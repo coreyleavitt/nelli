@@ -1080,6 +1080,28 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
 ## is a no-op and the proc executes normally.
 template symexOpaque*() {.pragma.}
 
+## Issue #163 user-extension hook, and the one to reach for first for a
+## logging/metrics/tracing call: attach to a VOID proc that cannot change
+## anything the code under test observes — no result, nothing written through
+## an argument, no state the SUT reads back — and symex DELETES the call
+## instead of modelling it:
+##
+## ```nim
+## proc trace(msg: string) {.symexTransparent.} = stderr.writeLine msg
+## ```
+##
+## `{.symexOpaque.}` would also keep the walker out of `trace`'s body, but it
+## additionally taints the path, so every target behind the trace call answers
+## `sxUnknown`. That is the right price for `readSensor()`, whose result the
+## SUT branches on, and the wrong price for a trace line. Use `symexOpaque`
+## when the call's result or effects matter and cannot be modelled; use
+## `symexTransparent` when the honest answer is that they do not matter.
+##
+## The promise is only honoured in statement position. If the proc's result is
+## used, the call falls back to `symexOpaque` handling — an over-claimed
+## pragma costs precision, never soundness. Outside symex it is a no-op.
+template symexTransparent*() {.pragma.}
+
 # RFC-z3-optional S1c: `symexTarget`/`symexAssert`/`symexAssume` moved to
 # `engine/markers.nim` and are re-exported by name near the top of this
 # file. They are Z3-free annotations that belong in production code, so

@@ -1496,17 +1496,13 @@ proc binopForInfix(op: string): IRBinop =
   else:
     error("symex: unsupported infix operator `" & op & "`")
 
-proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
-  ## Phase 9 — the user-facing extension hook. A proc marked with
-  ## `{.symexOpaque.}` is treated by symex as a black box: the
-  ## walker does not enter its body, the return value becomes a
-  ## fresh symbolic of the proc's return type, and the surviving
-  ## path is marked uncertain (same machinery as the built-in
-  ## OpaqueEffectfulProcs catalog for `echo`/`writeFile`/etc.).
-  ##
-  ## Use this to bring user-defined IO procs, FFI wrappers, or
-  ## intentionally-uninterpreted primitives under symex without
-  ## hand-extending the registry.
+proc hasSymexPragma(calleeSym: NimNode, pragmaName: string): bool =
+  ## True when `calleeSym`'s routine impl carries a pragma spelled
+  ## `pragmaName`. Matched purely BY NAME — which module DECLARED the pragma
+  ## template is deliberately not checked, so a leaf module can declare its
+  ## own private copy rather than importing `nelli/symex` (and with it Z3);
+  ## `coverage.nim` does exactly that. See `hasSymexOpaquePragma` /
+  ## `hasSymexTransparentPragma` below for the two recognised names.
   if calleeSym.kind != nnkSym: return false
   let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
   if impl == nil: return false
@@ -1519,9 +1515,44 @@ proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
       of nnkExprColonExpr, nnkCall:
         if p[0].kind in {nnkIdent, nnkSym}: p[0].strVal else: ""
       else: ""
-    if name == "symexOpaque":
+    if name == pragmaName:
       return true
   false
+
+proc hasSymexOpaquePragma(calleeSym: NimNode): bool =
+  ## Phase 9 — the user-facing extension hook. A proc marked with
+  ## `{.symexOpaque.}` is treated by symex as a black box: the
+  ## walker does not enter its body, the return value becomes a
+  ## fresh symbolic of the proc's return type, and the surviving
+  ## path is marked uncertain (same machinery as the built-in
+  ## OpaqueEffectfulProcs catalog for `echo`/`writeFile`/etc.).
+  ##
+  ## Use this to bring user-defined IO procs, FFI wrappers, or
+  ## intentionally-uninterpreted primitives under symex without
+  ## hand-extending the registry.
+  hasSymexPragma(calleeSym, "symexOpaque")
+
+proc hasSymexTransparentPragma(calleeSym: NimNode): bool =
+  ## Issue #163 — the STRONGER sibling of `{.symexOpaque.}`. A proc marked
+  ## `{.symexTransparent.}` is not a black box the walker must be careful
+  ## around; it is a call symex can DELETE. The author asserts the call is
+  ## void and cannot change anything the SUT observes — no result to bind, no
+  ## argument written through, no state the SUT reads back.
+  ##
+  ## `{.symexOpaque.}` also keeps the walker out of the body, but pays for it
+  ## with a path taint (`forkPathTainted` + `w.sawUnknown`), which is the
+  ## right price for `readLine()` and the wrong price for `recordEdge(id)`.
+  ## Paying it for instrumentation cost the whole answer: `{.cover.}` puts a
+  ## `recordEdge` at the top of every branch arm, so every path through an
+  ## instrumented proc was tainted and `symexFind` returned `sxUnknown`.
+  ##
+  ## Scope of the promise, and what happens if it is overstated: the parser
+  ## honours the pragma only in STATEMENT position, where Nim's own typing
+  ## already guarantees there is no value to drop. A `{.symexTransparent.}`
+  ## proc whose result IS used reaches the expression arm, which ignores the
+  ## pragma and falls back to `{.symexOpaque.}` handling — a wrong pragma
+  ## therefore degrades to the conservative answer, never to a false witness.
+  hasSymexPragma(calleeSym, "symexTransparent")
 
 proc hasBorrowPragma(impl: NimNode): bool =
   ## Phase 15 G5. True when `impl` (an `nnkProcDef`) carries a `{.borrow.}`
@@ -3854,9 +3885,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             return mkMathCall(cn, mArgs)
     # Opaque effectful proc (#137 + Phase 9 user extension via
     # `{.symexOpaque.}` pragma) — fresh-symbolic return, no body walk.
+    #
+    # Issue #163: `{.symexTransparent.}` routes here TOO, and deliberately
+    # gets the conservative opaque treatment rather than the drop. Reaching
+    # the expression arm means the call's result is being used, which
+    # contradicts the pragma's void-and-observably-nothing promise — so the
+    # promise is not honoured. Keeping the body unwalked is still right (that
+    # is the half of `{.symexOpaque.}` an over-claimed pragma still earns);
+    # only the deletion is withheld.
     let calleeName = calleeSym.strVal
     let opaModel = getStdlibModelFor(calleeName, itBool)
-    if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
+    if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
+       hasSymexTransparentPragma(calleeSym):
       var argIRs: seq[IRExpr]
       for i in 1 ..< n.len:
         argIRs.add parseExpr(n[i], preamble, ctx)
@@ -7774,7 +7814,28 @@ proc parseStmtInner(n: NimNode,
         # like `s.add(v)`).
         let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
         let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
-        if m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
+        if hasSymexTransparentPragma(calleeSym):
+          # Issue #163. A `{.symexTransparent.}` call in statement position is
+          # DELETED — no IR at all, not an opaque no-op. nelli's own
+          # instrumentation (`recordEdge`, `logCmp`) is the motivating case:
+          # `{.cover.}` emits a `recordEdge` at the top of every branch arm,
+          # so modelling them even as inert statements put an unknown effect
+          # on every path of every instrumented proc.
+          #
+          # The ARGUMENTS are still parsed, into the preamble, and only their
+          # values are thrown away. The pragma is a promise about the CALLEE,
+          # not about the expressions written at the call site: Nim evaluates
+          # those before the call whether or not symex models the call, so
+          # dropping them unparsed would silently delete any effect they carry
+          # (and any honest degrade an unmodellable argument owes). Both
+          # instrumentation shapes parse to nothing but a value —
+          # `{.cover.}`'s `recordEdge(123)` is an int literal, `{.covercmp.}`'s
+          # `logCmp(lTmp, rTmp, "==")` reads temps the rewrite already bound —
+          # so the preamble stays empty in the case that motivated this arm.
+          for i in 1 ..< n.len:
+            discard parseExpr(n[i], preamble, ctx)
+          mkBlock(@[])
+        elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
           var argIRs: seq[IRExpr]
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)

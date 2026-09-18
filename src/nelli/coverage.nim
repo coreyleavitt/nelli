@@ -87,18 +87,28 @@ proc resetCoverage*() =
     coverageBitmap[i] = 0
   coverageHitsCached = 0
 
-# RFC-fuzzer-nextgen G3fix. `symex/smt/dsl_parser.nim`'s `hasSymexOpaquePragma`
-# recognizes a `{.symexOpaque.}` pragma purely BY NAME (it never checks which
-# module defines the symbol), so a private local pragma template here is
-# sufficient — this module stays a true leaf (no `nelli/symex` import, which
-# would drag Z3 into `coverage.nim` and, through it, into `fuzz.nim`, which
-# imports this module and must stay Z3-free). `symex.nim` separately exports
-# its own public `symexOpaque*` for user-defined opaque procs (same name, same
-# contract, unrelated declaration) — the two never collide because this one is
+# RFC-fuzzer-nextgen G3fix / issue #163. `symex/smt/dsl_parser.nim` recognizes
+# the symex pragmas purely BY NAME (it never checks which module defines the
+# symbol), so a private local pragma template here is sufficient — this module
+# stays a true leaf (no `nelli/symex` import, which would drag Z3 into
+# `coverage.nim` and, through it, into `fuzz.nim`, which imports this module
+# and must stay Z3-free). `symex.nim` separately exports its own public
+# `symexTransparent*`/`symexOpaque*` for user-defined procs (same names, same
+# contracts, unrelated declarations) — they never collide because these are
 # never exported.
-template symexOpaque() {.pragma.}
+#
+# #163: instrumentation is TRANSPARENT, not opaque. G3fix marked `recordEdge`
+# and `logCmp` `{.symexOpaque.}` to keep the walker out of their bodies, which
+# fixed a `KeyError` crash but routed every instrumentation call into the
+# opaque arm's taint — so under `wmExplore` a `{.cover.}`'d proc degraded the
+# WHOLE run to `sxUnknown` (`{.cover.}` puts a `recordEdge` at the top of every
+# branch arm, so no path escaped). `{.symexTransparent.}` says the stronger,
+# TRUE thing about these procs: they are void, take only values, and touch
+# nothing the SUT can observe, so the parser drops the call entirely rather
+# than modelling it as an unknown effect.
+template symexTransparent() {.pragma.}
 
-proc recordEdge*(id: int) {.inline, symexOpaque.} =
+proc recordEdge*(id: int) {.inline, symexTransparent.} =
   ## Mark edge `id` as hit. `id mod coverageEdgeCount` is the bitmap
   ## slot; collisions are tolerated (AFL convention). Only the first
   ## hit of an edge updates the count, so re-hits in a tight loop
@@ -108,17 +118,22 @@ proc recordEdge*(id: int) {.inline, symexOpaque.} =
   ## `cmOff` so consumers of `{.cover.}`'d code pay nothing unless
   ## they've opted into recording via `setCoverageMode(cmRecording)`.
   ##
-  ## RFC-fuzzer-nextgen G3fix: `{.symexOpaque.}` keeps the symex walker OUT of
-  ## this body. Every real in-process `fuzz()` target is `{.cover.}`-
-  ## instrumented (this IS how it gets coverage), so once G3's concolic bridge
-  ## walks a real target, it walks a call to `recordEdge` too — descending
-  ## into this body previously crashed the walker with an uncaught `KeyError`
-  ## on the free-standing `coverageMode` threadvar reference below (`env` has
-  ## no binding for a module-level threadvar; the walker only knows params and
-  ## locals). `recordEdge` is a pure side-effect with zero bearing on the
-  ## property's symbolic path — exactly the RFC #137 "opaque effectful call"
-  ## shape `echo`/`writeFile` already get — so the fix is to make it opaque,
-  ## not to teach the walker to model a threadvar it doesn't own.
+  ## RFC-fuzzer-nextgen G3fix: the symex walker must stay OUT of this body.
+  ## Every real in-process `fuzz()` target is `{.cover.}`-instrumented (this IS
+  ## how it gets coverage), so once G3's concolic bridge walks a real target,
+  ## it walks a call to `recordEdge` too — descending into this body once
+  ## crashed the walker with an uncaught `KeyError` on the free-standing
+  ## `coverageMode` threadvar reference below (`env` has no binding for a
+  ## module-level threadvar; the walker only knows params and locals).
+  ##
+  ## Issue #163: G3fix bought that with `{.symexOpaque.}`, the RFC #137
+  ## "opaque effectful call" shape `echo`/`writeFile` get — which also TAINTS
+  ## every continuation, so under `wmExplore` a `{.cover.}`'d proc answered
+  ## `sxUnknown` for any target behind a branch. `{.symexTransparent.}` keeps
+  ## the walker out of this body just as firmly and states the reason
+  ## precisely: `recordEdge` is void, takes an `int` by value, and touches
+  ## nothing the SUT can read back, so it has zero bearing on the property's
+  ## symbolic path and the call is dropped rather than modelled as an unknown.
   if coverageMode == cmOff: return
   let slot = id and coverageEdgeMask
   if coverageBitmap[slot] == 0:
@@ -316,14 +331,16 @@ proc instrumentNode(n: NimNode; regs: var seq[NimNode]): NimNode =
 ## operand types — the same "no type info needed at macro-expansion time"
 ## property `{.cover.}`'s `recordEdge` injection already relies on.
 ##
-## **`{.symexOpaque.}` (mandatory, not optional).** Every `logCmp` overload
-## carries the SAME local `symexOpaque` pragma template `recordEdge` uses
-## (G3fix) — without it, a property that is both `{.cover.}`'d (or walked at
-## all) and `{.covercmp.}`'d would have the walker descend into `logCmp`'s
-## body and crash on `cmpLogMode`'s free-standing threadvar reference,
-## exactly the `recordEdge`/`coverageMode` crash G3fix fixed. `logCmp` is a
-## pure side-effecting instrumentation call with zero bearing on the
-## property's symbolic path — the RFC #137 "opaque effectful call" shape.
+## **`{.symexTransparent.}` (mandatory, not optional).** Every `logCmp`
+## overload carries the SAME local pragma template `recordEdge` uses — without
+## it, a property that is both `{.cover.}`'d (or walked at all) and
+## `{.covercmp.}`'d would have the walker descend into `logCmp`'s body and
+## crash on `cmpLogMode`'s free-standing threadvar reference, exactly the
+## `recordEdge`/`coverageMode` crash G3fix fixed. `logCmp` is a pure
+## side-effecting instrumentation call with zero bearing on the property's
+## symbolic path; issue #163 upgraded it from G3fix's `{.symexOpaque.}` (which
+## kept the walker out but tainted the path) to `{.symexTransparent.}` (which
+## drops the call), so one proc can be instrumented AND solvable.
 
 type
   CmpOp* = enum
@@ -520,7 +537,7 @@ proc parseCmpLog*(data: openArray[byte]): seq[CmpLogEntry] =
       result.add CmpLogEntry(kind: clkString, op: op, lhsStr: lhs, rhsStr: rhs)
       pos = p
 
-proc logCmp*[T: SomeInteger](lhs, rhs: T; op: string) {.symexOpaque.} =
+proc logCmp*[T: SomeInteger](lhs, rhs: T; op: string) {.symexTransparent.} =
   ## `ckInteger`-typed operand-pair hook. `T`'s `sizeof` is the logged
   ## width; the value is widened to `uint64` (sign-extended for a signed
   ## `T`, zero-extended for an unsigned one) — see `CmpLogEntry.lhsInt`'s
@@ -531,17 +548,17 @@ proc logCmp*[T: SomeInteger](lhs, rhs: T; op: string) {.symexOpaque.} =
   recordCmpEntry(CmpLogEntry(kind: clkInt, op: cmpOpFromStr(op), width: sizeof(T),
                              lhsInt: lhsWide, rhsInt: rhsWide))
 
-proc logCmp*(lhs, rhs: string; op: string) {.symexOpaque.} =
+proc logCmp*(lhs, rhs: string; op: string) {.symexTransparent.} =
   ## `ckString`-typed operand-pair hook.
   if not cmpLogMode: return
   recordCmpEntry(CmpLogEntry(kind: clkString, op: cmpOpFromStr(op), lhsStr: lhs, rhsStr: rhs))
 
-proc logCmp*(lhs, rhs: seq[byte]; op: string) {.symexOpaque.} =
+proc logCmp*(lhs, rhs: seq[byte]; op: string) {.symexTransparent.} =
   ## `ckBytes`-typed operand-pair hook.
   if not cmpLogMode: return
   recordCmpEntry(CmpLogEntry(kind: clkBytes, op: cmpOpFromStr(op), lhsBytes: lhs, rhsBytes: rhs))
 
-proc logCmp*[T](lhs, rhs: T; op: string) {.symexOpaque.} =
+proc logCmp*[T](lhs, rhs: T; op: string) {.symexTransparent.} =
   ## Catch-all no-op for any comparison type outside the `SomeInteger`/
   ## `string`/`seq[byte]` scope §G-cmp defines (bool, float, enum, char,
   ## object `==`, ...) — keeps a `{.covercmp.}`'d proc that happens to also

@@ -1139,6 +1139,29 @@ type
 
   AbstractionLog* = seq[AbstractionEntry]
 
+  ObligationDisposition* = enum
+    ## Issue #161 slice 2. What became of one signed-overflow proof
+    ## obligation. Per the ADR-0001 amendment, a promoted (Int-sorted)
+    ## value may only be used in arithmetic if the obligation is either
+    ## DISCHARGED statically or KEPT LIVE for the solver; these are the
+    ## two legal outcomes, and every site records which one it took.
+    odDischargedStatic  ## interval arithmetic proved the result stays
+                        ## inside `[low(T), high(T)]` — no fork emitted,
+                        ## the solver never sees this site
+    odLive              ## not proven; `overflowCondInt` was pushed and
+                        ## the raise fork is the solver's to resolve
+
+  ObligationEntry* = object
+    ## One arithmetic site on a width-typed Int-sorted value.
+    op*:          IRBinop
+    width*:       int                ## static Nim width of the operands
+    signed*:      bool
+    disposition*: ObligationDisposition
+    bound*:       Option[Interval]   ## the proven result interval when
+                                     ## discharged; `none` when live
+
+  ObligationLog* = seq[ObligationEntry]
+
   SymexErrorSeverity* = enum
     ## Phase 15 Z3. Severity contract (cross-cluster invariant 7):
     ## an `sxUnknown` result must carry >= 1 `sevError`; a result whose
@@ -1609,6 +1632,14 @@ type
 
   SymexResult*[T] = object
     abstractions*: AbstractionLog
+    obligations*:  ObligationLog
+      ## Issue #161 slice 2. Every signed-overflow proof obligation raised
+      ## during THIS run, and whether it was discharged by the static
+      ## interval analysis or handed to the solver. The audit trail for
+      ## the ADR-0001 amendment: a verifier that silently chooses which
+      ## obligations to prove itself is not one you can check. Empty when
+      ## `fromCache` — like `abstractions`, this records an exploration
+      ## that did not happen.
     callStats*:    CallStats   ## per-callee walk + cache-hit counts
     heapSnapshot*: seq[HeapSnapshotEntry]
       ## Phase 15 R12. The heap-snapshot witness (one entry per ref/ptr param)

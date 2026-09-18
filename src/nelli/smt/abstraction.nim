@@ -79,25 +79,74 @@ proc fitsBVWindow*(i: Interval, ty: IRType): bool =
 
 # ---- Interval arithmetic ----------------------------------------------------
 #
-# All operations are sound — the returned interval contains every
-# possible result when operands range over their input intervals.
+# The abstract domain is `Interval ∪ {⊤}`, with `⊤` spelled
+# `none(Interval)` — "this value could be anything". Every operation is a
+# SOUND over-approximation: the returned interval contains every possible
+# result when the operands range over their input intervals, and any case
+# the domain cannot represent degrades to `⊤` rather than to a wrong
+# answer.
+#
+# Issue #161 slice 2: the bounds themselves live in `int64`, so the
+# ANALYSIS's own arithmetic can overflow — `[0..4e9] * [0..4e9]` needs
+# 1.6e19, which `int64` cannot hold. Under Nim's default (and `-d:release`)
+# checked arithmetic the old unguarded `a.hi * b.hi` raised
+# `OverflowDefect` *inside the walker*; under `-d:danger` it silently
+# wrapped, which is worse — a wrapped bound looks small and would "prove"
+# a site safe that is not. Both are closed here by checking every bound
+# before it is computed and returning `⊤` instead.
 
-proc add*(a, b: Interval): Interval =
-  interval(a.lo + b.lo, a.hi + b.hi)
+proc checkedAdd(a, b: int64): Option[int64] =
+  if b > 0 and a > high(int64) - b: none(int64)
+  elif b < 0 and a < low(int64) - b: none(int64)
+  else: some(a + b)
 
-proc sub*(a, b: Interval): Interval =
-  interval(a.lo - b.hi, a.hi - b.lo)
+proc checkedSub(a, b: int64): Option[int64] =
+  if b < 0 and a > high(int64) + b: none(int64)
+  elif b > 0 and a < low(int64) + b: none(int64)
+  else: some(a - b)
 
-proc mul*(a, b: Interval): Interval =
-  let p1 = a.lo * b.lo
-  let p2 = a.lo * b.hi
-  let p3 = a.hi * b.lo
-  let p4 = a.hi * b.hi
-  interval(min(min(p1, p2), min(p3, p4)),
-           max(max(p1, p2), max(p3, p4)))
+proc checkedMul(a, b: int64): Option[int64] =
+  ## Conservative: a product whose true value is exactly `low(int64)`
+  ## reports `none`. Over-approximating "unknown" costs a solver fork,
+  ## never soundness.
+  if a == 0 or b == 0: return some(0'i64)
+  if a == 1: return some(b)
+  if b == 1: return some(a)
+  if a == -1: return (if b == low(int64): none(int64) else: some(-b))
+  if b == -1: return (if a == low(int64): none(int64) else: some(-a))
+  # |a| >= 2 and |b| >= 2 from here, so `low(int64)` on either side
+  # necessarily overflows and cannot be negated safely either.
+  if a == low(int64) or b == low(int64): return none(int64)
+  let sa = if a > 0: a else: -a
+  let sb = if b > 0: b else: -b
+  if sa > high(int64) div sb: none(int64) else: some(a * b)
 
-proc neg*(a: Interval): Interval =
-  interval(-a.hi, -a.lo)
+proc add*(a, b: Interval): Option[Interval] =
+  let lo = checkedAdd(a.lo, b.lo)
+  let hi = checkedAdd(a.hi, b.hi)
+  if lo.isSome and hi.isSome: some(interval(lo.get, hi.get))
+  else: none(Interval)
+
+proc sub*(a, b: Interval): Option[Interval] =
+  let lo = checkedSub(a.lo, b.hi)
+  let hi = checkedSub(a.hi, b.lo)
+  if lo.isSome and hi.isSome: some(interval(lo.get, hi.get))
+  else: none(Interval)
+
+proc mul*(a, b: Interval): Option[Interval] =
+  let ps = [checkedMul(a.lo, b.lo), checkedMul(a.lo, b.hi),
+            checkedMul(a.hi, b.lo), checkedMul(a.hi, b.hi)]
+  var lo = high(int64)
+  var hi = low(int64)
+  for p in ps:
+    if p.isNone: return none(Interval)
+    lo = min(lo, p.get)
+    hi = max(hi, p.get)
+  some(interval(lo, hi))
+
+proc neg*(a: Interval): Option[Interval] =
+  if a.lo == low(int64) or a.hi == low(int64): none(Interval)
+  else: some(interval(-a.hi, -a.lo))
 
 # ---- IR-expr interval propagation ------------------------------------------
 
@@ -156,7 +205,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     case e.uop
     of uNeg:
       let inner = tryEvalInterval(e.operand, ranges)
-      if inner.isSome: some(neg(inner.get)) else: none(Interval)
+      if inner.isSome: neg(inner.get) else: none(Interval)
     of uNot:
       none(Interval)
   of iekBinop:
@@ -176,15 +225,15 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
     of bAdd:
       let l = tryEvalInterval(e.lhs, ranges)
       let r = tryEvalInterval(e.rhs, ranges)
-      if l.isSome and r.isSome: some(add(l.get, r.get)) else: none(Interval)
+      if l.isSome and r.isSome: add(l.get, r.get) else: none(Interval)
     of bSub:
       let l = tryEvalInterval(e.lhs, ranges)
       let r = tryEvalInterval(e.rhs, ranges)
-      if l.isSome and r.isSome: some(sub(l.get, r.get)) else: none(Interval)
+      if l.isSome and r.isSome: sub(l.get, r.get) else: none(Interval)
     of bMul:
       let l = tryEvalInterval(e.lhs, ranges)
       let r = tryEvalInterval(e.rhs, ranges)
-      if l.isSome and r.isSome: some(mul(l.get, r.get)) else: none(Interval)
+      if l.isSome and r.isSome: mul(l.get, r.get) else: none(Interval)
 
 # ---- Promotion ban scan ----------------------------------------------------
 #

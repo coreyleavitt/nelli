@@ -25,6 +25,13 @@ proc mul64(a, b: range[0'i64..4_000_000_000'i64]) =
   symexTarget("t")
   discard c
 
+# Slice 2's control. a+b reaches 2000, which fits int64 with room to spare,
+# so the obligation is DISCHARGEABLE statically -- no fork need ever be built.
+proc addSafe(a, b: range[0'i64..1000'i64]) =
+  let c = a + b
+  symexTarget("t")
+  discard c
+
 suite "#161 — promotion keeps the overflow obligation live":
 
   test "isOptimised finds the reachable OverflowDefect in a*b":
@@ -33,6 +40,30 @@ suite "#161 — promotion keeps the overflow obligation live":
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "OverflowDefect"
+
+  test "a provably-safe site discharges its obligation statically":
+    ## Slice 2. `a + b` over [0..1000] can reach at most 2000; interval
+    ## arithmetic proves that in-window, so the obligation is discharged
+    ## at lowering time and NO fork is handed to Z3. Same verdict as
+    ## before, reached without the solver — which is the whole point.
+    let r = symexFind(addSafe, tLabel("t"))
+    check r.status == sxSat
+    check r.obligations.len >= 1
+    for o in r.obligations:
+      check o.disposition == odDischargedStatic
+
+  test "an unprovable site keeps its obligation live":
+    ## The complement. `a * b` over [0..4e9] reaches 1.6e19 — outside
+    ## int64 — so nothing is proven and the fork must survive to Z3.
+    ## Note the analysis's OWN arithmetic overflows int64 here: the
+    ## abstract domain has to answer "unknown" rather than raise.
+    let r = symexFind(mul64, tLabel("t"))
+    check r.status == sxSat
+    check r.obligations.len >= 1
+    var anyLive = false
+    for o in r.obligations:
+      if o.disposition == odLive: anyLive = true
+    check anyLive
 
   test "version floor — this behaviour arrived at walker 126":
     ## Per CLAUDE.md: a walker SEMANTICS change bumps `symexWalkerVersion`

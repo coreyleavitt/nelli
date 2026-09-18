@@ -296,6 +296,27 @@ type
         ## from an already-`svInt` operand), and `arithInt`/`iteSV`
         ## (propagated from their operands, so chained arithmetic and
         ## if-expression merges on a promoted value keep the fork alive).
+      ziIvl: Option[Interval]
+        ## Issue #161 slice 2. A SOUND over-approximation of the values
+        ## this Int term can take on the current path, or `none` for "could
+        ## be anything" (the ⊤ of the domain). `lowerArith` uses it to
+        ## DISCHARGE the overflow obligation statically: if the composed
+        ## result interval provably fits `[low(T), high(T)]`, no fork is
+        ## built and Z3 never sees the site.
+        ##
+        ## The direction of failure is what makes this safe to extend
+        ## piecemeal. `none` is Option's zero value, so every `SymVal`
+        ## construction that does not think about intervals — and there are
+        ## many — gets ⊤ by default, which keeps the obligation LIVE.
+        ## Forgetting to propagate an interval therefore costs a redundant
+        ## solver fork; it can never delete a defect path. Soundness lives
+        ## in `ziWidth` (slice 1's floor); this field is only ever allowed
+        ## to make the engine faster.
+        ##
+        ## Seeded at `promoteSound` params (their declared `range[lo..hi]`)
+        ## and at integer literals (the singleton `[v, v]`); propagated by
+        ## `arithInt` through chained arithmetic. Everything else — merges,
+        ## call returns, field reads, probe misses — is ⊤.
       ziSigned: bool
         ## Static Nim signedness of the width above; meaningful only when
         ## `ziWidth != 0`. Mirrors the common `signed` field's role for the
@@ -516,6 +537,9 @@ type
 
   RawResult* = object
     abstractions*: AbstractionLog
+    obligations*:  ObligationLog
+      ## Issue #161 slice 2. Mirrors `SymexResult.obligations`; filled from
+      ## the `obligationLog` threadvar on every verdict branch.
     callStats*:    CallStats
     errors*:       seq[SymexErrorInfo]
       ## Phase 14 cycle C4. Z3-layer errors caught at runSymex's top
@@ -1055,6 +1079,15 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## svInt (unbounded Z3Int) is skipped — overflow is meaningless there AND BV
   ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   ## Reset alongside `divByZeroConds` at every reset site.
+
+var obligationLog* {.threadvar.}: ObligationLog
+  ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
+  ## NOT reset alongside `overflowConds`. The cond sinks are drained and
+  ## cleared per `lower()` call (they hold the predicates one lowering
+  ## produced); this log accumulates across the whole run and is reset once,
+  ## at `runSymexImpl` entry, before being copied into `SymexResult`.
+  ## Appending it to the per-lower reset list would silently truncate it to
+  ## whatever the last expression happened to raise.
 
 var strIndexOobConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-chapulin-hardening SND-4 (ADR-0024). Raise-fork sink for string-index
@@ -3855,8 +3888,13 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
     ## literal `1` at `pos`'s own `svInt` representation (`probeProto`);
     ## without this the literal operand would silently lose the width the
     ## surrounding expression needs to stay overflow-checkable.
+    ## Issue #161 slice 2: a literal's interval is the singleton `[v, v]`
+    ## — the one exact fact the analysis always has. It is what makes the
+    ## common shapes (`pos + 1`, `i * 4`, `n - 1`) dischargeable at all:
+    ## without it every increment on a promoted counter pays a solver fork.
     SymVal(kind: svInt, zi: mkZ3IntLit(ival),
-           ziWidth: proto.ziWidth, ziSigned: proto.ziSigned)
+           ziWidth: proto.ziWidth, ziSigned: proto.ziSigned,
+           ziIvl: some(interval(ival, ival)))
   of svBool:
     raise newException(ValueError,  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see coerceIntLit's first site above)]
       "coerceIntLit: bool prototype for integer literal")
@@ -4247,10 +4285,24 @@ proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   let (rw, rs) = if a.ziWidth != 0: (a.ziWidth, a.ziSigned)
                  elif b.ziWidth != 0: (b.ziWidth, b.ziSigned)
                  else: (0, false)
+  ## Issue #161 slice 2: propagate the interval alongside the width, by the
+  ## same argument — an inner `pos + 1` must carry its own bound or the
+  ## outer `* bound` has nothing to prove with and pays a fork it does not
+  ## owe. `none` on either operand (or an analysis-overflowing bound) yields
+  ## `none`, which is ⊤ and merely keeps the obligation live.
+  ## div/mod are deliberately ⊤: sound bounds there depend on whether the
+  ## divisor straddles zero, which `tryEvalInterval` also declines to model.
+  let ri = if a.ziIvl.isSome and b.ziIvl.isSome:
+             case op
+             of bAdd: add(a.ziIvl.get, b.ziIvl.get)
+             of bSub: sub(a.ziIvl.get, b.ziIvl.get)
+             of bMul: mul(a.ziIvl.get, b.ziIvl.get)
+             else: none(Interval)
+           else: none(Interval)
   case op
-  of bAdd: SymVal(kind: svInt, zi: a.zi + b.zi, ziWidth: rw, ziSigned: rs)
-  of bSub: SymVal(kind: svInt, zi: a.zi - b.zi, ziWidth: rw, ziSigned: rs)
-  of bMul: SymVal(kind: svInt, zi: a.zi * b.zi, ziWidth: rw, ziSigned: rs)
+  of bAdd: SymVal(kind: svInt, zi: a.zi + b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
+  of bSub: SymVal(kind: svInt, zi: a.zi - b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
+  of bMul: SymVal(kind: svInt, zi: a.zi * b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
   of bDiv: SymVal(kind: svInt, zi: a.zi div b.zi, ziWidth: rw, ziSigned: rs)
   of bMod: SymVal(kind: svInt, zi: a.zi mod b.zi, ziWidth: rw, ziSigned: rs)
   else: raise newException(ValueError, "arithInt: not an arithmetic op")  # [raise-audited: category-c: op-narrowed by caller dispatch (arithInt's op set is pre-restricted by lowerArith before dispatch)]
@@ -4524,6 +4576,32 @@ proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
             "overflowCondInt: unexpected op " & $op)
   c < mkZ3IntLit(lo) or c > mkZ3IntLit(hi)
 
+proc tryDischargeOverflowInt(a, b: SymVal, op: IRBinop): Option[Interval] =
+  ## Issue #161 slice 2 — the static half of the ADR-0001 amendment.
+  ##
+  ## `overflowCondInt` builds the predicate `a op b < low(T) or a op b >
+  ## high(T)`. This proc tries to prove that predicate FALSE without the
+  ## solver, by composing the operands' intervals and testing the result
+  ## against the SAME `intBounds(width)` the predicate compares to — so
+  ## "discharged" here means exactly "the cond `lowerArith` would have
+  ## pushed is unsatisfiable", not something weaker that happens to
+  ## correlate. Returns the proven result interval, or `none` when the
+  ## proof does not go through (unknown operand, an analysis bound that
+  ## overflows `int64`, or a result genuinely outside the type).
+  ##
+  ## A `none` return is never a soundness event — it just means the fork
+  ## gets built and Z3 decides, which is what always happened before.
+  if a.ziWidth notin {8, 16, 32, 64}: return none(Interval)
+  if a.ziIvl.isNone or b.ziIvl.isNone: return none(Interval)
+  let r = case op
+          of bAdd: add(a.ziIvl.get, b.ziIvl.get)
+          of bSub: sub(a.ziIvl.get, b.ziIvl.get)
+          of bMul: mul(a.ziIvl.get, b.ziIvl.get)
+          else: none(Interval)
+  if r.isNone: return none(Interval)
+  let (lo, hi) = intBounds(a.ziWidth)
+  if r.get.lo >= lo and r.get.hi <= hi: r else: none(Interval)
+
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
@@ -4569,9 +4647,22 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     overflowConds.add oc
     syncOverflowCond(oc)
   elif op in {bAdd, bSub, bMul} and a.kind == svInt and a.ziWidth != 0 and a.ziSigned:
-    let oc = overflowCondInt(a, b, op)
-    overflowConds.add oc
-    syncOverflowCond(oc)
+    # Issue #161 slice 2. The obligation is raised unconditionally; what
+    # varies is who discharges it. Try the static proof first, and record
+    # the outcome either way — `obligationLog` is the audit trail that
+    # makes "we proved this" checkable rather than asserted.
+    let proven = tryDischargeOverflowInt(a, b, op)
+    if proven.isSome:
+      obligationLog.add ObligationEntry(
+        op: op, width: a.ziWidth, signed: a.ziSigned,
+        disposition: odDischargedStatic, bound: proven)
+    else:
+      obligationLog.add ObligationEntry(
+        op: op, width: a.ziWidth, signed: a.ziSigned,
+        disposition: odLive, bound: none(Interval))
+      let oc = overflowCondInt(a, b, op)
+      overflowConds.add oc
+      syncOverflowCond(oc)
   if a.kind == svInt:
     arithInt(a, b, op)
   elif a.kind in {svFloat32, svFloat64}:
@@ -12256,6 +12347,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   let ctx = newContext()
   setCurrentContext(ctx)
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
+  obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
+                           ## threadvar's own doc comment for why it must not
+                           ## join the raise-cond sinks' reset list.
   currentMaxBytesEncodingLen = settings.budget.maxBytesEncodingLen  ## Phase 15 S7a
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
   parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
@@ -12470,8 +12564,14 @@ proc runSymexImpl(prog: SymexProgram,
         # measured blowup case — tracked separately, NOT closed here.
         let soundWidth = if promoteSound: p.ty.width else: 0
         let soundSigned = promoteSound and p.ty.signed
+        # Slice 2: the same proven `ivl` that justifies the promotion also
+        # seeds the static discharge. It is exactly the pair of constraints
+        # added to `initialPC` just below, so the analysis and the path
+        # condition cannot disagree about this param's range.
+        let soundIvl = if promoteSound: some(ivl) else: none(Interval)
         env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name),
-                             ziWidth: soundWidth, ziSigned: soundSigned)
+                             ziWidth: soundWidth, ziSigned: soundSigned,
+                             ziIvl: soundIvl)
         if promoteSound:
           initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))
           initialPC.add (env[p.name].zi <= mkZ3IntLit(rangeHi))
@@ -12772,6 +12872,7 @@ proc runSymexImpl(prog: SymexProgram,
   if winnerFound:
     var r = winner
     r.abstractions = log
+    r.obligations = obligationLog   ## #161 slice 2
     r.callStats = statsSeq
     ## ADR-0012 D2: collect every non-winning sxRaised into diagnostics.
     ## If winner is sxSat (winnerIdx points to it), ALL sxRaised entries
@@ -12808,10 +12909,11 @@ proc runSymexImpl(prog: SymexProgram,
         msg: "sxUnknown produced with no classified reason — an unclassified " &
              "degrade site set sawUnknown bare (walker classification gap; " &
              "weInternalWalkerFault)")
-    RawResult(status: sxUnknown, abstractions: log, callStats: statsSeq,
-              errors: unknownErrs)
+    RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
+              callStats: statsSeq, errors: unknownErrs)
   else:
-    RawResult(status: sxUnsat, abstractions: log, callStats: statsSeq,
+    RawResult(status: sxUnsat, abstractions: log, obligations: obligationLog,
+              callStats: statsSeq,
               errors: exnWarnings & prog.parseErrors & closureErrs)
 
 # ---- RFC-fuzzer-nextgen G1b: concolic draw-symbolication + concrete-trace --

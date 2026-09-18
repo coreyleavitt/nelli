@@ -184,8 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "126"
-  ## Issue #161 (ADR-0001 amendment — obligation-as-floor). A `promoteSound`
+const symexWalkerVersion* = "127"
+  ## Issue #161 slice 2 (the prune). `lowerArith` now tries to DISCHARGE the
+  ## overflow obligation statically — composing the operands' intervals and
+  ## testing the result against the same `intBounds(width)` the fork
+  ## predicate compares to — and emits the fork only when that proof fails.
+  ##
+  ## Verdicts are unchanged where the solver terminated: a discharged
+  ## obligation is exactly one whose `overflowCondInt` is unsatisfiable, so
+  ## Z3 would have pruned the same path. It bumps because it can still move
+  ## a verdict at the margin — a run that exhausted its budget exploring
+  ## those forks answered `sxUnknown` at 126 and can answer `sxUnsat`/`sxSat`
+  ## at 127 — and because the run now reports `SymexResult.obligations`,
+  ## a new observable.
+  ##
+  ## 126 — Issue #161 slice 1 (the floor). A `promoteSound`
   ## param is now allocated `svInt` WITH its static Nim `ziWidth`/`ziSigned`,
   ## so `lowerArith` keeps pushing `overflowCondInt` for it. Promotion changes
   ## the ENCODING, never the defect semantics.

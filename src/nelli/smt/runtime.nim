@@ -4681,6 +4681,25 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   var a = a
   var b = b
   (a, b) = reconcileInt(a, b)
+  ## Issue #163 audit W9: the overflow-obligation guards below key on `a`'s
+  ## OWN stamp only (`a.ziWidth`/`a.ziSigned`) -- sound when the LEFT operand
+  ## of a Nim binop happens to be the one carrying width metadata, but that
+  ## metadata is a property of the OPERAND, not of its POSITION. `.len`'s
+  ## lowering (`iekSeqLen`, above) builds a bare width-less `svInt` with no
+  ## promotion site touching it, so `s.len - x`/`s.len * x` for a promoted
+  ## range-typed `x` left the guard permanently unarmed when `x * s.len`
+  ## (same values, swapped) already worked -- a silent false-`sxUnsat` for
+  ## exactly the shape #161's obligation machinery exists to close. Nim's
+  ## typing already guarantees both operands of a binop share one static
+  ## width/signedness (the same argument `arithInt`'s own a-then-b width
+  ## fallback, just below, and `toSvIntPreserving`'s doc comment both make),
+  ## so borrowing `b`'s stamp onto `a` here is a fallback, never a merge:
+  ## when both sides are stamped (the common case) or neither is, this is a
+  ## no-op and changes nothing.
+  if a.kind == svInt and a.ziWidth == 0 and
+     b.kind == svInt and b.ziWidth != 0:
+    a.ziWidth = b.ziWidth
+    a.ziSigned = b.ziSigned
   ##
   ## R16-3: for bDiv/bMod on non-float types, push `divisorIsZero(b)` to the
   ## `divByZeroConds` sink BEFORE dispatching. `arithInt`/`divBV`/`modBV` are

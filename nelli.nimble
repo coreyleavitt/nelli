@@ -285,6 +285,12 @@ task test, "Run the test suite":
             "tsymex_163audit_wave2",
             "tsymex_163audit_w9",
             "tsymex_163audit_w10",
+            # Issue #163 review finding R1 (Critical, soundness regression):
+            # the opaqueInert fast path returned paths untouched WITHOUT
+            # lowering stmt.cargs, so an inline defect-fork argument
+            # (div/mod by zero, parseInt, ...) reaching an inert-classified
+            # opaque call lost its raise obligation entirely.
+            "tsymex_163rev_inert_argfork",
             "tsymex_g6_transform_binding",
             # W11 (issues #161-163 wiring audit): 88 tsymex_*/t* suites existed
             # on disk but were registered nowhere, so symex-mingw's

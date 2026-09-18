@@ -10266,7 +10266,53 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # symmetric gap: an opaque call placed AFTER the target was already
       # invisible to it before this change. Ordering, not soundness, moves.
       if stmt.opaqueInert:
-        return paths
+        # #163 review R1: inert means a no-op for CONTROL FLOW and RESULT
+        # BINDING (there is no bound result — `isInertOpaqueCall` only ever
+        # fires in statement position), NOT a no-op for the ARGUMENT
+        # EXPRESSIONS themselves. Those are real Nim expressions the caller
+        # evaluates before the call runs, and `isInertArg` (dsl_parser.nim)
+        # checks only the argument's STATIC RESULT TYPE — never its
+        # expression shape — so an inline defect-fork shape among them
+        # (div/mod by zero, signed overflow, `parseInt`, `s[i]`, a seq
+        # slice — `rhsHasInlineDefectFork`'s class) is admitted here too,
+        # and can raise on its own. Raise obligations are a RUNTIME side
+        # effect of `lower()` (it populates sinks like `divByZeroConds`),
+        # never a static IR artifact, so skipping the lowering — as the
+        # fast path used to — makes the obligation never exist at all.
+        #
+        # Mirror the ordinary resolved-callee arm a few hundred lines
+        # below (`argVals.add lower(p.env, stmt.cargs[i], argProto)`
+        # followed by `drainScalarRaiseForks`): lower each argument for
+        # its SIDE EFFECTS ONLY (the value itself is discarded — there is
+        # nothing to bind on the inert path) and drain the raise-fork
+        # sinks it populates before returning the survivors. The call
+        # itself is still never walked and never taints — only the
+        # arguments' own defect obligations become live.
+        var out1: seq[Path]
+        for p in paths:
+          if w.shouldStop: return
+          seedCallerHeapThreadvars(p)
+          convFloatToIntBoundConds = @[]
+          w.convFloatToIntBoundConds = @[]
+          convFloatToIntDomainConds = @[]
+          w.convFloatToIntDomainConds = @[]
+          parseIntRaiseConds = @[]
+          w.parseIntRaiseConds = @[]
+          divByZeroConds = @[]
+          w.divByZeroConds = @[]
+          overflowConds = @[]
+          w.overflowConds = @[]
+          strIndexOobConds = @[]
+          w.strIndexOobConds = @[]
+          seqOobConds = @[]
+          w.seqOobConds = @[]
+          for arg in stmt.cargs:
+            discard lower(p.env, arg)
+          let pd = drainPendingLowerEffects(p)
+          discard drainConvFloatToIntRaises(p, w)  ## RangeDefect fork from pre-narrowing p
+          for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
+            out1.add sp
+        return out1
       # Don't resolve a body; allocate fresh retSym; mark path
       # uncertain so any target reached on this path degrades to
       # sxUnknown rather than emitting an unsound witness.

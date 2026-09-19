@@ -10686,7 +10686,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # The surviving paths are marked uncertain so any target hit on
       # them degrades to sxUnknown (the witness would otherwise be
       # an unsoundly-Z3-defaulted value).
+      # #161/#163 handoff follow-up: this used to set `sawUnknown` bare —
+      # the run-level Invariant-7 backstop (`runSymexImpl`) then reported an
+      # unclassified `weInternalWalkerFault`, indistinguishable from a real
+      # walker bug. `beBudgetExhausted` (chapulin catalog #5(b)) already
+      # names exactly this shape — "a walk budget ran out with paths still
+      # live" — for `maxLoopUnwind`/`maxFrontierSize`; this call-inlining
+      # depth cap is a sibling of the SAME budget family, so it reuses the
+      # kind rather than adding a near-duplicate. The message names the
+      # exhausted budget and its current value so "raise maxCallDepth" reads
+      # as actionable configuration advice, not a shrug.
       w.sawUnknown = true
+      w.walkDegradeErrors.add SymexErrorInfo(
+        kind: beBudgetExhausted, severity: sevError,
+        msg: "call-inlining depth budget exhausted (maxCallDepth=" &
+             $w.settings.budget.maxCallDepth & ") while inlining `" &
+             stmt.callee & "` — the call stack is at least as deep as the " &
+             "configured budget; raise settings.budget.maxCallDepth if " &
+             "this SUT's real call nesting is deeper than the current " &
+             "bound (beBudgetExhausted)")
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env

@@ -688,5 +688,17 @@ task test, "Run the test suite":
             # left unbounded even as finding R22 added a per-iteration
             # RangeDefect fork. Default now `256`, measured (not guessed)
             # against this engine's heaviest currently-terminating suites.
-            "tsymex_163rev_frontier_default"]:
+            "tsymex_163rev_frontier_default",
+            # Issues #161/#163 handoff follow-up, item 2: the `maxCallDepth`
+            # call-inlining bail set `w.sawUnknown` bare, so exceeding an
+            # ordinary, actionable recursion-depth budget reported the SAME
+            # `weInternalWalkerFault` "the engine has a bug" attribution as a
+            # genuine walker fault. Now rides the existing `beBudgetExhausted`
+            # kind (a sibling of the `maxLoopUnwind`/`maxFrontierSize` budget
+            # family), naming the exhausted budget and the remedy (raise
+            # `settings.budget.maxCallDepth`). Item 1 (a module-level global
+            # read's raw `KeyError`) is documented in this same file but NOT
+            # implemented -- it needs a new `SymexErrorKind`, and `types.nim`
+            # is sibling-owned this session.
+            "tsymex_163rev_degrade_classification"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

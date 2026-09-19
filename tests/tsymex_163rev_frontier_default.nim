@@ -47,7 +47,7 @@ suite "#163 item 3 -- maxFrontierSize default":
     check defaultResourceBudget().maxFrontierSize == 0
     check ResourceBudget().maxFrontierSize == 0
 
-  test "an explicit 0 still means unlimited (the opt-out survives the new default)":
+  test "an explicit 0 still means unlimited -- same as the default, stated explicitly":
     let unlimited = ResourceBudget(maxFrontierSize: 0)
     check unlimited.maxFrontierSize == 0
     ## And an explicitly-set cap is still honoured, which is the point of
@@ -55,7 +55,7 @@ suite "#163 item 3 -- maxFrontierSize default":
     let capped = ResourceBudget(maxFrontierSize: 256)
     check capped.maxFrontierSize == 256
 
-  test "an explicit non-zero literal is unaffected by the new default":
+  test "an explicit non-zero literal is honoured -- opting IN to a cap still works":
     let tight = ResourceBudget(maxFrontierSize: 1)
     check tight.maxFrontierSize == 1
 
@@ -77,7 +77,7 @@ proc manyBranchesReachable(x: int) =
             if x mod 13 == 0:
               symexTarget("deep-hit")
 
-suite "#163 item 3 -- the default cap does not truncate an ordinary analysis":
+suite "#163 item 3 -- the default budget does not truncate an ordinary analysis":
 
   test "oracle -- x = 2*3*5*7*11*13 satisfies every mod-0 condition":
     let x = 2 * 3 * 5 * 7 * 11 * 13

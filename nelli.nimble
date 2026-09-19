@@ -683,11 +683,15 @@ task test, "Run the test suite":
             # `int64`) was blindly unwrapped at its NARROW width, silently
             # wrapping the wider literal into a false `sxSat`.
             "tsymex_163rev_int_literal_width",
-            # Issue #163 item 3 (rev): `maxFrontierSize` defaulted to `0`
-            # (unbounded) -- the one incremental per-statement frontier cap
-            # left unbounded even as finding R22 added a per-iteration
-            # RangeDefect fork. Default now `256`, measured (not guessed)
-            # against this engine's heaviest currently-terminating suites.
+            # Issue #163 item 3 (rev): `maxFrontierSize`'s default. Briefly
+            # set to `256` on this branch and REVERTED to `0` (unbounded) at
+            # `90caaa1` -- the cap's premise was already dead (R22's forks
+            # return a single survivor via `routeRaise` and never multiplied
+            # the frontier) and its measurement sampled ~20 suites rather
+            # than the corpus, which the round-9 gate then caught: A4-3b
+            # carries 66 live paths and the prune turned a genuine UNSAT into
+            # `sxUnknown`. The suite now pins the default AT 0 and records
+            # what a future non-zero default must measure first.
             "tsymex_163rev_frontier_default",
             # Issues #161/#163 handoff follow-up, item 2: the `maxCallDepth`
             # call-inlining bail set `w.sawUnknown` bare, so exceeding an
@@ -697,9 +701,12 @@ task test, "Run the test suite":
             # kind (a sibling of the `maxLoopUnwind`/`maxFrontierSize` budget
             # family), naming the exhausted budget and the remedy (raise
             # `settings.budget.maxCallDepth`). Item 1 (a module-level global
-            # read's raw `KeyError`) is documented in this same file but NOT
-            # implemented -- it needs a new `SymexErrorKind`, and `types.nim`
-            # is sibling-owned this session.
+            # read's raw `KeyError`) landed later in the same round at
+            # `7182801`, via the new `feGlobalReadUnmodelled` kind routed
+            # through the `loweringDegradeErrors` threadvar sink rather than
+            # a raise -- a raw raise there unwinds through nested `walkBlock`
+            # frames and is swallowed by the C backend's goto-exception
+            # model, which is the N31/N36 false-`sxUnsat` class.
             "tsymex_163rev_degrade_classification",
             # Issue #163 review R26 (continued) + the parse-error gap:
             # `runConcolicCollectImpl` built an obligation log and read
@@ -707,5 +714,17 @@ task test, "Run the test suite":
             # the obligation log itself and the parse errors before they
             # ever reached `ConcolicCollectResult` -- diagnostics-only,
             # mirroring W10/R9's existing `walkDegradeCount` drain.
-            "tsymex_163rev_concolic_diagnostics"]:
+            "tsymex_163rev_concolic_diagnostics",
+            # N45 investigation instruments, registered in round 10 of the
+            # #163 review. Both were previously on disk and registered
+            # nowhere, so they ran in no sweep and no CI leg while still
+            # counting against the drift report every run. Both were
+            # verified to terminate and pass WITHOUT `-d:symexQueryStats`
+            # before being added: `tprobe_n45stats` skips itself when the
+            # flag is absent (the stats API is compiled out), and
+            # `tn45probe` runs its k=2 B5-4 trip-wire to `sxUnknown` in
+            # seconds. Registering them makes `unregistered` in
+            # `<outlog>.drift` mean "a real gap" again.
+            "tn45probe",
+            "tprobe_n45stats"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

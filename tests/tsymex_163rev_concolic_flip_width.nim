@@ -32,23 +32,28 @@
 ## carries, everywhere `runConcolicCollectImpl` builds a Z3Int `env[p.name]`
 ## for an `itInt` param.
 ##
-## `ConcolicCollectResult` has no raised-verdict channel at all (no
-## `witness`, no `found`-equivalent field -- `tsymex_163rev_concolic_modes.
-## nim`'s own header already established this for R1's div-by-zero case), and
-## `w.branchTrace` records ONLY `isIf` decisions (`walkIfFollowConcrete`) --
-## an overflow raise-fork is not an `if` and gets no `ConcolicBranchRecord`.
-## Neither `ConcolicYieldCounters` nor `ConcolicFlipCounters`
+## `ConcolicCollectResult` has no raised-VERDICT channel (no `witness`, no
+## `found`-equivalent field -- `tsymex_163rev_concolic_modes.nim`'s own header
+## already established this for R1's div-by-zero case), and `w.branchTrace`
+## records ONLY `isIf` decisions (`walkIfFollowConcrete`) -- an overflow
+## raise-fork is not an `if` and gets no `ConcolicBranchRecord`. Neither
+## `ConcolicYieldCounters` nor `ConcolicFlipCounters`
 ## (`smt/concolictaxonomy.nim`) has a slot for "a raise fired during
 ## collection" either. So R26's fix makes the OBLIGATION MACHINERY ITSELF
 ## fire correctly (verified below via the SAME `obligationLog` threadvar
 ## `RawResult.obligations` is drained from, which `runConcolicCollectImpl`
-## resets and populates identically to `runSymexImpl`), but the fact that it
-## fired is NOT observable through `concolicCollect`'s or `concolicFlip`'s
-## own public result types -- confirmed by inspection (both are plain
-## `object`s, exhaustively enumerated in this file's own imports), not
-## merely asserted. Wiring a raised-verdict channel through
-## `ConcolicCollectResult` (and from there into `fuzz.nim`'s orchestrator,
-## which this task does not own) is a genuinely separate, larger slice.
+## resets and populates identically to `runSymexImpl`).
+##
+## UPDATED in round 10 (`9bd6cc0`): the obligation IS now observable through
+## the public macro -- `ConcolicCollectResult` gained `obligations` (and
+## `parseErrors`) as a DIAGNOSTICS channel, pinned by
+## `tsymex_163rev_concolic_diagnostics.nim`. What remains absent, and is
+## absent deliberately, is the raised-VERDICT channel: the fuzzer executes
+## every seed against the real SUT and observes an actual crash directly, so
+## plumbing a symbolic raise verdict into `fuzz.nim`'s orchestrator would be
+## a producer with no live consumer. The assertions below still hold
+## unchanged -- they pin that `walkDegradeCount`/`ambiguousBranches`/
+## `branchTrace` say nothing about the raise, which is still true.
 ##
 ## House rule: every symbolic expectation below is paired with an ORACLE
 ## (the same computation executed for real, in Nim, in this file) and, where
@@ -242,10 +247,13 @@ suite "#163 review R26 -- concolic Z3Int params now carry the overflow obligatio
       if o.disposition == odLive: anyLive = true
     check anyLive
 
-  test "R26: NOT observable through ConcolicCollectResult itself -- documented, not fixed here":
-    ## `ConcolicCollectResult` (`smt/runtime.nim`) has exactly five fields:
-    ## `pcSatByConcreteInputs`, `counters`, `branchTrace`, `drawVars`,
-    ## `drawOverrides` -- no raised-verdict field, and `counters`
+  test "R26: no raised-VERDICT channel on ConcolicCollectResult -- deliberate, not an omission":
+    ## Round 10 (`9bd6cc0`) added `obligations` and `parseErrors` to
+    ## `ConcolicCollectResult`, so this test no longer enumerates the type's
+    ## full field list -- a prose field-count goes stale the moment the type
+    ## grows, and this one did. What it pins is unchanged and narrower: NONE
+    ## of the pre-existing fields say anything about a raise. There is still
+    ## no raised-verdict field, and `counters`
     ## (`ConcolicYieldCounters`, `smt/concolictaxonomy.nim`) has no slot for
     ## "an obligation fired" either (its members are `tracesTruncated`/
     ## `drawsSymbolicated`/`paramsConcretized`/`unsupportedDrawKinds`/

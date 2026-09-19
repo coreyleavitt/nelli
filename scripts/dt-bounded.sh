@@ -9,17 +9,27 @@
 # Exit:  0 = passed/ran to completion; 137 = HUNG (killed at timeout);
 #        other = compile/test failure.
 #
-# extra_nim_args, if given, is spliced verbatim (word-split, unquoted) into
-# the `nim` invocation ahead of the test file -- e.g. "-d:symexQueryStats"
-# to compile in a suite's real assertions instead of a `when defined` skip
-# branch. See scripts/sweep.sh's `extra_defines` table for the seam that
-# feeds this per-file for the whole-suite sweep.
+# extra_nim_args, if given, is one whitespace-separated string (e.g.
+# "-d:symexQueryStats" or "-d:foo -d:bar") to compile in a suite's real
+# assertions instead of a `when defined` skip branch. It is split into an
+# array on OUR side of the podman boundary and each flag is then passed to
+# the container as its own argv element -- never re-spliced into a string
+# the inner shell re-parses -- so multiple flags word-split without ever
+# reopening the injection class RFC-0002's L1 finding closed for
+# $test_file in this same script. See scripts/sweep.sh's `extra_defines`
+# table (itself derived from nelli.nimble, not hand-copied) for the seam
+# that feeds this per-file for the whole-suite sweep.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 backend="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs] [extra_nim_args]}"; shift
 test_file="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs] [extra_nim_args]}"; shift
 timeout_secs="${1:-180}"; [ $# -gt 0 ] && shift
 extra_nim_args="${1:-}"
+# Split on whitespace into real array elements now, while it is still a
+# plain shell variable on the host side -- NOT inside the container's `bash
+# -c` string, where an unquoted splice would hand the inner shell a single
+# blob to word-split (and glob-expand) at execution time.
+read -ra extra_args <<< "$extra_nim_args"
 img=localhost/nelli-dev:latest
 podman image exists "$img" || scripts/build-dev-image.sh
 
@@ -36,7 +46,8 @@ timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
   -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
   -w /work \
   "$img" \
-  bash -c 'nim "$1" -r --threads:on --hints:off $3 "$2"' _ "$backend" "$test_file" "$extra_nim_args"
+  bash -c 'b="$1"; f="$2"; shift 2; nim "$b" -r --threads:on --hints:off "$@" "$f"' \
+  _ "$backend" "$test_file" "${extra_args[@]}"
 rc=$?
 if [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; then
   echo ">>> HUNG: $test_file ($backend) killed after ${timeout_secs}s — treat as an engine non-termination defect, not a slow test." >&2

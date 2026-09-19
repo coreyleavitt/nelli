@@ -114,11 +114,29 @@ is_known_hang() {
 # nothing else in the repo ever sets (round-10 #163 liveness finding:
 # tprobe_n45stats was registered in nelli.nimble but ran skip() in every
 # venue, including this sweep, because -d:symexQueryStats was never
-# supplied here either). Keep this table in sync with nelli.nimble's
-# `extraDefines` table in the `test` task -- each side names the other in
-# a comment so the two cannot silently diverge.
-declare -A extra_defines=(
-  [tprobe_n45stats]="-d:symexQueryStats"
+# supplied here either).
+#
+# This USED to be a second hand-maintained table, kept in sync with
+# nelli.nimble's `extraDefines` Table only by a comment on each side naming
+# the other -- nothing checked it (finding D1). Fixed by elimination rather
+# than detection: parse nelli.nimble's `extraDefines` block directly, the
+# same "read the nimble file instead of hand-copying a second list" idiom
+# scripts/derive-ci-suites.ps1 already uses for the CI suite corpus, and
+# this very script already uses two paragraphs down for the drift report.
+# There is now exactly one table; nothing to diverge.
+declare -A extra_defines=()
+extra_defines_block="$(sed -n '/let extraDefines = {/,/}\.toTable()/p' nelli.nimble)"
+if [ -z "$extra_defines_block" ]; then
+  echo "sweep.sh: could not locate nelli.nimble's 'let extraDefines = { ... }.toTable()' block -- parser is out of sync with the file format" >&2
+  exit 2
+fi
+while IFS='|' read -r key val; do
+  [ -n "$key" ] && extra_defines["$key"]="$val"
+done < <(
+  printf '%s\n' "$extra_defines_block" \
+    | sed 's/#.*$//' \
+    | grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"' \
+    | sed -E 's/^"([^"]*)"[[:space:]]*:[[:space:]]*"([^"]*)"$/\1|\2/'
 )
 
 # ---- run set -------------------------------------------------------------
@@ -174,6 +192,31 @@ missing_n=$(LC_ALL=C comm -13 "$ondisk" "$registered" | wc -l | tr -d ' ')
   LC_ALL=C comm -13 "$ondisk" "$registered"
 } >> "$drift"
 
+# ---- skip-list hygiene (finding D4) --------------------------------------
+# known_linux_hangs entries must still name a real, registered suite --
+# mirrors the guard derive-ci-suites.ps1 already applies to ITS OWN skip
+# list (throws if a skip-listed suite isn't present in the nimble task). A
+# stale entry here (file deleted/renamed, or dropped from nelli.nimble)
+# skip-lists nothing real while silently costing nothing to notice.
+#
+# Deliberately NOT attempted: detecting an entry whose hang was fixed
+# upstream and is now just stale. That claim can only be proven by actually
+# running the suite unbounded to confirm it terminates -- exactly the cost
+# this skip list exists to avoid paying on every sweep. Left undone.
+stale_skiplist=()
+for h in "${known_linux_hangs[@]}"; do
+  ok=1
+  grep -qxF "$h" "$ondisk" || ok=0
+  grep -qxF "$h" "$registered" || ok=0
+  [ "$ok" -eq 1 ] || stale_skiplist+=("$h")
+done
+stale_n="${#stale_skiplist[@]}"
+{
+  echo
+  echo "## known_linux_hangs entries STALE — no file on disk and/or not in nelli.nimble's test task ($stale_n)"
+  printf '%s\n' "${stale_skiplist[@]}"
+} >> "$drift"
+
 # ---- sweep ---------------------------------------------------------------
 run_one() {
   local b="$1" f="$2" t="$3" extra="$4" rc
@@ -212,7 +255,7 @@ killed=$(awk '$1 == "137"' "$outlog" | wc -l | tr -d ' ')
 {
   echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${filter:+ filter=$filter}"
   echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
-  echo "unregistered=$unregistered_n missing=$missing_n  (see $drift)"
+  echo "unregistered=$unregistered_n missing=$missing_n stale_skiplist=$stale_n  (see $drift)"
   if [ "$fail" -gt 0 ]; then
     echo
     echo "## failing"

@@ -16,9 +16,10 @@ requires "nim >= 2.0.0"
 # behind a define that nothing else in the repo ever sets (round-10 #163
 # liveness finding: `tprobe_n45stats` was registered below but its whole
 # body ran `skip()` in every venue because `-d:symexQueryStats` was never
-# supplied anywhere). Keep this table in sync with scripts/sweep.sh's
-# `extra_defines` associative array -- each side names the other in a
-# comment so the two cannot silently diverge.
+# supplied anywhere). This is the single source of truth: scripts/sweep.sh
+# parses this block directly (same idiom as scripts/derive-ci-suites.ps1
+# parsing this file's `test` task) rather than keeping a second
+# hand-maintained copy that could silently diverge (finding D1).
 import std/tables
 let extraDefines = {
   "tprobe_n45stats": "-d:symexQueryStats",

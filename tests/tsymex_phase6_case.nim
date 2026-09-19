@@ -17,7 +17,11 @@ suite "symex Phase 6 — case":
   test "case over enum reaches matching arm":
     let r = symexFind(colorReach, tLabel("g"))
     check r.status == sxSat
-    check r.witness[0] == ord(green).uint8
+    # Issue #163: the witness reader now emits a correctly-typed `Color`
+    # value directly (see `IRType.enumName`), so `r.witness[0]` is already
+    # `Color` rather than a raw ordinal -- compare via `ord()` instead of
+    # a bare uint8 equality.
+    check ord(r.witness[0]) == ord(green)
 
   test "case with multiple labels per branch":
     proc small(n: int) =

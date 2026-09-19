@@ -210,7 +210,11 @@ suite "symex Phase 11 — wide-enum discriminator (#4)":
   test "256<n enum classifies as uint16; symex finds the high-ordinal arm":
     let r = symexFind(reachWide, tLabel("wide"))
     check r.status == sxSat
-    check r.witness[0] == ord(bk260).uint16
+    # Issue #163: the witness reader now emits a correctly-typed `BigKind`
+    # value directly (see `IRType.enumName`), so `r.witness[0]` is already
+    # `BigKind` rather than a raw ordinal -- compare via `ord()` instead of
+    # a bare uint16 equality.
+    check ord(r.witness[0]) == ord(bk260)
 
 # ---- #9 — consecutive discriminator reassignments ---------------------------
 

@@ -42,7 +42,11 @@ suite "symex variant objects #141 + Phase 11 migration":
   test "enum-typed param dispatch":
     let r = symexFind(isRed, tLabel("hit-red"))
     check r.status == sxSat
-    check r.witness[0] == ord(red).uint8
+    # Issue #163: the witness reader now emits a correctly-typed `Color`
+    # value directly (see `IRType.enumName`), so `r.witness[0]` is already
+    # `Color` rather than a raw ordinal -- compare via `ord()` instead of
+    # a bare uint8 equality.
+    check ord(r.witness[0]) == ord(red)
 
   test "variant — discriminator-gated arm-field constraint reaches target":
     let r = symexFind(isLargeCircle, tLabel("big-circle"))

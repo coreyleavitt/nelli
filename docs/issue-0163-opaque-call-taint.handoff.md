@@ -2065,3 +2065,96 @@ lenses are finding genuine things — including four errors of mine across the
 two rounds — but this is not yet converging on a floor, and each round's fixes
 are themselves a new surface. Worth a decision about whether to keep fixing or
 stop at the green gate and file the remainder.
+
+## PUSHED — 2026-09-19, and CI is running for the first time on this work
+
+`git push origin rfc-161-163-symex-defects` -> `26418f3..5056b46`, **86
+commits**. Corey's call, given directly.
+
+All three Windows legs triggered on the push (the `rfc-*` branch naming did
+its job): `symex-mingw` (35472097655), `fuzzer-mingw` (35472097646),
+`fuzzer-msvc` (35472097640). This is the **first CI exposure for every walker
+bump from 134 to 140** and for all of rounds 8-12. Prior runs on this branch
+(2026-09-18, at `26418f3`) were all green: symex-mingw ~41m, fuzzer-msvc ~36m,
+fuzzer-mingw ~10m.
+
+A background watcher is armed on all three.
+
+**Caveat recorded at push time:** the `quipu` pre-push hook is the one
+`quipu check` reports STALE, so this push may not have reached the hub. The
+commits are on GitHub regardless — it is the tracker that may be unaware.
+`quipu setup` repairs it; not run, it installs repo-local wiring and that is
+Corey's to authorise.
+
+**What CI is now exposed to that no Linux gate covers:** the six
+`tsymex_r6_*` suites skip-listed on Linux but historically GREEN on
+symex-mingw, and `tsymex_snd3_6_equality_loop`, which `ab7b9e0` added to
+`derive-ci-suites.ps1`'s `$skipReasons` precisely so it would NOT run
+unprotected in a sharded corpus job. That skip entry has never executed
+before; if the run reports a corpus-count change or a `throw` from
+`derive-ci-suites.ps1`'s sanity block, that entry is the first thing to look
+at.
+
+## Round 12 fixes — four agents dispatched, disjoint files
+
+| agent | findings | files |
+|---|---|---|
+| harden the defines parser | L12-1 (High), Q1 (Med), C7 (Med) | `scripts/sweep.sh`, `scripts/dt-bounded.sh`, `scripts/derive-ci-suites.ps1`, `nelli.nimble` |
+| fix the pragma's silent no-op | L12-2 (High), Q3 (High) | `src/nelli/parallel.nim`, `tests/tparallelcheck.nim` |
+| generic renderer + name-based fold | Q2 (High), Q5/L12-3 (Med) | `src/nelli/fuzz.nim`, `src/nelli/smt/concolictaxonomy.nim`, `tests/tsymex_163rev_concolic_*` |
+| explicit `w` parameter | Q6 (Low) | `src/nelli/smt/runtime.nim` |
+
+Load-bearing instructions in those briefs, recorded so a resumed session does
+not soften them:
+
+- The parser must make a **silently-partial parse impossible** — robust
+  multi-line parsing AND a count floor, since they catch different failures.
+- **C7 must resolve in one honest direction:** carry multi-token values safely
+  (NUL-delimited records) or stop advertising the capability and reject it
+  loudly at parse time. A documented capability that silently corrupts the
+  gate is not an acceptable end state.
+- The pragma must **never silently decline**: after recursing the way
+  `{.cover.}` does, zero insertions anywhere must produce a compile-time
+  warning naming the proc and the reason.
+- The pragma must **preserve the never-insert-after-the-final-statement
+  property at every newly-recursed level** — a body's last expression can be
+  the implicit `result`, and appending there changes the return value. Round
+  12 verified that property held at the top level; recursion is where it can
+  be lost.
+- If nested instrumentation proves unreliable, **report the measured rate and
+  do not claim otherwise in the docs**. A documented 14/20 is a good outcome;
+  a 14/20 documented as reliable is the defect being fixed.
+
+## Resume
+
+1. Collect the four agents. Each owes a measured proof, not an assertion.
+2. Read CI: `gh run list --branch rfc-161-163-symex-defects --limit 3`. A red
+   leg here is more informative than anything the Linux gate can say — it is
+   the first Windows verification of 86 commits.
+3. Then the authoritative gate, **single instance, absolute paths** (the
+   round-12 double-launch is recorded above):
+
+```
+nohup setsid bash -c 'scripts/sweep.sh /home/corey/.claude/jobs/4fd5573d/tmp/cur163r13.log \
+  > /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out 2>&1; \
+  scripts/sweep-diff.sh /home/corey/.claude/jobs/4fd5573d/tmp/base163.log \
+  /home/corey/.claude/jobs/4fd5573d/tmp/cur163r13.log \
+  >> /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out 2>&1; \
+  echo SWEEP_COMPLETE >> /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out' &
+```
+
+Before reading its result, confirm no second sweep is running and that
+`wc -l` on the log equals the on-disk test count.
+
+## Open, for Corey
+
+1. **`quipu setup`** — now the only blocking item. Hooks unwired; the push
+   above may not have reached the hub.
+2. Recommended, not done: rename the two N45 probes `tsymex_*` so
+   `symex-mingw`'s corpus picks them up. Unverifiable without pushing — though
+   now that the branch IS pushed, this is cheaper to try than it was.
+3. **The convergence question, still unanswered.** Rounds 10, 11 and 12 each
+   found real defects in the previous round's fixes. Round 13's lenses will
+   run against round 12's fixes. Whether to keep looping or stop at a green
+   gate and file the remainder is Corey's call; the mandate says keep fixing,
+   so that is the default in progress.

@@ -12,19 +12,6 @@ requires "nim >= 2.0.0"
 
 # Tasks
 
-# Per-file extra `-d:` defines: some suites gate their real assertions
-# behind a define that nothing else in the repo ever sets (round-10 #163
-# liveness finding: `tprobe_n45stats` was registered below but its whole
-# body ran `skip()` in every venue because `-d:symexQueryStats` was never
-# supplied anywhere). This is the single source of truth: scripts/sweep.sh
-# parses this block directly (same idiom as scripts/derive-ci-suites.ps1
-# parsing this file's `test` task) rather than keeping a second
-# hand-maintained copy that could silently diverge (finding D1).
-import std/tables
-let extraDefines = {
-  "tprobe_n45stats": "-d:symexQueryStats",
-}.toTable()
-
 task test, "Run the test suite":
   for f in ["tsmoke", "tchoice", "tserialize", "trng", "tdatasource",
             "tstrategy", "tstrategies", "tengine", "tshrinker", "tdsl",
@@ -740,11 +727,11 @@ task test, "Run the test suite":
             # nowhere, so they ran in no sweep and no CI leg while still
             # counting against the drift report every run. `tn45probe`
             # runs its k=2 B5-4 trip-wire to `sxUnknown` unconditionally in
-            # seconds. `tprobe_n45stats` needs `-d:symexQueryStats` (see
-            # `extraDefines` below) or its whole body compiles to a single
+            # seconds. `tprobe_n45stats` needs `-d:symexQueryStats`, supplied
+            # by its sibling `tests/tprobe_n45stats.nim.cfg` (Nim auto-reads
+            # `<module>.nim.cfg`), or its whole body compiles to a single
             # `skip()` -- a round-10 liveness finding caught it registered
             # but structurally inert that way.
             "tn45probe",
             "tprobe_n45stats"]:
-    exec "nim c -r --threads:on --hints:off --path:src " &
-      extraDefines.getOrDefault(f, "") & " tests/" & f & ".nim"
+    exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

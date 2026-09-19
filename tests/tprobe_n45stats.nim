@@ -6,7 +6,10 @@
 ## budget-truncated, so if `getStatistics` were only meaningful for sat/unsat
 ## the whole approach would be dead.
 ##
-## Build with: -d:symexQueryStats
+## The `-d:symexQueryStats` define this needs is supplied automatically by
+## the sibling `tprobe_n45stats.nim.cfg` (Nim auto-reads `<module>.nim.cfg`),
+## so a plain `scripts/dt.sh c tests/tprobe_n45stats.nim` is enough -- no
+## flag to remember.
 
 import std/unittest
 import nelli/symex

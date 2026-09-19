@@ -291,6 +291,94 @@ suite "#163 review R22 site 3 non-regression -- an ordinary unranged seq element
     check r.status == sxSat
 
 
+# =============================================================================
+# Site 4 -- a `var`/`out` PARAMETER reassignment inside its own callee
+# =============================================================================
+##
+## R22's own scope note said this needed the declared type to reach the
+## assign from the PARAM's type, not a local declaration (`isLet` never
+## fires for a formal parameter). R27 replaced R22's `isLet`-populated,
+## name-keyed table with `aty` resolved at PARSE TIME by TRUE SYMBOL
+## IDENTITY (`classifyType` on the assignment target's real `nnkSym`,
+## `dsl_parser.nim`'s `nnkAsgn`/plain-`nnkSym` arm) -- a mechanism that does
+## not care HOW the target symbol was introduced (`isLet`, a `var` local, or
+## a formal parameter are all just `nnkSym`s to `classifyType`). This
+## reassigns a `var range[lo..hi]` PARAMETER directly inside its own callee
+## -- the exact site the original scope note flagged as unreached.
+
+proc calleeReassignsRangedVarParam(v: var range[1..100], x, y: range[0..100]) =
+  v = x + y                 # x+y can reach 200 -- outside [1,100]
+  symexTarget("t")
+  discard v
+
+proc calleeReassignsRangedVarParamInRange(v: var range[1..100],
+                                           x, y: range[1..50]) =
+  v = x + y                 # x+y in [2,100] -- always inside [1,100]
+  symexTarget("t")
+  discard v
+
+proc calleeReassignsPlainVarParam(v: var int, x, y: range[0..100]) =
+  ## Non-regression: an ordinary unranged `var int` parameter is unaffected.
+  v = x + y
+  symexTarget("t")
+  discard v
+
+suite "#163 review R22 site 4 -- the oracle (var param reassignment inside its callee)":
+
+  test "Nim itself raises RangeDefect reassigning a var range param to an out-of-range sum":
+    proc rt(x, y: range[0..100]): range[1..100] =
+      var v: range[1..100] = 1
+      proc callee(v: var range[1..100], x, y: range[0..100]) =
+        v = x + y
+      callee(v, x, y)
+      v
+    expect RangeDefect:
+      discard rt(100, 100)
+    check rt(1, 0) == 1
+
+  test "the oracle -- the precision-case sum never leaves the declared range":
+    proc rt(x, y: range[1..50]): range[1..100] =
+      var v: range[1..100] = 1
+      proc callee(v: var range[1..100], x, y: range[1..50]) =
+        v = x + y
+      callee(v, x, y)
+      v
+    check rt(1, 1) == 2
+    check rt(50, 50) == 100
+
+suite "#163 review R22 site 4 -- an out-of-range var param reassignment raises instead of vanishing":
+
+  test "a genuinely out-of-range var param reassignment is found as sxRaised(RangeDefect)":
+    let r = symexFind(calleeReassignsRangedVarParam, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "RangeDefect"
+
+  test "the in-range survivor path still reaches the label":
+    let r = symexFind(calleeReassignsRangedVarParam, tLabel("t"))
+    check r.status == sxSat
+
+suite "#163 review R22 site 4 -- a provably-in-range var param reassignment does not fork":
+
+  test "no RangeDefect is found when the sum cannot leave the declared range":
+    let r = symexFind(calleeReassignsRangedVarParamInRange, tRaisedExn("RangeDefect"))
+    check r.status != sxRaised
+
+  test "the label is still reached normally":
+    let r = symexFind(calleeReassignsRangedVarParamInRange, tLabel("t"))
+    check r.status == sxSat
+
+suite "#163 review R22 site 4 non-regression -- an ordinary unranged var param is unaffected":
+
+  test "no RangeDefect fork on a plain int var param":
+    let r = symexFind(calleeReassignsPlainVarParam, tRaisedExn("RangeDefect"))
+    check r.status != sxRaised
+
+  test "the label is still reached":
+    let r = symexFind(calleeReassignsPlainVarParam, tLabel("t"))
+    check r.status == sxSat
+
+
 suite "#163 review round 1 -- walker version pin":
 
   test "walker version floor >= 138 (no bump owed by this round -- forks reuse forkAssignRangeCheck/rangeCondsIfNeeded unchanged)":

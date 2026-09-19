@@ -13042,33 +13042,50 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureDidMutateHeap = false                         ## Phase 15 CR-1
   ctx
 
-proc drainDedupedByMsg(dst: var seq[SymexErrorInfo], src: seq[SymexErrorInfo]) =
-  ## Round 10 design T4: the one dedup-by-message idiom every hint/error/
-  ## warning drain in `runSymexImpl`/`runConcolicCollectImpl` below hand-rolled
-  ## separately. Appends each entry of `src` to `dst`, deduplicated by `.msg`
-  ## WITHIN `src` alone, in its OWN `HashSet` — never merged with `dst`'s
-  ## prior contents or any sibling sink's own dedup set. Per-sink dedup is
-  ## deliberate, not an oversight: a message appearing in two DIFFERENT sinks
-  ## is vanishingly unlikely (each sink is written by its own disjoint set of
-  ## call sites), and this is the rule every site below already used before
-  ## this helper existed. A caller that concatenates two sub-sources into one
-  ## `seq` before calling (e.g. `w.someField & someThreadvar`) gets THOSE two
-  ## sub-sources deduped together, as one sink — that predates this helper
-  ## and is unchanged by it.
+iterator dedupedByMsg(src: seq[SymexErrorInfo]): SymexErrorInfo =
+  ## Shared insertion rule behind `drainDedupedByMsg`/`dedupedMsgCount` below:
+  ## walks `src` once, yielding each entry the first time its `.msg` is seen,
+  ## deduplicated WITHIN `src` alone, in its OWN `HashSet` — never merged with
+  ## a destination's prior contents or any sibling sink's own dedup set. Per-
+  ## sink dedup is deliberate, not an oversight: a message appearing in two
+  ## DIFFERENT sinks is vanishingly unlikely (each sink is written by its own
+  ## disjoint set of call sites). A caller that concatenates two sub-sources
+  ## into one `seq` before calling (e.g. `w.someField & someThreadvar`) gets
+  ## THOSE two sub-sources deduped together, as one sink.
   var seen: HashSet[string]
   for e in src:
     if e.msg notin seen:
       seen.incl e.msg
-      dst.add e
+      yield e
+
+proc drainDedupedByMsg(dst: var seq[SymexErrorInfo], src: seq[SymexErrorInfo]) =
+  ## Round 10 design T4: the one dedup-by-message idiom every hint/error/
+  ## warning drain in `runSymexImpl`/`runConcolicCollectImpl` below hand-rolled
+  ## separately. Appends each entry of `src` to `dst`, deduplicated per
+  ## `dedupedByMsg` above — see its doc for the per-sink-not-cross-sink
+  ## dedup contract.
+  for e in dedupedByMsg(src):
+    dst.add e
 
 proc dedupedMsgCount(src: seq[SymexErrorInfo]): int =
-  ## Same per-sink dedup rule as `drainDedupedByMsg`, for the two
-  ## `runConcolicCollectImpl` call sites that only need the count of distinct
-  ## messages, never the deduped entries themselves.
-  var seen: HashSet[string]
-  for e in src:
-    seen.incl e.msg
-  result = seen.len
+  ## Same per-sink dedup rule as `drainDedupedByMsg` (shared via
+  ## `dedupedByMsg` above), for the two `runConcolicCollectImpl` call sites
+  ## that only need the count of distinct messages, never the deduped
+  ## entries themselves — counts rather than materializing a throwaway seq.
+  for e in dedupedByMsg(src):
+    inc result
+
+template drainSinkUnion(dst: var seq[SymexErrorInfo]; walkField, threadVarSrc: untyped) =
+  ## CR-9 Stage 5 wiring, shared by every sink below that has BOTH a
+  ## `WalkCtx` field and a threadvar fallback: `w.walkField` is the LIVE
+  ## store, populated during the walk itself; the threadvar is the fallback
+  ## for any pre-walk/no-walk/probe caller that writes the sink outside a
+  ## walk. Unioning the two and draining (deduped by `.msg`, per
+  ## `drainDedupedByMsg` above) covers both the walk and any non-walk caller
+  ## uniformly. Each call site below carries a one-line pointer back to this
+  ## contract plus whatever is specific to ITS sink (Phase/ADR tag, what it
+  ## drains, and why the severity does or doesn't affect the verdict).
+  drainDedupedByMsg(dst, w.walkField & threadVarSrc)
 
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
@@ -13394,40 +13411,28 @@ proc runSymexImpl(prog: SymexProgram,
   # Phase 15 E4. Drain the unknown-exn-type warning sink, dedup'd by type name.
   # sevWarning never halts a verdict (Invariant 7), so it is appended to the
   # result's errors regardless of which verdict branch is taken below.
-  # CR-9 Stage 5: read from WalkCtx.unknownExnWarnings (LIVE store during walk);
-  # fall back to threadvar. Union covers both walk and any non-walk callers.
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
   var exnWarnings: seq[SymexErrorInfo]
-  let unknownExnWarningsLive = w.unknownExnWarnings & unknownExnWarnings
-  if unknownExnWarningsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, unknownExnWarningsLive)
+  drainSinkUnion(exnWarnings, unknownExnWarnings, unknownExnWarnings)
   # Phase 15 G4. Drain the distinct-bijectivity-skipped hint sink, dedup'd by
   # message (one per distinct type whose base was FP/String). sevHint never
   # changes the verdict (Invariant 7), so it rides every branch alongside
   # exnWarnings — appended to `exnWarnings` so the existing append sites carry
   # it on sat/unsat/unknown uniformly.
-  # CR-9 Stage 5: read from WalkCtx.distinctBijectivityHints (LIVE store during
-  # walk); fall back to threadvar for pre-walk/probe allocations. Union covers all.
-  let distinctBijectivityHintsLive = w.distinctBijectivityHints & distinctBijectivityHints
-  if distinctBijectivityHintsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, distinctBijectivityHintsLive)
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
+  drainSinkUnion(exnWarnings, distinctBijectivityHints, distinctBijectivityHints)
   # Phase 15 R2. Drain the freshness-cap hint sink, dedup'd by message (one per
   # ref type whose per-path distinctness inequalities hit the cap). sevHint
   # never changes the verdict (Invariant 7) — rides every branch via
   # `exnWarnings`, exactly the G4 bijectivity-skip drain above.
-  # CR-9 Stage 5: read from WalkCtx.freshnessCapHints (the LIVE store during
-  # the walk); fall back to threadvar for any hints appended outside a walk.
-  let freshnessCapHintsLive = w.freshnessCapHints & freshnessCapHints
-  if freshnessCapHintsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, freshnessCapHintsLive)
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
+  drainSinkUnion(exnWarnings, freshnessCapHints, freshnessCapHints)
   # Phase 15 R8. Drain the ptr-family hint sink, dedup'd by message (one entry
   # per run regardless of how many ptr derefs occurred). sevHint never changes
   # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
   # R2 freshness-cap drain above. A managed-`ref T`-only run drains NOTHING.
-  # CR-9 Stage 5: read from WalkCtx.ptrFamilyHints (LIVE store); fall back to
-  # threadvar. Union covers both walk and any potential pre-walk callers.
-  let ptrFamilyHintsLive = w.ptrFamilyHints & ptrFamilyHints
-  if ptrFamilyHintsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, ptrFamilyHintsLive)
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
+  drainSinkUnion(exnWarnings, ptrFamilyHints, ptrFamilyHints)
   # R16-2: convFloatToIntDomainHints removed — replaced by real RangeDefect raise
   # forks via drainConvFloatToIntRaises. No hint drain here.
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
@@ -13438,28 +13443,24 @@ proc runSymexImpl(prog: SymexProgram,
   # witness (the `w.found` precedence below). Riding `exnWarnings` surfaces the
   # kind on whichever branch is taken (Invariant 3). A run that never exhausts the
   # budget drains NOTHING (no spurious halt). Mirrors the R8 ptr-family drain.
-  # CR-9 Stage 5: read from WalkCtx.heapDepthErrors (the LIVE store during the
-  # walk); heapDepthExhausted writes both threadvar and w field. Union covers all.
-  let heapDepthErrorsLive = w.heapDepthErrors & heapDepthErrors
-  if heapDepthErrorsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, heapDepthErrorsLive)
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
+  drainSinkUnion(exnWarnings, heapDepthErrors, heapDepthErrors)
   # v64 (chapulin catalog #5(b), Invariant 7). Drain the budget-bail error
   # sink (dedup'd by message) — mirrors the R9 heap-depth-error drain. A
   # `beBudgetExhausted` is `sevError`; the exhausted/pruned paths already
   # drove the verdict via `w.sawUnknown` — this drain ensures the degraded
   # `sxUnknown` carries the classified WHY instead of an empty errors seq.
-  # WalkCtx-field-only (both emitting sites have `w: var WalkCtx`).
-  if w.walkDegradeErrors.len > 0:
-    drainDedupedByMsg(exnWarnings, w.walkDegradeErrors)
+  # WalkCtx-field-only (both emitting sites have `w: var WalkCtx`); no
+  # threadvar union needed, unlike `drainSinkUnion`'s sites above.
+  drainDedupedByMsg(exnWarnings, w.walkDegradeErrors)
   # Cluster H Step C. Drain the isNew-zero-write error sink (dedup'd by
   # message) — mirrors the R9 heap-depth-error drain exactly. A
   # `heNewFieldZeroUnsupported` is `sevError`; the offending path was tainted
   # `uncertain = true` (not halted) so its own downstream sat/raised findings
   # already demote to `sxUnknown` at the `uncertain` chokepoints — this drain
   # only ensures the classified kind rides every verdict branch (Invariant 3).
-  let newFieldZeroErrorsLive = w.newFieldZeroErrors & newFieldZeroErrors
-  if newFieldZeroErrorsLive.len > 0:
-    drainDedupedByMsg(exnWarnings, newFieldZeroErrorsLive)
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
+  drainSinkUnion(exnWarnings, newFieldZeroErrors, newFieldZeroErrors)
   # SND-3 (ADR-0023, walker v58). Drain the lowering-degrade error sink
   # (dedup'd by message) — mirrors the R9 heap-depth-error / Cluster-H
   # newFieldZeroErrors drains exactly. Each entry is `sevError`; the
@@ -13470,8 +13471,7 @@ proc runSymexImpl(prog: SymexProgram,
   # (no WalkCtx-field union): the lowering sites that populate it (`lower`'s
   # `iekBinop`/`iekContains` arms, `cmpString`) have no `w: var WalkCtx` in
   # scope.
-  if loweringDegradeErrors.len > 0:
-    drainDedupedByMsg(exnWarnings, loweringDegradeErrors)
+  drainDedupedByMsg(exnWarnings, loweringDegradeErrors)
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:
   # the over-cap instantiation was never registered, so the SUT's coverage is
@@ -13500,11 +13500,10 @@ proc runSymexImpl(prog: SymexProgram,
   # `ceClosureUnknownCallee`/`ceInlineBudgetExceeded` is `sevError`: the call's
   # semantics were not modeled, so the verdict MUST degrade to `sxUnknown`
   # (Invariant 3 — never a silent sat/unsat). Surface them on every branch.
-  # CR-9 Stage 5: read from WalkCtx.closureCallErrors (LIVE store during walk)
-  # and union with threadvar (covers the no-walk path in applyClosureGround).
-  let closureCallErrorsLive = w.closureCallErrors & currentClosureCallErrors
+  # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above
+  # (threadvar here is `currentClosureCallErrors`, not a same-named field).
   var closureErrs: seq[SymexErrorInfo]
-  drainDedupedByMsg(closureErrs, closureCallErrorsLive)
+  drainSinkUnion(closureErrs, closureCallErrors, currentClosureCallErrors)
   let closureForcedUnknown = block:
     var any = false
     for e in closureErrs:

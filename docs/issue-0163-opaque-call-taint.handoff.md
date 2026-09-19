@@ -1276,3 +1276,32 @@ enum fields and replays the witness, rather than checking the classifier.
 4. `wiring = proven`. `quipu` is not on PATH but DOES run as a git hook here —
    find the hook's invocation rather than assuming it is unavailable.
 
+## Round 9 findings — two, both against round 8
+
+Correctness/cache-key lens verified the highest-consequence items clean:
+`enumName` round-trips for all four enum positions (they all route through the
+same `classifyType`), is canonicalized as `:e[...]`, and is correctly excluded
+from `IRType.==` on the same precedent that already excludes `hasRange`.
+`maxFrontierSize` cannot yield a truncated `sxUnsat` — the prune sets
+`sawUnknown` and records `beBudgetExhausted` before truncating. R22's three
+new sites are consistent with the original. The widening fix never injects a
+conversion where none belongs.
+
+| id | sev | status | finding |
+|----|-----|--------|---------|
+| P2 | High | IN FLIGHT | **The widening-conversion fix is narrower than its own commit message claimed.** It engages `mkConvIntWidth` only when BOTH sides pass `isIntFamilyName` — a closed set of plain int spellings (`int`, `int8..64`, `uint`, `uint8..64`, `byte`, `char`). `valueTypeName` reads `getTypeInst`, which for a NAMED range alias or an enum reports that alias/enum name, so the gate fails and the code falls back to the old blind pass-through. Traced consequence: no `iekConvIntWidth` is inserted, `probeProto` returns the operand's native narrow width, and `coerceIntLit` truncates the oversized literal mod 2^n — the identical false SAT, for a different declared-type spelling. Proposed repro: `type SmallCount = range[0'i32..100]; proc f(a: SmallCount) = (if a > 3_000_000_000: symexTarget("hit"))`. **Not a regression** (the pre-round-8 pass-through was equally broken), but I asserted the class was closed and it is not. In flight: verify by experiment first (the lens could not compile), fix by reusing `rangeBaseType`/`enumOrdBitsNeeded` rather than a second name-based rule, and correct the v139 doc claim either way. |
+| P6 | Medium | fixed `7405283` | **My bump rationale contradicted itself.** v139's doc listed the module-global decline among changes NOT warranting a bump ("pure error attribution — the `sxUnknown` already happened") while the same comment explained that the raw `raise` it replaced "would have left `sawUnknown` unset and enabled a false `sxUnsat`". Both cannot hold. The old code was a bare `env[e.vname]`, which RAISES; the fix changes control flow to close that N31/N36-class false-`sxUnsat` hazard, which is verdict-affecting by definition. Harmless in practice — the 138->139 bump covers it anyway — but had it shipped alone the stated reasoning would have shipped a verdict-changing fix unbumped, which is the exact failure this protocol exists to catch. The `maxCallDepth` exclusion stands: it adds a message beside an already-present `sawUnknown`. |
+
+**Pattern worth naming:** round 9 is the third time this session a lens caught
+a stale or wrong CLAIM in my bookkeeping rather than a defect in the code — the
+`open`-after-landing row, the "no bump owed" comments, and now a
+self-contradictory bump rationale. The code has held up better than the record
+of it.
+
+## Remaining to close
+
+1. P2: confirm-or-refute by experiment, fix if real, correct the v139 claim.
+2. If P2 lands a fix, bump 139 -> 140.
+3. Full sweep vs `base163.log` (460 entries, pinned at `ac507c1`).
+4. `wiring = proven`.
+

@@ -7,13 +7,17 @@
 ## (highest-uncertainty paths dropped first), and to set
 ## `w.sawUnknown = true` so the final result is `sxUnknown` (NOT
 ## `sxUnsat`). `maxFrontierSize = 0` keeps the prior behaviour:
-## unlimited frontier, no prune.
+## unlimited frontier, no prune -- still true after issue #163 item 3 (rev)
+## gave the OMITTED-field default a non-zero value (`256`, comfortably above
+## anything this file's own tiny frontier reaches): `0` remains the explicit
+## opt-out, an explicit literal always wins over the type-level default.
 ##
 ## Test shape: a SUT whose branching produces N>>1 paths after a
 ## few `if` levels. With `maxFrontierSize = 1`, the walker is
 ## forced to prune most of the frontier and the verdict must come
-## back `sxUnknown`. With `maxFrontierSize = 0` (default) the SUT
-## solves normally — `sxSat` on a reachable label.
+## back `sxUnknown`. With DEFAULT settings the SUT solves normally —
+## `sxSat` on a reachable label (its frontier never gets near the default
+## 256 cap).
 import std/unittest
 import nelli/symex
 import nelli/smt/types
@@ -39,7 +43,7 @@ proc multiBranchUnreachable(x: int) =
           symexTarget("never")
 
 suite "symex Phase 14 cycle C3 — frontier pruning":
-  test "default settings (maxFrontierSize=0): unlimited frontier reaches deep target":
+  test "default settings (maxFrontierSize=256): well under the cap, reaches deep target":
     let r = symexFind(multiBranchReachable, tLabel("deep-hit"))
     check r.status == sxSat
 

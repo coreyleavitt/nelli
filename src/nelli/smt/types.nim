@@ -1965,7 +1965,55 @@ type
       ## Z3 logical step count bound. `0` (default) is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
-    maxFrontierSize*: int
+    maxFrontierSize*: int = 256
+      ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
+      ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path
+      ## frontier down to this many paths (highest-uncertainty-first
+      ## eviction) whenever it grows past the cap, tainting the evicted
+      ## paths' contribution as `sxUnknown` via the classified
+      ## `beBudgetExhausted` kind (Invariant 3 — an honest degrade, never a
+      ## silent truncation that could fake an `sxSat`/`sxUnsat`). `0` STAYS
+      ## the documented opt-out meaning UNLIMITED (this field is in the
+      ## `ResourceBudget` majority `0 = unlimited` covers, unlike
+      ## `maxCallDepth`/`maxLoopUnwind` — see the type's own umbrella
+      ## comment) — this only changes what an OMITTED field gets.
+      ##
+      ## Before this, the omitted-field default was Nim's bare zero —
+      ## unbounded — with no cap at all on multiplicative path growth. This
+      ## matters more since finding R22 added a `RangeDefect` fork at ranged
+      ## assignments: a ranged loop counter can now fork per iteration
+      ## whenever its `ziIvl` discharge is defeated by an unconstrained RHS
+      ## operand, and `maxLoopUnwind`/`maxCallDepth` bound other axes but
+      ## nothing bounded this one.
+      ##
+      ## `256` is MEASURED, not guessed (2026-09-18, this engine's Linux/
+      ## podman debug build, `walkBlock` instrumented with a temporary
+      ## max-frontier-seen counter in a throwaway `git worktree`, never
+      ## committed): the LARGEST post-step frontier any of ~20 sampled
+      ## heavy/branchy existing suites reached — including every suite this
+      ## round's own regression list calls "large"
+      ## (`tsymex_161_overflow_obligation`, `tsymex_162_range_base_width`,
+      ## `tsymex_163rev_assign_rangedefect`), plus the dedicated frontier-
+      ## pruning suite, several deep-nested-if/while/case suites, and every
+      ## variant/multivariant/container suite sampled — was **16**
+      ## (`tsymex_r6_n9_variant_budget.nim`). `256` is 16x that measured
+      ## ceiling: comfortably clear of anything a currently-green, currently-
+      ## TERMINATING analysis in this codebase actually reaches, while still
+      ## bounding a runaway multiplicative blow-up to a small constant
+      ## instead of letting it run unchecked (the R22 concern this field
+      ## exists for). Also matches an existing precedent value already
+      ## chosen by a test author in this exact codebase for this exact field
+      ## (`tsymex_phase7_assertcovered.nim`'s `lax` config), rather than an
+      ## arbitrary round number invented fresh.
+      ##
+      ## One sampled suite (`tsymex_snd3_loopdegrade.nim`) did not terminate
+      ## within a 300s bound even at HEAD, with no frontier cap at all
+      ## (confirmed independently of this instrumentation) — a pre-existing,
+      ## out-of-scope non-termination this change does not need to fix, but
+      ## also cannot regress: it was not passing before, so a `256` cap
+      ## converting its eventual fate to an honest, fast `sxUnknown` (should
+      ## its frontier ever exceed 256) would be a strict improvement, not a
+      ## truncation of anything that used to pass.
     maxCallDepth*: int = 3
       ## Upper bound on symbolic call-stack depth explored by `isCall`'s
       ## walker arm (`runtime.nim`) before bailing with a fresh

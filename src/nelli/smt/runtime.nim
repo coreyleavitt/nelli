@@ -9883,6 +9883,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let valProto = seqElemLitProto(recvSV.seqElemTy)
         let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w, valProto)
         for vp in drainScalarRaiseForks(valP, w):
+          # #163 review R22 site 3: a seq element write whose declared
+          # element type is `range[lo..hi]` forks exactly like the plain
+          # field write (site 1) and `isAssign`'s own local-variable case --
+          # see `forkAssignRangeCheck`'s doc comment. The declared type is
+          # already live on `recvSV.seqElemTy` (the SAME field
+          # `seqElemLitProto` above already reads), so no new IR field is
+          # needed. Checked BEFORE `storeSeqElem` (whose own internal
+          # svInt->BV reconciliation is independent of this) so the
+          # discharge can still see `valSV`'s `ziIvl`.
+          let vpRanged =
+            if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange:
+              forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
+            else: vp
           let newDataRaw = storeSeqElem(
             recvSV.seqDataRaw, recvSV.seqElemTy, idxZi, valSV) # [placeholder-audited]
           # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
@@ -9891,10 +9904,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # of the `for p in paths` loop, `continue`d on the placeholder
           # branch) and is never reassigned before this point — the
           # `.seqLen` read below is reached only on the non-placeholder path.
-          var newEnv = vp.env
+          var newEnv = vpRanged.env
           newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen, # [placeholder-audited]
             seqDataRaw: newDataRaw, seqElemTy: recvSV.seqElemTy)
-          survivors.add forkPath(vp, vp.pc & @[inLoCond, inHiCond], newEnv)
+          survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isSeqPop:
     # N14 (RFC-chapulin-hardening bucket-2): `retName := recvName.pop()`.

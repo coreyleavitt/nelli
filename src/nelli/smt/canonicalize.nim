@@ -252,14 +252,23 @@ const symexWalkerVersion* = "139"
   ##   the default is 256. `0` remains the documented opt-out. A runaway can
   ##   now degrade to `sxUnknown` instead of grinding.
   ##
-  ## NOT bumped for: the `maxCallDepth` classification and the module-global
-  ## decline. Both are pure error ATTRIBUTION — the `sxUnknown` already
-  ## happened and only the classified kind riding it changed. Note the
-  ## module-global fix deliberately does NOT raise: a raw `raise` unwinding
-  ## through nested `walkBlock` frames is silently swallowed by the C-backend
-  ## goto-exception unwind (the N31/N36 class), which would have left
-  ## `sawUnknown` unset and enabled a false `sxUnsat`. It records through the
-  ## `loweringDegradeErrors` threadvar sink instead.
+  ## NOT bumped for: the `maxCallDepth` classification (`0c85a13`) — that one
+  ## genuinely is pure ATTRIBUTION, adding a classified message next to an
+  ## already-present `w.sawUnknown = true`, so the `sxUnknown` had already
+  ## happened and only the kind riding it changed.
+  ##
+  ## CORRECTED by round 9 (finding P6): the module-global decline (`7182801`)
+  ## was ALSO listed here as attribution-only. That was self-contradictory and
+  ## wrong. The old code was a bare `env[e.vname]`, which RAISES `KeyError` on
+  ## a missing key; the fix changes control flow from raise to an in-band
+  ## degrade precisely because a raw `raise` unwinding through nested
+  ## `walkBlock` frames is silently swallowed by the C-backend goto-exception
+  ## unwind (the documented N31/N36 class) — leaving `sawUnknown` UNSET and
+  ## enabling a false `sxUnsat`. Closing a false-`sxUnsat` hazard is
+  ## verdict-affecting by definition, so it belongs in the bumped set above,
+  ## not in the exclusions. It is covered by this same 138 -> 139 bump, so no
+  ## stale entry can be replayed; the error was in the stated reasoning, which
+  ## would have shipped a verdict-changing fix unbumped had it landed alone.
   ## `/code-review` round 6 (2026-09-18) — **R28**, a narrowing that R27
   ## introduced and that round 6 caught.
   ##

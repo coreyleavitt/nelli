@@ -193,5 +193,5 @@ suite "#163 item 1 -- object-field enum DOMAIN: sparse, large explicit ordinal":
 
 suite "#163 item 1 -- walker version pin":
 
-  test "walker version floor >= 138 (the round this fix lands in)":
+  test "walker version floor >= 139 (the round this fix lands in)":
     check parseInt(symexWalkerVersion) >= 139

@@ -317,7 +317,7 @@ aggregation, the same drop-on-the-way-out bug one level up.
 | W5 pragma fallback | closed | `7d0ee90` + `d5108de` |
 | W7 enum domain | closed | `05f8e01` |
 | W11/W12/W13 | closed | `a1fc02c`, `9206071`, `7878212` |
-| W6, W8, W9, W10 | wave 2, IN FLIGHT | — |
+| W6, W8, W9, W10 | wave 2, IN FLIGHT at the time of writing | see below: W6 `9da19ab`, W9/W10 landed in wave 2, **W8 closed `bf6de33` and PINNED `bd6a013`** in review round 8 |
 
 Plus `d981a78` (retired #137 pin, see below) and `1404fb5` (rename +
 registration).
@@ -1210,7 +1210,7 @@ or raw-raise change — that is the point. Adjudicate, never re-count.
 | enum-field witness | `d71da9e` | `IRType` gained `enumName*`, populated by `classifyType`'s enum arm, consumed by `emitTyAndReader` to wrap the raw reader as `EnumName(...)`. Round-trips via a new `withEnumName` in `emitIRType`; canonicalized as `:e[...]` by default (mirroring `itTuple.objectName`); excluded from `IRType.==` (mirroring `nominalId` — the walker never reads the name). **Unblocks R21's object-field position**, so R2's and R18's enum-domain work is finally verifiable there, including negative-ordinal and sparse enums as object fields. Also corrected a collateral test that assumed a raw-int witness; it is now honestly typed. |
 | `maxFrontierSize` | `991b0ff` | Measured, not guessed: instrumented `walkBlock` across ~20 heavy/branchy suites, largest observed frontier **16** (`tsymex_r6_n9_variant_budget`). Default set to **256** — 16x headroom, matching a precedent value already used in `tsymex_phase7_assertcovered`. `0` remains the documented opt-out. The existing prune already degrades honestly via `beBudgetExhausted`; no change needed there. |
 | `maxCallDepth` classified | `0c85a13` | Was an unclassified degrade — `sxUnknown` with no named reason, so "raise your call-depth budget" was indistinguishable from "the engine cannot model your program". `beBudgetExhausted` already existed and fit exactly (same family as the `maxLoopUnwind`/`maxFrontierSize` uses), so no new enum member. Message now names `maxCallDepth=N` and the remedy. NOT verdict-affecting: the `sxUnknown` already happened; only the kind riding it changed. |
-| module-global read | IN FLIGHT | Diagnosed and RED-confirmed: `lower`'s `iekVar` arm does a bare `env[e.vname]`, so an unbound name lets Nim's `Table` throw `KeyError`, which escapes as `weInternalWalkerFault` — the engine's "I have a bug" backstop — for what is actually an unmodelled-feature decline. The first attempt was blocked because `types.nim` was sibling-owned; it is free now and the fix is in flight with `feGlobalReadUnmodelled` appended at the enum tail. |
+| module-global read | `7182801` | Diagnosed and RED-confirmed: `lower`'s `iekVar` arm does a bare `env[e.vname]`, so an unbound name lets Nim's `Table` throw `KeyError`, which escapes as `weInternalWalkerFault` — the engine's "I have a bug" backstop — for what is actually an unmodelled-feature decline. The first attempt was blocked because `types.nim` was sibling-owned; it is free now and the fix is in flight with `feGlobalReadUnmodelled` appended at the enum tail. |
 
 ## New fact worth recording
 
@@ -1221,9 +1221,50 @@ characterised as a "pre-existing failure, byte-identical in the baseline" —
 accurate as far as it went, but it is specifically an undocumented HANG, which
 belongs in the same ledger as the six known ones.
 
-## Remaining to close round 8
+## Round 8 closed
 
-1. Consolidated bump **138 -> 139** covering the verdict-affecting set: R22
+- **module-global read** `7182801` — landed. Note the implementing agent
+  DECLINED the implementation this brief specified. I said to raise
+  `SymexClassifiedDegradeError` at the `iekVar` site, matching the nearest
+  textual precedent. It checked where that precedent actually sits: every
+  remaining raw `raise` in `runtime.nim` is verified-unreachable, at the
+  pre-walk param boundary, or caught one frame away. `iekVar` is none of
+  those — it fires inside `lower()`'s own recursion on every ordinary global
+  read, arbitrarily deep. A raw `raise` unwinding through nested `walkBlock`
+  frames is silently swallowed by the C-backend goto-exception unwind (the
+  documented N31/N36 class), leaving `sawUnknown` unset and enabling a FALSE
+  `sxUnsat`. Following my brief would have reintroduced that bug class for
+  global reads. It used the `loweringDegradeErrors` threadvar sink instead,
+  added no `raise`, and both audits stayed green unchanged.
+- **Consolidated bump 138 -> 139** `0f16e47` — landed, covering R22 sites 1-3,
+  `storeSeqElem`, the widening-conversion false SAT, both parse gaps,
+  R24/R25/R26, the enum-field witness reader (a new canonicalized `IRType`
+  field, which mandates a bump on its own) and `maxFrontierSize`'s default.
+  NOT bumped for the `maxCallDepth` classification or the module-global
+  decline — both attribution-only.
+- Seven round-8-dependent suites raised to a `>= 139` floor; earlier suites
+  keep the floor their own behaviour requires.
+
+## Round 9 (re-review of round 8) — no findings above Low
+
+Security and liveness both clean. Two corrections it made to MY framing:
+- The fork-multiplication worry I carried through several briefs does not
+  hold. `forkAssignRangeCheck` takes one input `Path` and returns exactly one
+  survivor; the out-of-range sub-path is terminal via `discard routeRaise`.
+  A ranged assignment in a loop NARROWS the same path's `pc` each iteration,
+  it does not double the frontier. Real multiplicative growth comes from
+  ordinary `if`/`case` forks, pre-existing and already bounded.
+- `maxFrontierSize`'s prune always sets `sawUnknown` and records
+  `beBudgetExhausted`, so it cannot yield a truncated `sxUnsat` — the failure
+  mode I was most worried about.
+
+R21's object-field position is confirmed genuinely unblocked end-to-end:
+the new suite runs `symexFind` on objects with negative-ordinal and sparse
+enum fields and replays the witness, rather than checking the classifier.
+
+## Remaining to close
+
+1. ~~Consolidated bump **138 -> 139**~~ DONE (`0f16e47`) covering the verdict-affecting set: R22
    sites 1-3 + the `storeSeqElem` prerequisite, both parser gaps (`b307aef`),
    R24/R25/R26, the enum-field witness reader, the widening-conversion
    soundness fix, `maxFrontierSize`'s default, and the module-global decline if

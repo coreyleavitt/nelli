@@ -2334,6 +2334,27 @@ proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
     else: nil
   (if dummy != nil: dummy else: mkIntLit(0))
 
+proc isPromoteSoundEligibleParam(operand: NimNode, operandTy: IRType): bool =
+  ## Issue #163 review (rev item 2 follow-up) soundness carve-out, factored
+  ## out so every int-width-conversion call site shares ONE answer instead of
+  ## re-deriving it (the R11/R15/R16 "parallel rule drifts from the
+  ## classifier" failure mode this review has hit repeatedly). A bare
+  ## reference to one of the CURRENT proc's own formal parameters
+  ## (`operand.kind == nnkSym and symKind(operand) == nskParam`) whose
+  ## classified type carries a proven range AND is signed is exactly the
+  ## shape `runtime.nim`'s `promoteSound` (issue #161) promotes at top-level
+  ## param entry to a Z3 UNBOUNDED Int (`svInt`) rather than a fixed-width
+  ## BV. `mkConvIntWidth`'s walker (`lowerConvIntWidth`, `runtime.nim`) hard-
+  ## asserts its operand is ALWAYS a raw BV -- true for every case it was
+  ## built for, but NOT true for a promoted param: routing one through it
+  ## regressed a correct `sxUnsat` to `sxUnknown` (confirmed empirically,
+  ## `nnkHiddenStdConv` arm below). Skip the width-conversion wrapper for
+  ## exactly this carve-out -- the identity pass-through is independently
+  ## sound here via `promoteSound`, since a promoted param's value is already
+  ## an unbounded Z3 Int with no modulus to wrap against.
+  operand.kind == nnkSym and symKind(operand) == nskParam and
+  operandTy.hasRange and operandTy.signed
+
 proc armYieldsValue(body: NimNode): bool =
   ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
   ## path? A `case`/`if` in expression position may still carry arms that
@@ -2823,11 +2844,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # range-typed OBJECT FIELD case came back a false `sxSat` before
       # this fix, witness `f = 0`, and the same real Nim expression is
       # false for every value 0..100).
-      let isPromoteSoundEligibleParam =
-        wrapped.kind == nnkSym and symKind(wrapped) == nskParam and
-        innerTy.hasRange and innerTy.signed
       if outerTy.kind == itInt and innerTy.kind == itInt and
-         outerTy.width != innerTy.width and not isPromoteSoundEligibleParam:
+         outerTy.width != innerTy.width and
+         not isPromoteSoundEligibleParam(wrapped, innerTy):
         # This used to re-derive `srcWidth`/`tgtWidthV`/`srcSigned`/
         # `tgtSignedV` from a NAME-based lookup
         # (`isIntFamilyName(valueTypeName(...))`), which only recognizes the
@@ -4268,10 +4287,66 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
     # A7 (ADR-0017 Path B): `ord(r)` where `r` classifies as tInt (Rune → tInt).
     # `ord` is a magic intrinsic with no parseable body; for a type already
-    # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity.
+    # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity
+    # ONLY when its argument's own classified width already matches `ord`'s
+    # declared return type.
+    #
+    # Issue #163 (found during the round-9 range-alias review, fixed here).
+    # `ord`'s declared signature is `proc ord*[T](x: T): int` — its RESULT is
+    # always native (64-bit signed) `int`, regardless of `T`. This arm used
+    # to `return parseExpr(n[1], ...)` unconditionally: an identity
+    # pass-through at the ARGUMENT's own classified width, not `ord`'s
+    # declared return width. For a plain `int`/Rune argument the two
+    # coincide (both 64-bit), so no bug was visible there — but an ENUM
+    # argument classifies to `itInt` at its own lifted, narrow width
+    # (`enumOrdBitsNeeded`, e.g. 2 bits for a 3-member enum), and a `char`
+    # argument classifies at 8 bits (`dsl_typebridge.nim`'s `"char"` arm).
+    # Reproduced empirically (`scratchpad/probe_163ord_*.nim`, not
+    # committed): `proc f(c: Color) = if ord(c) > 3_000_000_000:
+    # symexTarget("hit")` for a 3-member `Color` enum returned `sxSat` with
+    # witness `cGreen` — real Nim's `ord(cGreen)` is 1, never close to three
+    # billion. `treeRepr`/`getTypeInst` confirm the compiler wraps the whole
+    # `ord(c)` CALL in an `nnkHiddenStdConv` for the surrounding comparison,
+    # but that wrapper's own `getTypeInst` (`int64`) already matches the
+    # Call node's OWN `getTypeInst` (`int`, from `ord`'s declared return
+    # type) — so the generic `nnkHiddenStdConv` widening arm above (issue
+    # #163 rev items 2/2-followup) sees no width mismatch at that level and
+    # recurses straight into this `nnkCall` "ord" handling, where the bug
+    # actually lived: re-deriving the result's width from the ARGUMENT
+    # (`n[1]`, e.g. `Color`) discarded the correct native-`int` answer the
+    # Call node's own type already carried one level up.
+    #
+    # Fix: read both widths off `classifyType`, exactly as the
+    # `nnkHiddenStdConv` arm already does — `outerTy` from the CALL node `n`
+    # itself (which resolves `ord`'s declared `int` return type, always
+    # native width) and `innerTy` from the argument `n[1]` (the enum's own
+    # lifted width via `enumOrdBitsNeeded`, or a range alias's own width via
+    # `rangeBaseType`). A genuine width change routes through the same
+    # `mkConvIntWidth` widening machinery the two landed hidden-conversion
+    # fixes use, with the identical `isPromoteSoundEligibleParam` carve-out:
+    # `ord` of a bare reference to the current proc's own signed, ranged,
+    # top-level param must stay an untouched identity pass-through, because
+    # `promoteSound` (issue #161) already promoted that param to an
+    # unbounded Z3 Int with no BV modulus to wrap against — and
+    # `mkConvIntWidth`'s walker hard-asserts a raw BV operand, so routing a
+    # promoted param through it regressed a correct `sxUnsat` to `sxUnknown`
+    # the same way it did for the hidden-stdconv arm (confirmed empirically
+    # for that arm; not re-tried here since the shape and the wall are
+    # identical).
     if calleeSym.strVal == "ord" and n.len == 2 and
        n[1].typeKind != ntyNone and
        classifyType(n[1]).ty.kind == itInt:
+      let outerTy = classifyType(n).ty
+      let innerTy = classifyType(n[1]).ty
+      if outerTy.kind == itInt and outerTy.width != innerTy.width and
+         not isPromoteSoundEligibleParam(n[1], innerTy):
+        if outerTy.width > innerTy.width:
+          return mkConvIntWidth(parseExpr(n[1], preamble, ctx),
+                                 innerTy.width, innerTy.signed,
+                                 outerTy.width, outerTy.signed)
+        else:
+          return declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
+                                      valueTypeName(n[1]), valueTypeName(n))
       return parseExpr(n[1], preamble, ctx)
     # v64 (chapulin catalog #pred): `pred(x[, k])` / `succ(x[, k])` are magic
     # intrinsics with no parseable body, and `a ..< b` lowers via a template

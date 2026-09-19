@@ -235,6 +235,29 @@ const symexWalkerVersion* = "139"
   ##   route) — closed separately by reading the width/signedness directly
   ##   off the `IRType`s `classifyType` already resolves for both sides,
   ##   instead of re-deriving them from a second, name-based lookup.
+  ##
+  ##   FOLLOW-UP (issue #163, `dsl_parser.nim` only — bump owed to the
+  ##   control loop, not landed in this const): the round-9 review also
+  ##   recorded, but explicitly left unfixed as out of that fix's scope, a
+  ##   THIRD site with the identical false-SAT shape: the `ord()` magic
+  ##   intercept (`calleeSym.strVal == "ord"`), not the `nnkHiddenStdConv`
+  ##   arm above. `ord`'s declared return type is always native (64-bit
+  ##   signed) `int`; the intercept identity-passed its argument at the
+  ##   ARGUMENT's own classified width instead — an enum's lifted
+  ##   `enumOrdBitsNeeded` width, or `char`'s 8 bits — discarding the correct
+  ##   native-`int` answer the `ord(...)` CALL node's own `classifyType`
+  ##   already carried. Confirmed empirically: `proc f(c: Color) = (if
+  ##   ord(c) > 3_000_000_000: symexTarget("hit"))` for a 3-member `Color`
+  ##   enum returned `sxSat` with witness `cGreen` — real Nim's `ord(cGreen)`
+  ##   is 1, never close to three billion — reproduced for an enum PARAM,
+  ##   LOCAL, and OBJECT FIELD, and for `ord()` bound to a `let` outside any
+  ##   comparison. Closed by reading `outerTy` off `classifyType` for the
+  ##   `ord(...)` CALL node itself (native `int`) versus `innerTy` off its
+  ##   argument, routing a genuine width change through the identical
+  ##   `mkConvIntWidth` machinery — including the SAME `promoteSound`
+  ##   carve-out, now factored into one shared `isPromoteSoundEligibleParam`
+  ##   proc so both call sites answer identically instead of carrying two
+  ##   copies of the same rule that could drift.
   ## * **`nnkHiddenCallConv` and `nnkHiddenSubConv`** (`dsl_parser.nim`) —
   ##   `echo(intExpr)` and a char-range comparison (`c > 'm'` for
   ##   `range['a'..'z']`) failed to PARSE AT ALL, so any SUT containing either

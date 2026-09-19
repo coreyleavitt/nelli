@@ -242,18 +242,149 @@ suite "#163 item 2 follow-up -- same-width pass-through stays untouched":
     check r.status == sxSat
     check r.witness[0] == cBlue
 
-# NOTE (out of scope for this fix, recorded for the record): probing the
-# enum case above surfaced a DIFFERENT, unrelated false-`sxSat` -- not
-# through this arm. `dsl_parser.nim`'s `ord()` magic intercept
-# (`calleeSym.strVal == "ord" ... classifyType(n[1]).ty.kind == itInt`)
-# identity-passes an enum-typed argument through at the ENUM's own lifted
-# (narrow) width rather than `ord`'s declared native-`int` (64-bit) return
-# type. `symexFind` on `proc f(c: Color) = if ord(c) > 3_000_000_000:
-# symexTarget("hit")` (Color = enum with 3 members) returns `sxSat` with
-# witness `cGreen` -- real Nim's `ord(cGreen)` is 1, never > 3_000_000_000.
-# This is a genuine soundness bug, but it lives in the `nnkCall`/"ord"
-# handling, not the shared `nnkHiddenStdConv` arm this fix's mandate covers;
-# left for separate follow-up.
+# NOTE: probing the enum case above once surfaced a DIFFERENT false-`sxSat`
+# -- not through this arm, and left as a recorded follow-up rather than
+# fixed here. That follow-up is now closed by the fix below.
+
+# ---------------------------------------------------------------------------
+# #163 -- the ord() magic intercept identity-passes its argument at the
+# ARGUMENT's own classified width, not ord's declared native-int RETURN
+# width.
+#
+# `ord`'s declared signature is `proc ord*[T](x: T): int` -- its result is
+# always native (64-bit signed) `int`. `dsl_parser.nim`'s `ord()` intercept
+# used to `return parseExpr(n[1], ...)` unconditionally whenever the
+# argument itself classified to `itInt` -- an identity pass-through at the
+# ARGUMENT's own width. For a plain `int`/Rune argument that coincides with
+# `ord`'s declared 64-bit return width, so no bug was visible there; an
+# ENUM argument classifies at its own lifted, narrow width
+# (`enumOrdBitsNeeded` -- e.g. 2 bits for a 3-member enum), and a `char`
+# argument classifies at 8 bits.
+#
+# Reproduced empirically (scratchpad/probe_163ord_treerepr.nim,
+# probe_163ord_types.nim, probe_163ord_fix.nim, not committed) BEFORE
+# fixing: `treeRepr`/`getTypeInst` confirm the compiler wraps the whole
+# `ord(c)` CALL in an `nnkHiddenStdConv` for the surrounding comparison, but
+# that wrapper's own `getTypeInst` (`int64`) already MATCHES the Call
+# node's own `getTypeInst` (`int`) -- so the generic `nnkHiddenStdConv`
+# widening arm (the fix above in this file) sees no width mismatch at that
+# level and recurses straight into the `ord()` "nnkCall" handling, which is
+# where the bug actually lived. `symexFind` on the PARAM shape below
+# returned `sxSat` with witness `cGreen`; the same false `sxSat` reproduced
+# for an enum LOCAL, an enum OBJECT FIELD, and `ord()` bound to a `let`
+# outside any comparison. A `char` argument reproduced it too (`ord(ch) >
+# 3_000_000_000` -- no `char` can ever satisfy that; `ord` tops out at 255).
+#
+# THE FIX: the same site now reads `outerTy` off `classifyType` for the
+# `ord(...)` CALL node `n` itself (which resolves `ord`'s declared `int`
+# return type, always native width) and `innerTy` off the argument `n[1]`
+# (the enum's own lifted width, or a range alias's own width via
+# `rangeBaseType`). A genuine width change routes through the SAME
+# `mkConvIntWidth` widening machinery the two fixes above use, sharing the
+# identical `isPromoteSoundEligibleParam` carve-out -- now factored into one
+# proc both call sites share, rather than two independent copies of the
+# same rule that could drift: `ord` of a bare reference to the current
+# proc's own signed, ranged, top-level param stays an untouched identity
+# pass-through, because `promoteSound` (issue #161) already promoted it to
+# an unbounded Z3 Int with no BV modulus to wrap against.
+#
+# House rule: every symbolic expectation below is paired with an oracle
+# computed by real Nim execution in this same file.
+# ---------------------------------------------------------------------------
+
+type OrdRec = object
+  c: Color
+
+type SmallRange163 = range[0'i32..5'i32]
+
+proc ordEnumParam(c: Color) =
+  ## THE REPRO (param).
+  if ord(c) > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordEnumLocal() =
+  ## THE REPRO (local).
+  var c: Color = cGreen
+  if ord(c) > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordEnumField(r: OrdRec) =
+  ## THE REPRO (object field).
+  if ord(r.c) > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordCharParam(ch: char) =
+  ## THE REPRO (char) -- ord(char) tops out at 255, nowhere near 3e9.
+  if ord(ch) > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordRangeAliasParam(x: SmallRange163) =
+  ## Non-regression: a signed ranged TOP-LEVEL PARAM stays sound via
+  ## promoteSound, exactly like the analogous case in the hidden-stdconv
+  ## fix above -- ord() of it must not be routed through mkConvIntWidth's
+  ## BV-only walker.
+  if ord(x) > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordNonComparisonLet(c: Color) =
+  ## THE REPRO (non-comparison context) -- the narrow width leaked into a
+  ## `let` binding, not just an immediate comparison.
+  let o = ord(c)
+  if o > 3_000_000_000:
+    symexTarget("hit")
+
+proc ordEqualsOne(c: Color) =
+  ## Non-regression: an ordinary IN-RANGE ord() comparison must still find
+  ## its witness -- the fix must not overcorrect into declining every ord()
+  ## comparison.
+  if ord(c) == 1:
+    symexTarget("hit")
+
+suite "#163 -- ord() carries its declared native-int width, not the argument's":
+
+  test "oracle -- no Color ordinal (0, 1, or 2) is ever > 3_000_000_000":
+    for c in Color:
+      check not (ord(c) > 3_000_000_000)
+
+  test "oracle -- no char ordinal (0..255) is ever > 3_000_000_000":
+    for ch in [char(0), 'a', char(255)]:
+      check not (ord(ch) > 3_000_000_000)
+
+  test "oracle -- no SmallRange163 value (0..5) is ever > 3_000_000_000":
+    for v in [SmallRange163(0'i32), SmallRange163(5'i32)]:
+      check not (v.int64 > 3_000_000_000'i64)
+
+  test "oracle -- ord(cGreen) is 1, exactly":
+    check ord(cGreen) == 1
+
+  test "RED (pre-fix): an enum PARAM's ord() must agree the target is UNSAT":
+    let r = symexFind(ordEnumParam, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "RED (pre-fix): an enum LOCAL's ord() must agree the target is UNSAT":
+    let r = symexFind(ordEnumLocal, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "RED (pre-fix): an enum OBJECT FIELD's ord() must agree the target is UNSAT":
+    let r = symexFind(ordEnumField, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "RED (pre-fix): a char's ord() must agree the target is UNSAT":
+    let r = symexFind(ordCharParam, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "non-regression -- a signed range-alias TOP-LEVEL PARAM stays sound (promoteSound)":
+    let r = symexFind(ordRangeAliasParam, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "RED (pre-fix): ord() bound to a let outside any comparison must agree UNSAT":
+    let r = symexFind(ordNonComparisonLet, tLabel("hit"))
+    check r.status == sxUnsat
+
+  test "non-regression -- an ordinary in-range ord() comparison still finds its witness":
+    let r = symexFind(ordEqualsOne, tLabel("hit"))
+    check r.status == sxSat
+    check r.witness[0] == cGreen
 
 suite "#163 item 2 -- walker version pin":
 

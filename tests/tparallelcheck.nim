@@ -1,4 +1,4 @@
-import std/[unittest, options, locks, atomics]
+import std/[unittest, options, locks, atomics, os]
 import nelli
 import nelli/[datasource, rng]
 
@@ -117,6 +117,21 @@ suite "parallelCheck: thread-safe SUT (no race)":
 # other N+2.
 proc racyInc(c: ptr Counter): int {.gcsafe.} =
   let v = c[].count
+  # Deliberately widen the race window between the read and the
+  # write. Without this, the two are back-to-back instructions: on
+  # an oversubscribed host (e.g. six concurrent sweep containers)
+  # the OS time-slices the two threads instead of truly running them
+  # concurrently, so the nanosecond-wide gap almost never straddles
+  # a context switch and the race is never observed -- every history
+  # comes out linearisable and the test flakes red for the wrong
+  # reason. Sleeping here forces the scheduler to actually run the
+  # other thread inside the window, so it reads the same pre-write
+  # value we did. This does not change what's wrong with the
+  # counter -- it is still an unsynchronized read-modify-write --
+  # it just makes the wrongness observable regardless of machine
+  # load. Do not remove this "for performance"; it is load-bearing
+  # for the test's ability to catch the race at all.
+  sleep(1)
   c[].count = v + 1
   v + 1
 
@@ -125,9 +140,13 @@ proc racyGet(c: ptr Counter): int {.gcsafe.} = c[].count
 suite "parallelCheck: racy SUT is caught":
   test "lock-free wrong counter is detected as non-linearisable":
     # This test is inherently nondeterministic in nature — racy bugs
-    # depend on scheduling. We use many repetitions per plan + many
-    # examples + jitter to maximize the chance of catching the race
-    # within the budget.
+    # depend on scheduling. `racyInc` widens its own read/write
+    # window with an explicit sleep (see comment there) so the race
+    # is caught deterministically in practice, independent of host
+    # load. On top of that we use many repetitions per plan + many
+    # examples + jitter (staggering thread start times) to maximize
+    # the chance of catching it within the budget even if the sleep
+    # trick alone weren't enough on some platform.
     let spec = LinSpec[CounterState, ptr Counter, int](
       modelInitial: CounterState(),
       newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
@@ -144,7 +163,7 @@ suite "parallelCheck: racy SUT is caught":
                     parallelSteps = 5,
                     threads = 2,
                     repetitions = 30,
-                    maxJitter = 0),
+                    maxJitter = 50),
       prop,
       Settings(maxExamples: 30, seed: 1,
                flakyRetries: 0, maxShrinks: 5,

@@ -2158,3 +2158,30 @@ Before reading its result, confirm no second sweep is running and that
    run against round 12's fixes. Whether to keep looping or stop at a green
    gate and file the remainder is Corey's call; the mandate says keep fixing,
    so that is the default in progress.
+
+## Round 13 — in progress
+
+Scope: `5056b46..HEAD`, i.e. round 12's own four fixes (`3dea487`, `da8855b`,
+`ec0733d`, `b1e2eb1`) plus the coupled `derive-ci-suites.ps1` / `nelli.nimble`
+surface. The premise is the one the last three rounds established: **a fix is
+a new surface.** Rounds 10, 11 and 12 each found a real defect in the previous
+round's fixes, so round 12's fixes get audited exactly as the code they
+replaced was.
+
+Four lenses dispatched in parallel, all `sonnet`, all **read-only** — the
+round-13 sweep owns this working tree and a concurrent `dt-bounded.sh` on the
+same test file clobbers one shared binary. The briefs say so explicitly.
+
+| lens | primary targets |
+|---|---|
+| Security | word-splitting/injection through the new `nelli.nimble` parse; gate integrity as a security property (can it silently under-test and still report pass?); macro insertion into `try`/`finally`/effect-annotated procs; TOCTOU from the real `sched_yield` |
+| Design & ergonomics | is `derive-ci-suites.ps1` now the *third* copy of the test/defines mapping, i.e. the same defect one hop over? is `{.jitterPoints.}` a faithful member of the `{.cover.}`/`{.symexOpaque.}` family? is `when name == "..."` a stringly-typed coupling a rename breaks silently? |
+| Liveness | end-to-end producer/consumer traces for `obligations`/`parseErrors`, `obligationsLive`/`parseDeclines`, the new `toJson`, `formatCampaignSummary`, `{.jitterPoints.}` in `src/` vs only `tests/`, whether the zero-insertion warning can actually fire, and whether `$skipReasons` is consulted or merely declared |
+| Correctness | hand-simulate the defines parser against the real `nelli.nimble` (empty value, absent value, trailing comment on the last entry, `#` inside a value) — a 4-field record misalignment runs test N with test N+1's defines and still reports pass; node-kind gaps in the pragma's recursion (`nnkStmtListExpr`, `nnkIfExpr`, expression-`case`, `nnkDefer`, `finally` semantics); `fieldPairs` merge completeness; template re-evaluation of the now-explicit `w` |
+
+The liveness brief carries one correction forward deliberately: an earlier
+round claimed `CampaignStats` was "user-visible at campaign end" and that was
+**false** — nothing rendered it. The brief tells the lens to re-derive the
+current state from the code and inherit neither the claim nor its retraction.
+
+Gate and CI for this round are running concurrently; see below.

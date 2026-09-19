@@ -1202,3 +1202,36 @@ scripts/dt-bounded.sh c tests/tsymex_r6_n36_raise_class_audit.nim 300
 Both audits are now permanent gates and will fire on any future range-primitive
 or raw-raise change — that is the point. Adjudicate, never re-count.
 
+## Round 8 — the last three items
+
+| item | commit | note |
+|---|---|---|
+| int-literal width | `678c6ce` | **Far worse than my own note said.** I had recorded it as "un-suffixed int literal above `int32.high` defaults to `int64`" — a vague width remark. It is a FALSE-SAT SOUNDNESS BUG: `proc f(a: int32) = (if a > 3_000_000_000: symexTarget("hit"))` is unsatisfiable for every `int32`, and `symexFind` returned `sxSat` with witness `a = -1294967295` — the literal truncated into the narrow width and wrapped negative. Real Nim inserts a widening `nnkHiddenStdConv` which the engine was not honouring. Fixed by routing genuine width changes through the existing `mkConvIntWidth` machinery; same-width hidden conversions (subrange strip, `nnkHiddenAddr`) untouched. |
+| enum-field witness | `d71da9e` | `IRType` gained `enumName*`, populated by `classifyType`'s enum arm, consumed by `emitTyAndReader` to wrap the raw reader as `EnumName(...)`. Round-trips via a new `withEnumName` in `emitIRType`; canonicalized as `:e[...]` by default (mirroring `itTuple.objectName`); excluded from `IRType.==` (mirroring `nominalId` — the walker never reads the name). **Unblocks R21's object-field position**, so R2's and R18's enum-domain work is finally verifiable there, including negative-ordinal and sparse enums as object fields. Also corrected a collateral test that assumed a raw-int witness; it is now honestly typed. |
+| `maxFrontierSize` | `991b0ff` | Measured, not guessed: instrumented `walkBlock` across ~20 heavy/branchy suites, largest observed frontier **16** (`tsymex_r6_n9_variant_budget`). Default set to **256** — 16x headroom, matching a precedent value already used in `tsymex_phase7_assertcovered`. `0` remains the documented opt-out. The existing prune already degrades honestly via `beBudgetExhausted`; no change needed there. |
+| `maxCallDepth` classified | `0c85a13` | Was an unclassified degrade — `sxUnknown` with no named reason, so "raise your call-depth budget" was indistinguishable from "the engine cannot model your program". `beBudgetExhausted` already existed and fit exactly (same family as the `maxLoopUnwind`/`maxFrontierSize` uses), so no new enum member. Message now names `maxCallDepth=N` and the remedy. NOT verdict-affecting: the `sxUnknown` already happened; only the kind riding it changed. |
+| module-global read | IN FLIGHT | Diagnosed and RED-confirmed: `lower`'s `iekVar` arm does a bare `env[e.vname]`, so an unbound name lets Nim's `Table` throw `KeyError`, which escapes as `weInternalWalkerFault` — the engine's "I have a bug" backstop — for what is actually an unmodelled-feature decline. The first attempt was blocked because `types.nim` was sibling-owned; it is free now and the fix is in flight with `feGlobalReadUnmodelled` appended at the enum tail. |
+
+## New fact worth recording
+
+`tests/tsymex_snd3_loopdegrade.nim` **hangs past 300s on unmodified HEAD** and
+is NOT one of the six documented `tsymex_r6_*` Linux hangers. This is the
+exit-137 entry every sweep this session has reported and that I repeatedly
+characterised as a "pre-existing failure, byte-identical in the baseline" —
+accurate as far as it went, but it is specifically an undocumented HANG, which
+belongs in the same ledger as the six known ones.
+
+## Remaining to close round 8
+
+1. Consolidated bump **138 -> 139** covering the verdict-affecting set: R22
+   sites 1-3 + the `storeSeqElem` prerequisite, both parser gaps (`b307aef`),
+   R24/R25/R26, the enum-field witness reader, the widening-conversion
+   soundness fix, `maxFrontierSize`'s default, and the module-global decline if
+   its agent judges it verdict-affecting. Move the CR2 `==` pin and raise floor
+   pins in the round-8-dependent suites. Test comments were already corrected
+   to say a bump IS owed (`908b786`) — do not re-derive.
+2. Re-review over `a581225..HEAD` (standing security, design, liveness).
+3. Full sweep vs `base163.log` (460 entries, pinned at `ac507c1`).
+4. `wiring = proven`. `quipu` is not on PATH but DOES run as a git hook here —
+   find the hook's invocation rather than assuming it is unavailable.
+

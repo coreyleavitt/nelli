@@ -2341,3 +2341,90 @@ Load-bearing instructions recorded so a resumed session does not soften them:
   fail the gate would break that contract.
 - New tests for the pragma are probabilistic: report the **measured** rate,
   never an unmeasured claim of reliability.
+
+### Round 13 fixes — landed
+
+| sha | findings | what landed |
+|---|---|---|
+| `8454a94` | R13-2, R13-6, R13-1 (macro side) | `nnkDefer` + `nnkWhenStmt` arms; self-reporting fallback; zero-insertion upgraded `warning` -> `error` |
+| `e244a4e` | (found BY the new fallback) | `nnkPragmaBlock` arm — `{.cast(gcsafe).}: <body>` |
+| `73d7a80` | (found BY the new fallback) | `nnkStaticStmt` moved to a deliberate exclusion; two exclusion categories separated |
+| `6ab0691` | R13-3 | `toJson(CampaignStats)` matches `execsPerSec` by name; `float` out of the generic bucket |
+| `491b3c1` | R13-4 | `renderEnumCounts`/`renderFloatSeq` shared by both renderers; 16 loops collapsed |
+| `afb261c` | R13-5, R13-8, R13-9, R13-10 | `extraDefines` deleted; `tests/tprobe_n45stats.nim.cfg` |
+| `d3da227` | R13-1 (gate side) | sweep captures and surfaces compiler warnings |
+
+AST shapes were confirmed with `macros.dumpTree` at every step rather than
+recalled, and every probabilistic test reports a MEASURED rate: `defer` 20/20,
+`when` 20/20, `{.cast(gcsafe).}` 20/20, each over 20 distinct seeds.
+
+**The self-reporting fallback justified itself immediately.** It was added so
+that future missing node kinds would report themselves instead of waiting for
+a review round. Within minutes it found `nnkPragmaBlock`, then `nnkStaticStmt`,
+then a fifth kind. Round 12 added six arms by hand and round 13's lenses found
+two missing; the mechanism then found three more on its own. That is the
+difference between a fix and another turn of whack-a-mole.
+
+**The durable result is a three-way classification**, not an arm count. A
+maintainer meeting a new node kind now picks one:
+- `jitterNestedCallableKinds` — wrong *attribution*: a separate callable's own
+  body, instrumenting it misattributes.
+- `jitterCannotExecuteAtRuntimeKinds` — cannot *execute* there. Currently just
+  `nnkStaticStmt`, proven by the real compiler error (`cannot 'importc'
+  variable at compile time; sched_yield`) — `parallelJitterPoint` wraps a
+  syscall and Nim's CTFE VM cannot run it. Instrumenting is actively wrong,
+  not merely pending.
+- otherwise it warns, and the warning now states that meaning explicitly
+  rather than saying "unhandled" (which is true of the exclusions too).
+
+`parallelJitterPoint` was confirmed genuinely `gcsafe` before the pragma-block
+arm was added — a plain non-cast `{.gcsafe.}: parallelJitterPoint()` block
+compiles, so the compiler *proves* it rather than merely accepting a cast.
+Inserting into `{.cast(gcsafe).}` therefore cannot launder a real effect
+violation, because there is none to launder.
+
+### Open for Corey — a genuine fork, not a gap
+
+**Trailing-block calls (`withLock lock: <body>`).** The fallback warns on
+`nnkCommand`/`nnkCall` carrying a trailing `nnkStmtList`. This was deliberately
+NOT force-classified into either exclusion set, and the reasoning is sound: a
+trailing block's body belongs to whatever macro or template receives it, which
+an `untyped`, pre-expansion macro cannot inspect. Instrumenting is sound for
+`withLock` specifically and unsound in general — a macro that pattern-matches
+its block's exact shape would break.
+
+It matters because `withLock` is plausibly the **commonest** real shape for a
+concurrency SUT, i.e. exactly what `{.jitterPoints.}` exists for. The options:
+
+- (a) leave it warning — safe, honest, and what ships today;
+- (b) instrument the trailing blocks of a known allow-list of concurrency
+  macros (`withLock` and friends) — targeted and safe, but a stringly-typed
+  macro-name allow-list;
+- (c) blanket-instrument trailing blocks — unsound.
+
+(c) is out. Between (a) and (b) the answer turns on how much unsoundness risk
+is worth the coverage of the common shape, which is a scope/risk call rather
+than something the quality bar decides. Recorded rather than chosen.
+
+### Newly surfaced by the gate fix, NOT a round-13 regression
+
+Making the gate stop discarding compiler stderr revealed that **every test in
+the tree compiles with roughly 14-23 warnings** — `UnusedImport` and
+`Deprecated`, attributed to real files under `src/nelli/` (`engine.nim`,
+`targeting.nim`, `dsl_parser.nim` among them). Order 8000 warnings in total.
+Always present, always thrown away.
+
+This breaks the R13-1 fix as first delivered: burying one actionable
+`{.jitterPoints.}` warning in eight thousand is not materially better than
+discarding it. The correction in progress makes warnings **delta-based, on the
+same footing as pass/fail** — which is this repo's existing gate contract
+(`CLAUDE.md`: the suite is never green on a good day, so the gate is what
+MOVED against a recorded baseline, never "the sweep passed"). Warnings have
+the same character: never zero, so the total is a trend and the delta is the
+gate. That requires a canonical, order-stable sidecar or the diff rots on
+line-number churn.
+
+The breakdown by category is being collected to decide what the debt IS:
+`UnusedImport` is a cosmetic chore, but `Deprecated` warnings naming our own
+`src/` APIs would be real rot and a finding in its own right. Not being fixed
+in this round either way.

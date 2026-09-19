@@ -1412,3 +1412,34 @@ six known `tsymex_r6_*` Linux hangers.
   ledger as the six known hangers.
 - **`tn45probe` / `tprobe_n45stats`** remain unregistered (pre-existing drift).
 
+## Gate status checkpoint
+
+Final sweep still RUNNING at this refresh: **306 entries** recorded,
+completion marker present: no.
+Nothing below is a completion claim — read the gate before treating round 9 as
+closed:
+
+```
+tail -34 /home/corey/.claude/jobs/4fd5573d/tmp/sweepr9.out
+grep -c . /home/corey/.claude/jobs/4fd5573d/tmp/cur163r9.log
+```
+
+If the waiter was lost, re-arm it by polling for the `SWEEP_COMPLETE` marker in
+`sweepr9.out` — **gate on the marker, never on `pgrep`**. Two separate traps bit
+this session: a waiter grepping for `sweep.sh` matches its own argv and never
+exits, and the sweep's real parent is a `run_one` driver whose argv never
+contains `sweep.sh`, so pattern-killing it misses (`ps -eo pid,ppid,args` and
+walk the ppid chain instead).
+
+If the sweep died mid-run, discard the partial log and re-run from scratch
+against the same baseline — a partial log must never be diffed as if complete.
+The previous aborted attempt is parked as `cur163rev.aborted.log` for exactly
+that reason.
+
+Expected in the result, neither a regression:
+- `tsymex_snd3_loopdegrade` exit 137 — an UNDOCUMENTED hang on unmodified HEAD.
+- `unregistered=2` (`tn45probe`, `tprobe_n45stats`) — pre-existing drift.
+  `missing` should be **0**; if it is not, check for a quoted string inside a
+  `nelli.nimble` COMMENT being scraped as a suite name (fixed once already this
+  session, and the drift extractor now strips comments).
+

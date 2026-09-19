@@ -1648,3 +1648,93 @@ work, which is what it looked like for two rounds.
    `main`, so the current tip has had no Windows verification. The earlier
    "~45 unpushed commits, zero CI exposure" line was stale in both halves.
 
+
+## Round 10 re-review — the lenses turned my own standard back on me
+
+Three standing lenses on the round-10 scope (`9bd6cc0`, `e7f0ed4`, `9330fa8`,
+`d39fcc8`). Security: **clean**, with coverage named — it verified the threadvar
+mechanics (reset -> walk -> read, no yield point; `runConcolicFlipImpl`'s two
+sequential collects each reset) and then checked reachability under real
+concurrency, finding that `fuzzworker.nim:772-785` documents `parallelCheck` as
+this library's ONLY `createThread` caller and every `fork()` as preceded by a
+thread census. One pre-existing Low recorded, not fixed:
+`ConcolicCollectResult.drawVars: seq[SymVal]` already carries Z3 handles across
+the public result boundary; round 10 does not widen it.
+
+| id | sev | status | finding |
+|----|-----|--------|---------|
+| T1 | High | fixing | **The diagnostics channel `9bd6cc0` added is itself a producer with no consumer on the production path.** `concolicCollect` has ZERO call sites in `src/`; the only production caller of `runConcolicCollectImpl` is `runConcolicFlipImpl`, which calls it twice and forwards only `.counters`. `.obligations`/`.parseErrors` are computed on every real flip and dropped. Both lenses found it independently. |
+| T2 | High | fixing | **`maxJitter` structurally cannot catch an intra-op race, and `parallel.nim:339-340` overclaims that it can.** `spinJitter` is a counted no-op loop (nanoseconds vs a 1-15ms quantum) spent BEFORE `applySUT`, so no value of `maxJitter` widens a read-modify-write window inside one op. `e7f0ed4`'s `sleep(1)` is doing all the work; its `maxJitter = 50` is decorative. |
+| T3 | High | fixing | **`tprobe_n45stats` is registered but structurally inert.** Its whole body is behind `when not defined(symexQueryStats)`, and nothing in the repo ever sets that define — not `nelli.nimble:730`, not any workflow, not any script. Registering it moved `unregistered` to 0 while leaving its instrumentation ungated in every venue. |
+| T4 | Medium | open | ~10 hand-copied `HashSet[string]` dedup-by-`.msg` blocks in `runSymexImpl`'s tail (`runtime.nim:13374`-`13512`), plus two more added by round 10 at `:14219`/`:14222`. `obligations`/`abstractions` are declared verbatim on three types with three copies of the same doc. Wants one `dedupByMsg` helper and one shared diagnostics sub-object. |
+| T5 | Medium | folded into T1 | `parseErrors` is passed, not enforced: `runSymexImpl` forces `sxUnknown` via `capForcedUnknown` for a `sevError` decline; the concolic path has no verdict to force and no wiring to anywhere a decision is made. |
+
+**T1's rationale was wrong in a specific way worth recording.** The commit
+justified not building a raised-VERDICT channel (the fuzzer sees real crashes
+directly) and then reused that as cover for shipping the diagnostics
+undrained. The Liveness lens separated the two correctly: the diagnostics
+report something a crash CANNOT — a parse decline that left part of the program
+unmodelled — and the values were already in scope for free at the one
+production call site. The fix threads them into the live chain
+`ConcolicFlipResult.collectCounters` -> `foldFlipResult` -> `CampaignStats
+.concolicYield`, which is user-visible at campaign end.
+
+**Decision recorded so it is not re-litigated:** admission is NOT gated on a
+parse decline. A decline means the SYMBOLIC model is incomplete, but the
+materialized seed is still a real input executed for real against the SUT, so
+refusing it would cost coverage and buy no soundness. Count it, surface it,
+admit it.
+
+## Round 10 — `tsymex_snd3_loopdegrade` diagnosed, and my hypothesis was wrong
+
+I proposed unbounded path growth. **Refuted by measurement.** `VmRSS` held flat
+(43228 -> 43612 -> 43740 KB) across 2+ minutes of sustained CPU — nothing like
+2^k forking; `maxLoopUnwind=1` still hangs; and BOTH backends hang identically,
+so it is not the backend-divergence class the file exists to pin. A frontier cap
+would not even have applied: there is no frontier growth to cap.
+
+**It is one Z3 query grinding.** `queryRLimit=1` terminates promptly with
+`sxUnknown` (so Z3 is reached and rlimit enforcement works — not a Nim-level
+loop); `queryRLimit=20_000_000` (this repo's own `defaultConcreteBranchRLimit`
+precedent) still fails to conclude. That evidence is rlimit-based, i.e. Z3
+logical steps rather than wall time, so it survives the core-starvation problem
+recorded below.
+
+**Only `sutEqualityLoopGuard` (SND-3-6) hangs** — the one test whose purpose is
+proving the fix does NOT touch equality guards. SND-3-1 through SND-3-5 all pass
+in seconds. The byte-identical SUT also exists as a PASSING test
+(`R1B-while-4`, `tests/tsymex_r1b_shortcircuit_oob.nim`), which points at solver
+runtime variance tied to per-binary state rather than a defect unique to this
+source. `types.nim`'s `maxFrontierSize` doc already recorded the
+non-termination; these measurements confirm its framing.
+
+**Disposition — not the agent's recommendation as given.** It proposed
+skip-listing the file. Skip-listing the FILE also retires five live soundness
+pins for a real false-`sxUnsat` fix, and a skip-list entry quietly covering more
+than it claims is exactly the `trequiresinit` incident. SND-3-6 moves to its own
+file and only that file is skip-listed, with the measurements and the
+`R1B-while-4` cross-reference in its header. Pending: `nelli.nimble` and
+`scripts/sweep.sh` are held by an in-flight agent.
+
+## Round 10 — two orphaned test runs had been stealing a third of the box
+
+Found while reading a sub-agent's incidental note (it reported them as idle;
+they were not). `scratchpad/bench/probe_163_w8hang` at **89.1% of a core for 1d
+11h**, and `tests/tsymex_163rev_intoffset_range` at **87.9% for 19h** — on a
+6-core host. Both reaped (`podman stop` for the one whose container was still
+live and visible; a direct process-tree kill for the other, whose podman root
+was `/tmp/podman-corey/storage` and so was invisible to the default
+`podman ps`).
+
+**What this does and does not invalidate.** Every wall-clock figure this session
+was measured on a box missing a third of its cores, including the round-10
+sweep. A clean sweep under starvation is a CONSERVATIVE pass — starvation makes
+timeout kills likelier, not less likely — so `regressed=1` stands, and it makes
+`tparallelcheck`'s contention flake MORE explicable, not less. The snd3
+conclusion stands on rlimit (logical steps), not wall clock. The final sweep
+will run on a healthy box.
+
+**Tooling finding, recorded not fixed:** `scripts/dt-bounded.sh`'s own header
+describes preventing exactly this orphan mode. It did not. One orphan's
+container was still `Up 19 hours`; the other's was gone while its `nim`/binary
+processes lived on. That file is held by an in-flight agent.

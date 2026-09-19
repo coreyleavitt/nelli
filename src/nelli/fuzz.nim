@@ -891,12 +891,27 @@ proc toJson*(s: CampaignStats): string =
   ## nanoseconds (an int64, not `$Duration`'s human string) since a JSON
   ## consumer (a metrics sink, a log line) wants a number, not prose to
   ## reparse. Driven by `fieldPairs` with the same `{.error.}` escape and
-  ## name-based matching as `formatCampaignSummary`, so the two renderers
-  ## cannot silently drift on which fields they cover.
+  ## name-based matching as `formatCampaignSummary` for which fields they
+  ## cover, so the two renderers cannot silently drift on FIELD COVERAGE
+  ## (a field neither renderer's `when` chain names and whose type isn't in
+  ## its generic bucket fails the build in both). That guarantee does NOT
+  ## extend to FORMATTING: nothing stops the two from choosing different
+  ## precision or shape for the same field's value, which is exactly why
+  ## `execsPerSec` (below) is matched by NAME rather than folded into a
+  ## generic `v is float` bucket -- #163 review round 13, Finding R13-3.
+  ## A generic float bucket here would silently absorb a future
+  ## differently-formatted `float` field the same way Q5 found
+  ## `foldFlipResult` doing for a `Table` field, and `formatCampaignSummary`
+  ## already proves within `CampaignStats` itself that float precision is
+  ## meaning-dependent (`execsPerSec` at 2 decimals, `operatorPulls`
+  ## elements at 3) -- there is no single "the" float format to fall back
+  ## to generically.
   var parts: seq[string] = @[]
   for name, v in fieldPairs(s):
     when name == "elapsed":
       parts.add("\"elapsed\":" & $v.inNanoseconds)
+    elif name == "execsPerSec":
+      parts.add("\"execsPerSec\":" & v.formatFloat(ffDecimal, 2))
     elif name == "operatorPulls":
       var pulls: seq[string] = @[]
       for p in v: pulls.add(p.formatFloat(ffDecimal, 3))
@@ -909,8 +924,6 @@ proc toJson*(s: CampaignStats): string =
       parts.add("\"concolicYield\":" & toJson(v))
     elif v is int:
       parts.add("\"" & name & "\":" & $v)
-    elif v is float:
-      parts.add("\"" & name & "\":" & v.formatFloat(ffDecimal, 2))
     elif v is bool:
       parts.add("\"" & name & "\":" & (if v: "true" else: "false"))
     else:

@@ -485,6 +485,32 @@ suite "#163 review round 12 -- CampaignStats/ConcolicYield toJson (Finding Q2 JS
     check j["ambiguousByConstruct"]["wckWhile"].getInt() == 2
     check not j["ambiguousByConstruct"].hasKey("wckIndex")   ## zero entries omitted, same as the text renderer
 
+suite "#163 review round 13 -- toJson(CampaignStats) execsPerSec name-match (Finding R13-3)":
+  ## Round 13 found `toJson(CampaignStats)` matching `execsPerSec` by its
+  ## TYPE (`elif v is float`) while its sibling `formatCampaignSummary`
+  ## deliberately matches it by NAME, precisely to keep a future
+  ## differently-formatted `float` field from silently sharing this one's
+  ## 2-decimal rendering. `{.error.}` firing on that future field is a
+  ## compile-time guarantee, not something a `check` can exercise here (see
+  ## `tfuzzpackaging.nim`/`tfuzzmacroreject.nim` for this repo's
+  ## `check not compiles(...)` idiom for compile-time rejection -- it does
+  ## not apply to a hypothetical field that does not exist yet). What CAN be
+  ## pinned at runtime is the CURRENT correct behavior this fix produces:
+  ## `execsPerSec` reaches JSON via the name-matched arm, at 2 decimals, same
+  ## as the text renderer. If a future edit folds `execsPerSec` back into a
+  ## generic `v is float` bucket, this test's precision expectation is the
+  ## first thing likely to drift (a differently-precisioned field sharing
+  ## the bucket would still pass THIS test, but the "elapsed"/"execsPerSec"
+  ## by-name comment above `toJson` is the actual guard -- this test only
+  ## proves the guard has not silently been reverted for `execsPerSec`
+  ## itself).
+  test "toJson(CampaignStats) renders execsPerSec at 2 decimals, matching formatCampaignSummary":
+    let stats = CampaignStats(execsPerSec: 1234.5)
+    let j = parseJson(toJson(stats))
+    check j["execsPerSec"].getFloat() == 1234.5
+    check "\"execsPerSec\":1234.50" in toJson(stats)
+    check "execsPerSec=1234.50" in formatCampaignSummary(stats)
+
 suite "#163 review -- walker version pin":
 
   test "walker version floor >= 140 -- this suite is diagnostics-only, no walker semantics moved":

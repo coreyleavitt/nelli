@@ -2250,3 +2250,94 @@ runs and make the sweep look alive after it was killed.
 
 The authoritative round-13 gate runs AFTER round 13's fixes land, against a
 quiet tree.
+
+## CI — all three Windows legs GREEN on `5056b46`
+
+| leg | run | duration | result |
+|---|---|---|---|
+| `fuzzer-mingw` | 35472097646 | 9m53s | success |
+| `fuzzer-msvc` | 35472097640 | 36m59s | success |
+| `symex-mingw` | 35472097655 | 45m37s | success |
+
+This closes the open question the push was taken for. It is the **first
+Windows verification of 86 commits**, covering every walker bump from 134 to
+140 and all of rounds 8-12. Specifically exercised, and now known good:
+
+- the six `tsymex_r6_*` suites that `scripts/sweep.sh` skip-lists on Linux
+  (see the `symex-r6-linux-hangs` memory) — they run for real only here;
+- `derive-ci-suites.ps1`'s `$skipReasons` entry for
+  `tsymex_snd3_6_equality_loop`, added at `ab7b9e0` and **never executed
+  before this run**. No corpus-count change and no `throw` from the sanity
+  block, so the entry parses and filters as intended.
+
+`symex-mingw` at 45m37s is up from 41m18s on 2026-09-18 at `26418f3`, which is
+within the noise of a hosted runner and consistent with the corpus having
+grown by the round 8-12 suites.
+
+## `.nim.cfg` supersedes `extraDefines` — verified, and being implemented
+
+The investigation returned WORKS with no blocking reason, and the archaeology
+is the part that matters:
+
+- The `.nim.cfg` precedents (`505354c`, `85603f5`, `a0bfeff`) predate
+  `extraDefines` by ~2 months, and `docs/rfc/0001-chapulin-hardening.handoff.md:926`
+  documents `505354c` establishing exactly this pattern — including the
+  `.gitignore` gotcha, already handled by the `!tests/*.nim.cfg` negation at
+  `.gitignore:14`.
+- `extraDefines` arrived in `233c7d1`, whose own message says it mirrors "the
+  existing per-suite define precedent in **symex-mingw.yaml**" — i.e. it was
+  modeled on a CI workflow's inline conditional rather than on this repo's own
+  older sibling-file convention.
+- **`.nim.cfg` was never considered and never rejected.** No stated reason
+  exists anywhere in the record. Six findings across rounds 11-13 (D1, D4, S1,
+  L12-1, Q1, C7) all repaired bugs *inside* the table and its parser; none
+  asked whether the table should exist.
+
+Every invocation path was audited and is path-based, so the sibling cfg
+applies: `dt.sh:16`, `dt-bounded.sh:39`, `sweep.sh:255`, `dt-crosswin.sh:33-40`,
+`nelli.nimble:750`, `symex-mingw.yaml:253-256,405-408`, both `fuzzer-*` main
+loops. The only `--skipProjCfg --skipParentCfg --skipUserCfg` in the repo is
+one unrelated step compiling `tests/tz3free_probe.nim`.
+
+So **R13-5, R13-8, R13-9 and R13-10 are closed by deletion, not by patching** —
+they are all findings in the parser being removed. A bonus defect closes with
+them: today a bare `scripts/dt.sh c tests/tprobe_n45stats.nim` silently
+compiles the `skip()` stub, because only `sweep.sh` and `nimble test` pass the
+define; after the change every invocation path gets the real assertions.
+
+Not expressible by `.nim.cfg`: `symex-mingw.yaml:399-402`'s `-d:symexCiLeanB5`,
+which must be ON in the container nimble task and OFF on the mingw leg. That
+is a third, separate mechanism, untouched by this change and correctly so.
+(Nim's cfg format does support `@if`/`@end` if a future entry needs backend or
+OS variance without a third mechanism.)
+
+## Round 13 fix agents — three dispatched, disjoint files
+
+| agent | findings | files |
+|---|---|---|
+| jitterPoints completeness | R13-1 (macro side), R13-2, R13-6 | `src/nelli/parallel.nim`, `tests/tparallelcheck.nim` |
+| renderer name-vs-type + dedup | R13-3, R13-4 | `src/nelli/fuzz.nim`, `src/nelli/smt/concolictaxonomy.nim`, `tests/tsymex_163rev_concolic_diagnostics.nim` |
+| `.nim.cfg` migration + gate diagnostics | R13-5, R13-8, R13-9, R13-10, R13-1 (gate side) | `nelli.nimble`, `scripts/sweep.sh`, `scripts/dt-bounded.sh`, `tests/tprobe_n45stats.nim{,.cfg}` |
+
+Load-bearing instructions recorded so a resumed session does not soften them:
+
+- The pragma fix must be **shape-level, not two more arms**: warn on ANY
+  undispatched statement-holding node kind, so future gaps report themselves.
+  Round 12 added six arms and round 13 found two missing; a third round of
+  whack-a-mole is the failure mode to avoid.
+- The zero-insertion case becomes an **error, not a warning** — R13-1 proves a
+  warning is invisible to the gate, and the build is the one channel the gate
+  cannot discard. If that breaks an existing annotated proc, fix the proc; do
+  not weaken the error back.
+- The self-reporting warning added above must **stay** a warning — a partially
+  instrumented proc is still useful.
+- The renderer agent must **audit the siblings**, not just fix the `float`
+  instance: the bug class is type-dispatch where the sibling uses name-dispatch.
+- The renderer refactor must not over-abstract; a helper with eight boolean
+  parameters is worse than two clear loops. Report what was deliberately left
+  duplicated.
+- Gate diagnostics must **surface, not escalate**: the suite is not green on a
+  good day and the contract is "what moved against a baseline". Warnings that
+  fail the gate would break that contract.
+- New tests for the pragma are probabilistic: report the **measured** rate,
+  never an unmeasured claim of reliability.

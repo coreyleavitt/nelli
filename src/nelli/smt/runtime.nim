@@ -11925,19 +11925,36 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
   ## new erased array. Mirrors the `iekSeqAdd` store dispatch.
   case elemTy.kind
   of itInt:
+    # #163 review R22 site 3 prerequisite: reconcile an `svInt`-shaped RHS
+    # (a `range[lo..hi]` top-level param promotes to `svInt` under the
+    # engine's default `isOptimised` integer semantics, `runSymexImpl`'s
+    # `promoteSound`) to the array's BV sort BEFORE storing -- mirroring the
+    # EXACT coercion `isDerefWrite`'s plain-field and arm-field write sites
+    # already apply (`runtime_heap.nim`). Every seq[T] backing array is
+    # BV-sorted by width regardless of whether `T` carries a declared range
+    # (`allocateSeqDataRaw`'s itInt arm), so an un-reconciled `svInt` crashes
+    # here on ANY int-family element, ranged or not.
+    var v = val
+    if v.kind == svInt:
+      case elemTy.width
+      of 8:  v = liftBV(intToBv[8](v.zi, Z3BitVec[8]),   elemTy.signed)
+      of 16: v = liftBV(intToBv[16](v.zi, Z3BitVec[16]), elemTy.signed)
+      of 32: v = liftBV(intToBv[32](v.zi, Z3BitVec[32]), elemTy.signed)
+      of 64: v = liftBV(intToBv[64](v.zi, Z3BitVec[64]), elemTy.signed)
+      else: discard
     case elemTy.width
     of 8:
       let t = wrap[Z3Array[Z3Int, Z3BitVec[8]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, val.bv8))
+      toAnyAst(store(t, idx, v.bv8))
     of 16:
       let t = wrap[Z3Array[Z3Int, Z3BitVec[16]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, val.bv16))
+      toAnyAst(store(t, idx, v.bv16))
     of 32:
       let t = wrap[Z3Array[Z3Int, Z3BitVec[32]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, val.bv32))
+      toAnyAst(store(t, idx, v.bv32))
     of 64:
       let t = wrap[Z3Array[Z3Int, Z3BitVec[64]]](dataRaw.ctx, dataRaw.raw)
-      toAnyAst(store(t, idx, val.bv64))
+      toAnyAst(store(t, idx, v.bv64))
     else:
       raise newException(ValueError, "storeSeqElem: unsupported int width " & $elemTy.width)  # [raise-audited: category-c: width-exhaustive (see seqElemAt above)]
   of itBool:

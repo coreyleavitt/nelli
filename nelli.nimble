@@ -417,6 +417,14 @@ task test, "Run the test suite":
             # `forkAssignRangeCheck`/`rangeCondsIfNeeded` unchanged (the
             # RAISE FORK model, never a range CONSTRAINT at the write site).
             "tsymex_163rev_assign_sites",
+            # Discovered building R22 site 3 (seq element write): a
+            # pre-existing, orthogonal defect -- storeSeqElem's itInt arm
+            # never reconciled an svInt-shaped RHS (a range[lo..hi] top-level
+            # param promotes to svInt under the engine's default isOptimised
+            # semantics) to the seq's BV-backed data array, crashing the
+            # walker for any int-family seq element write fed a promoted
+            # param, ranged or not.
+            "tsymex_163rev_seqelem_promoted_int",
             # Issue #163 review finding R28 (Medium, a narrowing R27
             # introduced): three scan-idiom recognizers (`tryRecognizeScanIdiom`,
             # `tryRecognizeScanPairIdiom`, `tryRecognizeAccumulatingScan`) call

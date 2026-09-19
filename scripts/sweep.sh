@@ -201,18 +201,41 @@ stale_n="${#stale_skiplist[@]}"
 # inside the container, e.g. `/.cache/milpa/...`), and stash any hits under
 # $warn_dir keyed by a name unique per (backend, file) so parallel workers
 # never interleave into the same file. Never affects rc/pass-fail.
+#
+# The sidecar is written in a CANONICAL, path-relative, order-stable form,
+# not the raw compiler line, because scripts/sweep-diff.sh diffs it against
+# a baseline (this suite is never green/warning-free on a good day either,
+# so "did any warnings appear" is as useless a question as "did the sweep
+# pass" -- the delta is the signal). Concretely: the `/work/` container
+# mount prefix is stripped (host-relative, so it matches a baseline taken
+# from a different checkout path), and the `(line, col)` location is
+# dropped entirely -- an edit that only shifts a warning's line number
+# (e.g. inserting a comment above it) must not read as a resolved warning
+# plus a new one. What survives is file + message + category, which is
+# what actually identifies a distinct diagnostic. Identical (file,
+# message, category) triples are then collapsed to one line with an
+# `xN` occurrence-count suffix and the whole set is sorted, so the sidecar
+# never varies with compile-order nondeterminism.
 run_one() {
-  local b="$1" f="$2" t="$3" name rc stderr_tmp warn_n
+  local b="$1" f="$2" t="$3" name rc stderr_tmp filtered warn_n
   name="$(basename "$f" .nim)"
   stderr_tmp="$(mktemp)"
   scripts/dt-bounded.sh "$b" "$f" "$t" >/dev/null 2>"$stderr_tmp"
   rc=$?
-  warn_n=$(grep -cE '^/work/(src|tests)/.*Warning:' "$stderr_tmp" 2>/dev/null || true)
-  warn_n=${warn_n:-0}
+  filtered="$(grep -E '^/work/(src|tests)/.*Warning:' "$stderr_tmp" 2>/dev/null || true)"
+  if [ -n "$filtered" ]; then
+    warn_n=$(printf '%s\n' "$filtered" | wc -l | tr -d ' ')
+  else
+    warn_n=0
+  fi
   if [ "$warn_n" -gt 0 ]; then
     {
       echo "## $b $f ($warn_n warning(s))"
-      grep -E '^/work/(src|tests)/.*Warning:' "$stderr_tmp"
+      printf '%s\n' "$filtered" \
+        | sed -E 's#^/work/##; s#\([0-9]+, *[0-9]+\) Warning: #: #' \
+        | LC_ALL=C sort \
+        | uniq -c \
+        | awk '{c=$1; $1=""; sub(/^ /, ""); print (c > 1) ? $0 " x" c : $0}'
       echo
     } > "$warn_dir/$b.$name"
   fi
@@ -260,7 +283,7 @@ warn_total=$(awk '{s+=$4+0} END{print s+0}' "$outlog")
   echo "backend=$backend jobs=$jobs timeout=${timeout_secs}s${filter:+ filter=$filter}"
   echo "pass=$pass fail=$fail (of which timeout-killed=$killed) skip=$skip total=$((pass + fail + skip))"
   echo "unregistered=$unregistered_n missing=$missing_n stale_skiplist=$stale_n  (see $drift)"
-  echo "warn_tests=$warn_tests warn_total=$warn_total  (see $warnlog) -- does not affect pass/fail"
+  echo "warn_tests=$warn_tests warn_total=$warn_total  (see $warnlog) -- trend only, never zero; the gate is scripts/sweep-diff.sh's warnings delta against a baseline, not this total"
   if [ "$fail" -gt 0 ]; then
     echo
     echo "## failing"

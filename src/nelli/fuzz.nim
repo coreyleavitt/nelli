@@ -852,18 +852,21 @@ proc formatCampaignSummary*(s: CampaignStats): string =
   ## formatted `float` field the same way Q5 found `foldFlipResult` doing
   ## for a `Table` field); every other field is a plain
   ## `int`/`bool`/`Duration` rendered generically via `$`.
+  ##
+  ## #163 review round 13, Finding R13-4: `operatorPulls`/`provenanceCounts`
+  ## delegate to `smt/concolictaxonomy.nim`'s `renderFloatSeq`/
+  ## `renderEnumCounts` rather than each hand-rolling its own "format every
+  ## element, join with a separator" loop -- the SAME per-field special-case
+  ## knowledge (which separator, whether zeros are skipped) this proc's
+  ## `toJson` sibling needs, previously kept in sync only by inspection.
   var lines: seq[string] = @[]
   for name, v in fieldPairs(s):
     when name == "execsPerSec":
       lines.add("execsPerSec=" & v.formatFloat(ffDecimal, 2))
     elif name == "operatorPulls":
-      var pulls: seq[string] = @[]
-      for p in v: pulls.add(p.formatFloat(ffDecimal, 3))
-      lines.add("operatorPulls=[" & pulls.join(", ") & "]")
+      lines.add("operatorPulls=[" & renderFloatSeq(v, 3, rsText) & "]")
     elif name == "provenanceCounts":
-      var prov: seq[string] = @[]
-      for p in Provenance: prov.add($p & "=" & $v[p])
-      lines.add("provenanceCounts={" & prov.join(", ") & "}")
+      lines.add("provenanceCounts={" & renderEnumCounts(v, rsText, skipZero = false) & "}")
     elif name == "concolicYield":
       lines.add("concolicYield:")
       for l in ($v).splitLines(): lines.add("  " & l)
@@ -913,13 +916,9 @@ proc toJson*(s: CampaignStats): string =
     elif name == "execsPerSec":
       parts.add("\"execsPerSec\":" & v.formatFloat(ffDecimal, 2))
     elif name == "operatorPulls":
-      var pulls: seq[string] = @[]
-      for p in v: pulls.add(p.formatFloat(ffDecimal, 3))
-      parts.add("\"operatorPulls\":[" & pulls.join(",") & "]")
+      parts.add("\"operatorPulls\":[" & renderFloatSeq(v, 3, rsJson) & "]")
     elif name == "provenanceCounts":
-      var prov: seq[string] = @[]
-      for p in Provenance: prov.add("\"" & $p & "\":" & $v[p])
-      parts.add("\"provenanceCounts\":{" & prov.join(",") & "}")
+      parts.add("\"provenanceCounts\":{" & renderEnumCounts(v, rsJson, skipZero = false) & "}")
     elif name == "concolicYield":
       parts.add("\"concolicYield\":" & toJson(v))
     elif v is int:

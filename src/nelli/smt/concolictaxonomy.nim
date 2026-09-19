@@ -401,16 +401,90 @@ proc recordAdmitOutcome*(y: var ConcolicYield, outcome: ConcolicAdmitOutcome,
 # control character in the first place, and importing `engine/render`
 # (which pulls in `strategy`/`optbox`) into this leaf taxonomy module for
 # an escaper it would never call is not a trade worth making.
+#
+# #163 review round 13, Finding R13-4: the `fieldPairs` walk above solved
+# "did we forget a field" but not "did we update every rendering surface for
+# a field's special case" -- each `$`/`toJson` pair still hand-duplicated the
+# SAME "walk an enum-indexed array/table, optionally skip zero entries, join
+# as k=v" loop once per style. `RenderStyle`/`renderEnumCounts`/
+# `renderFloatSeq` below factor that shared knowledge (which separator, which
+# quoting, whether zeros are skipped) into style-parameterized helpers used
+# by both renderers, so a third rendering surface (a CSV exporter, say) has
+# something to call instead of writing a thirteenth copy. `ConcolicYield`'s
+# `byConstruct` walk (further down) is deliberately NOT folded into this —
+# see the comment at its two call sites for why.
+
+type
+  RenderStyle* = enum
+    ## Shared style discriminant for the `$`/`toJson` pairs below (and, via
+    ## `renderEnumCounts`, `fuzz.nim`'s `provenanceCounts`) -- #163 review
+    ## round 13, Finding R13-4. Every one of those renderer pairs was
+    ## walking the exact same "iterate an enum, optionally skip zero
+    ## entries, join as k=v" shape twice, differing only in separator and
+    ## quoting; this enum names that difference so the walk itself can be
+    ## written once.
+    rsText   ## `key=value` entries joined by ", " -- the `` `$` `` style.
+    rsJson   ## `"key":value` entries joined by "," -- the `toJson` style.
+
+proc renderKV(style: RenderStyle; key: string; val: int): string =
+  case style
+  of rsText: key & "=" & $val
+  of rsJson: "\"" & key & "\":" & $val
+
+proc joinSep(style: RenderStyle): string =
+  case style
+  of rsText: ", "
+  of rsJson: ","
+
+proc renderEnumCounts*[E: enum](arr: array[E, int]; style: RenderStyle;
+                                skipZero: bool): string =
+  ## The shared body of every "walk an enum-indexed `int` array, join as
+  ## k=v" loop that used to be hand-duplicated once per `$`/`toJson` pair
+  ## (`ConcolicFlipCounters.byOutcome`/`byCoverage`, `ConstructTally`'s
+  ## three outcome arrays, `ConcolicYield.admitOutcomes`) -- #163 review
+  ## round 13, Finding R13-4. `fuzz.nim`'s `CampaignStats.provenanceCounts`
+  ## is the same shape one module up and reuses this too. Callers still
+  ## wrap the result in their own `name={...}`/`"name":{...}` -- that part
+  ## is one line and differs only in the same way `renderKV` already
+  ## captures, so a parameter for it would buy nothing.
+  var xs: seq[string] = @[]
+  for k in E:
+    let n = arr[k]
+    if skipZero and n == 0: continue
+    xs.add(renderKV(style, $k, n))
+  result = xs.join(joinSep(style))
+
+proc renderEnumCounts*[E: enum](t: Table[E, int]; style: RenderStyle;
+                                skipZero: bool): string =
+  ## Same walk as the `array` overload above, for the one field
+  ## (`ConcolicYieldCounters.ambiguousByConstruct`) that is a sparse
+  ## `Table` rather than a dense `array` -- `getOrDefault` stands in for
+  ## direct indexing so an absent key still renders as (or is skipped as)
+  ## zero, matching the array overload's behavior for a key that was
+  ## never incremented.
+  var xs: seq[string] = @[]
+  for k in E:
+    let n = t.getOrDefault(k, 0)
+    if skipZero and n == 0: continue
+    xs.add(renderKV(style, $k, n))
+  result = xs.join(joinSep(style))
+
+proc renderFloatSeq*(xs: seq[float]; decimals: int; style: RenderStyle): string =
+  ## `fuzz.nim`'s `CampaignStats.operatorPulls` walk (fixed-precision floats,
+  ## joined) is the same "format each element, join with the style's
+  ## separator" shape as `renderEnumCounts`, just without the enum keys --
+  ## shared here for the same R13-4 reason rather than left as its own
+  ## fourth hand-duplicated pair.
+  var parts: seq[string] = @[]
+  for x in xs: parts.add(x.formatFloat(ffDecimal, decimals))
+  result = parts.join(joinSep(style))
 
 proc `$`*(c: ConcolicYieldCounters): string =
   var lines: seq[string] = @[]
   for name, v in fieldPairs(c):
     when name == "ambiguousByConstruct":
-      var byConstruct: seq[string] = @[]
-      for k in WalkerConstructKind:
-        let n = v.getOrDefault(k, 0)
-        if n != 0: byConstruct.add($k & "=" & $n)
-      lines.add("ambiguousByConstruct={" & byConstruct.join(", ") & "}")
+      lines.add("ambiguousByConstruct={" &
+                renderEnumCounts(v, rsText, skipZero = true) & "}")
     elif v is int:
       lines.add(name & "=" & $v)
     else:
@@ -422,11 +496,8 @@ proc toJson*(c: ConcolicYieldCounters): string =
   var parts: seq[string] = @[]
   for name, v in fieldPairs(c):
     when name == "ambiguousByConstruct":
-      var entries: seq[string] = @[]
-      for k in WalkerConstructKind:
-        let n = v.getOrDefault(k, 0)
-        if n != 0: entries.add("\"" & $k & "\":" & $n)
-      parts.add("\"ambiguousByConstruct\":{" & entries.join(",") & "}")
+      parts.add("\"ambiguousByConstruct\":{" &
+                renderEnumCounts(v, rsJson, skipZero = true) & "}")
     elif v is int:
       parts.add("\"" & name & "\":" & $v)
     else:
@@ -438,13 +509,9 @@ proc `$`*(c: ConcolicFlipCounters): string =
   var lines: seq[string] = @[]
   for name, v in fieldPairs(c):
     when name == "byOutcome":
-      var xs: seq[string] = @[]
-      for o in ConcolicFlipOutcome: xs.add($o & "=" & $v[o])
-      lines.add("byOutcome={" & xs.join(", ") & "}")
+      lines.add("byOutcome={" & renderEnumCounts(v, rsText, skipZero = false) & "}")
     elif name == "byCoverage":
-      var xs: seq[string] = @[]
-      for cv in ConcolicCoverageOutcome: xs.add($cv & "=" & $v[cv])
-      lines.add("byCoverage={" & xs.join(", ") & "}")
+      lines.add("byCoverage={" & renderEnumCounts(v, rsText, skipZero = false) & "}")
     elif v is int:
       lines.add(name & "=" & $v)
     else:
@@ -456,13 +523,9 @@ proc toJson*(c: ConcolicFlipCounters): string =
   var parts: seq[string] = @[]
   for name, v in fieldPairs(c):
     when name == "byOutcome":
-      var xs: seq[string] = @[]
-      for o in ConcolicFlipOutcome: xs.add("\"" & $o & "\":" & $v[o])
-      parts.add("\"byOutcome\":{" & xs.join(",") & "}")
+      parts.add("\"byOutcome\":{" & renderEnumCounts(v, rsJson, skipZero = false) & "}")
     elif name == "byCoverage":
-      var xs: seq[string] = @[]
-      for cv in ConcolicCoverageOutcome: xs.add("\"" & $cv & "\":" & $v[cv])
-      parts.add("\"byCoverage\":{" & xs.join(",") & "}")
+      parts.add("\"byCoverage\":{" & renderEnumCounts(v, rsJson, skipZero = false) & "}")
     elif v is int:
       parts.add("\"" & name & "\":" & $v)
     else:
@@ -474,20 +537,11 @@ proc `$`*(t: ConstructTally): string =
   var parts: seq[string] = @[]
   for name, v in fieldPairs(t):
     when name == "flipOutcomes":
-      var xs: seq[string] = @[]
-      for o in ConcolicFlipOutcome:
-        if v[o] != 0: xs.add($o & "=" & $v[o])
-      parts.add("flipOutcomes={" & xs.join(", ") & "}")
+      parts.add("flipOutcomes={" & renderEnumCounts(v, rsText, skipZero = true) & "}")
     elif name == "coverageOutcomes":
-      var xs: seq[string] = @[]
-      for cv in ConcolicCoverageOutcome:
-        if v[cv] != 0: xs.add($cv & "=" & $v[cv])
-      parts.add("coverageOutcomes={" & xs.join(", ") & "}")
+      parts.add("coverageOutcomes={" & renderEnumCounts(v, rsText, skipZero = true) & "}")
     elif name == "admitOutcomes":
-      var xs: seq[string] = @[]
-      for a in ConcolicAdmitOutcome:
-        if v[a] != 0: xs.add($a & "=" & $v[a])
-      parts.add("admitOutcomes={" & xs.join(", ") & "}")
+      parts.add("admitOutcomes={" & renderEnumCounts(v, rsText, skipZero = true) & "}")
     elif v is int:
       parts.add(name & "=" & $v)
     else:
@@ -499,20 +553,11 @@ proc toJson*(t: ConstructTally): string =
   var parts: seq[string] = @[]
   for name, v in fieldPairs(t):
     when name == "flipOutcomes":
-      var xs: seq[string] = @[]
-      for o in ConcolicFlipOutcome:
-        if v[o] != 0: xs.add("\"" & $o & "\":" & $v[o])
-      parts.add("\"flipOutcomes\":{" & xs.join(",") & "}")
+      parts.add("\"flipOutcomes\":{" & renderEnumCounts(v, rsJson, skipZero = true) & "}")
     elif name == "coverageOutcomes":
-      var xs: seq[string] = @[]
-      for cv in ConcolicCoverageOutcome:
-        if v[cv] != 0: xs.add("\"" & $cv & "\":" & $v[cv])
-      parts.add("\"coverageOutcomes\":{" & xs.join(",") & "}")
+      parts.add("\"coverageOutcomes\":{" & renderEnumCounts(v, rsJson, skipZero = true) & "}")
     elif name == "admitOutcomes":
-      var xs: seq[string] = @[]
-      for a in ConcolicAdmitOutcome:
-        if v[a] != 0: xs.add("\"" & $a & "\":" & $v[a])
-      parts.add("\"admitOutcomes\":{" & xs.join(",") & "}")
+      parts.add("\"admitOutcomes\":{" & renderEnumCounts(v, rsJson, skipZero = true) & "}")
     elif v is int:
       parts.add("\"" & name & "\":" & $v)
     else:
@@ -530,10 +575,18 @@ proc `$`*(y: ConcolicYield): string =
       lines.add("flip:")
       for l in ($v).splitLines(): lines.add("  " & l)
     elif name == "admitOutcomes":
-      var xs: seq[string] = @[]
-      for a in ConcolicAdmitOutcome: xs.add($a & "=" & $v[a])
-      lines.add("admitOutcomes={" & xs.join(", ") & "}")
+      lines.add("admitOutcomes={" & renderEnumCounts(v, rsText, skipZero = false) & "}")
     elif name == "byConstruct":
+      # #163 review round 13, Finding R13-4: deliberately NOT routed through
+      # `renderEnumCounts` even though it also walks `WalkerConstructKind`.
+      # That helper's shared shape is "int value, one line, k=v"; this field
+      # is `Table[WalkerConstructKind, ConstructTally]` (a NESTED struct
+      # rendered via `$`/`toJson`, not a plain int) and the text style wants
+      # an indented multi-line block, not a one-line `{...}` join — both
+      # axes the helper does not parameterize. A shared helper covering both
+      # shapes would need a value-formatting callback plus a block/flat
+      # output switch, which is more machinery than the two call sites
+      # (here and in `toJson` below) it would replace.
       var byConstruct: seq[string] = @[]
       for k in WalkerConstructKind:
         if v.hasKey(k): byConstruct.add($k & ": " & $v[k])
@@ -555,9 +608,7 @@ proc toJson*(y: ConcolicYield): string =
     elif name == "flip":
       parts.add("\"flip\":" & toJson(v))
     elif name == "admitOutcomes":
-      var xs: seq[string] = @[]
-      for a in ConcolicAdmitOutcome: xs.add("\"" & $a & "\":" & $v[a])
-      parts.add("\"admitOutcomes\":{" & xs.join(",") & "}")
+      parts.add("\"admitOutcomes\":{" & renderEnumCounts(v, rsJson, skipZero = false) & "}")
     elif name == "byConstruct":
       var xs: seq[string] = @[]
       for k in WalkerConstructKind:

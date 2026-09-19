@@ -3749,8 +3749,22 @@ proc canonicalize*(t: IRType): string =
     # genuinely different verdicts, and this is the only encoding a FIELD's
     # bounds reach — `canonicalize(IRParam)`'s `;range=` covers params alone.
     # Absent bounds encode to nothing, so every pre-#162 key is unchanged.
+    #
+    # Issue #163 (rev item 1): `enumName` renders too, mirroring
+    # `itTuple`'s own `objectName` treatment (the conservative default this
+    # field's review round specifies for a witness-facing nominal-identity
+    # field: the walker never reads the name, so no known verdict depends on
+    # it, but rendering it costs nothing and forecloses any future doubt —
+    # e.g. a generic/overload-dispatch mechanism someday keying off an
+    # `itInt`'s origin type name). A bare Nim identifier can never contain
+    # any of this encoding's reserved sigils (`<`/`>`/`;`/`:`), so no
+    # escaping is needed — the same reasoning `distinctName`/`objectName`
+    # rely on just below. Absent (the default "") encodes to nothing, so
+    # every pre-existing key (every enum-free `itInt`, and every #162-era
+    # key from before this field existed) is unchanged.
     "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") &
-      (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") & ">"
+      (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
+      (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") & ">"
   of itBool:
     "Ty<B>"
   of itString:

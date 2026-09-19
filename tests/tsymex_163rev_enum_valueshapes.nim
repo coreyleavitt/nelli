@@ -111,7 +111,11 @@ suite "#163 review R18 -- tuple/string-valued enum fields get their real ordinal
     ## the meaningful one.
     let r = symexFind(checkA, tLabel("a"))
     check r.status == sxSat
-    check r.witness[0] == 5
+    # Issue #163 item 1 (rev): the witness reader now emits a correctly-typed
+    # `Mixed` value directly (see `IRType.enumName`), so `r.witness[0]` is
+    # already `Mixed` rather than a raw ordinal -- compare via `ord()`
+    # instead of a bare `int` equality.
+    check ord(r.witness[0]) == 5
     check Mixed(r.witness[0]) == mxA
 
   test "x == mxB is reachable, and the witness genuinely satisfies it":
@@ -119,14 +123,14 @@ suite "#163 review R18 -- tuple/string-valued enum fields get their real ordinal
     ## off the wrong base), not 6 (mxB's real ordinal).
     let r = symexFind(checkB, tLabel("b"))
     check r.status == sxSat
-    check r.witness[0] == 6
+    check ord(r.witness[0]) == 6
     check Mixed(r.witness[0]) == mxB
 
   test "x == mxC is reachable, and the witness genuinely satisfies it":
     ## RED (pre-fix): embedded RHS 2, not 7 (mxC's real ordinal).
     let r = symexFind(checkC, tLabel("c"))
     check r.status == sxSat
-    check r.witness[0] == 7
+    check ord(r.witness[0]) == 7
     check Mixed(r.witness[0]) == mxC
 
 ## ---------------------------------------------------------------------------

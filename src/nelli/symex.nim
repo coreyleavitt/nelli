@@ -658,7 +658,22 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     (ident(ty.distinctName), newCall(ident(ty.distinctName), baseReader))
   of itBool, itInt, itFloat32, itFloat64:
     let (tyName, readerName) = primTyAndReader(ty)
-    (ident(tyName), newCall(ident(readerName), witId, newLit(path)))
+    let rawReader = newCall(ident(readerName), witId, newLit(path))
+    if ty.kind == itInt and ty.enumName.len > 0:
+      # Issue #163 (rev item 1). `ty` is the lifted `itInt` representation of
+      # a Nim `enum` (see `IRType.enumName`'s field doc) — the RAW
+      # `readUInt8`/`readUInt16`/... reader above produces a plain unsigned
+      # value Nim will NOT implicitly convert back into an enum-typed slot,
+      # so a bare `nnkObjConstr` field (or, via the `itArray`/itSeq` arms
+      # below, an array/seq element) built from it fails to COMPILE. Wrap it
+      # in the enum type's own converter call — `EnumName(rawReader)` — the
+      # same `T(ordinalValue)` construction Nim itself accepts for any
+      # ordinal-convertible value, sound regardless of signedness or a
+      # negative/sparse ordinal domain (R2/R18's fixes already put the
+      # correct width/signed/range on `ty` before this ever runs).
+      (ident(ty.enumName), newCall(ident(ty.enumName), rawReader))
+    else:
+      (ident(tyName), rawReader)
   of itTuple:
     if ty.objectName.len > 0:
       # Nominal object. For variant objects (heuristic: any of the

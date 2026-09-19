@@ -671,5 +671,10 @@ task test, "Run the test suite":
             # registered here, matched no leg, and the comment claimed
             # otherwise. It does NOT reach symex-mingw, whose corpus is
             # derived from `tsymex_*` names only.
-            "tentrypointwiring"]:
+            "tentrypointwiring",
+            # Issue #163 item 1 (rev): an enum-typed OBJECT FIELD's witness
+            # reader (`readUInt8`/`readUInt16`) did not compile back into
+            # the enum-typed field at all -- `symexFind` could not even be
+            # CALLED on a proc taking an object with a plain enum field.
+            "tsymex_163rev_enum_field_witness"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

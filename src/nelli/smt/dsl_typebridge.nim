@@ -764,7 +764,16 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         if ord > maxOrd: maxOrd = ord
       let enumSigned = minOrd < 0
       let bits = enumOrdBitsNeeded(minOrd, maxOrd, enumSigned)
-      return ranged(tInt(bits, signed = enumSigned), minOrd, maxOrd)
+      var cls = ranged(tInt(bits, signed = enumSigned), minOrd, maxOrd)
+      # Issue #163 (rev item 1): stamp the enum's own name onto the lifted
+      # `itInt` so witness reconstruction (`symex.emitTyAndReader`) can emit
+      # `s(readUInt8(...))` instead of a raw reader Nim will not implicitly
+      # convert back into an enum-typed slot -- see `IRType.enumName`'s field
+      # doc for the full mechanism this unblocks (an enum-typed OBJECT FIELD
+      # could not even reach `symexFind`: the generated witness constructor
+      # failed to COMPILE).
+      cls.ty = cls.ty.withEnumName(s)
+      return cls
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
     # `itRef`/`itPtr(FULL pointee)` — true heap identity — instead of

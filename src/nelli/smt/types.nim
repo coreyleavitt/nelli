@@ -149,6 +149,44 @@ type
                                ## that differ only in a field's declared
                                ## bounds have genuinely different verdicts
                                ## and must not share a cache entry.
+      enumName*: string        ## Issue #163 (rev item 1). "" for an ordinary
+                               ## int/range; the enum type's OWN name (e.g.
+                               ## "Ordering") when this `itInt` is the lifted
+                               ## representation of a Nim `enum` (see
+                               ## `dsl_typebridge.classifyType`'s enum arm).
+                               ## Witness reconstruction
+                               ## (`symex.emitTyAndReader`) needs the name to
+                               ## emit a reader Nim will actually accept for
+                               ## an enum-typed slot -- `readUInt8`/
+                               ## `readUInt16` alone produce a raw unsigned
+                               ## value, and Nim will not implicitly convert
+                               ## that back into an enum-typed FIELD inside a
+                               ## generated `nnkObjConstr`, so the whole
+                               ## witness-rebuilding proc fails to COMPILE
+                               ## (`symexFind` could not even be called on a
+                               ## proc taking an object with a plain enum
+                               ## field). Wrapping the reader in
+                               ## `EnumName(...)` fixes the call-site type;
+                               ## this field is what tells the reader which
+                               ## name to wrap with.
+                               ##
+                               ## Analogous to `itTuple.nominalId` — nominal
+                               ## identity carried for WITNESS/CODEGEN
+                               ## purposes, not a structural/verdict property
+                               ## — same reasoning `isPlaceholder` and
+                               ## `nominalId` are excluded under: NOT part of
+                               ## `IRType.==` (two enums with the same
+                               ## width/signedness/declared range behave
+                               ## byte-identically to every walker arm that
+                               ## consumes an `itInt` — the walker never
+                               ## reads a name). IS rendered by
+                               ## `canonicalize` anyway (the conservative
+                               ## default the field's own review round
+                               ## specifies for a new `IRType` field, mirrors
+                               ## `itTuple.objectName`'s own canonicalize
+                               ## treatment) — cheap, and it forecloses any
+                               ## future doubt about a generic/overload
+                               ## dispatch keying on the enum's name.
     of itBool:
       discard
     of itTuple:
@@ -2364,7 +2402,22 @@ proc withRange*(ty: IRType, lo, hi: int64): IRType =
   ## one in place would silently narrow every unrelated use of it.
   doAssert ty.kind == itInt, "withRange: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
-         hasRange: true, rangeLo: lo, rangeHi: hi)
+         hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName)
+
+proc withEnumName*(ty: IRType, name: string): IRType =
+  ## Issue #163 (rev item 1). Stamp the lifted `itInt`'s ORIGIN enum name —
+  ## see `IRType.enumName`'s own field doc for why witness reconstruction
+  ## needs it. A fresh `IRType` for the same reason `withRange` is: `IRType`
+  ## is a shared `ref`, so mutating one in place would leak the name onto
+  ## every other use of the same base type. Carries every existing `itInt`
+  ## field forward (unlike `withRange`, which is always called FIRST in the
+  ## enum arm and so has nothing of its own to preserve beyond width/signed)
+  ## so `ranged(...).withEnumName(...)` chains without dropping the range
+  ## just attached.
+  doAssert ty.kind == itInt, "withEnumName: not an itInt: " & $ty.kind
+  IRType(kind: itInt, width: ty.width, signed: ty.signed,
+         hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
+         enumName: name)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",

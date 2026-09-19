@@ -394,10 +394,21 @@ proc emitIRType*(t: IRType): NimNode =
     # so bounds left out here default to absent at runtime no matter what
     # `classifyType` computed, and a range-typed field goes unconstrained.
     let base = newCall(bindSym"tInt", newLit(t.width), newLit(t.signed))
-    if t.hasRange:
+    let ranged = if t.hasRange:
       newCall(bindSym"withRange", base, newLit(t.rangeLo), newLit(t.rangeHi))
     else:
       base
+    # Issue #163 (rev item 1): `enumName` MUST round-trip the same way
+    # `hasRange`/`rangeLo`/`rangeHi` do just above -- see this arm's own
+    # comment. Left out here, an enum-typed slot's runtime-reconstructed
+    # `IRType` would silently default `enumName = ""` regardless of what
+    # `classifyType` computed, no matter what `symex.emitTyAndReader`
+    # (which reads the macro-time `IRType` directly and needs no round trip
+    # of its own) does with the name at witness-codegen time.
+    if t.enumName.len > 0:
+      newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
+    else:
+      ranged
   of itTuple:
     var fieldsLit = newTree(nnkBracket)
     for f in t.fields:

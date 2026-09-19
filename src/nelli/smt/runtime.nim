@@ -3703,8 +3703,8 @@ proc placeholderReadDeclineMsg(recv: SymVal, loc, what: string): string =
   ## supported" in that case is FALSE and misleads a reader of
   ## `SymexResult.errors` about the actual defect. Reference the ORIGINAL
   ## decline reason instead — this also lets the drain-time message dedup
-  ## (`if e.msg notin seenLD`, near `loweringDegradeErrors`'s drain) collapse
-  ## a cascade of downstream reads on the same tainted receiver into a small,
+  ## (`drainDedupedByMsg`, at `loweringDegradeErrors`'s drain) collapse a
+  ## cascade of downstream reads on the same tainted receiver into a small,
   ## honestly-worded set instead of manufacturing new misclassified entries.
   let locPrefix = if loc.len > 0: loc & ": " else: ""
   if recv.seqUnsupportedFieldReason.len > 0:
@@ -13042,6 +13042,34 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureDidMutateHeap = false                         ## Phase 15 CR-1
   ctx
 
+proc drainDedupedByMsg(dst: var seq[SymexErrorInfo], src: seq[SymexErrorInfo]) =
+  ## Round 10 design T4: the one dedup-by-message idiom every hint/error/
+  ## warning drain in `runSymexImpl`/`runConcolicCollectImpl` below hand-rolled
+  ## separately. Appends each entry of `src` to `dst`, deduplicated by `.msg`
+  ## WITHIN `src` alone, in its OWN `HashSet` — never merged with `dst`'s
+  ## prior contents or any sibling sink's own dedup set. Per-sink dedup is
+  ## deliberate, not an oversight: a message appearing in two DIFFERENT sinks
+  ## is vanishingly unlikely (each sink is written by its own disjoint set of
+  ## call sites), and this is the rule every site below already used before
+  ## this helper existed. A caller that concatenates two sub-sources into one
+  ## `seq` before calling (e.g. `w.someField & someThreadvar`) gets THOSE two
+  ## sub-sources deduped together, as one sink — that predates this helper
+  ## and is unchanged by it.
+  var seen: HashSet[string]
+  for e in src:
+    if e.msg notin seen:
+      seen.incl e.msg
+      dst.add e
+
+proc dedupedMsgCount(src: seq[SymexErrorInfo]): int =
+  ## Same per-sink dedup rule as `drainDedupedByMsg`, for the two
+  ## `runConcolicCollectImpl` call sites that only need the count of distinct
+  ## messages, never the deduped entries themselves.
+  var seen: HashSet[string]
+  for e in src:
+    seen.incl e.msg
+  result = seen.len
+
 proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
@@ -13371,11 +13399,7 @@ proc runSymexImpl(prog: SymexProgram,
   var exnWarnings: seq[SymexErrorInfo]
   let unknownExnWarningsLive = w.unknownExnWarnings & unknownExnWarnings
   if unknownExnWarningsLive.len > 0:
-    var seen: HashSet[string]
-    for e in unknownExnWarningsLive:
-      if e.msg notin seen:
-        seen.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, unknownExnWarningsLive)
   # Phase 15 G4. Drain the distinct-bijectivity-skipped hint sink, dedup'd by
   # message (one per distinct type whose base was FP/String). sevHint never
   # changes the verdict (Invariant 7), so it rides every branch alongside
@@ -13385,11 +13409,7 @@ proc runSymexImpl(prog: SymexProgram,
   # walk); fall back to threadvar for pre-walk/probe allocations. Union covers all.
   let distinctBijectivityHintsLive = w.distinctBijectivityHints & distinctBijectivityHints
   if distinctBijectivityHintsLive.len > 0:
-    var seenD: HashSet[string]
-    for e in distinctBijectivityHintsLive:
-      if e.msg notin seenD:
-        seenD.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, distinctBijectivityHintsLive)
   # Phase 15 R2. Drain the freshness-cap hint sink, dedup'd by message (one per
   # ref type whose per-path distinctness inequalities hit the cap). sevHint
   # never changes the verdict (Invariant 7) — rides every branch via
@@ -13398,11 +13418,7 @@ proc runSymexImpl(prog: SymexProgram,
   # the walk); fall back to threadvar for any hints appended outside a walk.
   let freshnessCapHintsLive = w.freshnessCapHints & freshnessCapHints
   if freshnessCapHintsLive.len > 0:
-    var seenF: HashSet[string]
-    for e in freshnessCapHintsLive:
-      if e.msg notin seenF:
-        seenF.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, freshnessCapHintsLive)
   # Phase 15 R8. Drain the ptr-family hint sink, dedup'd by message (one entry
   # per run regardless of how many ptr derefs occurred). sevHint never changes
   # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
@@ -13411,11 +13427,7 @@ proc runSymexImpl(prog: SymexProgram,
   # threadvar. Union covers both walk and any potential pre-walk callers.
   let ptrFamilyHintsLive = w.ptrFamilyHints & ptrFamilyHints
   if ptrFamilyHintsLive.len > 0:
-    var seenP: HashSet[string]
-    for e in ptrFamilyHintsLive:
-      if e.msg notin seenP:
-        seenP.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, ptrFamilyHintsLive)
   # R16-2: convFloatToIntDomainHints removed — replaced by real RangeDefect raise
   # forks via drainConvFloatToIntRaises. No hint drain here.
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
@@ -13430,11 +13442,7 @@ proc runSymexImpl(prog: SymexProgram,
   # walk); heapDepthExhausted writes both threadvar and w field. Union covers all.
   let heapDepthErrorsLive = w.heapDepthErrors & heapDepthErrors
   if heapDepthErrorsLive.len > 0:
-    var seenD: HashSet[string]
-    for e in heapDepthErrorsLive:
-      if e.msg notin seenD:
-        seenD.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, heapDepthErrorsLive)
   # v64 (chapulin catalog #5(b), Invariant 7). Drain the budget-bail error
   # sink (dedup'd by message) — mirrors the R9 heap-depth-error drain. A
   # `beBudgetExhausted` is `sevError`; the exhausted/pruned paths already
@@ -13442,11 +13450,7 @@ proc runSymexImpl(prog: SymexProgram,
   # `sxUnknown` carries the classified WHY instead of an empty errors seq.
   # WalkCtx-field-only (both emitting sites have `w: var WalkCtx`).
   if w.walkDegradeErrors.len > 0:
-    var seenB: HashSet[string]
-    for e in w.walkDegradeErrors:
-      if e.msg notin seenB:
-        seenB.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, w.walkDegradeErrors)
   # Cluster H Step C. Drain the isNew-zero-write error sink (dedup'd by
   # message) — mirrors the R9 heap-depth-error drain exactly. A
   # `heNewFieldZeroUnsupported` is `sevError`; the offending path was tainted
@@ -13455,11 +13459,7 @@ proc runSymexImpl(prog: SymexProgram,
   # only ensures the classified kind rides every verdict branch (Invariant 3).
   let newFieldZeroErrorsLive = w.newFieldZeroErrors & newFieldZeroErrors
   if newFieldZeroErrorsLive.len > 0:
-    var seenNZ: HashSet[string]
-    for e in newFieldZeroErrorsLive:
-      if e.msg notin seenNZ:
-        seenNZ.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, newFieldZeroErrorsLive)
   # SND-3 (ADR-0023, walker v58). Drain the lowering-degrade error sink
   # (dedup'd by message) — mirrors the R9 heap-depth-error / Cluster-H
   # newFieldZeroErrors drains exactly. Each entry is `sevError`; the
@@ -13471,11 +13471,7 @@ proc runSymexImpl(prog: SymexProgram,
   # `iekBinop`/`iekContains` arms, `cmpString`) have no `w: var WalkCtx` in
   # scope.
   if loweringDegradeErrors.len > 0:
-    var seenLD: HashSet[string]
-    for e in loweringDegradeErrors:
-      if e.msg notin seenLD:
-        seenLD.incl e.msg
-        exnWarnings.add e
+    drainDedupedByMsg(exnWarnings, loweringDegradeErrors)
   # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
   # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:
   # the over-cap instantiation was never registered, so the SUT's coverage is
@@ -13508,12 +13504,7 @@ proc runSymexImpl(prog: SymexProgram,
   # and union with threadvar (covers the no-walk path in applyClosureGround).
   let closureCallErrorsLive = w.closureCallErrors & currentClosureCallErrors
   var closureErrs: seq[SymexErrorInfo]
-  block:
-    var seenC: HashSet[string]
-    for e in closureCallErrorsLive:
-      if e.msg notin seenC:
-        seenC.incl e.msg
-        closureErrs.add e
+  drainDedupedByMsg(closureErrs, closureCallErrorsLive)
   let closureForcedUnknown = block:
     var any = false
     for e in closureErrs:
@@ -13743,12 +13734,11 @@ type
       ## nim`'s own R26 suite proved that it does fire, but only by reading
       ## the `obligationLog` threadvar DIRECTLY, because this type had no
       ## field to carry it through the public `concolicCollect` macro at
-      ## all. `SymexResult` already carries exactly this same threadvar as
-      ## `obligations*: ObligationLog` (`smt/types.nim`; `runSymexImpl`
-      ## assigns it identically, at `r.obligations = obligationLog` /
-      ## `RawResult(..., obligations: obligationLog, ...)` above) — this
-      ## field mirrors that, assigned from the SAME threadvar at the SAME
-      ## point `result.counters` is, below. Diagnostics only, exactly like
+      ## all. This field mirrors `SymexResult.obligations` (`smt/types.nim`
+      ## — see its own doc comment for the canonical threadvar-drain
+      ## contract; `RawResult.obligations`, just above in this file, is the
+      ## same mirror), assigned from the SAME threadvar at the SAME point
+      ## `result.counters` is, below. Diagnostics only, exactly like
       ## `counters.walkDegradeCount` (W10/R9): an obligation recorded here
       ## never flips `pcSatByConcreteInputs` or any other verdict-shaped
       ## field on this type, and this type still has no raised-verdict
@@ -14237,13 +14227,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # contents were never read back here. An unmodelled lowering-site op (e.g.
   # string ordering, S3-pending) therefore reported `walkDegradeCount == 0`,
   # indistinguishable from a genuinely clean collect.
-  var seenDegrade: HashSet[string]
-  for e in w.walkDegradeErrors:
-    seenDegrade.incl e.msg
-  var seenLoweringDegrade: HashSet[string]
-  for e in loweringDegradeErrors:
-    seenLoweringDegrade.incl e.msg
-  counters.walkDegradeCount = seenDegrade.len + seenLoweringDegrade.len
+  counters.walkDegradeCount = dedupedMsgCount(w.walkDegradeErrors) +
+                              dedupedMsgCount(loweringDegradeErrors)
   # Issue #163 round 10 (Design F1/F3, Liveness F1): `obligationLog` and
   # `prog.parseErrors` were already read into `ConcolicCollectResult.
   # obligations`/`.parseErrors` below, but those two fields had no consumer

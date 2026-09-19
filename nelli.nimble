@@ -700,5 +700,12 @@ task test, "Run the test suite":
             # read's raw `KeyError`) is documented in this same file but NOT
             # implemented -- it needs a new `SymexErrorKind`, and `types.nim`
             # is sibling-owned this session.
-            "tsymex_163rev_degrade_classification"]:
+            "tsymex_163rev_degrade_classification",
+            # Issue #163 review R26 (continued) + the parse-error gap:
+            # `runConcolicCollectImpl` built an obligation log and read
+            # `prog.parseErrors`' sibling degrade sinks, but discarded both
+            # the obligation log itself and the parse errors before they
+            # ever reached `ConcolicCollectResult` -- diagnostics-only,
+            # mirroring W10/R9's existing `walkDegradeCount` drain.
+            "tsymex_163rev_concolic_diagnostics"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

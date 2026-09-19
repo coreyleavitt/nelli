@@ -13733,6 +13733,51 @@ type
       ## construction of how the macro emits bindings: see `concolic.nim`'s
       ## `bindingExprFor`) keeps working exactly as before, untouched by a
       ## sibling param's own `useBV` choice for the SAME index.
+    obligations*: ObligationLog
+      ## Issue #163 review R26 (continued). R26's own fix (above,
+      ## `concolicScalarLiteral`) stamped `ziWidth`/`ziSigned` onto a
+      ## concolic-bound Z3Int param SPECIFICALLY so `overflowCondInt`'s
+      ## (#161) signed-overflow obligation would fire on this driver's
+      ## `wmFollowConcrete` walk exactly as it already does for `wmExplore`'s
+      ## own `promoteSound` route — and `tsymex_163rev_concolic_flip_width.
+      ## nim`'s own R26 suite proved that it does fire, but only by reading
+      ## the `obligationLog` threadvar DIRECTLY, because this type had no
+      ## field to carry it through the public `concolicCollect` macro at
+      ## all. `SymexResult` already carries exactly this same threadvar as
+      ## `obligations*: ObligationLog` (`smt/types.nim`; `runSymexImpl`
+      ## assigns it identically, at `r.obligations = obligationLog` /
+      ## `RawResult(..., obligations: obligationLog, ...)` above) — this
+      ## field mirrors that, assigned from the SAME threadvar at the SAME
+      ## point `result.counters` is, below. Diagnostics only, exactly like
+      ## `counters.walkDegradeCount` (W10/R9): an obligation recorded here
+      ## never flips `pcSatByConcreteInputs` or any other verdict-shaped
+      ## field on this type, and this type still has no raised-verdict
+      ## channel at all (see `drawOverrides`'s own R26 note, and
+      ## `tsymex_163rev_concolic_flip_width.nim`'s closing suite, for why
+      ## that is a deliberately separate, larger slice this field does not
+      ## attempt).
+    parseErrors*: seq[SymexErrorInfo]
+      ## Issue #163 review R26's companion gap: `runConcolicCollectImpl`
+      ## drains BOTH degrade sinks (`w.walkDegradeErrors` and the
+      ## `loweringDegradeErrors` threadvar, see `counters.walkDegradeCount`'s
+      ## own drain immediately below, W10/R9) into a count, but never once
+      ## read `prog.parseErrors` — the seq of `SymexErrorInfo` a PARSE-TIME
+      ## decline (e.g. `feTransparentResultUsed`,
+      ## `feEnumOrdinalUnresolved`, `feGlobalReadUnmodelled`) is recorded
+      ## into, before the walk itself ever starts (`dsl_parser.nim`'s
+      ## `ctx.parseErrors`, threaded onto `SymexProgram.parseErrors` by
+      ## `parseEntryImplWarned`, the SAME macro-time step `symexFind` and
+      ## `concolicCollect` both route through — see `nelli/symex.nim`'s
+      ## `concolicCollect` macro body). `runSymexImpl` already unions this
+      ## same seq into `r.errors` on every one of its own verdict branches
+      ## (`r.errors.add prog.parseErrors`, Phase 15 G1c); a concolic collect
+      ## over a program with such a decline used to report "success" with no
+      ## indication whatsoever that part of the program was never modelled.
+      ## Read directly off `prog.parseErrors` — no threadvar, no drain, no
+      ## dedup (a `SymexProgram` is parsed exactly once per macro
+      ## invocation, so `prog.parseErrors` cannot accumulate duplicates the
+      ## way a threadvar sink written across nested calls could). Diagnostic
+      ## only, same contract as `obligations` above.
 
 const defaultMaxConcolicDraws* = 256
   ## RFC-fuzzer-nextgen G1b (round-2 breadth fix): bounded trace length. A
@@ -14192,6 +14237,17 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars
   result.drawOverrides = drawOverrides
+  # Issue #163 review R26 (continued) + the parse-error gap. Both fields'
+  # own doc comments (`ConcolicCollectResult`, above) give the full
+  # rationale; the short version: `obligationLog` is the SAME per-run
+  # threadvar `resetSymexRunState` (this proc's own entry, above) resets and
+  # `runSymexImpl` drains into `RawResult.obligations` on every verdict
+  # branch, so reading it here reflects only THIS collect, not a stale one
+  # from an earlier call. `prog.parseErrors` needs no draining at all — it
+  # is a plain field on the `SymexProgram` this call was handed, populated
+  # once at parse time.
+  result.obligations = obligationLog
+  result.parseErrors = prog.parseErrors
 
 # ---- RFC-fuzzer-nextgen G2: branch-flip solve + materialization -----------
 #

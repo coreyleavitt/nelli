@@ -28,6 +28,17 @@
 import std/[options, hashes, sets, locks, monotimes, times]
 import ./strategy, ./datasource, ./int128, ./choice
 
+when defined(windows):
+  # `SwitchToThread` has no `winlean` wrapper -- declared directly here,
+  # matching the raw-FFI precedent in fuzzworker.nim/fuzz.nim for a syscall
+  # the stdlib doesn't already expose. Returns nonzero iff it actually
+  # switched to another ready thread; we don't care which, so it's discarded
+  # at the call site.
+  proc winSwitchToThread(): int32 {.stdcall, dynlib: "kernel32",
+                                     importc: "SwitchToThread".}
+else:
+  import std/posix
+
 type
   LinEvent*[OpId, Ret] = object
     ## One recorded operation invocation. `invokeTime` < `responseTime`
@@ -196,9 +207,12 @@ type
     ops*: seq[LinOpDef[State, SUT, Ret]]
 
   ScheduledOp* = object
-    ## One scheduled operation within a parallel plan: which op to
-    ## run, plus how many cpuRelax iterations to spin before invoking
-    ## it. Jitter delays are drawn from the choice sequence, so they
+    ## One scheduled operation within a parallel plan: which op to run,
+    ## plus how many real scheduler-yield calls (`spinJitter`) to spend
+    ## immediately BEFORE invoking it — never during the op's own body.
+    ## See `parallelCheck`'s doc comment for exactly what that can and
+    ## cannot catch, and `parallelJitterPoint` for perturbing INSIDE an
+    ## op. Jitter delays are drawn from the choice sequence, so they
     ## *shrink* — if a race only manifests at a specific delay
     ## pattern, the engine can pull it toward the minimal pattern
     ## that still exposes the bug.
@@ -229,15 +243,47 @@ type
     barrierCount: ptr int
     barrierTarget: int
 
+proc schedulerYield() {.inline.} =
+  ## Ask the OS scheduler to run a different ready thread right now, if
+  ## one exists. A real syscall (`sched_yield` / `SwitchToThread`) that
+  ## can produce an actual context switch — unlike a busy no-op spin,
+  ## which never leaves this thread's own timeslice and so can never
+  ## influence which thread the kernel schedules next.
+  when defined(windows):
+    discard winSwitchToThread()
+  else:
+    discard posix.sched_yield()
+
 proc spinJitter(n: int) {.inline.} =
-  ## `n` no-op iterations. Equivalent to `cpuRelax` in spirit; we use
-  ## a counted spin because Nim doesn't ship `cpuRelax` portably. The
-  ## body is `discard` so a sufficiently smart C compiler might elide
-  ## it — but the call boundary itself enforces *some* delay, which
-  ## is what we want for interleaving disruption.
-  var k = 0
-  while k < n:
-    inc k
+  ## `n` scheduler-yield calls (see `schedulerYield`), spent before an
+  ## op is invoked. `n = 0` costs nothing — the loop body never runs —
+  ## so `maxJitter = 0` remains a true no-op fast path.
+  ##
+  ## This used to be a counted busy spin (`var k = 0; while k < n: inc
+  ## k`): a pure no-op loop that never asked the OS for anything and so
+  ## ran in nanoseconds — several orders of magnitude below a real
+  ## scheduling quantum (~1-15ms on Linux) and therefore structurally
+  ## incapable of influencing which thread actually runs next. `n`'s
+  ## UNIT is unchanged (still "how many jitter units", same integer
+  ## range every existing caller already passes); only the mechanism
+  ## each unit spends its time on changed, from spinning to yielding.
+  for _ in 0 ..< n:
+    schedulerYield()
+
+proc parallelJitterPoint*(n = 1) =
+  ## Call this from INSIDE an `applySUT` op body, at the exact point
+  ## you want the OS scheduler to reconsider which thread runs next —
+  ## e.g. between the read and the write of an unsynchronized
+  ## read-modify-write. `ScheduledOp.jitter` / `maxJitter` can only
+  ## insert delay BETWEEN ops (see `parallelCheck`'s doc comment); it
+  ## never runs while an op's body is executing, so it structurally
+  ## cannot widen a race window that lives inside a single op. This
+  ## proc performs the same real scheduler-yield `spinJitter` uses,
+  ## just reachable from wherever inside the op the SUT author needs
+  ## it — the library's answer to "hand-roll a `sleep` in the SUT" for
+  ## exposing an intra-op race.
+  for _ in 0 ..< n:
+    schedulerYield()
 
 proc workerProc[State, SUT, Ret](
     ctx: ptr WorkerCtx[State, SUT, Ret]) {.thread, nimcall.} =
@@ -334,10 +380,31 @@ proc parallelCheck*[State, SUT, Ret](
   ## repetitions — that result is what the engine sees.
   ##
   ## **Jitter from the choice sequence**: each scheduled op carries an
-  ## integer in `[0, maxJitter]` drawn from the source. The shrinker
-  ## can pull jitter values toward 0, finding the minimal scheduling
-  ## perturbation that still reproduces the bug. This is the
-  ## differentiating feature vs. uninstrumented racy testing.
+  ## integer in `[0, maxJitter]` drawn from the source, spent as real
+  ## OS scheduler-yield calls (`spinJitter`) immediately BEFORE that op
+  ## is invoked. The shrinker can pull jitter values toward 0, finding
+  ## the minimal scheduling perturbation that still reproduces a bug.
+  ##
+  ## **What jitter can and cannot catch.** Jitter only ever runs
+  ## BETWEEN ops — it perturbs which thread the scheduler picks to run
+  ## next and how a thread's suffix is staggered relative to its
+  ## siblings. It NEVER runs while an op's body (`applySUT`) is
+  ## executing. So it can help expose bugs that hinge on ordering or
+  ## timing BETWEEN two ops, but it structurally CANNOT widen a race
+  ## window that lives INSIDE a single op's body — most concretely, an
+  ## unsynchronized read-modify-write (read a field, compute, write it
+  ## back) racing against another thread's read-modify-write of the
+  ## same field. No value of `maxJitter` catches that shape of bug:
+  ## there is no op boundary between the read and the write for jitter
+  ## to land on.
+  ##
+  ## If your SUT has that shape of race and you want the harness —
+  ## rather than a hand-rolled `sleep` inside the SUT itself — to widen
+  ## the window, call `parallelJitterPoint()` from inside `applySUT` at
+  ## the specific point you want the scheduler to reconsider (e.g.
+  ## between the read and the write). It performs the same real
+  ## scheduler-yield mechanism as `maxJitter`, just reachable from
+  ## inside an op body instead of only between ops.
 
   let spec = spec   # capture by value
   let retEq = retEq

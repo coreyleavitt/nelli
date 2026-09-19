@@ -131,6 +131,21 @@ proc racyInc(c: ptr Counter): int {.gcsafe.} =
   # it just makes the wrongness observable regardless of machine
   # load. Do not remove this "for performance"; it is load-bearing
   # for the test's ability to catch the race at all.
+  #
+  # `parallelCheck`'s between-op jitter (`maxJitter`, below) cannot
+  # replace this: it only ever runs BETWEEN two ops, never while an
+  # op's own body is executing, so it structurally cannot widen a gap
+  # that lives inside `racyInc` (see `parallelCheck`'s doc comment in
+  # parallel.nim). Confirmed empirically too: with `spinJitter` now a
+  # real OS scheduler-yield (see parallel.nim) instead of a nanosecond
+  # busy spin, deleting this `sleep(1)` and relying on that alone
+  # still failed to catch the race in 1 of 10 idle runs -- not
+  # reliable enough to keep in a suite that must prove the catch. The
+  # library also offers `parallelJitterPoint()`, callable from inside
+  # an op body precisely for this shape of race, but its delay length
+  # is scheduler-dependent (a yield, not a guaranteed pause) and this
+  # `sleep(1)` was kept because it is the one already proven reliable
+  # here across idle and CPU-contended runs.
   sleep(1)
   c[].count = v + 1
   v + 1

@@ -381,5 +381,17 @@ suite "#163 review R22 site 4 non-regression -- an ordinary unranged var param i
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 138 (no bump owed by this round -- forks reuse forkAssignRangeCheck/rangeCondsIfNeeded unchanged)":
+  test "walker version floor >= 138 (a bump IS owed by sites 1-3 -- see this file's header; deferred to the control loop's single consolidated bump, not made here)":
+    ## Sites 1-3 are VERDICT-AFFECTING (a program matching one of these
+    ## write shapes previously reported sxUnsat for a RangeDefect search;
+    ## it now reports sxRaised for the identical canonicalized program) --
+    ## per `symexWalkerVersion`'s own doc comment precedent (`canonicalize.
+    ## nim`, e.g. bullets "10"/"11"), a stale cache entry recorded under the
+    ## CURRENT version would replay the pre-fix verdict if the version were
+    ## not bumped. This floor is pinned at the tree's CURRENT version only
+    ## because this task does not own the bump (one consolidated bump per
+    ## round, landed by the control loop covering every verdict-affecting
+    ## change this round, not per-commit) -- it is NOT a claim that no bump
+    ## is owed. Site 4 needed no code change (already covered by R27's own
+    ## walker-137 bump) and so owes nothing further on its own.
     check parseInt(symexWalkerVersion) >= 138

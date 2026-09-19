@@ -70,5 +70,12 @@ suite "#163 review R22 site 3 prerequisite -- storeSeqElem reconciles a promoted
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 138 (no bump owed -- storeSeqElem's own coercion mirrors an existing idiom; no new walker semantics)":
+  test "walker version floor >= 138 (a bump IS owed -- sxUnknown -> sxSat is a verdict change; deferred to the control loop's single consolidated bump)":
+    ## Before this fix a program matching either shape crashed the walker
+    ## (sxUnknown, weInternalWalkerFault); it now reports sxSat for the
+    ## identical canonicalized program -- a verdict change, per
+    ## `symexWalkerVersion`'s own doc comment precedent. Pinned at the
+    ## tree's CURRENT version only because this task does not own the bump
+    ## (see `tsymex_163rev_assign_sites.nim`'s own version-pin test for the
+    ## full rationale) -- not a claim that none is owed.
     check parseInt(symexWalkerVersion) >= 138

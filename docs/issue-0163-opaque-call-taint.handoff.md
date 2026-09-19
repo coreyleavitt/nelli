@@ -1870,3 +1870,94 @@ ordinary state of a new library primitive.
 | D3 | Medium | design | The two new dedup helpers hand-roll the SAME `HashSet` loop independently — 12 copies became 2, not 1. And the deeper duplication the finding pointed at (eight sinks, each with its own union, guard and six-line comment) is untouched. Seven of the eight `if len > 0:` guards are now DEAD (the helper no-ops on empty) while the eighth site was correctly de-guarded — applied mechanically rather than as a rethink. |
 | L4 | Low/Med | liveness | The "20/20 idle, 10/10 saturated" and "9 in 10" figures now baked into `parallel.nim`'s docs describe one-time manual experiments. The shipped test is a SINGLE seeded run and cannot regression-detect a drop in that rate, while the doc asserts the figure as "measured, not hopeful". |
 | S1 | Low | security | `dt-bounded.sh`'s `$3` splice is unquoted. Every current caller passes a hardcoded literal (all traced), so nothing exploits it — but RFC-0002's L1 closed this exact class for `$test_file` in the SAME script, and `233c7d1` reopened it for a new parameter. Quote it defensively. |
+
+## State at this refresh — round 11 fixes in flight, round 10 gated GREEN
+
+**HEAD `ab7b9e0`. Walker 140. 117 commits ahead of `main`, 67 ahead of
+`origin/rfc-161-163-symex-defects`. Not pushed.**
+
+### The gate finally came back clean
+
+```
+pass=489 fail=0 (of which timeout-killed=0) skip=7 total=496
+unchanged=459 regressed=0 new-failing=0 fixed=1 skip-changed=0 new-ok=36 gone=0
+unregistered=0 missing=0
+## FIXED (1)
+  c tests/tsymex_snd3_loopdegrade.nim   137 -> 0
+```
+
+Logs `cur163r11.log` / `sweepr11.out` against baseline `base163.log`. This
+gates ROUND 10 — the tree at `4374abe`; `ab7b9e0` after it touched only docs
+and `derive-ci-suites.ps1`, no Nim. First `fail=0` of the session. The
+`fixed=1` is the SND-3-6 split recovering five soundness pins the gate had
+been losing to a timeout kill every run. The seven skips are the six r6
+hangers plus SND-3-6, each now carrying its own documented reason. Also the
+first sweep run on a box with all six cores (see the orphan-reaping entry).
+
+### Four agents in flight, disjoint files
+
+| agent | finding | files |
+|---|---|---|
+| campaign renderer + generic fold | L1 (Critical), D5 (High) | `fuzz.nim`, `concolictaxonomy.nim`, `tsymex_163rev_concolic_flip_width.nim`, `tsymex_163rev_concolic_diagnostics.nim` |
+| defines-table sync + skip hygiene + quoting | D1 (High), D4 (Med), S1 (Low) | `scripts/sweep.sh`, `scripts/dt-bounded.sh`, `scripts/derive-ci-suites.ps1`, `nelli.nimble` |
+| jitter pragma + doc-figure honesty | D2 (High), L4 (Low/Med) | `src/nelli/parallel.nim`, `tests/tparallelcheck.nim` |
+| finish the dedup refactor | D3 (Medium) | `src/nelli/smt/runtime.nim` |
+
+Each brief carries an explicit escape hatch, because three times this session
+the valuable outcome was an agent REFUSING the task as framed: if `fieldPairs`
+cannot work, propose what achieves compile-time safety instead of leaving a
+"remember to wire it" comment; if the pragma proves unreliable, ship the
+measurement and NOT the recommendation; if a sink site does not fit the
+template, that is worth more than a tidy refactor; and verify the new
+defines-table sync check by deliberately diverging the tables, because a sync
+check nobody has watched fail is not known to work.
+
+### Resume command
+
+If interrupted before the agents report, re-read this doc and check what
+landed:
+
+```
+git log --oneline ab7b9e0..HEAD
+git status --porcelain
+```
+
+Then, once all four are in, re-gate and run round 12's lenses:
+
+```
+T=/home/corey/.claude/jobs/4fd5573d/tmp
+nohup setsid bash -c "scripts/sweep.sh $T/cur163r12.log > $T/sweepr12.out 2>&1; \
+  scripts/sweep-diff.sh $T/base163.log $T/cur163r12.log >> $T/sweepr12.out 2>&1; \
+  echo SWEEP_COMPLETE >> $T/sweepr12.out" &
+```
+
+Gate the waiter on the `SWEEP_COMPLETE` marker, never `pgrep` (a waiter that
+greps for the sweep matches its own argv and never exits). Expect `skip=7`.
+Note `scripts/sweep.sh` is itself a fix target this round — do not edit it
+while a sweep is executing, and re-verify the filtered-sweep behaviour after
+the scripts agent lands.
+
+### Open, for Corey
+
+1. **Push.** 67 commits of CI-invisible history, including all seven walker
+   bumps from 134 to 140.
+2. **`quipu setup`** — `quipu check` warns the ingest hooks are not fully
+   wired (`post-merge`/`post-rewrite` missing, `pre-push` stale), so "a push,
+   merge or rewrite here may never reach the configured hub, silently". This
+   matters more than usual with a push pending. Not run unasked: it installs
+   repo-local wiring.
+3. **Recommended, deliberately not done:** rename `tn45probe`/`tprobe_n45stats`
+   to `tsymex_*` so `symex-mingw`'s derived corpus picks them up. They run in
+   no CI leg today. It is a change to a Windows leg that cannot be verified
+   without pushing, and guessing at unverifiable CI edits is how the last CI
+   saga started.
+
+### Standing note on the loop
+
+Eleven rounds. The last three have each been findings against the PREVIOUS
+round's own fixes — round 10 closed round 9's regressions; round 11 found that
+round 10's headline fix moved dormancy one hop instead of closing it, that its
+refactor left seven dead guards and two copies of the loop it was
+deduplicating, and that its test split opened a Windows CI exposure while the
+commit claimed both directions verified. The lenses are earning their keep
+(three of my own errors today), but the loop has not yet reached a floor.

@@ -2185,3 +2185,68 @@ round claimed `CampaignStats` was "user-visible at campaign end" and that was
 current state from the code and inherit neither the claim nor its retraction.
 
 Gate and CI for this round are running concurrently; see below.
+
+### Round 13 findings — consolidated after adversarial verification
+
+Two verifications moved severity in BOTH directions, which is the point of
+running them.
+
+| id | sev | source | anchor | finding |
+|---|---|---|---|---|
+| R13-1 | High | Security | `scripts/sweep.sh:255` | Round 12's "never a silent no-op" guarantee is a compile-time `warning`, but the gate runs `dt-bounded.sh ... >/dev/null 2>&1`. The warning lands on discarded stderr — the mechanism built to stop silent under-instrumentation is itself silent under the only harness that runs it. |
+| R13-2 | High | Correctness | `src/nelli/parallel.nim:390-441` | `nnkDefer` undispatched: a read-modify-write race inside `defer:` gets zero jitter points, silently, because the warning fires only on a zero TOTAL count. |
+| R13-3 | Med (was High) | Design | `src/nelli/fuzz.nim:912` | `toJson` dispatches `float` by type forty lines below the sibling documenting why `float` must be matched by name. |
+| R13-4 | Med | Design | `concolictaxonomy.nim`, `fuzz.nim` | ~12 near-identical enum-walk loops, each duplicated across its text and JSON sibling. `fieldPairs` closed "forgot a field", not "forgot a renderer". |
+| R13-5 | Med | Security + Correctness | `scripts/sweep.sh:158-172` | Count floor admits a wrong-but-same-cardinality parse: a value containing `\"` truncates yet still yields one match. Found independently by two lenses. |
+| R13-6 | Low (was Med) | Correctness + Design | `src/nelli/parallel.nim:364-371` | `nnkWhenStmt` has `nnkDefer`'s gap, and the doc's rationale is wrong — it conflates `when`-as-expression with `when`-as-statement. `coverage.nim:266` already does it right. Latent: no current target uses `when`. |
+| R13-7 | Low (was High) | Design | `nelli.nimble:19-22` | "Single source of truth" overreads its scope. No live collision; `symexCiLeanB5` is a CI-timeout lever, not a correctness gate. |
+| R13-8 | Low | Security | `scripts/sweep.sh:128` | `sed` range lacks an end-anchor check; a reformatted `}.toTable()` runs to EOF. |
+| R13-9 | Low | Security | `scripts/sweep.sh:146` | A legitimate `#` in a value hard-aborts the sweep. Fail-safe, but a plausible edit bricks the gate. |
+| R13-10 | Low | Design | `scripts/sweep.sh:211-213` | The drift extraction parses the same fragile file with no sanity check, while its sibling three paragraphs up now has one. |
+
+**Liveness: clean.** Every mechanism traced to a live producer and consumer.
+It also re-derived the `CampaignStats` question from source and landed on the
+accurate reading rather than inheriting either the old false claim or its
+retraction.
+
+**R13-1, R13-2 and R13-6 are one defect, not three.** An allow-list of node
+kinds plus a total-count-only warning produces silent partial instrumentation
+*by construction*. Round 12 added six arms; round 13 found two missing. Adding
+two more guarantees round 14 finds a third. The fix is therefore shape-level:
+add the arms, but also warn on ANY undispatched statement-holding node kind so
+future gaps report themselves, and upgrade the zero-insertion case from
+`warning` to `error` — because R13-1 proves a warning is invisible to the gate,
+and the build is the one channel the gate cannot discard.
+
+### A lead worth more than the finding that produced it
+
+Verifying R13-7 turned up a mechanism nobody in this review had considered:
+Nim auto-loads a per-file `<test>.nim.cfg`, and **three `tsymex_*` suites
+already use it** to carry a correctness-critical define
+(`-d:symexTestInjectWalkerFault`) straight through the Windows corpus job with
+no parser at all. The entire `extraDefines` table, its shell parser, the count
+floor, the NUL transport and the `dt-bounded.sh` plumbing — the subject of
+findings across rounds 11, 12 and 13 — may exist to do what Nim already does
+natively. An agent is testing whether that whole mechanism can be deleted,
+including git archaeology on whether `.nim.cfg` was considered and rejected
+for a stated reason. Not touched yet; it changes the gate.
+
+### Gate discipline — a self-inflicted error, recorded
+
+The round-13 gate was launched and then, while it ran, fix agents were
+dispatched that edit `src/nelli/parallel.nim` and `src/nelli/fuzz.nim`. Since
+`sweep.sh` compiles each test from the WORKING TREE as it reaches it, and
+those modules are transitively imported by nearly every test, the run splits
+into "compiled before the edits" and "compiled after". That result is not
+noisy, it is uninterpretable — and a partially-valid log reading as a real
+result is precisely the round-10 mistake.
+
+The run was killed at 220/496 and its artifacts renamed
+`cur163r13.CONTAMINATED.log*`. **Order the loop gate-then-fix, or fix in a
+worktree.** Killing it also needed the process GROUP of the original `setsid`
+wrapper: `kill` on the `xargs -P6` pool PID orphans its in-flight
+`bash -c run_one` children to init, which keep launching fresh `dt-bounded.sh`
+runs and make the sweep look alive after it was killed.
+
+The authoritative round-13 gate runs AFTER round 13's fixes land, against a
+quiet tree.

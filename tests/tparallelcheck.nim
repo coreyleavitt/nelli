@@ -159,30 +159,58 @@ proc racyGet(c: ptr Counter): int {.gcsafe.} = c[].count
 
 # `{.jitterPoints.}` self-reporting fallback -- "still fires on" note.
 # `insertJitterBoundaries` (parallel.nim) warns at compile time whenever it
-# meets a node that itself holds a nested statement list but has no
-# dedicated dispatch arm (and isn't a nested callable, which is correctly
-# excluded). Two node kinds were caught this way and given real arms:
-# `nnkDefer` and `nnkWhenStmt` (round 13 findings R13-2/R13-6), then
-# `nnkPragmaBlock` (`{.cast(gcsafe).}: ...` and similar -- found by the
-# fallback firing while verifying the first two, not by a new review round;
-# see `racyIncPragmaCastGcsafe` below).
+# meets a node that (a) itself holds a nested statement list and (b) is
+# not one of its two deliberate exclusion sets --
+# `jitterNestedCallableKinds` (wrong ATTRIBUTION: a separate callable's
+# body, not this proc's control flow) or `jitterCannotExecuteAtRuntimeKinds`
+# (cannot run a real jitter call at all). Every node kind this fallback has
+# caught so far sorts into exactly one of three outcomes:
 #
-# As of this writing, ONE more construct is confirmed to still trip the
-# fallback and was deliberately NOT given an arm: `nnkStaticStmt`
-# (`static: ...`). Unlike the three above, giving it the same copy-paste
-# arm would be actively WRONG, not just pending: a `static:` body runs at
-# COMPILE time (Nim's CTFE VM), and `parallelJitterPoint()` bottoms out in
-# a real `importc`'d syscall (`posix.sched_yield`/`SwitchToThread`) that
-# cannot execute there at all -- verified empirically: a bare
-# `static: parallelJitterPoint()` fails to compile with "cannot 'importc'
-# variable at compile time; sched_yield". So for `nnkStaticStmt` the
-# fallback's current behavior (warn, leave uninstrumented) is already the
-# CORRECT outcome, not a gap -- the fix, if this is ever revisited, is a
-# documented exclusion (like the nested-callable list) explaining why, not
-# a new instrumenting arm. This is concrete evidence that the allow-list
-# does not simply converge to "eventually every statement-holding node
-# kind gets an arm": some future fallback hits will need bespoke reasoning
-# about whether instrumenting is even valid, the same way this one did.
+# 1. GIVEN A REAL ARM. `nnkDefer` and `nnkWhenStmt` (round 13 findings
+#    R13-2/R13-6), then `nnkPragmaBlock` (`{.cast(gcsafe).}: ...` and
+#    similar -- found by the fallback firing while verifying the first
+#    two, not by a new review round; see `racyIncPragmaCastGcsafe` below).
+#
+# 2. MOVED INTO A DELIBERATE EXCLUSION, so the fallback is now SILENT on
+#    it: `nnkStaticStmt` (`static: ...`). Giving it the same copy-paste
+#    arm as (1) would be actively WRONG, not just pending: a `static:`
+#    body runs at COMPILE time (Nim's CTFE VM), and
+#    `parallelJitterPoint()` bottoms out in a real `importc`'d syscall
+#    (`posix.sched_yield`/`SwitchToThread`) that cannot execute there at
+#    all -- verified empirically: a bare `static: parallelJitterPoint()`
+#    fails to compile with "cannot 'importc' variable at compile time;
+#    sched_yield". This is exactly the same "a warning that fires on
+#    correct code trains people to ignore every warning after it"
+#    principle that originally justified excluding nested callables (round
+#    13 finding R13-1's lesson, applied to this fallback itself) -- so
+#    `nnkStaticStmt` was moved into `jitterCannotExecuteAtRuntimeKinds`
+#    rather than left to warn forever.
+#
+# 3. LEFT WARNING ON PURPOSE, because it sorts into NEITHER of the above:
+#    a trailing-block call like `withLock lock: <body>` --
+#    `nnkCommand`/`nnkCall` with an `nnkStmtList` as its last argument
+#    (generic do-notation-without-`do` sugar; this shape is not specific
+#    to `withLock` -- it is how ANY template/macro with an `untyped` last
+#    parameter receives a trailing block). Unlike `defer`/`when`/pragma
+#    blocks, whose body-splicing semantics are fixed by the compiler, the
+#    real owner of a trailing-block call's body is whatever macro/template
+#    it is handed to -- `jitterPoints` is an `untyped` macro running
+#    pre-expansion and has no way to know whether that callee tolerates an
+#    extra spliced-in statement (`withLock` clearly would; a macro that
+#    pattern-matches its block argument's exact shape might not).
+#    Blanket-instrumenting every trailing-block call would be UNSOUND in
+#    general, so this is not an "add an arm" case -- but it is also not
+#    "always wrong to instrument" the way `static:` is, so it does not
+#    belong in an exclusion set either. The warning firing here is
+#    reporting a real, judgment-requiring gap, not noise; it is left as
+#    future work rather than fixed blind.
+#
+# So the allow-list does NOT simply converge to "eventually every
+# statement-holding node kind gets an arm" -- outcome (2) shows some hits
+# need a documented exclusion instead, and outcome (3) shows some hits are
+# genuinely ambiguous (sound for the specific macro a SUT author used, not
+# sound in general) and are correctly left as an open, actionable warning
+# rather than force-classified into either bucket.
 
 # Same race as `racyInc`, but the read/write window is widened with the
 # library's low-level intra-op primitive instead of a hand-rolled

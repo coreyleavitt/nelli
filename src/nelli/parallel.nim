@@ -340,18 +340,38 @@ proc instrumentStmtList(list: NimNode; count: var int; procName: string): NimNod
       result.add newCall(bindSym"parallelJitterPoint")
       inc count
 
-## Nested-callable node kinds `insertJitterBoundaries` must never recurse
-## into or warn about, even though several of them carry an `nnkStmtList`
-## body: a `proc`/`func`/`lambda`/etc. declared inside the annotated proc's
-## body is a SEPARATE callable with its own statement lists, not part of
-## this proc's control flow. Instrumenting it (or warning that it was
-## skipped) would be incorrect attribution — the "unhandled construct"
-## fallback warning below exists to catch REAL gaps like round 13's
-## `nnkDefer`/`nnkWhenStmt`, not to fire on every nested `proc` a SUT
-## happens to declare.
+## Two DIFFERENT reasons a statement-holding node kind must never reach
+## the fallback's "you probably need a new arm" warning below. These are
+## genuinely distinct failure modes, not one grab-bag allow-list — kept as
+## two separate consts, not one combined set, so a future maintainer
+## sorting a newly-discovered node kind has to pick ONE of these two
+## reasons (or conclude neither applies, in which case the warning is
+## correct and an arm is probably the right fix).
+##
+## (1) WRONG ATTRIBUTION. A `proc`/`func`/`lambda`/etc. declared inside
+## the annotated proc's body is a SEPARATE callable with its own
+## statement lists, not part of THIS proc's control flow. Instrumenting
+## it (or warning that it was skipped) would attribute its body's
+## statement boundaries to the wrong proc.
 const jitterNestedCallableKinds = {
   nnkProcDef, nnkFuncDef, nnkLambda, nnkIteratorDef, nnkTemplateDef,
   nnkMacroDef, nnkConverterDef, nnkMethodDef, nnkDo}
+
+## (2) CANNOT EXECUTE IN THIS CONTEXT. A node kind whose body does not run
+## as ordinary proc-call-time code, so a runtime call inserted into it
+## would be wrong regardless of attribution. `nnkStaticStmt` (`static:
+## ...`) is the only member so far: its body runs at COMPILE TIME, inside
+## Nim's CTFE VM, and `parallelJitterPoint` bottoms out in a real
+## `importc`'d syscall (`sched_yield` / `SwitchToThread`, wrapped by
+## `schedulerYield` in this module) that the CTFE VM cannot execute at
+## all. Confirmed empirically (not just reasoned about) by compiling a
+## bare `static: parallelJitterPoint()`, which fails with:
+##   Error: cannot 'importc' variable at compile time; sched_yield
+## So for this node kind, silently skipping is the CORRECT outcome, not a
+## gap awaiting an arm — round 13 finding R13-1's lesson (a diagnostic
+## that fires on correct code trains people to ignore every diagnostic
+## after it) applies here exactly as it does to `jitterNestedCallableKinds`.
+const jitterCannotExecuteAtRuntimeKinds = {nnkStaticStmt}
 
 proc hasStmtListChild(n: NimNode): bool =
   ## True if `n` has a direct child that is itself an `nnkStmtList` —
@@ -423,7 +443,10 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ##   flow" reason, this rewrite never descends into a nested
   ##   `proc`/`func`/`lambda`/`iterator`/`template`/`macro`/`converter`/
   ##   `method`/`do` block declared inside the annotated proc's body —
-  ##   see `jitterNestedCallableKinds`.
+  ##   see `jitterNestedCallableKinds`. A `static:` body is excluded for a
+  ##   DIFFERENT reason — it isn't a wrong-attribution problem, it cannot
+  ##   run a real jitter call at all — see
+  ##   `jitterCannotExecuteAtRuntimeKinds`.
   ##
   ## The never-insert-after-the-last-statement rule (see
   ## `instrumentStmtList`) is applied at EVERY statement list this
@@ -441,31 +464,63 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ## An allow-list of "constructs we thought of" will always be one
   ## review round behind whatever construct nobody thought of yet. So the
   ## `else` arm below does not just fall through: if the node it was
-  ## handed is itself a statement-holding construct (`hasStmtListChild`)
-  ## and not a nested callable
-  ## (`jitterNestedCallableKinds`, which legitimately have a body but
-  ## aren't part of this proc's control flow), it emits a compile-time
-  ## `warning` naming the node kind, the proc, and that a nested body was
-  ## left uninstrumented. This is a `warning`, not the `{.error.}` the
-  ## macro itself uses for zero total insertions (see `jitterPoints`):
-  ## a proc that partially instruments — every OTHER statement boundary
-  ## still gets a yield — is still useful, and hard-failing the build
-  ## every time a SUT author reaches for some exotic statement kind this
-  ## module hasn't special-cased yet would be worse than the gap it
-  ## reports.
+  ## handed (a) is itself a statement-holding construct
+  ## (`hasStmtListChild`) and (b) is NOT one of the two deliberate
+  ## exclusion sets above (`jitterNestedCallableKinds` — wrong
+  ## attribution — or `jitterCannotExecuteAtRuntimeKinds` — cannot run a
+  ## real jitter call at all), it emits a compile-time `warning`. The
+  ## warning's claim is deliberately narrow: NOT "this node kind is
+  ## unhandled" (which is also true of the exclusion sets, yet they must
+  ## stay silent), but "this node kind holds statements, is not one of
+  ## this macro's known-deliberate exclusions, and most likely needs a
+  ## new dispatch arm — go add one, or add it to an exclusion set with a
+  ## reason if instrumenting it would be wrong." This is a `warning`, not
+  ## the `{.error.}` the macro itself uses for zero total insertions (see
+  ## `jitterPoints`): a proc that partially instruments — every OTHER
+  ## statement boundary still gets a yield — is still useful, and
+  ## hard-failing the build every time a SUT author reaches for some
+  ## exotic statement kind this module hasn't sorted yet would be worse
+  ## than the gap it reports.
   ##
-  ## This mechanism has already paid for itself once: `nnkPragmaBlock`
-  ## (`{.cast(gcsafe).}: ...` and similar) was found by this fallback
-  ## firing while verifying the `nnkDefer`/`nnkWhenStmt` fix above, not
-  ## by a subsequent review round, and got its own arm below rather than
-  ## being left on the warning. Whether the allow-list of arms
-  ## eventually converges (every statement-holding construct in the Nim
-  ## grammar gets an arm and the fallback goes permanently quiet) or
-  ## stays genuinely open-ended (real Nim code keeps finding new
-  ## statement-holding node kinds) is, as of this writing, still an open
-  ## question — see the "still fires on" note kept up to date at the top
-  ## of `tests/tparallelcheck.nim`'s jitter-pragma section for the
-  ## current answer.
+  ## Also load-bearing per round 13 finding R13-1's lesson, applied
+  ## recursively to this fallback itself: a warning that fires on CORRECT
+  ## code (i.e. a node kind that was merely unsorted, not actually buggy)
+  ## trains people to ignore every warning after it, including the real
+  ## ones. That is exactly why `nnkStaticStmt` was moved into
+  ## `jitterCannotExecuteAtRuntimeKinds` instead of being left to warn
+  ## forever — see that const's doc comment.
+  ##
+  ## This mechanism has already paid for itself twice, both times without
+  ## a new review round: `nnkPragmaBlock` (`{.cast(gcsafe).}: ...` and
+  ## similar) was found while verifying the `nnkDefer`/`nnkWhenStmt` fix
+  ## above, and got its own arm below. `nnkStaticStmt` (`static: ...`)
+  ## was found immediately after, and got excluded with a reason instead
+  ## — instrumenting it does not just need an arm, it is actively wrong
+  ## (see `jitterCannotExecuteAtRuntimeKinds`). Whether the allow-lists
+  ## (arms + exclusions together) eventually converge (every
+  ## statement-holding construct in the Nim grammar gets sorted into one
+  ## of the two, and the fallback goes permanently quiet) or stay
+  ## genuinely open-ended is, as of this writing, still not fully
+  ## resolved: a trailing-block call like `withLock lock: <body>`
+  ## (`nnkCommand`/`nnkCall` with an `nnkStmtList` as the last argument —
+  ## this is generic do-notation-without-`do` sugar, always routed to a
+  ## template or macro's `untyped` parameter, not specific to `withLock`)
+  ## also reaches this fallback and is DELIBERATELY left as a warning,
+  ## sorting into NEITHER exclusion set: unlike `defer`/`when`/pragma
+  ## blocks, whose body-splicing semantics are fixed by the compiler, the
+  ## real owner of a trailing-block call's body is whatever macro/template
+  ## it is passed to — this `untyped` macro runs pre-expansion and cannot
+  ## know whether that callee's body-handling logic can tolerate an extra
+  ## spliced-in statement (some, like `withLock`, clearly can; a macro
+  ## that pattern-matches its block argument's exact shape might not).
+  ## Blanket-instrumenting every trailing-block call would be UNSOUND in
+  ## general, so this is not an "add an arm" case; but it is also not
+  ## "always wrong to instrument" the way `static:` is, so it does not
+  ## belong in an exclusion set either — the warning firing here is
+  ## reporting a real, judgment-requiring gap, not noise. See the "still
+  ## fires on" note kept up to date at the top of
+  ## `tests/tparallelcheck.nim`'s jitter-pragma section for the current,
+  ## fullest answer.
   case n.kind
   of nnkStmtList:
     result = instrumentStmtList(n, count, procName)
@@ -589,16 +644,30 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
     result = nnkPragmaBlock.newTree(
       n[0], instrumentStmtList(n[1], count, procName))
   else:
-    if n.kind notin jitterNestedCallableKinds and hasStmtListChild(n):
+    if n.kind notin jitterNestedCallableKinds and
+       n.kind notin jitterCannotExecuteAtRuntimeKinds and
+       hasStmtListChild(n):
+      # NOT "this node kind is unhandled" -- that is also true of the two
+      # exclusion sets above, and they must stay silent. The actionable
+      # claim is narrower: this node kind holds statements, is not one of
+      # this macro's known-deliberate exclusions, and most likely needs a
+      # real dispatch arm -- or, if instrumenting it would be wrong for
+      # some reason (see jitterNestedCallableKinds /
+      # jitterCannotExecuteAtRuntimeKinds for the two known reasons),
+      # belongs in one of those exclusion sets instead of a new arm.
       warning(
         "{.jitterPoints.}: proc `" & procName & "` has a nested `" &
-        $n.kind & "` construct that insertJitterBoundaries has no arm " &
-        "for -- its statement-list body was left uninstrumented, so any " &
-        "race living inside it will NOT be widened by this pragma. Add " &
-        "an `of " & $n.kind & ":` arm to insertJitterBoundaries " &
-        "(parallel.nim) that recurses into its body via " &
-        "instrumentStmtList/insertJitterBoundaries, the same way the " &
-        "existing arms do.",
+        $n.kind & "` construct that holds statements, is not one of " &
+        "this macro's deliberate exclusions (jitterNestedCallableKinds " &
+        "/ jitterCannotExecuteAtRuntimeKinds in parallel.nim), and has " &
+        "no dispatch arm in insertJitterBoundaries -- so its body was " &
+        "left uninstrumented and any race living inside it will NOT be " &
+        "widened by this pragma. This most likely needs a new `of " &
+        $n.kind & ":` arm (see the existing arms for the pattern) -- " &
+        "unless instrumenting it would actually be wrong (wrong " &
+        "attribution, like a nested callable, or cannot execute at " &
+        "runtime, like a `static:` body), in which case it belongs in " &
+        "one of the two exclusion sets above instead, not a new arm.",
         n)
     result = n
 

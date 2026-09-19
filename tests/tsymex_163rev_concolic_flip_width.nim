@@ -61,9 +61,24 @@
 ## has no call sites in `src/`, and `runConcolicFlipImpl` was dropping
 ## `.obligations`/`.parseErrors` on every real flip. So the counters
 ## `obligationsLive`/`parseDeclines` now ride `ConcolicFlipResult
-## .collectCounters` -> `foldFlipResult` -> `CampaignStats.concolicYield`, which
-## is user-visible at campaign end. The raised-VERDICT channel is still
-## deliberately absent; a count and a verdict are different things.
+## .collectCounters` -> `foldFlipResult` -> `Orchestrator.concolicYield` ->
+## `CampaignStats.concolicYield` -- and that last hop was originally claimed
+## to make them "user-visible at campaign end". Round 11 review found that
+## claim FALSE: nothing in the repo rendered `FuzzReport`/`CampaignStats` at
+## all -- no `echo`, no `$` operator, no serializer; the only reader
+## anywhere was a `check report.stats.concolicYield...` assertion in a test.
+## What was and remains true, without the overstatement: the counters are
+## RETURNED to the caller on `FuzzReport.stats.concolicYield`, reachable by
+## any code that reads the report -- exactly as reachable as every OTHER
+## `CampaignStats` field (`drawsSymbolicated` and the rest), which is a
+## legitimate library design, not itself a defect. As of this commit
+## `CampaignStats` also has a renderer -- `formatCampaignSummary*(s:
+## CampaignStats): string` (`fuzz.nim`) -- so a caller wanting a
+## human-readable campaign summary no longer has to hand-roll one. The
+## library still never prints it unbidden: calling `formatCampaignSummary`
+## (or not) stays the caller's decision, never the fuzz loop's own. The
+## raised-VERDICT channel is still deliberately absent; a count and a
+## verdict are different things.
 ##
 ## House rule: every symbolic expectation below is paired with an ORACLE
 ## (the same computation executed for real, in Nim, in this file) and, where

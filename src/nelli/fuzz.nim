@@ -816,6 +816,49 @@ type
       ## Bounded recorded-branch-index attempts per stall round. Any value
       ## `<= 0` resolves to `8`, matching `tryConcolicBridge`'s own default.
 
+proc formatCampaignSummary*(s: CampaignStats): string =
+  ## #163 review round 11, Finding L1(a). `CampaignStats` had no renderer
+  ## anywhere in the library — `report.stats.<field>` assertions in tests
+  ## were the only reader of ANY field here, not just `concolicYield`'s two
+  ## round-10 counters. This covers the whole struct for that reason: the
+  ## defect was the struct being unusable, not those two fields being
+  ## under-served relative to the rest.
+  ##
+  ## A named proc rather than a `$` overload — `engine/render.nim`'s
+  ## `renderReport`/`repro` set the precedent for a big, composite,
+  ## report-shaped type (this module's own `key=value`/`\n`-joined idiom,
+  ## reused verbatim below), where `smt/abstraction.nim`'s `` `$`(Interval) ``
+  ## is the precedent for a small single-value type. `CampaignStats` is the
+  ## former shape.
+  ##
+  ## Deliberately never called from `fuzz`/`fuzzWith`'s own loop: this is a
+  ## library, and deciding to print a campaign summary on the caller's
+  ## behalf is the caller's call, not this module's. Providing the renderer
+  ## is the fix; invoking it is optional.
+  var lines: seq[string] = @[]
+  lines.add("execs=" & $s.execs)
+  lines.add("elapsed=" & $s.elapsed)
+  lines.add("execsPerSec=" & s.execsPerSec.formatFloat(ffDecimal, 2))
+  lines.add("corpusSize=" & $s.corpusSize)
+  lines.add("coverageEdges=" & $s.coverageEdges)
+  lines.add("respawnCount=" & $s.respawnCount)
+  lines.add("stormTripped=" & $s.stormTripped)
+  lines.add("stormBackoffLevel=" & $s.stormBackoffLevel)
+  lines.add("sinceLastCoverageAdmits=" & $s.sinceLastCoverageAdmits)
+  lines.add("sinceLastCrashIters=" & $s.sinceLastCrashIters)
+  lines.add("crashCount=" & $s.crashCount)
+  lines.add("totalMutationOps=" & $s.totalMutationOps)
+  lines.add("cullCount=" & $s.cullCount)
+  var pulls: seq[string] = @[]
+  for p in s.operatorPulls: pulls.add(p.formatFloat(ffDecimal, 3))
+  lines.add("operatorPulls=[" & pulls.join(", ") & "]")
+  var prov: seq[string] = @[]
+  for p in Provenance: prov.add($p & "=" & $s.provenanceCounts[p])
+  lines.add("provenanceCounts={" & prov.join(", ") & "}")
+  lines.add("concolicYield:")
+  for l in ($s.concolicYield).splitLines(): lines.add("  " & l)
+  result = lines.join("\n")
+
 proc resolveAssist*(assist: ConcolicAssist): tuple[stallRounds, maxBranchAttempts: int]
                     {.raises: [ConcolicAssistError].} =
   ## RFC-z3-optional, the resolution rule, in one place: assist present ⇒

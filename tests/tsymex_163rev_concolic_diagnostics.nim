@@ -48,9 +48,35 @@
 ## Method note (inherited from #162/#163): every symbolic expectation below
 ## is paired with the SAME computation run for real in this file where one
 ## is meaningful.
+##
+## Round 11 review added two more findings on this same chain, both closed
+## below:
+##
+## L1(a) (Critical) -- the chain's last hop, "user-visible at campaign end",
+## was FALSE: nothing in the repo rendered `FuzzReport`/`CampaignStats` at
+## all (`report.stats.<field>` assertions in tests were the only reader of
+## ANY field, not just `concolicYield`'s two round-10 counters). Fixed by
+## `formatCampaignSummary*(s: CampaignStats): string` (`fuzz.nim`) -- a
+## renderer covering the WHOLE struct, never called from the library's own
+## loop (printing on the caller's behalf is the caller's decision, not
+## this one's). The corrected claim -- "returned to the caller, and now
+## formattable" -- lives in `tsymex_163rev_concolic_flip_width.nim`'s own
+## header, the file that originally overstated it.
+##
+## D5 (High) -- `foldFlipResult` (`smt/concolictaxonomy.nim`) summed each
+## `ConcolicYieldCounters` scalar with a hand-written `+=` line, now eight of
+## them: the SAME "producer exists, a human must remember to wire the
+## consumer" hazard round 10 closed one layer up. Replaced with a
+## `fieldPairs` walk that sums any `int` field automatically and fails the
+## BUILD (`{.error.}`) on an unhandled field type, so a future field cannot
+## silently vanish from the fold the way this one nearly did three times.
+## `ambiguousByConstruct` (the one non-`int`, `Table`-valued field) keeps its
+## explicit per-key merge -- a generic `+=` cannot express it, and the `when`
+## names it explicitly rather than falling through to the `{.error.}` arm.
 import std/[unittest, strutils]
 import nelli/smt/canonicalize
 import nelli/symex
+import nelli/fuzz
 
 # =============================================================================
 # Channel 1 -- the obligation log
@@ -255,6 +281,116 @@ suite "#163 review round 10 -- obligationsLive/parseDeclines travel the concolic
     check y.collect.obligationsLive == r1.collectCounters.obligationsLive +
                                        r2.collectCounters.obligationsLive
     check y.collect.obligationsLive >= 2
+
+suite "#163 review round 11 -- foldFlipResult's generic fieldPairs fold (Finding D5)":
+
+  test "every scalar ConcolicYieldCounters field sums correctly across two folds":
+    let counters1 = ConcolicYieldCounters(
+      tracesTruncated: 1, drawsSymbolicated: 2, paramsConcretized: 3,
+      unsupportedDrawKinds: 4, nonInt64Draws: 5, ambiguousBranches: 6,
+      walkDegradeCount: 7, obligationsLive: 8, parseDeclines: 9)
+    let counters2 = ConcolicYieldCounters(
+      tracesTruncated: 10, drawsSymbolicated: 20, paramsConcretized: 30,
+      unsupportedDrawKinds: 40, nonInt64Draws: 50, ambiguousBranches: 60,
+      walkDegradeCount: 70, obligationsLive: 80, parseDeclines: 90)
+    let r1 = oneShotFlip(cfoSolvedExact, ccoIntendedCovered, collectCounters = counters1)
+    let r2 = oneShotFlip(cfoUnsat, ccoNotApplicable, collectCounters = counters2)
+    var y: ConcolicYield
+    foldFlipResult(y, r1)
+    foldFlipResult(y, r2)
+    check y.collect.tracesTruncated == 11
+    check y.collect.drawsSymbolicated == 22
+    check y.collect.paramsConcretized == 33
+    check y.collect.unsupportedDrawKinds == 44
+    check y.collect.nonInt64Draws == 55
+    check y.collect.ambiguousBranches == 66
+    check y.collect.walkDegradeCount == 77
+    check y.collect.obligationsLive == 88
+    check y.collect.parseDeclines == 99
+
+  test "the table-valued field (ambiguousByConstruct) still merges per-key, independent of the scalar fold":
+    var c1 = ConcolicYieldCounters(ambiguousBranches: 5)
+    c1.ambiguousByConstruct[wckIf] = 3
+    c1.ambiguousByConstruct[wckWhile] = 2
+    var c2 = ConcolicYieldCounters(ambiguousBranches: 4)
+    c2.ambiguousByConstruct[wckIf] = 1
+    c2.ambiguousByConstruct[wckIndex] = 3
+    let r1 = oneShotFlip(cfoSolvedExact, ccoIntendedCovered, collectCounters = c1)
+    let r2 = oneShotFlip(cfoUnsat, ccoNotApplicable, collectCounters = c2)
+    var y: ConcolicYield
+    foldFlipResult(y, r1, wckIf)
+    foldFlipResult(y, r2, wckWhile)
+    # Per-key accumulation on the flat table: wckIf gets both calls' wckIf
+    # entries (3+1), wckWhile and wckIndex each get their own single entry --
+    # keyed by what the COLLECT counters recorded, not by the `construct`
+    # argument passed to foldFlipResult (that argument attributes the FLIP
+    # side below, a genuinely different axis).
+    check y.collect.ambiguousByConstruct[wckIf] == 4
+    check y.collect.ambiguousByConstruct[wckWhile] == 2
+    check y.collect.ambiguousByConstruct[wckIndex] == 3
+    check y.byConstruct[wckIf].ambiguousBranches == 4
+    check y.byConstruct[wckWhile].ambiguousBranches == 2
+    check y.byConstruct[wckIndex].ambiguousBranches == 3
+    # The `construct` argument's own axis (flip outcomes) still attributes
+    # correctly alongside the table merge above -- proving the two folds
+    # (generic scalar loop + explicit table merge) didn't step on each other.
+    check y.byConstruct[wckIf].flipOutcomes[cfoSolvedExact] == 1
+    check y.byConstruct[wckWhile].flipOutcomes[cfoUnsat] == 1
+
+suite "#163 review round 11 -- CampaignStats.formatCampaignSummary (Finding L1a)":
+
+  test "formatCampaignSummary is deterministic -- the same stats render identically twice":
+    var y: ConcolicYield
+    let r = oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                        collectCounters = ConcolicYieldCounters(obligationsLive: 3, parseDeclines: 1))
+    foldFlipResult(y, r, wckWhile)
+    let stats = CampaignStats(execs: 42, corpusSize: 5, coverageEdges: 7,
+                              crashCount: 1, totalMutationOps: 9, cullCount: 2,
+                              operatorPulls: @[1.5, 2.25],
+                              provenanceCounts: [pvMutation: 3, pvConcolic: 1, pvI2S: 0, pvImported: 0],
+                              concolicYield: y)
+    check formatCampaignSummary(stats) == formatCampaignSummary(stats)
+
+  test "formatCampaignSummary covers every top-level CampaignStats field, not only concolicYield":
+    let stats = CampaignStats(execs: 42, corpusSize: 5, coverageEdges: 7,
+                              crashCount: 1, totalMutationOps: 9, cullCount: 2,
+                              operatorPulls: @[1.5, 2.25],
+                              provenanceCounts: [pvMutation: 3, pvConcolic: 1, pvI2S: 0, pvImported: 0])
+    let s = formatCampaignSummary(stats)
+    for field in ["execs=", "elapsed=", "execsPerSec=", "corpusSize=",
+                  "coverageEdges=", "respawnCount=", "stormTripped=",
+                  "stormBackoffLevel=", "sinceLastCoverageAdmits=",
+                  "sinceLastCrashIters=", "crashCount=", "totalMutationOps=",
+                  "cullCount=", "operatorPulls=", "provenanceCounts=",
+                  "concolicYield:"]:
+      checkpoint("missing field: " & field)
+      check field in s
+    check "execs=42" in s
+    check "corpusSize=5" in s
+    check "coverageEdges=7" in s
+    check "crashCount=1" in s
+    check "totalMutationOps=9" in s
+    check "cullCount=2" in s
+    check "pvMutation=3" in s
+    check "pvConcolic=1" in s
+
+  test "formatCampaignSummary's concolicYield section reflects the L1/D5 counters, nested and correct":
+    var y: ConcolicYield
+    let r = oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                        collectCounters = ConcolicYieldCounters(obligationsLive: 4, parseDeclines: 2))
+    foldFlipResult(y, r, wckIf)
+    let stats = CampaignStats(concolicYield: y)
+    let s = formatCampaignSummary(stats)
+    check "obligationsLive=4" in s
+    check "parseDeclines=2" in s
+    check "cfoSolvedExact=1" in s
+    check "ccoIntendedCovered=1" in s
+
+  test "a zero-value CampaignStats still renders (no crash, every section present)":
+    let s = formatCampaignSummary(CampaignStats())
+    check "execs=0" in s
+    check "concolicYield:" in s
+    check "byConstruct={}" in s   ## empty Table[WalkerConstructKind, ConstructTally]
 
 suite "#163 review -- walker version pin":
 

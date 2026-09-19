@@ -32,7 +32,7 @@
 ## (`foldFlipResult`) or one admission decision (`recordAdmitOutcome`) at a
 ## time, keyed by construct.
 
-import std/tables
+import std/[tables, strutils]
 import ../choice
 
 type
@@ -307,15 +307,30 @@ proc foldFlipResult*(y: var ConcolicYield, r: ConcolicFlipResult,
   ## `ConcolicBranchRecord`s a flip-solve can target (see
   ## `WalkerConstructKind`'s doc) — a caller targeting a future construct
   ## passes it explicitly once G2 grows past `if`.
-  y.collect.tracesTruncated += r.collectCounters.tracesTruncated
-  y.collect.drawsSymbolicated += r.collectCounters.drawsSymbolicated
-  y.collect.paramsConcretized += r.collectCounters.paramsConcretized
-  y.collect.unsupportedDrawKinds += r.collectCounters.unsupportedDrawKinds
-  y.collect.nonInt64Draws += r.collectCounters.nonInt64Draws
-  y.collect.ambiguousBranches += r.collectCounters.ambiguousBranches
-  y.collect.walkDegradeCount += r.collectCounters.walkDegradeCount
-  y.collect.obligationsLive += r.collectCounters.obligationsLive
-  y.collect.parseDeclines += r.collectCounters.parseDeclines
+  # #163 review round 11, Finding D5: this used to be nine hand-written
+  # `+=` lines (eight scalars plus the table loop below), the SAME hazard
+  # round 10 spent a commit closing one layer up in `ConcolicYieldCounters`
+  # itself — a field can be added there and never wired here, because
+  # wiring it is a thing a human must remember. `fieldPairs` walks BOTH
+  # objects' fields in lockstep by declaration order (verified identical
+  # since both operands are the same type, `ConcolicYieldCounters`) so a
+  # future scalar `int` field sums automatically; the `when` covers every
+  # field type that exists today and the `else` branch is a compile-time
+  # error rather than a silent drop, so a field of some OTHER type (should
+  # one ever be added) fails the build instead of vanishing from the fold.
+  # `ambiguousByConstruct` (the one non-scalar field, a
+  # `Table[WalkerConstructKind, int]`) keeps its own explicit merge below —
+  # a per-key accumulation `+=` cannot express — including the
+  # `byConstruct.ambiguousBranches` side-effect the flat scalar fields have
+  # no equivalent of.
+  for name, dst, src in fieldPairs(y.collect, r.collectCounters):
+    when dst is int:
+      dst += src
+    elif dst is Table[WalkerConstructKind, int]:
+      discard "handled explicitly below"
+    else:
+      {.error: "ConcolicYieldCounters gained a field of type " & $typeof(dst) &
+               " (" & name & ") -- teach foldFlipResult how to fold it".}
   for k, v in r.collectCounters.ambiguousByConstruct:
     y.collect.ambiguousByConstruct.mgetOrPut(k, 0) += v
     y.byConstruct.mgetOrPut(k, ConstructTally()).ambiguousBranches += v
@@ -335,6 +350,85 @@ proc recordAdmitOutcome*(y: var ConcolicYield, outcome: ConcolicAdmitOutcome,
   ## default for why it is `wckIf` today.
   inc y.admitOutcomes[outcome]
   inc y.byConstruct.mgetOrPut(construct, ConstructTally()).admitOutcomes[outcome]
+
+# ---- Rendering --------------------------------------------------------------
+#
+# #163 review round 11, Finding L1(a): `fuzz.nim`'s `formatCampaignSummary`
+# needs to render `CampaignStats.concolicYield` as part of covering the WHOLE
+# `CampaignStats` struct, not just its own two newest fields. These live here
+# rather than in `fuzz.nim` because the types they render do — matching this
+# module's own reasoning for why the taxonomy types themselves live in this
+# leaf module instead of being hand-mirrored downstream. Enum-driven
+# iteration (declared order), never raw `Table` iteration, so the output is
+# deterministic regardless of insertion history — the same reason
+# `engine/render.nim`'s event-stats renderer sorts its `Table` keys before
+# walking them.
+
+proc `$`*(c: ConcolicYieldCounters): string =
+  var lines: seq[string] = @[]
+  lines.add("tracesTruncated=" & $c.tracesTruncated)
+  lines.add("drawsSymbolicated=" & $c.drawsSymbolicated)
+  lines.add("paramsConcretized=" & $c.paramsConcretized)
+  lines.add("unsupportedDrawKinds=" & $c.unsupportedDrawKinds)
+  lines.add("nonInt64Draws=" & $c.nonInt64Draws)
+  lines.add("ambiguousBranches=" & $c.ambiguousBranches)
+  var byConstruct: seq[string] = @[]
+  for k in WalkerConstructKind:
+    let v = c.ambiguousByConstruct.getOrDefault(k, 0)
+    if v != 0: byConstruct.add($k & "=" & $v)
+  lines.add("ambiguousByConstruct={" & byConstruct.join(", ") & "}")
+  lines.add("walkDegradeCount=" & $c.walkDegradeCount)
+  lines.add("obligationsLive=" & $c.obligationsLive)
+  lines.add("parseDeclines=" & $c.parseDeclines)
+  result = lines.join("\n")
+
+proc `$`*(c: ConcolicFlipCounters): string =
+  var byOutcome: seq[string] = @[]
+  for o in ConcolicFlipOutcome:
+    byOutcome.add($o & "=" & $c.byOutcome[o])
+  var byCoverage: seq[string] = @[]
+  for cv in ConcolicCoverageOutcome:
+    byCoverage.add($cv & "=" & $c.byCoverage[cv])
+  result = @[
+    "byOutcome={" & byOutcome.join(", ") & "}",
+    "byCoverage={" & byCoverage.join(", ") & "}",
+    "relaxationAttemptsUsed=" & $c.relaxationAttemptsUsed
+  ].join("\n")
+
+proc `$`*(t: ConstructTally): string =
+  var flipOutcomes: seq[string] = @[]
+  for o in ConcolicFlipOutcome:
+    if t.flipOutcomes[o] != 0: flipOutcomes.add($o & "=" & $t.flipOutcomes[o])
+  var coverageOutcomes: seq[string] = @[]
+  for cv in ConcolicCoverageOutcome:
+    if t.coverageOutcomes[cv] != 0: coverageOutcomes.add($cv & "=" & $t.coverageOutcomes[cv])
+  var admitOutcomes: seq[string] = @[]
+  for a in ConcolicAdmitOutcome:
+    if t.admitOutcomes[a] != 0: admitOutcomes.add($a & "=" & $t.admitOutcomes[a])
+  result = "ambiguousBranches=" & $t.ambiguousBranches &
+           " flipOutcomes={" & flipOutcomes.join(", ") & "}" &
+           " coverageOutcomes={" & coverageOutcomes.join(", ") & "}" &
+           " admitOutcomes={" & admitOutcomes.join(", ") & "}"
+
+proc `$`*(y: ConcolicYield): string =
+  var lines: seq[string] = @["collect:"]
+  for l in ($y.collect).splitLines(): lines.add("  " & l)
+  lines.add("flip:")
+  for l in ($y.flip).splitLines(): lines.add("  " & l)
+  var admitOutcomes: seq[string] = @[]
+  for a in ConcolicAdmitOutcome:
+    admitOutcomes.add($a & "=" & $y.admitOutcomes[a])
+  lines.add("admitOutcomes={" & admitOutcomes.join(", ") & "}")
+  var byConstruct: seq[string] = @[]
+  for k in WalkerConstructKind:
+    if y.byConstruct.hasKey(k):
+      byConstruct.add($k & ": " & $y.byConstruct[k])
+  if byConstruct.len > 0:
+    lines.add("byConstruct:")
+    for l in byConstruct: lines.add("  " & l)
+  else:
+    lines.add("byConstruct={}")
+  result = lines.join("\n")
 
 # ---- Backward-compatible flat accessors ------------------------------------
 #

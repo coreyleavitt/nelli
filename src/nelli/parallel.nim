@@ -25,7 +25,7 @@
 ## the algorithmic core ships first so the Wing-Gong definition is
 ## in place and tested independent of the thread-orchestration layer.
 
-import std/[options, hashes, sets, locks, monotimes, times]
+import std/[options, hashes, sets, locks, monotimes, times, macros]
 import ./strategy, ./datasource, ./int128, ./choice
 
 when defined(windows):
@@ -211,8 +211,9 @@ type
     ## plus how many real scheduler-yield calls (`spinJitter`) to spend
     ## immediately BEFORE invoking it — never during the op's own body.
     ## See `parallelCheck`'s doc comment for exactly what that can and
-    ## cannot catch, and `parallelJitterPoint` for perturbing INSIDE an
-    ## op. Jitter delays are drawn from the choice sequence, so they
+    ## cannot catch, and `{.jitterPoints.}` (or the lower-level
+    ## `parallelJitterPoint`) for perturbing INSIDE an op. Jitter delays
+    ## are drawn from the choice sequence, so they
     ## *shrink* — if a race only manifests at a specific delay
     ## pattern, the engine can pull it toward the minimal pattern
     ## that still exposes the bug.
@@ -271,26 +272,105 @@ proc spinJitter(n: int) {.inline.} =
     schedulerYield()
 
 proc parallelJitterPoint*(n = 1) =
-  ## Call this from INSIDE an `applySUT` op body, at the exact point
-  ## you want the OS scheduler to reconsider which thread runs next —
-  ## e.g. between the read and the write of an unsynchronized
-  ## read-modify-write. `ScheduledOp.jitter` / `maxJitter` can only
-  ## insert delay BETWEEN ops (see `parallelCheck`'s doc comment); it
-  ## never runs while an op's body is executing, so it structurally
-  ## cannot widen a race window that lives inside a single op. This
-  ## proc performs the same real scheduler-yield `spinJitter` uses,
-  ## just reachable from wherever inside the op the SUT author needs
-  ## it — the library's answer to "hand-roll a `sleep` in the SUT" for
-  ## exposing an intra-op race.
+  ## The low-level primitive: call this from INSIDE an `applySUT` op
+  ## body, at the exact point you want the OS scheduler to reconsider
+  ## which thread runs next — e.g. between the read and the write of an
+  ## unsynchronized read-modify-write. `ScheduledOp.jitter` / `maxJitter`
+  ## can only insert delay BETWEEN ops (see `parallelCheck`'s doc
+  ## comment); it never runs while an op's body is executing, so it
+  ## structurally cannot widen a race window that lives inside a single
+  ## op. This proc performs the same real scheduler-yield `spinJitter`
+  ## uses, just reachable from wherever inside the op the SUT author
+  ## needs it.
+  ##
+  ## **Prefer `{.jitterPoints.}` (below) unless you specifically want
+  ## one yield at one hand-chosen point.** Calling this directly asks
+  ## the author to already know exactly where the race window is —
+  ## which partly defeats the point of automated concurrency testing —
+  ## and it puts a call into `nelli/parallel` inside the code under
+  ## test, giving production code a dependency on a test harness for no
+  ## other reason. `{.jitterPoints.}` is the recommended surface for
+  ## "instrument this proc for the harness"; this proc remains public
+  ## and supported as the primitive it's built on, for the case where
+  ## you genuinely do want a single yield at a single point you've
+  ## already identified.
   ##
   ## **Measured reliability**: placed at the read/write boundary of the
   ## same unsynchronized-increment race `parallelCheck`'s doc comment
   ## describes, this hook (default `n = 1`, no `sleep` anywhere in the
   ## op) caught the race in 20/20 idle runs and 10/10 CPU-contended runs
   ## -- see "lock-free wrong counter is detected via parallelJitterPoint
-  ## (no sleep)" in `tests/tparallelcheck.nim`.
+  ## (no sleep)" in `tests/tparallelcheck.nim`. As with every catch-rate
+  ## figure in this module, that is a one-time measurement taken when
+  ## the hook was introduced (round 10), not a property re-verified by
+  ## every sweep -- the single seeded run in that test is what actually
+  ## runs on every sweep, and it guards the basic catch (an
+  ## `otFalsified`/`otFlaky` outcome), not the specific ratio.
   for _ in 0 ..< n:
     schedulerYield()
+
+proc insertJitterBoundaries(body: NimNode): NimNode =
+  ## AST rewrite used by `{.jitterPoints.}`: insert a
+  ## `parallelJitterPoint()` call between every pair of adjacent
+  ## top-level statements in `body`. An N-statement body has N-1
+  ## boundaries between them; every boundary gets a yield, so whichever
+  ## boundary the real race lives at — the SUT author does not need to
+  ## know which — a yield lands there. This generalises the
+  ## read/write-boundary case `parallelJitterPoint` asks the author to
+  ## hand-locate: an unsynchronized read-modify-write is, at the Nim
+  ## source level, two adjacent top-level statements (read into a
+  ## local, then write back), so splitting every top-level boundary
+  ## covers that shape without the author pointing at it.
+  ##
+  ## Deliberately shallow: only the proc's OWN top-level statement list
+  ## is split. Statements nested inside an `if`/`case`/`while`/`block`
+  ## body are left alone — unlike `{.cover.}`, which recurses into
+  ## branch bodies because it must instrument every branch to measure
+  ## coverage, a yield only needs to land at ONE boundary to widen a
+  ## race, and the shapes this library documents (a bare
+  ## read-modify-write) are already flat top-level statement sequences.
+  ## A future extension could recurse the same way `instrumentNode`
+  ## does in coverage.nim if a race nested inside a branch turns up in
+  ## practice.
+  if body.kind != nnkStmtList or body.len <= 1:
+    return body
+  result = newStmtList()
+  for i in 0 ..< body.len:
+    result.add body[i]
+    if i < body.len - 1:
+      result.add newCall(bindSym"parallelJitterPoint")
+
+macro jitterPoints*(procDef: untyped): untyped =
+  ## Pragma macro: rewrite the proc's body so a real scheduler-yield
+  ## (`parallelJitterPoint`) runs between every pair of adjacent
+  ## top-level statements. Use as `proc f(c: ptr T): int {.gcsafe,
+  ## jitterPoints.} = ...`.
+  ##
+  ## This is the RECOMMENDED way to widen an intra-op race window for
+  ## `parallelCheck`. Unlike calling `parallelJitterPoint()` by hand, it
+  ## asks the SUT author to locate nothing: annotate the proc once and
+  ## every top-level statement boundary gets a chance to yield,
+  ## including whichever boundary the actual race lives at. It also
+  ## keeps the instrumentation OUT of the function body text, the same
+  ## reason this codebase already reaches for a body-rewriting macro
+  ## pragma rather than a hand-inserted call for "instrument this proc"
+  ## — see `{.cover.}` / `{.covercmp.}` in coverage.nim, whose structure
+  ## (`expectKind` the proc, rewrite `procDef[^1]`, return `procDef`)
+  ## this macro follows directly.
+  ##
+  ## **Measured reliability**: applied to the same unsynchronized-increment
+  ## race `parallelJitterPoint`'s own figure is based on (`racyIncPragma`,
+  ## with no `sleep` and no hand-placed `parallelJitterPoint()` call
+  ## anywhere in the SUT), this pragma caught the race in 20/20 idle runs
+  ## and 10/10 CPU-contended runs -- see "lock-free wrong counter is
+  ## detected via {.jitterPoints.} (no sleep, no hand-placed call)" in
+  ## tests/tparallelcheck.nim. As with every catch-rate figure in this
+  ## module, that is a one-time measurement, not re-verified by every
+  ## sweep; the single seeded run in that test is what runs on every
+  ## sweep, and it guards the basic catch, not the ratio.
+  expectKind procDef, {nnkProcDef, nnkFuncDef, nnkLambda}
+  procDef[^1] = insertJitterBoundaries(procDef[^1])
+  result = procDef
 
 proc workerProc[State, SUT, Ret](
     ctx: ptr WorkerCtx[State, SUT, Ret]) {.thread, nimcall.} =
@@ -407,13 +487,18 @@ proc parallelCheck*[State, SUT, Ret](
   ##
   ## If your SUT has that shape of race and you want the harness —
   ## rather than a hand-rolled `sleep` inside the SUT itself — to widen
-  ## the window, call `parallelJitterPoint()` from inside `applySUT` at
-  ## the specific point you want the scheduler to reconsider (e.g.
-  ## between the read and the write). It performs the same real
-  ## scheduler-yield mechanism as `maxJitter`, just reachable from
-  ## inside an op body instead of only between ops. This is a measured
-  ## recommendation, not a hopeful one: see `parallelJitterPoint`'s own
-  ## doc comment for the catch-rate test that backs it.
+  ## the window, annotate the op proc `{.jitterPoints.}` (see that
+  ## pragma's doc comment). It rewrites the proc's body to yield between
+  ## every top-level statement boundary — including whichever one the
+  ## real read/write race sits at — without you having to locate the
+  ## boundary yourself or add a call inside the function text. This is
+  ## a measured recommendation, not a hopeful one: see `{.jitterPoints.}`'s
+  ## own doc comment for the catch-rate test that backs it.
+  ##
+  ## `parallelJitterPoint()` remains available as the low-level
+  ## primitive `{.jitterPoints.}` is built on, for the narrower case
+  ## where you already know the exact point and want exactly one yield
+  ## there — see its own doc comment.
 
   let spec = spec   # capture by value
   let retEq = retEq

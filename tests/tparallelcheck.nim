@@ -139,11 +139,16 @@ proc racyInc(c: ptr Counter): int {.gcsafe.} =
   # parallel.nim). Confirmed empirically too: with `spinJitter` now a
   # real OS scheduler-yield (see parallel.nim) instead of a nanosecond
   # busy spin, deleting this `sleep(1)` and relying on that alone
-  # still failed to catch the race in 1 of 10 idle runs -- not
-  # reliable enough to keep in a suite that must prove the catch. The
-  # library also offers `parallelJitterPoint()`, callable from inside
-  # an op body precisely for this shape of race, but its delay length
-  # is scheduler-dependent (a yield, not a guaranteed pause) and this
+  # still failed to catch the race in 1 of 10 idle runs (9/10) -- not
+  # reliable enough to keep in a suite that must prove the catch. That
+  # 9/10 figure, like every catch-rate figure this module's doc
+  # comments quote, is a ONE-TIME measurement taken at the commit that
+  # introduced it, not a property any test re-verifies on every sweep
+  # -- see the "NOTE on the doc figures (L4)" comment in the suite below
+  # for what IS continuously checked. The library also offers
+  # `parallelJitterPoint()` / `{.jitterPoints.}`, usable from inside an
+  # op body precisely for this shape of race, but their delay length is
+  # scheduler-dependent (a yield, not a guaranteed pause) and this
   # `sleep(1)` was kept because it is the one already proven reliable
   # here across idle and CPU-contended runs.
   sleep(1)
@@ -153,12 +158,25 @@ proc racyInc(c: ptr Counter): int {.gcsafe.} =
 proc racyGet(c: ptr Counter): int {.gcsafe.} = c[].count
 
 # Same race as `racyInc`, but the read/write window is widened with the
-# library's dedicated intra-op hook instead of a hand-rolled `sleep(1)`.
-# This is the mechanism `parallelCheck`'s doc comment recommends SUT authors
-# reach for; unlike `racyInc`, this proc has never had a `sleep` in it.
+# library's low-level intra-op primitive instead of a hand-rolled
+# `sleep(1)`. Unlike `racyInc`, this proc has never had a `sleep` in it.
+# `{.jitterPoints.}` (below) is the recommended surface for new code; this
+# hand-placed call remains supported for the case where the author already
+# knows the exact point and wants exactly one yield there.
 proc racyIncJitterPoint(c: ptr Counter): int {.gcsafe.} =
   let v = c[].count
   parallelJitterPoint()
+  c[].count = v + 1
+  v + 1
+
+# Same race again, this time widened purely by annotating the proc
+# `{.jitterPoints.}` — no hand-placed `parallelJitterPoint()` call, no
+# `sleep`, and no knowledge on the author's part of where the race window
+# is. The pragma rewrites the body to yield between every top-level
+# statement boundary; here that's the (`let v = ...`) / (`c[].count = ...`)
+# boundary and the (`c[].count = ...`) / (`v + 1`) boundary.
+proc racyIncPragma(c: ptr Counter): int {.gcsafe, jitterPoints.} =
+  let v = c[].count
   c[].count = v + 1
   v + 1
 
@@ -209,10 +227,26 @@ suite "parallelCheck: racy SUT is caught":
 
   test "lock-free wrong counter is detected via parallelJitterPoint (no sleep)":
     # Same race as above, widened with `parallelJitterPoint()` called from
-    # inside `applySUT` instead of a hand-rolled `sleep(1)` -- the mechanism
-    # `parallelCheck`'s doc comment recommends. `maxJitter` is 0 here
-    # deliberately: between-op jitter must contribute nothing, so a catch
-    # can only be credited to the intra-op hook itself.
+    # inside `applySUT` instead of a hand-rolled `sleep(1)` -- the low-level
+    # primitive `{.jitterPoints.}` (tested below) is built on, and still
+    # supported for a hand-chosen point. `maxJitter` is 0 here deliberately:
+    # between-op jitter must contribute nothing, so a catch can only be
+    # credited to the intra-op hook itself.
+    #
+    # NOTE on the doc figures (L4): `parallel.nim`'s doc comments quote
+    # 20/20 idle and 10/10 CPU-contended catch rates for this hook, and the
+    # `racyInc` comment above quotes 9/10 for between-op jitter alone.
+    # Those are ONE-TIME measurements taken when the mechanism was
+    # introduced, not properties this suite re-verifies every run -- this
+    # test (a single seeded `forAll` run, `seed: 1`, `maxExamples: 30`) is
+    # what actually runs on every sweep, and it guards the basic catch (an
+    # `otFalsified`/`otFlaky` outcome), not the specific ratio. Re-running
+    # 20+30 repeated `forAll` passes here to keep the ratio continuously
+    # true would multiply this file's cost on every sweep for a guarantee
+    # the single-run check doesn't need; if the real catch rate regresses
+    # (e.g. to 15/20), this test can still pass by chance on its one seed.
+    # Anyone who needs the rate re-measured should re-run the manual sweep
+    # this comment describes, the same way it was produced originally.
     let spec = LinSpec[CounterState, ptr Counter, int](
       modelInitial: CounterState(),
       newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
@@ -220,6 +254,39 @@ suite "parallelCheck: racy SUT is caught":
         LinOpDef[CounterState, ptr Counter, int](
           opId: 0,
           applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncJitterPoint(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}
+
+  test "lock-free wrong counter is detected via {.jitterPoints.} (no sleep, no hand-placed call)":
+    # Same race again, widened purely by `{.jitterPoints.}` on `racyIncPragma`
+    # -- no hand-placed `parallelJitterPoint()` call anywhere in the SUT, no
+    # `sleep`, and no knowledge on the test author's part of where the race
+    # window sits (the pragma yields at every top-level statement boundary,
+    # not just the read/write one). `maxJitter` is 0 here for the same
+    # reason as the test above: a catch can only be credited to the pragma.
+    #
+    # See the L4 note on the test above -- the same one-time-measurement
+    # framing applies here.
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragma(c),
           applyModel: applyIncModel),
       ])
     proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)

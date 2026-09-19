@@ -2016,7 +2016,7 @@ type
       ## Z3 logical step count bound. `0` (default) is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
-    maxFrontierSize*: int = 256
+    maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path
       ## frontier down to this many paths (highest-uncertainty-first

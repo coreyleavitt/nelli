@@ -1,24 +1,38 @@
-## Issue #163 item 3 (rev) -- `maxFrontierSize` defaulted to `0` (= unbounded).
-## It is the one INCREMENTAL per-statement frontier cap (`walkBlock`,
-## `runtime.nim`), and with no default cap nothing bounds multiplicative path
-## growth -- more pressing since finding R22 added a `RangeDefect` fork at
-## ranged assignments (a ranged loop counter can now fork per iteration
-## whenever its `ziIvl` discharge is defeated by an unconstrained RHS).
+## Issue #163 item 3 (rev) -- `maxFrontierSize` and why its default is `0`.
 ##
-## `0` remains the documented opt-out meaning UNLIMITED (`ResourceBudget`'s
-## majority contract) -- this only changes what an OMITTED field gets.
-## Measured (not guessed): the largest post-step frontier observed across a
-## broad sample of this engine's heaviest/branchiest currently-terminating
-## suites was 16 (`tsymex_r6_n9_variant_budget.nim`, measured via a temporary
-## `walkBlock` instrumentation in a throwaway `git worktree`, never
-## committed). The new default, `256`, is 16x that ceiling and also matches
-## an existing precedent value already chosen by a test author in this
-## codebase for this exact field (`tsymex_phase7_assertcovered.nim`'s `lax`
-## config).
+## HISTORY, and a reversal worth reading before changing this again.
 ##
-## House rule: every symbolic expectation is paired with an oracle computed
-## by real Nim execution in this same file.
-
+## Round 8 (`991b0ff`) changed the omitted-field default from `0` (unbounded)
+## to `256`, on two premises: that finding R22's new `RangeDefect` forks could
+## multiply the frontier on a ranged loop counter, and that `256` was 16x the
+## largest frontier measured (16) across ~20 heavy suites.
+##
+## BOTH premises turned out to be wrong, and round 9's full sweep proved it:
+##
+##  1. R22's forks do NOT multiply the frontier. `forkAssignRangeCheck` takes
+##     one input `Path` and returns exactly ONE survivor; the out-of-range
+##     sub-path is terminal via `discard routeRaise(...)` and never joins the
+##     returned set. A ranged assignment in a loop NARROWS the same path's `pc`
+##     each iteration. So the cap was bounding a growth mode that does not
+##     exist. (Established by the round-9 correctness lens, then confirmed
+##     against the code.)
+##  2. The measurement was not broad enough. `tsymex_r6_a4_construct_
+##     interactions`'s A4-3b -- a wide 10-tag variant constructed and then
+##     reassigned symbolically -- carries 66 live paths past the cap, and the
+##     prune turned a genuine UNSAT into `sxUnknown` (`beBudgetExhausted`).
+##     That is a real completeness regression against the recorded baseline,
+##     caught by the sweep and NOT by the ~20-suite sample.
+##
+## So the default is back to `0`. The cap mechanism itself is fine and is kept
+## -- it degrades honestly (sets `sawUnknown`, records `beBudgetExhausted`, can
+## never yield a truncated `sxUnsat`) and remains available per-run. What is
+## reverted is only the DEFAULT, i.e. imposing it on every existing user to
+## solve a problem that was never there.
+##
+## If you want a non-zero default again, the bar is: measure across the WHOLE
+## corpus (`scripts/sweep.sh`), not a sample, and have a growth mode that
+## actually needs bounding.
+##
 import std/[unittest, strutils, sequtils]
 import nelli/smt/canonicalize
 import nelli/symex
@@ -26,13 +40,20 @@ import nelli/smt/types
 
 suite "#163 item 3 -- maxFrontierSize default":
 
-  test "the omitted-field default is now 256, not 0":
-    check defaultResourceBudget().maxFrontierSize == 256
-    check ResourceBudget().maxFrontierSize == 256
+  test "the omitted-field default is 0 (unbounded) -- see this file's header":
+    ## Reverted from round 8's 256: the growth mode it bounded does not exist,
+    ## and 256 regressed a genuine UNSAT to sxUnknown on a 10-tag variant
+    ## reassign (66 live paths). The cap stays available per-run.
+    check defaultResourceBudget().maxFrontierSize == 0
+    check ResourceBudget().maxFrontierSize == 0
 
   test "an explicit 0 still means unlimited (the opt-out survives the new default)":
     let unlimited = ResourceBudget(maxFrontierSize: 0)
     check unlimited.maxFrontierSize == 0
+    ## And an explicitly-set cap is still honoured, which is the point of
+    ## keeping the mechanism while dropping the default.
+    let capped = ResourceBudget(maxFrontierSize: 256)
+    check capped.maxFrontierSize == 256
 
   test "an explicit non-zero literal is unaffected by the new default":
     let tight = ResourceBudget(maxFrontierSize: 1)

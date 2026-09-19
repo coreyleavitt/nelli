@@ -1961,3 +1961,107 @@ refactor left seven dead guards and two copies of the loop it was
 deduplicating, and that its test split opened a Windows CI exposure while the
 commit claimed both directions verified. The lenses are earning their keep
 (three of my own errors today), but the loop has not yet reached a floor.
+
+## Round 11 fix table — all six closed
+
+| id | sev | sha | what closed it |
+|----|-----|-----|----------------|
+| L1 + D5 | Critical / High | `c765a3f` | `formatCampaignSummary*(CampaignStats): string` in `fuzz.nim` (named proc, not `$` — `engine/render.nim`'s `renderReport` is the precedent for composite report types), plus `$` for four taxonomy types; all sixteen fields, enum/table iteration in declared order so output is deterministic; NOT called from the fuzz loop (a library must not print unbidden). `foldFlipResult`'s nine hand-written `+=` lines became a `fieldPairs` fold with a real `{.error.}` arm. The table field keeps its explicit per-key merge including the `byConstruct` side effect, with a test proving it survived. `ConcolicFlipCounters` deliberately untouched — it already iterates its enum exhaustively, which is the array-safe pattern, not the hazard. |
+| D1 + D4 + S1 | High / Med / Low | `27055ba` | Chose ELIMINATION over detection: `sweep.sh` parses `nelli.nimble`'s table instead of keeping a copy, exit 2 if the block is absent. Verified by first REPRODUCING the silent divergence (renamed the define in `nelli.nimble` only, watched `tprobe_n45stats` print `[SKIPPED]`), then reverting. `stale_skiplist=N` added to the drift report, verified with an injected bogus entry. `dt-bounded.sh` passes extra args as argv elements; verified adversarially (`-d:foo;touch /tmp/PWNED` created nothing). |
+| D2 + L4 | High / Low-Med | `1881473` | `{.jitterPoints.}` macro pragma following `{.cover.}`'s structure; caught the race 20/20 idle and 10/10 contended with no sleep and no hand-placed call. Every catch-rate figure now notes it is a one-time measurement at the introducing commit, naming the single-seeded test that actually guards the catch per sweep. |
+| D3 | Medium | `450ba6b` | Shared `iterator dedupedByMsg` backs both helpers (iterator, not a materialised seq, so the count path does not copy strings); `drainSinkUnion` template collapsed 7 sites; **8** dead guards removed — one more than the review enumerated. Two sites correctly NOT forced into the template (one WalkCtx-only, one threadvar-only). |
+
+## Round 12 — gate GREEN, and an operational error of mine
+
+```
+pass=489 fail=0 (of which timeout-killed=0) skip=7 total=496
+unchanged=459 regressed=0 new-failing=0 fixed=1 skip-changed=0 new-ok=36 gone=0
+unregistered=0 missing=0 stale_skiplist=0
+```
+
+Integrity checked independently: 496 log lines / 496 unique suites / 496 files
+on disk.
+
+**I briefly reported `gone=1` and "the gate silently dropped a test". That was
+wrong and the cause was mine.** My first launch used a shell variable that did
+not survive into the backgrounded chain; instead of dying cleanly it left a
+SECOND sweep running against the same output log. The waiter fired on the first
+`SWEEP_COMPLETE` and diffed a log the other run was still filling — a 495-line
+snapshot and a phantom `gone=1`. No defect in `sweep.sh`.
+
+**Carried caveat:** two concurrent sweeps means two runs compiling the same
+test files, which is the documented same-file-clobber hazard. Clobbering
+produces failures rather than false passes, and `fail=0` across 489 suites
+makes a false green unlikely — but the round-12 fixes need a gate anyway, and
+THAT run must be a single clean instance and is the authoritative one. Launch
+sweeps with absolute paths, never a shell variable.
+
+## Round 12 findings — open
+
+| id | sev | finding |
+|----|-----|---------|
+| L12-1 | High | `sweep.sh`'s new nimble parser silently drops a key/value pair that is LINE-WRAPPED inside the block (`grep -oE` is per-line). **Reproduced** on a throwaway file: block found, no exit 2, entry vanishes with zero errors — the suite then reverts to its `[SKIPPED]` stub, indistinguishable from a clean run. The change that eliminated the divergence bug reintroduced it by another route. Reordering, trailing `#`, and blank lines are all handled correctly; only an intra-pair line break defeats it. |
+| L12-2 | High | `{.jitterPoints.}` is a SILENT NO-OP on any proc with one top-level statement (`body.len <= 1` returns unchanged) — and `inc(c.count)` / `c.count += 1` is the natural shape for the very race class it targets. The shipped proof splits read and write into two statements so boundaries exist, and so structurally cannot demonstrate the compound-assignment idiom. Compiles clean, documented as the recommended surface, does nothing, says nothing. |
+| Q2 | High | `c765a3f` fixed hand-maintained field enumeration and then wrote THREE more: `$`(ConcolicYieldCounters) (9 names), `formatCampaignSummary` (16), and the completeness test (16 again, as a runtime substring check rather than a structural guard). `fieldPairs` was already in hand. Also: `renderReport` — the cited precedent — is an `OutputFormat` enum WITH a real JSON arm; the new renderer reproduces only its text mode, so a caller wanting structured logging must re-parse a pretty string. |
+| Q3 | High | The pragma does not recurse into `if`/`while`/`case` bodies, so a read-modify-write inside a loop — arguably the commoner shape — gets zero instrumentation and no diagnostic. `{.cover.}`'s `instrumentNode` already exists as a working recursive walker to follow. Compounds with L12-2: the pragma currently works only on flat multi-statement bodies. |
+| Q5 / L12-3 | Medium | The fold excludes the table field BY TYPE while `name` is already bound in the loop. A second future `Table[WalkerConstructKind, int]` field — the taxonomy's own natural per-construct idiom, already used once — would silently hit `discard` instead of the `{.error.}` arm. Name-based exclusion is strictly more precise. |
+| C7 | Medium | `sweep.sh:242-247` builds space-delimited quadruples for `xargs -n4`, assuming no field contains whitespace — while `dt-bounded.sh`'s doc, added in the SAME commit, advertises `"-d:foo -d:bar"` as supported. First use of that advertised capability shifts every subsequent row's fields for the rest of the batch, silently. Not a regression (the old table had the same assumption) but the commit created the mismatch. |
+| Q1 | Medium | The parser checks only that the extracted block is non-empty. Its sibling `derive-ci-suites.ps1` throws below a sanity FLOOR, so a regex matching too little fails loudly there and silently here. |
+| Q6 | Low | `drainSinkUnion` references `w` as a free identifier resolved at each call site rather than taking it as a parameter. Safe today (all 7 sites are inside `runSymexImpl` with no shadowing — verified), but in a 14.7k-line file a future extraction yields "undeclared identifier `w`" pointing at the template definition. |
+
+Also confirmed CLEAN this round, with coverage named: the `450ba6b` refactor
+(hygiene, all 8 removed guards genuinely dead, no `dst`/`src` aliasing at any
+site), the `fieldPairs` fold mutating in place rather than a copy (checked
+against Nim's two-arg `fieldPairs` at `lib/system/iterators.nim:337` AND by
+confirming the test starts from zero so a copy-fold would be caught), the
+pragma never inserting AFTER the final statement (so an implicit-`result`
+expression return cannot be corrupted), `dt-bounded.sh`'s `read -ra` producing
+a genuinely empty array, and `stale_skiplist` reading the same single array the
+sweep consults.
+
+**L12-4, and it corrects my framing rather than the code:** `formatCampaignSummary`
+has no non-test callers — but the cited precedents `renderReport`/`repro` have
+none either, so "a caller-invoked renderer is a legitimate terminus" is this
+codebase's actual convention, not special pleading. The accurate record is that
+**round 10's public `FuzzReport.stats` field is what closed L1** (a caller could
+always read `report.stats.concolicYield.collect.obligationsLive` unaided); the
+renderer is convenience, unproven in the wild. I have asserted "the chain now
+terminates visibly" in three consecutive rounds and been wrong twice.
+
+## Resume
+
+Round 12's eight findings are NOT yet dispatched. Next step is a fix round over
+them, then a SINGLE-INSTANCE gate:
+
+```
+nohup setsid bash -c 'scripts/sweep.sh /home/corey/.claude/jobs/4fd5573d/tmp/cur163r13.log \
+  > /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out 2>&1; \
+  scripts/sweep-diff.sh /home/corey/.claude/jobs/4fd5573d/tmp/base163.log \
+  /home/corey/.claude/jobs/4fd5573d/tmp/cur163r13.log \
+  >> /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out 2>&1; \
+  echo SWEEP_COMPLETE >> /home/corey/.claude/jobs/4fd5573d/tmp/sweepr13.out' &
+```
+
+Absolute paths only. Confirm no other sweep is running first
+(`pgrep -af dt-bounded` and check `podman ps`), and before reading the result
+verify `wc -l` on the log equals the on-disk count.
+
+## Open, for Corey — unchanged
+
+1. **Push.** 67+ commits of CI-invisible history, all seven walker bumps
+   134->140.
+2. **`quipu setup`** — ingest hooks not fully wired (`post-merge`/`post-rewrite`
+   missing, `pre-push` stale); a push may never reach the hub, silently.
+3. Recommended, not done: rename the two N45 probes `tsymex_*` so
+   `symex-mingw`'s corpus picks them up. Unverifiable without pushing.
+
+## Convergence note
+
+Twelve rounds. Rounds 10, 11 and 12 each found real defects in the PREVIOUS
+round's fixes: round 11 found round 10's headline fix moved dormancy one hop;
+round 12 found round 11's parser reintroduced the bug it eliminated (by a new
+route) and its pragma silently does nothing on the commonest race shape. The
+lenses are finding genuine things — including four errors of mine across the
+two rounds — but this is not yet converging on a floor, and each round's fixes
+are themselves a new surface. Worth a decision about whether to keep fixing or
+stop at the green gate and file the remainder.

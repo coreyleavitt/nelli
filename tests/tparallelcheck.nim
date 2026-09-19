@@ -180,6 +180,20 @@ proc racyIncPragma(c: ptr Counter): int {.gcsafe, jitterPoints.} =
   c[].count = v + 1
   v + 1
 
+# Round 12 finding Q3: the same race again, but relocated entirely INSIDE a
+# `for` loop body. Before the recursion fix, `insertJitterBoundaries` only
+# ever split the proc's OWN top-level statement list -- and this proc's
+# top-level list is a SINGLE statement (the `for` loop itself), so the
+# pre-fix macro would also have hit round 12 finding L12-2 (silent zero
+# insertions) on top of Q3's "loop bodies are uninstrumented". Catching the
+# race here proves the recursion actually reaches into a `for` body, not
+# just past it.
+proc racyIncPragmaLoop(c: ptr Counter): int {.gcsafe, jitterPoints.} =
+  for _ in 0 ..< 1:
+    let v = c[].count
+    c[].count = v + 1
+    result = v + 1
+
 suite "parallelCheck: racy SUT is caught":
   test "lock-free wrong counter is detected as non-linearisable":
     # This test is inherently nondeterministic in nature — racy bugs
@@ -254,6 +268,49 @@ suite "parallelCheck: racy SUT is caught":
         LinOpDef[CounterState, ptr Counter, int](
           opId: 0,
           applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncJitterPoint(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}
+
+  test "lock-free wrong counter nested in a for loop is detected via {.jitterPoints.}":
+    # Round 12 Q3: the read/write pair lives inside `racyIncPragmaLoop`'s
+    # `for` body, and the proc's own top-level statement list is a single
+    # statement (the loop) -- exactly the shape that both L12-2 (single
+    # top-level statement -> zero insertions) and Q3 (no recursion into
+    # loop bodies) independently caused to go uninstrumented before the
+    # round-12 fix. `maxJitter` is 0 for the same reason as the tests
+    # above: a catch can only be credited to the pragma's OWN recursion
+    # into the loop body, not to any between-op jitter.
+    #
+    # See the L4 note further up -- the same one-time-measurement framing
+    # applies here. Measured (manual, outside this suite, by looping this
+    # same spec/settings over 20 distinct seeds -- op-index/jitter draws
+    # are degenerate with a single op and maxJitter=0, so the seed itself
+    # contributes no variance; the catch or miss on each iteration comes
+    # entirely from real OS thread-scheduling nondeterminism, same as the
+    # flat-case figures above): 20/20 idle runs, and 20/20 caught again
+    # under CPU contention (`nproc`+2 busy-loop processes pinning every
+    # core; two independent 20-iteration contended sweeps were run, both
+    # 20/20).
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragmaLoop(c),
           applyModel: applyIncModel),
       ])
     proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)

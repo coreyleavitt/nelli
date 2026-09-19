@@ -5,14 +5,21 @@
 # int2bv(bv2int(x)) mixed-theory query made Z3 spin a full core for 24min+ and
 # left orphaned containers running for hours.
 #
-# Usage: scripts/dt-bounded.sh <c|cpp> tests/foo.nim [timeout_secs]
+# Usage: scripts/dt-bounded.sh <c|cpp> tests/foo.nim [timeout_secs] [extra_nim_args]
 # Exit:  0 = passed/ran to completion; 137 = HUNG (killed at timeout);
 #        other = compile/test failure.
+#
+# extra_nim_args, if given, is spliced verbatim (word-split, unquoted) into
+# the `nim` invocation ahead of the test file -- e.g. "-d:symexQueryStats"
+# to compile in a suite's real assertions instead of a `when defined` skip
+# branch. See scripts/sweep.sh's `extra_defines` table for the seam that
+# feeds this per-file for the whole-suite sweep.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-backend="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs]}"; shift
-test_file="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs]}"; shift
-timeout_secs="${1:-180}"
+backend="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs] [extra_nim_args]}"; shift
+test_file="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs] [extra_nim_args]}"; shift
+timeout_secs="${1:-180}"; [ $# -gt 0 ] && shift
+extra_nim_args="${1:-}"
 img=localhost/nelli-dev:latest
 podman image exists "$img" || scripts/build-dev-image.sh
 
@@ -29,7 +36,7 @@ timeout --signal=KILL "$timeout_secs" podman run --rm --name "$cname" \
   -v "$HOME/.cache/milpa:$HOME/.cache/milpa" \
   -w /work \
   "$img" \
-  bash -c 'nim "$1" -r --threads:on --hints:off "$2"' _ "$backend" "$test_file"
+  bash -c 'nim "$1" -r --threads:on --hints:off $3 "$2"' _ "$backend" "$test_file" "$extra_nim_args"
 rc=$?
 if [ "$rc" -eq 137 ] || [ "$rc" -eq 124 ]; then
   echo ">>> HUNG: $test_file ($backend) killed after ${timeout_secs}s — treat as an engine non-termination defect, not a slow test." >&2

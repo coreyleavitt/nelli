@@ -12,6 +12,18 @@ requires "nim >= 2.0.0"
 
 # Tasks
 
+# Per-file extra `-d:` defines: some suites gate their real assertions
+# behind a define that nothing else in the repo ever sets (round-10 #163
+# liveness finding: `tprobe_n45stats` was registered below but its whole
+# body ran `skip()` in every venue because `-d:symexQueryStats` was never
+# supplied anywhere). Keep this table in sync with scripts/sweep.sh's
+# `extra_defines` associative array -- each side names the other in a
+# comment so the two cannot silently diverge.
+import std/tables
+let extraDefines = {
+  "tprobe_n45stats": "-d:symexQueryStats",
+}.toTable()
+
 task test, "Run the test suite":
   for f in ["tsmoke", "tchoice", "tserialize", "trng", "tdatasource",
             "tstrategy", "tstrategies", "tengine", "tshrinker", "tdsl",
@@ -718,13 +730,13 @@ task test, "Run the test suite":
             # N45 investigation instruments, registered in round 10 of the
             # #163 review. Both were previously on disk and registered
             # nowhere, so they ran in no sweep and no CI leg while still
-            # counting against the drift report every run. Both were
-            # verified to terminate and pass WITHOUT `-d:symexQueryStats`
-            # before being added: `tprobe_n45stats` skips itself when the
-            # flag is absent (the stats API is compiled out), and
-            # `tn45probe` runs its k=2 B5-4 trip-wire to `sxUnknown` in
-            # seconds. Registering them makes `unregistered` in
-            # `<outlog>.drift` mean "a real gap" again.
+            # counting against the drift report every run. `tn45probe`
+            # runs its k=2 B5-4 trip-wire to `sxUnknown` unconditionally in
+            # seconds. `tprobe_n45stats` needs `-d:symexQueryStats` (see
+            # `extraDefines` below) or its whole body compiles to a single
+            # `skip()` -- a round-10 liveness finding caught it registered
+            # but structurally inert that way.
             "tn45probe",
             "tprobe_n45stats"]:
-    exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"
+    exec "nim c -r --threads:on --hints:off --path:src " &
+      extraDefines.getOrDefault(f, "") & " tests/" & f & ".nim"

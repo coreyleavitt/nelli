@@ -95,6 +95,18 @@ is_known_hang() {
   return 1
 }
 
+# Per-file extra `-d:` defines, keyed by basename (no `tests/` prefix, no
+# `.nim` suffix). Some suites gate their real assertions behind a define
+# nothing else in the repo ever sets (round-10 #163 liveness finding:
+# tprobe_n45stats was registered in nelli.nimble but ran skip() in every
+# venue, including this sweep, because -d:symexQueryStats was never
+# supplied here either). Keep this table in sync with nelli.nimble's
+# `extraDefines` table in the `test` task -- each side names the other in
+# a comment so the two cannot silently diverge.
+declare -A extra_defines=(
+  [tprobe_n45stats]="-d:symexQueryStats"
+)
+
 # ---- run set -------------------------------------------------------------
 run_set=()
 for f in tests/t*.nim; do
@@ -150,8 +162,13 @@ missing_n=$(LC_ALL=C comm -13 "$ondisk" "$registered" | wc -l | tr -d ' ')
 
 # ---- sweep ---------------------------------------------------------------
 run_one() {
-  local b="$1" f="$2" t="$3" rc
-  scripts/dt-bounded.sh "$b" "$f" "$t" >/dev/null 2>&1
+  local b="$1" f="$2" t="$3" extra="$4" rc
+  # xargs -n4 groups the flat token stream by count, so a row that dropped
+  # its 4th field on an empty extra-define would shift every field after
+  # it into the wrong row. NOFLAG is emitted for "no extra define" instead
+  # of an empty string so every row always contributes exactly 4 tokens.
+  [ "$extra" = "NOFLAG" ] && extra=""
+  scripts/dt-bounded.sh "$b" "$f" "$t" "$extra" >/dev/null 2>&1
   rc=$?
   echo "$rc $b $f"
 }
@@ -164,11 +181,13 @@ export -f run_one
       echo "skip $backend $f" >> "$outlog"
       continue
     fi
-    # No test path or backend contains whitespace, so a space-separated
-    # triple is safe here (same assumption psweep.sh makes).
-    printf '%s %s %s\n' "$backend" "$f" "$timeout_secs"
+    extra="${extra_defines[$name]:-NOFLAG}"
+    # No test path, backend, or extra-define entry contains whitespace, so
+    # a space-separated quadruple is safe here (same assumption psweep.sh
+    # makes for its triple).
+    printf '%s %s %s %s\n' "$backend" "$f" "$timeout_secs" "$extra"
   done
-} | xargs -P"$jobs" -n3 bash -c 'run_one "$0" "$1" "$2"' >> "$outlog"
+} | xargs -P"$jobs" -n4 bash -c 'run_one "$0" "$1" "$2" "$3"' >> "$outlog"
 
 # ---- summary -------------------------------------------------------------
 summary="$outlog.summary"

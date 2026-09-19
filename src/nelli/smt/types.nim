@@ -1707,7 +1707,33 @@ type
                           ## this unblocks: #163 slice 4's opaque-call
                           ## inertness proof relies on this decline being
                           ## real and classified -- see `isInertOpaqueCall`'s
-                          ## doc, dsl_parser.nim. Appended at enum tail
+                          ## doc, dsl_parser.nim. `seVariantFieldOnDeclinedCtor`
+                          ## was appended after it, so this is no longer the
+                          ## last member -- append new kinds after the
+                          ## CURRENT tail, not here.
+    seVariantFieldOnDeclinedCtor ## #163 regression fix (post-round-9 gate).
+                          ## `isVariantField`'s walker arm (`runtime.nim`)
+                          ## reached a receiver SymVal that is NEITHER
+                          ## `svVariant` NOR `svMultiVariant` -- reachable
+                          ## ONLY when the receiver's own CONSTRUCTION already
+                          ## declined (`itVariant`/`itMultiVariant` object-
+                          ## constructor edge cases in `dsl_parser.nim` return
+                          ## a bound placeholder, per `unsupportedFieldPlaceholder`'s
+                          ## own documented residual: no literal IR constructor
+                          ## exists for a variant-shaped value, so the
+                          ## placeholder is a plain `mkIntLit(0)`, deliberately
+                          ## NOT variant-shaped) -- a later field read on that
+                          ## already-tainted value is a REAL, reachable
+                          ## consequence of an ALREADY-recorded classified
+                          ## decline, not a fresh walker bug. Before this
+                          ## kind, the receiver-kind mismatch was a bare
+                          ## `doAssert false` (an uncatchable `AssertionDefect`
+                          ## crash), reported at the `runSymex` boundary as
+                          ## `weInternalWalkerFault` -- an internal-bug
+                          ## attribution for an ordinary, everywhere-
+                          ## applicable consequence of an existing, honestly-
+                          ## classified construction gap. sevError ->
+                          ## sxUnknown (Invariant 3). Appended at enum tail
                           ## (ordinal stability).
 
   DefectKind* = enum

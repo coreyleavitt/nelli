@@ -10428,8 +10428,31 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           "isVariantField on svMultiVariant: no axis owns field " &
           stmt.vfFieldName
       else:
-        doAssert false,
-          "isVariantField on non-variant SymVal kind=" & $recv.kind
+        # #163 regression fix (post-round-9 gate). A receiver that is
+        # NEITHER `svVariant` NOR `svMultiVariant` here is reachable ONLY
+        # when the receiver's own CONSTRUCTION already declined --
+        # `dsl_parser.nim`'s `itVariant`/`itMultiVariant` object-constructor
+        # edge-case arms bind a type-correct but non-variant-shaped
+        # placeholder (`unsupportedFieldPlaceholder`: no literal IR
+        # constructor exists for a variant-shaped value, so the placeholder
+        # is a plain `mkIntLit(0)`, deliberately not variant-shaped) --
+        # never a fresh walker bug. This used to be a bare `doAssert false`
+        # (an uncatchable `AssertionDefect`, reported at the `runSymex`
+        # boundary as `weInternalWalkerFault` -- an internal-bug
+        # attribution for an ordinary, everywhere-applicable consequence of
+        # an existing, honestly-classified construction gap). Degrade this
+        # ONE path in-band instead: record the classified decline and drop
+        # the path (mirrors `isUnsafeCast`'s "halt this path" idiom) rather
+        # than fabricate arm data for a receiver that was never a real
+        # variant to begin with.
+        w.sawUnknown = true
+        w.walkDegradeErrors.add SymexErrorInfo(
+          kind: seVariantFieldOnDeclinedCtor, severity: sevError,
+          msg: "variant field '" & stmt.vfFieldName & "' read on a " &
+               "receiver whose construction was already declined " &
+               "(non-variant SymVal kind=" & $recv.kind & ") " &
+               "(seVariantFieldOnDeclinedCtor)")
+        continue
       # Build the matching-arm equalities + collect each arm's SymVal
       # for the requested field.
       var armEqs: seq[Z3Bool]

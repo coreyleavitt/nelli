@@ -2355,6 +2355,41 @@ proc isPromoteSoundEligibleParam(operand: NimNode, operandTy: IRType): bool =
   operand.kind == nnkSym and symKind(operand) == nskParam and
   operandTy.hasRange and operandTy.signed
 
+proc isIntLiteralNode(n: NimNode): bool =
+  ## #163 regression fix (post-round-9 gate). Nim gives an un-suffixed
+  ## integer literal a provisional default type (`int`, width 64) and, when
+  ## the literal is then used somewhere requiring a NARROWER fixed-width
+  ## int -- e.g. the `2` in `x * 2` where `x: int32`, resolving the `*`
+  ## overload to `system.\`*\`(x, y: int32): int32` -- wraps the LITERAL
+  ## itself in `nnkHiddenStdConv`, not the variable. `classifyType` of that
+  ## whole node reports the narrower target width (`int32`), while
+  ## `classifyType` of the wrapped literal reports its own provisional
+  ## width (`int`, 64) -- so from the 678c6ce gate's point of view this is
+  ## indistinguishable from a genuine narrowing conversion, and it declined
+  ## the whole expression (`feUnsupportedExprKind`, forcing `sxUnknown`).
+  ##
+  ## Unlike a narrowing of a VARIABLE (truly unmodeled -- a real width's
+  ## worth of bits could be lost at runtime, hence 678c6ce's decline), a
+  ## narrowing of a LITERAL is always representation-safe: Nim only accepts
+  ## the program at all because it already verified the literal's value
+  ## fits the resolved narrower width (otherwise it's a compile error) --
+  ## there is no bit to lose. `parseExpr`'s own literal arm
+  ## (`mkIntLit(n.intVal)`) never tags a width at all; downstream folding
+  ## sizes the literal into whatever BV width the OTHER operand carries.
+  ## That is exactly the pre-678c6ce behavior for this shape, and is
+  ## unaffected by (and orthogonal to) the WIDENING case 678c6ce targeted
+  ## (there the wrapped node is the narrow VARIABLE, never a literal).
+  ##
+  ## Confirmed via `tests/tdebug_probe.nim` (scratch, not committed): before
+  ## this carve-out, `x: int32; if x * 2 == 50'i32: ...` declined with "B2:
+  ## hidden narrowing int conversion `int` -> `int32` ... in `2`", forcing
+  ## the whole run to `sxUnknown` — the same signature across all 15
+  ## suites in the #163 gate regression (any arithmetic/comparison pairing
+  ## a plain integer literal against an operand narrower than `int`).
+  n.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit,
+             nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit,
+             nnkUInt64Lit}
+
 proc armYieldsValue(body: NimNode): bool =
   ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
   ## path? A `case`/`if` in expression position may still carry arms that
@@ -2814,73 +2849,100 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # identity pass-through, UNCHANGED.
     block:
       let wrapped = n[n.len - 1]
-      let outerTy = classifyType(n).ty
-      let innerTy = classifyType(wrapped).ty
-      # #163 review (rev item 2 follow-up), soundness carve-out. A bare
-      # reference to one of the CURRENT proc's own formal parameters
-      # (`wrapped.kind == nnkSym and symKind(wrapped) == nskParam`) whose
-      # classified type carries a proven range AND is signed is exactly the
-      # shape `runtime.nim`'s `promoteSound` (issue #161) promotes at
-      # top-level param entry to a Z3 UNBOUNDED Int (`svInt`) rather than a
-      # fixed-width BV -- confirmed empirically
-      # (`scratchpad/probe_163item2b_witness.nim`/`witness2.nim`, not
-      # committed: both a narrow and a near-full-width SIGNED range-alias
-      # PARAM already come back the correct `sxUnsat`, with no width
-      # conversion inserted here at all). `mkConvIntWidth`'s walker
-      # (`lowerConvIntWidth`, `runtime.nim`) hard-asserts its operand is
-      # ALWAYS a raw BV -- true for every case it was built for (no
-      # non-ranged fixed-width int, and no OBJECT FIELD/local of any int
-      # type, is ever `promoteSound`-eligible), but NOT true for a
-      # promoted param. Routing a promoted param through it anyway was
-      # tried and regressed a correct `sxUnsat` to `sxUnknown`
-      # (confirmed empirically the same way). Skip the fix for exactly
-      # this carve-out -- identical to the untouched status quo, which
-      # is independently sound here via `promoteSound` -- and apply it
-      # everywhere else (object fields, locals, array/seq elements,
-      # UNSIGNED ranged values, and any param whose range does not
-      # qualify `promoteSound`), where no such promotion protects the
-      # identity pass-through and the width truncation this fix targets
-      # is real (confirmed: `scratchpad/probe_163item2b_witness3.nim`'s
-      # range-typed OBJECT FIELD case came back a false `sxSat` before
-      # this fix, witness `f = 0`, and the same real Nim expression is
-      # false for every value 0..100).
-      if outerTy.kind == itInt and innerTy.kind == itInt and
-         outerTy.width != innerTy.width and
-         not isPromoteSoundEligibleParam(wrapped, innerTy):
-        # This used to re-derive `srcWidth`/`tgtWidthV`/`srcSigned`/
-        # `tgtSignedV` from a NAME-based lookup
-        # (`isIntFamilyName(valueTypeName(...))`), which only recognizes the
-        # closed `intTyNames` spelling set. `valueTypeName` reads
-        # `getTypeInst`, which for a value whose DECLARED type is a named
-        # `range[lo..hi]` alias or an `enum` reports that alias/enum NAME
-        # (e.g. "SmallCount"), not a plain int spelling -- so the gate missed
-        # both, falling back to the identity pass-through below for a
-        # genuine width-changing hidden conversion on either shape.
-        #
-        # `outerTy`/`innerTy` are ALREADY the correct answer: `classifyType`
-        # (`dsl_typebridge.nim`) resolves a range alias's base width/
-        # signedness via `rangeBaseType` (issue #162) and an enum's lifted
-        # representation via `enumOrdBitsNeeded` (issue #163 R2) -- both
-        # stamped onto the `IRType` this block already computed above to
-        # decide whether a width mismatch exists at all. Reading
-        # `.width`/`.signed` directly off `outerTy`/`innerTy` instead of
-        # re-deriving them from a second, name-based lookup closes the gap
-        # without inventing a parallel type-resolution rule that could drift
-        # from the classifier's own answer (the R11/R15/R16 failure mode).
-        if outerTy.width > innerTy.width:
-          mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
-                         innerTy.width, innerTy.signed,
-                         outerTy.width, outerTy.signed)
-        else:
-          # An implicit NARROWING hidden conversion is not expected from
-          # sound Nim typing (Nim widens implicitly; it does not implicitly
-          # narrow), but decline rather than risk a silent truncation if
-          # some toolchain shape ever produces one (Invariant 3 -- never a
-          # crash, never a silent wrong verdict).
-          declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
-                               valueTypeName(wrapped), valueTypeName(n))
-      else:
+      # #163 regression fix (post-round-9 gate). Check the literal shape
+      # BEFORE calling `classifyType` on anything: `tests/tsymex_phase15_
+      # g10_smoke.nim`'s concept-constrained generic instantiation reaches
+      # this arm with `wrapped` a plain `nnkIntLit` (`n.repr` is just `2`)
+      # whose own type resolves fine (`wrapped.typeKind == ntyInt`), but
+      # `n`'s (the conversion node's) `typeKind` reports `ntyNot` -- a
+      # concept/typeclass type-EXPRESSION kind, not `ntyNone` -- so the
+      # standing `typeKind != ntyNone` idiom this file uses everywhere else
+      # to guard `classifyType` does NOT catch it: `classifyType(n)` still
+      # crashes with "node has no type" (`dsl_typebridge.nim`'s
+      # `getTypeInst` call) because `ntyNot` is exactly as unresolvable for
+      # that call as `ntyNone` is, just spelled differently (confirmed via
+      # an inline debug probe, not committed). This is a hard, non-catchable
+      # macro-instantiation error that aborts the whole compile -- not an
+      # exception this engine could degrade from even if it wanted to.
+      #
+      # A literal operand never needs `outerTy`/`innerTy` at all (see
+      # `isIntLiteralNode` above): narrowing OR widening a literal is always
+      # representation-safe, and `parseExpr`'s literal arm
+      # (`mkIntLit(n.intVal)`) carries no width tag for downstream folding
+      # to disagree with. Checking `isIntLiteralNode(wrapped)` first — before
+      # `n` (or `wrapped`) is ever handed to `classifyType` — sidesteps the
+      # crash entirely rather than trying to enumerate every unresolvable
+      # `NimTypeKind` a generic/concept instantiation might produce.
+      if isIntLiteralNode(wrapped):
         parseExpr(wrapped, preamble, ctx)
+      else:
+        let outerTy = classifyType(n).ty
+        let innerTy = classifyType(wrapped).ty
+        # #163 review (rev item 2 follow-up), soundness carve-out. A bare
+        # reference to one of the CURRENT proc's own formal parameters
+        # (`wrapped.kind == nnkSym and symKind(wrapped) == nskParam`) whose
+        # classified type carries a proven range AND is signed is exactly the
+        # shape `runtime.nim`'s `promoteSound` (issue #161) promotes at
+        # top-level param entry to a Z3 UNBOUNDED Int (`svInt`) rather than a
+        # fixed-width BV -- confirmed empirically
+        # (`scratchpad/probe_163item2b_witness.nim`/`witness2.nim`, not
+        # committed: both a narrow and a near-full-width SIGNED range-alias
+        # PARAM already come back the correct `sxUnsat`, with no width
+        # conversion inserted here at all). `mkConvIntWidth`'s walker
+        # (`lowerConvIntWidth`, `runtime.nim`) hard-asserts its operand is
+        # ALWAYS a raw BV -- true for every case it was built for (no
+        # non-ranged fixed-width int, and no OBJECT FIELD/local of any int
+        # type, is ever `promoteSound`-eligible), but NOT true for a
+        # promoted param. Routing a promoted param through it anyway was
+        # tried and regressed a correct `sxUnsat` to `sxUnknown`
+        # (confirmed empirically the same way). Skip the fix for exactly
+        # this carve-out -- identical to the untouched status quo, which
+        # is independently sound here via `promoteSound` -- and apply it
+        # everywhere else (object fields, locals, array/seq elements,
+        # UNSIGNED ranged values, and any param whose range does not
+        # qualify `promoteSound`), where no such promotion protects the
+        # identity pass-through and the width truncation this fix targets
+        # is real (confirmed: `scratchpad/probe_163item2b_witness3.nim`'s
+        # range-typed OBJECT FIELD case came back a false `sxSat` before
+        # this fix, witness `f = 0`, and the same real Nim expression is
+        # false for every value 0..100).
+        if outerTy.kind == itInt and innerTy.kind == itInt and
+           outerTy.width != innerTy.width and
+           not isPromoteSoundEligibleParam(wrapped, innerTy):
+          # This used to re-derive `srcWidth`/`tgtWidthV`/`srcSigned`/
+          # `tgtSignedV` from a NAME-based lookup
+          # (`isIntFamilyName(valueTypeName(...))`), which only recognizes the
+          # closed `intTyNames` spelling set. `valueTypeName` reads
+          # `getTypeInst`, which for a value whose DECLARED type is a named
+          # `range[lo..hi]` alias or an `enum` reports that alias/enum NAME
+          # (e.g. "SmallCount"), not a plain int spelling -- so the gate missed
+          # both, falling back to the identity pass-through below for a
+          # genuine width-changing hidden conversion on either shape.
+          #
+          # `outerTy`/`innerTy` are ALREADY the correct answer: `classifyType`
+          # (`dsl_typebridge.nim`) resolves a range alias's base width/
+          # signedness via `rangeBaseType` (issue #162) and an enum's lifted
+          # representation via `enumOrdBitsNeeded` (issue #163 R2) -- both
+          # stamped onto the `IRType` this block already computed above to
+          # decide whether a width mismatch exists at all. Reading
+          # `.width`/`.signed` directly off `outerTy`/`innerTy` instead of
+          # re-deriving them from a second, name-based lookup closes the gap
+          # without inventing a parallel type-resolution rule that could drift
+          # from the classifier's own answer (the R11/R15/R16 failure mode).
+          if outerTy.width > innerTy.width:
+            mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
+                           innerTy.width, innerTy.signed,
+                           outerTy.width, outerTy.signed)
+          else:
+            # An implicit NARROWING hidden conversion is not expected from
+            # sound Nim typing (Nim widens implicitly; it does not implicitly
+            # narrow), but decline rather than risk a silent truncation if
+            # some toolchain shape ever produces one (Invariant 3 -- never a
+            # crash, never a silent wrong verdict).
+            declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
+                                 valueTypeName(wrapped), valueTypeName(n))
+        else:
+          parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:
     # Issue #163 review (rev item 1). The compiler inserts `nnkHiddenCallConv`
     # for an implicit converter call. The one this engine actually needs to
@@ -4635,7 +4697,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkUnsupported("A1: ref-aliased variant object " &
                                     "constructor unmodeled " &
                                     "(feUnsupportedExprKind)")
-        return mkVar(freshSynth(ctx, "a1RefVariantUnsupported"))
+        # #163 regression fix (post-round-9 gate): a BOUND, type-correct
+        # dummy (mirrors `declineIntWidthConv`'s "never an unbound `mkVar`"
+        # precedent) -- NOT a dangling `mkVar(freshSynth(...))` reference
+        # into an env slot no LET statement ever binds. Confirmed via
+        # `tests/tsymex_r6_a1_variantlit.nim`'s A1-5 (the `itMultiVariant`
+        # sibling arm below): reading a dangling fresh-synth name used to
+        # raise `KeyError` at walk time, silently swallowed by the known
+        # C-backend nested-`walkBlock` exception-loss quirk (SND-3/ADR-0023)
+        # -- masked, not sound, and #163's `iekVar` global-read fix
+        # (`runtime.nim`) closed that swallow, which then surfaced the
+        # dangling reference as a genuine crash one level further down
+        # (`isVariantField` reading a wrongly-kinded substitute).
+        return unsupportedFieldPlaceholder(objTyFull)
       var byNameDisc = initTable[string, NimNode]()
       for k in 1 ..< n.len:
         let child = n[k]
@@ -4650,7 +4724,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                           "discriminant field `" & objTyFull.vDiscName & "`"))
         preamble.add mkUnsupported("A1: variant constructor missing " &
                                     "discriminant (feUnsupportedExprKind)")
-        return mkVar(freshSynth(ctx, "a1VariantMissingDiscUnsupported"))
+        # #163 regression fix (post-round-9 gate): bound dummy, not a
+        # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+        return unsupportedFieldPlaceholder(objTyFull)
       # Try the static-tag path first — same `parseExpr` + `iekIntLit`
       # test the `nnkAsgn`/`isVariantReassign` static-tag path already
       # uses (mirrored deliberately, not reinvented).
@@ -4681,7 +4757,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           preamble.add mkUnsupported("A3: symbolic-discriminant " &
                                       "constructor with an arm-specific " &
                                       "field unmodeled (feUnsupportedExprKind)")
-          return mkVar(freshSynth(ctx, "a3ArmSpecificFieldUnsupported"))
+          # #163 regression fix (post-round-9 gate): bound dummy, not a
+          # dangling `mkVar` -- see the ref-aliased-variant arm's comment
+          # above.
+          return unsupportedFieldPlaceholder(objTyFull)
         # Parse-time `case`-branch tag-set NARROWING (ADR-0029): consult the
         # INNERMOST `ctx.procScoped.caseNarrow` entry (searched from the top of the
         # stack — the most tightly-scoped enclosing `case`) whose subject
@@ -4727,7 +4806,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         preamble.add mkUnsupported("A1: else-covered/unresolved-tag " &
                                     "variant constructor unmodeled " &
                                     "(feUnsupportedExprKind)")
-        return mkVar(freshSynth(ctx, "a1ElseArmUnsupported"))
+        # #163 regression fix (post-round-9 gate): bound dummy, not a
+        # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+        return unsupportedFieldPlaceholder(objTyFull)
       # Shared per-field extraction for BOTH the active arm's fields and
       # the always-present plain fields — `parseVariantCtorField` mirrors
       # the itTuple constructor path's byName-based field handling
@@ -4761,7 +4842,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                         "consumer needs it first"))
       preamble.add mkUnsupported("itMultiVariant object constructor " &
                                   "unmodeled (feUnsupportedExprKind)")
-      return mkVar(freshSynth(ctx, "a1MultiVariantUnsupported"))
+      # #163 regression fix (post-round-9 gate): a BOUND, type-correct dummy
+      # (mirrors `declineIntWidthConv`'s "never an unbound `mkVar`"
+      # precedent) -- NOT a dangling `mkVar(freshSynth(...))` reference into
+      # an env slot no LET statement ever binds. Confirmed via
+      # `tests/tsymex_r6_a1_variantlit.nim`'s A1-5: `let t = <this decline>`
+      # bound `t` to a reference to a never-defined fresh name; reading it
+      # via `t.a1` at walk time raised `KeyError`, silently swallowed by the
+      # known C-backend nested-`walkBlock` exception-loss quirk (SND-3/
+      # ADR-0023) -- masked, not sound, and #163's `iekVar` global-read fix
+      # (`runtime.nim`) closed that swallow, which then surfaced the
+      # dangling reference as a genuine crash one level further down
+      # (`isVariantField` hitting a wrongly-kinded `svBV64` substitute
+      # instead of raising cleanly on the missing key).
+      return unsupportedFieldPlaceholder(objTyFull)
     of itTuple, itRef, itPtr:
       discard   ## handled below
     else:
@@ -4774,7 +4868,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                         "unexpected shape " & $objTyFull.kind))
       preamble.add mkUnsupported("P2b: unexpected object-constructor shape " &
                                   "(feUnsupportedExprKind)")
-      return mkVar(freshSynth(ctx, "p2bUnexpectedShapeUnsupported"))
+      # #163 regression fix (post-round-9 gate): bound dummy, not a
+      # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+      return unsupportedFieldPlaceholder(objTyFull)
 
     let isRefCtor = objTyFull.kind in {itRef, itPtr}
     let isPtrCtor = objTyFull.kind == itPtr

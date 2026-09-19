@@ -13075,7 +13075,8 @@ proc dedupedMsgCount(src: seq[SymexErrorInfo]): int =
   for e in dedupedByMsg(src):
     inc result
 
-template drainSinkUnion(dst: var seq[SymexErrorInfo]; walkField, threadVarSrc: untyped) =
+template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
+                         walkField, threadVarSrc: untyped) =
   ## CR-9 Stage 5 wiring, shared by every sink below that has BOTH a
   ## `WalkCtx` field and a threadvar fallback: `w.walkField` is the LIVE
   ## store, populated during the walk itself; the threadvar is the fallback
@@ -13085,6 +13086,17 @@ template drainSinkUnion(dst: var seq[SymexErrorInfo]; walkField, threadVarSrc: u
   ## uniformly. Each call site below carries a one-line pointer back to this
   ## contract plus whatever is specific to ITS sink (Phase/ADR tag, what it
   ## drains, and why the severity does or doesn't affect the verdict).
+  ##
+  ## `w` is an explicit parameter (not a free identifier resolved from the
+  ## call site's enclosing scope) so the dependency is stated in the
+  ## signature rather than implied: every call site must have its own
+  ## `WalkCtx` in scope, named whatever it likes, and pass it in. Typed
+  ## `WalkCtx` (by value, read-only — this template only ever reads
+  ## `w.walkField`) rather than `var WalkCtx` or `untyped`: templates splice
+  ## the argument AST into the body instead of copying through a call frame,
+  ## so a plain symbol argument (every call site below passes bare `w`)
+  ## costs nothing extra over `untyped` here, and the typed parameter still
+  ## buys real signature documentation plus type-checking at the call site.
   drainDedupedByMsg(dst, w.walkField & threadVarSrc)
 
 proc runSymexImpl(prog: SymexProgram,
@@ -13413,26 +13425,26 @@ proc runSymexImpl(prog: SymexProgram,
   # result's errors regardless of which verdict branch is taken below.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
   var exnWarnings: seq[SymexErrorInfo]
-  drainSinkUnion(exnWarnings, unknownExnWarnings, unknownExnWarnings)
+  drainSinkUnion(exnWarnings, w, unknownExnWarnings, unknownExnWarnings)
   # Phase 15 G4. Drain the distinct-bijectivity-skipped hint sink, dedup'd by
   # message (one per distinct type whose base was FP/String). sevHint never
   # changes the verdict (Invariant 7), so it rides every branch alongside
   # exnWarnings — appended to `exnWarnings` so the existing append sites carry
   # it on sat/unsat/unknown uniformly.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, distinctBijectivityHints, distinctBijectivityHints)
+  drainSinkUnion(exnWarnings, w, distinctBijectivityHints, distinctBijectivityHints)
   # Phase 15 R2. Drain the freshness-cap hint sink, dedup'd by message (one per
   # ref type whose per-path distinctness inequalities hit the cap). sevHint
   # never changes the verdict (Invariant 7) — rides every branch via
   # `exnWarnings`, exactly the G4 bijectivity-skip drain above.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, freshnessCapHints, freshnessCapHints)
+  drainSinkUnion(exnWarnings, w, freshnessCapHints, freshnessCapHints)
   # Phase 15 R8. Drain the ptr-family hint sink, dedup'd by message (one entry
   # per run regardless of how many ptr derefs occurred). sevHint never changes
   # the verdict (Invariant 7) — rides every branch via `exnWarnings`, exactly the
   # R2 freshness-cap drain above. A managed-`ref T`-only run drains NOTHING.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, ptrFamilyHints, ptrFamilyHints)
+  drainSinkUnion(exnWarnings, w, ptrFamilyHints, ptrFamilyHints)
   # R16-2: convFloatToIntDomainHints removed — replaced by real RangeDefect raise
   # forks via drainConvFloatToIntRaises. No hint drain here.
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
@@ -13444,7 +13456,7 @@ proc runSymexImpl(prog: SymexProgram,
   # kind on whichever branch is taken (Invariant 3). A run that never exhausts the
   # budget drains NOTHING (no spurious halt). Mirrors the R8 ptr-family drain.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, heapDepthErrors, heapDepthErrors)
+  drainSinkUnion(exnWarnings, w, heapDepthErrors, heapDepthErrors)
   # v64 (chapulin catalog #5(b), Invariant 7). Drain the budget-bail error
   # sink (dedup'd by message) — mirrors the R9 heap-depth-error drain. A
   # `beBudgetExhausted` is `sevError`; the exhausted/pruned paths already
@@ -13460,7 +13472,7 @@ proc runSymexImpl(prog: SymexProgram,
   # already demote to `sxUnknown` at the `uncertain` chokepoints — this drain
   # only ensures the classified kind rides every verdict branch (Invariant 3).
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
-  drainSinkUnion(exnWarnings, newFieldZeroErrors, newFieldZeroErrors)
+  drainSinkUnion(exnWarnings, w, newFieldZeroErrors, newFieldZeroErrors)
   # SND-3 (ADR-0023, walker v58). Drain the lowering-degrade error sink
   # (dedup'd by message) — mirrors the R9 heap-depth-error / Cluster-H
   # newFieldZeroErrors drains exactly. Each entry is `sevError`; the
@@ -13503,7 +13515,7 @@ proc runSymexImpl(prog: SymexProgram,
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above
   # (threadvar here is `currentClosureCallErrors`, not a same-named field).
   var closureErrs: seq[SymexErrorInfo]
-  drainSinkUnion(closureErrs, closureCallErrors, currentClosureCallErrors)
+  drainSinkUnion(closureErrs, w, closureCallErrors, currentClosureCallErrors)
   let closureForcedUnknown = block:
     var any = false
     for e in closureErrs:

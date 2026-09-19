@@ -218,6 +218,23 @@ const symexWalkerVersion* = "139"
   ##   `nnkHiddenStdConv`; the engine was not honouring the width change.
   ##   Genuine width changes now route through `mkConvIntWidth`; same-width
   ##   hidden conversions are untouched. `sxSat` -> `sxUnsat`.
+  ##
+  ##   CORRECTED (issue #163 review round 9, `dsl_parser.nim` only, no bump
+  ##   here — see the round's own bump for the fix): "genuine width changes
+  ##   now route through `mkConvIntWidth`" overstated what this entry closed.
+  ##   The discrimination gate that decided whether to engage `mkConvIntWidth`
+  ##   read `valueTypeName` (`getTypeInst`), which reports a NAMED
+  ##   `range[lo..hi]` alias's or an `enum`'s own type name, never a plain int
+  ##   spelling — so it only ever recognized the closed fixed-width spelling
+  ##   set (`int`/`int8..64`/`uint`/`uint8..64`/`byte`/`char`), silently
+  ##   falling back to the untouched identity pass-through for a range-alias
+  ##   or enum-typed operand instead. Confirmed empirically that this
+  ##   remained exploitable for a range-alias/enum value used as an OBJECT
+  ##   FIELD or a LOCAL VARIABLE (never for a signed ranged TOP-LEVEL PARAM,
+  ##   which issue #161's `promoteSound` already protects by an unrelated
+  ##   route) — closed separately by reading the width/signedness directly
+  ##   off the `IRType`s `classifyType` already resolves for both sides,
+  ##   instead of re-deriving them from a second, name-based lookup.
   ## * **`nnkHiddenCallConv` and `nnkHiddenSubConv`** (`dsl_parser.nim`) —
   ##   `echo(intExpr)` and a char-range comparison (`c > 'm'` for
   ##   `range['a'..'z']`) failed to PARSE AT ALL, so any SUT containing either

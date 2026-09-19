@@ -2795,35 +2795,71 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let wrapped = n[n.len - 1]
       let outerTy = classifyType(n).ty
       let innerTy = classifyType(wrapped).ty
+      # #163 review (rev item 2 follow-up), soundness carve-out. A bare
+      # reference to one of the CURRENT proc's own formal parameters
+      # (`wrapped.kind == nnkSym and symKind(wrapped) == nskParam`) whose
+      # classified type carries a proven range AND is signed is exactly the
+      # shape `runtime.nim`'s `promoteSound` (issue #161) promotes at
+      # top-level param entry to a Z3 UNBOUNDED Int (`svInt`) rather than a
+      # fixed-width BV -- confirmed empirically
+      # (`scratchpad/probe_163item2b_witness.nim`/`witness2.nim`, not
+      # committed: both a narrow and a near-full-width SIGNED range-alias
+      # PARAM already come back the correct `sxUnsat`, with no width
+      # conversion inserted here at all). `mkConvIntWidth`'s walker
+      # (`lowerConvIntWidth`, `runtime.nim`) hard-asserts its operand is
+      # ALWAYS a raw BV -- true for every case it was built for (no
+      # non-ranged fixed-width int, and no OBJECT FIELD/local of any int
+      # type, is ever `promoteSound`-eligible), but NOT true for a
+      # promoted param. Routing a promoted param through it anyway was
+      # tried and regressed a correct `sxUnsat` to `sxUnknown`
+      # (confirmed empirically the same way). Skip the fix for exactly
+      # this carve-out -- identical to the untouched status quo, which
+      # is independently sound here via `promoteSound` -- and apply it
+      # everywhere else (object fields, locals, array/seq elements,
+      # UNSIGNED ranged values, and any param whose range does not
+      # qualify `promoteSound`), where no such promotion protects the
+      # identity pass-through and the width truncation this fix targets
+      # is real (confirmed: `scratchpad/probe_163item2b_witness3.nim`'s
+      # range-typed OBJECT FIELD case came back a false `sxSat` before
+      # this fix, witness `f = 0`, and the same real Nim expression is
+      # false for every value 0..100).
+      let isPromoteSoundEligibleParam =
+        wrapped.kind == nnkSym and symKind(wrapped) == nskParam and
+        innerTy.hasRange and innerTy.signed
       if outerTy.kind == itInt and innerTy.kind == itInt and
-         outerTy.width != innerTy.width:
-        let tgt = valueTypeName(n)
-        let src = valueTypeName(wrapped)
-        if isIntFamilyName(tgt) and isIntFamilyName(src):
-          let srcN = normalizeIntTyName(src)
-          let tgtN = normalizeIntTyName(tgt)
-          let srcWidth = intTyWidth(srcN)
-          let tgtWidthV = intTyWidth(tgtN)
-          let srcSigned = intTySigned(srcN)
-          let tgtSignedV = intTySigned(tgtN)
-          if tgtWidthV > srcWidth:
-            mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
-                           srcWidth, srcSigned, tgtWidthV, tgtSignedV)
-          else:
-            # An implicit NARROWING hidden conversion is not expected from
-            # sound Nim typing (Nim widens implicitly; it does not
-            # implicitly narrow), but decline rather than risk a silent
-            # truncation if some toolchain shape ever produces one
-            # (Invariant 3 -- never a crash, never a silent wrong verdict).
-            declineIntWidthConv(n, preamble, ctx, "hidden narrowing", src, tgt)
+         outerTy.width != innerTy.width and not isPromoteSoundEligibleParam:
+        # This used to re-derive `srcWidth`/`tgtWidthV`/`srcSigned`/
+        # `tgtSignedV` from a NAME-based lookup
+        # (`isIntFamilyName(valueTypeName(...))`), which only recognizes the
+        # closed `intTyNames` spelling set. `valueTypeName` reads
+        # `getTypeInst`, which for a value whose DECLARED type is a named
+        # `range[lo..hi]` alias or an `enum` reports that alias/enum NAME
+        # (e.g. "SmallCount"), not a plain int spelling -- so the gate missed
+        # both, falling back to the identity pass-through below for a
+        # genuine width-changing hidden conversion on either shape.
+        #
+        # `outerTy`/`innerTy` are ALREADY the correct answer: `classifyType`
+        # (`dsl_typebridge.nim`) resolves a range alias's base width/
+        # signedness via `rangeBaseType` (issue #162) and an enum's lifted
+        # representation via `enumOrdBitsNeeded` (issue #163 R2) -- both
+        # stamped onto the `IRType` this block already computed above to
+        # decide whether a width mismatch exists at all. Reading
+        # `.width`/`.signed` directly off `outerTy`/`innerTy` instead of
+        # re-deriving them from a second, name-based lookup closes the gap
+        # without inventing a parallel type-resolution rule that could drift
+        # from the classifier's own answer (the R11/R15/R16 failure mode).
+        if outerTy.width > innerTy.width:
+          mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
+                         innerTy.width, innerTy.signed,
+                         outerTy.width, outerTy.signed)
         else:
-          # Width differs but one side is not a plain fixed-width int
-          # spelling this engine recognizes by name (e.g. an enum or a
-          # named range alias promoted/demoted some other way) -- this
-          # shape has run through the untouched identity pass-through since
-          # #162/#163 with no known false verdict; leave it exactly as
-          # before rather than risk misclassifying an unfamiliar spelling.
-          parseExpr(wrapped, preamble, ctx)
+          # An implicit NARROWING hidden conversion is not expected from
+          # sound Nim typing (Nim widens implicitly; it does not implicitly
+          # narrow), but decline rather than risk a silent truncation if
+          # some toolchain shape ever produces one (Invariant 3 -- never a
+          # crash, never a silent wrong verdict).
+          declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
+                               valueTypeName(wrapped), valueTypeName(n))
       else:
         parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:

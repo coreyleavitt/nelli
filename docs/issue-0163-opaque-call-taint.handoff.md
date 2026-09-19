@@ -1501,3 +1501,56 @@ genuinely now wrong it must argue that per-suite against a real-Nim oracle.
 runs.** The round-8/9 fixes are real and their pins are green in isolation, but
 the branch as a whole currently regresses 15 suites against its own baseline.
 
+## Gate failure diagnosed and closed — all 15
+
+**First bad commit, by bisect (not guess): `678c6ce`.** Trail:
+`e1a6b57` PASS -> `d71da9e` PASS -> `678c6ce` **FAIL** (both probes).
+
+**Mechanism.** Nim gives an un-suffixed integer literal a provisional `int`
+(64-bit) type, then inserts a NARROWING `nnkHiddenStdConv` when it sits beside
+a narrower operand — the `2` in `x * 2` for `x: int32`. `678c6ce`'s new gate
+could not distinguish that from a genuine narrowing of a VARIABLE (the real
+unmodelled case it targeted) and declined the whole expression
+(`declineIntWidthConv`), forcing `sxUnknown`. A literal beside any
+`int8`/`int16`/`int32` operand is everywhere, which is why 15 suites moved.
+Fixed at `64ed929` by recognising the wrapped operand is a LITERAL before the
+width check runs — narrowing or widening a literal is always
+representation-safe, and `parseExpr`'s literal arm carries no width tag anyway.
+That ordering also sidestepped a second crash: a concept-constrained generic
+reaches that arm with `typeKind == ntyNot`, as unresolvable as `ntyNone` but
+missed by the file's standing `!= ntyNone` guard.
+
+**A second, pre-existing bug surfaced by the causal chain** (also `64ed929`):
+six object-constructor decline arms returned a dangling `mkVar(freshSynth(...))`
+— a reference into an env slot nothing binds. Reading it raised `KeyError`,
+which the C-backend's nested-`walkBlock` unwind silently swallowed (masked, not
+sound). #163's OWN module-global fix (`7182801`) closed that swallow and
+surfaced the dangling reference as a real crash one level down. Routed all six
+through the existing `unsupportedFieldPlaceholder` idiom, and hardened
+`isVariantField`'s walker arm to degrade in-band (new
+`seVariantFieldOnDeclinedCtor`) instead of `doAssert false`.
+
+**The 15th: `maxFrontierSize`, and my own error.** I told the bisect agent the
+frontier cap was "not your suspect" because I had tested three suites with the
+default set back to 0 and all three still failed. That was true of those three
+and I over-generalised it to all fifteen. The agent escalated it back rather
+than accepting my framing: A4-3b carries 66 live paths past the 256 cap and the
+prune turned a genuine UNSAT into `sxUnknown`. Reverted at `90caaa1` — see that
+commit and the test header for why the cap's ORIGINAL justification was already
+dead (R22's forks return one survivor; they never multiplied the frontier) and
+what the bar is for proposing a non-zero default again (measure across the whole
+corpus, not a sample).
+
+**No bump owed** for `64ed929` or `90caaa1`: every affected verdict was already
+`sxUnknown` one way or another, and the revert restores a pre-existing default.
+Walker stays at **140**.
+
+## Remaining
+
+1. **Re-run the full sweep.** 14 suites were verified individually and the 15th
+   after the revert, but the gate is the sweep, not the sample — that is exactly
+   the lesson of this round. Baseline `base163.log` (460 entries, pinned at
+   `ac507c1`).
+2. `wiring = proven`, only if that sweep is clean.
+3. Corey's call on pushing (~45 unpushed commits).
+

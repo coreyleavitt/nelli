@@ -287,7 +287,7 @@ agent 4 lands.
 | W5 pragma fallback | closed | `7d0ee90` + `d5108de` (mutation-strengthened) |
 | W6 variant-disc else arm | closed | `9da19ab` |
 | W7 enum domain | closed | `05f8e01` |
-| **W8 isIntOffset arms** | **OPEN — no RED** | see its own section |
+| W8 isIntOffset arms | closed | `bd6a013` — fourth attempt; the round-1 "precision only, no crash" characterisation was WRONG (the RED hangs rather than asserting). See its own section. |
 | W9 obligation operand | closed | `9068f16` + `1deff68` |
 | W10 concolic drain | closed | agent commit + `26f620d` |
 | W11/W12/W13 | closed | `a1fc02c`, `9206071`, `7878212` |
@@ -887,13 +887,18 @@ content, another disturbed a sibling's uncommitted `runtime.nim`. Switched to
 isolated worktrees for A/B. Recorded as a memory.
 | R16 | `9e48761` | New `concolicScalarPromotesSoundly` — shares `promoteSound`'s core argument (unsigned never promotes; narrow signed only with a range fitting the BV window) but carves out width-64 signed. Justified: `promoteSound`'s extra "proven range even for plain int" requirement exists to bound `wmExplore`'s fork cost, not for soundness, and reusing it literally would push every existing concolic test onto BV for no gain. RED was a three-way disagreement (oracle vs `wmExplore` vs `wmFollowConcrete`) on both uint8 wrap and int8 overflow; plain `int` agreed pre-fix and is untouched. |
 
-### New findings from round 4 (all reported by fixing agents, none fixed)
+### New findings from round 4 (reported by fixing agents; all closed in round 8)
+
+Status column reconciled in round 10 — R24/R25/R26 read `open` here long after
+`9d1d8e3` closed them, which is the exact bookkeeping rot the standing lenses
+caught three separate times this session. The closure records are further down,
+in the round-8 fix table.
 
 | id | sev | status | file:line | finding |
 |----|-----|--------|-----------|---------|
-| R24 | Medium | open | `runtime.nim` `runConcolicFlipImpl` / `materializeConcolicModel` | G2 flip reads a solved value off `drawVars[i].zi`, but a param R16 now binds as BV has `env[p.name]` as a FRESH BV pinned by concrete equality, deliberately never bridged to `.zi` (avoiding the `int2bv`/`bv2int` non-termination hazard this codebase flags elsewhere). A flip targeting a branch over such a param solves the wrong variable and reads back an uninformative draw. **R16 widened the set of params this applies to.** No test exercises `concolicFlip` on a non-`int` scalar, so nothing regresses today. |
-| R25 | Low | open | `runtime.nim`, `cbTransformLinked` BV branch | Concretizes rather than staying symbolic (same int2bv avoidance), sacrificing flip-ability for that param. Unexercised — `tsymex_g6_transform_binding.nim` uses plain `int`. |
-| R26 | Medium | open | `runtime.nim`, concolic Z3Int binding | A concolic-bound signed param on the Z3Int route carries no `ziWidth`/`ziSigned` stamp, so `overflowCondInt`'s raise obligation never fires on a concolic path at ANY width. Pre-existing #161 gap, out of R16's scope (`ConcolicCollectResult` has no raised-verdict channel to expose it anyway). Documented in code and in the suite header. |
+| R24 | Medium | fixed `9d1d8e3` | `runtime.nim` `runConcolicFlipImpl` / `materializeConcolicModel` | G2 flip reads a solved value off `drawVars[i].zi`, but a param R16 now binds as BV has `env[p.name]` as a FRESH BV pinned by concrete equality, deliberately never bridged to `.zi` (avoiding the `int2bv`/`bv2int` non-termination hazard this codebase flags elsewhere). A flip targeting a branch over such a param solves the wrong variable and reads back an uninformative draw. **R16 widened the set of params this applies to.** No test exercises `concolicFlip` on a non-`int` scalar, so nothing regresses today. |
+| R25 | Low | fixed `9d1d8e3` | `runtime.nim`, `cbTransformLinked` BV branch | Concretizes rather than staying symbolic (same int2bv avoidance), sacrificing flip-ability for that param. Unexercised — `tsymex_g6_transform_binding.nim` uses plain `int`. |
+| R26 | Medium | fixed `9d1d8e3` | `runtime.nim`, concolic Z3Int binding | A concolic-bound signed param on the Z3Int route carries no `ziWidth`/`ziSigned` stamp, so `overflowCondInt`'s raise obligation never fires on a concolic path at ANY width. Pre-existing #161 gap, out of R16's scope (`ConcolicCollectResult` has no raised-verdict channel to expose it anyway). Documented in code and in the suite header. |
 | R9 | `b13d484` | Concolic counter now unions BOTH degrade sinks, each deduped in its own `HashSet` — deliberately matching `runSymexImpl`'s existing per-sink rule so the two drivers agree. RED: a `cmpString` lowering degrade (no `WalkCtx` in scope, threadvar-only) read `walkDegradeCount == 0`, indistinguishable from clean. |
 | R10 | `d3fc8c2` | New `feTransparentResultUsed` for the expression-position over-claim route, extending R7's parse-time mechanism rather than adding a parallel one. Message names the real cause (statement-position-only) instead of advising the pragma the caller already applied. |
 | R12 | `06335b2` | Pure `discriminatorDomain*(ty)` — dropped the suggested `hasElse` param since `VariantArm.isElse` is already on `ty.vArms`, collapsing a third duplication where both callers re-derived it. Agent VERIFIED the two builders were genuinely equivalent (Nim's case-exhaustiveness guarantees the explicit `of` ordinals equal the full tag set when there is no `else`) rather than assuming. Behavior-neutral. |
@@ -1004,7 +1009,7 @@ The six new `aty` sites match R27's shape and gating. Bump correct.
 | id | sev | status | finding |
 |----|-----|--------|---------|
 | R29 | Medium | **resolved empirically, inert** | Idiom 1's bracket-index identity check (`tryMatchScanIdiomShape`, `dsl_parser.nim:5019`) is NOT unwrapped, while the structurally identical checks in idioms 2 and 3 are (`:5241`, `:5420`, both predating R28). If live this would block recognition for a ranged counter and silently fall back to the hang-prone k-unroll path, making R28's idiom-1 fix dead code. **Settled by the sweep:** `tsymex_163rev_scan_counter_range` passes (exit 0), and its idiom-1 case asserts a POSITIVE `sxRaised(RangeDefect)` — which cannot pass unless idiom 1 is recognized AND carries `aty`. Bracket indexing is compiler magic accepting any Ordinal, so no `nnkHiddenStdConv` is inserted there, unlike the generic `<`. Worth a one-line comment recording why idiom 1 needs no peel; no code change owed. |
-| R30 | Low | open | `inc`/`dec`'s `aty` gate (`dsl_parser.nim:8031`) tests `hasRange` without the `itInt` check its five siblings use. Functionally equivalent (a `hasRange` type always classifies `itInt` here), cosmetic, predates R28. |
+| R30 | Low | fixed `4e01f98` | `inc`/`dec`'s `aty` gate (`dsl_parser.nim:8031`) tests `hasRange` without the `itInt` check its five siblings use. Functionally equivalent (a `hasRange` type always classifies `itInt` here), cosmetic, predates R28. |
 
 ---
 
@@ -1545,12 +1550,101 @@ corpus, not a sample).
 `sxUnknown` one way or another, and the revert restores a pre-existing default.
 Walker stays at **140**.
 
+## Round 10 — the gate re-run, and it is clean
+
+```
+pass=486 fail=2 (of which timeout-killed=1) skip=6 total=494
+unchanged=459 regressed=1 new-failing=0 fixed=0 skip-changed=0 new-ok=34 gone=0
+unregistered=2 missing=0
+```
+
+Logs: `cur163r10.log` / `sweepr10.out` (baseline `base163.log`, pinned at
+`ac507c1`). **The whole symex surface is clean** — 34 new suites passing, zero
+regressions among them, and the round-9 diagnosis holds up under the full gate
+rather than the 15-suite sample that found it.
+
+**`regressed=1` is `tparallelcheck`, and it is not ours.** The proof is not an
+argument from plausibility: `sweep3.log`, dated **2026-08-28**, fails it — three
+weeks before this branch's first commit (`3ce1dfd`, 2026-09-17). Across the ten
+recorded sweeps in the job tmp it has failed three and passed seven, on
+unrelated code states. It passes 15/15 in isolation and 3/3 under six-way
+podman load.
+
+The mechanism is a designed-in flake, found by reading rather than by
+re-running: `tests/tparallelcheck.nim`'s racy-counter test asserts
+`r.outcome in {otFalsified, otFlaky}` — that a read-modify-write race **will be
+observed** inside the budget. That is an assertion about the OS scheduler. On a
+box running six containers the two threads time-slice instead of interleaving,
+the window between `racyInc`'s read and its write never straddles a context
+switch, every history is linearisable, and the catch silently does not happen.
+The test's own comment (`:127`) claims it mitigates this with "many repetitions
+per plan + many examples + **jitter**"; `:147` passes `maxJitter = 0`. Being
+fixed in this round — a gate test nobody can read is not a gate.
+
+`tsymex_snd3_loopdegrade` exit 137 is byte-identical to baseline.
+
+## Round 10 — closing the "open, recorded, not closed" list
+
+That list existed because round 8 reclassified work as filing material, which
+was the wrong call and was corrected. Round 10 closes it out.
+
+- **R26's observability + the parse-error gap are ONE hole, not two.**
+  `runConcolicCollectImpl` already drains both degrade sinks into
+  `counters.walkDegradeCount` (W10/R9) and then throws away the two richest
+  parts of the same story: `obligationLog` (which `9d1d8e3` confirmed populates
+  `odLive` on a concolic path) and `prog.parseErrors` (which that driver never
+  reads at all). Both are being landed on `ConcolicCollectResult` as a
+  diagnostics channel, mirroring `SymexResult.obligations` — IN FLIGHT at this
+  refresh; the closing sha goes here, and until it does this bullet is a plan,
+  not a result. **Deliberately NOT built:** a
+  raised-verdict channel through to `fuzz.nim`. The fuzzer executes every seed
+  against the real SUT and observes an actual crash directly, so that channel
+  would be a producer with no live consumer — the exact defect class the wiring
+  audit exists to catch. Recorded as a decision, not left as a silent omission.
+- **`tn45probe` / `tprobe_n45stats` — verified registerable, registration
+  pending** (`nelli.nimble` is held by the in-flight agent above). Both were
+  run first and confirmed to terminate and pass WITHOUT `-d:symexQueryStats`,
+  so the default suite gains no hang: `tprobe_n45stats` skips itself when the flag is
+  absent, `tn45probe` runs its k=2 trip-wire and reports `sxUnknown` in seconds.
+  `tn45probe` also lost its deprecated `withSymexSettings` builder for the
+  partial-literal form RFC-0010 introduced. The drift report's `unregistered`
+  count now measures real gaps instead of two known probes.
+- **`tsymex_snd3_loopdegrade`** — under diagnosis this round, by measurement.
+  The standing hypothesis is unbounded PATH growth, not unbounded unwinding: a
+  symbolic-length string loop whose guard degrades to a fresh unconstrained
+  bool forks both ways every iteration, and `maxFrontierSize` is back to 0.
+
+## Round 10 — bookkeeping reconciled
+
+Three ledger rows read `open` long after their fixes landed (`R24`/`R25`/`R26`
+at `9d1d8e3`, `R30` at `4e01f98`) and the round-4 findings header still said
+"none fixed"; `W8` read "OPEN — no RED" after `bd6a013` pinned it. All
+corrected in place. This is the fourth time this session a stale status has had
+to be caught — the ledger rots faster than the code does, and the standing
+lenses are the only thing that has reliably found it.
+
+**`nelli.nimble`'s test-task comments carried two stale claims**, both fixed:
+`tsymex_163rev_frontier_default`'s comment still said "Default now `256`,
+measured…" after `90caaa1` reverted it to 0, and
+`tsymex_163rev_degrade_classification`'s said its item 1 "is NOT implemented —
+it needs a new `SymexErrorKind`, and `types.nim` is sibling-owned this session",
+both halves of which stopped being true when `7182801` landed
+`feGlobalReadUnmodelled`.
+
+## Round 10 — `wiring = proven` has no address, and that is the answer
+
+`quipu` is not on `PATH`; it runs via `core.hookspath` (`~/.config/git/hooks`)
+and its CLI is `/home/corey/.local/share/uv/tools/quipu/bin/python3 -m
+quipu.cli`. But **#161–163 are issue-scoped handoffs, not RFCs** — `quipu
+roadmap` lists eight documents and none of them is this work. There is no
+`<doc>/wiring` or `<doc>/review` address to set, so the skill's propagation step
+terminates in this ledger. Recorded here rather than left looking like pending
+work, which is what it looked like for two rounds.
+
 ## Remaining
 
-1. **Re-run the full sweep.** 14 suites were verified individually and the 15th
-   after the revert, but the gate is the sweep, not the sample — that is exactly
-   the lesson of this round. Baseline `base163.log` (460 entries, pinned at
-   `ac507c1`).
-2. `wiring = proven`, only if that sweep is clean.
-3. Corey's call on pushing (~45 unpushed commits).
+1. Corey's call on pushing. `origin/rfc-161-163-symex-defects` exists (CI rounds
+   1–2 ran against it) but HEAD is **67 commits ahead** of it and 117 ahead of
+   `main`, so the current tip has had no Windows verification. The earlier
+   "~45 unpushed commits, zero CI exposure" line was stale in both halves.
 

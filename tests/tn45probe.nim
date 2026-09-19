@@ -43,8 +43,12 @@ proc sutChainSecondNonLenBoundImpossible(s: string) =
   if p2 > s.len:
     symexTarget("impossible")
 
-const b5TripWireBudget = withSymexSettings() do (s: var SymexSettings):
-  s.budget.maxLoopUnwind = 2
+const b5TripWireBudget = SymexSettings(budget: ResourceBudget(maxLoopUnwind: 2))
+  ## The k=2 budget this probe holds FIXED. Written as a partial literal
+  ## rather than the deprecated `withSymexSettings` builder: RFC-0010 gave
+  ## `SymexSettings`/`ResourceBudget` per-field defaults, so every budget
+  ## this probe does not name keeps its default (`maxCallDepth` 3, etc.)
+  ## exactly as the builder left them.
 
 suite "N45 controlled probe — B5-4 trip-wire at a FIXED k=2 budget":
   test "B5-4 at k=2":

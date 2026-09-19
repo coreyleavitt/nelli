@@ -1738,3 +1738,47 @@ will run on a healthy box.
 describes preventing exactly this orphan mode. It did not. One orphan's
 container was still `Up 19 hours`; the other's was gone while its `nim`/binary
 processes lived on. That file is held by an in-flight agent.
+
+## Round 10 fix table
+
+| id | sev | sha | what closed it |
+|----|-----|-----|----------------|
+| T1 + T5 | High | `8b244d7` | `ConcolicYieldCounters` gains `obligationsLive` and `parseDeclines`, populated in `runConcolicCollectImpl` beside the existing `walkDegradeCount` and folded by `foldFlipResult` — so they ride the live chain to `CampaignStats.concolicYield`, user-visible at campaign end. Liveness proven through the real path, not by field existence: assertions drive `concolicFlip` and then `foldFlipResult`, plus a two-call test proving the fold ACCUMULATES rather than overwrites. The counter rides every flip outcome including `cfoUnmodelable`, because `collectCounters` is assigned before `targetBranchIndex` is consulted. `parseDeclines` uses `capForcedUnknown`'s exact `sevError` predicate. The `.obligations`/`.parseErrors` seqs stay as the detail view behind a live count — a legitimate role, unlike being the only surface. No bump (140). |
+| T2 | High | `5d93568` | `spinJitter` spends its budget on real `sched_yield`/`SwitchToThread` syscalls instead of a user-space no-op spin. **Unit kept, mechanism changed**, so no caller's numbers need reinterpreting and `maxJitter = 0` still costs nothing. New `parallelJitterPoint*(n = 1)` lets a SUT perturb INSIDE an op without touching `LinOpDef.applySUT`'s signature. The overclaiming doc ("the differentiating feature vs. uninstrumented racy testing") is gone. Agent tested removing `racyInc`'s `sleep(1)` and measured **9 catches in 10** on between-op jitter alone — so the sleep stays, with that measurement recorded in the code rather than an assumption. |
+| T3 | High | `233c7d1` | A per-file extra-defines table in BOTH `nelli.nimble`'s test task and `scripts/sweep.sh` (each commenting the other so they cannot silently diverge), plus an optional trailing args parameter on `dt-bounded.sh` that leaves its three existing callers alone. Proof is the difference, not the pass: WITHOUT the define the suite still prints `[SKIPPED] requires -d:symexQueryStats`; WITH it, all three assertions run and pass (`rlimit=7360`/`9369` on sat, `rlimit=10` on unsat, `ASSERTS small=1 big=6`). Nothing needed weakening. The `skip()` branch stays — a legitimate safety net, since the instrumentation symbols are compiled out without the flag and a bare `nim c -r` would otherwise hard-error. |
+| T6 | High | `13b8998` | **A finding against T2's own fix.** `parallelJitterPoint` shipped with zero callers, referenced only in comment prose — "exercised by documentation" is not liveness, and the same commit's docs RECOMMENDED it over a hand-rolled sleep, so we were advertising a mechanism nothing had demonstrated. Settled by measurement with removal on the table: **20/20 idle and 10/10 under six-core saturation, all `otFalsified`**, with `maxJitter: 0` in the new test so the intra-op hook is the only perturbation. Better than between-op jitter's 9/10, because placing the yield at the race boundary lands it in the window every time. Reliable, so the recommendation stands — now cited to the test. Real caller at `tests/tparallelcheck.nim:161`. |
+| T4 | Medium | in flight | The ~12 copies of the dedup-by-`.msg` idiom. Guardrails in the brief: per-sink dedup stays the default (the existing per-sink rule is deliberate, `runtime.nim:14159-14173`), and Part B does NOT proceed if consolidating the three `obligations`/`abstractions` declarations would rewrite every caller — `SymexResult.obligations` is public API chapulin reads, and "consumers report, don't drive" is not licence to break field access for tidiness. |
+
+## Round 10 — SND-3-6 split, and what the sweep got back
+
+`1e1a735`. `tsymex_snd3_loopdegrade` was a 900s timeout kill in every sweep this
+session, which cost the gate five live soundness pins — SND-3-1 through SND-3-5
+pin a real false-`sxUnsat` fix and pass in SECONDS. Only `sutEqualityLoopGuard`
+hangs, so only `tsymex_snd3_6_equality_loop` is skip-listed.
+
+Verified rather than assumed, in both directions: the parent now passes in
+seconds, and the split file still hangs (killed at 180s), so the skip-list entry
+is honest rather than covering a test that quietly started passing. A scoped
+sweep reports `pass=1 skip=1 fail=0`, `unregistered=0 missing=0`.
+
+The skip list gained a RULE alongside the entry — each entry names its own
+reason and covers exactly the suite that hangs, with the `trequiresinit`
+incident cited as why. That is the trap this change was one decision away from
+walking into.
+
+## Round 10 — a claim of mine that needed narrowing
+
+"Drift is zero in both directions" is true and narrower than it sounded. The T3
+agent established that **`nimble test` is invoked by no CI leg at all** (an
+existing comment in `symex-mingw.yaml` says so outright), and `symex-mingw`'s
+derived corpus pulls only `tsymex_*`-prefixed names, which excludes both
+probes. So registering a file in `nelli.nimble` buys agreement between the list
+and the filesystem, plus `nimble test` locally — it does NOT buy CI coverage.
+On Linux the real gate is `sweep.sh`, which sweeps the filesystem and now
+carries the defines table too. On Windows the two probes run nowhere.
+
+Renaming them `tsymex_*` would pull them into the derived corpus, and the
+per-suite define mechanism already exists there (`-d:symexCiLeanB5`,
+`symex-mingw.yaml:396-403`). **Recommended, deliberately not done:** it is a
+change to a Windows leg that cannot be verified without pushing, and guessing at
+unverifiable CI edits is how the last CI saga started.

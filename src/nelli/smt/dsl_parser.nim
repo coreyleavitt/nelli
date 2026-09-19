@@ -2764,7 +2764,68 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # (`feUnsupportedExprKind`); finding W3 (`dsl_typebridge.nim`) had
     # already fixed the TYPE side of char ranges, but this EXPRESSION-side
     # gap remained.
-    parseExpr(n[n.len - 1], preamble, ctx)
+    #
+    # #163 item 2 (rev). Blind unwrapping is sound ONLY when the hidden
+    # conversion is representation-preserving (the subrange-strip case
+    # above, and `nnkHiddenAddr`'s address-of annotation, which never
+    # changes the pointee's value type). Nim ALSO inserts
+    # `nnkHiddenStdConv` to WIDEN a narrower fixed-width int operand up to
+    # match a wider peer -- e.g. `a: int32` compared against the untyped
+    # literal `3_000_000_000`, which itself types `int64` because it does
+    # not fit `int32` (`getImpl`/`treeRepr` puts `a` inside a
+    # `HiddenStdConv` whose OWN `getTypeInst` is `int64`; confirmed via
+    # `scratchpad/probe_163item2_treerepr.nim`, not committed). Blindly
+    # unwrapping parsed `a` at its narrow width with no record of the
+    # widening; the comparison's other operand -- a literal too big for
+    # that narrow width -- then got folded into a same-sized BV downstream
+    # and silently WRAPPED (`3_000_000_000` truncated into 32 bits reads
+    # back as the negative `-1294967296`), so `a > 3_000_000_000` came back
+    # `sxSat` for a target genuinely UNREACHABLE by any real `int32` value
+    # (every `int32` is far below three billion) -- a soundness bug, not
+    # merely an imprecision.
+    #
+    # Detect a genuine WIDTH change between the hidden conversion's own
+    # resolved type and its wrapped operand's type and route it through the
+    # same `mkConvIntWidth`/`declineIntWidthConv` machinery B2 built for the
+    # explicit `nnkConv` case above. Every same-width hidden conversion
+    # (subrange-strip, `nnkHiddenAddr`, or a spelling this engine does not
+    # recognize as a plain fixed-width int) falls through to the original
+    # identity pass-through, UNCHANGED.
+    block:
+      let wrapped = n[n.len - 1]
+      let outerTy = classifyType(n).ty
+      let innerTy = classifyType(wrapped).ty
+      if outerTy.kind == itInt and innerTy.kind == itInt and
+         outerTy.width != innerTy.width:
+        let tgt = valueTypeName(n)
+        let src = valueTypeName(wrapped)
+        if isIntFamilyName(tgt) and isIntFamilyName(src):
+          let srcN = normalizeIntTyName(src)
+          let tgtN = normalizeIntTyName(tgt)
+          let srcWidth = intTyWidth(srcN)
+          let tgtWidthV = intTyWidth(tgtN)
+          let srcSigned = intTySigned(srcN)
+          let tgtSignedV = intTySigned(tgtN)
+          if tgtWidthV > srcWidth:
+            mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
+                           srcWidth, srcSigned, tgtWidthV, tgtSignedV)
+          else:
+            # An implicit NARROWING hidden conversion is not expected from
+            # sound Nim typing (Nim widens implicitly; it does not
+            # implicitly narrow), but decline rather than risk a silent
+            # truncation if some toolchain shape ever produces one
+            # (Invariant 3 -- never a crash, never a silent wrong verdict).
+            declineIntWidthConv(n, preamble, ctx, "hidden narrowing", src, tgt)
+        else:
+          # Width differs but one side is not a plain fixed-width int
+          # spelling this engine recognizes by name (e.g. an enum or a
+          # named range alias promoted/demoted some other way) -- this
+          # shape has run through the untouched identity pass-through since
+          # #162/#163 with no known false verdict; leave it exactly as
+          # before rather than risk misclassifying an unfamiliar spelling.
+          parseExpr(wrapped, preamble, ctx)
+      else:
+        parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:
     # Issue #163 review (rev item 1). The compiler inserts `nnkHiddenCallConv`
     # for an implicit converter call. The one this engine actually needs to

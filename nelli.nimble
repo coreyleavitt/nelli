@@ -676,5 +676,11 @@ task test, "Run the test suite":
             # reader (`readUInt8`/`readUInt16`) did not compile back into
             # the enum-typed field at all -- `symexFind` could not even be
             # CALLED on a proc taking an object with a plain enum field.
-            "tsymex_163rev_enum_field_witness"]:
+            "tsymex_163rev_enum_field_witness",
+            # Issue #163 item 2 (rev): a hidden int-widening conversion
+            # (`nnkHiddenStdConv`, e.g. `a: int32` compared against the
+            # untyped literal `3_000_000_000`, which Nim itself types
+            # `int64`) was blindly unwrapped at its NARROW width, silently
+            # wrapping the wider literal into a false `sxSat`.
+            "tsymex_163rev_int_literal_width"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

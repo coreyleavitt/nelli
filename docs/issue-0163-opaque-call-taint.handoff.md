@@ -1369,3 +1369,46 @@ scripts/sweep.sh <out>.log && scripts/sweep-diff.sh \
   /home/corey/.claude/jobs/4fd5573d/tmp/base163.log <out>.log
 ```
 
+## Round 9 closed
+
+| item | commit | note |
+|---|---|---|
+| family member 4 — `ord()` | `710e9dc` | `ord()`'s magic intercept re-derived its result width from the ARGUMENT (an enum at its narrow `enumOrdBitsNeeded` width) instead of the `Call` node's own correct native-`int` classification — discarding the right answer one level up. Subtle because the enclosing `HiddenStdConv` and the `Call` node's types already AGREE at native width, so the widening arm saw no mismatch and recursed straight past. `ord(c) > 3_000_000_000` on a 3-member enum returned `sxSat` witness `cGreen` (real `ord(cGreen) == 1`). Confirmed and fixed at six positions: param, local, object field, `char`, non-comparison binding, arithmetic. `isPromoteSoundEligibleParam` was factored into ONE shared proc for this site and `c74c04b`'s rather than duplicating the carve-out — closing the drift risk directly. |
+| bump 139 -> 140 | `284734d` | Covers `c74c04b` and `710e9dc`, both real false SATs. The doc comment records them as members of the width-truncation family, with the unaffected positions and why. |
+| collateral regression from `d71da9e` | `90531ae` | **Round 8's enum-witness fix broke three suites' COMPILATION.** Making the witness honestly enum-typed is correct, but `tsymex_rectify_variants`, `tsymex_phase11_walker` and `tsymex_phase6_case` still compared it against `ord(x).uint8`/`.uint16`. The enum agent fixed one such suite when `d71da9e` landed and missed these. All three now use the idiom that commit established (`ord(r.witness[0]) == ord(x)`), assertion strength unchanged. The corpus was then swept for further instances — none; the remaining suspicious matches are plain `uint8` params or already-enum casts that are now no-ops. The third file was found by that sweep, not by the report, and would otherwise have read as a regression. |
+
+## State
+
+Branch `rfc-161-163-symex-defects`, HEAD `90531ae`, **NOT PUSHED** (last push
+`26418f3`). Walker **140**, in six bumps across nine review rounds. The final
+full sweep is RUNNING — read its result before believing any completion claim:
+
+```
+tail -34 /home/corey/.claude/jobs/4fd5573d/tmp/sweepr9.out
+grep -c . /home/corey/.claude/jobs/4fd5573d/tmp/cur163r9.log   # progress /484ish
+```
+
+Baseline is the same `base163.log` (460 entries, pinned worktree at `ac507c1`)
+every gate this session used. Expect `tsymex_snd3_loopdegrade` exit 137 — it is
+an UNDOCUMENTED HANG on unmodified HEAD, not a regression, and distinct from the
+six known `tsymex_r6_*` Linux hangers.
+
+## Remaining
+
+1. Read the sweep. If anything regressed, it belongs to this round.
+2. `wiring = proven`. `quipu` is not on PATH but DOES run as a git hook here —
+   find the hook's invocation rather than assuming it is unavailable.
+3. Corey's call: push (~40 unpushed commits, zero CI exposure).
+
+## Open, recorded, not closed
+
+- **R26's observability** — `ziWidth`/`ziSigned` are stamped and
+  `obligationLog` populates on a concolic path, but `ConcolicCollectResult` /
+  `ConcolicFlipResult` have no raised-verdict channel, so it cannot surface.
+  Wiring one needs `fuzz.nim` orchestrator work.
+- **The three parse-time error kinds do not reach `concolicCollect`**, which
+  never reads `prog.parseErrors`. Pre-existing structural gap in that API.
+- **`tsymex_snd3_loopdegrade`** hangs on unmodified HEAD; belongs in the same
+  ledger as the six known hangers.
+- **`tn45probe` / `tprobe_n45stats`** remain unregistered (pre-existing drift).
+

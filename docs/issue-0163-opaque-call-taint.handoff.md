@@ -1289,7 +1289,7 @@ conversion where none belongs.
 
 | id | sev | status | finding |
 |----|-----|--------|---------|
-| P2 | High | IN FLIGHT | **The widening-conversion fix is narrower than its own commit message claimed.** It engages `mkConvIntWidth` only when BOTH sides pass `isIntFamilyName` — a closed set of plain int spellings (`int`, `int8..64`, `uint`, `uint8..64`, `byte`, `char`). `valueTypeName` reads `getTypeInst`, which for a NAMED range alias or an enum reports that alias/enum name, so the gate fails and the code falls back to the old blind pass-through. Traced consequence: no `iekConvIntWidth` is inserted, `probeProto` returns the operand's native narrow width, and `coerceIntLit` truncates the oversized literal mod 2^n — the identical false SAT, for a different declared-type spelling. Proposed repro: `type SmallCount = range[0'i32..100]; proc f(a: SmallCount) = (if a > 3_000_000_000: symexTarget("hit"))`. **Not a regression** (the pre-round-8 pass-through was equally broken), but I asserted the class was closed and it is not. In flight: verify by experiment first (the lens could not compile), fix by reusing `rangeBaseType`/`enumOrdBitsNeeded` rather than a second name-based rule, and correct the v139 doc claim either way. |
+| P2 | High | fixed `c74c04b` | **The widening-conversion fix is narrower than its own commit message claimed.** It engages `mkConvIntWidth` only when BOTH sides pass `isIntFamilyName` — a closed set of plain int spellings (`int`, `int8..64`, `uint`, `uint8..64`, `byte`, `char`). `valueTypeName` reads `getTypeInst`, which for a NAMED range alias or an enum reports that alias/enum name, so the gate fails and the code falls back to the old blind pass-through. Traced consequence: no `iekConvIntWidth` is inserted, `probeProto` returns the operand's native narrow width, and `coerceIntLit` truncates the oversized literal mod 2^n — the identical false SAT, for a different declared-type spelling. Proposed repro: `type SmallCount = range[0'i32..100]; proc f(a: SmallCount) = (if a > 3_000_000_000: symexTarget("hit"))`. **Not a regression** (the pre-round-8 pass-through was equally broken), but I asserted the class was closed and it is not. In flight: verify by experiment first (the lens could not compile), fix by reusing `rangeBaseType`/`enumOrdBitsNeeded` rather than a second name-based rule, and correct the v139 doc claim either way. |
 | P6 | Medium | fixed `7405283` | **My bump rationale contradicted itself.** v139's doc listed the module-global decline among changes NOT warranting a bump ("pure error attribution — the `sxUnknown` already happened") while the same comment explained that the raw `raise` it replaced "would have left `sawUnknown` unset and enabled a false `sxUnsat`". Both cannot hold. The old code was a bare `env[e.vname]`, which RAISES; the fix changes control flow to close that N31/N36-class false-`sxUnsat` hazard, which is verdict-affecting by definition. Harmless in practice — the 138->139 bump covers it anyway — but had it shipped alone the stated reasoning would have shipped a verdict-changing fix unbumped, which is the exact failure this protocol exists to catch. The `maxCallDepth` exclusion stands: it adds a message beside an already-present `sawUnknown`. |
 
 **Pattern worth naming:** round 9 is the third time this session a lens caught
@@ -1304,4 +1304,68 @@ of it.
 2. If P2 lands a fix, bump 139 -> 140.
 3. Full sweep vs `base163.log` (460 entries, pinned at `ac507c1`).
 4. `wiring = proven`.
+
+## P2 resolved — and the repro I proposed was wrong
+
+`c74c04b`. The top-level-param repro I wrote into the brief
+(`proc f(a: SmallCount)`) was **REFUTED**: it already returned `sxUnsat`.
+#161's `promoteSound` independently lifts any signed, proven-range top-level
+parameter to Z3's unbounded Int theory at allocation, so BV truncation never
+applies there. The AST premise held (the wrapped operand's `getTypeInst`
+reports `"SmallCount"` and fails `isIntFamilyName`), but the consequence did
+not — at that position.
+
+Pushing on adjacent positions found the real bug: a range-alias **object
+field** (`r.f: range[0'i32..100'i32]` vs an oversized literal) returned false
+`sxSat` with witness `f = 0`, and an enum/range-alias **local** the same. Fixed
+by reading width and signedness off the `outerTy`/`innerTy` `IRType`s that
+`classifyType` already computes — reusing `rangeBaseType` /
+`enumOrdBitsNeeded` rather than adding a third name-based rule.
+
+One carve-out was found empirically, not by design: routing a
+`promoteSound`-promoted param through `mkConvIntWidth` regressed a correct
+`sxUnsat` to `sxUnknown`, because `lowerConvIntWidth` hard-asserts a raw-BV
+operand. `isPromoteSoundEligibleParam` leaves exactly that shape on the
+untouched identity path.
+
+## A FAMILY, not three bugs — worth recording as such
+
+Four related false-SAT defects have now surfaced, all the same root shape: **a
+value carrying a narrower width than its expression's declared type, so an
+oversized literal truncates mod 2^n and wraps into range.**
+
+1. plain `int32` param vs an oversized literal — `678c6ce`
+2. range-aliased object field — `c74c04b`
+3. range-aliased local — `c74c04b`
+4. `ord()` of an enum, which identity-passes at the ENUM's narrow lifted width
+   instead of `ord`'s declared native-`int` return — IN FLIGHT
+
+`tests/tsymex_163rev_int_literal_width.nim` is now the flagship pin for the
+whole family and should stay that way; a fifth instance belongs there too.
+The positions that are NOT affected are worth knowing: a signed proven-range
+top-level param is covered by `promoteSound`, and unsigned range-alias params
+and native-width `ord()` were already sound for orthogonal reasons documented
+in that test file.
+
+## Remaining to close
+
+1. The `ord()` fix (family member 4), in flight.
+2. One bump **139 -> 140** covering `c74c04b` and the `ord()` fix. Both are
+   verdict-affecting (each closes a real false SAT). Move the CR2 `==` pin and
+   raise the floor pin in `tsymex_163rev_int_literal_width.nim`.
+3. Full sweep vs `base163.log` (460 entries, pinned worktree at `ac507c1`).
+   `tsymex_snd3_loopdegrade` is an undocumented HANG on unmodified HEAD — expect
+   its exit-137 and do not read it as a regression.
+4. `wiring = proven`. `quipu` is not on PATH but DOES run as a git hook here;
+   find the hook's invocation rather than assuming it is unavailable.
+
+**Resume:**
+
+```
+git -C /home/corey/projects/nim/libs/proptest log --oneline -50
+grep -n 'symexWalkerVersion\* = ' src/nelli/smt/canonicalize.nim
+scripts/dt-bounded.sh c tests/tsymex_163rev_int_literal_width.nim 300
+scripts/sweep.sh <out>.log && scripts/sweep-diff.sh \
+  /home/corey/.claude/jobs/4fd5573d/tmp/base163.log <out>.log
+```
 

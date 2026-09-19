@@ -184,7 +184,43 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "139"
+const symexWalkerVersion* = "140"
+  ## `/code-review` round 9 (2026-09-18) — two more members of the
+  ## WIDTH-TRUNCATION FAMILY, both false SATs. The family's root shape: a value
+  ## carrying a NARROWER width than its expression's declared type, so an
+  ## oversized literal truncates mod 2^n and wraps into range. Four instances
+  ## now, and `tests/tsymex_163rev_int_literal_width.nim` is the flagship pin
+  ## for all of them — a fifth belongs there too.
+  ##
+  ## * **`c74c04b`** — v139's widening fix (`678c6ce`) engaged only when BOTH
+  ##   sides passed `isIntFamilyName`, a closed set of plain int spellings.
+  ##   `valueTypeName` reads `getTypeInst`, which for a NAMED range alias or an
+  ##   enum reports that alias/enum name, so the gate fell through to the old
+  ##   blind identity pass-through. v139's own doc claimed the class was
+  ##   closed; it was not. Now reads width/signedness off the `outerTy`/
+  ##   `innerTy` `IRType`s `classifyType` already computes (`rangeBaseType`,
+  ##   `enumOrdBitsNeeded`) rather than a second name-based rule.
+  ##   NOTE the position matters and the originally-proposed repro was WRONG:
+  ##   a signed proven-range TOP-LEVEL PARAM is already sound, because #161's
+  ##   `promoteSound` lifts it to Z3's unbounded Int theory at allocation. The
+  ##   live bug was at OBJECT-FIELD and LOCAL positions (`r.f: range[0'i32..
+  ##   100'i32]` vs an oversized literal returned `sxSat`, witness `f = 0`).
+  ##   `isPromoteSoundEligibleParam` keeps the promoted-param shape on the
+  ##   untouched path — found empirically: routing it through `mkConvIntWidth`
+  ##   regressed a correct `sxUnsat` to `sxUnknown`, since `lowerConvIntWidth`
+  ##   hard-asserts a raw-BV operand.
+  ## * **`710e9dc`** — `ord()`'s magic intercept re-derived its result width
+  ##   from the ARGUMENT (an enum at its narrow `enumOrdBitsNeeded` width)
+  ##   instead of from the `Call` node's own correct native-`int`
+  ##   classification, discarding the right answer one level up. Subtle
+  ##   because the enclosing `HiddenStdConv` and the `Call` node's types
+  ##   already AGREE at native width, so the widening arm above saw no
+  ##   mismatch and recursed straight past it. `ord(c) > 3_000_000_000` on a
+  ##   3-member enum returned `sxSat` with witness `cGreen`
+  ##   (real `ord(cGreen) == 1`). Confirmed and fixed across six positions:
+  ##   param, local, object field, `char`, non-comparison binding, arithmetic.
+  ##   `isPromoteSoundEligibleParam` was factored into ONE shared proc for this
+  ##   site and `c74c04b`'s, rather than duplicating the carve-out.
   ## `/code-review` round 8 (2026-09-18) — the "fix everything" sweep, after
   ## Corey pushed back on round 7 having closed the review's own findings and
   ## then reclassified the remainder as filing material and a withheld flag.

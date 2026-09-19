@@ -389,4 +389,4 @@ suite "#163 -- ord() carries its declared native-int width, not the argument's":
 suite "#163 item 2 -- walker version pin":
 
   test "walker version floor >= 138 (the round this fix lands in)":
-    check parseInt(symexWalkerVersion) >= 139
+    check parseInt(symexWalkerVersion) >= 140

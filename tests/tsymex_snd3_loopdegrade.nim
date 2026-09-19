@@ -91,15 +91,12 @@ proc sutCharOrderingOutsideLoop(s: string) =
   if s.len > 0 and s[0] >= '0':
     symexTarget("outside_loop_degrade")
 
-# 6. Equality regression — `s[i] == 'a'` in a loop guard is NOT an ordering
-# comparison (CR-17(a) only guards `<`/`<=`/`>`/`>=`) and must keep resolving
-# to a REAL verdict; the fix must not touch this non-raising path at all.
-proc sutEqualityLoopGuard(s: string) =
-  var i = 0
-  while i < s.len and s[i] == 'a':
-    inc i
-  if i == 3:
-    symexTarget("equality_loop_hit")
+# 6. The equality regression lives in `tsymex_snd3_6_equality_loop.nim`.
+# Split out in round 10 of the #163 review: its SUT is the ONLY one in this
+# file that fails to terminate (one Z3 query grinding past a 20M rlimit --
+# measurements in that file's header), and skip-listing THIS file to cope with
+# it would have silently retired SND-3-1 through SND-3-5, which are live
+# soundness pins. One entry, one SUT, one documented reason.
 
 # ---------------------------------------------------------------------------
 # Tests
@@ -133,14 +130,6 @@ suite "symex RFC-chapulin-hardening SND-3 — loop-guard lowering degrade (c==cp
       if e.kind == seUnsupportedStringOp and e.severity == sevError:
         sawKind = true
     check sawKind
-
-  test "SND-3-6 (equality regression): s[i]=='a' loop guard still resolves to a real sxSat verdict":
-    let r = symexFind(sutEqualityLoopGuard, tLabel("equality_loop_hit"))
-    check r.status == sxSat
-    check r.witness[0].len >= 3
-    check r.witness[0][0] == 'a'
-    check r.witness[0][1] == 'a'
-    check r.witness[0][2] == 'a'
 
 suite "symex RFC-chapulin-hardening SND-3 — version pins":
 

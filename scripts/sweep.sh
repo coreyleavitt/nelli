@@ -75,18 +75,32 @@ outlog="${1:?usage: sweep.sh [-j N] [-t SECS] [-b c|cpp] [-f REGEX] <outlog>}"
 
 case "$backend" in c|cpp) ;; *) echo "sweep.sh: backend must be c or cpp" >&2; exit 2 ;; esac
 
-# Six suites that hang INDEFINITELY under Linux/podman (verified to 1500s,
-# killed, not merely slow) while passing on the symex-mingw Windows leg.
-# Pre-existing on main. Sweeping them costs six timeout kills and tells us
-# nothing we do not already know, so they are skipped and reported as `skip`
-# rather than silently dropped.
+# Suites that hang INDEFINITELY under Linux/podman (verified, killed, not
+# merely slow). Sweeping them costs a timeout kill each and tells us nothing we
+# do not already know, so they are skipped and reported as `skip` rather than
+# silently dropped.
+#
+# Every entry here must name its own reason, and the entry must cover exactly
+# the suite that hangs -- no more. A skip-list entry that quietly covers more
+# than it claims is how a real defect stays hidden: see the `trequiresinit`
+# incident, where a stale "fails on Windows" ledger note had maintainers
+# skip-listing a genuine bug that was red on BOTH platforms.
 known_linux_hangs=(
+  # The six r6 suites: hang under Linux/podman (verified to 1500s) while
+  # PASSING on the symex-mingw Windows leg. Pre-existing on main.
   tsymex_r6_b1_stringbacked
   tsymex_r6_b3_scanpair
   tsymex_r6_nulwitness
   tsymex_r6_b7r_bytescan
   tsymex_r6_b7r2_pathscope
   tsymex_r6_n10_coverage_matrix
+  # SND-3-6, split out of tsymex_snd3_loopdegrade.nim in round 10 of the #163
+  # review. ONE Z3 query grinding: flat RSS (so not path growth), hangs at
+  # maxLoopUnwind=1 (so not unrolling), hangs on BOTH backends (so not the
+  # backend-divergence class SND-3 pins), terminates at queryRLimit=1 but not
+  # at 20_000_000. Its parent file is deliberately NOT here: SND-3-1..5 pass in
+  # seconds and are live soundness pins. Full measurements in the suite header.
+  tsymex_snd3_6_equality_loop
 )
 
 is_known_hang() {

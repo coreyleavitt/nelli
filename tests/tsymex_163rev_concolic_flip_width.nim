@@ -55,6 +55,16 @@
 ## unchanged -- they pin that `walkDegradeCount`/`ambiguousBranches`/
 ## `branchTrace` say nothing about the raise, which is still true.
 ##
+## Round 10 went one hop further (`8b244d7`), and for a reason worth recording:
+## two review lenses independently found that the diagnostics channel above was
+## ITSELF a producer with no consumer on the production path -- `concolicCollect`
+## has no call sites in `src/`, and `runConcolicFlipImpl` was dropping
+## `.obligations`/`.parseErrors` on every real flip. So the counters
+## `obligationsLive`/`parseDeclines` now ride `ConcolicFlipResult
+## .collectCounters` -> `foldFlipResult` -> `CampaignStats.concolicYield`, which
+## is user-visible at campaign end. The raised-VERDICT channel is still
+## deliberately absent; a count and a verdict are different things.
+##
 ## House rule: every symbolic expectation below is paired with an ORACLE
 ## (the same computation executed for real, in Nim, in this file) and, where
 ## meaningful, cross-checked against `wmExplore` (`symexFind`) too -- the
@@ -253,12 +263,15 @@ suite "#163 review R26 -- concolic Z3Int params now carry the overflow obligatio
     ## full field list -- a prose field-count goes stale the moment the type
     ## grows, and this one did. What it pins is unchanged and narrower: NONE
     ## of the pre-existing fields say anything about a raise. There is still
-    ## no raised-verdict field, and `counters`
-    ## (`ConcolicYieldCounters`, `smt/concolictaxonomy.nim`) has no slot for
-    ## "an obligation fired" either (its members are `tracesTruncated`/
-    ## `drawsSymbolicated`/`paramsConcretized`/`unsupportedDrawKinds`/
-    ## `nonInt64Draws`/`ambiguousBranches`/`ambiguousByConstruct`/
-    ## `walkDegradeCount` -- none of them about a raise). `branchTrace` is
+    ## no raised-verdict field. `counters` (`ConcolicYieldCounters`,
+    ## `smt/concolictaxonomy.nim`) DOES now have a slot for "an obligation
+    ## fired" -- `obligationsLive`, added at `8b244d7` so the fact reaches
+    ## `CampaignStats.concolicYield` via `foldFlipResult`. A diagnostic COUNT
+    ## is not a verdict channel, and that distinction is the one this test
+    ## pins: none of the fields asserted below say anything about the raise.
+    ## (This comment previously enumerated the counter's members and claimed
+    ## no such slot existed, which `8b244d7` falsified within the same round --
+    ## hence no member list here now.) `branchTrace` is
     ## populated ONLY by `walkIfFollowConcrete` (an `if`-decision); an
     ## overflow raise-fork is not an `if` and produces no
     ## `ConcolicBranchRecord`, so `concolicFlip`'s `targetBranchIndex`

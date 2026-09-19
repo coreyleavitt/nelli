@@ -631,6 +631,13 @@ task test, "Run the test suite":
             "tsymex_snd1b_closure_uncertain_axiom",
             "tsymex_snd2_assume",
             "tsymex_snd3_loopdegrade",
+            # SND-3-6 split out of tsymex_snd3_loopdegrade in round 10 of the
+            # #163 review: it is the only SUT in that file that does not
+            # terminate (one Z3 query past a 20M rlimit), and skip-listing the
+            # parent to cope would have retired five live soundness pins with
+            # it. Registered here so `nimble test` still covers it; skip-listed
+            # in scripts/sweep.sh so the gate does not burn a timeout on it.
+            "tsymex_snd3_6_equality_loop",
             "tsymex_snd4_strindex_oob",
             # RFC-fuzzer-nextgen Track E — isolated executor: worker protocol,
             # process/fork workers, orchestrator, lifecycle, breakers, and the

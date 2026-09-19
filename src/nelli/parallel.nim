@@ -383,10 +383,11 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ## write back), so splitting every statement boundary covers that
   ## shape without the author pointing at it — including when those two
   ## statements sit inside an `if`/`while`/`for`/`case`/`block`/`try`/
-  ## `defer`/`when` body rather than directly in the proc's own
-  ## top-level list (round 12 finding Q3: a race inside a loop body is
-  ## arguably the *commoner* shape for a concurrent counter, and
-  ## pre-recursion this hook missed it entirely, silently).
+  ## `defer`/`when`/pragma-block (`{.cast(gcsafe).}: ...` and similar)
+  ## body rather than directly in the proc's own top-level list (round
+  ## 12 finding Q3: a race inside a loop body is arguably the *commoner*
+  ## shape for a concurrent counter, and pre-recursion this hook missed
+  ## it entirely, silently).
   ##
   ## Follows `instrumentNode` (coverage.nim)'s shape: dispatch on the
   ## node kinds that carry a nested statement-list body, rewrite each
@@ -403,8 +404,8 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ##   value. So the fallback here does NOT recurse further — only the
   ##   explicitly listed statement-holding constructs (top-level list,
   ##   `if`/`elif`/`else`, `case`, `while`, `for`, `block`,
-  ##   `try`/`except`/`finally`, `defer`, `when`/`elif`/`else`) are
-  ##   walked.
+  ##   `try`/`except`/`finally`, `defer`, `when`/`elif`/`else`, and
+  ##   pragma blocks like `{.cast(gcsafe).}: ...`) are walked.
   ##   NOTE (round 13 finding R13-6 corrected a prior version of this
   ##   comment): `nnkWhenStmt` used to be lumped in with `nnkIfExpr` here
   ##   as an "expression position with nowhere to put a call", which was
@@ -431,16 +432,17 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ## treats each branch of a top-level-position `if`/`case` as
   ## separately contributing an implicit result).
   ##
-  ## **Self-reporting fallback (round 13 finding R13-2/R13-6).** Round 12
-  ## added six arms; round 13's review found two more missing
-  ## (`nnkDefer`, `nnkWhenStmt`) — both silent, because the zero-insertion
-  ## guard on the macro only fires when the TOTAL count across the whole
-  ## proc is zero, and any other statement boundary in the same proc
-  ## keeps that count positive. An allow-list of "constructs we thought
-  ## of" will always be one review round behind whatever construct
-  ## nobody thought of yet. So the `else` arm below does not just fall
-  ## through: if the node it was handed is itself a statement-holding
-  ## construct (`hasStmtListChild`) and not a nested callable
+  ## **Self-reporting fallback (round 13 finding R13-2/R13-6, then
+  ## `nnkPragmaBlock` immediately after).** Round 12 added six arms;
+  ## round 13's review found two more missing (`nnkDefer`, `nnkWhenStmt`)
+  ## — both silent, because the zero-insertion guard on the macro only
+  ## fires when the TOTAL count across the whole proc is zero, and any
+  ## other statement boundary in the same proc keeps that count positive.
+  ## An allow-list of "constructs we thought of" will always be one
+  ## review round behind whatever construct nobody thought of yet. So the
+  ## `else` arm below does not just fall through: if the node it was
+  ## handed is itself a statement-holding construct (`hasStmtListChild`)
+  ## and not a nested callable
   ## (`jitterNestedCallableKinds`, which legitimately have a body but
   ## aren't part of this proc's control flow), it emits a compile-time
   ## `warning` naming the node kind, the proc, and that a nested body was
@@ -451,6 +453,19 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
   ## every time a SUT author reaches for some exotic statement kind this
   ## module hasn't special-cased yet would be worse than the gap it
   ## reports.
+  ##
+  ## This mechanism has already paid for itself once: `nnkPragmaBlock`
+  ## (`{.cast(gcsafe).}: ...` and similar) was found by this fallback
+  ## firing while verifying the `nnkDefer`/`nnkWhenStmt` fix above, not
+  ## by a subsequent review round, and got its own arm below rather than
+  ## being left on the warning. Whether the allow-list of arms
+  ## eventually converges (every statement-holding construct in the Nim
+  ## grammar gets an arm and the fallback goes permanently quiet) or
+  ## stays genuinely open-ended (real Nim code keeps finding new
+  ## statement-holding node kinds) is, as of this writing, still an open
+  ## question — see the "still fires on" note kept up to date at the top
+  ## of `tests/tparallelcheck.nim`'s jitter-pragma section for the
+  ## current answer.
   case n.kind
   of nnkStmtList:
     result = instrumentStmtList(n, count, procName)
@@ -535,6 +550,44 @@ proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNo
     # a `defer:` body got zero jitter points, silently, because the
     # proc's OTHER statements kept the total insertion count positive.
     result = nnkDefer.newTree(instrumentStmtList(n[0], count, procName))
+  of nnkPragmaBlock:
+    # `{.somePragma.}: stmt1; stmt2` parses as a two-child node: n[0] is
+    # the `nnkPragma` list (left untouched — we are not rewriting the
+    # pragma, just the body), n[1] is the `nnkStmtList` body. Verified via
+    # `dumpTree` for three shapes -- `{.cast(gcsafe).}: ...`, an arbitrary
+    # user pragma, and `{.locks: [l].}: ...` -- all three produce the
+    # identical `PragmaBlock[Pragma[...], StmtList[...]]` shape, so no
+    # per-pragma special-casing is needed. This was the THIRD gap the
+    # self-reporting fallback below caught on its own (found while
+    # verifying round 13's `nnkDefer`/`nnkWhenStmt` fix, not by a new
+    # review round) — `{.cast(gcsafe).}: <racy read-modify-write>` is a
+    # very plausible SUT shape, arguably more likely than `defer`.
+    #
+    # Effect-safety check (this is the one arm here where "is a jitter
+    # call still just scheduling, or does it change what the compiler
+    # verifies" is a real question, because `{.cast(gcsafe).}` doesn't
+    # just group statements -- it overrides the compiler's gcsafe check
+    # for everything inside it): if `parallelJitterPoint`/`schedulerYield`
+    # were NOT actually gcsafe, inserting a call to them inside a
+    # `{.cast(gcsafe).}` block would compile anyway (the cast suppresses
+    # the check) while a plain, non-cast `{.gcsafe.}` block would reject
+    # it -- so a cast could "launder" an otherwise-real violation.
+    # Checked empirically: a plain, non-cast `{.gcsafe.}: parallelJitterPoint()`
+    # block -- which requires the compiler to PROVE gcsafe-ness, not just
+    # assert it -- compiles clean. `racyIncJitterPoint` and `racyIncPragma`
+    # elsewhere in this module already call `parallelJitterPoint()` from
+    # inside procs annotated plain `{.gcsafe.}` (no cast) for the same
+    # reason. So `parallelJitterPoint` is genuinely gcsafe, verified by
+    # real inference, not merely accepted through an override -- inserting
+    # it inside a `{.cast(gcsafe).}` (or any other pragma) block cannot
+    # launder a violation that doesn't exist. Its body is also a bare
+    # syscall wrapper (`posix.sched_yield`/`SwitchToThread`, discarded
+    # return value) with no `raise`, so a `{.cast(raises: []).}`-style
+    # block is equally unaffected. It is never inserted after the body's
+    # last statement, same invariant as everywhere else, so a pragma
+    # block ending in an implicit-result expression is unaffected.
+    result = nnkPragmaBlock.newTree(
+      n[0], instrumentStmtList(n[1], count, procName))
   else:
     if n.kind notin jitterNestedCallableKinds and hasStmtListChild(n):
       warning(

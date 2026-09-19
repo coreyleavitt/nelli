@@ -157,6 +157,33 @@ proc racyInc(c: ptr Counter): int {.gcsafe.} =
 
 proc racyGet(c: ptr Counter): int {.gcsafe.} = c[].count
 
+# `{.jitterPoints.}` self-reporting fallback -- "still fires on" note.
+# `insertJitterBoundaries` (parallel.nim) warns at compile time whenever it
+# meets a node that itself holds a nested statement list but has no
+# dedicated dispatch arm (and isn't a nested callable, which is correctly
+# excluded). Two node kinds were caught this way and given real arms:
+# `nnkDefer` and `nnkWhenStmt` (round 13 findings R13-2/R13-6), then
+# `nnkPragmaBlock` (`{.cast(gcsafe).}: ...` and similar -- found by the
+# fallback firing while verifying the first two, not by a new review round;
+# see `racyIncPragmaCastGcsafe` below).
+#
+# As of this writing, ONE more construct is confirmed to still trip the
+# fallback and was deliberately NOT given an arm: `nnkStaticStmt`
+# (`static: ...`). Unlike the three above, giving it the same copy-paste
+# arm would be actively WRONG, not just pending: a `static:` body runs at
+# COMPILE time (Nim's CTFE VM), and `parallelJitterPoint()` bottoms out in
+# a real `importc`'d syscall (`posix.sched_yield`/`SwitchToThread`) that
+# cannot execute there at all -- verified empirically: a bare
+# `static: parallelJitterPoint()` fails to compile with "cannot 'importc'
+# variable at compile time; sched_yield". So for `nnkStaticStmt` the
+# fallback's current behavior (warn, leave uninstrumented) is already the
+# CORRECT outcome, not a gap -- the fix, if this is ever revisited, is a
+# documented exclusion (like the nested-callable list) explaining why, not
+# a new instrumenting arm. This is concrete evidence that the allow-list
+# does not simply converge to "eventually every statement-holding node
+# kind gets an arm": some future fallback hits will need bespoke reasoning
+# about whether instrumenting is even valid, the same way this one did.
+
 # Same race as `racyInc`, but the read/write window is widened with the
 # library's low-level intra-op primitive instead of a hand-rolled
 # `sleep(1)`. Unlike `racyInc`, this proc has never had a `sleep` in it.
@@ -230,6 +257,27 @@ proc racyIncPragmaWhen(c: ptr Counter): int {.gcsafe, jitterPoints.} =
     result = v + 1
   else:
     result = 0
+
+# The self-reporting fallback's own third catch: the read/write pair sits
+# inside a `{.cast(gcsafe).}:` pragma block. Before `nnkPragmaBlock` got its
+# own arm, this fell through uninstrumented and the fallback warned about
+# it -- found while manually verifying the `defer`/`when` fix above, not by
+# a new review round (see the "still fires on" note further up). A
+# `{.cast(gcsafe).}` block is a very plausible real SUT shape: it is
+# exactly how a Nim author tells the compiler "trust me, this is
+# thread-safe" around code that is, in fact, the unsynchronized
+# read-modify-write this whole module exists to catch. Verified that
+# inserting `parallelJitterPoint()` here does not launder an effect
+# violation: `parallelJitterPoint` already compiles inside a REAL
+# (non-cast) `{.gcsafe.}` block, which requires the compiler to PROVE
+# gcsafe-ness rather than merely assert it (see `racyIncJitterPoint`,
+# `racyIncPragma` above, both plain `{.gcsafe.}` with no cast) -- so it is
+# genuinely gcsafe, not merely accepted through the cast's override.
+proc racyIncPragmaCastGcsafe(c: ptr Counter): int {.gcsafe, jitterPoints.} =
+  {.cast(gcsafe).}:
+    let v = c[].count
+    c[].count = v + 1
+    result = v + 1
 
 suite "parallelCheck: racy SUT is caught":
   test "lock-free wrong counter is detected as non-linearisable":
@@ -456,6 +504,44 @@ suite "parallelCheck: racy SUT is caught":
         LinOpDef[CounterState, ptr Counter, int](
           opId: 0,
           applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragmaWhen(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}
+
+  test "lock-free wrong counter inside a {.cast(gcsafe).} block is detected via {.jitterPoints.}":
+    # The self-reporting fallback's third catch (see the "still fires on"
+    # note further up): the read/write pair lives inside
+    # `racyIncPragmaCastGcsafe`'s `{.cast(gcsafe).}:` block, and the
+    # proc's own top-level statement list is a single statement (the
+    # pragma block itself) -- the `nnkPragmaBlock` arm added for this
+    # finding is what reaches the boundary between the block's three
+    # statements. `maxJitter` is 0 for the same reason as every other test
+    # in this file: a catch can only be credited to the pragma's own
+    # recursion into the pragma-block body.
+    #
+    # See the L4 note further up -- the same one-time-measurement framing
+    # applies here. Measured (manual, outside this suite, the same way as
+    # the `defer`/`when` tests above: looping this same spec/settings over
+    # 20 distinct seeds, idle host): 20/20.
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragmaCastGcsafe(c),
           applyModel: applyIncModel),
       ])
     proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)

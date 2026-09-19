@@ -98,4 +98,4 @@ suite "#163 item 2 non-regression -- a same-width (no hidden conv) oversized lit
 suite "#163 item 2 -- walker version pin":
 
   test "walker version floor >= 138 (the round this fix lands in)":
-    check parseInt(symexWalkerVersion) >= 138
+    check parseInt(symexWalkerVersion) >= 139

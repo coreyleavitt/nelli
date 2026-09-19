@@ -394,4 +394,4 @@ suite "#163 review round 1 -- walker version pin":
     ## change this round, not per-commit) -- it is NOT a claim that no bump
     ## is owed. Site 4 needed no code change (already covered by R27's own
     ## walker-137 bump) and so owes nothing further on its own.
-    check parseInt(symexWalkerVersion) >= 138
+    check parseInt(symexWalkerVersion) >= 139

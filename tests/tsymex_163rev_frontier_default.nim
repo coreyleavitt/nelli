@@ -114,4 +114,4 @@ suite "#163 item 3 -- an exceeded cap degrades honestly (never a silent wrong ve
 suite "#163 item 3 -- walker version pin":
 
   test "walker version floor >= 138 (the round this fix lands in)":
-    check parseInt(symexWalkerVersion) >= 138
+    check parseInt(symexWalkerVersion) >= 139

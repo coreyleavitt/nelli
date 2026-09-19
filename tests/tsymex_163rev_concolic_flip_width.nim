@@ -274,5 +274,5 @@ suite "#163 review R26 -- concolic Z3Int params now carry the overflow obligatio
 
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 138":
-    check parseInt(symexWalkerVersion) >= 138
+  test "walker version floor >= 139":
+    check parseInt(symexWalkerVersion) >= 139

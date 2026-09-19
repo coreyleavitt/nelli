@@ -78,4 +78,4 @@ suite "#163 review round 1 -- walker version pin":
     ## tree's CURRENT version only because this task does not own the bump
     ## (see `tsymex_163rev_assign_sites.nim`'s own version-pin test for the
     ## full rationale) -- not a claim that none is owed.
-    check parseInt(symexWalkerVersion) >= 138
+    check parseInt(symexWalkerVersion) >= 139

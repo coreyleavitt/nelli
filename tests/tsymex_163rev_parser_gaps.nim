@@ -160,5 +160,5 @@ suite "#163 rev (2) -- a char RANGE compared against a char literal parses":
 
 suite "#163 rev parser gaps -- walker version pin":
 
-  test "walker version floor >= 138":
-    check parseInt(symexWalkerVersion) >= 138
+  test "walker version floor >= 139":
+    check parseInt(symexWalkerVersion) >= 139

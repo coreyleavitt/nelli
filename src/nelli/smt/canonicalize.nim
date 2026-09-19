@@ -184,7 +184,82 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "138"
+const symexWalkerVersion* = "139"
+  ## `/code-review` round 8 (2026-09-18) — the "fix everything" sweep, after
+  ## Corey pushed back on round 7 having closed the review's own findings and
+  ## then reclassified the remainder as filing material and a withheld flag.
+  ## Seven verdict-affecting fixes, bumped together for the usual reason: a
+  ## cache entry written under any one of them can replay a wrong verdict
+  ## under the others.
+  ##
+  ## * **R22 sites 1-3** (`runtime_heap.nim` plain-field and variant-arm
+  ##   writes; `runtime.nim`'s `isIndexAssign`) — R22 had modelled Nim's
+  ##   assignment-time `RangeDefect` at ONE site, a plain local. The ref-object
+  ##   field write, the variant-arm field write and the seq-element write all
+  ##   still let an out-of-range store vanish. Each now forks via
+  ##   `forkAssignRangeCheck`, discharging statically against `#161`'s `ziIvl`
+  ##   interval first. `sxUnsat` -> `sxRaised`. Site 4 (a `var`/`out` param
+  ##   reassignment) needed NO code change: R27's parse-time `aty` resolution
+  ##   is indifferent to whether the target symbol came from an `isLet`, a
+  ##   `var` local or a formal, so it was already covered.
+  ## * **`storeSeqElem` (prerequisite, found while building R22 site 3's
+  ##   precision test)** — its `itInt` arm read `val.bv8/16/32/64` with no
+  ##   `svInt` handling. Under the DEFAULT `isOptimised` semantics a ranged
+  ##   param promotes to `svInt` for #161's machinery, so writing that value
+  ##   into ANY int-family seq element crashed the walker with
+  ##   `weInternalWalkerFault` — ranged or not. Pre-existing.
+  ##   `sxUnknown` -> a real verdict.
+  ## * **The hidden widening conversion** (`dsl_parser.nim`) — a FALSE-SAT
+  ##   soundness bug, and the one this round nearly under-reported. For
+  ##   `proc f(a: int32) = (if a > 3_000_000_000: symexTarget("hit"))`, which
+  ##   is unsatisfiable for every `int32`, the engine answered `sxSat` with
+  ##   witness `a = -1294967295`: the literal was truncated into the narrow
+  ##   width and wrapped negative. Real Nim inserts a widening
+  ##   `nnkHiddenStdConv`; the engine was not honouring the width change.
+  ##   Genuine width changes now route through `mkConvIntWidth`; same-width
+  ##   hidden conversions are untouched. `sxSat` -> `sxUnsat`.
+  ## * **`nnkHiddenCallConv` and `nnkHiddenSubConv`** (`dsl_parser.nim`) —
+  ##   `echo(intExpr)` and a char-range comparison (`c > 'm'` for
+  ##   `range['a'..'z']`) failed to PARSE AT ALL, so any SUT containing either
+  ##   was unanalysable. The `echo` fix reuses the existing `$`-conversion
+  ##   lowering rather than blind-unwrapping, since the result sits in a
+  ##   string-typed slot. This also revalidates finding R1's original repro,
+  ##   which had to be retracted for not parsing.
+  ## * **R24/R25** (`runtime.nim`, `runConcolicFlipImpl` /
+  ##   `materializeConcolicModel`) — the G2 flip read a solved value off
+  ##   `drawVars[i].zi`, but a param R16 binds as BV has `env[p.name]` as a
+  ##   fresh BV never bridged to `.zi` (the `int2bv`/`bv2int` non-termination
+  ##   hazard). A flip over such a param solved a disconnected variable: a
+  ##   `uint8` flip materialised `int(0)` instead of `int(201)`. New
+  ##   `drawOverrides` records which variable each binding actually used.
+  ## * **R26** (same file) — concolic Z3Int params carried no
+  ##   `ziWidth`/`ziSigned` stamp, so `overflowCondInt`'s obligation never
+  ##   fired on a concolic path at any width. Now stamped. (The obligation is
+  ##   still not OBSERVABLE through `ConcolicCollectResult`, which has no
+  ##   raised-verdict channel — recorded as follow-up, not implied closed.)
+  ## * **The enum-field witness reader** (`symex.nim`, `types.nim`,
+  ##   `dsl_typebridge.nim`) — `symexFind` could not COMPILE for a proc taking
+  ##   an object with a plain enum field: the reader emitted `readUInt8` into
+  ##   an enum-typed field. `IRType` gained `enumName`, round-tripped via
+  ##   `withEnumName` and rendered here as `:e[...]`, excluded from `IRType.==`
+  ##   per `nominalId`'s precedent since the walker never reads it. **A new
+  ##   canonicalized `IRType` field alone mandates this bump.** Unblocks
+  ##   finding R21's object-field position.
+  ## * **`maxFrontierSize`'s default** (`types.nim`) — was `0` = unbounded, the
+  ##   one incremental per-statement cap, which is what let R22's fork
+  ##   multiplicity accumulate on a ranged loop counter. Measured rather than
+  ##   guessed: largest frontier observed across ~20 heavy suites was 16, so
+  ##   the default is 256. `0` remains the documented opt-out. A runaway can
+  ##   now degrade to `sxUnknown` instead of grinding.
+  ##
+  ## NOT bumped for: the `maxCallDepth` classification and the module-global
+  ## decline. Both are pure error ATTRIBUTION — the `sxUnknown` already
+  ## happened and only the classified kind riding it changed. Note the
+  ## module-global fix deliberately does NOT raise: a raw `raise` unwinding
+  ## through nested `walkBlock` frames is silently swallowed by the C-backend
+  ## goto-exception unwind (the N31/N36 class), which would have left
+  ## `sawUnknown` unset and enabled a false `sxUnsat`. It records through the
+  ## `loweringDegradeErrors` threadvar sink instead.
   ## `/code-review` round 6 (2026-09-18) — **R28**, a narrowing that R27
   ## introduced and that round 6 caught.
   ##

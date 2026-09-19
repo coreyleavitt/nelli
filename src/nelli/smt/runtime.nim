@@ -5042,12 +5042,59 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
-    if env.hasKey(e.vname) or not isFollowConcreteWalk():
-      # `wmExplore` (the default whole-proc symbolic walker) is BYTE-
-      # IDENTICAL to pre-G3fix here: a name absent from `env` is a real
-      # parser/walker gap (every local/param the parser emits gets bound
-      # before its first read) and stays an honest `KeyError` crash.
+    if env.hasKey(e.vname):
       env[e.vname]
+    elif not isFollowConcreteWalk():
+      # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
+      # symbolic walker) reaching a name absent from `env` is NEVER a
+      # parser/walker gap -- the parser deliberately lets a free/global
+      # name through as a bare `iekVar` (every local/param it emits is
+      # bound before its first read; see `isInertOpaqueCall`'s doc comment,
+      # `dsl_parser.nim`), and the walker does not model module-level
+      # globals at all. This used to be a bare `env[e.vname]`, letting
+      # Nim's `Table.[]` `KeyError` escape uncaught and get reported by the
+      # run-level backstop as `weInternalWalkerFault` -- an internal-bug
+      # attribution for an ordinary, everywhere-applicable modeling gap.
+      #
+      # Degrades IN-BAND instead of raising: this arm sits inside `lower()`'s
+      # own recursion, reachable from arbitrarily many nested `walkBlock`
+      # frames (any global read inside a loop body or branch), which is
+      # EXACTLY the C-backend goto-exception hazard ADR-0023/SND-3 exists to
+      # ban -- a raw `raise` reached from inside nested `walkBlock` frames is
+      # silently LOST by Nim's C-backend goto-exception unwind (`lower()`
+      # returns as if nothing happened, `w.sawUnknown` never set, and the
+      # walker's default-to-UNSAT fallback can report a false `sxUnsat` for a
+      # concretely reachable target -- N31's original bug, generalized by
+      # N36/N40/N46 for every OTHER walk-reachable raw-raise site; see
+      # `degradeStrArm`'s own doc comment, above, for the fullest writeup of
+      # this exact mechanism). So this follows THAT idiom, not the
+      # `SymexClassifiedDegradeError` raise idiom the param-boundary/
+      # verified-unreachable/converted-at-chokepoint sites use (none of
+      # those unwind through a live `walkBlock` frame the way this arm
+      # does): record the classified decline via the same
+      # `loweringDegradeErrors`/`loweringDidDegrade` threadvar sink every
+      # other `lower()`-internal degrade in this file uses, then hand back a
+      # fresh unconstrained symbol of the best-known type (mirrors the
+      # `wmFollowConcrete` havoc construction immediately below) so lowering
+      # can continue -- `drainPendingLowerEffects` (the mandatory drain at
+      # every `lower()` call site inside `walk`) forks the path `uncertain`
+      # and sets `w.sawUnknown` regardless of nesting depth once this
+      # returns, so the verdict is `sxUnknown` at ANY nesting depth, naming
+      # the global so the caller knows what to remove from the reachable
+      # computation (or thread through as an explicit parameter) -- the
+      # soundness argument #163 slice 4's opaque-call inertness proof rests
+      # on needs this to be a genuine classified decline, not an accident of
+      # an escaping exception.
+      loweringDegradeErrors.add SymexErrorInfo(kind: feGlobalReadUnmodelled,
+        severity: sevError,
+        msg: "module-level global '" & e.vname & "' is read but not " &
+             "modelled by the symbolic walker -- remove it from the " &
+             "reachable computation or pass it as an explicit parameter " &
+             "(feGlobalReadUnmodelled)")
+      loweringDidDegrade = true
+      var fresh: seq[Z3Bool]
+      let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
+      allocateSym(ty, "__globalReadHavoc_" & e.vname, fresh)
     else:
       # RFC-fuzzer-nextgen G3fix safety net (only reached in
       # `wmFollowConcrete` — concolic collection replaying an ALREADY-

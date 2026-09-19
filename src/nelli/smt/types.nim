@@ -1683,7 +1683,32 @@ type
                           ## own pragma-honouring decision, not a walker
                           ## fault. sevError -> sxUnknown (Invariant 3 --
                           ## fails SAFE, never a silent wrong verdict).
-                          ## Appended at enum tail (ordinal stability).
+                          ## Appended at the enum tail WHEN IT LANDED (ordinal
+                          ## stability); `feGlobalReadUnmodelled` was appended
+                          ## after it, so this is no longer the last member --
+                          ## append new kinds after the CURRENT tail, not here.
+    feGlobalReadUnmodelled ## Issues #161/#163 handoff: `lower`'s `iekVar` arm
+                          ## (`runtime.nim`) reached a name absent from the
+                          ## current `env` -- the walker does not model
+                          ## module-level globals AT ALL, and the parser
+                          ## deliberately passes a free/global name through as
+                          ## a bare `iekVar` (every local/param the parser
+                          ## emits is bound before its first read, so an
+                          ## unbound name here is never a parser bug). Before
+                          ## this kind, the resulting `KeyError` escaped to
+                          ## the top-level catch-all and reported
+                          ## `weInternalWalkerFault` -- an internal-bug
+                          ## attribution for an ordinary, everywhere-
+                          ## applicable modeling gap. The message carries the
+                          ## unbound name so the user knows which global to
+                          ## remove from the reachable computation (or thread
+                          ## through as an explicit parameter). sevError ->
+                          ## sxUnknown (Invariant 3); the soundness argument
+                          ## this unblocks: #163 slice 4's opaque-call
+                          ## inertness proof relies on this decline being
+                          ## real and classified -- see `isInertOpaqueCall`'s
+                          ## doc, dsl_parser.nim. Appended at enum tail
+                          ## (ordinal stability).
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.

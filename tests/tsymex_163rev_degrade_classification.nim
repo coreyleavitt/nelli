@@ -8,50 +8,46 @@
 ## misattributes a product limitation as an engine fault.
 ##
 ## ----------------------------------------------------------------------------
-## Item 1 -- a module-level global read (DEFERRED, not implemented here)
+## Item 1 -- a module-level global read (LANDED)
 ## ----------------------------------------------------------------------------
 ## `lower`'s `iekVar` arm (`runtime.nim`) reaches a name absent from `env` --
 ## the walker does not model module-level globals AT ALL, and the parser
 ## deliberately lets a free/global name through as a bare `iekVar` (there is
 ## no other route by which an unbound name reaches `lower`: every local/param
 ## the parser emits is bound before its first read -- confirmed live via
-## `scratchpad/bench/probe_163_globals.nim`, which reports:
+## `scratchpad/bench/probe_163_globals.nim`, which reported, PRE-FIX:
 ##
 ##   readsGlobal          status=sxUnknown
 ##       weInternalWalkerFault [sevError] KeyError: key not found: gLimit
 ##
-## No existing `SymexErrorKind` names this ("a module-level global is read
-## and not modelled"); `types.nim` is owned by a sibling agent this session,
-## so the fix is NOT implemented here. Proposed new tail member (to be added
-## by whoever next owns `types.nim`):
+## `types.nim` gained a new tail member, `feGlobalReadUnmodelled` (see its own
+## doc comment, `types.nim`, for the full writeup) naming exactly this gap.
 ##
-##   feGlobalReadUnmodelled ## `lower`'s `iekVar` arm (runtime.nim) reached a
-##                         ## name absent from the current `env` -- the
-##                         ## walker does not model module-level globals AT
-##                         ## ALL, and the parser deliberately passes a
-##                         ## free/global name through as a bare `iekVar`
-##                         ## (every local/param the parser emits is bound
-##                         ## before its first read, so an unbound name here
-##                         ## is never a parser bug). Before this kind, the
-##                         ## resulting `KeyError` escaped to the top-level
-##                         ## catch-all and reported `weInternalWalkerFault`
-##                         ## -- an internal-bug attribution for an ordinary,
-##                         ## everywhere-applicable modeling gap. The message
-##                         ## carries the unbound name so the user knows
-##                         ## which global to remove from the reachable
-##                         ## computation (or thread through as an explicit
-##                         ## parameter). sevError -> sxUnknown (Invariant 3);
-##                         ## the soundness argument this unblocks: #163
-##                         ## slice 4's opaque-call inertness proof relies on
-##                         ## this decline being real and classified -- see
-##                         ## `isInertOpaqueCall`'s doc, dsl_parser.nim.
-##                         ## Appended at enum tail (ordinal stability).
-##
-## Once that member lands, the fix is: in `lower`'s `iekVar` arm
-## (`runtime.nim`, the `wmExplore`/default branch currently doing a bare
-## `env[e.vname]`), raise the existing `SymexClassifiedDegradeError` carrier
-## with `feGlobalReadUnmodelled` and a message naming `e.vname`, instead of
-## letting the `Table.[]` KeyError escape uncaught. Not done in this commit.
+## IMPLEMENTATION CORRECTION vs. the original proposal: the proposal above
+## (this file's prior revision) called for RAISING the existing
+## `SymexClassifiedDegradeError` carrier at the `iekVar` site, matching the
+## textually-nearest precedent (`iekSeqLen`'s `else` arm, a few hundred lines
+## below in `runtime.nim`). That precedent is marked `verified-unreachable`
+## -- a defensive backstop, never actually triggered by a live walk. `iekVar`
+## is the OPPOSITE: it fires on every ordinary global read, and `lower()` is
+## called recursively from arbitrarily deep inside `walkBlock` frames (any
+## global read inside a loop body or branch). Per this file's own extensively
+## documented ADR-0023/SND-3 invariant -- see `allocDegrade`'s and
+## `degradeStrArm`'s doc comments -- a raw `raise` reached from inside nested
+## `walkBlock` frames is silently LOST by Nim's C-backend goto-exception
+## unwind: `lower()` returns as if nothing happened, `w.sawUnknown` is never
+## set, and the walker's default-to-UNSAT fallback can report a false
+## `sxUnsat` for a concretely reachable target -- N31's original bug,
+## reintroduced for global reads specifically. The landed fix instead
+## degrades IN-BAND: it records `feGlobalReadUnmodelled` via the same
+## `loweringDegradeErrors`/`loweringDidDegrade` threadvar sink every other
+## `lower()`-internal degrade in this file uses, then hands back a fresh
+## unconstrained symbol of the best-known type (mirroring the existing
+## `wmFollowConcrete` havoc construction immediately below it in the same
+## `iekVar` arm) -- no `raise`, no new marked site in the raw-raise-in-lower
+## audit (`tsymex_r6_n36_raise_class_audit.nim`; confirmed unchanged, see
+## that file's own re-run for this fix). See `runtime.nim`'s `iekVar` arm for
+## the landed code and its own doc comment for the full mechanism writeup.
 ##
 ## ----------------------------------------------------------------------------
 ## Item 2 -- the maxCallDepth bail degrades unclassified (FIXED here)
@@ -161,6 +157,48 @@ suite "#161/#163 handoff -- maxCallDepth bail names its own budget":
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == weInternalWalkerFault: internalFault = true
     check r.status == sxSat
+    check not internalFault
+
+# =============================================================================
+# Item 1 -- module-level global read classification
+# =============================================================================
+
+var gLimit163rev = 10
+
+proc readsGlobal163(x: int) =
+  ## No opaque call anywhere -- purely a global READ. The ONLY way to reach
+  ## the target is a witness with `x > gLimit163rev`; the walker cannot
+  ## soundly decide this without modelling the global.
+  if x > gLimit163rev:
+    symexTarget("overLimit")
+
+suite "#161/#163 handoff -- module-level global read names itself, not weInternalWalkerFault":
+
+  test "oracle: gLimit163rev genuinely gates the target's condition in real Nim":
+    ## Pairs with the house rule: the global is not incidental -- it really
+    ## changes the answer, so declining is necessary, not pessimism.
+    check gLimit163rev == 10
+    check 11 > gLimit163rev
+    check not (5 > gLimit163rev)
+
+  test "a module-level global read degrades to sxUnknown, never a silent wrong verdict":
+    let r = symexFind(readsGlobal163, tLabel("overLimit"))
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.status == sxUnknown
+
+  test "the global-read decline is classified feGlobalReadUnmodelled, names the global, and is never weInternalWalkerFault":
+    let r = symexFind(readsGlobal163, tLabel("overLimit"))
+    var classified = false
+    var internalFault = false
+    for e in r.errors:
+      checkpoint($e.kind & ": " & e.msg)
+      if e.kind == feGlobalReadUnmodelled and "gLimit163rev" in e.msg:
+        classified = true
+      if e.kind == weInternalWalkerFault:
+        internalFault = true
+    check r.status == sxUnknown
+    check classified
     check not internalFault
 
 suite "#161/#163 handoff -- walker version pin":

@@ -1677,7 +1677,7 @@ report something a crash CANNOT — a parse decline that left part of the progra
 unmodelled — and the values were already in scope for free at the one
 production call site. The fix threads them into the live chain
 `ConcolicFlipResult.collectCounters` -> `foldFlipResult` -> `CampaignStats
-.concolicYield`, which is user-visible at campaign end.
+.concolicYield`, which is returned to the caller on `FuzzReport.stats` at campaign end [CORRECTED round 11 -- see below].
 
 **Decision recorded so it is not re-litigated:** admission is NOT gated on a
 parse decline. A decline means the SYMBOLIC model is incomplete, but the
@@ -1743,7 +1743,7 @@ processes lived on. That file is held by an in-flight agent.
 
 | id | sev | sha | what closed it |
 |----|-----|-----|----------------|
-| T1 + T5 | High | `8b244d7` | `ConcolicYieldCounters` gains `obligationsLive` and `parseDeclines`, populated in `runConcolicCollectImpl` beside the existing `walkDegradeCount` and folded by `foldFlipResult` — so they ride the live chain to `CampaignStats.concolicYield`, user-visible at campaign end. Liveness proven through the real path, not by field existence: assertions drive `concolicFlip` and then `foldFlipResult`, plus a two-call test proving the fold ACCUMULATES rather than overwrites. The counter rides every flip outcome including `cfoUnmodelable`, because `collectCounters` is assigned before `targetBranchIndex` is consulted. `parseDeclines` uses `capForcedUnknown`'s exact `sevError` predicate. The `.obligations`/`.parseErrors` seqs stay as the detail view behind a live count — a legitimate role, unlike being the only surface. No bump (140). |
+| T1 + T5 | High | `8b244d7` | `ConcolicYieldCounters` gains `obligationsLive` and `parseDeclines`, populated in `runConcolicCollectImpl` beside the existing `walkDegradeCount` and folded by `foldFlipResult` — so they ride the live chain to `CampaignStats.concolicYield`, returned to the caller on `FuzzReport.stats` at campaign end [CORRECTED round 11 -- see below]. Liveness proven through the real path, not by field existence: assertions drive `concolicFlip` and then `foldFlipResult`, plus a two-call test proving the fold ACCUMULATES rather than overwrites. The counter rides every flip outcome including `cfoUnmodelable`, because `collectCounters` is assigned before `targetBranchIndex` is consulted. `parseDeclines` uses `capForcedUnknown`'s exact `sevError` predicate. The `.obligations`/`.parseErrors` seqs stay as the detail view behind a live count — a legitimate role, unlike being the only surface. No bump (140). |
 | T2 | High | `5d93568` | `spinJitter` spends its budget on real `sched_yield`/`SwitchToThread` syscalls instead of a user-space no-op spin. **Unit kept, mechanism changed**, so no caller's numbers need reinterpreting and `maxJitter = 0` still costs nothing. New `parallelJitterPoint*(n = 1)` lets a SUT perturb INSIDE an op without touching `LinOpDef.applySUT`'s signature. The overclaiming doc ("the differentiating feature vs. uninstrumented racy testing") is gone. Agent tested removing `racyInc`'s `sleep(1)` and measured **9 catches in 10** on between-op jitter alone — so the sleep stays, with that measurement recorded in the code rather than an assumption. |
 | T3 | High | `233c7d1` | A per-file extra-defines table in BOTH `nelli.nimble`'s test task and `scripts/sweep.sh` (each commenting the other so they cannot silently diverge), plus an optional trailing args parameter on `dt-bounded.sh` that leaves its three existing callers alone. Proof is the difference, not the pass: WITHOUT the define the suite still prints `[SKIPPED] requires -d:symexQueryStats`; WITH it, all three assertions run and pass (`rlimit=7360`/`9369` on sat, `rlimit=10` on unsat, `ASSERTS small=1 big=6`). Nothing needed weakening. The `skip()` branch stays — a legitimate safety net, since the instrumentation symbols are compiled out without the flag and a bare `nim c -r` would otherwise hard-error. |
 | T6 | High | `13b8998` | **A finding against T2's own fix.** `parallelJitterPoint` shipped with zero callers, referenced only in comment prose — "exercised by documentation" is not liveness, and the same commit's docs RECOMMENDED it over a hand-rolled sleep, so we were advertising a mechanism nothing had demonstrated. Settled by measurement with removal on the table: **20/20 idle and 10/10 under six-core saturation, all `otFalsified`**, with `maxJitter: 0` in the new test so the intra-op hook is the only perturbation. Better than between-op jitter's 9/10, because placing the yield at the race boundary lands it in the window every time. Reliable, so the recommendation stands — now cited to the test. Real caller at `tests/tparallelcheck.nim:161`. |
@@ -1782,3 +1782,91 @@ per-suite define mechanism already exists there (`-d:symexCiLeanB5`,
 `symex-mingw.yaml:396-403`). **Recommended, deliberately not done:** it is a
 change to a Windows leg that cannot be verified without pushing, and guessing at
 unverifiable CI edits is how the last CI saga started.
+
+## Round 11 — the lenses caught a false claim of mine, and a CI gap I got backwards
+
+Three standing lenses on the round-10 FIX commits. Two of the three briefs
+deliberately re-audited claims *I* had made, on the principle that a claim is
+not evidence. Both audits found something.
+
+### L1 (Critical) — "user-visible at campaign end" was false
+
+I justified T1's fix with the chain `ConcolicFlipResult.collectCounters` ->
+`foldFlipResult` -> `Orchestrator.concolicYield` -> `CampaignStats
+.concolicYield` -> "reported to the user at campaign end", and I verified every
+hop EXCEPT the last. The lens checked it: **nothing in the repo renders
+`FuzzReport`/`CampaignStats`.** No `echo`, no `$` operator, no serializer; the
+only proc taking a `FuzzReport` is `exportCrashes`, which writes
+`report.irCrashes` bytes and never touches `concolicYield`. The only readers
+anywhere are `check report.stats.concolicYield...` assertions in tests.
+
+So T1 moved the dormancy one hop rather than closing it. The claim was asserted
+as settled fact in two places (`tests/tsymex_163rev_concolic_flip_width.nim:65`
+and this handoff), which is worse than the gap itself.
+
+**The mitigation, stated without hiding behind it:** every OTHER field of
+`CampaignStats` is in exactly the same position. The library returns a
+`FuzzReport` and the caller decides what to print, which is a legitimate design
+for a library — the two new counters are precisely as reachable as
+`drawsSymbolicated` and the other eight. That makes the CLAIM the defect rather
+than the wiring. Closing it means correcting the wording AND giving
+`CampaignStats` a renderer, which makes the whole struct usable instead of just
+these two fields.
+
+`foldFlipResult` itself was confirmed genuinely live: `fuzz.nim:1695` sits in
+`tryConcolicBridge`, reached from the main mutation loop in the public
+`fuzz*[T]` (`fuzz.nim:2305`) whenever `assist.bridge != nil` — the path
+`fuzzConcolic` expands to. Not test-only.
+
+### L5 (High) — I got SND-3-6's Windows exposure exactly backwards
+
+Round 10 reasoned carefully about `tn45probe`/`tprobe_n45stats` being EXCLUDED
+from `symex-mingw`'s derived corpus for lacking a `tsymex_` prefix, and
+recorded that honestly. It did not notice that the split file has the OPPOSITE
+problem: `tsymex_snd3_6_equality_loop` IS `tsymex_*`-prefixed, so
+`derive-ci-suites.ps1` pulls it into the corpus, and that script's
+`$skipReasons` was `[ordered]@{}` — completely empty.
+
+An ordinary sharded corpus job has **no per-suite timeout** (only the job-level
+60 minutes) and no per-suite isolation. A hang there burns the full hour and
+takes every suite queued behind it in that shard with it, unattributed —
+exactly the "runner lost communication, no logs" failure that scan-tail's
+per-suite job isolation exists to prevent, and which this repo has already
+lived through once. The round-10 diagnosis found the hang **backend-invariant**
+(identical on `c` and `cpp`), so there is no reason to assume mingw fares
+better, and nobody has checked.
+
+Fixed by adding the entry to `$skipReasons` with its reason and its retirement
+condition (run it on a real Windows runner and show it terminates). The
+script's own guard — skip-listed suites must exist in `nelli.nimble`'s task —
+is satisfied, and the corpus floor (150) is unaffected at 361 registered
+`tsymex_*` suites. `pwsh` is not on this host, so this is a data entry into a
+guarded table rather than an executed verification; it is fail-SAFE (it removes
+a suite from the corpus, it cannot add untested behaviour).
+
+My round-10 commit said "verified in both directions". That was true of the
+Linux sweep only.
+
+### Resolved, not a defect
+
+**`parallelJitterPoint` is NOT the same class as the concolic dead end**, and
+the lens was explicitly asked to apply the standard consistently rather than
+grant an exemption. The distinction holds: `obligations`/`parseErrors` needed a
+consumer inside nelli's OWN orchestrator, and that consumer existing nowhere
+was a real internal-wiring gap. `parallelJitterPoint` is instrumentation meant
+to be called from EXTERNAL SUT code, like `symexTarget` and `{.cover.}` — a
+`src/`-internal call site could not exist by design. Exported via `nelli.nim`,
+proven by test. Legitimately live; merely unproven in the wild, which is the
+ordinary state of a new library primitive.
+
+### Round 11 open findings
+
+| id | sev | source | finding |
+|----|-----|--------|---------|
+| L1 | Critical | liveness | Above. Correct the claim in two places AND render `CampaignStats` so the chain terminates somewhere a person can see. |
+| D5 | High | design | `foldFlipResult` sums each field with a hand-written `+=`, now eight of them. This is round 10's OWN defect class one layer downstream — "producer exists, consumer must remember to wire it". `fieldPairs` makes future scalar fields sum automatically and compile-fail on an unhandled type. |
+| D1 | High | design | The two-copy defines table is guarded by a comment, not a mechanism. The repo solves this shape twice already — `sweep.sh`'s own drift block (`comm -13`/`comm -23`) and `derive-ci-suites.ps1`, which ELIMINATES one hand-list and asserts set-equality, failing loudly. I used neither. |
+| D2 | High | design | `parallelJitterPoint` asks a SUT author to hand-place a harness call at the byte offset they already suspect is racy. The codebase's instrumentation idiom is pragma decoration (`{.cover.}`, `{.covercmp.}`, `{.symexTransparent.}`), which rewrites a whole body without the author locating anything. The proc should be the primitive a pragma is built on, not the recommended surface. |
+| D3 | Medium | design | The two new dedup helpers hand-roll the SAME `HashSet` loop independently — 12 copies became 2, not 1. And the deeper duplication the finding pointed at (eight sinks, each with its own union, guard and six-line comment) is untouched. Seven of the eight `if len > 0:` guards are now DEAD (the helper no-ops on empty) while the eighth site was correctly de-guarded — applied mechanically rather than as a rethink. |
+| L4 | Low/Med | liveness | The "20/20 idle, 10/10 saturated" and "9 in 10" figures now baked into `parallel.nim`'s docs describe one-time manual experiments. The shipped test is a SINGLE seeded run and cannot regression-detect a drop in that rate, while the doc asserts the figure as "measured, not hopeful". |
+| S1 | Low | security | `dt-bounded.sh`'s `$3` splice is unquoted. Every current caller passes a hardcoded literal (all traced), so nothing exploits it — but RFC-0002's L1 closed this exact class for `$test_file` in the SAME script, and `233c7d1` reopened it for a new parameter. Quote it defensively. |

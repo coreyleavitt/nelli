@@ -166,6 +166,27 @@ Write-Host "matrix cross-check OK: $($matrixSuites.Count) suites identical in de
 # fixed at HEAD. Both suites join the derived corpus below instead
 # of this list.
 $skipReasons = [ordered]@{
+  # Split out of tsymex_snd3_loopdegrade in round 10 of the #163 review
+  # because it is the only SUT in that file that does not terminate: ONE Z3
+  # query grinding (flat RSS, so not path growth; hangs at maxLoopUnwind=1,
+  # so not unrolling; terminates at queryRLimit=1 but not at 20_000_000).
+  # Critically for THIS list, the hang is backend-INVARIANT -- it reproduces
+  # identically on `c` and `cpp` -- so there is no reason to expect mingw to
+  # fare better, and nobody has verified that it does.
+  #
+  # It must be skipped HERE and not only in scripts/sweep.sh's Linux list.
+  # The suite is `tsymex_*`-prefixed, so without an entry here the derived
+  # corpus pulls it into an ordinary sharded job, which has no per-suite
+  # timeout -- only the job-level 60 minutes -- and no per-suite isolation.
+  # A hang there burns the full hour and takes every suite queued behind it
+  # in that shard down with it, unattributed: exactly the "runner lost
+  # communication, no logs" failure that scan-tail's per-suite job isolation
+  # exists to prevent.
+  #
+  # To retire this entry: run the suite on an actual Windows runner under
+  # mingw and show it terminates. Measurements and the R1B-while-4
+  # cross-reference are in the suite's own header.
+  'tsymex_snd3_6_equality_loop' = 'known non-termination (one Z3 query, backend-invariant); see tests/tsymex_snd3_6_equality_loop.nim'
 }
 
 # Sanity: matrix/skip entries must actually exist in the nimble

@@ -29,10 +29,21 @@
 ##
 ## Both are diagnostic-only additions, exactly like `counters.walkDegradeCount`
 ## (issue #163 audit W10 / review R9, `tsymex_163audit_w10.nim`): neither
-## touches a verdict, neither is a raise channel, and neither reaches
-## `fuzz.nim`/`ConcolicFlipResult` -- the fuzzer already observes a real crash
-## directly against the SUT, so a raised-verdict channel here would be a
-## producer with no live consumer (considered and rejected).
+## touches a verdict, and neither is a raise channel.
+##
+## Round 10 review (Design F1/F3, Liveness F1, High): `obligations`/
+## `parseErrors` themselves DO reach `fuzz.nim` -- as a LIVE COUNT, not as
+## the two detail seqs directly. `ConcolicYieldCounters` (`smt/
+## concolictaxonomy.nim`) gained `obligationsLive`/`parseDeclines`, populated
+## in `runConcolicCollectImpl` from the SAME `obligationLog`/`prog.
+## parseErrors` these two fields already read, folded by `foldFlipResult`
+## exactly like every sibling counter, and so reaching
+## `Orchestrator.concolicYield`/`CampaignStats.concolicYield` on every real
+## fuzzing flip. Section 3 below proves the counters travel that whole
+## chain, not just that a field exists on `ConcolicCollectResult`. The two
+## detail seqs stay: they are the "what obligation, what error" drill-down
+## BEHIND the live count, a legitimate role distinct from being the only
+## surface.
 ##
 ## Method note (inherited from #162/#163): every symbolic expectation below
 ## is paired with the SAME computation run for real in this file where one
@@ -83,6 +94,14 @@ suite "#163 review R26 -- ConcolicCollectResult.obligations surfaces the obligat
     for o in r.obligations:
       if o.disposition == odLive: anyLive = true
     check anyLive
+    # The live-count companion: `counters.obligationsLive` mirrors the SAME
+    # `obligationLog` this test just read directly, so it must count the
+    # SAME live entries -- not just be nonzero.
+    var wantLive = 0
+    for o in r.obligations:
+      if o.disposition == odLive: inc wantLive
+    check r.counters.obligationsLive == wantLive
+    check r.counters.obligationsLive >= 1
 
   test "a clean SUT reports an empty obligations -- the field is not trivially always-on":
     let trace = @[integerChoice(7, 0, 10, 0)]
@@ -90,6 +109,7 @@ suite "#163 review R26 -- ConcolicCollectResult.obligations surfaces the obligat
     let r = concolicCollect(cleanGate, trace, bindings)
     check r.pcSatByConcreteInputs
     check r.obligations.len == 0
+    check r.counters.obligationsLive == 0
 
 # =============================================================================
 # Channel 2 -- parse errors
@@ -131,12 +151,110 @@ suite "#163 review -- ConcolicCollectResult.parseErrors surfaces prog.parseError
       if e.kind == feTransparentResultUsed and "probeRD" in e.msg:
         specific = true
     check specific
+    # The live-count companion: `counters.parseDeclines` counts the SAME
+    # `sevError` entries `capForcedUnknown` (`runSymexImpl`) already treats
+    # as a blanket "this program was not fully modelled" switch -- NOT
+    # every entry in `parseErrors` (some parse-time records are warnings/
+    # hints, not declines).
+    var wantDeclines = 0
+    for e in r.parseErrors:
+      if e.severity == sevError: inc wantDeclines
+    check r.counters.parseDeclines == wantDeclines
+    check r.counters.parseDeclines >= 1
 
   test "a clean SUT reports an empty parseErrors -- the field is not trivially always-on":
     let trace = @[integerChoice(7, 0, 10, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
     let r = concolicCollect(cleanGate, trace, bindings)
     check r.parseErrors.len == 0
+    check r.counters.parseDeclines == 0
+
+# =============================================================================
+# Channel 3 -- the counters travel the REAL production chain, not just
+# ConcolicCollectResult
+# =============================================================================
+#
+# Round 10 finding (Design F1/F3, Liveness F1): the only in-repo production
+# caller of `runConcolicCollectImpl` is `runConcolicFlipImpl`
+# (`ConcolicFlipResult.collectCounters`), folded by `foldFlipResult`
+# (`smt/concolictaxonomy.nim`) into `Orchestrator.concolicYield` /
+# `CampaignStats.concolicYield` -- `fuzz.nim:1695`. `concolicCollect`'s macro
+# itself has zero call sites in `src/`. So proving a field exists on
+# `ConcolicCollectResult` proves nothing about the fuzzer; these tests drive
+# `concolicFlip` (which calls `runConcolicCollectImpl` internally, exactly
+# `runConcolicFlipImpl` does) and `foldFlipResult` instead.
+
+suite "#163 review round 10 -- obligationsLive/parseDeclines travel the concolicFlip/foldFlipResult chain":
+
+  test "concolicFlip surfaces obligationsLive on ConcolicFlipResult.collectCounters":
+    # `concolicOverflowGate` has no `if` at all, so `branchTrace` is empty and
+    # ANY `targetBranchIndex` is out of range -- `cfoUnmodelable`. That is
+    # fine: `runConcolicFlipImpl` assigns `result.collectCounters` from its
+    # OWN internal `runConcolicCollectImpl` call before it ever inspects
+    # `targetBranchIndex`, so the counter is populated on every outcome, not
+    # only a solved one.
+    let trace = @[integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0),
+                  integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r = concolicFlip(concolicOverflowGate, trace, bindings, 0)
+    check r.outcome == cfoUnmodelable
+    check r.collectCounters.obligationsLive >= 1
+
+  test "concolicFlip surfaces parseDeclines on ConcolicFlipResult.collectCounters":
+    let trace = @[integerChoice(7, 0, 100, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicFlip(usesProbeRD, trace, bindings, 0)
+    check r.collectCounters.parseDeclines >= 1
+
+  test "a clean SUT's concolicFlip reports both new counters at zero":
+    let trace = @[integerChoice(5, 0, 201, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicFlip(cleanGate, trace, bindings, 0)
+    check r.collectCounters.obligationsLive == 0
+    check r.collectCounters.parseDeclines == 0
+
+  test "foldFlipResult carries obligationsLive into CampaignStats.concolicYield's own accumulator type":
+    let trace = @[integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0),
+                  integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r = concolicFlip(concolicOverflowGate, trace, bindings, 0)
+    var y: ConcolicYield
+    check y.collect.obligationsLive == 0   ## zero value before any fold
+    foldFlipResult(y, r)
+    check y.collect.obligationsLive == r.collectCounters.obligationsLive
+    check y.collect.obligationsLive >= 1
+
+  test "foldFlipResult carries parseDeclines into CampaignStats.concolicYield's own accumulator type":
+    let trace = @[integerChoice(7, 0, 100, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicFlip(usesProbeRD, trace, bindings, 0)
+    var y: ConcolicYield
+    check y.collect.parseDeclines == 0   ## zero value before any fold
+    foldFlipResult(y, r)
+    check y.collect.parseDeclines == r.collectCounters.parseDeclines
+    check y.collect.parseDeclines >= 1
+
+  test "foldFlipResult accumulates obligationsLive across TWO calls, not just the last":
+    let trace = @[integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0),
+                  integerChoice(9_000_000_000_000_000_000'i64, 0,
+                                9_000_000_000_000_000_000'i64, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
+                     ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
+    let r1 = concolicFlip(concolicOverflowGate, trace, bindings, 0)
+    let r2 = concolicFlip(concolicOverflowGate, trace, bindings, 0)
+    var y: ConcolicYield
+    foldFlipResult(y, r1)
+    foldFlipResult(y, r2)
+    check y.collect.obligationsLive == r1.collectCounters.obligationsLive +
+                                       r2.collectCounters.obligationsLive
+    check y.collect.obligationsLive >= 2
 
 suite "#163 review -- walker version pin":
 

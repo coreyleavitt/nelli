@@ -201,6 +201,48 @@ type
                                 ## unmodelled call, and for a `{.cover.}`-
                                 ## instrumented SUT (#163 slice 4 made
                                 ## nelli's own instrumentation transparent).
+    obligationsLive*:     int   ## Issue #163 round 10 (Design F1/F3,
+                                ## Liveness F1). Count of `ObligationEntry`s
+                                ## with `disposition == odLive` recorded in
+                                ## `obligationLog` (`smt/types.nim`) during
+                                ## THIS collect — the same threadvar
+                                ## `runConcolicCollectImpl`'s
+                                ## `ConcolicCollectResult.obligations` is
+                                ## assigned from (see that field's own doc
+                                ## comment, `smt/runtime.nim`), just counted
+                                ## instead of copied wholesale. `obligations`
+                                ## is the detail seq (which obligation, what
+                                ## width/signedness); this is the live count
+                                ## that actually reaches the fuzzer — folded
+                                ## by `foldFlipResult` below into
+                                ## `Orchestrator.concolicYield`/
+                                ## `CampaignStats.concolicYield` on every real
+                                ## fuzzing flip. An obligation going live
+                                ## never flips `pcSatByConcreteInputs` or any
+                                ## other verdict-shaped field — this counter
+                                ## is diagnostics only, exactly like
+                                ## `walkDegradeCount` above.
+    parseDeclines*:       int   ## Issue #163 round 10 companion. Count of
+                                ## `prog.parseErrors` entries with
+                                ## `severity == sevError` for the program
+                                ## THIS collect ran — the exact same
+                                ## predicate `runSymexImpl`'s
+                                ## `capForcedUnknown` (`smt/runtime.nim`)
+                                ## uses to force `sxUnknown` on the
+                                ## `wmExplore` path. Deliberately NOT mirrored
+                                ## here as an admission gate: a parse decline
+                                ## means the SYMBOLIC MODEL of part of the
+                                ## program is incomplete, but the materialized
+                                ## seed this collect is following is a REAL
+                                ## concrete input the fuzzer executes for real
+                                ## against the SUT — rejecting it on account
+                                ## of an incomplete model would cost coverage
+                                ## and buy no soundness (Track E re-verifies
+                                ## every candidate concretely regardless).
+                                ## Count it, surface it, never refuse it on
+                                ## this basis alone. `parseErrors`
+                                ## (`ConcolicCollectResult`) is the detail
+                                ## seq this counts; see its own doc comment.
 
   ConcolicFlipCounters* = object
     ## Keyed by outcome enum (never a string) — `array[Enum, int]` indexing
@@ -272,6 +314,8 @@ proc foldFlipResult*(y: var ConcolicYield, r: ConcolicFlipResult,
   y.collect.nonInt64Draws += r.collectCounters.nonInt64Draws
   y.collect.ambiguousBranches += r.collectCounters.ambiguousBranches
   y.collect.walkDegradeCount += r.collectCounters.walkDegradeCount
+  y.collect.obligationsLive += r.collectCounters.obligationsLive
+  y.collect.parseDeclines += r.collectCounters.parseDeclines
   for k, v in r.collectCounters.ambiguousByConstruct:
     y.collect.ambiguousByConstruct.mgetOrPut(k, 0) += v
     y.byConstruct.mgetOrPut(k, ConstructTally()).ambiguousBranches += v

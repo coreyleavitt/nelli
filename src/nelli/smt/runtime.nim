@@ -13756,6 +13756,16 @@ type
       ## `tsymex_163rev_concolic_flip_width.nim`'s closing suite, for why
       ## that is a deliberately separate, larger slice this field does not
       ## attempt).
+      ##
+      ## Round 10 (Design F1/F3, Liveness F1): this seq is a DETAIL view,
+      ## not the only surface — the fact "an obligation went live" is what
+      ## actually needs to reach the fuzzer, and it does, as
+      ## `counters.obligationsLive` (`ConcolicYieldCounters`, `smt/
+      ## concolictaxonomy.nim`), folded by `foldFlipResult` into
+      ## `Orchestrator.concolicYield`/`CampaignStats.concolicYield` on every
+      ## real fuzzing flip via `runConcolicFlipImpl`. This seq stays for the
+      ## drill-down (which obligation, what width/signedness) behind that
+      ## live count; it was never meant to be, and is not, the only channel.
     parseErrors*: seq[SymexErrorInfo]
       ## Issue #163 review R26's companion gap: `runConcolicCollectImpl`
       ## drains BOTH degrade sinks (`w.walkDegradeErrors` and the
@@ -13778,6 +13788,17 @@ type
       ## invocation, so `prog.parseErrors` cannot accumulate duplicates the
       ## way a threadvar sink written across nested calls could). Diagnostic
       ## only, same contract as `obligations` above.
+      ##
+      ## Round 10 (Design F1/F3, Liveness F1): same correction as
+      ## `obligations` above — this seq is the detail view, not the only
+      ## surface. `counters.parseDeclines` (`ConcolicYieldCounters`) counts
+      ## the `sevError` entries here (the SAME predicate `capForcedUnknown`,
+      ## above, uses to force `sxUnknown` on the `wmExplore` path) and
+      ## reaches `Orchestrator.concolicYield`/`CampaignStats.concolicYield`
+      ## the same way `obligationsLive` does. A parse decline is counted and
+      ## surfaced, never used to reject the materialized seed — see
+      ## `parseDeclines`'s own doc comment for why: the seed is still a real
+      ## concrete input the fuzzer executes for real against the SUT.
 
 const defaultMaxConcolicDraws* = 256
   ## RFC-fuzzer-nextgen G1b (round-2 breadth fix): bounded trace length. A
@@ -14223,6 +14244,22 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   for e in loweringDegradeErrors:
     seenLoweringDegrade.incl e.msg
   counters.walkDegradeCount = seenDegrade.len + seenLoweringDegrade.len
+  # Issue #163 round 10 (Design F1/F3, Liveness F1): `obligationLog` and
+  # `prog.parseErrors` were already read into `ConcolicCollectResult.
+  # obligations`/`.parseErrors` below, but those two fields had no consumer
+  # anywhere on the production path (`runConcolicFlipImpl` forwards only
+  # `.counters`, never `.obligations`/`.parseErrors`). Fold each into a
+  # counter HERE, alongside `walkDegradeCount` above, so it rides the SAME
+  # already-live `counters` -> `ConcolicFlipResult.collectCounters` ->
+  # `foldFlipResult` -> `Orchestrator.concolicYield` chain every other
+  # counter on this object already travels — see `ConcolicYieldCounters.
+  # obligationsLive`/`.parseDeclines` (`smt/concolictaxonomy.nim`) for the
+  # full rationale, including why a parse decline counts but never gates
+  # admission.
+  for o in obligationLog:
+    if o.disposition == odLive: inc counters.obligationsLive
+  for e in prog.parseErrors:
+    if e.severity == sevError: inc counters.parseDeclines
 
   # ---- Soundness pin: the collected constraints ARE satisfied by the
   # original concrete draws (RFC: "feed them back to Z3 ... check

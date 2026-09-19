@@ -152,6 +152,16 @@ proc racyInc(c: ptr Counter): int {.gcsafe.} =
 
 proc racyGet(c: ptr Counter): int {.gcsafe.} = c[].count
 
+# Same race as `racyInc`, but the read/write window is widened with the
+# library's dedicated intra-op hook instead of a hand-rolled `sleep(1)`.
+# This is the mechanism `parallelCheck`'s doc comment recommends SUT authors
+# reach for; unlike `racyInc`, this proc has never had a `sleep` in it.
+proc racyIncJitterPoint(c: ptr Counter): int {.gcsafe.} =
+  let v = c[].count
+  parallelJitterPoint()
+  c[].count = v + 1
+  v + 1
+
 suite "parallelCheck: racy SUT is caught":
   test "lock-free wrong counter is detected as non-linearisable":
     # This test is inherently nondeterministic in nature — racy bugs
@@ -196,3 +206,32 @@ suite "parallelCheck: racy SUT is caught":
     if r.outcome == otFalsified and r.counterexample.isSome:
       check r.counterexample.get.divergingOp.isSome
       check r.counterexample.get.divergingOp.get == 0
+
+  test "lock-free wrong counter is detected via parallelJitterPoint (no sleep)":
+    # Same race as above, widened with `parallelJitterPoint()` called from
+    # inside `applySUT` instead of a hand-rolled `sleep(1)` -- the mechanism
+    # `parallelCheck`'s doc comment recommends. `maxJitter` is 0 here
+    # deliberately: between-op jitter must contribute nothing, so a catch
+    # can only be credited to the intra-op hook itself.
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncJitterPoint(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}

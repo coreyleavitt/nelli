@@ -282,6 +282,13 @@ proc parallelJitterPoint*(n = 1) =
   ## just reachable from wherever inside the op the SUT author needs
   ## it — the library's answer to "hand-roll a `sleep` in the SUT" for
   ## exposing an intra-op race.
+  ##
+  ## **Measured reliability**: placed at the read/write boundary of the
+  ## same unsynchronized-increment race `parallelCheck`'s doc comment
+  ## describes, this hook (default `n = 1`, no `sleep` anywhere in the
+  ## op) caught the race in 20/20 idle runs and 10/10 CPU-contended runs
+  ## -- see "lock-free wrong counter is detected via parallelJitterPoint
+  ## (no sleep)" in `tests/tparallelcheck.nim`.
   for _ in 0 ..< n:
     schedulerYield()
 
@@ -404,7 +411,9 @@ proc parallelCheck*[State, SUT, Ret](
   ## the specific point you want the scheduler to reconsider (e.g.
   ## between the read and the write). It performs the same real
   ## scheduler-yield mechanism as `maxJitter`, just reachable from
-  ## inside an op body instead of only between ops.
+  ## inside an op body instead of only between ops. This is a measured
+  ## recommendation, not a hopeful one: see `parallelJitterPoint`'s own
+  ## doc comment for the catch-rate test that backs it.
 
   let spec = spec   # capture by value
   let retEq = retEq

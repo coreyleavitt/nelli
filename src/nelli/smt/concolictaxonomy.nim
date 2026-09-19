@@ -324,10 +324,20 @@ proc foldFlipResult*(y: var ConcolicYield, r: ConcolicFlipResult,
   # `byConstruct.ambiguousBranches` side-effect the flat scalar fields have
   # no equivalent of.
   for name, dst, src in fieldPairs(y.collect, r.collectCounters):
-    when dst is int:
-      dst += src
-    elif dst is Table[WalkerConstructKind, int]:
+    when name == "ambiguousByConstruct":
+      # #163 review round 12, Finding Q5/L12-3: this used to match on
+      # `dst is Table[WalkerConstructKind, int]` -- the field's TYPE, not
+      # its identity. `name` is already bound by the loop and unused in the
+      # old condition; a second field of this exact same Table type (the
+      # taxonomy's own natural per-construct shape, so a plausible future
+      # addition) would have silently matched this branch too and been
+      # discarded here with no fold and no compile error -- the exact
+      # hazard this whole refactor exists to close, reintroduced for one
+      # case. Matching by name means a same-typed but differently-named
+      # field instead falls through to the `{.error.}` arm below.
       discard "handled explicitly below"
+    elif dst is int:
+      dst += src
     else:
       {.error: "ConcolicYieldCounters gained a field of type " & $typeof(dst) &
                " (" & name & ") -- teach foldFlipResult how to fold it".}
@@ -363,72 +373,200 @@ proc recordAdmitOutcome*(y: var ConcolicYield, outcome: ConcolicAdmitOutcome,
 # deterministic regardless of insertion history — the same reason
 # `engine/render.nim`'s event-stats renderer sorts its `Table` keys before
 # walking them.
+#
+# #163 review round 12, Finding Q2: round 11 fixed `foldFlipResult`'s
+# hand-maintained field enumeration with a `fieldPairs` walk, then
+# immediately hand-listed the SAME field set three more times below (each
+# `` `$` `` overload, plus `fuzz.nim`'s `formatCampaignSummary`, plus that
+# proc's own completeness test) with no equivalent protection — a future
+# field would silently go unrendered. Every renderer below is now driven by
+# `fieldPairs` too, with the same `{.error.}` compile-time escape
+# `foldFlipResult` uses for a field type it doesn't know how to handle. Any
+# field needing bespoke formatting (an enum-indexed array/table, a nested
+# struct) is matched by NAME, not type — `foldFlipResult`'s own Q5 fix
+# (matching `ambiguousByConstruct` by name rather than by its `Table`
+# type) applies equally well here: two fields sharing a type but not a
+# rendering rule must not silently share a branch.
+#
+# Round 12, Finding Q2 also asked for the structured sibling
+# `engine/render.nim`'s `renderReport`/`renderJson` actually has (that
+# precedent is an `OutputFormat` enum with a real `ofJson` arm — not, as
+# round 11's doc comment claimed, a fixed text shape). `toJson` below
+# follows `renderJson`'s conventions: hand-built `"key":value` fragments,
+# not `std/json`'s `JsonNode` (matching the ONE JSON style already in this
+# repo rather than inventing a second). It deliberately does NOT reuse
+# `renderJson`'s private `jsonEscape` helper — none of these types carry a
+# free-text `string` field (every value here is an int/float/bool/Duration
+# or an enum name), so there is nothing that can contain a `"` or a
+# control character in the first place, and importing `engine/render`
+# (which pulls in `strategy`/`optbox`) into this leaf taxonomy module for
+# an escaper it would never call is not a trade worth making.
 
 proc `$`*(c: ConcolicYieldCounters): string =
   var lines: seq[string] = @[]
-  lines.add("tracesTruncated=" & $c.tracesTruncated)
-  lines.add("drawsSymbolicated=" & $c.drawsSymbolicated)
-  lines.add("paramsConcretized=" & $c.paramsConcretized)
-  lines.add("unsupportedDrawKinds=" & $c.unsupportedDrawKinds)
-  lines.add("nonInt64Draws=" & $c.nonInt64Draws)
-  lines.add("ambiguousBranches=" & $c.ambiguousBranches)
-  var byConstruct: seq[string] = @[]
-  for k in WalkerConstructKind:
-    let v = c.ambiguousByConstruct.getOrDefault(k, 0)
-    if v != 0: byConstruct.add($k & "=" & $v)
-  lines.add("ambiguousByConstruct={" & byConstruct.join(", ") & "}")
-  lines.add("walkDegradeCount=" & $c.walkDegradeCount)
-  lines.add("obligationsLive=" & $c.obligationsLive)
-  lines.add("parseDeclines=" & $c.parseDeclines)
+  for name, v in fieldPairs(c):
+    when name == "ambiguousByConstruct":
+      var byConstruct: seq[string] = @[]
+      for k in WalkerConstructKind:
+        let n = v.getOrDefault(k, 0)
+        if n != 0: byConstruct.add($k & "=" & $n)
+      lines.add("ambiguousByConstruct={" & byConstruct.join(", ") & "}")
+    elif v is int:
+      lines.add(name & "=" & $v)
+    else:
+      {.error: "ConcolicYieldCounters gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach `$`(ConcolicYieldCounters) how to render it".}
   result = lines.join("\n")
+
+proc toJson*(c: ConcolicYieldCounters): string =
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(c):
+    when name == "ambiguousByConstruct":
+      var entries: seq[string] = @[]
+      for k in WalkerConstructKind:
+        let n = v.getOrDefault(k, 0)
+        if n != 0: entries.add("\"" & $k & "\":" & $n)
+      parts.add("\"ambiguousByConstruct\":{" & entries.join(",") & "}")
+    elif v is int:
+      parts.add("\"" & name & "\":" & $v)
+    else:
+      {.error: "ConcolicYieldCounters gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach toJson(ConcolicYieldCounters) how to render it".}
+  result = "{" & parts.join(",") & "}"
 
 proc `$`*(c: ConcolicFlipCounters): string =
-  var byOutcome: seq[string] = @[]
-  for o in ConcolicFlipOutcome:
-    byOutcome.add($o & "=" & $c.byOutcome[o])
-  var byCoverage: seq[string] = @[]
-  for cv in ConcolicCoverageOutcome:
-    byCoverage.add($cv & "=" & $c.byCoverage[cv])
-  result = @[
-    "byOutcome={" & byOutcome.join(", ") & "}",
-    "byCoverage={" & byCoverage.join(", ") & "}",
-    "relaxationAttemptsUsed=" & $c.relaxationAttemptsUsed
-  ].join("\n")
+  var lines: seq[string] = @[]
+  for name, v in fieldPairs(c):
+    when name == "byOutcome":
+      var xs: seq[string] = @[]
+      for o in ConcolicFlipOutcome: xs.add($o & "=" & $v[o])
+      lines.add("byOutcome={" & xs.join(", ") & "}")
+    elif name == "byCoverage":
+      var xs: seq[string] = @[]
+      for cv in ConcolicCoverageOutcome: xs.add($cv & "=" & $v[cv])
+      lines.add("byCoverage={" & xs.join(", ") & "}")
+    elif v is int:
+      lines.add(name & "=" & $v)
+    else:
+      {.error: "ConcolicFlipCounters gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach `$`(ConcolicFlipCounters) how to render it".}
+  result = lines.join("\n")
+
+proc toJson*(c: ConcolicFlipCounters): string =
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(c):
+    when name == "byOutcome":
+      var xs: seq[string] = @[]
+      for o in ConcolicFlipOutcome: xs.add("\"" & $o & "\":" & $v[o])
+      parts.add("\"byOutcome\":{" & xs.join(",") & "}")
+    elif name == "byCoverage":
+      var xs: seq[string] = @[]
+      for cv in ConcolicCoverageOutcome: xs.add("\"" & $cv & "\":" & $v[cv])
+      parts.add("\"byCoverage\":{" & xs.join(",") & "}")
+    elif v is int:
+      parts.add("\"" & name & "\":" & $v)
+    else:
+      {.error: "ConcolicFlipCounters gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach toJson(ConcolicFlipCounters) how to render it".}
+  result = "{" & parts.join(",") & "}"
 
 proc `$`*(t: ConstructTally): string =
-  var flipOutcomes: seq[string] = @[]
-  for o in ConcolicFlipOutcome:
-    if t.flipOutcomes[o] != 0: flipOutcomes.add($o & "=" & $t.flipOutcomes[o])
-  var coverageOutcomes: seq[string] = @[]
-  for cv in ConcolicCoverageOutcome:
-    if t.coverageOutcomes[cv] != 0: coverageOutcomes.add($cv & "=" & $t.coverageOutcomes[cv])
-  var admitOutcomes: seq[string] = @[]
-  for a in ConcolicAdmitOutcome:
-    if t.admitOutcomes[a] != 0: admitOutcomes.add($a & "=" & $t.admitOutcomes[a])
-  result = "ambiguousBranches=" & $t.ambiguousBranches &
-           " flipOutcomes={" & flipOutcomes.join(", ") & "}" &
-           " coverageOutcomes={" & coverageOutcomes.join(", ") & "}" &
-           " admitOutcomes={" & admitOutcomes.join(", ") & "}"
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(t):
+    when name == "flipOutcomes":
+      var xs: seq[string] = @[]
+      for o in ConcolicFlipOutcome:
+        if v[o] != 0: xs.add($o & "=" & $v[o])
+      parts.add("flipOutcomes={" & xs.join(", ") & "}")
+    elif name == "coverageOutcomes":
+      var xs: seq[string] = @[]
+      for cv in ConcolicCoverageOutcome:
+        if v[cv] != 0: xs.add($cv & "=" & $v[cv])
+      parts.add("coverageOutcomes={" & xs.join(", ") & "}")
+    elif name == "admitOutcomes":
+      var xs: seq[string] = @[]
+      for a in ConcolicAdmitOutcome:
+        if v[a] != 0: xs.add($a & "=" & $v[a])
+      parts.add("admitOutcomes={" & xs.join(", ") & "}")
+    elif v is int:
+      parts.add(name & "=" & $v)
+    else:
+      {.error: "ConstructTally gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach `$`(ConstructTally) how to render it".}
+  result = parts.join(" ")
+
+proc toJson*(t: ConstructTally): string =
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(t):
+    when name == "flipOutcomes":
+      var xs: seq[string] = @[]
+      for o in ConcolicFlipOutcome:
+        if v[o] != 0: xs.add("\"" & $o & "\":" & $v[o])
+      parts.add("\"flipOutcomes\":{" & xs.join(",") & "}")
+    elif name == "coverageOutcomes":
+      var xs: seq[string] = @[]
+      for cv in ConcolicCoverageOutcome:
+        if v[cv] != 0: xs.add("\"" & $cv & "\":" & $v[cv])
+      parts.add("\"coverageOutcomes\":{" & xs.join(",") & "}")
+    elif name == "admitOutcomes":
+      var xs: seq[string] = @[]
+      for a in ConcolicAdmitOutcome:
+        if v[a] != 0: xs.add("\"" & $a & "\":" & $v[a])
+      parts.add("\"admitOutcomes\":{" & xs.join(",") & "}")
+    elif v is int:
+      parts.add("\"" & name & "\":" & $v)
+    else:
+      {.error: "ConstructTally gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach toJson(ConstructTally) how to render it".}
+  result = "{" & parts.join(",") & "}"
 
 proc `$`*(y: ConcolicYield): string =
-  var lines: seq[string] = @["collect:"]
-  for l in ($y.collect).splitLines(): lines.add("  " & l)
-  lines.add("flip:")
-  for l in ($y.flip).splitLines(): lines.add("  " & l)
-  var admitOutcomes: seq[string] = @[]
-  for a in ConcolicAdmitOutcome:
-    admitOutcomes.add($a & "=" & $y.admitOutcomes[a])
-  lines.add("admitOutcomes={" & admitOutcomes.join(", ") & "}")
-  var byConstruct: seq[string] = @[]
-  for k in WalkerConstructKind:
-    if y.byConstruct.hasKey(k):
-      byConstruct.add($k & ": " & $y.byConstruct[k])
-  if byConstruct.len > 0:
-    lines.add("byConstruct:")
-    for l in byConstruct: lines.add("  " & l)
-  else:
-    lines.add("byConstruct={}")
+  var lines: seq[string] = @[]
+  for name, v in fieldPairs(y):
+    when name == "collect":
+      lines.add("collect:")
+      for l in ($v).splitLines(): lines.add("  " & l)
+    elif name == "flip":
+      lines.add("flip:")
+      for l in ($v).splitLines(): lines.add("  " & l)
+    elif name == "admitOutcomes":
+      var xs: seq[string] = @[]
+      for a in ConcolicAdmitOutcome: xs.add($a & "=" & $v[a])
+      lines.add("admitOutcomes={" & xs.join(", ") & "}")
+    elif name == "byConstruct":
+      var byConstruct: seq[string] = @[]
+      for k in WalkerConstructKind:
+        if v.hasKey(k): byConstruct.add($k & ": " & $v[k])
+      if byConstruct.len > 0:
+        lines.add("byConstruct:")
+        for l in byConstruct: lines.add("  " & l)
+      else:
+        lines.add("byConstruct={}")
+    else:
+      {.error: "ConcolicYield gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach `$`(ConcolicYield) how to render it".}
   result = lines.join("\n")
+
+proc toJson*(y: ConcolicYield): string =
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(y):
+    when name == "collect":
+      parts.add("\"collect\":" & toJson(v))
+    elif name == "flip":
+      parts.add("\"flip\":" & toJson(v))
+    elif name == "admitOutcomes":
+      var xs: seq[string] = @[]
+      for a in ConcolicAdmitOutcome: xs.add("\"" & $a & "\":" & $v[a])
+      parts.add("\"admitOutcomes\":{" & xs.join(",") & "}")
+    elif name == "byConstruct":
+      var xs: seq[string] = @[]
+      for k in WalkerConstructKind:
+        if v.hasKey(k): xs.add("\"" & $k & "\":" & toJson(v[k]))
+      parts.add("\"byConstruct\":{" & xs.join(",") & "}")
+    else:
+      {.error: "ConcolicYield gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach toJson(ConcolicYield) how to render it".}
+  result = "{" & parts.join(",") & "}"
 
 # ---- Backward-compatible flat accessors ------------------------------------
 #

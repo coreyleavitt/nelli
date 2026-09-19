@@ -73,7 +73,36 @@
 ## `ambiguousByConstruct` (the one non-`int`, `Table`-valued field) keeps its
 ## explicit per-key merge -- a generic `+=` cannot express it, and the `when`
 ## names it explicitly rather than falling through to the `{.error.}` arm.
-import std/[unittest, strutils]
+##
+## Round 12 review closed two more findings on this same chain:
+##
+## Q2 (High) -- D5's own fix then hand-listed the SAME field set three more
+## times with no equivalent protection: both `` `$` `` overloads in
+## `smt/concolictaxonomy.nim` and `formatCampaignSummary` in `fuzz.nim`
+## named every field, plus this file's own completeness test re-typed the
+## sixteen `CampaignStats` names a THIRD time as a runtime substring check.
+## Every renderer is now `fieldPairs`-driven with the same `{.error.}`
+## escape, matching bespoke-formatted fields BY NAME (not type, for the
+## same reason Q5 below matches by name). The completeness test below no
+## longer hand-lists field names either -- it derives the expected key set
+## from `fieldPairs(stats)` itself, so it cannot drift from the type any
+## more than the renderer can. Also added the structured JSON sibling
+## `engine/render.nim`'s `renderReport`/`ofJson` precedent actually has
+## (round 11's doc comment overstated that precedent as text-only):
+## `toJson*(s: CampaignStats): string` and matching `toJson` overloads on
+## every `smt/concolictaxonomy.nim` type it nests, in the same hand-built
+## `"key":value` style `renderJson` uses.
+##
+## Q5/L12-3 (Medium) -- `foldFlipResult`'s `when` matched
+## `ambiguousByConstruct` by its concrete TYPE
+## (`dst is Table[WalkerConstructKind, int]`), not by field identity, with
+## `name` already bound and unused. A second field of that same `Table`
+## type -- the taxonomy's own natural per-construct shape, so a plausible
+## future addition -- would have silently matched the same branch and
+## never reached the fold, with no compile error: the exact hazard D5
+## closed, reintroduced for one case. Switched to `name ==
+## "ambiguousByConstruct"`.
+import std/[unittest, strutils, json]
 import nelli/smt/canonicalize
 import nelli/symex
 import nelli/fuzz
@@ -352,19 +381,26 @@ suite "#163 review round 11 -- CampaignStats.formatCampaignSummary (Finding L1a)
     check formatCampaignSummary(stats) == formatCampaignSummary(stats)
 
   test "formatCampaignSummary covers every top-level CampaignStats field, not only concolicYield":
+    ## #163 review round 12, Finding Q2: this used to hand-list the sixteen
+    ## `CampaignStats` field names a THIRD time (after `foldFlipResult` and
+    ## `formatCampaignSummary` itself), as a runtime substring-presence
+    ## check that could drift from the type just like the other two.
+    ## Deriving the expected marker set from `fieldPairs(stats)` means a
+    ## field added to `CampaignStats` automatically joins this test's own
+    ## expectations -- the guard cannot go stale by omission the way a
+    ## hand-typed list can. `concolicYield` is the one field
+    ## `formatCampaignSummary` renders as a nested block (`"name:"`) rather
+    ## than a flat `"name="` pair; every other field, whatever its type,
+    ## renders as `"name="`.
     let stats = CampaignStats(execs: 42, corpusSize: 5, coverageEdges: 7,
                               crashCount: 1, totalMutationOps: 9, cullCount: 2,
                               operatorPulls: @[1.5, 2.25],
                               provenanceCounts: [pvMutation: 3, pvConcolic: 1, pvI2S: 0, pvImported: 0])
     let s = formatCampaignSummary(stats)
-    for field in ["execs=", "elapsed=", "execsPerSec=", "corpusSize=",
-                  "coverageEdges=", "respawnCount=", "stormTripped=",
-                  "stormBackoffLevel=", "sinceLastCoverageAdmits=",
-                  "sinceLastCrashIters=", "crashCount=", "totalMutationOps=",
-                  "cullCount=", "operatorPulls=", "provenanceCounts=",
-                  "concolicYield:"]:
-      checkpoint("missing field: " & field)
-      check field in s
+    for name, _ in fieldPairs(stats):
+      let marker = if name == "concolicYield": name & ":" else: name & "="
+      checkpoint("missing field: " & marker)
+      check marker in s
     check "execs=42" in s
     check "corpusSize=5" in s
     check "coverageEdges=7" in s
@@ -391,6 +427,63 @@ suite "#163 review round 11 -- CampaignStats.formatCampaignSummary (Finding L1a)
     check "execs=0" in s
     check "concolicYield:" in s
     check "byConstruct={}" in s   ## empty Table[WalkerConstructKind, ConstructTally]
+
+suite "#163 review round 12 -- CampaignStats/ConcolicYield toJson (Finding Q2 JSON sibling)":
+  ## The structured sibling `engine/render.nim`'s real `ofJson` precedent
+  ## has, and round 11's `formatCampaignSummary` doc comment claimed but
+  ## never built. Parsed back with `std/json` (rather than only checked as
+  ## a substring, the way `formatCampaignSummary`'s tests above work) so
+  ## these tests actually prove the output is well-formed JSON, not merely
+  ## text that happens to contain the right characters.
+
+  test "toJson(CampaignStats) parses as JSON and covers every top-level field":
+    let stats = CampaignStats(execs: 42, corpusSize: 5, coverageEdges: 7,
+                              crashCount: 1, totalMutationOps: 9, cullCount: 2,
+                              operatorPulls: @[1.5, 2.25],
+                              provenanceCounts: [pvMutation: 3, pvConcolic: 1, pvI2S: 0, pvImported: 0])
+    let j = parseJson(toJson(stats))
+    for name, _ in fieldPairs(stats):
+      checkpoint("missing JSON key: " & name)
+      check j.hasKey(name)
+    check j["execs"].getInt() == 42
+    check j["corpusSize"].getInt() == 5
+    check j["coverageEdges"].getInt() == 7
+    check j["crashCount"].getInt() == 1
+    check j["totalMutationOps"].getInt() == 9
+    check j["cullCount"].getInt() == 2
+    check j["operatorPulls"].getElems().len == 2
+    check j["provenanceCounts"]["pvMutation"].getInt() == 3
+    check j["provenanceCounts"]["pvConcolic"].getInt() == 1
+
+  test "toJson(CampaignStats) nests concolicYield structurally, not as an escaped string":
+    var y: ConcolicYield
+    let r = oneShotFlip(cfoSolvedExact, ccoIntendedCovered,
+                        collectCounters = ConcolicYieldCounters(obligationsLive: 4, parseDeclines: 2))
+    foldFlipResult(y, r, wckIf)
+    let stats = CampaignStats(concolicYield: y)
+    let j = parseJson(toJson(stats))
+    check j["concolicYield"].kind == JObject
+    check j["concolicYield"]["collect"]["obligationsLive"].getInt() == 4
+    check j["concolicYield"]["collect"]["parseDeclines"].getInt() == 2
+    check j["concolicYield"]["flip"]["byOutcome"]["cfoSolvedExact"].getInt() == 1
+    check j["concolicYield"]["flip"]["byCoverage"]["ccoIntendedCovered"].getInt() == 1
+    check j["concolicYield"]["byConstruct"]["wckIf"]["flipOutcomes"]["cfoSolvedExact"].getInt() == 1
+
+  test "a zero-value CampaignStats.toJson still parses (no crash, byConstruct is an empty object)":
+    let j = parseJson(toJson(CampaignStats()))
+    check j["execs"].getInt() == 0
+    check j["concolicYield"]["byConstruct"].kind == JObject
+    check j["concolicYield"]["byConstruct"].len == 0
+
+  test "toJson(ConcolicYieldCounters) round-trips ambiguousByConstruct as a keyed object":
+    var c = ConcolicYieldCounters(ambiguousBranches: 5)
+    c.ambiguousByConstruct[wckIf] = 3
+    c.ambiguousByConstruct[wckWhile] = 2
+    let j = parseJson(toJson(c))
+    check j["ambiguousBranches"].getInt() == 5
+    check j["ambiguousByConstruct"]["wckIf"].getInt() == 3
+    check j["ambiguousByConstruct"]["wckWhile"].getInt() == 2
+    check not j["ambiguousByConstruct"].hasKey("wckIndex")   ## zero entries omitted, same as the text renderer
 
 suite "#163 review -- walker version pin":
 

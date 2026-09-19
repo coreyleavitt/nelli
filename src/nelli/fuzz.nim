@@ -835,29 +835,88 @@ proc formatCampaignSummary*(s: CampaignStats): string =
   ## library, and deciding to print a campaign summary on the caller's
   ## behalf is the caller's call, not this module's. Providing the renderer
   ## is the fix; invoking it is optional.
+  ##
+  ## #163 review round 12, Finding Q2: round 11 hand-listed all sixteen
+  ## `CampaignStats` fields here, the SAME hazard `foldFlipResult`
+  ## (`smt/concolictaxonomy.nim`) had just been fixed for one layer down —
+  ## a future field silently absent from this renderer unless a human
+  ## remembers to add it. Driven by `fieldPairs` now, with the same
+  ## `{.error.}` compile-time escape for a field type this proc does not
+  ## know how to format. Field order is `CampaignStats`' own declaration
+  ## order (what `fieldPairs` walks in), which happens to already match
+  ## the order this proc printed by hand, so the rendered text is
+  ## unchanged. Only `execsPerSec`/`operatorPulls`/`provenanceCounts`/
+  ## `concolicYield` need bespoke formatting and so are matched by NAME
+  ## (not type — `execsPerSec` is the only `float` field here today, but
+  ## matching it by type would silently absorb a future differently-
+  ## formatted `float` field the same way Q5 found `foldFlipResult` doing
+  ## for a `Table` field); every other field is a plain
+  ## `int`/`bool`/`Duration` rendered generically via `$`.
   var lines: seq[string] = @[]
-  lines.add("execs=" & $s.execs)
-  lines.add("elapsed=" & $s.elapsed)
-  lines.add("execsPerSec=" & s.execsPerSec.formatFloat(ffDecimal, 2))
-  lines.add("corpusSize=" & $s.corpusSize)
-  lines.add("coverageEdges=" & $s.coverageEdges)
-  lines.add("respawnCount=" & $s.respawnCount)
-  lines.add("stormTripped=" & $s.stormTripped)
-  lines.add("stormBackoffLevel=" & $s.stormBackoffLevel)
-  lines.add("sinceLastCoverageAdmits=" & $s.sinceLastCoverageAdmits)
-  lines.add("sinceLastCrashIters=" & $s.sinceLastCrashIters)
-  lines.add("crashCount=" & $s.crashCount)
-  lines.add("totalMutationOps=" & $s.totalMutationOps)
-  lines.add("cullCount=" & $s.cullCount)
-  var pulls: seq[string] = @[]
-  for p in s.operatorPulls: pulls.add(p.formatFloat(ffDecimal, 3))
-  lines.add("operatorPulls=[" & pulls.join(", ") & "]")
-  var prov: seq[string] = @[]
-  for p in Provenance: prov.add($p & "=" & $s.provenanceCounts[p])
-  lines.add("provenanceCounts={" & prov.join(", ") & "}")
-  lines.add("concolicYield:")
-  for l in ($s.concolicYield).splitLines(): lines.add("  " & l)
+  for name, v in fieldPairs(s):
+    when name == "execsPerSec":
+      lines.add("execsPerSec=" & v.formatFloat(ffDecimal, 2))
+    elif name == "operatorPulls":
+      var pulls: seq[string] = @[]
+      for p in v: pulls.add(p.formatFloat(ffDecimal, 3))
+      lines.add("operatorPulls=[" & pulls.join(", ") & "]")
+    elif name == "provenanceCounts":
+      var prov: seq[string] = @[]
+      for p in Provenance: prov.add($p & "=" & $v[p])
+      lines.add("provenanceCounts={" & prov.join(", ") & "}")
+    elif name == "concolicYield":
+      lines.add("concolicYield:")
+      for l in ($v).splitLines(): lines.add("  " & l)
+    elif v is int or v is bool or v is Duration:
+      lines.add(name & "=" & $v)
+    else:
+      {.error: "CampaignStats gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach formatCampaignSummary how to render it".}
   result = lines.join("\n")
+
+proc toJson*(s: CampaignStats): string =
+  ## #163 review round 12, Finding Q2: the structured sibling
+  ## `formatCampaignSummary` claimed as precedent but never actually
+  ## built — `engine/render.nim`'s `renderReport` is an `OutputFormat` enum
+  ## with a real `ofJson` arm (`renderJson`), not the fixed text shape
+  ## round 11's doc comment described. Follows `renderJson`'s own
+  ## convention (hand-built `"key":value` string concatenation, not
+  ## `std/json`'s `JsonNode` — the ONE JSON style already in this repo, not
+  ## a second one). Unlike `Report[T]`, nothing in `CampaignStats` (or the
+  ## `ConcolicYield` it nests) is free-text: every leaf is an
+  ## int/float/bool/`Duration` or an enum name, so there is no `jsonEscape`
+  ## call to make here — see `toJson(ConcolicYield)`'s own doc
+  ## (`smt/concolictaxonomy.nim`) for why importing `engine/render` for its
+  ## private escaper isn't worth it. `elapsed` renders as total
+  ## nanoseconds (an int64, not `$Duration`'s human string) since a JSON
+  ## consumer (a metrics sink, a log line) wants a number, not prose to
+  ## reparse. Driven by `fieldPairs` with the same `{.error.}` escape and
+  ## name-based matching as `formatCampaignSummary`, so the two renderers
+  ## cannot silently drift on which fields they cover.
+  var parts: seq[string] = @[]
+  for name, v in fieldPairs(s):
+    when name == "elapsed":
+      parts.add("\"elapsed\":" & $v.inNanoseconds)
+    elif name == "operatorPulls":
+      var pulls: seq[string] = @[]
+      for p in v: pulls.add(p.formatFloat(ffDecimal, 3))
+      parts.add("\"operatorPulls\":[" & pulls.join(",") & "]")
+    elif name == "provenanceCounts":
+      var prov: seq[string] = @[]
+      for p in Provenance: prov.add("\"" & $p & "\":" & $v[p])
+      parts.add("\"provenanceCounts\":{" & prov.join(",") & "}")
+    elif name == "concolicYield":
+      parts.add("\"concolicYield\":" & toJson(v))
+    elif v is int:
+      parts.add("\"" & name & "\":" & $v)
+    elif v is float:
+      parts.add("\"" & name & "\":" & v.formatFloat(ffDecimal, 2))
+    elif v is bool:
+      parts.add("\"" & name & "\":" & (if v: "true" else: "false"))
+    else:
+      {.error: "CampaignStats gained a field of type " & $typeof(v) &
+               " (" & name & ") -- teach toJson(CampaignStats) how to render it".}
+  result = "{" & parts.join(",") & "}"
 
 proc resolveAssist*(assist: ConcolicAssist): tuple[stallRounds, maxBranchAttempts: int]
                     {.raises: [ConcolicAssistError].} =

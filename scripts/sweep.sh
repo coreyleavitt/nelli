@@ -130,14 +130,46 @@ if [ -z "$extra_defines_block" ]; then
   echo "sweep.sh: could not locate nelli.nimble's 'let extraDefines = { ... }.toTable()' block -- parser is out of sync with the file format" >&2
   exit 2
 fi
+
+# Parse the WHOLE block, not line by line (finding L12-1). An entry wrapped
+# across two lines --
+#   "someOtherLongProbeName":
+#     "-d:someLongDefineFlagThatGotWrapped",
+# -- has its key on one line and its value on the next. A per-line regex
+# never sees them together, so the pair silently vanishes: the block text
+# itself is still non-empty, the only guard that used to exist here, so
+# nothing here noticed and the suite quietly reverted to its `[SKIPPED]`
+# stub. Strip comments per line first (must happen before joining, or a
+# `#` on one line could swallow the next line's real entry), then flatten
+# the block onto a single line so a key/value pair is visible to the
+# extractor regardless of where its author wrapped it.
+extra_defines_joined="$(printf '%s\n' "$extra_defines_block" | sed 's/#.*$//' | tr '\n' ' ')"
+
+# Sanity floor (finding Q1): scripts/derive-ci-suites.ps1 guards its own
+# nelli.nimble parse with a count floor and throws loudly when the
+# extracted count looks implausibly low rather than trusting "the regex
+# matched something." This block's size isn't fixed (it can legitimately
+# be empty), so instead of a hardcoded number, cross-check the extractor's
+# own output against an independent, cruder count of the same text: every
+# `"key":`-looking token anywhere in the joined block. If the extractor
+# didn't turn every such token into a complete key/value pair -- wrapped,
+# malformed, or otherwise unparseable -- that must fail loudly instead of
+# silently dropping the entry.
+key_token_count=$(printf '%s' "$extra_defines_joined" | grep -oE '"[^"]+"[[:space:]]*:' | wc -l | tr -d ' ')
+
 while IFS='|' read -r key val; do
   [ -n "$key" ] && extra_defines["$key"]="$val"
 done < <(
-  printf '%s\n' "$extra_defines_block" \
-    | sed 's/#.*$//' \
+  printf '%s' "$extra_defines_joined" \
     | grep -oE '"[^"]+"[[:space:]]*:[[:space:]]*"[^"]*"' \
     | sed -E 's/^"([^"]*)"[[:space:]]*:[[:space:]]*"([^"]*)"$/\1|\2/'
 )
+
+if [ "${#extra_defines[@]}" -ne "$key_token_count" ]; then
+  echo "sweep.sh: found $key_token_count key-looking token(s) in nelli.nimble's extraDefines block but only parsed ${#extra_defines[@]} complete key/value pair(s) -- treating as a parse failure rather than silently dropping an entry. Block as read:" >&2
+  printf '%s\n' "$extra_defines_block" | sed 's/^/    /' >&2
+  exit 2
+fi
 
 # ---- run set -------------------------------------------------------------
 run_set=()
@@ -220,11 +252,6 @@ stale_n="${#stale_skiplist[@]}"
 # ---- sweep ---------------------------------------------------------------
 run_one() {
   local b="$1" f="$2" t="$3" extra="$4" rc
-  # xargs -n4 groups the flat token stream by count, so a row that dropped
-  # its 4th field on an empty extra-define would shift every field after
-  # it into the wrong row. NOFLAG is emitted for "no extra define" instead
-  # of an empty string so every row always contributes exactly 4 tokens.
-  [ "$extra" = "NOFLAG" ] && extra=""
   scripts/dt-bounded.sh "$b" "$f" "$t" "$extra" >/dev/null 2>&1
   rc=$?
   echo "$rc $b $f"
@@ -238,13 +265,22 @@ export -f run_one
       echo "skip $backend $f" >> "$outlog"
       continue
     fi
-    extra="${extra_defines[$name]:-NOFLAG}"
-    # No test path, backend, or extra-define entry contains whitespace, so
-    # a space-separated quadruple is safe here (same assumption psweep.sh
-    # makes for its triple).
-    printf '%s %s %s %s\n' "$backend" "$f" "$timeout_secs" "$extra"
+    extra="${extra_defines[$name]:-}"
+    # C7: dt-bounded.sh's extra_nim_args is documented (same commit that
+    # introduced this sweep) as accepting a whitespace-separated multi-flag
+    # string, e.g. "-d:foo -d:bar" -- so a defines value CAN legitimately
+    # contain embedded spaces. A space-separated quadruple fed to plain
+    # `xargs -n4` cannot tell "one field with a space in it" from "two
+    # fields": the first multi-flag value in the table would silently
+    # shift every field of every row behind it in the batch for the rest
+    # of the run, with no exit code and nothing in the drift file. NUL-
+    # delimit every field instead -- no shell string can ever contain a
+    # NUL byte, so it can never collide with real field content -- and
+    # consume the stream with `xargs -0 -n4` below, so an embedded space
+    # is just a byte inside one field, never a field separator.
+    printf '%s\0%s\0%s\0%s\0' "$backend" "$f" "$timeout_secs" "$extra"
   done
-} | xargs -P"$jobs" -n4 bash -c 'run_one "$0" "$1" "$2" "$3"' >> "$outlog"
+} | xargs -0 -P"$jobs" -n4 bash -c 'run_one "$0" "$1" "$2" "$3"' >> "$outlog"
 
 # ---- summary -------------------------------------------------------------
 summary="$outlog.summary"

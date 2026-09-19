@@ -18,7 +18,10 @@
 # reopening the injection class RFC-0002's L1 finding closed for
 # $test_file in this same script. See scripts/sweep.sh's `extra_defines`
 # table (itself derived from nelli.nimble, not hand-copied) for the seam
-# that feeds this per-file for the whole-suite sweep.
+# that feeds this per-file for the whole-suite sweep -- it hands a
+# multi-flag value to xargs as one NUL-delimited field (finding C7), never
+# a whitespace-delimited one, so a value with embedded spaces reaches
+# here as a single argv element instead of getting split mid-transport.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 backend="${1:?usage: dt-bounded.sh <c|cpp> <test.nim> [timeout_secs] [extra_nim_args]}"; shift

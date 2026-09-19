@@ -1150,3 +1150,55 @@ scripts/sweep.sh <out>.log && scripts/sweep-diff.sh \
 
 Baseline remains `base163.log` (460 entries, pinned worktree at `ac507c1`).
 
+## Round 8 progress — the queue is nearly empty
+
+| item | commit(s) | note |
+|---|---|---|
+| **W8 PINNED** | `bd6a013` | Fourth attempt, and it corrects the round-1 characterisation. W8 was called "a precision gap on an internal representation; no crash, no wrong verdict." **Wrong.** The pre-fix RED did not fail an assertion — it HUNG and was killed at the 300s bound. The range assertion is load-bearing for TERMINATION: without it Z3 reasons through the full call's Sequence-theory equality instead of short-circuiting on a trivial `p > 1000` vs `p in [0,1000]` contradiction. The blocker that defeated three prior attempts also dissolved on its own: scan-shape non-termination no longer reproduces on current HEAD, because R22/R27/R28 landed in between. Instrumentation confirmed B3 fires the bare arm, B4 the tuple arm, both `hasRange=true`, both terminating in seconds. |
+| R24/R25/R26 | `9d1d8e3` | New `ConcolicCollectResult.drawOverrides` so the flip solves the variable the binding actually used — option (a), no `int2bv` bridge. R24 RED: a `uint8` flip materialised `int(0)` instead of `int(201)`. R26: `ziWidth`/`ziSigned` now stamped on concolic Z3Int params, verified by reading `obligationLog` directly (empty pre-fix, `odLive` post). R26's obligation is confirmed NOT observable through `ConcolicCollectResult`/`ConcolicFlipResult` — no raised-verdict channel exists; wiring one needs `fuzz.nim` orchestrator work. Recorded, not silently implied. |
+| R11 audit's first live catch | `aad62dd` | The gate went red on a real change within minutes of existing. **Adjudicated, not re-counted:** R24/R25's two new `bvRangeConds` calls bound a BV against the concolic TRACE node's recorded per-draw interval (`node.intC.min/max`), NOT the type's declared range, so `rangeCondsIfNeeded` (which reads `ty.rangeLo`/`ty.rangeHi`) is the wrong helper by construction. Both call lines carry an inline `# [range-invariant: concolic-trace-interval]` marker (the scanner checks the CALL LINE only, not preceding lines — learned the hard way), inventory 1 -> 3, and the test title updated so it does not misdescribe its own assertion. |
+| **R22 fully closed** | `bf403e8` `5322221` `37618d0` `895b312` `404df8d` | All four remaining sites. **Site 4 needed NO code change** — R27's parse-time `aty` resolution is indifferent to whether the target symbol came from an `isLet`, a `var` local, or a formal, so `var`/`out` param reassignment was already covered. Round 5's deeper fix paid an unanticipated dividend. **And building site 3's precision test found a pre-existing crash:** `storeSeqElem`'s `itInt` arm read `val.bv8/16/32/64` with no `svInt` handling, so under the DEFAULT `isOptimised` semantics — where a ranged param promotes to `svInt` for #161's machinery — writing that value into ANY int-family seq element crashed the walker (`weInternalWalkerFault`), ranged or not. Fixed with its own RED (`37618d0`). Cost checked after every site; no blow-ups. Both audits stayed clean with no adjudication needed. |
+| enum-field witness reader | `d71da9e` | `symexFind` could not COMPILE for a proc taking an object with a plain enum field. This also unblocks R21's untested object-field position, so R2's and R18's enum-domain work is finally verifiable there. |
+| hidden widening conversion | `678c6ce` | The int-literal-width item, which reproduced as a hidden widening conversion losing its operand's real width. |
+| `maxFrontierSize` default | `991b0ff` | Was 0 = unbounded, the one incremental per-statement cap; it is what let R22's fork multiplicity accumulate on a ranged loop counter. |
+
+## Still in flight
+
+- The two raw-degrade classifications: module-global read (currently
+  `weInternalWalkerFault` + a raw `KeyError`) and the `maxCallDepth` bail
+  (currently unclassified). **The first is not cosmetic** — #163 slice 4's
+  inertness soundness argument rests on "a SUT reading a global has already
+  degraded at its own read site", which is only trustworthy if that degrade
+  is a real classified decline rather than an env-lookup miss escaping as an
+  engine fault.
+- The enum/types/symex agent's own final report (its three commits are in).
+
+## Then, to close round 8
+
+1. One consolidated `symexWalkerVersion` bump (138 -> 139) covering every
+   verdict-affecting fix of this round: R22's sites 1-3, the `storeSeqElem`
+   prerequisite, both parser gaps (`b307aef`), R24/R25/R26, the enum-field
+   witness reader, the widening-conversion fix. Update the CR2 `==` pin and
+   raise the floor pins in the suites whose behaviour depends on round-8
+   semantics. Several test comments were corrected to say a bump IS owed
+   (`908b786`) — do not re-derive that.
+2. A re-review round over `a581225..HEAD` (standing security, design,
+   liveness lenses).
+3. The full sweep against `base163.log` (460 entries, pinned at `ac507c1`).
+4. `wiring = proven` — a consequence of the above, not a separate judgement.
+   `quipu` is not on PATH but DOES run as a git hook here, so find the
+   invocation the hook uses rather than assuming it is unavailable.
+
+**Resume:**
+
+```
+git -C /home/corey/projects/nim/libs/proptest log --oneline -45
+scripts/sweep.sh <out>.log && scripts/sweep-diff.sh \
+  /home/corey/.claude/jobs/4fd5573d/tmp/base163.log <out>.log
+scripts/dt-bounded.sh c tests/tsymex_r11_range_invariant_audit.nim 300
+scripts/dt-bounded.sh c tests/tsymex_r6_n36_raise_class_audit.nim 300
+```
+
+Both audits are now permanent gates and will fire on any future range-primitive
+or raw-raise change — that is the point. Adjudicate, never re-count.
+

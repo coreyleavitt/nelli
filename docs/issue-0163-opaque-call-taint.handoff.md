@@ -1443,3 +1443,61 @@ Expected in the result, neither a regression:
   `nelli.nimble` COMMENT being scraped as a suite name (fixed once already this
   session, and the drift extractor now strips comments).
 
+---
+
+# GATE FAILED — 15 regressions. Round 9 is NOT closed.
+
+```
+unchanged=445  regressed=15  new-failing=0  new-ok=34  gone=0
+```
+
+The 15 that passed in the `ac507c1` baseline and fail now:
+
+```
+tsymex_tot1_totality_corpus          tsymex_phase15_CR3_CR4_CR6_float
+tsymex_phase15_g10_smoke             tsymex_phase2_overflow
+tsymex_r6_r3_svint_overflow          tsymex_retest_c3_bitwise_guard
+tsymex_r6_a1_variantlit              tsymex_phase2_bv_arith
+tsymex_phase15_F5_probeproto         tsymex_p2b_refobjconstr_expr
+tsymex_r6_a4_construct_interactions  tsymex_phase15_g7_static_param
+tsymex_phase15_C2_staticparams       tsymex_cr9c_intrep
+tsymex_p2a_objconstr_expr
+```
+
+**Signature** (confirmed on three): a DEFINITIVE verdict became `sxUnknown`.
+`probeproto`'s `int32(f) + 5 == k` expected `sxRaised`, got `sxUnknown`;
+`phase2_overflow`'s "isExact finds the BV-only witness" and `cr9c_intrep`'s
+"bv32 vs bv32 arithmetic" both expected `sxSat`, got `sxUnknown`. Safe
+direction — no unsoundness — but a broad COMPLETENESS regression: the engine
+used to reach a verdict and now declines.
+
+**Hypothesis tested and REFUTED, do not repeat it.** `maxFrontierSize`'s
+default (0 = unbounded -> 256, `991b0ff`) matches the signature exactly, since a
+frontier prune degrades via `beBudgetExhausted`. I set the default back to 0 and
+all three still failed identically. Not the cause. Default restored to 256.
+
+**Prime suspects**, from the failing names clustering on int width /
+representation (`bv_arith`, `intrep`, `probeproto`, `svint_overflow`,
+`bitwise_guard`, `overflow`, `int32(f)`) and object/variant construction
+(`objconstr`, `refobjconstr`, `variantlit`, `construct_interactions`,
+`staticparams`): the three width-conversion commits `678c6ce`, `c74c04b`,
+`710e9dc`. The strongest lead is that `c74c04b`'s own report documents
+`lowerConvIntWidth` HARD-ASSERTING a raw-BV operand, and that routing a
+promoted `svInt` param through it regressed a correct `sxUnsat` to `sxUnknown`
+— the same failure direction as all 15. Its `isPromoteSoundEligibleParam`
+carve-out may simply be too narrow.
+
+A bisect-and-fix agent is in flight with instructions to BISECT from
+`e1a6b57` (the last gate that was clean apart from one adjudicated item)
+rather than guess, and a hard constraint: the 15 must pass again WITHOUT
+reopening the four false SATs those commits closed
+(`tests/tsymex_163rev_int_literal_width.nim` must stay green). If those two
+goals genuinely conflict, it is to STOP and report both repros — that trade is
+my call, not its own. It is also explicitly forbidden from adjusting the 15
+suites' expectations to make the sweep green; if a specific expectation is
+genuinely now wrong it must argue that per-suite against a real-Nim oracle.
+
+**Nothing in this session is closed until this is resolved and a clean sweep
+runs.** The round-8/9 fixes are real and their pins are green in isolation, but
+the branch as a whole currently regresses 15 suites against its own baseline.
+

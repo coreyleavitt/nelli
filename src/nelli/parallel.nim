@@ -309,15 +309,17 @@ proc parallelJitterPoint*(n = 1) =
   for _ in 0 ..< n:
     schedulerYield()
 
-proc insertJitterBoundaries(n: NimNode; count: var int): NimNode
+proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNode
   ## Forward declaration — mutually recursive with `instrumentStmtList`
   ## below (each statement list splits its children via
   ## `insertJitterBoundaries`; each control-flow node recurses into its
   ## nested statement list(s) via `instrumentStmtList`). See
   ## `insertJitterBoundaries`'s own doc comment further down for what it
-  ## actually does.
+  ## actually does. `procName` is threaded through purely so the
+  ## self-reporting fallback warning (see that doc comment) can name the
+  ## annotated proc; it plays no role in the rewrite itself.
 
-proc instrumentStmtList(list: NimNode; count: var int): NimNode =
+proc instrumentStmtList(list: NimNode; count: var int; procName: string): NimNode =
   ## Split every adjacent-statement boundary of `list` with a
   ## `parallelJitterPoint()` call — but NEVER after the final statement.
   ## That asymmetry is deliberate and load-bearing: if `list` is (or
@@ -333,12 +335,41 @@ proc instrumentStmtList(list: NimNode; count: var int): NimNode =
   ## no-op rather than guessing from any one list's length.
   result = list.copyNimNode
   for i in 0 ..< list.len:
-    result.add insertJitterBoundaries(list[i], count)
+    result.add insertJitterBoundaries(list[i], count, procName)
     if i < list.len - 1:
       result.add newCall(bindSym"parallelJitterPoint")
       inc count
 
-proc insertJitterBoundaries(n: NimNode; count: var int): NimNode =
+## Nested-callable node kinds `insertJitterBoundaries` must never recurse
+## into or warn about, even though several of them carry an `nnkStmtList`
+## body: a `proc`/`func`/`lambda`/etc. declared inside the annotated proc's
+## body is a SEPARATE callable with its own statement lists, not part of
+## this proc's control flow. Instrumenting it (or warning that it was
+## skipped) would be incorrect attribution — the "unhandled construct"
+## fallback warning below exists to catch REAL gaps like round 13's
+## `nnkDefer`/`nnkWhenStmt`, not to fire on every nested `proc` a SUT
+## happens to declare.
+const jitterNestedCallableKinds = {
+  nnkProcDef, nnkFuncDef, nnkLambda, nnkIteratorDef, nnkTemplateDef,
+  nnkMacroDef, nnkConverterDef, nnkMethodDef, nnkDo}
+
+proc hasStmtListChild(n: NimNode): bool =
+  ## True if `n` has a direct child that is itself an `nnkStmtList` —
+  ## i.e. `n` is (or looks like) a statement-holding construct rather
+  ## than a plain expression or leaf. Used only by the fallback arm
+  ## below to decide whether a node kind `insertJitterBoundaries` has no
+  ## dedicated arm for is nonetheless the kind of thing that SHOULD have
+  ## one. Deliberately shallow (direct children only): `nnkIfExpr` and
+  ## `nnkCaseStmt`-as-expression wrap their branch bodies in
+  ## `nnkElifExpr`/`nnkOfBranch` first, not a bare `nnkStmtList`, so this
+  ## check does not mistake a genuine expression position for a
+  ## statement list the way a deep search would.
+  for child in n:
+    if child.kind == nnkStmtList:
+      return true
+  false
+
+proc insertJitterBoundaries(n: NimNode; count: var int; procName: string): NimNode =
   ## AST rewrite used by `{.jitterPoints.}`: insert a
   ## `parallelJitterPoint()` call between every pair of adjacent
   ## statements reachable through `n`'s control-flow structure — not
@@ -351,35 +382,47 @@ proc insertJitterBoundaries(n: NimNode; count: var int): NimNode =
   ## source level, two adjacent statements (read into a local, then
   ## write back), so splitting every statement boundary covers that
   ## shape without the author pointing at it — including when those two
-  ## statements sit inside an `if`/`while`/`for`/`case`/`block`/`try`
-  ## body rather than directly in the proc's own top-level list (round
-  ## 12 finding Q3: a race inside a loop body is arguably the *commoner*
-  ## shape for a concurrent counter, and pre-recursion this hook missed
-  ## it entirely, silently).
+  ## statements sit inside an `if`/`while`/`for`/`case`/`block`/`try`/
+  ## `defer`/`when` body rather than directly in the proc's own
+  ## top-level list (round 12 finding Q3: a race inside a loop body is
+  ## arguably the *commoner* shape for a concurrent counter, and
+  ## pre-recursion this hook missed it entirely, silently).
   ##
   ## Follows `instrumentNode` (coverage.nim)'s shape: dispatch on the
-  ## handful of node kinds that carry a nested statement-list body,
-  ## rewrite each such body, and recurse. Two differences from
-  ## `instrumentNode`, both deliberate:
+  ## node kinds that carry a nested statement-list body, rewrite each
+  ## such body, and recurse. Two differences from `instrumentNode`, both
+  ## deliberate:
   ## - `instrumentNode`'s fallback arm recurses into *every* child of
   ##   *every* node it doesn't special-case, because a coverage branch
   ##   can be nested arbitrarily deep inside an expression. A jitter
   ##   boundary, in contrast, only ever exists between two STATEMENTS in
   ##   a statement list — there is nowhere to put a void
-  ##   `parallelJitterPoint()` call inside an arbitrary expression
-  ##   (`nnkIfExpr`/`nnkWhenStmt` branches, call arguments, ...) without
-  ##   either producing an invalid AST or silently changing an
-  ##   expression's value. So the fallback here does NOT recurse further
-  ##   — only the eight explicitly listed statement-holding constructs
-  ##   (top-level list, `if`/`elif`/`else`, `case`, `while`, `for`,
-  ##   `block`, `try`/`except`/`finally`) are walked.
-  ## - For the same reason, this rewrite never descends into a nested
-  ##   `proc`/`func`/`lambda`/`iterator`/`template`/`macro` definition
-  ##   that happens to be declared inside the annotated proc's body —
-  ##   that is a SEPARATE callable with its own statement lists, not
-  ##   part of this proc's control flow, so instrumenting it would be
-  ##   incorrect attribution (and those node kinds are simply not among
-  ##   the eight dispatched on, so they already fall through untouched).
+  ##   `parallelJitterPoint()` call inside a genuine expression position
+  ##   (`nnkIfExpr` branches, call arguments, ...) without either
+  ##   producing an invalid AST or silently changing an expression's
+  ##   value. So the fallback here does NOT recurse further — only the
+  ##   explicitly listed statement-holding constructs (top-level list,
+  ##   `if`/`elif`/`else`, `case`, `while`, `for`, `block`,
+  ##   `try`/`except`/`finally`, `defer`, `when`/`elif`/`else`) are
+  ##   walked.
+  ##   NOTE (round 13 finding R13-6 corrected a prior version of this
+  ##   comment): `nnkWhenStmt` used to be lumped in with `nnkIfExpr` here
+  ##   as an "expression position with nowhere to put a call", which was
+  ##   simply wrong — a `when` in STATEMENT position (the only position
+  ##   this macro ever sees, since it rewrites a proc BODY) has ordinary
+  ##   `nnkStmtList` branch bodies via `nnkElifBranch`/`nnkElse`,
+  ##   structurally identical to `nnkIfStmt`'s. It gets its own arm
+  ##   below, sharing that shape. `jitterPoints` is an `untyped` macro
+  ##   running pre-semantic-analysis, so an untaken `when` branch (and
+  ##   any jitter call inserted into it) is discarded before codegen —
+  ##   the same reasoning `instrumentNode` already relies on in
+  ##   production for its combined `nnkIfStmt, nnkIfExpr, nnkWhenStmt`
+  ##   arm.
+  ## - For the same "no callable is part of this proc's own control
+  ##   flow" reason, this rewrite never descends into a nested
+  ##   `proc`/`func`/`lambda`/`iterator`/`template`/`macro`/`converter`/
+  ##   `method`/`do` block declared inside the annotated proc's body —
+  ##   see `jitterNestedCallableKinds`.
   ##
   ## The never-insert-after-the-last-statement rule (see
   ## `instrumentStmtList`) is applied at EVERY statement list this
@@ -387,18 +430,54 @@ proc insertJitterBoundaries(n: NimNode; count: var int): NimNode =
   ## for a branch body sitting in implicit-return position too (Nim
   ## treats each branch of a top-level-position `if`/`case` as
   ## separately contributing an implicit result).
+  ##
+  ## **Self-reporting fallback (round 13 finding R13-2/R13-6).** Round 12
+  ## added six arms; round 13's review found two more missing
+  ## (`nnkDefer`, `nnkWhenStmt`) — both silent, because the zero-insertion
+  ## guard on the macro only fires when the TOTAL count across the whole
+  ## proc is zero, and any other statement boundary in the same proc
+  ## keeps that count positive. An allow-list of "constructs we thought
+  ## of" will always be one review round behind whatever construct
+  ## nobody thought of yet. So the `else` arm below does not just fall
+  ## through: if the node it was handed is itself a statement-holding
+  ## construct (`hasStmtListChild`) and not a nested callable
+  ## (`jitterNestedCallableKinds`, which legitimately have a body but
+  ## aren't part of this proc's control flow), it emits a compile-time
+  ## `warning` naming the node kind, the proc, and that a nested body was
+  ## left uninstrumented. This is a `warning`, not the `{.error.}` the
+  ## macro itself uses for zero total insertions (see `jitterPoints`):
+  ## a proc that partially instruments — every OTHER statement boundary
+  ## still gets a yield — is still useful, and hard-failing the build
+  ## every time a SUT author reaches for some exotic statement kind this
+  ## module hasn't special-cased yet would be worse than the gap it
+  ## reports.
   case n.kind
   of nnkStmtList:
-    result = instrumentStmtList(n, count)
+    result = instrumentStmtList(n, count, procName)
   of nnkIfStmt:
     result = n.copyNimNode
     for branch in n:
       case branch.kind
       of nnkElifBranch:
         result.add nnkElifBranch.newTree(
-          branch[0], insertJitterBoundaries(branch[1], count))
+          branch[0], insertJitterBoundaries(branch[1], count, procName))
       of nnkElse:
-        result.add nnkElse.newTree(insertJitterBoundaries(branch[0], count))
+        result.add nnkElse.newTree(
+          insertJitterBoundaries(branch[0], count, procName))
+      else:
+        result.add branch  # unexpected; preserve verbatim
+  of nnkWhenStmt:
+    # Same shape as nnkIfStmt (see the doc comment above): branch[0] is
+    # the (untouched) condition, branch[1]/branch[0] the StmtList body.
+    result = n.copyNimNode
+    for branch in n:
+      case branch.kind
+      of nnkElifBranch:
+        result.add nnkElifBranch.newTree(
+          branch[0], insertJitterBoundaries(branch[1], count, procName))
+      of nnkElse:
+        result.add nnkElse.newTree(
+          insertJitterBoundaries(branch[0], count, procName))
       else:
         result.add branch  # unexpected; preserve verbatim
   of nnkCaseStmt:
@@ -409,20 +488,21 @@ proc insertJitterBoundaries(n: NimNode; count: var int): NimNode =
       let newBranch = branch.copyNimNode
       for j in 0 ..< branch.len - 1:
         newBranch.add branch[j]
-      newBranch.add insertJitterBoundaries(branch[^1], count)
+      newBranch.add insertJitterBoundaries(branch[^1], count, procName)
       result.add newBranch
   of nnkWhileStmt:
-    result = nnkWhileStmt.newTree(n[0], insertJitterBoundaries(n[1], count))
+    result = nnkWhileStmt.newTree(
+      n[0], insertJitterBoundaries(n[1], count, procName))
   of nnkForStmt:
     result = n.copyNimNode
     for i in 0 ..< n.len - 1:
       result.add n[i]  # loop var(s) + iterable, unchanged
-    result.add insertJitterBoundaries(n[^1], count)
+    result.add insertJitterBoundaries(n[^1], count, procName)
   of nnkBlockStmt:
     result = n.copyNimNode
     for i in 0 ..< n.len - 1:
       result.add n[i]  # label (possibly empty), unchanged
-    result.add insertJitterBoundaries(n[^1], count)
+    result.add insertJitterBoundaries(n[^1], count, procName)
   of nnkTryStmt:
     result = n.copyNimNode
     for child in n:
@@ -431,50 +511,98 @@ proc insertJitterBoundaries(n: NimNode; count: var int): NimNode =
         let newBranch = child.copyNimNode
         for j in 0 ..< child.len - 1:
           newBranch.add child[j]
-        newBranch.add insertJitterBoundaries(child[^1], count)
+        newBranch.add insertJitterBoundaries(child[^1], count, procName)
         result.add newBranch
       of nnkFinally:
-        result.add nnkFinally.newTree(insertJitterBoundaries(child[0], count))
+        result.add nnkFinally.newTree(
+          insertJitterBoundaries(child[0], count, procName))
       else:
-        result.add insertJitterBoundaries(child, count)  # the try body itself
+        # the try body itself
+        result.add insertJitterBoundaries(child, count, procName)
+  of nnkDefer:
+    # `defer: stmt1; stmt2` parses as a single-child node whose child is
+    # the StmtList making up the defer body (verified via `dumpTree`,
+    # since this shape isn't spelled out in the manual). A
+    # `parallelJitterPoint()` call inserted between two statements INSIDE
+    # that body is a plain void call like any other statement — it does
+    # not raise, allocate, or otherwise interact with unwinding, so it
+    # cannot change what the surrounding `defer` guarantees. It is never
+    # inserted after the body's last statement (instrumentStmtList's
+    # invariant, same as everywhere else), so a `defer` body ending in an
+    # expression used as its final statement is unaffected. Before this
+    # arm existed, `nnkDefer` fell to the `else` branch below and was
+    # skipped outright — R13-2: a read-modify-write race entirely inside
+    # a `defer:` body got zero jitter points, silently, because the
+    # proc's OTHER statements kept the total insertion count positive.
+    result = nnkDefer.newTree(instrumentStmtList(n[0], count, procName))
   else:
+    if n.kind notin jitterNestedCallableKinds and hasStmtListChild(n):
+      warning(
+        "{.jitterPoints.}: proc `" & procName & "` has a nested `" &
+        $n.kind & "` construct that insertJitterBoundaries has no arm " &
+        "for -- its statement-list body was left uninstrumented, so any " &
+        "race living inside it will NOT be widened by this pragma. Add " &
+        "an `of " & $n.kind & ":` arm to insertJitterBoundaries " &
+        "(parallel.nim) that recurses into its body via " &
+        "instrumentStmtList/insertJitterBoundaries, the same way the " &
+        "existing arms do.",
+        n)
     result = n
 
 macro jitterPoints*(procDef: untyped): untyped =
   ## Pragma macro: rewrite the proc's body so a real scheduler-yield
   ## (`parallelJitterPoint`) runs between every pair of adjacent
   ## statements reachable through the proc's control flow — its own
-  ## top-level list AND every `if`/`elif`/`else`, `case`, `while`,
-  ## `for`, `block`, and `try`/`except`/`finally` body nested inside it,
-  ## at any depth. Use as `proc f(c: ptr T): int {.gcsafe, jitterPoints.}
-  ## = ...`.
+  ## top-level list AND every `if`/`elif`/`else`, `when`/`elif`/`else`,
+  ## `case`, `while`, `for`, `block`, `try`/`except`/`finally`, and
+  ## `defer` body nested inside it, at any depth. Use as
+  ## `proc f(c: ptr T): int {.gcsafe, jitterPoints.} = ...`.
   ##
   ## This is the RECOMMENDED way to widen an intra-op race window for
   ## `parallelCheck`. Unlike calling `parallelJitterPoint()` by hand, it
   ## asks the SUT author to locate nothing: annotate the proc once and
   ## every statement boundary its control flow can reach gets a chance
   ## to yield, including whichever boundary the actual race lives at —
-  ## even one nested inside a loop or branch body. It also keeps the
-  ## instrumentation OUT of the function body text, the same reason this
-  ## codebase already reaches for a body-rewriting macro pragma rather
-  ## than a hand-inserted call for "instrument this proc" — see
-  ## `{.cover.}` / `{.covercmp.}` in coverage.nim, whose structure
+  ## even one nested inside a loop, branch, or `defer` body. It also
+  ## keeps the instrumentation OUT of the function body text, the same
+  ## reason this codebase already reaches for a body-rewriting macro
+  ## pragma rather than a hand-inserted call for "instrument this proc"
+  ## — see `{.cover.}` / `{.covercmp.}` in coverage.nim, whose structure
   ## (`expectKind` the proc, rewrite `procDef[^1]`, return `procDef`)
   ## this macro follows directly; `insertJitterBoundaries`'s own doc
   ## comment lists where the recursion here deliberately parts ways with
-  ## `instrumentNode`'s.
+  ## `instrumentNode`'s, and documents the self-reporting fallback that
+  ## flags any FUTURE statement-holding construct nobody has added an
+  ## arm for yet.
   ##
   ## **Never a silent no-op.** If the rewrite inserts zero jitter points
   ## anywhere in the proc — the body (and everything nested in it) has
   ## no statement boundary to widen at all, e.g. a single bare statement
-  ## like `inc(c[].count)` — this emits a COMPILE-TIME warning naming the
-  ## proc, rather than compiling clean and doing nothing. A `warning`,
-  ## not an `error`: a single-statement proc may be a legitimate thing to
-  ## annotate in a body that will grow later. This was round 12 finding
-  ## L12-2: before this check existed, `proc f(c: ptr Counter) {.gcsafe,
+  ## like `inc(c[].count)` — this is a COMPILE-TIME `{.error.}`, naming
+  ## the proc, rather than compiling clean and doing nothing.
+  ##
+  ## This was a `warning` through round 12 (finding L12-2: before any
+  ## check existed at all, `proc f(c: ptr Counter) {.gcsafe,
   ## jitterPoints.} = inc(c[].count)` — the single most natural way to
   ## write the exact race this pragma targets — compiled clean and
-  ## instrumented nothing.
+  ## instrumented nothing). Round 13 (finding R13-1) found the warning
+  ## itself insufficient: `scripts/sweep.sh` runs every test through
+  ## `dt-bounded.sh ... >/dev/null 2>&1`, so compiler stderr — where a
+  ## `warning` lands — is discarded by the only harness that runs these
+  ## tests on every sweep. A diagnostic the gate cannot see cannot carry
+  ## a correctness guarantee. Annotating a proc `{.jitterPoints.}` that
+  ## structurally cannot hold even one jitter point is also, unlike the
+  ## partial-coverage case the fallback `warning` in
+  ## `insertJitterBoundaries` reports, not a legitimate thing to leave in
+  ## place: there is no valid reason to keep the pragma on a proc it can
+  ## never do anything for, so failing the build is both actionable (the
+  ## message says exactly what to do) and the one channel the gate
+  ## cannot swallow. (The OTHER warning — the self-reporting fallback for
+  ## a construct with no dispatch arm, see `insertJitterBoundaries` —
+  ## deliberately stays a `warning`: a proc that instruments everywhere
+  ## EXCEPT one exotic nested construct still yields real jitter points
+  ## everywhere else, so erroring there could break a legitimate proc
+  ## over a partial gap instead of just flagging it.)
   ##
   ## **Measured reliability**: applied to the same unsynchronized-increment
   ## race `parallelJitterPoint`'s own figure is based on (`racyIncPragma`,
@@ -488,24 +616,36 @@ macro jitterPoints*(procDef: untyped): untyped =
   ## caught in 20/20 idle runs and 20/20 CPU-contended runs (two
   ## independent contended sweeps, both 20/20) — see "lock-free wrong
   ## counter nested in a for loop is detected via {.jitterPoints.}" in the
-  ## same file. As with every catch-rate figure in this module,
-  ## these are one-time measurements, not re-verified by every sweep; the
-  ## single seeded run in each test is what runs on every sweep, and it
-  ## guards the basic catch, not the ratio.
+  ## same file. The same race relocated inside a `defer:` body
+  ## (`racyIncPragmaDefer`, round 13 finding R13-2) and inside a `when
+  ## true:` body in statement position (`racyIncPragmaWhen`, round 13
+  ## finding R13-6) were each measured in a smaller idle-only run — see
+  ## those tests in tparallelcheck.nim for the exact counts. As with
+  ## every catch-rate figure in this module, these are one-time
+  ## measurements, not re-verified by every sweep; the single seeded run
+  ## in each test is what runs on every sweep, and it guards the basic
+  ## catch, not the ratio.
   expectKind procDef, {nnkProcDef, nnkFuncDef, nnkLambda}
+  let nameNode = procDef[0]
+  let procName = (if nameNode.kind == nnkPostfix: nameNode[^1] else: nameNode).repr
   var count = 0
-  procDef[^1] = insertJitterBoundaries(procDef[^1], count)
+  procDef[^1] = insertJitterBoundaries(procDef[^1], count, procName)
   if count == 0:
-    let nameNode = procDef[0]
-    let procName = if nameNode.kind == nnkPostfix: nameNode[^1] else: nameNode
-    warning(
-      "{.jitterPoints.}: proc `" & procName.repr & "` had zero jitter " &
+    error(
+      "{.jitterPoints.}: proc `" & procName & "` would have zero jitter " &
       "points inserted -- its body (including everything nested in " &
-      "if/case/while/for/block/try bodies) has no statement boundary to " &
-      "widen. A compound read-modify-write like `inc(x)` or `x += 1` " &
-      "must be split into a separate read and write statement, or call " &
-      "parallelJitterPoint() directly inside it, for the race window to " &
-      "be wideable by this pragma at all.",
+      "if/when/case/while/for/block/try/defer bodies) has fewer than two " &
+      "statements in every reachable statement list, so there is no " &
+      "statement boundary anywhere for this pragma to widen. A compound " &
+      "read-modify-write like `inc(x)` or `x += 1` must be split into a " &
+      "separate read and write statement, or call parallelJitterPoint() " &
+      "directly inside it, for the race window to be wideable by this " &
+      "pragma at all. Annotating a proc `{.jitterPoints.}` that cannot " &
+      "hold a single jitter point has no valid use case, so this is a " &
+      "hard error rather than a warning (round 13 finding R13-1: a " &
+      "warning is discarded by scripts/sweep.sh, which redirects " &
+      "dt-bounded.sh's stderr to /dev/null, so it cannot carry a " &
+      "correctness guarantee here).",
       procDef)
   result = procDef
 

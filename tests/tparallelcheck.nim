@@ -194,6 +194,43 @@ proc racyIncPragmaLoop(c: ptr Counter): int {.gcsafe, jitterPoints.} =
     c[].count = v + 1
     result = v + 1
 
+# Round 13 finding R13-2: the same race again, but the read/write pair sits
+# entirely INSIDE a `defer:` body. Before that round's fix, `nnkDefer` had no
+# arm in `insertJitterBoundaries` and fell through to the (then-unreported)
+# fallback, so this proc's only statement boundary -- the one between the
+# `defer` body's own three statements -- got zero jitter points. It was
+# SILENT: the proc's top-level statement list has exactly one statement (the
+# `defer` itself), so nothing else in the proc kept the total insertion
+# count positive either, but nobody had a test here to notice. `result` is
+# assigned from inside the deferred block (not before it) so the returned
+# value is the post-increment count even though `defer` runs after the rest
+# of the (here, empty) body -- the same shape a real deferred-cleanup SUT
+# would use to report its final state.
+proc racyIncPragmaDefer(c: ptr Counter): int {.gcsafe, jitterPoints.} =
+  defer:
+    let v = c[].count
+    c[].count = v + 1
+    result = v + 1
+
+# Round 13 finding R13-6: the same race again, but the read/write pair sits
+# inside a `when true:` body in STATEMENT position. Before that round's fix,
+# `nnkWhenStmt` had no arm and fell through uninstrumented, same as
+# `nnkDefer` above -- and the doc comment at the time incorrectly claimed
+# `when` was a genuine expression position with nowhere to put a call,
+# which does not hold for `when` used as a statement (its branches are
+# ordinary `nnkStmtList` bodies, identical in shape to `if`'s). `jitterPoints`
+# runs pre-semantic-analysis, so the untaken `else` branch here (and
+# anything the macro inserts into it) is discarded before codegen -- the
+# same idiom `coverage.nim`'s `instrumentNode` already relies on for its
+# combined `nnkIfStmt, nnkIfExpr, nnkWhenStmt` arm.
+proc racyIncPragmaWhen(c: ptr Counter): int {.gcsafe, jitterPoints.} =
+  when true:
+    let v = c[].count
+    c[].count = v + 1
+    result = v + 1
+  else:
+    result = 0
+
 suite "parallelCheck: racy SUT is caught":
   test "lock-free wrong counter is detected as non-linearisable":
     # This test is inherently nondeterministic in nature — racy bugs
@@ -344,6 +381,81 @@ suite "parallelCheck: racy SUT is caught":
         LinOpDef[CounterState, ptr Counter, int](
           opId: 0,
           applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragma(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}
+
+  test "lock-free wrong counter inside a defer body is detected via {.jitterPoints.}":
+    # Round 13 finding R13-2: the read/write pair lives inside
+    # `racyIncPragmaDefer`'s `defer:` body, and the proc's own top-level
+    # statement list is a single statement (the `defer` itself) -- the
+    # `nnkDefer` arm added for this finding is what reaches the boundary
+    # between the deferred block's three statements. `maxJitter` is 0 for
+    # the same reason as the tests above: a catch can only be credited to
+    # the pragma's own recursion into the defer body, not to any
+    # between-op jitter.
+    #
+    # See the L4 note further up -- the same one-time-measurement framing
+    # applies here. Measured (manual, outside this suite, the same way as
+    # `racyIncPragmaLoop`'s figure: looping this same spec/settings over 20
+    # distinct seeds, idle host): 20/20.
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragmaDefer(c),
+          applyModel: applyIncModel),
+      ])
+    proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)
+    let r = forAll(
+      parallelCheck(spec, intEq,
+                    prefixSteps = 0,
+                    parallelSteps = 5,
+                    threads = 2,
+                    repetitions = 30,
+                    maxJitter = 0),
+      prop,
+      Settings(maxExamples: 30, seed: 1,
+               flakyRetries: 0, maxShrinks: 5,
+               maxRejections: 50))
+    check r.outcome in {otFalsified, otFlaky}
+
+  test "lock-free wrong counter inside a when-statement body is detected via {.jitterPoints.}":
+    # Round 13 finding R13-6: the read/write pair lives inside
+    # `racyIncPragmaWhen`'s `when true:` branch, in statement position (not
+    # the expression position the pre-fix doc comment incorrectly lumped it
+    # in with). The proc's own top-level statement list is a single
+    # statement (the `when`), so before the `nnkWhenStmt` arm existed this
+    # was uninstrumented and silent, same shape as the `defer` case above.
+    # `maxJitter` is 0 for the same reason as every other test in this
+    # file: a catch can only be credited to the pragma's own recursion into
+    # the `when` branch body.
+    #
+    # See the L4 note further up -- the same one-time-measurement framing
+    # applies here. Measured (manual, outside this suite, the same way as
+    # the `defer` test above: looping this same spec/settings over 20
+    # distinct seeds, idle host): 20/20.
+    let spec = LinSpec[CounterState, ptr Counter, int](
+      modelInitial: CounterState(),
+      newSUT: proc(): ptr Counter {.gcsafe.} = newSafeCounter(),
+      ops: @[
+        LinOpDef[CounterState, ptr Counter, int](
+          opId: 0,
+          applySUT: proc(c: ptr Counter): int {.gcsafe.} = racyIncPragmaWhen(c),
           applyModel: applyIncModel),
       ])
     proc prop(lr: LinResult[int, int]) = (ensure lr.linearisable)

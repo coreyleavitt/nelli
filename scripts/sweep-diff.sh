@@ -107,7 +107,22 @@ rc=$?
 base_warn="$base.warnings"
 cur_warn="$cur.warnings"
 if [ ! -r "$base_warn" ] || [ ! -r "$cur_warn" ]; then
-  echo "sweep-diff.sh: warnings diff skipped -- $base_warn and/or $cur_warn not found (baseline predates R13-1's warning capture, or wrong log path)" >&2
+  # Name the side that is actually missing. An "and/or" message sends the
+  # reader to check a file that is present and fine -- and a diagnostic that
+  # misdirects is worse than none, which is the whole point of R13-1.
+  missing=""
+  [ -r "$base_warn" ] || missing="baseline sidecar $base_warn"
+  if [ ! -r "$cur_warn" ]; then
+    [ -n "$missing" ] && missing="$missing and current sidecar $cur_warn" \
+                      || missing="current sidecar $cur_warn"
+  fi
+  echo "sweep-diff.sh: warnings diff skipped -- $missing not found." >&2
+  if [ -r "$cur_warn" ]; then
+    echo "sweep-diff.sh:   the current run DID capture warnings; only the baseline lacks them," >&2
+    echo "sweep-diff.sh:   so this run establishes no delta. Capture a baseline sidecar by running" >&2
+    echo "sweep-diff.sh:   sweep.sh in the pinned baseline worktree, or adopt a known-good run as" >&2
+    echo "sweep-diff.sh:   the warnings reference. Until then the warnings gate is INERT." >&2
+  fi
 else
   awk -v basefile="$base" -v curfile="$cur" -v basewarn="$base_warn" -v curwarn="$cur_warn" '
     function section(title, arr, n, cap,    k, shown) {

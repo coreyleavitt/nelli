@@ -2565,3 +2565,67 @@ reports its own gaps instead of waiting for a reviewer.
 The floor condition (0 Critical/High/Medium) is met on a green,
 integrity-checked gate. Stopping here is defensible; the remaining items are
 judgment calls, not defects.
+
+## MERGED TO MAIN — 2026-09-20, and green on all three Windows legs
+
+`git push origin HEAD:main` -> `1f97136..95f7669`, **160 commits**, clean
+fast-forward, no PR (per this repo's convention). The branch ref was pushed to
+match: `5056b46..95f7669`. Corey's call, given directly.
+
+Pushed via `HEAD:main` rather than checking `main` out, deliberately: the
+concurrent `quipu-71` peer session has uncommitted edits in `quipu.toml`, and
+switching branches would have disturbed them. They were left untouched
+throughout this review.
+
+CI on `main`, all three legs **success**:
+
+| leg | run |
+|---|---|
+| `fuzzer-mingw` | 35484569043 |
+| `fuzzer-msvc` | 35484569070 |
+| `symex-mingw` | 35484569044 |
+
+This is the first Windows exposure for round 13's own changes. Rounds 8-12 were
+already green at `5056b46`.
+
+### The `nelli.nimble` parse risk, cleared by inspection as well as by CI
+
+`afb261c` edited `nelli.nimble`, and `scripts/derive-ci-suites.ps1` text-parses
+that same file to build the Windows shard corpus, with a `throw` if the parse
+fails (`derive-ci-suites.ps1:51`). That was a real risk worth naming. It is
+clear, and not merely because CI passed:
+
+- the parse is CONTENT-anchored, not line-anchored:
+  `'(?s)task test,.*?for f in \[(?<body>.*?)\]:'` (`derive-ci-suites.ps1:49`);
+- the deleted `extraDefines` block sat ABOVE `task test`, so it is outside the
+  matched region entirely;
+- the `for f in [...]` suite array is byte-identical — `afb261c` touched only
+  the preamble comment and the `exec` line.
+
+So the corpus parses exactly as before. Recorded because "CI went green" is not
+an explanation, and the next person editing `nelli.nimble` needs to know which
+part of the file the PowerShell parser is sensitive to.
+
+### The quipu pre-push hook is worse than stale — it cannot fire from this workflow
+
+The push printed, twice:
+
+```
+quipu: rfc-161-163-symex-defects is not the default branch ('main') -- not pushing
+```
+
+It tests the **checked-out branch name**, not the ref being pushed. This push's
+destination WAS `main` and the ingest was still skipped. Since this repo always
+lands work from an `rfc-*` branch (that naming is required for the Windows legs
+to trigger at all), the hook can never fire in normal use — it is not a stale
+config that drifted, it is a check against the wrong thing. That is why the hub
+has sat at `a1ebeb142` for 155 commits.
+
+`quipu setup` is the repair and remains Corey's to authorise; `quipu warm
+--push` is the manual catch-up.
+
+### Not tagged
+
+Last release is `v0.8.0`. This merge carries no version decision that should be
+made without Corey: #161-#163 are defect fixes, but `afb261c` also removes
+`extraDefines` from `nelli.nimble`'s surface. Awaiting a version.

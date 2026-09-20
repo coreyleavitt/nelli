@@ -25,6 +25,8 @@ git-add order: three docs were authored earlier and committed late.
 | 0011 | effect-annotations | symex |
 | 0012 | complexity-properties | core |
 | 0013 | coverage-guided-cost | core |
+| 0014 | integer-range-provenance | symex |
+| 0015 | audit-remainder | core |
 
 0006–0012 were composed together on 2026-09-03 from a post-0005 architecture
 survey rather than authored one at a time. They are grouped by shared
@@ -44,6 +46,17 @@ as `v0.8.0` on 2026-09-08.** Upgrade notes: `docs/migration/0.8.0.md`.
 **0013** is a later, separately-composed `seed` (2026-09-09): a bisected
 per-example cost regression in coverage-guided `forAll`, reported by a
 downstream rather than found by the survey.
+
+**0014 and 0015** are `seed`s composed together on 2026-09-20 from the nine
+issues (#164–#172) the #161–#163 audit left behind. The split is by mechanism,
+not by size: **0014** is four issues that are one missing capability — the
+abstraction layer carries an integer bound only for a value that *is* a
+declared-range param — paid for once in soundness and twice in precision, with
+a slice order forced by a measured Z3 blowup. **0015** is the remainder, and
+says so in its own §0 rather than inventing a mechanism to justify itself:
+three findings share a defect class (a contract documented at an entry point and
+honoured on a subset of the paths behind it) and two are hygiene. Each carries
+one open fork for Corey.
 
 Not every design doc lives here. `docs/FUZZ_PLAN.md`, `docs/SYMEX_PLAN.md`
 and `docs/MODAL_PBT_PLAN.md` are standing plans rather than RFCs, and the

@@ -2526,7 +2526,7 @@ open fork).
 
 ## Resume
 
-The branch is **9 commits ahead of `origin`** and NOT pushed. Round 13's work
+The branch is **19 commits ahead of `origin`** and NOT pushed. Round 13's work
 has had no Windows exposure; rounds 8-12 are green on all three legs at
 `5056b46`. One command:
 

@@ -2428,3 +2428,140 @@ The breakdown by category is being collected to decide what the debt IS:
 `UnusedImport` is a cosmetic chore, but `Deprecated` warnings naming our own
 `src/` APIs would be real rot and a finding in its own right. Not being fixed
 in this round either way.
+
+## Round 13 gate — GREEN, and integrity-checked
+
+Run at `bbde48c` on a quiet tree, single instance, absolute paths.
+
+```
+pass=489 fail=0 (of which timeout-killed=0) skip=7 total=496
+unregistered=0 missing=0 stale_skiplist=0
+warn_tests=463 warn_total=7437
+unchanged=459 regressed=0 new-failing=0 fixed=1 skip-changed=0 new-ok=36 gone=0
+```
+
+Integrity, checked BEFORE reading the result, per the discipline this doc
+records: `log_lines=496`, `unique_tests=496`, `disk_tests=496`,
+`concurrent_sweeps=0`. The counts agree, so no test was dropped and no second
+sweep was writing to the log.
+
+### The warnings gate was INERT on its first real run — now it is not
+
+`sweep-diff.sh` reported the warnings delta skipped. The current run had
+captured its sidecar correctly (526 KB, 6749 lines); only the BASELINE lacked
+one, because `base163.log` predates R13-1. So the delta mechanism — the thing
+demanded specifically so a single `{.jitterPoints.}` warning could not be lost
+— shipped green, unit-verified against hand-built fixtures, and did nothing on
+contact with real data. A mechanism that is built, tested and never exercised
+end-to-end is precisely the dormant-substrate class the liveness lens exists
+to catch, and it nearly shipped that way.
+
+Closed two ways:
+
+1. **Exercised on real-scale data, both directions.** Took the genuine
+   6749-line sidecar, derived a synthetic variant differing by exactly one
+   line, and diffed each way:
+   - one new warning among 7213 -> `## NEW WARNINGS — not in baseline (1)`,
+     named, attributed to `c tests/tautolabels.nim`, `now x1`, uncapped;
+   - the reverse -> `## RESOLVED WARNINGS ... was x1`;
+   - `new-warnings=1 resolved-warnings=0 count-changed=0`, informational,
+     exit status untouched.
+2. **A real baseline now exists.** This green run is preserved at
+   `/home/corey/projects/nim/libs/nelli-sweep-baselines/base-bbde48c.log{,.warnings,.drift}`
+   with a README. It is deliberately OUTSIDE the repo (no litter) and outside
+   `$CLAUDE_JOB_DIR/tmp`, which is deleted with the job — every prior baseline
+   in this review lived in that ephemeral directory.
+
+   Resume with:
+
+   ```
+   scripts/sweep.sh <outlog>
+   scripts/sweep-diff.sh \
+     /home/corey/projects/nim/libs/nelli-sweep-baselines/base-bbde48c.log <outlog>
+   ```
+
+`1a2bebe` also fixes the skip message itself: it said "`$base_warn` and/or
+`$cur_warn` not found", which sends the reader to check a file that is present
+and fine. It now names the side that is actually missing and states plainly
+that the warnings gate is INERT until a baseline sidecar exists — a diagnostic
+that misdirects being worse than none is the whole point of R13-1.
+
+### Warning debt, correctly scoped
+
+The earlier "~8000 warnings" figure was multiplication, not scale. Sampling 36
+tests: **603 raw occurrences, 40 DISTINCT `(file, message, category)`
+diagnostics.** The same noisy `src/` modules get recompiled per test.
+
+- `UnusedImport` — 38 distinct. Cosmetic.
+- `Deprecated` — 2 distinct, and these are real:
+  - `src/nelli/smt/canonicalize.nim` — stdlib `sha1` is deprecated in favour
+    of `nimble install checksums` + `import checksums/sha1`;
+  - `src/nelli/smt/dsl_parser.nim` — `owner` from `std/macros` is deprecated.
+
+Top contributors by raw count: `engine.nim` (180), `engine/targeting.nim`
+(144), `jsonschema.nim` (78), `bisim.nim` (52), `engine/phases.nim` (36).
+
+A contained chore plus two API migrations — not a body of rot. Deliberately
+NOT fixed this round; it is unrelated to #161-#163 and would have made the
+gate unreadable.
+
+## Round 13 — closed
+
+| finding | disposition |
+|---|---|
+| R13-1 | fixed both sides: macro errors instead of warning (`8454a94`), gate surfaces + diffs warnings (`d3da227`, `bbde48c`, `1a2bebe`) |
+| R13-2 | fixed `8454a94` (`nnkDefer`, 20/20 measured) |
+| R13-3 | fixed `6ab0691`; sibling audit found it was the only instance |
+| R13-4 | fixed `491b3c1`; `byConstruct` deliberately left duplicated, reasoned at the call sites |
+| R13-5 | closed by deletion `afb261c` |
+| R13-6 | fixed `8454a94` (`nnkWhenStmt`, 20/20 measured) |
+| R13-7 | closed by deletion `afb261c` |
+| R13-8 | closed by deletion `afb261c` |
+| R13-9 | closed by deletion `afb261c` |
+| R13-10 | closed by deletion `afb261c` |
+
+Plus three node kinds the new self-reporting fallback found on its own
+(`nnkPragmaBlock` -> arm, `nnkStaticStmt` -> exclusion, trailing-block calls ->
+open fork).
+
+## Resume
+
+The branch is **9 commits ahead of `origin`** and NOT pushed. Round 13's work
+has had no Windows exposure; rounds 8-12 are green on all three legs at
+`5056b46`. One command:
+
+```
+git push origin rfc-161-163-symex-defects
+```
+
+## Open for Corey
+
+1. **`quipu setup`** — still the only blocking item, and now measured rather
+   than inferred: the commit hook reports HEAD **153 commits ahead** of the
+   last ingest the hub acknowledged (`a1ebeb142`). The hub does not know about
+   any of this work. `quipu warm --push` is the manual repair the hook itself
+   suggests; not run, because publishing to the hub is the same authorisation
+   question as `quipu setup`.
+2. **The `withLock` fork** (recorded above): leave trailing-block calls
+   warning, or instrument an allow-list of known concurrency macros. Turns on
+   risk appetite, not on the quality bar.
+3. **The warning debt**: 38 unused imports (chore) + 2 deprecated-API
+   migrations (real). Wants its own small RFC, not a #163 slice.
+4. Still true from earlier rounds: renaming the two N45 probes `tsymex_*` so
+   `symex-mingw`'s corpus picks them up.
+5. `quipu.toml` has uncommitted edits that are NOT from this session (the
+   concurrent `quipu-71` peer). Left untouched throughout.
+
+## Convergence
+
+Round 13 found ten findings in round 12's four fixes, of which eight are now
+closed and four of those by deleting the mechanism rather than repairing it.
+That is a different shape from rounds 10-12, which each repaired the previous
+round's repair. The two things a round 14 would look at are both recorded
+above as decisions for Corey rather than defects, and the one mechanism most
+likely to keep generating findings — the jitter node-kind allow-list — now
+reports its own gaps instead of waiting for a reviewer.
+
+The floor condition (0 Critical/High/Medium) is met on a green,
+integrity-checked gate. Stopping here is defensible; the remaining items are
+judgment calls, not defects.

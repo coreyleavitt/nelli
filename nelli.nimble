@@ -745,5 +745,10 @@ task test, "Run the test suite":
             # degrade() funnel + Degrade token, RawResult.pathTaint, the
             # .taint/.runTaint writer grep-pin and the lowering pending-taint
             # leak pin. All-⊤ classOf default: no verdict change, no bump.
-            "tsymex_rfc0005_s1_lattice"]:
+            "tsymex_rfc0005_s1_lattice",
+            # RFC-0005 S2: the replay substrate -- ReplayOutcome, the
+            # target-shaped replayWitness macro, the dcFreshSymbol eligibility
+            # gate, witness fidelity / target scope, and the stackable capture
+            # context. Not yet wired into the verdict (S10); no walker bump.
+            "tsymex_rfc0005_s2_replay"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

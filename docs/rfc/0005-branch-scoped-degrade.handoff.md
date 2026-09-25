@@ -18,24 +18,24 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~04:20)
+## Current position (refreshed 2026-09-25 ~05:20)
 
-- **Slices done:** 3 of 15 on the branch — S0 (`8a7384b`), S0b (spike), S1
-  (`d2c2226`). **S2 built** (`48c30d6` on side branch `rfc-0005-s2-replay`,
-  worktree `scratchpad/s2-replay`) — not yet merged, fence row not flipped;
-  notes in `scratchpad/S2-RESULT.md`.
-- **In flight:** S1b (opus agent) — uncommitted in the main checkout, running
-  its gate sweep.
-- **Remaining:** S1b, S1c, S2 (merge + sweep), S3, S4, S5, S6, S7, S8, S9,
-  S10, S11.
+- **Slices done:** 5 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
+  S1b (`a898905`), S2 (`48c30d6`, merged `1519608`).
+- **In flight:** gate sweep of the merge at `1519608` in the pinned worktree
+  `scratchpad/gate-1519608` (result -> `scratchpad/gate-1519608.diff`).
+  S1c (opus agent) in the main checkout; it also owns the n40 leak-pin fix,
+  the `runConcolicCollectImpl` pending-taint reset, and the walker bump; it
+  starts its own sweep once `gate-1519608.diff` exists.
+- **Remaining:** S1c, S3, S4, S5, S6, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, if the S1b agent is gone, check `git status`: uncommitted S1b work
-  must be gated (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`, regressed=0)
-  and committed. Then merge `rfc-0005-s2-replay` onto the branch, flip S2 in
-  the fence, sweep-gate, and launch S1c (opus).
+  resume, read `scratchpad/gate-1519608.diff` (must be regressed=0); if the
+  S1c agent is gone, check `git status` and gate any uncommitted S1c work
+  (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`) before committing. Then
+  S3 (sonnet).
 
 ## Implementation plan — model allocation
 

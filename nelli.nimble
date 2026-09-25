@@ -764,5 +764,15 @@ task test, "Run the test suite":
             # the witness-monotonicity pin (tainted arm first), and the
             # N40-4 / concolic pending-taint leak fixes. All-⊤: no status
             # moves; walker 140->141.
-            "tsymex_rfc0005_s1c_verdict"]:
+            "tsymex_rfc0005_s1c_verdict",
+            # RFC-0005 S3: the taint-monotonicity harness -- the
+            # `withPoisonedArm` test-support macro + a curated battery
+            # (three witness shapes -- sxSat, sxRaised, sxSat behind a loop
+            # and a call -- each grafted from >=2 of four live degrade
+            # funnels in both discovery orders), the family-2a
+            # witness-on-tainted-path classification pins, the family-2b
+            # over-taint-only characterization pins for S4/S5/S6 to flip,
+            # and an exhaustive `decideVerdict` monotonicity check. No
+            # product code; no walker bump.
+            "tsymex_rfc0005_s3_monotonicity"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

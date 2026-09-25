@@ -63,7 +63,7 @@ state = "done"
 [[slice]]
 id    = "S3"
 title = "Taint-monotonicity harness: withPoisonedArm + battery"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S4"

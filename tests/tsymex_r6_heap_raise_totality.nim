@@ -121,14 +121,16 @@ proc heapMaskingOrdered(p: HeapStrNode, choose: bool) =
 
 suite "N46-followup-2 -- liftHeapValue unsupported-pointee-kind (converted)":
 
-  test "sanity: string field read alone is honest sxUnknown carrying heUnresolvedRef, never a crash":
+  test "sanity: string field read alone is honest sxUnknown carrying heUnsupportedPointeeRead, never a crash":
+    # RFC-0005 S4: the site's kind split off `heUnresolvedRef`; the target is
+    # reachable only through the fresh value, so it stays a candidate (sxUnknown).
     let r = symexFind(heapStrFieldRead, tLabel("heap_str_field_read"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
     var saw = false
     for e in r.errors:
-      if e.kind == heUnresolvedRef: saw = true
+      if e.kind == heUnsupportedPointeeRead: saw = true
     check saw
     check r.status != sxSat   ## a tainted path must never mint a bogus sat
 

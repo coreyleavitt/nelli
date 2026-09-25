@@ -68,7 +68,7 @@ state = "done"
 [[slice]]
 id    = "S4"
 title = "Classify allocDegrade funnel; S0 exhibit flips to sxUnsat"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S5"

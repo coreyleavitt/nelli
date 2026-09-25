@@ -286,7 +286,7 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     # N31/ADR-0023 SND-3 silent-loss class, reproduced RED/GREEN by this
     # slice's own SUT probe (see `tests/tsymex_r6_heap_raise_totality.nim`).
     # In-band degrade instead: `allocDegrade` records the classified
-    # `heUnresolvedRef` and marks the run degraded immediately/globally
+    # kind (`heUnresolvedRef` until S4) and marks the run degraded immediately/globally
     # (Invariant 3), then a FRESH placeholder SymVal of the SAME pointee
     # type keeps the Z3 API call chain type-sound (mirrors `seqElemAt`'s own
     # unsupported-elem-kind idiom, `runtime.nim`) -- its CONTENT is never
@@ -295,12 +295,30 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     # degrade into the surviving path's own `uncertain` flag (SND-1)
     # immediately after the select, so a path whose OWN read just degraded
     # can never mint a bogus winning `sxSat`.
-    allocDegrade(heUnresolvedRef,
+    #
+    # RFC-0005 S4 (walker v142): this arm is the `allocDegrade` funnel's one
+    # FRESH-SYMBOL site, so it records its own kind,
+    # `heUnsupportedPointeeRead` (`classOf` = `dcFreshSymbol`: the run keeps
+    # `sxUnsat` available, the path is a replay candidate) -- split off
+    # `heUnresolvedRef`, whose other sites substitute rather than havoc (see
+    # `classOf`'s row for it). That class is licensed ONLY by §2.1's
+    # introduction invariant -- the substituted symbol carries NO constraint
+    # at introduction -- which the pre-S4 spelling violated:
+    # `allocateSym(pointeeTy, "__liftHeapValueUnsupported", ...)` named every
+    # occurrence identically, so two reads of two DIFFERENT cells (`a.s`,
+    # `b.s`) were the SAME Z3 constant -- an equality reality does not
+    # impose, i.e. an under-approximation that proved `a.s != b.s`
+    # unreachable (a false `sxUnsat` once the class stopped being ⊤; pinned
+    # RED in `tests/tsymex_rfc0005_s4_alloc.nim`). `degradeAlloc` pairs the
+    # record with a `freshDegradeName`-uniquified allocation and discards
+    # `allocateSym`'s init-side `pcOut` (the byte-faithful char-range /
+    # length-ceiling well-formedness facts) -- so each read is a fresh,
+    # wholly unconstrained symbol of the pointee's own type.
+    degradeAlloc(pointeeTy, heUnsupportedPointeeRead,
       "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
       "not yet modeled (Cluster R R1 covers primitive pointees; " &
-      "composite pointees — ref object / seq[ref T] — land R3+)")
-    var freshLiftPc: seq[Z3Bool]
-    allocateSym(pointeeTy, "__liftHeapValueUnsupported", freshLiftPc)
+      "composite pointees — ref object / seq[ref T] — land R3+)",
+      "__liftHeapValueUnsupported")
 
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =

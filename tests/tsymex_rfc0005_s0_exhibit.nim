@@ -14,7 +14,7 @@
 ## claim is checked, not assumed.
 ##
 ## ----------------------------------------------------------------------------
-## Pin 1 -- UNSAT exhibit (RFC-0005 S0, DoD item 1; expected to flip at S4)
+## Pin 1 -- UNSAT exhibit (RFC-0005 S0, DoD item 1; FLIPPED to sxUnsat at S4)
 ## ----------------------------------------------------------------------------
 ## `s0DeadFreshSymbol` reads `p.s` -- a `string` FIELD through a heap-deref'd
 ## `ref` -- which `liftHeapValue`'s unsupported-pointee-kind `else` arm
@@ -23,6 +23,9 @@
 ## calls `allocDegrade(heUnresolvedRef, ...)` (the funnel at `runtime.nim`
 ## ~1295) and substitutes a FRESH, UNCONSTRAINED placeholder `svString` for
 ## `p.s` (`allocateSym(pointeeTy, "__liftHeapValueUnsupported", freshLiftPc)`
+## -- as of RFC-0005 S4 the site records the split kind
+## `heUnsupportedPointeeRead` and allocates via `degradeAlloc` under a
+## per-read `freshDegradeName`, see `tsymex_rfc0005_s4_alloc.nim`
 ## -- no value constraint beyond the byte-faithful ADR-0006 char-range domain
 ## every `itString` allocation carries, which is a WELL-FORMEDNESS
 ## constraint, not a value pin: see `allocateSym`'s `of itString:` arm,
@@ -46,11 +49,13 @@
 ## `scIncomplete` is never in it.
 ##
 ## **Routes through the `allocDegrade` funnel** (`runtime.nim` ~1295) --
-## RFC-0005 slice S4 classifies that funnel (`heUnresolvedRef` -> `dcFreshSymbol`)
-## and this pin is the one chosen to flip there: `sxUnknown` -> `sxUnsat`.
+## RFC-0005 slice S4 classifies that funnel (this site split off as
+## `heUnsupportedPointeeRead` -> `dcFreshSymbol`) and this pin FLIPPED
+## there: `sxUnknown` -> `sxUnsat` (asserted via `checkUnsatOverTaintOnly`).
 ##
 ## Verified by reasoning AND by the observed error-kind set (below): the
-## ONLY `sevError` kind ever drained on this run is `heUnresolvedRef`. No
+## ONLY `sevError` kind ever drained on this run is `heUnsupportedPointeeRead`
+## (`heUnresolvedRef` before S4's split). No
 ## under-approximating kind fires -- no `beBudgetExhausted` (no loop/call/
 ## frontier budget is anywhere near this SUT), no heap-depth halt (a single
 ## one-level deref, nowhere near `maxHeapDepth`), no k-unroll (no loop at
@@ -58,6 +63,7 @@
 
 import std/[unittest, sequtils, strutils]
 import nelli/smt/canonicalize
+import nelli/smt/types
 import nelli/symex
 
 type
@@ -176,22 +182,23 @@ suite "RFC-0005 S0 -- oracles":
   test "oracle: x == 7 and x == 42 are genuinely disjoint":
     check not (7 == 42)
 
-suite "RFC-0005 S0 pin 1 -- over-taint-only UNSAT exhibit (flips sxUnsat at S4)":
+suite "RFC-0005 S0 pin 1 -- over-taint-only UNSAT exhibit (flipped sxUnsat at S4)":
 
-  test "today: sxUnknown, never sxSat/sxUnsat":
+  test "S4: sxUnsat over a dcFreshSymbol-only run taint":
+    # RFC-0005 S4: was sxUnknown through S3; the drained taint is
+    # {heUnsupportedPointeeRead} (dcFreshSymbol, runTaint {scSpurious}), so
+    # §2.3's verdict rule proves the target unreachable.
     let r = symexFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
-    check r.status == sxUnknown
-    check r.status != sxSat
-    check r.status != sxUnsat
+    checkUnsatOverTaintOnly(r)
 
-  test "today: the drained sevError kind set is EXACTLY {heUnresolvedRef} -- over-taint-only, asserted not assumed":
+  test "the drained sevError kind set is EXACTLY {heUnsupportedPointeeRead} -- over-taint-only, asserted not assumed":
     let r = symexFind(s0DeadFreshSymbol, tLabel("s0_dead_fresh_symbol"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError:
         sevErrorKinds.add e.kind
-    check sevErrorKinds == @[heUnresolvedRef]
+    check sevErrorKinds == @[heUnsupportedPointeeRead]
     # No under-approximating kind anywhere -- the run-wide taint is
     # over-only, which is exactly what licenses the S4 flip to sxUnsat.
     for e in r.errors:

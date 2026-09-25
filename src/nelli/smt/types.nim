@@ -1286,6 +1286,17 @@ type
     ## the free-form `kind: string`. Prefixes: ek=Z3 engine, fe=front-end,
     ## se=string/seq, ee=exception, ge=generics, ce=closure, he=heap/ref.
     ## Phase-14 Z3Error kinds come first so Phase-15 kinds keep higher ordinals.
+    ##
+    ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
+    ## EXISTING kind at a NEW emission site asserts that the new site shares
+    ## that kind's substitution class (`classOf`, below: what the site
+    ## SUBSTITUTES -- a fresh unconstrained symbol, a forced value / stale
+    ## env, a fabricated continuation, a pure omission, or no answer at all).
+    ## `classOf`'s exhaustive `case` forces a row for a NEW kind but cannot
+    ## see a reused one. If your site's class differs, split: tail-append ONE
+    ## sibling for the minority funnel and keep this member for the majority
+    ## (never retire-and-append-two -- each retirement is a permanent
+    ## tombstone in every consumer `case`).
     ekZ3Error, ekZ3MemoryError, ekZ3InternalError, ekZ3SolverError,
     feUnsupportedOp, feExtractionFailed,
     feConvDomainExcluded, ## retired R16-2 — do not reuse ordinal.
@@ -1370,7 +1381,9 @@ type
                            ## logical-heap semantics are not yet modeled
                            ## (structural cycle). sevError → sxUnknown
                            ## (Invariant 3). R1+ replace the stub with real
-                           ## heap semantics.
+                           ## heap semantics. RFC-0005 S4: `liftHeapValue`'s
+                           ## unsupported-pointee read no longer emits this
+                           ## kind (split to `heUnsupportedPointeeRead`).
     geVtableDispatch,      ## Phase 16 INV (reserved/unused): subtype-dispatch /
                            ## vtable method call — when a `nnkMethodDef` callee
                            ## reaches `ensureProcRegistered`, the current walker
@@ -1824,6 +1837,25 @@ type
                           ## The natural carrier for the rlimit provenance
                           ## RFC-0005 §8.2 owes RFC-0011/0008. sevError ->
                           ## sxUnknown.
+    heUnsupportedPointeeRead ## RFC-0005 S4 (§3.2 split of `heUnresolvedRef`,
+                          ## the minority funnel): a heap READ whose pointee
+                          ## kind `liftHeapValue` does not lift (a `string`/
+                          ## `seq`/`Table`/`HashSet`/`distinct`/... field or
+                          ## bare pointee reached through a `ref`/`ptr`). The
+                          ## select happens on the NON-NIL continuation (the
+                          ## NilAccessDefect fork already ran), and the read
+                          ## value is replaced by a FRESH, per-occurrence,
+                          ## UNCONSTRAINED symbol of the pointee type -- a
+                          ## superset of whatever the real cell holds, so
+                          ## `classOf` is `dcFreshSymbol`. Split off because
+                          ## every OTHER `heUnresolvedRef` site substitutes
+                          ## differently (the non-ref-SymVal deref arms skip
+                          ## the nil fork, the write arms drop the write, the
+                          ## boundary arm aborts the run): reusing that kind
+                          ## here would have promoted them all. sevError; as
+                          ## `dcFreshSymbol` it blocks `sxSat` on its own path
+                          ## (a candidate until replay confirms it) but never
+                          ## `sxUnsat` on the run.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2368,6 +2400,20 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   ## the unsound direction. Slices S4-S6 reclassify one funnel at a time,
   ## each flipping only its own pins under its own walker bump.
   ##
+  ## RFC-0005 S4 (walker v142) audited the `allocDegrade` funnel
+  ## (`runtime.nim`, with its `degradeAlloc` pairing helper and
+  ## `runtime_heap.nim`'s `heapArmDegrade` wrapper) site by site against
+  ## §3.1's substitution rule. Rows marked `S4` below carry the verdict of
+  ## that audit; `dcNoAnswer` on an S4-audited row is the audit's answer,
+  ## not the unaudited default. The finding: the funnel's name does not
+  ## decide the class -- most of its arms FORCE a value (a `tabSize == 0`
+  ## Table/HashSet placeholder, a shared-name 2-valued `svBool` standing in
+  ## for an arbitrary `itUninterp` type, a concrete BV64 `0` sort filler, a
+  ## forwarded operand, a vacuous `true` binding) or DROP behaviour (a heap
+  ## arm that skips the nil-deref fork or the write). Exactly one arm
+  ## substitutes a fresh unconstrained symbol: `liftHeapValue`'s
+  ## unsupported-pointee read, split off as `heUnsupportedPointeeRead`.
+  ##
   ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
   ## EXISTING kind at a NEW emission site asserts that the new site shares
   ## that kind's substitution class. If it does not, split the kind
@@ -2379,6 +2425,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of ekZ3InternalError: dcNoAnswer
   of ekZ3SolverError: dcNoAnswer
   of feUnsupportedOp: dcNoAnswer
+    # S4 audited, NOT reclassified: its `allocDegrade`/`degradeAlloc` arms
+    # alone span a vacuous `true` binding, a forwarded operand and fresh
+    # comparison results, and it has walk-level sites beyond the funnel --
+    # the mandatory §3.2 split is S6's.
   of feExtractionFailed: dcNoAnswer
   of feConvDomainExcluded: dcNoAnswer
   of seUnsupportedStringOp: dcNoAnswer
@@ -2390,7 +2440,11 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of seByteIndexUnsupported: dcNoAnswer
   of seByteIterUnsupported: dcNoAnswer
   of seUnsupportedTableValType: dcNoAnswer
+    # S4 audited: `allocateSym`'s placeholder FORCES `tabSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
   of seUnsupportedSetCharInterop: dcNoAnswer
+    # S4 audited: `allocateSym`'s placeholder FORCES `setSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
   of seNestedSeqUnsupported: dcNoAnswer
   of seParseIntPreE: dcNoAnswer
   of eeUninterpRefExtraction: dcNoAnswer
@@ -2416,18 +2470,44 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of heFreshnessCapExceeded: dcNoAnswer
   of heUnsupportedVarRef: dcNoAnswer
   of heRefVariantUnsupported: dcNoAnswer
+    # S4 audited (reaches `allocDegrade` via `heapArmDegrade`): the
+    # multi-variant field READ forks every path to a placeholder BEFORE
+    # `nilDerefFork` (a dropped NilAccessDefect branch) and the field WRITE
+    # drops the write -- dcSubstituted; the boundary arm is dcNoAnswer. ⊤.
   of heUnsupportedOwnership: dcNoAnswer
+    # S4 audited: `allocateSym`'s `__ownership:` arm substitutes a
+    # `.unalloc` svBool keyed on the allocation's own name (a 2-valued sort
+    # lie, shared across repeat allocations: dcSubstituted); the param
+    # boundary (`raiseParamAllocIssue`) aborts the run (dcNoAnswer). ⊤ both.
   of heUnresolvedRef: dcNoAnswer
+    # S4 audited (split -> heUnsupportedPointeeRead): the remaining sites
+    # substitute, they do not havoc -- `walkHeapArm`'s non-ref/ptr-SymVal
+    # deref reads bind a placeholder WITHOUT the NilAccessDefect fork (a
+    # dropped raise branch), its deref writes DROP the write (stale heap),
+    # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
   of geVtableDispatch: dcNoAnswer
   of ceClosureBodyUncertain: dcNoAnswer
   of weInternalWalkerFault: dcNoAnswer
+    # S4 audited: a walker bug is never an approximation (§3.1), including
+    # its two `degradeAlloc` seq-element sites.
   of beBudgetExhausted: dcNoAnswer
   of feUnsupportedExprKind: dcNoAnswer
+    # S4 audited, NOT reclassified: one `degradeAlloc` site (`iekField` on an
+    # unsupported receiver) plus the Class-A `mkUnsupported` parse sites,
+    # whose typed-zero dummy is §0.2's flagship dcSubstituted example.
   of feUnsupportedParamType: dcNoAnswer
+    # S4 audited: signature-scoped (§2.5 item 2) -- dcNoAnswer by the RFC;
+    # the in-walk `allocateSym` arm is the same 2-valued `.unalloc` sort lie.
   of feUnsupportedWitnessType: dcNoAnswer
+    # S4 audited: as feUnsupportedParamType (signature-scoped, §2.5 item 2).
   of heNewFieldZeroUnsupported: dcNoAnswer
   of seUnsupportedTableKeyType: dcNoAnswer
-  of seUnsupportedCompoundSortLeaf: dcNoAnswer
+    # S4 audited: `allocateSym`'s placeholder FORCES `tabSize == 0`
+    # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
+  of seUnsupportedCompoundSortLeaf: dcSubstituted
+    # S4: the ONE site (`rawAnyAstOf`) returns a concrete BV64 `0` as the
+    # compound value's ast, and heap stores / closure args consume it as a
+    # VALUE -- a forced value, not a havoc. Same coordinates as the default.
   of beBudgetExhaustedAssumedBound: dcNoAnswer
   of feOpaqueCallUnmodelled: dcNoAnswer
   of feEnumOrdinalUnresolved: dcNoAnswer
@@ -2442,6 +2522,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of ceClosureBodyDiverged: dcNoAnswer
   of weBreakOutsideLoop: dcNoAnswer
   of beSolverUndef: dcNoAnswer
+  # RFC-0005 S4: the one fresh-symbol arm of the `allocDegrade` funnel.
+  of heUnsupportedPointeeRead: dcFreshSymbol
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -2479,6 +2561,24 @@ func runTaintOf*(errors: openArray[SymexErrorInfo]): Taint =
   for e in errors:
     if e.severity == sevError:
       result = result + runTaint(classOf(e.kind))
+
+proc checkUnsatOverTaintOnly*[T](r: SymexResult[T]) =
+  ## RFC-0005 §4.3 (landed S4): the checked justification for a pin that
+  ## flipped `sxUnknown` -> `sxUnsat`. Asserts `r.status == sxUnsat` AND that
+  ## every drained `sevError` in `r.errors` maps through `classOf` to a class
+  ## whose run coordinate lacks `scIncomplete` -- i.e. the run is
+  ## over-approximation-only, so the UNSAT is licensed by §0.1 rather than by
+  ## a classification slip. Reads `runTaintOf`, the same function the drain
+  ## derives `WalkCtx.runTaint` from (one source of truth). Raises an
+  ## `AssertionDefect` naming the offending kind(s) otherwise, so a test
+  ## calls it as a statement.
+  var offending: seq[string]
+  for e in r.errors:
+    if e.severity == sevError and scIncomplete in runTaint(classOf(e.kind)):
+      offending.add $e.kind & " (" & $classOf(e.kind) & ")"
+  if r.status != sxUnsat or offending.len > 0:
+    raiseAssert "checkUnsatOverTaintOnly: status=" & $r.status &
+      " (want sxUnsat); under-approximating sevError kinds: " & $offending
 
 # ---- Constructors -----------------------------------------------------------
 #

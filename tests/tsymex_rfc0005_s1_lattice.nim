@@ -24,9 +24,14 @@ const clean: Taint = {}   ## ⊥ -- the identity of join
 
 suite "RFC-0005 S1 (a) -- the channel algebra":
 
-  test "classOf is total and maps EVERY kind to dcNoAnswer (the conservative ⊤ default)":
+  # RFC-0005 S4 reclassified the first rows out of S1's all-⊤ default; every
+  # kind NOT in this set must still be dcNoAnswer (later slices extend it).
+  const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf}
+
+  test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:
-      check classOf(k) == dcNoAnswer
+      if k notin reclassified:
+        check classOf(k) == dcNoAnswer
 
   test "pathTaint per class (RFC §2.2 table)":
     check pathTaint(dcFreshSymbol) == {scSpurious}
@@ -50,13 +55,14 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
     for c in DegradeClass:
       check pathTaint(c) != {scIncomplete}
 
-  test "channels(k) is (pathTaint(classOf k), runTaint(classOf k)) and is ⊤/⊤ for every kind under S1's default":
+  test "channels(k) is (pathTaint(classOf k), runTaint(classOf k)) and is ⊤/⊤ for every not-yet-reclassified kind":
     for k in SymexErrorKind:
       let ch = channels(k)
       check ch.path == pathTaint(classOf(k))
       check ch.run == runTaint(classOf(k))
-      check ch.path == {scSpurious, scIncomplete}
-      check ch.run == {scSpurious, scIncomplete}
+      if k notin reclassified:
+        check ch.path == {scSpurious, scIncomplete}
+        check ch.run == {scSpurious, scIncomplete}
 
   test "runTaintOf derives the run coordinate from drained errors: only sevError contributes (§2.2 severity rule)":
     check runTaintOf(newSeq[SymexErrorInfo]()) == clean

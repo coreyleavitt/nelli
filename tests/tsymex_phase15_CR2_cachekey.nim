@@ -791,7 +791,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## 133 and changes verdicts, so it takes its own number. 133->134.
     ## RFC-0005 S1c (the verdict rule: tainted paths solved into a
     ## candidate pool, tainted raises routed, ordered procedure). 140->141.
-    check symexWalkerVersion == "141"
+    ## RFC-0005 S4 (the `allocDegrade` funnel classified: the fresh-symbol
+    ## heap pointee read is `dcFreshSymbol`, so an over-taint-only run can
+    ## now prove `sxUnsat`). 141->142.
+    check symexWalkerVersion == "142"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -184,7 +184,22 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "141"
+const symexWalkerVersion* = "142"
+  ## RFC-0005 S4 (2026-09-25) — the FIRST verdict-changing classification
+  ## slice: the `allocDegrade` funnel audited site by site against §3.1's
+  ## substitution rule (`types.nim`'s `classOf` rows marked S4).
+  ## `liftHeapValue`'s unsupported-pointee read (a `string`/`seq`/... field
+  ## or pointee through a `ref`/`ptr`) is split off `heUnresolvedRef` as
+  ## `heUnsupportedPointeeRead` and classified `dcFreshSymbol`, so a run
+  ## whose ONLY degrade is that read, and which proves the target
+  ## unreachable, now reports `sxUnsat` instead of `sxUnknown` (the S0
+  ## exhibit's flip). The site also stops naming every occurrence
+  ## identically (`degradeAlloc` + `freshDegradeName`): two reads of two
+  ## different cells were one Z3 constant, an equality reality does not
+  ## impose -- harmless under ⊤, a false `sxUnsat` under `dcFreshSymbol`.
+  ## `seUnsupportedCompoundSortLeaf` is relabelled `dcSubstituted` (same
+  ## coordinates). A pre-S4 cached `sfUnknown` sentinel for such a SUT is a
+  ## stale verdict and must not be served. 141->142.
   ## RFC-0005 S1c (2026-09-25) — the verdict rule (§2.3). `isTargetLabel`
   ## and `routeRaise` now SOLVE a tainted path instead of skipping it (a SAT
   ## on an `scSpurious` path becomes a CANDIDATE in `w.candidates`, never a

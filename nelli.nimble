@@ -774,5 +774,12 @@ task test, "Run the test suite":
             # over-taint-only characterization pins for S4/S5/S6 to flip,
             # and an exhaustive `decideVerdict` monotonicity check. No
             # product code; no walker bump.
-            "tsymex_rfc0005_s3_monotonicity"]:
+            "tsymex_rfc0005_s3_monotonicity",
+            # RFC-0005 S4: the allocDegrade funnel audited by its true §3.1
+            # class -- `liftHeapValue`'s unsupported-pointee read split off
+            # `heUnresolvedRef` as `heUnsupportedPointeeRead` (dcFreshSymbol,
+            # a per-read fresh name: the introduction invariant),
+            # `seUnsupportedCompoundSortLeaf` -> dcSubstituted, every other
+            # funnel kind stays ⊤; `checkUnsatOverTaintOnly`; walker 141->142.
+            "tsymex_rfc0005_s4_alloc"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -35,16 +35,19 @@
 ##         `sxUnknown` until S10's replay confirms it.
 ##     2b. An over-taint-only run that proves the target UNREACHABLE must
 ##         report `sxUnsat` -- but that flip needs S4/S5/S6 to reclassify a
-##         funnel out of the conservative `dcNoAnswer` default first. Today
-##         these pins characterize the CURRENT `sxUnknown`, each naming the
-##         slice expected to flip it (mirrors `tsymex_rfc0005_s0_exhibit.nim`'s
-##         pin style).
+##         funnel out of the conservative `dcNoAnswer` default first. These
+##         pins characterize the CURRENT verdict, each naming the slice
+##         expected to flip it (mirrors `tsymex_rfc0005_s0_exhibit.nim`'s
+##         pin style); F1 flipped at S4 and is asserted via
+##         `checkUnsatOverTaintOnly`.
 ##
 ## The battery deliberately routes through four LIVE, DISTINCT degrade
 ## funnels (S0b's own measurement categories) so S4/S5/S6/S7's later work
 ## each has pre-existing coverage in this file to extend, not invent:
 ##   F1 -- `allocDegrade`/`heUnresolvedRef`  (heap ref-to-string field deref;
-##         the exact S0-pin-1 shape) -- classified at **S4**
+##         the exact S0-pin-1 shape) -- classified at **S4**: the site split
+##         off as `heUnsupportedPointeeRead` (`dcFreshSymbol`); F1 now fires
+##         that kind, not `heUnresolvedRef`
 ##   F2 -- `degradeStrArm`/`seUnsupportedStringOp` (`toOct`, no Z3 oct
 ##         primitive; the `tsymex_a8_radix` precedent) -- classified at **S5**
 ##   F3 -- `mkUnsupported` statement / `feUnsupportedStmtKind` (a field
@@ -56,12 +59,18 @@
 ##         this funnel gets NO family-2b pin -- there is nothing to name.
 ##   F4 -- heap-arm degrade / `heRefVariantUnsupported` (an inline `ref` to a
 ##         variant-fielded object; the `tsymex_phase15_r6_refobj` precedent)
-##         -- classified at **S6**
+##         -- routes `heapArmDegrade` -> `allocDegrade`, so S4 AUDITED it (not
+##         S6, as this comment said at S3): both its sites SUBSTITUTE (the
+##         read skips `nilDerefFork`, dropping the NilAccessDefect raise; the
+##         write is dropped), so it stays `dcNoAnswer` and does NOT flip. Any
+##         later flip needs a slice that restructures those sites first.
 ##
-## No product code. All four kinds classify `dcNoAnswer` today (verified by
-## `types.nim`'s `classOf` table), so no verdict this file pins today can
-## have been produced by anything other than the pre-existing, all-⊤
-## verdict rule. Walker version floor: unchanged at 141 (S1c).
+## No product code. At S3 all four kinds classified `dcNoAnswer` (verified by
+## `types.nim`'s `classOf` table); S4 reclassified F1's kind only (F1's
+## family-2b pin flips; its family-1 pins are unaffected because the clean
+## witness wins by rule 1 regardless of taint). Walker version floor: 141
+## (S1c) at S3; S4 bumped the walker to 142 (pinned in
+## `tsymex_rfc0005_s4_alloc.nim`).
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -120,7 +129,7 @@ template withPoisonedArm*(placement: static PoisonPlacement; poisonOn: bool;
 # Poison sources -- one degrade site per funnel, reused across the battery
 # =============================================================================
 
-# ---- F1: allocDegrade / heUnresolvedRef (heap ref-to-string field deref) ----
+# ---- F1: allocDegrade / heUnsupportedPointeeRead (heUnresolvedRef pre-S4) --
 # Identical shape to `tsymex_rfc0005_s0_exhibit.nim`'s `s0DeadFreshSymbol`:
 # `liftHeapValue`'s unsupported-pointee `else` arm does not yet model a
 # `string` field read through a heap-deref'd `ref` (Cluster R1 covers only
@@ -216,13 +225,13 @@ suite "RFC-0005 S3 -- W1 (sxSat, plain), witness monotonicity":
     let r = symexFind(s3w1Base, tLabel("s3_w1_base"))
     check r.status == sxSat
 
-  test "F1 before (shouldStop pin): graft does not change sxSat; heUnresolvedRef fired":
+  test "F1 before (shouldStop pin): graft does not change sxSat; heUnsupportedPointeeRead fired":
     let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
     let r = symexFind(s3w1F1Before, tLabel("s3_w1_f1_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
-    check r.errors.hasKind(heUnresolvedRef)
+    check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F1 after (shouldStop eager-halt): graft does not change sxSat; the poison NEVER fires":
     ## `shouldStop` (`runtime.nim:8445`) halts the ENTIRE walk the instant a
@@ -238,7 +247,7 @@ suite "RFC-0005 S3 -- W1 (sxSat, plain), witness monotonicity":
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
-    check not r.errors.hasKind(heUnresolvedRef)
+    check not r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F2 before (shouldStop pin): graft does not change sxSat; seUnsupportedStringOp fired":
     let base = symexFind(s3w1Base, tLabel("s3_w1_base"))
@@ -388,13 +397,13 @@ suite "RFC-0005 S3 -- W3 (sxSat behind a loop + a call), witness monotonicity":
     let r = symexFind(s3w3Base, tLabel("s3_w3_base"))
     check r.status == sxSat
 
-  test "F1 before (shouldStop pin): graft does not change sxSat; heUnresolvedRef fired":
+  test "F1 before (shouldStop pin): graft does not change sxSat; heUnsupportedPointeeRead fired":
     let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
     let r = symexFind(s3w3F1Before, tLabel("s3_w3_f1_before"))
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
-    check r.errors.hasKind(heUnresolvedRef)
+    check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F1 after (shouldStop eager-halt): graft does not change sxSat; the poison NEVER fires":
     let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
@@ -402,7 +411,7 @@ suite "RFC-0005 S3 -- W3 (sxSat behind a loop + a call), witness monotonicity":
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxSat
-    check not r.errors.hasKind(heUnresolvedRef)
+    check not r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F3 before (shouldStop pin): graft does not change sxSat; feUnsupportedStmtKind fired":
     let base = symexFind(s3w3Base, tLabel("s3_w3_base"))
@@ -454,12 +463,12 @@ proc s3ClassifyF4(p: ref S3F4Obj, y: int) =
 
 suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path never reports sxSat":
 
-  test "F1: heUnresolvedRef sits between every path and the target -> sxUnknown, never sxSat":
+  test "F1: heUnsupportedPointeeRead sits between every path and the target -> sxUnknown, never sxSat":
     let r = symexFind(s3ClassifyF1, tLabel("s3_classify_f1"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.status != sxSat
-    check r.errors.hasKind(heUnresolvedRef)
+    check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F2: seUnsupportedStringOp sits before every path's target check -> sxUnknown, never sxSat":
     let r = symexFind(s3ClassifyF2, tLabel("s3_classify_f2"))
@@ -491,7 +500,8 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
 # set is asserted EXACT -- over-taint-only is checked, not assumed. Today the
 # conservative `classOf` default (`dcNoAnswer`, verified below) makes every
 # one of these `sxUnknown`; each comment names the slice expected to flip it
-# to `sxUnsat` and why. F3 (feUnsupportedStmtKind) has no entry here -- see
+# to `sxUnsat` and why. F1 flipped at S4 (rewritten in place through
+# `checkUnsatOverTaintOnly`); F4 was audited at S4 and stays `dcNoAnswer`. F3 (feUnsupportedStmtKind) has no entry here -- see
 # this file's header comment for why RFC-0005 §5 names no flipping slice for
 # that funnel.
 
@@ -514,18 +524,19 @@ proc s3OverTaintF4(p: ref S3F4Obj, n: int) =
 
 suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's own RED)":
 
-  test "F1: classOf(heUnresolvedRef) is dcNoAnswer today (the conservative S1 default)":
-    check classOf(heUnresolvedRef) == dcNoAnswer
+  test "F1: classOf(heUnsupportedPointeeRead) is dcFreshSymbol (RFC-0005 S4)":
+    check classOf(heUnsupportedPointeeRead) == dcFreshSymbol
 
-  test "F1 today: sxUnknown, over-taint-only -- expected to flip to sxUnsat at S4":
+  test "F1: sxUnsat, over-taint-only -- flipped at S4":
+    # RFC-0005 S4: was sxUnknown at S3; the site now records the split
+    # dcFreshSymbol kind, whose runTaint lacks scIncomplete (§2.3 -> sxUnsat).
     let r = symexFind(s3OverTaintF1, tLabel("s3_overtaint_f1"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.status != sxSat
+    checkUnsatOverTaintOnly(r)
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError: sevErrorKinds.add e.kind
-    check sevErrorKinds == @[heUnresolvedRef]
+    check sevErrorKinds == @[heUnsupportedPointeeRead]
 
   test "F2: classOf(seUnsupportedStringOp) is dcNoAnswer today":
     check classOf(seUnsupportedStringOp) == dcNoAnswer
@@ -540,10 +551,10 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
       if e.severity == sevError: sevErrorKinds.add e.kind
     check sevErrorKinds == @[seUnsupportedStringOp]
 
-  test "F4: classOf(heRefVariantUnsupported) is dcNoAnswer today":
+  test "F4: classOf(heRefVariantUnsupported) is dcNoAnswer (audited at S4: its sites substitute)":
     check classOf(heRefVariantUnsupported) == dcNoAnswer
 
-  test "F4 today: sxUnknown, over-taint-only -- expected to flip to sxUnsat at S6":
+  test "F4: sxUnknown, over-taint-only -- stays ⊤ (S4 audit: substituting sites, no flip)":
     let r = symexFind(s3OverTaintF4, tLabel("s3_overtaint_f4"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown

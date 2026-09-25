@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~15:19)
+## Current position (refreshed 2026-09-25 ~15:50)
 
 - **Slices done:** 11 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -27,7 +27,7 @@
 - **S6b confirmation sweep:** S6b's own gate was a full sweep with 6 red, then a
   *targeted* resweep after product-code fixes. A full confirmation sweep of the
   exact sha runs in the pinned worktree `scratchpad/wt-s6b` ->
-  `scratchpad/s6b-confirm.log` (~257/506 at 15:19; diff it vs `baseline-6cbfe8f.log`; remove the
+  `scratchpad/s6b-confirm.log` (~378/506 at 15:50; diff it vs `baseline-6cbfe8f.log`; remove the
   worktree after).
 - **Branch vs main:** `main` is still `6cbfe8f`; lands by fast-forward (no PR).
   Never pushed (no upstream).
@@ -37,6 +37,7 @@
 - **In flight:** **S7** (opus) -- seven cross-path sinks, closure-descent taint
   joins the calling path, every closure/HOF decline through `w.degrade` + path
   taint, S9 safety precondition pinned (`decideVerdict(vetoed=false)` not clean sat).
+  15:50: uncommitted, gate sweep `scratchpad/s7-sweep.log` ~150/507.
 - **Remaining:** S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), **i3 (transparent
   companions, blocks S8** -- `feTransparentArgNotInert` / `feTransparentResultUsed`

@@ -587,8 +587,18 @@ type
       ## RFC-0005 S1 (§2.3). The taint of the path that produced this
       ## finding, recorded at TARGET-HIT time (`isTargetLabel`'s sxSat,
       ## `routeRaise`'s sxRaised) because the winning path is not otherwise
-      ## available at verdict time. Always `{}` in S1 (both hit sites solve
-      ## only untainted paths today); S1c's candidate pool is its consumer.
+      ## available at verdict time. RFC-0005 S1c routes on it
+      ## (`admitSolvedHit`): a winner's is free of `scSpurious`; a candidate's
+      ## carries it.
+    candidates*:   seq[RawResult]
+      ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Every SOLVED finding
+      ## whose path carries `scSpurious` (`sxSat` at a label hit, `sxRaised`
+      ## at a SUT-boundary raise), in discovery order, each with its own
+      ## `pathTaint` and its own witness-extraction `errors`. Never a winner
+      ## by itself: `decideVerdict` returns `sxUnknown` when one exists and no
+      ## clean finding does (rule 4 -- the enlarged program reaches the
+      ## target). This is the pool RFC-0005 S10's replay reads (rule 3) after
+      ## `runSymex` returns. Empty on `sxUnsat` by construction.
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -7738,6 +7748,20 @@ type
     found:     seq[RawResult]   ## Phase 15 Z4: was Option[RawResult]. Accumulated
                                 ## findings; shouldStop halts on the first sxSat
                                 ## (sxRaised added to the stop set in E2a).
+                                ## RFC-0005 S1c: CLEAN findings only
+                                ## (`scSpurious notin pathTaint`) -- a SAT on a
+                                ## spurious-tainted path goes to `candidates`.
+    candidates: seq[RawResult]
+      ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Solved SAT findings
+      ## (`sxSat` at `isTargetLabel`, `sxRaised` at `routeRaise`) whose path
+      ## carries `scSpurious`: the enlarged program reaches the target, reality
+      ## is unknown. A SEPARATE pool, not a filter over `found`, for one
+      ## reason: `shouldStop` halts the whole walk on the first stopping entry
+      ## in `found`, so a candidate there would end exploration before a clean
+      ## witness on a sibling path was ever solved -- and the relaxation would
+      ## LOSE a verdict today's engine earns. `shouldStop` never reads this
+      ## pool. Consumed by `decideVerdict` (rule 4: any solved SAT blocks
+      ## `sxUnsat`) and handed out on `RawResult.candidates` for S10's replay.
     statics:   WalkerStatics    ## Phase 15 Z4 — populated E1/C2a/R1
     frame:     CallFrameCtx     ## Phase 15 Z4 — populated E1/C2a. The CURRENT
                                 ## call frame's exception context (handler stack
@@ -7752,15 +7776,11 @@ type
       ## RFC-0005 S1 (was `sawUnknown: bool`; `sawUnknown ≡ runTaint != {}`).
       ## The RUN coordinate — DERIVED, never written at a degrade site: the
       ## ONLY writer is `runSymexImpl`'s verdict assembly, which sets it to
-      ## `runTaintOf(drained errors)` (`types.nim`) joined with the
-      ## transitional `kindlessRunTaint`. `{}` for the whole walk until then.
-      ## Pinned by the writer grep-pin.
-    kindlessRunTaint: bool
-      ## TRANSITIONAL (RFC-0005 S1 → deleted by S1c). Set by
-      ## `kindlessRunDegrade` at the two sites that skip solving a tainted
-      ## path (`isTargetLabel`, `routeRaise`; each marked `# RFC-0005 S1c:
-      ## replaced by the isTargetLabel/routeRaise solve`); joined into
-      ## `runTaint` as ⊤ at drain. Since S1b every other degrade records.
+      ## `runTaintOf(drained errors)` (`types.nim`). `{}` for the whole walk
+      ## until then. Pinned by the writer grep-pin. RFC-0005 S1c: purely
+      ## derived -- the transitional kindless ⊤ mark is gone, because no site
+      ## skips solving a tainted path any more (the only unsolved outcome, a
+      ## solver unknown, records `beSolverUndef`).
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
@@ -8053,29 +8073,10 @@ proc takeLoweringPendingDegrade(): Degrade =
   result = Degrade(path: loweringPendingTaint)
   loweringPendingTaint = {}
 
-# ---- RFC-0005 S1/S1b: TRANSITIONAL kindless run mark — S1c deletes it -------
-# RFC-0005 §2.2 "The premise 'every taint site has a kind in hand' is false".
-# S1b minted a kind for every degrade site that recorded no `SymexErrorInfo`
-# and routed each through `degrade` (the kindless PATH token is gone: every
-# `Degrade` is now obtained from a recording funnel — pinned by
-# `tests/tsymex_rfc0005_s1b_kinds.nim`). What survives is the RUN mark at
-# exactly the two sites that REFUSE to solve a tainted path — the tainted
-# `isTargetLabel` hit and the tainted `routeRaise` early return. Those are not
-# degrades (the path's taint was already recorded where it was introduced);
-# they are §2.3's "unsolved-skip is itself an omission", and S1c replaces both
-# with the real solve. Each call site carries the marker
-# `# RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve`. Not a
-# sanctioned pattern for new code: a new degrade site mints its kind and calls
-# `degrade`.
-
-template kindlessRunDegrade(w: var WalkCtx) =
-  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1c). The run mark of a site that
-  ## skips solving a tainted path; joined into `w.runTaint` as ⊤ at drain.
-  w.kindlessRunTaint = true
-
 proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## RFC-0005 S1 (§2.2 last paragraph) — the pending-taint LEAK PIN. Called
-  ## once, right after the top-level `walk` returns. `loweringPendingTaint`
+  ## once, right after the top-level `walk` returns, by BOTH walk drivers
+  ## (`runSymexImpl`; `runConcolicCollectImpl` since S1c). `loweringPendingTaint`
   ## must be `{}` there: every `lowerDegrade` join is meant to be folded onto
   ## a path by `drainPendingLowerEffects`; a non-empty residue means a
   ## lowering degrade was recorded but its PATH taint landed nowhere (the
@@ -8451,6 +8452,183 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
     if r.status == sxSat: return true
     if r.status == sxRaised and w.target.kind != stkLabel: return true
   false
+
+const defaultConcreteBranchRLimit* = 20_000_000'u
+  ## R7: the genuine, non-zero default `concreteBranchOutcome` falls back to
+  ## when the caller's `settings.budget.queryRLimit` is `0` (i.e. expressed
+  ## no preference — the codebase-wide "0 = unbounded" convention every
+  ## other `ResourceBudget` field also uses, so this substitution happens
+  ## only at that one sentinel value, never silently overriding a caller who
+  ## explicitly asked for a smaller — or larger — budget).
+  ##
+  ## `trySolve` is allowed to default to unbounded (`0`) because it runs
+  ## inside a user-invoked symex query: the user chose to run a solver and
+  ## can set a budget if they want one. `concreteBranchOutcome` has no such
+  ## user in the loop — it runs on the FUZZ LOOP's hot path, synchronously,
+  ## on the main thread, on every if-decision of every concolic collection,
+  ## with no watchdog. A hang there wedges the whole campaign silently
+  ## (the dt-bounded.sh header documents a real 24+ minute mixed-theory
+  ## hang from exactly this class of unbounded query). That asymmetry is
+  ## why this site needs a real default where `trySolve` doesn't.
+  ##
+  ## rlimit (a deterministic Z3 logical-step count), not G2's wall-clock
+  ## `timeout`: this call sits in the general-walk layer `trySolve`
+  ## occupies, not G2's bounded-relaxation-attempt loop, and — unlike a G2
+  ## flip-solve, whose only output is a throwaway candidate Track E
+  ## re-verifies concretely regardless — this call's outcome directly
+  ## shapes which arm `walkIfFollowConcrete` follows, i.e. the search
+  ## trajectory itself. A wall-clock timeout is reproducible in the
+  ## SAT/UNSAT case (Z3 always finds those given enough time) but the
+  ## TIMING of a timeout is machine/load-dependent, so the same seed could
+  ## resolve a branch on a fast/idle machine and degrade to `ambiguousBranches`
+  ## on a slow/loaded one — different collected constraints, different
+  ## corpus growth, from the identical campaign. `rlimit` counts logical
+  ## steps, not wall-clock time, so it reproduces identically across
+  ## machines for a fixed Z3 build (the same property `trySolve` already
+  ## relies on — see `docs/symex/RFC-unsat-caching.md`'s "Wall-clock
+  ## timeouts aren't [deterministic]... Z3 exposes rlimit"). A fuzzer whose
+  ## intermediate search steps depend on machine speed is a much bigger
+  ## reproducibility problem than a throwaway flip-solve candidate is, so
+  ## rlimit is the right instrument here even though G2 chose timeout for
+  ## its own (differently-shaped) problem.
+  ##
+  ## Value: `20_000_000` is not an arbitrary round number — it's the one
+  ## rlimit magnitude this codebase has already validated empirically.
+  ## `tests/tsymex_r4_strip.nim` bisected a real adversarial query (nested
+  ## `strip` idempotence decomposition) that ran UNBOUNDED for measured
+  ## 3+ hours, and confirmed `queryRLimit: 20_000_000` bounds it to a fast,
+  ## deterministic `sxUnknown`. `concreteBranchOutcome`'s own queries are
+  ## far simpler by construction (a fully concrete-pinned comparison, no
+  ## free variables) and should resolve in a tiny fraction of that budget
+  ## under normal conditions — so this ceiling gives enormous headroom
+  ## against a false/premature `none(bool)` degrade on ordinary campaigns,
+  ## while still being a genuine, finite, deterministic backstop against
+  ## the exact class of mixed-theory divergence dt-bounded.sh exists to
+  ## catch. Reusing this proven value (vs. inventing an untested one) means
+  ## its termination behavior is already known-good on this Z3 build,
+  ## rather than a fresh guess this fix would be the first to rely on.
+  ##
+  ## RFC-0005 S1c: the same asymmetry now holds INSIDE `trySolve`'s own
+  ## layer. A tainted target-hit path (`solveTargetHit`) was never solved
+  ## before S1c, and its pc can carry a degraded lowering's mixed-theory
+  ## residue (N36's `iekStrInOptionRegion` shape spun Z3 unbounded) -- the
+  ## user never chose to run THAT query, so `taintedSolveRLimit` falls back
+  ## to this same ceiling. Declared here, ahead of `solveTargetHit`, for
+  ## that reason (Nim declaration order).
+
+func taintedSolveRLimit*(settings: SymexSettings): uint =
+  ## RFC-0005 S1c. The Z3 `rlimit` a TAINTED target-hit path is solved under
+  ## (`solveTargetHit`): the caller's explicit `queryRLimit` when set (a
+  ## caller's budget always wins), else `defaultConcreteBranchRLimit` -- the
+  ## same validated finite backstop, for the same mixed-theory divergence
+  ## class, that R7's `concreteBranchRLimit` applies. Pure, so the "never
+  ## unbounded under default settings" contract is unit-testable without
+  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`).
+  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  else: defaultConcreteBranchRLimit
+
+proc solveTargetHit(w: var WalkCtx; p: Path):
+    tuple[status: SymexStatusKind, witness: RawWitness,
+          candidateErrs: seq[SymexErrorInfo]] =
+  ## RFC-0005 S1c (§2.3). THE solve for a path that reached the search target
+  ## -- `isTargetLabel`'s label hit and `routeRaise`'s SUT-boundary raise --
+  ## run on EVERY such path, tainted or not. Before S1c both sites refused to
+  ## solve a tainted path; an unsolved path that reaches the target is itself
+  ## an omission (§0.1), so the refusal forced a kindless ⊤ run mark and made
+  ## rule 5 (`sxUnsat` on `scIncomplete notin runTaint`) unshippable. Now the
+  ## only unsolved outcome is a solver unknown, which the caller records as
+  ## `beSolverUndef` (classified, so it derives the run coordinate).
+  ##
+  ## Witness extraction may record `extractionErrors` (sevError/sevHint), and
+  ## that sink is surfaced on the WINNER branch only. A candidate is not a
+  ## winner, so its extraction errors are moved off the shared sink into
+  ## `candidateErrs` (they ride the candidate's own `RawResult.errors`) --
+  ## otherwise a clean witness found later would inherit diagnostics about a
+  ## model it never used.
+  ##
+  ## A TAINTED path's query is solved under `taintedSolveRLimit` -- never
+  ## unbounded. Its pc carries whatever a degraded lowering left behind
+  ## (the N36 `iekStrInOptionRegion` BV-bound decline's residue spins Z3's
+  ## `check` forever under the default `queryRLimit = 0`), and before S1c
+  ## that query was never issued, so an unbounded solve here would be a NEW
+  ## non-termination, not a pre-existing one. The bound's `zsUnknown` is the
+  ## honest `beSolverUndef` the caller records. A clean path's query is
+  ## exactly the pre-S1c one and keeps the caller's budget unchanged.
+  let isCandidate = scSpurious in p.taint
+  let exStart = extractionErrors.len
+  let exLiveStart = w.extractionErrors.len
+  var solveSettings = w.settings
+  if p.taint != {}:
+    solveSettings.budget.queryRLimit = taintedSolveRLimit(w.settings)
+  let (st, wit) = trySolve(w.z3, p, w.params, solveSettings, w.tabKeys,
+                           w.setMembers, w.initialEnv)
+  var errs: seq[SymexErrorInfo]
+  if isCandidate:
+    for i in exLiveStart ..< w.extractionErrors.len:
+      errs.add w.extractionErrors[i]
+    extractionErrors.setLen(exStart)
+    w.extractionErrors.setLen(exLiveStart)
+  (status: st, witness: wit, candidateErrs: errs)
+
+proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
+  ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Files a SOLVED finding by the
+  ## taint of the path that produced it (`r.pathTaint`, recorded at the hit):
+  ## a clean one into `w.found` (a winner; may halt the walk via
+  ## `shouldStop`), an `scSpurious`-tainted one into `w.candidates` (never
+  ## halts, never wins by itself -- only S10's replay can promote it; it
+  ## still blocks `sxUnsat`, `decideVerdict` rule 4). `path.scIncomplete`
+  ## alone is inert (§2.1): an omission cannot invent a model.
+  if scSpurious in r.pathTaint:
+    w.candidates.add r
+  else:
+    w.found.add r
+
+type
+  VerdictDecision* = object
+    ## RFC-0005 S1c. The outcome of `decideVerdict`: the status the run
+    ## reports and, for `sxSat`/`sxRaised`, the index of the winning entry in
+    ## `found` (`-1` otherwise).
+    status*:    SymexStatusKind
+    winnerIdx*: int
+
+func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
+                    vetoed: bool): VerdictDecision =
+  ## RFC-0005 §2.3 -- THE verdict rule, an ordered decision procedure with
+  ## disjoint guards (first matching rule wins). Pure: `runSymexImpl` feeds it
+  ## the walk's pools and the drained run coordinate, and a test can drive
+  ## every rule directly with any `Taint` -- including ones no kind produces
+  ## until S4-S6 reclassify a funnel (all-⊤ makes rule 4 indistinguishable
+  ## from rule 5 through `symexFind` today).
+  ##
+  ##   1. a clean `sxSat` in `found` -> `sxSat` (first in discovery order)
+  ##   2. a clean `sxRaised` in `found` -> `sxRaised` (a reachable raise is an
+  ##      existence claim: it obeys the SAT rule verbatim)
+  ##   3. a candidate whose replay returns `roConfirmed` -> `sxSat`/`sxRaised`
+  ##      -- RFC-0005 S10's rule: replay runs in macro code after `runSymex`
+  ##      returns (§4.2 plumbing), so it cannot sit in this runtime function;
+  ##      S10 applies it to `RawResult.candidates` on the `sxUnknown` this
+  ##      procedure returns under rule 4.
+  ##   4. any solved SAT anywhere -- a candidate, or a `found` entry the rules
+  ##      above did not accept -- terminally blocks `sxUnsat`: the enlarged
+  ##      program DOES reach the target. -> `sxUnknown`
+  ##   5. nothing solved SAT and `scIncomplete notin runTaint` -> `sxUnsat`
+  ##   6. otherwise -> `sxUnknown`
+  ##
+  ## `vetoed` is the two blanket vetoes (`capForcedUnknown`,
+  ## `closureForcedUnknown`, §2.5): until S9 deletes them they suppress rules
+  ## 1-2 and block rule 5, exactly as before S1c.
+  if not vetoed:
+    for i, f in found:                                         # rule 1
+      if f.status == sxSat and scSpurious notin f.pathTaint:
+        return VerdictDecision(status: sxSat, winnerIdx: i)
+    for i, f in found:                                         # rule 2
+      if f.status == sxRaised and scSpurious notin f.pathTaint:
+        return VerdictDecision(status: sxRaised, winnerIdx: i)
+  if vetoed or found.len > 0 or candidates.len > 0:            # rule 4
+    return VerdictDecision(status: sxUnknown, winnerIdx: -1)
+  if scIncomplete notin runTaint:                              # rule 5
+    return VerdictDecision(status: sxUnsat, winnerIdx: -1)
+  VerdictDecision(status: sxUnknown, winnerIdx: -1)            # rule 6
 
 proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
@@ -9166,61 +9344,6 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
 # — ground equalities pinning every symbolicated draw to its recorded value —
 # via a SCRATCH solver that never touches the live path's `pc` (the draws
 # stay free/unpinned so a later G2 flip-solve can still move them).
-
-const defaultConcreteBranchRLimit* = 20_000_000'u
-  ## R7: the genuine, non-zero default `concreteBranchOutcome` falls back to
-  ## when the caller's `settings.budget.queryRLimit` is `0` (i.e. expressed
-  ## no preference — the codebase-wide "0 = unbounded" convention every
-  ## other `ResourceBudget` field also uses, so this substitution happens
-  ## only at that one sentinel value, never silently overriding a caller who
-  ## explicitly asked for a smaller — or larger — budget).
-  ##
-  ## `trySolve` is allowed to default to unbounded (`0`) because it runs
-  ## inside a user-invoked symex query: the user chose to run a solver and
-  ## can set a budget if they want one. `concreteBranchOutcome` has no such
-  ## user in the loop — it runs on the FUZZ LOOP's hot path, synchronously,
-  ## on the main thread, on every if-decision of every concolic collection,
-  ## with no watchdog. A hang there wedges the whole campaign silently
-  ## (the dt-bounded.sh header documents a real 24+ minute mixed-theory
-  ## hang from exactly this class of unbounded query). That asymmetry is
-  ## why this site needs a real default where `trySolve` doesn't.
-  ##
-  ## rlimit (a deterministic Z3 logical-step count), not G2's wall-clock
-  ## `timeout`: this call sits in the general-walk layer `trySolve`
-  ## occupies, not G2's bounded-relaxation-attempt loop, and — unlike a G2
-  ## flip-solve, whose only output is a throwaway candidate Track E
-  ## re-verifies concretely regardless — this call's outcome directly
-  ## shapes which arm `walkIfFollowConcrete` follows, i.e. the search
-  ## trajectory itself. A wall-clock timeout is reproducible in the
-  ## SAT/UNSAT case (Z3 always finds those given enough time) but the
-  ## TIMING of a timeout is machine/load-dependent, so the same seed could
-  ## resolve a branch on a fast/idle machine and degrade to `ambiguousBranches`
-  ## on a slow/loaded one — different collected constraints, different
-  ## corpus growth, from the identical campaign. `rlimit` counts logical
-  ## steps, not wall-clock time, so it reproduces identically across
-  ## machines for a fixed Z3 build (the same property `trySolve` already
-  ## relies on — see `docs/symex/RFC-unsat-caching.md`'s "Wall-clock
-  ## timeouts aren't [deterministic]... Z3 exposes rlimit"). A fuzzer whose
-  ## intermediate search steps depend on machine speed is a much bigger
-  ## reproducibility problem than a throwaway flip-solve candidate is, so
-  ## rlimit is the right instrument here even though G2 chose timeout for
-  ## its own (differently-shaped) problem.
-  ##
-  ## Value: `20_000_000` is not an arbitrary round number — it's the one
-  ## rlimit magnitude this codebase has already validated empirically.
-  ## `tests/tsymex_r4_strip.nim` bisected a real adversarial query (nested
-  ## `strip` idempotence decomposition) that ran UNBOUNDED for measured
-  ## 3+ hours, and confirmed `queryRLimit: 20_000_000` bounds it to a fast,
-  ## deterministic `sxUnknown`. `concreteBranchOutcome`'s own queries are
-  ## far simpler by construction (a fully concrete-pinned comparison, no
-  ## free variables) and should resolve in a tiny fraction of that budget
-  ## under normal conditions — so this ceiling gives enormous headroom
-  ## against a false/premature `none(bool)` degrade on ordinary campaigns,
-  ## while still being a genuine, finite, deterministic backstop against
-  ## the exact class of mixed-theory divergence dt-bounded.sh exists to
-  ## catch. Reusing this proven value (vs. inventing an untested one) means
-  ## its termination behavior is already known-good on this Z3 build,
-  ## rather than a fresh guess this fix would be the first to rely on.
 
 func concreteBranchRLimit*(settings: SymexSettings): uint =
   ## R7: the rlimit `concreteBranchOutcome` actually uses — the caller's
@@ -11404,34 +11527,33 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
-        if p.taint != {}:
-          # Uncertain path: a SAT witness here would be unsound because
-          # bailed-call retSyms are unconstrained at the Z3 level.
-          # RFC-0005 S1: S1 keeps today's "any path taint blocks SAT and
-          # marks the run" gate (all-⊤ default). The path's taint was
-          # introduced by a degrade that already RECORDED its kind (S1b), so
-          # this run mark is the §2.3 "unsolved-skip is itself an omission"
-          # contribution, which S1c replaces with the real solve.
-          w.kindlessRunDegrade()  # RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve
-        else:
-          let (st, wit) = trySolve(w.z3, p, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
-          case st
-          # RFC-0005 S1: `pathTaint` is PRODUCED here — the hitting path's
-          # taint (always `{}` on this branch in S1; S2's `scSpurious`
-          # narrowing makes it an `{scIncomplete}`-carrying SAT possible).
-          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit,
-                                             pathTaint: p.taint))
-          of sxUnknown:
-            # RFC-0005 S1b (§3.1 solver-undef row): Z3 gave up on a path that
-            # reaches the target — record it (was a kindless run mark, so a
-            # run whose only degrade was a solver resource-out was stamped
-            # `weInternalWalkerFault` by the Invariant-7 backstop).
-            discard w.degrade(beSolverUndef,
-              "solver returned unknown on a path reaching target label `" &
-                   stmt.tname & "` (queryRLimit=" &
-                   $w.settings.budget.queryRLimit & ") (beSolverUndef)")
-          of sxUnsat:  discard
-          of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
+        # RFC-0005 S1c (§2.3): EVERY path reaching the label is solved,
+        # tainted or not (was: a tainted path skipped `trySolve` -- "bailed-
+        # call retSyms are unconstrained" -- and marked the run with a
+        # kindless ⊤). A SAT on a clean path is a winner; a SAT on an
+        # `scSpurious`-tainted path is a CANDIDATE (`admitSolvedHit`): the
+        # enlarged program reaches the label, reality is unknown until S10's
+        # replay, and it blocks `sxUnsat` without ever halting the walk.
+        let (st, wit, candErrs) = solveTargetHit(w, p)
+        case st
+        # RFC-0005 S1: `pathTaint` is PRODUCED here -- the hitting path's
+        # taint, which `admitSolvedHit` routes on.
+        of sxSat:    w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
+                                                pathTaint: p.taint,
+                                                errors: candErrs))
+        of sxUnknown:
+          # RFC-0005 S1b (§3.1 solver-undef row): Z3 gave up on a path that
+          # reaches the target — record it (was a kindless run mark, so a
+          # run whose only degrade was a solver resource-out was stamped
+          # `weInternalWalkerFault` by the Invariant-7 backstop). Since S1c
+          # this is also the ONLY unsolved skip (§2.3 "the unsolved-skip is
+          # itself an omission"), on a tainted path as on a clean one.
+          discard w.degrade(beSolverUndef,
+            "solver returned unknown on a path reaching target label `" &
+                 stmt.tname & "` (queryRLimit=" &
+                 $w.settings.budget.queryRLimit & ") (beSolverUndef)")
+        of sxUnsat:  discard
+        of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
   of isRaise:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -11659,13 +11781,14 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   ## for the caller's `isCall` arm to re-route (inter-proc). Otherwise we are at
   ## the SUT boundary: surface a public `sxRaised` finding (E2b semantics,
   ## target-gated) and terminate the path (return `@[]`).
-  if p.taint != {}:
-    # Bailed-call retSyms are unconstrained at the Z3 level; neither a witness
-    # nor a confident handler-routing decision is sound here.
-    # RFC-0005 S1: the path's taint was introduced by a degrade that already
-    # RECORDED its kind (S1b); this run mark is the unsolved-skip omission.
-    w.kindlessRunDegrade()  # RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve
-    return @[]
+  # RFC-0005 S1c (§2.6): a TAINTED path's raise is routed like any other
+  # (was: killed unconditionally -- "bailed-call retSyms are unconstrained" --
+  # with a kindless ⊤ run mark, including for a handler-caught raise). The
+  # taint rides the path through the handler body / escape / finally exactly
+  # as `pc` does (every fork joins it), so nothing downstream can mistake it
+  # for clean: a boundary `sxRaised` it produces is filed as a CANDIDATE by
+  # `admitSolvedHit` below, never a winner. Killing it instead dropped every
+  # behaviour past the raise -- an omission the run could not account for.
   # Phase 15 E4. Subtype matching (replaces E3's exact-string membership). An
   # unknown raised type (not in `exnTable` nor `userExnHierarchy`) is matched
   # ONLY against a bare `except:` — never a named handler — and records a
@@ -11762,8 +11885,8 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       else:
         false  ## e.g. an stkLabel search: the raise just terminates the path
   if wantsRaise:
-    let (st, wit) = trySolve(w.z3, p, w.params, w.settings,
-                             w.tabKeys, w.setMembers, w.initialEnv)
+    # RFC-0005 S1c: solved on a tainted path too (`solveTargetHit`).
+    let (st, wit, candErrs) = solveTargetHit(w, p)
     case st
     of sxSat:
       let iv = InternalVerdict(kind: ivRaised,
@@ -11771,11 +11894,12 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
                                raisedMsg: msg,
                                raisedWitness: wit,
                                raisedIsDefect: raisedIsDefect)  ## Phase 15 E6
-      # RFC-0005 S1: `pathTaint` PRODUCED at the raised-finding hit (`{}` on
-      # this branch in S1 — the tainted early-return above gates it).
+      # RFC-0005 S1: `pathTaint` PRODUCED at the raised-finding hit; S1c
+      # routes on it (clean -> `found`, spurious-tainted -> `candidates`).
       var r = toPublic(iv)
       r.pathTaint = p.taint
-      w.found.add(r)
+      r.errors.add candErrs
+      w.admitSolvedHit(r)
     of sxUnknown:
       # RFC-0005 S1b (§3.1 solver-undef row): the raised finding's path could
       # not be decided — record it (was a kindless run mark).
@@ -13815,43 +13939,30 @@ proc runSymexImpl(prog: SymexProgram,
   # RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The ONE
   # writer of `w.runTaint`: the union, over every DRAINED `sevError` entry
   # (the walk/heap-depth/new-field-zero/lowering sinks in `exnWarnings`, the
-  # parse-time errors, the closure sink), of `runTaint(classOf(kind))` —
-  # joined with the TRANSITIONAL kindless mark (`kindlessRunTaint`, the two
-  # tainted-path unsolved-skips; S1c deletes it). Under S1's all-⊤
-  # `classOf` default this is `{scSpurious, scIncomplete}` exactly when the
-  # old `w.sawUnknown` was true, so the verdict below is unchanged.
+  # parse-time errors, the closure sink), of `runTaint(classOf(kind))`.
+  # RFC-0005 S1c: nothing else -- the transitional kindless ⊤ join is gone
+  # with the unsolved skips it stood for. Under the all-⊤ `classOf` default
+  # this is `{scSpurious, scIncomplete}` exactly when the old `w.sawUnknown`
+  # was true.
   w.runTaint = runTaintOf(exnWarnings) + runTaintOf(prog.parseErrors) +
                runTaintOf(closureErrs)
-  if w.kindlessRunTaint:
-    w.runTaint = w.runTaint + {scSpurious, scIncomplete}
-  ## ADR-0012 D2: unified, target-independent precedence over w.found:
-  ##   sxSat  >  sxRaised  >  sxUnsat/sxUnknown.
-  ## Scan for the FIRST sxSat (the direct answer — for stkLabel this is the only
-  ## status that answers "is the label reachable?"); else the FIRST sxRaised (a
-  ## defect that fires). This is correct for ALL target kinds, NOT a label
-  ## special-case: raise-flavoured targets only ever accumulate sxRaised in
-  ## w.found (label sxSat is added solely at isTargetLabel, gated on stkLabel),
-  ## so first-sxRaised-wins is bit-identical to the prior w.found[0] behaviour
-  ## for them. sxUnsat/sxUnknown only when no sxSat/sxRaised exists.
-  var winnerFound = false
-  var winnerIdx   = -1
-  var winner: RawResult
-  if w.found.len > 0 and not capForcedUnknown and not closureForcedUnknown:
-    for i, f in w.found:
-      if f.status == sxSat:
-        winner     = f
-        winnerFound = true
-        winnerIdx  = i
-        break
-    if not winnerFound:
-      for i, f in w.found:
-        if f.status == sxRaised:
-          winner     = f
-          winnerFound = true
-          winnerIdx  = i
-          break
+  ## RFC-0005 S1c (§2.3): the ordered verdict procedure (`decideVerdict`).
+  ## Rules 1-2 keep ADR-0012 D2's unified, target-independent precedence over
+  ## `w.found` -- sxSat > sxRaised > the rest, FIRST in discovery order --
+  ## now over CLEAN findings only (`w.found` holds nothing else since S1c;
+  ## spurious-tainted SATs sit in `w.candidates`). Raise-flavoured targets
+  ## only ever accumulate sxRaised in `w.found` (label sxSat is added solely
+  ## at isTargetLabel, gated on stkLabel), so first-sxRaised-wins is
+  ## bit-identical to the prior `w.found[0]` behaviour for them. Rule 4: any
+  ## candidate blocks `sxUnsat`. Rule 5: `sxUnsat` needs only
+  ## `scIncomplete notin runTaint` (§0.3's recovered capability; under
+  ## all-⊤ that is exactly the old `runTaint == {}`).
+  let decision = decideVerdict(w.found, w.candidates, w.runTaint,
+                               vetoed = capForcedUnknown or closureForcedUnknown)
+  let winnerFound = decision.status in {sxSat, sxRaised}
+  let winnerIdx   = decision.winnerIdx
   if winnerFound:
-    var r = winner
+    var r = w.found[winnerIdx]
     r.abstractions = log
     r.obligations = obligationLog   ## #161 slice 2
     r.callStats = statsSeq
@@ -13875,17 +13986,18 @@ proc runSymexImpl(prog: SymexProgram,
     r.errors.add exnWarnings       ## Phase 15 E4
     r.errors.add prog.parseErrors  ## Phase 15 G1c
     r.errors.add closureErrs       ## Phase 15 C2b
+    r.candidates = w.candidates    ## RFC-0005 S1c
     r
-  elif w.runTaint != {} or capForcedUnknown or closureForcedUnknown:
+  elif decision.status == sxUnknown:
     # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown
     # must carry at least one classified error. All known degrade sites now
     # classify (budget bails via `beBudgetExhausted`, lowering degrades via
     # `loweringDegradeErrors`, …) — if this fires, some run-marking site
-    # (RFC-0005 S1b: only a transitional `kindlessRunDegrade` unsolved-skip
-    # can mark the run without an entry, and it only ever fires on a path
-    # whose taint was already recorded) escaped classification, which is a
-    # walker bug: surface it as
+    # escaped classification, which is a walker bug: surface it as
     # `weInternalWalkerFault` so telemetry tracks it, never an empty seq.
+    # RFC-0005 S1c: that includes a candidate with nothing recorded behind
+    # it -- a spurious-tainted path whose degrade recorded no error (every
+    # `Degrade` token comes from a recording funnel, so this is a walker bug).
     var unknownErrs = exnWarnings & prog.parseErrors & closureErrs
     if unknownErrs.len == 0:
       unknownErrs.add SymexErrorInfo(
@@ -13894,8 +14006,11 @@ proc runSymexImpl(prog: SymexProgram,
              "degrade site set sawUnknown bare (walker classification gap; " &
              "weInternalWalkerFault)")
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
-              callStats: statsSeq, errors: unknownErrs)
+              callStats: statsSeq, errors: unknownErrs,
+              candidates: w.candidates)
   else:
+    # RFC-0005 S1c: `decideVerdict` rule 5 -- no solved SAT anywhere (so no
+    # candidates to hand out) and `scIncomplete notin runTaint`.
     RawResult(status: sxUnsat, abstractions: log, obligations: obligationLog,
               callStats: statsSeq,
               errors: exnWarnings & prog.parseErrors & closureErrs)
@@ -14520,6 +14635,14 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let initial = Path(pc: initialPC, env: env)
   let resultPaths = walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil
+  # RFC-0005 S1c: the walk-end pending-taint leak pin, exactly as
+  # `runSymexImpl` runs it. This driver used to skip it, so a lowering
+  # degrade whose path taint was never drained stayed in the
+  # `loweringPendingTaint` threadvar after the collect returned (reset only at
+  # the NEXT run's entry) and went uncounted. The stamp records a classified
+  # `weInternalWalkerFault` into `w.walkDegradeErrors`, which the
+  # `walkDegradeCount` read below picks up, and clears the residue.
+  stampLoweringPendingLeak(w)
   counters.ambiguousBranches = w.concolicAmbiguousBranches
   counters.ambiguousByConstruct = w.concolicAmbiguousByConstruct
   # Issue #163 audit finding W10: this driver used to read neither

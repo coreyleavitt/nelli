@@ -53,7 +53,7 @@ state = "done"
 [[slice]]
 id    = "S1c"
 title = "Verdict rule: ordered procedure, candidate pool, isTargetLabel solve"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S2"

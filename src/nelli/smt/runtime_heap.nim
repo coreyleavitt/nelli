@@ -1383,6 +1383,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # path (PER-PATH — an unforked branch never sees this update).
         var child = forkPath(cp, cp.pc, cp.env)
         child.heaps[heapKey] = storedHeap
+        # RFC-0005 S1c (S1b's measured leak, `tsymex_r6_n40_alloc_totality`
+        # N40-4). `rawAnyAstOf(valSV)` in the store above runs AFTER
+        # `lowerInExpr`'s drain, and for a value with no single-leaf Z3 sort
+        # (a `Table[int, _]` field) it degrades in-band via `allocDegrade` --
+        # so its pending taint was never folded onto ANY path and surfaced
+        # only as the walk-end leak stamp. Drain it onto the path that
+        # carries the stored value: the same post-allocation drain the READ
+        # arm's N42 note establishes above (idempotent; a no-op when nothing
+        # degraded).
+        child = drainPendingLowerEffects(child)
         survivors.add child
     survivors
   else:

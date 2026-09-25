@@ -184,7 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "140"
+const symexWalkerVersion* = "141"
+  ## RFC-0005 S1c (2026-09-25) — the verdict rule (§2.3). `isTargetLabel`
+  ## and `routeRaise` now SOLVE a tainted path instead of skipping it (a SAT
+  ## on an `scSpurious` path becomes a CANDIDATE in `w.candidates`, never a
+  ## winner, never halting the walk); `routeRaise` routes a tainted raise
+  ## through its handlers instead of killing the path (§2.6); the verdict is
+  ## the ordered procedure `decideVerdict` (a candidate blocks `sxUnsat`;
+  ## `sxUnsat` needs only `scIncomplete notin runTaint`); the kindless ⊤ run
+  ## mark is deleted. Under the all-⊤ `classOf` default no status moves, but
+  ## the walk explores more (handler bodies of tainted raises), records more
+  ## (`beSolverUndef` on a tainted path's solver unknown, the handler body's
+  ## own degrades) and the N40-4 heap-write pending-taint leak no longer
+  ## stamps `weInternalWalkerFault` — so a pre-S1c cached `sfUnknown`/`sfUnsat`
+  ## sentinel was produced by different walker semantics and must not be
+  ## served. 140->141.
   ## `/code-review` round 9 (2026-09-18) — two more members of the
   ## WIDTH-TRUNCATION FAMILY, both false SATs. The family's root shape: a value
   ## carrying a NARROWER width than its expression's declared type, so an

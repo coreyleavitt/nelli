@@ -87,12 +87,17 @@ suite "RFC-0005 S2 -- replayWitness":
   test "roRefuted: a fresh-symbol witness the real fn does not reach":
     ## The model of `probedSut` havocs `probe()`, so it admits `x = 100`
     ## (with the havoc at 0); reality's `probe()` returns 7, so on x = 100
-    ## `fn` runs to completion without reaching the label. Today's engine
-    ## cannot hand us this witness itself -- `isTargetLabel` skips a tainted
-    ## path until RFC-0005 S1c -- so the solver's choice is written out; it is
-    ## the INPUT to replay, and the outcome is what replay observes.
+    ## `fn` runs to completion without reaching the label. Since RFC-0005
+    ## S1c the engine DOES solve this tainted path -- but the model is a
+    ## CANDIDATE (`RawResult.candidates`, an untyped `RawWitness`), and the
+    ## public surface cannot hand it over until S10: under the all-⊤
+    ## `classOf` default the path carries `scSpurious`, so `symexFind`
+    ## reports `sxUnknown` (§2.3 rule 4), and typing a candidate's witness
+    ## into `fn`'s parameter tuple is the macro codegen S10 adds. So the
+    ## solver's choice is written out; it is the INPUT to replay, and the
+    ## outcome is what replay observes.
     let r = symexFind(probedSut, tLabel("probed"))
-    check r.status == sxUnknown   ## the tainted path is not solved (pre-S1c)
+    check r.status == sxUnknown   ## solved into a candidate, not surfaced (pre-S10)
     sideEffects = 0
     check replayWitness(probedSut, (100,), tLabel("probed"),
                         pathTaint(dcFreshSymbol)) == roRefuted

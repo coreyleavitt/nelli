@@ -180,7 +180,10 @@ proc isTaintWrite(code: string; field: string): bool =
           return true
       elif afterCh == ':' and (after + 1 >= code.len or code[after + 1] != ':'):
         let rest = code[after + 1 .. ^1].strip()
-        if not rest.startsWith("Taint"):
+        # A colon ending the line (bare, or before a `#` comment) opens a
+        # BLOCK -- `if scIncomplete notin runTaint:  # rule 5` is a read in
+        # `decideVerdict` (RFC-0005 S1c), not a constructor argument.
+        if rest.len > 0 and rest[0] != '#' and not rest.startsWith("Taint"):
           return true
     i = after
 
@@ -233,6 +236,8 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
     check not isTaintWrite("    taint: Taint      ## doc", "taint")
     check not isTaintWrite("  w.kindlessRunTaint = true", "runTaint")
     check not isTaintWrite("  let t = pathTaint(classOf(k))", "taint")
+    check not isTaintWrite("  if scIncomplete notin runTaint:   # rule 5", "runTaint")
+    check not isTaintWrite("  if scIncomplete notin runTaint:", "runTaint")
 
 suite "RFC-0005 S1 (e) -- the lowering pending-taint leak pin (§2.2 last paragraph)":
   let probe = rfc0005S1LeakPinProbe()

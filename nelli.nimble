@@ -757,5 +757,12 @@ task test, "Run the test suite":
             # target-shaped replayWitness macro, the dcFreshSymbol eligibility
             # gate, witness fidelity / target scope, and the stackable capture
             # context. Not yet wired into the verdict (S10); no walker bump.
-            "tsymex_rfc0005_s2_replay"]:
+            "tsymex_rfc0005_s2_replay",
+            # RFC-0005 S1c: the verdict rule -- isTargetLabel/routeRaise solve
+            # tainted paths into a candidate pool (never halting the walk),
+            # tainted raises are routed, the ordered decideVerdict procedure,
+            # the witness-monotonicity pin (tainted arm first), and the
+            # N40-4 / concolic pending-taint leak fixes. All-⊤: no status
+            # moves; walker 140->141.
+            "tsymex_rfc0005_s1c_verdict"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

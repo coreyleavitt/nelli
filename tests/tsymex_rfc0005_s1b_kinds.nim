@@ -24,8 +24,8 @@
 ##       the site's own kind and no `weInternalWalkerFault`;
 ##   (b) STRUCTURAL correspondence -- a `Degrade` token (the only thing that
 ##       can taint a path) is constructed ONLY inside the recording funnels,
-##       and the transitional kindless shim survives at exactly the two
-##       target/raise-route sites S1c replaces with the real solve.
+##       and no kindless shim remains (the last two -- the target/raise-route
+##       unsolved skips -- were replaced by the real solve in RFC-0005 S1c).
 import std/[unittest, strutils, os, algorithm, sets]
 import nelli/symex
 import nelli/smt/types
@@ -315,13 +315,21 @@ suite "RFC-0005 S1b (b) -- structural correspondence: a Degrade token exists onl
   test "the kindless PATH token is gone (every fork site now has a kind)":
     check scanSites("kindlessPathDegrade").len == 0
 
-  test "the kindless RUN mark survives at exactly the two sites S1c replaces with the real solve":
-    let ss = scanSites("kindlessRunDegrade")
-    checkpoint(report(ss))
-    check ss.len == 2
-    for x in ss:
-      check "RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve" in x.line
-    check routinesOf(ss) == @["runtime.nim:routeRaise", "runtime.nim:walk"]
+  test "the kindless RUN mark is gone too (RFC-0005 S1c: zero kindless sites -- every tainted path is solved)":
+    ## Was: the shim survived at exactly the two unsolved-skip sites (the
+    ## tainted `isTargetLabel` hit, the tainted `routeRaise` early return).
+    ## S1c replaced both with the real solve, so the invariant is now total:
+    ## no degrade, and no skip, marks the run without a recorded kind.
+    check scanSites("kindlessRunDegrade").len == 0
+    var left: seq[string]
+    for path in walkFiles(smtDir / "runtime*.nim"):
+      var ln = 0
+      for line in readFile(path).splitLines():
+        inc ln
+        if "kindlessRunTaint" in line or "kindlessRunDegrade" in line:
+          left.add path.extractFilename & ":" & $ln
+    checkpoint($left)
+    check left.len == 0
 
   test "no `RFC-0005 S1b: mint kind` worklist marker remains in src/":
     var left: seq[string]

@@ -700,7 +700,7 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
               emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
   of isUnsupported:
-    newCall(bindSym"mkUnsupported", newLit(s.reason))
+    newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason))
   of isUnsafeCast:
     newCall(bindSym"mkUnsafeCast", newLit(s.ucReason))
 
@@ -1364,7 +1364,7 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
            "range literal (kind " & $idxNode.kind & ") in `" & n.repr &
            "` — degraded to sxUnknown (feUnsupportedExprKind)")
     preamble.add mkUnsupported(
-      "seq `[]` with unrecognized index (feUnsupportedExprKind)")
+      feUnsupportedExprKind, "seq `[]` with unrecognized index (feUnsupportedExprKind)")
     let dummy = zeroValueForType(classifyType(n).ty)
     return (if dummy != nil: dummy else: mkIntLit(0))
 
@@ -1870,7 +1870,7 @@ proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
   ctx.parseErrors.add SymexErrorInfo(
     kind: seNestedSeqUnsupported, severity: sevError,
     msg: siteMsg(n, reason))
-  preamble.add mkUnsupported(reason & " (seNestedSeqUnsupported)")
+  preamble.add mkUnsupported(seNestedSeqUnsupported, reason)   # kind is structured (unKind); N12: no raw kind-name parenthetical in the rendered msg
   mkSeqLit(@[], fieldTy.seqElemTy, declinedPlaceholder = true)
 
 proc ctorIsRefAliasedVariant(n: NimNode): bool =
@@ -1921,7 +1921,7 @@ proc parseVariantCtorField(fieldName: string, fty: IRType,
              "` initialised from `" & valNode.repr & "`, which does " &
              "not resolve to a genuine ref/ptr address — this " &
              "expression shape is out of scope")
-      preamble.add mkUnsupported("A1: recursive ref-field " &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "A1: recursive ref-field " &
                                   "construction from an unresolvable " &
                                   "expression (feUnsupportedExprKind)")
       return mkNil(fty)
@@ -1939,7 +1939,7 @@ proc parseVariantCtorField(fieldName: string, fty: IRType,
         msg: "A1: omitted variant field `" & fieldName & "` of type " &
              $fty.kind & " in `" & ctorNode.repr &
              "` has no clean zero-value encoding")
-      preamble.add mkUnsupported("A1: omitted variant field `" &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "A1: omitted variant field `" &
                                   fieldName & "` zero-value " &
                                   "unmodeled (feUnsupportedExprKind)")
       return unsupportedFieldPlaceholder(fty)
@@ -2327,7 +2327,7 @@ proc declineIntWidthConv(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx,
     kind: feUnsupportedExprKind, severity: sevError,
     msg: siteMsg(n, "B2: " & note & " int conversion `" & src & "` -> `" &
                     tgt & "` (RFC-chapulin-hardening B2 recorded decline)"))
-  preamble.add mkUnsupported("B2: " & note & " int conversion " & src & "->" &
+  preamble.add mkUnsupported(feUnsupportedExprKind, "B2: " & note & " int conversion " & src & "->" &
                               tgt & " (feUnsupportedExprKind)")
   let dummy =
     if n.typeKind != ntyNone: zeroValueForType(classifyType(n).ty)
@@ -2505,7 +2505,7 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
         msg: siteMsg(n, "RFC-0005 s1: else-less case-expression whose type " &
                         "has no zero encoding — cannot make the (unreachable) " &
                         "fall-through edge total (feUnsupportedExprKind)"))
-      preamble.add mkUnsupported("RFC-0005 s1: else-less case-expression, " &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "RFC-0005 s1: else-less case-expression, " &
                                  "no zero-encodable type (feUnsupportedExprKind)")
       return mkIntLit(0)
     elseBody = mkLet(tmp, resultTy, zero)
@@ -2610,7 +2610,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                               "type; declining rather than embedding a " &
                               "positional guess (feEnumOrdinalUnresolved, " &
                               "issue #163 review R19)"))
-            preamble.add mkUnsupported("enum constant '" & s & "' ordinal " &
+            preamble.add mkUnsupported(feEnumOrdinalUnresolved, "enum constant '" & s & "' ordinal " &
                                        "unresolved (feEnumOrdinalUnresolved)")
             return mkIntLit(0)
         # `n` is not enum-typed at all (`directTy.kind != nnkEnumTy`) --
@@ -2721,7 +2721,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # no symex-representable body); the walker never descends it (it stubs the
     # whole iekLambda first).
     mkLambda(site.siteHash, site.declOrder, @[],
-             mkUnsupported("closure iterators not yet supported"),
+             mkUnsupported(ceNotImplemented, "closure iterators not yet supported"),
              captures, tBool())
   of nnkConv:
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
@@ -2985,7 +2985,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                  " -- hidden `$`-conversion of a " & $opndTy &
                  " operand in `" & n.repr &
                  "` (feUnsupportedExprKind)")
-          preamble.add mkUnsupported("CR-2a: unsupported hidden `$`-" &
+          preamble.add mkUnsupported(feUnsupportedExprKind, "CR-2a: unsupported hidden `$`-" &
                                       "conversion operand (feUnsupportedExprKind)")
           let dummy = zeroValueForType(dummyTy)
           if dummy != nil: dummy else: mkIntLit(0)
@@ -2995,7 +2995,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         kind: feUnsupportedExprKind, severity: sevError,
         msg: "CR-2a: unsupported expression kind " & $n.kind & " in `" &
              n.repr & "` — not in the supported expression fragment")
-      preamble.add mkUnsupported("CR-2a: unsupported expression kind " &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "CR-2a: unsupported expression kind " &
                                   $n.kind & " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(dummyTy)
       if dummy != nil: dummy else: mkIntLit(0)
@@ -3129,7 +3129,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         severity: sevError,
         msg: "unsupported infix operator `" & n[0].strVal & "` in `" &
              n.repr & "` — degraded to sxUnknown (feUnsupportedOp)")
-      preamble.add mkUnsupported("unsupported infix operator `" &
+      preamble.add mkUnsupported(feUnsupportedOp, "unsupported infix operator `" &
                                  n[0].strVal & "` (feUnsupportedOp)")
       let dummy = zeroValueForType(dummyTy)
       return (if dummy != nil: dummy else: mkIntLit(0))
@@ -3397,7 +3397,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         kind: feUnsupportedExprKind, severity: sevError,
         msg: "`[]` on unsupported type " & $lhsCls.ty & " in `" & n.repr &
              "` — degraded to sxUnknown (feUnsupportedExprKind)")
-      preamble.add mkUnsupported("`[]` on unsupported type " & $lhsCls.ty &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "`[]` on unsupported type " & $lhsCls.ty &
                                  " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(classifyType(n).ty)
       return (if dummy != nil: dummy else: mkIntLit(0))
@@ -3599,7 +3599,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         kind: feUnsupportedExprKind, severity: sevError,
         msg: "`.` on unsupported type " & $lhsCls.ty & " in `" & n.repr &
              "` — degraded to sxUnknown (feUnsupportedExprKind)")
-      preamble.add mkUnsupported("`.` on unsupported type " & $lhsCls.ty &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "`.` on unsupported type " & $lhsCls.ty &
                                  " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(classifyType(n).ty)
       return (if dummy != nil: dummy else: mkIntLit(0))
@@ -3683,7 +3683,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           kind: feUnsupportedExprKind, severity: sevError,
           msg: siteMsg(n, "A0: `" & calleeSym.strVal & "` on a non-int-" &
                           "family type/value (" & tyName & ") is out of scope"))
-        preamble.add mkUnsupported("A0: low/high on non-int-family type " &
+        preamble.add mkUnsupported(feUnsupportedExprKind, "A0: low/high on non-int-family type " &
                                     tyName & " (feUnsupportedExprKind)")
         # A TYPE-CORRECT literal dummy (CR-2a's own idiom, `dsl_parser.nim`
         # catch-all below), not an unbound-env `mkVar` reference: unlike the
@@ -3878,7 +3878,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             severity: sevError,
             msg: "A7-S3: runeLen(symbolic) — UTF-8 grouping over unknown byte " &
                  "stream; no quantifier-free Z3 encoding (ADR-0017)")
-          preamble.add mkUnsupported("symex A7-S3: runeLen(symbolic) unsupported " &
+          preamble.add mkUnsupported(seZ3StringIncomplete, "symex A7-S3: runeLen(symbolic) unsupported " &
                                      "(seZ3StringIncomplete)")
           return mkIntLit(0)   # unreachable: walker halts on sawUnknown from above
     # Phase 15 C2b: the receiver of a string-builtin must be type-classifiable.
@@ -4008,7 +4008,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                    ") in `" & n.repr &
                    "` — degraded to sxUnknown (feUnsupportedExprKind)")
             preamble.add mkUnsupported(
-              "string `[]` with unrecognized index (feUnsupportedExprKind)")
+              feUnsupportedExprKind, "string `[]` with unrecognized index (feUnsupportedExprKind)")
             let dummy = zeroValueForType(classifyType(n).ty)
             return (if dummy != nil: dummy else: mkStrLit(""))
         # Phase 15 S3: `s.high` is byte-faithfully `len(s) - 1` (ADR-0006) —
@@ -4099,7 +4099,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                  n.repr & "` is not modeled (ADR-0026 covers literal " &
                  "specs) — degraded to sxUnknown (seUnsupportedStringOp)")
           preamble.add mkUnsupported(
-            "strip with non-literal spec (seUnsupportedStringOp)")
+            seUnsupportedStringOp, "strip with non-literal spec (seUnsupportedStringOp)")
           return mkStrLit("")
         let sm = getStdlibModelFor(calleeSym.strVal, itString)
         # Phase 15 G8: a call whose FIRST arg is an `itString` is NOT necessarily
@@ -4694,7 +4694,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                           "(heRefVariantUnsupported); a ref-variant " &
                           "constructor needs its own ADR revisiting that " &
                           "read gap"))
-        preamble.add mkUnsupported("A1: ref-aliased variant object " &
+        preamble.add mkUnsupported(feUnsupportedExprKind, "A1: ref-aliased variant object " &
                                     "constructor unmodeled " &
                                     "(feUnsupportedExprKind)")
         # #163 regression fix (post-round-9 gate): a BOUND, type-correct
@@ -4722,7 +4722,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           kind: feUnsupportedExprKind, severity: sevError,
           msg: siteMsg(n, "A1: variant object constructor missing its " &
                           "discriminant field `" & objTyFull.vDiscName & "`"))
-        preamble.add mkUnsupported("A1: variant constructor missing " &
+        preamble.add mkUnsupported(feUnsupportedExprKind, "A1: variant constructor missing " &
                                     "discriminant (feUnsupportedExprKind)")
         # #163 regression fix (post-round-9 gate): bound dummy, not a
         # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
@@ -4754,7 +4754,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                             "shared/plain field — Nim itself only accepts " &
                             "a non-constant discriminant when no arm-" &
                             "specific field is initialised"))
-          preamble.add mkUnsupported("A3: symbolic-discriminant " &
+          preamble.add mkUnsupported(feUnsupportedExprKind, "A3: symbolic-discriminant " &
                                       "constructor with an arm-specific " &
                                       "field unmodeled (feUnsupportedExprKind)")
           # #163 regression fix (post-round-9 gate): bound dummy, not a
@@ -4803,7 +4803,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           msg: siteMsg(n, "A1: variant construction with a tag not " &
                           "covered by an explicit (non-else) arm is out " &
                           "of scope"))
-        preamble.add mkUnsupported("A1: else-covered/unresolved-tag " &
+        preamble.add mkUnsupported(feUnsupportedExprKind, "A1: else-covered/unresolved-tag " &
                                     "variant constructor unmodeled " &
                                     "(feUnsupportedExprKind)")
         # #163 regression fix (post-round-9 gate): bound dummy, not a
@@ -4840,7 +4840,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                         "is out of scope — ADR-0029 ships multi-case " &
                         "construction as its own slice only if a " &
                         "consumer needs it first"))
-      preamble.add mkUnsupported("itMultiVariant object constructor " &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "itMultiVariant object constructor " &
                                   "unmodeled (feUnsupportedExprKind)")
       # #163 regression fix (post-round-9 gate): a BOUND, type-correct dummy
       # (mirrors `declineIntWidthConv`'s "never an unbound `mkVar`"
@@ -4866,7 +4866,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         kind: feUnsupportedExprKind, severity: sevError,
         msg: siteMsg(n, "P2b: object constructor classified to an " &
                         "unexpected shape " & $objTyFull.kind))
-      preamble.add mkUnsupported("P2b: unexpected object-constructor shape " &
+      preamble.add mkUnsupported(feUnsupportedExprKind, "P2b: unexpected object-constructor shape " &
                                   "(feUnsupportedExprKind)")
       # #163 regression fix (post-round-9 gate): bound dummy, not a
       # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
@@ -4925,7 +4925,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             msg: "P2b: ref-typed field `" & fieldName & "` initialised from `" &
                  valNode.repr & "`, which does not resolve to a genuine " &
                  "ref/ptr address — this expression shape is out of scope")
-          preamble.add mkUnsupported("P2b: recursive ref-field construction " &
+          preamble.add mkUnsupported(feUnsupportedExprKind, "P2b: recursive ref-field construction " &
                                       "from an unresolvable expression " &
                                       "(feUnsupportedExprKind)")
           valIR = mkNil(fty)
@@ -4960,7 +4960,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             msg: "P2b: ref-typed field `" & fieldName & "` initialised from `" &
                  valNode.repr & "`, which does not resolve to a genuine " &
                  "ref/ptr address — this expression shape is out of scope")
-          preamble.add mkUnsupported("P2b: recursive ref-field construction " &
+          preamble.add mkUnsupported(feUnsupportedExprKind, "P2b: recursive ref-field construction " &
                                       "from an unresolvable expression " &
                                       "(feUnsupportedExprKind)")
           elems.add mkNil(fty)
@@ -4983,7 +4983,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             msg: "P2a: omitted field `" & fieldName & "` of type " &
                  $fty.kind & " in `" & n.repr &
                  "` has no clean zero-value encoding")
-          preamble.add mkUnsupported("P2a: omitted field `" & fieldName &
+          preamble.add mkUnsupported(feUnsupportedExprKind, "P2a: omitted field `" & fieldName &
                                       "` zero-value unmodeled " &
                                       "(feUnsupportedExprKind)")
           # R8 (deferred LOW finding): a KIND-correct placeholder, never a
@@ -5017,7 +5017,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       severity: sevError,
       msg: "CR-2a: unsupported expression kind " & $n.kind & " in `" &
            n.repr & "` — not in the supported expression fragment")
-    preamble.add mkUnsupported("CR-2a: unsupported expression kind " &
+    preamble.add mkUnsupported(feUnsupportedExprKind, "CR-2a: unsupported expression kind " &
                                 $n.kind & " (feUnsupportedExprKind)")
     let dummy = zeroValueForType(dummyTy)
     if dummy != nil: dummy
@@ -7311,7 +7311,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
           msg: "R14: short-circuit while-guard shape unmodeled (nested " &
                "and-chain with a fault on the guard's LHS, body contains " &
                "continue) — sound degrade")
-        mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+        mkUnsupported(feUnsupportedOp, "R14: short-circuit while-guard shape unmodeled " &
           "(nested and-chain with a fault on the guard's LHS, body contains " &
           "continue) — sound degrade")
     else:
@@ -7334,7 +7334,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
           kind: feUnsupportedOp, severity: sevError,
           msg: "R14: short-circuit while-guard shape unmodeled (or-with-fault " &
                "/ nested, body contains continue) — sound degrade")
-        mkUnsupported("R14: short-circuit while-guard shape unmodeled " &
+        mkUnsupported(feUnsupportedOp, "R14: short-circuit while-guard shape unmodeled " &
           "(or-with-fault / nested, body contains continue) — sound degrade")
   ctx.inGuardCond = savedInGuardCond
   # N20 (RFC-chapulin-hardening bucket-2): when `result` came out a plain
@@ -7397,11 +7397,11 @@ proc parseIterBodyStmt(n: NimNode,
              yieldExprRaw[1].kind == nnkTupleConstr: yieldExprRaw[1]
         else: nil
       if tupleConstr == nil:
-        return mkUnsupported("A3-S2a: multi-var for-loop requires explicit tuple " &
+        return mkUnsupported(feUnsupportedStmtKind, "A3-S2a: multi-var for-loop requires explicit tuple " &
           "constructor in yield (got " & $yieldExprRaw.kind &
           " — indirect tuple variable not supported; ADR-0014 S2, Invariant 3)")
       if tupleConstr.len != iterVarBindings.len:
-        return mkUnsupported("A3-S2a: arity mismatch — yield tuple has " &
+        return mkUnsupported(feUnsupportedStmtKind, "A3-S2a: arity mismatch — yield tuple has " &
           $tupleConstr.len & " elements, for-loop has " &
           $iterVarBindings.len & " vars (ADR-0014 S2, Invariant 3)")
       # Emit one `let varK = elemK` per loop variable, in order.
@@ -7872,7 +7872,7 @@ proc parseStmtInner(n: NimNode,
               # static path was ever implemented for multi-axis).
               return mkVariantReassignSymbolic(
                 recv.strVal, ax.discName, tagIR)
-    mkUnsupported(&"unsupported nnkAsgn shape: {n.repr}")
+    mkUnsupported(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
     # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 / B6 (ADR-0028): try the
@@ -8029,7 +8029,7 @@ proc parseStmtInner(n: NimNode,
           msg: "Phase 15 S3: `for c in s` over a symbolic string — unbounded " &
                "iteration length has no sound bounded encoding (ADR-0006, " &
                "seByteIterUnsupported)")
-        return mkUnsupported("symex Phase 15 S3: `for c in s` over a symbolic " &
+        return mkUnsupported(seByteIterUnsupported, "symex Phase 15 S3: `for c in s` over a symbolic " &
           "string is unsupported (unbounded symbolic iteration length, " &
           "not a byte/codepoint mismatch — ADR-0006)")
       let body = parseStmt(bodyNode, ctx)
@@ -8071,7 +8071,7 @@ proc parseStmtInner(n: NimNode,
         mkBlock(allStmts)
       else:
         # itString is handled by the early return above (before body parse).
-        mkUnsupported(&"unsupported for-loop container kind: {recvCls.ty.kind}")
+        mkUnsupported(feUnsupportedStmtKind, &"unsupported for-loop container kind: {recvCls.ty.kind}")
     elif iterExpr.kind == nnkCall and iterExpr.len >= 1 and
          iterExpr[0].kind == nnkSym:
       # Phase 16 A7-S3: intercept `for r in s.runes` / `for r in lit.runes`
@@ -8109,7 +8109,7 @@ proc parseStmtInner(n: NimNode,
                 msg: "A7-S3: `for r in s.runes` over symbolic string — UTF-8 " &
                      "grouping over unknown byte stream; no quantifier-free Z3 " &
                      "encoding (ADR-0017)")
-              return mkUnsupported("symex A7-S3: `for r in s.runes` over " &
+              return mkUnsupported(seZ3StringIncomplete, "symex A7-S3: `for r in s.runes` over " &
                                    "symbolic string unsupported (seZ3StringIncomplete)")
           # Non-unicode origin: break to fall through to A3 path below.
       # ---- A3-S1/S2a (ADR-0014): inline direct-call closure/inline iterator ------
@@ -8120,7 +8120,7 @@ proc parseStmtInner(n: NimNode,
       var loopVarNames: seq[string]
       for vi in 0 ..< n.len - 2:
         if n[vi].kind != nnkSym:
-          return mkUnsupported("A3-S2a: loop variable at index " & $vi &
+          return mkUnsupported(feUnsupportedStmtKind, "A3-S2a: loop variable at index " & $vi &
             " is " & $n[vi].kind & " (expected nnkSym; ADR-0014 S2)")
         loopVarNames.add n[vi].strVal
       let itSym = iterExpr[0]
@@ -8134,21 +8134,21 @@ proc parseStmtInner(n: NimNode,
         # ---- Step 0: soundness pre-scans — ALL must pass; any failure → degrade
         # (a) Require ≥1 surface yield (catches post-transf state-machine lowering)
         if not hasYieldShallow(implBody):
-          return mkUnsupported("iterator " & itSym.strVal & " has no surface " &
+          return mkUnsupported(feUnsupportedStmtKind, "iterator " & itSym.strVal & " has no surface " &
             "nnkYieldStmt — may be post-transf lowered; cannot inline " &
             "(ADR-0014 D2-0a, CRIT-4)")
         # (b) No bare `return` in body — early-finish mis-modeled by proc-return
         if hasReturnShallow(implBody):
-          return mkUnsupported("iterator " & itSym.strVal & " contains `return` " &
+          return mkUnsupported(feUnsupportedStmtKind, "iterator " & itSym.strVal & " contains `return` " &
             "— early-finish not yet modeled in A3-S1 (ADR-0014 D2-0b, CRIT-1)")
         # (c) No break/continue in the raw for-body (unsound for finite iterators)
         if hasBreakContinueShallow(bodyNode):
-          return mkUnsupported("for-body contains `break`/`continue` — unsound " &
+          return mkUnsupported(feUnsupportedStmtKind, "for-body contains `break`/`continue` — unsound " &
             "for finite iterators in A3-S1; lifted in S2 (ADR-0014 D2-0c, CRIT-2)")
         # (d) Recursion guard: if this iterator is already being inlined, degrade
         let itSymName = itSym.strVal
         if itSymName in ctx.activeIterators:
-          return mkUnsupported("recursive iterator " & itSymName &
+          return mkUnsupported(feUnsupportedStmtKind, "recursive iterator " & itSymName &
             " — cannot inline (ADR-0014 D2-0d, CRIT-3)")
         # (e) Non-trivial default params that can't safely be evaluated out-of-scope
         let formal = impl[3]  # nnkFormalParams: [retTy, IdentDefs…]
@@ -8169,7 +8169,7 @@ proc parseStmtInner(n: NimNode,
                 let isConst = defaultNode.kind == nnkSym and
                               symKind(defaultNode) in {nskConst, nskEnumField}
                 if not isLit and not isConst:
-                  return mkUnsupported("iterator " & itSymName & " param " &
+                  return mkUnsupported(feUnsupportedStmtKind, "iterator " & itSymName & " param " &
                     paramDef[pj].strVal & " has non-trivial default — cannot " &
                     "safely evaluate out-of-scope (ADR-0014 D2-0e, N-2)")
               inc argIdx
@@ -8213,12 +8213,12 @@ proc parseStmtInner(n: NimNode,
           # Require itTuple return type with matching arity — degrade otherwise.
           if yieldElemTyTop.kind != itTuple:
             ctx.activeIterators.excl itSymName
-            return mkUnsupported("A3-S2a: multi-var for requires itTuple iterator " &
+            return mkUnsupported(feUnsupportedStmtKind, "A3-S2a: multi-var for requires itTuple iterator " &
               "return type; got " & $yieldElemTyTop.kind &
               " (ADR-0014 S2, Invariant 3)")
           if yieldElemTyTop.fields.len != loopVarNames.len:
             ctx.activeIterators.excl itSymName
-            return mkUnsupported("A3-S2a: arity mismatch — iterator tuple has " &
+            return mkUnsupported(feUnsupportedStmtKind, "A3-S2a: arity mismatch — iterator tuple has " &
               $yieldElemTyTop.fields.len & " fields, for-loop has " &
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
@@ -8233,10 +8233,10 @@ proc parseStmtInner(n: NimNode,
         else:
           bodyIR
       else:
-        mkUnsupported(&"unsupported for-loop iterable: {itSym.strVal} is not a " &
+        mkUnsupported(feUnsupportedStmtKind, &"unsupported for-loop iterable: {itSym.strVal} is not a " &
           "resolvable direct iterator call (ADR-0014 D1)")
     else:
-      mkUnsupported(&"unsupported for-loop iterable shape: {iterExpr.kind}")
+      mkUnsupported(feUnsupportedStmtKind, &"unsupported for-loop iterable shape: {iterExpr.kind}")
   of nnkBreakStmt:
     mkBreak()
   of nnkContinueStmt:
@@ -8295,7 +8295,7 @@ proc parseStmtInner(n: NimNode,
       # is irrelevant; getImpl on a nskLet sym returns IdentDefs, not nnkIteratorDef,
       # so D1 emits mkUnsupported too → sxUnknown (CRIT-5, D6 deferred).
       if valNode.kind == nnkSym and symKind(valNode) == nskIterator:
-        stmts.add mkUnsupported("iterator value binding `" & valNode.strVal &
+        stmts.add mkUnsupported(feUnsupportedStmtKind, "iterator value binding `" & valNode.strVal &
           "` not supported (ADR-0014 D6 deferred)")
         continue
       # Uninitialized `var x: T` (no initializer): the value node is nnkEmpty.
@@ -8310,7 +8310,7 @@ proc parseStmtInner(n: NimNode,
           if zero != nil:
             stmts.add mkLet(id[j].strVal, classified.ty, zero)
           else:
-            stmts.add mkUnsupported("uninitialized `var` of unmodeled type " &
+            stmts.add mkUnsupported(feUnsupportedStmtKind, "uninitialized `var` of unmodeled type " &
               $classified.ty.kind & " (zero-init not modeled this cycle)")
         continue
       let valIR = parseExpr(valNode, preamble, ctx)
@@ -8370,7 +8370,7 @@ proc parseStmtInner(n: NimNode,
         kind: hePtrArith,
         severity: sevError,
         msg: "pointer arithmetic (inc/dec) not modeled")
-      mkUnsupported("pointer arithmetic `" & n[0].strVal &
+      mkUnsupported(hePtrArith, "pointer arithmetic `" & n[0].strVal &
                     "` on a ptr operand is unsupported (Cluster R R8)")
     elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
          (block:
@@ -8404,7 +8404,7 @@ proc parseStmtInner(n: NimNode,
       # against typed AST — isolation-mode falls to `isUnsupported`.
       let calleeSym = n[0]
       if calleeSym.kind != nnkSym:
-        mkUnsupported(&"call to `{n[0].repr}` not in supported fragment")
+        mkUnsupported(feUnsupportedStmtKind, &"call to `{n[0].repr}` not in supported fragment")
       # Phase 15 R13 (sub-track A). A CLOSURE CALL through a proc-valued
       # variable/param in STATEMENT position (e.g. `capture()` — a `let`-bound
       # closure called for its effect, with NO args). The expression-position
@@ -8618,7 +8618,7 @@ proc parseStmtInner(n: NimNode,
             msg: siteMsg(n, "N49: dotted-field lvalue mutation `" &
                             recv1.repr & "." & calleeName &
                             "(...)` unsupported (feUnsupportedOp)"))
-          mkUnsupported("N49: dotted-field lvalue mutation `" & calleeName &
+          mkUnsupported(feUnsupportedOp, "N49: dotted-field lvalue mutation `" & calleeName &
                         "` unsupported (feUnsupportedOp)")
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
@@ -8796,7 +8796,7 @@ proc parseStmtInner(n: NimNode,
               mkStrOp(iekStrConcat, "&", @[mkVar(nm), rhsIR]))
           else:
             return mkUnsupported(
-              &"augmented assign: `&=` with non-string LHS/RHS " &
+              feUnsupportedStmtKind, &"augmented assign: `&=` with non-string LHS/RHS " &
               &"(lhs kind={lhsCls.ty.kind}) not modeled; degrade to " &
               &"sxUnknown (sound, Invariant 3)")
         let bop      = binopForInfix(baseOpStr)
@@ -8811,14 +8811,14 @@ proc parseStmtInner(n: NimNode,
         return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
       else:
         return mkUnsupported(
-          &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
+          feUnsupportedStmtKind, &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")
     mkUnsupported(
-      &"augmented assign: operator `{n[0].repr}` not in supported set " &
+      feUnsupportedStmtKind, &"augmented assign: operator `{n[0].repr}` not in supported set " &
       &"{{+=,-=,*=,&=}} or wrong AST shape (len={n.len}); " &
       &"degrade to sxUnknown (sound, Invariant 3)")
   else:
-    mkUnsupported(&"statement kind {n.kind} not in supported fragment")
+    mkUnsupported(feUnsupportedStmtKind, &"statement kind {n.kind} not in supported fragment")
 
 proc scanForHiddenMarkers(n: NimNode): seq[tuple[kind: string, name: string]] =
   ## Phase 14 cycle B67. Recursively scan a Nim sub-AST for
@@ -9221,7 +9221,9 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
       msg: "cannot resolve `getImpl` for callee `" & name &
            "` (generic / private cross-module / built-in / func) — call " &
            "degraded to sxUnknown (feUnsupportedOp)")
-    return "__unresolved:" & name
+    # RFC-0005 S1b: the never-registered key encodes this decline's kind, so
+    # the walker's missing-callee arm records it at the walk site.
+    return unregisteredCalleeKey(feUnsupportedOp, name)
   # Phase 15 G5. `geDistinctBarrier` (Invariant 3 — never a silent fallback). A
   # NON-borrowed proc taking a `distinct T` param whose body is NOT parseable
   # (`impl[6] == nnkEmpty`, e.g. an `{.importc.}` / magic on a distinct type)
@@ -9251,7 +9253,9 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
              "` with no parseable body and no `{.borrow.}` pragma — the " &
              "distinct type wall forbids walking it (Invariant 3); result is " &
              "sxUnknown")
-      return instKeyFor(calleeSym, initTable[string, NimNode](), impl)
+      # RFC-0005 S1b: kind-encoding unregistered key (see `types.nim`).
+      return unregisteredCalleeKey(geDistinctBarrier,
+        instKeyFor(calleeSym, initTable[string, NimNode](), impl))
   # Detect generic procs. In typed AST, the generic-params live in
   # impl[2] (untyped) or nested in impl[5] (typed). Either way, we
   # use the call's `getType` reads to derive the substitution.
@@ -9293,7 +9297,10 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
         msg: "generic proc `" & name & "` exceeded maxInstantiationsPerProc=" &
              $cap & " (observedCount=" & $(prior + 1) & "); instantiation `" &
              key & "` not registered — result is sxUnknown")
-      return key
+      # RFC-0005 S1b: kind-encoding unregistered key (see `types.nim`), so
+      # the walker's missing-callee arm records `geInstantiationCapped` at
+      # the walk site instead of a kindless taint.
+      return unregisteredCalleeKey(geInstantiationCapped, key)
     ctx.instCounts[baseId] = prior + 1
   ctx.parsing.incl key
   # D4 (design finding, accepted): every field of `ctx.procScoped` — a

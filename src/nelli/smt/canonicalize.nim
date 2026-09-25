@@ -4337,7 +4337,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"
   of isUnsupported:
-    "St<Un:" & s.reason.escape & ">"
+    # RFC-0005 S1b: the node's classified kind is content-addressed alongside
+    # the reason -- once S4-S6 reclassify, the kind alone decides the node's
+    # `DegradeClass` (and so the verdict), so two nodes differing only in
+    # kind must never share a cache entry.
+    "St<Un:" & $s.unKind & ";" & s.reason.escape & ">"
   of isUnsafeCast:
     # Phase 15 R11. Content-address by the routed pointer-materialisation reason.
     "St<Uc:" & s.ucReason.escape & ">"

@@ -1110,6 +1110,14 @@ type
                              ## array `refPointeeTypeId(dwObjTy) & "__" & dwField`.
       dwObjTy*:    IRType    ## Phase 15 R6: the OBJECT pointee type (`Ref_T` sort).
     of isUnsupported:
+      unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
+                                 ## walker's `isUnsupported` arm records via
+                                 ## `degrade()` when a path reaches this node
+                                 ## (§2.2: the node used to carry free text
+                                 ## only, so the arm tainted with no error).
+                                 ## A Class-A site passes the SAME kind as its
+                                 ## parse-time error; a Class-B site passes
+                                 ## `feUnsupportedStmtKind`.
       reason*: string            ## human-readable diagnostic
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
@@ -1734,7 +1742,88 @@ type
                           ## applicable consequence of an existing, honestly-
                           ## classified construction gap. sevError ->
                           ## sxUnknown (Invariant 3). Appended at enum tail
-                          ## (ordinal stability).
+                          ## (ordinal stability). The RFC-0005 S1b kinds were
+                          ## appended after it, so this is no longer the last
+                          ## member -- append new kinds after the CURRENT tail.
+    # ---- RFC-0005 S1b (§2.2 "the premise 'every taint site has a kind in
+    # hand' is false"): the kinds for the degrade sites that recorded NO
+    # `SymexErrorInfo` before S1b. Each of these sites used to reach the
+    # drain only through a transitional kindless ⊤ mark, so a run whose ONLY
+    # degrade was one of them hit the Invariant-7 backstop and was stamped
+    # `weInternalWalkerFault` -- a walker-bug attribution for an ordinary,
+    # classifiable degrade. Every one is routed through `degrade()`
+    # (`runtime.nim`), which records. All six are `dcNoAnswer` in `classOf`
+    # (the conservative ⊤ default); S4-S6 reclassify. Appended at the enum
+    # tail, in this order (ordinal stability).
+    feUnsupportedStmtKind ## RFC-0005 S1b: a STATEMENT-position shape outside
+                          ## the supported fragment that the parser replaces
+                          ## by an `isUnsupported` node WITHOUT a parse-time
+                          ## error of its own (§2.5's "Class-B" sites in
+                          ## `dsl_parser.nim`: the `statement kind ... not in
+                          ## supported fragment` catch-all, unmodelled
+                          ## `nnkAsgn`/augmented-assign shapes, a statement
+                          ## call outside the fragment, the A3/ADR-0014
+                          ## iterator-inlining declines, an uninitialised
+                          ## `var` of an unmodelled type). The statement is
+                          ## DROPPED -- its effects never reach `env` -- so the
+                          ## surviving path is tainted. The kind rides the
+                          ## `isUnsupported` node (`IRStmt.unKind`) and is
+                          ## recorded by the walker's `isUnsupported` arm when
+                          ## a path reaches it. The expression-position
+                          ## sibling is `feUnsupportedExprKind` (Class-A,
+                          ## paired with a parse error). sevError -> sxUnknown.
+    weRecursionCycleCut   ## RFC-0005 S1b: the `isCall` arm met a call whose
+                          ## `argShapeKey` is already on `w.activeCalls` --
+                          ## the callee is being walked further up the stack
+                          ## with an identical argument shape (mutual/direct
+                          ## recursion, or an `argShapeKey` hash collision).
+                          ## The cycle is CUT: the call returns a fresh
+                          ## unconstrained `_cyc` symbol, the callee's body
+                          ## (its var-param/heap effects and raises) is not
+                          ## walked for this occurrence, and the path is
+                          ## tainted. Before S1b it recorded nothing and did
+                          ## not mark the run (only a later tainted target
+                          ## hit did). sevError -> sxUnknown.
+    eeHandlerReraiseUnmodelled ## RFC-0005 S1b: a bare `raise` (re-raise)
+                          ## reached with a NON-empty handler stack but no
+                          ## in-flight exception -- e.g. a bare `raise` in a
+                          ## `try` BODY, where real Nim raises
+                          ## `ReraiseDefect`. Not modelled; the path is
+                          ## dropped. Distinct from `eeRaiseOutsideHandler`
+                          ## (empty handler stack). sevError -> sxUnknown.
+    ceClosureBodyDiverged ## RFC-0005 S1b: a closure application
+                          ## (`applyClosureGround`) whose body produced NO
+                          ## value-bearing exit at all -- no `return`, no
+                          ## fall-through (every body path raised, halted or
+                          ## was dropped) -- so the call's result symbol is
+                          ## unconstrained by any body path. A void closure
+                          ## that falls through is NOT this (it has
+                          ## fall-through paths). Recorded in the WALK sink,
+                          ## not the closure sink: it must not trip the
+                          ## closure veto (`closureForcedUnknown`), which it
+                          ## never did before S1b. sevError -> sxUnknown.
+    weBreakOutsideLoop    ## RFC-0005 S1b: an `isBreak`/`isContinue` reached
+                          ## with an EMPTY loop stack. Surface route: the
+                          ## parser flattens `block:` into its body, so a
+                          ## `break` out of a top-level `block` arrives here
+                          ## with no loop frame; the breaking path is dropped
+                          ## instead of resuming after the block. (`continue`
+                          ## outside a loop is rejected by Nim itself, so it
+                          ## is reachable only from hand-built IR.) sevError
+                          ## -> sxUnknown.
+    beSolverUndef         ## RFC-0005 S1b (§3.1's solver-undef row): `trySolve`
+                          ## returned `zsUnknown` -- Z3 gave up on a path that
+                          ## reached a finding (the `isTargetLabel` hit or
+                          ## `routeRaise`'s raised finding): the deterministic
+                          ## `queryRLimit` truncation, or an incomplete theory.
+                          ## Distinct from the `ekZ3*` kinds, which are minted
+                          ## only from RAISED Z3 exceptions, never from an
+                          ## unknown RESULT; before S1b this recorded nothing,
+                          ## so a run whose only degrade was a routine solver
+                          ## resource-out was stamped `weInternalWalkerFault`.
+                          ## The natural carrier for the rlimit provenance
+                          ## RFC-0005 §8.2 owes RFC-0011/0008. sevError ->
+                          ## sxUnknown.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2346,6 +2435,13 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feTransparentResultUsed: dcNoAnswer
   of feGlobalReadUnmodelled: dcNoAnswer
   of seVariantFieldOnDeclinedCtor: dcNoAnswer
+  # RFC-0005 S1b: the minted kinds -- still the conservative default.
+  of feUnsupportedStmtKind: dcNoAnswer
+  of weRecursionCycleCut: dcNoAnswer
+  of eeHandlerReraiseUnmodelled: dcNoAnswer
+  of ceClosureBodyDiverged: dcNoAnswer
+  of weBreakOutsideLoop: dcNoAnswer
+  of beSolverUndef: dcNoAnswer
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -3548,8 +3644,51 @@ proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
          dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy)
 
-proc mkUnsupported*(reason: string): IRStmt =
-  IRStmt(kind: isUnsupported, reason: reason)
+proc mkUnsupported*(kind: SymexErrorKind; reason: string): IRStmt =
+  ## RFC-0005 S1b. An `isUnsupported` node now carries the classified `kind`
+  ## the walker records when a path reaches it (§2.2). Reuse the kind the
+  ## site already classifies under -- a Class-A site passes its parse-time
+  ## error's kind -- and `feUnsupportedStmtKind` for a statement-position
+  ## Class-B decline. RFC-0005 §3.2's standing rule applies: the kind you
+  ## pass asserts your site shares that kind's substitution class.
+  IRStmt(kind: isUnsupported, unKind: kind, reason: reason)
+
+# ---- RFC-0005 S1b: unregistered-callee keys (§2.5 point 3) ------------------
+# The parser declines three kinds of callee by NOT registering a `ProcSig`
+# (an over-cap generic instantiation, `geInstantiationCapped`; a bodyless
+# non-borrow proc over a `distinct` type, `geDistinctBarrier`; an unresolvable
+# `getImpl`, `feUnsupportedOp`) and still emits the `mkCall`, so the walker's
+# missing-callee arm degrades the reaching path. The arm used to have no kind
+# in hand (it lived only in `prog.parseErrors`). The callee KEY is the anchor:
+# the parser mints the unregistered key through `unregisteredCalleeKey`,
+# which encodes the decline's kind, and the walker reads it back with
+# `unregisteredCalleeKind` -- one kind mention at the parse site, recorded at
+# the walk site. The key is never registered, so it can never shadow a real
+# `ProcSig`.
+
+const unregisteredCalleePrefix = "__unregistered:"
+
+proc unregisteredCalleeKey*(kind: SymexErrorKind; key: string): string =
+  ## The `mkCall` callee key for a declined, never-registered callee.
+  unregisteredCalleePrefix & $kind & ":" & key
+
+proc unregisteredCalleeKind*(callee: string;
+                             kind: var SymexErrorKind): bool =
+  ## Reads back the decline kind `unregisteredCalleeKey` encoded. `false` for
+  ## any other key (a missing callee with no parse-time decline behind it).
+  ## (Plain slicing, no `strutils`: this module imports it only further down.)
+  const pl = unregisteredCalleePrefix.len
+  if callee.len <= pl or callee[0 ..< pl] != unregisteredCalleePrefix:
+    return false
+  var colon = pl
+  while colon < callee.len and callee[colon] != ':': inc colon
+  if colon == pl or colon >= callee.len: return false
+  let name = callee[pl ..< colon]
+  for k in SymexErrorKind:
+    if $k == name:
+      kind = k
+      return true
+  false
 
 proc mkUnsafeCast*(reason: string): IRStmt =
   ## Phase 15 R11 (ADR-0010, RFC §R11). Construct an `isUnsafeCast` node for an
@@ -3960,5 +4099,5 @@ proc render*(s: IRStmt): string =
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""
     "deref<" & fam & ">(" & render(s.dwPtr) & ")" & fld & ":" & $s.dwElemTy &
       "=" & render(s.dwValue)
-  of isUnsupported:  "unsupported(" & s.reason & ")"
+  of isUnsupported:  "unsupported(" & $s.unKind & ": " & s.reason & ")"
   of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"

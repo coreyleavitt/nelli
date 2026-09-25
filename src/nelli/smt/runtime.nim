@@ -7756,10 +7756,11 @@ type
       ## transitional `kindlessRunTaint`. `{}` for the whole walk until then.
       ## Pinned by the writer grep-pin.
     kindlessRunTaint: bool
-      ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). Set by
-      ## `kindlessRunDegrade` at the degrade sites that record no
-      ## `SymexErrorInfo` yet (each marked `# RFC-0005 S1b: mint kind`);
-      ## joined into `runTaint` as ⊤ at drain so S1 stays behaviour-preserving.
+      ## TRANSITIONAL (RFC-0005 S1 → deleted by S1c). Set by
+      ## `kindlessRunDegrade` at the two sites that skip solving a tainted
+      ## path (`isTargetLabel`, `routeRaise`; each marked `# RFC-0005 S1c:
+      ## replaced by the isTargetLabel/routeRaise solve`); joined into
+      ## `runTaint` as ⊤ at drain. Since S1b every other degrade records.
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
@@ -8052,28 +8053,25 @@ proc takeLoweringPendingDegrade(): Degrade =
   result = Degrade(path: loweringPendingTaint)
   loweringPendingTaint = {}
 
-# ---- RFC-0005 S1: TRANSITIONAL kindless shim — S1b deletes this block ------
-# RFC-0005 §2.2 "The premise 'every taint site has a kind in hand' is false":
-# a handful of degrade sites record NO `SymexErrorInfo` today, so the
-# drain-time derivation of `w.runTaint` cannot see them. Until S1b mints their
-# kinds (and routes them through `degrade`), these two primitives keep S1
-# behaviour-preserving: `kindlessRunDegrade` marks the run exactly where the
-# site used to write `w.sawUnknown = true` (joined as ⊤ at drain — the
-# conservative `dcNoAnswer` default), and `kindlessPathDegrade` supplies the
-# ⊤ token a kindless FORK site hands to `forkPathTainted`. Every call site
-# carries a `# RFC-0005 S1b: mint kind (<site>)` marker naming itself, so S1b's
-# worklist is `grep 'RFC-0005 S1b: mint kind'`. Neither is a sanctioned
-# pattern for new code: a new degrade site mints its kind and calls `degrade`.
+# ---- RFC-0005 S1/S1b: TRANSITIONAL kindless run mark — S1c deletes it -------
+# RFC-0005 §2.2 "The premise 'every taint site has a kind in hand' is false".
+# S1b minted a kind for every degrade site that recorded no `SymexErrorInfo`
+# and routed each through `degrade` (the kindless PATH token is gone: every
+# `Degrade` is now obtained from a recording funnel — pinned by
+# `tests/tsymex_rfc0005_s1b_kinds.nim`). What survives is the RUN mark at
+# exactly the two sites that REFUSE to solve a tainted path — the tainted
+# `isTargetLabel` hit and the tainted `routeRaise` early return. Those are not
+# degrades (the path's taint was already recorded where it was introduced);
+# they are §2.3's "unsolved-skip is itself an omission", and S1c replaces both
+# with the real solve. Each call site carries the marker
+# `# RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve`. Not a
+# sanctioned pattern for new code: a new degrade site mints its kind and calls
+# `degrade`.
 
 template kindlessRunDegrade(w: var WalkCtx) =
-  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). The run act of a site that
-  ## records no error; joined into `w.runTaint` as ⊤ at drain.
+  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1c). The run mark of a site that
+  ## skips solving a tainted path; joined into `w.runTaint` as ⊤ at drain.
   w.kindlessRunTaint = true
-
-proc kindlessPathDegrade(): Degrade =
-  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). The ⊤ path token for a
-  ## kindless FORK site (the `dcNoAnswer` default every S1 kind gets anyway).
-  Degrade(path: {scSpurious, scIncomplete})
 
 proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## RFC-0005 S1 (§2.2 last paragraph) — the pending-taint LEAK PIN. Called
@@ -9799,8 +9797,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     if w.loopStack.len == 0:
-      # break outside any loop — degenerate. Records no error today.
-      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (break outside loop)
+      # break outside any loop. Surface route: the parser flattens `block:`
+      # into its body, so a `break` out of a top-level block lands here and
+      # the breaking path is dropped instead of resuming after the block.
+      # RFC-0005 S1b: HALT site — the recorded `weBreakOutsideLoop` is the run
+      # act (was a kindless run mark with no error); token discarded.
+      discard w.degrade(weBreakOutsideLoop,
+        "`break` reached with no enclosing loop (e.g. a `break` out of a " &
+             "top-level `block:`) — the breaking path is dropped rather than " &
+             "resumed after the block (weBreakOutsideLoop)")
       return @[]
     for p in paths:
       w.loopStack[w.loopStack.high].breakPaths.add p
@@ -9810,8 +9815,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     if w.loopStack.len == 0:
-      # continue outside any loop — degenerate. Records no error today.
-      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (continue outside loop)
+      # continue outside any loop — rejected by Nim itself, so reachable only
+      # from hand-built IR. RFC-0005 S1b: HALT site, same kind as `break`.
+      discard w.degrade(weBreakOutsideLoop,
+        "`continue` reached with no enclosing loop — the path is dropped " &
+             "(weBreakOutsideLoop)")
       return @[]
     for p in paths:
       w.loopStack[w.loopStack.high].continuePaths.add p
@@ -10922,11 +10930,27 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # uncertain so any target reached on them degrades to sxUnknown — never
       # an unsound witness. `geInstantiationCapped` is surfaced from
       # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
-      # RFC-0005 S1: this site records no error of its own (the cap's
-      # `geInstantiationCapped` lives in `prog.parseErrors`), so it takes the
-      # transitional kindless run mark + ⊤ path token.
-      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (over-cap missing callee)
-      let d = kindlessPathDegrade()  # RFC-0005 S1b: mint kind (over-cap missing callee)
+      # RFC-0005 S1b (§2.2 table, §2.5 point 3): the decline's kind now rides
+      # the never-registered callee KEY (`unregisteredCalleeKey`, minted by
+      # `ensureProcRegistered` for the over-cap / distinct-barrier /
+      # unresolvable-`getImpl` declines), so this arm records it at the walk
+      # site through `degrade` — the recorded error is the run act and its
+      # token the path act (was a kindless run mark + kindless ⊤ token). A
+      # missing callee with NO parse-time decline behind it has no modelled
+      # cause at all: that is a walker/parser bug, recorded as such.
+      var declineKind: SymexErrorKind
+      let d =
+        if unregisteredCalleeKind(stmt.callee, declineKind):
+          w.degrade(declineKind,
+            "call to unregistered callee `" & stmt.callee & "` reached at " &
+                 "walk time — declined at parse time (" & $declineKind &
+                 "); the call returns a fresh unconstrained value and the " &
+                 "callee's effects are not modelled")
+        else:
+          w.degrade(weInternalWalkerFault,
+            "call to callee `" & stmt.callee & "` reached at walk time with " &
+                 "no registered ProcSig and no parse-time decline behind it " &
+                 "(weInternalWalkerFault)")
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
@@ -11076,11 +11100,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               inc w.synthZ3
               let z3Name = stmt.retName & "_cyc" & $w.synthZ3
               newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-            # RFC-0005 S1: records no error and never marked the run (a
-            # target hit on this path does, at `isTargetLabel`) — path-only
-            # transitional ⊤ token.
-            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv,
-              kindlessPathDegrade())  # RFC-0005 S1b: mint kind (recursion cycle-break)
+            # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
+            # `weRecursionCycleCut` through `degrade` (was a path-only
+            # kindless ⊤ token that recorded nothing and marked the run only
+            # if a later target hit on this path did). The callee's body —
+            # its var-param/heap effects and raises — is not walked for this
+            # occurrence, so the degrade is run-relevant even when the cut
+            # path never reaches a finding.
+            let d = w.degrade(weRecursionCycleCut,
+              "recursive call to `" & stmt.callee & "` with an argument " &
+                   "shape already being walked up the stack — cycle cut " &
+                   "with a fresh unconstrained return value; the callee's " &
+                   "effects are not modelled for this call " &
+                   "(weRecursionCycleCut)")
+            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
             continue
           if w.callCache.hasKey(key):
             let entry = w.callCache[key]
@@ -11375,9 +11408,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Uncertain path: a SAT witness here would be unsound because
           # bailed-call retSyms are unconstrained at the Z3 level.
           # RFC-0005 S1: S1 keeps today's "any path taint blocks SAT and
-          # marks the run" gate (all-⊤ default); S2 narrows it to
-          # `scSpurious in p.taint` and drops this run mark.
-          w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (tainted target hit)
+          # marks the run" gate (all-⊤ default). The path's taint was
+          # introduced by a degrade that already RECORDED its kind (S1b), so
+          # this run mark is the §2.3 "unsolved-skip is itself an omission"
+          # contribution, which S1c replaces with the real solve.
+          w.kindlessRunDegrade()  # RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve
         else:
           let (st, wit) = trySolve(w.z3, p, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
@@ -11386,7 +11421,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # narrowing makes it an `{scIncomplete}`-carrying SAT possible).
           of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit,
                                              pathTaint: p.taint))
-          of sxUnknown: w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (target trySolve unknown)
+          of sxUnknown:
+            # RFC-0005 S1b (§3.1 solver-undef row): Z3 gave up on a path that
+            # reaches the target — record it (was a kindless run mark, so a
+            # run whose only degrade was a solver resource-out was stamped
+            # `weInternalWalkerFault` by the Invariant-7 backstop).
+            discard w.degrade(beSolverUndef,
+              "solver returned unknown on a path reaching target label `" &
+                   stmt.tname & "` (queryRLimit=" &
+                   $w.settings.budget.queryRLimit & ") (beSolverUndef)")
           of sxUnsat:  discard
           of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
@@ -11446,7 +11489,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # re-raise is E3+. Surface as unknown rather than guess.
         # (`paths` is never empty here — `walk` returns early on an empty
         # frontier — so the old per-path loop was an unconditional mark.)
-        w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (handler-stack re-raise)
+        # RFC-0005 S1b: HALT site — the recorded kind is the run act (was a
+        # kindless run mark with no error).
+        discard w.degrade(eeHandlerReraiseUnmodelled,
+          "bare `raise` (re-raise) inside a `try` with no in-flight " &
+               "exception — not modelled (real Nim raises ReraiseDefect); " &
+               "the path is dropped (eeHandlerReraiseUnmodelled)")
         return @[]
     var survivors: seq[Path]
     for p in paths:
@@ -11554,12 +11602,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Invariant-3-safe AND preserves downstream exploration: the existing
     # taint chokepoints (`isTargetLabel`, `routeRaise`) demote any later
     # sxSat/sxRaised on this path to sxUnknown, so a dropped mutation can
-    # never surface a silently-wrong witness. RFC-0005 S1: this arm records
-    # no error of its own (the parser's reason, if any, is in
-    # `prog.parseErrors`), so it takes the transitional kindless run mark
-    # (unconditional, as `w.sawUnknown = true` was) and ⊤ path token.
-    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (isUnsupported)
-    let d = kindlessPathDegrade()  # RFC-0005 S1b: mint kind (isUnsupported)
+    # never surface a silently-wrong witness. RFC-0005 S1b (§2.2 table —
+    # §0.2's flagship example): the node now carries its classified kind
+    # (`mkUnsupported(kind, reason)`), so the arm records it through
+    # `degrade` — the run act — and forks every path with its token (was a
+    # kindless run mark + kindless ⊤ token, recording nothing). A Class-A
+    # node's kind is its parse-time error's kind, recorded again HERE where a
+    # path actually reaches the decline (the reach-anchored record §2.5
+    # point 1 builds on); a Class-B node's is `feUnsupportedStmtKind`.
+    let d = w.degrade(stmt.unKind, stmt.reason)
     var out2: seq[Path]
     for p in paths:
       out2.add forkPathTainted(p, p.pc, p.env, d)
@@ -11611,7 +11662,9 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   if p.taint != {}:
     # Bailed-call retSyms are unconstrained at the Z3 level; neither a witness
     # nor a confident handler-routing decision is sound here.
-    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (tainted raise route)
+    # RFC-0005 S1: the path's taint was introduced by a degrade that already
+    # RECORDED its kind (S1b); this run mark is the unsolved-skip omission.
+    w.kindlessRunDegrade()  # RFC-0005 S1c: replaced by the isTargetLabel/routeRaise solve
     return @[]
   # Phase 15 E4. Subtype matching (replaces E3's exact-string membership). An
   # unknown raised type (not in `exnTable` nor `userExnHierarchy`) is matched
@@ -11723,7 +11776,13 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       var r = toPublic(iv)
       r.pathTaint = p.taint
       w.found.add(r)
-    of sxUnknown: w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (raise trySolve unknown)
+    of sxUnknown:
+      # RFC-0005 S1b (§3.1 solver-undef row): the raised finding's path could
+      # not be decided — record it (was a kindless run mark).
+      discard w.degrade(beSolverUndef,
+        "solver returned unknown on a path raising `" & typeId &
+             "` (queryRLimit=" & $w.settings.budget.queryRLimit &
+             ") (beSolverUndef)")
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
@@ -12092,7 +12151,14 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # void closures, collaterally degrading any UNSAT target after a void closure
   # call (see CR-1 companion fix for the sawUnknown/UNSAT interaction).
   if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0:
-    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (diverged closure body)
+    # RFC-0005 S1b: record the kind (was a kindless run mark). WALK sink, not
+    # the closure sink: `closureForcedUnknown` vetoes a winner on any closure
+    # sevError, which this site never did — moving it there would change
+    # verdicts.
+    discard w.degrade(ceClosureBodyDiverged,
+      "closure body produced no value-bearing exit (every body path raised, " &
+           "halted or was dropped) — the call's result is unconstrained " &
+           "(ceClosureBodyDiverged)")
   # ---- Phase 15 CR-1: merge closure exit heaps back to caller ----------------
   # The exit paths from the closure body may carry heap modifications (e.g.
   # `p[] = 99` inside the body) that must be visible to the CALLER after the
@@ -13750,8 +13816,8 @@ proc runSymexImpl(prog: SymexProgram,
   # writer of `w.runTaint`: the union, over every DRAINED `sevError` entry
   # (the walk/heap-depth/new-field-zero/lowering sinks in `exnWarnings`, the
   # parse-time errors, the closure sink), of `runTaint(classOf(kind))` —
-  # joined with the TRANSITIONAL kindless mark (`kindlessRunTaint`, the few
-  # sites that record no error yet; S1b deletes it). Under S1's all-⊤
+  # joined with the TRANSITIONAL kindless mark (`kindlessRunTaint`, the two
+  # tainted-path unsolved-skips; S1c deletes it). Under S1's all-⊤
   # `classOf` default this is `{scSpurious, scIncomplete}` exactly when the
   # old `w.sawUnknown` was true, so the verdict below is unchanged.
   w.runTaint = runTaintOf(exnWarnings) + runTaintOf(prog.parseErrors) +
@@ -13815,8 +13881,9 @@ proc runSymexImpl(prog: SymexProgram,
     # must carry at least one classified error. All known degrade sites now
     # classify (budget bails via `beBudgetExhausted`, lowering degrades via
     # `loweringDegradeErrors`, …) — if this fires, some run-marking site
-    # (RFC-0005 S1: only a transitional `kindlessRunDegrade` site can mark
-    # the run without an entry) escaped classification, which is itself a
+    # (RFC-0005 S1b: only a transitional `kindlessRunDegrade` unsolved-skip
+    # can mark the run without an entry, and it only ever fires on a path
+    # whose taint was already recorded) escaped classification, which is a
     # walker bug: surface it as
     # `weInternalWalkerFault` so telemetry tracks it, never an empty seq.
     var unknownErrs = exnWarnings & prog.parseErrors & closureErrs

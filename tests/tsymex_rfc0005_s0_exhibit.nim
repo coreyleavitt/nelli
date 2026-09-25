@@ -212,7 +212,11 @@ suite "RFC-0005 S0 pin 2 -- cap-veto companion (flips sxSat at S9)":
     for e in r.errors:
       if e.severity == sevError:
         sevErrorKinds.add e.kind
-    check sevErrorKinds == @[feUnsupportedExprKind]
+    # A kind SET (RFC-0005 S1b): the Class-A `isUnsupported` node now carries
+    # its parse-time kind and the walker records it again where a path
+    # reaches the decline, so `feUnsupportedExprKind` is drained twice (the
+    # parse-time entry + the walk-site entry). The set is unchanged.
+    check deduplicate(sevErrorKinds) == @[feUnsupportedExprKind]
 
 suite "RFC-0005 S0 pin 3 -- closure-veto companion (flips sxSat at S9)":
 

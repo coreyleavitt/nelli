@@ -48,7 +48,7 @@ state = "done"
 [[slice]]
 id    = "S1b"
 title = "Mint the missing kinds + runTaint/errors correspondence pin"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S1c"

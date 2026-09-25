@@ -415,7 +415,7 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     fieldwiseEq(a.dwPtr, b.dwPtr) and fieldwiseEq(a.dwValue, b.dwValue) and
       fieldwiseEq(a.dwElemTy, b.dwElemTy) and a.dwPtrFamily == b.dwPtrFamily and
       a.dwField == b.dwField and fieldwiseEqTypeOpt(a.dwObjTy, b.dwObjTy)
-  of isUnsupported: a.reason == b.reason
+  of isUnsupported: a.unKind == b.unKind and a.reason == b.reason
   of isUnsafeCast: a.ucReason == b.ucReason
 
 # ---------------------------------------------------------------------------
@@ -826,7 +826,10 @@ proc sDerefWriteBare(): IRStmt =
 proc sFieldDerefWrite(): IRStmt =
   mkFieldDerefWrite(mkVar("wobj"), mkBoolLit(true), tBool(),
                      tTuple(@[tBool()], @["b"], "WObj", "wObjId"), "b", ptrFamily = false)
-proc sUnsupportedStmt(): IRStmt = mkUnsupported("sentinel unsupported reason")
+proc sUnsupportedStmt(): IRStmt =
+  ## RFC-0005 S1b: a non-default kind, so a dropped `unKind` in the emitter
+  ## cannot round-trip by coincidence.
+  mkUnsupported(seNestedSeqUnsupported, "sentinel unsupported reason")
 proc sUnsafeCast(): IRStmt = mkUnsafeCast("cast[ptr T]")
 
 suite "R6 emit round-trip -- IRStmt kinds":

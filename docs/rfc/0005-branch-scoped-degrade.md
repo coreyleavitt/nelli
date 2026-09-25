@@ -73,7 +73,7 @@ state = "done"
 [[slice]]
 id    = "S5"
 title = "Classify degradeStrArm + R1 placeholder funnel"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S6"

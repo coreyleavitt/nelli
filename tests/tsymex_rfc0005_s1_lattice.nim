@@ -26,7 +26,12 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
 
   # RFC-0005 S4 reclassified the first rows out of S1's all-⊤ default; every
   # kind NOT in this set must still be dcNoAnswer (later slices extend it).
-  const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf}
+  # RFC-0005 S5 added the degradeStrArm funnel's four fresh-symbol kinds and
+  # the rune-decode split.
+  const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf,
+                        seBytesLengthTooLarge, seBytesSymbolicLength,
+                        seZ3VersionMissing, seZ3StringIncomplete,
+                        seRuneDecodeSymbolic}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

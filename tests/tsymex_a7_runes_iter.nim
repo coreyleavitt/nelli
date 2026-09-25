@@ -9,7 +9,7 @@
 ##     run the for-body once per rune. Callee-origin guard: only std/unicode.runes
 ##     is intercepted (a user-defined `runes` iterator is passed to A3 or degrades).
 ##   * DEGRADE (MANDATORY): `runeLen(s)` / `for r in s.runes:` over a SYMBOLIC
-##     string → classified `seZ3StringIncomplete` (sxUnknown, Invariant 3 — never
+##     string → classified `seRuneDecodeSymbolic` (`seZ3StringIncomplete` before RFC-0005 S5) (sxUnknown, Invariant 3 — never
 ##     a crash or hang). Symbolic UTF-8 decode = variable-length grouping over an
 ##     unknown byte stream; no quantifier-free Z3 encoding exists.
 ##   * REGRESSION: a user-defined proc named `runeLen` whose owner is NOT
@@ -19,6 +19,7 @@
 
 import std/[unittest, unicode, strutils]
 import nelli/symex
+import nelli/smt/types
 import nelli/smt/canonicalize
 
 # ---------------------------------------------------------------------------
@@ -40,7 +41,7 @@ proc sutRunesIterLiteral(x: int) =
     if r.ord == 0x20AC:
       symexTarget("euro_iter")
 
-# SUT 3: DEGRADE — for r in symbolic_s.runes → seZ3StringIncomplete, sxUnknown.
+# SUT 3: DEGRADE — for r in symbolic_s.runes → seRuneDecodeSymbolic, sxUnknown.
 # UTF-8 grouping over an unknown byte stream has no quantifier-free Z3 encoding.
 # The engine must NOT hang (gate: rc=0, bounded by dt-bounded.sh 200s timeout).
 proc sutRunesIterSymbolic(s: string) =
@@ -48,7 +49,7 @@ proc sutRunesIterSymbolic(s: string) =
     if r.ord == 0x41:
       symexTarget("runes_sym")
 
-# SUT 4: DEGRADE — runeLen(symbolic_s) → seZ3StringIncomplete, sxUnknown.
+# SUT 4: DEGRADE — runeLen(symbolic_s) → seRuneDecodeSymbolic, sxUnknown.
 proc sutRuneLenSymbolic(s: string) =
   if runeLen(s) == 2:
     symexTarget("runelen_sym")
@@ -83,25 +84,28 @@ suite "symex Phase 16 A7-S3 — concrete runes / runeLen (Part A)":
 
 suite "symex Phase 16 A7-S3 — symbolic DEGRADE (Part B, MANDATORY)":
 
-  test "A7-S3-3: for r in s.runes (symbolic s) → sxUnknown + seZ3StringIncomplete (no hang)":
+  test "A7-S3-3: for r in s.runes (symbolic s) → sxUnknown + seRuneDecodeSymbolic (no hang)":
     ## Symbolic UTF-8 decode → variable-length grouping with no QF Z3 encoding.
-    ## Must classify seZ3StringIncomplete, never crash or hang (Invariant 3).
+    ## Must classify, never crash or hang (Invariant 3). RFC-0005 S5 split
+    ## this parse-time site off seZ3StringIncomplete as seRuneDecodeSymbolic
+    ## (the loop is dropped: dcSubstituted).
     let r = symexFind(sutRunesIterSymbolic, tLabel("runes_sym"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
-      if e.kind == seZ3StringIncomplete and e.severity == sevError:
+      if e.kind == seRuneDecodeSymbolic and e.severity == sevError:
         sawKind = true
     check sawKind
 
-  test "A7-S3-4: runeLen(symbolic s) → sxUnknown + seZ3StringIncomplete (no hang)":
+  test "A7-S3-4: runeLen(symbolic s) → sxUnknown + seRuneDecodeSymbolic (no hang)":
     ## runeLen over a symbolic string: same reason — symbolic UTF-8 grouping.
-    ## Must classify seZ3StringIncomplete, never crash or hang (Invariant 3).
+    ## Must classify, never crash or hang (Invariant 3). RFC-0005 S5: the
+    ## forced `0` is dcSubstituted, so the kind is seRuneDecodeSymbolic.
     let r = symexFind(sutRuneLenSymbolic, tLabel("runelen_sym"))
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
-      if e.kind == seZ3StringIncomplete and e.severity == sevError:
+      if e.kind == seRuneDecodeSymbolic and e.severity == sevError:
         sawKind = true
     check sawKind
 
@@ -111,12 +115,13 @@ suite "symex Phase 16 A7-S3 — regression guard":
     ## The origin guard (owner.strVal == \"unicode\") must prevent intercepting
     ## a same-named user proc. The user proc runeLen(n) = n*2 is walked normally:
     ## n*2 == 6 → n == 3 → sxSat, witness == 3.
-    ## If the guard is wrong, this would degrade to seZ3StringIncomplete (regression).
+    ## If the guard is wrong, this would degrade to seRuneDecodeSymbolic
+    ## (seZ3StringIncomplete before RFC-0005 S5's split) -- a regression.
     let r = symexFind(sutUserRuneLen, tLabel("userRuneLen"))
     check r.status == sxSat
     check r.witness[0] == 3
     for e in r.errors:
-      check e.kind != seZ3StringIncomplete
+      check e.kind != seRuneDecodeSymbolic
 
 suite "symex Phase 16 A7-S3 — walker version pin":
 

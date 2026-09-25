@@ -1856,6 +1856,21 @@ type
                           ## `dcFreshSymbol` it blocks `sxSat` on its own path
                           ## (a candidate until replay confirms it) but never
                           ## `sxUnsat` on the run.
+    seRuneDecodeSymbolic  ## RFC-0005 S5 (§3.2 split of `seZ3StringIncomplete`,
+                          ## the minority funnel): a UTF-8 rune decode over a
+                          ## SYMBOLIC string -- `runeLen(s)` / `for r in
+                          ## s.runes` (ADR-0017). Variable-length grouping over
+                          ## an unknown byte stream has no quantifier-free
+                          ## encoding, so the PARSER declines: `runeLen(s)` is
+                          ## replaced by the literal `0` and the `runes` loop
+                          ## statement is dropped (its body's effects never
+                          ## happen). Both substitute -- `classOf` is
+                          ## `dcSubstituted`. Split off because every OTHER
+                          ## `seZ3StringIncomplete` site is a lowering-time
+                          ## `degradeStrArm` decline whose result is a fresh
+                          ## per-read symbol (`dcFreshSymbol`): reusing that
+                          ## kind here would have promoted a forced `0`.
+                          ## sevError -> sxUnknown.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2414,6 +2429,19 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   ## substitutes a fresh unconstrained symbol: `liftHeapValue`'s
   ## unsupported-pointee read, split off as `heUnsupportedPointeeRead`.
   ##
+  ## RFC-0005 S5 (walker v143) audited the `degradeStrArm` funnel and the R1
+  ## placeholder funnel the same way (rows marked `S5`). `degradeStrArm`
+  ## substitutes a fresh per-read symbol of the result sort, but that alone
+  ## does not make a kind `dcFreshSymbol`: the declines that raised before
+  ## lowering their operands DROPPED the operands' raise forks. S5 moved
+  ## the operand lowering ahead of the `bytes`/`replaceAll`/regex-`replace`/
+  ## `split` raises and promoted the four kinds whose every site is then
+  ## fresh and effect-preserving; the parse-time rune decode split off as
+  ## `seRuneDecodeSymbolic` (a forced `0` / dropped loop). The R1 funnel is
+  ## NOT fresh (shared placeholder names, dropped `IndexDefect` forks and
+  ## operands) -- RFC §3.1's table is corrected by its `seNestedSeqUnsupported`
+  ## row below.
+  ##
   ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
   ## EXISTING kind at a NEW emission site asserts that the new site shares
   ## that kind's substitution class. If it does not, split the kind
@@ -2432,11 +2460,34 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feExtractionFailed: dcNoAnswer
   of feConvDomainExcluded: dcNoAnswer
   of seUnsupportedStringOp: dcNoAnswer
+    # S5 audited, NOT reclassified: `degradeStrArm`'s fresh symbol is fine,
+    # but the kind's sites drop behaviour -- `requireStr` fails in
+    # `iekStrAt`/`iekStrToInt` BEFORE the `IndexDefect`/`ValueError` raise
+    # fork is deposited, the `iekStrUnsupported` catch-all carries ops whose
+    # real counterpart raises (`parseFloat`), `iekStrSubstr`'s bound decline
+    # shares ONE name (`__strSubstrBoundDegrade`) across reads, and the
+    # `strip` parse site forces `""`. ⊤ until a raise-behaviour split.
   of seUnsupportedRegex: dcNoAnswer
-  of seZ3StringIncomplete: dcNoAnswer
-  of seZ3VersionMissing: dcNoAnswer
-  of seBytesSymbolicLength: dcNoAnswer
-  of seBytesLengthTooLarge: dcNoAnswer
+    # S5 audited: a MALFORMED pattern raises `RegexError` in reality (`re`
+    # compiles at run time) and the decline drops that raise; `iekStrFindRe`
+    # declines without lowering its receiver (its effects dropped). ⊤.
+  of seZ3StringIncomplete: dcFreshSymbol
+    # S5 (split -> seRuneDecodeSymbolic): the remaining sites are
+    # `lowerStrArm`'s join/split declines, each converted by `degradeStrArm`
+    # to a fresh per-read symbol of the result sort, AFTER every operand has
+    # been lowered (S5 moved the split receiver/separator lowering ahead of
+    # the raise: a dropped operand raise fork was an under-approximation).
+  of seZ3VersionMissing: dcFreshSymbol
+    # S5: `replaceAll` / regex `replace` without the Z3 >= 4.15.5 gates --
+    # operands lowered (and the pattern parsed) first, then a fresh per-read
+    # `degradeStrArm` symbol. The op is total in Nim, so nothing is dropped.
+  of seBytesSymbolicLength: dcFreshSymbol
+    # S5: `bytes(s)` over a non-literal -- the receiver is lowered first
+    # (S5), then a fresh per-read `seq[uint8]` symbol (a superset: its
+    # `len == len(s)` link is lost, never forced).
+  of seBytesLengthTooLarge: dcFreshSymbol
+    # S5: `bytes(<literal>)` over `maxBytesEncodingLen` -- the receiver is a
+    # literal (no effects to drop); a fresh per-read `seq[uint8]` symbol.
   of seByteIndexUnsupported: dcNoAnswer
   of seByteIterUnsupported: dcNoAnswer
   of seUnsupportedTableValType: dcNoAnswer
@@ -2446,6 +2497,14 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S4 audited: `allocateSym`'s placeholder FORCES `setSize == 0`
     # (dcSubstituted); the param boundary aborts (dcNoAnswer). ⊤.
   of seNestedSeqUnsupported: dcNoAnswer
+    # S5 audited, NOT reclassified (RFC §3.1's "R1 placeholder funnel =
+    # fresh symbol" does not survive the audit): `iekSeqLen`'s decline
+    # names every occurrence `__seqLenPlaceholderDecline` (reads correlate),
+    # the `isIndex` decline continues with the destination UNBOUND and no
+    # `IndexDefect` fork, `iekSeqSlice`/`.add`/`.del` return the flagged
+    # receiver without lowering their bound/argument operands, `iteSV`
+    # forwards one operand, the HOF inline arms share fixed names, and the
+    # parse site drops a statement. ⊤.
   of seParseIntPreE: dcNoAnswer
   of eeUninterpRefExtraction: dcNoAnswer
   of eeRaiseUnimplemented: dcNoAnswer
@@ -2489,7 +2548,8 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of ceClosureBodyUncertain: dcNoAnswer
   of weInternalWalkerFault: dcNoAnswer
     # S4 audited: a walker bug is never an approximation (§3.1), including
-    # its two `degradeAlloc` seq-element sites.
+    # its two `degradeAlloc` seq-element sites. S5: likewise its R1
+    # placeholder-funnel sites (`placeholderReadDeclineKind`).
   of beBudgetExhausted: dcNoAnswer
   of feUnsupportedExprKind: dcNoAnswer
     # S4 audited, NOT reclassified: one `degradeAlloc` site (`iekField` on an
@@ -2524,6 +2584,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of beSolverUndef: dcNoAnswer
   # RFC-0005 S4: the one fresh-symbol arm of the `allocDegrade` funnel.
   of heUnsupportedPointeeRead: dcFreshSymbol
+  # RFC-0005 S5: the parse-time rune-decode split of seZ3StringIncomplete.
+  of seRuneDecodeSymbolic: dcSubstituted
+    # `runeLen(s)` is replaced by the literal `0` (a forced value) and the
+    # `for r in s.runes` statement is dropped (a stale env) -- both substitute.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

@@ -3867,19 +3867,21 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           return mkIntLit(int64(rLen))
         else:
           # Symbolic string: UTF-8 grouping over an unknown byte stream has no
-          # quantifier-free Z3 encoding → classified seZ3StringIncomplete (ADR-0017).
+          # quantifier-free Z3 encoding → classified seRuneDecodeSymbolic
+          # (ADR-0017; RFC-0005 S5 split it off seZ3StringIncomplete: this site
+          # FORCES the value `0` below -- dcSubstituted, not a fresh symbol).
           # We are inside `parseExpr` (returns IRExpr): add the classify-error to
           # ctx.parseErrors (drained to r.errors at runSymex boundary), emit an
           # mkUnsupported stmt into the preamble (sets sawUnknown=true in walker),
           # and return a dummy IRExpr so the enclosing expression is well-typed.
           # The dummy value is never reached (walker sees sawUnknown first).
           ctx.parseErrors.add SymexErrorInfo(
-            kind: seZ3StringIncomplete,
+            kind: seRuneDecodeSymbolic,
             severity: sevError,
             msg: "A7-S3: runeLen(symbolic) — UTF-8 grouping over unknown byte " &
                  "stream; no quantifier-free Z3 encoding (ADR-0017)")
-          preamble.add mkUnsupported(seZ3StringIncomplete, "symex A7-S3: runeLen(symbolic) unsupported " &
-                                     "(seZ3StringIncomplete)")
+          preamble.add mkUnsupported(seRuneDecodeSymbolic, "symex A7-S3: runeLen(symbolic) unsupported " &
+                                     "(seRuneDecodeSymbolic)")
           return mkIntLit(0)   # unreachable: walker halts on sawUnknown from above
     # Phase 15 C2b: the receiver of a string-builtin must be type-classifiable.
     # A nested CLOSURE CALL (`f(f(v))` — `n[1]` is `f(v)`) carries NO semantic
@@ -8101,16 +8103,18 @@ proc parseStmtInner(n: NimNode,
               return mkBlock(stmts)
             else:
               # Symbolic string: UTF-8 grouping over an unknown byte stream has
-              # no quantifier-free Z3 encoding → seZ3StringIncomplete (ADR-0017).
+              # no quantifier-free Z3 encoding → seRuneDecodeSymbolic (ADR-0017;
+              # RFC-0005 S5 split it off seZ3StringIncomplete: the loop statement
+              # is DROPPED here -- dcSubstituted, not a fresh symbol).
               # Must NEVER reach the A3 inline path (avoid body parse → possible hang).
               ctx.parseErrors.add SymexErrorInfo(
-                kind: seZ3StringIncomplete,
+                kind: seRuneDecodeSymbolic,
                 severity: sevError,
                 msg: "A7-S3: `for r in s.runes` over symbolic string — UTF-8 " &
                      "grouping over unknown byte stream; no quantifier-free Z3 " &
                      "encoding (ADR-0017)")
-              return mkUnsupported(seZ3StringIncomplete, "symex A7-S3: `for r in s.runes` over " &
-                                   "symbolic string unsupported (seZ3StringIncomplete)")
+              return mkUnsupported(seRuneDecodeSymbolic, "symex A7-S3: `for r in s.runes` over " &
+                                   "symbolic string unsupported (seRuneDecodeSymbolic)")
           # Non-unicode origin: break to fall through to A3 path below.
       # ---- A3-S1/S2a (ADR-0014): inline direct-call closure/inline iterator ------
       # Placed AFTER the items/pairs arm (which already claimed those iterator

@@ -181,7 +181,10 @@ suite "RFC-0005 S4 (a) -- the allocDegrade funnel's classOf rows":
       check scIncomplete in runTaint(classOf(k))
 
   test "the split is a TAIL append (ordinal stability, §3.2)":
-    check heUnsupportedPointeeRead == SymexErrorKind.high
+    ## RFC-0005 S5 tail-appended `seRuneDecodeSymbolic` after this kind; the
+    ## pin is the ordinal adjacency, not `.high`, so later splits keep it.
+    check ord(heUnsupportedPointeeRead) == ord(beSolverUndef) + 1
+    check ord(seRuneDecodeSymbolic) == ord(heUnsupportedPointeeRead) + 1
 
 # =============================================================================
 # (b) the flip: an over-taint-only run that proves the target unreachable

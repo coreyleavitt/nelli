@@ -794,7 +794,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S4 (the `allocDegrade` funnel classified: the fresh-symbol
     ## heap pointee read is `dcFreshSymbol`, so an over-taint-only run can
     ## now prove `sxUnsat`). 141->142.
-    check symexWalkerVersion == "142"
+    ## RFC-0005 S5 (the `degradeStrArm` funnel classified: bytes/replaceAll/
+    ## regex-replace/split/join declines are `dcFreshSymbol` once they lower
+    ## their operands first; rune decode split off as `seRuneDecodeSymbolic`).
+    ## 142->143.
+    check symexWalkerVersion == "143"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -49,7 +49,15 @@
 ##         off as `heUnsupportedPointeeRead` (`dcFreshSymbol`); F1 now fires
 ##         that kind, not `heUnresolvedRef`
 ##   F2 -- `degradeStrArm`/`seUnsupportedStringOp` (`toOct`, no Z3 oct
-##         primitive; the `tsymex_a8_radix` precedent) -- classified at **S5**
+##         primitive; the `tsymex_a8_radix` precedent) -- AUDITED at **S5**
+##         and NOT reclassified: `toOct`'s own decline is a fresh symbol, but
+##         the kind's other sites drop behaviour (`requireStr` failures ahead
+##         of an `IndexDefect`/`ValueError` fork, a catch-all carrying
+##         raising ops like `parseFloat`, a shared-name substr bound decline,
+##         the `strip` parse site's forced `""`), so it stays `dcNoAnswer`
+##         and F2 does NOT flip. No RFC-0005 slice schedules a flip: it would
+##         need a §3.2 split of the total-op declines (radix/case-fold) out
+##         of `seUnsupportedStringOp` first, which §5 does not plan.
 ##   F3 -- `mkUnsupported` statement / `feUnsupportedStmtKind` (a field
 ##         augmented-assignment through a value copy; the S1c
 ##         `s1cTaintedCaught` precedent) -- a generic Class-A/B catch-all
@@ -501,7 +509,8 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
 # conservative `classOf` default (`dcNoAnswer`, verified below) makes every
 # one of these `sxUnknown`; each comment names the slice expected to flip it
 # to `sxUnsat` and why. F1 flipped at S4 (rewritten in place through
-# `checkUnsatOverTaintOnly`); F4 was audited at S4 and stays `dcNoAnswer`. F3 (feUnsupportedStmtKind) has no entry here -- see
+# `checkUnsatOverTaintOnly`); F4 was audited at S4 and F2 at S5, and both stay
+# `dcNoAnswer`. F3 (feUnsupportedStmtKind) has no entry here -- see
 # this file's header comment for why RFC-0005 §5 names no flipping slice for
 # that funnel.
 
@@ -538,10 +547,10 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
       if e.severity == sevError: sevErrorKinds.add e.kind
     check sevErrorKinds == @[heUnsupportedPointeeRead]
 
-  test "F2: classOf(seUnsupportedStringOp) is dcNoAnswer today":
+  test "F2: classOf(seUnsupportedStringOp) is dcNoAnswer (audited at S5: its sites substitute)":
     check classOf(seUnsupportedStringOp) == dcNoAnswer
 
-  test "F2 today: sxUnknown, over-taint-only -- expected to flip to sxUnsat at S5":
+  test "F2: sxUnknown, over-taint-only -- stays ⊤ (S5 audit: substituting sites; no RFC-0005 slice flips it)":
     let r = symexFind(s3OverTaintF2, tLabel("s3_overtaint_f2"))
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown

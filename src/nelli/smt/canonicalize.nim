@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "142"
+const symexWalkerVersion* = "143"
+  ## RFC-0005 S5 (2026-09-25) — the `degradeStrArm` funnel and the R1
+  ## placeholder funnel audited site by site (`types.nim`'s `classOf` rows
+  ## marked S5). `seBytesLengthTooLarge`, `seBytesSymbolicLength`,
+  ## `seZ3VersionMissing` and `seZ3StringIncomplete` become `dcFreshSymbol`
+  ## (`degradeStrArm` already substitutes a fresh per-read symbol of the
+  ## result sort), so a run whose only degrades are those declines and which
+  ## proves the target unreachable now reports `sxUnsat`. To make that
+  ## sound, the `bytes`/`replaceAll`/regex-`replace`/`split` declines now
+  ## lower their operands BEFORE raising (`runtime_strings.nim`): raising
+  ## first dropped every raise fork an operand deposits, a false `sxUnsat`
+  ## for a caught `DivByZeroDefect` under the new class. The parse-time
+  ## rune-decode sites (`runeLen(s)` forced to 0, `for r in s.runes`
+  ## dropped) split off `seZ3StringIncomplete` as the tail-appended
+  ## `seRuneDecodeSymbolic` (`dcSubstituted`). `seUnsupportedStringOp`,
+  ## `seUnsupportedRegex` and the R1 funnel's `seNestedSeqUnsupported`
+  ## audit as substituting and stay ⊤. A pre-S5 cached `sfUnknown` sentinel
+  ## for such a SUT is a stale verdict and must not be served. 142->143.
   ## RFC-0005 S4 (2026-09-25) — the FIRST verdict-changing classification
   ## slice: the `allocDegrade` funnel audited site by site against §3.1's
   ## substitution rule (`types.nim`'s `classOf` rows marked S4).

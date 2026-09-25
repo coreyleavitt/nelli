@@ -781,5 +781,14 @@ task test, "Run the test suite":
             # a per-read fresh name: the introduction invariant),
             # `seUnsupportedCompoundSortLeaf` -> dcSubstituted, every other
             # funnel kind stays ⊤; `checkUnsatOverTaintOnly`; walker 141->142.
-            "tsymex_rfc0005_s4_alloc"]:
+            "tsymex_rfc0005_s4_alloc",
+            # RFC-0005 S5: the degradeStrArm funnel and the R1 placeholder
+            # funnel audited site by site -- bytes/replaceAll/replaceRe/
+            # split/join declines -> dcFreshSymbol once each lowers its
+            # operands before declining (a dropped operand raise fork was an
+            # under-approximation), the parse-time rune-decode sites split off
+            # `seZ3StringIncomplete` as `seRuneDecodeSymbolic` (dcSubstituted),
+            # seUnsupportedStringOp / seUnsupportedRegex /
+            # seNestedSeqUnsupported stay ⊤; walker 142->143.
+            "tsymex_rfc0005_s5_str"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

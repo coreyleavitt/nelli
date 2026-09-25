@@ -346,13 +346,20 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # won't compile on a build without the symbol). On a build lacking the
     # gate, raise SymexZ3VersionMissingError → sxUnknown + seZ3VersionMissing
     # (Invariant 3 — classified, never a crash, never a silent UNSAT).
+    #
+    # RFC-0005 S5: the operands are lowered BEFORE the gate on BOTH builds.
+    # `seZ3VersionMissing` is `dcFreshSymbol` (`degradeStrArm` substitutes a
+    # fresh per-read string), which licenses `sxUnsat` -- sound only if the
+    # decline drops nothing. Raising before lowering dropped every raise fork
+    # an operand deposits (`replaceAll($(a div b), …)` lost its
+    # DivByZeroDefect branch: a false `sxUnsat`).
+    let recv = lower(env, e.strArgs[0])
+    requireStr(recv, "iekStrReplaceAll")
+    let old = lower(env, e.strArgs[1])
+    requireStr(old, "iekStrReplaceAll")
+    let neu = lower(env, e.strArgs[2])
+    requireStr(neu, "iekStrReplaceAll")
     when defined(z3WithSeqReplaceAll):
-      let recv = lower(env, e.strArgs[0])
-      requireStr(recv, "iekStrReplaceAll")
-      let old = lower(env, e.strArgs[1])
-      requireStr(old, "iekStrReplaceAll")
-      let neu = lower(env, e.strArgs[2])
-      requireStr(neu, "iekStrReplaceAll")
       SymVal(kind: svString, str: replaceAll(recv.str, old.str, neu.str))
     else:
       raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
@@ -388,6 +395,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # (a) empty-sep. Byte-faithful: each Nim byte is one part. Requires the
       # receiver to be concrete so the byte list is known.
       if recvIR.kind != iekStrLit:
+        # RFC-0005 S5: lower the receiver BEFORE declining (the kind is
+        # `dcFreshSymbol`: its raise forks must not be dropped with the op).
+        let recvSym = lower(env, recvIR)
+        requireStr(recvSym, "iekStrSplit")
         raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
           msg: "split with empty sep over a symbolic string is not bounded " &
                "(receiver is not a string literal; general path → sxUnknown)")
@@ -423,6 +434,13 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       # universal quantifier over a symbolic seq[string] — the biggest hang
       # risk in Cluster S. Conservatively classified rather than encoded
       # (ADR-0006, Invariant 3 — structured sxUnknown, never a hang).
+      # RFC-0005 S5: lower receiver AND separator BEFORE declining -- the
+      # kind is `dcFreshSymbol`, so neither operand's raise forks may be
+      # dropped with the op (`s.split($(a div b))`).
+      let recvSym = lower(env, recvIR)
+      requireStr(recvSym, "iekStrSplit")
+      let sepSym = lower(env, sepIR)
+      requireStr(sepSym, "iekStrSplit")
       raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "general symbolic string.split is not bounded-encodable " &
              "(universal-quantifier hang risk; general path → sxUnknown)")
@@ -460,14 +478,19 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # the `replaceRe` proc only EXISTS when the gate is defined, so the call MUST
     # sit inside the `when`. Without the gate → SymexZ3VersionMissingError →
     # sxUnknown + seZ3VersionMissing (Invariant 3 — classified, never a crash).
+    #
+    # RFC-0005 S5: operands lowered and the pattern parsed BEFORE the gate on
+    # both builds -- `seZ3VersionMissing` is `dcFreshSymbol`, so the decline
+    # must drop no operand raise fork, and a pattern S6a rejects must keep
+    # its ⊤ `seUnsupportedRegex` (a malformed `re"…"` raises in reality).
+    let recv = lower(env, e.strArgs[0])
+    requireStr(recv, "iekStrReplaceRe")
+    let repl = lower(env, e.strArgs[1])
+    requireStr(repl, "iekStrReplaceRe")
+    let pr = parseNimRegexToZ3Regex(e.strOp)
+    if not pr.isOk:
+      raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
     when defined(z3WithSeqReplaceRe):
-      let recv = lower(env, e.strArgs[0])
-      requireStr(recv, "iekStrReplaceRe")
-      let repl = lower(env, e.strArgs[1])
-      requireStr(repl, "iekStrReplaceRe")
-      let pr = parseNimRegexToZ3Regex(e.strOp)
-      if not pr.isOk:
-        raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       SymVal(kind: svString, str: replaceRe(recv.str, pr.regex, repl.str))
     else:
       raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
@@ -491,6 +514,11 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # with no bounded element chain → seBytesSymbolicLength (Invariant 3).
     let recvIR = e.strArgs[0]
     if recvIR.kind != iekStrLit:
+      # RFC-0005 S5: lower the receiver BEFORE declining. The kind is
+      # `dcFreshSymbol`; raising first dropped the receiver's own raise forks
+      # (`bytes($(a div b))` lost its DivByZeroDefect branch).
+      let recvSym = lower(env, e.strArgs[0])
+      requireStr(recvSym, "iekStrBytes")
       raise (ref SymexBytesSymbolicLengthError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "bytes() over a symbolic-length string is not bounded-encodable " &
              "(receiver is not a string literal; general path → sxUnknown)")

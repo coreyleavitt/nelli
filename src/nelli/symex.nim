@@ -572,6 +572,17 @@ proc primTyAndReader(ty: IRType): (string, string) =
   of itFloat64: ("float",   "readFloat")     ## Phase 15 F1
   else: ("", "")
 
+proc rendersAsDefaultObject(ty: IRType): bool =
+  ## The `itTuple` arm of `emitTyAndReader` below renders a nominal object
+  ## that LOOKS like a variant (a leading `kind` field + more than two
+  ## fields) as `default(Object)` instead of reading its fields -- the
+  ## witness value is then NOT the solver's model. Factored out (RFC-0005
+  ## S2) so `witnessFidelity` classifies exactly the shapes the reader stubs;
+  ## two copies of the heuristic could drift and let a stubbed witness be
+  ## replayed as if it were faithful.
+  ty.kind == itTuple and ty.objectName.len > 0 and
+    ty.fields.len > 2 and ty.fieldNames.len > 0 and ty.fieldNames[0] == "kind"
+
 proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
   ## Recursive: returns (Nim type AST, witness-construction expression).
   case ty.kind
@@ -687,9 +698,9 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # Check for variant: the discriminator name on the parsed
       # object is conventionally "kind" + fields after position 0
       # that would be ambiguous to construct all at once.
-      let isLikelyVariant = ty.fields.len > 2 and ty.fieldNames.len > 0 and
-                            ty.fieldNames[0] == "kind"
-      if isLikelyVariant:
+      # (RFC-0005 S2: the predicate is shared with `witnessFidelity`,
+      # which must classify exactly the shapes this reader stubs.)
+      if rendersAsDefaultObject(ty):
         (objTyId, newCall(ident("default"), objTyId))
       else:
         var objVal = newTree(nnkObjConstr, objTyId)
@@ -1413,6 +1424,262 @@ proc allRaiseFindings*[T](r: SymexResult[T]): seq[DefectFinding[T]] =
   else:
     r.diagnostics
 
+# ---- Witness replay (RFC-0005 S2, §4.2) --------------------------------------
+#
+# The execution contract behind RFC-0005's SAT relaxation: a `sxSat`/`sxRaised`
+# the engine would newly permit on a `scSpurious`-tainted path must first have
+# its witness RUN against the real `fn`. S2 lands the substrate only -- the
+# outcome type, the target-shaped `replayWitness` macro, the eligibility gate
+# and (in `engine/markers.nim`) the stackable capture context. S10 wires it
+# into the verdict of BOTH `runSymex` consumers (`symexFind` and the
+# `symexFindAllWitnesses` codegen).
+#
+# WHY A MACRO. Invoking the SUT means splatting a typed witness tuple into its
+# parameter list with `var`-param wrapping -- the same codegen
+# `assertCoveredBy` does -- and `runSymex` is runtime code with no `fn`. So
+# replay runs in macro-generated code AFTER `runSymex` returns (§4.2
+# "Plumbing"). `emitReplayWitness` is the macro-time half S10 splices into
+# the entry macros, which already hold the parsed `params`.
+#
+# CONTRACT CHANGE (§4.2, for §8.1 / the migration note at S10): once wired,
+# `symexFind` EXECUTES `fn` on solver-chosen inputs, where it never ran `fn`
+# before. Replay performs the SUT's side effects FOR REAL, at verdict time, in
+# the caller's process -- and a `scSpurious` path is tainted precisely because
+# it ran through an unmodelled (often effectful: `echo`/`writeFile`, #137) call.
+#
+# NON-TERMINATION (§4.2). There is deliberately no watchdog: an in-process one
+# is not safely buildable under §1.5's no-nested-try constraint, and Invariant
+# 3 is instead preserved by the ELIGIBILITY GATE -- a `dcFabricated`
+# (k-unroll survivor) witness is by §0.3 an input on which the real program
+# may still be looping, and the gate declines it without running it. What
+# remains is the ordinary risk any PBT library takes calling a user proc,
+# which nelli already takes in `forAll`/`fuzz`.
+
+type ReplayOutcome* = enum
+  ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
+  ## Three-valued because a `bool` would conflate "refuted" with "could not
+  ## run" -- different facts with different downstream reporting.
+  ##
+  ## DISTINCT from `SymexFindingStatus.sfReplayMiss` (Phase 14 B5,
+  ## `engine/types.nim`): that status diagnoses a persisted REGRESSION SEED
+  ## whose choice sequence no longer drives the test runtime onto its marker
+  ## (strategy/generator skew, found by `assertCoveredBy` in the seed phase).
+  ## `ReplayOutcome` is a VERDICT-TIME fact about a fresh solver witness from
+  ## this run. A seed miss says the harness drifted; `roRefuted` says the
+  ## model did.
+  roConfirmed     ## the real fn reached the target on this witness -- the
+                  ## target is reachable in reality, whatever the model's taint
+  roRefuted       ## the real fn ran to completion (returned, or raised
+                  ## something other than the target) on a FAITHFULLY rendered
+                  ## witness and did not reach the target: this witness is
+                  ## proven spurious (a confirmed model gap). It says nothing
+                  ## about OTHER inputs -- the model's havoc symbols (an opaque
+                  ## call's return, …) are not part of the witness, so the
+                  ## verdict for a refuted candidate is sxUnknown, never sxUnsat
+                  ## (§2.3 rule 4)
+  roInconclusive  ## replay declined or not faithfully executable: an
+                  ## ineligible taint, a witness outside the renderable
+                  ## fragment, a target kind outside replay scope, or a lossy
+                  ## witness that did not reach the target. The candidate
+                  ## stays sxUnknown
+
+func replayEligible*(pathTaint: Taint): bool =
+  ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
+  ## whose path taint derives ENTIRELY from `dcFreshSymbol` sites. Read off
+  ## `RawResult.pathTaint` (RFC-0005 S1) via the class algebra rather than a
+  ## site list: `pathTaint(dcFreshSymbol) == {scSpurious}` and `dcOmitted`
+  ## contributes `{}`, while `dcSubstituted`/`dcFabricated`/`dcNoAnswer` all
+  ## put `scIncomplete` on the PATH -- so "entirely fresh-symbol" is exactly
+  ## "within `pathTaint(dcFreshSymbol)`". A clean path (`{}`) is trivially
+  ## eligible. A `dcFabricated` candidate is thereby `roInconclusive` by
+  ## construction, at no cost (§0.3: the k-unroll SAT payoff is empty), and
+  ## that is the bound on the non-termination hazard.
+  pathTaint <= pathTaint(dcFreshSymbol)
+
+func replayInScope*(target: SymexTarget): bool =
+  ## RFC-0005 §4.2 "Defect-flavoured targets": the target kinds replay may
+  ## execute. Outside scope the answer is `roInconclusive`, without running.
+  ##   * `stkNilAccess` -- never: a raw-`ptr` nil deref is a SIGSEGV, not a
+  ##     catchable Defect, and a `ref` nil deref is catchable only under
+  ##     nil-checking builds. Executing could kill the caller's process.
+  ##   * Defect targets (`stkAssertionViolation`/`stkIndexError`/
+  ##     `stkFieldDefect`, and a `stkRaisedExn` filtered on a `…Defect` type
+  ##     -- the `endsWith("Defect")` convention `allRaiseFindings` uses) --
+  ##     only when Defects are catchable, i.e. NOT under `--panics:on`
+  ##     (`nimPanics`), where the very raise replay looks for aborts the
+  ##     process.
+  ##   * `stkLabel` and a non-Defect `stkRaisedExn` -- always.
+  const panics = defined(nimPanics)
+  case target.kind
+  of stkLabel: true
+  of stkAssertionViolation, stkIndexError, stkFieldDefect: not panics
+  of stkRaisedExn: not (panics and target.typeFilter.endsWith("Defect"))
+  of stkNilAccess: false
+
+func replayReached*(target: SymexTarget; hits: HashSet[string];
+                    escaped: ref Exception): bool =
+  ## RFC-0005 §4.2: did one real execution reach `target`? `hits` is the
+  ## execution's own capture frame; `escaped` is the exception that escaped
+  ## `fn` (nil when it returned normally). A label counts if it was hit at
+  ## all, even if `fn` raised afterwards. The raise kinds mirror what the
+  ## walker reports as the finding: an exception ESCAPING the SUT frame
+  ## (`routeRaise`'s step 3 -- a handler-caught raise is never a finding),
+  ## matched by exact type name for `stkRaisedExn` (the walker's
+  ## `typeFilter == typeId` test) and by subtype for the builtin Defects
+  ## (`assertCoveredBy`'s precedent).
+  case target.kind
+  of stkLabel:              target.label in hits
+  of stkAssertionViolation: not escaped.isNil and escaped of AssertionDefect
+  of stkIndexError:         not escaped.isNil and escaped of IndexDefect
+  of stkFieldDefect:        not escaped.isNil and escaped of FieldDefect
+  of stkRaisedExn:
+    not escaped.isNil and
+      (target.typeFilter.len == 0 or $escaped.name == target.typeFilter)
+  of stkNilAccess:          false   ## out of scope; never executed
+
+type WitnessFidelity = enum
+  ## RFC-0005 §4.2 "Un-replayable witnesses". How faithfully `emitTyAndReader`
+  ## renders a witness shape -- decided at macro time, per parameter, from
+  ## the SAME `IRType` the reader walks. Ordered: the worst component wins.
+  wfFaithful      ## the rendered value IS the solver's model value
+  wfLossy         ## safe to execute, but the render is not the model (a
+                  ## `ref` rendered as a fresh non-nil cell with no alias
+                  ## structure; `default(Object)` variant stubs; default-cell
+                  ## `seq[ref T]` elements; the unsupported-field empty seq).
+                  ## A HIT still confirms -- any concrete input that reaches the
+                  ## target proves reachability -- but a MISS proves nothing
+                  ## about the model's witness, so it is inconclusive
+  wfUnexecutable  ## a placeholder that must never be run: the nil-proc
+                  ## closure stub, the nil `ptr`, the `__unsupported:` dummy
+                  ## `int`, the nil recursive-ref field (deref would crash or
+                  ## misattribute a raise)
+
+proc witnessFidelity(ty: IRType): WitnessFidelity =
+  ## Mirrors `emitTyAndReader`'s arms one-for-one; keep them in lockstep.
+  template worst(a, b: WitnessFidelity): WitnessFidelity = max(a, b)
+  case ty.kind
+  of itBool, itInt, itFloat32, itFloat64, itString: wfFaithful
+  of itDistinct: witnessFidelity(ty.distinctBase)
+  of itUninterp: wfUnexecutable
+  of itPtr: wfUnexecutable
+  of itRef:
+    if isRecursionPlaceholder(ty.refPointeeTy): wfUnexecutable
+    else: worst(wfLossy, witnessFidelity(ty.refPointeeTy))
+  of itTuple:
+    if rendersAsDefaultObject(ty): wfLossy
+    else:
+      var r = wfFaithful
+      for f in ty.fields: r = worst(r, witnessFidelity(f))
+      r
+  of itArray: witnessFidelity(ty.elemTy)
+  of itSeq:
+    if isUnsupportedFieldPlaceholder(ty): wfLossy
+    else:
+      case ty.seqElemTy.kind
+      of itInt, itFloat32, itFloat64: wfFaithful
+      of itRef: wfLossy
+      else: wfUnexecutable   ## the reader's defensive `error()` arm
+  of itTable:
+    if ty.tabKeyTy.kind == itString and ty.tabValTy.kind == itInt and
+       ty.tabValTy.signed and ty.tabValTy.width == 64: wfFaithful
+    else: wfUnexecutable
+  of itSet:
+    if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
+       ty.setElemTy.width == 64: wfFaithful
+    else: wfUnexecutable
+  of itVariant:
+    var r = witnessFidelity(ty.vDiscTy)
+    for f in ty.vPlainFieldTypes: r = worst(r, witnessFidelity(f))
+    for arm in ty.vArms:
+      for f in arm.fieldTypes: r = worst(r, witnessFidelity(f))
+    r
+  of itMultiVariant:
+    var r = wfFaithful
+    for f in ty.mvPlainFieldTypes: r = worst(r, witnessFidelity(f))
+    for ax in ty.mvAxes:
+      r = worst(r, witnessFidelity(ax.discTy))
+      for arm in ax.arms:
+        for f in arm.fieldTypes: r = worst(r, witnessFidelity(f))
+    r
+
+proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode): NimNode =
+  ## `callee(wit[0], wit[1], …)` with each argument first bound to a fresh
+  ## `var` local, so `var T` parameters receive an addressable lvalue (Phase
+  ## 14 A7b). Zero-cost for non-var params. Shared by `assertCoveredBy` and
+  ## `emitReplayWitness` -- one splat shape for every place the library runs
+  ## a SUT on a witness.
+  var preamble = newStmtList()
+  var call = newCall(callee)
+  for i in 0 ..< nParams:
+    let pvar = genSym(nskVar, "pvar" & $i)
+    preamble.add newTree(nnkVarSection,
+      newIdentDefs(pvar, newEmptyNode(),
+                   nnkBracketExpr.newTree(witId, newLit(i))))
+    call.add pvar
+  newStmtList(preamble, call)
+
+proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
+                        witness, target, pathTaint: NimNode): NimNode =
+  ## RFC-0005 S2: the macro-time half of `replayWitness`, for S10 to splice
+  ## into the entry macros (which already hold `parsed.params`). Emits an
+  ## expression of type `ReplayOutcome`. `witness` is the typed witness tuple
+  ## (a `SymexResult.witness` / `.raisedWitness`, i.e. the output of
+  ## `emitTyAndReader`), `target` a `SymexTarget` expression, `pathTaint` a
+  ## `Taint` expression (`RawResult.pathTaint`). Order of refusal, each one
+  ## WITHOUT executing `fn`: ineligible taint, unexecutable witness shape,
+  ## out-of-scope target kind.
+  var fidelity = wfFaithful
+  for p in params: fidelity = max(fidelity, witnessFidelity(p.ty))
+  if fidelity == wfUnexecutable:
+    # Decided at macro time: the splat is not even emitted, so a placeholder
+    # (a nil proc, a nil ptr) can never be called.
+    return bindSym"roInconclusive"
+  let witId = genSym(nskLet, "replayWit")
+  let tgtId = genSym(nskLet, "replayTarget")
+  let escId = genSym(nskVar, "replayEscaped")
+  let splat = emitWitnessSplat(fn, params.len, witId)
+  let lossy = newLit(fidelity == wfLossy)
+  result = quote do:
+    block:
+      let `tgtId`: SymexTarget = `target`
+      if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`):
+        roInconclusive
+      else:
+        let `witId` = `witness`
+        var `escId`: ref Exception = nil
+        # §4.2 "Capture reentrancy": a nested frame, so an enclosing user
+        # capture (`assertCoveredBy`) keeps its hits and does not see ours.
+        symexCaptureBegin()
+        try:
+          `splat`
+        except Exception as e:
+          `escId` = e
+        let hits = symexCaptureEnd()
+        if replayReached(`tgtId`, hits, `escId`): roConfirmed
+        elif `lossy`: roInconclusive
+        else: roRefuted
+
+macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
+                     pathTaint: Taint): untyped =
+  ## RFC-0005 §4.2: execute `witness` (a `SymexResult.witness`, or
+  ## `.raisedWitness`, of a `symexFind(fn, …)` run) against the REAL `fn`
+  ## and report whether it reaches `target`. Target-shaped, so the
+  ## raise-flavoured targets §2.3 puts in scope are expressible: a `sxRaised`
+  ## candidate is replayed with `tRaisedExn(r.raisedTypeId)` -- the claim
+  ## that exact type ESCAPES `fn`, whatever the search target was (under E6 a
+  ## non-excluded Defect surfaces as `sxRaised` under ANY target).
+  ## `pathTaint` is the candidate's `RawResult.pathTaint`, the input to the
+  ## eligibility gate (`replayEligible`).
+  ##
+  ## Returns `roInconclusive` WITHOUT running `fn` for an ineligible taint, a
+  ## witness shape outside the faithfully-renderable fragment (`emitTyAndReader`
+  ## placeholders -- permanently), or a target kind outside
+  ## `replayInScope`. Otherwise runs `fn` once, inside its own nested capture
+  ## frame, catching whatever escapes.
+  let parsed = parseEntryImpl(fn, "replayWitness",
+    defaultSymexSettings().budget.maxInstantiationsPerProc)
+  emitReplayWitness(fn, parsed.params, witness, target, pathTaint)
+
 # ---- assertCoveredBy --------------------------------------------------------
 
 macro assertCoveredBy*(fn: typed,
@@ -1478,16 +1745,9 @@ macro assertCoveredBy*(fn: typed,
   # Pre-A7b this emitted `testFn(wit[0], wit[1], ...)` which fails
   # to compile for SUTs that take any `var T`. The wrapping is
   # zero-cost for non-var params and idiomatic for var params.
+  # (RFC-0005 S2: the splat is `emitWitnessSplat`, shared with replay.)
   let witId = genSym(nskLet, "wit")
-  var splatPreamble = newStmtList()
-  var splat = newCall(actualTestFn)
-  for i in 0 ..< parsed.params.len:
-    let pvar = genSym(nskVar, "pvar" & $i)
-    splatPreamble.add newTree(nnkVarSection,
-      newIdentDefs(pvar, newEmptyNode(),
-                   nnkBracketExpr.newTree(witId, newLit(i))))
-    splat.add pvar
-  let splatBlock = newStmtList(splatPreamble, splat)
+  let splatBlock = emitWitnessSplat(actualTestFn, parsed.params.len, witId)
 
   # gensym shared identifiers used across the cover-check sub-quote
   # and the main quote — quote-do hygiene would otherwise mint

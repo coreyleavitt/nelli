@@ -752,5 +752,10 @@ task test, "Run the test suite":
             # weInternalWalkerFault) + the structural correspondence pin (a
             # Degrade token exists only inside a recording funnel). All-⊤:
             # no verdict change, no bump.
-            "tsymex_rfc0005_s1b_kinds"]:
+            "tsymex_rfc0005_s1b_kinds",
+            # RFC-0005 S2: the replay substrate -- ReplayOutcome, the
+            # target-shaped replayWitness macro, the dcFreshSymbol eligibility
+            # gate, witness fidelity / target scope, and the stackable capture
+            # context. Not yet wired into the verdict (S10); no walker bump.
+            "tsymex_rfc0005_s2_replay"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

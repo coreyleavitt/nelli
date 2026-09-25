@@ -58,7 +58,7 @@ state = "pending"
 [[slice]]
 id    = "S2"
 title = "Replay substrate: ReplayOutcome, target-shaped replayWitness, stackable capture"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S3"

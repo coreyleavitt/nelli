@@ -40,25 +40,60 @@ import std/sets
 # This cluster travels WITH the markers: `symexTarget`'s only non-no-op
 # behavior IS `symexCaptureRecord`, so splitting them would leave
 # `assertCoveredBy` reading an empty hit-set and failing at a distance.
+#
+# RFC-0005 S2 (§4.2 "Capture reentrancy"): the context is a STACK of frames.
+# Replay (`replayWitness`, `symex.nim`) executes the real SUT and reads its
+# hits through this same context -- and after RFC-0005 S10 it does so INSIDE
+# `symexFind`, which a user may well call from within their own active
+# `assertCoveredBy` capture (or a `testFn` that itself replays). The original
+# single-frame shape `clear()`ed the hit-set on `symexCaptureBegin` and went
+# inactive on `symexCaptureEnd`, so an engine-internal replay silently wiped
+# the user's in-flight hits and blinded the rest of their capture. Now
+# `symexCaptureBegin` pushes a fresh frame (saving the enclosing one) and
+# `symexCaptureEnd` pops it, restoring the enclosing frame intact.
+#
+# A hit is recorded into the INNERMOST frame only. That isolation is the
+# point: an inner replay runs the SUT on SOLVER-CHOSEN inputs, and letting its
+# hits leak outward would credit the user's `testFn` with coverage it never
+# earned on its own inputs.
 
 type SymexCaptureCtx* = ref object
   active*:           bool
+    ## True iff at least one capture frame is open on this thread.
   hits*:             HashSet[string]
+    ## The INNERMOST open frame's hit-set (the one `symexCaptureRecord`
+    ## writes and the matching `symexCaptureEnd` returns).
+  enclosing*:        seq[HashSet[string]]
+    ## RFC-0005 S2: the saved hit-sets of the enclosing open frames,
+    ## outermost first. Empty when at most one frame is open.
 
 var symexCapture* {.threadvar.}: SymexCaptureCtx
 
 proc symexCaptureBegin*() =
+  ## Opens a new, empty capture frame. Nests: an already-open frame is saved
+  ## (NOT cleared) and restored by the matching `symexCaptureEnd` -- RFC-0005
+  ## S2's reentrancy fix.
   if symexCapture.isNil:
     symexCapture = SymexCaptureCtx()
+  if symexCapture.active:
+    symexCapture.enclosing.add move(symexCapture.hits)
   symexCapture.active = true
-  symexCapture.hits.clear()
+  symexCapture.hits = initHashSet[string]()
 
 proc symexCaptureEnd*(): HashSet[string] =
-  ## Returns the set of `symexTarget` names hit during the capture.
-  ## After this call the context is inactive again.
-  result = symexCapture.hits
-  symexCapture.active = false
-  symexCapture.hits.clear()
+  ## Closes the innermost capture frame and returns the set of `symexTarget`
+  ## names hit while it was the innermost one. The enclosing frame (if any)
+  ## becomes innermost again with its hits intact; after closing the
+  ## outermost frame the context is inactive. With no frame open, returns
+  ## the empty set.
+  if symexCapture.isNil or not symexCapture.active:
+    return initHashSet[string]()
+  result = move(symexCapture.hits)
+  if symexCapture.enclosing.len > 0:
+    symexCapture.hits = symexCapture.enclosing.pop()
+  else:
+    symexCapture.active = false
+    symexCapture.hits = initHashSet[string]()
 
 proc symexCaptureRecord*(name: string) {.inline.} =
   if not symexCapture.isNil and symexCapture.active:

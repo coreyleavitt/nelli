@@ -733,5 +733,12 @@ task test, "Run the test suite":
             # `skip()` -- a round-10 liveness finding caught it registered
             # but structurally inert that way.
             "tn45probe",
-            "tprobe_n45stats"]:
+            "tprobe_n45stats",
+            # RFC-0005 (soundness channels) slice S0: characterization pins
+            # on TODAY's undifferentiated sxUnknown, run through the real
+            # symexFind entry point -- an over-taint-only UNSAT exhibit
+            # (flips sxUnsat at S4) plus the cap-veto and closure-veto
+            # companions (each a clean-path witness discarded by a blanket
+            # veto, flips sxSat at S9). No product code; no walker bump.
+            "tsymex_rfc0005_s0_exhibit"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

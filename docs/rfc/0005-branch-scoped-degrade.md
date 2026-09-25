@@ -33,7 +33,7 @@ owner = "corey"
 [[slice]]
 id    = "S0"
 title = "Exhibit: over-taint-only UNSAT + veto companion, green characterization pins"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S0b"

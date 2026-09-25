@@ -20,7 +20,7 @@
 
 ## Current position (refreshed 2026-09-25 ~03:16)
 
-- **Slices done:** 2 of 15 — S0 (`8a7384b`), S0b (spike, recorded).
+- **Slices done:** 3 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`).
 - **In flight:** S1 (opus agent) — code uncommitted in the main checkout
   (`types.nim`, the runtime unit, `tests/tsymex_rfc0005_s1_lattice.nim`,
   `nelli.nimble`); its gate sweep `scratchpad/s1-sweep.log` was 409/496.
@@ -61,7 +61,8 @@ soundness risk and the blast radius concentrate:
 |---|---|---|---|
 | S0 | done | `8a7384b` | 3 green pins through `symexFind`. Pin 1 routes `allocDegrade(heUnresolvedRef)` via `liftHeapValue`'s unsupported-pointee arm (string field through a ref) → flips at S4. Pin 2 `feUnsupportedExprKind` (inline `cast[int32]`) in a dead branch → cap veto. Pin 3 `ceUnsupportedHof` (`filter` over symbolic seq) → closure veto. Both flip to `sxSat` at S9. |
 | S0b | done | (spike, nothing committed) | See **S0b result** below. |
-| S1 | in progress (opus) | | |
+| S1 | done | `d2c2226` | sweep 491/0/7, regressed=0, no bump. `degrade(w, kind, msg, sink = dsWalk)`, `DegradeSink` {dsWalk, dsHeapDepth, dsNewFieldZero, dsClosure}; `heapArmDegrade`; `lowerDegrade` + `takeLoweringPendingDegrade`; `forkPathTaintPrimitive` (grep-pinned private). `w.runTaint` has ONE writer (drain in `runSymexImpl`: `runTaintOf` over exnWarnings/parseErrors/closureErrs + ⊤ if `kindlessRunTaint`). 14 transitional sites marked `RFC-0005 S1b: mint kind`. Leak pin `stampLoweringPendingLeak` may fire in practice (unmeasured). `SymexErrorKind` has **61** members, not 41. |
+| S1b | in progress (opus) | | |
 
 ### S0b result — the payoff is real, and gated on S1c
 

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~07:00)
+## Current position (refreshed 2026-09-25 ~07:40)
 
 - **Slices done:** 5 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`).
@@ -27,7 +27,9 @@
 - **In flight:** S1c (opus agent) in the main checkout, uncommitted; its gate
   sweep finished: `scratchpad/s1c-sweep.diff` unchanged=495 **regressed=1**
   (`tsymex_r6_n36_raise_degrade` 0 -> 137, killed at the sweep timeout --
-  likely the tainted-routeRaise solve); the agent is probing it
+  likely the tainted-routeRaise solve); the agent has a fix and is running
+  a second gate sweep `scratchpad/s1c-sweep2.log` (~325/496) + cpp run; it
+  commits only on regressed=0. It probed with
   (`tests/ts1c_n36probe.nim`, untracked scratch -- must not be committed).
   It also owns the n40 leak-pin
   fix, the `runConcolicCollectImpl` pending-taint reset, and the walker bump.

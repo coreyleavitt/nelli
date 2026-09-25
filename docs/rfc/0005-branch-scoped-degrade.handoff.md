@@ -18,20 +18,24 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~03:16)
+## Current position (refreshed 2026-09-25 ~04:20)
 
-- **Slices done:** 3 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`).
-- **In flight:** S1 (opus agent) — code uncommitted in the main checkout
-  (`types.nim`, the runtime unit, `tests/tsymex_rfc0005_s1_lattice.nim`,
-  `nelli.nimble`); its gate sweep `scratchpad/s1-sweep.log` was 409/496.
-- **Remaining:** S1, S1b, S1c, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11.
+- **Slices done:** 3 of 15 on the branch — S0 (`8a7384b`), S0b (spike), S1
+  (`d2c2226`). **S2 built** (`48c30d6` on side branch `rfc-0005-s2-replay`,
+  worktree `scratchpad/s2-replay`) — not yet merged, fence row not flipped;
+  notes in `scratchpad/S2-RESULT.md`.
+- **In flight:** S1b (opus agent) — uncommitted in the main checkout, running
+  its gate sweep.
+- **Remaining:** S1b, S1c, S2 (merge + sweep), S3, S4, S5, S6, S7, S8, S9,
+  S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, if the S1 agent is gone, check `git status`: uncommitted S1 work
-  must be gated (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`) and
-  committed before S1b starts. S1b next, then S1c (both opus).
+  resume, if the S1b agent is gone, check `git status`: uncommitted S1b work
+  must be gated (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`, regressed=0)
+  and committed. Then merge `rfc-0005-s2-replay` onto the branch, flip S2 in
+  the fence, sweep-gate, and launch S1c (opus).
 
 ## Implementation plan — model allocation
 
@@ -62,7 +66,8 @@ soundness risk and the blast radius concentrate:
 | S0 | done | `8a7384b` | 3 green pins through `symexFind`. Pin 1 routes `allocDegrade(heUnresolvedRef)` via `liftHeapValue`'s unsupported-pointee arm (string field through a ref) → flips at S4. Pin 2 `feUnsupportedExprKind` (inline `cast[int32]`) in a dead branch → cap veto. Pin 3 `ceUnsupportedHof` (`filter` over symbolic seq) → closure veto. Both flip to `sxSat` at S9. |
 | S0b | done | (spike, nothing committed) | See **S0b result** below. |
 | S1 | done | `d2c2226` | sweep 491/0/7, regressed=0, no bump. `degrade(w, kind, msg, sink = dsWalk)`, `DegradeSink` {dsWalk, dsHeapDepth, dsNewFieldZero, dsClosure}; `heapArmDegrade`; `lowerDegrade` + `takeLoweringPendingDegrade`; `forkPathTaintPrimitive` (grep-pinned private). `w.runTaint` has ONE writer (drain in `runSymexImpl`: `runTaintOf` over exnWarnings/parseErrors/closureErrs + ⊤ if `kindlessRunTaint`). 14 transitional sites marked `RFC-0005 S1b: mint kind`. Leak pin `stampLoweringPendingLeak` may fire in practice (unmeasured). `SymexErrorKind` has **61** members, not 41. |
-| S1b | in progress (opus) | | |
+| S1b | in progress (opus) | | gate sweep running |
+| S2 | built, unmerged | `48c30d6` (side branch) | 13 tests c+cpp green; `ReplayOutcome`, `replayWitness`, stackable capture; S10 API in `scratchpad/S2-RESULT.md` |
 
 ### S0b result — the payoff is real, and gated on S1c
 

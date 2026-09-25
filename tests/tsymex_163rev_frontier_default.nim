@@ -122,7 +122,8 @@ suite "#163 item 3 -- an exceeded cap degrades honestly (never a silent wrong ve
     let r = symexFind(multiBranchUnreachable, tLabel("never"), tightSettings)
     check r.status == sxUnknown
     check r.errors.len > 0
-    check r.errors.anyIt(it.kind == beBudgetExhausted)
+    # RFC-0005 S6a: the prune is `beBudgetExhaustedPrune` (dcOmitted).
+    check r.errors.anyIt(it.kind == beBudgetExhaustedPrune)
 
   test "control: the same target under an unlimited (explicit 0) budget is genuinely sxUnsat":
     const unlimitedSettings = block:

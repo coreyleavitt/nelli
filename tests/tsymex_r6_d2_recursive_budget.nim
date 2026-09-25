@@ -175,7 +175,8 @@ suite "symex round-6 D2 — recursive field-allocation budget (composite arm fie
     var hasClassified = false
     var msg = ""
     for e in res.errors:
-      if e.kind == beBudgetExhausted and e.severity == sevError:
+      # RFC-0005 S6a: the variant-ctor budget is `beBudgetExhaustedUnmodelled`.
+      if e.kind == beBudgetExhaustedUnmodelled and e.severity == sevError:
         hasClassified = true
         msg = e.msg
     check hasClassified
@@ -205,7 +206,8 @@ suite "symex round-6 D2 — nested-tuple arm field exercises two-level recursion
     check res.status != sxSat
     var hasClassified = false
     for e in res.errors:
-      if e.kind == beBudgetExhausted and e.severity == sevError:
+      # RFC-0005 S6a: the variant-ctor budget is `beBudgetExhaustedUnmodelled`.
+      if e.kind == beBudgetExhaustedUnmodelled and e.severity == sevError:
         hasClassified = true
     check hasClassified
 

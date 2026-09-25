@@ -158,7 +158,8 @@ suite "symex round-6 N9 — variant constructor field-allocation budget":
     var hasClassified = false
     var msg = ""
     for e in res.errors:
-      if e.kind == beBudgetExhausted and e.severity == sevError:
+      # RFC-0005 S6a: the variant-ctor budget is `beBudgetExhaustedUnmodelled`.
+      if e.kind == beBudgetExhaustedUnmodelled and e.severity == sevError:
         hasClassified = true
         msg = e.msg
     check hasClassified
@@ -190,7 +191,8 @@ suite "symex round-6 N9 — budget-boundary":
     check res.status != sxSat
     var hasClassified = false
     for e in res.errors:
-      if e.kind == beBudgetExhausted and e.severity == sevError:
+      # RFC-0005 S6a: the variant-ctor budget is `beBudgetExhaustedUnmodelled`.
+      if e.kind == beBudgetExhaustedUnmodelled and e.severity == sevError:
         hasClassified = true
     check hasClassified
 

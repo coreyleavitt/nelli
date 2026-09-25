@@ -790,5 +790,13 @@ task test, "Run the test suite":
             # `seZ3StringIncomplete` as `seRuneDecodeSymbolic` (dcSubstituted),
             # seUnsupportedStringOp / seUnsupportedRegex /
             # seNestedSeqUnsupported stay ⊤; walker 142->143.
-            "tsymex_rfc0005_s5_str"]:
+            "tsymex_rfc0005_s5_str",
+            # RFC-0005 S6a: the budget family split and classified --
+            # k-unroll survivor keeps `beBudgetExhausted` (dcFabricated, as
+            # `beBudgetExhaustedAssumedBound`), frontier prune ->
+            # `beBudgetExhaustedPrune` (dcOmitted, a halt), maxCallDepth /
+            # variant-ctor bails -> `beBudgetExhaustedUnmodelled`
+            # (dcSubstituted), `ceInlineBudgetExceeded` dcSubstituted;
+            # verdict-neutral by construction; walker 143->144.
+            "tsymex_rfc0005_s6a_budget"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

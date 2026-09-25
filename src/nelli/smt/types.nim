@@ -812,7 +812,8 @@ type
                       ## the walker's own `maxVariantConstructorForks`
                       ## STRUCTURAL budget check (against `vcsTagSet.len`,
                       ## before any solver work) classifies a decline
-                      ## (`beBudgetExhausted`) when exceeded — a WALK-TIME
+                      ## (`beBudgetExhaustedUnmodelled`, RFC-0005 S6a) when
+                      ## exceeded — a WALK-TIME
                       ## site with no `NimNode` to build a `siteMsg` from, so
                       ## `vcsLoc` carries the file:line:col + `n.repr`
                       ## components captured at PARSE time and rendered
@@ -1428,7 +1429,11 @@ type
                           ## walker v64): a WALK BUDGET ran out with paths
                           ## still live — `maxLoopUnwind` k-unroll exhaustion
                           ## (the loop guard was still SAT-able past the
-                          ## bound) or a `maxFrontierSize` path prune. The
+                          ## bound). RFC-0005 S6a narrowed it to exactly that
+                          ## (`dcFabricated`): the `maxFrontierSize` prune is
+                          ## now `beBudgetExhaustedPrune` and the
+                          ## `maxCallDepth` / variant-constructor bails are
+                          ## `beBudgetExhaustedUnmodelled`. The
                           ## affected paths are tainted/pruned and the run
                           ## degrades to `sxUnknown`; before v64 these sites
                           ## set `w.sawUnknown` bare, producing the
@@ -1871,6 +1876,38 @@ type
                           ## per-read symbol (`dcFreshSymbol`): reusing that
                           ## kind here would have promoted a forced `0`.
                           ## sevError -> sxUnknown.
+    beBudgetExhaustedPrune ## RFC-0005 S6a (§3.2 split of `beBudgetExhausted`,
+                          ## the `dcOmitted` minority funnel): the
+                          ## `maxFrontierSize` post-step frontier prune
+                          ## (`walkBlock`, `runtime.nim`) EVICTED live paths.
+                          ## The evicted paths are dropped outright and the
+                          ## kept paths are untouched -- a pure
+                          ## under-approximation, so `classOf` is `dcOmitted`
+                          ## (`{scIncomplete}` on the run: an UNSAT claim over
+                          ## the pruned run is void; `{}` on the path, which is
+                          ## inert because the site is a HALT -- no survivor
+                          ## receives the token). Split off because the
+                          ## k-unroll survivor that keeps `beBudgetExhausted`
+                          ## is `dcFabricated` and the call-depth/variant bails
+                          ## (`beBudgetExhaustedUnmodelled`) substitute:
+                          ## classifying the merged kind by THIS site would
+                          ## have stripped the path taint from both. sevError
+                          ## -> sxUnknown.
+    beBudgetExhaustedUnmodelled ## RFC-0005 S6a (§3.2 split of
+                          ## `beBudgetExhausted`, the `dcSubstituted` minority
+                          ## funnel): a walk budget ran out and the walker
+                          ## CONTINUED PAST an operation it did not model. The
+                          ## `maxCallDepth` bail (`isCall`) binds the result to
+                          ## a fresh havoc `retSym` but drops the callee's
+                          ## var-param writes, heap writes and raises, and never
+                          ## lowers the actuals; the `maxVariantConstructorForks`
+                          ## / `maxVariantConstructorFieldAllocs` declines
+                          ## (`isVariantConstructSym`) leave the destination
+                          ## UNBOUND and never lower the discriminant or
+                          ## plain-field operands. Both leave a stale env (and
+                          ## drop raise forks), neither ⊇ nor ⊆ the real
+                          ## behaviour set: `classOf` is `dcSubstituted`, ⊤ on
+                          ## both coordinates. sevError -> sxUnknown.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2191,7 +2228,8 @@ type
       ## frontier down to this many paths (highest-uncertainty-first
       ## eviction) whenever it grows past the cap, tainting the evicted
       ## paths' contribution as `sxUnknown` via the classified
-      ## `beBudgetExhausted` kind (Invariant 3 — an honest degrade, never a
+      ## `beBudgetExhaustedPrune` kind (RFC-0005 S6a; `beBudgetExhausted`
+      ## before it) (Invariant 3 — an honest degrade, never a
       ## silent truncation that could fake an `sxSat`/`sxUnsat`). `0` STAYS
       ## the documented opt-out meaning UNLIMITED (this field is in the
       ## `ResourceBudget` majority `0 = unlimited` covers, unlike
@@ -2310,7 +2348,8 @@ type
       ## `case`-branch-narrowed, or the full declared non-else arm count)
       ## BEFORE any solver work, mirroring `maxSplitParts`'s structural-cap
       ## style. Default `8`. `0` means unlimited. Exceeding it classifies a
-      ## `beBudgetExhausted` decline (sxUnknown) — never a crash, never an
+      ## `beBudgetExhaustedUnmodelled` decline (RFC-0005 S6a; sxUnknown) —
+      ## never a crash, never an
       ## unbounded fork explosion for a wide unconstrained enum.
     maxVariantConstructorFieldAllocs*: int = 64
       ## N9 (round-6 review remediation, ADR-0029 companion), unit corrected
@@ -2338,7 +2377,8 @@ type
       ## shape that previously passed at exactly 64 flat fields may now
       ## exceed 64 leaf allocations and decline — the intended behavior
       ## change). `0` means unlimited. Exceeding it classifies the SAME
-      ## `beBudgetExhausted` decline kind (never a parallel mechanism) —
+      ## `beBudgetExhaustedUnmodelled` decline kind (RFC-0005 S6a; never a
+      ## parallel mechanism) —
       ## never a crash, never unbounded allocation work for a wide- or
       ## deeply-fielded variant.
     maxSplitParts*: int = 8
@@ -2442,6 +2482,17 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   ## operands) -- RFC §3.1's table is corrected by its `seNestedSeqUnsupported`
   ## row below.
   ##
+  ## RFC-0005 S6a (walker v144) audited the BUDGET family (rows marked
+  ## `S6a`). `beBudgetExhausted` was one kind at six sites spanning three
+  ## classes, merged on purpose ("a sibling of the SAME budget family");
+  ## §3.2 split it: the k-unroll survivor keeps the kind (`dcFabricated`),
+  ## the frontier prune became `beBudgetExhaustedPrune` (`dcOmitted`, a
+  ## halt), and the call-depth / variant-constructor bails became
+  ## `beBudgetExhaustedUnmodelled` (`dcSubstituted`). Every class the family
+  ## maps to carries `scIncomplete` on the run, so NO budget kind can ever
+  ## license `sxUnsat`; the slice is verdict-neutral by construction (the
+  ## payoff is attribution and S10 replay eligibility).
+  ##
   ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
   ## EXISTING kind at a NEW emission site asserts that the new site shares
   ## that kind's substitution class. If it does not, split the kind
@@ -2521,7 +2572,13 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of ceUnsupportedCapture: dcNoAnswer
   of ceUnsupportedHof: dcNoAnswer
   of ceClosureUnknownCallee: dcNoAnswer
-  of ceInlineBudgetExceeded: dcNoAnswer
+  of ceInlineBudgetExceeded: dcSubstituted
+    # S6a: both sites (`applyClosureGround`'s inline-budget guard and its
+    # no-walk-context guard) return the closure's uninterpreted `funcApp`
+    # WITHOUT descending the body: its captured-variable writes and raises
+    # are dropped (a stale env) and equal arguments correlate where the real
+    # closure need not. Not a fresh symbol -- substituted. Same sites, same
+    # class: no split.
   of heDepthExhausted: dcNoAnswer
   of heUnsafeCast: dcNoAnswer
   of hePtrArith: dcNoAnswer
@@ -2550,7 +2607,14 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S4 audited: a walker bug is never an approximation (§3.1), including
     # its two `degradeAlloc` seq-element sites. S5: likewise its R1
     # placeholder-funnel sites (`placeholderReadDeclineKind`).
-  of beBudgetExhausted: dcNoAnswer
+  of beBudgetExhausted: dcFabricated
+    # S6a (split -> beBudgetExhaustedPrune, beBudgetExhaustedUnmodelled):
+    # the remaining sites are the `maxLoopUnwind` k-unroll exhaustion in
+    # BOTH walk modes (`isWhile`'s `wmExplore` arm, `walkWhileFollowConcrete`).
+    # Each still-active path is forked onto the POST-loop continuation with
+    # the guard still satisfiable on its pc -- a continuation reality never
+    # takes there (⊤ on the path) -- and iterations past the bound are never
+    # walked (`{scIncomplete}` on the run). The RFC's flagship dcFabricated.
   of feUnsupportedExprKind: dcNoAnswer
     # S4 audited, NOT reclassified: one `degradeAlloc` site (`iekField` on an
     # unsupported receiver) plus the Class-A `mkUnsupported` parse sites,
@@ -2568,7 +2632,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S4: the ONE site (`rawAnyAstOf`) returns a concrete BV64 `0` as the
     # compound value's ast, and heap stores / closure args consume it as a
     # VALUE -- a forced value, not a havoc. Same coordinates as the default.
-  of beBudgetExhaustedAssumedBound: dcNoAnswer
+  of beBudgetExhaustedAssumedBound: dcFabricated
+    # S6a: the `isWhile` k-unroll site's `wHasAssumedBound` branch -- the
+    # identical survivor fork as `beBudgetExhausted` (one site, one shape).
   of feOpaqueCallUnmodelled: dcNoAnswer
   of feEnumOrdinalUnresolved: dcNoAnswer
   of feTransparentArgNotInert: dcNoAnswer
@@ -2588,6 +2654,16 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of seRuneDecodeSymbolic: dcSubstituted
     # `runeLen(s)` is replaced by the literal `0` (a forced value) and the
     # `for r in s.runes` statement is dropped (a stale env) -- both substitute.
+  # RFC-0005 S6a: the two minority funnels split off beBudgetExhausted.
+  of beBudgetExhaustedPrune: dcOmitted
+    # `walkBlock`'s `maxFrontierSize` eviction drops paths and forks none:
+    # a pure under-approximation. Its `{}` path coordinate is sound only
+    # because the site is a HALT (the token is discarded -- pinned).
+  of beBudgetExhaustedUnmodelled: dcSubstituted
+    # the `maxCallDepth` bail (fresh havoc retSym, callee var-param/heap
+    # writes and raises dropped, actuals never lowered) and the two
+    # `isVariantConstructSym` budgets (destination unbound, operands never
+    # lowered): stale env + dropped raise forks.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the

@@ -363,7 +363,7 @@ suite "RFC-0005 S5 (a) -- the degradeStrArm / R1 funnels' classOf rows":
     check scIncomplete in runTaint(classOf(seRuneDecodeSymbolic))
 
   test "the split is a TAIL append (ordinal stability, §3.2)":
-    check seRuneDecodeSymbolic == SymexErrorKind.high
+    ## RFC-0005 S6a tail-appended after this kind; adjacency, not `.high`.
     check ord(heUnsupportedPointeeRead) + 1 == ord(seRuneDecodeSymbolic)
 
   test "the funnels' substituting / effect-dropping kinds stay ⊤":

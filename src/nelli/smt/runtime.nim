@@ -7822,7 +7822,9 @@ type
                       ## occur OUTSIDE the lowering wrappers (whose threadvar
                       ## sink is reset at every wrapper entry): the
                       ## `maxLoopUnwind` k-unroll exhaustion and
-                      ## `maxFrontierSize` prune sites (`beBudgetExhausted`)
+                      ## `maxFrontierSize` prune sites (`beBudgetExhausted`;
+                      ## RFC-0005 S6a split the prune off as
+                      ## `beBudgetExhaustedPrune`)
                       ## and the isReturn composite-return drain guard
                       ## (`feUnsupportedOp`) — all previously either set
                       ## `w.sawUnknown` BARE (empty-errors sxUnknown) or
@@ -9633,6 +9635,10 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   if active.len > 0:
     # RFC-0005 S1: one `degrade` call records the error (run act, derived at
     # drain) and yields the token every survivor is forked with (path act).
+    # RFC-0005 S6a: `beBudgetExhausted` is `dcFabricated` — each survivor
+    # leaves the loop with the guard still TRUE on its pc (a continuation
+    # the real trace never takes here: ⊤ on the path) and the iterations
+    # past the bound are never walked (`{scIncomplete}` on the run).
     let d = w.degrade(beBudgetExhausted,
       "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
            $unwind & ") while following a concrete replay that was still " &
@@ -9653,8 +9659,9 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
     # positive value triggers highest-uncertainty-first eviction:
     # certain paths sort before uncertain (stable within each
     # tier), and the tail is dropped. Pruned paths' contribution
-    # is reported as unknown via the classified `beBudgetExhausted`
-    # degrade (RFC-0005 S1: its run coordinate is derived at drain),
+    # is reported as unknown via the classified `beBudgetExhaustedPrune`
+    # degrade (RFC-0005 S1: its run coordinate is derived at drain; S6a
+    # split it off `beBudgetExhausted`),
     # which cascades into the final `sxUnknown` verdict cached under
     # `:unk` (NOT `:unsat`).
     if w.settings.budget.maxFrontierSize > 0 and
@@ -9674,11 +9681,16 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
       # bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
       # RFC-0005 S1: HALT site (pruned paths are dropped, not forked), so
       # the token is discarded; the run act is the recorded error.
-      discard w.degrade(beBudgetExhausted,
+      # RFC-0005 S6a: split off `beBudgetExhausted` as
+      # `beBudgetExhaustedPrune` (`dcOmitted`) — the eviction is a pure
+      # under-approximation (`{scIncomplete}` on the run), and its empty path
+      # coordinate is sound ONLY because this is a halt: the token must stay
+      # discarded (pinned in `tsymex_rfc0005_s6a_budget.nim`).
+      discard w.degrade(beBudgetExhaustedPrune,
         "path-frontier cap (maxFrontierSize=" &
              $w.settings.budget.maxFrontierSize & ") pruned " &
              $(result.len - kept.len) &
-             " live path(s) — their verdicts are unexplored (beBudgetExhausted)")
+             " live path(s) — their verdicts are unexplored (beBudgetExhaustedPrune)")
       result = kept
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
@@ -9885,6 +9897,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # implying an unbounded/genuinely-exhausted loop. Status/soundness
       # behavior is IDENTICAL either way (still tainted, still sxUnknown) —
       # only the classification differs.
+      # RFC-0005 S6a: both kinds are `dcFabricated`. Every survivor below is
+      # forked onto the post-loop continuation with `p.pc` — the guard still
+      # satisfiable, NOT `not cond` — so the continuation is fiction (⊤ on
+      # the path), and the omitted iterations void any UNSAT claim
+      # (`{scIncomplete}` on the run).
       var d: Degrade
       if stmt.wHasAssumedBound:
         # Round-6 fix round 3 (item 5): softened wording — `wHasAssumedBound`
@@ -10596,17 +10613,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let vcsTy = stmt.vcsVariantTy
     let vcsBudget = w.settings.budget.maxVariantConstructorForks
     if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
-      let d = w.degrade(beBudgetExhausted,
+      # RFC-0005 S6a: `beBudgetExhaustedUnmodelled` (`dcSubstituted`), not
+      # the k-unroll's `beBudgetExhausted` — the construction is skipped,
+      # the destination left UNBOUND (a later read declines as
+      # `feGlobalReadUnmodelled`) and `vcsDiscExpr`/`vcsPlainFields` are
+      # never lowered, so their raise forks are dropped: a stale env.
+      let d = w.degrade(beBudgetExhaustedUnmodelled,
         stmt.vcsLoc & ": variant constructor fork budget exhausted " &
              "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
              "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
-             "(beBudgetExhausted)")
+             "(beBudgetExhaustedUnmodelled)")
       for p in paths:
         # `stmt.vcsResultVar` is deliberately left UNBOUND in `p.env` — the
         # same safe-degrade idiom the P2b ref-variant decline uses (any
-        # later read raises KeyError, caught by the CR-1c safety net as
-        # `weInternalWalkerFault` → sxUnknown; SND-1's per-path taint is
-        # ALSO forced via `forkPathTainted` so the verdict never rides a
+        # later read misses the env and declines — observed in RFC-0005
+        # S6a as `feGlobalReadUnmodelled`'s havoc, ⊤ → sxUnknown, and the
+        # parser's A-normalised `let p = <temp>` makes that read immediate;
+        # SND-1's per-path taint is ALSO forced via `forkPathTainted` so the verdict never rides a
         # bare `w.sawUnknown` alone). RFC-0005 S1: one token `d`, forked
         # onto every path.
         out2.add forkPathTainted(p, p.pc, p.env, d)
@@ -10633,13 +10656,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let vcsFieldAllocs = satMul64(int64(stmt.vcsTagSet.len), vcsArmFieldCost)
     let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
     if vcsFieldBudget > 0 and vcsFieldAllocs > int64(vcsFieldBudget):
-      let d = w.degrade(beBudgetExhausted,
+      # RFC-0005 S6a: same substitution as the fork-count budget above.
+      let d = w.degrade(beBudgetExhaustedUnmodelled,
         stmt.vcsLoc & ": variant constructor field-allocation budget " &
              "exhausted (maxVariantConstructorFieldAllocs=" &
              $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
              " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
              $vcsFieldAllocs & ") — construction unmodeled " &
-             "(beBudgetExhausted)")
+             "(beBudgetExhaustedUnmodelled)")
       for p in paths:
         # Same safe-degrade idiom as the fork-count budget above.
         out2.add forkPathTainted(p, p.pc, p.env, d)
@@ -11131,13 +11155,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # kind rather than adding a near-duplicate. The message names the
       # exhausted budget and its current value so "raise maxCallDepth" reads
       # as actionable configuration advice, not a shrug.
-      let d = w.degrade(beBudgetExhausted,
+      # RFC-0005 S6a: that reuse is exactly what §3.2's standing rule
+      # forbids once `classOf` reads one word per kind — this bail is not a
+      # k-unroll survivor. It continues with a fresh havoc `retSym` but
+      # DROPS the callee's var-param writes, heap writes and raises (and
+      # never lowers the actuals): a stale env, `dcSubstituted`. Split off
+      # as `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
+      # frontier prune (`dcOmitted`) would have stripped these survivors'
+      # path taint — a witness through the havoc retSym reported clean sxSat.
+      let d = w.degrade(beBudgetExhaustedUnmodelled,
         "call-inlining depth budget exhausted (maxCallDepth=" &
              $w.settings.budget.maxCallDepth & ") while inlining `" &
              stmt.callee & "` — the call stack is at least as deep as the " &
              "configured budget; raise settings.budget.maxCallDepth if " &
              "this SUT's real call nesting is deeper than the current " &
-             "bound (beBudgetExhausted)")
+             "bound (beBudgetExhaustedUnmodelled)")
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
@@ -12103,6 +12135,12 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # RFC-0005 S1: HALT-shaped (no per-path act inside a lowering) — the
     # `dsClosure` sink writes the threadvar fallback + LIVE WalkCtx field
     # exactly as the two hand-written adds did; the token is discarded.
+    # RFC-0005 S6a: `dcSubstituted` (as is the no-walk-context guard above):
+    # `funcApp` stands in for a body that is never descended, so the body's
+    # captured-variable writes and raises are dropped, and equal arguments
+    # correlate where reality need not. The consuming path carries no taint
+    # from here — only the closure veto guards the SAT side (RFC §2.5: S7
+    # routes this decline through path taint before S9 deletes the veto).
     discard w.degrade(ceInlineBudgetExceeded,
       "closure-application descent exceeded maxClosureInlineCount (" &
            $w.settings.budget.maxClosureInlineCount & ") at " & label, dsClosure)

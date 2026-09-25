@@ -798,7 +798,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## regex-replace/split/join declines are `dcFreshSymbol` once they lower
     ## their operands first; rune decode split off as `seRuneDecodeSymbolic`).
     ## 142->143.
-    check symexWalkerVersion == "143"
+    ## RFC-0005 S6a (the budget family classified: `beBudgetExhausted` split
+    ## into the k-unroll survivor (dcFabricated), `beBudgetExhaustedPrune`
+    ## (dcOmitted) and `beBudgetExhaustedUnmodelled` (dcSubstituted)).
+    ## 143->144.
+    check symexWalkerVersion == "144"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

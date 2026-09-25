@@ -227,7 +227,8 @@ suite "symex round-6 A3 — maxVariantConstructorForks budget-exceeded decline":
     var hasClassified = false
     var msg = ""
     for e in res.errors:
-      if e.kind == beBudgetExhausted and e.severity == sevError:
+      # RFC-0005 S6a: the variant-ctor budget is `beBudgetExhaustedUnmodelled`.
+      if e.kind == beBudgetExhaustedUnmodelled and e.severity == sevError:
         hasClassified = true
         msg = e.msg
     check hasClassified

@@ -31,7 +31,11 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
   const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf,
                         seBytesLengthTooLarge, seBytesSymbolicLength,
                         seZ3VersionMissing, seZ3StringIncomplete,
-                        seRuneDecodeSymbolic}
+                        seRuneDecodeSymbolic,
+                        # RFC-0005 S6a: the budget family.
+                        beBudgetExhausted, beBudgetExhaustedAssumedBound,
+                        beBudgetExhaustedPrune, beBudgetExhaustedUnmodelled,
+                        ceInlineBudgetExceeded}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

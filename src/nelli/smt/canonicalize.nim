@@ -184,7 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "143"
+const symexWalkerVersion* = "144"
+  ## RFC-0005 S6a (2026-09-25) — the BUDGET family classified
+  ## (`types.nim`'s `classOf` rows marked S6a). `beBudgetExhausted` was one
+  ## kind at six walk sites spanning three substitution classes; §3.2 split
+  ## it by tail-appending one sibling per minority class: the `maxLoopUnwind`
+  ## k-unroll survivor keeps `beBudgetExhausted` (`dcFabricated`, as does
+  ## `beBudgetExhaustedAssumedBound`), the `maxFrontierSize` prune is
+  ## `beBudgetExhaustedPrune` (`dcOmitted`, a halt), and the `maxCallDepth`
+  ## bail plus the two `isVariantConstructSym` budgets are
+  ## `beBudgetExhaustedUnmodelled` (`dcSubstituted`: havoc/unbound result,
+  ## callee or operand effects dropped). `ceInlineBudgetExceeded` is
+  ## `dcSubstituted`. Every class carries `scIncomplete` on the run and every
+  ## forked site keeps `scSpurious` on the path, so no verdict changes; the
+  ## bump is for the renamed kinds a cached/compared `errors` seq now carries
+  ## at the split sites. 143->144.
   ## RFC-0005 S5 (2026-09-25) — the `degradeStrArm` funnel and the R1
   ## placeholder funnel audited site by site (`types.nim`'s `classOf` rows
   ## marked S5). `seBytesLengthTooLarge`, `seBytesSymbolicLength`,

@@ -130,7 +130,9 @@ suite "#161/#163 handoff -- maxCallDepth bail names its own budget":
     var internalFault = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == beBudgetExhausted and "maxCallDepth" in e.msg and
+      # RFC-0005 S6a: the depth bail is `beBudgetExhaustedUnmodelled`
+      # (dcSubstituted), split off the k-unroll's `beBudgetExhausted`.
+      if e.kind == beBudgetExhaustedUnmodelled and "maxCallDepth" in e.msg and
          "raise" in e.msg and "settings.budget.maxCallDepth" in e.msg:
         classified = true
       if e.kind == weInternalWalkerFault:

@@ -407,7 +407,8 @@ let corpus = @[
                         "reusing the beBudgetExhausted kind the " &
                         "maxLoopUnwind/maxFrontierSize precedents use)",
              status: rVariantConstructBudget.status, errors: rVariantConstructBudget.errors,
-             expectedKind: beBudgetExhausted, hasKindCheck: true),
+             # RFC-0005 S6a: split off as `beBudgetExhaustedUnmodelled`.
+             expectedKind: beBudgetExhaustedUnmodelled, hasKindCheck: true),
 
   CorpusItem(label: "B2: narrowing int conversion (uint8(x) from int32)",
              surface: "1. parser catch-all",

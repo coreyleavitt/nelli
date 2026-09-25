@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~08:45)
+## Current position (refreshed 2026-09-25 ~09:05)
 
 - **Slices done:** 7 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -29,8 +29,12 @@
   ahead and lands on main by fast-forward (no PR).
 - **In flight:** S4 (upgraded to **opus**: first verdict-changing slice, sets the
   classification + flip-audit pattern for S5/S6, and must split `heUnresolvedRef`).
+  Uncommitted in the main checkout; its gate sweep `scratchpad/s4-sweep.log` is
+  running (~223/496 at 09:05). It commits only on sweep-diff regressed=0.
 - **Windows gate:** the branch has never been pushed (no upstream). S4 is the first
   semantics-bearing slice; §4.4 makes Windows CI a required gate from here.
+  **Asked Corey (not yet answered)** whether to push the branch to trigger the
+  Windows legs; until answered, gating is local sweep-diff only.
 - **Remaining:** S4, S5, S6, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.

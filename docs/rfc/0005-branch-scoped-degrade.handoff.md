@@ -18,29 +18,22 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~07:40)
+## Current position (refreshed 2026-09-25 ~08:15)
 
-- **Slices done:** 5 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
-  S1b (`a898905`), S2 (`48c30d6`, merged `1519608`).
-- **Merge gate:** sweep at `1519608` vs baseline — unchanged=496
-  regressed=0 new-ok=4 (S0/S1/S1b/S2 test files). Gate worktree removed.
-- **In flight:** S1c (opus agent) in the main checkout, uncommitted; its gate
-  sweep finished: `scratchpad/s1c-sweep.diff` unchanged=495 **regressed=1**
-  (`tsymex_r6_n36_raise_degrade` 0 -> 137, killed at the sweep timeout --
-  likely the tainted-routeRaise solve); the agent has a fix and is running
-  a second gate sweep `scratchpad/s1c-sweep2.log` (~325/496) + cpp run; it
-  commits only on regressed=0. It probed with
-  (`tests/ts1c_n36probe.nim`, untracked scratch -- must not be committed).
-  It also owns the n40 leak-pin
-  fix, the `runConcolicCollectImpl` pending-taint reset, and the walker bump.
-- **Remaining:** S1c, S3, S4, S5, S6, S7, S8, S9, S10, S11.
+- **Slices done:** 6 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
+  S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`).
+- **Gate:** S1c sweep `scratchpad/s1c-sweep2.diff` vs baseline 6cbfe8f --
+  unchanged=496 regressed=0 new-ok=5. Walker 141.
+- **Branch vs main:** `main` is still `6cbfe8f`; the branch is 20+ commits
+  ahead and lands on main by fast-forward (no PR).
+- **In flight:** S3 (sonnet) -- monotonicity harness.
+- **Remaining:** S3, S4, S5, S6, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, if the S1c agent is gone, check `git status` and gate any uncommitted S1c work
-  (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`) before committing. Then
-  S3 (sonnet).
+  resume, check `git log` for the S3 commit; if absent and no agent is
+  running, gate any uncommitted S3 work before committing. Then S4 (sonnet).
 
 ## Implementation plan — model allocation
 
@@ -73,6 +66,7 @@ soundness risk and the blast radius concentrate:
 | S1 | done | `d2c2226` | sweep 491/0/7, regressed=0, no bump. `degrade(w, kind, msg, sink = dsWalk)`, `DegradeSink` {dsWalk, dsHeapDepth, dsNewFieldZero, dsClosure}; `heapArmDegrade`; `lowerDegrade` + `takeLoweringPendingDegrade`; `forkPathTaintPrimitive` (grep-pinned private). `w.runTaint` has ONE writer (drain in `runSymexImpl`: `runTaintOf` over exnWarnings/parseErrors/closureErrs + ⊤ if `kindlessRunTaint`). 14 transitional sites marked `RFC-0005 S1b: mint kind`. Leak pin `stampLoweringPendingLeak` may fire in practice (unmeasured). `SymexErrorKind` has **61** members, not 41. |
 | S1b | done | `a898905` | sweep regressed=0 after the N12 reason-suffix fix (full sweep regressed=1 before it; 24-test filtered re-sweep after). Minted `feUnsupportedStmtKind`, `weRecursionCycleCut`, `eeHandlerReraiseUnmodelled`, `ceClosureBodyDiverged` (walk sink, not closure sink), `weBreakOutsideLoop`, `beSolverUndef`; over-cap/missing callee kind via `unregisteredCalleeKey/Kind`. 54 `mkUnsupported` sites in `dsl_parser` take a kind; walker arm `w.degrade(stmt.unKind, stmt.reason)`. `kindlessPathDegrade` deleted; `kindlessRunDegrade` survives at exactly 2 sites (tainted target hit, tainted routeRaise) marked for S1c. Leak pin `stampLoweringPendingLeak` FIRES in `tsymex_r6_n40_alloc_totality` ({scSpurious, scIncomplete}) -- unfixed. Cycle cut now marks the run. Latent: parser flattens `block:` so `break` in a block inside a loop binds to the loop (out of scope, unfiled). Walker forks infeasible branches without a check -- walk-site records can come from dead paths (S8/S9). |
 | S2 | done | `48c30d6`, merged `1519608` | 13 tests c+cpp green; `ReplayOutcome`, `replayWitness`, eligibility `pathTaint <= pathTaint(dcFreshSymbol)`, stackable capture (`enclosing`). S10 API: `emitReplayWitness(fn, parsed.params, witnessNode, targetNode, pathTaintNode)`; sxRaised replays against `tRaisedExn(raw.raisedTypeId)`. Refuted and inconclusive both go to sxUnknown; lossy witnesses: hit=confirmed, miss=inconclusive. Refuted pin uses a hand witness until S1c lets symexFind return one. Gate sweep at `1519608` pending. |
+| S1c | done | `489a1e7` | sweep regressed=0 (second sweep; first regressed `tsymex_r6_n36_raise_degrade` 0->137 because solving a tainted path hung Z3 on the `iekStrInOptionRegion` decline residue). Fix: tainted-path solves run under `taintedSolveRLimit` (caller's `queryRLimit`, else `defaultConcreteBranchRLimit` 20M) -- **S10 must record this hazard.** Pure exported `decideVerdict(found, candidates, runTaint, vetoed)`; `RawResult.candidates` (empty on sxUnsat) for S10 replay; candidate extraction errors ride the candidate. `kindlessRunDegrade`/`kindlessRunTaint` deleted. n40 leak fixed (heap deref-write drains pending taint; `runConcolicCollectImpl` runs the leak stamp). Walker 140 -> 141. To force non-⊤ classes before S4: drive `decideVerdict` with a `Taint`, or IR via `mkUnsupported(kind, ...)`. S2's refuted pin still uses a hand witness (symexFind gives sxUnknown by rule 4 until S10). Vetoes unchanged (S9). |
 
 ### S0b result — the payoff is real, and gated on S1c
 

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~13:35)
+## Current position (refreshed 2026-09-25 ~14:06)
 
 - **Slices done:** 9 of 15 + S6a — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -30,7 +30,7 @@
   the Windows legs; until answered, gating is local sweep-diff only.
 - **In flight:** **S6b** (opus) -- `feUnsupportedOp` split + heap/halt sites +
   the `eeUnknownExnType` decision (§3.1/§6.5); flips the `S6` fence row.
-  13:35: implementing, uncommitted, gate sweep not yet started.
+  14:06: uncommitted, gate sweep `scratchpad/s6b-sweep.log` at ~319/506.
 - **Remaining:** S6b, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.

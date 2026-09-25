@@ -13,9 +13,10 @@ value = "high"
 [[item]]
 id    = "i1"
 title = "Round-2 cost: keep full scope (SAT replay half) in one RFC? Conditional on S0b's measured payoff"
-state = "open"
+state = "resolved"
 owner = "corey"
 lean  = "keep-one-rfc"
+reason = "Corey 2026-09-25: /tdd rfc-0005 til done, do not defer anything -- full scope in one RFC, replay half included"
 
 [[item]]
 id    = "i2"

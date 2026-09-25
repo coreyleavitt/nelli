@@ -46,7 +46,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feOpaqueCallUnmodelled, feEnumOrdinalUnresolved,
                         feGlobalReadUnmodelled, seVariantFieldOnDeclinedCtor,
                         feUnsupportedStmtKind, weRecursionCycleCut,
-                        eeHandlerReraiseUnmodelled, weBreakOutsideLoop}
+                        eeHandlerReraiseUnmodelled, weBreakOutsideLoop,
+                        # RFC-0005 S7: the closure / HOF declines.
+                        ceUnsupportedHof, ceClosureUnknownCallee,
+                        ceClosureBodyUncertain, ceClosureBodyDiverged}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

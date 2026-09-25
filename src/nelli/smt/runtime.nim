@@ -1545,22 +1545,6 @@ proc syncParseIntRaiseCond*(cond: Z3Bool)
   ## No-op when no active walk (lower() can be called from probe paths).
   ## Defined after `WalkCtx`.
 
-proc syncParseIntGateConstraint*(c: Z3Bool)
-  ## CR-9 A0 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
-  ## appends `c` to `WalkCtx.parseIntGateConstraints` so the field is the
-  ## LIVE store for parseInt digits-gate constraints during a walk. No-op
-  ## when no active walk (lower() can be called from probe paths).
-  ## Defined after `WalkCtx`.
-
-proc parseIntGateConstraintsLive*(): seq[Z3Bool]
-  ## CR-9 A0 fwd-decl. Returns the active parseInt digits-gate constraint
-  ## sequence for `trySolve` to assert. When a walk is active
-  ## (`currentWalkCtxPtr != nil`), returns `WalkCtx.parseIntGateConstraints`
-  ## (the LIVE store); otherwise falls back to the `parseIntGateConstraints`
-  ## threadvar. Mutually exclusive — never both — so no constraint is
-  ## double-asserted. Defined after `WalkCtx` (needs the cast).
-  ## Called from `trySolve` (defined before `WalkCtx`, so cannot cast directly).
-
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
   ## walk is active), mirrors `p`'s heap state into the WalkCtx fields
@@ -1697,6 +1681,13 @@ var currentClosureExitPc* {.threadvar.}: seq[Z3Bool]
   ## OverflowDefect raise path UNSAT and mask the defect. These facts are local to
   ## the caller continuation only.
 
+var lastDrainedClosureExitPc {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S7. The exit facts `drainPendingLowerEffects` appended to the
+  ## drained path's `defectSurvivorPc` on its most recent call (at its END,
+  ## in order). `drainClosureRaises` -- which always runs on that drained
+  ## path -- strips them from a routed closure raise: they state that the
+  ## closure bodies did NOT raise.
+
 proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   ## Phase 15 R1b / CR-5. Mirror a path's logical-heap state (and liveRefs)
   ## into the caller-heap threadvars so a CLOSURE call lowered out of `p.env`
@@ -1789,9 +1780,10 @@ var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
   ## (`implies(callerPC and pc_i, funcSym(env, args) == v_i)`), one per body
   ## return sub-path of each closure call lowered this run. Each is a CLOSED
-  ## implication (vacuously true off its call occurrence's path), so — like the
-  ## `parseIntGateConstraints` digits-gate — it is drained into EVERY `trySolve`
-  ## globally. NEVER a `∀env,args` axiom (that HANGS Z3 — the G4 MBQI lesson);
+  ## implication (vacuously true off its call occurrence's path), so it is
+  ## drained into EVERY `trySolve` globally. RFC-0005 S7: the implied value is
+  ## a per-occurrence fresh constant, not the funcSym application (see
+  ## `trySolve`'s drain comment for the admission rule). NEVER a `∀env,args` axiom (that HANGS Z3 — the G4 MBQI lesson);
   ## the function is applied at the GROUND `(env, args)` of THIS occurrence and
   ## equated to a value, identical in shape to G4's decidable eject-pin. Reset
   ## at `runSymexImpl` entry.
@@ -3070,16 +3062,6 @@ var currentMaxSplitParts* {.threadvar.}: int
   ## kind used by the general symbolic split path — rather than emitting
   ## potentially thousands of Z3 store calls (compile-time DoS prevention).
 
-var parseIntGateConstraints* {.threadvar.}: seq[Z3Bool]
-  ## Phase 15 S10a. Side soundness-gate constraints emitted by the `iekStrToInt`
-  ## (`parseInt`) lowering — `toInt(s) >= 0` on the active digits/negative branch
-  ## (the digits gate from Z3's `Z3_mk_str_to_int`, which is `>= 0` for digit
-  ## strings). `lower` has no path-condition sink (Env is a pure value table), so
-  ## these accumulate here and are drained into EVERY solver check (`trySolve`).
-  ## That is sound: each clause references the specific param string var's Z3 AST,
-  ## which is identical across paths, and the gate only narrows non-digit models.
-  ## Mirrors F7's `extractionErrors` / S7a's `currentMaxBytesEncodingLen` threadvars.
-
 var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
   ## `iekStrStrip` lowering: for `strip(s, leading, trailing, chars)` with a
@@ -3090,7 +3072,7 @@ var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ##   core == "" ∨ (¬startsWith(core, c) ∀c   when leading
   ##                 ∧ ¬endsWith(core, c) ∀c   when trailing)
   ## are pushed here and drained into EVERY solver check (`trySolve`) —
-  ## exactly the `parseIntGateConstraints`/`currentClosureCallAxioms` idiom.
+  ## exactly the `currentClosureCallAxioms` idiom.
   ## GLOBAL assertion is sound because the clauses are DEFINITIONAL: for
   ## every value of `s` there exists exactly ONE satisfying assignment of
   ## (pre, core, suf) — the maximal-strip decomposition (maximality is
@@ -3170,7 +3152,7 @@ var parseIntRaiseConds* {.threadvar.}: seq[Z3Bool]
   ## (`drainParseIntRaises`), which forks a routed-`ValueError` raise sub-path and
   ## a digits continuation. Reset before each lower-and-drain so predicates never
   ## leak across paths/statements. Closes the S10a `seParseIntPreE` window — that
-  ## hint is no longer emitted. Mirrors the `parseIntGateConstraints` threadvar.
+  ## hint is no longer emitted.
 
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal
 
@@ -7552,22 +7534,23 @@ proc trySolve(ctx: Z3Context,
   # which of these a closure's return-axiom uses as its implication guard.
   for c in path.defectSurvivorPc:
     s.add(c)
-  # Phase 15 S10a / CR-9 A0: drain the parseInt digits soundness-gate constraints
-  # (`toInt(s) >= 0` on the active branch) into every check. Sound because each
-  # clause references the specific param string var's Z3 AST (identical across
-  # paths) and only narrows non-digit models.
-  # CR-9 A0: use `parseIntGateConstraintsLive()` (fwd-decl; defined after WalkCtx)
-  # which returns the WalkCtx field when a walk is active, else the threadvar.
-  # Mutually exclusive — never both — so no gate constraint is double-asserted.
-  for c in parseIntGateConstraintsLive():
-    s.add(c)
+  # RFC-0005 S7 (§2.4): the parseInt digits-gate pool that was drained here is
+  # GONE. It asserted `startsWith(s,"-") => toInt(tail) >= 0` into EVERY check
+  # run-wide, so a `parseInt` lowered on one path pruned a sibling path that
+  # never called it (a false `sxUnsat`), and on its own path it deleted the
+  # `"-<non-digit>"` inputs Nim RAISES on instead of routing them. That case
+  # is now part of `iekStrToInt`'s raise predicate. What remains below is the
+  # audited cross-path list, pinned against this proc's source by
+  # `tests/tsymex_rfc0005_s7_closure.nim`.
   # Phase 15 C2b (ADR-0009 D6): drain the GROUND closure-call axioms
-  # (`implies(branch_conds_i, funcSym(env, args) == v_i)`) into every check.
-  # Each is a CLOSED implication tied to a specific call occurrence's funcSym
-  # application — vacuously true off its branch, so globally sound to add (the
-  # `parseIntGateConstraints` idiom). The funcSym is applied at the GROUND
-  # `(env, args)` of the occurrence, NOT universally quantified (the G4 hang
-  # lesson) — so the query stays in QF_UF... and does not MBQI-loop.
+  # (`implies(branch_conds_i, r == v_i)`) into every check. RFC-0005 S7: `r`
+  # is a fresh constant PER CALL OCCURRENCE (was the funcSym applied to the
+  # occurrence's `(env, args)`, which equated two calls with equal arguments
+  # even across an intervening heap write -- a false `sxUnsat`). Each axiom
+  # mentions only its own occurrence's `r`, so it is DEFINITIONAL: it never
+  # prunes a model of any other symbol, only fixes `r`. Admission: minted
+  # only from `taint == {}` body sub-paths (a tainted arm is dropped and
+  # recorded, `ceClosureBodyUncertain`).
   for c in currentClosureCallAxioms:
     s.add(c)
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
@@ -7582,8 +7565,7 @@ proc trySolve(ctx: Z3Context,
     # them by construction rather than by a hand-maintained tally.
     recordQueryStat(s,
       path.pc.len + path.defectSurvivorPc.len +
-        parseIntGateConstraintsLive().len + currentClosureCallAxioms.len +
-        stripDecompConds.len,
+        currentClosureCallAxioms.len + stripDecompConds.len,
       (case r
        of zsSat: "sat"
        of zsUnsat: "unsat"
@@ -7703,6 +7685,18 @@ type
     path:   Path
     typeId: string
     msg:    Option[string]
+
+  ClosureRaise = object
+    ## RFC-0005 S7. A raise that escaped a closure body, awaiting routing from
+    ## the calling path (`drainClosureRaises`). `priorExitPc` is the closure
+    ## exit-fact channel (`currentClosureExitPc`) as it stood when THIS call
+    ## deposited the raise -- the exit facts of closure calls that completed
+    ## EARLIER in the same expression, which do hold on the raise path. The
+    ## calling path's own `defectSurvivorPc` by drain time also carries THIS
+    ## call's (and any later call's) exit facts, which assert the body did
+    ## NOT raise; the drain strips those (`lastDrainedClosureExitPc`).
+    raised:      EscapedRaise
+    priorExitPc: seq[Z3Bool]
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -7981,16 +7975,19 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `strIndexOobConds` at every reset site.
-    parseIntGateConstraints: seq[Z3Bool]
-                      ## CR-9 A0 (S10a parseInt soundness gate). LIVE accumulator
-                      ## for `toInt(s) >= 0` gate constraints deposited by
-                      ## `lower(iekStrToInt)` during a walk. `syncParseIntGateConstraint`
-                      ## appends here when `currentWalkCtxPtr != nil`. Read in
-                      ## `trySolve` via field-else-threadvar (never both, so no gate
-                      ## constraint is double-asserted). Threadvar
-                      ## `parseIntGateConstraints` remains fallback for probe-path
-                      ## lower() calls. Zero-initialised at WalkCtx construction;
-                      ## threadvar reset at `runSymexImpl` entry remains.
+    closureRaises: seq[ClosureRaise]
+                      ## RFC-0005 S7. Raises that escaped a closure body's own
+                      ## handlers during `applyClosureGround`'s descent (the
+                      ## closure frame's `escaped` channel, captured before
+                      ## `popFrame`). The call is lowered inside an expression,
+                      ## so -- exactly like the scalar raise predicates above --
+                      ## it cannot route them itself: `drainClosureRaises` (the
+                      ## first stage of `drainScalarRaiseForks`) forks each one
+                      ## off the calling path and routes it through the
+                      ## CALLER's handlers, as the `isCall` arm does for a
+                      ## named callee. Before S7 `popFrame` discarded them (a
+                      ## raised target through a closure was a false `sxUnsat`).
+                      ## Reset alongside the scalar raise sinks.
     callerHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-3 (currentCallerHeaps migration).
                       ## LIVE copy of the caller path's heaps, written by
@@ -8128,6 +8125,28 @@ proc takeLoweringPendingDegrade(): Degrade =
   ## the walk-end leak stamp.
   result = Degrade(path: loweringPendingTaint)
   loweringPendingTaint = {}
+
+proc closureDegrade(kind: SymexErrorKind; msg: string) =
+  ## RFC-0005 S7 (§2.5 precondition for S9). THE way a closure / HOF site
+  ## records a decline. These sites run inside `lower` (a closure call or a
+  ## HOF is an EXPRESSION), so they cannot fork the consuming path; before S7
+  ## they wrote only the closure sink, which the blanket closure veto reads
+  ## -- and nothing reached the PATH, so deleting the veto (S9) would have
+  ## turned every hit through a stand-in value into a clean `sxSat`. One kind
+  ## mention performs both acts, exactly as `lowerDegrade` does for the
+  ## lowering sink:
+  ##   1. records the classified `sevError` into the closure sink (threadvar
+  ##      fallback + the LIVE `WalkCtx.closureCallErrors` field, which the
+  ##      drain-time run coordinate and the veto both read);
+  ##   2. joins `pathTaint(classOf(kind))` into `loweringPendingTaint`, which
+  ##      `drainPendingLowerEffects` folds onto the path that consumes the
+  ##      lowered value.
+  ## A closure-sink decline outside `lower` would use `w.degrade(…,
+  ## dsClosure)`; none exists (pinned by the S7 test).
+  let info = SymexErrorInfo(kind: kind, severity: sevError, msg: msg)
+  currentClosureCallErrors.add info   # threadvar: fallback
+  syncClosureCallError(info)          # LIVE WalkCtx field (no-op outside a walk)
+  loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
 
 proc stampLoweringPendingLeak(w: var WalkCtx) =
   ## RFC-0005 S1 (§2.2 last paragraph) — the pending-taint LEAK PIN. Called
@@ -8412,27 +8431,6 @@ proc syncSeqOobCond*(cond: Z3Bool) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].seqOobConds.add cond
 
-proc syncParseIntGateConstraint*(c: Z3Bool) =
-  ## CR-9 A0 (parseIntGateConstraints migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), appends `c` to `WalkCtx.parseIntGateConstraints` so
-  ## the field is the LIVE store for parseInt digits-gate constraints during a
-  ## walk. No-op when `currentWalkCtxPtr == nil` (lower() can be called from
-  ## probe paths outside an active walk).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].parseIntGateConstraints.add c
-
-proc parseIntGateConstraintsLive*(): seq[Z3Bool] =
-  ## CR-9 A0. Returns the active parseInt digits-gate constraints for
-  ## `trySolve` to assert: WalkCtx field when a walk is active
-  ## (`currentWalkCtxPtr != nil`), else the `parseIntGateConstraints` threadvar.
-  ## Mutually exclusive — never both — so no constraint is double-asserted.
-  ## Defined after `WalkCtx` so the cast is valid.
-  if currentWalkCtxPtr != nil:
-    cast[ptr WalkCtx](currentWalkCtxPtr)[].parseIntGateConstraints
-  else:
-    parseIntGateConstraints
-
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
   ## active), mirrors `p`'s heap state into the WalkCtx caller-heap fields
@@ -8456,6 +8454,87 @@ proc seedCallerHeapInWalkCtx*(p: Path) =
     wp[].closureExitHeaps = initTable[string, Z3AnyAst]()
     wp[].closureExitAllocCounters = initTable[string, int]()
     wp[].closureExitLiveRefs = initTable[string, seq[Z3AnyAst]]()
+
+type
+  PendingLowerEffects = object
+    ## RFC-0005 S7. Everything a `lower()` in progress has deposited for its
+    ## enclosing walk arm to drain, plus the caller-heap seed it lowers under.
+    ## `applyClosureGround` descends a closure body with the LIVE walker from
+    ## INSIDE that `lower()`, and the body's own statement arms reset, seed
+    ## and drain these same sinks -- so before S7 a descent silently consumed
+    ## the calling expression's pending effects: an argument's raise
+    ## predicate was wiped (a false `sxUnsat`), an earlier closure's exit
+    ## facts and heap were dropped, a pending decline's path taint landed on
+    ## the body's path instead of the caller's, and the caller-heap seed
+    ## became the body's. `takePendingLowerEffects` sets them aside (and
+    ## clears the sinks) before the descent; `restorePendingLowerEffects` puts
+    ## them back after it, before the call deposits its own.
+    pendingTaint: Taint
+    parseInt, divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
+    convBound, convDomain: seq[Z3Bool]
+    closureRaises: seq[ClosureRaise]
+    exitPc: seq[Z3Bool]
+    didMutate: bool
+    exitHeaps: Table[string, Z3AnyAst]
+    exitAlloc: Table[string, int]
+    exitLiveRefs: Table[string, seq[Z3AnyAst]]
+    callerHeaps: Table[string, Z3AnyAst]
+    callerHeapDepth: int
+    callerAlloc: Table[string, int]
+    callerLiveRefs: Table[string, seq[Z3AnyAst]]
+
+proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
+  ## RFC-0005 S7. See `PendingLowerEffects`. The WalkCtx fields are the LIVE
+  ## store during a walk (the threadvars mirror them), so they are what is
+  ## saved; both stores are cleared. The caller-heap seed is saved, not
+  ## cleared -- the descent reads it.
+  result = PendingLowerEffects(
+    pendingTaint: loweringPendingTaint,
+    parseInt: w.parseIntRaiseConds, divByZero: w.divByZeroConds,
+    overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
+    seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
+    convDomain: w.convFloatToIntDomainConds, closureRaises: w.closureRaises,
+    exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
+    exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
+    exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
+    callerHeapDepth: w.callerHeapDepth, callerAlloc: w.callerAllocCounters,
+    callerLiveRefs: w.callerLiveRefs)
+  loweringPendingTaint = {}
+  w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
+  w.divByZeroConds = @[]; divByZeroConds = @[]
+  w.overflowConds = @[]; overflowConds = @[]
+  w.strIndexOobConds = @[]; strIndexOobConds = @[]
+  w.seqOobConds = @[]; seqOobConds = @[]
+  w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
+  w.convFloatToIntDomainConds = @[]; convFloatToIntDomainConds = @[]
+  w.closureRaises = @[]
+  currentClosureExitPc = @[]
+  w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
+
+proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
+  ## RFC-0005 S7. Inverse of `takePendingLowerEffects`: reinstates the calling
+  ## expression's pending effects in BOTH stores, discarding whatever the
+  ## descent's own statement arms left behind (they drained their own).
+  loweringPendingTaint = s.pendingTaint
+  w.parseIntRaiseConds = s.parseInt; parseIntRaiseConds = s.parseInt
+  w.divByZeroConds = s.divByZero; divByZeroConds = s.divByZero
+  w.overflowConds = s.overflow; overflowConds = s.overflow
+  w.strIndexOobConds = s.strIndexOob; strIndexOobConds = s.strIndexOob
+  w.seqOobConds = s.seqOob; seqOobConds = s.seqOob
+  w.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
+  w.convFloatToIntDomainConds = s.convDomain
+  convFloatToIntDomainConds = s.convDomain
+  w.closureRaises = s.closureRaises
+  currentClosureExitPc = s.exitPc
+  w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
+  w.closureExitHeaps = s.exitHeaps; currentClosureExitHeaps = s.exitHeaps
+  w.closureExitAllocCounters = s.exitAlloc
+  currentClosureExitAllocCounters = s.exitAlloc
+  w.closureExitLiveRefs = s.exitLiveRefs; currentClosureExitLiveRefs = s.exitLiveRefs
+  w.callerHeaps = s.callerHeaps; currentCallerHeaps = s.callerHeaps
+  w.callerHeapDepth = s.callerHeapDepth; currentCallerHeapDepth = s.callerHeapDepth
+  w.callerAllocCounters = s.callerAlloc; currentCallerAllocCounters = s.callerAlloc
+  w.callerLiveRefs = s.callerLiveRefs; currentCallerLiveRefs = s.callerLiveRefs
 
 proc isFollowConcreteWalk*(): bool =
   ## RFC-fuzzer-nextgen G3fix. See fwd-decl above. `wp.mode` only exists once
@@ -8685,6 +8764,17 @@ func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
   if scIncomplete notin runTaint:                              # rule 5
     return VerdictDecision(status: sxUnsat, winnerIdx: -1)
   VerdictDecision(status: sxUnknown, winnerIdx: -1)            # rule 6
+
+var rfc0005UnvetoedStatus* {.threadvar.}: SymexStatusKind
+  ## RFC-0005 S7 -- the S9 safety precondition's observable. The status the
+  ## most recent `runSymexImpl` would have reported WITHOUT the two blanket
+  ## vetoes (`decideVerdict(…, vetoed = false)` over the same pools). S9
+  ## deletes the closure veto on the strength of S7; its precondition is that
+  ## for every closure / HOF decline this is never a clean `sxSat` -- a
+  ## decline whose path taint is missing shows up here as `sxSat` while the
+  ## reported status is still the vetoed `sxUnknown`. Written only by
+  ## `runSymexImpl` (not reset by the concolic driver); S9 deletes it with
+  ## the vetoes.
 
 proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
@@ -9154,7 +9244,52 @@ genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
 genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
                    "IndexDefect", "index out of bounds")
 
+proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S7. Route the raises that escaped a closure body during the
+  ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
+  ## into `w.closureRaises`) from the CALLING path `p`, as the `isCall` arm
+  ## routes a named callee's escaped raises. Each raise sub-path forks from
+  ## the escaped raise's own path (its exit heap and its taint ride out --
+  ## the `forkPathMerged` return-merge shape, joined with `p`'s taint), with
+  ## `p`'s pc, the body's condition for reaching the raise, `p`'s env and
+  ## both sides' defect-survivor facts. The survivor needs no negation here:
+  ## the call's exit-coverage fact (`applyClosureGround`) already confines the
+  ## caller continuation to the body's value-bearing exits.
+  let raises = w.closureRaises
+  w.closureRaises = @[]
+  if raises.len == 0:
+    return @[p]
+  # The caller's facts from BEFORE this expression's exit facts were
+  # appended (`lastDrainedClosureExitPc` is exactly that tail, in order).
+  let tail = lastDrainedClosureExitPc
+  var baseDsp = p.defectSurvivorPc
+  var tailOk = baseDsp.len >= tail.len
+  if tailOk:
+    let off = baseDsp.len - tail.len
+    for k in 0 ..< tail.len:
+      if baseDsp[off + k].raw != tail[k].raw:
+        tailOk = false
+        break
+    if tailOk: baseDsp.setLen(off)
+  if not tailOk:
+    # Not reachable by construction (every raise drain runs on the path
+    # `drainPendingLowerEffects` just returned); if it ever is, the raise
+    # would be forked under its own negation -- record the walker fault and
+    # route the raises anyway rather than drop them silently.
+    discard w.degrade(weInternalWalkerFault,
+      "closure raise drained on a path whose defect-survivor tail is not " &
+      "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)")
+  for cr in raises:
+    let er = cr.raised
+    var rp = forkPathMerged(er.path, p.pc & er.path.pc, p.env, p)
+    rp.defectSurvivorPc = baseDsp & cr.priorExitPc & er.path.defectSurvivorPc
+    rp.heapDepth = p.heapDepth
+    discard routeRaise(rp, er.typeId, er.msg, w)
+    if w.shouldStop: break
+  @[p]
+
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S7: first routes any closure-body raises (`drainClosureRaises`).
   ## R16-4 + SND-4 + N14: chain parseInt, div/mod-by-zero, signed-integer-
   ## overflow, string-index-OOB, and seq-del-OOB raise drains. Runs
   ## `drainParseIntRaises` first, then `drainDivByZeroRaises`, then
@@ -9163,7 +9298,9 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## stage so every combination of independent defect conditions is explored.
   ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
   ## it operates on the pre-narrowing path and stays at its call sites.
-  var survivors = drainParseIntRaises(p, w)
+  var survivors: seq[Path]
+  for s0 in drainClosureRaises(p, w):
+    survivors.add drainParseIntRaises(s0, w)
   var out2: seq[Path]
   for s in survivors:
     out2.add drainDivByZeroRaises(s, w)
@@ -9270,6 +9407,7 @@ proc drainPendingLowerEffects(p: Path): Path =
   # `not divByZero`/`not parseIntRaise` negations (branch-guarded) here; thread
   # them onto the CALLER path's `defectSurvivorPc` as hard caller-local facts.
   # Fork before mutating so we never alias a sibling path's constraint list.
+  lastDrainedClosureExitPc = currentClosureExitPc   ## RFC-0005 S7
   if currentClosureExitPc.len > 0:
     p2 = forkPath(p2, p2.pc, p2.env)
     for c in currentClosureExitPc: p2.defectSurvivorPc.add c
@@ -9335,6 +9473,7 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
   let p2 = drainPendingLowerEffects(p)
@@ -9366,6 +9505,7 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
   let p2 = drainPendingLowerEffects(p)
@@ -12112,13 +12252,15 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   let ctx = requireCurrentContext()
   # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
   if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
-    let cloErr1 = SymexErrorInfo(kind: ceClosureUnknownCallee, severity: sevError,
-      msg: "closure call through `" & e.ccCallee &
+    # RFC-0005 S7: `dcSubstituted` -- a fixed-name `int64` stand-in whatever
+    # the closure's return type, returned before the call's arguments are
+    # lowered (their raises are dropped). `closureDegrade` puts ⊤ on the
+    # consuming path, not only in the closure sink the veto reads.
+    closureDegrade(ceClosureUnknownCallee,
+      "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
-    currentClosureCallErrors.add cloErr1   # threadvar: fallback
-    syncClosureCallError(cloErr1)          # CR-9 Stage 5: LIVE WalkCtx field
-    # No semantics: return a FRESH unconstrained result so a downstream read
-    # does not crash; the classified error forces sxUnknown at the SUT boundary.
+    # No semantics: a well-sorted-for-int stand-in so a downstream read does
+    # not crash.
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
   let clo = env[e.ccCallee]
@@ -12152,26 +12294,25 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   if not closureBodiesLive.hasKey(siteKey):
     # The closure was constructed but its body was never stashed — should not
     # happen (buildClosure always stashes). Classify rather than crash.
-    let cloErr2 = SymexErrorInfo(kind: ceClosureUnknownCallee, severity: sevError,
-      msg: "closure call through " & label & ": lambda body not reachable for descent")
-    currentClosureCallErrors.add cloErr2   # threadvar: fallback
-    syncClosureCallError(cloErr2)          # CR-9 Stage 5: LIVE WalkCtx field
+    # RFC-0005 S7: as the unresolved-callee site (`dcSubstituted`).
+    closureDegrade(ceClosureUnknownCallee,
+      "closure call through " & label & ": lambda body not reachable for descent")
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureNoBody", fresh)
   let cb = closureBodiesLive[siteKey]
-  # ---- 2. Build the funcSym application at THIS occurrence (ground). ----
-  # Argument vector = flattened env-leaf asts ++ flattened call-arg asts, in the
-  # exact order `buildClosure` built the domain (env leaves then params, D2).
-  var appArgs: seq[RawZ3Ast]
-  if clo.closureEnv != nil:
-    for a in flattenLeafAsts(clo.closureEnv[]): appArgs.add a
-  for s in argSyms:
-    for a in flattenLeafAsts(s): appArgs.add a
-  let argsPtr = if appArgs.len > 0:
-                  cast[ptr UncheckedArray[RawZ3Ast]](addr appArgs[0])
-                else: nil
-  let appRaw = ctx.checkErr Z3_mk_app(ctx.raw, clo.closureRawFD,
-    cuint(appArgs.len), argsPtr)
+  # ---- 2. The call's RESULT at THIS occurrence. ----
+  # RFC-0005 S7 (§2.4, the closure-axiom sink): a FRESH constant of the
+  # funcSym's range sort, one per call occurrence. It was the funcSym APPLIED
+  # to the occurrence's (env-leaf ++ argument) asts, but the body can read
+  # state that is not in that vector (the heap, through a captured ref), so
+  # two calls with equal arguments were forced equal across an intervening
+  # heap write by the GLOBAL ground axioms each occurrence asserts -- a false
+  # `sxUnsat`. Each occurrence's result is now defined only by its own axioms
+  # (`bc_i ⇒ r == v_i`): definitional, so the global pool never prunes a
+  # model of another symbol. The funcSym stays declared (`buildClosure`): the
+  # sort is read from it.
+  let appRaw = ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__closureRet",
+    Z3_get_range(ctx.raw, clo.closureRawFD))
   let funcApp =
     try:
       symValFromRawAst(appRaw, cb.retTy)
@@ -12190,14 +12331,15 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       # call to `sxUnknown` regardless of what value `funcApp` settles to
       # (Invariant 3), so the fallback's content need not be trustworthy,
       # only type-correct enough that a downstream consumer does not crash.
-      let rawWrapErr = SymexErrorInfo(kind: feUnsupportedOp, severity: sevError,
-        msg: "closure call through " & label &
+      # RFC-0005 S7: `feUnsupportedOp` (`dcSubstituted`, S6b's closure-sink
+      # row): the fallback below is not tied to any body value, so `closureDegrade`
+      # puts ⊤ on the consuming path, not only in the closure sink.
+      closureDegrade(feUnsupportedOp,
+        "closure call through " & label &
              ": return type kind " & $cb.retTy.kind &
              " has no funcApp wrap in symValFromRawAst (" &
              getCurrentExceptionMsg() &
              ") — path degraded to sxUnknown (feUnsupportedOp)")
-      currentClosureCallErrors.add rawWrapErr  # threadvar: fallback
-      syncClosureCallError(rawWrapErr)         # CR-9 Stage 5: LIVE WalkCtx field
       # N46 (round-6 re-review, ADR-0023/SND-3 class widening): this call
       # used to be `defaultZero(cb.retTy, ...)`, which itself still raises
       # `ValueError` for a handful of composite kinds (itUninterp,
@@ -12216,17 +12358,17 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       # whole path is already forced to `sxUnknown` by `closureCallErrors`
       # regardless of what value `funcApp` settles to.
       var freshRawWrapPc: seq[Z3Bool]
-      allocateSym(cb.retTy, "__closureRet.rawwrapfail", freshRawWrapPc)
+      allocateSym(cb.retTy, freshDegradeName("__closureRet.rawwrapfail"),
+                  freshRawWrapPc)
   # ---- 3. Inline-budget guard (CallFrameCtx.closureInlineCount). ----
   # `currentWalkCtxPtr` is nil only outside an active walk (the C2a probes never
   # reach here). If absent, fall back to the funcApp alone (no descent, no
   # axiom) — sound but imprecise; classified so the verdict degrades.
   if currentWalkCtxPtr == nil:
-    # No active walk: the verdict cannot degrade via w.closureCallErrors, so
-    # write only to the threadvar (syncClosureCallError would be a no-op here).
-    currentClosureCallErrors.add SymexErrorInfo(
-      kind: ceInlineBudgetExceeded, severity: sevError,
-      msg: "closure call through " & label &
+    # No active walk: `closureDegrade` writes the threadvar (its live-field
+    # sync is a no-op here) and joins the pending taint (RFC-0005 S7).
+    closureDegrade(ceInlineBudgetExceeded,
+      "closure call through " & label &
            " lowered with no active walk context (no body descent)")
     return funcApp
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
@@ -12237,18 +12379,14 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # instead. Same `cap > 0 and` house style as `maxFrontierSize`/`maxSplitParts`.
   if w.settings.budget.maxClosureInlineCount > 0 and
      w.frame.closureInlineCount >= w.settings.budget.maxClosureInlineCount:
-    # RFC-0005 S1: HALT-shaped (no per-path act inside a lowering) — the
-    # `dsClosure` sink writes the threadvar fallback + LIVE WalkCtx field
-    # exactly as the two hand-written adds did; the token is discarded.
     # RFC-0005 S6a: `dcSubstituted` (as is the no-walk-context guard above):
     # `funcApp` stands in for a body that is never descended, so the body's
-    # captured-variable writes and raises are dropped, and equal arguments
-    # correlate where reality need not. The consuming path carries no taint
-    # from here — only the closure veto guards the SAT side (RFC §2.5: S7
-    # routes this decline through path taint before S9 deletes the veto).
-    discard w.degrade(ceInlineBudgetExceeded,
+    # captured-variable writes and raises are dropped. RFC-0005 S7: recorded
+    # through `closureDegrade`, so the consuming path carries the ⊤ taint
+    # itself -- the closure veto no longer has to guard the SAT side alone.
+    closureDegrade(ceInlineBudgetExceeded,
       "closure-application descent exceeded maxClosureInlineCount (" &
-           $w.settings.budget.maxClosureInlineCount & ") at " & label, dsClosure)
+           $w.settings.budget.maxClosureInlineCount & ") at " & label)
     return funcApp
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
   # Fresh descent env: params bound to the concrete call args, captures bound
@@ -12287,16 +12425,44 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # CR-9 Stage 6 Group-3: read caller-heap values from WalkCtx fields when a
   # walk is active (the LIVE store); fall back to threadvars otherwise.
   # `w` is always available here (applyClosureGround has `w: var WalkCtx`).
+  #
+  # RFC-0005 S7: the calling expression's pending lowering effects are set
+  # aside for the descent and reinstated after it (`PendingLowerEffects`), so
+  # the body's own statement arms can neither wipe nor steal them. If an
+  # EARLIER closure call in the same expression already wrote the heap, the
+  # body descends from that call's exit heap (its writes precede this call).
+  let pending = takePendingLowerEffects(w)
+  let chainHeap = pending.didMutate
   let descentBase = Path(pc: @[], env: descentEnv,
                          taint: {},  ## RFC-0005 S1: descent starts clean
-                         heaps: w.callerHeaps,
-                         heapDepth: w.callerHeapDepth,
-                         allocCounters: w.callerAllocCounters,
-                         liveRefs: w.callerLiveRefs)  ## Phase 15 CR-5
+                         heaps: (if chainHeap: pending.exitHeaps
+                                 else: pending.callerHeaps),
+                         heapDepth: pending.callerHeapDepth,
+                         allocCounters: (if chainHeap: pending.exitAlloc
+                                         else: pending.callerAlloc),
+                         liveRefs: (if chainHeap: pending.exitLiveRefs
+                                    else: pending.callerLiveRefs))  ## Phase 15 CR-5
   let fallThrough = walk(cb.body, @[descentBase], w)
   let frame = w.callStack[frameIx]
+  # RFC-0005 S7: capture the raises that escaped the body's own handlers
+  # BEFORE `popFrame` discards the closure frame (as the `isCall` arm does);
+  # `drainClosureRaises` routes them from the calling path.
+  let escapedRaises = w.frame.escaped
   popFrame(w)
   w.callStack.setLen(frameIx)
+  restorePendingLowerEffects(w, pending)
+  for er in escapedRaises:
+    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc)
+  # RFC-0005 S7 (closure-descent taint): the descent started from a clean
+  # root, so whatever its exit paths picked up (a degrade inside the body)
+  # must join the CALLING path -- through the pending-taint drain, the one
+  # channel a `lower()` has to its consuming path. Every contribution was
+  # recorded by the degrade that produced it. A raise's taint rides its own
+  # routed path (`drainClosureRaises`).
+  var exitTaint: Taint = {}
+  for cp in frame.returnedPaths: exitTaint = exitTaint + cp.taint
+  for cp in fallThrough: exitTaint = exitTaint + cp.taint
+  loweringPendingTaint = loweringPendingTaint + exitTaint
   # ---- 5. Lift each body return sub-path to a GROUND per-call axiom (D6). ----
   # Two channels yield sub-paths `(branch_conds_i, v_i)`:
   #   (a) EXPLICIT `return EXPR` — `walk(isReturn)` bound the value to the frame
@@ -12373,18 +12539,24 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
         let zeroVal = defaultZero(cb.retTy, "__closureRet.zerodefault")
         assertArm(cp.pc, retBindEq(funcApp, zeroVal))
       except ValueError, SymexRefUnresolvedError:
-        discard w.degrade(feUnsupportedOp,  # RFC-0005 S1: closure sink, no path act
+        # RFC-0005 S7: `feUnsupportedOpHavoc` -- the per-occurrence result is
+        # left free on this arm and nothing else is dropped (S6b's composite
+        # call-result binding shape); the path carries `{scSpurious}`.
+        closureDegrade(feUnsupportedOpHavoc,
           "closure call through " & label &
                ": composite-typed implicit-result fallthrough (untouched-" &
                "result path, retTy kind " & $cb.retTy.kind & ") has no " &
                "sound zero-default (" & getCurrentExceptionMsg() &
-               ") — path degraded to sxUnknown (feUnsupportedOp)", dsClosure)
+               ") — path degraded to sxUnknown (feUnsupportedOp)")
   if uncertainDrop:
-    discard w.degrade(ceClosureBodyUncertain,  # RFC-0005 S1: closure sink, no path act
+    # RFC-0005 S7: `dcFreshSymbol` -- the per-occurrence result is free under
+    # the dropped arm; `closureDegrade` joins `{scSpurious}` onto the calling
+    # path (the arm's own taint already joined through `exitTaint`).
+    closureDegrade(ceClosureBodyUncertain,
       "closure call through " & label &
            " body produced an uncertain sub-path (unmodeled-construct taint or " &
            "nested budget bail) — dropped from the ground-axiom set instead of " &
-           "asserting an unsound permanent fact", dsClosure)
+           "asserting an unsound permanent fact")
   # ADR-0012: thread each exit path's defect-survivor facts onto the CALLER via
   # the exit-pc channel (drained by drainPendingLowerEffects). Each fact is
   # guarded by THAT path's branch conditions — `implies(branchConds_i, neg)` —
@@ -12408,6 +12580,31 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in fallThrough:                                # implicit/void: all pc
     addGuardedDefects(cp.pc, cp.defectSurvivorPc)
   for c in mergedDefectPc: currentClosureExitPc.add c
+  # RFC-0005 S7: exit COVERAGE. The caller continues past the call only on
+  # an execution that left the body through a value-bearing exit, so the
+  # continuation is confined to the disjunction of the exits' branch
+  # conditions. Before S7 nothing said so: a body path that raised, halted
+  # or diverged left the result free, and a caller continuation reality
+  # never takes (the body raised) could reach the label -- a false `sxSat`.
+  # The raising executions are routed separately (`drainClosureRaises`).
+  # Skipped when some exit is unconditional (the disjunction is `true`); a
+  # body with no exit at all makes the continuation infeasible (`false`).
+  block exitCoverage:
+    var arms: seq[Z3Bool]
+    proc armOf(bc: openArray[Z3Bool]): Z3Bool =
+      result = bc[0]
+      for k in 1 ..< bc.len: result = result and bc[k]
+    for cp in frame.returnedPaths:
+      if cp.pc.len <= 1: break exitCoverage
+      arms.add armOf(cp.pc[0 ..< cp.pc.high])
+    for cp in fallThrough:
+      if cp.pc.len == 0: break exitCoverage
+      arms.add armOf(cp.pc)
+    var covered = mkBool(false)
+    if arms.len > 0:
+      covered = arms[0]
+      for k in 1 ..< arms.len: covered = covered or arms[k]
+    currentClosureExitPc.add covered
   # If the body produced NO value-bearing sub-path AND there are no output paths
   # at all (body diverged / was fully stubbed), mark uncertain so a target
   # reached through this result degrades to sxUnknown.
@@ -12421,7 +12618,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # RFC-0005 S1b: record the kind (was a kindless run mark). WALK sink, not
     # the closure sink: `closureForcedUnknown` vetoes a winner on any closure
     # sevError, which this site never did — moving it there would change
-    # verdicts.
+    # verdicts. RFC-0005 S7: a HALT (`dcOmitted`) -- the exit-coverage fact
+    # above is `false` here, so no caller continuation survives the call.
     discard w.degrade(ceClosureBodyDiverged,
       "closure body produced no value-bearing exit (every body path raised, " &
            "halted or was dropped) — the call's result is unconstrained " &
@@ -13060,14 +13258,14 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # DEFERRED to Phase 16 — no Z3 seqFilter HOF; a quantified filter
       # predicate over a symbolic-length seq is a hang risk. Classify (sevError
       # → sxUnknown) and return a fresh seq so a downstream read does not crash.
-      let filterErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
-        msg: "filter over a symbolic-length seq is not supported (no Z3 " &
+      # RFC-0005 S7: `dcSubstituted` -- the predicate is never applied (its
+      # raises are dropped) and the stand-in seq is unrelated to the input.
+      # `closureDegrade` puts ⊤ on the consuming path, so a hit through
+      # `__hofFilterUnsupported` is a candidate, never a clean `sxSat`, even
+      # once S9 deletes the closure veto.
+      closureDegrade(ceUnsupportedHof,
+        "filter over a symbolic-length seq is not supported (no Z3 " &
              "seqFilter HOF; axiomatize-filter deferred to Phase 16)")
-      currentClosureCallErrors.add filterErr  # threadvar: fallback
-      syncClosureCallError(filterErr)         # CR-9 Stage 5: LIVE WalkCtx field
-      # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
-      # the run coordinate is derived at drain from the closure-sink entry
-      # recorded just above (S7 routes these HOF sites through the funnel).
       # N36 (walker v101) reachability verification: `tSeq(e.hofRetElemTy)`'s
       # OWN `ty.seqElemTy` (= `e.hofRetElemTy`) is exactly the value
       # `allocateSym`'s `itSeq` arm guards with `isBackedSeqElemTy` before
@@ -13100,26 +13298,35 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
          seqSV.seqElemTy.kind != itInt:
         # Capturing closure or non-int element: the unary-funcdecl array-map
         # shape does not apply. Classify rather than risk an unsound/hang path.
-        let mapErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
-          msg: "map axiom path supports only a capture-free int->int closure " &
+        # RFC-0005 S7: `dcSubstituted`, as the filter decline above.
+        closureDegrade(ceUnsupportedHof,
+          "map axiom path supports only a capture-free int->int closure " &
                "over a symbolic seq[int]; this shape is deferred")
-        currentClosureCallErrors.add mapErr   # threadvar: fallback
-        syncClosureCallError(mapErr)          # CR-9 Stage 5: LIVE WalkCtx field
-        # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
-        # the run coordinate is derived at drain from the closure-sink entry
-        # recorded just above (S7 routes these HOF sites through the funnel).
         # N36 (walker v101) reachability verification: same argument as
         # `__hofFilterUnsupported` above. CONFIRMED UNREACHABLE to
         # `allocateSeqDataRaw`'s raise; no guard added.
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupported", fresh)
       # mapArray over Z3Array[Z3Int, BV64] using the unary funcSym.
+      #
+      # RFC-0005 S7: this path recorded NOTHING, yet no axiom ever constrains
+      # the funcSym it maps -- the body is never descended here (the comment
+      # that stood on `discard cb` claimed "ground axioms still constrain f";
+      # none are minted for this symbol), so `ys[i]` was an arbitrary value on
+      # a CLEAN path: `xs.map(x * 2)` reached `ys[0] == 3` as a clean `sxSat`
+      # (the closure veto never fired: nothing was in its sink). The mapped
+      # array keeps the right shape (length, pointwise over one function), but
+      # the function is unrelated to the closure and the body's raises are
+      # dropped: `ceUnsupportedHof`, `dcSubstituted`.
+      closureDegrade(ceUnsupportedHof,
+        "map over a symbolic-length seq maps an unconstrained function symbol " &
+             "(the closure body is not applied per element)")
       let fd = Z3FuncDecl[(Z3BitVec[64],), Z3BitVec[64]](
         raw: cloSV.closureRawFD, ctx: ctx)
       let srcArr = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         seqSV.seqDataRaw.ctx, seqSV.seqDataRaw.raw) # [placeholder-audited]
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)
-      discard cb   ## body already stashed; ground axioms still constrain f
+      discard cb   ## body stashed but not descended on this path (see above)
       SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
              seqDataRaw: toAnyAst(mappedArr), seqElemTy: e.hofRetElemTy)
     of "fold":
@@ -13128,14 +13335,10 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # The result is an uninterpreted value of the accumulator type; its
       # relation to the elements is left opaque (sound over-approximation —
       # degrades the verdict, never a false sat/unsat).
-      let foldErr = SymexErrorInfo(kind: ceUnsupportedHof, severity: sevError,
-        msg: "fold over a symbolic-length seq is modeled as an opaque " &
+      # RFC-0005 S7: `dcSubstituted`, as the filter decline above.
+      closureDegrade(ceUnsupportedHof,
+        "fold over a symbolic-length seq is modeled as an opaque " &
              "ground result (precise symbolic fold deferred)")
-      currentClosureCallErrors.add foldErr  # threadvar: fallback
-      syncClosureCallError(foldErr)         # CR-9 Stage 5: LIVE WalkCtx field
-      # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
-      # the run coordinate is derived at drain from the closure-sink entry
-      # recorded just above (S7 routes these HOF sites through the funnel).
       var fresh: seq[Z3Bool]
       return allocateSym(e.hofRetElemTy, "__hofFoldOpaque", fresh)
     else:
@@ -13549,8 +13752,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
                            ## join the raise-cond sinks' reset list.
   currentMaxBytesEncodingLen = settings.budget.maxBytesEncodingLen  ## Phase 15 S7a
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
-  parseIntGateConstraints = @[]   ## Phase 15 S10a: reset parseInt digits-gate sink
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
+  rfc0005UnvetoedStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
   currentInFlightTypeId = none(string)   ## Phase 15 E8: reset in-flight-exn mirror
   currentInFlightMsg = none(string)      ## Phase 15 E8
@@ -14104,6 +14307,8 @@ proc runSymexImpl(prog: SymexProgram,
   ## all-⊤ that is exactly the old `runTaint == {}`).
   let decision = decideVerdict(w.found, w.candidates, w.runTaint,
                                vetoed = capForcedUnknown or closureForcedUnknown)
+  rfc0005UnvetoedStatus =
+    decideVerdict(w.found, w.candidates, w.runTaint, vetoed = false).status
   let winnerFound = decision.status in {sxSat, sxRaised}
   let winnerIdx   = decision.winnerIdx
   if winnerFound:

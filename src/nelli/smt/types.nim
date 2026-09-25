@@ -1407,6 +1407,9 @@ type
                            ## whole-run-degrades the verdict to `sxUnknown`
                            ## (Invariant 3 — never a silent wrong sat/unsat).
                            ## Appended at enum tail (ordinal stability).
+                           ## RFC-0005 S7: also joins `{scSpurious}` onto the
+                           ## calling path (`closureDegrade`); the result is a
+                           ## per-occurrence fresh constant (`dcFreshSymbol`).
     weInternalWalkerFault ## RFC-chapulin-hardening CR-1c (walker v43,
                           ## ADR-0020): the walker's last-resort safety net —
                           ## the final `except CatchableError` catch-all on the
@@ -1820,6 +1823,10 @@ type
                           ## not the closure sink: it must not trip the
                           ## closure veto (`closureForcedUnknown`), which it
                           ## never did before S1b. sevError -> sxUnknown.
+                          ## RFC-0005 S7: the body's raises now reach the
+                          ## caller and the continuation past the call is
+                          ## made infeasible (exit coverage `false`), so the
+                          ## site is a halt: `dcOmitted`.
     weBreakOutsideLoop    ## RFC-0005 S1b: an `isBreak`/`isContinue` reached
                           ## with an EMPTY loop stack. Surface route: the
                           ## parser flattens `block:` into its body, so a
@@ -2537,6 +2544,20 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   ## two `dcFreshSymbol` rows are the slice's verdict flips: they no longer
   ## carry `scIncomplete` on the run.
   ##
+  ## RFC-0005 S7 (walker v146) audited the closure / HOF declines (rows
+  ## marked `S7`) -- the precondition for S9 deleting the closure veto. Every
+  ## value-substituting site now records through `closureDegrade`, which
+  ## joins its path coordinate onto the consuming path as well as the
+  ## closure sink the veto reads: `ceUnsupportedHof` and
+  ## `ceClosureUnknownCallee` are `dcSubstituted` (the closure is never
+  ## applied / the stand-in has a fixed name), `ceClosureBodyUncertain` is
+  ## `dcFreshSymbol` (the call result is fresh per occurrence since S7) and
+  ## `ceClosureBodyDiverged` is a halt (`dcOmitted`). `ceNotImplemented` and
+  ## `feExtractionFailed` stay `dcNoAnswer`: the former's sites are all ⊤ by
+  ## construction; the latter is an extraction / witness sink recorded only
+  ## on the SAT branch AFTER the verdict, outside `runTaintOf` -- S10's
+  ## replay gate owns it.
+  ##
   ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
   ## EXISTING kind at a NEW emission site asserts that the new site shares
   ## that kind's substitution class. If it does not, split the kind
@@ -2643,9 +2664,24 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S6b: as geInstantiationCapped -- the declined callee key reaches the
     # same missing-callee arm (fresh retSym, callee effects dropped).
   of ceNotImplemented: dcNoAnswer
+    # S7 audited: every site is ⊤ on both coordinates by construction -- the
+    # parse-time closure-iterator `mkUnsupported` marker (the walker's
+    # `isUnsupported` arm), the extraction sink's closure-typed SUT result,
+    # and the `runSymex` boundary abort. None is a value substitution the
+    # veto alone guards: the marker taints its reaching path ⊤ itself.
   of ceUnsupportedCapture: dcNoAnswer
-  of ceUnsupportedHof: dcNoAnswer
-  of ceClosureUnknownCallee: dcNoAnswer
+  of ceUnsupportedHof: dcSubstituted
+    # S7: all four `lowerHofCall` axiom-path declines (symbolic-length
+    # `filter`, capturing / non-int `map`, the `mapArray` map whose function
+    # symbol no axiom constrains, `fold`) stand a value in for a closure that
+    # is NEVER applied -- its raises and captured writes are dropped, so the
+    # stand-in is not a fresh symbol. Recorded through `closureDegrade`, which
+    # joins the ⊤ path coordinate onto the consuming path.
+  of ceClosureUnknownCallee: dcSubstituted
+    # S7: both sites (unresolved callee in `lowerClosureCall`, unstashed body
+    # in `applyClosureGround`) return a FIXED-name `int64` stand-in whatever
+    # the closure's return type, and the unresolved-callee site returns
+    # before lowering the call's arguments (their raises are dropped).
   of ceInlineBudgetExceeded: dcSubstituted
     # S6a: both sites (`applyClosureGround`'s inline-budget guard and its
     # no-walk-context guard) return the closure's uninterpreted `funcApp`
@@ -2686,7 +2722,14 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # dropped raise branch), its deref writes DROP the write (stale heap),
     # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
   of geVtableDispatch: dcNoAnswer
-  of ceClosureBodyUncertain: dcNoAnswer
+  of ceClosureBodyUncertain: dcFreshSymbol
+    # S7: the tainted body arm is dropped from the ground axioms, so the
+    # call's result -- a fresh constant PER OCCURRENCE since S7 (was a
+    # function application shared by every call with equal arguments) -- is
+    # free under that arm and fully defined under every other. The arm's
+    # operands were lowered before descent, its raises are routed, its heap
+    # and defect-survivor facts still merge: nothing is dropped. The arm's
+    # own degrade taint joins the calling path through the descent join.
   of weInternalWalkerFault: dcNoAnswer
     # S4 audited: a walker bug is never an approximation (§3.1), including
     # its two `degradeAlloc` seq-element sites. S5: likewise its R1
@@ -2753,7 +2796,12 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of eeHandlerReraiseUnmodelled: dcOmitted
     # S6b: a HALT -- the bare re-raise inside a handler with no in-flight
     # exception returns no survivor (token discarded).
-  of ceClosureBodyDiverged: dcNoAnswer
+  of ceClosureBodyDiverged: dcOmitted
+    # S7: a HALT. Since S7 the caller continuation past a body with no
+    # value-bearing exit is infeasible (the exit-coverage fact is `false`),
+    # and the body's raises are routed to the caller, so nothing survives
+    # past the call to carry a coordinate; the token is discarded. The run
+    # keeps `{scIncomplete}` for any body path a budget or halt dropped.
   of weBreakOutsideLoop: dcOmitted
     # S6b: both sites (`isBreak` / `isContinue` outside a loop) are HALTS --
     # the token is discarded and the walk returns `@[]`.

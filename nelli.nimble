@@ -804,5 +804,11 @@ task test, "Run the test suite":
             # `feUnsupportedOpAborted` dcNoAnswer, the rest dcSubstituted),
             # heap/halt sites dcOmitted, `heNewFieldZeroUnsupported`
             # dcFreshSymbol, `eeUnknownExnType` taints; walker 144->145.
-            "tsymex_rfc0005_s6b_ops"]:
+            "tsymex_rfc0005_s6b_ops",
+            # RFC-0005 S7: closure / HOF declines taint the path
+            # (`closureDegrade`), per-occurrence closure result, closure
+            # raises routed, exit coverage, descent isolation, parseInt
+            # digits-gate pool deleted; S9 precondition pins; walker
+            # 145->146.
+            "tsymex_rfc0005_s7_closure"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

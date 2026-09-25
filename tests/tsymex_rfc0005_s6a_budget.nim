@@ -430,12 +430,14 @@ const rtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
               "smt" / "runtime.nim"
 
 proc degradeSites(src: string; k: SymexErrorKind): seq[string] =
-  ## Every non-comment line of `src` that calls `degrade(<k>,` -- the
-  ## `w.degrade` funnel is the only emission path for these kinds.
+  ## Every non-comment line of `src` that calls `degrade(<k>,` or (RFC-0005
+  ## S7) `closureDegrade(<k>,` -- the two funnels are the only emission
+  ## paths for these kinds.
   for raw in src.splitLines():
     let t = raw.strip()
     if t.len == 0 or isCommentLine(t): continue
-    if ("degrade(" & $k & ",") in t: result.add t
+    if ("degrade(" & $k & ",") in t or ("closureDegrade(" & $k & ",") in t:
+      result.add t
 
 suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
 
@@ -447,7 +449,10 @@ suite "RFC-0005 S6a (d) -- structural: the audited emission sites":
                    (beBudgetExhaustedAssumedBound, 1),
                    (beBudgetExhaustedPrune, 1),        # walkBlock
                    (beBudgetExhaustedUnmodelled, 3),   # maxCallDepth + 2 vcs
-                   (ceInlineBudgetExceeded, 2)]:       # budget guard + S1 probe
+                   # budget guard + no-walk guard (both `closureDegrade`
+                   # since RFC-0005 S7; the no-walk guard was a hand-written
+                   # sink add before) + S1 probe
+                   (ceInlineBudgetExceeded, 3)]:
       let sites = degradeSites(src, k)
       checkpoint($k & ": " & $sites)
       check sites.len == n

@@ -83,7 +83,7 @@ state = "done"
 [[slice]]
 id    = "S7"
 title = "Cross-path sinks + closure/HOF decline path taint"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8"

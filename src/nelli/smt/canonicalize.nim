@@ -184,7 +184,28 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "145"
+const symexWalkerVersion* = "146"
+  ## RFC-0005 S7 (2026-09-25) — cross-path sinks and closure / HOF decline
+  ## path taint, the precondition for S9 deleting the closure veto. Every
+  ## value-substituting closure / HOF decline records through
+  ## `closureDegrade`, which joins its path coordinate onto the consuming
+  ## path (was: the closure sink only, which only the veto read) -- including
+  ## the symbolic-length `mapArray` path, which recorded nothing and reported
+  ## a clean false `sxSat`. `ceUnsupportedHof` / `ceClosureUnknownCallee` are
+  ## `dcSubstituted`, `ceClosureBodyUncertain` `dcFreshSymbol`,
+  ## `ceClosureBodyDiverged` a halt (`dcOmitted`). Closure descent: the
+  ## result is a fresh constant per call occurrence (was the funcSym applied
+  ## to the arguments, which the global ground axioms equated across a heap
+  ## write -- a false `sxUnsat`); the body's escaped raises are routed from
+  ## the calling path (were dropped at `popFrame`); an exit-coverage fact
+  ## confines the caller continuation to the body's value-bearing exits (a
+  ## body that always raised reached the label -- a false `sxSat`); exit
+  ## taint joins the calling path; and the calling expression's pending
+  ## lowering effects survive the descent (an argument's raise predicate was
+  ## wiped). The parseInt digits-gate pool (asserted into every check) is
+  ## deleted: `"-<non-digit>"` now raises `ValueError` on its own path
+  ## instead of pruning every path's models. Verdicts flip: see
+  ## `tests/tsymex_rfc0005_s7_closure.nim`. 145->146.
   ## RFC-0005 S6b (2026-09-25) — `feUnsupportedOp`, the heap/halt sites,
   ## `eeUnknownExnType` and the kinds still at the default classified
   ## (`types.nim`'s `classOf` rows marked S6b). `feUnsupportedOp` spanned

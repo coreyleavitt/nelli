@@ -522,11 +522,14 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
   test "feUnsupportedOpHavoc sites match the S6b audit (a new site must re-audit its class)":
     ## reinterpret, uninterp merge, seq merge, string/table/set merge (the
     ## group arm's kind choice), closure-env conjunct x2, bool ordering, and
-    ## the three composite call-result bindings.
+    ## the three composite call-result bindings. RFC-0005 S7 added the
+    ## eleventh: `applyClosureGround`'s composite zero-default fallthrough
+    ## (the per-occurrence closure result left free on that arm, recorded
+    ## through `closureDegrade`; was `feUnsupportedOp` in the closure sink).
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 10
+    check sites.len == 11
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

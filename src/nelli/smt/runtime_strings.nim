@@ -136,7 +136,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ##   indexOf, replace, replaceAll, joinStrSeq, mkConcreteStrSeq,
   ##   parseNimRegexToZ3Regex, intToBv, mkConstArray, store, toStr, toInt,
   ##   ite, len, concat, liftBV, toZ3Int, syncParseIntRaiseCond,
-  ##   syncParseIntGateConstraint, parseIntGateConstraints, parseIntRaiseConds,
+  ##   parseIntRaiseConds,
   ##   syncStrIndexOobCond, strIndexOobConds,
   ##   currentMaxBytesEncodingLen,
   ##   SymexUnsupportedStringOpError, SymexZ3StringIncompleteError,
@@ -582,28 +582,24 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     #   negInner = toInt(substr(s, 1, len(s)-1))     (digits after the '-')
     #   result   = ite(startsWith(s,"-"), -negInner, posVal)
     #
-    # DIGITS GATE — negative branch ONLY. The positive branch needs NO gate: Z3's
-    # `toInt` already returns the faithful value (true digits, or −1 for non-digit
-    # — exactly Z3's honest model). The negative branch DOES need a gate: if the
-    # suffix after `-` is non-digit, `negInner` is −1 and `-negInner` would be a
-    # FALSE `+1`. So gate `isNeg ⇒ negInner >= 0` (`(not isNeg) or negInner>=0`),
-    # threaded into `parseIntGateConstraints` (drained in `trySolve`).
-    #
-    # S10b RAISES-PATH. `parseInt(s)` is an EXPRESSION (→ int), but Nim's runtime
-    # RAISES `ValueError` when `s` is not a valid integer. The raise condition is
-    # exactly the non-`-`-prefixed non-digit case: `(not isNeg) and (posVal < 0)`
-    # (Z3's `toInt` returns −1 there). [The `-`-prefixed non-digit case is handled
-    # by the S10a digits gate above, which makes the negative branch UNSAT for a
-    # non-digit suffix; modelling its raise too is left to that gate — the spec
-    # scopes the S10b raise to the non-`-`-prefixed case, matching
-    # `not (toInt(s) >= 0) and not startsWith(s, "-")`.] `lower` cannot itself
-    # route a raise (it has no WalkCtx/Path), so we surface the raise predicate to
-    # the enclosing statement walk via the `parseIntRaiseConds` threadvar; the
-    # statement arm (`isLet`/`isAssign`/`isIf`/`isAssert`) drains it and forks: a
-    # RAISES sub-path (constrained by the predicate, routed via E3's `routeRaise`
-    # and terminated) and a DIGITS sub-path (constrained by the negation,
-    # continuing with this int value). This CLOSES the S10a unsoundness window, so
-    # the `seParseIntPreE` hint is NO LONGER emitted. strArgs = [s].
+    # RAISES-PATH (S10b; RFC-0005 S7 completed it). `parseInt(s)` is an
+    # EXPRESSION (→ int), but Nim's runtime RAISES `ValueError` when `s` is not
+    # a valid integer. Z3's `toInt` returns −1 for a non-digit string, so the
+    # raise condition is
+    #   (not isNeg and posVal < 0) or (isNeg and negInner < 0)
+    # -- a non-digit string, or a `-` followed by a non-digit suffix (where
+    # `-negInner` would otherwise be a FALSE `+1`). Before RFC-0005 S7 the
+    # second disjunct was a "digits gate" `isNeg ⇒ negInner >= 0` pushed into a
+    # pool asserted into EVERY solver check: it deleted `"-<non-digit>"` inputs
+    # instead of raising on them, and pruned sibling paths that never called
+    # `parseInt` at all (both false `sxUnsat`s). As a raise disjunct it is
+    # local to the path that lowers the call, and the survivor carries its
+    # negation. `lower` cannot itself route a raise (it has no WalkCtx/Path),
+    # so the predicate is surfaced to the enclosing statement walk via the
+    # `parseIntRaiseConds` sink; the statement arm drains it and forks a
+    # RAISES sub-path (routed via E3's `routeRaise`) and a DIGITS sub-path
+    # (constrained by the negation, continuing with this int value). strArgs
+    # = [s].
     let s = lower(env, e.strArgs[0])
     requireStr(s, "iekStrToInt")
     let dash = mkString("-")
@@ -612,13 +608,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let sLen = len(s.str)
     let negInner = toInt(substr(s.str, mkInt(1), sLen - mkInt(1)))
     let resultInt = ite(isNeg, -negInner, posVal)
-    # Digits gate on the NEGATIVE branch only (positive branch is already faithful).
-    let parseIntGateCond = (not isNeg) or (negInner >= mkInt(0))
-    parseIntGateConstraints.add parseIntGateCond    # threadvar fallback
-    syncParseIntGateConstraint(parseIntGateCond)    # CR-9 A0: LIVE WalkCtx field
-    # S10b: surface the raise predicate (non-digit, non-`-`-prefixed) for the
+    # S10b / RFC-0005 S7: surface the raise predicate (see above) for the
     # enclosing statement walk to fork into a routed `ValueError` raise.
-    let parseIntRaiseCond = (not isNeg) and (posVal < mkInt(0))
+    let parseIntRaiseCond = ((not isNeg) and (posVal < mkInt(0))) or
+                            (isNeg and (negInner < mkInt(0)))
     parseIntRaiseConds.add parseIntRaiseCond          # threadvar fallback
     syncParseIntRaiseCond(parseIntRaiseCond)          # CR-9 Stage 6 Group-2
     SymVal(kind: svInt, zi: resultInt)

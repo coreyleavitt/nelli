@@ -806,7 +806,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## `feUnsupportedOpHavoc` and the boundary `feUnsupportedOpAborted`;
     ## halts dcOmitted; `heNewFieldZeroUnsupported` dcFreshSymbol;
     ## `eeUnknownExnType` taints). 144->145.
-    check symexWalkerVersion == "145"
+    ## RFC-0005 S7 (closure / HOF declines taint the path via
+    ## `closureDegrade`; per-occurrence closure result; closure raises routed;
+    ## exit coverage; the parseInt digits-gate pool deleted). 145->146.
+    check symexWalkerVersion == "146"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -798,5 +798,11 @@ task test, "Run the test suite":
             # variant-ctor bails -> `beBudgetExhaustedUnmodelled`
             # (dcSubstituted), `ceInlineBudgetExceeded` dcSubstituted;
             # verdict-neutral by construction; walker 143->144.
-            "tsymex_rfc0005_s6a_budget"]:
+            "tsymex_rfc0005_s6a_budget",
+            # RFC-0005 S6b: `feUnsupportedOp` split (fresh sites ->
+            # `feUnsupportedOpHavoc` dcFreshSymbol, the boundary abort ->
+            # `feUnsupportedOpAborted` dcNoAnswer, the rest dcSubstituted),
+            # heap/halt sites dcOmitted, `heNewFieldZeroUnsupported`
+            # dcFreshSymbol, `eeUnknownExnType` taints; walker 144->145.
+            "tsymex_rfc0005_s6b_ops"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

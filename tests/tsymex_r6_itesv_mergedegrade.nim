@@ -74,7 +74,8 @@ suite "symex iteSV mergedegrade -- composite-merge degrade, single path":
     check r.status == sxUnknown
     var sawClassified = false
     for e in r.errors:
-      if e.kind == feUnsupportedOp and "iteSV" in e.msg and "string" in e.msg:
+      # RFC-0005 S6b: the string merge is the fresh-symbol split.
+      if e.kind == feUnsupportedOpHavoc and "iteSV" in e.msg and "string" in e.msg:
         sawClassified = true
     check sawClassified
 
@@ -141,7 +142,8 @@ suite "symex iteSV mergedegrade -- svSeq genuine (non-placeholder) merge, walker
     check r.status == sxUnknown
     var sawClassified = false
     for e in r.errors:
-      if e.kind == feUnsupportedOp and "iteSV" in e.msg and "seq" in e.msg:
+      # RFC-0005 S6b: the genuine seq merge is the fresh-symbol split.
+      if e.kind == feUnsupportedOpHavoc and "iteSV" in e.msg and "seq" in e.msg:
         sawClassified = true
     check sawClassified
 

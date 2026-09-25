@@ -301,11 +301,13 @@ proc sutReinterpretIntOffsetReturn(s: string, start: int) =
 
 suite "symex round-6 B2 fix-slice item 2 — lowerConvIntReinterpret's svInt arm":
 
-  test "item2-1 RED->GREEN: uint(q) on an isIntOffset-promoted svInt reports classified sxUnknown (feUnsupportedOp), never a crash":
+  test "item2-1 RED->GREEN: uint(q) on an isIntOffset-promoted svInt reports classified sxUnknown (feUnsupportedOpHavoc), never a crash":
+    ## RFC-0005 S6b: the Int-sorted reinterpret binds a fresh symbol and
+    ## drops nothing -- the `feUnsupportedOpHavoc` (dcFreshSymbol) split.
     let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
     check r.status == sxUnknown
     check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedOp)
+    check r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
     check r.errors.anyIt("lowerConvIntReinterpret" in it.msg)
 
   test "item2-2: the classified decline never falsely reports sxSat/sxUnsat":

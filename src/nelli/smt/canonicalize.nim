@@ -184,7 +184,31 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "144"
+const symexWalkerVersion* = "145"
+  ## RFC-0005 S6b (2026-09-25) — `feUnsupportedOp`, the heap/halt sites,
+  ## `eeUnknownExnType` and the kinds still at the default classified
+  ## (`types.nim`'s `classOf` rows marked S6b). `feUnsupportedOp` spanned
+  ## three classes; §3.2 split it: the fresh-symbol sites (iteSV
+  ## string/table/set/seq/uninterp merges, the Int-sorted reinterpret, bool
+  ## ordering, the closure-env leaf conjunct, and the three composite
+  ## call-result bindings that leave the per-call `retSym` free) became
+  ## `feUnsupportedOpHavoc` (`dcFreshSymbol`), the `runSymex` boundary abort
+  ## became `feUnsupportedOpAborted` (`dcNoAnswer`), and the rest -- forwarded
+  ## operands, dropped writes / forks, by-name composite comparisons that
+  ## drop a user overload's raise -- keep the kind as `dcSubstituted`.
+  ## `heNewFieldZeroUnsupported` is `dcFreshSymbol` (an untouched heap cell
+  ## at a fresh address). So a run whose only degrades are those two kinds
+  ## and which proves the target unreachable now reports `sxUnsat`. Every
+  ## halt kind (`heDepthExhausted`, `heUnsafeCast`, `weBreakOutsideLoop`,
+  ## `seVariantFieldOnDeclinedCtor`, `eeRaiseOutsideHandler`,
+  ## `eeHandlerReraiseUnmodelled`) is `dcOmitted`. The walk-level `iteSV`
+  ## folds (`isIndex`'s array arm, `isVariantField`, the heap variant-field
+  ## deref) now drain the merge's pending taint onto the binding path.
+  ## `eeUnknownExnType` is `dcSubstituted` and TAINTS: recorded once through
+  ## `degrade` (`dsUnknownExn`, still `sevWarning`, counted by `taintsRun`),
+  ## its token joined where a named handler is skipped on the unknown type
+  ## and at the boundary -- a false `sxUnsat` (caught by the skipped named
+  ## handler) and a false `sxSat` (a bare `except:` past it) before. 144->145.
   ## RFC-0005 S6a (2026-09-25) — the BUDGET family classified
   ## (`types.nim`'s `classOf` rows marked S6a). `beBudgetExhausted` was one
   ## kind at six walk sites spanning three substitution classes; §3.2 split

@@ -268,7 +268,9 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
     check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
-      if e.kind == feUnsupportedOp and e.severity == sevError:
+      # RFC-0005 S6b: the untouched result's per-call retSym is free and
+      # nothing is dropped -- the `feUnsupportedOpHavoc` split.
+      if e.kind == feUnsupportedOpHavoc and e.severity == sevError:
         sawKind = true
     check sawKind
 

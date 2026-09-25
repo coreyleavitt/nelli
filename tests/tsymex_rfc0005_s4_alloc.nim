@@ -174,11 +174,17 @@ suite "RFC-0005 S4 (a) -- the allocDegrade funnel's classOf rows":
     for k in [heUnresolvedRef, heRefVariantUnsupported, heUnsupportedOwnership,
               seUnsupportedTableKeyType, seUnsupportedTableValType,
               seUnsupportedSetCharInterop, feUnsupportedParamType,
-              feUnsupportedWitnessType, feUnsupportedOp, feUnsupportedExprKind,
+              feUnsupportedWitnessType, feUnsupportedExprKind,
               weInternalWalkerFault]:
       checkpoint($k)
       check classOf(k) == dcNoAnswer
       check scIncomplete in runTaint(classOf(k))
+    # RFC-0005 S6b classified `feUnsupportedOp` (still ⊤ on both coordinates:
+    # dcSubstituted) and moved this funnel's one fresh-symbol emission (the
+    # uninterpreted-ref merge) to `feUnsupportedOpHavoc`.
+    check classOf(feUnsupportedOp) == dcSubstituted
+    check scIncomplete in runTaint(classOf(feUnsupportedOp))
+    check classOf(feUnsupportedOpHavoc) == dcFreshSymbol
 
   test "the split is a TAIL append (ordinal stability, §3.2)":
     ## RFC-0005 S5 tail-appended `seRuneDecodeSymbolic` after this kind; the

@@ -537,6 +537,11 @@ type
     dsHeapDepth     ## `heapDepthErrors` threadvar + `w.heapDepthErrors`
     dsNewFieldZero  ## `newFieldZeroErrors` threadvar + `w.newFieldZeroErrors`
     dsClosure       ## `currentClosureCallErrors` threadvar + `w.closureCallErrors`
+    dsUnknownExn    ## `unknownExnWarnings` threadvar + `w.unknownExnWarnings`,
+                    ## recorded at `sevWarning` (RFC-0005 S6b: `routeRaise`'s
+                    ## `eeUnknownExnType`, a behaviour substitution whose
+                    ## consumer-facing severity predates the RFC; `taintsRun`
+                    ## counts it anyway -- §3.1's carve-out)
 
   RawWitness = object
     paramOrder: seq[string]
@@ -3415,8 +3420,11 @@ proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
     # scope on this call chain), then a fresh same-width BV placeholder
     # (never `svInt` — the placeholder must be `allocateSym`-representable
     # as the node's own declared result kind, not a re-degraded Int) keeps
-    # every downstream consumer's `.kind` dispatch total.
-    degradeAlloc(tInt(cirWidth, tgtSigned), feUnsupportedOp,
+    # every downstream consumer's `.kind` dispatch total. RFC-0005 S6b:
+    # `feUnsupportedOpHavoc` -- the operand is already lowered, the cast is
+    # total and effect-free in Nim, and the placeholder is fresh per
+    # evaluation with its init facts discarded (a superset).
+    degradeAlloc(tInt(cirWidth, tgtSigned), feUnsupportedOpHavoc,
       "lowerConvIntReinterpret: same-width signedness reinterpret has no " &
       "sound meaning on a Z3 Int-sorted operand (isIntOffset-promoted " &
       "svInt) — degraded to sxUnknown (feUnsupportedOp)",
@@ -3818,7 +3826,9 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # degrade instead: one operand is a sound stand-in (both `t`/`e` share
     # `t.kind` by the entry `doAssert`), matching `retBindEq`'s own
     # placeholder-return idiom for an unmodeled composite merge.
-    allocDegrade(feUnsupportedOp,
+    # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the result (below) is a
+    # uniquified fresh const of the operands' own sort.
+    allocDegrade(feUnsupportedOpHavoc,
       "iteSV: svUninterpRef merge lands with cluster E")
     # Round-6 re-review (item 1, walker v114): was `t` -- a pretend merge
     # that forwarded ONE OPERAND'S CONCRETE VALUE unconditionally, ignoring
@@ -3929,7 +3939,9 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # an inert `isUnsupportedFieldPlaceholder` result instead of raising
       # (the branch above this `if`), so `allocateSym(tyOf(t), …)` can never
       # raise here regardless of what `seqElemTy` holds.
-      degradeAlloc(tyOf(t), feUnsupportedOp,
+      # RFC-0005 S6b: `feUnsupportedOpHavoc` -- a lossless `tyOf`, a fresh
+      # per-merge name, init facts discarded, both operands already built.
+      degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
         "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
   of svString, svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
@@ -3998,7 +4010,17 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # concept); see that arm's comment and `degradeSymCounter`'s own doc for
     # the collision rationale. Item 9 (round-6 re-review): both sites now go
     # through the shared `degradeAlloc` pairing helper.
-    degradeAlloc(tyOf(t), feUnsupportedOp,
+    # RFC-0005 S6b: the kind follows what `tyOf(t)` round-trips. For
+    # svString / svTable / svSet it is lossless (the stored key / value /
+    # element types), so the placeholder is a fresh symbol of the operand's
+    # own type: `feUnsupportedOpHavoc`. For svVariant / svMultiVariant it
+    # rebuilds the arm-field types from live element SymVals and drops the
+    # tag names -- not a faithful round-trip, so it stays `feUnsupportedOp`
+    # (dcSubstituted).
+    let mergeKind =
+      if t.kind in {svVariant, svMultiVariant}: feUnsupportedOp
+      else: feUnsupportedOpHavoc
+    degradeAlloc(tyOf(t), mergeKind,
       "iteSV: not supported for " & plainEnglishSymValKind(t.kind) & " (Phase 5+)",
       "__iteSVMergeDegrade")
   of svClosure:
@@ -4228,6 +4250,12 @@ template cmpBV(a, b: SymVal, sop, uop: untyped): SymVal =
       # is never trusted once the run degrades). The placeholder-svSeq case
       # is peeled off above (walker v112) — this arm now only sees a
       # genuinely-unsupported (non-placeholder) kind.
+      # RFC-0005 S6b: stays `feUnsupportedOp` (dcSubstituted), not
+      # `feUnsupportedOpHavoc`. The bool is fresh, but the parser maps `<`
+      # BY NAME (`binopForInfix`), and on a composite operand the resolved
+      # operator is typically a user overload (or system's generic tuple
+      # `<`, which calls the fields' own, possibly user, operators): a raise
+      # inside it is dropped with the op.
       degradeAlloc(tBool(), feUnsupportedOp,
         "cmpBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
         "__cmpBVDegrade")
@@ -4319,7 +4347,10 @@ template eqBV(a, b: SymVal): SymVal =
       # Item 3 (walker v115): uniquify -- same Z3 name-interning collision
       # class as `__iteSVMergeDegrade` (see `degradeSymCounter`'s doc). Item 9
       # (round-6 re-review): routed through the shared `degradeAlloc` pairing
-      # helper.
+      # helper. RFC-0005 S6b: stays `feUnsupportedOp` (dcSubstituted) --
+      # the same by-name operator resolution as `cmpBV` above: a user `==`
+      # on an object (or on a field type system's structural `==` calls)
+      # may raise, and that raise is dropped with the op.
       degradeAlloc(tBool(), feUnsupportedOp,
         "eqBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
         "__eqBVDegrade")
@@ -4341,7 +4372,7 @@ template neBV(a, b: SymVal): SymVal =
       # (non-placeholder) kind.
       # Item 3 (walker v115): uniquify -- same rationale as `eqBV` above.
       # Item 9 (round-6 re-review): routed through the shared `degradeAlloc`
-      # pairing helper.
+      # pairing helper. RFC-0005 S6b: stays `feUnsupportedOp`, as `eqBV`.
       degradeAlloc(tBool(), feUnsupportedOp,
         "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
         "__neBVDegrade")
@@ -4367,6 +4398,9 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
     # here, and Nim defines pointer ordering for raw `ptr` types, so a
     # `ptr`-typed SUT comparison can plausibly reach this arm from a loop
     # guard. In-band degrade: a fresh unconstrained bool is sound.
+    # RFC-0005 S6b: stays `feUnsupportedOp` -- `ref T` has no system
+    # ordering, so an ordering `<` on refs IS a user overload (by-name
+    # mapping, as `cmpBV`): its raises are dropped.
     degradeAlloc(tBool(), feUnsupportedOp,
       "ref/ptr comparison op " & $op & " not valid (only ==/!=)",
       "__refEqOrderDegrade")
@@ -4609,7 +4643,11 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
       # A GENUINE (non-placeholder) captured seq field: general seq equality
       # is not yet wired (same residual gap `eqBV`'s catch-all still owns for
       # a bare `seq == seq`) -- falls through to the shared degrade below.
-      degradeAlloc(tBool(), feUnsupportedOp,
+      # RFC-0005 S6b: a fresh per-evaluation conjunct of an AND -- the
+      # environment equality it sits in can still take both values, and
+      # Nim's closure `==` runs no user code, so nothing is dropped:
+      # `feUnsupportedOpHavoc`.
+      degradeAlloc(tBool(), feUnsupportedOpHavoc,
         "svLeafEq: closure-environment field of kind seq is not supported " &
         "for structural equality (C5)", "__svLeafEqDegrade").bo
   else:
@@ -4621,8 +4659,9 @@ proc svLeafEq(a, b: SymVal): Z3Bool =
     # (`==`/`!=`) inside a loop reaches this unguarded. In-band degrade:
     # a fresh unconstrained bool is sound (the comparison result is never
     # trusted once the run degrades). `svSeq` is peeled off above (walker
-    # v112) into its own placeholder-aware arm.
-    degradeAlloc(tBool(), feUnsupportedOp,
+    # v112) into its own placeholder-aware arm. RFC-0005 S6b:
+    # `feUnsupportedOpHavoc`, as the svSeq arm above.
+    degradeAlloc(tBool(), feUnsupportedOpHavoc,
       "svLeafEq: closure-environment field of kind " & plainEnglishSymValKind(a.kind) &
       " is not supported for structural equality (C5)", "__svLeafEqDegrade").bo
 
@@ -4948,8 +4987,11 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
       # operands -- Nim's `system.nim` defines `<`/`<=` for `bool`
       # (`false < true`), so `flag1 < flag2` in a loop guard is valid Nim
       # reaching this arm. In-band degrade: a fresh unconstrained bool is
-      # sound.
-      degradeAlloc(tBool(), feUnsupportedOp,
+      # sound. RFC-0005 S6b: `feUnsupportedOpHavoc` -- system's `<`/`<=`
+      # on `bool` is a magic (a same-signature user overload is ambiguous,
+      # so no user code can hide behind it), both operands are lowered, and
+      # the bool is fresh per evaluation.
+      degradeAlloc(tBool(), feUnsupportedOpHavoc,
         "comparison op " & $op & " not valid on bool operands",
         "__boolOrderDegrade")
   elif a.kind in {svFloat32, svFloat64}:
@@ -5790,6 +5832,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # handles svTable/svSet receivers, falling through unguarded for
       # svSeq/svArray/svString. In-band degrade: mirrors the svSet arm's
       # own `__setContainsDegrade` idiom two cases above.
+      # RFC-0005 S6b: stays `feUnsupportedOp` (dcSubstituted): `e.key` is
+      # never lowered (its raise forks are dropped), and system's
+      # `contains(openArray)` calls the element type's `==`, which may be
+      # a raising user overload.
       lowerDegrade(feUnsupportedOp,
         "iekContains on unsupported kind " & plainEnglishSymValKind(recv.kind) &
              " (feUnsupportedOp)")
@@ -8051,7 +8097,12 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   ## write their threadvar fallback AND the live `WalkCtx` field, exactly as
   ## the hand-written sites did. No-`w` lowering sites use the sibling
   ## `lowerDegrade` instead.
-  let info = SymexErrorInfo(kind: kind, severity: sevError, msg: msg)
+  ##
+  ## RFC-0005 S6b: `dsUnknownExn` is the one sink that records at
+  ## `sevWarning` (the `eeUnknownExnType` severity consumers already see);
+  ## its run coordinate still counts through `taintsRun`'s carve-out.
+  let severity = if sink == dsUnknownExn: sevWarning else: sevError
+  let info = SymexErrorInfo(kind: kind, severity: severity, msg: msg)
   case sink
   of dsWalk:
     w.walkDegradeErrors.add info
@@ -8064,6 +8115,9 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   of dsClosure:
     currentClosureCallErrors.add info   # threadvar: fallback
     w.closureCallErrors.add info        # CR-9 Stage 5: LIVE WalkCtx field
+  of dsUnknownExn:
+    unknownExnWarnings.add info         # threadvar: fallback
+    w.unknownExnWarnings.add info       # CR-9 Stage 5: LIVE WalkCtx field
   Degrade(path: pathTaint(classOf(kind)))
 
 proc takeLoweringPendingDegrade(): Degrade =
@@ -10246,9 +10300,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for k in 1 ..< n:
           let kSV = coerceIntLit(idxSV, int64(k))
           indexed = iteSV(symEq(idxSV, kSV), arrSV.arrElems[k], indexed)
-        var newEnv = cp.env
+        # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
+        # wrapper), so a merge degrade's pending taint (`allocDegrade` /
+        # `degradeAlloc`) would otherwise be drained by whatever `lower()`
+        # runs NEXT -- on this path in practice, on a sibling in principle
+        # (the race `iteSV`'s group-arm note describes). Its fresh-symbol
+        # sites are `dcFreshSymbol` now, so the taint must land on the path
+        # that binds the merged value: drain it here, by construction.
+        let cpM = drainPendingLowerEffects(cp)
+        var newEnv = cpM.env
         newEnv[stmt.ixRetName] = indexed
-        survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
+        survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2): `xs[idx] = v` element ASSIGNMENT.
@@ -10873,9 +10935,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for k in countdown(armBindings.len - 2, 0):
         let eqB = variantDiscEq(disc, int64(armBindings[k][0]))
         bound = iteSV(eqB, armBindings[k][1], bound)
-      var newEnv = p.env
+      # RFC-0005 S6b: drain the arm fold's merge-degrade taint onto THIS
+      # path (see `isIndex`'s array arm: a direct `iteSV` call).
+      let pM = drainPendingLowerEffects(p)
+      var newEnv = pM.env
       newEnv[stmt.vfRetName] = bound
-      survivors.add forkPath(p, p.pc & @[inArmCond], newEnv)
+      survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
     survivors
   of isReturn:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -10930,7 +10995,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # threadvar — that sink is reset at every `lowerInExpr` wrapper
               # entry, so an entry added HERE (after the wrapper returned)
               # would be wiped by the next lowering before verdict assembly.
-              let d = w.degrade(feUnsupportedOp,
+              # RFC-0005 S6b: `feUnsupportedOpHavoc` -- `retSym` is this
+              # call's own `synthZ3`-numbered symbol (fresh per call) and is
+              # left free, `stmt.retExpr` was lowered and its raise forks
+              # drained above, and the callee's heap/var effects ride `cp`.
+              # A tainted return is never cached. A superset of the value.
+              let d = w.degrade(feUnsupportedOpHavoc,
                 "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
                      ") bound through the scalar-raise drain is not yet " &
                      "wired — path degraded to sxUnknown (feUnsupportedOp)")
@@ -11372,7 +11442,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 if retVal.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
                                       svBV64, svFloat32, svFloat64, svString,
                                       svTuple, svVariant}:
-                  let d = w.degrade(feUnsupportedOp,
+                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
+                  # composite arm: the per-call `retSym` is left free, the
+                  # callee's effects ride `cp`, nothing is dropped.
+                  let d = w.degrade(feUnsupportedOpHavoc,
                     "composite-typed implicit-result fallthrough (kind " &
                          plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
                          "to sxUnknown (feUnsupportedOp)")
@@ -11407,7 +11480,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
                                            cp.env)
                 except ValueError, SymexRefUnresolvedError:
-                  let d = w.degrade(feUnsupportedOp,
+                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
+                  # `retSym` ranges over the whole type, zero included.
+                  let d = w.degrade(feUnsupportedOpHavoc,
                     "composite-typed implicit-result fallthrough " &
                          "(untouched-result path, kind " & $stmt.retTy.kind &
                          ") has no sound zero-default (" &
@@ -11826,13 +11901,32 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # ONLY against a bare `except:` — never a named handler — and records a
   # `eeUnknownExnType` sevWarning (Invariant 3: no silent false-negative). A
   # known type matches a named handler `ht` iff `isSubtypeOf(typeId, ht, …)`.
+  #
+  # RFC-0005 S6b (RFC §3.1 round-2 row): that match rule is a BEHAVIOUR
+  # SUBSTITUTION, now classified (`eeUnknownExnType` -> dcSubstituted) and
+  # tainting instead of inert. The warning is recorded ONCE, through
+  # `degrade`'s `dsUnknownExn` sink (same sinks, same `sevWarning`), and
+  # counts on the run through `taintsRun`'s carve-out: an unknown raise
+  # voids `sxUnsat`, because every omission it causes -- a named handler's
+  # continuation never walked, a boundary finding the `stkRaisedExn` filter
+  # or the defect-ness guess suppressed -- is run-global. The token joins
+  # the PATH exactly where the guess is acted on and the path survives:
+  #   - a NAMED handler passed over only because the type is unknown -- the
+  #     path continuing past it (a later bare `except:`, a `finally`, an
+  #     escape) is a continuation reality may never take;
+  #   - the SUT boundary, where the finding's `raisedIsDefect` and its
+  #     surfacing are decided from a type the walker cannot resolve.
+  # A bare `except:` reached with no named handler skipped is EXACT (it
+  # catches everything in Nim too), so that handler continuation stays clean.
+  # An escape to a caller carries the path on unchanged; the caller's
+  # `routeRaise` decides again for its own handlers.
   let raisedKnown = isKnownExnType(typeId, w.statics.exnTable,
                                    w.statics.userExnHierarchy)
+  var unknownTok: Degrade
   if not raisedKnown:
-    let exnWarn = SymexErrorInfo(kind: eeUnknownExnType, severity: sevWarning,
-                                 msg: typeId)
-    unknownExnWarnings.add exnWarn   # threadvar: fallback
-    w.unknownExnWarnings.add exnWarn # CR-9 Stage 5: LIVE WalkCtx field
+    unknownTok = w.degrade(eeUnknownExnType, typeId, dsUnknownExn)
+  var rp = p
+  var unknownJoined = false
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
     let hf = w.frame.handlerStack[i]
@@ -11844,6 +11938,11 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
                          w.statics.userExnHierarchy):
             matched = true
             break
+      if not matched and not raisedKnown and not unknownJoined:
+        # RFC-0005 S6b: a named handler skipped on an unknown type -- every
+        # continuation past this point is substituted (joined once).
+        rp = forkPathTainted(rp, rp.pc, rp.env, unknownTok)
+        unknownJoined = true
       if matched:
         # MATCH. Pop the handler stack down to BELOW the matched frame for the
         # duration of the handler body (an inner try no longer guards us, and a
@@ -11857,7 +11956,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
                                                      ## the lower-time threadvars
                                                      ## so getCurrent* see this exn
                                                      ## during the handler body.
-        let handlerPaths = walk(h.body, @[p], w)
+        let handlerPaths = walk(h.body, @[rp], w)
         # Normal handler exit: clear the in-flight exn, restore the stack.
         w.frame.handlerStack = savedStack
         w.frame.inFlightExn = savedInFlight
@@ -11879,14 +11978,14 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # that a `try: raise … finally: …` (no except) still runs its finally.
   for i in countdown(w.frame.handlerStack.high, 0):
     if w.frame.handlerStack[i].finallyBlock != nil:
-      w.frame.pendingRaise.add (depth: i, path: p, typeId: typeId, msg: msg)
+      w.frame.pendingRaise.add (depth: i, path: rp, typeId: typeId, msg: msg)
       return @[]
   # 2. No handler matched in this frame.
   if w.frameStack.len > 0:
     # We are inside a callee — let the raise escape to the caller's handlers.
     # The caller's `isCall` arm drains `escaped` after we return. Carry the
     # raise-site path so heap/pc state is preserved (R1b; structural now).
-    w.frame.escaped.add EscapedRaise(path: p, typeId: typeId, msg: msg)
+    w.frame.escaped.add EscapedRaise(path: rp, typeId: typeId, msg: msg)
     return @[]
   # 3. Top-level (SUT) frame: surface as a public sxRaised finding.
   # Phase 15 E6. A raise of a Nim `Defect` subtype is a CONTRACT VIOLATION that
@@ -11917,8 +12016,14 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       else:
         false  ## e.g. an stkLabel search: the raise just terminates the path
   if wantsRaise:
+    # RFC-0005 S6b: an unknown type's defect-ness (hence `raisedIsDefect` and
+    # whether it surfaces at all) is a guess -- the finding rides a tainted
+    # path, so it is a candidate, never a clean `sxRaised`.
+    if not raisedKnown and not unknownJoined:
+      rp = forkPathTainted(rp, rp.pc, rp.env, unknownTok)
+      unknownJoined = true
     # RFC-0005 S1c: solved on a tainted path too (`solveTargetHit`).
-    let (st, wit, candErrs) = solveTargetHit(w, p)
+    let (st, wit, candErrs) = solveTargetHit(w, rp)
     case st
     of sxSat:
       let iv = InternalVerdict(kind: ivRaised,
@@ -11929,7 +12034,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       # RFC-0005 S1: `pathTaint` PRODUCED at the raised-finding hit; S1c
       # routes on it (clean -> `found`, spurious-tainted -> `candidates`).
       var r = toPublic(iv)
-      r.pathTaint = p.taint
+      r.pathTaint = rp.taint
       r.errors.add candErrs
       w.admitSolvedHit(r)
     of sxUnknown:
@@ -13167,10 +13272,12 @@ proc runSymex*(prog: SymexProgram,
       runSymexImpl(prog, target, settings)
   except SymexUnsupportedOpError as e:
     # Phase 15 F6: an unmodeled float op (classify/copySign/nextafter/any
-    # unmodeled math.<name>) -> sxUnknown + feUnsupportedOp (Invariant 3:
-    # a classified error, never a silent UNSAT). The op name rides in `msg`.
+    # unmodeled math.<name>) -> sxUnknown + a classified error (Invariant 3:
+    # never a silent UNSAT). The op name rides in `msg`. RFC-0005 S6b: the
+    # kind is `feUnsupportedOpAborted` (§3.3's boundary-abort class,
+    # dcNoAnswer), split off `feUnsupportedOp`'s in-walk substitutions.
     RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: feUnsupportedOp,
+              errors: @[SymexErrorInfo(kind: feUnsupportedOpAborted,
                                        severity: sevError, msg: e.msg)])
   except SymexUnsupportedStringOpError as e:
     # Phase 15 Cluster S (S1): an unmodeled string op (in S1, every iekStr*) ->

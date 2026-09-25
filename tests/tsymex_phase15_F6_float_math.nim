@@ -11,7 +11,9 @@ import nelli/symex
 # Phase 16 A5 promoted classify/copySign to fully modeled (sxSat, not sxUnknown).
 # The F6 tests for classify/copySign are updated to reflect this (see below).
 # Deferred (Invariant 3 — never silent UNSAT): any unmodeled math.<name>
-# (e.g. ln/sin/nextafter) -> sxUnknown with errors[0].kind == feUnsupportedOp.
+# (e.g. ln/sin/nextafter) -> sxUnknown with errors[0].kind ==
+# feUnsupportedOpAborted (RFC-0005 S6b: the runSymex boundary abort split off
+# `feUnsupportedOp` as the dcNoAnswer sibling).
 #
 # RFC DEVIATION: the RFC's predicate table assumed std/math exposes
 # `isInf`/`isFinite`/`isNormal`/`nextafter`. Nim's std/math (2.2.x) ships
@@ -57,7 +59,7 @@ proc fClassify(x: float) =
   if classify(x) == fcNan: symexTarget("classify")
 proc fCopySign(x, y: float) =
   if copySign(x, y) == 1.0: symexTarget("copysign")
-# Deferred ops — must emit feUnsupportedOp (sxUnknown), never silent UNSAT.
+# Deferred ops — must emit feUnsupportedOpAborted (sxUnknown), never silent UNSAT.
 proc fLog(x: float) =
   if ln(x) == 0.0: symexTarget("log")            # math.ln — unmodeled transcendental
 
@@ -101,8 +103,9 @@ suite "symex Phase 15 — F6 std/math float ops + FP predicates":
     ## Phase 16 A5: copySign promoted from deferred to modeled (ite over isNegative).
     let r = symexFind(fCopySign, tLabel("copysign"))
     check r.status == sxSat
-  test "unmodeled math.ln emits feUnsupportedOp (sxUnknown)":
+  test "unmodeled math.ln emits feUnsupportedOpAborted (sxUnknown)":
+    ## RFC-0005 S6b: the boundary abort is `feUnsupportedOpAborted`.
     let r = symexFind(fLog, tLabel("log"))
     check r.status == sxUnknown
-    check r.errors[0].kind == feUnsupportedOp
+    check r.errors[0].kind == feUnsupportedOpAborted
     check r.errors[0].severity == sevError

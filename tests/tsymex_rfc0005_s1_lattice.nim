@@ -35,7 +35,18 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         # RFC-0005 S6a: the budget family.
                         beBudgetExhausted, beBudgetExhaustedAssumedBound,
                         beBudgetExhaustedPrune, beBudgetExhaustedUnmodelled,
-                        ceInlineBudgetExceeded}
+                        ceInlineBudgetExceeded,
+                        # RFC-0005 S6b: feUnsupportedOp's split, the heap/halt
+                        # sites, eeUnknownExnType and the defaulted remainder.
+                        feUnsupportedOp, feUnsupportedOpHavoc,
+                        seByteIterUnsupported, eeRaiseOutsideHandler,
+                        eeUnknownExnType, geInstantiationCapped,
+                        geDistinctBarrier, heDepthExhausted, heUnsafeCast,
+                        hePtrArith, heNewFieldZeroUnsupported,
+                        feOpaqueCallUnmodelled, feEnumOrdinalUnresolved,
+                        feGlobalReadUnmodelled, seVariantFieldOnDeclinedCtor,
+                        feUnsupportedStmtKind, weRecursionCycleCut,
+                        eeHandlerReraiseUnmodelled, weBreakOutsideLoop}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:
@@ -75,8 +86,13 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
 
   test "runTaintOf derives the run coordinate from drained errors: only sevError contributes (§2.2 severity rule)":
     check runTaintOf(newSeq[SymexErrorInfo]()) == clean
-    check runTaintOf(@[SymexErrorInfo(kind: eeUnknownExnType, severity: sevWarning, msg: "w"),
+    check runTaintOf(@[SymexErrorInfo(kind: geDistinctBijectivitySkipped, severity: sevWarning, msg: "w"),
                        SymexErrorInfo(kind: hePtrFamily, severity: sevHint, msg: "h")]) == clean
+    # RFC-0005 S6b: the one carve-out -- `eeUnknownExnType` stays sevWarning
+    # (its reporting contract) but its guessed routing is a substitution, so
+    # it contributes its class's run coordinate (`taintsRun`).
+    check runTaintOf(@[SymexErrorInfo(kind: eeUnknownExnType, severity: sevWarning, msg: "w")]) ==
+      runTaint(classOf(eeUnknownExnType))
     check runTaintOf(@[SymexErrorInfo(kind: heUnresolvedRef, severity: sevError, msg: "e")]) ==
       runTaint(classOf(heUnresolvedRef))
     # Union over entries -- the join, not the last writer.

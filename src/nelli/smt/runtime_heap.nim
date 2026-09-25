@@ -775,10 +775,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # materialised above (each iteration can independently degrade via
           # `allocateSym`; `loweringDidDegrade` is idempotent to drain once
           # after the loop, since nothing resets it between iterations).
-          let cpB = drainPendingLowerEffects(cpA)
+          # RFC-0005 S6b: the arm fold runs BEFORE the drain, so a merge
+          # degrade inside `iteSV` (a direct call, no `lower()` wrapper)
+          # lands on this path too, not on whichever path lowers next.
           var bound = armSelects[armSelects.len - 1][1]
           for k in countdown(armSelects.len - 2, 0):
             bound = iteSV(discEq(int64(armSelects[k][0])), armSelects[k][1], bound)
+          let cpB = drainPendingLowerEffects(cpA)
           var newEnv = cpB.env
           newEnv[stmt.dRetName] = bound
           # ADR-0013 D5: witness markers. Record the observed disc (so the witness

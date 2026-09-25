@@ -802,7 +802,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## into the k-unroll survivor (dcFabricated), `beBudgetExhaustedPrune`
     ## (dcOmitted) and `beBudgetExhaustedUnmodelled` (dcSubstituted)).
     ## 143->144.
-    check symexWalkerVersion == "144"
+    ## RFC-0005 S6b (`feUnsupportedOp` split into the fresh-symbol
+    ## `feUnsupportedOpHavoc` and the boundary `feUnsupportedOpAborted`;
+    ## halts dcOmitted; `heNewFieldZeroUnsupported` dcFreshSymbol;
+    ## `eeUnknownExnType` taints). 144->145.
+    check symexWalkerVersion == "145"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

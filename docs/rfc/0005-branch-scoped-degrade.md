@@ -78,7 +78,7 @@ state = "done"
 [[slice]]
 id    = "S6"
 title = "Classify heap/halt sites + beBudgetExhausted/feUnsupportedOp splits"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S7"

@@ -211,9 +211,10 @@ suite "symex Phase 15 — F8 F-cluster regression smoke + round-trip":
   test "walker version is \"9\" (F8 4->5; S11 5->6; E7 6->7; G10 7->8; Cluster-C C6 8->9; R12 9->10; CR-2 10->11)":
     check parseInt(symexWalkerVersion) >= 9
 
-  test "intentionally-broken SUT: ln(x) yields sxUnknown with ONLY feUnsupportedOp":
+  test "intentionally-broken SUT: ln(x) yields sxUnknown with ONLY feUnsupportedOpAborted":
+    ## RFC-0005 S6b: the runSymex boundary abort is `feUnsupportedOpAborted`.
     let r = symexFind(sBroken, tLabel("broken"))
     check r.status == sxUnknown
     check r.errors.len > 0                       # no silent empty-errors sxUnknown
     for e in r.errors:
-      check e.kind == feUnsupportedOp            # feUnsupportedOp is the only kind
+      check e.kind == feUnsupportedOpAborted     # the boundary abort is the only kind

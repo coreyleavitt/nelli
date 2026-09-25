@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~10:20)
+## Current position (refreshed 2026-09-25 ~10:50)
 
 - **Slices done:** 8 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -32,7 +32,7 @@
   the Windows legs; until answered, gating is local sweep-diff only.
 - **In flight:** S5 (upgraded to **opus**: S4 proved classification slices hide
   false-UNSAT hazards -- the shared-name placeholder). Uncommitted; its gate
-  sweep `scratchpad/s5-sweep.log` is running (~51/500 at 10:20).
+  sweep `scratchpad/s5-sweep.log` is running (~376/503 at 10:50, no failures so far).
 - **Remaining:** S5, S6, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.

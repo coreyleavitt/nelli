@@ -13,7 +13,8 @@
   <paths>`; never `git add -A`.
 - **Baseline:** sha-pinned sweep of `6cbfe8f` in a scratch worktree →
   `scratchpad/baseline-6cbfe8f.log` (gate every semantics-bearing slice with
-  `scripts/sweep-diff.sh` against it).
+  `scripts/sweep-diff.sh` against it). **Recorded 2026-09-25: pass=489 fail=0 skip=7
+  total=496, drift 0, warn_total=7437** (c backend, -j 3, 900s timeout).
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 

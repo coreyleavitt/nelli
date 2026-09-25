@@ -248,14 +248,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let loSV = lower(env, e.strArgs[1], intProto)
     let hiSV = lower(env, e.strArgs[2], intProto)
     if loSV.kind != svInt or hiSV.kind != svInt:
-      loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
-        severity: sevError,
-        msg: "iekStrSubstr: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
+      lowerDegrade(seUnsupportedStringOp,
+        "iekStrSubstr: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
              plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would bv2int-" &
              "bridge into Sequence theory, a Z3 non-termination shape " &
              "(CR-17 class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
-      loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       return allocateSym(tString(), "__strSubstrBoundDegrade", fresh)
     let lo = loSV.zi

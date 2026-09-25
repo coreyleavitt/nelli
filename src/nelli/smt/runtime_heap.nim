@@ -326,21 +326,21 @@ proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
   ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
   ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
   ## at every fork via H1), then test it against the effective limit. On
-  ## exhaustion: mark the path uncertain, record a classified `heDepthExhausted`
-  ## (sevError) into the run sink, signal `w.sawUnknown`, and return `true` so the
+  ## exhaustion: record a classified `heDepthExhausted` (sevError) into the
+  ## heap-depth sink via `degrade` (RFC-0005 S1), and return `true` so the
   ## caller HALTS this path (binds nothing, contributes no survivor → sxUnknown).
   ## Otherwise return `false` and the deref/store proceeds normally. Per-path: a
   ## shallower path's deref does not exhaust and continues.
   inc p.heapDepth
   let limit = effectiveHeapDepthLimit(w.settings)
   if limit > 0 and p.heapDepth >= limit:
-    p.uncertain = true
-    let depthErr = SymexErrorInfo(
-      kind: heDepthExhausted, severity: sevError,
-      msg: "heap depth budget of " & $limit & " exceeded")
-    heapDepthErrors.add depthErr    # threadvar: kept for compatibility
-    w.heapDepthErrors.add depthErr  # CR-9 Stage 5: LIVE WalkCtx field
-    w.sawUnknown = true
+    # RFC-0005 S1: a HALT site — the caller drops `p` (no survivor), so the
+    # former `p.uncertain = true` mutation carried nothing anywhere and is
+    # gone; the token is discarded. `dsHeapDepth` writes the threadvar +
+    # LIVE WalkCtx field exactly as the two hand-written adds did, and the
+    # run act is derived at drain from that entry (was `w.sawUnknown`).
+    discard w.degrade(heDepthExhausted,
+      "heap depth budget of " & $limit & " exceeded", dsHeapDepth)
     return true
   false
 
@@ -427,15 +427,28 @@ proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
     clause = clause or armEqClauses[k]
   some(clause)
 
+proc heapArmDegrade(kind: SymexErrorKind; msg: string): Degrade =
+  ## RFC-0005 S1. The `walkHeapArm` decline arms' funnel: records through
+  ## `allocDegrade` (the lowering sink `loweringDegradeErrors` these sites
+  ## have always used — the sink distinction survives; `w.degrade` would move
+  ## them to the walk sink) AND returns the kind's `Degrade` token, which the
+  ## caller hands to `degradeHeapArmForPath` for every surviving path. The
+  ## pending lowering taint `allocDegrade` joins is deliberately left pending
+  ## (drained by the next `drainPendingLowerEffects`, exactly as the old
+  ## `loweringDidDegrade` flag was) so S1 moves no verdict.
+  allocDegrade(kind, msg)
+  Degrade(path: pathTaint(classOf(kind)))
+
 proc degradeHeapArmForPath(p: Path, elemTy: IRType, retName,
-                            placeholderTag: string): Path =
+                            placeholderTag: string; d: Degrade): Path =
   ## Round-6 mechanical-debt slice: the shared per-path FORK half of the
   ## `allocDegrade` + fresh `allocateSym` + env-rebind + `forkPathTainted`
   ## idiom `walkHeapArm`'s READ-side `refSV.kind`-mismatch/multi-variant-
   ## pointee decline arms repeat (deref read, arm-field read, ref-to-multi-
   ## variant field read — each independently converted off a raw raise at
   ## walker v113/v113). The caller has ALREADY recorded the degrade via
-  ## `allocDegrade(kind, msg)` at whatever granularity its own site calls
+  ## `allocDegrade(kind, msg)` (RFC-0005 S1: via `heapArmDegrade`, whose
+  ## returned token is `d`) at whatever granularity its own site calls
   ## for (once, statement-scoped, before the per-path loop for a decline
   ## that depends only on the statement's static type; or per-path, inside
   ## the loop, for a decline that depends on a per-path `lower()` result) —
@@ -453,16 +466,17 @@ proc degradeHeapArmForPath(p: Path, elemTy: IRType, retName,
   let placeholder = allocateSym(elemTy, placeholderTag, freshPc)
   var newEnv = p.env
   newEnv[retName] = placeholder
-  forkPathTainted(p, p.pc, newEnv)
+  forkPathTainted(p, p.pc, newEnv, d)
 
-proc degradeHeapArmForPath(p: Path): Path =
+proc degradeHeapArmForPath(p: Path; d: Degrade): Path =
   ## WRITE-side sibling of the 4-arg overload above: a write statement has
   ## no `dRetName`/`dwRetName` to bind, so the shared shape degenerates to
   ## "taint this path and DROP the write" — the pre-write env/heap carries
   ## forward unchanged (mirrors `isUnsupported`'s own walk-arm idiom for an
   ## unmodeled statement). Same "caller already called `allocDegrade`"
-  ## contract as the read-side overload.
-  forkPathTainted(p, p.pc, p.env)
+  ## contract as the read-side overload (RFC-0005 S1: `d` is the token
+  ## `heapArmDegrade` returned).
+  forkPathTainted(p, p.pc, p.env, d)
 
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
@@ -529,14 +543,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # sort so downstream statements that reference the bound name (an
       # `if`/comparison consuming the "read" value) do not crash on a
       # missing env key.
-      allocDegrade(heRefVariantUnsupported,
+      let d = heapArmDegrade(heRefVariantUnsupported,
         "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
         $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
         survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
-          "__heapMultiVariantUnsupported")
+          "__heapMultiVariantUnsupported", d)
       return survivors
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
@@ -602,10 +616,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # `stmt.dRetName` to a fresh placeholder of the field's type so
             # no downstream statement key-faults, and move on — the OTHER
             # paths in `paths` are untouched.
-            allocDegrade(heUnresolvedRef,
+            let d = heapArmDegrade(heUnresolvedRef,
               "arm-field deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
             survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
-              "__armFieldReadUnresolvedRef")
+              "__armFieldReadUnresolvedRef", d)
             continue
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
@@ -797,11 +811,11 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # path only, bind `stmt.dRetName` to a fresh placeholder of the
           # field/pointee's own type so no downstream statement key-faults,
           # and move on to the next path.
-          allocDegrade(heUnresolvedRef,
+          let d = heapArmDegrade(heUnresolvedRef,
             "deref of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
             " (Cluster R R1 expects an svRef/svPtr at the deref site)")
           survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
-            "__derefReadUnresolvedRef")
+            "__derefReadUnresolvedRef", d)
           continue
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
@@ -987,16 +1001,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # (seq/table/set/array/variant/distinct/uninterp) — taint-and-
             # continue (mirrors the `isUnsupported` walk arm exactly) rather
             # than leaving the field's heap cell silently unconstrained.
-            child.uncertain = true
-            w.sawUnknown = true
-            let zeroErr = SymexErrorInfo(kind: heNewFieldZeroUnsupported,
-              severity: sevError,
-              msg: "new " & $stmt.nRefTy & ": field `" & fname &
+            # RFC-0005 S1: the one mutation-shaped site — `child` is this
+            # statement's own fresh fork, so the token is joined in place
+            # (`taintInPlace`), not re-forked. `dsNewFieldZero` keeps the
+            # threadvar + LIVE WalkCtx dual store.
+            taintInPlace(child, w.degrade(heNewFieldZeroUnsupported,
+              "new " & $stmt.nRefTy & ": field `" & fname &
                    "` of type " & $fty.kind & " has no clean zero-value " &
                    "encoding — isNew zero-write skipped for this field " &
-                   "(SND-1 taint)")
-            newFieldZeroErrors.add zeroErr   # threadvar: fallback
-            w.newFieldZeroErrors.add zeroErr # CR-9-style LIVE WalkCtx field
+                   "(SND-1 taint)", dsNewFieldZero))
             continue
           let fieldKey = fieldHeapKey(pointee, fname)
           var fheap: Z3AnyAst
@@ -1072,13 +1085,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # PRE-write env/heap unchanged — the write is simply DROPPED (mirrors
       # the `isUnsupported` walk arm's own "SND-1: an unmodeled statement
       # dropped its mutation" idiom, `runtime.nim`), never silently applied.
-      allocDegrade(heRefVariantUnsupported,
+      let d = heapArmDegrade(heRefVariantUnsupported,
         "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
         "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        survivors.add degradeHeapArmForPath(p)
+        survivors.add degradeHeapArmForPath(p, d)
       return survivors
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
@@ -1126,9 +1139,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # conversion above and `isUnsupported`'s own idiom exactly: taint
             # this path and DROP the write (the pre-write env/heap carries
             # forward unchanged) rather than raising.
-            allocDegrade(heUnresolvedRef,
+            let d = heapArmDegrade(heUnresolvedRef,
               "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
-            survivors.add degradeHeapArmForPath(p)
+            survivors.add degradeHeapArmForPath(p, d)
             continue
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
@@ -1305,10 +1318,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # `sxSat`. A write has no `dwRetName` to bind — taint this path and
           # DROP the write (pre-write env/heap unchanged), mirroring
           # `isUnsupported`'s own idiom.
-          allocDegrade(heUnresolvedRef,
+          let d = heapArmDegrade(heUnresolvedRef,
             "deref-write through non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind) &
             " (Cluster R R4 expects an svRef/svPtr at the write site)")
-          survivors.add degradeHeapArmForPath(p)
+          survivors.add degradeHeapArmForPath(p, d)
           continue
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).

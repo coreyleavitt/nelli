@@ -740,5 +740,10 @@ task test, "Run the test suite":
             # (flips sxUnsat at S4) plus the cap-veto and closure-veto
             # companions (each a clean-path witness discarded by a blanket
             # veto, flips sxSat at S9). No product code; no walker bump.
-            "tsymex_rfc0005_s0_exhibit"]:
+            "tsymex_rfc0005_s0_exhibit",
+            # RFC-0005 S1: the channel lattice, the Path.taint carrier, the
+            # degrade() funnel + Degrade token, RawResult.pathTaint, the
+            # .taint/.runTaint writer grep-pin and the lowering pending-taint
+            # leak pin. All-⊤ classOf default: no verdict change, no bump.
+            "tsymex_rfc0005_s1_lattice"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

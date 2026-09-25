@@ -1791,6 +1791,39 @@ type
     severity*: SymexErrorSeverity
     msg*:      string
 
+  # ---- RFC-0005 S1: soundness channels (§2.1) ------------------------------
+  # Declared HERE, in `smt/types.nim` (which imports no z3), so the lattice is
+  # Z3-free: RFC-0005 §8.2 -- RFC-0007's trace engine shares it.
+  SoundnessChannel* = enum
+    ## RFC-0005 §2.1. The two structurally opposite ways the walker can be
+    ## wrong about a program, named for the FAILURE MODE they license rather
+    ## than the approximation direction (so the verdict rule reads
+    ## `scSpurious notin winnerTaint` / `scIncomplete notin runTaint`).
+    scSpurious    ## over-approximating: modelled ⊇ real. A witness on such a
+                  ## path may be spurious. Blocks sxSat for THIS path.
+    scIncomplete  ## under-approximating: modelled ⊆ real. A proof over such a
+                  ## run may have missed behaviours. Blocks sxUnsat RUN-WIDE.
+
+  Taint* = set[SoundnessChannel]
+    ## RFC-0005 §2.1. The powerset lattice on two elements: `⊥ = {}` (clean,
+    ## the identity of join), `⊤ = {scSpurious, scIncomplete}` (the
+    ## incomparable/"wrong, not merely coarse" class of §0.2); join is set
+    ## union. Carried per PATH (`Path.taint`, written at degrade sites) and
+    ## per RUN (`WalkCtx.runTaint`, DERIVED at drain from the error seqs --
+    ## §2.2 "The run coordinate is derived, not written").
+
+  DegradeClass* = enum
+    ## RFC-0005 §2.2. What a degrade site SUBSTITUTES, named -- the five
+    ## meaningful points of the four-coordinate (path, run) product. A
+    ## `classOf` row is a reviewable judgment ("kind K is dcFabricated"),
+    ## and the coordinates are derived once, in `pathTaint`/`runTaint`.
+    dcFreshSymbol   ## substitutes a fresh unconstrained symbol: modelled ⊇ real
+    dcSubstituted   ## forced value / stale env: modelled neither ⊇ nor ⊆ real
+    dcFabricated    ## the survivor path is fiction, but the omission is real:
+                    ## ⊤ on the path, {scIncomplete} on the run (k-unroll survivor)
+    dcOmitted       ## path drop / halt / prune: modelled ⊆ real
+    dcNoAnswer      ## Z3 unknown / walker fault: no modelled program exists
+
   SymexProgram* = object
     ## Defined here (after `SymexErrorInfo`) so `parseErrors` can name it;
     ## the other fields' types (`IRParam`/`IRStmt`/`ProcSig`) are declared in
@@ -2229,6 +2262,127 @@ type
     inlinePolicy*: InlinePolicy = ipHybrid
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
+
+# ---- RFC-0005 S1: the channel algebra (§2.2) -------------------------------
+
+func classOf*(k: SymexErrorKind): DegradeClass =
+  ## RFC-0005 §2.2 / §3.4. THE exhaustive classification -- one word per
+  ## kind, and deliberately NO `else` arm: a new `SymexErrorKind` member is a
+  ## compile error here until someone writes its row.
+  ##
+  ## RFC-0005 S1 DEFAULT: every kind maps to `dcNoAnswer` (⊤ on both
+  ## coordinates). That is the conservative choice by construction -- ⊤
+  ## blocks sxSat on the path and sxUnsat on the run, which is exactly
+  ## today's "any degrade forces sxUnknown" behaviour, so the carrier and the
+  ## verdict rule can land as behaviour-preserving refactors (RFC §5
+  ## sequencing decision 1). An unaudited kind is therefore never wrong in
+  ## the unsound direction. Slices S4-S6 reclassify one funnel at a time,
+  ## each flipping only its own pins under its own walker bump.
+  ##
+  ## STANDING RULE (RFC-0005 §3.2), which no mechanism can check: reusing an
+  ## EXISTING kind at a NEW emission site asserts that the new site shares
+  ## that kind's substitution class. If it does not, split the kind
+  ## (tail-append one sibling for the minority funnel) -- never add a
+  ## per-site class parameter.
+  case k
+  of ekZ3Error: dcNoAnswer
+  of ekZ3MemoryError: dcNoAnswer
+  of ekZ3InternalError: dcNoAnswer
+  of ekZ3SolverError: dcNoAnswer
+  of feUnsupportedOp: dcNoAnswer
+  of feExtractionFailed: dcNoAnswer
+  of feConvDomainExcluded: dcNoAnswer
+  of seUnsupportedStringOp: dcNoAnswer
+  of seUnsupportedRegex: dcNoAnswer
+  of seZ3StringIncomplete: dcNoAnswer
+  of seZ3VersionMissing: dcNoAnswer
+  of seBytesSymbolicLength: dcNoAnswer
+  of seBytesLengthTooLarge: dcNoAnswer
+  of seByteIndexUnsupported: dcNoAnswer
+  of seByteIterUnsupported: dcNoAnswer
+  of seUnsupportedTableValType: dcNoAnswer
+  of seUnsupportedSetCharInterop: dcNoAnswer
+  of seNestedSeqUnsupported: dcNoAnswer
+  of seParseIntPreE: dcNoAnswer
+  of eeUninterpRefExtraction: dcNoAnswer
+  of eeRaiseUnimplemented: dcNoAnswer
+  of eeTryUnimplemented: dcNoAnswer
+  of eeRaiseOutsideHandler: dcNoAnswer
+  of eeNotInHandler: dcNoAnswer
+  of eeUnknownExnType: dcNoAnswer
+  of geInstantiationCapped: dcNoAnswer
+  of geConceptViolation: dcNoAnswer
+  of geUnresolvedGeneric: dcNoAnswer
+  of geDistinctBijectivitySkipped: dcNoAnswer
+  of geDistinctBarrier: dcNoAnswer
+  of ceNotImplemented: dcNoAnswer
+  of ceUnsupportedCapture: dcNoAnswer
+  of ceUnsupportedHof: dcNoAnswer
+  of ceClosureUnknownCallee: dcNoAnswer
+  of ceInlineBudgetExceeded: dcNoAnswer
+  of heDepthExhausted: dcNoAnswer
+  of heUnsafeCast: dcNoAnswer
+  of hePtrArith: dcNoAnswer
+  of hePtrFamily: dcNoAnswer
+  of heFreshnessCapExceeded: dcNoAnswer
+  of heUnsupportedVarRef: dcNoAnswer
+  of heRefVariantUnsupported: dcNoAnswer
+  of heUnsupportedOwnership: dcNoAnswer
+  of heUnresolvedRef: dcNoAnswer
+  of geVtableDispatch: dcNoAnswer
+  of ceClosureBodyUncertain: dcNoAnswer
+  of weInternalWalkerFault: dcNoAnswer
+  of beBudgetExhausted: dcNoAnswer
+  of feUnsupportedExprKind: dcNoAnswer
+  of feUnsupportedParamType: dcNoAnswer
+  of feUnsupportedWitnessType: dcNoAnswer
+  of heNewFieldZeroUnsupported: dcNoAnswer
+  of seUnsupportedTableKeyType: dcNoAnswer
+  of seUnsupportedCompoundSortLeaf: dcNoAnswer
+  of beBudgetExhaustedAssumedBound: dcNoAnswer
+  of feOpaqueCallUnmodelled: dcNoAnswer
+  of feEnumOrdinalUnresolved: dcNoAnswer
+  of feTransparentArgNotInert: dcNoAnswer
+  of feTransparentResultUsed: dcNoAnswer
+  of feGlobalReadUnmodelled: dcNoAnswer
+  of seVariantFieldOnDeclinedCtor: dcNoAnswer
+
+func pathTaint*(c: DegradeClass): Taint =
+  ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
+  ## surviving path's `taint`. Consumed by the SAT rule (`scSpurious`); the
+  ## path's `scIncomplete` bit is inert by design (§2.1: uniformity is worth
+  ## two idle bits). Its codomain is `{}`, `{scSpurious}` or ⊤ -- closed under
+  ## union, so no path ever carries `{scIncomplete}` alone (§2.6).
+  case c
+  of dcFreshSymbol:                            {scSpurious}
+  of dcSubstituted, dcFabricated, dcNoAnswer:  {scSpurious, scIncomplete}
+  of dcOmitted:                                {}
+
+func runTaint*(c: DegradeClass): Taint =
+  ## RFC-0005 §2.2. The RUN coordinate a drained `sevError` of class `c`
+  ## contributes to `runTaint` at drain time. Consumed by the UNSAT rule
+  ## (`scIncomplete`); the run's `scSpurious` bit is diagnostics-only (§8.1).
+  case c
+  of dcFreshSymbol:                            {scSpurious}
+  of dcSubstituted, dcNoAnswer:                {scSpurious, scIncomplete}
+  of dcFabricated, dcOmitted:                  {scIncomplete}
+
+func channels*(k: SymexErrorKind): tuple[path, run: Taint] =
+  ## RFC-0005 §2.2 convenience: both coordinates of kind `k`'s class.
+  (pathTaint(classOf(k)), runTaint(classOf(k)))
+
+func runTaintOf*(errors: openArray[SymexErrorInfo]): Taint =
+  ## RFC-0005 §2.2 "The run coordinate is derived, not written". The union of
+  ## `runTaint(classOf(e.kind))` over every `sevError` entry in `errors`.
+  ## SEVERITY RULE: `sevWarning`/`sevHint` entries never taint (Invariant 7:
+  ## they do not force sxUnknown today either). `runSymexImpl` applies this to
+  ## the drained sinks (`exnWarnings` ∪ `prog.parseErrors` ∪ `closureErrs`)
+  ## to produce `WalkCtx.runTaint`; S1b's correspondence pin and S11's
+  ## `checkUnsatOverTaintOnly` read the SAME function, so recording and
+  ## classification have one source of truth.
+  for e in errors:
+    if e.severity == sevError:
+      result = result + runTaint(classOf(e.kind))
 
 # ---- Constructors -----------------------------------------------------------
 #

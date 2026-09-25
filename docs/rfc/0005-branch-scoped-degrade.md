@@ -43,7 +43,7 @@ state = "done"
 [[slice]]
 id    = "S1"
 title = "Lattice + DegradeClass + classOf (conservative dcNoAnswer default) + carrier + degrade() funnel"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S1b"

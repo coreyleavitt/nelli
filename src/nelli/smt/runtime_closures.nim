@@ -114,13 +114,11 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
         # own totality work established -- "the fallback's content need
         # not be trustworthy, only type-correct enough that a downstream
         # consumer does not crash").
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: feUnsupportedOp, severity: sevError,
-          msg: "closure/lambda return type kind " & $e.lambdaRetTy.kind &
+        lowerDegrade(feUnsupportedOp,
+          "closure/lambda return type kind " & $e.lambdaRetTy.kind &
                " flattens to " & $rangeSorts.len &
                " Z3 leaves — only a single-leaf scalar closure return " &
                "type is modeled (feUnsupportedOp)")
-        loweringDidDegrade = true
         mkBoolSort(ctx).raw
     let fname = "closure@" & $e.lambdaSite.siteHash & "/" &
                 $e.lambdaSite.declOrder

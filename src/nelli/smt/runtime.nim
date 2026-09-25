@@ -476,10 +476,17 @@ type
       ## is unchanged for every non-closure path; `forkPath` inherits the field so
       ## the named-proc return-merge propagates it to the caller for free.
     env:       Env
-    uncertain: bool   ## true once any call along this path has bailed
-                      ## (maxCallDepth exceeded). A target hit on an
-                      ## uncertain path can't be reported as a sound
-                      ## witness — it degrades to sxUnknown.
+    taint: Taint      ## RFC-0005 S1 (was SND-1's `uncertain: bool`). The
+                      ## soundness channels this path has picked up from a
+                      ## degrade (a bailed call, an unmodelled statement, an
+                      ## in-band lowering decline, ...). WRITTEN only through
+                      ## the sanctioned primitives -- `forkPath` (propagate),
+                      ## `forkPathTainted` (join a `Degrade` token),
+                      ## `forkPathMerged` (return-merge union),
+                      ## `taintInPlace` -- and pinned by the writer grep-pin
+                      ## (`tests/tsymex_rfc0005_s1_lattice.nim`). S1 reads it
+                      ## only as `taint != {}` (any channel ⇒ today's
+                      ## "uncertain"); S1c re-derives the reads per channel.
     # ---- Phase 15 H1: logical-heap state (ADR-0010) ----
     # These three fields are PURE SCAFFOLDING for Cluster R. They are
     # empty/zero on every path today and the walker never reads or writes
@@ -507,6 +514,29 @@ type
       ## Phase 15 R2. Count of fresh-ref distinctness inequalities already
       ## emitted on this path; compared against `settings.maxFreshnessAssertions`
       ## (the cap). Threaded by value at every fork like `heapDepth`.
+
+  Degrade = object
+    ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
+    ## degrade site obtains from `degrade(w, kind, msg)` (or `lowerDegrade`'s
+    ## pending-taint drain) and hands to `forkPathTainted`/`taintInPlace`. It
+    ## carries ONLY the path coordinate `pathTaint(classOf(kind))` of the one
+    ## kind mention that also recorded the `SymexErrorInfo` -- so recording
+    ## and classification cannot disagree, and one token serves every
+    ## survivor of a one-error-many-survivors site. The run coordinate is not
+    ## in it: `WalkCtx.runTaint` is DERIVED at drain from the recorded errors.
+    ## Construct a `Degrade(...)` ONLY inside the sanctioned funnels (pinned by
+    ## the writer grep-pin); a site never builds one by hand.
+    path: Taint
+
+  DegradeSink = enum
+    ## RFC-0005 S1. Which existing error sink `degrade()` records into. The
+    ## sinks predate the funnel and are drained separately at verdict
+    ## assembly (dedup is per sink), so the funnel must preserve each site's
+    ## sink rather than collapse them into `walkDegradeErrors`.
+    dsWalk          ## `w.walkDegradeErrors` (the default)
+    dsHeapDepth     ## `heapDepthErrors` threadvar + `w.heapDepthErrors`
+    dsNewFieldZero  ## `newFieldZeroErrors` threadvar + `w.newFieldZeroErrors`
+    dsClosure       ## `currentClosureCallErrors` threadvar + `w.closureCallErrors`
 
   RawWitness = object
     paramOrder: seq[string]
@@ -553,6 +583,12 @@ type
       ## by the reduction. Typed into `DefectFinding[T]` by the `symexFind`
       ## macro. Empty for sxUnsat/sxUnknown; also empty when the winner is
       ## the only sxRaised in w.found.
+    pathTaint*:    Taint
+      ## RFC-0005 S1 (§2.3). The taint of the path that produced this
+      ## finding, recorded at TARGET-HIT time (`isTargetLabel`'s sxSat,
+      ## `routeRaise`'s sxRaised) because the winning path is not otherwise
+      ## available at verdict time. Always `{}` in S1 (both hit sites solve
+      ## only untainted paths today); S1c's candidate pool is its consumer.
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -630,27 +666,24 @@ proc deepCopyHeapState(src: Path):
   # isolation that gives disjoint-path counter restart for free.
   result.liveRefs = src.liveRefs
 
-template forkPathWithTaint(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
-                           uncExpr: bool): Path =
-  ## Phase 15 H1 / R3 hardening: construct a CHILD `Path` from `parent`,
-  ## deep-copying the logical-heap state (heaps / heapDepth / allocCounters)
-  ## so the fork is isolated — the single enforcement point for the
-  ## ADR-0010 fork deep-copy contract. (The fresh ROOT path in `runSymex`
+template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
+                                taintExpr: Taint): Path =
+  ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
+  ## `parent`, deep-copying the logical-heap state (heaps / heapDepth /
+  ## allocCounters) so the fork is isolated — the single enforcement point for
+  ## the ADR-0010 fork deep-copy contract. (The fresh ROOT path in `runSymex`
   ## does NOT use this: it has no parent and correctly gets empty-default
   ## heap fields.)
   ##
-  ## This is the shared INTERNAL body. It is deliberately NOT the spelling
-  ## ordinary fork sites use: `uncExpr` is a bare `bool`, so a call here can
-  ## silently pass `false`/forget the parent's taint. Ordinary fork sites in
-  ## `walk` MUST go through one of the two public wrappers below instead —
-  ## `forkPath` (implicit PROPAGATE) or `forkPathTainted` (explicit FORCE) —
-  ## which make "drop the taint" unspellable. Call this internal template
-  ## directly ONLY when a site needs a taint value that is neither a bare
-  ## propagate nor a bare force (e.g. the isReturn return-merge site, which
-  ## ORs the caller's and callee's `uncertain` together); such sites are rare
-  ## and each must carry a comment explaining why.
+  ## PRIMITIVE — NOT FOR SITES. `taintExpr` is a bare `Taint`, so a call here
+  ## can silently pass `{}` and drop the parent's taint. Only the three
+  ## sanctioned wrappers immediately below call it, and each makes "drop the
+  ## taint" unspellable: `forkPath` (propagate), `forkPathTainted` (join a
+  ## `Degrade` token), `forkPathMerged` (the isReturn return-merge union).
+  ## The writer grep-pin (`tests/tsymex_rfc0005_s1_lattice.nim`) fails if
+  ## any other routine calls it.
   let hs = deepCopyHeapState(parent)
-  Path(pc: pcExpr, env: envExpr, uncertain: uncExpr,
+  Path(pc: pcExpr, env: envExpr, taint: taintExpr,
        defectSurvivorPc: parent.defectSurvivorPc,        ## Phase 16 ADR-0012
        heaps: hs.heaps, heapDepth: parent.heapDepth,
        allocCounters: hs.allocCounters,
@@ -659,22 +692,41 @@ template forkPathWithTaint(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
-  ## CHILD `Path` from `parent`. Implicitly PROPAGATES `parent.uncertain`
-  ## (SND-1's per-path soundness taint) to the child — there is no bool
-  ## parameter to silently drop or forget, so a future fork site can no
-  ## longer accidentally lose the taint the way a bare 4th-arg bool could.
+  ## CHILD `Path` from `parent`. Implicitly PROPAGATES `parent.taint`
+  ## (RFC-0005's per-path soundness channels, formerly SND-1's `uncertain`)
+  ## to the child — there is no taint parameter to silently drop or forget.
   ## Use `forkPathTainted` at sites that deliberately INTRODUCE taint.
-  forkPathWithTaint(parent, pcExpr, envExpr, parent.uncertain)
+  forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint)
 
-template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
-  ## R3 hardening: the explicit-FORCE counterpart to `forkPath`. Sets the
-  ## child's `uncertain = true` unconditionally, regardless of the parent's
-  ## taint — for the small set of sites that deliberately introduce SND-1/
-  ## SND-3 taint (an opaque call, a maxCallDepth/maxLoopUnwind/instantiation-
-  ## cap bail, a recursion-cycle bail, an unmodeled-statement drop, or an
-  ## in-band lowering-degrade). Self-documenting at the call site: no
-  ## `.uncertain` field read to misread or omit.
-  forkPathWithTaint(parent, pcExpr, envExpr, true)
+template forkPathTainted(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
+                         d: Degrade): Path =
+  ## R3 hardening / RFC-0005 S1: the explicit-INTRODUCE counterpart to
+  ## `forkPath`. The child's taint is the JOIN `parent.taint + d.path` —
+  ## never a replacement — where `d` is the token `degrade(w, kind, msg)`
+  ## returned when it recorded the site's classified error. A site cannot
+  ## taint a path without having recorded a kind (the token is the proof),
+  ## and one token serves every survivor of a one-error-many-survivors site
+  ## (`let d = w.degrade(…)` once, then fork per survivor).
+  forkPathTaintPrimitive(parent, pcExpr, envExpr, parent.taint + d.path)
+
+template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
+                        caller: Path): Path =
+  ## RFC-0005 S1: the isReturn return-MERGE fork (was the one site that
+  ## called the internal primitive with a computed `p.uncertain or
+  ## cp.uncertain`). Forks from the returned CALLEE path `callee` (so its
+  ## exit heap state rides out), with taint `callee.taint + caller.taint`:
+  ## the post-call path is tainted by anything either side picked up. Union
+  ## replaces OR with no special case (§2.1).
+  forkPathTaintPrimitive(callee, pcExpr, envExpr, callee.taint + caller.taint)
+
+proc taintInPlace(p: Path; d: Degrade) =
+  ## RFC-0005 S1 (§2.2). The MUTATION-shaped sibling of `forkPathTainted`,
+  ## for a site that already holds its own freshly-forked child and taints it
+  ## after the fact (`runtime_heap.nim`'s `isNew` zero-write, per unmodelled
+  ## field). Joins, never replaces. A halted path needs no carrier at all
+  ## (its contribution is run-global by construction), so halt sites call
+  ## `discard w.degrade(…)` and do not come here.
+  p.taint = p.taint + d.path
 
 # ---- Phase 15 H1: exported test hooks ---------------------------------------
 # `Path` is a private `ref object`, so the H1 RED test cannot name it. These two
@@ -1095,19 +1147,23 @@ var setMembershipKeyTerms* {.threadvar.}: Table[uint, seq[Z3AnyAst]]
   ## simply miss — extraction then falls back to candidates + store-chain
   ## harvest, the pre-v65 behaviour.
 
-var loweringDidDegrade* {.threadvar.}: bool
-  ## RFC-chapulin-hardening SND-3 (walker v58, ADR-0023). Per-`lower()`-call
-  ## signal: set alongside `loweringDegradeErrors` whenever a lowering site
-  ## degrades in-band (returns a fresh unconstrained symbol) instead of
-  ## `raise`-ing. MUST NEVER be consumed via a bare `w.sawUnknown = true` at
-  ## the raise site — that alone would be UNSOUND (a fresh unconstrained bool
-  ## on the tainted path could let that path reach the target and fabricate a
-  ## false `sxSat`, trading a false `sxUnsat` for a WORSE false `sxSat` under
-  ## Invariant 3). Instead this flag is consumed EXCLUSIVELY by
-  ## `drainPendingLowerEffects` — the single choke-point every `lower()`/
-  ## `lowerBool()` call site in `walk` already drains through — which forks
-  ## the PATH's `uncertain = true` (SND-1's per-path taint) before also
-  ## setting `w.sawUnknown` via `currentWalkCtxPtr`, then resets this flag.
+var loweringPendingTaint* {.threadvar.}: Taint
+  ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
+  ## bool`, walker v58, ADR-0023). The PENDING path taint of an in-band
+  ## lowering-time degrade: joined (union) by `lowerDegrade` whenever a
+  ## lowering site degrades in-band (returns a fresh unconstrained symbol)
+  ## instead of `raise`-ing -- `pathTaint(classOf(kind))` of the recorded
+  ## kind, so recording and classification share one kind mention. Consumed
+  ## EXCLUSIVELY by `drainPendingLowerEffects` — the single choke-point every
+  ## `lower()`/`lowerBool()` call site in `walk` already drains through —
+  ## which forks the PATH with the pending taint joined in and resets this to
+  ## `{}`. It carries no RUN contribution: that is derived at verdict time
+  ## from the `loweringDegradeErrors` entry `lowerDegrade` recorded alongside
+  ## (RFC-0005 §2.2), so a pending taint that is never drained still forces
+  ## the run coordinate. The PATH half, however, can be lost (see
+  ## `runtime_heap.nim`'s N42 note: a lost `{scSpurious}` would leave a havoc
+  ## value on a clean path), so `stampLoweringPendingLeak` pins this to `{}`
+  ## at walk end (RFC-0005 §2.2 last paragraph).
   ## THE reason a lowering-time degrade must NEVER `raise`: on the C backend
   ## (goto exceptions), a raise deep inside expression lowering that unwinds
   ## through a loop's live `seq[Path]` result is SILENTLY LOST (the
@@ -1115,6 +1171,20 @@ var loweringDidDegrade* {.threadvar.}: bool
   ## guard, producing a false `sxUnsat` (c) vs. the honest `sxUnknown` (cpp,
   ## whose native exceptions propagate cleanly). In-band taint sidesteps the
   ## raise entirely, so both backends agree.
+
+proc lowerDegrade(kind: SymexErrorKind; msg: string) =
+  ## RFC-0005 S1: the LOWERING-sink sibling of `degrade(w, kind, msg)` (which
+  ## lives after `WalkCtx`). For sites with no `w: var WalkCtx`/`Path` in
+  ## scope — `lower()` and the pure helpers it calls. Performs both acts from
+  ## one kind mention: records the classified `sevError` into
+  ## `loweringDegradeErrors` (whose drained entry derives the run coordinate)
+  ## and joins `pathTaint(classOf(kind))` into `loweringPendingTaint` (which
+  ## `drainPendingLowerEffects` turns into the calling path's taint). The
+  ## token is delivered through the drain rather than returned, because the
+  ## caller has no path to fork.
+  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
+                                            msg: msg)
+  loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
 
 var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 CR-3/CR-4. Path constraints deposited by `lower(iekConvFloatToInt)`
@@ -1245,19 +1315,6 @@ proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst)
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `srt`/`nc`
   ## into `WalkCtx.statics.refSorts[typeId]`/`.nilConsts[typeId]`. No-op when
   ## no active walk (probe paths). Defined after `WalkCtx` type.
-
-proc syncAllocDegradeSawUnknown*()
-  ## N40 fwd-decl (round-6 fix round 6, walker v104). If `currentWalkCtxPtr !=
-  ## nil` (a walk is active), sets `WalkCtx.sawUnknown = true` directly. The
-  ## `allocDegrade` chokepoint's own "immediate-degrade-on-alloc" half (see its
-  ## doc comment, immediately below) — `allocateSym` (`allocDegrade`'s main
-  ## caller) is declared far above `WalkCtx`, so this mirrors the `sync*`
-  ## fwd-decl idiom already established
-  ## by CR-9 Stage 4/5/6 rather than inlining the cast at the call site.
-  ## No-op when no active walk (the pre-walk param-entry boundary no longer
-  ## reaches `allocateSym`'s degrade arms at all as of this slice, but a
-  ## defensive no-op is still correct/harmless if it ever did). Defined after
-  ## `WalkCtx`.
 
 # ----------------------------------------------------------------------------
 # CR-1c carrier-boundary table (round-6 mechanical-debt slice, item 5)
@@ -1397,10 +1454,14 @@ proc allocDegrade(kind: SymexErrorKind, msg: string) =
   ## around a walk-reachable recursive call silently ELIDES the exception on
   ## this toolchain -- ordinary control flow (no raise, no catch) is the
   ## only form proven safe.
-  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
-                                            msg: msg)
-  loweringDidDegrade = true
-  syncAllocDegradeSawUnknown()   ## fwd-declared above; body after WalkCtx.
+  ## RFC-0005 S1: effect (2) below is now DERIVED rather than written — the
+  ## `loweringDegradeErrors` entry `lowerDegrade` records is a drained
+  ## `sevError`, and `runSymexImpl` derives `w.runTaint` from exactly those
+  ## entries, so the immediate/global run mark this proc used to sync through
+  ## `currentWalkCtxPtr` (`syncAllocDegradeSawUnknown`, retired) holds by
+  ## construction the instant the error is recorded — still unconditional,
+  ## still not contingent on any drain.
+  lowerDegrade(kind, msg)
 
 proc syncDistinctSortEntry*(name: string, entry: DistinctSortEntry)
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `entry`
@@ -3729,10 +3790,8 @@ template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
   ## machinery exists to prevent. Callers build their own type-correct inert
   ## result after calling this (an `svInt`/`svSeq`/etc — the one piece that
   ## cannot be centralised, since each arm's result kind differs).
-  loweringDegradeErrors.add SymexErrorInfo(
-    kind: placeholderReadDeclineKind(recv), severity: sevError,
-    msg: placeholderReadDeclineMsg(recv, loc, what))
-  loweringDidDegrade = true
+  lowerDegrade(placeholderReadDeclineKind(recv),
+    placeholderReadDeclineMsg(recv, loc, what))
 
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
@@ -4492,10 +4551,8 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
   else:
-    loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
-      severity: sevError,
-      msg: "string ordering `" & $op & "` is not modeled until S3")
-    loweringDidDegrade = true
+    lowerDegrade(seUnsupportedStringOp,
+      "string ordering `" & $op & "` is not modeled until S3")
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), freshDegradeName("__strOrderingDegrade"), fresh)
 
@@ -4941,9 +4998,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   ## site inside `walk`) forks the path `uncertain` and sets `w.sawUnknown`
   ## regardless of nesting depth once this returns, so the verdict is
   ## `sxUnknown` at ANY nesting depth — never a silently-lost raise.
-  loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
-                                            msg: msg)
-  loweringDidDegrade = true
+  lowerDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   case e.kind
   of iekStrLen, iekStrFind, iekStrRfind, iekStrToInt, iekStrFindRe:
@@ -5085,13 +5140,11 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # soundness argument #163 slice 4's opaque-call inertness proof rests
       # on needs this to be a genuine classified decline, not an accident of
       # an escaping exception.
-      loweringDegradeErrors.add SymexErrorInfo(kind: feGlobalReadUnmodelled,
-        severity: sevError,
-        msg: "module-level global '" & e.vname & "' is read but not " &
+      lowerDegrade(feGlobalReadUnmodelled,
+        "module-level global '" & e.vname & "' is read but not " &
              "modelled by the symbolic walker -- remove it from the " &
              "reachable computation or pass it as an explicit parameter " &
              "(feGlobalReadUnmodelled)")
-      loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
       allocateSym(ty, "__globalReadHavoc_" & e.vname, fresh)
@@ -5281,11 +5334,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # `sxUnsat` with ZERO errors pre-fix; the identical shape without the
       # block was already an honest classified `sxUnknown`. In-band
       # lowering-level degrade instead, matching `degradeStrArm`'s idiom.
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "iekSeqSlice: base lowered to " & plainEnglishSymValKind(recv.kind) &
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSlice: base lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (→ sxUnknown, Invariant 3)")
-      loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBaseKindDegrade"), fresh)
     if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
@@ -5326,14 +5377,12 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # without the block was already an honest classified `sxUnknown`.
       # In-band lowering-level degrade instead, matching `degradeStrArm`'s
       # idiom (and N31's own `iekStrSubstr` CR-17 fix).
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "iekSeqSlice: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSlice: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
              plainEnglishSymValKind(hiSV.kind) & " — a bitvector-represented bound would " &
              "bv2int-bridge into the array query (ADR-0027 non-termination " &
              "class; bounds from find/len/literals prove) " &
              "(→ sxUnknown, Invariant 3)")
-      loweringDidDegrade = true
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBoundDegrade"), fresh)
     let lo = loSV.zi
@@ -5434,9 +5483,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # mechanism.
       let declineMsg = "iekSeqAdd: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (weInternalWalkerFault)"
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
-      loweringDidDegrade = true
+      lowerDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -5497,9 +5544,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # a few lines up for the full mechanism.
         let declineMsg = "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
              " (weInternalWalkerFault)"
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
-        loweringDidDegrade = true
+        lowerDegrade(weInternalWalkerFault, declineMsg)
         var fresh: seq[Z3Bool]
         return allocateSym(
           tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -5519,9 +5564,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # (above) for the full mechanism.
       let declineMsg = "iekSeqAdd: unsupported elem " & plainEnglishTypeKind(recv.seqElemTy.kind) &
              " (weInternalWalkerFault)"
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
-      loweringDidDegrade = true
+      lowerDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
@@ -5566,11 +5609,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # walk-reachable Nim mutation. In-band degrade: return `recv`
       # unchanged (an inert no-op write is a sound over-approximation once
       # the run is forced to `sxUnknown`).
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "iekTableSet: unsupported val " & $recv.tabValTy.kind &
+      lowerDegrade(feUnsupportedOp,
+        "iekTableSet: unsupported val " & $recv.tabValTy.kind &
              " (feUnsupportedOp)")
-      loweringDidDegrade = true
       return recv
   of iekTableDel:
     let recv = lower(env, e.mutRecv)
@@ -5633,9 +5674,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # parse-time itSeq gate; decline in-band rather than a raw crash.
       let declineMsg = "iekSeqDel: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
              " — expected svSeq (weInternalWalkerFault)"
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: weInternalWalkerFault, severity: sevError, msg: declineMsg)
-      loweringDidDegrade = true
+      lowerDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
@@ -5679,11 +5718,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let recv = case e.kind
       of iekSeqInsert: lower(env, e.insSeq)
       else:            lower(env, e.popSeq)
-    loweringDegradeErrors.add SymexErrorInfo(
-      kind: feUnsupportedOp, severity: sevError,
-      msg: "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
+    lowerDegrade(feUnsupportedOp,
+      "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
-    loweringDidDegrade = true
     return recv
   of iekContains:
     let recv = lower(env, e.container)
@@ -5704,12 +5741,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # guard, the same C-backend silent-loss hazard as the CR-17(a) site
       # above. See `loweringDidDegrade`'s doc comment for the full mechanism.
       if recv.setElemTy.kind != itInt or recv.setElemTy.width != 64:
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: seUnsupportedSetCharInterop, severity: sevError,
-          msg: "set[char] / HashSet membership not modeled — element type " &
+        lowerDegrade(seUnsupportedSetCharInterop,
+          "set[char] / HashSet membership not modeled — element type " &
                $recv.setElemTy & " (width " & $recv.setElemTy.width &
                " != 64) (seUnsupportedSetCharInterop)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__setContainsDegrade"), fresh)
       let bv64Proto = SymVal(kind: svBV64, signed: true,
@@ -5724,11 +5759,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       if keySV.kind == svInt:
         keySV = svIntToBV(keySV, svBV64)
       if keySV.kind != svBV64:
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: weInternalWalkerFault, severity: sevError,
-          msg: "HashSet membership key lowered to " & plainEnglishSymValKind(keySV.kind) &
+        lowerDegrade(weInternalWalkerFault,
+          "HashSet membership key lowered to " & plainEnglishSymValKind(keySV.kind) &
                " — expected svBV64 (weInternalWalkerFault)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__setKeyDegrade"), fresh)
       # v65: record the key TERM for witness extraction (see
@@ -5747,11 +5780,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # handles svTable/svSet receivers, falling through unguarded for
       # svSeq/svArray/svString. In-band degrade: mirrors the svSet arm's
       # own `__setContainsDegrade` idiom two cases above.
-      loweringDegradeErrors.add SymexErrorInfo(
-        kind: feUnsupportedOp, severity: sevError,
-        msg: "iekContains on unsupported kind " & plainEnglishSymValKind(recv.kind) &
+      lowerDegrade(feUnsupportedOp,
+        "iekContains on unsupported kind " & plainEnglishSymValKind(recv.kind) &
              " (feUnsupportedOp)")
-      loweringDidDegrade = true
       var freshContains: seq[Z3Bool]
       return allocateSym(tBool(), freshDegradeName("__containsUnsupportedDegrade"), freshContains)
   of iekArrayLit:
@@ -5825,11 +5856,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       of svBV8, svBV16, svBV32, svBV64:
         notBV(inner)
       else:
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: weInternalWalkerFault, severity: sevError,
-          msg: "uNot on unsupported operand kind " & plainEnglishSymValKind(inner.kind) &
+        lowerDegrade(weInternalWalkerFault,
+          "uNot on unsupported operand kind " & plainEnglishSymValKind(inner.kind) &
                " — expected svBool or a BV (weInternalWalkerFault)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         allocateSym(tBool(), freshDegradeName("__uNotDegrade"), fresh)
   of iekBinop:
@@ -5856,12 +5885,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # unconstrained bool so evaluation can continue soundly.
       if e.bop in {bLt, bLe, bGt, bGe} and
          (e.lhs.kind == iekStrAt or e.rhs.kind == iekStrAt):
-        loweringDegradeErrors.add SymexErrorInfo(kind: seUnsupportedStringOp,
-          severity: sevError,
-          msg: "ordering comparison on s[i] (char) is not modeled " &
+        lowerDegrade(seUnsupportedStringOp,
+          "ordering comparison on s[i] (char) is not modeled " &
                "(CR-17: String+Int+BV ordering — latent Z3 hang shape; " &
                "use == / != for char comparisons)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__strCmpOrderingDegrade"), fresh)
       let pp = probeProto(env, e)
@@ -6043,11 +6070,9 @@ proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   if sv.kind == svBool:
     sv.bo
   else:
-    loweringDegradeErrors.add SymexErrorInfo(
-      kind: weInternalWalkerFault, severity: sevError,
-      msg: "lowerBool: expected Bool, got " & plainEnglishSymValKind(sv.kind) &
+    lowerDegrade(weInternalWalkerFault,
+      "lowerBool: expected Bool, got " & plainEnglishSymValKind(sv.kind) &
            " (weInternalWalkerFault)")
-    loweringDidDegrade = true
     var fresh: seq[Z3Bool]
     allocateSym(tBool(), freshDegradeName("__lowerBoolDegrade"), fresh).bo
 
@@ -7723,7 +7748,18 @@ type
                                 ## (saves `frame`, installs a fresh empty one)
                                 ## before walking the callee body and `popFrame`s
                                 ## on return. See pushFrame/popFrame below.
-    sawUnknown: bool
+    runTaint:  Taint
+      ## RFC-0005 S1 (was `sawUnknown: bool`; `sawUnknown ≡ runTaint != {}`).
+      ## The RUN coordinate — DERIVED, never written at a degrade site: the
+      ## ONLY writer is `runSymexImpl`'s verdict assembly, which sets it to
+      ## `runTaintOf(drained errors)` (`types.nim`) joined with the
+      ## transitional `kindlessRunTaint`. `{}` for the whole walk until then.
+      ## Pinned by the writer grep-pin.
+    kindlessRunTaint: bool
+      ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). Set by
+      ## `kindlessRunDegrade` at the degrade sites that record no
+      ## `SymexErrorInfo` yet (each marked `# RFC-0005 S1b: mint kind`);
+      ## joined into `runTaint` as ⊤ at drain so S1 stays behaviour-preserving.
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
@@ -7969,12 +8005,210 @@ type
     retSym:  SymVal
     pcDelta: seq[Z3Bool]
 
-proc syncAllocDegradeSawUnknown*() =
-  ## N40 (round-6 fix round 6, walker v104). Real implementation of the
-  ## fwd-declared proc above `allocateSym`. See `allocDegrade`'s own doc
-  ## comment for the full "immediate-degrade-on-alloc" design writeup.
-  if currentWalkCtxPtr != nil:
-    cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
+             sink = dsWalk): Degrade =
+  ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). THE way a
+  ## walk-level degrade site (one with `w: var WalkCtx` in scope) records a
+  ## classified degrade and obtains its `Degrade` token:
+  ##   1. records `SymexErrorInfo(kind, sevError, msg)` into the site's
+  ##      existing sink (`sink`, default `dsWalk` = `w.walkDegradeErrors`) —
+  ##      the drain-time derivation of `w.runTaint` reads it, so the RUN act
+  ##      is performed by recording, never by a separate write;
+  ##   2. returns `Degrade(path: pathTaint(classOf(kind)))` for the PATH act:
+  ##      `forkPathTainted(p, pc, env, d)` per survivor, `taintInPlace(p, d)`
+  ##      for a mutation-shaped site, or `discard` at a HALT site (a halted
+  ##      path needs no carrier — its contribution is run-global).
+  ## One kind mention drives both acts, so recording and classification
+  ## cannot disagree. Minimum ceremony for a new degrade: tail-append the
+  ## enum member, add its `classOf` arm (the compiler forces it), call this.
+  ##
+  ## `sink` preserves the pre-RFC sink each site already used (the sinks are
+  ## drained separately and deduped per sink at verdict assembly, so moving a
+  ## site between sinks would change `RawResult.errors`). The dual-store sinks
+  ## write their threadvar fallback AND the live `WalkCtx` field, exactly as
+  ## the hand-written sites did. No-`w` lowering sites use the sibling
+  ## `lowerDegrade` instead.
+  let info = SymexErrorInfo(kind: kind, severity: sevError, msg: msg)
+  case sink
+  of dsWalk:
+    w.walkDegradeErrors.add info
+  of dsHeapDepth:
+    heapDepthErrors.add info            # threadvar: kept for compatibility
+    w.heapDepthErrors.add info          # CR-9 Stage 5: LIVE WalkCtx field
+  of dsNewFieldZero:
+    newFieldZeroErrors.add info         # threadvar: fallback
+    w.newFieldZeroErrors.add info       # CR-9-style LIVE WalkCtx field
+  of dsClosure:
+    currentClosureCallErrors.add info   # threadvar: fallback
+    w.closureCallErrors.add info        # CR-9 Stage 5: LIVE WalkCtx field
+  Degrade(path: pathTaint(classOf(kind)))
+
+proc takeLoweringPendingDegrade(): Degrade =
+  ## RFC-0005 S1. The lowering-sink half of the token discipline: converts the
+  ## pending taint `lowerDegrade` accumulated (each join already paired with a
+  ## recorded `loweringDegradeErrors` entry) into a `Degrade` token and resets
+  ## the pending taint to `{}`. Called ONLY by `drainPendingLowerEffects` and
+  ## the walk-end leak stamp.
+  result = Degrade(path: loweringPendingTaint)
+  loweringPendingTaint = {}
+
+# ---- RFC-0005 S1: TRANSITIONAL kindless shim — S1b deletes this block ------
+# RFC-0005 §2.2 "The premise 'every taint site has a kind in hand' is false":
+# a handful of degrade sites record NO `SymexErrorInfo` today, so the
+# drain-time derivation of `w.runTaint` cannot see them. Until S1b mints their
+# kinds (and routes them through `degrade`), these two primitives keep S1
+# behaviour-preserving: `kindlessRunDegrade` marks the run exactly where the
+# site used to write `w.sawUnknown = true` (joined as ⊤ at drain — the
+# conservative `dcNoAnswer` default), and `kindlessPathDegrade` supplies the
+# ⊤ token a kindless FORK site hands to `forkPathTainted`. Every call site
+# carries a `# RFC-0005 S1b: mint kind (<site>)` marker naming itself, so S1b's
+# worklist is `grep 'RFC-0005 S1b: mint kind'`. Neither is a sanctioned
+# pattern for new code: a new degrade site mints its kind and calls `degrade`.
+
+template kindlessRunDegrade(w: var WalkCtx) =
+  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). The run act of a site that
+  ## records no error; joined into `w.runTaint` as ⊤ at drain.
+  w.kindlessRunTaint = true
+
+proc kindlessPathDegrade(): Degrade =
+  ## TRANSITIONAL (RFC-0005 S1 → deleted by S1b). The ⊤ path token for a
+  ## kindless FORK site (the `dcNoAnswer` default every S1 kind gets anyway).
+  Degrade(path: {scSpurious, scIncomplete})
+
+proc stampLoweringPendingLeak(w: var WalkCtx) =
+  ## RFC-0005 S1 (§2.2 last paragraph) — the pending-taint LEAK PIN. Called
+  ## once, right after the top-level `walk` returns. `loweringPendingTaint`
+  ## must be `{}` there: every `lowerDegrade` join is meant to be folded onto
+  ## a path by `drainPendingLowerEffects`; a non-empty residue means a
+  ## lowering degrade was recorded but its PATH taint landed nowhere (the
+  ## "lost entirely" hazard `runtime_heap.nim`'s N42 note documents — a lost
+  ## `{scSpurious}` would leave a havoc value on a clean path). The Invariant-7
+  ## backstop is extended to it: stamp a classified `weInternalWalkerFault`
+  ## (so telemetry sees the leak) and reset the residue so it cannot bleed
+  ## into the next run on this thread.
+  if loweringPendingTaint != {}:
+    discard w.degrade(weInternalWalkerFault,
+      "lowering pending taint " & $loweringPendingTaint & " leaked at walk " &
+      "end — a lowering degrade's path taint was never drained onto a path " &
+      "(RFC-0005 S1 leak pin; weInternalWalkerFault)")
+    loweringPendingTaint = {}
+
+# ---- RFC-0005 S1: exported test hooks (H1 pattern) --------------------------
+# `Path`/`WalkCtx`/`Degrade` are private to the runtime unit, so — exactly as
+# `h1PathHasHeapFields`/`h1ForkIsolation` above — `tests/tsymex_rfc0005_s1_
+# lattice.nim` drives the REAL templates/procs through these hooks and checks
+# what they observed. They exist solely for that test and have no role in the
+# walker; each saves and restores every threadvar sink it touches.
+
+type
+  Rfc0005S1CarrierProbe* = object
+    ## Observations `rfc0005S1CarrierProbe` reports (see its doc).
+    hasTaintField*, hasNoUncertainField*: bool
+    forkPathPropagated*: Taint
+    forkTaintedJoined*, forkTaintedParentUntouched*: Taint
+    walkSinkKinds*: seq[SymexErrorKind]
+    walkSinkSeverities*: seq[SymexErrorSeverity]
+    tokenPath*: Taint
+    heapDepthSinkKinds*, newFieldZeroSinkKinds*: seq[SymexErrorKind]
+    closureSinkKinds*, closureThreadvarKinds*: seq[SymexErrorKind]
+    runTaintBeforeDrain*: Taint
+    taintInPlaceJoined*: Taint
+    returnMergeJoined*, returnMergeCleanStaysClean*: Taint
+    lowerPendingAfter*: Taint
+    loweringSinkKinds*: seq[SymexErrorKind]
+    lowerDrainedPath*, lowerPendingAfterDrain*: Taint
+
+  Rfc0005S1LeakPinProbe* = object
+    ## Observations `rfc0005S1LeakPinProbe` reports (see its doc).
+    cleanStampedKinds*: seq[SymexErrorKind]
+    leakStampedKinds*: seq[SymexErrorKind]
+    leakStampedSeverities*: seq[SymexErrorSeverity]
+    pendingAfterStamp*: Taint
+
+proc kindsOf(errs: openArray[SymexErrorInfo]): seq[SymexErrorKind] =
+  for e in errs: result.add e.kind
+
+proc rfc0005S1CarrierProbe*(): Rfc0005S1CarrierProbe =
+  ## Drives the S1 carrier + funnel on synthetic `Path`s and a scratch
+  ## `WalkCtx`: `forkPath` propagation, `forkPathTainted`'s join (and that
+  ## the parent is untouched), `degrade` into each of the four sinks (and
+  ## that it writes no run coordinate), `taintInPlace`, the return-merge
+  ## union, and the lowering funnel (`lowerDegrade` → pending →
+  ## `takeLoweringPendingDegrade`).
+  let savedHeapDepth = heapDepthErrors
+  let savedNewFieldZero = newFieldZeroErrors
+  let savedClosure = currentClosureCallErrors
+  let savedLowering = loweringDegradeErrors
+  let savedPending = loweringPendingTaint
+  heapDepthErrors = @[]
+  newFieldZeroErrors = @[]
+  currentClosureCallErrors = @[]
+  loweringDegradeErrors = @[]
+  loweringPendingTaint = {}
+  var p {.used.} = Path()
+  result.hasTaintField = compiles(p.taint)
+  result.hasNoUncertainField = not compiles(p.uncertain)
+  let spur: Taint = {scSpurious}
+  let parent = Path(pc: @[], env: initOrderedTable[string, SymVal](),
+                    taint: spur)
+  result.forkPathPropagated = forkPath(parent, parent.pc, parent.env).taint
+  var w: WalkCtx
+  let d = w.degrade(feUnsupportedOp, "rfc0005 S1 probe (walk sink)")
+  result.tokenPath = d.path
+  result.walkSinkKinds = kindsOf(w.walkDegradeErrors)
+  for e in w.walkDegradeErrors: result.walkSinkSeverities.add e.severity
+  let child = forkPathTainted(parent, parent.pc, parent.env, d)
+  result.forkTaintedJoined = child.taint
+  result.forkTaintedParentUntouched = parent.taint
+  discard w.degrade(heDepthExhausted, "rfc0005 S1 probe (heap depth)", dsHeapDepth)
+  let dz = w.degrade(heNewFieldZeroUnsupported, "rfc0005 S1 probe (new zero)",
+                     dsNewFieldZero)
+  discard w.degrade(ceInlineBudgetExceeded, "rfc0005 S1 probe (closure)", dsClosure)
+  result.heapDepthSinkKinds = kindsOf(w.heapDepthErrors)
+  result.newFieldZeroSinkKinds = kindsOf(w.newFieldZeroErrors)
+  result.closureSinkKinds = kindsOf(w.closureCallErrors)
+  result.closureThreadvarKinds = kindsOf(currentClosureCallErrors)
+  result.runTaintBeforeDrain = w.runTaint
+  let inPlace = Path(pc: @[], env: initOrderedTable[string, SymVal](),
+                     taint: spur)
+  taintInPlace(inPlace, dz)
+  result.taintInPlaceJoined = inPlace.taint
+  let cleanCallee = Path(pc: @[], env: initOrderedTable[string, SymVal]())
+  result.returnMergeJoined =
+    forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env, parent).taint
+  result.returnMergeCleanStaysClean =
+    forkPathMerged(cleanCallee, cleanCallee.pc, cleanCallee.env, cleanCallee).taint
+  lowerDegrade(seUnsupportedStringOp, "rfc0005 S1 probe (lowering)")
+  result.lowerPendingAfter = loweringPendingTaint
+  result.loweringSinkKinds = kindsOf(loweringDegradeErrors)
+  result.lowerDrainedPath = takeLoweringPendingDegrade().path
+  result.lowerPendingAfterDrain = loweringPendingTaint
+  heapDepthErrors = savedHeapDepth
+  newFieldZeroErrors = savedNewFieldZero
+  currentClosureCallErrors = savedClosure
+  loweringDegradeErrors = savedLowering
+  loweringPendingTaint = savedPending
+
+proc rfc0005S1LeakPinProbe*(): Rfc0005S1LeakPinProbe =
+  ## Drives `stampLoweringPendingLeak` twice on a scratch `WalkCtx`: once with
+  ## a clean pending taint (must stamp nothing) and once with a residue left
+  ## by a `lowerDegrade` that no `drainPendingLowerEffects` consumed (must
+  ## stamp one `weInternalWalkerFault` sevError and reset the residue).
+  let savedLowering = loweringDegradeErrors
+  let savedPending = loweringPendingTaint
+  loweringDegradeErrors = @[]
+  loweringPendingTaint = {}
+  var clean: WalkCtx
+  stampLoweringPendingLeak(clean)
+  result.cleanStampedKinds = kindsOf(clean.walkDegradeErrors)
+  var leaky: WalkCtx
+  lowerDegrade(seUnsupportedStringOp, "rfc0005 S1 leak probe")
+  stampLoweringPendingLeak(leaky)
+  result.leakStampedKinds = kindsOf(leaky.walkDegradeErrors)
+  for e in leaky.walkDegradeErrors: result.leakStampedSeverities.add e.severity
+  result.pendingAfterStamp = loweringPendingTaint
+  loweringDegradeErrors = savedLowering
+  loweringPendingTaint = savedPending
 
 proc syncRefSortEntry*(typeId: string, srt: RawZ3Sort, nc: Z3AnyAst) =
   ## CR-9 Stage 4 (currentRefSorts/currentNilConsts migration). If
@@ -8299,12 +8533,12 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
 # also root-like (no parent Path to fork FROM — the closure body descends
 # fresh, seeded from the CALLER's threaded heap threadvars rather than a
 # parent Path), and — per SND-1b (RFC-chapulin-hardening, walker v39) —
-# hardcodes `uncertain: false` deliberately (the descent starts clean;
-# SND-1's taint is picked back up via `forkPath`/`forkPathTainted` calls made
-# BY `walk()` while descending the body, and read back off each returned
-# sub-path's `cp.uncertain` by `applyClosureGround` after the descent, to skip
-# axiomatizing any uncertain sub-path into the global `currentClosureCallAxioms`
-# sink).
+# hardcodes `taint: {}` deliberately (RFC-0005 S1; was `uncertain: false`
+# — the descent starts clean; taint is picked back up via `forkPath`/
+# `forkPathTainted` calls made BY `walk()` while descending the body, and read
+# back off each returned sub-path's `cp.taint` by `applyClosureGround` after
+# the descent, to skip axiomatizing any tainted sub-path into the global
+# `currentClosureCallAxioms` sink). Pinned by the S1 writer grep-pin.
 #
 # In H1 the tables are empty on every path (the walker neither reads nor writes
 # them); the copies are inert until Cluster R populates the heap. They are
@@ -8313,12 +8547,14 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
 # registry; the R-cluster walker comment block supersedes this one.
 #
 # R3 hardening (post-H1): `forkPath` takes no taint parameter at all — it
-# always PROPAGATES `parent.uncertain` to the child, which is the correct
+# always PROPAGATES `parent.taint` to the child, which is the correct
 # behavior at every site below except the handful marked "deliberate taint,"
 # which call `forkPathTainted` instead. Because the taint argument is no
-# longer a bare bool at the call site, "silently drop the parent's taint" is
-# not spellable; the two proc names below ARE the taint registry (previously
-# enforced only by convention/this comment). The list below still documents
+# longer a bare value at the call site, "silently drop the parent's taint" is
+# not spellable; RFC-0005 S1 goes further — `forkPathTainted` takes a
+# `Degrade` token (only `degrade`/`lowerDegrade` mint one from a recorded
+# kind), the return merge is `forkPathMerged`, and the shared constructor
+# `forkPathTaintPrimitive` is "not for sites" (writer grep-pin). The list below still documents
 # fork-site provenance for the heap-copy contract.
 #
 # Fork sites (line numbers reflect post-H1 state):
@@ -8775,11 +9011,13 @@ proc drainPendingLowerEffects(p: Path): Path =
   ##       LiveRefs` is merged into the path's `heaps/allocCounters/liveRefs`
   ##       (via `drainClosureExitHeap`, conditional on `currentClosureDidMutateHeap`)
   ##       and all four exit-heap threadvars are reset to clean state.
-  ##   (d) SND-3 (ADR-0023, walker v58): if `loweringDidDegrade` was set (a
-  ##       lowering site returned a fresh unconstrained symbol in-band instead
-  ##       of raising), fork the path's `uncertain = true` — SND-1's per-path
-  ##       taint — and set `w.sawUnknown` via `currentWalkCtxPtr`, then reset
-  ##       the flag. This is the ONLY consumer of `loweringDidDegrade`.
+  ##   (d) SND-3 (ADR-0023, walker v58): if `loweringPendingTaint` is
+  ##       non-empty (a lowering site returned a fresh unconstrained symbol
+  ##       in-band instead of raising, via `lowerDegrade`), fork the path
+  ##       joining that pending taint as its `Degrade` token and reset it
+  ##       (RFC-0005 S1; the run coordinate is derived at drain from the
+  ##       recorded `loweringDegradeErrors`). The ONLY per-path consumer of
+  ##       `loweringPendingTaint` (the other is the walk-end leak stamp).
   ##
   ## USAGE CONVENTION (uniform pattern at every `lower()`/`lowerBool()` call site
   ## inside `walk`):
@@ -8805,15 +9043,15 @@ proc drainPendingLowerEffects(p: Path): Path =
     for c in currentClosureExitPc: p2.defectSurvivorPc.add c
     currentClosureExitPc = @[]
   # (d) SND-3 (ADR-0023, walker v58). Fork BEFORE mutating (same rationale as
-  # (c) above) so we never alias a sibling path's `uncertain` flag. This is
-  # the single choke-point that folds an in-band lowering-degrade into the
-  # SND-1 per-path taint — see `loweringDidDegrade`'s doc comment for why the
-  # degrade must never route through a bare `w.sawUnknown = true` alone.
-  if loweringDidDegrade:
-    p2 = forkPathTainted(p2, p2.pc, p2.env)
-    if currentWalkCtxPtr != nil:
-      cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
-    loweringDidDegrade = false
+  # (c) above) so we never alias a sibling path's taint. This is the single
+  # choke-point that folds an in-band lowering-degrade into the per-path
+  # taint. RFC-0005 S1: the pending taint `lowerDegrade` joined (one join per
+  # recorded `loweringDegradeErrors` entry) becomes this path's `Degrade`
+  # token; the RUN coordinate is no longer written here (was the
+  # `currentWalkCtxPtr.sawUnknown` write) — it is derived at drain from the
+  # very `loweringDegradeErrors` entries `lowerDegrade` recorded.
+  if loweringPendingTaint != {}:
+    p2 = forkPathTainted(p2, p2.pc, p2.env, takeLoweringPendingDegrade())
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -9272,15 +9510,15 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   # trace (or a malformed `concreteEq`) claims more iterations than the
   # bound allows. Mark uncertain — same classified degrade as `wmExplore`.
   if active.len > 0:
-    w.sawUnknown = true
-    w.walkDegradeErrors.add SymexErrorInfo(
-      kind: beBudgetExhausted, severity: sevError,
-      msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+    # RFC-0005 S1: one `degrade` call records the error (run act, derived at
+    # drain) and yields the token every survivor is forked with (path act).
+    let d = w.degrade(beBudgetExhausted,
+      "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
            $unwind & ") while following a concrete replay that was still " &
            "continuing — the trace claims more iterations than the bound " &
            "allows (beBudgetExhausted)")
     for p in active:
-      survivors.add forkPathTainted(p, p.pc, p.env)
+      survivors.add forkPathTainted(p, p.pc, p.env, d)
   survivors
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -9294,15 +9532,16 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
     # positive value triggers highest-uncertainty-first eviction:
     # certain paths sort before uncertain (stable within each
     # tier), and the tail is dropped. Pruned paths' contribution
-    # is reported as unknown via `w.sawUnknown = true`, which
-    # cascades into the final `sxUnknown` verdict cached under
+    # is reported as unknown via the classified `beBudgetExhausted`
+    # degrade (RFC-0005 S1: its run coordinate is derived at drain),
+    # which cascades into the final `sxUnknown` verdict cached under
     # `:unk` (NOT `:unsat`).
     if w.settings.budget.maxFrontierSize > 0 and
        result.len > w.settings.budget.maxFrontierSize:
       var certain, uncertain: seq[Path]
       for p in result:
-        if p.uncertain: uncertain.add p
-        else:           certain.add p
+        if p.taint != {}: uncertain.add p
+        else:             certain.add p
       var kept: seq[Path]
       for p in certain:
         if kept.len >= w.settings.budget.maxFrontierSize: break
@@ -9310,12 +9549,12 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
       for p in uncertain:
         if kept.len >= w.settings.budget.maxFrontierSize: break
         kept.add p
-      w.sawUnknown = true
       # v64 (chapulin catalog #5(b), Invariant 7): classify the prune — a
       # bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: beBudgetExhausted, severity: sevError,
-        msg: "path-frontier cap (maxFrontierSize=" &
+      # RFC-0005 S1: HALT site (pruned paths are dropped, not forked), so
+      # the token is discarded; the run act is the recorded error.
+      discard w.degrade(beBudgetExhausted,
+        "path-frontier cap (maxFrontierSize=" &
              $w.settings.budget.maxFrontierSize & ") pruned " &
              $(result.len - kept.len) &
              " live path(s) — their verdicts are unexplored (beBudgetExhausted)")
@@ -9514,7 +9753,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Any paths still active after maxLoopUnwind iterations are
     # exhausted: cond=true was still SAT-able. Mark uncertain.
     if active.len > 0:
-      w.sawUnknown = true
       # v64 (chapulin catalog #5(b), Invariant 7): record the classified
       # reason — a bare `sawUnknown` here yielded sxUnknown with EMPTY errors.
       # N20 (RFC-chapulin-hardening bucket-2, walker v121): `stmt.
@@ -9526,6 +9764,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # implying an unbounded/genuinely-exhausted loop. Status/soundness
       # behavior is IDENTICAL either way (still tainted, still sxUnknown) —
       # only the classification differs.
+      var d: Degrade
       if stmt.wHasAssumedBound:
         # Round-6 fix round 3 (item 5): softened wording — `wHasAssumedBound`
         # is a purely LEXICAL name-match (`collectAssumedLoopBound`), with no
@@ -9538,22 +9777,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # pin. The old wording ("trip counts beyond the bound are
         # unexplored") implied the assumed bound was known to be tight
         # enough to matter; it is not — the k-unroll never checks that.
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: beBudgetExhaustedAssumedBound, severity: sevError,
-          msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+        # RFC-0005 S1: `degrade` records + returns the survivors' token.
+        d = w.degrade(beBudgetExhaustedAssumedBound,
+          "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
                $unwind & ") with the guard still satisfiable — an assumed " &
                "bound exists on a guard variable (symexAssume); it may not " &
                "fit the unroll budget, and the k-unroll cannot verify " &
                "either way without a per-iteration solver check (structural " &
                "limit, not a soundness gap) (beBudgetExhaustedAssumedBound)")
       else:
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: beBudgetExhausted, severity: sevError,
-          msg: "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
+        d = w.degrade(beBudgetExhausted,
+          "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
                $unwind & ") with the guard still satisfiable — trip counts " &
                "beyond the bound are unexplored (beBudgetExhausted)")
       for p in active:
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
     discard w.loopStack.pop()
     survivors
   of isBreak:
@@ -9561,7 +9799,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     if w.loopStack.len == 0:
-      w.sawUnknown = true   # break outside any loop — degenerate
+      # break outside any loop — degenerate. Records no error today.
+      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (break outside loop)
       return @[]
     for p in paths:
       w.loopStack[w.loopStack.high].breakPaths.add p
@@ -9571,7 +9810,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     if w.loopStack.len == 0:
-      w.sawUnknown = true
+      # continue outside any loop — degenerate. Records no error today.
+      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (continue outside loop)
       return @[]
     for p in paths:
       w.loopStack[w.loopStack.high].continuePaths.add p
@@ -9636,12 +9876,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # (identical shape to N31's `iekStrSubstr` fix). In-band walk-level
           # degrade instead, matching the `isUnsupportedFieldPlaceholder`
           # sibling decline a few lines below in this SAME `isIndex` arm.
-          w.sawUnknown = true
-          w.walkDegradeErrors.add SymexErrorInfo(
-            kind: seUnsupportedTableValType, severity: sevError,
-            msg: "Table value type not modeled at index: " & $arrSV.tabValTy &
+          let d = w.degrade(seUnsupportedTableValType,
+            "Table value type not modeled at index: " & $arrSV.tabValTy &
                  " — only Table[string, int] is supported (seUnsupportedTableValType)")
-          survivors.add forkPathTainted(p, p.pc, p.env)
+          survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
@@ -9672,11 +9910,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # unchanged, but a receiver rebound by an OPERATION-level decline
           # (e.g. `iekSeqAdd`'s width/elem-support gap) reports THAT decline's
           # own kind instead of the misleading nested-seq claim.
-          w.sawUnknown = true
-          w.walkDegradeErrors.add SymexErrorInfo(
-            kind: placeholderReadDeclineKind(arrSV), severity: sevError,
-            msg: placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
-          survivors.add forkPathTainted(p, p.pc, p.env)
+          let d = w.degrade(placeholderReadDeclineKind(arrSV),
+            placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
+          survivors.add forkPathTainted(p, p.pc, p.env, d)
           continue
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
@@ -9822,13 +10058,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # walk-level degrade instead, matching this SAME `isIndex` arm's
         # `isUnsupportedFieldPlaceholder`/Table-value-type siblings above.
         let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: feUnsupportedExprKind, severity: sevError,
-          msg: locPrefix & "isIndex: unsupported receiver kind " &
+        let d = w.degrade(feUnsupportedExprKind,
+          locPrefix & "isIndex: unsupported receiver kind " &
                plainEnglishSymValKind(arrSV.kind) & " (expected array/seq/table/string) — " &
                "degraded to sxUnknown (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -9892,13 +10126,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # rather than a raw `doAssert` crash — same idiom as `isIndex`'s own
         # non-array/seq/table/string receiver-kind decline immediately above.
         let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: feUnsupportedExprKind, severity: sevError,
-          msg: locPrefix & "isIndexAssign: receiver lowered to " &
+        let d = w.degrade(feUnsupportedExprKind,
+          locPrefix & "isIndexAssign: receiver lowered to " &
                plainEnglishSymValKind(recvSV.kind) &
                " — expected svSeq (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
         # A bare/field-sourced placeholder seq (structurally-unbacked elem
@@ -9907,11 +10139,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # shared `placeholderReadDeclineKind`/`placeholderReadDeclineMsg`
         # chokepoint) — never `storeSeqElem` into the placeholder's inert
         # arbitrary-sort backing array.
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: placeholderReadDeclineKind(recvSV), severity: sevError,
-          msg: placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        let d = w.degrade(placeholderReadDeclineKind(recvSV),
+          placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let intProto = SymVal(kind: svInt, zi: mkInt(0))
       let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
@@ -9973,20 +10203,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let recvSV = p.env[stmt.spRecvName]
       if recvSV.kind != svSeq:
         let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: feUnsupportedExprKind, severity: sevError,
-          msg: locPrefix & "isSeqPop: receiver lowered to " &
+        let d = w.degrade(feUnsupportedExprKind,
+          locPrefix & "isSeqPop: receiver lowered to " &
                plainEnglishSymValKind(recvSV.kind) &
                " — expected svSeq (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: placeholderReadDeclineKind(recvSV), severity: sevError,
-          msg: placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
-        survivors.add forkPathTainted(p, p.pc, p.env)
+        let d = w.degrade(placeholderReadDeclineKind(recvSV),
+          placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let lenZi = recvSV.seqLen # [placeholder-audited]
       let emptyCond = not (lenZi > mkInt(0))
@@ -10066,18 +10292,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Guard exactly like `defaultZero`'s two OTHER call sites (the
         # `isCall` implicit-result fallthrough and `applyClosureGround`'s
         # closure-call fallthrough, both elsewhere in this file) already do:
-        # in-band walk-level degrade — taint this path `uncertain`, record
+        # in-band walk-level degrade — taint this path, record
         # the classified error, and fork it forward WITHOUT rebinding
         # `stmt.vrObjName` (the variant keeps its PRE-reassign value on this
         # degraded path; never a fabricated wrong one).
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: feUnsupportedOp, severity: sevError,
-          msg: "isVariantReassign: new-arm field zero-default (tag " &
+        let d = w.degrade(feUnsupportedOp,
+          "isVariantReassign: new-arm field zero-default (tag " &
                $stmt.vrNewTag & ") has no sound zero-default (" &
                getCurrentExceptionMsg() &
                ") — path degraded to sxUnknown (feUnsupportedOp)")
-        w.sawUnknown = true
-        out2.add forkPathTainted(p, p.pc, p.env)
+        out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
       newArmFields[stmt.vrNewTag] = newFields
       let newSV = SymVal(kind: svVariant,
@@ -10241,10 +10465,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let vcsTy = stmt.vcsVariantTy
     let vcsBudget = w.settings.budget.maxVariantConstructorForks
     if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
-      w.sawUnknown = true
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: beBudgetExhausted, severity: sevError,
-        msg: stmt.vcsLoc & ": variant constructor fork budget exhausted " &
+      let d = w.degrade(beBudgetExhausted,
+        stmt.vcsLoc & ": variant constructor fork budget exhausted " &
              "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
              "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
              "(beBudgetExhausted)")
@@ -10254,8 +10476,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # later read raises KeyError, caught by the CR-1c safety net as
         # `weInternalWalkerFault` → sxUnknown; SND-1's per-path taint is
         # ALSO forced via `forkPathTainted` so the verdict never rides a
-        # bare `w.sawUnknown` alone).
-        out2.add forkPathTainted(p, p.pc, p.env)
+        # bare `w.sawUnknown` alone). RFC-0005 S1: one token `d`, forked
+        # onto every path.
+        out2.add forkPathTainted(p, p.pc, p.env, d)
       return out2
     # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
     # remediation). `maxVariantConstructorForks` above only bounds the OUTER
@@ -10279,10 +10502,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let vcsFieldAllocs = satMul64(int64(stmt.vcsTagSet.len), vcsArmFieldCost)
     let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
     if vcsFieldBudget > 0 and vcsFieldAllocs > int64(vcsFieldBudget):
-      w.sawUnknown = true
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: beBudgetExhausted, severity: sevError,
-        msg: stmt.vcsLoc & ": variant constructor field-allocation budget " &
+      let d = w.degrade(beBudgetExhausted,
+        stmt.vcsLoc & ": variant constructor field-allocation budget " &
              "exhausted (maxVariantConstructorFieldAllocs=" &
              $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
              " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
@@ -10290,7 +10511,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "(beBudgetExhausted)")
       for p in paths:
         # Same safe-degrade idiom as the fork-count budget above.
-        out2.add forkPathTainted(p, p.pc, p.env)
+        out2.add forkPathTainted(p, p.pc, p.env, d)
       return out2
     # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
     # `paths`/`tag` fork loops (mirrors the two budget checks immediately
@@ -10323,15 +10544,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           vcsFieldIssue = unallocatableFieldIssue(ft)
           if vcsFieldIssue.isSome: break findVcsFieldIssue
     if vcsFieldIssue.isSome:
-      w.sawUnknown = true
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: vcsFieldIssue.get.kind, severity: sevError,
-        msg: stmt.vcsLoc & ": variant constructor field allocation " &
+      let d = w.degrade(vcsFieldIssue.get.kind,
+        stmt.vcsLoc & ": variant constructor field allocation " &
              "unmodeled — " & vcsFieldIssue.get.msg &
              " (arm-field allocation, not param-entry)")
       for p in paths:
         # Same safe-degrade idiom as the two budget checks above.
-        out2.add forkPathTainted(p, p.pc, p.env)
+        out2.add forkPathTainted(p, p.pc, p.env, d)
       return out2
     for p in paths:
       let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
@@ -10444,11 +10663,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # ONE path in-band instead: record the classified decline and drop
         # the path (mirrors `isUnsafeCast`'s "halt this path" idiom) rather
         # than fabricate arm data for a receiver that was never a real
-        # variant to begin with.
-        w.sawUnknown = true
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: seVariantFieldOnDeclinedCtor, severity: sevError,
-          msg: "variant field '" & stmt.vfFieldName & "' read on a " &
+        # variant to begin with. RFC-0005 S1: HALT site — token discarded.
+        discard w.degrade(seVariantFieldOnDeclinedCtor,
+          "variant field '" & stmt.vfFieldName & "' read on a " &
                "receiver whose construction was already declined " &
                "(non-variant SymVal kind=" & $recv.kind & ") " &
                "(seVariantFieldOnDeclinedCtor)")
@@ -10558,14 +10775,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # threadvar — that sink is reset at every `lowerInExpr` wrapper
               # entry, so an entry added HERE (after the wrapper returned)
               # would be wiped by the next lowering before verdict assembly.
-              w.walkDegradeErrors.add SymexErrorInfo(
-                kind: feUnsupportedOp, severity: sevError,
-                msg: "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
+              let d = w.degrade(feUnsupportedOp,
+                "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
                      ") bound through the scalar-raise drain is not yet " &
                      "wired — path degraded to sxUnknown (feUnsupportedOp)")
-              w.sawUnknown = true
               w.callStack[frameIx].returnedPaths.add forkPathTainted(
-                cp, cp.pc, cp.env)
+                cp, cp.pc, cp.env, d)
               continue
             # Reconcile mixed int reps (e.g. callee returns svInt because
             # of #135 range propagation while retSym was allocated svBV*).
@@ -10679,14 +10894,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # the one an `echo` ahead of the interesting branch produced. The drain
       # dedups by message, so N calls to the same callee collapse to one
       # entry while two different callees each get named.
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: feOpaqueCallUnmodelled, severity: sevError,
-        msg: "opaque call `" & stmt.callee & "` is not modeled — its result " &
+      # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
+      let d = w.degrade(feOpaqueCallUnmodelled,
+        "opaque call `" & stmt.callee & "` is not modeled — its result " &
              "and any state it touches are unknown, so every path through it " &
              "is tainted. If the call cannot affect the code under test " &
              "(void, value arguments, nothing read back), mark it " &
              "`{.symexTransparent.}` and symex will drop it instead")
-      w.sawUnknown = true
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
@@ -10695,7 +10909,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           inc w.synthZ3
           let z3Name = stmt.retName & "_op" & $w.synthZ3
           newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv)
+        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
       return out2
     if not w.procs.hasKey(stmt.callee):
       # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
@@ -10708,7 +10922,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # uncertain so any target reached on them degrades to sxUnknown — never
       # an unsound witness. `geInstantiationCapped` is surfaced from
       # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
-      w.sawUnknown = true
+      # RFC-0005 S1: this site records no error of its own (the cap's
+      # `geInstantiationCapped` lives in `prog.parseErrors`), so it takes the
+      # transitional kindless run mark + ⊤ path token.
+      w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (over-cap missing callee)
+      let d = kindlessPathDegrade()  # RFC-0005 S1b: mint kind (over-cap missing callee)
       var out2: seq[Path]
       for p in paths:
         var newEnv = p.env
@@ -10717,7 +10935,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           inc w.synthZ3
           let z3Name = stmt.retName & "_cap" & $w.synthZ3
           newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv)
+        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
       return out2
     let sig = w.procs[stmt.callee]
     # Statistics
@@ -10766,10 +10984,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # kind rather than adding a near-duplicate. The message names the
       # exhausted budget and its current value so "raise maxCallDepth" reads
       # as actionable configuration advice, not a shrug.
-      w.sawUnknown = true
-      w.walkDegradeErrors.add SymexErrorInfo(
-        kind: beBudgetExhausted, severity: sevError,
-        msg: "call-inlining depth budget exhausted (maxCallDepth=" &
+      let d = w.degrade(beBudgetExhausted,
+        "call-inlining depth budget exhausted (maxCallDepth=" &
              $w.settings.budget.maxCallDepth & ") while inlining `" &
              stmt.callee & "` — the call stack is at least as deep as the " &
              "configured budget; raise settings.budget.maxCallDepth if " &
@@ -10783,7 +10999,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           inc w.synthZ3
           let z3Name = stmt.retName & "_d" & $w.synthZ3
           newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv)
+        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
       out2
     else:
       var survivors: seq[Path]
@@ -10860,7 +11076,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               inc w.synthZ3
               let z3Name = stmt.retName & "_cyc" & $w.synthZ3
               newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv)
+            # RFC-0005 S1: records no error and never marked the run (a
+            # target hit on this path does, at `isTargetLabel`) — path-only
+            # transitional ⊤ token.
+            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv,
+              kindlessPathDegrade())  # RFC-0005 S1b: mint kind (recursion cycle-break)
             continue
           if w.callCache.hasKey(key):
             let entry = w.callCache[key]
@@ -10964,13 +11184,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 if retVal.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
                                       svBV64, svFloat32, svFloat64, svString,
                                       svTuple, svVariant}:
-                  w.walkDegradeErrors.add SymexErrorInfo(
-                    kind: feUnsupportedOp, severity: sevError,
-                    msg: "composite-typed implicit-result fallthrough (kind " &
+                  let d = w.degrade(feUnsupportedOp,
+                    "composite-typed implicit-result fallthrough (kind " &
                          plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
                          "to sxUnknown (feUnsupportedOp)")
-                  w.sawUnknown = true
-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env)
+                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
                 else:
                   let (rSym, rVal) = reconcileInt(retSym, retVal)
                   fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
@@ -11001,15 +11219,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
                                            cp.env)
                 except ValueError, SymexRefUnresolvedError:
-                  w.walkDegradeErrors.add SymexErrorInfo(
-                    kind: feUnsupportedOp, severity: sevError,
-                    msg: "composite-typed implicit-result fallthrough " &
+                  let d = w.degrade(feUnsupportedOp,
+                    "composite-typed implicit-result fallthrough " &
                          "(untouched-result path, kind " & $stmt.retTy.kind &
                          ") has no sound zero-default (" &
                          getCurrentExceptionMsg() &
                          ") — path degraded to sxUnknown (feUnsupportedOp)")
-                  w.sawUnknown = true
-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env)
+                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
           # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
           # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
           # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
@@ -11040,7 +11256,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # divByZero` feasibility constraint. (Sound; merely less reuse.)
           if calleeEscaped.len == 0 and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
-             not frame.returnedPaths[0].uncertain and
+             frame.returnedPaths[0].taint == {} and
              frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len:
             let cp = frame.returnedPaths[0]
             let prefixLen = p.pc.len
@@ -11061,7 +11277,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 newEnv[callerName] = cp.env[formalName]
             # Phase 15 R1b return-MERGE: the post-call caller path carries the
             # callee's exit heap state back out (ADR-0010 R1b).
-            # `forkPathWithTaint(cp, ...)` forks from `cp` (the returned
+            # `forkPathMerged(cp, ...)` forks from `cp` (the returned
             # CALLEE path), so:
             #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
             #     caller's, so callee heap modifications are observed downstream.
@@ -11074,13 +11290,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # the merge is correct by construction now.)
             # Phase 15 G3: `retInit` threads the retSym init constraints onto the
             # surviving caller path (where `retSym` becomes visible).
-            # R3 hardening: taint is neither a bare propagate nor a bare force
-            # here — a post-call path is tainted if EITHER the caller (`p`) or
-            # the callee (`cp`) picked up SND-1/SND-3 taint, so this is the one
-            # site that calls the internal `forkPathWithTaint` directly with a
-            # computed bool instead of `forkPath`/`forkPathTainted`.
-            let merged = forkPathWithTaint(cp, cp.pc & retInit, newEnv,
-                                           p.uncertain or cp.uncertain)
+            # R3 hardening / RFC-0005 S1: taint is neither a bare propagate
+            # nor a token join here — a post-call path is tainted by anything
+            # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
+            # site uses the dedicated `forkPathMerged` (the union
+            # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
+            let merged = forkPathMerged(cp, cp.pc & retInit, newEnv, p)
             for tkey, callerCount in p.allocCounters:
               let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
               if callerCount > calleeCount:
@@ -11156,15 +11371,22 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
-        if p.uncertain:
+        if p.taint != {}:
           # Uncertain path: a SAT witness here would be unsound because
           # bailed-call retSyms are unconstrained at the Z3 level.
-          w.sawUnknown = true
+          # RFC-0005 S1: S1 keeps today's "any path taint blocks SAT and
+          # marks the run" gate (all-⊤ default); S2 narrows it to
+          # `scSpurious in p.taint` and drops this run mark.
+          w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (tainted target hit)
         else:
           let (st, wit) = trySolve(w.z3, p, w.params, w.settings, w.tabKeys, w.setMembers, w.initialEnv)
           case st
-          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit))
-          of sxUnknown: w.sawUnknown = true
+          # RFC-0005 S1: `pathTaint` is PRODUCED here — the hitting path's
+          # taint (always `{}` on this branch in S1; S2's `scSpurious`
+          # narrowing makes it an `{scIncomplete}`-carrying SAT possible).
+          of sxSat:    w.found.add(RawResult(status: sxSat, witness: wit,
+                                             pathTaint: p.taint))
+          of sxUnknown: w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (target trySolve unknown)
           of sxUnsat:  discard
           of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
@@ -11212,18 +11434,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # handler nor a genuine re-raise target never returns control) plus
         # a classified error record (the sibling branch has none to record
         # since it has no offending TYPE/MESSAGE, unlike this one).
-        w.walkDegradeErrors.add SymexErrorInfo(
-          kind: eeRaiseOutsideHandler, severity: sevError,
-          msg: "bare `raise` (re-raise) with no in-flight exception " &
+        # RFC-0005 S1: HALT site — token discarded; the recorded error is
+        # the run act (was `for p in paths: w.sawUnknown = true`; `paths`
+        # is never empty here — `walk` returns early on an empty frontier).
+        discard w.degrade(eeRaiseOutsideHandler,
+          "bare `raise` (re-raise) with no in-flight exception " &
                "(eeRaiseOutsideHandler)")
-        for p in paths:
-          w.sawUnknown = true
         return @[]
       else:
         # Inside a handler with no recorded in-flight exn yet — handler-stack
         # re-raise is E3+. Surface as unknown rather than guess.
-        for p in paths:
-          w.sawUnknown = true
+        # (`paths` is never empty here — `walk` returns early on an empty
+        # frontier — so the old per-path loop was an unconditional mark.)
+        w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (handler-stack re-raise)
         return @[]
     var survivors: seq[Path]
     for p in paths:
@@ -11325,17 +11548,21 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmFollowConcrete: discard
     # SND-1: an unmodeled statement dropped its mutation, so `env` is now
     # STALE relative to the real program. Taint-and-continue (SND-1, RFC
-    # Cluster 1): mirror the `maxCallDepth` bail arm above — set
-    # `w.sawUnknown` and fork every path through with `uncertain = true`
-    # rather than continuing with unmarked (and therefore falsely-trustable)
-    # state. This is Invariant-3-safe AND preserves downstream exploration:
-    # the existing `uncertain` chokepoints (`isTargetLabel`, `routeRaise`)
-    # demote any later sxSat/sxRaised on this path to sxUnknown, so a
-    # dropped mutation can never surface a silently-wrong witness.
-    w.sawUnknown = true
+    # Cluster 1): mirror the `maxCallDepth` bail arm above — mark the run
+    # and fork every path through tainted rather than continuing with
+    # unmarked (and therefore falsely-trustable) state. This is
+    # Invariant-3-safe AND preserves downstream exploration: the existing
+    # taint chokepoints (`isTargetLabel`, `routeRaise`) demote any later
+    # sxSat/sxRaised on this path to sxUnknown, so a dropped mutation can
+    # never surface a silently-wrong witness. RFC-0005 S1: this arm records
+    # no error of its own (the parser's reason, if any, is in
+    # `prog.parseErrors`), so it takes the transitional kindless run mark
+    # (unconditional, as `w.sawUnknown = true` was) and ⊤ path token.
+    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (isUnsupported)
+    let d = kindlessPathDegrade()  # RFC-0005 S1b: mint kind (isUnsupported)
     var out2: seq[Path]
     for p in paths:
-      out2.add forkPathTainted(p, p.pc, p.env)
+      out2.add forkPathTainted(p, p.pc, p.env, d)
     out2
   of isUnsafeCast:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -11343,7 +11570,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmFollowConcrete: discard
     # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe pointer materialisation
     # (`cast[ptr T]`/`addr`/`unsafeAddr`) is unmodelable in the logical-heap
-    # model. HALT the path: set `sawUnknown` → the verdict degrades to
+    # model. HALT the path: the verdict degrades to
     # `sxUnknown` (Invariant 3), and DROP the path (`@[]`) so the unmodelable
     # pointer binding (which was NOT added to env) is never referenced
     # downstream (a subsequent `p[]` deref would otherwise key-fault on the
@@ -11351,7 +11578,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # parse time into `prog.parseErrors` (drained into `RawResult.errors` on
     # every verdict branch — the SAME classify→sxUnknown mechanism R8
     # established for `hePtrArith`), so the unknown is never silent.
-    w.sawUnknown = true
+    # RFC-0005 S1: the former `w.sawUnknown = true` here is gone — the run
+    # coordinate is DERIVED at drain, and that parse-time sevError
+    # `heUnsafeCast` (emitted by `dsl_parser.nim` at the one site that builds
+    # this node) is exactly what derives it; no second record is written
+    # (it would duplicate the parse-time entry in `RawResult.errors`).
     @[]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
@@ -11377,10 +11608,10 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   ## for the caller's `isCall` arm to re-route (inter-proc). Otherwise we are at
   ## the SUT boundary: surface a public `sxRaised` finding (E2b semantics,
   ## target-gated) and terminate the path (return `@[]`).
-  if p.uncertain:
+  if p.taint != {}:
     # Bailed-call retSyms are unconstrained at the Z3 level; neither a witness
     # nor a confident handler-routing decision is sound here.
-    w.sawUnknown = true
+    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (tainted raise route)
     return @[]
   # Phase 15 E4. Subtype matching (replaces E3's exact-string membership). An
   # unknown raised type (not in `exnTable` nor `userExnHierarchy`) is matched
@@ -11487,8 +11718,12 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
                                raisedMsg: msg,
                                raisedWitness: wit,
                                raisedIsDefect: raisedIsDefect)  ## Phase 15 E6
-      w.found.add(toPublic(iv))
-    of sxUnknown: w.sawUnknown = true
+      # RFC-0005 S1: `pathTaint` PRODUCED at the raised-finding hit (`{}` on
+      # this branch in S1 — the tainted early-return above gates it).
+      var r = toPublic(iv)
+      r.pathTaint = p.taint
+      w.found.add(r)
+    of sxUnknown: w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (raise trySolve unknown)
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]
@@ -11682,12 +11917,12 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # instead. Same `cap > 0 and` house style as `maxFrontierSize`/`maxSplitParts`.
   if w.settings.budget.maxClosureInlineCount > 0 and
      w.frame.closureInlineCount >= w.settings.budget.maxClosureInlineCount:
-    let budgetErr = SymexErrorInfo(kind: ceInlineBudgetExceeded, severity: sevError,
-      msg: "closure-application descent exceeded maxClosureInlineCount (" &
-           $w.settings.budget.maxClosureInlineCount & ") at " & label)
-    currentClosureCallErrors.add budgetErr  # threadvar: fallback
-    w.closureCallErrors.add budgetErr       # CR-9 Stage 5: LIVE WalkCtx field
-    w.sawUnknown = true
+    # RFC-0005 S1: HALT-shaped (no per-path act inside a lowering) — the
+    # `dsClosure` sink writes the threadvar fallback + LIVE WalkCtx field
+    # exactly as the two hand-written adds did; the token is discarded.
+    discard w.degrade(ceInlineBudgetExceeded,
+      "closure-application descent exceeded maxClosureInlineCount (" &
+           $w.settings.budget.maxClosureInlineCount & ") at " & label, dsClosure)
     return funcApp
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
   # Fresh descent env: params bound to the concrete call args, captures bound
@@ -11727,7 +11962,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # walk is active (the LIVE store); fall back to threadvars otherwise.
   # `w` is always available here (applyClosureGround has `w: var WalkCtx`).
   let descentBase = Path(pc: @[], env: descentEnv,
-                         uncertain: false,
+                         taint: {},  ## RFC-0005 S1: descent starts clean
                          heaps: w.callerHeaps,
                          heapDepth: w.callerHeapDepth,
                          allocCounters: w.callerAllocCounters,
@@ -11770,7 +12005,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in frame.returnedPaths:                       # (a) explicit return
     if cp.pc.len == 0: continue
     sawValue = true
-    if cp.uncertain:
+    if cp.taint != {}:
       uncertainDrop = true
       continue
     # ADR-0012: cp.pc holds ONLY genuine branch conditions now (defect-survivor
@@ -11781,7 +12016,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in fallThrough:                                # (b) implicit result
     if cp.env.hasKey("result"):
       sawValue = true
-      if cp.uncertain:
+      if cp.taint != {}:
         uncertainDrop = true
         continue
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
@@ -11805,31 +12040,25 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       # is wired for -- for those, classified-decline exactly like R2's own
       # twin does, never bind a value the walker cannot back soundly.
       sawValue = true
-      if cp.uncertain:
+      if cp.taint != {}:
         uncertainDrop = true
         continue
       try:
         let zeroVal = defaultZero(cb.retTy, "__closureRet.zerodefault")
         assertArm(cp.pc, retBindEq(funcApp, zeroVal))
       except ValueError, SymexRefUnresolvedError:
-        let zeroErr = SymexErrorInfo(kind: feUnsupportedOp, severity: sevError,
-          msg: "closure call through " & label &
+        discard w.degrade(feUnsupportedOp,  # RFC-0005 S1: closure sink, no path act
+          "closure call through " & label &
                ": composite-typed implicit-result fallthrough (untouched-" &
                "result path, retTy kind " & $cb.retTy.kind & ") has no " &
                "sound zero-default (" & getCurrentExceptionMsg() &
-               ") — path degraded to sxUnknown (feUnsupportedOp)")
-        currentClosureCallErrors.add zeroErr  # threadvar: fallback
-        w.closureCallErrors.add zeroErr       # CR-9 Stage 5: LIVE WalkCtx field
-        w.sawUnknown = true
+               ") — path degraded to sxUnknown (feUnsupportedOp)", dsClosure)
   if uncertainDrop:
-    let bodyErr = SymexErrorInfo(kind: ceClosureBodyUncertain, severity: sevError,
-      msg: "closure call through " & label &
+    discard w.degrade(ceClosureBodyUncertain,  # RFC-0005 S1: closure sink, no path act
+      "closure call through " & label &
            " body produced an uncertain sub-path (unmodeled-construct taint or " &
            "nested budget bail) — dropped from the ground-axiom set instead of " &
-           "asserting an unsound permanent fact")
-    currentClosureCallErrors.add bodyErr   # threadvar: fallback
-    w.closureCallErrors.add bodyErr        # CR-9 Stage 5: LIVE WalkCtx field
-    w.sawUnknown = true
+           "asserting an unsound permanent fact", dsClosure)
   # ADR-0012: thread each exit path's defect-survivor facts onto the CALLER via
   # the exit-pc channel (drained by drainPendingLowerEffects). Each fact is
   # guarded by THAT path's branch conditions — `implies(branchConds_i, neg)` —
@@ -11863,7 +12092,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # void closures, collaterally degrading any UNSAT target after a void closure
   # call (see CR-1 companion fix for the sawUnknown/UNSAT interaction).
   if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0:
-    w.sawUnknown = true
+    w.kindlessRunDegrade()  # RFC-0005 S1b: mint kind (diverged closure body)
   # ---- Phase 15 CR-1: merge closure exit heaps back to caller ----------------
   # The exit paths from the closure body may carry heap modifications (e.g.
   # `p[] = 99` inside the body) that must be visible to the CALLER after the
@@ -12158,12 +12387,10 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     # placeholder discipline -- never call the unsafe function, never
     # attempt to `storeSeqElem` real (unbacked-typed) content into a
     # placeholder array.
-    loweringDegradeErrors.add SymexErrorInfo(
-      kind: seNestedSeqUnsupported, severity: sevError,
-      msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+    lowerDegrade(seNestedSeqUnsupported,
+      "seq[seq[T]] / seq[complex] not modeled — element kind " &
            plainEnglishTypeKind(elemTy.kind) &
            " (nested seq element type is not supported)")
-    loweringDidDegrade = true
     var fresh: seq[Z3Bool]
     return allocateSym(tSeq(elemTy), freshDegradeName("__seqLitUnsupportedDegrade"), fresh)
   # N29 fix (round-6 bucket-2, walker v120): the B6 rider's empty-literal
@@ -12300,12 +12527,10 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
         # touch that field), the safe direction per Invariant 3.
         let ftIssue = unallocatableFieldIssue(ft)
         if ftIssue.isSome:
-          loweringDegradeErrors.add SymexErrorInfo(
-            kind: ftIssue.get.kind, severity: sevError,
-            msg: "variant literal inactive-arm field `" & ty.vObjectName &
+          lowerDegrade(ftIssue.get.kind,
+            "variant literal inactive-arm field `" & ty.vObjectName &
                  "." & arm.fieldNames[j] & "` allocation unmodeled — " &
                  ftIssue.get.msg & " (arm-field allocation, not param-entry)")
-          loweringDidDegrade = true
           fields.add SymVal(kind: svBool, bo: mkBoolVar(path & ".unalloc"))
         else:
           var scratchPC: seq[Z3Bool]
@@ -12444,12 +12669,10 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # that even a single non-top-level catch/raise on this backend can
       # misbehave).
       if not isBackedSeqElemTy(e.hofRetElemTy):
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: seNestedSeqUnsupported, severity: sevError,
-          msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+        lowerDegrade(seNestedSeqUnsupported,
+          "seq[seq[T]] / seq[complex] not modeled — element kind " &
                plainEnglishTypeKind(e.hofRetElemTy.kind) &
                " (nested seq element type is not supported)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupportedInline", fresh)
       var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
@@ -12468,12 +12691,10 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # `map` arm immediately above -- see its own comment for the full
       # rationale (identical hazard, identical fix).
       if not isBackedSeqElemTy(elemTy):
-        loweringDegradeErrors.add SymexErrorInfo(
-          kind: seNestedSeqUnsupported, severity: sevError,
-          msg: "seq[seq[T]] / seq[complex] not modeled — element kind " &
+        lowerDegrade(seNestedSeqUnsupported,
+          "seq[seq[T]] / seq[complex] not modeled — element kind " &
                plainEnglishTypeKind(elemTy.kind) &
                " (nested seq element type is not supported)")
-        loweringDidDegrade = true
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(elemTy), "__hofFilterUnsupportedInline", fresh)
       var dataRaw = allocateSeqDataRaw(elemTy, "__hoffilter.data")
@@ -12511,8 +12732,9 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
              "seqFilter HOF; axiomatize-filter deferred to Phase 16)")
       currentClosureCallErrors.add filterErr  # threadvar: fallback
       syncClosureCallError(filterErr)         # CR-9 Stage 5: LIVE WalkCtx field
-      if currentWalkCtxPtr != nil:
-        cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+      # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
+      # the run coordinate is derived at drain from the closure-sink entry
+      # recorded just above (S7 routes these HOF sites through the funnel).
       # N36 (walker v101) reachability verification: `tSeq(e.hofRetElemTy)`'s
       # OWN `ty.seqElemTy` (= `e.hofRetElemTy`) is exactly the value
       # `allocateSym`'s `itSeq` arm guards with `isBackedSeqElemTy` before
@@ -12550,8 +12772,9 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
                "over a symbolic seq[int]; this shape is deferred")
         currentClosureCallErrors.add mapErr   # threadvar: fallback
         syncClosureCallError(mapErr)          # CR-9 Stage 5: LIVE WalkCtx field
-        if currentWalkCtxPtr != nil:
-          cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+        # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
+        # the run coordinate is derived at drain from the closure-sink entry
+        # recorded just above (S7 routes these HOF sites through the funnel).
         # N36 (walker v101) reachability verification: same argument as
         # `__hofFilterUnsupported` above. CONFIRMED UNREACHABLE to
         # `allocateSeqDataRaw`'s raise; no guard added.
@@ -12577,8 +12800,9 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
              "ground result (precise symbolic fold deferred)")
       currentClosureCallErrors.add foldErr  # threadvar: fallback
       syncClosureCallError(foldErr)         # CR-9 Stage 5: LIVE WalkCtx field
-      if currentWalkCtxPtr != nil:
-        cast[ptr WalkCtx](currentWalkCtxPtr)[].sawUnknown = true
+      # RFC-0005 S1: the former `currentWalkCtxPtr.sawUnknown` write is gone —
+      # the run coordinate is derived at drain from the closure-sink entry
+      # recorded just above (S7 routes these HOF sites through the funnel).
       var fresh: seq[Z3Bool]
       return allocateSym(e.hofRetElemTy, "__hofFoldOpaque", fresh)
     else:
@@ -13004,7 +13228,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   heapDepthErrors = @[]                  ## Phase 15 R9: reset heap-depth-error sink
   newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
-  loweringDidDegrade = false             ## SND-3 (ADR-0023): reset per-call degrade signal
+  loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
   setMembershipKeyTerms = initTable[uint, seq[Z3AnyAst]]()  ## v65: reset set-key registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
@@ -13363,7 +13587,7 @@ proc runSymexImpl(prog: SymexProgram,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
                        ## is also the zero-value, so pre-G1a callers already
                        ## got this behavior with no change required here.
-    found: @[], sawUnknown: false,
+    found: @[],
     settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, CallCacheEntry](),
@@ -13405,6 +13629,7 @@ proc runSymexImpl(prog: SymexProgram,
       w.statics.closureBodies[sk] = cb
   discard walk(prog.body, @[initial], w)
   currentWalkCtxPtr = nil   ## (a) normal-path clear: walk() completed without raising
+  stampLoweringPendingLeak(w)  ## RFC-0005 S1: pending-taint leak pin (§2.2)
   # Phase 15 G4 (ADR-0008 D4): CR-9 Stage 4 — `WalkerStatics.distinctSorts`/
   # `.distinctSortNames` are now the LIVE store, populated during the walk by
   # `syncDistinctSortEntry` (called from `allocDistinctSym`). No post-walk
@@ -13521,6 +13746,18 @@ proc runSymexImpl(prog: SymexProgram,
     for e in closureErrs:
       if e.severity == sevError: any = true; break
     any
+  # RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The ONE
+  # writer of `w.runTaint`: the union, over every DRAINED `sevError` entry
+  # (the walk/heap-depth/new-field-zero/lowering sinks in `exnWarnings`, the
+  # parse-time errors, the closure sink), of `runTaint(classOf(kind))` —
+  # joined with the TRANSITIONAL kindless mark (`kindlessRunTaint`, the few
+  # sites that record no error yet; S1b deletes it). Under S1's all-⊤
+  # `classOf` default this is `{scSpurious, scIncomplete}` exactly when the
+  # old `w.sawUnknown` was true, so the verdict below is unchanged.
+  w.runTaint = runTaintOf(exnWarnings) + runTaintOf(prog.parseErrors) +
+               runTaintOf(closureErrs)
+  if w.kindlessRunTaint:
+    w.runTaint = w.runTaint + {scSpurious, scIncomplete}
   ## ADR-0012 D2: unified, target-independent precedence over w.found:
   ##   sxSat  >  sxRaised  >  sxUnsat/sxUnknown.
   ## Scan for the FIRST sxSat (the direct answer — for stkLabel this is the only
@@ -13573,12 +13810,14 @@ proc runSymexImpl(prog: SymexProgram,
     r.errors.add prog.parseErrors  ## Phase 15 G1c
     r.errors.add closureErrs       ## Phase 15 C2b
     r
-  elif w.sawUnknown or capForcedUnknown or closureForcedUnknown:
+  elif w.runTaint != {} or capForcedUnknown or closureForcedUnknown:
     # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown
     # must carry at least one classified error. All known degrade sites now
     # classify (budget bails via `beBudgetExhausted`, lowering degrades via
-    # `loweringDegradeErrors`, …) — if this fires, some `sawUnknown` site
-    # escaped classification, which is itself a walker bug: surface it as
+    # `loweringDegradeErrors`, …) — if this fires, some run-marking site
+    # (RFC-0005 S1: only a transitional `kindlessRunDegrade` site can mark
+    # the run without an entry) escaped classification, which is itself a
+    # walker bug: surface it as
     # `weInternalWalkerFault` so telemetry tracks it, never an empty seq.
     var unknownErrs = exnWarnings & prog.parseErrors & closureErrs
     if unknownErrs.len == 0:
@@ -14202,7 +14441,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
     params: prog.params, mode: wmFollowConcrete,
-    found: @[], sawUnknown: false, settings: settings, procs: prog.procs,
+    found: @[], settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, CallCacheEntry](),
     activeCalls: initHashSet[string](), initialEnv: env,

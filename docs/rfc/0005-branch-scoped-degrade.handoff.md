@@ -43,8 +43,14 @@ soundness risk and the blast radius concentrate:
 
 | slice | state | commit | notes |
 |---|---|---|---|
-| S0 | in progress | | |
+| S0 | done | `8a7384b` | 3 green pins through `symexFind`. Pin 1 routes `allocDegrade(heUnresolvedRef)` via `liftHeapValue`'s unsupported-pointee arm (string field through a ref) → flips at S4. Pin 2 `feUnsupportedExprKind` (inline `cast[int32]`) in a dead branch → cap veto. Pin 3 `ceUnsupportedHof` (`filter` over symbolic seq) → closure veto. Both flip to `sxSat` at S9. |
 | S0b | in progress | | |
+| S1 | in progress (opus) | | |
+
+**Found, out of scope, to file:** routing `cast[int32](x) + 1` through a helper
+proc with declared return `int` trips a `lowerConvIntWidth` `AssertionDefect` on
+the callee's return widening — caught at top level as a bare
+`weInternalWalkerFault`. A real walker defect, unrelated to RFC-0005.
 
 ## What round 2 changed
 

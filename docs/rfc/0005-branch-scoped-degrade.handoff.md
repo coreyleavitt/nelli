@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~11:45)
+## Current position (refreshed 2026-09-25 ~12:18)
 
 - **Slices done:** 9 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -31,8 +31,8 @@
 - **In flight:** S6 pre-sliced into two sequential opus agents (both touch the
   runtime unit and tail-append to `SymexErrorKind`, so they cannot run in parallel):
   **S6a** budget family (`beBudgetExhausted` >=3-way split, `ceInlineBudgetExceeded`,
-  `beBudgetExhaustedAssumedBound`) -- running (11:45: implementing, uncommitted
-  `tests/tsymex_rfc0005_s6a_budget.nim` present, gate sweep not yet started); **S6b** `feUnsupportedOp` split +
+  `beBudgetExhaustedAssumedBound`) -- running (12:18: gate sweep `scratchpad/s6a-sweep.log` ~219/504, uncommitted
+  `tests/tsymex_rfc0005_s6a_budget.nim` present); **S6b** `feUnsupportedOp` split +
   heap/halt sites -- next, and S6b flips the `S6` fence row.
 - **Remaining:** S6a, S6b, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent

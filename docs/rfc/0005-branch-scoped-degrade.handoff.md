@@ -44,8 +44,40 @@ soundness risk and the blast radius concentrate:
 | slice | state | commit | notes |
 |---|---|---|---|
 | S0 | done | `8a7384b` | 3 green pins through `symexFind`. Pin 1 routes `allocDegrade(heUnresolvedRef)` via `liftHeapValue`'s unsupported-pointee arm (string field through a ref) → flips at S4. Pin 2 `feUnsupportedExprKind` (inline `cast[int32]`) in a dead branch → cap veto. Pin 3 `ceUnsupportedHof` (`filter` over symbolic seq) → closure veto. Both flip to `sxSat` at S9. |
-| S0b | in progress | | |
+| S0b | done | (spike, nothing committed) | See **S0b result** below. |
 | S1 | in progress (opus) | | |
+
+### S0b result — the payoff is real, and gated on S1c
+
+Instrumented verdict site, 105 `== sxUnknown` files (the 5 Linux hangers
+excluded), c backend: **727 runs** (sat 344, unknown 250, unsat 107, raised 26).
+
+| population of the 250 `sxUnknown` runs | runs |
+|---|---|
+| over-taint-only, **no blocker at all** (flips on classification alone) | **4** (3 files, all `ceUnsupportedHof`) |
+| over-taint-only, blocked only by kindless `isUnsupported` (S1b unlocks) | 1 |
+| over-taint-only, blocked by kindless taint **and** tainted-label-reach (S1b+S1c unlock) | 49 |
+| **over-taint-only ceiling** | **54 (24 files)** — pending Z3 confirming UNSAT on the newly-solved paths |
+| blocked only by an ambiguous/split-pending kind | 81 (`beBudgetExhausted` 45, `feUnsupportedOp` 31, …) |
+| carries an under/substituted/fabricated/no-answer kind | 115 |
+
+- **`isTargetLabel`'s tainted-path skip fires in 195/250 (78%)** — the dominant
+  blocker; confirms S1c (the solve) is load-bearing, not incidental.
+- **Every `weInternalWalkerFault` (21) co-occurs with one of the two named
+  kindless sites** — no unnamed kindless site exists in this corpus.
+- **Split candidates the RFC's §3.2 does not name** (audit in S4–S6):
+  `heUnresolvedRef`, `heRefVariantUnsupported`, `heUnsupportedOwnership`,
+  `seUnsupportedTableValType`, `seUnsupportedSetCharInterop` are each reached
+  both in-walk (fresh-symbol, `allocDegrade`-family) **and** at a param-boundary
+  raise before any path exists (`dcNoAnswer`). **`heUnresolvedRef` is S0 pin 1's
+  kind — S4 must split it** or pin 1 cannot flip. `ceInlineBudgetExceeded` is a
+  budget kind analogous to `beBudgetExhausted`. `beBudgetExhaustedAssumedBound`
+  (unnamed in the RFC) is unambiguously `dcFabricated`.
+- The 19 legacy `except Symex*Error` boundary arms (`runtime.nim:12745-12932`)
+  are mostly dead: only the old `raise (ref Symex...Error)(...)` spelling at
+  param-boundary sites still reaches them.
+- Spike artifacts: `scratchpad/classify.json` (best-effort, NOT the
+  deliverable), `aggregate.py`, `spike-run-summary.tsv`.
 
 **Found, out of scope, to file:** routing `cast[int32](x) + 1` through a helper
 proc with declared return `int` trips a `lowerConvIntWidth` `AssertionDefect` on

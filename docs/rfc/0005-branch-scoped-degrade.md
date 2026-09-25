@@ -38,7 +38,7 @@ state = "done"
 [[slice]]
 id    = "S0b"
 title = "Measure the over-taint-only payoff before building (throwaway spike)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S1"

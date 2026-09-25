@@ -18,26 +18,38 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~14:06)
+## Current position (refreshed 2026-09-25 ~14:45)
 
-- **Slices done:** 9 of 15 + S6a — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
+- **Slices done:** 11 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
-  S3 (`e37c3b7`), S4 (`e7d3c7b`), S5 (`c2beefd`), S6a (`a82ed95`). Walker 144.
-- **Branch vs main:** `main` is still `6cbfe8f`; the branch lands on main by
-  fast-forward (no PR). Never pushed (no upstream).
+  S3 (`e37c3b7`), S4 (`e7d3c7b`), S5 (`c2beefd`), S6a (`a82ed95`),
+  S6b (`11e0f83`, S6 row flipped). Walker 145.
+- **S6b confirmation sweep:** S6b's own gate was a full sweep with 6 red, then a
+  *targeted* resweep after product-code fixes. A full confirmation sweep of the
+  exact sha runs in the pinned worktree `scratchpad/wt-s6b` ->
+  `scratchpad/s6b-confirm.log` (diff it vs `baseline-6cbfe8f.log`; remove the
+  worktree after).
+- **Branch vs main:** `main` is still `6cbfe8f`; lands by fast-forward (no PR).
+  Never pushed (no upstream).
 - **Windows gate:** §4.4 makes Windows CI required on semantics-bearing slices
   (S4 onward). **Asked Corey (unanswered)** whether to push the branch to trigger
   the Windows legs; until answered, gating is local sweep-diff only.
-- **In flight:** **S6b** (opus) -- `feUnsupportedOp` split + heap/halt sites +
-  the `eeUnknownExnType` decision (§3.1/§6.5); flips the `S6` fence row.
-  14:06: uncommitted, gate sweep `scratchpad/s6b-sweep.log` at ~319/506.
-- **Remaining:** S6b, S7, S8, S9, S10, S11.
-- **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
-  companions, blocks S8 only). i1 resolved.
+- **In flight:** **S7** (opus) -- seven cross-path sinks, closure-descent taint
+  joins the calling path, every closure/HOF decline through `w.degrade` + path
+  taint, S9 safety precondition pinned (`decideVerdict(vetoed=false)` not clean sat).
+- **Remaining:** S7, S8, S9, S10, S11.
+- **Open forks:** i2 (`blocked_by` edge, blocks nothing), **i3 (transparent
+  companions, blocks S8** -- `feTransparentArgNotInert` / `feTransparentResultUsed`
+  stay ⊤ until it is decided). i1 resolved. S8 hard-pauses if i3 is still open.
+- **Found outside the RFC (not fixed, needs filing/fix):** `exn_hierarchy.nim` has
+  no `ArithmeticDefect` entry, so `except ArithmeticDefect` does not catch
+  `DivByZeroDefect`/`OverflowDefect` -> **pre-existing false `sxRaised`** (S6b).
+  Also: the parser resolves operators/`contains` by name, so user overloads are
+  modelled as the builtin (pre-existing, clean paths for Table/Set).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, check `git log` for the S6b commit; if absent and no agent is
-  running, gate any uncommitted work (full sweep-diff) before committing. Then S7 (opus).
+  resume, check `git log` for the S7 commit and the S6b confirm-sweep diff; if
+  no agent is running, gate any uncommitted work (full sweep-diff) before committing.
 
 ## Implementation plan — model allocation
 
@@ -76,6 +88,7 @@ soundness risk and the blast radius concentrate:
 | S4 | done | `e7d3c7b` | sweep regressed=0 new-ok=7; c+cpp green; walker 141 -> 142. **Spec correction (not a design change):** RFC §3.1's "`allocDegrade` arms = `dcFreshSymbol`" is mostly wrong -- only ONE allocDegrade site mints a truly fresh symbol. Minted `heUnsupportedPointeeRead` (tail, `liftHeapValue` else-arm, per-read `freshDegradeName`) = dcFreshSymbol; `seUnsupportedCompoundSortLeaf` = dcSubstituted (BV64 0 filler flows as a value); `heUnresolvedRef`, `heRefVariantUnsupported`, `heUnsupportedOwnership`, `feUnsupportedParamType/WitnessType`, `seUnsupportedTable{Val,Key}Type`, `seUnsupportedSetCharInterop`, `feUnsupportedExprKind`, `feUnsupportedOp`, `weInternalWalkerFault` audited and stay dcNoAnswer (substituting sites / wrong-sort shared-name placeholders); reasons commented on each `classOf` row. The `heUnresolvedRef` boundary arm is dead (`SymexRefUnresolvedError` only raised by `defaultZero`, always caught). **Hazard found:** a fixed placeholder name shared across reads correlates two "fresh" reads -> false sxUnsat (RED 2); every placeholder must use `freshDegradeName` per read before it may classify dcFreshSymbol (heap-arm tags like `__heapMultiVariantUnsupported` still fixed). `degradeHeapArmForPath` read sites skip `nilDerefFork` -> substituted until restructured. Flips: S0 pin 1 and S3 F2b-F1 -> sxUnsat via `checkUnsatOverTaintOnly`. Guards: n20:126,144 stay sxUnknown (ran); b7r2:381 reasoned (dcNoAnswer table kind). Later reclassifications must add their kind to the `reclassified` set in `tsymex_rfc0005_s1_lattice.nim`. |
 | S5 | done | `c2beefd` | sweep regressed=0 new-ok=8, **no existing pin flipped** (new sxUnsat pins only in `tests/tsymex_rfc0005_s5_str.nim`, 40/40 c+cpp). Walker 142 -> 143. dcFreshSymbol: `seBytesLengthTooLarge`, `seBytesSymbolicLength`, `seZ3VersionMissing`, `seZ3StringIncomplete`. Minted `seRuneDecodeSymbolic` (dcSubstituted: `runeLen` forced 0, runes loop dropped). Audited dcNoAnswer: `seUnsupportedStringOp`, `seUnsupportedRegex`, `seNestedSeqUnsupported` (R1 funnel -- **RFC §3.1 wrong again**: R1 substitutes/omits; correction written in `classOf` + test header). **Hazard found + fixed:** declines raised BEFORE lowering their operands, silently dropping operand raises (`replaceAll($(a div b), ..)` lost DivByZero) -> 6 false sxUnsat observed; `runtime_strings.nim` now lowers operands (and parses the regex) first. `.high` pin is now an ordinal-adjacency pin. F2 (`toOct`) stays sxUnknown -- flipping needs an unplanned split of total-op string declines. R1 promotion would need fresh-per-read `iekSeqLen`, an IndexDefect fork in the `isIndex` decline, operand lowering in slice/add/del. Dead boundary arms for six string carriers (runtime.nim ~13139-13177) left in place. Regex tests use a local `re` shim (no libpcre in podman). |
 | S6a | done | `a82ed95` | sweep regressed=0 new-ok=9; 31/31 c+cpp; walker 143 -> 144; **no flip possible or observed** (all three classes put scIncomplete on the run; payoff is S10 replay-ineligibility + S11 attribution). Site audit: k-unroll survivors (`:9642`, `:9921`) = dcFabricated keep `beBudgetExhausted`; AssumedBound (`:9913`) dcFabricated; `maxFrontierSize` prune (`:9689`) dcOmitted -> minted **`beBudgetExhaustedPrune`**; `maxCallDepth` bail (`:11165`) + two variant-constructor budget sites (`:10621`, `:10660`, unnamed in the RFC) dcSubstituted -> minted **`beBudgetExhaustedUnmodelled`**; `ceInlineBudgetExceeded` (2 sites) dcSubstituted, no split. Class channels: dcFabricated path ⊤ / run {scIncomplete}; dcSubstituted ⊤/⊤; dcOmitted path {} / run {scIncomplete} -- safe only because the prune is a halt; **structural pin: every dcOmitted degrade must be `discard w.degrade(`** (S6b must extend its scan if its halts emit via `heapArmDegrade`/`allocDegrade`/`runtime_heap.nim`). Site-count pin per budget kind now exists -- a new emission site must update it. **`ceInlineBudgetExceeded` still sets no PATH taint** (only the closure veto guards SAT) -- S7 must fix. Variant-constructor runs always also carry `feGlobalReadUnmodelled` (parser temp read unbound). 7 existing tests renamed to the split kinds. Sweep waiter: `.drift` is written at START; wait on line count. |
+| S6b | done | `11e0f83` | gate: full sweep had 6 red (kind-name pins + `ln`), fixed; merged targeted resweep regressed=0 new-ok=10 -- **full confirmation sweep pending** (see Current position). No existing pin flipped; new sxUnsat pins in `tests/tsymex_rfc0005_s6b_ops.nim` (41/41 c+cpp). Walker 144 -> 145. `feUnsupportedOp` split: majority stays `feUnsupportedOp` = dcSubstituted; minted **`feUnsupportedOpHavoc`** (dcFreshSymbol, 10 pinned sites) and **`feUnsupportedOpAborted`** (dcNoAnswer, boundary). `heNewFieldZeroUnsupported` dcFreshSymbol. Halts dcOmitted: `heDepthExhausted`, `heUnsafeCast`, `weBreakOutsideLoop`, `seVariantFieldOnDeclinedCtor`, `eeRaiseOutsideHandler`, `eeHandlerReraiseUnmodelled`. dcSubstituted: `seByteIterUnsupported`, `geInstantiationCapped`, `geDistinctBarrier`, `hePtrArith`, `feOpaqueCallUnmodelled`, `feEnumOrdinalUnresolved`, `feGlobalReadUnmodelled`, `feUnsupportedStmtKind`, `weRecursionCycleCut`. **`eeUnknownExnType` = dcSubstituted and taints** (closed a false sxUnsat AND a false sxSat): new `dsUnknownExn` sink, `taintsRun` predicate carves the sevWarning exception into `runTaintOf`/`checkUnsatOverTaintOnly`; path-joined only where the guess is acted on. Walk-level `iteSV` folds now drain pending merge taint. Residual ⊤: genuine (ekZ3*, walker fault, beSolverUndef, geConceptViolation, eeNotInHandler, ee*Unimplemented, feUnsupportedParam/WitnessType); S7 (ce*); S7/S10 (`ceNotImplemented`, `feExtractionFailed`); inert hints; S4/S5-audited ⊤; i3's `feTransparent*`. Dead boundary catches for RaiseOutsideHandler/RaiseUnimplemented/TryUnimplemented/ClosureUnimplemented. |
 
 ### S0b result — the payoff is real, and gated on S1c
 

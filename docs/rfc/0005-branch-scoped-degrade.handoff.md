@@ -18,29 +18,25 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~12:50)
+## Current position (refreshed 2026-09-25 ~13:05)
 
-- **Slices done:** 9 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
+- **Slices done:** 9 of 15 + S6a — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
-  S3 (`e37c3b7`), S4 (`e7d3c7b`), S5 (`c2beefd`). Walker 143.
+  S3 (`e37c3b7`), S4 (`e7d3c7b`), S5 (`c2beefd`), S6a (`a82ed95`). Walker 144.
 - **Branch vs main:** `main` is still `6cbfe8f`; the branch lands on main by
   fast-forward (no PR). Never pushed (no upstream).
 - **Windows gate:** §4.4 makes Windows CI required on semantics-bearing slices
   (S4 onward). **Asked Corey (unanswered)** whether to push the branch to trigger
   the Windows legs; until answered, gating is local sweep-diff only.
-- **In flight:** S6 pre-sliced into two sequential opus agents (both touch the
-  runtime unit and tail-append to `SymexErrorKind`, so they cannot run in parallel):
-  **S6a** budget family (`beBudgetExhausted` >=3-way split, `ceInlineBudgetExceeded`,
-  `beBudgetExhaustedAssumedBound`) -- running (12:50: gate sweep `scratchpad/s6a-sweep.log` ~445/504, uncommitted
-  `tests/tsymex_rfc0005_s6a_budget.nim` present); **S6b** `feUnsupportedOp` split +
-  heap/halt sites -- next, and S6b flips the `S6` fence row.
-- **Remaining:** S6a, S6b, S7, S8, S9, S10, S11.
+- **In flight:** **S6b** (opus) -- `feUnsupportedOp` split + heap/halt sites +
+  the `eeUnknownExnType` decision (§3.1/§6.5); flips the `S6` fence row.
+- **Remaining:** S6b, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, check `git log` for the S6a / S6b commits; if absent and no agent is
-  running, gate any uncommitted work (full sweep-diff) before committing.
+  resume, check `git log` for the S6b commit; if absent and no agent is
+  running, gate any uncommitted work (full sweep-diff) before committing. Then S7 (opus).
 
 ## Implementation plan — model allocation
 
@@ -78,6 +74,7 @@ soundness risk and the blast radius concentrate:
 | S3 | done | `e37c3b7` | test-only, no bump. `tests/tsymex_rfc0005_s3_monotonicity.nim` 29/29 c+cpp. `withPoisonedArm`; family 1: 3 witnesses (sxSat label, sxRaised, sxSat behind loop+call) x poison funnels F1 `heRefVariantUnsupported`, F2 `seUnsupportedStringOp` (`toOct`), F3 field-alloc decline, F4 heap-arm variant (2nd shape) x before/after. "After" poisons never fire (`shouldStop` halts on the clean witness) -- pinned as correct. Family 2a: sole tainted witness stays sxUnknown (4). Family 2b: over-taint-only unreachable pins at sxUnknown, commented with the flip slice -- S4/S5/S6 update them in place (verdict + classOf assert at the same site). |
 | S4 | done | `e7d3c7b` | sweep regressed=0 new-ok=7; c+cpp green; walker 141 -> 142. **Spec correction (not a design change):** RFC §3.1's "`allocDegrade` arms = `dcFreshSymbol`" is mostly wrong -- only ONE allocDegrade site mints a truly fresh symbol. Minted `heUnsupportedPointeeRead` (tail, `liftHeapValue` else-arm, per-read `freshDegradeName`) = dcFreshSymbol; `seUnsupportedCompoundSortLeaf` = dcSubstituted (BV64 0 filler flows as a value); `heUnresolvedRef`, `heRefVariantUnsupported`, `heUnsupportedOwnership`, `feUnsupportedParamType/WitnessType`, `seUnsupportedTable{Val,Key}Type`, `seUnsupportedSetCharInterop`, `feUnsupportedExprKind`, `feUnsupportedOp`, `weInternalWalkerFault` audited and stay dcNoAnswer (substituting sites / wrong-sort shared-name placeholders); reasons commented on each `classOf` row. The `heUnresolvedRef` boundary arm is dead (`SymexRefUnresolvedError` only raised by `defaultZero`, always caught). **Hazard found:** a fixed placeholder name shared across reads correlates two "fresh" reads -> false sxUnsat (RED 2); every placeholder must use `freshDegradeName` per read before it may classify dcFreshSymbol (heap-arm tags like `__heapMultiVariantUnsupported` still fixed). `degradeHeapArmForPath` read sites skip `nilDerefFork` -> substituted until restructured. Flips: S0 pin 1 and S3 F2b-F1 -> sxUnsat via `checkUnsatOverTaintOnly`. Guards: n20:126,144 stay sxUnknown (ran); b7r2:381 reasoned (dcNoAnswer table kind). Later reclassifications must add their kind to the `reclassified` set in `tsymex_rfc0005_s1_lattice.nim`. |
 | S5 | done | `c2beefd` | sweep regressed=0 new-ok=8, **no existing pin flipped** (new sxUnsat pins only in `tests/tsymex_rfc0005_s5_str.nim`, 40/40 c+cpp). Walker 142 -> 143. dcFreshSymbol: `seBytesLengthTooLarge`, `seBytesSymbolicLength`, `seZ3VersionMissing`, `seZ3StringIncomplete`. Minted `seRuneDecodeSymbolic` (dcSubstituted: `runeLen` forced 0, runes loop dropped). Audited dcNoAnswer: `seUnsupportedStringOp`, `seUnsupportedRegex`, `seNestedSeqUnsupported` (R1 funnel -- **RFC §3.1 wrong again**: R1 substitutes/omits; correction written in `classOf` + test header). **Hazard found + fixed:** declines raised BEFORE lowering their operands, silently dropping operand raises (`replaceAll($(a div b), ..)` lost DivByZero) -> 6 false sxUnsat observed; `runtime_strings.nim` now lowers operands (and parses the regex) first. `.high` pin is now an ordinal-adjacency pin. F2 (`toOct`) stays sxUnknown -- flipping needs an unplanned split of total-op string declines. R1 promotion would need fresh-per-read `iekSeqLen`, an IndexDefect fork in the `isIndex` decline, operand lowering in slice/add/del. Dead boundary arms for six string carriers (runtime.nim ~13139-13177) left in place. Regex tests use a local `re` shim (no libpcre in podman). |
+| S6a | done | `a82ed95` | sweep regressed=0 new-ok=9; 31/31 c+cpp; walker 143 -> 144; **no flip possible or observed** (all three classes put scIncomplete on the run; payoff is S10 replay-ineligibility + S11 attribution). Site audit: k-unroll survivors (`:9642`, `:9921`) = dcFabricated keep `beBudgetExhausted`; AssumedBound (`:9913`) dcFabricated; `maxFrontierSize` prune (`:9689`) dcOmitted -> minted **`beBudgetExhaustedPrune`**; `maxCallDepth` bail (`:11165`) + two variant-constructor budget sites (`:10621`, `:10660`, unnamed in the RFC) dcSubstituted -> minted **`beBudgetExhaustedUnmodelled`**; `ceInlineBudgetExceeded` (2 sites) dcSubstituted, no split. Class channels: dcFabricated path ⊤ / run {scIncomplete}; dcSubstituted ⊤/⊤; dcOmitted path {} / run {scIncomplete} -- safe only because the prune is a halt; **structural pin: every dcOmitted degrade must be `discard w.degrade(`** (S6b must extend its scan if its halts emit via `heapArmDegrade`/`allocDegrade`/`runtime_heap.nim`). Site-count pin per budget kind now exists -- a new emission site must update it. **`ceInlineBudgetExceeded` still sets no PATH taint** (only the closure veto guards SAT) -- S7 must fix. Variant-constructor runs always also carry `feGlobalReadUnmodelled` (parser temp read unbound). 7 existing tests renamed to the split kinds. Sweep waiter: `.drift` is written at START; wait on line count. |
 
 ### S0b result — the payoff is real, and gated on S1c
 

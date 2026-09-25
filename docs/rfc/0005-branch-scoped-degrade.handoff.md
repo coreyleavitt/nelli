@@ -1,17 +1,50 @@
 # RFC-0005 branch-scoped-degrade (soundness channels) — handoff
 
-- **Stage:** 2 (design review). **Round 1 done** 2026-09-20; **round 2 done**
-  2026-09-20, on `fable`, same five lenses (depth, breadth, design &
-  ergonomics, implementation feasibility, load-bearing liveness).
-- **Status:** draft (unchanged). Size **L**, now honestly L+ bordering XL —
-  see §13.1. `wiring = unproven` remains accurate — nothing is built.
-- **Blocked on:** **three round-2 forks await Corey (§13)**, none of which
-  block starting S0/S0b.
-- **Resume:** go to `/tdd` on §5's **S0** (a green characterization pin — safe
-  first) then **S0b** (the measurement spike, no product code). Do not start S1
-  until S0b's number is in hand — §13.1 is conditional on it.
-- **Branch:** must be named `rfc-0005-*` or the three Windows legs never
-  trigger. This matters more here than usual — see the Linux-hang note.
+- **Stage:** 3 (implementation, `/tdd` under `/loop`), started 2026-09-25.
+  Design rounds 1–2 done 2026-09-20 (see below).
+- **Branch:** `rfc-0005-soundness-channels` (the `rfc-*` name triggers the
+  three Windows legs). Base `6cbfe8f`. Rounds 1–2 committed at `c59d7ea`.
+- **Scope:** fork i1 **resolved by Corey 2026-09-25** — "til done, do not defer
+  anything": full scope, SAT replay half included, one RFC. Open forks i2
+  (`blocked_by` edge — tracker metadata, blocks nothing) and i3
+  (transparent-pragma companions — blocks **S8 only**).
+- **Working-tree hazard:** the checkout carries ~676 spurious filesystem mode
+  flips (100644→100755). Always stage with `git -c core.fileMode=false add
+  <paths>`; never `git add -A`.
+- **Baseline:** sha-pinned sweep of `6cbfe8f` in a scratch worktree →
+  `scratchpad/baseline-6cbfe8f.log` (gate every semantics-bearing slice with
+  `scripts/sweep-diff.sh` against it).
+- **Shared slice brief** for every implementing agent:
+  `scratchpad/SLICE-BRIEF.md` (session scratchpad).
+
+## Implementation plan — model allocation
+
+Corey asked for Opus 5.5 on the hardest chunks. Allocation, by where the
+soundness risk and the blast radius concentrate:
+
+| slice | model | why |
+|---|---|---|
+| S0 exhibit pins | sonnet | test-only; needs care picking an over-only SUT |
+| S0b payoff spike | sonnet | throwaway instrumentation + a long measurement run |
+| S1 lattice/carrier/funnel | **opus** | 79 `uncertain` refs across the 17.6k-line runtime unit; the `degrade()` funnel shape is load-bearing for every later slice |
+| S1b mint missing kinds | **opus** | ~40 `mkUnsupported` sites across `dsl_parser`/`canonicalize`; correspondence pin |
+| S1c verdict rule | **opus** | the soundness-critical core: candidate pool, `shouldStop`, `isTargetLabel` solve |
+| S2 replay substrate | **opus** | macro codegen, target-shaped replay, stackable capture |
+| S3 monotonicity harness | sonnet | test macro over a battery |
+| S4 / S5 classify funnels | sonnet | per-funnel reclassification + flip audit, pattern set by S4 |
+| S6 heap + kind splits | **opus** | `beBudgetExhausted` 3-way split is the most dangerous row in the RFC |
+| S7 sinks + closure taint | **opus** | seven cross-path sinks; HOF decline migration gates S9 |
+| S8 DeclineScope | **opus** | 39 `parseErrors.add` sites; structural totality pin (needs i3) |
+| S9 delete vetoes | sonnet | small once S7/S8 hold |
+| S10 SAT relaxation | **opus** | replay into the verdict across both `runSymex` consumers; Windows-only gate |
+| S11 public surface | sonnet | `Soundness`, `gaps()`, render layer, cache schema |
+
+## Slice ledger
+
+| slice | state | commit | notes |
+|---|---|---|---|
+| S0 | in progress | | |
+| S0b | in progress | | |
 
 ## What round 2 changed
 

@@ -18,6 +18,21 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
+## Current position (refreshed 2026-09-25 ~03:16)
+
+- **Slices done:** 2 of 15 — S0 (`8a7384b`), S0b (spike, recorded).
+- **In flight:** S1 (opus agent) — code uncommitted in the main checkout
+  (`types.nim`, the runtime unit, `tests/tsymex_rfc0005_s1_lattice.nim`,
+  `nelli.nimble`); its gate sweep `scratchpad/s1-sweep.log` was 409/496.
+- **Remaining:** S1, S1b, S1c, S2, S3, S4, S5, S6, S7, S8, S9, S10, S11.
+- **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
+  companions, blocks S8 only). i1 resolved.
+- **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
+  5.5 as the agent for the most dificult chunks try to plan that out.` — on
+  resume, if the S1 agent is gone, check `git status`: uncommitted S1 work
+  must be gated (sweep-diff vs `scratchpad/baseline-6cbfe8f.log`) and
+  committed before S1b starts. S1b next, then S1c (both opus).
+
 ## Implementation plan — model allocation
 
 Corey asked for Opus 5.5 on the hardest chunks. Allocation, by where the

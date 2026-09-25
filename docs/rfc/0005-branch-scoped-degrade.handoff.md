@@ -18,22 +18,26 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~08:15)
+## Current position (refreshed 2026-09-25 ~08:45)
 
-- **Slices done:** 6 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
-  S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`).
+- **Slices done:** 7 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
+  S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
+  S3 (`e37c3b7`).
 - **Gate:** S1c sweep `scratchpad/s1c-sweep2.diff` vs baseline 6cbfe8f --
   unchanged=496 regressed=0 new-ok=5. Walker 141.
 - **Branch vs main:** `main` is still `6cbfe8f`; the branch is 20+ commits
   ahead and lands on main by fast-forward (no PR).
-- **In flight:** S3 (sonnet) -- monotonicity harness.
-- **Remaining:** S3, S4, S5, S6, S7, S8, S9, S10, S11.
+- **In flight:** S4 (upgraded to **opus**: first verdict-changing slice, sets the
+  classification + flip-audit pattern for S5/S6, and must split `heUnresolvedRef`).
+- **Windows gate:** the branch has never been pushed (no upstream). S4 is the first
+  semantics-bearing slice; §4.4 makes Windows CI a required gate from here.
+- **Remaining:** S4, S5, S6, S7, S8, S9, S10, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), i3 (transparent
   companions, blocks S8 only). i1 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, check `git log` for the S3 commit; if absent and no agent is
-  running, gate any uncommitted S3 work before committing. Then S4 (sonnet).
+  resume, check `git log` for the S4 commit; if absent and no agent is
+  running, gate any uncommitted S4 work (full sweep-diff) before committing. Then S5 (sonnet).
 
 ## Implementation plan — model allocation
 
@@ -49,7 +53,8 @@ soundness risk and the blast radius concentrate:
 | S1c verdict rule | **opus** | the soundness-critical core: candidate pool, `shouldStop`, `isTargetLabel` solve |
 | S2 replay substrate | **opus** | macro codegen, target-shaped replay, stackable capture |
 | S3 monotonicity harness | sonnet | test macro over a battery |
-| S4 / S5 classify funnels | sonnet | per-funnel reclassification + flip audit, pattern set by S4 |
+| S4 classify allocDegrade | **opus** (upgraded 08:45) | first verdict flip; sets the pattern; `heUnresolvedRef` split |
+| S5 classify funnels | sonnet | per-funnel reclassification + flip audit, pattern set by S4 |
 | S6 heap + kind splits | **opus** | `beBudgetExhausted` 3-way split is the most dangerous row in the RFC |
 | S7 sinks + closure taint | **opus** | seven cross-path sinks; HOF decline migration gates S9 |
 | S8 DeclineScope | **opus** | 39 `parseErrors.add` sites; structural totality pin (needs i3) |
@@ -67,6 +72,7 @@ soundness risk and the blast radius concentrate:
 | S1b | done | `a898905` | sweep regressed=0 after the N12 reason-suffix fix (full sweep regressed=1 before it; 24-test filtered re-sweep after). Minted `feUnsupportedStmtKind`, `weRecursionCycleCut`, `eeHandlerReraiseUnmodelled`, `ceClosureBodyDiverged` (walk sink, not closure sink), `weBreakOutsideLoop`, `beSolverUndef`; over-cap/missing callee kind via `unregisteredCalleeKey/Kind`. 54 `mkUnsupported` sites in `dsl_parser` take a kind; walker arm `w.degrade(stmt.unKind, stmt.reason)`. `kindlessPathDegrade` deleted; `kindlessRunDegrade` survives at exactly 2 sites (tainted target hit, tainted routeRaise) marked for S1c. Leak pin `stampLoweringPendingLeak` FIRES in `tsymex_r6_n40_alloc_totality` ({scSpurious, scIncomplete}) -- unfixed. Cycle cut now marks the run. Latent: parser flattens `block:` so `break` in a block inside a loop binds to the loop (out of scope, unfiled). Walker forks infeasible branches without a check -- walk-site records can come from dead paths (S8/S9). |
 | S2 | done | `48c30d6`, merged `1519608` | 13 tests c+cpp green; `ReplayOutcome`, `replayWitness`, eligibility `pathTaint <= pathTaint(dcFreshSymbol)`, stackable capture (`enclosing`). S10 API: `emitReplayWitness(fn, parsed.params, witnessNode, targetNode, pathTaintNode)`; sxRaised replays against `tRaisedExn(raw.raisedTypeId)`. Refuted and inconclusive both go to sxUnknown; lossy witnesses: hit=confirmed, miss=inconclusive. Refuted pin uses a hand witness until S1c lets symexFind return one. Gate sweep at `1519608` pending. |
 | S1c | done | `489a1e7` | sweep regressed=0 (second sweep; first regressed `tsymex_r6_n36_raise_degrade` 0->137 because solving a tainted path hung Z3 on the `iekStrInOptionRegion` decline residue). Fix: tainted-path solves run under `taintedSolveRLimit` (caller's `queryRLimit`, else `defaultConcreteBranchRLimit` 20M) -- **S10 must record this hazard.** Pure exported `decideVerdict(found, candidates, runTaint, vetoed)`; `RawResult.candidates` (empty on sxUnsat) for S10 replay; candidate extraction errors ride the candidate. `kindlessRunDegrade`/`kindlessRunTaint` deleted. n40 leak fixed (heap deref-write drains pending taint; `runConcolicCollectImpl` runs the leak stamp). Walker 140 -> 141. To force non-⊤ classes before S4: drive `decideVerdict` with a `Taint`, or IR via `mkUnsupported(kind, ...)`. S2's refuted pin still uses a hand witness (symexFind gives sxUnknown by rule 4 until S10). Vetoes unchanged (S9). |
+| S3 | done | `e37c3b7` | test-only, no bump. `tests/tsymex_rfc0005_s3_monotonicity.nim` 29/29 c+cpp. `withPoisonedArm`; family 1: 3 witnesses (sxSat label, sxRaised, sxSat behind loop+call) x poison funnels F1 `heRefVariantUnsupported`, F2 `seUnsupportedStringOp` (`toOct`), F3 field-alloc decline, F4 heap-arm variant (2nd shape) x before/after. "After" poisons never fire (`shouldStop` halts on the clean witness) -- pinned as correct. Family 2a: sole tainted witness stays sxUnknown (4). Family 2b: over-taint-only unreachable pins at sxUnknown, commented with the flip slice -- S4/S5/S6 update them in place (verdict + classOf assert at the same site). |
 
 ### S0b result — the payoff is real, and gated on S1c
 

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~10:05Z)
+## Current position (refreshed 2026-09-26 ~10:45Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -64,8 +64,10 @@
 - **S10 Windows CI (`fbbc373`): all three green** -- fuzzer-mingw 36228767377,
   fuzzer-msvc 36228767379, symex-mingw 36228767383 (first pcre64.dll run).
 - **Slices done:** 14 of 16 (S8b added as a fence row by its slice).
-- **Remaining:** S8b (running, opus: importc empty-body, parseInt '+', exn hierarchy),
-  S9, S11.
+- **Remaining:** S8b (running, opus: importc empty-body, parseInt '+', exn hierarchy;
+  code done, gate sweep `s8b-sweep.log` at 201/~509 at 10:45Z), S8c, S9, S11.
+- **S8 Windows CI (`4d06fd4`):** fuzzer-mingw 36233546704 and fuzzer-msvc
+  36233546690 green; symex-mingw 36233546682 in progress.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Scheduled S8c (after S8b, before S9):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --

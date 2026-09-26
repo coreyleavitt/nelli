@@ -102,6 +102,11 @@ title = "Name-resolved builtins: resolve callees by symbol, walk user overloads"
 state = "done"
 
 [[slice]]
+id    = "S8d"
+title = "Name-classified type heads: resolve type heads by symbol"
+state = "done"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "pending"
@@ -912,6 +917,75 @@ hidden-marker scan, and type-name checks. Out of scope, noted for later:
 `classifyType` classifies the `seq`/`Table`/`HashSet` type heads by name, so
 a user type named `Table` would be misread. Pins:
 `tests/tsymex_rfc0005_s8c_resolution.nim`.
+
+**As landed (S8d, walker 151) — name-classified type heads.** S8c's noted
+leftover, and the same class one level down: `classifyType` and the parser's
+type-dependent arms recognised a type by its **name**. A user type spelled
+like a stdlib or builtin type was modelled as that type, and nothing was
+recorded. Each of these gave a false verdict with an empty `errors`:
+
+- a user generic `seq`/`Table`/`HashSet` (here, an `array[3, T]`) took the
+  container model, so its length was symbolic (false `sxSat`);
+- a user alias `Natural = int` got `[0, high(int)]` (false `sxUnsat`);
+- a user alias `int8 = int` made `low(int8)` fold to -128 (false `sxSat`);
+- a user `Rune = distinct RuneImpl` took the `[0, 0x10FFFF]` intercept (false
+  `sxUnsat`);
+- a user enum named `bool` was two-valued (false `sxUnsat`).
+
+- **Rule.** A type-head model applies only when the head's symbol is the
+  stdlib type (`isStdlibTypeSym`, `dsl_typebridge.nim`). That means a
+  compiler builtin, or a type declared under Nim's lib dir. The builtins
+  (`int`, `char`, `string`, and the `seq`/`set`/`array`/`range`/`openArray`
+  heads of an instance) have no declaration at all: `getImpl` is nil, and
+  every user type has a `TypeDef`. So a nil impl identifies the builtin. Any
+  other type is decided by its declaring file, as S8c decides callees. A
+  generic instance is decided by its head symbol, which `getTypeInst`
+  returns directly. `isBuiltinTypeHead` checks a head against a spelling
+  set. `typeSpelling` feeds the name-keyed tables, and tags any non-stdlib
+  symbol `user:` so that it matches no entry. `isStdlibRuneSym` is shared by
+  both Rune sites.
+- **What a user type gets instead.** Its structure, as for any other user
+  type: a user enum named `bool` is that enum. Otherwise it gets the
+  existing recorded decline for its shape. A user generic instance or plain
+  alias is `feUnsupportedParamType`, which every user generic and alias of
+  any other name already gets. `low`/`high` of a user type is the recorded
+  A0 decline. A conversion to a user type named like an int or float is not
+  the builtin conversion. No kind is minted.
+- **Audit, with each site's check.**
+  - `classifyType`: the raw `sink`/`lent`/`owned`/static-`array` arms, the
+    post-`getTypeInst` `sink`/`lent`, `range` and `array` arms, the
+    range-alias arm, the `bool` exclusion from the enum arm, the Rune
+    intercept, the `seq`/`Table`/`HashSet`/`WeakRef`/`Atomic` container
+    arm, and the scalar text match (`bool`, `string`, `char`, `byte`, the
+    int and float spellings, `Natural`, `Positive`).
+  - Parser: `valueTypeName`/`typeNodeName`, which feed the `nnkConv`
+    int/float/bool conversion arms, the B2 width arms and the A0
+    `low`/`high` fold; the `byte`/`uint8` literal unwrap; `isRuneTyped`;
+    `unwrapGenericTy`'s `sink`/`lent`; and the G7 static-array binder,
+    which now needs the argument's head to be the builtin `array` too.
+  - An unresolved `nnkIdent` head keeps its spelling, as under S8c. The
+    typed pipeline never presents a user type that way.
+- **Name-only model removed.** The container arm's `WeakRef` spelling
+  mapped to `__ownership:WeakRef`, but Nim's lib declares no `WeakRef`. So
+  under the rule it could match only a user type, the same as S8c's
+  `replaceAll`/`bytes`, and it is deleted. `Atomic` (`std/atomics`) keeps
+  the ownership arm. `tsymex_r6_n42_deref_taint` and `tsymex_r6_n43_parity`
+  had built a local `WeakRef[T] = distinct T` stand-in that depended on the
+  name match. They now use the real `Atomic[bool]` and still pin the same
+  `heUnsupportedOwnership` heap-deref decline.
+- **Not covered here.** `Option`, `Deque`, `OrderedTable`, `CountTable`,
+  `set` and `openArray` have no name arm, so a user type of those names was
+  already the user-generic decline (pinned for `Option`). Two places
+  outside the classifier still spell types by name:
+  - The witness emitter (`symex.nim`, `dsl_parser.nim`'s emitters) writes
+    `seq`/`Table`/`HashSet` and a user object's own name as identifiers in
+    the caller's scope. If a caller shadows one, the result is a compile
+    error, which is loud, not a verdict.
+  - `derive.nim` and `jsonschema.nim` are PBT generator and schema code,
+    not symex.
+
+Pins: `tests/tsymex_rfc0005_s8d_typeheads.nim` (+ helper module
+`tests/s8d_user_types.nim`).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

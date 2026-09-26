@@ -818,7 +818,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## converters walk; the DSL markers match by declaring module; the
     ## name-only `replaceAll`/`bytes`/`inc(ptr)` models removed, `replace` is
     ## all-occurrence). 149->150.
-    check symexWalkerVersion == "150"
+    ## RFC-0005 S8d (type heads resolved by symbol: a user type named like a
+    ## stdlib/builtin type -- `seq`/`Table`/`HashSet`/`Natural`/`int8`/
+    ## `bool`/`Rune` -- is not modelled as it). 150->151.
+    check symexWalkerVersion == "151"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

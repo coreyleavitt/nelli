@@ -99,7 +99,7 @@
 ## No engine code changes in this slice — test-only. Walker version:
 ## unchanged (`symexWalkerVersion` stays "108"; the floor pin below matches
 ## house convention).
-import std/[unittest, strutils, tables, sets, options]
+import std/[unittest, strutils, tables, sets, options, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
@@ -166,7 +166,7 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
     check unallocatableFieldIssue(tSet(tInt(32, signed = true))).isSome
 
   test "itUninterp: the three classified marker prefixes are unallocatable; an unrecognized name is the Defect-class sentinel arm (predicate returns none -- allocateSym's own doc comment: unreachable from valid DSL surface)":
-    check unallocatableFieldIssue(tUninterp("__ownership:WeakRef")).isSome
+    check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
     check unallocatableFieldIssue(tUninterp("__unsupported:cstring")).isSome
     check unallocatableFieldIssue(tUninterp("__unsupported_witness:seq[Foo]")).isSome
     check unallocatableFieldIssue(tUninterp("__closure")).isNone
@@ -204,20 +204,16 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 # =============================================================================
 
 type
-  WeakRef[T] = distinct T
-    ## Local ownership stand-in matching classifyType's head-text-match
-    ## ("WeakRef"/"Atomic" -> __ownership:*) -- same convention as
-    ## tests/tsymex_r6_n42_deref_taint.nim's own WeakRef stand-in. MUST be
-    ## named exactly "WeakRef" (or "Atomic") -- classifyType matches on the
-    ## generic HEAD's text, not structurally, so any other name falls
-    ## through to the generic `__unsupported:` catch-all instead.
-
   N43BadHeap = object
     good:        int
     tableKeyBad: Table[int, string]
     tableValBad: Table[string, int32]
     setBad:      HashSet[int32]
-    ownBad:      WeakRef[bool]
+    ownBad:      Atomic[bool]
+      ## The REAL `std/atomics.Atomic[T]` (`__ownership:Atomic`). RFC-0005
+      ## S8d: formerly a local `WeakRef[T] = distinct T` stand-in matched by
+      ## head NAME -- the substitution S8d removes (Nim's lib has no
+      ## `WeakRef`), as in tests/tsymex_r6_n42_deref_taint.nim.
 
   N43Outer = object
     ## Two-hop indirection, mirroring tests/tsymex_r6_n42_deref_taint.nim's
@@ -321,7 +317,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     check seUnsupportedSetCharInterop in errorKinds(r)
 
   test "N43-H4: ownership-wrapped field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, heUnsupportedOwnership, no crash":
-    check unallocatableFieldIssue(tUninterp("__ownership:WeakRef")).isSome
+    check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
     let r = symexFind(n43HeapOwnershipBlock, tLabel("n43_heap_ownership"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)

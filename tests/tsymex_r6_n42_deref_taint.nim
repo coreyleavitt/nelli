@@ -66,7 +66,7 @@
 ## Walker: v104 -> v105 (see `symexWalkerVersion`'s own doc comment,
 ## `canonicalize.nim`, for the full writeup). CR-2 `==` pin 104 -> 105
 ## (`tests/tsymex_phase15_CR2_cachekey.nim`).
-import std/[unittest, strutils, tables]
+import std/[unittest, strutils, tables, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -78,16 +78,16 @@ import nelli/smt/canonicalize
 # =============================================================================
 
 type
-  WeakRef[T] = distinct T
-    ## Local stand-in matching `classifyType`'s "WeakRef"/"Atomic"
-    ## head-text-match -> `__ownership:*` (dsl_typebridge.nim ~582-588).
-    ## Mirrors the N40 test file's own dropped param-boundary companion note
-    ## (`tests/tsymex_r6_n40_alloc_totality.nim` ~175-188): a BARE top-level
-    ## `WeakRef[T]` param crashes `emitTyAndReader` at macro-expansion time,
-    ## unrelated to this slice, out of scope -- hence the two-hop indirection.
-
   N42BadOwnHeap = object
-    w: WeakRef[bool]
+    ## The ownership-wrapped field is the REAL `std/atomics.Atomic[T]`
+    ## (`classifyType` -> `__ownership:Atomic`). RFC-0005 S8d: this was a
+    ## local `WeakRef[T] = distinct T` stand-in that relied on the head being
+    ## matched by NAME -- the exact substitution S8d removes (Nim's lib has no
+    ## `WeakRef`). Mirrors the N40 test file's own dropped param-boundary
+    ## companion note (`tests/tsymex_r6_n40_alloc_totality.nim` ~175-188): a
+    ## BARE top-level ownership param crashes `emitTyAndReader` at
+    ## macro-expansion time, out of scope -- hence the two-hop indirection.
+    w: Atomic[bool]
     n: int
 
   N42OuterOwn = object
@@ -211,7 +211,7 @@ suite "symex N42 -- itUninterp (ownership) heap-deref read":
     check r.status == sxUnknown
     var saw = false
     for e in r.errors:
-      if e.kind == heUnsupportedOwnership and "WeakRef" in e.msg:
+      if e.kind == heUnsupportedOwnership and "Atomic" in e.msg:
         saw = true
     check saw
 

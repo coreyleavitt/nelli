@@ -1425,11 +1425,13 @@ proc scanDelimiterChar(litNodeRaw: NimNode, byteBacked: bool): Option[char] =
   # untouched) — unlike `char(<s>[<i>])`'s call-syntax spelling (B4's own
   # accumulator-arg unwrap), an explicit TYPE conversion of a value arrives
   # as `nnkConv`, not `nnkCall`/`nnkCommand`.
+  # RFC-0005 S8d: `isBuiltinTypeHead` -- the SYSTEM `byte`/`uint8`, not a
+  # user type of that name (whose conversion need not keep the value).
   if byteBacked and lit.kind == nnkConv and lit.len == 2 and
-     lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+     isBuiltinTypeHead(lit[0], ["byte", "uint8"]):
     lit = unwrapHidden(lit[1])
   elif byteBacked and lit.kind in {nnkCall, nnkCommand} and lit.len == 2 and
-       lit[0].kind in {nnkSym, nnkIdent} and lit[0].strVal in ["byte", "uint8"]:
+       isBuiltinTypeHead(lit[0], ["byte", "uint8"]):
     lit = unwrapHidden(lit[1])
   case lit.kind
   of nnkCharLit:
@@ -2013,12 +2015,16 @@ proc valueTypeName(node: NimNode): string =
   ## Phase 15 F5: resolved type name of a VALUE node (operand), via getTypeInst.
   ## (A bare `nnkSym` value resolves to its declared name, not its type, so we
   ## must always go through getTypeInst here.)
-  let t = node.getTypeInst
-  if t.kind in {nnkSym, nnkIdent}: t.strVal else: t.repr
+  ## RFC-0005 S8d: `typeSpelling` -- a user type named `int8`/`float32`/
+  ## `bool` is spelled `user:<name>`, so the name-keyed conversion arms
+  ## (`intTyNames`, `fltTyNames`, `"bool"`) never read it as the builtin.
+  typeSpelling(node.getTypeInst)
 
 proc typeNodeName(node: NimNode): string =
   ## Phase 15 F5: name of a TYPE node (the conversion target `n[0]`).
-  if node.kind in {nnkSym, nnkIdent}: node.strVal else: node.repr
+  ## RFC-0005 S8d: `typeSpelling`, as `valueTypeName` -- a conversion to, or
+  ## `low`/`high` of, a user type named like a builtin is not the builtin.
+  typeSpelling(node)
 
 proc siteMsg*(n: NimNode, note: string): string =
   ## Round-6 A0 (siteMsg ownership — RFC "siteMsg ownership + a real gap it
@@ -2190,14 +2196,12 @@ proc isRuneTyped(node: NimNode): bool =
   ## Used by the `$` interception sites in A7-S2 to route `$r` to `iekRuneToStr`
   ## BEFORE the `itInt` check (Rune classifies to itInt post-S1, so checking the
   ## classified kind alone would conflate Rune with a plain int).
+  ## RFC-0005 S8d: decided by SYMBOL through the shared `isStdlibRuneSym`
+  ## (the old name pair also matched a user's own `Rune`/`RuneImpl`).
   var ty = node.getTypeInst
   if ty.isNil: return false
   if ty.kind == nnkVarTy and ty.len == 1: ty = ty[0]
-  if ty.kind != nnkSym or ty.strVal != "Rune": return false
-  let impl = ty.getImpl
-  result = impl.kind == nnkTypeDef and impl.len >= 3 and
-           impl[2].kind == nnkDistinctTy and impl[2].len == 1 and
-           impl[2][0].strVal == "RuneImpl"
+  isStdlibRuneSym(ty)
 
 proc isAtomicIR(e: IRExpr): bool =
   ## RFC-parser-normalization A2a (Mechanism, #146/#149). True iff `e` needs
@@ -9366,17 +9370,19 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
     ## `argTy` (`array[range[lo..hi], _]` after `getType`) and return it as an
     ## `nnkIntLit`; else nil.
     if formalTy.kind != nnkBracketExpr or formalTy.len != 3: return nil
-    if not (formalTy[0].kind in {nnkIdent, nnkSym} and
-            formalTy[0].strVal == "array"): return nil
+    # RFC-0005 S8d: both the formal's head and the argument's must be the
+    # builtin `array` -- a user generic named `array` has no index range.
+    if not isBuiltinTypeHead(formalTy[0], ["array"]): return nil
     if not (formalTy[1].kind in {nnkIdent, nnkSym} and
             formalTy[1].strVal == sname): return nil
-    if argTy.kind != nnkBracketExpr or argTy.len != 3: return nil
+    if argTy.kind != nnkBracketExpr or argTy.len != 3 or
+       not isBuiltinTypeHead(argTy[0], ["array"]): return nil
     let idx = argTy[1]
     # `getType` renders the index as `range[lo .. hi]` (a BracketExpr) or, in
     # some forms, a bare `lo .. hi` Infix.
     var lo, hi: NimNode = nil
     if idx.kind == nnkBracketExpr and idx.len == 3 and
-       idx[0].kind in {nnkIdent, nnkSym} and idx[0].strVal == "range":
+       isBuiltinTypeHead(idx[0], ["range"]):
       lo = idx[1]; hi = idx[2]
     elif idx.kind == nnkInfix and idx.len == 3 and idx[0].strVal == "..":
       lo = idx[1]; hi = idx[2]
@@ -9397,7 +9403,7 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
     # `nnkCommand[sink|lent, T]` (NOT a bracket — see G3 AST dump); a
     # post-substitution form may also surface as `nnkBracketExpr`.
     if n.kind in {nnkBracketExpr, nnkCommand} and n.len == 2 and
-       n[0].kind in {nnkIdent, nnkSym} and n[0].strVal in ["sink", "lent"]:
+       isBuiltinTypeHead(n[0], ["sink", "lent"]):   ## RFC-0005 S8d
       return unwrapGenericTy(n[1])
     n
   let formal = impl[3]

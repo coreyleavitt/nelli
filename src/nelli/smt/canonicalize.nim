@@ -184,7 +184,25 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "150"
+const symexWalkerVersion* = "151"
+  ## RFC-0005 S8d (2026-09-26) — silent substitution by NAME-classified type
+  ## heads (§2.2's class, the type-level sibling of S8c). `classifyType` and
+  ## the parser's type-dependent arms recognised `seq`/`Table`/`HashSet`/
+  ## `range`/`array`/`sink`/`lent`/`owned`/`Atomic`, the scalar
+  ## spellings (`int8`, `bool`, `Natural`, `byte`, ...) and the
+  ## `unicode.Rune` intercept by the type's NAME, so a user type spelled the
+  ## same way (a user generic `Table[K, V]`, an alias `Natural = int` or
+  ## `int8 = int`, a user `Rune`) was modelled as the stdlib type -- false
+  ## `sxSat`/`sxUnsat` with nothing recorded. Every such site now checks the
+  ## head's symbol (`isStdlibTypeSym`/`isBuiltinTypeHead`/`typeSpelling`/
+  ## `isStdlibRuneSym`, `dsl_typebridge.nim`): a compiler builtin or a type
+  ## declared under Nim's lib dir. A user type of the same name is
+  ## classified by its structure (a user enum named `bool` is that enum) or
+  ## reaches the existing recorded `feUnsupportedParamType` (a user generic
+  ## instance or plain alias, as for every other name); `low`/`high` of one
+  ## is the recorded A0 decline, and a conversion to one is not a builtin
+  ## int/float conversion. The `WeakRef` ownership arm is removed: Nim's
+  ## lib declares no `WeakRef`, so it only ever matched a user type.
   ## RFC-0005 S8c (2026-09-26) — silent substitution by name-resolved
   ## builtins (§2.2's class). The parser recognised operators and builtins by
   ## NAME, so a user overload (`+`/`<`/`==` on a distinct or object type, a

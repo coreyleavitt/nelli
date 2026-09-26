@@ -77,6 +77,66 @@ proc isUserRoutine*(sym: NimNode): bool =
   sym.kind == nnkSym and sym.symKind in userRoutineSymKinds and
     sym.getImpl.kind != nnkNilLit and not isStdlibDecl(sym)
 
+# ---- RFC-0005 S8d: type heads resolved by SYMBOL, not by name ----------------
+#
+# The same substitution one level down. `classifyType` and the parser's
+# type-dependent arms recognised `seq`/`Table`/`HashSet`/`range`/`array`/
+# `sink`/`lent`/`owned`, the scalar spellings (`int8`, `bool`, `Natural`,
+# `byte`, ...) and `unicode.Rune` by the type's NAME. A user type spelled the
+# same way -- a user generic `Table[K, V]`, an alias `Natural = int`, a
+# `Rune = distinct RuneImpl` of the user's own -- was modelled as the stdlib
+# type, with nothing recorded. The typed AST carries the type's symbol, so the
+# question is again answerable exactly.
+
+proc isStdlibTypeSym*(sym: NimNode): bool =
+  ## RFC-0005 S8d, the type-symbol analogue of `isStdlibDecl`. True iff `sym`
+  ## is a type symbol that is either a compiler builtin or declared under the
+  ## compiler's `lib/` tree. The builtins (`int`, `int8`, `char`, `float`,
+  ## `string`, and the `seq`/`set`/`array`/`range`/`openArray` heads of an
+  ## instance) have NO declaration at all -- `getImpl` is nil, probe-confirmed
+  ## on this toolchain -- whereas every user-declared type has its `TypeDef`,
+  ## so a nil impl is the builtin's signature, not an unknown. Everything
+  ## else (`Natural`, `byte`, `bool`, `Table`, `HashSet`, `Rune`, `sink`, ...)
+  ## is decided by the declaring file, as for callees.
+  if sym.kind != nnkSym or sym.symKind != nskType: return false
+  sym.getImpl.kind == nnkNilLit or isStdlibDecl(sym)
+
+proc isBuiltinTypeHead*(head: NimNode; names: openArray[string]): bool =
+  ## RFC-0005 S8d. True iff the type head `head` is spelled as one of `names`
+  ## AND is the stdlib type of that name. An `nnkSym` head must resolve to the
+  ## stdlib (`isStdlibTypeSym`); a user type of the same name is not the
+  ## builtin. An `nnkIdent` head is unresolved -- the untyped isolation entry
+  ## point (ADR-0002) -- and carries no symbol to check, so its spelling is
+  ## all there is (S8c's rule for an `nnkIdent` callee, `isUserRoutine`). The
+  ## typed pipeline never presents a user type that way: every type head in a
+  ## typed formal, a `getTypeInst` result or a `getImpl` body is an `nnkSym`
+  ## (probe-confirmed, including generic formals' `sink`/`lent`/`array`).
+  if head.kind notin {nnkIdent, nnkSym} or head.strVal notin names:
+    return false
+  head.kind == nnkIdent or isStdlibTypeSym(head)
+
+proc typeSpelling*(t: NimNode): string =
+  ## RFC-0005 S8d. The spelling a name-keyed type table (the parser's
+  ## `intTyNames`/`fltTyNames`, the `low`/`high` fold, `"bool"`, the
+  ## `byte`/`uint8` literal unwrap) may match. A stdlib type symbol (or an
+  ## unresolved `nnkIdent`, see `isBuiltinTypeHead`) is its own name; any
+  ## other symbol -- a user type, or a VALUE symbol (`low(someArray)`) -- is
+  ## tagged `user:` so it can never equal a builtin spelling while still
+  ## reading naturally in a decline message.
+  case t.kind
+  of nnkIdent: t.strVal
+  of nnkSym: (if isStdlibTypeSym(t): t.strVal else: "user:" & t.strVal)
+  else: t.repr
+
+proc isStdlibRuneSym*(sym: NimNode): bool =
+  ## RFC-0005 S8d. True iff `sym` is `std/unicode.Rune` itself. The A7
+  ## intercept (a Rune is an int pinned to [0, 0x10FFFF]) matched the name
+  ## pair `Rune`/`RuneImpl`, so a user `type RuneImpl = int32; Rune =
+  ## distinct RuneImpl` -- any int32, negatives included -- was pinned too.
+  ## Shared by `classifyType` and the parser's `isRuneTyped`, so the two
+  ## sites cannot disagree.
+  sym.kind == nnkSym and sym.strVal == "Rune" and isStdlibTypeSym(sym)
+
 proc nominalId*(n: NimNode): string =
   ## Canonical, symbol-unique nominal type identity for a named object type or
   ## generic instantiation. Stable across call sites (`signatureHash` of the
@@ -577,7 +637,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # `getTypeInst` below would raise "node has no type". Strip the ownership
   # wrapper on the RAW node first and classify the concrete inner type.
   if ty.kind == nnkCommand and ty.len == 2 and
-     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal in ["sink", "lent"]:
+     isBuiltinTypeHead(ty[0], ["sink", "lent"]):   ## RFC-0005 S8d: by symbol
     return classifyType(ty[1])
   # Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). `owned T` is an
   # ownership annotation out of scope for the ref cluster — map to the
@@ -586,7 +646,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # presents as an nnkCommand `[owned, T]` on the RAW node (no type), so match it
   # before `getTypeInst`.
   if ty.kind == nnkCommand and ty.len == 2 and
-     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal == "owned":
+     isBuiltinTypeHead(ty[0], ["owned"]):   ## RFC-0005 S8d: by symbol
     return unranged(tUninterp("__ownership:owned"))
   # Phase 15 G7: a `static[N]`-dimensioned array formal `array[N, T]` is
   # monomorphized (by `monomorphize`, with `N → nnkIntLit`) into a SYNTHESIZED
@@ -595,7 +655,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # the RAW node first (size is the literal dimension directly; the element type
   # recurses through the normal path).
   if ty.kind == nnkBracketExpr and ty.len == 3 and
-     ty[0].kind in {nnkIdent, nnkSym} and ty[0].strVal == "array" and
+     isBuiltinTypeHead(ty[0], ["array"]) and   ## RFC-0005 S8d: by symbol
      ty[1].kind in nnkIntLit..nnkInt64Lit:
     let elemCls = classifyType(ty[2])
     return unranged(tArray(elemCls.ty, int(ty[1].intVal)))
@@ -618,21 +678,18 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # is no nnkSinkTy/nnkLentTy node). After monomorphization the inner `T` is the
   # concrete type, so this recurses to the right IRType (e.g. `sink int`→itInt).
   if resolved.kind in {nnkBracketExpr, nnkCommand} and resolved.len == 2 and
-     resolved[0].kind in {nnkIdent, nnkSym} and
-     resolved[0].strVal in ["sink", "lent"]:
+     isBuiltinTypeHead(resolved[0], ["sink", "lent"]):   ## RFC-0005 S8d
     return classifyType(resolved[1])
   # ---- structural match: range[lo .. hi] ----
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and
-     resolved[0].kind in {nnkIdent, nnkSym} and
-     resolved[0].strVal == "range":
+     isBuiltinTypeHead(resolved[0], ["range"]):   ## RFC-0005 S8d
     let (lo, hi) = parseRangeBracket(resolved)
     return ranged(rangeBaseType(resolved[1][1]), lo, hi)
   # ---- structural match: array[N, T] ----
   if resolved.kind == nnkBracketExpr and
      resolved.len == 3 and
-     resolved[0].kind in {nnkIdent, nnkSym} and
-     resolved[0].strVal == "array":
+     isBuiltinTypeHead(resolved[0], ["array"]):   ## RFC-0005 S8d
     # resolved[1] is the index range (typically `0..N-1` from Nim's
     # array literal sugar); we want N.
     let idxRange = resolved[1]
@@ -682,10 +739,13 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
       # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
-      # Rune = distinct RuneImpl = distinct int32.  We intercept by name-pair
-      # ("Rune" / "RuneImpl") to avoid touching any user-defined type also named Rune.
+      # Rune = distinct RuneImpl = distinct int32. RFC-0005 S8d: intercepted
+      # by SYMBOL (`isStdlibRuneSym`); the old `Rune`/`RuneImpl` name pair
+      # also matched a user's own pair, pinning any-int32 values into
+      # [0, 0x10FFFF] (a false `sxUnsat` for a negative). A user `Rune` falls
+      # through to the ordinary distinct arm below.
       # Path B is ADDITIVE: the byte-faithful string model (ADR-0006 S-cluster) is untouched.
-      if s == "Rune" and impl[2][0].strVal == "RuneImpl":
+      if isStdlibRuneSym(resolved):
         return ranged(tInt(64, signed = true), 0'i64, 0x10FFFF'i64)
       let baseCls = classifyType(impl[2][0])
       return unranged(tDistinct(s, baseCls.ty))
@@ -723,8 +783,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkBracketExpr and
        impl[2].len == 2 and
-       impl[2][0].kind in {nnkIdent, nnkSym} and
-       impl[2][0].strVal == "range" and
+       isBuiltinTypeHead(impl[2][0], ["range"]) and   ## RFC-0005 S8d
        impl[2][1].kind == nnkInfix and
        impl[2][1][1].kind in ({nnkCharLit} + {nnkIntLit..nnkUInt64Lit}) and
        impl[2][1][2].kind in ({nnkCharLit} + {nnkIntLit..nnkUInt64Lit}):
@@ -732,9 +791,11 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       return ranged(rangeBaseType(impl[2][1][1]), lo, hi)
     # Enum: lift to BV[w] integer with type-derived range `[minOrd, maxOrd]`.
     if impl.kind == nnkTypeDef and impl.len >= 3 and
-       impl[2].kind == nnkEnumTy and s notin ["bool"]:
+       impl[2].kind == nnkEnumTy and
+       not (s == "bool" and isStdlibTypeSym(resolved)):
       # Enum lifts to BV[w]. Skip `bool` — it has an enum-shaped impl
-      # but is handled below as itBool.
+      # but is handled below as itBool. RFC-0005 S8d: only SYSTEM's `bool`;
+      # a user enum named `bool` is the enum it declares.
       #
       # Issue #163 (audit finding W7). This USED to return `unranged(...)`,
       # with the comment "don't attach hasRange to avoid promotion routing
@@ -874,8 +935,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # deliberately NOT applied to variants — same as pre-H1 behaviour).
       return unranged(pointee)
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
+  # RFC-0005 S8d: the container models apply only to the STDLIB head
+  # (`system.seq`, `tables.Table`, `sets.HashSet`, ...). A user generic of the
+  # same name -- `type Table[K, V] = array[3, V]` -- is a user generic
+  # instance like any other and reaches the `__unsupported:` catch-all below
+  # (a recorded `feUnsupportedParamType`), never the hash-table model.
   if resolved.kind == nnkBracketExpr and
-     resolved[0].kind in {nnkIdent, nnkSym}:
+     isBuiltinTypeHead(resolved[0],
+                       ["seq", "Table", "HashSet", "Atomic"]):
     let head = resolved[0].strVal
     case head
     of "seq":
@@ -894,12 +961,16 @@ proc classifyType*(ty: NimNode): ClassifiedType =
         error("symex (Phase 5): HashSet type must be `HashSet[T]`", resolved)
       let ety = classifyType(resolved[1]).ty
       return unranged(tSet(ety))
-    of "WeakRef", "Atomic":
-      # Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). `WeakRef[T]` /
-      # `Atomic[T]` are out of scope for the ref cluster — map to an
+    of "Atomic":
+      # Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). `Atomic[T]`
+      # (`std/atomics`) is out of scope for the ref cluster — map to an
       # `__ownership:*` placeholder so `allocateSym` raises the classified
       # `heUnsupportedOwnership` (sxUnknown, Invariant 3) at walk time rather
-      # than a compile error.
+      # than a compile error. RFC-0005 S8d: the `WeakRef` spelling this arm
+      # also matched is removed -- Nim's lib has no `WeakRef` type, so under
+      # the by-symbol rule it could only ever match a USER type of that name
+      # (a name-only model, as S8c's `replaceAll`/`bytes`). A user `WeakRef`
+      # is a user generic: the `__unsupported:` catch-all below.
       return unranged(tUninterp("__ownership:" & head))
     else: discard
   # Phase 15 Cluster R (R1a, ADR-0010). Inline `ref T` / `ptr T` — classify to
@@ -921,7 +992,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     return unranged(tUninterp("__closure"))
   # ---- otherwise: text match on the resolved type name ----
   let s = resolved.repr.strip
-  case s
+  # RFC-0005 S8d: the spellings below are the BUILTIN types. A user type of
+  # the same name -- `type Natural = int` (no lower bound), `type int8 = int`
+  # (64 bits), `type string = seq[char]` -- is not one of them, and a user
+  # alias or generic instance has no structural arm above, so it takes the
+  # catch-all's recorded `feUnsupportedParamType`, exactly as a user alias
+  # of any other name always has. `typeSpelling` tags a non-stdlib symbol
+  # `user:`, which no arm matches.
+  case (if resolved.kind in {nnkIdent, nnkSym}: typeSpelling(resolved) else: s)
   of "bool":     unranged(tBool())
   of "string":   unranged(tString())
   of "char":     unranged(tInt(8,  signed = false))  ## Phase 15 Z3c: char = uint8

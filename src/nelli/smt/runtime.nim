@@ -154,7 +154,7 @@ type
 
   SymexOwnershipUnsupportedError* = object of CatchableError
     ## Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). Raised when an
-    ## `owned T` / `WeakRef[T]` / `Atomic[T]` formal is allocated (classifyType
+    ## `owned T` / `Atomic[T]` formal is allocated (classifyType
     ## maps these to an `__ownership:*` placeholder). Caught at the `runSymex`
     ## boundary → `sxUnknown` carrying a `heUnsupportedOwnership` (sevError)
     ## classified error (Invariant 3). These ownership wrappers are out of scope
@@ -2343,7 +2343,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
   case ty.kind
   of itUninterp:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): classifyType maps `owned T` /
-    # `WeakRef[T]` / `Atomic[T]` to an `__ownership:*` placeholder. Allocating
+    # `Atomic[T]` to an `__ownership:*` placeholder. Allocating
     # one raises the classified ownership halt (caught at the runSymex boundary
     # → heUnsupportedOwnership → sxUnknown, Invariant 3).
     if ty.uninterpName.startsWith("__ownership:"):
@@ -13726,7 +13726,7 @@ proc runSymexCaught(prog: SymexProgram,
                                        severity: sevError, msg: e.msg,
                                        scope: abortScope())])
   except SymexOwnershipUnsupportedError as e:
-    # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` / `WeakRef[T]` /
+    # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` /
     # `Atomic[T]` formal was allocated -> sxUnknown + heUnsupportedOwnership
     # (Invariant 3 — classified, out of scope for the cluster).
     RawResult(status: sxUnknown,

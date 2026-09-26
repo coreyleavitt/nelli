@@ -351,13 +351,16 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pattern (A) site inventory: 7 runtime.nim + 20 runtime_strings.nim + 13 runtime_heap.nim marked lines":
+  test "pattern (A) site inventory: 7 runtime.nim + 18 runtime_strings.nim + 13 runtime_heap.nim marked lines":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
     ## runtime.nim/runtime_strings.nim counts are N40's own (7 unchanged;
     ## runtime_strings.nim 19->20, N46 hardened `lowerStrArm`'s final else
-    ## from a bare ValueError into this SAME pattern + chokepoint shape).
+    ## from a bare ValueError into this SAME pattern + chokepoint shape;
+    ## 20->18 in RFC-0005 S8c, which deleted the name-matched `bytes(s)` arm
+    ## and its two sites -- `SymexBytesSymbolicLengthError` /
+    ## `SymexBytesLengthTooLargeError`).
     ## runtime_heap.nim (13) is entirely NEW as of N46 -- this file was never
     ## scanned before this slice.
     let runtimeCount = countMarked(readFile(runtimeNimPath), refSymexPrefix, false)
@@ -366,7 +369,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
                $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
     check runtimeCount == 7
-    check runtimeStringsCount == 20
+    check runtimeStringsCount == 18
     # N46-followup-2 (round-6 re-review, heap-raise totality slice):
     # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
     # CONVERTED to the in-band degrade idiom (no longer raw raises, no

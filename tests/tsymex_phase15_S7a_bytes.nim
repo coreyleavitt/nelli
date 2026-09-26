@@ -1,103 +1,72 @@
-## Phase 15 — Cluster S, cycle S7a: `bytes(s)` byte-faithful byte-view.
+## Phase 15 — Cluster S, cycle S7a: byte-faithful byte view.
 ##
-## Under the byte-faithful string model (ADR-0006), every Z3 string character is
-## ALREADY a single byte (constrained ≤0xFF at allocation, S3). So `bytes(s)` is
-## the TRIVIAL identity byte-view — NOT a multi-byte UTF-8 decoding subsystem:
+## RFC-0005 S8c rewrite. S7a shipped a `bytes(s)` model (`smkStrBytes` ->
+## `iekStrBytes`) that the parser reached BY NAME on a string receiver. Nim's
+## stdlib has no `bytes(string)`, so the only way to reach that model was a
+## USER proc named `bytes` -- the silent-substitution class S8c removes (the
+## user's body was never walked; the model stood in for it). S8c deleted the
+## model, its `seBytesSymbolicLength` / `seBytesLengthTooLarge` kinds (retired)
+## and the `maxBytesEncodingLen` budget that capped it. This file now pins:
 ##
-##   * `bytes(s)` → an `svSeq` of `svBV8`, one element per character position.
-##   * `seqLen(bytes(s)) == len(s)` — EQUAL (byte count == char count under
-##     byte-faithful), NOT `>=`.
-##   * `bytes(s)[i] == intToBv[8](toCode(at(s, i)))` — reuses S3's exact
-##     at→toCode→BV8 bridge.
-##
-## A multi-byte literal like `"é"` is already its raw 2 bytes `[0xC3, 0xA9]`
-## (length 2) under byte-faithful `mkString`/`Z3_mk_lstring` — so `bytes("é")`
-## is a length-2 seq of those byte values, NOT a "2-byte UTF-8 codepoint".
-## `seBytesBeyondBMP` is UNREACHABLE (a char is ≤0xFF by construction; toCode
-## always fits BV8), so there is NO multi-byte-rune test here.
-##
-## Concrete vs symbolic length is detected at the IR level (mirroring S5 split):
-## a string LITERAL receiver (`iekStrLit`) has a known byte count; a bare
-## `string` parameter does not → seBytesSymbolicLength (sxUnknown, Invariant 3).
-## So the concrete cases call `bytes` on a LITERAL while the `string` parameter
-## is present only so the witness has a parameter (the S5 split idiom).
+##   * a user `bytes` helper is WALKED as an ordinary user call. Its body
+##     iterates a string (`for c in s`), which the walker declines at parse
+##     time with a recorded `seByteIterUnsupported` -- so every SUT through it
+##     is `sxUnknown`, never a verdict borrowed from the deleted model;
+##   * the byte-faithful facts the model asserted (ADR-0006: a Z3 string
+##     character IS one Nim byte; `"é"` is its raw 2 bytes `[0xC3, 0xA9]`)
+##     still hold through real code: `s[i]` / `ord(s[i])` / `s.len`.
 import std/unittest
 import nelli/symex
-import nelli/smt/runtime
+import nelli/smt/types
 
-# `bytes` is not a Nim stdlib proc; the symex parser intercepts it by NAME on an
-# `itString` receiver (smkStrBytes → iekStrBytes). The body never runs under
-# symex (the walker models the call, not its source). A local shim returning
-# `seq[byte]` lets Nim typecheck and `classifyType` see `seq[byte]` so the `[]`
-# index path lowers to the BV8 element. (Mirrors S5's `replaceAll` shim.)
 proc bytes(s: string): seq[byte] =
+  ## A user helper. NOT a model entry point: walked like any user routine.
   for c in s: result.add byte(c)
 
-# --- length-1 literal: bytes("A")[0] == 65 ('A') ---
-# Index inline (no `let` of a `byte`-typed local — the seq index path classifies
-# the SEQ and uses its BV8 element type, no `byte`-name lookup needed).
+# --- through the user helper: walked, declined, recorded ---------------------
+
 proc bytesAIs65(s: string) =
   if s == "x":
     if bytes("A").len == 1 and bytes("A")[0] == 65'u8:
       symexTarget("hit")
 
-# --- multi-byte literal: bytes("é") is the raw 2 bytes [0xC3, 0xA9] ---
-# byte-faithful: "é" is ALREADY 2 byte-chars, so bytes is length-2 with those
-# raw byte values — NOT a single 2-byte UTF-8 codepoint.
-proc bytesEacuteIs2(s: string) =
-  if s == "x":
-    if bytes("é").len == 2 and bytes("é")[0] == 0xC3'u8 and
-       bytes("é")[1] == 0xA9'u8:
-      symexTarget("hit")
-
-# --- len(bytes(s)) == len(s): EQUAL under byte-faithful ---
-# Concrete s pinned to a literal; bytes over the same literal. Both are 5.
-proc bytesLenEqualsStrLen(s: string) =
-  if s == "hello" and bytes("hello").len == s.len:
-    symexTarget("hit")
-
-# --- symbolic length: bytes(s) on a bare parameter → seBytesSymbolicLength ---
 proc bytesSymbolicLen(s: string) =
   if bytes(s).len == 3:
     symexTarget("hit")
 
-# --- concrete length > maxBytesEncodingLen (default 32) → seBytesLengthTooLarge ---
-# A 33-byte literal exceeds the cap.
-proc bytesTooLong(s: string) =
-  if s == "x":
-    if bytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa").len == 33:  # 33 'a's
-      symexTarget("hit")
+# --- the byte-faithful facts, through real code --------------------------------
 
-suite "symex Phase 15 S7a — bytes(s) byte-faithful byte-view":
-  test "bytes(\"A\") is length-1 with bytes[0] == 65 (sat)":
+proc eacuteIsTwoRawBytes(s: string) =
+  ## byte-faithful: "é" is ALREADY 2 byte-chars -- NOT one 2-byte codepoint.
+  if s == "é" and s.len == 2 and ord(s[0]) == 0xC3 and ord(s[1]) == 0xA9:
+    symexTarget("hit")
+
+proc eacuteIsNotOneChar(s: string) =
+  if s == "é" and s.len == 1:
+    symexTarget("hit")
+
+proc hasKind(errs: seq[SymexErrorInfo], k: SymexErrorKind): bool =
+  for e in errs:
+    if e.kind == k: return true
+
+suite "symex Phase 15 S7a — byte view (RFC-0005 S8c: no name-matched bytes model)":
+  test "a user `bytes` helper over a literal is walked: sxUnknown, seByteIterUnsupported":
     let r = symexFind(bytesAIs65, tLabel("hit"))
-    check r.status == sxSat
-    check r.witness[0] == "x"
+    check r.status == sxUnknown
+    check r.errors.hasKind(seByteIterUnsupported)
+    check not r.errors.hasKind(seBytesLengthTooLarge)
 
-  test "bytes(\"é\") is the raw 2 bytes @[0xC3, 0xA9] (byte-faithful, sat)":
-    let r = symexFind(bytesEacuteIs2, tLabel("hit"))
-    check r.status == sxSat
-    check r.witness[0] == "x"
-
-  test "len(bytes(s)) == len(s) — EQUAL under byte-faithful (sat)":
-    let r = symexFind(bytesLenEqualsStrLen, tLabel("hit"))
-    check r.status == sxSat
-    check r.witness[0] == "hello"
-
-  test "symbolic-length bytes(s) → sxUnknown + seBytesSymbolicLength":
+  test "a user `bytes` helper over a parameter is walked: sxUnknown, seByteIterUnsupported":
     let r = symexFind(bytesSymbolicLen, tLabel("hit"))
     check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seBytesSymbolicLength
+    check r.errors.hasKind(seByteIterUnsupported)
+    check not r.errors.hasKind(seBytesSymbolicLength)
 
-  test "concrete length > maxBytesEncodingLen → seBytesLengthTooLarge, confirmed by replay":
-    ## RFC-0005 S10: bytes of the 33-byte literal really has length 33,
-    ## so the label is reachable at s == "x". The path's taint is
-    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
-    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
-    ## the classified kind is still recorded.
-    let r = symexFind(bytesTooLong, tLabel("hit"))
+  test "\"é\" is the raw 2 bytes [0xC3, 0xA9] through s[i] (byte-faithful, sat)":
+    let r = symexFind(eacuteIsTwoRawBytes, tLabel("hit"))
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seBytesLengthTooLarge
+    check r.witness[0] == "é"
+
+  test "\"é\" is not one character (byte-faithful, unsat)":
+    let r = symexFind(eacuteIsNotOneChar, tLabel("hit"))
+    check r.status == sxUnsat

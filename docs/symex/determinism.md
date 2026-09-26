@@ -311,10 +311,8 @@ exactly like every other type. The string-specific guarantees are:
   | `for c in s` | (explicit message, NOT `seByteIterUnsupported`) | unbounded symbolic iteration length — no sound bounded encoding |
   | `s[i] = c` / `s.add(c)` / `s.add(otherStr)` | `seUnsupportedStringOp` | Z3 strings are **immutable** (ADR-0006); classified at S11. `s[i] = c` is detected as an `nnkAsgn` whose LHS is a string-index; `s.add(…)` as an `itString`-receiver `add` call. The reason is immutability, NOT a byte/codepoint mismatch. |
   | `toLower` / `toUpper` | `seUnsupportedStringOp` | no Z3 case-folding primitive (regex-range approx is Phase 16) |
-  | `replaceAll` / regex `replace(re…)` | `seZ3VersionMissing` | gated behind `z3WithSeqReplaceAll` / `z3WithSeqReplaceRe`; both **absent on Z3 4.15.0** (this dev image) |
+  | `strutils.replace` (all occurrences; RFC-0005 S8c) / regex `replace(re…)` | `seZ3VersionMissing` | gated behind `z3WithSeqReplaceAll` / `z3WithSeqReplaceRe`; both **absent on Z3 4.15.0** (this dev image). An empty literal `sub` is exact (returns `s`). |
   | general symbolic `split` | `seZ3StringIncomplete` | universal quantifier over a symbolic `seq[string]` — conservatively not encoded |
-  | `bytes(symbolic-len s)` | `seBytesSymbolicLength` | byte count is the unknown symbolic length |
-  | `bytes(concrete-len > maxBytesEncodingLen)` | `seBytesLengthTooLarge` | exceeds the encoding cap (default 32) |
   | `s.find(re…)` (regex search) | `seUnsupportedRegex` | nim-z3 has no `indexOf`-on-regex API (only substring `indexOf`); deferred |
   | rejected regex (backref `\1`, lookahead `(?=…)`, named groups) | `seUnsupportedRegex` | the S6a parser rejects these families |
 

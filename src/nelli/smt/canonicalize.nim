@@ -184,7 +184,34 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "149"
+const symexWalkerVersion* = "150"
+  ## RFC-0005 S8c (2026-09-26) — silent substitution by name-resolved
+  ## builtins (§2.2's class). The parser recognised operators and builtins by
+  ## NAME, so a user overload (`+`/`<`/`==` on a distinct or object type, a
+  ## non-generic `contains`/`len`/`items`/`add` that beats the stdlib
+  ## generic, a string-receiver `find`, a proc merely named `symexAssume`)
+  ## was modelled as the builtin -- false `sxSat`/`sxUnsat` with nothing
+  ## recorded. Every name-dispatch site now checks the resolved symbol
+  ## (`isUserCallee`/`isBuiltinNamed`, `dsl_parser.nim`; `isStdlibDecl`,
+  ## `dsl_typebridge.nim`): a builtin model applies only when the callee is
+  ## declared under Nim's lib dir, and a user routine is walked as an
+  ## ordinary user call (call/infix/prefix/hidden-conv, statement calls and
+  ## aug-assign, for-loop iterators), falling to the existing opaque/decline
+  ## arms when its body cannot be walked. User `converter`s now walk (re-treed
+  ## like `func`); `method` stays a recorded callee decline (dynamic
+  ## dispatch); `{.borrow.}` keeps the base model. The DSL markers match by
+  ## declaring module (`nelli/engine/markers.nim`), not by name. Three models
+  ## were reachable ONLY through a user routine sharing a builtin's name and
+  ## are removed: the `replaceAll` entry (no stdlib `replaceAll`) -- and the
+  ## resolved `strutils.replace`, modelled FIRST-occurrence (a false verdict:
+  ## `"foofoo".replace("foo","bar")` is `"barbar"`), now reaches the
+  ## all-occurrence `iekStrReplaceAll` (version-gated -> `seZ3VersionMissing`;
+  ## an empty literal `sub` returns `s` exactly), `iekStrReplace` deleted; the
+  ## `bytes(s)` model (`iekStrBytes`, `maxBytesEncodingLen`, retired
+  ## `seBytesSymbolicLength`/`seBytesLengthTooLarge`; no stdlib `bytes`); and
+  ## the R8 `inc`/`dec(ptr)` guard (retired `hePtrArith`; `system.inc` takes
+  ## an Ordinal, real pointer arithmetic is a `cast` -> `heUnsafeCast`).
+  ## The settings key drops its `;mbel=` segment with the field.
   ## RFC-0005 S8b (2026-09-26) — three silent substitutions (§2.2's class:
   ## a site substituted behaviour and recorded nothing). (1) A call to a
   ## bodiless foreign callee (`{.importc.}`/`importcpp`/`dynlib`/...) was
@@ -4597,9 +4624,6 @@ proc canonicalize*(s: SymexSettings): string =
   ##   maxClosureInlineCount — cap on closure descent depth; triggers
   ##                        ceInlineBudgetExceeded → sxUnknown if hit.
   ##                        CR-2 (was missing).
-  ##   maxBytesEncodingLen   — cap on bytes(s) materialisation length; triggers
-  ##                        seBytesLengthTooLarge → sxUnknown if exceeded.
-  ##                        CR-2 (was missing).
   ##   replay             — RFC-0005 S10: whether a replay-eligible candidate
   ##                        may be confirmed into sxSat/sxRaised or stays
   ##                        sxUnknown; changes the verdict. Rendered `;rp=off`
@@ -4654,7 +4678,6 @@ proc canonicalize*(s: SymexSettings): string =
     ";ac=" & $s.arithChecks &           ## R16-1: set[ArithCheck]; same ordinal-
                                         ## stable rendering as defectExclusions.
     ";mcic=" & $s.budget.maxClosureInlineCount &  ## CR-2
-    ";mbel=" & $s.budget.maxBytesEncodingLen &    ## CR-2
     ";mfa=" & $s.budget.maxFreshnessAssertions &  ## CR-2
     ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
     ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3

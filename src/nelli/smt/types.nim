@@ -74,8 +74,8 @@ type
                ## with a classified `heUnresolvedRef` → `sxUnknown` (Invariant 3).
     itPtr      ## Phase 15 Cluster R (R1a, ADR-0010): a `ptr T` type — same heap
                ## model as `itRef`. Carries `ptrPointeeTy: IRType`. Pointer
-               ## arithmetic is classified `hePtrArith` in R8; R1a STUBS it as
-               ## `heUnresolvedRef`.
+               ## arithmetic (a `cast` through an integer) records
+               ## `heUnsafeCast`.
     itDistinct ## Phase 15 G4 (ADR-0008 D4): a `distinct T` type. Maps to a
                ## FRESH uninterpreted Z3 sort named `distinctName` (a type wall
                ## between the distinct type and its base). Carries the base
@@ -427,8 +427,11 @@ type
     iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
     iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)
     iekStrEndsWith   ## `s.endsWith(q)`    → Z3 `(seq.suffixof q s)`    (S4)
-    iekStrReplace    ## `s.replace(o,n)`   → Z3 `replace` first-occ     (S5)
-    iekStrReplaceAll ## `s.replace(o,n)` all-occ (z3WithSeqReplaceAll)  (S5)
+    iekStrReplaceAll ## `strutils.replace(s,o,n)` → every occurrence,
+                     ## Z3 `(seq.replace_all …)` (z3WithSeqReplaceAll) (S5).
+                     ## RFC-0005 S8c: the ONLY replace model -- Nim's
+                     ## `replace` is all-occurrence; the first-occurrence
+                     ## `iekStrReplace` it used to reach is deleted.
     iekStrSplit      ## `s.split(sep)`     → bounded split             (S5)
     iekStrJoin       ## `xs.join(sep)`     → bounded concat            (S5)
     iekStrMatch      ## `s.match(re"…")`   → Z3 `(seq.in.re s r)`      (S6b)
@@ -440,7 +443,6 @@ type
     iekStrReplaceRe  ## `s.replace(re"…",x)` → Z3 `(seq.replace_re …)`  (S6b)
                      ## VERSION-GATED `-d:z3WithSeqReplaceRe`; pattern in `strOp`,
                      ## `strArgs == [recv, replacement]`.
-    iekStrBytes      ## `bytes(s)[i]`      → identity byte view        (S7a)
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
     iekStrToInt      ## `parseInt(s)`      → Z3 `(str.to.int s)`       (S10a)
@@ -653,9 +655,9 @@ type
       tabKey*:  IRExpr
       tabVal*:  IRExpr
     of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
-       iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+       iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-       iekStrBytes, iekStrConcat,
+       iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
        iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
        iekStrInOptionRegion:
@@ -1318,7 +1320,14 @@ type
     seUnsupportedStringOp, seUnsupportedRegex, seZ3StringIncomplete,
     seZ3VersionMissing,   ## Phase 15 S5: op requires a newer Z3 (e.g.
                           ## `Z3_mk_seq_replace_all`, absent < 4.15.5).
-    seBytesSymbolicLength, seBytesLengthTooLarge,
+    seBytesSymbolicLength, ## RETIRED RFC-0005 S8c -- retained for ordinal
+                           ## stability, NEVER EMITTED. Was the `bytes(s)`
+                           ## model's symbolic-length decline; that model was
+                           ## reachable only through a USER proc named `bytes`
+                           ## (Nim's stdlib has none), and S8c walks user
+                           ## routines instead of name-matching them.
+    seBytesLengthTooLarge, ## RETIRED RFC-0005 S8c -- as `seBytesSymbolicLength`
+                           ## (the same deleted `bytes(s)` model's length cap).
     seByteIndexUnsupported, ## reserved/unused: no distinct runtime degrade site
                             ## for symbolic byte-index constructs — string index
                             ## `s[i]` is handled upstream through a different path
@@ -1384,7 +1393,15 @@ type
                             ## exceeded `settings.maxClosureInlineCount`
                             ## (the `CallFrameCtx.closureInlineCount` budget).
                             ## sevError → sxUnknown (Invariant 3).
-    heDepthExhausted, heUnsafeCast, hePtrArith, hePtrFamily,
+    heDepthExhausted, heUnsafeCast,
+    hePtrArith,            ## RETIRED RFC-0005 S8c -- retained for ordinal
+                           ## stability, NEVER EMITTED. Its one producer keyed
+                           ## on `inc`/`dec` over a `ptr` operand, a call that
+                           ## exists only as a USER overload (`system.inc`
+                           ## takes an Ordinal); S8c walks that user routine.
+                           ## Real pointer arithmetic goes through `cast`,
+                           ## which records `heUnsafeCast`.
+    hePtrFamily,
     heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
     heUnsupportedOwnership,
     heUnresolvedRef,       ## Phase 15 R1a (ADR-0010): the walker reached an
@@ -2343,14 +2360,15 @@ type
     ## limit is reached).
     ##
     ## RFC-0010 B4: this promise was FALSE for four fields (`maxCallDepth`,
-    ## `maxLoopUnwind`, `maxClosureInlineCount`, `maxBytesEncodingLen`) as
+    ## `maxLoopUnwind`, `maxClosureInlineCount`, and the since-deleted
+    ## `maxBytesEncodingLen`) as
     ## originally written — each enforcement site was missing the
     ## `cap > 0 and` guard `maxFrontierSize`/`maxSplitParts` already used, so
     ## an explicit 0 exhausted the budget on the very FIRST use instead of
-    ## behaving as unlimited. Two of the four are fixed and now genuinely
+    ## behaving as unlimited. Two of the four were fixed and genuinely
     ## honour 0 = unlimited: `maxClosureInlineCount` (`runtime.nim`'s
-    ## `applyClosureGround`) and `maxBytesEncodingLen`
-    ## (`runtime_strings.nim`). A guard for `maxCallDepth` was added in the
+    ## `applyClosureGround`) and `maxBytesEncodingLen` (deleted with the
+    ## `bytes(s)` model it capped, RFC-0005 S8c). A guard for `maxCallDepth` was added in the
     ## same round and then REVERTED in round 2 — see below; it traded a
     ## bounded-but-useless `sxUnknown` for a native-stack-exhaustion SIGSEGV.
     ##
@@ -2577,11 +2595,6 @@ type
       ## Phase 15 S5. Upper bound on the number of parts a symbolic
       ## `string.split` decomposition may produce. Default `8`. `0` means
       ## unlimited.
-    maxBytesEncodingLen*: int = 32
-      ## Phase 15 S7a. Upper bound on the concrete byte/char count a
-      ## `bytes(s)` byte-view may materialise. Default `32`. `0` means
-      ## unlimited (RFC-0010 B4).
-      ## seBytesLengthTooLarge (sxUnknown) when exceeded.
     seqInlineThreshold*: int = 8
       ## Phase 15 C4 (net-new, ADR-0009). Upper bound on CONCRETE seq
       ## length a DSL HOF will UNROLL inline. Default `8`. A concrete
@@ -2768,16 +2781,13 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # been lowered (S5 moved the split receiver/separator lowering ahead of
     # the raise: a dropped operand raise fork was an under-approximation).
   of seZ3VersionMissing: dcFreshSymbol
-    # S5: `replaceAll` / regex `replace` without the Z3 >= 4.15.5 gates --
+    # S5: `strutils.replace` (all-occurrence, RFC-0005 S8c) / regex
+    # `replace` without the Z3 >= 4.15.5 gates --
     # operands lowered (and the pattern parsed) first, then a fresh per-read
     # `degradeStrArm` symbol. The op is total in Nim, so nothing is dropped.
-  of seBytesSymbolicLength: dcFreshSymbol
-    # S5: `bytes(s)` over a non-literal -- the receiver is lowered first
-    # (S5), then a fresh per-read `seq[uint8]` symbol (a superset: its
-    # `len == len(s)` link is lost, never forced).
-  of seBytesLengthTooLarge: dcFreshSymbol
-    # S5: `bytes(<literal>)` over `maxBytesEncodingLen` -- the receiver is a
-    # literal (no effects to drop); a fresh per-read `seq[uint8]` symbol.
+  of seBytesSymbolicLength, seBytesLengthTooLarge: dcNoAnswer
+    # RFC-0005 S8c: retired, never emitted -- the `bytes(s)` model they
+    # classified is deleted. The row stays only because `classOf` is total.
   of seByteIndexUnsupported: dcNoAnswer
   of seByteIterUnsupported: dcSubstituted
     # S6b: the one site is a parse-time decline of `for c in s` over a
@@ -2865,9 +2875,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S6b: recorded at parse time (the `cast[ptr T]`/`addr` binding); the
     # walker's `isUnsafeCast` arm returns `@[]` -- every path through the
     # binding is dropped, nothing is bound in its place.
-  of hePtrArith: dcSubstituted
-    # S6b: parse-time `mkUnsupported` for `inc`/`dec` on a pointer -- the
-    # statement is dropped, so the pointer keeps its stale value.
+  of hePtrArith: dcNoAnswer
+    # RFC-0005 S8c: retired, never emitted -- its producer keyed on a
+    # user-only `inc`/`dec(ptr)` overload. Row kept: `classOf` is total.
   of hePtrFamily: dcNoAnswer
   of heFreshnessCapExceeded: dcNoAnswer
   of heUnsupportedVarRef: dcNoAnswer
@@ -3305,9 +3315,9 @@ proc zeroIRExprForType*(ty: IRType): IRExpr =
 
 const StrOpKinds* = {
   iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
-  iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+  iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-  iekStrBytes, iekStrConcat,
+  iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
   iekStrInOptionRegion}
@@ -4400,8 +4410,6 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   if b.maxInstantiationsPerProc != d.maxInstantiationsPerProc:
     result.maxInstantiationsPerProc = b.maxInstantiationsPerProc
   if b.maxSplitParts != d.maxSplitParts: result.maxSplitParts = b.maxSplitParts
-  if b.maxBytesEncodingLen != d.maxBytesEncodingLen:
-    result.maxBytesEncodingLen = b.maxBytesEncodingLen
   if b.seqInlineThreshold != d.seqInlineThreshold:   ## Phase 15 C4
     result.seqInlineThreshold = b.seqInlineThreshold
   if b.maxVariantConstructorForks != d.maxVariantConstructorForks:  ## Round-6 A3

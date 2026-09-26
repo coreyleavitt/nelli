@@ -1,11 +1,14 @@
-## Phase 15 — Cluster S, cycle S5: string replace / replaceAll / split / join.
+## Phase 15 — Cluster S, cycle S5: string replace / split / join.
 ##
-## The densest Cluster-S cycle. Wires the four replacement / sequence-decomposition
+## The densest Cluster-S cycle. Wires the replacement / sequence-decomposition
 ## operations:
-##   * `s.replace(old, new)`   → Z3 `(seq.replace s old new)` first-occurrence  → svString
-##   * `s.replaceAll(old, new)`→ Z3 `(seq.replace_all …)` — VERSION-GATED: on a
-##                               build without `-d:z3WithSeqReplaceAll` (this one),
-##                               yields sxUnknown + seZ3VersionMissing (never a crash).
+##   * `s.replace(old, new)`   → Z3 `(seq.replace_all …)`: EVERY occurrence, as
+##                               `strutils.replace` does (RFC-0005 S8c; S5 had
+##                               modelled it first-occurrence, and a user
+##                               `replaceAll` shim reached the all-occurrence
+##                               model by name). VERSION-GATED: on a build
+##                               without `-d:z3WithSeqReplaceAll` (this one) it
+##                               records seZ3VersionMissing (never a crash).
 ##   * `s.split(sep)`          → symbolic `seq[string]`; tractable special cases:
 ##                               (a) empty-sep → single-byte parts; (b) concrete
 ##                               input + length-1 concrete sep → concrete inline parts.
@@ -19,22 +22,14 @@ import std/strutils  ## replace/split/join on strings
 import nelli/symex
 import nelli/smt/runtime
 
-# Nim's `strutils.replace` is already global (all-occurrence) and there is no
-# `replaceAll` in the stdlib. The symex parser dispatches on the *callee name*
-# for an `itString` receiver, so a local `replaceAll` shim routes to
-# `smkStrReplaceAll` → `iekStrReplaceAll` (the version-gated path under test).
-# The body never runs under symex (the walker models the call, not its source).
-proc replaceAll(s, old, neu: string): string =
-  s.replace(old, neu)
-
-# --- replace: first-occurrence ---
+# --- replace: every occurrence -- "foofoo" -> "barbar" ---
 proc replaceFoo(s: string) =
-  if s == "foofoo" and s.replace("foo", "bar") == "barfoo":
+  if s == "foofoo" and s.replace("foo", "bar") == "barbar":
     symexTarget("hit")
 
-# --- replaceAll: version-gated (this build lacks the gate → seZ3VersionMissing) ---
-proc replaceAllFoo(s: string) =
-  if s == "foofoo" and s.replaceAll("foo", "bar") == "barbar":
+# --- replace is NOT first-occurrence: "barfoo" is unreachable ---
+proc replaceFirstOnly(s: string) =
+  if s == "foofoo" and s.replace("foo", "bar") == "barfoo":
     symexTarget("hit")
 
 # --- split: concrete-inline path (concrete input, length-1 concrete sep) ---
@@ -71,19 +66,21 @@ proc splitSymbolic(s: string, sep: string) =
   if parts.len == 2:
     symexTarget("hit")
 
-suite "symex Phase 15 S5 — string replace/replaceAll/split/join":
-  test "replace: replace(\"foofoo\",\"foo\",\"bar\") == \"barfoo\" (first-occ)":
-    let r = symexFind(replaceFoo, tLabel("hit"))
-    check r.status == sxSat
-    check r.witness[0] == "foofoo"
+suite "symex Phase 15 S5 — string replace/split/join":
+  test "replace: \"foofoo\".replace(\"foo\",\"bar\") != \"barfoo\" (never first-occ)":
+    ## RFC-0005 S8c: this pin asserted the first-occurrence value `"barfoo"`
+    ## as sxSat -- a false verdict (Nim's `replace` replaces every
+    ## occurrence). The all-occurrence model makes it unreachable.
+    let r = symexFind(replaceFirstOnly, tLabel("hit"))
+    check r.status != sxSat
 
-  test "replaceAll: emits seZ3VersionMissing on this Z3 build (no crash)":
+  test "replace: emits seZ3VersionMissing on this Z3 build (no crash)":
     ## RFC-0005 S10: s == "foofoo" really replaces to "barbar", so the
     ## label is reachable. The path's taint is
     ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
     ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
     ## the classified kind is still recorded.
-    let r = symexFind(replaceAllFoo, tLabel("hit"))
+    let r = symexFind(replaceFoo, tLabel("hit"))
     check r.status == sxSat
     check rfc0005UnvetoedStatus == sxUnknown
     check r.witness[0] == "foofoo"

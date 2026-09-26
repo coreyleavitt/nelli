@@ -90,21 +90,6 @@ type
     ## risk) the walker classifies it `seZ3StringIncomplete` → `sxUnknown`
     ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
 
-  SymexBytesSymbolicLengthError* = object of CatchableError
-    ## Phase 15 S7a. Raised during `lower` for `bytes(s)` when the receiver's
-    ## byte/char count is NOT statically known (the receiver IR is not a string
-    ## literal, so its length is symbolic). The byte-view is materialised as a
-    ## concrete-length `svSeq` of BV8 elements, which requires a known length;
-    ## a symbolic length has no bounded element chain. Caught at the `runSymex`
-    ## boundary → `sxUnknown` carrying `seBytesSymbolicLength` (sevError) —
-    ## never a silent UNSAT (Invariant 3).
-
-  SymexBytesLengthTooLargeError* = object of CatchableError
-    ## Phase 15 S7a. Raised during `lower` for `bytes(s)` when the receiver's
-    ## concrete byte/char count exceeds `SymexSettings.maxBytesEncodingLen`
-    ## (default 32). Rather than expand a long element chain, the byte-view is
-    ## classified `seBytesLengthTooLarge` → `sxUnknown` (Invariant 3).
-
   SymexUnsupportedRegexError* = object of CatchableError
     ## Phase 15 S6b. Raised during `lower` when S6a's `parseNimRegexToZ3Regex`
     ## rejects a `re"…"` pattern (backreference / lookahead / named group, or a
@@ -2974,12 +2959,12 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # literal as a Z3Int. (iekStrFindRe's lower() raises a deferral; the proto
     # keeps a surrounding `>= 0` comparison's literal side well-typed.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekIntToStr, iekStrReplace, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
+  of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
-    # Phase 15 S5/S8/S10a: replace/replaceAll/join/concat/`$int` all produce a
+    # Phase 15 S5/S8/S10a: replace/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
     # "lit"` / `$n == "42"` lowers its literal as a string and dispatches through
-    # cmpString. (replaceAll's version-gate raise happens in lower(), not here —
+    # cmpString. (replace's version-gate raise happens in lower(), not here —
     # probeProto must still return a string proto so the literal side is lowered.)
     #
     # RFC Cluster 3 M6: `toLowerAscii`/`toUpperAscii` (Phase 16 A9), `toHex`/
@@ -2995,14 +2980,14 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll, iekStrJoin,
+                   iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
                    iekIntToStr, iekStrToInt,
                    iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
-    # raises SymexUnsupportedStringOpError. (iekStrSplit and iekStrBytes (S7a)
-    # produce an svSeq, consumed only via `.len`/index — never a direct `==` —
-    # so they need no comparison proto here.)
+    # raises SymexUnsupportedStringOpError. (iekStrSplit produces an svSeq,
+    # consumed only via `.len`/index — never a direct `==` — so it needs no
+    # comparison proto here.)
     none(SymVal)
   of iekContains:
     none(SymVal)
@@ -3103,18 +3088,11 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
-var currentMaxBytesEncodingLen* {.threadvar.}: int
-  ## Phase 15 S7a. The active `SymexSettings.maxBytesEncodingLen`, set at the
-  ## top of `runSymexImpl` so the `iekStrBytes` arm in `lower` (which has no
-  ## settings parameter) can read the cap without threading settings through
-  ## the whole expression-lowering recursion. Mirrors F7's `extractionErrors`
-  ## threadvar.
-
 var currentMaxSplitParts* {.threadvar.}: int
   ## CR-11/CR-18. The active `SymexSettings.budget.maxSplitParts`, set at the
   ## top of `runSymexImpl` so the `iekStrSplit` concrete-inline arms in
   ## `lowerStrArm` can enforce the cap without threading settings through the
-  ## lower() recursion. Mirrors the `currentMaxBytesEncodingLen` idiom (S7a).
+  ## lower() recursion. Mirrors F7's `extractionErrors` threadvar idiom.
   ## A value of 0 means unlimited (no cap applied). When the computed parts
   ## count exceeds this cap, the split is classified sxUnknown via
   ## SymexZ3StringIncompleteError (seZ3StringIncomplete) — the same error
@@ -5056,11 +5034,10 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   ## degrade converter for every classified raise `lowerStrArm`
   ## (`runtime_strings.nim`) can produce: `SymexUnsupportedStringOpError`,
   ## `SymexZ3VersionMissingError`, `SymexZ3StringIncompleteError`,
-  ## `SymexUnsupportedRegexError`, `SymexBytesSymbolicLengthError`,
-  ## `SymexBytesLengthTooLargeError`. Called from the SINGLE
+  ## `SymexUnsupportedRegexError`. Called from the SINGLE
   ## `lowerStrArm(env, e)` call site in `lower`'s dispatch (immediately
   ## below) rather than at each of `lowerStrArm`'s ~18 individual raw-raise
-  ## sites (`requireStr`, `needleAsStr`, the join/split/regex/bytes/radix/
+  ## sites (`requireStr`, `needleAsStr`, the join/split/regex/radix/
   ## case-fold arms, the "not modeled" catch-all). This is the SAME hazard
   ## N31 fixed for the single `iekStrSubstr` CR-17 site: a raw `raise`
   ## reached from inside nested `walkBlock` frames is silently LOST by
@@ -5107,8 +5084,6 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   of iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrMatch,
      iekStrInOptionRegion:
     allocateSym(tBool(), freshDegradeName("__strArmDegrade"), fresh)
-  of iekStrBytes:
-    allocateSym(tSeq(tInt(8, signed = false)), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrSplit:
     allocateSym(tSeq(tString()), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrUnsupported:
@@ -5154,7 +5129,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
       # itString/itInt/itBool/itFloat*).
       allocateSym(tString(), freshDegradeName("__strArmDegrade"), fresh)
   else:
-    # iekStrLit, iekStrSubstr, iekStrReplace, iekStrReplaceAll, iekStrJoin,
+    # iekStrLit, iekStrSubstr, iekStrReplaceAll, iekStrJoin,
     # iekStrReplaceRe, iekIntToStr, iekRadixFmt, iekStrToLower, iekStrToUpper,
     # iekRuneToStr, iekStrStrip, iekStrConcat all have svString on their
     # successful path — the least-surprising default for anything landing
@@ -5540,10 +5515,6 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       degradeStrArm(e, seZ3StringIncomplete, ex.msg)
     except SymexUnsupportedRegexError as ex:
       degradeStrArm(e, seUnsupportedRegex, ex.msg)
-    except SymexBytesSymbolicLengthError as ex:
-      degradeStrArm(e, seBytesSymbolicLength, ex.msg)
-    except SymexBytesLengthTooLargeError as ex:
-      degradeStrArm(e, seBytesLengthTooLarge, ex.msg)
   of iekGetCurrentExnMsg, iekGetCurrentExn:
     # Stage 7 (CR-7) Cluster E: exception expression arms extracted into
     # `lowerExnArm` (defined above, before this proc body).
@@ -9677,13 +9648,9 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
   ## Admitted kinds and their side-effect status:
   ##   iekVar      — env lookup, trivially pure.
   ##   iekField    — struct field projection, pure.
-  ##   iekStrBytes — `bytes(s)` on a string literal: raises early for symbolic
-  ##                 or oversized inputs; for a concrete literal it builds a Z3
-  ##                 const-array of BV8 with no closures or float→int sinks.
-  ##                 Added CR-20 (S7-bytes-index-assert): the parser does NOT
-  ##                 A-normalise `bytes(lit)[i]` — `ixArr` carries the
-  ##                 iekStrBytes expr directly. It is pure, so no drain needed.
-  doAssert e.kind in {iekVar, iekField, iekStrBytes},
+  ## (RFC-0005 S8c deleted the third admitted kind, `iekStrBytes`, with the
+  ## name-only `bytes(s)` model that produced it.)
+  doAssert e.kind in {iekVar, iekField},
     "lowerLeafInExpr: expected side-effect-free container expr; got " & $e.kind &
     " — add seed+drain if parser changes"
   lower(p.env, e)
@@ -10332,10 +10299,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if w.shouldStop: return
       ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
       ## expression. The parser A-normalises most container expressions to named
-      ## bindings (iekVar), but `bytes(lit)[i]` is the known exception — the
-      ## parser passes the iekStrBytes expr directly as ixArr (CR-20). Both
-      ## iekVar and iekStrBytes are pure (no closure/float→int sinks), so
-      ## lowerLeafInExpr handles them without seed+drain.
+      ## bindings (iekVar) or field projections (iekField); both are pure (no
+      ## closure/float→int sinks), so lowerLeafInExpr handles them without
+      ## seed+drain.
       let arrSV = lowerLeafInExpr(p, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
@@ -12157,8 +12123,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # downstream (a subsequent `p[]` deref would otherwise key-fault on the
     # unbound name). The classified `heUnsafeCast` (sevError) was emitted at
     # parse time into `prog.parseErrors` (drained into `RawResult.errors` on
-    # every verdict branch — the SAME classify→sxUnknown mechanism R8
-    # established for `hePtrArith`), so the unknown is never silent.
+    # every verdict branch), so the unknown is never silent.
     # RFC-0005 S1: the former `w.sawUnknown = true` here is gone — the run
     # coordinate is DERIVED at drain, and that parse-time sevError
     # `heUnsafeCast` (emitted by `dsl_parser.nim` at the one site that builds
@@ -13700,20 +13665,6 @@ proc runSymexCaught(prog: SymexProgram,
               errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
                                        severity: sevError, msg: e.msg,
                                        scope: abortScope())])
-  except SymexBytesSymbolicLengthError as e:
-    # Phase 15 S7a: `bytes(s)` over a symbolic-length receiver -> sxUnknown +
-    # seBytesSymbolicLength (Invariant 3 — classified, never a silent UNSAT).
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seBytesSymbolicLength,
-                                       severity: sevError, msg: e.msg,
-                                       scope: abortScope())])
-  except SymexBytesLengthTooLargeError as e:
-    # Phase 15 S7a: `bytes(s)` concrete length > maxBytesEncodingLen -> sxUnknown
-    # + seBytesLengthTooLarge (Invariant 3 — classified, never a silent UNSAT).
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: seBytesLengthTooLarge,
-                                       severity: sevError, msg: e.msg,
-                                       scope: abortScope())])
   except SymexRaiseUnimplementedError as e:
     # Phase 15 E1: the walker reached an `isRaise` while raise-flow is not yet
     # modeled (structural cycle) -> sxUnknown + eeRaiseUnimplemented (Invariant 3
@@ -13967,7 +13918,6 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
                            ## threadvar's own doc comment for why it must not
                            ## join the raise-cond sinks' reset list.
-  currentMaxBytesEncodingLen = settings.budget.maxBytesEncodingLen  ## Phase 15 S7a
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   rfc0005UnvetoedStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing

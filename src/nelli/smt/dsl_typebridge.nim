@@ -25,7 +25,57 @@ import std/macros
 import std/strutils
 import std/strformat
 import std/sequtils
+import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
 import ./types
+
+# ---- RFC-0005 S8c: callee resolution by SYMBOL, not by name ------------------
+#
+# The parser recognises its builtin vocabulary (`+ < == ... contains len inc
+# items ...`) by the callee's NAME. A user overload of one of those names -- a
+# `+` on a `distinct int`, a `==` on an object, a non-generic `contains`/`len`
+# that beats the stdlib generic, a `converter` -- was modelled as the builtin:
+# a silent substitution (§2.2's class) with nothing recorded. The typed AST the
+# parser receives carries the RESOLVED symbol at every call head (`nnkSym`,
+# probe-confirmed for `nnkCall`/`nnkInfix`/`nnkPrefix`/`nnkHiddenCallConv`,
+# including `>`/`!=`/`notin`, which the compiler rewrites through the user's
+# `<`/`==`/`contains`), so the question "is this the builtin?" is answerable
+# exactly: where was the resolved routine DECLARED?
+
+const nimLibDirForCmp = block:
+  ## The compiler's own `lib/` tree, normalised for a prefix compare (both
+  ## separators, and case, which a Windows toolchain path may vary in).
+  var d = querySetting(libPath).replace('\\', '/').toLowerAscii
+  if not d.endsWith("/"): d.add '/'
+  d
+
+proc isStdlibDecl*(sym: NimNode): bool =
+  ## RFC-0005 S8c. True iff `sym` is a symbol whose declaration lives in the
+  ## compiler's own `lib/` tree (`system` and its includes, `std/*`,
+  ## `pure/*`, ...). Decided from the declaration's file, not its module
+  ## NAME: a user module may be called `sequtils` or `tables`, and a nimble
+  ## package is user code, not stdlib.
+  if sym.kind != nnkSym: return false
+  let impl = sym.getImpl
+  if impl.kind == nnkNilLit: return false
+  impl.lineInfoObj.filename.replace('\\', '/').toLowerAscii.startsWith(
+    nimLibDirForCmp)
+
+const userRoutineSymKinds = {nskProc, nskFunc, nskMethod, nskConverter,
+                             nskIterator}
+
+proc isUserRoutine*(sym: NimNode): bool =
+  ## RFC-0005 S8c. True iff `sym` resolves to a routine declared OUTSIDE the
+  ## stdlib -- the SUT's own procs, a nimble package's, nelli's. Such a call
+  ## is never a builtin model, whatever its name: the parser walks it like
+  ## any other user call (the precise answer). A proc-valued VARIABLE
+  ## (`nskLet`/`nskParam`/...) is not a routine symbol and is left to the
+  ## closure-call arms; an unresolved `nnkIdent` (the untyped isolation entry
+  ## point, ADR-0002) is not a symbol at all. A routine with no locatable
+  ## declaration (`getImpl` nil) is conservatively NOT claimed user here --
+  ## no such routine reaches the parser in real compiler output (every
+  ## routine symbol in the typed AST carries its impl).
+  sym.kind == nnkSym and sym.symKind in userRoutineSymKinds and
+    sym.getImpl.kind != nnkNilLit and not isStdlibDecl(sym)
 
 proc nominalId*(n: NimNode): string =
   ## Canonical, symbol-unique nominal type identity for a named object type or

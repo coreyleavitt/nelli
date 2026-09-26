@@ -40,12 +40,11 @@ type
     smkStrContains     ## `sub in s`         (S4)
     smkStrStartsWith   ## `s.startsWith(p)`  (S4)
     smkStrEndsWith     ## `s.endsWith(q)`    (S4)
-    smkStrReplace      ## `s.replace(o,n)`   (S5)
-    smkStrReplaceAll   ## `s.replace(o,n)` all-occ (S5)
+    smkStrReplaceAll   ## `strutils.replace(s,o,n)`: every occurrence (S5;
+                       ## RFC-0005 S8c: Nim's replace IS all-occurrence)
     smkStrSplit        ## `s.split(sep)`     (S5)
     smkStrJoin         ## `xs.join(sep)`     (S5)
     smkStrMatch        ## `s.match(re)`      (S6)
-    smkStrBytes        ## `bytes(s)`         (S7a)
 
   StdlibModel* = object
     kind*: StdlibModelKind
@@ -112,12 +111,10 @@ proc getStdlibModelFor*(callee: string, recvKind: IRTypeKind): StdlibModel =
     of "contains":             return StdlibModel(kind: smkStrContains)
     of "startsWith":           return StdlibModel(kind: smkStrStartsWith)
     of "endsWith":             return StdlibModel(kind: smkStrEndsWith)
-    of "replace":              return StdlibModel(kind: smkStrReplace)
-    of "replaceAll":           return StdlibModel(kind: smkStrReplaceAll)
+    of "replace":              return StdlibModel(kind: smkStrReplaceAll)
     of "split":                return StdlibModel(kind: smkStrSplit)
     of "join":                 return StdlibModel(kind: smkStrJoin)
     of "match":                return StdlibModel(kind: smkStrMatch)
-    of "bytes":                return StdlibModel(kind: smkStrBytes)
     else:                      return StdlibModel(kind: smkUnregistered)
   case callee
   of "len":

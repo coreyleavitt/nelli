@@ -200,10 +200,19 @@ proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## file (`tests/tsymex_phase15_N2_kindgate_audit.nim`), which this proc,
   ## as the nil-core those bare gates were migrated ONTO, is not exempt
   ## from.
+  ##
+  ## RFC-0005 S8c: a `converter` is re-treed the same way. It is a routine
+  ## with a proc's exact layout, called statically like one (the compiler
+  ## inserts it as `nnkHiddenCallConv` at an implicit conversion); once S8c
+  ## routes user callees by symbol, a user converter reaches here and is
+  ## walked instead of declined. A `method` is deliberately NOT: the
+  ## resolved symbol names the base method, but the call dispatches on the
+  ## receiver's dynamic type, so walking the base body would substitute one
+  ## override for another -- it stays unresolved (a recorded callee decline).
   let impl = sym.getImpl
-  if impl.kind notin walkableRoutineKinds:
+  if impl.kind notin walkableRoutineKinds + {nnkConverterDef}:
     result = nil
-  elif impl.kind in {nnkFuncDef}:
+  elif impl.kind in {nnkFuncDef, nnkConverterDef}:
     if impl.len >= routineImplMinArity:
       var kids: seq[NimNode]
       for c in impl.children: kids.add c
@@ -1274,9 +1283,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     ## that real Nim's short-circuit evaluation never produces.
     result = true
   of iekStrLen, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
-     iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+     iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-     iekStrBytes, iekStrConcat, iekIntToStr, iekRadixFmt,
+     iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
      iekStrStrip, iekStrInOptionRegion:
     ## Round-6 B6: `iekStrInOptionRegion` is never reachable from ordinary
@@ -1354,6 +1363,9 @@ proc siteLoc*(n: NimNode): string  ## Round-6 A3/B1 fwd decl (defined below,
                                     ## bracket/len helpers stamp `IRStmt.
                                     ## isIndex`/`IRExpr.iekSeqLen`'s new
                                     ## `loc` field with this.
+proc isBuiltinNamed(head: NimNode, names: openArray[string]): bool
+  ## RFC-0005 S8c fwd decl (defined below, beside `isUserCallee`): the seq
+  ## bracket/slice helper just below matches `..`/`^` heads by name.
 
 proc receiverIsStringBacked(recvRawNode: NimNode, ctx: ParseCtx): bool =
   ## Round-6 B1 (ADR-0028 Leg 1). True iff `recvRawNode` (unwrapped of
@@ -1456,7 +1468,7 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
     idxNode = idxNode[idxNode.len - 1]
   if idxNode.kind == nnkInfix and idxNode.len == 3 and
      idxNode[0].kind in {nnkSym, nnkIdent} and
-     idxNode[0].strVal in ["..", "..<"]:
+     isBuiltinNamed(idxNode[0], ["..", "..<"]):
     let loIR = parseExpr(idxNode[1], preamble, ctx)
     # `^k` stays a `BackwardsIndex(k)` conversion for seqs (a string-backed
     # receiver's DECLARED type is still `seq[byte]`, so this pre-expansion
@@ -1468,7 +1480,7 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
     var hiIR: IRExpr
     if hiNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
        hiNode.len == 2 and hiNode[0].kind in {nnkSym, nnkIdent} and
-       hiNode[0].strVal in ["BackwardsIndex", "^"]:
+       isBuiltinNamed(hiNode[0], ["BackwardsIndex", "^"]):
       hiIR = mkBinop(bSub, mkSeqLen(objIR), parseExpr(hiNode[1], preamble, ctx))
     else:
       hiIR = parseExpr(idxNode[2], preamble, ctx)
@@ -1886,13 +1898,46 @@ proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
   else:
     BorrowInfo(isBorrow: true, returnsDistinct: false, distinctName: "")
 
+proc isUserCallee(sym: NimNode): bool =
+  ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
+  ## call whose head resolved to a user routine (`isUserRoutine`) is walked
+  ## as a routine call, never modelled as the builtin that shares its name.
+  ## A `{.borrow.}` routine is the one exception: it IS the base type's
+  ## builtin, by definition, and the borrow arms (`borrowIntercept`,
+  ## `runeCompareIntercept`) model it as exactly that.
+  if not isUserRoutine(sym): return false
+  let impl = resolveRoutineImpl(sym)
+  not (impl != nil and hasBorrowPragma(impl))
+
+proc isBuiltinNamed(head: NimNode, names: openArray[string]): bool =
+  ## RFC-0005 S8c. A call/operator head that names one of `names` AND is not
+  ## a user callee. The structural recognisers (scan idioms, slice bounds,
+  ## `new`, the assert expansion) match raw AST by head name; this is the
+  ## same name test plus the symbol gate, so a user overload never completes
+  ## a builtin shape. An untyped `nnkIdent` head (the isolation entry point)
+  ## passes on its name alone, as before.
+  head.kind in {nnkSym, nnkIdent} and head.strVal in names and
+    not isUserCallee(head)
+
+const markersModuleSuffix = "/nelli/engine/markers.nim"
+  ## RFC-0005 S8c: where the three DSL markers are declared.
+
 proc isMarkerCall(n: NimNode, name: string): bool =
+  ## RFC-0005 S8c: a resolved (`nnkSym`) head is a marker only when it IS
+  ## nelli's marker -- declared in `markers.nim` -- not a same-named user
+  ## proc (which is walked as the routine it is). An untyped `nnkIdent`
+  ## head matches by name, as before.
   if n.kind != nnkCall:
     return false
   let callee = n[0]
   case callee.kind
-  of nnkIdent, nnkSym:
+  of nnkIdent:
     callee.strVal == name
+  of nnkSym:
+    if callee.strVal != name: return false
+    let impl = callee.getImpl
+    impl.kind != nnkNilLit and
+      impl.lineInfoObj.filename.replace('\\', '/').endsWith(markersModuleSuffix)
   else:
     false
 
@@ -1917,7 +1962,8 @@ proc isNewCall(n: NimNode): bool =
     elif head.kind in {nnkSym, nnkIdent}:
       head.strVal
     else: return false
-  nm == "new"
+  # RFC-0005 S8c: a user proc named `new` is a routine call, not allocation.
+  nm == "new" and not (head.kind == nnkSym and isUserCallee(head))
 
 proc callsFailedAssertImpl(n: NimNode): bool =
   ## Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
@@ -1932,7 +1978,9 @@ proc callsFailedAssertImpl(n: NimNode): bool =
       if head.kind in {nnkOpenSymChoice, nnkClosedSymChoice} and head.len > 0:
         head[0].strVal
       else: head.strVal
-    if nm == "failedAssertImpl": return true
+    # RFC-0005 S8c: system's own `failedAssertImpl`, not a same-named user proc.
+    if nm == "failedAssertImpl" and
+       not (head.kind == nnkSym and isUserCallee(head)): return true
   for c in n:
     if callsFailedAssertImpl(c): return true
   false
@@ -2313,7 +2361,7 @@ proc isBooleanShortCircuitInfix(n: NimNode): bool =
   ## `tsymex_phase1_dsl.nim` passing unchanged, and by every typed-path test
   ## in the Phase 15 suite passing byte-identically.
   n.kind == nnkInfix and n.len == 3 and
-    n[0].kind in {nnkSym, nnkIdent} and n[0].strVal in ["and", "or"] and
+    isBuiltinNamed(n[0], ["and", "or"]) and  ## RFC-0005 S8c: not a user `and`
     isResolvedBoolAndOr(n)
 
 proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
@@ -2686,6 +2734,104 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
 
   preamble.add mkIf(branches, elseBody)
   mkVar(tmp)
+
+proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
+                          ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
+  ## model): the opaque/foreign/transparent arms, a call through a
+  ## proc-valued variable, else the A-normalised user-proc call. `n` is the
+  ## call-shaped node -- `nnkCall`, or an `nnkInfix`/`nnkPrefix`/
+  ## `nnkHiddenCallConv` whose head resolved to a user routine (all four put
+  ## the callee at `n[0]` and its arguments at `n[1..]`). Split out of the
+  ## `nnkCall` arm so the user-callee gates of all four arms reach the SAME
+  ## routine-call handling, not a copy of it.
+  let userCallee = isUserRoutine(calleeSym)
+  # Opaque effectful proc (#137 + Phase 9 user extension via
+  # `{.symexOpaque.}` pragma) — fresh-symbolic return, no body walk.
+  #
+  # Issue #163: `{.symexTransparent.}` routes here TOO, and deliberately
+  # gets the conservative opaque treatment rather than the drop. Reaching
+  # the expression arm means the call's result is being used, which
+  # contradicts the pragma's void-and-observably-nothing promise — so the
+  # promise is not honoured. Keeping the body unwalked is still right (that
+  # is the half of `{.symexOpaque.}` an over-claimed pragma still earns);
+  # only the deletion is withheld.
+  let calleeName = calleeSym.strVal
+  let opaModel = getStdlibModelFor(calleeName, itBool)
+  # RFC-0005 S8b: a bodiless foreign (`importc`/`dynlib`/...) callee is an
+  # opaque effect too -- see `isBodilessForeign` (it was walked as an EMPTY
+  # body, a silent zero result).
+  # RFC-0005 S8c: the `OpaqueEffectfulProcs` catalog is a list of stdlib
+  # NAMES (`echo`, `send`, `open`, ...); a user routine that happens to share
+  # one is walked, not blacked out. Only the pragma / foreign arms apply to it.
+  if (opaModel.kind == smkOpaqueEffectful and not userCallee) or
+     hasSymexOpaquePragma(calleeSym) or
+     hasSymexTransparentPragma(calleeSym) or isBodilessForeign(calleeSym):
+    # #163 review R10: the callee over-claimed `{.symexTransparent.}` on
+    # the OTHER route from R7's (`isInertOpaqueCall` gate, statement
+    # position, above) — its RESULT IS USED, here in expression position.
+    # Emit a SPECIFIC parse-time degrade naming the callee and the real
+    # broken promise, exactly R7's pattern: entirely a front-end
+    # (`ctx.parseErrors`) classification, sitting alongside (not instead
+    # of) the generic `feOpaqueCallUnmodelled` the resulting opaque-call
+    # fallback also produces at walk time. Without this, the ONLY message
+    # the caller sees is the generic opaque-call text, which literally
+    # tells them to "mark it `{.symexTransparent.}`" — wrong advice for a
+    # callee that already carries the pragma; the real problem is that the
+    # promise is honoured only in STATEMENT position.
+    if hasSymexTransparentPragma(calleeSym):
+      # RFC-0005 S8 (§13.3, i3): an annotation violation, not a decline.
+      ctx.annotationViolation(n, avResultUsed, calleeName,
+        "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
+        "but its result is used here; the pragma is honoured only " &
+        "in statement position, so it is treated as opaque instead " &
+        "of dropped")
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    let retCls = classifyType(n)
+    let synth = freshSynth(ctx, calleeName)
+    # #163 slice 4: stays `inert = false` (the `mkOpaqueCall` default) —
+    # this arm binds a result (`synth`), so clause (a) of the inertness
+    # predicate fails by construction; `isInertOpaqueCall` is a
+    # statement-position-only check and is deliberately not consulted here.
+    preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
+    return mkVar(synth)
+  # Phase 15 Cluster C (C1, ADR-0009 D6). A call THROUGH a proc-valued
+  # VARIABLE (a local/param of proc type), distinct from a normal named-proc
+  # call. The discriminator: `calleeSym`'s `getImpl` is NOT a proc/func DEF
+  # (a top-level proc resolves to `nnkProcDef`; a proc-valued variable's impl
+  # is the `nnkIdentDefs` of its let/var/param binding) AND its instantiated
+  # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
+  # handles only the proc-valued-variable CALL shape → `iekClosureCall`
+  # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
+  block closureCallDetect:
+    if calleeSym.kind == nnkSym:
+      let impl = calleeSym.getImpl
+      if impl.kind notin routineShapedForClosureDetect:
+        let ti = calleeSym.getTypeInst
+        if ti.kind == nnkProcTy:
+          var argIRs: seq[IRExpr]
+          for i in 1 ..< n.len:
+            argIRs.add parseExpr(n[i], preamble, ctx)
+          return mkClosureCall(calleeName, argIRs)
+  # User-proc call in expression position. A-normalise. The instantiation
+  # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
+  # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
+  let callKey = ensureProcRegistered(ctx, calleeSym, n)
+  var argIRs: seq[IRExpr]
+  for i in 1 ..< n.len:
+    argIRs.add parseExpr(n[i], preamble, ctx)
+  let retCls = classifyType(n)
+  let synth = freshSynth(ctx, calleeName)
+  # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
+  # body is a recognized B3/B4 scan closed form, the returned position
+  # (tuple field or bare scalar) is a genuine Sequence-theory Int — mark it
+  # so the call's fresh retSym allocates svInt there instead of the
+  # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
+  let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
+  preamble.add mkCall(callKey, synth, argIRs, retCls.ty, offsetPositions)
+  mkVar(synth)
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   case n.kind
@@ -3142,6 +3288,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # well-understood `$`-conversion shape is handled; any OTHER implicit
     # converter (e.g. a user-defined `converter` proc) falls through to the
     # ordinary catch-all decline rather than being guessed at.
+    # RFC-0005 S8c: ...except that a USER converter (or a user `$` the
+    # compiler inserted) is a routine the parser can walk: it is a routine
+    # call like any other, so it no longer declines, and a user `$` is no
+    # longer mistaken for `system.$`.
+    if n.len == 2 and isUserCallee(n[0]):
+      return parseRoutineCallExpr(n, n[0], preamble, ctx)
     if n.len == 2 and n[0].kind == nnkSym and n[0].strVal == "$":
       if isRuneTyped(n[1]):
         mkStrOp(iekRuneToStr, "$rune", @[parseExpr(n[1], preamble, ctx)])
@@ -3213,6 +3365,14 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # discriminator; symex just lowers the inner dot-expr.
     parseExpr(n[0], preamble, ctx)
   of nnkInfix:
+    # RFC-0005 S8c: an operator whose head resolved to a USER routine (`+` on
+    # a `distinct int`, `==` on an object, `<` with custom semantics, ...) is
+    # a routine call, not the builtin `binopForInfix` models by the operator's
+    # spelling. The typed AST puts the resolved symbol at `n[0]` -- including
+    # for `>`/`>=`/`!=`, which the compiler rewrites through the user's
+    # `<`/`<=`/`==`. `{.borrow.}` operators stay on `borrowIntercept` below.
+    if isUserCallee(n[0]):
+      return parseRoutineCallExpr(n, n[0], preamble, ctx)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
     # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard
@@ -3414,6 +3574,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (general infix)
       mkBinop(op, l, r)
   of nnkPrefix:
+    # RFC-0005 S8c: a user prefix operator (`-`/`not`/`$`/`@` on a user type)
+    # is a routine call, not the builtin its spelling names.
+    if isUserCallee(n[0]):
+      return parseRoutineCallExpr(n, n[0], preamble, ctx)
     let op = n[0].strVal
     case op
     of "not":
@@ -3552,7 +3716,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let idxNode = n[1]
       if idxNode.kind == nnkInfix and idxNode.len == 3 and
          idxNode[0].kind in {nnkSym, nnkIdent} and
-         idxNode[0].strVal in ["..", "..<"]:
+         isBuiltinNamed(idxNode[0], ["..", "..<"]):
         let loIR = parseExpr(idxNode[1], preamble, ctx)
         var hiIR = parseExpr(idxNode[2], preamble, ctx)
         if idxNode[0].strVal == "..<":
@@ -3662,7 +3826,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                            preamble, ctx)
       mkField(objIR, ix, fieldName)
     of itSeq:
-      if fieldName == "len":
+      if isBuiltinNamed(n[1], ["len"]):   ## RFC-0005 S8c: not a user `len`
         # Round-6 B1: shared with the call-form `len`/`card` arm below —
         # `parseSeqLenAccess` chooses `iekStrLen` over `mkSeqLen` for a
         # string-backed receiver.
@@ -3785,6 +3949,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
             "context; expression-position calls require the full macro flow.",
             n)
+    # RFC-0005 S8c: resolve by SYMBOL before any builtin-by-name model below
+    # gets a look. A user routine named `len`/`contains`/`$`/`parseInt`/
+    # `abs`/... is not that builtin; it is walked like any other user call.
+    if isUserCallee(calleeSym):
+      return parseRoutineCallExpr(n, calleeSym, preamble, ctx)
     # Phase 15 E8: the two no-arg exception-query magic intrinsics. Recognised
     # by callee symbol name and intercepted BEFORE the user-proc fall-through
     # (`ensureProcRegistered`), which would otherwise try to parse their stdlib
@@ -4154,7 +4323,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             idxNode = idxNode[idxNode.len - 1]
           if idxNode.kind == nnkInfix and idxNode.len == 3 and
              idxNode[0].kind in {nnkSym, nnkIdent} and
-             idxNode[0].strVal in ["..", "..<"]:
+             isBuiltinNamed(idxNode[0], ["..", "..<"]):
             # `s[a..b]` (inclusive) / `s[a..<b]` (exclusive). Lower to
             # `iekStrSubstr` carrying [recv, lo, hi] — the runtime computes the
             # Z3 (seq.extract recv lo (hi-lo+1)) length-arg form, with hi being
@@ -4312,12 +4481,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             of smkStrContains:   iekStrContains
             of smkStrStartsWith: iekStrStartsWith
             of smkStrEndsWith:   iekStrEndsWith
-            of smkStrReplace:    iekStrReplace
             of smkStrReplaceAll: iekStrReplaceAll
             of smkStrSplit:      iekStrSplit
             of smkStrJoin:       iekStrJoin
             of smkStrMatch:      iekStrMatch
-            of smkStrBytes:      iekStrBytes
             else:                iekStrUnsupported
           # Fix-slice item 5: the `else` (unrecognized stdlib string-method
           # name) branch above is the genuinely AMBIGUOUS `iekStrUnsupported`
@@ -4466,61 +4633,6 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             for i in 1 ..< n.len:
               mArgs.add parseExpr(n[i], preamble, ctx)
             return mkMathCall(cn, mArgs)
-    # Opaque effectful proc (#137 + Phase 9 user extension via
-    # `{.symexOpaque.}` pragma) — fresh-symbolic return, no body walk.
-    #
-    # Issue #163: `{.symexTransparent.}` routes here TOO, and deliberately
-    # gets the conservative opaque treatment rather than the drop. Reaching
-    # the expression arm means the call's result is being used, which
-    # contradicts the pragma's void-and-observably-nothing promise — so the
-    # promise is not honoured. Keeping the body unwalked is still right (that
-    # is the half of `{.symexOpaque.}` an over-claimed pragma still earns);
-    # only the deletion is withheld.
-    let calleeName = calleeSym.strVal
-    let opaModel = getStdlibModelFor(calleeName, itBool)
-    # RFC-0005 S8b: a bodiless foreign (`importc`/`dynlib`/...) callee is an
-    # opaque effect too -- see `isBodilessForeign` (it was walked as an EMPTY
-    # body, a silent zero result).
-    if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
-       hasSymexTransparentPragma(calleeSym) or isBodilessForeign(calleeSym):
-      # #163 review R10: the callee over-claimed `{.symexTransparent.}` on
-      # the OTHER route from R7's (`isInertOpaqueCall` gate, statement
-      # position, above) — its RESULT IS USED, here in expression position.
-      # Emit a SPECIFIC parse-time degrade naming the callee and the real
-      # broken promise, exactly R7's pattern: entirely a front-end
-      # (`ctx.parseErrors`) classification, sitting alongside (not instead
-      # of) the generic `feOpaqueCallUnmodelled` the resulting opaque-call
-      # fallback also produces at walk time. Without this, the ONLY message
-      # the caller sees is the generic opaque-call text, which literally
-      # tells them to "mark it `{.symexTransparent.}`" — wrong advice for a
-      # callee that already carries the pragma; the real problem is that the
-      # promise is honoured only in STATEMENT position.
-      if hasSymexTransparentPragma(calleeSym):
-        # RFC-0005 S8 (§13.3, i3): an annotation violation, not a decline.
-        ctx.annotationViolation(n, avResultUsed, calleeName,
-          "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
-          "but its result is used here; the pragma is honoured only " &
-          "in statement position, so it is treated as opaque instead " &
-          "of dropped")
-      var argIRs: seq[IRExpr]
-      for i in 1 ..< n.len:
-        argIRs.add parseExpr(n[i], preamble, ctx)
-      let retCls = classifyType(n)
-      let synth = freshSynth(ctx, calleeName)
-      # #163 slice 4: stays `inert = false` (the `mkOpaqueCall` default) —
-      # this arm binds a result (`synth`), so clause (a) of the inertness
-      # predicate fails by construction; `isInertOpaqueCall` is a
-      # statement-position-only check and is deliberately not consulted here.
-      preamble.add mkOpaqueCall(calleeName, synth, argIRs, retCls.ty)
-      return mkVar(synth)
-    # Phase 15 Cluster C (C1, ADR-0009 D6). A call THROUGH a proc-valued
-    # VARIABLE (a local/param of proc type), distinct from a normal named-proc
-    # call. The discriminator: `calleeSym`'s `getImpl` is NOT a proc/func DEF
-    # (a top-level proc resolves to `nnkProcDef`; a proc-valued variable's impl
-    # is the `nnkIdentDefs` of its let/var/param binding) AND its instantiated
-    # type is a proc type (`nnkProcTy`). Top-level procs-as-VALUES are C3; C1
-    # handles only the proc-valued-variable CALL shape → `iekClosureCall`
-    # (walker-stubbed `ceNotImplemented` in C1; C2b adds application).
     # A7 (ADR-0017 Path B): `ord(r)` where `r` classifies as tInt (Rune → tInt).
     # `ord` is a magic intrinsic with no parseable body; for a type already
     # classified to tInt (e.g. Rune after A7 intercept), `ord` is the identity
@@ -4616,33 +4728,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let lhs = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (rune-compare)
       let rhs = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (rune-compare)
       return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
-    block closureCallDetect:
-      if calleeSym.kind == nnkSym:
-        let impl = calleeSym.getImpl
-        if impl.kind notin routineShapedForClosureDetect:
-          let ti = calleeSym.getTypeInst
-          if ti.kind == nnkProcTy:
-            var argIRs: seq[IRExpr]
-            for i in 1 ..< n.len:
-              argIRs.add parseExpr(n[i], preamble, ctx)
-            return mkClosureCall(calleeName, argIRs)
-    # User-proc call in expression position. A-normalise. The instantiation
-    # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
-    # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
-    let callKey = ensureProcRegistered(ctx, calleeSym, n)
-    var argIRs: seq[IRExpr]
-    for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
-    let retCls = classifyType(n)
-    let synth = freshSynth(ctx, calleeName)
-    # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
-    # body is a recognized B3/B4 scan closed form, the returned position
-    # (tuple field or bare scalar) is a genuine Sequence-theory Int — mark it
-    # so the call's fresh retSym allocates svInt there instead of the
-    # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
-    let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
-    preamble.add mkCall(callKey, synth, argIRs, retCls.ty, offsetPositions)
-    mkVar(synth)
+    # RFC-0005 S8c: every builtin-by-name model above has had its chance
+    # (and, since the user-callee gate at the top of this arm, sees only
+    # stdlib-declared callees). What is left is an ordinary routine call.
+    parseRoutineCallExpr(n, calleeSym, preamble, ctx)
   of nnkIfExpr:
     # RFC-chapulin-hardening M5 (walker v50->51): an if-EXPRESSION used as a
     # SUB-EXPRESSION (e.g. `(if c: 1 else: 2) + 1`, or the direct RHS of a
@@ -5403,12 +5492,12 @@ proc boundIsScannedLen(boundNode, sNode: NimNode): bool =
   ## a named predicate instead of re-inlined at each site.
   let boundCore = unwrapHidden(boundNode)
   if boundCore.kind in {nnkCall, nnkCommand} and boundCore.len == 2 and
-     boundCore[0].kind == nnkSym and boundCore[0].strVal == "len" and
+     boundCore[0].kind == nnkSym and isBuiltinNamed(boundCore[0], ["len"]) and
      sameSym(unwrapHidden(boundCore[1]), sNode):
     return true
   if boundCore.kind == nnkDotExpr and boundCore.len == 2 and
      boundCore[1].kind in {nnkSym, nnkIdent} and
-     boundCore[1].strVal == "len" and
+     isBuiltinNamed(boundCore[1], ["len"]) and
      sameSym(unwrapHidden(boundCore[0]), sNode):
     return true
   false
@@ -5427,7 +5516,7 @@ proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
   ## "advance form" fact has exactly two members, not four, and this
   ## predicate names precisely that.
   if stmt.kind in {nnkCall, nnkCommand} and stmt.len in {2, 3} and
-     stmt[0].kind == nnkSym and stmt[0].strVal == "inc":
+     stmt[0].kind == nnkSym and isBuiltinNamed(stmt[0], ["inc"]):
     let recv = unwrapHidden(stmt[1])
     let stepOk = stmt.len == 2 or
                  (stmt[2].kind == nnkIntLit and stmt[2].intVal == 1)
@@ -5446,7 +5535,7 @@ proc counterAdvancesByOne(stmt, iNode: NimNode): bool =
     # unwrapping too.
     let rhs = unwrapHidden(stmt[1])
     return sameSym(lhs, iNode) and
-           rhs.kind == nnkInfix and rhs.len == 3 and rhs[0].strVal == "+" and
+           rhs.kind == nnkInfix and rhs.len == 3 and isBuiltinNamed(rhs[0], ["+"]) and
            sameSym(unwrapHidden(rhs[1]), iNode) and
            rhs[2].kind == nnkIntLit and rhs[2].intVal == 1
   false
@@ -5476,10 +5565,10 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
 
   # ---- guard shape: `<i> < <bound> and <s>[<i>] != <lit>` (and-shaped,
   # short-circuit order: the bound check FIRST) ----
-  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "and":
+  if cond.kind != nnkInfix or cond.len != 3 or not isBuiltinNamed(cond[0], ["and"]):
     return none(ScanShapeMatch)
   let ltPart = cond[1]
-  if ltPart.kind != nnkInfix or ltPart.len != 3 or ltPart[0].strVal != "<":
+  if ltPart.kind != nnkInfix or ltPart.len != 3 or not isBuiltinNamed(ltPart[0], ["<"]):
     return none(ScanShapeMatch)
   # `!=` desugars (via a template) to
   # `StmtListExpr(Empty, Prefix("not", Infix("==", lhs, rhs)))` in the typed
@@ -5492,11 +5581,11 @@ proc tryMatchScanIdiomShape(n: NimNode): Option[ScanShapeMatch] =
     nePart = nePart[nePart.len - 1]
   var idxExprRaw: NimNode
   var litNodeRaw: NimNode
-  if nePart.kind == nnkInfix and nePart.len == 3 and nePart[0].strVal == "!=":
+  if nePart.kind == nnkInfix and nePart.len == 3 and isBuiltinNamed(nePart[0], ["!="]):
     idxExprRaw = nePart[1]
     litNodeRaw = nePart[2]
-  elif nePart.kind == nnkPrefix and nePart.len == 2 and nePart[0].strVal == "not" and
-       nePart[1].kind == nnkInfix and nePart[1].len == 3 and nePart[1][0].strVal == "==":
+  elif nePart.kind == nnkPrefix and nePart.len == 2 and isBuiltinNamed(nePart[0], ["not"]) and
+       nePart[1].kind == nnkInfix and nePart[1].len == 3 and isBuiltinNamed(nePart[1][0], ["=="]):
     idxExprRaw = nePart[1][1]
     litNodeRaw = nePart[1][2]
   else:
@@ -5730,7 +5819,7 @@ proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
   # (below) narrows to genuine candidates first, and the `typeKind !=
   # ntyNone` guard on every `classifyType` call site is the belt-and-
   # suspenders backstop per clause (d), applied regardless.
-  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+  if cond.kind != nnkInfix or cond.len != 3 or not isBuiltinNamed(cond[0], ["<"]):
     return none(ScanPairShapeMatch)
   # #163 review R28: unwrap a `range[lo..hi]` counter's `nnkHiddenStdConv`
   # widening to `int` before the identity check below -- see
@@ -5762,7 +5851,7 @@ proc tryMatchScanPairIdiomShape(n: NimNode): Option[ScanPairShapeMatch] =
   if thenStmt.kind != nnkReturnStmt:
     return none(ScanPairShapeMatch)
 
-  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or not isBuiltinNamed(ifCond[0], ["=="]):
     return none(ScanPairShapeMatch)
   let idxExpr = unwrapHidden(ifCond[1])
   let litNodeRaw = ifCond[2]
@@ -5912,7 +6001,7 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
   # checks first, per standing DoD clause (d) / B3's N3 lesson: a plain `<`
   # guard also matches an iterator's own loop, and `classifyType` on such a
   # node can hit the "node has no type" crash class A5 fixed. ----
-  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+  if cond.kind != nnkInfix or cond.len != 3 or not isBuiltinNamed(cond[0], ["<"]):
     return none(AccScanShapeMatch)
   # #163 review R28: unwrap a `range[lo..hi]` counter's `nnkHiddenStdConv`
   # widening to `int` before the identity check below -- see
@@ -5943,7 +6032,7 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
   if thenStmt.kind != nnkReturnStmt:
     return none(AccScanShapeMatch)
 
-  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or not isBuiltinNamed(ifCond[0], ["=="]):
     return none(AccScanShapeMatch)
   let idxExpr = unwrapHidden(ifCond[1])
   let litNodeRaw = ifCond[2]
@@ -5960,7 +6049,7 @@ proc tryMatchAccumulatingScanIdiomShape(n: NimNode): Option[AccScanShapeMatch] =
   # itString type gate on `sNode`, applied by the caller, settles which) ----
   if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
     return none(AccScanShapeMatch)
-  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or not isBuiltinNamed(addStmt[0], ["add"]):
     return none(AccScanShapeMatch)
   let accNode = unwrapHidden(addStmt[1])
   if accNode.kind != nnkSym:
@@ -6204,7 +6293,7 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
   if n.kind != nnkWhileStmt or n.len != 2: return none(PairLoopShapeMatch)
   let cond = n[0]
   let body = n[1]
-  if cond.kind != nnkInfix or cond.len != 3 or cond[0].strVal != "<":
+  if cond.kind != nnkInfix or cond.len != 3 or not isBuiltinNamed(cond[0], ["<"]):
     return none(PairLoopShapeMatch)
   let iNode = cond[1]
   let boundNode = cond[2]
@@ -6232,7 +6321,7 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
     if breakBody.len != 1: return none(PairLoopShapeMatch)
     breakBody = breakBody[0]
   if breakBody.kind != nnkBreakStmt: return none(PairLoopShapeMatch)
-  if ifCond.kind != nnkInfix or ifCond.len != 3 or ifCond[0].strVal != "==":
+  if ifCond.kind != nnkInfix or ifCond.len != 3 or not isBuiltinNamed(ifCond[0], ["=="]):
     return none(PairLoopShapeMatch)
   let zeroLit = unwrapHidden(ifCond[2])
   if zeroLit.kind != nnkIntLit or zeroLit.intVal != 0:
@@ -6240,11 +6329,11 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
   let lenExpr = unwrapHidden(ifCond[1])
   var keyLenOk = false
   if lenExpr.kind in {nnkCall, nnkCommand} and lenExpr.len == 2 and
-     lenExpr[0].kind in {nnkSym, nnkIdent} and lenExpr[0].strVal == "len" and
+     lenExpr[0].kind in {nnkSym, nnkIdent} and isBuiltinNamed(lenExpr[0], ["len"]) and
      sameSym(unwrapHidden(lenExpr[1]), keyNode):
     keyLenOk = true
   elif lenExpr.kind == nnkDotExpr and lenExpr.len == 2 and
-       lenExpr[1].kind in {nnkSym, nnkIdent} and lenExpr[1].strVal == "len" and
+       lenExpr[1].kind in {nnkSym, nnkIdent} and isBuiltinNamed(lenExpr[1], ["len"]) and
        sameSym(unwrapHidden(lenExpr[0]), keyNode):
     keyLenOk = true
   if not keyLenOk: return none(PairLoopShapeMatch)
@@ -6264,7 +6353,7 @@ proc tryMatchPairLoopIdiomShape(n: NimNode): Option[PairLoopShapeMatch] =
   let addStmt = body[3]
   if addStmt.kind notin {nnkCall, nnkCommand} or addStmt.len != 3:
     return none(PairLoopShapeMatch)
-  if addStmt[0].kind notin {nnkSym, nnkIdent} or addStmt[0].strVal != "add":
+  if addStmt[0].kind notin {nnkSym, nnkIdent} or not isBuiltinNamed(addStmt[0], ["add"]):
     return none(PairLoopShapeMatch)
   let pairsNode = unwrapHidden(addStmt[1])
   if pairsNode.kind != nnkSym: return none(PairLoopShapeMatch)
@@ -6885,7 +6974,7 @@ proc offsetShapedElem(n: NimNode, iNode: NimNode): bool =
   let core = unwrapHidden(n)
   if sameSym(core, iNode): return true
   if core.kind == nnkInfix and core.len == 3 and
-     core[0].kind in {nnkSym, nnkIdent} and core[0].strVal in ["+", "-"] and
+     core[0].kind in {nnkSym, nnkIdent} and isBuiltinNamed(core[0], ["+", "-"]) and
      sameSym(unwrapHidden(core[1]), iNode) and
      unwrapHidden(core[2]).kind == nnkIntLit:
     return true
@@ -7451,7 +7540,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   ctx.inGuardCond = true
   result =
     if guardNode.kind == nnkInfix and guardNode.len == 3 and
-       guardNode[0].strVal == "and":
+       isBuiltinNamed(guardNode[0], ["and"]):
       let aNode = guardNode[1]
       let bNode = guardNode[2]
       var preA: seq[IRStmt]
@@ -7806,6 +7895,102 @@ proc isKnownMutatingReceiverCall(calleeName: string, recv: NimNode,
   of "[]=": cls.ty.kind == itTable and argc == 4
   else: false
 
+proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
+                          ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8c. A statement-position call to a ROUTINE: the
+  ## transparent / opaque / foreign arms, else the ordinary user-proc call.
+  ## Split out of `parseStmtInner`'s `nnkCall` arm so a user callee -- a
+  ## user `inc`/`add`/`incl`/`del`, or a user `+=` reaching the `nnkInfix`
+  ## statement arm -- takes exactly this path and never a builtin mutation
+  ## model that shares its name.
+  let calleeName = calleeSym.strVal
+  let userCallee = isUserRoutine(calleeSym)
+  let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
+  if hasSymexTransparentPragma(calleeSym) and isInertOpaqueCall(n):
+    # Issue #163. A `{.symexTransparent.}` call in statement position is
+    # DELETED — no IR at all, not an opaque no-op. nelli's own
+    # instrumentation (`recordEdge`, `logCmp`) is the motivating case:
+    # `{.cover.}` emits a `recordEdge` at the top of every branch arm,
+    # so modelling them even as inert statements put an unknown effect
+    # on every path of every instrumented proc.
+    #
+    # #163 review R7: the deletion is now GATED on `isInertOpaqueCall`
+    # — the identical predicate the OPAQUE sibling arm below applies to
+    # the same argument shapes. Before this gate, the call was dropped
+    # UNCONDITIONALLY: a `var` formal (`nnkHiddenAddr`) or a `ref`/
+    # `ptr`/possibly-ref-carrying-object argument lets the real callee
+    # write through or observe state a deleted call's absence cannot
+    # account for, so a transparent-tagged mutator (e.g.
+    # `mutateT(x: var int)`) vanished and a target reading the
+    # mutation's effect solved against the UNMUTATED value — a
+    # concrete false `sxUnsat`. The non-inert case now falls through to
+    # the opaque arm just below (mirrors the expression-position
+    # fallback a few hundred lines up: a `{.symexTransparent.}` callee
+    # whose promise is contradicted degrades to `{.symexOpaque.}`
+    # handling — fails safe, never a silent wrong witness).
+    #
+    # The ARGUMENTS are still parsed, into the preamble, and only their
+    # values are thrown away. The pragma is a promise about the CALLEE,
+    # not about the expressions written at the call site: Nim evaluates
+    # those before the call whether or not symex models the call, so
+    # dropping them unparsed would silently delete any effect they carry
+    # (and any honest degrade an unmodellable argument owes). Both
+    # instrumentation shapes parse to nothing but a value —
+    # `{.cover.}`'s `recordEdge(123)` is an int literal, `{.covercmp.}`'s
+    # `logCmp(lTmp, rTmp, "==")` reads temps the rewrite already bound —
+    # so the preamble stays empty in the case that motivated this arm.
+    for i in 1 ..< n.len:
+      discard parseExpr(n[i], preamble, ctx)
+    mkBlock(@[])
+  elif hasSymexTransparentPragma(calleeSym):
+    # #163 review R7: the callee over-claimed `{.symexTransparent.}` —
+    # at least one argument is not provably inert (a writable `var`/
+    # `ref`/`ptr`/possibly-ref-carrying-object). Emit a SPECIFIC
+    # parse-time degrade naming the callee and the broken promise —
+    # entirely a front-end (`ctx.parseErrors`) classification, so it
+    # sits alongside, not instead of, the generic
+    # `feOpaqueCallUnmodelled` the resulting opaque-call fallback also
+    # produces at walk time. Without this, the ONLY message the caller
+    # sees is the generic opaque-call text, which literally suggests
+    # "mark it `{.symexTransparent.}`" to a caller who already did —
+    # actionable advice for a genuine `{.symexOpaque.}` call, wrong
+    # advice here.
+    # RFC-0005 S8 (§13.3, i3): an annotation violation, not a decline.
+    ctx.annotationViolation(n, avArgNotInert, calleeName,
+      "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
+      "but takes a writable argument (var/ref/ptr/possibly-ref-" &
+      "carrying), so it is not provably inert; treated as opaque " &
+      "instead of dropped")
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
+  elif (m.kind == smkOpaqueEffectful and not userCallee) or
+       hasSymexOpaquePragma(calleeSym) or isBodilessForeign(calleeSym):
+    # RFC-0005 S8c: the name catalog is stdlib names; a same-named user
+    # routine is walked (the final arm), only its pragmas can black it out.
+    # RFC-0005 S8b: a bodiless foreign callee joins this arm (see
+    # `isBodilessForeign`); the inertness rule below applies to it as
+    # to any opaque call.
+    #
+    # Issue #163 slice 4: an opaque call in statement position (no
+    # bound result — `retName == ""` below) whose every argument is
+    # plainly value-typed (`isInertOpaqueCall`) cannot affect the
+    # SUT's symbolic state. Compute the predicate against the RAW
+    # node `n` before parsing — parsing doesn't consume `n`, but the
+    # predicate is about the call site's shape, not the parsed IR.
+    let inert = isInertOpaqueCall(n)
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
+  else:
+    let callKey = ensureProcRegistered(ctx, calleeSym, n)
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    mkCall(callKey, "", argIRs, tBool())
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -8151,8 +8336,11 @@ proc parseStmtInner(n: NimNode,
     let bodyNode = n[^1]
     iterVar.expectKind nnkSym
     let iterName = iterVar.strVal
+    # RFC-0005 S8c: the range and container desugarings below model the
+    # STDLIB iterators; a user iterator that shares the name (a non-generic
+    # `items` beating `system.items[T]`, a user `..`) is not one of them.
     if iterExpr.kind == nnkInfix and iterExpr[0].kind == nnkSym and
-       iterExpr[0].strVal in [".." , "..<"]:
+       isBuiltinNamed(iterExpr[0], [".." , "..<"]):
       let inclusive = iterExpr[0].strVal == ".."
       var preamble3: seq[IRStmt]
       let loIR = parseExpr(iterExpr[1], preamble3, ctx)
@@ -8175,7 +8363,7 @@ proc parseStmtInner(n: NimNode,
       allStmts.add whileSt
       mkBlock(allStmts)
     elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
-         iterExpr[0].kind == nnkSym and iterExpr[0].strVal in ["items", "pairs"]:
+         iterExpr[0].kind == nnkSym and isBuiltinNamed(iterExpr[0], ["items", "pairs"]):
       # `for x in container` semchecks to `for x in items(container)`.
       let container = iterExpr[1]
       let recvCls = classifyType(container)
@@ -8518,36 +8706,16 @@ proc parseStmtInner(n: NimNode,
       ## `sxRaised(AssertionDefect)` for a violatable assume ahead of a
       ## genuinely-unreachable target. Distinct IR kind: `mkAssume`.
       mkAssume(parseExpr(n[1], preamble, ctx))
-    elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
-         (block:
-            # Phase 15 R8 (ADR-0010). `inc`/`dec` are the `{.magic: Inc/Dec.}`
-            # ordinal mutators. The GUARD keys on the RECEIVER's type so the
-            # normal INT case is UNAFFECTED (it falls through to the int-mutator
-            # arm below); ONLY a `ptr`-typed operand is pointer arithmetic. The
-            # receiver may carry a semcheck `nnkHiddenAddr`/`nnkHiddenDeref`
-            # (the `var T` formal) — unwrap before classifying.
-            let recv = unwrapHidden(n[1])
-            classifyType(recv).ty.kind == itPtr):
-      # Pointer arithmetic (`inc(p)`/`dec(p)` on a `ptr T`). The resulting
-      # address is UNMODELABLE in the logical-heap model (the heap is keyed by
-      # an abstract `Ref_T` address, not a numeric offset). Classify
-      # `hePtrArith` (sevError) so the verdict degrades to `sxUnknown`
-      # (Invariant 3 — never a silent sat/unsat) and emit `isUnsupported`. We do
-      # NOT model the arithmetic.
-      ctx.declineAtSite(
-        hePtrArith,
-        "pointer arithmetic (inc/dec) not modeled",
-        "pointer arithmetic `" & n[0].strVal &
-                      "` on a ptr operand is unsupported (Cluster R R8)")
-    elif n.len >= 2 and n[0].kind == nnkSym and n[0].strVal in ["inc", "dec"] and
+    elif n.len >= 2 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["inc", "dec"]) and
          (block:
             let recv = unwrapHidden(n[1])
             recv.kind == nnkSym and classifyType(recv).ty.kind == itInt):
       # Phase 15 R8. `inc(i)`/`dec(i)` on an INT receiver — the normal ordinal
       # mutation. Lower to the equivalent env rebind `i = i ± y` (`y` defaults to
       # 1) so the int case symexes natively (the `{.magic.}` body is not walked).
-      # This keeps inc/dec on int working `as before` while the ptr-operand guard
-      # above peels off pointer arithmetic.
+      # RFC-0005 S8c: the R8 `ptr`-operand guard that preceded this arm is
+      # deleted -- `system.inc` takes an Ordinal, so an `inc(p: ptr T)` is a
+      # USER overload, which the user-callee gate walks before this chain.
       let recv = unwrapHidden(n[1])
       let nm = recv.strVal
       let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
@@ -8600,83 +8768,16 @@ proc parseStmtInner(n: NimNode,
         # on the first argument (receiver position for method-call syntax
         # like `s.add(v)`).
         let recv1 = if n.len > 1: unwrapHidden(n[1]) else: nil
+        # RFC-0005 S8c: a user callee -- whatever its name -- and every
+        # transparent/opaque/foreign callee take the routine-call path; only
+        # a stdlib callee may complete one of the builtin mutation shapes
+        # below (`add`/`del`/`insert`/`incl`/`excl`/`[]=`).
+        let userCallee = isUserCallee(calleeSym)
         let m = getStdlibModelFor(calleeName, itBool)  ## kind ignored
-        if hasSymexTransparentPragma(calleeSym) and isInertOpaqueCall(n):
-          # Issue #163. A `{.symexTransparent.}` call in statement position is
-          # DELETED — no IR at all, not an opaque no-op. nelli's own
-          # instrumentation (`recordEdge`, `logCmp`) is the motivating case:
-          # `{.cover.}` emits a `recordEdge` at the top of every branch arm,
-          # so modelling them even as inert statements put an unknown effect
-          # on every path of every instrumented proc.
-          #
-          # #163 review R7: the deletion is now GATED on `isInertOpaqueCall`
-          # — the identical predicate the OPAQUE sibling arm below applies to
-          # the same argument shapes. Before this gate, the call was dropped
-          # UNCONDITIONALLY: a `var` formal (`nnkHiddenAddr`) or a `ref`/
-          # `ptr`/possibly-ref-carrying-object argument lets the real callee
-          # write through or observe state a deleted call's absence cannot
-          # account for, so a transparent-tagged mutator (e.g.
-          # `mutateT(x: var int)`) vanished and a target reading the
-          # mutation's effect solved against the UNMUTATED value — a
-          # concrete false `sxUnsat`. The non-inert case now falls through to
-          # the opaque arm just below (mirrors the expression-position
-          # fallback a few hundred lines up: a `{.symexTransparent.}` callee
-          # whose promise is contradicted degrades to `{.symexOpaque.}`
-          # handling — fails safe, never a silent wrong witness).
-          #
-          # The ARGUMENTS are still parsed, into the preamble, and only their
-          # values are thrown away. The pragma is a promise about the CALLEE,
-          # not about the expressions written at the call site: Nim evaluates
-          # those before the call whether or not symex models the call, so
-          # dropping them unparsed would silently delete any effect they carry
-          # (and any honest degrade an unmodellable argument owes). Both
-          # instrumentation shapes parse to nothing but a value —
-          # `{.cover.}`'s `recordEdge(123)` is an int literal, `{.covercmp.}`'s
-          # `logCmp(lTmp, rTmp, "==")` reads temps the rewrite already bound —
-          # so the preamble stays empty in the case that motivated this arm.
-          for i in 1 ..< n.len:
-            discard parseExpr(n[i], preamble, ctx)
-          mkBlock(@[])
-        elif hasSymexTransparentPragma(calleeSym):
-          # #163 review R7: the callee over-claimed `{.symexTransparent.}` —
-          # at least one argument is not provably inert (a writable `var`/
-          # `ref`/`ptr`/possibly-ref-carrying-object). Emit a SPECIFIC
-          # parse-time degrade naming the callee and the broken promise —
-          # entirely a front-end (`ctx.parseErrors`) classification, so it
-          # sits alongside, not instead of, the generic
-          # `feOpaqueCallUnmodelled` the resulting opaque-call fallback also
-          # produces at walk time. Without this, the ONLY message the caller
-          # sees is the generic opaque-call text, which literally suggests
-          # "mark it `{.symexTransparent.}`" to a caller who already did —
-          # actionable advice for a genuine `{.symexOpaque.}` call, wrong
-          # advice here.
-          # RFC-0005 S8 (§13.3, i3): an annotation violation, not a decline.
-          ctx.annotationViolation(n, avArgNotInert, calleeName,
-            "call `" & calleeName & "` is tagged `{.symexTransparent.}` " &
-            "but takes a writable argument (var/ref/ptr/possibly-ref-" &
-            "carrying), so it is not provably inert; treated as opaque " &
-            "instead of dropped")
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
-          mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
-        elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
-             isBodilessForeign(calleeSym):
-          # RFC-0005 S8b: a bodiless foreign callee joins this arm (see
-          # `isBodilessForeign`); the inertness rule below applies to it as
-          # to any opaque call.
-          #
-          # Issue #163 slice 4: an opaque call in statement position (no
-          # bound result — `retName == ""` below) whose every argument is
-          # plainly value-typed (`isInertOpaqueCall`) cannot affect the
-          # SUT's symbolic state. Compute the predicate against the RAW
-          # node `n` before parsing — parsing doesn't consume `n`, but the
-          # predicate is about the call site's shape, not the parsed IR.
-          let inert = isInertOpaqueCall(n)
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
-          mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
+        if userCallee or hasSymexTransparentPragma(calleeSym) or
+           m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
+           isBodilessForeign(calleeSym):
+          parseRoutineCallStmt(n, calleeSym, preamble, ctx)
         # #145 mutations recognised by name + receiver kind.
         elif recv1 != nil and recv1.kind == nnkSym:
           let recvName = recv1.strVal
@@ -8812,7 +8913,7 @@ proc parseStmtInner(n: NimNode,
     # `tUninterp("")`, not the ref classification).
     if n.len == 1 and n[0].kind == nnkCall and n[0].len == 1 and
        n[0][0].kind == nnkSym and
-       n[0][0].strVal in ["getCurrentException", "getCurrentExceptionMsg"]:
+       isBuiltinNamed(n[0][0], ["getCurrentException", "getCurrentExceptionMsg"]):
       let exprIR = parseExpr(n[0], preamble, ctx)
       let sinkTy = if n[0][0].strVal == "getCurrentExceptionMsg": tString()
                    else: tUninterp("")
@@ -8920,6 +9021,12 @@ proc parseStmtInner(n: NimNode,
         discard
     mkTry(tBody, handlers, finallyBody)
   of nnkInfix:
+    # RFC-0005 S8c: a statement-position operator whose head resolved to a
+    # USER routine (a user `+=`, a void user operator) is a routine call, not
+    # the augmented-assignment model below, which reads the operator's
+    # spelling (`+=` -> `bAdd`).
+    if isUserCallee(n[0]):
+      return parseRoutineCallStmt(n, n[0], preamble, ctx)
     # Augmented-assignment statement: `<simpleVar> <op>= <rhs>`.
     # After semcheck, `s += x` presents as `nnkInfix(Sym "+=", <lhs>, <rhs>)`.
     # This is the ONLY `nnkInfix` shape that reaches statement-level dispatch —
@@ -8952,7 +9059,8 @@ proc parseStmtInner(n: NimNode,
     #   * field LHS (`obj.f += y`) — non-nnkSym after unwrap
     #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
     #   * any other `<op>=` not in {+=, -=, *=, &=}
-    #   * user-defined `op=` proc calls (land as nnkCall, not nnkInfix)
+    #   * (a user-defined `op=` proc is an `nnkInfix` too; RFC-0005 S8c routes
+    #     it to `parseRoutineCallStmt` at the top of this arm)
     let augOp = n[0]
     if n.len == 3 and augOp.kind == nnkSym and
        augOp.strVal in ["+=", "-=", "*=", "&="]:

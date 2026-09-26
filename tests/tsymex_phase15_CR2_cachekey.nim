@@ -39,14 +39,9 @@ suite "Phase 15 CR-2 — four missing settings now in cache key":
     s1.budget.maxClosureInlineCount = s0.budget.maxClosureInlineCount + 1
     check canonicalize(s0) != canonicalize(s1)
 
-  test "CR-2 sub-test 3: maxBytesEncodingLen changes canonical form":
-    ## Changing maxBytesEncodingLen changes whether a bytes(s) materialisation
-    ## triggers seBytesLengthTooLarge → sxUnknown vs expands (sxSat).
-    ## Two settings differing ONLY in maxBytesEncodingLen must hash differently.
-    var s0 = defaultSymexSettings()
-    var s1 = s0
-    s1.budget.maxBytesEncodingLen = s0.budget.maxBytesEncodingLen + 1
-    check canonicalize(s0) != canonicalize(s1)
+  ## CR-2 sub-test 3 (`maxBytesEncodingLen` in the key) was removed in
+  ## RFC-0005 S8c with the field: the name-matched `bytes(s)` model it capped
+  ## is deleted, so the setting and its `;mbel=` key segment are gone.
 
   test "CR-2 sub-test 4: maxFreshnessAssertions changes canonical form":
     ## Changing maxFreshnessAssertions changes how many `newRef != prior`
@@ -818,7 +813,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8b (bodiless importc callees take the opaque arm; parseInt
     ## follows rawParseInt -- `+` sign, int range, `_` continues tainted;
     ## `exnTypeTable` follows Nim's tree, `ArithmeticDefect` et al.). 148->149.
-    check symexWalkerVersion == "149"
+    ## RFC-0005 S8c (builtin models apply only when the resolved callee is
+    ## the stdlib symbol; a user overload is walked as a user call; user
+    ## converters walk; the DSL markers match by declaring module; the
+    ## name-only `replaceAll`/`bytes`/`inc(ptr)` models removed, `replace` is
+    ## all-occurrence). 149->150.
+    check symexWalkerVersion == "150"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -133,15 +133,13 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ##
   ## Shared-symbol dependencies for Stage 8 include-ordering:
   ##   mkString, mkInt, at, toCode, substr, contains, startsWith, endsWith,
-  ##   indexOf, replace, replaceAll, joinStrSeq, mkConcreteStrSeq,
+  ##   indexOf, replaceAll, joinStrSeq, mkConcreteStrSeq,
   ##   parseNimRegexToZ3Regex, intToBv, mkConstArray, store, toStr, toInt,
   ##   ite, len, concat, liftBV, toZ3Int, syncParseIntRaiseCond,
   ##   parseIntRaiseConds,
   ##   syncStrIndexOobCond, strIndexOobConds,
-  ##   currentMaxBytesEncodingLen,
   ##   SymexUnsupportedStringOpError, SymexZ3StringIncompleteError,
-  ##   SymexZ3VersionMissingError, SymexBytesSymbolicLengthError,
-  ##   SymexBytesLengthTooLargeError, SymexUnsupportedRegexError, StrOpKinds
+  ##   SymexZ3VersionMissingError, SymexUnsupportedRegexError, StrOpKinds
   case e.kind
   of iekStrLit:
     SymVal(kind: svString, str: mkString(e.sval))
@@ -326,45 +324,41 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # v65: char needle bridged via needleAsStr (`hostPort.rfind(':')`).
     let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrRfind")
     SymVal(kind: svInt, zi: lastIndexOf(recv.str, sub))
-  of iekStrReplace:
-    # Phase 15 S5. `s.replace(old, new)` → Z3 `(seq.replace s old new)`
-    # (`Z3_mk_seq_replace`), FIRST-occurrence semantics. strArgs = [recv, old,
-    # new]. (Nim's `strutils.replace` is global, but the byte-faithful Z3 op
-    # this cycle models is the first-occurrence primitive per the S5 spec.)
-    let recv = lower(env, e.strArgs[0])
-    requireStr(recv, "iekStrReplace")
-    let old = lower(env, e.strArgs[1])
-    requireStr(old, "iekStrReplace")
-    let neu = lower(env, e.strArgs[2])
-    requireStr(neu, "iekStrReplace")
-    SymVal(kind: svString, str: replace(recv.str, old.str, neu.str))
   of iekStrReplaceAll:
-    # Phase 15 S5. `s.replaceAll(old, new)` → Z3 `(seq.replace_all s old new)`
-    # (`Z3_mk_seq_replace_all`) — VERSION-GATED behind `-d:z3WithSeqReplaceAll`
-    # (absent on Z3 < 4.15.5). The `replaceAll` proc only EXISTS when the gate
-    # is defined, so the call MUST sit inside the `when` (an unguarded call
-    # won't compile on a build without the symbol). On a build lacking the
-    # gate, raise SymexZ3VersionMissingError → sxUnknown + seZ3VersionMissing
-    # (Invariant 3 — classified, never a crash, never a silent UNSAT).
+    # Phase 15 S5 / RFC-0005 S8c. `strutils.replace(s, sub, by)` replaces
+    # EVERY occurrence (both overloads: `string` and `char` sub/by), so it is
+    # Z3 `(seq.replace_all s sub by)` (`Z3_mk_seq_replace_all`). S8c deleted
+    # the first-occurrence model the stdlib call used to reach (a false
+    # verdict: `"foofoo".replace("foo","bar")` is `"barbar"`, not
+    # `"barfoo"`) and the name-only `replaceAll` entry that reached this one
+    # (Nim's stdlib has no `replaceAll`). strArgs = [recv, sub, by]; a `char`
+    # sub/by is bridged to its 1-char string by `needleAsStr` (exact under
+    # the byte-faithful domain), exactly as the `char` overload behaves.
     #
-    # RFC-0005 S5: the operands are lowered BEFORE the gate on BOTH builds.
-    # `seZ3VersionMissing` is `dcFreshSymbol` (`degradeStrArm` substitutes a
-    # fresh per-read string), which licenses `sxUnsat` -- sound only if the
-    # decline drops nothing. Raising before lowering dropped every raise fork
-    # an operand deposits (`replaceAll($(a div b), …)` lost its
-    # DivByZeroDefect branch: a false `sxUnsat`).
+    # Operands are lowered BEFORE the version gate on both builds (RFC-0005
+    # S5): `seZ3VersionMissing` is `dcFreshSymbol`, sound only if the decline
+    # drops no operand raise fork.
     let recv = lower(env, e.strArgs[0])
     requireStr(recv, "iekStrReplaceAll")
-    let old = lower(env, e.strArgs[1])
-    requireStr(old, "iekStrReplaceAll")
-    let neu = lower(env, e.strArgs[2])
-    requireStr(neu, "iekStrReplaceAll")
-    when defined(z3WithSeqReplaceAll):
-      SymVal(kind: svString, str: replaceAll(recv.str, old.str, neu.str))
+    let old = needleAsStr(lower(env, e.strArgs[1]), "iekStrReplaceAll")
+    let neu = needleAsStr(lower(env, e.strArgs[2]), "iekStrReplaceAll")
+    if e.strArgs[1].kind == iekStrLit and e.strArgs[1].sval.len == 0:
+      # strutils: `if subLen == 0: result = s` -- an empty `sub` returns the
+      # receiver unchanged. Exact, and needs no Z3 op (so no version gate).
+      # (SMT-LIB's `str.replace_all` agrees; Z3's first-occurrence `replace`
+      # would PREPEND `by`.)
+      recv
     else:
-      raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-        msg: "replaceAll requires Z3 >= 4.15.5 (Z3_mk_seq_replace_all absent " &
-             "without -d:z3WithSeqReplaceAll)")
+      when defined(z3WithSeqReplaceAll):
+        SymVal(kind: svString, str: replaceAll(recv.str, old, neu))
+      else:
+        # The gate is absent (Z3 < 4.15.5 lacks `Z3_mk_seq_replace_all`):
+        # raise SymexZ3VersionMissingError -> degradeStrArm -> a fresh,
+        # per-read string + `seZ3VersionMissing` (Invariant 3 -- recorded,
+        # never a silent first-occurrence fallback, never a crash).
+        raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+          msg: "strutils.replace (all occurrences) requires Z3 >= 4.15.5 " &
+               "(Z3_mk_seq_replace_all absent without -d:z3WithSeqReplaceAll)")
   of iekStrJoin:
     # Phase 15 S5. `xs.join(sep)` → Z3 concat of `xs` with `sep` interleaved.
     # strArgs = [recv(seq[string]), sep]. Tractable only over a CONCRETE-length
@@ -496,55 +490,6 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "regex replace requires Z3 >= 4.15.5 (Z3_mk_seq_replace_re absent " &
              "without -d:z3WithSeqReplaceRe)")
-  of iekStrBytes:
-    # Phase 15 S7a. `bytes(s)` byte-faithful byte-view. Under the byte-faithful
-    # model (ADR-0006), every Z3 string character is ALREADY a single byte (≤0xFF
-    # constrained at allocation, S3), so the byte count == char count and this is
-    # the TRIVIAL identity view — NOT a multi-byte UTF-8 decode. We materialise a
-    # concrete-length `svSeq` of `svBV8`, one element per character position,
-    # reusing S3's exact at→toCode→BV8 bridge:
-    #   bytes[i] == intToBv[8](toCode(at(s, i)))
-    # `seBytesBeyondBMP` is UNREACHABLE here: a free char is ≤0xFF by construction
-    # and a literal char is a raw byte 0..255, so toCode always fits BV8 — no
-    # multi-byte branch is ever needed. (Omitted as an error kind for that reason.)
-    #
-    # Concreteness is detected at the IR level (mirroring S5's split): a string
-    # LITERAL receiver (`iekStrLit`) has a statically-known byte count; anything
-    # else (a bare `string` parameter, a symbolic result) has a symbolic length
-    # with no bounded element chain → seBytesSymbolicLength (Invariant 3).
-    let recvIR = e.strArgs[0]
-    if recvIR.kind != iekStrLit:
-      # RFC-0005 S5: lower the receiver BEFORE declining. The kind is
-      # `dcFreshSymbol`; raising first dropped the receiver's own raise forks
-      # (`bytes($(a div b))` lost its DivByZeroDefect branch).
-      let recvSym = lower(env, e.strArgs[0])
-      requireStr(recvSym, "iekStrBytes")
-      raise (ref SymexBytesSymbolicLengthError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-        msg: "bytes() over a symbolic-length string is not bounded-encodable " &
-             "(receiver is not a string literal; general path → sxUnknown)")
-    let concreteLen = recvIR.sval.len   # byte count == char count (byte-faithful)
-    # RFC-0010 B4: `maxBytesEncodingLen = 0` is documented (this field's own
-    # comment, smt/types.nim) as the unlimited sentinel; the guard below had
-    # no `> 0` gate, so it fired on any non-empty literal instead. Same
-    # `cap > 0 and` house style as `maxFrontierSize`/`maxSplitParts` (this
-    # file, above).
-    if currentMaxBytesEncodingLen > 0 and concreteLen > currentMaxBytesEncodingLen:
-      raise (ref SymexBytesLengthTooLargeError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-        msg: "bytes() concrete length " & $concreteLen & " exceeds " &
-             "maxBytesEncodingLen=" & $currentMaxBytesEncodingLen &
-             " (general path → sxUnknown)")
-    # Build the svSeq of BV8 via the at→toCode→BV8 bridge over the literal's Z3
-    # string. A const array defaulting to 0 (unstored slots are never read —
-    # access is len-bounded), `store`ing each byte at its index; seqLen pinned to
-    # concreteLen (EQUAL to len(s), not >=).
-    let recvStr = mkString(recvIR.sval)
-    var arr = mkConstArray[Z3Int, Z3BitVec[8]](mkBitVec[8](0))
-    for i in 0 ..< concreteLen:
-      let b = intToBv[8](toCode(at(recvStr, mkInt(i))), Z3BitVec[8])
-      arr = store(arr, mkInt(i), b)
-    SymVal(kind: svSeq, seqLen: mkInt(concreteLen),
-           seqDataRaw: toAnyAst(arr),
-           seqElemTy: tInt(8, signed = false))
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by
     # nim-z3 as `concat` on `Z3String`. Both operands lower to svString (a string
@@ -861,10 +806,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     SymVal(kind: svBool, bo: matches(tail, region))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrRfind, iekStrReplace, iekStrReplaceAll,
+                   iekStrFind, iekStrRfind, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe,
-                   iekStrBytes, iekStrConcat,
+                   iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
                    iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
                    iekStrInOptionRegion}:

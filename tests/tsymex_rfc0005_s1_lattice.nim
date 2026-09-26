@@ -28,8 +28,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
   # kind NOT in this set must still be dcNoAnswer (later slices extend it).
   # RFC-0005 S5 added the degradeStrArm funnel's four fresh-symbol kinds and
   # the rune-decode split.
+  # RFC-0005 S8c retired `seBytesLengthTooLarge`, `seBytesSymbolicLength` and
+  # `hePtrArith` back to dcNoAnswer (never emitted; rows kept for totality).
   const reclassified = {heUnsupportedPointeeRead, seUnsupportedCompoundSortLeaf,
-                        seBytesLengthTooLarge, seBytesSymbolicLength,
                         seZ3VersionMissing, seZ3StringIncomplete,
                         seRuneDecodeSymbolic,
                         # RFC-0005 S6a: the budget family.
@@ -42,7 +43,7 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         seByteIterUnsupported, eeRaiseOutsideHandler,
                         eeUnknownExnType, geInstantiationCapped,
                         geDistinctBarrier, heDepthExhausted, heUnsafeCast,
-                        hePtrArith, heNewFieldZeroUnsupported,
+                        heNewFieldZeroUnsupported,
                         feOpaqueCallUnmodelled, feEnumOrdinalUnresolved,
                         feGlobalReadUnmodelled, seVariantFieldOnDeclinedCtor,
                         feUnsupportedStmtKind, weRecursionCycleCut,

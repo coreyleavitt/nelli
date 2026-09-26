@@ -61,7 +61,6 @@ suite "RFC-0010 B2 — ResourceBudget: the empty literal IS the default":
     check lit.maxClosureInlineCount == want.maxClosureInlineCount
     check lit.maxInstantiationsPerProc == want.maxInstantiationsPerProc
     check lit.maxSplitParts == want.maxSplitParts
-    check lit.maxBytesEncodingLen == want.maxBytesEncodingLen
     check lit.seqInlineThreshold == want.seqInlineThreshold
     check lit.maxVariantConstructorForks == want.maxVariantConstructorForks
     check lit.maxVariantConstructorFieldAllocs ==
@@ -187,7 +186,7 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
         queryRLimit: 111'u, maxFrontierSize: 222, maxCallDepth: 33,
         maxLoopUnwind: 44, maxHeapDepth: 55, maxFreshnessAssertions: 666,
         maxClosureInlineCount: 777, maxInstantiationsPerProc: 888,
-        maxSplitParts: 99, maxBytesEncodingLen: 121,
+        maxSplitParts: 99,
         seqInlineThreshold: 131, maxVariantConstructorForks: 141,
         maxVariantConstructorFieldAllocs: 151))
     check defaultSymexSettings() + b == b
@@ -198,7 +197,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # and the pin passes while `+` silently ignores it. Pinning the counts is
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
-    check fieldCount[ResourceBudget]() == 13
+    check fieldCount[ResourceBudget]() == 12   # RFC-0005 S8c deleted
+                                               # `maxBytesEncodingLen`
     check fieldCount[SymexSettings]() == 7   # 6 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`)
 
@@ -241,7 +241,10 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
 # guards stay fixed and correct: `maxClosureInlineCount` (the walker declines
 # a forward-declared self-referencing closure with `ceClosureUnknownCallee`
 # before it could ever recurse, so there is no equivalent crash to trade for)
-# and `maxBytesEncodingLen` (never recursive at all). Each SUT below only
+# and `maxBytesEncodingLen` (never recursive at all) -- the latter since
+# deleted with the name-matched `bytes(s)` model it capped (RFC-0005 S8c:
+# Nim has no stdlib `bytes`; the model was reachable only through a user
+# proc of that name, which S8c walks instead). Each SUT below only
 # reaches its target by actually exercising the guarded machinery, so a
 # wrongly-firing budget degrades the whole run to `sxUnknown` instead of the
 # definite verdict the default budget reaches — the same shape as this
@@ -266,34 +269,13 @@ proc b4ClosureInline(x: int) =
   if f(3) == 13:
     symexTarget("closure_inline_hit")
 
-# --- maxBytesEncodingLen: bytes() over a short literal --------------------
-# `bytes` is intercepted BY NAME on an `itString` receiver (S7a) -- it MUST be
-# spelled exactly `bytes`, not a distinguishing local name, or the parser
-# never routes the call to `iekStrBytes` at all and this SUT would silently
-# stop testing anything budget-related. The shim body never runs under
-# symex. Mirrors tsymex_phase15_S7a_bytes.nim's shim.
-proc bytes(s: string): seq[byte] =
-  for c in s: result.add byte(c)
-
-proc b4BytesEncoding(s: string) =
-  if s == "x":
-    if bytes("A").len == 1:
-      symexTarget("bytes_encoding_hit")
-
-suite "RFC-0010 B4 — explicit zero means unlimited (two fixed fields)":
+suite "RFC-0010 B4 — explicit zero means unlimited (the fixed field)":
 
   test "maxClosureInlineCount: 0 must not block the first closure application":
     let viaDefault = symexFind(b4ClosureInline, tLabel("closure_inline_hit"))
     check viaDefault.status == sxSat
     let viaZero = symexFind(b4ClosureInline, tLabel("closure_inline_hit"),
         SymexSettings(budget: ResourceBudget(maxClosureInlineCount: 0)))
-    check viaZero.status == sxSat
-
-  test "maxBytesEncodingLen: 0 must not block a 1-byte literal bytes() view":
-    let viaDefault = symexFind(b4BytesEncoding, tLabel("bytes_encoding_hit"))
-    check viaDefault.status == sxSat
-    let viaZero = symexFind(b4BytesEncoding, tLabel("bytes_encoding_hit"),
-        SymexSettings(budget: ResourceBudget(maxBytesEncodingLen: 0)))
     check viaZero.status == sxSat
 
 # ---------------------------------------------------------------------------

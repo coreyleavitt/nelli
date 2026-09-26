@@ -826,5 +826,10 @@ task test, "Run the test suite":
             # (`+` sign, int range, `_` continues tainted), exnTypeTable
             # audited against Nim's own hierarchy (+ exception aliases);
             # walker 148->149.
-            "tsymex_rfc0005_s8b_substitutions"]:
+            "tsymex_rfc0005_s8b_substitutions",
+            # RFC-0005 S8c -- name-resolved builtins: a builtin model applies
+            # only when the resolved callee is the stdlib symbol; a user
+            # overload is walked as a user call; markers match by module;
+            # walker 149->150.
+            "tsymex_rfc0005_s8c_resolution"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

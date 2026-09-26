@@ -174,10 +174,10 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
      iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
-     iekStrStartsWith, iekStrEndsWith, iekStrReplace, iekStrReplaceAll,
+     iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrInOptionRegion,                     ## Round-6 B6: svBool result, not int.
-     iekStrBytes, iekStrConcat,
+     iekStrConcat,
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
      iekStrStrip,                             ## ADR-0026: svString result, not int.

@@ -6,7 +6,7 @@
 ## to catch cross-op state-threading bugs introduced by the S1–S7a multi-file
 ## edits (parser routing, the uniform `iekStr*` payload, the at→toCode→BV8 char
 ## bridge, the ≤0xFF byte-faithful constraint, the seq[string] machinery, regex
-## membership, and the `bytes(s)` identity view). Each S-cycle shipped its own
+## membership). Each S-cycle shipped its own
 ## focused test; S7b proves the ops COMPOSE.
 ##
 ## Byte-faithful model (ADR-0006): every Z3 string char is constrained ≤0xFF at
@@ -54,23 +54,20 @@ proc multiOp2Sut(s: string) =
     symexTarget("hit")
 
 # ----------------------------------------------------------------------------
-# 2. Concrete split + join round-trip AND a bytes(s) check on a literal, in the
-#    same file (and the same SUT). `s` is pinned to a literal so the witness has
-#    a parameter; the split/join/bytes all operate on string LITERALS (the S5/S7a
-#    concrete-inline idiom — no symbolic quantifier, no hang).
+# 2. Concrete split + join round-trip AND a byte read of a split part, in the
+#    same SUT. `s` is pinned to a literal so the witness has a parameter; the
+#    split/join operate on string LITERALS (the S5 concrete-inline idiom — no
+#    symbolic quantifier, no hang). (RFC-0005 S8c: this SUT used a user
+#    `bytes` shim to reach the name-matched `bytes(s)` model, now deleted --
+#    Nim has no stdlib `bytes`; the byte read goes through real `s[i]`.)
 # ----------------------------------------------------------------------------
-# `bytes` is intercepted by NAME on an itString receiver (smkStrBytes); the body
-# never runs under symex. Local shim so Nim typechecks (mirrors S7a).
-proc bytes(s: string): seq[byte] =
-  for c in s: result.add byte(c)
-
 proc splitJoinBytesSut(s: string) =
   if s == "x":
     # split + join round-trip (concrete)
     let parts = "a,b,c".split(",")
-    # bytes() on a literal: byte-faithful identity view, "A" -> @[65]
+    # byte-faithful read of a part: "b"[0] is byte 98
     if parts.len == 3 and parts.join(",") == "a,b,c" and
-       bytes("A").len == 1 and bytes("A")[0] == 65'u8:
+       ord(parts[1][0]) == 98:
       symexTarget("hit")
 
 # ----------------------------------------------------------------------------
@@ -122,7 +119,7 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     check r.status == sxSat
     check r.witness[0] == "world"
 
-  test "split+join round-trip (concrete) + bytes(literal) in one SUT -> sxSat":
+  test "split+join round-trip (concrete) + a part's byte in one SUT -> sxSat":
     let r = symexFind(splitJoinBytesSut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"

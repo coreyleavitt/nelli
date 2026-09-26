@@ -10,10 +10,13 @@
 ##     witness carries a `SymexErrorInfo{kind: hePtrFamily}` so consumers can
 ##     distinguish unmanaged ptr from managed ref. A parallel `ref T` SUT
 ##     produces NO such entry.
-##   * Pointer arithmetic `inc(p)`/`dec(p)` with a `ptr`-typed operand →
-##     `SymexErrorInfo{kind: hePtrArith, severity: sevError}` (HALTING) →
-##     sxUnknown (Invariant 3). The address is NOT modeled. `inc`/`dec` on an
-##     INT is UNAFFECTED.
+##   * Pointer arithmetic. R8 classified `inc(p)`/`dec(p)` on a `ptr` operand
+##     `hePtrArith`. RFC-0005 S8c retired that kind: `system.inc` takes an
+##     Ordinal, so an `inc(p: ptr T)` exists only as a USER overload, and S8c
+##     walks a user routine instead of name-matching it. Real pointer
+##     arithmetic goes through `cast` (`cast[ptr T](cast[int](p) + k)`), which
+##     records `heUnsafeCast` (R11) -- pinned below through that path.
+##     `inc`/`dec` on an INT is UNAFFECTED.
 ##
 ## See ADR-0010 (logical-heap model). R8 is ADDITIVE under walker version "9"
 ## (no bump; Cluster R bumps at R12).
@@ -33,18 +36,23 @@ proc refDerefIs7(p: ref int) =
     if p[] == 7:
       symexTarget("hit")
 
-# R8 SUT 2: pointer arithmetic via `inc` on a `ptr` operand — unmodelable
-# address → hePtrArith (sevError) → sxUnknown. Stock Nim has NO `inc(p: ptr T)`
-# (pointer arithmetic is cast-based), so to exercise the name+ptr-operand guard
-# with a type-checking SUT we provide a local `inc`/`dec` ptr overload. The
-# parser's R8 guard keys on the proc NAME (`inc`/`dec`) + a ptr-typed operand
-# and fires BEFORE the user overload is ever registered/walked.
+# R8 SUT 2: a USER `inc` overload on a `ptr` operand. Stock Nim has NO
+# `inc(p: ptr T)`, so this no-op proc is ordinary user code; RFC-0005 S8c
+# walks it (the retired R8 guard name-matched it as pointer arithmetic and
+# never looked at its empty body).
 proc inc(p: ptr int) = discard
 proc dec(p: ptr int) = discard
 
 proc ptrInc(p: ptr int) =
   inc(p)
   symexTarget("any")
+
+# R8 SUT 3: REAL pointer arithmetic -- an integer offset through `cast`.
+proc ptrCastArith(p: ptr int) =
+  if p != nil:
+    let q = cast[ptr int](cast[int](p) + 8)
+    if q[] == 7:
+      symexTarget("hit")
 
 suite "symex Phase 15 R8 — ptr T heap model + pointer-arith classification":
 
@@ -65,12 +73,21 @@ suite "symex Phase 15 R8 — ptr T heap model + pointer-arith classification":
     for e in r.errors:
       check e.kind != hePtrFamily
 
-  test "R8.2: inc(p) on a ptr operand → sxUnknown + hePtrArith (sevError)":
+  test "R8.2: a user no-op inc(p: ptr int) is walked: sxSat, no error recorded":
     let r = symexFind(ptrInc, tLabel("any"))
+    check r.status == sxSat
+    for e in r.errors:
+      check e.severity != sevError
+      check e.kind != hePtrArith
+
+  test "R8.2b: real pointer arithmetic (cast offset) → sxUnknown + heUnsafeCast":
+    let r = symexFind(ptrCastArith, tLabel("hit"))
     check r.status == sxUnknown
-    check r.errors.len > 0                   # no silent empty-errors sxUnknown
-    check r.errors[0].kind == hePtrArith
-    check r.errors[0].severity == sevError
+    var sawCast = false
+    for e in r.errors:
+      check e.kind != hePtrArith
+      if e.kind == heUnsafeCast and e.severity == sevError: sawCast = true
+    check sawCast
 
   test "R8.3: inc/dec on an INT is unaffected (no hePtrArith)":
     # The pointer-arith guard must key on a ptr-typed operand ONLY. A normal

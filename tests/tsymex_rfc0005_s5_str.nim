@@ -49,7 +49,15 @@
 ##
 ## Flip audit (§4.3): pins that flipped are rewritten through
 ## `checkUnsatOverTaintOnly` in the slice that flipped them.
-import std/[unittest, strutils, os, unicode]
+##
+## RFC-0005 S8c: this file reached three models through USER procs that
+## shared a builtin's name (`replaceAll`, `bytes`, and a `re`/`replace`/`match`
+## regex shim) -- the silent substitution S8c removes. `replaceAll` is gone
+## (Nim's `strutils.replace` IS all-occurrence, so the real call now reaches
+## `seZ3VersionMissing`); the `bytes(s)` model and its two kinds
+## (`seBytesLengthTooLarge`, `seBytesSymbolicLength`) are deleted/retired, so
+## their rows below are removed; the regex rows use the real `std/re`.
+import std/[unittest, strutils, os, unicode, re]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -67,58 +75,10 @@ proc sevErrorKinds(errs: seq[SymexErrorInfo]): seq[SymexErrorKind] =
   for e in errs:
     if e.severity == sevError and e.kind notin result: result.add e.kind
 
-# `replaceAll` / `bytes` are not Nim stdlib procs; the symex parser intercepts
-# them BY NAME on an `itString` receiver (smkStrReplaceAll / smkStrBytes).
-# The bodies never run under symex (the S5_strops / S7a_bytes shim idiom).
-proc replaceAll(s, old, neu: string): string = s.replace(old, neu)
-proc bytes(s: string): seq[byte] =
-  for c in s: result.add byte(c)
-
-# `std/re` needs libpcre at run time, which the podman test image does not
-# ship (why `tsymex_phase15_S6b_regex` is red there). The parser routes a
-# regex call BY NAME -- callee `match`/`replace` with an `re"…"` generalized
-# raw-string argument (`dsl_parser.nim`, Phase 15 S6b) -- so a local `re`
-# shim drives the identical `iekStrMatch` / `iekStrReplaceRe` IR. The bodies
-# implement the real semantics of exactly the patterns used here (`c+` and
-# `(.)\1`) for the oracles; they never run under symex.
-type S5Re = object
-  pat: string
-
-proc re(p: string): S5Re = S5Re(pat: p)
-
-proc replace(s: string; r: S5Re; repl: string): string =
-  doAssert r.pat.len == 2 and r.pat[1] == '+', "shim models `c+` only"
-  var i = 0
-  while i < s.len:
-    if s[i] == r.pat[0]:
-      result.add repl
-      while i < s.len and s[i] == r.pat[0]: inc i
-    else:
-      result.add s[i]
-      inc i
-
-proc match(s: string; r: S5Re): bool =
-  doAssert r.pat == "(.)\\1", "shim models `(.)\\1` only"
-  s.len >= 2 and s[0] == s[1]
-
-const lit33 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"   ## > maxBytesEncodingLen (32)
-
 # ---- (b) over-taint-only, target unreachable: one SUT per classified kind ---
 
-proc s5DeadBytesTooLarge(s: string, n: int) =
-  let b = bytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-  discard b
-  if n == 5 and n == 6:
-    symexTarget("s5_dead_bytes_too_large")
-
-proc s5DeadBytesSymbolic(s: string, n: int) =
-  let b = bytes(s)
-  discard b
-  if n == 5 and n == 6:
-    symexTarget("s5_dead_bytes_symbolic")
-
 proc s5DeadReplaceAll(s: string, n: int) =
-  let t = s.replaceAll("a", "b")
+  let t = s.replace("a", "b")
   discard t
   if n == 5 and n == 6:
     symexTarget("s5_dead_replace_all")
@@ -143,23 +103,19 @@ proc s5DeadJoin(s: string, n: int) =
 
 ## The contradiction runs THROUGH the fresh value: no string is both.
 proc s5DeadThroughValue(s: string) =
-  let t = s.replaceAll("a", "b")
+  let t = s.replace("a", "b")
   if t == "x" and t == "y":
     symexTarget("s5_dead_through_value")
 
 # ---- (c) introduction invariant: fresh per read, no constraint -------------
 
 proc s5TwoCellsReplaceAll(a, b: string) =
-  if a.replaceAll("x", "y") != b.replaceAll("x", "y"):
+  if a.replace("x", "y") != b.replace("x", "y"):
     symexTarget("s5_two_cells_replace_all")
 
 proc s5TwoCellsReplaceRe(a, b: string) =
   if a.replace(re"x+", "y") != b.replace(re"x+", "y"):
     symexTarget("s5_two_cells_replace_re")
-
-proc s5TwoCellsBytes(a, b: string) =
-  if bytes(a).len != bytes(b).len:
-    symexTarget("s5_two_cells_bytes")
 
 proc s5TwoCellsSplit(a, b: string) =
   if a.split(",").len != b.split(",").len:
@@ -174,25 +130,17 @@ proc s5TwoCellsLoop(a, b: string) =
   var first = ""
   var differ = false
   for i in 0 .. 1:
-    let cur = if i == 0: a.replaceAll("x", "y") else: b.replaceAll("x", "y")
+    let cur = if i == 0: a.replace("x", "y") else: b.replace("x", "y")
     if i == 0: first = cur
     elif cur != first: differ = true
   if differ:
     symexTarget("s5_two_cells_loop")
 
-## The REAL value is reachable: `bytes(lit33)` really has length 33 and its
-## first byte really is 'a'. A placeholder forced to anything (length 0) would
-## prove this unreachable.
-proc s5TooLargeRealValue(s: string) =
-  let b = bytes("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
-  if b.len == 33 and b[0] == 97'u8:
-    symexTarget("s5_too_large_real_value")
-
 # ---- (d) operand effects survive the decline (RED before S5's fix) ---------
 
 proc s5EffReplaceAll(s: string, a, b: int) =
   try:
-    let t = replaceAll($(a div b), "x", "y")
+    let t = replace($(a div b), "x", "y")
     discard t
   except DivByZeroDefect:
     symexTarget("s5_eff_replace_all")
@@ -203,13 +151,6 @@ proc s5EffReplaceRe(s: string, a, b: int) =
     discard t
   except DivByZeroDefect:
     symexTarget("s5_eff_replace_re")
-
-proc s5EffBytes(s: string, a, b: int) =
-  try:
-    let t = bytes($(a div b))
-    discard t
-  except DivByZeroDefect:
-    symexTarget("s5_eff_bytes")
 
 proc s5EffSplitGeneral(s: string, a, b: int) =
   try:
@@ -242,16 +183,12 @@ proc s5EffJoin(s: string, a, b: int) =
 # ---- guard: reachable ONLY through the fresh value -------------------------
 
 proc s5LiveReplaceAll(s: string) =
-  if s.replaceAll("a", "b") == "zzz":
+  if s.replace("a", "b") == "zzz":
     symexTarget("s5_live_replace_all")
 
 proc s5LiveSplit(s: string) =
   if s.split(",").len == 2:
     symexTarget("s5_live_split")
-
-proc s5LiveBytes(s: string) =
-  if bytes(s).len == 3:
-    symexTarget("s5_live_bytes")
 
 # ---- (e) must-NOT-promote: the funnels' ⊤ kinds -----------------------------
 
@@ -309,17 +246,13 @@ suite "RFC-0005 S5 -- oracles":
 
   test "oracle: the degraded ops are total over these inputs (no raise to drop)":
     for s in ["", "a,b", "aaa", "x"]:
-      discard s.replaceAll("a", "b")
+      discard s.replace("a", "b")
       discard s.replace(re"a+", "b")
-      discard bytes(s)
       discard s.split(",").join("-")
-    check bytes(lit33).len == 33
-    check bytes(lit33)[0] == 97'u8
 
   test "oracle: the two-cell targets are reachable (distinct inputs, distinct results)":
-    check "a".replaceAll("x", "y") != "b".replaceAll("x", "y")
+    check "a".replace("x", "y") != "b".replace("x", "y")
     check "a".replace(re"x+", "y") != "b".replace(re"x+", "y")
-    check bytes("a").len != bytes("ab").len
     check "a".split(",").len != "a,b".split(",").len
     check "a".split(",").join("-") != "b".split(",").join("-")
 
@@ -329,19 +262,17 @@ suite "RFC-0005 S5 -- oracles":
       try: body()
       except DivByZeroDefect: inc hits
     let z = 0
-    probe(proc () = discard replaceAll($(1 div z), "x", "y"))
+    probe(proc () = discard replace($(1 div z), "x", "y"))
     probe(proc () = discard ($(1 div z)).replace(re"x+", "y"))
-    probe(proc () = discard bytes($(1 div z)))
     probe(proc () = discard ($(1 div z)).split(","))
     probe(proc () = discard "s".split($(1 div z)))
     probe(proc () = discard ($(1 div z)).split(""))
     probe(proc () = discard "s".split(",").join($(1 div z)))
-    check hits == 7
+    check hits == 6
 
   test "oracle: the live targets are reachable":
-    check "zzz".replaceAll("a", "b") == "zzz"
+    check "zzz".replace("a", "b") == "zzz"
     check "a,b".split(",").len == 2
-    check bytes("abc").len == 3
     check runeLen("ab") == 2
 
 # =============================================================================
@@ -351,8 +282,7 @@ suite "RFC-0005 S5 -- oracles":
 suite "RFC-0005 S5 (a) -- the degradeStrArm / R1 funnels' classOf rows":
 
   test "the fresh-per-read, effect-preserving kinds are dcFreshSymbol":
-    for k in [seBytesLengthTooLarge, seBytesSymbolicLength, seZ3VersionMissing,
-              seZ3StringIncomplete]:
+    for k in [seZ3VersionMissing, seZ3StringIncomplete]:
       checkpoint($k)
       check classOf(k) == dcFreshSymbol
       check channels(k).path == {scSpurious}
@@ -379,19 +309,7 @@ suite "RFC-0005 S5 (a) -- the degradeStrArm / R1 funnels' classOf rows":
 
 suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
 
-  test "seBytesLengthTooLarge: bytes(<33-byte literal>) -> sxUnsat":
-    let r = symexFind(s5DeadBytesTooLarge, tLabel("s5_dead_bytes_too_large"))
-    checkpoint($kindNames(r.errors))
-    checkUnsatOverTaintOnly(r)
-    check sevErrorKinds(r.errors) == @[seBytesLengthTooLarge]
-
-  test "seBytesSymbolicLength: bytes(s) -> sxUnsat":
-    let r = symexFind(s5DeadBytesSymbolic, tLabel("s5_dead_bytes_symbolic"))
-    checkpoint($kindNames(r.errors))
-    checkUnsatOverTaintOnly(r)
-    check sevErrorKinds(r.errors) == @[seBytesSymbolicLength]
-
-  test "seZ3VersionMissing (replaceAll): -> sxUnsat":
+  test "seZ3VersionMissing (strutils.replace, all occurrences): -> sxUnsat":
     let r = symexFind(s5DeadReplaceAll, tLabel("s5_dead_replace_all"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
@@ -423,9 +341,8 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
 
   test "guard: a target reachable ONLY through the fresh value is a candidate -- sxUnknown, never sxUnsat":
     for (name, r) in [
-        ("replaceAll", symexFind(s5LiveReplaceAll, tLabel("s5_live_replace_all")).status),
-        ("split", symexFind(s5LiveSplit, tLabel("s5_live_split")).status),
-        ("bytes", symexFind(s5LiveBytes, tLabel("s5_live_bytes")).status)]:
+        ("replace", symexFind(s5LiveReplaceAll, tLabel("s5_live_replace_all")).status),
+        ("split", symexFind(s5LiveSplit, tLabel("s5_live_split")).status)]:
       checkpoint(name & " -> " & $r)
       check r == sxUnknown
 
@@ -435,7 +352,7 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
 
 suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint":
 
-  test "seZ3VersionMissing: two cells' replaceAll results are independent -- never sxUnsat":
+  test "seZ3VersionMissing: two cells' replace results are independent -- never sxUnsat":
     let r = symexFind(s5TwoCellsReplaceAll, tLabel("s5_two_cells_replace_all"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
@@ -446,12 +363,6 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3VersionMissing)
-
-  test "seBytesSymbolicLength: two cells' byte views are independent -- never sxUnsat":
-    let r = symexFind(s5TwoCellsBytes, tLabel("s5_two_cells_bytes"))
-    checkpoint($kindNames(r.errors))
-    check r.status != sxUnsat
-    check r.errors.hasKind(seBytesSymbolicLength)
 
   test "seZ3StringIncomplete: two cells' splits are independent -- never sxUnsat":
     let r = symexFind(s5TwoCellsSplit, tLabel("s5_two_cells_split"))
@@ -469,12 +380,6 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
     let r = symexFind(s5TwoCellsLoop, tLabel("s5_two_cells_loop"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
-
-  test "seBytesLengthTooLarge: the placeholder admits the REAL value (len 33, byte 'a') -- never sxUnsat":
-    let r = symexFind(s5TooLargeRealValue, tLabel("s5_too_large_real_value"))
-    checkpoint($kindNames(r.errors))
-    check r.status != sxUnsat
-    check r.errors.hasKind(seBytesLengthTooLarge)
 
   test "structural: degradeStrArm allocates only through freshDegradeName and never asserts its init facts":
     const rtSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
@@ -515,8 +420,7 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
                    "smt" / "runtime_strings.nim"
     let src = readFile(strSrc)
     for (arm, carrier) in [("of iekStrReplaceAll:", "SymexZ3VersionMissingError"),
-                           ("of iekStrReplaceRe:", "SymexZ3VersionMissingError"),
-                           ("of iekStrBytes:", "SymexBytesSymbolicLengthError")]:
+                           ("of iekStrReplaceRe:", "SymexZ3VersionMissingError")]:
       let a = src.find(arm)
       check a >= 0
       let r = src.find("raise (ref " & carrier & ")", a)
@@ -531,18 +435,13 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
 
 suite "RFC-0005 S5 (d) -- a caught operand raise is never dropped with the op":
 
-  test "replaceAll($(a div b), ...): the DivByZeroDefect handler is reachable -- never sxUnsat":
+  test "replace($(a div b), ...): the DivByZeroDefect handler is reachable -- never sxUnsat":
     let r = symexFind(s5EffReplaceAll, tLabel("s5_eff_replace_all"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 
   test "($(a div b)).replace(re, ...): never sxUnsat":
     let r = symexFind(s5EffReplaceRe, tLabel("s5_eff_replace_re"))
-    checkpoint($r.status & " " & $kindNames(r.errors))
-    check r.status != sxUnsat
-
-  test "bytes($(a div b)): never sxUnsat":
-    let r = symexFind(s5EffBytes, tLabel("s5_eff_bytes"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     check r.status != sxUnsat
 

@@ -290,8 +290,10 @@ suite "RFC-0005 S6b -- oracles":
 # =============================================================================
 
 const freshKinds = [feUnsupportedOpHavoc, heNewFieldZeroUnsupported]
+# RFC-0005 S8c: `hePtrArith` left `substKinds` -- retired, its only producer
+# keyed on a user-only `inc(ptr)` overload.
 const substKinds = [feUnsupportedOp, seByteIterUnsupported, eeUnknownExnType,
-                    geInstantiationCapped, geDistinctBarrier, hePtrArith,
+                    geInstantiationCapped, geDistinctBarrier,
                     feOpaqueCallUnmodelled, feEnumOrdinalUnresolved,
                     feGlobalReadUnmodelled, feUnsupportedStmtKind,
                     weRecursionCycleCut]

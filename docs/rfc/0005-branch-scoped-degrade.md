@@ -97,6 +97,11 @@ title = "Three silent substitutions: bodiless importc callee, parseInt '+' sign,
 state = "done"
 
 [[slice]]
+id    = "S8c"
+title = "Name-resolved builtins: resolve callees by symbol, walk user overloads"
+state = "done"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "pending"
@@ -838,6 +843,75 @@ blanket vetoes it deletes.
 Pins: `tests/tsymex_rfc0005_s8b_substitutions.nim`. S10's two `+` pins
 become clean verdicts (`"+5"` → `sxUnsat`, `"+x"` → an exact `sxRaised`), and
 its confirmed-lax pin moves to `"1_x"`.
+
+**As landed (S8c, walker 150) — name-resolved builtins.** The same class as
+S8b, one level up: the parser recognised operators and builtins by **name**,
+so a user overload was modelled as the builtin and nothing was recorded. A
+user `+`/`<`/prefix `-`/`+=` on a `distinct`, a user `==` on an object, and a
+non-generic `contains`/`len`/`items`/`add` that beats the stdlib generic all
+gave false `sxSat`/`sxUnsat` with an empty `errors`. So did a
+string-receiver `find` and a user proc merely named `symexAssume`.
+
+- **Rule.** A builtin model applies only when the resolved callee is declared
+  under Nim's lib dir (`isStdlibDecl`, `dsl_typebridge.nim`). Every
+  name-dispatch site checks this through `isBuiltinNamed`/`isUserCallee`
+  (`dsl_parser.nim`). A user routine is walked as an ordinary user call. That
+  covers call, infix, prefix and hidden-conversion expressions, statement
+  calls and aug-assign, and for-loop iterators. If the body cannot be walked,
+  the call falls to the existing opaque/decline arms, so no new kind is
+  needed.
+- **Edges.** A `{.borrow.}` proc keeps its base model. A `method` stays a
+  recorded callee decline (dynamic dispatch). A `converter` now walks: it is
+  re-treed like a `func`, where before it was a `feUnsupportedExprKind`
+  decline. The DSL markers match by their declaring module
+  (`nelli/engine/markers.nim`), not by name.
+- **Second order.** A stdlib generic whose instantiated body reaches a user
+  `==`/`hash` is `system.==` over an object/tuple/seq, or `sets.contains` over
+  a distinct key. It is already closed by the element fragment: a recorded
+  `sxUnknown` (`feUnsupportedOp`, `seNestedSeqUnsupported`,
+  `feUnsupportedWitnessType`). It is pinned, not guarded. A guard would be
+  dormant, and the pins fire if the fragment widens.
+
+- **Name-only models, removed.** Three models could be reached *only*
+  through a user routine sharing a builtin's name. Each one was a
+  substitution, and keeping a name allowlist for them would bring the bug
+  back.
+  - **`replaceAll`.** Nim has no stdlib `replaceAll`, so the entry is gone.
+    Its all-occurrence model is what real `strutils.replace` does (both
+    overloads). The resolved `strutils.replace` used to reach a
+    *first-occurrence* model: `"foofoo".replace("foo","bar")` gave
+    `"barfoo"`, which is a false verdict (`tsymex_phase15_S5_strops` pinned
+    it `sxSat`). It now reaches `iekStrReplaceAll`, and `iekStrReplace` is
+    deleted. The op stays version-gated: without
+    `-d:z3WithSeqReplaceAll` it records `seZ3VersionMissing`
+    (`dcFreshSymbol`, replay-gated), never a silent first-match. An empty
+    literal `sub` returns `s` exactly, as `strutils` does
+    (`if subLen == 0: result = s`).
+  - **`bytes(s)`.** There is no stdlib `bytes`. `toOpenArrayByte` returns
+    an `openArray`, not a value the model could stand for. So `iekStrBytes`,
+    `smkStrBytes` and the `ResourceBudget.maxBytesEncodingLen` field (with
+    its `;mbel=` settings-key segment) are deleted.
+    `seBytesSymbolicLength`/`seBytesLengthTooLarge` are retired: the ordinal
+    is kept and `classOf` is `dcNoAnswer`. A user `bytes` helper is walked.
+    Its `for c in s` declines with a recorded `seByteIterUnsupported`.
+  - **R8 `inc`/`dec` on a `ptr`.** `system.inc` takes an Ordinal, so the
+    guard fired only on a user overload. `hePtrArith` is retired. Real
+    pointer arithmetic goes through `cast`, which records `heUnsafeCast`
+    (pinned in `tsymex_phase15_r8_ptr`).
+
+  **Consumer-visible (S11 migration note).** Three changes:
+  - `ResourceBudget.maxBytesEncodingLen` is removed.
+  - `strutils.replace` results are now all-occurrence. On this Z3 build
+    they are recorded `seZ3VersionMissing` rather than a clean
+    first-occurrence value.
+  - The three retired kinds are never emitted.
+
+Left by name, deliberately: the receiver-mutation veto in
+`scanShapeReceiverMutated` (a broad match only vetoes more), the diagnostic
+hidden-marker scan, and type-name checks. Out of scope, noted for later:
+`classifyType` classifies the `seq`/`Table`/`HashSet` type heads by name, so
+a user type named `Table` would be misread. Pins:
+`tests/tsymex_rfc0005_s8c_resolution.nim`.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

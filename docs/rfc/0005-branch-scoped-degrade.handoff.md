@@ -37,17 +37,29 @@
   S7a_bytes bytesTooLong, r2_zerodefault T5h, tot1 A6-rider). Splat bug (carrier
   types, non-void fn) fixed. No second full sweep yet; cpp not run. The uncommitted
   tree has the S10 fence row flipped to done -- revert if S10 doesn't land as is.
-  Commit message drafted at `scratchpad/s10-commit-msg.txt`. **Fork put to Corey.**
+  Commit message drafted at `scratchpad/s10-commit-msg.txt`.
+  **Corey decided 2026-09-26: contract change + opt-out.** Replay on by default
+  (SUT must link/load, stated in §4.2 + migration note); per-call `replay = false`
+  emits no call and leaves candidates sxUnknown; g5 opts out; libpcre added to
+  the dev image and every CI leg running the regex tests (not opted out). The S10
+  agent was resumed with this and finishes the slice.
 - **S1c "hang" corrected:** the N36 shape takes ~234s (six tainted queries each
   to the full 20M rlimit), not infinite; ~12s at 1M. Recorded in RFC §4.2.
 - **Windows CI:** Corey approved the push; branch pushed 2026-09-26 04:44Z at
   `969d59c` (S0-S7). Runs: fuzzer-msvc 36218721870, fuzzer-mingw 36218721921,
   symex-mingw 36218721869. All three legs already use the patched-Nim OCI
   artifact (`setup-nim-artifact`), containerless.
-- **Remaining:** S10 (blocked on the link fork), S8 (blocked on i3), S9, S11.
-- **Open forks:** i2 (`blocked_by` edge, blocks nothing), **i3 (transparent
-  companions, blocks S8** -- `feTransparentArgNotInert` / `feTransparentResultUsed`
-  stay ⊤ until it is decided). i1 resolved. S8 hard-pauses if i3 is still open.
+- **i3 decided by Corey 2026-09-26: neither option -- a separate channel.**
+  `feTransparentResultUsed`/`feTransparentArgNotInert` are not declines (nothing is
+  approximated; soundness already comes from `feOpaqueCallUnmodelled` path taint);
+  they report a false user `{.symexTransparent.}` claim. Move them out of
+  `SymexErrorKind` into a separate annotation-violation channel on the result:
+  error-severity, loud, verdict-neutral, no classOf/DeclineScope. S8 builds the
+  split (and sets i3 `resolved` in the fence + writes the resolution into §13.3);
+  S11 renders the channel. DeclineScope totality then holds with no special case.
+- **Remaining:** S10 (resumed), S8 (unblocked; runs after S10 -- same files), S9, S11.
+- **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 resolved; i3 decided
+  (above), fence flip lands with S8.
 - **Found outside the RFC (not fixed, needs filing/fix):** `exn_hierarchy.nim` has
   no `ArithmeticDefect` entry, so `except ArithmeticDefect` does not catch
   `DivByZeroDefect`/`OverflowDefect` -> **pre-existing false `sxRaised`** (S6b).

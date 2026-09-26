@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 21:50Z)
+## Current position (refreshed 2026-09-26 22:15Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -118,7 +118,8 @@
   - S11 migration must list: unreached declines are now `sevHint`; the new
     kind; the two renames; twin anchored declines now keep one walk record
     each.
-- **Remaining:** **S8e** (running, opus) -- three pre-existing defects:
+- **S9 Windows CI (`23692b2`):** fuzzer-mingw, fuzzer-msvc green; symex-mingw running.
+- **Remaining:** **S8e** (running, opus; implementing at 22:15Z, working on the emitters) -- three pre-existing defects:
   (1) shadowed names share one closure env slot (an inner `var k` aliases the outer
   `k`) -> a *silent* wrong verdict, the priority item; (2) `classifyType` "node has
   no type" compile crash on `x in s`/`s.add x` over a user generic alias of `seq`;

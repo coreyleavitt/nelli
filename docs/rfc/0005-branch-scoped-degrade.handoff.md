@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~12:45Z)
+## Current position (refreshed 2026-09-26 ~13:10Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -76,7 +76,15 @@
   `nnkType` except types -- do not rely on it.
 - **Slices done:** 15 of 17 (S8b, S8c are fence rows).
 - **Remaining:** S8c (running, opus: name-resolved builtins/operators -> resolve by
-  symbol; code done; gate sweep `s8c-sweep.log` 353/~509 at 12:45Z), S9, S11.
+  symbol; uncommitted in the main checkout; walker 150). First gate: the sweep was killed
+  at 493 lines by host memory pressure from another session, and the partial diff
+  showed regressed=5, all real: three models were reachable ONLY via user shims
+  that share a builtin's name (`replaceAll`, `bytes`, a user ptr `inc` feeding
+  `hePtrArith`). Control-loop resolution (not a fork): remove name-only entry
+  points; wire real `strutils.replace` to the all-occurrences model (the existing
+  model is first-match, a separate false-sxUnsat bug: `"foofoo".replace("foo","bar")`
+  is `"barbar"` in Nim, and the S5 pin said `"barfoo"`); keep `bytes`/`hePtrArith`
+  only if a real stdlib producer exists, else delete/tombstone; rerun sweep -j 2), S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --

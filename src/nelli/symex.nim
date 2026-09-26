@@ -1566,7 +1566,8 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   ##     `pathTaint` (still `scSpurious`: S11 surfaces `replay =
   ##     rsConfirmed` beside it) and its own extraction errors after the
   ##     run's. No `diagnostics`: every other finding is either a
-  ##     candidate nobody confirmed or a vetoed clean one.
+  ##     candidate nobody confirmed or a clean one an unplaced decline
+  ##     suppressed (`decideVerdict`'s `reachUnknown`, RFC-0005 S9).
   ##   * `roRefuted` -- stays `sxUnknown` (rule 4: the enlarged program
   ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
   ##     `sevHint` naming the witness's confirmed model gap (§4.2).

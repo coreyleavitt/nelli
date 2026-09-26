@@ -295,55 +295,55 @@ const fresh = {scSpurious}   ## pathTaint(dcFreshSymbol) = runTaint(dcFreshSymbo
 suite "RFC-0005 S1c (f) -- decideVerdict: the ordered decision procedure":
 
   test "rule 1: a clean sxSat wins, in discovery order":
-    let d = decideVerdict(@[sat({}), sat({})], @[], allTop, vetoed = false)
+    let d = decideVerdict(@[sat({}), sat({})], @[], allTop, reachUnknown = false)
     check d.status == sxSat
     check d.winnerIdx == 0
 
   test "rules 1-2 order: a clean sxSat beats an EARLIER clean sxRaised":
-    let d = decideVerdict(@[raised({}), sat({})], @[], {}, vetoed = false)
+    let d = decideVerdict(@[raised({}), sat({})], @[], {}, reachUnknown = false)
     check d.status == sxSat
     check d.winnerIdx == 1
 
   test "rule 2: a clean sxRaised wins when no clean sxSat exists":
-    let d = decideVerdict(@[raised({})], @[], allTop, vetoed = false)
+    let d = decideVerdict(@[raised({})], @[], allTop, reachUnknown = false)
     check d.status == sxRaised
     check d.winnerIdx == 0
 
   test "rules 1-2 never accept an scSpurious finding, even one filed in `found`":
-    let d = decideVerdict(@[sat(fresh), raised(allTop)], @[], {}, vetoed = false)
+    let d = decideVerdict(@[sat(fresh), raised(allTop)], @[], {}, reachUnknown = false)
     check d.status == sxUnknown
     check d.winnerIdx == -1
 
   test "a candidate never shadows a clean winner found after it":
-    let d = decideVerdict(@[sat({})], @[sat(fresh)], allTop, vetoed = false)
+    let d = decideVerdict(@[sat({})], @[sat(fresh)], allTop, reachUnknown = false)
     check d.status == sxSat
     check d.winnerIdx == 0
 
   test "rule 4: a candidate blocks sxUnsat even on a run with NO scIncomplete":
     ## The false-sxUnsat guard: the enlarged program reaches the target, so a
     ## candidate that is not (yet) confirmed falls to sxUnknown, never sxUnsat.
-    check decideVerdict(@[], @[sat(fresh)], fresh, vetoed = false).status == sxUnknown
-    check decideVerdict(@[], @[raised(fresh)], fresh, vetoed = false).status == sxUnknown
+    check decideVerdict(@[], @[sat(fresh)], fresh, reachUnknown = false).status == sxUnknown
+    check decideVerdict(@[], @[raised(fresh)], fresh, reachUnknown = false).status == sxUnknown
 
   test "rule 5: nothing solved SAT and no scIncomplete -> sxUnsat (an over-taint-only run)":
-    check decideVerdict(@[], @[], fresh, vetoed = false).status == sxUnsat
-    check decideVerdict(@[], @[], {}, vetoed = false).status == sxUnsat
+    check decideVerdict(@[], @[], fresh, reachUnknown = false).status == sxUnsat
+    check decideVerdict(@[], @[], {}, reachUnknown = false).status == sxUnsat
 
   test "rule 6: nothing solved SAT but scIncomplete in the run -> sxUnknown":
-    check decideVerdict(@[], @[], {scIncomplete}, vetoed = false).status == sxUnknown
-    check decideVerdict(@[], @[], allTop, vetoed = false).status == sxUnknown
+    check decideVerdict(@[], @[], {scIncomplete}, reachUnknown = false).status == sxUnknown
+    check decideVerdict(@[], @[], allTop, reachUnknown = false).status == sxUnknown
 
-  test "the blanket vetoes (until S9) suppress rules 1-2 and block rule 5":
-    check decideVerdict(@[sat({})], @[], {}, vetoed = true).status == sxUnknown
-    check decideVerdict(@[], @[], {}, vetoed = true).status == sxUnknown
+  test "reachUnknown (an unplaced decline; the blanket vetoes' residue since RFC-0005 S9) suppresses rules 1-2 and blocks rule 5":
+    check decideVerdict(@[sat({})], @[], {}, reachUnknown = true).status == sxUnknown
+    check decideVerdict(@[], @[], {}, reachUnknown = true).status == sxUnknown
 
   test "behaviour-preserving under all-⊤: runTaint ∈ {{}, ⊤} reproduces the pre-S1c rule":
     ## Pre-S1c: winner if any finding and no veto; else sxUnknown iff
     ## runTaint != {} or a veto; else sxUnsat.
     for rt in [Taint({}), allTop]:
-      for vetoed in [false, true]:
-        let expected = if vetoed or rt != {}: sxUnknown else: sxUnsat
-        check decideVerdict(@[], @[], rt, vetoed).status == expected
+      for reachUnknown in [false, true]:
+        let expected = if reachUnknown or rt != {}: sxUnknown else: sxUnsat
+        check decideVerdict(@[], @[], rt, reachUnknown).status == expected
 
 suite "RFC-0005 S1c (g) -- a tainted path's solve is bounded (never a new non-termination)":
 

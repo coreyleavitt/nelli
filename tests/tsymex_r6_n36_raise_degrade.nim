@@ -223,7 +223,7 @@ suite "symex N36 -- iekStrSplit cap-exceeded decline inside a block: (loop-in-bl
     ## candidate is replayed and CONFIRMED -> sxSat (rules 1-2 alone decide
     ## sxUnknown). Still never a false sxUnsat.
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check sawSplitCapKind
 
 proc sutSplitOversizeNoBlockAfter(unused: int) =
@@ -240,7 +240,7 @@ suite "symex N36 -- regression: iekStrSplit no-block companion stays correct":
     ## candidate is replayed and CONFIRMED -> sxSat (rules 1-2 alone decide
     ## sxUnknown). Still never a false sxUnsat.
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     var sawSplitCapKind = false
     for e in r.errors:
       if e.kind == seZ3StringIncomplete and "maxSplitParts" in e.msg:

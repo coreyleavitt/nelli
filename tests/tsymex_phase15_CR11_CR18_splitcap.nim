@@ -80,7 +80,7 @@ suite "Phase 15 CR-11 + CR-18 — maxSplitParts cap wired into concrete-inline s
     ## the classified kind is still recorded.
     let r = symexFind(splitFourParts, tLabel("hit"), cap3)
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seZ3StringIncomplete
 

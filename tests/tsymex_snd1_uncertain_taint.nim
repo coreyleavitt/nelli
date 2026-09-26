@@ -20,7 +20,8 @@
 ## `&=` and `/=` are NOT in the augmented-assign supported set ({+=, -=, *=})
 ## in `dsl_parser.nim`'s catch-all, so both land as a BARE `mkUnsupported`
 ## (Class B: no accompanying `sevError` parseError — the vulnerable class per
-## the RFC; Class A sites are already immune via `capForcedUnknown`).
+## the RFC; Class A sites were already immune via `capForcedUnknown`, which
+## RFC-0005 S9 replaced with a reach join on the same marker).
 ##
 ## Walker version pin: "38" (SND-1 bumped 37→38 — this slice changes verdicts
 ## sxSat→sxUnknown for programs that drop a mutation via a bare

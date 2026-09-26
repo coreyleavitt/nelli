@@ -218,7 +218,7 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     ## (the unvetoed verdict of the same pools) ...
     check r.errors.hasKind(feUnsupportedOpHavoc)
     check classOf(feUnsupportedOpHavoc) == dcFreshSymbol
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     ## ... and the reporting path ran the real fn on the witness, exactly once.
     check sideEffects == 1
     check not r.errors.hasKind(feReplayRefuted)
@@ -238,7 +238,7 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[1] == 7
-    check rfc0005UnvetoedStatus == sxUnknown     ## a candidate, not a winner
+    check rfc0005RawStatus == sxUnknown     ## a candidate, not a winner
     check sideEffects == 1
 
   test "an scSpurious-tainted raise the real fn does not raise stays sxUnknown":
@@ -419,7 +419,7 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
     ## `symexFind` in it (see `s10NoSuchSymbol`).
     let r = symexFind(s10Unlinkable, tLabel("s10_unlinkable"), s10NoReplay)
     check r.status == sxUnknown          ## a candidate, not replayed
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     let fs = symexFindAllWitnesses(s10Unlinkable, inMemoryDatabase(), s10NoReplay)
     check fs.findingFor("label(\"s10_unlinkable\")").isSome
 

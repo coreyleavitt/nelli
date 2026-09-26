@@ -53,7 +53,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         ceClosureBodyUncertain, ceClosureBodyDiverged,
                         # RFC-0005 S10: parseInt's lax raise half, and the
                         # replay-refutation diagnostic.
-                        seParseIntLaxSyntax, feReplayRefuted}
+                        seParseIntLaxSyntax, feReplayRefuted,
+                        # RFC-0005 S9: capture by reference.
+                        ceCaptureByRefUnmodelled}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

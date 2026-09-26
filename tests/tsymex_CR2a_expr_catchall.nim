@@ -15,8 +15,9 @@
 ## `n.kind`). Soundness rides on SND-1 (LANDED, walker v38+): `of
 ## isUnsupported` taints `Path.uncertain`, so any witness produced downstream
 ## of the dummy is demoted to `sxUnknown` at the chokepoints — the dummy can
-## NEVER produce a false witness. The parseError also makes this Class-A, so
-## `capForcedUnknown` backstops it independently of SND-1.
+## NEVER produce a false witness. The parseError also makes this Class-A;
+## `capForcedUnknown` backstopped it independently of SND-1 until RFC-0005
+## S9, which joins the parseError with the walk's reach record instead.
 ##
 ## ## RFC M5 migration (walker v50→51)
 ##

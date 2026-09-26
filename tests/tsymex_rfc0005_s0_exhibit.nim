@@ -77,7 +77,7 @@ proc s0DeadFreshSymbol(p: S0DeadNode, n: int) =
     symexTarget("s0_dead_fresh_symbol")
 
 # =============================================================================
-# Pin 2 -- cap-veto companion (RFC-0005 S0, DoD item 2; expected to flip at S9)
+# Pin 2 -- cap-veto companion (RFC-0005 S0, DoD item 2; FLIPPED to sxSat at S9)
 # =============================================================================
 ## `cast[int32](x)` used as an OPERAND of `+` is an expression-position
 ## construct `parseExpr` (`dsl_parser.nim`) has no arm for outside the R11
@@ -114,7 +114,10 @@ proc s0DeadFreshSymbol(p: S0DeadNode, n: int) =
 ##
 ## RFC-0005 slice S9 deletes this blanket veto (replacing it with the
 ## `DeclineScope`-based reach-taint of §2.5, landed inert at S8); this pin
-## is the one chosen to flip there: `sxUnknown` -> `sxSat`.
+## is the one chosen to flip there: `sxUnknown` -> `sxSat`. FLIPPED at S9
+## (walker 152). The walker forks the contradictory branch without a
+## feasibility check, so the cast IS reached: its reach record taints that
+## path (whose target hit is infeasible), and the `x == 42` path is clean.
 ##
 ## The ONLY `sevError` kind this run ever drains is `feUnsupportedExprKind`.
 
@@ -126,7 +129,7 @@ proc s0CapVetoCompanion(x: int, deadGuard: bool) =
     symexTarget("s0_cap_veto_companion")
 
 # =============================================================================
-# Pin 3 -- closure-veto companion (RFC-0005 S0, DoD item 2; flips at S9)
+# Pin 3 -- closure-veto companion (RFC-0005 S0, DoD item 2; FLIPPED to sxSat at S9)
 # =============================================================================
 ## Same shape as pin 2, for `closureForcedUnknown` (`runtime.nim`
 ## ~13519-13523) rather than `capForcedUnknown`. `xs.filter(...)` over a
@@ -154,7 +157,9 @@ proc s0CapVetoCompanion(x: int, deadGuard: bool) =
 ## RFC-0005 slice S9 deletes this blanket veto too (gated on S7 routing
 ## every value-substituting closure/HOF decline through `w.degrade` + path
 ## taint, per §2.5's round-2 correction); this pin is the one chosen to
-## flip there: `sxUnknown` -> `sxSat`.
+## flip there: `sxUnknown` -> `sxSat`. FLIPPED at S9 (walker 152): S7's
+## `closureDegrade` taints the `x == 7` path that lowered the `filter`, so
+## the `x == 42` path is clean.
 ##
 ## The ONLY `sevError` kind this run ever drains is `ceUnsupportedHof`.
 
@@ -205,15 +210,19 @@ suite "RFC-0005 S0 pin 1 -- over-taint-only UNSAT exhibit (flipped sxUnsat at S4
       check e.kind != beBudgetExhausted
       check e.kind != weInternalWalkerFault
 
-suite "RFC-0005 S0 pin 2 -- cap-veto companion (flips sxSat at S9)":
+suite "RFC-0005 S0 pin 2 -- cap-veto companion (flipped sxSat at S9)":
 
-  test "today: a clean-path witness is discarded by the blanket cap veto -- sxUnknown, never sxSat":
+  test "S9: the clean-path witness is reported -- sxSat, x == 42 (§2.3 rule 1)":
+    # RFC-0005 S9: was sxUnknown through S8 -- `capForcedUnknown` discarded
+    # the clean witness because a `sevError` sat in `prog.parseErrors`. The
+    # veto is deleted; the decline's walk-time reach record taints only the
+    # (infeasible) path through the cast, so the `x == 42` hit is clean.
     let r = symexFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
-    check r.status == sxUnknown
-    check r.status != sxSat
+    check r.status == sxSat
+    check r.witness[0] == 42
 
-  test "today: the drained sevError kind set is EXACTLY {feUnsupportedExprKind}, from a branch disjoint from the witness":
+  test "the drained sevError kind set is EXACTLY {feUnsupportedExprKind}, from a branch disjoint from the witness":
     let r = symexFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
@@ -225,15 +234,19 @@ suite "RFC-0005 S0 pin 2 -- cap-veto companion (flips sxSat at S9)":
     # parse-time entry + the walk-site entry). The set is unchanged.
     check deduplicate(sevErrorKinds) == @[feUnsupportedExprKind]
 
-suite "RFC-0005 S0 pin 3 -- closure-veto companion (flips sxSat at S9)":
+suite "RFC-0005 S0 pin 3 -- closure-veto companion (flipped sxSat at S9)":
 
-  test "today: a clean-path witness is discarded by the blanket closure veto -- sxUnknown, never sxSat":
+  test "S9: the clean-path witness is reported -- sxSat, x == 42 (§2.3 rule 1)":
+    # RFC-0005 S9: was sxUnknown through S8 -- `closureForcedUnknown`
+    # discarded the clean witness because a closure `sevError` was drained.
+    # The veto is deleted; S7's `closureDegrade` taints only the `x == 7`
+    # path that lowered the `filter`, so the `x == 42` hit is clean.
     let r = symexFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
     for e in r.errors: checkpoint($e.kind & " sev=" & $e.severity & ": " & e.msg)
-    check r.status == sxUnknown
-    check r.status != sxSat
+    check r.status == sxSat
+    check r.witness[1] == 42
 
-  test "today: the drained sevError kind set is EXACTLY {ceUnsupportedHof}, from a branch disjoint from the witness":
+  test "the drained sevError kind set is EXACTLY {ceUnsupportedHof}, from a branch disjoint from the witness":
     let r = symexFind(s0ClosureVetoCompanion, tLabel("s0_closure_veto_companion"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:

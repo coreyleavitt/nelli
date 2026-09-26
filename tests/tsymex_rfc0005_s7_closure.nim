@@ -1,10 +1,10 @@
 ## RFC-0005 (soundness channels) slice S7 -- cross-path sinks and closure /
 ## HOF decline path taint (§2.4, §2.5; §5 row S7). Walker 145 -> 146.
 ##
-## S9 deletes the closure veto (`closureForcedUnknown`) on the strength of
-## this slice, so every closure / HOF site that stands a value in for one the
-## walk did not compute must put that fact on the PATH, not only in the
-## closure error sink the veto reads. Suites:
+## S9 deleted the closure veto (`closureForcedUnknown`) on the strength of
+## this slice: every closure / HOF site that stands a value in for one the
+## walk did not compute puts that fact on the PATH, not only in the closure
+## error sink the veto read. Suites:
 ##   (a) classes -- the S7-owned kinds leave S1's ⊤ default;
 ##   (b) flips -- each false verdict the audit found, observed through
 ##       candidate placement / path taint (RawResult), so each test is red
@@ -323,45 +323,46 @@ suite "RFC-0005 S7 (c) -- clean closures stay exact":
 # =============================================================================
 
 suite "RFC-0005 S7 (d) -- S9 precondition: without the vetoes, no S7 SUT is a clean sxSat":
-  ## `rfc0005UnvetoedStatus` is `decideVerdict(…, vetoed = false)` over the
-  ## run's own pools. The vetoes stay in this slice; S9 deletes them only
-  ## because this holds for every closure / HOF decline.
+  ## `rfc0005RawStatus` is the status `decideVerdict` decided over the run's
+  ## own pools (before replay). Through S8 that observable was the verdict
+  ## WITHOUT the two blanket vetoes; S9 deleted them on the strength of this
+  ## suite, and the run's own status is now the same thing.
 
   test "filter decline (__hofFilterUnsupported)":
     let r = runSymex(progOf(s7Filter), tLabel("s7_filter"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
     check r.status == sxUnknown
-    check rfc0005UnvetoedStatus != sxSat
+    check rfc0005RawStatus != sxSat
 
   test "capturing map decline (__hofMapUnsupported)":
     let r = runSymex(progOf(s7MapCapture), tLabel("s7_map_capture"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus != sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus != sxSat
 
   test "mapArray decline":
     let r = runSymex(progOf(s7MapArray), tLabel("s7_map_array"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus != sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus != sxSat
 
   test "inline-budget decline (ceInlineBudgetExceeded)":
     let r = runSymex(progOf(s7InlineLive), tLabel("s7_inline_live"), inlineOne)
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus != sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus != sxSat
 
   test "dropped tainted arm (ceClosureBodyUncertain)":
     let r = runSymex(progOf(s7UncertainLive), tLabel("s7_uncertain_live"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus != sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus != sxSat
 
   test "diverged body (ceClosureBodyDiverged)":
     let r = runSymex(progOf(s7CloAlwaysRaise), tLabel("s7_clo_always_raise"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus != sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus != sxSat
 
-  test "control: a clean closure's reachable label IS a clean sxSat unvetoed (the observable is live)":
+  test "control: a clean closure's reachable label IS a clean sxSat (the observable is live)":
     let r = runSymex(progOf(s7CleanLive), tLabel("s7_clean_live"))
-    checkpoint(show(r) & " unvetoed=" & $rfc0005UnvetoedStatus)
-    check rfc0005UnvetoedStatus == sxSat
+    checkpoint(show(r) & " raw=" & $rfc0005RawStatus)
+    check rfc0005RawStatus == sxSat
 
 # =============================================================================
 # (e) structural
@@ -453,8 +454,9 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     check dsClosureSites == @["rfc0005S1CarrierProbe"]
     ## unresolved callee x2, raw-wrap fallback, no-walk and over-budget
     ## guards, uncertain arm, zero-default havoc, HOF filter / capturing map /
-    ## mapArray / fold.
-    check degradeSites == 11
+    ## mapArray / fold; RFC-0005 S9 adds the two by-reference capture sites
+    ## (applied out of frame, body writes a capture).
+    check degradeSites == 13
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():
@@ -464,7 +466,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
           let k = t["closureDegrade(".len ..< t.find(',')]
           check k in ["ceClosureUnknownCallee", "feUnsupportedOp",
                       "ceInlineBudgetExceeded", "ceClosureBodyUncertain",
-                      "feUnsupportedOpHavoc", "ceUnsupportedHof"]
+                      "feUnsupportedOpHavoc", "ceUnsupportedHof",
+                      "ceCaptureByRefUnmodelled"]   # RFC-0005 S9
 
   test "the closure result is a fresh constant per occurrence, not the funcSym application":
     let body = routineBody(smtDir / "runtime.nim", "applyClosureGround")
@@ -482,7 +485,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
   test "every error sink runSymexImpl drains feeds a run-coordinate operand (no sink escapes both channels)":
     ## The path channel is the funnels' token; the run channel is derived
     ## here. Every drained sink lands in `exnWarnings` or `closureErrs`, and
-    ## `runTaint` is derived from those plus `prog.parseErrors`. The one
+    ## `runTaint` is derived from those plus the parse-time errors (RFC-0005
+    ## S9: reach-joined, `parseErrs`). The one
     ## sink outside it is `extractionErrors`: recorded on the SAT branch
     ## after the verdict (witness extraction) -- S10's replay gate owns it.
     let body = routineBody(smtDir / "runtime.nim", "runSymexImpl")
@@ -496,7 +500,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     let rt = body.filterIt(it.startsWith("w.runTaint = "))
     check rt.len == 1
     check "runTaintOf(exnWarnings)" in rt[0]
-    check "runTaintOf(prog.parseErrors)" in rt[0]
+    check "runTaintOf(parseErrs)" in rt[0]
+    check body.anyIt("let parseErrs = reachJoinParseErrors(prog.parseErrors, exnWarnings)" in it)
     check body.anyIt("runTaintOf(closureErrs)" in it)
 
 suite "RFC-0005 S7 -- walker version pin":

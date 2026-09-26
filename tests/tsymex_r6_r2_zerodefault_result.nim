@@ -272,7 +272,7 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
     ## the classified kind is still recorded.
     let r = symexFind(sutFloatZeroDeclines, tLabel("float_zero_declines"))
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     var sawKind = false
     for e in r.errors:
       # RFC-0005 S6b: the untouched result's per-call retSym is free and

@@ -37,6 +37,10 @@ proc paramSorts(params: seq[IRParam]): seq[RawZ3Sort] =
     let rep = allocateSym(p.ty, "__closureParamSort." & p.name, scratchPC)
     for s in sortOfTuple(rep): result.add s
 
+proc currentFrameId(): int
+  ## RFC-0005 S9 fwd-decl (body after `WalkCtx`, in runtime.nim): the live
+  ## walk's `CallFrameCtx.frameId`, or -1 outside a walk.
+
 proc buildClosure(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2a (ADR-0009 D1/D2/D4). Construct an `svClosure` from an
   ## `iekLambda`:
@@ -150,10 +154,41 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
   # 4. Assemble the svClosure.
   var boxedEnv = new(SymVal)
   boxedEnv[] = envRecord
+  # RFC-0005 S9: the by-reference captures (those the snapshot holds) and
+  # the frame whose env names them.
+  var mutCaps: seq[string]
+  for name in e.lambdaMutCaptures:
+    if name in capNames: mutCaps.add name
   SymVal(kind: svClosure,
          closureSite: e.lambdaSite,
          closureEnv: boxedEnv,
-         closureRawFD: fd)
+         closureRawFD: fd,
+         closureMutCaptures: mutCaps,
+         closureFrame: currentFrameId())
+
+proc refreshByRefCaptures(v: SymVal; env: Env): SymVal =
+  ## RFC-0005 S9. Nim captures a mutable local BY REFERENCE: a closure reads
+  ## the variable as it stands at the CALL, not at construction. `buildClosure`
+  ## snapshots every capture; this re-reads the by-reference ones from `env`
+  ## -- the reading site's env -- whenever `v` is a closure read in the frame
+  ## that built it (the only frame whose env binds the capture NAMES to the
+  ## captured variables). Called wherever a closure value is read (`lower`'s
+  ## `iekVar` arm, `lowerClosureCall`), so a closure passed on, stored or
+  ## applied carries the values current at that read. In any other frame it
+  ## returns `v` unchanged, and `applyClosureGround` declines the application
+  ## (`ceCaptureByRefUnmodelled`). Non-closures pass through.
+  if v.kind != svClosure or v.closureMutCaptures.len == 0 or
+     v.closureFrame != currentFrameId() or v.closureEnv == nil or
+     v.closureEnv[].kind != svTuple:
+    return v
+  var rec = v.closureEnv[]
+  for i, nm in rec.fieldNames:
+    if nm in v.closureMutCaptures and env.hasKey(nm):
+      rec.fields[i] = env[nm]
+  var boxed = new(SymVal)
+  boxed[] = rec
+  result = v
+  result.closureEnv = boxed
 
 proc lowerClosureArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster C extraction. Called from `lower`'s case arm for

@@ -82,7 +82,7 @@ suite "symex Phase 15 S5 — string replace/split/join":
     ## the classified kind is still recorded.
     let r = symexFind(replaceFoo, tLabel("hit"))
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check r.witness[0] == "foofoo"
     check r.errors.len >= 1
     check r.errors[0].kind == seZ3VersionMissing

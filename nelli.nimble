@@ -835,5 +835,10 @@ task test, "Run the test suite":
             # RFC-0005 S8d -- type heads resolved by symbol: a user type named
             # like a stdlib/builtin type (seq/Table/HashSet/Natural/int8/bool/
             # Rune) is not modelled as it; walker 150->151.
-            "tsymex_rfc0005_s8d_typeheads"]:
+            "tsymex_rfc0005_s8d_typeheads",
+            # RFC-0005 S9 -- both blanket vetoes deleted: the parse-time reach
+            # join (an unreached decline is a hint), unplaced declines block
+            # both directions, dedup on message + anchor, capture by
+            # reference (ceCaptureByRefUnmodelled); walker 151->152.
+            "tsymex_rfc0005_s9_vetoes"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

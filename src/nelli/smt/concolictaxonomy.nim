@@ -225,11 +225,12 @@ type
     parseDeclines*:       int   ## Issue #163 round 10 companion. Count of
                                 ## `prog.parseErrors` entries with
                                 ## `severity == sevError` for the program
-                                ## THIS collect ran — the exact same
-                                ## predicate `runSymexImpl`'s
-                                ## `capForcedUnknown` (`smt/runtime.nim`)
-                                ## uses to force `sxUnknown` on the
-                                ## `wmExplore` path. Deliberately NOT mirrored
+                                ## THIS collect ran — the predicate
+                                ## `runSymexImpl`'s `capForcedUnknown`
+                                ## (`smt/runtime.nim`) used to force
+                                ## `sxUnknown` on the `wmExplore` path until
+                                ## RFC-0005 S9 replaced it with a per-decline
+                                ## reach join. Deliberately NOT mirrored
                                 ## here as an admission gate: a parse decline
                                 ## means the SYMBOLIC MODEL of part of the
                                 ## program is incomplete, but the materialized

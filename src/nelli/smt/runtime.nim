@@ -422,6 +422,16 @@ type
       closureRawFD*: RawZ3FuncDecl
                                  ## Phase 15 C2a: the uninterpreted funcSym handle
                                  ## (the per-site decl). Nil in the C1 stub.
+      closureMutCaptures*: seq[string]
+                                 ## RFC-0005 S9: the captures Nim holds BY
+                                 ## REFERENCE (`lambdaMutCaptures`). Their
+                                 ## snapshot in `closureEnv` is refreshed from
+                                 ## the current env at every read in the
+                                 ## defining frame (`refreshByRefCaptures`).
+      closureFrame*: int         ## RFC-0005 S9: `CallFrameCtx.frameId` of the
+                                 ## frame that built the closure (-1 outside a
+                                 ## walk). Only there do the capture NAMES in
+                                 ## the env denote the captured variables.
     of svRef:
       ## Phase 15 Cluster R (R1, ADR-0010). A `Ref_T`-sorted symbolic ref
       ## constant. `refAst` is the uninterpreted-sort const (the abstract
@@ -5166,7 +5176,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     ofBool(mkBool(e.bval))
   of iekVar:
     if env.hasKey(e.vname):
-      env[e.vname]
+      # RFC-0005 S9: a closure read here carries its by-reference captures
+      # as they stand now (a no-op for every other value).
+      refreshByRefCaptures(env[e.vname], env)
     elif not isFollowConcreteWalk():
       # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
       # symbolic walker) reaching a name absent from `env` is NEVER a
@@ -7733,6 +7745,12 @@ type
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
+    frameId: int                      ## RFC-0005 S9: this descent's identity
+                                      ## (0 = the SUT's own frame; each
+                                      ## `pushFrame` mints the next id from
+                                      ## `WalkCtx.frameIdCounter`). A closure
+                                      ## records the id it was built under
+                                      ## (`svClosure.closureFrame`).
     closureInlineCount: int           ## Phase 15 C2b (ADR-0009 D6): the depth of
                                       ## NESTED closure-application descents at
                                       ## this frame. `lowerClosureCall` increments
@@ -7845,6 +7863,9 @@ type
                                 ## (saves `frame`, installs a fresh empty one)
                                 ## before walking the callee body and `popFrame`s
                                 ## on return. See pushFrame/popFrame below.
+    frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
+                                ## `pushFrame` minted (ids are never reused
+                                ## within a walk).
     runTaint:  Taint
       ## RFC-0005 S1 (was `sawUnknown: bool`; `sawUnknown ≡ runTaint != {}`).
       ## The RUN coordinate — DERIVED, never written at a degrade site: the
@@ -8170,14 +8191,14 @@ proc closureDegrade(kind: SymexErrorKind; msg: string) =
   ## RFC-0005 S7 (§2.5 precondition for S9). THE way a closure / HOF site
   ## records a decline. These sites run inside `lower` (a closure call or a
   ## HOF is an EXPRESSION), so they cannot fork the consuming path; before S7
-  ## they wrote only the closure sink, which the blanket closure veto reads
-  ## -- and nothing reached the PATH, so deleting the veto (S9) would have
-  ## turned every hit through a stand-in value into a clean `sxSat`. One kind
+  ## they wrote only the closure sink, which the blanket closure veto read
+  ## -- and nothing reached the PATH, so deleting the veto (S9, done) would
+  ## have turned every hit through a stand-in value into a clean `sxSat`. One kind
   ## mention performs both acts, exactly as `lowerDegrade` does for the
   ## lowering sink:
   ##   1. records the classified `sevError` into the closure sink (threadvar
   ##      fallback + the LIVE `WalkCtx.closureCallErrors` field, which the
-  ##      drain-time run coordinate and the veto both read);
+  ##      drain-time run coordinate reads);
   ##   2. joins `pathTaint(classOf(kind))` into `loweringPendingTaint`, which
   ##      `drainPendingLowerEffects` folds onto the path that consumes the
   ##      lowered value.
@@ -8603,6 +8624,13 @@ proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
     currentInFlightTypeId = none(string)
     currentInFlightMsg = none(string)
 
+proc currentFrameId(): int =
+  ## RFC-0005 S9 (fwd-declared in `runtime_closures.nim`). The live walk's
+  ## `CallFrameCtx.frameId`; -1 outside a walk (a probe), which no walk frame
+  ## ever equals.
+  if currentWalkCtxPtr == nil: -1
+  else: cast[ptr WalkCtx](currentWalkCtxPtr)[].frame.frameId
+
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
   ## fresh, empty one for the callee being descended into. The handler stack is
@@ -8611,7 +8639,8 @@ proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Structural in E1 (handlerStack/inFlightExn are always empty until E2b+);
   ## wired now so E3/E5 need not re-audit the call-descent arms.
   w.frameStack.add w.frame
-  w.frame = CallFrameCtx()
+  inc w.frameIdCounter                        ## RFC-0005 S9
+  w.frame = CallFrameCtx(frameId: w.frameIdCounter)
 
 proc popFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Restore the caller's call frame saved by `pushFrame`.
@@ -8788,7 +8817,7 @@ type
     winnerIdx*: int
 
 func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
-                    vetoed: bool): VerdictDecision =
+                    reachUnknown: bool): VerdictDecision =
   ## RFC-0005 §2.3 -- THE verdict rule, an ordered decision procedure with
   ## disjoint guards (first matching rule wins). Pure: `runSymexImpl` feeds it
   ## the walk's pools and the drained run coordinate, and a test can drive
@@ -8810,32 +8839,32 @@ func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
   ##   5. nothing solved SAT and `scIncomplete notin runTaint` -> `sxUnsat`
   ##   6. otherwise -> `sxUnknown`
   ##
-  ## `vetoed` is the two blanket vetoes (`capForcedUnknown`,
-  ## `closureForcedUnknown`, §2.5): until S9 deletes them they suppress rules
-  ## 1-2 and block rule 5, exactly as before S1c.
-  if not vetoed:
+  ## `reachUnknown` (RFC-0005 S9, §2.5 point 4): some admitted decline has
+  ## no anchor (`dskUnplaced`), so whether it was reached -- and so whether a
+  ## clean finding or an empty pool can be trusted -- is undecidable. It
+  ## suppresses rules 1-2 and blocks rule 5. S9 deleted the two blanket
+  ## vetoes (`capForcedUnknown`/`closureForcedUnknown`) this parameter used
+  ## to carry; it now fires only on bucket 4, which the S8 pin keeps empty.
+  if not reachUnknown:
     for i, f in found:                                         # rule 1
       if f.status == sxSat and scSpurious notin f.pathTaint:
         return VerdictDecision(status: sxSat, winnerIdx: i)
     for i, f in found:                                         # rule 2
       if f.status == sxRaised and scSpurious notin f.pathTaint:
         return VerdictDecision(status: sxRaised, winnerIdx: i)
-  if vetoed or found.len > 0 or candidates.len > 0:            # rule 4
+  if reachUnknown or found.len > 0 or candidates.len > 0:      # rule 4
     return VerdictDecision(status: sxUnknown, winnerIdx: -1)
   if scIncomplete notin runTaint:                              # rule 5
     return VerdictDecision(status: sxUnsat, winnerIdx: -1)
   VerdictDecision(status: sxUnknown, winnerIdx: -1)            # rule 6
 
-var rfc0005UnvetoedStatus* {.threadvar.}: SymexStatusKind
-  ## RFC-0005 S7 -- the S9 safety precondition's observable. The status the
-  ## most recent `runSymexImpl` would have reported WITHOUT the two blanket
-  ## vetoes (`decideVerdict(…, vetoed = false)` over the same pools). S9
-  ## deletes the closure veto on the strength of S7; its precondition is that
-  ## for every closure / HOF decline this is never a clean `sxSat` -- a
-  ## decline whose path taint is missing shows up here as `sxSat` while the
-  ## reported status is still the vetoed `sxUnknown`. Written only by
-  ## `runSymexImpl` (not reset by the concolic driver); S9 deletes it with
-  ## the vetoes.
+var rfc0005RawStatus* {.threadvar.}: SymexStatusKind
+  ## RFC-0005 S9 (was S7's `rfc0005UnvetoedStatus`, which observed the
+  ## verdict WITHOUT the two blanket vetoes; S9 deleted them). The status the
+  ## most recent `runSymexImpl` decided (`decideVerdict`), BEFORE an entry
+  ## macro's replay settles its candidates (S10) -- so a test can tell a
+  ## clean `sxSat` from a confirmed candidate. Written only by `runSymexImpl`
+  ## (not reset by the concolic driver).
 
 proc symValHash(sv: SymVal): uint =
   ## Hash of a SymVal's Z3 representation for use as a call-cache key.
@@ -12132,8 +12161,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # the parse record's own anchor (`siteAnchored(stmt.ucMarker)`), exactly
     # as the `isUnsupported` arm above does. Before S8 the only record was
     # the parse-time one, which says the cast EXISTS, not that a path reached
-    # it -- the blanket veto made that distinction moot; S9 deletes the veto
-    # and needs it. The token is discarded: a halted path needs no carrier.
+    # it -- the blanket veto made that distinction moot; S9 deleted the veto
+    # and joins on it. The token is discarded: a halted path needs no carrier.
     discard w.degrade(heUnsafeCast,
       "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
       "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
@@ -12366,6 +12395,71 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: caught immediately at its sole call site (see above)]
       "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
 
+proc sameSymVal(a, b: SymVal): bool =
+  ## RFC-0005 S9. Representation IDENTITY of two SymVals: the same kind and,
+  ## leaf by leaf, the same Z3 AST handle (Z3 hash-conses, so structurally
+  ## identical terms share one handle). Used to ask whether a closure body
+  ## left a by-reference capture as it found it; `false` is the conservative
+  ## answer (a spurious "written" costs a decline, never soundness), so a
+  ## kind without an arm here, or any shape mismatch, is `false`.
+  if a.kind != b.kind: return false
+  template same(x, y: untyped): bool =
+    cast[pointer](x.raw) == cast[pointer](y.raw)
+  template allSame(xs, ys: seq[SymVal]): bool =
+    block:
+      var ok = xs.len == ys.len
+      if ok:
+        for i in 0 ..< xs.len:
+          if not sameSymVal(xs[i], ys[i]):
+            ok = false
+            break
+      ok
+  case a.kind
+  of svInt:     same(a.zi, b.zi) and a.ziWidth == b.ziWidth
+  of svBool:    same(a.bo, b.bo)
+  of svBV8:     same(a.bv8, b.bv8) and a.signed == b.signed
+  of svBV16:    same(a.bv16, b.bv16) and a.signed == b.signed
+  of svBV32:    same(a.bv32, b.bv32) and a.signed == b.signed
+  of svBV64:    same(a.bv64, b.bv64) and a.signed == b.signed
+  of svFloat32: same(a.fp32, b.fp32)
+  of svFloat64: same(a.fp64, b.fp64)
+  of svString:  same(a.str, b.str)
+  of svTuple:   allSame(a.fields, b.fields)
+  of svArray:   allSame(a.arrElems, b.arrElems)
+  of svSeq:
+    # Handle identity only: nothing is lowered or read as a value, and the
+    # placeholder flag is itself compared, so a placeholder never matches a
+    # backed seq (N27 audit, RFC-0005 S9).
+    same(a.seqLen, b.seqLen) and same(a.seqDataRaw, b.seqDataRaw) and  # [placeholder-audited]
+      a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
+  of svTable:
+    same(a.tabDataRaw, b.tabDataRaw) and
+      same(a.tabPresentRaw, b.tabPresentRaw) and same(a.tabSize, b.tabSize)
+  of svSet:
+    same(a.setMembersRaw, b.setMembersRaw) and same(a.setSize, b.setSize)
+  of svDistinct:
+    same(a.distinctAst, b.distinctAst) and a.distinctBaseSym != nil and
+      b.distinctBaseSym != nil and
+      sameSymVal(a.distinctBaseSym[], b.distinctBaseSym[])
+  of svRef:         same(a.refAst, b.refAst)
+  of svPtr:         same(a.ptrAst, b.ptrAst) and a.ptrFamily == b.ptrFamily
+  of svUninterpRef: same(a.uninterpAst, b.uninterpAst)
+  of svClosure:
+    a.closureSite == b.closureSite and a.closureEnv != nil and
+      b.closureEnv != nil and sameSymVal(a.closureEnv[], b.closureEnv[])
+  of svVariant:
+    if a.vDisc == nil or b.vDisc == nil or
+       not sameSymVal(a.vDisc[], b.vDisc[]) or
+       not allSame(a.vPlainFields, b.vPlainFields) or
+       a.vArmFields.len != b.vArmFields.len:
+      return false
+    for tag, fs in a.vArmFields.pairs:
+      if not b.vArmFields.hasKey(tag) or not allSame(fs, b.vArmFields[tag]):
+        return false
+    true
+  of svMultiVariant:
+    false   # no identity arm: conservatively "changed"
+
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string): SymVal   ## Phase 15 C4 fwd-decl.
 
@@ -12389,7 +12483,7 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     # RFC-0005 S7: `dcSubstituted` -- a fixed-name `int64` stand-in whatever
     # the closure's return type, returned before the call's arguments are
     # lowered (their raises are dropped). `closureDegrade` puts ⊤ on the
-    # consuming path, not only in the closure sink the veto reads.
+    # consuming path, not only in the closure sink.
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
@@ -12397,7 +12491,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     # not crash.
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
-  let clo = env[e.ccCallee]
+  # RFC-0005 S9: the by-reference captures as they stand at THIS call.
+  let clo = refreshByRefCaptures(env[e.ccCallee], env)
   var argSyms: seq[SymVal]
   for a in e.ccArgs: argSyms.add lower(env, a)
   return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`")
@@ -12517,11 +12612,22 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # `funcApp` stands in for a body that is never descended, so the body's
     # captured-variable writes and raises are dropped. RFC-0005 S7: recorded
     # through `closureDegrade`, so the consuming path carries the ⊤ taint
-    # itself -- the closure veto no longer has to guard the SAT side alone.
+    # itself (the closure veto that once guarded the SAT side is gone, S9).
     closureDegrade(ceInlineBudgetExceeded,
       "closure-application descent exceeded maxClosureInlineCount (" &
            $w.settings.budget.maxClosureInlineCount & ") at " & label)
     return funcApp
+  # RFC-0005 S9 (capture by reference). Applied in the frame that built it,
+  # the closure's by-reference captures were re-read at the call
+  # (`refreshByRefCaptures`). Anywhere else the env does not bind their
+  # names, so the body reads the construction-time snapshot -- a value the
+  # variable may no longer hold: decline (`dcSubstituted`) and descend on it.
+  if clo.closureMutCaptures.len > 0 and clo.closureFrame != w.frame.frameId:
+    closureDegrade(ceCaptureByRefUnmodelled,
+      "closure call through " & label & " outside the frame that built it: " &
+           "its by-reference capture(s) " & clo.closureMutCaptures.join(", ") &
+           " are read as they stood at construction, not as they stand now " &
+           "(ceCaptureByRefUnmodelled)")
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
   # Fresh descent env: params bound to the concrete call args, captures bound
   # from the svClosure's env tuple (by capture name, matching the stash order).
@@ -12530,6 +12636,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     let envRec = clo.closureEnv[]
     for i, nm in envRec.fieldNames:
       descentEnv[nm] = envRec.fields[i]
+  let byRefEntry = descentEnv  ## RFC-0005 S9: the captures as the body met them
   for i, p in cb.params:
     if i < argSyms.len: descentEnv[p.name] = argSyms[i]
   # Push a call frame whose retSym IS the funcApp: `walk(isReturn)` binds each
@@ -12585,6 +12692,31 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   popFrame(w)
   w.callStack.setLen(frameIx)
   restorePendingLowerEffects(w, pending)
+  # RFC-0005 S9 (capture by reference). A body that WRITES a by-reference
+  # capture writes the caller's variable; the descent env is the body's own,
+  # and nothing carries the write back. Any exit -- a value exit or an
+  # escaping raise -- whose capture is not the one the body met declines
+  # the call (`dcSubstituted`: the write is dropped).
+  block byRefWrites:
+    var written: seq[string]
+    for nm in clo.closureMutCaptures:
+      if not byRefEntry.hasKey(nm): continue
+      let entry = byRefEntry[nm]
+      var changed = false
+      for cp in fallThrough:
+        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
+      for cp in frame.returnedPaths:
+        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
+      for er in escapedRaises:
+        if er.path.env.hasKey(nm) and not sameSymVal(er.path.env[nm], entry):
+          changed = true
+      if changed: written.add nm
+    if written.len > 0:
+      closureDegrade(ceCaptureByRefUnmodelled,
+        "closure call through " & label & ": the body writes its " &
+             "by-reference capture(s) " & written.join(", ") & "; the " &
+             "write is not carried back to the caller " &
+             "(ceCaptureByRefUnmodelled)")
   for er in escapedRaises:
     w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc)
   # RFC-0005 S7 (closure-descent taint): the descent started from a clean
@@ -12624,9 +12756,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # into `currentClosureCallAxioms` — that sink is GLOBAL and drained into
   # EVERY subsequent `trySolve` for the rest of the run (unlike the call-cache,
   # which already gates on `not frame.returnedPaths[0].uncertain`, ~5850). Skip
-  # axiomatizing that sub-path and record `ceClosureBodyUncertain` so
-  # `closureForcedUnknown` (below, ~7322) whole-run-degrades the verdict
-  # instead of asserting a possibly-wrong value as a permanent ground fact.
+  # axiomatizing that sub-path and record `ceClosureBodyUncertain` (its
+  # path taint reaches the caller through `closureDegrade`; the whole-run
+  # `closureForcedUnknown` that read it went in RFC-0005 S9) instead of
+  # asserting a possibly-wrong value as a permanent ground fact.
   var uncertainDrop = false
   for cp in frame.returnedPaths:                       # (a) explicit return
     if cp.pc.len == 0: continue
@@ -12750,9 +12883,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # call (see CR-1 companion fix for the sawUnknown/UNSAT interaction).
   if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0:
     # RFC-0005 S1b: record the kind (was a kindless run mark). WALK sink, not
-    # the closure sink: `closureForcedUnknown` vetoes a winner on any closure
-    # sevError, which this site never did — moving it there would change
-    # verdicts. RFC-0005 S7: a HALT (`dcOmitted`) -- the exit-coverage fact
+    # the closure sink (through S8 `closureForcedUnknown` vetoed a winner on
+    # any closure-sink sevError, which this site never did; S9 deleted it).
+    # RFC-0005 S7: a HALT (`dcOmitted`) -- the exit-coverage fact
     # above is `false` here, so no caller continuation survives the call.
     discard w.degrade(ceClosureBodyDiverged,
       "closure body produced no value-bearing exit (every body path raised, " &
@@ -13395,8 +13528,8 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # RFC-0005 S7: `dcSubstituted` -- the predicate is never applied (its
       # raises are dropped) and the stand-in seq is unrelated to the input.
       # `closureDegrade` puts ⊤ on the consuming path, so a hit through
-      # `__hofFilterUnsupported` is a candidate, never a clean `sxSat`, even
-      # once S9 deletes the closure veto.
+      # `__hofFilterUnsupported` is a candidate, never a clean `sxSat` (the
+      # closure veto that also guarded it went in S9).
       closureDegrade(ceUnsupportedHof,
         "filter over a symbolic-length seq is not supported (no Z3 " &
              "seqFilter HOF; axiomatize-filter deferred to Phase 16)")
@@ -13920,7 +14053,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
                            ## join the raise-cond sinks' reset list.
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
-  rfc0005UnvetoedStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
+  rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
   currentInFlightTypeId = none(string)   ## Phase 15 E8: reset in-flight-exn mirror
   currentInFlightMsg = none(string)      ## Phase 15 E8
@@ -13973,18 +14106,28 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
 
 iterator dedupedByMsg(src: seq[SymexErrorInfo]): SymexErrorInfo =
   ## Shared insertion rule behind `drainDedupedByMsg`/`dedupedMsgCount` below:
-  ## walks `src` once, yielding each entry the first time its `.msg` is seen,
-  ## deduplicated WITHIN `src` alone, in its OWN `HashSet` — never merged with
-  ## a destination's prior contents or any sibling sink's own dedup set. Per-
-  ## sink dedup is deliberate, not an oversight: a message appearing in two
-  ## DIFFERENT sinks is vanishingly unlikely (each sink is written by its own
-  ## disjoint set of call sites). A caller that concatenates two sub-sources
-  ## into one `seq` before calling (e.g. `w.someField & someThreadvar`) gets
-  ## THOSE two sub-sources deduped together, as one sink.
+  ## walks `src` once, yielding each entry the first time its `.msg` AND
+  ## `.scope` are seen together, deduplicated WITHIN `src` alone, in its OWN
+  ## `HashSet` — never merged with a destination's prior contents or any
+  ## sibling sink's own dedup set. Per-sink dedup is deliberate, not an
+  ## oversight: a message appearing in two DIFFERENT sinks is vanishingly
+  ## unlikely (each sink is written by its own disjoint set of call sites). A
+  ## caller that concatenates two sub-sources into one `seq` before calling
+  ## (e.g. `w.someField & someThreadvar`) gets THOSE two sub-sources deduped
+  ## together, as one sink.
+  ##
+  ## RFC-0005 S9: the key includes the anchor. Two declines of one kind at
+  ## two sites record the same message (the walker's reach record carries the
+  ## marker's `reason`, which names the construct, not the site), so a
+  ## message-only key kept ONE walk record for both -- and the reach join
+  ## (`reachJoinParseErrors`) would have read the second site as never
+  ## reached. A `dskWalkSite` record's anchor is the same for every site, so
+  ## those still dedup by message alone.
   var seen: HashSet[string]
   for e in src:
-    if e.msg notin seen:
-      seen.incl e.msg
+    let key = e.msg & "\x00" & $e.scope
+    if key notin seen:
+      seen.incl key
       yield e
 
 proc drainDedupedByMsg(dst: var seq[SymexErrorInfo], src: seq[SymexErrorInfo]) =
@@ -14003,6 +14146,31 @@ proc dedupedMsgCount(src: seq[SymexErrorInfo]): int =
   ## entries themselves — counts rather than materializing a throwaway seq.
   for e in dedupedByMsg(src):
     inc result
+
+proc reachJoinParseErrors(parseErrors, walkRecords: seq[SymexErrorInfo]):
+    seq[SymexErrorInfo] =
+  ## RFC-0005 S9 (§2.5 point 1: "Reach-taint then decides the verdict ... and
+  ## the `parseErrors` entry becomes purely diagnostic"). A parse-time decline
+  ## anchored at a marker (`dskSiteAnchored`) or an unregistered callee key
+  ## (`dskCalleeKey`) was reached iff the walk recorded a decline under the
+  ## SAME anchor -- the walker records one at every path that reaches the
+  ## site, and taints that path. An unreached one is returned as a `sevHint`
+  ## (the diagnostic kept, `taintsRun` false: it contributes nothing to the
+  ## run coordinate, as it contributed nothing to any path). A reached one,
+  ## and every other scope (signature, unplaced), is returned unchanged.
+  var reached: seq[DeclineScope]
+  for e in walkRecords:
+    if taintsRun(e) and e.scope.kind in {dskSiteAnchored, dskCalleeKey} and
+       e.scope notin reached:
+      reached.add e.scope
+  for e in parseErrors:
+    var r = e
+    if taintsRun(e) and e.scope.kind in {dskSiteAnchored, dskCalleeKey} and
+       e.scope notin reached:
+      r.severity = sevHint
+      r.msg = e.msg & " [never reached on a walked path: diagnostic only " &
+              "(RFC-0005 S9)]"
+    result.add r
 
 template drainSinkUnion(dst: var seq[SymexErrorInfo]; w: WalkCtx;
                          walkField, threadVarSrc: untyped) =
@@ -14414,53 +14582,46 @@ proc runSymexImpl(prog: SymexProgram,
   # `iekBinop`/`iekContains` arms, `cmpString`) have no `w: var WalkCtx` in
   # scope.
   drainDedupedByMsg(exnWarnings, loweringDegradeErrors)
-  # Phase 15 G1c. Parse-time errors (generic instantiation-cap overflow) are
-  # surfaced on every verdict branch. A `geInstantiationCapped` is `sevError`:
-  # the over-cap instantiation was never registered, so the SUT's coverage is
-  # incomplete and the verdict MUST degrade to `sxUnknown` (Invariant 3 — a
-  # `sevError` never resolves to sat/unsat). The walker's missing-callee arm
-  # already sets `w.sawUnknown` when the capped call is reached, but we force
-  # it here so a cap discovered on a NON-walked path (the over-cap callee is
-  # parsed but, e.g., guarded behind an unreachable branch) still cannot yield
-  # an unsound sat/unsat.
-  #
-  # NOTE (SND-1, RFC Cluster 1): despite the name, `capForcedUnknown` below is
-  # NOT specific to instantiation caps — it is a blanket switch that forces
-  # `sxUnknown` whenever ANY `sevError` parseError exists anywhere in
-  # `prog.parseErrors`, regardless of which parse-time classifier raised it
-  # (e.g. `heUnsafeCast`, the Class-A `mkUnsupported` sites that also record a
-  # `sevError`, …). Class-B bare `mkUnsupported` sites (no accompanying
-  # `sevError`) are NOT covered by this switch — those rely on the walker-arm
-  # `isUnsupported` taint-and-continue fix above (SND-1) to reach the
-  # `w.sawUnknown`/`Path.uncertain` chokepoints instead.
-  let capForcedUnknown = block:
-    var any = false
-    for e in prog.parseErrors:
-      if e.severity == sevError: any = true; break
-    any
-  # Phase 15 C2b. Drain the closure-call error sink (dedup'd by message). A
-  # `ceClosureUnknownCallee`/`ceInlineBudgetExceeded` is `sevError`: the call's
-  # semantics were not modeled, so the verdict MUST degrade to `sxUnknown`
-  # (Invariant 3 — never a silent sat/unsat). Surface them on every branch.
+  # Phase 15 C2b. Drain the closure-call error sink (dedup'd by message and
+  # anchor). Every entry is recorded by `closureDegrade`, which also put its
+  # path taint on the consuming path (RFC-0005 S7); surfaced on every branch.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above
   # (threadvar here is `currentClosureCallErrors`, not a same-named field).
   var closureErrs: seq[SymexErrorInfo]
   drainSinkUnion(closureErrs, w, closureCallErrors, currentClosureCallErrors)
-  let closureForcedUnknown = block:
-    var any = false
-    for e in closureErrs:
-      if e.severity == sevError: any = true; break
-    any
+  # RFC-0005 S9 (§2.5) -- the two blanket vetoes are deleted.
+  # `capForcedUnknown` forced `sxUnknown` whenever ANY parse-time `sevError`
+  # existed, and `closureForcedUnknown` whenever any closure-sink `sevError`
+  # did, whatever the path that found the answer had passed. What they
+  # insured against is now answered per decline:
+  #   * a closure-sink decline taints its consuming path (S7), so it needs no
+  #     run-wide switch;
+  #   * a parse-time decline anchored at a marker or a callee key (S8) was
+  #     REACHED iff a walk record carries the same anchor -- the walker
+  #     records one on every path that reaches the site (`isUnsupported`,
+  #     `isUnsafeCast`, the missing-callee arm), and taints that path. A
+  #     decline no walked path reached contributed nothing to any verdict: it
+  #     is kept as a `sevHint` diagnostic and leaves the run coordinate
+  #     (`reachJoinParseErrors`). "Reached" means WALKED, not feasible: the
+  #     walker forks `if` arms without a feasibility check, so this recovers
+  #     `sxUnsat` only behind a decline no path walks at all (a handler no
+  #     raise is routed to, a callee never called).
+  #   * a signature-scoped decline stays run-wide through its class (§2.5
+  #     point 2), as before;
+  #   * a decline with NO anchor (`dskUnplaced`, §2.5 point 4) cannot answer
+  #     the reach question, so it blocks both directions (`reachUnknown`) --
+  #     a walker-completeness defect, pinned empty by the S8 battery.
+  let parseErrs = reachJoinParseErrors(prog.parseErrors, exnWarnings)
   # RFC-0005 S1 (§2.2 "the run coordinate is derived, not written"). The ONE
   # writer of `w.runTaint`: the union, over every DRAINED `sevError` entry
   # (the walk/heap-depth/new-field-zero/lowering sinks in `exnWarnings`, the
-  # parse-time errors, the closure sink), of `runTaint(classOf(kind))`.
-  # RFC-0005 S1c: nothing else -- the transitional kindless ⊤ join is gone
-  # with the unsolved skips it stood for. Under the all-⊤ `classOf` default
-  # this is `{scSpurious, scIncomplete}` exactly when the old `w.sawUnknown`
-  # was true.
-  w.runTaint = runTaintOf(exnWarnings) + runTaintOf(prog.parseErrors) +
+  # reach-joined parse-time errors, the closure sink), of
+  # `runTaint(classOf(kind))`. RFC-0005 S1c: nothing else.
+  w.runTaint = runTaintOf(exnWarnings) + runTaintOf(parseErrs) +
                runTaintOf(closureErrs)
+  let reachUnknown = unplacedDeclines(exnWarnings).len > 0 or
+                     unplacedDeclines(parseErrs).len > 0 or
+                     unplacedDeclines(closureErrs).len > 0
   ## RFC-0005 S1c (§2.3): the ordered verdict procedure (`decideVerdict`).
   ## Rules 1-2 keep ADR-0012 D2's unified, target-independent precedence over
   ## `w.found` -- sxSat > sxRaised > the rest, FIRST in discovery order --
@@ -14473,9 +14634,8 @@ proc runSymexImpl(prog: SymexProgram,
   ## `scIncomplete notin runTaint` (§0.3's recovered capability; under
   ## all-⊤ that is exactly the old `runTaint == {}`).
   let decision = decideVerdict(w.found, w.candidates, w.runTaint,
-                               vetoed = capForcedUnknown or closureForcedUnknown)
-  rfc0005UnvetoedStatus =
-    decideVerdict(w.found, w.candidates, w.runTaint, vetoed = false).status
+                               reachUnknown = reachUnknown)
+  rfc0005RawStatus = decision.status
   let winnerFound = decision.status in {sxSat, sxRaised}
   let winnerIdx   = decision.winnerIdx
   if winnerFound:
@@ -14501,7 +14661,7 @@ proc runSymexImpl(prog: SymexProgram,
     if extractionErrorsLive.len > 0:   ## Phase 15 F7: surface any float-extraction failures
       r.errors.add extractionErrorsLive
     r.errors.add exnWarnings       ## Phase 15 E4
-    r.errors.add prog.parseErrors  ## Phase 15 G1c
+    r.errors.add parseErrs         ## Phase 15 G1c; RFC-0005 S9: reach-joined
     r.errors.add closureErrs       ## Phase 15 C2b
     r.candidates = toCandidates(w.candidates)    ## RFC-0005 S1c / S10
     r
@@ -14515,7 +14675,7 @@ proc runSymexImpl(prog: SymexProgram,
     # RFC-0005 S1c: that includes a candidate with nothing recorded behind
     # it -- a spurious-tainted path whose degrade recorded no error (every
     # `Degrade` token comes from a recording funnel, so this is a walker bug).
-    var unknownErrs = exnWarnings & prog.parseErrors & closureErrs
+    var unknownErrs = exnWarnings & parseErrs & closureErrs
     if unknownErrs.len == 0:
       unknownErrs.add SymexErrorInfo(
         kind: weInternalWalkerFault, severity: sevError,
@@ -14534,7 +14694,7 @@ proc runSymexImpl(prog: SymexProgram,
     # candidates to hand out) and `scIncomplete notin runTaint`.
     RawResult(status: sxUnsat, abstractions: log, obligations: obligationLog,
               callStats: statsSeq,
-              errors: exnWarnings & prog.parseErrors & closureErrs)
+              errors: exnWarnings & parseErrs & closureErrs)
 
 # ---- RFC-fuzzer-nextgen G1b: concolic draw-symbolication + concrete-trace --
 # ---- constraint collection (mechanism steps 2-3 only; no branch-flip) ------
@@ -14741,8 +14901,8 @@ type
       ## Round 10 (Design F1/F3, Liveness F1): same correction as
       ## `obligations` above — this seq is the detail view, not the only
       ## surface. `counters.parseDeclines` (`ConcolicYieldCounters`) counts
-      ## the `sevError` entries here (the SAME predicate `capForcedUnknown`,
-      ## above, uses to force `sxUnknown` on the `wmExplore` path) and
+      ## the `sevError` entries here (the predicate `capForcedUnknown` used
+      ## to force `sxUnknown` on the `wmExplore` path until RFC-0005 S9) and
       ## reaches `Orchestrator.concolicYield`/`CampaignStats.concolicYield`
       ## the same way `obligationsLive` does. A parse decline is counted and
       ## surfaced, never used to reject the materialized seed — see

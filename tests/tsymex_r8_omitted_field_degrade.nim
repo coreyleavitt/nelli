@@ -19,7 +19,8 @@
 ## the whole walk, that runtime exception preempts the already-registered
 ## `feUnsupportedExprKind` classification entirely: the walk's own
 ## `prog.parseErrors` are never drained into the result (see
-## `runtime.nim`'s `elif w.sawUnknown or capForcedUnknown ...` branch, which
+## `runtime.nim`'s `elif w.sawUnknown or capForcedUnknown ...` branch -- since
+## RFC-0005 S9 the reach-joined verdict block -- which
 ## is only reached if the walk completes WITHOUT raising) and the generic
 ## `CatchableError` catch-all (`runtime.nim` ~7727) reclassifies the whole
 ## run as `weInternalWalkerFault` instead — a real engine-bug signal for

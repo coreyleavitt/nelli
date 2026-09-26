@@ -481,7 +481,7 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
     let r = symexFind(s3ClassifyF1, tLabel("s3_classify_f1"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check r.witness[1] == 42
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
@@ -584,11 +584,11 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
 # decideVerdict monotonicity (§4.1 family 1, the pure-function form)
 # =============================================================================
 # "Adding a candidate or taint never demotes a clean found witness." Rule 1/2
-# of `decideVerdict` (`runtime.nim`) scan ONLY `found` and `vetoed` -- neither
+# of `decideVerdict` (`runtime.nim`) scan ONLY `found` and `reachUnknown` -- neither
 # `candidates` nor `runTaint` is consulted before a clean winner is found --
 # so the property is that the verdict (status AND winnerIdx) is INVARIANT
 # under arbitrary changes to `candidates`/`runTaint` as long as `found` and
-## `vetoed` are held fixed and `found` already contains a clean winner. The
+# `reachUnknown` are held fixed and `found` already contains a clean winner. The
 # state space is small and exactly enumerable (`Taint` has 4 values; a
 # handful of representative `found`/`candidates` shapes covers every rule
 # interaction), so this is a full exhaustive check, not a sampled one --
@@ -624,7 +624,7 @@ suite "RFC-0005 S3 -- decideVerdict monotonicity: a clean found witness is never
     for (label, found, expStatus, expIdx) in foundShapes:
       for cands in candidatePools:
         for rt in taintAdditions:
-          let d = decideVerdict(found, cands, rt, vetoed = false)
+          let d = decideVerdict(found, cands, rt, reachUnknown = false)
           checkpoint(label & " | candidates=" & $cands.len & " runTaint=" & $rt &
                      " -> " & $d.status & "/" & $d.winnerIdx)
           check d.status == expStatus

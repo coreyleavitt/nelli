@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "151"
+const symexWalkerVersion* = "152"
+  ## RFC-0005 S9 (2026-09-26) — both blanket vetoes deleted (§2.5).
+  ## `capForcedUnknown` (any parse-time `sevError`) and
+  ## `closureForcedUnknown` (any closure-sink `sevError`) no longer force
+  ## `sxUnknown` on the whole run; each decline answers "was I reached?"
+  ## through its S8 anchor instead. A parse-time decline no walked path
+  ## reached (no walk record at its marker / callee key) is kept as a
+  ## `sevHint` diagnostic and leaves the run coordinate; a reached one is
+  ## the walk record's `sevError` twin. A decline with no anchor
+  ## (`dskUnplaced`, §2.5 point 4) blocks `sxSat` and `sxUnsat` both. The
+  ## walk-sink dedup keys on message AND anchor, so twin declines keep one
+  ## walk record each. Capture by reference: a closure reads a captured
+  ## `var` from the CURRENT env when applied in its defining frame (was the
+  ## construction snapshot -- a false `sxSat`/`sxUnsat` with nothing
+  ## recorded), and declines with `ceCaptureByRefUnmodelled` when applied in
+  ## another frame or when its body writes such a capture. Verdicts move
+  ## (clean `sxSat` off a declined path; `sxUnsat` behind an unreached
+  ## decline; the capture fixes), hence the bump.
   ## RFC-0005 S8d (2026-09-26) — silent substitution by NAME-classified type
   ## heads (§2.2's class, the type-level sibling of S8c). `classifyType` and
   ## the parser's type-dependent arms recognised `seq`/`Table`/`HashSet`/
@@ -4373,6 +4390,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for p in e.lambdaParams: ptys.add canonicalize(p.ty)
     "Ex<Lam:site=" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
       ";caps=[" & caps.join(",") & "];params=[" & ptys.join(",") & "]" &
+      ";byref=[" & e.lambdaMutCaptures.join(",") & "]" &   ## RFC-0005 S9
       ";retTy=" & canonicalize(e.lambdaRetTy) &
       ";body=" & canonicalize(e.lambdaBody, env) & ">"
   of iekClosureCall:                     ## Phase 15 C1: distinct partition from

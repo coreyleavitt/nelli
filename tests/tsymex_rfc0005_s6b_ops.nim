@@ -429,7 +429,7 @@ suite "RFC-0005 S6b (c) -- guards":
     let r = symexFind(s6bBoolOrderFresh, tLabel("s6b_bool_order_fresh"))
     show r
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
@@ -444,7 +444,7 @@ suite "RFC-0005 S6b (c) -- guards":
     let r = symexFind(s6bSeqFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxSat
-    check rfc0005UnvetoedStatus == sxUnknown
+    check rfc0005RawStatus == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the merged string is a candidate: sxUnknown":

@@ -1,7 +1,7 @@
 ## RFC-0005 (soundness channels) slice S8 -- decline scope (§2.5, §6.6) and
 ## the i3 annotation-violation channel (§13.3). Walker 147 -> 148.
 ##
-## S9 deletes the blanket vetoes (`capForcedUnknown`/`closureForcedUnknown`)
+## S9 deleted the blanket vetoes (`capForcedUnknown`/`closureForcedUnknown`)
 ## on the strength of the structural guarantee pinned here: every decline the
 ## run coordinate admits (`taintsRun`) says WHERE it sits, so the verdict can
 ## ask "was it reached?" instead of insuring against the answer. Suites:
@@ -327,14 +327,21 @@ suite "RFC-0005 S8 (c) -- reach joins on the anchor":
     let m = prog.parseErrors[0].scope.markerId
     let r = runSymex(prog, tLabel("s8_cast_dead_live"))
     checkpoint(show(r.errors))
-    var anchored = 0
+    # No walk record at the marker. RFC-0005 S9: the join reads that absence
+    # -- the parse record is kept as a `sevHint` diagnostic (so `scopesOf`,
+    # which counts the declines `taintsRun` admits, sees none at `m`) ...
+    var anchored, hinted = 0
     for s in scopesOf(r.errors, feUnsupportedExprKind):
       if s.kind == dskSiteAnchored and s.markerId == m: inc anchored
-    check anchored == 1
-    # Vetoes retained (S8 moves no verdict): still `sxUnknown` today; the
-    # verdict without the vetoes is the clean hit S9 will report.
-    check r.status == sxUnknown
-    check rfc0005UnvetoedStatus == sxSat
+    for e in r.errors:
+      if e.kind == feUnsupportedExprKind and e.severity == sevHint and
+         e.scope.kind == dskSiteAnchored and e.scope.markerId == m: inc hinted
+    check anchored == 0
+    check hinted == 1
+    # ... and the clean hit is reported (was `sxUnknown` under the cap veto
+    # through S8, with the unvetoed verdict already `sxSat`).
+    check r.status == sxSat
+    check rfc0005RawStatus == sxSat
 
   test "a reached unsafe cast records its reach under the parse record's marker":
     let prog = progOf(unsafeCastS8)

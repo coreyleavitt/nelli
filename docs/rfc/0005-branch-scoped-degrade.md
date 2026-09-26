@@ -109,7 +109,7 @@ state = "done"
 [[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S10"
@@ -986,6 +986,107 @@ recorded. Each of these gave a false verdict with an empty `errors`:
 
 Pins: `tests/tsymex_rfc0005_s8d_typeheads.nim` (+ helper module
 `tests/s8d_user_types.nim`).
+
+**As landed (S9, walker 152) — both vetoes deleted.** `capForcedUnknown`
+and `closureForcedUnknown` are gone from `runSymexImpl`. What each one used
+to force is now decided by the lattice (§2.3) and the anchor on each record
+(S8).
+
+- **The reach join (`reachJoinParseErrors`, `runtime.nim`).** Take a parse
+  record that is `taintsRun` and anchored (`dskSiteAnchored` or
+  `dskCalleeKey`). If the drained walk records have no `taintsRun` record
+  under the same anchor, no walked path reached the site. The parse record
+  is then rewritten to `sevHint`, and its message gets the suffix
+  `[never reached on a walked path: diagnostic only (RFC-0005 S9)]`. It
+  stays in `errors`, but it no longer feeds `runTaint`. A record the join
+  matches keeps its `sevError`. The verdict code reads the joined list
+  (`parseErrs`) wherever it used to read `prog.parseErrors`.
+- **"Reached" means walked, not feasible.** The walker forks both arms of an
+  `if` without a feasibility check. So a decline in an arm that is walked
+  but infeasible still has its walk record, and still taints that arm's
+  path. That arm has no model, so the path taint is what drives the verdict,
+  and it is scoped to the path. What the join recovers is narrower:
+  `sxUnsat` behind a decline that **no** path walks. Examples are a handler
+  for an exception nothing raises, a callee never called, or a label no path
+  enters (`s9DeadHandler`: `sxUnknown` → `sxUnsat`, checked by
+  `checkUnsatOverTaintOnly`). The `sxSat` recovery is wider and does not
+  come from the join. Since the vetoes are gone, a clean path's hit is
+  `sxSat` even when another path reached a decline (the S0 companions).
+- **Dedup keys on message and anchor.** `dedupedByMsg` used to collapse two
+  same-message walk records at different markers into one. That left the
+  second marker with no walk record, so the join would have called a
+  reached site unreached. The key is now `msg & "\0" & $scope`, pinned by
+  twin Class-A casts and twin Class-B markers.
+- **Class B is not unified with a parse record (deviation from point 1).**
+  A Class-B `declineMarker` site still has only its walk record. Under the
+  join, a parse record at a Class-B site could only ever be diagnostic: it
+  would be `sevHint` when unreached, and a duplicate of the walk record when
+  reached. Adding one would mint records that affect no verdict, so it is
+  not done. The join does not read `collectUserExnAncestors`, and it
+  decides nothing from handler shape. Reach is only the walk record.
+- **An unplaced decline blocks both directions.** A `taintsRun` record
+  scoped `dskUnplaced` (point 4) in the parse, walk or closure records sets
+  `reachUnknown`, which forces `sxUnknown` from `decideVerdict`. This covers
+  `sxUnsat` as well as `sxSat`, whatever the record's class, because the
+  engine cannot say whether that site was reached. `decideVerdict`'s
+  `vetoed` parameter is renamed `reachUnknown`. The threadvar
+  `rfc0005UnvetoedStatus` is renamed `rfc0005RawStatus`: it is the decision
+  procedure's status before S10's replay, and there is no longer a veto to
+  bypass.
+- **Capture by reference (the S7 handoff's `capMutNeg`).** A Nim closure
+  reads a captured `var` as that variable stands at the call. `buildClosure`
+  snapshotted the value at construction, which gave a false `sxSat` (dead
+  label reported reachable) and a false `sxUnsat` (live label reported
+  dead), both with an empty `errors`. The closure veto never caught this,
+  because nothing was recorded.
+  - The parser records the captures whose symbol is `nskVar`/`nskForVar`
+    (`lambdaMutCaptures`; it is part of the canonical key, rendered
+    `byref=[...]`).
+  - The closure value records those captures and its constructing frame (a
+    new `frameId` on `CallFrameCtx`).
+  - In that frame, reading the closure (`iekVar`, `lowerClosureCall`)
+    re-reads the by-reference captures from the current env
+    (`refreshByRefCaptures`). This is exact.
+  - Applied in any other frame (for example, passed to a callee), the
+    snapshot may be stale. The descent records the new kind
+    **`ceCaptureByRefUnmodelled`** (`dcSubstituted`: the stand-in is a stale
+    value) through `closureDegrade`.
+  - A body that writes a by-reference capture would have to write back to
+    the caller's variable, and the descent's fresh env drops that write. It
+    is detected by comparing each capture's value on every exit path
+    against the entry (`sameSymVal`, identity of representation) and
+    declined with the same kind.
+  - `let` captures are unaffected and stay exact by value.
+- **Flip audit.** No new `sxSat` comes from a path that passes a
+  substituting site: rule 1 requires a path with no `scSpurious`, and every
+  substituting record taints its path `⊤`. Every new `sxUnsat` below is
+  checked by `checkUnsatOverTaintOnly`.
+
+  | SUT | before | after | why |
+  |---|---|---|---|
+  | S0 pin 2 (`s0CapVetoCompanion`) | `sxUnknown` | `sxSat` (x = 42) | the reached cast taints only the other path |
+  | S0 pin 3 (`s0ClosureVetoCompanion`) | `sxUnknown` | `sxSat` | the S7 path taint sits on the `x == 7` path only |
+  | S8 (c) `castDeadS8` | `sxUnknown` | `sxSat` | the unreached decline is now a hint |
+  | `s9CapCompanion` / `s9ClosureCompanion` (both consumers) | — | `sxSat` / `sfSat` | clean witness path |
+  | `s9CapMutNeg` | `sxSat` (false) | `sxUnsat` | by-reference read, checked |
+  | `s9CapMutPos` | `sxUnsat` (false) | `sxSat` (x = 7) | by-reference read, clean |
+  | `s9CapBranch` | `sxSat` (false) | `sxUnsat` | by-reference read per arm, checked |
+  | `s9CapEscaped` | `sxSat` (false) | `sxUnknown` | `ceCaptureByRefUnmodelled` |
+  | `s9BodyWrite` | `sxSat` (false) | `sxUnknown` | `ceCaptureByRefUnmodelled` |
+  | `s9DeadHandler` | `sxUnknown` | `sxUnsat` | reach join, checked |
+
+  The full sweep moved no verdict outside these pins. Its one regression
+  was the N27 placeholder-read audit, which flagged `sameSymVal`'s svSeq
+  arm. That arm compares handles and the placeholder flag and lowers
+  nothing. It is now tagged `[placeholder-audited]`, and the inventory is
+  67 → 69.
+- **Found, not fixed: shadowed names conflate in the env.** An inner `var k`
+  that shadows an outer `k` shares the outer's env slot, so a write through
+  either name is seen through both. This predates S9 and is independent of
+  capture. It is left for a scope-keyed-names slice (S8e-shaped).
+
+Pins: `tests/tsymex_rfc0005_s9_vetoes.nim` (a)–(f), and
+`tests/tsymex_rfc0005_s0_exhibit.nim` pins 2 and 3 (now `sxSat`).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

@@ -821,7 +821,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8d (type heads resolved by symbol: a user type named like a
     ## stdlib/builtin type -- `seq`/`Table`/`HashSet`/`Natural`/`int8`/
     ## `bool`/`Rune` -- is not modelled as it). 150->151.
-    check symexWalkerVersion == "151"
+    ## RFC-0005 S9 (both blanket vetoes deleted; an unreached parse-time
+    ## decline is a `sevHint`; an unplaced one blocks both directions; walk
+    ## dedup keys on message and anchor; a closure reads a captured `var` by
+    ## reference, `ceCaptureByRefUnmodelled` where it cannot). 151->152.
+    check symexWalkerVersion == "152"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

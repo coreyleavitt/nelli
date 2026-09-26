@@ -24,7 +24,9 @@
 ## degrade (already fed by `ceClosureUnknownCallee`/`ceInlineBudgetExceeded`)
 ## fires. Coarse (whole-run, not per-occurrence — there is no live `Path` at
 ## the `lower()` call site to taint per-occurrence, the same reason SND-1 uses
-## chokepoints instead of threading a Path there) but sound.
+## chokepoints instead of threading a Path there) but sound. (RFC-0005 S7
+## put the taint on the consuming path through `closureDegrade`; S9 deleted
+## the whole-run `closureForcedUnknown`.)
 ##
 ## Walker version pin: "39" (SND-1b bumped 38→39 — this slice changes verdicts
 ## sxSat→sxUnknown for closure applications whose body drops a mutation or

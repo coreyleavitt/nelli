@@ -354,10 +354,14 @@ proc emitExpr*(e: IRExpr): NimNode =
     for p in e.lambdaParams: paramsLit.add emitParam(p)
     var capsLit = newTree(nnkBracket)
     for c in e.lambdaCaptures: capsLit.add newLit(c)
+    var mutCapsLit = newTree(nnkBracket)     ## RFC-0005 S9
+    for c in e.lambdaMutCaptures: mutCapsLit.add newLit(c)
     newCall(bindSym"mkLambda",
             newLit(e.lambdaSite.siteHash), newLit(e.lambdaSite.declOrder),
             prefix(paramsLit, "@"), emitStmt(e.lambdaBody),
-            prefix(capsLit, "@"), emitIRType(e.lambdaRetTy))
+            prefix(capsLit, "@"), emitIRType(e.lambdaRetTy),
+            newTree(nnkExprEqExpr, ident"mutCaptures",
+                    newCall(bindSym"@", mutCapsLit)))
   of iekClosureCall:      ## Phase 15 C1
     var argsLit = newTree(nnkBracket)
     for a in e.ccArgs: argsLit.add emitExpr(a)
@@ -1034,9 +1038,11 @@ proc newParseCtx*(maxInstantiationsPerProc = 0): ParseCtx =
 #     returns the `isUnsupported` marker `m` for the caller to place where
 #     the substitution happens (a preamble, or as the statement itself);
 #   * `declineMarker` -- a Class-B site: the marker alone (its reach record
-#     is the walker's, under the same anchor; recording a parse-time error
-#     too would trip the retained blanket veto -- a verdict change S8 must
-#     not make);
+#     is the walker's, under the same anchor, and is its only record; S8 kept
+#     it that way because a parse-time error would have tripped the blanket
+#     veto. RFC-0005 S9 deleted the veto; the verdict still needs no parse
+#     record here -- reach taint decides it, and `reachJoinParseErrors`
+#     would only ever keep such a record as a diagnostic);
 #   * `declineUnsafeCast` -- the `isUnsafeCast` sibling of `declineAtSite`;
 #   * `declineCallee` -- an unregistered-callee decline: records
 #     `dskCalleeKey(key)` and returns the never-registered key for `mkCall`.
@@ -1545,13 +1551,18 @@ proc collectBoundLocals(n: NimNode, into: var HashSet[string]) =
   for c in n: collectBoundLocals(c, into)
 
 proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
-                        order: var seq[string], seen: var HashSet[string]) =
+                        order: var seq[string], seen: var HashSet[string],
+                        mutable: var seq[string]) =
   ## Phase 15 C1. Enumerate the FREE VARIABLES of a lambda body: every `nnkSym`
   ## reference whose symbol is a runtime VALUE binding (`nskParam`/`nskLet`/
   ## `nskVar`/`nskForVar`) and that is NOT bound inside the lambda (`bound`
   ## holds the lambda's own params ++ its body-locals). This excludes top-level
   ## procs/types/consts/enums (different `symKind`) — those are not captured.
   ## First-seen source order is preserved (deterministic capture list / key).
+  ## RFC-0005 S9: `mutable` receives the captures whose symbol is a mutable
+  ## local (`nskVar`/`nskForVar`) -- Nim captures those by reference, so their
+  ## value at a call can differ from their value at construction. A `let` or
+  ## a (non-`var`, the only capturable kind) param cannot change.
   if n == nil: return
   if n.kind == nnkSym:
     if symKind(n) in {nskParam, nskLet, nskVar, nskForVar}:
@@ -1559,8 +1570,9 @@ proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
       if nm notin bound and nm notin seen:
         seen.incl nm
         order.add nm
+        if symKind(n) in {nskVar, nskForVar}: mutable.add nm
     return
-  for c in n: collectFreeVarRefs(c, bound, order, seen)
+  for c in n: collectFreeVarRefs(c, bound, order, seen, mutable)
 
 proc lambdaBodyHash(lam: NimNode): string =
   ## Phase 15 C1 (ADR-0009 D3, reconciliation §F-C). `symBodyHash` is a
@@ -1610,14 +1622,15 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   let bodyNode = body(n)
   # Free variables = value-symbol refs not bound by the lambda. A top-level proc
   # (C3) has none by construction; skip the scan.
-  var captures: seq[string]
+  var captures, mutCaptures: seq[string]
   if not forceNoCaptures:
     # Body-local definitions are also bound (not captured).
     collectBoundLocals(bodyNode, bound)
     var seen: HashSet[string]
-    collectFreeVarRefs(bodyNode, bound, captures, seen)
+    collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
   let bodyIR = parseStmt(bodyNode, ctx)
-  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy)
+  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy,
+           mutCaptures)
 
 proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
@@ -3032,12 +3045,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Cluster C → emit an iekLambda carrying an iterator marker so the walker
     # stub fires a classified `ceNotImplemented` (Invariant 3 — not a crash).
     # The detail string is surfaced at walk time via the stub message.
-    var captures: seq[string]
+    var captures, mutCaptures: seq[string]
     var seen: HashSet[string]
     var bound: HashSet[string]
     let bodyNode = body(n)
     collectBoundLocals(bodyNode, bound)
-    collectFreeVarRefs(bodyNode, bound, captures, seen)
+    collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
     let site = (siteHash: int64(hash("closure-iterator:" & lambdaBodyHash(n))),
                 declOrder: ctx.lambdaCounter)
     inc ctx.lambdaCounter
@@ -3046,7 +3059,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # whole iekLambda first).
     mkLambda(site.siteHash, site.declOrder, @[],
              ctx.declineMarker(ceNotImplemented, "closure iterators not yet supported"),
-             captures, tBool())
+             captures, tBool(), mutCaptures)
   of nnkConv:
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
@@ -3454,8 +3467,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # argument position, which the bracket-slice interceptors never see —
     # used to fall into `binopForInfix`'s macro-time `error()`, aborting the
     # whole file's compilation (observed on the real `parseTftpUri`).
-    # Degrade CR-2a-style instead: classified parse error (sevError forces
-    # the whole-run verdict to sxUnknown via `capForcedUnknown`), an
+    # Degrade CR-2a-style instead: classified parse error (anchored at the
+    # marker; RFC-0005 S9 reads it as a run taint only if a walked path
+    # reaches the marker -- was the whole-run `capForcedUnknown`), an
     # `mkUnsupported` stmt for the SND-1 walker taint, and a typed zero
     # dummy so parsing continues.
     if n[0].strVal notin ["+", "-", "*", "div", "/", "mod", "==", "!=",
@@ -5270,9 +5284,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # via `classifyType(n).ty` — resolvable regardless of `n.kind`.
     # Soundness: `of isUnsupported` taints `Path.uncertain` (SND-1), so any
     # witness produced downstream of this dummy is demoted to `sxUnknown` at
-    # the chokepoints — the dummy can NEVER produce a false witness. Because
-    # this also registers a `sevError`, it is Class-A and `capForcedUnknown`
-    # backstops it independently (belt-and-suspenders). This is the
+    # the chokepoints — the dummy can NEVER produce a false witness. It also
+    # registers a `sevError` (Class-A), anchored at the marker: RFC-0005 S9
+    # deleted the `capForcedUnknown` backstop that read it, and joins it with
+    # the walk's reach record instead (an unreached one is a diagnostic). This is the
     # catch-all for the whole expression-position macro-error class
     # (M2/M5/P1/P2a shapes).
     let dummyTy = classifyType(n).ty
@@ -9527,7 +9542,8 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     # the LAST compile wall on the natural seq-slice value path
     # (`getImpl`-inlining system's `[]` died here on its `len` callee).
     # CR-2a-style classified degrade instead: record the parse error
-    # (sevError → whole-run sxUnknown via `capForcedUnknown`) and return a
+    # (sevError, anchored at the key; RFC-0005 S9 counts it only if a walked
+    # path reaches the call -- was the whole-run `capForcedUnknown`) and return a
     # synthetic key that is never registered, so the walker's
     # missing-callee arm degrades the path (exactly the geDistinctBarrier
     # / over-cap-instantiation precedent above and below).

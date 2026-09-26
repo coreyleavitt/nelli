@@ -711,6 +711,14 @@ type
       lambdaBody*:     IRStmt        ## the lambda's body (descended at C2b apply)
       lambdaCaptures*: seq[string]   ## names of captured locals (free vars, D2)
       lambdaRetTy*:    IRType        ## concrete return type
+      lambdaMutCaptures*: seq[string]
+                                     ## RFC-0005 S9: the captures that are
+                                     ## mutable locals (`var`/`for` symbols) --
+                                     ## captured BY REFERENCE in Nim, so the
+                                     ## walker reads them at the call, not at
+                                     ## construction. A subset of
+                                     ## `lambdaCaptures`; a `let`/param capture
+                                     ## cannot change, and stays by value.
     of iekClosureCall:               ## A-normalised like isCall (D6)
       ccCallee*:  string             ## name of the proc-valued variable
       ccArgs*:    seq[IRExpr]
@@ -1430,9 +1438,10 @@ type
                            ## `currentClosureCallAxioms` (would otherwise
                            ## assert a possibly-wrong value as a PERMANENT
                            ## ground fact for the rest of the run) and instead
-                           ## pushes this kind so `closureForcedUnknown`
-                           ## whole-run-degrades the verdict to `sxUnknown`
-                           ## (Invariant 3 — never a silent wrong sat/unsat).
+                           ## pushes this kind (through SND-1b the whole-run
+                           ## `closureForcedUnknown` read it; RFC-0005 S9
+                           ## deleted that veto -- the path taint below is
+                           ## what keeps the verdict honest).
                            ## Appended at enum tail (ordinal stability).
                            ## RFC-0005 S7: also joins `{scSpurious}` onto the
                            ## calling path (`closureDegrade`); the result is a
@@ -1483,8 +1492,9 @@ type
                           ## (`classifyType(n).ty`). Sound because `of
                           ## isUnsupported` taints `Path.uncertain` (SND-1) —
                           ## the dummy can never produce a false witness; also
-                          ## Class-A (`capForcedUnknown` backstops it
-                          ## independently). Covers the whole expression-
+                          ## Class-A: the parse record joins the walk's reach
+                          ## record on the marker (RFC-0005 S9; was the
+                          ## `capForcedUnknown` backstop). Covers the whole expression-
                           ## position macro-error class (M2/M5/P1/P2a shapes).
                           ## Appended at enum tail (ordinal stability).
     feUnsupportedParamType ## RFC-chapulin-hardening CR-2b (walker v45):
@@ -1862,9 +1872,9 @@ type
                           ## unconstrained by any body path. A void closure
                           ## that falls through is NOT this (it has
                           ## fall-through paths). Recorded in the WALK sink,
-                          ## not the closure sink: it must not trip the
-                          ## closure veto (`closureForcedUnknown`), which it
-                          ## never did before S1b. sevError -> sxUnknown.
+                          ## not the closure sink (through S8 the closure veto,
+                          ## `closureForcedUnknown`, read that sink; RFC-0005
+                          ## S9 deleted it). sevError -> sxUnknown.
                           ## RFC-0005 S7: the body's raises now reach the
                           ## caller and the continuation past the call is
                           ## made infeasible (exit coverage `false`), so the
@@ -2013,6 +2023,19 @@ type
                           ## `dcFreshSymbol`: only an entirely fresh-symbol
                           ## path is replayed at all (`replayEligible`), so
                           ## the gap it names is that class's.
+    ceCaptureByRefUnmodelled ## RFC-0005 S9. A closure application whose
+                          ## by-reference captures the walker cannot follow.
+                          ## Nim captures a `var` by reference; the walker
+                          ## reads such a capture from the CURRENT env, which
+                          ## it can do only when the closure is applied in the
+                          ## frame that built it (`refreshByRefCaptures`).
+                          ## Recorded when a closure with a mutable capture is
+                          ## applied in another frame (the body reads the
+                          ## construction-time snapshot, possibly stale), or
+                          ## when the body writes a mutable capture (the write
+                          ## is not carried back to the caller). `classOf` is
+                          ## `dcSubstituted`: a stale value is forced, or a
+                          ## write is dropped. sevError, via `closureDegrade`.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2064,8 +2087,9 @@ type
   DeclineScopeKind* = enum
     ## RFC-0005 S8 (§2.5 "Where the scope lives"). WHERE a decline is
     ## anchored, so the verdict can ask the one question the blanket vetoes
-    ## (`capForcedUnknown`/`closureForcedUnknown`) insure against instead of
-    ## answering: was this decline reached? The CHANNEL stays derived from
+    ## (`capForcedUnknown`/`closureForcedUnknown`) insured against instead of
+    ## answering: was this decline reached? (RFC-0005 S9 deleted them and
+    ## asks it: `reachJoinParseErrors`, `runtime.nim`.) The CHANNEL stays derived from
     ## `kind` (`classOf`); the scope is different data -- no existing field
     ## carries it.
     dskUnplaced     ## §2.5 point 4 ("bucket 4") -- the engine cannot say where this
@@ -2091,7 +2115,7 @@ type
                     ## the walker's missing-callee arm records the SAME key
                     ## when a path reaches the call.
     dskWalkSite     ## RFC-0005 S8, not in the RFC's §2.5 sketch (which scoped
-                    ## only the PARSE-time records the veto reads): a record
+                    ## only the PARSE-time records the veto read): a record
                     ## the WALKER made at the site it was walking -- a
                     ## `degrade`/`lowerDegrade`/`closureDegrade`/`allocDegrade`
                     ## funnel, the extraction sink, or a `runSymex` boundary
@@ -2149,7 +2173,7 @@ type
     ## back to opaque handling, whose walk-time `feOpaqueCallUnmodelled`
     ## degrade taints every path through it (the soundness), so this record
     ## is verdict-NEUTRAL by construction: no `classOf`, no `DeclineScope`,
-    ## no taint, never read by the verdict or by either blanket veto. It is
+    ## no taint, never read by the verdict. It is
     ## error-severity in spirit -- the user's code carries a wrong promise --
     ## and rides its own channel (`SymexProgram.annotationViolations` ->
     ## `RawResult`/`SymexResult.annotationViolations`) so it stays loud
@@ -2727,7 +2751,7 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   ## marked `S7`) -- the precondition for S9 deleting the closure veto. Every
   ## value-substituting site now records through `closureDegrade`, which
   ## joins its path coordinate onto the consuming path as well as the
-  ## closure sink the veto reads: `ceUnsupportedHof` and
+  ## closure sink the veto read (S9 deleted it): `ceUnsupportedHof` and
   ## `ceClosureUnknownCallee` are `dcSubstituted` (the closure is never
   ## applied / the stand-in has a fixed name), `ceClosureBodyUncertain` is
   ## `dcFreshSymbol` (the call result is fresh per occurrence since S7) and
@@ -2898,6 +2922,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # dropped raise branch), its deref writes DROP the write (stale heap),
     # and `runSymex`'s `SymexRefUnresolvedError` boundary arm aborts the run.
   of geVtableDispatch: dcNoAnswer
+  of ceCaptureByRefUnmodelled: dcSubstituted
+    # RFC-0005 S9: the body reads the construction-time snapshot of a capture
+    # that may have been written since (a forced, possibly stale value), or
+    # its write to a capture is dropped at the call's exit.
   of ceClosureBodyUncertain: dcFreshSymbol
     # S7: the tainted body arm is dropped from the ground axioms, so the
     # call's result -- a fresh constant PER OCCURRENCE since S7 (was a
@@ -3110,8 +3138,10 @@ func `==`*(a, b: SymexErrorInfo): bool =
 func unplacedDeclines*(errors: openArray[SymexErrorInfo]): seq[SymexErrorInfo] =
   ## RFC-0005 S8 (§2.5 point 4, §6.6). The bucket-4 members of `errors`: every
   ## entry `taintsRun` admits (a decline) whose scope is `dskUnplaced`. The
-  ## invariant S9 deletes the blanket vetoes on is that this is empty for
-  ## every run; the S8 totality pin enumerates any exception by name.
+  ## invariant S9 deleted the blanket vetoes on is that this is empty for
+  ## every run; the S8 totality pin enumerates any exception by name. A
+  ## non-empty result blocks both `sxSat` and `sxUnsat`
+  ## (`decideVerdict`'s `reachUnknown`, RFC-0005 S9).
   for e in errors:
     if taintsRun(e) and e.scope.kind == dskUnplaced:
       result.add e
@@ -3195,14 +3225,18 @@ proc mkBorrowOp*(op: IRBinop, lhs, rhs: IRExpr,
          borrowDistinctName: distinctName)
 
 proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
-               body: IRStmt, captures: seq[string], retTy: IRType): IRExpr =
+               body: IRStmt, captures: seq[string], retTy: IRType,
+               mutCaptures: seq[string] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009). A lambda expression node. `siteHash`/
   ## `declOrder` form the formatting-stable lambda-site key (D3); `params`/
   ## `retTy` are concrete post-monomorphization (D8); `captures` are the
   ## free-variable names snapshotted from the enclosing scope (D2).
+  ## RFC-0005 S9: `mutCaptures` names the captures read by reference (see
+  ## `lambdaMutCaptures`); empty for a lambda that captures no mutable local.
   IRExpr(kind: iekLambda, lambdaSite: (siteHash, declOrder),
          lambdaParams: params, lambdaBody: body,
-         lambdaCaptures: captures, lambdaRetTy: retTy)
+         lambdaCaptures: captures, lambdaRetTy: retTy,
+         lambdaMutCaptures: mutCaptures)
 
 proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
@@ -4661,7 +4695,10 @@ proc render*(e: IRExpr): string =
     var ps: seq[string]
     for p in e.lambdaParams: ps.add p.name
     "lambda@" & $e.lambdaSite.siteHash & "/" & $e.lambdaSite.declOrder &
-      "(" & ps.join(",") & ")[caps:" & e.lambdaCaptures.join(",") & "]"
+      "(" & ps.join(",") & ")[caps:" & e.lambdaCaptures.join(",") & "]" &
+      (if e.lambdaMutCaptures.len > 0:           ## RFC-0005 S9
+         "[byref:" & e.lambdaMutCaptures.join(",") & "]"
+       else: "")
   of iekClosureCall:      ## Phase 15 C1
     var asr: seq[string]
     for a in e.ccArgs: asr.add render(a)

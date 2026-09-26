@@ -220,8 +220,9 @@ suite "#163 review -- ConcolicCollectResult.parseErrors surfaces prog.parseError
     check specific
     check r.annotationViolations.len == 0
     # The live-count companion: `counters.parseDeclines` counts the SAME
-    # `sevError` entries `capForcedUnknown` (`runSymexImpl`) already treats
-    # as a blanket "this program was not fully modelled" switch -- NOT
+    # `sevError` entries `capForcedUnknown` (`runSymexImpl`) treated as a
+    # blanket "this program was not fully modelled" switch until RFC-0005
+    # S9 replaced it with a per-decline reach join -- NOT
     # every entry in `parseErrors` (some parse-time records are warnings/
     # hints, not declines).
     var wantDeclines = 0

@@ -351,7 +351,7 @@ type
                                    ## candidate is replayed and confirmed,
                                    ## so the row reports sxSat (with the
                                    ## pre-replay verdict still sxUnknown)
-    unvetoed: SymexStatusKind      ## `rfc0005UnvetoedStatus` right after the
+    rawStatus: SymexStatusKind     ## `rfc0005RawStatus` right after the
                                    ## row's own run (replayConfirms rows)
     hasKindCheck: bool            ## Class-A sites carry a classified kind;
                                    ## SND-1's bare Class-B drop does not (by
@@ -385,7 +385,7 @@ let
   rBareLenRead   = symexFind(corpusBareLenRead,          tLabel("bare_len_read"))
   rCompositeFallthrough = symexFind(corpusCompositeImplicitFallthrough,
                                      tLabel("composite_implicit_fallthrough"))
-  uCompositeFallthrough = rfc0005UnvetoedStatus   ## captured before the next run
+  uCompositeFallthrough = rfc0005RawStatus   ## captured before the next run
 
 let corpus = @[
   CorpusItem(label: "CR-2a: cast[int32](x) as sub-expr",
@@ -509,7 +509,7 @@ let corpus = @[
              # RFC-0005 S10: `@[x].len == 1` for every x >= 0, so the label
              # is reachable; the path's taint is dcFreshSymbol only, and the
              # replayed candidate is confirmed.
-             replayConfirms: true, unvetoed: uCompositeFallthrough),
+             replayConfirms: true, rawStatus: uCompositeFallthrough),
 ]
 
 # =============================================================================
@@ -553,7 +553,7 @@ suite "symex TOT-1 — §0-totality regression corpus":
       if item.replayConfirms:
         ## RFC-0005 S10: a witness the REAL fn confirmed -- not a false one.
         check item.status == sxSat
-        check item.unvetoed == sxUnknown
+        check item.rawStatus == sxUnknown
       else:
         check item.status == sxUnknown
         check item.status != sxSat    ## never a false witness

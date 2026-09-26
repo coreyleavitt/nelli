@@ -161,7 +161,7 @@ suite "RFC-0005 S1 (c) -- RawResult.pathTaint is produced at the target-hit site
   test "no verdict change: an isUnsupported path still blocks SAT and degrades the run to sxUnknown":
     # RFC-0005 S1b: the node carries a kind (was kindless/transitional in S1).
     let prog = SymexProgram(params: @[],
-      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "rfc0005 S1 probe"),
+      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "rfc0005 S1 probe", 0),
                       mkTargetLabel("hit")]))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     check raw.status == sxUnknown

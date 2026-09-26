@@ -215,7 +215,7 @@ suite "RFC-0005 S1b (c) -- the kind rides the IR (isUnsupported node, unregister
 
   test "the walker's isUnsupported arm records exactly the node's own (kind, reason)":
     let prog = SymexProgram(params: @[],
-      body: mkBlock(@[mkUnsupported(seNestedSeqUnsupported, "s1b probe reason"),
+      body: mkBlock(@[mkUnsupported(seNestedSeqUnsupported, "s1b probe reason", 0),
                       mkTargetLabel("hit")]))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     checkpoint($kindNames(raw.errors))
@@ -229,8 +229,8 @@ suite "RFC-0005 S1b (c) -- the kind rides the IR (isUnsupported node, unregister
     check not raw.errors.hasKind(weInternalWalkerFault)
 
   test "two isUnsupported nodes differing only in kind never share a cache-key canonical form":
-    check canonicalize(mkUnsupported(feUnsupportedStmtKind, "r")) !=
-          canonicalize(mkUnsupported(feUnsupportedExprKind, "r"))
+    check canonicalize(mkUnsupported(feUnsupportedStmtKind, "r", 0)) !=
+          canonicalize(mkUnsupported(feUnsupportedExprKind, "r", 0))
 
   test "unregisteredCalleeKey round-trips every kind; an ordinary key carries none":
     for k in SymexErrorKind:

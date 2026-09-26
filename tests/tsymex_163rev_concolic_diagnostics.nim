@@ -18,9 +18,9 @@
 ##    that was never run.
 ##
 ## 2. Parse errors. `runConcolicCollectImpl` never read `prog.parseErrors`,
-##    so a program whose IR carries a parse-time decline (e.g.
-##    `feTransparentResultUsed`, `tsymex_163rev_transparent_result.nim`'s own
-##    `usesProbeR` shape) collected "successfully" through `concolicCollect`
+##    so a program whose IR carries a parse-time decline (e.g. the CR-2a
+##    catch-all's `cast[int32](x)` operand; before RFC-0005 S8 also
+##    `feTransparentResultUsed`, now an annotation violation) collected "successfully" through `concolicCollect`
 ##    with no indication that part of the program was never modelled at all.
 ##    `runSymexImpl` already unions `prog.parseErrors` into `r.errors` on
 ##    every verdict branch (`smt/runtime.nim:13571`/`13581`/`13593`); this
@@ -170,10 +170,11 @@ suite "#163 review R26 -- ConcolicCollectResult.obligations surfaces the obligat
 # Channel 2 -- parse errors
 # =============================================================================
 #
-# Verbatim shape of `tsymex_163rev_transparent_result.nim`'s R10 SUT: a
-# `{.symexTransparent.}` callee whose result IS used, which that suite proved
-# emits a parse-time `feTransparentResultUsed` decline (alongside the generic
-# `feOpaqueCallUnmodelled`) on the `wmExplore` (`symexFind`) path. Parse
+# `usesProbeRD` is the verbatim shape of `tsymex_163rev_transparent_result.nim`'s
+# R10 SUT: a `{.symexTransparent.}` callee whose result IS used. Before
+# RFC-0005 S8 that emitted a parse-time `feTransparentResultUsed` decline; it
+# is now an annotation violation (§13.3, i3), so `castDeclineRD` below
+# carries the genuine parse decline this channel is pinned on. Parse
 # errors are attached to `SymexProgram.parseErrors` at PARSE time -- the same
 # `parseEntryImplWarned` call both `symexFind` and `concolicCollect` route
 # through (`nelli/symex.nim`) -- independent of which walker mode later
@@ -189,6 +190,16 @@ proc usesProbeRD(x: int) =
   if x + p == 0x5A4D:
     symexTarget("hit_rd")
 
+# RFC-0005 S8 (§13.3, i3): `usesProbeRD`'s false `{.symexTransparent.}` claim
+# is no longer a parse-time decline -- it rides `annotationViolations` -- so
+# the parse-error channel needs a SUT carrying a GENUINE parse decline: the
+# CR-2a catch-all's `cast[int32](x)` operand (`tsymex_CR2a_expr_catchall.nim`
+# SUT 3), a site-anchored `feUnsupportedExprKind`.
+proc castDeclineRD(x: int) =
+  let y = cast[int32](x) + 1
+  if y == 1:
+    symexTarget("hit_cast_rd")
+
 suite "#163 review -- ConcolicCollectResult.parseErrors surfaces prog.parseErrors":
 
   test "oracle: usesProbeRD really gates on x + 11 == Magic":
@@ -199,13 +210,15 @@ suite "#163 review -- ConcolicCollectResult.parseErrors surfaces prog.parseError
   test "a concolic collect over a SUT carrying a parse-time decline reports it in parseErrors":
     let trace = @[integerChoice(7, 0, 100, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
-    let r = concolicCollect(usesProbeRD, trace, bindings)
+    let r = concolicCollect(castDeclineRD, trace, bindings)
     var specific = false
     for e in r.parseErrors:
-      checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feTransparentResultUsed and "probeRD" in e.msg:
+      checkpoint($e.kind & ": " & e.msg & " @ " & $e.scope)
+      if e.kind == feUnsupportedExprKind and "cast" in e.msg:
         specific = true
+        check e.scope.kind == dskSiteAnchored   # RFC-0005 S8
     check specific
+    check r.annotationViolations.len == 0
     # The live-count companion: `counters.parseDeclines` counts the SAME
     # `sevError` entries `capForcedUnknown` (`runSymexImpl`) already treats
     # as a blanket "this program was not fully modelled" switch -- NOT
@@ -216,6 +229,18 @@ suite "#163 review -- ConcolicCollectResult.parseErrors surfaces prog.parseError
       if e.severity == sevError: inc wantDeclines
     check r.counters.parseDeclines == wantDeclines
     check r.counters.parseDeclines >= 1
+
+  test "RFC-0005 S8: a false transparent claim reaches the concolic collect as an annotation violation, not a decline":
+    let trace = @[integerChoice(7, 0, 100, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    let r = concolicCollect(usesProbeRD, trace, bindings)
+    for e in r.parseErrors:
+      checkpoint($e.kind & ": " & e.msg)
+    check r.annotationViolations.len == 1
+    check r.annotationViolations[0].kind == avResultUsed
+    check r.annotationViolations[0].callee == "probeRD"
+    check r.parseErrors.len == 0
+    check r.counters.parseDeclines == 0
 
   test "a clean SUT reports an empty parseErrors -- the field is not trivially always-on":
     let trace = @[integerChoice(7, 0, 10, 0)]
@@ -261,7 +286,7 @@ suite "#163 review round 10 -- obligationsLive/parseDeclines travel the concolic
   test "concolicFlip surfaces parseDeclines on ConcolicFlipResult.collectCounters":
     let trace = @[integerChoice(7, 0, 100, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
-    let r = concolicFlip(usesProbeRD, trace, bindings, 0)
+    let r = concolicFlip(castDeclineRD, trace, bindings, 0)
     check r.collectCounters.parseDeclines >= 1
 
   test "a clean SUT's concolicFlip reports both new counters at zero":
@@ -288,7 +313,7 @@ suite "#163 review round 10 -- obligationsLive/parseDeclines travel the concolic
   test "foldFlipResult carries parseDeclines into CampaignStats.concolicYield's own accumulator type":
     let trace = @[integerChoice(7, 0, 100, 0)]
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
-    let r = concolicFlip(usesProbeRD, trace, bindings, 0)
+    let r = concolicFlip(castDeclineRD, trace, bindings, 0)
     var y: ConcolicYield
     check y.collect.parseDeclines == 0   ## zero value before any fold
     foldFlipResult(y, r)

@@ -1600,6 +1600,7 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
     result.errors       = raw.errors & c.errors
     result.pathTaint    = c.pathTaint
     result.candidates   = raw.candidates
+    result.annotationViolations = raw.annotationViolations   # RFC-0005 S8
 
 proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
                           prog, target, settings: NimNode;
@@ -1799,6 +1800,7 @@ macro symexFind*(fn: typed,
   let procsExpr  = parsed.procsNimNode
   let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
   let peExpr     = parsed.parseErrorsNimNode       ## Phase 15 G1c
+  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
   # RFC-0005 S10: the walker run AND the rule-3 replay settle of its
   # candidates, in one emitted expression (`emitRunSymexReplayed`) -- the
@@ -1814,7 +1816,8 @@ macro symexFind*(fn: typed,
                               body: `bodyExpr`,
                               procs: `procsExpr`,
                               userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`)
+                              parseErrors: `peExpr`,
+                              annotationViolations: `avExpr`)
       let raw = `runReplayed`
       ## ADR-0012 D2: type each RawDiagnostic into DefectFinding[T] by
       ## rebinding diagWitId per entry and running the same witnessTup reader.
@@ -1839,6 +1842,7 @@ macro symexFind*(fn: typed,
                                callStats: raw.callStats,
                                heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
+                               annotationViolations: raw.annotationViolations,
                                fromCache: false,
                                diagnostics: diagResult)
       of sxUnsat:
@@ -1847,6 +1851,7 @@ macro symexFind*(fn: typed,
                                obligations: raw.obligations,
                                callStats: raw.callStats,
                                errors: raw.errors,
+                               annotationViolations: raw.annotationViolations,
                                fromCache: false,
                                diagnostics: diagResult)
       of sxUnknown:
@@ -1855,6 +1860,7 @@ macro symexFind*(fn: typed,
                                obligations: raw.obligations,
                                callStats: raw.callStats,
                                errors: raw.errors,
+                               annotationViolations: raw.annotationViolations,
                                fromCache: false,
                                diagnostics: diagResult)
       of sxRaised:
@@ -1872,6 +1878,7 @@ macro symexFind*(fn: typed,
                                callStats: raw.callStats,
                                heapSnapshot: readHeapSnapshot(`witId`),
                                errors: raw.errors,
+                               annotationViolations: raw.annotationViolations,
                                fromCache: false,
                                diagnostics: diagResult)
 
@@ -1898,11 +1905,13 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   let procsExpr  = parsed.procsNimNode
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
+  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
                               procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`)
+                              parseErrors: `peExpr`,
+                              annotationViolations: `avExpr`)
       runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
 
 # ---- concolicFlip (RFC-fuzzer-nextgen G2) -----------------------------------
@@ -1928,11 +1937,13 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   let procsExpr  = parsed.procsNimNode
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
+  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
                               procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
-                              parseErrors: `peExpr`)
+                              parseErrors: `peExpr`,
+                              annotationViolations: `avExpr`)
       runConcolicFlipImpl(prog, `trace`, `bindings`, `targetBranchIndex`,
                          `settings`, `maxDraws`, `maxRelaxationAttempts`,
                          `z3TimeoutMs`)
@@ -2485,6 +2496,7 @@ macro symexFindAllWitnesses*(fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
   let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
+  let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
   # Compile-time list of target constructors. We materialise them
   # at runtime as a `seq[SymexTarget]` so the runtime loop is a
@@ -2640,7 +2652,8 @@ macro symexFindAllWitnesses*(fn: typed,
       let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`,
-                              parseErrors: `peExpr`)
+                              parseErrors: `peExpr`,
+                              annotationViolations: `avExpr`)
       `targetsBuild`
       var `findingsId`: seq[SymexFinding] = @[]
       var `dbErrorsId` {.used.}: seq[string] = @[]

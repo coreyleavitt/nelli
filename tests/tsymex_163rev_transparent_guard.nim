@@ -103,20 +103,34 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
       checkpoint($e.kind & ": " & e.msg)
     check r.status != sxUnsat
 
-  test "the var-argument overclaim degrades classified, naming the callee":
+  test "the var-argument overclaim is reported as an annotation violation, naming the callee":
     let r = symexFind(withMutateT, tLabel("t_bug"))
     var specific = false
     var generic = false
     var internalFault = false
+    var retiredKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feTransparentArgNotInert and "mutateT" in e.msg:
-        specific = true
+      if e.kind in {feTransparentArgNotInert, feTransparentResultUsed}:
+        retiredKind = true
       if e.kind == feOpaqueCallUnmodelled and "mutateT" in e.msg:
         generic = true
       if e.kind == weInternalWalkerFault:
         internalFault = true
-    check r.status == sxUnknown
+    # RFC-0005 S8 (§13.3, i3): the overclaim is an annotation violation on
+    # its own channel, not a decline in `r.errors`.
+    for av in r.annotationViolations:
+      checkpoint($av.kind & " " & av.callee & " @ " & av.site & ": " & av.msg)
+      if av.pragma == saSymexTransparent and av.kind == avArgNotInert and
+         av.callee == "mutateT":
+        specific = true
+    check r.annotationViolations.len == 1
+    check not retiredKind
+    # No longer vetoed by a parse-time `sevError`: the opaque fallback's
+    # taint makes the hit a candidate, which S10's replay may confirm
+    # against the real fn (the target is reachable for essentially every
+    # input). Never `sxUnsat`.
+    check r.status in {sxUnknown, sxSat}
     check specific
     check generic
     check not internalFault
@@ -141,20 +155,34 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
       checkpoint($e.kind & ": " & e.msg)
     check r.status != sxUnsat
 
-  test "the ref-argument overclaim degrades classified, naming the callee":
+  test "the ref-argument overclaim is reported as an annotation violation, naming the callee":
     let r = symexFind(withTouchT, tLabel("t_touched"))
     var specific = false
     var generic = false
     var internalFault = false
+    var retiredKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feTransparentArgNotInert and "touchT" in e.msg:
-        specific = true
+      if e.kind in {feTransparentArgNotInert, feTransparentResultUsed}:
+        retiredKind = true
       if e.kind == feOpaqueCallUnmodelled and "touchT" in e.msg:
         generic = true
       if e.kind == weInternalWalkerFault:
         internalFault = true
-    check r.status == sxUnknown
+    # RFC-0005 S8 (§13.3, i3): the overclaim is an annotation violation on
+    # its own channel, not a decline in `r.errors`.
+    for av in r.annotationViolations:
+      checkpoint($av.kind & " " & av.callee & " @ " & av.site & ": " & av.msg)
+      if av.pragma == saSymexTransparent and av.kind == avArgNotInert and
+         av.callee == "touchT":
+        specific = true
+    check r.annotationViolations.len == 1
+    check not retiredKind
+    # No longer vetoed by a parse-time `sevError`: the opaque fallback's
+    # taint makes the hit a candidate, which S10's replay may confirm
+    # against the real fn (the target is reachable for essentially every
+    # input). Never `sxUnsat`.
+    check r.status in {sxUnknown, sxSat}
     check specific
     check generic
     check not internalFault
@@ -178,6 +206,7 @@ suite "#163 review R7 -- a transparent call is only deleted when it is provably 
       if e.kind == feOpaqueCallUnmodelled: opaqueUnmodelled = true
       if e.kind == feTransparentArgNotInert: specificDegrade = true
       if e.kind == weInternalWalkerFault: internalFault = true
+    specificDegrade = specificDegrade or r.annotationViolations.len > 0
     check r.status == sxRaised
     check not opaqueUnmodelled
     check not specificDegrade

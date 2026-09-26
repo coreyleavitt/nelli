@@ -815,5 +815,10 @@ task test, "Run the test suite":
             # of symexFind and symexFindAllWitnesses/symexForAll; candidacy
             # unspellable as sat; parseInt's lax raise replay-gated; replay
             # precedes persist; walker 146->147.
-            "tsymex_rfc0005_s10_replay_verdict"]:
+            "tsymex_rfc0005_s10_replay_verdict",
+            # RFC-0005 S8: DeclineScope on every decline (site-anchored /
+            # signature / callee-key / walk-site), the structural totality
+            # pin + bucket-4 list, the i3 annotation-violation channel;
+            # walker 147->148.
+            "tsymex_rfc0005_s8_scope"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -812,7 +812,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S10 (§2.3 rule 3: candidates replayed against the real fn by
     ## both entry macros; `parseInt`'s raise split into a clean exact half
     ## and an `seParseIntLaxSyntax`-tainted lax half). 146->147.
-    check symexWalkerVersion == "147"
+    ## RFC-0005 S8 (`DeclineScope` on every decline; the i3 annotation
+    ## channel retires `feTransparent*` from the veto; `isUnsafeCast` records
+    ## its reach; concept violations never register). 147->148.
+    check symexWalkerVersion == "148"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

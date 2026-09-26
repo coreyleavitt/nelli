@@ -237,7 +237,7 @@ suite "RFC-0005 S1c (e) -- the candidate pool (w.candidates, RawResult.candidate
 
   test "a tainted label hit is solved INTO the candidate pool, not dropped, and the run stays sxUnknown":
     let prog = SymexProgram(params: xParam,
-      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe"),
+      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe", 0),
                       mkTargetLabel("hit")]))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     check raw.status == sxUnknown
@@ -251,7 +251,7 @@ suite "RFC-0005 S1c (e) -- the candidate pool (w.candidates, RawResult.candidate
     let prog = SymexProgram(params: xParam,
       body: mkBlock(@[mkIf(@[
         mkBranch(mkBinop(bLt, xVar, mkIntLit(0)),
-                 mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe"),
+                 mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe", 0),
                            mkTargetLabel("hit")])),
         mkBranch(mkBinop(bEq, xVar, mkIntLit(42)), mkTargetLabel("hit"))])]))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
@@ -262,7 +262,7 @@ suite "RFC-0005 S1c (e) -- the candidate pool (w.candidates, RawResult.candidate
 
   test "a tainted SUT-boundary raise is solved into the candidate pool as an sxRaised":
     let prog = SymexProgram(params: xParam,
-      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe"),
+      body: mkBlock(@[mkUnsupported(feUnsupportedStmtKind, "s1c probe", 0),
                       mkRaise("ValueError", mkStrLit("s1c"))]))
     let raw = runSymex(prog, SymexTarget(kind: stkRaisedExn, typeFilter: ""))
     check raw.status == sxUnknown

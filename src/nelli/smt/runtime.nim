@@ -628,6 +628,10 @@ type
       ## available at verdict time. RFC-0005 S1c routes on it
       ## (`admitSolvedHit`): a winner's is free of `scSpurious`; a candidate's
       ## carries it.
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0005 S8 (§13.3, i3). `prog.annotationViolations`, copied onto
+      ## every verdict branch by `runSymex`. Verdict-neutral (see
+      ## `AnnotationViolation`).
     candidates*:   seq[SatCandidate]
       ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Every SOLVED finding
       ## whose path carries `scSpurious` (`sxSat` at a label hit, `sxRaised`
@@ -1233,7 +1237,9 @@ proc lowerDegrade(kind: SymexErrorKind; msg: string) =
   ## token is delivered through the drain rather than returned, because the
   ## caller has no path to fork.
   loweringDegradeErrors.add SymexErrorInfo(kind: kind, severity: sevError,
-                                            msg: msg)
+                                            msg: msg, scope: walkSite())
+    # RFC-0005 S8: a lowering decline is recorded by the walk that reached
+    # it -- its reach is the record itself (`dskWalkSite`).
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
 
 var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
@@ -6245,7 +6251,8 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
         w.float64Vals[path] = opt.get
       else:
         let exErr64 = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
-          msg: "float64 witness at '" & path & "' did not resolve to a concrete numeral")
+          msg: "float64 witness at '" & path & "' did not resolve to a concrete numeral",
+          scope: walkSite())   # RFC-0005 S8: recorded at the hit that extracts
         extractionErrors.add exErr64     # threadvar: fallback
         syncExtractionError(exErr64)     # CR-9 Stage 5: LIVE WalkCtx field
         w.float64Vals[path] = 0.0
@@ -6258,7 +6265,8 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
         w.float32Vals[path] = opt.get
       else:
         let exErr32 = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
-          msg: "float32 witness at '" & path & "' did not resolve to a concrete numeral")
+          msg: "float32 witness at '" & path & "' did not resolve to a concrete numeral",
+          scope: walkSite())   # RFC-0005 S8: recorded at the hit that extracts
         extractionErrors.add exErr32     # threadvar: fallback
         syncExtractionError(exErr32)     # CR-9 Stage 5: LIVE WalkCtx field
         w.float32Vals[path] = 0.0'f32
@@ -6846,7 +6854,8 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     # gracefully (classified note); the captured-ref pointees are recovered.
     let cloErr = SymexErrorInfo(kind: ceNotImplemented, severity: sevError,
       msg: "closure as a top-level SUT result is not supported (no witness " &
-           "rendering for a proc value)")
+           "rendering for a proc value)",
+      scope: walkSite())   # RFC-0005 S8: recorded at the hit that extracts
     extractionErrors.add cloErr          # threadvar: fallback
     syncExtractionError(cloErr)          # CR-9 Stage 5: LIVE WalkCtx field
     if sv.closureEnv != nil and sv.closureEnv.kind == svTuple:
@@ -8128,7 +8137,7 @@ type
     pcDelta: seq[Z3Bool]
 
 proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
-             sink = dsWalk): Degrade =
+             sink = dsWalk; scope = walkSite()): Degrade =
   ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). THE way a
   ## walk-level degrade site (one with `w: var WalkCtx` in scope) records a
   ## classified degrade and obtains its `Degrade` token:
@@ -8154,8 +8163,15 @@ proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
   ## RFC-0005 S6b: `dsUnknownExn` is the one sink that records at
   ## `sevWarning` (the `eeUnknownExnType` severity consumers already see);
   ## its run coordinate still counts through `taintsRun`'s carve-out.
+  ##
+  ## RFC-0005 S8: `scope` defaults to `dskWalkSite` (the record exists
+  ## because a path reached this site). The two walk arms that reach a
+  ## PARSE-time anchor pass it instead -- `isUnsupported`/`isUnsafeCast`
+  ## (`siteAnchored(marker)`) and the missing-callee arm (`calleeKeyed`) --
+  ## so the parse record and its reach record join on the same anchor.
   let severity = if sink == dsUnknownExn: sevWarning else: sevError
-  let info = SymexErrorInfo(kind: kind, severity: severity, msg: msg)
+  let info = SymexErrorInfo(kind: kind, severity: severity, msg: msg,
+                            scope: scope)
   case sink
   of dsWalk:
     w.walkDegradeErrors.add info
@@ -8199,7 +8215,8 @@ proc closureDegrade(kind: SymexErrorKind; msg: string) =
   ##      lowered value.
   ## A closure-sink decline outside `lower` would use `w.degrade(…,
   ## dsClosure)`; none exists (pinned by the S7 test).
-  let info = SymexErrorInfo(kind: kind, severity: sevError, msg: msg)
+  let info = SymexErrorInfo(kind: kind, severity: sevError, msg: msg,
+                            scope: walkSite())   # RFC-0005 S8
   currentClosureCallErrors.add info   # threadvar: fallback
   syncClosureCallError(info)          # LIVE WalkCtx field (no-op outside a walk)
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
@@ -11429,7 +11446,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "call to unregistered callee `" & stmt.callee & "` reached at " &
                  "walk time — declined at parse time (" & $declineKind &
                  "); the call returns a fresh unconstrained value and the " &
-                 "callee's effects are not modelled")
+                 "callee's effects are not modelled",
+            scope = calleeKeyed(stmt.callee))   # RFC-0005 S8 (§2.5 point 3)
         else:
           w.degrade(weInternalWalkerFault,
             "call to callee `" & stmt.callee & "` reached at walk time with " &
@@ -12106,7 +12124,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # node's kind is its parse-time error's kind, recorded again HERE where a
     # path actually reaches the decline (the reach-anchored record §2.5
     # point 1 builds on); a Class-B node's is `feUnsupportedStmtKind`.
-    let d = w.degrade(stmt.unKind, stmt.reason)
+    # RFC-0005 S8: the reach record carries the node's parse-minted anchor.
+    let d = w.degrade(stmt.unKind, stmt.reason,
+                      scope = siteAnchored(stmt.unMarker))
     var out2: seq[Path]
     for p in paths:
       out2.add forkPathTainted(p, p.pc, p.env, d)
@@ -12128,8 +12148,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # RFC-0005 S1: the former `w.sawUnknown = true` here is gone — the run
     # coordinate is DERIVED at drain, and that parse-time sevError
     # `heUnsafeCast` (emitted by `dsl_parser.nim` at the one site that builds
-    # this node) is exactly what derives it; no second record is written
-    # (it would duplicate the parse-time entry in `RawResult.errors`).
+    # this node) is exactly what derives it.
+    # RFC-0005 S8 (§2.5 point 1): the halt now ALSO records its reach, under
+    # the parse record's own anchor (`siteAnchored(stmt.ucMarker)`), exactly
+    # as the `isUnsupported` arm above does. Before S8 the only record was
+    # the parse-time one, which says the cast EXISTS, not that a path reached
+    # it -- the blanket veto made that distinction moot; S9 deletes the veto
+    # and needs it. The token is discarded: a halted path needs no carrier.
+    discard w.degrade(heUnsafeCast,
+      "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
+      "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
     @[]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
@@ -13583,7 +13611,20 @@ when defined(windows) and not defined(symexNoBigStack):
       raise ctx.exn
     ctx.res
 
-proc runSymex*(prog: SymexProgram,
+var paramBoundaryAbort {.threadvar.}: bool
+  ## RFC-0005 S8 (§2.5 point 2). Set by `raiseParamAllocIssue` immediately
+  ## before it raises, so the `runSymex` boundary can tell a SIGNATURE-scoped
+  ## abort (a top-level parameter type that cannot be allocated, before any
+  ## walk state exists) from one raised mid-walk. Reset per run by
+  ## `runSymexCaught`.
+
+proc abortScope(): DeclineScope =
+  ## RFC-0005 S8. The scope of a `runSymex` boundary-abort record: the
+  ## param-entry boundary's is `dskSignature`; any other abort was raised by
+  ## the walk at the site it was walking (`dskWalkSite`).
+  if paramBoundaryAbort: signatureScope() else: walkSite()
+
+proc runSymexCaught(prog: SymexProgram,
                target: SymexTarget,
                settings: SymexSettings = defaultSymexSettings()): RawResult =
   ## Phase 14 cycle C4. Wrap the implementation in a `try/except` that
@@ -13592,6 +13633,7 @@ proc runSymex*(prog: SymexProgram,
   ## the error structured into `errors`. Walker-level
   ## `ValueError` and `AssertionDefect` are NOT caught — those
   ## are real bugs in the symex layer and must surface.
+  paramBoundaryAbort = false   # RFC-0005 S8: see `abortScope`
   try:
     # v64 (catalog #11): on Windows the solve runs on a 16 MB fiber stack —
     # the fiber trampoline re-raises any escaped exception HERE on the main
@@ -13608,7 +13650,8 @@ proc runSymex*(prog: SymexProgram,
     # dcNoAnswer), split off `feUnsupportedOp`'s in-walk substitutions.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: feUnsupportedOpAborted,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexUnsupportedStringOpError as e:
     # Phase 15 Cluster S (S1): an unmodeled string op (in S1, every iekStr*) ->
     # sxUnknown + seUnsupportedStringOp (Invariant 3 — classified, never silent
@@ -13616,7 +13659,8 @@ proc runSymex*(prog: SymexProgram,
     # gains a real lowering.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedStringOp,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexUnsupportedRegexError as e:
     # Phase 15 S6b: a `re"…"` pattern S6a rejects (backreference / lookahead /
     # named group / malformed) or a regex `find` (no Z3 indexOf/regex API) ->
@@ -13624,46 +13668,53 @@ proc runSymex*(prog: SymexProgram,
     # UNSAT). The S6a reason rides in `msg`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedRegex,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexZ3VersionMissingError as e:
     # Phase 15 S5: a string op whose Z3 FFI symbol is absent on this build
     # (e.g. replaceAll on Z3 < 4.15.5) -> sxUnknown + seZ3VersionMissing
     # (Invariant 3 — classified, never a crash, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seZ3VersionMissing,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexZ3StringIncompleteError as e:
     # Phase 15 S5: a string-theory decomposition the walker cannot soundly
     # bound (the general symbolic-split path) -> sxUnknown + seZ3StringIncomplete
     # (Invariant 3 — structured, never a hang).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seZ3StringIncomplete,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexBytesSymbolicLengthError as e:
     # Phase 15 S7a: `bytes(s)` over a symbolic-length receiver -> sxUnknown +
     # seBytesSymbolicLength (Invariant 3 — classified, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seBytesSymbolicLength,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexBytesLengthTooLargeError as e:
     # Phase 15 S7a: `bytes(s)` concrete length > maxBytesEncodingLen -> sxUnknown
     # + seBytesLengthTooLarge (Invariant 3 — classified, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seBytesLengthTooLarge,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexRaiseUnimplementedError as e:
     # Phase 15 E1: the walker reached an `isRaise` while raise-flow is not yet
     # modeled (structural cycle) -> sxUnknown + eeRaiseUnimplemented (Invariant 3
     # — classified, never a silent UNSAT). E2b+ replaces this with real semantics.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeRaiseUnimplemented,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexTryUnimplementedError as e:
     # Phase 15 E1: the walker reached an `isTry` while try/except is not yet
     # modeled -> sxUnknown + eeTryUnimplemented (Invariant 3). E3+ replaces it.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeTryUnimplemented,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexClosureUnimplementedError as e:
     # Phase 15 C1: the walker reached an `iekLambda`/`iekClosureCall` while
     # closure semantics are not yet modeled (structural cycle) -> sxUnknown +
@@ -13671,14 +13722,16 @@ proc runSymex*(prog: SymexProgram,
     # (construction) / C2b (application) replace this with real semantics.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: ceNotImplemented,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexRaiseOutsideHandlerError as e:
     # Phase 15 E2b: a bare `raise` (re-raise) reached with an empty handler stack
     # and no in-flight exception -> sxUnknown + eeRaiseOutsideHandler (Invariant 3
     # — classified, never a silent UNSAT). Handler-stack re-raise lands E3.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeRaiseOutsideHandler,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexNotInHandlerError as e:
     # Phase 15 E8: `getCurrentException()` / `getCurrentExceptionMsg()` called
     # outside any `except` handler body (no in-flight exception) -> sxUnknown +
@@ -13686,7 +13739,8 @@ proc runSymex*(prog: SymexProgram,
     # name rides in `msg`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: eeNotInHandler,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexRefUnresolvedError as e:
     # Phase 15 R1a (ADR-0010): the walker reached an `itRef`/`itPtr`/`isDeref`/
     # `isNew` while the logical-heap semantics are not yet modeled (structural
@@ -13695,7 +13749,8 @@ proc runSymex*(prog: SymexProgram,
     # semantics. The diagnostic rides in `msg`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: heUnresolvedRef,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexRefVariantUnsupportedError as e:
     # Phase 15 R6 (ADR-0010, Feas-MED-4 / M17): a field access through a ref/ptr
     # to a VARIANT object -> sxUnknown + heRefVariantUnsupported (Invariant 3 —
@@ -13703,35 +13758,40 @@ proc runSymex*(prog: SymexProgram,
     # field-split heap has no flat positional layout to split a variant on.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: heRefVariantUnsupported,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexOwnershipUnsupportedError as e:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` / `WeakRef[T]` /
     # `Atomic[T]` formal was allocated -> sxUnknown + heUnsupportedOwnership
     # (Invariant 3 — classified, out of scope for the cluster).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: heUnsupportedOwnership,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexNestedSeqUnsupportedError as e:
     # Phase 16 INV: `seq[seq[T]]` / complex-element seq — nested-seq encoding
     # not modeled -> sxUnknown + seNestedSeqUnsupported (Invariant 3 — classified,
     # never a crash, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seNestedSeqUnsupported,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexUnsupportedTableValTypeError as e:
     # Phase 16 INV: Table value type not modeled (only Table[string, int] supported)
     # -> sxUnknown + seUnsupportedTableValType (Invariant 3 — classified,
     # never a crash, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedTableValType,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexUnsupportedSetCharInteropError as e:
     # Phase 16 INV: set[char] / HashSet element type not modeled (only HashSet[int]
     # BV[64] is supported) -> sxUnknown + seUnsupportedSetCharInterop (Invariant 3
     # — classified, never a crash, never a silent UNSAT).
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: seUnsupportedSetCharInterop,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except SymexClassifiedDegradeError as e:
     # Phase 16 CR-1c (ADR-0020): the single generic classified-degrade carrier's
     # `kind` rides through verbatim -> sxUnknown (Invariant 3). This arm handles
@@ -13741,7 +13801,8 @@ proc runSymex*(prog: SymexProgram,
     # CatchableError` catch-all below and classified `weInternalWalkerFault`.
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: e.kind,
-                                       severity: sevError, msg: e.msg)])
+                                       severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except Z3Error as e:
     # Phase 15 Z3: map the Z3Error subclass name to the closed SymexErrorKind.
     # A caught Z3Error -> sxUnknown, so severity is sevError (invariant 7).
@@ -13751,7 +13812,8 @@ proc runSymex*(prog: SymexProgram,
              of "Z3SolverError":   ekZ3SolverError
              else:                 ekZ3Error
     RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: ek, severity: sevError, msg: e.msg)])
+              errors: @[SymexErrorInfo(kind: ek, severity: sevError, msg: e.msg,
+                                       scope: abortScope())])
   except CatchableError as e:
     # Phase 16 CR-1c (RFC-chapulin-hardening, Cluster 2 — Crash-totality,
     # ADR-0020): the genuine last-resort SAFETY NET for the §0 "walker never
@@ -13787,7 +13849,8 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: weInternalWalkerFault,
                                        severity: sevError,
-                                       msg: $e.name & ": " & e.msg)])
+                                       msg: $e.name & ": " & e.msg,
+                                       scope: abortScope())])
   except Defect as e:
     # Round-3 crash-doctrine decision (Corey, 2026-08-06 — supersedes the
     # CR-1c "Defects keep crashing loudly" carve-out for CONSUMER-facing
@@ -13808,7 +13871,19 @@ proc runSymex*(prog: SymexProgram,
     RawResult(status: sxUnknown,
               errors: @[SymexErrorInfo(kind: weInternalWalkerFault,
                                        severity: sevError,
-                                       msg: $e.name & ": " & e.msg)])
+                                       msg: $e.name & ": " & e.msg,
+                                       scope: abortScope())])
+
+
+proc runSymex*(prog: SymexProgram,
+               target: SymexTarget,
+               settings: SymexSettings = defaultSymexSettings()): RawResult =
+  ## Phase 14 cycle C4 boundary (`runSymexCaught`), plus RFC-0005 S8
+  ## (§13.3, i3): the program's annotation violations ride out on EVERY
+  ## verdict branch, including a boundary abort. Verdict-neutral: nothing
+  ## reads them to decide `status`.
+  result = runSymexCaught(prog, target, settings)
+  result.annotationViolations = prog.annotationViolations
 
 proc raiseParamAllocIssue(issue: FieldAllocIssue) =
   ## N40 (round-6 fix round 6, walker v104). The pre-walk PARAMETER-entry
@@ -13839,6 +13914,7 @@ proc raiseParamAllocIssue(issue: FieldAllocIssue) =
   ## `seUnsupportedTableKeyType`) reuses the generic `SymexClassifiedDegradeError`
   ## carrier (CR-1c's "no 20th near-identical dedicated exception type"
   ## discipline), which carries `kind` explicitly.
+  paramBoundaryAbort = true   # RFC-0005 S8: the abort is signature-scoped
   case issue.kind
   of heUnsupportedOwnership:
     raise (ref SymexOwnershipUnsupportedError)(msg: issue.msg)  # [raise-audited: param-boundary -- allocateSym is total; the param boundary raises by design, before any walk state exists (N40)]
@@ -14481,7 +14557,11 @@ proc runSymexImpl(prog: SymexProgram,
         kind: weInternalWalkerFault, severity: sevError,
         msg: "sxUnknown produced with no classified reason — an unclassified " &
              "degrade site set sawUnknown bare (walker classification gap; " &
-             "weInternalWalkerFault)")
+             "weInternalWalkerFault)",
+        # RFC-0005 S8 (§2.5 point 4): literally unplaced -- the backstop
+        # fires only when no site recorded anything, so there is no site to
+        # name. Bucket 4 by construction; the S8 pin enumerates it by name.
+        scope: DeclineScope(kind: dskUnplaced))
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
               candidates: toCandidates(w.candidates))
@@ -14665,14 +14745,20 @@ type
       ## real fuzzing flip via `runConcolicFlipImpl`. This seq stays for the
       ## drill-down (which obligation, what width/signedness) behind that
       ## live count; it was never meant to be, and is not, the only channel.
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0005 S8 (§13.3, i3). `prog.annotationViolations`, read directly
+      ## (same contract as `parseErrors` below). Before S8 a false
+      ## `{.symexTransparent.}` claim arrived here as a `parseErrors` entry
+      ## (`feTransparentResultUsed`/`feTransparentArgNotInert`) and so was
+      ## counted in `counters.parseDeclines`; it is not a decline, so it no
+      ## longer is.
     parseErrors*: seq[SymexErrorInfo]
       ## Issue #163 review R26's companion gap: `runConcolicCollectImpl`
       ## drains BOTH degrade sinks (`w.walkDegradeErrors` and the
       ## `loweringDegradeErrors` threadvar, see `counters.walkDegradeCount`'s
       ## own drain immediately below, W10/R9) into a count, but never once
       ## read `prog.parseErrors` — the seq of `SymexErrorInfo` a PARSE-TIME
-      ## decline (e.g. `feTransparentResultUsed`,
-      ## `feEnumOrdinalUnresolved`, `feGlobalReadUnmodelled`) is recorded
+      ## decline (e.g. `feEnumOrdinalUnresolved`, `feGlobalReadUnmodelled`) is recorded
       ## into, before the walk itself ever starts (`dsl_parser.nim`'s
       ## `ctx.parseErrors`, threaded onto `SymexProgram.parseErrors` by
       ## `parseEntryImplWarned`, the SAME macro-time step `symexFind` and
@@ -15187,6 +15273,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # once at parse time.
   result.obligations = obligationLog
   result.parseErrors = prog.parseErrors
+  result.annotationViolations = prog.annotationViolations   # RFC-0005 S8
 
 # ---- RFC-fuzzer-nextgen G2: branch-flip solve + materialization -----------
 #

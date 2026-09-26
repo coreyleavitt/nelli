@@ -1120,9 +1120,19 @@ type
                                  ## parse-time error; a Class-B site passes
                                  ## `feUnsupportedStmtKind`.
       reason*: string            ## human-readable diagnostic
+      unMarker*: int             ## RFC-0005 S8 (§2.5 point 1): the site's
+                                 ## marker id, minted by the parser
+                                 ## (`ParseCtx.nextMarker`, from 1) in the
+                                 ## SAME act that records a Class-A site's
+                                 ## `dskSiteAnchored(unMarker)` parse error.
+                                 ## The walker's arm records its reach under
+                                 ## the same anchor. Identity only: excluded
+                                 ## from `canonicalize` (like a local's name).
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
+      ucMarker*: int             ## RFC-0005 S8: as `unMarker` -- the anchor of
+                                 ## the paired parse-time `heUnsafeCast`.
 
   IRParam* = object
     name*: string
@@ -1660,7 +1670,16 @@ type
                           ## is in ordinary constant resolution, not a
                           ## walker-internal fault. sevError → sxUnknown.
                           ## Appended at enum tail (ordinal stability).
-    feTransparentArgNotInert ## Issue #163 review R7: a `{.symexTransparent.}`
+    feTransparentArgNotInert ## RETIRED RFC-0005 S8 (§13.3, i3 -- Corey
+                          ## 2026-09-26) -- retained for ordinal stability,
+                          ## NEVER EMITTED. Not a decline: nothing is
+                          ## approximated because of it (the opaque fallback's
+                          ## own `feOpaqueCallUnmodelled` taints every path
+                          ## through the call); it reports that the user's
+                          ## pragma claim is false. That report now rides the
+                          ## verdict-neutral `AnnotationViolation` channel
+                          ## (`avArgNotInert`). History follows.
+                          ## Issue #163 review R7: a `{.symexTransparent.}`
                           ## callee in STATEMENT position was deleted
                           ## UNCONDITIONALLY (`dsl_parser.nim`'s statement-arm
                           ## `hasSymexTransparentPragma` branch) -- never
@@ -1691,7 +1710,13 @@ type
                           ## `feTransparentResultUsed` (R10) was appended after
                           ## it, so this is no longer the last member -- append
                           ## new kinds after the CURRENT tail, not here.
-    feTransparentResultUsed ## Issue #163 review R10: the OTHER way a
+    feTransparentResultUsed ## RETIRED RFC-0005 S8 (§13.3, i3 -- Corey
+                          ## 2026-09-26) -- retained for ordinal stability,
+                          ## NEVER EMITTED; now the `AnnotationViolation`
+                          ## channel's `avResultUsed` (see
+                          ## `feTransparentArgNotInert`, above). History
+                          ## follows.
+                          ## Issue #163 review R10: the OTHER way a
                           ## `{.symexTransparent.}` callee can over-claim its
                           ## promise -- R7 (`feTransparentArgNotInert`, above)
                           ## covers the statement-position/non-inert-argument
@@ -2016,6 +2041,56 @@ type
     ipAlwaysAxiomatize  ## emit summary axiom; never walk body
     ipHybrid            ## walk up to seqInlineThreshold times, then axiomatize
 
+  DeclineScopeKind* = enum
+    ## RFC-0005 S8 (§2.5 "Where the scope lives"). WHERE a decline is
+    ## anchored, so the verdict can ask the one question the blanket vetoes
+    ## (`capForcedUnknown`/`closureForcedUnknown`) insure against instead of
+    ## answering: was this decline reached? The CHANNEL stays derived from
+    ## `kind` (`classOf`); the scope is different data -- no existing field
+    ## carries it.
+    dskUnplaced     ## §2.5 point 4 ("bucket 4") -- the engine cannot say where this
+                    ## decline sits, so it cannot say whether it was reached:
+                    ## a walker-completeness DEFECT, not a property of the
+                    ## SUT. The DEFAULT (ordinal 0) on purpose: a record built
+                    ## without a scope lands here, where the S8 totality pin
+                    ## (`tests/tsymex_rfc0005_s8_scope.nim`) counts it.
+    dskSiteAnchored ## §2.5 point 1: a parse-time decline at a program site.
+                    ## `markerId` names the `isUnsupported`/`isUnsafeCast` node
+                    ## the parser minted in the same act (`declineAtSite`,
+                    ## `dsl_parser.nim`); the walker records the SAME anchor
+                    ## when a path reaches that node, so reach is a join on
+                    ## `markerId`.
+    dskSignature    ## §2.5 point 2: the unmodellable thing IS the SUT's
+                    ## signature (a parameter type allocation declines before
+                    ## any walk state exists). Run-wide by construction.
+    dskCalleeKey    ## §2.5 point 3 (added in round 2): an unregistered-
+                    ## callee decline (`geInstantiationCapped`,
+                    ## `geDistinctBarrier`, `geConceptViolation`, unresolvable-
+                    ## `getImpl` `feUnsupportedOp`). `calleeKey` is the
+                    ## never-registered `mkCall` key (`unregisteredCalleeKey`);
+                    ## the walker's missing-callee arm records the SAME key
+                    ## when a path reaches the call.
+    dskWalkSite     ## RFC-0005 S8, not in the RFC's §2.5 sketch (which scoped
+                    ## only the PARSE-time records the veto reads): a record
+                    ## the WALKER made at the site it was walking -- a
+                    ## `degrade`/`lowerDegrade`/`closureDegrade`/`allocDegrade`
+                    ## funnel, the extraction sink, or a `runSymex` boundary
+                    ## abort raised mid-walk. Such a record exists only
+                    ## because a path reached its site, so its reach is the
+                    ## record itself; it needs no join.
+
+  DeclineScope* = object
+    ## RFC-0005 S8 (§2.5). The anchor of one `SymexErrorInfo`. Build with
+    ## `siteAnchored`/`calleeKeyed`/`signatureScope`/`walkSite`; the default
+    ## value is `dskUnplaced` (bucket 4).
+    case kind*: DeclineScopeKind
+    of dskSiteAnchored:
+      markerId*: int
+    of dskCalleeKey:
+      calleeKey*: string
+    of dskUnplaced, dskSignature, dskWalkSite:
+      discard
+
   SymexErrorInfo* = object
     ## Phase 14 cycle C4 / Phase 15 Z3. Structured symex-error record.
     ## `kind` is a closed `SymexErrorKind` (was a free-form string);
@@ -2023,6 +2098,47 @@ type
     kind*:     SymexErrorKind
     severity*: SymexErrorSeverity
     msg*:      string
+    scope*:    DeclineScope
+      ## RFC-0005 S8 (§2.5). Where this decline is anchored. Meaningful on
+      ## every entry `taintsRun` admits (the declines); a `sevHint`/plain
+      ## `sevWarning` diagnostic is not a decline and keeps the default. The
+      ## structural invariant, pinned by `tests/tsymex_rfc0005_s8_scope.nim`:
+      ## no admitted entry is `dskUnplaced` except a named, enumerated one.
+
+  SymexAnnotation* = enum
+    ## RFC-0005 S8 (§13.3, i3 -- Corey 2026-09-26). A user annotation symex
+    ## honours on the strength of the user's promise.
+    saSymexTransparent  ## `{.symexTransparent.}`: "this call is void and
+                        ## observably inert -- drop it"
+
+  AnnotationViolationKind* = enum
+    ## RFC-0005 S8 (§13.3). WHICH promise of the annotation the call site
+    ## contradicts.
+    avResultUsed    ## the call's RESULT is used (expression position), but
+                    ## the pragma is honoured only in statement position
+                    ## (was `feTransparentResultUsed`, issue #163 review R10)
+    avArgNotInert   ## statement position, but an argument is not provably
+                    ## inert -- a `var`/`ref`/`ptr`/possibly-ref-carrying
+                    ## argument the callee could write through (was
+                    ## `feTransparentArgNotInert`, issue #163 review R7)
+
+  AnnotationViolation* = object
+    ## RFC-0005 S8 (§13.3, i3 resolved by Corey 2026-09-26). A user's
+    ## annotation claim that the parser found to be FALSE at a call site.
+    ## NOT a decline: nothing is approximated because of it -- the call falls
+    ## back to opaque handling, whose walk-time `feOpaqueCallUnmodelled`
+    ## degrade taints every path through it (the soundness), so this record
+    ## is verdict-NEUTRAL by construction: no `classOf`, no `DeclineScope`,
+    ## no taint, never read by the verdict or by either blanket veto. It is
+    ## error-severity in spirit -- the user's code carries a wrong promise --
+    ## and rides its own channel (`SymexProgram.annotationViolations` ->
+    ## `RawResult`/`SymexResult.annotationViolations`) so it stays loud
+    ## without masquerading as a modelling gap. S11 renders it.
+    pragma*: SymexAnnotation         ## the annotation that was violated
+    kind*:   AnnotationViolationKind ## which of its promises broke
+    callee*: string                  ## the annotated callee's name
+    site*:   string                  ## `file:line:col` of the call site
+    msg*:    string                  ## the human-readable explanation
 
   # ---- RFC-0005 S1: soundness channels (§2.1) ------------------------------
   # Declared HERE, in `smt/types.nim` (which imports no z3), so the lattice is
@@ -2079,6 +2195,13 @@ type
                                      ## `runSymex` drains these into the
                                      ## `RawResult.errors` so a `sevError` here
                                      ## forces `sxUnknown` (Invariant 3).
+    annotationViolations*: seq[AnnotationViolation]
+                                     ## RFC-0005 S8 (§13.3, i3). Parse-time
+                                     ## findings that a user annotation's
+                                     ## promise is false at a call site.
+                                     ## Verdict-neutral: `runSymex` copies
+                                     ## them onto every `RawResult` and reads
+                                     ## them for nothing else.
 
   CallStat* = object
     name*:      string
@@ -2172,6 +2295,12 @@ type
       ## Phase 15 F6. Classified errors surfaced during the run. On an
       ## `sxUnknown` verdict caused by an unsupported op, `errors[0].kind`
       ## is `feUnsupportedOp` (Invariant 3 — never a silent UNSAT).
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0005 S8 (§13.3, i3). Every call site where a user annotation's
+      ## promise (today: `{.symexTransparent.}`) was found false. Loud and
+      ## verdict-NEUTRAL: it never changes `status`, and a call it names is
+      ## still tainted through its own `feOpaqueCallUnmodelled` entry in
+      ## `errors`. Empty when `fromCache`.
     fromCache*:    bool
       ## Phase 14 cycle C1. `true` iff this result was served from
       ## the verdict cache (`:unsat`/`:unk` suffix) or the witness
@@ -2809,8 +2938,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feEnumOrdinalUnresolved: dcSubstituted
     # S6b: the parser replaces the unresolved enum constant with the literal
     # `0` -- a forced value.
-  of feTransparentArgNotInert: dcNoAnswer
-  of feTransparentResultUsed: dcNoAnswer
+  of feTransparentArgNotInert, feTransparentResultUsed: dcNoAnswer
+    # RFC-0005 S8 (§13.3, i3): retired, never emitted -- the report rides
+    # the verdict-neutral `AnnotationViolation` channel. The row stays only
+    # because `classOf` is total over the (ordinal-stable) enum.
   of feGlobalReadUnmodelled: dcSubstituted
     # S6b: the read returns `__globalReadHavoc_<name>` -- ONE name per
     # global, so two reads correlate where a write between them makes them
@@ -2923,6 +3054,54 @@ func runTaintOf*(errors: openArray[SymexErrorInfo]): Taint =
   for e in errors:
     if taintsRun(e):
       result = result + runTaint(classOf(e.kind))
+
+func siteAnchored*(markerId: int): DeclineScope =
+  ## RFC-0005 S8. §2.5 point 1: anchored at the parser-minted marker node
+  ## `markerId` (`isUnsupported.unMarker` / `isUnsafeCast.ucMarker`).
+  DeclineScope(kind: dskSiteAnchored, markerId: markerId)
+
+func calleeKeyed*(calleeKey: string): DeclineScope =
+  ## RFC-0005 S8. §2.5 point 3: anchored at a never-registered `mkCall` key.
+  DeclineScope(kind: dskCalleeKey, calleeKey: calleeKey)
+
+func signatureScope*(): DeclineScope =
+  ## RFC-0005 S8. §2.5 point 2: the SUT's signature is the unmodellable thing.
+  DeclineScope(kind: dskSignature)
+
+func walkSite*(): DeclineScope =
+  ## RFC-0005 S8. Recorded by the walker at the site it reached.
+  DeclineScope(kind: dskWalkSite)
+
+func `==`*(a, b: DeclineScope): bool =
+  ## RFC-0005 S8. Structural equality (the system `==` does not iterate a
+  ## case object's branch fields).
+  if a.kind != b.kind: return false
+  case a.kind
+  of dskSiteAnchored: a.markerId == b.markerId
+  of dskCalleeKey: a.calleeKey == b.calleeKey
+  of dskUnplaced, dskSignature, dskWalkSite: true
+
+func `$`*(s: DeclineScope): string =
+  case s.kind
+  of dskSiteAnchored: "siteAnchored(" & $s.markerId & ")"
+  of dskCalleeKey: "calleeKey(" & s.calleeKey & ")"
+  of dskUnplaced: "unplaced"
+  of dskSignature: "signature"
+  of dskWalkSite: "walkSite"
+
+func `==`*(a, b: SymexErrorInfo): bool =
+  ## RFC-0005 S8: spelled out because `scope` is a case object.
+  a.kind == b.kind and a.severity == b.severity and a.msg == b.msg and
+    a.scope == b.scope
+
+func unplacedDeclines*(errors: openArray[SymexErrorInfo]): seq[SymexErrorInfo] =
+  ## RFC-0005 S8 (§2.5 point 4, §6.6). The bucket-4 members of `errors`: every
+  ## entry `taintsRun` admits (a decline) whose scope is `dskUnplaced`. The
+  ## invariant S9 deletes the blanket vetoes on is that this is empty for
+  ## every run; the S8 totality pin enumerates any exception by name.
+  for e in errors:
+    if taintsRun(e) and e.scope.kind == dskUnplaced:
+      result.add e
 
 proc checkUnsatOverTaintOnly*[T](r: SymexResult[T]) =
   ## RFC-0005 §4.3 (landed S4): the checked justification for a pin that
@@ -4107,14 +4286,18 @@ proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
          dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy)
 
-proc mkUnsupported*(kind: SymexErrorKind; reason: string): IRStmt =
+proc mkUnsupported*(kind: SymexErrorKind; reason: string;
+                    marker: int): IRStmt =
   ## RFC-0005 S1b. An `isUnsupported` node now carries the classified `kind`
   ## the walker records when a path reaches it (§2.2). Reuse the kind the
   ## site already classifies under -- a Class-A site passes its parse-time
   ## error's kind -- and `feUnsupportedStmtKind` for a statement-position
   ## Class-B decline. RFC-0005 §3.2's standing rule applies: the kind you
   ## pass asserts your site shares that kind's substitution class.
-  IRStmt(kind: isUnsupported, unKind: kind, reason: reason)
+  ## RFC-0005 S8: `marker` is the site's anchor (`unMarker`). The parser
+  ## never calls this directly -- `declineAtSite`/`declineMarker`
+  ## (`dsl_parser.nim`) mint the id; hand-built IR passes its own.
+  IRStmt(kind: isUnsupported, unKind: kind, reason: reason, unMarker: marker)
 
 # ---- RFC-0005 S1b: unregistered-callee keys (§2.5 point 3) ------------------
 # The parser declines three kinds of callee by NOT registering a `ProcSig`
@@ -4129,7 +4312,7 @@ proc mkUnsupported*(kind: SymexErrorKind; reason: string): IRStmt =
 # the walk site. The key is never registered, so it can never shadow a real
 # `ProcSig`.
 
-const unregisteredCalleePrefix = "__unregistered:"
+const unregisteredCalleePrefix* = "__unregistered:"
 
 proc unregisteredCalleeKey*(kind: SymexErrorKind; key: string): string =
   ## The `mkCall` callee key for a declined, never-registered callee.
@@ -4153,11 +4336,12 @@ proc unregisteredCalleeKind*(callee: string;
       return true
   false
 
-proc mkUnsafeCast*(reason: string): IRStmt =
+proc mkUnsafeCast*(reason: string; marker: int): IRStmt =
   ## Phase 15 R11 (ADR-0010, RFC §R11). Construct an `isUnsafeCast` node for an
   ## unsafe pointer-materialisation RHS (`cast[ptr T]`/`addr`/`unsafeAddr`); the
   ## walker raises a classified `heUnsafeCast` (sevError) for it.
-  IRStmt(kind: isUnsafeCast, ucReason: reason)
+  ## RFC-0005 S8: `marker` anchors the paired parse-time `heUnsafeCast`.
+  IRStmt(kind: isUnsafeCast, ucReason: reason, ucMarker: marker)
 
 # ---- Defaults ---------------------------------------------------------------
 

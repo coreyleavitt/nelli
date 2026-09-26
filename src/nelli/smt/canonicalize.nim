@@ -184,7 +184,22 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "147"
+const symexWalkerVersion* = "148"
+  ## RFC-0005 S8 (2026-09-26) — decline scope + the i3 annotation channel.
+  ## Every run-tainting `SymexErrorInfo` now carries a `DeclineScope`; the
+  ## parser records each Class-A decline together with its marker
+  ## (`declineAtSite`), the walker records the same anchor on reach
+  ## (`isUnsupported`, and newly `isUnsafeCast`, whose halt now records a
+  ## walk-sink `heUnsafeCast`), and `geConceptViolation` is decided before
+  ## registration so its callee is never registered (the walk now reaches it
+  ## through the missing-callee arm). Verdict change: a false
+  ## `{.symexTransparent.}` claim is no longer a `sevError` parse error
+  ## (`feTransparentResultUsed`/`feTransparentArgNotInert`, retired) but an
+  ## `AnnotationViolation`, so it no longer trips the cap veto -- a run
+  ## whose only parse record was one of those can leave `sxUnknown`. A
+  ## pre-S8 cached `:unk` for such a program is stale.
+  ##
+  ## Previous bump (147):
   ## RFC-0005 S10 (2026-09-25) — the SAT relaxation: §2.3 rule 3. A run whose
   ## only SAT lies on an `scSpurious` path no longer stays `sxUnknown`
   ## unconditionally: `runSymex` hands its solved candidates out as

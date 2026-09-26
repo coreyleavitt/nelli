@@ -27,8 +27,9 @@ owner = "corey"
 [[item]]
 id    = "i3"
 title = "feTransparentResultUsed/feTransparentArgNotInert: demote to sevWarning, or add a companion-anchored DeclineScope"
-state = "open"
+state = "resolved"
 owner = "corey"
+reason = "Corey 2026-09-26: neither -- they are not declines; moved to a separate verdict-neutral annotation-violation channel (AnnotationViolation on RawResult/SymexResult), enum members tombstoned; landed in S8 (§13.3)"
 
 [[slice]]
 id    = "S0"
@@ -88,7 +89,7 @@ state = "done"
 [[slice]]
 id    = "S8"
 title = "DeclineScope carrier + Class-A/B unification + totality pin (vetoes retained)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -741,11 +742,53 @@ The invariant that keeps this honest is structural and pinnable: **every
 `sevError` carries a `DeclineScope` other than `dskUnplaced`.** That is a
 totality pin of the same kind as `classOf`'s exhaustive `case` — bucket 4 is a
 measurable, shrinking defect class instead of an invisible policy knob. Two
-kinds are expected to need reclassification rather than anchoring:
+kinds were expected to need reclassification rather than anchoring:
 `feTransparentResultUsed` (`dsl_parser.nim:4324`) and `feTransparentArgNotInert`
 (`:8486`) are diagnostic *companions* to a walk-time mechanism that already
-taints via `feOpaqueCallUnmodelled`; they should become `sevWarning` or be
-explicitly companion-anchored (§13.3 asks which).
+taints via `feOpaqueCallUnmodelled`. **Resolved (§13.3, Corey 2026-09-26):
+neither `sevWarning` nor a companion scope — they are not declines at all.**
+They left `SymexErrorKind`'s live set (tombstoned, never emitted) for a
+separate, verdict-neutral annotation-violation channel, so the invariant is
+total without them and no scope kind exists for two members.
+
+**As landed (S8, walker 148).** Deviations from and additions to the sketch
+above, each forced by making the totality pin *real* rather than approximate:
+
+- **A fifth scope kind, `dskWalkSite`.** The sketch scoped only the parse-time
+  records the vetoes read. The run coordinate (`taintsRun`) also admits every
+  record the *walker* makes — `degrade`, `lowerDegrade`, `closureDegrade`,
+  `allocDegrade`, the extraction sink, and a `runSymex` boundary abort raised
+  mid-walk. Such a record exists only because a path reached its site, so its
+  reach is the record itself; it needs no join. Left unscoped it would have
+  been bucket 4 on every run. The two walk arms that reach a *parse* anchor
+  record that anchor instead (`isUnsupported`/`isUnsafeCast` →
+  `dskSiteAnchored(marker)`, the missing-callee arm → `dskCalleeKey(key)`), so
+  a reached parse decline carries two records under one anchor and an
+  unreached one carries only the parse record — the join S9 reads.
+- **Signature scope is the param-entry boundary.** A carrier raised by
+  `raiseParamAllocIssue` (before any walk state exists) is recorded
+  `dskSignature` at the `runSymex` boundary; every other boundary abort is
+  `dskWalkSite`.
+- **One funnel per record.** `ctx.parseErrors` is written only by
+  `declineAtSite` (Class A: record + `isUnsupported` marker in one act),
+  `declineUnsafeCast` (the `isUnsafeCast` sibling) and `declineCallee` (record
+  + never-registered key); Class B mints its marker through `declineMarker`
+  and records nothing at parse time (a parse record would trip the retained
+  veto — a verdict change S8 may not make). Grep-pinned.
+- **`isUnsafeCast` now records its reach.** The halt previously relied on the
+  parse record alone; that says the cast *exists*, not that a path reached it.
+- **`geConceptViolation` is decided before registration.** It ran inside
+  `parseCalleeImpl`, i.e. after the callee was already being registered — the
+  "never registered" premise of point 3 was false for it. The check is
+  hoisted into `ensureProcRegistered` (`conceptViolationMsg`), so the key is
+  genuinely never registered and the missing-callee arm is its reach.
+- **A placement check, not a trust.** `parseProc` scans the *emitted* program
+  (`placeDeclineScopes`) for every marker literal and never-registered key; a
+  parse record whose anchor did not survive into the IR the walker walks is
+  rescoped `dskUnplaced` — so a dropped marker is caught, not assumed away.
+- **Bucket 4 today: empty for every run, with one construction `dskUnplaced` by
+  design** — the Invariant-7 backstop, which fires only when nothing at all was
+  recorded (there is no site to name). It is enumerated by name in the pin.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's
@@ -1254,7 +1297,12 @@ Not "the suite passes". The RFC is done when:
 6. Both blanket vetoes deleted, the `DeclineScope` totality pin green, and the
    count of `dskUnplaced` declines (§2.5 bucket 4) **recorded in the slice's
    own test** — the target is zero, and a non-zero count must be an
-   enumerated, named list rather than a tolerance.
+   enumerated, named list rather than a tolerance. *(S8: the pin covers every
+   `sevError` construction, walker records included — see §2.5 "As landed";
+   the two `feTransparent*` kinds are not in it because §13.3 moved them off
+   the decline lattice, not because they were demoted or companion-scoped.
+   Recorded count: 0, in `tests/tsymex_rfc0005_s8_scope.nim`; the Invariant-7
+   backstop is the one construction `dskUnplaced` by design, named there.)*
 7. §7's version and cache discipline discharged **including the cache value
    schema**; the `docs/migration/<version>.md` entry written (§8.2); Windows CI
    green on all three legs; `sweep-diff` against a sha-pinned baseline shows
@@ -1587,7 +1635,35 @@ drop to a soft "builds on", or the specific still-pending 0001 item that blocks
 S0 should be named. I have **not** changed the frontmatter — 0001 round 6 is
 live, and the tracker graph is yours to move.
 
-### §13.3 `feTransparentResultUsed` / `feTransparentArgNotInert` — warning or companion-anchored? — **for Corey**
+### §13.3 `feTransparentResultUsed` / `feTransparentArgNotInert` — warning or companion-anchored? — **resolved 2026-09-26 (Corey): neither — a separate channel; landed in S8**
+
+**Resolution.** Both options assumed the two are declines that need a place in
+the decline lattice. They are not: nothing is approximated *because of* them —
+the call's opaque fallback, whose walk-time `feOpaqueCallUnmodelled` taints
+every path through it, is the whole soundness story. What they report is that
+the *user's* annotation makes a promise the code does not keep. So they left
+`SymexErrorKind`'s live set: the two members are tombstoned ("retained for
+ordinal stability, never emitted"), and the report rides a separate
+`AnnotationViolation` channel (`pragma`, `kind` = `avResultUsed` /
+`avArgNotInert`, `callee`, `site` = `file:line:col`, `msg`) on
+`SymexProgram` → `RawResult` → `SymexResult` (and `ConcolicCollectResult`),
+populated on every verdict branch. It is error-severity in spirit and stays
+loud, but it is **verdict-neutral by construction**: no `classOf`, no
+`DeclineScope`, no taint, and it cannot trip the cap veto. Why this beats both
+options: `sevWarning` would have made a wrong promise *quieter* than a real
+decline; `dskCompanionAnchored` would have added a scope kind for two members
+and still left a non-decline in the decline lattice, where it vetoed runs the
+annotation did not affect.
+
+**The verdict consequence (S8).** Before S8 the parse-time `sevError` tripped
+`capForcedUnknown` for the whole run. Now a hit on a path that never passes
+the over-claimed call is a clean `sxSat` (rule 1; pinned in
+`tests/tsymex_rfc0005_s8_scope.nim` (d)); a hit *through* it stays a
+`dcSubstituted` candidate (replay-ineligible), and a dead target behind it
+stays `sxUnknown` (the walk record's run coordinate carries `scIncomplete`).
+
+The original framing, kept for the record:
+
 
 These two are `sevError` diagnostics *companion* to a walk-time mechanism that
 already taints reaching paths via `feOpaqueCallUnmodelled` (§2.5). Under the

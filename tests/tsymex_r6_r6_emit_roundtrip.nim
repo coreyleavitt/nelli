@@ -829,8 +829,8 @@ proc sFieldDerefWrite(): IRStmt =
 proc sUnsupportedStmt(): IRStmt =
   ## RFC-0005 S1b: a non-default kind, so a dropped `unKind` in the emitter
   ## cannot round-trip by coincidence.
-  mkUnsupported(seNestedSeqUnsupported, "sentinel unsupported reason")
-proc sUnsafeCast(): IRStmt = mkUnsafeCast("cast[ptr T]")
+  mkUnsupported(seNestedSeqUnsupported, "sentinel unsupported reason", 7)
+proc sUnsafeCast(): IRStmt = mkUnsafeCast("cast[ptr T]", 9)
 
 suite "R6 emit round-trip -- IRStmt kinds":
   test "isBlock":

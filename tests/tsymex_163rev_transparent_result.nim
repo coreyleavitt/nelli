@@ -54,25 +54,38 @@ suite "#163 review R10 -- a transparent result used in expression position names
     usesProbeR(0)
     usesProbeR(Magic - 11)
 
-  test "the specific degrade fires, naming the callee and the real problem":
+  test "the specific finding fires, naming the callee and the real problem":
+    ## RFC-0005 S8 (§13.3, i3): the finding rides the annotation-violation
+    ## channel (`r.annotationViolations`), not `r.errors` -- it is not a
+    ## decline. The generic opaque-call degrade still taints the path.
     let r = symexFind(usesProbeR, tLabel("hit_r"))
-    var specific = false
-    var specificMsg = ""
     var generic = false
     var internalFault = false
+    var retiredKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feTransparentResultUsed and "probeR" in e.msg:
-        specific = true
-        specificMsg = e.msg
       if e.kind == feOpaqueCallUnmodelled and "probeR" in e.msg:
         generic = true
       if e.kind == weInternalWalkerFault:
         internalFault = true
-    check r.status == sxUnknown
-    check specific
+      if e.kind in {feTransparentResultUsed, feTransparentArgNotInert}:
+        retiredKind = true
+    check r.annotationViolations.len == 1
+    let av = r.annotationViolations[0]
+    check av.pragma == saSymexTransparent
+    check av.kind == avResultUsed
+    check av.callee == "probeR"
+    check "tsymex_163rev_transparent_result" in av.site
+    let specificMsg = av.msg
+    # Never a clean-looking verdict the model cannot back: the opaque
+    # fallback taints the hit, so the verdict is `sxUnknown` unless S10's
+    # replay confirmed the solver's witness against the real `usesProbeR`.
+    check r.status in {sxUnknown, sxSat}
+    if r.status == sxSat:
+      check r.witness[0] + probeRState == Magic
     check generic
     check not internalFault
+    check not retiredKind
     # The whole point of R10: the specific message must NOT repeat the
     # generic message's (here, wrong) advice to apply the pragma -- the
     # callee already carries it. It must instead name the actual constraint:
@@ -92,12 +105,10 @@ suite "#163 review R10 -- a transparent result used in expression position names
       if x == Magic:
         symexTarget("hit_announce")
     let r = symexFind(withAnnounceR, tLabel("hit_announce"))
-    var resultUsedDegrade = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feTransparentResultUsed: resultUsedDegrade = true
     check r.status == sxSat
-    check not resultUsedDegrade
+    check r.annotationViolations.len == 0   # RFC-0005 S8 channel
 
 suite "#163 review round 1 -- walker version pin":
 

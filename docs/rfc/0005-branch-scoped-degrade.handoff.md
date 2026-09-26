@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~03:47)
+## Current position (refreshed 2026-09-26 ~04:15)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -27,23 +27,8 @@
 - **Order change:** S8 hard-pauses on fork **i3**; S10 has no dependency on S8/S9,
   so **S10 (opus) runs now**; S8 -> S9 -> S11 follow once i3 is answered.
 - **Branch vs main:** `main` is still `6cbfe8f`; lands by fast-forward (no PR).
-- **S10 BLOCKED (uncommitted in the main checkout, do not discard):** replay
-  emits a real call to `fn`, so every symexFind/FindAllWitnesses/ForAll SUT and
-  its callees become link-time and load-time dependencies of the caller's binary.
-  §4.2 never names this. Sweep regressions: `tsymex_phase15_g5_distinct_borrow`
-  (undefined `magic_scale` importc) and `tsymex_phase15_S6b_regex`/`S7b_smoke`
-  (libpcre not loadable). Also 5 legit replay-confirmed flips sxUnknown -> sxSat
-  whose pins still assert sxUnknown (S5_strops replaceAllFoo, CR11_CR18_splitcap,
-  S7a_bytes bytesTooLong, r2_zerodefault T5h, tot1 A6-rider). Splat bug (carrier
-  types, non-void fn) fixed. No second full sweep yet; cpp not run. The uncommitted
-  tree has the S10 fence row flipped to done -- revert if S10 doesn't land as is.
-  Commit message drafted at `scratchpad/s10-commit-msg.txt`.
-  **Corey decided 2026-09-26: contract change + opt-out.** Replay on by default
-  (SUT must link/load, stated in §4.2 + migration note); per-call `replay = false`
-  emits no call and leaves candidates sxUnknown; g5 opts out; libpcre added to
-  the dev image and every CI leg running the regex tests (not opted out). The S10
-  agent was resumed with this and finishes the slice (03:47: its full gate
-  sweep at ~401/508).
+- **S10 landed `fbbc373`** (walker 147) per Corey's link-contract decision; pushed
+  04:15 -- Windows CI running (first run of the new pcre64.dll step).
 - **S1c "hang" corrected:** the N36 shape takes ~234s (six tainted queries each
   to the full 20M rlimit), not infinite; ~12s at 1M. Recorded in RFC §4.2.
 - **Windows CI:** Corey approved the push; branch pushed 2026-09-26 04:44Z at
@@ -59,7 +44,16 @@
   error-severity, loud, verdict-neutral, no classOf/DeclineScope. S8 builds the
   split (and sets i3 `resolved` in the fence + writes the resolution into §13.3);
   S11 renders the channel. DeclineScope totality then holds with no special case.
-- **Remaining:** S10 (resumed), S8 (unblocked; runs after S10 -- same files), S9, S11.
+- **Plan change -- S8b added (opus, after S8, before S9):** three pre-existing
+  silent-substitution soundness bugs found during S6b/S10, all RFC-0005 §2.2-class
+  (a site substitutes without recording taint) and so in scope, not deferred:
+  (1) a call to a bodiless `importc` proc is analysed as an empty body -> default
+  `false` -> **false sxUnsat with no errors** (repro at `969d59c`); (2)
+  `parseInt` digits branch: target reachable only via `parseInt("+5")` -> false
+  sxUnsat; (3) `exn_hierarchy.nim` lacks `ArithmeticDefect`, so `except
+  ArithmeticDefect` misses DivByZero/Overflow -> false sxRaised.
+- **Slices done:** 13 of 15 (S10 added).
+- **Remaining:** S8 (running), S8b, S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 resolved; i3 decided
   (above), fence flip lands with S8.
 - **Found outside the RFC (not fixed, needs filing/fix):** `exn_hierarchy.nim` has
@@ -69,7 +63,7 @@
   modelled as the builtin (pre-existing, clean paths for Table/Set).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, check `git log` for the S10 commit; if
+  resume, check `git log` for the S8 commit; if
   no agent is running, gate any uncommitted work (full sweep-diff) before committing.
 
 ## Implementation plan — model allocation
@@ -111,6 +105,7 @@ soundness risk and the blast radius concentrate:
 | S6a | done | `a82ed95` | sweep regressed=0 new-ok=9; 31/31 c+cpp; walker 143 -> 144; **no flip possible or observed** (all three classes put scIncomplete on the run; payoff is S10 replay-ineligibility + S11 attribution). Site audit: k-unroll survivors (`:9642`, `:9921`) = dcFabricated keep `beBudgetExhausted`; AssumedBound (`:9913`) dcFabricated; `maxFrontierSize` prune (`:9689`) dcOmitted -> minted **`beBudgetExhaustedPrune`**; `maxCallDepth` bail (`:11165`) + two variant-constructor budget sites (`:10621`, `:10660`, unnamed in the RFC) dcSubstituted -> minted **`beBudgetExhaustedUnmodelled`**; `ceInlineBudgetExceeded` (2 sites) dcSubstituted, no split. Class channels: dcFabricated path ⊤ / run {scIncomplete}; dcSubstituted ⊤/⊤; dcOmitted path {} / run {scIncomplete} -- safe only because the prune is a halt; **structural pin: every dcOmitted degrade must be `discard w.degrade(`** (S6b must extend its scan if its halts emit via `heapArmDegrade`/`allocDegrade`/`runtime_heap.nim`). Site-count pin per budget kind now exists -- a new emission site must update it. **`ceInlineBudgetExceeded` still sets no PATH taint** (only the closure veto guards SAT) -- S7 must fix. Variant-constructor runs always also carry `feGlobalReadUnmodelled` (parser temp read unbound). 7 existing tests renamed to the split kinds. Sweep waiter: `.drift` is written at START; wait on line count. |
 | S6b | done | `11e0f83` | gate: full sweep had 6 red (kind-name pins + `ln`), fixed; merged targeted resweep regressed=0 new-ok=10 -- full confirmation sweep of the sha: regressed=0. No existing pin flipped; new sxUnsat pins in `tests/tsymex_rfc0005_s6b_ops.nim` (41/41 c+cpp). Walker 144 -> 145. `feUnsupportedOp` split: majority stays `feUnsupportedOp` = dcSubstituted; minted **`feUnsupportedOpHavoc`** (dcFreshSymbol, 10 pinned sites) and **`feUnsupportedOpAborted`** (dcNoAnswer, boundary). `heNewFieldZeroUnsupported` dcFreshSymbol. Halts dcOmitted: `heDepthExhausted`, `heUnsafeCast`, `weBreakOutsideLoop`, `seVariantFieldOnDeclinedCtor`, `eeRaiseOutsideHandler`, `eeHandlerReraiseUnmodelled`. dcSubstituted: `seByteIterUnsupported`, `geInstantiationCapped`, `geDistinctBarrier`, `hePtrArith`, `feOpaqueCallUnmodelled`, `feEnumOrdinalUnresolved`, `feGlobalReadUnmodelled`, `feUnsupportedStmtKind`, `weRecursionCycleCut`. **`eeUnknownExnType` = dcSubstituted and taints** (closed a false sxUnsat AND a false sxSat): new `dsUnknownExn` sink, `taintsRun` predicate carves the sevWarning exception into `runTaintOf`/`checkUnsatOverTaintOnly`; path-joined only where the guess is acted on. Walk-level `iteSV` folds now drain pending merge taint. Residual ⊤: genuine (ekZ3*, walker fault, beSolverUndef, geConceptViolation, eeNotInHandler, ee*Unimplemented, feUnsupportedParam/WitnessType); S7 (ce*); S7/S10 (`ceNotImplemented`, `feExtractionFailed`); inert hints; S4/S5-audited ⊤; i3's `feTransparent*`. Dead boundary catches for RaiseOutsideHandler/RaiseUnimplemented/TryUnimplemented/ClosureUnimplemented. |
 | S7 | done | `69a86a8` | sweep regressed=0 new-ok=11; c+cpp green; walker 145 -> 146; no kinds minted. **Sinks: 5 live, not 7** (RFC's two rows are one pool; parseInt digits-gate pool had no path scoping and was DELETED, `iekStrToInt` raise predicate widened instead). Closure call axioms admit only `taint == {}` arms and use a fresh result const per call occurrence; closure cache admits only clean; descent roots start `{}` and join exit taint into the caller; escaped body raises captured before `popFrame` and routed via `drainClosureRaises`. All 11 closure/HOF decline sites go through `closureDegrade` (sink + path taint). Classes: `ceClosureUnknownCallee` substituted, `ceClosureBodyUncertain` fresh, `ceUnsupportedHof` substituted, `ceClosureBodyDiverged` omitted; `ceNotImplemented` stays ⊤; `feExtractionFailed` ⊤, S10's. REDs included 5 **false sxUnsat** (closure raises dropped) and a false clean sxSat, now fixed. **S9 precondition pinned:** threadvar `rfc0005UnvetoedStatus*` = verdict with `vetoed=false`, never clean sxSat on S7 SUTs. **S9 must fix: capMutNeg -- a closure capturing a var mutated later still gives false sxSat without the veto.** S8: `runtime_heap` `lowerInExpr` sites never drain scalar raise forks (pre-existing, all raise sinks). S10: Nim `parseInt` accepts `+`/`_`, Z3 str.to_int doesn't -> widened raise predicate can over-report; replay should classify. |
+| S10 | done | `fbbc373` | walker 146 -> 147. Replay in both consumers via one emitter `emitRunSymexReplayed` (`symex.nim` ~1570; symexFind ~1740, FindAllWitnesses/ForAll ~2530, replay before cache save). `SatCandidate` keeps its witness private; only symex.nim private procs convert it, only on confirmed replay (compile-time + file-scan pins). Refuted -> new `feReplayRefuted` hint. parseInt raise split: exact half clean, lax `+`/`_` half -> replay (`seParseIntLaxSyntax`); `"+5"` was a false sxRaised, now refuted. `--panics:on` -> no replay; lossy/converted witnesses confirm but never refute; unconvertible never run; non-void discarded. Cache stores confirmed candidate as its finding. **Contract (Corey 2026-09-26): fn must link+load; `SymexSettings.replay = false` opt-out emits no call** (cache key `;rp=off` only when off). g5 opts out. libpcre: dev image builds PCRE 8.45 from source (sha256 pinned; orchestrator verified tarball against PH10's GPG sig 45F6 8D54 ... 43D8); symex-mingw corpus job fetches `pcre64.dll` from nim-lang dlls.zip (hash-pinned). 10 replay-confirmed flips sxUnknown -> sxSat, each pinned with unvetoed-still-sxUnknown. Gate: sweep2 had 2 test-only fails fixed after (configdefaults field count, S3 F1 flip), substituted -> regressed=0 new-ok=12 (unmodified: `s10-sweep2.diff`). cpp S10/S2/S1c/S7 green. RFC §4.2 "As landed (S10)" records link contract + tainted-solve cost (N36 ~230s at 20M, not a hang). |
 
 ### S0b result — the payoff is real, and gated on S1c
 

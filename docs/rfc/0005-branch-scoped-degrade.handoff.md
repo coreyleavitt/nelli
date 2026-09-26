@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~17:50Z)
+## Current position (refreshed 2026-09-26 ~18:15Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -86,11 +86,22 @@
   `seBytesLengthTooLarge`, `hePtrArith`. **S11 migration note must list:** the
   `ResourceBudget.maxBytesEncodingLen` removal (and its cache-key segment),
   `replace` all-occurrence, the three retired kinds.
-- **Slices done:** 16 of 18 (S8b, S8c, S8d are fence rows).
-- **Remaining:** S8d (running, opus: `classifyType` and sibling type dispatch
-  recognise `seq`/`Table`/`HashSet`/`Option` heads by name -> resolve by symbol;
-  second gate sweep `s8d-sweep.log` 483/~509 at 17:50Z; first run kept at `s8d-sweep1`), S9, S11.
-- **S8c Windows CI (`1eb6924`): all three green.** S0-S8c + S10 Windows-verified.
+- **S8d landed `f83e785`** (walker 151; pushed). Final sweep: unchanged=496
+  regressed=0 new-failing=0 new-ok=16 (second run; the first found two r6 tests
+  relying on a name-only `WeakRef` arm, which was deleted -- Nim's lib has no
+  WeakRef). Type-head models apply only when `isStdlibTypeSym` (compiler builtin
+  or declared under lib/); user types with stdlib names are classified by
+  structure or declined (`feUnsupportedParamType`). S11 migration: user types
+  named like stdlib types now get sxUnknown+feUnsupportedParamType (enums: real
+  verdict); `WeakRef` arm gone.
+- **Slices done:** 17 of 19.
+- **Remaining:** S9 (running, opus: delete `capForcedUnknown`/`closureForcedUnknown`;
+  fix S7's capMutNeg; msg+scope dedup), then **S8e** (new, after S9): two *loud*
+  pre-existing defects found by S8d -- (1) `classifyType` "node has no type"
+  compile crash on `x in s`/`s.add x` over a user generic alias of `seq`; (2) the
+  witness emitters (`symex.nim`, `dsl_parser.nim`) spell `seq`/`Table`/object
+  names bare in the caller's scope, so a clashing import fails to compile.
+  Then S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --
@@ -98,8 +109,8 @@
   Fix: resolve by symbol (or taint when the resolved symbol is not the builtin).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8d commit; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8d -> S9 ->
+  resume, check `git log` for the S9 commit; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S9 -> S8e ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~03:15)
+## Current position (refreshed 2026-09-26 ~03:47)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -42,7 +42,8 @@
   (SUT must link/load, stated in §4.2 + migration note); per-call `replay = false`
   emits no call and leaves candidates sxUnknown; g5 opts out; libpcre added to
   the dev image and every CI leg running the regex tests (not opted out). The S10
-  agent was resumed with this and finishes the slice.
+  agent was resumed with this and finishes the slice (03:47: its full gate
+  sweep at ~401/508).
 - **S1c "hang" corrected:** the N36 shape takes ~234s (six tainted queries each
   to the full 20M rlimit), not infinite; ~12s at 1M. Recorded in RFC §4.2.
 - **Windows CI:** Corey approved the push; branch pushed 2026-09-26 04:44Z at

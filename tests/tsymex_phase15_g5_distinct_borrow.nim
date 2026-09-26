@@ -51,6 +51,16 @@ proc useBorrowLt(m1, m2: Meters): bool =
 # and is NOT a borrow shim → the type wall forbids silently walking it.
 proc magicScale(a: Meters): bool {.importc: "magic_scale".}
 
+const noReplay = block:
+  ## RFC-0005 S10: `magicScale` is a deliberately UNLINKABLE `importc` stub
+  ## (no `magic_scale` exists in C). Replay (on by default) makes the entry
+  ## macro reference `fn`, so `fn` and its callees must link; this SUT is
+  ## analysable but not executable, so it opts out (`replay = false` emits no
+  ## reference to `fn`, and its verdict is the pre-S10 one).
+  var s = defaultSymexSettings()
+  s.replay = false
+  s
+
 proc useDistinctBarrier(m1: Meters): bool =
   if magicScale(m1):
     symexTarget("barrier_reached")
@@ -71,7 +81,7 @@ suite "symex Phase 15 G5 — distinct borrow semantics":
     check float64(r.witness[0]) < float64(r.witness[1])
 
   test "G5: non-borrowed bodyless distinct op → geDistinctBarrier (sxUnknown)":
-    let r = symexFind(useDistinctBarrier, tLabel("barrier_reached"))
+    let r = symexFind(useDistinctBarrier, tLabel("barrier_reached"), noReplay)
     check r.status == sxUnknown
     var sawBarrier = false
     for e in r.errors:

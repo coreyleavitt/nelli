@@ -810,5 +810,10 @@ task test, "Run the test suite":
             # raises routed, exit coverage, descent isolation, parseInt
             # digits-gate pool deleted; S9 precondition pins; walker
             # 145->146.
-            "tsymex_rfc0005_s7_closure"]:
+            "tsymex_rfc0005_s7_closure",
+            # RFC-0005 S10: rule 3 -- witness replay wired into the verdict
+            # of symexFind and symexFindAllWitnesses/symexForAll; candidacy
+            # unspellable as sat; parseInt's lax raise replay-gated; replay
+            # precedes persist; walker 146->147.
+            "tsymex_rfc0005_s10_replay_verdict"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -809,7 +809,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S7 (closure / HOF declines taint the path via
     ## `closureDegrade`; per-occurrence closure result; closure raises routed;
     ## exit coverage; the parseInt digits-gate pool deleted). 145->146.
-    check symexWalkerVersion == "146"
+    ## RFC-0005 S10 (§2.3 rule 3: candidates replayed against the real fn by
+    ## both entry macros; `parseInt`'s raise split into a clean exact half
+    ## and an `seParseIntLaxSyntax`-tainted lax half). 146->147.
+    check symexWalkerVersion == "147"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

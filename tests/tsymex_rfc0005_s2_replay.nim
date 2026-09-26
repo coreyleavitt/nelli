@@ -9,11 +9,14 @@
 ## scope (`tNilAccess` declined); escaping-raise semantics; `var` params;
 ## and the stackable capture context (`engine/markers.nim`) that keeps an
 ## engine-internal replay from clobbering a user's in-flight capture.
-## Not yet wired into the verdict -- that is S10. No walker bump: no walker
-## semantics change.
+## Wired into the verdict by S10 (`emitRunSymexReplayed`, `symex.nim`); the
+## roRefuted case below now drives a REAL eligible candidate through
+## `symexFind` (its verdict-side coverage is
+## `tsymex_rfc0005_s10_replay_verdict`). No walker bump in S2 itself.
 
 import std/[unittest, sets]
 import nelli/symex
+import nelli/smt/types
 
 var sideEffects = 0   ## counts real SUT executions; proves "declined" means
                       ## "never ran", not "ran and was ignored"
@@ -29,18 +32,23 @@ proc magicSut(x: int) =
   if x == 42:
     symexTarget("magic")
 
-var probeState = 7    ## module-level: unmodellable, and deliberately so
-
-proc probe(): int {.symexTransparent.} = probeState
-  ## Its result is USED below, so the transparency promise is not honoured and
-  ## the call falls back to OPAQUE: the walker substitutes a fresh,
-  ## unconstrained symbol for it -- RFC-0005's `dcFreshSymbol` shape exactly.
-
-proc probedSut(x: int) =
+proc freshSut(a: bool; x: int) =
+  ## `a < a` on a bool is system's magic `<`, which the walker models as a
+  ## FRESH symbol (`feUnsupportedOpHavoc`, `dcFreshSymbol`): the label's path
+  ## carries exactly `{scSpurious}` -- replay-eligible. Reality: `a < a` is
+  ## always false, so the label is unreachable and every candidate the solver
+  ## picks for it is refuted.
   tick()
-  let p = probe()
-  if x + p == 100:
-    symexTarget("probed")
+  let o = a < a
+  if o and x == 100:
+    symexTarget("fresh")
+
+proc freshTwinSut(a: bool; x: int) =
+  ## The confirming twin: the same fresh symbol, negated guard.
+  tick()
+  let o = a < a
+  if not o and x == 100:
+    symexTarget("freshTwin")
 
 proc refSut(p: ref int) =
   tick()
@@ -84,28 +92,33 @@ suite "RFC-0005 S2 -- replayWitness":
     check replayWitness(magicSut, r.witness, tLabel("magic"), {}) == roConfirmed
     check sideEffects == 1
 
-  test "roRefuted: a fresh-symbol witness the real fn does not reach":
-    ## The model of `probedSut` havocs `probe()`, so it admits `x = 100`
-    ## (with the havoc at 0); reality's `probe()` returns 7, so on x = 100
-    ## `fn` runs to completion without reaching the label. Since RFC-0005
-    ## S1c the engine DOES solve this tainted path -- but the model is a
-    ## CANDIDATE (`RawResult.candidates`, an untyped `RawWitness`), and the
-    ## public surface cannot hand it over until S10: under the all-⊤
-    ## `classOf` default the path carries `scSpurious`, so `symexFind`
-    ## reports `sxUnknown` (§2.3 rule 4), and typing a candidate's witness
-    ## into `fn`'s parameter tuple is the macro codegen S10 adds. So the
-    ## solver's choice is written out; it is the INPUT to replay, and the
-    ## outcome is what replay observes.
-    let r = symexFind(probedSut, tLabel("probed"))
-    check r.status == sxUnknown   ## solved into a candidate, not surfaced (pre-S10)
+  test "roRefuted: a real fresh-symbol candidate the real fn does not reach":
+    ## The model of `freshSut` havocs `a < a`, so it solves the label's path
+    ## into a CANDIDATE (x = 100, the havoc true). Since S10 that candidate is
+    ## replayed by `symexFind` itself -- the typed witness never reaches this
+    ## module (`SatCandidate` exposes none) -- and reality refutes it: the
+    ## verdict stays `sxUnknown`, the refutation is recorded as a
+    ## `feReplayRefuted` hint, and `fn` ran exactly once.
     sideEffects = 0
-    check replayWitness(probedSut, (100,), tLabel("probed"),
-                        pathTaint(dcFreshSymbol)) == roRefuted
+    let r = symexFind(freshSut, tLabel("fresh"))
+    check r.status == sxUnknown
     check sideEffects == 1
-    ## The same fresh-symbol-tainted candidate on the input reality agrees
-    ## with confirms -- the eligible gate does not decline it.
-    check replayWitness(probedSut, (93,), tLabel("probed"),
+    var refuted = false
+    for e in r.errors:
+      if e.kind == feReplayRefuted: refuted = true
+    check refuted
+    ## The twin's candidate is CONFIRMED by the same replay, so it surfaces as
+    ## sxSat -- and that real witness, replayed through the public substrate
+    ## call, confirms on its label and refutes on the refuted twin's.
+    sideEffects = 0
+    let t = symexFind(freshTwinSut, tLabel("freshTwin"))
+    check t.status == sxSat
+    check t.witness[1] == 100
+    check sideEffects == 1
+    check replayWitness(freshTwinSut, t.witness, tLabel("freshTwin"),
                         pathTaint(dcFreshSymbol)) == roConfirmed
+    check replayWitness(freshSut, t.witness, tLabel("fresh"),
+                        pathTaint(dcFreshSymbol)) == roRefuted
 
   test "eligibility gate: only an entirely-dcFreshSymbol path taint replays":
     ## Real witness, reaching input -- so any non-confirmed answer below is the

@@ -612,8 +612,17 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # enclosing statement walk to fork into a routed `ValueError` raise.
     let parseIntRaiseCond = ((not isNeg) and (posVal < mkInt(0))) or
                             (isNeg and (negInner < mkInt(0)))
-    parseIntRaiseConds.add parseIntRaiseCond          # threadvar fallback
-    syncParseIntRaiseCond(parseIntRaiseCond)          # CR-9 Stage 6 Group-2
+    # RFC-0005 S10: split by where `str.to_int` and Nim's `parseInt` agree
+    # (`ParseIntRaise`). Nim's `rawParseInt` also accepts a leading `+` and
+    # `_` separators; `str.to_int` is -1 on every such string (so each is
+    # already inside `parseIntRaiseCond`). Those inputs form the `lax` half,
+    # whose raise fork is tainted and replay-gated; the rest is `exact`.
+    let laxSyntax = startsWith(s.str, mkString("+")) or
+                    contains(s.str, mkString("_"))
+    let parseIntRaise = ParseIntRaise(exact: parseIntRaiseCond and not laxSyntax,
+                                      lax: laxSyntax)
+    parseIntRaiseConds.add parseIntRaise              # threadvar fallback
+    syncParseIntRaiseCond(parseIntRaise)              # CR-9 Stage 6 Group-2
     SymVal(kind: svInt, zi: resultInt)
   of iekRadixFmt:
     # Phase 16 A8. `toHex(x)` / `toBin(x, len)` for fixed-width BV int operands.

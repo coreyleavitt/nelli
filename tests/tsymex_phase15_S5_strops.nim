@@ -17,6 +17,7 @@
 import std/unittest
 import std/strutils  ## replace/split/join on strings
 import nelli/symex
+import nelli/smt/runtime
 
 # Nim's `strutils.replace` is already global (all-occurrence) and there is no
 # `replaceAll` in the stdlib. The symex parser dispatches on the *callee name*
@@ -77,8 +78,15 @@ suite "symex Phase 15 S5 — string replace/replaceAll/split/join":
     check r.witness[0] == "foofoo"
 
   test "replaceAll: emits seZ3VersionMissing on this Z3 build (no crash)":
+    ## RFC-0005 S10: s == "foofoo" really replaces to "barbar", so the
+    ## label is reachable. The path's taint is
+    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
+    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
+    ## the classified kind is still recorded.
     let r = symexFind(replaceAllFoo, tLabel("hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
+    check r.witness[0] == "foofoo"
     check r.errors.len >= 1
     check r.errors[0].kind == seZ3VersionMissing
 

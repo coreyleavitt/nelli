@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "146"
+const symexWalkerVersion* = "147"
+  ## RFC-0005 S10 (2026-09-25) — the SAT relaxation: §2.3 rule 3. A run whose
+  ## only SAT lies on an `scSpurious` path no longer stays `sxUnknown`
+  ## unconditionally: `runSymex` hands its solved candidates out as
+  ## `SatCandidate` (no witness branch; the model is private), and both entry
+  ## macros replay them against the real `fn` (`emitRunSymexReplayed`,
+  ## `symex.nim`) -- a `roConfirmed` replay reports `sxSat`/`sxRaised`, a
+  ## refuted one stays `sxUnknown` with a `feReplayRefuted` hint. Walker
+  ## side: `parseInt`'s raise predicate is split (`ParseIntRaise`) -- the
+  ## inputs where Z3's `str.to_int` and Nim's `parseInt` agree fork a CLEAN
+  ## raise as before, while a `+` prefix or `_` separator (which Nim accepts
+  ## and `str.to_int` rejects) forks an `seParseIntLaxSyntax`-tainted raise:
+  ## what was a clean, possibly FALSE `sxRaised` (`parseInt("+5")`) is now a
+  ## replay-gated candidate. A pre-S10 cached `:raised` / `:unk` entry was
+  ## produced without the replay settle (an `sxRaised` over `"+5"`, an
+  ## `sfUnknown` a confirmed candidate now turns into `sfSat`) and must not
+  ## be served. 146->147.
+  ##
   ## RFC-0005 S7 (2026-09-25) — cross-path sinks and closure / HOF decline
   ## path taint, the precondition for S9 deleting the closure veto. Every
   ## value-substituting closure / HOF decline records through
@@ -4549,6 +4566,10 @@ proc canonicalize*(s: SymexSettings): string =
   ##   maxBytesEncodingLen   — cap on bytes(s) materialisation length; triggers
   ##                        seBytesLengthTooLarge → sxUnknown if exceeded.
   ##                        CR-2 (was missing).
+  ##   replay             — RFC-0005 S10: whether a replay-eligible candidate
+  ##                        may be confirmed into sxSat/sxRaised or stays
+  ##                        sxUnknown; changes the verdict. Rendered `;rp=off`
+  ##                        only when disabled (default keys unchanged).
   ##   maxFreshnessAssertions — cap on `newRef != prior` inequalities; when hit,
   ##                        dropped constraints allow Z3 to alias refs it
   ##                        otherwise could not → false-SAT direction.
@@ -4604,6 +4625,8 @@ proc canonicalize*(s: SymexSettings): string =
     ";msp=" & $s.budget.maxSplitParts &           ## CR-11/CR-18: now wired
     ";mvcf=" & $s.budget.maxVariantConstructorForks &  ## Round-6 A3
     ";mvfa=" & $s.budget.maxVariantConstructorFieldAllocs &  ## N9
+    (if s.replay: "" else: ";rp=off") &   ## RFC-0005 S10: rendered only when
+                                          ## off, so default keys are unchanged
     ">"
 
 # ---- Cache key -------------------------------------------------------------

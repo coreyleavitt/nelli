@@ -471,11 +471,18 @@ proc s3ClassifyF4(p: ref S3F4Obj, y: int) =
 
 suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path never reports sxSat":
 
-  test "F1: heUnsupportedPointeeRead sits between every path and the target -> sxUnknown, never sxSat":
+  test "F1: heUnsupportedPointeeRead sits between every path and the target -> sxSat only via a confirmed replay":
+    ## RFC-0005 S10: `heUnsupportedPointeeRead` is `dcFreshSymbol` (S4), so
+    ## the tainted path's model is a replay-eligible CANDIDATE. Reality
+    ## reaches the label (any non-nil `p`, x == 42), the replay confirms it
+    ## (the ref witness is lossy: it may confirm, never refute) -> sxSat.
+    ## Family 2a's invariant still holds: the TAINTED path alone never
+    ## reports sxSat -- rules 1-2 decide sxUnknown, pinned below.
     let r = symexFind(s3ClassifyF1, tLabel("s3_classify_f1"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.status != sxSat
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
+    check r.witness[1] == 42
     check r.errors.hasKind(heUnsupportedPointeeRead)
 
   test "F2: seUnsupportedStringOp sits before every path's target check -> sxUnknown, never sxSat":

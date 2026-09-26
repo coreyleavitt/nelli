@@ -23,6 +23,7 @@
 ## is present only so the witness has a parameter (the S5 split idiom).
 import std/unittest
 import nelli/symex
+import nelli/smt/runtime
 
 # `bytes` is not a Nim stdlib proc; the symex parser intercepts it by NAME on an
 # `itString` receiver (smkStrBytes → iekStrBytes). The body never runs under
@@ -89,8 +90,14 @@ suite "symex Phase 15 S7a — bytes(s) byte-faithful byte-view":
     check r.errors.len >= 1
     check r.errors[0].kind == seBytesSymbolicLength
 
-  test "concrete length > maxBytesEncodingLen → sxUnknown + seBytesLengthTooLarge":
+  test "concrete length > maxBytesEncodingLen → seBytesLengthTooLarge, confirmed by replay":
+    ## RFC-0005 S10: bytes of the 33-byte literal really has length 33,
+    ## so the label is reachable at s == "x". The path's taint is
+    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
+    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
+    ## the classified kind is still recorded.
     let r = symexFind(bytesTooLong, tLabel("hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seBytesLengthTooLarge

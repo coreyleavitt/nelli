@@ -40,6 +40,7 @@
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 
 # =============================================================================
 # 1. Tracer (the S3 shape). `maybeSetResult`'s `x <= 0` path never touches
@@ -263,9 +264,15 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
     let r = symexFind(sutFloatAssignedSat, tLabel("float_assigned_sat"))
     check r.status == sxSat
 
-  test "T5h: the untouched float path classified-declines (sxUnknown), never a crash or a bound wrong value":
+  test "T5h: the untouched float path classified-declines, never a crash or a bound wrong value":
+    ## RFC-0005 S10: `x <= 0` is reachable whatever the untouched
+    ## float result is. The path's taint is
+    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
+    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
+    ## the classified kind is still recorded.
     let r = symexFind(sutFloatZeroDeclines, tLabel("float_zero_declines"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
     var sawKind = false
     for e in r.errors:
       # RFC-0005 S6b: the untouched result's per-call retSym is free and

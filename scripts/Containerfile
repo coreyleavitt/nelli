@@ -20,3 +20,25 @@ RUN zypper --non-interactive --gpg-auto-import-keys refresh && \
         mingw64-cross-gcc mingw64-cross-gcc-c++ && \
     zypper clean -a && \
     mkdir -p /opt/z3-headers && cp /usr/include/z3*.h /opt/z3-headers/
+# libpcre (PCRE1) for `std/re`: Nim's pcre wrapper dlopens
+# `libpcre.so(.3|.1|)` at start-up of any binary whose generated code calls a
+# regex proc. RFC-0005 S10 made that every symex SUT that uses `re` (replay
+# references `fn`, so the SUT is code-generated and linked), which is what
+# tsymex_phase15_S6b_regex / _S7b_smoke need. Tumbleweed has dropped PCRE1
+# (only libpcre2-*, a different ABI), so build the final PCRE1 release from
+# source, hash-pinned.
+ARG PCRE_VERSION=8.45
+ARG PCRE_SHA256=4e6ce03e0336e8b4a3d6c2b70b1c5e18590a5673a98186da90d4f33c23defc09
+RUN zypper --non-interactive install --force-resolution make gzip && \
+    zypper clean -a && \
+    curl -fsSL -o /tmp/pcre.tar.gz \
+      "https://sourceforge.net/projects/pcre/files/pcre/${PCRE_VERSION}/pcre-${PCRE_VERSION}.tar.gz/download" && \
+    echo "${PCRE_SHA256}  /tmp/pcre.tar.gz" | sha256sum -c - && \
+    tar --no-same-owner -C /tmp -xzf /tmp/pcre.tar.gz && \
+    cd /tmp/pcre-${PCRE_VERSION} && \
+    ./configure --prefix=/usr/local --libdir=/usr/local/lib64 \
+      --disable-static --disable-cpp --enable-utf --enable-unicode-properties && \
+    make -j"$(nproc)" && make install && \
+    echo /usr/local/lib64 > /etc/ld.so.conf.d/usr-local-lib64.conf && ldconfig && \
+    ldconfig -p | grep -q 'libpcre\.so\.1 ' && \
+    cd / && rm -rf /tmp/pcre.tar.gz /tmp/pcre-${PCRE_VERSION}

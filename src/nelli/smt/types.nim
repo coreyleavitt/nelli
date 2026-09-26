@@ -1945,6 +1945,29 @@ type
                           ## path at all. No enlarged or shrunk program exists
                           ## for an aborted walk: `classOf` is `dcNoAnswer`.
                           ## sevError -> sxUnknown.
+    seParseIntLaxSyntax   ## RFC-0005 S10. `parseInt(s)`'s raise predicate
+                          ## on a string with a `+` prefix or a `_`: Nim's
+                          ## `rawParseInt` accepts both, Z3's `str.to_int` is
+                          ## -1 on both, so the modelled `ValueError` raise
+                          ## there is a SUPERSET of the real one
+                          ## (`drainParseIntRaises`, `ParseIntRaise.lax`).
+                          ## Taints the raise fork only; `classOf` is
+                          ## `dcFreshSymbol` (`{scSpurious}` on both
+                          ## coordinates): a raise it produces is a
+                          ## replay-gated candidate, and it never voids
+                          ## `sxUnsat`. sevError.
+    feReplayRefuted       ## RFC-0005 S10 (§4.2 `roRefuted`). NOT a degrade:
+                          ## the verdict-time replay of a candidate's witness
+                          ## ran the real SUT to completion without reaching
+                          ## the target -- a CONFIRMED model gap on that
+                          ## witness, surfaced as its own classified
+                          ## diagnostic on the `sxUnknown` result. Recorded
+                          ## by `symex.nim`'s `settleCandidate` AFTER
+                          ## `runSymex` returns, so it never enters
+                          ## `runTaint`; always `sevHint`. `classOf` is
+                          ## `dcFreshSymbol`: only an entirely fresh-symbol
+                          ## path is replayed at all (`replayEligible`), so
+                          ## the gap it names is that class's.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2475,6 +2498,17 @@ type
     inlinePolicy*: InlinePolicy = ipHybrid
       ## Phase 15 Z3. Call-summary strategy (Cluster C owns the axiom
       ## construction; the type/field live here). Default `ipHybrid`.
+    replay*: bool = true
+      ## RFC-0005 S10 (§2.3 rule 3). When a run's only SAT lies on a
+      ## replay-eligible `scSpurious` path, the entry macro EXECUTES `fn` on
+      ## the solver's witness and reports `sxSat`/`sxRaised` only if the real
+      ## run reaches the target. On by default, which is a contract change:
+      ## `fn` and everything it calls must LINK and LOAD in the calling
+      ## binary (an `importc` with no definition, or a `dynlib` the host
+      ## lacks, now fails the build or the start-up), and its side effects
+      ## happen for real at verdict time. `replay = false` opts out: the
+      ## macro emits no reference to `fn`, and a candidate stays `sxUnknown`
+      ## as before S10. Static at every entry macro. In the cache key.
 
 # ---- RFC-0005 S1: the channel algebra (§2.2) -------------------------------
 
@@ -2831,6 +2865,16 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of feUnsupportedOpAborted: dcNoAnswer
     # The §3.3 boundary abort: the walk never finished, so there is no
     # approximation in either direction -- ⊤, never "promoted" (§3.3).
+  # RFC-0005 S10.
+  of seParseIntLaxSyntax: dcFreshSymbol
+    # The lax half of a `parseInt` raise predicate: the model raises on
+    # every `+`-prefixed / `_`-bearing string, reality on a subset -- the
+    # raise fork over-approximates and drops nothing (the exact half is
+    # forked clean alongside it, the digits survivor is unchanged).
+  of feReplayRefuted: dcFreshSymbol
+    # A verdict-time diagnostic, never drained into `runTaint` (see the
+    # enum member): the refuted witness came from a `dcFreshSymbol`-only
+    # path, which is the only taint replay runs on.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -4197,6 +4241,7 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.defectExclusions != d.defectExclusions: result.defectExclusions = b.defectExclusions
   if b.arithChecks != d.arithChecks: result.arithChecks = b.arithChecks  ## R16-1
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
+  if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4 / R16-1. Returns a list of human-readable warnings about

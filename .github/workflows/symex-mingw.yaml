@@ -212,6 +212,32 @@ jobs:
           if (!(Test-Path C:\z3\include\z3.h))  { throw 'z3.h missing' }
           Add-Content $env:GITHUB_PATH 'C:\z3\bin'
 
+      - name: Install pcre64.dll for std/re (RFC-0005 S10)
+        shell: pwsh
+        run: |
+          # Nim's pcre wrapper dlopens `pcre64.dll` (x64) at start-up of any
+          # binary whose generated code calls a regex proc. Since RFC-0005 S10
+          # every symex SUT is code-generated (replay references `fn`), so
+          # tsymex_phase15_S6b_regex / _S7b_smoke need it here. The toolchain
+          # artifact ships Nim ALONE, without the DLL bundle the official
+          # Windows distribution carries -- so fetch that bundle
+          # (nim-lang.org/download/dlls.zip), hash-pinned, and put ONLY
+          # pcre64.dll (imports: KERNEL32, msvcrt) on PATH. msys2's
+          # mingw-w64-x86_64-pcre ships `libpcre-1.dll`, a name the wrapper
+          # never tries.
+          $zipSha = '4b20b0fc775d2cfece0c1a09d4ec0bdbcd01d257ce8d556d9a8a88e6c4cd6961'
+          $dllSha = 'adfe6ba22e66b14af30d368cd1458547f86ba81825bcfae1d3a1b4cb6068b2bb'
+          curl.exe -L -o C:\nimdlls.zip 'https://nim-lang.org/download/dlls.zip'
+          if ($LASTEXITCODE -ne 0) { throw 'dlls.zip download failed' }
+          $got = (Get-FileHash C:\nimdlls.zip -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $zipSha) { throw "dlls.zip sha256 mismatch: $got" }
+          Expand-Archive -Path C:\nimdlls.zip -DestinationPath C:\nimdlls-all -Force
+          New-Item -ItemType Directory -Force C:\pcre | Out-Null
+          Copy-Item C:\nimdlls-all\pcre64.dll C:\pcre\pcre64.dll
+          $got = (Get-FileHash C:\pcre\pcre64.dll -Algorithm SHA256).Hash.ToLower()
+          if ($got -ne $dllSha) { throw "pcre64.dll sha256 mismatch: $got" }
+          Add-Content $env:GITHUB_PATH 'C:\pcre'
+
       - name: Clone deps at milpa.lock provenance SHAs
         shell: pwsh
         run: |

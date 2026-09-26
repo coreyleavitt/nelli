@@ -57,6 +57,7 @@ import std/[unittest, strutils, os, math]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 import audit_scan_utils
 
 proc kindNames(errs: seq[SymexErrorInfo]): seq[string] =
@@ -419,19 +420,30 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.status == sxUnknown
 
   test "two independent fresh orderings: a candidate, never sxUnsat (the introduction invariant)":
+    ## RFC-0005 S10: the candidate is now REPLAYED (rule 3), and reality
+    ## reaches the target (a=false: `false < true` and not `false < false`),
+    ## so it reports sxSat -- never sxUnsat, and only via a confirmed replay
+    ## (the path is tainted, so rules 1-2 decided sxUnknown).
     let r = symexFind(s6bBoolOrderFresh, tLabel("s6b_bool_order_fresh"))
     show r
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
+    check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
     let r = symexFind(s6bSeqResultLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnknown
 
-  test "two havoc retSyms are independent: sxUnknown":
+  test "two havoc retSyms are independent: a candidate, confirmed by replay":
+    ## Pre-S10 sxUnknown. RFC-0005 S10: reality reaches the target on every
+    ## input (`@[n].len != @[n, n].len`), so the replayed candidate is
+    ## confirmed -> sxSat, with rules 1-2 having decided sxUnknown.
     let r = symexFind(s6bSeqFresh, tLabel("s6b_seq_fresh"))
     show r
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
+    check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the merged string is a candidate: sxUnknown":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))

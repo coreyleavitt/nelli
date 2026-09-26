@@ -92,6 +92,7 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 
 # =============================================================================
 # 1. iekStrInOptionRegion (the :791 copy) -- pair-loop-idiom BV-bound shape.
@@ -217,7 +218,12 @@ suite "symex N36 -- iekStrSplit cap-exceeded decline inside a block: (loop-in-bl
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == seZ3StringIncomplete and "maxSplitParts" in e.msg:
         sawSplitCapKind = true
-    check r.status == sxUnknown
+    ## RFC-0005 S10: the label is reached unconditionally in reality and the
+    ## path's only taint is `seZ3StringIncomplete` (`dcFreshSymbol`), so the
+    ## candidate is replayed and CONFIRMED -> sxSat (rules 1-2 alone decide
+    ## sxUnknown). Still never a false sxUnsat.
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
     check sawSplitCapKind
 
 proc sutSplitOversizeNoBlockAfter(unused: int) =
@@ -229,7 +235,12 @@ suite "symex N36 -- regression: iekStrSplit no-block companion stays correct":
 
   test "N36-2-noblock: same shape without the block -- honest sxUnknown, same kind pre- and post-fix":
     let r = symexFind(sutSplitOversizeNoBlockAfter, tLabel("n36_split_oversize_noblock_after"))
-    check r.status == sxUnknown
+    ## RFC-0005 S10: the label is reached unconditionally in reality and the
+    ## path's only taint is `seZ3StringIncomplete` (`dcFreshSymbol`), so the
+    ## candidate is replayed and CONFIRMED -> sxSat (rules 1-2 alone decide
+    ## sxUnknown). Still never a false sxUnsat.
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
     var sawSplitCapKind = false
     for e in r.errors:
       if e.kind == seZ3StringIncomplete and "maxSplitParts" in e.msg:

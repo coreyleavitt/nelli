@@ -49,7 +49,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         eeHandlerReraiseUnmodelled, weBreakOutsideLoop,
                         # RFC-0005 S7: the closure / HOF declines.
                         ceUnsupportedHof, ceClosureUnknownCallee,
-                        ceClosureBodyUncertain, ceClosureBodyDiverged}
+                        ceClosureBodyUncertain, ceClosureBodyDiverged,
+                        # RFC-0005 S10: parseInt's lax raise half, and the
+                        # replay-refutation diagnostic.
+                        seParseIntLaxSyntax, feReplayRefuted}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

@@ -182,6 +182,7 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
       defectExclusions: {dkIndexDefect},
       arithChecks: {acDivByZero},
       inlinePolicy: ipAlwaysAxiomatize,
+      replay: false,                     # RFC-0005 S10
       budget: ResourceBudget(
         queryRLimit: 111'u, maxFrontierSize: 222, maxCallDepth: 33,
         maxLoopUnwind: 44, maxHeapDepth: 55, maxFreshnessAssertions: 666,
@@ -198,7 +199,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
     check fieldCount[ResourceBudget]() == 13
-    check fieldCount[SymexSettings]() == 6   # 5 scalars plus `budget`
+    check fieldCount[SymexSettings]() == 7   # 6 scalars plus `budget`
+                                             # (RFC-0005 S10 added `replay`)
 
   test "composing two different nested budget overrides keeps both":
     # `a` and `b` each change ONE, different, budget subfield. A whole-object

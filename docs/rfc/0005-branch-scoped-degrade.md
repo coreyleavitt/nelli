@@ -98,7 +98,7 @@ state = "pending"
 [[slice]]
 id    = "S10"
 title = "SAT relaxation: replay wired into verdict across both runSymex consumers"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -1011,6 +1011,22 @@ a site list.
 - **Naming collision.** `sfReplayMiss` already exists on `SymexFindingStatus`
   (`engine/types.nim:29-35`) as replay vocabulary from Phase 14 B5. Reuse it or
   distinguish it explicitly.
+- **Tainted-solve cost (found in S1c).** Rule 3 needs a model, so S1c solves
+  every target-hit path, tainted or not -- queries no engine before it ever
+  issued. A tainted path's pc carries whatever a degraded lowering left behind,
+  and the N36 `iekStrInOptionRegion` BV-bound decline's residue spins Z3's
+  `check` without end under the default `queryRLimit = 0`: an unbounded solve
+  there would be a NEW non-termination, not a pre-existing one. S1c bounds it
+  (`taintedSolveRLimit`: the caller's explicit `queryRLimit`, else
+  `defaultConcreteBranchRLimit` = 20M) and the bound's `zsUnknown` is the
+  honest `beSolverUndef`. The bound is finite but not cheap: on
+  `tsymex_rfc0005_s1c_verdict`'s N36 shape six tainted queries each run to the
+  full 20M, which is ~230 s of wall time under default settings (measured at
+  S10 with `-d:symexQueryStats`), well past `dt-bounded.sh`'s 180 s default
+  (the sweep's 900 s covers it). A caller's explicit `queryRLimit` shrinks it
+  (1M: ~12 s, same verdict). Replay adds nothing here -- the candidates it
+  receives are already solved -- but a tighter default tainted budget is a
+  live tuning question, not a closed one.
 
 **Plumbing — replay cannot live in `runSymex`.** Invoking the SUT requires
 splatting a typed witness into its parameter list with `var`-param wrapping;
@@ -1027,6 +1043,63 @@ reached by `symexForAll` via `toFindingStatus`, `:408`) — and **both** must
 discharge it. A `symexFind`-only implementation leaves `symexForAll` either
 unsound or dark, and round 1's DoD wording ("replay confirmed in the reporting
 path", singular) did not force the second.
+
+**As landed (S10).** Candidacy crosses the boundary as `SatCandidate`
+(`smt/runtime.nim`), a type with no `witness`/`raisedWitness` branch whose
+model is a PRIVATE field. It is readable only by `symex.nim`'s private
+`candidateInput`, and a verdict can be made from it only by the private
+`settleCandidate`, and only on `roConfirmed`. Both are reached solely through
+`bindSym` in `emitRunSymexReplayed`, which is the ONE `runSymex` call site
+behind both entry macros. An entry macro that skipped the settle could not
+mis-report: it would see `sxUnknown` and a pool it cannot render. The
+compile-time and structural pins live in `tsymex_rfc0005_s10_replay_verdict`.
+Each hazard above is contained as follows:
+
+- **Non-termination.** The eligibility gate (`replayEligible`: path taint
+  `<=` `{scSpurious}`) is unchanged, and there is no watchdog.
+- **Side effects.** These are run for real, once per replayed candidate, in
+  discovery order, stopping at the first confirmation. An ineligible or clean
+  result runs nothing, and the tests pin that with an effect counter.
+- **Defects.** Under `--panics:on` every target is declined, not just Defect
+  targets, because a candidate's real run may hit a Defect the model never
+  forked. `tNilAccess` is always declined.
+- **Un-replayable witnesses.** A `feExtractionFailed` model is lossy: it
+  confirms on a hit and never refutes.
+- **Naming.** A refutation is the new `feReplayRefuted` hint on a `sxUnknown`
+  result, not `sfReplayMiss`, which stays Phase 14 B5's per-seed diagnostic.
+- **Raises (§2.6).** `routeRaise`'s spurious raises reach the same pool, and
+  an `sxRaised` claim replays against `tRaisedExn(<its type>)`.
+- **parseInt.** The raise predicate is split so that Nim's `+`/`_` syntax
+  (which `str.to_int` rejects) raises only on a `seParseIntLaxSyntax`
+  (`dcFreshSymbol`) candidate. Before this, it was a clean `sxRaised` that
+  could be false (`"+5"`).
+- **Cache.** Replay precedes persist, structurally: the cache writers run on
+  the settled result.
+- **Link/load contract (found by S10's sweep; decided: stated contract with
+  an opt-out).** Replay needs a real call to `fn` in the generated code. So
+  with replay on, `fn` and everything it calls are compiled, LINKED and LOADED
+  into the calling binary, whether or not any candidate is ever replayed.
+  Before S10, `fn` was only read at macro time.
+  - An `importc` with no definition now fails the link. This was
+    `tsymex_phase15_g5_distinct_borrow`'s deliberately unlinkable stub.
+  - A `dynlib` the host lacks now fails at start-up. `std/re` loads PCRE1:
+    `libpcre.so.1` on Linux, `pcre64.dll` on x64 Windows.
+
+  No runtime gate can contain either failure, because both happen before any
+  replay decision runs.
+
+  The opt-out is `SymexSettings.replay = false`. It is static at every entry
+  macro, so no reference to `fn` is emitted and every candidate stays
+  `sxUnknown` as before S10. It enters the cache key as `;rp=off`, and only
+  when off, so default keys are unchanged. g5 opts out. The regex suites keep
+  full coverage instead:
+  - the dev image builds PCRE 8.45 from hash-pinned source, since Tumbleweed
+    ships only PCRE2;
+  - `symex-mingw`'s corpus job puts the hash-pinned `pcre64.dll` from Nim's
+    official `dlls.zip` on PATH.
+
+  The S11 migration note leads with both contract changes: `fn` is EXECUTED,
+  and `fn` must LINK and LOAD.
 
 Replay is therefore a **verdict mechanism**, not a test oracle, and it is the
 single largest piece of genuinely new machinery in the RFC.

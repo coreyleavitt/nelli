@@ -41,6 +41,7 @@ import std/strutils
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+import nelli/smt/runtime
 
 # --- SUT: concrete both-literal split with 4 parts (cap=3 → sxUnknown) ---
 proc splitFourParts(s: string) =
@@ -69,12 +70,17 @@ const cap3 = withSymexSettings() do (s: var SymexSettings):
 
 suite "Phase 15 CR-11 + CR-18 — maxSplitParts cap wired into concrete-inline split":
 
-  test "CR-11: concrete split >cap parts → sxUnknown + seZ3StringIncomplete (DoS guard)":
-    ## 4-part split with cap=3: must classify sxUnknown, NOT build a huge Z3 term.
-    ## RED before fix: this test passed without the cap (the split returned sxSat
-    ## by emitting 4 Z3 store calls — not a huge DoS here, but proves the cap fires).
+  test "CR-11: concrete split >cap parts → seZ3StringIncomplete (DoS guard), confirmed by replay":
+    ## 4-part split with cap=3: the cap still fires (classified
+    ## seZ3StringIncomplete, NOT a huge Z3 term).
+    ## RFC-0005 S10: "a,b,c,d".split(",") really has 4 parts, so the
+    ## label is reachable at s == "x". The path's taint is
+    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
+    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
+    ## the classified kind is still recorded.
     let r = symexFind(splitFourParts, tLabel("hit"), cap3)
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check rfc0005UnvetoedStatus == sxUnknown
     check r.errors.len >= 1
     check r.errors[0].kind == seZ3StringIncomplete
 

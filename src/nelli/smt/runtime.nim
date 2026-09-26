@@ -570,6 +570,39 @@ type
     raisedMsg*:     Option[string]
     raisedWitness*: RawWitness
 
+  SatCandidate* = object
+    ## RFC-0005 S10 (§2.3 rule 3, §4.2 "Plumbing"). A SOLVED finding on an
+    ## `scSpurious`-tainted path -- the enlarged program reaches the target,
+    ## reality is unknown -- in a form that CANNOT be mistaken for, or
+    ## spelled as, a `sxSat`/`sxRaised`. It is deliberately NOT a
+    ## `RawResult`: it has no `witness`/`raisedWitness` branch, so no
+    ## `case raw.status` arm, cache writer (`saveSymexRaisedImpl` takes
+    ## `seq[RawResult]`) or `SymexResult` construction can consume it. The
+    ## model's input is the PRIVATE `input` field: outside this module it is
+    ## readable only by `symex.nim`'s replay codegen (`candidateInput`, under
+    ## `privateAccess`), and the only way to turn a candidate into a verdict
+    ## is `symex.nim`'s `settleCandidate` with a `roConfirmed` replay outcome
+    ## -- both private to `symex.nim`, reached from macro-generated code by
+    ## `bindSym` inside `emitRunSymexReplayed`, the one place `runSymex` is
+    ## called from an entry macro. The metadata a consumer may audit is
+    ## public.
+    status*:       SymexStatusKind
+      ## The CLAIM: `sxSat` (a label hit) or `sxRaised` (a SUT-boundary
+      ## raise). Never `sxUnsat`/`sxUnknown`.
+    pathTaint*:    Taint
+      ## The taint of the path that produced it (always `scSpurious in`),
+      ## recorded at the hit; the input to replay's eligibility gate.
+    errors*:       seq[SymexErrorInfo]
+      ## Its own witness-extraction errors (RFC-0005 S1c), never the run's.
+      ## A `feExtractionFailed` here makes the rendered witness lossy
+      ## (a substituted `0.0`): replay confirms on a hit, never refutes.
+    raisedTypeId*: string            ## `sxRaised` claims only
+    isDefect*:     bool              ## `sxRaised` claims only
+    raisedMsg*:    Option[string]    ## `sxRaised` claims only
+    input:         RawWitness
+      ## PRIVATE: the solver's model of the input (the `witness` of an
+      ## `sxSat` claim, the `raisedWitness` of an `sxRaised` one).
+
   RawResult* = object
     abstractions*: AbstractionLog
     obligations*:  ObligationLog
@@ -595,15 +628,17 @@ type
       ## available at verdict time. RFC-0005 S1c routes on it
       ## (`admitSolvedHit`): a winner's is free of `scSpurious`; a candidate's
       ## carries it.
-    candidates*:   seq[RawResult]
+    candidates*:   seq[SatCandidate]
       ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Every SOLVED finding
       ## whose path carries `scSpurious` (`sxSat` at a label hit, `sxRaised`
       ## at a SUT-boundary raise), in discovery order, each with its own
       ## `pathTaint` and its own witness-extraction `errors`. Never a winner
       ## by itself: `decideVerdict` returns `sxUnknown` when one exists and no
       ## clean finding does (rule 4 -- the enlarged program reaches the
-      ## target). This is the pool RFC-0005 S10's replay reads (rule 3) after
-      ## `runSymex` returns. Empty on `sxUnsat` by construction.
+      ## target). RFC-0005 S10: this is the pool rule 3's replay reads after
+      ## `runSymex` returns (`symex.nim`'s `emitRunSymexReplayed`), typed
+      ## `SatCandidate` so it cannot be read as a witness anywhere else.
+      ## Empty on `sxUnsat` by construction.
     case status*: SymexStatusKind
     of sxSat:
       witness*: RawWitness
@@ -1539,11 +1574,32 @@ proc syncConvFloatToIntBoundCond*(cond: Z3Bool)
   ## No-op when no active walk (lower() can be called from probe paths).
   ## Defined after `WalkCtx`.
 
-proc syncParseIntRaiseCond*(cond: Z3Bool)
+type ParseIntRaise* = object
+  ## RFC-0005 S10. One `parseInt(s)` lowering's raise obligation, SPLIT by
+  ## whether Z3's `str.to_int` agrees with Nim's `parseInt` on the inputs it
+  ## covers. Nim's `parseutils.rawParseInt` accepts a leading `+` and `_`
+  ## separators after a digit; `str.to_int` is `-1` on any such string, so the
+  ## S10b/S7 raise predicate raised on inputs Nim parses (`"+5"`, `"1_0"`) --
+  ## and did so on a CLEAN path, a false `sxRaised` no replay ever saw.
+  ##   * `exact` -- the raise predicate restricted to strings with no `+`
+  ##     prefix and no `_`: there the model is Nim's (a non-digit string, or
+  ##     `-` followed by one, raises; digits parse). Forked CLEAN.
+  ##   * `lax`   -- a `+` prefix or a `_` anywhere (every such string is in
+  ##     the S7 raise predicate, since `str.to_int` is `-1` on it): Nim may
+  ##     raise or parse. The modelled raise set there is a SUPERSET of the
+  ##     real one, so the raise fork is `scSpurious`-tainted
+  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol`) -- a CANDIDATE that only a
+  ##     confirming replay may report (RFC-0005 §2.6).
+  ## The digits survivor carries `not exact and not lax` (= the old `not
+  ## raiseCond`), unchanged.
+  exact*: Z3Bool
+  lax*:   Z3Bool
+
+proc syncParseIntRaiseCond*(cond: ParseIntRaise)
   ## CR-9 Stage 6 fwd-decl (Group-2). If `currentWalkCtxPtr != nil` (a walk
   ## is active), appends `cond` to `WalkCtx.parseIntRaiseConds`.
   ## No-op when no active walk (lower() can be called from probe paths).
-  ## Defined after `WalkCtx`.
+  ## Defined after `WalkCtx`. RFC-0005 S10: one `ParseIntRaise` per lowering.
 
 proc seedCallerHeapInWalkCtx*(p: Path)
   ## CR-9 Stage 6 fwd-decl (Groups 3+4). If `currentWalkCtxPtr != nil` (a
@@ -3143,7 +3199,7 @@ var lastGetCurrentExnRef* {.threadvar.}: tuple[sortName, typeTag: string]
   ## opaque ref is not witness-extractable through `symexFind`, so E8's test 2
   ## inspects this threadvar to assert the tagging (`Exn_<typeId>` / `typeId`).
 
-var parseIntRaiseConds* {.threadvar.}: seq[Z3Bool]
+var parseIntRaiseConds* {.threadvar.}: seq[ParseIntRaise]
   ## Phase 15 S10b. Raise predicates emitted by the `iekStrToInt` (`parseInt`)
   ## lowering — one `(not isNeg) and (posVal < 0)` clause per `parseInt` lowered
   ## (the non-digit, non-`-`-prefixed case, where Nim's runtime RAISES
@@ -7932,7 +7988,7 @@ type
                       ## probe-path lower() calls. Reset (to @[]) in
                       ## `lowerInExpr`/`lowerBoolInExpr` (via w param) and
                       ## in `drainConvFloatToIntBounds` after drain.
-    parseIntRaiseConds: seq[Z3Bool]
+    parseIntRaiseConds: seq[ParseIntRaise]
                       ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration).
                       ## LIVE accumulator for parseInt raise predicates deposited
                       ## by `lower(iekStrToInt)` during a walk.
@@ -8399,7 +8455,7 @@ proc syncConvFloatToIntBoundCond*(cond: Z3Bool) =
 # dedup, `genRaiseForkDrain` below, is the substantive R5 consolidation; these
 # 6-liners are not forward-decl-compatible with that pattern). Keep the bodies
 # identical if you edit one.
-proc syncParseIntRaiseCond*(cond: Z3Bool) =
+proc syncParseIntRaiseCond*(cond: ParseIntRaise) =
   ## CR-9 Stage 6 Group-2. Appends `cond` to `WalkCtx.parseIntRaiseConds` (the
   ## LIVE store) when a walk is active; no-op on probe paths (currentWalkCtxPtr
   ## == nil — no drain runs there).
@@ -8470,7 +8526,8 @@ type
     ## clears the sinks) before the descent; `restorePendingLowerEffects` puts
     ## them back after it, before the call deposits its own.
     pendingTaint: Taint
-    parseInt, divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
+    parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
+    divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, convDomain: seq[Z3Bool]
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
@@ -8717,6 +8774,25 @@ proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
     w.candidates.add r
   else:
     w.found.add r
+
+func toCandidate(r: RawResult): SatCandidate =
+  ## RFC-0005 S10. Re-types a pooled candidate for the `runSymex` boundary
+  ## (`RawResult.candidates`): the witness moves into the private `input`
+  ## field, so past this point the model is not spellable as a `sxSat`.
+  case r.status
+  of sxSat:
+    SatCandidate(status: sxSat, pathTaint: r.pathTaint, errors: r.errors,
+                 input: r.witness)
+  of sxRaised:
+    SatCandidate(status: sxRaised, pathTaint: r.pathTaint, errors: r.errors,
+                 raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
+                 raisedMsg: r.raisedMsg, input: r.raisedWitness)
+  of sxUnsat, sxUnknown:
+    # `admitSolvedHit` is only ever handed a solved SAT / raise.
+    raiseAssert "RFC-0005 S10: a candidate is always a solved sxSat/sxRaised"
+
+func toCandidates(pool: openArray[RawResult]): seq[SatCandidate] =
+  for r in pool: result.add toCandidate(r)
 
 type
   VerdictDecision* = object
@@ -9109,10 +9185,61 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
     for n in negated: surv.defectSurvivorPc.add n
     @[surv]
 
-## Phase 15 S10b. parseInt raise predicates from `iekStrToInt` — unconditional
-## (no settings gate).
-genRaiseForkDrain(drainParseIntRaises, parseIntRaiseConds, none(ArithCheck),
-                   "ValueError", "invalid integer: parseInt")
+proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## Phase 15 S10b. parseInt raise predicates from `iekStrToInt` —
+  ## unconditional (no settings gate). Same read-and-reset / fork /
+  ## `defectSurvivorPc` protocol as the `genRaiseForkDrain` family above
+  ## (which it was, until RFC-0005 S10), with ONE difference: each lowering
+  ## deposits a `ParseIntRaise` pair, and the two halves fork differently.
+  ##   * `exact` forks a CLEAN routed `ValueError` raise -- on those inputs
+  ##     Z3's `str.to_int` and Nim's `parseInt` agree.
+  ##   * `lax` (a `+` prefix or a `_`: Nim may parse what `str.to_int`
+  ##     rejects) forks the raise on a path tainted through `degrade`
+  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol` -> `{scSpurious}`), so a
+  ##     boundary `sxRaised` there is a CANDIDATE (`admitSolvedHit`) that
+  ##     RFC-0005 S10's replay confirms (`"+x"` raises for real) or refutes
+  ##     (`"+5"` parses to 5) -- §2.6's replay-gated raise, where before S10
+  ##     it was a clean, unconfirmed `sxRaised`. The error is recorded
+  ##     ONCE per drain whose `lax` half does not simplify to `false` (a
+  ##     literal operand has no lax inputs, so it forks and records
+  ##     nothing); a symbolic operand's lax fork is taken without a
+  ##     feasibility check, as at every other fork site. Its run coordinate
+  ##     `{scSpurious}` is diagnostics-only, so `sxUnsat` is unaffected.
+  ## The survivor carries `not exact` and `not lax` -- together exactly the
+  ## pre-S10 `not raiseCond`, so the digits continuation is unchanged.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].parseIntRaiseConds
+      wp[].parseIntRaiseConds = @[]
+      parseIntRaiseConds = @[]         # keep threadvar reset in sync
+      c
+    else:
+      let c = parseIntRaiseConds
+      parseIntRaiseConds = @[]
+      c
+  if conds.len == 0:
+    return @[p]
+  const msg = "invalid integer: parseInt"
+  var laxLive: seq[bool]
+  for c in conds: laxLive.add($simplify(c.lax) != "false")
+  var laxTok: Degrade
+  if true in laxLive:
+    laxTok = w.degrade(seParseIntLaxSyntax,
+      "parseInt: a `+` prefix or `_` separator, which Nim's parseInt " &
+      "accepts and Z3's str.to_int rejects -- the ValueError raise there " &
+      "is over-approximated (seParseIntLaxSyntax; a replay-gated candidate)")
+  for i, c in conds:
+    let exactPath = forkPath(p, p.pc & @[c.exact], p.env)
+    discard routeRaise(exactPath, "ValueError", some(msg), w)
+    if laxLive[i]:
+      let laxPath = forkPathTainted(p, p.pc & @[c.lax], p.env, laxTok)
+      discard routeRaise(laxPath, "ValueError", some(msg), w)
+  let surv = forkPath(p, p.pc, p.env)
+  for c in conds:
+    surv.defectSurvivorPc.add(not c.exact)
+    surv.defectSurvivorPc.add(not c.lax)
+  @[surv]
 
 proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
   ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated
@@ -14336,7 +14463,7 @@ proc runSymexImpl(prog: SymexProgram,
     r.errors.add exnWarnings       ## Phase 15 E4
     r.errors.add prog.parseErrors  ## Phase 15 G1c
     r.errors.add closureErrs       ## Phase 15 C2b
-    r.candidates = w.candidates    ## RFC-0005 S1c
+    r.candidates = toCandidates(w.candidates)    ## RFC-0005 S1c / S10
     r
   elif decision.status == sxUnknown:
     # v64 (chapulin catalog #5(b)): Invariant-7 BACKSTOP. Every sxUnknown
@@ -14357,7 +14484,7 @@ proc runSymexImpl(prog: SymexProgram,
              "weInternalWalkerFault)")
     RawResult(status: sxUnknown, abstractions: log, obligations: obligationLog,
               callStats: statsSeq, errors: unknownErrs,
-              candidates: w.candidates)
+              candidates: toCandidates(w.candidates))
   else:
     # RFC-0005 S1c: `decideVerdict` rule 5 -- no solved SAT anywhere (so no
     # candidates to hand out) and `scIncomplete notin runTaint`.

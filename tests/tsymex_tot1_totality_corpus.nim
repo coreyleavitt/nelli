@@ -70,6 +70,7 @@
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 
 # =============================================================================
 # SUTs — one per corpus item, grouped by the §0 surface it backstops.
@@ -345,6 +346,13 @@ type
     status:       SymexStatusKind
     errors:       seq[SymexErrorInfo]
     expectedKind: SymexErrorKind  ## only meaningful when hasKindCheck
+    replayConfirms: bool          ## RFC-0005 S10: a dcFreshSymbol-only row
+                                   ## whose target reality reaches -- the
+                                   ## candidate is replayed and confirmed,
+                                   ## so the row reports sxSat (with the
+                                   ## pre-replay verdict still sxUnknown)
+    unvetoed: SymexStatusKind      ## `rfc0005UnvetoedStatus` right after the
+                                   ## row's own run (replayConfirms rows)
     hasKindCheck: bool            ## Class-A sites carry a classified kind;
                                    ## SND-1's bare Class-B drop does not (by
                                    ## design — see tsymex_snd1_uncertain_taint.nim)
@@ -377,6 +385,7 @@ let
   rBareLenRead   = symexFind(corpusBareLenRead,          tLabel("bare_len_read"))
   rCompositeFallthrough = symexFind(corpusCompositeImplicitFallthrough,
                                      tLabel("composite_implicit_fallthrough"))
+  uCompositeFallthrough = rfc0005UnvetoedStatus   ## captured before the next run
 
 let corpus = @[
   CorpusItem(label: "CR-2a: cast[int32](x) as sub-expr",
@@ -496,7 +505,11 @@ let corpus = @[
                         "isReturn's own existing composite-return degrade " &
                         "net rather than leaving retSym unconstrained)",
              status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
-             expectedKind: feUnsupportedOp, hasKindCheck: false),
+             expectedKind: feUnsupportedOp, hasKindCheck: false,
+             # RFC-0005 S10: `@[x].len == 1` for every x >= 0, so the label
+             # is reachable; the path's taint is dcFreshSymbol only, and the
+             # replayed candidate is confirmed.
+             replayConfirms: true, unvetoed: uCompositeFallthrough),
 ]
 
 # =============================================================================
@@ -537,8 +550,13 @@ suite "symex TOT-1 — §0-totality regression corpus":
       ## prevented this test binary from existing). The three explicit
       ## status checks below then rule out every remaining false-verdict
       ## shape §0 forbids.
-      check item.status == sxUnknown
-      check item.status != sxSat    ## never a false witness
+      if item.replayConfirms:
+        ## RFC-0005 S10: a witness the REAL fn confirmed -- not a false one.
+        check item.status == sxSat
+        check item.unvetoed == sxUnknown
+      else:
+        check item.status == sxUnknown
+        check item.status != sxSat    ## never a false witness
       check item.status != sxUnsat  ## never a false "unreachable" claim
       if item.hasKindCheck:
         check hasKind(item.errors, item.expectedKind)

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~17:20Z)
+## Current position (refreshed 2026-09-26 ~17:50Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -89,7 +89,7 @@
 - **Slices done:** 16 of 18 (S8b, S8c, S8d are fence rows).
 - **Remaining:** S8d (running, opus: `classifyType` and sibling type dispatch
   recognise `seq`/`Table`/`HashSet`/`Option` heads by name -> resolve by symbol;
-  second gate sweep `s8d-sweep.log` 307/~509 at 17:20Z; first run kept at `s8d-sweep1`), S9, S11.
+  second gate sweep `s8d-sweep.log` 483/~509 at 17:50Z; first run kept at `s8d-sweep1`), S9, S11.
 - **S8c Windows CI (`1eb6924`): all three green.** S0-S8c + S10 Windows-verified.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~14:35Z)
+## Current position (refreshed 2026-09-26 ~15:30Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -74,18 +74,22 @@
   deprecated `DivByZeroError`) used the alias name as type id -> false sxRaised.
   S9 note: handler-side user exn capture (`collectUserExnAncestors`) skips
   `nnkType` except types -- do not rely on it.
-- **Slices done:** 15 of 17 (S8b, S8c are fence rows).
-- **Remaining:** S8c (running, opus: name-resolved builtins/operators -> resolve by
-  symbol; uncommitted in the main checkout; walker 150). First gate: the sweep was killed
-  at 493 lines by host memory pressure from another session, and the partial diff
-  showed regressed=5, all real: three models were reachable ONLY via user shims
-  that share a builtin's name (`replaceAll`, `bytes`, a user ptr `inc` feeding
-  `hePtrArith`). Control-loop resolution (not a fork): remove name-only entry
-  points; wire real `strutils.replace` to the all-occurrences model (the existing
-  model is first-match, a separate false-sxUnsat bug: `"foofoo".replace("foo","bar")`
-  is `"barbar"` in Nim, and the S5 pin said `"barfoo"`); keep `bytes`/`hePtrArith`
-  only if a real stdlib producer exists, else delete/tombstone; rerun sweep -j 2).
-  Agent applied the resolution; rerun sweep `s8c-sweep.log` at 478/~509 at 14:35Z), S9, S11.
+- **S8c landed `3a95844`** (walker 150; pushed). Sweep -j 2: unchanged=495
+  regressed=1 (test-only: a raise-site count 20->18 after the `bytes` model's two
+  raises were deleted; count updated, test re-run green) new-failing=0 new-ok=15.
+  Builtin models now apply only when the resolved callee is declared in Nim's lib
+  dir; user overloads/converters are walked; markers match by module. Removed:
+  name-only `replaceAll` (real `strutils.replace` now all-occurrence; on this Z3
+  build it records `seZ3VersionMissing`, replay-confirmed; first-match model
+  deleted), the `bytes` model (+ `maxBytesEncodingLen` budget field), the
+  `hePtrArith` guard. Retired kinds: `seBytesSymbolicLength`,
+  `seBytesLengthTooLarge`, `hePtrArith`. **S11 migration note must list:** the
+  `ResourceBudget.maxBytesEncodingLen` removal (and its cache-key segment),
+  `replace` all-occurrence, the three retired kinds.
+- **Slices done:** 16 of 18 (S8b, S8c, S8d are fence rows).
+- **Remaining:** S8d (running, opus: `classifyType` and sibling type dispatch
+  recognise `seq`/`Table`/`HashSet`/`Option` heads by name -> resolve by symbol),
+  S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --
@@ -93,8 +97,8 @@
   Fix: resolve by symbol (or taint when the resolved symbol is not the builtin).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8c commit; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8b -> S8c -> S9 ->
+  resume, check `git log` for the S8d commit; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8d -> S9 ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

@@ -575,50 +575,57 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # digits of `s` represent, or **−1** for a non-digit string (VERIFIED against
     # `_deps/z3/src/z3/strings.nim:126-128` — this CORRECTS the RFC/recon premise
     # that `str.to_int` is "unconstrained for non-digit"; it is the fixed value
-    # −1). Nim negatives have a leading `-`, which is non-digit (so bare `toInt`
-    # gives −1), so we fork on `startsWith(s, "-")` (nim-z3's `Z3_mk_seq_prefix`;
-    # the RFC named this `prefixOf` — the real proc is `startsWith(a, prefix)`):
-    #   posVal   = toInt(s)                          (no leading '-')
-    #   negInner = toInt(substr(s, 1, len(s)-1))     (digits after the '-')
-    #   result   = ite(startsWith(s,"-"), -negInner, posVal)
+    # −1). A Nim sign (`-` or, since RFC-0005 S8b, `+`) is non-digit, so the
+    # sign is stripped first (`startsWith`, nim-z3's `Z3_mk_seq_prefix`):
+    #   digitsVal = toInt(substr(s, signLen, len(s)-signLen))
+    #   result    = ite(startsWith(s,"-"), -digitsVal, digitsVal)
     #
     # RAISES-PATH (S10b; RFC-0005 S7 completed it). `parseInt(s)` is an
     # EXPRESSION (→ int), but Nim's runtime RAISES `ValueError` when `s` is not
-    # a valid integer. Z3's `toInt` returns −1 for a non-digit string, so the
-    # raise condition is
-    #   (not isNeg and posVal < 0) or (isNeg and negInner < 0)
-    # -- a non-digit string, or a `-` followed by a non-digit suffix (where
-    # `-negInner` would otherwise be a FALSE `+1`). Before RFC-0005 S7 the
-    # second disjunct was a "digits gate" `isNeg ⇒ negInner >= 0` pushed into a
-    # pool asserted into EVERY solver check: it deleted `"-<non-digit>"` inputs
-    # instead of raising on them, and pruned sibling paths that never called
-    # `parseInt` at all (both false `sxUnsat`s). As a raise disjunct it is
-    # local to the path that lowers the call, and the survivor carries its
-    # negation. `lower` cannot itself route a raise (it has no WalkCtx/Path),
-    # so the predicate is surfaced to the enclosing statement walk via the
-    # `parseIntRaiseConds` sink; the statement arm drains it and forks a
-    # RAISES sub-path (routed via E3's `routeRaise`) and a DIGITS sub-path
-    # (constrained by the negation, continuing with this int value). strArgs
+    # a valid integer. `lower` cannot itself route a raise (it has no
+    # WalkCtx/Path), so the predicate is surfaced to the enclosing statement
+    # walk via the `parseIntRaiseConds` sink; the statement arm drains it and
+    # forks a RAISES sub-path (routed via E3's `routeRaise`) and a DIGITS
+    # sub-path (constrained by the negation, continuing with this int value).
+    # Before RFC-0005 S7 part of the predicate was a "digits gate" pushed into
+    # a pool asserted into EVERY solver check (both false `sxUnsat`s). strArgs
     # = [s].
+    #
+    # RFC-0005 S8b: the model is now `parseutils.rawParseInt` + strutils'
+    # `L == s.len` check, verbatim, for every string with no `_`:
+    #   * ONE optional sign, `+` or `-` (a `+` was treated as a non-digit,
+    #     so the digits continuation dropped every `"+5"` -- a false
+    #     `sxUnsat` for a target reachable only through the sign);
+    #   * then one or more digits and nothing else (no whitespace, no second
+    #     sign: `str.to_int` of the unsigned remainder is -1 otherwise, and
+    #     of "" too, so a lone sign raises);
+    #   * the value must fit `int` (= `BiggestInt`, 64-bit) with Nim's
+    #     asymmetric bound -- `-9223372036854775808` parses,
+    #     `9223372036854775808` raises ("Parsed integer outside of valid
+    #     range"; it was an unbounded Int that never raised).
+    # A `_` is a digit separator after the first digit. Its VALUE needs
+    # `str.replace_all`, which not every supported Z3 has (`replaceAll`'s
+    # version gate), so a `_`-string is the `lax` half: it both raises and
+    # continues, each on a `seParseIntLaxSyntax`-tainted path, and the
+    # continuation's value is a FRESH Int (`dcFreshSymbol`: every value Nim
+    # can produce is a model of it) -- a replay-gated candidate, never a
+    # dropped input.
     let s = lower(env, e.strArgs[0])
     requireStr(s, "iekStrToInt")
-    let dash = mkString("-")
-    let isNeg = startsWith(s.str, dash)
-    let posVal = toInt(s.str)
     let sLen = len(s.str)
-    let negInner = toInt(substr(s.str, mkInt(1), sLen - mkInt(1)))
-    let resultInt = ite(isNeg, -negInner, posVal)
-    # S10b / RFC-0005 S7: surface the raise predicate (see above) for the
-    # enclosing statement walk to fork into a routed `ValueError` raise.
-    let parseIntRaiseCond = ((not isNeg) and (posVal < mkInt(0))) or
-                            (isNeg and (negInner < mkInt(0)))
-    # RFC-0005 S10: split by where `str.to_int` and Nim's `parseInt` agree
-    # (`ParseIntRaise`). Nim's `rawParseInt` also accepts a leading `+` and
-    # `_` separators; `str.to_int` is -1 on every such string (so each is
-    # already inside `parseIntRaiseCond`). Those inputs form the `lax` half,
-    # whose raise fork is tainted and replay-gated; the rest is `exact`.
-    let laxSyntax = startsWith(s.str, mkString("+")) or
-                    contains(s.str, mkString("_"))
+    let isNeg = startsWith(s.str, mkString("-"))
+    let isPlus = startsWith(s.str, mkString("+"))
+    let signLen = ite(isNeg or isPlus, mkInt(1), mkInt(0))
+    let digitsVal = toInt(substr(s.str, signLen, sLen - signLen))
+    # `mkInt` is `cint`-ranged; the 64-bit bounds need `mkBigInt`.
+    let outOfRange = ite(isNeg, digitsVal > mkBigInt("9223372036854775808"),
+                         digitsVal > mkBigInt($high(int64)))
+    let parseIntRaiseCond = (digitsVal < mkInt(0)) or outOfRange
+    let laxSyntax = contains(s.str, mkString("_"))
+    let laxValue = mkIntVar(freshDegradeName("__parseIntLaxValue"))
+    let resultInt = ite(laxSyntax, laxValue,
+                        ite(isNeg, -digitsVal, digitsVal))
+    # RFC-0005 S10 / S8b: split by where the model is Nim's (`ParseIntRaise`).
     let parseIntRaise = ParseIntRaise(exact: parseIntRaiseCond and not laxSyntax,
                                       lax: laxSyntax)
     parseIntRaiseConds.add parseIntRaise              # threadvar fallback

@@ -815,7 +815,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8 (`DeclineScope` on every decline; the i3 annotation
     ## channel retires `feTransparent*` from the veto; `isUnsafeCast` records
     ## its reach; concept violations never register). 147->148.
-    check symexWalkerVersion == "148"
+    ## RFC-0005 S8b (bodiless importc callees take the opaque arm; parseInt
+    ## follows rawParseInt -- `+` sign, int range, `_` continues tainted;
+    ## `exnTypeTable` follows Nim's tree, `ArithmeticDefect` et al.). 148->149.
+    check symexWalkerVersion == "149"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

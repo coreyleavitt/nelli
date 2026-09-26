@@ -11,19 +11,41 @@
 ##
 ##   Exception                       (root, of RootObj)
 ##   ├─ Defect                       (of Exception)
+##   │   ├─ ArithmeticDefect         (RFC-0005 S8b)
+##   │   │   ├─ DivByZeroDefect      (R16-3)
+##   │   │   └─ OverflowDefect       (R16-1)
+##   │   ├─ FloatingPointDefect      (RFC-0005 S8b)
+##   │   │   ├─ FloatInvalidOpDefect
+##   │   │   ├─ FloatDivByZeroDefect
+##   │   │   ├─ FloatOverflowDefect
+##   │   │   ├─ FloatUnderflowDefect
+##   │   │   └─ FloatInexactDefect
 ##   │   ├─ IndexDefect
 ##   │   ├─ FieldDefect
 ##   │   ├─ AssertionDefect
 ##   │   ├─ RangeDefect
-##   │   ├─ OverflowDefect           (R16-1)
-##   │   ├─ DivByZeroDefect          (R16-3)
 ##   │   ├─ OutOfMemDefect           (REAL name; OutOfMemoryDefect is an alias)
-##   │   └─ StackOverflowDefect
+##   │   ├─ StackOverflowDefect
+##   │   ├─ NilAccessDefect
+##   │   └─ AccessViolationDefect, ReraiseDefect, ObjectAssignmentDefect,
+##   │       ObjectConversionDefect, DeadThreadDefect   (RFC-0005 S8b)
 ##   └─ CatchableError               (of Exception)
 ##       ├─ ValueError
 ##       │   └─ KeyError             (KeyError is-a ValueError, NOT directly CatchableError)
 ##       ├─ IOError
-##       └─ OSError
+##       │   └─ EOFError
+##       ├─ OSError
+##       │   └─ LibraryError
+##       └─ ResourceExhaustedError
+##
+## RFC-0005 S8b. The table used to FLATTEN the tree: `DivByZeroDefect` and
+## `OverflowDefect` were recorded as direct `Defect` children and
+## `ArithmeticDefect` was absent, so `except ArithmeticDefect` never caught
+## either (the defect escaped past its handler -- a false `sxRaised`, and the
+## handler's continuation never walked). The whole table is now pinned
+## against the compiler's own `lib/system.nim` + `lib/system/exceptions.nim`
+## by `tests/tsymex_rfc0005_s8b_substitutions.nim` (every Nim exception type
+## present with its real chain; every entry real, one legacy spelling named).
 ##
 ## `isSubtypeOf(raised, handlerType, exnTable, userExnHierarchy)` answers
 ## "does an `except handlerType:` clause catch a raised `raised`?": true iff
@@ -55,8 +77,26 @@ const exnTypeTable*: Table[string, seq[string]] = {
   "FieldDefect":          @["Defect", "Exception"],
   "AssertionDefect":      @["Defect", "Exception"],
   "RangeDefect":          @["Defect", "Exception"],
-  "OverflowDefect":       @["Defect", "Exception"],   ## R16-1
-  "DivByZeroDefect":      @["Defect", "Exception"],   ## R16-3
+  # RFC-0005 S8b: the arithmetic family sits under `ArithmeticDefect`, as in
+  # Nim (it was flattened to `Defect`, so `except ArithmeticDefect` missed it).
+  "ArithmeticDefect":     @["Defect", "Exception"],
+  "OverflowDefect":       @["ArithmeticDefect", "Defect", "Exception"],   ## R16-1
+  "DivByZeroDefect":      @["ArithmeticDefect", "Defect", "Exception"],   ## R16-3
+  # RFC-0005 S8b: the floating-point family (raised by Nim's FP checks,
+  # `--floatChecks:on`) and the remaining direct `Defect` children, so a
+  # handler or raise naming any of them resolves instead of reading as an
+  # unknown type.
+  "FloatingPointDefect":  @["Defect", "Exception"],
+  "FloatInvalidOpDefect": @["FloatingPointDefect", "Defect", "Exception"],
+  "FloatDivByZeroDefect": @["FloatingPointDefect", "Defect", "Exception"],
+  "FloatOverflowDefect":  @["FloatingPointDefect", "Defect", "Exception"],
+  "FloatUnderflowDefect": @["FloatingPointDefect", "Defect", "Exception"],
+  "FloatInexactDefect":   @["FloatingPointDefect", "Defect", "Exception"],
+  "AccessViolationDefect":  @["Defect", "Exception"],
+  "ReraiseDefect":          @["Defect", "Exception"],
+  "ObjectAssignmentDefect": @["Defect", "Exception"],
+  "ObjectConversionDefect": @["Defect", "Exception"],
+  "DeadThreadDefect":       @["Defect", "Exception"],
   "OutOfMemDefect":       @["Defect", "Exception"],
   # `OutOfMemoryDefect` is the RFC/checklist spelling; the real Nim type is
   # `OutOfMemDefect`. Keep both names resolving to the same chain so a SUT

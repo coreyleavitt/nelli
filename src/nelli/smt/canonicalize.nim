@@ -184,7 +184,26 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "148"
+const symexWalkerVersion* = "149"
+  ## RFC-0005 S8b (2026-09-26) — three silent substitutions (§2.2's class:
+  ## a site substituted behaviour and recorded nothing). (1) A call to a
+  ## bodiless foreign callee (`{.importc.}`/`importcpp`/`dynlib`/...) was
+  ## registered and walked as an EMPTY body, returning the zero default --
+  ## a false `sxUnsat` with no error; it now takes the opaque-call arm
+  ## (fresh result, `feOpaqueCallUnmodelled` path taint; statement-position
+  ## value-argument calls stay inert no-ops per #163). (2) `parseInt` now
+  ## follows `rawParseInt` for every `_`-free string: a `+` sign parses
+  ## (the digits continuation dropped every `"+5"`, a false `sxUnsat`; S10's
+  ## refuted lax raise on it is now simply absent), and a value outside
+  ## `int` raises `ValueError` (it parsed to an unbounded Int); a `_`-string
+  ## continues on a tainted fresh value instead of being dropped. (3)
+  ## `exnTypeTable` follows Nim's real tree: `ArithmeticDefect` over
+  ## `DivByZeroDefect`/`OverflowDefect` (`except ArithmeticDefect` caught
+  ## neither -- a false `sxRaised`), the `FloatingPointDefect` family, and
+  ## the remaining direct `Defect` children. A pre-S8b cached `:unsat` /
+  ## `:raised` for any of these shapes is stale. 148->149.
+  ##
+  ## Previous bump (148):
   ## RFC-0005 S8 (2026-09-26) — decline scope + the i3 annotation channel.
   ## Every run-tainting `SymexErrorInfo` now carries a `DeclineScope`; the
   ## parser records each Class-A decline together with its marker

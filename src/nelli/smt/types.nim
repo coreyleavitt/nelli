@@ -1970,15 +1970,18 @@ type
                           ## path at all. No enlarged or shrunk program exists
                           ## for an aborted walk: `classOf` is `dcNoAnswer`.
                           ## sevError -> sxUnknown.
-    seParseIntLaxSyntax   ## RFC-0005 S10. `parseInt(s)`'s raise predicate
-                          ## on a string with a `+` prefix or a `_`: Nim's
-                          ## `rawParseInt` accepts both, Z3's `str.to_int` is
-                          ## -1 on both, so the modelled `ValueError` raise
-                          ## there is a SUPERSET of the real one
-                          ## (`drainParseIntRaises`, `ParseIntRaise.lax`).
-                          ## Taints the raise fork only; `classOf` is
+    seParseIntLaxSyntax   ## RFC-0005 S10. `parseInt(s)` on a string with a
+                          ## `_`: Nim's `rawParseInt` skips it as a digit
+                          ## separator, Z3's `str.to_int` is -1 on it, and
+                          ## the value needs the version-gated
+                          ## `str.replace_all`, so both the modelled
+                          ## `ValueError` raise and (RFC-0005 S8b) the
+                          ## continuation on a fresh value are SUPERSETS of
+                          ## the real ones (`drainParseIntRaises`,
+                          ## `ParseIntRaise.lax`). S10 also put a `+` prefix
+                          ## here; S8b models the sign exactly. `classOf` is
                           ## `dcFreshSymbol` (`{scSpurious}` on both
-                          ## coordinates): a raise it produces is a
+                          ## coordinates): what it produces is a
                           ## replay-gated candidate, and it never voids
                           ## `sxUnsat`. sevError.
     feReplayRefuted       ## RFC-0005 S10 (§4.2 `roRefuted`). NOT a degrade:
@@ -2998,10 +3001,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # approximation in either direction -- ⊤, never "promoted" (§3.3).
   # RFC-0005 S10.
   of seParseIntLaxSyntax: dcFreshSymbol
-    # The lax half of a `parseInt` raise predicate: the model raises on
-    # every `+`-prefixed / `_`-bearing string, reality on a subset -- the
-    # raise fork over-approximates and drops nothing (the exact half is
-    # forked clean alongside it, the digits survivor is unchanged).
+    # The lax half of `parseInt`: on every `_`-bearing string the model
+    # both raises and continues on a fresh value, reality does one of the
+    # two with one value -- both forks over-approximate and drop nothing
+    # (the exact half is forked clean alongside them).
   of feReplayRefuted: dcFreshSymbol
     # A verdict-time diagnostic, never drained into `runTaint` (see the
     # enum member): the refuted witness came from a `dcFreshSymbol`-only

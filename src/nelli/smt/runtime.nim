@@ -1582,22 +1582,19 @@ proc syncConvFloatToIntBoundCond*(cond: Z3Bool)
 
 type ParseIntRaise* = object
   ## RFC-0005 S10. One `parseInt(s)` lowering's raise obligation, SPLIT by
-  ## whether Z3's `str.to_int` agrees with Nim's `parseInt` on the inputs it
-  ## covers. Nim's `parseutils.rawParseInt` accepts a leading `+` and `_`
-  ## separators after a digit; `str.to_int` is `-1` on any such string, so the
-  ## S10b/S7 raise predicate raised on inputs Nim parses (`"+5"`, `"1_0"`) --
-  ## and did so on a CLEAN path, a false `sxRaised` no replay ever saw.
-  ##   * `exact` -- the raise predicate restricted to strings with no `+`
-  ##     prefix and no `_`: there the model is Nim's (a non-digit string, or
-  ##     `-` followed by one, raises; digits parse). Forked CLEAN.
-  ##   * `lax`   -- a `+` prefix or a `_` anywhere (every such string is in
-  ##     the S7 raise predicate, since `str.to_int` is `-1` on it): Nim may
-  ##     raise or parse. The modelled raise set there is a SUPERSET of the
-  ##     real one, so the raise fork is `scSpurious`-tainted
-  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol`) -- a CANDIDATE that only a
+  ## whether the model is Nim's `parseutils.rawParseInt` on the inputs it
+  ## covers. Nim accepts `_` separators after a digit; the model cannot
+  ## compute their value (`str.replace_all` is version-gated), so:
+  ##   * `exact` -- the raise predicate restricted to strings with no `_`:
+  ##     there the model is Nim's (RFC-0005 S8b: one optional `+`/`-` sign,
+  ##     then digits only, in `int` range). Forked CLEAN.
+  ##   * `lax`   -- a `_` anywhere: Nim may raise or parse. Both the raise
+  ##     fork and the continuation (on a fresh value) are `scSpurious`-tainted
+  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol`) -- candidates that only a
   ##     confirming replay may report (RFC-0005 §2.6).
-  ## The digits survivor carries `not exact and not lax` (= the old `not
-  ## raiseCond`), unchanged.
+  ## S10 had `+` in the lax half too, and the digits survivor carried `not
+  ## lax`: every `+`/`_` string was dropped from the continuation, a false
+  ## `sxUnsat` for a target reachable only through one (S8b).
   exact*: Z3Bool
   lax*:   Z3Bool
 
@@ -9209,21 +9206,25 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## (which it was, until RFC-0005 S10), with ONE difference: each lowering
   ## deposits a `ParseIntRaise` pair, and the two halves fork differently.
   ##   * `exact` forks a CLEAN routed `ValueError` raise -- on those inputs
-  ##     Z3's `str.to_int` and Nim's `parseInt` agree.
-  ##   * `lax` (a `+` prefix or a `_`: Nim may parse what `str.to_int`
-  ##     rejects) forks the raise on a path tainted through `degrade`
-  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol` -> `{scSpurious}`), so a
-  ##     boundary `sxRaised` there is a CANDIDATE (`admitSolvedHit`) that
-  ##     RFC-0005 S10's replay confirms (`"+x"` raises for real) or refutes
-  ##     (`"+5"` parses to 5) -- §2.6's replay-gated raise, where before S10
-  ##     it was a clean, unconfirmed `sxRaised`. The error is recorded
-  ##     ONCE per drain whose `lax` half does not simplify to `false` (a
-  ##     literal operand has no lax inputs, so it forks and records
-  ##     nothing); a symbolic operand's lax fork is taken without a
-  ##     feasibility check, as at every other fork site. Its run coordinate
-  ##     `{scSpurious}` is diagnostics-only, so `sxUnsat` is unaffected.
-  ## The survivor carries `not exact` and `not lax` -- together exactly the
-  ## pre-S10 `not raiseCond`, so the digits continuation is unchanged.
+  ##     the model is Nim's `parseInt` (RFC-0005 S8b: sign, digits, range).
+  ##   * `lax` (a `_` separator: the value needs `str.replace_all`) forks
+  ##     BOTH outcomes on paths tainted through `degrade`
+  ##     (`seParseIntLaxSyntax`, `dcFreshSymbol` -> `{scSpurious}`): the
+  ##     raise, whose boundary `sxRaised` is a CANDIDATE (`admitSolvedHit`)
+  ##     that RFC-0005 S10's replay confirms (`"1_x"` raises for real) or
+  ##     refutes (`"1_0"` parses to 10) -- §2.6's replay-gated raise -- and,
+  ##     since RFC-0005 S8b, the digits continuation on the lowering's fresh
+  ##     `__parseIntLaxValue` (S10 dropped it: the survivor carried `not
+  ##     lax`, so a target reachable only through a `_`-string was a false
+  ##     `sxUnsat`). The error is recorded ONCE per drain whose `lax` half
+  ##     does not simplify to `false` (a literal operand has no lax inputs,
+  ##     so it forks and records nothing); a symbolic operand's lax forks are
+  ##     taken without a feasibility check, as at every other fork site. Its
+  ##     run coordinate `{scSpurious}` is diagnostics-only, so `sxUnsat` is
+  ##     unaffected.
+  ## The clean survivor carries `not exact` and `not lax`; the tainted lax
+  ## survivor carries every `not exact` plus the disjunction of the live
+  ## `lax` halves -- together every input on which Nim does not raise.
   let conds = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
@@ -9243,20 +9244,33 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
   var laxTok: Degrade
   if true in laxLive:
     laxTok = w.degrade(seParseIntLaxSyntax,
-      "parseInt: a `+` prefix or `_` separator, which Nim's parseInt " &
-      "accepts and Z3's str.to_int rejects -- the ValueError raise there " &
-      "is over-approximated (seParseIntLaxSyntax; a replay-gated candidate)")
+      "parseInt: a `_` digit separator, which Nim's parseInt skips and " &
+      "Z3's str.to_int rejects -- both the ValueError raise and the parsed " &
+      "value there are over-approximated (seParseIntLaxSyntax; replay-gated " &
+      "candidates)")
+  var anyLax: Z3Bool
+  var anyLaxInit = false
   for i, c in conds:
     let exactPath = forkPath(p, p.pc & @[c.exact], p.env)
     discard routeRaise(exactPath, "ValueError", some(msg), w)
     if laxLive[i]:
       let laxPath = forkPathTainted(p, p.pc & @[c.lax], p.env, laxTok)
       discard routeRaise(laxPath, "ValueError", some(msg), w)
+      if anyLaxInit: anyLax = anyLax or c.lax
+      else:
+        anyLax = c.lax
+        anyLaxInit = true
   let surv = forkPath(p, p.pc, p.env)
   for c in conds:
     surv.defectSurvivorPc.add(not c.exact)
     surv.defectSurvivorPc.add(not c.lax)
-  @[surv]
+  result = @[surv]
+  if anyLaxInit:
+    # RFC-0005 S8b: the `_`-string continuation, on the fresh lax value.
+    let laxSurv = forkPathTainted(p, p.pc, p.env, laxTok)
+    for c in conds: laxSurv.defectSurvivorPc.add(not c.exact)
+    laxSurv.defectSurvivorPc.add anyLax
+    result.add laxSurv
 
 proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
   ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated

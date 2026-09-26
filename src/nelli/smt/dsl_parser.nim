@@ -1089,6 +1089,42 @@ proc annotationViolation(ctx: ParseCtx; n: NimNode;
     pragma: saSymexTransparent, kind: kind, callee: callee,
     site: li.filename & ":" & $li.line & ":" & $li.column, msg: msg)
 
+proc canonicalExnTypeSym(typeNode: NimNode): NimNode =
+  ## RFC-0005 S8b. Resolve a type ALIAS to the type it names --
+  ## `type MyErr = ArithmeticDefect`, or system's deprecated
+  ## `DivByZeroError* = DivByZeroDefect` -- so an `except`/`raise` naming the
+  ## alias gets the real type's id. Before S8b the alias's own name was the
+  ## type id: known to neither table, and `isSubtypeOf` matched nothing, so
+  ## `except MyErr` silently never caught the `DivByZeroDefect` it catches in
+  ## Nim (a false `sxRaised`, no error recorded).
+  ##
+  ## In typed AST an `except` type is an `nnkType` node (verified: its
+  ## `repr` is the written name, `typeKind` is `ntyAlias` for an alias, and
+  ## `getTypeInst` is the written name's symbol); a `raise` names a symbol.
+  ## An alias symbol's `getImpl` is a `TypeDef` whose body is the aliased
+  ## type's bare symbol; a real object type's body is an `ObjectTy`/`RefTy`,
+  ## where resolution stops. A node with no alias hop is returned unchanged,
+  ## so every non-alias type id is exactly what it was.
+  var cur = typeNode
+  if cur.kind == nnkType:
+    let inst =
+      try: cur.getTypeInst
+      except CatchableError: return typeNode
+    if inst.kind != nnkSym: return typeNode
+    cur = inst
+  var hopped = false
+  var guard = 0
+  while cur.kind == nnkSym and guard < 64:
+    inc guard
+    let impl =
+      try: cur.getImpl
+      except CatchableError: break
+    if impl.kind != nnkTypeDef or impl.len < 3 or impl[2].kind != nnkSym:
+      break
+    cur = impl[2]
+    hopped = true
+  if hopped: cur else: typeNode
+
 proc collectUserExnAncestors(typeSym: NimNode, ctx: ParseCtx) =
   ## Phase 15 E4a. Walk `typeSym`'s inheritance chain via `getImpl`, recording
   ## each `child -> direct-parent` link into `ctx.userExnHierarchy`, until the
@@ -1761,6 +1797,52 @@ proc hasBorrowPragma(impl: NimNode): bool =
       else: ""
     if name == "borrow":
       return true
+  false
+
+proc distinctParamOf(impl: NimNode): string =
+  ## Phase 15 G5. The name of the first `distinct T` formal of `impl`, or ""
+  ## when it has none. Shared by `ensureProcRegistered`'s `geDistinctBarrier`
+  ## check and `isBodilessForeign` (which defers to that check).
+  let formal = impl[3]
+  if formal.kind == nnkFormalParams:
+    for i in 1 ..< formal.len:
+      let id = formal[i]
+      if id.kind == nnkIdentDefs:
+        let pc = classifyType(id[id.len - 2])
+        if pc.ty.kind == itDistinct:
+          return pc.ty.distinctName
+  ""
+
+const foreignImportPragmas = ["importc", "importcpp", "importobjc",
+                              "importjs", "dynlib"]
+  ## RFC-0005 S8b. The pragmas that give a routine a FOREIGN definition: its
+  ## body is supplied by C/C++/ObjC/JS or a shared library, never by Nim.
+
+proc isBodilessForeign(calleeSym: NimNode): bool =
+  ## RFC-0005 S8b (§2.2's silent-substitution class). True when `calleeSym`
+  ## is a routine with no Nim body because it is defined outside Nim
+  ## (`foreignImportPragmas`) -- e.g. `proc c_abs(x: int32): int32
+  ## {.importc: "abs", header: "<stdlib.h>".}`.
+  ##
+  ## Before S8b such a callee fell through to `ensureProcRegistered`, was
+  ## registered, and `parseCalleeImpl` parsed its EMPTY body: the walker
+  ## "called" a proc that does nothing and returns the zero default. A target
+  ## reachable only through the foreign result was then a false `sxUnsat`
+  ## with no error recorded at all. The call is an effect symex cannot see
+  ## into, which is exactly what the opaque-call arm models (a fresh result
+  ## and a `feOpaqueCallUnmodelled` path taint), so both call-position
+  ## dispatches route it there, next to `{.symexOpaque.}`.
+  ##
+  ## Two exclusions keep existing, more specific treatment first:
+  ## `{.borrow.}` (the G5 borrow path) and a bodiless proc over a `distinct`
+  ## formal (`ensureProcRegistered`'s `geDistinctBarrier` callee decline).
+  if calleeSym.kind != nnkSym: return false
+  let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
+  if impl == nil or impl.kind notin walkableRoutineKinds: return false
+  if impl[6].kind != nnkEmpty or hasBorrowPragma(impl): return false
+  if distinctParamOf(impl).len > 0: return false
+  for name in foreignImportPragmas:
+    if hasSymexPragma(calleeSym, name): return true
   false
 
 type BorrowInfo = object
@@ -4396,8 +4478,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # only the deletion is withheld.
     let calleeName = calleeSym.strVal
     let opaModel = getStdlibModelFor(calleeName, itBool)
+    # RFC-0005 S8b: a bodiless foreign (`importc`/`dynlib`/...) callee is an
+    # opaque effect too -- see `isBodilessForeign` (it was walked as an EMPTY
+    # body, a silent zero result).
     if opaModel.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
-       hasSymexTransparentPragma(calleeSym):
+       hasSymexTransparentPragma(calleeSym) or isBodilessForeign(calleeSym):
       # #163 review R10: the callee over-claimed `{.symexTransparent.}` on
       # the OTHER route from R7's (`isInertOpaqueCall` gate, statement
       # position, above) — its RESULT IS USED, here in expression position.
@@ -8575,7 +8660,12 @@ proc parseStmtInner(n: NimNode,
           for i in 1 ..< n.len:
             argIRs.add parseExpr(n[i], preamble, ctx)
           mkOpaqueCall(calleeName, "", argIRs, tBool(), false)
-        elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym):
+        elif m.kind == smkOpaqueEffectful or hasSymexOpaquePragma(calleeSym) or
+             isBodilessForeign(calleeSym):
+          # RFC-0005 S8b: a bodiless foreign callee joins this arm (see
+          # `isBodilessForeign`); the inertness rule below applies to it as
+          # to any opaque call.
+          #
           # Issue #163 slice 4: an opaque call in statement position (no
           # bound result — `retName == ""` below) whose every argument is
           # plainly value-typed (`isInertOpaqueCall`) cannot affect the
@@ -8784,6 +8874,7 @@ proc parseStmtInner(n: NimNode,
         var tn = oc[0]
         while tn.kind in {nnkPar, nnkRefTy, nnkPtrTy} and tn.len > 0:
           tn = tn[0]
+        tn = canonicalExnTypeSym(tn)   ## RFC-0005 S8b: an alias is its target
         let typeId =
           if tn.kind in {nnkSym, nnkIdent}: tn.strVal else: tn.repr
         # Phase 15 E4a. Capture the RAISED type's inheritance chain (beyond the
@@ -8814,7 +8905,7 @@ proc parseStmtInner(n: NimNode,
       of nnkExceptBranch:
         var typeIds: seq[string]
         for j in 0 ..< arm.len - 1:
-          let tnode = arm[j]
+          let tnode = canonicalExnTypeSym(arm[j])   ## RFC-0005 S8b
           typeIds.add (if tnode.kind in {nnkSym, nnkIdent}: tnode.strVal
                        else: tnode.repr)
           # Phase 15 E4a. Capture the HANDLER type's inheritance chain too
@@ -9344,16 +9435,7 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # walker's missing-callee arm degrades the path to sxUnknown, and the sevError
   # forces the verdict to sxUnknown (never silent).
   if impl[6].kind == nnkEmpty and not hasBorrowPragma(impl):
-    let formal = impl[3]
-    var distinctParam = ""
-    if formal.kind == nnkFormalParams:
-      for i in 1 ..< formal.len:
-        let id = formal[i]
-        if id.kind == nnkIdentDefs:
-          let pc = classifyType(id[id.len - 2])
-          if pc.ty.kind == itDistinct:
-            distinctParam = pc.ty.distinctName
-            break
+    let distinctParam = distinctParamOf(impl)
     if distinctParam.len > 0:
       # RFC-0005 S1b: kind-encoding unregistered key (see `types.nim`);
       # RFC-0005 S8: the record is anchored at that key (`declineCallee`).

@@ -19,6 +19,9 @@
 ##       `str.to_int` rejects what Nim's `parseInt` accepts, so the raise on
 ##       such a string was a CLEAN, sometimes false `sxRaised`. S10 splits the
 ##       predicate; the lax half is a candidate and replay classifies it.
+##       (RFC-0005 S8b made the `+` sign exact -- only `_` is lax now -- so
+##       the `+` pins below are clean verdicts, and the replayed lax pins use
+##       `_` strings.)
 ##   (c) the trio through `symexFindAllWitnesses` and `symexForAll`, and the
 ##       cache: replay precedes persist, a confirmed candidate is stored as
 ##       the `sxSat`/`sxRaised` it became, a refuted one as `sfUnknown`, and
@@ -113,6 +116,11 @@ proc s10ParsePlusAlpha(s: string) =
   tick()
   if s == "+x":
     discard parseInt(s)      ## Nim raises too: a real ValueError
+
+proc s10ParseUnderscoreAlpha(s: string) =
+  tick()
+  if s == "1_x":
+    discard parseInt(s)      ## Nim raises too: `x` is no digit
 
 proc s10ParseUnderscore(s: string) =
   tick()
@@ -286,13 +294,15 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
 
 suite "RFC-0005 S10 (b) -- parseInt's `+` / `_` over-report, classified by replay":
 
-  test "\"+5\": Nim parses it -- the lax raise is refuted, sxUnknown (was a clean false sxRaised)":
+  test "\"+5\": Nim parses it -- no raise at all, sxUnsat (S10: a refuted lax raise; before S10 a clean false sxRaised)":
+    # RFC-0005 S8b: the `+` sign is modelled exactly (`rawParseInt`), so
+    # "+5" parses and the ValueError target is unreachable -- a clean
+    # verdict with no candidate to replay.
     sideEffects = 0
     let r = symexFind(s10ParsePlusDigit, tRaisedExn("ValueError"))
-    check r.status == sxUnknown
-    check r.errors.hasKind(seParseIntLaxSyntax)
-    check r.errors.hasKind(feReplayRefuted)
-    check sideEffects == 1
+    check r.status == sxUnsat
+    check not r.errors.hasKind(feReplayRefuted)
+    check sideEffects == 0
 
   test "\"1_0\": `_` is a digit separator in Nim -- refuted, sxUnknown":
     sideEffects = 0
@@ -301,12 +311,20 @@ suite "RFC-0005 S10 (b) -- parseInt's `+` / `_` over-report, classified by repla
     check r.errors.hasKind(feReplayRefuted)
     check sideEffects == 1
 
-  test "\"+x\": Nim raises too -- the lax raise is confirmed, sxRaised":
+  test "\"+x\": Nim raises too -- since S8b an exact, clean sxRaised, no replay":
     sideEffects = 0
     let r = symexFind(s10ParsePlusAlpha, tRaisedExn("ValueError"))
     check r.status == sxRaised
     check r.raisedTypeId == "ValueError"
     check r.raisedWitness[0] == "+x"
+    check sideEffects == 0
+
+  test "\"1_x\": Nim raises too -- the lax raise is confirmed, sxRaised":
+    sideEffects = 0
+    let r = symexFind(s10ParseUnderscoreAlpha, tRaisedExn("ValueError"))
+    check r.status == sxRaised
+    check r.raisedTypeId == "ValueError"
+    check r.raisedWitness[0] == "1_x"
     check sideEffects == 1
 
   test "the exact half stays a clean sxRaised, no replay":

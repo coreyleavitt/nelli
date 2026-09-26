@@ -820,5 +820,11 @@ task test, "Run the test suite":
             # signature / callee-key / walk-site), the structural totality
             # pin + bucket-4 list, the i3 annotation-violation channel;
             # walker 147->148.
-            "tsymex_rfc0005_s8_scope"]:
+            "tsymex_rfc0005_s8_scope",
+            # RFC-0005 S8b: three silent substitutions -- bodiless importc
+            # callees take the opaque arm, parseInt follows rawParseInt
+            # (`+` sign, int range, `_` continues tainted), exnTypeTable
+            # audited against Nim's own hierarchy (+ exception aliases);
+            # walker 148->149.
+            "tsymex_rfc0005_s8b_substitutions"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -92,6 +92,11 @@ title = "DeclineScope carrier + Class-A/B unification + totality pin (vetoes ret
 state = "done"
 
 [[slice]]
+id    = "S8b"
+title = "Three silent substitutions: bodiless importc callee, parseInt '+' sign, exn hierarchy (ArithmeticDefect)"
+state = "done"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "pending"
@@ -789,6 +794,50 @@ above, each forced by making the totality pin *real* rather than approximate:
 - **Bucket 4 today: empty for every run, with one construction `dskUnplaced` by
   design** — the Invariant-7 backstop, which fires only when nothing at all was
   recorded (there is no site to name). It is enumerated by name in the pin.
+
+**As landed (S8b, walker 149) — three silent substitutions.** Found during
+S6b/S10: sites in §2.2's class that substituted behaviour and recorded
+*nothing*, so no channel, scope or veto could see them. Each was a false
+verdict with an empty `errors`. S9 inherits them fixed, not hidden behind the
+blanket vetoes it deletes.
+
+- **Bodiless foreign callee.** A call to an `{.importc.}` (or `importcpp`,
+  `importobjc`, `importjs`, `dynlib`) proc with no Nim body was registered and
+  its EMPTY body walked, so the call returned the zero default. A target
+  reachable only through the foreign result was a false `sxUnsat`.
+  `isBodilessForeign` (`dsl_parser.nim`) now routes it through both
+  call-position opaque arms, next to `{.symexOpaque.}`. The call gets a fresh
+  result and a walk-site `feOpaqueCallUnmodelled`. That kind is reused rather
+  than minted: `dcSubstituted` is the class the site earns (§3.2), because
+  the result is fresh (⊇) and any foreign effect on state is dropped (⊆).
+  Statement-position calls whose arguments are all values stay inert no-ops
+  (#163's rule). `{.symexTransparent.}`/`{.symexOpaque.}` importc callees are
+  unchanged. A bodiless proc over a `distinct` formal keeps its
+  `geDistinctBarrier` callee decline.
+- **`parseInt`.** The model is now `parseutils.rawParseInt` for every string
+  with no `_`. It accepts one optional `+`/`-` sign, then digits only, in
+  `int` range with Nim's asymmetric bound. The digits continuation used to
+  drop every `+` string, a false `sxUnsat` for `parseInt("+5")`. A value
+  outside `int` used to be an unbounded Int that never raised; now it raises
+  `ValueError`. With `+` exact, only `_` is `seParseIntLaxSyntax`, since its
+  value would need the version-gated `str.replace_all`. A `_` string now
+  continues on a fresh, tainted value (`dcFreshSymbol`, replay-gated). S10
+  dropped that continuation.
+- **Exception hierarchy.** `exnTypeTable` had flattened `DivByZeroDefect`/
+  `OverflowDefect` onto `Defect` and omitted `ArithmeticDefect`, so `except
+  ArithmeticDefect` caught neither: a false `sxRaised`. The table now matches
+  Nim's tree. That adds `ArithmeticDefect`, the `FloatingPointDefect` family
+  and five more direct `Defect` children. The table is audited against the
+  compiler's own `lib/system.nim` + `lib/system/exceptions.nim`, read at
+  compile time. Found while auditing: an `except`/`raise` naming a type
+  **alias** (a user `type E = ArithmeticDefect`, or system's deprecated
+  `DivByZeroError`) used the alias's name as the type id. That id is in no
+  table, so the handler silently never matched. `canonicalExnTypeSym`
+  resolves aliases.
+
+Pins: `tests/tsymex_rfc0005_s8b_substitutions.nim`. S10's two `+` pins
+become clean verdicts (`"+5"` → `sxUnsat`, `"+x"` → an exact `sxRaised`), and
+its confirmed-lax pin moves to `"1_x"`.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

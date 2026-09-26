@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~00:45)
+## Current position (refreshed 2026-09-26 ~03:15)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -47,7 +47,8 @@
   to the full 20M rlimit), not infinite; ~12s at 1M. Recorded in RFC §4.2.
 - **Windows CI:** Corey approved the push; branch pushed 2026-09-26 04:44Z at
   `969d59c` (S0-S7). Runs: fuzzer-msvc 36218721870, fuzzer-mingw 36218721921,
-  symex-mingw 36218721869. All three legs already use the patched-Nim OCI
+  symex-mingw 36218721869 -- **all three green** (S0-S7 Windows-verified, incl.
+  the Linux-hanging `b7r2_pathscope`). All three legs already use the patched-Nim OCI
   artifact (`setup-nim-artifact`), containerless.
 - **i3 decided by Corey 2026-09-26: neither option -- a separate channel.**
   `feTransparentResultUsed`/`feTransparentArgNotInert` are not declines (nothing is

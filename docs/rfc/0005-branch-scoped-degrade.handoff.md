@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~11:05Z)
+## Current position (refreshed 2026-09-26 ~11:35Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -63,19 +63,27 @@
   record; S7's capMutNeg false sxSat must be handled before deleting the veto.
 - **S10 Windows CI (`fbbc373`): all three green** -- fuzzer-mingw 36228767377,
   fuzzer-msvc 36228767379, symex-mingw 36228767383 (first pcre64.dll run).
-- **Slices done:** 14 of 16 (S8b added as a fence row by its slice).
-- **Remaining:** S8b (running, opus: importc empty-body, parseInt '+', exn hierarchy;
-  code done, gate sweep `s8b-sweep.log` at 488/~509 at 11:03Z), S8c, S9, S11.
-- **S8 Windows CI (`4d06fd4`): all three green** -- fuzzer-mingw 36233546704,
-  fuzzer-msvc 36233546690, symex-mingw 36233546682. S0-S8 + S10 Windows-verified.
+- **S8b landed `6004832`** (walker 149; pushed). Sweep: unchanged=496 regressed=0
+  new-failing=0 new-ok=13. Fixed: bodiless importc/importcpp/dynlib callee ->
+  fresh result + walk-site `feOpaqueCallUnmodelled`; `parseInt` now exact vs
+  `rawParseInt` ('+', lone sign raises, out-of-range raises), `_` strings continue
+  tainted (`seParseIntLaxSyntax`, dcFreshSymbol); `exn_hierarchy` audited against
+  the compiler's `system.nim` at compile time (12 missing types, 2 wrong chains);
+  **4th bug found and fixed:** exception *aliases* (`type E = ArithmeticDefect`,
+  deprecated `DivByZeroError`) used the alias name as type id -> false sxRaised.
+  S9 note: handler-side user exn capture (`collectUserExnAncestors`) skips
+  `nnkType` except types -- do not rely on it.
+- **Slices done:** 15 of 17 (S8b, S8c are fence rows).
+- **Remaining:** S8c (running, opus: name-resolved builtins/operators -> resolve by
+  symbol), S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
-- **Scheduled S8c (after S8b, before S9):** the parser resolves operators and
+- **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --
   the same §2.2 silent-substitution class as S8b, so it is in scope, not deferred.
   Fix: resolve by symbol (or taint when the resolved symbol is not the builtin).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8b commit; if no agent is running, gate any
+  resume, check `git log` for the S8c commit; if no agent is running, gate any
   uncommitted work (full sweep-diff) before committing. Order: S8b -> S8c -> S9 ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

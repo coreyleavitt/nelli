@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~19:50Z)
+## Current position (refreshed 2026-09-26 ~20:20Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -96,7 +96,7 @@
   verdict); `WeakRef` arm gone.
 - **Slices done:** 17 of 19.
 - **S8d Windows CI (`a95bb69`): all three green.** S0-S8d + S10 Windows-verified.
-- **Remaining:** S9 (running, opus; code done, gate sweep `s9-sweep.log` 302/~509 at 19:50Z: delete `capForcedUnknown`/`closureForcedUnknown`;
+- **Remaining:** S9 (running, opus; code done, gate sweep `s9-sweep.log` 438/~509 at 20:20Z: delete `capForcedUnknown`/`closureForcedUnknown`;
   fix S7's capMutNeg; msg+scope dedup), then **S8e** (new, after S9): two *loud*
   pre-existing defects found by S8d -- (1) `classifyType` "node has no type"
   compile crash on `x in s`/`s.add x` over a user generic alias of `seq`; (2) the

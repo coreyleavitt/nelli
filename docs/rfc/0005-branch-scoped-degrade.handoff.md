@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~11:35Z)
+## Current position (refreshed 2026-09-26 ~12:10Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -64,7 +64,8 @@
 - **S10 Windows CI (`fbbc373`): all three green** -- fuzzer-mingw 36228767377,
   fuzzer-msvc 36228767379, symex-mingw 36228767383 (first pcre64.dll run).
 - **S8b landed `6004832`** (walker 149; pushed). Sweep: unchanged=496 regressed=0
-  new-failing=0 new-ok=13. Fixed: bodiless importc/importcpp/dynlib callee ->
+  new-failing=0 new-ok=14 (complete-run diff). Windows CI on `dde01b4`: fuzzer-mingw
+  36238010826 green; symex-mingw 36238010682, fuzzer-msvc 36238010758 running. Fixed: bodiless importc/importcpp/dynlib callee ->
   fresh result + walk-site `feOpaqueCallUnmodelled`; `parseInt` now exact vs
   `rawParseInt` ('+', lone sign raises, out-of-range raises), `_` strings continue
   tainted (`seParseIntLaxSyntax`, dcFreshSymbol); `exn_hierarchy` audited against
@@ -75,7 +76,7 @@
   `nnkType` except types -- do not rely on it.
 - **Slices done:** 15 of 17 (S8b, S8c are fence rows).
 - **Remaining:** S8c (running, opus: name-resolved builtins/operators -> resolve by
-  symbol), S9, S11.
+  symbol; mid-implementation at 12:10Z, sweep not started), S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --

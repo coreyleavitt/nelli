@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~13:10Z)
+## Current position (refreshed 2026-09-26 ~14:05Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -84,7 +84,8 @@
   points; wire real `strutils.replace` to the all-occurrences model (the existing
   model is first-match, a separate false-sxUnsat bug: `"foofoo".replace("foo","bar")`
   is `"barbar"` in Nim, and the S5 pin said `"barfoo"`); keep `bytes`/`hePtrArith`
-  only if a real stdlib producer exists, else delete/tombstone; rerun sweep -j 2), S9, S11.
+  only if a real stdlib producer exists, else delete/tombstone; rerun sweep -j 2).
+  Agent applied the resolution; rerun sweep `s8c-sweep.log` at 301/~509 at 14:05Z), S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --

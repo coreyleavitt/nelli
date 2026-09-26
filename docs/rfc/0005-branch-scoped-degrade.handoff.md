@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 21:26Z)
+## Current position (refreshed 2026-09-26 21:50Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -94,16 +94,10 @@
   structure or declined (`feUnsupportedParamType`). S11 migration: user types
   named like stdlib types now get sxUnknown+feUnsupportedParamType (enums: real
   verdict); `WeakRef` arm gone.
-- **Slices done:** 17 of 19.
+- **Slices done:** 18 of 20 (S0-S10 incl. S8b/S8c/S8d; S8e added).
 - **S8d Windows CI (`a95bb69`): all three green.** S0-S8d + S10 Windows-verified.
-- **Remaining:** S9 (running, opus; code done, gate sweep first sweep: unchanged=495 regressed=1 (`tsymex_r6_n27_placeholder_read_audit`) new-ok=17; agent fixed and is re-sweeping `s9-sweep2.log`, 474/~509 at 21:26Z: delete `capForcedUnknown`/`closureForcedUnknown`;
-  fix S7's capMutNeg; msg+scope dedup), then **S8e** (new, after S9): two *loud*
-  pre-existing defects found by S8d -- (1) `classifyType` "node has no type"
-  compile crash on `x in s`/`s.add x` over a user generic alias of `seq`; (2) the
-  witness emitters (`symex.nim`, `dsl_parser.nim`) spell `seq`/`Table`/object
-  names bare in the caller's scope, so a clashing import fails to compile.
-  Then S11.
-- **S9 implemented (walker 152), committed on this branch, not pushed.** Both
+- **S9 landed `9ce6dba`** (walker 152; pushed 21:50Z). Final sweep `s9-sweep2.log`:
+  unchanged=496 regressed=0 new-failing=0 new-ok=17. Both
   vetoes are deleted. What changed:
   - Reach join: an unreached anchored parse decline becomes `sevHint` with a
     suffixed msg. `dedupedByMsg` keys on msg+scope.
@@ -124,16 +118,17 @@
   - S11 migration must list: unreached declines are now `sevHint`; the new
     kind; the two renames; twin anchored declines now keep one walk record
     each.
-- **Remaining:** S8e -> S11 -> completion gate.
+- **Remaining:** **S8e** (running, opus) -- three pre-existing defects:
+  (1) shadowed names share one closure env slot (an inner `var k` aliases the outer
+  `k`) -> a *silent* wrong verdict, the priority item; (2) `classifyType` "node has
+  no type" compile crash on `x in s`/`s.add x` over a user generic alias of `seq`;
+  (3) witness emitters spell `seq`/`Table`/object names bare in the caller's scope,
+  so a clashing import fails to compile. Then S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
-- **S8c (running):** the parser resolves operators and
-  `contains` by *name*, so a user overload is silently modelled as the builtin --
-  the same §2.2 silent-substitution class as S8b, so it is in scope, not deferred.
-  Fix: resolve by symbol (or taint when the resolved symbol is not the builtin).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S9 commit; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S9 -> S8e ->
+  resume, check `git log` for the S8e commit; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8e ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

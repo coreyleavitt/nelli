@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~09:35Z)
+## Current position (refreshed 2026-09-26 ~10:05Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -53,23 +53,30 @@
   sxUnsat; (3) `exn_hierarchy.nim` lacks `ArithmeticDefect`, so `except
   ArithmeticDefect` misses DivByZero/Overflow -> false sxRaised.
 - **Slices done:** 13 of 15 (S10 added).
-- **Remaining:** S8 (running, opus agent `acbfc579e7fd0a778`, in the main checkout;
-  code written, running its own full gate sweep), S8b, S9, S11.
-- **S10 Windows CI (`fbbc373`, pushed 08:06Z): all three green** -- fuzzer-mingw
-  36228767377, fuzzer-msvc 36228767379, symex-mingw 36228767383 (first pcre64.dll run).
-- **S8 gate sweep** `scratchpad/s8-sweep.log` at 471/~509 lines (09:32Z); the agent
-  diffs against `baseline-6cbfe8f.log` and commits on regressed=0.
-- **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 resolved; i3 decided
-  (above), fence flip lands with S8.
-- **Found outside the RFC (not fixed, needs filing/fix):** `exn_hierarchy.nim` has
-  no `ArithmeticDefect` entry, so `except ArithmeticDefect` does not catch
-  `DivByZeroDefect`/`OverflowDefect` -> **pre-existing false `sxRaised`** (S6b).
-  Also: the parser resolves operators/`contains` by name, so user overloads are
-  modelled as the builtin (pre-existing, clean paths for Table/Set).
+- **S8 landed `654263b`** (walker 148; pushed). Sweep `s8-sweep.log`:
+  unchanged=496 regressed=0 new-failing=0 new-ok=13. i3 resolved in the fence.
+  DeclineScope gained an extra kind `dskWalkSite` (walker-made records; RFC §2.5
+  "As landed"). Bucket-4 = 0. One verdict flip: sxUnknown -> sxSat off the
+  over-claimed call's path (i3 split; clean rule-1 hit). Notes for S9: reach means
+  *walked* not feasible; `dedupedByMsg` collapses same-text markers (dedup on
+  msg+scope before relying on the reach join); Class-B sites have only the walk
+  record; S7's capMutNeg false sxSat must be handled before deleting the veto.
+- **S10 Windows CI (`fbbc373`): all three green** -- fuzzer-mingw 36228767377,
+  fuzzer-msvc 36228767379, symex-mingw 36228767383 (first pcre64.dll run).
+- **Slices done:** 14 of 16 (S8b added as a fence row by its slice).
+- **Remaining:** S8b (running, opus: importc empty-body, parseInt '+', exn hierarchy),
+  S9, S11.
+- **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
+- **Scheduled S8c (after S8b, before S9):** the parser resolves operators and
+  `contains` by *name*, so a user overload is silently modelled as the builtin --
+  the same §2.2 silent-substitution class as S8b, so it is in scope, not deferred.
+  Fix: resolve by symbol (or taint when the resolved symbol is not the builtin).
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
-  5.5 as the agent for the most dificult chunks try to plan that out.` — on
-  resume, check `git log` for the S8 commit; if
-  no agent is running, gate any uncommitted work (full sweep-diff) before committing.
+  5.5 as the agent for the most dificult chunks try to plan that out.` -- on
+  resume, check `git log` for the S8b commit; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8b -> S8c -> S9 ->
+  S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
+  `quipu warm --push`.
 
 ## Implementation plan — model allocation
 

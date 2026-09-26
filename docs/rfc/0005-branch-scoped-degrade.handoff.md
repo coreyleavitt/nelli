@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 23:17Z)
+## Current position (refreshed 2026-09-26 23:48Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -119,7 +119,7 @@
     kind; the two renames; twin anchored declines now keep one walk record
     each.
 - **S9 Windows CI (`23692b2`): all three green.** S0-S10 (incl. S8b-S8d) Windows-verified.
-- **Remaining:** **S8e** (running, opus; code done, gate sweep `s8e-sweep.log` 242/~509 at 23:17Z) -- three pre-existing defects:
+- **Remaining:** **S8e** (running, opus; code done, gate sweep `s8e-sweep.log` 394/~509 at 23:48Z) -- three pre-existing defects:
   (1) shadowed names share one closure env slot (an inner `var k` aliases the outer
   `k`) -> a *silent* wrong verdict, the priority item; (2) `classifyType` "node has
   no type" compile crash on `x in s`/`s.add x` over a user generic alias of `seq`;

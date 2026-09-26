@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~16:05Z)
+## Current position (refreshed 2026-09-26 ~16:35Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -89,8 +89,8 @@
 - **Slices done:** 16 of 18 (S8b, S8c, S8d are fence rows).
 - **Remaining:** S8d (running, opus: `classifyType` and sibling type dispatch
   recognise `seq`/`Table`/`HashSet`/`Option` heads by name -> resolve by symbol;
-  gate sweep `s8d-sweep.log` 305/~509 at 16:05Z), S9, S11.
-- **S8c Windows CI (`1eb6924`):** fuzzer-mingw, fuzzer-msvc green; symex-mingw running.
+  gate sweep `s8d-sweep.log` 479/~509 at 16:35Z), S9, S11.
+- **S8c Windows CI (`1eb6924`): all three green.** S0-S8c + S10 Windows-verified.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **S8c (running):** the parser resolves operators and
   `contains` by *name*, so a user overload is silently modelled as the builtin --

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-26 ~04:15)
+## Current position (refreshed 2026-09-26 ~08:40Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -53,7 +53,10 @@
   sxUnsat; (3) `exn_hierarchy.nim` lacks `ArithmeticDefect`, so `except
   ArithmeticDefect` misses DivByZero/Overflow -> false sxRaised.
 - **Slices done:** 13 of 15 (S10 added).
-- **Remaining:** S8 (running), S8b, S9, S11.
+- **Remaining:** S8 (running, opus agent `acbfc579e7fd0a778`, in the main checkout;
+  code written, running its own full gate sweep), S8b, S9, S11.
+- **S10 Windows CI (`fbbc373`, pushed 08:06Z):** fuzzer-mingw 36228767377 green;
+  fuzzer-msvc 36228767379 and symex-mingw 36228767383 (first pcre64.dll run) in progress.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 resolved; i3 decided
   (above), fence flip lands with S8.
 - **Found outside the RFC (not fixed, needs filing/fix):** `exn_hierarchy.nim` has

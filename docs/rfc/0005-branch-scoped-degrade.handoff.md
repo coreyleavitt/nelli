@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-25 ~17:10)
+## Current position (refreshed 2026-09-26 ~00:45)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -27,13 +27,24 @@
 - **Order change:** S8 hard-pauses on fork **i3**; S10 has no dependency on S8/S9,
   so **S10 (opus) runs now**; S8 -> S9 -> S11 follow once i3 is answered.
 - **Branch vs main:** `main` is still `6cbfe8f`; lands by fast-forward (no PR).
-  Never pushed (no upstream).
-- **Windows gate:** §4.4 makes Windows CI required on semantics-bearing slices
-  (S4 onward). **Asked Corey (unanswered)** whether to push the branch to trigger
-  the Windows legs; until answered, gating is local sweep-diff only.
-- **In flight:** **S10** (opus) -- replay wired into the verdict across both
-  `runSymex` consumers, candidacy unspellable-as-sat, spurious raises replay-gated.
-- **Remaining:** S10, S8 (blocked on i3), S9, S11.
+- **S10 BLOCKED (uncommitted in the main checkout, do not discard):** replay
+  emits a real call to `fn`, so every symexFind/FindAllWitnesses/ForAll SUT and
+  its callees become link-time and load-time dependencies of the caller's binary.
+  §4.2 never names this. Sweep regressions: `tsymex_phase15_g5_distinct_borrow`
+  (undefined `magic_scale` importc) and `tsymex_phase15_S6b_regex`/`S7b_smoke`
+  (libpcre not loadable). Also 5 legit replay-confirmed flips sxUnknown -> sxSat
+  whose pins still assert sxUnknown (S5_strops replaceAllFoo, CR11_CR18_splitcap,
+  S7a_bytes bytesTooLong, r2_zerodefault T5h, tot1 A6-rider). Splat bug (carrier
+  types, non-void fn) fixed. No second full sweep yet; cpp not run. The uncommitted
+  tree has the S10 fence row flipped to done -- revert if S10 doesn't land as is.
+  Commit message drafted at `scratchpad/s10-commit-msg.txt`. **Fork put to Corey.**
+- **S1c "hang" corrected:** the N36 shape takes ~234s (six tainted queries each
+  to the full 20M rlimit), not infinite; ~12s at 1M. Recorded in RFC §4.2.
+- **Windows CI:** Corey approved the push; branch pushed 2026-09-26 04:44Z at
+  `969d59c` (S0-S7). Runs: fuzzer-msvc 36218721870, fuzzer-mingw 36218721921,
+  symex-mingw 36218721869. All three legs already use the patched-Nim OCI
+  artifact (`setup-nim-artifact`), containerless.
+- **Remaining:** S10 (blocked on the link fork), S8 (blocked on i3), S9, S11.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing), **i3 (transparent
   companions, blocks S8** -- `feTransparentArgNotInert` / `feTransparentResultUsed`
   stay ⊤ until it is decided). i1 resolved. S8 hard-pauses if i3 is still open.

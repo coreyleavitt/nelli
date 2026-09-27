@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 03:23Z)
+## Current position (refreshed 2026-09-27 03:54Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -131,7 +131,7 @@
   `std/tables`/`std/sets` in the caller.
 - **Slices done:** 19 of 21.
 - **S8e Windows CI (`93b74ac`): all three green.** S0-S10 incl. S8b-S8e Windows-verified.
-- **Remaining:** **S8f** (running, opus; GREEN, gate sweep in progress at 03:23Z, ~296/510 lines): S8e found a *clean sxSat whose witness
+- **Remaining:** **S8f** (running, opus; GREEN, gate sweep in progress at 03:54Z, ~418/510 lines): S8e found a *clean sxSat whose witness
   does not satisfy the target* -- `Table[string,int]` with `t.len == 2` renders
   `{:}`. Fix the len-vs-content gap across container models (Table, HashSet,
   seq, string, OrderedTable, CountTable) and decide on evidence whether replay

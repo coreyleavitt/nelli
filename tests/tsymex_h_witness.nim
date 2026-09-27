@@ -13,7 +13,8 @@
 ## `buildHeapSnapshot`/`pointeeRendering` now descend recursively into
 ## ref-typed object fields and container (seq/array) elements, bounded by the
 ## SAME effective heap-depth budget the walker itself enforces
-## (`effectiveHeapDepthLimit`), and cycle-safe via a `visited` address set — a
+## (`effectiveHeapDepthLimit`; RFC-0005 S8h removed that cut -- see the chain
+## test), and cycle-safe via a `visited` address set — a
 ## revisited address renders `aliasRef` to the name it was FIRST seen under
 ## rather than re-recursing (the LOAD-BEARING safety property: a self-cycle
 ## or ring must terminate, not hang or stack-overflow).
@@ -177,11 +178,18 @@ suite "Cluster H H_witness — recursive heap-snapshot witness":
     check qNext.aliasRef.isSome
     check qNext.aliasRef.get == "p"
 
-  test "depth bound: a 3-deep forced chain renders exactly 2 hops under maxHeapDepth=3":
+  test "a 3-deep forced chain renders every hop, with no depth cut":
+    # RFC-0005 S8h re-pin. This pinned exactly 3 entries and a
+    # `"<max-heap-depth>"` marker on `p.next.next`: the snapshot cut its walk
+    # at the walker's heap-depth budget. That budget bounds the derefs a PATH
+    # makes, not the cells an input holds, and the typed witness now resolves
+    # every position through the snapshot, so a position past the cut would
+    # read nil. The walk now follows the model's addresses to the end -- it
+    # ends because an uninterpreted sort's model universe is finite (a cycle
+    # is an alias back to a cell already named). `p.next.next.next` is a hop
+    # the SUT never takes: it renders the model's (free) value.
     let r = symexFind(longChain, tLabel("long_chain"), depth3)
     check r.status == sxSat
-    # p, p.next, p.next.next — the third hop is never taken (never selected).
-    check r.heapSnapshot.len == 3
     let pEntry = find("p", r.heapSnapshot)
     check "@p.next" in pEntry.pointsTo.get
     let n1Entry = find("p.next", r.heapSnapshot)
@@ -189,9 +197,14 @@ suite "Cluster H H_witness — recursive heap-snapshot witness":
     check "@p.next.next" in n1Entry.pointsTo.get
     let n2Entry = find("p.next.next", r.heapSnapshot)
     check n2Entry.pointsTo.isSome
-    # The third hop is BLOCKED (never selected) — honest, not fabricated.
-    check "<max-heap-depth>" in n2Entry.pointsTo.get
-    check "p.next.next.next" notin mapNames(r.heapSnapshot)
+    check "<max-heap-depth>" notin n2Entry.pointsTo.get
+    # The typed witness is the chain the path proved, and it reproduces.
+    let p = r.witness[0]
+    check p != nil and p.next != nil and p.next.next != nil
+    check p.next != p and p.next.next != p and p.next.next != p.next
+    symexCaptureBegin()
+    longChain(p)
+    check "long_chain" in symexCaptureEnd()
 
   test "container element: array[2, Node] element renders its pointee":
     let r = symexFind(arrElemHit, tLabel("arr_elem_hit"))

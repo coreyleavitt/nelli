@@ -14,7 +14,7 @@
 ## (so a bare re-raise inside the finally sees it); if the finally completes
 ## normally on a raised continuation, the original is re-propagated; if the
 ## finally itself raises, that replaces the in-flight one.
-import std/[unittest, tables, options]
+import std/[unittest, options]
 import nelli/symex
 import nelli/smt/[dsl, runtime]
 
@@ -83,10 +83,10 @@ suite "symex Phase 15 E5 — finally semantics (finally-raises-replaces)":
   #
   # un-deferred at R13; Cluster R complete.
   #
-  # WRINKLE (documented, sound adaptation): the R12 heap-snapshot surfaces a
+  # WRINKLE (documented, sound adaptation): the R12 heap-snapshot surfaced a
   # ptr param's committed pointee in the witness ONLY when that cell was READ
-  # back via `p[]` (the `currentHeapDerefVals` witness hook fires on `isDeref`,
-  # not on a write-only `isDerefWrite`). The RFC's bare write-only SUT (`p[]=7`
+  # back via `p[]` (the pre-S8h `currentHeapDerefVals` witness hook fired on
+  # `isDeref`, not on a write-only `isDerefWrite`). The RFC's bare write-only SUT (`p[]=7`
   # in try, `q[]=99` in finally, no read-back) therefore commits both stores to
   # `path.heaps` but the witness renders the unobserved pointees as the default
   # zero — the writes are committed to the heap, but not SURFACED. To assert the
@@ -114,20 +114,17 @@ suite "symex Phase 15 E5 — finally semantics (finally-raises-replaces)":
     check r.raisedTypeId == "ValueError"
     # The v3 heap-snapshot has one entry per ptr param (p and q).
     check r.heapSnapshot.len == 2
-    # Collect each param's committed pointee. If the solver aliased p and q to
-    # the same cell, the alias-PRIMARY carries `pointsTo` and the other carries
-    # `aliasRef`; resolve aliases so we read the committed value for both names.
-    var pointee = initTable[string, string]()
+    # RFC-0005 S8h re-pin. This used to read `pointsTo` p == "7", q == "99":
+    # the heap at the END of the raising path, i.e. the values the SUT itself
+    # writes. The snapshot is now the heap the SUT is CALLED with, where both
+    # cells are write-before-read and so unconstrained. What the model does
+    # commit to is two live, DISTINCT cells (aliased, `q[] = 99` would
+    # overwrite the 7 and the guard would fail) -- and the witness is now a
+    # real pair of cells, so the property is checked by running it: the
+    # try-body store and the finally store both land and the finally raises.
     for e in r.heapSnapshot:
-      if e.pointsTo.isSome:
-        pointee[e.name] = e.pointsTo.get
-    for e in r.heapSnapshot:
-      if e.aliasRef.isSome and pointee.hasKey(e.aliasRef.get):
-        pointee[e.name] = pointee[e.aliasRef.get]
-    # The try-body write `p[] = 7` AND the finally-before-raise write
-    # `q[] = 99` are BOTH committed in the raised witness, surfaced by the
-    # finally's read-back guard.
-    check pointee.hasKey("p")
-    check pointee.hasKey("q")
-    check pointee["p"] == "7"
-    check pointee["q"] == "99"
+      check e.value != "nil"
+      check e.aliasRef.isNone
+    check r.raisedWitness[0] != r.raisedWitness[1]
+    expect ValueError:
+      finallyHeapWrites(r.raisedWitness[0], r.raisedWitness[1])

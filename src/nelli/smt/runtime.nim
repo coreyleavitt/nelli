@@ -997,11 +997,6 @@ proc fieldHeapKey*(objTy: IRType, field: string): string
   ## Cluster H H_witness fwd-decl (defined in runtime_heap.nim, included
   ## below). `buildHeapSnapshot`'s recursive descent needs the field-split
   ## heap key before the heap cluster is included.
-proc effectiveHeapDepthLimit(settings: SymexSettings): int
-  ## Cluster H H_witness fwd-decl (defined below, after `buildHeapSnapshot`).
-  ## `buildHeapSnapshot` needs the SAME effective heap-depth budget the
-  ## walker itself enforces (`heapDepthExhausted`) to bound its own recursion.
-
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
@@ -1701,24 +1696,31 @@ proc isFollowConcreteWalk*(): bool
   ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
   ## above. Defined after `WalkCtx` (needs the cast).
 
-var currentHeapDerefVals* {.threadvar.}: Table[string, SymVal]
-  ## Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The MINIMAL R1 witness reader
-  ## hook: when a `ref T`/`ptr T` PARAM `p` is dereferenced, the heap-select
-  ## value (`select(heap, p)`) is recorded here keyed by the param name, so the
-  ## witness for `p` renders the dereffed value (the value `p[]` takes in the
-  ## model) rather than a silent empty leaf. `extractFromSymVal(svRef/svPtr)`
-  ## consumes it. (The full heap-snapshot witness format — `pointsTo`/`aliasRef`
-  ## per ADR-0010 §Heap witness invariants — lands R11b/R12; R1 needs only a
-  ## sound scalar reader for the `ref int` DoD.) Reset at `runSymexImpl` entry.
-
 var currentVariantHeaps* {.threadvar.}: Table[string, Z3AnyAst]
   ## ADR-0013 D5 (Slice 2). The WINNING path's logical-heap arrays, snapshotted
   ## just before `extractWitness` (in `trySolve`'s sat branch) so the witness
   ## serializer can `select` a ref-to-variant pointee's ACTIVE-arm field values
   ## out of the per-(arm,field) heaps (`<typeId>__@<ord>__<field>`) at the ref's
   ## abstract address — emitting only the active arm's observed fields (D5).
-  ## Mirrors `currentHeapDerefVals`'s role for the disc/plain leaves. Keyed by
-  ## the same `heapKey` strings the walk used. Reset at `runSymexImpl` entry.
+  ## Keyed by the same `heapKey` strings the walk used. Reset at
+  ## `runSymexImpl` entry. RFC-0005 S8h: `buildHeapSnapshot` uses it to know
+  ## WHICH heaps the winning path materialised; it reads their input
+  ## constants (`heap_<key>`), not these end-of-path terms.
+
+type
+  HeapKeyShape = object
+    ## RFC-0005 S8h. What `mkHeapArrayVar` knew about a heap it introduced.
+    valTy:     IRType  ## the heap's value type: a field's, a discriminator's,
+                       ## or a whole scalar pointee's
+    variantTy: IRType  ## the variant object, for its `__@disc` and
+                       ## `__@<ord>__<field>` heaps; nil otherwise
+
+var heapKeyShapes {.threadvar.}: Table[string, HeapKeyShape]
+  ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
+  ## `buildHeapSnapshot` renders a cell's fields from the heaps themselves:
+  ## the IR pointee of a recursive field is an empty placeholder by
+  ## construction (`namedRefPlaceholder`), so it cannot say which fields a
+  ## cell has or what their types are. Reset at `runSymexImpl` entry.
 
 var heapWitnessNominalRegistry* {.threadvar.}: Table[string, IRType]
   ## Cluster H H_witness (ADR-0022, ADR-0010 invariant #4). Maps a named
@@ -1735,9 +1737,10 @@ var heapWitnessNominalRegistry* {.threadvar.}: Table[string, IRType]
   ## observes a genuinely-fielded instance of a nominal type (always true for
   ## a bare ref/ptr PARAM's pointee, or a container element's pointee — a
   ## `namedRefPlaceholder` is never registered, `isPlaceholder` guards it).
-  ## `resolveObjectFields` reads it; a lookup miss (never observed a full
-  ## instance this run) means the schema is genuinely unknown and nested
-  ## rendering honestly renders an empty object rather than guessing fields.
+  ## RFC-0005 S8h: `renderCell` reads it only to list a cell's fields in
+  ## declaration order in its `pointsTo`; the fields themselves (and their
+  ## values) come from the heaps the path materialised (`heapKeyShapes`), so
+  ## a lookup miss loses the order, never a field.
   ## Reset at `runSymexImpl` entry alongside `currentRefSorts`.
 
 var currentCallerHeaps* {.threadvar.}: Table[string, Z3AnyAst]
@@ -6484,44 +6487,6 @@ proc clampWitnessField(w: var RawWitness, path: string, fty: IRType) =
     elif not fty.signed and w.uintVals.hasKey(path):
       w.uintVals[path] = uint64(clampToDeclaredRange(int64(w.uintVals[path]), fty))
 
-proc clampWitnessFieldsDeep(w: var RawWitness, path: string, fty: IRType) =
-  ## Issue #163 review R8. `clampWitnessField` patches ONE already-keyed leaf;
-  ## this walks a field's TYPE the same way `extractFromSymVal` walks the
-  ## matching SymVal (`itTuple`'s `path & "." & fieldName`/positional-index
-  ## convention, `itArray`'s `path & "." & $index`), so a `range[lo..hi]`
-  ## leaf gets clamped regardless of nesting depth.
-  ##
-  ## The gap this closes: W4's ref-to-object-pointee clamp (just above, at
-  ## the `itTuple` pointee arm in `extractFromSymVal`) iterated only
-  ## `pointee.fieldNames`/`fields` -- the pointee's OWN immediate fields.
-  ## But the recursive `extractFromSymVal` call that populates the witness
-  ## in the first place recurses arbitrarily deep through nested
-  ## `svTuple`/`svArray` fields, building deeper dotted paths
-  ## (`path.outer.inner`) the flat one-level loop never visits. An unread
-  ## `ref object` field whose type is itself an object containing a
-  ## `range[lo..hi]` subfield two levels down reconstructs that subfield
-  ## unclamped -- the same `RangeDefect` class W4 targets, one nesting
-  ## level deeper than the flat loop reaches.
-  ##
-  ## Deliberately narrow to the shapes `extractFromSymVal` itself recurses
-  ## through structurally (tuple/object fields, fixed-size array elements):
-  ## every other kind (seq/table/set/variant/ref/...) has its own dedicated
-  ## extraction+clamp site already, and re-deriving a parallel traversal for
-  ## them here would fork the path convention `extractFromSymVal` owns
-  ## rather than following it.
-  case fty.kind
-  of itInt:
-    clampWitnessField(w, path, fty)
-  of itTuple:
-    for i, fname in fty.fieldNames:
-      let suffix = if fname.len > 0: "." & fname else: "." & $i
-      clampWitnessFieldsDeep(w, path & suffix, fty.fields[i])
-  of itArray:
-    for i in 0 ..< fty.size:
-      clampWitnessFieldsDeep(w, path & "." & $i, fty.elemTy)
-  else:
-    discard
-
 proc renderedSize(m: Z3Model; size: Z3Int): int =
   ## RFC-0005 S8f. A table/set size under the model. Allocation bounds it to
   ## `[0, 1024]`; the clamp only guards a malformed model.
@@ -6695,13 +6660,9 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       extractFromSymVal(m, w, path & suffix, f)
   of svArray:
     for i, e in sv.arrElems:
+      # RFC-0005 S8h: a ref/ptr element is the position `path[i]`, rendered
+      # by `buildHeapSnapshot` (the svRef/svPtr arm below writes nothing).
       extractFromSymVal(m, w, path & "." & $i, e)
-      # RFC-0005 S8f: a ref/ptr element's cell is ALSO rendered at the
-      # heap-snapshot name `path[i]` (`renderContainerElemCell`'s naming),
-      # where `buildHeapSnapshot` then overwrites the defaults with the
-      # observed field values; the reader reads the cell there.
-      if e.kind in {svRef, svPtr}:
-        extractFromSymVal(m, w, path & "[" & $i & "]", e)
   of svSeq:
     if sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # Round-6 Bug #2 (scoped decline): `seqLen` was forced `== 0` at
@@ -6718,25 +6679,8 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       let n = max(0, lenVal)
       w.seqLens[path] = n
       extractSeqElements(m, w, path, sv, n)
-      # RFC-0005 S8f: a `seq[ref T]` rendered every element as a fresh
-      # default cell, so `s[69].v == 3` had a clean `sxSat` whose witness held
-      # `v == 0`. Render each element's cell at the heap-snapshot name
-      # `path[i]` (defaults here; `buildHeapSnapshot` overwrites the observed
-      # fields), the same way a top-level `ref` param's cell is rendered.
-      if sv.seqElemTy.kind in {itRef, itPtr}:
-        let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
-        let isPtr = sv.seqElemTy.kind == itPtr
-        let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy
-                      else: sv.seqElemTy.refPointeeTy
-        for i in 0 ..< n:
-          let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, # [placeholder-audited]
-                                              mkInt(i).raw)
-          let elemAny = wrap[Z3AnyAst](ctx, raw)
-          let elemSV = if isPtr: SymVal(kind: svPtr, ptrAst: elemAny,
-                                        ptrFamily: true, ptrPointee: pointee)
-                       else: SymVal(kind: svRef, refAst: elemAny,
-                                    refPointee: pointee)
-          extractFromSymVal(m, w, path & "[" & $i & "]", elemSV)
+      # RFC-0005 S8h: a `seq[ref T]` element is the position `path[i]`,
+      # rendered by `buildHeapSnapshot`.
   of svTable:
     extractTableEntries(m, w, path, sv)
   of svSet:
@@ -6796,632 +6740,387 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     # literal), so the closure VALUE itself is still classified `ceNotImplemented`
     # (sevError) rather than silently dropped. BUT R13 (sub-track A) lets a
     # closure CAPTURE a `ref T`/`ptr T` free variable; those captured refs DO
-    # have a sound heap witness. So follow each captured `svRef`/`svPtr` field in
-    # the envRecord through the heap and extract its `pointsTo` value (the same
-    # `currentHeapDerefVals`/default-zero leaf the svRef arm produces) into the
-    # witness under the field's sub-path. The closure-value rendering degrades
-    # gracefully (classified note); the captured-ref pointees are recovered.
+    # have a sound heap witness. RFC-0005 S8h: each captured `svRef`/`svPtr`
+    # is a position under the field's sub-path, rendered (with its cell) by
+    # `buildHeapSnapshot` -- `collectRefPositions`'s svClosure arm. The
+    # closure-value rendering degrades gracefully (classified note).
     let cloErr = SymexErrorInfo(kind: ceNotImplemented, severity: sevError,
       msg: "closure as a top-level SUT result is not supported (no witness " &
            "rendering for a proc value)",
       scope: walkSite())   # RFC-0005 S8: recorded at the hit that extracts
     extractionErrors.add cloErr          # threadvar: fallback
     syncExtractionError(cloErr)          # CR-9 Stage 5: LIVE WalkCtx field
-    if sv.closureEnv != nil and sv.closureEnv.kind == svTuple:
-      let env = sv.closureEnv[]
-      for i, f in env.fields:
-        if f.kind in {svRef, svPtr}:
-          let suffix = if env.fieldNames[i].len > 0: "." & env.fieldNames[i]
-                       else: "." & $i
-          extractFromSymVal(m, w, path & suffix, f)
   of svRef, svPtr:
-    # Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The minimal R1 witness for a
-    # `ref T`/`ptr T` param: if the param was dereferenced (`p[]`), render the
-    # heap-select value (`select(heap, p)`) — recorded under the param name in
-    # `currentHeapDerefVals` — at the SAME path, so the reader produces a `ref T`
-    # holding the value `p[]` took in the model. A NEVER-dereferenced ref param
-    # has no observed pointee value: render its pointee as the type's DEFAULT
-    # (zero) so the leaf exists and the reader never KeyErrors — any value is
-    # sound since the pointee was never observed. The full heap-snapshot witness
-    # format (alias groups / nil rendering) lands R11b/R12.
-    if currentHeapDerefVals.hasKey(path):
-      extractFromSymVal(m, w, path, currentHeapDerefVals[path])
-    else:
-      let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
-      if pointee != nil:
-        case pointee.kind
-        of itInt:
-          if pointee.signed: w.intVals[path]  = 0
-          else:              w.uintVals[path] = 0'u64
-        of itBool: w.boolVals[path] = false
-        of itFloat32: w.float32Vals[path] = 0.0'f32
-        of itFloat64: w.float64Vals[path] = 0.0'f64
-        of itTuple:
-          # Phase 15 R6 (ADR-0010). A `ref object` param accessed only by field
-          # (`p.field`, the field-split heap) records NO whole-object deref value
-          # under `currentHeapDerefVals` — but the witness reader
-          # (`emitTyAndReader(itTuple)`) still reads a leaf PER FIELD. Materialise
-          # a DEFAULT object SymVal and extract its leaves so every field leaf
-          # exists (the reader never KeyErrors). Sound: the field-array pointee
-          # values were observed only through the heap; the rendered object cell
-          # is a replayable default. The full heap-snapshot witness (per-field
-          # observed values) lands R11b/R12.
-          var scratchPC: seq[Z3Bool]
-          let protoObj = allocateSym(pointee, "__refObjWitness", scratchPC)
-          extractFromSymVal(m, w, path, protoObj)
-          # Issue #163 wiring-audit W4. `allocateSym`'s `itInt` arm DOES
-          # push a range-typed field's `bvRangeConds` into `scratchPC` above
-          # — but `scratchPC` is thrown away right here: this proto exists
-          # only to be evaluated under the ALREADY-SOLVED model `m`, and a
-          # fresh, wholly disconnected symbol with no asserted constraint
-          # extracts as the model's bare default (empirically `0`), which a
-          # narrow declared range need not contain. Clamp the same way
-          # `extractSeqElements`/`renderLeafFieldAt` do, for a param whose
-          # OWN object was never individually field-accessed or dereffed
-          # (the shape those two sites cannot reach: no heap key exists for
-          # this param at all, only a proto default).
-          # Review R8: routed through `clampWitnessFieldsDeep` (not the flat
-          # `clampWitnessField`) -- the recursive `extractFromSymVal` call
-          # just above reaches nested object subfields the flat loop cannot;
-          # see that proc's own doc comment (beside `clampWitnessField`) for
-          # the full gap.
-          for i, fname in pointee.fieldNames:
-            clampWitnessFieldsDeep(w, path & "." & fname, pointee.fields[i])
-        of itVariant:
-          # ADR-0013 Slice 1. Witness extraction for a ref-to-variant pointee.
-          # Allocate a proto svVariant (default arm fields), extract all its
-          # sub-paths so the macro reader never KeyErrors, then OVERRIDE the disc
-          # sub-path with the actually-observed disc SymVal (recorded in
-          # `currentHeapDerefVals["<path>.<discName>"]`) so the macro's case
-          # dispatch on the discriminator reflects the real model value.
-          # Arm-specific field observed values land in Slice 2.
-          var scratchPC: seq[Z3Bool]
-          let protoVariant = allocateSym(pointee, "__refVariantWitness", scratchPC)
-          extractFromSymVal(m, w, path, protoVariant)
-          # Issue #163 review R3 (Part B). Same throwaway-`scratchPC` gap as
-          # the `itTuple` pointee arm above: `allocateSym`'s `itVariant` arm
-          # DOES push `bvRangeConds` for every ranged plain AND arm field
-          # into `scratchPC` — discarded here, since this proto exists only
-          # to be evaluated under the already-solved model `m`. A fresh,
-          # wholly disconnected symbol with no asserted constraint extracts
-          # as the model's bare default (empirically `0`), which a narrow
-          # declared range need not contain. Clamp EVERY plain field and
-          # EVERY arm's fields (not just the arm actually selected below) —
-          # mirrors the `itTuple` arm's own clamp loop.
-          #
-          # Issue #163 review R17 correction: this loop runs BEFORE the
-          # active-arm override below, and that override clamps its OWN
-          # extraction too (see the comment at the override site) — it does
-          # NOT rely on this loop's clamp surviving. `currentVariantHeaps` is
-          # populated by BOTH a heap READ (which asserts `bvRangeConds`, the
-          # D2 fix in `walkHeapArm`'s `isArmField`) and a heap WRITE (which
-          # asserts no range anywhere: the write arm's own `allocateSym`
-          # proto-range conds land in a discarded local `scratchPC` and would
-          # bound the proto, not the stored value, regardless). The two arms
-          # build byte-identical keys, so the override cannot tell which
-          # populated a given entry and must clamp unconditionally.
-          # Review R11: routed through `clampWitnessField`.
-          for i, fname in pointee.vPlainFieldNames:
-            let fty = pointee.vPlainFieldTypes[i]
-            clampWitnessField(w, path & "." & fname, fty)
-          for arm in pointee.vArms:
-            for j, fname in arm.fieldNames:
-              let fty = arm.fieldTypes[j]
-              clampWitnessField(w, path & ".@" & $arm.tagOrdinal & "." & fname, fty)
-          # Override disc with observed SymVal (if we actually read it via heap).
-          let discPath = path & "." & pointee.vDiscName
-          if currentHeapDerefVals.hasKey(discPath):
-            let discSV = currentHeapDerefVals[discPath]
-            extractLeaf(m, w, discPath, discSV)
-            # ADR-0013 D5 (Slice 2): emit ONLY the ACTIVE arm's fields. Evaluate
-            # the disc ordinal, find the matching arm (or the else arm), and for
-            # each of its fields whose per-(arm,field) heap was materialised on
-            # the winning path, `select` the observed value at the ref's address
-            # and override the proto-default leaf. The macro witness reader case-
-            # dispatches on the disc and reads exactly `<path>.@<ord>.<field>`, so
-            # only the active arm's leaves are consumed — inactive arms keep their
-            # (harmless) proto defaults. Soundness: the disc-range clause (D4.5)
-            # guarantees the ordinal is a legal arm tag, so a real arm is found.
-            let discOrd = evalDiscOrdinal(m, discSV)
-            let addrAst = if sv.kind == svRef: sv.refAst else: sv.ptrAst
-            let baseId = refPointeeTypeId(pointee)
-            var activeArm: VariantArm
-            var foundArm = false
-            var elseArm: VariantArm
-            var hasElse = false
-            for arm in pointee.vArms:
-              if arm.isElse: (elseArm = arm; hasElse = true)
-              elif int64(arm.tagOrdinal) == discOrd: (activeArm = arm; foundArm = true)
-            if (not foundArm) and hasElse:
-              activeArm = elseArm; foundArm = true
-            if foundArm:
-              for j, fname in activeArm.fieldNames:
-                let armHeapKey = baseId & "__@" & $activeArm.tagOrdinal & "__" & fname
-                if currentVariantHeaps.hasKey(armHeapKey):
-                  try:
-                    let heap = currentVariantHeaps[armHeapKey]
-                    let fieldSV = heapSelect(heap.ctx, heap, addrAst,
-                                             activeArm.fieldTypes[j])
-                    let fieldPath = path & ".@" & $activeArm.tagOrdinal & "." & fname
-                    extractLeaf(m, w, fieldPath, fieldSV)
-                    # Issue #163 review R17. `armHeapKey` may have been
-                    # populated by a heap WRITE (`runtime_heap.nim`'s write
-                    # arm), which asserts no `bvRangeConds` anywhere — only a
-                    # heap READ does (Part A above). This override cannot
-                    # distinguish the two (identical key shape), so it must
-                    # clamp its own extraction rather than trust Part B's
-                    # earlier clamp to survive: this call unconditionally
-                    # overwrites whatever Part B wrote at `fieldPath`.
-                    # Review R11: routed through `clampWitnessField`, still
-                    # against the SAME `fieldPath` local `extractLeaf` wrote.
-                    clampWitnessField(w, fieldPath, activeArm.fieldTypes[j])
-                  except CatchableError:
-                    discard  ## non-primitive arm field: keep proto default (sound)
-        of itMultiVariant:
-          # N46-followup-4 (witness-rendering fix). A ref/ptr-to-
-          # multi-axis-variant PARAMETER's pointee fell through to the
-          # generic `else: discard` below -- NO leaf was written for any of
-          # the multi-variant's sub-paths, not even the per-axis
-          # discriminators. `emitTyAndReader`'s `itMultiVariant` arm
-          # (`symex.nim`) unconditionally reads `<path>.<axisDiscName>` for
-          # EVERY axis when rendering the pointee, regardless of whether the
-          # pointee was ever dereferenced (mirroring how the `itTuple`/
-          # `itVariant` arms above always reconstruct the full pointee on a
-          # SAT result) -- so a missing leaf crashed with an unhandled
-          # `KeyError` ("key not found: p.kindA"), reproducible even with
-          # ZERO heap-deref/field-access in the SUT body (a bare
-          # `if p != nil: symexTarget(...)` is enough to reach a SAT witness
-          # that needs to render `p`'s full pointee type).
-          # No per-axis/per-field OBSERVED value can be recovered here the
-          # way `itVariant`'s arm above does: the walker's own heap-deref
-          # support for a ref-to-multi-variant pointee is ITSELF still
-          # declined (`heRefVariantUnsupported`, N46-followup-2's `runtime_
-          # heap.nim` conversion) — `currentHeapDerefVals`/
-          # `currentVariantHeaps` never carry an entry for this shape, so
-          # there is nothing to override a proto default WITH. Mirror the
-          # `itTuple` arm's simpler default-only treatment instead:
-          # materialise a DEFAULT proto multi-variant and extract ITS
-          # leaves, so every sub-path the macro reader might query exists.
-          # Sound: the pointee was never actually observed through the
-          # heap (by construction of this branch — `currentHeapDerefVals`
-          # has no entry for `path`), so a replayable default is exact, not
-          # an approximation.
-          var scratchPC: seq[Z3Bool]
-          let protoMultiVariant = allocateSym(pointee, "__refMultiVariantWitness",
-                                               scratchPC)
-          extractFromSymVal(m, w, path, protoMultiVariant)
-        else: discard   ## other composite pointees' witness lands R3+/R11b
+    # RFC-0005 S8h. A `ref`/`ptr` is a POSITION, not a leaf: nil, an alias of
+    # another position, or a cell whose fields are read from the model's
+    # input heap. `buildHeapSnapshot` renders all three for every position
+    # (and every cell reachable from one) once the leaves are extracted; the
+    # typed witness resolves them through `resolveRef`. (Before S8h this arm
+    # wrote a cell's leaves here from the LAST value any path had read through
+    # the param's name -- the end-of-path heap, not the input -- or a zero
+    # prototype, and a nil or aliased ref was not representable.)
+    discard
   else:
     extractLeaf(m, w, path, sv)
 
 proc pointeeRendering(w: RawWitness, path: string): Option[string] =
-  ## Phase 15 R12. Render the modelled pointee value at `path` for a ref/ptr
-  ## param's heap-snapshot `pointsTo`, reading back the leaf that
-  ## `extractFromSymVal(svRef/svPtr)` populated into the flat witness tables.
-  ## A primitive pointee resolves to a stringified value; a composite pointee
-  ## (`ref object` field-split, R6) has no single whole-object leaf — render a
-  ## structural placeholder so the snapshot is honest (Invariant 3, no silent
-  ## gap) rather than fabricating a value.
-  ##
-  ## Cluster H H_witness: this proc still handles the TOP-LEVEL, PRIMITIVE-
-  ## pointee case unchanged (a `ref int`/`ref float`/`ref bool` etc. param —
-  ## `currentHeapDerefVals`/R1's bare-`p[]` witness hook already gives it a
-  ## REAL observed value, never a fabricated default). A composite (`itTuple`)
-  ## pointee no longer reaches the `"<object>"` fallback below at all —
-  ## `buildHeapSnapshot` routes those through `renderObjectFields` instead,
-  ## which reads the REAL per-field heap values via the model (not the
-  ## default-zero prototype `extractFromSymVal`'s `itTuple` arm populates).
-  ## The fallback is kept for any OTHER composite kind (`seq`/`Table`/`HashSet`
-  ## pointee) this slice does not extend.
+  ## Phase 15 R12. The heap-snapshot rendering of the scalar leaf at `path`.
+  ## RFC-0005 S8h: only ever asked about a leaf `buildHeapSnapshot` has just
+  ## written (a cell's scalar field or pointee, a discriminator), so the
+  ## structural `"<object>"` fallback for a composite pointee's sub-leaves is
+  ## gone with the composite callers it served.
   if w.intVals.hasKey(path):     return some($w.intVals[path])
   if w.uintVals.hasKey(path):    return some($w.uintVals[path])
   if w.boolVals.hasKey(path):    return some($w.boolVals[path])
   if w.float64Vals.hasKey(path): return some($w.float64Vals[path])
   if w.float32Vals.hasKey(path): return some($w.float32Vals[path])
   if w.strVals.hasKey(path):     return some(w.strVals[path])
-  # Composite pointee (object/seq): leaves live under `path.<sub>` sub-paths.
-  # The whole-cell value isn't a single leaf; render a structural marker.
-  for k in w.intVals.keys:
-    if k.len > path.len and k.startsWith(path & "."): return some("<object>")
-  for k in w.boolVals.keys:
-    if k.len > path.len and k.startsWith(path & "."): return some("<object>")
   none(string)
 
-# --- Cluster H H_witness (ADR-0022, ADR-0010 invariant #4) ------------------
-# The recursive heap-snapshot witness. `buildHeapSnapshot` used to stop at the
-# top-level ref/ptr PARAMS, rendering any composite (`itTuple`) pointee as the
-# blind `"<object>"` placeholder. H_witness descends the REACHABLE ref graph
-# from every param — object fields, and (additively) container (seq/array/
-# tuple) elements — reading each cell's REAL modelled value out of the
-# winning path's heap arrays (`currentVariantHeaps`, snapshotted from
-# `path.heaps` just before `extractWitness` runs), bounded by the SAME
-# effective heap-depth budget the walker itself enforces
-# (`effectiveHeapDepthLimit`) and cycle-safe via a `visited` address->name
-# map (a revisited address renders `aliasRef` to the name it was FIRST seen
-# under — never re-recursed, so a self-cycle or ring provably terminates).
+# --- RFC-0005 S8h: the heap snapshot is the model's INPUT heap ----------------
+# (Supersedes Cluster H H_witness's depth-first descent over the winning
+# path's end-of-path heaps.) The snapshot records the heap the SUT is CALLED
+# with, which is the only heap a witness can hand it. Every heap array is
+# introduced as the free constant `heap_<key>` (`mkHeapArrayVar`); a path's
+# `heaps[key]` is that constant under the stores and merges the path made, so
+# reading the end-of-path array rendered what the SUT had WRITTEN -- `p.v ==
+# 0` followed by `p.v = 1` rendered `v: 1`, a witness that does not reach the
+# branch it was solved for. Selecting from `heap_<key>` itself reads the
+# input.
 #
-# Cell naming: a top-level param keeps its bare name (`p`, `q`, unchanged).
-# A reachable cell is named by its ACCESS PATH from the param that reached it
-# first: a field hop appends `.<field>` (`p.next`, `p.next.next`); a container
-# index appends `[<i>]` (`s[0]`, `arr[1]`). Every reachable cell (param or
-# not) that denotes a live, in-budget, non-alias address gets its own
-# `HeapSnapshotEntry` in the SAME flat `seq` — no new struct shape, `pointsTo`/
-# `aliasRef` simply now populate for the WHOLE reachable graph, not just
-# top-level params, per ADR-0010 invariant #4.
+# Positions. A position is any place a `ref`/`ptr` value sits in the input: a
+# param; a field or element of a by-value param (`h.n`, `t.1`, `a[0]`, `s[2]`,
+# a variant field `v.f`/`v.@<ord>.f`), named exactly as the witness emitter
+# names it; and a ref field of a cell (`p.next`). Every position of a param
+# gets an entry. A cell's field gets one unless it is nil, which renders
+# inline as "nil" in the cell's `pointsTo` (an absent position reads nil).
 #
-# An object cell's `pointsTo` is a structural rendering `"{f1=v1, f2=v2}"`:
-#   * a primitive field renders its stringified value (same stringifier as a
-#     top-level primitive pointee, via `extractLeaf` + `pointeeRendering`);
-#   * a nil ref/ptr field renders inline as `"nil"` (no separate cell — a nil
-#     field has no substructure worth naming);
-#   * a non-nil ref/ptr field renders `"@<cellName>"` — a REFERENCE to another
-#     entry in this same flat seq (which may be a fresh cell, a param, or an
-#     alias entry); the consumer resolves it by name, exactly like resolving
-#     an `aliasRef`;
-#   * a field whose per-field heap array was never materialised on the
-#     winning path (the SUT never touched it, so Z3 asserts nothing about it)
-#     renders `"<unobserved>"` — Invariant 3 (never fabricate a value) rather
-#     than guessing;
-#   * a field one hop beyond the effective heap-depth budget renders
-#     `"<max-heap-depth>"` — the hop is never taken (no select performed),
-#     mirroring `heapDepthExhausted`'s "halt the path" semantics for the walk
-#     itself;
-#   * a field of a container/variant/nested-by-value-object type (not yet
-#     witness-renderable through the field-split heap this slice) renders
-#     `"<unsupported>"` — a documented ceiling, not a crash or a guess.
+# Cells. One cell per model address, named by the first position found to
+# hold it: among bare params the lexicographically-first name (R12,
+# unchanged), then by-value positions in param order, then fields
+# breadth-first. Every other position holding the address carries
+# `aliasRef = <cell>`. The walk is over model addresses, and a model's
+# universe for an uninterpreted `Ref_T` sort is finite, so it ends -- a cycle
+# is an alias back to a cell already named -- without a depth cut. (There was
+# one, at the walker's heap-depth budget; the budget bounds the derefs a path
+# makes, not the cells an input holds, and a position past the cut read nil.)
+#
+# A cell's fields are read from the heaps the winning path materialised
+# (`currentVariantHeaps` names them). A cell's IR type does not have to list
+# them: the recursive field's pointee is an empty placeholder by construction
+# (`namedRefPlaceholder`), and `heapKeyShapes` records each heap's value type
+# (and, for a variant's `__@disc`/`__@<ord>__f` heaps, the variant) when the
+# walker introduces it. A field leaf is written at `<cell>.<field>` -- for a
+# variant, the discriminator at `<cell>.<discName>` and the ACTIVE branch's
+# fields at `<cell>.<field>` -- and a scalar pointee at `<cell>`, which is
+# where `resolveRef` reads them.
+
+type
+  RefPos = object
+    ## RFC-0005 S8h. One `ref`/`ptr` position of the input.
+    name:    string
+    addrAst: Z3AnyAst
+    pointee: IRType
 
 proc registerNominalIfFull(ty: IRType) =
   ## Learn `ty`'s field structure under its `nominalId`, but only if `ty` is a
-  ## genuinely fielded (non-placeholder) named object — a `namedRefPlaceholder`
-  ## must never overwrite a real entry (and never seeds one, since it carries
-  ## no real fields to learn).
+  ## genuinely fielded (non-placeholder) named object -- a
+  ## `namedRefPlaceholder` must never overwrite a real entry. Used only to
+  ## ORDER a cell's `pointsTo` fields as declared; the fields themselves come
+  ## from the heaps.
   if ty != nil and ty.kind == itTuple and not ty.isPlaceholder and
      ty.nominalId.len > 0 and not heapWitnessNominalRegistry.hasKey(ty.nominalId):
     heapWitnessNominalRegistry[ty.nominalId] = ty
 
-proc resolveObjectFields(ty: IRType): IRType =
-  ## Recover the REAL field list for `ty` when `ty` is an empty-fielded
-  ## `namedRefPlaceholder` (a recursive field's pointee) whose nominal type has
-  ## already been observed elsewhere this run (always true once ANY bare
-  ## ref/ptr param or container element of that nominal type has been visited
-  ## — `registerNominalIfFull` seeds it before any field recurses). Falls back
-  ## to `ty` itself (possibly still empty) when the schema is genuinely
-  ## unknown this run.
-  if ty.isPlaceholder and ty.nominalId.len > 0 and
-     heapWitnessNominalRegistry.hasKey(ty.nominalId):
-    heapWitnessNominalRegistry[ty.nominalId]
+proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
+                         acc: var seq[RefPos]) =
+  ## RFC-0005 S8h. The `ref`/`ptr` positions inside the input value `sv` at
+  ## `path`, named as `emitTyAndReader` names them (`.<field>`/`.<i>` for a
+  ## tuple or object, `.<i>` for an array element that is not a ref and
+  ## `[<i>]` for one that is, `[<i>]` for a `seq` element, the variant layout
+  ## of `extractFromSymVal`, a `distinct` at its own path).
+  case sv.kind
+  of svRef:
+    if sv.refPointee != nil:
+      acc.add RefPos(name: path, addrAst: sv.refAst, pointee: sv.refPointee)
+  of svPtr:
+    if sv.ptrPointee != nil:
+      acc.add RefPos(name: path, addrAst: sv.ptrAst, pointee: sv.ptrPointee)
+  of svTuple:
+    for i, f in sv.fields:
+      let suffix = if sv.fieldNames[i].len > 0: "." & sv.fieldNames[i]
+                   else: "." & $i
+      collectRefPositions(m, path & suffix, f, acc)
+  of svArray:
+    for i, e in sv.arrElems:
+      let sub = if e.kind in {svRef, svPtr}: path & "[" & $i & "]"
+                else: path & "." & $i
+      collectRefPositions(m, sub, e, acc)
+  of svSeq:
+    if sv.seqElemTy.kind in {itRef, itPtr} and
+       not sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
+      # Allocation bounds `seqLen` to `[0, 1024]`.
+      let n = max(0, int(m.evalInt(sv.seqLen))) # [placeholder-audited]
+      let isPtr = sv.seqElemTy.kind == itPtr
+      let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy
+                    else: sv.seqElemTy.refPointeeTy
+      for i in 0 ..< n:
+        # `Ref_T` is a RUNTIME uninterpreted sort the typed `select` cannot
+        # express -- raw FFI, as `storeSeqElem` does. GROUND select.
+        let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, # [placeholder-audited]
+                                            mkInt(i).raw)
+        acc.add RefPos(name: path & "[" & $i & "]",
+                       addrAst: wrap[Z3AnyAst](ctx, raw), pointee: pointee)
+  of svVariant:
+    for i, f in sv.vPlainFields:
+      collectRefPositions(m, path & "." & sv.vPlainFieldNames[i], f, acc)
+    for tagOrdinal, fields in sv.vArmFields.pairs:
+      let armNames = sv.vArmFieldNames[tagOrdinal]
+      for j, f in fields:
+        collectRefPositions(m, path & ".@" & $tagOrdinal & "." & armNames[j],
+                            f, acc)
+  of svMultiVariant:
+    for i, f in sv.mvPlainFields:
+      collectRefPositions(m, path & "." & sv.mvPlainFieldNames[i], f, acc)
+    for ax in sv.mvAxes:
+      for tagOrdinal, fields in ax.armFields.pairs:
+        let armNames = ax.armFieldNames[tagOrdinal]
+        for j, f in fields:
+          collectRefPositions(m, path & "." & ax.discName & ".@" &
+                              $tagOrdinal & "." & armNames[j], f, acc)
+  of svDistinct:
+    collectRefPositions(m, path, sv.distinctBaseSym[], acc)
+  of svClosure:
+    # Phase 15 R13: a closure's captured `ref`/`ptr` free variables.
+    if sv.closureEnv != nil and sv.closureEnv.kind == svTuple:
+      let env = sv.closureEnv[]
+      for i, f in env.fields:
+        if f.kind in {svRef, svPtr}:
+          let suffix = if env.fieldNames[i].len > 0: "." & env.fieldNames[i]
+                       else: "." & $i
+          collectRefPositions(m, path & suffix, f, acc)
   else:
-    ty
+    discard
 
-proc heapAddrIsNil(m: Z3Model, addrAst: Z3AnyAst, pointeeTy: IRType): bool =
-  let typeId = refPointeeTypeId(pointeeTy)
-  currentNilConsts.hasKey(typeId) and
-    $m.eval(currentNilConsts[typeId]) == $m.eval(addrAst)
+proc inputHeap(key: string): Z3AnyAst =
+  ## RFC-0005 S8h. The INPUT heap for `key`: the free constant `heap_<key>`
+  ## every path's `heaps[key]` is built on (`mkHeapArrayVar`), re-made by
+  ## name and sort -- Z3 constants are identified by both, so this is the
+  ## same term, not a new one.
+  let post = currentVariantHeaps[key]
+  let ctx = post.ctx
+  let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, post.raw)
+  let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & key).cstring)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
 
-proc renderLeafFieldAt(m: Z3Model, w: var RawWitness, ctx: Z3Context,
-                       heapKey, leafPath: string, addrAst: Z3AnyAst,
-                       fty: IRType): string =
-  ## Render a PRIMITIVE field (or bare primitive pointee) at `addrAst`,
-  ## reusing `extractLeaf`/`pointeeRendering` for byte-identical stringifying
-  ## with the rest of the witness. `"<unobserved>"` when the heap array was
-  ## never materialised (the SUT never touched this cell/field on the winning
-  ## path — Invariant 3: never fabricate).
-  if not currentVariantHeaps.hasKey(heapKey): return "<unobserved>"
-  let leafSV = heapSelect(ctx, currentVariantHeaps[heapKey], addrAst, fty)
-  extractLeaf(m, w, leafPath, leafSV)
-  # Issue #163 wiring-audit W4. The field-split heap array backing `fty` is
-  # SHARED across every instance of the object type (`fieldHeapKey` keys on
-  # (objTy, fieldName) alone, not on `addrAst`) — materialised as soon as
-  # ANY instance's field is deref'd. So `currentVariantHeaps.hasKey(heapKey)`
-  # being true does NOT mean THIS address's read was ever individually
-  # bound by `walkHeapArm`'s `bvRangeConds` assertion (that assertion is
-  # per-statement, at the specific `refAst` dereffed on the winning path) —
-  # a second, never-dereffed ref of the same type sharing this heap renders
-  # here too, and its value is free. Clamp for the same reason
-  # `extractSeqElements` does: sound because an un-asserted value has no
-  # bearing on the verdict already reached.
-  # Review R11: routed through `clampWitnessField`.
-  clampWitnessField(w, leafPath, fty)
+proc heapKeyValTy(key: string): IRType =
+  ## The value type `mkHeapArrayVar` recorded for `key`, or nil.
+  if heapKeyShapes.hasKey(key): heapKeyShapes[key].valTy else: nil
+
+proc refAddrOf(m: Z3Model, addrAst: Z3AnyAst, pointee: IRType): string =
+  ## RFC-0005 S8h. The model address of a ref, "" for nil. Prefixed with the
+  ## pointee's type id: addresses of different `Ref_T` sorts never alias.
+  let typeId = refPointeeTypeId(pointee)
+  let rendering = $m.eval(addrAst)
+  if currentNilConsts.hasKey(typeId) and
+     $m.eval(currentNilConsts[typeId]) == rendering:
+    ""
+  else:
+    typeId & "|" & rendering
+
+type
+  SnapshotBuild = object
+    ## RFC-0005 S8h. The state of one `buildHeapSnapshot` walk.
+    cellOf:  Table[string, string]   ## model address -> cell name
+    entryOf: Table[string, int]      ## cell name -> its index in `entries`
+    queue:   seq[RefPos]             ## cells to render, in discovery order
+    entries: seq[HeapSnapshotEntry]
+
+proc addPosition(b: var SnapshotBuild, m: Z3Model, pos: RefPos,
+                 inlineNil: bool): string =
+  ## RFC-0005 S8h. Record the position `pos`: its entry (unless it is nil and
+  ## `inlineNil`), and, the first time its address is seen, a new cell. The
+  ## result is the `pointsTo` fragment a parent cell renders for it.
+  let sortName = "Ref_" & refPointeeTypeId(pos.pointee)
+  let address = refAddrOf(m, pos.addrAst, pos.pointee)
+  if address.len == 0:
+    if not inlineNil:
+      b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
+        value: "nil", pointsTo: none(string), aliasRef: none(string))
+    return "nil"
+  let rendering = $m.eval(pos.addrAst)
+  if b.cellOf.hasKey(address) and b.cellOf[address] != pos.name:
+    b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
+      value: rendering, pointsTo: none(string),
+      aliasRef: some(b.cellOf[address]))
+  else:
+    b.cellOf[address] = pos.name
+    b.entryOf[pos.name] = b.entries.len
+    b.entries.add HeapSnapshotEntry(name: pos.name, sort: sortName,
+      value: rendering, pointsTo: none(string), aliasRef: none(string))
+    b.queue.add pos
+  "@" & pos.name
+
+proc renderHeapLeaf(m: Z3Model, w: var RawWitness, key, leafPath: string,
+                    addrAst: Z3AnyAst, valTy: IRType): string =
+  ## RFC-0005 S8h. Write the input-heap value of a scalar heap `key` at
+  ## `addrAst` as the leaf `leafPath`; the `pointsTo` fragment for it.
+  let sv = heapSelect(addrAst.ctx, inputHeap(key), addrAst, valTy)
+  extractLeaf(m, w, leafPath, sv)
+  # Issue #163 W4 / review R11: the field-split heap is shared by every cell
+  # of the type, so a cell whose field the path never read has a free value
+  # in it; clamp a ranged field (sound: the value bears on no verdict).
+  clampWitnessField(w, leafPath, valTy)
   pointeeRendering(w, leafPath).get("<unobserved>")
 
-proc renderObjectFields(m: Z3Model, w: var RawWitness,
-                        cellName: string, addrAst: Z3AnyAst, pointeeTyIn: IRType,
-                        depth, limit: int, visited: var Table[string, string],
-                        acc: var seq[HeapSnapshotEntry]): string
-
-proc renderRefFieldValue(m: Z3Model, w: var RawWitness,
-                         cellName: string, addrAst: Z3AnyAst, objTy: IRType,
-                         fname: string, fty: IRType, depth, limit: int,
-                         visited: var Table[string, string],
-                         acc: var seq[HeapSnapshotEntry]): string =
-  ## Render one ref/ptr-typed FIELD's value fragment. ALWAYS materialises a
-  ## `HeapSnapshotEntry` in `acc` for `cellName & "." & fname` when the target
-  ## is non-nil and in-budget — carrying `pointsTo` (a fresh address, which
-  ## recurses into it) or `aliasRef` (an address already seen — a param, or an
-  ## earlier reachable cell, POSSIBLY AN ANCESTOR of this very field, i.e. a
-  ## self-loop/ring). Returns `"@<cellName>"` either way, so the parent's
-  ## `{...}` rendering always names a lookup key one hop away — the consumer
-  ## chases `aliasRef` exactly as it already must for param-vs-param aliasing.
-  ## Cycle-safe: `visited` is checked BEFORE any recursion, so a self-loop or
-  ## ring resolves to an `aliasRef` on the SECOND visit and never re-descends.
-  let ctx = addrAst.ctx
-  let heapKey = fieldHeapKey(objTy, fname)
-  if not currentVariantHeaps.hasKey(heapKey): return "<unobserved>"
-  let childDepth = depth + 1
-  if limit > 0 and childDepth >= limit: return "<max-heap-depth>"
-  let fieldSV = heapSelect(ctx, currentVariantHeaps[heapKey], addrAst, fty)
-  let (childAddr, childPointee) =
-    if fieldSV.kind == svRef: (fieldSV.refAst, fieldSV.refPointee)
-    else: (fieldSV.ptrAst, fieldSV.ptrPointee)
-  if heapAddrIsNil(m, childAddr, childPointee): return "nil"
-  let addrRendering = $m.eval(childAddr)
-  let childName = cellName & "." & fname
-  if visited.hasKey(addrRendering):
-    # ALIAS / CYCLE: this address was already registered under an earlier
-    # name (a param, or an earlier reachable cell — possibly an ANCESTOR of
-    # this very field, i.e. a self-loop/ring). Still materialise a named
-    # entry for `childName` (mirrors param-vs-param aliasing: every name
-    # gets an entry) carrying `aliasRef` — but do NOT recurse again (the
-    # visited-set check runs BEFORE any recursion, so a cycle provably
-    # terminates here rather than re-descending).
-    acc.add HeapSnapshotEntry(
-      name: childName, sort: "Ref_" & refPointeeTypeId(childPointee),
-      value: addrRendering, pointsTo: none(string),
-      aliasRef: some(visited[addrRendering]))
-    return "@" & childName
-  visited[addrRendering] = childName
-  registerNominalIfFull(childPointee)
-  var childEntry = HeapSnapshotEntry(
-    name: childName, sort: "Ref_" & refPointeeTypeId(childPointee),
-    value: addrRendering, pointsTo: none(string), aliasRef: none(string))
-  case childPointee.kind
-  of itTuple:
-    childEntry.pointsTo = some(renderObjectFields(m, w, childName, childAddr,
-      childPointee, childDepth, limit, visited, acc))
+proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     cell: RefPos, key, fname: string, declTy: IRType): string =
+  ## RFC-0005 S8h. One field of `cell`, from its input heap `key`.
+  if not currentVariantHeaps.hasKey(key): return "<unobserved>"
+  let valTy = block:
+    let t = heapKeyValTy(key)
+    if t != nil: t else: declTy
+  if valTy == nil: return "<unobserved>"
+  case valTy.kind
   of itInt, itBool, itFloat32, itFloat64:
-    # A `ref`/`ptr` FIELD whose own pointee is a bare primitive (e.g.
-    # `next: ref int`) — a SECOND, bare (non-field) heap keyed on the pointee
-    # type alone, only materialised if the SUT itself dereffed it directly.
-    let rendered = renderLeafFieldAt(m, w, ctx, refPointeeTypeId(childPointee),
-                                     childName, childAddr, childPointee)
-    if rendered != "<unobserved>": childEntry.pointsTo = some(rendered)
+    renderHeapLeaf(m, w, key, cell.name & "." & fname, cell.addrAst, valTy)
+  of itRef, itPtr:
+    let sv = heapSelect(cell.addrAst.ctx, inputHeap(key), cell.addrAst, valTy)
+    let (childAddr, childPointee) =
+      if sv.kind == svRef: (sv.refAst, sv.refPointee)
+      else: (sv.ptrAst, sv.ptrPointee)
+    addPosition(b, m, RefPos(name: cell.name & "." & fname,
+                             addrAst: childAddr, pointee: childPointee),
+                inlineNil = true)
   else:
-    discard  ## container/variant/etc pointee: documented ceiling this slice —
-             ## `pointsTo` stays `none` (honest, not fabricated).
-  acc.add childEntry
-  "@" & childName
+    # A kind the logical heap does not model (`liftHeapValue` degrades a
+    # read of it): no leaf, the typed witness keeps the zero value.
+    "<unsupported>"
 
-proc renderObjectFields(m: Z3Model, w: var RawWitness,
-                        cellName: string, addrAst: Z3AnyAst, pointeeTyIn: IRType,
-                        depth, limit: int, visited: var Table[string, string],
-                        acc: var seq[HeapSnapshotEntry]): string =
-  ## Build the `"{field=value, ...}"` structural rendering for an OBJECT cell
-  ## already known live/in-budget/non-alias at `cellName`/`addrAst`. Recurses
-  ## into ref/ptr fields via `renderRefFieldValue` (which appends new entries
-  ## to `acc`); primitive fields render via `renderLeafFieldAt`; any other
-  ## field kind (container/variant/nested-by-value-object — not yet
-  ## witness-renderable through the field-split heap) renders `"<unsupported>"`.
-  let realTy = resolveObjectFields(pointeeTyIn)
-  if realTy.fields.len == 0: return "{}"
-  let ctx = addrAst.ctx
+proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                cell: RefPos): Option[string] =
+  ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
+  let typeId = refPointeeTypeId(cell.pointee)
+  if cell.pointee.kind notin {itTuple, itVariant}:
+    # A scalar pointee (`ref int`) lives in the whole-pointee heap `<typeId>`.
+    if not currentVariantHeaps.hasKey(typeId): return none(string)
+    let valTy = block:
+      let t = heapKeyValTy(typeId)
+      if t != nil: t else: cell.pointee
+    if valTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
+      return none(string)
+    return some(renderHeapLeaf(m, w, typeId, cell.name, cell.addrAst, valTy))
+  # An object or variant. The heaps materialised for this type, by suffix.
+  let prefix = typeId & "__"
+  var observed: seq[string]
+  for key in currentVariantHeaps.keys:
+    if key.len > prefix.len and key.startsWith(prefix):
+      let suffix = key[prefix.len .. ^1]
+      # A Nim identifier never contains `__`; a suffix that does belongs to
+      # a different type whose id extends this one's.
+      if suffix[0] != '@' and "__" notin suffix: observed.add suffix
+  sort(observed)
   var parts: seq[string]
-  for i, fname in realTy.fieldNames:
-    let fty = realTy.fields[i]
-    let frag =
-      if fty.kind in {itRef, itPtr}:
-        renderRefFieldValue(m, w, cellName, addrAst, realTy, fname, fty,
-                            depth, limit, visited, acc)
-      elif fty.kind in {itInt, itBool, itFloat32, itFloat64}:
-        renderLeafFieldAt(m, w, ctx, fieldHeapKey(realTy, fname),
-                          cellName & "." & fname, addrAst, fty)
-      else:
-        "<unsupported>"
-    parts.add fname & "=" & frag
-  "{" & parts.join(", ") & "}"
-
-proc renderContainerElemCell(m: Z3Model, w: var RawWitness, cellName: string,
-                             elemSV: SymVal, limit: int,
-                             visited: var Table[string, string],
-                             acc: var seq[HeapSnapshotEntry]) =
-  ## Render one container ELEMENT (a `seq[Node]`/`array[N, Node]`/
-  ## `tuple[...]` slot) whose value is already an `svRef`/`svPtr` SymVal — the
-  ## SAME nil/alias/recurse machinery as a field, just entered from a
-  ## container index/field instead of an object field. A container element
-  ## costs no heap-depth hop to OBTAIN (its address is already bound, exactly
-  ## like a top-level param) — depth starts at 0, matching a param cell.
-  let (addrAst, pointee) =
-    if elemSV.kind == svRef: (elemSV.refAst, elemSV.refPointee)
-    else: (elemSV.ptrAst, elemSV.ptrPointee)
-  if pointee == nil: return
-  let sortName = "Ref_" & refPointeeTypeId(pointee)
-  if heapAddrIsNil(m, addrAst, pointee):
-    acc.add HeapSnapshotEntry(name: cellName, sort: sortName, value: "nil",
-                              pointsTo: none(string), aliasRef: none(string))
-    return
-  let addrRendering = $m.eval(addrAst)
-  if visited.hasKey(addrRendering):
-    acc.add HeapSnapshotEntry(name: cellName, sort: sortName,
-                              value: addrRendering, pointsTo: none(string),
-                              aliasRef: some(visited[addrRendering]))
-    return
-  visited[addrRendering] = cellName
-  registerNominalIfFull(pointee)
-  var entry = HeapSnapshotEntry(name: cellName, sort: sortName,
-                                value: addrRendering, pointsTo: none(string),
-                                aliasRef: none(string))
-  if pointee.kind == itTuple:
-    entry.pointsTo = some(renderObjectFields(m, w, cellName, addrAst, pointee,
-                                              0, limit, visited, acc))
-  elif pointee.kind in {itInt, itBool, itFloat32, itFloat64}:
-    let rendered = renderLeafFieldAt(m, w, addrAst.ctx, refPointeeTypeId(pointee),
-                                     cellName, addrAst, pointee)
-    if rendered != "<unobserved>": entry.pointsTo = some(rendered)
-  acc.add entry
-
-proc renderContainerElemsIntoSnapshot(m: Z3Model, w: var RawWitness,
-                                      pname: string, sv: SymVal, limit: int,
-                                      visited: var Table[string, string],
-                                      acc: var seq[HeapSnapshotEntry]) =
-  ## Cluster H H_witness: a top-level CONTAINER param (`seq[Node]`/
-  ## `array[N, Node]`/`tuple[...]`) whose element(s) are ref/ptr-typed —
-  ## descend into each element the model pins, naming cells `pname[i]`
-  ## (seq/array) or `pname.field` (tuple). PURELY ADDITIVE: before H_witness a
-  ## container param contributed ZERO heapSnapshot entries (only bare
-  ## ref/ptr-KIND params did), so this cannot alter any existing snapshot's
-  ## shape — it can only add new cells for a param class that rendered
-  ## nothing at all before.
-  case sv.kind
-  of svArray:
-    if sv.arrElemTy.kind notin {itRef, itPtr}: return
-    for i, elemSV in sv.arrElems:
-      renderContainerElemCell(m, w, pname & "[" & $i & "]", elemSV, limit,
-                              visited, acc)
-  of svTuple:
-    for i, fname in sv.fieldNames:
-      let f = sv.fields[i]
-      if f.kind in {svRef, svPtr}:
-        let label = if fname.len > 0: fname else: $i
-        renderContainerElemCell(m, w, pname & "." & label, f, limit,
-                                visited, acc)
-  of svSeq:
-    if sv.seqElemTy.kind notin {itRef, itPtr}: return
-    let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
-    # RFC-0005 S8f: every cell (was cut at 64, below the element count
-    # `extractFromSymVal` renders).
-    let n = max(0, int(m.evalInt(sv.seqLen))) # [placeholder-audited]
-    let isPtr = sv.seqElemTy.kind == itPtr
-    let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy else: sv.seqElemTy.refPointeeTy
-    for i in 0 ..< n:
-      # `Ref_T` is a RUNTIME uninterpreted sort the typed `select` can't
-      # express — raw FFI, mirroring `isIndex/seq`'s itRef/itPtr arm
-      # (runtime.nim ~5415) and `storeSeqElem`'s itRef/itPtr arm. GROUND
-      # select; no quantifier.
-      let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, mkInt(i).raw) # [placeholder-audited]
-      let elemAny = wrap[Z3AnyAst](ctx, raw)
-      let elemSV = if isPtr: SymVal(kind: svPtr, ptrAst: elemAny,
-                                    ptrFamily: true, ptrPointee: pointee)
-                   else: SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
-      renderContainerElemCell(m, w, pname & "[" & $i & "]", elemSV, limit,
-                              visited, acc)
-  else: discard
+  var done: seq[string]
+  # The discriminator and the active branch of a variant.
+  let discKey = prefix & "@disc"
+  let variantTy =
+    if cell.pointee.kind == itVariant: cell.pointee
+    elif heapKeyShapes.hasKey(discKey): heapKeyShapes[discKey].variantTy
+    else: nil
+  if variantTy != nil and currentVariantHeaps.hasKey(discKey):
+    let discTy = block:
+      let t = heapKeyValTy(discKey)
+      if t != nil: t else: variantTy.vDiscTy
+    let discSV = heapSelect(cell.addrAst.ctx, inputHeap(discKey), cell.addrAst,
+                            discTy)
+    let discPath = cell.name & "." & variantTy.vDiscName
+    extractLeaf(m, w, discPath, discSV)
+    parts.add variantTy.vDiscName & "=" & pointeeRendering(w, discPath).get("?")
+    done.add variantTy.vDiscName
+    let ord = evalDiscOrdinal(m, discSV)
+    var active = -1
+    for i, arm in variantTy.vArms:
+      if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+    if active < 0:
+      for i, arm in variantTy.vArms:
+        if arm.isElse: active = i
+    if active >= 0:
+      let arm = variantTy.vArms[active]
+      for j, fname in arm.fieldNames:
+        let key = prefix & "@" & $arm.tagOrdinal & "__" & fname
+        parts.add fname & "=" & renderCellField(b, m, w, cell, key, fname,
+                                                arm.fieldTypes[j])
+        done.add fname
+  # Plain fields: in declaration order when the type is known, then any
+  # other field the path materialised.
+  let declared =
+    if cell.pointee.kind == itTuple:
+      if cell.pointee.isPlaceholder and cell.pointee.nominalId.len > 0 and
+         heapWitnessNominalRegistry.hasKey(cell.pointee.nominalId):
+        heapWitnessNominalRegistry[cell.pointee.nominalId]
+      else: cell.pointee
+    else: nil
+  if declared != nil:
+    for i, fname in declared.fieldNames:
+      if fname.len == 0 or fname in done: continue
+      parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+                                              fname, declared.fields[i])
+      done.add fname
+  elif cell.pointee.kind == itVariant:
+    for i, fname in cell.pointee.vPlainFieldNames:
+      if fname in done: continue
+      parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+        fname, cell.pointee.vPlainFieldTypes[i])
+      done.add fname
+  for fname in observed:
+    if fname in done: continue
+    parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+                                            fname, nil)
+    done.add fname
+  some("{" & parts.join(", ") & "}")
 
 proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
-                       params: seq[IRParam],
-                       settings: SymexSettings): seq[HeapSnapshotEntry] =
-  ## Phase 15 R12 (ADR-0010, witness-format-v3.md); Cluster H H_witness
-  ## extends this to the FULL reachable heap graph (ADR-0010 invariant #4),
-  ## not just top-level ref/ptr params. Empty when the SUT has no ref/ptr
-  ## params AND no container-of-ref params (the `heapSnapshot` key is ABSENT,
-  ## not null — backward compat with every prior cluster's witness).
-  ##
-  ## Aliasing: two refs that bound to the SAME `Ref_T` address in the model
-  ## render as the SAME cell. Pass 1 (UNCHANGED from pre-H_witness) evaluates
-  ## each ref/ptr PARAM's address const under the model and groups by the
-  ## resulting rendering; the lexicographically-FIRST param name in a group is
-  ## the PRIMARY and carries `pointsTo`; the rest carry `aliasRef = <primary>`
-  ## (and no `pointsTo`) — preserved byte-for-byte so param-vs-param aliasing
-  ## behaviour never changes. `visited` (address rendering -> the name
-  ## registered for it) is then SEEDED from this param-primary table before
-  ## any recursion, so a reachable cell that turns out to share a PARAM's
-  ## address (the "one-hop alias" shape, `p.next == q`) always renders as an
-  ## alias of that param, never a duplicate cell. Nil refs (`value == "nil"`)
-  ## are never aliased to a non-nil cell and carry no `pointsTo`.
-  ##
-  ## `value` is the model rendering of the abstract address (`$m.eval(refAst)`);
-  ## the address-rendering string doubles as the alias-group key. Nil is
-  ## detected by comparing that rendering against the evaluated `nil_<typeId>`
-  ## const. `limit` (`effectiveHeapDepthLimit`, the SAME budget the walker's
-  ## own `heapDepthExhausted` enforces) bounds recursion depth; a `visited` set
-  ## makes a cycle (self-loop or ring) terminate via `aliasRef` rather than
-  ## infinite recursion — see `renderRefFieldValue`.
-  let limit = effectiveHeapDepthLimit(settings)
-  # The ref/ptr params, in declaration order (the snapshot preserves it).
-  var refParams: seq[IRParam]
+                       params: seq[IRParam]): seq[HeapSnapshotEntry] =
+  ## Phase 15 R12 (ADR-0010, witness-format-v3.md); Cluster H H_witness;
+  ## RFC-0005 S8h (see the section comment above): every `ref`/`ptr`
+  ## position of the input and every cell reachable from one, rendered from
+  ## the model's INPUT heap. Empty when the input holds no ref or ptr.
+  var top: seq[RefPos]
   for p in params:
-    if not env.hasKey(p.name): continue
-    let sv = env[p.name]
-    if sv.kind in {svRef, svPtr}:
-      let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
-      if pointee != nil: refParams.add p
-  # Pass 1: per-param address rendering + nil flag; and, per non-nil address
-  # group, the lexicographically-FIRST param name (the alias-group PRIMARY that
-  # carries `pointsTo`).
-  var addrOf = initTable[string, string]()   ## param name -> address rendering
-  var isNilOf = initTable[string, bool]()     ## param name -> nil?
-  var primaryFor = initTable[string, string]()## address rendering -> primary name
-  for p in refParams:
-    let sv = env[p.name]
-    let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
-    let typeId = refPointeeTypeId(pointee)
-    let addrAst = if sv.kind == svRef: sv.refAst else: sv.ptrAst
-    let addrRendering = $m.eval(addrAst)
-    addrOf[p.name] = addrRendering
-    var isNil = false
-    if currentNilConsts.hasKey(typeId):
-      isNil = ($m.eval(currentNilConsts[typeId]) == addrRendering)
-    isNilOf[p.name] = isNil
-    if not isNil:
-      if (not primaryFor.hasKey(addrRendering)) or
-         (p.name < primaryFor[addrRendering]):
-        primaryFor[addrRendering] = p.name
-    registerNominalIfFull(pointee)  ## H_witness: seed the nominal registry up
-                                    ## front so a self-referential field's
-                                    ## placeholder always resolves.
-  # H_witness: seed the shared visited/alias map from the param-primary table.
-  var visited = initTable[string, string]()
-  for addrRendering, primaryName in primaryFor:
-    visited[addrRendering] = primaryName
-  # Pass 2: emit one entry per ref/ptr PARAM. Param-vs-param RELATIVE order is
-  # UNCHANGED (still one `.add` per `p in refParams`, in declaration order).
-  # H_witness swaps the composite-pointee rendering from the flat `"<object>"`
-  # placeholder to a real recursive descent (`renderObjectFields`), which
-  # appends new REACHABLE, non-param cell entries into `result` as a side
-  # effect DURING the `pointsTo` computation — so a param with ref-typed
-  # fields now has its DISCOVERED CHILDREN precede its own entry in `result`
-  # (a flat param with no ref fields is entirely unaffected: no children are
-  # ever discovered for it, so its position is unchanged). Entry ORDER was
-  # never a documented contract (existing tests key off `.name`, not
-  # position), so this is not a regression.
-  for p in refParams:
-    let sv = env[p.name]
-    let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
-    let sortName = "Ref_" & refPointeeTypeId(pointee)
-    let addrRendering = addrOf[p.name]
-    var entry = HeapSnapshotEntry(
-      name: p.name, sort: sortName,
-      value: (if isNilOf[p.name]: "nil" else: addrRendering),
-      pointsTo: none(string), aliasRef: none(string))
-    if not isNilOf[p.name]:
-      if primaryFor[addrRendering] == p.name:
-        if pointee.kind == itTuple:
-          let addrAst = if sv.kind == svRef: sv.refAst else: sv.ptrAst
-          entry.pointsTo = some(renderObjectFields(m, w, p.name, addrAst,
-            pointee, 0, limit, visited, result))
-        else:
-          entry.pointsTo = pointeeRendering(w, p.name)   ## unchanged primitive path
-      else:
-        entry.aliasRef = some(primaryFor[addrRendering])
-    result.add entry
-  # H_witness: container-typed params (seq/array/tuple of ref/ptr elements) —
-  # purely additive (see `renderContainerElemsIntoSnapshot`'s doc comment).
-  for p in params:
-    if not env.hasKey(p.name): continue
-    let sv = env[p.name]
-    if sv.kind in {svArray, svSeq, svTuple}:
-      renderContainerElemsIntoSnapshot(m, w, p.name, sv, limit, visited, result)
+    if env.hasKey(p.name): collectRefPositions(m, p.name, env[p.name], top)
+  for pos in top: registerNominalIfFull(pos.pointee)
+  var b: SnapshotBuild
+  # R12: among bare params sharing an address, the lexicographically-first
+  # name is the cell.
+  var paramNames: seq[string]
+  for p in params: paramNames.add p.name
+  for pos in top:
+    if pos.name notin paramNames: continue
+    let address = refAddrOf(m, pos.addrAst, pos.pointee)
+    if address.len > 0 and
+       (not b.cellOf.hasKey(address) or pos.name < b.cellOf[address]):
+      b.cellOf[address] = pos.name
+  for pos in top:
+    discard addPosition(b, m, pos, inlineNil = false)
+  var i = 0
+  while i < b.queue.len:
+    let cell = b.queue[i]
+    let pointsTo = renderCell(b, m, w, cell)
+    b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
+    inc i
+  b.entries
 
-proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
-                    settings: SymexSettings
-                    ): RawWitness =
+proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   result.paramOrder = newSeq[string](params.len)
   for i, p in params:
     result.paramOrder[i] = p.name
     extractFromSymVal(m, result, p.name, env[p.name])
-  # Phase 15 R12: the heap-snapshot witness — after every leaf is populated,
-  # so `pointeeRendering` can read back each ref/ptr param's pointee value.
-  # Cluster H H_witness: `buildHeapSnapshot` now ALSO writes new leaves into
-  # `result` (recursively-discovered cells' primitive fields), hence `var`.
-  result.heapSnapshot = buildHeapSnapshot(m, result, env, params, settings)
+  # Phase 15 R12: the heap-snapshot witness. RFC-0005 S8h: it is also where
+  # every cell's leaves are written (`<cell>.<field>`, `<cell>` for a scalar
+  # pointee) -- the typed witness's `resolveRef` reads them there.
+  result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
@@ -7600,7 +7299,7 @@ proc trySolve(ctx: Z3Context,
     # serializer can select a ref-to-variant pointee's active-arm field values.
     currentVariantHeaps = path.heaps
     (status: sxSat,
-     witness: extractWitness(m, envForExtract, params, settings))
+     witness: extractWitness(m, envForExtract, params))
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness())
   of zsUnknown:
@@ -14156,7 +13855,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   degradeSymCounter = 0                  ## Round-6 item 3 (consolidated item 1): reset shared degrade-name counter
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
-  currentHeapDerefVals = initTable[string, SymVal]()  ## Phase 15 R1
+  heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
@@ -15739,47 +15438,141 @@ proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
 
-proc refCellIsNil*(w: RawWitness, cell: string): bool =
-  ## RFC-0005 S8f. True iff the heap snapshot records `cell` (a container
-  ## element's cell, `s[i]`) as a nil ref.
+# ---- RFC-0005 S8h: ref witnesses built from the model's input heap ---------
+#
+# A `ref`/`ptr` position of the typed witness (a param, a field of a by-value
+# param, a container element, a field of another cell) is resolved through
+# the heap snapshot `buildHeapSnapshot` wrote: nil, the cell of another
+# position (aliasing -- one Nim object per model address, bound to every
+# position that holds it), or a cell of its own. A cell is allocated ONCE, and
+# its fields are filled from the leaves the snapshot wrote under the cell's
+# name (`<cell>.<field>`, or `<cell>` for a scalar pointee). The fill is a
+# generic over the SUT's own Nim type (`fieldPairs`), so a recursive field, a
+# cycle, a case object reached through a field and a ref inside a by-value
+# field render the same way a top-level param does -- the IR never has to
+# spell the pointee's fields out (a recursive field's IR pointee is an empty
+# placeholder by construction).
+
+type
+  RefWitness* = ref object
+    ## RFC-0005 S8h. One per rendered witness tuple, shared by every position
+    ## in it: the snapshot's position -> cell map, and the cells built so far.
+    w: RawWitness
+    cellOf: Table[string, string]   ## position -> its cell's name ("" = nil)
+    cells: Table[string, pointer]   ## cell name -> the object built for it
+
+proc newRefWitness*(w: RawWitness): RefWitness =
+  ## RFC-0005 S8h. A position absent from the snapshot is nil: a nil field is
+  ## rendered inline and gets no entry, and a field whose heap the winning
+  ## path never materialised was never observed.
+  result = RefWitness(w: w)
   for e in w.heapSnapshot:
-    if e.name == cell: return e.value == "nil"
+    result.cellOf[e.name] =
+      if e.value == "nil": ""
+      elif e.aliasRef.isSome: e.aliasRef.get
+      else: e.name
 
-proc refCellAlias*(w: RawWitness, cell: string): string =
-  ## RFC-0005 S8f. The primary cell `cell` aliases in the heap snapshot (the
-  ## same address, discovered first), or "" when it is its own primary.
-  for e in w.heapSnapshot:
-    if e.name == cell:
-      return (if e.aliasRef.isSome: e.aliasRef.get else: "")
+proc refElemPos*(container: string; i: int): string =
+  ## RFC-0005 S8h. The position of element `i` of a `seq`/`array` of refs.
+  container & "[" & $i & "]"
 
-proc refCellElemIndex*(cell, container: string): int =
-  ## RFC-0005 S8f. `i` when `cell` is `container[i]`, else -1.
-  if cell.len > container.len + 2 and cell.startsWith(container & "[") and
-     cell[^1] == ']':
-    try: parseInt(cell[container.len + 1 ..< cell.len - 1])
-    except ValueError: -1
-  else: -1
+proc cellInt(c: RefWitness; path: string; v: var int64): bool =
+  if c.w.intVals.hasKey(path): (v = c.w.intVals[path]; true) else: false
+proc cellUInt(c: RefWitness; path: string; v: var uint64): bool =
+  if c.w.uintVals.hasKey(path): (v = c.w.uintVals[path]; true) else: false
+proc cellBool(c: RefWitness; path: string; v: var bool): bool =
+  if c.w.boolVals.hasKey(path): (v = c.w.boolVals[path]; true) else: false
+proc cellF32(c: RefWitness; path: string; v: var float32): bool =
+  if c.w.float32Vals.hasKey(path): (v = c.w.float32Vals[path]; true) else: false
+proc cellF64(c: RefWitness; path: string; v: var float64): bool =
+  if c.w.float64Vals.hasKey(path): (v = c.w.float64Vals[path]; true) else: false
 
-proc rebaseWitness*(w: RawWitness, fromPrefix, toPrefix: string): RawWitness =
-  ## RFC-0005 S8f. The leaves of `w` under `fromPrefix` (the key itself, or a
-  ## `.`/`[` sub-path of it), re-keyed under `toPrefix`: lets a reader
-  ## emitted at the fixed path `toPrefix` render the cell at a path only
-  ## known at run time (a `seq[ref T]` element `s[i]`).
-  proc under(k: string): bool =
-    k == fromPrefix or (k.startsWith(fromPrefix) and
-      k.len > fromPrefix.len and k[fromPrefix.len] in {'.', '['})
-  template copy(field: untyped) =
-    for k, v in w.field.pairs:
-      if under(k): result.field[toPrefix & k[fromPrefix.len .. ^1]] = v
-  copy(intVals)
-  copy(uintVals)
-  copy(boolVals)
-  copy(float32Vals)
-  copy(float64Vals)
-  copy(strVals)
-  copy(seqLens)
-  copy(tabKeys)
-  copy(setMembers)
+# Non-generic accessors: the generics below are instantiated in the caller's
+# module, so they never touch `RefWitness`'s private fields directly.
+proc cellNameOf(c: RefWitness; pos: string): string = c.cellOf.getOrDefault(pos, "")
+proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
+proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
+
+proc readCellField[F](c: RefWitness; path: string; f: var F)
+
+proc validDefault[F](f: var F) =
+  ## RFC-0005 S8h. A cell comes from `new`/`alloc0`, so every field starts
+  ## zeroed, and zero need not lie inside a field's declared range
+  ## (`range[10..20]`, an enum whose low is not 0). A field the model never
+  ## observed does not affect the path, so any in-range value is faithful:
+  ## `low(F)`. By-value aggregates are walked recursively, since a nested
+  ## ranged subfield is zeroed too.
+  when F is object or F is tuple:
+    {.cast(uncheckedAssign).}:
+      for _, fv in fieldPairs(f): validDefault(fv)
+  elif F is array:
+    for x in f.mitems: validDefault(x)
+  elif F is SomeUnsignedInt or F is bool or F is char:
+    discard
+  elif F is Ordinal:
+    if ord(f) < ord(low(F)) or ord(f) > ord(high(F)): f = low(F)
+  else:
+    discard
+
+proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
+  ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
+  let cell = cellNameOf(c, pos)
+  if cell.len == 0: return nil
+  let built = cellBuilt(c, cell)
+  if built != nil: return cast[T](built)
+  when T is ref:
+    new(result)
+  else:
+    # A `ptr` witness cell is unmanaged memory the witness owns for the rest
+    # of the process: nothing frees what a SUT is handed as a raw pointer.
+    result = cast[T](alloc0(sizeof(result[])))
+  cellRecord(c, cell, cast[pointer](result))
+  when result[] is object:
+    # A case object's discriminator is assigned in field order, before the
+    # branch fields `fieldPairs` then yields for the branch it selected.
+    {.cast(uncheckedAssign).}:
+      for fname, fv in fieldPairs(result[]):
+        readCellField(c, cell & "." & fname, fv)
+  else:
+    readCellField(c, cell, result[])
+
+proc readCellField[F](c: RefWitness; path: string; f: var F) =
+  ## RFC-0005 S8h. One field of a cell (or a scalar pointee). The kinds the
+  ## logical heap models (`liftHeapValue`: int, bool, float, ref, ptr) read
+  ## the snapshot's leaf; a leaf that is absent was never observed and keeps
+  ## `validDefault`. Every other kind keeps `validDefault` too: a read of it
+  ## degrades the path (`heUnsupportedPointeeRead`), so no clean verdict
+  ## rests on it, and `witnessFidelity` classifies such a pointee lossy.
+  when F isnot ref and F isnot ptr:
+    validDefault(f)
+  when F is ref:
+    f = resolveRef[F](c, path)
+  elif F is ptr:
+    when typeof(f[]) is object or typeof(f[]) is SomeNumber or
+         typeof(f[]) is bool or typeof(f[]) is enum or typeof(f[]) is char or
+         typeof(f[]) is ref or typeof(f[]) is ptr:
+      f = resolveRef[F](c, path)
+  elif F is bool:
+    var b: bool
+    if cellBool(c, path, b): f = b
+  elif F is float32:
+    var x: float32
+    if cellF32(c, path, x): f = x
+  elif F is SomeFloat:
+    var x: float64
+    if cellF64(c, path, x): f = F(x)
+  elif F is SomeUnsignedInt or F is char:
+    var u: uint64
+    var i: int64
+    if cellUInt(c, path, u): f = F(u)
+    elif cellInt(c, path, i): f = F(uint64(i))
+  elif F is Ordinal:
+    var i: int64
+    var u: uint64
+    if cellInt(c, path, i): f = F(i)
+    elif cellUInt(c, path, u): f = F(int64(u))
+  else:
+    discard
 
 proc readSeqLen*(w: RawWitness, name: string): int =
   ## Phase 15 R3 (ADR-0010). The model length of a seq witness leaf — used by

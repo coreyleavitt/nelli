@@ -113,13 +113,19 @@ suite "#163 review R17 -- a write-only ranged arm field's witness stays inside i
 
 suite "#163 review R17 non-regression -- a field that IS read back still solves correctly":
 
-  test "read-after-write on the same ref reports the real observed value":
+  test "read-after-write on the same ref: the witness is the input and reproduces":
+    ## RFC-0005 S8h: the witness is the INPUT heap. `p.v = 55` happens on
+    ## the path, so the input `v` is any in-range value (this test used to
+    ## pin the written 55). Replaying the SUT on the witness takes the
+    ## `nkA` branch and performs the write, which is the observable proof.
     let r = symexFind(writeThenReadSameRef, tLabel("readback"))
     check r.status == sxSat
     check not r.witness[0].isNil
     let node = r.witness[0][]
     check node.kind == nkA
-    check node.v == 55
+    check node.v in 1 .. 100
+    writeThenReadSameRef(r.witness[0])
+    check r.witness[0].v == 55
 
 
 suite "#163 review round 1 -- walker version pin":

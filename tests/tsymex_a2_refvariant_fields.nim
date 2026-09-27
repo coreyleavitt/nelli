@@ -169,7 +169,11 @@ suite "A2 Slice 3 — ref-to-variant arm-field WRITE + aliasing (v29)":
     check not r.witness[0].isNil
     let node = r.witness[0][]
     check node.col == cGreen
-    check node.g == 99
+    # RFC-0005 S8h: the witness is the INPUT heap, so `g` is whatever the
+    # caller passed in (this used to pin the written 99). Replaying the SUT
+    # on the witness takes the cGreen arm and performs the write.
+    writeReadSameRef(r.witness[0])
+    check r.witness[0].g == 99
 
   test "wrong-arm write — FieldDefect raised; witness disc is a legal ordinal (D4.5)":
     # Write p.g when col != cGreen → FieldDefect. D4.5: the defect witness's

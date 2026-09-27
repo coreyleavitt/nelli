@@ -854,5 +854,9 @@ task test, "Run the test suite":
             # float->int never raises, unary-minus overflow, split(s, ""),
             # new(int) zero-init, slice/del defect classes, else-arm
             # discriminator reassignment; walker 154->155.
-            "tsymex_rfc0005_s8g_models"]:
+            "tsymex_rfc0005_s8g_models",
+            # RFC-0005 S8h -- ref witnesses that reproduce: built from the
+            # model's input heap -- nil, aliasing, recursive cells and cycles,
+            # refs in by-value fields; walker 155->156.
+            "tsymex_rfc0005_s8h_refwitness"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

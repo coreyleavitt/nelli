@@ -835,7 +835,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## overflow; `split(s, "")`; `new(int)` zero-init; slice / `del` defect
     ## classes; the `else:` arm of a symbolic discriminator reassignment).
     ## 154->155.
-    check symexWalkerVersion == "155"
+    ## RFC-0005 S8h (ref witnesses from the model's input heap: nil, aliasing,
+    ## recursive cells and cycles, refs in by-value fields). 155->156.
+    check symexWalkerVersion == "156"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

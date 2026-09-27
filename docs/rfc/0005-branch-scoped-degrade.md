@@ -129,7 +129,7 @@ state = "pending"
 [[slice]]
 id    = "S8h"
 title = "Ref witnesses that reproduce: nil top-level ref, param aliasing, recursive ref fields, refs inside by-value fields"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -1445,6 +1445,104 @@ Inventories:
 - `r6_n36_raise_class_audit`: the two removed empty-separator split raises,
   and one category-c raise added in `discFromRhs`. Also the
 `phase15_CR2_cachekey` pin (155).
+
+**As landed (S8h, walker 156) — ref witnesses that reproduce.** A clean
+`sxSat`/`sxRaised` whose witness holds a ref or ptr is now built from the
+solver model's **input** heap. Running the SUT on it takes the path the
+solver proved. Before S8h, four shapes each produced a false clean `sxSat`:
+
+1. A nil top-level ref param rendered non-nil.
+2. Params at one model address rendered as distinct objects.
+3. A live recursive ref field (`n.next != nil`) rendered nil.
+4. A ref inside a by-value field (`Holder.n`, a tuple field) rendered nil.
+
+The same mechanism also caused a fifth: (5) a cell's fields showed the heap
+the SUT had **written** by the end of the path, not the heap it was called
+with. For example, `p.v == 0` followed by `p.v = 1` rendered `v: 1`.
+
+- **Runtime.** `buildHeapSnapshot` works in three steps:
+  - It collects every ref/ptr position of the input. That covers params and
+    positions inside by-value params (tuple, array, seq, variant, distinct,
+    closure captures), each named the way the emitter names it.
+  - It assigns one cell per model address. Bare params are named first, in
+    lexicographic order, then the rest breadth-first.
+  - It reads each cell's fields by selecting from the free input constant
+    `heap_<key>` of every heap that the winning path materialised.
+
+  `mkHeapArrayVar` records each heap's value type in `heapKeyShapes`, plus
+  the variant for `__@disc`/`__@<ord>__f` heaps. As a result, a cell whose IR
+  pointee is a recursive-field placeholder still renders every observed
+  field, and a case object renders its discriminator and active branch. The
+  walk has no depth cut: it follows model addresses, which form a finite
+  universe, until it reaches nil or a cell that is already named.
+  `currentHeapDerefVals` and `extractFromSymVal`'s proto-default cell leaves
+  are deleted, as is `clampWitnessFieldsDeep`. `currentHeapDerefVals` held the
+  last value read through a param name on any path, not necessarily the
+  winning one.
+- **Emitter.** Every ref/ptr position renders as `resolveRef[T](ctx, pos)`.
+  All four tuple sites share one `RefWitness` per witness tuple through
+  `emitWitnessTuple`. For each position the call returns one of:
+  - nil;
+  - the object already built for that address;
+  - a new cell, filled generically over the SUT's own Nim type (`fieldPairs`
+    under `uncheckedAssign`, so case objects work).
+
+  A field that the model never observed gets `validDefault`, which is
+  `low(F)` wherever a zeroed range or enum field would lie outside its
+  declared range. It recurses through by-value aggregates, doing the job
+  `clampWitnessFieldsDeep` used to do. Seqs and arrays of refs resolve per
+  element. S8f's `rebaseWitness` and
+  `refCell*` readers are deleted. A `ptr` to an object or scalar renders an
+  `alloc0` cell instead of a nil placeholder. In `witnessFidelity`, a ref cell
+  is `wfFaithful` when every one of its field kinds is modelled by the logical
+  heap (int/enum, bool, float, ref, ptr), so S10's replay refutes a miss.
+  Every other ref cell is `wfLossy`.
+- **Consumer-visible (for S11's migration note).**
+  - Typed ref witnesses now carry nil, aliasing and cycles. Each address is
+    one object, whether it is reached through a param, a field or an element.
+    Field values are the input values.
+  - A `ptr T` witness is a real cell, never freed, instead of nil.
+  - `heapSnapshot` changes in several ways:
+    - It shows the input heap.
+    - It has an entry for every ref position of a param, including positions
+      inside by-value params.
+    - Cells are named breadth-first.
+    - `"<max-heap-depth>"` is gone.
+    - A variant cell shows its discriminator and active branch.
+    - An unobserved scalar pointee has `pointsTo` none; it was `"0"`.
+  - S10 replay treats these ref witnesses as faithful, so a miss refutes.
+  - The walker bump to 156 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - An inline `ref <case object>` field reached through a ref (`h.v.kind ==
+    vkB and h.v.b == 5`, with `v: ref VObj`) yields a false `sxUnsat`. In
+    isolation it yields `sxUnknown(ekZ3Error)`. A named alias (`VRef = ref
+    VObj`) works. This is already present on `f91eb94`.
+  - `renderAsChoices`, and so `assertCoveredBy`, still rejects ref params at
+    compile time.
+
+Pins: `tests/tsymex_rfc0005_s8h_refwitness.nim`. It covers the four
+violations, a cycle, alias through a field, input-versus-written fields, a
+`ptr` cell, a variant field, seq-element aliasing, and the `>= 156` floor.
+
+Re-pinned, each checked by running the SUT on the witness under real Nim:
+- `phase15_E5_finally` had pinned the values the SUT writes. It now pins two
+  live, distinct cells, and running the SUT on the witness raises
+  `ValueError`.
+- `phase15_r13_ptr_finally` had pinned the written `"7"`. Running the SUT on
+  the witness now raises `ValueError`.
+- `h_witness` had pinned a depth-cut chain with a `"<max-heap-depth>"`
+  marker. It now pins three distinct live typed cells, and running the SUT
+  on them hits the label.
+- `163rev_armfield_write` had pinned the written `v == 55`. It now pins an
+  input `v` in `1 .. 100`, and running the SUT on the witness takes the
+  `nkA` branch and writes 55.
+- `a2_refvariant_fields` read-after-write had pinned the written `g ==
+  99`. Running the SUT on the witness now takes the `cGreen` arm and writes
+  99.
+- In `163rev_nested_clamp`, the never-dereferenced `c2` may now be nil,
+  which is faithful. The range oracle runs only on a live cell, and both
+  SUTs run on their witnesses.
+- `phase15_CR2_cachekey` pin (156).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

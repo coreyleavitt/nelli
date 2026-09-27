@@ -184,7 +184,19 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "155"
+const symexWalkerVersion* = "156"
+  ## RFC-0005 S8h (2026-09-27) — `ref` witnesses that reproduce. A `sxSat`/
+  ## `sxRaised` witness holding a `ref`/`ptr` is now built from the solver
+  ## model's INPUT heap: a nil ref renders nil, positions at one model
+  ## address render as one object (params, fields, elements), a recursive
+  ## field proved live renders its cell (cycles included), and a ref inside a
+  ## by-value field renders. A cell's fields are the values the SUT was
+  ## called with, not the ones it had written by the end of the path. The
+  ## `heapSnapshot` changes with it (input heap, breadth-first naming, an
+  ## entry for every position of a param, no `<max-heap-depth>` cut), and a
+  ## ref witness of modelled field kinds is now `wfFaithful` to S10's replay,
+  ## so a miss on it refutes. A cache entry keyed under "155" carries the old
+  ## witnesses and must not be replayed.
   ## RFC-0005 S8g (2026-09-27) — faithful scalar, string and defect models.
   ## Verdicts move in both directions, so a cache entry keyed under "154"
   ## must not be replayed:

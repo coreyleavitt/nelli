@@ -635,10 +635,9 @@ proc stdName(name: string): NimNode =
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
   of "readSeqLen": bindSym"readSeqLen"
-  of "refCellIsNil": bindSym"refCellIsNil"        # RFC-0005 S8f
-  of "refCellAlias": bindSym"refCellAlias"        # RFC-0005 S8f
-  of "refCellElemIndex": bindSym"refCellElemIndex"  # RFC-0005 S8f
-  of "rebaseWitness": bindSym"rebaseWitness"      # RFC-0005 S8f
+  of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
+  of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
+  of "refElemPos": bindSym"refElemPos"            # RFC-0005 S8h
   else:
     error("symex RFC-0005 S8e: stdName has no binding for `" & name & "`")
     nil
@@ -669,44 +668,79 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
 proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode)
 
-proc emitRefElemsReader(elemIr: IRType; path: string;
-                        witId, n, init: NimNode): NimNode =
-  ## RFC-0005 S8f. The reader of a container of `ref T` (`seq`, `array`):
-  ## `init` is the empty container, `n` its element count. Element `i` is the
-  ## heap-snapshot cell `path[i]`: `nil` when the snapshot says so; the SAME
-  ## ref as element `j < i` when it aliases that element; otherwise a cell
-  ## built by the ordinary `ref T` reader over the leaves at `path[i]` (or at
-  ## the primary it aliases outside this container, e.g. a param -- its
-  ## content, not its identity), re-keyed to a fixed path by `rebaseWitness`.
-  let cellPath = "__nelliElemCell"
-  let subId = genSym(nskLet, "elemWit")
-  let (_, cellReader) = emitTyAndReaderShared(elemIr, cellPath, subId)
+var witnessRefCtx {.compileTime.}: NimNode
+  ## RFC-0005 S8h. The `RefWitness` binding of the witness tuple being
+  ## emitted (`emitWitnessTuple`): every `ref`/`ptr` position of one witness
+  ## resolves through ONE context, so a cell shared by two positions is one
+  ## Nim object bound to both.
+var witnessRefCtxUsed {.compileTime.}: bool
+  ## RFC-0005 S8h. Whether the tuple being emitted resolved any ref.
+
+proc refWitnessCtx(witId: NimNode): NimNode =
+  ## RFC-0005 S8h. The context a `ref` position resolves through: the
+  ## enclosing `emitWitnessTuple`'s, or -- for a reader emitted outside one --
+  ## a context of its own (identity is then shared within the position only).
+  witnessRefCtxUsed = true
+  if witnessRefCtx != nil: witnessRefCtx
+  else: newCall(stdName("newRefWitness"), witId)
+
+proc resolveRefCall(refTy: NimNode; pos, witId: NimNode): NimNode =
+  ## RFC-0005 S8h. `resolveRef[refTy](ctx, pos)`.
+  newCall(nnkBracketExpr.newTree(stdName("resolveRef"), refTy),
+          refWitnessCtx(witId), pos)
+
+proc emitRefElemsReader(elemTy: NimNode; path: string; witId, n,
+                        init: NimNode): NimNode =
+  ## RFC-0005 S8h. The reader of a `seq`/`array` of refs: `init` is the
+  ## container, `n` its element count; element `i` is the position `path[i]`.
   let contId = genSym(nskVar, "cont")
   let iId = genSym(nskForVar, "i")
-  let cellId = genSym(nskLet, "cell")
-  let aliasId = genSym(nskLet, "alias")
-  let jId = genSym(nskLet, "j")
   let nId = genSym(nskLet, "n")
-  let isNil = stdName("refCellIsNil")
-  let aliasOf = stdName("refCellAlias")
-  let elemIx = stdName("refCellElemIndex")
-  let rebase = stdName("rebaseWitness")
-  result = quote do:
+  let pos = newCall(stdName("refElemPos"), newLit(path), iId)
+  let elem = resolveRefCall(elemTy, pos, witId)
+  quote do:
     block:
       let `nId` = `n`
       var `contId` = `init`
       for `iId` in 0 ..< `nId`:
-        let `cellId` = `path` & "[" & $`iId` & "]"
-        if not `isNil`(`witId`, `cellId`):
-          let `aliasId` = `aliasOf`(`witId`, `cellId`)
-          let `jId` = `elemIx`(`aliasId`, `path`)
-          if `jId` >= 0 and `jId` < `iId`:
-            `contId`[`iId`] = `contId`[`jId`]
-          else:
-            let `subId` {.used.} = `rebase`(`witId`,
-              (if `aliasId`.len > 0: `aliasId` else: `cellId`), `cellPath`)
-            `contId`[`iId`] = `cellReader`
+        `contId`[`iId`] = `elem`
       `contId`
+
+proc refPointeeOf(ty: IRType): IRType =
+  if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
+
+proc resolvesByRef(ty: IRType): bool =
+  ## RFC-0005 S8h. Whether the `ref`/`ptr` position `ty` renders through
+  ## `resolveRef`: always, for a `ref`, unless it is a recursive field whose
+  ## type reached the IR without a symbol; for a `ptr`, when its pointee is
+  ## an object or a scalar `alloc0` can hold.
+  let pointee = refPointeeOf(ty)
+  if isRecursionPlaceholder(pointee) and witnessTypeSym(pointee) == nil:
+    return false
+  ty.kind == itRef or
+    pointee.kind in {itTuple, itVariant, itMultiVariant, itInt, itBool,
+                     itFloat32, itFloat64}
+
+proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
+  ## RFC-0005 S8h. The Nim type of the `ref`/`ptr` position `ty`. A named ref
+  ## alias (`type Node = ref object`) IS the ref type; a recursive field's IR
+  ## pointee is an empty placeholder carrying only the symbol it was
+  ## classified from -- the alias itself, or the object an inline `ref Obj`
+  ## points to.
+  let pointee = refPointeeOf(ty)
+  proc wrapped(inner: NimNode): NimNode =
+    if ty.kind == itRef: nnkRefTy.newTree(inner) else: nnkPtrTy.newTree(inner)
+  if isRecursionPlaceholder(pointee):
+    let sym = witnessTypeSym(pointee)
+    if sym == nil: return wrapped(ident(pointee.objectName))
+    let impl = sym.getImpl
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind in {nnkRefTy, nnkPtrTy}:
+      return copyNimNode(sym)
+    return wrapped(copyNimNode(sym))
+  let (innerTy, _) = emitTyAndReader(pointee, path, witId)
+  if pointee.kind == itTuple and pointee.nameIsRefAlias: innerTy
+  else: wrapped(innerTy)
 
 proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
@@ -861,10 +895,9 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
     let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
     let arrTy = newTree(nnkBracketExpr,
       stdName("array"), newLit(ty.size), elemTyNode)
-    if ty.elemTy.kind == itRef:
-      # RFC-0005 S8f: as `seq[ref T]` -- nil, element aliasing, and the
-      # cell's observed fields, read at the heap-snapshot name `path[i]`.
-      return (arrTy, emitRefElemsReader(ty.elemTy, path, witId,
+    if ty.elemTy.kind in {itRef, itPtr} and resolvesByRef(ty.elemTy):
+      # RFC-0005 S8f/S8h: element `i` is the position `path[i]`.
+      return (arrTy, emitRefElemsReader(elemTyNode, path, witId,
                                         newLit(ty.size),
                                         defaultValueOf(arrTy)))
     var arrLit = newTree(nnkBracket)
@@ -930,37 +963,14 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float32")),
        newCall(stdName("readSeqFloat32"), witId, newLit(path)))
     elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
-      # The element pointee values were observed only through the heap; the full
-      # per-element heap-snapshot witness (alias groups / nil rendering) lands
-      # R11b/R12 / Cluster H H_witness. R3 renders a `seq[ref T]` of the model
-      # length, each element a fresh default-zero pointee cell — sound (the
-      # pointees were constrained in-solver, never individually rendered) and
-      # replayable (the seq has the right length). No per-element witness leaf
-      # is read (the extractor recorded none), so the cells are freshly
-      # allocated defaults. Build the element type from the pointee (its
-      # reader is intentionally NOT invoked at R3 — that would KeyError on the
-      # absent leaf).
-      let pointee = ty.seqElemTy.refPointeeTy
-      let (innerTy, _) = emitTyAndReader(pointee, path & ".0", witId)
-      # Cluster H H_witness fix: a DIRECT named ref-object alias (`type Node =
-      # ref object`) has NO separately-nameable plain-object symbol — mirrors
-      # the `itRef` arm's own `nameIsRefAlias` special-case (~line 1005 below).
-      # `innerTy` is ALREADY ref-shaped ("Node"); wrapping in an ADDITIONAL
-      # `ref`/`new` would build `ref (ref Body)`, a genuine Nim type mismatch
-      # ("got 'Node' for 'new(Node)' but expected 'ref Node'"). `array[N,
-      # Node]` never hit this: `itArray` delegates whole-element construction
-      # to the `itRef` arm, which already special-cases `nameIsRefAlias`;
-      # `itSeq` had its OWN bespoke reader that predates Step C and never
-      # learned the same special-case. Nim's `Node(...)` constructor sugar
-      # already allocates+returns a fresh `ref Node` cell directly.
-      let isDirectRefAlias = pointee.kind == itTuple and pointee.nameIsRefAlias
-      let elemTy = if isDirectRefAlias: innerTy else: nnkRefTy.newTree(innerTy)
-      # RFC-0005 S8f: each element renders its OWN cell -- `nil`, the same
-      # ref as an earlier element it aliases, or a cell built from the
-      # leaves the extractor wrote at the heap-snapshot name `path[i]` --
-      # instead of a fresh default (`s[69].v == 3` rendered `v == 0`).
+      # RFC-0005 S8f/S8h: element `i` is the position `path[i]` -- nil, the
+      # same object as any other position holding its address (an earlier
+      # element, a param), or its own cell. (R3 rendered each element a
+      # fresh default cell; S8f rebuilt each from its leaves, with identity
+      # only among elements.)
+      let (elemTy, _) = emitTyAndReader(ty.seqElemTy, path & "[0]", witId)
       let lenCall = newCall(stdName("readSeqLen"), witId, newLit(path))
-      let reader = emitRefElemsReader(ty.seqElemTy, path, witId, lenCall,
+      let reader = emitRefElemsReader(elemTy, path, witId, lenCall,
         newCall(nnkBracketExpr.newTree(stdName("newSeq"), elemTy), lenCall))
       (newTree(nnkBracketExpr, stdName("seq"), elemTy), reader)
     else:
@@ -1210,77 +1220,33 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       caseStmt
     (objTyId, emitMVBranch(0, @[]))
   of itRef, itPtr:
-    # Phase 15 Cluster R (R1, ADR-0010, C7/Breadth-CRIT-1). A `ref T`/`ptr T`
-    # SUT param renders the dereffed pointee value at `path`: the runtime's
-    # `extractFromSymVal(svRef/svPtr)` populated the witness leaf at `path` from
-    # the heap-select value (`select(heap, p)`, recorded via
-    # `currentHeapDerefVals`). Build a heap-allocated `ref T`/`ptr T` holding
-    # that value so the rendered witness satisfies `p[] == <value>`. The full
-    # heap-snapshot witness format (alias groups / nil rendering, ADR-0010 §Heap
-    # witness invariants) lands R11b/R12.
+    # RFC-0005 S8h. A `ref T`/`ptr T` position resolves through the witness's
+    # `RefWitness` (`resolveRef`): nil, the object already built for another
+    # position holding the same model address, or a cell built once and
+    # filled from the model's INPUT heap. The fill is generic over the Nim
+    # type, so a recursive field, a cycle and a case object reached through
+    # a field render like a top-level param.
     #
-    # A NEVER-dereferenced ref param has no leaf at `path`; the pointee reader
-    # then reads the leaf's default (e.g. `0` for an int), which is sound — the
-    # witness is replayable and the param's pointee was never observed.
-    let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
-    # Phase 15 R9 (ADR-0010). A REF-TYPED FIELD's pointee is a finite NAMED
-    # PLACEHOLDER (`classifyFieldType` → empty-fielded `itTuple` carrying only the
-    # object name) — the recursive `next: Node` of a linked list. We cannot (and
-    # need not) reconstruct the whole chain as a witness: a recursive ref renders
-    # as `nil` of its named `ref Obj` type (sound + replayable; the full
-    # heap-snapshot witness — alias groups, chain rendering — lands R11b/R12).
-    # Cluster H Step C (ADR-0022 Round-2): explicit provenance check
-    # (`isRecursionPlaceholder`) — NOT the old `fields.len == 0` heuristic,
-    # which was ambiguous for a genuine zero-field named ref type (`type
-    # Token = ref object`): its TOP-LEVEL full pointee also has
-    # `fields.len == 0`, so a proven-non-nil `p: Token` would have
-    # mis-rendered as `nil` under the old heuristic.
-    if isRecursionPlaceholder(pointee):
-      let objId = userTypeName(pointee, pointee.objectName)
-      let refTy = if ty.kind == itRef: nnkRefTy.newTree(objId)
-                  else: nnkPtrTy.newTree(objId)
-      return (refTy, newNilLit())
-    let (innerTy, innerReader) = emitTyAndReader(pointee, path, witId)
-    # Cluster H Step C (ADR-0022 Round-2): a DIRECT named ref-object alias
-    # (`type Node = ref object`) has NO separately-nameable plain-object
-    # symbol — `objectName` ("Node") IS the ref alias itself, and Nim's
-    # `Node(field: val, ...)` constructor sugar ALREADY allocates and returns
-    # a `ref Node`. `innerReader` (built by the `itTuple` arm above) is
-    # therefore ALREADY the correct ref-typed witness value — wrapping it in
-    # an ADDITIONAL `new(Node)` + `cell[] = Node(...)` would try to build
-    # `ref Node` (= `ref ref <body>`) and assign that `ref Node`-typed value
-    # into a plain-object-typed cell slot: a genuine Nim type mismatch (the
-    # object body has no name of its own to declare the cell's type as).
-    if pointee.kind == itTuple and pointee.nameIsRefAlias:
-      return (innerTy, innerReader)
-    if ty.kind == itRef:
-      # `(var r = new(T); r[] = <pointeeReader>; r)` — a heap cell holding the
-      # dereffed value, so the rendered witness satisfies `p[] == <value>`.
-      let cellId = genSym(nskVar, "refCell")
-      let reader = quote do:
-        block:
-          # RFC-0005 S8e: declared, not `new(T)`: `new` needs `T` as a
-          # `typedesc`, which a recorded type symbol is not.
-          var `cellId`: ref `innerTy`
-          new(`cellId`)
-          `cellId`[] = `innerReader`
-          `cellId`
-      (nnkRefTy.newTree(innerTy), reader)
-    else:
-      # `ptr T`: a `ptr` witness cannot be safely heap-reconstructed without an
-      # owning cell (a raw `ptr` to a GC'd `new` cell would dangle). R1's DoD is
-      # `ref int`. R8 classifies the ptr FAMILY (a non-halting `hePtrFamily` hint
-      # on the finding) but does NOT yet render the ptr witness VALUE; the full
-      # heap-snapshot witness format (alias groups / ptr rendering) lands R11b/R12.
-      # Emit a `nil` ptr placeholder + a classified compile-time `{.warning.}`
-      # (never a silent crash), mirroring the `__closure` arm.
+    # Replaces Phase 15 R1/R9 and Cluster H Step C's readers, each of which
+    # built a fresh object from leaves at `path`: a nil param rendered
+    # non-nil, two params at one address rendered two objects, a recursive
+    # field (an empty IR placeholder) rendered `nil` even when the path had
+    # proved it live, and the fields rendered the heap the SUT had written by
+    # the end of the path, not the one it was called with.
+    let refTy = refWitnessTypeNode(ty, path, witId)
+    if not resolvesByRef(ty):
+      # A recursive field whose type reached the IR without a symbol, or a
+      # `ptr` to a pointee `resolveRef` cannot allocate (an `UncheckedArray`,
+      # a container): no Nim type to build the cell as. `witnessFidelity`
+      # classifies it `wfUnexecutable`, so replay never trusts it.
       let placeholder = quote do:
         block:
-          {.warning: "symex: a `ptr T` top-level SUT param renders as a `nil` " &
-                     "ptr placeholder; R8 flags the ptr family via a hePtrFamily " &
-                     "hint, full pointer-family witness rendering lands R11b/R12.".}
+          {.warning: "symex: this `ref`/`ptr` witness position renders as " &
+                     "`nil`: no cell of its pointee type can be built " &
+                     "(RFC-0005 S8h).".}
           nil
-      (nnkPtrTy.newTree(innerTy), placeholder)
+      return (refTy, placeholder)
+    (refTy, resolveRefCall(refTy, newLit(path), witId))
 
 proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
   ## Returns (Nim type AST, witness-construction expression) for `ty` at
@@ -1293,6 +1259,29 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   ## a value of the type, not the type itself.
   let (t, r) = emitTyAndReaderShared(ty, path, witId)
   (copyNimTree(t), copyNimTree(r))
+
+proc emitWitnessTuple(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) =
+  ## The witness tuple of `params` over the `RawWitness` `witId`: (its type,
+  ## its value). RFC-0005 S8h: every `ref`/`ptr` position in it resolves
+  ## through ONE `RefWitness`, bound once around the tuple, so a cell held by
+  ## two params (or a param and a field, or two elements) is one object.
+  let ctxId = genSym(nskLet, "refWit")
+  let (savedCtx, savedUsed) = (witnessRefCtx, witnessRefCtxUsed)
+  witnessRefCtx = ctxId
+  witnessRefCtxUsed = false
+  var tupleTy = newTree(nnkTupleConstr)
+  var tup = newTree(nnkTupleConstr)
+  for p in params:
+    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
+    tupleTy.add pTy
+    tup.add pVal
+  let used = witnessRefCtxUsed
+  (witnessRefCtx, witnessRefCtxUsed) = (savedCtx, savedUsed)
+  if not used:
+    return (tupleTy, tup)
+  let ctxInit = newCall(stdName("newRefWitness"), witId)
+  (tupleTy, nnkBlockExpr.newTree(newEmptyNode(),
+     newStmtList(newLetStmt(ctxId, ctxInit), tup)))
 
 # ---- Body markers -----------------------------------------------------------
 
@@ -1481,41 +1470,110 @@ type WitnessFidelity = enum
   ## the SAME `IRType` the reader walks. Ordered: the worst component wins.
   wfFaithful      ## the rendered value IS the solver's model value
   wfLossy         ## safe to execute, but the render is not the model (a
-                  ## `ref` rendered as a fresh non-nil cell with no alias
-                  ## structure; `default(Object)` variant stubs; default-cell
-                  ## `seq[ref T]` elements; the unsupported-field empty seq).
+                  ## `ref` cell with a field kind the logical heap does not
+                  ## model, or whose fields are unknown at macro time -- RFC-
+                  ## 0005 S8h; `default(Object)` variant stubs; the
+                  ## unsupported-field empty seq).
                   ## A HIT still confirms -- any concrete input that reaches the
                   ## target proves reachability -- but a MISS proves nothing
                   ## about the model's witness, so it is inconclusive
   wfUnexecutable  ## a placeholder that must never be run: the nil-proc
-                  ## closure stub, the nil `ptr`, the `__unsupported:` dummy
-                  ## `int`, the nil recursive-ref field (deref would crash or
+                  ## closure stub, the nil `ptr` to a pointee no cell can be
+                  ## built for, the `__unsupported:` dummy `int`, a recursive
+                  ## ref field with no type symbol (deref would crash or
                   ## misattribute a raise)
 
-proc witnessFidelity(ty: IRType): WitnessFidelity =
+proc collectNominals(ty: IRType; acc: var Table[string, IRType];
+                     seen: var HashSet[string]) =
+  ## RFC-0005 S8h. Every fielded named object in the type tree `ty`, by
+  ## `nominalId`: the only place a recursive field's placeholder pointee can
+  ## learn its fields at macro time.
+  if ty == nil: return
+  case ty.kind
+  of itTuple:
+    if ty.nominalId.len > 0:
+      if ty.isPlaceholder or seen.containsOrIncl(ty.nominalId): return
+      acc[ty.nominalId] = ty
+    for f in ty.fields: collectNominals(f, acc, seen)
+  of itRef: collectNominals(ty.refPointeeTy, acc, seen)
+  of itPtr: collectNominals(ty.ptrPointeeTy, acc, seen)
+  of itArray: collectNominals(ty.elemTy, acc, seen)
+  of itSeq: collectNominals(ty.seqElemTy, acc, seen)
+  of itDistinct: collectNominals(ty.distinctBase, acc, seen)
+  of itVariant:
+    for f in ty.vPlainFieldTypes: collectNominals(f, acc, seen)
+    for arm in ty.vArms:
+      for f in arm.fieldTypes: collectNominals(f, acc, seen)
+  of itMultiVariant:
+    for f in ty.mvPlainFieldTypes: collectNominals(f, acc, seen)
+    for ax in ty.mvAxes:
+      for arm in ax.arms:
+        for f in arm.fieldTypes: collectNominals(f, acc, seen)
+  else: discard
+
+proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
+                     inProgress: var HashSet[string]): WitnessFidelity =
+  ## RFC-0005 S8h. The fidelity of a `ref`/`ptr` position: `resolveRef`
+  ## renders the model's input heap exactly for the field kinds the logical
+  ## heap models (`liftHeapValue`: int -- incl. enums --, bool, float, ref,
+  ## ptr), so a cell of only those is faithful, recursively; a field of any
+  ## other kind keeps its zero value (lossy), and a cell whose fields cannot
+  ## be known at macro time is lossy too.
+  if not resolvesByRef(ty): return wfUnexecutable
+  var pointee = refPointeeOf(ty)
+  if pointee.kind == itTuple and pointee.isPlaceholder:
+    if pointee.nominalId.len == 0 or not noms.hasKey(pointee.nominalId):
+      return wfLossy
+    pointee = noms[pointee.nominalId]
+  proc fieldFidelity(f: IRType; inProgress: var HashSet[string]): WitnessFidelity =
+    case f.kind
+    of itBool, itInt, itFloat32, itFloat64: wfFaithful
+    of itRef, itPtr: refCellFidelity(f, noms, inProgress)
+    else: wfLossy
+  case pointee.kind
+  of itBool, itInt, itFloat32, itFloat64: wfFaithful
+  of itTuple:
+    if pointee.objectName.len == 0: return wfLossy   ## `fieldPairs` names differ
+    if pointee.nominalId.len > 0:
+      # A cycle through this type is faithful if the rest of it is.
+      if inProgress.containsOrIncl(pointee.nominalId): return wfFaithful
+    var r = wfFaithful
+    for f in pointee.fields: r = max(r, fieldFidelity(f, inProgress))
+    if pointee.nominalId.len > 0: inProgress.excl pointee.nominalId
+    r
+  of itVariant:
+    var r = fieldFidelity(pointee.vDiscTy, inProgress)
+    for f in pointee.vPlainFieldTypes: r = max(r, fieldFidelity(f, inProgress))
+    for arm in pointee.vArms:
+      for f in arm.fieldTypes: r = max(r, fieldFidelity(f, inProgress))
+    r
+  else: wfLossy
+
+proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
   ## Mirrors `emitTyAndReader`'s arms one-for-one; keep them in lockstep.
+  ## `noms`: `collectNominals` over every parameter (RFC-0005 S8h).
   template worst(a, b: WitnessFidelity): WitnessFidelity = max(a, b)
+  template wf(t: IRType): WitnessFidelity = witnessFidelity(t, noms)
   case ty.kind
   of itBool, itInt, itFloat32, itFloat64, itString: wfFaithful
-  of itDistinct: witnessFidelity(ty.distinctBase)
+  of itDistinct: wf(ty.distinctBase)
   of itUninterp: wfUnexecutable
-  of itPtr: wfUnexecutable
-  of itRef:
-    if isRecursionPlaceholder(ty.refPointeeTy): wfUnexecutable
-    else: worst(wfLossy, witnessFidelity(ty.refPointeeTy))
+  of itRef, itPtr:
+    var inProgress: HashSet[string]
+    refCellFidelity(ty, noms, inProgress)
   of itTuple:
     if rendersAsDefaultObject(ty): wfLossy
     else:
       var r = wfFaithful
-      for f in ty.fields: r = worst(r, witnessFidelity(f))
+      for f in ty.fields: r = worst(r, wf(f))
       r
-  of itArray: witnessFidelity(ty.elemTy)
+  of itArray: wf(ty.elemTy)
   of itSeq:
     if isUnsupportedFieldPlaceholder(ty): wfLossy
     else:
       case ty.seqElemTy.kind
       of itInt, itFloat32, itFloat64: wfFaithful
-      of itRef: wfLossy
+      of itRef: wf(ty.seqElemTy)   ## RFC-0005 S8h
       else: wfUnexecutable   ## the reader's defensive `error()` arm
   of itTable:
     if ty.tabKeyTy.kind == itString and ty.tabValTy.kind == itInt and
@@ -1526,18 +1584,18 @@ proc witnessFidelity(ty: IRType): WitnessFidelity =
        ty.setElemTy.width == 64: wfFaithful
     else: wfUnexecutable
   of itVariant:
-    var r = witnessFidelity(ty.vDiscTy)
-    for f in ty.vPlainFieldTypes: r = worst(r, witnessFidelity(f))
+    var r = wf(ty.vDiscTy)
+    for f in ty.vPlainFieldTypes: r = worst(r, wf(f))
     for arm in ty.vArms:
-      for f in arm.fieldTypes: r = worst(r, witnessFidelity(f))
+      for f in arm.fieldTypes: r = worst(r, wf(f))
     r
   of itMultiVariant:
     var r = wfFaithful
-    for f in ty.mvPlainFieldTypes: r = worst(r, witnessFidelity(f))
+    for f in ty.mvPlainFieldTypes: r = worst(r, wf(f))
     for ax in ty.mvAxes:
-      r = worst(r, witnessFidelity(ax.discTy))
+      r = worst(r, wf(ax.discTy))
       for arm in ax.arms:
-        for f in arm.fieldTypes: r = worst(r, witnessFidelity(f))
+        for f in arm.fieldTypes: r = worst(r, wf(f))
     r
 
 proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
@@ -1608,8 +1666,11 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## miss from `roRefuted` to `roInconclusive`; a hit still confirms. Order
   ## of refusal, each one WITHOUT executing `fn`: ineligible taint,
   ## unexecutable witness shape, out-of-scope target kind.
+  var noms: Table[string, IRType]
+  var seenNoms: HashSet[string]
+  for p in params: collectNominals(p.ty, noms, seenNoms)
   var fidelity = wfFaithful
-  for p in params: fidelity = max(fidelity, witnessFidelity(p.ty))
+  for p in params: fidelity = max(fidelity, witnessFidelity(p.ty, noms))
   if fidelity == wfUnexecutable:
     # Decided at macro time: the splat is not even emitted, so a placeholder
     # (a nil proc, a nil ptr) can never be called.
@@ -1839,12 +1900,7 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   if not replayOn:
     return runCall
   let witId  = genSym(nskLet, "candRawWit")
-  var tupleTy = newTree(nnkTupleConstr)
-  var witnessTup = newTree(nnkTupleConstr)
-  for p in params:
-    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
-    tupleTy.add pTy
-    witnessTup.add pVal
+  let (tupleTy, witnessTup) = emitWitnessTuple(params, witId)
   let settledId = genSym(nskVar, "settled")
   let tgtId     = genSym(nskLet, "searchTarget")
   let candId    = genSym(nskForVar, "cand")
@@ -1982,21 +2038,13 @@ macro symexFind*(fn: typed,
   # local name for the RawWitness so the witness-constructor calls
   # share an identity-equal NimNode with the `let` that binds it.
   let witId = genSym(nskLet, "rawWit")
-  var tupleTy = newTree(nnkTupleConstr)
-  var witnessTup = newTree(nnkTupleConstr)
-  for p in parsed.params:
-    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
-    tupleTy.add pTy
-    witnessTup.add pVal
+  let (tupleTy, witnessTup) = emitWitnessTuple(parsed.params, witId)
 
   # ADR-0012 D2: a SEPARATE gensym for the per-diagnostic RawWitness
   # binding inside the diagnostics loop. Using a distinct name avoids any
   # shadowing concern with the outer `witId` binding.
   let diagWitId = genSym(nskLet, "diagRawWit")
-  var diagWitnessTup = newTree(nnkTupleConstr)
-  for p in parsed.params:
-    let (_, pVal) = emitTyAndReader(p.ty, p.name, diagWitId)
-    diagWitnessTup.add pVal
+  let (_, diagWitnessTup) = emitWitnessTuple(parsed.params, diagWitId)
 
   # `(int,)` is a syntactic 1-tuple; nnkTupleConstr with one child
   # renders correctly for both the type and the value.
@@ -2691,12 +2739,7 @@ macro symexFindAllWitnesses*(fn: typed,
   # produce a typed Nim value so `renderAsChoices` can serialise it
   # into the choice IR for the example DB and report.
   let witId = genSym(nskLet, "rawWit")
-  var tupleTy = newTree(nnkTupleConstr)
-  var witnessTup = newTree(nnkTupleConstr)
-  for p in parsed.params:
-    let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
-    tupleTy.add pTy
-    witnessTup.add pVal
+  let (tupleTy, witnessTup) = emitWitnessTuple(parsed.params, witId)
 
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode

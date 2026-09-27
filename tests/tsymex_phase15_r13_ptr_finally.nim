@@ -50,5 +50,10 @@ suite "symex Phase 15 R13-B — ptr T + try/finally composition":
     let e = r.heapSnapshot[0]
     check e.name == "p"
     check e.value != "nil"
-    check e.pointsTo.isSome
-    check e.pointsTo.get == "7"
+    # RFC-0005 S8h re-pin. This read `pointsTo == "7"`: the heap at the END
+    # of the path, the value `f` itself writes. The snapshot is now the heap
+    # `f` is CALLED with, where `p[]` is written before it is read and so
+    # unconstrained. The property -- the store threads through to the
+    # finally's read -- is checked by running `f` on the (now real) cell.
+    expect ValueError:
+      f(r.raisedWitness[0])

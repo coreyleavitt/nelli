@@ -88,18 +88,23 @@ suite "#163 review R8 -- a ranged subfield two levels deep in an unread ref-obje
     ## own declared range type raised `RangeDefect` before this fix.
     let r = symexFind(twoOuterRefs, tLabel("hit"))
     check r.status == sxSat  ## did not crash constructing this result
-    if r.status == sxSat:
+    ## RFC-0005 S8h: `c2` is never dereferenced, so the model may leave it
+    ## nil, and a nil witness is faithful. Only a live cell has a subfield
+    ## to range-check.
+    if r.status == sxSat and r.witness[1] != nil:
       let c2 = r.witness[1][]
       discard mkInnerR(c2.inner.r)  ## does not raise -- the point of the fix
+    twoOuterRefs(r.witness[0], r.witness[1])
 
 suite "#163 review R8 non-regression -- W4's original one-level-deep field still clamps":
 
   test "an unread sibling ref's direct field witness still stays inside its declared range":
     let r = symexFind(twoFlatRefs, tLabel("hit"))
     check r.status == sxSat
-    if r.status == sxSat:
+    if r.status == sxSat and r.witness[1] != nil:  ## RFC-0005 S8h: nil is faithful
       let c2 = r.witness[1][]
       discard mkFlatW(c2.w)  ## does not raise -- unaffected by the R8 change
+    twoFlatRefs(r.witness[0], r.witness[1])
 
 suite "#163 review round 1 -- walker version pin":
 

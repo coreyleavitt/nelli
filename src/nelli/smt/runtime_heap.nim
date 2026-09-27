@@ -211,7 +211,8 @@ proc heapValueSort(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
   ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
 
 proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
-                    pointeeTy: IRType, name: string): Z3AnyAst =
+                    pointeeTy: IRType, name: string,
+                    variantTy: IRType = nil): Z3AnyAst =
   ## Phase 15 R1 (ADR-0010). Build a FREE `Z3Array[Ref_T, T_sym]` variable —
   ## the initial heap for one pointee type on one path. The key sort `Ref_T`
   ## is a RUNTIME uninterpreted sort, so the typed `mkArrayVar[K, V]` (which
@@ -220,6 +221,16 @@ proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
   ## is a GROUND free array — every `select` on it is decidable (QF_AUFLIA-ish);
   ## NO universal-∀ axiom is ever asserted over the uninterpreted sort (the G4
   ## hang lesson).
+  ##
+  ## RFC-0005 S8h: records the heap's value type -- and `variantTy`, the
+  ## variant object, for a discriminator or branch-field heap -- in
+  ## `heapKeyShapes` under the key (`name` less its `heap_` prefix), for
+  ## `buildHeapSnapshot`, which renders the witness from the input constant
+  ## this builds.
+  let key = if name.startsWith("heap_"): name["heap_".len .. ^1] else: name
+  if not heapKeyShapes.hasKey(key) or
+     (variantTy != nil and heapKeyShapes[key].variantTy == nil):
+    heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
   let valSort = heapValueSort(ctx, pointeeTy)
   let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, valSort)
   let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
@@ -509,7 +520,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ##   heapSelect, mkHeapArrayVar, fieldHeapKey, refPointeeTypeId,
   ##   freshRef, assertFreshness, lowerInExpr, allocateSym, liftBV, intToBv,
   ##   forkPath, wrap, Z3_mk_store, rawAnyAstOf, ptrFamilyHints,
-  ##   currentHeapDerefVals, SymexErrorInfo, hePtrFamily, sevHint,
+  ##   heapKeyShapes, SymexErrorInfo, hePtrFamily, sevHint,
   ##   SymexRefUnresolvedError, SymexRefVariantUnsupportedError,
   ##   refVariantDiscRangeClause
   case stmt.kind
@@ -656,7 +667,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
-                                      "heap_" & discHeapKey)
+                                      "heap_" & discHeapKey, objTy)
           # N42: drain any `allocateSym` degrade from the disc-heap value-sort
           # probe above into this path's own taint (SND-1) — see the main
           # (non-variant-field) `isDeref` arm's own N42 comment, above, for
@@ -754,7 +765,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             else:
               let refSort = allocRefSort(ctx, objTy)
               armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
-                                       "heap_" & armHeapKey)
+                                       "heap_" & armHeapKey, objTy)
             armHeaps.add (armHeapKey, armHeap)
             armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
           # Issue #163 review R3 (Part A). A ranged arm-specific field never
@@ -784,11 +795,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let cpB = drainPendingLowerEffects(cpA)
           var newEnv = cpB.env
           newEnv[stmt.dRetName] = bound
-          # ADR-0013 D5: witness markers. Record the observed disc (so the witness
-          # disc reflects the model) and each matching arm's field value (so the
-          # active arm's leaf renders the observed value, not a proto default).
-          if stmt.dPtr.kind == iekVar:
-            currentHeapDerefVals[stmt.dPtr.vname & "." & objTy.vDiscName] = discSV
           var child = forkPath(cpB, childPc, newEnv)
           child.heaps[discHeapKey] = discHeap
           for (hk, hh) in armHeaps:
@@ -905,7 +911,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           let refSort = allocRefSort(ctx, sortTy)
           heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
-                                "heap_" & heapKey)
+                                "heap_" & heapKey,
+                                (if isDiscDeref: stmt.dObjTy else: nil))
         let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
         newEnv = cp.env
         let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
@@ -944,19 +951,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Review R11: routed through `rangeCondsIfNeeded` (defined in
         # runtime.nim, beside `bvRangeConds`; this file is `include`d there).
         childPc = childPc & rangeCondsIfNeeded(valSV, stmt.dElemTy)
-        # ADR-0013 D5: Witness marker for disc field so the ref witness renders
-        # a structural marker (`p.tag`). Full active-arm serialization is Slice 2.
-        if isDiscDeref and stmt.dPtr.kind == iekVar:
-          currentHeapDerefVals[stmt.dPtr.vname & "." &
-                               stmt.dObjTy.vDiscName] = valSV
-        # R1 witness hook: if the dereffed ptr is a bare PARAM ref, record the
-        # heap value under the param name so the witness reader renders `p[]`.
-        # Only for a BARE `p[]` — a field deref's scalar value must not clobber
-        # the object-cell witness slot for `p` (the field-split heap has no
-        # whole-object witness reader at R6; the full heap-snapshot witness lands
-        # R11b/R12).
-        if not isField and stmt.dPtr.kind == iekVar:
-          currentHeapDerefVals[stmt.dPtr.vname] = valSV
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
@@ -1219,7 +1213,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
-                                      "heap_" & discHeapKeyW)
+                                      "heap_" & discHeapKeyW, objTy)
           # N42 audit: defensive drain, mirroring the read-side disc-heap
           # site — `objTy.vDiscTy` is always a primitive ordinal by
           # variant-discriminant construction, so this never actually
@@ -1336,7 +1330,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               else:
                 let refSort = allocRefSort(ctx, objTy)
                 armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
-                                         "heap_" & armHeapKey)
+                                         "heap_" & armHeapKey, objTy)
               let storedRaw = ctx.checkErr Z3_mk_store(
                 ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
               cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
@@ -1404,7 +1398,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           heap = cp.heaps[heapKey]
         else:
           let refSort = allocRefSort(ctx, sortTy)
-          heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & heapKey)
+          heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & heapKey,
+                                (if isDiscWrite: stmt.dwObjTy else: nil))
         # Lower the RHS with a pointee-typed prototype so an int literal coerces to
         # the matching BV width / sort the heap array expects (the seq/table store
         # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.

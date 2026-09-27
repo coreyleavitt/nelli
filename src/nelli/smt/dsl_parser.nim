@@ -451,13 +451,13 @@ proc emitIRType*(t: IRType): NimNode =
     # ONLY by witness CODEGEN (`symex.nim`'s `emitTyAndReader`), which reads
     # the macro-time IRType directly and never needs the runtime
     # reconstruction — true for every consumer BEFORE H_witness.
-    # `buildHeapSnapshot`'s recursive descent (`resolveObjectFields`,
-    # runtime.nim) is the FIRST consumer that inspects `isPlaceholder` on a
+    # `buildHeapSnapshot`'s recursive descent (`renderCell`, runtime.nim;
+    # `resolveObjectFields` until RFC-0005 S8h) is the FIRST consumer that inspects `isPlaceholder` on a
     # WALK-TIME (runtime-reconstructed) `IRType` — a ref-typed FIELD's
     # pointee, reached via `heapSelect`/`liftHeapValue` at witness-extraction
     # time, is exactly one of these reconstructed nodes. Without this fix
     # every runtime-reconstructed `itTuple` silently defaulted
-    # `isPlaceholder = false` (Nim's zero-value), so `resolveObjectFields`
+    # `isPlaceholder = false` (Nim's zero-value), so the snapshot
     # could never tell a genuine empty-fielded placeholder apart from a
     # PROVEN-EMPTY value type — it always took the "already full, don't
     # substitute" branch, permanently rendering a placeholder's `{}` empty

@@ -2348,6 +2348,22 @@ type
     ## renderable through the field-split heap) renders `"<unsupported>"` — a
     ## documented ceiling, not a crash or a guess. A non-object (primitive)
     ## pointee's `pointsTo` is just the stringified value, as in R12.
+    ##
+    ## RFC-0005 S8h changes three things, and the typed witness is now built
+    ## FROM this snapshot (so it holds nil, aliasing and cycles too):
+    ##   * `pointsTo` is the heap the SUT is CALLED with (the model's input
+    ##     heap), not the heap at the end of the path -- a value the SUT
+    ##     writes before reading it is not an input and no longer shows.
+    ##   * Every `ref`/`ptr` position of a param gets an entry, including one
+    ##     inside a by-value param (`h.n`, `t.1`, `v.@<ord>.f`, `arr[0]`); a
+    ##     cell's non-param fields are still inline `"nil"` when nil. Cells
+    ##     are discovered breadth-first (params and their by-value positions
+    ##     first, in declaration order), so a cell reachable along two paths
+    ##     is named by the shorter.
+    ##   * There is no `"<max-heap-depth>"` cut: the walk follows the model's
+    ##     addresses to nil or back to a named cell. A variant cell renders
+    ##     its discriminator and ACTIVE branch; a scalar pointee whose heap
+    ##     the path never materialised has `pointsTo == none`.
     name*:     string          ## the param name, or a reachable cell's access
                                ## path (declaration/discovery order preserved
                                ## by the surrounding `seq`)

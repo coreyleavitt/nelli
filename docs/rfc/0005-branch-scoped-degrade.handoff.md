@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 10:48Z)
+## Current position (refreshed 2026-09-27 18:10Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -156,12 +156,28 @@
   - **S8h** (opus): ref witnesses -- nil top-level ref renders non-nil; aliased
     params render distinct; live recursive ref field renders nil; ref inside a
     by-value field not rendered (ADR-0010 heap-witness programme).
-- **Remaining:** S8g (running, opus; first gate sweep done 09:15Z: regressed=4 (r6_n36_raise_class_audit, retest_c11_stack, phase15_CR11_CR18_splitcap, r6_n36_raise_degrade), new-failing=0 -- agent fixed; re-sweep (s8g-sweep.log; first run archived in sweep1/) at 371/515 at 10:48Z (slowed: host load ~39, 4 GB available, from other sessions)). **S8f Windows CI (`daf9a73`): all three green.** -> S8h -> S11 -> completion gate -> ff main + tag.
+- **S8g landed `b744fcd`** (walker 155; re-sweep regressed=0 new-failing=0,
+  unchanged=496 new-ok=20; sweep started after the last src edit). ADR-0011
+  R16-2 reversed: float->int never raises in 2.2.10; out-of-range is fresh +
+  `feConvFloatToIntUndefined` (dcFreshSymbol); range targets fork RangeDefect.
+  Also unary-neg overflow, `split(s,"")`, `new T` default, slice/del defect
+  table, `^k` string-slice bound bug, reassignment else-arm, three dropped
+  raise-fork drains. Full notes in RFC §2.5 "As landed (S8g)". S11 migration:
+  float->int no longer sxRaised; new kind `feConvFloatToIntUndefined`;
+  `heNewFieldZeroUnsupported`; slice/del defect classes changed; walker 155.
+- **S8i added** (S8g's different-mechanism findings, not deferred): `low(int)
+  div -1` / `mod -1` unmodelled; uint64->float treated as signed; int->range
+  conversion is a pass-through; symbolic reassignment of a declined
+  construction hits an internal assertion; concolic if-walker never drains
+  scalar raise forks.
+- **PAUSED 18:10Z: weekly Opus limit hit** (S8g agent died mid-wait; its sweep
+  had already finished green and I landed it). Resets Oct 1 17:00 ET.
+- **Remaining:** S8h (opus) -> S8i -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8g/S8h commits; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8g -> S8h ->
+  resume, check `git log` for the S8h/S8i commits; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8h -> S8i ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

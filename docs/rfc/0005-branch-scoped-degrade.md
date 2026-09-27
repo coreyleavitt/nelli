@@ -122,6 +122,11 @@ title = "Faithful scalar/string/defect models: float-to-int conversion, unary-ne
 state = "done"
 
 [[slice]]
+id    = "S8i"
+title = "S8g's different-mechanism remainder: low(int) div/mod -1, uint64-to-float signedness, int-to-range conversion check, reassignment of a declined construction, concolic if-walker raise drain"
+state = "pending"
+
+[[slice]]
 id    = "S8h"
 title = "Ref witnesses that reproduce: nil top-level ref, param aliasing, recursive ref fields, refs inside by-value fields"
 state = "pending"

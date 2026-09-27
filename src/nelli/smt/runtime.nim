@@ -1320,25 +1320,26 @@ proc lowerDegrade(kind: SymexErrorKind; msg: string) =
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
 
 var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 15 CR-3/CR-4. Path constraints deposited by `lower(iekConvFloatToInt)`
-  ## bounding the float operand to the target integer type's representable range.
-  ## Each `int(f)` / `int32(f)` lowering appends one `Z3Bool` (a conjunction of
-  ## FP range + finiteness constraints) here. The walker drains this into the
-  ## current path condition immediately after any `lower()`/`lowerBool()` call —
-  ## mirroring the `parseIntRaiseConds` / `drainParseIntRaises` pattern (S10b).
-  ## Reset at each `lower` call-site in the walker (before the call) and consumed
-  ## (not forked — it's a path-narrowing, not a branch) immediately after.
-  ## Reset at `runSymexImpl` entry.
+  ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
+  ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
+  ## truncation fits the target type). The lowered value is
+  ## `ite(domain, exact, fresh)`; `drainConvFloatToIntFresh` (a stage of
+  ## `drainScalarRaiseForks`) forks the continuation on it -- clean in range,
+  ## `feConvFloatToIntUndefined`-tainted out of range. Until S8g the walker
+  ## NARROWED the path to the domain here and raised `RangeDefect` outside it
+  ## (ADR-0011 R16-2, reversed: Nim never raises there). Reset at each
+  ## `lower` call-site in the walker (before the call). Reset at
+  ## `runSymexImpl` entry.
 
-var convFloatToIntDomainConds* {.threadvar.}: seq[Z3Bool]
-  ## Phase 16 R16-2. Parallel sink to `convFloatToIntBoundConds`: carries the
-  ## SAME `domainCond` (in-range predicate) deposited by `lower(iekConvFloatToInt)`,
-  ## but drained by `drainConvFloatToIntRaises` (a raise-fork drain) rather than
-  ## `drainConvFloatToIntBounds` (a path-narrowing drain). The raise fork branches
-  ## off the PRE-narrowing path with `not(domainCond)` → RangeDefect, so the two
-  ## drains are DUAL: the bounds drain narrows the normal path; this drain opens the
-  ## raise path. `syncConvFloatToIntDomainCond` appends here when in a walk.
-  ## Reset at every `convFloatToIntBoundConds` reset site (they are always in sync).
+var rangeDefectConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8g. Raise-fork sink for `RangeDefect` predicates deposited by
+  ## a lowering: a `range` target's check on a float -> int conversion
+  ## (`Natural(f)`), a negative slice length (`s[a .. b]` with `b < a - 1`),
+  ## and `del`'s `Natural` index. Drained by `drainRangeRaises` (a
+  ## `genRaiseForkDrain`, gated by `acRange`). The name was R16-2's parallel
+  ## float -> int domain sink, retired with that model; this is a plain
+  ## raise-predicate sink like `seqOobConds`. `syncRangeDefectCond` appends
+  ## here when in a walk.
 
 var divByZeroConds* {.threadvar.}: seq[Z3Bool]
   ## Phase 16 R16-3. Raise-fork sink for div/mod-by-zero predicates.
@@ -1348,7 +1349,7 @@ var divByZeroConds* {.threadvar.}: seq[Z3Bool]
   ## predicate as a `DivByZeroDefect` raise path. The surviving non-zero
   ## continuation carries the negated predicates in its pc.
   ## `syncDivByZeroCond` appends to `WalkCtx.divByZeroConds` when in a walk.
-  ## Reset alongside `convFloatToIntBoundConds`/`convFloatToIntDomainConds`
+  ## Reset alongside `convFloatToIntBoundConds`/`rangeDefectConds`
   ## at every reset site.
 
 var overflowConds* {.threadvar.}: seq[Z3Bool]
@@ -1612,11 +1613,11 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo)
   ## walk (allocDistinctSym can be called from probe/pre-walk paths). Defined
   ## after `WalkCtx`.
 
-proc syncConvFloatToIntDomainCond*(cond: Z3Bool)
-  ## R16-2 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
-  ## `cond` to `WalkCtx.convFloatToIntDomainConds` (the LIVE store for the
-  ## parallel raise-fork sink). No-op when no active walk (lower() can be called
-  ## from probe paths). Defined after `WalkCtx`.
+proc syncRangeDefectCond*(cond: Z3Bool)
+  ## RFC-0005 S8g fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `cond` to `WalkCtx.rangeDefectConds` (the LIVE store for the
+  ## `RangeDefect` raise-fork sink). No-op when no active walk (lower() can
+  ## be called from probe paths). Defined after `WalkCtx`.
 
 proc syncDivByZeroCond*(cond: Z3Bool)
   ## R16-3 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
@@ -3109,10 +3110,12 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # probeProto returned svInt (stale from before CR-4), causing:
     #   • ordering/equality vs literal: bv2int wrap reintroduced → F5 pathology
     #   • arithmetic vs literal: binBV doAssert `a.kind==b.kind` fired → crash
-    if e.convWidth == 32:
-      some(SymVal(kind: svBV32, signed: true, bv32: mkBitVec[32](0)))
-    else:
-      some(SymVal(kind: svBV64, signed: true, bv64: mkBitVec[64](0'i64)))
+    # RFC-0005 S8g: every target width and signedness.
+    case e.convWidth
+    of 8:  some(SymVal(kind: svBV8,  signed: e.convSigned, bv8:  mkBitVec[8](0)))
+    of 16: some(SymVal(kind: svBV16, signed: e.convSigned, bv16: mkBitVec[16](0)))
+    of 32: some(SymVal(kind: svBV32, signed: e.convSigned, bv32: mkBitVec[32](0)))
+    else:  some(SymVal(kind: svBV64, signed: e.convSigned, bv64: mkBitVec[64](0'i64)))
   of iekConvIntWidth:
     # Round-6 B2. MIRRORS the iekConvFloatToInt fix directly above (the exact
     # stale-proto crash precedent this defends against): return the SAME
@@ -5580,11 +5583,24 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # IndexDefect fork at the statement boundary; the sink is string-NAMED
     # but its routed defect type is exactly right for container slices too.
     # The view below is only ever OBSERVED on the in-bounds survivor path.
+    #
+    # RFC-0005 S8g: the defect CLASS is Nim's (probe, `d = @[1, 2, 3]`):
+    # system's `[]`(s, HSlice) computes `L = hi - lo + 1` as a `Natural`
+    # (`newSeq(L)`), so `L < 0` raises `RangeDefect` (`d[4 .. ^1]`,
+    # `d[2 .. 0]`), and then copies `s[i + lo]` for `i in 0 ..< L`, so an
+    # out-of-bounds bound raises `IndexDefect` only when `L > 0`; an empty
+    # slice (`L == 0`, `d[3 .. ^1]`, `d[5 .. 4]`) never raises. Every one
+    # of those was an `IndexDefect` (`not (lo >= 0 and hi < len and
+    # lo <= hi + 1)`), including the empty slice past the end.
     let lenZ = recv.seqLen # [placeholder-audited]
-    let ok = (lo >= mkInt(0)) and (hi < lenZ) and (lo <= hi + mkInt(1))
+    let sliceLen = (hi - lo) + mkInt(1)
+    let idxOob = (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
+    let negLen = sliceLen < mkInt(0)
     when not defined(symexSliceNoOobFork):
-      strIndexOobConds.add (not ok)
-      syncStrIndexOobCond(not ok)
+      strIndexOobConds.add idxOob
+      syncStrIndexOobCond(idxOob)
+      rangeDefectConds.add negLen
+      syncRangeDefectCond(negLen)
     inc sliceViewCounter
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
     let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
@@ -5872,9 +5888,17 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let idxSV = lower(env, e.delIdx, some(SymVal(kind: svInt, zi: mkInt(0))))
     let idxZi = toZ3Int(idxSV)
     let lenZi = recv.seqLen # [placeholder-audited]
-    let oob = not (idxZi >= mkInt(0) and idxZi < lenZi)
+    # RFC-0005 S8g: `del`'s index is a `Natural` (`proc del*[T](x: var
+    # seq[T], i: Natural)`), so a negative `i` raises `RangeDefect` at the
+    # call's conversion, before any indexing; only `i >= len` is the
+    # `IndexDefect` (probe: `@[1,2,3].del(-1)` -> RangeDefect, `.del(3)` ->
+    # IndexDefect). Both were `IndexDefect`.
+    let oob = idxZi >= lenZi
     seqOobConds.add oob
     syncSeqOobCond(oob)
+    let negIdx = idxZi < mkInt(0)
+    rangeDefectConds.add negIdx
+    syncRangeDefectCond(negIdx)
     # Swap-with-last: data' = store(data, idx, data[len-1]); len' = len-1.
     # `idxZi` may equal `lenZi - 1` (deleting the last element) — the store
     # then writes the SAME value back to the SAME slot, a harmless no-op
@@ -6024,10 +6048,32 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # CR-9(c) Stage E audit: this svInt/float/BV dispatch is a UNARY negation,
       # not an arith/cmp ladder — lowerArith/lowerCmp do not cover unary ops.
       # Left inline (no helper captures one-operand form).
+      #
+      # RFC-0005 S8g: a SIGNED integer negation is `0 - x` through
+      # `lowerArith`, so it carries the same overflow obligation as a binary
+      # `-` (R16-4 for BV, issue #161 for a width-typed svInt): Nim raises
+      # `OverflowDefect` for `-low(T)` (probe: `-low(int)`, `-low(int32)`,
+      # `-low(int8)`, and `abs(low(int))`, whose body is `-x`). It was a
+      # plain two's-complement negate, so `-low(int)` wrapped to itself and
+      # never raised. An svInt with no static width (`ziWidth == 0`: an
+      # unbounded mathematical Int, e.g. a `.len`-derived value) cannot
+      # overflow and stays a plain negation, as do floats; an unsigned BV
+      # has no unary minus in Nim, so `negBV` there is unchanged.
       let inner = ejectBase(lower(env, e.operand, proto))   ## Phase 15 G4
-      if inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
+      if inner.kind == svInt and inner.ziWidth != 0 and inner.ziSigned:
+        let zero = SymVal(kind: svInt, zi: mkInt(0), ziWidth: inner.ziWidth,
+                          ziSigned: true, ziIvl: some(interval(0, 0)))
+        lowerArith(zero, inner, bSub)
+      elif inner.kind == svInt: SymVal(kind: svInt, zi: -inner.zi)
       elif inner.kind == svFloat32: SymVal(kind: svFloat32, fp32: -inner.fp32)  # Phase 15 F3
       elif inner.kind == svFloat64: SymVal(kind: svFloat64, fp64: -inner.fp64)  # Phase 15 F3
+      elif inner.kind in {svBV8, svBV16, svBV32, svBV64} and inner.signed:
+        let zero = case inner.kind
+          of svBV8:  liftBV(mkBitVec[8](0), true)
+          of svBV16: liftBV(mkBitVec[16](0), true)
+          of svBV32: liftBV(mkBitVec[32](0), true)
+          else:      liftBV(mkBitVec[64](0'i64), true)
+        lowerArith(zero, inner, bSub)
       else: negBV(inner)
     of uNot:
       let inner = lower(env, e.operand, some(ofBool(mkBool(true))))
@@ -7872,18 +7918,13 @@ type
                       ## `currentWalkCtxPtr != nil`. Verdict-assembly reads
                       ## this field. Threadvar `distinctBijectivityHints`
                       ## remains fallback for probe/pre-walk callers.
-    convFloatToIntDomainConds: seq[Z3Bool]
-                      ## R16-2 (parallel raise-fork sink). LIVE accumulator for
-                      ## float→int domain-condition predicates deposited by
-                      ## `lower(iekConvFloatToInt)` during a walk — the SAME
-                      ## `domainCond` pushed to `convFloatToIntBoundConds`, kept
-                      ## in a SEPARATE sink so `drainPendingLowerEffects` (which
-                      ## consumes `convFloatToIntBoundConds`) does NOT consume
-                      ## this one. `drainConvFloatToIntRaises` reads this field
-                      ## and forks each `not(domainCond)` as a RangeDefect raise
-                      ## from the PRE-narrowing path. `syncConvFloatToIntDomainCond`
-                      ## appends here when `currentWalkCtxPtr != nil`. Reset
-                      ## alongside `convFloatToIntBoundConds` at every reset site.
+    rangeDefectConds: seq[Z3Bool]
+                      ## RFC-0005 S8g. LIVE accumulator for `RangeDefect`
+                      ## raise predicates deposited by a lowering during a
+                      ## walk (see the threadvar's doc). `syncRangeDefectCond`
+                      ## appends here when `currentWalkCtxPtr != nil`;
+                      ## `drainRangeRaises` reads and resets it. Reset
+                      ## alongside the other raise sinks at every reset site.
     extractionErrors: seq[SymexErrorInfo]
                       ## CR-9 Stage 5 (F7/E8). LIVE accumulator for
                       ## `feExtractionFailed`/`eeUninterpRefExtraction`/
@@ -7906,12 +7947,14 @@ type
                       ## constraints deposited by `lower(iekConvFloatToInt)`
                       ## during a walk. `syncConvFloatToIntBoundCond` appends
                       ## here when `currentWalkCtxPtr != nil`. Drained by
-                      ## `drainConvFloatToIntBounds` which reads this field
-                      ## (not the threadvar) when a walk is active. Threadvar
-                      ## `convFloatToIntBoundConds` remains fallback for
-                      ## probe-path lower() calls. Reset (to @[]) in
-                      ## `lowerInExpr`/`lowerBoolInExpr` (via w param) and
-                      ## in `drainConvFloatToIntBounds` after drain.
+                      ## `drainConvFloatToIntFresh` (RFC-0005 S8g: a fork
+                      ## stage of `drainScalarRaiseForks`, no longer a
+                      ## narrowing inside `drainPendingLowerEffects`), which
+                      ## reads this field (not the threadvar) when a walk is
+                      ## active. Threadvar `convFloatToIntBoundConds` remains
+                      ## fallback for probe-path lower() calls. Reset (to @[])
+                      ## in `lowerInExpr`/`lowerBoolInExpr` (via w param) and
+                      ## by the drain.
     parseIntRaiseConds: seq[ParseIntRaise]
                       ## CR-9 Stage 6 Group-2 (parseIntRaiseConds migration).
                       ## LIVE accumulator for parseInt raise predicates deposited
@@ -8337,15 +8380,15 @@ proc syncDistinctBijectivityHint*(info: SymexErrorInfo) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].distinctBijectivityHints.add info
 
-proc syncConvFloatToIntDomainCond*(cond: Z3Bool) =
-  ## R16-2 (convFloatToIntDomainConds migration). If `currentWalkCtxPtr != nil`
-  ## (a walk is active), appends `cond` to `WalkCtx.convFloatToIntDomainConds`
+proc syncRangeDefectCond*(cond: Z3Bool) =
+  ## RFC-0005 S8g. If `currentWalkCtxPtr != nil`
+  ## (a walk is active), appends `cond` to `WalkCtx.rangeDefectConds`
   ## so the field is the LIVE store for the raise-fork sink during a walk.
   ## No-op when `currentWalkCtxPtr == nil` (probe-path lower() calls outside an
   ## active walk — no raise drain runs on probe paths).
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    wp[].convFloatToIntDomainConds.add cond
+    wp[].rangeDefectConds.add cond
 
 proc syncExtractionError*(info: SymexErrorInfo) =
   ## CR-9 Stage 5 (extractionErrors migration). If `currentWalkCtxPtr != nil`
@@ -8460,7 +8503,7 @@ type
     pendingTaint: Taint
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
-    convBound, convDomain: seq[Z3Bool]
+    convBound, rangeDefect: seq[Z3Bool]
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
     didMutate: bool
@@ -8482,7 +8525,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     parseInt: w.parseIntRaiseConds, divByZero: w.divByZeroConds,
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
-    convDomain: w.convFloatToIntDomainConds, closureRaises: w.closureRaises,
+    rangeDefect: w.rangeDefectConds, closureRaises: w.closureRaises,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
     exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
@@ -8495,7 +8538,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.strIndexOobConds = @[]; strIndexOobConds = @[]
   w.seqOobConds = @[]; seqOobConds = @[]
   w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
-  w.convFloatToIntDomainConds = @[]; convFloatToIntDomainConds = @[]
+  w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.closureRaises = @[]
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
@@ -8511,8 +8554,8 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.strIndexOobConds = s.strIndexOob; strIndexOobConds = s.strIndexOob
   w.seqOobConds = s.seqOob; seqOobConds = s.seqOob
   w.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
-  w.convFloatToIntDomainConds = s.convDomain
-  convFloatToIntDomainConds = s.convDomain
+  w.rangeDefectConds = s.rangeDefect
+  rangeDefectConds = s.rangeDefect
   w.closureRaises = s.closureRaises
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
@@ -9034,37 +9077,58 @@ proc forkDefect(p: Path, defectCond: Z3Bool, typeId: string,
   let defectPath = forkPath(p, p.pc & @[defectCond], p.env)
   routeRaise(defectPath, typeId, msg, w)
 
-proc drainConvFloatToIntBounds(p: Path): Path =
-  ## Phase 15 CR-3/CR-4. Drain any float→int domain-bounding constraints
-  ## accumulated by `lower(iekConvFloatToInt)` during the just-completed
-  ## `lower`/`lowerBool` call on path `p`, folding them into the path condition.
-  ## Unlike `drainParseIntRaises`, this is NOT a fork: the bounds are a
-  ## path-narrowing (they restrict the sat domain, not a branching choice), so we
-  ## simply extend `p.pc` with the accumulated constraints and return ONE path.
+proc drainConvFloatToIntFresh(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8g (ADR-0011 R16-2 reversed). Fork the continuation of an
+  ## expression that lowered float -> int conversions on their DOMAIN (the
+  ## `convFloatToIntBoundConds` sink: each operand's truncation fits its
+  ## target type). The lowered value is `ite(domain, exact, fresh)`, so:
+  ##   * the IN-RANGE continuation is `p` with the conjunction of the
+  ##     domains among its defect-survivor facts -- clean, and exact;
+  ##   * the OUT-OF-RANGE continuation (some conversion's operand is NaN,
+  ##     +-Inf or too large) is `p` with the negated conjunction, tainted
+  ##     `feConvFloatToIntUndefined` (`dcFreshSymbol`): its value is a fresh
+  ##     symbol of the target type, since Nim's cast there is C-level
+  ##     undefined and never raises.
+  ## Both are returned; `drainScalarRaiseForks` runs every later raise drain
+  ## on each. The facts ride in `defectSurvivorPc`, as `drainParseIntRaises`'
+  ## clean/lax split does: they select between two models of ONE execution,
+  ## not a branch of the program. The error is recorded once per drain whose
+  ## out-of-range half does not simplify to `false` (a literal operand, or
+  ## one the path already confines, forks nothing).
   ##
-  ## Callers MUST reset `convFloatToIntBoundConds = @[]` immediately BEFORE the
-  ## `lower`/`lowerBool` call so the drained predicates belong to THIS path only.
-  ## Returns `p` unchanged (identity) when no bounds were accumulated.
-  ##
-  ## CR-9 Stage 6 Group-1: when a walk is active, read from and reset
-  ## `WalkCtx.convFloatToIntBoundConds` (the LIVE store); fall back to the
-  ## threadvar when `currentWalkCtxPtr == nil` (probe-path lower() calls).
-  ## Both stores are reset so a subsequent lower() starts clean (idempotent).
-  if currentWalkCtxPtr != nil:
-    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-    if wp[].convFloatToIntBoundConds.len == 0:
+  ## Until S8g this sink NARROWED `p.pc` to the domain inside
+  ## `drainPendingLowerEffects`, and a parallel sink forked `RangeDefect`
+  ## outside it (`drainConvFloatToIntRaises`, deleted): a false `sxRaised`,
+  ## a live `except RangeDefect`, and a false `sxUnsat` for every target
+  ## reachable only out of range.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].convFloatToIntBoundConds
+      wp[].convFloatToIntBoundConds = @[]
       convFloatToIntBoundConds = @[]   # keep threadvar reset in sync
-      return p
-    let conds = wp[].convFloatToIntBoundConds
-    wp[].convFloatToIntBoundConds = @[]
-    convFloatToIntBoundConds = @[]     # keep threadvar reset in sync
-    return forkPath(p, p.pc & conds, p.env)
-  # Fallback: no active walk (probe paths).
-  if convFloatToIntBoundConds.len == 0:
-    return p
-  let conds = convFloatToIntBoundConds
-  convFloatToIntBoundConds = @[]
-  forkPath(p, p.pc & conds, p.env)
+      c
+    else:
+      let c = convFloatToIntBoundConds
+      convFloatToIntBoundConds = @[]
+      c
+  if conds.len == 0:
+    return @[p]
+  var inDomain = conds[0]
+  for i in 1 ..< conds.len: inDomain = inDomain and conds[i]
+  let surv = forkPath(p, p.pc, p.env)
+  surv.defectSurvivorPc.add inDomain
+  result = @[surv]
+  let outside = not inDomain
+  if $simplify(outside) != "false":
+    let tok = w.degrade(feConvFloatToIntUndefined,
+      "float -> int conversion of an operand outside the target type's " &
+      "range (NaN, +-Inf or too large): Nim does not raise, and the value " &
+      "is platform-defined -- a fresh value on its own path " &
+      "(feConvFloatToIntUndefined; replay-gated candidates)")
+    let alt = forkPathTainted(p, p.pc, p.env, tok)
+    alt.defectSurvivorPc.add outside
+    result.add alt
 
 template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCheck]];
                             defectType, msg: string) =
@@ -9093,9 +9157,7 @@ template genRaiseForkDrain(procName, field: untyped; gate: static[Option[ArithCh
   ##    asserted by trySolve, inherited by forkPath, excluded from a closure
   ##    return-axiom's implication guard).
   ##
-  ## This drain always forks from the POST-lower path `p` directly (unlike
-  ## `drainConvFloatToIntRaises`, which forks from the PRE-narrowing path and
-  ## is NOT part of this family — see its own doc comment for why).
+  ## This drain always forks from the POST-lower path `p` directly.
   proc procName(p: Path, w: var WalkCtx): seq[Path] =
     let conds = block:
       if currentWalkCtxPtr != nil:
@@ -9197,53 +9259,11 @@ proc drainParseIntRaises(p: Path, w: var WalkCtx): seq[Path] =
     laxSurv.defectSurvivorPc.add anyLax
     result.add laxSurv
 
-proc drainConvFloatToIntRaises(pPre: Path, w: var WalkCtx): seq[Path] =
-  ## Phase 16 R16-2. Drain any float→int domain-condition predicates accumulated
-  ## by `lower(iekConvFloatToInt)` during the just-completed `lower`/`lowerBool`
-  ## call, forking each `not(domainCond)` into a routed `RangeDefect` raise.
-  ##
-  ## KEY INVARIANT (UNSAT-drop prevention): this drain reads `convFloatToIntDomainConds`
-  ## (the PARALLEL sink) and forks from `pPre` — the PRE-narrowing path, BEFORE
-  ## `drainPendingLowerEffects`/`drainConvFloatToIntBounds` narrowed the path to
-  ## `p & domainCond`. If we forked `not(domainCond)` from the POST-narrowed path,
-  ## the pc would be `... & domainCond & not(domainCond)` = UNSAT → silent drop.
-  ##
-  ## Returns `@[]` always (raise paths are terminal; the surviving in-range
-  ## continuation is the post-drain path already handled by the bounds drain).
-  ##
-  ## `drainPendingLowerEffects` (inside `lowerInExpr`/`lowerBoolInExpr`) consumes
-  ## `convFloatToIntBoundConds` but does NOT touch `convFloatToIntDomainConds` —
-  ## they are separate sinks. Both are reset before each `lower()` call so they
-  ## are always in sync.
-  ##
-  ## Reads from WalkCtx.convFloatToIntDomainConds (the LIVE store when in a walk);
-  ## falls back to the threadvar for probe-path lower() calls (where no drain runs).
-  let conds = block:
-    if currentWalkCtxPtr != nil:
-      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-      let c = wp[].convFloatToIntDomainConds
-      wp[].convFloatToIntDomainConds = @[]
-      convFloatToIntDomainConds = @[]   # keep threadvar reset in sync
-      c
-    else:
-      let c = convFloatToIntDomainConds
-      convFloatToIntDomainConds = @[]
-      c
-  if acRange notin w.settings.arithChecks or conds.len == 0:
-    # acRange gate: when the check is disabled, suppress the fork (honest-
-    # incomplete only — the bounds drain still narrows the normal path).
-    return @[]
-  # Fork a RangeDefect raise path for each not(domainCond) predicate.
-  for c in conds:
-    let raisePath = forkPath(pPre, pPre.pc & @[not c], pPre.env)
-    discard routeRaise(raisePath, "RangeDefect",
-                       some("int(float): value outside target integer range"), w)
-  @[]
-
 proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
                           w: var WalkCtx): Path =
   ## Issue #163 review R22. `nelli/symex`'s ONLY prior `RangeDefect` fork was
-  ## `drainConvFloatToIntRaises`, for float→int conversion — an assignment
+  ## R16-2's float→int conversion fork (reversed by RFC-0005 S8g: Nim
+  ## never raises there) — an assignment
   ## into a `range[lo..hi]`-typed local (`var v: range[1..100]; v = x + y`)
   ## forked NOTHING: `symexFind` could never locate a genuine `RangeDefect`
   ## at such a site. This closes that gap for `isAssign` targets whose
@@ -9254,12 +9274,12 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
   ## branches and inlined call frames; `aty` is parse-time-resolved per
   ## statement instead, with no shared mutable state to collide.
   ##
-  ## Mirrors `drainConvFloatToIntRaises`'s + `drainConvFloatToIntBounds`'s
-  ## combined two-obligation shape (that pair is `RangeDefect`'s own
-  ## established idiom, not `genRaiseForkDrain`'s ValueError/OverflowDefect/
-  ## DivByZeroDefect/IndexDefect family): fork the out-of-range sub-path as a
-  ## routed raise, and hard-narrow the survivor's `pc` to the in-range
-  ## domain — exactly as the bounds-drain narrows a float→int conversion's
+  ## Mirrors R16-2's (since-retired) float→int raise-and-narrow pair's
+  ## combined two-obligation shape (not `genRaiseForkDrain`'s ValueError/
+  ## OverflowDefect/DivByZeroDefect/IndexDefect family): fork the
+  ## out-of-range sub-path as a routed raise, and hard-narrow the survivor's
+  ## `pc` to the in-range domain — exactly as that bounds-drain narrowed a
+  ## float→int conversion's
   ## survivor to its valid domain.
   ##
   ## Precision (the caller-mandated "do not fork when provably in range"
@@ -9282,7 +9302,7 @@ proc forkAssignRangeCheck(cp: Path, av: SymVal, targetTy: IRType,
                 ## placeholder reaching an itInt target) — honest-incomplete,
                 ## matching `bvRangeConds`'s own `else` contract.
   if acRange notin w.settings.arithChecks:
-    # Same gate `drainConvFloatToIntRaises` uses, but this site's OWN
+    # Same gate `drainRangeRaises` uses, but this site's OWN
     # off-behaviour matches `genRaiseForkDrain`'s family instead of
     # float→int's: when the check is disabled the assignment is not
     # modeled at all (no fork AND no narrowing) so `v`'s value stays
@@ -9326,6 +9346,13 @@ genRaiseForkDrain(drainStrIndexRaises, strIndexOobConds, none(ArithCheck),
 ## site with a bounds check, `isIndexAssign`, forks unconditionally too).
 genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
                    "IndexDefect", "index out of bounds")
+
+## RFC-0005 S8g. `RangeDefect` predicates from a lowering: a `range`
+## target's check on a float -> int conversion (`Natural(f)`), a negative
+## slice length, `del`'s `Natural` index. Gated by `acRange`, like every
+## range check (Nim's `rangeChecks`): when disabled, honest-incomplete.
+genRaiseForkDrain(drainRangeRaises, rangeDefectConds, some(acRange),
+                   "RangeDefect", "value out of range")
 
 proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
@@ -9373,30 +9400,51 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7: first routes any closure-body raises (`drainClosureRaises`).
-  ## R16-4 + SND-4 + N14: chain parseInt, div/mod-by-zero, signed-integer-
-  ## overflow, string-index-OOB, and seq-del-OOB raise drains. Runs
-  ## `drainParseIntRaises` first, then `drainDivByZeroRaises`, then
-  ## `drainOverflowRaises`, then `drainStrIndexRaises`, then
-  ## `drainSeqOobRaises`. Each stage feeds the survivors of the previous
-  ## stage so every combination of independent defect conditions is explored.
-  ## The conv-float drain (`drainConvFloatToIntRaises`) is NOT folded in here —
-  ## it operates on the pre-narrowing path and stays at its call sites.
-  var survivors: seq[Path]
-  for s0 in drainClosureRaises(p, w):
-    survivors.add drainParseIntRaises(s0, w)
-  var out2: seq[Path]
-  for s in survivors:
-    out2.add drainDivByZeroRaises(s, w)
-  var out3: seq[Path]
-  for s in out2:
-    out3.add drainOverflowRaises(s, w)
-  var out4: seq[Path]
-  for s in out3:
-    out4.add drainStrIndexRaises(s, w)
-  var out5: seq[Path]
-  for s in out4:
-    out5.add drainSeqOobRaises(s, w)
-  out5
+  ## RFC-0005 S8g: then forks an expression's float -> int conversions on
+  ## their domain (`drainConvFloatToIntFresh`: clean in range, a tainted
+  ## fresh value outside).
+  ## R16-4 + SND-4 + N14 + S8g: then chains parseInt, div/mod-by-zero,
+  ## signed-integer-overflow, string-index-OOB, seq-del-OOB and RangeDefect
+  ## raise drains. Each stage feeds the survivors of the previous stage so
+  ## every combination of independent defect conditions is explored.
+  ##
+  ## RFC-0005 S8g: each stage's sink is read ONCE here and reinstated before
+  ## the stage runs on EACH survivor. The drains read-and-reset their sink,
+  ## so before this a stage that returned two survivors (the parseInt lax
+  ## continuation, since S8b) fed the next stage's raises to the FIRST
+  ## survivor only: the second continued with no overflow / index / ... fork
+  ## at all.
+  let closureSnap = w.closureRaises
+  let convSnap = w.convFloatToIntBoundConds
+  let parseSnap = w.parseIntRaiseConds
+  let divSnap = w.divByZeroConds
+  let ovfSnap = w.overflowConds
+  let strSnap = w.strIndexOobConds
+  let seqSnap = w.seqOobConds
+  let rangeSnap = w.rangeDefectConds
+  template stage(inp: seq[Path]; sinkW, sinkT, snap, drain: untyped): seq[Path] =
+    var outp: seq[Path]
+    for s in inp:
+      w.sinkW = snap
+      sinkT = snap
+      outp.add drain(s, w)
+    outp
+  var s0: seq[Path]
+  for s in @[p]:
+    w.closureRaises = closureSnap
+    s0.add drainClosureRaises(s, w)
+  let s1 = stage(s0, convFloatToIntBoundConds, convFloatToIntBoundConds,
+                 convSnap, drainConvFloatToIntFresh)
+  let s2 = stage(s1, parseIntRaiseConds, parseIntRaiseConds, parseSnap,
+                 drainParseIntRaises)
+  let s3 = stage(s2, divByZeroConds, divByZeroConds, divSnap,
+                 drainDivByZeroRaises)
+  let s4 = stage(s3, overflowConds, overflowConds, ovfSnap,
+                 drainOverflowRaises)
+  let s5 = stage(s4, strIndexOobConds, strIndexOobConds, strSnap,
+                 drainStrIndexRaises)
+  let s6 = stage(s5, seqOobConds, seqOobConds, seqSnap, drainSeqOobRaises)
+  stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap, drainRangeRaises)
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -9457,8 +9505,10 @@ proc drainPendingLowerEffects(p: Path): Path =
   ## Single choke-point that drains ALL out-of-band `lower()`/`lowerBool()`
   ## effects into path `p` and resets all associated threadvars so no stale
   ## effect leaks to the next `lower()` call:
-  ##   (a) Float→int domain bounds from `convFloatToIntBoundConds` are folded
-  ##       into `p.pc` (via `drainConvFloatToIntBounds`) and the sink is reset.
+  ##   (a) RFC-0005 S8g: none. Float→int domain bounds were folded into
+  ##       `p.pc` here (a narrowing that dropped every out-of-range input);
+  ##       they are now a FORK, `drainScalarRaiseForks`'s
+  ##       `drainConvFloatToIntFresh` stage.
   ##   (b) Closure exit-heap state from `currentClosureExitHeaps/AllocCounters/
   ##       LiveRefs` is merged into the path's `heaps/allocCounters/liveRefs`
   ##       (via `drainClosureExitHeap`, conditional on `currentClosureDidMutateHeap`)
@@ -9483,7 +9533,7 @@ proc drainPendingLowerEffects(p: Path): Path =
   ## drain and cleanup AFTER. Together they collapse what were two separate
   ## conventions (seed/drain float-bounds and seed/drain closure-exit-heap) into
   ## one auditable pair.
-  let p1 = drainConvFloatToIntBounds(p)   ## (a) float→int bounds; also resets sink
+  let p1 = p   ## (a) RFC-0005 S8g: no narrowing (see above)
   var p2 = drainClosureExitHeap(p1)       ## (b) closure exit heap (conditional)
   # (c) Phase 16 ADR-0012: closure exit defect-survivor facts. A closure call
   # lowered during this lower() deposited each body exit path's `not overflow`/
@@ -9546,8 +9596,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
-  convFloatToIntDomainConds = @[]
-  w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
+  rangeDefectConds = @[]
+  w.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
   divByZeroConds = @[]
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
@@ -9578,8 +9628,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.parseIntRaiseConds = @[]            # CR-9 Stage 6 Group-2: reset WalkCtx field
   convFloatToIntBoundConds = @[]
   w.convFloatToIntBoundConds = @[]      # CR-9 Stage 6 Group-1: reset WalkCtx field
-  convFloatToIntDomainConds = @[]
-  w.convFloatToIntDomainConds = @[]     # R16-2: reset parallel raise-fork sink
+  rangeDefectConds = @[]
+  w.rangeDefectConds = @[]     # RFC-0005 S8g: reset RangeDefect raise sink
   divByZeroConds = @[]
   w.divByZeroConds = @[]                # R16-3: reset div/mod-by-zero raise sink
   overflowConds = @[]
@@ -9787,6 +9837,25 @@ proc carryBranchFields(armFields: OrderedTable[int, seq[SymVal]];
       carried.add v
     result[newTag] = carried
     return
+
+proc discFromRhs(rhs, oldDisc: SymVal): SymVal =
+  ## RFC-0005 S8g. The discriminator a symbolic reassignment into the
+  ## `else:` arm leaves behind: the RHS value itself, in the old
+  ## discriminator's representation (kind, width, signedness).
+  case oldDisc.kind
+  of svBV8, svBV16, svBV32, svBV64:
+    if rhs.kind == oldDisc.kind:
+      result = rhs
+    else:
+      let asInt = SymVal(kind: svInt, zi: toZ3Int(rhs))
+      result = svIntToBV(asInt, oldDisc.kind)
+    result.signed = oldDisc.signed
+  of svInt:
+    result = SymVal(kind: svInt, zi: toZ3Int(rhs))
+  else:
+    raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (allocateSym's itVariant/itMultiVariant arms only ever allocate a BV/Int discriminator)]
+      "discFromRhs: discriminator must be a BV or Z3Int kind (got " &
+      $oldDisc.kind & ")")
 
 proc markAmbiguous(w: var WalkCtx, construct: WalkerConstructKind) =
   ## R28: the ONE site that increments an ambiguous-branch degrade —
@@ -10041,40 +10110,39 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # continuation (`cp`) carries the non-raise constraint forward to ALL
       # subsequent arms and the else. `cp` threads that digits-constrained base
       # path across the branch loop.
-      var cp = p
-      var accumNegated: seq[Z3Bool]
+      # RFC-0005 S8g: a condition's scalar drain can return SEVERAL
+      # continuations (a float -> int conversion's in-range / out-of-range
+      # split, parseInt's clean / lax split). Each one walks every later arm
+      # and the else with its own negated-conditions prefix; only `cont[0]`
+      # was followed before, so the others' arms were never explored.
+      var states = @[(p, newSeq[Z3Bool]())]
       for br in stmt.branches:
-        ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
-        ## NI-1 semantics preserved: lowerBoolInExpr seeds from the CURRENT cp
-        ## (the path passed to the wrapper), NOT the original p.
-        let cpPre = cp  ## R16-2: capture PRE-narrowing path before wrapper narrows it
-        let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
-        cp = cp2
-        # DES-4 invariant: `condBool` was computed from the pre-drain `cp.env`
-        # (env passed into lowerBoolInExpr) and is a Z3 AST.
-        # `lowerBoolInExpr` returns the drained path as cp2; we set cp = cp2.
-        # The drain mutates cp.pc (extends with float→int domain bounds and/or
-        # closure heap state) but does NOT touch cp.env. Since `condBool` is a
-        # Z3 term constructed from the pre-drain env variables, it remains a
-        # valid Z3 AST after the drain and can safely be added to the arm/else
-        # path conditions below (`cp.pc & accumNegated & @[condBool]`).
-        let cont = drainScalarRaiseForks(cp, w)  ## R16-3: parseInt + div/mod-by-zero raise forks
-        discard drainConvFloatToIntRaises(cpPre, w)  ## R16-2: RangeDefect fork from pre-narrowing cp
-        if cont.len == 0:
-          # The whole cond raised on every path (digits continuation infeasible).
-          cp = forkPath(cp, cp.pc, cp.env)
+        var next: seq[(Path, seq[Z3Bool])]
+        for (cp0, accumNegated) in states:
+          ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
+          ## NI-1 semantics preserved: lowerBoolInExpr seeds from the CURRENT
+          ## cp (the path passed to the wrapper), NOT the original p.
+          let (condBool, cp2) = lowerBoolInExpr(cp0, br.cond, w)
+          # DES-4 invariant: `condBool` was computed from the pre-drain
+          # `cp.env` and is a Z3 AST; the drains below never touch `env`, so
+          # it stays valid on every continuation.
+          var cont = drainScalarRaiseForks(cp2, w)  ## closure/conv/parseInt/div/overflow/index/range forks
+          if cont.len == 0:
+            # The whole cond raised on every path (digits continuation infeasible).
+            cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+          for cp in cont:
+            let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
+                                   cp.env)
+            survivors.add walk(br.body, @[armPath], w)
+            if w.shouldStop: return
+            next.add (cp, accumNegated & @[not condBool])
+        states = next
+      for (cp, accumNegated) in states:
+        let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
+        if stmt.elseBody != nil:
+          survivors.add walk(stmt.elseBody, @[elsePath], w)
         else:
-          cp = cont[0]   ## digits-constrained continuation (non-raise pc)
-        let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
-                               cp.env)
-        survivors.add walk(br.body, @[armPath], w)
-        accumNegated.add(not condBool)
-        if w.shouldStop: return
-      let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
-      if stmt.elseBody != nil:
-        survivors.add walk(stmt.elseBody, @[elsePath], w)
-      else:
-        survivors.add elsePath
+          survivors.add elsePath
     survivors
   of isLet:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -10107,7 +10175,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                    ziWidth: loWidth, ziSigned: loSigned))
                      else: intLitProto(stmt.lty)
       let (lv, pb) = lowerInExpr(p, stmt.lvalue, w, letProto)
-      discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         var newEnv = cp.env
         newEnv[stmt.lname] = lv
@@ -10125,7 +10192,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## representation (assign IR carries no declared type).
       let (av, pb) = lowerInExpr(p, stmt.avalue, w,
                                  envLitProto(p.env, stmt.aname))
-      discard drainConvFloatToIntRaises(p, w)   ## R16-2: RangeDefect fork from pre-narrowing p
       for cp0 in drainScalarRaiseForks(pb, w):   ## R16-3: parseInt + div/mod-by-zero raise forks
         ## #163 review R27 (was R22): `stmt.aty` is the target's declared
         ## range type, resolved at PARSE TIME by true symbol identity
@@ -10815,24 +10881,37 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## scalar-raise-fork predicates. Undrained, those were silently
       ## discarded — no raise fork, no bounds narrowing. Drain and thread
       ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
+      ## RFC-0005 S8g (walker 155): the `else:` arm (key -1) is a candidate
+      ## too. Its guard is "the RHS equals no explicit tag" (the same
+      ## membership `isVariantField` uses), and its new discriminator is the
+      ## symbolic RHS itself, not a constant: every else value shares the
+      ## one else branch, so a `kC -> kD` reassignment keeps `c`.
+      proc tagGuard(explicit: seq[int]): proc (tagOrd: int64): Z3Bool =
+        result = proc (tagOrd: int64): Z3Bool =
+          if tagOrd >= 0: return rhsEq(tagOrd)
+          result = mkBool(true)
+          for t in explicit:
+            result = result and not rhsEq(int64(t))
       for cp in drainScalarRaiseForks(pr, w):
         case oldSV.kind
         of svVariant:
-          var candidateTags: seq[int]
+          var candidateTags, explicitTags: seq[int]
           for tag in oldSV.vArmFields.keys:
-            if tag >= 0: candidateTags.add tag  # else arm — covered by D4 future work
+            candidateTags.add tag
+            if tag >= 0: explicitTags.add tag
+          let guard = tagGuard(explicitTags)
           let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
-                                            rhsEq, candidateTags)
+                                            guard, candidateTags)
           for tag in candidateTags:
             if followTag.isSome and tag != followTag.get(): continue
-            let chosen = forkPath(cp, cp.pc & @[rhsEq(int64(tag))], cp.env)
+            let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
             let same = sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches)
             maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
             if w.shouldStop: return out2
             let carried = carryBranchFields(oldSV.vArmFields, oldSV.vDisc[],
                                             tag, stmt.vrsBranches)
             let chosenM = drainPendingLowerEffects(chosen)
-            let newDiscInner: SymVal =
+            let newDiscConst: SymVal =
               case oldSV.vDisc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
               of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
@@ -10842,6 +10921,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               else:
                 raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
                   "isVariantReassignSymbolic: old disc must be BV or Z3Int")
+            let newDiscInner =
+              if tag < 0: discFromRhs(rhsSV, oldSV.vDisc[]) else: newDiscConst
             let newDiscBoxed = new(SymVal)
             newDiscBoxed[] = newDiscInner
             let newSV = SymVal(kind: svVariant,
@@ -10866,21 +10947,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             "isVariantReassignSymbolic on svMultiVariant: no axis named " &
             stmt.vrsDiscName
           let oldAxis = oldSV.mvAxes[axisIx]
-          var candidateTags: seq[int]
+          var candidateTags, explicitTags: seq[int]
           for tag in oldAxis.armFields.keys:
-            if tag >= 0: candidateTags.add tag
+            candidateTags.add tag
+            if tag >= 0: explicitTags.add tag
+          let guard = tagGuard(explicitTags)
           let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
-                                            rhsEq, candidateTags)
+                                            guard, candidateTags)
           for tag in candidateTags:
             if followTag.isSome and tag != followTag.get(): continue
-            let chosen = forkPath(cp, cp.pc & @[rhsEq(int64(tag))], cp.env)
+            let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
             let same = sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches)
             maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
             if w.shouldStop: return out2
             let carried = carryBranchFields(oldAxis.armFields, oldAxis.disc[],
                                             tag, stmt.vrsBranches)
             let chosenM = drainPendingLowerEffects(chosen)
-            let newDiscInner: SymVal =
+            let newDiscConst: SymVal =
               case oldAxis.disc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
               of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
@@ -10890,6 +10973,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               else:
                 raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
                   "isVariantReassignSymbolic: axis disc must be a BV kind")
+            let newDiscInner =
+              if tag < 0: discFromRhs(rhsSV, oldAxis.disc[]) else: newDiscConst
             let newDiscBoxed = new(SymVal)
             newDiscBoxed[] = newDiscInner
             var newAxes = oldSV.mvAxes
@@ -11368,8 +11453,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           seedCallerHeapThreadvars(p)
           convFloatToIntBoundConds = @[]
           w.convFloatToIntBoundConds = @[]
-          convFloatToIntDomainConds = @[]
-          w.convFloatToIntDomainConds = @[]
+          rangeDefectConds = @[]
+          w.rangeDefectConds = @[]
           parseIntRaiseConds = @[]
           w.parseIntRaiseConds = @[]
           divByZeroConds = @[]
@@ -11383,7 +11468,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for arg in stmt.cargs:
             discard lower(p.env, arg)
           let pd = drainPendingLowerEffects(p)
-          discard drainConvFloatToIntRaises(p, w)  ## RangeDefect fork from pre-narrowing p
           for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
             out1.add sp
         return out1
@@ -11545,8 +11629,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var argVals: seq[SymVal]
         convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
         w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
-        convFloatToIntDomainConds = @[]   ## R16-2: parallel raise-fork sink reset
-        w.convFloatToIntDomainConds = @[] ## R16-2: WalkCtx field
+        rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
+        w.rangeDefectConds = @[] ## R16-2: WalkCtx field
         parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
         w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
         divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
@@ -11583,7 +11667,6 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
         # the surviving non-raise continuations. The callee dispatch below runs once
         # per continuation (typically 1 path, so zero overhead on the common case).
-        discard drainConvFloatToIntRaises(p, w)  ## R16-2: RangeDefect fork from pre-narrowing p
         for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
           if w.shouldStop: break
           # Cache lookup — pure procs with deterministic-arg-shape hits
@@ -11855,19 +11938,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## CR-9 Stage 2: encapsulate seed→reset→lowerBool→drain via wrapper.
       ## drainScalarRaiseForks is a FORK — NOT inside the wrapper; called on pb0.
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
-      let cont = drainScalarRaiseForks(pb0, w)  ## R16-3: parseInt + div/mod-by-zero raise forks
-      discard drainConvFloatToIntRaises(p0, w)  ## R16-2: RangeDefect fork from pre-narrowing p0
-      if cont.len == 0: continue
-      let p = cont[0]
-      discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
-      out2.add forkPath(p, p.pc & @[cond], p.env)
+      ## RFC-0005 S8g: every continuation (was `cont[0]` only).
+      for p in drainScalarRaiseForks(pb0, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
+        discard forkDefect(p, not cond, "AssertionDefect", none(string), w)   ## Phase 16 D1a
+        out2.add forkPath(p, p.pc & @[cond], p.env)
     out2
   of isAssume:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
     ## Phase 16 SND-2 (ADR-0019): filter/prune, NOT assert. Shares steps
-    ## (1) lowerBoolInExpr+drainScalarRaiseForks, (2) drainConvFloatToIntRaises,
+    ## (1) lowerBoolInExpr+drainScalarRaiseForks (whose stages include the
+    ## float→int domain fork since RFC-0005 S8g),
     ## and (4) conjoin cond into pc VERBATIM with the isAssert arm above —
     ## those steps surface raises arising from EVALUATING cond itself (e.g.
     ## `symexAssume(1 div x == 0)` with symbolic x must still surface
@@ -11878,11 +11960,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p0 in paths:
       if w.shouldStop: return
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
-      let cont = drainScalarRaiseForks(pb0, w)
-      discard drainConvFloatToIntRaises(p0, w)
-      if cont.len == 0: continue
-      let p = cont[0]
-      out2.add forkPath(p, p.pc & @[cond], p.env)
+      for p in drainScalarRaiseForks(pb0, w):   ## RFC-0005 S8g: every continuation
+        out2.add forkPath(p, p.pc & @[cond], p.env)
     out2
   of isTargetLabel:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -14060,7 +14139,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
   variantConstructSymFreshCounter = 0    ## Round-6 A3: reset per-fork fresh-field counter
   convFloatToIntBoundConds = @[]         ## Phase 15 CR-3/CR-4: reset domain-bound cond sink
-  convFloatToIntDomainConds = @[]        ## R16-2: reset parallel raise-fork sink
+  rangeDefectConds = @[]        ## RFC-0005 S8g: reset RangeDefect raise sink
   divByZeroConds = @[]                   ## R16-3: reset div/mod-by-zero raise-fork sink
   overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
@@ -14513,8 +14592,9 @@ proc runSymexImpl(prog: SymexProgram,
   # R2 freshness-cap drain above. A managed-`ref T`-only run drains NOTHING.
   # CR-9 Stage 5 union/LIVE-store contract: see `drainSinkUnion`'s doc above.
   drainSinkUnion(exnWarnings, w, ptrFamilyHints, ptrFamilyHints)
-  # R16-2: convFloatToIntDomainHints removed — replaced by real RangeDefect raise
-  # forks via drainConvFloatToIntRaises. No hint drain here.
+  # R16-2: convFloatToIntDomainHints removed (RFC-0005 S8g: a float→int
+  # conversion never raises; its out-of-range continuation is a
+  # `feConvFloatToIntUndefined`-tainted fork). No hint drain here.
   # Phase 15 R9. Drain the heap-depth-error sink (dedup'd by message). A
   # `heDepthExhausted` is `sevError`, but the verdict is already driven PER-PATH:
   # the exhausting path was halted (returned no survivor) and set `w.sawUnknown`,

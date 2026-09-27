@@ -184,7 +184,33 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "154"
+const symexWalkerVersion* = "155"
+  ## RFC-0005 S8g (2026-09-27) — faithful scalar, string and defect models.
+  ## Verdicts move in both directions, so a cache entry keyed under "154"
+  ## must not be replayed:
+  ## - `int(f)` and the fixed-width `intN(f)`/`uintN(f)` never raise (probed:
+  ##   `int(NaN)`, `int(1e30)`, `int8(300.0)` all return without a defect).
+  ##   In range the value is exact at the target width; out of range it is a
+  ##   fresh value that taints the path (`feConvFloatToIntUndefined`,
+  ##   `dcFreshSymbol`). A range target (`Natural(f)`) raises RangeDefect.
+  ##   Reverses ADR-0011 R16-2. The CFI canonical form now carries width,
+  ##   signedness and range.
+  ## - Unary `-x` (and `abs`) on a signed int raises OverflowDefect at
+  ##   `low(T)`; it was a wrapping negation.
+  ## - `split(s, "")` is `@[s]`; it was a byte-wise split.
+  ## - `new int` (any non-object pointee) reads the zero value; it was a free
+  ##   cell.
+  ## - `s[a .. b]` on a seq or string raises IndexDefect only for a
+  ##   non-empty out-of-bounds slice and RangeDefect for a negative length;
+  ##   the string form was a clamp. `substr` clamps. `del(i)` raises
+  ##   RangeDefect for `i < 0`, IndexDefect for `i >= len`.
+  ##   A `^k` bound of a string slice (either end) and the low `^k` bound of
+  ##   a seq slice are `len - k`; they read as `k`.
+  ## - A symbolic discriminator reassignment forks the `else:` arm too, with
+  ##   the symbolic RHS as the new discriminator.
+  ## - Scalar raises deposited by a deref-write RHS are drained; each raise
+  ##   sink now forks on every survivor of an earlier stage, and `if`,
+  ##   `assert` and `assume` walk every drain continuation.
   ## RFC-0005 S8f (2026-09-27) — a clean `sxSat` whose witness reproduces.
   ## `Table`'s and `HashSet`'s `len` was a free integer never tied to the
   ## present/member array: `t.len == 0 and t.hasKey("a")` was a false
@@ -4326,7 +4352,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekIntLit:    "Ex<IL:" & $e.ival & ">"
   of iekFloatLit:  "Ex<FL:" & $e.fwidth & ":" & $e.fval & ">"
   of iekConvIntToFloat: "Ex<CIF:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
-  of iekConvFloatToInt: "Ex<CFI:" & $e.convWidth & ":" & canonicalize(e.convOperand, env) & ">"
+  of iekConvFloatToInt:
+    # RFC-0005 S8g: signedness and a range target's bounds change the model.
+    "Ex<CFI:" & $e.convWidth & ":" & $e.convSigned & ":" &
+      (if e.convHasRange: $e.convLo & ".." & $e.convHi else: "-") & ":" &
+      canonicalize(e.convOperand, env) & ">"
   of iekConvIntWidth:
     # Round-6 B2. Every field that changes the encoding (source/target width
     # AND signedness — signedness picks zero- vs sign-extend, and steers the

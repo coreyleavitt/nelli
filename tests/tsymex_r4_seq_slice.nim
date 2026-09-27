@@ -64,8 +64,9 @@ proc sliceHalfOpenElemImpossible(data: seq[int]) =
       symexTarget("halfopen-elem-impossible")
 
 proc sliceOobUnguarded(data: seq[int]) =
-  ## No length guard: data.len < 4 makes `4 .. data.len-1` a REAL
-  ## IndexDefect (lo > hi + 1) — the defect search must find it.
+  ## No length guard: data.len < 4 makes `4 .. data.len-1` a negative-length
+  ## slice. RFC-0005 S8g: Nim raises RangeDefect there, not IndexDefect
+  ## (probed on 2.2.10) — the defect search must find it.
   let payload = data[4 .. ^1]
   discard payload.len
 
@@ -111,9 +112,12 @@ suite "symex round-4 — seq-slice values as array-lambda views":
                       tLabel("halfopen-elem-impossible"))
     check r.status == sxUnsat
 
-  test "unguarded slice: the IndexDefect is FOUND (defect-fork honesty)":
+  test "unguarded slice: the RangeDefect is FOUND (defect-fork honesty)":
+    ## The only reachable defect is RangeDefect (S8g); a reachable defect
+    ## preempts the IndexDefect search, which therefore reports it.
     let r = symexFind(sliceOobUnguarded, tIndexError())
     check r.status == sxRaised
+    check r.raisedTypeId == "RangeDefect"
 
   test "guarded slice: no IndexError path (sxUnsat)":
     let r = symexFind(sliceOobGuarded, tIndexError())

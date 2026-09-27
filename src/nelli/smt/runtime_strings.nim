@@ -182,9 +182,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     liftBV(intToBv[8](code, Z3BitVec[8]), false)
   of iekStrSubstr:
     # Phase 15 S3. `s[a..b]` → Z3 `(seq.extract s a (b-a+1))` (substr's
-    # (offset, length) convention). Byte-offset slice; out-of-range yields the
-    # empty string (Z3 spec). The parser already adjusted `..<` to an inclusive
-    # `b`. strArgs = [recv, lo, hi].
+    # (offset, length) convention). Byte-offset slice. The parser already
+    # adjusted `..<` to an inclusive `b`. strArgs = [recv, lo, hi] (`substr`'s
+    # one-bound overload: [recv, lo]). RFC-0005 S8g: the slice forks its
+    # IndexDefect / RangeDefect, and `substr` clamps (below).
     let recv = lower(env, e.strArgs[0])
     requireStr(recv, "iekStrSubstr")
     # v66 (round-4 Slice A, CR-17 class): a slice BOUND that lowered as a
@@ -244,7 +245,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # originally implied.
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.strArgs[1], intProto)
-    let hiSV = lower(env, e.strArgs[2], intProto)
+    # RFC-0005 S8g: `substr(s, first)` (the one-bound overload) has no
+    # `last`; it is `high(s)`.
+    let hiSV = if e.strArgs.len >= 3: lower(env, e.strArgs[2], intProto)
+               else: SymVal(kind: svInt, zi: len(recv.str) - mkInt(1))
     if loSV.kind != svInt or hiSV.kind != svInt:
       lowerDegrade(seUnsupportedStringOp,
         "iekStrSubstr: slice bound lowered as " & plainEnglishSymValKind(loSV.kind) & "/" &
@@ -256,8 +260,33 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       return allocateSym(tString(), "__strSubstrBoundDegrade", fresh)
     let lo = loSV.zi
     let hi = hiSV.zi
-    let length = (hi - lo) + mkInt(1)
-    SymVal(kind: svString, str: substr(recv.str, lo, length))
+    let lenS = len(recv.str)
+    if e.strOp == "substr":
+      # RFC-0005 S8g: `substr` CLAMPS (system.nim: `first = max(first, 0)`,
+      # `L = max(min(last, high(s)) - first + 1, 0)`) and never raises:
+      # `substr("abc", -2, 1) == "ab"`, `substr("abc", 1, 9) == "bc"`. It
+      # was the raw Z3 extract, whose negative offset gives "" -- a false
+      # `sxUnsat` for every target reachable through a clamped bound.
+      let first = ite(lo < mkInt(0), mkInt(0), lo)
+      let last = ite(hi < lenS - mkInt(1), hi, lenS - mkInt(1))
+      let l0 = (last - first) + mkInt(1)
+      let length = ite(l0 < mkInt(0), mkInt(0), l0)
+      SymVal(kind: svString, str: substr(recv.str, first, length))
+    else:
+      # RFC-0005 S8g: `s[a .. b]` (system's `[]`(s, HSlice)) builds
+      # `newString(L)` with `L = b - a + 1` a `Natural` -- `L < 0` raises
+      # `RangeDefect` -- then copies `s[i + a]` for `i in 0 ..< L`, so an
+      # out-of-bounds bound raises `IndexDefect` only when `L > 0` (an
+      # empty slice reads nothing). It raised nothing at all: the Z3
+      # extract clamped, so `s[1 .. 7]` of a 3-byte string was "bc".
+      let length = (hi - lo) + mkInt(1)
+      let idxOob = (length > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenS))
+      strIndexOobConds.add idxOob
+      syncStrIndexOobCond(idxOob)
+      let negLen = length < mkInt(0)
+      rangeDefectConds.add negLen
+      syncRangeDefectCond(negLen)
+      SymVal(kind: svString, str: substr(recv.str, lo, length))
   of iekStrContains:
     # Phase 15 S4. `s.contains(sub)` / `sub in s` → Z3 `(seq.contains s sub)`.
     # `sub in s` semchecks to `contains(s, sub)`; the parser's itString call-guard
@@ -378,38 +407,25 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # Phase 15 S5. `s.split(sep)` → `seq[string]`. Two TRACTABLE special cases
     # only (the general symbolic path is a universal quantifier over a symbolic
     # seq — a Z3 string-solver hang risk — so it is classified, not encoded):
-    #   (a) empty-sep: sep is the literal "" → byte-faithful single-BYTE parts
-    #       (`split("abc","") == @["a","b","c"]`), computed in Nim.
+    #   (a) empty-sep: sep is the literal "" → `@[s]`, for ANY receiver.
+    #       RFC-0005 S8g: this was a byte-wise split (`@["a","b","c"]`) and a
+    #       decline for a symbolic receiver; Nim's `split` never matches an
+    #       empty separator (`substrEq` of "" is false, strutils.nim:509-538),
+    #       so the result is one part (probe: `"abc".split("") ==
+    #       @["abc"]`, `"".split("") == @[""]`).
     #   (b) concrete-inline: receiver AND sep are string LITERALS → compute the
     #       Nim split and emit a concrete `svSeq` of literal parts. No quantifier.
     # Anything else (symbolic receiver or symbolic sep) → seZ3StringIncomplete.
     let recvIR = e.strArgs[0]
     let sepIR  = e.strArgs[1]
     if sepIR.kind == iekStrLit and sepIR.sval.len == 0:
-      # (a) empty-sep. Byte-faithful: each Nim byte is one part. Requires the
-      # receiver to be concrete so the byte list is known.
-      if recvIR.kind != iekStrLit:
-        # RFC-0005 S5: lower the receiver BEFORE declining (the kind is
-        # `dcFreshSymbol`: its raise forks must not be dropped with the op).
-        let recvSym = lower(env, recvIR)
-        requireStr(recvSym, "iekStrSplit")
-        raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-          msg: "split with empty sep over a symbolic string is not bounded " &
-               "(receiver is not a string literal; general path → sxUnknown)")
-      var parts: seq[string]
-      for b in recvIR.sval:           # iterate bytes
-        parts.add $b
-      # CR-11/CR-18: cap parts count. A huge literal (e.g. "x".repeat(10_000).split(""))
-      # would emit 10_000+ Z3 store calls — compile-time DoS against the developer's
-      # build. If the cap is set (>0) and exceeded, classify sxUnknown (seZ3StringIncomplete)
-      # before emitting any Z3 stores. The cap now GATES the concrete-inline path.
-      let splitCap = currentMaxSplitParts
-      if splitCap > 0 and parts.len > splitCap:
-        raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-          msg: "split with empty sep produces " & $parts.len & " parts (cap=" &
-               $splitCap & " maxSplitParts); classify sxUnknown to prevent " &
-               "compile-time DoS from huge-literal Z3 store chain")
-      mkConcreteStrSeq(parts)
+      # (a) empty-sep: the one-element seq holding the receiver itself.
+      let recvSym = lower(env, recvIR)
+      requireStr(recvSym, "iekStrSplit")
+      let arr = store(mkConstArray[Z3Int, Z3String](mkString("")), mkInt(0),
+                      recvSym.str)
+      SymVal(kind: svSeq, seqLen: mkInt(1), seqDataRaw: toAnyAst(arr),
+             seqElemTy: tString())
     elif recvIR.kind == iekStrLit and sepIR.kind == iekStrLit:
       # (b) concrete-inline. Both sides literal → split in Nim, emit literals.
       let parts = recvIR.sval.split(sepIR.sval)

@@ -189,7 +189,9 @@ suite "symex N36 -- regression: iekStrInOptionRegion no-block companion stays co
     check sawOptRegionKind
 
 # =============================================================================
-# 2. iekStrSplit empty-sep cap-exceeded decline (join/split family) --
+# 2. iekStrSplit cap-exceeded decline (join/split family) --
+#    (RFC-0005 S8g: an empty separator gives `@[s]` in Nim and never declines,
+#    so the vehicle is a literal separator splitting into > maxSplitParts.)
 #    directly constructible from ordinary literal DSL code. A bare `block:`
 #    around the single `let` statement was NOT sufficient to reproduce the
 #    loss (confirmed this slice); a `block:` containing a WHILE LOOP (mirroring
@@ -200,7 +202,7 @@ proc sutSplitOversizeBlockAfter(unused: int) =
   block:
     var i = 0
     while i < 1:                        ## always runs exactly once
-      let parts = "abcdefghij".split("")   ## 10 bytes > default maxSplitParts=8
+      let parts = "a,b,c,d,e,f,g,h,i,j".split(",")   ## 10 parts > default maxSplitParts=8
       discard parts
       i.inc
   symexTarget("n36_split_oversize_block_after")
@@ -227,7 +229,7 @@ suite "symex N36 -- iekStrSplit cap-exceeded decline inside a block: (loop-in-bl
     check sawSplitCapKind
 
 proc sutSplitOversizeNoBlockAfter(unused: int) =
-  let parts = "abcdefghij".split("")
+  let parts = "a,b,c,d,e,f,g,h,i,j".split(",")
   discard parts
   symexTarget("n36_split_oversize_noblock_after")
 

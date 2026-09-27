@@ -587,7 +587,15 @@ type
       fwidth*: int       ## 32 or 64
     of iekConvIntToFloat, iekConvFloatToInt:
       convOperand*: IRExpr   ## Phase 15 F5: the value being converted
-      convWidth*:   int      ## target width: 32 or 64
+      convWidth*:   int      ## target width: 32 or 64 (int->float);
+                             ## 8, 16, 32 or 64 (float->int, RFC-0005 S8g)
+      convSigned*:  bool     ## RFC-0005 S8g, float->int only: the target
+                             ## integer type's signedness (`uint8(f)` is
+                             ## unsigned). Always true for int->float.
+      convHasRange*: bool    ## RFC-0005 S8g, float->int only: the target is
+      convLo*, convHi*: int64 ## a `range[convLo..convHi]` of the base
+                             ## integer type (`Natural(f)`), whose check on
+                             ## the converted value raises `RangeDefect`.
     of iekConvIntWidth:
       ciwOperand*:   IRExpr  ## Round-6 B2: the value being widened
       ciwSrcWidth*:  int     ## source width: 8, 16, or 32
@@ -2063,6 +2071,24 @@ type
                           ## is not carried back to the caller). `classOf` is
                           ## `dcSubstituted`: a stale value is forced, or a
                           ## write is dropped. sevError, via `closureDegrade`.
+    feConvFloatToIntUndefined ## RFC-0005 S8g. A float -> int conversion
+                          ## whose operand may lie outside the target type's
+                          ## range (NaN, +-Inf, or a finite value whose
+                          ## truncation does not fit). Nim 2.2.10 never
+                          ## raises there -- its generated C casts first and
+                          ## range-checks the CAST value -- and the cast is
+                          ## C-level undefined (x86-64 gives `low(int)` for
+                          ## `int`, 0 for `int32(1e30)`, the low byte for
+                          ## `int8(300.0)`; other targets differ). The
+                          ## out-of-range continuation takes a FRESH value of
+                          ## the target type on its own path
+                          ## (`drainConvFloatToIntFresh`); the in-range one
+                          ## is exact and clean. `classOf` is `dcFreshSymbol`:
+                          ## every value any platform produces is a model of
+                          ## the fresh symbol, nothing is forked away, and a
+                          ## candidate on that path is replay-gated. Recorded
+                          ## once per drain whose out-of-range half does not
+                          ## simplify to `false`. sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3074,6 +3100,12 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # A verdict-time diagnostic, never drained into `runTaint` (see the
     # enum member): the refuted witness came from a `dcFreshSymbol`-only
     # path, which is the only taint replay runs on.
+  # RFC-0005 S8g.
+  of feConvFloatToIntUndefined: dcFreshSymbol
+    # The out-of-range float -> int continuation: a fresh value of the
+    # target type stands for a platform-defined cast result, every operand
+    # is lowered and the raise drains run on that path too -- nothing is
+    # dropped (the in-range continuation is forked clean beside it).
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -3207,9 +3239,14 @@ proc mkFloat32Lit*(v: float32): IRExpr =             ## Phase 15 F2
   IRExpr(kind: iekFloatLit, fval: float64(v), fwidth: 32)
 
 proc mkConvIntToFloat*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
-  IRExpr(kind: iekConvIntToFloat, convOperand: e, convWidth: targetWidth)
-proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64): IRExpr =   ## Phase 15 F5
-  IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth)
+  IRExpr(kind: iekConvIntToFloat, convOperand: e, convWidth: targetWidth,
+         convSigned: true)
+proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64, signed = true,
+                       hasRange = false, lo = 0'i64, hi = 0'i64): IRExpr =
+  ## Phase 15 F5; RFC-0005 S8g added the target's signedness, the narrow
+  ## widths and a `range` target's bounds.
+  IRExpr(kind: iekConvFloatToInt, convOperand: e, convWidth: targetWidth,
+         convSigned: signed, convHasRange: hasRange, convLo: lo, convHi: hi)
 
 proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
                       tgtWidth: int, tgtSigned: bool): IRExpr =

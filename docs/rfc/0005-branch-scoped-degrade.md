@@ -119,7 +119,7 @@ state = "done"
 [[slice]]
 id    = "S8g"
 title = "Faithful scalar/string/defect models: float-to-int conversion, unary-negation overflow, split(s, \"\"), new int zero-init, slice/del defect class, reassignment else-arm"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8h"
@@ -1303,6 +1303,143 @@ semantics, each with a real-SUT oracle where one applies: `phase11_walker`,
 `r6_lows_declines`, `r6_n36_raise_degrade`, `r6_r2_zerodefault_result`,
 `rfc0005_s6b_ops`; the audit inventories `r6_n27` (+2 guarded
 `seqDataRaw` reads) and `r6_n36_raise_class_audit` (-1 float raise).
+
+**As landed (S8g, walker 155) — faithful scalar, string and defect models.**
+Six of S8f's remainder items were model defects: the walker claimed behaviour
+real Nim does not have. Each is now fixed by construction. Replay is still not
+extended to clean candidates. Every flip below was probed on the pinned
+toolchain (Nim 2.2.10, c and cpp identical, debug build).
+
+- **Float to int (ADR-0011 R16-2 reversed in place).** `int(f)` casts first
+  and checks the cast value, so an int-family target never raises:
+  - `int(1e30)`, `int(NaN)` and `int(Inf)` all give `low(int)`;
+  - `int32(1e30)` gives 0, and `int8(300.0)` gives 44;
+  - `Natural(-5.0)` raises `RangeDefect`.
+
+  The model:
+  - In range, the value is exact at the target's own width and signedness.
+    An 8- or 16-bit target was not modelled at its own width.
+  - Out of range, the value is fresh and taints the path through
+    `feConvFloatToIntUndefined` (`dcFreshSymbol`). A candidate that depends on
+    it is replayed and either confirmed or refuted.
+  - A `range` target forks `RangeDefect` on the converted value. It uses the
+    general `rangeDefectConds` sink, which replaces `convFloatToIntDomainConds`
+    and is shared with slice and `del`.
+  - Gone: `drainConvFloatToIntBounds`, the in-domain narrowing (which made
+    every out-of-range value falsely unreachable) and
+    `drainConvFloatToIntRaises`.
+- **Unary negation.** On a signed int, `-x` and `abs(x)` are `0 - x` under
+  the overflow check. So `-low(T)` raises `OverflowDefect`; it used to wrap.
+- **`split(s, "")`** is `@[s]` for a literal or symbolic receiver. It was a
+  byte-wise split for a literal receiver and a `seZ3StringIncomplete`
+  decline for a symbolic one.
+- **`new T` for a non-object `T`** (`new int`, `new bool`, ...) stores
+  `default(T)` in a heap keyed by the type. It was a free cell. A type with
+  no modelled zero value declines with `heNewFieldZeroUnsupported`.
+- **Slice and `del` defect classes.**
+
+  | Operation | Condition | Result |
+  |---|---|---|
+  | `s[a .. b]` on a seq or string | non-empty and out of bounds | `IndexDefect` |
+  | `s[a .. b]` on a seq or string | negative length (`b < a - 1`) | `RangeDefect` |
+  | `s[a .. b]` on a seq or string | empty past the end | no defect |
+  | `substr(s, a, b)` | any bounds | clamps |
+  | `del(i)` | `i < 0` | `RangeDefect` |
+  | `del(i)` | `i >= len` | `IndexDefect` |
+
+  Before, a seq slice was an `IndexDefect` for every out-of-bounds case, a
+  string slice clamped, and `substr` did not clamp a negative start.
+  A `^k` bound of a string slice, and the low `^k` bound of a seq slice,
+  read as `k` rather than `len - k`: `s[1 .. ^1]` of "abcd" was "b". The
+  clamping extract hid this until the slice forked its defects (the
+  `retest_c11_stack` shape `s[1 .. ^1]` on a 1-byte string then raised a
+  false `IndexDefect`).
+- **Symbolic discriminator reassignment** forks the `else:` arm. Its guard is
+  "the RHS equals no explicit tag", and its new discriminator is the RHS
+  itself. So `kC -> kD` under `else:` keeps the branch's field, and
+  `kA -> kD` raises `FieldDefect`. The else arm used to have no path, so
+  both were a false `sxUnsat`.
+- **Drain fixes found on the way (same mechanism: a raise fork dropped).**
+  - The deref-write sites (`p[] = e`, including inside a variant arm) now
+    drain the RHS's scalar raise forks. Before, a raise in such an RHS
+    (for example `p[] = a div b`) was dropped.
+  - `drainScalarRaiseForks` now forks every sink on every survivor of an
+    earlier stage. It used to fork only on the first survivor, for example
+    after `parseInt`'s lax continuation.
+  - `if`, `assert` and `assume` now walk every drain continuation, not just
+    the first.
+- **Flips.**
+
+  | SUT | before | after |
+  |---|---|---|
+  | `int(f)`, target `RangeDefect` | `sxRaised` (false) | `sxUnsat` |
+  | `try: int(f) except RangeDefect: label` | `sxSat` (false) | `sxUnsat` |
+  | `int8(f)`/`uint8(f)` of an out-of-range `f` reaching a label | `sxUnsat` (false) | `sxSat`, reproduces |
+  | `int(NaN) == low(int)` | `sxRaised` | `sxSat`, replay-confirmed |
+  | `int(NaN) == 7` | `sxRaised` | `sxUnknown` (`feReplayRefuted`) |
+  | `Natural(f)` on a negative `f` | `sxUnsat` (false) | `sxRaised` `RangeDefect` |
+  | `-x` / `abs(x)` at `low(T)` | `sxUnsat` (false) | `sxRaised` `OverflowDefect` |
+  | `"abc".split("") == @["abc"]` | `sxUnsat` (false) | `sxSat` |
+  | `(new int)[] != 0` | `sxSat` (false) | `sxUnsat` |
+  | `data[4 .. ^1]`, short `data` | `IndexDefect` | `RangeDefect` |
+  | `data[5 .. 4]` on a 3-seq | `IndexDefect` (false) | no defect |
+  | `s[1 .. 7]` on a 3-string | no defect (false) | `IndexDefect` |
+  | `del(-1)` | `IndexDefect` | `RangeDefect` |
+  | `substr(s, -2, 1)` | `sxUnsat` (false) | `sxSat` |
+  | `s[1 .. ^1] == "bcd"` for `s == "abcd"` | `sxUnsat` (false) | `sxSat` |
+  | symbolic reassignment into `else:` | `sxUnsat` (false) | `sxSat` / `FieldDefect` |
+
+- **Consumer-visible (for S11's migration note).**
+  - `int(f)` and `intN(f)`/`uintN(f)` no longer report `RangeDefect`, and a
+    `try/except RangeDefect` around one is dead. `Natural(f)` and other range
+    targets do report it.
+  - There is a new error kind, `feConvFloatToIntUndefined`, appended to the
+    enum (`dcFreshSymbol`). An exhaustive `case` over `SymexErrorKind` needs
+    an arm for it.
+  - `-low(T)` and `abs(low(T))` report `OverflowDefect`.
+  - `split(s, "")` is `@[s]`, and `new int` reads 0.
+  - The class of a slice or `del` defect can change between `IndexDefect`
+    and `RangeDefect`. A string slice now raises, and `substr` clamps.
+  - A deref-write RHS's raise now surfaces.
+  - The CFI canonical form carries width, signedness and range. With the
+    walker bump to 155, every symex cache entry is invalidated.
+- **Different mechanisms, reported and not fixed here.**
+  - `low(int) div -1` raises `OverflowDefect` in Nim, and `low(int) mod -1`
+    crashes with SIGFPE. Neither is modelled: `divBV` forks only on zero.
+  - `toFpFromSigned` converts a `uint64` to float as signed.
+  - An explicit int-to-range conversion (`Natural(x)` for an int `x`) is a
+    pass-through with no `RangeDefect`.
+  - Symbolic reassignment of an object whose construction was declined hits
+    an internal walker assertion (`weInternalWalkerFault`).
+  - The concolic `walkIfFollowConcrete` never drains scalar raise forks.
+
+Pins: `tests/tsymex_rfc0005_s8g_models.nim` (1)–(7).
+
+Re-pinned to Nim semantics, each checked against the real SUT:
+- `phase15_CR3_CR4_CR6_float`;
+- `phase15_CR11_CR18_splitcap` (an empty-separator split is one part, so a
+  5-part result is `sxUnsat`);
+- `r6_n36_raise_degrade` (the split-cap decline's vehicle is now a
+  literal-separator split);
+- `phase15_cr9_lowerInExpr`;
+- `phase15_F5_float_conv`;
+- `phase15_F5_probeproto` (clean `sxSat` whose witness reproduces);
+- `phase16_R16_2_rangedefect` (rewritten around `int` vs `Natural`);
+- `phase16_R16_2b_shortcircuit_conv` (the guard now exercised through
+  `Natural`);
+- `phase15_rereview_drains` (NI-2-2);
+- `phase15_S5_strops` (split empty separator);
+- `phase15_r2_new` (the disjoint arms write before reading);
+- `r4_seq_slice` (unguarded slice is `RangeDefect`);
+- `r6_n14_seqops` (a `del` `IndexDefect` means `i >= len`).
+
+Inventories:
+- `rfc0005_s1_lattice` (new kind);
+- `r11_range_invariant_audit` (+1 marker-exempt `bvRangeConds`, the
+  range-defect check);
+- `r6_n36_raise_class_audit`: the two removed empty-separator split raises,
+  and one category-c raise added in `discFromRhs`. Also the
+`phase15_CR2_cachekey` pin (155).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

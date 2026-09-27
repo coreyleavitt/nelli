@@ -849,5 +849,10 @@ task test, "Run the test suite":
             # RFC-0005 S8f -- a clean sxSat's witness reproduces: a table's /
             # set's size is tied to its present key terms at every check, and
             # table/set/seq witnesses render len entries; walker 153->154.
-            "tsymex_rfc0005_s8f_witness"]:
+            "tsymex_rfc0005_s8f_witness",
+            # RFC-0005 S8g -- faithful scalar, string and defect models:
+            # float->int never raises, unary-minus overflow, split(s, ""),
+            # new(int) zero-init, slice/del defect classes, else-arm
+            # discriminator reassignment; walker 154->155.
+            "tsymex_rfc0005_s8g_models"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

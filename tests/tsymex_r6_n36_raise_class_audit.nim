@@ -351,7 +351,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pattern (A) site inventory: 7 runtime.nim + 18 runtime_strings.nim + 13 runtime_heap.nim marked lines":
+  test "pattern (A) site inventory: 7 runtime.nim + 16 runtime_strings.nim + 13 runtime_heap.nim marked lines":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -368,8 +368,12 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     let runtimeHeapCount = countMarked(readFile(runtimeHeapNimPath), refSymexPrefix, false)
     checkpoint("runtime.nim=" & $runtimeCount & " runtime_strings.nim=" &
                $runtimeStringsCount & " runtime_heap.nim=" & $runtimeHeapCount)
+    ## runtime_strings.nim 18 -> 16 (RFC-0005 S8g, walker 155). `split(s,
+    ## "")` is `@[s]` in Nim, so its case (a) no longer declines: the
+    ## symbolic-receiver `SymexZ3StringIncompleteError` and the empty-sep
+    ## `maxSplitParts` one went with the byte-wise split. No site was added.
     check runtimeCount == 7
-    check runtimeStringsCount == 18
+    check runtimeStringsCount == 16
     # N46-followup-2 (round-6 re-review, heap-raise totality slice):
     # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
     # CONVERTED to the in-band degrade idiom (no longer raw raises, no
@@ -378,7 +382,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 76 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 77 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -409,11 +413,17 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 77 -> 76 (RFC-0005 S8f, walker 154). `defaultZero`'s float arm now
     ## returns Nim's `default(float)` (0.0) instead of raising, so its
     ## category-c marker went with the raise. No site was added.
-    check runtimeCount == 76
+    ## 76 -> 77 (RFC-0005 S8g, walker 155). One new marked site:
+    ## `runtime.nim`'s `discFromRhs` (the discriminator a symbolic
+    ## reassignment into the `else:` arm leaves behind). Its `else` arm is
+    ## category-c by the same argument as `variantDiscEq`'s: `allocateSym`'s
+    ## itVariant/itMultiVariant arms only ever allocate a BV or Int
+    ## discriminator.
+    check runtimeCount == 77
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 79 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 80 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -436,7 +446,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## counted above (also category-c). No category-d site was added.
     ## 80 -> 79: the same `defaultZero` float site removed above (RFC-0005
     ## S8f).
-    check cCount == 79
+    ## 79 -> 80: the same `discFromRhs` site added above (RFC-0005 S8g).
+    check cCount == 80
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

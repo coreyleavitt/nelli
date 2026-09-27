@@ -8,12 +8,14 @@ import nelli/symex
 # CR-3 (MEDIUM): float→int out-of-range: no domain guard → silent unsound witness.
 #   Fix: add `f ∈ [float(low(T)), float(high(T))]` path constraint so the result
 #   is honest-incomplete, never silently unsound.
-#   R16-2 follow-up: additionally forks a RangeDefect raise for the out-of-range
-#   path. For unconstrained SUTs the raise is the PRIMARY finding.
+#   RFC-0005 S8g (walker 155): Nim's int(f) never raises (probed: int(1e30),
+#   int(NaN), int(Inf) all give low(int); int32(1e30) gives 0), so the R16-2
+#   RangeDefect fork is gone. In range the value is exact; out of range it is
+#   a fresh value (feConvFloatToIntUndefined) that replay confirms or refutes.
 #
 # CR-4 (MEDIUM): convWidth never read; int32(f) modeled as 64-bit truncation.
 #   Fix: use toSbv[...,32] for convWidth==32 + domain-bound to int32 range.
-#   R16-2: raise fork fires for int32(f) too.
+#   S8g: int32(f) is exact at width 32 in range and never raises.
 #
 # CR-6 (MEDIUM): cmpFloat doAssert a.kind==b.kind crashes for float32 vs float64.
 #   Fix: widen float32 to float64 via toFp(rmRNE()) before the comparison (mirrors
@@ -25,20 +27,15 @@ import nelli/symex
 
 proc f2i_unbound(x: float) =
   ## Unbounded float-to-int: int(x) == 3.
-  ## After CR-3 fix: domain bound [low(int64)..high(int64)] added to pc.
-  ## After R16-2: unconstrained int(x) also forks a RangeDefect raise.
+  ## Reachable in range (x = 3.0); never raises.
   if int(x) == 3: symexTarget("f2i_unbound")
 
 proc f2i_nan(x: float) =
-  ## Only satisfiable if x is NaN.
-  ## After CR-3 fix: domain bound excludes NaN.
-  ## After R16-2: the raise path (not(domainCond)) captures NaN → sxRaised.
+  ## Unreachable in Nim: int(NaN) == low(int).
   if isNaN(x) and int(x) == 3: symexTarget("f2i_nan")
 
 proc f2i_inf(x: float) =
-  ## Only satisfiable if x is +Inf.
-  ## After CR-3 fix: domain bound excludes Inf.
-  ## After R16-2: the raise path (not(domainCond)) captures Inf → sxRaised.
+  ## Unreachable in Nim: int(Inf) == low(int).
   ## Note: use `x == Inf` since std/math has no `isInf` in Nim 2.2.x.
   if x == Inf and int(x) == 3: symexTarget("f2i_inf")
 
@@ -48,7 +45,7 @@ proc f2i_inf(x: float) =
 
 proc i32conv(x: float) =
   ## int32(x) == 5: should produce a witness that round-trips through int32().
-  ## After R16-2: unconstrained int32(x) forks a RangeDefect raise (primary).
+  ## Never raises (S8g).
   if int32(x) == 5: symexTarget("i32conv")
 
 # ---------------------------------------------------------------------------
@@ -74,34 +71,31 @@ proc mixedCmpOrd(a: float32, b: float64) =
 
 suite "symex Phase 15 — CR-3 float→int domain bounding":
 
-  test "CR-3: unbounded int(x)==3 → sxRaised (R16-2: out-of-range raise is primary finding)":
-    ## R16-2: an unconstrained int(x) forks a RangeDefect raise-path that is
-    ## discovered before the sat path (defect surfacing). The raise is the primary
-    ## w.found[0] entry even for tLabel searches.
-    ## In-range sat reachability is verified by R16-2-3 (rd_inRange test).
-    let r = symexFind(f2i_unbound, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "CR-3: unbounded int(x) never raises; int(x)==3 is a clean sxSat (S8g)":
+    check symexFind(f2i_unbound, tRaisedExn("RangeDefect")).status == sxUnsat
+    let r = symexFind(f2i_unbound, tLabel("f2i_unbound"))
+    check r.status == sxSat
+    if r.status == sxSat: check int(r.witness[0]) == 3
 
-  test "CR-3: NaN input → sxRaised (R16-2: NaN satisfies not(domainCond))":
-    ## Before R16-2: isNaN(x) and int(x)==3 was sxUnsat (NaN excluded by domain bound).
-    ## After R16-2: the raise path `not(domainCond)` captures NaN → sxRaised.
-    ## The raise path `not(x ∈ int64 range)` is satisfiable for NaN → defect found.
-    let r = symexFind(f2i_nan, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "CR-3: NaN input → never a claim (S8g: fresh value, replay refutes)":
+    ## Real Nim: int(NaN) == low(int), so the label is unreachable. The model's
+    ## out-of-range value is fresh; its candidate is replayed and refuted.
+    check symexFind(f2i_nan, tRaisedExn("RangeDefect")).status == sxUnsat
+    let r = symexFind(f2i_nan, tLabel("f2i_nan"))
+    check r.status == sxUnknown
 
-  test "CR-3: Inf input → sxRaised (R16-2: Inf satisfies not(domainCond))":
-    ## Before R16-2: x==Inf and int(x)==3 was sxUnsat (Inf excluded by domain bound).
-    ## After R16-2: the raise path `not(domainCond)` captures Inf → sxRaised.
-    let r = symexFind(f2i_inf, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "CR-3: Inf input → never a claim (S8g: fresh value, replay refutes)":
+    check symexFind(f2i_inf, tRaisedExn("RangeDefect")).status == sxUnsat
+    let r = symexFind(f2i_inf, tLabel("f2i_inf"))
+    check r.status == sxUnknown
 
 suite "symex Phase 15 — CR-4 int32(float) 32-bit conversion":
 
-  test "CR-4: int32(x)==5 → sxRaised (R16-2: out-of-range raise is primary finding)":
-    ## R16-2: unconstrained int32(x) forks a RangeDefect raise (primary finding).
-    ## The in-range sat path (x=5.0) is also reachable but discovered second.
-    let r = symexFind(i32conv, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "CR-4: int32(x) never raises; int32(x)==5 is a clean sxSat (S8g)":
+    check symexFind(i32conv, tRaisedExn("RangeDefect")).status == sxUnsat
+    let r = symexFind(i32conv, tLabel("i32conv"))
+    check r.status == sxSat
+    if r.status == sxSat: check int32(r.witness[0]) == 5
 
 suite "symex Phase 15 — CR-6 float32 vs float64 comparison":
 

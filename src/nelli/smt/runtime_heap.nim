@@ -1009,7 +1009,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # construction arm's per-PRESENT-field `mkFieldDerefWrite`s then
       # overwrite the fields it actually set). A non-object pointee (a plain
       # `ref int`/`ref float`/… inline allocation) has no fields to split —
-      # skip. A variant object pointee never reaches `isNew` (named ref
+      # its whole cell is zero-written (RFC-0005 S8g, the `else` below). A
+      # variant object pointee never reaches `isNew` (named ref
       # aliases whose pointee has `case` fields classify to `itVariant`, not
       # `itRef` — ADR-0022 sub-decision #1 — so `isNewCall` gates never fire
       # for them); this loop is therefore never reached with a variant pointee.
@@ -1056,6 +1057,43 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             ctx.raw, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
+      else:
+        # RFC-0005 S8g: a NON-object pointee (`new int`, `new bool`, ...) is
+        # zero-initialised too (probe: `new int` reads 0, `new float` 0.0,
+        # `new bool` false, `new string` ""). It was skipped ("no fields to
+        # split"), so `p[]` read the whole-pointee heap cell (`typeId`, the
+        # key `isDeref`/`isDerefWrite` use for a non-field access) at a fresh
+        # address: a free value, and `p[] != 0` a false `sxSat`. Same store
+        # as the field loop above, into the whole-pointee heap.
+        let zeroExpr = zeroIRExprForType(pointee)
+        if zeroExpr == nil:
+          # SND-1 twin of the field loop's decline: no clean zero encoding
+          # for this pointee type -- the cell stays fresh, on a tainted path.
+          taintInPlace(child, w.degrade(heNewFieldZeroUnsupported,
+            "new " & $stmt.nRefTy & ": pointee of type " & $pointee.kind &
+                 " has no clean zero-value encoding — isNew zero-write " &
+                 "skipped (SND-1 taint)", dsNewFieldZero))
+        else:
+          var heap: Z3AnyAst
+          if child.heaps.hasKey(typeId):
+            heap = child.heaps[typeId]
+          else:
+            heap = mkHeapArrayVar(ctx, refSort, pointee, "heap_" & typeId)
+          var scratchPC: seq[Z3Bool]
+          let proto = allocateSym(pointee, "__isNewZeroProto", scratchPC)
+          let (valSVRaw, childAfter) = lowerInExpr(child, zeroExpr, w, some(proto))
+          var valSV = valSVRaw
+          if valSV.kind == svInt:
+            case proto.kind
+            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+            else: discard
+          let storedRaw = ctx.checkErr Z3_mk_store(
+            ctx.raw, heap.raw, newRef.raw, rawAnyAstOf(valSV))
+          child = childAfter
+          child.heaps[typeId] = wrap[Z3AnyAst](ctx, storedRaw)
       survivors.add child
     survivors
   of isDerefWrite:
@@ -1263,51 +1301,55 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # mirrors the plain-field write path (svInt↔BV reconciliation).
           var scratchPC: seq[Z3Bool]
           let proto = allocateSym(stmt.dwElemTy, "__armWriteProto", scratchPC)
-          let (valSVRaw, cpInArm) = lowerInExpr(cpChild, stmt.dwValue, w, some(proto))
-          var valSV = valSVRaw
-          # #163 review R22 site 2: an ARM-specific field write forks exactly
-          # like the plain field write (site 1, above) and `isAssign`'s own
-          # local-variable case -- see `forkAssignRangeCheck`'s doc comment.
-          # All arms sharing this field NAME carry the SAME field TYPE by
-          # Nim's own case-object rule, so `stmt.dwElemTy` (the type this
-          # write's proto was already built from) is the correct target type
-          # regardless of which arm(s) `armHitsW` matched. Checked BEFORE the
-          # svInt->BV coercion below so the discharge can still see `valSV`'s
-          # `ziIvl`.
-          let cpInArmRanged =
-            if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
-              forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
-            else: cpInArm
-          if valSV.kind == svInt:
-            case proto.kind
-            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-            else: discard
-          # Store RHS into each matching arm's field heap.
-          for hit in armHitsW:
-            let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dwField
-            var armHeap: Z3AnyAst
-            if cpInArmRanged.heaps.hasKey(armHeapKey):
-              armHeap = cpInArmRanged.heaps[armHeapKey]
-            else:
-              let refSort = allocRefSort(ctx, objTy)
-              armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
-                                       "heap_" & armHeapKey)
-            let storedRaw = ctx.checkErr Z3_mk_store(
-              ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
-            cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
-          # N42 audit (round-6 fix round 7): unlike the plain-field write path
-          # (below, in this same proc) and the disc-heap materialisation
-          # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
-          # own `lowerInExpr` (which produced `cpInArm` and already drained
-          # sink (a) once) -- so a degrade from an ARM's OWN field type here
-          # (a different, possibly-unsupported per-arm shape than the RHS's
-          # own `stmt.dwElemTy` proto) would otherwise sit undrained past
-          # `survivors.add` below. Same fix as the read-side arm-field path.
-          let cpInArmDrained = drainPendingLowerEffects(cpInArmRanged)
-          survivors.add cpInArmDrained
+          let (valSVRaw, cpInArmLowered) = lowerInExpr(cpChild, stmt.dwValue, w, some(proto))
+          # RFC-0005 S8g: the RHS's scalar raise / conversion forks (this site
+          # dropped them: an overflowing `p.f = a + b` never raised, and a
+          # float -> int conversion's out-of-range continuation was lost).
+          for cpInArm in drainScalarRaiseForks(cpInArmLowered, w):
+            var valSV = valSVRaw
+            # #163 review R22 site 2: an ARM-specific field write forks exactly
+            # like the plain field write (site 1, above) and `isAssign`'s own
+            # local-variable case -- see `forkAssignRangeCheck`'s doc comment.
+            # All arms sharing this field NAME carry the SAME field TYPE by
+            # Nim's own case-object rule, so `stmt.dwElemTy` (the type this
+            # write's proto was already built from) is the correct target type
+            # regardless of which arm(s) `armHitsW` matched. Checked BEFORE the
+            # svInt->BV coercion below so the discharge can still see `valSV`'s
+            # `ziIvl`.
+            let cpInArmRanged =
+              if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+                forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
+              else: cpInArm
+            if valSV.kind == svInt:
+              case proto.kind
+              of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+              of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+              of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+              of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+              else: discard
+            # Store RHS into each matching arm's field heap.
+            for hit in armHitsW:
+              let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dwField
+              var armHeap: Z3AnyAst
+              if cpInArmRanged.heaps.hasKey(armHeapKey):
+                armHeap = cpInArmRanged.heaps[armHeapKey]
+              else:
+                let refSort = allocRefSort(ctx, objTy)
+                armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
+                                         "heap_" & armHeapKey)
+              let storedRaw = ctx.checkErr Z3_mk_store(
+                ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
+              cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
+            # N42 audit (round-6 fix round 7): unlike the plain-field write path
+            # (below, in this same proc) and the disc-heap materialisation
+            # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
+            # own `lowerInExpr` (which produced `cpInArm` and already drained
+            # sink (a) once) -- so a degrade from an ARM's OWN field type here
+            # (a different, possibly-unsupported per-arm shape than the RHS's
+            # own `stmt.dwElemTy` proto) would otherwise sit undrained past
+            # `survivors.add` below. Same fix as the read-side arm-field path.
+            let cpInArmDrained = drainPendingLowerEffects(cpInArmRanged)
+            survivors.add cpInArmDrained
       return survivors
     let sortTy = if isField: stmt.dwObjTy else: stmt.dwElemTy
     let typeId = refPointeeTypeId(sortTy)
@@ -1371,50 +1413,54 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var scratchPC: seq[Z3Bool]
         let proto = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchPC)
         ## Encapsulate seed→reset→lower→drain via wrapper.
-        let (valSVRaw, cpLowered) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
-        var valSV = valSVRaw
-        # #163 review R22 site 1: a FIELD write (`p.field = v`, isField) whose
-        # declared field type is `range[lo..hi]` forks exactly like
-        # `isAssign`'s own local-variable case (`forkAssignRangeCheck`, reused
-        # unchanged) — the out-of-range sub-path is a routed RangeDefect
-        # raise, the survivor's `pc` is hard-narrowed to the in-range domain,
-        # and a provably-in-range RHS (`av.ziIvl`) discharges statically with
-        # no fork at all. Checked BEFORE the svInt→BV coercion below so the
-        # discharge can still see `valSV.ziIvl` (a BV-coerced value carries
-        # none). A bare `p[] = v` (not `isField`) is out of this fix's scope
-        # — see the handoff's site enumeration.
-        let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
-                   forkAssignRangeCheck(cpLowered, valSV, stmt.dwElemTy, w)
-                 else: cpLowered
-        # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
-        # but the heap array value sort is BV64.  Coerce via int2bv here rather
-        # than in the heap-read path; equality-only goals are safe (no ordering
-        # goal — the F5 int2bv/bv2int pathology does not apply here).
-        if valSV.kind == svInt:
-          case proto.kind
-          of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-          of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-          of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-          of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-          else: discard  ## proto is not a BV — no BV coercion needed
-        let storedRaw = ctx.checkErr Z3_mk_store(
-          ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
-        let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
-        # REPLACE the per-path heap binding with the stored array on the surviving
-        # path (PER-PATH — an unforked branch never sees this update).
-        var child = forkPath(cp, cp.pc, cp.env)
-        child.heaps[heapKey] = storedHeap
-        # RFC-0005 S1c (S1b's measured leak, `tsymex_r6_n40_alloc_totality`
-        # N40-4). `rawAnyAstOf(valSV)` in the store above runs AFTER
-        # `lowerInExpr`'s drain, and for a value with no single-leaf Z3 sort
-        # (a `Table[int, _]` field) it degrades in-band via `allocDegrade` --
-        # so its pending taint was never folded onto ANY path and surfaced
-        # only as the walk-end leak stamp. Drain it onto the path that
-        # carries the stored value: the same post-allocation drain the READ
-        # arm's N42 note establishes above (idempotent; a no-op when nothing
-        # degraded).
-        child = drainPendingLowerEffects(child)
-        survivors.add child
+        let (valSVRaw, cpLoweredRaw) = lowerInExpr(cp, stmt.dwValue, w, some(proto))
+        # RFC-0005 S8g: the RHS's scalar raise / conversion forks (this site
+        # dropped them: an overflowing `p[] = a + b` never raised, and a
+        # float -> int conversion's out-of-range continuation was lost).
+        for cpLowered in drainScalarRaiseForks(cpLoweredRaw, w):
+          var valSV = valSVRaw
+          # #163 review R22 site 1: a FIELD write (`p.field = v`, isField) whose
+          # declared field type is `range[lo..hi]` forks exactly like
+          # `isAssign`'s own local-variable case (`forkAssignRangeCheck`, reused
+          # unchanged) — the out-of-range sub-path is a routed RangeDefect
+          # raise, the survivor's `pc` is hard-narrowed to the in-range domain,
+          # and a provably-in-range RHS (`av.ziIvl`) discharges statically with
+          # no fork at all. Checked BEFORE the svInt→BV coercion below so the
+          # discharge can still see `valSV.ziIvl` (a BV-coerced value carries
+          # none). A bare `p[] = v` (not `isField`) is out of this fix's scope
+          # — see the handoff's site enumeration.
+          let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+                     forkAssignRangeCheck(cpLowered, valSV, stmt.dwElemTy, w)
+                   else: cpLowered
+          # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)
+          # but the heap array value sort is BV64.  Coerce via int2bv here rather
+          # than in the heap-read path; equality-only goals are safe (no ordering
+          # goal — the F5 int2bv/bv2int pathology does not apply here).
+          if valSV.kind == svInt:
+            case proto.kind
+            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+            else: discard  ## proto is not a BV — no BV coercion needed
+          let storedRaw = ctx.checkErr Z3_mk_store(
+            ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
+          let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
+          # REPLACE the per-path heap binding with the stored array on the surviving
+          # path (PER-PATH — an unforked branch never sees this update).
+          var child = forkPath(cp, cp.pc, cp.env)
+          child.heaps[heapKey] = storedHeap
+          # RFC-0005 S1c (S1b's measured leak, `tsymex_r6_n40_alloc_totality`
+          # N40-4). `rawAnyAstOf(valSV)` in the store above runs AFTER
+          # `lowerInExpr`'s drain, and for a value with no single-leaf Z3 sort
+          # (a `Table[int, _]` field) it degrades in-band via `allocDegrade` --
+          # so its pending taint was never folded onto ANY path and surfaced
+          # only as the walk-end leak stamp. Drain it onto the path that
+          # carries the stored value: the same post-allocation drain the READ
+          # arm's N42 note establishes above (idempotent; a no-op when nothing
+          # degraded).
+          child = drainPendingLowerEffects(child)
+          survivors.add child
     survivors
   else:
     raise newException(ValueError,  # [raise-audited: category-c: documented single-caller dispatch invariant (walk's own case restricts stmt.kind to isDeref/isNew/isDerefWrite before ever calling walkHeapArm)]

@@ -1,63 +1,80 @@
 import std/unittest
 import nelli/symex
 
-# Phase 16 R16-2 — float→int RangeDefect raise fork.
+# Phase 16 R16-2 — float→int RangeDefect.
 #
-# The engine now forks a `RangeDefect` raise-path when `int(f)` / `int32(f)` is
-# applied to a float value that may be outside the target integer range (NaN,
-# ±Inf, or out-of-range finite). This is the "honest-RAISES" model promised by
-# CR-3's "RangeDefect modeling is Phase-16" comment.
-#
-# Design: a parallel sink `convFloatToIntDomainConds` carries the SAME domainCond
-# as `convFloatToIntBoundConds`, but is drained by `drainConvFloatToIntRaises`
-# (a fork drain) rather than `drainConvFloatToIntBounds` (a narrowing drain).
-# The fork branches off the PRE-narrowing path so the raise constraint
-# `not(domainCond)` does not land on an already-narrowed path (which would be
-# UNSAT by construction and silently drop the finding).
-#
-# RED state for each test: before R16-2, tRaisedExn("RangeDefect") yields
-# sxUnsat because no raise fork is opened.
+# R16-2 forked a `RangeDefect` raise-path whenever `int(f)` / `int32(f)` could
+# see a float outside the target range. RFC-0005 S8g (walker 155) reversed it
+# (ADR-0011, "Reversed (RFC-0005 S8g)"): Nim 2.2.10 casts first and checks the
+# CAST value, so an int-family target never raises. Probed, c and cpp:
+#   int(1e30) = int(NaN) = int(Inf) = low(int); int32(1e30) = 0;
+#   int8(300.0) = 44; none raise RangeDefect.
+# Only a `range` target checks the cast value against its subrange:
+#   Natural(-5.0) raises RangeDefect.
+# These pins keep R16-2's shapes and assert the Nim behaviour: `int(f)` has
+# no RangeDefect path, `Natural(f)` does, and `acRange` gates the latter.
 
 # ---------------------------------------------------------------------------
-# Behavior 1: Tracer — int(f) with unconstrained f → sxRaised(RangeDefect)
+# Behavior 1: unconstrained int(f) never raises; Natural(f) does
 # ---------------------------------------------------------------------------
 
 proc rd_raiseOnly(f: float) =
-  ## No explicit unreachable label — we drive via tRaisedExn.
-  ## int(f) on an unconstrained f triggers RangeDefect for out-of-range values.
   let i = int(f)
   symexTarget("rdRaiseOnlyHit")
   discard i
 
-suite "symex Phase 16 R16-2 — float→int RangeDefect raise fork":
+proc rd_natural(f: float) =
+  let i = Natural(f)
+  symexTarget("rdNaturalHit")
+  discard i
 
-  test "R16-2-1: unconstrained int(f) → sxRaised(RangeDefect)":
-    ## Before R16-2: tRaisedExn("RangeDefect") yields sxUnsat.
-    ## After R16-2: the raise fork is opened → sxRaised.
+suite "symex Phase 16 R16-2 — float→int RangeDefect (S8g: range targets only)":
+
+  test "R16-2-1: unconstrained int(f) → no RangeDefect (sxUnsat)":
     let r = symexFind(rd_raiseOnly, tRaisedExn("RangeDefect"))
+    check r.status == sxUnsat
+
+  test "R16-2-1b: unconstrained Natural(f) → sxRaised(RangeDefect)":
+    let r = symexFind(rd_natural, tRaisedExn("RangeDefect"))
     check r.status == sxRaised
     if r.status == sxRaised:
       check r.raisedTypeId == "RangeDefect"
 
 # ---------------------------------------------------------------------------
-# Behavior 2: Caught — RangeDefect inside try/except is catchable
+# Behavior 2: catchability — the handler around int(f) is dead; around
+# Natural(f) it is live
 # ---------------------------------------------------------------------------
 
 proc rd_caught(f: float) =
-  ## int(f) wrapped in try/except RangeDefect: the defect is caught.
   try:
     let i = int(f)
     discard i
   except RangeDefect:
     symexTarget("rdCaughtHit")
 
+proc rd_caughtNatural(f: float) =
+  try:
+    let i = Natural(f)
+    discard i
+  except RangeDefect:
+    symexTarget("rdCaughtNaturalHit")
+
 suite "symex Phase 16 R16-2 — RangeDefect catchability":
 
-  test "R16-2-2: int(f) in try/except RangeDefect is caught → sxSat":
-    ## The raise-fork enters the except handler; handler body reaches the target.
-    ## Proves routeRaise correctly threads into the except block.
+  test "R16-2-2: int(f) in try/except RangeDefect: the handler is dead → sxUnsat":
     let r = symexFind(rd_caught, tLabel("rdCaughtHit"))
+    check r.status == sxUnsat
+
+  test "R16-2-2b: Natural(f) in try/except RangeDefect is caught → sxSat":
+    let r = symexFind(rd_caughtNatural, tLabel("rdCaughtNaturalHit"))
     check r.status == sxSat
+    if r.status == sxSat:
+      var caught = false
+      try:
+        discard Natural(r.witness[0])
+      except RangeDefect:
+        caught = true
+      check caught
 
 # ---------------------------------------------------------------------------
 # Behavior 3: In-range stays clean — no false positive RangeDefect
@@ -72,13 +89,10 @@ proc rd_inRange(f: float) =
 suite "symex Phase 16 R16-2 — in-range no false positive":
 
   test "R16-2-3: in-range constrained int(f) yields sxSat with no spurious RangeDefect":
-    ## f ∈ [0,10) is inside int64 range. `not(domainCond)` is UNSAT under the
-    ## existing path constraint, so no raise fork surfaces.
     let r = symexFind(rd_inRange, tLabel("rdInRangeHit"))
     check r.status == sxSat
 
   test "R16-2-3b: in-range constrained → tRaisedExn(RangeDefect) is sxUnsat":
-    ## No RangeDefect should be reachable when f is bounded in [0,10).
     let r = symexFind(rd_inRange, tRaisedExn("RangeDefect"))
     check r.status == sxUnsat
 
@@ -87,8 +101,7 @@ suite "symex Phase 16 R16-2 — in-range no false positive":
 # ---------------------------------------------------------------------------
 
 proc rd_acRangeOff(f: float) =
-  ## Same SUT as rd_raiseOnly, but tested with acRange excluded.
-  discard int(f)
+  discard Natural(f)
   symexTarget("rdAcRangeOffHit")
 
 proc noAcRangeSettings(): SymexSettings =
@@ -98,27 +111,34 @@ proc noAcRangeSettings(): SymexSettings =
 
 suite "symex Phase 16 R16-2 — acRange gate":
 
-  test "R16-2-4: acRange off → no RangeDefect raise (honest-incomplete only)":
-    ## When acRange is excluded from arithChecks, the raise fork is suppressed.
+  test "R16-2-4: acRange on → Natural(f) raises RangeDefect":
+    let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"))
+    check r.status == sxRaised
+
+  test "R16-2-4b: acRange off → no RangeDefect raise":
     let r = symexFind(rd_acRangeOff, tRaisedExn("RangeDefect"), noAcRangeSettings())
     check r.status == sxUnsat   ## no RangeDefect path raised
 
 # ---------------------------------------------------------------------------
-# Behavior 5: int32 width — RangeDefect for int32(f) with out-of-int32 value
+# Behavior 5: int32 width — never raises; exact at width 32 in range
 # ---------------------------------------------------------------------------
 
 proc rd_int32width(f: float) =
-  ## int32(f) on an unconstrained f: the 32-bit domain is narrower than int64.
-  ## A value in (2^31, 2^63) is valid int64 range but out-of-range for int32.
   let i = int32(f)
   discard i
   symexTarget("rdInt32Hit")
 
-suite "symex Phase 16 R16-2 — int32(float) RangeDefect":
+proc rd_int32exact(f: float) =
+  if f > 7.0 and f < 8.0:
+    if int32(f) == 7: symexTarget("rdInt32Exact")
 
-  test "R16-2-5: int32(f) unconstrained → sxRaised(RangeDefect)":
-    ## The 32-bit branch of iekConvFloatToInt must fork a RangeDefect raise.
+suite "symex Phase 16 R16-2 — int32(float)":
+
+  test "R16-2-5: int32(f) unconstrained → no RangeDefect (sxUnsat)":
     let r = symexFind(rd_int32width, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
-    if r.status == sxRaised:
-      check r.raisedTypeId == "RangeDefect"
+    check r.status == sxUnsat
+
+  test "R16-2-5b: int32(f) in range is exact":
+    let r = symexFind(rd_int32exact, tLabel("rdInt32Exact"))
+    check r.status == sxSat
+    if r.status == sxSat: check int32(r.witness[0]) == 7

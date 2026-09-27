@@ -60,7 +60,9 @@ proc splitTwoParts(s: string) =
 # --- SUT: empty-sep split producing 5 parts (cap=3 → sxUnknown) ---
 proc splitEmptySepFiveParts(s: string) =
   if s == "x":
-    let parts = "abcde".split("")   # 5 parts ("a","b","c","d","e")
+    # RFC-0005 S8g: Nim gives "abcde".split("") == @["abcde"] (probed), one
+    # part, so this label is unreachable; it was a fictional 5-part split.
+    let parts = "abcde".split("")
     if parts.len == 5:
       symexTarget("hit")
 
@@ -90,12 +92,11 @@ suite "Phase 15 CR-11 + CR-18 — maxSplitParts cap wired into concrete-inline s
     check r.status == sxSat
     check r.witness[0] == "x"
 
-  test "CR-11: empty-sep split >cap parts → sxUnknown (same guard on path (a))":
-    ## 5-byte literal split with cap=3: path (a) (empty-sep) must also cap.
+  test "CR-11: empty-sep split is one part, under any cap → sxUnsat (S8g)":
+    ## An empty separator yields @[s], so the cap never fires on path (a) and
+    ## a 5-part result is unreachable.
     let r = symexFind(splitEmptySepFiveParts, tLabel("hit"), cap3)
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seZ3StringIncomplete
+    check r.status == sxUnsat
 
   test "CR-18: maxSplitParts NOW changes canonical form (wired into cache key)":
     ## Two settings differing only in maxSplitParts must produce distinct keys.

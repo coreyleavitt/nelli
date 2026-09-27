@@ -264,7 +264,9 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekConvIntToFloat:
     newCall(bindSym"mkConvIntToFloat", emitExpr(e.convOperand), newLit(e.convWidth))
   of iekConvFloatToInt:
-    newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth))
+    newCall(bindSym"mkConvFloatToInt", emitExpr(e.convOperand), newLit(e.convWidth),
+            newLit(e.convSigned), newLit(e.convHasRange), newLit(e.convLo),
+            newLit(e.convHi))
   of iekConvIntWidth:
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
@@ -1218,7 +1220,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   ## Returns true iff `e` contains any node that produces an inline raise-fork
   ## when lowered, requiring the short-circuit guard even when rhsPreamble is empty.
   ## Covers:
-  ##   iekConvFloatToInt — float→int conversion may raise RangeDefect (R16-2b).
+  ##   iekConvFloatToInt — float→int conversion forks (R16-2b): an
+  ##     out-of-range operand's continuation on a fresh value, and a `range`
+  ##     target's RangeDefect (RFC-0005 S8g; a plain int target never raises).
   ##   iekBinop with op in {bDiv, bMod} — division/modulo may raise DivByZeroDefect
   ##     (R16-3). Only applies to the RHS of an `and`/`or` — a div in the LHS is
   ##     evaluated unconditionally, so its raise IS reachable without guarding.
@@ -1244,6 +1248,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     if e.bop in {bAdd, bSub, bMul, bDiv, bMod}: return true  ## R16-3/R16-4: arith → DivByZeroDefect/OverflowDefect guard
     result = rhsHasInlineDefectFork(e.lhs) or rhsHasInlineDefectFork(e.rhs)
   of iekUnop:
+    # RFC-0005 S8g: a unary minus carries an overflow obligation
+    # (`-low(T)` raises OverflowDefect), like the binary arithmetic ops.
+    if e.uop == uNeg: return true
     result = rhsHasInlineDefectFork(e.operand)
   of iekField:
     result = rhsHasInlineDefectFork(e.obj)
@@ -1264,14 +1271,16 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = rhsHasInlineDefectFork(e.lenObj)
   of iekSeqSlice:
     # v67: a seq slice carries its own IndexDefect fork (the SND-4 OOB
-    # deposit in its lowering) — always guard-worthy on an and/or RHS.
+    # deposit in its lowering; RFC-0005 S8g: and its RangeDefect) — always
+    # guard-worthy on an and/or RHS.
     result = true
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     result = rhsHasInlineDefectFork(e.mutRecv) or rhsHasInlineDefectFork(e.mutArg)
   of iekSeqDel:
-    result = rhsHasInlineDefectFork(e.delSeq) or rhsHasInlineDefectFork(e.delIdx)
+    # RFC-0005 S8g: `del` forks its own IndexDefect / RangeDefect.
+    result = true
   of iekSeqInsert:
     result = rhsHasInlineDefectFork(e.insSeq) or
              rhsHasInlineDefectFork(e.insVal) or
@@ -1295,7 +1304,14 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     ## when `A` (e.g. `i < s.len`) was false — a false `sxRaised(IndexDefect)`
     ## that real Nim's short-circuit evaluation never produces.
     result = true
-  of iekStrLen, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+  of iekStrSubstr:
+    ## RFC-0005 S8g: a string SLICE (`s[a .. b]`, strOp "[]") forks its
+    ## IndexDefect / RangeDefect like a seq slice; `substr` clamps and
+    ## never raises, so it only carries its operands' forks.
+    if e.strOp == "[]": return true
+    for a in e.strArgs:
+      if rhsHasInlineDefectFork(a): return true
+  of iekStrLen, iekStrFind, iekStrRfind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrConcat, iekIntToStr, iekRadixFmt,
@@ -1457,6 +1473,24 @@ proc scanDelimiterChar(litNodeRaw: NimNode, byteBacked: bool): Option[char] =
       none(char)
   else: none(char)
 
+proc parseStrSliceBound(boundNode: NimNode, recvIR: IRExpr,
+                        preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8g. One bound of a string slice `s[a .. b]`. A `^k` bound is
+  ## `BackwardsIndex(k)` in the typed AST, meaning `s.len - k`; parsed as a
+  ## plain expression it was `k` itself, so `s[1 .. ^1]` of "abc" was "b"
+  ## (a false `sxUnsat` for `== "bc"`). The seq slice path already rewrote
+  ## it (`parseSeqBracketAccess`); the two string slice paths did not.
+  var b = boundNode
+  while b.kind in {nnkHiddenStdConv, nnkStmtListExpr} and b.len >= 1:
+    b = b[b.len - 1]
+  if b.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and b.len == 2 and
+     b[0].kind in {nnkSym, nnkIdent} and
+     isBuiltinNamed(b[0], ["BackwardsIndex", "^"]):
+    mkBinop(bSub, mkStrOp(iekStrLen, "len", @[recvIR]),
+            parseExpr(b[1], preamble, ctx))
+  else:
+    parseExpr(boundNode, preamble, ctx)
+
 proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
                             rawIdxNode: NimNode, elemTy: IRType,
                             preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -1484,7 +1518,19 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
   if idxNode.kind == nnkInfix and idxNode.len == 3 and
      idxNode[0].kind in {nnkSym, nnkIdent} and
      isBuiltinNamed(idxNode[0], ["..", "..<"]):
-    let loIR = parseExpr(idxNode[1], preamble, ctx)
+    # RFC-0005 S8g: a `^k` LOW bound (`data[^3 .. ^1]`) is `len - k` too;
+    # only the high bound was rewritten, so the low one read as `k`.
+    var loNode = idxNode[1]
+    while loNode.kind in {nnkHiddenStdConv, nnkStmtListExpr} and
+          loNode.len >= 1:
+      loNode = loNode[loNode.len - 1]
+    let loIR =
+      if loNode.kind in {nnkCall, nnkConv, nnkCommand, nnkPrefix} and
+         loNode.len == 2 and loNode[0].kind in {nnkSym, nnkIdent} and
+         isBuiltinNamed(loNode[0], ["BackwardsIndex", "^"]):
+        mkBinop(bSub, mkSeqLen(objIR), parseExpr(loNode[1], preamble, ctx))
+      else:
+        parseExpr(idxNode[1], preamble, ctx)
     # `^k` stays a `BackwardsIndex(k)` conversion for seqs (a string-backed
     # receiver's DECLARED type is still `seq[byte]`, so this pre-expansion
     # never applies to it either) — rewrite to `len(base) - k`.
@@ -3084,7 +3130,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if tgt in fltTyNames and src in intTyNames:
       mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
     elif tgt in intTyNames and src in fltTyNames:
-      mkConvFloatToInt(parseExpr(operand, preamble, ctx), if tgt == "int32": 32 else: 64)
+      # RFC-0005 S8g: the target's own width and signedness (`int8(f)` was
+      # lowered at width 64, `uint8(f)` as signed).
+      mkConvFloatToInt(parseExpr(operand, preamble, ctx),
+                       intTyWidth(tgt), intTySigned(tgt))
+    elif src in fltTyNames and classifyType(n[0]).ty.kind == itInt and
+         classifyType(n[0]).range.hasRange:
+      # RFC-0005 S8g: a `range` target (`Natural(f)`). Nim converts to the
+      # base type, then range-checks the converted value (`RangeDefect`).
+      # This was the identity pass-through: a float flowed on as the
+      # "Natural" and the check was never modelled.
+      let cls = classifyType(n[0])
+      mkConvFloatToInt(parseExpr(operand, preamble, ctx),
+                       cls.ty.width, cls.ty.signed,
+                       true, cls.range.lo, cls.range.hi)
     elif tgt in intTyNames and src == "bool":
       # v69 (sello #3): `int32(b)` — previously the pass-through below, which
       # left an svBool flowing where an int-kinded SymVal is required
@@ -3750,8 +3809,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if idxNode.kind == nnkInfix and idxNode.len == 3 and
          idxNode[0].kind in {nnkSym, nnkIdent} and
          isBuiltinNamed(idxNode[0], ["..", "..<"]):
-        let loIR = parseExpr(idxNode[1], preamble, ctx)
-        var hiIR = parseExpr(idxNode[2], preamble, ctx)
+        let loIR = parseStrSliceBound(idxNode[1], objIR, preamble, ctx)
+        var hiIR = parseStrSliceBound(idxNode[2], objIR, preamble, ctx)
         if idxNode[0].strVal == "..<":
           hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
         mkStrOp(iekStrSubstr, "[]", @[objIR, loIR, hiIR])
@@ -4361,8 +4420,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             # `iekStrSubstr` carrying [recv, lo, hi] — the runtime computes the
             # Z3 (seq.extract recv lo (hi-lo+1)) length-arg form, with hi being
             # `b` for `..` and `b-1` for `..<`.
-            let loIR = parseExpr(idxNode[1], preamble, ctx)
-            var hiIR = parseExpr(idxNode[2], preamble, ctx)
+            let loIR = parseStrSliceBound(idxNode[1], recvIR, preamble, ctx)
+            var hiIR = parseStrSliceBound(idxNode[2], recvIR, preamble, ctx)
             if idxNode[0].strVal == "..<":
               hiIR = mkBinop(bSub, hiIR, mkIntLit(1))
             return mkStrOp(iekStrSubstr, "[]", @[recvIR, loIR, hiIR])

@@ -314,7 +314,9 @@ suite "N14 — seq `.del(i)` (swap-with-last)":
     check r.raisedTypeId == "IndexDefect"
     let xs = r.raisedWitness[0]
     let i = r.raisedWitness[1]
-    check (i < 0 or i >= xs.len)
+    ## RFC-0005 S8g: only i >= len is IndexDefect; i < 0 is RangeDefect
+    ## (probed: `@[1,2,3].del(-1)` raises RangeDefect).
+    check i >= xs.len
 
   test "walker version floor >= 121 (N14 del)":
     check parseInt(symexWalkerVersion) >= 121

@@ -185,7 +185,8 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
   ##   mkFloatLitSym, toBv64ForFp, toFpFromSigned, rmRNE, rmRTZ,
   ##   Z3Float32, Z3Float64, toSbv, mkFloat32, mkFloat64,
   ##   convFloatToIntBoundConds, syncConvFloatToIntBoundCond,
-  ##   convFloatToIntDomainConds, syncConvFloatToIntDomainCond,
+  ##   rangeDefectConds, syncRangeDefectCond, bvRangeConds, bvVar, iteSV,
+  ##   freshDegradeName,
   ##   lowerMathCall
   case e.kind
   of iekFloatLit:
@@ -201,86 +202,89 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     else:
       SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
   of iekConvFloatToInt:
-    # Phase 15 CR-3/CR-4 + Phase 16 R16-2: float -> int(W), rmRTZ truncation (OQ2).
+    # Phase 15 F5 / CR-3 / CR-4; RFC-0005 S8g (ADR-0011 R16-2 reversed).
+    # float -> int(W), rmRTZ truncation (OQ2).
     #
-    # CR-3 (domain bounding): Add a path constraint bounding the float operand
-    # to the in-range window for the target integer width, so any witness Z3
-    # produces is guaranteed to round-trip through Nim's int()/int32() without
-    # raising RangeDefect.  IEEE semantics:
-    #   • `f >= lo` is false for NaN (NaN compares false), true for +Inf (if lo<∞)
-    #   • `f < hi` is false for NaN and +Inf/−Inf (Inf is not less than any finite)
-    # So `f >= lo and f < hi` correctly excludes NaN, ±Inf and all out-of-range
-    # finite floats with no explicit isFinite test.  The constraint is deposited
-    # in the `convFloatToIntBoundConds` threadvar; the walker drains it into p.pc
-    # immediately after lower() returns (mirroring the parseIntRaiseConds idiom).
+    # Nim 2.2.10 NEVER raises here for a plain integer target: its generated
+    # C casts first and range-checks the CAST value (`(NI)(f) < MIN ||
+    # (NI)(f) > MAX`), which is tautological, and a narrow target is emitted
+    # as `(NI8)((NI64)f)` / `(NU8)(f)` with no check at all. The cast of an
+    # operand whose truncation does not fit the target (NaN, +-Inf, or too
+    # large) is C-level undefined: x86-64 gives `low(int)` for `int`, 0 for
+    # `int32(1e30)`, the low byte for `int8(300.0)` (probes: RFC-0005 S8g's
+    # test file). So the value is
+    #   ite(domain, exact truncation, FRESH symbol of the target type)
+    # and `domain` goes to the `convFloatToIntBoundConds` sink, where
+    # `drainConvFloatToIntFresh` (the first scalar-drain stage after the
+    # closure raises) forks the continuation in two: in range, clean and
+    # exact; out of range, tainted `feConvFloatToIntUndefined`
+    # (`dcFreshSymbol`) -- a replay-gated candidate, never a claim and never
+    # a dropped input. The model was an exact-or-raise split (R16-2): a
+    # false `sxRaised(RangeDefect)`, a live `except RangeDefect`, and a
+    # false `sxUnsat` for every out-of-range target.
     #
-    # R16-2 (RangeDefect fork): the SAME `domainCond` is ALSO pushed to the
-    # parallel `convFloatToIntDomainConds` sink. The walker's
-    # `drainConvFloatToIntRaises` (called from the PRE-narrowing path) forks
-    # `not(domainCond)` as a RangeDefect raise. Dual-drain: bounds drain on the
-    # normal path (narrowing), raise drain on the error path (fork).
+    # `domain` is `trunc(f) in [lo, hi]` of the target type: `f > lo - 1 and
+    # f < hi + 1`, with `hi + 1` a power of two (exact in both sorts) and
+    # `lo - 1` exact except for the signed 64-bit target in either sort and
+    # the signed 32-bit target from float32, where no float of the sort lies
+    # strictly between `lo - 1` and `lo`, so `f >= lo` is the same set.
+    # NaN compares false, so it is outside; +-Inf fails one bound.
     #
-    # CR-4 (width correctness): read `e.convWidth`; use toSbv[..,32] for width 32
-    # and return svBV32 so downstream comparisons see the correct 32-bit result.
+    # A `range` target (`Natural(f)`, `convHasRange`) converts to the base
+    # type and then range-checks the converted value -- that check DOES
+    # raise (`Natural(-5.0)`: "value out of range: -5 notin 0 .. ..."), so
+    # its negation goes to the `rangeDefectConds` sink (acRange-gated, like
+    # every range check).
     let sv = lower(env, e.convOperand)
-    if e.convWidth == 32:
-      # float → int32: bound to [-2^31, 2^31) in the operand's FP sort.
-      # float32 range: lo32 = -2147483648.0'f32 (exact = -2^31),
-      #                hi32 = 2147483648.0'f32 (= 2^31, excluded by strict <).
-      # float64 range: same values but as float64.
-      let bv32 =
-        case sv.kind
-        of svFloat32:
-          let lo = mkFloat32(-2147483648.0'f32)
-          let hi = mkFloat32(2147483648.0'f32)
-          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
-          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
-          toSbv[8, 24, 32](rmRTZ(), sv.fp32)
-        of svFloat64:
-          let lo = mkFloat64(-2147483648.0)
-          let hi = mkFloat64(2147483648.0)
-          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
-          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
-          toSbv[11, 53, 32](rmRTZ(), sv.fp64)
-        else: raise newException(ValueError, "int32(): operand is not a float")
-      SymVal(kind: svBV32, bv32: bv32, signed: true)
-    else:
-      # float → int64 (default): bound to [-2^63, 2^63) in the operand's FP sort.
-      # float64 range: lo64 = -9.223372036854776e18 (= -2^63, exact in float64),
-      #                hi64 = +9.223372036854776e18 (= +2^63, excluded by strict <).
-      # Note: high(int64) = 2^63-1 is NOT exactly representable as float64 (rounds
-      # up to 2^63); using strict < against 2^63 correctly excludes all
-      # out-of-range values including the float64 that would represent 2^63.
-      let bv64 =
-        case sv.kind
-        of svFloat64:
-          let lo = mkFloat64(-9.223372036854776e18)
-          let hi = mkFloat64(9.223372036854776e18)
-          let domainCond = (sv.fp64 >= lo) and (sv.fp64 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
-          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
-          toSbv[11, 53, 64](rmRTZ(), sv.fp64)
-        of svFloat32:
-          # float32 → int64: same int64 bounds but expressed in float32.
-          # -2^63 and +2^63 are exactly representable as float32 (powers of 2).
-          let lo = mkFloat32(-9.223372036854776e18.float32)
-          let hi = mkFloat32(9.223372036854776e18.float32)
-          let domainCond = (sv.fp32 >= lo) and (sv.fp32 < hi)
-          convFloatToIntBoundConds.add domainCond          # threadvar fallback (bounds drain)
-          syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
-          convFloatToIntDomainConds.add domainCond         # R16-2: parallel raise-fork sink
-          syncConvFloatToIntDomainCond(domainCond)         # R16-2: WalkCtx live store
-          toSbv[8, 24, 64](rmRTZ(), sv.fp32)
-        else: raise newException(ValueError, "int(): operand is not a float")
-      SymVal(kind: svBV64, bv64: bv64, signed: true)
+    let w = e.convWidth
+    let signed = e.convSigned
+    let loF = if signed: -pow(2.0, float64(w - 1)) else: 0.0
+    let hiExclF = if signed: pow(2.0, float64(w - 1)) else: pow(2.0, float64(w))
+    template convAt(fpv: typed; E, S: static int): SymVal =
+      case w
+      of 8:
+        if signed: liftBV(toSbv[E, S, 8](rmRTZ(), fpv), true)
+        else: liftBV(toUbv[E, S, 8](rmRTZ(), fpv), false)
+      of 16:
+        if signed: liftBV(toSbv[E, S, 16](rmRTZ(), fpv), true)
+        else: liftBV(toUbv[E, S, 16](rmRTZ(), fpv), false)
+      of 32:
+        if signed: liftBV(toSbv[E, S, 32](rmRTZ(), fpv), true)
+        else: liftBV(toUbv[E, S, 32](rmRTZ(), fpv), false)
+      else:
+        if signed: liftBV(toSbv[E, S, 64](rmRTZ(), fpv), true)
+        else: liftBV(toUbv[E, S, 64](rmRTZ(), fpv), false)
+    var domainCond: Z3Bool
+    var exact: SymVal
+    case sv.kind
+    of svFloat64:
+      let loExact = not signed or w <= 32
+      let loOk = if loExact: sv.fp64 > mkFloat64(loF - 1.0)
+                 else: sv.fp64 >= mkFloat64(loF)
+      domainCond = loOk and (sv.fp64 < mkFloat64(hiExclF))
+      exact = convAt(sv.fp64, 11, 53)
+    of svFloat32:
+      let loExact = not signed or w <= 16
+      let loOk = if loExact: sv.fp32 > mkFloat32(float32(loF - 1.0))
+                 else: sv.fp32 >= mkFloat32(float32(loF))
+      domainCond = loOk and (sv.fp32 < mkFloat32(float32(hiExclF)))
+      exact = convAt(sv.fp32, 8, 24)
+    else: raise newException(ValueError, "int(): operand is not a float")
+    let fresh = bvVar(tInt(w, signed), freshDegradeName("__convFloatToIntFresh"))
+    let value = iteSV(domainCond, exact, fresh)
+    convFloatToIntBoundConds.add domainCond          # threadvar fallback
+    syncConvFloatToIntBoundCond(domainCond)          # CR-9 Stage 6 Group-1
+    if e.convHasRange:
+      var inRange = mkTrue()
+      # [range-invariant: range-defect-check -- the converted value's
+      # subrange membership is the CONDITION of a RangeDefect fork (Nim checks
+      # the cast value against the target subrange), not a constraint
+      # asserted on the path, so `rangeCondsIfNeeded` does not apply.]
+      for c in bvRangeConds(value, e.convLo, e.convHi, signed):  # [range-invariant: range-defect-check]
+        inRange = inRange and c
+      rangeDefectConds.add(not inRange)              # threadvar fallback
+      syncRangeDefectCond(not inRange)
+    value
   of iekMathCall:
     lowerMathCall(env, e)
   else:

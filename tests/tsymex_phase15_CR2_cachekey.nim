@@ -830,7 +830,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## monomorphization; witnesses name types by symbol). 152->153.
     ## RFC-0005 S8f (a table's / set's size is tied to its present key terms
     ## at every check; table/set/seq witnesses render `len` entries). 153->154.
-    check symexWalkerVersion == "154"
+    ## RFC-0005 S8g (float -> int never raises: exact in range, a
+    ## `feConvFloatToIntUndefined`-tainted fresh value outside; unary-minus
+    ## overflow; `split(s, "")`; `new(int)` zero-init; slice / `del` defect
+    ## classes; the `else:` arm of a symbolic discriminator reassignment).
+    ## 154->155.
+    check symexWalkerVersion == "155"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

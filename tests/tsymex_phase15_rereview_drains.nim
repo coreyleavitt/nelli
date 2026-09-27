@@ -211,17 +211,18 @@ proc ni2DerefWriteFloatConv(x: float, p: ref int) =
       symexTarget("ni2DerefHit")
 
 proc ni2DerefWriteNanExcluded(x: float, p: ref int) =
-  ## NaN float in deref-write: int(NaN) is undefined. After fix the domain
-  ## bound excludes NaN → path is sxUnsat when x == NaN (symbolic input).
-  ## Before fix: bound not applied → sxUnknown (no domain constraint on x).
-  ## After fix: x ∈ [low(int64)..high(int64)] excludes NaN → sxUnsat.
+  ## NaN float in deref-write. Real Nim: int(NaN) == low(int), so the target
+  ## is unreachable. RFC-0005 S8g: the model's out-of-range value is fresh
+  ## (feConvFloatToIntUndefined); the candidate is replayed and refuted, so
+  ## the verdict is sxUnknown, never a claim. (Walker <= 154 excluded NaN
+  ## with a domain bound on x, which also hid every real out-of-range value.)
   ## NOTE: `x != x` is the inline IEEE NaN test (avoids a nested proc which
   ## would be isUnsupported and set sawUnknown regardless).
   if p != nil:
     if x != x:    # inline NaN test: only true when x is NaN
       p[] = int(x)
       if p[] == 3:
-        symexTarget("ni2NanHit")  # sxUnsat AFTER fix
+        symexTarget("ni2NanHit")  # unreachable in Nim
 
 # ============================================================================
 # S-3: isCall arg-lowering: drainClosureExitHeap missing after arg lower
@@ -378,16 +379,20 @@ suite "symex Phase 15 re-review NI-1: per-branch reset in isIf elif":
 suite "symex Phase 15 re-review NI-2: isDerefWrite missing float→int drain":
 
   test "NI-2-1: p[]=int(x); p[]==3 is sxSat (domain-bound hint retired by R16-2)":
-    ## R16-2 replaced the feConvDomainExcluded hint with a real RangeDefect
-    ## raise fork. The sat verdict (post-NI-2 fix) remains; hint check removed.
+    ## R16-2 retired the feConvDomainExcluded hint and S8g its RangeDefect
+    ## fork. The sat verdict (post-NI-2 fix) remains.
     let r = symexFind(ni2DerefWriteFloatConv, tLabel("ni2DerefHit"))
     check r.status == sxSat
 
-  test "NI-2-2: p[]=int(NaN) path is sxUnsat (domain bound excludes NaN)":
-    ## RED test: before fix, sxUnknown (no domain bound → Z3 picks weird values).
-    ## After fix: NaN excluded by domain bound → sxUnsat.
+  test "NI-2-2: p[]=int(NaN) path is never a claim (S8g: fresh value, sxUnknown)":
+    ## The drain still runs at the deref-write (the NI-2 fix); what it drains
+    ## is now the fresh-value fork, so the verdict carries its degrade kind.
     let r = symexFind(ni2DerefWriteNanExcluded, tLabel("ni2NanHit"))
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    var sawKind = false
+    for e in r.errors:
+      if e.kind == feConvFloatToIntUndefined: sawKind = true
+    check sawKind
 
 suite "symex Phase 15 re-review S-3: isCall arg-lowering drainClosureExitHeap":
 

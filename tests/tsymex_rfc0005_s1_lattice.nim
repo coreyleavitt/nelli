@@ -55,7 +55,9 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         # replay-refutation diagnostic.
                         seParseIntLaxSyntax, feReplayRefuted,
                         # RFC-0005 S9: capture by reference.
-                        ceCaptureByRefUnmodelled}
+                        ceCaptureByRefUnmodelled,
+                        # RFC-0005 S8g: an out-of-range float-to-int value.
+                        feConvFloatToIntUndefined}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

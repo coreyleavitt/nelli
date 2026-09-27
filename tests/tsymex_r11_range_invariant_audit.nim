@@ -321,7 +321,7 @@ suite "symex R11 — permanent range-invariant regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pinned inventory: bvRangeConds 3 calls (rangeCondsIfNeeded helper-internal; 2 concolic-trace-interval, marker-exempt), all in runtime.nim":
+  test "pinned inventory: bvRangeConds 4 calls (rangeCondsIfNeeded helper-internal; 2 concolic-trace-interval and 1 range-defect-check, marker-exempt)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -346,10 +346,16 @@ suite "symex R11 — permanent range-invariant regression audit":
     ## not re-counted: both carry an inline `# [range-invariant:
     ## concolic-trace-interval]` marker at the call, which is the exemption
     ## path this audit's header designates for new sites.
+    ## 3 -> 4 (RFC-0005 S8g, walker 155). `iekConvFloatToInt` in
+    ## runtime_floats.nim forks RangeDefect when a float converted to a
+    ## `range` target (`Natural(f)`) lands outside it: the bound is the
+    ## defect CONDITION, not a path constraint, so `rangeCondsIfNeeded` is
+    ## not the applicable helper. Marker-exempt (`range-defect-check`).
     check byFile[0][1] == 3               ## runtime.nim
+    check byFile[2][1] == 1               ## runtime_floats.nim
     for i in 1 ..< byFile.len:
-      check byFile[i][1] == 0             ## the five `include`d siblings
-    check byProc.len == 2
+      if i != 2: check byFile[i][1] == 0  ## the other `include`d siblings
+    check byProc.len == 3
     check byProc[0][0] == "rangeCondsIfNeeded"
     check byProc[0][1] == 1
 

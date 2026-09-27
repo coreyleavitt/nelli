@@ -23,14 +23,12 @@ import nelli/symex
 # VARIABLE operand case (e.g. `int(f) > n` with n:int) was already fine because
 # both sides are lowered as svBV64 (no literal proto involved).
 #
-# R16-2 UPDATE: `drainConvFloatToIntRaises` now fires at each isIf site for
-# unconstrained int(f) conditions. The raise fork (RangeDefect for out-of-range
-# values) is discovered BEFORE the in-range sat path for unconstrained f.
-# Primary finding is sxRaised (not sxSat) for all unconstrained-f SUTs.
-# The probeProto fix is still verified: a prompt sxRaised (not exit 137/crash)
-# proves the BV encoding is correct (no bv2int-over-FP, no doAssert crash).
-# Witness round-trips use pre-constrained SUTs where the raise is UNSAT.
-#
+# RFC-0005 S8g (walker 155): `int(f)` never raises in Nim (probed: `int(1e30)`,
+# `int(NaN)` give `low(int)`; `int32(1e30)` gives 0), so the R16-2 RangeDefect
+# fork these tests used to pin is gone. Each unconstrained SUT now reaches its
+# label as a clean `sxSat` whose witness reproduces on the real SUT; a prompt
+# verdict (not exit 137, not a crash) still proves the BV encoding (no
+# bv2int-over-FP, no doAssert crash).
 # RED STATE (before probeProto fix):
 #   - `int(f) > 5` ordering vs literal: hangs (exit 137) or produces bv2int wrap
 #   - `int(f) + 5 == K` arithmetic vs literal: CRASH (doAssert a.kind==b.kind)
@@ -64,10 +62,10 @@ proc f32EqLit(f: float32) =
     symexTarget("f32EqLit")
 
 # --- Constrained-path SUTs for witness round-trips ---------------------------
-# R16-2: outer if pre-constrains f to int64 range → inner int(f) raise is UNSAT
-# → sxSat is primary finding → witness round-trip is valid.
+# The outer if pre-constrains f to the int64 range, so the conversion is exact
+# on every path and the witness round-trips.
 proc f64GtLitConstr(f: float) =
-  ## f pre-constrained to (5.0, 1e15): inner int(f) > 5 raise UNSAT under bound.
+  ## f pre-constrained to (5.0, 1e15): the conversion is exact.
   if f > 5.0 and f < 1.0e15:
     if int(f) > 5:
       symexTarget("f64GtLitConstr")
@@ -80,34 +78,53 @@ proc f64ArithLitConstr(f: float, k: int) =
 
 suite "symex Phase 15 — F5-probeproto regression: int(f) vs literal":
 
-  test "F5-pp-1: int(f) > 5 ordering vs literal — no hang (R16-2: sxRaised promptly)":
-    ## Before probeProto fix: hangs (bv2int-over-FP pathology) or crashes.
-    ## After fix + R16-2: sxRaised returned PROMPTLY (defect for unconstrained f).
-    ## Prompt sxRaised proves: (a) no bv2int hang, (b) no doAssert crash.
-    let r = symexFind(f64GtLit, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "F5-pp-1: int(f) > 5 ordering vs literal — no hang (S8g: clean sxSat)":
+    let r = symexFind(f64GtLit, tLabel("f64GtLit"))
+    checkpoint($r.status)
+    check r.status == sxSat
+    if r.status == sxSat:
+      symexCaptureBegin()
+      f64GtLit(r.witness[0])
+      check "f64GtLit" in symexCaptureEnd()
 
-  test "F5-pp-2: int(f) == 42 equality vs literal — no hang (R16-2: sxRaised promptly)":
-    let r = symexFind(f64EqLit, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "F5-pp-2: int(f) == 42 equality vs literal — no hang (S8g: clean sxSat)":
+    let r = symexFind(f64EqLit, tLabel("f64EqLit"))
+    checkpoint($r.status)
+    check r.status == sxSat
+    if r.status == sxSat:
+      symexCaptureBegin()
+      f64EqLit(r.witness[0])
+      check "f64EqLit" in symexCaptureEnd()
 
-  test "F5-pp-3: int(f) + 5 == k arithmetic vs literal — no crash (R16-2: sxRaised promptly)":
-    ## Before fix: `binBV` doAssert fires (svBV64 vs svInt → crash).
-    ## After fix + R16-2: sxRaised promptly (no crash, no bv2int).
-    let r = symexFind(f64ArithLit, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "F5-pp-3: int(f) + 5 == k arithmetic vs literal — no crash (S8g: clean sxSat)":
+    let r = symexFind(f64ArithLit, tLabel("f64ArithLit"))
+    checkpoint($r.status)
+    check r.status == sxSat
+    if r.status == sxSat:
+      symexCaptureBegin()
+      f64ArithLit(r.witness[0], r.witness[1])
+      check "f64ArithLit" in symexCaptureEnd()
 
-  test "F5-pp-4: int32(f) + 5 == k arithmetic vs literal — no crash (R16-2: sxRaised promptly)":
-    ## Same but svBV32 branch. Prompt sxRaised proves no doAssert on BV32.
-    let r = symexFind(f32ArithLit, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "F5-pp-4: int32(f) + 5 == k arithmetic vs literal — no crash (S8g: clean sxSat)":
+    let r = symexFind(f32ArithLit, tLabel("f32ArithLit"))
+    checkpoint($r.status)
+    check r.status == sxSat
+    if r.status == sxSat:
+      symexCaptureBegin()
+      f32ArithLit(r.witness[0], r.witness[1])
+      check "f32ArithLit" in symexCaptureEnd()
 
-  test "F5-pp-5: int32(f) == 10 equality vs literal (svBV32 branch) — no hang (R16-2: sxRaised)":
-    let r = symexFind(f32EqLit, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+  test "F5-pp-5: int32(f) == 10 equality vs literal (svBV32 branch) — no hang (S8g: clean sxSat)":
+    let r = symexFind(f32EqLit, tLabel("f32EqLit"))
+    checkpoint($r.status)
+    check r.status == sxSat
+    if r.status == sxSat:
+      symexCaptureBegin()
+      f32EqLit(r.witness[0])
+      check "f32EqLit" in symexCaptureEnd()
 
-  test "F5-pp-6: constrained int(f) > 5 witness round-trip (R16-2: pre-bound → sxSat)":
-    ## With f pre-constrained to (5.0, 1e15), the raise path is UNSAT → sxSat.
+  test "F5-pp-6: constrained int(f) > 5 witness round-trip (pre-bound → sxSat)":
+    ## With f pre-constrained to (5.0, 1e15), the conversion is exact → sxSat.
     ## Verifies the in-range sat path AND the witness validity.
     let r = symexFind(f64GtLitConstr, tLabel("f64GtLitConstr"))
     check r.status == sxSat
@@ -115,7 +132,7 @@ suite "symex Phase 15 — F5-probeproto regression: int(f) vs literal":
     check int(f) > 5
 
   test "F5-pp-7: constrained int(f) + 5 == k arithmetic witness round-trip":
-    ## With f pre-constrained to [0, 1e15), the raise path is UNSAT → sxSat.
+    ## With f pre-constrained to [0, 1e15), the conversion is exact → sxSat.
     let r = symexFind(f64ArithLitConstr, tLabel("f64ArithLitConstr"))
     check r.status == sxSat
     let f = r.witness[0]

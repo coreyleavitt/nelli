@@ -67,21 +67,15 @@ proc cr9_floatIntWhile(x: float, k: int) =
 
 suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate":
 
-  test "CR-9 S1: float→int in let → sxRaised (R16-2: raise is primary finding)":
-    ## R16-2: unconstrained int(x) in a let-binding forks a RangeDefect raise
-    ## (drain fires at isLet site). The raise is the primary w.found[0] entry
-    ## even for tLabel searches; the sat path (v==7 for x=7.0) is found second.
+  test "CR-9 S1: float→int in let never raises (S8g: int(f) has no RangeDefect)":
+    ## RFC-0005 S8g: Nim's int(f) never raises (int(1e30), int(NaN) give
+    ## low(int)), so no RangeDefect path exists.
     let r = symexFind(cr9_floatIntLet, tRaisedExn("RangeDefect"))
-    check r.status == sxRaised
+    check r.status == sxUnsat
 
   test "CR-9 S1: float→int let — tLabel search returns sxSat (ADR-0012: label wins)":
-    ## ADR-0012 D1+D2: a cleanly-reachable label returns sxSat even when an
-    ## incidental RangeDefect is also reachable on another path. The label
-    ## `cr9_floatIntLet_hit` (v==7 at x=7.0) is cleanly reachable, so the
-    ## verdict is sxSat. The incidental RangeDefect is demoted — it surfaces
-    ## as the headline status only when the target IS the raise (see the
-    ## sibling test above targeting `tRaisedExn("RangeDefect")`, which
-    ## correctly stays sxRaised).
+    ## The label `cr9_floatIntLet_hit` (v==7 at x=7.0) is cleanly reachable,
+    ## so the verdict is sxSat.
     let r = symexFind(cr9_floatIntLet, tLabel("cr9_floatIntLet_hit"))
     check r.status == sxSat
 
@@ -100,8 +94,8 @@ suite "symex Phase 15 CR-9 Stage 1 — lowerInExpr/lowerBoolInExpr wrapper gate"
     check a + b == 42
 
   test "CR-9 S3: float→int in while-guard: sxSat (domain-bound hint retired by R16-2)":
-    ## R16-2 replaced the feConvDomainExcluded hint with a real RangeDefect
-    ## raise fork. The sat verdict remains; the hint assertion is retired.
+    ## R16-2 retired the feConvDomainExcluded hint; S8g retired its
+    ## RangeDefect fork (Nim's int(f) never raises). The sat verdict remains.
     let r = symexFind(cr9_floatIntWhile, tLabel("cr9_floatIntWhile_hit"))
     check r.status == sxSat
 

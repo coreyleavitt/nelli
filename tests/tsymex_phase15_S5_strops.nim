@@ -51,8 +51,10 @@ proc splitConcreteElem(s: string) =
 # --- split: empty-sep special case → single-byte parts ---
 proc splitEmptySep(s: string) =
   if s == "x":
+    # RFC-0005 S8g: Nim 2.2.10 gives "abc".split("") == @["abc"] (probed);
+    # the byte-wise split this pinned was fictional.
     let parts = "abc".split("")
-    if parts.len == 3 and parts[0] == "a" and parts[1] == "b" and parts[2] == "c":
+    if parts.len == 1 and parts[0] == "abc":
       symexTarget("hit")
 
 # --- join over a concrete seq[string] result (split round-trip stays in Z3String) ---
@@ -97,7 +99,7 @@ suite "symex Phase 15 S5 — string replace/split/join":
     check r.status == sxSat
     check r.witness[0] == "x"
 
-  test "split empty-sep: split(\"abc\",\"\") yields single-byte parts @[\"a\",\"b\",\"c\"]":
+  test "split empty-sep: split(\"abc\",\"\") yields @[\"abc\"] (S8g)":
     let r = symexFind(splitEmptySep, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0] == "x"

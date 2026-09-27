@@ -47,13 +47,17 @@ proc twoNewsAlias() =
 #    via the SAT-reachable target on EACH branch: a branch-local `new int` whose
 #    deref equals a branch-specific value is reachable on both arms (no spurious
 #    cross-path contradiction prunes either). ──────────────────────────────────
-proc disjointNews(b: bool) =
+#    RFC-0005 S8g: `new int` reads 0 in Nim (it was a free cell here), so each
+#    arm writes the symbolic `x` before the read.
+proc disjointNews(b: bool, x: int) =
   if b:
     let p = new int
+    p[] = x
     if p[] == 1:
       symexTarget("armA")
   else:
     let q = new int
+    q[] = x
     if q[] == 2:
       symexTarget("armB")
 
@@ -82,7 +86,7 @@ suite "symex Phase 15 R2 — `new T` allocation (fresh-ref distinctness + cap)":
     check r.status == sxUnsat
 
   test "R2: disjoint forked paths do not share fresh-ref counters (armA reachable)":
-    # Arm A allocates its own `ref_int_1` and reads `p[] == 1`; the heap is free,
+    # Arm A allocates its own `ref_int_1`, writes `x` and reads `p[] == 1`,
     # so this is reachable. No constraint from arm B's allocation leaks here.
     let rA = symexFind(disjointNews, tLabel("armA"))
     check rA.status == sxSat

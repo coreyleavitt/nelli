@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 23:23Z)
+## Current position (refreshed 2026-09-27 23:58Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -173,13 +173,23 @@
 - 18:10Z weekly-Opus-limit pause (S8g agent died mid-wait; its sweep had already
   finished green and I landed it). Corey said continue at 18:20Z.
 - **S8g Windows CI (`dea297f`): all three green.**
-- **Remaining:** S8h (running, opus, launched 18:20Z; GREEN; s8h-sweep.log INVALID as gate (runtime.nim edited 25 min after it started) -- re-sweep s8h-sweep2.log started after the last src edit, 448/515 at 23:23Z; s8h-commit.txt drafted; drafts
-  `s8h-commit.txt` before its sweep so an interrupted run can be landed) -> S8i -> S11 -> completion gate -> ff main + tag.
+- **S8h committed `4cfa655`** (walker 156; NOT yet pushed). The session restart
+  killed its agent and its sweep at 450/515 (partial: 1 stale failure,
+  r6_n27, whose test was re-pinned mid-sweep; it passes at `4cfa655`).
+  **Gate now runs per Corey's new rule: from worktree `scratchpad/wt-s8h`
+  at `4cfa655`** -> `scratchpad/s8h-gate.log`. Push once regressed=0 and
+  new-failing=0. (`scratchpad/wt-head` holds an uncommitted copy of the S8h
+  edits from the dead agent -- leave it; delete once S8h is pushed.)
+- **S8i running (opus) in worktree `scratchpad/wt-s8i`, branch
+  `rfc-0005-s8i`** based on `4cfa655`; it commits, then gates its own sha
+  after the S8h gate's `.warnings` sidecar exists. Land by fast-forwarding
+  `rfc-0005-soundness-channels` to it.
+- **Remaining:** S8h gate -> S8i -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8h/S8i commits; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8h -> S8i ->
+  resume, check the S8h gate (`s8h-gate.log`) and `rfc-0005-s8i`; gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8h -> S8i ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

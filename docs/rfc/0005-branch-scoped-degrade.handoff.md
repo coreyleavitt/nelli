@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 20:39Z)
+## Current position (refreshed 2026-09-27 21:20Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -173,7 +173,7 @@
 - 18:10Z weekly-Opus-limit pause (S8g agent died mid-wait; its sweep had already
   finished green and I landed it). Corey said continue at 18:20Z.
 - **S8g Windows CI (`dea297f`): all three green.**
-- **Remaining:** S8h (running, opus, launched 18:20Z; in RED/GREEN cycles at 20:39Z, walker/emitter edits in progress; drafts
+- **Remaining:** S8h (running, opus, launched 18:20Z; GREEN, gate sweep s8h-sweep.log at 153/515 at 21:20Z, s8h-commit.txt drafted; drafts
   `s8h-commit.txt` before its sweep so an interrupted run can be landed) -> S8i -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

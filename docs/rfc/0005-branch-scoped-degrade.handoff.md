@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 04:41Z)
+## Current position (refreshed 2026-09-27 05:12Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -131,7 +131,7 @@
   `std/tables`/`std/sets` in the caller.
 - **Slices done:** 19 of 21.
 - **S8e Windows CI (`93b74ac`): all three green.** S0-S10 incl. S8b-S8e Windows-verified.
-- **Remaining:** **S8f** (running, opus; GREEN, first gate sweep done 04:41Z: regressed=5 (r6_r2_zerodefault_result, r6_n36_raise_class_audit, r6_n27_placeholder_read_audit, r6_n36_raise_degrade, r6_lows_declines) + new-failing=1 (s6b_ops) -- agent triaging, re-sweep required): S8e found a *clean sxSat whose witness
+- **Remaining:** **S8f** (running, opus; GREEN, first gate sweep done 04:41Z: regressed=5 (r6_r2_zerodefault_result, r6_n36_raise_class_audit, r6_n27_placeholder_read_audit, r6_n36_raise_degrade, r6_lows_declines) + new-failing=1 (s6b_ops) -- agent fixed; re-sweep (s8f-sweep2.log) at 315/515 at 05:12Z, commit message drafted): S8e found a *clean sxSat whose witness
   does not satisfy the target* -- `Table[string,int]` with `t.len == 2` renders
   `{:}`. Fix the len-vs-content gap across container models (Table, HashSet,
   seq, string, OrderedTable, CountTable) and decide on evidence whether replay

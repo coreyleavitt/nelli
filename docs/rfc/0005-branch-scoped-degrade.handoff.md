@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 06:35Z)
+## Current position (refreshed 2026-09-27 06:55Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -156,7 +156,7 @@
   - **S8h** (opus): ref witnesses -- nil top-level ref renders non-nil; aliased
     params render distinct; live recursive ref field renders nil; ref inside a
     by-value field not rendered (ADR-0010 heap-witness programme).
-- **Remaining:** S8g (running) -> S8h -> S11 -> completion gate -> ff main + tag.
+- **Remaining:** S8g (running, opus; RED/probe phase at 06:55Z; `daf9a73` pushed, Windows fuzzer-mingw green, msvc + symex-mingw running) -> S8h -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on

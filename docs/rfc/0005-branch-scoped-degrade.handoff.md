@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 18:10Z)
+## Current position (refreshed 2026-09-27 18:20Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -170,9 +170,10 @@
   conversion is a pass-through; symbolic reassignment of a declined
   construction hits an internal assertion; concolic if-walker never drains
   scalar raise forks.
-- **PAUSED 18:10Z: weekly Opus limit hit** (S8g agent died mid-wait; its sweep
-  had already finished green and I landed it). Resets Oct 1 17:00 ET.
-- **Remaining:** S8h (opus) -> S8i -> S11 -> completion gate -> ff main + tag.
+- 18:10Z weekly-Opus-limit pause (S8g agent died mid-wait; its sweep had already
+  finished green and I landed it). Corey said continue at 18:20Z.
+- **Remaining:** S8h (running, opus, launched 18:20Z; drafts
+  `s8h-commit.txt` before its sweep so an interrupted run can be landed) -> S8i -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on

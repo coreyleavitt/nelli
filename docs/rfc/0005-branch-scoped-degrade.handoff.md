@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 06:09Z)
+## Current position (refreshed 2026-09-27 06:35Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -129,18 +129,39 @@
   caller-local `Color`. S11 migration: `name__scN` in messages/cache keys;
   formerly-aborting code now walks (recorded declines); witnesses no longer need
   `std/tables`/`std/sets` in the caller.
-- **Slices done:** 19 of 21.
+- **Slices done:** 20 of 23 (S8f done; S8g, S8h added).
 - **S8e Windows CI (`93b74ac`): all three green.** S0-S10 incl. S8b-S8e Windows-verified.
-- **Remaining:** **S8f** (running, opus; GREEN, first gate sweep done 04:41Z: regressed=5 (r6_r2_zerodefault_result, r6_n36_raise_class_audit, r6_n27_placeholder_read_audit, r6_n36_raise_degrade, r6_lows_declines) + new-failing=1 (s6b_ops) -- agent fixed; re-sweep (s8f-sweep2.log) at 492/515 at 06:09Z, commit message drafted): S8e found a *clean sxSat whose witness
-  does not satisfy the target* -- `Table[string,int]` with `t.len == 2` renders
-  `{:}`. Fix the len-vs-content gap across container models (Table, HashSet,
-  seq, string, OrderedTable, CountTable) and decide on evidence whether replay
-  must also confirm clean candidates. Then S11 -> completion gate -> ff main + tag.
+- **S8f landed `f5e618a`** (walker 154; sweep2 regressed=0 new-failing=0,
+  unchanged=496 new-ok=19). Table/HashSet len tied to present keys; seq witness
+  uncapped (was 64) + ref-element cells; variant reassignment now Nim-2-faithful
+  (branch change raises FieldDefect, ADR-0003 amended); runtime-discriminator
+  constructor arm fields default (ADR-0029 amended); range-discriminator else arm
+  renders; float default 0.0. **Replay NOT extended to clean candidates** (on
+  evidence: it would refute 4 true claims -- analysis declares unchecked ints vs a
+  checked SUT build -- and cannot catch ref witnesses, which S10 marks
+  inconclusive); fixes are by construction. S11 migration: cache keys change
+  (reassign IR branch grouping, walker 154); branch-changing reassignment ->
+  sxRaised FieldDefect; runtime-discriminator ctor arms default; untouched float
+  result binds 0.0; full Table/set/seq witness contents; OrderedTable/CountTable
+  still decline.
+- **S8f's audit found a remainder that still violates "a non-reproducing witness
+  is never reported sxSat".** Resolved (not a fork -- "do not defer anything"
+  plus Nim-faithfulness to the pinned toolchain) as two new slices, both before S11:
+  - **S8g** (opus): float->int conversion never raises in Nim 2.2.10 (R16-2
+    RangeDefect fork is fictional; reverse it -- out-of-range result is C UB, so
+    model it soundly, not as a hardcoded `low(int)` unless proven); `-low(int)`
+    OverflowDefect unmodelled; `split(s, "")` is `@[s]`; `new int` not
+    zero-inited; slice/`seq.del` OOB is RangeDefect not IndexDefect; symbolic
+    reassignment never tries the `else:` arm (false-sxUnsat risk).
+  - **S8h** (opus): ref witnesses -- nil top-level ref renders non-nil; aliased
+    params render distinct; live recursive ref field renders nil; ref inside a
+    by-value field not rendered (ADR-0010 heap-witness programme).
+- **Remaining:** S8g (running) -> S8h -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8f commit; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8f ->
+  resume, check `git log` for the S8g/S8h commits; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8g -> S8h ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

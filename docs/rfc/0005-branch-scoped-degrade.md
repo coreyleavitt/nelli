@@ -114,6 +114,16 @@ state = "done"
 [[slice]]
 id    = "S8f"
 title = "A clean sxSat whose witness reproduces: container cardinality, variant reassignment and construction"
+state = "done"
+
+[[slice]]
+id    = "S8g"
+title = "Faithful scalar/string/defect models: float-to-int conversion, unary-negation overflow, split(s, \"\"), new int zero-init, slice/del defect class, reassignment else-arm"
+state = "pending"
+
+[[slice]]
+id    = "S8h"
+title = "Ref witnesses that reproduce: nil top-level ref, param aliasing, recursive ref fields, refs inside by-value fields"
 state = "pending"
 
 [[slice]]

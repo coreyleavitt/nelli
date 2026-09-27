@@ -825,7 +825,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## decline is a `sevHint`; an unplaced one blocks both directions; walk
     ## dedup keys on message and anchor; a closure reads a captured `var` by
     ## reference, `ceCaptureByRefUnmodelled` where it cannot). 151->152.
-    check symexWalkerVersion == "152"
+    ## RFC-0005 S8e (names keyed by symbol: a shadowing local gets its own
+    ## env slot, `name__scN`; generic callees keep node types through
+    ## monomorphization; witnesses name types by symbol). 152->153.
+    check symexWalkerVersion == "153"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

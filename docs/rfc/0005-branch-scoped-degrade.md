@@ -107,6 +107,11 @@ title = "Name-classified type heads: resolve type heads by symbol"
 state = "done"
 
 [[slice]]
+id    = "S8e"
+title = "Scope-keyed names: shadowed locals, generic callee types, symbol-bound witnesses"
+state = "done"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"
@@ -1083,10 +1088,106 @@ to force is now decided by the lattice (§2.3) and the anchor on each record
 - **Found, not fixed: shadowed names conflate in the env.** An inner `var k`
   that shadows an outer `k` shares the outer's env slot, so a write through
   either name is seen through both. This predates S9 and is independent of
-  capture. It is left for a scope-keyed-names slice (S8e-shaped).
+  capture. It is left for a scope-keyed-names slice (S8e-shaped). *Fixed
+  in S8e, below.*
 
 Pins: `tests/tsymex_rfc0005_s9_vetoes.nim` (a)–(f), and
 `tests/tsymex_rfc0005_s0_exhibit.nim` pins 2 and 3 (now `sxSat`).
+
+**As landed (S8e, walker 153) — names keyed by symbol.** S8c resolved
+callees by symbol and S8d type heads. Three more places identified a thing by
+its spelling where Nim identifies it by its symbol.
+
+- **Shadowed locals (the S9 finding).** The IR names every variable by a
+  string. The walker's env, the closure capture lists, the `var`-param
+  write-back map and the pre-pass collectors all key on that string, and the
+  parser took it from `strVal`. So two distinct locals of one spelling
+  shared one env slot. That covers an inner `var k` in a block, an `if` arm,
+  a loop body, a for-variable, a closure body, or an inlined iterator body.
+  The result was a silent substitution (§2.2): a false `sxSat` or `sxUnsat`
+  with `errors` empty.
+  - **Fix.** `smt/scoped_names.nim` claims each routine's declarations in
+    source order, one naming scope at a time. A scope is the env the walker
+    gives a routine: the entry proc, or a callee with its lambdas and
+    inlined iterator bodies. A top-level proc used as a value gets its own
+    scope. The first symbol to claim a spelling keeps it, so entry params
+    keep their witness names. A later, different symbol with that spelling
+    gets `k__scN`. Nim identifiers cannot contain `__`, so this collides
+    with no user name.
+  - **Why no per-site audit.** The module exports its own `strVal` in place
+    of `std/macros.strVal`, and `dsl_parser` imports `std/macros except
+    strVal`. So every symbol-to-name conversion sees the scoped name by
+    construction. This covers declarations, reads and writes, the capture
+    scan, the collectors and the iterator param substitution.
+  - **The map audit.** Once IR names are unique per symbol, every
+    name-keyed map is keyed by symbol: locals, `varArgs`, loop variables,
+    captures. None needed its own change.
+  - **Case narrowing.** The ADR-0029 narrowing stack keyed its scrutinee by
+    `.repr`, which prints an inner and an outer `k` alike. It now keys on
+    `scopedRepr`, which spells each symbol by its scoped name.
+- **Generic callees lost their types.** `x in s` and `s.add x` over `type
+  MySeq[T] = seq[T]` aborted the whole compile with `classifyType`'s "node
+  has no type". So did any user generic whose body calls a helper. There
+  were two causes.
+  - `monomorphize` rebuilt every node with `newTree`, which drops the node
+    type. It now uses `copyNimNode` and returns symbols unchanged.
+  - The callee's formals were read from the generic declaration. They are
+    now read from the instance's own `getTypeInst` (`instTy`), which gives
+    typed concrete nodes such as `openArray[int]`.
+  - **Result.** A user generic is walked and modelled. The alias cases now
+    reach the existing recorded declines. As a param, that is S8d's
+    user-alias `feUnsupportedParamType`. As a local, it is a
+    parse/walk decline for the stdlib body the alias does not model. No
+    case crashes.
+- **Witness emitters spelled types by name.** `symex.emitTyAndReader`
+  builds the witness in the caller's scope. It wrote the following as bare
+  identifiers:
+  - `seq`, `Table` and `HashSet`, the scalar types and the readers;
+  - a user object's, enum's or distinct's name;
+  - an enum member.
+
+  A caller that imported only the SUT could not compile it. A caller that
+  holds another symbol of that spelling had the witness built through that
+  symbol. For example, S8d's dropped non-generic user `OrderedTable` bound
+  to `std/tables.OrderedTable`, and a local enum `Color` silently re-typed
+  the witness. Now:
+  - fixed names are `bindSym`-bound (`stdName`);
+  - a user type is named by its own symbol, which `dsl_typebridge`
+    recorded under `IRType.typeKey` at classification (`keyedBySym`,
+    `witnessTypeSym`). `typeKey` is compile-time only, and `==`, `$` and
+    the canonical form ignore it;
+  - a discriminator is written `DiscTy(ordinal)`, not by member name;
+  - `default(T)` becomes `var w: T; w`, and `new(T)` becomes `var c: ref
+    T; new(c)`, because a typed-AST symbol is not a `typedesc` argument;
+  - the result is unshared with `copyNimTree`.
+
+  In `dsl_parser`'s IR emitters, enum values go through `newLit` (a
+  conversion through the enum type's symbol), and `string` is `bindSym`.
+- **Flips.**
+
+  | SUT | before | after |
+  |---|---|---|
+  | block / `if`-arm shadow, inner write | `sxSat` (false) | `sxUnsat`, checked |
+  | block / param shadow, outer read | `sxUnsat` (false) | `sxSat` |
+  | loop / `while` / for-variable shadow | `sxSat` (false) | `sxUnknown` (`beBudgetExhausted`, as the unshadowed loop) |
+  | closure captures `k`, inner `k` written | `sxSat` (false) | `sxUnsat`, checked |
+  | lambda captures `k` and declares its own | `sxUnknown` (`feGlobalReadUnmodelled`) | `sxUnsat`, checked |
+  | inlined iterator local named like a caller local | `sxSat` (false) | `sxUnsat`, checked |
+  | case narrowing, shadowed scrutinee | `sxUnsat` (false) | `sxSat` |
+  | alias `in`/`add`, user generic calling a helper | compile abort | decline / `sxSat` |
+  | witness of a type the caller cannot name | compile error or wrong type | `sxSat`, correct witness |
+
+- **Consumer-visible.** A shadowed local's IR name is `name__scN`. It shows
+  in decline messages and cache keys, so the walker bump invalidates those
+  caches. Code that failed to compile now compiles:
+  - generic callees;
+  - witnesses of types the caller did not import.
+
+  A caller no longer needs `std/tables` or `std/sets` in scope for a
+  `Table`/`HashSet` witness.
+
+Pins: `tests/tsymex_rfc0005_s8e_scoping.nim` (a)–(d) (+ helper module
+`tests/s8e_user_types.nim`).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

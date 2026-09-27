@@ -184,7 +184,18 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "152"
+const symexWalkerVersion* = "153"
+  ## RFC-0005 S8e (2026-09-26) — names keyed by symbol. Two distinct locals
+  ## of one spelling (a shadowing `var k` in a block, an `if` arm, a loop
+  ## body, a for-variable, a closure body, an inlined iterator body) shared
+  ## one env slot, so a write through either was read through both (a
+  ## silent false `sxSat`/`sxUnsat`); the parser now claims each routine's
+  ## declarations per naming scope (`smt/scoped_names.nim`) and a later
+  ## symbol of a taken spelling gets `name__scN`. The `case`-narrowing stack
+  ## keys its scrutinee by symbol (`scopedRepr`). A generic callee is
+  ## monomorphized with its node types kept and its formals read from the
+  ## instance, so it is walked where it used to abort the compile. IR names
+  ## and so cache keys change for any routine with a shadowed local.
   ## RFC-0005 S9 (2026-09-26) — both blanket vetoes deleted (§2.5).
   ## `capForcedUnknown` (any parse-time `sevError`) and
   ## `closureForcedUnknown` (any closure-sink `sevError`) no longer force

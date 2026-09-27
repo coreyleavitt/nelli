@@ -840,5 +840,10 @@ task test, "Run the test suite":
             # join (an unreached decline is a hint), unplaced declines block
             # both directions, dedup on message + anchor, capture by
             # reference (ceCaptureByRefUnmodelled); walker 151->152.
-            "tsymex_rfc0005_s9_vetoes"]:
+            "tsymex_rfc0005_s9_vetoes",
+            # RFC-0005 S8e -- names keyed by symbol: a shadowing local gets its
+            # own env slot, case narrowing keys its scrutinee by symbol,
+            # generic callees keep node types, witnesses name types by
+            # symbol; walker 152->153.
+            "tsymex_rfc0005_s8e_scoping"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

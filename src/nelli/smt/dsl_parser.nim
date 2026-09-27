@@ -25,7 +25,7 @@
 ##
 ## The walker only ever sees calls as statements.
 
-import std/macros
+import std/macros except strVal   ## RFC-0005 S8e: `scoped_names.strVal` keys a name by its symbol
 import std/options    ## RFC-chapulin-hardening Q1: tryRecognizeScanIdiom's Option[IRStmt]
 import std/strformat
 import std/strutils
@@ -38,6 +38,7 @@ import ./types
 import ./dsl_typebridge
 import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
+import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
 
 # ---- Cluster N: routine-impl resolution (RFC-parser-normalization #146/#148) --
 #
@@ -337,15 +338,16 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSetExcl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of StrOpKinds:
     # Phase 15 Cluster S (S1). Re-emit a runtime-reconstructible string-op node:
-    # `mkStrOp(kind, op, @[args], retTy)`. The kind is emitted as its enum
-    # symbol. Fix-slice item 5: `strRetTy` must round-trip too — an
+    # `mkStrOp(kind, op, @[args], retTy)`. The kind is emitted through
+    # `newLit` (a conversion via the enum type's symbol; RFC-0005 S8e).
+    # Fix-slice item 5: `strRetTy` must round-trip too — an
     # `iekStrUnsupported` node reconstructed via the macro-emit path (rather
     # than built directly by the parser) would otherwise silently fall back
     # to `mkStrOp`'s `itString` default, losing a threaded int/bool/float
     # type and reintroducing the exact type-mismatch this fix closes.
     var argsLit = newTree(nnkBracket)
     for a in e.strArgs: argsLit.add emitExpr(a)
-    newCall(bindSym"mkStrOp", ident($e.kind), newLit(e.strOp),
+    newCall(bindSym"mkStrOp", newLit(e.kind), newLit(e.strOp),
             prefix(argsLit, "@"), emitIRType(e.strRetTy))
   of iekGetCurrentExn:    newCall(bindSym"mkGetCurrentExn")      ## Phase 15 E8
   of iekGetCurrentExnMsg: newCall(bindSym"mkGetCurrentExnMsg")   ## Phase 15 E8
@@ -479,16 +481,15 @@ proc emitIRType*(t: IRType): NimNode =
     # `iekSeqAdd`'s own kind, N47-followup/walker-v110) the moment the IR
     # crossed the macro round trip — the exact "unserialized field silently
     # reverts to its default" class this arm's own comment warns about,
-    # just for the sibling field. Emitted the SAME way `IRExprKind` values
-    # are emitted elsewhere in this proc (`ident($e.kind)`, ~line 331): a
-    # bare identifier naming the enum value, resolved by ordinary symbol
-    # lookup at the call site — `SymexErrorKind` has no `bindSym`-friendly
-    # constructor of its own to route through the way `newLit` handles
-    # string/int/bool.
+    # just for the sibling field. RFC-0005 S8e: emitted through `newLit`,
+    # which writes an enum value as a conversion of its ordinal through the
+    # enum type's SYMBOL (`SymexErrorKind(n)`); the bare member identifier it
+    # replaced resolved by ordinary lookup at the CALLER's call site, where
+    # the member may be undeclared or another symbol may hold its spelling.
     if t.seqUnsupportedFieldReason.len > 0:
       newCall(bindSym"tUnsupportedFieldSeq", emitIRType(t.seqElemTy),
               newLit(t.seqUnsupportedFieldReason),
-              ident($t.seqUnsupportedFieldKind))
+              newLit(t.seqUnsupportedFieldKind))
     else:
       newCall(bindSym"tSeq", emitIRType(t.seqElemTy))
   of itTable:
@@ -752,14 +753,17 @@ type
                                    ## body statements and popped immediately
                                    ## after — a plain-`seq` stack, mirroring
                                    ## `parsing`'s push/pop-around-recursion
-                                   ## idiom. `subjectRepr` is the scrutinee
-                                   ## NimNode's `.repr` (structural identity);
+                                   ## idiom. `subjectRepr` is the scrutinee's
+                                   ## `scopedRepr` (structural identity, each
+                                   ## symbol by its scoped name -- RFC-0005
+                                   ## S8e: `.repr` conflated a shadowing
+                                   ## local with the outer scrutinee);
                                    ## `tags` is that branch's literal label
                                    ## ordinals. A symbolic-discriminant variant
                                    ## constructor consults the INNERMOST
                                    ## (last-pushed) entry whose `subjectRepr`
                                    ## matches its own discriminant expression's
-                                   ## `.repr`. `ensureProcRegistered` SAVES,
+                                   ## key. `ensureProcRegistered` SAVES,
                                    ## CLEARS, and RESTORES this stack (as part
                                    ## of the whole `ProcScopedCollectors`
                                    ## record) around a callee's recursive body
@@ -1599,6 +1603,10 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
   ## `forceNoCaptures` short-circuits that to `@[]` for the C3 top-level-proc
   ## case (a module-scope proc has no enclosing runtime scope to capture from).
   ## PRAGMAS (`{.raises, gcsafe.}` etc.) are dropped — semchecker metadata only.
+  # RFC-0005 S8e: claim the routine's names in the current naming scope
+  # before reading any. A no-op for a lambda its enclosing routine already
+  # claimed; for an expression-position `nnkProcDef` it is the claim.
+  claimRoutine(n)
   let formal = n[3]
   formal.expectKind nnkFormalParams
   var params: seq[IRParam]
@@ -1651,7 +1659,11 @@ proc parseProcAsValue(procSym, impl: NimNode, ctx: ParseCtx): IRExpr =
   ## Calling it dispatches through the existing C2b `iekClosureCall` path; the
   ## walker materializes the zero-field unit-env via the C2a empty-capture path.
   let site = (siteHash: int64(hash(bodyHashPart(procSym, impl))), declOrder: 0)
-  parseRoutineToLambda(impl, ctx, site, forceNoCaptures = true)
+  # RFC-0005 S8e: the proc's body runs in a unit-env closure of its own --
+  # its own naming scope, as a callee's is.
+  let savedNames = enterNameScope()
+  result = parseRoutineToLambda(impl, ctx, site, forceNoCaptures = true)
+  leaveNameScope(savedNames)
 
 # ---- Binop / unop helpers ----------------------------------------------------
 
@@ -5051,7 +5063,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         var tagSet: seq[int] = @[]
         var narrowed = false
         for i in countdown(ctx.procScoped.caseNarrow.high, 0):
-          if ctx.procScoped.caseNarrow[i].subjectRepr == discNode.repr:
+          if ctx.procScoped.caseNarrow[i].subjectRepr == scopedRepr(discNode):  ## RFC-0005 S8e
             for t in ctx.procScoped.caseNarrow[i].tags:
               var isRealArm = false
               for arm in objTyFull.vArms:
@@ -8329,7 +8341,7 @@ proc parseStmtInner(n: NimNode,
         # pop immediately after so a SIBLING branch never inherits it.
         let pushNarrow = narrowOk and narrowTags.len > 0
         if pushNarrow:
-          ctx.procScoped.caseNarrow.add (subjectRepr: n[0].repr, tags: narrowTags)
+          ctx.procScoped.caseNarrow.add (subjectRepr: scopedRepr(n[0]), tags: narrowTags)  ## RFC-0005 S8e: symbol-keyed
         let armBody = parseStmt(arm[arm.len - 1], ctx)
         if pushNarrow: discard ctx.procScoped.caseNarrow.pop()
         branches.add mkBranch(cond, armBody)
@@ -8551,6 +8563,11 @@ proc parseStmtInner(n: NimNode,
                     "safely evaluate out-of-scope (ADR-0014 D2-0e, N-2)")
               inc argIdx
         # ---- Steps 1-4: inline transform ----
+        # RFC-0005 S8e: the inlined body runs in THIS routine's env, so its
+        # params and locals are claimed in this naming scope: an iterator
+        # local spelled like a caller local gets its own slot (and a body
+        # local shadowing an iterator param is not substituted as the param).
+        claimRoutine(impl)
         # D2 step 2: bind each formal param to a gensym'd let.
         ctx.activeIterators.incl itSymName
         var paramSubst = initTable[string, string]()  # param name → gensym'd name
@@ -9178,7 +9195,8 @@ proc parseStmt*(n: NimNode): IRStmt =
 
 proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =
-                       initTable[string, NimNode]()): ProcSig
+                       initTable[string, NimNode](),
+                     instTy: NimNode = nil): ProcSig
 
 # ---- Phase 15 G6: stdlib concept membership (trust boundary) ---------------
 #
@@ -9278,9 +9296,9 @@ proc monomorphize(node: NimNode, subst: Table[string, NimNode]): NimNode =
     return subst[node.strVal]
   if node.kind in {nnkEmpty} or node.len == 0:
     return node
-  result = newTree(node.kind)
   if node.kind == nnkSym:
     return node
+  result = copyNimNode(node)
   for c in node:
     result.add monomorphize(c, subst)
 
@@ -9663,15 +9681,59 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # omit.
   let savedProcScoped = ctx.procScoped
   ctx.procScoped = ProcScopedCollectors()
-  let sig = parseCalleeImpl(impl, ctx, typeSubst)
+  # RFC-0005 S8e: a callee runs in its own env frame, so it is its own
+  # naming scope -- claimed before `parseCalleeImpl`'s pre-passes read a
+  # name, discarded (with its renames) once its IR is built.
+  let savedNames = enterNameScope()
+  claimRoutine(impl)
+  # RFC-0005 S8e: the call site's callee symbol is the generic INSTANCE; its
+  # own proc type carries the instantiated formals as typed nodes (see
+  # `instantiatedFormalTypes`).
+  let sig = parseCalleeImpl(impl, ctx, typeSubst,
+    if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
+    else: nil)
+  leaveNameScope(savedNames)
   ctx.procScoped = savedProcScoped
   ctx.procs[key] = sig
   ctx.parsing.excl key
   key
 
+proc instantiatedFormalTypes(instTy: NimNode): tuple[params: seq[NimNode], ret: NimNode] =
+  ## RFC-0005 S8e. The typed formal types of a generic INSTANCE, flattened one
+  ## per parameter in declaration order, from the instance symbol's own proc
+  ## type (`calleeSym.getTypeInst`). Empty when `instTy` is not a proc type.
+  if instTy == nil or instTy.kind != nnkProcTy or instTy.len == 0 or
+     instTy[0].kind != nnkFormalParams:
+    return
+  let f = instTy[0]
+  result.ret = f[0]
+  for i in 1 ..< f.len:
+    let id = f[i]
+    if id.kind != nnkIdentDefs: continue
+    for j in 0 ..< id.len - 2: result.params.add id[id.len - 2]
+
+proc typedFormal(mono, inst: NimNode): NimNode =
+  ## RFC-0005 S8e (the `classifyType` "node has no type" crash). A STRUCTURED
+  ## generic formal -- `openArray[T]`, `seq[T]`, `var seq[T]` -- is a tree
+  ## `monomorphize` rebuilt: it used to come back with no type at all (and
+  ## `classifyType`'s `getTypeInst` aborted macro expansion on it), and even
+  ## with node types kept it carries the GENERIC declaration's type, not the
+  ## instance's. A leaf is either untouched or replaced by an already-typed
+  ## instance node. `x in s` / `s.add x` over a user alias of `seq` reach the
+  ## stdlib generic `contains`/`add`, whose first formal is `openArray[T]` /
+  ## `var seq[T]`. The instance's own typed formal is that type as
+  ## instantiated, so it is classified instead -- its real model, or the
+  ## recorded decline its shape already gets.
+  if inst != nil and inst.kind != nnkEmpty and
+     mono.kind notin {nnkSym, nnkIdent, nnkEmpty}:
+    inst
+  else:
+    mono
+
 proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =
-                       initTable[string, NimNode]()): ProcSig =
+                       initTable[string, NimNode](),
+                     instTy: NimNode = nil): ProcSig =
   ## Build a `ProcSig` from a callee's `nnkProcDef`. Recursively parses
   ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
   ## For generic procs, `typeSubst` carries `T → concreteTypeNode`
@@ -9749,12 +9811,16 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ctx.procScoped.pairLoopCounterConsumedAfter = collectPairLoopCounterConsumedAfter(monoImpl)
   # Params
   var params: seq[IRParam]
+  let inst = instantiatedFormalTypes(instTy)   ## RFC-0005 S8e
+  var flatIx = 0
   for i in 1 ..< formal.len:
     let id = formal[i]
     id.expectKind nnkIdentDefs
-    let tyNode = id[id.len - 2]
+    let tyNode = typedFormal(id[id.len - 2],
+      if flatIx < inst.params.len: inst.params[flatIx] else: nil)
     let cls = classifyType(tyNode)
     let isVar = tyNode.kind == nnkVarTy
+    flatIx += id.len - 2
     for j in 0 ..< id.len - 2:
       params.add IRParam(name: id[j].strVal, ty: cls.ty,
                          rangeLo: cls.range.lo,
@@ -9766,7 +9832,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   var retTy = tBool()
   var isVoid = true
   if formal[0].kind != nnkEmpty:
-    let cls = classifyType(formal[0])
+    let cls = classifyType(typedFormal(formal[0], inst.ret))   ## RFC-0005 S8e
     retTy = cls.ty
     isVoid = false
   else:
@@ -9900,7 +9966,7 @@ proc emitProcs(procs: Table[string, ProcSig]): NimNode =
   result = newStmtList()
   result.add newVarStmt(tableId,
     newCall(newTree(nnkBracketExpr, bindSym"initTable",
-                                     ident"string", bindSym"ProcSig")))
+                                     bindSym"string", bindSym"ProcSig")))
   for name, sig in procs:
     result.add newAssignment(
       newTree(nnkBracketExpr, tableId, newLit(name)),
@@ -9916,7 +9982,7 @@ proc emitStrStrTable(t: Table[string, string]): NimNode =
   result = newStmtList()
   result.add newVarStmt(tableId,
     newCall(newTree(nnkBracketExpr, bindSym"initTable",
-                                     ident"string", ident"string")))
+                                     bindSym"string", bindSym"string")))
   for child, parent in t:
     result.add newAssignment(
       newTree(nnkBracketExpr, tableId, newLit(child)),
@@ -9932,19 +9998,21 @@ proc emitScope(sc: DeclineScope): NimNode =
   of dskSignature:    newCall(bindSym"signatureScope")
   of dskWalkSite:     newCall(bindSym"walkSite")
   of dskUnplaced:     nnkObjConstr.newTree(bindSym"DeclineScope",
-                        newColonExpr(ident"kind", ident"dskUnplaced"))
+                        newColonExpr(ident"kind", newLit(dskUnplaced)))
 
 proc emitErrorSeq(errs: seq[SymexErrorInfo]): NimNode =
   ## Phase 15 G1c. Emit a `seq[SymexErrorInfo]` literal of parse-time errors
-  ## (generic instantiation-cap overflow). `kind`/`severity` are enum members
-  ## (emitted by name via `ident`); `msg` is a string literal. RFC-0005 S8:
+  ## (generic instantiation-cap overflow). `kind`/`severity` are enum values,
+  ## emitted through `newLit` (RFC-0005 S8e: a conversion via the enum
+  ## type's symbol, not the member's name, which the caller's scope need not
+  ## hold); `msg` is a string literal. RFC-0005 S8:
   ## `scope` rides along (`emitScope`).
   var br = newTree(nnkBracket)
   for e in errs:
     br.add nnkObjConstr.newTree(
       bindSym"SymexErrorInfo",
-      newColonExpr(ident"kind", ident($e.kind)),
-      newColonExpr(ident"severity", ident($e.severity)),
+      newColonExpr(ident"kind", newLit(e.kind)),
+      newColonExpr(ident"severity", newLit(e.severity)),
       newColonExpr(ident"msg", newLit(e.msg)),
       newColonExpr(ident"scope", emitScope(e.scope)))
   prefix(br, "@")
@@ -9956,8 +10024,8 @@ proc emitAnnotationViolations(avs: seq[AnnotationViolation]): NimNode =
   for a in avs:
     br.add nnkObjConstr.newTree(
       bindSym"AnnotationViolation",
-      newColonExpr(ident"pragma", ident($a.pragma)),
-      newColonExpr(ident"kind", ident($a.kind)),
+      newColonExpr(ident"pragma", newLit(a.pragma)),
+      newColonExpr(ident"kind", newLit(a.kind)),
       newColonExpr(ident"callee", newLit(a.callee)),
       newColonExpr(ident"site", newLit(a.site)),
       newColonExpr(ident"msg", newLit(a.msg)))
@@ -10058,6 +10126,11 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   let formalParams = procDef[3]
   formalParams.expectKind nnkFormalParams
   let ctx = newParseCtx(maxInstantiationsPerProc)
+  # RFC-0005 S8e: claim every declaration's IR name by SYMBOL before any
+  # pre-pass or IR build reads a name (`scoped_names`): a shadowing local
+  # gets its own env slot. Params claim first, so the witness keeps them.
+  resetNameScopes()
+  claimRoutine(procDef)
   # Round-6 B1a (ADR-0028 Leg 1): the representation pre-pass runs BEFORE
   # any IR is built — the `iekStrSubstr`-vs-`iekSeqSlice` dispatch choice
   # `parseStmt` below bakes into the IR the instant `parseExpr`'s bracket

@@ -25,6 +25,7 @@ import std/macros
 import std/strutils
 import std/strformat
 import std/sequtils
+import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
 import ./types
 
@@ -153,6 +154,31 @@ proc nominalId*(n: NimNode): string =
     for i in 1 ..< n.len: s.add "|" & nominalId(n[i])
     s
   else: n.repr
+
+var witnessTypeSyms {.compileTime.}: Table[string, NimNode]
+  ## RFC-0005 S8e. `IRType.typeKey` -> the symbol of the named user type it
+  ## was classified from. Never cleared: an entry is a fact about a symbol,
+  ## and a cached parse may emit its witness long after the classification.
+
+proc keyedBySym*(ty: IRType, sym: NimNode): IRType =
+  ## RFC-0005 S8e. Record `sym` as the symbol that names `ty` in a witness and
+  ## return `ty` (freshly built by the caller, so the stamp touches no shared
+  ## node). The witness emitter (`symex.emitTyAndReader`) builds its value in
+  ## the CALLER's scope, where the type's spelling may be undeclared (the
+  ## caller imported only the SUT proc) or bound to a different type (a user
+  ## `OrderedTable` object, beside `std/tables.OrderedTable`). A symbol names
+  ## its own type in any scope. A node that is not a symbol records nothing:
+  ## the emitter then keeps its spelling.
+  if sym.kind == nnkSym:
+    let key = nominalId(sym)
+    witnessTypeSyms[key] = sym
+    ty.typeKey = key
+  ty
+
+proc witnessTypeSym*(ty: IRType): NimNode =
+  ## RFC-0005 S8e. The symbol recorded for `ty` by `keyedBySym`, or nil.
+  if ty.typeKey.len == 0: nil
+  else: witnessTypeSyms.getOrDefault(ty.typeKey)
 
 type
   ClassifiedType* = object
@@ -437,7 +463,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   if recList.kind == nnkEmpty:
     return tTuple(@[], @[], objectName =
       (if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr),
-      nominalId = nominalId(nameSym), nameIsRefAlias = isRefWrapped)
+      nominalId = nominalId(nameSym), nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
   recList.expectKind nnkRecList
   let s = if nameSym.kind in {nnkSym, nnkIdent}: nameSym.strVal else: nameSym.repr
   # First pass: detect whether this object has any `nnkRecCase`
@@ -594,12 +620,12 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         arms = axes[0].arms,
         plainFieldNames = plainFieldNames,
         plainFieldTypes = plainFieldTypes,
-        discTags = axes[0].discTags)
+        discTags = axes[0].discTags).keyedBySym(nameSym)
     else:
       return mkMultiVariant(objectName = s,
         axes = axes,
         plainFieldNames = plainFieldNames,
-        plainFieldTypes = plainFieldTypes)
+        plainFieldTypes = plainFieldTypes).keyedBySym(nameSym)
   # ---- Phase-4 plain-record path: only plain fields --------------
   var fields: seq[IRType]
   var names: seq[string]
@@ -625,7 +651,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       # path's three analogous sites).
       names.add fieldNameStr(member[j], j)
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
-                nameIsRefAlias = isRefWrapped)
+                nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
 
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
@@ -748,7 +774,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       if isStdlibRuneSym(resolved):
         return ranged(tInt(64, signed = true), 0'i64, 0x10FFFF'i64)
       let baseCls = classifyType(impl[2][0])
-      return unranged(tDistinct(s, baseCls.ty))
+      return unranged(tDistinct(s, baseCls.ty).keyedBySym(resolved))
     # Phase 14 cycle A3. Named-alias for `range[lo..hi]` with int
     # literal bounds — used as a variant discriminator since Nim
     # rejects plain `int` discs (low(T) must be 0). Aliases with
@@ -883,7 +909,7 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # doc for the full mechanism this unblocks (an enum-typed OBJECT FIELD
       # could not even reach `symexFind`: the generated witness constructor
       # failed to COMPILE).
-      cls.ty = cls.ty.withEnumName(s)
+      cls.ty = cls.ty.withEnumName(s).keyedBySym(resolved)
       return cls
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
@@ -1052,7 +1078,7 @@ proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## typed AST), so an empty-fielded named placeholder is sufficient and FINITE.
   let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
   tTuple(@[], @[], objectName = nm, nominalId = nominalId(objSym),
-         isPlaceholder = true)
+         isPlaceholder = true).keyedBySym(objSym)
 
 proc isObjectTypeSym(sym: NimNode): bool =
   ## CR-19: Returns true iff `sym` (a nnkSym/nnkIdent) refers to a user-defined
@@ -1126,7 +1152,7 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
       let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
       let placeholder = tTuple(@[], @[], objectName = nm,
                                nominalId = (if inner.kind in {nnkSym, nnkIdent}: nominalId(inner) else: ""),
-                               isPlaceholder = true)
+                               isPlaceholder = true).keyedBySym(inner)
       return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))
              else: unranged(tPtr(placeholder))
   classifyType(ty)

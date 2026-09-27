@@ -583,8 +583,99 @@ proc rendersAsDefaultObject(ty: IRType): bool =
   ty.kind == itTuple and ty.objectName.len > 0 and
     ty.fields.len > 2 and ty.fieldNames.len > 0 and ty.fieldNames[0] == "kind"
 
-proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
-  ## Recursive: returns (Nim type AST, witness-construction expression).
+proc stdName(name: string): NimNode =
+  ## RFC-0005 S8e. The symbol of a system/stdlib type, constructor or witness
+  ## reader that `emitTyAndReader` writes into the CALLER's scope. An
+  ## identifier there resolves in that scope: a caller that did not import
+  ## `std/tables` has no `Table`, and a caller that declares its own `seq`
+  ## or `readSeqInt` would have the witness built through it. Bound here,
+  ## each name means what this module means by it, in any scope.
+  case name
+  of "bool": bindSym"bool"
+  of "int": bindSym"int"
+  of "int8": bindSym"int8"
+  of "int16": bindSym"int16"
+  of "int32": bindSym"int32"
+  of "int64": bindSym"int64"
+  of "uint": bindSym"uint"
+  of "uint8": bindSym"uint8"
+  of "uint16": bindSym"uint16"
+  of "uint32": bindSym"uint32"
+  of "uint64": bindSym"uint64"
+  of "float": bindSym"float"
+  of "float32": bindSym"float32"
+  of "string": bindSym"string"
+  of "array": bindSym"array"
+  of "seq": bindSym"seq"
+  of "newSeq": bindSym"newSeq"
+  of "Table": bindSym"Table"
+  of "HashSet": bindSym"HashSet"
+  of "readBool": bindSym"readBool"
+  of "readInt": bindSym"readInt"
+  of "readInt8": bindSym"readInt8"
+  of "readInt16": bindSym"readInt16"
+  of "readInt32": bindSym"readInt32"
+  of "readUInt": bindSym"readUInt"
+  of "readUInt8": bindSym"readUInt8"
+  of "readUInt16": bindSym"readUInt16"
+  of "readUInt32": bindSym"readUInt32"
+  of "readFloat": bindSym"readFloat"
+  of "readFloat32": bindSym"readFloat32"
+  of "readString": bindSym"readString"
+  of "readSeqInt": bindSym"readSeqInt"
+  of "readSeqInt8": bindSym"readSeqInt8"
+  of "readSeqInt16": bindSym"readSeqInt16"
+  of "readSeqInt32": bindSym"readSeqInt32"
+  of "readSeqUInt8": bindSym"readSeqUInt8"
+  of "readSeqUInt16": bindSym"readSeqUInt16"
+  of "readSeqUInt32": bindSym"readSeqUInt32"
+  of "readSeqUInt64": bindSym"readSeqUInt64"
+  of "readSeqFloat64": bindSym"readSeqFloat64"
+  of "readSeqFloat32": bindSym"readSeqFloat32"
+  of "readTableStrInt": bindSym"readTableStrInt"
+  of "readSetInt": bindSym"readSetInt"
+  else:
+    error("symex RFC-0005 S8e: stdName has no binding for `" & name & "`")
+    nil
+
+proc userTypeName(ty: IRType, spelling: string): NimNode =
+  ## RFC-0005 S8e. A named user type in the witness: its own SYMBOL, as
+  ## `dsl_typebridge.keyedBySym` recorded it at classification. The spelling
+  ## stands in only where no symbol was recorded (a type that reached the IR
+  ## from something other than a symbol), which is all the emitter wrote
+  ## before.
+  let sym = witnessTypeSym(ty)
+  if sym != nil: copyNimNode(sym) else: ident(spelling)
+
+proc defaultValueOf(tyNode: NimNode): NimNode =
+  ## RFC-0005 S8e. The default value of the type `tyNode` names, as
+  ## `block: (var w: T; w)`. `default(T)` needs `T` as a `typedesc`, and a
+  ## type SYMBOL recorded from the typed AST (`userTypeName`) carries the
+  ## type itself as its node type, which `default`'s overload rejects; a
+  ## declaration's type position takes the symbol as it is.
+  let w = genSym(nskVar, "dflt")
+  quote do:
+    block:
+      var `w`: `tyNode`
+      `w`
+
+proc freshRefCell(pointeeTy: NimNode): NimNode =
+  ## RFC-0005 S8e. A fresh default `ref T` cell, as `block: (var c: ref T;
+  ## new(c); c)`, for the same reason as `defaultValueOf`: `new(T)` needs `T`
+  ## as a `typedesc`, which a recorded type symbol is not.
+  let c = genSym(nskVar, "cell")
+  quote do:
+    block:
+      var `c`: ref `pointeeTy`
+      new(`c`)
+      `c`
+
+proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode)
+
+proc emitTyAndReaderShared(ty: IRType, path: string,
+                           witId: NimNode): (NimNode, NimNode) =
+  ## Recursive: returns (Nim type AST, witness-construction expression). The
+  ## result may use one node at several places; `emitTyAndReader` unshares.
   case ty.kind
   of itUninterp:
     if ty.uninterpName == "__closure":
@@ -655,7 +746,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
                      "CR-2b/CR-2c / Invariant 3); witness rendering yields " &
                      "an unused int placeholder.".}
           0
-      return (ident("int"), placeholder)
+      return (stdName("int"), placeholder)
     raise newException(ValueError,
       "emitTyAndReader(itUninterp): opaque-ref witness reader lands with cluster E")
   of itDistinct:
@@ -666,10 +757,11 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # converter `DistinctName(baseValue)`. Without this the distinct param
     # would produce a silent empty reader.
     let (_, baseReader) = emitTyAndReader(ty.distinctBase, path, witId)
-    (ident(ty.distinctName), newCall(ident(ty.distinctName), baseReader))
+    (userTypeName(ty, ty.distinctName),
+     newCall(userTypeName(ty, ty.distinctName), baseReader))
   of itBool, itInt, itFloat32, itFloat64:
     let (tyName, readerName) = primTyAndReader(ty)
-    let rawReader = newCall(ident(readerName), witId, newLit(path))
+    let rawReader = newCall(stdName(readerName), witId, newLit(path))
     if ty.kind == itInt and ty.enumName.len > 0:
       # Issue #163 (rev item 1). `ty` is the lifted `itInt` representation of
       # a Nim `enum` (see `IRType.enumName`'s field doc) — the RAW
@@ -682,9 +774,10 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # ordinal-convertible value, sound regardless of signedness or a
       # negative/sparse ordinal domain (R2/R18's fixes already put the
       # correct width/signed/range on `ty` before this ever runs).
-      (ident(ty.enumName), newCall(ident(ty.enumName), rawReader))
+      (userTypeName(ty, ty.enumName),
+       newCall(userTypeName(ty, ty.enumName), rawReader))
     else:
-      (ident(tyName), rawReader)
+      (stdName(tyName), rawReader)
   of itTuple:
     if ty.objectName.len > 0:
       # Nominal object. For variant objects (heuristic: any of the
@@ -694,14 +787,14 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # downstream user code can examine `r.status` to verify
       # reachability. Variant-aware witness reconstruction is a
       # follow-up (#141 phase 2).
-      let objTyId = ident(ty.objectName)
+      let objTyId = userTypeName(ty, ty.objectName)
       # Check for variant: the discriminator name on the parsed
       # object is conventionally "kind" + fields after position 0
       # that would be ambiguous to construct all at once.
       # (RFC-0005 S2: the predicate is shared with `witnessFidelity`,
       # which must classify exactly the shapes this reader stubs.)
       if rendersAsDefaultObject(ty):
-        (objTyId, newCall(ident("default"), objTyId))
+        (objTyId, defaultValueOf(objTyId))
       else:
         var objVal = newTree(nnkObjConstr, objTyId)
         for i, fty in ty.fields:
@@ -731,14 +824,14 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   of itArray:
     let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
     let arrTy = newTree(nnkBracketExpr,
-      ident("array"), newLit(ty.size), elemTyNode)
+      stdName("array"), newLit(ty.size), elemTyNode)
     var arrLit = newTree(nnkBracket)
     for i in 0 ..< ty.size:
       let (_, sv) = emitTyAndReader(ty.elemTy, path & "." & $i, witId)
       arrLit.add sv
     (arrTy, arrLit)
   of itString:
-    (ident("string"), newCall(ident("readString"), witId, newLit(path)))
+    (stdName("string"), newCall(stdName("readString"), witId, newLit(path)))
   of itSeq:
     if isUnsupportedFieldPlaceholder(ty):
       # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
@@ -755,13 +848,13 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # mirrors the `itArray`/`itRef` arms' existing "type-only" recursion
       # idiom above).
       let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
-      let seqTy = newTree(nnkBracketExpr, ident("seq"), elemTyNode)
-      (seqTy, newCall(newTree(nnkBracketExpr, ident("newSeq"), elemTyNode), newLit(0)))
+      let seqTy = newTree(nnkBracketExpr, stdName("seq"), elemTyNode)
+      (seqTy, newCall(newTree(nnkBracketExpr, stdName("newSeq"), elemTyNode), newLit(0)))
     # Phase 5 cycle 1: only seq[int] tested; specialised reader.
     elif ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
        ty.seqElemTy.width == 64:
-      (newTree(nnkBracketExpr, ident("seq"), ident("int")),
-       newCall(ident("readSeqInt"), witId, newLit(path)))
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("int")),
+       newCall(stdName("readSeqInt"), witId, newLit(path)))
     elif ty.seqElemTy.kind == itInt:
       # RFC-chapulin-hardening M1: fixed-width-int seq elements
       # (`byte`/`uint8..uint64`, `int8..int32` — `int64` is the arm above).
@@ -786,14 +879,14 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           of 16: ("uint16", "readSeqUInt16")
           of 32: ("uint32", "readSeqUInt32")
           else:  ("uint64", "readSeqUInt64")
-      (newTree(nnkBracketExpr, ident("seq"), ident(elemTyName)),
-       newCall(ident(readerName), witId, newLit(path)))
+      (newTree(nnkBracketExpr, stdName("seq"), stdName(elemTyName)),
+       newCall(stdName(readerName), witId, newLit(path)))
     elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
-      (newTree(nnkBracketExpr, ident("seq"), ident("float")),
-       newCall(ident("readSeqFloat64"), witId, newLit(path)))
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("float")),
+       newCall(stdName("readSeqFloat64"), witId, newLit(path)))
     elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
-      (newTree(nnkBracketExpr, ident("seq"), ident("float32")),
-       newCall(ident("readSeqFloat32"), witId, newLit(path)))
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("float32")),
+       newCall(stdName("readSeqFloat32"), witId, newLit(path)))
     elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # The element pointee values were observed only through the heap; the full
       # per-element heap-snapshot witness (alias groups / nil rendering) lands
@@ -823,8 +916,10 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       # already allocates+returns a fresh `ref Node` cell directly.
       let isDirectRefAlias = pointee.kind == itTuple and pointee.nameIsRefAlias
       let elemTy = if isDirectRefAlias: innerTy else: nnkRefTy.newTree(innerTy)
-      let freshElem = if isDirectRefAlias: newCall(innerTy)
-                      else: newCall(ident("new"), innerTy)
+      # RFC-0005 S8e: built so that `innerTy` stands only in TYPE positions
+      # (an object constructor head, a declaration) -- see `freshRefCell`.
+      let freshElem = if isDirectRefAlias: nnkObjConstr.newTree(innerTy)
+                      else: freshRefCell(innerTy)
       let reader = quote do:
         block:
           let `nVar` = readSeqLen(`witId`, `path`)
@@ -832,7 +927,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           for `idxId` in 0 ..< `nVar`:
             `seqVar`[`idxId`] = `freshElem`
           `seqVar`
-      (newTree(nnkBracketExpr, ident("seq"), elemTy), reader)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTy), reader)
     else:
       # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
       # `else` used to `error()` at macro-expansion time, aborting
@@ -859,8 +954,8 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
        ty.tabValTy.kind == itInt and ty.tabValTy.signed and
        ty.tabValTy.width == 64:
       let tabTy = newTree(nnkBracketExpr,
-        ident("Table"), ident("string"), ident("int"))
-      (tabTy, newCall(ident("readTableStrInt"), witId, newLit(path)))
+        stdName("Table"), stdName("string"), stdName("int"))
+      (tabTy, newCall(stdName("readTableStrInt"), witId, newLit(path)))
     else:
       # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
       # the `itSeq` else-arm comment above. `parseProc*`'s recursive
@@ -873,8 +968,8 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   of itSet:
     if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
        ty.setElemTy.width == 64:
-      let setTy = newTree(nnkBracketExpr, ident("HashSet"), ident("int"))
-      (setTy, newCall(ident("readSetInt"), witId, newLit(path)))
+      let setTy = newTree(nnkBracketExpr, stdName("HashSet"), stdName("int"))
+      (setTy, newCall(stdName("readSetInt"), witId, newLit(path)))
     else:
       # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
       # the `itSeq` else-arm comment above. `parseProc*`'s recursive
@@ -895,7 +990,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # same path in every case branch, which Nim's runtime sees as
     # one shared symbolic value (matching Nim's variant memory
     # layout where plain fields are always-present and shared).
-    let objTyId = ident(ty.vObjectName)
+    let objTyId = userTypeName(ty, ty.vObjectName)
     let discPath = path & "." & ty.vDiscName
     let (discTyId, discReaderExpr) =
       emitTyAndReader(ty.vDiscTy, discPath, witId)
@@ -922,9 +1017,13 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
         ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
       # Discriminator literal. Non-enum discs (Phase 14 A3) carry an
       # empty tagName — Nim accepts an int literal for `range`-typed
-      # fields, so fall back to `newLit(tagOrdinal)`.
+      # fields, so fall back to `newLit(tagOrdinal)`. RFC-0005 S8e: an
+      # enum member is written `DiscTy(ordinal)` through the disc type's
+      # symbol, never by its member name -- the caller's scope need not
+      # hold the enum (it imported only the SUT), and may hold another
+      # symbol of that spelling.
       let discValExpr =
-        if arm.tagName.len > 0: ident(arm.tagName)
+        if arm.tagName.len > 0: newCall(discTyId, newLit(arm.tagOrdinal))
         else: newLit(arm.tagOrdinal)
       ctor.add nnkExprColonExpr.newTree(
         ident(ty.vDiscName), discValExpr)
@@ -954,14 +1053,14 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
             ty.vPlainFieldTypes[i], path & "." & fname, witId)
           ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
         ctor.add nnkExprColonExpr.newTree(
-          ident(ty.vDiscName), ident(dt.name))
+          ident(ty.vDiscName), newCall(discTyId, newLit(dt.ord)))  # RFC-0005 S8e
         for j, fname in elseArm.fieldNames:
           let armPath = path & ".@" & $elseArm.tagOrdinal & "." & fname
           let (_, fReader) = emitTyAndReader(
             elseArm.fieldTypes[j], armPath, witId)
           ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
         caseStmt.add nnkOfBranch.newTree(tagLit, ctor)
-    caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
+    caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))
     (objTyId, caseStmt)
   of itMultiVariant:
     # Phase 14 cycle A1d per ADR-0003 D1. Emit nested case
@@ -976,10 +1075,10 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # `fields(w)` on the constructed object iterates active-arm
     # order: plain..., axis1, arm1-fields, axis2, arm2-fields...
     # which matches `renderAsChoices`'s iteration contract.
-    let objTyId = ident(ty.mvObjectName)
+    let objTyId = userTypeName(ty, ty.mvObjectName)
     type AxisBind = tuple[
       discName: string,
-      tagName: string,
+      tagVal: NimNode,   ## RFC-0005 S8e: `DiscTy(ordinal)`, not the member name
       armFieldNames: seq[string],
       armFieldReaders: seq[NimNode]]
     proc emitMVBranch(axisIdx: int,
@@ -992,7 +1091,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
         for ab in chosen:
           ctor.add nnkExprColonExpr.newTree(
-            ident(ab.discName), ident(ab.tagName))
+            ident(ab.discName), ab.tagVal)
           for j, fn in ab.armFieldNames:
             ctor.add nnkExprColonExpr.newTree(
               ident(fn), ab.armFieldReaders[j])
@@ -1011,12 +1110,12 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
           let (_, fr) = emitTyAndReader(arm.fieldTypes[j], armPath, witId)
           armReaders.add fr
         let body = emitMVBranch(axisIdx + 1, chosen & @[
-          (discName: ax.discName, tagName: arm.tagName,
+          (discName: ax.discName, tagVal: newCall(discTyId, newLit(arm.tagOrdinal)),
            armFieldNames: arm.fieldNames, armFieldReaders: armReaders)])
         caseStmt.add nnkOfBranch.newTree(tagLit, body)
       # Else covers any out-of-set disc value; same defensive
       # fallback as itVariant (line 599).
-      caseStmt.add nnkElse.newTree(newCall(ident"default", objTyId))
+      caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))
       caseStmt
     (objTyId, emitMVBranch(0, @[]))
   of itRef, itPtr:
@@ -1046,7 +1145,7 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
     # `fields.len == 0`, so a proven-non-nil `p: Token` would have
     # mis-rendered as `nil` under the old heuristic.
     if isRecursionPlaceholder(pointee):
-      let objId = ident(pointee.objectName)
+      let objId = userTypeName(pointee, pointee.objectName)
       let refTy = if ty.kind == itRef: nnkRefTy.newTree(objId)
                   else: nnkPtrTy.newTree(objId)
       return (refTy, newNilLit())
@@ -1069,7 +1168,8 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
       let cellId = genSym(nskVar, "refCell")
       let reader = quote do:
         block:
-          var `cellId` = new(`innerTy`)
+          var `cellId`: ref `innerTy`   # RFC-0005 S8e: see `freshRefCell`
+          new(`cellId`)
           `cellId`[] = `innerReader`
           `cellId`
       (nnkRefTy.newTree(innerTy), reader)
@@ -1088,6 +1188,18 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
                      "hint, full pointer-family witness rendering lands R11b/R12.".}
           nil
       (nnkPtrTy.newTree(innerTy), placeholder)
+
+proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode) =
+  ## Returns (Nim type AST, witness-construction expression) for `ty` at
+  ## witness path `path`. RFC-0005 S8e: every node of the result is its own
+  ## copy. The builder above places one type node at several positions (a
+  ## variant's type in each arm's constructor and in its `default`, a disc
+  ## type in every tag conversion). With identifiers that was harmless; a
+  ## SYMBOL node is annotated in place by semantic checking, so a shared one
+  ## checked as a constructor head reaches the next position already typed as
+  ## a value of the type, not the type itself.
+  let (t, r) = emitTyAndReaderShared(ty, path, witId)
+  (copyNimTree(t), copyNimTree(r))
 
 # ---- Body markers -----------------------------------------------------------
 

@@ -118,6 +118,16 @@ type
       ## branches for else-covered ordinals.
 
   IRType* = ref object  ## ref because itTuple/itArray/itVariant recurse.
+    typeKey*: string
+      ## RFC-0005 S8e. Compile-time only: the key (`nominalId` of the type's
+      ## symbol) under which `dsl_typebridge` recorded the SYMBOL of a named
+      ## user type -- an object, variant, enum or distinct -- so that
+      ## `symex.emitTyAndReader` names the type by that symbol in the
+      ## caller's scope, not by its spelling (which the caller may not have
+      ## imported, or may bind to a different type). "" for every unnamed
+      ## type. Not part of the type's identity: `==`, `$`, the canonical
+      ## form and the emitted runtime literal all ignore it (the names they
+      ## compare already carry the identity they always had).
     case kind*: IRTypeKind
     of itInt:
       width*: int
@@ -3440,7 +3450,8 @@ proc withRange*(ty: IRType, lo, hi: int64): IRType =
   ## one in place would silently narrow every unrelated use of it.
   doAssert ty.kind == itInt, "withRange: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
-         hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName)
+         hasRange: true, rangeLo: lo, rangeHi: hi, enumName: ty.enumName,
+         typeKey: ty.typeKey)
 
 proc withEnumName*(ty: IRType, name: string): IRType =
   ## Issue #163 (rev item 1). Stamp the lifted `itInt`'s ORIGIN enum name —
@@ -3455,7 +3466,7 @@ proc withEnumName*(ty: IRType, name: string): IRType =
   doAssert ty.kind == itInt, "withEnumName: not an itInt: " & $ty.kind
   IRType(kind: itInt, width: ty.width, signed: ty.signed,
          hasRange: ty.hasRange, rangeLo: ty.rangeLo, rangeHi: ty.rangeHi,
-         enumName: name)
+         enumName: name, typeKey: ty.typeKey)
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",

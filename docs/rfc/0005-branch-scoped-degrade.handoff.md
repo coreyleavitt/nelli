@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-27 00:40Z)
+## Current position (refreshed 2026-09-27 01:05Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -119,17 +119,27 @@
     kind; the two renames; twin anchored declines now keep one walk record
     each.
 - **S9 Windows CI (`23692b2`): all three green.** S0-S10 (incl. S8b-S8d) Windows-verified.
-- **Remaining:** **S8e** (running, opus; code done, gate sweep `s8e-sweep.log` 501/~509 at 00:40Z) -- three pre-existing defects:
-  (1) shadowed names share one closure env slot (an inner `var k` aliases the outer
-  `k`) -> a *silent* wrong verdict, the priority item; (2) `classifyType` "node has
-  no type" compile crash on `x in s`/`s.add x` over a user generic alias of `seq`;
-  (3) witness emitters spell `seq`/`Table`/object names bare in the caller's scope,
-  so a clashing import fails to compile. Then S11 -> completion gate -> ff main + tag.
+- **S8e landed `f5a654c`** (walker 153; pushed). Final sweep: unchanged=496
+  regressed=0 new-failing=0 new-ok=18 (first sweep's 4 regressions -- `new(T)`/
+  `default(T)` on a typed-AST type symbol -- fixed, re-swept from scratch).
+  New `scoped_names.nim` gives shadowing locals unique names `k__scN` (fixed 13
+  false verdicts); `monomorphize` keeps node types (no more "node has no type");
+  witness emitters bind names by symbol (`bindSym`, user types by their symbol,
+  enums as `T(ord)`) -- also fixed a *silent* wrong-type witness bound to a
+  caller-local `Color`. S11 migration: `name__scN` in messages/cache keys;
+  formerly-aborting code now walks (recorded declines); witnesses no longer need
+  `std/tables`/`std/sets` in the caller.
+- **Slices done:** 19 of 21.
+- **Remaining:** **S8f** (running, opus): S8e found a *clean sxSat whose witness
+  does not satisfy the target* -- `Table[string,int]` with `t.len == 2` renders
+  `{:}`. Fix the len-vs-content gap across container models (Table, HashSet,
+  seq, string, OrderedTable, CountTable) and decide on evidence whether replay
+  must also confirm clean candidates. Then S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `git log` for the S8e commit; if no agent is running, gate any
-  uncommitted work (full sweep-diff) before committing. Order: S8e ->
+  resume, check `git log` for the S8f commit; if no agent is running, gate any
+  uncommitted work (full sweep-diff) before committing. Order: S8f ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

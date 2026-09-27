@@ -65,8 +65,17 @@ proc forceTo(s: var Shape) =
 
 suite "symex Phase 11 cycle 6 — discriminator reassignment":
   test "obj.kind = literal forces vDisc; previous arm becomes unreachable":
+    ## RFC-0005 S8f (walker 154): the label stays unreachable, but the run is
+    ## not `sxUnsat`: an input on the OTHER branch (`skSquare`) makes the
+    ## assignment raise `FieldDefect` ("assignment to discriminant changes
+    ## object branch"), which Nim does and the walker used to model as a
+    ## legal transition. The oracle below runs exactly that input.
     let r = symexFind(forceTo, tLabel("impossible"))
-    check r.status == sxUnsat
+    check r.status == sxRaised
+    check r.raisedTypeId == "FieldDefect"
+    var sq = Shape(kind: skSquare, side: 1)
+    expect FieldDefect:
+      forceTo(sq)
 
 proc bigSquare(s: Shape) =
   # Phase 16 D1c: restored flat-and; short-circuit guard prevents the
@@ -227,8 +236,17 @@ proc threeReassigns(x: var Shape) =
 
 suite "symex Phase 11 — consecutive reassignments (#9)":
   test "obj.kind = X; obj.kind = Y; obj.kind = Z — final disc is Z":
+    ## RFC-0005 S8f (walker 154): `skSquare -> skCircle` changes the branch
+    ## whatever the input, so Nim raises `FieldDefect` at the second
+    ## assignment on EVERY input and the label is never reached -- the old
+    ## `sxSat` was a witness that raised. The oracle runs both inputs.
     let r = symexFind(threeReassigns, tLabel("final"))
-    check r.status == sxSat
+    check r.status == sxRaised
+    check r.raisedTypeId == "FieldDefect"
+    for k in [skCircle, skSquare]:
+      var x = (if k == skCircle: Shape(kind: skCircle) else: Shape(kind: skSquare))
+      expect FieldDefect:
+        threeReassigns(x)
 
 # ---- #6 — note: Nim's variant syntax disallows duplicate field
 # names across arms (`Error: attempt to redefine 'fieldName'`). The

@@ -94,6 +94,15 @@ type
     tagName*:    string
     fieldNames*: seq[string]
     fieldTypes*: seq[IRType]
+    branchIx*:   int
+      ## RFC-0005 S8f. The index of the `of`/`else` branch this arm came
+      ## from, in source order. `of kA, kC:` yields TWO arms (one per tag)
+      ## sharing one `branchIx`: Nim lets a discriminator assignment move
+      ## between tags of ONE branch (the fields are kept) and raises
+      ## `FieldDefect` on any other, so the reassignment walker needs the
+      ## grouping, which neither the tags nor the field names carry (two
+      ## field-less branches look alike). Read at parse time only, to build
+      ## the reassignment statement's `vrBranches`/`vrsBranches`.
     isElse*:     bool
       ## Phase 14 cycle A2 (forward-compat): true iff this arm is the
       ## `else:` branch of an `nnkRecCase`. Walker-time arm membership
@@ -1067,11 +1076,19 @@ type
       vrObjName*:       string    ## the variant variable in env
       vrNewTag*:        int       ## the new tag ordinal
       vrTagName*:       string    ## diagnostic, e.g. "skSquare"
+      vrBranches*:      seq[seq[int]]
+        ## RFC-0005 S8f. The variant's explicit tag ordinals grouped by
+        ## source branch (`of kA, kC:` is one group); an ordinal in no group
+        ## belongs to the `else:` branch. The walker forks `FieldDefect` when
+        ## the old discriminator's branch differs from the new tag's, as Nim
+        ## does at runtime, and keeps the fields otherwise.
     of isVariantReassignSymbolic:
       vrsObjName*:      string    ## the variant variable in env
       vrsDiscName*:     string    ## which axis (itMultiVariant); ""
                                     ## for single-axis itVariant
       vrsRhs*:          IRExpr    ## the symbolic RHS expression
+      vrsBranches*:     seq[seq[int]]
+        ## RFC-0005 S8f. As `vrBranches`, for the reassigned axis.
     of isVariantConstructSym:
       vcsResultVar*:    string    ## fresh temp the constructed value binds to
       vcsVariantTy*:    IRType    ## the full itVariant IRType (vArms,
@@ -3957,6 +3974,7 @@ proc `==`*(a, b: IRType): bool =
       for j, ft in arm.fieldTypes:
         if ft != b.vArms[i].fieldTypes[j]: return false
       if arm.isElse != b.vArms[i].isElse: return false
+      if arm.branchIx != b.vArms[i].branchIx: return false
     if a.vDiscTags != b.vDiscTags: return false
     true
   of itMultiVariant:
@@ -3976,6 +3994,7 @@ proc `==`*(a, b: IRType): bool =
         let barm = bx.arms[k]
         if arm.tagOrdinal != barm.tagOrdinal: return false
         if arm.tagName    != barm.tagName:    return false
+        if arm.branchIx   != barm.branchIx:   return false
         if arm.fieldNames != barm.fieldNames: return false
         if arm.fieldTypes.len != barm.fieldTypes.len: return false
         for j, ft in arm.fieldTypes:
@@ -4223,19 +4242,37 @@ proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
          vfFieldName: fieldName, vfFieldTy: fieldTy,
          vfMatchingTags: matchingTags)
 
+func branchGroups*(arms: seq[VariantArm]): seq[seq[int]] =
+  ## RFC-0005 S8f. The explicit (`of`) tag ordinals of one variant axis,
+  ## grouped by source branch in branch order: `of kA, kC: … of kB: …`
+  ## gives `@[@[0, 2], @[1]]`. The `else:` arm is left out -- an ordinal in
+  ## no group is the else branch's. See `VariantArm.branchIx`.
+  var ixs: seq[int]
+  for arm in arms:
+    if arm.isElse: continue
+    let g = ixs.find(arm.branchIx)
+    if g < 0:
+      ixs.add arm.branchIx
+      result.add @[arm.tagOrdinal]
+    else:
+      result[g].add arm.tagOrdinal
+
 proc mkVariantReassign*(objName: string, newTag: int,
-                        tagName: string): IRStmt =
+                        tagName: string;
+                        branches: seq[seq[int]]): IRStmt =
   IRStmt(kind: isVariantReassign, vrObjName: objName,
-         vrNewTag: newTag, vrTagName: tagName)
+         vrNewTag: newTag, vrTagName: tagName, vrBranches: branches)
 
 proc mkVariantReassignSymbolic*(objName, discName: string,
-                                rhs: IRExpr): IRStmt =
+                                rhs: IRExpr;
+                                branches: seq[seq[int]]): IRStmt =
   ## Phase 14 cycle A4a (ADR-0003 D4). Symbolic-RHS variant disc
   ## reassignment: `discName == ""` selects the only axis on a
   ## single-axis itVariant; non-empty names a specific axis on an
   ## itMultiVariant.
   IRStmt(kind: isVariantReassignSymbolic,
-         vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs)
+         vrsObjName: objName, vrsDiscName: discName, vrsRhs: rhs,
+         vrsBranches: branches)
 
 proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
                             discExpr: IRExpr, tagSet: seq[int],

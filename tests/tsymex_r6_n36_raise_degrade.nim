@@ -276,25 +276,24 @@ proc sutFloatReassignCallAfter(v: var N36FRec) =
 
 suite "symex N36 -- isVariantReassign defaultZero(float) decline via a call frame":
 
-  test "N36-3: post-call target reaches an honest, PROPERLY-CLASSIFIED sxUnknown (feUnsupportedOp)":
+  test "N36-3: post-call target is reached from the n36fkB branch, never a crash":
     ## PRE-FIX (stash-confirmed): sxUnknown/weInternalWalkerFault ("ValueError:
-    ## defaultZero(float): lands with F7") -- honest (not lost, not a wrong
-    ## verdict) but generically classified by the outer catch-all, not the
-    ## specific in-band idiom. POST-FIX: sxUnknown/feUnsupportedOp, the SAME
-    ## idiom `isCall`'s and `applyClosureGround`'s pre-existing
-    ## `defaultZero`-fallthrough guards already use.
+    ## defaultZero(float): lands with F7"). N36: sxUnknown/feUnsupportedOp.
+    ## RFC-0005 S8f (walker 154): a reassignment no longer zero-initialises
+    ## (Nim raises `FieldDefect` on a branch change and keeps the fields on
+    ## `n36fkB -> n36fkB`), so no `defaultZero` is reached: the target is a
+    ## clean sxSat whose witness starts on `n36fkB`.
     let r = symexFind(sutFloatReassignCallAfter, tLabel("n36_floatreassign_call_after"))
-    check r.status == sxUnknown
-    var sawProperKind = false
+    check r.status == sxSat
     var sawGenericFault = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feUnsupportedOp and "isVariantReassign" in e.msg:
-        sawProperKind = true
       if e.kind == weInternalWalkerFault:
         sawGenericFault = true
-    check sawProperKind
     check not sawGenericFault
+    var w = N36FRec(kind: n36fkB, f: 1.5)
+    sutFloatReassignCallAfter(w)
+    check w.f == 1.5
 
 proc sutFloatReassignNoBlockAfter(v: var N36FRec) =
   v.kind = n36fkB
@@ -302,14 +301,11 @@ proc sutFloatReassignNoBlockAfter(v: var N36FRec) =
 
 suite "symex N36 -- regression: isVariantReassign no-frame companion stays correct":
 
-  test "N36-3-noframe: direct (non-call) reassignment -- properly classified, same kind":
+  test "N36-3-noframe: direct (non-call) reassignment -- same verdict as the call frame":
+    ## RFC-0005 S8f: see N36-3.
     let r = symexFind(sutFloatReassignNoBlockAfter, tLabel("n36_floatreassign_noblock_after"))
-    check r.status == sxUnknown
-    var sawProperKind = false
-    for e in r.errors:
-      if e.kind == feUnsupportedOp and "isVariantReassign" in e.msg:
-        sawProperKind = true
-    check sawProperKind
+    check r.status == sxSat
+    check r.errors.len == 0
 
 # =============================================================================
 # 4. UNSAT companion -- proving the fix does not over-degrade into a false

@@ -845,5 +845,9 @@ task test, "Run the test suite":
             # own env slot, case narrowing keys its scrutinee by symbol,
             # generic callees keep node types, witnesses name types by
             # symbol; walker 152->153.
-            "tsymex_rfc0005_s8e_scoping"]:
+            "tsymex_rfc0005_s8e_scoping",
+            # RFC-0005 S8f -- a clean sxSat's witness reproduces: a table's /
+            # set's size is tied to its present key terms at every check, and
+            # table/set/seq witnesses render len entries; walker 153->154.
+            "tsymex_rfc0005_s8f_witness"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

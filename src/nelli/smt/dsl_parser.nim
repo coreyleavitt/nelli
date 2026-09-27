@@ -513,6 +513,7 @@ proc emitIRType*(t: IRType): NimNode =
         nnkExprColonExpr.newTree(ident"tagName",    newLit(arm.tagName)),
         nnkExprColonExpr.newTree(ident"fieldNames", prefix(fieldNamesLit, "@")),
         nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")),
+        nnkExprColonExpr.newTree(ident"branchIx",   newLit(arm.branchIx)),
         nnkExprColonExpr.newTree(ident"isElse",     newLit(arm.isElse)))
       armsLit.add armCons
     var plainNamesLit = newTree(nnkBracket)
@@ -550,6 +551,7 @@ proc emitIRType*(t: IRType): NimNode =
           nnkExprColonExpr.newTree(ident"tagName",    newLit(arm.tagName)),
           nnkExprColonExpr.newTree(ident"fieldNames", prefix(fieldNamesLit, "@")),
           nnkExprColonExpr.newTree(ident"fieldTypes", prefix(fieldTypesLit, "@")),
+          nnkExprColonExpr.newTree(ident"branchIx",   newLit(arm.branchIx)),
           nnkExprColonExpr.newTree(ident"isElse",     newLit(arm.isElse)))
       var discTagsLit = newTree(nnkBracket)
       for dt in ax.discTags:
@@ -658,11 +660,12 @@ proc emitStmt*(s: IRStmt): NimNode =
             prefix(tagsLit, "@"))
   of isVariantReassign:
     newCall(bindSym"mkVariantReassign",
-            newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName))
+            newLit(s.vrObjName), newLit(s.vrNewTag), newLit(s.vrTagName),
+            newLit(s.vrBranches))
   of isVariantReassignSymbolic:
     newCall(bindSym"mkVariantReassignSymbolic",
             newLit(s.vrsObjName), newLit(s.vrsDiscName),
-            emitExpr(s.vrsRhs))
+            emitExpr(s.vrsRhs), newLit(s.vrsBranches))
   of isVariantConstructSym:
     var tagsLit = newTree(nnkBracket)
     for t in s.vcsTagSet: tagsLit.add newLit(t)
@@ -8244,9 +8247,11 @@ proc parseStmtInner(n: NimNode,
             for arm in recvCls.ty.vArms:
               if arm.tagOrdinal == int(tagIR.ival):
                 tagName = arm.tagName; break
-            return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName)
+            return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName,
+                                     branchGroups(recvCls.ty.vArms))
           # Symbolic RHS: A4 fork path.
-          return mkVariantReassignSymbolic(recv.strVal, "", tagIR)
+          return mkVariantReassignSymbolic(recv.strVal, "", tagIR,
+                                           branchGroups(recvCls.ty.vArms))
         if recvCls.ty.kind == itMultiVariant:
           # Identify which axis owns `fieldNode.strVal` as discName.
           for ax in recvCls.ty.mvAxes:
@@ -8257,7 +8262,7 @@ proc parseStmtInner(n: NimNode,
               # go through the A4 symbolic IR for now (no Phase 11
               # static path was ever implemented for multi-axis).
               return mkVariantReassignSymbolic(
-                recv.strVal, ax.discName, tagIR)
+                recv.strVal, ax.discName, tagIR, branchGroups(ax.arms))
     ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]

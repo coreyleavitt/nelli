@@ -2179,6 +2179,16 @@ fork the ONLY observable behavior, matching ADR-0003's variant-soundness
 posture. Zeroing them would let a buggy twin "read" a value real Nim
 never yields.
 
+**Amended by RFC-0005 S8f (walker 154).** The note above holds for an
+INACTIVE arm only. In `isVariantConstructSym` every fork's OWN arm is the
+active one, and Nim sets none of its fields (a runtime discriminator in
+constructor syntax admits no arm field), so they are `default(T)`, readable
+without a `FieldDefect`. The fresh allocation made `p.rq == 777` a clean
+`sxSat` no input reaches. Every arm's fields are now `defaultZero(ft)`; a
+field type with no modelled default (`defaultZeroTotal` false: containers,
+variants, `distinct`, `ref`/`ptr`, a `range` excluding 0) declines the
+construction.
+
 **Slice plan (round-6 RFC Track A carries the tdd slices).** (1)
 `iekVariantLit` construction + single-arm read-back SAT/UNSAT pins; (2)
 `retBindEq` svVariant arm (variant-returning callees — the chapulin

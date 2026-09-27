@@ -134,12 +134,21 @@ proc s6bSeqFresh(n: int) =
   if s1.len != s2.len:
     symexTarget("s6b_seq_fresh")
 
-proc s6bMaybeFloat(n: int): float =
+type
+  S6bVK = enum s6bA, s6bB
+  S6bV = object
+    case k: S6bVK
+    of s6bA: a: int
+    of s6bB: b: int
+
+proc s6bMaybeVariant(n: int): S6bV =
+  ## RFC-0005 S8f: a variant result has no modelled zero default (a
+  ## `float` one did until walker 154 gave `defaultZero` its float arm).
   if n > 0:
-    result = 1.5
+    result = S6bV(k: s6bB, b: 3)
 
 proc s6bFloatZeroDead(n: int) =
-  let f = s6bMaybeFloat(n)
+  let f = s6bMaybeVariant(n)
   discard f
   if n == 5 and n == 6:
     symexTarget("s6b_float_zero_dead")

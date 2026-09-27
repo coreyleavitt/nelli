@@ -410,6 +410,9 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ##       each mentions only its own occurrence's fresh result (definitional)
     ##   stripDecompConds         -- definitional over per-occurrence fresh
     ##       strings (unique decomposition): admits every channel.
+    ##   cardConds                -- RFC-0005 S8f `containerCardConds`: each
+    ##       table's/set's size >= its distinct present key terms, true of
+    ##       every real table for any term values (prunes no real input).
     ## The call cache (admits `taint == {}` only) and the fresh `Path` roots
     ## are sinks outside trySolve, pinned below.
     var drained: seq[string]
@@ -417,7 +420,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
       if t.startsWith("for c in ") and t.endsWith(":"):
         drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
-                       "currentClosureCallAxioms", "stripDecompConds"]
+                       "currentClosureCallAxioms", "stripDecompConds",
+                       "cardConds"]
 
   test "the parseInt digits-gate pool is gone from the source":
     for f in runtimeFiles():

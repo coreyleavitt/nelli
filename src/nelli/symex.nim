@@ -634,6 +634,11 @@ proc stdName(name: string): NimNode =
   of "readSeqFloat32": bindSym"readSeqFloat32"
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
+  of "readSeqLen": bindSym"readSeqLen"
+  of "refCellIsNil": bindSym"refCellIsNil"        # RFC-0005 S8f
+  of "refCellAlias": bindSym"refCellAlias"        # RFC-0005 S8f
+  of "refCellElemIndex": bindSym"refCellElemIndex"  # RFC-0005 S8f
+  of "rebaseWitness": bindSym"rebaseWitness"      # RFC-0005 S8f
   else:
     error("symex RFC-0005 S8e: stdName has no binding for `" & name & "`")
     nil
@@ -659,18 +664,49 @@ proc defaultValueOf(tyNode: NimNode): NimNode =
       var `w`: `tyNode`
       `w`
 
-proc freshRefCell(pointeeTy: NimNode): NimNode =
-  ## RFC-0005 S8e. A fresh default `ref T` cell, as `block: (var c: ref T;
-  ## new(c); c)`, for the same reason as `defaultValueOf`: `new(T)` needs `T`
-  ## as a `typedesc`, which a recorded type symbol is not.
-  let c = genSym(nskVar, "cell")
-  quote do:
-    block:
-      var `c`: ref `pointeeTy`
-      new(`c`)
-      `c`
-
 proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNode)
+
+proc emitTyAndReaderShared(ty: IRType, path: string,
+                           witId: NimNode): (NimNode, NimNode)
+
+proc emitRefElemsReader(elemIr: IRType; path: string;
+                        witId, n, init: NimNode): NimNode =
+  ## RFC-0005 S8f. The reader of a container of `ref T` (`seq`, `array`):
+  ## `init` is the empty container, `n` its element count. Element `i` is the
+  ## heap-snapshot cell `path[i]`: `nil` when the snapshot says so; the SAME
+  ## ref as element `j < i` when it aliases that element; otherwise a cell
+  ## built by the ordinary `ref T` reader over the leaves at `path[i]` (or at
+  ## the primary it aliases outside this container, e.g. a param -- its
+  ## content, not its identity), re-keyed to a fixed path by `rebaseWitness`.
+  let cellPath = "__nelliElemCell"
+  let subId = genSym(nskLet, "elemWit")
+  let (_, cellReader) = emitTyAndReaderShared(elemIr, cellPath, subId)
+  let contId = genSym(nskVar, "cont")
+  let iId = genSym(nskForVar, "i")
+  let cellId = genSym(nskLet, "cell")
+  let aliasId = genSym(nskLet, "alias")
+  let jId = genSym(nskLet, "j")
+  let nId = genSym(nskLet, "n")
+  let isNil = stdName("refCellIsNil")
+  let aliasOf = stdName("refCellAlias")
+  let elemIx = stdName("refCellElemIndex")
+  let rebase = stdName("rebaseWitness")
+  result = quote do:
+    block:
+      let `nId` = `n`
+      var `contId` = `init`
+      for `iId` in 0 ..< `nId`:
+        let `cellId` = `path` & "[" & $`iId` & "]"
+        if not `isNil`(`witId`, `cellId`):
+          let `aliasId` = `aliasOf`(`witId`, `cellId`)
+          let `jId` = `elemIx`(`aliasId`, `path`)
+          if `jId` >= 0 and `jId` < `iId`:
+            `contId`[`iId`] = `contId`[`jId`]
+          else:
+            let `subId` {.used.} = `rebase`(`witId`,
+              (if `aliasId`.len > 0: `aliasId` else: `cellId`), `cellPath`)
+            `contId`[`iId`] = `cellReader`
+      `contId`
 
 proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
@@ -825,6 +861,12 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
     let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
     let arrTy = newTree(nnkBracketExpr,
       stdName("array"), newLit(ty.size), elemTyNode)
+    if ty.elemTy.kind == itRef:
+      # RFC-0005 S8f: as `seq[ref T]` -- nil, element aliasing, and the
+      # cell's observed fields, read at the heap-snapshot name `path[i]`.
+      return (arrTy, emitRefElemsReader(ty.elemTy, path, witId,
+                                        newLit(ty.size),
+                                        defaultValueOf(arrTy)))
     var arrLit = newTree(nnkBracket)
     for i in 0 ..< ty.size:
       let (_, sv) = emitTyAndReader(ty.elemTy, path & "." & $i, witId)
@@ -900,9 +942,6 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # absent leaf).
       let pointee = ty.seqElemTy.refPointeeTy
       let (innerTy, _) = emitTyAndReader(pointee, path & ".0", witId)
-      let idxId = genSym(nskForVar, "i")
-      let nVar = genSym(nskLet, "n")
-      let seqVar = genSym(nskVar, "s")
       # Cluster H H_witness fix: a DIRECT named ref-object alias (`type Node =
       # ref object`) has NO separately-nameable plain-object symbol — mirrors
       # the `itRef` arm's own `nameIsRefAlias` special-case (~line 1005 below).
@@ -916,17 +955,13 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # already allocates+returns a fresh `ref Node` cell directly.
       let isDirectRefAlias = pointee.kind == itTuple and pointee.nameIsRefAlias
       let elemTy = if isDirectRefAlias: innerTy else: nnkRefTy.newTree(innerTy)
-      # RFC-0005 S8e: built so that `innerTy` stands only in TYPE positions
-      # (an object constructor head, a declaration) -- see `freshRefCell`.
-      let freshElem = if isDirectRefAlias: nnkObjConstr.newTree(innerTy)
-                      else: freshRefCell(innerTy)
-      let reader = quote do:
-        block:
-          let `nVar` = readSeqLen(`witId`, `path`)
-          var `seqVar` = newSeq[`elemTy`](`nVar`)
-          for `idxId` in 0 ..< `nVar`:
-            `seqVar`[`idxId`] = `freshElem`
-          `seqVar`
+      # RFC-0005 S8f: each element renders its OWN cell -- `nil`, the same
+      # ref as an earlier element it aliases, or a cell built from the
+      # leaves the extractor wrote at the heap-snapshot name `path[i]` --
+      # instead of a fresh default (`s[69].v == 3` rendered `v == 0`).
+      let lenCall = newCall(stdName("readSeqLen"), witId, newLit(path))
+      let reader = emitRefElemsReader(ty.seqElemTy, path, witId, lenCall,
+        newCall(nnkBracketExpr.newTree(stdName("newSeq"), elemTy), lenCall))
       (newTree(nnkBracketExpr, stdName("seq"), elemTy), reader)
     else:
       # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
@@ -1060,6 +1095,62 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
             elseArm.fieldTypes[j], armPath, witId)
           ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
         caseStmt.add nnkOfBranch.newTree(tagLit, ctor)
+      # RFC-0005 S8f. A NON-enum (`range[lo..hi]`) discriminator has no
+      # `vDiscTags`, so the loop above rendered no branch for an
+      # else-covered value: a `W(kind: 5, e: 42)` witness fell to the
+      # `default` below and rendered `kind: 0, e: 0` -- a clean `sxSat`
+      # whose witness never reached the target (#163 W6's own fixture).
+      # Render ONE branch over the else arm's whole value set -- the
+      # declared range minus the explicit tags, as ordinal intervals --
+      # constructing with the discriminator bound to the case selector's
+      # `let`: Nim accepts a runtime discriminator in an object constructor
+      # when the enclosing `case` on that `let` proves its branch -- and
+      # only for a discriminator type of at most 2^16 values, the limit
+      # Nim puts on that proof (a wider range keeps the old fallback).
+      if ty.vDiscTags.len == 0 and ty.vDiscTy.hasRange and
+         ty.vDiscTy.rangeHi - ty.vDiscTy.rangeLo < 65536:
+        var ranges: seq[NimNode]
+        var lo = ty.vDiscTy.rangeLo
+        let hi = ty.vDiscTy.rangeHi
+        var explicit: seq[int64]
+        for o in nonElseOrds: explicit.add int64(o)
+        explicit.sort()
+        proc addRun(ranges: var seq[NimNode]; a, b: int64) =
+          if a > b: return
+          let la = newCall(discTyId, newLit(a))
+          if a == b: ranges.add la
+          else: ranges.add infix(la, "..", newCall(discTyId, newLit(b)))
+        for o in explicit:
+          if o < lo or o > hi: continue
+          addRun(ranges, lo, o - 1)
+          lo = o + 1
+        addRun(ranges, lo, hi)
+        if ranges.len > 0:
+          let selId = genSym(nskLet, "discSel")
+          var ctor = newTree(nnkObjConstr, objTyId)
+          for i, fname in ty.vPlainFieldNames:
+            let (_, fReader) = emitTyAndReader(
+              ty.vPlainFieldTypes[i], path & "." & fname, witId)
+            ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+          ctor.add nnkExprColonExpr.newTree(ident(ty.vDiscName), selId)
+          for j, fname in elseArm.fieldNames:
+            let armPath = path & ".@" & $elseArm.tagOrdinal & "." & fname
+            let (_, fReader) = emitTyAndReader(
+              elseArm.fieldTypes[j], armPath, witId)
+            ctor.add nnkExprColonExpr.newTree(ident(fname), fReader)
+          var ofBr = newTree(nnkOfBranch)
+          for r in ranges: ofBr.add r
+          ofBr.add ctor
+          caseStmt.add ofBr
+          caseStmt[0] = selId
+          caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))
+          # The selector must have the FIELD's own type (the reader's
+          # `discTyId` is the range's base type).
+          let fieldTy = newCall(ident"typeof", newDotExpr(
+            defaultValueOf(objTyId), ident(ty.vDiscName)))
+          let blk = newStmtList(
+            newLetStmt(selId, newCall(fieldTy, discReaderExpr)), caseStmt)
+          return (objTyId, newBlockStmt(blk))
     caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))
     (objTyId, caseStmt)
   of itMultiVariant:
@@ -1168,7 +1259,9 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let cellId = genSym(nskVar, "refCell")
       let reader = quote do:
         block:
-          var `cellId`: ref `innerTy`   # RFC-0005 S8e: see `freshRefCell`
+          # RFC-0005 S8e: declared, not `new(T)`: `new` needs `T` as a
+          # `typedesc`, which a recorded type symbol is not.
+          var `cellId`: ref `innerTy`
           new(`cellId`)
           `cellId`[] = `innerReader`
           `cellId`

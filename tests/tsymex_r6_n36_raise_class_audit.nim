@@ -378,7 +378,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 75 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 76 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -406,11 +406,14 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `ckInteger` draw -- no other `SymVal` kind is ever stored there, so
     ## the catch-all is unreachable from any live path, exactly the same
     ## argument `bvEqConst`'s own neighbour marker makes.
-    check runtimeCount == 77
+    ## 77 -> 76 (RFC-0005 S8f, walker 154). `defaultZero`'s float arm now
+    ## returns Nim's `default(float)` (0.0) instead of raising, so its
+    ## category-c marker went with the raise. No site was added.
+    check runtimeCount == 76
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 78 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 79 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -431,7 +434,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## category-d site was added; that backlog stays closed.
     ## 79 -> 80: the same single R24/R25/R26 `evalConcolicDrawInt64` site
     ## counted above (also category-c). No category-d site was added.
-    check cCount == 80
+    ## 80 -> 79: the same `defaultZero` float site removed above (RFC-0005
+    ## S8f).
+    check cCount == 79
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

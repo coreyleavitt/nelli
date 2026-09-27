@@ -83,25 +83,33 @@ type
       opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
 
 proc n15ReassignToB(v: var N15Rec) =
-  v.kind = n15rkB
+  ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
+  ## raises `FieldDefect` in Nim, so the reassignment runs only on the
+  ## branch it keeps; these pins are about the placeholder, not the
+  ## reassignment.
+  if v.kind == n15rkB:
+    v.kind = n15rkB
 
 proc n15IndexOpts(v: var N15Rec) =
   n15ReassignToB(v)
-  let x = v.opts[0]
-  discard x
-  symexTarget("n15_index_opts")
+  if v.kind == n15rkB:
+    let x = v.opts[0]
+    discard x
+    symexTarget("n15_index_opts")
 
 proc n15SliceOpts(v: var N15Rec) =
   n15ReassignToB(v)
-  let x = v.opts[0 .. 0]
-  discard x
-  symexTarget("n15_slice_opts")
+  if v.kind == n15rkB:
+    let x = v.opts[0 .. 0]
+    discard x
+    symexTarget("n15_slice_opts")
 
 proc n15LenOpts(v: var N15Rec) =
   n15ReassignToB(v)
-  let n = v.opts.len
-  discard n
-  symexTarget("n15_len_opts")
+  if v.kind == n15rkB:
+    let n = v.opts.len
+    discard n
+    symexTarget("n15_len_opts")
 
 suite "symex round-6 N15 -- field-sourced placeholder: index/slice unified with .len":
 
@@ -265,19 +273,26 @@ type
       opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
 
 proc n12ReassignToB(v: var N12Rec) =
-  v.kind = n12rkB
+  ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
+  ## raises `FieldDefect` in Nim, so the reassignment runs only on the
+  ## branch it keeps; these pins are about the placeholder, not the
+  ## reassignment.
+  if v.kind == n12rkB:
+    v.kind = n12rkB
 
 proc n12LenOpts(v: var N12Rec) =
   n12ReassignToB(v)
-  let n = v.opts.len
-  discard n
-  symexTarget("n12_len_opts")
+  if v.kind == n12rkB:
+    let n = v.opts.len
+    discard n
+    symexTarget("n12_len_opts")
 
 proc n12ReadOpts(v: var N12Rec) =
   n12ReassignToB(v)
-  let o = v.opts
-  discard o
-  symexTarget("n12_read_opts")
+  if v.kind == n12rkB:
+    let o = v.opts
+    discard o
+    symexTarget("n12_read_opts")
 
 suite "symex round-6 N12 -- decline messages render plain language, not internal IR vocabulary":
 

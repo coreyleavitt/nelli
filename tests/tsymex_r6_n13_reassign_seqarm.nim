@@ -28,6 +28,15 @@
 ## "98"; `renderAsChoicesVersion` stays "11" -- every pin below matched the
 ## engine's ACTUAL observed behavior on first run (confirmed while writing
 ## this file; see the per-suite notes).
+##
+## RFC-0005 S8f (walker 154) removed the premise: Nim never zero-initialises
+## an arm on a discriminator assignment. It raises `FieldDefect` when the
+## assignment changes the object's branch and keeps the fields when it does
+## not (probed on the pinned toolchain), and `isVariantReassign` now models
+## exactly that -- `defaultZero` is no longer called from it. The pins below
+## that encoded the zero-init ("count != 0 after reassignment is
+## unreachable") are restated to what Nim does, each with a run of the real
+## code as its oracle; the no-crash and decline pins keep their purpose.
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -82,18 +91,31 @@ suite "symex N13 -- sibling backed field (count) unaffected by the placeholder s
     let r = symexFind(sutCountZeroSat, tLabel("count_zero_sat"))
     check r.status == sxSat
 
-  test "N13-2b: soundness -- count != 0 after reassignment is UNREACHABLE (sxUnsat)":
+  test "N13-2b: count != 0 after a same-branch reassignment is reachable (S8f)":
+    ## Nim keeps `count` from an input already on `rkB` (and raises on
+    ## `rkA`), so the label IS reachable -- the old `sxUnsat` pinned the
+    ## zero-init Nim does not do.
     let r = symexFind(sutCountNonzeroUnreachable, tLabel("count_nonzero_unreachable"))
-    check r.status == sxUnsat
+    check r.status == sxSat
+    var v = Rec(kind: rkB, count: 3)
+    reassignToB(v)
+    check v.count == 3
+    var w = Rec(kind: rkA, a: 1)
+    expect FieldDefect:
+      reassignToB(w)
 
 # --- (iii) a READ of the placeholder field after reassignment classifies
 #     decline -- never a crash, never a wrong verdict. ---------------------
 
 proc sutReadOptsAfterReassign(v: var Rec) =
-  reassignToB(v)
-  let o = v.opts
-  discard o
-  symexTarget("read_opts_after_reassign")
+  ## RFC-0005 S8f: guarded onto `rkB`, so the assignment cannot raise and
+  ## the run's only question is the decline this suite pins (unguarded, an
+  ## `rkA` input raises `FieldDefect` -- a real `sxRaised`).
+  if v.kind == rkB:
+    reassignToB(v)
+    let o = v.opts
+    discard o
+    symexTarget("read_opts_after_reassign")
 
 suite "symex N13 -- reading the reassigned-in placeholder field classifies decline":
 
@@ -109,8 +131,8 @@ suite "symex N13 -- reading the reassigned-in placeholder field classifies decli
 
 # =============================================================================
 # 2. Control: a BACKED-elem seq field (seq[byte], itInt elem -- inside
-#    `isBackedSeqElemTy`'s set) reassigned the same way gets normal
-#    zero-init semantics (length provably 0), full verdicts -- no decline.
+#    `isBackedSeqElemTy`'s set) reassigned the same way: full verdicts, no
+#    decline (S8f: the field is kept on a same-branch assignment).
 # =============================================================================
 
 type
@@ -118,7 +140,7 @@ type
   Ctl = object
     case kind: CKind
     of ckA: a: int
-    of ckB: bytes: seq[byte]        ## backed elem (itInt) -> real zero-init
+    of ckB: bytes: seq[byte]        ## backed elem (itInt)
 
 proc reassignCtlToB(v: var Ctl) =
   v.kind = ckB
@@ -133,15 +155,18 @@ proc sutCtlLenNonzeroUnreachable(v: var Ctl) =
   if v.bytes.len != 0:
     symexTarget("ctl_len_nonzero_unreachable")
 
-suite "symex N13 -- control: backed-elem seq field reassignment gets real zero-init":
+suite "symex N13 -- control: backed-elem seq field reassignment is fully modelled":
 
   test "N13-4a: bytes.len == 0 after reassignment is reachable (sxSat)":
     let r = symexFind(sutCtlLenZeroSat, tLabel("ctl_len_zero_sat"))
     check r.status == sxSat
 
-  test "N13-4b: soundness -- bytes.len != 0 after reassignment is UNREACHABLE (sxUnsat)":
+  test "N13-4b: bytes.len != 0 after a same-branch reassignment is reachable (S8f)":
     let r = symexFind(sutCtlLenNonzeroUnreachable, tLabel("ctl_len_nonzero_unreachable"))
-    check r.status == sxUnsat
+    check r.status == sxSat
+    var v = Ctl(kind: ckB, bytes: @[1'u8])
+    reassignCtlToB(v)
+    check v.bytes.len == 1
 
 # =============================================================================
 # Version pin

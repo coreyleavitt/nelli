@@ -184,7 +184,32 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "153"
+const symexWalkerVersion* = "154"
+  ## RFC-0005 S8f (2026-09-27) — a clean `sxSat` whose witness reproduces.
+  ## `Table`'s and `HashSet`'s `len` was a free integer never tied to the
+  ## present/member array: `t.len == 0 and t.hasKey("a")` was a false
+  ## `sxSat`, and a `t.len == 2` witness rendered `{:}`. Every check now
+  ## asserts each allocated table's/set's size is at least its number of
+  ## distinct present key terms (`ContainerCardRegistry`, `runtime.nim`), a
+  ## fact of every real table; the extractors render those keys plus fresh
+  ## fill up to `len` (symbolic keys and tables in object fields included,
+  ## where the literal scan rendered nothing), and a seq renders all `len`
+  ## elements (was cut at 64). Verdicts move sxSat -> sxUnsat where only an
+  ## unrealizable table/set reached the target. A discriminator assignment
+  ## that changes the object's source branch now forks `FieldDefect` (Nim
+  ## raises it; the walker modelled the pre-2.0 zero-initialising
+  ## transition), and a same-branch one keeps the branch's fields: a
+  ## reassignment reached from the wrong branch moves sxSat -> sxRaised /
+  ## sxUnsat, and the reassignment IR carries the branch grouping
+  ## (`vrBranches`/`vrsBranches`), so its cache keys change. A runtime-
+  ## discriminator constructor's arm fields are each type's `default(T)`
+  ## (were fresh: `p.rq == 777` was a false `sxSat`); an arm field with no
+  ## modelled default declines the construction. `defaultZero` gains its
+  ## float arm (0.0), so an untouched `float` result binds 0.0 where it was
+  ## havocked. Witness side
+  ## (no key change): a range discriminator's `else:` arm renders its tag and
+  ## fields, and a `seq`/`array` of `ref T` renders each element's own cell
+  ## (nil, element aliasing, observed fields) instead of a fresh default.
   ## RFC-0005 S8e (2026-09-26) — names keyed by symbol. Two distinct locals
   ## of one spelling (a shadowing `var k` in a block, an `if` arm, a loop
   ## body, a for-variable, a closure body, an inlined iterator body) shared
@@ -4503,13 +4528,13 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";tags=[" & tags & "]>"
   of isVariantReassign:
     "St<VR:" & lookupLocal(env, s.vrObjName) & ".kind=" &
-      $s.vrNewTag & ":" & s.vrTagName & ">"
+      $s.vrNewTag & ":" & s.vrTagName & ";br=" & $s.vrBranches & ">"
   of isVariantReassignSymbolic:
     # Phase 14 A4a: distinct prefix `VRS:` so cache keys can't
     # collide with static-tag `VR:` entries.
     "St<VRS:" & lookupLocal(env, s.vrsObjName) & "." &
       (if s.vrsDiscName.len == 0: "kind" else: s.vrsDiscName) &
-      "=" & canonicalize(s.vrsRhs, env) & ">"
+      "=" & canonicalize(s.vrsRhs, env) & ";br=" & $s.vrsBranches & ">"
   of isVariantConstructSym:
     # Round-6 A3 (ADR-0029). Distinct `VCS:` prefix (never collides with
     # `VRS:`/`VL:`). `vcsLoc` is DELIBERATELY excluded — it is pure

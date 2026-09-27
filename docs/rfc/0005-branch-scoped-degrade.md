@@ -112,6 +112,11 @@ title = "Scope-keyed names: shadowed locals, generic callee types, symbol-bound 
 state = "done"
 
 [[slice]]
+id    = "S8f"
+title = "A clean sxSat whose witness reproduces: container cardinality, variant reassignment and construction"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"
@@ -1188,6 +1193,106 @@ its spelling where Nim identifies it by its symbol.
 
 Pins: `tests/tsymex_rfc0005_s8e_scoping.nim` (a)–(d) (+ helper module
 `tests/s8e_user_types.nim`).
+
+**As landed (S8f, walker 154) — a clean `sxSat` whose witness reproduces;
+open.** S8e found `proc f(t: Table[string, int])` with target `t.len == 2`
+returning a clean `sxSat` whose witness rendered `{:}`. This part closes the
+container gap and the variant gaps the replay audit found. The audit also
+found model defects outside this slice's design, so the slice stays open (see
+"Remainder" below).
+
+- **Containers.** `Table`'s and `HashSet`'s `len` was a free integer in
+  `[0, 1024]`, never tied to the present/member array.
+  - The model: every check asserts, for each allocated table and set, `len >=`
+    the number of distinct present key terms among every key term the run
+    selected at (`ContainerCardRegistry`, asserted in `trySolve` as
+    `cardConds`). That is a fact of every real table, so it prunes no real
+    input, and it makes every model realizable.
+  - The extractor renders the present values of the run's key terms plus fresh
+    fill up to `len`. That covers symbolic keys and tables in object fields,
+    where the old literal scan rendered nothing. A seq renders all `len`
+    elements; it was cut at 64.
+  - Audit per container:
+    - `Table` and `HashSet`: fixed as above.
+    - `seq`: the 64-element cut is fixed. `seq`/`array` of `ref T` rendered
+      every element as a fresh default cell. Each element now renders its own
+      cell: nil, an earlier element it aliases, or its observed fields.
+    - `string`: Z3's own `str.len`, sound and faithful. No gap.
+    - `OrderedTable` and `CountTable`: not modelled. They decline with
+      `feUnsupportedParamType`, so there is no claim to be wrong.
+- **Variant reassignment (ADR-0003 amended).** Nim 2 raises `FieldDefect` on
+  a discriminator assignment that changes the object's branch, and keeps the
+  fields on one that does not. The walker modelled the pre-2.0 zero-init.
+  Both reassignment arms now fork `FieldDefect` on "old branch != new branch"
+  and carry the branch's fields otherwise. The IR carries the branch grouping
+  as `vrBranches`/`vrsBranches`, so the cache keys change.
+- **Variant construction (ADR-0029 amended).** In `isVariantConstructSym`,
+  every arm field is now its type's `default(T)`; it was fresh, so
+  `p.rq == 777` was a false `sxSat`. A field with no modelled default declines
+  the construction.
+- **`defaultZero` float arm.** `defaultZero(float)` returns 0.0; it raised.
+  Construction needs it, and an untouched `float` call result now binds Nim's
+  `default(float)` where it was havocked (`feUnsupportedOpHavoc`). The
+  "no zero default" pins in `r6_r2_zerodefault_result` and `s6b_ops` move to
+  a variant result.
+- **Range-discriminator witness.** A `range` discriminator's `else:` arm
+  renders its tag and fields; it rendered `kind: 0`.
+- **Replay decision (S10 on clean candidates): no.** Replay is not extended
+  to confirm clean candidates as the mechanism for the minimum. A test-only
+  patch replayed every clean `sxSat`/`sxRaised` in the suite against the real
+  SUT and showed three problems:
+  - Faithful refutations were real model defects, fixed here or listed below.
+  - Four were wrong refutations from a settings mismatch: the analysis
+    declares unchecked integer semantics while the SUT build is checked
+    (`163rev_concolic_modes:340`, `phase2_overflow:48/55`,
+    `161_overflow_obligation`). Clean replay would demote true claims unless
+    it is gated on the declared semantics matching the build.
+  - Every `ref`-witness miss is `wfLossy` or `wfUnexecutable`, and a lossy or
+    unexecutable miss is inconclusive by S10's own rule. So replay cannot
+    enforce the minimum where it is violated most.
+
+  The mechanism is therefore by-construction fixes, as above. A gated clean
+  replay as a safety net is the open fork (c) below.
+- **Flips.**
+
+  | SUT | before | after |
+  |---|---|---|
+  | `t.len == 0 and t.hasKey("a")` (and the set twin) | `sxSat` (false) | `sxUnsat` |
+  | `t.len == 2`, symbolic key, table in a field | `sxSat`, witness `{:}` | `sxSat`, reproduces |
+  | branch-changing reassignment of a param | `sxSat` from the wrong branch | `sxSat` from the new branch, or `sxRaised` `FieldDefect` |
+  | branch-changing reassignment of a local | `sxSat` (false) | `sxRaised` `FieldDefect`, checked |
+  | same-branch reassignment reading the kept field | `sxUnsat` (false) | `sxSat` |
+  | runtime-discriminator construction, arm field `!= 0` | `sxSat` (false) | `sxUnsat` |
+  | untouched `float` result | `sxUnknown` raw (havoc), replayed to `sxSat` | `sxSat` clean; `!= 0.0` is `sxUnsat` |
+
+- **Remainder (open; the slice's blocker).** Faithful replay refutations
+  outside this slice's design:
+  - float-to-int conversion never raises in Nim 2.2.10: `int(1e30)`, NaN and
+    Inf give `low(int)`. So R16-2's `RangeDefect` fork is fictional. Every
+    `sxRaised` in `CR3_CR4_CR6_float`, `cr9_lowerInExpr`, `F5_float_conv`,
+    `F5_probeproto`, `R16_2b_shortcircuit_conv` and `R16_2_rangedefect` is
+    false, plus that last file's `sxSat` at :59.
+  - `split(s, "")` gives `@[s]` in Nim but is modelled bytewise
+    (`S5_strops:101`).
+  - `new int` is not zero-initialised (`r2_new:87/93`).
+  - Unary negation overflow is unmodelled: `-low(int)` raises
+    `OverflowDefect` (`r6_r2_zerodefault_result:369`).
+  - Slice and `seq.del` out of bounds raise `RangeDefect`, but are claimed as
+    `IndexDefect` (`r4_seq_slice:115`, `r6_n14_seqops:312`).
+  - `ref`-witness lossiness, probe-confirmed non-reproducing `sxSat`:
+    - a top-level ref param's nil renders non-nil;
+    - cross-param aliasing `p == q` renders distinct cells;
+    - a recursive live ref field renders nil;
+    - a ref in a by-value object field does not render.
+  - The symbolic reassignment's candidate tags skip the `else:` arm (-1), so
+    paths to else-covered values are dropped (a false-`sxUnsat` risk).
+
+Pins: `tests/tsymex_rfc0005_s8f_witness.nim` (a)–(e); re-pinned to Nim
+semantics, each with a real-SUT oracle where one applies: `phase11_walker`,
+`r6_n13`, `r6_a3`, `r6_a4`, `r6_n9`, `r6_lows_blockparse`, `r6_n14_seqops`,
+`r6_lows_declines`, `r6_n36_raise_degrade`, `r6_r2_zerodefault_result`,
+`rfc0005_s6b_ops`; the audit inventories `r6_n27` (+2 guarded
+`seqDataRaw` reads) and `r6_n36_raise_class_audit` (-1 float raise).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

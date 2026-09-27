@@ -400,25 +400,33 @@ type
       opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
 
 proc mkPlaceholderRec(v: var MRec) =
-  v.kind = mkB
+  ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
+  ## raises `FieldDefect` in Nim, so the reassignment runs only on the
+  ## `mkB` branch it keeps; the pins below are about the placeholder, not
+  ## the reassignment.
+  if v.kind == mkB:
+    v.kind = mkB
 
 proc mutIndexAssignOnPlaceholder(v: var MRec, i: int) =
   mkPlaceholderRec(v)
-  var o = v.opts
-  o[i] = ("k", "v")
-  symexTarget("mut_indexassign_placeholder")
+  if v.kind == mkB:
+    var o = v.opts
+    o[i] = ("k", "v")
+    symexTarget("mut_indexassign_placeholder")
 
 proc mutPopOnPlaceholder(v: var MRec) =
   mkPlaceholderRec(v)
-  var o = v.opts
-  discard o.pop()
-  symexTarget("mut_pop_placeholder")
+  if v.kind == mkB:
+    var o = v.opts
+    discard o.pop()
+    symexTarget("mut_pop_placeholder")
 
 proc mutDelOnPlaceholder(v: var MRec, i: int) =
   mkPlaceholderRec(v)
-  var o = v.opts
-  o.del(i)
-  symexTarget("mut_del_placeholder")
+  if v.kind == mkB:
+    var o = v.opts
+    o.del(i)
+    symexTarget("mut_del_placeholder")
 
 suite "N14 — mutation on a placeholder-ized seq (item 1 audit pin, round-6 fix round 3)":
   test "index-assign on a placeholder receiver classifies sxUnknown, never a crash":

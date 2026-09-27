@@ -8,11 +8,14 @@
 ## `extractTableEntries` -- the exact gap `extractSeqElements` already had
 ## to close for `seq[range[lo..hi]]` one container over.
 ##
-## The escalation: `collectTableLitKeys`/`collectTableLitKeysExpr` is a pure
+## The escalation: `collectTableLitKeys`/`collectTableLitKeysExpr` was a pure
 ## STATIC scan of the whole `prog.body` (both branches of every `if`,
 ## `while`, `try`), run once per Table param BEFORE any path walking. A
 ## literal key referenced ANYWHERE lands in `tabKeys[paramName]`, regardless
-## of which path the solver actually walks. Presence and the range
+## of which path the solver actually walks. (RFC-0005 S8f replaced the scan
+## with the run's key-term registry, `ContainerCardRegistry`: every key the
+## run lowered, on any path -- the same "extracted but not range-constrained
+## on this path" shape, plus fresh fill keys up to `len`.) Presence and the range
 ## constraint are asserted only by the `isIndex` walk site itself, on
 ## whichever path executes it. So a key that is only ever READ on a branch
 ## the winning path does NOT take is still extracted by

@@ -151,6 +151,19 @@ For nested variants in arm fields, `allocateSym`'s recursion handles
 construction correctly. Nim's type system prevents direct self-recursion
 in objects (only via `ref`), so cycles are bounded.
 
+**Amended by RFC-0005 S8f (walker 154).** The zero-init premise of D4/D5
+was the pre-2.0 `nimOldCaseObjects` behaviour. Nim 2 raises `FieldDefect`
+("assignment to discriminant changes object branch") on ANY discriminator
+assignment that changes the object's source branch, and keeps the fields on
+one that does not (probed on the pinned toolchain for a `var` param, a
+local, and a default-initialised object). Both reassignment arms now fork
+`FieldDefect` on "old discriminator's branch != new tag's branch" and
+continue on the same branch with that branch's fields carried over (the
+per-tag field sets of a multi-tag `of a, b:` branch are joined by an ite on
+the old discriminator). The static-tag arm no longer zero-initialises, so
+D5's construction is no longer reached from it. The branch grouping travels
+on the IR as `vrBranches`/`vrsBranches`, built from `VariantArm.branchIx`.
+
 ### D6. Z3Int discriminator promotion mandatory under `isOptimised`
 
 Under `isOptimised`, the variant discriminator `vDisc` is promoted from

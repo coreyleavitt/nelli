@@ -98,7 +98,10 @@ type
 proc sutWithinBudgetTracer(b: byte, n: int) =
   let op = if b == 1'u8: op2Rrq else: op2Wrq
   let p = TwoTagPkt2(opcode: op, tag: n)
-  if p.opcode == op2Rrq and p.rq == 777:
+  # RFC-0005 S8f (walker 154): a runtime-discriminator constructor's arm
+  # fields are `default(T)`, so the tracer reads `rq == 0` (was `777`, a
+  # value no real input yields).
+  if p.opcode == op2Rrq and p.rq == 0:
     symexTarget("n9_within_budget_sat")
 
 proc sutWithinBudgetUnsatCompanion(b: byte, n: int) =

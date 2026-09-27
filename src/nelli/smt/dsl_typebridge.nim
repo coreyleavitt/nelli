@@ -569,6 +569,7 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
               tagOrdinal: -1, tagName: "else",
               fieldNames: armFieldNames,
               fieldTypes: armFieldTypes,
+              branchIx: k,   # RFC-0005 S8f
               isElse: true)
             continue
           # Emit one arm per tag literal listed in this branch.
@@ -592,7 +593,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
             arms.add VariantArm(
               tagOrdinal: tagOrd, tagName: tagName,
               fieldNames: armFieldNames,
-              fieldTypes: armFieldTypes)
+              fieldTypes: armFieldTypes,
+              branchIx: k)   # RFC-0005 S8f: tags of one `of` share it
         # Phase 14 cycle A2. Snapshot the disc enum's full (name,
         # ordinal) domain — walker uses ords to bound the disc
         # range when an `else:` arm is present; witness emitter

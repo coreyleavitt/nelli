@@ -235,8 +235,9 @@ suite "symex round-6 R2 — supported zero-default return types (bool / string /
     check r.status == sxUnsat
 
 # -----------------------------------------------------------------------------
-# 5b. A return type the zero machinery genuinely CANNOT back soundly (float --
-# `defaultZero` declines every float kind, unrelated to this slice) must
+# 5b. A return type the zero machinery genuinely CANNOT back soundly (a
+# variant object; float was the example until RFC-0005 S8f gave `defaultZero`
+# its float arm) must
 # classified-decline, never crash and never bind a wrong value. Assert
 # kind + severity, the `bug2_scopeddecline` idiom.
 # -----------------------------------------------------------------------------
@@ -258,19 +259,47 @@ proc sutFloatZeroDeclines(x: int) =
   if x <= 0:
     symexTarget("float_zero_declines")
 
+proc sutFloatZeroNonzero(x: int) =
+  let r = maybeSetFloat(x)
+  if x <= 0 and r != 0.0:
+    symexTarget("float_zero_nonzero")
+
+type
+  R2VK = enum r2A, r2B
+  R2V = object
+    case k: R2VK
+    of r2A: a: int
+    of r2B: b: int
+
+proc maybeSetVariant(x: int): R2V =
+  if x > 0:
+    result = R2V(k: r2B, b: 3)
+
+proc sutVariantZeroDeclines(x: int) =
+  let r = maybeSetVariant(x)
+  discard r
+  if x <= 0:
+    symexTarget("variant_zero_declines")
+
 suite "symex round-6 R2 — honest decline: a return type defaultZero cannot back (float)":
 
   test "T5g: the assigned float path still proves sxSat (unaffected regression)":
     let r = symexFind(sutFloatAssignedSat, tLabel("float_assigned_sat"))
     check r.status == sxSat
 
-  test "T5h: the untouched float path classified-declines, never a crash or a bound wrong value":
-    ## RFC-0005 S10: `x <= 0` is reachable whatever the untouched
-    ## float result is. The path's taint is
-    ## dcFreshSymbol only, so the candidate is REPLAYED (rule 3) and the real
-    ## fn confirms it -> sxSat; rules 1-2 alone still decide sxUnknown, and
-    ## the classified kind is still recorded.
+  test "T5h: the untouched float path binds 0.0 (RFC-0005 S8f; was a classified decline)":
+    ## Walker 154 gives `defaultZero` its float arm (Nim's `default(float)`
+    ## is 0.0), so the untouched path is modelled, not havocked: a clean
+    ## sxSat with no decline, and `r != 0.0` there is unreachable.
     let r = symexFind(sutFloatZeroDeclines, tLabel("float_zero_declines"))
+    check r.status == sxSat
+    check rfc0005RawStatus == sxSat
+    check r.errors.len == 0
+    let z = symexFind(sutFloatZeroNonzero, tLabel("float_zero_nonzero"))
+    check z.status == sxUnsat
+
+  test "T5h-2: a result type with no zero default (a variant) still declines, never a bound wrong value":
+    let r = symexFind(sutVariantZeroDeclines, tLabel("variant_zero_declines"))
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
     var sawKind = false

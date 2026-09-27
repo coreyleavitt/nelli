@@ -112,8 +112,9 @@ suite "symex re-test C3 — HashSet membership keyed by svInt":
     ## v64 fixed the crash (svBV64 key assert → svIntToBV bridge) but the
     ## extracted witness still missed symbolically-keyed members (`s = ""`,
     ## `hs = {}` — the literal-candidate scan cannot see an `int2bv(len(s))`
-    ## key). v65 harvests the model's own store chain
-    ## (`harvestSetStoreKeys`), so the witness must now be consistent.
+    ## key). v65 harvested the model's own store chain
+    ## (`harvestSetStoreKeys`); RFC-0005 S8f renders the model value of every
+    ## membership key term the run lowered, so the witness must be consistent.
     let r = symexFind(lenInSet, tLabel("len-member"))
     check r.status == sxSat
     check r.witness[0].len in r.witness[1]

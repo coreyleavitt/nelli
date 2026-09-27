@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 72 marked lines (69 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 74 marked lines (71 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -224,13 +224,18 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## RFC-0005 S9 (walker 152) added `sameSymVal`'s svSeq arm: two lines
     ## comparing Z3 handles and the placeholder flag for identity, lowering
     ## nothing (a closure body's by-reference write check). 67 + 2 = 69.
+    ##
+    ## RFC-0005 S8f (walker 154) added `extractFromSymVal`'s `seq[ref T]`
+    ## element cells: two lines reading `seqDataRaw` inside the `else` of the
+    ## `isUnsupportedFieldPlaceholder` guard directly above them, so a
+    ## placeholder never reaches them. 69 + 2 = 71.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 69
+    check runtimeCount == 71
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

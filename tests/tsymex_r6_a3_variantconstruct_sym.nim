@@ -24,6 +24,12 @@
 ## refactor gets the full declared-arm-count fork cost) lets a wide enum
 ## narrowed to <= budget construct instead of declining.
 ##
+## RFC-0005 S8f (walker 154): the construction's arm fields are now each
+## field type's `default(T)` -- Nim sets no arm field here, so the old
+## FRESH allocation let `p.rq == 777` be a clean `sxSat` no input reaches.
+## A3-1/A3-4a/A3-4c are re-pinned below and every `sxSat` replays its
+## witness on the real SUT.
+##
 ## Bumps `symexWalkerVersion` 76->77: verdict-surface change (previously
 ## `sxUnknown` symbolic-disc constructions now resolve to real `sxSat`/
 ## `sxUnsat` below budget, or a classified decline at/above it).
@@ -31,6 +37,13 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/types
+
+template reached(call: untyped; label: string): bool =
+  ## RFC-0005 S8f: runs the SUT on the witness in a capture frame.
+  block:
+    symexCaptureBegin()
+    call
+    label in symexCaptureEnd()
 
 # ---------------------------------------------------------------------------
 # SUTs — two-tag shape (protocol.nim:166 replica: a two-tag variant built
@@ -54,7 +67,8 @@ type
 proc sutTracer(b: byte, n: int) =
   let op = if b == 1'u8: opRrq else: opWrq
   let p = TwoTagPkt(opcode: op, tag: n)
-  if p.opcode == opRrq and p.rq == 777:
+  # RFC-0005 S8f: arm fields are `default(T)` (was `p.rq == 777`).
+  if p.opcode == opRrq and p.rq == 0:
     symexTarget("tracer_rrq_rq777")
 
 # --- Test 2: UNSAT companion — soundness, not a free/unconstrained fork.
@@ -175,6 +189,7 @@ suite "symex round-6 A3 — isVariantConstructSym tracer + soundness":
     let res = symexFind(sutTracer, tLabel("tracer_rrq_rq777"))
     check res.status == sxSat
     check res.witness[0] == 1'u8
+    check reached(sutTracer(res.witness[0], res.witness[1]), "tracer_rrq_rq777")
 
   test "A3-2: UNSAT companion — op==opRrq forces b==1'u8, so b!=1'u8 in the same conjunction is impossible":
     let res = symexFind(sutUnsatCompanion, tLabel("unsat_rrq_but_b_not_1"))
@@ -194,17 +209,20 @@ suite "symex round-6 A3 — fork-per-tag observable":
 
 suite "symex round-6 A3 — fresh inactive-arm fields PER FORK (dedicated divergence pin)":
 
-  test "A3-4a: the active fork's arm field reaches a nonzero value — not zero-forced":
+  test "A3-4a: the active fork's arm field is default(T), never 777 (RFC-0005 S8f; was a false sxSat)":
+    ## Nim accepts a runtime discriminator in constructor syntax only when
+    ## no arm field is set, so `rq` is 0 on every input.
     let res = symexFind(sutFreshFieldNonzero, tLabel("fresh_rq_777"))
-    check res.status == sxSat
+    check res.status == sxUnsat
 
-  test "A3-4b: the SAME fork's arm field independently reaches zero too — genuinely free, not pinned":
+  test "A3-4b: the SAME fork's arm field is zero":
     let res = symexFind(sutFreshFieldZero, tLabel("fresh_rq_zero"))
     check res.status == sxSat
+    check reached(sutFreshFieldZero(res.witness[0], res.witness[1]), "fresh_rq_zero")
 
-  test "A3-4c: the OTHER fork's own arm field is independently fresh too":
+  test "A3-4c: the OTHER fork's own arm field is default(T) too (RFC-0005 S8f; was a false sxSat)":
     let res = symexFind(sutFreshFieldOtherFork, tLabel("fresh_wq_555"))
-    check res.status == sxSat
+    check res.status == sxUnsat
 
 suite "symex round-6 A3 — parse-time case-branch tag-set narrowing":
 

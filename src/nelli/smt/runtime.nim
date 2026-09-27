@@ -1181,20 +1181,102 @@ var loweringDegradeErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## `runSymexImpl` entry; drained (dedup'd) into `RawResult.errors` on every
   ## verdict branch — exactly the R9 `heapDepthErrors` idiom.
 
-var setMembershipKeyTerms* {.threadvar.}: Table[uint, seq[Z3AnyAst]]
-  ## v65 (round-3 ledger: HashSet witness gap, root-caused). Registry of the
-  ## exact KEY TERMS asserted in `iekContains`/svSet membership constraints,
-  ## keyed by the membership array's raw AST pointer. Why it exists: for a
-  ## symbolically-keyed membership (`s.len in hs`), Z3's simplest model is
-  ## the CONST-TRUE array — the set is universal, there is no store chain to
-  ## harvest and no literal candidate to probe, so the extracted finite
-  ## witness came out EMPTY (observed `s = "", hs = {}` — inconsistent).
-  ## Evaluating each recorded key term under the model yields the concrete
-  ## member(s) the program actually tested — the minimal faithful finite
-  ## rendering of a possibly-universal model set. Reset at `runSymexImpl`
-  ## entry. Mutated sets (`incl` → `store`) re-key to the new array AST and
-  ## simply miss — extraction then falls back to candidates + store-chain
-  ## harvest, the pre-v65 behaviour.
+type ContainerCardRegistry* = object
+  ## RFC-0005 S8f. What ties a `Table`'s / `HashSet`'s `len` to its content.
+  ##
+  ## The model of a `Table[string, int]` is a present array, a data array
+  ## and a size integer (`allocateSym`'s `itTable` arm); a `HashSet[int]` is a
+  ## member array and a size. Before S8f nothing related the size to the
+  ## array: `len` was a free integer in `[0, 1024]`. Two defects followed.
+  ##   * The MODEL admitted states no real table has. `t.len == 0 and
+  ##     t.hasKey("a")` was a clean, false `sxSat`, and a `[]=`/`incl`
+  ##     growing a table/set that already held another key could leave
+  ##     `len == 1`.
+  ##   * The EXTRACTOR ignored `len`: a `t.len == 2` witness rendered `{:}`,
+  ##     a clean `sxSat` whose witness does not reach the target.
+  ## Z3 has no cardinality over arrays, but none is needed. The program
+  ## observes an array only by `select`ing it at KEY TERMS, and the run
+  ## records every one here (`noteTableKey` / `noteSetKey`, at each
+  ## `select`/`store` site). A model is realizable iff, for every allocated
+  ## table/set (`registerTableBase` / `registerSetBase`, at allocation),
+  ## `size >=` the number of DISTINCT key-term values at which the array is
+  ## present: the real content is then those keys plus `size - count` keys
+  ## no term names, which no `select` can observe. `containerCardConds`
+  ## asserts exactly that inequality into every `trySolve`. It is a fact
+  ## about every real table for ANY values of the terms, including terms
+  ## recorded on another path (their symbols are then free), so it prunes
+  ## only unrealizable models -- never a real input, never a false
+  ## `sxUnsat`. The extractors (`extractTableEntries` /
+  ## `extractSetMembers`) render that same content, so a clean witness
+  ## reproduces by construction.
+  ##
+  ## Registries are global to the run, not per array: a store makes a new
+  ## array handle, and the key of every store and select on any array
+  ## derived from a base is a select on the base (store(a, k, v)[j] is
+  ## a[j] for j != k). Reset at `runSymexImpl` entry. Entries are deduped
+  ## by Z3 AST handle (Z3 hash-conses equal terms).
+  tabBases*: seq[tuple[present: Z3AnyAst, size: Z3Int]]
+  tabKeys*:  seq[Z3String]
+  setBases*: seq[tuple[members: Z3AnyAst, size: Z3Int]]
+  setKeys*:  seq[Z3BitVec[64]]
+  seen:      HashSet[pointer]
+
+var containerCard* {.threadvar.}: ContainerCardRegistry
+  ## RFC-0005 S8f. The run's `ContainerCardRegistry`. Replaces v65's
+  ## per-array `setMembershipKeyTerms`, which keyed on the membership
+  ## array's handle and so lost every key tested after an `incl`/`excl`.
+
+proc firstSighting(raw: pointer): bool =
+  ## RFC-0005 S8f. True the first time `raw` is registered this run.
+  if raw in containerCard.seen: return false
+  containerCard.seen.incl raw
+  true
+
+proc registerTableBase(present: Z3AnyAst; size: Z3Int) =
+  ## RFC-0005 S8f. An allocated `Table[string, int]`: its present array and
+  ## size (see `ContainerCardRegistry`).
+  if firstSighting(cast[pointer](present.raw)):
+    containerCard.tabBases.add (present: present, size: size)
+
+proc registerSetBase(members: Z3AnyAst; size: Z3Int) =
+  ## RFC-0005 S8f. An allocated `HashSet[int]`: its member array and size.
+  if firstSighting(cast[pointer](members.raw)):
+    containerCard.setBases.add (members: members, size: size)
+
+proc noteTableKey(k: Z3String) =
+  ## RFC-0005 S8f. A key term some table array is selected or stored at.
+  if firstSighting(cast[pointer](k.raw)):
+    containerCard.tabKeys.add k
+
+proc noteSetKey(k: Z3BitVec[64]) =
+  ## RFC-0005 S8f. A key term some set array is selected or stored at.
+  if firstSighting(cast[pointer](k.raw)):
+    containerCard.setKeys.add k
+
+proc distinctPresentCount[K](arr: Z3Array[K, Z3Bool]; keys: seq[K]): Z3Int =
+  ## RFC-0005 S8f. The number of DISTINCT values among `keys` at which `arr`
+  ## holds: key i counts iff it is present and differs from every earlier
+  ## key. Quadratic in the key terms, which are few (one per distinct
+  ## key expression the run lowered).
+  result = mkInt(0)
+  for i in 0 ..< keys.len:
+    var counts = select(arr, keys[i])
+    for j in 0 ..< i:
+      counts = counts and (keys[i] != keys[j])
+    result = result + ite(counts, mkInt(1), mkInt(0))
+
+proc containerCardConds(): seq[Z3Bool] =
+  ## RFC-0005 S8f. `size >= distinctPresentCount(array, keyTerms)` for every
+  ## allocated table and set: see `ContainerCardRegistry` for why this is
+  ## both sound (true of every real table) and sufficient (every model
+  ## satisfying it is realized by the extractors).
+  for b in containerCard.tabBases:
+    let present = wrap[Z3Array[Z3String, Z3Bool]](b.present.ctx, b.present.raw)
+    result.add (b.size >= distinctPresentCount(present, containerCard.tabKeys))
+  for b in containerCard.setBases:
+    let members = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
+      b.members.ctx, b.members.raw)
+    result.add (b.size >= distinctPresentCount(members, containerCard.setKeys))
 
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
@@ -2741,6 +2823,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         let sizeSym = mkIntVar(baseName & ".len")
         pcOut.add (sizeSym >= mkInt(0))
         pcOut.add (sizeSym <= mkInt(1024))   ## same ceiling as seqs
+        # RFC-0005 S8f: tie `sizeSym` to the present array at every check.
+        registerTableBase(presentAst, sizeSym)
         SymVal(kind: svTable, tabDataRaw: dataAst,
                tabPresentRaw: presentAst, tabSize: sizeSym,
                tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
@@ -2767,6 +2851,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       let sizeSym = mkIntVar(baseName & ".len")
       pcOut.add (sizeSym >= mkInt(0))
       pcOut.add (sizeSym <= mkInt(1024))
+      # RFC-0005 S8f: tie `sizeSym` to the member array at every check.
+      registerSetBase(memAst, sizeSym)
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
@@ -3643,16 +3729,18 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   ## known, so no `pcOut`/path-condition threading is needed the way
   ## `allocateSym` needs for a genuinely free symbol). Inherits `allocateSym`'s
   ## scope for containers — Table with non-string keys and HashSet with
-  ## non-int64 elements still raise (RFC §A5 sub-deferral); `itFloat*`/
+  ## non-int64 elements still raise (RFC §A5 sub-deferral);
   ## `itVariant`/`itMultiVariant`/`itDistinct`/`itRef`/`itPtr` also still
   ## raise (never wired for zero-init — out of both A5's and R2's scope; a
   ## caller reaching one of these must classified-decline, never bind a wrong
-  ## value).
+  ## value). `itFloat*` returns 0.0 since RFC-0005 S8f (walker 154).
+  ## `defaultZeroTotal` (below) says, without calling it, whether this
+  ## returns.
   case t.kind
   of itUninterp:
     raise newException(ValueError, "defaultZero(itUninterp): lands with cluster E")  # [raise-audited: category-c: documented out-of-scope invariant (defaultZero's own doc: itUninterp zero-init never wired, out of A5/R2 scope)]
-  of itFloat32, itFloat64:
-    raise newException(ValueError, "defaultZero(float): lands with F7")  # [raise-audited: category-c: documented out-of-scope invariant -- unreached via applyClosureGround's fallback chain since symValFromRawAst already succeeds for itFloat32/64 before any defaultZero call]
+  of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32(0'f32))
+  of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64(0.0))
   of itBool: SymVal(kind: svBool, bo: mkBool(false))
   of itInt:
     case t.width
@@ -3750,6 +3838,25 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     raise (ref SymexRefUnresolvedError)(  # [raise-audited: converted-at-chokepoint -- all 3 defaultZero callers wrap ValueError/SymexRefUnresolvedError]
       msg: "ref/ptr zero-init " & $t &
            " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
+
+func defaultZeroTotal(t: IRType): bool =
+  ## RFC-0005 S8f: true exactly when `defaultZero(t)` returns Nim's
+  ## `default(T)` without raising, so a caller with no `try` in scope (the
+  ## walker bans non-top-level `try`) can pick `defaultZero` or a classified
+  ## decline BEFORE the call. An `itInt` whose `range` excludes 0 is not
+  ## total: `defaultZero` would bind 0, a value the type cannot hold.
+  case t.kind
+  of itBool, itString, itFloat32, itFloat64: true
+  of itInt:
+    t.width in {8, 16, 32, 64} and
+      (not t.hasRange or (t.rangeLo <= 0 and 0 <= t.rangeHi))
+  of itTuple:
+    for ft in t.fields:
+      if not defaultZeroTotal(ft): return false
+    true
+  of itArray: defaultZeroTotal(t.elemTy)
+  of itSeq: true
+  else: false
 
 # ---------------------------------------------------------------------------
 # R1 (walker v89) — placeholder read-totality CHOKEPOINT.
@@ -5666,6 +5773,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let vbv = case val.kind
         of svBV64: val.bv64
         else: mkBitVec[64](0'i64)
+      noteTableKey(keySV.str)   ## RFC-0005 S8f
       let newData = store(typedData, keySV.str, vbv)
       let newPresent = store(typedPresent, keySV.str, mkBool(true))
       let wasPresent = select(typedPresent, keySV.str)
@@ -5696,6 +5804,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let keySV = lower(env, e.mutArg, some(keyProto))
     let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
       recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
+    noteTableKey(keySV.str)   ## RFC-0005 S8f
     let wasPresent = select(typedPresent, keySV.str)
     let newPresent = store(typedPresent, keySV.str, mkBool(false))
     let newSize = ite(wasPresent, recv.tabSize - mkInt(1), recv.tabSize)
@@ -5711,6 +5820,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     doAssert elem.kind == svBV64
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
       recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
+    noteSetKey(elem.bv64)   ## RFC-0005 S8f
     let wasMember = select(typed, elem.bv64)
     let newMembers = store(typed, elem.bv64, mkBool(true))
     let newSize = ite(wasMember, recv.setSize, recv.setSize + mkInt(1))
@@ -5724,6 +5834,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     doAssert elem.kind == svBV64
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
       recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
+    noteSetKey(elem.bv64)   ## RFC-0005 S8f
     let wasMember = select(typed, elem.bv64)
     let newMembers = store(typed, elem.bv64, mkBool(false))
     let newSize = ite(wasMember, recv.setSize - mkInt(1), recv.setSize)
@@ -5807,6 +5918,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       doAssert keySV.kind == svString
       let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
         recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
+      noteTableKey(keySV.str)   ## RFC-0005 S8f
       ofBool(select(typedPresent, keySV.str))
     of svSet:
       # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
@@ -5840,12 +5952,12 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                " — expected svBV64 (weInternalWalkerFault)")
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__setKeyDegrade"), fresh)
-      # v65: record the key TERM for witness extraction (see
-      # `setMembershipKeyTerms` — a symbolically-keyed membership can be
-      # satisfied by a const-true model array, leaving nothing else to
-      # enumerate the witness from).
-      setMembershipKeyTerms.mgetOrPut(
-        cast[uint](recv.setMembersRaw.raw), @[]).add toAnyAst(keySV.bv64)
+      # v65 / RFC-0005 S8f: record the key TERM (see
+      # `ContainerCardRegistry`): the cardinality constraint counts it, and
+      # the extractor renders its model value -- a symbolically-keyed
+      # membership can be satisfied by a const-true model array, leaving
+      # nothing else to enumerate the witness from.
+      noteSetKey(keySV.bv64)
       let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
         recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
       ofBool(select(typed, keySV.bv64))
@@ -6280,208 +6392,6 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
-proc collectSetLitMembers(s: IRStmt, paramName: string,
-                          members: var HashSet[int64])
-proc collectSetLitMembersExpr(e: IRExpr, paramName: string,
-                              members: var HashSet[int64]) =
-  if e == nil: return
-  case e.kind
-  of iekBinop:
-    collectSetLitMembersExpr(e.lhs, paramName, members)
-    collectSetLitMembersExpr(e.rhs, paramName, members)
-  of iekUnop:
-    collectSetLitMembersExpr(e.operand, paramName, members)
-  of iekField:
-    collectSetLitMembersExpr(e.obj, paramName, members)
-  of iekIndex:
-    collectSetLitMembersExpr(e.arr, paramName, members)
-    collectSetLitMembersExpr(e.idx, paramName, members)
-  of iekContains:
-    if e.container != nil and e.container.kind == iekVar and
-       e.container.vname == paramName and
-       e.key != nil and e.key.kind == iekIntLit:
-      members.incl e.key.ival
-    collectSetLitMembersExpr(e.container, paramName, members)
-    collectSetLitMembersExpr(e.key, paramName, members)
-  of iekArrayLit:
-    for c in e.lelems: collectSetLitMembersExpr(c, paramName, members)
-  of iekTupleLit:
-    for c in e.telems: collectSetLitMembersExpr(c, paramName, members)
-  of iekSeqLen:
-    collectSetLitMembersExpr(e.lenObj, paramName, members)
-  else: discard
-
-proc collectSetLitMembers(s: IRStmt, paramName: string,
-                          members: var HashSet[int64]) =
-  if s == nil: return
-  case s.kind
-  of isBlock:
-    for c in s.stmts: collectSetLitMembers(c, paramName, members)
-  of isIf:
-    for br in s.branches:
-      collectSetLitMembersExpr(br.cond, paramName, members)
-      collectSetLitMembers(br.body, paramName, members)
-    if s.elseBody != nil: collectSetLitMembers(s.elseBody, paramName, members)
-  of isLet:
-    collectSetLitMembersExpr(s.lvalue, paramName, members)
-  of isAssign:
-    collectSetLitMembersExpr(s.avalue, paramName, members)
-  of isWhile:
-    collectSetLitMembersExpr(s.wcond, paramName, members)
-    collectSetLitMembers(s.wbody, paramName, members)
-  of isBreak, isContinue:
-    discard
-  of isAssert, isAssume:
-    collectSetLitMembersExpr(s.acond, paramName, members)
-  of isCall:
-    for a in s.cargs: collectSetLitMembersExpr(a, paramName, members)
-  of isIndex:
-    collectSetLitMembersExpr(s.ixArr, paramName, members)
-    collectSetLitMembersExpr(s.ixIdx, paramName, members)
-  of isIndexAssign:
-    collectSetLitMembersExpr(s.iaIdx, paramName, members)
-    collectSetLitMembersExpr(s.iaVal, paramName, members)
-  of isSeqPop:
-    discard  ## no expr operands
-  of isVariantField:
-    collectSetLitMembersExpr(s.vfRecv, paramName, members)
-  of isVariantReassign:
-    discard
-  of isVariantReassignSymbolic:
-    if s.vrsRhs != nil:
-      collectSetLitMembersExpr(s.vrsRhs, paramName, members)
-  of isVariantConstructSym:
-    collectSetLitMembersExpr(s.vcsDiscExpr, paramName, members)
-    for fe in s.vcsPlainFields: collectSetLitMembersExpr(fe, paramName, members)
-  of isReturn:
-    if s.retExpr != nil: collectSetLitMembersExpr(s.retExpr, paramName, members)
-  of isRaise:
-    if s.raiseMsg != nil:
-      collectSetLitMembersExpr(s.raiseMsg, paramName, members)
-  of isTry:
-    collectSetLitMembers(s.tryBody, paramName, members)
-    for h in s.tryHandlers: collectSetLitMembers(h.body, paramName, members)
-    if s.tryFinally != nil: collectSetLitMembers(s.tryFinally, paramName, members)
-  of isDeref:   ## Phase 15 R1a: scan the dereffed ptr expr.
-    collectSetLitMembersExpr(s.dPtr, paramName, members)
-  of isNew:     ## Phase 15 R1a: allocation has no operand expr.
-    discard
-  of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
-    collectSetLitMembersExpr(s.dwPtr, paramName, members)
-    collectSetLitMembersExpr(s.dwValue, paramName, members)
-  of isTargetLabel, isUnsupported, isUnsafeCast: discard
-
-proc collectTableLitKeys(s: IRStmt, paramName: string,
-                         keys: var HashSet[string])
-proc collectTableLitKeysExpr(e: IRExpr, paramName: string,
-                             keys: var HashSet[string]) =
-  if e == nil: return
-  case e.kind
-  of iekBinop:
-    collectTableLitKeysExpr(e.lhs, paramName, keys)
-    collectTableLitKeysExpr(e.rhs, paramName, keys)
-  of iekUnop:
-    collectTableLitKeysExpr(e.operand, paramName, keys)
-  of iekField:
-    collectTableLitKeysExpr(e.obj, paramName, keys)
-  of iekIndex:
-    collectTableLitKeysExpr(e.arr, paramName, keys)
-    collectTableLitKeysExpr(e.idx, paramName, keys)
-  of iekArrayLit:
-    for c in e.lelems: collectTableLitKeysExpr(c, paramName, keys)
-  of iekTupleLit:
-    for c in e.telems: collectTableLitKeysExpr(c, paramName, keys)
-  of iekSeqLen:
-    collectTableLitKeysExpr(e.lenObj, paramName, keys)
-  of iekContains:
-    collectTableLitKeysExpr(e.container, paramName, keys)
-    collectTableLitKeysExpr(e.key, paramName, keys)
-  of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
-    collectTableLitKeysExpr(e.mutRecv, paramName, keys)
-    collectTableLitKeysExpr(e.mutArg, paramName, keys)
-  of iekTableSet:
-    if e.tabRecv != nil and e.tabRecv.kind == iekVar and
-       e.tabRecv.vname == paramName and
-       e.tabKey != nil and e.tabKey.kind == iekStrLit:
-      keys.incl e.tabKey.sval
-    collectTableLitKeysExpr(e.tabRecv, paramName, keys)
-    collectTableLitKeysExpr(e.tabKey, paramName, keys)
-    collectTableLitKeysExpr(e.tabVal, paramName, keys)
-  of iekSeqDel:
-    collectTableLitKeysExpr(e.delSeq, paramName, keys)
-    collectTableLitKeysExpr(e.delIdx, paramName, keys)
-  of iekSeqInsert:
-    collectTableLitKeysExpr(e.insSeq, paramName, keys)
-    collectTableLitKeysExpr(e.insVal, paramName, keys)
-    collectTableLitKeysExpr(e.insIdx, paramName, keys)
-  of iekSeqPop:
-    collectTableLitKeysExpr(e.popSeq, paramName, keys)
-  else: discard
-
-proc collectTableLitKeys(s: IRStmt, paramName: string,
-                         keys: var HashSet[string]) =
-  if s == nil: return
-  case s.kind
-  of isBlock:
-    for c in s.stmts: collectTableLitKeys(c, paramName, keys)
-  of isIf:
-    for br in s.branches:
-      collectTableLitKeysExpr(br.cond, paramName, keys)
-      collectTableLitKeys(br.body, paramName, keys)
-    if s.elseBody != nil: collectTableLitKeys(s.elseBody, paramName, keys)
-  of isLet:
-    collectTableLitKeysExpr(s.lvalue, paramName, keys)
-  of isAssign:
-    collectTableLitKeysExpr(s.avalue, paramName, keys)
-  of isWhile:
-    collectTableLitKeysExpr(s.wcond, paramName, keys)
-    collectTableLitKeys(s.wbody, paramName, keys)
-  of isBreak, isContinue:
-    discard
-  of isAssert, isAssume:
-    collectTableLitKeysExpr(s.acond, paramName, keys)
-  of isCall:
-    for a in s.cargs: collectTableLitKeysExpr(a, paramName, keys)
-  of isIndex:
-    if s.ixArr != nil and s.ixArr.kind == iekVar and
-       s.ixArr.vname == paramName and
-       s.ixIdx != nil and s.ixIdx.kind == iekStrLit:
-      keys.incl s.ixIdx.sval
-    collectTableLitKeysExpr(s.ixArr, paramName, keys)
-    collectTableLitKeysExpr(s.ixIdx, paramName, keys)
-  of isIndexAssign:
-    collectTableLitKeysExpr(s.iaIdx, paramName, keys)
-    collectTableLitKeysExpr(s.iaVal, paramName, keys)
-  of isSeqPop:
-    discard  ## no expr operands
-  of isVariantField:
-    collectTableLitKeysExpr(s.vfRecv, paramName, keys)
-  of isVariantReassign:
-    discard
-  of isVariantReassignSymbolic:
-    if s.vrsRhs != nil:
-      collectTableLitKeysExpr(s.vrsRhs, paramName, keys)
-  of isVariantConstructSym:
-    collectTableLitKeysExpr(s.vcsDiscExpr, paramName, keys)
-    for fe in s.vcsPlainFields: collectTableLitKeysExpr(fe, paramName, keys)
-  of isReturn:
-    if s.retExpr != nil: collectTableLitKeysExpr(s.retExpr, paramName, keys)
-  of isRaise:
-    if s.raiseMsg != nil:
-      collectTableLitKeysExpr(s.raiseMsg, paramName, keys)
-  of isTry:
-    collectTableLitKeys(s.tryBody, paramName, keys)
-    for h in s.tryHandlers: collectTableLitKeys(h.body, paramName, keys)
-    if s.tryFinally != nil: collectTableLitKeys(s.tryFinally, paramName, keys)
-  of isDeref:   ## Phase 15 R1a: scan the dereffed ptr expr.
-    collectTableLitKeysExpr(s.dPtr, paramName, keys)
-  of isNew:     ## Phase 15 R1a: allocation has no operand expr.
-    discard
-  of isDerefWrite:   ## Phase 15 R3: scan the ptr expr + the stored RHS.
-    collectTableLitKeysExpr(s.dwPtr, paramName, keys)
-    collectTableLitKeysExpr(s.dwValue, paramName, keys)
-  of isTargetLabel, isUnsupported, isUnsafeCast: discard
-
 proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
   ## Issue #163 wiring-audit W2/W4 (+ review R4, the Table sibling below).
   ## `ty.hasRange`'s ONE verdict-side consumer (`allocateSym`'s `itInt` arm)
@@ -6566,30 +6476,52 @@ proc clampWitnessFieldsDeep(w: var RawWitness, path: string, fty: IRType) =
   else:
     discard
 
+proc renderedSize(m: Z3Model; size: Z3Int): int =
+  ## RFC-0005 S8f. A table/set size under the model. Allocation bounds it to
+  ## `[0, 1024]`; the clamp only guards a malformed model.
+  int(max(0'i64, min(m.evalInt(size), 1024'i64)))
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
-                         sv: SymVal, keys: HashSet[string]) =
+                         sv: SymVal) =
+  ## RFC-0005 S8f (was: the present keys among a static scan of string
+  ## LITERALS, for a top-level param only, `len` ignored -- `{:}` for
+  ## `t.len == 2`, for a symbolic key, and for a table in an object field).
+  ## Renders the content `containerCardConds` proves exists (see
+  ## `ContainerCardRegistry`): the model value of every key term the run
+  ## lowered at which the table is present, then fresh keys that no term's
+  ## value names until there are `len` entries. A select at any term sees
+  ## exactly the model's answer, and no select can see a fresh key, so the
+  ## real table behaves as the model on the winning path.
   case sv.tabValTy.kind
   of itInt:
     let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
       sv.tabDataRaw.ctx, sv.tabDataRaw.raw)
     let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
       sv.tabPresentRaw.ctx, sv.tabPresentRaw.raw)
+    template emit(k: string; v0: int64) =
+      var v = v0
+      # Issue #163 review R4: a value no read on the winning path
+      # range-constrained (a key read on an untaken branch, or a fresh fill
+      # key) is the model's free choice and may fall outside a
+      # `range[lo..hi]` value type -- see `clampToDeclaredRange`.
+      if sv.tabValTy.hasRange: v = clampToDeclaredRange(v, sv.tabValTy)
+      keyList.add k
+      w.intVals[path & "." & k] = v
     var keyList: seq[string]
-    for k in keys:
-      if m.evalBool(select(typedPresent, mkString(k))):
-        keyList.add k
-        var v = m.evalInt(select(typedData, mkString(k)))
-        # Issue #163 review R4: `sv.tabValTy.hasRange` had exactly the same
-        # unclamped-witness gap `extractSeqElements` already closes for
-        # `seq[range[lo..hi]]` elements (see `clampToDeclaredRange`'s doc
-        # comment) -- a key whose read sits on a branch the winning path
-        # did not take is extracted here (its literal is always in `keys`,
-        # a static whole-body scan) but was never range-constrained on
-        # this path, so the raw model value can fall outside the declared
-        # bound and raise a real `RangeDefect` reconstructing it into the
-        # SUT's own `range[lo..hi]`-typed slot.
-        if sv.tabValTy.hasRange: v = clampToDeclaredRange(v, sv.tabValTy)
-        w.intVals[path & "." & k] = int64(v)
+    var named: HashSet[string]   ## every term's value, present or not
+    for t in containerCard.tabKeys:
+      let k = m.evalStrBytes(t)
+      if k in named: continue
+      named.incl k
+      if m.evalBool(select(typedPresent, t)):
+        emit(k, int64(m.evalInt(select(typedData, t))))
+    let n = renderedSize(m, sv.tabSize)
+    var fill = 0
+    while keyList.len < n:
+      let k = "k" & $fill
+      inc fill
+      if k notin named:
+        emit(k, int64(m.evalInt(select(typedData, mkString(k)))))
     w.tabKeys[path] = keyList
   else: discard
 
@@ -6666,60 +6598,31 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
-proc harvestSetStoreKeys(m: Z3Model, sv: SymVal): seq[int64] =
-  ## v65 (round-3 ledger: HashSet witness gap). The model VALUE of the
-  ## membership array is — for the finite models Z3 produces here — a
-  ## nested `(store (store ((as const …) dflt) k1 v1) k2 v2)` chain. Walk
-  ## it and harvest every concrete BV64 key. This surfaces members
-  ## constrained only through a SYMBOLIC key (e.g. `s.len in hs`, whose
-  ## key is `int2bv(len(s))` — the literal-candidate scan
-  ## `collectSetLitMembers` cannot see it, which produced the observed
-  ## `s = "", hs = {}` inconsistent witness). Keys whose stored value is
-  ## `false` (a later overwrite / explicit exclusion) are filtered by the
-  ## caller's `select` re-check, so this only needs to be a SUPERSET
-  ## harvest. A non-store model shape (e.g. an as-array function graph)
-  ## harvests nothing and the caller falls back to literal candidates
-  ## alone — exactly the pre-v65 behaviour, never worse.
-  let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
-    sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
-  var cur = toAnyAst(m.eval(typed, modelCompletion = true))
-  var guard = 0
-  while guard < 4096:   # cycle-proof bound; model store chains are finite
-    inc guard
-    if getAstKind(cur) != akApp: break
-    if declName(cur.ctx, getAppDecl(cur)) != "store": break
-    let keyAst = getAppArg(cur, 1)
-    if getAstKind(keyAst) == akNumeral:
-      try:
-        result.add cast[int64](parseBiggestUInt(getNumeralString(keyAst)))
-      except ValueError:
-        discard   # non-decimal numeral rendering — skip this key
-    cur = getAppArg(cur, 0)
-
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
-                       sv: SymVal, candidates: HashSet[int64]) =
+                       sv: SymVal) =
+  ## RFC-0005 S8f (was: literal candidates, a harvest of the model array's
+  ## store chain and v65's per-array membership terms, `len` ignored -- a
+  ## `s.len == 3` witness rendered `{}`). Same rendering as
+  ## `extractTableEntries`: the present values of the run's key terms, then
+  ## fresh members no term's value names until there are `len`. A store-
+  ## chain key that no term names is not rendered: no select observes it,
+  ## and counting it could exceed `len`.
   doAssert sv.setElemTy.kind == itInt and sv.setElemTy.width == 64
   let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
     sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
-  # v65: union the literal candidates with keys harvested from the model's
-  # own store chain, so symbolically-keyed members surface too.
-  var cands = candidates
-  for k in harvestSetStoreKeys(m, sv):
-    cands.incl k
-  # v65: include the concrete model value of every key TERM this set was
-  # membership-tested with (`setMembershipKeyTerms`) — the only faithful
-  # finite rendering when the model chose a const-true (universal) array.
-  let keyId = cast[uint](sv.setMembersRaw.raw)
-  if setMembershipKeyTerms.hasKey(keyId):
-    for t in setMembershipKeyTerms[keyId]:
-      cands.incl int64(m.evalInt(asZ3BitVec[64](t)))
-  when defined(symexSetTrace):
-    stderr.writeLine "[settrace] path=" & path & " cands=" & $cands
-    stderr.writeLine "[settrace] model(A) = " & $(m.eval(typed, true))
   var present: seq[int64]
-  for v in cands:
-    if m.evalBool(select(typed, mkBitVec[64](v))):
+  var named: HashSet[int64]   ## every term's value, present or not
+  for t in containerCard.setKeys:
+    let v = int64(m.evalInt(t))
+    if v in named: continue
+    named.incl v
+    if m.evalBool(select(typed, t)):
       present.add v
+  let n = renderedSize(m, sv.setSize)
+  var fill = 0'i64
+  while present.len < n:
+    if fill notin named: present.add fill
+    inc fill
   w.setMembers[path] = present
 
 proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64 =
@@ -6737,18 +6640,22 @@ proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64 =
   else:      0'i64
 
 proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
-                       sv: SymVal,
-                       tabKeys: Table[string, HashSet[string]],
-                       setMembers: Table[string, HashSet[int64]]) =
+                       sv: SymVal) =
   case sv.kind
   of svTuple:
     for i, f in sv.fields:
       let suffix = if sv.fieldNames[i].len > 0: "." & sv.fieldNames[i]
                    else: "." & $i
-      extractFromSymVal(m, w, path & suffix, f, tabKeys, setMembers)
+      extractFromSymVal(m, w, path & suffix, f)
   of svArray:
     for i, e in sv.arrElems:
-      extractFromSymVal(m, w, path & "." & $i, e, tabKeys, setMembers)
+      extractFromSymVal(m, w, path & "." & $i, e)
+      # RFC-0005 S8f: a ref/ptr element's cell is ALSO rendered at the
+      # heap-snapshot name `path[i]` (`renderContainerElemCell`'s naming),
+      # where `buildHeapSnapshot` then overwrites the defaults with the
+      # observed field values; the reader reads the cell there.
+      if e.kind in {svRef, svPtr}:
+        extractFromSymVal(m, w, path & "[" & $i & "]", e)
   of svSeq:
     if sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       # Round-6 Bug #2 (scoped decline): `seqLen` was forced `== 0` at
@@ -6760,56 +6667,72 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
       w.seqLens[path] = 0
     else:
       let lenVal = int(m.evalInt(sv.seqLen)) # [placeholder-audited]
-      let n = max(0, min(lenVal, 64))
+      # RFC-0005 S8f: every element (was cut at 64, so a `s.len == 100`
+      # witness had 64). Allocation bounds `seqLen` to `[0, 1024]`.
+      let n = max(0, lenVal)
       w.seqLens[path] = n
       extractSeqElements(m, w, path, sv, n)
+      # RFC-0005 S8f: a `seq[ref T]` rendered every element as a fresh
+      # default cell, so `s[69].v == 3` had a clean `sxSat` whose witness held
+      # `v == 0`. Render each element's cell at the heap-snapshot name
+      # `path[i]` (defaults here; `buildHeapSnapshot` overwrites the observed
+      # fields), the same way a top-level `ref` param's cell is rendered.
+      if sv.seqElemTy.kind in {itRef, itPtr}:
+        let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
+        let isPtr = sv.seqElemTy.kind == itPtr
+        let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy
+                      else: sv.seqElemTy.refPointeeTy
+        for i in 0 ..< n:
+          let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, # [placeholder-audited]
+                                              mkInt(i).raw)
+          let elemAny = wrap[Z3AnyAst](ctx, raw)
+          let elemSV = if isPtr: SymVal(kind: svPtr, ptrAst: elemAny,
+                                        ptrFamily: true, ptrPointee: pointee)
+                       else: SymVal(kind: svRef, refAst: elemAny,
+                                    refPointee: pointee)
+          extractFromSymVal(m, w, path & "[" & $i & "]", elemSV)
   of svTable:
-    let keys = if tabKeys.hasKey(path): tabKeys[path] else: initHashSet[string]()
-    extractTableEntries(m, w, path, sv, keys)
+    extractTableEntries(m, w, path, sv)
   of svSet:
-    let cands = if setMembers.hasKey(path): setMembers[path]
-                else: initHashSet[int64]()
-    extractSetMembers(m, w, path, sv, cands)
+    extractSetMembers(m, w, path, sv)
   of svVariant:
     # Discriminator goes under the standard `.kind` path; arm
     # fields land under `.@<armTag>.<fieldName>`. Cycle 7's
     # witness emitter consumes them via a case dispatch on the
     # discriminator value.
-    extractFromSymVal(m, w, path & "." & sv.vDiscName, sv.vDisc[],
-                      tabKeys, setMembers)
+    extractFromSymVal(m, w, path & "." & sv.vDiscName, sv.vDisc[])
     # Plain fields under direct sub-paths (no @tag prefix).
     for i, f in sv.vPlainFields:
       let sub = path & "." & sv.vPlainFieldNames[i]
-      extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+      extractFromSymVal(m, w, sub, f)
     for tagOrdinal, fields in sv.vArmFields.pairs:
       let armNames = sv.vArmFieldNames[tagOrdinal]
       for j, f in fields:
         # Use a tag-ordinal-keyed subpath so cycle 7 can resolve
         # by discriminator value rather than by tag name.
         let sub = path & ".@" & $tagOrdinal & "." & armNames[j]
-        extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+        extractFromSymVal(m, w, sub, f)
   of svMultiVariant:
     # Phase 14 cycle A1c. Same shape as svVariant extraction but
     # iterates each axis: extract per-axis disc + arm fields. Plain
     # fields are emitted once (shared across all axes).
     for i, f in sv.mvPlainFields:
       let sub = path & "." & sv.mvPlainFieldNames[i]
-      extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+      extractFromSymVal(m, w, sub, f)
     for ax in sv.mvAxes:
-      extractFromSymVal(m, w, path & "." & ax.discName, ax.disc[],
-                        tabKeys, setMembers)
+      extractFromSymVal(m, w, path & "." & ax.discName, ax.disc[])
       for tagOrdinal, fields in ax.armFields.pairs:
         let armNames = ax.armFieldNames[tagOrdinal]
         for j, f in fields:
           let sub = path & "." & ax.discName &
                     ".@" & $tagOrdinal & "." & armNames[j]
-          extractFromSymVal(m, w, sub, f, tabKeys, setMembers)
+          extractFromSymVal(m, w, sub, f)
   of svDistinct:
     # Phase 15 G4 (Breadth-CRIT-1). The witness for a `distinct T` param goes
     # through ejection: extract the BASE SymVal (`== eject_T(distinctConst)`) at
     # the SAME path, so the emitter's eject-then-base-reader chain reads a real
     # base value instead of a silent empty leaf.
-    extractFromSymVal(m, w, path, sv.distinctBaseSym[], tabKeys, setMembers)
+    extractFromSymVal(m, w, path, sv.distinctBaseSym[])
   of svUninterpRef:
     # Phase 15 E8. An opaque exception ref (`getCurrentException()`): its fields
     # are not modeled symbolically, so there is no witness leaf to extract.
@@ -6844,7 +6767,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
         if f.kind in {svRef, svPtr}:
           let suffix = if env.fieldNames[i].len > 0: "." & env.fieldNames[i]
                        else: "." & $i
-          extractFromSymVal(m, w, path & suffix, f, tabKeys, setMembers)
+          extractFromSymVal(m, w, path & suffix, f)
   of svRef, svPtr:
     # Phase 15 R1 (ADR-0010, C7/Breadth-CRIT-1). The minimal R1 witness for a
     # `ref T`/`ptr T` param: if the param was dereferenced (`p[]`), render the
@@ -6856,8 +6779,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     # sound since the pointee was never observed. The full heap-snapshot witness
     # format (alias groups / nil rendering) lands R11b/R12.
     if currentHeapDerefVals.hasKey(path):
-      extractFromSymVal(m, w, path, currentHeapDerefVals[path],
-                        tabKeys, setMembers)
+      extractFromSymVal(m, w, path, currentHeapDerefVals[path])
     else:
       let pointee = if sv.kind == svRef: sv.refPointee else: sv.ptrPointee
       if pointee != nil:
@@ -6880,7 +6802,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # observed values) lands R11b/R12.
           var scratchPC: seq[Z3Bool]
           let protoObj = allocateSym(pointee, "__refObjWitness", scratchPC)
-          extractFromSymVal(m, w, path, protoObj, tabKeys, setMembers)
+          extractFromSymVal(m, w, path, protoObj)
           # Issue #163 wiring-audit W4. `allocateSym`'s `itInt` arm DOES
           # push a range-typed field's `bvRangeConds` into `scratchPC` above
           # — but `scratchPC` is thrown away right here: this proto exists
@@ -6909,7 +6831,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           # Arm-specific field observed values land in Slice 2.
           var scratchPC: seq[Z3Bool]
           let protoVariant = allocateSym(pointee, "__refVariantWitness", scratchPC)
-          extractFromSymVal(m, w, path, protoVariant, tabKeys, setMembers)
+          extractFromSymVal(m, w, path, protoVariant)
           # Issue #163 review R3 (Part B). Same throwaway-`scratchPC` gap as
           # the `itTuple` pointee arm above: `allocateSym`'s `itVariant` arm
           # DOES push `bvRangeConds` for every ranged plain AND arm field
@@ -7021,7 +6943,7 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
           var scratchPC: seq[Z3Bool]
           let protoMultiVariant = allocateSym(pointee, "__refMultiVariantWitness",
                                                scratchPC)
-          extractFromSymVal(m, w, path, protoMultiVariant, tabKeys, setMembers)
+          extractFromSymVal(m, w, path, protoMultiVariant)
         else: discard   ## other composite pointees' witness lands R3+/R11b
   else:
     extractLeaf(m, w, path, sv)
@@ -7318,7 +7240,9 @@ proc renderContainerElemsIntoSnapshot(m: Z3Model, w: var RawWitness,
   of svSeq:
     if sv.seqElemTy.kind notin {itRef, itPtr}: return
     let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
-    let n = max(0, min(int(m.evalInt(sv.seqLen)), 64)) # [placeholder-audited]
+    # RFC-0005 S8f: every cell (was cut at 64, below the element count
+    # `extractFromSymVal` renders).
+    let n = max(0, int(m.evalInt(sv.seqLen))) # [placeholder-audited]
     let isPtr = sv.seqElemTy.kind == itPtr
     let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy else: sv.seqElemTy.refPointeeTy
     for i in 0 ..< n:
@@ -7441,14 +7365,12 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
       renderContainerElemsIntoSnapshot(m, w, p.name, sv, limit, visited, result)
 
 proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam],
-                    tabKeys: Table[string, HashSet[string]],
-                    setMembers: Table[string, HashSet[int64]],
                     settings: SymexSettings
                     ): RawWitness =
   result.paramOrder = newSeq[string](params.len)
   for i, p in params:
     result.paramOrder[i] = p.name
-    extractFromSymVal(m, result, p.name, env[p.name], tabKeys, setMembers)
+    extractFromSymVal(m, result, p.name, env[p.name])
   # Phase 15 R12: the heap-snapshot witness — after every leaf is populated,
   # so `pointeeRendering` can read back each ref/ptr param's pointee value.
   # Cluster H H_witness: `buildHeapSnapshot` now ALSO writes new leaves into
@@ -7555,8 +7477,6 @@ proc trySolve(ctx: Z3Context,
               path: Path,
               params: seq[IRParam],
               settings: SymexSettings = defaultSymexSettings(),
-              tabKeys: Table[string, HashSet[string]] = initTable[string, HashSet[string]](),
-              setMembers: Table[string, HashSet[int64]] = initTable[string, HashSet[int64]](),
               initialEnv: Env = initOrderedTable[string, SymVal]()
               ): tuple[status: SymexStatusKind, witness: RawWitness] =
   let s = newSolver(ctx)
@@ -7603,6 +7523,15 @@ proc trySolve(ctx: Z3Context,
   # strings (see `stripDecompConds`' doc for the soundness argument).
   for c in stripDecompConds:
     s.add(c)
+  # RFC-0005 S8f: every allocated table's / set's size is at least its
+  # number of distinct present key terms (`ContainerCardRegistry`). True of
+  # every real table for any values of the terms, so it prunes only
+  # unrealizable models (`t.len == 0 and t.hasKey("a")`), never a real
+  # input; and every model that satisfies it is the one the extractors
+  # render.
+  let cardConds = containerCardConds()
+  for c in cardConds:
+    s.add(c)
   inc symexZ3CallCount
   let r = s.check()
   when defined(symexQueryStats):
@@ -7610,7 +7539,7 @@ proc trySolve(ctx: Z3Context,
     # them by construction rather than by a hand-maintained tally.
     recordQueryStat(s,
       path.pc.len + path.defectSurvivorPc.len +
-        currentClosureCallAxioms.len + stripDecompConds.len,
+        currentClosureCallAxioms.len + stripDecompConds.len + cardConds.len,
       (case r
        of zsSat: "sat"
        of zsUnsat: "unsat"
@@ -7625,8 +7554,7 @@ proc trySolve(ctx: Z3Context,
     # serializer can select a ref-to-variant pointee's active-arm field values.
     currentVariantHeaps = path.heaps
     (status: sxSat,
-     witness: extractWitness(m, envForExtract, params, tabKeys, setMembers,
-                             settings))
+     witness: extractWitness(m, envForExtract, params, settings))
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness())
   of zsUnknown:
@@ -7883,8 +7811,6 @@ type
     callCache: Table[string, CallCacheEntry]
     activeCalls: HashSet[string]
     synthZ3:   int
-    tabKeys:   Table[string, HashSet[string]]
-    setMembers: Table[string, HashSet[int64]]
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
                       ## (not values after `isAssign` mutations).
@@ -8766,8 +8692,7 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   var solveSettings = w.settings
   if p.taint != {}:
     solveSettings.budget.queryRLimit = taintedSolveRLimit(w.settings)
-  let (st, wit) = trySolve(w.z3, p, w.params, solveSettings, w.tabKeys,
-                           w.setMembers, w.initialEnv)
+  let (st, wit) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
   var errs: seq[SymexErrorInfo]
   if isCandidate:
     for i in exLiveStart ..< w.extractionErrors.len:
@@ -9818,6 +9743,51 @@ proc followConcreteTag(mode: WalkMode, ctx: Z3Context, concreteEq: seq[Z3Bool],
       return some(t)
   none(int)
 
+proc sameBranchCond(oldDisc: SymVal; newTag: int;
+                    branches: seq[seq[int]]): Z3Bool =
+  ## RFC-0005 S8f. "The discriminator `oldDisc` selects the same source
+  ## branch as `newTag`." Nim checks exactly this on every discriminator
+  ## assignment and raises `FieldDefect` ("assignment to discriminant
+  ## changes object branch") when it fails -- for a `var` param, a local, a
+  ## default-initialised object alike (probed on the pinned toolchain).
+  ## `branches` is `vrBranches`: explicit tags grouped by branch; `newTag`
+  ## in no group is an `else:` value, whose branch is "no explicit tag".
+  for g in branches:
+    if newTag in g:
+      result = variantDiscEq(oldDisc, int64(g[0]))
+      for k in 1 ..< g.len:
+        result = result or variantDiscEq(oldDisc, int64(g[k]))
+      return
+  result = mkBool(true)
+  for g in branches:
+    for t in g:
+      result = result and not variantDiscEq(oldDisc, int64(t))
+
+proc carryBranchFields(armFields: OrderedTable[int, seq[SymVal]];
+                       oldDisc: SymVal; newTag: int;
+                       branches: seq[seq[int]]): OrderedTable[int, seq[SymVal]] =
+  ## RFC-0005 S8f. A same-branch discriminator assignment keeps the
+  ## branch's field storage (`V(kind: kA, a: 5)` then `kind = kC` under
+  ## `of kA, kC: a` leaves `a == 5`). The model keeps one field set per TAG,
+  ## so the new tag's fields become the OLD tag's: an ite over the branch's
+  ## tags on `oldDisc`. A single-tag branch or an else value is unchanged.
+  ## May leave a merge-degrade effect pending (`iteSV`): the caller drains.
+  result = armFields
+  for g in branches:
+    if newTag notin g or g.len < 2: continue
+    let target = armFields.getOrDefault(newTag)
+    var carried: seq[SymVal]
+    for j in 0 ..< target.len:
+      var v = target[j]
+      for t in g:
+        if t == newTag: continue
+        let src = armFields.getOrDefault(t)
+        if j < src.len:
+          v = iteSV(variantDiscEq(oldDisc, int64(t)), src[j], v)
+      carried.add v
+    result[newTag] = carried
+    return
+
 proc markAmbiguous(w: var WalkCtx, construct: WalkerConstructKind) =
   ## R28: the ONE site that increments an ambiguous-branch degrade —
   ## `walkIfFollowConcrete`'s `wckIf` and `walkWhileFollowConcrete`'s
@@ -10346,6 +10316,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # presence constraint to the surviving path.
         let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
           arrSV.tabPresentRaw.ctx, arrSV.tabPresentRaw.raw)
+        noteTableKey(keySV.str)   ## RFC-0005 S8f
         let presentCond = select(typedPresent, keySV.str)
         case arrSV.tabValTy.kind
         of itInt:
@@ -10735,24 +10706,27 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors
   of isVariantReassign:
-    # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL, not a symbolic
-    # expression, so this statement never forks at all (every `p in paths`
-    # below produces exactly one `out2` entry via `forkPath(p, p.pc, ...)`
-    # — `p.pc` unchanged). There is no explore-vs-follow-concrete
-    # distinction to make when there is nothing to fork: `wmFollowConcrete`
-    # is correctly identical to `wmExplore` here BY CONSTRUCTION, not by
-    # oversight.
+    # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
+    # the RFC-0005 S8f branch-change `FieldDefect` below, routed through
+    # `maybeForkDefect` (which narrows it under `wmFollowConcrete`, exactly
+    # as `isVariantField`'s out-of-arm fork is narrowed).
     case w.mode
     of wmExplore: discard
     of wmFollowConcrete: discard
-    # Phase 11 cycle 6 — `obj.kind = tagLiteral`. Build a new
-    # svVariant whose discriminator IS the literal tag (constant
-    # BV) and whose new arm's primitive fields are zero-init'd
-    # (Nim runtime semantics on discriminator reassignment), via the
-    # module-level `defaultZero` (Phase 14 cycle A5, ADR-0003 D5; hoisted to
-    # module scope by R2/walker-v90 — see its own doc comment, just below
-    # `retBindEq` — so the `isCall` arm's zero-default result binding can
-    # share the same constructor).
+    # Phase 11 cycle 6 — `obj.kind = tagLiteral`: the discriminator becomes
+    # the literal tag.
+    #
+    # RFC-0005 S8f (walker 154). Nim raises `FieldDefect` ("assignment to
+    # discriminant changes object branch") when the old discriminator selects
+    # a DIFFERENT source branch than the new one, and keeps the fields when
+    # it selects the same branch (probed on the pinned toolchain: a `var`
+    # param, a local, and a default-initialised object all behave so). The
+    # walker used to model the transition as legal with the new arm's fields
+    # zero-initialised (ADR-0003 D5, the pre-2.0 `nimOldCaseObjects`
+    # behaviour) -- so `x.kind = pfB` on a `var` param was a clean `sxSat`
+    # whose witness (`kind: pfA`) raised `FieldDefect` instead of reaching
+    # the target. Now: fork the defect on "different branch" and continue
+    # on "same branch" with the branch's fields carried over.
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
@@ -10773,51 +10747,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         else:
           raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassignSymbolic's discriminator is always BV/Z3Int-allocated)]
             "isVariantReassign: disc must be BV or Z3Int kind")
+      let same = sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches)
+      maybeForkDefect(p, not same, "FieldDefect", none(string), w)
+      if w.shouldStop: return out2
       let newDiscBoxed = new(SymVal)
       newDiscBoxed[] = newDiscInner
-      var newArmFields = oldSV.vArmFields
-      let priorFields = oldSV.vArmFields.getOrDefault(stmt.vrNewTag)
-      var newFields: seq[SymVal]
-      let armNames = oldSV.vArmFieldNames.getOrDefault(stmt.vrNewTag)
-      try:
-        for ix, f in priorFields:
-          let fname = if ix < armNames.len: armNames[ix] else: $ix
-          let basePath = stmt.vrObjName & ".@" &
-                         $stmt.vrNewTag & "." & fname & ".reass"
-          newFields.add defaultZero(tyOf(f), basePath)
-      except ValueError, SymexRefUnresolvedError:
-        # Round-6 N36 (walker v101): `defaultZero` raw-raises `ValueError`
-        # (float/Table/HashSet/nested-variant/distinct new-arm fields) or
-        # `SymexRefUnresolvedError` (ref/ptr new-arm fields) — this call was
-        # UNGUARDED, reached from inside this `walkBlock`-reachable `for p in
-        # paths` loop, the exact C-backend goto-exception hazard ADR-0023/
-        # SND-3 exists to ban (identical shape to N31's `iekStrSubstr` fix).
-        # Guard exactly like `defaultZero`'s two OTHER call sites (the
-        # `isCall` implicit-result fallthrough and `applyClosureGround`'s
-        # closure-call fallthrough, both elsewhere in this file) already do:
-        # in-band walk-level degrade — taint this path, record
-        # the classified error, and fork it forward WITHOUT rebinding
-        # `stmt.vrObjName` (the variant keeps its PRE-reassign value on this
-        # degraded path; never a fabricated wrong one).
-        let d = w.degrade(feUnsupportedOp,
-          "isVariantReassign: new-arm field zero-default (tag " &
-               $stmt.vrNewTag & ") has no sound zero-default (" &
-               getCurrentExceptionMsg() &
-               ") — path degraded to sxUnknown (feUnsupportedOp)")
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      newArmFields[stmt.vrNewTag] = newFields
+      let carried = carryBranchFields(oldSV.vArmFields, oldDisc,
+                                      stmt.vrNewTag, stmt.vrBranches)
+      let pM = drainPendingLowerEffects(p)
       let newSV = SymVal(kind: svVariant,
                          vDisc: newDiscBoxed,
                          vDiscName: oldSV.vDiscName,
                          vObjectName: oldSV.vObjectName,
-                         vArmFields: newArmFields,
+                         vArmFields: carried,
                          vArmFieldNames: oldSV.vArmFieldNames,
                          vPlainFields: oldSV.vPlainFields,       # shared:
                          vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
-      var newEnv = p.env
+      var newEnv = pM.env
       newEnv[stmt.vrObjName] = newSV
-      out2.add forkPath(p, p.pc, newEnv)
+      out2.add forkPath(pM, pM.pc & @[same], newEnv)
     return out2
   of isVariantReassignSymbolic:
     # R14: unlike `isVariantReassign` (above), the RHS here IS symbolic —
@@ -10838,9 +10786,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # fork one path per arm-ordinal in the disc's domain. Each path
     # is constrained `rhsSV == k_ord` AND the variant SymVal in env
     # is rebuilt with the new disc SET TO THAT TAG'S CONSTANT.
-    # Arm-field SymVals are PRESERVED — no zero-init (that's the
-    # static-tag path's job per D4). For itMultiVariant: only the
-    # named axis's disc is updated; other axes are preserved as-is.
+    # For itMultiVariant: only the named axis's disc is updated; other
+    # axes are preserved as-is.
+    # RFC-0005 S8f (walker 154): per tag, fork `FieldDefect` when the old
+    # discriminator's source branch differs from the tag's (Nim's runtime
+    # check -- see `isVariantReassign` above), and continue on the same
+    # branch with that branch's fields carried (`carryBranchFields`).
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrsObjName):
@@ -10874,6 +10825,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                             rhsEq, candidateTags)
           for tag in candidateTags:
             if followTag.isSome and tag != followTag.get(): continue
+            let chosen = forkPath(cp, cp.pc & @[rhsEq(int64(tag))], cp.env)
+            let same = sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches)
+            maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
+            if w.shouldStop: return out2
+            let carried = carryBranchFields(oldSV.vArmFields, oldSV.vDisc[],
+                                            tag, stmt.vrsBranches)
+            let chosenM = drainPendingLowerEffects(chosen)
             let newDiscInner: SymVal =
               case oldSV.vDisc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
@@ -10890,13 +10848,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                vDisc: newDiscBoxed,
                                vDiscName: oldSV.vDiscName,
                                vObjectName: oldSV.vObjectName,
-                               vArmFields: oldSV.vArmFields,       # PRESERVED
+                               vArmFields: carried,
                                vArmFieldNames: oldSV.vArmFieldNames,
                                vPlainFields: oldSV.vPlainFields,
                                vPlainFieldNames: oldSV.vPlainFieldNames)
-            var newEnv = cp.env
+            var newEnv = chosenM.env
             newEnv[stmt.vrsObjName] = newSV
-            out2.add forkPath(cp, cp.pc & @[rhsEq(int64(tag))], newEnv)
+            out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
         of svMultiVariant:
           # Locate the named axis (vrsDiscName); other axes preserve
           # their disc + arm state.
@@ -10915,6 +10873,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                             rhsEq, candidateTags)
           for tag in candidateTags:
             if followTag.isSome and tag != followTag.get(): continue
+            let chosen = forkPath(cp, cp.pc & @[rhsEq(int64(tag))], cp.env)
+            let same = sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches)
+            maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
+            if w.shouldStop: return out2
+            let carried = carryBranchFields(oldAxis.armFields, oldAxis.disc[],
+                                            tag, stmt.vrsBranches)
+            let chosenM = drainPendingLowerEffects(chosen)
             let newDiscInner: SymVal =
               case oldAxis.disc[].kind
               of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
@@ -10930,16 +10895,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             var newAxes = oldSV.mvAxes
             newAxes[axisIx] = VariantAxisSym(
               discName: oldAxis.discName, disc: newDiscBoxed,
-              armFields: oldAxis.armFields,       # PRESERVED
+              armFields: carried,
               armFieldNames: oldAxis.armFieldNames)
             let newSV = SymVal(kind: svMultiVariant,
                                mvObjectName: oldSV.mvObjectName,
                                mvAxes: newAxes,
                                mvPlainFields: oldSV.mvPlainFields,
                                mvPlainFieldNames: oldSV.mvPlainFieldNames)
-            var newEnv = cp.env
+            var newEnv = chosenM.env
             newEnv[stmt.vrsObjName] = newSV
-            out2.add forkPath(cp, cp.pc & @[rhsEq(int64(tag))], newEnv)
+            out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
         else:
           doAssert false,
             "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
@@ -10951,9 +10916,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # divergence: construction has no "active arm" data to preserve (Nim
     # itself only accepts a non-constant discriminant in constructor syntax
     # when no arm-specific field is set — the parser's `of itVariant:` arm
-    # enforces this), so EVERY declared arm's fields allocate FRESH,
-    # INDEPENDENTLY, IN EACH FORK (mirrors `lowerVariantLit`'s inactive-arm
-    # allocation, applied here to every arm unconditionally).
+    # enforces this), so EVERY declared arm's fields are that field type's
+    # `default(T)` in each fork. (Walker <= 153 allocated them FRESH, which
+    # let a witness claim an arm-field value real Nim never holds; RFC-0005
+    # S8f.)
     #
     # The `maxVariantConstructorForks` budget is a STRUCTURAL check against
     # `stmt.vcsTagSet.len` — before any solver work, uniform across every
@@ -11062,6 +11028,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Same safe-degrade idiom as the two budget checks above.
         out2.add forkPathTainted(p, p.pc, p.env, d)
       return out2
+    # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
+    # syntax only when no arm field is set, so every arm field is its
+    # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
+    # target on `p.rq == 777` was a clean `sxSat` whose witness could never
+    # reach it. A field type `defaultZero` cannot build declines the whole
+    # construction, the same safe-degrade idiom as the checks above.
+    block findVcsZeroIssue:
+      for arm in vcsTy.vArms:
+        for j, ft in arm.fieldTypes:
+          if not defaultZeroTotal(ft):
+            let d = w.degrade(feUnsupportedOp,
+              stmt.vcsLoc & ": variant constructor arm field `" &
+                   vcsTy.vObjectName & "." & arm.fieldNames[j] &
+                   "` has no modelled default value (" & $ft & ")")
+            for p in paths:
+              out2.add forkPathTainted(p, p.pc, p.env, d)
+            return out2
     for p in paths:
       let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
       proc vcsDiscEq(tagOrd: int64): Z3Bool =
@@ -11093,8 +11076,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               let path = "__variantConstructSym." & vcsTy.vObjectName & ".@" &
                          arm.tagName & "." & arm.fieldNames[j] & ".fork" &
                          $tag & "." & $variantConstructSymFreshCounter
-              var scratchPC: seq[Z3Bool]
-              fields.add allocateSym(ft, path, scratchPC)
+              # RFC-0005 S8f: Nim sets no arm field in a runtime-
+              # discriminator constructor, so every arm field is its
+              # type's `default(T)` (`findVcsZeroIssue` above guarantees
+              # `defaultZeroTotal` for every one).
+              fields.add defaultZero(ft, path)
             armFields[arm.tagOrdinal] = fields
           let discBoxed = new(SymVal)
           discBoxed[] = bvConst(vcsTy.vDiscTy, int64(tag))
@@ -14067,7 +14053,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   newFieldZeroErrors = @[]               ## Cluster H Step C: reset isNew-zero-write sink
   loweringDegradeErrors = @[]            ## SND-3 (ADR-0023): reset lowering-degrade sink
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
-  setMembershipKeyTerms = initTable[uint, seq[Z3AnyAst]]()  ## v65: reset set-key registry
+  containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
@@ -14441,20 +14427,6 @@ proc runSymexImpl(prog: SymexProgram,
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
   let initial = Path(pc: initialPC, env: env)
-  # Static IR scan: collect string-literal keys accessed on each
-  # Table-typed param so witness extraction returns a Nim Table
-  # populated for those keys.
-  var tabKeys: Table[string, HashSet[string]]
-  var setMembers: Table[string, HashSet[int64]]
-  for p in prog.params:
-    if p.ty.kind == itTable:
-      var keys: HashSet[string]
-      collectTableLitKeys(prog.body, p.name, keys)
-      tabKeys[p.name] = keys
-    elif p.ty.kind == itSet:
-      var members: HashSet[int64]
-      collectSetLitMembers(prog.body, p.name, members)
-      setMembers[p.name] = members
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
@@ -14465,8 +14437,6 @@ proc runSymexImpl(prog: SymexProgram,
     callStack: @[], callStats: initTable[string, CallStat](),
     callCache: initTable[string, CallCacheEntry](),
     activeCalls: initHashSet[string](),
-    tabKeys: tabKeys,
-    setMembers: setMembers,
     initialEnv: env,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
                            userExnHierarchy: prog.userExnHierarchy),  ## E4a
@@ -15688,6 +15658,48 @@ proc readUInt32*(w: RawWitness, name: string): uint32 = uint32(w.uintVals[name])
 proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]
 
 proc readString*(w: RawWitness, name: string): string = w.strVals[name]
+
+proc refCellIsNil*(w: RawWitness, cell: string): bool =
+  ## RFC-0005 S8f. True iff the heap snapshot records `cell` (a container
+  ## element's cell, `s[i]`) as a nil ref.
+  for e in w.heapSnapshot:
+    if e.name == cell: return e.value == "nil"
+
+proc refCellAlias*(w: RawWitness, cell: string): string =
+  ## RFC-0005 S8f. The primary cell `cell` aliases in the heap snapshot (the
+  ## same address, discovered first), or "" when it is its own primary.
+  for e in w.heapSnapshot:
+    if e.name == cell:
+      return (if e.aliasRef.isSome: e.aliasRef.get else: "")
+
+proc refCellElemIndex*(cell, container: string): int =
+  ## RFC-0005 S8f. `i` when `cell` is `container[i]`, else -1.
+  if cell.len > container.len + 2 and cell.startsWith(container & "[") and
+     cell[^1] == ']':
+    try: parseInt(cell[container.len + 1 ..< cell.len - 1])
+    except ValueError: -1
+  else: -1
+
+proc rebaseWitness*(w: RawWitness, fromPrefix, toPrefix: string): RawWitness =
+  ## RFC-0005 S8f. The leaves of `w` under `fromPrefix` (the key itself, or a
+  ## `.`/`[` sub-path of it), re-keyed under `toPrefix`: lets a reader
+  ## emitted at the fixed path `toPrefix` render the cell at a path only
+  ## known at run time (a `seq[ref T]` element `s[i]`).
+  proc under(k: string): bool =
+    k == fromPrefix or (k.startsWith(fromPrefix) and
+      k.len > fromPrefix.len and k[fromPrefix.len] in {'.', '['})
+  template copy(field: untyped) =
+    for k, v in w.field.pairs:
+      if under(k): result.field[toPrefix & k[fromPrefix.len .. ^1]] = v
+  copy(intVals)
+  copy(uintVals)
+  copy(boolVals)
+  copy(float32Vals)
+  copy(float64Vals)
+  copy(strVals)
+  copy(seqLens)
+  copy(tabKeys)
+  copy(setMembers)
 
 proc readSeqLen*(w: RawWitness, name: string): int =
   ## Phase 15 R3 (ADR-0010). The model length of a seq witness leaf — used by

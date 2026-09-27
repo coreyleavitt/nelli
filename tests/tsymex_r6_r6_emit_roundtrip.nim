@@ -200,6 +200,7 @@ proc fieldwiseEqParams(a, b: seq[IRParam]): bool =
 proc fieldwiseEqVariantArm(a, b: VariantArm): bool =
   a.tagOrdinal == b.tagOrdinal and a.tagName == b.tagName and
     a.fieldNames == b.fieldNames and a.isElse == b.isElse and
+    a.branchIx == b.branchIx and
     fieldwiseEqTypeSeq(a.fieldTypes, b.fieldTypes)
 
 proc fieldwiseEqVariantArms(a, b: seq[VariantArm]): bool =
@@ -389,10 +390,11 @@ proc fieldwiseEq(a, b: IRStmt): bool =
       a.vfFieldName == b.vfFieldName and fieldwiseEq(a.vfFieldTy, b.vfFieldTy) and
       a.vfMatchingTags == b.vfMatchingTags
   of isVariantReassign:
-    a.vrObjName == b.vrObjName and a.vrNewTag == b.vrNewTag and a.vrTagName == b.vrTagName
+    a.vrObjName == b.vrObjName and a.vrNewTag == b.vrNewTag and
+      a.vrTagName == b.vrTagName and a.vrBranches == b.vrBranches
   of isVariantReassignSymbolic:
     a.vrsObjName == b.vrsObjName and a.vrsDiscName == b.vrsDiscName and
-      fieldwiseEq(a.vrsRhs, b.vrsRhs)
+      fieldwiseEq(a.vrsRhs, b.vrsRhs) and a.vrsBranches == b.vrsBranches
   of isVariantConstructSym:
     a.vcsResultVar == b.vcsResultVar and fieldwiseEq(a.vcsVariantTy, b.vcsVariantTy) and
       fieldwiseEq(a.vcsDiscExpr, b.vcsDiscExpr) and a.vcsTagSet == b.vcsTagSet and
@@ -450,10 +452,10 @@ proc sVariantType(): IRType =
   tVariant("SentShape", "kind", tInt(64, true),
     @[VariantArm(tagOrdinal: 0, tagName: "skCircle",
                   fieldNames: @["radius"], fieldTypes: @[tInt(64, true)],
-                  isElse: false),
+                  branchIx: 2, isElse: false),
       VariantArm(tagOrdinal: 1, tagName: "elseArm",
                   fieldNames: @[], fieldTypes: @[],
-                  isElse: true)],
+                  branchIx: 3, isElse: true)],
     plainFieldNames = @["id"], plainFieldTypes = @[tString()],
     discTags = @[(name: "skCircle", ord: 0), (name: "skSquare", ord: 1)])
 proc sMultiVariantType(): IRType =
@@ -780,9 +782,11 @@ proc sOpaqueCall(): IRStmt =
   mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
 proc sVariantFieldStmt(): IRStmt =
   mkVariantFieldStmt("sentVF", mkVar("obj"), "radius", tInt(64, true), @[0, 2, 5])
-proc sVariantReassign(): IRStmt = mkVariantReassign("sentObj", 3, "skSquare")
+proc sVariantReassign(): IRStmt =
+  mkVariantReassign("sentObj", 3, "skSquare", @[@[0, 3], @[1]])
 proc sVariantReassignSymbolic(): IRStmt =
-  mkVariantReassignSymbolic("sentObj2", "axisA", mkVar("symDisc"))
+  mkVariantReassignSymbolic("sentObj2", "axisA", mkVar("symDisc"),
+                            @[@[1], @[2, 4]])
 proc sVariantConstructSym(): IRStmt =
   let vty = tVariant("SentShape3", "kind", tInt(64, true),
     @[VariantArm(tagOrdinal: 0, tagName: "skA",

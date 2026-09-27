@@ -129,12 +129,18 @@ suite "symex round-6 N38 -- block-wrapped discriminator reassignment, fully-back
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
-  test "N38-2b: soundness companion -- field != 0 after reassignment is " &
-       "UNREACHABLE (sxUnsat), never a wrong verdict":
+  test "N38-2b: field != 0 after reassignment is reachable from a dkB " &
+       "input that keeps its field (RFC-0005 S8f, walker 154)":
+    ## Walker <= 153 zero-initialised the field on every reassignment. In
+    ## Nim `dkA -> dkB` raises FieldDefect and `dkB -> dkB` keeps `b`, so a
+    ## `dkB` input with `b != 0` reaches the target: checked on the SUT.
     let r = symexFind(sutN38FieldNonzeroUnreachable, tLabel("n38_field_nonzero_unreachable"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnsat
+    check r.status == sxSat
+    var w = D(kind: dkB, b: 7)
+    sutN38FieldNonzeroUnreachable(w)
+    check w.b == 7
 
 # =============================================================================
 # Version pin

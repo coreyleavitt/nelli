@@ -139,7 +139,7 @@ state = "done"
 [[slice]]
 id    = "S8k"
 title = "Termination and resources: long-string Z3 queries bounded (rlimit-proof decline to sxUnknown), loop-unroll feasibility pruning and memory bound, replay never executes a witness into a SIGSEGV (real nil write)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8l"
@@ -2194,6 +2194,200 @@ Re-pinned, each checked against real Nim:
   (the retired kind's carriers). S3's F4 `classOf` test becomes a
   retirement test that the member is gone. S4 drops the member from the
   `dcNoAnswer` list.
+
+**As landed (S8k, walker 161) — termination and resources.** Three ways a
+run could fail to finish or take its host down. Every Z3 figure below was
+measured on the pinned Z3 (reports 5.1.0) in the `nelli-dev` container;
+every Nim behaviour was probed on Nim 2.2.10, debug build, c and cpp
+identical.
+
+1. **Long-string queries were not bounded.** `findColon(s, 0) > 1000` (a
+   `while i < s.len: if s[i] == ':'` scan) never returned, whatever
+   `queryRLimit` said. Why `rlimit` did not bound it: Z3's sequence solver
+   searches string lengths upward, and past ~100 elements each step grows
+   super-linearly (`len(s) > N` alone: N=100 1.4 s; N=200 19 s, 1.6 GB;
+   N=300 102 s, 3.4 GB). Past ~250 elements single steps run for minutes
+   without polling the resource counter. At N=300 a 10 s wall-clock
+   `timeout` returned after 102 s, and `rlimit = 300000` also returned at
+   101 s. `len(s) > 1000` never returned. Neither bound can stop a step
+   that never checks it, so neither is the fix. Z3 parameters that do not
+   help: `model=false`, `smt.seq.max_unfolding` / `min_unfolding`,
+   `smt.seq.split_w_len`, and `smt.string_solver=z3str3`, which answers
+   `unknown` at once for everything.
+2. **The k-unroll forked both arms of every iteration.** A loop with a
+   concrete trip count kept its impossible "guard still true" continuation
+   to the unroll bound. So a dead label after `var i = 0; while i < 3: inc
+   i` was `sxUnknown [beBudgetExhausted]`, and nested loops multiplied.
+3. **Replay could execute a SIGSEGV.** A real nil dereference is a SIGSEGV
+   in the default build: `try: p[].x = 1 except NilAccessDefect: …`
+   prints "SIGSEGV: Illegal storage access. (Attempt to read from nil?)"
+   and exits 139, for a read too, with or without `--nilchecks:on`. The
+   walker models the nil edge as `NilAccessDefect` (a finding under
+   `tRaisedExn("NilAccessDefect")`, or a handler-caught raise). S10 replays
+   an `scSpurious` candidate against the real SUT. A candidate whose path
+   crossed the nil edge killed the test process: `nilWriteOnNaN(p, f)` (`let
+   k = int(f); if f != f: p[].x = k`), where the NaN edge of `int(f)` is a
+   `feConvFloatToIntUndefined` fresh symbol, died with that SIGSEGV under
+   `symexFind(…, tRaisedExn("NilAccessDefect"))`.
+
+- **Runtime.**
+  - Every query the walker issues (`trySolve`, through the new shared
+    `pathSolver`) caps each uninterpreted seq-sorted term at
+    `ResourceBudget.maxSeqLen` elements (bytes for a `string`; default 128;
+    `0` = unlimited). The capped terms are an input, a fresh return, a
+    closure / UF result, or a heap `select`. `checkCapped` asserts
+    `len(t) <= maxSeqLen` behind one fresh assumption literal and reads
+    the unsat core:
+    - a model is a model of the uncapped query;
+    - UNSAT without the literal in the core is the query's own UNSAT;
+    - UNSAT with it is `zsUnknown`, recorded as `beSolverUndef` whose
+      message names `maxSeqLen`. It is never a verdict.
+    Every other seq term is built from these leaves by interpreted
+    operations, so capping the leaves bounds the search. Assumption-based
+    checking costs what a hard assert does (measured: 4.3 s either way at
+    length 130).
+  - Under the cap the sequence solver does poll `rlimit`, but it spends it
+    at 40–55k units/s (against ~1M/s for arithmetic). `s.len == 20 and
+    s[19] == 'q'` needs 2.3M units (~60 s) to find its model. The same at
+    length 100 needs 34M (~10 min), and nothing stopped a within-cap query
+    that needed more under the default unbounded `queryRLimit`. So a query
+    that mentions a string or seq also runs under
+    `ResourceBudget.seqQueryRLimit` (default 20M, the
+    `defaultConcreteBranchRLimit` the tainted target-hit solve already
+    uses) whenever that is smaller than its own bound. `maxSeqLen = 0`
+    turns off both the cap and this bound.
+  - **No wall-clock timeout is used.** Both bounds are step counts, so a
+    query they cut off is the same `beSolverUndef` on every machine, and
+    the verdict cache stays deterministic. Every `beSolverUndef` message
+    now ends with its reason: the cap text, or `Z3: <reason_unknown>`,
+    with the `seqQueryRLimit` value when that bound applied.
+  - The `wmExplore` `isWhile` k-unroll walks an arm only if
+    `loopArmInfeasible` cannot refute it on the path. A guard that
+    simplifies to a literal never reaches the solver. Otherwise the check
+    is the path's full `pathSolver` query plus the arm, under
+    `loopPruneRLimit` (250k, or a smaller caller `queryRLimit`). An
+    `unknown` never prunes. After the last unrolled body, a surviving path
+    faces the guard once more, as the real loop does. Where the guard is
+    provably false there, the path leaves clean through the exit. Only a
+    path whose guard may still hold is the exhausted survivor, and it
+    still records `beBudgetExhausted` / `beBudgetExhaustedAssumedBound`
+    exactly as before. Pruning is sound: a pruned arm's every later query
+    would carry the same UNSAT constraints. What it loses are declines an
+    infeasible arm would have recorded.
+  - `Path.nilDeref` is set on `nilDerefFork`'s nil edge (`runtime_heap.nim`).
+    `forkPath` carries it, and `forkPathMerged` ORs both sides, because a
+    closure descent starts from a fresh root. `RawResult` /
+    `SatCandidate.nilDerefOnPath` carries it to the finding (both the
+    label hit and `routeRaise`'s raise). `emitReplayWitness` returns
+    `roInconclusive` without running `fn` when it is set.
+    `replayInScope(tRaisedExn("NilAccessDefect"))` is now `false`, for
+    `stkNilAccess`'s reason.
+- **Consumer-visible (for S11's migration note).**
+  - Two new `ResourceBudget` fields: `maxSeqLen` (default 128) and
+    `seqQueryRLimit` (default 20M). Each enters the settings cache key only
+    when it is not the default (`;msl=` / `;sqr=`), so default keys are
+    unchanged apart from the walker version.
+  - Verdicts change:
+    - A finding whose witness needs a string or seq longer than 128
+      elements is `sxUnknown` + `beSolverUndef` naming `maxSeqLen`. It was
+      `sxSat` when Z3 finished, and a hang when it did not. Raise
+      `maxSeqLen` to search further. The `>1000`-byte RangeDefect in
+      `163rev_intoffset_range` is the pinned instance.
+    - A within-cap string query that needs more than 20M units is
+      `sxUnknown` + `beSolverUndef` (was a slow `sxSat` or a hang).
+    - A dead label after a concretely bounded loop is `sxUnsat`
+      (was `sxUnknown [beBudgetExhausted]`).
+    - A `symexAssume` that really bounds a loop within `maxLoopUnwind`
+      records no exhaustion kind (was `beBudgetExhaustedAssumedBound`).
+    - A replay candidate whose path went through a nil dereference, and
+      any `tRaisedExn("NilAccessDefect")` candidate, stays `sxUnknown`
+      (`roInconclusive`) instead of running the SUT. A clean-path
+      `sxRaised NilAccessDefect` is unchanged: it was never replayed.
+  - `beSolverUndef` messages carry the reason.
+    `beBudgetExhaustedAssumedBound`'s message no longer says the k-unroll
+    cannot check the bound.
+  - New exported `symexLoopIterations` (a per-thread counter of loop
+    bodies walked, like `symexZ3CallCount`), `loopPruneRLimit` and
+    `defaultLoopPruneRLimit`.
+  - The walker bump to 161 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - Byte-string character tests are slow in Z3, and that is where most of
+    the 20M backstop goes. The byte-faithful model's two pieces are each
+    cheap alone. One is `str.in_re s (re.* (re.range "\u{0}" "\u{ff}"))`
+    on every string input. The other is `((_ int_to_bv 8) (str.to_code
+    (str.at s i))) = #x71` for `s[i] == 'q'`. Together they cost 2.3M
+    units for `s.len == 20 and s[19] == 'q'`, and 34M (626 s) at length
+    100. The Linux-hanging `tsymex_r6_nulwitness` NW-5 (nine byte
+    equalities on a 9-byte string) is this class: it now ends
+    `sxUnknown [beSolverUndef … seqQueryRLimit = 20000000]` instead of
+    hanging. An encoding-precision slice (for example a
+    `seq.nth`-and-integer-code form without `int_to_bv`) would be the fix.
+  - The string index is lowered as `ite(bvslt c 0, ubv_to_int c - 2^64,
+    ubv_to_int c)` even for a constant `c`, and is not folded before it
+    reaches Z3.
+  - The concolic solves (`concreteBranchOutcome`, `concretelyInfeasible`,
+    `runConcolicCollectImpl`'s `pcSatByConcreteInputs` check, the G2 flip
+    solve) do not go through `pathSolver` and are not capped. The first
+    two have concrete pins (lengths fixed by the draws) and
+    `concreteBranchRLimit`. The flip solve has a caller `timeoutMs` plus
+    `rlimit`. The `pcSatByConcreteInputs` soundness check has no bound at
+    all; its lengths are pinned by the draws.
+  - Windows risk to watch: `tsymex_r6_nulwitness` NW-5 and
+    `tsymex_r6_b7r_bytescan` B7R-6 pass on the symex-mingw leg and never
+    finished on Linux. Linux now needs more than 20M units for them. If the
+    Windows Z3 build's step count for them is also over 20M, they turn
+    `sxUnknown` there. That would be the same bound doing its job, not a
+    new defect, but it would be a red on that leg.
+
+**Linux blind spot (the six r6 hangers, run at 900 s under `dt-bounded`).**
+- `b1_stringbacked` (202 s), `b3_scanpair` (73 s) and `n10_coverage_matrix`
+  (142 s) now terminate and pass on c and cpp. N10 needed one re-pin
+  (below). All three leave `scripts/sweep.sh`'s skip list.
+- `nulwitness` (129 s) terminates. It fails only NW-5, which is
+  `sxUnknown` against a pinned `sxSat` (the byte-string class above).
+- `b7r_bytescan` (570 s) terminates. It fails only B7R-6 (16 per-index
+  byte equalities), the same way.
+- `b7r2_pathscope` still runs past 900 s. Before the kill, B7r2-1a and its
+  trip-wire had already ended `sxUnknown` against pinned `sxSat`.
+- These three stay skipped.
+
+Pins: `tests/tsymex_rfc0005_s8k_bounds.nim`.
+- **(1)** The far-colon label is `sxUnknown` with only the `maxSeqLen`
+  `beSolverUndef` (RED: killed at 300 s by `dt-bounded`). A length
+  contradiction stays `sxUnsat` under the cap. A 100-byte witness is
+  found. Past the cap: a 130-byte witness and a bare 130-byte length are
+  declined, not `sxUnsat`. `maxSeqLen: 160` finds the 130-byte witness. A
+  small `seqQueryRLimit` declines a within-cap character test with the
+  bound named. Both fields key the cache only when not the default.
+- **(2)** A dead label after `while i < 3` is `sxUnsat` (RED: `sxUnknown`),
+  and the live one is still `sxSat`. A 4×4 nested loop is `sxUnsat` with
+  `symexLoopIterations == 20` body walks (37 queries). With the
+  feasibility checks switched off and nothing else changed, it measured
+  9330 walks, 34211 queries and `sxUnknown [beBudgetExhausted]`. A
+  symbolic trip count still records `beBudgetExhausted`.
+- **(3)** `nilWriteOnNaN` under `tRaisedExn("NilAccessDefect")` and
+  `nilWriteCaught` (the nil write inside `try … except NilAccessDefect`
+  around a label) are `sxUnknown` with no replay refutation, and the
+  process survives. RED: the test binary died with SIGSEGV. Plus the
+  `replayInScope` table.
+- The `>= 161` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (161).
+- `163rev_intoffset_range`: its three searches run with range checks on
+  again (S8i had turned them off because the query never returned). Each
+  is `sxUnknown` with only the `maxSeqLen` decline. That is honest: the
+  RangeDefect is real (the oracles raise it) but needs a 1001-byte string.
+  The range-checks-off searches stay as the `sxUnsat` W8 placeholder pin.
+- `configdefaults`: `ResourceBudget` has 14 fields; the full-override
+  merge and the partial-literal test cover the two new ones.
+- `r6_n20_boundedloop`: `symexAssume(n >= 0 and n < 3)` now records no
+  exhaustion kind. The loop runs at most twice in Nim; the old pin
+  recorded the unconditional fork. The magnitude-useless assume still
+  pins `beBudgetExhaustedAssumedBound`.
+- `r6_n10_coverage_matrix` N10d-5-decline: `sxUnsat`, the verdict its
+  own comment said was expected (`s.len == 0` refutes the fallback loop's
+  guard).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

@@ -42,23 +42,34 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
 
-# RFC-0005 S8i: `return i` into a `range[0..1000]` result is now a checked
+# RFC-0005 S8i: `return i` into a `range[0..1000]` result is a checked
 # conversion, as in Nim: it forks RangeDefect (the oracles below show Nim
 # raising it). That defect is real for each SUT here (a 1001-byte string
-# with no early ':'), and a defect surfaces under any target, so the
-# faithful answer to these label searches is now a RangeDefect finding. Its
-# witness needs a string of more than 1000 bytes, and Z3 does not finish
-# that query (`rlimit` does not bound it; a plain label search for
-# `findColon(s, 0) > 1000` does not terminate before S8i either). What
-# these tests pin is the W8 placeholder range, so they run with range
-# checks off (`acRange` excluded): no RangeDefect fork, and the label is
-# still unreachable only because the placeholder keeps the declared range.
+# with no early ':'), and a defect surfaces under any target, so each label
+# search below also asks for a RangeDefect witness of more than 1000 bytes.
+# Until RFC-0005 S8k that query never returned, and these searches ran with
+# range checks off. S8k caps every string in a query at `maxSeqLen` (128),
+# so the witness is out of reach and the search ends as a recorded
+# `beSolverUndef` naming the cap: the honest verdict is `sxUnknown`, never
+# `sxUnsat` (the defect is real) and never `sxSat` (which the unranged
+# placeholder W8 fixed would produce at once, with a short string). The
+# same searches with range checks off (`acRange` excluded: no RangeDefect
+# fork) pin the placeholder range on its own: `sxUnsat`.
 # `tsymex_rfc0005_s8i_models` pins the callee-return check itself, at a
 # bound Z3 can witness.
 
 proc noRangeChecks(): SymexSettings =
   result = defaultSymexSettings()
   result.arithChecks = {acOverflow, acDivByZero}
+
+proc capDeclineOnly[T](r: SymexResult[T]): bool =
+  ## sxUnknown whose only errors are the `maxSeqLen` decline.
+  if r.status != sxUnknown: return false
+  var capped = false
+  for e in r.errors:
+    if e.severity == sevError and e.kind != beSolverUndef: return false
+    if e.kind == beSolverUndef and "maxSeqLen" in e.msg: capped = true
+  capped
 
 # ---------------------------------------------------------------------------
 # Bare (non-tuple) scan-offset return -- B3 early-return-on-match shape,
@@ -102,6 +113,11 @@ suite "#163 review W8 -- bare scan-offset return: the placeholder keeps the call
     ## above) -- a false `sxSat` witness.
     let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"), noRangeChecks())
     check r.status == sxUnsat
+
+  test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
+    let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"))
+    for e in r.errors: checkpoint $e.kind & ": " & e.msg
+    check r.capDeclineOnly
 
 # ---------------------------------------------------------------------------
 # Traced tuple position -- B4 accumulating-scan shape, range-typed second
@@ -150,6 +166,11 @@ suite "#163 review W8 -- traced tuple position: the placeholder keeps the callee
     let r = symexFind(callerTuple, tLabel("impossible_tuple"), noRangeChecks())
     check r.status == sxUnsat
 
+  test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
+    let r = symexFind(callerTuple, tLabel("impossible_tuple"))
+    for e in r.errors: checkpoint $e.kind & ": " & e.msg
+    check r.capDeclineOnly
+
 # ---------------------------------------------------------------------------
 # Non-regression: Q1/B0's skip-while shape does not reach either arm at all
 # (`calleeIntOffsetReturnPositions` only recognizes B3/B4), so it stays
@@ -175,7 +196,12 @@ suite "#163 review W8 -- non-regression: Q1/B0 never reaches these arms":
     let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"), noRangeChecks())
     check r.status == sxUnsat
 
+  test "range checks on: the real RangeDefect needs a >1000-byte string -- a recorded maxSeqLen decline":
+    let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"))
+    for e in r.errors: checkpoint $e.kind & ": " & e.msg
+    check r.capDeclineOnly
+
 suite "#163 review round 1 -- walker version pin":
 
-  test "walker version floor >= 138":
-    check parseInt(symexWalkerVersion) >= 138
+  test "walker version floor >= 161":
+    check parseInt(symexWalkerVersion) >= 161

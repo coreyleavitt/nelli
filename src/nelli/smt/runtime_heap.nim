@@ -460,7 +460,12 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   # `p == nil` (the defect) and `p != nil` (the continuation), ground over Ref_T.
   let eqNil = wrap[Z3Bool](ctx, checkedEq(ctx, refAst.raw, nilConst.raw))
   # NIL sub-path — NilAccessDefect fork. Phase 16 D1a unconditional.
-  discard forkDefect(p, eqNil, "NilAccessDefect", none(string), w)
+  # RFC-0005 S8k: the nil edge is marked (`Path.nilDeref`) before it is
+  # routed, so a handler continuation and an escaping finding both carry it
+  # to replay, which must never run the real SIGSEGV this edge models.
+  let nilPath = forkPath(p, p.pc & @[eqNil], p.env)
+  nilPath.nilDeref = true
+  discard routeRaise(nilPath, "NilAccessDefect", none(string), w)
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
   @[forkPath(p, p.pc & @[not eqNil], p.env)]
 

@@ -184,7 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "160"
+const symexWalkerVersion* = "161"
+  ## RFC-0005 S8k (2026-09-28) — termination and resources. Every query
+  ## caps each uninterpreted string / seq term at `maxSeqLen` (default 128)
+  ## as an assumption and reads the unsat core: an UNSAT the cap took part
+  ## in is `beSolverUndef`, not a verdict (a query whose witness needed a
+  ## 1001-byte string never returned: Z3's length search stops polling
+  ## `rlimit` and `timeout` alike past ~250 elements), and runs under
+  ## `seqQueryRLimit` (default 20M; within the cap the sequence solver polls
+  ## the counter but spends it slowly). The `while` k-unroll
+  ## walks an arm only if it is not provably infeasible, and faces the
+  ## guard once more after the last unrolled body, so a dead label after a
+  ## concretely bounded loop is `sxUnsat` (was `sxUnknown`
+  ## [beBudgetExhausted]) and nested loops stay linear in their trip
+  ## counts. Replay never executes a candidate whose path took the nil
+  ## dereference edge (a real SIGSEGV). 160 -> 161.
   ## RFC-0005 S8m (2026-09-28) — S8l's remainder. `break` and `continue`
   ## leave through every enclosing `finally` and `defer` innermost first
   ## (they skipped them: a label there was a false `sxUnsat`); a `break` in
@@ -4807,6 +4821,15 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        may be confirmed into sxSat/sxRaised or stays
   ##                        sxUnknown; changes the verdict. Rendered `;rp=off`
   ##                        only when disabled (default keys unchanged).
+  ##   maxSeqLen          — RFC-0005 S8k: the per-term seq/string length cap
+  ##                        every query assumes; an UNSAT it took part in is
+  ##                        sxUnknown, so it changes the verdict. Rendered
+  ##                        `;msl=` only when not the default 128 (default
+  ##                        keys unchanged).
+  ##   seqQueryRLimit     — RFC-0005 S8k: the rlimit of a query that mentions
+  ##                        a string / seq; a query it cuts off is
+  ##                        sxUnknown. Rendered `;sqr=` only when not the
+  ##                        default 20M (default keys unchanged).
   ##   maxFreshnessAssertions — cap on `newRef != prior` inequalities; when hit,
   ##                        dropped constraints allow Z3 to alias refs it
   ##                        otherwise could not → false-SAT direction.
@@ -4863,6 +4886,10 @@ proc canonicalize*(s: SymexSettings): string =
     ";mvfa=" & $s.budget.maxVariantConstructorFieldAllocs &  ## N9
     (if s.replay: "" else: ";rp=off") &   ## RFC-0005 S10: rendered only when
                                           ## off, so default keys are unchanged
+    (if s.budget.maxSeqLen == ResourceBudget().maxSeqLen: ""
+     else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
+    (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
+     else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
     ">"
 
 # ---- Cache key -------------------------------------------------------------

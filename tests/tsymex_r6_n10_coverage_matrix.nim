@@ -9,7 +9,7 @@
 ## under N10 was already closed by slice R2
 ## (`tests/tsymex_r6_r2_zerodefault_result.nim` pins multi-path exhaustiveness
 ## for the zero-default result binding) -- not duplicated here.
-import std/[unittest, strutils, sequtils]
+import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -333,8 +333,14 @@ suite "symex round-6 N10(d) -- empty-receiver family-wide, B6":
     let r = symexFind(readOptionsEmptySUT, tLabel("b6_empty_done"))
     check r.status == sxSat
 
-  test "N10d-5-decline: the fallback branch's own reachability is an honest budget decline, not sxUnsat":
-    ## HONESTY RULE: expected sxUnsat (the member fast-path's membership
+  test "N10d-5-decline: the fallback branch's raise is unreachable on an empty receiver (sxUnsat)":
+    ## Re-pinned by RFC-0005 S8k: this is now the `sxUnsat` the paragraph
+    ## below says was expected. The k-unroll walks a loop arm only if it is
+    ## feasible on the path, so under `s.len == 0` the fallback loop's
+    ## "guard still true" arm (`i < s.len`) is pruned and the loop is left
+    ## after zero iterations, as in Nim. The history below is kept.
+    ##
+    ## HONESTY RULE (as written before S8k): expected sxUnsat (the member fast-path's membership
     ## condition is Z3-provably true under `s.len == 0`, so the fallback
     ## branch's raise should be unreachable) but the engine actually returns
     ## a classified sxUnknown instead. Root cause: per B6's own doc comment,
@@ -364,9 +370,7 @@ suite "symex round-6 N10(d) -- empty-receiver family-wide, B6":
     ## catch a REGRESSION to `sxUnsat`/`sxSat`, not to police which of the
     ## two honest-decline kinds fires.
     let r = symexFind(readOptionsEmptySUT, tRaisedExn("ScanError"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind in {beBudgetExhausted, beBudgetExhaustedAssumedBound})
+    check r.status == sxUnsat
 
 suite "symex round-6 N10 -- walker version pin":
 

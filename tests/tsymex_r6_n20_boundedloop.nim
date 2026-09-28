@@ -107,18 +107,23 @@ suite "N20 — k-unroll decline misclassification":
     let n = r.witness[0]
     check n >= 0 and n < 3
 
-  test "the exhaustion classification distinguishes assumed-bounded from genuinely unbounded":
+  test "an assume that really bounds the loop exhausts nothing (RFC-0005 S8k)":
     let r = symexFind(boundedLoopSat, tLabel("bounded_hit"))
     check r.status == sxSat
-    # The k-unroll's own structural exhaustion still fires (that mechanism
-    # is unchanged — this slice reclassifies it, does not remove it), but it
-    # reports the ASSUMED-BOUND-aware kind, not the plain one.
+    # Re-pinned by RFC-0005 S8k. This pinned the ASSUMED-BOUND-aware kind
+    # firing here: the k-unroll forked the "guard still true" arm on every
+    # iteration whether or not it was feasible, so it reported exhaustion
+    # even though `n < 3` ends every real run within the unroll bound. The
+    # k-unroll now walks an arm only if it is feasible on the path, so no
+    # path survives the bound and neither exhaustion kind is recorded --
+    # which is what Nim does (the loop runs at most twice). The kind itself
+    # is still pinned where the assume does not bound the loop (below).
     var sawAssumedBoundKind = false
     var sawPlainKind = false
     for e in r.errors:
       if e.kind == beBudgetExhaustedAssumedBound: sawAssumedBoundKind = true
       if e.kind == beBudgetExhausted: sawPlainKind = true
-    check sawAssumedBoundKind
+    check not sawAssumedBoundKind
     check not sawPlainKind
 
   test "a genuinely unbounded loop keeps the OLD plain classification (no regression)":

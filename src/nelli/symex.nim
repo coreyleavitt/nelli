@@ -1444,14 +1444,21 @@ func replayInScope*(target: SymexTarget): bool =
   ##     Defect the model never forked (an `IndexDefect` before a label, a
   ##     user `Defect` subtype the `endsWith("Defect")` convention misses)
   ##     even when the target itself is a label.
-  ##   * otherwise every kind (`stkLabel`, the Defect targets, any
+  ##   * `stkRaisedExn` for `NilAccessDefect` -- never, for `stkNilAccess`'s
+  ##     reason (RFC-0005 S8k). S10 replays an `sxRaised` candidate against
+  ##     `tRaisedExn(<its type>)`, and the walker's only producer of that
+  ##     type is its nil-dereference fork, whose real run is a SIGSEGV in
+  ##     the default build of the pinned toolchain (probed: a `ref` read or
+  ##     write through nil, `--nilchecks:on` or not, never reaches an
+  ##     `except NilAccessDefect` arm), not a Defect.
+  ##   * otherwise every kind (`stkLabel`, the Defect targets, any other
   ##     `stkRaisedExn`): an escaping exception, Defects included, is caught
   ##     by the replay frame and classified.
   const panics = defined(nimPanics)
   if panics: return false
   case target.kind
-  of stkLabel, stkAssertionViolation, stkIndexError, stkFieldDefect,
-     stkRaisedExn: true
+  of stkLabel, stkAssertionViolation, stkIndexError, stkFieldDefect: true
+  of stkRaisedExn: target.typeFilter != "NilAccessDefect"
   of stkNilAccess: false
 
 func replayReached*(target: SymexTarget; hits: HashSet[string];
@@ -1664,7 +1671,8 @@ proc formalParamTypes(fn: NimNode): seq[NimNode] =
 
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
-                        extraLossy: NimNode = newLit(false)): NimNode =
+                        extraLossy: NimNode = newLit(false);
+                        nilDeref: NimNode = newLit(false)): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
   ## an expression of type `ReplayOutcome`. `witness` is the typed witness
@@ -1674,9 +1682,13 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## behind this witness is known NOT to be the rendered value even though
   ## its shape renders faithfully -- a candidate whose extraction recorded
   ## `feExtractionFailed` (a float leaf substituted by `0.0`). It demotes a
-  ## miss from `roRefuted` to `roInconclusive`; a hit still confirms. Order
-  ## of refusal, each one WITHOUT executing `fn`: ineligible taint,
-  ## unexecutable witness shape, out-of-scope target kind.
+  ## miss from `roRefuted` to `roInconclusive`; a hit still confirms.
+  ## `nilDeref` (RFC-0005 S8k) is a runtime `bool`: true when the witness's
+  ## path went through the walker's nil-dereference edge
+  ## (`SatCandidate.nilDerefOnPath`), whose real run is a SIGSEGV that would
+  ## kill the process -- declined, never executed. Order of refusal, each
+  ## one WITHOUT executing `fn`: ineligible taint, unexecutable witness
+  ## shape, out-of-scope target kind, a nil-dereference path.
   var noms: Table[string, IRType]
   var seenNoms: HashSet[string]
   for p in params: collectNominals(p.ty, noms, seenNoms)
@@ -1716,7 +1728,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   result = quote do:
     block:
       let `tgtId`: SymexTarget = `target`
-      if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`):
+      if not replayEligible(`pathTaint`) or not replayInScope(`tgtId`) or
+         `nilDeref`:
         roInconclusive
       else:
         let `witId` {.used.} = `witness`
@@ -1801,9 +1814,14 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
 #     already take calling a user proc.
 #   * Defects -- caught by the replay frame and classified; under
 #     `--panics:on` nothing is replayed (`replayInScope`); a raw-`ptr`
-#     witness is never executed (`witnessFidelity`); a crash `fn` would also
-#     commit under `forAll` (SIGSEGV, stack overflow, `quit`) is not
-#     containable in-process and is not contained.
+#     witness is never executed (`witnessFidelity`); a candidate whose path
+#     went through the walker's nil-dereference edge, escaping or caught,
+#     is never executed (RFC-0005 S8k: `nilDerefOnPath`, and a
+#     `NilAccessDefect` raise target is out of `replayInScope`) -- the
+#     walker models that edge as a raise, the default build SIGSEGVs.
+#     Any other crash `fn` would also commit under `forAll` (SIGSEGV, stack
+#     overflow, `quit`) off the modelled path is not containable in-process
+#     and is not contained.
 #   * Capture reentrancy -- each replay runs in its own nested capture frame
 #     (`engine/markers.nim`), so a user's enclosing `assertCoveredBy`
 #     capture neither loses hits nor sees replay's.
@@ -1932,7 +1950,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
         let `typedId` {.used.}: `tupleTy` = `witnessTup`
   let replay = emitReplayWitness(fn, params, typedId, replayTgt,
     newDotExpr(candId, ident"pathTaint"),
-    newCall(bindSym"candidateLossy", candId))
+    newCall(bindSym"candidateLossy", candId),
+    newDotExpr(candId, ident"nilDerefOnPath"))
   result = quote do:
     block:
       let `rawId` = `runCall`

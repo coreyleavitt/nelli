@@ -500,6 +500,16 @@ type
       ## Phase 15 R2. Count of fresh-ref distinctness inequalities already
       ## emitted on this path; compared against `settings.maxFreshnessAssertions`
       ## (the cap). Threaded by value at every fork like `heapDepth`.
+    nilDeref: bool
+      ## RFC-0005 S8k. This path took `nilDerefFork`'s NIL edge: it models a
+      ## `p[]` read or write with `p == nil` as a `NilAccessDefect` raise
+      ## (escaping, or caught by a handler and continued). The real program
+      ## does not raise there: a nil dereference is a SIGSEGV in the default
+      ## build of the pinned toolchain (probed: `--nilchecks:on` changes
+      ## nothing, and no `except` arm runs). Set once at the fork, inherited
+      ## by every fork below it, and carried to the finding
+      ## (`RawResult.nilDerefOnPath`), so replay never executes a witness
+      ## whose real run would dereference nil and kill the host process.
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
@@ -585,6 +595,11 @@ type
     raisedTypeId*: string            ## `sxRaised` claims only
     isDefect*:     bool              ## `sxRaised` claims only
     raisedMsg*:    Option[string]    ## `sxRaised` claims only
+    nilDerefOnPath*: bool
+      ## RFC-0005 S8k. The claim's path went through the walker's nil
+      ## dereference edge (`Path.nilDeref`): its real run would SIGSEGV
+      ## where the model raises `NilAccessDefect`, so replay declines it
+      ## (`roInconclusive`) without executing `fn`.
     input:         RawWitness
       ## PRIVATE: the solver's model of the input (the `witness` of an
       ## `sxSat` claim, the `raisedWitness` of an `sxRaised` one).
@@ -607,6 +622,11 @@ type
       ## by the reduction. Typed into `DefectFinding[T]` by the `symexFind`
       ## macro. Empty for sxUnsat/sxUnknown; also empty when the winner is
       ## the only sxRaised in w.found.
+    nilDerefOnPath*: bool
+      ## RFC-0005 S8k. The path that produced this finding took the walker's
+      ## nil dereference edge (`Path.nilDeref`), recorded at target-hit time
+      ## beside `pathTaint`. Read only when the finding becomes a replay
+      ## candidate (`SatCandidate.nilDerefOnPath`).
     pathTaint*:    Taint
       ## RFC-0005 S1 (§2.3). The taint of the path that produced this
       ## finding, recorded at TARGET-HIT time (`isTargetLabel`'s sxSat,
@@ -728,7 +748,8 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        heaps: hs.heaps, heapDepth: parent.heapDepth,
        allocCounters: hs.allocCounters,
        liveRefs: hs.liveRefs,                            ## Phase 15 R2
-       freshnessAssertCount: parent.freshnessAssertCount)  ## Phase 15 R2
+       freshnessAssertCount: parent.freshnessAssertCount,  ## Phase 15 R2
+       nilDeref: parent.nilDeref)                        ## RFC-0005 S8k
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
@@ -756,8 +777,15 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
   ## cp.uncertain`). Forks from the returned CALLEE path `callee` (so its
   ## exit heap state rides out), with taint `callee.taint + caller.taint`:
   ## the post-call path is tainted by anything either side picked up. Union
-  ## replaces OR with no special case (§2.1).
-  forkPathTaintPrimitive(callee, pcExpr, envExpr, callee.taint + caller.taint)
+  ## replaces OR with no special case (§2.1). RFC-0005 S8k: `nilDeref` is
+  ## likewise either side's -- a closure body's descent starts from a fresh
+  ## root, so a caller that already passed the nil edge (a caught
+  ## `NilAccessDefect`) would otherwise lose the mark on the body's raise.
+  block:
+    let merged = forkPathTaintPrimitive(callee, pcExpr, envExpr,
+                                        callee.taint + caller.taint)
+    merged.nilDeref = callee.nilDeref or caller.nilDeref
+    merged
 
 proc taintInPlace(p: Path; d: Degrade) =
   ## RFC-0005 S1 (§2.2). The MUTATION-shaped sibling of `forkPathTainted`,
@@ -7556,12 +7584,106 @@ when defined(symexQueryStats):
       echo "N45STATS queries=", t.queries, " asserts=", t.asserts,
            " rlimit=", t.rlimit)
 
-proc trySolve(ctx: Z3Context,
-              path: Path,
-              params: seq[IRParam],
-              settings: SymexSettings = defaultSymexSettings(),
-              initialEnv: Env = initOrderedTable[string, SymVal]()
-              ): tuple[status: SymexStatusKind, witness: RawWitness] =
+# ---- RFC-0005 S8k: the per-term seq length cap (`maxSeqLen`) ---------------
+#
+# Z3's sequence solver explores string / seq lengths upward, and past ~100
+# elements each step's work grows super-linearly; past ~250 a single step
+# can run for minutes without polling the resource counter, so neither
+# `rlimit` nor a wall-clock `timeout` bounds it (measured, see
+# `ResourceBudget.maxSeqLen`). Every walker query therefore assumes each
+# uninterpreted seq-sorted term is at most `maxSeqLen` long, and reads the
+# unsat core to tell a genuine UNSAT from one the cap caused. Under the cap
+# the counter IS polled, but slowly, so such a query also runs under
+# `seqQueryRLimit`. Deterministic: no wall clock is consulted anywhere.
+
+var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, uninterp, select: int]
+  ## The `Z3_decl_kind` ordinals of an uninterpreted application and an
+  ## array `select`, read off terms built once per thread: the wrapper's
+  ## `Z3DeclKindFFI` binds only the proof-rule subset of the C enum, and
+  ## the header's values for these two are positional, so they are taken
+  ## from the linked Z3 itself rather than restated here.
+
+proc seqCapKinds(ctx: Z3Context): tuple[uninterp, select: int] =
+  if not seqCapDeclKinds.ready:
+    let c = mkIntVar(ctx, "__s8k_kind_probe")
+    let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8k_kind_probe_arr")
+    let sel = select(arr, mkInt(ctx, 0))
+    seqCapDeclKinds = (ready: true,
+      uninterp: ord(Z3_get_decl_kind(ctx.raw, getAppDecl(c))),
+      select:   ord(Z3_get_decl_kind(ctx.raw, getAppDecl(sel))))
+  (seqCapDeclKinds.uninterp, seqCapDeclKinds.select)
+
+proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool];
+                cap: int): seq[Z3Bool] =
+  ## RFC-0005 S8k. `len(t) <= cap` for every seq-sorted (string or seq)
+  ## term `t` in `roots` that is an uninterpreted constant or application
+  ## (an input, a fresh return, a closure/UF result) or an array `select`
+  ## (a heap cell). Every other seq-sorted term is built from these by
+  ## interpreted operations, so bounding the leaves bounds the query's
+  ## search space. Quantifier bodies are not entered (their seq terms are
+  ## bound, not chosen). Each distinct AST is visited once.
+  let kinds = seqCapKinds(ctx)
+  let capInt = mkInt(ctx, cap)
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    if getSortKind(t) == skSeq:
+      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if k == kinds.uninterp or k == kinds.select:
+        let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
+        result.add lenT <= capInt
+    for a in args: stack.add a
+
+proc checkCapped(s: Z3Solver; ctx: Z3Context; roots: openArray[Z3Bool];
+                 settings: SymexSettings; rlimit: uint):
+                 tuple[status: Z3Status, capped, seqBounded: bool] =
+  ## RFC-0005 S8k. `s.check()` under the `maxSeqLen` assumption. `roots`
+  ## are the formulas asserted into `s` (the caps are taken from them);
+  ## `rlimit` is the one `s` was built with. With no seq leaf (or
+  ## `maxSeqLen == 0`, unlimited) this is exactly `s.check()`. Otherwise
+  ## the query runs under `seqQueryRLimit` when that is the smaller bound
+  ## (`seqBounded`), and the caps ride one fresh assumption literal:
+  ##   * sat -- the model satisfies the caps, so it is a model of `s`;
+  ##   * unsat with the literal outside the core -- `s` alone is UNSAT;
+  ##   * unsat with the literal in the core -- only the cap refuted it (a
+  ##     longer term may satisfy `s`): reported `zsUnknown`, `capped`.
+  let cap = settings.budget.maxSeqLen
+  if cap <= 0:
+    return (s.check(), false, false)
+  let caps = seqLenCaps(ctx, roots, cap)
+  if caps.len == 0:
+    return (s.check(), false, false)
+  let sq = settings.budget.seqQueryRLimit
+  let seqBounded = sq != 0 and (rlimit == 0 or sq < rlimit)
+  if seqBounded:
+    let p = newParams(ctx)
+    p.set("rlimit", sq)
+    p.set("random_seed", 0'u)
+    s.setParams(p)
+  let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")
+  var all = caps[0]
+  for i in 1 ..< caps.len: all = all and caps[i]
+  s.add implies(capLit, all)
+  let r = s.checkWith([capLit])
+  if r != zsUnsat:
+    return (r, false, seqBounded)
+  if s.getUnsatCore().len == 0:
+    return (zsUnsat, false, seqBounded)
+  (zsUnknown, true, seqBounded)
+
+proc pathSolver(ctx: Z3Context; path: Path; settings: SymexSettings;
+                rlimit: uint): tuple[s: Z3Solver, roots: seq[Z3Bool]] =
+  ## The solver every walker query of `path` is issued on, with every
+  ## assertion `trySolve` has always made (RFC-0005 S8k factored it out so
+  ## the loop-iteration feasibility check asks the same question). `roots`
+  ## lists what was asserted, for `checkCapped`.
   let s = newSolver(ctx)
   # Z3 bound: deterministic logical-step count (NOT wall-clock) so
   # the same SUT + Z3 build produces identical outcomes across
@@ -7570,18 +7692,19 @@ proc trySolve(ctx: Z3Context,
   # overrides any caller's `setGlobalParam` so the verdict cache's
   # determinism guarantee doesn't depend on undocumented Z3 defaults.
   let solverParams = newParams(ctx)
-  solverParams.set("rlimit", settings.budget.queryRLimit)
+  solverParams.set("rlimit", rlimit)
   solverParams.set("random_seed", 0'u)
   s.setParams(solverParams)
+  var roots: seq[Z3Bool]
   for c in path.pc:
-    s.add(c)
+    roots.add c
   # Phase 16 ADR-0012: defect-survivor feasibility facts (the `not overflow`/
   # `not divByZero`/`not parseIntRaise` negations) are asserted alongside `pc`,
   # so the effective path condition (pc ++ defectSurvivorPc) is identical to the
   # pre-ADR-0012 behaviour for every non-closure path. The split only changes
   # which of these a closure's return-axiom uses as its implication guard.
   for c in path.defectSurvivorPc:
-    s.add(c)
+    roots.add c
   # RFC-0005 S7 (§2.4): the parseInt digits-gate pool that was drained here is
   # GONE. It asserted `startsWith(s,"-") => toInt(tail) >= 0` into EVERY check
   # run-wide, so a `parseInt` lowered on one path pruned a sibling path that
@@ -7600,29 +7723,42 @@ proc trySolve(ctx: Z3Context,
   # only from `taint == {}` body sub-paths (a tainted arm is dropped and
   # recorded, `ceClosureBodyUncertain`).
   for c in currentClosureCallAxioms:
-    s.add(c)
+    roots.add c
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
   # into every check — definitional clauses over per-occurrence fresh
   # strings (see `stripDecompConds`' doc for the soundness argument).
   for c in stripDecompConds:
-    s.add(c)
+    roots.add c
   # RFC-0005 S8f: every allocated table's / set's size is at least its
   # number of distinct present key terms (`ContainerCardRegistry`). True of
   # every real table for any values of the terms, so it prunes only
   # unrealizable models (`t.len == 0 and t.hasKey("a")`), never a real
   # input; and every model that satisfies it is the one the extractors
   # render.
-  let cardConds = containerCardConds()
-  for c in cardConds:
+  for c in containerCardConds():
+    roots.add c
+  for c in roots:
     s.add(c)
+  (s: s, roots: roots)
+
+proc trySolve(ctx: Z3Context,
+              path: Path,
+              params: seq[IRParam],
+              settings: SymexSettings = defaultSymexSettings(),
+              initialEnv: Env = initOrderedTable[string, SymVal]()
+              ): tuple[status: SymexStatusKind, witness: RawWitness,
+                       undefWhy: string] =
+  ## `undefWhy` (RFC-0005 S8k) says why an `sxUnknown` is one, for the
+  ## caller's `beSolverUndef` message: the `maxSeqLen` cap, or Z3's own
+  ## `reason_unknown` (an exhausted `queryRLimit`, an incomplete theory).
+  let (s, roots) = pathSolver(ctx, path, settings, settings.budget.queryRLimit)
   inc symexZ3CallCount
-  let r = s.check()
+  let (r, capped, seqBounded) = checkCapped(s, ctx, roots, settings,
+                                            settings.budget.queryRLimit)
   when defined(symexQueryStats):
-    # Counted from the same sources the adds above iterate, so it tracks
+    # Counted from the same sources `pathSolver` asserts, so it tracks
     # them by construction rather than by a hand-maintained tally.
-    recordQueryStat(s,
-      path.pc.len + path.defectSurvivorPc.len +
-        currentClosureCallAxioms.len + stripDecompConds.len + cardConds.len,
+    recordQueryStat(s, roots.len,
       (case r
        of zsSat: "sat"
        of zsUnsat: "unsat"
@@ -7637,11 +7773,61 @@ proc trySolve(ctx: Z3Context,
     # serializer can select a ref-to-variant pointee's active-arm field values.
     currentVariantHeaps = path.heaps
     (status: sxSat,
-     witness: extractWitness(m, envForExtract, params))
+     witness: extractWitness(m, envForExtract, params), undefWhy: "")
   of zsUnsat:
-    (status: sxUnsat, witness: RawWitness())
+    (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
-    (status: sxUnknown, witness: RawWitness())
+    let why =
+      if capped:
+        "no model with every string / seq at most " &
+          $settings.budget.maxSeqLen & " elements (maxSeqLen); a longer " &
+          "one was not searched"
+      elif seqBounded:
+        "Z3: " & s.reasonUnknown() & " (the query mentions a string / seq, " &
+          "so it ran under seqQueryRLimit = " &
+          $settings.budget.seqQueryRLimit & ")"
+      else:
+        "Z3: " & s.reasonUnknown()
+    (status: sxUnknown, witness: RawWitness(), undefWhy: why)
+
+const defaultLoopPruneRLimit* = 250_000'u
+  ## RFC-0005 S8k. The Z3 `rlimit` each loop-iteration feasibility check
+  ## (`loopArmInfeasible`) runs under, unless the caller's `queryRLimit` is
+  ## smaller. A check that runs out is `zsUnknown`, which never prunes: the
+  ## arm is walked exactly as before S8k, so the bound trades pruning power
+  ## for time and nothing else. Small on purpose: the check runs once per
+  ## unrolled iteration per path, and a concretely-decided guard never
+  ## reaches the solver at all (it simplifies to a literal first).
+
+func loopPruneRLimit*(settings: SymexSettings): uint =
+  ## RFC-0005 S8k. `defaultLoopPruneRLimit`, or the caller's `queryRLimit`
+  ## when that is set and smaller (a caller's budget is never exceeded).
+  let q = settings.budget.queryRLimit
+  if q != 0 and q < defaultLoopPruneRLimit: q else: defaultLoopPruneRLimit
+
+proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
+                       settings: SymexSettings): bool =
+  ## RFC-0005 S8k. True only when `path`'s full query (`pathSolver`) plus
+  ## `arm` is UNSAT on its own -- the arm of a loop guard no real execution
+  ## on this path can take. A literal `arm` is decided without the solver;
+  ## `zsUnknown` (the budget, or an UNSAT only the `maxSeqLen` cap caused)
+  ## is `false`: an undecided arm is walked. Sound for pruning: the pruned
+  ## arm's every later query would carry the same UNSAT constraints, so no
+  ## finding and no model is lost; what is lost are declines an infeasible
+  ## arm would have recorded, which is the precision S8k is after.
+  let lit = $simplify(arm)
+  if lit == "false": return true
+  if lit == "true": return false
+  let rl = loopPruneRLimit(settings)
+  let (s, roots) = pathSolver(ctx, path, settings, rl)
+  s.add arm
+  checkCapped(s, ctx, roots & @[arm], settings, rl).status == zsUnsat
+
+var symexLoopIterations* {.threadvar.}: int
+  ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
+  ## (one per feasible iteration per path). Always on, like
+  ## `symexZ3CallCount`; tests reset it and read it to pin that feasibility
+  ## pruning keeps nested loops linear in their trip counts.
 
 type
   LoopFrame = object
@@ -8810,7 +8996,7 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
 
 proc solveTargetHit(w: var WalkCtx; p: Path):
     tuple[status: SymexStatusKind, witness: RawWitness,
-          candidateErrs: seq[SymexErrorInfo]] =
+          candidateErrs: seq[SymexErrorInfo], undefWhy: string] =
   ## RFC-0005 S1c (§2.3). THE solve for a path that reached the search target
   ## -- `isTargetLabel`'s label hit and `routeRaise`'s SUT-boundary raise --
   ## run on EVERY such path, tainted or not. Before S1c both sites refused to
@@ -8841,14 +9027,14 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   var solveSettings = w.settings
   if p.taint != {}:
     solveSettings.budget.queryRLimit = taintedSolveRLimit(w.settings)
-  let (st, wit) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
+  let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
   var errs: seq[SymexErrorInfo]
   if isCandidate:
     for i in exLiveStart ..< w.extractionErrors.len:
       errs.add w.extractionErrors[i]
     extractionErrors.setLen(exStart)
     w.extractionErrors.setLen(exLiveStart)
-  (status: st, witness: wit, candidateErrs: errs)
+  (status: st, witness: wit, candidateErrs: errs, undefWhy: why)
 
 proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
   ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Files a SOLVED finding by the
@@ -8870,9 +9056,10 @@ func toCandidate(r: RawResult): SatCandidate =
   case r.status
   of sxSat:
     SatCandidate(status: sxSat, pathTaint: r.pathTaint, errors: r.errors,
-                 input: r.witness)
+                 nilDerefOnPath: r.nilDerefOnPath, input: r.witness)
   of sxRaised:
     SatCandidate(status: sxRaised, pathTaint: r.pathTaint, errors: r.errors,
+                 nilDerefOnPath: r.nilDerefOnPath,
                  raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
                  raisedMsg: r.raisedMsg, input: r.raisedWitness)
   of sxUnsat, sxUnknown:
@@ -10619,11 +10806,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # rationale (`maxLoopUnwind`'s own doc comment, smt/types.nim, already
     # says ">= 1"; the corrected false promise lived in the ResourceBudget
     # umbrella comment, not here). This arm's own reason is even more direct:
-    # EVERY iteration forks BOTH the continue and exit branch with no
-    # per-iteration feasibility check (a deliberate architecture choice — see
-    # N20's seeded-future-work note, `canonicalize.nim`'s `symexWalkerVersion`
-    # doc), so `active` is never structurally smaller than it was on its own;
-    # only `unwind` ever empties it. Treating 0 as "no bound" would not
+    # a loop whose trip count is symbolic keeps a feasible "guard still
+    # true" arm on every iteration (RFC-0005 S8k prunes only the infeasible
+    # ones; before S8k every iteration forked both arms unconditionally), so
+    # `active` need not shrink on its own; only `unwind` is sure to empty it. Treating 0 as "no bound" would not
     # terminate for essentially ANY while loop reaching this arm — not just
     # pathological ones — which is a direct Invariant-3 (never hang) violation,
     # not a corner case worth silently capping around.
@@ -10646,18 +10832,45 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         ## built from `pb`'s (pre-drain) env, which the drain does not
         ## mutate, so it stays a valid Z3 AST against each drained survivor.
         for dp in drainScalarRaiseForks(pb, w):
-          # cond=true: walk body
-          let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
-          let afterBody = walk(stmt.wbody, @[truePath], w)
-          # Continue-paths from the body merge into next-iter active.
-          let cps = w.loopStack[frameIx].continuePaths
-          w.loopStack[frameIx].continuePaths = @[]
-          for cp in cps: nextActive.add cp
-          for ap in afterBody: nextActive.add ap
+          # RFC-0005 S8k: each arm is walked only if it is not provably
+          # infeasible on `dp` (`loopArmInfeasible`: a literal guard is
+          # decided without the solver, an undecided one is walked). Before
+          # S8k both arms were forked on every iteration, so a concrete
+          # loop's impossible "guard still true" continuations ran to the
+          # unroll bound and reported `beBudgetExhausted`, and nested loops
+          # grew as a power of the bound.
+          if not loopArmInfeasible(w.z3, dp, cond, w.settings):
+            # cond=true: walk body
+            let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
+            inc symexLoopIterations
+            let afterBody = walk(stmt.wbody, @[truePath], w)
+            # Continue-paths from the body merge into next-iter active.
+            let cps = w.loopStack[frameIx].continuePaths
+            w.loopStack[frameIx].continuePaths = @[]
+            for cp in cps: nextActive.add cp
+            for ap in afterBody: nextActive.add ap
           # cond=false: exit loop (use dp — the drained path with domain
           # bounds folded in).
-          survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+          if not loopArmInfeasible(w.z3, dp, not cond, w.settings):
+            survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
       active = nextActive
+    # RFC-0005 S8k: a path still active after the last unrolled body faces
+    # the guard once more, exactly as the real loop does. Where the guard is
+    # provably false there, the loop has ended on that path after exactly
+    # `unwind` iterations: it leaves CLEAN through the exit arm, and no
+    # iteration was omitted. Only a path whose guard may still hold is the
+    # exhausted survivor below. The guard's own raises are routed as on
+    # every earlier iteration (Nim evaluates it on this path too).
+    if active.len > 0 and not w.shouldStop:
+      var undecided: seq[Path]
+      for p in active:
+        let (cond, pb) = lowerBoolInExpr(p, stmt.wcond, w)
+        for dp in drainScalarRaiseForks(pb, w):
+          if loopArmInfeasible(w.z3, dp, cond, w.settings):
+            survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+          else:
+            undecided.add dp
+      active = undecided
     # Break-paths exit the loop directly (with their accumulated pc/env).
     for bp in w.loopStack[frameIx].breakPaths:
       survivors.add bp
@@ -10669,9 +10882,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # N20 (RFC-chapulin-hardening bucket-2, walker v121): `stmt.
       # wHasAssumedBound` (parse-time, `collectAssumedLoopBound`) routes to a
       # DISTINCT kind when a `symexAssume` on the guard's own variable(s)
-      # exists — the structural k-unroll still cannot USE that bound (no
-      # per-iteration solver check, by design — see the kind's own doc,
-      # types.nim), but the diagnostic should say so honestly instead of
+      # exists — RFC-0005 S8k: an assume that really bounds the loop now
+      # prunes the "guard still true" arm and never reaches here; one that
+      # does not (too loose for the unroll budget) still does, and the
+      # diagnostic should say so honestly instead of
       # implying an unbounded/genuinely-exhausted loop. Status/soundness
       # behavior is IDENTICAL either way (still tainted, still sxUnknown) —
       # only the classification differs.
@@ -10697,10 +10911,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         d = w.degrade(beBudgetExhaustedAssumedBound,
           "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
                $unwind & ") with the guard still satisfiable — an assumed " &
-               "bound exists on a guard variable (symexAssume); it may not " &
-               "fit the unroll budget, and the k-unroll cannot verify " &
-               "either way without a per-iteration solver check (structural " &
-               "limit, not a soundness gap) (beBudgetExhaustedAssumedBound)")
+               "bound exists on a guard variable (symexAssume), but it " &
+               "does not end the loop within the unroll budget on this path " &
+               "(or the per-iteration feasibility check ran out of its " &
+               "budget) (beBudgetExhaustedAssumedBound)")
       else:
         d = w.degrade(beBudgetExhausted,
           "while-loop k-unroll budget exhausted (maxLoopUnwind=" &
@@ -12368,12 +12582,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # `scSpurious`-tainted path is a CANDIDATE (`admitSolvedHit`): the
         # enlarged program reaches the label, reality is unknown until S10's
         # replay, and it blocks `sxUnsat` without ever halting the walk.
-        let (st, wit, candErrs) = solveTargetHit(w, p)
+        let (st, wit, candErrs, why) = solveTargetHit(w, p)
         case st
         # RFC-0005 S1: `pathTaint` is PRODUCED here -- the hitting path's
         # taint, which `admitSolvedHit` routes on.
         of sxSat:    w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
                                                 pathTaint: p.taint,
+                                                nilDerefOnPath: p.nilDeref,
                                                 errors: candErrs))
         of sxUnknown:
           # RFC-0005 S1b (§3.1 solver-undef row): Z3 gave up on a path that
@@ -12385,7 +12600,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           discard w.degrade(beSolverUndef,
             "solver returned unknown on a path reaching target label `" &
                  stmt.tname & "` (queryRLimit=" &
-                 $w.settings.budget.queryRLimit & ") (beSolverUndef)")
+                 $w.settings.budget.queryRLimit & "): " & why &
+                 " (beSolverUndef)")
         of sxUnsat:  discard
         of sxRaised: discard   ## Phase 15 E2a: trySolve never returns sxRaised
     paths
@@ -12840,7 +13056,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       rp = forkPathTainted(rp, rp.pc, rp.env, unknownTok)
       unknownJoined = true
     # RFC-0005 S1c: solved on a tainted path too (`solveTargetHit`).
-    let (st, wit, candErrs) = solveTargetHit(w, rp)
+    let (st, wit, candErrs, why) = solveTargetHit(w, rp)
     case st
     of sxSat:
       let iv = InternalVerdict(kind: ivRaised,
@@ -12852,6 +13068,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       # routes on it (clean -> `found`, spurious-tainted -> `candidates`).
       var r = toPublic(iv)
       r.pathTaint = rp.taint
+      r.nilDerefOnPath = rp.nilDeref   # RFC-0005 S8k
       r.errors.add candErrs
       w.admitSolvedHit(r)
     of sxUnknown:
@@ -12860,7 +13077,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       discard w.degrade(beSolverUndef,
         "solver returned unknown on a path raising `" & typeId &
              "` (queryRLimit=" & $w.settings.budget.queryRLimit &
-             ") (beSolverUndef)")
+             "): " & why & " (beSolverUndef)")
     of sxUnsat:   discard
     of sxRaised:  discard   ## trySolve never returns sxRaised
   @[]

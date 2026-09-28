@@ -65,6 +65,8 @@ suite "RFC-0010 B2 — ResourceBudget: the empty literal IS the default":
     check lit.maxVariantConstructorForks == want.maxVariantConstructorForks
     check lit.maxVariantConstructorFieldAllocs ==
           want.maxVariantConstructorFieldAllocs
+    check lit.maxSeqLen == want.maxSeqLen             # RFC-0005 S8k
+    check lit.seqQueryRLimit == want.seqQueryRLimit   # RFC-0005 S8k
 
   test "an explicitly-written zero still means unlimited":
     # `0 = unlimited` is this type's documented contract for 10 of its 13
@@ -172,7 +174,7 @@ proc fieldCount[T](): int =
 suite "RFC-0010 B3 — the deprecated merge still covers every field":
 
   test "a fully-overriding merge reproduces the override exactly":
-    # Every one of ResourceBudget's 13 fields and SymexSettings' 5 non-budget
+    # Every one of ResourceBudget's 14 fields and SymexSettings' 6 non-budget
     # fields set away from its default, so a `+` body missing a line drops that
     # field back and this fails naming it.
     let b = SymexSettings(
@@ -188,7 +190,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
         maxClosureInlineCount: 777, maxInstantiationsPerProc: 888,
         maxSplitParts: 99,
         seqInlineThreshold: 131, maxVariantConstructorForks: 141,
-        maxVariantConstructorFieldAllocs: 151))
+        maxVariantConstructorFieldAllocs: 151,
+        maxSeqLen: 161, seqQueryRLimit: 171'u))   # RFC-0005 S8k
     check defaultSymexSettings() + b == b
 
   test "the field counts the merge was written against have not changed":
@@ -197,8 +200,10 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # and the pin passes while `+` silently ignores it. Pinning the counts is
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
-    check fieldCount[ResourceBudget]() == 12   # RFC-0005 S8c deleted
-                                               # `maxBytesEncodingLen`
+    check fieldCount[ResourceBudget]() == 14   # RFC-0005 S8c deleted
+                                               # `maxBytesEncodingLen`;
+                                               # S8k added `maxSeqLen` and
+                                               # `seqQueryRLimit`
     check fieldCount[SymexSettings]() == 7   # 6 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`)
 

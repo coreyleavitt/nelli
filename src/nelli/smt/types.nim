@@ -1693,7 +1693,15 @@ type
                           ## crash, never a silent wrong sat/unsat). Appended
                           ## at enum tail (ordinal stability).
     beBudgetExhaustedAssumedBound ## N20 (RFC-chapulin-hardening bucket-2,
-                          ## walker v121). A SIBLING of `beBudgetExhausted`,
+                          ## walker v121). RFC-0005 S8k superseded the
+                          ## history below: the k-unroll now walks an arm
+                          ## only if it is feasible on the path, so an
+                          ## assume that really bounds the loop records
+                          ## nothing, and this kind fires only where the
+                          ## assumed bound does not end the loop within
+                          ## `maxLoopUnwind` (or the check ran out of
+                          ## `loopPruneRLimit`). As written at v121:
+                          ## A SIBLING of `beBudgetExhausted`,
                           ## not a replacement: the plain while-loop k-unroll
                           ## (`isWhile`, no closed-form recognizer match) never
                           ## consults path-condition feasibility per iteration
@@ -2578,10 +2586,9 @@ type
     ##
     ## `maxLoopUnwind` cannot honour 0 = unlimited without reopening a walker
     ## hang: `isWhile`'s wmExplore k-unroll forks BOTH the continue and exit
-    ## branch at EVERY iteration with no per-iteration feasibility check (a
-    ## deliberate architecture choice, see `symexWalkerVersion`'s N20 note in
-    ## `canonicalize.nim`), so the active-path set never shrinks on its own
-    ## for an ordinary loop body — `unwind = 0` read as "no bound" would not
+    ## branch whenever it is feasible (RFC-0005 S8k's per-iteration check;
+    ## before S8k, at EVERY iteration unconditionally), so the active-path
+    ## set never shrinks on its own for a loop with a symbolic trip count — `unwind = 0` read as "no bound" would not
     ## terminate for essentially ANY while loop reaching that arm, violating
     ## this engine's Invariant 3 (never hang, always classify). The
     ## concrete-replay counterpart (`walkWhileFollowConcrete`) is no safer in
@@ -2602,6 +2609,44 @@ type
       ## Z3 logical step count bound. `0` (default) is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
+    maxSeqLen*: int = 128
+      ## RFC-0005 S8k. The longest string / seq (in elements -- bytes for a
+      ## `string`) any solver query may choose for one term. Default `128`.
+      ## `0` means unlimited. Every query the walker issues caps each
+      ## uninterpreted seq-sorted term (an input, a fresh return, a heap
+      ## `select`) at this length as an ASSUMPTION and reads Z3's unsat
+      ## core (`runtime.nim`'s `checkCapped`): a model found under the cap
+      ## is a model of the query; an UNSAT the cap is not part of is the
+      ## query's own; an UNSAT the cap took part in is neither, and the
+      ## solve is `zsUnknown` -- recorded as `beSolverUndef` naming this
+      ## field.
+      ##
+      ## Why a cap and not `queryRLimit`: Z3's sequence solver explores
+      ## lengths upward, and its work per step grows super-linearly with
+      ## the length (measured on the pinned Z3, `len(s) > N` alone: N=100
+      ## 1.4 s, N=200 19 s and 1.6 GB, N=300 102 s and 3.4 GB). Past ~250
+      ## elements single steps run for minutes WITHOUT polling the resource
+      ## counter, so neither `rlimit` nor a wall-clock `timeout` stops them
+      ## (a 10 s `timeout` returned after 102 s; `findColon(s, 0) > 1000`'s
+      ## query never returned). Under the cap Z3 never takes those steps,
+      ## and `seqQueryRLimit` bounds what remains. `128` admits the 100-byte
+      ## witnesses the existing suites pin (`s.len == 100 and s[99] == 7`).
+    seqQueryRLimit*: uint = 20_000_000
+      ## RFC-0005 S8k. The Z3 `rlimit` of every query that mentions a string
+      ## or seq (one `maxSeqLen` caps), when smaller than the query's own
+      ## (`queryRLimit`, `0` = unbounded, or the tainted target-hit budget).
+      ## `0` means no extra bound. Under the cap the sequence solver DOES
+      ## poll the counter, but it spends it slowly (measured on the pinned
+      ## Z3: 40-55k units/s, against ~1M/s for arithmetic): `s.len == 20
+      ## and s[19] == 'q'` needs 2.3M units (~60 s) to find its model, the
+      ## same at length 100 needs 34M (~10 min), and unbounded (the default
+      ## `queryRLimit`) nothing stopped a within-cap query that needed more.
+      ## `20M` is the bound `concreteBranchRLimit` and the tainted target-hit
+      ## solve already use by default (`defaultConcreteBranchRLimit`): a few
+      ## minutes of sequence search at most. Deterministic (a step count,
+      ## not a clock), so a query it cuts off is the same `beSolverUndef` on
+      ## every machine, and cacheable. Ignored when `maxSeqLen == 0` (no
+      ## cap, no bound: the caller opted out of both).
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path
@@ -4643,6 +4688,8 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   result = a
   let d = defaultResourceBudget()
   if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
+  if b.maxSeqLen != d.maxSeqLen: result.maxSeqLen = b.maxSeqLen   ## RFC-0005 S8k
+  if b.seqQueryRLimit != d.seqQueryRLimit: result.seqQueryRLimit = b.seqQueryRLimit   ## RFC-0005 S8k
   if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
   if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
   if b.maxLoopUnwind != d.maxLoopUnwind: result.maxLoopUnwind = b.maxLoopUnwind

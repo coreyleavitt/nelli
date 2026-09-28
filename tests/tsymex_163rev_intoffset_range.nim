@@ -42,6 +42,24 @@ import std/strutils
 import nelli/smt/canonicalize
 import nelli/symex
 
+# RFC-0005 S8i: `return i` into a `range[0..1000]` result is now a checked
+# conversion, as in Nim: it forks RangeDefect (the oracles below show Nim
+# raising it). That defect is real for each SUT here (a 1001-byte string
+# with no early ':'), and a defect surfaces under any target, so the
+# faithful answer to these label searches is now a RangeDefect finding. Its
+# witness needs a string of more than 1000 bytes, and Z3 does not finish
+# that query (`rlimit` does not bound it; a plain label search for
+# `findColon(s, 0) > 1000` does not terminate before S8i either). What
+# these tests pin is the W8 placeholder range, so they run with range
+# checks off (`acRange` excluded): no RangeDefect fork, and the label is
+# still unreachable only because the placeholder keeps the declared range.
+# `tsymex_rfc0005_s8i_models` pins the callee-return check itself, at a
+# bound Z3 can witness.
+
+proc noRangeChecks(): SymexSettings =
+  result = defaultSymexSettings()
+  result.arithChecks = {acOverflow, acDivByZero}
+
 # ---------------------------------------------------------------------------
 # Bare (non-tuple) scan-offset return -- B3 early-return-on-match shape,
 # range-typed CALLEE RETURN type.
@@ -82,7 +100,7 @@ suite "#163 review W8 -- bare scan-offset return: the placeholder keeps the call
     ## callee's declared `range[0..1000]` return type makes that impossible
     ## (Nim itself would have raised `RangeDefect` first, per the oracle
     ## above) -- a false `sxSat` witness.
-    let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"))
+    let r = symexFind(callerBareEarly, tLabel("impossible_bare_early"), noRangeChecks())
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -129,7 +147,7 @@ suite "#163 review W8 -- traced tuple position: the placeholder keeps the callee
     ## the field as a bare `svInt` with no range assertion -- same false
     ## `sxSat` mechanism as the bare arm above, at the OTHER call-return
     ## site the fix touches.
-    let r = symexFind(callerTuple, tLabel("impossible_tuple"))
+    let r = symexFind(callerTuple, tLabel("impossible_tuple"), noRangeChecks())
     check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
@@ -154,7 +172,7 @@ proc callerBareSkipWhile(s: string) =
 suite "#163 review W8 -- non-regression: Q1/B0 never reaches these arms":
 
   test "the skip-while shape still terminates and still respects the range (ordinary BV route)":
-    let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"))
+    let r = symexFind(callerBareSkipWhile, tLabel("impossible_bare_skipwhile"), noRangeChecks())
     check r.status == sxUnsat
 
 suite "#163 review round 1 -- walker version pin":

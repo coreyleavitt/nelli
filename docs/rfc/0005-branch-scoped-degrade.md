@@ -1645,7 +1645,9 @@ behaviour was probed against the pinned toolchain (c and cpp identical):
     `4cfa655`, before S8i. S8i's range check at a callee's `return i` into
     `range[0..1000]` (`163rev_intoffset_range`) issues exactly that query:
     the `RangeDefect` is real (Nim raises it for a 1001-byte string with no
-    early `':'`), but its solve does not return.
+    early `':'`), but its solve does not return. That test pins the #163 W8
+    placeholder range, so it now runs with `acRange` off (re-pinned below);
+    the callee-return check is pinned at a bound Z3 can witness.
 
 Pins: `tests/tsymex_rfc0005_s8i_models.nim`. It covers:
 - `div -1` at 64, 32 and 8 bits;
@@ -1658,6 +1660,7 @@ Pins: `tests/tsymex_rfc0005_s8i_models.nim`. It covers:
 - the implicit `let`, `var`, object-field and `int8 -> Natural`
   conversions;
 - an out-of-bounds array index, which stays an `IndexDefect`;
+- a callee's `return x` into a `range[0..10]` result;
 - symbolic and literal reassignment of a declined construction;
 - the concolic let-site and closure raising conditions, both raising and
   returning;
@@ -1682,6 +1685,12 @@ Re-pinned, each checked against real Nim:
   `lowerConvIntRange`'s `range-defect-check`.
 - `phase15_A1_arithmetic`: the open `bMod` sign note is marked resolved.
   The cell's domain is unchanged.
+- `163rev_intoffset_range` had pinned `sxUnsat` for three label searches
+  whose callees `return i` into `range[0..1000]`. That is the old model:
+  Nim raises `RangeDefect` there (the file's own oracles), and the
+  finding's witness is a string Z3 cannot build (see Different
+  mechanisms). The three searches now run with `acRange` off, which keeps
+  their subject, the W8 placeholder range, and their `sxUnsat`.
 - `phase15_CR2_cachekey` pin (157).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2

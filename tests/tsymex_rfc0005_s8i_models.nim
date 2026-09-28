@@ -365,6 +365,18 @@ proc hiddenInt8(x: int8) =
   let q: Natural = x
   discard q
 
+# A callee's `return x` into a range result is the same hidden conversion
+# (`ReturnStmt(Asgn(result, HiddenStdConv(Empty, x)))`). Probe: `return x`
+# from a `Natural` proc raises RangeDefect "value out of range: -1 notin
+# 0 .. 9223372036854775807" (c and cpp identical).
+
+proc retSmall(x: int): range[0..10] =
+  return x
+
+proc callsRetSmall(x: int) =
+  let q = retSmall(x)
+  if q > 10: symexTarget("s8i_ret_small")
+
 suite "S8i (3b) an implicit conversion into a range type raises RangeDefect":
   test "let q: R = x raises out of range (was a false sxUnsat)":
     let r = symexFind(hiddenLet, tRaisedExn("RangeDefect"))
@@ -391,6 +403,14 @@ suite "S8i (3b) an implicit conversion into a range type raises RangeDefect":
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxRaised
     if r.status == sxRaised: check r.raisedWitness[0] < 0
+
+  test "a callee's return into a range result raises out of range (was unchecked)":
+    let r = symexFind(callsRetSmall, tLabel("s8i_ret_small"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "RangeDefect"
+      check r.raisedWitness[0] < 0 or r.raisedWitness[0] > 10
 
   test "an int8 into a Natural raises for x < 0 (was a false sxUnsat)":
     let r = symexFind(hiddenInt8, tRaisedExn("RangeDefect"))

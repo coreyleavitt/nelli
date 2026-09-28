@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 12:21Z)
+## Current position (refreshed 2026-09-28 13:27Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -205,14 +205,15 @@
   `return` exit (**false sxUnsat**), `defer`, named ref-object case variants,
   suspected variant-blind reads through `VRef = ref VObj`, inline ref to a
   multi-variant. **S8l (opus) running** in `scratchpad/wt-s8l`, branch
-  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log` (commit `297003a`; gate finished 12:21Z: one failure, `rfc0005_s6b_ops`,
-  the decline-site audit; agent fixing then re-gating). Based on `3500d0d`: rebase onto the branch tip at landing.
+  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log` (`297003a` + `e0ce94a`, which re-audits s6b_ops 11 -> 12 for the
+  bare-return zero-default havoc site; re-gate `s8l-gate2.log` at `e0ce94a`,
+  422/515 at 13:27Z, clean so far). Based on `3500d0d`: rebase onto the branch tip at landing.
   Soundness first, so S8l runs before S8k.
 - **Remaining:** S8l -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8l (`rfc-0005-s8l`, `s8l-gate.log`); gates run from a
+  resume, check S8l (`rfc-0005-s8l`, `s8l-gate2.log`); gates run from a
   worktree at the sha they certify, never the live checkout. Order: S8l -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

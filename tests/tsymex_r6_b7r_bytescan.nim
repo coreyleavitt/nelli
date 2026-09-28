@@ -479,25 +479,20 @@ suite "symex round-6 B7-rider -- LEG 2 (char-widening witness-corruption fix)":
     let r = symexFind(sut, tLabel("leg2_highbyte_hit"))
     check r.status == sxSat
 
-  test "B7R-LEG2-3: char(<a wider int>) narrowing declines cleanly (classified sxUnknown, not a crash or a silent mis-model)":
-    ## Regression pin for `normalizeIntTyName`'s widened `char` mapping's
-    ## OTHER branch: `char` as a NARROWING target is a NEW REACHABLE INPUT
-    ## for `declineIntWidthConv` -- an EXISTING B2 decline site (already
-    ## covered by TOT-1's own "B2: narrowing int conversion" corpus row, per
-    ## its SITE, not its exact input-type combination) -- not a new site.
-    ## Pre-fix this shape silently fell to the bare identity pass-through
-    ## (no narrowing check at all, an unmasked, unsound value) rather than
-    ## declining; post-fix it declines exactly like `byte`'s own narrowing
-    ## case (B2-9/B2-13, `tsymex_r6_b2_intwidth.nim`).
+  test "B7R-LEG2-3: char(<a wider int>) narrowing is modelled (range-checked, faithful witness)":
+    ## Originally pinned `char` as a NARROWING target declining through
+    ## `declineIntWidthConv` (B2), which beat the pre-fix silent identity
+    ## pass-through. RFC-0005 S8j models the conversion faithfully instead:
+    ## Nim range-checks a `char` target over 0..255 (out of range raises
+    ## `RangeDefect`), so the label is reachable exactly at x == ord('A').
     proc charNarrowingDecline(x: int32) =
       let c = char(x)
       if c == 'A':
         symexTarget("char_narrow_decline_target")
     let r = symexFind(charNarrowingDecline, tLabel("char_narrow_decline_target"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind)
-    check r.errors.anyIt("narrowing" in it.msg)
+    check r.status == sxSat
+    check r.witness[0] == 65'i32
+    check not r.errors.anyIt("narrowing" in it.msg)
 
 suite "symex round-6 B7-rider -- version pins":
 

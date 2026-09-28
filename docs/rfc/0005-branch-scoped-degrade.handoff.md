@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 17:39Z)
+## Current position (refreshed 2026-09-28 18:41Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -210,7 +210,7 @@
   at `6b0cd1e` (tree = landed but for this handoff) regressed=0 new-failing=0
   new-ok=25. `heRefVariantUnsupported` removed (breaking for exhaustive
   matches); new `eeFinallyJumpOnRaise`; every Z3 error now forces sxUnknown.
-  Pushed; Windows CI running.
+  Pushed; **Windows CI (`a696d80`): all three green.**
 - **Fence regrouped (`6556a23`)** from S8m's findings: **S8k = termination and
   resources** -- long-string Z3 queries rlimit does not bound, loop-unroll
   feasibility pruning (20GB at unwind 5; dead label after a loop is
@@ -219,7 +219,7 @@
   params, a callee reading `result` before writing it, a closure returning a
   variant. **S8k (opus) running** in `scratchpad/wt-s8k`, branch
   `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
-  six Linux hangers.
+  six Linux hangers. (18:41Z: editing src, not yet committed.)
 - **Remaining:** S8k -> S8n -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

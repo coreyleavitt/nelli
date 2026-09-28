@@ -5,7 +5,8 @@
 ## procs (and, wherever today's engine can produce one, a real `symexFind`
 ## witness): all three outcomes; the `dcFreshSymbol`-only eligibility gate;
 ## witness fidelity (a lossy `ref` render confirms on a hit but never
-## refutes, an unexecutable `ptr` placeholder is never run); target-kind
+## refutes, an unexecutable `ptr` placeholder is never run; since S8h a
+## `ref`/`ptr` to modelled scalars is faithful and refutes); target-kind
 ## scope (`tNilAccess` declined); escaping-raise semantics; `var` params;
 ## and the stackable capture context (`engine/markers.nim`) that keeps an
 ## engine-internal replay from clobbering a user's in-flight capture.
@@ -59,6 +60,20 @@ proc ptrSut(p: ptr int) =
   tick()
   if p[] == 3:
     symexTarget("ptrHit")
+
+type LossyBox = object
+  n: int
+  s: string   ## a field kind the logical heap does not model (S8h)
+
+proc lossySut(p: ref LossyBox) =
+  tick()
+  if p.n == 5:
+    symexTarget("lossyHit")
+
+proc ptrStrSut(p: ptr string) =
+  tick()
+  if p[].len == 3:
+    symexTarget("ptrStrHit")
 
 proc raiser(x: int) =
   tick()
@@ -138,26 +153,50 @@ suite "RFC-0005 S2 -- replayWitness":
     ## fresh-symbol.
     check not replayEligible(pathTaint(dcFreshSymbol) + pathTaint(dcFabricated))
 
-  test "witness fidelity: a lossy ref witness confirms on a hit, never refutes":
-    ## `ref int` renders as a fresh non-nil cell with no alias structure
-    ## (`emitTyAndReader`'s `itRef` arm) -- safe to run, not the model.
+  test "witness fidelity: a faithful ref int witness confirms and refutes":
+    ## RFC-0005 S8h: `resolveRef` renders a `ref int` cell exactly as the
+    ## model's input heap has it, so the witness is faithful -- a hit
+    ## confirms and a miss refutes.
     let r = symexFind(refSut, tLabel("refHit"))
     check r.status == sxSat
     sideEffects = 0
     check replayWitness(refSut, r.witness, tLabel("refHit"), {}) == roConfirmed
     check sideEffects == 1
-    ## A miss on a lossy render says nothing about the model's witness.
     var cell = new int
     cell[] = 0
-    check replayWitness(refSut, (cell,), tLabel("refHit"), {}) == roInconclusive
+    check replayWitness(refSut, (cell,), tLabel("refHit"), {}) == roRefuted
     check sideEffects == 2
 
-  test "witness fidelity: an unexecutable ptr witness is never run":
-    ## `ptr T` renders as a nil placeholder: running it would SIGSEGV.
-    ## Declined at macro time, so even a reaching, valid input is not run.
+  test "witness fidelity: a lossy ref witness confirms on a hit, never refutes":
+    ## A pointee with a field kind the logical heap does not model (`string`)
+    ## keeps that field's zero value in the render -- safe to run, not the
+    ## model.
+    var box = new LossyBox
+    box.n = 5
+    sideEffects = 0
+    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}) == roConfirmed
+    check sideEffects == 1
+    ## A miss on a lossy render says nothing about the model's witness.
+    box.n = 0
+    check replayWitness(lossySut, (box,), tLabel("lossyHit"), {}) ==
+          roInconclusive
+    check sideEffects == 2
+
+  test "witness fidelity: a ptr int witness is a real cell and runs":
+    ## RFC-0005 S8h: a `ptr` to a scalar `alloc0` can hold is faithful.
     var cellVal = 3
     sideEffects = 0
     check replayWitness(ptrSut, (addr cellVal,), tLabel("ptrHit"), {}) ==
+          roConfirmed
+    check sideEffects == 1
+
+  test "witness fidelity: an unexecutable ptr witness is never run":
+    ## `ptr string` does not render through `resolveRef`: running its
+    ## placeholder would SIGSEGV. Declined at macro time, so even a reaching,
+    ## valid input is not run.
+    var strVal = "abc"
+    sideEffects = 0
+    check replayWitness(ptrStrSut, (addr strVal,), tLabel("ptrStrHit"), {}) ==
           roInconclusive
     check sideEffects == 0
 

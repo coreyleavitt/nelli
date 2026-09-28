@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 09:42Z)
+## Current position (refreshed 2026-09-28 09:57Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -194,17 +194,21 @@
   walker 158; self-gates -> `scratchpad/s8j-gate.log`. **S8k** after S8j:
   long-string Z3 queries that ignore rlimit (bounded decline to sxUnknown),
   concolic closure-condition resolution, `renderAsChoices` over ref params.
-- **S8j progress (08:40Z):** `9784b95` (fix: top-level return lowered, narrowing
-  conversions, inline ref variant sort, single range check) + `ef5f6d4`
-  (re-pin: unsigned narrowing truncates in Nim, so round-6 B2's decline pins
-  become sxSat). First gate at `9784b95` flagged those two; **re-gate running
-  at `ef5f6d4`** -> `scratchpad/s8j-gate2.log` (476/515 at 09:42Z, clean so far).
-- **Remaining:** S8j -> S8k -> S11 -> completion gate -> ff main + tag.
+- **S8j landed `7d2c2d7`** (walker 158; fix `e70786a`, re-pin `7d2c2d7`):
+  gate at `ef5f6d4` (tree = landed but for this handoff) regressed=0
+  new-failing=0 new-ok=23. Pushed; Windows CI running.
+- **Fence grew S8l (`3500d0d`)** from S8j's findings: `finally` skipped on a
+  `return` exit (**false sxUnsat**), `defer`, named ref-object case variants,
+  suspected variant-blind reads through `VRef = ref VObj`, inline ref to a
+  multi-variant. **S8l (opus) running** in `scratchpad/wt-s8l`, branch
+  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log`.
+  Soundness first, so S8l runs before S8k.
+- **Remaining:** S8l -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8j (`rfc-0005-s8j`, `s8j-gate2.log`); gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8j -> S8k ->
+  resume, check S8l (`rfc-0005-s8l`, `s8l-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8l -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

@@ -149,10 +149,10 @@ proc corpusVariantConstructBudgetExceeded(b: byte, x: int) =
   if v.tag == 42:
     symexTarget("variant_construct_budget_exceeded")
 
-# Round-6 B2: a NARROWING int conversion (`uint8(x)` truncating an `int32`)
-# has no truncate primitive modeled — must decline cleanly to a classified
-# sxUnknown, never fall through to the pre-B2 identity pass-through's
-# silent unsoundness (the value left unmasked).
+# Round-6 B2 recorded a NARROWING int conversion (`uint8(x)` truncating an
+# `int32`) as a classified decline (no truncate primitive). RFC-0005 S8j
+# models it: Nim truncates into an unsigned target and never raises (probed:
+# `uint8(300) == 44`), so this is a capability row below, not a §0 row.
 proc corpusNarrowIntConv(x: int32) =
   let b = uint8(x)
   if b == 42'u8:
@@ -419,14 +419,6 @@ let corpus = @[
              # RFC-0005 S6a: split off as `beBudgetExhaustedUnmodelled`.
              expectedKind: beBudgetExhaustedUnmodelled, hasKindCheck: true),
 
-  CorpusItem(label: "B2: narrowing int conversion (uint8(x) from int32)",
-             surface: "1. parser catch-all",
-             backstops: "Round-6 B2 (int-family width-conversion modeling — " &
-                        "narrowing is a recorded decline, no truncate " &
-                        "primitive modeled)",
-             status: rNarrowIntConv.status, errors: rNarrowIntConv.errors,
-             expectedKind: feUnsupportedExprKind, hasKindCheck: true),
-
   CorpusItem(label: "CR-2b: cstring SUT param",
              surface: "2. type-classifier catch-all",
              backstops: "CR-2b (classifyType param-type catch-all)",
@@ -528,6 +520,13 @@ suite "symex TOT-1 — B2 same-width reinterpret: sxSat capability + soundness c
     check rReinterpretIntConv.status == sxSat
     check rReinterpretIntConv.status != sxUnknown  ## the pre-9019d90 behavior
     check int32(rReinterpretIntConv.witness[0]) == 42'i32
+
+  test "B2/RFC-0005 S8j: uint8(x) from int32 truncates to a REAL sxSat witness (low byte 42), never the pre-S8j decline":
+    ## Formerly the §0 row "B2: narrowing int conversion" (a classified
+    ## decline); re-pinned as a capability when S8j modelled the truncation.
+    check rNarrowIntConv.status == sxSat
+    if rNarrowIntConv.status == sxSat:
+      check (int32(rNarrowIntConv.witness[0]) and 0xFF'i32) == 42'i32
 
   test "B2/9019d90 SOUNDNESS: the tag-flip reinterpret never equates u == 42'u32 for any x other than 42":
     check rReinterpretIntConvSoundness.status == sxUnsat

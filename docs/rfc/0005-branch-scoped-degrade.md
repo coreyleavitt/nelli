@@ -1819,7 +1819,15 @@ Pins: `tests/tsymex_rfc0005_s8j_exits.nim`. It covers:
 
 Each test comment cites the real-Nim probe it relies on.
 
-Re-pinned: `phase15_CR2_cachekey` pin (158).
+Re-pinned, each checked against real Nim:
+- `r6_b2_intwidth` B2-9 and B2-13 had pinned the round-6 narrowing decline
+  (`sxUnknown`, `feUnsupportedExprKind`) for `uint8(x)` and `byte(x)` of an
+  `int32`. Nim truncates there (`uint8(300) == 44`), so both are now
+  `sxSat` with a witness whose low byte is 42.
+- `tot1_totality_corpus`: the §0 row "B2: narrowing int conversion" was a
+  decline row; it moves to the capability suite beside the B2 reinterpret,
+  pinned `sxSat` with the same low-byte check.
+- `phase15_CR2_cachekey` pin (158).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

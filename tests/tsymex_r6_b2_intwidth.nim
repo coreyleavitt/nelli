@@ -234,21 +234,24 @@ suite "symex round-6 B2 — signedness keyed on the SOURCE value":
     let r = symexFind(widenSignExtendToUnsignedTarget, tAssertionViolation())
     check r.status == sxUnsat
 
-suite "symex round-6 B2 — recorded declines (narrowing)":
+suite "symex round-6 B2 — narrowing into an unsigned target (formerly a decline, now modeled)":
+  # RFC-0005 S8j re-pin. B2 recorded `uint8(x)` / `byte(x)` of a wider int
+  # as a classified decline. Nim truncates into an unsigned target and never
+  # raises (probed on the pinned toolchain: `uint8(300) == 44`,
+  # `byte(300) == 44`), and S8j models exactly that, so the label is
+  # reachable and the witness's low byte is 42.
 
-  test "B2-9: narrowing int conversion declines cleanly (classified sxUnknown, not a crash)":
+  test "B2-9: uint8(x) narrowing truncates to the low byte (SAT)":
     let r = symexFind(narrowingDecline, tLabel("narrow_decline_target"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind)
-    check r.errors.anyIt("narrowing" in it.msg)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check (r.witness[0] and 0xFF'i32) == 42'i32
 
-  test "B2-13: byte(x) narrowing declines cleanly (classified sxUnknown, not a crash — rider)":
+  test "B2-13: byte(x) narrowing truncates to the low byte (SAT — rider)":
     let r = symexFind(narrowingDeclineByteTarget, tLabel("narrow_decline_byte_target"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind)
-    check r.errors.anyIt("narrowing" in it.msg)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check (r.witness[0] and 0xFF'i32) == 42'i32
 
 suite "symex round-6 A1 — same-width signedness reinterpret (formerly B2-10 decline, now modeled)":
 

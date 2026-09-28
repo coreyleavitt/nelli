@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 04:40Z)
+## Current position (refreshed 2026-09-28 06:11Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -180,17 +180,21 @@
   object with a `string` field, unexecutable case to `ptr string`); rerun at
   `3e62bae` 15/15 OK. Branch pushed at `3e62bae`; Windows CI running
   (fuzzer-mingw green). `scratchpad/wt-head` may now be deleted.
-- **S8i** `c4d0b63` on `rfc-0005-s8i` (worktree `scratchpad/wt-s8i`, based on
-  `4cfa655`) is gating -> `scratchpad/s8i-gate.log` (341/515 at 04:40Z). New
-  failures so far vs baseline, both passing at S8h, so S8i's:
-  `tsymex_163rev_intoffset_range` (rc 137) and `tsymex_phase12_witnesses`.
-  `s2_replay` will also show red there (expected; fixed by `3e62bae`). Land by
-  rebasing `rfc-0005-s8i` onto `3e62bae`, rerun the fixed tests, push.
+- **S8h Windows CI (`3e62bae`): all three green.**
+- **S8i** first gate (`c4d0b63`): regressed=4 (`163rev_intoffset_range`,
+  `phase12_witnesses`, `phase16_D1a_defect_routeraise`, `phase4_oob`),
+  new-failing `rfc0005_s6b_ops` (+ `s2_replay`, fixed by `3e62bae`). Agent
+  rebased onto `3e62bae` -> `ccf6be4` (S8i), fixed in `9191baa` (array index is
+  not a range conversion; reassignment decline kind) and `8c878de` (test
+  re-pin). **Full re-gate running from `scratchpad/wt-s8i` at `8c878de`** ->
+  `scratchpad/s8i-regate.log` (294/515 at 06:11Z, 0 non-pass so far). Land by
+  fast-forwarding `rfc-0005-soundness-channels` to it once regressed=0 and
+  new-failing=0, then push + Windows CI.
 - **Remaining:** S8i -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check the S8i gate (`s8i-gate.log`) and `rfc-0005-s8i`; gates run from a
+  resume, check the S8i re-gate (`s8i-regate.log`) and `rfc-0005-s8i`; gates run from a
   worktree at the sha they certify, never the live checkout. Order: S8i ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

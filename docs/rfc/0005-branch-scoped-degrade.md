@@ -132,6 +132,16 @@ title = "Ref witnesses that reproduce: nil top-level ref, param aliasing, recurs
 state = "done"
 
 [[slice]]
+id    = "S8j"
+title = "S8i's unlowered exits: top-level return lowering and raise drain, inline ref case-object field through a ref, narrowing int conversion as a RangeDefect fork, single range check on plain assignment"
+state = "pending"
+
+[[slice]]
+id    = "S8k"
+title = "Termination and precision remainder: long-string Z3 queries bounded (rlimit-proof decline to sxUnknown), concolic closure-condition resolution, renderAsChoices over ref params"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

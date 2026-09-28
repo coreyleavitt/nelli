@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 11:12Z)
+## Current position (refreshed 2026-09-28 12:21Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -199,14 +199,14 @@
   new-failing=0 new-ok=23. Pushed. **Windows CI (`7d2c2d7`): fuzzer legs green,
   symex-mingw RED** on `tsymex_r6_b7r_bytescan` B7R-LEG2-3 -- a Linux-skipped
   hanger that pinned `char(<int32>)` as the old B2 narrowing decline; S8j
-  models it (sxSat, witness 65). Re-pinned test-only in `91b6d25`; verifying
-  via a standalone probe in `scratchpad/wt-fix`, then push for CI.
+  models it (sxSat, witness 65). Re-pinned test-only in `91b6d25` (standalone probe OK);
+  **Windows CI at `a7ac700`: all three green.**
 - **Fence grew S8l (`3500d0d`)** from S8j's findings: `finally` skipped on a
   `return` exit (**false sxUnsat**), `defer`, named ref-object case variants,
   suspected variant-blind reads through `VRef = ref VObj`, inline ref to a
   multi-variant. **S8l (opus) running** in `scratchpad/wt-s8l`, branch
-  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log` (commit `297003a`; 308/515 at 11:12Z,
-  clean so far). Based on `3500d0d`: rebase onto the branch tip at landing.
+  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log` (commit `297003a`; gate finished 12:21Z: one failure, `rfc0005_s6b_ops`,
+  the decline-site audit; agent fixing then re-gating). Based on `3500d0d`: rebase onto the branch tip at landing.
   Soundness first, so S8l runs before S8k.
 - **Remaining:** S8l -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.

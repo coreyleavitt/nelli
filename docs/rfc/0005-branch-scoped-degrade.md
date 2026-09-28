@@ -1880,7 +1880,10 @@ silently.
     - at top level, it joins `topReturnedPaths`;
     - in a callee, it binds the frame's `retSym` to `result`, or to the
       return type's zero value when a value-returning callee never assigned
-      it.
+      it. Where the return type has no modelled zero value (a variant),
+      `retSym` stays free and the site records `feUnsupportedOpHavoc`,
+      S6b's fresh class, the same as the `isCall` arm's untouched-result
+      twin. This is a new twelfth site in S6b's audited list.
   - `isTry` claims the returns recorded at its depth, walks the `finally` on
     each, and sends the fall-through outward through `exitReturn`.
   - While a `finally` runs on a raised exit (`raisedFinally > 0`), a
@@ -1965,7 +1968,9 @@ Pins: `tests/tsymex_rfc0005_s8l_exits.nim`. It covers:
 - a callee's `finally` on a return, which reads and writes `result`;
 - a raise in a `finally`, nested `finally`s, a `return` in a `finally`, and
   a return from an `except` arm (with a raise from an `except` arm alongside);
-- a bare `return`, and a top-level `finally` on both walkers;
+- a bare `return`, a bare `return` before `result` is assigned (the zero
+  value; and, with no zero value, `feUnsupportedOpHavoc` licensing
+  `sxUnsat`), and a top-level `finally` on both walkers;
 - the `eeFinallyReturnOnRaise` decline;
 - `defer`: return, raise, a write to `result`, two defers in order, and a
   trailing defer;
@@ -1985,6 +1990,10 @@ Re-pinned, each checked against real Nim:
 - `phase15_CR2_cachekey` pin (159).
 - `rfc0005_s1_lattice`: `eeFinallyReturnOnRaise` joins the reclassified set
   (`dcOmitted`).
+- `rfc0005_s6b_ops`: the structural count of `feUnsupportedOpHavoc` sites
+  goes from 11 to 12 for the `completeReturn` zero-default fallback, after
+  that site was re-audited. The composite-return site moved from `isReturn`
+  into `completeReturn` without change.
 - `h_verification`: the named-ref multi-variant discriminator read had
   pinned the value-model decline. It is now `sxSat`.
 - `p2b_refobjconstr_expr` P2b-13 and `r6_a1_variantlit` A1-7 had pinned

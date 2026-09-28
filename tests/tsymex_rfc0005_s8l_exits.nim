@@ -14,7 +14,7 @@
 ##   (4) variant reads through a named `ref` alias;
 ##   (5) an inline `ref` to a multi-variant object;
 ##   (6) the walker version floor.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli
 import nelli/symex
 import nelli/smt/types
@@ -158,6 +158,38 @@ proc bareRet(x: int): int =
 proc callsBareRet(x: int) =
   if bareRet(x) == 4: symexTarget("s8l_bare_ret")
 
+# A bare `return` before `result` is assigned returns its zero value (Nim
+# zero-initialises `result`; probed: bareZero(1) == 0, bareZero(0) == 5).
+# The walker binds the callee's `retSym` to the return type's zero default
+# there (`completeReturn`); before S8l that path left it free. A variant
+# result has no modelled zero default, so the per-call `retSym` stays free
+# on that path and the site records `feUnsupportedOpHavoc` (a fresh symbol
+# ranging over the whole type, zero included -- RFC-0005 S6b's class).
+proc bareZero(x: int): int =
+  if x > 0: return
+  result = 5
+
+proc callsBareZero(x: int) =
+  let r = bareZero(x)
+  if x > 0 and r != 0: symexTarget("s8l_bare_zero_dead")
+  if x > 0 and r == 0: symexTarget("s8l_bare_zero")
+
+type
+  BareVK = enum bvA, bvB
+  BareV = object
+    case k: BareVK
+    of bvA: a: int
+    of bvB: b: int
+
+proc bareVariant(x: int): BareV =
+  if x > 0: return
+  result = BareV(k: bvB, b: 3)
+
+proc callsBareVariant(x: int) =
+  let v = bareVariant(x)
+  discard v
+  if x == 5 and x == 6: symexTarget("s8l_bare_variant_dead")
+
 # Top level: the SUT itself returns through its own finally.
 proc topFin(x: int): int =
   try:
@@ -296,6 +328,24 @@ suite "S8l (1) finally runs on a return exit":
     check c.status == sxSat
     if c.status == sxSat:
       check c.witness[0] == 4
+
+  test "a bare return before result is assigned returns the zero value":
+    check bareZero(1) == 0
+    check bareZero(0) == 5
+    let r = symexFind(callsBareZero, tLabel("s8l_bare_zero"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.status == sxSat
+    if r.status == sxSat:
+      check reproduces(callsBareZero(r.witness[0]), "s8l_bare_zero")
+    let d = symexFind(callsBareZero, tLabel("s8l_bare_zero_dead"))
+    checkpoint($d.status & " " & show(d.errors))
+    check d.status == sxUnsat
+
+  test "a bare return of a result with no zero default is a fresh symbol (feUnsupportedOpHavoc)":
+    let r = symexFind(callsBareVariant, tLabel("s8l_bare_variant_dead"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
+    checkUnsatOverTaintOnly(r)
 
   test "top level: the finally sees the returned result (was sxUnknown feGlobalReadUnmodelled)":
     let r = symexFind(topFin, tLabel("s8l_topfin"))

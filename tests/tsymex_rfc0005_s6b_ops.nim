@@ -549,10 +549,16 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## eleventh: `applyClosureGround`'s composite zero-default fallthrough
     ## (the per-occurrence closure result left free on that arm, recorded
     ## through `closureDegrade`; was `feUnsupportedOp` in the closure sink).
+    ## RFC-0005 S8l added the twelfth: `completeReturn`'s bare `return` of
+    ## an untouched result with no zero default (the per-call `retSym` left
+    ## free, a superset of the zero value Nim returns -- the fresh class of
+    ## the `isCall` arm's untouched-result twin; pinned sxUnsat-licensing in
+    ## `tsymex_rfc0005_s8l_exits.nim`). The composite-return site moved
+    ## from the `isReturn` arm into `completeReturn` unchanged.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 11
+    check sites.len == 12
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

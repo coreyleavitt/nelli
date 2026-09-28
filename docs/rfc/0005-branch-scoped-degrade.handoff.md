@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 01:55Z)
+## Current position (refreshed 2026-09-28 02:26Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -177,10 +177,10 @@
   killed its agent and its sweep at 450/515 (partial: 1 stale failure,
   r6_n27, whose test was re-pinned mid-sweep; it passes at `4cfa655`).
   **Gate now runs per Corey's new rule: from worktree `scratchpad/wt-s8h`
-  at `4cfa655`** -> `scratchpad/s8h-gate.log` (325/515 at 01:55Z, no regressions so far). Push once regressed=0 and
+  at `4cfa655`** -> `scratchpad/s8h-gate.log` (390/515 at 02:26Z, no regressions so far). Push once regressed=0 and
   new-failing=0. (`scratchpad/wt-head` holds an uncommitted copy of the S8h
   edits from the dead agent -- leave it; delete once S8h is pushed.)
-- **S8i running (opus) in worktree `scratchpad/wt-s8i`, branch
+- **S8i committed `c4d0b63` on `rfc-0005-s8i` (02:26Z), awaiting its gate after S8h's; running (opus) in worktree `scratchpad/wt-s8i`, branch
   `rfc-0005-s8i`** based on `4cfa655`; it commits, then gates its own sha
   after the S8h gate's `.warnings` sidecar exists. Land by fast-forwarding
   `rfc-0005-soundness-channels` to it.

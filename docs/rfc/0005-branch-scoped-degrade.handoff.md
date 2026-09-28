@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 13:27Z)
+## Current position (refreshed 2026-09-28 13:55Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -201,20 +201,24 @@
   hanger that pinned `char(<int32>)` as the old B2 narrowing decline; S8j
   models it (sxSat, witness 65). Re-pinned test-only in `91b6d25` (standalone probe OK);
   **Windows CI at `a7ac700`: all three green.**
-- **Fence grew S8l (`3500d0d`)** from S8j's findings: `finally` skipped on a
-  `return` exit (**false sxUnsat**), `defer`, named ref-object case variants,
-  suspected variant-blind reads through `VRef = ref VObj`, inline ref to a
-  multi-variant. **S8l (opus) running** in `scratchpad/wt-s8l`, branch
-  `rfc-0005-s8l`, walker 159, self-gates -> `scratchpad/s8l-gate.log` (`297003a` + `e0ce94a`, which re-audits s6b_ops 11 -> 12 for the
-  bare-return zero-default havoc site; re-gate `s8l-gate2.log` at `e0ce94a`,
-  422/515 at 13:27Z, clean so far). Based on `3500d0d`: rebase onto the branch tip at landing.
-  Soundness first, so S8l runs before S8k.
-- **Remaining:** S8l -> S8k -> S11 -> completion gate -> ff main + tag.
+- **S8l landed `e8fc9dd`** (walker 159; feat `01defe9`, s6b re-audit
+  `e8fc9dd`): re-gate at `e0ce94a` pass=513 fail=0, regressed=0 new-failing=0
+  new-ok=24 (tree = landed but for this handoff and the Windows-only
+  `b7r_bytescan` re-pin). Linux-skipped hangers checked by the agent: nothing
+  touched. Pushed; Windows CI running.
+- **Fence grew S8m (`a58dc08`)** from S8l's findings: `finally` skipped on
+  break/continue exits (**false sxUnsat**), wrong-sort Z3 store swallowed into
+  a **silent sxUnsat**, ref-local reassignment/cast `eqBV` walker fault,
+  uninitialised ref locals, closure bare-return zero value, retire the
+  producer-less `heRefVariantUnsupported`. **S8m (opus) running** in
+  `scratchpad/wt-s8m`, branch `rfc-0005-s8m`, walker 160, self-gates ->
+  `scratchpad/s8m-gate.log`. Soundness first, so S8m runs before S8k.
+- **Remaining:** S8m -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8l (`rfc-0005-s8l`, `s8l-gate2.log`); gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8l -> S8k ->
+  resume, check S8m (`rfc-0005-s8m`, `s8m-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8m -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

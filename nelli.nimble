@@ -863,5 +863,10 @@ task test, "Run the test suite":
             # div/mod -1, truncating mod, uint64 -> float, int -> range
             # conversions, declined-construction reassignment, the concolic
             # if-walker's raise drain; walker 156->157.
-            "tsymex_rfc0005_s8i_models"]:
+            "tsymex_rfc0005_s8i_models",
+            # RFC-0005 S8j -- S8i's unlowered exits: the SUT's own `return`
+            # lowered and drained, an inline `ref <case object>` field,
+            # narrowing int conversions (checked into signed/char, truncating
+            # into unsigned), one range check per store; walker 157->158.
+            "tsymex_rfc0005_s8j_exits"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

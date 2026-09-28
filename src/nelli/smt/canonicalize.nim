@@ -184,7 +184,19 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "157"
+const symexWalkerVersion* = "158"
+  ## RFC-0005 S8j (2026-09-28) — S8i's unlowered exits. The SUT's own
+  ## `return <expr>` is lowered and its raises drained (a `return 100 div x`
+  ## raises `DivByZeroDefect`, a `return x` from a `Natural` proc
+  ## `RangeDefect`; both were a false `sxUnsat`). An inline `ref <case
+  ## object>` field keys the same `Ref_<id>` sort as every other `ref` to
+  ## that variant (`vNominalId`; was a Z3 sort error). A narrowing integer
+  ## conversion range-checks into a signed or `char` target (and at the
+  ## same width from unsigned) and truncates into an unsigned one (was a
+  ## recorded decline, or the unchecked reinterpret). A store of a value
+  ## that already carries its range check (`q = x`, `p.f = x`, `s[i] = x`
+  ## into a range) checks once. Verdicts change: a cache entry keyed under
+  ## "157" must not be replayed.
   ## RFC-0005 S8i (2026-09-27) — S8g's different-mechanism remainder.
   ## `low(T) div -1` raises `OverflowDefect`; `low(T) mod -1` at 32/64 bits
   ## (and `div` there with overflow checks off) confines the continuation

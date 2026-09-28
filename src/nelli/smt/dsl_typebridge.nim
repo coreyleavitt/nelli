@@ -622,7 +622,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         arms = axes[0].arms,
         plainFieldNames = plainFieldNames,
         plainFieldTypes = plainFieldTypes,
-        discTags = axes[0].discTags).keyedBySym(nameSym)
+        discTags = axes[0].discTags,
+        nominalId = nominalId(nameSym)).keyedBySym(nameSym)   # RFC-0005 S8j
     else:
       return mkMultiVariant(objectName = s,
         axes = axes,

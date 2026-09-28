@@ -44,8 +44,17 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## proves the mechanism keeps inline-ref sort naming consistent first.
   ## Anonymous tuples and non-object pointees have no `nominalId` and keep
   ## the structural rendering (unchanged behaviour).
+  ##
+  ## RFC-0005 S8j: a variant pointee keys on its `vNominalId` the same way.
+  ## An inline `ref Obj` field's pointee is the empty-fielded placeholder
+  ## tuple, keyed on `nominalId(Obj)`; when `Obj` is a case object, every
+  ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
+  ## carries the full variant. Keyed structurally, the two were distinct
+  ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
   let base = if pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
                pointeeTy.nominalId
+             elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
+               pointeeTy.vNominalId
              else:
                $pointeeTy
   result = base
@@ -1311,7 +1320,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # svInt->BV coercion below so the discharge can still see `valSV`'s
             # `ziIvl`.
             let cpInArmRanged =
-              if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+              if stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange and
+                 not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):   # RFC-0005 S8j
                 forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
               else: cpInArm
             if valSV.kind == svInt:
@@ -1424,7 +1434,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # discharge can still see `valSV.ziIvl` (a BV-coerced value carries
           # none). A bare `p[] = v` (not `isField`) is out of this fix's scope
           # — see the handoff's site enumeration.
-          let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange:
+          # RFC-0005 S8j: not when the RHS is itself the range-checked
+          # conversion into this field's bounds (`carriesRangeCheck`).
+          let cp = if isField and stmt.dwElemTy.kind == itInt and stmt.dwElemTy.hasRange and
+                      not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):
                      forkAssignRangeCheck(cpLowered, valSV, stmt.dwElemTy, w)
                    else: cpLowered
           # Reconcile svInt↔BV sort mismatch: float→int64 returns svInt (Z3Int)

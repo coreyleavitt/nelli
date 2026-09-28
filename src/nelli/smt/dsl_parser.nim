@@ -534,7 +534,8 @@ proc emitIRType*(t: IRType): NimNode =
       prefix(armsLit, "@"),
       prefix(plainNamesLit, "@"),
       prefix(plainTypesLit, "@"),
-      prefix(discTagsLit, "@"))
+      prefix(discTagsLit, "@"),
+      newLit(t.vNominalId))   # RFC-0005 S8j: keys the `Ref_<id>` sort
   of itMultiVariant:
     # Phase 14 cycle A1a stub. Re-emit a runtime-reconstructible
     # `mkMultiVariant(…)` call. Full A1b (parser-side classification)
@@ -2701,6 +2702,22 @@ proc isIntLiteralNode(n: NimNode): bool =
              nnkUIntLit, nnkUInt8Lit, nnkUInt16Lit, nnkUInt32Lit,
              nnkUInt64Lit}
 
+proc intConvSrcName(operand: NimNode, src: string): string =
+  ## RFC-0005 S8j. The int-family spelling an int conversion's operand is
+  ## converted FROM. A subrange operand (`int8(x)` with `x: range[0..1000]`)
+  ## spells as the range, not its base, so the conversion arm never read it
+  ## as an int and the identity pass-through dropped the conversion: 1000
+  ## flowed on as the `int8`, neither checked nor truncated. The range's
+  ## representation is its base type's (the bounds are bookkeeping), so the
+  ## base's width and signedness are the source's. Every other spelling is
+  ## returned unchanged.
+  if isIntFamilyName(src) or isIntLiteralNode(operand) or
+     operand.typeKind != ntyRange:
+    return src
+  let cls = classifyType(operand)
+  if cls.ty.kind != itInt: return src
+  (if cls.ty.signed: "int" else: "uint") & $cls.ty.width
+
 proc armYieldsValue(body: NimNode): bool =
   ## RFC-0005 s1. Does this branch arm produce a VALUE, or does it leave the
   ## path? A `case`/`if` in expression position may still carry arms that
@@ -3187,7 +3204,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         @[mkBranch(condIR, mkLet(tmp, convTy, mkIntLit(1)))],
         mkLet(tmp, convTy, mkIntLit(0)))
       mkVar(tmp)
-    elif isIntFamilyName(tgt) and isIntFamilyName(src) and tgt != src:
+    elif isIntFamilyName(tgt) and isIntFamilyName(intConvSrcName(operand, src)) and
+         tgt != intConvSrcName(operand, src):
       # Round-6 B2 (RFC-chapulin-hardening, ADR-0028 Leg 2): int-family
       # conversion between two DIFFERENT fixed-width type spellings.
       # `uint16(b)` (call syntax) and `b.uint16` (method-call syntax) both
@@ -3203,7 +3221,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # or it silently drops the conversion (`normalizeIntTyName`'s own doc
       # comment has the full root-cause writeup — this was the char-widening
       # witness-corruption companion bug's actual cause).
-      let srcN = normalizeIntTyName(src)
+      let srcN = normalizeIntTyName(intConvSrcName(operand, src))
       let tgtN = normalizeIntTyName(tgt)
       # Both normalized names are guaranteed `intTyNames` members here, so
       # `intTyWidth`/`intTySigned` are total.
@@ -3211,20 +3229,54 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let tgtWidthV = intTyWidth(tgtN)
       let srcSigned = intTySigned(srcN)
       let tgtSignedV = intTySigned(tgtN)
-      if tgtWidthV > srcWidth:
-        # WIDENING — the only case this slice models. Zero-/sign-extend is
+      # RFC-0005 S8j: which conversions range-check. Probed on the pinned
+      # toolchain (c and cpp identical), with the operand through a noinline
+      # identity so nothing folds:
+      #   * a SIGNED target checks the operand's VALUE against its own
+      #     bounds -- `int8(200)`, `int8(300'i16)`, `int32(1 shl 40)` and,
+      #     at the SAME width, `int8(200'u8)`, `int32(high(uint32))`,
+      #     `int(2^63'u64)` all raise `RangeDefect` ("value out of range:
+      #     200 notin -128 .. 127"); `int8(-1'i64) == -1`;
+      #   * an UNSIGNED target never checks: `uint8(300) == 44`,
+      #     `uint16(-1) == 65535`, `byte(300) == 44` -- it truncates, as C;
+      #   * a `char` target checks 0 .. 255 although it normalizes to
+      #     `uint8` here: `char(300)`, `char(-1)`, `char(-1'i8)` raise.
+      # A checked conversion lowers through S8i's range conversion (the
+      # negated check to `rangeDefectConds`, the value then converted --
+      # exact wherever the check passes); an unchecked narrowing lowers to
+      # the truncation. Both were the recorded narrowing decline below
+      # (`int8(x)`, `uint8(x)`, `char(x)`), and the same-width unsigned ->
+      # signed case was the unchecked reinterpret.
+      let tgtIsChar = tgt == "char"
+      let checked =
+        if tgtIsChar: srcN != "uint8"
+        else: tgtSignedV and (tgtWidthV < srcWidth or
+                              (tgtWidthV == srcWidth and not srcSigned))
+      if checked:
+        let (lo, hi) =
+          if tgtIsChar: (0'i64, 255'i64)
+          elif tgtWidthV >= 64: (low(int64), high(int64))
+          else: (-(1'i64 shl (tgtWidthV - 1)), (1'i64 shl (tgtWidthV - 1)) - 1)
+        mkConvIntWidth(parseExpr(operand, preamble, ctx),
+                       srcWidth, srcSigned, tgtWidthV, tgtSignedV,
+                       true, lo, hi)
+      elif tgtWidthV > srcWidth:
+        # WIDENING. Zero-/sign-extend is
         # keyed on the SOURCE value's signedness (RFC B2); the resulting
         # SymVal's own `signed` flag takes the TARGET type's signedness.
         mkConvIntWidth(parseExpr(operand, preamble, ctx),
                        srcWidth, srcSigned, tgtWidthV, tgtSignedV)
       elif tgtWidthV < srcWidth:
-        # NARROWING (e.g. `byte(x)`/`uint8(x)` from an `int32`) —
-        # RECORDED DECLINE: no truncate primitive is modeled and the
-        # pre-B2 identity pass-through left the value UNMASKED (unsound).
-        declineIntWidthConv(n, preamble, ctx, "narrowing", src, tgt)
+        # NARROWING into an unsigned target (`byte(x)`/`uint8(x)` from an
+        # `int32`): the low bits, never a raise (RFC-0005 S8j; was the
+        # recorded B2 decline -- the pre-B2 identity pass-through had left
+        # the value unmasked).
+        mkConvIntWidth(parseExpr(operand, preamble, ctx),
+                       srcWidth, srcSigned, tgtWidthV, tgtSignedV)
       elif srcSigned != tgtSignedV:
         # SAME-WIDTH signedness REINTERPRET (e.g. `uint32(x)` from an
-        # `int32`). A1 adjudication (walker v116): B2 originally recorded
+        # `int32`; RFC-0005 S8j: the unsigned -> signed direction checks,
+        # above, so only signed -> unsigned reaches here). A1 adjudication (walker v116): B2 originally recorded
         # this as a decline, but the underlying Z3 BV bit pattern is
         # signedness-agnostic — the pre-B2 identity pass-through's actual
         # unsoundness was leaving a STALE `signed` flag (steering
@@ -8334,8 +8386,13 @@ proc parseStmtInner(n: NimNode,
       # this assignment targets — not its printed name) so the walker's
       # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
       # unscoped, name-keyed `WalkCtx` table R22 used to route through.
+      # RFC-0005 S8j: nil too when `val` is itself the range-checked
+      # conversion into the target's bounds (S8i: the hidden conversion Nim
+      # puts on `q = x`, or an explicit `q = R(x)`) -- one check, as Nim
+      # makes, not the conversion's and then this site's.
       let assignCls = classifyType(lhs)
-      let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange:
+      let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange and
+                        not carriesRangeCheck(val, assignCls.ty):
                        assignCls.ty
                      else: nil
       return mkAssign(nm, val, assignTy)

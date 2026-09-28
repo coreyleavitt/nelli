@@ -134,7 +134,7 @@ state = "done"
 [[slice]]
 id    = "S8j"
 title = "S8i's unlowered exits: top-level return lowering and raise drain, inline ref case-object field through a ref, narrowing int conversion as a RangeDefect fork, single range check on plain assignment"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8k"
@@ -1702,6 +1702,124 @@ Re-pinned, each checked against real Nim:
   mechanisms). The three searches now run with `acRange` off, which keeps
   their subject, the W8 placeholder range, and their `sxUnsat`.
 - `phase15_CR2_cachekey` pin (157).
+
+**As landed (S8j, walker 158) — S8i's unlowered exits.** S8i reported four
+defects outside its design. Each was a claim the real SUT contradicts.
+Every expected behaviour was probed against the pinned toolchain (c and cpp
+identical):
+
+1. The SUT's own top-level `return <expr>` was never lowered: `isReturn`
+   with an empty call stack ended the path without lowering or draining
+   `retExpr`. `return 100 div x` and `return x` from a `Natural` proc gave a
+   false `sxUnsat` for their defect, and a raising `return` inside a `try`
+   never reached its handler. The concolic walker dropped the same raise,
+   so the handler's decisions were never recorded.
+2. An inline `ref <case object>` field reached through a ref (`h.v.kind`
+   with `v: ref V`, `V` a case object) was an `ekZ3Error` `sxUnknown`
+   ("Sorts Ref_… and Ref_… are incompatible"), not the false `sxUnsat` S8h
+   reported. The field's placeholder keyed its `Ref_<id>` sort by the
+   type's nominal id; the nil literal and the deref classify the full
+   variant, whose id was structural.
+3. A narrowing integer conversion was a recorded decline (`int8(x)`,
+   `uint8(x)`, `char(x)` of a wider int). At the same width, unsigned ->
+   signed (`int8(x)` of a `uint8`) was the unchecked reinterpret, and any
+   conversion of a subrange operand (`int8(x)`, `x: range[0..1000]`) was
+   the identity pass-through: 1000 flowed on as the `int8`. Nim:
+   - a signed target checks the value against its own bounds:
+     `int8(200)`, `int8(300'i16)`, `int8(200'u8)`, `int32(high(uint32))`,
+     `int(2^63'u64)` raise `RangeDefect`;
+   - an unsigned target truncates and never raises: `uint8(300) == 44`,
+     `uint16(-1) == 65535`, `byte(300) == 44`;
+   - a `char` target checks 0 .. 255: `char(300)`, `char(-1)`,
+     `char(-1'i8)` raise.
+4. A plain assignment into a range variable checked twice. S8i's parser
+   wraps `q = x` in the range conversion, and the walker's #163 R22 site
+   check forked the same condition again (canonical form: two checks for
+   `q = x` and for `q = R(x)`). A field or seq element store did the same
+   at the walker.
+
+- **Runtime.**
+  - `isReturn`, empty call stack: the expression lowers through
+    `lowerInExpr` (the `result` binding shapes a literal) and each
+    continuation from `drainScalarRaiseForks` binds `result` and joins the
+    new `WalkCtx.topReturnedPaths`. A raise routes as any other
+    (`routeRaise`, so an enclosing handler catches it). A bare `return`
+    joins unchanged. The concolic driver appends `topReturnedPaths` to
+    the body's surviving paths (the symbolic driver discards both: its
+    findings are the raise and label records).
+  - `IRType` `itVariant` gains `vNominalId` (from `nominalId` in
+    `dsl_typebridge`, emitted by `emitIRType`); `refPointeeTypeId` keys a
+    variant pointee by it, so the placeholder and the full variant share
+    one sort.
+  - `iekConvIntWidth` now also carries an unchecked narrowing
+    (`mkConvIntWidth` asserts a range or a width change). The new
+    `lowerConvIntTrunc` truncates a BV operand (`truncBV`) and takes an
+    Int-sorted one modulo `2^w`. A checked conversion reuses S8i's range
+    conversion with the target's own bounds (or 0 .. 255 for `char`). The
+    parser's `nnkConv` int-family arm picks checked / truncating / widening
+    / reinterpret from the probe table above; `intConvSrcName` reads a
+    subrange operand as its base type.
+  - `carriesRangeCheck(e, ty)`: `e` is a range conversion whose bounds lie
+    inside `ty`'s. The parser's plain-assign `aty` is nil for it, and the
+    walker's field-write (`Dw`, both arms) and seq element-write sites skip
+    `forkAssignRangeCheck` for it. One check per store.
+- **Consumer-visible (for S11's migration note).**
+  - New findings: defects raised in a top-level `return` expression
+    (`DivByZeroDefect`, `OverflowDefect`, `RangeDefect` into a range
+    result, …), and `RangeDefect` from narrowing into a signed or `char`
+    target. A `tRaisedExn("X")` search can now return one of these instead
+    of `sxUnsat`.
+  - A label reachable only through a handler of a raising `return` is now
+    found.
+  - Programs with narrowing conversions that were `sxUnknown` (the
+    recorded decline) now get a verdict; an unsigned narrowing's value is
+    the truncation.
+  - Searches through an inline `ref <case object>` field that were
+    `sxUnknown` (`ekZ3Error`) now get a verdict, including `FieldDefect`
+    on a wrong-arm read.
+  - Concolic collection: `branchTrace` gains the handler decisions of a
+    raising top-level `return`.
+  - The walker bump to 158 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - `finally` does not run on a `return` exit, in a callee or at top level:
+    `isReturn` never consults the handler stack's `finally` blocks.
+    `proc calleeFin(x: int): int = (try: return x finally:
+    symexTarget("cfin"))` called from `proc callsFin(x: int) = discard
+    calleeFin(x)` gives a false `sxUnsat` for `tLabel("cfin")`. At top
+    level, `try: return x * 2 finally: (if result == 10:
+    symexTarget("fin"))` is `sxUnknown` `feGlobalReadUnmodelled`. The
+    `result` binding on a returned top-level path has no reader until
+    this is fixed.
+  - `defer:` is `feUnsupportedStmtKind` (`nnkDefer`): honest, and a
+    `return` under a `defer` has the same gap.
+  - A named `ref object` case variant (`VB = ref object case …`) still
+    declines: `p != nil` (CR-2a, `nnkNilLit`) and `p.a = x` ("unsupported
+    nnkAsgn shape").
+  - Suspected, not verified: a named alias `VRef = ref VObj` reads variant
+    fields through a variant-blind placeholder, so a wrong-arm read through
+    it may raise no `FieldDefect`.
+  - An inline `ref` to an `itMultiVariant` field keeps the structural /
+    nominal sort split (no nominal id there). The deref of a ref to a
+    multi-variant is declined anyway.
+
+Pins: `tests/tsymex_rfc0005_s8j_exits.nim`. It covers:
+- top-level `return` of a division, a `Natural` result, a branch, a
+  caught raise, and a guarded division that never raises;
+- the concolic walker on a raising and a returning trace;
+- an inline `ref <case object>` field: reachability, aliasing with a
+  second param (and its unsat clash), and a wrong-arm `FieldDefect`;
+- signed narrowing at 64 -> 8, 32 -> 16, 64 -> 32, same-width unsigned ->
+  signed, a caught one, and one of a subrange param;
+- unsigned truncation, including a negative operand, a subrange param and
+  `byte`;
+- `char` from `int`, in range, and from `int8`;
+- a single canonical range check for `q = x`, `q = R(x)` and `q += 1`,
+  with their verdicts; field and seq element store verdicts;
+- the `>= 158` floor.
+
+Each test comment cites the real-Nim probe it relies on.
+
+Re-pinned: `phase15_CR2_cachekey` pin (158).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

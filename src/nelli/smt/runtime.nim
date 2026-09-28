@@ -3599,6 +3599,29 @@ proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   else:
     raiseAssert "truncBV: unsupported operand kind: " & $v.kind
 
+proc lowerConvIntTrunc(sv: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
+  ## RFC-0005 S8j. An unchecked narrowing conversion -- an unsigned target
+  ## (`uint8(x)`, `byte(x)`, `uint32(x)` of a wider int). Nim keeps the low
+  ## `tgtWidth` bits and never raises (probed: `uint8(300) == 44`,
+  ## `uint16(-1) == 65535`). A BV operand truncates (`truncBV`). An
+  ## Int-sorted operand (an `isIntOffset`-promoted param) has no bit
+  ## pattern; its low bits are the value modulo `2^tgtWidth`, which Z3's
+  ## `mod` (Euclidean: non-negative for a positive divisor) gives exactly.
+  ## Anything else is a placeholder with nothing to convert.
+  case sv.kind
+  of svBV64, svBV32, svBV16:
+    let w = case sv.kind
+            of svBV64: 64
+            of svBV32: 32
+            else: 16
+    if tgtWidth < w: truncBV(sv, tgtWidth, tgtSigned)
+    else: lowerConvIntReinterpret(sv, tgtWidth, tgtSigned)
+  of svInt:
+    SymVal(kind: svInt, zi: sv.zi mod mkZ3IntLit(1'i64 shl tgtWidth),
+           ziWidth: tgtWidth, ziSigned: tgtSigned)
+  else:
+    sv
+
 proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
   ## RFC-0005 S8i. An integer conversion to a `range` (or enum) target:
   ## `Natural(x)`, `Positive(x)`, `range[a..b](x)`, `R(x)` for a subrange
@@ -5467,6 +5490,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # Round-6 B2: WIDENING-only int-family width conversion.
     if e.ciwHasRange:   # RFC-0005 S8i: a range-checked conversion
       lowerConvIntRange(lower(env, e.ciwOperand), e)
+    elif e.ciwTgtWidth < e.ciwSrcWidth:   # RFC-0005 S8j: unchecked narrowing
+      lowerConvIntTrunc(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
     else:
       lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
   of iekConvIntReinterpret:
@@ -7738,6 +7763,13 @@ type
     settings:  SymexSettings
     procs:     Table[string, ProcSig]
     callStack: seq[CallFrame]
+    topReturnedPaths: seq[Path]
+      ## RFC-0005 S8j. The paths that left the SUT through its OWN `return`
+      ## (`isReturn` with an empty `callStack`), each with `result` bound to
+      ## the returned value. `walk` never returns them (a `return` ends its
+      ## statement list), so a driver that reads the SUT's normal exits
+      ## joins them to the walk's fall-through survivors
+      ## (`runConcolicCollectImpl`'s soundness pin).
     callStats: Table[string, CallStat]
     loopStack: seq[LoopFrame]   ## Phase 6: nested-loop tracking
     callCache: Table[string, CallCacheEntry]
@@ -10721,7 +10753,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # svInt->BV reconciliation is independent of this) so the
           # discharge can still see `valSV`'s `ziIvl`.
           let vpRanged =
-            if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange:
+            if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange and
+               not carriesRangeCheck(stmt.iaVal, recvSV.seqElemTy):   # RFC-0005 S8j
               forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
             else: vp
           let newDataRaw = storeSeqElem(
@@ -11327,6 +11360,26 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     if w.callStack.len == 0:
+      # RFC-0005 S8j: the SUT's OWN `return <expr>`. This arm used to end
+      # the path here without lowering `stmt.retExpr`, so every raise the
+      # expression can make was lost: `return 100 div x` never forked its
+      # `DivByZeroDefect`, and `return x` from a `Natural` proc (the hidden
+      # range conversion S8i models) never forked its `RangeDefect` -- a
+      # false `sxUnsat` for both, while the `result = ...` forms raise.
+      # Lower and drain it exactly as a callee's `return` is (R1, below),
+      # bind `result` to the value on each survivor, and hand the survivors
+      # to `w.topReturnedPaths`: the walk's other exits, which a driver
+      # reads as the paths that left the SUT normally.
+      for p in paths:
+        if stmt.retExpr == nil:
+          w.topReturnedPaths.add p
+          continue
+        let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w,
+                                       envLitProto(p.env, "result"))
+        for cp in drainScalarRaiseForks(pr, w):
+          var newEnv = cp.env
+          newEnv["result"] = retVal
+          w.topReturnedPaths.add forkPath(cp, cp.pc, newEnv)
       @[]
     else:
       # Inside a callee: bind the returned value to the retSym and
@@ -15403,7 +15456,9 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   )
   currentWalkCtxPtr = addr w
   let initial = Path(pc: initialPC, env: env)
-  let resultPaths = walk(prog.body, @[initial], w)
+  # RFC-0005 S8j: a path that left through the SUT's own `return` is a
+  # normal exit too; its constraints join the soundness pin below.
+  let resultPaths = walk(prog.body, @[initial], w) & w.topReturnedPaths
   currentWalkCtxPtr = nil
   # RFC-0005 S1c: the walk-end pending-taint leak pin, exactly as
   # `runSymexImpl` runs it. This driver used to skip it, so a lowering

@@ -313,6 +313,19 @@ type
         ## ordinals — variant construction needs static enum literals,
         ## which the of-arm tagNames alone don't supply.
       vObjectName*:      string
+      vNominalId*:       string
+        ## RFC-0005 S8j. The variant's canonical nominal identity
+        ## (`dsl_typebridge.nominalId` of its type symbol), exactly as
+        ## `itTuple.nominalId`; "" when the variant was not classified from
+        ## a symbol (a value-rebuilt `tyOf`, hand-built IR). An inline
+        ## `ref Obj` OBJECT FIELD classifies its pointee as an empty-fielded
+        ## placeholder keyed on `nominalId(Obj)` (`classifyFieldType`, which
+        ## is variant-blind by design), while every other `ref Obj`
+        ## position -- a param, a nil literal, the pointee of `h.v.kind` --
+        ## classifies the full variant. Without this both named the same
+        ## Nim type with two `Ref_<id>` sorts (`refPointeeTypeId`), and the
+        ## first cross-use was a Z3 sort error. NOT part of `IRType.==` or
+        ## the canonical form, the reasoning `nominalId` is excluded under.
       vPlainFieldNames*: seq[string]
                                     # Phase 11 post-cycle-12: plain
                                     # (non-recCase) fields shared
@@ -3280,11 +3293,29 @@ proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
   ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
   ## RFC-0005 S8i: a `range` target (`hasRange`, bounds `lo..hi`) is
   ## range-checked on the operand's value, so it admits any width relation.
-  doAssert hasRange or tgtWidth > srcWidth,
-    "mkConvIntWidth: widening only — src=" & $srcWidth & " tgt=" & $tgtWidth
+  ## RFC-0005 S8j: an unchecked NARROWING (an unsigned target: `uint8(x)`
+  ## of an `int`) keeps the low `tgtWidth` bits.
+  doAssert hasRange or tgtWidth != srcWidth,
+    "mkConvIntWidth: a same-width conversion is a reinterpret — src=" &
+    $srcWidth & " tgt=" & $tgtWidth
   IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
          ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned,
          ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi)
+
+proc carriesRangeCheck*(e: IRExpr, ty: IRType): bool =
+  ## RFC-0005 S8j. True iff `e` is an integer conversion that range-checks
+  ## its operand (S8i's `ciwHasRange`) into bounds inside `ty`'s declared
+  ## range. A store of such a value into a `ty`-typed slot needs no second
+  ## check: the conversion already raised `RangeDefect` for every value
+  ## outside those bounds. Nim inserts exactly this conversion on the RHS of
+  ## `q = x`, `p.f = x` and `s[i] = x` into a range-typed target, and checks
+  ## once (probed: `q = 11` with `q: range[0..10]` raises one `RangeDefect`).
+  ## The assignment sites' own check (`forkAssignRangeCheck`, #163 R22) is
+  ## skipped for it, at parse time for a plain assignment (`isAssign.aty`
+  ## stays nil) and at walk time for a field or seq element write.
+  e != nil and e.kind == iekConvIntWidth and e.ciwHasRange and
+    ty != nil and ty.kind == itInt and ty.hasRange and
+    e.ciwLo >= ty.rangeLo and e.ciwHi <= ty.rangeHi
 
 proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
   ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
@@ -3945,7 +3976,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
                arms: seq[VariantArm],
                plainFieldNames: seq[string] = @[],
                plainFieldTypes: seq[IRType] = @[],
-               discTags: seq[tuple[name: string, ord: int]] = @[]): IRType =
+               discTags: seq[tuple[name: string, ord: int]] = @[],
+               nominalId = ""): IRType =
   ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
@@ -3958,7 +3990,7 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
   ## `else:` (the per-arm equality disjunction is then sufficient).
   IRType(kind: itVariant, vObjectName: objectName,
          vDiscName: discName, vDiscTy: discTy, vArms: arms,
-         vDiscTags: discTags,
+         vDiscTags: discTags, vNominalId: nominalId,
          vPlainFieldNames: plainFieldNames,
          vPlainFieldTypes: plainFieldTypes)
 

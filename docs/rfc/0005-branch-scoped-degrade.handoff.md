@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 23:12Z)
+## Current position (refreshed 2026-09-28 23:43Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -219,7 +219,7 @@
   params, a callee reading `result` before writing it, a closure returning a
   variant. **S8k (opus) running** in `scratchpad/wt-s8k`, branch
   `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
-  six Linux hangers. (22:10Z: first gate on `b795d9c` RED -- regressed=6 (r6_r3_svint_overflow, r1b_shortcircuit_oob, r6_r5_pairloop_counter, phase16_m3_rfind, r14_case2_degrade, r6_n21_pairloop_member) + new-failing=1; agent fixing (23:12Z: fixes uncommitted, now checking the Windows-only r6 suites), then re-gates.)
+  six Linux hangers. (22:10Z: first gate on `b795d9c` RED -- regressed=6 (r6_r3_svint_overflow, r1b_shortcircuit_oob, r6_r5_pairloop_counter, phase16_m3_rfind, r14_case2_degrade, r6_n21_pairloop_member) + new-failing=1; agent fixing (23:43Z: fixes uncommitted, still iterating on the r6 b-series string suites), then re-gates.)
 - **Remaining:** S8k -> S8n -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

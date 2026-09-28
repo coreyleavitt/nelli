@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 18:41Z)
+## Current position (refreshed 2026-09-28 19:43Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -219,7 +219,7 @@
   params, a callee reading `result` before writing it, a closure returning a
   variant. **S8k (opus) running** in `scratchpad/wt-s8k`, branch
   `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
-  six Linux hangers. (18:41Z: editing src, not yet committed.)
+  six Linux hangers. (19:43Z: editing src + restoring `163rev_intoffset_range`, not yet committed.)
 - **Remaining:** S8k -> S8n -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

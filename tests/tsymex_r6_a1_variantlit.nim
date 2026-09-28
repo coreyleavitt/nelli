@@ -121,7 +121,7 @@ proc sutSymbolicDiscConstructs(k: ShapeKind, t: int) =
   if s.tag == 7:
     symexTarget("symbolic_disc_reached")
 
-# --- Test 7 (bonus): ref-aliased variant constructor stays excluded ------
+# --- Test 7 (bonus): ref-aliased variant constructor (constructs since RFC-0005 S8l)
 proc sutRefVariantConstrDeclines(x: int) =
   let v = RVNode(kind: rvA, a: x)
   if v.a == 3:
@@ -177,10 +177,15 @@ suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
     check res.status == sxSat
     check res.witness[1] == 7
 
-  test "A1-7: a ref-aliased variant constructor stays excluded (ADR-0029 'deliberately not covered')":
+  test "A1-7: a ref-aliased variant constructor CONSTRUCTS -- MIGRATED by RFC-0005 S8l (walker 159)":
+    ## Pre-S8l: `sxUnknown`, a recorded decline (ADR-0029 "deliberately not
+    ## covered": the ref variant was value-modelled, so its constructor had
+    ## no heap to build on). S8l classifies `RVNode` as `itRef` and builds
+    ## it on the ADR-0013 heap: `v.a == x`, so `x == 3` reaches the target.
     let res = symexFind(sutRefVariantConstrDeclines, tLabel("ref_variant_hit"))
-    check res.status == sxUnknown
-    check res.status != sxSat
+    check res.status == sxSat
+    if res.status == sxSat:
+      check res.witness[0] == 3
 
 suite "symex round-6 A1 — walker version pin":
 

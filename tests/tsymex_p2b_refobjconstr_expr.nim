@@ -42,7 +42,7 @@ type
     x: int64
     y: int32
 
-  VNode = ref object        ## variant ref object (negative DoD)
+  VNode = ref object        ## variant ref object (heap-built since RFC-0005 S8l)
     case kind: bool
     of true: a: int
     of false: b: int
@@ -146,8 +146,8 @@ proc sutUnsupportedField(x: int64) =
   if p.y == 0:
     symexTarget("dummy_would_sat")
 
-# --- Negative: variant ref-object construction stays sxUnknown (no crash,
-# no false sxSat) — round-2 exclusion decision. -------------------------------
+# --- Variant ref-object construction: the round-2 exclusion (sxUnknown)
+# until RFC-0005 S8l, heap-built since. ----------------------------------------
 proc sutVariantConstr(x: int) =
   let v = VNode(kind: true, a: x)
   if v.a == 3:
@@ -250,29 +250,17 @@ suite "symex RFC-chapulin-hardening P2b — SND-1 soundness (unsupported field)"
 
 suite "symex RFC-chapulin-hardening P2b — variant ref-object negative (round-2 exclusion)":
 
-  test "P2b-13: variant ref-object constructor stays sxUnknown (no crash, no false sxSat)":
+  test "P2b-13: variant ref-object constructor is heap-built since RFC-0005 S8l (was sxUnknown)":
+    ## RFC-0005 S8l (walker 159) re-pin. The round-2 exclusion held while a
+    ## named ref variant was value-modelled; S8l classifies `VNode` as
+    ## `itRef` and builds `VNode(kind: true, a: x)` on the ADR-0013 heap
+    ## (the `bool` discriminator's constant arrives folded to `1` in the
+    ## typed AST and is stored as a Bool). `v.a == x`: `x == 3` is the
+    ## witness.
     let r = symexFind(sutVariantConstr, tLabel("variant_hit"))
-    check r.status == sxUnknown
-    check r.status != sxSat
-    ## The degrade mechanism (ADR-0021) returns a reference to a fresh,
-    ## deliberately-UNBOUND synthetic var — the FIRST read of `v` (already at
-    ## the `let v = …` binding itself) is expected to hit either (a) my
-    ## classified `feUnsupportedExprKind` parse-time error, if the unbound-var
-    ## read is never actually reached, or (b) the safe missing-key path
-    ## (`env[name]` -> `KeyError` -> ADR-0020's CR-1c safety net ->
-    ## `weInternalWalkerFault`), if it IS reached before anything consumes it.
-    ## EMPIRICALLY, which of the two fires is backend-dependent (C: (a); C++:
-    ## (b)) — a benign cross-backend divergence in exception-timing, the same
-    ## class ADR-0020 itself documents (the b7258f7/CR-1c precedent). Both are
-    ## SOUND classified degrades to `sxUnknown`; the load-bearing invariant is
-    ## the status assertions above (never a crash, never a false `sxSat`), not
-    ## which specific error kind happens to surface.
-    var sawKind = false
-    for e in r.errors:
-      if e.kind in {feUnsupportedExprKind, weInternalWalkerFault} and
-         e.severity == sevError:
-        sawKind = true
-    check sawKind
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == 3
 
 suite "symex RFC-chapulin-hardening P2b — regressions":
 

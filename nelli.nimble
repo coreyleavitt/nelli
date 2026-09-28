@@ -868,5 +868,9 @@ task test, "Run the test suite":
             # lowered and drained, an inline `ref <case object>` field,
             # narrowing int conversions (checked into signed/char, truncating
             # into unsigned), one range check per store; walker 157->158.
-            "tsymex_rfc0005_s8j_exits"]:
+            "tsymex_rfc0005_s8j_exits",
+            # RFC-0005 S8l -- S8j's exit remainder: finally on a return exit,
+            # `defer:`, named ref variants and the heap discriminator write's
+            # branch check, an inline ref to a multi-variant; walker 158->159.
+            "tsymex_rfc0005_s8l_exits"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

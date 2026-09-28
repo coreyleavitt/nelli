@@ -997,6 +997,11 @@ proc fieldHeapKey*(objTy: IRType, field: string): string
   ## Cluster H H_witness fwd-decl (defined in runtime_heap.nim, included
   ## below). `buildHeapSnapshot`'s recursive descent needs the field-split
   ## heap key before the heap cluster is included.
+proc variantDiscHeapKey(objTy: IRType): string
+  ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
+  ## `renderCell` names each axis's discriminator heap.
+proc mvAxisView(mv: IRType; axisIx: int): IRType
+  ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
@@ -7214,7 +7219,7 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                 cell: RefPos): Option[string] =
   ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
   let typeId = refPointeeTypeId(cell.pointee)
-  if cell.pointee.kind notin {itTuple, itVariant}:
+  if cell.pointee.kind notin {itTuple, itVariant, itMultiVariant}:   # RFC-0005 S8l: + MV
     # A scalar pointee (`ref int`) lives in the whole-pointee heap `<typeId>`.
     if not currentVariantHeaps.hasKey(typeId): return none(string)
     let valTy = block:
@@ -7235,13 +7240,27 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
   sort(observed)
   var parts: seq[string]
   var done: seq[string]
-  # The discriminator and the active branch of a variant.
-  let discKey = prefix & "@disc"
-  let variantTy =
-    if cell.pointee.kind == itVariant: cell.pointee
-    elif heapKeyShapes.hasKey(discKey): heapKeyShapes[discKey].variantTy
-    else: nil
-  if variantTy != nil and currentVariantHeaps.hasKey(discKey):
+  # The discriminator and the active branch of a variant. RFC-0005 S8l: of
+  # each axis of a multi-variant (its `mvAxisView`s, one discriminator heap
+  # each); a placeholder pointee (a recursive field's) learns its axes from
+  # the discriminator heaps the path materialised.
+  var axes: seq[tuple[discKey: string; variantTy: IRType]]
+  if cell.pointee.kind == itVariant:
+    axes.add (prefix & "@disc", cell.pointee)
+  elif cell.pointee.kind == itMultiVariant:
+    for ai in 0 ..< cell.pointee.mvAxes.len:
+      let view = mvAxisView(cell.pointee, ai)
+      axes.add (variantDiscHeapKey(view), view)
+  else:
+    var discKeys: seq[string]
+    for key in heapKeyShapes.keys:
+      if key.startsWith(prefix & "@disc") and heapKeyShapes[key].variantTy != nil and
+         variantDiscHeapKey(heapKeyShapes[key].variantTy) == key:
+        discKeys.add key
+    sort(discKeys)
+    for key in discKeys: axes.add (key, heapKeyShapes[key].variantTy)
+  for (discKey, variantTy) in axes:
+    if not currentVariantHeaps.hasKey(discKey): continue
     let discTy = block:
       let t = heapKeyValTy(discKey)
       if t != nil: t else: variantTy.vDiscTy
@@ -7285,6 +7304,12 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       if fname in done: continue
       parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
         fname, cell.pointee.vPlainFieldTypes[i])
+      done.add fname
+  elif cell.pointee.kind == itMultiVariant:   # RFC-0005 S8l
+    for i, fname in cell.pointee.mvPlainFieldNames:
+      if fname in done: continue
+      parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+        fname, cell.pointee.mvPlainFieldTypes[i])
       done.add fname
   for fname in observed:
     if fname in done: continue
@@ -7531,6 +7556,11 @@ type
     callee:        string
     retSym:        SymVal           ## the fresh symbol returned values bind to
     retName:       string           ## "" for void
+    retTy:         IRType
+      ## RFC-0005 S8l. The callee's return type; nil for a void proc (and
+      ## for a closure descent, whose bare-return zero default is not
+      ## modelled here). A bare `return` that never assigned `result` binds
+      ## `retSym` to this type's zero value (`completeReturn`).
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
 
   HandlerFrame = object
@@ -7673,6 +7703,18 @@ type
                                       ## finally-raise replaces it). This intercept is
                                       ## what makes a `finally` run on the RAISED exit
                                       ## path before the raise propagates onward.
+    pendingReturn: seq[tuple[depth: int, path: Path]]
+                                      ## RFC-0005 S8l: `return` exits guarded by a
+                                      ## `finally` at `depth` (the deepest HandlerFrame
+                                      ## with a non-nil `finallyBlock`), `result`
+                                      ## already bound on `path.env`. The owning
+                                      ## `isTry` claims its entries after walking its
+                                      ## body, runs the finally on each, and sends the
+                                      ## fall-through on outward (`exitReturn`): the
+                                      ## return-exit twin of `pendingRaise`.
+    raisedFinally: int                ## RFC-0005 S8l: > 0 while a `finally` of this
+                                      ## frame runs on a RAISED exit; a `return` there
+                                      ## is backend-divergent (`eeFinallyReturnOnRaise`).
 
   WalkMode = enum
     ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
@@ -9829,6 +9871,27 @@ proc sameBranchCond(oldDisc: SymVal; newTag: int;
     for t in g:
       result = result and not variantDiscEq(oldDisc, int64(t))
 
+proc sameBranchSymCond(oldDisc, newDisc: SymVal;
+                       branches: seq[seq[int]]): Z3Bool =
+  ## RFC-0005 S8l. `sameBranchCond` for a SYMBOLIC new discriminator: a
+  ## discriminator write through a ref (`p.kind = v`, the heap model) stores
+  ## an arbitrary value of the discriminator's type, not a parse-time tag.
+  ## "Both select the same source branch": some explicit group holds both,
+  ## or neither is any explicit tag (both are the `else:` branch's).
+  var oldElse = mkBool(true)
+  var newElse = mkBool(true)
+  var anyGroup = mkBool(false)
+  for g in branches:
+    var oldIn = mkBool(false)
+    var newIn = mkBool(false)
+    for t in g:
+      oldIn = oldIn or variantDiscEq(oldDisc, int64(t))
+      newIn = newIn or variantDiscEq(newDisc, int64(t))
+    anyGroup = anyGroup or (oldIn and newIn)
+    oldElse = oldElse and not oldIn
+    newElse = newElse and not newIn
+  anyGroup or (oldElse and newElse)
+
 proc carryBranchFields(armFields: OrderedTable[int, seq[SymVal]];
                        oldDisc: SymVal; newTag: int;
                        branches: seq[seq[int]]): OrderedTable[int, seq[SymVal]] =
@@ -9881,6 +9944,115 @@ proc markAmbiguous(w: var WalkCtx, construct: WalkerConstructKind) =
   ## counters hand-kept in sync).
   inc w.concolicAmbiguousBranches
   w.concolicAmbiguousByConstruct.mgetOrPut(construct, 0) += 1
+
+proc completeReturn(p: Path, w: var WalkCtx) =
+  ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
+  ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
+  ## `return <expr>` value, or whatever the body (and the finallys) assigned
+  ## before a bare `return`.
+  ##   * The SUT's own frame (empty `callStack`): the path joins
+  ##     `w.topReturnedPaths` (RFC-0005 S8j).
+  ##   * A callee: the frame's `retSym` is bound to `result` on the path's pc
+  ##     as its LAST conjunct (`applyClosureGround` reads it there) and the
+  ##     path joins the frame's `returnedPaths`. A bare `return` in a
+  ##     value-returning callee that never assigned `result` binds the return
+  ##     type's zero value (Nim zero-initialises `result`), exactly as the
+  ##     `isCall` arm's implicit fall-through does (R2); before S8l it left
+  ##     `retSym` free on that path. A void callee's path joins unchanged.
+  if w.callStack.len == 0:
+    w.topReturnedPaths.add p
+    return
+  let frameIx = w.callStack.high
+  let retSym = w.callStack[frameIx].retSym
+  var retVal: SymVal
+  if p.env.hasKey("result"):
+    retVal = p.env["result"]
+  elif w.callStack[frameIx].retTy != nil:
+    try:
+      retVal = defaultZero(w.callStack[frameIx].retTy,
+                           w.callStack[frameIx].retName & ".zerodefault")
+    except ValueError, SymexRefUnresolvedError:
+      # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as the `isCall` arm's
+      # untouched-result twin: the free per-call `retSym` ranges over the
+      # whole type, zero included.
+      let d = w.degrade(feUnsupportedOpHavoc,
+        "bare `return` of an untouched composite result (kind " &
+             $w.callStack[frameIx].retTy.kind & ") has no sound zero-default (" &
+             getCurrentExceptionMsg() & ") — path degraded to sxUnknown " &
+             "(feUnsupportedOp)")
+      w.callStack[frameIx].returnedPaths.add forkPathTainted(p, p.pc, p.env, d)
+      return
+  else:
+    w.callStack[frameIx].returnedPaths.add p
+    return
+  # v64 (chapulin catalog #6): a COMPOSITE-typed retSym (svTuple/
+  # svArray/…) reaching this binding used to flow into `retBindEq`,
+  # whose non-primitive arm RAISES ValueError — an in-walk raise
+  # that unwinds through live `seq[Path]` state (the b7258f7/CR-1c
+  # C-backend silent-loss hazard). Chapulin observed the same shape
+  # both as a hard native crash and as a net-caught
+  # `weInternalWalkerFault` — nondeterministic manifestations of
+  # this one raise. Repro: DESTRUCTURING a tuple return from a
+  # loop-bearing callee that can raise (`let (_, p1) =
+  # readCStringTwin(data, 2)`); a `discard`ed call of the same
+  # callee never arrives here composite-typed and still proves.
+  # Composite binding through this drain is not yet wired (P1
+  # wired tuple RETURN PARSING, not the raise-fork return bind) —
+  # degrade IN-BAND: classify + taint the returned path
+  # (uncertain ⇒ no false sxSat), never raise.
+  # v69 (sello #2): svTuple joins the wired set — retBindEq now
+  # binds tuples structurally per field. svArray/other composites
+  # (and closures returning tuples, bound at the funcApp site)
+  # remain in the degrade net.
+  # Round-6 A2 (ADR-0029): svVariant joins the wired set —
+  # retBindEq's general encoding (discEq + guarded per-arm field
+  # eq + plain-field eq) binds a variant-returning callee.
+  if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
+                        svBV64, svFloat32, svFloat64, svString,
+                        svTuple, svVariant}:
+    # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
+    # threadvar — that sink is reset at every `lowerInExpr` wrapper
+    # entry, so an entry added HERE (after the wrapper returned)
+    # would be wiped by the next lowering before verdict assembly.
+    # RFC-0005 S6b: `feUnsupportedOpHavoc` -- `retSym` is this
+    # call's own `synthZ3`-numbered symbol (fresh per call) and is
+    # left free, `stmt.retExpr` was lowered and its raise forks
+    # drained above, and the callee's heap/var effects ride `cp`.
+    # A tainted return is never cached. A superset of the value.
+    let d = w.degrade(feUnsupportedOpHavoc,
+      "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
+           ") bound through the scalar-raise drain is not yet " &
+           "wired — path degraded to sxUnknown (feUnsupportedOp)")
+    w.callStack[frameIx].returnedPaths.add forkPathTainted(
+      p, p.pc, p.env, d)
+    return
+  # Reconcile mixed int reps (e.g. callee returns svInt because
+  # of #135 range propagation while retSym was allocated svBV*).
+  # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
+  # then works on same-kind operands (bv2int was applied if needed).
+  let (rSym, rVal) = reconcileInt(retSym, retVal)
+  # Phase 15 G3: same-kind structural binding (BV-wrap semantics
+  # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
+  # float uses a NaN-safe structural eq so a NaN-returning callee
+  # is not pruned; string binds natively). This is what wires a
+  # value-returning generic instantiated at `float64`/`string` to
+  # flow its result into the caller.
+  let retConstraint = retBindEq(rSym, rVal)
+  w.callStack[frameIx].returnedPaths.add forkPath(
+    p, p.pc & @[retConstraint], p.env)
+
+proc exitReturn(p: Path, w: var WalkCtx) =
+  ## RFC-0005 S8l. Send a `return` exit (`result` already bound on `p.env`)
+  ## out of the current frame. A `finally` guarding it runs first: the
+  ## deepest HandlerFrame with a `finallyBlock` claims the path
+  ## (`pendingReturn`), and its `isTry` runs the finally and calls back here
+  ## for the next-outer one (innermost first, as Nim unwinds). With none
+  ## left, the return completes.
+  for i in countdown(w.frame.handlerStack.high, 0):
+    if w.frame.handlerStack[i].finallyBlock != nil:
+      w.frame.pendingReturn.add (depth: i, path: p)
+      return
+  completeReturn(p, w)
 
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
@@ -11359,103 +11531,42 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    if w.callStack.len == 0:
-      # RFC-0005 S8j: the SUT's OWN `return <expr>`. This arm used to end
-      # the path here without lowering `stmt.retExpr`, so every raise the
-      # expression can make was lost: `return 100 div x` never forked its
-      # `DivByZeroDefect`, and `return x` from a `Natural` proc (the hidden
-      # range conversion S8i models) never forked its `RangeDefect` -- a
-      # false `sxUnsat` for both, while the `result = ...` forms raise.
-      # Lower and drain it exactly as a callee's `return` is (R1, below),
-      # bind `result` to the value on each survivor, and hand the survivors
-      # to `w.topReturnedPaths`: the walk's other exits, which a driver
-      # reads as the paths that left the SUT normally.
-      for p in paths:
-        if stmt.retExpr == nil:
-          w.topReturnedPaths.add p
-          continue
-        let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w,
-                                       envLitProto(p.env, "result"))
-        for cp in drainScalarRaiseForks(pr, w):
-          var newEnv = cp.env
-          newEnv["result"] = retVal
-          w.topReturnedPaths.add forkPath(cp, cp.pc, newEnv)
-      @[]
-    else:
-      # Inside a callee: bind the returned value to the retSym and
-      # record the path into the call frame's returnedPaths.
-      let frameIx = w.callStack.high
-      for p in paths:
-        if stmt.retExpr == nil:
-          w.callStack[frameIx].returnedPaths.add p
-        else:
-          ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-          let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w,
-                                         some(w.callStack[frameIx].retSym))
-          ## R1 (Invariant-3 soundness fix): `stmt.retExpr` may itself
-          ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB,
-          ## `x div 0`). Undrained, those were silently discarded — no
-          ## raise fork, no bounds narrowing. Drain and thread the
-          ## survivor(s) forward, mirroring `isLet`/`isAssign`.
-          for cp in drainScalarRaiseForks(pr, w):
-            let retSym = w.callStack[frameIx].retSym
-            # v64 (chapulin catalog #6): a COMPOSITE-typed retSym (svTuple/
-            # svArray/…) reaching this binding used to flow into `retBindEq`,
-            # whose non-primitive arm RAISES ValueError — an in-walk raise
-            # that unwinds through live `seq[Path]` state (the b7258f7/CR-1c
-            # C-backend silent-loss hazard). Chapulin observed the same shape
-            # both as a hard native crash and as a net-caught
-            # `weInternalWalkerFault` — nondeterministic manifestations of
-            # this one raise. Repro: DESTRUCTURING a tuple return from a
-            # loop-bearing callee that can raise (`let (_, p1) =
-            # readCStringTwin(data, 2)`); a `discard`ed call of the same
-            # callee never arrives here composite-typed and still proves.
-            # Composite binding through this drain is not yet wired (P1
-            # wired tuple RETURN PARSING, not the raise-fork return bind) —
-            # degrade IN-BAND: classify + taint the returned path
-            # (uncertain ⇒ no false sxSat), never raise.
-            # v69 (sello #2): svTuple joins the wired set — retBindEq now
-            # binds tuples structurally per field. svArray/other composites
-            # (and closures returning tuples, bound at the funcApp site)
-            # remain in the degrade net.
-            # Round-6 A2 (ADR-0029): svVariant joins the wired set —
-            # retBindEq's general encoding (discEq + guarded per-arm field
-            # eq + plain-field eq) binds a variant-returning callee.
-            if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
-                                  svBV64, svFloat32, svFloat64, svString,
-                                  svTuple, svVariant}:
-              # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
-              # threadvar — that sink is reset at every `lowerInExpr` wrapper
-              # entry, so an entry added HERE (after the wrapper returned)
-              # would be wiped by the next lowering before verdict assembly.
-              # RFC-0005 S6b: `feUnsupportedOpHavoc` -- `retSym` is this
-              # call's own `synthZ3`-numbered symbol (fresh per call) and is
-              # left free, `stmt.retExpr` was lowered and its raise forks
-              # drained above, and the callee's heap/var effects ride `cp`.
-              # A tainted return is never cached. A superset of the value.
-              let d = w.degrade(feUnsupportedOpHavoc,
-                "composite-typed proc return (kind " & plainEnglishSymValKind(retSym.kind) &
-                     ") bound through the scalar-raise drain is not yet " &
-                     "wired — path degraded to sxUnknown (feUnsupportedOp)")
-              w.callStack[frameIx].returnedPaths.add forkPathTainted(
-                cp, cp.pc, cp.env, d)
-              continue
-            # Reconcile mixed int reps (e.g. callee returns svInt because
-            # of #135 range propagation while retSym was allocated svBV*).
-            # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
-            # then works on same-kind operands (bv2int was applied if needed).
-            let (rSym, rVal) = reconcileInt(retSym, retVal)
-            let retConstraint =
-              # Phase 15 G3: same-kind structural binding (BV-wrap semantics
-              # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
-              # float uses a NaN-safe structural eq so a NaN-returning callee
-              # is not pruned; string binds natively). This is what wires a
-              # value-returning generic instantiated at `float64`/`string` to
-              # flow its result into the caller.
-              retBindEq(rSym, rVal)
-            w.callStack[frameIx].returnedPaths.add forkPath(
-              cp, cp.pc & @[retConstraint], cp.env)
-      @[]
+    # RFC-0005 S8l: a `return` inside a `finally` that runs on a RAISED exit
+    # (`raisedFinally`, this frame) is backend-divergent -- c re-raises the
+    # in-flight exception, cpp returns (probed). HALT the path.
+    if w.frame.raisedFinally > 0:
+      discard w.degrade(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)")
+      return @[]
+    # RFC-0005 S8j (top level) / R1 (callee): lower `stmt.retExpr` and
+    # drain its scalar raises, so a raise in the returned expression routes
+    # to its handler (`return 100 div x`, a `Natural` result's range check).
+    # RFC-0005 S8l: the value is bound to `result` on the returning path
+    # (Nim assigns `result` before leaving), and the path leaves through
+    # `exitReturn`, which runs every enclosing `finally` of this frame first
+    # (innermost first, each able to read and write `result`, raise, or
+    # `return` again) and only then completes the return (`completeReturn`:
+    # the SUT's `topReturnedPaths`, or the callee frame's `retSym` binding).
+    # Before S8l a `return` completed at once and no `finally` ever ran on
+    # it: `try: return x finally: symexTarget("fin")` never reached its label
+    # (a false `sxUnsat`), in a callee and at top level.
+    for p in paths:
+      if stmt.retExpr == nil:
+        exitReturn(p, w)
+        continue
+      let proto = if w.callStack.len == 0: envLitProto(p.env, "result")
+                  else: some(w.callStack[w.callStack.high].retSym)
+      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+      let (retVal, pr) = lowerInExpr(p, stmt.retExpr, w, proto)
+      ## R1 (Invariant-3 soundness fix): `stmt.retExpr` may itself
+      ## deposit scalar-raise-fork predicates (e.g. `s[i]` OOB,
+      ## `x div 0`). Undrained, those were silently discarded — no
+      ## raise fork, no bounds narrowing. Drain and thread the
+      ## survivor(s) forward, mirroring `isLet`/`isAssign`.
+      for cp in drainScalarRaiseForks(pr, w):
+        var newEnv = cp.env
+        newEnv["result"] = retVal
+        exitReturn(forkPath(cp, cp.pc, newEnv), w)
+    @[]
   of isCall:
     # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
     # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
@@ -11815,7 +11926,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                      stmt.retIntOffsetPositions)
           w.callStack.add CallFrame(
             callee: stmt.callee, retSym: retSym,
-            retName: stmt.retName, returnedPaths: @[])
+            retName: stmt.retName,
+            retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+            returnedPaths: @[])
           w.callStats[stmt.callee] = CallStat(
             name: stmt.callee,
             walked: w.callStats[stmt.callee].walked + 1,
@@ -12200,6 +12313,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if pr.depth == myDepth: raisedConts.add (pr.path, pr.typeId, pr.msg)
       else:                   keptPending.add pr
     w.frame.pendingRaise = keptPending
+    # RFC-0005 S8l: claim the RETURN exits deferred to this try's finally
+    # (`exitReturn` recorded them at our depth: a `return` in the body or in
+    # an `except` arm). Only a try with a `finally` is ever recorded.
+    var returnConts: seq[Path]
+    var keptReturn: seq[tuple[depth: int, path: Path]]
+    for pr in w.frame.pendingReturn:
+      if pr.depth == myDepth: returnConts.add pr.path
+      else:                   keptReturn.add pr
+    w.frame.pendingReturn = keptReturn
     if stmt.tryFinally == nil:
       # No finally: normal continuations flow through; any raised continuations
       # re-propagate immediately (re-route through the now-popped outer stack).
@@ -12223,6 +12345,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if continuations.len > 0:
         survivors.add walk(stmt.tryFinally, continuations, w)
         if w.shouldStop: return survivors
+      # (a') RETURN exits (RFC-0005 S8l): walk the finally on each with
+      #     `result` already bound, as Nim runs it. The finally's fall-through
+      #     continues the SAME return outward (`exitReturn`: the next-outer
+      #     finally of this frame, else the return completes). A raise in the
+      #     finally is routed by `routeRaise` and replaces the return; a
+      #     `return` in the finally is a new return exit that overrides it
+      #     (the handler stack is already popped to `myDepth`, so neither
+      #     re-enters this finally).
+      if returnConts.len > 0:
+        for fp in walk(stmt.tryFinally, returnConts, w):
+          exitReturn(fp, w)
+        if w.shouldStop: return survivors
       # (b) RAISED exits: for each, set `inFlightExn` to the original exn for the
       #     finally's duration (so a bare re-raise inside finally sees it), walk
       #     the finally on the raised path; the survivors are the paths where the
@@ -12235,7 +12369,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let savedInFlight = w.frame.inFlightExn
         w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
+        inc w.frame.raisedFinally   ## RFC-0005 S8l: a `return` here declines
         let finallyNormal = walk(stmt.tryFinally, @[rc.path], w)
+        dec w.frame.raisedFinally
         w.frame.inFlightExn = savedInFlight
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         for fp in finallyNormal:
@@ -12404,6 +12540,18 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         let savedStack = w.frame.handlerStack
         let savedInFlight = w.frame.inFlightExn
         w.frame.handlerStack.setLen(i)
+        # RFC-0005 S8l: the matched try's `finally` still guards its handler
+        # body -- Nim runs it when the arm returns or raises (probed:
+        # `except ValueError: return 5` runs the finally with result == 5;
+        # `except ValueError: raise newException(KeyError, "k")` runs it
+        # before the KeyError leaves). Keep it at depth `i` with no `except`
+        # arms, so a return from the arm is deferred to it (`exitReturn`)
+        # and a raise from the arm reaches it (`pendingRaise`); the owning
+        # `isTry` (depth `i`) claims both. Before S8l the frame was dropped
+        # with its arms and neither exit ran the finally.
+        if hf.finallyBlock != nil:
+          w.frame.handlerStack.add HandlerFrame(handlers: @[],
+                                                finallyBlock: hf.finallyBlock)
         w.frame.inFlightExn = some(ExnRecord(typeId: typeId, msg: msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8: mirror into
                                                      ## the lower-time threadvars

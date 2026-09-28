@@ -184,7 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "158"
+const symexWalkerVersion* = "159"
+  ## RFC-0005 S8l (2026-09-28) — S8j's exit remainder. A `finally` runs on a
+  ## `return` exit (in a callee, at top level, from an `except` arm) and
+  ## sees `result`; a raise in it replaces the return, nested ones unwind
+  ## innermost first, and a `return` in it overrides (a `return` in a
+  ## `finally` on a RAISED exit is a recorded decline,
+  ## `eeFinallyReturnOnRaise`: the c and cpp backends disagree). `defer:`
+  ## is the `finally` of the rest of its block (was a decline). A named
+  ## `ref object` case type and a `ref VObj` alias are heap variants (were
+  ## value-modelled: `p != nil` faulted, construction declined), a
+  ## discriminator write through a ref forks `FieldDefect` on a branch
+  ## change (was a plain store), and an inline `ref` to a multi-variant is
+  ## modelled per axis (was `heRefVariantUnsupported`, or a Z3 sort error
+  ## for a field). Verdicts change: a cache entry keyed under "158" must not
+  ## be replayed.
   ## RFC-0005 S8j (2026-09-28) — S8i's unlowered exits. The SUT's own
   ## `return <expr>` is lowered and its raises drained (a `return 100 div x`
   ## raises `DivByZeroDefect`, a `return x` from a `Natural` proc
@@ -4657,7 +4671,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
-      ";fld=" & s.dwField & ";ety=" & canonicalize(s.dwElemTy) &
+      ";fld=" & s.dwField & (if s.dwInit: ";init" else: "") &   # RFC-0005 S8l
+      ";ety=" & canonicalize(s.dwElemTy) &
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"
   of isUnsupported:

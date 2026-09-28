@@ -738,6 +738,17 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
        impl[2].kind in {nnkRefTy, nnkPtrTy}:
       return copyNimNode(sym)
     return wrapped(copyNimNode(sym))
+  # RFC-0005 S8l: a variant pointee of a named `ref object` case type
+  # (`type VB = ref object case ...`) is spelled by that ref type itself --
+  # as `nameIsRefAlias` says for a plain one. Its symbol's own declaration
+  # tells (a `ref VObj` alias's pointee symbol is the value object `VObj`).
+  if pointee.kind in {itVariant, itMultiVariant}:
+    let sym = witnessTypeSym(pointee)
+    if sym != nil:
+      let impl = sym.getImpl
+      if impl.kind == nnkTypeDef and impl.len >= 3 and
+         impl[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimNode(sym)
   let (innerTy, _) = emitTyAndReader(pointee, path, witId)
   if pointee.kind == itTuple and pointee.nameIsRefAlias: innerTy
   else: wrapped(innerTy)

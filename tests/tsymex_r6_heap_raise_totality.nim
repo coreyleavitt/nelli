@@ -193,29 +193,25 @@ proc heapMultiVariantNilCheckOnly(p: ref HeapMultiVariantObj) =
   if p != nil:
     symexTarget("heap_mv_nil_check_only")
 
-suite "N46-followup-2 -- itMultiVariant field deref/write decline (converted)":
+suite "N46-followup-2 -- itMultiVariant field deref/write (modelled since RFC-0005 S8l)":
+  # RFC-0005 S8l (walker 159) re-pin: the decline these two tests pinned
+  # (`heRefVariantUnsupported`, an honest sxUnknown) is gone -- a field of
+  # an inline `ref` multi-variant is modelled per axis (`mvAxisView`), so
+  # both targets are genuinely reachable and the witness replays.
 
-  test "field READ through an inline ref-to-multi-variant param -- honest sxUnknown carrying heRefVariantUnsupported":
+  test "field READ through an inline ref-to-multi-variant param -- sxSat, reproduces":
     let r = symexFind(heapMultiVariantFieldRead, tLabel("heap_mv_field_read"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
-    var saw = false
-    for e in r.errors:
-      if e.kind == heRefVariantUnsupported: saw = true
-    check saw
-    check r.status != sxSat
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] != nil and r.witness[0].a1 == 5
 
-  test "field WRITE through an inline ref-to-multi-variant param -- honest sxUnknown carrying heRefVariantUnsupported, write dropped not crashed":
+  test "field WRITE through an inline ref-to-multi-variant param -- sxSat, the write is stored":
     let r = symexFind(heapMultiVariantFieldWrite, tLabel("heap_mv_field_write"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
-    var saw = false
-    for e in r.errors:
-      if e.kind == heRefVariantUnsupported: saw = true
-    check saw
-    check r.status != sxSat
+    check r.status == sxSat
 
 suite "N46-followup-4 -- ref-to-multi-variant witness rendering":
 

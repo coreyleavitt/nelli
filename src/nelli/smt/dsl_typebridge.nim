@@ -447,11 +447,10 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   ## for sym-indirection (`type NodeRef = ref Obj`) — that delegates to a
   ## RECURSIVE `classifyType(Obj)` call instead, where `Obj` is a genuinely
   ## separate, non-ref-aliased object name (`isRefWrapped` stays false there
-  ## too, correctly). The caller decides whether to wrap a non-variant result
-  ## in `tRef`/`tPtr` (a variant result is never wrapped: ADR-0022
-  ## sub-decision #1, variant ref objects stay value-modeled / excluded from
-  ## heap routing) — `isRefWrapped` only affects the witness-rendering flag,
-  ## never the routing decision itself.
+  ## too, correctly). The caller wraps the result in `tRef`/`tPtr` -- a
+  ## variant result too since RFC-0005 S8l (it was never wrapped under
+  ## ADR-0022 sub-decision #1) — `isRefWrapped` only affects the
+  ## witness-rendering flag, never the routing decision itself.
   # A genuinely ZERO-FIELD object (`type Token = object` / `type Token = ref
   # object`, no members at all) has an `nnkEmpty` body, NOT `nnkRecList` — Nim
   # omits the record-list node entirely rather than emitting an empty one.
@@ -628,7 +627,8 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
       return mkMultiVariant(objectName = s,
         axes = axes,
         plainFieldNames = plainFieldNames,
-        plainFieldTypes = plainFieldTypes).keyedBySym(nameSym)
+        plainFieldTypes = plainFieldTypes,
+        nominalId = nominalId(nameSym)).keyedBySym(nameSym)   # RFC-0005 S8l
   # ---- Phase-4 plain-record path: only plain fields --------------
   var fields: seq[IRType]
   var names: seq[string]
@@ -917,11 +917,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # #136 FLIPPED (Cluster H Step C, ADR-0022): a NAMED `ref T`/`ptr T` alias
     # whose pointee is a plain (non-variant) object now classifies as
     # `itRef`/`itPtr(FULL pointee)` — true heap identity — instead of
-    # unwrapping to the pointee's value shape. A VARIANT pointee (case fields)
-    # is explicitly EXEMPTED and still value-models via the hasRecCase branch
-    # inside `classifyObjectRecordFields` (ADR-0022 sub-decision #1: variant
-    # ref objects stay excluded from the heap; the field-split heap declines
-    # variant reads, `heRefVariantUnsupported`).
+    # unwrapping to the pointee's value shape. RFC-0005 S8l: a VARIANT pointee
+    # (case fields, one axis or several) is no longer exempted. ADR-0022
+    # sub-decision #1 exempted it because the field-split heap then declined
+    # variant reads; ADR-0013 Slices 1-3 (single axis) and S8l (multi-axis,
+    # `runtime_heap.mvAxisView`) model them, while the exemption erased the
+    # `ref`: a value-modelled `VB = ref object case ...` param faulted on
+    # `p != nil` (weInternalWalkerFault), had no aliasing, and declined its
+    # constructor (`ctorIsRefAliasedVariant`).
     var underObj: NimNode = nil
     var refWrapNode: NimNode = nil   # non-nil (the nnkRefTy/nnkPtrTy node) iff
                                       # this alias directly wraps `ref object`/
@@ -943,11 +946,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           # OWN nominal id (`classifyObjectRecordFields` already stamped it,
           # via this same recursive `classifyType(inner)` call, since `Obj`'s
           # own dispatch reaches the plain-record arm with `nameSym = inner`).
-          # A non-object (or variant) result is returned UNCHANGED — identical
-          # to the pre-H1 `return classifyType(inner)` — since only a
-          # plain-object pointee is in scope for the flip.
+          # A non-object result is returned UNCHANGED — identical to the
+          # pre-H1 `return classifyType(inner)`. RFC-0005 S8l: a variant
+          # (`VRef = ref VObj`) is wrapped too; it used to be returned
+          # unchanged, value-modelling the ref (see the flip note below).
           let objCls = classifyType(inner)
-          if objCls.ty.kind == itTuple:
+          if objCls.ty.kind in {itTuple, itVariant, itMultiVariant}:   # RFC-0005 S8l: + variants
             return unranged(if underObj.kind == nnkPtrTy: tPtr(objCls.ty)
                              else: tRef(objCls.ty))
           else:
@@ -957,11 +961,10 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let recList = underObj[2]
       let pointee = classifyObjectRecordFields(resolved, recList,
                                                isRefWrapped = refWrapNode != nil)
-      if refWrapNode != nil and pointee.kind notin {itVariant, itMultiVariant}:
+      if refWrapNode != nil:   # RFC-0005 S8l: variants too
         return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(pointee)
                          else: tRef(pointee))
-      # Non-ref plain object, OR a ref/ptr-wrapped VARIANT (ref-wrap
-      # deliberately NOT applied to variants — same as pre-H1 behaviour).
+      # A non-ref object (plain or variant).
       return unranged(pointee)
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   # RFC-0005 S8d: the container models apply only to the STDLIB head
@@ -1141,7 +1144,15 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
       # syms too (e.g. `int`). Now gate on `isObjectTypeSym` to match only real
       # object types and let primitive pointees fall to `classifyType(ty)`.
       if inner.kind == nnkObjectTy or isObjectTypeSym(inner):
-        let placeholder = namedRefPlaceholder(nameSym)
+        # RFC-0005 S8l: a sym-indirection alias (`NodeRef = ref Obj`) keys
+        # the placeholder on `Obj`, as `classifyType` keys the pointee of a
+        # `NodeRef` param (`tRef(classifyType(Obj))`). Keyed on the alias,
+        # a `NodeRef` field and every other `NodeRef` position named two
+        # `Ref_` sorts for one Nim type -- a Z3 sort error on the first
+        # cross-use (`h.p != nil and h.p.x == 5`), for a plain object as for
+        # the case object S8l now heap-models.
+        let placeholder = namedRefPlaceholder(
+          if inner.kind == nnkSym: inner else: nameSym)
         return if impl[2].kind == nnkRefTy: unranged(tRef(placeholder))
                else: unranged(tPtr(placeholder))
   # An INLINE `ref Obj` / `ptr Obj` field (the type node is itself nnkRefTy/PtrTy

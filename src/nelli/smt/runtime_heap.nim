@@ -51,10 +51,14 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## other position (the nil in `h.v != nil`, the pointee of `h.v.kind`)
   ## carries the full variant. Keyed structurally, the two were distinct
   ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
+  ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
+  ## reason (an inline `ref MV` field was that sort error).
   let base = if pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
                pointeeTy.nominalId
              elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
                pointeeTy.vNominalId
+             elif pointeeTy.kind == itMultiVariant and pointeeTy.mvNominalId.len > 0:
+               pointeeTy.mvNominalId   # RFC-0005 S8l
              else:
                $pointeeTy
   result = base
@@ -360,6 +364,42 @@ proc fieldHeapKey*(objTy: IRType, field: string): string =
   ## every field of one ref shares a single abstract address (aliasing observed).
   refPointeeTypeId(objTy) & "__" & field
 
+proc variantDiscHeapKey(objTy: IRType): string =
+  ## ADR-0013 D1. The discriminator heap of a ref-to-variant: `<id>__@disc`.
+  ## RFC-0005 S8l: an axis view of a multi-variant (`mvAxisView`) keys its
+  ## discriminator by name, `<id>__@disc__<discName>` -- one heap per axis.
+  ## Its arm and plain field heaps need no such suffix: Nim forbids two
+  ## fields of one object sharing a name, so `__@<ord>__<field>` and
+  ## `__<field>` are already unique across axes.
+  result = refPointeeTypeId(objTy) & "__@disc"
+  if objTy.vIsAxisView: result.add "__" & objTy.vDiscName
+
+proc mvAxisView(mv: IRType; axisIx: int): IRType =
+  ## RFC-0005 S8l. Axis `axisIx` of the multi-variant `mv`, as the
+  ## single-axis variant the ADR-0013 heap arms already model: the axis's
+  ## discriminator and arms, the object's plain fields, and `mv`'s own
+  ## `Ref_<id>` (`vNominalId` is `refPointeeTypeId(mv)`, which that proc
+  ## returns unchanged). The axes of one object are independent in Nim --
+  ## each field, discriminator included, lives at its own slot -- so the
+  ## object's heap is exactly the union of its axis views' heaps.
+  let ax = mv.mvAxes[axisIx]
+  result = tVariant(objectName = mv.mvObjectName, discName = ax.discName,
+                    discTy = ax.discTy, arms = ax.arms,
+                    plainFieldNames = mv.mvPlainFieldNames,
+                    plainFieldTypes = mv.mvPlainFieldTypes,
+                    discTags = ax.discTags,
+                    nominalId = refPointeeTypeId(mv))
+  result.vIsAxisView = true
+
+proc mvAxisOfField(mv: IRType; field: string): int =
+  ## RFC-0005 S8l. The axis whose discriminator or arm declares `field`;
+  ## 0 for a plain field (every view carries the plain fields).
+  for i, ax in mv.mvAxes:
+    if ax.discName == field: return i
+    for arm in ax.arms:
+      if field in arm.fieldNames: return i
+  0
+
 proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
   ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
   ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
@@ -554,42 +594,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # with VALUE sort = the field type (`dElemTy`). A bare `p[]` keeps the R1
     # path (sort + heap both keyed on the whole pointee `dElemTy`).
     let isField = stmt.dField.len > 0
-    # ADR-0013 Slice 1: itMultiVariant still raises (deferred to Slice 4).
-    # itVariant: discriminant and plain fields proceed; arm-specific fields
-    # are deferred (Slices 2/3).
+    # ADR-0013: itVariant's discriminant, plain and arm fields are modelled
+    # (Slices 1-3); an itMultiVariant's through its axis views (RFC-0005 S8l).
     if isField and stmt.dObjTy.kind == itMultiVariant:
-      # N46-followup (round-6 re-review, walker v113): was `raise (ref
-      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. LIVE (confirmed via
-      # probe): a multi-axis `case`-`case` object reached through an INLINE
-      # `ref T`/`ptr T` parameter (the classifier wraps such a pointee in
-      # `itRef`/`itPtr` unchanged — only the NAMED-alias and field-typed-ref
-      # paths exempt variant pointees from heap routing, per
-      # `dsl_typebridge.nim`'s ADR-0022 sub-decision #1) reaches this arm at
-      # WALK time on an ordinary `p.field` access. A raw raise here unwinds
-      # through `walkHeapArm`/`walk`/`walkBlock` to `runSymexImpl`'s
-      # top-level catch — a WHOLE-RUN abort that can mask an unrelated
-      # sibling path's already-found (or not-yet-explored) `sxSat` (the
-      # N31/ADR-0023 SND-3 class; same mechanism proven RED/GREEN for the
-      # sibling `liftHeapValue` conversion above). This decline happens
-      # BEFORE the per-path loop even starts (it depends only on
-      # `stmt.dObjTy.kind`, not on any one path), so every INCOMING path is
-      # degraded uniformly here: `allocDegrade` records the classified
-      # `heRefVariantUnsupported` and marks the run degraded
-      # immediately/globally, then each path is forked TAINTED with
-      # `stmt.dRetName` bound to a fresh placeholder of the field's own type
-      # (`stmt.dElemTy`) — never trustworthy content, but a well-formed Z3
-      # sort so downstream statements that reference the bound name (an
-      # `if`/comparison consuming the "read" value) do not crash on a
-      # missing env key.
-      let d = heapArmDegrade(heRefVariantUnsupported,
-        "field `." & stmt.dField & "` through a ref/ptr to multi-variant `" &
-        $stmt.dObjTy & "` is unsupported (Slice 4 deferred, ADR-0013 D6)")
-      var survivors: seq[Path]
-      for p in paths:
-        if w.shouldStop: return survivors
-        survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
-          "__heapMultiVariantUnsupported", d)
-      return survivors
+      # RFC-0005 S8l (ADR-0013 D6, "Slice 4"). A field of a multi-variant
+      # read through a ref is a field of ONE axis's view (`mvAxisView`): its
+      # discriminator, an arm field (FieldDefect-forked against that axis's
+      # discriminator alone, as Nim checks it), or a plain field. Until S8l
+      # this was a recorded decline (`heRefVariantUnsupported`, N46
+      # follow-up) -- every field access through an inline `ref MV`.
+      let view = mvAxisView(stmt.dObjTy, mvAxisOfField(stmt.dObjTy, stmt.dField))
+      return walkHeapArm(IRStmt(kind: isDeref, dRetName: stmt.dRetName,
+                                dPtr: stmt.dPtr, dElemTy: stmt.dElemTy,
+                                dPtrFamily: stmt.dPtrFamily, dField: stmt.dField,
+                                dObjTy: view), paths, w)
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
     let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
@@ -605,7 +623,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let ctx = w.z3
       let objTy = stmt.dObjTy
       let baseId = refPointeeTypeId(objTy)
-      let discHeapKey = baseId & "__@disc"
+      let discHeapKey = variantDiscHeapKey(objTy)
       # Scan arms declaring the field → (tagOrdinal, fieldIx, isElse, fieldTy).
       # Nim forbids field-name shadowing across arms, so a non-else field lands
       # in exactly ONE arm (the ite-chain is then trivial); the loop stays general
@@ -816,7 +834,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # guard — Nim identifiers cannot start with @). Plain/non-variant fields
     # keep the existing fieldHeapKey unchanged.
     let heapKey =
-      if isDiscDeref: refPointeeTypeId(stmt.dObjTy) & "__@disc"
+      if isDiscDeref: variantDiscHeapKey(stmt.dObjTy)
       elif isField:   fieldHeapKey(stmt.dObjTy, stmt.dField)
       else:           typeId
     var survivors: seq[Path]
@@ -1012,14 +1030,43 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # construction arm's per-PRESENT-field `mkFieldDerefWrite`s then
       # overwrite the fields it actually set). A non-object pointee (a plain
       # `ref int`/`ref float`/… inline allocation) has no fields to split —
-      # its whole cell is zero-written (RFC-0005 S8g, the `else` below). A
-      # variant object pointee never reaches `isNew` (named ref
-      # aliases whose pointee has `case` fields classify to `itVariant`, not
-      # `itRef` — ADR-0022 sub-decision #1 — so `isNewCall` gates never fire
-      # for them); this loop is therefore never reached with a variant pointee.
+      # its whole cell is zero-written (RFC-0005 S8g, the `else` below).
+      # RFC-0005 S8l: a VARIANT pointee is an object too (a named `ref object`
+      # case type or a `ref VObj` alias now classifies to `itRef(itVariant)`,
+      # and a ref-variant constructor lowers to this `isNew`). Nim zeroes the
+      # whole cell: the discriminator reads ordinal 0 and every field -- plain
+      # or of any arm -- reads its zero. Each lives in its own heap (ADR-0013
+      # D1: `__@disc`, `<obj>__<plain>`, `__@<ord>__<armField>`); all are
+      # zero-written. Before S8l a variant pointee never reached `isNew`. A
+      # multi-variant pointee (`new(p)` on an inline `ref MV`) likewise.
+      var zeroSlots: seq[tuple[fname, key: string; ty, variantTy: IRType]]
       if pointee.kind == itTuple:
         for i, fname in pointee.fieldNames:
-          let fty = pointee.fields[i]
+          zeroSlots.add (fname, fieldHeapKey(pointee, fname), pointee.fields[i],
+                         IRType(nil))
+      elif pointee.kind in {itVariant, itMultiVariant}:
+        # A multi-variant is the union of its axis views (`mvAxisView`): each
+        # axis's discriminator and arm fields, and the plain fields once.
+        var views: seq[IRType]
+        if pointee.kind == itVariant: views.add pointee
+        else:
+          for ai in 0 ..< pointee.mvAxes.len: views.add mvAxisView(pointee, ai)
+        let baseId = refPointeeTypeId(pointee)
+        for vi, view in views:
+          zeroSlots.add (view.vDiscName, variantDiscHeapKey(view), view.vDiscTy,
+                         view)
+          if vi == 0:
+            for i, fname in view.vPlainFieldNames:
+              zeroSlots.add (fname, fieldHeapKey(view, fname),
+                             view.vPlainFieldTypes[i], IRType(nil))
+          for arm in view.vArms:
+            for i, fname in arm.fieldNames:
+              zeroSlots.add (fname, baseId & "__@" & $arm.tagOrdinal & "__" & fname,
+                             arm.fieldTypes[i], view)
+      if pointee.kind in {itTuple, itVariant, itMultiVariant}:
+        for slot in zeroSlots:
+          let fname = slot.fname
+          let fty = slot.ty
           let zeroExpr = zeroIRExprForType(fty)
           if zeroExpr == nil:
             # SND-1: no clean zero encoding for this field's type this cycle
@@ -1036,12 +1083,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                    "encoding — isNew zero-write skipped for this field " &
                    "(SND-1 taint)", dsNewFieldZero))
             continue
-          let fieldKey = fieldHeapKey(pointee, fname)
+          let fieldKey = slot.key
           var fheap: Z3AnyAst
           if child.heaps.hasKey(fieldKey):
             fheap = child.heaps[fieldKey]
           else:
-            fheap = mkHeapArrayVar(ctx, refSort, fty, "heap_" & fieldKey)
+            fheap = mkHeapArrayVar(ctx, refSort, fty, "heap_" & fieldKey,
+                                   slot.variantTy)
           var scratchPC: seq[Z3Bool]
           let proto = allocateSym(fty, "__isNewZeroProto", scratchPC)
           let (valSVRaw, childAfter) = lowerInExpr(child, zeroExpr, w, some(proto))
@@ -1130,31 +1178,18 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # SAME field sees it (Z3 array theory), a read of a DIFFERENT field is
     # independent. A bare `p[] = v` keeps the R4 whole-pointee path.
     let isField = stmt.dwField.len > 0
-    # ADR-0013 Slice 1: itMultiVariant still raises (Slice 4 deferred).
-    # itVariant: discriminant and plain fields proceed; arm-specific writes
-    # are deferred (Slices 2/3).
+    # ADR-0013: itVariant's discriminant, plain and arm-field writes are
+    # modelled (Slices 1-3); an itMultiVariant's through its axis views
+    # (RFC-0005 S8l).
     if isField and stmt.dwObjTy.kind == itMultiVariant:
-      # N46-followup (round-6 re-review, walker v113): was `raise (ref
-      # SymexRefVariantUnsupportedError)`, LEDGERED-LIVE. Same live-hazard
-      # class as the read-side `isDeref` sibling above (an INLINE ref-to-
-      # multi-variant parameter reaches this arm on an ordinary `p.field =
-      # v` write; a raw raise here is a WHOLE-RUN abort that can mask a
-      # sibling path's `sxSat`). This decline is statement-scoped (depends
-      # only on `stmt.dwObjTy.kind`, not on any one path), so every incoming
-      # path is degraded uniformly: `allocDegrade` records the classified
-      # `heRefVariantUnsupported` and marks the run degraded
-      # immediately/globally, then each path is forked TAINTED with its
-      # PRE-write env/heap unchanged — the write is simply DROPPED (mirrors
-      # the `isUnsupported` walk arm's own "SND-1: an unmodeled statement
-      # dropped its mutation" idiom, `runtime.nim`), never silently applied.
-      let d = heapArmDegrade(heRefVariantUnsupported,
-        "field-write `." & stmt.dwField & " = …` through ref/ptr to " &
-        "multi-variant `" & $stmt.dwObjTy & "`: unsupported (Slice 4, ADR-0013 D6)")
-      var survivors: seq[Path]
-      for p in paths:
-        if w.shouldStop: return survivors
-        survivors.add degradeHeapArmForPath(p, d)
-      return survivors
+      # RFC-0005 S8l. The write-side sibling of the `isDeref` arm's view
+      # dispatch: a discriminator write is checked against its own axis's
+      # branches, an arm-field write against its own axis's discriminator.
+      let view = mvAxisView(stmt.dwObjTy, mvAxisOfField(stmt.dwObjTy, stmt.dwField))
+      return walkHeapArm(IRStmt(kind: isDerefWrite, dwPtr: stmt.dwPtr,
+                                dwValue: stmt.dwValue, dwElemTy: stmt.dwElemTy,
+                                dwPtrFamily: stmt.dwPtrFamily, dwField: stmt.dwField,
+                                dwObjTy: view, dwInit: stmt.dwInit), paths, w)
     let isVariantPointeeW = isField and stmt.dwObjTy.kind == itVariant
     let isDiscWrite = isVariantPointeeW and stmt.dwField == stmt.dwObjTy.vDiscName
     let isArmFieldWrite = isVariantPointeeW and not isDiscWrite and
@@ -1169,7 +1204,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # p==q share heap arrays, so select(store(h,p,v),q) == v via Z3 array theory.
       let objTy = stmt.dwObjTy
       let baseId = refPointeeTypeId(objTy)
-      let discHeapKeyW = baseId & "__@disc"
+      let discHeapKeyW = variantDiscHeapKey(objTy)
       type ArmHitW = tuple[tagOrd: int; fieldIx: int; isElse: bool; fieldTy: IRType]
       var armHitsW: seq[ArmHitW]
       for arm in objTy.vArms:
@@ -1359,7 +1394,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     let typeId = refPointeeTypeId(sortTy)
     # ADR-0013 D1: disc write uses __@disc heap key; plain/non-variant use fieldHeapKey.
     let heapKey =
-      if isDiscWrite: refPointeeTypeId(stmt.dwObjTy) & "__@disc"
+      if isDiscWrite: variantDiscHeapKey(stmt.dwObjTy)
       elif isField:   fieldHeapKey(stmt.dwObjTy, stmt.dwField)
       else:           typeId
     var survivors: seq[Path]
@@ -1451,12 +1486,66 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
             of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
             else: discard  ## proto is not a BV — no BV coercion needed
+          # RFC-0005 S8l. A discriminator write THROUGH a ref is checked exactly
+          # like the value model's reassignment (S8f, `sameBranchCond`): Nim
+          # raises `FieldDefect` ("assignment to discriminant changes object
+          # branch") when the stored discriminator selects a different source
+          # branch than the new value -- a zero-initialised `new(V)` cell
+          # included (probed on the pinned toolchain). Before S8l this was a
+          # plain store: an INLINE `ref V` write was unchecked, and the named
+          # ref variant (value-modelled until S8l) reaches this arm now. The
+          # constructor's initialising write (`dwInit`) is not an assignment
+          # and is not checked. A same-branch move keeps the branch's fields:
+          # the ADR-0013 heap keeps one array per TAG, so each field of a
+          # multi-tag branch is re-stored at every tag of it from the tag the
+          # old discriminator named (an arm-field write already stores to all
+          # of them, so this only matters for an unwritten free param cell).
+          var cpS = cp
+          if isDiscWrite and not stmt.dwInit:
+            let objTy = stmt.dwObjTy
+            let oldDisc = heapSelect(ctx, heap, refAst, objTy.vDiscTy)
+            var basePc = cp.pc
+            let rangeOpt = refVariantDiscRangeClause(objTy, oldDisc)
+            if rangeOpt.isSome: basePc = basePc & @[rangeOpt.get]
+            let groups = branchGroups(objTy.vArms)
+            let same = sameBranchSymCond(oldDisc, valSV, groups)
+            maybeForkDefect(forkPath(cp, basePc, cp.env), not same,
+                            "FieldDefect", none(string), w)
+            if w.shouldStop: return survivors
+            cpS = forkPath(cp, basePc & @[same], cp.env)
+            let baseId = refPointeeTypeId(objTy)
+            for g in groups:
+              if g.len < 2: continue
+              var armIx = -1
+              for ai, arm in objTy.vArms:
+                if arm.tagOrdinal == g[0]: armIx = ai
+              if armIx < 0: continue
+              let arm0 = objTy.vArms[armIx]
+              for j, fname in arm0.fieldNames:
+                let fty = arm0.fieldTypes[j]
+                var keys: seq[string]
+                var arrs: seq[Z3AnyAst]
+                for t in g:
+                  let k = baseId & "__@" & $t & "__" & fname
+                  keys.add k
+                  if cpS.heaps.hasKey(k):
+                    arrs.add cpS.heaps[k]
+                  else:
+                    arrs.add mkHeapArrayVar(ctx, allocRefSort(ctx, objTy), fty,
+                                            "heap_" & k, objTy)
+                var carried = heapSelect(ctx, arrs[^1], refAst, fty)
+                for k in countdown(g.len - 2, 0):
+                  carried = iteSV(variantDiscEq(oldDisc, int64(g[k])),
+                                  heapSelect(ctx, arrs[k], refAst, fty), carried)
+                for k in 0 ..< g.len:
+                  cpS.heaps[keys[k]] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_store(
+                    ctx.raw, arrs[k].raw, refAst.raw, rawAnyAstOf(carried)))
           let storedRaw = ctx.checkErr Z3_mk_store(
             ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
           let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
           # REPLACE the per-path heap binding with the stored array on the surviving
           # path (PER-PATH — an unforked branch never sees this update).
-          var child = forkPath(cp, cp.pc, cp.env)
+          var child = forkPath(cpS, cpS.pc, cpS.env)
           child.heaps[heapKey] = storedHeap
           # RFC-0005 S1c (S1b's measured leak, `tsymex_r6_n40_alloc_totality`
           # N40-4). `rawAnyAstOf(valSV)` in the store above runs AFTER

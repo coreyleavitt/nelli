@@ -57,7 +57,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         # RFC-0005 S9: capture by reference.
                         ceCaptureByRefUnmodelled,
                         # RFC-0005 S8g: an out-of-range float-to-int value.
-                        feConvFloatToIntUndefined}
+                        feConvFloatToIntUndefined,
+                        # RFC-0005 S8l: a `return` in a `finally` on a
+                        # raised exit (backend-divergent).
+                        eeFinallyReturnOnRaise}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

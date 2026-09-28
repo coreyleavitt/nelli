@@ -326,6 +326,13 @@ type
         ## Nim type with two `Ref_<id>` sorts (`refPointeeTypeId`), and the
         ## first cross-use was a Z3 sort error. NOT part of `IRType.==` or
         ## the canonical form, the reasoning `nominalId` is excluded under.
+      vIsAxisView*:      bool
+        ## RFC-0005 S8l. True only on a WALK-TIME view of one axis of an
+        ## `itMultiVariant` reached through a `ref`/`ptr`
+        ## (`runtime_heap.mvAxisView`): the ADR-0013 heap arms model that
+        ## axis exactly as a single-axis variant, and the flag gives its
+        ## discriminator heap its own key (one per axis). Never built by the
+        ## parser; NOT part of `IRType.==` or the canonical form.
       vPlainFieldNames*: seq[string]
                                     # Phase 11 post-cycle-12: plain
                                     # (non-recCase) fields shared
@@ -362,6 +369,12 @@ type
         ## >= 2`; enforced by `mkMultiVariant`. The parser emits
         ## `itVariant` (not `itMultiVariant`) for single-recCase
         ## objects.
+      mvNominalId*:       string
+        ## RFC-0005 S8l. `vNominalId` for a multi-variant: keys its
+        ## `Ref_<id>` sort (`refPointeeTypeId`), so an inline `ref Obj`
+        ## FIELD's placeholder pointee and a `ref Obj` param name one sort
+        ## (was a Z3 sort error). NOT part of `IRType.==` or the canonical
+        ## form.
 
   ## IRExprKind prefix convention (M2):
   ##   iek* — value-producing expressions (may appear in rvalue position)
@@ -1176,6 +1189,10 @@ type
                              ## write — stores into the per-(type,field) heap
                              ## array `refPointeeTypeId(dwObjTy) & "__" & dwField`.
       dwObjTy*:    IRType    ## Phase 15 R6: the OBJECT pointee type (`Ref_T` sort).
+      dwInit*:     bool      ## RFC-0005 S8l: a ref-variant CONSTRUCTOR's
+                             ## initialising discriminator write -- not an
+                             ## assignment, so no branch-change `FieldDefect`
+                             ## check (every other disc write is checked).
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -2110,6 +2127,17 @@ type
                           ## candidate on that path is replay-gated. Recorded
                           ## once per drain whose out-of-range half does not
                           ## simplify to `false`. sevError.
+    eeFinallyReturnOnRaise ## RFC-0005 S8l. A `return` inside a `finally`
+                          ## that is running on a RAISED exit (the try body
+                          ## or an `except` arm raised, nothing caught it).
+                          ## The pinned toolchain's two backends disagree
+                          ## there: `try: raise newException(ValueError,
+                          ## "a") finally: return 7` returns 7 under cpp and
+                          ## re-raises the ValueError under c (probed,
+                          ## Nim 2.2.10). The walker cannot know which
+                          ## backend replays the witness, so the path is
+                          ## dropped. `classOf` is `dcOmitted` (a HALT, token
+                          ## discarded). sevError -> sxUnknown.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3143,6 +3171,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # target type stands for a platform-defined cast result, every operand
     # is lowered and the raise drains run on that path too -- nothing is
     # dropped (the in-range continuation is forked clean beside it).
+  # RFC-0005 S8l.
+  of eeFinallyReturnOnRaise: dcOmitted
+    # A HALT: the path whose `finally` returns during a raised exit is
+    # dropped (token discarded), because c re-raises and cpp returns.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -3997,7 +4029,8 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
 proc mkMultiVariant*(objectName: string,
                      axes: seq[VariantAxis],
                      plainFieldNames: seq[string] = @[],
-                     plainFieldTypes: seq[IRType] = @[]): IRType =
+                     plainFieldTypes: seq[IRType] = @[];
+                     nominalId = ""): IRType =
   ## Phase 14 (ADR-0003 D1). Constructor for multi-recCase variants.
   ## Asserts `axes.len >= 2` — single-recCase objects MUST use
   ## `tVariant` instead. The two IR kinds are intentionally disjoint
@@ -4008,7 +4041,8 @@ proc mkMultiVariant*(objectName: string,
   IRType(kind: itMultiVariant, mvObjectName: objectName,
          mvAxes: axes,
          mvPlainFieldNames: plainFieldNames,
-         mvPlainFieldTypes: plainFieldTypes)
+         mvPlainFieldTypes: plainFieldTypes,
+         mvNominalId: nominalId)   # RFC-0005 S8l
 
 proc `==`*(a, b: IRType): bool =
   if a.isNil or b.isNil: return a.isNil and b.isNil
@@ -4470,13 +4504,13 @@ proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
 
 proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
                         objTy: IRType, field: string,
-                        ptrFamily = false): IRStmt =
+                        ptrFamily = false; init = false): IRStmt =
   ## Phase 15 R6 (ADR-0010). `p.field = value` — a FIELD WRITE through a
   ## `ref object`/`ptr object`. Stores `value` into the per-(type,field) heap
   ## array `refPointeeTypeId(objTy) & "__" & field` at `p`'s address (only that
   ## field's array changes; an aliased read of the same field sees the write).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
-         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy)
+         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
                     marker: int): IRStmt =
@@ -4942,6 +4976,6 @@ proc render*(s: IRStmt): string =
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""
     "deref<" & fam & ">(" & render(s.dwPtr) & ")" & fld & ":" & $s.dwElemTy &
-      "=" & render(s.dwValue)
+      (if s.dwInit: "=init " else: "=") & render(s.dwValue)
   of isUnsupported:  "unsupported(" & $s.unKind & ": " & s.reason & ")"
   of isUnsafeCast:   "unsafeCast(" & s.ucReason & ")"

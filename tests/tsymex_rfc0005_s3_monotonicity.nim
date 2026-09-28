@@ -72,6 +72,11 @@
 ##         read skips `nilDerefFork`, dropping the NilAccessDefect raise; the
 ##         write is dropped), so it stays `dcNoAnswer` and does NOT flip. Any
 ##         later flip needs a slice that restructures those sites first.
+##         RFC-0005 S8l (walker 159) retired both sites instead: a field of
+##         an inline `ref` multi-variant is modelled per axis, so F4's
+##         witnesses no longer taint. Its pins below are re-pinned to the
+##         modelled verdicts (the graft still never changes the verdict;
+##         the "fired" and ⊤ assertions no longer have a funnel to observe).
 ##
 ## No product code. At S3 all four kinds classified `dcNoAnswer` (verified by
 ## `types.nim`'s `classOf` table); S4 reclassified F1's kind only (F1's
@@ -334,13 +339,13 @@ suite "RFC-0005 S3 -- W2 (sxRaised), witness monotonicity":
     check r.status == sxRaised
     check not r.errors.hasKind(feUnsupportedStmtKind)
 
-  test "F4 before (shouldStop pin): graft does not change sxRaised; heRefVariantUnsupported fired":
+  test "F4 before (shouldStop pin): graft does not change sxRaised (the F4 arm is modelled since RFC-0005 S8l)":
     let base = symexFind(s3w2Base, tRaisedExn())
     let r = symexFind(s3w2F4Before, tRaisedExn())
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
-    check r.errors.hasKind(heRefVariantUnsupported)
+    check not r.errors.hasKind(heRefVariantUnsupported)
 
   test "F4 after (shouldStop eager-halt): graft does not change sxRaised; the poison NEVER fires":
     let base = symexFind(s3w2Base, tRaisedExn())
@@ -499,12 +504,14 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
     check r.status != sxSat
     check r.errors.hasKind(feUnsupportedStmtKind)
 
-  test "F4: heRefVariantUnsupported sits between every path and the target -> sxUnknown, never sxSat":
+  test "F4: the multi-variant read before the target is modelled since RFC-0005 S8l -> sxSat (was sxUnknown)":
     let r = symexFind(s3ClassifyF4, tLabel("s3_classify_f4"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.status != sxSat
-    check r.errors.hasKind(heRefVariantUnsupported)
+    check r.status == sxSat
+    check not r.errors.hasKind(heRefVariantUnsupported)
+    if r.status == sxSat:
+      check r.witness[0] != nil and r.witness[0].kindA == s3f4KindA1
+      check r.witness[1] == 42
 
 # =============================================================================
 # Family 2b -- over-taint-only unreachable-target pins (S4/S5/S6's own RED)
@@ -570,15 +577,17 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
   test "F4: classOf(heRefVariantUnsupported) is dcNoAnswer (audited at S4: its sites substitute)":
     check classOf(heRefVariantUnsupported) == dcNoAnswer
 
-  test "F4: sxUnknown, over-taint-only -- stays ⊤ (S4 audit: substituting sites, no flip)":
+  test "F4: no taint since RFC-0005 S8l -- the SUT's own FieldDefect is the verdict (was sxUnknown, ⊤)":
+    # `p.a1` with `kindA == s3f4KindA2` raises FieldDefect in real Nim; the
+    # modelled read finds it, and the dead target adds nothing.
     let r = symexFind(s3OverTaintF4, tLabel("s3_overtaint_f4"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.status != sxSat
+    check r.status == sxRaised
+    check "FieldDefect" in r.raisedTypeId
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
       if e.severity == sevError: sevErrorKinds.add e.kind
-    check sevErrorKinds == @[heRefVariantUnsupported]
+    check sevErrorKinds.len == 0
 
 # =============================================================================
 # decideVerdict monotonicity (§4.1 family 1, the pure-function form)

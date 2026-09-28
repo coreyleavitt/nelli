@@ -843,7 +843,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8j (the SUT's own `return` lowered and drained, an inline
     ## `ref <case object>` field's sort, narrowing int conversions, one range
     ## check per store). 157->158.
-    check symexWalkerVersion == "158"
+    ## RFC-0005 S8l (finally on a return exit, `defer:`, named ref variants,
+    ## the heap discriminator write's branch check, an inline ref to a
+    ## multi-variant). 158->159.
+    check symexWalkerVersion == "159"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

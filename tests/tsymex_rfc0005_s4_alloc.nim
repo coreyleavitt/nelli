@@ -16,8 +16,8 @@
 ##     stores and closure args consume as a value (`dcSubstituted`);
 ##   - `walkHeapArm`'s decline arms (`heUnresolvedRef`'s non-ref-SymVal
 ##     reads/writes, `heRefVariantUnsupported`'s multi-variant field
-##     read/write) bind a placeholder WITHOUT the NilAccessDefect fork, or
-##     drop the write outright;
+##     read/write -- retired by RFC-0005 S8l) bind a placeholder WITHOUT the
+##     NilAccessDefect fork, or drop the write outright;
 ##   - `feUnsupportedOp` / `feUnsupportedExprKind` / `weInternalWalkerFault`
 ##     span several classes or are never an approximation at all.
 ## Exactly ONE arm substitutes a fresh unconstrained symbol:
@@ -129,8 +129,9 @@ proc s4TwoCellsLoop(a, b: S4Node) =
       symexTarget("s4_two_cells_loop")
 
 ## Must-NOT-promote: the `heRefVariantUnsupported` heap arm (reaches
-## `allocDegrade` through `heapArmDegrade`) skips the nil-deref fork, so it
-## stays ⊤ and an unreachable target through it stays sxUnknown.
+## `allocDegrade` through `heapArmDegrade`) skipped the nil-deref fork, so it
+## stayed ⊤ and an unreachable target through it stayed sxUnknown. RFC-0005
+## S8l retired that arm (the multi-variant field is modelled); see the test.
 proc s4MultiVariantDead(p: ref S4MultiObj, n: int) =
   if p != nil:
     discard p.a1
@@ -279,12 +280,17 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
 
 suite "RFC-0005 S4 (d) -- the funnel's substituting arms stay ⊤":
 
-  test "heRefVariantUnsupported (heapArmDegrade, nil fork skipped) keeps an unreachable target sxUnknown":
+  test "a multi-variant field read through a ref is modelled since RFC-0005 S8l (was heRefVariantUnsupported, sxUnknown)":
+    # RFC-0005 S8l (walker 159) re-pin: the substituting arm this pinned is
+    # gone (`p.a1` through an inline `ref` multi-variant is modelled per
+    # axis), so the SUT's own FieldDefect -- `a1` read while `kindA` is
+    # `s4KindA2`, which real Nim raises -- is the verdict, and it carries no
+    # taint.
     let r = symexFind(s4MultiVariantDead, tLabel("s4_multivariant_dead"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(heRefVariantUnsupported)
-    check scIncomplete in runTaintOf(r.errors)
+    check r.status == sxRaised
+    check "FieldDefect" in r.raisedTypeId
+    check not r.errors.hasKind(heRefVariantUnsupported)
 
   test "checkUnsatOverTaintOnly rejects an sxUnknown result":
     let r = SymexResult[int](status: sxUnknown,

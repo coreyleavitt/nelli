@@ -158,6 +158,11 @@ proc twoNilRefsNeqUnsat(p, q: Node) =
 ##         genuine, currently-excluded field-ACCESS path — verified below,
 ##         never previously exercised by R6 test 5 (single-axis) or P2b-13
 ##         (construction, not access).
+##
+## RFC-0005 S8l (walker 159) retired both escapes: a named ref-variant alias
+## is `itRef` now (heap identity, `p != nil` modelled), and a multi-axis
+## variant is modelled through the heap per axis (`mvAxisView`). The
+## "EXCLUDED" pin below is re-pinned to the modelled `sxSat`.
 # =============================================================================
 
 type
@@ -286,21 +291,17 @@ suite "Cluster H verification — nil edge cases":
 
 suite "Cluster H verification — variant ref-object FIELD ACCESS (supported vs excluded)":
 
-  test "EXCLUDED: inline ref to a MULTI-axis variant — disc read stays sxUnknown, no crash, no false sxSat":
+  test "SUPPORTED since RFC-0005 S8l: inline ref to a MULTI-axis variant — disc read is sxSat (was sxUnknown, heRefVariantUnsupported)":
     let r = symexFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
-    check r.status == sxUnknown
-    check r.status != sxSat
-    var sawKind = false
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == heRefVariantUnsupported and e.severity == sevError:
-        sawKind = true
-    check sawKind
+      check e.kind != heRefVariantUnsupported
 
   test "SUPPORTED (contrast): inline ref to a SINGLE-axis variant — arm-field read is sxSat":
     let r = symexFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))
     check r.status == sxSat
 
-  test "SUPPORTED (contrast): NAMED alias to a ref-to-variant — field read bypasses the heap entirely (sxSat, value-modelled)":
+  test "SUPPORTED (contrast): NAMED alias to a ref-to-variant — field read is sxSat (heap-modelled since RFC-0005 S8l)":
     let r = symexFind(namedAliasVariantDiscRead, tLabel("named_alias_variant_disc_hit"))
     check r.status == sxSat
 

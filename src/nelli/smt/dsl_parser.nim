@@ -576,7 +576,8 @@ proc emitIRType*(t: IRType): NimNode =
       newLit(t.mvObjectName),
       prefix(axesLit, "@"),
       prefix(plainNamesLit, "@"),
-      prefix(plainTypesLit, "@"))
+      prefix(plainTypesLit, "@"),
+      newLit(t.mvNominalId))   # RFC-0005 S8l: keys the `Ref_<id>` sort
 
 proc emitBranch(br: IRBranch): NimNode =
   newCall(bindSym"mkBranch", emitExpr(br.cond), emitStmt(br.body))
@@ -716,7 +717,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
               emitIRType(s.dwElemTy), emitIRType(s.dwObjTy), newLit(s.dwField),
-              newLit(s.dwPtrFamily))
+              newLit(s.dwPtrFamily), newLit(s.dwInit))
     else:
       newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
               emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
@@ -2186,29 +2187,6 @@ proc declineUnsupportedFieldRead(n: NimNode, fieldName: string, fieldTy: IRType,
     siteMsg(n, reason),
     reason)   # kind is structured (unKind); N12: no raw kind-name parenthetical in the rendered msg
   mkSeqLit(@[], fieldTy.seqElemTy, declinedPlaceholder = true)
-
-proc ctorIsRefAliasedVariant(n: NimNode): bool =
-  ## Round-6 A1 (ADR-0029). `classifyType` collapses a `ref object`/`ptr
-  ## object` alias with `case` fields (`VNode = ref object; case kind: ...`)
-  ## to the SAME `itVariant` IRType a plain (non-ref) `object` with `case`
-  ## fields produces — ADR-0022 sub-decision #1 deliberately value-models
-  ## both identically everywhere (field reads, reassignment, ...), so
-  ## `objTyFull.kind == itVariant` alone cannot tell the two shapes apart.
-  ## ADR-0029 excludes ref-aliased variant CONSTRUCTION specifically
-  ## ("deliberately not covered" — construction needs its own read-gap ADR
-  ## first, `heRefVariantUnsupported`), so this replicates
-  ## `dsl_typebridge.classifyType`'s own ref-alias detection (`impl[2].kind
-  ## in {nnkRefTy, nnkPtrTy}`, ~455-460 there) directly on the constructor
-  ## node `n`'s resolved type symbol — the only place this distinction
-  ## still survives once `classifyType` has been called.
-  let resolved = n.getTypeInst
-  if resolved.kind != nnkSym: return false
-  let impl = resolved.getImpl
-  if impl.kind == nnkTypeDef and impl.len >= 3:
-    let under = impl[2]
-    if under.kind in {nnkRefTy, nnkPtrTy} and under.len == 1:
-      return true
-  false
 
 proc parseVariantCtorField(fieldName: string, fty: IRType,
                             byName: Table[string, NimNode], ctorNode: NimNode,
@@ -3995,11 +3973,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
         # `itTuple` → field-split heap deref. `itVariant`/`itMultiVariant` →
         # routed through the SAME field-deref IR (the field type is still
-        # well-defined), but the WALKER detects the variant `dObjTy` and raises
-        # the classified `heRefVariantUnsupported` (Feas-MED-4 / M17 negative DoD)
-        # — a field-split heap has no flat positional layout to split a variant
-        # on, so it is honestly out of scope (sxUnknown, never a Defect on
-        # svTuple dispatch).
+        # well-defined); the walker models the variant `dObjTy` on the
+        # ADR-0013 per-arm heaps (a multi-variant per axis, RFC-0005 S8l).
         if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
           let fieldName = n[1].strVal
           # The field's type: ref-aware (`classifyFieldType`) so a RECURSIVE
@@ -5105,10 +5080,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `FieldDefect`, empirically confirmed as a hard MACRO-EXPANSION error:
     # `VNode(kind: true, a: x)` for a `case`-fielded `VNode` fails to compile
     # the SUT at all today — a P2a gap this retroactively hardens). Variant
-    # ref-object construction is explicitly EXCLUDED (round-2 decision): the
-    # field-split heap already declines variant READS (`heRefVariantUnsupported`,
-    # ~1299-1305 above); variant construction needs its own ADR revisiting
-    # that read gap. Degrade soundly: register the classified error and
+    # ref-object construction was EXCLUDED here (round-2 decision) until
+    # RFC-0005 S8l, which builds it on the heap (the `isRefCtor` path below);
+    # a VALUE multi-variant constructor still declines. Degrade soundly: register the classified error and
     # return a reference to a FRESH, DELIBERATELY-UNBOUND synthetic var name
     # (never `mkLet`/`mkAssign`-bound). This is the SAFE degrade shape — env
     # is `OrderedTable[string, SymVal]`, so any consumer's later `env[name]`
@@ -5144,40 +5118,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # retained decline arm below. Two shapes stay excluded here too —
       # neither is this slice's job:
       #   * a ref-ALIASED variant constructor (`VNode = ref object; case
-      #     kind: ...`) — ADR-0029 "deliberately not covered" (construction
-      #     needs its own read-gap ADR first); `classifyType` alone cannot
-      #     tell it apart from a plain value-object variant (ADR-0022 D#1),
-      #     so `ctorIsRefAliasedVariant` replicates the type-symbol-impl
-      #     check that distinction still requires.
+      #     kind: ...`) was declined here until RFC-0005 S8l
+      #     (`ctorIsRefAliasedVariant`): it now classifies to `itRef` and is
+      #     built on the heap by the `isRefCtor` path below.
       #   * a SYMBOLIC discriminant — A3's fork-per-tag
       #     `isVariantConstructSym` job, not an `iek*` (a value-producing
       #     expression cannot fork paths; see the `iekVariantLit` doc
       #     comment).
-      if ctorIsRefAliasedVariant(n):
-        preamble.add ctx.declineAtSite(
-          feUnsupportedExprKind,
-          siteMsg(n, "A1 (ADR-0029): ref-aliased variant object " &
-                            "constructor is deliberately not covered — the " &
-                            "field-split heap still declines variant reads " &
-                            "(heRefVariantUnsupported); a ref-variant " &
-                            "constructor needs its own ADR revisiting that " &
-                            "read gap"),
-          "A1: ref-aliased variant object " &
-                                      "constructor unmodeled " &
-                                      "(feUnsupportedExprKind)")
-        # #163 regression fix (post-round-9 gate): a BOUND, type-correct
-        # dummy (mirrors `declineIntWidthConv`'s "never an unbound `mkVar`"
-        # precedent) -- NOT a dangling `mkVar(freshSynth(...))` reference
-        # into an env slot no LET statement ever binds. Confirmed via
-        # `tests/tsymex_r6_a1_variantlit.nim`'s A1-5 (the `itMultiVariant`
-        # sibling arm below): reading a dangling fresh-synth name used to
-        # raise `KeyError` at walk time, silently swallowed by the known
-        # C-backend nested-`walkBlock` exception-loss quirk (SND-3/ADR-0023)
-        # -- masked, not sound, and #163's `iekVar` global-read fix
-        # (`runtime.nim`) closed that swallow, which then surfaced the
-        # dangling reference as a genuine crash one level further down
-        # (`isVariantField` reading a wrongly-kinded substitute).
-        return unsupportedFieldPlaceholder(objTyFull)
       var byNameDisc = initTable[string, NimNode]()
       for k in 1 ..< n.len:
         let child = n[k]
@@ -5192,8 +5139,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                             "discriminant field `" & objTyFull.vDiscName & "`"),
           "A1: variant constructor missing " &
                                       "discriminant (feUnsupportedExprKind)")
-        # #163 regression fix (post-round-9 gate): bound dummy, not a
-        # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+        # #163 regression fix (post-round-9 gate): a BOUND, type-correct
+        # dummy (mirrors `declineIntWidthConv`'s "never an unbound `mkVar`"
+        # precedent) -- NOT a dangling `mkVar(freshSynth(...))` reference
+        # into an env slot no LET statement ever binds. Confirmed via
+        # `tests/tsymex_r6_a1_variantlit.nim`'s A1-5 (the `itMultiVariant`
+        # sibling arm below): reading a dangling fresh-synth name used to
+        # raise `KeyError` at walk time, silently swallowed by the known
+        # C-backend nested-`walkBlock` exception-loss quirk (SND-3/ADR-0023)
+        # -- masked, not sound, and #163's `iekVar` global-read fix
+        # (`runtime.nim`) closed that swallow, which then surfaced the
+        # dangling reference as a genuine crash one level further down
+        # (`isVariantField` reading a wrongly-kinded substitute).
         return unsupportedFieldPlaceholder(objTyFull)
       # Try the static-tag path first — same `parseExpr` + `iekIntLit`
       # test the `nnkAsgn`/`isVariantReassign` static-tag path already
@@ -5226,7 +5183,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                         "constructor with an arm-specific " &
                                         "field unmodeled (feUnsupportedExprKind)")
           # #163 regression fix (post-round-9 gate): bound dummy, not a
-          # dangling `mkVar` -- see the ref-aliased-variant arm's comment
+          # dangling `mkVar` -- see the missing-discriminant arm's comment
           # above.
           return unsupportedFieldPlaceholder(objTyFull)
         # Parse-time `case`-branch tag-set NARROWING (ADR-0029): consult the
@@ -5275,7 +5232,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                       "variant constructor unmodeled " &
                                       "(feUnsupportedExprKind)")
         # #163 regression fix (post-round-9 gate): bound dummy, not a
-        # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+        # dangling `mkVar` -- see the missing-discriminant arm's comment above.
         return unsupportedFieldPlaceholder(objTyFull)
       # Shared per-field extraction for BOTH the active arm's fields and
       # the always-present plain fields — `parseVariantCtorField` mirrors
@@ -5337,7 +5294,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         "P2b: unexpected object-constructor shape " &
                                     "(feUnsupportedExprKind)")
       # #163 regression fix (post-round-9 gate): bound dummy, not a
-      # dangling `mkVar` -- see the ref-aliased-variant arm's comment above.
+      # dangling `mkVar` -- see the missing-discriminant arm's comment above.
       return unsupportedFieldPlaceholder(objTyFull)
 
     let isRefCtor = objTyFull.kind in {itRef, itPtr}
@@ -5365,6 +5322,64 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # would be redundant (ADR-0022 Round-2: "H4's separate omitted-field
       # zero-write is DROPPED").
       let tmp = freshSynth(ctx, "p2bNew")
+      if objTy.kind in {itVariant, itMultiVariant}:
+        # RFC-0005 S8l: a REF-variant constructor (`VB(k: bkB, b: x)` with
+        # `VB = ref object case ...`, or `VRef(kind: ...)` with `VRef = ref
+        # VObj`) -- real heap construction, as a plain ref object's above.
+        # `isNew` zeroes the whole cell (discriminator ordinal 0, every plain
+        # and arm field zero); the discriminator is then written (`init`: an
+        # initialisation, exempt from the heap disc write's branch-change
+        # `FieldDefect` check), and each
+        # PRESENT field is written through the ADR-0013 field-split heap (an
+        # arm field's write checks its arm against the discriminator just
+        # stored, so it never forks a FieldDefect here). Nim accepts a
+        # non-constant discriminator only when no arm field is set, so the
+        # stored value is always a legal tag. Before S8l this constructor was
+        # a recorded decline (ADR-0029), because the named ref variant was
+        # value-modelled.
+        # A multi-variant (`MRef(a: akY, y: v, b: bkQ)` with `MRef = ref
+        # MV`) is the same per axis: each axis's discriminator, then the
+        # plain fields, then each axis's present arm fields.
+        var axes: seq[VariantAxis]
+        var plainNames: seq[string]
+        var plainTypes: seq[IRType]
+        if objTy.kind == itVariant:
+          axes.add VariantAxis(discName: objTy.vDiscName, discTy: objTy.vDiscTy,
+                               arms: objTy.vArms)
+          plainNames = objTy.vPlainFieldNames
+          plainTypes = objTy.vPlainFieldTypes
+        else:
+          axes = objTy.mvAxes
+          plainNames = objTy.mvPlainFieldNames
+          plainTypes = objTy.mvPlainFieldTypes
+        preamble.add mkNewT(tmp, objTyFull)
+        for ax in axes:
+          if byName.hasKey(ax.discName):
+            var tagIR = parseExpr(byName[ax.discName], preamble, ctx)
+            # A `bool` discriminator's constant reaches the typed AST folded
+            # to an int literal (`kind: true` is `1`); the heap stores a Bool.
+            if ax.discTy.kind == itBool and tagIR.kind == iekIntLit:
+              tagIR = mkBoolLit(tagIR.ival != 0)
+            preamble.add mkFieldDerefWrite(mkVar(tmp), tagIR, ax.discTy,
+                                           objTy, ax.discName, isPtrCtor,
+                                           init = true)
+        for i, fieldName in plainNames:
+          if not byName.hasKey(fieldName): continue
+          let fty = plainTypes[i]
+          preamble.add mkFieldDerefWrite(mkVar(tmp),
+            parseVariantCtorField(fieldName, fty, byName, n, preamble, ctx),
+            fty, objTy, fieldName, isPtrCtor)
+        var armDone: seq[string]
+        for ax in axes:
+          for arm in ax.arms:
+            for i, fieldName in arm.fieldNames:
+              if not byName.hasKey(fieldName) or fieldName in armDone: continue
+              armDone.add fieldName
+              let fty = arm.fieldTypes[i]
+              preamble.add mkFieldDerefWrite(mkVar(tmp),
+                parseVariantCtorField(fieldName, fty, byName, n, preamble, ctx),
+                fty, objTy, fieldName, isPtrCtor)
+        return mkVar(tmp)
       preamble.add mkNewT(tmp, objTyFull)
       for i, fieldName in objTy.fieldNames:
         if not byName.hasKey(fieldName): continue
@@ -8074,6 +8089,27 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
+proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
+  ## list, lowering `defer:` the way Nim does: a `defer: D` guards the REST of
+  ## its own statement list, i.e. it becomes `try: <rest> finally: D` (the
+  ## manual; probed: `defer: log r; if x > 0: return x*2` runs the defer
+  ## after the return with result == 8, a raise under it runs it before the
+  ## exception leaves, a `defer: result += 100` changes the returned value,
+  ## and two defers run in reverse order). A later defer nests inside the
+  ## earlier one's try, so it runs first. A defer that ends its list guards
+  ## nothing and runs at once (an empty try body). Before S8l `nnkDefer` fell
+  ## to the catch-all (`feUnsupportedStmtKind`: the defer body was dropped).
+  var stmts: seq[IRStmt]
+  for k in start ..< items.len:
+    let c = items[k]
+    if c.kind == nnkDefer:
+      let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
+      stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
+      break
+    stmts.add parseStmt(c, ctx)
+  if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+
 proc isKnownMutatingReceiverCall(calleeName: string, recv: NimNode,
                                   argc: int): bool =
   ## N49 (RFC-chapulin-hardening bucket-2, design round). True iff
@@ -8228,10 +8264,7 @@ proc parseStmtInner(n: NimNode,
     parseStmt(n[n.len - 1], ctx)
   of nnkStmtList, nnkStmtListExpr, nnkBlockStmt:
     let inner = if n.kind == nnkBlockStmt: n[1] else: n
-    var stmts: seq[IRStmt]
-    for c in stmtListItems(inner):
-      stmts.add parseStmt(c, ctx)
-    if stmts.len == 1: stmts[0] else: mkBlock(stmts)
+    parseDeferList(stmtListItems(inner), 0, ctx)
   of nnkIfStmt, nnkIfExpr:
     var branches: seq[IRBranch]
     var elseBody: IRStmt = nil

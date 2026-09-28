@@ -144,7 +144,7 @@ state = "pending"
 [[slice]]
 id    = "S8l"
 title = "S8j's exit remainder: finally on a return exit (callee and top level), defer, named ref-object case variants, variant-faithful reads through a named ref alias, inline ref to a multi-variant"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -1833,6 +1833,172 @@ Re-pinned, each checked against real Nim:
   decline row; it moves to the capability suite beside the B2 reinterpret,
   pinned `sxSat` with the same low-byte check.
 - `phase15_CR2_cachekey` pin (158).
+
+**As landed (S8l, walker 159) — S8j's exit remainder.** S8j reported five
+defects outside its design. Every expected behaviour was probed against the
+pinned toolchain (Nim 2.2.10); c and cpp are identical except where noted.
+
+1. `finally` did not run on a `return` exit. `isReturn` completed the return
+   at once and never consulted the handler stack. Nim runs every enclosing
+   `finally` innermost first, with `result` already assigned:
+   - a `finally` can read `result` and write it (`result = result + 1` is
+     returned);
+   - a raise in the `finally` replaces the return;
+   - a `return` in the `finally` overrides it;
+   - a `return` from an `except` arm, and a bare `return`, run it too.
+   The one exception is `try: raise newException(ValueError, "a") finally:
+   return 7`. Here c re-raises the `ValueError` and cpp returns 7.
+2. `defer:` was `feUnsupportedStmtKind` and its body was dropped. Nim lowers
+   `defer: D` to a `try: <rest of block> finally: D`. A later defer runs
+   first, and a `defer: result += 100` changes the returned value.
+3. A named `ref object` case variant (`VB = ref object case kind: …`) was
+   value-modelled. `p != nil` was a `weInternalWalkerFault`, construction
+   was a recorded decline, and `new(VB)` had no zero cell.
+4. A `VRef = ref VObj` alias was variant-blind in the same way. A field
+   typed by a `ref Obj` alias (`v: VRef`, and the plain `p: PRef` with
+   `PRef = ref PObj`) was an `ekZ3Error` sort error. Its placeholder keyed
+   the `Ref_<id>` sort on the alias symbol, while every other position keyed
+   it on the object.
+5. An inline `ref` to a multi-variant was `heRefVariantUnsupported` on a
+   deref or write. As a field it was a Z3 sort error, because
+   `itMultiVariant` had no nominal id.
+
+Also found and fixed: no discriminator write through a ref was checked. Real
+Nim raises `FieldDefect` when a discriminator assignment through a ref
+changes the branch, even on a fresh `new` cell. A same-branch move (between
+two tags of one `of` group) keeps the branch's fields. A constructor's
+discriminator write is not checked. The heap arm had stored the new tag
+silently.
+
+- **Runtime.**
+  - `CallFrame` gains `retTy`, `pendingReturn` and `raisedFinally`.
+  - `isReturn` binds `result` on the returning path and calls `exitReturn`.
+  - `exitReturn` hands the path to the deepest `HandlerFrame` of the frame
+    that has a `finallyBlock` (`pendingReturn`), or else calls
+    `completeReturn`.
+  - `completeReturn` does what `isReturn` did before:
+    - at top level, it joins `topReturnedPaths`;
+    - in a callee, it binds the frame's `retSym` to `result`, or to the
+      return type's zero value when a value-returning callee never assigned
+      it.
+  - `isTry` claims the returns recorded at its depth, walks the `finally` on
+    each, and sends the fall-through outward through `exitReturn`.
+  - While a `finally` runs on a raised exit (`raisedFinally > 0`), a
+    `return` halts through the new `dcOmitted` kind `eeFinallyReturnOnRaise`
+    (`discard w.degrade`). The walker cannot know which backend will replay
+    the witness.
+  - The top-level `result` binding now has a reader. A top-level `finally`
+    reading `result` was `feGlobalReadUnmodelled`.
+  - The concolic driver records the `finally`'s decisions on a top-level
+    return.
+  - `dsl_parser.parseDeferList` performs the `defer` lowering above.
+  - `dsl_typebridge` gives both the direct `ref object` form and the
+    sym-indirection alias `{itTuple, itVariant, itMultiVariant}` the ref
+    wrap. `ctorIsRefAliasedVariant` and its decline are deleted.
+    `classifyFieldType` keys a named ref field's placeholder on the pointee
+    symbol. This retires ADR-0022 sub-decision #1 (named-ref variants
+    value-modelled).
+  - The ref-constructor arm writes each axis's discriminator with the new
+    `isDerefWrite.dwInit` (it appears in the canonical form as `;init`),
+    then the plain fields, then the arm fields. A `bool` discriminator's
+    folded int literal becomes a bool literal. Before, it was stored
+    BV-into-Bool, and Z3 swallowed that into a silent `sxUnsat`.
+  - `itMultiVariant` gains `mvNominalId` (the `Ref_<id>` key) and `itVariant`
+    gains `vIsAxisView`. `runtime_heap.mvAxisView` models one axis of a
+    multi-variant as a single-axis variant whose discriminator heap has its
+    own key, `<id>__@disc__<discName>` (`variantDiscHeapKey`).
+  - The multi-variant deref and write arms re-dispatch through the axis
+    view that owns the field (`mvAxisOfField`) instead of declining.
+    `new(MV)` zero-initialises every axis.
+  - The heap discriminator write (not `dwInit`) forks `FieldDefect` on
+    `not sameBranchSymCond(old, new)`. On a multi-tag `of` group it
+    re-stores each branch field over the old tag's arrays.
+  - The witness `renderCell` walks every axis of a multi-variant cell.
+    `refWitnessTypeNode` returns the named ref symbol for a variant pointee,
+    so the witness tuple is typed `VRef`, not `VObj`.
+- **Consumer-visible (for S11's migration note).**
+  - New findings:
+    - labels and raises inside a `finally` reached by a `return`;
+    - a `finally`'s raise replacing a return;
+    - `defer` bodies;
+    - `FieldDefect` from a branch-changing discriminator write through any
+      ref;
+    - wrong-arm `FieldDefect` through a named ref variant, a `ref` alias, or
+      a ref to a multi-variant.
+  - Returned values change where a `finally` or `defer` writes `result`.
+  - Programs that were `sxUnknown` now get verdicts:
+    - `feUnsupportedStmtKind` for `defer`;
+    - `weInternalWalkerFault` for a named ref variant's `p != nil`;
+    - the construction decline;
+    - `heRefVariantUnsupported`;
+    - `ekZ3Error` for alias-typed and multi-variant ref fields.
+  - A new `sxUnknown`: `eeFinallyReturnOnRaise`.
+  - `heRefVariantUnsupported` and the `heapArmDegrade` funnel's F4 arm have
+    no live producer now. The enum member stays for cache and consumer
+    compatibility.
+  - Witnesses for a named ref variant param are typed by the named ref.
+  - The walker bump to 159 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - `break` / `continue` out of a `try: … finally:` inside a loop does not
+    run the `finally`. `for i in 0..1: (try: (if i < 5: continue) finally:
+    echo "loopfin ", i)` prints `loopfin 0`, `loopfin 1` in Nim. The walker
+    walks the `continue` past the `finally`, so a label in it is a false
+    `sxUnsat`.
+  - A ref local reassigned from a param, `var q: ref Obj; if p != nil:
+    q = p; if q != nil: …`, and the cast form `let q = cast[ref Obj](p); if
+    q != nil: …`, are `weInternalWalkerFault`. The cause is an
+    `AssertionDefect` in `eqBV`'s `a.kind == b.kind` (`runtime.nim:4608`).
+    This is pre-existing (`runtime.nim:4603` at 3500d0d).
+  - An uninitialised `var p: ref T` local is `feUnsupportedStmtKind`, so the
+    tests use `new(T)`.
+  - A closure's bare `return` has no `retTy`, so a closure that never
+    assigns `result` still takes the free-`retSym` path, not the zero
+    default.
+  - A Z3 store whose sort mismatches (a BV into a Bool array) surfaced as a
+    silent `sxUnsat` with no error recorded. That is how the bool
+    discriminator constructor failed before the fix above. No other
+    producer is known, but nothing checks the sort at the store.
+  - The `heUnresolvedRef` sites are reachable only on a ref that was already
+    degraded upstream.
+
+Pins: `tests/tsymex_rfc0005_s8l_exits.nim`. It covers:
+- a callee's `finally` on a return, which reads and writes `result`;
+- a raise in a `finally`, nested `finally`s, a `return` in a `finally`, and
+  a return from an `except` arm (with a raise from an `except` arm alongside);
+- a bare `return`, and a top-level `finally` on both walkers;
+- the `eeFinallyReturnOnRaise` decline;
+- `defer`: return, raise, a write to `result`, two defers in order, and a
+  trailing defer;
+- a named ref variant: nil, arm read and write, wrong arm, construction
+  (including a `bool` discriminator), `new` zero, aliasing, a
+  branch-changing discriminator write, a same-branch one, and a multi-tag
+  carry;
+- `VRef` alias reads, construction, and alias-typed fields;
+- an inline `ref` to a multi-variant: reads on both axes, wrong arm on
+  each, write, a discriminator change, a field, a named alias, `new`,
+  construction, and aliasing;
+- the `>= 159` floor.
+
+Every `sxSat` pin replays its witness on the real code.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (159).
+- `rfc0005_s1_lattice`: `eeFinallyReturnOnRaise` joins the reclassified set
+  (`dcOmitted`).
+- `h_verification`: the named-ref multi-variant discriminator read had
+  pinned the value-model decline. It is now `sxSat`.
+- `p2b_refobjconstr_expr` P2b-13 and `r6_a1_variantlit` A1-7 had pinned
+  the ref-variant construction decline (`ctorIsRefAliasedVariant`). Both
+  are now `sxSat` with witness 3, which reproduces.
+- `r6_heap_raise_totality` N46-followup-2: the multi-variant ref read and
+  write had pinned `heRefVariantUnsupported`. Both are now `sxSat`.
+- `rfc0005_s4_alloc` `s4MultiVariantDead`: a wrong-arm read through a ref
+  to a multi-variant is `sxRaised` `FieldDefect`, as Nim raises. It was
+  `heRefVariantUnsupported`.
+- `rfc0005_s3_monotonicity` F4 used `heRefVariantUnsupported` as its
+  live F4 producer. F4-before now asserts the kind is absent. 2a is `sxSat`
+  (witness `kindA == s3f4KindA1`, `y == 42`, which reproduces). 2b is
+  `sxRaised` `FieldDefect` with no `sevError` kinds.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

@@ -149,7 +149,7 @@ state = "done"
 [[slice]]
 id    = "S8m"
 title = "S8l's remainder: finally on break/continue exits, sort-checked Z3 stores (no silent sxUnsat), ref-local reassignment/cast walker fault, uninitialised ref locals, closure bare-return zero value, retire heRefVariantUnsupported"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -2013,6 +2013,180 @@ Re-pinned, each checked against real Nim:
   live F4 producer. F4-before now asserts the kind is absent. 2a is `sxSat`
   (witness `kindA == s3f4KindA1`, `y == 42`, which reproduces). 2b is
   `sxRaised` `FieldDefect` with no `sevError` kinds.
+
+**As landed (S8m, walker 160) — S8l's remainder.** S8l reported six
+defects outside its design. Every expected behaviour was probed against the
+pinned toolchain (Nim 2.2.10); c and cpp are identical except where noted.
+
+1. `break` / `continue` did not run a `finally` they left, and the parser
+   flattened every `block` into its body and emitted a bare `break` /
+   `continue` for each source one. The walker applied it to the innermost
+   `isWhile`, so:
+   - a `continue` past a `try: … finally:` skipped the `finally` (a label
+     in it was a false `sxUnsat`);
+   - `break outer` out of two nested loops left only the inner one (a false
+     `sxSat` on the code after it);
+   - a `block`'s `break` left the enclosing loop, and a `break` out of a
+     top-level `block` or an unrolled array loop halted
+     (`weBreakOutsideLoop`);
+   - a `continue` in a `for` loop skipped the desugared increment and
+     replayed the same iteration up to the unroll bound.
+   Nim leaves the innermost `block` or loop (`break`), the named block
+   (`break L`), or goes to the innermost loop's next iteration
+   (`continue`), running every `finally` in between, innermost first. One
+   backend divergence: a `break` / `continue` leaving a `finally` that runs
+   on a raised exit. `try: raise … finally: break` re-raises under c and
+   swallows under cpp; the `continue` form overflows the call depth under c.
+2. A Z3 term built with mismatched sorts (a BV stored into a Bool array)
+   raised `Z3Error` from `checkErr` inside a `walkBlock` frame. On c the
+   goto-based exception was lost and the run ended a silent `sxUnsat []`; on
+   cpp it reached the boundary as `ekZ3Error`. Reproduced at a58dc08 by
+   disabling S8l's bool-discriminator fold: `BoolV(on: true, t: x)` was c
+   `sxUnsat []`, cpp `sxUnknown [ekZ3Error: … domain sort (_ BitVec 64) and
+   parameter sort Bool do not match]`.
+3. A ref local assigned from a param (`var q: ref Obj; if p != nil: q = p`)
+   and a same-type cast (`let q = cast[ref Obj](p)`) were
+   `weInternalWalkerFault` (`eqBV`'s `a.kind == b.kind` assert,
+   `runtime.nim:4608`). The cast reached `parseExpr`'s catch-all, whose int
+   dummy met a ref in `q != nil`; the alias form `q = p` was
+   `feUnsupportedStmtKind`.
+4. An uninitialised `var p: ref T` local was `feUnsupportedStmtKind`, then
+   a walker fault on its first comparison: `zeroValueForType` returned nil
+   (no encoding) for `itRef` / `itPtr`.
+5. A closure's bare `return` (and its fall-through) with `result` never
+   assigned took the free-`retSym` path, because the closure `CallFrame` had
+   no `retTy`. `f(-1) == 7` for `f = proc(x: int): int = (if x < 0: return;
+   result = 7)`-shaped closures was a false `sxUnsat`, and a dead label
+   behind the zero was a false `sxSat`.
+6. `heRefVariantUnsupported` had no live producer after S8l.
+
+- **Runtime.**
+  - `isBlock` gains `blkLabel` and `isBreak` gains `brkLabel`
+    (`mkLabelledBlock`, `mkBreak(label)`; both canonicalised). A labelled
+    `isBlock` pushes a `LoopFrame` carrying the label; a labelled `break`
+    resumes after it, an unlabelled one leaves the innermost `isWhile`.
+  - The parser keeps a lexical `jumpTargets` stack
+    (`ProcScopedCollectors`) and resolves each source jump
+    (`resolveBreak` / `resolveContinue`) to the construct Nim leaves. A
+    `for` loop's body is a labelled block its `continue` leaves, so the
+    increment still runs; an unrolled loop (array, constant string) is
+    wrapped in a block its `break` leaves. A label is minted only when a
+    jump names it, so the IR of every program without such a jump is
+    unchanged.
+  - `LoopFrame` records the handler depth it was entered at (`hsDepth`).
+    `exitJump` hands a jump to the deepest `finally` between it and its
+    target (`pendingJump`), exactly as S8l's `exitReturn` does for a
+    return; `isTry` walks the `finally` on each claimed jump and sends it
+    outward through `exitJump`. `routeRaise` cuts the loop stack to the
+    try's depth while a handler runs (`HandlerFrame.loopLen`).
+  - A jump leaving a `finally` that runs on a raised exit halts through the
+    new `dcOmitted` kind `eeFinallyJumpOnRaise` (`discard w.degrade`), the
+    jump twin of `eeFinallyReturnOnRaise`. `raisedFinally` became
+    `raisedFinallyLoops`, which records the loop depth so a jump that stays
+    inside the `finally` is not caught.
+  - Every Z3 `store` / `select` / `ite` / `eq` the walker builds goes
+    through `checkedStore` / `checkedSelect` / `checkedIte` / `checkedEq`
+    (17 sites in `runtime.nim` and `runtime_heap.nim`). A sort mismatch
+    records `weInternalWalkerFault` through `lowerDegrade` (path taint
+    `{scSpurious, scIncomplete}`) and a fresh term of the expected sort
+    stands in. No exception is raised, so no backend can lose it. A
+    source audit pins zero unchecked raw calls.
+  - Backstop: `resetSymexRunState` installs a counting Z3 error handler. If
+    any Z3 API error was raised during the run and no `ekZ3*` error
+    reached the verdict (or the status is not `sxUnknown`), `runSymex`
+    returns `sxUnknown` with `ekZ3Error`. No Z3 error can end in a verdict.
+  - `parseExpr` gains an `nnkCast` arm: a cast to the ref / ptr type the
+    operand already has is the identity (same address, same `Ref_<id>`
+    sort). Any other cast is the recorded `feUnsupportedExprKind` decline
+    with a kind-correct dummy.
+  - `zeroValueForType` returns `mkNil` for `itRef` / `itPtr`. This models
+    the uninitialised ref local and makes every catch-all dummy of a ref
+    type a nil ref, not an int.
+  - A comparison of a ref against a non-ref operand (a value the model did
+    not resolve to an address) records `heUnresolvedRef` through
+    `degradeAlloc` (`refMixedCmpDecline`) instead of crashing `eqBV`.
+  - The closure `CallFrame` carries `retTy: cb.retTy`, so S8l's
+    `completeReturn` binds the zero value (or records
+    `feUnsupportedOpHavoc` where the return type has none).
+    `applyClosureGround` checks a returned path's taint before it skips an
+    empty path condition, so the unconditional bare return's havoc path
+    carries its taint to the caller.
+  - `heRefVariantUnsupported` is retired: the enum member, its `classOf`
+    arm, `SymexRefVariantUnsupportedError` and its `runSymexCaught` arm are
+    deleted. Its six unreachable carriers in `runtime_heap.nim` raise
+    `SymexClassifiedDegradeError(kind: weInternalWalkerFault)`.
+- **Consumer-visible (for S11's migration note).**
+  - `heRefVariantUnsupported` is gone from `SymexErrorKind`. A consumer
+    matching on it no longer compiles.
+  - New `SymexErrorKind`: `eeFinallyJumpOnRaise` (`sxUnknown`).
+  - New findings: labels and raises in a `finally` reached by `break` /
+    `continue`; code after a labelled `break` out of nested loops; code
+    after a `block`'s `break`; each `for` iteration after a `continue`.
+  - Verdicts change from false to true:
+    - a label in a `finally` left by `continue` (was `sxUnsat`);
+    - code only reachable after an inner loop's `break outer` (was `sxSat`);
+    - a closure whose bare return yields the zero value (was `sxUnsat` /
+      `sxSat` the wrong way round);
+    - an ill-sorted Z3 term is `sxUnknown` + `weInternalWalkerFault` (was a
+      silent c-only `sxUnsat`).
+  - Programs that were `sxUnknown` now get verdicts: a top-level block's
+    `break` (`weBreakOutsideLoop`), a ref local assigned or same-type cast
+    from a param (`weInternalWalkerFault`), an uninitialised ref local
+    (`feUnsupportedStmtKind`).
+  - A layout-changing `cast` is now `feUnsupportedExprKind` (was a walker
+    fault when its operand met a ref).
+  - The walker bump to 160 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - A callee that reads `result` before any write (`proc rr(x: int): int =
+    result += 100`) is `feGlobalReadUnmodelled` on its caller. Nim
+    zero-initialises `result`. Pre-existing at a58dc08. The S8m pin for a
+    `break` cancelling a return assigns `result = 0` first for this reason.
+  - A variant-typed closure result is substituted
+    (`seUnsupportedCompoundSortLeaf` / `feUnsupportedOp`) on the caller.
+    The item-5 havoc fires as well; the verdict stays `sxUnknown`.
+  - A real nil write (`p[].x = 1` with `p == nil`) SIGSEGVs in a default
+    debug build on the pinned toolchain; the walker models it, as R5 did, as
+    `sxRaised NilAccessDefect`. A witness replay oracle cannot catch it
+    with `expect NilAccessDefect`.
+  - The Linux-hanging r6 suites `b7r_bytescan`, `b7r2_pathscope` and
+    `n10_coverage_matrix` contain unlabelled `break`s in `while` loops. The
+    lowering of those is unchanged (a plain `mkBreak()` still leaves the
+    innermost `isWhile`), but they run only on Windows CI.
+
+Pins: `tests/tsymex_rfc0005_s8m_exits.nim`. It covers:
+- `continue` and `break` through a `finally` (loop, nested `try`, `defer`,
+  `for` and `while`), a labelled block break through a `finally`, a nested
+  block break, `break outer` from nested loops, a `break` from an `except`
+  arm, a `break` in a `finally` cancelling a return, a return through a
+  loop's `finally`, and `break` / `continue` in an unrolled array loop;
+- `eeFinallyJumpOnRaise`;
+- an ill-sorted store as `sxUnknown` + `weInternalWalkerFault` on the live
+  and dead label, the error-handler backstop, and the zero-unchecked-call
+  source audit;
+- ref assignment, aliasing, same-type cast, and a different-pointee cast;
+- an uninitialised ref local: nil, a nil write (`sxRaised
+  NilAccessDefect`), and `new` after it;
+- a closure's bare return: zero value, dead label, and the variant havoc;
+- the `>= 160` floor.
+
+Every `sxSat` pin checks its witness value against an oracle run of the
+real code; the ones over non-constant witnesses also replay it. Loop pins
+run at `maxLoopUnwind: 3` and accept a dead label behind a loop as
+`sxUnsat` or `beBudgetExhausted`-only `sxUnknown` (k-unroll has no
+feasibility pruning, so the unroll bound is structural).
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (160).
+- `rfc0005_s1_lattice`: `eeFinallyJumpOnRaise` joins the reclassified set
+  (`dcOmitted`).
+- `rfc0005_s1b_kinds`: the surface `break s1bBlk` of a `block` had pinned
+  `weBreakOutsideLoop`. It is now `sxSat`, as in Nim. The kind is still
+  pinned at the IR level (a bare `mkBreak()` outside any loop).
+- `h_verification`, `rfc0005_s3_monotonicity` and `rfc0005_s4_alloc`:
+  every `heRefVariantUnsupported` check retargets `weInternalWalkerFault`
+  (the retired kind's carriers). S3's F4 `classOf` test becomes a
+  retirement test that the member is gone. S4 drops the member from the
+  `dcNoAnswer` list.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

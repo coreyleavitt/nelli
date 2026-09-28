@@ -143,15 +143,6 @@ type
     ## (Invariant 3 — never a silent UNSAT, never a crash). R1+ replace the stub
     ## with real ref-sort / heap-array semantics. The diagnostic rides in `msg`.
 
-  SymexRefVariantUnsupportedError* = object of CatchableError
-    ## Phase 15 Cluster R (R6, ADR-0010, Feas-MED-4 / M17). Raised when a field
-    ## access through a `ref`/`ptr` to a VARIANT object is reached: the
-    ## field-split heap has no flat positional layout to split a variant on, so
-    ## it is out of scope. Caught at the `runSymex` boundary → `sxUnknown`
-    ## carrying a `heRefVariantUnsupported` (sevError) classified error
-    ## (Invariant 3 — never a silent UNSAT, never a Defect on svTuple dispatch).
-    ## The diagnostic rides in `msg`.
-
   SymexOwnershipUnsupportedError* = object of CatchableError
     ## Phase 15 Cluster R (R1a, ADR-0010, Breadth-LOW-L4). Raised when an
     ## `owned T` / `Atomic[T]` formal is allocated (classifyType
@@ -1319,6 +1310,98 @@ proc lowerDegrade(kind: SymexErrorKind; msg: string) =
     # it -- its reach is the record itself (`dskWalkSite`).
   loweringPendingTaint = loweringPendingTaint + pathTaint(classOf(kind))
 
+# ---- RFC-0005 S8m: sort-checked Z3 term construction ------------------------
+#
+# A Z3 API error (a BV stored into a Bool array, an `ite` over two sorts) is
+# raised by nim-z3's `checkErr` as a `Z3Error`. On the C backend that raise,
+# unwinding through the walker's live `walkBlock` frames, is LOST (the
+# goto-exception hazard `degradeStrArm`'s doc describes): the store returned
+# as if it had not happened, `runSymexCaught`'s `Z3Error` arm never ran, and
+# the run reported a silent `sxUnsat` with no error at all. Reproduced at
+# a58dc08 by removing S8l's bool-discriminator fold: `BoolV(on: true, t: x)`
+# was `sxUnsat []` on c and `sxUnknown [ekZ3Error]` on cpp.
+#
+# Two guards. (1) The raw constructors the walker builds from values of
+# independently derived sorts -- array store and select, `ite`, `=` -- check
+# the sorts first (`checked*`). A mismatch is a walker fault: it is recorded
+# as `weInternalWalkerFault` through the lowering sink (the calling path is
+# tainted when it drains, or the walk-end leak pin records it), and a fresh
+# term of the expected sort stands in, so nothing raises. (2) The error
+# handler every symex context installs (`nelliZ3ErrorHandler`) counts every
+# Z3 API error of the run, whether or not its raise survived; `runSymex`
+# turns any verdict of a run that saw one into `sxUnknown` + `ekZ3Error`.
+
+var z3ApiErrorCount* {.threadvar.}: int
+  ## RFC-0005 S8m. Z3 API errors raised in this thread's current run (reset
+  ## by `resetSymexRunState`), counted by `nelliZ3ErrorHandler`.
+var z3ApiFirstError* {.threadvar.}: string
+  ## RFC-0005 S8m. The first such error's code, for the recorded message.
+
+proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
+  ## RFC-0005 S8m. Replaces nim-z3's no-op handler on every context
+  ## `resetSymexRunState` makes. Z3 has already set the error code, so
+  ## `checkErr` still raises after the call returns; this only counts it,
+  ## so a raise the C backend loses still reaches `runSymex`.
+  if z3ApiErrorCount == 0: z3ApiFirstError = $e
+  inc z3ApiErrorCount
+
+proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
+  ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
+  ## `want`. Z3 hash-conses sorts, so pointer identity is sort equality (what
+  ## `Z3_is_eq_sort` computes).
+  if want == got: return false
+  lowerDegrade(weInternalWalkerFault,
+    "Z3 sort mismatch at " & op & ": expected " &
+      $Z3_sort_to_string(ctx.raw, want) & ", got " &
+      $Z3_sort_to_string(ctx.raw, got) & " -- the walker built an ill-sorted " &
+      "term; a fresh term stands in and the path is tainted " &
+      "(RFC-0005 S8m; weInternalWalkerFault)")
+  true
+
+proc sortOfRaw(ctx: Z3Context; a: RawZ3Ast): RawZ3Sort =
+  ctx.checkErr Z3_get_sort(ctx.raw, a)
+
+proc freshOfSort(ctx: Z3Context; s: RawZ3Sort): RawZ3Ast =
+  ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__sortFault", s)
+
+proc checkedStore*(ctx: Z3Context; arr, idx, val: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8m. `Z3_mk_store` with the index and value sorts checked
+  ## against the array's domain and range.
+  let arrSort = sortOfRaw(ctx, arr)
+  if sortFault(ctx, "array store index",
+               ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort),
+               sortOfRaw(ctx, idx)) or
+     sortFault(ctx, "array store value",
+               ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort),
+               sortOfRaw(ctx, val)):
+    return freshOfSort(ctx, arrSort)
+  ctx.checkErr Z3_mk_store(ctx.raw, arr, idx, val)
+
+proc checkedSelect*(ctx: Z3Context; arr, idx: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8m. `Z3_mk_select` with the index sort checked against the
+  ## array's domain.
+  let arrSort = sortOfRaw(ctx, arr)
+  if sortFault(ctx, "array select index",
+               ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort),
+               sortOfRaw(ctx, idx)):
+    return freshOfSort(ctx, ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
+  ctx.checkErr Z3_mk_select(ctx.raw, arr, idx)
+
+proc checkedIte*(ctx: Z3Context; c, t, e: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8m. `Z3_mk_ite` with a Bool condition and two same-sort arms.
+  let tSort = sortOfRaw(ctx, t)
+  if sortFault(ctx, "ite condition", ctx.checkErr Z3_mk_bool_sort(ctx.raw),
+               sortOfRaw(ctx, c)) or
+     sortFault(ctx, "ite else-arm", tSort, sortOfRaw(ctx, e)):
+    return freshOfSort(ctx, tSort)
+  ctx.checkErr Z3_mk_ite(ctx.raw, c, t, e)
+
+proc checkedEq*(ctx: Z3Context; a, b: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8m. `Z3_mk_eq` over two same-sort operands.
+  if sortFault(ctx, "equality", sortOfRaw(ctx, a), sortOfRaw(ctx, b)):
+    return freshOfSort(ctx, ctx.checkErr Z3_mk_bool_sort(ctx.raw))
+  ctx.checkErr Z3_mk_eq(ctx.raw, a, b)
+
 var convFloatToIntBoundConds* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 CR-3/CR-4; RFC-0005 S8g. The in-range DOMAIN of each float ->
   ## int conversion lowered by `lower(iekConvFloatToInt)` (the operand's
@@ -2325,7 +2408,7 @@ proc allocDistinctSym(ty: IRType, baseName: string,
     # func-decl to reference, but it is never APPLIED at allocation time.
     let ejD = rawApp1(ctx, entry.eject, dAny)
     pcOut.add wrap[Z3Bool](ctx,
-      ctx.checkErr Z3_mk_eq(ctx.raw, ejD.raw, rawAstOf(baseSym)))
+      checkedEq(ctx, ejD.raw, rawAstOf(baseSym)))
   let boxed = new(SymVal)
   boxed[] = baseSym
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: name,
@@ -4168,7 +4251,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # (uninterpreted-sort ites are fine) and the base recursively.
     let ctx = t.distinctAst.ctx
     var args = [cond.raw, t.distinctAst.raw, e.distinctAst.raw]
-    let merged = ctx.checkErr Z3_mk_ite(ctx.raw, args[0], args[1], args[2])
+    let merged = checkedIte(ctx, args[0], args[1], args[2])
     let boxed = new(SymVal)
     boxed[] = iteSV(cond, t.distinctBaseSym[], e.distinctBaseSym[])
     SymVal(kind: svDistinct, distinctAst: wrap[Z3AnyAst](ctx, merged),
@@ -4343,7 +4426,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     let refT = if t.kind == svPtr: t.ptrAst else: t.refAst
     let refE = if e.kind == svPtr: e.ptrAst else: e.refAst
     let ctx = refT.ctx
-    let mergedRaw = ctx.checkErr Z3_mk_ite(ctx.raw, cond.raw, refT.raw, refE.raw)
+    let mergedRaw = checkedIte(ctx, cond.raw, refT.raw, refE.raw)
     let merged = wrap[Z3AnyAst](ctx, mergedRaw)
     if t.kind == svPtr:
       SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
@@ -4666,7 +4749,7 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   let aAst = (if a.kind == svRef: a.refAst else: a.ptrAst)
   let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
   let ctx = requireCurrentContext()
-  let eq = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, aAst.raw, bAst.raw))
+  let eq = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, bAst.raw))
   case op
   of bEq: ofBool(eq)
   of bNe: ofBool(not eq)
@@ -4684,6 +4767,20 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
     degradeAlloc(tBool(), feUnsupportedOp,
       "ref/ptr comparison op " & $op & " not valid (only ==/!=)",
       "__refEqOrderDegrade")
+
+proc refMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0005 S8m. A comparison with a ref/ptr on ONE side only. Nim types
+  ## both operands of a ref `==` alike, so the other side lowered to a
+  ## non-address `SymVal` only because something upstream already failed to
+  ## model it (a declined expression's dummy). This fell through to
+  ## `lowerCmp`, whose `eqBV` asserted `a.kind == b.kind` and aborted the
+  ## whole run as `weInternalWalkerFault`. Record it as the unresolved ref it
+  ## is and hand back a fresh bool: the path is tainted, never a verdict.
+  degradeAlloc(tBool(), heUnresolvedRef,
+    "ref/ptr " & $op & " against a " & plainEnglishSymValKind(
+      (if a.kind in {svRef, svPtr}: b.kind else: a.kind)) &
+      " operand the model did not resolve to an address (heUnresolvedRef)",
+    "__refMixedCmpDegrade")
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -5834,7 +5931,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # survive; the first non-SAT query died). Every intermediate is now
     # wrapped (inc_ref'd) IMMEDIATELY on creation.
     let sel = wrap[Z3AnyAst](zctx,
-      zctx.checkErr Z3_mk_select(zctx.raw, recv.seqDataRaw.raw, shifted.raw)) # [placeholder-audited]
+      checkedSelect(zctx, recv.seqDataRaw.raw, shifted.raw)) # [placeholder-audited]
     var iApp = zctx.checkErr Z3_to_app(zctx.raw, iVar.raw)
     let lam = wrap[Z3AnyAst](zctx,
       zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
@@ -6362,6 +6459,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # MUST return before lowerCmp (short-circuit; lowerCmp has no ref/ptr branch).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
           return refEq(l, r, e.bop)
+        if l.kind in {svRef, svPtr} or r.kind in {svRef, svPtr}:
+          return refMixedCmpDecline(l, r, e.bop)   ## RFC-0005 S8m
         # CR-9(c) D2: delegate to lowerCmp (reconcileInt + dispatch).
         lowerCmp(l, r, e.bop)
       else:
@@ -6377,6 +6476,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # MUST return before lowerCmp (short-circuit).
         if l.kind in {svRef, svPtr} and r.kind in {svRef, svPtr}:
           return refEq(l, r, e.bop)
+        if l.kind in {svRef, svPtr} or r.kind in {svRef, svPtr}:
+          return refMixedCmpDecline(l, r, e.bop)   ## RFC-0005 S8m
         # CR-9(c) D3: delegate to lowerCmp.  reconcileInt is a no-op when
         # kinds match (probe-miss: both sides lowered without width steering).
         lowerCmp(l, r, e.bop)
@@ -7085,7 +7186,7 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
       for i in 0 ..< n:
         # `Ref_T` is a RUNTIME uninterpreted sort the typed `select` cannot
         # express -- raw FFI, as `storeSeqElem` does. GROUND select.
-        let raw = ctx.checkErr Z3_mk_select(ctx.raw, sv.seqDataRaw.raw, # [placeholder-audited]
+        let raw = checkedSelect(ctx, sv.seqDataRaw.raw, # [placeholder-audited]
                                             mkInt(i).raw)
         acc.add RefPos(name: path & "[" & $i & "]",
                        addrAst: wrap[Z3AnyAst](ctx, raw), pointee: pointee)
@@ -7548,6 +7649,13 @@ type
     ## the top entry to dispatch correctly.
     breakPaths*:    seq[Path]
     continuePaths*: seq[Path]
+    label*:         string
+      ## RFC-0005 S8m. "" for a loop (`isWhile`); else the `blkLabel` of a
+      ## labelled `isBlock`, the target of `break <label>` only.
+    hsDepth*:       int
+      ## RFC-0005 S8m. `w.frame.handlerStack.len` when the frame was pushed:
+      ## a jump to it leaves every HandlerFrame at or above this depth, so
+      ## each of their `finally`s runs first (`exitJump`).
 
   CallFrame = object
     ## A walker-level call frame. The runtime pushes one of these per
@@ -7557,10 +7665,11 @@ type
     retSym:        SymVal           ## the fresh symbol returned values bind to
     retName:       string           ## "" for void
     retTy:         IRType
-      ## RFC-0005 S8l. The callee's return type; nil for a void proc (and
-      ## for a closure descent, whose bare-return zero default is not
-      ## modelled here). A bare `return` that never assigned `result` binds
-      ## `retSym` to this type's zero value (`completeReturn`).
+      ## RFC-0005 S8l. The callee's return type; nil for a void proc. A
+      ## bare `return` that never assigned `result` binds `retSym` to this
+      ## type's zero value (`completeReturn`). RFC-0005 S8m: a closure
+      ## descent carries its lambda's `retTy` too (a void lambda's is the
+      ## `bool` placeholder its unread `funcApp` is sorted by).
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
 
   HandlerFrame = object
@@ -7570,6 +7679,12 @@ type
     ## E3+ populates and consults these on raise-flow propagation.
     handlers:     seq[ExceptHandler]
     finallyBlock: IRStmt   ## nil if no finally
+    loopLen:      int      ## RFC-0005 S8m: `w.loopStack.len` at the try's
+                           ## entry. `routeRaise` walks a matched `except`
+                           ## arm with the loop stack cut back to it: the
+                           ## arm is lexically outside every loop the try
+                           ## body entered, so a `break` there must not
+                           ## reach one of them.
 
   ExnRecord = object
     ## Phase 15 E1. An in-flight exception value (type + optional message).
@@ -7712,9 +7827,24 @@ type
                                       ## body, runs the finally on each, and sends the
                                       ## fall-through on outward (`exitReturn`): the
                                       ## return-exit twin of `pendingRaise`.
-    raisedFinally: int                ## RFC-0005 S8l: > 0 while a `finally` of this
-                                      ## frame runs on a RAISED exit; a `return` there
-                                      ## is backend-divergent (`eeFinallyReturnOnRaise`).
+    raisedFinallyLoops: seq[int]      ## RFC-0005 S8l/S8m: one entry per `finally` of
+                                      ## this frame running on a RAISED exit (S8l's
+                                      ## `raisedFinally` count), holding
+                                      ## `w.loopStack.len` at its entry. A `return`
+                                      ## there is backend-divergent
+                                      ## (`eeFinallyReturnOnRaise`), and so is a
+                                      ## `break` / `continue` that leaves it -- one
+                                      ## whose target frame lies below the innermost
+                                      ## entry (`eeFinallyJumpOnRaise`).
+    pendingJump: seq[tuple[depth: int, path: Path, target: int, isCont: bool]]
+                                      ## RFC-0005 S8m: `break` / `continue` exits
+                                      ## guarded by a `finally` at `depth` (the deepest
+                                      ## HandlerFrame with a `finallyBlock` the jump
+                                      ## leaves), bound for `w.loopStack[target]`. The
+                                      ## owning `isTry` claims its entries after
+                                      ## walking its body, runs the finally on each,
+                                      ## and sends the fall-through on (`exitJump`):
+                                      ## the jump twin of `pendingReturn`.
 
   WalkMode = enum
     ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
@@ -10054,6 +10184,44 @@ proc exitReturn(p: Path, w: var WalkCtx) =
       return
   completeReturn(p, w)
 
+proc exitJump(p: Path; target: int; isCont: bool; w: var WalkCtx) =
+  ## RFC-0005 S8m. Send a `break` (`isCont` false) or `continue` exit to the
+  ## loop / labelled-block frame `w.loopStack[target]`. Every `finally` the
+  ## jump leaves -- each HandlerFrame of this call frame at or above the
+  ## target's `hsDepth` -- runs first, innermost first: the deepest one claims
+  ## the path (`pendingJump`), and its `isTry` walks the finally and calls back
+  ## here for the next one out. With none left, the path joins the target's
+  ## `breakPaths` / `continuePaths`. Before S8m a jump went straight to the
+  ## loop and no `finally` (or `defer`) ran on it: a label in a `finally` a
+  ## `continue` left was a false `sxUnsat`.
+  ##
+  ## A jump that leaves a `finally` running on a RAISED exit is
+  ## backend-divergent (c re-raises, cpp swallows the exception; probed):
+  ## the path halts (`eeFinallyJumpOnRaise`, `dcOmitted`), as S8l's
+  ## `return` there does.
+  if w.frame.raisedFinallyLoops.len > 0 and
+     target < w.frame.raisedFinallyLoops[^1]:
+    discard w.degrade(eeFinallyJumpOnRaise,
+      "`" & (if isCont: "continue" else: "break") & "` leaving a `finally` " &
+      "that runs on a raised exit: the c backend re-raises, cpp does not -- " &
+      "path dropped (eeFinallyJumpOnRaise)")
+    return
+  for i in countdown(w.frame.handlerStack.high, w.loopStack[target].hsDepth):
+    if w.frame.handlerStack[i].finallyBlock != nil:
+      w.frame.pendingJump.add (depth: i, path: p, target: target,
+                               isCont: isCont)
+      return
+  if isCont: w.loopStack[target].continuePaths.add p
+  else:      w.loopStack[target].breakPaths.add p
+
+proc jumpTarget(w: WalkCtx; label: string): int =
+  ## RFC-0005 S8m. The frame a jump leaves: the innermost loop for "" (a
+  ## plain `break` / `continue`), else the innermost labelled block named
+  ## `label`. -1 when there is none.
+  for i in countdown(w.loopStack.high, 0):
+    if w.loopStack[i].label == label: return i
+  -1
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -10180,7 +10348,7 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
   ## early `return` on an ambiguous guard.
   var survivors: seq[Path] = @[]
   var active = paths
-  w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
+  w.loopStack.add LoopFrame(hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
   let frameIx = w.loopStack.high
   defer: discard w.loopStack.pop()
   # RFC-0010 B4: unlike every other ResourceBudget field, `unwind = 0` here
@@ -10305,7 +10473,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    walkBlock(stmt.stmts, paths, w)
+    if stmt.blkLabel.len == 0:
+      return walkBlock(stmt.stmts, paths, w)
+    # RFC-0005 S8m: a labelled block is a break target (a source `block` a
+    # `break` names, or a desugared loop body a `continue` leaves). Paths
+    # that `break` it resume after it, beside its fall-through.
+    w.loopStack.add LoopFrame(label: stmt.blkLabel,
+                              hsDepth: w.frame.handlerStack.len)
+    let frameIx = w.loopStack.high
+    var survivors = walkBlock(stmt.stmts, paths, w)
+    survivors.add w.loopStack[frameIx].breakPaths
+    discard w.loopStack.pop()
+    survivors
   of isIf:
     case w.mode
     of wmExplore: discard
@@ -10433,7 +10612,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Phase 6: k-unroll. Each iteration forks on the guard.
     var survivors: seq[Path] = @[]
     var active = paths
-    w.loopStack.add LoopFrame(breakPaths: @[], continuePaths: @[])
+    w.loopStack.add LoopFrame(hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
     let frameIx = w.loopStack.high
     # RFC-0010 B4: `unwind = 0` deliberately does NOT mean unlimited here —
     # see `walkWhileFollowConcrete`'s matching note above for the full
@@ -10535,33 +10714,37 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    if w.loopStack.len == 0:
-      # break outside any loop. Surface route: the parser flattens `block:`
-      # into its body, so a `break` out of a top-level block lands here and
-      # the breaking path is dropped instead of resuming after the block.
+    let target = w.jumpTarget(stmt.brkLabel)
+    if target < 0:
+      # break outside any loop / named block. RFC-0005 S8m: the parser now
+      # resolves every source `break` (a `block`'s, an unrolled loop's) to
+      # its target, so this is reachable only from hand-built IR (Nim
+      # rejects a `break` with nothing to leave).
       # RFC-0005 S1b: HALT site — the recorded `weBreakOutsideLoop` is the run
       # act (was a kindless run mark with no error); token discarded.
       discard w.degrade(weBreakOutsideLoop,
-        "`break` reached with no enclosing loop (e.g. a `break` out of a " &
-             "top-level `block:`) — the breaking path is dropped rather than " &
-             "resumed after the block (weBreakOutsideLoop)")
+        "`break` reached with no enclosing loop or block to leave — the " &
+             "breaking path is dropped (weBreakOutsideLoop)")
       return @[]
+    # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
-      w.loopStack[w.loopStack.high].breakPaths.add p
+      exitJump(p, target, isCont = false, w)
     @[]
   of isContinue:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
     of wmFollowConcrete: discard
-    if w.loopStack.len == 0:
+    let target = w.jumpTarget("")
+    if target < 0:
       # continue outside any loop — rejected by Nim itself, so reachable only
       # from hand-built IR. RFC-0005 S1b: HALT site, same kind as `break`.
       discard w.degrade(weBreakOutsideLoop,
         "`continue` reached with no enclosing loop — the path is dropped " &
              "(weBreakOutsideLoop)")
       return @[]
+    # RFC-0005 S8m: through every `finally` the jump leaves (`exitJump`).
     for p in paths:
-      w.loopStack[w.loopStack.high].continuePaths.add p
+      exitJump(p, target, isCont = true, w)
     @[]
   of isIndex:
     # R14: `isIndex` is not a fork-every-arm construct the way `isIf`/
@@ -10753,8 +10936,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let isPtr = arrSV.seqElemTy.kind == itPtr
             let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
                           else: arrSV.seqElemTy.refPointeeTy
-            let elemRaw = ctx.checkErr Z3_mk_select(ctx.raw,
-              arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
+            let elemRaw = checkedSelect(ctx, arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
             let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
             if isPtr:
               indexed = SymVal(kind: svPtr, ptrAst: elemAny,
@@ -11532,9 +11714,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     # RFC-0005 S8l: a `return` inside a `finally` that runs on a RAISED exit
-    # (`raisedFinally`, this frame) is backend-divergent -- c re-raises the
+    # (`raisedFinallyLoops`, this frame) is backend-divergent -- c re-raises the
     # in-flight exception, cpp returns (probed). HALT the path.
-    if w.frame.raisedFinally > 0:
+    if w.frame.raisedFinallyLoops.len > 0:
       discard w.degrade(eeFinallyReturnOnRaise, "`return` inside a `finally` running on a raised exit: the c backend re-raises, cpp returns -- path dropped (eeFinallyReturnOnRaise)")
       return @[]
     # RFC-0005 S8j (top level) / R1 (callee): lower `stmt.retExpr` and
@@ -12288,7 +12470,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # and are returned alongside the body's normal fall-through.
     let myDepth = w.frame.handlerStack.len  ## index this try's HandlerFrame sits at
     w.frame.handlerStack.add HandlerFrame(handlers: stmt.tryHandlers,
-                                          finallyBlock: stmt.tryFinally)
+                                          finallyBlock: stmt.tryFinally,
+                                          loopLen: w.loopStack.len)   # RFC-0005 S8m
     let bodyPaths = walk(stmt.tryBody, paths, w)
     # Pop our handler frame — it is no longer active once the body is walked.
     if w.frame.handlerStack.len > myDepth:
@@ -12322,6 +12505,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if pr.depth == myDepth: returnConts.add pr.path
       else:                   keptReturn.add pr
     w.frame.pendingReturn = keptReturn
+    # RFC-0005 S8m: likewise the `break` / `continue` exits deferred to this
+    # try's finally (`exitJump`: a jump in the body or an `except` arm).
+    var jumpConts: seq[tuple[path: Path, target: int, isCont: bool]]
+    var keptJump: seq[tuple[depth: int, path: Path, target: int, isCont: bool]]
+    for pj in w.frame.pendingJump:
+      if pj.depth == myDepth: jumpConts.add (pj.path, pj.target, pj.isCont)
+      else:                   keptJump.add pj
+    w.frame.pendingJump = keptJump
     if stmt.tryFinally == nil:
       # No finally: normal continuations flow through; any raised continuations
       # re-propagate immediately (re-route through the now-popped outer stack).
@@ -12357,6 +12548,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for fp in walk(stmt.tryFinally, returnConts, w):
           exitReturn(fp, w)
         if w.shouldStop: return survivors
+      # (a'') JUMP exits (RFC-0005 S8m): walk the finally on each `break` /
+      #     `continue` that leaves this try, as Nim runs it. Its fall-through
+      #     continues the SAME jump outward (`exitJump`: the next-outer
+      #     finally the jump leaves, else the target loop / block). A raise
+      #     in the finally replaces the jump (`routeRaise`); a `return` or
+      #     another jump in it overrides (probed: `try: return 5 finally:
+      #     break` in a loop continues after the loop).
+      for jc in jumpConts:
+        for fp in walk(stmt.tryFinally, @[jc.path], w):
+          exitJump(fp, jc.target, jc.isCont, w)
+        if w.shouldStop: return survivors
       # (b) RAISED exits: for each, set `inFlightExn` to the original exn for the
       #     finally's duration (so a bare re-raise inside finally sees it), walk
       #     the finally on the raised path; the survivors are the paths where the
@@ -12369,9 +12571,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let savedInFlight = w.frame.inFlightExn
         w.frame.inFlightExn = some(ExnRecord(typeId: rc.typeId, msg: rc.msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
-        inc w.frame.raisedFinally   ## RFC-0005 S8l: a `return` here declines
+        # RFC-0005 S8l: a `return` here declines; S8m: so does a jump that
+        # leaves this finally.
+        w.frame.raisedFinallyLoops.add w.loopStack.len
         let finallyNormal = walk(stmt.tryFinally, @[rc.path], w)
-        dec w.frame.raisedFinally
+        discard w.frame.raisedFinallyLoops.pop()
         w.frame.inFlightExn = savedInFlight
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8
         for fp in finallyNormal:
@@ -12551,13 +12755,25 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         # with its arms and neither exit ran the finally.
         if hf.finallyBlock != nil:
           w.frame.handlerStack.add HandlerFrame(handlers: @[],
-                                                finallyBlock: hf.finallyBlock)
+                                                finallyBlock: hf.finallyBlock,
+                                                loopLen: hf.loopLen)
+        # RFC-0005 S8m: the arm is lexically outside every loop / labelled
+        # block the try body entered, but the raise is routed from inside
+        # them. Cut the loop stack back to the try's entry for the arm, so a
+        # `break` / `continue` there leaves the loop enclosing the TRY
+        # (probed: `for i: (try: (for j: raise) except: break)` leaves the
+        # `i` loop). Before S8m it left the innermost live loop -- the `j`
+        # loop -- and walked on inside the try body's loop.
+        let loopCut = min(hf.loopLen, w.loopStack.len)
+        let savedLoops = w.loopStack[loopCut .. ^1]
+        w.loopStack.setLen(loopCut)
         w.frame.inFlightExn = some(ExnRecord(typeId: typeId, msg: msg))
         setInFlightThreadvars(w.frame.inFlightExn)   ## Phase 15 E8: mirror into
                                                      ## the lower-time threadvars
                                                      ## so getCurrent* see this exn
                                                      ## during the handler body.
         let handlerPaths = walk(h.body, @[rp], w)
+        w.loopStack.add savedLoops   # RFC-0005 S8m
         # Normal handler exit: clear the in-flight exn, restore the stack.
         w.frame.handlerStack = savedStack
         w.frame.inFlightExn = savedInFlight
@@ -12942,7 +13158,13 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   w.callStack.add CallFrame(
     callee: "closure@" & $clo.closureSite.siteHash & "/" &
             $clo.closureSite.declOrder,
-    retSym: funcApp, retName: "__closureRet", returnedPaths: @[])
+    retSym: funcApp, retName: "__closureRet", returnedPaths: @[],
+    # RFC-0005 S8m: a bare `return` that never assigned `result` binds the
+    # zero value, as the fall-through twin below does. With no `retTy` the
+    # path joined `returnedPaths` unbound, and the explicit-return loop
+    # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
+    # return` asserted `y > 0` as a ground axiom of the whole run.
+    retTy: cb.retTy)
   let frameIx = w.callStack.high
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
@@ -13060,11 +13282,17 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # asserting a possibly-wrong value as a permanent ground fact.
   var uncertainDrop = false
   for cp in frame.returnedPaths:                       # (a) explicit return
-    if cp.pc.len == 0: continue
-    sawValue = true
+    # RFC-0005 S8m: the taint check comes first. `completeReturn`'s havoc
+    # arm (a bare `return` whose composite result has no zero value) hands
+    # back a tainted path with NO binding, and a straight-line body leaves
+    # its pc empty: it was skipped here as if it had no value, and the call
+    # result stayed free with no taint on the calling path.
     if cp.taint != {}:
+      sawValue = true
       uncertainDrop = true
       continue
+    if cp.pc.len == 0: continue
+    sawValue = true
     # ADR-0012: cp.pc holds ONLY genuine branch conditions now (defect-survivor
     # negations were split into cp.defectSurvivorPc by the drains), so the guard
     # is clean — this is the fix for the C3 unsound witness. cp.pc[^1] is the
@@ -13246,8 +13474,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
         for tkey in tkeys:
           let exitHeap = ePath.heaps[tkey]
           let prevHeap = mergedHeaps.getOrDefault(tkey, exitHeap)
-          let rawIte = ctx.checkErr Z3_mk_ite(ctx.raw,
-                         guard.raw, exitHeap.raw, prevHeap.raw)
+          let rawIte = checkedIte(ctx, guard.raw, exitHeap.raw, prevHeap.raw)
           mergedHeaps[tkey] = wrap[Z3AnyAst](ctx, rawIte)
       else:
         # Unconditional path (else branch of the last if / the only path):
@@ -13443,7 +13670,7 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
           plainEnglishSymValKind(val.kind) & " (weInternalWalkerFault)",
           "__storeSeqElemKindMismatch")
         if elemTy.kind == itPtr: placeholder.ptrAst else: placeholder.refAst
-    let storedRaw = ctx.checkErr Z3_mk_store(ctx.raw, dataRaw.raw, idx.raw, valAst.raw)
+    let storedRaw = checkedStore(ctx, dataRaw.raw, idx.raw, valAst.raw)
     wrap[Z3AnyAst](ctx, storedRaw)
   else:
     raise newException(ValueError, "storeSeqElem: unsupported elem kind " & $elemTy.kind)  # [raise-audited: category-c: kind-exhaustive (storeSeqElem's case set matches isBackedSeqElemTy exactly, including itRef/itPtr -- unlike seqElemAt, this proc's read-side counterpart, which lacks the itRef/itPtr arm; see seqElemAt's own N46 comment)]
@@ -14147,15 +14374,6 @@ proc runSymexCaught(prog: SymexProgram,
               errors: @[SymexErrorInfo(kind: heUnresolvedRef,
                                        severity: sevError, msg: e.msg,
                                        scope: abortScope())])
-  except SymexRefVariantUnsupportedError as e:
-    # Phase 15 R6 (ADR-0010, Feas-MED-4 / M17): a field access through a ref/ptr
-    # to a VARIANT object -> sxUnknown + heRefVariantUnsupported (Invariant 3 —
-    # classified, never a Defect on svTuple dispatch, never a silent UNSAT). The
-    # field-split heap has no flat positional layout to split a variant on.
-    RawResult(status: sxUnknown,
-              errors: @[SymexErrorInfo(kind: heRefVariantUnsupported,
-                                       severity: sevError, msg: e.msg,
-                                       scope: abortScope())])
   except SymexOwnershipUnsupportedError as e:
     # Phase 15 R1a (ADR-0010, Breadth-LOW-L4): an `owned T` /
     # `Atomic[T]` formal was allocated -> sxUnknown + heUnsupportedOwnership
@@ -14279,6 +14497,22 @@ proc runSymex*(prog: SymexProgram,
   ## verdict branch, including a boundary abort. Verdict-neutral: nothing
   ## reads them to decide `status`.
   result = runSymexCaught(prog, target, settings)
+  # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
+  # (the C backend loses a raise unwinding through the walk) has no verdict.
+  if z3ApiErrorCount > 0:
+    var recorded = false
+    for e in result.errors:
+      if e.kind in {ekZ3Error, ekZ3MemoryError, ekZ3InternalError,
+                    ekZ3SolverError}:
+        recorded = true
+    if not recorded or result.status != sxUnknown:
+      result = RawResult(status: sxUnknown, errors: result.errors &
+        @[SymexErrorInfo(kind: ekZ3Error, severity: sevError,
+          msg: "Z3 API error (" & z3ApiFirstError & ", " & $z3ApiErrorCount &
+               " in the run) was raised inside the walk and never reached " &
+               "the run boundary -- no verdict stands behind it " &
+               "(RFC-0005 S8m; ekZ3Error)",
+          scope: abortScope())])
   result.annotationViolations = prog.annotationViolations
 
 proc raiseParamAllocIssue(issue: FieldAllocIssue) =
@@ -14345,6 +14579,10 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentWalkCtxPtr = nil
   let ctx = newContext()
   setCurrentContext(ctx)
+  # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
+  Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
+  z3ApiErrorCount = 0
+  z3ApiFirstError = ""
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
                            ## threadvar's own doc comment for why it must not
@@ -14428,6 +14666,18 @@ iterator dedupedByMsg(src: seq[SymexErrorInfo]): SymexErrorInfo =
     if key notin seen:
       seen.incl key
       yield e
+
+proc rfc0005S8mUncheckedZ3Error*(): tuple[counted: int, code: string] =
+  ## RFC-0005 S8m test hook (H1 pattern: `WalkCtx`/contexts are private to
+  ## the runtime unit). Makes a fresh symex run context exactly as a run does
+  ## (`resetSymexRunState`) and issues an ill-sorted `Z3_mk_eq` WITHOUT
+  ## `checkErr` -- the shape of a raise the C backend loses. Reports what
+  ## `nelliZ3ErrorHandler` counted, which is what `runSymex` reads.
+  let ctx = resetSymexRunState(defaultSymexSettings())
+  discard Z3_mk_eq(ctx.raw, mkBool(true).raw, mkBitVec[64](1'i64).raw)  # [s8m-unchecked-probe]
+  result = (z3ApiErrorCount, z3ApiFirstError)
+  z3ApiErrorCount = 0
+  z3ApiFirstError = ""
 
 proc drainDedupedByMsg(dst: var seq[SymexErrorInfo], src: seq[SymexErrorInfo]) =
   ## Round 10 design T4: the one dedup-by-message idiom every hint/error/

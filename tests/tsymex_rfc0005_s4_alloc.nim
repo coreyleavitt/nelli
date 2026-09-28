@@ -172,7 +172,8 @@ suite "RFC-0005 S4 (a) -- the allocDegrade funnel's classOf rows":
     check classOf(seUnsupportedCompoundSortLeaf) == dcSubstituted
 
   test "every other kind the funnel records is audited ⊤ -- never promoted by S4":
-    for k in [heUnresolvedRef, heRefVariantUnsupported, heUnsupportedOwnership,
+    # RFC-0005 S8m: `heRefVariantUnsupported` retired (no producer since S8l).
+    for k in [heUnresolvedRef, heUnsupportedOwnership,
               seUnsupportedTableKeyType, seUnsupportedTableValType,
               seUnsupportedSetCharInterop, feUnsupportedParamType,
               feUnsupportedWitnessType, feUnsupportedExprKind,
@@ -290,7 +291,7 @@ suite "RFC-0005 S4 (d) -- the funnel's substituting arms stay ⊤":
     checkpoint($kindNames(r.errors))
     check r.status == sxRaised
     check "FieldDefect" in r.raisedTypeId
-    check not r.errors.hasKind(heRefVariantUnsupported)
+    check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
 
   test "checkUnsatOverTaintOnly rejects an sxUnknown result":
     let r = SymexResult[int](status: sxUnknown,

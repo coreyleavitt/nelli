@@ -596,7 +596,10 @@ proc emitStmt*(s: IRStmt): NimNode =
     var seqLit = newTree(nnkBracket)
     for st in s.stmts:
       seqLit.add emitStmt(st)
-    newCall(bindSym"mkBlock", prefix(seqLit, "@"))
+    if s.blkLabel.len > 0:   # RFC-0005 S8m: a break target
+      newCall(bindSym"mkLabelledBlock", newLit(s.blkLabel), prefix(seqLit, "@"))
+    else:
+      newCall(bindSym"mkBlock", prefix(seqLit, "@"))
   of isIf:
     var seqLit = newTree(nnkBracket)
     for br in s.branches:
@@ -612,7 +615,7 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkWhile", emitExpr(s.wcond), emitStmt(s.wbody),
             newLit(s.wHasAssumedBound))
   of isBreak:
-    newCall(bindSym"mkBreak")
+    newCall(bindSym"mkBreak", newLit(s.brkLabel))
   of isContinue:
     newCall(bindSym"mkContinue")
   of isReturn:
@@ -734,6 +737,23 @@ proc emitStmt*(s: IRStmt): NimNode =
 # names.
 
 type
+  JumpTarget* = object
+    ## RFC-0005 S8m. One construct a source `break` / `continue` can leave,
+    ## on `ProcScopedCollectors.jumpTargets` (a lexical stack, innermost
+    ## last) while its body is parsed.
+    isLoop*: bool
+    blockSym*: NimNode   ## a source block's label symbol (nil: unnamed / a loop)
+    brkViaBlock*: bool
+      ## A `break` leaves a labelled block: always for a block, and for a
+      ## statically UNROLLED loop (no `isWhile` to leave). False: a plain
+      ## `mkBreak()` leaves the walker's innermost `isWhile`.
+    contViaBlock*: bool
+      ## A `continue` leaves the per-iteration body block: a `for` loop,
+      ## whose desugared increment follows the body, or an unrolled loop.
+      ## False: the walker's own `continue`, back to the guard.
+    brkLabel*: string    ## minted when a jump first names it; "" = unused
+    contLabel*: string   ## likewise
+
   ProcScopedCollectors* = object
     ## D4 (design finding, accepted). Every field below is proc-scoped parse
     ## state: populated (via a pre-pass collector, or via ordinary push/pop
@@ -753,6 +773,14 @@ type
     ## touchpoints nothing enforced staying in sync) so a NEW proc-scoped
     ## collector joins the save/restore the moment it becomes a field HERE:
     ## there is no separate save/restore line for it to omit.
+    jumpTargets*: seq[JumpTarget]
+                                   ## RFC-0005 S8m. LEXICAL stack of the
+                                   ## loops and blocks enclosing the
+                                   ## statement being parsed (innermost
+                                   ## last). `resolveBreak` /
+                                   ## `resolveContinue` name the construct
+                                   ## Nim leaves. Proc-scoped: a `break`
+                                   ## never crosses a routine boundary.
     caseNarrow*: seq[tuple[subjectRepr: string, tags: seq[int]]]
                                    ## Round-6 A3 (ADR-0029). LEXICAL stack of
                                    ## `case`-branch tag-set narrowings, pushed
@@ -1226,6 +1254,76 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
   inc ctx.synthCounter
   "__sym_" & prefixWord & "_" & $ctx.synthCounter
 
+# ---- RFC-0005 S8m: break / continue targets -----------------------------------
+#
+# Nim's `break` leaves the innermost enclosing `block` or loop, `break L`
+# the block labelled `L`, and `continue` jumps to the innermost loop's next
+# iteration, leaving every block in between (probed: `break inner` of a
+# `block inner:` in a `while` leaves only the block; `break outer` out of two
+# nested `for`s leaves both). Before S8m the parser flattened every `block`
+# into its body and emitted a bare `break` / `continue` for every source
+# one, which the walker applied to the innermost `isWhile`: `break outer`
+# left only the inner loop (a false `sxSat` on the code after it), a
+# `block`'s `break` left the enclosing loop, a `break` out of a top-level
+# `block` or an unrolled array loop halted (`weBreakOutsideLoop`), and a
+# `continue` in a `for` loop skipped the desugared increment, replaying the
+# same iteration to the unroll bound. The parser now resolves each jump to
+# the construct Nim leaves; a labelled `isBlock` is emitted only for a block
+# some jump actually names, so the IR of every other program is unchanged.
+
+proc pushJumpTarget(ctx: ParseCtx; isLoop: bool; blockSym: NimNode = nil;
+                    brkViaBlock = false; contViaBlock = false) =
+  ## `brkViaBlock` (a block, or an unrolled loop) / `contViaBlock` (a `for`
+  ## loop or an unrolled one): the jump leaves a labelled block, minted on
+  ## first use (`brkLabel` / `contLabel`), rather than the walker's loop.
+  ctx.procScoped.jumpTargets.add JumpTarget(
+    isLoop: isLoop, blockSym: blockSym,
+    brkViaBlock: brkViaBlock or not isLoop, contViaBlock: contViaBlock)
+
+proc popJumpTarget(ctx: ParseCtx): JumpTarget =
+  ctx.procScoped.jumpTargets.pop()
+
+proc wrapJumpBlock(label: string; body: IRStmt): IRStmt =
+  ## The labelled block a jump named, or `body` unchanged when none did.
+  if label.len == 0: body else: mkLabelledBlock(label, @[body])
+
+proc sameBlockLabel(a, b: NimNode): bool =
+  ## A `break L`'s label names its block by symbol (the typed AST), by
+  ## spelling when either side is untyped.
+  if a.kind == nnkSym and b.kind == nnkSym: a == b
+  elif a.kind in {nnkSym, nnkIdent} and b.kind in {nnkSym, nnkIdent}:
+    eqIdent(a, b)
+  else: false
+
+proc breakVia(ctx: ParseCtx; i: int): IRStmt =
+  ## A `break` that leaves jump target `i`.
+  template t: untyped = ctx.procScoped.jumpTargets[i]
+  if not t.brkViaBlock: return mkBreak()      # the walker's innermost loop
+  if t.brkLabel.len == 0: t.brkLabel = freshSynth(ctx, "brk")
+  mkBreak(t.brkLabel)
+
+proc resolveBreak(n: NimNode; ctx: ParseCtx): IRStmt =
+  let label = if n.len > 0: n[0] else: newEmptyNode()
+  if label.kind == nnkEmpty:
+    if ctx.procScoped.jumpTargets.len == 0:
+      return mkBreak()   # no enclosing loop: the walker's weBreakOutsideLoop
+    return breakVia(ctx, ctx.procScoped.jumpTargets.high)
+  for i in countdown(ctx.procScoped.jumpTargets.high, 0):
+    let t = ctx.procScoped.jumpTargets[i]
+    if not t.isLoop and t.blockSym != nil and sameBlockLabel(t.blockSym, label):
+      return breakVia(ctx, i)
+  ctx.declineMarker(feUnsupportedStmtKind,
+    "`break " & label.repr & "`: its block is not a modelled break target")
+
+proc resolveContinue(ctx: ParseCtx): IRStmt =
+  for i in countdown(ctx.procScoped.jumpTargets.high, 0):
+    template t: untyped = ctx.procScoped.jumpTargets[i]
+    if t.isLoop:
+      if not t.contViaBlock: return mkContinue()
+      if t.contLabel.len == 0: t.contLabel = freshSynth(ctx, "cont")
+      return mkBreak(t.contLabel)
+  mkContinue()   # no enclosing loop: the walker's weBreakOutsideLoop
+
 # ---- R16-2b: detect inline float→int conversions in RHS IR trees ------------
 
 proc rhsHasInlineDefectFork(e: IRExpr): bool =
@@ -1360,6 +1458,19 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
+proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt
+
+proc parseLoopBody(bodyNode: NimNode; ctx: ParseCtx; unrolled = false):
+    tuple[body: IRStmt, brkLabel: string] =
+  ## RFC-0005 S8m. Parse a desugared `for` loop's body as a jump target. A
+  ## `continue` leaves the body (its labelled block), so the increment that
+  ## follows it still runs; in an `unrolled` loop (one body copy per
+  ## element, no `isWhile`) a `break` leaves the block `brkLabel` the caller
+  ## wraps the whole unrolled sequence in.
+  ctx.pushJumpTarget(isLoop = true, brkViaBlock = unrolled, contViaBlock = true)
+  let body = parseStmt(bodyNode, ctx)
+  let jt = ctx.popJumpTarget()
+  (wrapJumpBlock(jt.contLabel, body), jt.brkLabel)
 proc zeroValueForType(ty: IRType): IRExpr  ## CR-2a fwd decl (defined below):
                                             ## parseExpr's expression-kind
                                             ## catch-all needs this to build a
@@ -3127,6 +3238,30 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     mkLambda(site.siteHash, site.declOrder, @[],
              ctx.declineMarker(ceNotImplemented, "closure iterators not yet supported"),
              captures, tBool(), mutCaptures)
+  of nnkCast:
+    # RFC-0005 S8m. `cast[ref Obj](p)` with `p: ref Obj` reinterprets a ref as
+    # the very type it already has: the same address, the same `Ref_<id>`
+    # sort, so it is the identity and keeps `p`'s heap identity. Before, the
+    # cast reached the catch-all below, whose int dummy crashed the first
+    # `q != nil` (`eqBV`'s kind assert, `weInternalWalkerFault`). Any other
+    # cast (a different pointee, a value reinterpretation) has no layout the
+    # heap model can follow, and stays the catch-all's recorded decline. A
+    # `cast[ptr T]` binding never gets here: `unsafeCastReason` declines it
+    # as `heUnsafeCast` first.
+    let tgt = refExprClassify(n)
+    let src = if n.len == 2: refExprClassify(n[1]) else: tgt
+    if n.len == 2 and tgt.ty.kind in {itRef, itPtr} and
+       src.ty.kind == tgt.ty.kind and src.ty == tgt.ty:
+      return parseExpr(n[1], preamble, ctx)
+    let dummyTy = classifyType(n).ty
+    preamble.add ctx.declineAtSite(
+      feUnsupportedExprKind,
+      siteMsg(n, "RFC-0005 S8m: `cast` in `" & n.repr & "` reinterprets " &
+                 "the value as a different type -- no layout the symbolic " &
+                 "model can follow (feUnsupportedExprKind)"),
+      "RFC-0005 S8m: layout-changing `cast` (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(dummyTy)
+    if dummy != nil: dummy else: mkIntLit(0)
   of nnkConv:
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
@@ -5449,9 +5584,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           elems.add parseExpr(valNode, preamble, ctx)
       elif isRefField:
         # P2b: an OMITTED ref-typed field is genuinely, soundly nil-initialised
-        # by Nim — `zeroValueForType` returns `nil` (no encoding) for
-        # `itRef`/`itPtr` (its `else: nil` catch-all), so special-case ref/ptr
-        # fields to the REAL zero (`mkNil`) before falling to the scalar path.
+        # by Nim (`mkNil`; `zeroValueForType` agrees since RFC-0005 S8m).
         elems.add mkNil(fty)
       else:
         let zv = zeroValueForType(fty)
@@ -7900,8 +8033,14 @@ proc parseIterBodyStmt(n: NimNode,
       stmts.add parseIterBodyStmt(c, iterVarBindings, forBodyNode, ctx)
     if stmts.len == 1: stmts[0] else: mkBlock(stmts)
   of nnkBlockStmt:
-    parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
+    # RFC-0005 S8m: the iterator's own `block` is a break target.
+    ctx.pushJumpTarget(isLoop = false,
+      blockSym = (if n[0].kind in {nnkSym, nnkIdent}: n[0] else: nil))
+    let blk = parseIterBodyStmt(n[n.len - 1], iterVarBindings, forBodyNode, ctx)
+    wrapJumpBlock(ctx.popJumpTarget().brkLabel, blk)
   of nnkWhileStmt:
+    # RFC-0005 S8m: the iterator's own `while` is a jump target.
+    ctx.pushJumpTarget(isLoop = true)
     var wp: seq[IRStmt]
     # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 (ADR-0028): try the
     # bounded scan-idiom lifts BEFORE building the ordinary k-unrolled
@@ -7918,28 +8057,31 @@ proc parseIterBodyStmt(n: NimNode,
     let accLift = if scanLift.isNone and pairLift.isNone:
                     tryRecognizeAccumulatingScan(n, wp, ctx)
                   else: none(IRStmt)
-    if scanLift.isSome or pairLift.isSome or accLift.isSome:
-      # Closed-form replacement for the whole loop (no loop to re-run) — its
-      # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
-      let hit = if scanLift.isSome: scanLift.get
-                elif pairLift.isSome: pairLift.get
-                else: accLift.get
-      if wp.len > 0:
-        var all = wp
-        all.add hit
-        mkBlock(all)
+    let whileIR =
+      if scanLift.isSome or pairLift.isSome or accLift.isSome:
+        # Closed-form replacement for the whole loop (no loop to re-run) — its
+        # preamble `wp` (the hoisted `find` call) runs once, hoisted as before.
+        let hit = if scanLift.isSome: scanLift.get
+                  elif pairLift.isSome: pairLift.get
+                  else: accLift.get
+        if wp.len > 0:
+          var all = wp
+          all.add hit
+          mkBlock(all)
+        else:
+          hit
       else:
-        hit
-    else:
-      # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
-      # `some(...)` path) and unused below — R14 routes through the shared
-      # `mkShortCircuitWhile` helper so a `while i<s.len and s[i]==c` NESTED
-      # INSIDE a for/iterator body desugars to the loop-level and-split
-      # (guard A re-evaluated by real `while` semantics, B's fault forked
-      # inside the body), exactly like the top-level `parseStmtInner` arm —
-      # and stays continue-safe by construction (see `mkShortCircuitWhile`).
-      let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
-      mkShortCircuitWhile(n[0], n[1], whileBody, ctx)
+        # `wp` is still empty here (tryRecognizeScanIdiom only appends on the
+        # `some(...)` path) and unused below — R14 routes through the shared
+        # `mkShortCircuitWhile` helper so a `while i<s.len and s[i]==c` NESTED
+        # INSIDE a for/iterator body desugars to the loop-level and-split
+        # (guard A re-evaluated by real `while` semantics, B's fault forked
+        # inside the body), exactly like the top-level `parseStmtInner` arm —
+        # and stays continue-safe by construction (see `mkShortCircuitWhile`).
+        let whileBody = parseIterBodyStmt(n[1], iterVarBindings, forBodyNode, ctx)
+        mkShortCircuitWhile(n[0], n[1], whileBody, ctx)
+    discard ctx.popJumpTarget()
+    whileIR
   of nnkIfStmt, nnkIfExpr:
     var branches: seq[IRBranch]
     var elseBody: IRStmt = nil
@@ -7981,7 +8123,12 @@ proc zeroValueForType(ty: IRType): IRExpr =
   of itFloat32: mkFloatLit(0.0, 32)
   of itFloat64: mkFloatLit(0.0, 64)
   of itString: mkStrLit("")           ## Nim `string` default is the empty string
-  else: nil                            ## seq/table/set/tuple/variant/ref/… — defer
+  of itRef, itPtr: mkNil(ty)           ## RFC-0005 S8m: a `ref`/`ptr` is nil. An
+                                       ## uninitialised `var p: ref T` local was
+                                       ## a decline, and every catch-all dummy of
+                                       ## a ref type was an int that crashed the
+                                       ## first `p != nil` (`eqBV`'s kind assert).
+  else: nil                            ## seq/table/set/tuple/variant/… — defer
 
 proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
   ## RFC-chapulin-hardening R8 (deferred LOW finding, telemetry hygiene). A
@@ -8028,9 +8175,8 @@ proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
   ## machinery, out of scope for this telemetry-only fix; `mkIntLit(0)`
   ## remains the fallback there, same residual risk as before R8.
   let realZero = zeroValueForType(ty)
-  if realZero != nil: return realZero
+  if realZero != nil: return realZero   ## RFC-0005 S8m: covers itRef/itPtr
   case ty.kind
-  of itRef, itPtr: mkNil(ty)
   of itSeq: mkSeqLit(@[], ty.seqElemTy)
   of itTuple:
     var elems: seq[IRExpr]
@@ -8591,7 +8737,7 @@ proc parseStmtInner(n: NimNode,
       var preamble3: seq[IRStmt]
       let loIR = parseExpr(iterExpr[1], preamble3, ctx)
       let hiIR = parseExpr(iterExpr[2], preamble3, ctx)
-      let body = parseStmt(bodyNode, ctx)
+      let body = parseLoopBody(bodyNode, ctx).body   # RFC-0005 S8m
       # Build: { var __iv = lo; while __iv <op> hi: { let i = __iv; body; __iv = __iv + 1 } }
       let ivName = freshSynth(ctx, "iv")
       let intTy = tInt(64, signed = true)
@@ -8635,7 +8781,11 @@ proc parseStmtInner(n: NimNode,
           "symex Phase 15 S3: `for c in s` over a symbolic " &
             "string is unsupported (unbounded symbolic iteration length, " &
             "not a byte/codepoint mismatch — ADR-0006)")
-      let body = parseStmt(bodyNode, ctx)
+      # RFC-0005 S8m: an array is unrolled (a `break` leaves the block
+      # around the whole unroll); a seq is a `while` whose increment follows
+      # the body (a `continue` leaves the body's block).
+      let (body, unrollBrk) = parseLoopBody(bodyNode, ctx,
+                                            unrolled = recvCls.ty.kind == itArray)
       let intTy = tInt(64, signed = true)
       case recvCls.ty.kind
       of itArray:
@@ -8643,13 +8793,16 @@ proc parseStmtInner(n: NimNode,
         var preamble3: seq[IRStmt]
         let arrIR = parseExpr(container, preamble3, ctx)
         var stmts = preamble3
+        var iters: seq[IRStmt]
         for k in 0 ..< recvCls.ty.size:
           # bind `iterName = arr[k]`
           let synth = freshSynth(ctx, "fa")
-          stmts.add mkIndexStmt(synth, arrIR, mkIntLit(int64(k)),
+          iters.add mkIndexStmt(synth, arrIR, mkIntLit(int64(k)),
                                 recvCls.ty.elemTy)
-          stmts.add mkLet(iterName, recvCls.ty.elemTy, mkVar(synth))
-          stmts.add body
+          iters.add mkLet(iterName, recvCls.ty.elemTy, mkVar(synth))
+          iters.add body
+        if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
+        else: stmts.add iters
         mkBlock(stmts)
       of itSeq:
         # Desugar: var __iv = 0; while __iv < s.len: let x = s[__iv]; body; __iv += 1
@@ -8695,13 +8848,14 @@ proc parseStmtInner(n: NimNode,
               # Exact vs Nim: we call Nim's own toRunes (Invariant 3 §Soundness).
               let runeSeq = unicode.toRunes(container.strVal)
               let runeTy = tInt(64, signed = true)
-              let body = parseStmt(bodyNode, ctx)
+              # RFC-0005 S8m: unrolled -- jumps leave labelled blocks.
+              let (body, unrollBrk) = parseLoopBody(bodyNode, ctx, unrolled = true)
               var stmts: seq[IRStmt]
               for rune in runeSeq:
                 stmts.add mkLet(iterName, runeTy,
                                 mkIntLit(int64(rune.ord)))
                 stmts.add body
-              return mkBlock(stmts)
+              return wrapJumpBlock(unrollBrk, mkBlock(stmts))
             else:
               # Symbolic string: UTF-8 grouping over an unknown byte stream has
               # no quantifier-free Z3 encoding → seRuneDecodeSymbolic (ADR-0017;
@@ -8847,9 +9001,9 @@ proc parseStmtInner(n: NimNode,
     else:
       ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop iterable shape: {iterExpr.kind}")
   of nnkBreakStmt:
-    mkBreak()
+    resolveBreak(n, ctx)        # RFC-0005 S8m
   of nnkContinueStmt:
-    mkContinue()
+    resolveContinue(ctx)        # RFC-0005 S8m
   of nnkReturnStmt:
     # Semchecked AST forms for `return EXPR`:
     #   * `return EXPR` directly (untyped)         → ReturnStmt[EXPR]
@@ -9370,6 +9524,21 @@ proc scanForHiddenMarkers(n: NimNode): seq[tuple[kind: string, name: string]] =
   for child in n: result.add scanForHiddenMarkers(child)
 
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt =
+  # RFC-0005 S8m: a `while` and a `block` are jump targets while their
+  # bodies parse (`resolveBreak` / `resolveContinue`); a block some `break`
+  # names becomes a labelled `isBlock`.
+  if n.kind in {nnkWhileStmt, nnkBlockStmt}:
+    if n.kind == nnkWhileStmt:
+      ctx.pushJumpTarget(isLoop = true)
+    else:
+      ctx.pushJumpTarget(isLoop = false,
+        blockSym = (if n[0].kind in {nnkSym, nnkIdent}: n[0] else: nil))
+    let body = parseStmtBare(n, ctx)
+    let jt = ctx.popJumpTarget()
+    return wrapJumpBlock(jt.brkLabel, body)
+  parseStmtBare(n, ctx)
+
+proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt =
   var preamble: seq[IRStmt]
   let inner = parseStmtInner(n, preamble, ctx)
   # Phase 14 B67. If a parse landed on `isUnsupported`, scan the

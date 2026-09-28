@@ -962,6 +962,13 @@ type
     case kind*: IRStmtKind
     of isBlock:
       stmts*: seq[IRStmt]
+      blkLabel*: string
+        ## RFC-0005 S8m. "" for a plain statement sequence. Non-empty: a
+        ## BREAK TARGET -- a source `block` some `break` leaves, or the
+        ## parser's synthetic body block a `for` loop's `continue` (or an
+        ## unrolled loop's `break`) leaves. An `isBreak` whose `brkLabel`
+        ## names it resumes after the block. The label is a parse-time synth
+        ## name, unique per program.
     of isIf:
       branches*: seq[IRBranch]
       elseBody*: IRStmt          ## nil if no `else:` clause
@@ -1033,7 +1040,14 @@ type
                          ## Default `false` for every non-generic-while
                          ## construction site (the closed-form scan
                          ## recognizers never build a plain `isWhile`).
-    of isBreak, isContinue:
+    of isBreak:
+      brkLabel*: string
+        ## RFC-0005 S8m. "" leaves the innermost LOOP (`isWhile`), skipping
+        ## any labelled block between. Non-empty: leaves the innermost
+        ## enclosing `isBlock` with that `blkLabel`. The parser resolves every
+        ## source `break` (labelled or not, `for`-loop `continue` too) to the
+        ## construct Nim leaves.
+    of isContinue:
       discard
     of isReturn:
       retExpr*: IRExpr   ## nil for void returns; callees use this to
@@ -1483,7 +1497,10 @@ type
                            ## Real pointer arithmetic goes through `cast`,
                            ## which records `heUnsafeCast`.
     hePtrFamily,
-    heFreshnessCapExceeded, heUnsupportedVarRef, heRefVariantUnsupported,
+    heFreshnessCapExceeded, heUnsupportedVarRef,
+    # `heRefVariantUnsupported` stood here until RFC-0005 S8m: S8l modelled
+    # every ref-variant shape it declined, and S8m retired it; its six
+    # unreachable carriers raise `weInternalWalkerFault` now.
     heUnsupportedOwnership,
     heUnresolvedRef,       ## Phase 15 R1a (ADR-0010): the walker reached an
                            ## `itRef`/`itPtr`/`isDeref`/`isNew` while the
@@ -2137,6 +2154,17 @@ type
                           ## Nim 2.2.10). The walker cannot know which
                           ## backend replays the witness, so the path is
                           ## dropped. `classOf` is `dcOmitted` (a HALT, token
+                          ## discarded). sevError -> sxUnknown.
+    eeFinallyJumpOnRaise  ## RFC-0005 S8m. A `break` / `continue` that leaves
+                          ## a `finally` running on a RAISED exit -- the
+                          ## jump twin of `eeFinallyReturnOnRaise`. The
+                          ## pinned toolchain's backends disagree there:
+                          ## `for i in 0..1: (try: raise newException(
+                          ## ValueError, "r") finally: break)` re-raises the
+                          ## ValueError under c and swallows it under cpp; a
+                          ## `continue` there overflows the call depth under
+                          ## c (probed, Nim 2.2.10). The path is dropped.
+                          ## `classOf` is `dcOmitted` (a HALT, token
                           ## discarded). sevError -> sxUnknown.
 
   DefectKind* = enum
@@ -3023,11 +3051,6 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of hePtrFamily: dcNoAnswer
   of heFreshnessCapExceeded: dcNoAnswer
   of heUnsupportedVarRef: dcNoAnswer
-  of heRefVariantUnsupported: dcNoAnswer
-    # S4 audited (reaches `allocDegrade` via `heapArmDegrade`): the
-    # multi-variant field READ forks every path to a placeholder BEFORE
-    # `nilDerefFork` (a dropped NilAccessDefect branch) and the field WRITE
-    # drops the write -- dcSubstituted; the boundary arm is dcNoAnswer. ⊤.
   of heUnsupportedOwnership: dcNoAnswer
     # S4 audited: `allocateSym`'s `__ownership:` arm substitutes a
     # `.unalloc` svBool keyed on the allocation's own name (a 2-valued sort
@@ -3175,6 +3198,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
   of eeFinallyReturnOnRaise: dcOmitted
     # A HALT: the path whose `finally` returns during a raised exit is
     # dropped (token discarded), because c re-raises and cpp returns.
+  # RFC-0005 S8m.
+  of eeFinallyJumpOnRaise: dcOmitted
+    # A HALT: the path whose `break` / `continue` leaves a `finally` during a
+    # raised exit is dropped (token discarded): c re-raises, cpp does not.
 
 func pathTaint*(c: DegradeClass): Taint =
   ## RFC-0005 §2.2. The PATH coordinate a degrade of class `c` joins into the
@@ -3564,11 +3591,15 @@ proc mkWhile*(cond: IRExpr, body: IRStmt, hasAssumedBound = false): IRStmt =
   IRStmt(kind: isWhile, wcond: cond, wbody: body,
          wHasAssumedBound: hasAssumedBound)
 
-proc mkBreak*(): IRStmt = IRStmt(kind: isBreak)
+proc mkBreak*(label = ""): IRStmt = IRStmt(kind: isBreak, brkLabel: label)
 proc mkContinue*(): IRStmt = IRStmt(kind: isContinue)
 
 proc mkBlock*(stmts: seq[IRStmt]): IRStmt =
   IRStmt(kind: isBlock, stmts: stmts)
+
+proc mkLabelledBlock*(label: string; stmts: seq[IRStmt]): IRStmt =
+  ## RFC-0005 S8m. A break target: `break label` resumes after it.
+  IRStmt(kind: isBlock, stmts: stmts, blkLabel: label)
 
 proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil): IRStmt =
   IRStmt(kind: isIf, branches: branches, elseBody: elseBody)
@@ -4900,7 +4931,8 @@ proc render*(s: IRStmt): string =
   if s == nil: return "nil"
   case s.kind
   of isBlock:
-    "{" & s.stmts.mapIt(render(it)).join(";") & "}"
+    (if s.blkLabel.len > 0: s.blkLabel & ":" else: "") &
+      "{" & s.stmts.mapIt(render(it)).join(";") & "}"
   of isIf:
     var arms = ""
     for br in s.branches:
@@ -4914,7 +4946,7 @@ proc render*(s: IRStmt): string =
     s.aname & ":=" & render(s.avalue)
   of isWhile:
     "while(" & render(s.wcond) & "){" & render(s.wbody) & "}"
-  of isBreak:    "break"
+  of isBreak:    (if s.brkLabel.len > 0: "break " & s.brkLabel else: "break")
   of isContinue: "continue"
   of isReturn:
     if s.retExpr == nil: "return"

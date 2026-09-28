@@ -846,7 +846,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8l (finally on a return exit, `defer:`, named ref variants,
     ## the heap discriminator write's branch check, an inline ref to a
     ## multi-variant). 158->159.
-    check symexWalkerVersion == "159"
+    ## RFC-0005 S8m (finally on break/continue, labelled blocks, sort-checked
+    ## Z3 construction, ref locals and casts, nil ref locals, a closure's
+    ## bare return). 159->160.
+    check symexWalkerVersion == "160"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

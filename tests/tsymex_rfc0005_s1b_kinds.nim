@@ -183,12 +183,27 @@ suite "RFC-0005 S1b (a) -- every degrade records its kind (behavioural correspon
         walkSite = true
     check walkSite
 
-  test "a `break` with no enclosing loop records weBreakOutsideLoop":
+  test "a `break` of a labelled `block` is modelled (RFC-0005 S8m re-pin)":
+    ## Re-pinned by RFC-0005 S8m: this surface `break s1bBlk` used to reach
+    ## the walker as a loop-less `break` and record weBreakOutsideLoop. S8m
+    ## lowers `block` labels (the parser wraps the block and resolves the
+    ## `break` to it), so the break now leaves the block and the target
+    ## after it is genuinely reachable (x > 0). The loop-less kind itself
+    ## is still pinned at the IR level just below.
     let r = symexFind(s1bBlockBreak, tLabel("s1b_after_block"))
     checkpoint($kindNames(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(weBreakOutsideLoop)
+    check r.status == sxSat
+    check not r.errors.hasKind(weBreakOutsideLoop)
     check not r.errors.hasKind(weInternalWalkerFault)
+
+  test "a `break` with no enclosing loop records weBreakOutsideLoop (IR-level)":
+    let prog = SymexProgram(params: @[],
+      body: mkBlock(@[mkBreak(), mkTargetLabel("hit")]))
+    let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
+    checkpoint($kindNames(raw.errors))
+    check raw.status == sxUnknown
+    check raw.errors.hasKind(weBreakOutsideLoop)
+    check not raw.errors.hasKind(weInternalWalkerFault)
 
   test "a `continue` with no enclosing loop records weBreakOutsideLoop (IR-level: Nim rejects it at the surface)":
     let prog = SymexProgram(params: @[],

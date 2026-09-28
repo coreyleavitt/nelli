@@ -60,7 +60,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         feConvFloatToIntUndefined,
                         # RFC-0005 S8l: a `return` in a `finally` on a
                         # raised exit (backend-divergent).
-                        eeFinallyReturnOnRaise}
+                        eeFinallyReturnOnRaise,
+                        # RFC-0005 S8m: a `break` / `continue` leaving a
+                        # `finally` on a raised exit (backend-divergent).
+                        eeFinallyJumpOnRaise}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

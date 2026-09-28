@@ -295,7 +295,7 @@ suite "Cluster H verification — variant ref-object FIELD ACCESS (supported vs 
     let r = symexFind(inlineMultiVariantDiscRead, tLabel("inline_multivariant_disc_hit"))
     check r.status == sxSat
     for e in r.errors:
-      check e.kind != heRefVariantUnsupported
+      check e.kind != weInternalWalkerFault   # RFC-0005 S8m: heRefVariantUnsupported retired
 
   test "SUPPORTED (contrast): inline ref to a SINGLE-axis variant — arm-field read is sxSat":
     let r = symexFind(inlineSingleVariantArmFieldRead, tLabel("inline_singlevariant_armfield_hit"))

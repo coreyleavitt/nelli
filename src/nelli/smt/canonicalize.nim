@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "159"
+const symexWalkerVersion* = "160"
+  ## RFC-0005 S8m (2026-09-28) — S8l's remainder. `break` and `continue`
+  ## leave through every enclosing `finally` and `defer` innermost first
+  ## (they skipped them: a label there was a false `sxUnsat`); a `break` in
+  ## a `finally` on a raised exit is a recorded decline,
+  ## `eeFinallyJumpOnRaise` (the backends disagree). A labelled `break`
+  ## leaves its `block` (blocks were flattened: `break outer` left only the
+  ## innermost loop, a false `sxSat`), `continue` in a `for` loop still
+  ## advances it, `break`/`continue` in an unrolled array loop are modelled,
+  ## and an `except` arm's `break` targets the loop around its `try`. A Z3
+  ## store/select/ite/eq over mismatched sorts is a recorded walker fault,
+  ## and any Z3 API error of a run voids its verdict (the C backend lost the
+  ## raise: a silent `sxUnsat`). A `ref` local, an uninitialised one (nil),
+  ## and a same-type `cast` keep heap identity (were
+  ## `weInternalWalkerFault`/declines). A closure's bare `return` binds the
+  ## zero value (its last branch condition had become a ground axiom of the
+  ## run). `heRefVariantUnsupported` is retired. Verdicts change: a cache
+  ## entry keyed under "159" must not be replayed.
   ## RFC-0005 S8l (2026-09-28) — S8j's exit remainder. A `finally` runs on a
   ## `return` exit (in a callee, at top level, from an `except` arm) and
   ## sees `result`; a raise in it replaces the return, nested ones unwind
@@ -4537,9 +4554,13 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
   if s.isNil: return "St<nil>"
   case s.kind
   of isBlock:
+    # RFC-0005 S8m: a labelled block (a break target) binds its label like a
+    # local, so the canonical form is independent of the synth counter.
+    let lbl = if s.blkLabel.len > 0: "$" & $bindLocal(env, "@blk:" & s.blkLabel) & ":"
+              else: ""
     var parts: seq[string]
     for x in s.stmts: parts.add canonicalize(x, env)
-    "St<Bk:[" & parts.join(",") & "]>"
+    "St<Bk:" & lbl & "[" & parts.join(",") & "]>"
   of isIf:
     var parts: seq[string]
     for br in s.branches:
@@ -4564,7 +4585,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
   of isWhile:
     "St<W:" & canonicalize(s.wcond, env) & ";body=" &
       canonicalize(s.wbody, env) & ">"
-  of isBreak:    "St<Bk>"
+  of isBreak:
+    if s.brkLabel.len > 0: "St<Br:" & lookupLocal(env, "@blk:" & s.brkLabel) & ">"
+    else: "St<Bk>"
   of isContinue: "St<Co>"
   of isReturn:
     "St<R:" & canonicalize(s.retExpr, env) & ">"

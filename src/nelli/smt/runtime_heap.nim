@@ -128,7 +128,7 @@ proc assertFreshness*(ctx: Z3Context, path: Path, typeId: string,
   ## then allow `newRef` to alias an un-asserted prior ref, which is
   ## conservative (more models), never a false UNSAT.
   template mkNeq(a, b: Z3AnyAst): Z3Bool =
-    not wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, a.raw, b.raw))
+    not wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, b.raw))
   # 1. newRef != nil (always — not pairwise, not capped).
   if currentNilConsts.hasKey(typeId):
     path.pc.add mkNeq(newRef, currentNilConsts[typeId])
@@ -351,7 +351,7 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## result is the value-sorted ast; lift it into a SymVal. This is the whole
   ## of R1's deref: a decidable array select, NO quantifier (the G4 lesson —
   ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
-  let valRaw = ctx.checkErr Z3_mk_select(ctx.raw, heap.raw, refAst.raw)
+  let valRaw = checkedSelect(ctx, heap.raw, refAst.raw)
   liftHeapValue(ctx, valRaw, pointeeTy)
 
 proc fieldHeapKey*(objTy: IRType, field: string): string =
@@ -458,7 +458,7 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   if pcImpliesNonNil(ctx, p.pc, refAst, nilConst, typeId):
     return @[p]
   # `p == nil` (the defect) and `p != nil` (the continuation), ground over Ref_T.
-  let eqNil = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, refAst.raw, nilConst.raw))
+  let eqNil = wrap[Z3Bool](ctx, checkedEq(ctx, refAst.raw, nilConst.raw))
   # NIL sub-path — NilAccessDefect fork. Phase 16 D1a unconditional.
   discard forkDefect(p, eqNil, "NilAccessDefect", none(string), w)
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
@@ -570,7 +570,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ##   freshRef, assertFreshness, lowerInExpr, allocateSym, liftBV, intToBv,
   ##   forkPath, wrap, Z3_mk_store, rawAnyAstOf, ptrFamilyHints,
   ##   heapKeyShapes, SymexErrorInfo, hePtrFamily, sevHint,
-  ##   SymexRefUnresolvedError, SymexRefVariantUnsupportedError,
+  ##   SymexRefUnresolvedError,
   ##   refVariantDiscRangeClause
   case stmt.kind
   of isDeref:
@@ -646,7 +646,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # the SUT's own compile time (undeclared field access is a compile
         # error). Degenerate IR only, never reachable from a SUT that
         # compiles at all.
-        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHits.len==0 is degenerate IR only]
+        raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: dField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHits.len==0 is degenerate IR only]
           msg: "arm-specific field `." & stmt.dField & "` is declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -726,7 +726,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # yielding only `svBV8`/`svBV16`/`svBV32`/`svBV64`. `svInt`/
               # `svBool`/this `else` can never be
               # the kind of a disc value read through this call path.
-              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
+              raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref: unsupported discriminant sort " &
                      plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy & "` (degrade, " &
                      "never guess — ADR-0013 D2/D7)")
@@ -752,7 +752,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   # contains >= 1 non-`isElse` arm whenever ANY `isElse` arm
                   # exists. `seeded` can only stay false here for a
                   # degenerate IR that no compilable SUT can produce.
-                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
+                  raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -1104,8 +1104,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
             of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
             else: discard
-          let storedRaw = ctx.checkErr Z3_mk_store(
-            ctx.raw, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
+          let storedRaw = checkedStore(ctx, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
       else:
@@ -1141,8 +1140,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
             of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
             else: discard
-          let storedRaw = ctx.checkErr Z3_mk_store(
-            ctx.raw, heap.raw, newRef.raw, rawAnyAstOf(valSV))
+          let storedRaw = checkedStore(ctx, heap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[typeId] = wrap[Z3AnyAst](ctx, storedRaw)
       survivors.add child
@@ -1217,7 +1215,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # `stmt.dwField` is parser-resolved against `objTy`'s real field
         # names before this arm-scan runs; a SUT referencing an undeclared
         # field does not compile. Degenerate IR only.
-        raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: dwField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHitsW.len==0 is degenerate IR only]
+        raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: dwField is parser-resolved against objTy's real field names before this arm-scan runs; a Nim SUT with an undeclared field reference does not compile, so armHitsW.len==0 is degenerate IR only]
           msg: "arm-specific field write `." & stmt.dwField & "` declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
@@ -1282,7 +1280,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               # the read-side `discEq` sibling: `objTy.vDiscTy` is always
               # `itInt`, and `liftHeapValue`'s `itInt` arm is width-exhaustive,
               # so `discSV.kind` can only ever be `svBV8`/`16`/`32`/`64` here.
-              raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
+              raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: vDiscTy is always itInt (types.nim invariant) and liftHeapValue's itInt arm is width-exhaustive, so heapSelect can only yield svBV8/16/32/64 for a disc value -- this else is dead]
                 msg: "arm-field deref-write: unsupported discriminant sort " &
                      plainEnglishSymValKind(discSV.kind) & " for variant `" & $objTy &
                      "` (degrade, never guess — ADR-0013 D3/D7)")
@@ -1306,7 +1304,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   # requires >= 1 `of` branch before an optional `else`, so
                   # an else-only variant with zero non-else arms cannot be
                   # constructed from valid Nim.
-                  raise (ref SymexRefVariantUnsupportedError)(  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
+                  raise (ref SymexClassifiedDegradeError)(kind: weInternalWalkerFault,  # [raise-audited: verified-unreachable: Nim case syntax requires >=1 `of` branch before an optional `else`, so an else-only variant with zero non-else arms is not constructible from valid Nim -- degenerate IR only]
                     msg: "arm-field deref-write: else-only variant `" & $objTy &
                          "` has no non-else arm to negate against (degenerate)")
                 conj
@@ -1376,8 +1374,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 let refSort = allocRefSort(ctx, objTy)
                 armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
                                          "heap_" & armHeapKey, objTy)
-              let storedRaw = ctx.checkErr Z3_mk_store(
-                ctx.raw, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
+              let storedRaw = checkedStore(ctx, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
               cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
             # N42 audit (round-6 fix round 7): unlike the plain-field write path
             # (below, in this same proc) and the disc-heap materialisation
@@ -1538,10 +1535,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                   carried = iteSV(variantDiscEq(oldDisc, int64(g[k])),
                                   heapSelect(ctx, arrs[k], refAst, fty), carried)
                 for k in 0 ..< g.len:
-                  cpS.heaps[keys[k]] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_store(
-                    ctx.raw, arrs[k].raw, refAst.raw, rawAnyAstOf(carried)))
-          let storedRaw = ctx.checkErr Z3_mk_store(
-            ctx.raw, heap.raw, refAst.raw, rawAnyAstOf(valSV))
+                  cpS.heaps[keys[k]] = wrap[Z3AnyAst](ctx, checkedStore(ctx, arrs[k].raw, refAst.raw, rawAnyAstOf(carried)))
+          let storedRaw = checkedStore(ctx, heap.raw, refAst.raw, rawAnyAstOf(valSV))
           let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
           # REPLACE the per-path heap binding with the stored array on the surviving
           # path (PER-PATH — an unforked branch never sees this update).

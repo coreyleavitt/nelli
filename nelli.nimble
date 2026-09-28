@@ -872,5 +872,9 @@ task test, "Run the test suite":
             # RFC-0005 S8l -- S8j's exit remainder: finally on a return exit,
             # `defer:`, named ref variants and the heap discriminator write's
             # branch check, an inline ref to a multi-variant; walker 158->159.
-            "tsymex_rfc0005_s8l_exits"]:
+            "tsymex_rfc0005_s8l_exits",
+            # RFC-0005 S8m -- S8l's remainder: finally on break/continue,
+            # labelled blocks, sort-checked Z3 construction, ref locals and
+            # casts, nil ref locals, a closure's bare return; walker 159->160.
+            "tsymex_rfc0005_s8m_exits"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -345,7 +345,7 @@ suite "RFC-0005 S3 -- W2 (sxRaised), witness monotonicity":
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
-    check not r.errors.hasKind(heRefVariantUnsupported)
+    check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
 
   test "F4 after (shouldStop eager-halt): graft does not change sxRaised; the poison NEVER fires":
     let base = symexFind(s3w2Base, tRaisedExn())
@@ -353,7 +353,7 @@ suite "RFC-0005 S3 -- W2 (sxRaised), witness monotonicity":
     checkpoint($kindNames(r.errors))
     check r.status == base.status
     check r.status == sxRaised
-    check not r.errors.hasKind(heRefVariantUnsupported)
+    check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
 
 # ---- W3: sxSat behind a loop and a call (funnels F1, F3) -------------------
 
@@ -508,7 +508,7 @@ suite "RFC-0005 S3 -- family 2a: a witness reachable ONLY through a tainted path
     let r = symexFind(s3ClassifyF4, tLabel("s3_classify_f4"))
     checkpoint($kindNames(r.errors))
     check r.status == sxSat
-    check not r.errors.hasKind(heRefVariantUnsupported)
+    check not r.errors.hasKind(weInternalWalkerFault)   # S8m: heRefVariantUnsupported retired
     if r.status == sxSat:
       check r.witness[0] != nil and r.witness[0].kindA == s3f4KindA1
       check r.witness[1] == 42
@@ -574,8 +574,10 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
       if e.severity == sevError: sevErrorKinds.add e.kind
     check sevErrorKinds == @[seUnsupportedStringOp]
 
-  test "F4: classOf(heRefVariantUnsupported) is dcNoAnswer (audited at S4: its sites substitute)":
-    check classOf(heRefVariantUnsupported) == dcNoAnswer
+  test "F4: heRefVariantUnsupported is retired (RFC-0005 S8m); its six unreachable carriers are walker faults":
+    check classOf(weInternalWalkerFault) == dcNoAnswer
+    for k in SymexErrorKind:
+      check $k != "heRefVariantUnsupported"
 
   test "F4: no taint since RFC-0005 S8l -- the SUT's own FieldDefect is the verdict (was sxUnknown, ⊤)":
     # `p.a1` with `kindA == s3f4KindA2` raises FieldDefect in real Nim; the

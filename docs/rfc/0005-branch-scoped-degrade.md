@@ -1591,10 +1591,16 @@ behaviour was probed against the pinned toolchain (c and cpp identical):
     parser emits it for an explicit `nnkConv` whose target is a range/enum
     and whose operand is an integer, and for a hidden conversion into a
     range type unless the operand's own range lies inside the target's.
-    `rhsHasInlineDefectFork` treats it as forking; its canonical key
-    includes the bounds.
+    An array index is excluded: Nim wraps `arr[i]`'s index in the same
+    hidden conversion to the index type but checks it as an index
+    (`IndexDefect` "index 7 not in 0 .. 4", probed), which `isIndex`
+    already forks. The array-index parse marks that one conversion
+    (`ParseCtx.indexConvPending`). `rhsHasInlineDefectFork` treats the
+    range conversion as forking; its canonical key includes the bounds.
   - `degradeUnmodelledReassign`: a reassignment of a non-variant object
-    records `feUnsupportedOpHavoc`, unbinds the object and taints the path.
+    records `feUnsupportedOp`, unbinds the object and taints the path. The
+    kind is `dcSubstituted`, not `feUnsupportedOpHavoc`, because the site
+    drops the branch-change `FieldDefect` fork (§3.2 standing rule).
   - `walkIfFollowConcrete` drains each condition. A continuation whose new
     defect-survivor facts the draws contradict is not followed, and those
     facts join `concreteBranchOutcome`'s solves (a closure call's exit facts
@@ -1611,7 +1617,7 @@ behaviour was probed against the pinned toolchain (c and cpp identical):
   - Signed `mod` results and `float(uint64)` values change to Nim's; SAT/UNSAT
     verdicts that depended on the old values flip.
   - A reassignment of a declined construction is `sxUnknown` with
-    `feUnsupportedOpHavoc`, not `weInternalWalkerFault`.
+    `feUnsupportedOp`, not `weInternalWalkerFault`.
   - Concolic collection: `branchTrace` gains the handler decisions of a
     raising `if` condition and loses records from handlers the trace never
     entered; `ambiguousBranches` drops for a closure condition that raised.
@@ -1633,6 +1639,13 @@ behaviour was probed against the pinned toolchain (c and cpp identical):
   - `renderAsChoices` still rejects ref params, and an inline `ref <case
     object>` field reached through a ref is still a false `sxUnsat` (both
     reported under S8h).
+  - Z3 does not finish a query whose witness needs a string longer than
+    about a thousand bytes, and `rlimit` does not bound it. A label search
+    for `findColon(s, 0) > 1000` over a scan loop does not terminate on
+    `4cfa655`, before S8i. S8i's range check at a callee's `return i` into
+    `range[0..1000]` (`163rev_intoffset_range`) issues exactly that query:
+    the `RangeDefect` is real (Nim raises it for a 1001-byte string with no
+    early `':'`), but its solve does not return.
 
 Pins: `tests/tsymex_rfc0005_s8i_models.nim`. It covers:
 - `div -1` at 64, 32 and 8 bits;
@@ -1644,6 +1657,7 @@ Pins: `tests/tsymex_rfc0005_s8i_models.nim`. It covers:
   enum conversions, with in-range values and a live `except RangeDefect`;
 - the implicit `let`, `var`, object-field and `int8 -> Natural`
   conversions;
+- an out-of-bounds array index, which stays an `IndexDefect`;
 - symbolic and literal reassignment of a declined construction;
 - the concolic let-site and closure raising conditions, both raising and
   returning;

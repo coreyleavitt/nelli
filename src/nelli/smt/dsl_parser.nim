@@ -942,6 +942,15 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    indexConvPending*: bool
+                                   ## RFC-0005 S8i. Set by the array-index
+                                   ## parse for the one hidden conversion Nim
+                                   ## wraps the index in (to the array's index
+                                   ## type); consumed by the hidden-conversion
+                                   ## arm, which then skips the RangeDefect
+                                   ## range check -- Nim checks an index as an
+                                   ## index (`IndexDefect`), which `isIndex`
+                                   ## already forks.
     procs*:      Table[string, ProcSig]
     parsing*:    HashSet[string]   ## currently-being-parsed callees
                                    ## (cycle break for mutual recursion)
@@ -3279,6 +3288,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # recognize as a plain fixed-width int) falls through to the original
     # identity pass-through, UNCHANGED.
     block:
+      let isIndexConv = ctx.indexConvPending   # RFC-0005 S8i
+      ctx.indexConvPending = false
       let wrapped = n[n.len - 1]
       # #163 regression fix (post-round-9 gate). Check the literal shape
       # BEFORE calling `classifyType` on anything: `tests/tsymex_phase15_
@@ -3339,7 +3350,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # range-typed OBJECT FIELD case came back a false `sxSat` before
         # this fix, witness `f = 0`, and the same real Nim expression is
         # false for every value 0..100).
-        if n.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and
+        if not isIndexConv and
+           n.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and
            outerTy.kind == itInt and innerTy.kind == itInt and
            outerCls.range.hasRange and
            not (innerCls.range.hasRange and
@@ -3827,7 +3839,15 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                   else: ""
       mkField(objIR, ix, fname)
     of itArray:
+      # RFC-0005 S8i: Nim wraps the index in a hidden conversion to the
+      # array's index type (`arr[i]` is `BracketExpr(arr, HiddenStdConv(i))`)
+      # but checks it as an INDEX: `arr[7]` on an `array[5, int]` raises
+      # IndexDefect "index 7 not in 0 .. 4", never RangeDefect (probed, c
+      # and cpp). `isIndex` forks that; the conversion's range check must
+      # not fire as well.
+      ctx.indexConvPending = n[1].kind in {nnkHiddenStdConv, nnkHiddenSubConv}
       let idxIR = parseExpr(n[1], preamble, ctx)
+      ctx.indexConvPending = false
       let synth = freshSynth(ctx, "idx")
       preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
       mkVar(synth)

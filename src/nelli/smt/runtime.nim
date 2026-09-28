@@ -8976,13 +8976,15 @@ proc degradeUnmodelledReassign(p: Path, objName: string, kind: SVKind,
   ## the recorded decline surfaced as `weInternalWalkerFault`. Now the
   ## reassignment degrades through the same channel: the object is
   ## unbound again (a later read havocs, as the first one did) and the
-  ## path carries its own `feUnsupportedOpHavoc` token -- a superset of
-  ## every value the reassigned object can hold, whose `FieldDefect`
-  ## branch-change fork is not modelled.
-  let d = w.degrade(feUnsupportedOpHavoc,
+  ## path carries its own `feUnsupportedOp` token. Not
+  ## `feUnsupportedOpHavoc`: the reassignment's branch-change `FieldDefect`
+  ## fork (S8f) is dropped here, and a site that drops a raise is
+  ## `dcSubstituted` by the §3.2 standing rule -- the kind already lists
+  ## "variant reassignment" among its sites.
+  let d = w.degrade(feUnsupportedOp,
     "discriminator reassignment of `" & objName & "`, which is not a " &
     "modelled variant (kind " & $kind & "; its construction was declined) " &
-    "-- the object is left unmodelled (feUnsupportedOpHavoc)")
+    "-- the object is left unmodelled (feUnsupportedOp)")
   var env = p.env
   env.del(objName)
   forkPathTainted(p, p.pc, env, d)

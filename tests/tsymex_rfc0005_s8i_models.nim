@@ -398,6 +398,25 @@ suite "S8i (3b) an implicit conversion into a range type raises RangeDefect":
     check r.status == sxRaised
     if r.status == sxRaised: check r.raisedWitness[0] < 0
 
+# An array index is NOT one of these conversions. Nim wraps `arr[i]`'s
+# index in the same hidden conversion to the index type, but checks it as
+# an index: probe (c and cpp identical) `arr[7]` and `arr[-1]` on an
+# `array[5, int]`, and on an `array[R, int]` with `R = range[0..4]`, raise
+# IndexDefect "index 7 not in 0 .. 4", never RangeDefect. The walker's
+# own `isIndex` fork already models that check.
+
+proc arrIndexed(arr: array[5, int], i: int): int =
+  result = arr[i]
+
+suite "S8i (3c) an array index stays an IndexDefect":
+  test "an out-of-bounds array index raises IndexDefect, not RangeDefect":
+    let r = symexFind(arrIndexed, tRaisedExn("RangeDefect"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "IndexDefect"
+      check r.raisedWitness[1] < 0 or r.raisedWitness[1] > 4
+
 # ---- (4) symbolic reassignment of a declined construction ---------------------
 #
 # Nim (2.2.10): `S8iV(kind: t)` with a runtime `t` sets no arm field, so

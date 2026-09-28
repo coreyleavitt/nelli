@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 06:59Z)
+## Current position (refreshed 2026-09-28 08:40Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -184,8 +184,8 @@
 - **S8i landed `d1aff36`** (walker 157): feature `3dacacd`, fix `607e8d9`
   (array index is not a range conversion; reassignment decline kind), test
   `d1aff36`. Re-gate at the pre-rebase sha `8c878de` (tree identical but for this
-  handoff): pass=511 fail=0 skip=7, regressed=0 new-failing=0. Pushed; Windows
-  CI running.
+  handoff): pass=511 fail=0 skip=7, regressed=0 new-failing=0. Pushed;
+  **Windows CI (`d1aff36`): all three green.**
 - **Fence grew S8j + S8k (`3d7dd06`)** from S8i's different-mechanism findings
   (none deferred). **S8j** (opus, running in `scratchpad/wt-s8j`, branch
   `rfc-0005-s8j`): SUT top-level `return` lowering + raise drain (false sxUnsat),
@@ -194,11 +194,16 @@
   walker 158; self-gates -> `scratchpad/s8j-gate.log`. **S8k** after S8j:
   long-string Z3 queries that ignore rlimit (bounded decline to sxUnknown),
   concolic closure-condition resolution, `renderAsChoices` over ref params.
+- **S8j progress (08:40Z):** `9784b95` (fix: top-level return lowered, narrowing
+  conversions, inline ref variant sort, single range check) + `ef5f6d4`
+  (re-pin: unsigned narrowing truncates in Nim, so round-6 B2's decline pins
+  become sxSat). First gate at `9784b95` flagged those two; **re-gate running
+  at `ef5f6d4`** -> `scratchpad/s8j-gate2.log`.
 - **Remaining:** S8j -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8j (`rfc-0005-s8j`, `s8j-gate.log`); gates run from a
+  resume, check S8j (`rfc-0005-s8j`, `s8j-gate2.log`); gates run from a
   worktree at the sha they certify, never the live checkout. Order: S8j -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

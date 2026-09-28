@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 15:59Z)
+## Current position (refreshed 2026-09-28 16:56Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -212,12 +212,14 @@
   uninitialised ref locals, closure bare-return zero value, retire the
   producer-less `heRefVariantUnsupported`. **S8m (opus) running** in
   `scratchpad/wt-s8m`, branch `rfc-0005-s8m`, walker 160, self-gates ->
-  `scratchpad/s8m-gate.log` (committed `50f4a2c`; gate 466/515 at 15:59Z, clean so far). Soundness first, so S8m runs before S8k.
+  `scratchpad/s8m-gate.log` (`50f4a2c`; first gate regressed=0 new-failing=1 --
+  `s9_vetoes`, fixed in `6b0cd1e` (layout-changing cast keeps the catch-all
+  message); re-gate `s8m-gate2.log` at `6b0cd1e`, 339/515 at 16:56Z, clean so far). Soundness first, so S8m runs before S8k.
 - **Remaining:** S8m -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8m (`rfc-0005-s8m`, `s8m-gate.log`); gates run from a
+  resume, check S8m (`rfc-0005-s8m`, `s8m-gate2.log`); gates run from a
   worktree at the sha they certify, never the live checkout. Order: S8m -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

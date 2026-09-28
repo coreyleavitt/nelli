@@ -147,6 +147,11 @@ title = "S8j's exit remainder: finally on a return exit (callee and top level), 
 state = "done"
 
 [[slice]]
+id    = "S8m"
+title = "S8l's remainder: finally on break/continue exits, sort-checked Z3 stores (no silent sxUnsat), ref-local reassignment/cast walker fault, uninitialised ref locals, closure bare-return zero value, retire heRefVariantUnsupported"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

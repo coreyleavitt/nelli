@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 13:55Z)
+## Current position (refreshed 2026-09-28 14:57Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -205,14 +205,14 @@
   `e8fc9dd`): re-gate at `e0ce94a` pass=513 fail=0, regressed=0 new-failing=0
   new-ok=24 (tree = landed but for this handoff and the Windows-only
   `b7r_bytescan` re-pin). Linux-skipped hangers checked by the agent: nothing
-  touched. Pushed; Windows CI running.
+  touched. Pushed; **Windows CI (`e8fc9dd`): all three green.**
 - **Fence grew S8m (`a58dc08`)** from S8l's findings: `finally` skipped on
   break/continue exits (**false sxUnsat**), wrong-sort Z3 store swallowed into
   a **silent sxUnsat**, ref-local reassignment/cast `eqBV` walker fault,
   uninitialised ref locals, closure bare-return zero value, retire the
   producer-less `heRefVariantUnsupported`. **S8m (opus) running** in
   `scratchpad/wt-s8m`, branch `rfc-0005-s8m`, walker 160, self-gates ->
-  `scratchpad/s8m-gate.log`. Soundness first, so S8m runs before S8k.
+  `scratchpad/s8m-gate.log` (committed `50f4a2c`; gate 45/515 at 14:57Z). Soundness first, so S8m runs before S8k.
 - **Remaining:** S8m -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

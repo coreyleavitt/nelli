@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 08:40Z)
+## Current position (refreshed 2026-09-28 09:42Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -198,7 +198,7 @@
   conversions, inline ref variant sort, single range check) + `ef5f6d4`
   (re-pin: unsigned narrowing truncates in Nim, so round-6 B2's decline pins
   become sxSat). First gate at `9784b95` flagged those two; **re-gate running
-  at `ef5f6d4`** -> `scratchpad/s8j-gate2.log`.
+  at `ef5f6d4`** -> `scratchpad/s8j-gate2.log` (476/515 at 09:42Z, clean so far).
 - **Remaining:** S8j -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

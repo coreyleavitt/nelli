@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 14:57Z)
+## Current position (refreshed 2026-09-28 15:59Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -212,7 +212,7 @@
   uninitialised ref locals, closure bare-return zero value, retire the
   producer-less `heRefVariantUnsupported`. **S8m (opus) running** in
   `scratchpad/wt-s8m`, branch `rfc-0005-s8m`, walker 160, self-gates ->
-  `scratchpad/s8m-gate.log` (committed `50f4a2c`; gate 45/515 at 14:57Z). Soundness first, so S8m runs before S8k.
+  `scratchpad/s8m-gate.log` (committed `50f4a2c`; gate 466/515 at 15:59Z, clean so far). Soundness first, so S8m runs before S8k.
 - **Remaining:** S8m -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

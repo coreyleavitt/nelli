@@ -1402,6 +1402,20 @@ var seqOobConds* {.threadvar.}: seq[Z3Bool]
   ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
   ## Reset alongside `strIndexOobConds` at every reset site.
 
+var arithTrapConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
+  ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
+  ## and 64 bits (and `div` there, which traps when overflow checks are
+  ## off), compiled to a hardware `idiv` that raises SIGFPE -- an uncatchable
+  ## process abort (`except Defect` does not see it; probed on the pinned
+  ## toolchain, c and cpp). `lowerArith` pushes each trap predicate here;
+  ## `drainArithTraps` (via `drainScalarRaiseForks`) adds its negation to the
+  ## continuation's defect-survivor facts and forks NO raise: no execution
+  ## continues past the trap, and there is no exception to route. Before S8i
+  ## the continuation carried `low(T) mod -1 == 0`, a state Nim never
+  ## reaches. `syncArithTrapCond` appends to `WalkCtx.arithTrapConds` when in
+  ## a walk. Reset alongside `seqOobConds` at every reset site.
+
 # ---- Phase 15 Cluster R (R1): per-walker ref-sort + nil-const cache -----------
 #
 # Each distinct `ref T`/`ptr T` pointee type gets ONE fresh uninterpreted sort
@@ -1634,6 +1648,12 @@ proc syncSeqOobCond*(cond: Z3Bool)
   ## N14 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
   ## `cond` to `WalkCtx.seqOobConds` (the LIVE store for the seq del-OOB
   ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
+
+proc syncArithTrapCond*(cond: Z3Bool)
+  ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
+  ## appends `cond` to `WalkCtx.arithTrapConds` (the LIVE store for the
+  ## survivor-only arithmetic-trap sink). No-op when no active walk. Defined
+  ## after `WalkCtx`.
 
 proc syncExtractionError*(info: SymexErrorInfo)
   ## CR-9 Stage 5 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -3131,6 +3151,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # `doAssert` firing, or a bv2int/int2bv wrap silently reintroducing a
     # narrower representation.
     case e.ciwTgtWidth
+    of 8:  some(SymVal(kind: svBV8,  signed: e.ciwTgtSigned, bv8:  mkBitVec[8](0)))  # RFC-0005 S8i: range targets
     of 16: some(SymVal(kind: svBV16, signed: e.ciwTgtSigned, bv16: mkBitVec[16](0)))
     of 32: some(SymVal(kind: svBV32, signed: e.ciwTgtSigned, bv32: mkBitVec[32](0)))
     else:  some(SymVal(kind: svBV64, signed: e.ciwTgtSigned, bv64: mkBitVec[64](0'i64)))
@@ -3553,6 +3574,90 @@ proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
   else:
     raiseAssert "lowerConvIntReinterpret: unsupported operand kind: " &
       $operandSV.kind
+
+proc intBounds(width: int): (int64, int64)
+  ## RFC-0005 S8i fwd-decl (`lowerConvIntRange`); defined beside
+  ## `overflowCondInt`.
+
+proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
+  ## RFC-0005 S8i. The low `tgtWidth` bits of a wider BV (C's truncating
+  ## integer conversion). `lowerConvIntRange` reaches it only for a value
+  ## its range check has confined to the target, where the low bits ARE the
+  ## value. `extract`'s bounds are static, so each pair has its own arm.
+  case v.kind
+  of svBV64:
+    case tgtWidth
+    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv64, 7, 0))
+    of 16: SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv64, 15, 0))
+    else:  SymVal(kind: svBV32, signed: tgtSigned, bv32: extract(v.bv64, 31, 0))
+  of svBV32:
+    case tgtWidth
+    of 8:  SymVal(kind: svBV8,  signed: tgtSigned, bv8:  extract(v.bv32, 7, 0))
+    else:  SymVal(kind: svBV16, signed: tgtSigned, bv16: extract(v.bv32, 15, 0))
+  of svBV16:
+    SymVal(kind: svBV8, signed: tgtSigned, bv8: extract(v.bv16, 7, 0))
+  else:
+    raiseAssert "truncBV: unsupported operand kind: " & $v.kind
+
+proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
+  ## RFC-0005 S8i. An integer conversion to a `range` (or enum) target:
+  ## `Natural(x)`, `Positive(x)`, `range[a..b](x)`, `R(x)` for a subrange
+  ## `R`, `E(x)` for an enum `E`. Nim checks the operand's VALUE against the
+  ## target's bounds and raises `RangeDefect` outside them ("value out of
+  ## range: -1 notin 0 .. 9223372036854775807" for `Natural(-1)`; probed on
+  ## the pinned toolchain, c and cpp), then converts. The check's negation
+  ## goes to the `rangeDefectConds` sink (acRange-gated in its drain, as
+  ## S8g's float -> range check is); the value is converted to the target's
+  ## width, which is exact wherever the check passes. Before S8i the whole
+  ## conversion was an identity pass-through: no check, and an out-of-range
+  ## value flowed on as the target type.
+  ##
+  ## The bounds are clamped to the operand's own type first, so each
+  ## literal fits the width it is compared at (`Positive(x)` of an `int8`
+  ## compares against 1 .. 127, never a truncated `high(int)`).
+  let bvW = case sv.kind
+            of svBV8: 8
+            of svBV16: 16
+            of svBV32: 32
+            of svBV64: 64
+            else: 0
+  let (w, sgn) =
+    if sv.kind == svInt and sv.ziWidth != 0: (sv.ziWidth, sv.ziSigned)
+    elif bvW != 0: (bvW, sv.signed)
+    else: (e.ciwSrcWidth, e.ciwSrcSigned)
+  let (sMin, sMax) =
+    if sgn: intBounds(w)
+    elif w < 64: (0'i64, (1'i64 shl w) - 1)
+    else: (0'i64, high(int64))   # a u64 above this still needs the check
+  let lo = max(e.ciwLo, sMin)
+  let hi = min(e.ciwHi, sMax)
+  var conds: seq[Z3Bool]
+  if lo > hi:
+    conds = @[mkBool(false)]
+  elif sv.kind == svInt:
+    conds = @[sv.zi >= mkZ3IntLit(lo), sv.zi <= mkZ3IntLit(hi)]
+  elif lo != sMin or hi != sMax or (not sgn and w == 64):
+    # [range-invariant: range-defect-check -- the target's bounds are the
+    # conversion's defect CONDITION, not a path constraint on a stored
+    # value, so `rangeCondsIfNeeded` is not the applicable helper]
+    conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
+  if conds.len > 0:
+    var inRange = conds[0]
+    for i in 1 ..< conds.len: inRange = inRange and conds[i]
+    rangeDefectConds.add(not inRange)              # threadvar fallback
+    syncRangeDefectCond(not inRange)
+  let tw = e.ciwTgtWidth
+  if sv.kind == svInt:
+    SymVal(kind: svInt, zi: sv.zi, ziWidth: tw, ziSigned: e.ciwTgtSigned,
+           ziIvl: sv.ziIvl)
+  elif bvW == 0:
+    sv    # a non-integer placeholder: nothing to convert (honest-incomplete)
+  elif tw > w:
+    lowerConvIntWidth(sv, tw, e.ciwTgtSigned)
+  elif tw < w:
+    truncBV(sv, tw, e.ciwTgtSigned)
+  else:
+    lowerConvIntReinterpret(sv, tw, e.ciwTgtSigned)
 
 proc symEq(a, b: SymVal): Z3Bool =
   ## Equality of two same-kind primitive SymVals as a Z3Bool.
@@ -4418,17 +4523,22 @@ template divBV(a, b: SymVal): SymVal =
     raise newException(ValueError, "divBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
 template modBV(a, b: SymVal): SymVal =
+  ## RFC-0005 S8i: Nim's signed `mod` is C's `%`, the TRUNCATED remainder,
+  ## whose sign is the dividend's (`-7 mod 2 == -1`, `7 mod -2 == 1`,
+  ## probed on the pinned toolchain) -- `bvsrem`. It was `bvsmod` (the sign
+  ## of the divisor): `-7 mod 2` modelled as 1, a false `sxUnsat`/`sxSat`
+  ## for every negative operand of mixed sign.
   doAssert a.kind == b.kind
   let s = a.signed
   case a.kind
   of svBV8:
-    liftBV((if s: bvsmod(a.bv8,  b.bv8)  else: bvurem(a.bv8,  b.bv8)), s)
+    liftBV((if s: bvsrem(a.bv8,  b.bv8)  else: bvurem(a.bv8,  b.bv8)), s)
   of svBV16:
-    liftBV((if s: bvsmod(a.bv16, b.bv16) else: bvurem(a.bv16, b.bv16)), s)
+    liftBV((if s: bvsrem(a.bv16, b.bv16) else: bvurem(a.bv16, b.bv16)), s)
   of svBV32:
-    liftBV((if s: bvsmod(a.bv32, b.bv32) else: bvurem(a.bv32, b.bv32)), s)
+    liftBV((if s: bvsrem(a.bv32, b.bv32) else: bvurem(a.bv32, b.bv32)), s)
   of svBV64:
-    liftBV((if s: bvsmod(a.bv64, b.bv64) else: bvurem(a.bv64, b.bv64)), s)
+    liftBV((if s: bvsrem(a.bv64, b.bv64) else: bvurem(a.bv64, b.bv64)), s)
   else:
     raise newException(ValueError, "modBV on non-BV SymVal")  # [raise-audited: category-c: BV-arithmetic-only reachability (see binBV)]
 
@@ -4675,6 +4785,24 @@ proc arithFloat(a, b: SymVal, op: IRBinop): SymVal =
        of bDiv: a.fp64 / b.fp64
        else: raise newException(ValueError, "arithFloat: " & $op & " not a float arith op")))  # [raise-audited: category-c: op-narrowed by caller dispatch (see arithFloat above)]
 
+proc truncDivInt(a, b: Z3Int): tuple[q, r: Z3Int] =
+  ## RFC-0005 S8i. Nim's `div`/`mod` on a signed integer are C's: the
+  ## quotient truncates toward zero and the remainder takes the dividend's
+  ## sign (`-7 div 2 == -3`, `-7 mod 2 == -1`, `7 mod -2 == 1`; probed on the
+  ## pinned toolchain). Z3's Int `div`/`mod` are EUCLIDEAN (`0 <= r < |b|`),
+  ## which agrees only for a non-negative dividend. From the Euclidean pair
+  ## `(qe, re)`: a negative dividend with a non-zero `re` moves the quotient
+  ## one step toward zero (`qe + sign(b)`) and the remainder by `|b|`.
+  ## Before S8i the svInt arm used Z3's pair directly (the `bMod` gap
+  ## recorded in `tsymex_phase15_A1_arithmetic.nim`).
+  let qe = a div b
+  let re = a mod b
+  let zero = mkInt(0)
+  let adjust = a < zero and re != zero
+  let step = ite(b > zero, mkInt(1), mkInt(-1))
+  let absB = ite(b >= zero, b, zero - b)
+  (q: ite(adjust, qe + step, qe), r: ite(adjust, re - absB, re))
+
 proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   doAssert a.kind == svInt and b.kind == svInt
   ## R3 (S2): propagate width metadata to the result so CHAINED arithmetic
@@ -4706,8 +4834,8 @@ proc arithInt(a, b: SymVal, op: IRBinop): SymVal =
   of bAdd: SymVal(kind: svInt, zi: a.zi + b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
   of bSub: SymVal(kind: svInt, zi: a.zi - b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
   of bMul: SymVal(kind: svInt, zi: a.zi * b.zi, ziWidth: rw, ziSigned: rs, ziIvl: ri)
-  of bDiv: SymVal(kind: svInt, zi: a.zi div b.zi, ziWidth: rw, ziSigned: rs)
-  of bMod: SymVal(kind: svInt, zi: a.zi mod b.zi, ziWidth: rw, ziSigned: rs)
+  of bDiv: SymVal(kind: svInt, zi: truncDivInt(a.zi, b.zi).q, ziWidth: rw, ziSigned: rs)
+  of bMod: SymVal(kind: svInt, zi: truncDivInt(a.zi, b.zi).r, ziWidth: rw, ziSigned: rs)
   else: raise newException(ValueError, "arithInt: not an arithmetic op")  # [raise-audited: category-c: op-narrowed by caller dispatch (arithInt's op set is pre-restricted by lowerArith before dispatch)]
 
 proc cmpInt(a, b: SymVal, op: IRBinop): SymVal =
@@ -4970,9 +5098,10 @@ proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
   ## conversion, unlike the BV predicates `overflowCond` builds — that hang
   ## concern is specific to bv2int/int2bv, not present here). Only called
   ## for `op in {bAdd, bSub, bMul}` — the caller guards this, mirroring
-  ## `overflowCond`'s own op restriction (parity with the BV path: div/mod
-  ## are never overflow-forked on either side, by design — see the R16-3
-  ## `divisorIsZero` sink for the div/mod-by-zero raise instead).
+  ## `overflowCond`'s own op restriction (parity with the BV path; the one
+  ## division overflow, `low(T) div -1`, is `divLowByMinusOne`'s -- RFC-0005
+  ## S8i -- and the R16-3 `divisorIsZero` sink owns the div/mod-by-zero
+  ## raise).
   let (lo, hi) = intBounds(a.ziWidth)
   let c = case op
           of bAdd: a.zi + b.zi
@@ -4981,6 +5110,39 @@ proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
           else: raise newException(ValueError,  # [raise-audited: category-c: documented caller-guarded invariant (own doc note)]
             "overflowCondInt: unexpected op " & $op)
   c < mkZ3IntLit(lo) or c > mkZ3IntLit(hi)
+
+proc divLowByMinusOne(a, b: SymVal): Z3Bool =
+  ## RFC-0005 S8i. `a == low(T) and b == -1` for a signed operand pair, in
+  ## the operands' NATIVE sort (a signed BV, or a width-stamped svInt): the
+  ## one signed division whose quotient `-low(T)` is unrepresentable. Nim's
+  ## `div` raises `OverflowDefect` there at every width (its check precedes
+  ## the division); the C division itself, which `mod` reaches unchecked,
+  ## traps (SIGFPE) at 32 and 64 bits -- narrower operands are promoted to
+  ## C `int` first, so `low(int8) mod -1 == 0`. Probed on the pinned
+  ## toolchain, c and cpp. The caller guards the kind and signedness.
+  case a.kind
+  of svBV8:  a.bv8  == mkBitVec[8](low(int8))  and b.bv8  == mkBitVec[8](-1)
+  of svBV16: a.bv16 == mkBitVec[16](low(int16)) and b.bv16 == mkBitVec[16](-1)
+  of svBV32: a.bv32 == mkBitVec[32](low(int32)) and b.bv32 == mkBitVec[32](-1)
+  of svBV64: a.bv64 == mkBitVec[64](low(int64)) and b.bv64 == mkBitVec[64](-1)
+  of svInt:
+    let (lo, _) = intBounds(a.ziWidth)
+    a.zi == mkZ3IntLit(lo) and b.zi == mkZ3IntLit(-1)
+  else:
+    raise newException(ValueError,  # [raise-audited: category-c: kind-narrowed by caller dispatch (own doc: caller-guarded)]
+      "divLowByMinusOne: unexpected kind " & $a.kind)
+
+proc divOperandWidth(a: SymVal): int =
+  ## RFC-0005 S8i. The static width of a signed division's operand, or 0
+  ## when it has none (an unstamped svInt -- the unbounded `isUnbounded`
+  ## integer semantics, where no division overflows).
+  case a.kind
+  of svBV8: 8
+  of svBV16: 16
+  of svBV32: 32
+  of svBV64: 64
+  of svInt: a.ziWidth
+  else: 0
 
 proc tryDischargeOverflowInt(a, b: SymVal, op: IRBinop): Option[Interval] =
   ## Issue #161 slice 2 — the static half of the ADR-0001 amendment.
@@ -5088,6 +5250,28 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
       let oc = overflowCondInt(a, b, op)
       overflowConds.add oc
       syncOverflowCond(oc)
+  # RFC-0005 S8i: signed `div`/`mod` of `low(T)` by `-1`. `div` raises
+  # `OverflowDefect` (Nim's check, at every width) -- the `overflowConds`
+  # sink, acOverflow-gated like add/sub/mul. At 32 and 64 bits the C
+  # division itself traps (SIGFPE, an uncatchable abort): `mod` always
+  # reaches it (Nim has no check there), and so does `div` with overflow
+  # checks off -- the survivor-only `arithTrapConds` sink, drained after the
+  # overflow raises. Before S8i neither was modelled: `low(int) div -1`
+  # continued as `low(int)`, `low(int) mod -1` as 0.
+  if op in {bDiv, bMod}:
+    let signedOp = (a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed) or
+                   (a.kind == svInt and a.ziWidth != 0 and a.ziSigned)
+    let width = divOperandWidth(a)
+    let loExcluded = a.kind == svInt and a.ziIvl.isSome and width != 0 and
+                     a.ziIvl.get.lo > intBounds(width)[0]
+    if signedOp and width in {8, 16, 32, 64} and not loExcluded:
+      let tc = divLowByMinusOne(a, b)
+      if op == bDiv:
+        overflowConds.add tc
+        syncOverflowCond(tc)
+      if width in {32, 64}:
+        arithTrapConds.add tc
+        syncArithTrapCond(tc)
   if a.kind == svInt:
     arithInt(a, b, op)
   elif a.kind in {svFloat32, svFloat64}:
@@ -5281,7 +5465,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     lowerFloatArm(env, e)
   of iekConvIntWidth:
     # Round-6 B2: WIDENING-only int-family width conversion.
-    lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
+    if e.ciwHasRange:   # RFC-0005 S8i: a range-checked conversion
+      lowerConvIntRange(lower(env, e.ciwOperand), e)
+    else:
+      lowerConvIntWidth(lower(env, e.ciwOperand), e.ciwTgtWidth, e.ciwTgtSigned)
   of iekConvIntReinterpret:
     # A1 adjudication (walker v116): same-width signedness reinterpret.
     lowerConvIntReinterpret(lower(env, e.cirOperand), e.cirWidth, e.cirTgtSigned)
@@ -7697,6 +7884,11 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `strIndexOobConds` at every reset site.
+    arithTrapConds: seq[Z3Bool]
+                      ## RFC-0005 S8i. LIVE accumulator for the survivor-only
+                      ## arithmetic-trap predicates `lowerArith` deposits (see
+                      ## the threadvar's doc). Drained by `drainArithTraps`.
+                      ## Reset alongside `seqOobConds` at every reset site.
     closureRaises: seq[ClosureRaise]
                       ## RFC-0005 S7. Raises that escaped a closure body's own
                       ## handlers during `applyClosureGround`'s descent (the
@@ -8161,6 +8353,13 @@ proc syncSeqOobCond*(cond: Z3Bool) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].seqOobConds.add cond
 
+proc syncArithTrapCond*(cond: Z3Bool) =
+  ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
+  ## syncParseIntRaiseCond.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].arithTrapConds.add cond
+
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
   ## active), mirrors `p`'s heap state into the WalkCtx caller-heap fields
@@ -8203,6 +8402,7 @@ type
     parseInt: seq[ParseIntRaise]              ## RFC-0005 S10
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
+    arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
     didMutate: bool
@@ -8224,7 +8424,8 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     parseInt: w.parseIntRaiseConds, divByZero: w.divByZeroConds,
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
-    rangeDefect: w.rangeDefectConds, closureRaises: w.closureRaises,
+    rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
+    closureRaises: w.closureRaises,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
     exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
@@ -8238,6 +8439,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.seqOobConds = @[]; seqOobConds = @[]
   w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
+  w.arithTrapConds = @[]; arithTrapConds = @[]
   w.closureRaises = @[]
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
@@ -8255,6 +8457,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.convFloatToIntBoundConds = s.convBound; convFloatToIntBoundConds = s.convBound
   w.rangeDefectConds = s.rangeDefect
   rangeDefectConds = s.rangeDefect
+  w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
   w.closureRaises = s.closureRaises
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
@@ -8763,6 +8966,27 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 
+proc degradeUnmodelledReassign(p: Path, objName: string, kind: SVKind,
+                               w: var WalkCtx): Path =
+  ## RFC-0005 S8i. A discriminator reassignment (`v.kind = ...`) whose
+  ## object is not a modelled variant: its construction was DECLINED
+  ## (`isVariantConstructSym`'s recorded decline leaves the destination
+  ## unbound, and the parser's A-normalised read of it havocs a scalar
+  ## placeholder). Both reassignment arms `doAssert`ed a variant there, so
+  ## the recorded decline surfaced as `weInternalWalkerFault`. Now the
+  ## reassignment degrades through the same channel: the object is
+  ## unbound again (a later read havocs, as the first one did) and the
+  ## path carries its own `feUnsupportedOpHavoc` token -- a superset of
+  ## every value the reassigned object can hold, whose `FieldDefect`
+  ## branch-change fork is not modelled.
+  let d = w.degrade(feUnsupportedOpHavoc,
+    "discriminator reassignment of `" & objName & "`, which is not a " &
+    "modelled variant (kind " & $kind & "; its construction was declined) " &
+    "-- the object is left unmodelled (feUnsupportedOpHavoc)")
+  var env = p.env
+  env.del(objName)
+  forkPathTainted(p, p.pc, env, d)
+
 proc forkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                 msg: Option[string], w: var WalkCtx): seq[Path] =
   ## Phase 16 D1a. Unconditionally fork the defect sub-path (constrained by
@@ -9053,6 +9277,30 @@ genRaiseForkDrain(drainSeqOobRaises, seqOobConds, none(ArithCheck),
 genRaiseForkDrain(drainRangeRaises, rangeDefectConds, some(acRange),
                    "RangeDefect", "value out of range")
 
+proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8i. Drain the survivor-only arithmetic-trap sink (see the
+  ## `arithTrapConds` threadvar): the continuation `p` gains each trap
+  ## predicate's negation as a defect-survivor fact, and nothing is forked --
+  ## a SIGFPE aborts the process, so there is no raise to route and no
+  ## execution past it. Ungated: `arithChecks` models Nim's runtime checks,
+  ## and this is the hardware's, which no check setting removes.
+  let conds = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let c = wp[].arithTrapConds
+      wp[].arithTrapConds = @[]
+      arithTrapConds = @[]   # keep threadvar reset in sync
+      c
+    else:
+      let c = arithTrapConds
+      arithTrapConds = @[]
+      c
+  if conds.len == 0:
+    return @[p]
+  let surv = forkPath(p, p.pc, p.env)
+  for c in conds: surv.defectSurvivorPc.add(not c)
+  @[surv]
+
 proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
   ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
@@ -9104,7 +9352,8 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## fresh value outside).
   ## R16-4 + SND-4 + N14 + S8g: then chains parseInt, div/mod-by-zero,
   ## signed-integer-overflow, string-index-OOB, seq-del-OOB and RangeDefect
-  ## raise drains. Each stage feeds the survivors of the previous stage so
+  ## raise drains (RFC-0005 S8i: with the survivor-only arithmetic-trap
+  ## drain after the overflow stage). Each stage feeds the survivors of the previous stage so
   ## every combination of independent defect conditions is explored.
   ##
   ## RFC-0005 S8g: each stage's sink is read ONCE here and reinstated before
@@ -9121,6 +9370,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let strSnap = w.strIndexOobConds
   let seqSnap = w.seqOobConds
   let rangeSnap = w.rangeDefectConds
+  let trapSnap = w.arithTrapConds
   template stage(inp: seq[Path]; sinkW, sinkT, snap, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
@@ -9138,8 +9388,13 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
                  drainParseIntRaises)
   let s3 = stage(s2, divByZeroConds, divByZeroConds, divSnap,
                  drainDivByZeroRaises)
-  let s4 = stage(s3, overflowConds, overflowConds, ovfSnap,
-                 drainOverflowRaises)
+  let s4a = stage(s3, overflowConds, overflowConds, ovfSnap,
+                  drainOverflowRaises)
+  # RFC-0005 S8i: after the overflow raises, so a `low(T) div -1` raises
+  # `OverflowDefect` (Nim's check runs first) and only its survivor is
+  # confined off the trap.
+  let s4 = stage(s4a, arithTrapConds, arithTrapConds, trapSnap,
+                 drainArithTraps)
   let s5 = stage(s4, strIndexOobConds, strIndexOobConds, strSnap,
                  drainStrIndexRaises)
   let s6 = stage(s5, seqOobConds, seqOobConds, seqSnap, drainSeqOobRaises)
@@ -9305,6 +9560,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  arithTrapConds = @[]
+  w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
@@ -9337,6 +9594,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.strIndexOobConds = @[]              # SND-4: reset string-index OOB raise sink
   seqOobConds = @[]
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
+  arithTrapConds = @[]
+  w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
@@ -9381,7 +9640,8 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   else: defaultConcreteBranchRLimit
 
 proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
-                           cond: Z3Bool, settings: SymexSettings): Option[bool] =
+                           cond: Z3Bool, settings: SymexSettings,
+                           facts: seq[Z3Bool] = @[]): Option[bool] =
   ## Determine whether `cond` (a branch predicate, already lowered against
   ## the current symbolic env) is concretely true or false under
   ## `concreteEq`, WITHOUT asserting `concreteEq` onto any live path.
@@ -9410,6 +9670,11 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## one UNSAT" branch, and `zsUnknown` is neither, so an exhausted bound
   ## can only ever push the result toward `none(bool)`, never flip it
   ## toward an incorrect `some(true)`/`some(false)`.
+  ##
+  ## RFC-0005 S8i: `facts` (default none) join both solves -- the defect-
+  ## survivor facts the condition's own lowering produced, which define a
+  ## closure call's result there (its exit facts). `walkIfFollowConcrete`
+  ## passes them only after checking the draws satisfy them.
   let rlimit = concreteBranchRLimit(settings)
   let sTrue = newSolver(ctx)
   let spTrue = newParams(ctx)
@@ -9417,6 +9682,7 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   spTrue.set("random_seed", 0'u)
   sTrue.setParams(spTrue)
   for c in concreteEq: sTrue.add(c)
+  for c in facts: sTrue.add(c)
   sTrue.add(cond)
   let rTrue = sTrue.check()
   let sFalse = newSolver(ctx)
@@ -9425,11 +9691,28 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   spFalse.set("random_seed", 0'u)
   sFalse.setParams(spFalse)
   for c in concreteEq: sFalse.add(c)
+  for c in facts: sFalse.add(c)
   sFalse.add(not cond)
   let rFalse = sFalse.check()
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
+
+proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
+                          conds: seq[Z3Bool], settings: SymexSettings): bool =
+  ## RFC-0005 S8i. True iff `conds` (a path's `pc` and defect-survivor
+  ## facts) is UNSAT under the concrete pins: the replayed execution cannot
+  ## be on that path. One scratch solve, bounded like
+  ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
+  ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
+  let sv = newSolver(ctx)
+  let sp = newParams(ctx)
+  sp.set("rlimit", concreteBranchRLimit(settings))
+  sp.set("random_seed", 0'u)
+  sv.setParams(sp)
+  for c in concreteEq: sv.add(c)
+  for c in conds: sv.add(c)
+  sv.check() == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -9576,13 +9859,20 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
   ## original concrete draws are a model of it, by construction of this
   ## very function — the soundness pin catches a bug in this function, not
   ## a property of the SUT).
+  ##
+  ## RFC-0005 S8i: each condition's scalar raises are drained
+  ## (`drainScalarRaiseForks`), as the explore arm and
+  ## `walkWhileFollowConcrete` drain theirs. They were never drained here:
+  ## a closure call in the condition that raised on this trace had its raise
+  ## dropped, so the handler that caught it was never walked and its
+  ## decisions never recorded. The drain routes the raise paths
+  ## (`routeRaise` skips the ones the replay did not take) and may return
+  ## several continuations (a float -> int conversion's in/out-of-domain
+  ## split, parseInt's clean/lax pair): one whose NEW defect-survivor facts
+  ## the concrete draws contradict is not this trace and is not followed.
   var survivors: seq[Path]
   for p in paths:
     if w.shouldStop: return survivors
-    var cp = p
-    var accumNegated: seq[Z3Bool]
-    var takenArm = -1
-    var takenCond: Z3Bool
     # RFC-fuzzer-nextgen G2: snapshot the pc BEFORE this if-statement's own
     # branch predicates are lowered/appended — the "prefix constraints up to
     # that branch" a later flip-solve needs. Side-conditions `lowerBoolInExpr`
@@ -9590,42 +9880,62 @@ proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[P
     # this point, not before — deliberately excluded from `prefixPc` (they
     # describe how THIS decision's own predicate was computed, not what held
     # on entry to it).
-    let branchPrefixPc = cp.pc
-    for i, br in stmt.branches:
-      let (condBool, cp2) = lowerBoolInExpr(cp, br.cond, w)
-      cp = cp2
-      let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool, w.settings)
-      if outcome.isNone:
-        # Walker-boundary concretization for control flow: `cond` isn't
-        # pinned by the symbolicated draws alone. Graceful degrade — stop
-        # following this path past the ambiguous branch rather than guess
-        # (guessing could collect an UNSOUND constraint); counted, not
-        # silently dropped — attributed to `wckIf` (R28).
-        markAmbiguous(w, wckIf)
-        return survivors & cp
-      if outcome.get():
-        takenArm = i
-        takenCond = condBool
-        break
-      accumNegated.add(not condBool)
-    # RFC-fuzzer-nextgen G2: record this DETERMINED decision (the ambiguous
-    # case above already returned before reaching here — every record is
-    # therefore backed entirely by modelable conjuncts). `observedTruth` is
-    # the taken arm's own condition, or — when no arm fired — the conjunction
-    # of every branch's negated condition (`mkAnd` on a singleton returns it
-    # unchanged, so this collapses to `not condBool` for a plain if/else).
-    let observedTruth = if takenArm >= 0: takenCond else: mkAnd(accumNegated)
-    w.branchTrace.add ConcolicBranchRecord(
-      prefixPc: branchPrefixPc, observedTruth: observedTruth, armTaken: takenArm)
-    if takenArm >= 0:
-      let armPath = forkPath(cp, cp.pc & accumNegated & @[takenCond], cp.env)
-      survivors.add walk(stmt.branches[takenArm].body, @[armPath], w)
-    else:
-      let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
-      if stmt.elseBody != nil:
-        survivors.add walk(stmt.elseBody, @[elsePath], w)
-      else:
-        survivors.add elsePath
+    let branchPrefixPc = p.pc
+    # RFC-0005 S8i: a worklist of (next branch, path, negated earlier
+    # conditions), since a drain can continue on more than one path.
+    var states: seq[(int, Path, seq[Z3Bool])] = @[(0, p, newSeq[Z3Bool]())]
+    var si = 0
+    while si < states.len:
+      if w.shouldStop: return survivors
+      let (i, sp, accumNegated) = states[si]
+      inc si
+      if i >= stmt.branches.len:
+        # RFC-fuzzer-nextgen G2: record this DETERMINED decision (an
+        # ambiguous one returned before reaching here — every record is
+        # therefore backed entirely by modelable conjuncts). No arm fired:
+        # `observedTruth` is the conjunction of every branch's negated
+        # condition (`mkAnd` on a singleton returns it unchanged, so this
+        # collapses to `not condBool` for a plain if/else).
+        w.branchTrace.add ConcolicBranchRecord(
+          prefixPc: branchPrefixPc, observedTruth: mkAnd(accumNegated),
+          armTaken: -1)
+        let elsePath = forkPath(sp, sp.pc & accumNegated, sp.env)
+        if stmt.elseBody != nil:
+          survivors.add walk(stmt.elseBody, @[elsePath], w)
+        else:
+          survivors.add elsePath
+        continue
+      # The facts this condition's lowering and drain add (a closure call's
+      # exit facts, a drained raise's negation): they must hold on the
+      # replay, and they define a closure call's result in `condBool`.
+      let factBase = sp.defectSurvivorPc.len
+      let (condBool, cp2) = lowerBoolInExpr(sp, stmt.branches[i].cond, w)
+      for dp in drainScalarRaiseForks(cp2, w):
+        if w.shouldStop: return survivors
+        let newFacts =
+          if dp.defectSurvivorPc.len > factBase: dp.defectSurvivorPc[factBase .. ^1]
+          else: newSeq[Z3Bool]()
+        if newFacts.len > 0 and
+           concretelyInfeasible(w.z3, w.concreteEq, newFacts, w.settings):
+          continue
+        let outcome = concreteBranchOutcome(w.z3, w.concreteEq, condBool,
+                                            w.settings, newFacts)
+        if outcome.isNone:
+          # Walker-boundary concretization for control flow: `cond` isn't
+          # pinned by the symbolicated draws alone. Graceful degrade — stop
+          # following this path past the ambiguous branch rather than guess
+          # (guessing could collect an UNSOUND constraint); counted, not
+          # silently dropped — attributed to `wckIf` (R28).
+          markAmbiguous(w, wckIf)
+          return survivors & dp
+        if outcome.get():
+          # RFC-fuzzer-nextgen G2: the taken arm's own condition.
+          w.branchTrace.add ConcolicBranchRecord(
+            prefixPc: branchPrefixPc, observedTruth: condBool, armTaken: i)
+          let armPath = forkPath(dp, dp.pc & accumNegated & @[condBool], dp.env)
+          survivors.add walk(stmt.branches[i].body, @[armPath], w)
+        else:
+          states.add (i + 1, dp, accumNegated & @[not condBool])
   survivors
 
 proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -10498,6 +10808,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add p
         continue
       let oldSV = p.env[stmt.vrObjName]
+      if oldSV.kind notin {svVariant, svMultiVariant}:
+        # RFC-0005 S8i: a declined construction's placeholder.
+        out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
+        continue
       doAssert oldSV.kind == svVariant,
         "isVariantReassign on non-variant kind=" & $oldSV.kind
       let oldDisc = oldSV.vDisc[]
@@ -10690,8 +11004,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             newEnv[stmt.vrsObjName] = newSV
             out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
         else:
-          doAssert false,
-            "isVariantReassignSymbolic on non-variant kind=" & $oldSV.kind
+          # RFC-0005 S8i: a declined construction's placeholder (this was a
+          # `doAssert false`, surfacing the decline as an internal fault).
+          out2.add degradeUnmodelledReassign(cp, stmt.vrsObjName, oldSV.kind, w)
     return out2
   of isVariantConstructSym:
     # Round-6 A3 (ADR-0029). Fork-per-tag SYMBOLIC-discriminant variant
@@ -11164,6 +11479,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           w.strIndexOobConds = @[]
           seqOobConds = @[]
           w.seqOobConds = @[]
+          arithTrapConds = @[]
+          w.arithTrapConds = @[]
           for arg in stmt.cargs:
             discard lower(p.env, arg)
           let pd = drainPendingLowerEffects(p)
@@ -11340,6 +11657,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
         seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
         w.seqOobConds = @[]                ## N14: WalkCtx field
+        arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
+        w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
           ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -11987,6 +12306,18 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # catches everything in Nim too), so that handler continuation stays clean.
   # An escape to a caller carries the path on unchanged; the caller's
   # `routeRaise` decides again for its own handlers.
+  # RFC-0005 S8i. Under `wmFollowConcrete` a raise the concrete replay did
+  # not take is not routed: its handler would be walked and recorded as a
+  # decision of THIS trace (a `ConcolicBranchRecord` inside a handler that
+  # never ran, and a result path whose pc the draws contradict, so
+  # `pcSatByConcreteInputs` went false). A let-site `x div y` with `y != 0`
+  # concretely routed its `DivByZeroDefect` path into the handler before
+  # this. The explore mode is unchanged; `maybeForkDefect` already skipped
+  # the concretely-false defect forks it owns.
+  if w.mode == wmFollowConcrete and
+     concretelyInfeasible(w.z3, w.concreteEq, p.pc & p.defectSurvivorPc,
+                          w.settings):
+    return @[]
   let raisedKnown = isKnownExnType(typeId, w.statics.exnTable,
                                    w.statics.userExnHierarchy)
   var unknownTok: Degrade
@@ -13843,6 +14174,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   overflowConds = @[]                    ## R16-4: reset signed-integer overflow raise-fork sink
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
+  arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

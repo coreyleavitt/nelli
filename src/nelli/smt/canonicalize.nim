@@ -184,7 +184,20 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "156"
+const symexWalkerVersion* = "157"
+  ## RFC-0005 S8i (2026-09-27) — S8g's different-mechanism remainder.
+  ## `low(T) div -1` raises `OverflowDefect`; `low(T) mod -1` at 32/64 bits
+  ## (and `div` there with overflow checks off) confines the continuation
+  ## off the SIGFPE trap; signed `mod` takes the dividend's sign (`bvsrem`)
+  ## and the Int-sort `div`/`mod` truncate, as Nim's do. A `uint64` converts
+  ## to float as unsigned. An integer conversion to a `range`/enum type,
+  ## explicit (`Natural(x)`, `R(x)`, `E(x)`) or implicit (`let q: R = x`, a
+  ## `Natural` field), forks `RangeDefect` out of range. Reassigning the
+  ## discriminator of a declined construction degrades
+  ## (`feUnsupportedOpHavoc`) instead of faulting. The concolic `if` walker
+  ## drains its conditions' raises, and a concolic replay routes only the
+  ## raises it took. Verdicts change for all of these: a cache entry keyed
+  ## under "156" must not be replayed.
   ## RFC-0005 S8h (2026-09-27) — `ref` witnesses that reproduce. A `sxSat`/
   ## `sxRaised` witness holding a `ref`/`ptr` is now built from the solver
   ## model's INPUT heap: a nil ref renders nil, positions at one model
@@ -4374,8 +4387,10 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # AND signedness — signedness picks zero- vs sign-extend, and steers the
     # result's own `signed` flag) is part of the key so two conversions that
     # differ only in signedness never collide.
+    # RFC-0005 S8i: a `range` target's bounds change the model.
     "Ex<CIW:" & $e.ciwSrcWidth & ":" & $e.ciwSrcSigned & ":" &
       $e.ciwTgtWidth & ":" & $e.ciwTgtSigned & ":" &
+      (if e.ciwHasRange: $e.ciwLo & ".." & $e.ciwHi & ":" else: "") &
       canonicalize(e.ciwOperand, env) & ">"
   of iekConvIntReinterpret:
     # A1 adjudication: width + target signedness are both part of the key

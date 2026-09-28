@@ -837,7 +837,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## 154->155.
     ## RFC-0005 S8h (ref witnesses from the model's input heap: nil, aliasing,
     ## recursive cells and cycles, refs in by-value fields). 155->156.
-    check symexWalkerVersion == "156"
+    ## RFC-0005 S8i (div/mod of low(T) by -1, truncating mod, uint64 -> float,
+    ## int -> range conversions, declined-construction reassignment, the
+    ## concolic if-walker's raise drain). 156->157.
+    check symexWalkerVersion == "157"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

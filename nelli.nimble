@@ -858,5 +858,10 @@ task test, "Run the test suite":
             # RFC-0005 S8h -- ref witnesses that reproduce: built from the
             # model's input heap -- nil, aliasing, recursive cells and cycles,
             # refs in by-value fields; walker 155->156.
-            "tsymex_rfc0005_s8h_refwitness"]:
+            "tsymex_rfc0005_s8h_refwitness",
+            # RFC-0005 S8i -- S8g's different-mechanism remainder: low(T)
+            # div/mod -1, truncating mod, uint64 -> float, int -> range
+            # conversions, declined-construction reassignment, the concolic
+            # if-walker's raise drain; walker 156->157.
+            "tsymex_rfc0005_s8i_models"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

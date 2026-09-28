@@ -602,6 +602,14 @@ type
       ciwSrcSigned*: bool    ## source signedness — drives zero-/sign-extend
       ciwTgtWidth*:  int     ## target width: 16, 32, or 64 (> ciwSrcWidth)
       ciwTgtSigned*: bool    ## target signedness — the result SymVal's `signed`
+      ciwHasRange*: bool     ## RFC-0005 S8i: the target is a `range` (or
+      ciwLo*, ciwHi*: int64  ## enum) type `[ciwLo..ciwHi]` -- `Natural(x)`,
+                             ## `range[a..b](x)`, a subrange or enum
+                             ## conversion. Nim checks the operand's VALUE
+                             ## against the bounds (`RangeDefect`), so any
+                             ## width relation is modelled here, the value
+                             ## being representable in the target whenever
+                             ## the check passes.
     of iekConvIntReinterpret:
       cirOperand*:   IRExpr  ## A1 adjudication: the value being reinterpreted
       cirWidth*:     int     ## shared src==tgt width: 8, 16, 32, or 64
@@ -3265,14 +3273,18 @@ proc mkConvFloatToInt*(e: IRExpr, targetWidth = 64, signed = true,
          convSigned: signed, convHasRange: hasRange, convLo: lo, convHi: hi)
 
 proc mkConvIntWidth*(e: IRExpr, srcWidth: int, srcSigned: bool,
-                      tgtWidth: int, tgtSigned: bool): IRExpr =
+                      tgtWidth: int, tgtSigned: bool,
+                      hasRange = false, lo = 0'i64, hi = 0'i64): IRExpr =
   ## Round-6 B2: WIDENING-only int-family width conversion. Zero-/sign-
   ## extend is keyed on `srcSigned` (the SOURCE value's own signedness);
   ## `tgtSigned` becomes the resulting SymVal's `signed` flag.
-  doAssert tgtWidth > srcWidth,
+  ## RFC-0005 S8i: a `range` target (`hasRange`, bounds `lo..hi`) is
+  ## range-checked on the operand's value, so it admits any width relation.
+  doAssert hasRange or tgtWidth > srcWidth,
     "mkConvIntWidth: widening only — src=" & $srcWidth & " tgt=" & $tgtWidth
   IRExpr(kind: iekConvIntWidth, ciwOperand: e, ciwSrcWidth: srcWidth,
-         ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned)
+         ciwSrcSigned: srcSigned, ciwTgtWidth: tgtWidth, ciwTgtSigned: tgtSigned,
+         ciwHasRange: hasRange, ciwLo: lo, ciwHi: hi)
 
 proc mkConvIntReinterpret*(e: IRExpr, width: int, tgtSigned: bool): IRExpr =
   ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
@@ -4730,7 +4742,10 @@ proc render*(e: IRExpr): string =
   of iekConvIntToFloat: "float(" & render(e.convOperand) & ")"
   of iekConvFloatToInt: "int(" & render(e.convOperand) & ")"
   of iekConvIntWidth:
-    "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
+    if e.ciwHasRange:   # RFC-0005 S8i
+      "range[" & $e.ciwLo & ".." & $e.ciwHi & "](" & render(e.ciwOperand) & ")"
+    else:
+      "widen" & $e.ciwTgtWidth & "(" & render(e.ciwOperand) & ")"
   of iekConvIntReinterpret:
     "reinterpret" & (if e.cirTgtSigned: "signed" else: "unsigned") &
       $e.cirWidth & "(" & render(e.cirOperand) & ")"

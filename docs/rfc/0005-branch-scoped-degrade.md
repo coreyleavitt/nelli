@@ -124,7 +124,7 @@ state = "done"
 [[slice]]
 id    = "S8i"
 title = "S8g's different-mechanism remainder: low(int) div/mod -1, uint64-to-float signedness, int-to-range conversion check, reassignment of a declined construction, concolic if-walker raise drain"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8h"
@@ -1543,6 +1543,132 @@ Re-pinned, each checked by running the SUT on the witness under real Nim:
   which is faithful. The range oracle runs only on a live cell, and both
   SUTs run on their witnesses.
 - `phase15_CR2_cachekey` pin (156).
+
+**As landed (S8i, walker 157) — S8g's different-mechanism remainder.** S8g
+reported five defects whose mechanism lay outside its design. Each was a
+claim the real SUT contradicts, or an internal walker fault. Every expected
+behaviour was probed against the pinned toolchain (c and cpp identical):
+
+1. `low(T) div -1` raised nothing in the model; Nim raises `OverflowDefect`
+   at every signed width. `low(T) mod -1` continued as 0; at 32 and 64 bits
+   the C division traps (SIGFPE, an uncatchable abort), while `low(int8)` and
+   `low(int16)` `mod -1` are 0. Along the way, signed `mod` took the
+   divisor's sign (`bvsmod`: `-7 mod 2` modelled as 1, Nim gives -1), and the
+   Int-sort `div`/`mod` were Euclidean.
+2. `float(x)` of a `uint64` treated the pattern as signed: every value
+   `>= 2^63` became negative.
+3. An integer conversion to a `range` or enum target (`Natural(x)`,
+   `Positive(x)`, `range[a..b](x)`, `R(x)`, `E(x)`) was a pass-through. The
+   implicit conversion into a range type (`let q: R = x`,
+   `var n: Natural = x`, a `Natural` object field, an `int8` into a
+   `Natural`) was too. Nim range-checks all of them (`RangeDefect`).
+4. Reassigning the discriminator of an object whose construction was
+   declined hit a `doAssert` in both reassignment arms
+   (`weInternalWalkerFault`).
+5. The concolic `if` walker never drained its conditions' scalar raises: a
+   closure call that raised on the trace had its raise dropped, and the
+   handler's decisions were never recorded. A let-site raise the trace did
+   not take was still routed into its handler, recording a decision that
+   never happened and making `pcSatByConcreteInputs` false.
+
+- **Runtime.**
+  - `lowerArith`: signed `div`/`mod` push `divLowByMinusOne` (in the
+    operands' native sort; skipped when an svInt's interval excludes
+    `low(T)`). `div` pushes it to `overflowConds` (acOverflow-gated). At
+    widths 32/64 both push it to the new survivor-only `arithTrapConds`
+    sink, whose drain (`drainArithTraps`, after the overflow stage in
+    `drainScalarRaiseForks`, ungated) adds the negation to the
+    continuation's defect-survivor facts and forks no raise.
+  - `modBV` signed uses `bvsrem`; `arithInt`'s `div`/`mod` go through
+    `truncDivInt` (the Euclidean pair adjusted toward zero).
+  - `iekConvIntToFloat` uses `toFpFromUnsigned` for an unsigned 64-bit
+    operand (narrower unsigned operands were already zero-extended).
+  - `iekConvIntWidth` gains `ciwHasRange`/`ciwLo`/`ciwHi`. A range target
+    lowers through `lowerConvIntRange`: the bounds clamped to the operand's
+    own type, the negated check to `rangeDefectConds` (acRange-gated, as
+    S8g's float -> range check), and the value converted to the target width
+    (extend, retag or truncate — exact wherever the check passes). The
+    parser emits it for an explicit `nnkConv` whose target is a range/enum
+    and whose operand is an integer, and for a hidden conversion into a
+    range type unless the operand's own range lies inside the target's.
+    `rhsHasInlineDefectFork` treats it as forking; its canonical key
+    includes the bounds.
+  - `degradeUnmodelledReassign`: a reassignment of a non-variant object
+    records `feUnsupportedOpHavoc`, unbinds the object and taints the path.
+  - `walkIfFollowConcrete` drains each condition. A continuation whose new
+    defect-survivor facts the draws contradict is not followed, and those
+    facts join `concreteBranchOutcome`'s solves (a closure call's exit facts
+    define its result). Under `wmFollowConcrete`, `routeRaise` drops a raise
+    path the draws contradict (`concretelyInfeasible`).
+- **Consumer-visible (for S11's migration note).**
+  - New findings: `OverflowDefect` from `low(T) div -1`; `RangeDefect` from
+    explicit and implicit int -> range/enum conversions. A defect surfaces
+    under any target, so a `tRaisedExn("X")` search can now return one of
+    these instead of `sxUnsat`.
+  - Paths through `low(T) mod -1` at 32/64 bits (and `div` with overflow
+    checks off) no longer continue: a label reachable only through the trap
+    is `sxUnsat`.
+  - Signed `mod` results and `float(uint64)` values change to Nim's; SAT/UNSAT
+    verdicts that depended on the old values flip.
+  - A reassignment of a declined construction is `sxUnknown` with
+    `feUnsupportedOpHavoc`, not `weInternalWalkerFault`.
+  - Concolic collection: `branchTrace` gains the handler decisions of a
+    raising `if` condition and loses records from handlers the trace never
+    entered; `ambiguousBranches` drops for a closure condition that raised.
+  - The walker bump to 157 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - The SUT's own top-level `return <expr>` is never lowered: `isReturn`
+    with an empty call stack ends the path without lowering or draining
+    `retExpr`. Every raise in the returned expression is lost. `return 100
+    div x` and `return x` from a `Natural` proc both give a false
+    `sxUnsat` for their defect, while the `result = ...` forms raise. A
+    callee's `return` is lowered and drained (R1). This is present before
+    S8i.
+  - A concolic `if` whose condition is a closure call that returns normally
+    stays ambiguous. The closure's ground axioms are implications guarded by
+    the whole caller pc, so `concreteBranchOutcome`'s solves do not see
+    them. A closure that raises on the trace is resolved (item 5).
+  - A narrowing integer conversion (`int8(x)` from an `int`) is still a
+    recorded decline. It is not modelled as a `RangeDefect` fork.
+  - `renderAsChoices` still rejects ref params, and an inline `ref <case
+    object>` field reached through a ref is still a false `sxUnsat` (both
+    reported under S8h).
+
+Pins: `tests/tsymex_rfc0005_s8i_models.nim`. It covers:
+- `div -1` at 64, 32 and 8 bits;
+- the `mod -1` trap at 64 and 32 bits and its absence at 8 bits;
+- a witness steered off the trap;
+- the sign of `mod`;
+- `float` of a `uint64`, including `float32(high(uint64))`;
+- explicit `Natural`, subrange, anonymous range, `Positive`-of-`int8` and
+  enum conversions, with in-range values and a live `except RangeDefect`;
+- the implicit `let`, `var`, object-field and `int8 -> Natural`
+  conversions;
+- symbolic and literal reassignment of a declined construction;
+- the concolic let-site and closure raising conditions, both raising and
+  returning;
+- the `>= 157` floor.
+
+Each test comment cites the real-Nim probe it relies on.
+
+Re-pinned, each checked against real Nim:
+- `phase16_R16_3_divzero` R16-3-4 had pinned "nothing raised" for
+  `sg(a, b)` (`b != 0 and a div b > 5`). A defect surfaces under any
+  target, and `low(int) div -1` now raises `OverflowDefect`. The pin is now
+  "no `DivByZeroDefect`", and when an `OverflowDefect` is found, running
+  `sg` on the witness must raise it.
+- `phase16_R16_3_divzero` R16-3-6 (`acDivByZero` off) had pinned
+  `sxUnsat`. It now admits the `OverflowDefect` at `(low(int), -1)`, which
+  real Nim raises.
+- `r6_n36_raise_class_audit` pattern-(B) inventory: 77 -> 78 marked
+  `runtime.nim` lines and 80 -> 81 category-c. The new site is
+  `divLowByMinusOne`'s caller-guarded `else`.
+- `r11_range_invariant_audit`: 4 -> 5 `bvRangeConds` calls, with
+  `runtime.nim` going 3 -> 4 and 4 procs. The new call is
+  `lowerConvIntRange`'s `range-defect-check`.
+- `phase15_A1_arithmetic`: the open `bMod` sign note is marked resolved.
+  The cell's domain is unchanged.
+- `phase15_CR2_cachekey` pin (157).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

@@ -270,7 +270,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekConvIntWidth:
     newCall(bindSym"mkConvIntWidth", emitExpr(e.ciwOperand),
             newLit(e.ciwSrcWidth), newLit(e.ciwSrcSigned),
-            newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned))
+            newLit(e.ciwTgtWidth), newLit(e.ciwTgtSigned),
+            newLit(e.ciwHasRange), newLit(e.ciwLo), newLit(e.ciwHi))
   of iekConvIntReinterpret:
     newCall(bindSym"mkConvIntReinterpret", emitExpr(e.cirOperand),
             newLit(e.cirWidth), newLit(e.cirTgtSigned))
@@ -1235,8 +1236,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekConvIntWidth:
     ## Round-6 B2: a pure widening extend has no inline raise fork of its
     ## own (unlike iekConvFloatToInt's RangeDefect bound) — only its operand
-    ## can carry one.
-    result = rhsHasInlineDefectFork(e.ciwOperand)
+    ## can carry one. RFC-0005 S8i: a `range` target's check forks
+    ## `RangeDefect`, as iekConvFloatToInt's does.
+    result = e.ciwHasRange or rhsHasInlineDefectFork(e.ciwOperand)
   of iekConvIntReinterpret:
     ## A1 adjudication: a same-width tag flip has no inline raise fork of
     ## its own either — only its operand can carry one.
@@ -3144,6 +3146,24 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       mkConvFloatToInt(parseExpr(operand, preamble, ctx),
                        cls.ty.width, cls.ty.signed,
                        true, cls.range.lo, cls.range.hi)
+    elif not isIntLiteralNode(operand) and
+         n.typeKind in {ntyRange, ntyEnum} and
+         operand.typeKind in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64,
+                              ntyUInt, ntyUInt8, ntyUInt16, ntyUInt32,
+                              ntyUInt64, ntyRange, ntyEnum} and
+         classifyType(n).ty.kind == itInt and classifyType(n).range.hasRange and
+         classifyType(operand).ty.kind == itInt:
+      # RFC-0005 S8i: an integer converted to a `range` or enum target
+      # (`Natural(x)`, `range[a..b](x)`, `R(x)`, `E(x)`). Nim range-checks
+      # the operand's value (`RangeDefect`), then converts at the target's
+      # width. This was the identity pass-through below: an out-of-range
+      # value flowed on as the target type, the check never modelled.
+      let tcls = classifyType(n)
+      let scls = classifyType(operand)
+      mkConvIntWidth(parseExpr(operand, preamble, ctx),
+                     scls.ty.width, scls.ty.signed,
+                     tcls.ty.width, tcls.ty.signed,
+                     true, tcls.range.lo, tcls.range.hi)
     elif tgt in intTyNames and src == "bool":
       # v69 (sello #3): `int32(b)` — previously the pass-through below, which
       # left an svBool flowing where an int-kinded SymVal is required
@@ -3287,8 +3307,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if isIntLiteralNode(wrapped):
         parseExpr(wrapped, preamble, ctx)
       else:
-        let outerTy = classifyType(n).ty
-        let innerTy = classifyType(wrapped).ty
+        let outerCls = classifyType(n)
+        let innerCls = classifyType(wrapped)
+        let outerTy = outerCls.ty
+        let innerTy = innerCls.ty
         # #163 review (rev item 2 follow-up), soundness carve-out. A bare
         # reference to one of the CURRENT proc's own formal parameters
         # (`wrapped.kind == nnkSym and symKind(wrapped) == nskParam`) whose
@@ -3317,7 +3339,26 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # range-typed OBJECT FIELD case came back a false `sxSat` before
         # this fix, witness `f = 0`, and the same real Nim expression is
         # false for every value 0..100).
-        if outerTy.kind == itInt and innerTy.kind == itInt and
+        if n.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and
+           outerTy.kind == itInt and innerTy.kind == itInt and
+           outerCls.range.hasRange and
+           not (innerCls.range.hasRange and
+                innerCls.range.lo >= outerCls.range.lo and
+                innerCls.range.hi <= outerCls.range.hi):
+          # RFC-0005 S8i: the implicit conversion INTO a `range` type (`let
+          # q: R = x`, `var n: Natural = x`, `K(n: x)`, `return x` from a
+          # `Natural` proc, an argument to a `Natural` formal). Nim
+          # range-checks it exactly as the explicit `R(x)` above (probed on
+          # the pinned toolchain: each raises "value out of range: -1 notin
+          # 0 .. 9223372036854775807"), unless the operand's own range lies
+          # inside the target's -- then no check is emitted and none is
+          # modelled. Before S8i this was the pass-through (or the width
+          # route below): the out-of-range value flowed on unchecked.
+          mkConvIntWidth(parseExpr(wrapped, preamble, ctx),
+                         innerTy.width, innerTy.signed,
+                         outerTy.width, outerTy.signed,
+                         true, outerCls.range.lo, outerCls.range.hi)
+        elif outerTy.kind == itInt and innerTy.kind == itInt and
            outerTy.width != innerTy.width and
            not isPromoteSoundEligibleParam(wrapped, innerTy):
           # This used to re-derive `srcWidth`/`tgtWidthV`/`srcSigned`/

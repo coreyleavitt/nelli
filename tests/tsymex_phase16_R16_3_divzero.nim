@@ -90,7 +90,18 @@ suite "symex Phase 16 R16-3 — guarded short-circuit (primary acceptance gate)"
     ## Before step 5 (rhsHasInlineDefectFork fix): false-positive sxRaised.
     ## After step 5: b==0 is short-circuit-guarded → sxUnsat for tRaisedExn.
     let r = symexFind(sg, tRaisedExn("DivByZeroDefect"))
-    check r.status != sxRaised
+    ## RFC-0005 S8i: a defect always surfaces, whatever the target's type
+    ## filter, and `low(int) div -1` now raises `OverflowDefect` (Nim's
+    ## check; it was unmodelled). The guard's claim is that NO
+    ## `DivByZeroDefect` is reachable; the one finding left is the overflow,
+    ## and the SUT raises it on the witness.
+    check not (r.status == sxRaised and r.raisedTypeId == "DivByZeroDefect")
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+      var raisedOvf = false
+      try: sg(r.raisedWitness[0], r.raisedWitness[1])
+      except OverflowDefect: raisedOvf = true
+      check raisedOvf
 
 # ---------------------------------------------------------------------------
 # Behavior 5: LHS div still raises — not over-guarded
@@ -130,7 +141,13 @@ suite "symex Phase 16 R16-3 — acDivByZero gate":
 
   test "R16-3-6: acDivByZero off → no DivByZeroDefect raise (honest-incomplete)":
     let r = symexFind(sd_off, tRaisedExn("DivByZeroDefect"), noAcDivByZeroSettings())
-    check r.status == sxUnsat
+    ## RFC-0005 S8i: acOverflow stays on, so `low(int) div -1`'s
+    ## `OverflowDefect` (always surfaced) is the one finding left; no
+    ## `DivByZeroDefect` is forked with the gate off.
+    check r.status in {sxUnsat, sxRaised}
+    if r.status == sxRaised:
+      check r.raisedTypeId == "OverflowDefect"
+      check r.raisedWitness[0] == low(int) and r.raisedWitness[1] == -1
 
 # ---------------------------------------------------------------------------
 # Behavior 7: Constant nonzero divisor — no DivByZeroDefect

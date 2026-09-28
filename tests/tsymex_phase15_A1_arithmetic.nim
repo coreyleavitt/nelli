@@ -58,6 +58,13 @@ proc arithAtomicAdd(a, b: int) =
 # individually unsound, Z3 non-determinism over an equisatisfiable-but-
 # differently-shaped false query picks different concrete models) — flagged
 # for separate follow-up, not folded into this corpus's baseline.
+#
+# RESOLVED by RFC-0005 S8i (walker 157): the BV `mod` was `bvsmod` (the
+# sign of the DIVISOR, hence 455) and is now `bvsrem` (the dividend's, as
+# C's `%` and Nim's `mod`); the Int-sort `div`/`mod` pair is truncating
+# too. `tsymex_rfc0005_s8i_models` pins `-7 mod 2 == -1` and
+# `7 mod -2 == 1` against the real compiler. This cell's domain is left as
+# it was: it pins the ANF chokepoint, not the sign rule.
 # ---------------------------------------------------------------------------
 proc arithDivModIdentity(x, y: int) =
   symexAssume(y > 0 and y < 1_000 and x >= 0 and x < 1_000)

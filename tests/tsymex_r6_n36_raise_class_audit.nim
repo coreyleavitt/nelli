@@ -382,7 +382,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 77 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 78 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -419,11 +419,15 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## category-c by the same argument as `variantDiscEq`'s: `allocateSym`'s
     ## itVariant/itMultiVariant arms only ever allocate a BV or Int
     ## discriminator.
-    check runtimeCount == 77
+    ## 77 -> 78 (RFC-0005 S8i, walker 157). One new marked site:
+    ## `runtime.nim`'s `divLowByMinusOne` (the `low(T) / -1` predicate).
+    ## Its `else` arm is category-c: `lowerArith` calls it only for a signed
+    ## BV or width-stamped svInt operand.
+    check runtimeCount == 78
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 80 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 81 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -447,7 +451,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 80 -> 79: the same `defaultZero` float site removed above (RFC-0005
     ## S8f).
     ## 79 -> 80: the same `discFromRhs` site added above (RFC-0005 S8g).
-    check cCount == 80
+    ## 80 -> 81: the same `divLowByMinusOne` site added above (RFC-0005 S8i).
+    check cCount == 81
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

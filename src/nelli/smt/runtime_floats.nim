@@ -182,7 +182,7 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
   ## `reconcileFloat` are already named procs and are NOT moved here.
   ##
   ## Shared-symbol dependencies for Stage 8 include-ordering:
-  ##   mkFloatLitSym, toBv64ForFp, toFpFromSigned, rmRNE, rmRTZ,
+  ##   mkFloatLitSym, toBv64ForFp, toFpFromSigned, toFpFromUnsigned, rmRNE, rmRTZ,
   ##   Z3Float32, Z3Float64, toSbv, mkFloat32, mkFloat64,
   ##   convFloatToIntBoundConds, syncConvFloatToIntBoundCond,
   ##   rangeDefectConds, syncRangeDefectCond, bvRangeConds, bvVar, iteSV,
@@ -195,12 +195,22 @@ proc lowerFloatArm(env: Env, e: IRExpr): SymVal =
     # Phase 15 F5: int -> float. signed-bv -> fp (rmRNE, OQ2). The operand
     # is already a bitvector; `toBv64ForFp` takes its 64-bit pattern directly
     # rather than via `int2bv(bv2int(x))` (which hangs Z3 on ordering goals).
+    # RFC-0005 S8i: a `uint64`/`uint` operand's pattern is UNSIGNED -- read
+    # as signed, every value `>= 2^63` became negative (`float(2^63'u64)`
+    # modelled as `-9.2e18`; Nim gives `9.223372036854776e+18`, probed on
+    # the pinned toolchain). Narrower unsigned operands are zero-extended by
+    # `toBv64ForFp`, so the signed conversion of their pattern was exact.
     let sv = lower(env, e.convOperand)
     let bv64 = toBv64ForFp(sv)
+    let unsigned64 = sv.kind == svBV64 and not sv.signed
     if e.convWidth == 32:
-      SymVal(kind: svFloat32, fp32: toFpFromSigned(rmRNE(), bv64, Z3Float32))
+      SymVal(kind: svFloat32, fp32:
+        (if unsigned64: toFpFromUnsigned(rmRNE(), bv64, Z3Float32)
+         else: toFpFromSigned(rmRNE(), bv64, Z3Float32)))
     else:
-      SymVal(kind: svFloat64, fp64: toFpFromSigned(rmRNE(), bv64, Z3Float64))
+      SymVal(kind: svFloat64, fp64:
+        (if unsigned64: toFpFromUnsigned(rmRNE(), bv64, Z3Float64)
+         else: toFpFromSigned(rmRNE(), bv64, Z3Float64)))
   of iekConvFloatToInt:
     # Phase 15 F5 / CR-3 / CR-4; RFC-0005 S8g (ADR-0011 R16-2 reversed).
     # float -> int(W), rmRTZ truncation (OQ2).

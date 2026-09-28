@@ -3253,13 +3253,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n.len == 2 and tgt.ty.kind in {itRef, itPtr} and
        src.ty.kind == tgt.ty.kind and src.ty == tgt.ty:
       return parseExpr(n[1], preamble, ctx)
+    # The decline is the catch-all's own, message for message (no site
+    # prefix: RFC-0005 S9's twin-decline dedup keys on message AND anchor,
+    # and two casts of one spelling must stay one message).
     let dummyTy = classifyType(n).ty
     preamble.add ctx.declineAtSite(
       feUnsupportedExprKind,
-      siteMsg(n, "RFC-0005 S8m: `cast` in `" & n.repr & "` reinterprets " &
-                 "the value as a different type -- no layout the symbolic " &
-                 "model can follow (feUnsupportedExprKind)"),
-      "RFC-0005 S8m: layout-changing `cast` (feUnsupportedExprKind)")
+      "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+             n.repr & "` — not in the supported expression fragment",
+      "CR-2a: unsupported expression kind " &
+                                  $n.kind & " (feUnsupportedExprKind)")
     let dummy = zeroValueForType(dummyTy)
     if dummy != nil: dummy else: mkIntLit(0)
   of nnkConv:

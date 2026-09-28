@@ -2097,8 +2097,10 @@ pinned toolchain (Nim 2.2.10); c and cpp are identical except where noted.
     returns `sxUnknown` with `ekZ3Error`. No Z3 error can end in a verdict.
   - `parseExpr` gains an `nnkCast` arm: a cast to the ref / ptr type the
     operand already has is the identity (same address, same `Ref_<id>`
-    sort). Any other cast is the recorded `feUnsupportedExprKind` decline
-    with a kind-correct dummy.
+    sort). Any other cast keeps the catch-all's `feUnsupportedExprKind`
+    decline, message for message, now with a kind-correct dummy. (A first
+    cut prefixed the site to the message; S9's twin-decline pin caught it,
+    since that dedup keys on message and anchor.)
   - `zeroValueForType` returns `mkNil` for `itRef` / `itPtr`. This models
     the uninitialised ref local and makes every catch-all dummy of a ref
     type a nil ref, not an int.
@@ -2133,8 +2135,8 @@ pinned toolchain (Nim 2.2.10); c and cpp are identical except where noted.
     `break` (`weBreakOutsideLoop`), a ref local assigned or same-type cast
     from a param (`weInternalWalkerFault`), an uninitialised ref local
     (`feUnsupportedStmtKind`).
-  - A layout-changing `cast` is now `feUnsupportedExprKind` (was a walker
-    fault when its operand met a ref).
+  - A layout-changing `cast` keeps its `feUnsupportedExprKind` decline; a
+    ref-typed one no longer adds a walker fault at its first comparison.
   - The walker bump to 160 invalidates every symex cache entry.
 - **Different mechanisms, reported and not fixed here.**
   - A callee that reads `result` before any write (`proc rr(x: int): int =

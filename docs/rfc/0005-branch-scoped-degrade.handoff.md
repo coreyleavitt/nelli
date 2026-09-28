@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 16:56Z)
+## Current position (refreshed 2026-09-28 17:39Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -206,21 +206,26 @@
   new-ok=24 (tree = landed but for this handoff and the Windows-only
   `b7r_bytescan` re-pin). Linux-skipped hangers checked by the agent: nothing
   touched. Pushed; **Windows CI (`e8fc9dd`): all three green.**
-- **Fence grew S8m (`a58dc08`)** from S8l's findings: `finally` skipped on
-  break/continue exits (**false sxUnsat**), wrong-sort Z3 store swallowed into
-  a **silent sxUnsat**, ref-local reassignment/cast `eqBV` walker fault,
-  uninitialised ref locals, closure bare-return zero value, retire the
-  producer-less `heRefVariantUnsupported`. **S8m (opus) running** in
-  `scratchpad/wt-s8m`, branch `rfc-0005-s8m`, walker 160, self-gates ->
-  `scratchpad/s8m-gate.log` (`50f4a2c`; first gate regressed=0 new-failing=1 --
-  `s9_vetoes`, fixed in `6b0cd1e` (layout-changing cast keeps the catch-all
-  message); re-gate `s8m-gate2.log` at `6b0cd1e`, 339/515 at 16:56Z, clean so far). Soundness first, so S8m runs before S8k.
-- **Remaining:** S8m -> S8k -> S11 -> completion gate -> ff main + tag.
+- **S8m landed `a696d80`** (walker 160; feat `e544c45`, fix `a696d80`): re-gate
+  at `6b0cd1e` (tree = landed but for this handoff) regressed=0 new-failing=0
+  new-ok=25. `heRefVariantUnsupported` removed (breaking for exhaustive
+  matches); new `eeFinallyJumpOnRaise`; every Z3 error now forces sxUnknown.
+  Pushed; Windows CI running.
+- **Fence regrouped (`6556a23`)** from S8m's findings: **S8k = termination and
+  resources** -- long-string Z3 queries rlimit does not bound, loop-unroll
+  feasibility pruning (20GB at unwind 5; dead label after a loop is
+  sxUnknown), replay SIGSEGV on a real nil write in debug builds. **S8n =
+  precision** -- concolic closure conditions, `renderAsChoices` over ref
+  params, a callee reading `result` before writing it, a closure returning a
+  variant. **S8k (opus) running** in `scratchpad/wt-s8k`, branch
+  `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
+  six Linux hangers.
+- **Remaining:** S8k -> S8n -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8m (`rfc-0005-s8m`, `s8m-gate2.log`); gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8m -> S8k ->
+  resume, check S8k (`rfc-0005-s8k`, `s8k-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8k -> S8n ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

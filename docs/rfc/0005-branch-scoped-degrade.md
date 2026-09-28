@@ -138,7 +138,7 @@ state = "done"
 
 [[slice]]
 id    = "S8k"
-title = "Termination and precision remainder: long-string Z3 queries bounded (rlimit-proof decline to sxUnknown), concolic closure-condition resolution, renderAsChoices over ref params"
+title = "Termination and resources: long-string Z3 queries bounded (rlimit-proof decline to sxUnknown), loop-unroll feasibility pruning and memory bound, replay never executes a witness into a SIGSEGV (real nil write)"
 state = "pending"
 
 [[slice]]
@@ -150,6 +150,11 @@ state = "done"
 id    = "S8m"
 title = "S8l's remainder: finally on break/continue exits, sort-checked Z3 stores (no silent sxUnsat), ref-local reassignment/cast walker fault, uninitialised ref locals, closure bare-return zero value, retire heRefVariantUnsupported"
 state = "done"
+
+[[slice]]
+id    = "S8n"
+title = "Precision remainder: concolic closure-condition resolution, renderAsChoices over ref params, callee reading result before writing it, closure returning a variant"
+state = "pending"
 
 [[slice]]
 id    = "S9"

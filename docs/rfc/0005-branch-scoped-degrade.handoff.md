@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-28 06:11Z)
+## Current position (refreshed 2026-09-28 06:59Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -181,21 +181,25 @@
   `3e62bae` 15/15 OK. Branch pushed at `3e62bae`; Windows CI running
   (fuzzer-mingw green). `scratchpad/wt-head` may now be deleted.
 - **S8h Windows CI (`3e62bae`): all three green.**
-- **S8i** first gate (`c4d0b63`): regressed=4 (`163rev_intoffset_range`,
-  `phase12_witnesses`, `phase16_D1a_defect_routeraise`, `phase4_oob`),
-  new-failing `rfc0005_s6b_ops` (+ `s2_replay`, fixed by `3e62bae`). Agent
-  rebased onto `3e62bae` -> `ccf6be4` (S8i), fixed in `9191baa` (array index is
-  not a range conversion; reassignment decline kind) and `8c878de` (test
-  re-pin). **Full re-gate running from `scratchpad/wt-s8i` at `8c878de`** ->
-  `scratchpad/s8i-regate.log` (294/515 at 06:11Z, 0 non-pass so far). Land by
-  fast-forwarding `rfc-0005-soundness-channels` to it once regressed=0 and
-  new-failing=0, then push + Windows CI.
-- **Remaining:** S8i -> S11 -> completion gate -> ff main + tag.
+- **S8i landed `d1aff36`** (walker 157): feature `3dacacd`, fix `607e8d9`
+  (array index is not a range conversion; reassignment decline kind), test
+  `d1aff36`. Re-gate at the pre-rebase sha `8c878de` (tree identical but for this
+  handoff): pass=511 fail=0 skip=7, regressed=0 new-failing=0. Pushed; Windows
+  CI running.
+- **Fence grew S8j + S8k (`3d7dd06`)** from S8i's different-mechanism findings
+  (none deferred). **S8j** (opus, running in `scratchpad/wt-s8j`, branch
+  `rfc-0005-s8j`): SUT top-level `return` lowering + raise drain (false sxUnsat),
+  inline `ref <case object>` field through a ref (false sxUnsat), narrowing int
+  conversion as a RangeDefect fork, single range check on plain assignment;
+  walker 158; self-gates -> `scratchpad/s8j-gate.log`. **S8k** after S8j:
+  long-string Z3 queries that ignore rlimit (bounded decline to sxUnknown),
+  concolic closure-condition resolution, `renderAsChoices` over ref params.
+- **Remaining:** S8j -> S8k -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check the S8i re-gate (`s8i-regate.log`) and `rfc-0005-s8i`; gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8i ->
+  resume, check S8j (`rfc-0005-s8j`, `s8j-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8j -> S8k ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

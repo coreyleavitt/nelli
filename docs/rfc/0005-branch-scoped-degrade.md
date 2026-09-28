@@ -142,6 +142,11 @@ title = "Termination and precision remainder: long-string Z3 queries bounded (rl
 state = "pending"
 
 [[slice]]
+id    = "S8l"
+title = "S8j's exit remainder: finally on a return exit (callee and top level), defer, named ref-object case variants, variant-faithful reads through a named ref alias, inline ref to a multi-variant"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

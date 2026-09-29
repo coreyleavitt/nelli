@@ -271,15 +271,11 @@ jobs:
           Write-Host "shard $($env:SHARD_IDX): $($tests.Count) suites"
           $failed = @()
           foreach ($t in $tests) {
-            Write-Host "==> $t"
-            # -Wl,--stack: link an 8 MB main-thread stack (Linux parity).
-            # Windows defaults to 1 MB, and deep walker/Z3 recursion
-            # intermittently overflowed it as a silent crash (catalog #11
-            # class).
-            nim c -r --cc:gcc --threads:on --hints:off --colors:off `
-              --path:src --path:_deps/z3/src --path:_deps/softlink/src `
-              --cincludes:C:/z3/include `
-              --passL:"-Wl,--stack,8388608" "tests/$t.nim"
+            # RFC-0005 S8r: each suite runs under a wall-clock and memory
+            # watchdog (scripts/run-ci-suite.ps1). A suite that would starve
+            # the runner is killed and named here instead of taking the
+            # whole shard's log down with a lost runner.
+            ./scripts/run-ci-suite.ps1 -Suite $t
             if ($LASTEXITCODE -ne 0) { $failed += $t }
           }
           if ($failed.Count -gt 0) {

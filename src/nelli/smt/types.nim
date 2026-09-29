@@ -2635,7 +2635,9 @@ type
       ## RFC-0005 S8k. The Z3 `rlimit` of every query that mentions a string
       ## or seq (one `maxSeqLen` caps), when smaller than the query's own
       ## (`queryRLimit`, `0` = unbounded, or the tainted target-hit budget).
-      ## `0` means no extra bound. Under the cap the sequence solver DOES
+      ## `0` means no extra bound. The query's model search (the capped
+      ## check, then the uncapped one) spends at most this in all, half
+      ## per check (`checkCapped`). Under the cap the sequence solver DOES
       ## poll the counter, but it can spend it slowly (measured on the
       ## pinned Z3: 40-55k units/s, against ~1M/s for arithmetic). In the
       ## lowered byte-test form `s.len == 20 and s[19] == 'q'` needed 2.3M

@@ -7733,8 +7733,11 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ## `beSolverUndef` message. With no seq leaf (or `maxSeqLen == 0`,
   ## unlimited) this is exactly the pre-S8k one-shot `check()` under
   ## `rlimit`. Otherwise each byte test takes its character form
-  ## (`seqLenCaps`' `byteEqs`), and every step runs under
-  ## `seqQueryRLimit` when that is the smaller bound:
+  ## (`seqLenCaps`' `byteEqs`), and the query's budget is
+  ## `seqQueryRLimit` when that is the smaller bound. Steps 1 and 3, the
+  ## model search, run under half of it each, so a query that finds no
+  ## model spends at most the budget searching; steps 1b and 2 run under
+  ## all of it:
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after an UNSAT in (1), or an unknown in both (1) and (3),
@@ -7763,10 +7766,13 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ## `tsymex_r1b_shortcircuit_oob`; running (1b) before (3) moved a
   ## `parseInt` raise query across 20M; a `seq[byte]` scan query SAT in
   ## 2.1M units from its own SMT-LIB text ran past 20M in the walker even
-  ## in a fresh context of its own (Z3 keeps process-wide state). So the
-  ## budget is a bound, not a promise: the character
-  ## form keeps the common byte tests far below it, and a query that
-  ## lands near it can decline in one process and not another.
+  ## in a fresh context of its own (Z3 keeps process-wide state); and a
+  ## four-iteration pair-loop query with its ten caps asserted, SAT in
+  ## 3.9 s from its own text, ran 100 s to 20M units in the walker, with
+  ## the uncapped query SAT 23 s later (the half-and-half split above is
+  ## from that case). So the budget is a bound, not a promise: the
+  ## character form keeps the common byte tests far below it, and a query
+  ## that lands near it can decline in one process and not another.
   ## Why two solver modes: Z3 answers a check under assumptions with its
   ## incremental core, not the one-shot preprocessing pipeline, and that
   ## core is both much slower on bit-vector-heavy queries (one the
@@ -7786,7 +7792,7 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   let (caps, lastIndex, byteEqs) = seqLenCaps(ctx, rootsIn, cap)
   if caps.len == 0: plain()
   # Every step below decides the query with each byte equality in its
-  # `mod` form (`seqLenCaps`): the same predicate, so the same models.
+  # character form (`seqLenCaps`): the same predicate, so the same models.
   var roots = newSeq[Z3Bool](rootsIn.len)
   if byteEqs.len == 0:
     for i, r in rootsIn: roots[i] = r
@@ -7803,6 +7809,9 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   let sq = settings.budget.seqQueryRLimit
   let seqBounded = sq != 0 and (rlimit == 0 or sq < rlimit)
   let rl = if seqBounded: sq else: rlimit
+  # Steps 1 and 3 are the model search; between them they spend at most
+  # `rl`, half each (`0`, unbounded, stays unbounded).
+  let rlHalf = if rl == 0: 0'u else: max(1'u, rl div 2)
   proc z3Why(s: Z3Solver): string =
     result = "Z3: " & s.reasonUnknown()
     if seqBounded:
@@ -7811,7 +7820,7 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   let capText = "no model with every string / seq at most " & $cap &
     " elements (maxSeqLen); a longer one was not searched"
   # Step 1: the caps asserted, one-shot.
-  let s1 = querySolver(ctx, roots, rl)
+  let s1 = querySolver(ctx, roots, rlHalf)
   for c in caps: s1.add c
   let r1 = s1.check()
   if r1 == zsSat: return (zsSat, s1, s1.model(), "")
@@ -7851,7 +7860,7 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
                              "disagree on this query under maxSeqLen = " &
                              $cap)
   # Step 3: the uncapped one-shot query.
-  let s3 = querySolver(ctx, roots, rl)
+  let s3 = querySolver(ctx, roots, rl - rlHalf)
   let r3 = s3.check()
   case r3
   of zsSat: (zsSat, s3, s3.model(), "")

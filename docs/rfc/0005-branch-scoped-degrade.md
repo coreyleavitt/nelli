@@ -2260,6 +2260,9 @@ identical.
     4. the uncapped one-shot query (the pre-S8k one), only when (1) ran
        out of budget, or in place of (3) for a query holding a
        `seq.last_indexof`.
+    (1) and (4), the model search, run under half of the query's budget
+    each, so a query that finds no model spends at most that budget
+    searching; (2) and (3) run under all of it.
     Why so much: each simpler design broke a pinned suite on the first
     gate or on the way to the second.
     - Z3's incremental core (any `check-sat-assuming` or `push`, even
@@ -2297,7 +2300,14 @@ identical.
       and dropped. The budget is a bound, not a promise: the character
       form keeps the common byte tests far below it, and a query near it
       can decline in one process and not in another.
-    Residual risk: (4) runs uncapped under `seqQueryRLimit`, which a long
+    - With (1) and (4) each under the whole budget, a query that found
+      no model could spend it twice, then (2) on top. The
+      four-iteration pair-loop query of `r6_n36_raise_degrade`'s
+      no-block companion, SAT in 3.9 s from its own text with all ten
+      caps asserted, ran 100 s to 20M units in the walker before (4)
+      found the model in 23 s, and the file went from passing to past
+      the 900 s gate timeout (15.5 min standalone). Half each: 2.6 min.
+    Residual risk: (4) runs uncapped under half the budget, which a long
     enough string search does not poll. It is reached only after the
     capped query ran out of budget, or for a `seq.last_indexof` query
     whose capped form is UNSAT.

@@ -162,6 +162,11 @@ title = "S8k's termination remainder: byte tests lowered to the character/code f
 state = "pending"
 
 [[slice]]
+id    = "S8p"
+title = "S8n's precision remainder: SUT frame reading result (IR carries the SUT return type), augmented field assignment on a result (result.a += x), string char append (result.add c), closures returning multi-field tuples / string / seq, multi-variant zero value, retBindEq kind mismatch on a multi-variant or distinct callee result (weInternalWalkerFault)"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

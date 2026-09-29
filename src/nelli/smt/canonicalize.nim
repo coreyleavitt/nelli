@@ -184,7 +184,17 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "164"
+const symexWalkerVersion* = "165"
+  ## RFC-0005 S8q (2026-09-29) — S8o's termination remainder. An entry
+  ## `int` param traced to a B3 scan-pair's loop index
+  ## (`IRParam.isScanPairOffset`) is a Z3 Int stamped with its width and
+  ## bounded by its type's range (was a bit-vector whose signed `bv2int`
+  ## bridge into the string query Z3 did not bound: B7R-3 ran past 300 s
+  ## under a 10M `rlimit`). `symexAssume(a and b ...)` parses as one assume
+  ## per conjunct, in order (D1c's guard temporaries forked 2^(n-1) paths
+  ## for n conjuncts). Query shapes and path counts change: 164 -> 165.
+  ##
+  ## (Prior: 164.)
   ## RFC-0005 S8p (2026-09-29) — S8n's precision remainder. A callee
   ## assigning a `distinct` or multi-variant result binds it (was
   ## `weInternalWalkerFault`, "retBindEq: kind mismatch"): `retBindEq`

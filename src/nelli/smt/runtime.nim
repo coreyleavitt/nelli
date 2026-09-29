@@ -15608,6 +15608,24 @@ proc runSymexImpl(prog: SymexProgram,
       var rangeLo = p.rangeLo
       var rangeHi = p.rangeHi
       var fromAssert = false
+      # RFC-0005 S8q: a B3 scan-pair offset (`IRParam.isScanPairOffset`)
+      # with no declared or asserted range takes its TYPE's full range, so
+      # `promoteSound` below allocates it as a width-stamped Z3 Int with
+      # that range in `initialPC`: the bit-vector's own value set, and every
+      # overflow obligation kept (`overflowCondInt`). As a bit-vector it
+      # reached the scan's string query through a signed `bv2int` bridge
+      # Z3 did not bound (B7R-3 ran past 300 s under a 10M `rlimit`).
+      var typeRangeForScan = false
+      # A param B4 also traced (`isIntOffset`) keeps that promotion as is.
+      if not hasRange and p.isScanPairOffset and not p.isIntOffset and
+         p.ty.signed and p.ty.width in [8, 16, 32, 64] and
+         not assertRanges.hasKey(p.name):
+        hasRange = true
+        typeRangeForScan = true
+        rangeLo = if p.ty.width == 64: low(int64)
+                  else: -(1'i64 shl (p.ty.width - 1))
+        rangeHi = if p.ty.width == 64: high(int64)
+                  else: (1'i64 shl (p.ty.width - 1)) - 1
       if not hasRange and assertRanges.hasKey(p.name):
         let ai = assertRanges[p.name]
         if not ai.isEmpty:
@@ -15687,6 +15705,7 @@ proc runSymexImpl(prog: SymexProgram,
             evidence: if fromAssert: aeNumericFold else: aeTypeRange,
             derivation:
               (if fromAssert: "assertion-derived range "
+               elif typeRangeForScan: "scan-pair offset, type range "
                else: "type-derived range ") &
               $ivl & " fits " & $p.ty & " BV window")
         elif p.hasRange and not promoteLoose:

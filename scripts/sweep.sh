@@ -86,14 +86,16 @@ case "$backend" in c|cpp) ;; *) echo "sweep.sh: backend must be c or cpp" >&2; e
 # incident, where a stale "fails on Windows" ledger note had maintainers
 # skip-listing a genuine bug that was red on BOTH platforms.
 known_linux_hangs=(
-  # Two of the six r6 suites that hung under Linux/podman (verified to
-  # 1500s) while PASSING on the symex-mingw Windows leg. RFC-0005 S8k (the
-  # `maxSeqLen` cap, `seqQueryRLimit`, byte tests in character form, loop
-  # feasibility pruning) made b1_stringbacked, b3_scanpair,
-  # n10_coverage_matrix and nulwitness terminate and pass on c and cpp, so
-  # they are swept again. These two still run past 900s on Linux.
-  tsymex_r6_b7r_bytescan
-  tsymex_r6_b7r2_pathscope
+  # The six r6 suites that hung under Linux/podman (verified to 1500s)
+  # while PASSING on the symex-mingw Windows leg are all swept again.
+  # RFC-0005 S8k (the `maxSeqLen` cap, `seqQueryRLimit`, byte tests in
+  # character form, loop feasibility pruning) freed b1_stringbacked,
+  # b3_scanpair, n10_coverage_matrix and nulwitness. RFC-0005 S8q freed
+  # b7r_bytescan (a scan-pair offset param is an Int, not a bit-vector
+  # bridged into the string query; a conjunctive `symexAssume` no longer
+  # forks per conjunct) and b7r2_pathscope: measured under a concurrent
+  # -j 6 gate sweep, b7r_bytescan 51s (c) / 54s (cpp) and b7r2_pathscope
+  # 279s (c) / 277s (cpp), every check passing.
   # SND-3-6, split out of tsymex_snd3_loopdegrade.nim in round 10 of the #163
   # review. ONE Z3 query grinding: flat RSS (so not path growth), hangs at
   # maxLoopUnwind=1 (so not unrolling), hangs on BOTH backends (so not the

@@ -93,8 +93,17 @@ suite "symex A1 — assert/assume direct-argument-position operand-shape charact
     check rInline.status == sxUnsat
     checkTwins(rInline, rHoisted)
 
-  test "cell 4 (direct assume, compound arithmetic condition): sxSat, twin-identical":
+  test "cell 4 (direct assume, compound arithmetic condition): sxSat, twin-identical verdict":
+    ## RFC-0005 S8q: a direct `symexAssume(a and b)` is one assume per
+    ## conjunct (`x - y` is evaluated only once `x + y > 0` holds, as in
+    ## Nim), while the twin hoists both operands first. The verdicts agree;
+    ## the path conditions differ in order, so Z3 picks different models
+    ## (inline (-6291457, 274871877636), hoisted (0, 4611686018427387904)).
+    ## Each witness is checked against the real conditions instead.
     let rInline  = symexFind(assumeArgArithDirect, tLabel("hit"))
     let rHoisted = symexFind(assumeArgArithDirectHoisted, tLabel("hit"))
     check rInline.status == sxSat
-    checkTwins(rInline, rHoisted)
+    check rHoisted.status == sxSat
+    if rInline.status == sxSat and rHoisted.status == sxSat:
+      for (x, y) in [rInline.witness, rHoisted.witness]:
+        check (x + y) > 0 and (x - y) < 100 and (x > 0 or y > 0)

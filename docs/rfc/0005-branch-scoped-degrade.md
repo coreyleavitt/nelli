@@ -169,7 +169,7 @@ state = "done"
 [[slice]]
 id    = "S8q"
 title = "S8o's termination remainder: b7r_bytescan B7R-3 hangs past its rlimit in the walk's shared Z3 context (int param in BV form converted to Int inside a string query; keep it out of BV or bound the check), b7r2_pathscope off the sweep skip list once measured on c and cpp under gate load, B7R-6 conjunctive symexAssume forking 2^16 paths, per-context Z3 cost history for capped string queries"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8r"
@@ -2882,6 +2882,123 @@ Re-pinned, each checked against real Nim:
   `augmented_assign`: the Class-B `feUnsupportedStmtKind` trigger is a
   positional tuple-element `+=`; `augmented_assign` also pins the field
   `+=` as modelled (`sxUnsat`).
+
+**As landed (S8q, walker 165) — S8o's termination remainder.**
+
+*B7R-3: the offset parameter is an Int.* The stalled query was
+`str.indexof(data, "\0", bv2int(start)) == bv2int(start + 4)`: `start`, an
+`int` parameter, was a 64-bit bit-vector, and every use of it in the
+string query went through Z3's signed `bv2int` (an `ite` over `bvslt`).
+Rewritten with `start` an Int (its range asserted, `start + 4` as Int
+addition) the query is SAT in 0.09 s on the 4.13.4 CLI; the bridged text
+is `unknown` at 10M units and SAT only at 100M (8.5 s). `collectScanPairOffsetParams` (`dsl_parser.nim`) now marks
+an entry-proc `int` param that reaches a B3 scan-pair's loop index,
+traced as B4's `collectIntOffsetParams` traces its offsets (one `var i =
+<param>` rebind, one call boundary); the two share one collector,
+parameterised by the loop shape. `IRParam.isScanPairOffset` carries the
+mark, and `runSymexImpl` gives such a param with no declared or asserted
+range its type's full range, so the existing `promoteSound` path
+allocates it: a Z3 Int stamped with its width (every `+`/`-`/`*` on it
+keeps its `overflowCondInt` fork), with `low(T) <= x <= high(T)` in the
+initial path condition, logged as an `AbstractionEntry`. That is the
+bit-vector's own value set, so no verdict can change except by Z3
+answering. Two limits, both deliberate:
+- only under `isOptimised` (the default); `isExact` keeps the
+  bit-vector and the bridge;
+- a param B4 already marks (`isIntOffset`) keeps that unstamped
+  promotion unchanged.
+
+The walker-level fix was chosen over bounding the check.
+- **A wall-clock `timeout`** would make verdicts depend on the machine,
+  which every other bound here avoids.
+- **A context of its own per capped query** was built and measured. Z3's
+  translator rejects string terms: translating a query holding
+  `str.indexof` into a fresh context raised `Sort of polymorphic function
+  'seq.indexof' does not match the declared type` (Z3 5.1). A Z3 API
+  error voids the run's verdict (S8m), so B7R-1 through B7R-2c went
+  `sxUnknown` and `s8o_termination` crashed. It would not have decided
+  B7R-3 anyway: S8o measured the bridged query `unknown` at 10M units in
+  a fresh 5.1 context. Item 4 (per-context cost history) is therefore not
+  changed. It stays documented at `checkCapped`; the only route past it is
+  one context per query, which needs a translation Z3 does not provide
+  for string terms.
+
+*B7R-6: a conjunctive assume is one assume per conjunct.*
+`symexAssume(a and b)` and `symexAssume(a); symexAssume(b)` are the same
+program: `a` is evaluated, and `b` is evaluated (and may raise) only when
+`a` holds; either way the run is filtered unless both hold. The parser
+now emits the split form, conjunct `k`'s preamble after assume `k-1`.
+Parsed whole, D1c's guard temporaries (`let sc = a; if sc: sc = b`) are
+chained, not nested, so every path forked at every conjunct whose right
+side reads an index. A 12-conjunct assume made 2049 Z3 calls (2^11 + 1),
+and now makes 13: the target solve plus one UNSAT raise solve per
+conjunct.
+
+*Timings.* Measured on the slice sha under gate-like load (S8p's `-j 6`
+gate sweep running, plus five other `dt-bounded` runs; load average about
+9 on 6 cores):
+
+| suite | backend | S8o (5f85893) | S8q |
+|---|---|---|---|
+| `b7r_bytescan` | c | killed at 900 s (5 of 26 checks) | 51 s, 26/26 |
+| `b7r_bytescan` | cpp | killed at 900 s (5 of 26 checks) | 54 s, 26/26 |
+| `b7r2_pathscope` | c | 528 s, 11/11 (S8o, unloaded) | 279 s, 11/11 |
+| `b7r2_pathscope` | cpp | 754 s, 11/11 | 277 s, 11/11 |
+
+Both suites are off `sweep.sh`'s skip list. Before the assume split,
+`b7r_bytescan` on c took 109 s (B7R-6 alone was about 80 s).
+
+*Skipped-suite per-check comparison* (every `[OK]`/`[FAILED]` line, base
+5f85893 against the slice, c and cpp; the c base is S8o's log of the
+code-identical 5dc201f): no check goes from `[OK]` to
+`[FAILED]`. `b7r_bytescan` goes from 5 `[OK]` then a kill to 26 `[OK]` on
+both backends; `b7r2_pathscope` is 11 `[OK]` on both shas and both
+backends; `snd3_6_equality_loop` is 3 `[OK]` on both.
+
+Pins: `tests/tsymex_rfc0005_s8q_termination.nim`.
+- (1) `start` promoted over `int`'s range (RED: no abstraction entry);
+  B7R-3's shape SAT within `seqQueryRLimit = 2M` with a replayed witness
+  (RED: `sxUnknown`, "canceled"); the overflow obligation on the promoted
+  param (`OverflowDefect` at `high(int)`); a negative start still raises
+  `IndexDefect` at the entry read.
+- (3) a 12-conjunct assume in at most 13 Z3 calls (RED: 2049); short
+  circuit kept (a guarded read never raises, an unguarded one does);
+  contradictory conjuncts `sxUnsat`.
+- The `>= 165` floor.
+
+Re-pinned:
+- `phase15_CR2_cachekey` (164 -> 165, after S8p).
+- `phase15_A1_assertarg` cell 4: `symexAssume((x + y) > 0 and (x - y) <
+  100)` against its hoisted twin. Both are `sxSat`, but the split assume
+  orders the path condition differently, so Z3 returns a different model
+  (inline `(-6291457, 274871877636)`, hoisted `(0,
+  4611686018427387904)`). The pin now checks both witnesses against the
+  real conditions (both hold in Nim, no overflow) instead of their
+  equality. The inline form is also now faithful where the twin is not:
+  it evaluates `x - y` only once `x + y > 0` holds.
+
+*Different mechanisms, reported and not fixed here.*
+- **D1c `and` chains fork 2^(n-1) paths everywhere else.** The guard
+  temporaries chain (`let sc2 = sc1; if sc2: ...`), so the path where
+  `sc1` is false still forks at every later `if`, unpruned. Only
+  `symexAssume` is split here. `if a and b and c:`, `while`,
+  `symexAssert(a and b ...)` and `let x = a and b ...` with index-reading
+  right sides keep the blow-up. Nesting each guard inside the previous
+  one (`if sc: ...; sc = b; if sc: ...`) would make it linear for all of
+  them.
+- **Other scan shapes keep the bridge.** Only the B3 scan-pair's index is
+  traced. A Q1/B0 skip-while scan or a pair loop seeded from an `int`
+  param still bridges it into the string query as a bit-vector, and so
+  does any param under `isExact`.
+- **B4's `isIntOffset` promotion is still unstamped.** It carries no
+  width and no range, so arithmetic on such a param has no overflow
+  obligation (the existing, tracked gap at `runSymexImpl`).
+- **`tsymex_snd3_6_equality_loop` no longer hangs.** It is still on
+  `sweep.sh`'s skip list ("hangs on BOTH backends"). It passed, all 3
+  checks, at base 5f85893 (c: S8o's log; cpp 89 s) and at this slice
+  (c 53 s, cpp 65 s). Its entry is stale.
+- **CLAUDE.md** still says six `tsymex_r6_*` suites hang on Linux; none
+  of the six is skipped any more.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

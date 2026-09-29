@@ -7495,8 +7495,23 @@ proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int] =
     @[]
   walkLoops(body)
 
+proc accumulatingScanIndex(loop: NimNode): NimNode =
+  ## The loop index of a B4 accumulating scan (`collectIntOffsetParams`),
+  ## or nil.
+  let shapeOpt = tryMatchAccumulatingScanIdiomShape(loop)
+  if shapeOpt.isSome: shapeOpt.get.iNode else: nil
+
+proc scanPairIndex(loop: NimNode): NimNode =
+  ## RFC-0005 S8q. The loop index of a B3 scan-pair (early return on the
+  ## delimiter, `tryMatchScanPairIdiomShape`), or nil
+  ## (`collectScanPairOffsetParams`).
+  let shapeOpt = tryMatchScanPairIdiomShape(loop)
+  if shapeOpt.isSome: shapeOpt.get.iNode else: nil
+
 proc collectIntOffsetParamsImpl(procDef: NimNode,
-                                 visiting: CollectorVisiting): HashSet[string] =
+                                 visiting: CollectorVisiting,
+                                 loopIndex: proc(loop: NimNode): NimNode {.nimcall.} =
+                                   accumulatingScanIndex): HashSet[string] =
   ## Round-6 B4 (ADR-0028 Leg 1, ADR-0027's recorded lift — "int params
   ## whose def-use reaches an iekStrSubstr bound / iekStrFind start ->
   ## allocate svInt"). B1 left this collector unbuilt because Q1/B0/B3's
@@ -7558,9 +7573,9 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   proc walkLoops(n: NimNode) =
     if n == nil or n.kind == nnkEmpty: return
     if n.kind == nnkWhileStmt:
-      let shapeOpt = tryMatchAccumulatingScanIdiomShape(n)
-      if shapeOpt.isSome:
-        iSyms.add shapeOpt.get.iNode
+      let iNode = loopIndex(n)
+      if iNode != nil:
+        iSyms.add iNode
     for child in n:
       walkLoops(child)
   walkLoops(procDef[6])
@@ -7587,7 +7602,7 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
   traceOneCallBoundary[HashSet[string]](
     procDef,
     getCalleeMarked = proc(calleeImpl: NimNode): HashSet[string] =
-      collectIntOffsetParamsImpl(calleeImpl, visiting),
+      collectIntOffsetParamsImpl(calleeImpl, visiting, loopIndex),
     isMarked = proc(calleeMarked: HashSet[string], formalSym: NimNode): bool =
       formalSym.strVal in calleeMarked,
     onMatch = markIfParamOrLocal)
@@ -7596,6 +7611,22 @@ proc collectIntOffsetParamsImpl(procDef: NimNode,
 proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
   let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
   collectIntOffsetParamsImpl(procDef, visiting)
+
+proc collectScanPairOffsetParams(procDef: NimNode): HashSet[string] =
+  ## RFC-0005 S8q. The entry proc's `int` params that reach a B3
+  ## scan-pair's loop index, traced exactly as `collectIntOffsetParams`
+  ## traces B4's (at most one `var i = <param>` rebind, one call boundary).
+  ## B3's closed form reads its index through `iekStrAt`/`iekStrFind`,
+  ## which bridge a bit-vector with a signed `bv2int` (an `ite` over
+  ## `bvslt`); inside a string query Z3 did not answer that bridge within
+  ## its `rlimit` (`tsymex_r6_b7r_bytescan` B7R-3: past 300 s in the walk's
+  ## context, `unknown` at 10M units standalone; SAT in 0.1 s with the
+  ## param an Int). `runSymexImpl` allocates a marked param as a Z3 Int
+  ## stamped with its Nim width and bounded by its type's range
+  ## (`IRParam.isScanPairOffset`), which is the bit-vector's value set, so
+  ## unlike `isIntOffset` it loses no overflow obligation.
+  let visiting = newCollectorVisiting()
+  collectIntOffsetParamsImpl(procDef, visiting, scanPairIndex)
 
 proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for
@@ -9250,7 +9281,38 @@ proc parseStmtInner(n: NimNode,
       ## `symexAssert` (`mkAssert`), which masked `sxUnsat` with a false
       ## `sxRaised(AssertionDefect)` for a violatable assume ahead of a
       ## genuinely-unreachable target. Distinct IR kind: `mkAssume`.
-      mkAssume(parseExpr(n[1], preamble, ctx))
+      ##
+      ## RFC-0005 S8q: a boolean `and` chain is one assume per conjunct, in
+      ## source order. `symexAssume(a and b)` and `symexAssume(a);
+      ## symexAssume(b)` are the same program in Nim: `a` is evaluated; if
+      ## it is false the run is filtered either way, and `b` is evaluated
+      ## (and may raise) only when `a` is true. Parsed whole, D1c's guard
+      ## temporaries (`let sc = a; if sc: sc = b`) forked every path at
+      ## every conjunct with a raising read, so n conjuncts gave 2^(n-1)
+      ## paths (B7R-6: 16 conjuncts, 32,768 target solves); split, each
+      ## conjunct is one path constraint and only its own raises fork.
+      ## Conjunct k's preamble runs after assume k-1, as its evaluation does.
+      var conjuncts: seq[NimNode]
+      proc flattenAnd(c: NimNode) =
+        let u = if c.kind == nnkPar and c.len == 1: c[0] else: c
+        if u.kind == nnkInfix and u.len == 3 and u[0].kind in {nnkIdent, nnkSym} and
+           u[0].strVal == "and" and
+           (u[0].kind == nnkIdent or isBooleanShortCircuitInfix(u)):
+          flattenAnd(u[1])
+          flattenAnd(u[2])
+        else:
+          conjuncts.add c
+      flattenAnd(n[1])
+      if conjuncts.len <= 1:
+        mkAssume(parseExpr(n[1], preamble, ctx))
+      else:
+        var stmts = @[mkAssume(parseExpr(conjuncts[0], preamble, ctx))]
+        for k in 1 ..< conjuncts.len:
+          var pre: seq[IRStmt]
+          let c = parseExpr(conjuncts[k], pre, ctx)
+          stmts.add pre
+          stmts.add mkAssume(c)
+        mkBlock(stmts)
     elif n.len >= 2 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["inc", "dec"]) and
          (block:
             let recv = unwrapHidden(n[1])
@@ -10494,7 +10556,8 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"hasRange", newLit(p.hasRange)),
     newColonExpr(ident"isVar",    newLit(p.isVar)),
     newColonExpr(ident"isStringBacked", newLit(p.isStringBacked)),
-    newColonExpr(ident"isIntOffset", newLit(p.isIntOffset)))
+    newColonExpr(ident"isIntOffset", newLit(p.isIntOffset)),
+    newColonExpr(ident"isScanPairOffset", newLit(p.isScanPairOffset)))
 
 proc emitParamSeq(ps: seq[IRParam]): NimNode =
   var lit = newTree(nnkBracket)
@@ -10694,6 +10757,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # feeds an accumulating-scan's offset) must exist before `runSymexImpl`'s
   # top-level param-allocation loop chooses BV vs svInt.
   let intOffsetParams = collectIntOffsetParams(procDef)
+  let scanPairOffsetParams = collectScanPairOffsetParams(procDef)   ## RFC-0005 S8q
   # Round-6 B7r2 (walker v88): companion pre-pass for the literal-seeded
   # case `collectIntOffsetParams` cannot cover (see its own doc comment)
   # — same timing discipline (must exist before the `nnkVarSection`/
@@ -10728,7 +10792,8 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
                       hasRange: classified.range.hasRange,
                       isVar: isVarParam,
                       isStringBacked: containsSym(ctx.procScoped.stringBackedParams, id[j]),
-                      isIntOffset: name in intOffsetParams)
+                      isIntOffset: name in intOffsetParams,
+                      isScanPairOffset: name in scanPairOffsetParams)
       params.add p
       paramsNimSeq.add emitParam(p)
   # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the

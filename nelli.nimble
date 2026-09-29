@@ -892,5 +892,10 @@ task test, "Run the test suite":
             # multi-variant result binding, the multi-variant zero value, the
             # SUT's unwritten `result`, value field writes, char `add`,
             # structured closure results; walker 163->164.
-            "tsymex_rfc0005_s8p_precision"]:
+            "tsymex_rfc0005_s8p_precision",
+            # RFC-0005 S8q -- S8o's termination remainder: a B3 scan-pair
+            # offset param allocated as a stamped Int (no bv2int bridge into
+            # the string query), a conjunctive symexAssume split per
+            # conjunct; walker 164->165.
+            "tsymex_rfc0005_s8q_termination"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

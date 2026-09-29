@@ -1291,6 +1291,17 @@ type
                        ## The DECLARED `IRType` stays `itInt` unchanged
                        ## (an allocation hint sibling to `isStringBacked`,
                        ## not a type change).
+    isScanPairOffset*: bool
+                       ## RFC-0005 S8q. True for an entry-proc `int` PARAM
+                       ## that reaches a B3 scan-pair's loop index
+                       ## (`collectScanPairOffsetParams`, `dsl_parser.nim`).
+                       ## As a bit-vector it reached the string query
+                       ## through a signed `bv2int` bridge that Z3 did not
+                       ## bound (`tsymex_r6_b7r_bytescan` B7R-3).
+                       ## `runSymexImpl` allocates it as a Z3 Int stamped
+                       ## with its width and constrained to its type's
+                       ## range under `isOptimised` (the sound-promotion
+                       ## path), so its overflow obligations stay live.
 
   ProcSig* = object
     name*:    string

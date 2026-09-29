@@ -184,7 +184,23 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "167"
+const symexWalkerVersion* = "168"
+  ## RFC-0005 S8t (2026-09-29) — S8q's termination remainder. A boolean
+  ## `and`/`or` chain is lowered with ONE guard temporary whose guards nest
+  ## (`lowerShortCircuitParts`, `dsl_parser.nim`): D1c's chained
+  ## temporaries forked 2^(n-1) paths over n operands with raising reads in
+  ## `if`, `while`, `symexAssert` and `let` (12 operands: 2049 Z3 calls,
+  ## now 13). A `while` guard's `and` chain splits at its longest plain
+  ## prefix, and a guard whose first operand hoists is rotated with the
+  ## whole chain nested (it ran later operands' reads unguarded). A Q1/B0
+  ## skip-while or B6 pair-loop offset (`IRParam.isScanOffset`, renamed
+  ## from `isScanPairOffset`) and a B4 accumulating-scan offset
+  ## (`isIntOffset`, was an unstamped Int with no overflow obligation) are
+  ## width-stamped Ints over their type's range, under `isExact` as well
+  ## as `isOptimised`. Path counts, query shapes and verdicts (a B4
+  ## offset's `OverflowDefect`) change: 167 -> 168.
+  ##
+  ## (Prior: 167.)
   ## RFC-0005 S8s (2026-09-29) — S8p's precision remainder. A seq literal's
   ## elements lower at the element type (`@[x, 1'u8]` was
   ## `weInternalWalkerFault`: a 64-bit element stored into a `seq[uint8]`).
@@ -204,7 +220,7 @@ const symexWalkerVersion* = "167"
   ## (Prior: 165.)
   ## RFC-0005 S8q (2026-09-29) — S8o's termination remainder. An entry
   ## `int` param traced to a B3 scan-pair's loop index
-  ## (`IRParam.isScanPairOffset`) is a Z3 Int stamped with its width and
+  ## (`IRParam.isScanPairOffset`, S8t: `isScanOffset`) is a Z3 Int stamped with its width and
   ## bounded by its type's range (was a bit-vector whose signed `bv2int`
   ## bridge into the string query Z3 did not bound: B7R-3 ran past 300 s
   ## under a 10M `rlimit`). `symexAssume(a and b ...)` parses as one assume

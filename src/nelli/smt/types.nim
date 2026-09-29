@@ -1298,23 +1298,30 @@ type
                        ## top-level param-allocation loop reads this
                        ## alongside the existing `isLoose`/`isOptimised`
                        ## svInt-promotion machinery to allocate an
-                       ## unconstrained `svInt` instead of a BV var — no
-                       ## new range constraints (this flag carries no
-                       ## proven range, unlike the sound-promotion path).
+                       ## `svInt` instead of a BV var. RFC-0005 S8t: with
+                       ## its type's range and width stamp (the
+                       ## sound-promotion path, as `isScanOffset`); before
+                       ## S8t it was unconstrained and unstamped, so
+                       ## arithmetic on it had no overflow obligation.
                        ## The DECLARED `IRType` stays `itInt` unchanged
                        ## (an allocation hint sibling to `isStringBacked`,
                        ## not a type change).
-    isScanPairOffset*: bool
-                       ## RFC-0005 S8q. True for an entry-proc `int` PARAM
-                       ## that reaches a B3 scan-pair's loop index
-                       ## (`collectScanPairOffsetParams`, `dsl_parser.nim`).
+    isScanOffset*: bool
+                       ## RFC-0005 S8q (as `isScanPairOffset`). True for an
+                       ## entry-proc `int` PARAM that reaches a scan's loop
+                       ## index (`collectScanOffsetParams`,
+                       ## `dsl_parser.nim`): a B3 scan-pair (S8q), a Q1/B0
+                       ## skip-while scan or a B6 pair loop (S8t).
                        ## As a bit-vector it reached the string query
                        ## through a signed `bv2int` bridge that Z3 did not
                        ## bound (`tsymex_r6_b7r_bytescan` B7R-3).
                        ## `runSymexImpl` allocates it as a Z3 Int stamped
                        ## with its width and constrained to its type's
-                       ## range under `isOptimised` (the sound-promotion
-                       ## path), so its overflow obligations stay live.
+                       ## range (the sound-promotion path, under
+                       ## `isOptimised`, and since S8t under `isExact` with
+                       ## checked arithmetic), so its overflow obligations
+                       ## stay live. Since S8t an `isIntOffset` param is
+                       ## allocated the same way.
 
   ProcSig* = object
     name*:    string

@@ -15785,18 +15785,24 @@ proc runSymexImpl(prog: SymexProgram,
       var rangeLo = p.rangeLo
       var rangeHi = p.rangeHi
       var fromAssert = false
-      # RFC-0005 S8q: a B3 scan-pair offset (`IRParam.isScanPairOffset`)
-      # with no declared or asserted range takes its TYPE's full range, so
+      # RFC-0005 S8q: a scan offset (`IRParam.isScanOffset`) with no
+      # declared or asserted range takes its TYPE's full range, so
       # `promoteSound` below allocates it as a width-stamped Z3 Int with
       # that range in `initialPC`: the bit-vector's own value set, and every
       # overflow obligation kept (`overflowCondInt`). As a bit-vector it
       # reached the scan's string query through a signed `bv2int` bridge
       # Z3 did not bound (B7R-3 ran past 300 s under a 10M `rlimit`).
+      # RFC-0005 S8t: the same for a B4 accumulating-scan offset
+      # (`isIntOffset`), which before S8t promoted UNSTAMPED with no range
+      # (arithmetic on it had no overflow obligation), and for either kind
+      # under `isExact` (below). Under `isExact` an asserted range is not
+      # consulted: the type range is exact, the assertion fold is analysis.
+      let isOffsetParam = p.isScanOffset or p.isIntOffset
       var typeRangeForScan = false
-      # A param B4 also traced (`isIntOffset`) keeps that promotion as is.
-      if not hasRange and p.isScanPairOffset and not p.isIntOffset and
+      if not hasRange and isOffsetParam and
          p.ty.signed and p.ty.width in [8, 16, 32, 64] and
-         not assertRanges.hasKey(p.name):
+         (settings.integerSemantics == isExact or
+          not assertRanges.hasKey(p.name)):
         hasRange = true
         typeRangeForScan = true
         rangeLo = if p.ty.width == 64: low(int64)
@@ -15824,7 +15830,18 @@ proc runSymexImpl(prog: SymexProgram,
       # carry `hasRange` at all (the enum arm in `dsl_typebridge` declines to
       # attach one for exactly this reason), so there is no promotion here to
       # preserve, only one not to introduce.
-      let promoteSound = settings.integerSemantics == isOptimised and
+      # RFC-0005 S8t: under `isExact` a scan offset is promoted too. A Z3
+      # Int stamped with its width, over its type's range, with every
+      # overflow fork kept, has exactly the bit-vector's values and
+      # defects, so `isExact`'s verdicts cannot move except by Z3
+      # answering; the bridged form left B7R-3's query `unknown`. Only
+      # under checked arithmetic (`acOverflow`): a bit-vector wraps where
+      # an unbounded Int does not, and `isExact` runs no wrap scan
+      # (`collectBan`'s `wrapScan` is `isOptimised`-only).
+      let offsetExact = settings.integerSemantics == isExact and
+                        isOffsetParam and acOverflow in settings.arithChecks
+      let promoteSound = (settings.integerSemantics == isOptimised or
+                          offsetExact) and
                          hasRange and
                          p.ty.signed and
                          fitsBVWindow(ivl, p.ty) and
@@ -15861,8 +15878,14 @@ proc runSymexImpl(prog: SymexProgram,
         #
         # `promoteLoose` (isLoose) and `isIntOffset`-only promotions stay
         # UNSTAMPED: isLoose is documented-unsound by user opt-in (ADR-0001)
-        # and exists as a research baseline, and `isIntOffset` is the
-        # measured blowup case — tracked separately, NOT closed here.
+        # and exists as a research baseline. RFC-0005 S8t: an `isIntOffset`
+        # param now takes its type's range (above) and goes through
+        # `promoteSound`, stamped, like S8q's scan offsets. The blowup the
+        # R3 note measured was the stamp WITHOUT a range. What remains on
+        # the unstamped arm is an `isIntOffset` param `promoteSound` turns
+        # down: banned by the ban scan (a bit-twiddling op, or unprovable
+        # arithmetic under unchecked `isOptimised`), unsigned, `isLoose`,
+        # or `isExact` with unchecked arithmetic.
         let soundWidth = if promoteSound: p.ty.width else: 0
         let soundSigned = promoteSound and p.ty.signed
         # Slice 2: the same proven `ivl` that justifies the promotion also
@@ -15882,7 +15905,7 @@ proc runSymexImpl(prog: SymexProgram,
             evidence: if fromAssert: aeNumericFold else: aeTypeRange,
             derivation:
               (if fromAssert: "assertion-derived range "
-               elif typeRangeForScan: "scan-pair offset, type range "
+               elif typeRangeForScan: "scan offset, type range "
                else: "type-derived range ") &
               $ivl & " fits " & $p.ty & " BV window")
         elif p.hasRange and not promoteLoose:

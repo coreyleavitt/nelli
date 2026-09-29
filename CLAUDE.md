@@ -6,11 +6,12 @@ the `nelli/symex` symbolic-execution engine (Z3 via nim-z3/softlink).
 - nim is NOT installed on the host. Build/run tests via `scripts/dt.sh` or
   `scripts/dt-bounded.sh <c|cpp> <test.nim>` (podman, `localhost/nelli-dev`);
   `scripts/dt-crosswin.sh` cross-compiles for `--os:windows` to catch Windows
-  API misuse without a Windows host. Six `tsymex_r6_*` suites hang under
-  Linux/podman — see the `symex-r6-linux-hangs` memory before reading a red
-  sweep as a regression.
+  API misuse without a Windows host. No suite is known to hang under
+  Linux/podman: the six `tsymex_r6_*` hangers were fixed by RFC-0005 S8k and
+  S8q, and `tsymex_snd3_6_equality_loop` terminates since S8t. A kill
+  (rc=137) in a sweep is therefore a real signal, not a known hang.
 - Whole-suite work is gated by `scripts/sweep.sh <outlog>` (every
-  `tests/t*.nim` in parallel, the six Linux hangers skipped by name) and
+  `tests/t*.nim` in parallel; its `known_linux_hangs` skip list is empty) and
   `scripts/sweep-diff.sh <baseline> <current>`. The suite is not green on a
   good day, so the gate is *what moved against a recorded baseline*, never
   "the sweep passed". `scripts/psweep.sh` remains the `tsymex_*`-only,

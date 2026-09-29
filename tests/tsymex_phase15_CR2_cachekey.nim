@@ -865,7 +865,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8s (`seq[uint8]` literal elements, else-arm discriminator
     ## domains and zero values, array results, variant field and positional
     ## tuple writes). 165->167 (166 is S8r's).
-    check symexWalkerVersion == "167"
+    ## RFC-0005 S8t (and/or chains lowered with nested guards, Q1/B0,
+    ## pair-loop and B4 offsets and `isExact` offsets allocated as stamped
+    ## Ints). 167->168.
+    check symexWalkerVersion == "168"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -907,5 +907,10 @@ task test, "Run the test suite":
             # RFC-0005 S8r -- the symex-mingw shard 2 runner loss: the
             # theory-free check really has no sequence theory on Z3 4.13.4,
             # and a cap-only refutation declines without a string search.
-            "tsymex_rfc0005_s8r_theoryfree"]:
+            "tsymex_rfc0005_s8r_theoryfree",
+            # RFC-0005 S8t -- S8q's termination remainder: and/or chains
+            # lowered with nested guards (linear paths), Q1/B0, pair-loop,
+            # B4 and isExact scan offsets allocated as stamped Ints;
+            # walker 167->168.
+            "tsymex_rfc0005_s8t_termination"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

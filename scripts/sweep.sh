@@ -5,9 +5,10 @@
 # Why this exists (RFC-0010 slice A0). Before it there was no way to run the
 # whole suite at all:
 #   * scripts/psweep.sh sweeps only tests/tsymex_*.nim.
-#   * `nimble test` is a single serial loop that includes the six
-#     tsymex_r6_* suites which hang forever on Linux/podman, so it never
-#     finishes in the container.
+#   * `nimble test` is a single serial loop that, when this was written,
+#     included six tsymex_r6_* suites which hung forever on Linux/podman,
+#     so it never finished in the container. (RFC-0005 S8k and S8q fixed
+#     all six; see `known_linux_hangs` below.)
 # Any RFC round whose purpose is detecting behavioural fallout across the
 # suite needs a sweep it can actually run, twice, and diff — see
 # scripts/sweep-diff.sh.
@@ -35,15 +36,15 @@
 #     <rc> <backend> <file>
 #
 # A test PASSED iff the first field is exactly `0`. The first field is `skip`
-# for the known-hang list below. Anything else is a failure; `137` specifically
+# for the known-hang list below (empty since RFC-0005 S8t). Anything else is a failure; `137` specifically
 # is a dt-bounded.sh timeout kill and is counted separately in the summary,
 # because a kill and an assertion failure need different responses and look
 # identical in a bare count.
 #
 # The default timeout is 900s and that number is load-bearing, not padding. At
 # 300s this sweep reported five suites as rc=137 that all pass under 900s on a
-# quiet machine -- and rc=137 is exactly what the six genuinely-hanging suites
-# report, so a tight bound manufactures members of the known-hang class. If
+# quiet machine -- and rc=137 is exactly what a genuinely-hanging suite
+# reports, so a tight bound manufactures members of the known-hang class. If
 # something else on the box is eating cores (check `podman stats` for orphaned
 # containers), raise it further rather than reading the kills as hangs.
 #
@@ -96,13 +97,12 @@ known_linux_hangs=(
   # forks per conjunct) and b7r2_pathscope: measured under a concurrent
   # -j 6 gate sweep, b7r_bytescan 51s (c) / 54s (cpp) and b7r2_pathscope
   # 279s (c) / 277s (cpp), every check passing.
-  # SND-3-6, split out of tsymex_snd3_loopdegrade.nim in round 10 of the #163
-  # review. ONE Z3 query grinding: flat RSS (so not path growth), hangs at
-  # maxLoopUnwind=1 (so not unrolling), hangs on BOTH backends (so not the
-  # backend-divergence class SND-3 pins), terminates at queryRLimit=1 but not
-  # at 20_000_000. Its parent file is deliberately NOT here: SND-3-1..5 pass in
-  # seconds and are live soundness pins. Full measurements in the suite header.
-  tsymex_snd3_6_equality_loop
+  # RFC-0005 S8t removed the last entry, tsymex_snd3_6_equality_loop (SND-3-6,
+  # one Z3 query that ground past its rlimit when the entry was added). It now
+  # passes all three checks in 26-49s (c) / 43-62s (cpp), measured at a58856d
+  # and at S8t with the host at load average 20-24. The list is empty: nothing is known to hang
+  # on Linux/podman. Add an entry only for a suite measured to hang (killed,
+  # not merely slow), with its reason.
 )
 
 is_known_hang() {

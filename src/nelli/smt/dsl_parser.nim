@@ -2592,6 +2592,79 @@ proc isBooleanShortCircuitInfix(n: NimNode): bool =
     isBuiltinNamed(n[0], ["and", "or"]) and  ## RFC-0005 S8c: not a user `and`
     isResolvedBoolAndOr(n)
 
+proc flattenShortCircuitChain(n: NimNode, opName: string,
+                              into: var seq[NimNode]) =
+  ## RFC-0005 S8t. The operands of a boolean short-circuit chain of ONE
+  ## operator (`a and b and c`, however parenthesised), in evaluation order.
+  ## Nim evaluates `(a and b) and c` and `a and (b and c)` identically: `a`;
+  ## then `b` only if `a` allowed it; then `c` only if `b` did. An operand
+  ## is descended into exactly when `parseExpr` would route it to the same
+  ## boolean `and`/`or` arm: a builtin (not a user `and`, S8c), not the
+  ## bitwise form (`isResolvedBitwiseAndOr`), and the same operator. A
+  ## different operator (`(a or b) and c`) stays one operand, lowered by its
+  ## own recursive parse.
+  let u = if n.kind == nnkPar and n.len == 1: n[0] else: n
+  if u.kind == nnkInfix and u.len == 3 and
+     u[0].kind in {nnkIdent, nnkSym} and u[0].strVal == opName and
+     not isUserCallee(u[0]) and not isResolvedBitwiseAndOr(u):
+    flattenShortCircuitChain(u[1], opName, into)
+    flattenShortCircuitChain(u[2], opName, into)
+  else:
+    into.add n
+
+type ShortCircuitPart = tuple[pre: seq[IRStmt], ir: IRExpr]
+  ## RFC-0005 S8t. One parsed operand of a short-circuit chain: the
+  ## statements its evaluation hoisted, and its value.
+
+proc shortCircuitPartIsPure(p: ShortCircuitPart): bool =
+  ## D1c's fast-path test for a non-first operand: nothing hoisted and no
+  ## inline defect fork, so evaluating it unconditionally changes nothing.
+  p.pre.len == 0 and not rhsHasInlineDefectFork(p.ir)
+
+proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
+                            preamble: var seq[IRStmt],
+                            ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8t. Lowers a flattened `and`/`or` chain (D1c's short-circuit
+  ## model) with ONE guard temporary whose guards NEST:
+  ##   and:  let sc = a; if sc: (<b's pre>; sc = b; if sc: (<c's pre>; sc = c))
+  ##   or:   the same with `if not sc:`
+  ## A pure operand (`shortCircuitPartIsPure`) joins the value before it
+  ## flat (`sc = b and c`), as D1c's fast path always did.
+  ##
+  ## Before S8t each binary node got its own temporary, CHAINED
+  ## (`let sc2 = sc1; if sc2: ...`), so the path on which an early operand
+  ## was false still reached every later guard as a fresh fork: n operands
+  ## with raising reads walked 2^(n-1) paths (12 operands: 2049 Z3 calls in
+  ## `if`, `while`, `symexAssert` and `let`; S8q split only `symexAssume`).
+  ## Nested, that path leaves the chain at the first false guard: n + 1
+  ## paths. Short-circuit order is unchanged: operand k's hoisted statements
+  ## (its raising reads) run only inside the guard of operand k-1.
+  preamble.add parts[0].pre
+  var acc = parts[0].ir
+  var k = 1
+  while k < parts.len and shortCircuitPartIsPure(parts[k]):
+    acc = mkBinop(op, acc, parts[k].ir)
+    inc k
+  if k == parts.len:
+    return acc
+  let sc = freshSynth(ctx, "sc")
+  preamble.add mkLet(sc, tBool(), acc)
+  proc guardOf(): IRExpr =
+    if op == bAnd: mkVar(sc)                # and: go on only while true
+    else: mkUnop(uNot, mkVar(sc))           # or:  go on only while false
+  proc nest(k: int): seq[IRStmt] =
+    result = parts[k].pre
+    var cur = parts[k].ir
+    var j = k + 1
+    while j < parts.len and shortCircuitPartIsPure(parts[j]):
+      cur = mkBinop(op, cur, parts[j].ir)
+      inc j
+    result.add mkAssign(sc, cur)
+    if j < parts.len:
+      result.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(j)))], nil)
+  preamble.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(k)))], nil)
+  mkVar(sc)
+
 proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
                         ctx: ParseCtx): IRExpr =
   ## RFC-parser-normalization A2a (D2, #146/#149 Mechanism). The ONLY way to
@@ -3905,28 +3978,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # plain `parseExpr` owns both operands, exactly as before this
         # restructure. Post-restructure, branch exclusivity with the
         # BITWISE arm above makes this exclusion structural, not incidental.
-        let lhsIR = parseExpr(n[1], preamble, ctx)  ## A2b EXCLUSION (boolean and/or, LHS)
-        var rhsPreamble: seq[IRStmt]
-        let rhsIR = parseExpr(n[2], rhsPreamble, ctx)  ## A2b EXCLUSION (boolean and/or, RHS)
-        if rhsPreamble.len == 0 and not rhsHasInlineDefectFork(rhsIR):
-          # Fast path: no hoisted stmts in RHS AND no inline defect-fork operation.
-          # R16-2b: iekConvFloatToInt is lowered inline — rhsPreamble.len==0 alone
-          # is insufficient. R16-3: iekBinop(bDiv/bMod) also lowers inline and must
-          # force the guarded path so the b==0 fork only fires under the LHS guard.
-          mkBinop(op, lhsIR, rhsIR)
-        else:
-          # Guarded path: bind LHS result into a fresh bool temp, then
-          # conditionally evaluate the RHS preamble + assign back.
-          let sc = freshSynth(ctx, "sc")
-          preamble.add mkLet(sc, tBool(), lhsIR)
-          let scGuard =
-            if op == bAnd:
-              mkVar(sc)                      # and: run RHS only when LHS is true
-            else:
-              mkUnop(uNot, mkVar(sc))        # or:  run RHS only when LHS is false
-          let rhsBody = mkBlock(rhsPreamble & @[mkAssign(sc, rhsIR)])
-          preamble.add mkIf(@[mkBranch(scGuard, rhsBody)], nil)
-          mkVar(sc)
+        #
+        # RFC-0005 S8t: the whole same-operator chain is flattened and
+        # lowered with ONE guard temporary whose guards nest
+        # (`lowerShortCircuitParts`). Each operand is parsed into its own
+        # scratch preamble, in source order. Fast path (every non-first
+        # operand pure: nothing hoisted, no inline defect fork -- R16-2b's
+        # iekConvFloatToInt, R16-3's bDiv/bMod): zero IR overhead, the flat
+        # `mkBinop` chain as before D1c. Pre-S8t each binary node had its
+        # own chained temporary, which forked 2^(n-1) paths over n operands.
+        var operands: seq[NimNode]
+        flattenShortCircuitChain(n, n[0].strVal, operands)
+        var parts: seq[ShortCircuitPart]
+        for o in operands:
+          var pre: seq[IRStmt]
+          let ir = parseExpr(o, pre, ctx)  ## A2b EXCLUSION (boolean and/or operand)
+          parts.add (pre: pre, ir: ir)
+        lowerShortCircuitParts(op, parts, preamble, ctx)
     else:
       # A2a chokepoint: the clean general infix family (comparisons,
       # arithmetic, shl/shr, xor — never bAnd/bOr, which are handled entirely
@@ -7511,12 +7579,22 @@ proc accumulatingScanIndex(loop: NimNode): NimNode =
   let shapeOpt = tryMatchAccumulatingScanIdiomShape(loop)
   if shapeOpt.isSome: shapeOpt.get.iNode else: nil
 
-proc scanPairIndex(loop: NimNode): NimNode =
-  ## RFC-0005 S8q. The loop index of a B3 scan-pair (early return on the
-  ## delimiter, `tryMatchScanPairIdiomShape`), or nil
-  ## (`collectScanPairOffsetParams`).
-  let shapeOpt = tryMatchScanPairIdiomShape(loop)
-  if shapeOpt.isSome: shapeOpt.get.iNode else: nil
+proc scanOffsetIndex(loop: NimNode): NimNode =
+  ## RFC-0005 S8q/S8t. The loop index of a recognised scan whose closed
+  ## form reads its index inside a string query, or nil
+  ## (`collectScanOffsetParams`): a B3 scan-pair (early return on the
+  ## delimiter, `tryMatchScanPairIdiomShape`, S8q), a Q1/B0 skip-while scan
+  ## (`tryMatchScanIdiomShape`, S8t) and a B6 pair loop
+  ## (`tryMatchPairLoopIdiomShape`, S8t). B4's accumulating scan has its
+  ## own collector (`collectIntOffsetParams`), whose params `runSymexImpl`
+  ## allocates the same way since S8t.
+  let pairOpt = tryMatchScanPairIdiomShape(loop)
+  if pairOpt.isSome: return pairOpt.get.iNode
+  let scanOpt = tryMatchScanIdiomShape(loop)
+  if scanOpt.isSome: return scanOpt.get.iNode
+  let pairLoopOpt = tryMatchPairLoopIdiomShape(loop)
+  if pairLoopOpt.isSome: return pairLoopOpt.get.iNode
+  nil
 
 proc collectIntOffsetParamsImpl(procDef: NimNode,
                                  visiting: CollectorVisiting,
@@ -7622,10 +7700,12 @@ proc collectIntOffsetParams(procDef: NimNode): HashSet[string] =
   let visiting = newCollectorVisiting()   ## N11: symbol-identity cycle guard
   collectIntOffsetParamsImpl(procDef, visiting)
 
-proc collectScanPairOffsetParams(procDef: NimNode): HashSet[string] =
-  ## RFC-0005 S8q. The entry proc's `int` params that reach a B3
-  ## scan-pair's loop index, traced exactly as `collectIntOffsetParams`
-  ## traces B4's (at most one `var i = <param>` rebind, one call boundary).
+proc collectScanOffsetParams(procDef: NimNode): HashSet[string] =
+  ## RFC-0005 S8q. The entry proc's `int` params that reach a scan's loop
+  ## index (`scanOffsetIndex`: B3 scan-pair since S8q; Q1/B0 skip-while
+  ## scan and B6 pair loop since S8t), traced exactly as
+  ## `collectIntOffsetParams` traces B4's (at most one `var i = <param>`
+  ## rebind, one call boundary).
   ## B3's closed form reads its index through `iekStrAt`/`iekStrFind`,
   ## which bridge a bit-vector with a signed `bv2int` (an `ite` over
   ## `bvslt`); inside a string query Z3 did not answer that bridge within
@@ -7633,10 +7713,10 @@ proc collectScanPairOffsetParams(procDef: NimNode): HashSet[string] =
   ## context, `unknown` at 10M units standalone; SAT in 0.1 s with the
   ## param an Int). `runSymexImpl` allocates a marked param as a Z3 Int
   ## stamped with its Nim width and bounded by its type's range
-  ## (`IRParam.isScanPairOffset`), which is the bit-vector's value set, so
-  ## unlike `isIntOffset` it loses no overflow obligation.
+  ## (`IRParam.isScanOffset`), which is the bit-vector's value set, so
+  ## it loses no overflow obligation.
   let visiting = newCollectorVisiting()
-  collectIntOffsetParamsImpl(procDef, visiting, scanPairIndex)
+  collectIntOffsetParamsImpl(procDef, visiting, scanOffsetIndex)
 
 proc collectIntOffsetLiteralLocals(procDef: NimNode): seq[NimNode] =
   ## Round-6 B7r2 (walker v88). A COMPANION to `collectIntOffsetParams` for
@@ -8016,27 +8096,53 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   result =
     if guardNode.kind == nnkInfix and guardNode.len == 3 and
        isBuiltinNamed(guardNode[0], ["and"]):
-      let aNode = guardNode[1]
-      let bNode = guardNode[2]
-      var preA: seq[IRStmt]
-      let condA = parseExpr(aNode, preA, ctx)
-      var preB: seq[IRStmt]
-      let condB = parseExpr(bNode, preB, ctx)
-      let bHasFault = rhsHasInlineDefectFork(condB) or preB.len > 0
-      if preA.len == 0 and bHasFault:
+      # RFC-0005 S8t: the guard's whole `and` chain is flattened and its
+      # operands parsed once each, in source order. `A` is the longest
+      # prefix that is a plain guard (the first operand hoists nothing, the
+      # rest are pure); `B` is the remaining chain, lowered with nested
+      # guards (`lowerShortCircuitParts`). Pre-S8t the split was only at
+      # the top binary node: `(X and Y) and B` with a fault in `X` fell to
+      # the rotation below with `preA & preB`, which ran B's hoisted reads
+      # UNGUARDED by A (a false IndexDefect: `while s[0] == 'a' and i <
+      # s.len and s[i] == 'a'` read `s[s.len]`), and a long chain forked
+      # 2^(n-1) paths through D1c's chained temporaries.
+      var operands: seq[NimNode]
+      flattenShortCircuitChain(guardNode, "and", operands)
+      var parts: seq[ShortCircuitPart]
+      for o in operands:
+        var pre: seq[IRStmt]
+        let ir = parseExpr(o, pre, ctx)
+        parts.add (pre: pre, ir: ir)
+      var k0 = 0
+      if parts[0].pre.len == 0:
+        k0 = 1
+        while k0 < parts.len and shortCircuitPartIsPure(parts[k0]):
+          inc k0
+      if k0 >= 1 and k0 < parts.len:
         # Case 1: faithful and-split. Continue-safe by construction.
+        var condA = parts[0].ir
+        for i in 1 ..< k0:
+          condA = mkBinop(bAnd, condA, parts[i].ir)
+        var preB: seq[IRStmt]
+        let condB = lowerShortCircuitParts(bAnd, parts[k0 .. ^1], preB, ctx)
         let breakIfNotB = mkIf(@[mkBranch(mkUnop(uNot, condB), mkBreak())], nil)
         let loopBody = mkBlock(preB & @[breakIfNotB, body])
         mkWhile(condA, loopBody)
-      elif preA.len == 0 and not bHasFault:
+      elif k0 == parts.len:
         # Case 1b: no fault anywhere in this and-guard — plain flat guard
         # (identical to D1c's own fast path for the same node).
-        mkWhile(mkBinop(bAnd, condA, condB), body)
+        var cond = parts[0].ir
+        for i in 1 ..< parts.len:
+          cond = mkBinop(bAnd, cond, parts[i].ir)
+        mkWhile(cond, body)
       elif not bodyHasContinue:
-        # Case 2, continue-free: A itself needed hoisting (nested
-        # short-circuit) — safe to fall back to the pre-R14 rotation since
-        # there is no `continue` to ever skip the refresh.
-        mkRotatedGuardWhile(mkBinop(bAnd, condA, condB), body, preA & preB)
+        # Case 2, continue-free: the FIRST operand needed hoisting -- safe
+        # to fall back to the pre-R14 rotation since there is no `continue`
+        # to ever skip the refresh. The rotated preamble is the whole
+        # chain's nested lowering, so every later operand stays guarded.
+        var pre: seq[IRStmt]
+        let cond = lowerShortCircuitParts(bAnd, parts, pre, ctx)
+        mkRotatedGuardWhile(cond, body, pre)
       else:
         # Case 2, continue present: no safe re-run mechanism for this rare
         # nested shape — sound-degrade (Invariant 3: never a false verdict).
@@ -10655,7 +10761,7 @@ proc emitParam(p: IRParam): NimNode =
     newColonExpr(ident"isVar",    newLit(p.isVar)),
     newColonExpr(ident"isStringBacked", newLit(p.isStringBacked)),
     newColonExpr(ident"isIntOffset", newLit(p.isIntOffset)),
-    newColonExpr(ident"isScanPairOffset", newLit(p.isScanPairOffset)))
+    newColonExpr(ident"isScanOffset", newLit(p.isScanOffset)))
 
 proc emitParamSeq(ps: seq[IRParam]): NimNode =
   var lit = newTree(nnkBracket)
@@ -10855,7 +10961,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # feeds an accumulating-scan's offset) must exist before `runSymexImpl`'s
   # top-level param-allocation loop chooses BV vs svInt.
   let intOffsetParams = collectIntOffsetParams(procDef)
-  let scanPairOffsetParams = collectScanPairOffsetParams(procDef)   ## RFC-0005 S8q
+  let scanOffsetParams = collectScanOffsetParams(procDef)   ## RFC-0005 S8q/S8t
   # Round-6 B7r2 (walker v88): companion pre-pass for the literal-seeded
   # case `collectIntOffsetParams` cannot cover (see its own doc comment)
   # — same timing discipline (must exist before the `nnkVarSection`/
@@ -10891,7 +10997,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
                       isVar: isVarParam,
                       isStringBacked: containsSym(ctx.procScoped.stringBackedParams, id[j]),
                       isIntOffset: name in intOffsetParams,
-                      isScanPairOffset: name in scanPairOffsetParams)
+                      isScanOffset: name in scanOffsetParams)
       params.add p
       paramsNimSeq.add emitParam(p)
   # Phase 14 cycle C3: always wrap the proc body in `isBlock` so the

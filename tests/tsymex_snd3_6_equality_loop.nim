@@ -1,4 +1,12 @@
-## SND-3-6, split out of `tsymex_snd3_loopdegrade.nim` — and SKIP-LISTED.
+## SND-3-6, split out of `tsymex_snd3_loopdegrade.nim` — formerly SKIP-LISTED.
+##
+## RFC-0005 S8t: no longer on `scripts/sweep.sh`'s skip list nor on
+## `scripts/derive-ci-suites.ps1`'s Windows one. Measured at a58856d and at
+## S8t it passes all three checks in 26-49 s (c) and 43-62 s (cpp) on Linux
+## under load, so the non-termination below is history there. On Windows it
+## joins the derived corpus under S8r's per-suite watchdog
+## (`scripts/run-ci-suite.ps1`, 240 s), which bounds and names it if it
+## still hangs there; the next symex-mingw run is that verification.
 ##
 ## This is the equality-regression half of RFC-chapulin-hardening SND-3: an
 ## `s[i] == 'a'` loop guard is NOT an ordering comparison (CR-17(a) guards only

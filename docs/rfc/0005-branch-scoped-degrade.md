@@ -184,7 +184,7 @@ state = "done"
 [[slice]]
 id    = "S8t"
 title = "S8q's termination remainder: and-chain lowering forks 2^(n-1) paths in if/while/symexAssert/let (nest the guard temporaries), other scan shapes (Q1/B0, pair loop) and isExact mode still use the bv2int bridge, B4 isIntOffset promotion lacks a width stamp (no overflow obligations), stale snd3_6 sweep skip-list entry, CLAUDE.md six-Linux-hangers line"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8u"
@@ -3289,6 +3289,116 @@ Re-pinned, each checked against real Nim:
   - `rfc0005_s1b_kinds`
   - `rfc0005_s1c_verdict`
   - `augmented_assign`
+
+**As landed (S8t, walker 168) — S8q's termination remainder.**
+
+*`and`/`or` chains lower to nested guards.* `lowerShortCircuitParts`
+(`dsl_parser.nim`) takes a whole same-operator chain, flattened by
+`flattenShortCircuitChain` (a builtin, boolean, same-operator operand is
+descended into; a different operator is one operand), and lowers it with
+one guard temporary whose guards nest:
+`let sc = a; if sc: (<b's reads>; sc = b; if sc: (<c's reads>; sc = c))`
+(`if not sc` for `or`). A pure operand joins the one before it flat, as
+D1c's fast path did. Before, each binary node had its own temporary,
+chained (`let sc2 = sc1; if sc2: ...`), so the path on which an early
+operand was false reached every later guard as a fresh fork. A
+12-operand chain with raising reads made 2049 Z3 calls in `if`, `let`,
+`symexAssert(not ...)`, `while` and an `or` chain; it now makes 13 (the
+target solve plus one UNSAT `IndexDefect` solve per read). Short-circuit
+order is unchanged: operand k's hoisted reads run only inside operand
+k-1's guard. S8q's per-conjunct `symexAssume` split stays (it forks
+nothing at all).
+
+`mkShortCircuitWhile` flattens the guard's `and` chain too. `A` is the
+longest plain prefix (the first operand hoists nothing, the rest are
+pure) and `B`, the rest, is lowered nested inside the body
+(`while A: <B>; if not B: break; body`). When the first operand hoists,
+the rotation re-runs the whole chain's nested lowering. Before, the split
+was only at the top binary node, so `(X and Y) and B` with a hoisting `X`
+was rotated with `preA & preB`, which ran B's reads outside A's guard,
+and a long guard forked 2^(n-1) paths. The pin
+`while s.len > 0 and s[0] == 'a' and i < s.len and s[i] == 'a'` (with
+`s.len <= 3`) was `sxUnknown` (`beBudgetExhausted`) for `tIndexError`
+and is now `sxUnsat`.
+
+*Every scan offset is a width-stamped Int.* `collectScanOffsetParams`
+(was `collectScanPairOffsetParams`) traces an entry `int` param to a
+Q1/B0 skip-while scan's index and a B6 pair loop's counter as well as a
+B3 scan-pair's (`scanOffsetIndex`); `IRParam.isScanPairOffset` is renamed
+`isScanOffset`. In `runSymexImpl` a B4 accumulating-scan offset
+(`isIntOffset`) takes the same path: with no declared range it gets its
+type's range and goes through `promoteSound`, a Z3 Int stamped with its
+width, range in the initial path condition, every `overflowCondInt` fork
+kept. It was an unstamped Int with no range, so arithmetic on it had no
+overflow obligation. The R3 note measured the stamp without a range
+(`b4_readcstring` past 15 minutes); with the range it runs in 90 s under
+load. Under `isExact` an offset param (either kind) is promoted the same
+way when arithmetic is checked (`acOverflow`): the stamped Int over the
+type range has the bit-vector's values and defects, so only Z3's ability
+to answer changes. Under `isExact` an asserted range is not used for it,
+only the type range. With unchecked arithmetic `isExact` keeps the
+bit-vector, because a bit-vector wraps and an Int does not.
+
+*Skip list and CLAUDE.md.* `tsymex_snd3_6_equality_loop` passes all 3
+checks at a58856d in 26-47 s (c) and 43-62 s (cpp), and at this slice in
+49 s (c) and 62 s (cpp), with the host at load average 20-24. It is off `sweep.sh`'s skip list and
+`derive-ci-suites.ps1`'s Windows one, both now empty. `CLAUDE.md` says no suite is known to hang on Linux/podman.
+
+*Skipped-suite per-check comparison.* The only skipped suite at the base
+was `snd3_6_equality_loop`: 3 `[OK]` at a58856d on c and cpp, and 3
+`[OK]` at this slice on c and cpp. No check goes from `[OK]` to
+`[FAILED]`.
+
+Pins: `tests/tsymex_rfc0005_s8t_termination.nim`.
+- (1) 12-operand chains in `if`, `let`, `symexAssert`, `while` and an
+  `or` chain within 13 Z3 calls (RED: 2049 each); short-circuit kept in
+  `if`, `or` and a mixed chain (a guarded read never raises, an
+  unguarded one does); the hoisting-first-operand `while` guard (RED:
+  `sxUnknown`).
+- (3) a B4 offset promoted over `int`'s range (RED: no abstraction
+  entry); its `OverflowDefect` at `high(int)` (RED: `sxRaised` with
+  witness `(@[], -1)`, which in Nim raises `IndexDefect`, not
+  `OverflowDefect`); the B4 hit still reachable, replayed.
+- (2) a Q1/B0 offset promoted, its hit replayed and its `OverflowDefect`
+  found (RED: the suite killed at 900 s in this test); a pair-loop offset
+  promoted (RED: no entry, `beBudgetExhausted`); under `isExact` a
+  scan-pair offset promoted and B7R-3's shape SAT within 2M units (RED:
+  `sxUnknown`, "canceled").
+- The `>= 168` floor.
+
+Re-pinned:
+- `phase15_CR2_cachekey` (167 -> 168).
+- `phase15_A2a_chokepoint_audit`: the boolean and/or branch parses every
+  operand in one loop, so exactly 1 line (was 2, LHS and RHS) carries the
+  `A2b EXCLUSION (boolean and/or` marker on a bare `parseExpr(`.
+
+*Different mechanisms, reported and not fixed here.*
+- **Alternating `and`/`or` chains still multiply paths.** An operand
+  with the other operator (`(a or b) and (c or d) and ...`) is lowered by
+  its own recursive parse, whose guard forks two paths that both go on
+  into the rest of the outer chain. m such operands with raising reads
+  give 2^m paths. Nesting across operators would need the chain lowered
+  as one decision tree.
+- **A hoisting first operand in a `while` guard whose body has
+  `continue`** still declines (`feUnsupportedOp`, R14 Case 2). The
+  rotation is unsafe there and there is no `A` to split on.
+- **An `isIntOffset` param `promoteSound` turns down stays an unstamped
+  Int**: banned by the ban scan, unsigned, `isLoose`, or `isExact` with
+  unchecked arithmetic. Under unchecked `isOptimised` the wrap scan bans
+  any arithmetic it cannot prove, so a B4 offset with arithmetic stays an
+  unbounded Int that does not wrap where Nim does. The bit-vector would
+  wrap, but B4's `iekStrSubstr` bound declines a bit-vector (CR-17), so
+  the fix is not a revert. It is pre-existing.
+- **The false `OverflowDefect` at the base** (`sutAccOverflow`, witness
+  `(@[], -1)`) is gone with the stamp. How the unstamped offset produced
+  an `OverflowDefect` at all was not traced; no other shape was probed
+  for it.
+- **`tsymex_snd3_6_equality_loop` is unverified on Windows.** Its
+  `scripts/derive-ci-suites.ps1` skip entry is removed too (the list is
+  now empty): it passes in under 65 s on Linux, and S8r's per-suite
+  watchdog (`scripts/run-ci-suite.ps1`, 240 s) bounds it in the corpus
+  shards and names it if it hangs. The next symex-mingw run is its
+  Windows verification; no Windows runner ran it in this slice.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

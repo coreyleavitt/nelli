@@ -197,15 +197,18 @@ suite "symex A2a — permanent parseAtomicOperand chokepoint audit":
     # post-restructure analog of the not-exclusion check above, catching a
     # future revert that swaps parseAtomicOperand into the boolean path
     # without updating (or removing) the marker.
+    # RFC-0005 S8t: the branch flattens the whole same-operator chain and
+    # parses every operand in ONE loop (`lowerShortCircuitParts`), so the
+    # marker sits on one `parseExpr(` line, not an LHS and an RHS line.
     var booleanExclusionCallCount = 0
     for rawLine in dslParserSrc.splitLines():
       if rawLine.contains("A2b EXCLUSION (boolean and/or") and
          rawLine.contains("parseExpr(") and not rawLine.contains("parseAtomicOperand("):
         inc booleanExclusionCallCount
-    if booleanExclusionCallCount != 2:
+    if booleanExclusionCallCount != 1:
       violations.add Violation(lineNo: 0, lineText: "",
-        reason: "expected exactly 2 lines tagged 'A2b EXCLUSION (boolean " &
-                "and/or' calling bare parseExpr( (LHS + RHS), found " &
+        reason: "expected exactly 1 line tagged 'A2b EXCLUSION (boolean " &
+                "and/or' calling bare parseExpr( (the operand loop), found " &
                 $booleanExclusionCallCount)
     # The guard-cond carve-out must set ctx.inGuardCond exactly once (the
     # single shared mkShortCircuitWhile implementation both nnkWhileStmt

@@ -7990,7 +7990,36 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       result.lastIndex = true
     for a in args: stack.add a
 
-proc querySolver(ctx: Z3Context; roots: openArray[Z3Bool];
+var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
+  ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
+  ## Z3's simple solver: probed once per thread against the linked Z3
+  ## (`theoryFreeSimple`).
+
+proc theoryFreeSimple(ctx: Z3Context): bool =
+  ## RFC-0005 S8r. True when the linked Z3's default solver ignores
+  ## `smt.string_solver = none` set as a solver parameter. Z3 4.13.4 (the
+  ## symex-mingw leg's build) does: its default (combined) solver keeps the
+  ## sequence theory, so `checkCapped`'s step 1b ran the UNCAPPED string
+  ## query -- the search `maxSeqLen` exists to avoid, which does not poll
+  ## `rlimit` -- and on `tsymex_163rev_intoffset_range` it grew past 10 GB
+  ## (the corpus shard 2 runner loss since S8k). Z3 5.1's default solver
+  ## honours the parameter; the simple solver honours it on both. Probe:
+  ## `str.len(x) < 0` is UNSAT only under the sequence theory's length
+  ## axiom, so a theory-free solver answers SAT.
+  if not theoryFreeNeedsSimple.ready:
+    let x = mkStringVar(ctx, "__s8r_theory_free_probe")
+    let lenX = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, x.raw))
+    let s = newSolver(ctx)
+    let p = newParams(ctx)
+    p.set("rlimit", 100_000'u)
+    p.set("random_seed", 0'u)
+    p.set("smt.string_solver", "none")
+    s.setParams(p)
+    s.add lenX < mkInt(ctx, 0)
+    theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
+  theoryFreeNeedsSimple.simple
+
+proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
   ## A fresh solver holding `roots`. Z3 bound: deterministic logical-step
   ## count (NOT wall-clock) so the same SUT + Z3 build produces identical
@@ -8003,8 +8032,11 @@ proc querySolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## none`): every string / seq operation Z3's rewriter does not evaluate
   ## is an uninterpreted function, so the query's models are a SUPERSET of
   ## the real ones -- its UNSAT is the query's own, and it never searches
-  ## for a string at all.
-  result = newSolver(ctx)
+  ## for a string at all. RFC-0005 S8r: on a Z3 whose default solver
+  ## ignores that parameter (4.13.4, `theoryFreeSimple`) it runs on the
+  ## simple solver, which honours it.
+  result = if not seqTheory and theoryFreeSimple(ctx): newSimpleSolver(ctx)
+           else: newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
   solverParams.set("random_seed", 0'u)
@@ -8039,6 +8071,10 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ##      string search, and without step 2's unsat core, which may name
   ##      the cap although the query's own bounds refute it too (Z3's cores
   ##      are not minimal).
+  ##   1c. after (1b), when (1) was UNSAT: the caps ASSERTED into the
+  ##      theory-free query. Its UNSAT means the caps refute every
+  ##      theory-free model, so the cap took part: `zsUnknown`, with no
+  ##      sequence-theory check (RFC-0005 S8r).
   ##   2. if (1) is UNSAT: a fresh solver with the caps behind one
   ##      assumption literal, checked under it, and its unsat core read.
   ##      Without the literal in the core the query is UNSAT on its own;
@@ -8140,6 +8176,20 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
   if r1 == zsUnsat and not lastIndex:
+    # Step 1c (RFC-0005 S8r): the caps against the query with no sequence
+    # theory. (1b) found no theory-free refutation of the query alone; if
+    # the caps now refute it, the cap takes part in the only refutation
+    # visible without a string search: decline as step 2 would on a core
+    # naming the cap, without running the sequence theory at all. Step 2's
+    # incremental core does not see the caps during preprocessing (they
+    # sit behind its assumption literal), and on Z3 4.13.4 it searched the
+    # long strings itself: `len(s) > 1000` under the 128 cap took 2.3M
+    # units and 1 GB to refute, and its sibling ran out of memory without
+    # reaching a 20M `rlimit` (`tsymex_163rev_intoffset_range`, the corpus
+    # shard 2 runner loss).
+    let sTc = querySolver(ctx, roots, rl, seqTheory = false)
+    for c in caps: sTc.add c
+    if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
     # Step 2: is the UNSAT the query's own?
     let s2 = querySolver(ctx, roots, rl)
     let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")

@@ -76,16 +76,15 @@ while (-not $p.WaitForExit(2000)) {
   }
 }
 $wall = [math]::Round($sw.Elapsed.TotalSeconds, 1)
-if (-not $killed) {
-  # PeakWorkingSet64 is not readable after exit on every runtime; keep the
-  # last polled value then.
-  try { $peakMB = [math]::Max($peakMB, [math]::Round($p.PeakWorkingSet64 / 1MB)) } catch {}
-}
+# The peak working set is the largest value polled while the suite ran
+# (Windows reports 0 once the process has exited), so a suite that exits
+# before the first 2 s poll has none.
+$peak = if ($peakMB -gt 0) { "${peakMB}MB" } else { 'n/a' }
 if ($killed) {
   $rc = if ($killed.StartsWith('memory')) { 125 } else { 124 }
-  Write-Host "<== $Suite rc=$rc wall=${wall}s peakWS=${peakMB}MB KILLED ($killed)"
+  Write-Host "<== $Suite rc=$rc wall=${wall}s peakWS=$peak KILLED ($killed)"
   exit $rc
 }
 $rc = $p.ExitCode
-Write-Host "<== $Suite rc=$rc wall=${wall}s peakWS=${peakMB}MB"
+Write-Host "<== $Suite rc=$rc wall=${wall}s peakWS=$peak"
 exit $rc

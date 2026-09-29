@@ -903,5 +903,9 @@ task test, "Run the test suite":
             # a callee's `array` result, variant arm field and positional
             # tuple-element writes, n43's cpp build; walker 165->167 (166 is
             # S8r's).
-            "tsymex_rfc0005_s8s_precision"]:
+            "tsymex_rfc0005_s8s_precision",
+            # RFC-0005 S8r -- the symex-mingw shard 2 runner loss: the
+            # theory-free check really has no sequence theory on Z3 4.13.4,
+            # and a cap-only refutation declines without a string search.
+            "tsymex_rfc0005_s8r_theoryfree"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

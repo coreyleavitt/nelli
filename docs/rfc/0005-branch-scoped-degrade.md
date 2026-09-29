@@ -174,7 +174,7 @@ state = "done"
 [[slice]]
 id    = "S8r"
 title = "Windows symex-mingw corpus shard 2 loses its runner since S8k (red at 6772146, 8b9e4b4, 5dc201f; green at a696d80): identify the suite under Z3 4.13.4, fix the resource blowup, make a dying suite attributable in CI"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8s"
@@ -3009,6 +3009,83 @@ Re-pinned:
   (c 53 s, cpp 65 s). Its entry is stale.
 - **CLAUDE.md** still says six `tsymex_r6_*` suites hang on Linux; none
   of the six is skipped any more.
+**As landed (S8r, walker 165, no bump) — the symex-mingw shard 2 runner loss.**
+
+*The suite.* `tsymex_163rev_intoffset_range`, index 9 of shard 2's 123. S8k
+added its three range-checked label searches, whose RangeDefect witness is
+a string longer than 1000 bytes. Every shard 2 suite was run on Linux
+against the 4.13.4 shared library at 671fef5 (peak RSS of the test
+binary, 10 GB container cap): this one grew to 10,219 MB and was killed at
+510 s. No other suite passed 100 MB. A CI run with the watchdog below
+(run 36628492946, the pre-fix sha) killed it at 240 s with a 2,391 MB
+peak working set, and the shard finished with its log.
+
+*Two unbounded checks in `checkCapped`, both on Z3 4.13.4 only.*
+- **Step 1b was not theory-free.** It sets `smt.string_solver = none` as
+  a solver parameter. Z3 4.13.4's default (combined) solver ignores it:
+  `str.len(x) < 0` is UNSAT there, SAT on 5.1. So step 1b ran the
+  uncapped string search, which does not poll `rlimit`. Z3's simple
+  solver honours the parameter on both builds. `querySolver` now probes
+  the linked Z3 once per thread (`theoryFreeSimple`) and uses the simple
+  solver for `seqTheory = false` when the default one ignores it. On 5.1
+  nothing changes.
+- **Step 2 searched the long strings too.** Its caps sit behind the
+  assumption literal, so preprocessing does not see them. For the query
+  `len(s) > 1000` under the 128 cap, the 4.13.4 CLI took 2.3M units and
+  992 MB to answer UNSAT. The sibling query ran out of memory at 3 GB
+  before reaching the 20M `rlimit`. New step 1c: the caps are ASSERTED
+  into the theory-free query. If that is UNSAT (and 1b was not), the cap
+  takes part in the only refutation visible without a string search, so
+  the result is `zsUnknown` with the cap message. That is the same verdict
+  step 2 gives on a core naming the cap, and no sequence-theory check
+  runs.
+
+After the fix, on 4.13.4: `intoffset_range` passes every check in 123 s
+with a 1,410 MB peak. One step 2 (the `indexof` form: its theory-free
+abstraction lets `str.indexof` go below -1, so 1c is SAT) still costs 58 s
+and 1.2 GB.
+
+*Attribution in CI.* Each corpus suite now runs through
+`scripts/run-ci-suite.ps1`. The script compiles the suite, then polls the
+test binary every 2 s. It kills the binary past 240 s of wall clock or a
+6 GB peak working set, and reports that suite as failed. It prints
+`<== suite rc wall peakWS` per suite. The shard step then finishes and
+keeps its log.
+
+*Ten registered suites never ran on the leg.* `derive-ci-suites.ps1` pairs
+the quotes in the `test` task's list, comments included. The comment
+`split(s, "")` shifted that pairing. From there on, each suite name parsed
+as the text between two entries. As a result, `tsymex_rfc0005_s8g_models`
+through `s8o_termination` were registered but never reached the corpus
+(380 of 390 `tsymex_*` names were parsed). The script now removes `#`
+comments before it pairs quotes. That adds those nine suites and this
+slice's pin: the corpus is 380 suites, 127/127/126 across the shards.
+None of them has run on Windows before.
+
+Pins: `tests/tsymex_rfc0005_s8r_theoryfree.nim`.
+- (1) `str.len(x) < 0` is SAT with `seqTheory = false`. RED on 4.13.4:
+  `zsUnsat`.
+- (1') A companion that is UNSAT with the theory.
+- (2) The range-checked >1000-byte search is a recorded `maxSeqLen`
+  decline. RED on 4.13.4: killed. With (1) alone fixed, step 2 still
+  used more than 4 GB.
+- Both pass on 5.1 before and after the fix. The RED needs the 4.13.4
+  library.
+
+*Different mechanisms, reported and not fixed here.*
+- **`tsymex_r6_b3_scanpair` B3-1 is red on 4.13.4** (CI run 36628492946
+  and Linux against 4.13.4). It reads `sxRaised` where it expects `sxSat`.
+  It was `sxSat` at a696d80 on 4.13.4 and is `sxSat` on 5.1. The `hit`
+  query, `str.indexof(s, ":", bv2int(start)) == bv2int(start) + 4`, does
+  not decide, and the real ScanError raise is reported in its place. That
+  query is S8q's shape: an int parameter in BV form bridged into a string
+  query. Shard 2 stays red on this suite until that lands.
+- **Step 2 on 4.13.4 is still a string search** whenever the theory-free
+  abstraction cannot see the cap's conflict (the 58 s case above). Adding
+  the sequence functions' range facts to the theory-free query would close
+  it: `str.len >= 0` and `-1 <= str.indexof < str.len`.
+- **`tsymex_r4_strip` runs 2.6 times longer on 4.13.4 than at a696d80**
+  (91 s against 35 s wall, 51 s against 21 s user). It passes.
 
 **As landed (S8s, walker 167) — S8p's precision remainder.** The five
 places S8p reported, plus three soundness faults found on the way. Every

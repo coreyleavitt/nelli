@@ -51,6 +51,11 @@ if (-not $taskMatch.Success) {
   throw "derive-suites: could not locate 'task test' suite array in nelli.nimble -- parser is out of sync with the file format"
 }
 $body = $taskMatch.Groups['body'].Value
+# RFC-0005 S8r: drop the list's `#` comments before pairing quotes. A
+# comment holding `""` (the `split(s, "")` note) shifted the pairing, and
+# every suite registered after it parsed as the text between two entries:
+# ten tsymex_rfc0005_s8* suites were registered but never ran on this leg.
+$body = [regex]::Replace($body, '#[^\r\n]*', '')
 
 $allNames = [regex]::Matches($body, '"(?<name>[^"]+)"') | ForEach-Object { $_.Groups['name'].Value }
 if ($allNames.Count -lt 50) {

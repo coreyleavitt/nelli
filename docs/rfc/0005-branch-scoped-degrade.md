@@ -158,7 +158,7 @@ state = "pending"
 
 [[slice]]
 id    = "S8o"
-title = "S8k's termination remainder: byte tests lowered to the character/code form (s[i]==s[j], byte vs symbolic), constant string index folded before Z3, concolic solves capped (pcSatByConcreteInputs unbounded), b7r_bytescan and b7r2_pathscope terminate on Linux"
+title = "S8k's termination remainder: byte tests lowered to the character/code form (s[i]==s[j], byte vs symbolic), constant string index folded before Z3, concolic solves capped (pcSatByConcreteInputs unbounded), Z3 cost dependent on process history (a query SAT in 4 s alone takes 100 s in the walker), incremental-core seq.last_indexof miscomputed over a constant receiver (guard or avoid), b7r_bytescan and b7r2_pathscope terminate on Linux"
 state = "pending"
 
 [[slice]]

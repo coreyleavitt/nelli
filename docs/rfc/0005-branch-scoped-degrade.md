@@ -167,6 +167,11 @@ title = "S8n's precision remainder: SUT frame reading result (IR carries the SUT
 state = "pending"
 
 [[slice]]
+id    = "S8q"
+title = "S8o's termination remainder: b7r_bytescan B7R-3 hangs past its rlimit in the walk's shared Z3 context (int param in BV form converted to Int inside a string query; keep it out of BV or bound the check), b7r2_pathscope off the sweep skip list once measured on c and cpp under gate load, B7R-6 conjunctive symexAssume forking 2^16 paths, per-context Z3 cost history for capped string queries"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

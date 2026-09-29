@@ -3563,18 +3563,36 @@ proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: distinctName,
          distinctBaseSym: boxed)
 
+proc bvTermToZ3Int*[W: static int](bv: Z3BitVec[W], signed: bool): Z3Int =
+  ## `bv` as a Z3 Int, read as signed or unsigned. RFC-0005 S8o: a NUMERAL
+  ## is folded here, to the Int numeral of its Nim value. Z3 builds a signed
+  ## `bv2int` of a constant as `ite(bvslt c 0, bv2int c - 2^W, bv2int c)`
+  ## and leaves it unevaluated, so every constant string index (`s[3]`)
+  ## used to reach the solver in that form (S8k's As-landed note). A
+  ## symbolic `bv` keeps Z3's `bv2int`.
+  let ctx = bv.ctx
+  if isNumeralAst(ctx, bv.raw):
+    let u = parseBiggestUInt(getNumeralString(bv))   # 0 ..< 2^W, W <= 64
+    let text =
+      if signed and W < 64 and u >= (1'u64 shl (W - 1)):
+        "-" & $((1'u64 shl W) - u)
+      elif signed and W == 64 and u >= (1'u64 shl 63):
+        "-" & $((not u) + 1)
+      else: $u
+    return wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring,
+                                                      ctx.checkErr Z3_mk_int_sort(ctx.raw)))
+  wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, bv.raw, signed))
+
 proc bvToZ3Int(sv: SymVal): Z3Int =
   ## Z3-level conversion of a typed BV SymVal to Z3Int. Used when a
   ## BV-shaped value (e.g. a Nim `int` param `i`) meets a Z3Int-shaped
-  ## operand (e.g. `s.len`). Z3's `bv2int` is the canonical conversion.
-  template wrapIt(bv: untyped): Z3Int =
-    wrap[Z3Int](bv.ctx,
-      bv.ctx.checkErr Z3_mk_bv2int(bv.ctx.raw, bv.raw, sv.signed))
+  ## operand (e.g. `s.len`). Z3's `bv2int` is the canonical conversion;
+  ## a constant is folded first (`bvTermToZ3Int`, RFC-0005 S8o).
   case sv.kind
-  of svBV8:  wrapIt(sv.bv8)
-  of svBV16: wrapIt(sv.bv16)
-  of svBV32: wrapIt(sv.bv32)
-  of svBV64: wrapIt(sv.bv64)
+  of svBV8:  bvTermToZ3Int(sv.bv8, sv.signed)
+  of svBV16: bvTermToZ3Int(sv.bv16, sv.signed)
+  of svBV32: bvTermToZ3Int(sv.bv32, sv.signed)
+  of svBV64: bvTermToZ3Int(sv.bv64, sv.signed)
   else:
     raise newException(ValueError,  # [raise-audited: category-c: bijectivity-guarded (only reached from toZ3Int's own BV-kind-guarded arm)]
       "bvToZ3Int: not a BV — got " & $sv.kind)
@@ -7662,22 +7680,38 @@ when defined(symexQueryStats):
 # a query also runs under `seqQueryRLimit`. Deterministic: no wall clock is
 # consulted anywhere.
 
-var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, uninterp, select: int]
-  ## The `Z3_decl_kind` ordinals of an uninterpreted application and an
-  ## array `select`, read off terms built once per thread: the wrapper's
-  ## `Z3DeclKindFFI` binds only the proof-rule subset of the C enum, and
-  ## the header's values for these two are positional, so they are taken
-  ## from the linked Z3 itself rather than restated here.
+type SeqCapKinds = object
+  ## The `Z3_decl_kind` ordinals `seqLenCaps` matches on. RFC-0005 S8o:
+  ## operators are matched by KIND, never by printed name -- Z3 renamed
+  ## `int2bv` to `int_to_bv` (and `bv2int` to `ubv_to_int`) after 4.13, so
+  ## S8k's name match never fired on the Windows leg's Z3 4.13.4, and its
+  ## byte tests stayed in the slow lowered form (B7R-6 / B7r2-1a went
+  ## `sxUnknown` under `seqQueryRLimit`).
+  uninterp, select, int2bv, toCode, strAt, inRe: int
 
-proc seqCapKinds(ctx: Z3Context): tuple[uninterp, select: int] =
+var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
+  ## Read off terms built once per thread: the wrapper's `Z3DeclKindFFI`
+  ## binds only the proof-rule subset of the C enum, and the header's values
+  ## are positional, so they are taken from the linked Z3 itself rather
+  ## than restated here.
+
+proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
   if not seqCapDeclKinds.ready:
+    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
     let c = mkIntVar(ctx, "__s8k_kind_probe")
     let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8k_kind_probe_arr")
-    let sel = select(arr, mkInt(ctx, 0))
-    seqCapDeclKinds = (ready: true,
-      uninterp: ord(Z3_get_decl_kind(ctx.raw, getAppDecl(c))),
-      select:   ord(Z3_get_decl_kind(ctx.raw, getAppDecl(sel))))
-  (seqCapDeclKinds.uninterp, seqCapDeclKinds.select)
+    let str = mkStringVar(ctx, "__s8o_kind_probe_str")
+    let ch = at(str, c)
+    seqCapDeclKinds = (ready: true, k: SeqCapKinds(
+      uninterp: kindOf(ctx, c.raw),
+      select:   kindOf(ctx, select(arr, mkInt(ctx, 0)).raw),
+      int2bv:   kindOf(ctx, intToBv[8](c, Z3BitVec[8]).raw),
+      toCode:   kindOf(ctx, toCode(ch).raw),
+      strAt:    kindOf(ctx, ch.raw),
+      inRe:     kindOf(ctx, matches(str, star(range(mkString(ctx, "\x00"),
+                                                   mkString(ctx, "\xff")))).raw)))
+  seqCapDeclKinds.k
 
 proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     tuple[caps: seq[Z3Bool], lastIndex: bool,
@@ -7691,7 +7725,11 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## bound, not chosen). Each distinct AST is visited once. `lastIndex`
   ## reports a `seq.last_indexof` anywhere in `roots` (see `checkCapped`);
   ## it is matched by name, because its decl kind is Z3's catch-all
-  ## internal ordinal, which other operators share.
+  ## internal ordinal, which other operators share (and which moved
+  ## between Z3 4.13.4 and 5.1: 45100, then 49165). Its name is the same
+  ## on both. Every other operator here is matched by decl kind
+  ## (`SeqCapKinds`, RFC-0005 S8o): names are not stable across Z3
+  ## releases.
   ##
   ## `byteEqs` pairs each byte test `int2bv[8](str.to_code(c)) == n`
   ## (either operand order, `n` a numeral, `c = str.at(s, i)`), where `s`
@@ -7699,7 +7737,14 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## is itself one of `roots`, with `c == "\xNN"` (for `n = 255`, also
   ## `c == ""`: `str.at` past the end is `""`, whose code -1 wraps to
   ## 0xFF). Under that constraint every character of `s` has a code in
-  ## 0..255, so the two agree in every model of `roots`. `s[i] == 'a'`
+  ## 0..255, so the two agree in every model of `roots`. The same holds
+  ## (RFC-0005 S8o) for two byte tests, `c == d` or one of them `""` and
+  ## the other `"\xff"`; and for a byte test against an 8-bit input `x`,
+  ## `c == str.from_code(bv2nat(x))` or `x == 0xFF` and `c == ""`
+  ## (measured, Z3 4.13.4, each from its own text: `s[39] == s[3] and
+  ## s[3] == s[20]` 2.5M units lowered, 51k in character form; `s[39] ==
+  ## x and s[2] == x` 8.5M against 185k). Only an input: `bv2nat` of a
+  ## computed term is not measured here. `s[i] == 'a'`
   ## lowers to the first form, and Z3 decides it slowly: `s[0..2] ==
   ## "aaa"` needed 41M units (103 s) in the first form, 3.8k in the
   ## second; the `parseInt("-x")` raise query 23.6M against 12k (measured
@@ -7708,8 +7753,10 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## 110M.
   let kinds = seqCapKinds(ctx)
   let capInt = mkInt(ctx, cap)
-  proc nameOf(ctx: Z3Context; a: Z3AnyAst): string =
-    if getAstKind(a) == akApp: declName(ctx, unpackApp(a).decl) else: ""
+  proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
+    ## -1 for a non-application (a numeral, a variable, a quantifier).
+    if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
+    else: -1
   # The string leaves whose byte-domain constraint is a root: built as the
   # walker builds it (`allocateSym`'s `itString` arm), so it is the same
   # hash-consed AST.
@@ -7718,7 +7765,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   var byteLeaves: HashSet[int]
   for r in roots:
     let ra = toAnyAst(r)
-    if nameOf(ctx, ra) == "str.in_re":
+    if kindOf(ctx, ra) == kinds.inRe:
       let args = unpackApp(ra).args
       if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
          ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp:
@@ -7727,13 +7774,13 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       tuple[ok: bool, ch: Z3AnyAst] =
     ## `str.at(s, i)` when `conv` is `int2bv[8](str.to_code(str.at(s, i)))`
     ## over a byte leaf `s`.
-    if nameOf(ctx, conv) != "int_to_bv" or
+    if kindOf(ctx, conv) != kinds.int2bv or
        Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, conv.raw)) != 8:
       return
     let code = unpackApp(conv).args[0]
-    if nameOf(ctx, code) != "str.to_code": return
+    if kindOf(ctx, code) != kinds.toCode: return
     let ch = unpackApp(code).args[0]
-    if nameOf(ctx, ch) != "str.at": return
+    if kindOf(ctx, ch) != kinds.strAt: return
     if astId(ctx, unpackApp(ch).args[0].raw) notin byteLeaves: return
     (true, ch)
   var seen: HashSet[int]
@@ -7751,16 +7798,36 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
       result.caps.add lenT <= capInt
     elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
-      for (conv, lit) in [(args[0], args[1]), (args[1], args[0])]:
-        if getAstKind(lit) != akNumeral: continue
-        let (ok, ch) = byteTestChar(ctx, conv)
-        if not ok: continue
-        let n = parseInt($Z3_get_numeral_string(ctx.raw, lit.raw))
-        let chS = wrap[Z3String](ctx, ch.raw)
-        var eqv = chS == mkString(ctx, $chr(n))
-        if n == 255: eqv = eqv or (chS == mkString(ctx, ""))
+      let empty = mkString(ctx, "")
+      let ff = mkString(ctx, "\xff")
+      let (okA, chA) = byteTestChar(ctx, args[0])
+      let (okB, chB) = byteTestChar(ctx, args[1])
+      var eqv: Z3Bool
+      var found = true
+      if okA and okB:
+        # Byte against byte: equal codes, or `""` (code -1) against 0xFF.
+        let a = wrap[Z3String](ctx, chA.raw)
+        let b = wrap[Z3String](ctx, chB.raw)
+        eqv = (a == b) or ((a == empty) and (b == ff)) or
+              ((a == ff) and (b == empty))
+      elif okA or okB:
+        let a = wrap[Z3String](ctx, (if okA: chA else: chB).raw)
+        let other = if okA: args[1] else: args[0]
+        if getAstKind(other) == akNumeral:
+          let n = parseInt($Z3_get_numeral_string(ctx.raw, other.raw))
+          eqv = a == mkString(ctx, $chr(n))
+          if n == 255: eqv = eqv or (a == empty)
+        elif kindOf(ctx, other) == kinds.uninterp:
+          # Byte against an 8-bit input (a `char` / `uint8` parameter or
+          # draw): the character whose code is its unsigned value.
+          let x = wrap[Z3BitVec[8]](ctx, other.raw)
+          let code = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, false))
+          eqv = (a == fromCode(ctx, code)) or
+                ((x == mkBitVec[8](ctx, 255)) and (a == empty))
+        else: found = false
+      else: found = false
+      if found:
         result.byteEqs.add (old: wrap[Z3Bool](ctx, t.raw), new: eqv)
-        break
     elif not result.lastIndex and declName(ctx, decl) == "seq.last_indexof":
       result.lastIndex = true
     for a in args: stack.add a
@@ -7826,19 +7893,29 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ##      Z3 answers quickly without them -- and, in place of (2), for a
   ##      query holding a `seq.last_indexof` (below).
   ## Z3's cost on a string query is not a function of the query alone: it
-  ## also followed whatever the process had built before. The same
-  ## lowered `s[0..2] == "aaa"` label query was SAT at once as a program's
-  ## only search and ran past 20M units as the last search of
-  ## `tsymex_r1b_shortcircuit_oob`; running (1b) before (3) moved a
-  ## `parseInt` raise query across 20M; a `seq[byte]` scan query SAT in
-  ## 2.1M units from its own SMT-LIB text ran past 20M in the walker even
-  ## in a fresh context of its own (Z3 keeps process-wide state); and a
+  ## also follows what its CONTEXT already holds, and every query of one
+  ## walk shares one context. The same lowered `s[0..2] == "aaa"` label
+  ## query was SAT at once as a program's only search and ran past 20M
+  ## units as the last search of `tsymex_r1b_shortcircuit_oob`; running
+  ## (1b) before (3) moved a `parseInt` raise query across 20M; and a
   ## four-iteration pair-loop query with its ten caps asserted, SAT in
   ## 3.9 s from its own text, ran 100 s to 20M units in the walker, with
   ## the uncapped query SAT 23 s later (the half-and-half split above is
-  ## from that case). So the budget is a bound, not a promise: the
-  ## character form keeps the common byte tests far below it, and a query
-  ## that lands near it can decline in one process and not another.
+  ## from that case). RFC-0005 S8o measured where the state lives (Z3
+  ## 5.1, SMT-LIB text loaded into solvers with `random_seed = 0`): a
+  ## FRESH context reproduces a query's unit count exactly, before or
+  ## after 80M units of unrelated work in other contexts (33,858,060
+  ## both times), so no state is process-wide; a second solver in the
+  ## SAME context, on the same text, went from past 40M to SAT in 3.25M
+  ## (and in another case to SAT in 31.7M). Z3 keeps what a check built
+  ## -- terms, skolems, rewriter caches -- in the context, and later
+  ## checks there start from it. That is Z3's, and deterministic for a
+  ## given SUT and Z3 build; deciding each query in a context of its own
+  ## would trade it for a translation per query, and is not done here.
+  ## So the budget is a bound, not a promise: the character form keeps
+  ## the common byte tests far below it, and a query that lands near it
+  ## can decline in one walk and not in another that asked something
+  ## else first.
   ## Why two solver modes: Z3 answers a check under assumptions with its
   ## incremental core, not the one-shot preprocessing pipeline, and that
   ## core is both much slower on bit-vector-heavy queries (one the
@@ -15829,7 +15906,9 @@ type
       ## flips a branch (that's G2), so this can only go false from an
       ## internal bug in `walkIfFollowConcrete`/draw-symbolication — not
       ## from "no solution exists" (there is always one: the original
-      ## concrete trace itself).
+      ## concrete trace itself). RFC-0005 S8o: the check runs under
+      ## `concreteBranchRLimit(settings)`; one that exhausts it is `false`
+      ## (not proven).
     counters*: ConcolicYieldCounters
     branchTrace*: seq[ConcolicBranchRecord]
       ## RFC-fuzzer-nextgen G2. The `if`-decisions `walkIfFollowConcrete`
@@ -16419,7 +16498,15 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # ---- Soundness pin: the collected constraints ARE satisfied by the
   # original concrete draws (RFC: "feed them back to Z3 ... check
   # directly") — checked here so callers/tests get a plain bool. ----------
+  # RFC-0005 S8o: bounded like the branch-outcome solves beside it
+  # (`concreteBranchRLimit`), with their `random_seed`. It had no bound at
+  # all. An exhausted bound is `zsUnknown`, reported `false`: not proven,
+  # never a claim.
   let s = newSolver(ctx)
+  let sp = newParams(ctx)
+  sp.set("rlimit", concreteBranchRLimit(settings))
+  sp.set("random_seed", 0'u)
+  s.setParams(sp)
   for c in initialPC: s.add(c)
   for c in concreteEq: s.add(c)
   for p in resultPaths:

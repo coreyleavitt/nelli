@@ -882,5 +882,10 @@ task test, "Run the test suite":
             # conditions, ref / ptr witnesses in `renderAsChoices`, a callee's
             # unwritten `result`, variant closure results and the variant
             # zero value; walker 161->162.
-            "tsymex_rfc0005_s8n_precision"]:
+            "tsymex_rfc0005_s8n_precision",
+            # RFC-0005 S8o -- S8k's termination remainder: byte tests matched
+            # by decl kind (Z3 4.13.4), byte-vs-byte / byte-vs-input character
+            # forms, constant index folding, a bounded concolic pc check, the
+            # seq.last_indexof incremental-core guard; walker 162->163.
+            "tsymex_rfc0005_s8o_termination"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

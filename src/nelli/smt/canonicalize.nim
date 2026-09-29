@@ -184,7 +184,19 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "162"
+const symexWalkerVersion* = "163"
+  ## RFC-0005 S8o (2026-09-29) — S8k's termination remainder. The
+  ## character form of a byte test matches Z3's operators by decl kind, not
+  ## by printed name (S8k matched `int_to_bv`, Z3 5.x's spelling; on the
+  ## Windows leg's Z3 4.13.4, `int2bv`, it never fired, and three B7 checks
+  ## went `sxUnknown`), and now also covers a byte against a byte and a
+  ## byte against an 8-bit input. A constant bit-vector reaches Z3 as an Int
+  ## numeral (a constant string index was an unevaluated signed `bv2int`).
+  ## The concolic `pcSatByConcreteInputs` check runs under
+  ## `concreteBranchRLimit` (it was unbounded; exhausted is `false`).
+  ## Query shapes and verdicts change: 162 -> 163.
+  ##
+  ## (Prior: 162.)
   ## RFC-0005 S8n (2026-09-29) — the precision remainder. The concolic
   ## scratch solves (`concreteBranchOutcome`, `concretelyInfeasible`)
   ## assert the run-wide pools every walker query asserts (`globalRoots`,

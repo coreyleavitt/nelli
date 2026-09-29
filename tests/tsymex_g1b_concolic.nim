@@ -222,7 +222,16 @@ suite "R7 — concreteBranchOutcome is genuinely rlimit-bounded (not silently 0/
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 3)]
     let r = concolicCollect(concolicMultGate, trace, bindings, tightMultSettings)
     check r.counters.ambiguousBranches == 1
-    check r.pcSatByConcreteInputs  ## degrading early asserts nothing false
+    ## RFC-0005 S8o: the soundness check itself now runs under the same
+    ## bound (`concreteBranchRLimit`; it was unbounded), so at one unit it
+    ## proves nothing -- `false`, not a claim. Was: `true`.
+    check not r.pcSatByConcreteInputs
+    # Degrading early asserts nothing false: the same trace under the
+    # default budget decides the branch and the check proves the draws
+    # satisfy the collected pc.
+    let rd = concolicCollect(concolicMultGate, trace, bindings)
+    check rd.counters.ambiguousBranches == 0
+    check rd.pcSatByConcreteInputs
     # RFC-fuzzer-nextgen R28: the SAME degrade, attributed by construct —
     # see the "R28" suite below for the differential proof against a while
     # guard's ambiguity landing under a DIFFERENT key.

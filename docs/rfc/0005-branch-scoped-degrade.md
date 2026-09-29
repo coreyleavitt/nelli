@@ -159,7 +159,7 @@ state = "done"
 [[slice]]
 id    = "S8o"
 title = "S8k's termination remainder: byte tests lowered to the character/code form (s[i]==s[j], byte vs symbolic), constant string index folded before Z3, concolic solves capped (pcSatByConcreteInputs unbounded), Z3 cost dependent on process history (a query SAT in 4 s alone takes 100 s in the walker), incremental-core seq.last_indexof miscomputed over a constant receiver (guard or avoid), b7r_bytescan and b7r2_pathscope terminate on Linux"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8p"
@@ -2617,6 +2617,106 @@ Re-pinned, each checked against real Nim:
 - `rfc0005_s8l_exits` (1): a bare return of a variant is its zero value
   (dead label `sxUnsat`, no `feUnsupportedOpHavoc`); the havoc-site pin
   moves to a never-assigned multi-variant.
+
+**As landed (S8o, walker 163) — S8k's termination remainder.**
+
+*The symex-mingw red (P0).* S8k's character form matched Z3's `int2bv` by
+its printed name, `int_to_bv`. That is Z3 5.x's spelling; the Windows leg's
+Z3 4.13.4 prints `int2bv` (and `bv2int` where 5.x prints `ubv_to_int`). On
+Windows the rewrite never fired, the byte tests reached Z3 lowered, and
+B7R-6, B7r2-1a and B7r2-1a-red ran out of `seqQueryRLimit` (`sxUnknown`).
+Linux (5.1) never saw it. `seqLenCaps` now matches every operator by decl
+kind, read off terms built in the running Z3 (`SeqCapKinds`). The one
+exception is `seq.last_indexof`: its kind is Z3's shared internal ordinal
+(45100 on 4.13.4, 49165 on 5.1), and its name is the same on both, so it
+stays name-matched. Measured with the three checks copied into probes, on
+c, against the 4.13.4 shared library (`dt-bounded` plus
+`LD_LIBRARY_PATH`):
+
+| check | a696d80 | f6d8887 | S8o |
+|---|---|---|---|
+| B7R-6 | `sxSat` 95 s | `sxUnknown` 1194 s | `sxSat` 79 s |
+| B7r2-1a | `sxSat` 73 s | `sxUnknown` 1181 s | `sxSat` 78 s |
+| B7r2-1a-red | `sxSat` 176 s | (CI: `sxUnknown`) | `sxSat` 120 s |
+
+On Linux 5.1 the same probes are `sxSat` in 83 s, 83 s and 218 s.
+
+*The rest of the slice.*
+- **Byte against byte, and byte against an input.** Both take the
+  character form. `s[i] == s[j]` becomes `c == d`, or one side `""` and
+  the other `"\xff"`. A byte against an 8-bit input `x` becomes
+  `c == str.from_code(bv2nat(x))`, or `x == 0xFF` and `c == ""`. It
+  applies only when `x` is an input: `bv2nat` of a computed term was not
+  measured. Measured from their own text on 4.13.4: 2.5M units lowered
+  against 51k, and 8.5M against 185k. In the walker (5.1) both lowered
+  forms ran past 20M units (`sxUnknown`).
+- **Constant bit-vector to Int.** `bvTermToZ3Int` folds a numeral to its
+  Int value. Z3 builds a signed `bv2int` of a constant as an unevaluated
+  `ite`, and every constant string index reached the query in that form.
+- **`pcSatByConcreteInputs`.** Runs under `concreteBranchRLimit` with
+  `random_seed = 0`; it had no bound. An exhausted check is `false`.
+- **`seq.last_indexof` and the incremental core.** Proof by construction:
+  the only check under assumptions in `src/` is `checkCapped`'s step 2,
+  and it is skipped when `lastIndex` is set. Every other check, and every
+  model, comes from a one-shot `check()` of a fresh solver, and the walker
+  builds no quantifier. A guard test pins the skip: removing
+  `not lastIndex` turns its `sxSat` into `sxUnsat`.
+- **Z3 cost depends on history.** It is per-context, not per-process, and
+  it is Z3's behaviour. SMT-LIB text loaded into fresh contexts
+  reproduced a query's unit count exactly (33,858,060) before and after
+  80M units of unrelated work in other contexts. A second solver in the
+  same context, on the same text, went from past 40M to `sxSat` at
+  3.25M. Every query of one walk shares one context, so a walk's earlier
+  queries shape later ones. The effect is deterministic for a given SUT
+  and Z3 build. Fixing it would need one context per query, which means
+  translating every query; that was not done. Documented at
+  `checkCapped`.
+
+Pins: `tests/tsymex_rfc0005_s8o_termination.nim`.
+- (0) `s[19] == 'q'` within 1M units: RED on 4.13.4.
+- (1) pair and input forms within 1M units: RED on 5.1 (`sxUnknown`), plus
+  an `sxUnsat` byte contradiction.
+- (2) the numeral fold: RED was a compile error.
+- (3) the concolic bound: RED was "was true".
+- (4) the rfind guard.
+- The `>= 163` floor.
+
+Re-pinned:
+- `phase15_CR2_cachekey` (163).
+- `g1b_concolic` R7: at `queryRLimit = 1`, `pcSatByConcreteInputs` is now
+  `false`. The check runs under that bound and proves nothing (it was
+  `true` only because the check was unbounded). Its "degrading early
+  asserts nothing false" intent moves to a companion: the same trace under
+  the default budget decides the branch, and the check proves the draws.
+
+*Different mechanisms, reported and not fixed here.*
+- **`b7r_bytescan` still runs past 900 s on Linux c.** It hung the same
+  way at the S8n base. Five checks pass before the kill (B7R-1 through
+  B7R-2c).
+  - **Where it stalls.** B7R-3 (`sutByteScanPairFound`, the B3 scan-pair
+    shape over `seq[byte]`). The walk's sixth solver check, step 1 of
+    `checkCapped` under a 10M `rlimit`, does not return within 300 s.
+  - **The query.** `str.indexof(data, "\0", bv2int(start)) ==
+    bv2int(start + 4)`. `start` is a symbolic `int` parameter, allocated as
+    a 64-bit bit-vector, so the signed `bv2int` bridge (an `ite` over
+    `bvslt`) sits inside a string query. No byte test is involved.
+  - **Standalone, in a fresh 5.1 context,** the same SMT-LIB text is
+    bounded: `unknown` at 10M units in 36 s. With `start` fixed it is SAT
+    in 28 ms. The 4.13.4 CLI is also `unknown` at 10M, in 8 s.
+  - **Mechanism.** Inside the walk's shared context, Z3 stops polling the
+    resource counter on this query. This is the per-context effect above,
+    on a bit-vector-to-Int bridge into the string theory.
+  - **What would fix it.** Keeping `start` out of the bit-vector domain
+    (allocating it as an Int, or declining the bridge the way
+    `runtime_strings` already declines a bit-vector bound). That is a
+    change to parameter allocation.
+- **`b7r2_pathscope` now ends in 528 s on c, every check `[OK]`.** It
+  stays on `sweep.sh`'s skip list next to `b7r_bytescan` until it has also
+  been measured on cpp and under gate load.
+- **B7R-6's walk forks 2^15 target-hit solves.** Each of the sixteen
+  conjuncts of its `symexAssume` forks, giving 32,768 trivial UNSAT
+  solves (about 3 s in all). The cost is small, but the fork is not
+  needed.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

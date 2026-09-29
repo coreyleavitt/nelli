@@ -157,6 +157,11 @@ title = "Precision remainder: concolic closure-condition resolution, renderAsCho
 state = "pending"
 
 [[slice]]
+id    = "S8o"
+title = "S8k's termination remainder: byte tests lowered to the character/code form (s[i]==s[j], byte vs symbolic), constant string index folded before Z3, concolic solves capped (pcSatByConcreteInputs unbounded), b7r_bytescan and b7r2_pathscope terminate on Linux"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

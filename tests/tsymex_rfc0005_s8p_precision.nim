@@ -561,10 +561,15 @@ suite "S8p (6b) field-write edges":
     if r.status == sxSat:
       check r.witness[0] == "bc"
 
-  test "a variant arm field write still declines":
+  test "a variant arm field write is modelled (re-pinned by RFC-0005 S8s; declined here)":
+    ## Real Nim: `v.va == x` after the write (the oracle above reaches the
+    ## label with x == 6).
     let r = symexFind(variantArmWrite, tLabel("s8p_varm"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      check r.witness[0] == 6
 
 # ---- (7) walker version floor ---------------------------------------------------
 

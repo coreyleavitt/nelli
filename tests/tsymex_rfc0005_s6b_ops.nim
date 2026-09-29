@@ -53,7 +53,7 @@
 ## else moved: a live target through a fresh symbol is a candidate
 ## (`sxUnknown`, never `sxSat`), substituted/halt/abort runs stay
 ## `sxUnknown`, and the unknown-exception repros no longer lie.
-import std/[unittest, strutils, os, math]
+import std/[unittest, strutils, os, math, sets, tables]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -105,52 +105,55 @@ proc s6bBoolOrderFresh(a: bool) =
 
 # ---- fresh: composite result through a callee --------------------------------
 #
-# RFC-0005 S8p binds a `seq` result (`retBindEq`'s svSeq arm), so these pins
-# use an `array` result, which `retBindEq` still does not bind: the per-call
-# retSym stays free (`feUnsupportedOpHavoc`).
+# RFC-0005 S8p binds a `seq` result (`retBindEq`'s svSeq arm) and S8s an
+# `array` one, so these pins pass a `Table` through the callee, which
+# `retBindEq` still does not bind: the per-call retSym stays free
+# (`feUnsupportedOpHavoc`). The table is an input: a callee building its own
+# local `Table` is a walker fault (reported by S8s, not fixed there).
 
-proc s6bMkArr(n: int): array[2, int] =
-  result = [n, n]
+proc s6bMkTab(t: Table[string, int]): Table[string, int] =
+  result = t
 
-proc s6bRetArr(n: int): array[2, int] =
-  return [n, n]
+proc s6bRetTab(t: Table[string, int]): Table[string, int] =
+  return t
 
-proc s6bArrResultDead(n: int) =
-  let s = s6bMkArr(n)
+proc s6bTabResultDead(t: Table[string, int]; n: int) =
+  let s = s6bMkTab(t)
   discard s
   if n == 5 and n == 6:
     symexTarget("s6b_seq_result_dead")
 
-proc s6bArrResultLive(n: int) =
-  ## Real Nim: s[0] == s[1] always; only the free retSym separates them.
-  let s = s6bMkArr(n)
-  if s[0] != s[1]:
+proc s6bTabResultLive(t: Table[string, int]; n: int) =
+  ## Real Nim: s.len == t.len always; only the free retSym separates them.
+  let s = s6bMkTab(t)
+  if s.len != t.len:
     symexTarget("s6b_seq_result_live")
 
-proc s6bArrReturnDead(n: int) =
-  let s = s6bRetArr(n)
+proc s6bTabReturnDead(t: Table[string, int]; n: int) =
+  let s = s6bRetTab(t)
   discard s
   if n == 5 and n == 6:
     symexTarget("s6b_seq_return_dead")
 
-proc s6bArrFresh(n: int) =
-  ## Real Nim: s1[0] == n and s2[0] == n, so s1[0] != s2[0] + 1 on every
+proc s6bTabFresh(t: Table[string, int]; n: int) =
+  ## Real Nim: s1.len == s2.len == t.len, so s1.len != s2.len + 1 on every
   ## input.
-  let s1 = s6bRetArr(n)
-  let s2 = s6bMkArr(n)
-  if s1[0] != s2[0] + 1:
+  let s1 = s6bRetTab(t)
+  let s2 = s6bMkTab(t)
+  if s1.len != s2.len + 1:
     symexTarget("s6b_seq_fresh")
 
 type
   S6bVK = enum s6bA, s6bB
   S6bV = object
     ## Two `case` sections: a multi-variant. RFC-0005 S8n gave the
-    ## single-case variant its zero value and S8p the multi-variant with an
-    ## explicit ordinal-0 arm on every axis, so this site needs a type that
-    ## still has none: the first axis's ordinal 0 falls in its `else` arm.
+    ## single-case variant its zero value, S8p the multi-variant with an
+    ## explicit ordinal-0 arm on every axis and S8s one whose ordinal 0
+    ## falls in an `else` arm, so this site needs a type that still has
+    ## none: an arm field of a type `defaultZero` has no arm for (`HashSet`).
     case k: S6bVK
     of s6bB: b: int
-    else: a: int
+    else: a: HashSet[int]
     case j: S6bVK
     of s6bA: c: int
     of s6bB: d: int
@@ -283,10 +286,12 @@ suite "RFC-0005 S6b -- oracles":
     check false < true
     check (false < true) and not (false < false)
 
-  test "oracle: s6bMkArr's two elements agree (the live target is really dead; the walk may only call it a candidate)":
+  test "oracle: s6bMkTab keeps the table's length (the live target is really dead; the walk may only call it a candidate)":
+    var t = initTable[string, int]()
     for n in [-3, 0, 3]:
-      check s6bMkArr(n)[0] == s6bMkArr(n)[1]
-      check s6bRetArr(n)[0] != s6bMkArr(n)[0] + 1
+      t[$n] = n
+      check s6bMkTab(t).len == t.len
+      check s6bRetTab(t).len != s6bMkTab(t).len + 1
 
   test "oracle: an object-constructed ref's untouched seq field is empty":
     check S6bBox(v: 3).items.len == 0
@@ -406,13 +411,13 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     checkUnsatOverTaintOnly(r)
 
   test "composite result (implicit-result fallthrough): dead target is sxUnsat":
-    let r = symexFind(s6bArrResultDead, tLabel("s6b_seq_result_dead"))
+    let r = symexFind(s6bTabResultDead, tLabel("s6b_seq_result_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
 
   test "composite result (explicit return): dead target is sxUnsat":
-    let r = symexFind(s6bArrReturnDead, tLabel("s6b_seq_return_dead"))
+    let r = symexFind(s6bTabReturnDead, tLabel("s6b_seq_return_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
@@ -458,7 +463,7 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
-    let r = symexFind(s6bArrResultLive, tLabel("s6b_seq_result_live"))
+    let r = symexFind(s6bTabResultLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnknown
 
@@ -466,8 +471,9 @@ suite "RFC-0005 S6b (c) -- guards":
     ## Pre-S10 sxUnknown. RFC-0005 S10: reality reaches the target on every
     ## input (`n != n + 1`), so the replayed candidate is
     ## confirmed -> sxSat, with rules 1-2 having decided sxUnknown.
-    ## (RFC-0005 S8p: over `array` results; a `seq` result is bound.)
-    let r = symexFind(s6bArrFresh, tLabel("s6b_seq_fresh"))
+    ## (RFC-0005 S8p/S8s: over `Table` results; a `seq` and an `array`
+    ## result are bound.)
+    let r = symexFind(s6bTabFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown

@@ -179,7 +179,7 @@ state = "pending"
 [[slice]]
 id    = "S8s"
 title = "S8p's precision remainder: seq[uint8] element vs literal walker fault (bv8 field on svBV64), multi-variant with else arm at ordinal 0 zero value, callee array result havoc, variant-arm field writes and positional tuple-element writes (q[0] += b) declining, tsymex_r6_n43_parity cpp compile failure (deleted std::atomic operator=)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8t"
@@ -3004,6 +3004,194 @@ Re-pinned:
   (c 53 s, cpp 65 s). Its entry is stale.
 - **CLAUDE.md** still says six `tsymex_r6_*` suites hang on Linux; none
   of the six is skipped any more.
+
+**As landed (S8s, walker 167) — S8p's precision remainder.** The five
+places S8p reported, plus three soundness faults found on the way. Every
+expected value was checked against the pinned toolchain (Nim 2.2.10, debug
+build) by an oracle test that runs the SUT itself.
+
+1. `seq[uint8]` literal: a `seq[uint8]` element compared against a literal
+   (`let v = @[x, 1'u8]; if v[0] == 7`) was `weInternalWalkerFault`.
+   `lowerSeqLit` lowered each element with no prototype. An int literal
+   therefore became a 64-bit value, and `storeSeqElem` read its `bv8`.
+2. `else` arm at ordinal 0: a multi-variant whose ordinal 0 falls in an
+   `else` arm had no zero value (`feUnsupportedOpHavoc`). The cause was
+   in `allocateSym`, and it was also a soundness fault. The multi-variant
+   arm constrained each axis's discriminator to the disjunction of its
+   arms' ordinals. That set included the `else` arm's sentinel -1 (0xFF on
+   a `u8` discriminator) and left out every ordinal the `else` arm covers.
+   So an input whose `k` fell in an `else` arm was unreachable, which is a
+   false `sxUnsat`. A zero-valued callee result also contradicted its own
+   allocation, which is why `multiVariantZeroTotal` required an explicit
+   ordinal-0 arm.
+3. `array` results: a callee or closure returning an `array` was havoc
+   (`feUnsupportedOpHavoc`), or `feUnsupportedOp` for the closure.
+   `retBindEq` had no `svArray` arm.
+4. Field writes: a field write on a variant (`v.a = x`, `v.a += x`) and a
+   positional tuple-element write (`q[0] = b`, `q[0] += b`) were
+   `feUnsupportedStmtKind`.
+5. `r6_n43_parity` on cpp: `tsymex_r6_n43_parity` did not compile. The
+   failing statement was `validDefault`'s `f = low(F)`. There `F` was
+   `std/atomics`' `AtomicInt8`, which cpp imports as `std::atomic<NI8>`.
+   Its `operator=` is deleted.
+
+Found on the way:
+
+- (a) `retBindEq` guarded a variant's `else`-arm fields with
+  `variantDiscEq(disc, -1)`, which no legal discriminator satisfies. So a
+  callee's `else`-arm fields were never bound to its result. This was a
+  free value and a false `sxSat`: a dead label behind them (`r.e != 0`
+  after a zero result) was `sxSat`, and replay did not refute it.
+- (b) The multi-variant witness emitter rendered an `else` arm as
+  `DiscTy(-1)`. This was a compile error in every SUT taking such a
+  multi-variant as input. It had never been reached, because of (2).
+- (c) With (2) fixed, an input axis with a `range` discriminator and an
+  `else` arm could take its `else` values. The emitter rendered no branch
+  for them (the `default` fallback), so a clean `sxSat`'s witness would not
+  reach its label. RFC-0005 S8f had fixed the same thing for a single
+  `case`.
+
+- **Runtime.**
+  - `lowerSeqLit` lowers each element against the element type's
+    prototype (`bvConst(elemTy, 0)` for an int, a bool for a bool), as
+    `lowerTupleLit`'s fields do.
+  - `discriminatorDomain`'s body is split out as `discDomainOf`.
+    `axisDiscriminatorDomain(ax)` applies the same decision to one axis of
+    a multi-variant.
+  - `allocateSym`'s multi-variant arm constrains each axis's discriminator
+    to that domain: the explicit tags, the enum ordinals an `else` arm
+    covers, and for a `range` discriminator with an `else` arm its
+    declared range. The single-case variant already did this.
+    `multiVariantZeroTotal` then asks the same question
+    `variantZeroTotal` does: is 0 a legal tag?
+  - `armSelected(disc, tagOrd, arms)` guards an arm's field binding in
+    `retBindEq`, for the variant and the multi-variant. An `else` arm
+    (key -1) is selected exactly when no explicit arm is.
+  - `retBindEq` binds an `svArray` element-wise and joins
+    `retBindWiredKinds`. `closureRetStructured` covers `itArray`.
+  - `lowerVariantFieldSet` lowers the new `iekVariantFieldSet`. The result
+    is the receiver with one field replaced: the plain field, or the arm
+    field in every arm that declares it. The new value lowers against the
+    old one's prototype. A receiver with no such slot (its constructor
+    already declined) degrades with `seVariantFieldOnDeclinedCtor`.
+  - `validDefault` writes `low(F)` through a size-matched integer and
+    `copyMem`. It no longer uses `f = low(F)`.
+- **IR / parser.**
+  - `iekVariantFieldSet` (`vfsRecv`, `vfsFieldName`, `vfsTags`, `vfsVal`)
+    has its emit, render, canonical (`Ex<VFS:`), abstraction and
+    defect-fork-scan arms.
+  - `valueFieldTy` / `valueFieldWrite` now go through `fieldStep`. A step
+    is `recv.name` on a tuple, `recv[<int literal>]` on a tuple, or
+    `recv.name` on a variant or multi-variant (a plain or arm field, never
+    a discriminator). The receiver may itself be a field, element or
+    checked-field step.
+  - A variant step rebuilds with `iekVariantFieldSet`. A tuple step
+    rebuilds with `iekTupleLit`, as before.
+  - When a step is an arm field (`valueFieldChecked`), the plain-assign
+    arm parses the read of the LHS before the value. That read's
+    `isVariantField` forks the out-of-arm `FieldDefect`. Nim checks the
+    field before it evaluates the value: `v.vb = 100 div x` with `v` in the
+    other arm raises `FieldDefect` at x = 0, not `DivByZeroDefect`. The
+    `op=` arm already reads the LHS first.
+- **Witness.** The multi-variant emitter renders an `else` arm as one
+  branch per enum ordinal it covers. For a `range` discriminator (at most
+  2^16 values) it renders one branch over the range minus the explicit
+  tags, with the discriminator bound to the selector's `let`. Both follow
+  the single-case emitter.
+- **Consumer-visible (for S11's migration note).**
+  - **Newly reachable.** A multi-variant input whose discriminator falls
+    in an `else` arm is now reachable. Labels behind it were a false
+    `sxUnsat`.
+  - **Now bound.** A callee's variant or multi-variant result binds its
+    `else`-arm fields. Labels that depended on them were a false `sxSat`.
+  - **`sxUnknown` programs that now get verdicts:**
+    - a `seq[uint8]` literal compared against a literal
+    - a multi-variant result whose ordinal 0 is in an `else` arm
+    - an `array` callee or closure result
+    - variant and multi-variant field writes
+    - positional tuple-element writes
+  - **cpp.** An SUT whose cell holds an `Atomic` compiles.
+  - **Cache.** The canonical program form changes for any SUT with a
+    variant field write. The walker bump to 167 invalidates every symex
+    cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - **`else`-covered constructor.** A variant constructor naming an
+    `else`-covered tag (`S8sVE(vk: s3B, ve: 1)`) is still
+    `feUnsupportedExprKind` ("else-covered/unresolved-tag variant
+    constructor unmodeled"). A field write on its value then degrades with
+    `seVariantFieldOnDeclinedCtor`. The S8s pin for an `else`-arm field
+    write therefore takes the variant as an input.
+  - **Local `Table` / `HashSet` in a callee.** A callee building a local
+    `Table` or `HashSet` and returning it (`var t: Table[string, int];
+    t["a"] = n; result = t`) is `weInternalWalkerFault`. The failures are
+    `lower`'s `iekTableSet` `doAssert recv.kind == svTable` and its
+    `iekSetIncl` twin. A callee assigning a `ref` result through
+    `new(result)` is `weInternalWalkerFault` as well ("retBindEq: kind
+    mismatch svRef vs svBV64"). All three were found while picking the new
+    havoc-site pins. A `Table` passed through a callee is a clean
+    `feUnsupportedOpHavoc`: `retBindEq` does not bind `svTable`, `svSet`,
+    `svRef` or `svPtr`.
+  - **No zero value.** An untouched `distinct` result has no modelled zero
+    value (`feUnsupportedOpHavoc`, "kind itDistinct"), although Nim's
+    default is the base type's zero. So does any type with a `HashSet` or
+    `Table` field.
+  - **`bool` discriminator.** A multi-variant with a `bool` discriminator
+    on any axis is `weInternalWalkerFault` ("multi-variant axis disc must
+    be a BV kind (got svBool)"). This is `allocateSym`'s one raise-audited
+    site, kept as it was. A single-case `bool` variant is modelled.
+  - **Array-element `op=`.** An array element's `op=` (`a[0] += b`) is
+    still `feUnsupportedStmtKind`. `fieldStep` takes a positional step only
+    on a tuple. This is the Class-B trigger the pins below moved to.
+
+Pins: `tests/tsymex_rfc0005_s8s_precision.nim`. It covers:
+- (1) an input byte in a `seq[uint8]` literal, a constant byte literal and
+  a signed 8-bit literal (RED: `weInternalWalkerFault`);
+- (2) an untouched and a bare-returned multi-variant with ordinal 0 in an
+  `else` arm (RED: `feUnsupportedOpHavoc`), plus a single-case one;
+  - an input's `else`-covered discriminators on both axes (RED: a compile
+    error in the witness emitter);
+  - a `range` discriminator's `else` values in the witness (RED, with the
+    emitter's range branch removed: the witness renders `r == 0`, and
+    replaying it raises `FieldDefect`);
+  - dead labels on a callee's `else`-arm fields (RED: `sxSat`, with
+    `armSelected` reverted);
+- (3) a callee's `array` result (assigned, untouched, passed through) and
+  a closure's (RED: `feUnsupportedOpHavoc`, `feUnsupportedOp`);
+- (4) variant field writes:
+  - in-arm, `+=`, plain, `else` arm, through a `var` parameter, nested
+    under an object, a tuple inside an arm, on a multi-variant
+    (RED: `feUnsupportedStmtKind`);
+  - the out-of-arm write raising `FieldDefect`, with the field check
+    before the value;
+  - a symbolic discriminator;
+  - positional tuple writes, nested and mixed with named ones;
+- (5) the n43 cpp build, pinned by `tsymex_r6_n43_parity` compiling on
+  cpp (RED: `use of deleted function ... std::atomic<signed char>::operator=`);
+- the `>= 167` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (167).
+- `r6_r6_emit_roundtrip`: the `iekVariantFieldSet` arm, two sentinels
+  (arm field, plain field) and their round-trip tests.
+- `rfc0005_s8p_precision` (6b): a variant arm field write is modelled
+  (`sxSat`, witness 6).
+- The no-zero result pins moved from the `else`-arm multi-variant (now
+  modelled) to one with a `HashSet` arm field:
+  - `r6_r2_zerodefault_result` T5h-4
+  - `rfc0005_s6b_ops`
+  - `rfc0005_s8l_exits`
+- The composite-result havoc pins moved from an `array` result (now
+  bound) to a `Table` passed through the callee:
+  - `rfc0005_s6b_ops` (dead, live, fresh)
+  - `tot1_totality_corpus`'s A6-rider row
+- `r6_lows_declines` N30-2: the closure decline is pinned on a `Table`
+  result.
+- The Class-B `feUnsupportedStmtKind` trigger is now an array element's
+  `+=`:
+  - `rfc0005_s3_monotonicity`
+  - `rfc0005_s1b_kinds`
+  - `rfc0005_s1c_verdict`
+  - `augmented_assign`
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

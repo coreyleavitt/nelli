@@ -897,5 +897,11 @@ task test, "Run the test suite":
             # offset param allocated as a stamped Int (no bv2int bridge into
             # the string query), a conjunctive symexAssume split per
             # conjunct; walker 164->165.
-            "tsymex_rfc0005_s8q_termination"]:
+            "tsymex_rfc0005_s8q_termination",
+            # RFC-0005 S8s -- S8p's precision remainder: a `seq[uint8]`
+            # element vs a literal, the `else`-arm multi-variant zero value,
+            # a callee's `array` result, variant arm field and positional
+            # tuple-element writes, n43's cpp build; walker 165->167 (166 is
+            # S8r's).
+            "tsymex_rfc0005_s8s_precision"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

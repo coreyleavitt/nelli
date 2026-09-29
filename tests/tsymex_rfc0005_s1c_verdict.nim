@@ -86,8 +86,8 @@ proc s1cTaintedCaught(p: S1cPoint, b: int) =
     if b + s > 0:
       raise newException(ValueError, "s1c tainted raise")
   except ValueError:
-    var q = (p.x, p.y)
-    q[0] += b  # RFC-0005 S8p models `q.x += b`; a positional element still declines
+    var q = [p.x, p.y]
+    q[0] += b  # RFC-0005 S8p/S8s model a field and a tuple element; an array element still declines
   symexTarget("s1c_after_catch")
 
 # (c) witness monotonicity, tainted arm FIRST: the `if` arm is walked before

@@ -1243,18 +1243,84 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let (discTyId, discReaderExpr) =
         emitTyAndReader(ax.discTy, discPath, witId)
       var caseStmt = newTree(nnkCaseStmt, discReaderExpr)
+      # RFC-0005 S8s: an `else` arm renders one branch per enum ordinal it
+      # covers (`discTags` minus the explicit arms), each with that static
+      # discriminator, as the single-`case` emitter does. It used to render
+      # its sentinel ordinal (`DiscTy(-1)`, a compile error).
+      var nonElseOrds: seq[int]
       for arm in ax.arms:
-        let tagLit = newCall(discTyId, newLit(arm.tagOrdinal))
-        var armReaders: seq[NimNode]
-        for j, fn in arm.fieldNames:
-          let armPath = path & "." & ax.discName &
-                        ".@" & $arm.tagOrdinal & "." & fn
-          let (_, fr) = emitTyAndReader(arm.fieldTypes[j], armPath, witId)
-          armReaders.add fr
-        let body = emitMVBranch(axisIdx + 1, chosen & @[
-          (discName: ax.discName, tagVal: newCall(discTyId, newLit(arm.tagOrdinal)),
-           armFieldNames: arm.fieldNames, armFieldReaders: armReaders)])
-        caseStmt.add nnkOfBranch.newTree(tagLit, body)
+        if not arm.isElse: nonElseOrds.add arm.tagOrdinal
+      for arm in ax.arms:
+        var tagOrds: seq[int]
+        if arm.isElse:
+          for dt in ax.discTags:
+            if dt.ord notin nonElseOrds: tagOrds.add dt.ord
+        else:
+          tagOrds.add arm.tagOrdinal
+        for tagOrd in tagOrds:
+          let tagLit = newCall(discTyId, newLit(tagOrd))
+          var armReaders: seq[NimNode]
+          for j, fn in arm.fieldNames:
+            let armPath = path & "." & ax.discName &
+                          ".@" & $arm.tagOrdinal & "." & fn
+            let (_, fr) = emitTyAndReader(arm.fieldTypes[j], armPath, witId)
+            armReaders.add fr
+          let body = emitMVBranch(axisIdx + 1, chosen & @[
+            (discName: ax.discName, tagVal: newCall(discTyId, newLit(tagOrd)),
+             armFieldNames: arm.fieldNames, armFieldReaders: armReaders)])
+          caseStmt.add nnkOfBranch.newTree(tagLit, body)
+      # RFC-0005 S8s: a NON-enum (`range[lo..hi]`) discriminator has no
+      # `discTags`, so the loop above rendered no branch for an else-covered
+      # value. Since S8s `allocateSym` admits those values (the axis's
+      # declared range), so render them as the single-`case` emitter does
+      # (RFC-0005 S8f): ONE branch over the range minus the explicit tags,
+      # the discriminator bound to the case selector's `let`, only for a
+      # discriminator type of at most 2^16 values (Nim's limit on proving a
+      # runtime discriminator; a wider range keeps the fallback, whose
+      # witness replay refutes).
+      var elseArmIx = -1
+      for i, arm in ax.arms:
+        if arm.isElse: elseArmIx = i
+      if elseArmIx >= 0 and ax.discTags.len == 0 and ax.discTy.hasRange and
+         ax.discTy.rangeHi - ax.discTy.rangeLo < 65536:
+        let elseArm = ax.arms[elseArmIx]
+        var ranges: seq[NimNode]
+        var lo = ax.discTy.rangeLo
+        let hi = ax.discTy.rangeHi
+        var explicit: seq[int64]
+        for o in nonElseOrds: explicit.add int64(o)
+        explicit.sort()
+        proc addRun(ranges: var seq[NimNode]; a, b: int64) =
+          if a > b: return
+          let la = newCall(discTyId, newLit(a))
+          if a == b: ranges.add la
+          else: ranges.add infix(la, "..", newCall(discTyId, newLit(b)))
+        for o in explicit:
+          if o < lo or o > hi: continue
+          addRun(ranges, lo, o - 1)
+          lo = o + 1
+        addRun(ranges, lo, hi)
+        if ranges.len > 0:
+          let selId = genSym(nskLet, "discSel")
+          var armReaders: seq[NimNode]
+          for j, fn in elseArm.fieldNames:
+            let armPath = path & "." & ax.discName &
+                          ".@" & $elseArm.tagOrdinal & "." & fn
+            let (_, fr) = emitTyAndReader(elseArm.fieldTypes[j], armPath, witId)
+            armReaders.add fr
+          let body = emitMVBranch(axisIdx + 1, chosen & @[
+            (discName: ax.discName, tagVal: selId,
+             armFieldNames: elseArm.fieldNames, armFieldReaders: armReaders)])
+          var ofBr = newTree(nnkOfBranch)
+          for r in ranges: ofBr.add r
+          ofBr.add body
+          caseStmt.add ofBr
+          caseStmt[0] = selId
+          caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))
+          let fieldTy = newCall(ident"typeof", newDotExpr(
+            defaultValueOf(objTyId), ident(ax.discName)))
+          return newBlockStmt(newStmtList(
+            newLetStmt(selId, newCall(fieldTy, discReaderExpr)), caseStmt))
       # Else covers any out-of-set disc value; same defensive
       # fallback as itVariant (line 599).
       caseStmt.add nnkElse.newTree(defaultValueOf(objTyId))

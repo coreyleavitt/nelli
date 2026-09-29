@@ -156,13 +156,14 @@ proc n30ClosureStringZeroSat(x: int) =
   if x <= 0 and r == "":
     symexTarget("n30_closure_string_zero_sat")
 
-proc n30ClosureArrayDeclines(x: int) =
-  ## RFC-0005 S8p: a `string` return is now a structured closure result, so
-  ## the classified-decline route is pinned on a return type it still takes
-  ## (an array: no single-leaf range sort, no `symValFromRawAst` wrap).
-  let f = proc(y: int): array[2, int] = [y, 2]
+proc n30ClosureArrayDeclines(t: Table[string, int]; x: int) =
+  ## RFC-0005 S8p: a `string` return is now a structured closure result, and
+  ## S8s an `array` one, so the classified-decline route is pinned on a
+  ## return type it still takes (a `Table`: no single-leaf range sort, no
+  ## `symValFromRawAst` wrap).
+  let f = proc(y: int): Table[string, int] = t
   let r = f(x)
-  if r[0] == 4:
+  if r.len == 4:
     symexTarget("n30_closure_array")
 
 suite "symex round-6 N30 -- closure string-return type: classified decline (feUnsupportedOp), not weInternalWalkerFault":

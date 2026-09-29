@@ -324,6 +324,13 @@ proc emitExpr*(e: IRExpr): NimNode =
     for t in e.mvlAxisTags: tagsLit.add newLit(t)
     newCall(bindSym"mkMultiVariantLit", emitIRType(e.mvlTy),
             prefix(tagsLit, "@"), prefix(axesLit, "@"), prefix(plainLit, "@"))
+  of iekVariantFieldSet:   ## RFC-0005 S8s
+    let tagsLit = newTree(nnkBracket)
+    for t in e.vfsTags: tagsLit.add newLit(t)
+    newCall(bindSym"mkVariantFieldSet", emitExpr(e.vfsRecv),
+            newLit(e.vfsFieldName),
+            prefix(tagsLit, "@"),
+            emitExpr(e.vfsVal))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj), newLit(e.lenLoc))
   of iekSeqSlice:
@@ -1396,6 +1403,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
         if rhsHasInlineDefectFork(a): return true
     for a in e.mvlPlainFields:
       if rhsHasInlineDefectFork(a): return true
+  of iekVariantFieldSet:   ## RFC-0005 S8s
+    result = rhsHasInlineDefectFork(e.vfsRecv) or
+             rhsHasInlineDefectFork(e.vfsVal)
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
   of iekSeqSlice:
@@ -8497,25 +8507,101 @@ type ValueFieldWrite = object
   root:  string
   value: IRExpr
 
+type FieldStep = object
+  ## RFC-0005 S8s. One step of a value field chain: `recv.name` or a
+  ## positional `recv[ix]` on a tuple, or `recv.name` on a variant.
+  recv:    NimNode    ## the receiver, hidden wrappers stripped
+  recvTy:  IRType
+  ix:      int        ## tuple field index (-1 on a variant)
+  name:    string     ## the field's name ("" for an unnamed tuple element)
+  tags:    seq[int]   ## variant: the arms declaring it (empty: a plain field)
+  fieldTy: IRType
+
+proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
+  ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
+  ## variant arm field's `nnkCheckedFieldExpr` (Nim's discriminant check) is
+  ## unwrapped: `valueFieldWrite` models the check with the field's
+  ## `isVariantField` read. A discriminator is not a step (its writes have
+  ## their own arms), nor is a field whose declared type is the scoped-decline
+  ## placeholder.
+  var t = unwrapHidden(lhs)
+  if t.kind == nnkCheckedFieldExpr and t.len >= 1: t = t[0]
+  if t.len != 2: return false
+  let recv = unwrapHidden(t[0])
+  if recv.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr}:
+    return false
+  let recvTy = classifyType(recv).ty
+  if recvTy == nil: return false
+  step = FieldStep(recv: recv, recvTy: recvTy, ix: -1)
+  if t.kind == nnkBracketExpr:
+    if recvTy.kind != itTuple or
+       t[1].kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
+                        nnkInt64Lit}:
+      return false
+    step.ix = int(t[1].intVal)
+    if step.ix < 0 or step.ix >= recvTy.fields.len: return false
+    step.name = recvTy.fieldNames[step.ix]
+    step.fieldTy = recvTy.fields[step.ix]
+    return true
+  if t.kind != nnkDotExpr or t[1].kind notin {nnkIdent, nnkSym}: return false
+  step.name = t[1].strVal
+  case recvTy.kind
+  of itTuple:
+    step.ix = recvTy.fieldNames.find(step.name)
+    if step.ix < 0: return false
+    step.fieldTy = recvTy.fields[step.ix]
+  of itVariant:
+    if step.name == recvTy.vDiscName: return false
+    let pix = recvTy.vPlainFieldNames.find(step.name)
+    if pix >= 0:
+      step.fieldTy = recvTy.vPlainFieldTypes[pix]
+    else:
+      for arm in recvTy.vArms:
+        let ix = arm.fieldNames.find(step.name)
+        if ix >= 0:
+          step.tags.add arm.tagOrdinal
+          if step.fieldTy == nil: step.fieldTy = arm.fieldTypes[ix]
+      if step.tags.len == 0: return false
+  of itMultiVariant:
+    for ax in recvTy.mvAxes:
+      if step.name == ax.discName: return false
+    let pix = recvTy.mvPlainFieldNames.find(step.name)
+    if pix >= 0:
+      step.fieldTy = recvTy.mvPlainFieldTypes[pix]
+    else:
+      for ax in recvTy.mvAxes:
+        for arm in ax.arms:
+          let ix = arm.fieldNames.find(step.name)
+          if ix >= 0:
+            step.tags.add arm.tagOrdinal
+            if step.fieldTy == nil: step.fieldTy = arm.fieldTypes[ix]
+        if step.tags.len > 0: break
+      if step.tags.len == 0: return false
+  else:
+    return false
+  step.fieldTy != nil and not isUnsupportedFieldPlaceholder(step.fieldTy)
+
 proc valueFieldTy(lhs: NimNode): IRType =
   ## RFC-0005 S8p. The written field's type when `lhs` is a field chain over a
   ## VALUE tuple or object rooted at a variable (`o.a`, `o.inner.b`,
-  ## `result.a`), nil for any other lvalue. Every step must classify
-  ## `itTuple`: a ref/ptr step is a heap write (the `nnkAsgn` arms above
-  ## `valueFieldWrite`'s caller), and a variant field write has a
-  ## discriminant check this does not model; both keep their declines.
+  ## `result.a`), nil for any other lvalue. A ref/ptr step is a heap write
+  ## (the `nnkAsgn` arms above `valueFieldWrite`'s caller) and keeps its
+  ## decline. RFC-0005 S8s: a step may also be a positional tuple element
+  ## (`q[0]`, `q.a[1]`) or a field of a value variant or multi-variant, plain
+  ## or in an arm (`v.a`); before S8s both declined.
   ## Pure: parses nothing, so a caller can ask before lifting any call.
-  let t = unwrapHidden(lhs)
-  if t.kind != nnkDotExpr or t.len != 2 or t[1].kind notin {nnkIdent, nnkSym}:
-    return nil
-  let recv = unwrapHidden(t[0])
-  if recv.kind notin {nnkSym, nnkDotExpr}: return nil
-  let recvTy = classifyType(recv).ty
-  if recvTy == nil or recvTy.kind != itTuple: return nil
-  let ix = recvTy.fieldNames.find(t[1].strVal)
-  if ix < 0: return nil
-  if recv.kind == nnkDotExpr and valueFieldTy(recv) == nil: return nil
-  recvTy.fields[ix]
+  var step: FieldStep
+  if not fieldStep(lhs, step): return nil
+  if step.recv.kind != nnkSym and valueFieldTy(step.recv) == nil: return nil
+  step.fieldTy
+
+proc valueFieldChecked(lhs: NimNode): bool =
+  ## RFC-0005 S8s. True when some step of the chain `valueFieldTy` accepted
+  ## is a variant ARM field: writing through it checks the discriminant.
+  var step: FieldStep
+  if not fieldStep(lhs, step): return false
+  step.tags.len > 0 or
+    (step.recv.kind != nnkSym and valueFieldChecked(step.recv))
 
 proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
                      preamble: var seq[IRStmt], ctx: ParseCtx): ValueFieldWrite =
@@ -8523,21 +8609,27 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   ## tuple or object, for an `lhs` `valueFieldTy` accepts. Nim writes the one
   ## field in place; the other fields keep their values. That is the same as
   ## assigning the root a rebuilt tuple whose written field is `newVal` and
-  ## whose other fields are reads of the old ones -- one level per `.`.
-  let t = unwrapHidden(lhs)
-  let recv = unwrapHidden(t[0])
-  let recvTy = classifyType(recv).ty
-  let ix = recvTy.fieldNames.find(t[1].strVal)
-  let recvIR = parseExpr(recv, preamble, ctx)
-  var elems: seq[IRExpr]
-  for i in 0 ..< recvTy.fields.len:
-    elems.add(if i == ix: newVal
-              else: mkField(recvIR, i, recvTy.fieldNames[i]))
-  let rebuilt = mkTupleLit(elems, recvTy)
-  if recv.kind == nnkSym:
-    ValueFieldWrite(root: recv.strVal, value: rebuilt)
+  ## whose other fields are reads of the old ones -- one level per step.
+  ## RFC-0005 S8s: a variant step rebuilds with `iekVariantFieldSet`. Its
+  ## discriminant check is not made here: the caller parses the read of
+  ## `lhs` first when `valueFieldChecked` holds, and that read's
+  ## `isVariantField` forks the out-of-arm `FieldDefect` before any write.
+  var step: FieldStep
+  discard fieldStep(lhs, step)
+  let recvIR = parseExpr(step.recv, preamble, ctx)
+  let rebuilt =
+    if step.recvTy.kind == itTuple:
+      var elems: seq[IRExpr]
+      for i in 0 ..< step.recvTy.fields.len:
+        elems.add(if i == step.ix: newVal
+                  else: mkField(recvIR, i, step.recvTy.fieldNames[i]))
+      mkTupleLit(elems, step.recvTy)
+    else:
+      mkVariantFieldSet(recvIR, step.name, step.tags, newVal)
+  if step.recv.kind == nnkSym:
+    ValueFieldWrite(root: step.recv.strVal, value: rebuilt)
   else:
-    valueFieldWrite(recv, rebuilt, preamble, ctx)
+    valueFieldWrite(step.recv, rebuilt, preamble, ctx)
 
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
@@ -8785,6 +8877,12 @@ proc parseStmtInner(n: NimNode,
     # per-field RangeDefect fork.
     let fieldTy = valueFieldTy(lhs)
     if fieldTy != nil:
+      # RFC-0005 S8s: a write through a variant arm field checks the
+      # discriminant first -- Nim computes the field's address, raising
+      # `FieldDefect` out of the arm, before it evaluates the value. The
+      # read of `lhs` is that check (its `isVariantField` fork).
+      if valueFieldChecked(lhs):
+        discard parseExpr(lhs, preamble, ctx)
       let val = parseExpr(n[1], preamble, ctx)
       if not (fieldTy.kind == itInt and fieldTy.hasRange and
               not carriesRangeCheck(val, fieldTy)):

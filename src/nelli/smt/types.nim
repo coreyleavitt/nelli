@@ -417,6 +417,13 @@ type
                  ## at parse time and its bound stand-in was an int, which a
                  ## callee returning it met in `retBindEq` as a kind mismatch
                  ## (`weInternalWalkerFault`).
+    iekVariantFieldSet ## RFC-0005 S8s: a variant or multi-variant value
+                 ## with one field replaced -- the new value of `v` after
+                 ## `v.f = x`. A plain field is replaced; an arm field is
+                 ## replaced in every arm that declares it (`vfsTags`). The
+                 ## parser puts the field's `isVariantField` read before the
+                 ## assignment, so the out-of-arm path has already raised
+                 ## `FieldDefect` and the surviving path is in the arm.
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
@@ -697,6 +704,12 @@ type
                                    ## per axis: the ACTIVE arm's field exprs,
                                    ## in that arm's `fieldNames` order
       mvlPlainFields*: seq[IRExpr] ## `mvlTy.mvPlainFieldNames` order
+    of iekVariantFieldSet:
+      vfsRecv*:      IRExpr       ## the variant value written into
+      vfsFieldName*: string       ## the field replaced (never a discriminator)
+      vfsTags*:      seq[int]     ## tag ordinals of the arms declaring it;
+                                   ## empty for a plain (shared) field
+      vfsVal*:       IRExpr       ## the field's new value
     of iekSeqLen:
       lenObj*: IRExpr
       lenLoc*: string            ## Round-6 B1 (siteLoc precedent, A3):
@@ -3581,6 +3594,13 @@ proc mkMultiVariantLit*(ty: IRType, axisTags: seq[int],
   IRExpr(kind: iekMultiVariantLit, mvlTy: ty, mvlAxisTags: axisTags,
          mvlAxisFields: axisFields, mvlPlainFields: plainFields)
 
+proc mkVariantFieldSet*(recv: IRExpr, fieldName: string, tags: seq[int],
+                         val: IRExpr): IRExpr =
+  ## RFC-0005 S8s. `recv` with field `fieldName` replaced by `val` (see
+  ## `iekVariantFieldSet`).
+  IRExpr(kind: iekVariantFieldSet, vfsRecv: recv, vfsFieldName: fieldName,
+         vfsTags: tags, vfsVal: val)
+
 proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
 
@@ -4988,6 +5008,11 @@ proc render*(e: IRExpr): string =
       for c in e.mvlAxisFields[ai]: inner.add "," & render(c)
     for c in e.mvlPlainFields: inner.add "," & render(c)
     "MVr(" & inner & ")"
+  of iekVariantFieldSet:
+    var tags = ""
+    for t in e.vfsTags: tags.add "@" & $t
+    "VFs(" & render(e.vfsRecv) & "." & e.vfsFieldName & tags & ":=" &
+      render(e.vfsVal) & ")"
   of iekSeqLen:
     render(e.lenObj) & ".len"
   of iekStrLit:

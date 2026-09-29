@@ -37,7 +37,7 @@
 ## Verdict-affecting (a previously-false `sxSat` now correctly reports
 ## `sxUnsat`): `symexWalkerVersion` bumps 89→90. `renderAsChoicesVersion`
 ## stays UNCHANGED (11) — no new witness-rendering shape.
-import std/[unittest, strutils]
+import std/[unittest, strutils, sets]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -299,12 +299,13 @@ type
     of r2A: c: int
     of r2B: d: int
   R2MVE = object
-    ## A multi-variant whose first axis's ordinal 0 falls in an `else` arm:
-    ## Nim's zero value is legal, but `multiVariantZeroTotal` requires an
-    ## explicit ordinal-0 arm on every axis, so it has no modelled zero.
+    ## A multi-variant with a `HashSet` arm field: Nim's zero value is
+    ## legal (an empty set), but `defaultZero` has no set arm, so it has no
+    ## modelled zero. (Its ordinal 0 in an `else` arm was this pin's shape
+    ## until RFC-0005 S8s modelled that.)
     case k: R2VK
     of r2B: b: int
-    else: a: int
+    else: a: HashSet[int]
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
@@ -371,7 +372,7 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
                       tLabel("multivariant_zero_nonzero"))
     check z.status == sxUnsat
 
-  test "T5h-4: a result type with no modelled zero (a multi-variant with an else arm at ordinal 0) still declines, never a bound wrong value":
+  test "T5h-4: a result type with no modelled zero (a multi-variant with a HashSet field) still declines, never a bound wrong value":
     let r = symexFind(sutMultiVariantZeroDeclines,
                       tLabel("multivariant_zero_declines"))
     check r.status == sxSat

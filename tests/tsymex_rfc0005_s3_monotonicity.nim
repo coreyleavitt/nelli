@@ -58,9 +58,9 @@
 ##         and F2 does NOT flip. No RFC-0005 slice schedules a flip: it would
 ##         need a §3.2 split of the total-op declines (radix/case-fold) out
 ##         of `seUnsupportedStringOp` first, which §5 does not plan.
-##   F3 -- `mkUnsupported` statement / `feUnsupportedStmtKind` (a positional
-##         tuple-element augmented assignment; was a field one until
-##         RFC-0005 S8p modelled that) -- a generic Class-A/B catch-all
+##   F3 -- `mkUnsupported` statement / `feUnsupportedStmtKind` (an array
+##         element's augmented assignment; was a field one until RFC-0005
+##         S8p modelled that, then a tuple element's until S8s did) -- a generic Class-A/B catch-all
 ##         kind. RFC-0005 §5 does not name a slice that reclassifies THIS
 ##         kind out of `dcNoAnswer` (S8 unifies Class-A/B's REPRESENTATION
 ##         but explicitly makes "no verdict change" its own DoD item), so
@@ -158,9 +158,10 @@ type S3F1Node = ref object
 # ---- F3: mkUnsupported statement / feUnsupportedStmtKind -------------------
 # Was `tsymex_rfc0005_s1c_verdict.nim`'s `s1cTaintedCaught` shape (a field
 # augmented assignment through a local value copy), which RFC-0005 S8p
-# models. The trigger is now a POSITIONAL tuple-element augmented assignment
-# (`q[0] += b`), a Class-B `isUnsupported` statement the parser still has no
-# arm for.
+# models. The trigger was then a POSITIONAL tuple-element augmented
+# assignment, which RFC-0005 S8s models; it is now an ARRAY element's
+# (`q[0] += b` on an `array`), a Class-B `isUnsupported` statement the parser
+# still has no arm for.
 type S3F3Point = object
   x, y: int
 
@@ -288,7 +289,7 @@ proc s3w2Base(x: int) =
 
 proc s3w2F3Before(p: S3F3Point, b: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    var q = (p.x, p.y)
+    var q = [p.x, p.y]
     q[0] += b
   do:
     if b == 7:
@@ -296,7 +297,7 @@ proc s3w2F3Before(p: S3F3Point, b: int, poisonOn: bool) =
 
 proc s3w2F3After(p: S3F3Point, b: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    var q = (p.x, p.y)
+    var q = [p.x, p.y]
     q[0] += b
   do:
     if b == 7:
@@ -390,7 +391,7 @@ proc s3w3F1After(p: S3F1Node, n: int, poisonOn: bool) =
 
 proc s3w3F3Before(p: S3F3Point, b, n: int, poisonOn: bool) =
   withPoisonedArm(paBefore, poisonOn):
-    var q = (p.x, p.y)
+    var q = [p.x, p.y]
     q[0] += b
   do:
     let r = s3w3Helper(n)
@@ -399,7 +400,7 @@ proc s3w3F3Before(p: S3F3Point, b, n: int, poisonOn: bool) =
 
 proc s3w3F3After(p: S3F3Point, b, n: int, poisonOn: bool) =
   withPoisonedArm(paAfter, poisonOn):
-    var q = (p.x, p.y)
+    var q = [p.x, p.y]
     q[0] += b
   do:
     let r = s3w3Helper(n)
@@ -465,7 +466,7 @@ proc s3ClassifyF2(x: int64) =
     symexTarget("s3_classify_f2")
 
 proc s3ClassifyF3(p: S3F3Point, b: int) =
-  var q = (p.x, p.y)
+  var q = [p.x, p.y]
   q[0] += b
   if b == 42:
     symexTarget("s3_classify_f3")

@@ -105,8 +105,8 @@ proc sutFieldAugModelled(p: AugPoint, b: int) =
       symexTarget("field_aug_dead")
 
 proc sutFieldAugDegrades(p: AugPoint, b: int) =
-  var q = (p.x, p.y)  ## an anonymous tuple copy of the struct param
-  q[0] += b    ## positional-element LHS → non-nnkSym after unwrap → mkUnsupported → sawUnknown
+  var q = [p.x, p.y]  ## an array copy of the struct param
+  q[0] += b    ## array-element LHS → non-nnkSym after unwrap → mkUnsupported → sawUnknown
   ## No symexTarget: target not reached + sawUnknown=true → sxUnknown
 
 # ===========================================================================
@@ -165,9 +165,10 @@ suite "Augmented-assignment desugaring (walker v31)":
     check r.status == sxUnsat
 
   test "positional-element augmented assign degrades soundly → sxUnknown":
-    ## `q[0] += b` on a tuple: the LHS (after unwrapping hidden-deref
+    ## `q[0] += b` on an array: the LHS (after unwrapping hidden-deref
     ## wrappers) is nnkBracketExpr, NOT nnkSym, and not a value field chain
-    ## (RFC-0005 S8p's field route). The nnkInfix arm degrades to
+    ## (RFC-0005 S8p's field route; S8s added a tuple element, not an array
+    ## one). The nnkInfix arm degrades to
     ## mkUnsupported → sawUnknown=true.
     ## With no symexTarget in the proc and sawUnknown=true, the verdict is
     ## sxUnknown (not sxSat — which would be wrong — and not sxUnsat — which

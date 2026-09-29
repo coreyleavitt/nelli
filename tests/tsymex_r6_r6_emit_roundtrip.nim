@@ -305,6 +305,10 @@ proc fieldwiseEq(a, b: IRExpr): bool =
             ok = false
         ok) and
       fieldwiseEqExprSeq(a.mvlPlainFields, b.mvlPlainFields)
+  of iekVariantFieldSet:
+    ## RFC-0005 S8s.
+    fieldwiseEq(a.vfsRecv, b.vfsRecv) and a.vfsFieldName == b.vfsFieldName and
+      a.vfsTags == b.vfsTags and fieldwiseEq(a.vfsVal, b.vfsVal)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -588,6 +592,14 @@ proc sMultiVariantLit(): IRExpr =
   ## RFC-0005 S8p. Axis A on its tag-0 arm, axis B on its tag-1 arm.
   mkMultiVariantLit(sMultiVariantType(), @[0, 1],
                     @[@[mkIntLit(9)], @[mkStrLit("fb")]], @[mkBoolLit(true)])
+proc sVariantFieldSet(): IRExpr =
+  ## RFC-0005 S8s. An arm field declared by two arms (tags 0 and 2).
+  mkVariantFieldSet(mkVar("sentinelVariant"), "sentinelArmField", @[0, 2],
+                    mkIntLit(13))
+proc sVariantFieldSetPlain(): IRExpr =
+  ## RFC-0005 S8s. A plain field: no tags.
+  mkVariantFieldSet(mkVar("sentinelVariant"), "sentinelPlainField", @[],
+                    mkBoolLit(true))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -663,6 +675,10 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sVariantLit(), roundtripExpr(sVariantLit()))
   test "iekMultiVariantLit":
     check fieldwiseEq(sMultiVariantLit(), roundtripExpr(sMultiVariantLit()))
+  test "iekVariantFieldSet (arm field, two tags)":
+    check fieldwiseEq(sVariantFieldSet(), roundtripExpr(sVariantFieldSet()))
+  test "iekVariantFieldSet (plain field, no tags)":
+    check fieldwiseEq(sVariantFieldSetPlain(), roundtripExpr(sVariantFieldSetPlain()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -740,6 +756,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekTupleLit: discard                    ## "iekTupleLit"
       of iekVariantLit: discard                  ## "iekVariantLit"
       of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
+      of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"

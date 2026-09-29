@@ -314,23 +314,24 @@ proc corpusBareLenRead(n: int) =
 # fallthrough (no explicit `return`) after a CONDITIONAL, multi-statement
 # `result = expr` assignment, where the returned VALUE is a composite kind
 # outside the scalar-wired set `isReturn`'s explicit-return arm already
-# supports (`svTuple`/`svVariant` and every scalar — but NOT `svArray` here; a `seq` is bound since RFC-0005 S8p).
+# supports (`svTuple`/`svVariant` and every scalar — but NOT `svTable` here; a `seq` is bound since RFC-0005 S8p, an `array` since S8s).
 # Pre-fix this degraded to an UNSOUND unconstrained `retSym` (the BLOCKER
 # #12 root cause, see `tests/tsymex_r6_a6r_callwitness.nim`); post-fix, a
 # composite kind the walker doesn't yet have a `retBindEq` arm for degrades
 # cleanly to a classified `sxUnknown` (mirroring `isReturn`'s own existing
 # composite-return degrade net verbatim, `feUnsupportedOp`), never a false
 # `sxSat` and never a crash.
-proc corpusCompositeFallthroughReturn(x: int): array[1, int] =
-  ## RFC-0005 S8p binds a `seq` result, so this row uses an `array` one,
-  ## which `retBindEq` still does not bind.
+proc corpusCompositeFallthroughReturn(t: Table[string, int];
+                                      x: int): Table[string, int] =
+  ## RFC-0005 S8p binds a `seq` result and S8s an `array` one, so this row
+  ## passes a `Table` through, which `retBindEq` still does not bind.
   if x < 0:
     raise newException(ValueError, "negative")
-  result = [x]
+  result = t
 
-proc corpusCompositeImplicitFallthrough(x: int) =
-  let s = corpusCompositeFallthroughReturn(x)
-  if s[0] == x:
+proc corpusCompositeImplicitFallthrough(t: Table[string, int]; x: int) =
+  let s = corpusCompositeFallthroughReturn(t, x)
+  if s.len == t.len:
     symexTarget("composite_implicit_fallthrough")
 
 # ---------------------------------------------------------------------------
@@ -502,7 +503,8 @@ let corpus = @[
                         "net rather than leaving retSym unconstrained)",
              status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
              expectedKind: feUnsupportedOp, hasKindCheck: false,
-             # RFC-0005 S10: `[x][0] == x` for every x >= 0, so the label
+             # RFC-0005 S10: `s.len == t.len` for every x >= 0 (S8s: was
+             # `[x][0] == x` over an `array` result), so the label
              # is reachable; the path's taint is dcFreshSymbol only, and the
              # replayed candidate is confirmed.
              replayConfirms: true, rawStatus: uCompositeFallthrough),

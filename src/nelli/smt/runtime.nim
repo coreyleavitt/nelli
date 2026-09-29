@@ -2055,8 +2055,10 @@ func closureRetStructured(t: IRType): bool =
   ## Z3 sort. `buildClosure` gives such a funcSym a placeholder range and
   ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
   ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
-  ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`.
-  t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq}
+  ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`. RFC-0005
+  ## S8s adds an `array` (`retBindEq` binds it element-wise).
+  t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
+                          itArray}
 
 var currentClosureBodies* {.threadvar.}: Table[
     tuple[siteHash: int64, declOrder: int], ClosureBody]
@@ -2140,6 +2142,9 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal
 
 proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal
   ## RFC-0005 S8p fwd-decl. `lowerVariantLit`, once per axis.
+
+proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8s fwd-decl. A variant value with one field replaced.
 
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
@@ -2483,6 +2488,39 @@ proc variantDiscEq(d: SymVal, tagOrd: int64): Z3Bool =
       "variantDiscEq: discriminator must be a BV or Z3Int kind (got " &
       $d.kind & ")")
 
+proc discDomainOf(arms: seq[VariantArm];
+                  discTags: seq[tuple[name: string, ord: int]];
+                  discTy: IRType): tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
+  ## The body of `discriminatorDomain` (below), over one `case` section's
+  ## arms, enum domain and discriminator type. RFC-0005 S8s split it out so
+  ## a multi-variant axis (`axisDiscriminatorDomain`) shares it.
+  var hasElse = false
+  for arm in arms:
+    if arm.isElse:
+      hasElse = true
+      break
+  let rangeAliasElseDomain =
+    hasElse and discTags.len == 0 and discTy.hasRange
+  if rangeAliasElseDomain:
+    return (discTy.rangeLo, discTy.rangeHi, newSeq[int]())
+  var minOrd = high(int64)
+  var maxOrd = low(int64)
+  var ordSet: seq[int]
+  for arm in arms:
+    if arm.tagOrdinal < 0: continue  # else sentinel
+    if int64(arm.tagOrdinal) < minOrd: minOrd = int64(arm.tagOrdinal)
+    if int64(arm.tagOrdinal) > maxOrd: maxOrd = int64(arm.tagOrdinal)
+    ordSet.add arm.tagOrdinal
+  for dt in discTags:
+    if int64(dt.ord) < minOrd: minOrd = int64(dt.ord)
+    if int64(dt.ord) > maxOrd: maxOrd = int64(dt.ord)
+    if dt.ord notin ordSet: ordSet.add dt.ord
+  if minOrd == high(int64):
+    # No non-else arms AND no discTags -- degenerate.
+    minOrd = 0
+    maxOrd = 0
+  (minOrd, maxOrd, ordSet)
+
 proc discriminatorDomain*(ty: IRType):
     tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
   ## Issue #163 review R12 extraction. THE single decision of what values a
@@ -2518,32 +2556,17 @@ proc discriminatorDomain*(ty: IRType):
   ## paired at construction time in `dsl_typebridge.nim` and can't
   ## diverge), so folding the scan in here removes that third small
   ## duplication too.
-  var hasElse = false
-  for arm in ty.vArms:
-    if arm.isElse:
-      hasElse = true
-      break
-  let rangeAliasElseDomain =
-    hasElse and ty.vDiscTags.len == 0 and ty.vDiscTy.hasRange
-  if rangeAliasElseDomain:
-    return (ty.vDiscTy.rangeLo, ty.vDiscTy.rangeHi, newSeq[int]())
-  var minOrd = high(int64)
-  var maxOrd = low(int64)
-  var ordSet: seq[int]
-  for arm in ty.vArms:
-    if arm.tagOrdinal < 0: continue  # else sentinel
-    if int64(arm.tagOrdinal) < minOrd: minOrd = int64(arm.tagOrdinal)
-    if int64(arm.tagOrdinal) > maxOrd: maxOrd = int64(arm.tagOrdinal)
-    ordSet.add arm.tagOrdinal
-  for dt in ty.vDiscTags:
-    if int64(dt.ord) < minOrd: minOrd = int64(dt.ord)
-    if int64(dt.ord) > maxOrd: maxOrd = int64(dt.ord)
-    if dt.ord notin ordSet: ordSet.add dt.ord
-  if minOrd == high(int64):
-    # No non-else arms AND no vDiscTags -- degenerate.
-    minOrd = 0
-    maxOrd = 0
-  (minOrd, maxOrd, ordSet)
+  discDomainOf(ty.vArms, ty.vDiscTags, ty.vDiscTy)
+
+proc axisDiscriminatorDomain*(ax: VariantAxis):
+    tuple[minOrd, maxOrd: int64, ordSet: seq[int]] =
+  ## RFC-0005 S8s. `discriminatorDomain` for one axis of a multi-variant.
+  ## `allocateSym`'s multi-variant arm used to build its own disjunction
+  ## over the axis's arm ordinals, the `else` arm's sentinel (-1) among
+  ## them, so an ordinal an `else` arm covers was never a value of an
+  ## allocated discriminator (a false `sxUnsat`), and -1 was. The same
+  ## decision as a single `case` now, from the same code.
+  discDomainOf(ax.arms, ax.discTags, ax.discTy)
 
 proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                  stringBacked: bool = false,
@@ -2749,7 +2772,6 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       discBoxed[] = discInner
       var armFields = initOrderedTable[int, seq[SymVal]]()
       var armNames  = initOrderedTable[int, seq[string]]()
-      var armEqClauses: seq[Z3Bool]
       for arm in ax.arms:
         var fields: seq[SymVal]
         for j, ft in arm.fieldTypes:
@@ -2758,22 +2780,22 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
           fields.add allocateSym(ft, path, pcOut)
         armFields[arm.tagOrdinal] = fields
         armNames[arm.tagOrdinal]  = arm.fieldNames
-        let tagOrd = int64(arm.tagOrdinal)
-        let eqBool =
-          case discInner.kind
-          of svBV8:  discInner.bv8  == mkBitVec[8](tagOrd)
-          of svBV16: discInner.bv16 == mkBitVec[16](tagOrd)
-          of svBV32: discInner.bv32 == mkBitVec[32](tagOrd)
-          of svBV64: discInner.bv64 == mkBitVec[64](tagOrd)
-          else:
-            raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (multi-variant axis discriminator is always BV-allocated)]
-              "symex Phase 14: multi-variant axis disc must be a BV kind " &
-              "(got " & $discInner.kind & ")")
-        armEqClauses.add eqBool
-      if armEqClauses.len > 0:
-        var clause = armEqClauses[0]
-        for k in 1 ..< armEqClauses.len:
-          clause = clause or armEqClauses[k]
+      # RFC-0005 S8s: the axis's legal discriminator domain is
+      # `axisDiscriminatorDomain`'s, as for a single `case`. This arm used
+      # to disjoin the arm ordinals themselves, so an `else` arm put its
+      # sentinel -1 (0xFF on a `u8` disc) in the domain and left out every
+      # ordinal it covers: an input with `k` in an `else` arm was
+      # unreachable, and a callee's zero-valued result contradicted its
+      # own allocation.
+      let (_, _, ordSet) = axisDiscriminatorDomain(ax)
+      if discInner.kind notin {svBV8, svBV16, svBV32, svBV64}:
+        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (multi-variant axis discriminator is always BV-allocated)]
+          "symex Phase 14: multi-variant axis disc must be a BV kind " &
+          "(got " & $discInner.kind & ")")
+      if ordSet.len > 0:
+        var clause = variantDiscEq(discInner, int64(ordSet[0]))
+        for k in 1 ..< ordSet.len:
+          clause = clause or variantDiscEq(discInner, int64(ordSet[k]))
         pcOut.add clause
       axisSyms.add VariantAxisSym(
         discName: ax.discName, disc: discBoxed,
@@ -3172,10 +3194,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # `svTuple` — no scalar surrounding op takes ITS representation from a
     # sub-element's proto the way an array literal's homogeneous elemTy does.
     none(SymVal)
-  of iekVariantLit, iekMultiVariantLit:
+  of iekVariantLit, iekMultiVariantLit, iekVariantFieldSet:
     # Round-6 A1. Same reasoning as iekTupleLit: a variant literal's own
-    # SymVal kind is always `svVariant` (RFC-0005 S8p: `svMultiVariant`) —
-    # no scalar proto to offer.
+    # SymVal kind is always `svVariant` (RFC-0005 S8p: `svMultiVariant`;
+    # S8s: a field set is its receiver's kind) — no scalar proto to offer.
     none(SymVal)
   of iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
@@ -3859,11 +3881,24 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
 
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
-                           svMultiVariant, svSeq, svDistinct}
+                           svMultiVariant, svSeq, svDistinct, svArray}
   ## The value kinds `retBindEq` binds structurally; the two call-return
   ## drains (`completeReturn`, the `isCall` fall-through) decline any other
   ## (`feUnsupportedOpHavoc`). RFC-0005 S8p added `svMultiVariant`, `svSeq`
   ## and `svDistinct`, and made it one set (each drain had its own copy).
+  ## RFC-0005 S8s added `svArray`.
+
+proc armSelected(disc: SymVal; tagOrd: int;
+                 arms: OrderedTable[int, seq[SymVal]]): Z3Bool =
+  ## RFC-0005 S8s. `disc` selects the arm keyed `tagOrd` among a `case`
+  ## section's arms (`arms`, keyed by tag ordinal). An `else` arm is keyed by the
+  ## sentinel -1 and selected exactly when no explicit arm is -- the same
+  ## membership `isVariantField` reads an else-arm field under. A bare
+  ## `variantDiscEq(disc, -1)` is never true for a legal discriminator.
+  if tagOrd >= 0: return variantDiscEq(disc, int64(tagOrd))
+  result = mkBool(true)
+  for t in arms.keys:
+    if t >= 0: result = result and not variantDiscEq(disc, int64(t))
 
 proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## Phase 15 G3: the binding constraint linking a call's fresh `retSym`
@@ -3995,7 +4030,11 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       for i in 0 ..< symFields.len:
         let (fs, fv) = reconcileInt(symFields[i], valFields[i])
         armEq = armEq and retBindEq(fs, fv)
-      acc = acc and variantDiscEq(retSym.vDisc[], int64(tagOrd)).implies(armEq)
+      # RFC-0005 S8s: `armSelected`, not `variantDiscEq(disc, tagOrd)`: an
+      # `else` arm's key is -1, which no discriminator equals, so its fields
+      # were never bound (a free result wherever the else arm was active).
+      acc = acc and armSelected(retSym.vDisc[], tagOrd,
+                                retSym.vArmFields).implies(armEq)
     doAssert retSym.vPlainFields.len == retVal.vPlainFields.len,
       "retBindEq: variant plain-field arity mismatch " &
       $retSym.vPlainFields.len & " vs " & $retVal.vPlainFields.len
@@ -4027,17 +4066,32 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
         for i in 0 ..< symFields.len:
           let (fs, fv) = reconcileInt(symFields[i], valFields[i])
           armEq = armEq and retBindEq(fs, fv)
-        acc = acc and variantDiscEq(sAx.disc[], int64(tagOrd)).implies(armEq)
+        acc = acc and armSelected(sAx.disc[], tagOrd,
+                                  sAx.armFields).implies(armEq)   # RFC-0005 S8s
     doAssert retSym.mvPlainFields.len == retVal.mvPlainFields.len,
       "retBindEq: multi-variant plain-field arity mismatch"
     for i in 0 ..< retSym.mvPlainFields.len:
       let (fs, fv) = reconcileInt(retSym.mvPlainFields[i], retVal.mvPlainFields[i])
       acc = acc and retBindEq(fs, fv)
     acc
+  of svArray:
+    ## RFC-0005 S8s: element-wise, as a tuple binds per field. An array
+    ## value is a fixed list of element values (`arrElems`, one per index),
+    ## and both sides come from the same `array[N, T]` type. Before S8s an
+    ## array fell to the catch-all below: an array-returning callee's result
+    ## was `feUnsupportedOpHavoc`.
+    doAssert retSym.arrElems.len == retVal.arrElems.len,
+      "retBindEq: array length mismatch " & $retSym.arrElems.len & " vs " &
+      $retVal.arrElems.len
+    var acc = mkBool(true)
+    for i in 0 ..< retSym.arrElems.len:
+      let (es, ev) = reconcileInt(retSym.arrElems[i], retVal.arrElems[i])
+      acc = acc and retBindEq(es, ev)
+    acc
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached for
-    # a proc returning `array[N,T]`/`Table[K,V]`/`HashSet[T]`/a
-    # multi-variant object/`ref`/`ptr` -- all ordinary Nim return-type
+    # a proc returning `Table[K,V]`/`HashSet[T]`/`ref`/`ptr` (RFC-0005 S8p
+    # and S8s wired the multi-variant and the array) -- all ordinary Nim return-type
     # shapes, called from inside a loop reaches this unguarded. In-band
     # degrade: `mkBool(true)` mirrors the svSeq arm's own placeholder
     # idiom immediately above (sound vacuous binding).
@@ -4074,7 +4128,8 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   ## zero-init — out of both A5's and R2's scope; a caller reaching one of
   ## these must classified-decline, never bind a wrong value), as does a
   ## variant (RFC-0005 S8n) or multi-variant (S8p) whose ordinal-0
-  ## discriminator is not an explicit arm's tag. `itFloat*` returns 0.0 since
+  ## discriminator is not a legal tag (an explicit arm's, or one an `else`
+  ## arm covers). `itFloat*` returns 0.0 since
   ## RFC-0005 S8f (walker 154).
   ## `defaultZeroTotal` (below) says, without calling it, whether this
   ## returns.
@@ -4248,18 +4303,20 @@ func variantZeroTotal(t: IRType): bool =
 
 func multiVariantZeroTotal(t: IRType): bool =
   ## RFC-0005 S8p: `variantZeroTotal` per axis. Every axis's discriminator
-  ## type holds 0 and 0 is an explicit (non-else) arm of that axis -- the
-  ## tags `allocateSym`'s multi-variant arm constrains a discriminator to --
-  ## and every field (plain, and of every arm) has a zero value.
+  ## type holds 0 and 0 is a legal tag of that axis, and every field (plain,
+  ## and of every arm) has a zero value. RFC-0005 S8s: "a legal tag" is
+  ## `axisDiscriminatorDomain`'s, so an ordinal 0 an `else` arm covers
+  ## counts, as it does for a single `case` (S8p required an explicit
+  ## ordinal-0 arm, the only tags `allocateSym`'s multi-variant arm then
+  ## admitted).
   doAssert t.kind == itMultiVariant
   for ax in t.mvAxes:
     if not defaultZeroTotal(ax.discTy): return false
-    var zeroArm = false
+    let (_, _, ordSet) = axisDiscriminatorDomain(ax)
+    if ordSet.len > 0 and 0 notin ordSet: return false
     for arm in ax.arms:
-      if not arm.isElse and arm.tagOrdinal == 0: zeroArm = true
       for ft in arm.fieldTypes:
         if not defaultZeroTotal(ft): return false
-    if not zeroArm: return false
   for ft in t.mvPlainFieldTypes:
     if not defaultZeroTotal(ft): return false
   true
@@ -6804,6 +6861,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     lowerVariantLit(env, e)
   of iekMultiVariantLit:
     lowerMultiVariantLit(env, e)   ## RFC-0005 S8p
+  of iekVariantFieldSet:
+    lowerVariantFieldSet(env, e)   ## RFC-0005 S8s
   of iekHofCall:
     # Phase 15 C4 (ADR-0009). DSL higher-order call. Selects the INLINE path
     # (concrete length ≤ seqInlineThreshold; unroll the closure per element,
@@ -14444,8 +14503,17 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
         toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
     else:
       allocateSeqDataRaw(elemTy, "__seqlit.data")
+  # RFC-0005 S8s. Each element lowers against the element type's prototype,
+  # as `lowerTupleLit`'s fields do: an int literal with no prototype lowers
+  # to a signed 64-bit value, and `storeSeqElem` then read the `bv8` of that
+  # `svBV64` element of a `seq[uint8]` (`@[x, 1'u8]`, a
+  # `weInternalWalkerFault` on every such literal, with or without an input).
+  let elemProto =
+    if elemTy.kind == itInt: some(bvConst(elemTy, 0))
+    elif elemTy.kind == itBool: some(ofBool(mkBool(false)))
+    else: none(SymVal)
   for i, ce in e.seqLitElems:
-    let elemSV = lower(env, ce)
+    let elemSV = lower(env, ce, elemProto)
     dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
   SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
          seqDataRaw: dataRaw, seqElemTy: elemTy)
@@ -14590,6 +14658,65 @@ proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
                             armFields: armFields, armFieldNames: armNames)
   SymVal(kind: svMultiVariant, mvObjectName: ty.mvObjectName, mvAxes: axes,
          mvPlainFields: plainFields, mvPlainFieldNames: ty.mvPlainFieldNames)
+
+proc lowerVariantFieldSet(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8s. `v.f = x` on a value variant or multi-variant: `v`'s new
+  ## value is its old one with field `f` replaced by `x`. A plain field has
+  ## one slot. An arm field has a slot in every arm that declares it
+  ## (`of a, b: f` is two arms), and all of them are replaced: the parser's
+  ## preceding `isVariantField` read of `v.f` has already forked the
+  ## out-of-arm `FieldDefect` (Nim checks the field before it writes, and
+  ## leaves `v` unchanged when it raises), so on this path the
+  ## discriminator selects one of those arms. The other arms' slots are
+  ## unreachable while it does. The new value lowers against the old one's
+  ## prototype, so a literal takes the field's width.
+  let recv = lower(env, e.vfsRecv)
+  proc replaced(old: SymVal): SymVal =
+    let proto =
+      if old.kind in {svBool, svInt, svBV8, svBV16, svBV32, svBV64}: some(old)
+      else: none(SymVal)
+    lower(env, e.vfsVal, proto)
+  case recv.kind
+  of svVariant:
+    result = recv
+    let pix = recv.vPlainFieldNames.find(e.vfsFieldName)
+    if pix >= 0:
+      result.vPlainFields[pix] = replaced(recv.vPlainFields[pix])
+      return
+    var newVal: Option[SymVal]
+    for tag in e.vfsTags:
+      if not recv.vArmFieldNames.hasKey(tag): continue
+      let ix = recv.vArmFieldNames[tag].find(e.vfsFieldName)
+      if ix < 0: continue
+      if newVal.isNone: newVal = some(replaced(recv.vArmFields[tag][ix]))
+      result.vArmFields[tag][ix] = newVal.get
+    if newVal.isSome: return
+  of svMultiVariant:
+    result = recv
+    let pix = recv.mvPlainFieldNames.find(e.vfsFieldName)
+    if pix >= 0:
+      result.mvPlainFields[pix] = replaced(recv.mvPlainFields[pix])
+      return
+    var newVal: Option[SymVal]
+    for ai, ax in recv.mvAxes:
+      for tag in e.vfsTags:
+        if not ax.armFieldNames.hasKey(tag): continue
+        let ix = ax.armFieldNames[tag].find(e.vfsFieldName)
+        if ix < 0: continue
+        if newVal.isNone: newVal = some(replaced(ax.armFields[tag][ix]))
+        result.mvAxes[ai].armFields[tag][ix] = newVal.get
+      if newVal.isSome: return
+  else:
+    discard
+  # The receiver is not a variant (its construction already declined and
+  # bound a stand-in: `seVariantFieldOnDeclinedCtor`, as `isVariantField`
+  # reports it), or no slot holds the field. Taint the path and keep the
+  # old value: no verdict on this path is trusted.
+  lowerDegrade(seVariantFieldOnDeclinedCtor,
+    "variant field '" & e.vfsFieldName & "' written on a receiver with no " &
+    "such field slot (SymVal kind=" & $recv.kind & ") " &
+    "(seVariantFieldOnDeclinedCtor)")
+  recv
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,
@@ -17055,7 +17182,23 @@ proc validDefault[F](f: var F) =
   elif F is SomeUnsignedInt or F is bool or F is char:
     discard
   elif F is Ordinal:
-    if ord(f) < ord(low(F)) or ord(f) > ord(high(F)): f = low(F)
+    if ord(f) < ord(low(F)) or ord(f) > ord(high(F)):
+      # RFC-0005 S8s. Written through its bytes, not `f = low(F)`: `F` can be
+      # an imported type whose C++ assignment is deleted. `std/atomics`'
+      # `Atomic[T]` on cpp holds `value: AtomicInt8`, an ordinal alias
+      # imported as `std::atomic<NI8>`, and `f = low(F)` there emitted a
+      # use of the deleted `std::atomic::operator=` (a cpp compile error in
+      # every SUT whose cell holds an `Atomic`, `tsymex_r6_n43_parity`).
+      when sizeof(F) == 1:
+        var lo = int8(ord(low(F)))
+      elif sizeof(F) == 2:
+        var lo = int16(ord(low(F)))
+      elif sizeof(F) == 4:
+        var lo = int32(ord(low(F)))
+      else:
+        var lo = int64(ord(low(F)))
+      static: doAssert sizeof(lo) == sizeof(F)
+      copyMem(addr f, addr lo, sizeof(F))
   else:
     discard
 

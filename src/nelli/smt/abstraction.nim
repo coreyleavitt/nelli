@@ -197,6 +197,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
                                               ## literal result is a tagged
                                               ## record, not an integer.
      iekMultiVariantLit,                      ## RFC-0005 S8p: likewise.
+     iekVariantFieldSet,                      ## RFC-0005 S8s: likewise.
      iekNil:                                  ## Phase 15 R5: a ref/ptr nil literal
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
@@ -325,6 +326,10 @@ proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
     for fs in e.mvlAxisFields:
       for c in fs: collectVarRefs(c, into)
     for c in e.mvlPlainFields: collectVarRefs(c, into)
+  of iekVariantFieldSet: ## RFC-0005 S8s: the receiver and the new value
+                       ## reference vars.
+    collectVarRefs(e.vfsRecv, into)
+    collectVarRefs(e.vfsVal, into)
   of iekHofCall:       ## Phase 15 C4: the receiver seq + fold init reference
                        ## vars; the closure body is a separate scope (like
                        ## iekLambda) and surfaces no enclosing def-use vars.

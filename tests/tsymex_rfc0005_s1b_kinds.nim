@@ -62,16 +62,16 @@ proc s1bSolverUndefRaise(a, b, c, d: int) =
   if a * b * c * d == 1234567:
     raise newException(ValueError, "s1b rare")
 
-# Class-B `isUnsupported` (no parse-time error of its own): a positional
-# tuple-element augmented assignment is dropped whole
+# Class-B `isUnsupported` (no parse-time error of its own): an array
+# element's augmented assignment is dropped whole
 # (`tsymex_augmented_assign.nim`; a field-LHS one is modelled since
-# RFC-0005 S8p).
+# RFC-0005 S8p, a tuple element's since S8s).
 type S1bPoint = object
   x, y: int
 
 proc s1bFieldAug(p: S1bPoint, b: int) =
-  var q = (p.x, p.y)
-  q[0] += b  # RFC-0005 S8p models `q.x += b`; a positional element still declines
+  var q = [p.x, p.y]
+  q[0] += b  # RFC-0005 S8p/S8s model a field and a tuple element; an array element still declines
   if b > 0:
     symexTarget("s1b_fieldaug")
 

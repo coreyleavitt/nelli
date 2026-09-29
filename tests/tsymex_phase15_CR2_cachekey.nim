@@ -862,7 +862,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## writes, char `add`, structured closure results). 163->164.
     ## RFC-0005 S8q (a B3 scan-pair offset param allocated as a stamped
     ## Int, a conjunctive symexAssume split per conjunct). 164->165.
-    check symexWalkerVersion == "165"
+    ## RFC-0005 S8s (`seq[uint8]` literal elements, else-arm discriminator
+    ## domains and zero values, array results, variant field and positional
+    ## tuple writes). 165->167 (166 is S8r's).
+    check symexWalkerVersion == "167"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

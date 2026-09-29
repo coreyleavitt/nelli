@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "165"
+const symexWalkerVersion* = "167"
+  ## RFC-0005 S8s (2026-09-29) — S8p's precision remainder. A seq literal's
+  ## elements lower at the element type (`@[x, 1'u8]` was
+  ## `weInternalWalkerFault`: a 64-bit element stored into a `seq[uint8]`).
+  ## A multi-variant axis's discriminator ranges over the ordinals its
+  ## `else` arm covers (`allocateSym` admitted the else arm's -1 sentinel
+  ## and none of them: a false `sxUnsat`), so a multi-variant whose
+  ## ordinal 0 is in an `else` arm has a zero value (was
+  ## `feUnsupportedOpHavoc`), and an input one renders as a witness (was a
+  ## compile error). A variant's `else`-arm fields bind across a call
+  ## (`retBindEq` guarded them by `disc == -1`: a false `sxSat`). A callee or
+  ## closure returning an `array` binds element-wise (was
+  ## `feUnsupportedOpHavoc` / `feUnsupportedOp`). A write to a value variant
+  ## field (`iekVariantFieldSet`, after the field's `FieldDefect` check) and
+  ## a positional tuple-element write (`q[0] += b`) are modelled (was
+  ## `feUnsupportedStmtKind`). 165 -> 167 (166 is reserved for S8r).
+  ##
+  ## (Prior: 165.)
   ## RFC-0005 S8q (2026-09-29) — S8o's termination remainder. An entry
   ## `int` param traced to a B3 scan-pair's loop index
   ## (`IRParam.isScanPairOffset`) is a Z3 Int stamped with its width and
@@ -4564,6 +4581,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for x in e.mvlPlainFields: plainParts.add canonicalize(x, env)
     "Ex<MVL:" & canonicalize(e.mvlTy) & ";[" & axisParts.join(";") & "];[" &
       plainParts.join(",") & "]>"
+  of iekVariantFieldSet:
+    # RFC-0005 S8s. Distinct `VFS:` prefix; the arm tags are in the key.
+    var tags: seq[string]
+    for t in e.vfsTags: tags.add $t
+    "Ex<VFS:" & canonicalize(e.vfsRecv, env) & "." & e.vfsFieldName & ";[" &
+      tags.join(",") & "];" & canonicalize(e.vfsVal, env) & ">"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &

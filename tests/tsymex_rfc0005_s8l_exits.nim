@@ -14,7 +14,7 @@
 ##   (4) variant reads through a named `ref` alias;
 ##   (5) an inline `ref` to a multi-variant object;
 ##   (6) the walker version floor.
-import std/[unittest, strutils, sequtils]
+import std/[unittest, strutils, sequtils, sets]
 import nelli
 import nelli/symex
 import nelli/smt/types
@@ -192,13 +192,14 @@ proc callsBareVariant(x: int) =
 
 type
   BareMV = object
-    ## Two `case` sections: a multi-variant whose first axis's ordinal 0
-    ## falls in its `else` arm, which still has no modelled zero value
-    ## after RFC-0005 S8n (single-case variants) and S8p (multi-variants
-    ## with an explicit ordinal-0 arm on every axis).
+    ## Two `case` sections: a multi-variant with a `HashSet` arm field,
+    ## which has no modelled zero value. (RFC-0005 S8n gave single-case
+    ## variants one, S8p multi-variants with an explicit ordinal-0 arm on
+    ## every axis, and S8s those whose ordinal 0 falls in an `else` arm,
+    ## this pin's previous shape.)
     case k: BareVK
     of bvB: b: int
-    else: a: int
+    else: a: HashSet[int]
     case j: BareVK
     of bvA: c: int
     of bvB: d: int

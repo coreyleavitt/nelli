@@ -172,6 +172,11 @@ title = "S8o's termination remainder: b7r_bytescan B7R-3 hangs past its rlimit i
 state = "pending"
 
 [[slice]]
+id    = "S8r"
+title = "Windows symex-mingw corpus shard 2 loses its runner since S8k (red at 6772146, 8b9e4b4, 5dc201f; green at a696d80): identify the suite under Z3 4.13.4, fix the resource blowup, make a dying suite attributable in CI"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

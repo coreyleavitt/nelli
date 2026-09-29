@@ -164,7 +164,7 @@ state = "done"
 [[slice]]
 id    = "S8p"
 title = "S8n's precision remainder: SUT frame reading result (IR carries the SUT return type), augmented field assignment on a result (result.a += x), string char append (result.add c), closures returning multi-field tuples / string / seq, multi-variant zero value, retBindEq kind mismatch on a multi-variant or distinct callee result (weInternalWalkerFault)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8q"
@@ -2727,6 +2727,156 @@ Re-pinned:
   conjuncts of its `symexAssume` forks, giving 32,768 trivial UNSAT
   solves (about 3 s in all). The cost is small, but the fork is not
   needed.
+
+**As landed (S8p, walker 164) — S8n's precision remainder.** The six
+places S8n reported, plus one fault found on the way. Every expected value
+was probed against the pinned toolchain (Nim 2.2.10, debug build) by an
+oracle test that runs the SUT itself.
+
+1. A callee assigning a multi-variant or `distinct` result was
+   `weInternalWalkerFault` ("retBindEq: kind mismatch"). Two causes. A
+   multi-variant constructor had no IR: the parser declined it and left an
+   int placeholder, which `retBindEq` then met against the multi-variant
+   `retSym`. And `retBindEq` had no `svDistinct` or `svMultiVariant` arm,
+   so a `D(3)` result (the identity pass-through, a plain int) and a
+   passed-through multi-variant hit the kind-mismatch raise.
+2. A multi-variant had no zero value (`feUnsupportedOpHavoc` on an
+   untouched or bare-returned result).
+3. The SUT's own frame reading `result` before writing it was
+   `feGlobalReadUnmodelled`: the IR carried no return type for the SUT.
+4. A field write on a value tuple or object was `feUnsupportedStmtKind`.
+   This covered plain assignment as well (`o.a = x`: "unsupported nnkAsgn
+   shape"), not only `result.a += x`.
+5. `s.add(c)` with a `char` was `seUnsupportedStringOp`.
+6. A closure returning a tuple of more than one field, a `string` or a
+   `seq` declined (`feUnsupportedOp`, `seUnsupportedCompoundSortLeaf`).
+   An index read straight off such a call (`h(x)[0]`) was a
+   `weInternalWalkerFault`: `lowerLeafInExpr` asserted that the index
+   container was a variable or a field.
+
+- **IR / parser.**
+  - New `iekMultiVariantLit` (`mvlTy`, `mvlAxisTags`, `mvlAxisFields`,
+    `mvlPlainFields`), with its emit, render, canonical (`Ex<MVL:`),
+    abstraction and defect-fork-scan arms. The parser builds it when every
+    axis's discriminator is a literal naming an explicit, non-`else` arm.
+    A symbolic discriminator, or one that falls in an `else` arm, keeps the
+    old decline.
+  - `SymexProgram.retTy` carries the SUT's return type (nil for a void
+    SUT). `canonicalize(prog)` appends `;ret=<type>` only when it is
+    non-nil, so every void SUT's key is unchanged.
+  - `valueFieldTy` / `valueFieldWrite`. `o.a = v`, `o.inner.b = v` and
+    `o.a op= v` (`+=`, `-=`, `*=`, and `&=` on a string field) become an
+    assignment of the root: a rebuilt `iekTupleLit` whose written field is
+    the new value and whose other fields are reads of the old ones, one
+    level per `.`. Every step of the chain must classify `itTuple`. A
+    ref/ptr step keeps the heap-write arms, a variant arm field keeps its
+    decline (its discriminant check is not modelled on this route), and so
+    does a positional element (`q[0] += b`). A ranged int field declines
+    unless the value is itself the range-checked conversion (`=`), and
+    always for `op=`. The rebuilt write has no per-field `RangeDefect`
+    fork. An augmented write's overflow check is the binop's own, as for a
+    variable.
+  - `s.add(c)` with a `char` argument (`typeKind == ntyChar`) is
+    `s := s & c`.
+  - `liftIndexContainer`: an `isIndex` container that is not a variable or
+    a field chain over one is bound to a synthetic `let` first, before the
+    index is parsed (Nim evaluates the container first).
+- **Runtime.**
+  - `retBindEq` compares a `distinct` by its base value (`ejectBase`), and
+    a multi-variant per axis: the discriminators equal, each arm's fields
+    equal under `variantDiscEq(disc, tag)`, and the plain fields equal. A
+    genuine (non-placeholder) `seq` binds its length and its data array;
+    it was an in-band `feUnsupportedOp`. The two call-return drains share
+    one `retBindWiredKinds` set, which gains `svMultiVariant`, `svSeq` and
+    `svDistinct`.
+  - `defaultZero` builds a multi-variant's zero value when
+    `multiVariantZeroTotal` holds: every axis's discriminator type holds 0
+    and 0 is an explicit arm's tag, and every field has a zero. A
+    multi-variant whose ordinal 0 falls in an `else` arm is not covered
+    (below). It still raises through the one pre-existing variant raise
+    site, whose marker is reworded, so the `r6_n36_raise_class_audit`
+    inventory is unchanged.
+  - `unwrittenResultZero` reads `WalkerStatics.sutRetTy` when the call
+    stack is empty (the SUT's own frame), so an unbound `result` there is
+    its return type's zero value.
+  - `iekStrConcat` turns a char right operand into the 1-byte string
+    (`needleAsStr`).
+  - `closureRetStructured` covers a multi-variant, a tuple, a `string` and
+    a `seq` as well as a variant: the funcSym gets a Bool placeholder
+    range, and each occurrence's result is a fresh `allocateSym` value bound
+    by the ground axioms.
+- **Consumer-visible (for S11's migration note).**
+  - Programs that were `sxUnknown` now get verdicts: a callee assigning a
+    `distinct` or multi-variant result (was a walker fault), a multi-variant
+    constructor, an untouched or bare-returned multi-variant result, the
+    SUT reading its own `result` before writing it, field writes and
+    `op=` on value tuples and objects, `s.add(c)` with a char, a closure
+    returning a tuple, `string` or `seq` (and an index read off such a
+    call), and a callee returning a `seq` (was `feUnsupportedOpHavoc`).
+  - The canonical program form of a value-returning SUT carries its return
+    type. The walker bump to 164 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - A multi-variant whose ordinal 0 falls in an `else` arm has a legal Nim
+    zero value, but `multiVariantZeroTotal` requires an explicit ordinal-0
+    arm on each axis, so it keeps `feUnsupportedOpHavoc`. The havoc-site
+    pins now use that shape.
+  - A callee returning an `array` is still `feUnsupportedOpHavoc`:
+    `retBindEq` has no `svArray` arm. The havoc-site pins that used a `seq`
+    result moved to an `array` result.
+  - A field write on a variant arm field (`v.a = x`) and a positional
+    tuple-element write (`q[0] = b`, `q[0] += b`) stay
+    `feUnsupportedStmtKind`. `rfc0005_s3_monotonicity`, `s1b_kinds`,
+    `s1c_verdict` and `augmented_assign` moved their Class-B trigger to the
+    positional form.
+  - Comparing an element of a `seq[uint8]` against a literal
+    (`let v = @[x, 1'u8]; if v[0] == 7`) is `weInternalWalkerFault`
+    ("field 'bv8' is not accessible ... kind = svBV64"). It is pre-existing
+    and does not depend on a call: the local literal alone faults. It was
+    found while probing the new `seq` result binding.
+
+Pins: `tests/tsymex_rfc0005_s8p_precision.nim`. It covers:
+- (1) a `distinct` result, a multi-variant result on both axes, and a
+  multi-variant passed through a callee (RED: `weInternalWalkerFault`);
+- (2) an untouched and a bare-returned multi-variant's zero value (RED:
+  `feUnsupportedOpHavoc`);
+- (3) the SUT's own `int`, `bool` and tuple `result` read before any write
+  (RED: `feGlobalReadUnmodelled`);
+- (4) `result.a += x`, `o.a = x`, `-=`/`*=` (one operand through
+  `nnkHiddenAddr`), a nested write that changes only its own field, and the
+  overflow check of a field `+=` (RED: `feUnsupportedStmtKind`);
+- (5) `result.add 'z'` and a symbolic char appended (RED:
+  `seUnsupportedStringOp`);
+- (6) closures returning a two-field tuple, a `string` and a `seq`, and an
+  index read off the call (RED: `feUnsupportedOp`, `weInternalWalkerFault`);
+- (6b) a `var` parameter's field writes reaching the caller, `&=` on a
+  string field, and a variant arm field write that still declines;
+- the `>= 164` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (164).
+- `r6_n27_placeholder_read_audit`: 70 -> 74 `runtime.nim` markers (the
+  four lines of `retBindEq`'s seq binding, behind the placeholder guard).
+- `r6_r6_emit_roundtrip`: the `iekMultiVariantLit` arm, a sentinel and its
+  round-trip test.
+- `r6_a1_variantlit` A1-5 and `tot1_totality_corpus`'s A1 row: a literal
+  multi-variant constructor is modelled (`sxSat`, and a dead twin
+  `sxUnsat`); the corpus row now pins the symbolic-discriminator decline.
+- `r6_r2_zerodefault_result` T5h-3: an untouched multi-variant is its zero
+  value; T5h-4 pins the `else`-arm multi-variant's decline.
+- `rfc0005_s6b_ops`, `rfc0005_s8l_exits`: the no-zero result pins move to
+  the `else`-arm multi-variant; the composite-result havoc pins move from
+  `seq` to `array` results. `tot1_totality_corpus`'s A6-rider row likewise.
+- `phase15_S11_mutation` `addChar`: `sxSat`, witness `'c'`.
+- `r6_lows_declines` N30 and `r6_n16_closure_zerodefault` N16-4: a string
+  closure result is modelled; N30-2 pins the classified decline on an
+  `array` closure result.
+- `r6_n37_raise_residue` N37-4: the tuple closure is no longer declined by
+  `buildClosure`; the pin moves to `lowerHofCall`'s
+  `seNestedSeqUnsupported`.
+- `rfc0005_s3_monotonicity`, `rfc0005_s1b_kinds`, `rfc0005_s1c_verdict`,
+  `augmented_assign`: the Class-B `feUnsupportedStmtKind` trigger is a
+  positional tuple-element `+=`; `augmented_assign` also pins the field
+  `+=` as modelled (`sxUnsat`).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

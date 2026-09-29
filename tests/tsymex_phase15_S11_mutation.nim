@@ -24,8 +24,8 @@
 ## the now-CORRECT `sxSat`. `s.add(c)` (a CHAR arg) is UNCHANGED and remains
 ## `sxUnknown` — char is modeled as `itInt` (uint8) with no char→1-char-string
 ## conversion IR, so M4 explicitly left it out of scope (type-classified on
-## the argument, not just the receiver); the `addChar` test below is an
-## explicit regression guard for that.
+## the argument, not just the receiver). UPDATE (RFC-0005 S8p, walker 164):
+## a char arg is now appended as its 1-byte string, so `addChar` is `sxSat`.
 import std/[unittest, strutils]
 import nelli/symex
 
@@ -39,7 +39,7 @@ proc indexAssign(c: char) =
   if s == "xbc":
     symexTarget("idxAsg")
 
-# --- `s.add(c)` append a char: classified seUnsupportedStringOp ------------
+# --- `s.add(c)` append a char: modelled since RFC-0005 S8p -----------------
 proc addChar(c: char) =
   var s = "ab"
   s.add(c)
@@ -65,11 +65,13 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedStringOp
 
-  test "s.add(c) char append → sxUnknown + seUnsupportedStringOp":
+  test "s.add(c) char append → now MODELED (RFC-0005 S8p): real sxSat":
+    ## Real Nim: addChar('c') makes s == "abc" and reaches the label. The
+    ## char is appended as its 1-byte string (walker 164).
     let r = symexFind(addChar, tLabel("addC"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == uint8(ord('c'))
 
   test "s.add(\"x\") string append → now MODELED (M4): real sxSat via iekStrConcat":
     let r = symexFind(addStr, tLabel("addS"))

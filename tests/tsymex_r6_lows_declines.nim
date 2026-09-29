@@ -156,10 +156,28 @@ proc n30ClosureStringZeroSat(x: int) =
   if x <= 0 and r == "":
     symexTarget("n30_closure_string_zero_sat")
 
+proc n30ClosureArrayDeclines(x: int) =
+  ## RFC-0005 S8p: a `string` return is now a structured closure result, so
+  ## the classified-decline route is pinned on a return type it still takes
+  ## (an array: no single-leaf range sort, no `symValFromRawAst` wrap).
+  let f = proc(y: int): array[2, int] = [y, 2]
+  let r = f(x)
+  if r[0] == 4:
+    symexTarget("n30_closure_array")
+
 suite "symex round-6 N30 -- closure string-return type: classified decline (feUnsupportedOp), not weInternalWalkerFault":
 
-  test "N30-1 RED->GREEN: symValFromRawAst's missing itString arm now reports feUnsupportedOp (not weInternalWalkerFault)":
+  test "N30-1: a string closure result is MODELLED since RFC-0005 S8p (walker 164; was a classified decline)":
+    ## Real Nim: x <= 0 leaves `result` at "", so the label is reached.
     let r = symexFind(n30ClosureStringZeroSat, tLabel("n30_closure_string_zero_sat"))
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] <= 0
+    for e in r.errors:
+      check e.kind != weInternalWalkerFault
+
+  test "N30-2: a closure return type with no wrap still declines classified (feUnsupportedOp), never a fault":
+    let r = symexFind(n30ClosureArrayDeclines, tLabel("n30_closure_array"))
     check r.status == sxUnknown
     var sawFault = false
     var sawClassified = false

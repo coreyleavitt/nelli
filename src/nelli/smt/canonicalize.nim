@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "163"
+const symexWalkerVersion* = "164"
+  ## RFC-0005 S8p (2026-09-29) — S8n's precision remainder. A callee
+  ## assigning a `distinct` or multi-variant result binds it (was
+  ## `weInternalWalkerFault`, "retBindEq: kind mismatch"): `retBindEq`
+  ## compares a distinct by its base value and a multi-variant per axis, and
+  ## a multi-variant constructor is modelled (`iekMultiVariantLit`). A
+  ## multi-variant whose every axis has an explicit ordinal-0 arm has a zero
+  ## value (was `feUnsupportedOpHavoc`). The SUT's own `result` read before
+  ## any write is its return type's zero value (`SymexProgram.retTy`; was
+  ## `feGlobalReadUnmodelled`), and the canonical program form carries that
+  ## type. A field write or `+=`/`-=`/`*=`/`&=` on a value tuple or object
+  ## field is modelled as a rebuilt-root assignment (was
+  ## `feUnsupportedStmtKind`). `s.add(c)` with a `char` appends its byte
+  ## (was `seUnsupportedStringOp`). A closure returning a tuple, `string`
+  ## or `seq` gets a fresh structured result bound by its ground axioms
+  ## (was `feUnsupportedOp`). 163 -> 164.
+  ##
+  ## (Prior: 163.)
   ## RFC-0005 S8o (2026-09-29) — S8k's termination remainder. The
   ## character form of a byte test matches Z3's operators by decl kind, not
   ## by printed name (S8k matched `int_to_bv`, Z3 5.x's spelling; on the
@@ -4526,6 +4543,17 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for x in e.vlPlainFields: plainParts.add canonicalize(x, env)
     "Ex<VL:" & canonicalize(e.vlVariantTy) & ";" & $e.vlTagOrd & ";[" &
       armParts.join(",") & "];[" & plainParts.join(",") & "]>"
+  of iekMultiVariantLit:
+    # RFC-0005 S8p. Distinct `MVL:` prefix; every axis's tag is in the key.
+    var axisParts: seq[string]
+    for ai, t in e.mvlAxisTags:
+      var fs: seq[string]
+      for x in e.mvlAxisFields[ai]: fs.add canonicalize(x, env)
+      axisParts.add $t & ":[" & fs.join(",") & "]"
+    var plainParts: seq[string]
+    for x in e.mvlPlainFields: plainParts.add canonicalize(x, env)
+    "Ex<MVL:" & canonicalize(e.mvlTy) & ";[" & axisParts.join(";") & "];[" &
+      plainParts.join(",") & "]>"
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
@@ -4805,9 +4833,12 @@ proc canonicalize*(prog: SymexProgram): string =
   var procParts: seq[string]
   for k in keys:
     procParts.add canonicalize(prog.procs[k])
+  # RFC-0005 S8p: the SUT's return type keys the program (its zero value
+  # is what an unwritten `result` reads); a void SUT's key is unchanged.
+  let retPart = if prog.retTy == nil: "" else: ";ret=" & canonicalize(prog.retTy)
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &
-    ";procs=[" & procParts.join(",") & "]>"
+    ";procs=[" & procParts.join(",") & "]" & retPart & ">"
 
 # ---- SymexTarget -----------------------------------------------------------
 

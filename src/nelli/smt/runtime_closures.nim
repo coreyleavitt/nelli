@@ -91,7 +91,8 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     for s in pSorts: domain.add s
     var retPC: seq[Z3Bool]
     # RFC-0005 S8n: a variant-returning closure's per-occurrence result is a
-    # fresh variant `applyClosureGround` allocates itself (`closureResultFor`)
+    # fresh variant (S8p: or tuple, string, seq -- `closureRetStructured`)
+    # `applyClosureGround` allocates itself (`closureResultFor`)
     # and never an application of this decl, so its range sort is never
     # read: a Bool placeholder keeps the decl well-formed. Deriving it
     # declined the call (`seUnsupportedCompoundSortLeaf`), since a variant

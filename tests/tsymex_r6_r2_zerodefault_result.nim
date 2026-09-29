@@ -290,23 +290,46 @@ proc sutVariantZeroNonzero(x: int) =
 
 type
   R2MV = object
-    ## Two `case` sections: a multi-variant, which still has no modelled
-    ## zero value after RFC-0005 S8n wired the single-case one.
+    ## Two `case` sections: a multi-variant. RFC-0005 S8p gives it a zero
+    ## value (each axis's ordinal-0 arm, every field zero).
     case k: R2VK
     of r2A: a: int
     of r2B: b: int
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
+  R2MVE = object
+    ## A multi-variant whose first axis's ordinal 0 falls in an `else` arm:
+    ## Nim's zero value is legal, but `multiVariantZeroTotal` requires an
+    ## explicit ordinal-0 arm on every axis, so it has no modelled zero.
+    case k: R2VK
+    of r2B: b: int
+    else: a: int
+    case j: R2VK
+    of r2A: c: int
+    of r2B: d: int
 
 proc maybeSetMultiVariant(x: int): R2MV =
-  ## Never assigned: an assigned multi-variant result is a separate,
-  ## pre-existing walker fault (`retBindEq` kind mismatch, reported by
-  ## RFC-0005 S8n), and this pin is about the untouched path alone.
+  ## Never assigned: this pin is about the untouched path alone.
+  discard x
+
+proc sutMultiVariantZero(x: int) =
+  let r = maybeSetMultiVariant(x)
+  discard r
+  if x <= 0:
+    symexTarget("multivariant_zero")
+
+proc sutMultiVariantZeroNonzero(x: int) =
+  ## Real Nim: k == r2A, a == 0, j == r2A, c == 0.
+  let r = maybeSetMultiVariant(x)
+  if r.k != r2A or r.a != 0 or r.j != r2A or r.c != 0:
+    symexTarget("multivariant_zero_nonzero")
+
+proc maybeSetMultiVariantElse(x: int): R2MVE =
   discard x
 
 proc sutMultiVariantZeroDeclines(x: int) =
-  let r = maybeSetMultiVariant(x)
+  let r = maybeSetMultiVariantElse(x)
   discard r
   if x <= 0:
     symexTarget("multivariant_zero_declines")
@@ -339,7 +362,16 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
     let z = symexFind(sutVariantZeroNonzero, tLabel("variant_zero_nonzero"))
     check z.status == sxUnsat
 
-  test "T5h-3: a result type with no zero default (a multi-variant) still declines, never a bound wrong value":
+  test "T5h-3: an untouched multi-variant result is its zero value (RFC-0005 S8p; was a classified decline)":
+    let r = symexFind(sutMultiVariantZero, tLabel("multivariant_zero"))
+    check r.status == sxSat
+    check rfc0005RawStatus == sxSat
+    check r.errors.len == 0
+    let z = symexFind(sutMultiVariantZeroNonzero,
+                      tLabel("multivariant_zero_nonzero"))
+    check z.status == sxUnsat
+
+  test "T5h-4: a result type with no modelled zero (a multi-variant with an else arm at ordinal 0) still declines, never a bound wrong value":
     let r = symexFind(sutMultiVariantZeroDeclines,
                       tLabel("multivariant_zero_declines"))
     check r.status == sxSat

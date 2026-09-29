@@ -104,45 +104,53 @@ proc s6bBoolOrderFresh(a: bool) =
     symexTarget("s6b_bool_order_fresh")
 
 # ---- fresh: composite result through a callee --------------------------------
+#
+# RFC-0005 S8p binds a `seq` result (`retBindEq`'s svSeq arm), so these pins
+# use an `array` result, which `retBindEq` still does not bind: the per-call
+# retSym stays free (`feUnsupportedOpHavoc`).
 
-proc s6bMkSeq(n: int): seq[int] =
-  result = @[n, n]
+proc s6bMkArr(n: int): array[2, int] =
+  result = [n, n]
 
-proc s6bRetSeq(n: int): seq[int] =
-  return @[n]
+proc s6bRetArr(n: int): array[2, int] =
+  return [n, n]
 
-proc s6bSeqResultDead(n: int) =
-  let s = s6bMkSeq(n)
+proc s6bArrResultDead(n: int) =
+  let s = s6bMkArr(n)
   discard s
   if n == 5 and n == 6:
     symexTarget("s6b_seq_result_dead")
 
-proc s6bSeqResultLive(n: int) =
-  let s = s6bMkSeq(n)
-  if s.len == 3:
+proc s6bArrResultLive(n: int) =
+  ## Real Nim: s[0] == s[1] always; only the free retSym separates them.
+  let s = s6bMkArr(n)
+  if s[0] != s[1]:
     symexTarget("s6b_seq_result_live")
 
-proc s6bSeqReturnDead(n: int) =
-  let s = s6bRetSeq(n)
+proc s6bArrReturnDead(n: int) =
+  let s = s6bRetArr(n)
   discard s
   if n == 5 and n == 6:
     symexTarget("s6b_seq_return_dead")
 
-proc s6bSeqFresh(n: int) =
-  let s1 = s6bRetSeq(n)
-  let s2 = s6bMkSeq(n)
-  if s1.len != s2.len:
+proc s6bArrFresh(n: int) =
+  ## Real Nim: s1[0] == n and s2[0] == n, so s1[0] != s2[0] + 1 on every
+  ## input.
+  let s1 = s6bRetArr(n)
+  let s2 = s6bMkArr(n)
+  if s1[0] != s2[0] + 1:
     symexTarget("s6b_seq_fresh")
 
 type
   S6bVK = enum s6bA, s6bB
   S6bV = object
     ## Two `case` sections: a multi-variant. RFC-0005 S8n gave the
-    ## single-case variant its zero value, so this site needs a type that
-    ## still has none.
+    ## single-case variant its zero value and S8p the multi-variant with an
+    ## explicit ordinal-0 arm on every axis, so this site needs a type that
+    ## still has none: the first axis's ordinal 0 falls in its `else` arm.
     case k: S6bVK
-    of s6bA: a: int
     of s6bB: b: int
+    else: a: int
     case j: S6bVK
     of s6bA: c: int
     of s6bB: d: int
@@ -150,9 +158,9 @@ type
 proc s6bMaybeVariant(n: int): S6bV =
   ## RFC-0005 S8f: a multi-variant result has no modelled zero default (a
   ## `float` one did until walker 154 gave `defaultZero` its float arm, a
-  ## single-case variant until S8n). Never assigned: an assigned
-  ## multi-variant result is a separate, pre-existing walker fault
-  ## (`retBindEq` kind mismatch, reported by S8n).
+  ## single-case variant until S8n, a multi-variant with an explicit
+  ## ordinal-0 arm on every axis until S8p). Never assigned: the pin is
+  ## about the untouched path alone.
   discard n
 
 proc s6bFloatZeroDead(n: int) =
@@ -275,10 +283,10 @@ suite "RFC-0005 S6b -- oracles":
     check false < true
     check (false < true) and not (false < false)
 
-  test "oracle: s6bMkSeq's length is 2 (the live target is really dead; the walk may only call it a candidate)":
+  test "oracle: s6bMkArr's two elements agree (the live target is really dead; the walk may only call it a candidate)":
     for n in [-3, 0, 3]:
-      check s6bMkSeq(n).len == 2
-      check s6bRetSeq(n).len == 1
+      check s6bMkArr(n)[0] == s6bMkArr(n)[1]
+      check s6bRetArr(n)[0] != s6bMkArr(n)[0] + 1
 
   test "oracle: an object-constructed ref's untouched seq field is empty":
     check S6bBox(v: 3).items.len == 0
@@ -398,13 +406,13 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     checkUnsatOverTaintOnly(r)
 
   test "composite result (implicit-result fallthrough): dead target is sxUnsat":
-    let r = symexFind(s6bSeqResultDead, tLabel("s6b_seq_result_dead"))
+    let r = symexFind(s6bArrResultDead, tLabel("s6b_seq_result_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
 
   test "composite result (explicit return): dead target is sxUnsat":
-    let r = symexFind(s6bSeqReturnDead, tLabel("s6b_seq_return_dead"))
+    let r = symexFind(s6bArrReturnDead, tLabel("s6b_seq_return_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
@@ -450,15 +458,16 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
-    let r = symexFind(s6bSeqResultLive, tLabel("s6b_seq_result_live"))
+    let r = symexFind(s6bArrResultLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnknown
 
   test "two havoc retSyms are independent: a candidate, confirmed by replay":
     ## Pre-S10 sxUnknown. RFC-0005 S10: reality reaches the target on every
-    ## input (`@[n].len != @[n, n].len`), so the replayed candidate is
+    ## input (`n != n + 1`), so the replayed candidate is
     ## confirmed -> sxSat, with rules 1-2 having decided sxUnknown.
-    let r = symexFind(s6bSeqFresh, tLabel("s6b_seq_fresh"))
+    ## (RFC-0005 S8p: over `array` results; a `seq` result is bound.)
+    let r = symexFind(s6bArrFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown

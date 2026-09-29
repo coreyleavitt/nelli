@@ -1835,8 +1835,9 @@ proc isFollowConcreteWalk*(): bool
 proc unwrittenResultZero(): Option[SymVal]
   ## RFC-0005 S8n fwd-decl. The value of a callee's `result` read before
   ## anything wrote it: the innermost call frame's return type's zero value
-  ## (Nim zero-initialises `result` before the body runs), or `none` outside
-  ## a callee, for a void frame, or for a type `defaultZero` cannot build.
+  ## (Nim zero-initialises `result` before the body runs) -- the SUT's own
+  ## return type at the top frame (RFC-0005 S8p) -- or `none` outside a
+  ## walk, for a void frame, or for a type `defaultZero` cannot build.
   ## Defined after `WalkCtx` (needs the cast), like `isFollowConcreteWalk`.
 
 var currentVariantHeaps* {.threadvar.}: Table[string, Z3AnyAst]
@@ -2052,8 +2053,10 @@ func closureRetStructured(t: IRType): bool =
   ## fresh structured value (`allocateSym`) rather than a fresh constant of
   ## the funcSym's range sort: a variant object, which has no single-leaf
   ## Z3 sort. `buildClosure` gives such a funcSym a placeholder range and
-  ## `applyClosureGround` never reads it.
-  t != nil and t.kind == itVariant
+  ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
+  ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
+  ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`.
+  t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq}
 
 var currentClosureBodies* {.threadvar.}: Table[
     tuple[siteHash: int64, declOrder: int], ClosureBody]
@@ -2134,6 +2137,9 @@ proc lowerTupleLit(env: Env, e: IRExpr): SymVal
 proc lowerVariantLit(env: Env, e: IRExpr): SymVal
   ## Round-6 A1 fwd-decl (ADR-0029). Literal-discriminant variant
   ## constructor → svVariant, disc pinned to the literal tag.
+
+proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8p fwd-decl. `lowerVariantLit`, once per axis.
 
 proc lowerHofCall(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Defined AFTER `walk` (the inline path applies the
@@ -3166,9 +3172,10 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # `svTuple` — no scalar surrounding op takes ITS representation from a
     # sub-element's proto the way an array literal's homogeneous elemTy does.
     none(SymVal)
-  of iekVariantLit:
+  of iekVariantLit, iekMultiVariantLit:
     # Round-6 A1. Same reasoning as iekTupleLit: a variant literal's own
-    # SymVal kind is always `svVariant` — no scalar proto to offer.
+    # SymVal kind is always `svVariant` (RFC-0005 S8p: `svMultiVariant`) —
+    # no scalar proto to offer.
     none(SymVal)
   of iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl:
@@ -3850,6 +3857,14 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
   ## reconciles mixed int reps PER FIELD before recursing (a field can be
   ## svInt via range propagation while its retSym slot allocated svBV*).
 
+const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
+                           svFloat32, svFloat64, svString, svTuple, svVariant,
+                           svMultiVariant, svSeq, svDistinct}
+  ## The value kinds `retBindEq` binds structurally; the two call-return
+  ## drains (`completeReturn`, the `isCall` fall-through) decline any other
+  ## (`feUnsupportedOpHavoc`). RFC-0005 S8p added `svMultiVariant`, `svSeq`
+  ## and `svDistinct`, and made it one set (each drain had its own copy).
+
 proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## Phase 15 G3: the binding constraint linking a call's fresh `retSym`
   ## placeholder to the value the callee actually returns (used by the
@@ -3886,6 +3901,15 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## kinds already match (including every non-int-family kind — bool,
   ## float, string, tuple, variant, …), so this is a pure addition: no
   ## existing call site's observed behavior changes.
+  if retSym.kind == svDistinct or retVal.kind == svDistinct:
+    # RFC-0005 S8p: a `distinct T` binds through its ejected base. `D(3)` is
+    # the parser's identity pass-through (a plain base value), and every
+    # read of a distinct value ejects to the base (`ejectBase`, `svLeafEq`),
+    # so the base is the whole observable value. Before S8p a callee
+    # assigning `result = D(3)` met the `svDistinct` `retSym` here with a
+    # base-kinded value: the kind-mismatch raise below, reported as
+    # `weInternalWalkerFault`.
+    return retBindEq(ejectBase(retSym), ejectBase(retVal))
   let (retSym, retVal) = reconcileInt(retSym, retVal)
   if retSym.kind != retVal.kind:
     # N3: a classified decline (mirrors the `svSeq`/final-`else` arms below),
@@ -3918,25 +3942,21 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     ## never modeled either side, so asserting them equal would be
     ## meaningless, and omitting the constraint costs nothing since no read
     ## of this field ever trusts its content anyway — the `nnkDotExpr`
-    ## read-taint owns honesty). A GENUINE (non-placeholder) `svSeq` return
-    ## field is not yet a wired capability — same as before this slice —
-    ## and still raises, so this does not silently change behavior for any
-    ## already-tested plain-seq-returning SUT.
+    ## read-taint owns honesty). A GENUINE (non-placeholder) `svSeq` binds
+    ## its length and data (RFC-0005 S8p, below).
     if retSym.isUnsupportedFieldPlaceholder or retVal.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       mkBool(true)
     else:
-      # N46 (round-6 re-review): was a raw `raise newException`. A GENUINE
-      # (non-placeholder) svSeq-returning proc (`proc f(): seq[int] = @[..]`)
-      # called from inside a loop reaches this arm unguarded -- confirmed
-      # live by this arm's own pre-existing comment above ("still raises").
-      # In-band degrade: `mkBool(true)` is the SAME vacuous/no-op binding
-      # the placeholder branch immediately above already uses (sound
-      # over-approximation -- the field's content is never modeled either
-      # side once the run is degraded).
-      allocDegrade(feUnsupportedOp,
-        "retBindEq: svSeq composite return not yet wired (outside the " &
-        "Round-6 Bug #2 scoped-decline placeholder)")
-      mkBool(true)
+      # RFC-0005 S8p: a genuine seq binds its length and its data array.
+      # `retSym` is a fresh seq per call (or per closure occurrence), so
+      # equating the whole data array constrains nothing but its own
+      # leaves; the elements past the length are never read. Before S8p
+      # this was an in-band `feUnsupportedOp` decline (N46): a seq-returning
+      # callee, or a closure returning a seq, could not return a value.
+      let ctx = retSym.seqLen.ctx # [placeholder-audited]
+      (retSym.seqLen == retVal.seqLen) and # [placeholder-audited]
+        wrap[Z3Bool](ctx, checkedEq(ctx, retSym.seqDataRaw.raw, # [placeholder-audited]
+                                    retVal.seqDataRaw.raw)) # [placeholder-audited]
   of svTuple:
     ## v69 (sello #2): structural per-field binding for a tuple-returning
     ## callee — the capability the v64 catalog-#6 degrade preserved as
@@ -3983,6 +4003,37 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       let (fs, fv) = reconcileInt(retSym.vPlainFields[i], retVal.vPlainFields[i])
       acc = acc and retBindEq(fs, fv)
     acc
+  of svMultiVariant:
+    ## RFC-0005 S8p: the `svVariant` encoding, once per axis -- each axis's
+    ## discriminator equal, and each of its arms' fields equal under that
+    ## axis's `disc == tag` -- plus the shared plain fields. Before S8p a
+    ## multi-variant fell to the composite catch-all below
+    ## (`feUnsupportedOp`), so a callee could not return one.
+    doAssert retSym.mvObjectName == retVal.mvObjectName and
+             retSym.mvAxes.len == retVal.mvAxes.len,
+      "retBindEq: multi-variant mismatch " & retSym.mvObjectName & " vs " &
+      retVal.mvObjectName
+    var acc = mkBool(true)
+    for ai, sAx in retSym.mvAxes:
+      let vAx = retVal.mvAxes[ai]
+      let (sDisc, vDisc) = reconcileInt(sAx.disc[], vAx.disc[])
+      acc = acc and retBindEq(sDisc, vDisc)
+      for tagOrd, symFields in sAx.armFields:
+        let valFields = vAx.armFields[tagOrd]
+        doAssert symFields.len == valFields.len,
+          "retBindEq: multi-variant arm arity mismatch on axis " &
+          sAx.discName & " tag " & $tagOrd
+        var armEq = mkBool(true)
+        for i in 0 ..< symFields.len:
+          let (fs, fv) = reconcileInt(symFields[i], valFields[i])
+          armEq = armEq and retBindEq(fs, fv)
+        acc = acc and variantDiscEq(sAx.disc[], int64(tagOrd)).implies(armEq)
+    doAssert retSym.mvPlainFields.len == retVal.mvPlainFields.len,
+      "retBindEq: multi-variant plain-field arity mismatch"
+    for i in 0 ..< retSym.mvPlainFields.len:
+      let (fs, fv) = reconcileInt(retSym.mvPlainFields[i], retVal.mvPlainFields[i])
+      acc = acc and retBindEq(fs, fv)
+    acc
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached for
     # a proc returning `array[N,T]`/`Table[K,V]`/`HashSet[T]`/a
@@ -4009,6 +4060,9 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
 func variantZeroTotal(t: IRType): bool
   ## RFC-0005 S8n fwd-decl (defined beside `defaultZeroTotal`, below).
 
+func multiVariantZeroTotal(t: IRType): bool
+  ## RFC-0005 S8p fwd-decl (defined beside `defaultZeroTotal`, below).
+
 proc defaultZero(t: IRType, baseName: string): SymVal =
   ## Recursive type-driven zero-init — Nim's `default(T)` value, expressed as
   ## a Z3 constant (never a fresh symbolic variable: the zero value is fully
@@ -4016,10 +4070,12 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   ## `allocateSym` needs for a genuinely free symbol). Inherits `allocateSym`'s
   ## scope for containers — Table with non-string keys and HashSet with
   ## non-int64 elements still raise (RFC §A5 sub-deferral);
-  ## `itVariant`/`itMultiVariant`/`itDistinct`/`itRef`/`itPtr` also still
-  ## raise (never wired for zero-init — out of both A5's and R2's scope; a
-  ## caller reaching one of these must classified-decline, never bind a wrong
-  ## value). `itFloat*` returns 0.0 since RFC-0005 S8f (walker 154).
+  ## `itDistinct`/`itRef`/`itPtr` also still raise (never wired for
+  ## zero-init — out of both A5's and R2's scope; a caller reaching one of
+  ## these must classified-decline, never bind a wrong value), as does a
+  ## variant (RFC-0005 S8n) or multi-variant (S8p) whose ordinal-0
+  ## discriminator is not an explicit arm's tag. `itFloat*` returns 0.0 since
+  ## RFC-0005 S8f (walker 154).
   ## `defaultZeroTotal` (below) says, without calling it, whether this
   ## returns.
   case t.kind
@@ -4110,8 +4166,30 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     # 0, so zeroing them too binds nothing observable). Built for a
     # single-case variant where that is a legal value of the type
     # (`variantZeroTotal`); a caller checks `defaultZeroTotal` first or
-    # catches the raise below. A multi-variant needs a default disc per axis
-    # and stays unsupported until a concrete demand surfaces.
+    # catches the raise below. RFC-0005 S8p: a multi-variant likewise, each
+    # axis's discriminator ordinal 0 (`multiVariantZeroTotal`).
+    if t.kind == itMultiVariant and multiVariantZeroTotal(t):
+      var plainFields: seq[SymVal]
+      for i, ft in t.mvPlainFieldTypes:
+        plainFields.add defaultZero(ft, baseName & "." & t.mvPlainFieldNames[i])
+      var axes: seq[VariantAxisSym]
+      for ax in t.mvAxes:
+        let discBoxed = new(SymVal)
+        discBoxed[] = defaultZero(ax.discTy, baseName & "." & ax.discName)
+        var armFields = initOrderedTable[int, seq[SymVal]]()
+        var armNames  = initOrderedTable[int, seq[string]]()
+        for arm in ax.arms:
+          var fields: seq[SymVal]
+          for j, ft in arm.fieldTypes:
+            fields.add defaultZero(ft, baseName & "." & ax.discName & ".@" &
+                                       arm.tagName & "." & arm.fieldNames[j])
+          armFields[arm.tagOrdinal] = fields
+          armNames[arm.tagOrdinal]  = arm.fieldNames
+        axes.add VariantAxisSym(discName: ax.discName, disc: discBoxed,
+                                armFields: armFields, armFieldNames: armNames)
+      return SymVal(kind: svMultiVariant, mvObjectName: t.mvObjectName,
+                    mvAxes: axes, mvPlainFields: plainFields,
+                    mvPlainFieldNames: t.mvPlainFieldNames)
     if t.kind == itVariant and variantZeroTotal(t):
       let discBoxed = new(SymVal)
       discBoxed[] = defaultZero(t.vDiscTy, baseName & "." & t.vDiscName)
@@ -4132,7 +4210,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
                     vArmFields: armFields, vArmFieldNames: armNames,
                     vPlainFields: plainFields,
                     vPlainFieldNames: t.vPlainFieldNames)
-    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a multi-variant, or a variant whose zero discriminator is not a legal tag, has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8n)]
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a variant or multi-variant whose zero discriminator is not a legal tag has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8n)]
       "A5 zero-init: variant " & $t & " has no legal zero value")
   of itDistinct:
     # Phase 15 G4: a distinct-typed zero-init needs the per-run
@@ -4168,6 +4246,24 @@ func variantZeroTotal(t: IRType): bool =
       if not defaultZeroTotal(ft): return false
   true
 
+func multiVariantZeroTotal(t: IRType): bool =
+  ## RFC-0005 S8p: `variantZeroTotal` per axis. Every axis's discriminator
+  ## type holds 0 and 0 is an explicit (non-else) arm of that axis -- the
+  ## tags `allocateSym`'s multi-variant arm constrains a discriminator to --
+  ## and every field (plain, and of every arm) has a zero value.
+  doAssert t.kind == itMultiVariant
+  for ax in t.mvAxes:
+    if not defaultZeroTotal(ax.discTy): return false
+    var zeroArm = false
+    for arm in ax.arms:
+      if not arm.isElse and arm.tagOrdinal == 0: zeroArm = true
+      for ft in arm.fieldTypes:
+        if not defaultZeroTotal(ft): return false
+    if not zeroArm: return false
+  for ft in t.mvPlainFieldTypes:
+    if not defaultZeroTotal(ft): return false
+  true
+
 func defaultZeroTotal(t: IRType): bool =
   ## RFC-0005 S8f: true exactly when `defaultZero(t)` returns Nim's
   ## `default(T)` without raising, so a caller with no `try` in scope (the
@@ -4186,6 +4282,7 @@ func defaultZeroTotal(t: IRType): bool =
   of itArray: defaultZeroTotal(t.elemTy)
   of itSeq: true
   of itVariant: variantZeroTotal(t)   # RFC-0005 S8n
+  of itMultiVariant: multiVariantZeroTotal(t)   # RFC-0005 S8p
   else: false
 
 # ---------------------------------------------------------------------------
@@ -6705,6 +6802,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # svVariant, extracted to `lowerVariantLit` (mirrors the `lowerTupleLit`
     # extraction precedent).
     lowerVariantLit(env, e)
+  of iekMultiVariantLit:
+    lowerMultiVariantLit(env, e)   ## RFC-0005 S8p
   of iekHofCall:
     # Phase 15 C4 (ADR-0009). DSL higher-order call. Selects the INLINE path
     # (concrete length ≤ seqInlineThreshold; unroll the closure per element,
@@ -8212,6 +8311,11 @@ type
     userExnHierarchy: Table[string, string]
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
+    sutRetTy: IRType
+                        ## RFC-0005 S8p: the SUT's own return type (nil for a
+                        ## void SUT), from `SymexProgram.retTy`. The SUT frame
+                        ## has no `CallFrame`, so `unwrittenResultZero` reads
+                        ## its `result`'s zero value from here.
     distinctSorts: Table[string, DistinctSortEntry]
                         ## Phase 15 G4 (ADR-0008 D4): the per-walker distinct-
                         ## sort cache (one full DistinctSortEntry per distinct
@@ -9202,10 +9306,15 @@ proc unwrittenResultZero(): Option[SymVal] =
   ## fell to the module-level-global arm, `feGlobalReadUnmodelled`. The
   ## innermost `CallFrame` is the frame being walked: a callee's arguments
   ## are lowered before its frame is pushed. A frame whose return type has
-  ## no total zero value keeps the global-read decline.
+  ## no total zero value keeps the global-read decline. RFC-0005 S8p: the
+  ## SUT's own frame has no `CallFrame`; its return type rides in
+  ## `statics.sutRetTy`, carried from the parse (`SymexProgram.retTy`).
   if currentWalkCtxPtr == nil: return none(SymVal)
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
-  if wp.callStack.len == 0: return none(SymVal)
+  if wp.callStack.len == 0:
+    let st = wp.statics.sutRetTy
+    if st == nil or not defaultZeroTotal(st): return none(SymVal)
+    return some(defaultZero(st, "result.unwritten"))
   let t = wp.callStack[wp.callStack.high].retTy
   if t == nil or not defaultZeroTotal(t): return none(SymVal)
   some(defaultZero(t, wp.callStack[wp.callStack.high].retName & ".unwritten"))
@@ -10675,9 +10784,7 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   # Round-6 A2 (ADR-0029): svVariant joins the wired set —
   # retBindEq's general encoding (discEq + guarded per-arm field
   # eq + plain-field eq) binds a variant-returning callee.
-  if retSym.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
-                        svBV64, svFloat32, svFloat64, svString,
-                        svTuple, svVariant}:
+  if retSym.kind notin retBindWiredKinds:
     # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
     # threadvar — that sink is reset at every `lowerInExpr` wrapper
     # entry, so an entry added HERE (after the wrapper returned)
@@ -12735,9 +12842,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for cp in fallThroughRaw:
               if cp.env.hasKey("result"):
                 let retVal = cp.env["result"]
-                if retVal.kind notin {svBool, svInt, svBV8, svBV16, svBV32,
-                                      svBV64, svFloat32, svFloat64, svString,
-                                      svTuple, svVariant}:
+                if retVal.kind notin retBindWiredKinds:
                   # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
                   # composite arm: the per-call `retSym` is left free, the
                   # callee's effects ride `cp`, nothing is dropped.
@@ -13625,14 +13730,16 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   let funcApp =
     if closureRetStructured(cb.retTy):
       # RFC-0005 S8n: a variant result is a fresh variant (fresh leaves per
-      # occurrence, as the scalar constant below). Its allocation facts
-      # (the discriminator's legal tags) hold of every real value, so they
+      # occurrence, as the scalar constant below); S8p: likewise a
+      # multi-variant, tuple, string or seq result. Its allocation facts
+      # (a discriminator's legal tags, a seq's length) hold of every real
+      # value, so they
       # join the closure axioms, which constrain nothing but this
       # occurrence's own leaves. Before S8n the call declined
       # (`seUnsupportedCompoundSortLeaf` + `feUnsupportedOp`): the funcSym
       # has no variant sort.
       var allocFacts: seq[Z3Bool]
-      let fresh = allocateSym(cb.retTy, freshDegradeName("__closureRet.variant"),
+      let fresh = allocateSym(cb.retTy, freshDegradeName("__closureRet.structured"),
                               allocFacts)
       for f in allocFacts:
         currentClosureCallAxioms.add f
@@ -14364,48 +14471,29 @@ proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
     fields.add lower(env, ce, protoSV)
   SymVal(kind: svTuple, fields: fields, fieldNames: e.ttupleTy.fieldNames)
 
-proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
-  ## Round-6 A1 (ADR-0029). `T(kind: tagLit, f1: e1, ...)` → svVariant.
-  ## Mirrors `allocateSym(itVariant)`'s shape (disc + per-arm fields +
-  ## plain fields) with two deliberate divergences: the discriminator is a
-  ## Z3 CONST pinned to the literal tag (`bvConst`, not a fresh symbol with
-  ## a disjunction constraint — `vDiscTy` is always `itInt`, per its own
-  ## doc comment, so `bvConst` covers every legal disc shape), and the
-  ## ACTIVE arm's fields are the LOWERED constructor exprs rather than
-  ## fresh allocations.
-  ##
-  ## Every OTHER arm allocates FRESH-UNCONSTRAINED fields (never zero) —
-  ## the ADR's soundness note: real Nim raises `FieldDefect` on an
-  ## out-of-arm read before any value is observable, so a zero-filled
-  ## inactive field would let a buggy twin "read" a value real Nim never
-  ## yields. The fresh allocation's own `pcOut` is intentionally a LOCAL,
-  ## discarded scratch — mirrors the existing `__refVariantWitness`
-  ## proto-allocation precedent (`extractFromSymVal`'s `itVariant` arm,
-  ## above) for the identical reason: an inactive arm's fields are only
-  ## ever reachable through `isVariantField`'s fork, whose out-of-arm side
-  ## is exactly the `FieldDefect` raise — no live SAT path ever reads a
-  ## fresh inactive field's value, so no pc constraint on it could ever
-  ## affect a reachable verdict.
-  let ty = e.vlVariantTy
-  let discBoxed = new(SymVal)
-  discBoxed[] = bvConst(ty.vDiscTy, int64(e.vlTagOrd))
-  var plainFields: seq[SymVal]
-  for fe in e.vlPlainFields:
-    plainFields.add lower(env, fe)
+proc variantLitArms(env: Env, arms: seq[VariantArm], tagOrd: int,
+                     activeExprs: seq[IRExpr], objName: string):
+    tuple[fields: OrderedTable[int, seq[SymVal]],
+          names: OrderedTable[int, seq[string]]] =
+  ## The per-arm fields of a literal-discriminant variant (one axis of a
+  ## multi-variant): the active arm's are the lowered constructor exprs,
+  ## every other arm's are fresh (see `lowerVariantLit`'s soundness note).
+  ## Extracted from `lowerVariantLit` by RFC-0005 S8p, which reuses it per
+  ## axis in `lowerMultiVariantLit`.
   var armFields = initOrderedTable[int, seq[SymVal]]()
   var armNames  = initOrderedTable[int, seq[string]]()
-  for arm in ty.vArms:
+  for arm in arms:
     armNames[arm.tagOrdinal] = arm.fieldNames
-    if arm.tagOrdinal == e.vlTagOrd:
+    if arm.tagOrdinal == tagOrd:
       var fields: seq[SymVal]
-      for fe in e.vlArmFields:
+      for fe in activeExprs:
         fields.add lower(env, fe)
       armFields[arm.tagOrdinal] = fields
     else:
       var fields: seq[SymVal]
       for j, ft in arm.fieldTypes:
         inc variantLitFreshCounter
-        let path = "__variantLit." & ty.vObjectName & ".@" & arm.tagName &
+        let path = "__variantLit." & objName & ".@" & arm.tagName &
                    "." & arm.fieldNames[j] & "." & $variantLitFreshCounter
         # N39 (round-6 fix round 5). GUARD-BEFORE-CALL: `classifyFieldType`
         # (dsl_typebridge.nim) legitimately classifies an INACTIVE arm's
@@ -14435,7 +14523,7 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
         let ftIssue = unallocatableFieldIssue(ft)
         if ftIssue.isSome:
           lowerDegrade(ftIssue.get.kind,
-            "variant literal inactive-arm field `" & ty.vObjectName &
+            "variant literal inactive-arm field `" & objName &
                  "." & arm.fieldNames[j] & "` allocation unmodeled — " &
                  ftIssue.get.msg & " (arm-field allocation, not param-entry)")
           fields.add SymVal(kind: svBool, bo: mkBoolVar(path & ".unalloc"))
@@ -14443,10 +14531,65 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
           var scratchPC: seq[Z3Bool]
           fields.add allocateSym(ft, path, scratchPC)
       armFields[arm.tagOrdinal] = fields
+  (armFields, armNames)
+
+proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
+  ## Round-6 A1 (ADR-0029). `T(kind: tagLit, f1: e1, ...)` → svVariant.
+  ## Mirrors `allocateSym(itVariant)`'s shape (disc + per-arm fields +
+  ## plain fields) with two deliberate divergences: the discriminator is a
+  ## Z3 CONST pinned to the literal tag (`bvConst`, not a fresh symbol with
+  ## a disjunction constraint — `vDiscTy` is always `itInt`, per its own
+  ## doc comment, so `bvConst` covers every legal disc shape), and the
+  ## ACTIVE arm's fields are the LOWERED constructor exprs rather than
+  ## fresh allocations.
+  ##
+  ## Every OTHER arm allocates FRESH-UNCONSTRAINED fields (never zero) —
+  ## the ADR's soundness note: real Nim raises `FieldDefect` on an
+  ## out-of-arm read before any value is observable, so a zero-filled
+  ## inactive field would let a buggy twin "read" a value real Nim never
+  ## yields. The fresh allocation's own `pcOut` is intentionally a LOCAL,
+  ## discarded scratch — mirrors the existing `__refVariantWitness`
+  ## proto-allocation precedent (`extractFromSymVal`'s `itVariant` arm,
+  ## above) for the identical reason: an inactive arm's fields are only
+  ## ever reachable through `isVariantField`'s fork, whose out-of-arm side
+  ## is exactly the `FieldDefect` raise — no live SAT path ever reads a
+  ## fresh inactive field's value, so no pc constraint on it could ever
+  ## affect a reachable verdict.
+  let ty = e.vlVariantTy
+  let discBoxed = new(SymVal)
+  discBoxed[] = bvConst(ty.vDiscTy, int64(e.vlTagOrd))
+  var plainFields: seq[SymVal]
+  for fe in e.vlPlainFields:
+    plainFields.add lower(env, fe)
+  let (armFields, armNames) = variantLitArms(env, ty.vArms, e.vlTagOrd,
+                                             e.vlArmFields, ty.vObjectName)
   SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: ty.vDiscName,
          vObjectName: ty.vObjectName, vArmFields: armFields,
          vArmFieldNames: armNames, vPlainFields: plainFields,
          vPlainFieldNames: ty.vPlainFieldNames)
+
+
+proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8p. `T(k: tagLit, ..., j: tagLit2, ...)` over an
+  ## `itMultiVariant` -> svMultiVariant: `lowerVariantLit` once per axis
+  ## (the discriminator a const pinned to its literal tag, the active arm's
+  ## fields the lowered constructor exprs, the other arms' fields fresh),
+  ## plus the shared plain fields.
+  let ty = e.mvlTy
+  var plainFields: seq[SymVal]
+  for fe in e.mvlPlainFields:
+    plainFields.add lower(env, fe)
+  var axes: seq[VariantAxisSym]
+  for ai, ax in ty.mvAxes:
+    let discBoxed = new(SymVal)
+    discBoxed[] = bvConst(ax.discTy, int64(e.mvlAxisTags[ai]))
+    let (armFields, armNames) = variantLitArms(env, ax.arms, e.mvlAxisTags[ai],
+                                               e.mvlAxisFields[ai],
+                                               ty.mvObjectName & "." & ax.discName)
+    axes.add VariantAxisSym(discName: ax.discName, disc: discBoxed,
+                            armFields: armFields, armFieldNames: armNames)
+  SymVal(kind: svMultiVariant, mvObjectName: ty.mvObjectName, mvAxes: axes,
+         mvPlainFields: plainFields, mvPlainFieldNames: ty.mvPlainFieldNames)
 
 proc concreteSeqLen(seqSV: SymVal): Option[int] =
   ## Phase 15 C4. If the seq's length folds (via `simplify`) to a Z3 numeral,
@@ -15586,7 +15729,8 @@ proc runSymexImpl(prog: SymexProgram,
     activeCalls: initHashSet[string](),
     initialEnv: env,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
-                           userExnHierarchy: prog.userExnHierarchy),  ## E4a
+                           userExnHierarchy: prog.userExnHierarchy,  ## E4a
+                           sutRetTy: prog.retTy),  ## RFC-0005 S8p
   )
   # Phase 15 C2b: publish a pointer to the live WalkCtx so `lowerClosureCall`
   # (running in the `lower` evaluator, no `WalkCtx` parameter) can drive the
@@ -16436,7 +16580,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     activeCalls: initHashSet[string](), initialEnv: env,
     concreteEq: concreteEq,
     statics: WalkerStatics(exnTable: exnTypeTable,
-                           userExnHierarchy: prog.userExnHierarchy),
+                           userExnHierarchy: prog.userExnHierarchy,
+                           sutRetTy: prog.retTy),
   )
   currentWalkCtxPtr = addr w
   let initial = Path(pc: initialPC, env: env)

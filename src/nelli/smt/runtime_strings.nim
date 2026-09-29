@@ -514,9 +514,10 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # strArgs = [lhs, rhs].
     let l = lower(env, e.strArgs[0])
     requireStr(l, "iekStrConcat")
+    # RFC-0005 S8p: the right operand may be a char (`s.add('z')`), the
+    # 1-byte string with that byte (`needleAsStr`, exact under ADR-0006).
     let r = lower(env, e.strArgs[1])
-    requireStr(r, "iekStrConcat")
-    SymVal(kind: svString, str: concat(l.str, r.str))
+    SymVal(kind: svString, str: concat(l.str, needleAsStr(r, "iekStrConcat")))
   of iekIntToStr:
     # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
     # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a

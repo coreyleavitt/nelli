@@ -312,6 +312,18 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkVariantLit", emitIRType(e.vlVariantTy),
             newLit(e.vlTagOrd), newLit(e.vlTagName),
             prefix(armLit, "@"), prefix(plainLit, "@"))
+  of iekMultiVariantLit:
+    var axesLit = newTree(nnkBracket)
+    for fs in e.mvlAxisFields:
+      var lit = newTree(nnkBracket)
+      for c in fs: lit.add emitExpr(c)
+      axesLit.add prefix(lit, "@")
+    var plainLit = newTree(nnkBracket)
+    for c in e.mvlPlainFields: plainLit.add emitExpr(c)
+    let tagsLit = newTree(nnkBracket)
+    for t in e.mvlAxisTags: tagsLit.add newLit(t)
+    newCall(bindSym"mkMultiVariantLit", emitIRType(e.mvlTy),
+            prefix(tagsLit, "@"), prefix(axesLit, "@"), prefix(plainLit, "@"))
   of iekSeqLen:
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj), newLit(e.lenLoc))
   of iekSeqSlice:
@@ -1378,6 +1390,12 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
       if rhsHasInlineDefectFork(a): return true
     for a in e.vlPlainFields:
       if rhsHasInlineDefectFork(a): return true
+  of iekMultiVariantLit:
+    for fs in e.mvlAxisFields:
+      for a in fs:
+        if rhsHasInlineDefectFork(a): return true
+    for a in e.mvlPlainFields:
+      if rhsHasInlineDefectFork(a): return true
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
   of iekSeqSlice:
@@ -1615,6 +1633,24 @@ proc parseStrSliceBound(boundNode: NimNode, recvIR: IRExpr,
   else:
     parseExpr(boundNode, preamble, ctx)
 
+func isPureContainer(e: IRExpr): bool =
+  ## RFC-0005 S8p. The container shapes `isIndex` lowers without a
+  ## seed/drain (`lowerLeafInExpr`): a variable, or a field chain over one.
+  e.kind == iekVar or (e.kind == iekField and isPureContainer(e.obj))
+
+proc liftIndexContainer(objIR: IRExpr, ty: IRType,
+                        preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8p. An `isIndex` container that is not a variable or a field
+  ## chain over one (`f(x)[0]`, a closure call) is bound to a synthetic
+  ## `let` first, so it is lowered as any `let` value is (with its effects
+  ## drained) and the index statement reads the variable. It hit
+  ## `lowerLeafInExpr`'s assertion (`weInternalWalkerFault`) before.
+  ## Called before the index is parsed: Nim evaluates the container first.
+  if isPureContainer(objIR): return objIR
+  let synth = freshSynth(ctx, "ixrecv")
+  preamble.add mkLet(synth, ty, objIR)
+  mkVar(synth)
+
 proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
                             rawIdxNode: NimNode, elemTy: IRType,
                             preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -1676,12 +1712,15 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
     else:
       return mkSeqSlice(objIR, loIR, hiIR)
   elif idxNode.typeKind != ntyNone and classifyType(idxNode).ty.kind == itInt:
+    let recvIR =
+      if stringBacked: objIR
+      else: liftIndexContainer(objIR, classifyType(recvRawNode).ty, preamble, ctx)
     let idxIR = parseExpr(idxNode, preamble, ctx)
     if stringBacked:
       return mkStrOp(iekStrAt, "[]", @[objIR, idxIR])
     else:
       let synth = freshSynth(ctx, "idx")
-      preamble.add mkIndexStmt(synth, objIR, idxIR, elemTy, siteLoc(n))
+      preamble.add mkIndexStmt(synth, recvIR, idxIR, elemTy, siteLoc(n))
       return mkVar(synth)
   else:
     preamble.add ctx.declineAtSite(
@@ -4013,11 +4052,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # IndexDefect "index 7 not in 0 .. 4", never RangeDefect (probed, c
       # and cpp). `isIndex` forks that; the conversion's range check must
       # not fire as well.
+      let arrIR = liftIndexContainer(objIR, lhsCls.ty, preamble, ctx)
       ctx.indexConvPending = n[1].kind in {nnkHiddenStdConv, nnkHiddenSubConv}
       let idxIR = parseExpr(n[1], preamble, ctx)
       ctx.indexConvPending = false
       let synth = freshSynth(ctx, "idx")
-      preamble.add mkIndexStmt(synth, objIR, idxIR, lhsCls.ty.elemTy)
+      preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy)
       mkVar(synth)
     of itSeq:
       # v67 (dev item 1) / round-6 B1: `data[a..b]` (slice, array-lambda
@@ -4886,7 +4926,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if calleeSym.strVal == "[]" and n.len == 3:
       let recvCls = classifyType(n[1])
       if recvCls.ty.kind == itTable:
-        let recvIR = parseExpr(n[1], preamble, ctx)
+        let recvIR = liftIndexContainer(parseExpr(n[1], preamble, ctx),
+                                        recvCls.ty, preamble, ctx)
         let keyIR  = parseExpr(n[2], preamble, ctx)
         let synth = freshSynth(ctx, "tget")
         preamble.add mkIndexStmt(synth, recvIR, keyIR, recvCls.ty.tabValTy)
@@ -5392,11 +5433,47 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       return mkVariantLit(objTyFull, tagOrd, activeArm.tagName,
                            armFieldExprs, plainFieldExprs)
     of itMultiVariant:
+      # RFC-0005 S8p: every discriminator a literal naming an explicit
+      # (non-else) arm of its axis builds a real `svMultiVariant`
+      # (`iekMultiVariantLit`, A1's literal construction once per axis).
+      # Before S8p every multi-variant constructor took the decline below,
+      # whose int stand-in reached `retBindEq` as a kind mismatch when a
+      # callee returned it (`weInternalWalkerFault`).
+      var byNameMV = initTable[string, NimNode]()
+      for k in 1 ..< n.len:
+        if n[k].kind == nnkExprColonExpr:
+          byNameMV[n[k][0].strVal] = n[k][1]
+      var mvTags: seq[int]
+      var mvFields: seq[seq[IRExpr]]
+      var mvOk = true
+      for ax in objTyFull.mvAxes:
+        if not byNameMV.hasKey(ax.discName): mvOk = false; break
+        let tagIR = parseExpr(byNameMV[ax.discName], preamble, ctx)
+        if tagIR.kind != iekIntLit: mvOk = false; break
+        var found = false
+        for arm in ax.arms:
+          if not arm.isElse and arm.tagOrdinal == int(tagIR.ival):
+            var fs: seq[IRExpr]
+            for i, fieldName in arm.fieldNames:
+              fs.add parseVariantCtorField(fieldName, arm.fieldTypes[i],
+                                           byNameMV, n, preamble, ctx)
+            mvTags.add arm.tagOrdinal
+            mvFields.add fs
+            found = true
+            break
+        if not found: mvOk = false; break
+      if mvOk:
+        var mvPlain: seq[IRExpr]
+        for i, fieldName in objTyFull.mvPlainFieldNames:
+          mvPlain.add parseVariantCtorField(fieldName, objTyFull.mvPlainFieldTypes[i],
+                                            byNameMV, n, preamble, ctx)
+        return mkMultiVariantLit(objTyFull, mvTags, mvFields, mvPlain)
       # Round-6 A1: retained decline, split into its OWN arm (see the
       # `of itVariant:` comment above for why un-splitting is a named DoD
       # item, not an assumed side effect). Message updated to cite
       # ADR-0029's explicit non-goal instead of P2b's now-superseded
-      # "variant construction needs its own ADR" framing.
+      # "variant construction needs its own ADR" framing. RFC-0005 S8p:
+      # now only a symbolic or else-covered discriminator reaches it.
       preamble.add ctx.declineAtSite(
         feUnsupportedExprKind,
         siteMsg(n, "itMultiVariant (multi-case) object constructor " &
@@ -8382,6 +8459,55 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       argIRs.add parseExpr(n[i], preamble, ctx)
     mkCall(callKey, "", argIRs, tBool())
 
+type ValueFieldWrite = object
+  ## RFC-0005 S8p. A field write on a VALUE tuple or object, rebuilt as a
+  ## whole-root assignment: `root` is the variable the write lands in, `value`
+  ## its new value.
+  root:  string
+  value: IRExpr
+
+proc valueFieldTy(lhs: NimNode): IRType =
+  ## RFC-0005 S8p. The written field's type when `lhs` is a field chain over a
+  ## VALUE tuple or object rooted at a variable (`o.a`, `o.inner.b`,
+  ## `result.a`), nil for any other lvalue. Every step must classify
+  ## `itTuple`: a ref/ptr step is a heap write (the `nnkAsgn` arms above
+  ## `valueFieldWrite`'s caller), and a variant field write has a
+  ## discriminant check this does not model; both keep their declines.
+  ## Pure: parses nothing, so a caller can ask before lifting any call.
+  let t = unwrapHidden(lhs)
+  if t.kind != nnkDotExpr or t.len != 2 or t[1].kind notin {nnkIdent, nnkSym}:
+    return nil
+  let recv = unwrapHidden(t[0])
+  if recv.kind notin {nnkSym, nnkDotExpr}: return nil
+  let recvTy = classifyType(recv).ty
+  if recvTy == nil or recvTy.kind != itTuple: return nil
+  let ix = recvTy.fieldNames.find(t[1].strVal)
+  if ix < 0: return nil
+  if recv.kind == nnkDotExpr and valueFieldTy(recv) == nil: return nil
+  recvTy.fields[ix]
+
+proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
+                     preamble: var seq[IRStmt], ctx: ParseCtx): ValueFieldWrite =
+  ## RFC-0005 S8p. `o.a = v` / `o.inner.b = v` / `result.a += v` on a value
+  ## tuple or object, for an `lhs` `valueFieldTy` accepts. Nim writes the one
+  ## field in place; the other fields keep their values. That is the same as
+  ## assigning the root a rebuilt tuple whose written field is `newVal` and
+  ## whose other fields are reads of the old ones -- one level per `.`.
+  let t = unwrapHidden(lhs)
+  let recv = unwrapHidden(t[0])
+  let recvTy = classifyType(recv).ty
+  let ix = recvTy.fieldNames.find(t[1].strVal)
+  let recvIR = parseExpr(recv, preamble, ctx)
+  var elems: seq[IRExpr]
+  for i in 0 ..< recvTy.fields.len:
+    elems.add(if i == ix: newVal
+              else: mkField(recvIR, i, recvTy.fieldNames[i]))
+  let rebuilt = mkTupleLit(elems, recvTy)
+  if recv.kind == nnkSym:
+    ValueFieldWrite(root: recv.strVal, value: rebuilt)
+  else:
+    valueFieldWrite(recv, rebuilt, preamble, ctx)
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -8622,6 +8748,17 @@ proc parseStmtInner(n: NimNode,
               # static path was ever implemented for multi-axis).
               return mkVariantReassignSymbolic(
                 recv.strVal, ax.discName, tagIR, branchGroups(ax.arms))
+    # RFC-0005 S8p: `o.a = v` on a value tuple / object (see
+    # `valueFieldWrite`). A ranged int field keeps the decline unless `v` is
+    # itself the range-checked conversion: the rebuilt root assignment has no
+    # per-field RangeDefect fork.
+    let fieldTy = valueFieldTy(lhs)
+    if fieldTy != nil:
+      let val = parseExpr(n[1], preamble, ctx)
+      if not (fieldTy.kind == itInt and fieldTy.hasRange and
+              not carriesRangeCheck(val, fieldTy)):
+        let fw = valueFieldWrite(lhs, val, preamble, ctx)
+        return mkAssign(fw.root, fw.value)
     ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
@@ -9199,19 +9336,22 @@ proc parseStmtInner(n: NimNode,
           # rebinding the receiver's env slot to the concatenation result — no
           # new encoding is needed beyond what `&` already has.
           #
-          # Type-classify the ARGUMENT too: `iekStrConcat`'s runtime lowering
-          # (`runtime_strings.nim`) `doAssert`s BOTH operands are `svString`.
-          # `s.add('c')` (a char arg) classifies to `itInt` (Phase 15 Z3c: char
-          # = uint8) — there is no char→1-char-string conversion IR in this
-          # engine, so promoting a char arg to `iekStrConcat` would either
-          # under-constrain or crash. Out of scope per RFC round-2 note; keep
-          # the prior clean `iekStrUnsupported` degrade for a non-string arg
-          # (still sound — Invariant 3 — and preserves S11's `addChar` pin).
+          # Type-classify the ARGUMENT too. `s.add('c')` (a char arg)
+          # classifies to `itInt` (Phase 15 Z3c: char = uint8); RFC-0005 S8p
+          # models it by its Nim type (`ntyChar`): `iekStrConcat`'s lowering
+          # turns a char right operand into the 1-byte string (`needleAsStr`,
+          # exact under the byte-faithful model, ADR-0006). Any other
+          # non-string arg keeps the clean `iekStrUnsupported` degrade
+          # (sound — Invariant 3).
           # This arm must precede the `itSeq` `add` arm below (a string is NOT
           # an itSeq, but the explicit guard keeps the classification
           # intentional and self-documenting).
           if calleeName == "add" and recvCls.ty.kind == itString and n.len == 3:
-            if classifyType(n[2]).ty.kind == itString:
+            # RFC-0005 S8p: a `char` argument is the 1-byte string with that
+            # byte -- `iekStrConcat` bridges a char operand on its right
+            # (`needleAsStr`), so `s.add('z')` is `s := s & "z"`.
+            if classifyType(n[2]).ty.kind == itString or
+               unwrapHidden(n[2]).typeKind == ntyChar:
               let argIR = parseExpr(n[2], preamble, ctx)
               return mkAssign(recvName,
                 mkStrOp(iekStrConcat, "&", @[mkVar(recvName), argIR]))
@@ -9464,7 +9604,8 @@ proc parseStmtInner(n: NimNode,
     # abort, NOT a sound sxUnknown degrade — would be a regression).
     #
     # ALL other shapes degrade to mkUnsupported (sound — Invariant 3):
-    #   * field LHS (`obj.f += y`) — non-nnkSym after unwrap
+    #   * field LHS (`obj.f += y`) other than a value tuple/object field
+    #     (RFC-0005 S8p models that one: `valueFieldWrite`)
     #   * index LHS (`a[i] += y`) — non-nnkSym after unwrap
     #   * any other `<op>=` not in {+=, -=, *=, &=}
     #   * (a user-defined `op=` proc is an `nnkInfix` too; RFC-0005 S8c routes
@@ -9498,6 +9639,27 @@ proc parseStmtInner(n: NimNode,
                     else: nil
         return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
       else:
+        # RFC-0005 S8p: `o.a += v` on a value tuple / object field -- the
+        # same rebuilt-root write as `o.a = o.a + v` (`valueFieldWrite`).
+        # `&=` needs a string field; a ranged int field declines (the
+        # rebuilt write has no per-field RangeDefect fork).
+        let fieldTy = valueFieldTy(lhs)
+        if fieldTy != nil:
+          let baseOpStr = augOp.strVal[0 .. ^2]
+          let fits =
+            if baseOpStr == "&":
+              fieldTy.kind == itString and classifyType(n[2]).ty.kind == itString
+            else:
+              (fieldTy.kind == itInt and not fieldTy.hasRange) or
+                fieldTy.kind in {itFloat32, itFloat64}
+          if fits:
+            let old = parseExpr(lhs, preamble, ctx)
+            let rhsIR = parseExpr(n[2], preamble, ctx)
+            let newVal =
+              if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
+              else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
+            let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
+            return mkAssign(fw.root, fw.value)
         return ctx.declineMarker(
           feUnsupportedStmtKind, &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")
@@ -10317,6 +10479,10 @@ type
                               ## into `SymexProgram.annotationViolations`.
     annotationViolations*: seq[AnnotationViolation]
                               ## RFC-0005 S8. Macro-time copy.
+    retTy*: IRType            ## RFC-0005 S8p. The SUT's return type; nil
+                              ## for a void SUT.
+    retTyNimNode*: NimNode    ## RFC-0005 S8p. Emit-time AST of `retTy`,
+                              ## threaded into `SymexProgram.retTy`.
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -10573,6 +10739,14 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   let parsed = parseStmt(procDef[6], ctx)
   let bodyIR = if parsed != nil and parsed.kind == isBlock: parsed
                else: mkBlock(@[parsed])
+  # RFC-0005 S8p: the SUT's return type, so a read of `result` before the
+  # body writes it takes that type's zero value, as in a callee (S8n).
+  # Classified as `parseCalleeImpl` classifies a callee's.
+  if formalParams[0].kind != nnkEmpty:
+    result.retTy = classifyType(formalParams[0]).ty
+    result.retTyNimNode = emitIRType(result.retTy)
+  else:
+    result.retTyNimNode = newNilLit()
   result.params = params
   result.bodyNimNode = emitStmt(bodyIR)
   result.paramsNimNode = prefix(paramsNimSeq, "@")

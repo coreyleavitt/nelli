@@ -887,5 +887,10 @@ task test, "Run the test suite":
             # by decl kind (Z3 4.13.4), byte-vs-byte / byte-vs-input character
             # forms, constant index folding, a bounded concolic pc check, the
             # seq.last_indexof incremental-core guard; walker 162->163.
-            "tsymex_rfc0005_s8o_termination"]:
+            "tsymex_rfc0005_s8o_termination",
+            # RFC-0005 S8p -- S8n's precision remainder: distinct and
+            # multi-variant result binding, the multi-variant zero value, the
+            # SUT's unwritten `result`, value field writes, char `add`,
+            # structured closure results; walker 163->164.
+            "tsymex_rfc0005_s8p_precision"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

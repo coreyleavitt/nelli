@@ -93,9 +93,20 @@ proc sutIterSumAug(n: int) =
 type AugPoint = object
   x, y: int
 
+proc sutFieldAugModelled(p: AugPoint, b: int) =
+  ## RFC-0005 S8p: a value-object field `+=` is modelled (rebuilt-root
+  ## assignment), so a label it guards is decided.
+  ## Both operands are bounded first, so neither `+` can overflow (an
+  ## unbounded `q.x += b` rightly reports its OverflowDefect, sxRaised).
+  if b > 0 and b < 1000 and p.x > 0 and p.x < 1000:
+    var q = p
+    q.x += b
+    if q.x == p.x + b + 1:
+      symexTarget("field_aug_dead")
+
 proc sutFieldAugDegrades(p: AugPoint, b: int) =
-  var q = p    ## copy of the struct param — initialised from a variable, no constructor
-  q.x += b     ## field-LHS → non-nnkSym after unwrap → mkUnsupported → sawUnknown
+  var q = (p.x, p.y)  ## an anonymous tuple copy of the struct param
+  q[0] += b    ## positional-element LHS → non-nnkSym after unwrap → mkUnsupported → sawUnknown
   ## No symexTarget: target not reached + sawUnknown=true → sxUnknown
 
 # ===========================================================================
@@ -148,10 +159,16 @@ suite "Augmented-assignment desugaring (walker v31)":
     check r.witness[0] == 4
 
   # ---- 5. Degradation (Invariant 3) ------------------------------------------
-  test "field-LHS augmented assign degrades soundly → sxUnknown":
-    ## `p.x += b` where p is a plain value object: the LHS (after unwrapping
-    ## hidden-deref wrappers) is nnkDotExpr, NOT nnkSym. The new nnkInfix arm
-    ## degrades to mkUnsupported → sawUnknown=true.
+  test "field-LHS augmented assign on a value object is modelled (RFC-0005 S8p) → sxUnsat":
+    ## Real Nim: q.x == p.x + b after the `+=`, never p.x + b + 1.
+    let r = symexFind(sutFieldAugModelled, tLabel("field_aug_dead"))
+    check r.status == sxUnsat
+
+  test "positional-element augmented assign degrades soundly → sxUnknown":
+    ## `q[0] += b` on a tuple: the LHS (after unwrapping hidden-deref
+    ## wrappers) is nnkBracketExpr, NOT nnkSym, and not a value field chain
+    ## (RFC-0005 S8p's field route). The nnkInfix arm degrades to
+    ## mkUnsupported → sawUnknown=true.
     ## With no symexTarget in the proc and sawUnknown=true, the verdict is
     ## sxUnknown (not sxSat — which would be wrong — and not sxUnsat — which
     ## would be unsound because we can't prove the label is unreachable).

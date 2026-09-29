@@ -294,6 +294,17 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     fieldwiseEq(a.vlVariantTy, b.vlVariantTy) and a.vlTagOrd == b.vlTagOrd and
       a.vlTagName == b.vlTagName and fieldwiseEqExprSeq(a.vlArmFields, b.vlArmFields) and
       fieldwiseEqExprSeq(a.vlPlainFields, b.vlPlainFields)
+  of iekMultiVariantLit:
+    ## RFC-0005 S8p.
+    fieldwiseEq(a.mvlTy, b.mvlTy) and a.mvlAxisTags == b.mvlAxisTags and
+      a.mvlAxisFields.len == b.mvlAxisFields.len and
+      (block:
+        var ok = true
+        for i in 0 ..< a.mvlAxisFields.len:
+          if not fieldwiseEqExprSeq(a.mvlAxisFields[i], b.mvlAxisFields[i]):
+            ok = false
+        ok) and
+      fieldwiseEqExprSeq(a.mvlPlainFields, b.mvlPlainFields)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -573,6 +584,10 @@ proc sVariantLit(): IRExpr =
                   fieldNames: @["radius"], fieldTypes: @[tInt(64, true)], isElse: false)],
     plainFieldNames = @["id"], plainFieldTypes = @[tString()])
   mkVariantLit(ty, 0, "skCircle", @[mkIntLit(9)], @[mkStrLit("pid")])
+proc sMultiVariantLit(): IRExpr =
+  ## RFC-0005 S8p. Axis A on its tag-0 arm, axis B on its tag-1 arm.
+  mkMultiVariantLit(sMultiVariantType(), @[0, 1],
+                    @[@[mkIntLit(9)], @[mkStrLit("fb")]], @[mkBoolLit(true)])
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -646,6 +661,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sTupleLit(), roundtripExpr(sTupleLit()))
   test "iekVariantLit":
     check fieldwiseEq(sVariantLit(), roundtripExpr(sVariantLit()))
+  test "iekMultiVariantLit":
+    check fieldwiseEq(sMultiVariantLit(), roundtripExpr(sMultiVariantLit()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -722,6 +739,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekArrayLit: discard                    ## "iekArrayLit"
       of iekTupleLit: discard                    ## "iekTupleLit"
       of iekVariantLit: discard                  ## "iekVariantLit"
+      of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"

@@ -101,6 +101,12 @@ proc sutMultiVariantConstrDeclines(x: int) =
   if t.a1 == 3:
     symexTarget("multivariant_hit")
 
+proc sutMultiVariantConstrDead(x: int) =
+  ## RFC-0005 S8p: both axes' fields hold `x`; they can never differ.
+  let t = TwoAxis(axis1: kaX, a1: x, axis2: kbP, b1: x)
+  if t.a1 != t.b1 or t.axis2 != kbP:
+    symexTarget("multivariant_dead")
+
 # --- Test 6 (bonus, trivial): symbolic discriminant at construction ------
 # Nim itself only accepts a RUNTIME discriminant in constructor syntax when
 # no arm-specific field is set (it cannot prove which arm's storage is safe
@@ -153,15 +159,15 @@ suite "symex round-6 A1 — iekVariantLit literal-discriminant construction":
 
 suite "symex round-6 A1 — itMultiVariant construction regression pin":
 
-  test "A1-5: multi-case-object constructor still declines cleanly — classified sxUnknown, not a crash":
+  test "A1-5: multi-case-object constructor CONSTRUCTS — MIGRATED by RFC-0005 S8p (iekMultiVariantLit, walker 164)":
+    ## Pre-S8p: a classified decline (`feUnsupportedExprKind`). Real Nim:
+    ## x == 3 reaches the label, and the two axes' fields always agree.
     let res = symexFind(sutMultiVariantConstrDeclines, tLabel("multivariant_hit"))
-    check res.status == sxUnknown
-    check res.status != sxSat
-    var hasClassified = false
-    for e in res.errors:
-      if e.kind == feUnsupportedExprKind and e.severity == sevError:
-        hasClassified = true
-    check hasClassified
+    check res.status == sxSat
+    if res.status == sxSat:
+      check res.witness[0] == 3
+    let dead = symexFind(sutMultiVariantConstrDead, tLabel("multivariant_dead"))
+    check dead.status == sxUnsat
 
 suite "symex round-6 A1 — out-of-scope shapes keep declining cleanly":
 

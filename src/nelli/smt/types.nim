@@ -409,6 +409,14 @@ type
                  ## FRESH-UNCONSTRAINED fields (never zero — reading one is a
                  ## `FieldDefect` FINDING via the existing `isVariantField`
                  ## fork, not a modeling gap).
+    iekMultiVariantLit ## RFC-0005 S8p: `iekVariantLit` for an
+                 ## `itMultiVariant` (two or more `case` sections), every
+                 ## discriminator a literal. One pinned discriminator and one
+                 ## active arm per axis; the inactive arms' fields are fresh,
+                 ## as `iekVariantLit`'s. Before S8p the constructor declined
+                 ## at parse time and its bound stand-in was an int, which a
+                 ## callee returning it met in `retBindEq` as a kind mismatch
+                 ## (`weInternalWalkerFault`).
     iekSeqLen    ## Phase 5: `s.len` on a `seq[T]`. Returns Z3Int.
     iekStrLit    ## Phase 5: string literal (Z3String constant).
     iekFloatLit  ## Phase 15 F2: float32/float64 literal (incl. Inf/NaN/-0.0).
@@ -681,6 +689,14 @@ type
       vlPlainFields*: seq[IRExpr] ## the shared (always-present) plain-field
                                    ## exprs, in `vlVariantTy.vPlainFieldNames`
                                    ## order
+    of iekMultiVariantLit:
+      mvlTy*:         IRType      ## the full itMultiVariant IRType
+      mvlAxisTags*:   seq[int]    ## per axis (`mvlTy.mvAxes` order): the
+                                   ## literal discriminant's ordinal
+      mvlAxisFields*: seq[seq[IRExpr]]
+                                   ## per axis: the ACTIVE arm's field exprs,
+                                   ## in that arm's `fieldNames` order
+      mvlPlainFields*: seq[IRExpr] ## `mvlTy.mvPlainFieldNames` order
     of iekSeqLen:
       lenObj*: IRExpr
       lenLoc*: string            ## Round-6 B1 (siteLoc precedent, A3):
@@ -2362,6 +2378,10 @@ type
     params*: seq[IRParam]
     body*: IRStmt
     procs*: Table[string, ProcSig]   ## transitively reachable callees
+    retTy*: IRType                   ## RFC-0005 S8p. The SUT's own return
+                                     ## type; nil for a void SUT. The zero
+                                     ## value `result` holds before the body
+                                     ## writes it (`unwrittenResultZero`).
     userExnHierarchy*: Table[string, string]
                                      ## Phase 15 E4a: child -> direct-parent
                                      ## links for USER-defined exception types
@@ -3534,6 +3554,21 @@ proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
   IRExpr(kind: iekVariantLit, vlVariantTy: ty, vlTagOrd: tagOrd,
          vlTagName: tagName, vlArmFields: armFields,
          vlPlainFields: plainFields)
+
+proc mkMultiVariantLit*(ty: IRType, axisTags: seq[int],
+                        axisFields: seq[seq[IRExpr]],
+                        plainFields: seq[IRExpr]): IRExpr =
+  ## RFC-0005 S8p. `ty` is the full `itMultiVariant` IRType; `axisTags[i]`
+  ## is a non-else arm ordinal of `ty.mvAxes[i]` and `axisFields[i]` that
+  ## arm's field exprs, in its `fieldNames` order.
+  doAssert ty.kind == itMultiVariant,
+    "mkMultiVariantLit: not an itMultiVariant: " & $ty.kind
+  doAssert axisTags.len == ty.mvAxes.len and axisFields.len == ty.mvAxes.len,
+    "mkMultiVariantLit: axis arity mismatch"
+  doAssert plainFields.len == ty.mvPlainFieldNames.len,
+    "mkMultiVariantLit: plain-field arity mismatch"
+  IRExpr(kind: iekMultiVariantLit, mvlTy: ty, mvlAxisTags: axisTags,
+         mvlAxisFields: axisFields, mvlPlainFields: plainFields)
 
 proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
@@ -4934,6 +4969,14 @@ proc render*(e: IRExpr): string =
     for c in e.vlPlainFields:
       inner.add "," & render(c)
     "Vr(" & inner & ")"
+  of iekMultiVariantLit:
+    var inner = ""
+    for ai, t in e.mvlAxisTags:
+      if ai > 0: inner.add ";"
+      inner.add "@" & $t
+      for c in e.mvlAxisFields[ai]: inner.add "," & render(c)
+    for c in e.mvlPlainFields: inner.add "," & render(c)
+    "MVr(" & inner & ")"
   of iekSeqLen:
     render(e.lenObj) & ".len"
   of iekStrLit:

@@ -192,18 +192,19 @@ proc callsBareVariant(x: int) =
 
 type
   BareMV = object
-    ## Two `case` sections: a multi-variant, which still has no modelled
-    ## zero value after RFC-0005 S8n wired the single-case variant's.
+    ## Two `case` sections: a multi-variant whose first axis's ordinal 0
+    ## falls in its `else` arm, which still has no modelled zero value
+    ## after RFC-0005 S8n (single-case variants) and S8p (multi-variants
+    ## with an explicit ordinal-0 arm on every axis).
     case k: BareVK
-    of bvA: a: int
     of bvB: b: int
+    else: a: int
     case j: BareVK
     of bvA: c: int
     of bvB: d: int
 
 proc bareMultiVariant(x: int): BareMV =
-  ## Never assigned: an assigned multi-variant result is a separate,
-  ## pre-existing walker fault (reported by S8n).
+  ## Never assigned: the pin is about the bare return alone.
   if x > 0: return
 
 proc callsBareMultiVariant(x: int) =

@@ -210,16 +210,26 @@ proc sutClosureStringZeroSat(x: int) =
   if x <= 0 and r == "":
     symexTarget("closure_string_zero_sat")
 
-suite "symex round-6 N16 — direct closure call: string retTy, classified decline pinned (N30, walker v108)":
+proc sutClosureStringZeroNonEmpty(x: int) =
+  ## Real Nim: the untouched path's `result` is "", never "hit".
+  let f = proc(y: int): string =
+    if y > 0:
+      result = "hit"
+  let r = f(x)
+  if x <= 0 and r != "":
+    symexTarget("closure_string_zero_nonempty")
 
-  test "N16-4: string-returning closure classified-declines (sxUnknown, feUnsupportedOp) -- symValFromRawAst still has no itString arm, but N30 (walker v108) catches the raise and classifies it instead of leaking weInternalWalkerFault":
+suite "symex round-6 N16 — direct closure call: string retTy, modelled since RFC-0005 S8p (walker 164)":
+
+  test "N16-4: string-returning closure's untouched path is \"\" (RFC-0005 S8p; was a classified decline, N30)":
+    ## The regression guard this suite promised a slice widening the string
+    ## return: the zero-default `result` binds "" on the untouched path.
     let r = symexFind(sutClosureStringZeroSat, tLabel("closure_string_zero_sat"))
-    check r.status == sxUnknown
-    var sawOp = false
-    for e in r.errors:
-      if e.kind == feUnsupportedOp and e.severity == sevError:
-        sawOp = true
-    check sawOp
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] <= 0
+    let z = symexFind(sutClosureStringZeroNonEmpty, tLabel("closure_string_zero_nonempty"))
+    check z.status == sxUnsat
 
 # =============================================================================
 # 5. Soundness: multi-arm closure body, union of {1, -1, 0} exhaustive --

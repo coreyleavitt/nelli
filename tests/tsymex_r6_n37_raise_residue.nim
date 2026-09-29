@@ -474,6 +474,11 @@ suite "symex N37 -- UNSAT companion: no over-degrade":
 ##
 ## Regression pin below: the NEW honest classification this slice's own
 ## N29 fix (plus its buildClosure follow-up) exposed.
+##
+## RFC-0005 S8p (walker 164): a tuple-returning closure is a structured
+## closure result (`closureRetStructured`), so `buildClosure` no longer
+## declines it; the `seNestedSeqUnsupported` from `lowerHofCall`'s map arm
+## is the remaining (honest) decline, and the pin moves to it.
 
 proc n37HofMapTupleElem(a: int) =
   var xs: seq[int] = @[]
@@ -486,13 +491,14 @@ suite "symex N37 -- lowerHofCall inline map, unbacked tuple return elem (N29-unb
 
   test "N37-4: N29-unblocked closure construction hits a SECOND, orthogonal gap (multi-leaf closure return type) -- now an honest classified decline (feUnsupportedOp), never a crash":
     let r = symexFind(n37HofMapTupleElem, tLabel("n37_hof_map_tuple"))
-    var sawUnsupportedOp = false
+    var sawNested = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feUnsupportedOp and e.severity == sevError:
-        sawUnsupportedOp = true
+      check e.kind != weInternalWalkerFault
+      if e.kind == seNestedSeqUnsupported and e.severity == sevError:
+        sawNested = true
     check r.status == sxUnknown
-    check sawUnsupportedOp
+    check sawNested
 
 # =============================================================================
 # Version pin

@@ -98,10 +98,12 @@ proc corpusLowHighNonIntFamily(flag: bool, y: int) =
 
 # Round-6 A1 (ADR-0029): a multi-`case`-object (`itMultiVariant`)
 # constructor stays a classified decline after A1 SPLITS the former
-# combined `of itVariant, itMultiVariant:` P2b arm — construction ships as
-# its own slice only if a consumer needs it first (ADR-0029 "Deliberately
-# not covered"). Must decline cleanly, never crash and never fall through
-# to the now-real `itVariant` literal-discriminant construction path.
+# combined `of itVariant, itMultiVariant:` P2b arm. RFC-0005 S8p constructs
+# one whose every discriminator is a literal naming an explicit arm
+# (`iekMultiVariantLit`); a SYMBOLIC discriminator (Nim-legal only with no
+# field of that axis's arms set) still declines, which this row pins. Must
+# decline cleanly, never crash and never fall through to the single-case
+# `itVariant` construction path.
 type
   Tot1AxisA = enum tot1aX, tot1aY
   Tot1AxisB = enum tot1bP, tot1bQ
@@ -113,9 +115,9 @@ type
     of tot1bP: b1: int
     of tot1bQ: b2: int
 
-proc corpusMultiVariantConstr(x: int) =
-  let t = Tot1MultiVariant(axis1: tot1aX, a1: x, axis2: tot1bP, b1: x)
-  if t.a1 == 42:
+proc corpusMultiVariantConstr(k: Tot1AxisA, x: int) =
+  let t = Tot1MultiVariant(axis1: k, axis2: tot1bP, b1: x)
+  if t.b1 == 42:
     symexTarget("multivariant_constr")
 
 # Round-6 A3 (ADR-0029): a symbolic-discriminant variant CONSTRUCTION whose
@@ -312,21 +314,23 @@ proc corpusBareLenRead(n: int) =
 # fallthrough (no explicit `return`) after a CONDITIONAL, multi-statement
 # `result = expr` assignment, where the returned VALUE is a composite kind
 # outside the scalar-wired set `isReturn`'s explicit-return arm already
-# supports (`svTuple`/`svVariant` and every scalar — but NOT `svSeq` here).
+# supports (`svTuple`/`svVariant` and every scalar — but NOT `svArray` here; a `seq` is bound since RFC-0005 S8p).
 # Pre-fix this degraded to an UNSOUND unconstrained `retSym` (the BLOCKER
 # #12 root cause, see `tests/tsymex_r6_a6r_callwitness.nim`); post-fix, a
 # composite kind the walker doesn't yet have a `retBindEq` arm for degrades
 # cleanly to a classified `sxUnknown` (mirroring `isReturn`'s own existing
 # composite-return degrade net verbatim, `feUnsupportedOp`), never a false
 # `sxSat` and never a crash.
-proc corpusCompositeFallthroughReturn(x: int): seq[int] =
+proc corpusCompositeFallthroughReturn(x: int): array[1, int] =
+  ## RFC-0005 S8p binds a `seq` result, so this row uses an `array` one,
+  ## which `retBindEq` still does not bind.
   if x < 0:
     raise newException(ValueError, "negative")
-  result = @[x]
+  result = [x]
 
 proc corpusCompositeImplicitFallthrough(x: int) =
   let s = corpusCompositeFallthroughReturn(x)
-  if s.len == 1:
+  if s[0] == x:
     symexTarget("composite_implicit_fallthrough")
 
 # ---------------------------------------------------------------------------
@@ -404,8 +408,8 @@ let corpus = @[
   CorpusItem(label: "A1: itMultiVariant (multi-case-object) constructor",
              surface: "1. parser catch-all",
              backstops: "Round-6 A1 (ADR-0029 — itVariant/itMultiVariant " &
-                        "arm split; itMultiVariant construction stays a " &
-                        "classified decline)",
+                        "arm split; a symbolic-discriminator itMultiVariant " &
+                        "construction stays a classified decline, RFC-0005 S8p)",
              status: rMultiVariant.status, errors: rMultiVariant.errors,
              expectedKind: feUnsupportedExprKind, hasKindCheck: true),
 
@@ -498,7 +502,7 @@ let corpus = @[
                         "net rather than leaving retSym unconstrained)",
              status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
              expectedKind: feUnsupportedOp, hasKindCheck: false,
-             # RFC-0005 S10: `@[x].len == 1` for every x >= 0, so the label
+             # RFC-0005 S10: `[x][0] == x` for every x >= 0, so the label
              # is reachable; the path's taint is dcFreshSymbol only, and the
              # replayed candidate is confirmed.
              replayConfirms: true, rawStatus: uCompositeFallthrough),

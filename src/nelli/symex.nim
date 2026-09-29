@@ -2112,6 +2112,7 @@ macro symexFind*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
   let peExpr     = parsed.parseErrorsNimNode       ## Phase 15 G1c
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
@@ -2128,7 +2129,7 @@ macro symexFind*(fn: typed,
     block:
       let `progId` = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`,
+                              procs: `procsExpr`, retTy: `rtExpr`,
                               userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
@@ -2217,13 +2218,14 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
+                              procs: `procsExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
@@ -2249,13 +2251,14 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, userExnHierarchy: `uxhExpr`,
+                              procs: `procsExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       runConcolicFlipImpl(prog, `trace`, `bindings`, `targetBranchIndex`,
@@ -2586,12 +2589,13 @@ macro symexCacheKeyForFn*(fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`, retTy: `rtExpr`)
       symexCacheKey(prog, `targetExpr`, `settings`,
                     z3Version        = z3FullVersion(),
                     nimVersion       = NimVersion,
@@ -2613,12 +2617,13 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`, retTy: `rtExpr`)
       var dbErrors {.used.}: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
@@ -2641,12 +2646,13 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`, retTy: `rtExpr`)
       var dbErrors {.used.}: seq[string] = @[]
       loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
 
@@ -2673,12 +2679,13 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`, retTy: `rtExpr`)
       var dbErrors {.used.}: seq[string] = @[]
       saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
                             `status`, dbErrors)
@@ -2697,12 +2704,13 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`)
+                              procs: `procsExpr`, retTy: `rtExpr`)
       var dbErrors {.used.}: seq[string] = @[]
       loadSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
 
@@ -2804,6 +2812,7 @@ macro symexFindAllWitnesses*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
 
@@ -2960,7 +2969,7 @@ macro symexFindAllWitnesses*(fn: typed,
     block:
       let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`,
+                              procs: `procsExpr`, retTy: `rtExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       `targetsBuild`

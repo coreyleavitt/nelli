@@ -3073,13 +3073,23 @@ Pins: `tests/tsymex_rfc0005_s8r_theoryfree.nim`.
   library.
 
 *Different mechanisms, reported and not fixed here.*
-- **`tsymex_r6_b3_scanpair` B3-1 is red on 4.13.4** (CI run 36628492946
-  and Linux against 4.13.4). It reads `sxRaised` where it expects `sxSat`.
-  It was `sxSat` at a696d80 on 4.13.4 and is `sxSat` on 5.1. The `hit`
-  query, `str.indexof(s, ":", bv2int(start)) == bv2int(start) + 4`, does
-  not decide, and the real ScanError raise is reported in its place. That
-  query is S8q's shape: an int parameter in BV form bridged into a string
-  query. Shard 2 stays red on this suite until that lands.
+- **Context history moved two scan-pair checks on 4.13.4.** Both have the
+  same `hit` query, `str.indexof(data, NUL, bv2int(start)) ==
+  bv2int(start) + 4`, where `start` is an int parameter in BV form.
+  - `b3_scanpair` B3-1 read `sxRaised` before this slice (CI run
+    36628492946) and `sxSat` after it (run 36635331030).
+  - `b7r_bytescan` B7R-3 went the other way: `sxSat` before, `sxRaised`
+    after (run 36635331030, scan-tail).
+  - Traced on Linux against 4.13.4 at 671fef5: the walk's earlier step-1b
+    checks ran the full sequence theory in the shared context, and the
+    `hit` query's step 1 then went SAT in 13 s. With step 1b theory-free,
+    the same step 1 exhausts its 10M units, and so does step 3. The path
+    records `beSolverUndef` at `sevError`, so it is not pruned. The real
+    ScanError raise (no NUL) is the verdict.
+  - This is S8o's per-context cost effect. The query itself is S8q's:
+    with S8q's `isScanPairOffset` Int allocation (3771cc0) and this slice
+    on top, 4.13.4 gives B7R-3 `sxSat` in 1 s (the whole suite in 7.5 s)
+    and B3-1 `sxSat`.
 - **Step 2 on 4.13.4 is still a string search** whenever the theory-free
   abstraction cannot see the cap's conflict (the 58 s case above). Adding
   the sequence functions' range facts to the theory-free query would close

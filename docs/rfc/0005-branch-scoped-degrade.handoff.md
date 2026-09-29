@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-29 14:10Z)
+## Current position (refreshed 2026-09-29 14:54Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -221,7 +221,7 @@
   `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
   six Linux hangers. (22:10Z: first gate on `b795d9c` RED -- regressed=6 (r6_r3_svint_overflow, r1b_shortcircuit_oob, r6_r5_pairloop_counter, phase16_m3_rfind, r14_case2_degrade, r6_n21_pairloop_member) + new-failing=1; agent fixing (00:37Z: all six fixed in `c058475`; second gate `s8k-gate2.log` done: regressed=1 (r6_n36_raise_degrade rc=137 -- REAL: uncapped fallback query; fixed uncommitted, p9 32/32 green; agent died on a network error ~03:20Z, resumed 12:00Z; fix committed `4d66d76`, third gate `s8k-gate3.log` ~80% at 13:04Z, 0 FAIL), new-failing=0; 4 former Linux hangers (nulwitness, b1, b3, n10) now pass on Linux), then re-gates.)
 - **S8k LANDED** (`1ea2c70`/`70fb94c`/`6772146`, walker 161; third gate regressed=0 new-failing=0; four Linux hangers -- nulwitness, b1, b3, n10 -- off the skip list). Findings -> fence **S8o** (`008b064` + widened). **S8n (opus) running** in `scratchpad/wt-s8n`, branch `rfc-0005-s8n` from `008b064`, self-gates -> `scratchpad/s8n-gate.log`.
-- **S8k Windows RED** (`symex-mingw` run 36574704361 @ `6772146`): `b7r_bytescan` B7R-6 and `b7r2_pathscope` B7r2-1a + 1a-red no longer sxSat (all via the region-membership fast path past the unwind horizon -- likely S8k loop pruning). Linux-blind (both hang there). Green at `a696d80`. **S8o (opus) started now in parallel** in `scratchpad/wt-s8o`, branch `rfc-0005-s8o`, with this regression first; its gate waits for S8n's.
+- **S8k Windows RED** (`symex-mingw` run 36574704361 @ `6772146`): `b7r_bytescan` B7R-6 and `b7r2_pathscope` B7r2-1a + 1a-red no longer sxSat (all via the region-membership fast path past the unwind horizon -- likely S8k loop pruning). Linux-blind (both hang there). Green at `a696d80`. **S8o (opus) started now in parallel** in `scratchpad/wt-s8o`, branch `rfc-0005-s8o`, with this regression first; its gate waits for S8n's. (14:54Z: S8n committed `66ca895`, gate `s8n-gate.log` running; S8o reproducing the Windows red.)
 - **Remaining:** S8n + S8o (parallel) -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

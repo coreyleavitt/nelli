@@ -177,6 +177,11 @@ title = "Windows symex-mingw corpus shard 2 loses its runner since S8k (red at 6
 state = "pending"
 
 [[slice]]
+id    = "S8s"
+title = "S8p's precision remainder: seq[uint8] element vs literal walker fault (bv8 field on svBV64), multi-variant with else arm at ordinal 0 zero value, callee array result havoc, variant-arm field writes and positional tuple-element writes (q[0] += b) declining, tsymex_r6_n43_parity cpp compile failure (deleted std::atomic operator=)"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

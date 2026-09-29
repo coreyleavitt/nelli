@@ -154,7 +154,7 @@ state = "done"
 [[slice]]
 id    = "S8n"
 title = "Precision remainder: concolic closure-condition resolution, renderAsChoices over ref params, callee reading result before writing it, closure returning a variant"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8o"
@@ -2471,6 +2471,142 @@ Re-pinned, each checked against real Nim:
   an honest decline). Each literal's own replay test shows Nim agrees:
   N21-1's literal always raises, so "done" is unreachable; N21-2's and
   N21-3's never raise; R5-2's loop always ends with `i == 6`, so "stale" is unreachable.
+
+**As landed (S8n, walker 162) — the precision remainder.** Four places the
+walker, or the witness bridge, gave up on code whose behaviour is fully
+determined. S8i, S8h and S8m reported them. Every expected value was probed
+against the pinned toolchain (Nim 2.2.10, debug build) by an oracle test that
+runs the SUT itself; c and cpp are identical.
+
+1. A concolic `if` on a closure call that returns normally stayed
+   ambiguous. The RFC's S8i note says the closure's ground axioms are
+   "guarded by the whole caller pc". They are not: they are guarded by the
+   body's own branch conditions (the descent starts from an empty pc). The
+   real cause is simpler. The axioms live in the run-wide
+   `currentClosureCallAxioms` pool, which `trySolve` asserts through
+   `pathRoots`, and `concreteBranchOutcome`'s two scratch solves never
+   asserted it. The per-occurrence result was free under the pins, so both
+   solves were SAT and the walk stopped at the `if`.
+2. `renderAsChoices` had no `ref` / `ptr` arm. A SUT with a ref or ptr
+   parameter could not be passed to `assertCoveredBy`, or run as a `symex`
+   phase: `{.error: "renderAsChoices: unsupported witness shape".}` at
+   compile time.
+3. A callee that read `result` before writing it (`result += 100`) had
+   the read fall to the module-level-global arm of `lower`'s `iekVar`:
+   `feGlobalReadUnmodelled` on the caller. Nim zero-initialises `result`.
+4. A variant-returning closure declined on the caller
+   (`seUnsupportedCompoundSortLeaf` + `feUnsupportedOp`). `buildClosure`
+   derives the funcSym's range sort from the return type, and a variant
+   has no single-leaf sort. `defaultZero` also had no variant arm, so a
+   bare `return` of a variant (closure or callee) and an untouched variant
+   result were `feUnsupportedOpHavoc`.
+
+- **Runtime.**
+  - `pathRoots` is split. The run-wide pools (closure axioms,
+    `stripDecompConds`, `containerCardConds`) move to `globalRoots`, which
+    `pathRoots` appends after the path's own facts, in the same order.
+    `concreteBranchOutcome` and `concretelyInfeasible` assert
+    `globalRoots()` too. Each pool is definitional or true of every real
+    input, so it prunes no execution the draws describe.
+  - `lower`'s `iekVar` arm: an unbound `result` inside a callee or closure
+    frame reads `unwrittenResultZero()`, the innermost `CallFrame`'s
+    `retTy` zero value, when `defaultZeroTotal` says it has one. Otherwise
+    (no frame, a void frame, a type with no zero) it keeps the global-read
+    decline. The SUT's own frame is not covered (below).
+  - `defaultZero` gains an `itVariant` arm: discriminator ordinal 0 and
+    every plain and arm field its own zero. `variantZeroTotal` (and so
+    `defaultZeroTotal`) holds only when that is a legal value of the type:
+    the discriminator's type holds 0, 0 is a legal tag
+    (`discriminatorDomain`), and every field has a zero. A multi-variant
+    still raises. This reaches every `defaultZero` site: `completeReturn`'s
+    bare return, the `isCall` untouched-result fall-through, and the
+    closure's.
+  - `closureRetStructured(t)` (a variant). `buildClosure` gives such a
+    funcSym a Bool placeholder range instead of deriving one.
+    `applyClosureGround` makes the per-occurrence result a fresh variant
+    (`allocateSym`), not a fresh constant of the range sort. Its allocation
+    facts (the discriminator's legal tags) join `currentClosureCallAxioms`.
+    `retBindEq`'s variant arm already binds each exit's value.
+  - `renderAsChoices` becomes a wrapper over `renderInto`, which threads
+    the cells rendered so far. A ref / ptr renders as one integer tag, then
+    its pointee: 0 = nil; 1 = a new cell, followed by the pointee; k + 2 =
+    the k-th cell already rendered (an alias or a cycle), with nothing
+    after it. The bounds are `[0, 1 + cells so far]`. So the encoding is
+    total over cyclic witnesses and keeps aliasing, and a tree-shaped
+    witness is all 0 / 1 tags. `renderAsChoicesVersion` does not move: no
+    ref witness could render, or persist, before.
+- **Consumer-visible (for S11's migration note).**
+  - Concolic collection: an `if` on a closure call that returns now records
+    its decision (`branchTrace` gains it and every decision after it;
+    `ambiguousBranches` drops).
+  - `assertCoveredBy` and the `symex` phase accept SUTs with `ref` / `ptr`
+    parameters. `SymexFinding.witnessChoices` for them uses the tag
+    encoding above.
+  - Programs that were `sxUnknown` now get verdicts: a callee or closure
+    reading `result` before writing it (`feGlobalReadUnmodelled`), a
+    variant-returning closure (`seUnsupportedCompoundSortLeaf`,
+    `feUnsupportedOp`), and a variant result left untouched or returned
+    bare (`feUnsupportedOpHavoc`).
+  - The walker bump to 162 invalidates every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - The SUT's own frame reading `result` before writing it
+    (`proc sut(x: int): int = result += 3`) is still
+    `feGlobalReadUnmodelled`. The IR carries no return type for the SUT's
+    own frame (the call stack is empty there), so there is no type to take
+    the zero of.
+  - An augmented assignment to a field of `result` (`result.a += x` on a
+    tuple result) is `feUnsupportedStmtKind` ("LHS `result.a` is not a
+    simple variable"). This is the general augmented-field-assign gap, not
+    a `result` one.
+  - `result.add 'z'` on a `string` result is `seUnsupportedStringOp`
+    (`string add (non-string arg)`): a char append is unmodelled.
+  - A closure returning any other multi-leaf or non-scalar type (a tuple of
+    more than one field, a `string`, a `seq`) still declines as a variant
+    did (`feUnsupportedOp` from `buildClosure` or `symValFromRawAst`, or
+    `seUnsupportedCompoundSortLeaf` from the sort derivation). The `closureRetStructured` route would carry them
+    too, but each needs its `retBindEq` arm checked, and this slice did not
+    widen past the variant.
+  - A multi-variant (two `case` sections) has no zero value, so its
+    untouched or bare-returned result stays `feUnsupportedOpHavoc`.
+  - A callee that assigns a multi-variant or a `distinct` result
+    (`result = MV(k: kb, b: 3, j: ka, c: 1)`, `result = D(3)`) is
+    `weInternalWalkerFault` ("retBindEq: kind mismatch svMultiVariant vs
+    svBV64", and `svDistinct vs svBV64`): the assigned value reaches the
+    binding as a 64-bit int. Found while moving the havoc-site pins off the
+    single-case variant; pre-existing (the assignment path is untouched
+    here). The re-pins below use never-assigned results for that reason.
+
+Pins: `tests/tsymex_rfc0005_s8n_precision.nim`. It covers:
+- (1) true and false closure conditions decided (RED: `ambiguous=1`,
+  `branchTrace.len` 2 and 0), and an int-valued closure result compared;
+- (2) nil, a cell, a cycle, an alias against two equal cells,
+  determinism, a `ptr`, and `assertCoveredBy` over a ref-param and a
+  ptr-param SUT (RED: the compile-time `{.error.}`);
+- (3) `result +=` in a callee, a `bool` result, and a closure (RED:
+  `feGlobalReadUnmodelled`);
+- (4) a variant closure result on both arms with a dead label (RED:
+  `seUnsupportedCompoundSortLeaf`), and a bare return's zero value (RED:
+  `feUnsupportedOpHavoc`);
+- the `>= 162` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (162).
+- `rfc0005_s7_closure`: the sink audit reads `pathRoots` and `globalRoots`
+  (same five pools, same order) and pins that `pathRoots` appends
+  `globalRoots()`.
+- `rfc0005_s8i_models` (5b): `pred(7)` is true in Nim, so the outer `if`
+  now records `armTaken == 0` after the body's `v == 0` (was: the walk
+  stopped there, ambiguous).
+- `rfc0005_s8m_exits` (5): the variant bare return is its zero value, so
+  the dead label is `sxUnsat` with no `feUnsupportedOpHavoc`.
+- `r6_r2_zerodefault_result` T5h-2: the untouched variant result is its
+  zero value (`sxSat`, no decline; a non-zero value there is `sxUnsat`).
+  T5h-3 keeps the decline pin on a never-assigned multi-variant.
+- `rfc0005_s6b_ops`: the havoc-site kind pin moves to a never-assigned
+  multi-variant result.
+- `rfc0005_s8l_exits` (1): a bare return of a variant is its zero value
+  (dead label `sxUnsat`, no `feUnsupportedOpHavoc`); the havoc-site pin
+  moves to a never-assigned multi-variant.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

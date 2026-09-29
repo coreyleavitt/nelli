@@ -851,7 +851,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## bare return). 159->160.
     ## RFC-0005 S8k (the `maxSeqLen` query cap, loop-iteration feasibility
     ## pruning, no replay through a nil dereference). 160->161.
-    check symexWalkerVersion == "161"
+    ## RFC-0005 S8n (concolic closure conditions decided, a callee's unwritten
+    ## `result` read as zero, the variant zero value, variant closure
+    ## results). 161->162.
+    check symexWalkerVersion == "162"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

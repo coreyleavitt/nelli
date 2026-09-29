@@ -1832,6 +1832,13 @@ proc isFollowConcreteWalk*(): bool
   ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
   ## above. Defined after `WalkCtx` (needs the cast).
 
+proc unwrittenResultZero(): Option[SymVal]
+  ## RFC-0005 S8n fwd-decl. The value of a callee's `result` read before
+  ## anything wrote it: the innermost call frame's return type's zero value
+  ## (Nim zero-initialises `result` before the body runs), or `none` outside
+  ## a callee, for a void frame, or for a type `defaultZero` cannot build.
+  ## Defined after `WalkCtx` (needs the cast), like `isFollowConcreteWalk`.
+
 var currentVariantHeaps* {.threadvar.}: Table[string, Z3AnyAst]
   ## ADR-0013 D5 (Slice 2). The WINNING path's logical-heap arrays, snapshotted
   ## just before `extractWitness` (in `trySolve`'s sat branch) so the witness
@@ -2039,6 +2046,14 @@ type ClosureBody* = object  ## Phase 15 C2b. The descent payload for a lambda
   params*:   seq[IRParam]
   captures*: seq[string]
   retTy*:    IRType
+
+func closureRetStructured(t: IRType): bool =
+  ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
+  ## fresh structured value (`allocateSym`) rather than a fresh constant of
+  ## the funcSym's range sort: a variant object, which has no single-leaf
+  ## Z3 sort. `buildClosure` gives such a funcSym a placeholder range and
+  ## `applyClosureGround` never reads it.
+  t != nil and t.kind == itVariant
 
 var currentClosureBodies* {.threadvar.}: Table[
     tuple[siteHash: int64, declOrder: int], ClosureBody]
@@ -3973,6 +3988,9 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
 # constructor instead of inventing a parallel one — `isVariantReassign`'s own
 # call site is otherwise unchanged. Every existing arm's behavior is
 # unchanged EXCEPT `itSeq`: see that arm's own note.
+func variantZeroTotal(t: IRType): bool
+  ## RFC-0005 S8n fwd-decl (defined beside `defaultZeroTotal`, below).
+
 proc defaultZero(t: IRType, baseName: string): SymVal =
   ## Recursive type-driven zero-init — Nim's `default(T)` value, expressed as
   ## a Z3 constant (never a fresh symbolic variable: the zero value is fully
@@ -4067,12 +4085,39 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (RFC A5 sub-deferral, container zero-init) -- every defaultZero call site now wraps in try/except (N46 closed the one unguarded site, applyClosureGround)]
       "A5 zero-init: container field " & $t &
       " not yet supported (RFC §A5 sub-deferral)")
-  of itVariant, itMultiVariant:
-    # Zero-initing a variant requires picking a default disc + recursing.
-    # `defaultZero` doesn't have access to the constructor here; remains
-    # unsupported until a concrete demand surfaces (retBindEq's own
-    # `svVariant` arm, by contrast, supports an ASSIGNED variant return —
-    # this is a `defaultZero`-only gap, not a `retBindEq` one).
+  of itVariant:
+    # RFC-0005 S8n: Nim zero-initialises a variant object's memory, so its
+    # discriminator holds ordinal 0 and every field its own zero (the fields
+    # of the other arms are unreachable while the discriminator says ordinal
+    # 0, so zeroing them too binds nothing observable). Only when that is a
+    # legal value of the type (`variantZeroTotal`); a caller checks
+    # `defaultZeroTotal` first or catches the raise below.
+    if not variantZeroTotal(t):
+      raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a variant whose zero discriminator is not a legal tag has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal]
+        "A5 zero-init: variant " & $t & " has no legal zero value")
+    let discBoxed = new(SymVal)
+    discBoxed[] = defaultZero(t.vDiscTy, baseName & "." & t.vDiscName)
+    var plainFields: seq[SymVal]
+    for i, ft in t.vPlainFieldTypes:
+      plainFields.add defaultZero(ft, baseName & "." & t.vPlainFieldNames[i])
+    var armFields = initOrderedTable[int, seq[SymVal]]()
+    var armNames  = initOrderedTable[int, seq[string]]()
+    for arm in t.vArms:
+      var fields: seq[SymVal]
+      for j, ft in arm.fieldTypes:
+        fields.add defaultZero(ft, baseName & ".@" & arm.tagName & "." &
+                                   arm.fieldNames[j])
+      armFields[arm.tagOrdinal] = fields
+      armNames[arm.tagOrdinal]  = arm.fieldNames
+    SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: t.vDiscName,
+           vObjectName: t.vObjectName,
+           vArmFields: armFields, vArmFieldNames: armNames,
+           vPlainFields: plainFields,
+           vPlainFieldNames: t.vPlainFieldNames)
+  of itMultiVariant:
+    # Zero-initing a multi-variant requires picking a default disc per axis
+    # + recursing; remains unsupported until a concrete demand surfaces
+    # (the single-case `itVariant` arm above is wired, RFC-0005 S8n).
     raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (variant zero-init not wired) -- every defaultZero call site now wraps in try/except (N46)]
       "A5 zero-init: variant " & $t & " not supported")
   of itDistinct:
@@ -4088,6 +4133,26 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     raise (ref SymexRefUnresolvedError)(  # [raise-audited: converted-at-chokepoint -- all 3 defaultZero callers wrap ValueError/SymexRefUnresolvedError]
       msg: "ref/ptr zero-init " & $t &
            " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
+
+func defaultZeroTotal(t: IRType): bool
+
+func variantZeroTotal(t: IRType): bool =
+  ## RFC-0005 S8n: true when the all-zero memory of variant `t` is a value
+  ## of the type -- the discriminator's type holds 0 and 0 is a legal tag
+  ## (an explicit `of` ordinal, or covered by an `else:` arm, which
+  ## `discriminatorDomain` folds into `ordSet`; an empty `ordSet` means the
+  ## discriminator's own range is the domain) -- and every field has a zero
+  ## value. An enum whose first ordinal is not 0 fails the first test.
+  doAssert t.kind == itVariant
+  if not defaultZeroTotal(t.vDiscTy): return false
+  let (_, _, ordSet) = discriminatorDomain(t)
+  if ordSet.len > 0 and 0 notin ordSet: return false
+  for ft in t.vPlainFieldTypes:
+    if not defaultZeroTotal(ft): return false
+  for arm in t.vArms:
+    for ft in arm.fieldTypes:
+      if not defaultZeroTotal(ft): return false
+  true
 
 func defaultZeroTotal(t: IRType): bool =
   ## RFC-0005 S8f: true exactly when `defaultZero(t)` returns Nim's
@@ -4106,6 +4171,7 @@ func defaultZeroTotal(t: IRType): bool =
     true
   of itArray: defaultZeroTotal(t.elemTy)
   of itSeq: true
+  of itVariant: variantZeroTotal(t)   # RFC-0005 S8n
   else: false
 
 # ---------------------------------------------------------------------------
@@ -5634,6 +5700,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # RFC-0005 S9: a closure read here carries its by-reference captures
       # as they stand now (a no-op for every other value).
       refreshByRefCaptures(env[e.vname], env)
+    elif e.vname == "result" and unwrittenResultZero().isSome:
+      # RFC-0005 S8n: a callee's `result` read before its first write is
+      # the zero value Nim initialised it to (was `feGlobalReadUnmodelled`).
+      unwrittenResultZero().get
     elif not isFollowConcreteWalk():
       # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
       # symbolic walker) reaching a name absent from `env` is NEVER a
@@ -7874,20 +7944,15 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
 
-proc pathRoots(path: Path): seq[Z3Bool] =
-  ## Every assertion a walker query of `path` is issued with, as `trySolve`
-  ## has always made them (RFC-0005 S8k factored it out so the
-  ## loop-iteration feasibility check asks the same question).
+proc globalRoots(): seq[Z3Bool] =
+  ## The run-wide pools every walker query asserts beside its path's own
+  ## facts. Each is definitional or true of every real input, so asserting
+  ## it anywhere prunes no real execution. RFC-0005 S8n split it out of
+  ## `pathRoots` so the concolic scratch solves (`concreteBranchOutcome`,
+  ## `concretelyInfeasible`) see the same pools: without the closure
+  ## axioms a closure call's result was free there, and every `if` on one
+  ## was ambiguous.
   var roots: seq[Z3Bool]
-  for c in path.pc:
-    roots.add c
-  # Phase 16 ADR-0012: defect-survivor feasibility facts (the `not overflow`/
-  # `not divByZero`/`not parseIntRaise` negations) are asserted alongside `pc`,
-  # so the effective path condition (pc ++ defectSurvivorPc) is identical to the
-  # pre-ADR-0012 behaviour for every non-closure path. The split only changes
-  # which of these a closure's return-axiom uses as its implication guard.
-  for c in path.defectSurvivorPc:
-    roots.add c
   # RFC-0005 S7 (§2.4): the parseInt digits-gate pool that was drained here is
   # GONE. It asserted `startsWith(s,"-") => toInt(tail) >= 0` into EVERY check
   # run-wide, so a `parseInt` lowered on one path pruned a sibling path that
@@ -7921,6 +7986,23 @@ proc pathRoots(path: Path): seq[Z3Bool] =
   let cardConds = containerCardConds()
   for c in cardConds:
     roots.add c
+  roots
+
+proc pathRoots(path: Path): seq[Z3Bool] =
+  ## Every assertion a walker query of `path` is issued with, as `trySolve`
+  ## has always made them (RFC-0005 S8k factored it out so the
+  ## loop-iteration feasibility check asks the same question).
+  var roots: seq[Z3Bool]
+  for c in path.pc:
+    roots.add c
+  # Phase 16 ADR-0012: defect-survivor feasibility facts (the `not overflow`/
+  # `not divByZero`/`not parseIntRaise` negations) are asserted alongside `pc`,
+  # so the effective path condition (pc ++ defectSurvivorPc) is identical to the
+  # pre-ADR-0012 behaviour for every non-closure path. The split only changes
+  # which of these a closure's return-axiom uses as its implication guard.
+  for c in path.defectSurvivorPc:
+    roots.add c
+  roots.add globalRoots()
   roots
 
 proc trySolve(ctx: Z3Context,
@@ -9039,6 +9121,21 @@ proc isFollowConcreteWalk*(): bool =
     wp.mode == wmFollowConcrete
   else:
     false
+
+proc unwrittenResultZero(): Option[SymVal] =
+  ## RFC-0005 S8n. See fwd-decl above. `lower`'s `iekVar` arm asks this when
+  ## a callee reads `result` that no path statement has bound yet
+  ## (`result += 100` as the body's first statement). Before S8n the read
+  ## fell to the module-level-global arm, `feGlobalReadUnmodelled`. The
+  ## innermost `CallFrame` is the frame being walked: a callee's arguments
+  ## are lowered before its frame is pushed. A frame whose return type has
+  ## no total zero value keeps the global-read decline.
+  if currentWalkCtxPtr == nil: return none(SymVal)
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if wp.callStack.len == 0: return none(SymVal)
+  let t = wp.callStack[wp.callStack.high].retTy
+  if t == nil or not defaultZeroTotal(t): return none(SymVal)
+  some(defaultZero(t, wp.callStack[wp.callStack.high].retName & ".unwritten"))
 
 proc setInFlightThreadvars(inFlight: Option[ExnRecord]) {.inline.} =
   ## Phase 15 E8. Mirror the structural `w.frame.inFlightExn` into the
@@ -10237,13 +10334,22 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## survivor facts the condition's own lowering produced, which define a
   ## closure call's result there (its exit facts). `walkIfFollowConcrete`
   ## passes them only after checking the draws satisfy them.
+  ##
+  ## RFC-0005 S8n: both solves also assert `globalRoots()`, the run-wide
+  ## pools every walker query asserts. A closure call's result is a fresh
+  ## constant defined by its ground axioms there; without them it was free
+  ## under the pins, and an `if` on a closure that returned normally was
+  ## always ambiguous. The pools are definitional (or true of every real
+  ## input), so they prune no execution the draws describe.
   let rlimit = concreteBranchRLimit(settings)
+  let pools = globalRoots()
   let sTrue = newSolver(ctx)
   let spTrue = newParams(ctx)
   spTrue.set("rlimit", rlimit)
   spTrue.set("random_seed", 0'u)
   sTrue.setParams(spTrue)
   for c in concreteEq: sTrue.add(c)
+  for c in pools: sTrue.add(c)
   for c in facts: sTrue.add(c)
   sTrue.add(cond)
   let rTrue = sTrue.check()
@@ -10253,6 +10359,7 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   spFalse.set("random_seed", 0'u)
   sFalse.setParams(spFalse)
   for c in concreteEq: sFalse.add(c)
+  for c in pools: sFalse.add(c)
   for c in facts: sFalse.add(c)
   sFalse.add(not cond)
   let rFalse = sFalse.check()
@@ -10267,12 +10374,14 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## be on that path. One scratch solve, bounded like
   ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
   ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
+  ## RFC-0005 S8n: with the same `globalRoots()` pools.
   let sv = newSolver(ctx)
   let sp = newParams(ctx)
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
   sv.setParams(sp)
   for c in concreteEq: sv.add(c)
+  for c in globalRoots(): sv.add(c)
   for c in conds: sv.add(c)
   sv.check() == zsUnsat
 
@@ -13440,55 +13549,71 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # (`bc_i ⇒ r == v_i`): definitional, so the global pool never prunes a
   # model of another symbol. The funcSym stays declared (`buildClosure`): the
   # sort is read from it.
-  let appRaw = ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__closureRet",
-    Z3_get_range(ctx.raw, clo.closureRawFD))
   let funcApp =
-    try:
-      symValFromRawAst(appRaw, cb.retTy)
-    except ValueError:
-      # Round-6 N30: `symValFromRawAst` only wraps a closure's ground
-      # application for `itInt`/`itBool`/`itFloat32`/`itFloat64` — any OTHER
-      # return type (e.g. a closure returning `string`) raised `ValueError`
-      # unconditionally, for BOTH the assigned and untouched paths alike,
-      # uncaught here, surfacing as an internal-fault decline
-      # (`weInternalWalkerFault`) instead of an honest classified one. Mirrors
-      # the SAME try/except + `feUnsupportedOp` idiom the fallThrough loop
-      # below already uses for `defaultZero`'s composite-kind gaps (N16,
-      # walker v96): classify, never crash, and fall back to
-      # `defaultZero(cb.retTy, ...)` for a well-typed (if unconstrained)
-      # placeholder — `closureCallErrors` forces every path reaching this
-      # call to `sxUnknown` regardless of what value `funcApp` settles to
-      # (Invariant 3), so the fallback's content need not be trustworthy,
-      # only type-correct enough that a downstream consumer does not crash.
-      # RFC-0005 S7: `feUnsupportedOp` (`dcSubstituted`, S6b's closure-sink
-      # row): the fallback below is not tied to any body value, so `closureDegrade`
-      # puts ⊤ on the consuming path, not only in the closure sink.
-      closureDegrade(feUnsupportedOp,
-        "closure call through " & label &
-             ": return type kind " & $cb.retTy.kind &
-             " has no funcApp wrap in symValFromRawAst (" &
-             getCurrentExceptionMsg() &
-             ") — path degraded to sxUnknown (feUnsupportedOp)")
-      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): this call
-      # used to be `defaultZero(cb.retTy, ...)`, which itself still raises
-      # `ValueError` for a handful of composite kinds (itUninterp,
-      # itSet/itTable, itVariant/itMultiVariant, itDistinct — see
-      # `defaultZero`'s own doc comment). Every OTHER call site of
-      # `defaultZero` wraps it in a local `try`/`except` (runtime.nim
-      # ~7717, ~8451, ~9217 below); this one did not — a closure/HOF
-      # lambda returning one of those composite kinds, called inside a
-      # loop, reached `defaultZero`'s raw raise here unguarded, the exact
-      # ADR-0023 silent-loss shape. Use `allocateSym` instead of
-      # `defaultZero`: it is TOTAL for every classifiable type since N40
-      # (never raises — self-classifies via `allocDegrade` on an
-      # unsupported kind), so no try/except is needed at all. A fresh
-      # symbolic placeholder (vs. `defaultZero`'s zero value) is sound
-      # here for the SAME reason the comment above already gives: this
-      # whole path is already forced to `sxUnknown` by `closureCallErrors`
-      # regardless of what value `funcApp` settles to.
-      var freshRawWrapPc: seq[Z3Bool]
-      allocateSym(cb.retTy, freshDegradeName("__closureRet.rawwrapfail"),
-                  freshRawWrapPc)
+    if closureRetStructured(cb.retTy):
+      # RFC-0005 S8n: a variant result is a fresh variant (fresh leaves per
+      # occurrence, as the scalar constant below). Its allocation facts
+      # (the discriminator's legal tags) hold of every real value, so they
+      # join the closure axioms, which constrain nothing but this
+      # occurrence's own leaves. Before S8n the call declined
+      # (`seUnsupportedCompoundSortLeaf` + `feUnsupportedOp`): the funcSym
+      # has no variant sort.
+      var allocFacts: seq[Z3Bool]
+      let fresh = allocateSym(cb.retTy, freshDegradeName("__closureRet.variant"),
+                              allocFacts)
+      for f in allocFacts:
+        currentClosureCallAxioms.add f
+        currentClosureCallAxiomStrs.add $f
+      fresh
+    else:
+      let appRaw = ctx.checkErr Z3_mk_fresh_const(ctx.raw, "__closureRet",
+        Z3_get_range(ctx.raw, clo.closureRawFD))
+      try:
+        symValFromRawAst(appRaw, cb.retTy)
+      except ValueError:
+        # Round-6 N30: `symValFromRawAst` only wraps a closure's ground
+        # application for `itInt`/`itBool`/`itFloat32`/`itFloat64` — any OTHER
+        # return type (e.g. a closure returning `string`) raised `ValueError`
+        # unconditionally, for BOTH the assigned and untouched paths alike,
+        # uncaught here, surfacing as an internal-fault decline
+        # (`weInternalWalkerFault`) instead of an honest classified one. Mirrors
+        # the SAME try/except + `feUnsupportedOp` idiom the fallThrough loop
+        # below already uses for `defaultZero`'s composite-kind gaps (N16,
+        # walker v96): classify, never crash, and fall back to
+        # `defaultZero(cb.retTy, ...)` for a well-typed (if unconstrained)
+        # placeholder — `closureCallErrors` forces every path reaching this
+        # call to `sxUnknown` regardless of what value `funcApp` settles to
+        # (Invariant 3), so the fallback's content need not be trustworthy,
+        # only type-correct enough that a downstream consumer does not crash.
+        # RFC-0005 S7: `feUnsupportedOp` (`dcSubstituted`, S6b's closure-sink
+        # row): the fallback below is not tied to any body value, so `closureDegrade`
+        # puts ⊤ on the consuming path, not only in the closure sink.
+        closureDegrade(feUnsupportedOp,
+          "closure call through " & label &
+               ": return type kind " & $cb.retTy.kind &
+               " has no funcApp wrap in symValFromRawAst (" &
+               getCurrentExceptionMsg() &
+               ") — path degraded to sxUnknown (feUnsupportedOp)")
+        # N46 (round-6 re-review, ADR-0023/SND-3 class widening): this call
+        # used to be `defaultZero(cb.retTy, ...)`, which itself still raises
+        # `ValueError` for a handful of composite kinds (itUninterp,
+        # itSet/itTable, itVariant/itMultiVariant, itDistinct — see
+        # `defaultZero`'s own doc comment). Every OTHER call site of
+        # `defaultZero` wraps it in a local `try`/`except` (runtime.nim
+        # ~7717, ~8451, ~9217 below); this one did not — a closure/HOF
+        # lambda returning one of those composite kinds, called inside a
+        # loop, reached `defaultZero`'s raw raise here unguarded, the exact
+        # ADR-0023 silent-loss shape. Use `allocateSym` instead of
+        # `defaultZero`: it is TOTAL for every classifiable type since N40
+        # (never raises — self-classifies via `allocDegrade` on an
+        # unsupported kind), so no try/except is needed at all. A fresh
+        # symbolic placeholder (vs. `defaultZero`'s zero value) is sound
+        # here for the SAME reason the comment above already gives: this
+        # whole path is already forced to `sxUnknown` by `closureCallErrors`
+        # regardless of what value `funcApp` settles to.
+        var freshRawWrapPc: seq[Z3Bool]
+        allocateSym(cb.retTy, freshDegradeName("__closureRet.rawwrapfail"),
+                    freshRawWrapPc)
   # ---- 3. Inline-budget guard (CallFrameCtx.closureInlineCount). ----
   # `currentWalkCtxPtr` is nil only outside an active walk (the C2a probes never
   # reach here). If absent, fall back to the funcApp alone (no descent, no

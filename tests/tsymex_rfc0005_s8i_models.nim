@@ -568,10 +568,20 @@ suite "S8i (5b) the concolic if-walker routes a closure raise in its condition":
     let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0),
                      ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 1)]
     let r = concolicCollect(concIfClosure, trace, bindings)
-    checkpoint("branchTrace.len=" & $r.branchTrace.len)
+    checkpoint("branchTrace.len=" & $r.branchTrace.len &
+               " ambiguous=" & $r.counters.ambiguousBranches)
+    for b in r.branchTrace: checkpoint("armTaken=" & $b.armTaken)
     check r.pcSatByConcreteInputs
-    # Only the closure body's `v == 0` (not taken): no handler decision.
-    for b in r.branchTrace: check b.armTaken == -1
+    # The closure body's `v == 0` (not taken), then the outer `if`: real
+    # Nim's `pred(7)` is true, so it takes its arm. No handler decision.
+    # (Re-pinned by RFC-0005 S8n: before it the outer `if` on a returning
+    # closure was ambiguous -- the scratch solves never saw the closure
+    # axioms -- and the walk stopped with only the body's record.)
+    check r.counters.ambiguousBranches == 0
+    check r.branchTrace.len == 2
+    if r.branchTrace.len == 2:
+      check r.branchTrace[0].armTaken == -1
+      check r.branchTrace[1].armTaken == 0
 
 # ---- (6) walker version floor ---------------------------------------------------
 

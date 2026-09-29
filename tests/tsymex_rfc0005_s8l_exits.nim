@@ -190,6 +190,27 @@ proc callsBareVariant(x: int) =
   discard v
   if x == 5 and x == 6: symexTarget("s8l_bare_variant_dead")
 
+type
+  BareMV = object
+    ## Two `case` sections: a multi-variant, which still has no modelled
+    ## zero value after RFC-0005 S8n wired the single-case variant's.
+    case k: BareVK
+    of bvA: a: int
+    of bvB: b: int
+    case j: BareVK
+    of bvA: c: int
+    of bvB: d: int
+
+proc bareMultiVariant(x: int): BareMV =
+  ## Never assigned: an assigned multi-variant result is a separate,
+  ## pre-existing walker fault (reported by S8n).
+  if x > 0: return
+
+proc callsBareMultiVariant(x: int) =
+  let v = bareMultiVariant(x)
+  discard v
+  if x == 5 and x == 6: symexTarget("s8l_bare_mv_dead")
+
 # Top level: the SUT itself returns through its own finally.
 proc topFin(x: int): int =
   try:
@@ -341,8 +362,17 @@ suite "S8l (1) finally runs on a return exit":
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
-  test "a bare return of a result with no zero default is a fresh symbol (feUnsupportedOpHavoc)":
+  test "a bare return of a variant returns its zero value (re-pinned by RFC-0005 S8n)":
+    # S8l pinned `feUnsupportedOpHavoc` here: the variant had no modelled
+    # zero value. Nim zero-initialises it (`k == bvA`, `a == 0`), which S8n
+    # models, so the dead label is a clean sxUnsat.
     let r = symexFind(callsBareVariant, tLabel("s8l_bare_variant_dead"))
+    checkpoint($r.status & " " & show(r.errors))
+    check not r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
+    check r.status == sxUnsat
+
+  test "a bare return of a result with no zero default is a fresh symbol (feUnsupportedOpHavoc)":
+    let r = symexFind(callsBareMultiVariant, tLabel("s8l_bare_mv_dead"))
     checkpoint($r.status & " " & show(r.errors))
     check r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)

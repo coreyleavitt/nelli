@@ -877,5 +877,10 @@ task test, "Run the test suite":
             # labelled blocks, sort-checked Z3 construction, ref locals and
             # casts, nil ref locals, a closure's bare return; walker 159->160.
             "tsymex_rfc0005_s8m_exits",
-            "tsymex_rfc0005_s8k_bounds"]:
+            "tsymex_rfc0005_s8k_bounds",
+            # RFC-0005 S8n -- the precision remainder: concolic closure
+            # conditions, ref / ptr witnesses in `renderAsChoices`, a callee's
+            # unwritten `result`, variant closure results and the variant
+            # zero value; walker 161->162.
+            "tsymex_rfc0005_s8n_precision"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -137,15 +137,23 @@ proc s6bSeqFresh(n: int) =
 type
   S6bVK = enum s6bA, s6bB
   S6bV = object
+    ## Two `case` sections: a multi-variant. RFC-0005 S8n gave the
+    ## single-case variant its zero value, so this site needs a type that
+    ## still has none.
     case k: S6bVK
     of s6bA: a: int
     of s6bB: b: int
+    case j: S6bVK
+    of s6bA: c: int
+    of s6bB: d: int
 
 proc s6bMaybeVariant(n: int): S6bV =
-  ## RFC-0005 S8f: a variant result has no modelled zero default (a
-  ## `float` one did until walker 154 gave `defaultZero` its float arm).
-  if n > 0:
-    result = S6bV(k: s6bB, b: 3)
+  ## RFC-0005 S8f: a multi-variant result has no modelled zero default (a
+  ## `float` one did until walker 154 gave `defaultZero` its float arm, a
+  ## single-case variant until S8n). Never assigned: an assigned
+  ## multi-variant result is a separate, pre-existing walker fault
+  ## (`retBindEq` kind mismatch, reported by S8n).
+  discard n
 
 proc s6bFloatZeroDead(n: int) =
   let f = s6bMaybeVariant(n)

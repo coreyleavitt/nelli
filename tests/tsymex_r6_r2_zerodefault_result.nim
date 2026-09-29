@@ -281,6 +281,36 @@ proc sutVariantZeroDeclines(x: int) =
   if x <= 0:
     symexTarget("variant_zero_declines")
 
+proc sutVariantZeroNonzero(x: int) =
+  ## Real Nim: the untouched variant result is zero-initialised, `k == r2A`
+  ## (ordinal 0) and `a == 0`.
+  let r = maybeSetVariant(x)
+  if x <= 0 and (r.k != r2A or r.a != 0):
+    symexTarget("variant_zero_nonzero")
+
+type
+  R2MV = object
+    ## Two `case` sections: a multi-variant, which still has no modelled
+    ## zero value after RFC-0005 S8n wired the single-case one.
+    case k: R2VK
+    of r2A: a: int
+    of r2B: b: int
+    case j: R2VK
+    of r2A: c: int
+    of r2B: d: int
+
+proc maybeSetMultiVariant(x: int): R2MV =
+  ## Never assigned: an assigned multi-variant result is a separate,
+  ## pre-existing walker fault (`retBindEq` kind mismatch, reported by
+  ## RFC-0005 S8n), and this pin is about the untouched path alone.
+  discard x
+
+proc sutMultiVariantZeroDeclines(x: int) =
+  let r = maybeSetMultiVariant(x)
+  discard r
+  if x <= 0:
+    symexTarget("multivariant_zero_declines")
+
 suite "symex round-6 R2 — honest decline: a return type defaultZero cannot back (float)":
 
   test "T5g: the assigned float path still proves sxSat (unaffected regression)":
@@ -298,8 +328,20 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
     let z = symexFind(sutFloatZeroNonzero, tLabel("float_zero_nonzero"))
     check z.status == sxUnsat
 
-  test "T5h-2: a result type with no zero default (a variant) still declines, never a bound wrong value":
+  test "T5h-2: an untouched variant result is its zero value (RFC-0005 S8n; was a classified decline)":
+    ## Walker 162 gives `defaultZero` the single-case variant's zero value
+    ## (discriminator ordinal 0, every field zero), so the untouched path is
+    ## modelled: a clean sxSat, and a non-zero value there is unreachable.
     let r = symexFind(sutVariantZeroDeclines, tLabel("variant_zero_declines"))
+    check r.status == sxSat
+    check rfc0005RawStatus == sxSat
+    check r.errors.len == 0
+    let z = symexFind(sutVariantZeroNonzero, tLabel("variant_zero_nonzero"))
+    check z.status == sxUnsat
+
+  test "T5h-3: a result type with no zero default (a multi-variant) still declines, never a bound wrong value":
+    let r = symexFind(sutMultiVariantZeroDeclines,
+                      tLabel("multivariant_zero_declines"))
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
     var sawKind = false

@@ -90,8 +90,16 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
     var domain = envLeafSorts
     for s in pSorts: domain.add s
     var retPC: seq[Z3Bool]
-    let retRep = allocateSym(e.lambdaRetTy, "__closureRet", retPC)
-    let rangeSorts = sortOfTuple(retRep)
+    # RFC-0005 S8n: a variant-returning closure's per-occurrence result is a
+    # fresh variant `applyClosureGround` allocates itself (`closureResultFor`)
+    # and never an application of this decl, so its range sort is never
+    # read: a Bool placeholder keeps the decl well-formed. Deriving it
+    # declined the call (`seUnsupportedCompoundSortLeaf`), since a variant
+    # has no single-leaf sort.
+    let structuredRet = closureRetStructured(e.lambdaRetTy)
+    let rangeSorts =
+      if structuredRet: @[mkBoolSort(ctx).raw]
+      else: sortOfTuple(allocateSym(e.lambdaRetTy, "__closureRet", retPC))
     let rangeSort =
       if rangeSorts.len == 1:
         rangeSorts[0]

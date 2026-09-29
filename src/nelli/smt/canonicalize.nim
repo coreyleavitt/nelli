@@ -184,7 +184,23 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "161"
+const symexWalkerVersion* = "162"
+  ## RFC-0005 S8n (2026-09-29) — the precision remainder. The concolic
+  ## scratch solves (`concreteBranchOutcome`, `concretelyInfeasible`)
+  ## assert the run-wide pools every walker query asserts (`globalRoots`,
+  ## split out of `pathRoots`), so an `if` on a closure call that returns
+  ## normally is decided, not ambiguous. A callee (or closure) reading
+  ## `result` before any write reads its return type's zero value (was
+  ## `feGlobalReadUnmodelled`). `defaultZero` builds a single-case
+  ## variant's zero value (discriminator ordinal 0, every field zero) where
+  ## that is a legal value of the type, so an untouched variant result is
+  ## that value (was `feUnsupportedOpHavoc`). A variant-returning closure's
+  ## result is a fresh variant bound by the ground axioms (was
+  ## `seUnsupportedCompoundSortLeaf` + `feUnsupportedOp`).
+  ## `renderAsChoices` gains a `ref` / `ptr` arm; `renderAsChoicesVersion`
+  ## does not move: no ref witness could render (or persist) before.
+  ##
+  ## (Prior: 161.)
   ## RFC-0005 S8k (2026-09-28) — termination and resources. Every query
   ## caps each uninterpreted string / seq term at `maxSeqLen` (default 128)
   ## (`checkCapped`): an UNSAT the cap took part in is `beSolverUndef`, not

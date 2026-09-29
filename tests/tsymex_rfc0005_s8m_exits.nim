@@ -555,9 +555,9 @@ type
     of svkB: b: int
 
 proc closRetVariant(x: int) =
-  ## A variant result has no modelled zero value: the bare return is
-  ## `completeReturn`'s havoc site (`feUnsupportedOpHavoc`), now reached by a
-  ## closure too.
+  ## A variant result's bare return. At S8m it had no modelled zero value
+  ## and was `completeReturn`'s havoc site (`feUnsupportedOpHavoc`); RFC-0005
+  ## S8n models it (Nim zero-initialises the variant: `k == svkA`, `a == 0`).
   let g = proc (y: int): S8mV =
     if y > 0: return
     result = S8mV(k: svkB, b: 3)
@@ -682,15 +682,15 @@ suite "S8m (5) a closure's bare return":
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat
 
-  test "a result with no zero value is the havoc site (feUnsupportedOpHavoc)":
+  test "a variant result's bare return is its zero value (re-pinned by S8n)":
     let r = symexFind(closRetVariant, tLabel("s8m_closret_variant_dead"))
     checkpoint($r.status & " " & show(r.errors))
-    check hasKind(r.errors, feUnsupportedOpHavoc)
-    # A variant-typed closure result is itself substituted on the calling
-    # side (`seUnsupportedCompoundSortLeaf`, `feUnsupportedOp`: the
-    # `funcApp` has no variant sort), so the run stays sxUnknown; the pin is
-    # that the bare return reaches the havoc site and never a verdict.
-    check r.status == sxUnknown
+    # S8m pinned `feUnsupportedOpHavoc` + sxUnknown here: no variant zero
+    # value, and a variant closure result substituted on the calling side.
+    # RFC-0005 S8n models both (the zero value per real Nim, see
+    # `tsymex_rfc0005_s8n_precision` (4)), so the dead label is a verdict.
+    check not hasKind(r.errors, feUnsupportedOpHavoc)
+    check r.status == sxUnsat
 
 # ---- (6) walker version floor ---------------------------------------------------
 

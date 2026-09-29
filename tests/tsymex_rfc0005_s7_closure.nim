@@ -420,13 +420,20 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## loop-iteration feasibility check (`loopArmInfeasible`) both assert, so
     ## the audit reads `pathRoots` and pins that neither caller drains
     ## anything of its own.
+    ##
+    ## RFC-0005 S8n split the run-wide pools into `globalRoots`, which
+    ## `pathRoots` adds after the path's own facts (and the concolic scratch
+    ## solves assert too); the audit reads both, in that order.
     var drained: seq[string]
-    for t in routineBody(smtDir / "runtime.nim", "pathRoots"):
-      if t.startsWith("for c in ") and t.endsWith(":"):
-        drained.add t["for c in ".len ..< t.len - 1]
+    for routine in ["pathRoots", "globalRoots"]:
+      for t in routineBody(smtDir / "runtime.nim", routine):
+        if t.startsWith("for c in ") and t.endsWith(":"):
+          drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
                        "currentClosureCallAxioms", "stripDecompConds",
                        "cardConds"]
+    check "roots.add globalRoots()" in
+      routineBody(smtDir / "runtime.nim", "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:
       var callsRoots = false
       for t in routineBody(smtDir / "runtime.nim", caller):

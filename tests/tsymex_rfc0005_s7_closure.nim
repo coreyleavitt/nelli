@@ -415,13 +415,24 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ##       every real table for any term values (prunes no real input).
     ## The call cache (admits `taint == {}` only) and the fresh `Path` roots
     ## are sinks outside trySolve, pinned below.
+    ##
+    ## RFC-0005 S8k moved the list into `pathRoots`, which `trySolve` and the
+    ## loop-iteration feasibility check (`loopArmInfeasible`) both assert, so
+    ## the audit reads `pathRoots` and pins that neither caller drains
+    ## anything of its own.
     var drained: seq[string]
-    for t in routineBody(smtDir / "runtime.nim", "trySolve"):
+    for t in routineBody(smtDir / "runtime.nim", "pathRoots"):
       if t.startsWith("for c in ") and t.endsWith(":"):
         drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
                        "currentClosureCallAxioms", "stripDecompConds",
                        "cardConds"]
+    for caller in ["trySolve", "loopArmInfeasible"]:
+      var callsRoots = false
+      for t in routineBody(smtDir / "runtime.nim", caller):
+        check not (t.startsWith("for c in ") and t.endsWith(":"))
+        if "pathRoots(path)" in t: callsRoots = true
+      check callsRoots
 
   test "the parseInt digits-gate pool is gone from the source":
     for f in runtimeFiles():

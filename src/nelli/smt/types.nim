@@ -2614,12 +2614,12 @@ type
       ## `string`) any solver query may choose for one term. Default `128`.
       ## `0` means unlimited. Every query the walker issues caps each
       ## uninterpreted seq-sorted term (an input, a fresh return, a heap
-      ## `select`) at this length as an ASSUMPTION and reads Z3's unsat
-      ## core (`runtime.nim`'s `checkCapped`): a model found under the cap
-      ## is a model of the query; an UNSAT the cap is not part of is the
-      ## query's own; an UNSAT the cap took part in is neither, and the
-      ## solve is `zsUnknown` -- recorded as `beSolverUndef` naming this
-      ## field.
+      ## `select`) at this length (`runtime.nim`'s `checkCapped`): a model
+      ## found under the cap is a model of the query; an UNSAT is the
+      ## query's own only when the query without the sequence theory, or
+      ## an unsat core without the cap, shows it; an UNSAT the cap took
+      ## part in is neither, and the solve is `zsUnknown` -- recorded as
+      ## `beSolverUndef` naming this field.
       ##
       ## Why a cap and not `queryRLimit`: Z3's sequence solver explores
       ## lengths upward, and its work per step grows super-linearly with
@@ -2636,11 +2636,14 @@ type
       ## or seq (one `maxSeqLen` caps), when smaller than the query's own
       ## (`queryRLimit`, `0` = unbounded, or the tainted target-hit budget).
       ## `0` means no extra bound. Under the cap the sequence solver DOES
-      ## poll the counter, but it spends it slowly (measured on the pinned
-      ## Z3: 40-55k units/s, against ~1M/s for arithmetic): `s.len == 20
-      ## and s[19] == 'q'` needs 2.3M units (~60 s) to find its model, the
-      ## same at length 100 needs 34M (~10 min), and unbounded (the default
-      ## `queryRLimit`) nothing stopped a within-cap query that needed more.
+      ## poll the counter, but it can spend it slowly (measured on the
+      ## pinned Z3: 40-55k units/s, against ~1M/s for arithmetic). In the
+      ## lowered byte-test form `s.len == 20 and s[19] == 'q'` needed 2.3M
+      ## units (~60 s) and the same at length 100 34M (~10 min); the query
+      ## now takes a byte equality in its character form (`checkCapped`),
+      ## which decides both at once, but other string queries still cost
+      ## that much, and unbounded (the default `queryRLimit`) nothing
+      ## stopped a within-cap query that needed more.
       ## `20M` is the bound `concreteBranchRLimit` and the tainted target-hit
       ## solve already use by default (`defaultConcreteBranchRLimit`): a few
       ## minutes of sequence search at most. Deterministic (a step count,

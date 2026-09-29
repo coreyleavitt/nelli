@@ -108,7 +108,7 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
     let r = symexFind(sut, tLabel("correct"))
     check r.status == sxSat
 
-  test "R5-2: the STALE (pre-loop, unadvanced) i is no longer FALSELY reachable -- honest sxUnknown, not sxSat":
+  test "R5-2: the STALE (pre-loop, unadvanced) i is no longer FALSELY reachable -- sxUnsat (S8k; was an honest sxUnknown)":
     ## Pre-fix this reported sxSat (WRONG: the member branch's empty block
     ## never advances `i`, so the model thinks the entry value 0 survives to
     ## the post-loop check, even though the real program never returns 0
@@ -130,11 +130,16 @@ suite "symex round-6 R5 -- B6 pair-loop counter advance (finding S4)":
     ## narrower and still fully achieved: the WRONG sxSat is gone, replaced
     ## by an HONEST degrade -- capability lost, never a wrong verdict,
     ## exactly the RFC's own tradeoff for fix option (b).
+    ## RFC-0005 S8k (walker 161): the k-unroll now drops an iteration whose
+    ## guard the path refutes, so that limitation is gone and the absence
+    ## proof is the verdict: sxUnsat. Nim agrees -- on this literal the
+    ## first pair ends at i == 6, the second key is empty, the loop breaks
+    ## with i == 6, and "stale" is never reached (R5-1 reaches "correct").
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSutCounter(s, 0)
     let r = symexFind(sut, tLabel("stale"))
-    check r.status == sxUnknown
+    check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
 # 2. Non-member/fallback consistency (RFC test-plan item 3). A truncated

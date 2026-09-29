@@ -7590,11 +7590,11 @@ when defined(symexQueryStats):
 # elements each step's work grows super-linearly; past ~250 a single step
 # can run for minutes without polling the resource counter, so neither
 # `rlimit` nor a wall-clock `timeout` bounds it (measured, see
-# `ResourceBudget.maxSeqLen`). Every walker query therefore assumes each
-# uninterpreted seq-sorted term is at most `maxSeqLen` long, and reads the
-# unsat core to tell a genuine UNSAT from one the cap caused. Under the cap
-# the counter IS polled, but slowly, so such a query also runs under
-# `seqQueryRLimit`. Deterministic: no wall clock is consulted anywhere.
+# `ResourceBudget.maxSeqLen`). Every walker query with a string / seq leaf
+# is therefore solved with each such leaf capped at `maxSeqLen` elements
+# (`checkCapped`). Under the cap the counter IS polled, but slowly, so such
+# a query also runs under `seqQueryRLimit`. Deterministic: no wall clock is
+# consulted anywhere.
 
 var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, uninterp, select: int]
   ## The `Z3_decl_kind` ordinals of an uninterpreted application and an
@@ -7613,17 +7613,63 @@ proc seqCapKinds(ctx: Z3Context): tuple[uninterp, select: int] =
       select:   ord(Z3_get_decl_kind(ctx.raw, getAppDecl(sel))))
   (seqCapDeclKinds.uninterp, seqCapDeclKinds.select)
 
-proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool];
-                cap: int): seq[Z3Bool] =
+proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
+    tuple[caps: seq[Z3Bool], lastIndex: bool,
+          byteEqs: seq[tuple[old, new: Z3Bool]]] =
   ## RFC-0005 S8k. `len(t) <= cap` for every seq-sorted (string or seq)
   ## term `t` in `roots` that is an uninterpreted constant or application
   ## (an input, a fresh return, a closure/UF result) or an array `select`
   ## (a heap cell). Every other seq-sorted term is built from these by
   ## interpreted operations, so bounding the leaves bounds the query's
   ## search space. Quantifier bodies are not entered (their seq terms are
-  ## bound, not chosen). Each distinct AST is visited once.
+  ## bound, not chosen). Each distinct AST is visited once. `lastIndex`
+  ## reports a `seq.last_indexof` anywhere in `roots` (see `checkCapped`);
+  ## it is matched by name, because its decl kind is Z3's catch-all
+  ## internal ordinal, which other operators share.
+  ##
+  ## `byteEqs` pairs each byte test `int2bv[8](str.to_code(c)) == n`
+  ## (either operand order, `n` a numeral, `c = str.at(s, i)`), where `s`
+  ## is a string leaf whose byte-domain constraint `s in (\x00..\xff)*`
+  ## is itself one of `roots`, with `c == "\xNN"` (for `n = 255`, also
+  ## `c == ""`: `str.at` past the end is `""`, whose code -1 wraps to
+  ## 0xFF). Under that constraint every character of `s` has a code in
+  ## 0..255, so the two agree in every model of `roots`. `s[i] == 'a'`
+  ## lowers to the first form, and Z3 decides it slowly: `s[0..2] ==
+  ## "aaa"` needed 41M units (103 s) in the first form, 3.8k in the
+  ## second; the `parseInt("-x")` raise query 23.6M against 12k (measured
+  ## on the pinned Z3, each in a fresh context). The other exact
+  ## rewrite, `x mod 256 == n`, fixed the first and made the second
+  ## 110M.
   let kinds = seqCapKinds(ctx)
   let capInt = mkInt(ctx, cap)
+  proc nameOf(ctx: Z3Context; a: Z3AnyAst): string =
+    if getAstKind(a) == akApp: declName(ctx, unpackApp(a).decl) else: ""
+  # The string leaves whose byte-domain constraint is a root: built as the
+  # walker builds it (`allocateSym`'s `itString` arm), so it is the same
+  # hash-consed AST.
+  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
+  let byteReId = astId(ctx, byteRe.raw)
+  var byteLeaves: HashSet[int]
+  for r in roots:
+    let ra = toAnyAst(r)
+    if nameOf(ctx, ra) == "str.in_re":
+      let args = unpackApp(ra).args
+      if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp:
+        byteLeaves.incl astId(ctx, args[0].raw)
+  proc byteTestChar(ctx: Z3Context; conv: Z3AnyAst):
+      tuple[ok: bool, ch: Z3AnyAst] =
+    ## `str.at(s, i)` when `conv` is `int2bv[8](str.to_code(str.at(s, i)))`
+    ## over a byte leaf `s`.
+    if nameOf(ctx, conv) != "int_to_bv" or
+       Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, conv.raw)) != 8:
+      return
+    let code = unpackApp(conv).args[0]
+    if nameOf(ctx, code) != "str.to_code": return
+    let ch = unpackApp(code).args[0]
+    if nameOf(ctx, ch) != "str.at": return
+    if astId(ctx, unpackApp(ch).args[0].raw) notin byteLeaves: return
+    (true, ch)
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
@@ -7634,67 +7680,195 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool];
     seen.incl id
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
-    if getSortKind(t) == skSeq:
-      let k = ord(Z3_get_decl_kind(ctx.raw, decl))
-      if k == kinds.uninterp or k == kinds.select:
-        let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
-        result.add lenT <= capInt
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if getSortKind(t) == skSeq and (k == kinds.uninterp or k == kinds.select):
+      let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
+      result.caps.add lenT <= capInt
+    elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
+      for (conv, lit) in [(args[0], args[1]), (args[1], args[0])]:
+        if getAstKind(lit) != akNumeral: continue
+        let (ok, ch) = byteTestChar(ctx, conv)
+        if not ok: continue
+        let n = parseInt($Z3_get_numeral_string(ctx.raw, lit.raw))
+        let chS = wrap[Z3String](ctx, ch.raw)
+        var eqv = chS == mkString(ctx, $chr(n))
+        if n == 255: eqv = eqv or (chS == mkString(ctx, ""))
+        result.byteEqs.add (old: wrap[Z3Bool](ctx, t.raw), new: eqv)
+        break
+    elif not result.lastIndex and declName(ctx, decl) == "seq.last_indexof":
+      result.lastIndex = true
     for a in args: stack.add a
 
-proc checkCapped(s: Z3Solver; ctx: Z3Context; roots: openArray[Z3Bool];
-                 settings: SymexSettings; rlimit: uint):
-                 tuple[status: Z3Status, capped, seqBounded: bool] =
-  ## RFC-0005 S8k. `s.check()` under the `maxSeqLen` assumption. `roots`
-  ## are the formulas asserted into `s` (the caps are taken from them);
-  ## `rlimit` is the one `s` was built with. With no seq leaf (or
-  ## `maxSeqLen == 0`, unlimited) this is exactly `s.check()`. Otherwise
-  ## the query runs under `seqQueryRLimit` when that is the smaller bound
-  ## (`seqBounded`), and the caps ride one fresh assumption literal:
-  ##   * sat -- the model satisfies the caps, so it is a model of `s`;
-  ##   * unsat with the literal outside the core -- `s` alone is UNSAT;
-  ##   * unsat with the literal in the core -- only the cap refuted it (a
-  ##     longer term may satisfy `s`): reported `zsUnknown`, `capped`.
-  let cap = settings.budget.maxSeqLen
-  if cap <= 0:
-    return (s.check(), false, false)
-  let caps = seqLenCaps(ctx, roots, cap)
-  if caps.len == 0:
-    return (s.check(), false, false)
-  let sq = settings.budget.seqQueryRLimit
-  let seqBounded = sq != 0 and (rlimit == 0 or sq < rlimit)
-  if seqBounded:
-    let p = newParams(ctx)
-    p.set("rlimit", sq)
-    p.set("random_seed", 0'u)
-    s.setParams(p)
-  let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")
-  var all = caps[0]
-  for i in 1 ..< caps.len: all = all and caps[i]
-  s.add implies(capLit, all)
-  let r = s.checkWith([capLit])
-  if r != zsUnsat:
-    return (r, false, seqBounded)
-  if s.getUnsatCore().len == 0:
-    return (zsUnsat, false, seqBounded)
-  (zsUnknown, true, seqBounded)
-
-proc pathSolver(ctx: Z3Context; path: Path; settings: SymexSettings;
-                rlimit: uint): tuple[s: Z3Solver, roots: seq[Z3Bool]] =
-  ## The solver every walker query of `path` is issued on, with every
-  ## assertion `trySolve` has always made (RFC-0005 S8k factored it out so
-  ## the loop-iteration feasibility check asks the same question). `roots`
-  ## lists what was asserted, for `checkCapped`.
-  let s = newSolver(ctx)
-  # Z3 bound: deterministic logical-step count (NOT wall-clock) so
-  # the same SUT + Z3 build produces identical outcomes across
-  # machines. `rlimit = 0` is Z3's documented "unbounded"; non-zero
-  # truncates to `Z3_L_UNDEF` (sxUnknown). `random_seed = 0'u`
-  # overrides any caller's `setGlobalParam` so the verdict cache's
-  # determinism guarantee doesn't depend on undocumented Z3 defaults.
+proc querySolver(ctx: Z3Context; roots: openArray[Z3Bool];
+                 rlimit: uint; seqTheory = true): Z3Solver =
+  ## A fresh solver holding `roots`. Z3 bound: deterministic logical-step
+  ## count (NOT wall-clock) so the same SUT + Z3 build produces identical
+  ## outcomes across machines. `rlimit = 0` is Z3's documented
+  ## "unbounded"; non-zero truncates to `Z3_L_UNDEF` (sxUnknown).
+  ## `random_seed = 0'u` overrides any caller's `setGlobalParam` so the
+  ## verdict cache's determinism guarantee doesn't depend on undocumented
+  ## Z3 defaults. `seqTheory = false` (RFC-0005 S8k, `checkCapped`) runs
+  ## the query with no sequence theory registered (`smt.string_solver =
+  ## none`): every string / seq operation Z3's rewriter does not evaluate
+  ## is an uninterpreted function, so the query's models are a SUPERSET of
+  ## the real ones -- its UNSAT is the query's own, and it never searches
+  ## for a string at all.
+  result = newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
   solverParams.set("random_seed", 0'u)
-  s.setParams(solverParams)
+  if not seqTheory:
+    solverParams.set("smt.string_solver", "none")
+  result.setParams(solverParams)
+  for c in roots: result.add(c)
+
+proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
+                 settings: SymexSettings; rlimit: uint):
+                 tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
+                       why: string] =
+  ## RFC-0005 S8k. Decide `rootsIn` (every assertion of one walker query)
+  ## with each string / seq leaf capped at `maxSeqLen` elements. `s` is the
+  ## solver that answered (for its statistics), `m` its model in `ctx` for
+  ## `zsSat`; `why` says why a `zsUnknown` is one, for the caller's
+  ## `beSolverUndef` message. With no seq leaf (or `maxSeqLen == 0`,
+  ## unlimited) this is exactly the pre-S8k one-shot `check()` under
+  ## `rlimit`. Otherwise each byte test takes its character form
+  ## (`seqLenCaps`' `byteEqs`), and every step runs under
+  ## `seqQueryRLimit` when that is the smaller bound:
+  ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
+  ##      model of the uncapped query.
+  ##   1b. after an UNSAT in (1), or an unknown in both (1) and (3),
+  ##      the query with NO sequence theory (`querySolver`'s
+  ##      `seqTheory = false`): its models are a superset of the real ones,
+  ##      so its UNSAT is the query's own. It decides the UNSATs whose
+  ##      contradiction is arithmetic over lengths and indices without any
+  ##      string search, and without step 2's unsat core, which may name
+  ##      the cap although the query's own bounds refute it too (Z3's cores
+  ##      are not minimal).
+  ##   2. if (1) is UNSAT: a fresh solver with the caps behind one
+  ##      assumption literal, checked under it, and its unsat core read.
+  ##      Without the literal in the core the query is UNSAT on its own;
+  ##      with it, only the cap refuted it (a longer term may satisfy the
+  ##      query): `zsUnknown`, and no uncapped query is ever run -- its
+  ##      models, if any, are exactly the long ones Z3 cannot be bounded
+  ##      on.
+  ##   3. the uncapped one-shot `check()` (the pre-S8k query) decides when
+  ##      (1) ran out of budget -- asserted length caps can slow a query
+  ##      Z3 answers quickly without them -- and, in place of (2), for a
+  ##      query holding a `seq.last_indexof` (below).
+  ## Z3's cost on a string query is not a function of the query alone: it
+  ## also followed whatever the process had built before. The same
+  ## lowered `s[0..2] == "aaa"` label query was SAT at once as a program's
+  ## only search and ran past 20M units as the last search of
+  ## `tsymex_r1b_shortcircuit_oob`; running (1b) before (3) moved a
+  ## `parseInt` raise query across 20M; a `seq[byte]` scan query SAT in
+  ## 2.1M units from its own SMT-LIB text ran past 20M in the walker even
+  ## in a fresh context of its own (Z3 keeps process-wide state). So the
+  ## budget is a bound, not a promise: the character
+  ## form keeps the common byte tests far below it, and a query that
+  ## lands near it can decline in one process and not another.
+  ## Why two solver modes: Z3 answers a check under assumptions with its
+  ## incremental core, not the one-shot preprocessing pipeline, and that
+  ## core is both much slower on bit-vector-heavy queries (one the
+  ## one-shot solver finished in seconds exhausted 20M units) and wrong on
+  ## `seq.last_indexof` over a term fixed to a constant: with `s == "abc"`
+  ## asserted it takes `seq.last_indexof(s, "bc")` to be -4294967292, not
+  ## 1 (probed on the pinned Z3; a bare `(check-sat-assuming (true))` or a
+  ## `push` is enough). So every model comes from a one-shot check, and
+  ## the incremental core is consulted only to tell an UNSAT's cause.
+  template plain(): untyped =
+    let s = querySolver(ctx, rootsIn, rlimit)
+    let r = s.check()
+    return (r, s, (if r == zsSat: s.model() else: nil),
+            (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
+  let cap = settings.budget.maxSeqLen
+  if cap <= 0: plain()
+  let (caps, lastIndex, byteEqs) = seqLenCaps(ctx, rootsIn, cap)
+  if caps.len == 0: plain()
+  # Every step below decides the query with each byte equality in its
+  # `mod` form (`seqLenCaps`): the same predicate, so the same models.
+  var roots = newSeq[Z3Bool](rootsIn.len)
+  if byteEqs.len == 0:
+    for i, r in rootsIn: roots[i] = r
+  else:
+    var froms = newSeq[RawZ3Ast](byteEqs.len)
+    var tos = newSeq[RawZ3Ast](byteEqs.len)
+    for i, e in byteEqs:
+      froms[i] = e.old.raw
+      tos[i] = e.new.raw
+    for i, r in rootsIn:
+      roots[i] = wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
+        cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  let sq = settings.budget.seqQueryRLimit
+  let seqBounded = sq != 0 and (rlimit == 0 or sq < rlimit)
+  let rl = if seqBounded: sq else: rlimit
+  proc z3Why(s: Z3Solver): string =
+    result = "Z3: " & s.reasonUnknown()
+    if seqBounded:
+      result.add " (the query mentions a string / seq, so it ran under " &
+        "seqQueryRLimit = " & $sq & ")"
+  let capText = "no model with every string / seq at most " & $cap &
+    " elements (maxSeqLen); a longer one was not searched"
+  # Step 1: the caps asserted, one-shot.
+  let s1 = querySolver(ctx, roots, rl)
+  for c in caps: s1.add c
+  let r1 = s1.check()
+  if r1 == zsSat: return (zsSat, s1, s1.model(), "")
+  # Step 1b: the query with no sequence theory. Its models include every
+  # real one, so an UNSAT here is the query's own (the cap took no part);
+  # it cannot run into a long-string search, having none. It decides the
+  # UNSATs whose contradiction is arithmetic over lengths and indices,
+  # which an unsat core (step 2) can wrongly attribute to the cap: Z3's
+  # cores are not minimal, and `len(s) <= maxSeqLen` bounds a length as
+  # well as the query's own `len(s) <= 1000` does. After an unknown in
+  # (1) it runs only once (3) has failed too (see the doc comment).
+  template theoryFreeUnsat(): (bool, Z3Solver) =
+    let sTf = querySolver(ctx, roots, rl, seqTheory = false)
+    (sTf.check() == zsUnsat, sTf)
+  if r1 == zsUnsat:
+    let (tfUnsat, s1b) = theoryFreeUnsat()
+    if tfUnsat: return (zsUnsat, s1b, nil, "")
+  if r1 == zsUnsat and not lastIndex:
+    # Step 2: is the UNSAT the query's own?
+    let s2 = querySolver(ctx, roots, rl)
+    let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")
+    var all = caps[0]
+    for i in 1 ..< caps.len: all = all and caps[i]
+    s2.add implies(capLit, all)
+    let r2 = s2.checkWith([capLit])
+    return case r2
+      of zsUnsat:
+        if s2.getUnsatCore().len == 0: (zsUnsat, s2, nil, "")
+        else: (zsUnknown, s1, nil, capText)
+      of zsUnknown:
+        (zsUnknown, s2, nil, capText & "; whether the query is UNSAT on " &
+                             "its own was not decided: " & z3Why(s2))
+      of zsSat:
+        # SAT under the assumption although step 1 found the capped query
+        # UNSAT: the two Z3 solvers disagree, and neither answer is used.
+        (zsUnknown, s1, nil, "Z3's one-shot and incremental solvers " &
+                             "disagree on this query under maxSeqLen = " &
+                             $cap)
+  # Step 3: the uncapped one-shot query.
+  let s3 = querySolver(ctx, roots, rl)
+  let r3 = s3.check()
+  case r3
+  of zsSat: (zsSat, s3, s3.model(), "")
+  of zsUnsat: (zsUnsat, s3, nil, "")
+  of zsUnknown:
+    if r1 == zsUnsat:
+      (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
+                           "seq.last_indexof) was not decided: " & z3Why(s3))
+    else:
+      let (tfUnsat, s1b) = theoryFreeUnsat()
+      if tfUnsat: (zsUnsat, s1b, nil, "")
+      else: (zsUnknown, s3, nil, z3Why(s3))
+
+proc pathRoots(path: Path): seq[Z3Bool] =
+  ## Every assertion a walker query of `path` is issued with, as `trySolve`
+  ## has always made them (RFC-0005 S8k factored it out so the
+  ## loop-iteration feasibility check asks the same question).
   var roots: seq[Z3Bool]
   for c in path.pc:
     roots.add c
@@ -7735,11 +7909,10 @@ proc pathSolver(ctx: Z3Context; path: Path; settings: SymexSettings;
   # unrealizable models (`t.len == 0 and t.hasKey("a")`), never a real
   # input; and every model that satisfies it is the one the extractors
   # render.
-  for c in containerCardConds():
+  let cardConds = containerCardConds()
+  for c in cardConds:
     roots.add c
-  for c in roots:
-    s.add(c)
-  (s: s, roots: roots)
+  roots
 
 proc trySolve(ctx: Z3Context,
               path: Path,
@@ -7751,12 +7924,12 @@ proc trySolve(ctx: Z3Context,
   ## `undefWhy` (RFC-0005 S8k) says why an `sxUnknown` is one, for the
   ## caller's `beSolverUndef` message: the `maxSeqLen` cap, or Z3's own
   ## `reason_unknown` (an exhausted `queryRLimit`, an incomplete theory).
-  let (s, roots) = pathSolver(ctx, path, settings, settings.budget.queryRLimit)
+  let roots = pathRoots(path)
   inc symexZ3CallCount
-  let (r, capped, seqBounded) = checkCapped(s, ctx, roots, settings,
-                                            settings.budget.queryRLimit)
+  let (r, s, model, why) = checkCapped(ctx, roots, settings,
+                                       settings.budget.queryRLimit)
   when defined(symexQueryStats):
-    # Counted from the same sources `pathSolver` asserts, so it tracks
+    # Counted from the same sources `pathRoots` collects, so it tracks
     # them by construction rather than by a hand-maintained tally.
     recordQueryStat(s, roots.len,
       (case r
@@ -7765,7 +7938,7 @@ proc trySolve(ctx: Z3Context,
        else: "unknown"))
   case r
   of zsSat:
-    let m = s.model()
+    let m = model
     # Use initialEnv when provided — mutations may have rebound params
     # to post-store SymVals; the witness wants the pre-call value.
     let envForExtract = if initialEnv.len > 0: initialEnv else: path.env
@@ -7777,17 +7950,6 @@ proc trySolve(ctx: Z3Context,
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
-    let why =
-      if capped:
-        "no model with every string / seq at most " &
-          $settings.budget.maxSeqLen & " elements (maxSeqLen); a longer " &
-          "one was not searched"
-      elif seqBounded:
-        "Z3: " & s.reasonUnknown() & " (the query mentions a string / seq, " &
-          "so it ran under seqQueryRLimit = " &
-          $settings.budget.seqQueryRLimit & ")"
-      else:
-        "Z3: " & s.reasonUnknown()
     (status: sxUnknown, witness: RawWitness(), undefWhy: why)
 
 const defaultLoopPruneRLimit* = 250_000'u
@@ -7807,7 +7969,7 @@ func loopPruneRLimit*(settings: SymexSettings): uint =
 
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
                        settings: SymexSettings): bool =
-  ## RFC-0005 S8k. True only when `path`'s full query (`pathSolver`) plus
+  ## RFC-0005 S8k. True only when `path`'s full query (`pathRoots`) plus
   ## `arm` is UNSAT on its own -- the arm of a loop guard no real execution
   ## on this path can take. A literal `arm` is decided without the solver;
   ## `zsUnknown` (the budget, or an UNSAT only the `maxSeqLen` cap caused)
@@ -7818,10 +7980,8 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   let lit = $simplify(arm)
   if lit == "false": return true
   if lit == "true": return false
-  let rl = loopPruneRLimit(settings)
-  let (s, roots) = pathSolver(ctx, path, settings, rl)
-  s.add arm
-  checkCapped(s, ctx, roots & @[arm], settings, rl).status == zsUnsat
+  checkCapped(ctx, pathRoots(path) & @[arm], settings,
+              loopPruneRLimit(settings)).status == zsUnsat
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks

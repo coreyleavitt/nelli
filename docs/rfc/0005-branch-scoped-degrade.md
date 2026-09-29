@@ -2231,26 +2231,82 @@ identical.
    `symexFind(…, tRaisedExn("NilAccessDefect"))`.
 
 - **Runtime.**
-  - Every query the walker issues (`trySolve`, through the new shared
-    `pathSolver`) caps each uninterpreted seq-sorted term at
-    `ResourceBudget.maxSeqLen` elements (bytes for a `string`; default 128;
-    `0` = unlimited). The capped terms are an input, a fresh return, a
-    closure / UF result, or a heap `select`. `checkCapped` asserts
-    `len(t) <= maxSeqLen` behind one fresh assumption literal and reads
-    the unsat core:
-    - a model is a model of the uncapped query;
-    - UNSAT without the literal in the core is the query's own UNSAT;
-    - UNSAT with it is `zsUnknown`, recorded as `beSolverUndef` whose
-      message names `maxSeqLen`. It is never a verdict.
-    Every other seq term is built from these leaves by interpreted
-    operations, so capping the leaves bounds the search. Assumption-based
-    checking costs what a hard assert does (measured: 4.3 s either way at
-    length 130).
-  - Under the cap the sequence solver does poll `rlimit`, but it spends it
-    at 40–55k units/s (against ~1M/s for arithmetic). `s.len == 20 and
-    s[19] == 'q'` needs 2.3M units (~60 s) to find its model. The same at
-    length 100 needs 34M (~10 min), and nothing stopped a within-cap query
-    that needed more under the default unbounded `queryRLimit`. So a query
+  - Every query the walker issues (`trySolve` and the loop check below,
+    both through the new shared `pathRoots` / `checkCapped`) caps each
+    uninterpreted seq-sorted term at `ResourceBudget.maxSeqLen` elements
+    (bytes for a `string`; default 128; `0` = unlimited). The capped terms
+    are an input, a fresh return, a closure / UF result, or a heap
+    `select`. Every other seq term is built from these leaves by
+    interpreted operations, so capping the leaves bounds the search.
+    First, each byte test `int2bv8(str.to_code(str.at(s, i))) == n` over
+    an input string `s` whose byte-domain constraint is in the query
+    becomes `str.at(s, i) == "\xNN"` (or `""` too, for `n = 255`): the
+    same predicate under that constraint, and far cheaper (below).
+    `checkCapped` then decides the query in up to four fresh one-query
+    solvers:
+    1. one-shot, with every `len(t) <= maxSeqLen` asserted. A model is a
+       model of the uncapped query.
+    2. after (1) was UNSAT, or (1) and (4) both ran out of budget:
+       one-shot with no sequence theory registered
+       (`smt.string_solver = none`). Every string operation Z3's rewriter
+       does not evaluate is uninterpreted, so the models are a superset
+       of the real ones and an UNSAT is the query's own. It has no string
+       search to run into.
+    3. if (1) was UNSAT and (2) was not: the caps behind one assumption
+       literal, checked incrementally, and the unsat core read. No
+       literal in the core: the query's own UNSAT. The literal in the
+       core, or `unknown`: `zsUnknown`, recorded as `beSolverUndef`
+       naming `maxSeqLen`, never a verdict.
+    4. the uncapped one-shot query (the pre-S8k one), only when (1) ran
+       out of budget, or in place of (3) for a query holding a
+       `seq.last_indexof`.
+    Why so much: each simpler design broke a pinned suite on the first
+    gate or on the way to the second.
+    - Z3's incremental core (any `check-sat-assuming` or `push`, even
+      `(check-sat-assuming (true))`) evaluates `seq.last_indexof` wrongly
+      over a term fixed to a constant: with `s == "abc"` it takes
+      `seq.last_indexof(s, "bc")` to be -4294967292, not 1. That made
+      `phase16_m3_rfind` a false `sxUnsat`. So every model comes from a
+      one-shot check, and a `last_indexof` query never trusts (3).
+    - The incremental core is also far slower on bit-vector-heavy
+      queries: `r14_case2_degrade`'s label query, seconds one-shot, ran
+      out of 20M units, so its IndexDefect raise was reported first.
+    - Z3's unsat cores are not minimal. `r6_r3_svint_overflow` R3-5b
+      bounds `s.len <= 1000` itself, and the overflow it asks about is
+      refuted by arithmetic alone, but the core named the cap (which
+      bounds the length as well). (2) decides it.
+    - `seq.last_indexof` has no decl kind of its own in the C API: it
+      reports Z3's catch-all internal ordinal, shared with `ubv_to_int`
+      among others. Matching on the kind sent every string index query
+      down (4) uncapped, and `farColon` hung again. It is matched by
+      name.
+    - Byte tests: in their lowered form, `s[0..2] == "aaa"` needs 41M
+      units (103 s) and the `parseInt("-x")` raise query of
+      `s7_closure` 23.6M; in character form, 3.8k and 12k. The other
+      exact rewrite, `x mod 256 == n`, fixed the first and made the
+      second 110M. The character form is used only where the query
+      itself pins the string to bytes.
+    - Z3's cost on a string query is not a function of the query alone.
+      The lowered `s[0..2] == "aaa"` label query was SAT at once as a
+      program's only search and ran past 20M units as the last search of
+      `r1b_shortcircuit_oob`. Running (2) before (4) pushed the
+      `parseInt` raise query across 20M. A `seq[byte]` scan query of
+      `r6_b7r_bytescan` that is SAT in 2.1M units from its own SMT-LIB
+      text ran past 20M in the walker even when tried in a fresh Z3
+      context (Z3 keeps process-wide state), so fresh contexts were tried
+      and dropped. The budget is a bound, not a promise: the character
+      form keeps the common byte tests far below it, and a query near it
+      can decline in one process and not in another.
+    Residual risk: (4) runs uncapped under `seqQueryRLimit`, which a long
+    enough string search does not poll. It is reached only after the
+    capped query ran out of budget, or for a `seq.last_indexof` query
+    whose capped form is UNSAT.
+  - Under the cap the sequence solver does poll `rlimit`, but it can
+    spend it at 40–55k units/s (against ~1M/s for arithmetic). With the
+    byte test in its lowered form, `s.len == 20 and s[19] == 'q'` needed
+    2.3M units (~60 s) and the same at length 100 34M (~10 min); the
+    character form decides both at once, but nothing stopped a within-cap
+    query that needed more under the default unbounded `queryRLimit`. So a query
     that mentions a string or seq also runs under
     `ResourceBudget.seqQueryRLimit` (default 20M, the
     `defaultConcreteBranchRLimit` the tainted target-hit solve already
@@ -2264,7 +2320,7 @@ identical.
   - The `wmExplore` `isWhile` k-unroll walks an arm only if
     `loopArmInfeasible` cannot refute it on the path. A guard that
     simplifies to a literal never reaches the solver. Otherwise the check
-    is the path's full `pathSolver` query plus the arm, under
+    is the path's full `pathRoots` query (through `checkCapped`) plus the arm, under
     `loopPruneRLimit` (250k, or a smaller caller `queryRLimit`). An
     `unknown` never prunes. After the last unrolled body, a surviving path
     faces the guard once more, as the real loop does. Where the guard is
@@ -2295,6 +2351,11 @@ identical.
       `163rev_intoffset_range` is the pinned instance.
     - A within-cap string query that needs more than 20M units is
       `sxUnknown` + `beSolverUndef` (was a slow `sxSat` or a hang).
+      Byte equalities with a constant are decided in character form, so
+      queries built from them (`s[i] == 'a'`) are much faster and find
+      their witness where they used to exhaust a budget.
+    - Some UNSATs arrive where a decline did: `r6_n21_pairloop_member`
+      N21-1/2/3-unsat and `r6_r5_pairloop_counter` R5-2 (below).
     - A dead label after a concretely bounded loop is `sxUnsat`
       (was `sxUnknown [beBudgetExhausted]`).
     - A `symexAssume` that really bounds a loop within `maxLoopUnwind`
@@ -2311,54 +2372,55 @@ identical.
     `defaultLoopPruneRLimit`.
   - The walker bump to 161 invalidates every symex cache entry.
 - **Different mechanisms, reported and not fixed here.**
-  - Byte-string character tests are slow in Z3, and that is where most of
-    the 20M backstop goes. The byte-faithful model's two pieces are each
-    cheap alone. One is `str.in_re s (re.* (re.range "\u{0}" "\u{ff}"))`
-    on every string input. The other is `((_ int_to_bv 8) (str.to_code
-    (str.at s i))) = #x71` for `s[i] == 'q'`. Together they cost 2.3M
-    units for `s.len == 20 and s[19] == 'q'`, and 34M (626 s) at length
-    100. The Linux-hanging `tsymex_r6_nulwitness` NW-5 (nine byte
-    equalities on a 9-byte string) is this class: it now ends
-    `sxUnknown [beSolverUndef … seqQueryRLimit = 20000000]` instead of
-    hanging. An encoding-precision slice (for example a
-    `seq.nth`-and-integer-code form without `int_to_bv`) would be the fix.
+  - Byte tests other than an equality with a constant stay in the lowered
+    `int2bv8(str.to_code(str.at(s, i)))` form, which Z3 decides slowly
+    next to the byte-domain constraint `str.in_re s (re.* (re.range
+    "\u{0}" "\u{ff}"))` on every string input (each cheap alone). That
+    covers `s[i] == s[j]` and a byte compared with a symbolic value.
+    Ordering comparisons on `s[i]` are already declined
+    (`seUnsupportedStringOp`, CR-17). A lowering that produced the
+    character or integer-code form directly would be the general fix.
   - The string index is lowered as `ite(bvslt c 0, ubv_to_int c - 2^64,
     ubv_to_int c)` even for a constant `c`, and is not folded before it
     reaches Z3.
   - The concolic solves (`concreteBranchOutcome`, `concretelyInfeasible`,
     `runConcolicCollectImpl`'s `pcSatByConcreteInputs` check, the G2 flip
-    solve) do not go through `pathSolver` and are not capped. The first
+    solve) do not go through `checkCapped` and are not capped. The first
     two have concrete pins (lengths fixed by the draws) and
     `concreteBranchRLimit`. The flip solve has a caller `timeoutMs` plus
     `rlimit`. The `pcSatByConcreteInputs` soundness check has no bound at
     all; its lengths are pinned by the draws.
-  - Windows risk to watch: `tsymex_r6_nulwitness` NW-5 and
-    `tsymex_r6_b7r_bytescan` B7R-6 pass on the symex-mingw leg and never
-    finished on Linux. Linux now needs more than 20M units for them. If the
-    Windows Z3 build's step count for them is also over 20M, they turn
-    `sxUnknown` there. That would be the same bound doing its job, not a
-    new defect, but it would be a red on that leg.
+  - Windows risk to watch: `tsymex_r6_b7r_bytescan` and
+    `tsymex_r6_b7r2_pathscope` pass on the symex-mingw leg and do not
+    finish on Linux. If a query of theirs needs more than 20M units on
+    the Windows Z3 build too, it turns `sxUnknown` there. That would be
+    the same bound doing its job, not a new defect, but it would be a red
+    on that leg.
 
 **Linux blind spot (the six r6 hangers, run at 900 s under `dt-bounded`).**
-- `b1_stringbacked` (202 s), `b3_scanpair` (73 s) and `n10_coverage_matrix`
-  (142 s) now terminate and pass on c and cpp. N10 needed one re-pin
-  (below). All three leave `scripts/sweep.sh`'s skip list.
-- `nulwitness` (129 s) terminates. It fails only NW-5, which is
-  `sxUnknown` against a pinned `sxSat` (the byte-string class above).
-- `b7r_bytescan` (570 s) terminates. It fails only B7R-6 (16 per-index
-  byte equalities), the same way.
-- `b7r2_pathscope` still runs past 900 s. Before the kill, B7r2-1a and its
-  trip-wire had already ended `sxUnknown` against pinned `sxSat`.
-- These three stay skipped.
-
+- `b1_stringbacked`, `b3_scanpair` and `n10_coverage_matrix` now terminate
+  and pass on c and cpp. N10 needed one re-pin (below).
+- `nulwitness` now terminates and passes on c and cpp. With the capped
+  query alone its NW-5 (nine byte equalities on a 9-byte string) ended
+  `sxUnknown [beSolverUndef … seqQueryRLimit = 20000000]`; the character
+  form decides it.
+- These four leave `scripts/sweep.sh`'s skip list.
+- `b7r2_pathscope` still runs past 900 s on c and cpp; B7r2-1a, which
+  ended `sxUnknown` before, now passes before the kill.
+- `b7r_bytescan` ran to the end in 570 s at the first S8k commit (failing
+  only B7R-6). With the final code it runs past 900 s on c. One of its
+  `seq[byte]` scan queries is SAT in 2.1M units from its own SMT-LIB text
+  but ran past 20M in the walker (the process-dependence above).
+- These two stay skipped.
 Pins: `tests/tsymex_rfc0005_s8k_bounds.nim`.
 - **(1)** The far-colon label is `sxUnknown` with only the `maxSeqLen`
   `beSolverUndef` (RED: killed at 300 s by `dt-bounded`). A length
   contradiction stays `sxUnsat` under the cap. A 100-byte witness is
   found. Past the cap: a 130-byte witness and a bare 130-byte length are
-  declined, not `sxUnsat`. `maxSeqLen: 160` finds the 130-byte witness. A
-  small `seqQueryRLimit` declines a within-cap character test with the
-  bound named. Both fields key the cache only when not the default.
+  declined, not `sxUnsat`. `maxSeqLen: 160` finds the 130-byte witness,
+  and `s[129] == 'q'` on it in its character form (about 5 s; RED: over
+  300 s unbounded in the lowered form). A small `seqQueryRLimit` declines
+  that query with the bound named. Both fields key the cache only when not the default.
 - **(2)** A dead label after `while i < 3` is `sxUnsat` (RED: `sxUnknown`),
   and the live one is still `sxSat`. A 4×4 nested loop is `sxUnsat` with
   `symexLoopIterations == 20` body walks (37 queries). With the
@@ -2388,6 +2450,12 @@ Re-pinned, each checked against real Nim:
 - `r6_n10_coverage_matrix` N10d-5-decline: `sxUnsat`, the verdict its
   own comment said was expected (`s.len == 0` refutes the fallback loop's
   guard).
+- `r6_n21_pairloop_member` N21-1-unsat, N21-2-unsat and N21-3-unsat, and
+  `r6_r5_pairloop_counter` R5-2: `sxUnsat`, the verdicts their comments
+  said the pre-S8k k-unroll could not deliver (each pinned `sxUnknown` as
+  an honest decline). Each literal's own replay test shows Nim agrees:
+  N21-1's literal always raises, so "done" is unreachable; N21-2's and
+  N21-3's never raise; R5-2's loop always ends with `i == 6`, so "stale" is unreachable.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

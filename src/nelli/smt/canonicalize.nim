@@ -187,8 +187,8 @@ const renderAsChoicesVersion* = "11"
 const symexWalkerVersion* = "161"
   ## RFC-0005 S8k (2026-09-28) — termination and resources. Every query
   ## caps each uninterpreted string / seq term at `maxSeqLen` (default 128)
-  ## as an assumption and reads the unsat core: an UNSAT the cap took part
-  ## in is `beSolverUndef`, not a verdict (a query whose witness needed a
+  ## (`checkCapped`): an UNSAT the cap took part in is `beSolverUndef`, not
+  ## a verdict (a query whose witness needed a
   ## 1001-byte string never returned: Z3's length search stops polling
   ## `rlimit` and `timeout` alike past ~250 elements), and runs under
   ## `seqQueryRLimit` (default 20M; within the cap the sequence solver polls

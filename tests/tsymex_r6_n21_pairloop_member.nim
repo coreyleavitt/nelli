@@ -164,11 +164,16 @@ suite "symex round-6 N21 -- odd-segment member-branch false-SAT (confirmed bug r
     ## wrong verdict); it does not, and is not required to, additionally
     ## close N20's separate k-unroll-validity decline. HONESTY RULE: expect
     ## the classified `sxUnknown` decline, not sxUnsat.
+    ## RFC-0005 S8k (walker 161): the k-unroll now drops an iteration whose
+    ## guard the path refutes, so the fallback no longer leaves an
+    ## infeasible budget-exhausted survivor and this proves "done" unreachable: the
+    ## decline below was that pre-S8k limitation, and sxUnsat is the
+    ## verdict Nim agrees with (N21-1-replay: the literal always raises ScanError).
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00")
       readOptionsSut(s, 0)
     let r = symexFind(sut, tLabel("done"))
-    check r.status == sxUnknown
+    check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
 # 2. Even-pair, NO trailing terminator -- ground truth (container-verified,
@@ -189,7 +194,7 @@ suite "symex round-6 N21 -- even-pair no-terminator (counter lands exactly on bo
   test "N21-2-replay: concrete replay of the pinned literal completes without raising":
     readOptionsSut("aa\x00bb\x00", 0)   # unhandled raise would fail this test
 
-  test "N21-2-unsat: the modeled ScanError raise for this member literal is an honest decline, not sxUnsat":
+  test "N21-2-unsat: the modeled ScanError raise for this member literal is sxUnsat (S8k; was an honest decline)":
     ## Attempted UNSAT companion (requirement v). This IS a genuine MEMBER
     ## shape under the new grammar (PAIR* with zero leftover): the
     ## fallback's raise arm is semantically infeasible. But actually PROVING
@@ -206,18 +211,22 @@ suite "symex round-6 N21 -- even-pair no-terminator (counter lands exactly on bo
     ## and the fallback's `mkShortCircuitWhile` guard re-check does not
     ## special-case a `symexAssume`-derived concrete bound). HONESTY RULE:
     ## expect sxUnknown.
+    ## RFC-0005 S8k (walker 161): the k-unroll now drops an iteration whose
+    ## guard the path refutes, so the fallback no longer leaves an
+    ## infeasible budget-exhausted survivor and this proves the raise unreachable: the
+    ## decline below was that pre-S8k limitation, and sxUnsat is the
+    ## verdict Nim agrees with (N21-2-replay: the literal completes without raising).
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00")
       readOptionsSut(s, 0)
     let r = symexFind(sut, tRaisedExn("ScanError"))
-    check r.status == sxUnknown
+    check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
 # 3. Properly double-NUL-terminated shape -- the canonical clean wire shape,
 #    a genuine MEMBER under both the old and new grammar. Pinned alongside
-#    its attempted UNSAT raise-companion (requirement v) -- see N21-2-unsat's
-#    comment for why that companion honestly declines rather than proving
-#    sxUnsat (a separate, pre-existing N20/N10d-5-decline class).
+#    its UNSAT raise-companion (requirement v), which declined before
+#    RFC-0005 S8k for the reason N21-2-unsat's comment gives.
 # ---------------------------------------------------------------------------
 
 suite "symex round-6 N21 -- properly terminated (PAIR* + terminator)":
@@ -232,14 +241,15 @@ suite "symex round-6 N21 -- properly terminated (PAIR* + terminator)":
   test "N21-3-replay: concrete replay of the pinned literal completes without raising":
     readOptionsSut("aa\x00bb\x00\x00", 0)
 
-  test "N21-3-unsat: the modeled ScanError raise for this member literal is an honest decline, not sxUnsat":
-    ## Same N20/N10d-5-decline class as N21-2-unsat above -- see that pin's
-    ## comment for the full evidence trail. HONESTY RULE: expect sxUnknown.
+  test "N21-3-unsat: the modeled ScanError raise for this member literal is sxUnsat (S8k; was an honest decline)":
+    ## Was the same N20/N10d-5-decline class as N21-2-unsat above. RFC-0005
+    ## S8k (walker 161): sxUnsat, the verdict Nim agrees with (N21-3-replay:
+    ## the literal completes without raising).
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00\x00")
       readOptionsSut(s, 0)
     let r = symexFind(sut, tRaisedExn("ScanError"))
-    check r.status == sxUnknown
+    check r.status == sxUnsat
 
 # ---------------------------------------------------------------------------
 # 4. Empty-region edge -- NOT part of the wrong-verdict class (both old and

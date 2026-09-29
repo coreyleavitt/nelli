@@ -8,8 +8,8 @@
 ##       peaks at 1.6 GB and 19 s, `len(s) > 300` at 3.4 GB with a single
 ##       ~100 s stretch in which neither `rlimit` nor `timeout` is polled;
 ##       `findColon(s, 0) > 1000`'s query never returns). The walker now
-##       caps every string / seq in a query at `maxSeqLen` elements and asks
-##       Z3 for an unsat core: an UNSAT the cap took part in is a recorded
+##       caps every string / seq in a query at `maxSeqLen` elements
+##       (`checkCapped`): an UNSAT the cap took part in is a recorded
 ##       `beSolverUndef`, never a verdict;
 ##   (2) the loop k-unroll forked every iteration without asking whether it
 ##       was feasible, so a dead label after a loop was `sxUnknown` and
@@ -131,11 +131,21 @@ suite "S8k (1): every query over strings is bounded":
     if r.status == sxSat:
       check r.witness[0].len == 130
 
+  test "a byte test is decided in its character form":
+    ## `s[129] == 'q'` lowers to `int2bv8(str.to_code(str.at(s, 129))) ==
+    ## 0x71`; the query takes it as `str.at(s, 129) == "q"` (the same
+    ## predicate on a byte string). Was: over 300 s under the wide cap
+    ## with no budget, the sequence solver polling the counter slowly.
+    let r = symexFind(needs130, tLabel("s8k_needs130"), wideCap)
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0].len == 130
+      check r.witness[0][129] == 'q'
+
   test "a within-cap query seqQueryRLimit cuts off is a recorded decline":
-    ## `needs130` under the wide cap asks for `s[129]`'s code through a
-    ## bit-vector conversion: the sequence solver polls the counter, but
-    ## slowly -- unbounded (the default `queryRLimit`) it ran for over
-    ## 300 s. Under a small `seqQueryRLimit` it is declined at once.
+    ## The same query takes about 5 s; under a small `seqQueryRLimit` it
+    ## is declined at once.
     let r = symexFind(needs130, tLabel("s8k_needs130"), smallSeqBudget)
     checkpoint show(r.errors)
     check r.status == sxUnknown

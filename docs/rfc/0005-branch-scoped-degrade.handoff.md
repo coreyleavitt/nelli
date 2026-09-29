@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-29 01:39Z)
+## Current position (refreshed 2026-09-29 02:35Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -219,7 +219,7 @@
   params, a callee reading `result` before writing it, a closure returning a
   variant. **S8k (opus) running** in `scratchpad/wt-s8k`, branch
   `rfc-0005-s8k`, self-gates -> `scratchpad/s8k-gate.log`; it also retries the
-  six Linux hangers. (22:10Z: first gate on `b795d9c` RED -- regressed=6 (r6_r3_svint_overflow, r1b_shortcircuit_oob, r6_r5_pairloop_counter, phase16_m3_rfind, r14_case2_degrade, r6_n21_pairloop_member) + new-failing=1; agent fixing (00:37Z: all six fixed in `c058475`; second gate `s8k-gate2.log` running, ~75% through at 01:39Z, 0 FAIL), then re-gates.)
+  six Linux hangers. (22:10Z: first gate on `b795d9c` RED -- regressed=6 (r6_r3_svint_overflow, r1b_shortcircuit_oob, r6_r5_pairloop_counter, phase16_m3_rfind, r14_case2_degrade, r6_n21_pairloop_member) + new-failing=1; agent fixing (00:37Z: all six fixed in `c058475`; second gate `s8k-gate2.log` done: regressed=1 (r6_n36_raise_degrade rc=137 after 24s -- agent triaging), new-failing=0; 4 former Linux hangers (nulwitness, b1, b3, n10) now pass on Linux), then re-gates.)
 - **Remaining:** S8k -> S8n -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus

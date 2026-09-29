@@ -230,8 +230,8 @@
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8p (`rfc-0005-s8p`, `s8p-gate.log`) S8q (`rfc-0005-s8q`, `s8q-gate.log`) S8r (`rfc-0005-s8r`, `s8r-gate.log`) and S8s (`rfc-0005-s8s`, `s8s-gate.log`); gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8p + S8q ->
+  resume, check S8q (`rfc-0005-s8q`, `s8q-gate.log`) S8r (`rfc-0005-s8r`, `s8r-gate.log`) and S8s (`rfc-0005-s8s`, `s8s-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8q -> S8r -> S8s ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

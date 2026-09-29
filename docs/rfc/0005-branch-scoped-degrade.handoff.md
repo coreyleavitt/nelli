@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-29 19:40Z)
+## Current position (refreshed 2026-09-29 20:35Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -224,11 +224,12 @@
 - **S8k Windows RED** (`symex-mingw` run 36574704361 @ `6772146`): `b7r_bytescan` B7R-6 and `b7r2_pathscope` B7r2-1a + 1a-red no longer sxSat (all via the region-membership fast path past the unwind horizon -- likely S8k loop pruning). Linux-blind (both hang there). Green at `a696d80`. **S8o (opus) started now in parallel** in `scratchpad/wt-s8o`, branch `rfc-0005-s8o`, with this regression first; its gate waits for S8n's. (16:16Z: S8n gate 1 regressed=1 -- n36_raise_class_audit inventory, a second audited raise; fixed in `4c5137a`, gate 2 `s8n-gate2.log` ~55%, 0 FAIL. S8o fix in progress, uncommitted, now on B7R-3 Linux termination.)
 - **S8n LANDED** (`54cb9f0`/`fe44fcc`, walker 162; gate2 regressed=0 new-failing=0; skipped-suite per-check unchanged). Findings -> fence **S8p** (`8b9e4b4`). **S8o** agent stalled 15:48-17:03 on an unbounded trace; stopped and resumed 17:05 (becomes walker 163 at rebase). **S8p (opus) running** in `scratchpad/wt-s8p`, branch `rfc-0005-s8p` (walker 164 at landing). Gates serialized via the .warnings wait. (19:02Z: S8o `b4098c3` gate `s8o-gate.log` ~80%, 0 FAIL; S8p committed `d60d9e0`, gate queued behind S8o's.)
 - **S8o LANDED** (`5dc201f`, walker 163; gate regressed=0 new-failing=0, 521 pass / 0 fail; skipped-suite per-check identical). Root cause of the S8k Windows red: the byte-test rewrite matched `int2bv` by its Z3 5.x printed name, and Windows links Z3 4.13.4, which spells it differently. Operators are now matched by decl kind. symex-mingw on `5dc201f` is being watched. Findings -> fence **S8q** (`5f85893`): b7r_bytescan B7R-3 ignores the rlimit in the shared context, b7r2_pathscope unskip, B7R-6 2^16 assume fork, per-context cost. **S8q (opus) running** in `scratchpad/wt-s8q`, branch `rfc-0005-s8q` (walker 165). **S8p** gate `s8p-gate.log` running on `d60d9e0`; it then rebases to walker 164.
-- **Remaining:** S8p land -> S8q land -> S11 -> completion gate -> ff main + tag.
+- **symex-mingw @ `5dc201f`:** B7R-6 / B7r2-1a / 1a-red scan-tail jobs GREEN (S8o fix confirmed on Windows). Still red: `corpus (shard 2)` "runner lost communication" -- red since S8k (6772146, 8b9e4b4, 5dc201f), green at a696d80; unattributed (log lost). -> fence **S8r** (`671fef5`); **S8r (opus) running** in `scratchpad/wt-s8r`, branch `rfc-0005-s8r` (walker 166 if needed).
+- **Remaining:** S8p land -> S8q land -> S8r land -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8p (`rfc-0005-s8p`, `s8p-gate.log`) and S8q (`rfc-0005-s8q`, `s8q-gate.log`); gates run from a
+  resume, check S8p (`rfc-0005-s8p`, `s8p-gate.log`) S8q (`rfc-0005-s8q`, `s8q-gate.log`) and S8r (`rfc-0005-s8r`, `s8r-gate.log`); gates run from a
   worktree at the sha they certify, never the live checkout. Order: S8p + S8q ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.

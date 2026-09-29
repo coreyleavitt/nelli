@@ -182,6 +182,11 @@ title = "S8p's precision remainder: seq[uint8] element vs literal walker fault (
 state = "pending"
 
 [[slice]]
+id    = "S8t"
+title = "S8q's termination remainder: and-chain lowering forks 2^(n-1) paths in if/while/symexAssert/let (nest the guard temporaries), other scan shapes (Q1/B0, pair loop) and isExact mode still use the bv2int bridge, B4 isIntOffset promotion lacks a width stamp (no overflow obligations), stale snd3_6 sweep skip-list entry, CLAUDE.md six-Linux-hangers line"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

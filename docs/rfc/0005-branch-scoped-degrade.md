@@ -2517,8 +2517,13 @@ runs the SUT itself; c and cpp are identical.
     every plain and arm field its own zero. `variantZeroTotal` (and so
     `defaultZeroTotal`) holds only when that is a legal value of the type:
     the discriminator's type holds 0, 0 is a legal tag
-    (`discriminatorDomain`), and every field has a zero. A multi-variant
-    still raises. This reaches every `defaultZero` site: `completeReturn`'s
+    (`discriminatorDomain`), and every field has a zero. A multi-variant,
+    or a variant failing `variantZeroTotal`, still raises, through the one
+    pre-existing variant raise site (its category-c marker reworded to
+    name both), so the `r6_n36_raise_class_audit` inventory is unchanged.
+    The first cut added a second marked raise and moved that audit's
+    `runtime.nim` and category-c counts by one; the gate caught it. This
+    reaches every `defaultZero` site: `completeReturn`'s
     bare return, the `isCall` untouched-result fall-through, and the
     closure's.
   - `closureRetStructured(t)` (a variant). `buildClosure` gives such a

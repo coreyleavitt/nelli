@@ -4085,41 +4085,37 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (RFC A5 sub-deferral, container zero-init) -- every defaultZero call site now wraps in try/except (N46 closed the one unguarded site, applyClosureGround)]
       "A5 zero-init: container field " & $t &
       " not yet supported (RFC §A5 sub-deferral)")
-  of itVariant:
+  of itVariant, itMultiVariant:
     # RFC-0005 S8n: Nim zero-initialises a variant object's memory, so its
     # discriminator holds ordinal 0 and every field its own zero (the fields
     # of the other arms are unreachable while the discriminator says ordinal
-    # 0, so zeroing them too binds nothing observable). Only when that is a
-    # legal value of the type (`variantZeroTotal`); a caller checks
-    # `defaultZeroTotal` first or catches the raise below.
-    if not variantZeroTotal(t):
-      raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a variant whose zero discriminator is not a legal tag has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal]
-        "A5 zero-init: variant " & $t & " has no legal zero value")
-    let discBoxed = new(SymVal)
-    discBoxed[] = defaultZero(t.vDiscTy, baseName & "." & t.vDiscName)
-    var plainFields: seq[SymVal]
-    for i, ft in t.vPlainFieldTypes:
-      plainFields.add defaultZero(ft, baseName & "." & t.vPlainFieldNames[i])
-    var armFields = initOrderedTable[int, seq[SymVal]]()
-    var armNames  = initOrderedTable[int, seq[string]]()
-    for arm in t.vArms:
-      var fields: seq[SymVal]
-      for j, ft in arm.fieldTypes:
-        fields.add defaultZero(ft, baseName & ".@" & arm.tagName & "." &
-                                   arm.fieldNames[j])
-      armFields[arm.tagOrdinal] = fields
-      armNames[arm.tagOrdinal]  = arm.fieldNames
-    SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: t.vDiscName,
-           vObjectName: t.vObjectName,
-           vArmFields: armFields, vArmFieldNames: armNames,
-           vPlainFields: plainFields,
-           vPlainFieldNames: t.vPlainFieldNames)
-  of itMultiVariant:
-    # Zero-initing a multi-variant requires picking a default disc per axis
-    # + recursing; remains unsupported until a concrete demand surfaces
-    # (the single-case `itVariant` arm above is wired, RFC-0005 S8n).
-    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (variant zero-init not wired) -- every defaultZero call site now wraps in try/except (N46)]
-      "A5 zero-init: variant " & $t & " not supported")
+    # 0, so zeroing them too binds nothing observable). Built for a
+    # single-case variant where that is a legal value of the type
+    # (`variantZeroTotal`); a caller checks `defaultZeroTotal` first or
+    # catches the raise below. A multi-variant needs a default disc per axis
+    # and stays unsupported until a concrete demand surfaces.
+    if t.kind == itVariant and variantZeroTotal(t):
+      let discBoxed = new(SymVal)
+      discBoxed[] = defaultZero(t.vDiscTy, baseName & "." & t.vDiscName)
+      var plainFields: seq[SymVal]
+      for i, ft in t.vPlainFieldTypes:
+        plainFields.add defaultZero(ft, baseName & "." & t.vPlainFieldNames[i])
+      var armFields = initOrderedTable[int, seq[SymVal]]()
+      var armNames  = initOrderedTable[int, seq[string]]()
+      for arm in t.vArms:
+        var fields: seq[SymVal]
+        for j, ft in arm.fieldTypes:
+          fields.add defaultZero(ft, baseName & ".@" & arm.tagName & "." &
+                                     arm.fieldNames[j])
+        armFields[arm.tagOrdinal] = fields
+        armNames[arm.tagOrdinal]  = arm.fieldNames
+      return SymVal(kind: svVariant, vDisc: discBoxed, vDiscName: t.vDiscName,
+                    vObjectName: t.vObjectName,
+                    vArmFields: armFields, vArmFieldNames: armNames,
+                    vPlainFields: plainFields,
+                    vPlainFieldNames: t.vPlainFieldNames)
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a multi-variant, or a variant whose zero discriminator is not a legal tag, has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8n)]
+      "A5 zero-init: variant " & $t & " has no legal zero value")
   of itDistinct:
     # Phase 15 G4: a distinct-typed zero-init needs the per-run
     # distinct-sort cache + pcOut threading, which this constructor-less

@@ -209,7 +209,7 @@ state = "done"
 [[slice]]
 id    = "S8y"
 title = "Runtime regression: tsymex_r6_n36_raise_degrade went from under the sweep's 900s kill to ~992s standalone between S8s and S8t2 (identical checks), so gates show 0 -> 137; bisect the landing that slowed it, find the query mechanism, restore the runtime without giving up soundness, pin it by query/rlimit shape rather than wall time"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8z"
@@ -4267,6 +4267,120 @@ Re-pinned: `phase15_CR2_cachekey` (173 -> 174).
 - **`seq.last_indexof` queries skip step 1c altogether.** They go to the
   uncapped step 3 (S8k's `lastIndex`), which is the one place the
   uncapped sequence theory still runs. That is unchanged here.
+
+**As landed (S8y, walker 176) — the n36_raise_degrade / s1c_verdict
+runtime.** `tsymex_r6_n36_raise_degrade` (8 OK, unchanged) took ~992 s
+standalone at ec1519c, past the sweep's 900 s kill, and
+`tsymex_rfc0005_s1c_verdict`'s N36-shape test ~640 s. Both walk the same
+readCString pair loop, and every hit of the target past it is tainted.
+
+*Bisect.* Measured by Z3 `rlimit` for every check in `checkCapped`, not by
+wall time: on the shared host (load 15-30 on 6 cores) the same query
+sequence took anywhere from 467 s to 756 s.
+
+| sha | landing | N36-1 units | N36-1 exhausted 10M halves | s1c N36 test |
+|---|---|---|---|---|
+| 857b9b1 | S8s | 50.8M | 4 | 34.8M, 1 |
+| 29a4d26 | S8r | 84.1M | 8 | 71.3M, 6 |
+| 5509ef0 / ec1519c / 219f152 | S8t / S8t2 / S8u | identical to 29a4d26 (same md5 for the whole suite) | 8 | 6 |
+
+*Mechanism.* S8r's step 1c ran in the walk's Z3 context: ten extra
+checks per test, all SAT, deciding nothing. Z3 keeps what a check built
+in its context, and later checks there start from it (`checkCapped`'s doc
+comment). After those checks the pair loop's 3- and 4-iteration target
+solves (0.27M and 2.06M units before S8r) ran out of both halves of
+their 20M budget. With 1c removed, or moved to a context of its own, the
+walk's query sequence is 857b9b1's unit for unit. That isolation
+(prototyped as 4d34954, not landed) did not survive S8v: S8v's range
+facts build terms in the walk's context, and on S8v's a061df3 the
+isolation took n36 from 49.6M/42.8M units per test to 70.3M/70.3M (s1c
+from 88.0M to 66.7M). On this tip, with the floor fix below, it changed
+N36's units by less than 1%. It is not landed. What did not move with
+any of it is the floor: two five-iteration exit hits per test (the break
+on a fifth empty key, and the unroll-bound survivor), each spending its
+whole 20M tainted budget, about 80% of the suites' CPU, before and after
+S8r.
+
+*Floor, replayed.* The five-iteration queries (q103: four pairs then an
+empty key; q106: five pairs), dumped before their check and replayed in
+fresh contexts under 10M units (one model-search half; Z3 5.1):
+
+| variant | q102 (4 pairs) | q103 | q106 |
+|---|---|---|---|
+| as emitted | SAT 3.8M | out | out |
+| `random_seed=1` | SAT 3.2M | out | out |
+| `smt.seq.split_w_len=false`, `smt.relevancy=0`, `smt.arith.solver=2`, `smt.phase_selection=0`, `encoding=ascii` | | | out in every case |
+| byte-domain regex dropped on substring-defined strings (NR) | | SAT 2.5M | out |
+| each `str.indexof(s, "\0", i)` a fresh Int, with `s = pre ++ x ++ "\0" ++ post`, `len(pre) = i`, `ix = i + len(x)`, `"\0" notin x` (split) | SAT 1.3M | SAT 9.0M | SAT 5.7M |
+| split plus chain facts (`pre_j = pre_i ++ x_i ++ "\0"` when `start_j = ix_i + 1`) | SAT 0.71M | SAT 4.2M | SAT 4.7M |
+| split plus chain plus NR | SAT 0.64M | SAT 1.26M | SAT 4.66M |
+| `str.prefixof("a\0" x 8, s)` (most of the witness given) | | SAT 9.0M | |
+
+The split is an equivalence for a one-character needle `c`: `indexof(s,
+c, i) = ix >= 0` holds exactly when `s` has a `c` at `ix >= i` with none
+in `s[i, ix)`, which is the split's `pre`/`x`/`c`/`post` decomposition
+with `len(pre) = i` and `c notin x`. The `-1` arm is `c notin s[i..]` or
+`i` out of range. It is the only variant that makes q106 SAT, and only
+at about half the budget. It is a lowering change of its own, so it is
+slice S8ag.
+
+*Fix.* Two changes, walker 175 -> 176:
+- **(a) Implied byte-domain constraints dropped** (`dropImpliedByteDomains`,
+  `checkCapped`, after `seqLenCaps`). A string whose root `x in
+  (\x00..\xff)*` is implied by a definition `x == t` in the query, `t`
+  built by `str.++` / `str.substr` / `str.at` from byte literals and from
+  strings whose own byte-domain constraint stays, loses that constraint.
+  Every character of `t` is one of those characters, so the two queries
+  have the same models. A justifying string is never itself dropped, and
+  a definition under a disjunction justifies nothing.
+- **(b) A tainted hit at least as deep as an exhausted one is declined.**
+  `Path.loopIters` records, for each `while` a path ran through, how many
+  times its latest execution entered the body. It is set at the loop's
+  forks and inherited below them, and a closure return merge joins the
+  caller's. When a tainted target-hit solve runs out of budget
+  (`rlimit` spent >= the solve's bound), its depths go to
+  `WalkCtx.budgetOutDepths`. A later tainted hit at least as deep in each
+  of those loops is not solved: `solveTargetHit` returns `sxUnknown`, and
+  the caller records the same classified `beSolverUndef` a solver unknown
+  gets. That voids `sxUnsat` exactly as spending the budget would have.
+  What is given up is a candidate on a tainted path (it only feeds S10's
+  replay, never wins). A clean hit is always solved.
+
+*Measured* (rlimit per test, the two main N36 tests; tip 58e52af):
+
+| | N36-1 | N36-1-noblock | exhausted 10M halves | 20M budget-outs |
+|---|---|---|---|---|
+| 58e52af | 51.4M | 51.4M | 3 + 3 | 1 + 1, plus the sibling solved to exhaustion |
+| with S8y | 46.0M | 26.2M | 4 + 2 | 1 + 1, sibling declined |
+
+Whole n36 suite: 368 s at 58e52af and 367 s with S8y, at load ~6
+(S8ae's facts had already brought the tip down). The number that moves
+is the bound, not this run's time: before S8y, how many hits ran out of
+budget depended on what the context held (8 exhausted halves at S8r).
+Now at most one tainted budget-out per loop depth can happen, and each
+later hit that deep is declined without being solved. Wall times
+standalone at the fix: n36 367 s; s1c_verdict (25 OK) 275 s.
+
+*Pin.* By counts, never wall time. `symexTargetSolveStats` counts
+target-hit budget-outs and S8y declines. `tsymex_rfc0005_s8y_budget_decline`:
+- (a) the drop and its three non-drops;
+- (b) under a 2M `seqQueryRLimit`, the pair loop has exactly one
+  budget-out and at least one decline, and each decline is a classified
+  `beSolverUndef`, never `sxUnsat`. It is RED with the decline disabled
+  (4 budget-outs, 0 declines);
+- (b) a clean loop ahead of an unsolvable factoring query still has every
+  hit solved (>= 2 budget-outs, 0 declines).
+
+N36-1, N36-1-noblock and s1c's N36 test each check `budgetOut <= 1`.
+
+*Not fixed here.* The first five-iteration hit still spends its full 20M
+(S8ag). A hit whose step 1 runs out but whose uncapped step 3 finds a
+model spends 10M plus, and is not a budget-out, so the bound does not
+cover it. How many such hits there are still depends on the context.
+`-d:symexQueryStats` records the context's running `rlimit` total as each
+query's cost, so its per-query figures overstate the spend (S8ac's
+`rlimitDelta`). An unchecked solver's statistics read the context's
+counter without a check, which this slice uses (`rlimitCountNow`).
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

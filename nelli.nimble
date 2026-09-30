@@ -964,5 +964,10 @@ task test, "Run the test suite":
             # `start div y == start` under the seq theory; walker 174->175.
             # Reads per-query step counts via its `.nim.cfg`
             # (`-d:symexQueryStats`).
-            "tsymex_rfc0005_s8ad_remainder"]:
+            "tsymex_rfc0005_s8ad_remainder",
+            # RFC-0005 S8y -- the n36_raise_degrade / s1c_verdict floor:
+            # implied byte-domain constraints dropped, and a tainted target
+            # hit as deep as one that ran out of budget declined unsolved
+            # (beSolverUndef); walker 175->176.
+            "tsymex_rfc0005_s8y_budget_decline"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

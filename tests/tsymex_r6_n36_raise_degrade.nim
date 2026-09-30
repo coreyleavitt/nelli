@@ -151,7 +151,12 @@ suite "symex N36 -- iekStrInOptionRegion BV-bound decline inside a block:":
     ## the SAME `iekStrSubstr`/`iekStrInOptionRegion` BV-bound declines the
     ## fallback's own closed forms reach -- multiple honest reasons, never a
     ## silent completion).
+    symexTargetSolveStats = default(typeof(symexTargetSolveStats))
     let r = symexFind(sutOptionRegionBlockAfter, tLabel("n36_optregion_block_after"))
+    # RFC-0005 S8y: the suite's runtime floor, by count (never wall time).
+    checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
+               " declined=" & $symexTargetSolveStats.declined
+    check symexTargetSolveStats.budgetOut <= 1
     var sawOptRegionKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
@@ -179,7 +184,12 @@ proc sutOptionRegionNoBlockAfter(s: string) =
 suite "symex N36 -- regression: iekStrInOptionRegion no-block companion stays correct":
 
   test "N36-1-noblock: same shape without the block -- honest sxUnknown, same kind pre- and post-fix":
+    symexTargetSolveStats = default(typeof(symexTargetSolveStats))
     let r = symexFind(sutOptionRegionNoBlockAfter, tLabel("n36_optregion_noblock_after"))
+    # RFC-0005 S8y: the suite's runtime floor, by count (never wall time).
+    checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
+               " declined=" & $symexTargetSolveStats.declined
+    check symexTargetSolveStats.budgetOut <= 1
     var sawOptRegionKind = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)

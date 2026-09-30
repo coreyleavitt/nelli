@@ -184,7 +184,18 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "175"
+const symexWalkerVersion* = "176"
+  ## RFC-0005 S8y (2026-09-30) — the floor under n36_raise_degrade and
+  ## s1c_verdict. (1) `checkCapped` drops a string's byte-domain constraint
+  ## when the query defines the string over byte strings
+  ## (`dropImpliedByteDomains`; same models, a different query text). (2) A
+  ## tainted target hit at least as deep in every loop as an earlier
+  ## tainted hit whose solve ran out of budget is declined unsolved
+  ## (`beSolverUndef`), where it used to be solved: a candidate the walk
+  ## found before can now be missing, and an unknown can now be recorded
+  ## where the solve would have found a model. 175 -> 176.
+  ##
+  ## (Prior: 175.)
   ## RFC-0005 S8ad (2026-09-30) — S8ac's remainder. A borrowed arithmetic
   ## result of a distinct type no parameter carries (`var m = Meters(0);
   ## m = m + Meters(1)`) allocates the distinct sort itself

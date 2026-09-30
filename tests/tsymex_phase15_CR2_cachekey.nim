@@ -885,7 +885,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ad (a borrowed result of a distinct type no parameter
     ## carries allocates its sort; linear bounds on Int quotients).
     ## 174->175.
-    check symexWalkerVersion == "175"
+    ## RFC-0005 S8y (implied byte-domain constraints dropped; a tainted hit
+    ## as deep as an exhausted one declined unsolved). 175->176.
+    check symexWalkerVersion == "176"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

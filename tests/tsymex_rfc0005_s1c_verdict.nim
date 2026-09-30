@@ -359,7 +359,12 @@ suite "RFC-0005 S1c (g) -- a tainted path's solve is bounded (never a new non-te
     ## file hung under dt-bounded; `tsymex_r6_n36_raise_degrade` 0 -> 137 in
     ## the sweep). Post-bound: the tainted solves finish (sat, unsat or a
     ## bounded `beSolverUndef`) and the verdict is the pre-S1c sxUnknown.
+    symexTargetSolveStats = default(typeof(symexTargetSolveStats))
     let r = symexFind(s1cRegionBlock, tLabel("s1c_region_block"))
+    # RFC-0005 S8y: this test's runtime floor, by count (never wall time).
+    checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
+               " declined=" & $symexTargetSolveStats.declined
+    check symexTargetSolveStats.budgetOut <= 1
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedStringOp)

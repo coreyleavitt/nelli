@@ -510,6 +510,13 @@ type
       ## by every fork below it, and carried to the finding
       ## (`RawResult.nilDerefOnPath`), so replay never executes a witness
       ## whose real run would dereference nil and kill the host process.
+    loopIters: seq[tuple[loop: int, iters: int]]
+      ## RFC-0005 S8y. For each `while` this path has run through (`loop`,
+      ## the statement's identity within the walk), how many times its body
+      ## was entered in the loop's latest execution: set at each of the
+      ## loop's forks (`atIteration`), inherited by every fork below.
+      ## `solveTargetHit` compares it with the depth of a tainted hit that
+      ## ran out of budget (`WalkCtx.budgetOutDepths`).
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
@@ -749,7 +756,8 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        allocCounters: hs.allocCounters,
        liveRefs: hs.liveRefs,                            ## Phase 15 R2
        freshnessAssertCount: parent.freshnessAssertCount,  ## Phase 15 R2
-       nilDeref: parent.nilDeref)                        ## RFC-0005 S8k
+       nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
+       loopIters: parent.loopIters)                      ## RFC-0005 S8y
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
@@ -785,7 +793,25 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
     let merged = forkPathTaintPrimitive(callee, pcExpr, envExpr,
                                         callee.taint + caller.taint)
     merged.nilDeref = callee.nilDeref or caller.nilDeref
+    # RFC-0005 S8y: a closure body's descent starts from a fresh root, so
+    # the caller's loop depths are joined back in (the deeper of the two).
+    for (loop, n) in caller.loopIters:
+      var seen = false
+      for e in merged.loopIters.mitems:
+        if e.loop == loop:
+          e.iters = max(e.iters, n)
+          seen = true
+      if not seen: merged.loopIters.add (loop: loop, iters: n)
     merged
+
+proc atIteration(p: Path; loop, n: int) =
+  ## RFC-0005 S8y. Record on `p` (a child just forked) that its latest
+  ## execution of `loop` has entered the body `n` times.
+  for e in p.loopIters.mitems:
+    if e.loop == loop:
+      e.iters = n
+      return
+  p.loopIters.add (loop: loop, iters: n)
 
 proc taintInPlace(p: Path; d: Degrade) =
   ## RFC-0005 S1 (§2.2). The MUTATION-shaped sibling of `forkPathTainted`,
@@ -8094,6 +8120,14 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
+var symexTargetSolveStats* {.threadvar.}: tuple[budgetOut, declined: int]
+  ## RFC-0005 S8y. `solveTargetHit`'s own tally, never reset by the engine
+  ## (tests reset it around a measured run): `budgetOut` counts target-hit
+  ## solves, clean or tainted, that ran out of their budget; `declined`
+  ## counts tainted hits declined unsolved because an earlier tainted hit
+  ## at most as deep had run out. Deterministic, like the `rlimit` it is
+  ## read from.
+
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
   ## inside symex. Always-on (no compile-time gate) — the increment
@@ -8620,6 +8654,120 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
                            (zero <= e.i) and (e.i <= pc.i),
                            (zero <= e.r) and (e.r <= pc.i))
 
+var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
+                                         eq: int]
+  ## RFC-0005 S8y. The decl kinds `dropImpliedByteDomains` matches, read off
+  ## terms built once per thread (as `seqCapKinds`: by kind, never by name).
+
+proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3Bool] =
+  ## RFC-0005 S8y. `roots` without each byte-domain constraint
+  ## `x in (\x00..\xff)*` (`allocateSym`'s `itString` arm) that the rest of
+  ## `roots` implies: `x` is defined -- by a root, or a conjunct of a root's
+  ## top-level `and` -- equal to a term built by `str.++`, `str.substr` and
+  ## `str.at` from string literals whose every character is at most 0xFF
+  ## and from strings whose own byte-domain constraint stays in the result.
+  ## Every character of such a term is one of those characters, so in every
+  ## model of the result `x`'s are too: the two sets have the same models.
+  ## A string that justifies a drop is never dropped itself, so no two
+  ## constraints are each other's justification.
+  ##
+  ## Why: a call's string return is allocated with the constraint and then
+  ## bound to the callee's closed form -- every readCString key and value of
+  ## a pair loop is `k == "" ++ str.substr(s, i, j - i)` -- and Z3 decides
+  ## each such membership on its own. In `tsymex_r6_n36_raise_degrade`'s
+  ## four-pairs-and-an-empty-key query that was the difference between
+  ## running out of 10M units and SAT in 2.5M (fresh context, Z3 5.1).
+  if not byteDomainKinds.ready:
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    let s = mkStringVar(ctx, "__s8y_kind_probe_str")
+    let b = mkBoolVar(ctx, "__s8y_kind_probe_b")
+    byteDomainKinds = (ready: true,
+      concat: kindOf((s & mkStringVar(ctx, "__s8y_kind_probe_t")).raw),
+      extract: kindOf(substr(s, mkIntVar(ctx, "__s8y_kind_probe_i"),
+                             mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
+      andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
+      eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw))
+  let bk = byteDomainKinds
+  let kinds = seqCapKinds(ctx)
+  proc kindOf(a: Z3AnyAst): int =
+    if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
+    else: -1
+  proc isStrConst(a: Z3AnyAst): bool =
+    getAstKind(a) == akApp and getSortKind(a) == skSeq and
+      kindOf(a) == kinds.uninterp and unpackApp(a).args.len == 0
+  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
+  let byteReId = astId(ctx, byteRe.raw)
+  # The byte-domain roots, by the constrained constant's AST id.
+  var domainRoot: seq[tuple[x: int, root: int]]
+  var constrained: HashSet[int]
+  for i, r in roots:
+    let ra = toAnyAst(r)
+    if kindOf(ra) == kinds.inRe:
+      let args = unpackApp(ra).args
+      if astId(ctx, args[1].raw) == byteReId and isStrConst(args[0]):
+        let x = astId(ctx, args[0].raw)
+        if x notin constrained:
+          constrained.incl x
+          domainRoot.add (x: x, root: i)
+  if domainRoot.len == 0: return @roots
+  # Definitions `x == t` among the roots' top-level conjuncts.
+  var defs: Table[int, seq[Z3AnyAst]]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let k = kindOf(t)
+    if k == bk.andK:
+      for a in unpackApp(t).args: stack.add a
+    elif k == bk.eq:
+      let args = unpackApp(t).args
+      if args.len == 2:
+        for (lhs, rhs) in [(args[0], args[1]), (args[1], args[0])]:
+          if isStrConst(lhs) and astId(ctx, lhs.raw) in constrained:
+            defs.mgetOrPut(astId(ctx, lhs.raw), @[]).add rhs
+  proc leaves(t: Z3AnyAst; acc: var seq[int]): bool =
+    ## The string constants `t` is built from by `str.++` / `str.substr` /
+    ## `str.at` and byte literals; false for any other shape.
+    if isStrConst(t):
+      acc.add astId(ctx, t.raw)
+      return true
+    if Z3_is_string(ctx.raw, t.raw):
+      let n = Z3_get_string_length(ctx.raw, t.raw)
+      if n == 0: return true
+      var cps = newSeq[cuint](int(n))
+      Z3_get_string_contents(ctx.raw, t.raw, n, cps[0].addr)
+      for c in cps:
+        if c > 0xFF'u32: return false
+      return true
+    let k = kindOf(t)
+    if k == bk.concat:
+      for a in unpackApp(t).args:
+        if not leaves(a, acc): return false
+      return true
+    if k == bk.extract or k == kinds.strAt:
+      return leaves(unpackApp(t).args[0], acc)
+    false
+  var dropped, pinned, dropRoot: HashSet[int]
+  for (x, root) in domainRoot:
+    if x in pinned: continue
+    for t in defs.getOrDefault(x):
+      var acc: seq[int]
+      if not leaves(t, acc): continue
+      var ok = true
+      for y in acc:
+        if y == x or y notin constrained or y in dropped:
+          ok = false
+          break
+      if ok:
+        dropped.incl x
+        dropRoot.incl root
+        for y in acc: pinned.incl y
+        break
+  for i, r in roots:
+    if i notin dropRoot: result.add r
+
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
   ## Z3's simple solver: probed once per thread against the linked Z3
@@ -8928,6 +9076,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       roots[i] = wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
         cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
         cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  # RFC-0005 S8y: without the byte-domain constraints the rest of the
+  # query implies (`dropImpliedByteDomains`; same models). After
+  # `seqLenCaps`, which reads them to find the byte leaves.
+  roots = dropImpliedByteDomains(ctx, roots)
   let sq = settings.budget.seqQueryRLimit
   let seqBounded = sq != 0 and (rlimit == 0 or sq < rlimit)
   let rl = if seqBounded: sq else: rlimit
@@ -9472,6 +9624,9 @@ type
       ## (`runConcolicCollectImpl`'s soundness pin).
     callStats: Table[string, CallStat]
     loopStack: seq[LoopFrame]   ## Phase 6: nested-loop tracking
+    budgetOutDepths: seq[seq[tuple[loop: int, iters: int]]]
+      ## RFC-0005 S8y. The loop depths (`Path.loopIters`) of each tainted
+      ## target hit whose solve ran out of budget (`solveTargetHit`).
     callCache: Table[string, CallCacheEntry]
     activeCalls: HashSet[string]
     synthZ3:   int
@@ -10356,6 +10511,41 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
   if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
   else: defaultConcreteBranchRLimit
 
+proc rlimitCountNow(ctx: Z3Context): int =
+  ## RFC-0005 S8y. `ctx`'s `rlimit count` as it stands. Z3 reads the
+  ## context's counter when a solver's statistics are collected, so an
+  ## unchecked solver reports it without running a check (which would itself
+  ## advance the counter and leave state in the context).
+  let st = newSolver(ctx).getStatistics()
+  if not st.contains("rlimit count"): 0
+  elif st.isInt("rlimit count"): st.getInt("rlimit count")
+  else: int(st.getFloat("rlimit count"))
+
+func budgetOutFloor(settings: SymexSettings): int =
+  ## RFC-0005 S8y. What a target-hit solve spends when it runs out: the
+  ## smaller of its `queryRLimit` and `seqQueryRLimit` (`checkCapped`'s
+  ## model search spends exactly the smaller one before giving up), 0 when
+  ## both are unbounded.
+  let q = settings.budget.queryRLimit
+  let sq = settings.budget.seqQueryRLimit
+  if q == 0: int(sq)
+  elif sq == 0: int(q)
+  else: int(min(q, sq))
+
+func atLeastAsDeep(p: Path; depth: openArray[tuple[loop: int, iters: int]]):
+    bool =
+  ## RFC-0005 S8y. `p` has entered the body of each loop in `depth` at least
+  ## as many times as `depth` records (and `depth` names a loop at all).
+  if depth.len == 0: return false
+  for (loop, n) in depth:
+    var ok = false
+    for e in p.loopIters:
+      if e.loop == loop and e.iters >= n:
+        ok = true
+        break
+    if not ok: return false
+  true
+
 proc solveTargetHit(w: var WalkCtx; p: Path):
     tuple[status: SymexStatusKind, witness: RawWitness,
           candidateErrs: seq[SymexErrorInfo], undefWhy: string] =
@@ -10383,13 +10573,45 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   ## non-termination, not a pre-existing one. The bound's `zsUnknown` is the
   ## honest `beSolverUndef` the caller records. A clean path's query is
   ## exactly the pre-S1c one and keeps the caller's budget unchanged.
+  ##
+  ## RFC-0005 S8y. A tainted hit that runs out of budget records its loop
+  ## depths (`Path.loopIters`) in `w.budgetOutDepths`, and a later tainted
+  ## hit at least as deep in every one of those loops is NOT solved: it
+  ## comes back `sxUnknown`, which the caller records as the same
+  ## `beSolverUndef` a solver unknown is, so it voids `sxUnsat` exactly as
+  ## spending the budget would have. The hits are a walk's deeper unrolls of
+  ## one loop, whose queries only grow: `tsymex_r6_n36_raise_degrade`'s
+  ## pair loop spent its whole 20M budget on each five-iteration hit, twice
+  ## per test, the break on a fifth empty key and the unroll-bound survivor
+  ## (and on a four-iteration one too once the walk's context held S8r's or
+  ## S8v's extra terms). What is given up is a candidate, never a winner (a
+  ## tainted SAT only feeds S10's replay), and a CLEAN hit is always
+  ## solved: its SAT would be a finding.
   let isCandidate = scSpurious in p.taint
   let exStart = extractionErrors.len
   let exLiveStart = w.extractionErrors.len
   var solveSettings = w.settings
   if p.taint != {}:
     solveSettings.budget.queryRLimit = taintedSolveRLimit(w.settings)
+    for depth in w.budgetOutDepths:
+      if p.atLeastAsDeep(depth):
+        inc symexTargetSolveStats.declined
+        var iters: seq[int]
+        for e in depth: iters.add e.iters
+        return (status: sxUnknown, witness: RawWitness(), candidateErrs: @[],
+                undefWhy: "not solved (RFC-0005 S8y): an earlier tainted " &
+                  "path reached the target after " & $iters &
+                  " loop iterations and ran out of its solver budget, and " &
+                  "this tainted path is at least as deep in each of those " &
+                  "loops")
+  let spentBefore = rlimitCountNow(w.z3)
   let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
+  if st == sxUnknown:
+    let floor = budgetOutFloor(solveSettings)
+    if floor > 0 and rlimitCountNow(w.z3) - spentBefore >= floor:
+      inc symexTargetSolveStats.budgetOut
+      if p.taint != {} and p.loopIters.len > 0:
+        w.budgetOutDepths.add p.loopIters
   var errs: seq[SymexErrorInfo]
   if isCandidate:
     for i in exLiveStart ..< w.extractionErrors.len:
@@ -12545,6 +12767,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var active = paths
     w.loopStack.add LoopFrame(hsDepth: w.frame.handlerStack.len)   # RFC-0005 S8m
     let frameIx = w.loopStack.high
+    # RFC-0005 S8y: the loop's identity for `Path.loopIters` -- the IR
+    # statement itself, the same object on every execution in this walk.
+    let loopId = cast[int](stmt)
     # RFC-0010 B4: `unwind = 0` deliberately does NOT mean unlimited here —
     # see `walkWhileFollowConcrete`'s matching note above for the full
     # rationale (`maxLoopUnwind`'s own doc comment, smt/types.nim, already
@@ -12586,6 +12811,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if not loopArmInfeasible(w.z3, dp, cond, w.settings):
             # cond=true: walk body
             let truePath = forkPath(dp, dp.pc & @[cond], dp.env)
+            truePath.atIteration(loopId, iter + 1)   # RFC-0005 S8y
             inc symexLoopIterations
             let afterBody = walk(stmt.wbody, @[truePath], w)
             # Continue-paths from the body merge into next-iter active.
@@ -12596,7 +12822,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # cond=false: exit loop (use dp — the drained path with domain
           # bounds folded in).
           if not loopArmInfeasible(w.z3, dp, not cond, w.settings):
-            survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
+            let exitPath = forkPath(dp, dp.pc & @[not cond], dp.env)
+            exitPath.atIteration(loopId, iter)       # RFC-0005 S8y
+            survivors.add exitPath
       active = nextActive
     # RFC-0005 S8k: a path still active after the last unrolled body faces
     # the guard once more, exactly as the real loop does. Where the guard is

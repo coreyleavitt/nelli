@@ -197,6 +197,11 @@ title = "S8r's termination remainder: checkCapped step 2 slow on Z3 4.13.4 when 
 state = "pending"
 
 [[slice]]
+id    = "S8w"
+title = "S8t's remainder: alternating and/or chains ((a or b) and (c or d)) still fork 2^m paths, while guard whose first part hoists a read in a body with continue still declines (R14 Case 2), isIntOffset params rejected by promotion (banned, unsigned, isLoose, isExact unchecked) stay unstamped Ints and B4 offsets do not wrap under unchecked isOptimised, trace the base's false OverflowDefect witness (@[], -1) and probe other shapes for the same fault"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

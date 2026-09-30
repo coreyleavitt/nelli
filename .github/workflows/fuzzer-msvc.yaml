@@ -327,12 +327,24 @@ jobs:
           # `strategy.nim`, `parallel.nim` -- is fuzzer-side code. Pinned
           # here (and in fuzzer-mingw.yaml) so the guard is exercised under
           # BOTH C compilers, not only mingw-via-symex-mingw.
+          #
+          # RFC-0005 S8ah: this SAME suite also gets `-d:nelliVmAliasAudit`
+          # (ONLY this one -- see fuzzer-mingw.yaml's identical comment for
+          # why: `tsmoke`/`trequiresinit` import neither `symex.nim` nor
+          # `concolic.nim`, so the define is a no-op for them, and adding it
+          # to the whole glob-discovered loop above would multiply a real,
+          # measured ~15s-per-compile cost across every fuzzer suite for no
+          # benefit). This test file imports BOTH `nelli/symex {.all.}` and
+          # `nelli/concolic {.all.}`, so one compile here exercises both
+          # modules' build-time self-audit blocks under MSVC.
           foreach ($named in @('tsmoke', 'trequiresinit', 'tsymex_rfc0005_s8ab_letaudit')) {
             Write-Host "==> $named.nim (contract test)"
+            $extraDefs = @()
+            if ($named -eq 'tsymex_rfc0005_s8ab_letaudit') { $extraDefs = @('-d:nelliVmAliasAudit') }
             nim c -r --cc:vcc --threads:on --hints:off --colors:off `
               --nimcache:_nimcache `
               --path:src --path:_deps\z3\src --path:_deps\softlink\src `
-              --cincludes:C:\z3\include "tests\$named.nim"
+              --cincludes:C:\z3\include @extraDefs "tests\$named.nim"
             if ($LASTEXITCODE -ne 0) { $failed += "$named.nim" }
           }
 

@@ -254,7 +254,7 @@ state = "pending"
 [[slice]]
 id    = "S8ah"
 title = "S8af's remainder: verify compile-time-VM reachability macro-by-macro for all 17 macros and instantiate-audit every VM-reachable generic among the 37 generic routines in scope (not just traceOneCallBoundary); lift the param check's depth-3 sibling-field bound (walk the full field graph with a visited set); classify generics never instantiated in the scope's compilation unit (force a representative instantiation or prove unreachable); run the guard as a build-time check wired into the symex compile path, not only as a test"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ai"
@@ -4540,6 +4540,184 @@ unchanged), zero param hits, zero new hits from either the widened
   `auditGenericInstantiation` — unclassifiable, same as before S8af.
 - **The guard is still test-only reflection, not a build-time lint**
   (unchanged from S8ab's own note).
+
+**As landed (S8ah, no bump) — S8af's remainder: mechanical macro-by-macro
+reachability, unbounded field-graph depth, forced-generic completeness,
+and a real build-time gate.** The guard's own duplicated copy moved out of
+`tests/tsymex_rfc0005_s8ab_letaudit.nim` and into a reusable library,
+`src/nelli/smt/vm_alias_guard.nim`, so the SAME mechanism can run both as
+a test (`check`) and as an opt-in build-time gate (`doAssert`) on the real
+symex compile path — see item 4 below. No walker/IR change; no
+`symexWalkerVersion` bump.
+
+1. **Macro reachability, made mechanical.** S8af traced ONE generic
+   (`traceOneCallBoundary`) by hand. S8ah replaces the hand trace with
+   `vmGuardWalkForGenericCalls`: for every macro in the 16-file scope,
+   walk its typed `getImpl()` tree for a live `nnkCall`/`nnkCommand` whose
+   resolved callee is one of the 37 registered generics —
+   TRANSITIVELY through the call graph (a `file:name@line`-keyed visited
+   set guards cycles), not just one level deep. The transitive hop is not
+   theoretical: `traceOneCallBoundary` itself is never called directly
+   from any macro — it is called from `collectStringBackedByteSeqParamsImpl`,
+   an ordinary proc, which is what a macro actually calls. A one-level-only
+   version of this walk (the first one built) missed the one generic S8af
+   had found by hand; the transitive walk catches it and would have
+   caught it without S8af's own manual trace.
+   `quote do:` blocks need no special-casing: a call written inside one
+   lowers to `getAst`/tree-construction code, never a live call to the
+   target (probed empirically, `probe_quotedo_reach.nim`), so the walk
+   naturally sees only genuine compile-time-VM execution — confirmed by a
+   dedicated fixture pair (`s8ahFxDirectGenericCall`/
+   `s8ahFxQuotedGenericCall` in the test file): the direct call is flagged
+   reachable, the quoted one is not.
+
+   *Macro count correction.* The fence title (and S8af's own residual
+   note) say "17 macros". Counted mechanically
+   (`extractTopLevelMacroNames`, pinned by a new test): the real 16-file
+   scope has **22** unique macro names, across 7 of the 16 files (the
+   other 9 — `dsl_parser.nim`, `dsl_typebridge.nim`, `scoped_names.nim`,
+   `exn_hierarchy.nim`, `stdlib_models.nim`, `types.nim`, `scan.nim` —
+   declare none). "17" matched neither the unique-name count nor the raw
+   `macro` keyword count (also 22 — no macro name in scope is overloaded
+   the way `coverage.nim`'s `logCmp` proc is). Per the "RFC status lines
+   lag git" lesson, corrected here rather than propagated.
+
+   *Macro-by-macro evidence table* (mechanical walk output, not a manual
+   trace):
+
+   | File | Macro | Reaches one of the 37 generics? |
+   |---|---|---|
+   | symex.nim | symexForAll | no |
+   | symex.nim | replayWitness | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | symexFind | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | concolicCollect | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | concolicFlip | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | assertCoveredBy | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | symexCacheKeyForFn | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | saveSymexWitness | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | loadSymexWitnesses | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | saveSymexVerdict | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | loadSymexVerdict | **yes** -> `traceOneCallBoundary` |
+   | symex.nim | symexFindAllWitnesses | **yes** -> `traceOneCallBoundary` |
+   | fuzzmacro.nim | fuzz | no |
+   | derive.nim | arbitrary | no |
+   | dsl.nim | rejectStrategyTypedesc | no |
+   | dsl.nim | property | no |
+   | coverage.nim | covercmp | no |
+   | coverage.nim | cover | no |
+   | mutation.nim | mutantsOf | no |
+   | concolic.nim | concolicAssist | no |
+   | strategy.nim | map | no |
+   | parallel.nim | jitterPoints | no |
+
+   11 of the 22 macros reach `traceOneCallBoundary` transitively (all in
+   `symex.nim`, all funneling through the same parse/IR pipeline); the
+   other 11 reach none of the 37. Every call any of the 22 macros makes
+   into `strategy.nim`'s 31 registered generics (`newStrategy`,
+   `generate`, `just`, `sampledFrom`, `map`, `filter`, `recursive`, etc. —
+   the bulk of the 37) is built inside a `quote do:` block in
+   `fuzzMacroImpl`/`arbitraryImpl` — S8af's manual claim, now mechanically
+   confirmed rather than asserted.
+
+2. **Forced-generic completeness.** With reachability now mechanical,
+   "never instantiated" classifies itself: exactly ONE of the 37 registered
+   generics (`traceOneCallBoundary`) is VM-reachable from any macro in
+   scope, and it is the one already forced (S8af). The other 36 are not
+   left "unclassifiable" (S8af's own residual note) — the SAME walk that
+   finds `traceOneCallBoundary` reachable also establishes, by finding no
+   path to them from any of the 22 macros, that none of the other 36 is
+   compile-time-VM-reachable at all, so none needs forcing. A completeness
+   test (`vmGuardForcedGenerics`, a global `{.compileTime.}` list every
+   `vmGuardAuditInstantiation` call appends to, shared across modules) now
+   fails closed if the mechanical walk ever finds a NEW reachable generic
+   with no matching forced-instantiation audit.
+
+3. **Field-graph depth.** `collectFieldTypes`'s 3-level bound is replaced
+   with a full walk guarded by a `sameType`-keyed visited list — the depth
+   bound's only real job was stopping an infinite loop on a
+   self-referential type, which a visited set does at any depth. RED,
+   observed against the OLD code (`probe_fielddepth_red.nim`, deleted
+   after confirming): a hazard 5 field-hops deep
+   (`FxHolderDeep.nxt.nxt.nxt.nxt.xs`) produced `siblingFieldTypes.len=0,
+   matched=false` — a real false negative. GREEN: the same shape, plus a
+   second fixture reachable only through a self-referential type
+   (`FxCyclicInner.self: FxCyclicInner`) proving the visited set both
+   catches the hazard AND terminates (this fixture compiling at all is
+   part of the termination proof).
+
+4. **Build-time check.** The exact same mechanism (now living in
+   `src/nelli/smt/vm_alias_guard.nim`) is wired into `symex.nim`'s and
+   `concolic.nim`'s own trailing `when defined(nelliVmAliasAudit): ...
+   static: doAssert ...` blocks — a genuine build-time gate on the real
+   symex/concolic compile path, not only the test file's own
+   unconditional `check`s. Opt-in via `-d:nelliVmAliasAudit`: an ordinary
+   `import nelli/symex` compile evaluates none of this (the `when
+   defined` guard means the block is not even semantically checked when
+   the define is off), so it costs library users nothing.
+   *Measured cost* (podman/gcc, this worktree): compiling
+   `tests/tsymex_phase15_F8_smoke.nim` (imports `symex.nim`) went from
+   29.7s to 44.7s with the define on (+15.0s); compiling
+   `tests/tfuzzconcolicassist.nim` (imports `concolic.nim`) went from
+   34.5s to 49.7s (+15.2s) — both from the 16-file self-audit's `getImpl`
+   reflection plus the new transitive reach-walk, paid once per compile
+   unit that imports the audited module with the define on.
+   *CI wiring, deliberately narrow*: because the cost is per-COMPILE
+   (not a one-time cost across a whole CI run), the define is turned on
+   for exactly ONE suite per leg — `tsymex_rfc0005_s8ab_letaudit` itself,
+   which already imports both `nelli/symex {.all.}` and `nelli/concolic
+   {.all.}` — rather than the whole corpus/glob in any of the three legs.
+   `symex-mingw.yaml` singles it out by name inside its derived-corpus
+   shard loop (`run-ci-suite.ps1 -ExtraNimArgs @('-d:nelliVmAliasAudit')`,
+   reusing that script's existing `-ExtraNimArgs` parameter — precedent
+   `-d:symexCiLeanB5`); `fuzzer-mingw.yaml`/`fuzzer-msvc.yaml` single it
+   out inside their existing named-contract-test loop. Applying the
+   define to every suite in any of the three legs would have multiplied
+   the measured ~15s per compile across ~200+ suites (symex-mingw's
+   derived corpus) for zero additional coverage — no suite besides this
+   one self-audits `symex.nim`/`concolic.nim`'s own routines at build
+   time. Verified locally (podman) before pushing: both
+   `tests/tsymex_phase15_F8_smoke.nim` and `tests/tfuzzconcolicassist.nim`
+   compile clean with `-d:nelliVmAliasAudit` (no cycle error — the
+   concolic.nim -> symex.nim -> vm_alias_guard.nim -> concolic.nim import
+   cycle this design deliberately avoids by having `vm_alias_guard.nim`
+   self-audit only 14 of the 16 files, with `symex.nim` and `concolic.nim`
+   each self-auditing their OWN routines independently, with no `{.all.}}`
+   import of themselves).
+
+Run across the real 16-file scope today: the same four `let` hits as
+S8af's own run (already allowlisted, unchanged), zero param hits (the
+unbounded field walk finds no NEW real-scope hazard), one reachable
+generic (`traceOneCallBoundary`, already forced). `dt-bounded.sh c` and
+`dt-bounded.sh cpp` both green, 15/15 tests (5 new: two field-graph
+fixtures, two reachability-mechanism fixtures, the macro-count and
+single-reachable-generic pins).
+
+*Different mechanisms, reported and not fixed here.*
+- **A zero-required-argument macro passed bare as a `typed` macro
+  parameter is auto-invoked by Nim, not resolved to its own symbol** —
+  discovered while building the reachability-mechanism fixtures (a
+  zero-arg fixture macro's bare name resolved to `nnkIntLit`, the RESULT
+  of calling it, never `nnkSym`; probed, confirmed with a required dummy
+  parameter added). Checked against the real 16-file scope: none of the
+  22 real macros has zero required parameters (`command grep -nE '^macro
+  [a-zA-Z_][a-zA-Z0-9_]*\*?\(\)'` and the bare `macro name:` form both
+  return no matches), so this does not hide a real-scope reachability
+  false negative today — but the mechanism itself would miss one if a
+  future zero-arg macro were added to scope. Not fixed here: doing so
+  would mean detecting and special-casing the auto-invoke shape inside
+  `vmGuardAuditRoutine`/`vmGuardAuditMacroReachWithSpecs`, which is a
+  change to the audit macros themselves, not to this slice's four items.
+- **The build-time gate runs on one suite per CI leg, not the whole
+  corpus.** A real regression in `symex.nim`'s or `concolic.nim`'s own
+  routines would still be caught (the gate's `doAssert`s fire on ANY
+  compile of that module with the define on, and this one suite's compile
+  happens on every leg run), but the define is not exercised against
+  every OTHER test file's own compile of those modules — deliberate, per
+  item 4's cost measurement above, not an oversight.
+- **The guard's own walker (`extractTopLevelNames`/`extractTopLevelMacroNames`)
+  is still a column-0 source scan**, with the same backtick-operator and
+  unusual-multi-line-signature caveats S8ab's own note first listed —
+  unchanged by this slice.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

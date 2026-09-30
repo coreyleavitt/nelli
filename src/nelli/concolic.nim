@@ -527,3 +527,69 @@ template fuzzConcolic*(s, p: untyped; settings: untyped = FuzzSettings();
   ## Defaults are the ACTIVE values: `stallRounds = 1`. Calling this and
   ## getting an inert campaign is not a state this API spells.
   fuzz(s, p, settings, assist = concolicAssist(s, p, stallRounds, maxBranchAttempts))
+
+# =============================================================================
+# RFC-0005 S8ah -- see `symex.nim`'s own trailing block for the full
+# rationale (opt-in via `-d:nelliVmAliasAudit`, zero cost when off).
+# `concolic.nim` gets its OWN copy, not `symex.nim`'s: this module is the
+# only place in the 16-file scope that itself `import ./symex`s
+# (RFC-z3-optional's documented seam), so `vm_alias_guard.nim` cannot
+# `{.all.}}` import it without creating a cycle (vm_alias_guard -> concolic
+# -> symex -> vm_alias_guard) -- see vm_alias_guard.nim's own header. Self-
+# audit needs no `{.all.}}` import to reflect on this module's own routines.
+when defined(nelliVmAliasAudit):
+  import std/strutils
+  import ./smt/vm_alias_guard
+
+  const concolicSelfNames = extractTopLevelNames(currentSourcePath())
+  vmGuardAuditNames(concolicSelfNames, "concolic.nim")
+
+  const concolicSelfLetHits = block:
+    var dedup: seq[string]
+    for h in vmGuardLetHits:
+      if h.startsWith("concolic.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  const concolicSelfParamHits = block:
+    var dedup: seq[string]
+    for h in vmGuardParamHits:
+      if h.startsWith("concolic.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  const concolicSelfReachHits = block:
+    var dedup: seq[string]
+    for h in vmGuardReachHits:
+      if h.startsWith("concolic.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  # No hazard has ever been found in concolic.nim's own scope (S8x/S8ab/
+  # S8af never separately called it out, and S8ah's own mechanical run
+  # found none either -- see the RFC note). Empty on purpose: a future
+  # value-typed save/restore added here must fail closed, same as every
+  # other file in scope.
+  const concolicSelfLetAllowlist: seq[string] = @[]
+
+  static:
+    doAssert vmGuardWalkErrs.len == 0,
+      "concolic.nim self-audit: getImpl/audit-machinery error:\n" & vmGuardWalkErrs.join("\n")
+    var unexpectedLets: seq[string]
+    for h in concolicSelfLetHits:
+      if h notin concolicSelfLetAllowlist: unexpectedLets.add h
+    doAssert unexpectedLets.len == 0,
+      "concolic.nim self-audit: unallowlisted compile-time VM let-aliasing " &
+      "hazard (RFC-0005 S8ab/S8x) -- fix it or add a reviewed allowlist " &
+      "entry with a justification:\n" & unexpectedLets.join("\n")
+    doAssert concolicSelfParamHits.len == 0,
+      "concolic.nim self-audit: unallowlisted compile-time VM param-aliasing " &
+      "hazard:\n" & concolicSelfParamHits.join("\n")
+    var reachableGenerics: seq[string]
+    for h in concolicSelfReachHits:
+      let genericKey = h.split(" -> ")[^1]
+      if genericKey notin reachableGenerics: reachableGenerics.add genericKey
+    var unforced: seq[string]
+    for g in reachableGenerics:
+      if g notin vmGuardForcedGenerics: unforced.add g
+    doAssert unforced.len == 0,
+      "concolic.nim self-audit: a macro directly (unquoted) calls a generic " &
+      "with no forced-instantiation audit (RFC-0005 S8ah item 1/3):\n" &
+      unforced.join("\n")

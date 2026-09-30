@@ -277,12 +277,30 @@ jobs:
           # `strategy.nim`, `parallel.nim` -- is fuzzer-side code. Pinned
           # here (and in fuzzer-msvc.yaml) so the guard is exercised under
           # BOTH C compilers, not only mingw-via-symex-mingw.
+          #
+          # RFC-0005 S8ah: this SAME suite also gets `-d:nelliVmAliasAudit`
+          # (ONLY this one -- `tsmoke`/`trequiresinit` import neither
+          # `symex.nim` nor `concolic.nim`, so the define would be a no-op
+          # for them, paid for nothing). That define flips on `symex.nim`'s
+          # and `concolic.nim`'s own trailing build-time self-audit blocks
+          # (`when defined(nelliVmAliasAudit): ... static: doAssert ...`) --
+          # the guard running as a genuine BUILD-time gate on the real
+          # symex/concolic compile path, not only as this suite's own
+          # `check`-based unittest assertions (which already run
+          # unconditionally, define or not). This test file imports BOTH
+          # `nelli/symex {.all.}` and `nelli/concolic {.all.}`, so one
+          # compile here exercises both modules' self-audit blocks --
+          # deliberately NOT added to the whole glob-discovered loop above:
+          # the added cost (~15s, measured) is real per compile, and this
+          # is the one suite where paying it once proves the gate runs.
           foreach ($named in @('tsmoke', 'trequiresinit', 'tsymex_rfc0005_s8ab_letaudit')) {
             Write-Host "==> $named.nim (contract test)"
+            $extraDefs = @()
+            if ($named -eq 'tsymex_rfc0005_s8ab_letaudit') { $extraDefs = @('-d:nelliVmAliasAudit') }
             nim c -r --cc:gcc --threads:on --hints:off --colors:off `
               --nimcache:_nimcache `
               --path:src --path:_deps\z3\src --path:_deps\softlink\src `
-              --cincludes:C:\z3\include "tests\$named.nim"
+              --cincludes:C:\z3\include @extraDefs "tests\$named.nim"
             if ($LASTEXITCODE -ne 0) { $failed += "$named.nim" }
           }
 

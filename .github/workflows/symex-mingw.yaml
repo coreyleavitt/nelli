@@ -275,7 +275,25 @@ jobs:
             # watchdog (scripts/run-ci-suite.ps1). A suite that would starve
             # the runner is killed and named here instead of taking the
             # whole shard's log down with a lost runner.
-            ./scripts/run-ci-suite.ps1 -Suite $t
+            #
+            # RFC-0005 S8ah: `tsymex_rfc0005_s8ab_letaudit` (whichever shard
+            # the derive step happens to place it in) ALSO gets
+            # `-d:nelliVmAliasAudit`, via `run-ci-suite.ps1`'s existing
+            # `-ExtraNimArgs` (precedent: `-d:symexCiLeanB5`). That define
+            # flips on `symex.nim`'s and `concolic.nim`'s own build-time
+            # self-audit blocks (this suite imports both `{.all.}`), so the
+            # guard runs as a genuine compile-path gate under mingw here,
+            # not only under this suite's own unconditional `check`
+            # assertions. Not applied to the other ~200 suites in this
+            # corpus: the added cost is real (~15s, measured) per compile,
+            # and every one of them would pay it for zero additional
+            # coverage (none besides this suite self-audits symex.nim/
+            # concolic.nim's OWN routines at build time).
+            if ($t -eq 'tsymex_rfc0005_s8ab_letaudit') {
+              ./scripts/run-ci-suite.ps1 -Suite $t -ExtraNimArgs @('-d:nelliVmAliasAudit')
+            } else {
+              ./scripts/run-ci-suite.ps1 -Suite $t
+            }
             if ($LASTEXITCODE -ne 0) { $failed += $t }
           }
           if ($failed.Count -gt 0) {

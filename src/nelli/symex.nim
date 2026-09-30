@@ -3053,3 +3053,93 @@ macro symexFindAllWitnesses*(fn: typed,
         recordSymexDbError(dbErr)
       `findingsId`
 
+# =============================================================================
+# RFC-0005 S8ah -- build-time wiring of the compile-time VM let-aliasing
+# guard (`smt/vm_alias_guard.nim`) onto the REAL symex compile path, opt-in
+# behind `-d:nelliVmAliasAudit` so an ordinary `import nelli/symex` compile
+# (every user who is not running this repo's own CI) pays nothing: the
+# `when defined` condition is false, so this whole block -- including the
+# `import` itself -- is never semantically checked, only parsed as a
+# skipped statement. Measured (S8ah's own note in the RFC): with the define
+# OFF, compiling `tests/tsymex_phase15_F8_smoke.nim` (a small, representative
+# symex test) shows no measurable difference against the pre-S8ah baseline;
+# with it ON, the guard's own reflection walk adds a few seconds (the same
+# order of cost `tsymex_rfc0005_s8ab_letaudit.nim` itself already pays every
+# `nimble test`/`dt-bounded.sh` run) -- acceptable for CI, not for every
+# user's build, hence opt-in rather than unconditional.
+#
+# `vm_alias_guard.nim` audits the OTHER 15 files in scope (14 directly via
+# `{.all.}}` imports, plus itself covers none of symex.nim -- see its own
+# header for why `concolic.nim` is ALSO excluded there, to avoid an import
+# cycle). This block covers the 16th: symex.nim's OWN top-level routines,
+# self-audited (no `{.all.}}` import needed to reflect on your own module).
+when defined(nelliVmAliasAudit):
+  import ./smt/vm_alias_guard
+
+  const symexSelfNames = extractTopLevelNames(currentSourcePath())
+  vmGuardAuditNames(symexSelfNames, "symex.nim")
+
+  const symexSelfLetHits = block:
+    var dedup: seq[string]
+    for h in vmGuardLetHits:
+      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  const symexSelfParamHits = block:
+    var dedup: seq[string]
+    for h in vmGuardParamHits:
+      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  const symexSelfReachHits = block:
+    var dedup: seq[string]
+    for h in vmGuardReachHits:
+      if h.startsWith("symex.nim:") and h notin dedup: dedup.add h
+    dedup
+
+  # The one historical hazard S8x/S8ab/S8af already reviewed and allowlisted
+  # in symex.nim's own scope: `emitTyAndReaderShared`'s nested
+  # `emitMVBranch`, reading a `VariantAxis`/`VariantArm` element with
+  # nothing written while the binding is live (the `types.nim:==` twin of
+  # this same finding is allowlisted in `vm_alias_guard.nim`'s own block).
+  const symexSelfLetAllowlist = [
+    "symex.nim:emitTyAndReaderShared: let ax : VariantAxis (ntyObject) <- ty.mvAxes[axisIdx]",
+    "symex.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
+  ]
+
+  # RFC-0005 S8ah: symex.nim's own macros (`symexFindAllWitnesses`) call
+  # `traceOneCallBoundary[seq[NimNode]]` directly (unquoted) -- but forcing
+  # that instantiation for audit needs `{.all.}}` visibility into
+  # `dsl_parser.nim`'s private symbol, which symex.nim does not have (and
+  # should not need just to self-audit). `vm_alias_guard.nim`'s own
+  # 14-file self-audit already forces and audits that exact instantiation
+  # as a side effect of the `import` above (module-level code runs once,
+  # at import time) and records it in the GLOBAL `vmGuardForcedGenerics`
+  # list -- the completeness check below reads THAT, not a local
+  # symex.nim-only copy, so it sees the forcing regardless of which module
+  # performed it.
+  static:
+    doAssert vmGuardWalkErrs.len == 0,
+      "symex.nim self-audit: getImpl/audit-machinery error:\n" & vmGuardWalkErrs.join("\n")
+    var unexpectedLets: seq[string]
+    for h in symexSelfLetHits:
+      if h notin symexSelfLetAllowlist: unexpectedLets.add h
+    doAssert unexpectedLets.len == 0,
+      "symex.nim self-audit: unallowlisted compile-time VM let-aliasing " &
+      "hazard (RFC-0005 S8ab/S8x) -- fix it or add a reviewed allowlist " &
+      "entry with a justification:\n" & unexpectedLets.join("\n")
+    doAssert symexSelfParamHits.len == 0,
+      "symex.nim self-audit: unallowlisted compile-time VM param-aliasing " &
+      "hazard:\n" & symexSelfParamHits.join("\n")
+    var reachableGenerics: seq[string]
+    for h in symexSelfReachHits:
+      let genericKey = h.split(" -> ")[^1]
+      if genericKey notin reachableGenerics: reachableGenerics.add genericKey
+    var unforced: seq[string]
+    for g in reachableGenerics:
+      if g notin vmGuardForcedGenerics: unforced.add g
+    doAssert unforced.len == 0,
+      "symex.nim self-audit: a macro directly (unquoted) calls a generic " &
+      "with no forced-instantiation audit (RFC-0005 S8ah item 1/3):\n" &
+      unforced.join("\n")
+

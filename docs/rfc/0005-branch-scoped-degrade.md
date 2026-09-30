@@ -227,6 +227,11 @@ title = "S8x's remainder: only `ctx.procScoped` lets have a mechanical guard aga
 state = "pending"
 
 [[slice]]
+id    = "S8ac"
+title = "S8aa's remainder: a callee assigning through a `var` ref parameter (`cur = b`) is an internal walker fault (sort mismatch at array store value) -- must model or decline scoped, never weInternalWalkerFault; exact-mode `start div y` (width-stamped offset by a bitvector param) runs past 900s -- find the query cost and bound it; a shift by a count outside 0..<width is modelled as Z3's result but x86 masks the count (5 shl 64 == 5), so a witness depending on it may not replay -- model the target's masking or decline; the short-circuit join still declines when an operand allocates or when table/set/variant/distinct state differs"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

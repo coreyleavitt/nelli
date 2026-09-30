@@ -219,7 +219,7 @@ state = "pending"
 [[slice]]
 id    = "S8aa"
 title = "S8w's remainder: unchecked `low(T) div -1` is modelled as a wrap to low(T) but C traps SIGFPE (witness does not replay -- model the trap or decline); the and/or path join merges only scalar-differing paths, so a chain operand writing a string/seq/heap cell/ref or leaving >1 surviving path still forks 2^m; B6 with a negative offset returns sxUnknown when the unroll budget runs out under the IndexError target; `data.len.uint` in an unsigned B4 scan declines on its own path"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ab"
@@ -3802,6 +3802,142 @@ Re-pinned:
   it traps (x86 `idiv`, SIGFPE) rather than wrapping. Before S8w it was
   modelled as the out-of-window `-low(T)`, so neither form matches the
   trap. A witness that depends on it would fail to replay.
+
+**As landed (S8aa, walker 172) — S8w's remainder.**
+
+*A zero divisor with overflow checks off is a trap.* Nim emits its
+`div`/`mod` zero check only under `overflowChecks`. With it off (`{.push
+overflowChecks: off.}`, or `acOverflow` off in the model), `x div 0` and
+`x mod 0` reach the C division, which traps: probed on the pinned
+toolchain, debug build (the build a witness is replayed in), c and cpp,
+both print `SIGFPE: Arithmetic error.` and abort, with no `except` arm
+run. The non-replaying witnesses at the base: with `arithChecks:
+{acDivByZero, acRange}`, `x div y` returned `sxRaised` `DivByZeroDefect`
+at `(0, 0)`; with `arithChecks: {}`, `x div y == -1 and y == 0` and `x mod
+y == x and y == 0` were `sxSat` at `(0, 0)`. Each witness aborts the
+process on replay. `lowerArith` now routes a zero divisor into S8i's
+survivor-only trap sink (`arithTrapConds`) whenever `currentArithWraps`
+holds, and into the `DivByZeroDefect` fork (gated on `acDivByZero`)
+only with `acOverflow` on. The checked build still raises
+`DivByZeroDefect`, and that witness replays.
+
+S8w's suspect, `low(T) div -1`, was already modelled at 32 and 64
+bits: S8i confines the path off it (`arithTrapConds`), and the probe
+confirms C traps there (`low(int) div -1`, `low(int) mod -1`, and the
+`int32` pair all abort). At 8 and 16 bits C promotes to `int`, so
+`low(int8) div -1 == low(int8)` and `mod` is 0, which is the wrap the
+model gives. None of the shapes tried (let, callee, while, chain,
+return, assignment, stamped B4 offset, range, `parseInt`) reproduced the
+"wrap to `low(T)`" S8w recorded. They are pinned. No other operator has
+the trap shape: probed the same way, `shl`, `shr` and `ashr` by a count
+>= the width or negative never trap (x86 masks the count: `5 shl 64 ==
+5`, `5 shl 65 == 10`), and unsigned division traps only at zero.
+
+*The short-circuit join covers store shapes and multi-path operands.*
+`mergeJoinPaths` no longer requires one survivor with equal heap state.
+- Env values that differ are joined by `joinSV`: `ite` over the
+  string term, the seq's array term and length (neither side a
+  placeholder, equal element type), refs and pointers of the same
+  pointee, and tuples and arrays field by field, on top of S8w's
+  scalars.
+- Heap arrays that differ are joined key by key (`ite` over the
+  array terms). The heap key set, live refs, allocation counters,
+  freshness count and nil-deref flag must be equal (`sameHeapMeta`).
+  `heapDepth` is a per-path deref budget, not program state, so the
+  join takes the max.
+- n survivors with guards `G_i` (their `pc` tail and `dspc` tail
+  past the base) join as a fold `ite(G_1, v_1, ite(G_2, v_2, ...))`,
+  with `cond => OR R_i` in `pc` and `cond => OR G_i` in `dspc`. One
+  survivor is S8w's join unchanged.
+The chain's own guard temporary keeps S8w2's connective form (`cond and
+v` / `e or v`, not an `ite`); every other entry goes through `joinSV`.
+Anything else (allocation in an operand, unequal taint, a table, set
+or variant that differs) still returns the paths unjoined. With 6
+pairs the base made 114 (string), 378 (seq), 296 (heap cell) and 732
+(two-survivor callee) Z3 calls; this slice makes at most 16 (24 for the
+two-survivor callee).
+
+*B6 with a negative start raises.* `iekStrInOptionRegion`'s member test
+required nothing of the start. Z3's `str.substr` at a negative offset
+is "", which the region accepts, so a negative start was certified
+defect-free and the first scan's `IndexDefect` (`s[-1]`) was never
+walked: `sxUnknown` (`beBudgetExhausted`) when the fallback's unroll
+ran out, and a false `sxUnsat` when it did not. The member test now
+conjoins `start >= 0`. A negative start is `sxRaised` `IndexDefect`,
+and the witness replays.
+
+*A same-width reinterpret of an Int-sorted value is modelled.*
+`lowerConvIntReinterpret` on an `svInt` (`data.len.uint`,
+`s.find(c).uint`) declined (`feUnsupportedOpHavoc`). It now reduces
+the value into the target window (`lo + (v - lo) mod 2^w`, skipped
+when the interval already fits) and stamps the target width and
+signedness. So a `len` stays itself and `find`'s -1 becomes
+`high(uint)`. Pinning it exposed a literal bug: at an unsigned 64-bit
+`svInt` proto, `coerceIntLit` built a `uint64` literal above
+`high(int64)` from its two's-complement `int64` (`high(uint)` as -1),
+so `s.find('a').uint == high(uint)` was a false `sxUnsat` and
+`s.len.uint > high(uint) - 2` a false `sxSat` (with the reinterpret
+modelled and the literal not yet fixed). Such a literal is now
+`ival + 2^64`. The same bug reached S8w's stamped `uint` offsets.
+
+Pins: `tests/tsymex_rfc0005_s8aa_remainder.nim`.
+- (1) unchecked `x div 0` (signed, `isOptimised` and `isExact`;
+  `uint32`) is not a `DivByZeroDefect` (RED: `sxRaised` at `(0, 0)`);
+  with no checks, no execution continues past `x div 0` or `x mod 0`
+  (RED: `sxSat` at `(0, 0)`). The checked build's `DivByZeroDefect` is
+  found and replays. `low(T) div -1` and `mod -1` at 32 and 64 bits
+  stay dead, `low(int8) div -1` wraps and replays, a safe division keeps
+  its quotient, and a stamped B4 offset divided by -1 traps at
+  `low(int)`.
+- (2) 6-pair chains whose operands append to a string, append to a
+  seq, add to a heap cell, rebind a local ref, rebind a ref in a heap
+  cell, or leave two survivors, each within 16 (24) Z3 calls, with
+  their witnesses checked. The string chain's impossible length is
+  `sxUnsat`. A raising read on one of two survivors still raises and
+  replays.
+- (3) B6 with a negative start: `sxRaised` `IndexDefect` that replays,
+  also on a short region (RED: `sxUnknown`, `beBudgetExhausted`).
+- (4) the unsigned B4 scan's hit with no decline, replayed (RED:
+  `feUnsupportedOpHavoc`); `find`'s -1 as `high(uint)` (RED: decline,
+  then false `sxUnsat`); `len.uint == 3` SAT and `s.len <= 4 and
+  s.len.uint > high(uint) - 2` UNSAT (RED: decline; the unbounded form
+  was a false `sxSat` before the literal fix). Unbounded, the second is `sxUnknown` (`beSolverUndef`,
+  `maxSeqLen`), which is honest.
+- The `>= 172` floor.
+
+Re-pinned:
+- `phase15_CR2_cachekey` (171 -> 172).
+- `r6_n27_placeholder_read_audit`: `joinSV`'s svSeq arm has 5 marked
+  lines, a placeholder guard and the reads it gates (76 -> 81 in
+  `runtime.nim`).
+- `rfc0005_s6b_ops`: the `feUnsupportedOpHavoc` site count loses the
+  reinterpret (14 -> 13).
+- `r6_b2_intwidth` item2-1/item2-2: `uint(q)` on a B4 scan's
+  Int-sorted result was pinned as S6b's decline (`sxUnknown`,
+  `feUnsupportedOpHavoc`); it is now `sxSat` with no decline, and the
+  witness is checked against Nim's scan.
+
+*Different mechanisms, reported and not fixed here.*
+- **A `var` ref parameter written by a callee is a walker fault.**
+  `proc noteR(cur: var Box, b: Box) = cur = b`, called once and with no
+  chain, returns `sxUnknown`: `seUnsupportedCompoundSortLeaf`, then
+  `weInternalWalkerFault` ("sort mismatch at array store value:
+  expected (_ BitVec 64), got Ref..."). It is sound (the path is
+  tainted), and the same at the base. The join pins use a local rebind
+  and a heap-cell rebind instead.
+- **Exact `start div y` with a stamped Int offset and a BV divisor ran
+  past 900 s** (a probe; nonlinear Int division under the wrap). It is
+  not pinned here.
+- **The join still declines** on allocation inside an operand and on
+  tables, sets, variants and distinct values that differ.
+- **A shift by a count outside `0 ..< width` is modelled as Z3's
+  `bvshl`/`bvlshr`/`bvashr` (0 or all sign bits)**, but the machine
+  masks the count (`5 shl 64 == 5`). It is C UB and does not trap, so a
+  witness that depends on it can fail to replay and a verdict on it can
+  be wrong. It is not this slice's trap shape.
+- **`acDivByZero` off with `acOverflow` on** leaves the continuation
+  unconstrained at a zero divisor: the user turned the check off.
+  That is a policy choice, left as it is.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

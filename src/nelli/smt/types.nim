@@ -2281,7 +2281,11 @@ type
     ## cache key (`;ac=`); inserting or reordering silently changes every cached
     ## digest. Never reorder — only append.
     acOverflow   ## fork +/-/* overflow → OverflowDefect raise
-    acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise
+    acDivByZero  ## fork div/mod-by-zero → DivByZeroDefect raise. Only with
+                 ## `acOverflow` also on (RFC-0005 S8aa): Nim emits its zero
+                 ## check under `overflowChecks` alone, so with that off a
+                 ## zero divisor reaches the C division, which traps (SIGFPE);
+                 ## it is then a survivor-only trap, never a raise.
     acRange      ## fork float→int out-of-range → RangeDefect raise (R16-2);
                  ## also int-width narrowing (R16-5, deferred). Scope in R16-1:
                  ## float→int domain checks only (RD2) — no fork emitted yet.

@@ -184,7 +184,21 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "171"
+const symexWalkerVersion* = "172"
+  ## RFC-0005 S8aa (2026-09-30) — S8w's remainder. With overflow checks off
+  ## Nim emits no zero-divisor check, so `x div 0`/`x mod 0` reach the C
+  ## division, which traps (SIGFPE): a zero divisor is now a survivor-only
+  ## trap (`arithTrapConds`) whenever `acOverflow` is off, never a
+  ## `DivByZeroDefect` raise nor a continuation on Z3's `x div 0` value.
+  ## (`low(T) div/mod -1` already trapped at 32/64 bits since S8i.) The
+  ## short-circuit join (`mergeJoinPaths`) now merges string, seq, heap
+  ## cell and ref state (`joinSV`, ite over the store/array terms) and
+  ## operands that leave more than one surviving path. B6's option-region
+  ## member test requires a non-negative start (Z3's `str.substr` at a
+  ## negative offset is "", a member), so the first scan's `IndexDefect`
+  ## is walked. A same-width signedness reinterpret of an Int-sorted value
+  ## (`data.len.uint`, `s.find(c).uint`) is modelled (mod 2^w into the
+  ## target window) instead of declining.
   ## RFC-0005 S8w (2026-09-30) — S8t's remainder. An alternating `and`/`or`
   ## chain's synthesized guard `if`s carry `ifJoin` (`IRStmt.ifJoin`), and
   ## the walker joins the guarded and skipped paths back into one

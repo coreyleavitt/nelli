@@ -305,17 +305,22 @@ proc sutReinterpretIntOffsetReturn(s: string, start: int) =
 suite "symex round-6 B2 fix-slice item 2 — lowerConvIntReinterpret's svInt arm":
 
   test "item2-1 RED->GREEN: uint(q) on an isIntOffset-promoted svInt reports classified sxUnknown (feUnsupportedOpHavoc), never a crash":
-    ## RFC-0005 S6b: the Int-sorted reinterpret binds a fresh symbol and
-    ## drops nothing -- the `feUnsupportedOpHavoc` (dcFreshSymbol) split.
+    ## RFC-0005 S8aa re-pin: the Int-sorted reinterpret is now modelled
+    ## (`lowerConvIntReinterpret` reduces into the target window; a
+    ## non-negative `q` keeps its value), so the target is `sxSat` with no
+    ## decline and a witness Nim itself reaches. Was: `sxUnknown`,
+    ## `feUnsupportedOpHavoc` (S6b's scoped decline).
     let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
-    check r.errors.anyIt("lowerConvIntReinterpret" in it.msg)
+    check r.status == sxSat
+    check not r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
+    if r.status == sxSat:
+      let (s, start) = r.witness
+      let (_, q) = readCStringB2Reinterpret(s, start)
+      check uint(q) == 5'u
 
-  test "item2-2: the classified decline never falsely reports sxSat/sxUnsat":
+  test "item2-2: the modelled reinterpret never falsely reports sxUnsat":
+    ## RFC-0005 S8aa re-pin: was `!= sxSat and != sxUnsat` (the decline).
     let r = symexFind(sutReinterpretIntOffsetReturn, tLabel("reinterpret_intoffset_return_reached"))
-    check r.status != sxSat
     check r.status != sxUnsat
 
 suite "symex round-6 B2 — walker version pin":

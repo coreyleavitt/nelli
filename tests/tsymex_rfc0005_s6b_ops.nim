@@ -621,11 +621,13 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## the type, a superset of Nim's `default(T)`), and `retBindEq`'s
     ## kind-mismatch backstop (was a raise; `retSym` left free). The
     ## call-return drains now also take a kind mismatch
-    ## (`retBindKindsAgree`) through their existing site.
+    ## (`retBindKindsAgree`) through their existing site. RFC-0005 S8aa
+    ## removed the first: an Int-sorted same-width reinterpret is modelled
+    ## (`lowerConvIntReinterpret` reduces into the target window), so 13.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 14
+    check sites.len == 13
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

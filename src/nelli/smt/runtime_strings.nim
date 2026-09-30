@@ -820,7 +820,17 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let terminator = mkRegex(mkString("\x00"))
     let pair = concat(plus(nonzero), terminator, star(nonzero), terminator)
     let region = concat(star(pair), option(concat(terminator, star(anybyte))))
-    SymVal(kind: svBool, bo: matches(tail, region))
+    # RFC-0005 S8aa: membership needs `start >= 0`. Z3's `str.substr` at a
+    # negative offset is "", which `region` accepts (zero pairs), so a
+    # negative start certified the loop defect-free -- while the real first
+    # iteration reads `s[start]` and raises `IndexDefect` whenever
+    # `start < s.len`. The member branch swallowed that raise, and the
+    # fallback k-unroll never saw a negative start: `tIndexError` was
+    # `sxUnknown` when the unroll budget ran out on the other fallback
+    # paths, and a false `sxUnsat` when it did not (a bounded `s.len`). A
+    # negative start now takes the fallback, whose first scan raises.
+    SymVal(kind: svBool,
+           bo: (startSV.zi >= mkInt(0)) and matches(tail, region))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll,

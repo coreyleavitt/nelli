@@ -932,5 +932,10 @@ task test, "Run the test suite":
             # `ite`; a literal `shr` on an unstamped Int is Int floor
             # division, not an `int2bv` bridge. Reads query text via its
             # `.nim.cfg` (`-d:symexQueryStats`).
-            "tsymex_rfc0005_s8w2_hotfix"]:
+            "tsymex_rfc0005_s8w2_hotfix",
+            # RFC-0005 S8aa -- S8w's remainder: unchecked zero divisors
+            # trap, the short-circuit join covers strings, seqs, heap
+            # cells, refs and multi-path operands, B6 negative starts
+            # raise, `len.uint` reinterprets; walker 171->172.
+            "tsymex_rfc0005_s8aa_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

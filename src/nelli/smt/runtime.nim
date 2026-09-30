@@ -3777,6 +3777,12 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
     raiseAssert "lowerConvIntWidth: unsupported operand kind for widening: " &
       $operandSV.kind
 
+proc intWindow(width: int, signed: bool): tuple[lo, hi: Z3Int,
+                                                span: Z3Int,
+                                                ivl: Option[Interval]]
+  ## RFC-0005 S8aa fwd-decl (`lowerConvIntReinterpret`); defined beside
+  ## `wrapIntToWidth`.
+
 proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
                               tgtSigned: bool): SymVal =
   ## A1 adjudication (walker v116): SAME-WIDTH signedness reinterpret (e.g.
@@ -3798,27 +3804,26 @@ proc lowerConvIntReinterpret(operandSV: SymVal, cirWidth: int,
   of svBV32: SymVal(kind: svBV32, signed: tgtSigned, bv32: operandSV.bv32)
   of svBV64: SymVal(kind: svBV64, signed: tgtSigned, bv64: operandSV.bv64)
   of svInt:
-    # Round-6 re-review (fix-slice item 2): a width-64 `isIntOffset`-promoted
-    # param (`allocateSym`'s `itInt` arm, ~2176-2188) allocates `svInt` — a
-    # Z3 Int-sorted value with no bit pattern at all, only `ziWidth`/
-    # `ziSigned` bookkeeping fields. The BV arms above are a SOUND pure tag
-    # flip because a BV's raw ast is genuinely signedness-agnostic; an Int
-    # sort has no such raw bit pattern to relabel, so faking a `signed`
-    # retag here would assert an identity the operand never had. Classified
-    # decline instead of a crash: `allocDegrade` records the taint (sync,
-    # same sink every other alloc-time decline uses — no `Path`/`w` in
-    # scope on this call chain), then a fresh same-width BV placeholder
-    # (never `svInt` — the placeholder must be `allocateSym`-representable
-    # as the node's own declared result kind, not a re-degraded Int) keeps
-    # every downstream consumer's `.kind` dispatch total. RFC-0005 S6b:
-    # `feUnsupportedOpHavoc` -- the operand is already lowered, the cast is
-    # total and effect-free in Nim, and the placeholder is fresh per
-    # evaluation with its init facts discarded (a superset).
-    degradeAlloc(tInt(cirWidth, tgtSigned), feUnsupportedOpHavoc,
-      "lowerConvIntReinterpret: same-width signedness reinterpret has no " &
-      "sound meaning on a Z3 Int-sorted operand (isIntOffset-promoted " &
-      "svInt) — degraded to sxUnknown (feUnsupportedOp)",
-      "__convIntReinterpretDegrade")
+    # RFC-0005 S8aa: an Int-sorted operand (a stamped scan offset, or an
+    # unstamped `.len` / `find` / `parseInt` result, a signed 64-bit `int`)
+    # has no bit pattern to relabel, but a same-width reinterpret is still
+    # a total function of its VALUE: the one integer of the target's window
+    # congruent to it modulo `2^width` (two's complement is exactly that).
+    # `wrapIntToWidth`'s term reduces it -- `lo + (v - lo) mod 2^w` -- and a
+    # value whose interval already lies in the target window (a
+    # non-negative `len` to `uint`) is itself. Before S8aa this declined
+    # (`feUnsupportedOpHavoc`, a fresh placeholder): `data.len.uint` in an
+    # unsigned B4 scan lost the bound on its own path.
+    let win = intWindow(cirWidth, tgtSigned)
+    let v = operandSV.zi
+    let ivl = operandSV.ziIvl
+    if ivl.isSome and win.ivl.isSome and ivl.get.lo >= win.ivl.get.lo and
+       ivl.get.hi <= win.ivl.get.hi:
+      return SymVal(kind: svInt, zi: v, ziWidth: cirWidth,
+                    ziSigned: tgtSigned, ziIvl: ivl)
+    let inWin = v >= win.lo and v <= win.hi
+    SymVal(kind: svInt, zi: ite(inWin, v, win.lo + ((v - win.lo) mod win.span)),
+           ziWidth: cirWidth, ziSigned: tgtSigned, ziIvl: win.ivl)
   else:
     raiseAssert "lowerConvIntReinterpret: unsupported operand kind: " &
       $operandSV.kind
@@ -4918,6 +4923,14 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
     ## — the one exact fact the analysis always has. It is what makes the
     ## common shapes (`pos + 1`, `i * 4`, `n - 1`) dischargeable at all:
     ## without it every increment on a promoted counter pays a solver fork.
+    ## RFC-0005 S8aa: a `uint64` literal above `high(int64)` arrives as its
+    ## two's-complement `int64` (`high(uint)` is -1). At an unsigned 64-bit
+    ## proto its value is `ival + 2^64`, which no `Interval` holds. It was
+    ## the negative numeral: `s.find('a').uint == high(uint)` was a false
+    ## `sxUnsat` and `s.len.uint > high(uint) - 2` a false `sxSat`.
+    if ival < 0 and proto.ziWidth == 64 and not proto.ziSigned:
+      return SymVal(kind: svInt, zi: mkZ3IntLit(ival) + intWindow(64, false).span,
+                    ziWidth: 64, ziSigned: false, ziIvl: none(Interval))
     SymVal(kind: svInt, zi: mkZ3IntLit(ival),
            ziWidth: proto.ziWidth, ziSigned: proto.ziSigned,
            ziIvl: some(interval(ival, ival)))
@@ -5813,8 +5826,26 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## from the same pre-lower path in `drainOverflowRaises`, kind-agnostic.
   if op in {bDiv, bMod} and a.kind notin {svFloat32, svFloat64}:
     let c = divisorIsZero(b)
-    divByZeroConds.add c
-    syncDivByZeroCond(c)
+    if currentArithWraps:
+      # RFC-0005 S8aa: Nim's zero-divisor check is part of its overflow
+      # checks (the C code generator emits it only under `overflowChecks`),
+      # so with them off -- `acOverflow` excluded, `currentArithWraps` --
+      # `x div 0` and `x mod 0` reach the C division itself, which traps
+      # (x86 `idiv` / `div`, SIGFPE) at every width and signedness. Probed
+      # on the pinned toolchain in the debug build a test replays under, c
+      # and cpp, with `{.push overflowChecks: off.}`: `5 div 0` and
+      # `5 mod 0` abort with "SIGFPE: Arithmetic error", and no `except`
+      # arm runs. So it is the survivor-only trap sink, as `low(T) div -1`
+      # is below, and never a `DivByZeroDefect` raise, whatever
+      # `acDivByZero` says. Before S8aa the raise was forked (its witness
+      # aborts the process on replay) and, with `acDivByZero` off too, the
+      # continuation carried Z3's `x div 0` value, a state Nim never
+      # reaches.
+      arithTrapConds.add c
+      syncArithTrapCond(c)
+    else:
+      divByZeroConds.add c
+      syncDivByZeroCond(c)
   if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed:
     let oc = overflowCond(a, b, op)
     overflowConds.add oc
@@ -11400,16 +11431,21 @@ proc hasZ3Prefix(s, prefix: seq[Z3Bool]): bool =
     if s[i].raw != prefix[i].raw: return false
   true
 
-proc sameHeapState(a, b: Path): bool =
-  ## RFC-0005 S8w. The logical-heap fields `forkPath` deep-copies are equal
-  ## on both paths (the join keeps one copy).
-  if a.heapDepth != b.heapDepth or
-     a.freshnessAssertCount != b.freshnessAssertCount or
+proc sameHeapMeta(a, b: Path): bool =
+  ## RFC-0005 S8w (S8aa: the heap arrays themselves may differ). The
+  ## logical-heap bookkeeping `forkPath` deep-copies is equal on both paths
+  ## and they hold a heap array for the same pointee types, so the join can
+  ## keep one copy of the bookkeeping and `ite` the arrays. An allocation
+  ## (`new T`: a fresh ref, a counter, freshness facts) makes them differ.
+  ## `heapDepth` is not compared: it counts the dereferences walked on the
+  ## path (a budget, `heapDepthExhausted`), not program state, and the join
+  ## keeps the larger count, which only ever halts a path sooner.
+  if a.freshnessAssertCount != b.freshnessAssertCount or
      a.nilDeref != b.nilDeref or a.allocCounters != b.allocCounters or
      a.heaps.len != b.heaps.len or a.liveRefs.len != b.liveRefs.len:
     return false
-  for k, v in a.heaps:
-    if not b.heaps.hasKey(k) or b.heaps[k].raw != v.raw: return false
+  for k in a.heaps.keys:
+    if not b.heaps.hasKey(k): return false
   for k, v in a.liveRefs:
     if not b.liveRefs.hasKey(k): return false
     let u = b.liveRefs[k]
@@ -11418,47 +11454,167 @@ proc sameHeapState(a, b: Path): bool =
       if u[i].raw != v[i].raw: return false
   true
 
+proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
+  ## RFC-0005 S8w/S8aa. `ite(sel, t, e)` for two values of ONE program
+  ## variable on the two sides of a short-circuit join, or `none` when the
+  ## ite would not be exact. Identical values are kept as they are. A
+  ## scalar is an `ite` of its term (a stamped Int of one width and sign
+  ## keeps the hull of both intervals). S8aa adds the store shapes, where
+  ## the value IS its terms, so the `ite` of the terms is the `ite` of the
+  ## value: a string (one Z3 string), a seq of one element type (its
+  ## length and its data array; a placeholder is never merged), a `ref` /
+  ## `ptr` to one pointee (the address), and a tuple / array whose elements
+  ## all join. Anything else declines (`iteSV` would degrade it).
+  if sameSV(t, e): return some(t)
+  if t.kind != e.kind: return none(SymVal)
+  case t.kind
+  of svBool, svFloat32, svFloat64:
+    some(iteSV(sel, t, e))
+  of svBV8, svBV16, svBV32, svBV64:
+    if t.signed == e.signed: some(iteSV(sel, t, e)) else: none(SymVal)
+  of svInt:
+    if t.ziWidth != e.ziWidth or t.ziSigned != e.ziSigned:
+      return none(SymVal)
+    var m = iteSV(sel, t, e)
+    m.ziIvl = if t.ziIvl.isSome and e.ziIvl.isSome:
+                some(interval(min(t.ziIvl.get.lo, e.ziIvl.get.lo),
+                              max(t.ziIvl.get.hi, e.ziIvl.get.hi)))
+              else: none(Interval)
+    some(m)
+  of svString:
+    some(SymVal(kind: svString, str: ite(sel, t.str, e.str)))
+  of svSeq:
+    if t.isUnsupportedFieldPlaceholder or e.isUnsupportedFieldPlaceholder or  # [placeholder-audited]
+       t.seqElemTy != e.seqElemTy:
+      return none(SymVal)
+    let ctx = t.seqDataRaw.ctx  # [placeholder-audited]
+    # Wrapped (inc_ref'd) at once: a raw handle is not owned, and the next
+    # API call may reclaim it.
+    let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,  # [placeholder-audited]
+                              t.seqDataRaw.raw, e.seqDataRaw.raw))  # [placeholder-audited]
+    some(SymVal(kind: svSeq, seqLen: ite(sel, t.seqLen, e.seqLen),  # [placeholder-audited]
+                seqDataRaw: data, seqElemTy: t.seqElemTy))
+  of svRef:
+    if t.refPointee != e.refPointee: none(SymVal)
+    else: some(iteSV(sel, t, e))
+  of svPtr:
+    if t.ptrPointee != e.ptrPointee or t.ptrFamily != e.ptrFamily:
+      none(SymVal)
+    else: some(iteSV(sel, t, e))
+  of svTuple:
+    if t.fields.len != e.fields.len or t.fieldNames != e.fieldNames:
+      return none(SymVal)
+    var fs: seq[SymVal]
+    for i in 0 ..< t.fields.len:
+      let f = joinSV(sel, t.fields[i], e.fields[i])
+      if f.isNone: return none(SymVal)
+      fs.add f.get
+    some(SymVal(kind: svTuple, fields: fs, fieldNames: t.fieldNames))
+  of svArray:
+    if t.arrElems.len != e.arrElems.len or t.arrElemTy != e.arrElemTy:
+      return none(SymVal)
+    var es: seq[SymVal]
+    for i in 0 ..< t.arrElems.len:
+      let x = joinSV(sel, t.arrElems[i], e.arrElems[i])
+      if x.isNone: return none(SymVal)
+      es.add x.get
+    some(SymVal(kind: svArray, arrElems: es, arrElemTy: t.arrElemTy))
+  else:
+    none(SymVal)
+
+proc conjTail(s: seq[Z3Bool], start: int): Option[Z3Bool] =
+  ## RFC-0005 S8aa. The conjunction of `s[start .. ^1]`, `none` when empty.
+  if s.len <= start: return none(Z3Bool)
+  var c = s[start]
+  for i in start + 1 ..< s.len: c = c and s[i]
+  some(c)
+
 proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
                     skip: Path): seq[Path] =
   ## RFC-0005 S8w. The join of an `IRStmt.ifJoin` guard (a short-circuit
   ## chain's `if sc: <next operand>`, `lowerShortCircuitParts`): the body's
-  ## survivor `a` (forked from `base` with `cond`) and the skip path (`base`
-  ## with `not cond`) become ONE path with
-  ##   pc   = base.pc   & [cond => <a's own later branch conditions>]
-  ##   dspc = base.dspc & [cond => <a's own defect-survivor facts>]
-  ##   env  = a's env, with each entry the skip path holds differently
+  ## survivors `a_1 .. a_n` (forked from `base` with `cond`) and the skip
+  ## path (`base` with `not cond`) become ONE path. Each survivor's own
+  ## later branch conditions are `R_i` and its own defect-survivor facts
+  ## `D_i`. With one survivor (S8w):
+  ##   pc   = base.pc   & [cond => R]
+  ##   dspc = base.dspc & [cond => D]
+  ##   env  = a's env, each entry the skip path holds differently
   ##          `ite(cond, a's, skip's)`
-  ## which is exactly `base and ((cond and A) or not cond)`, the disjunction
-  ## of the two paths: `cond` separates them, so the `ite` picks each one's
-  ## value. The reads the body hoisted were already forked (and their raises
-  ## routed) on `a`, under `cond`; only the continuation is shared.
+  ## which is exactly `base and ((cond and R and D) or not cond)`, the
+  ## disjunction of the two paths: `cond` separates them, so the `ite`
+  ## picks each one's value. RFC-0005 S8aa: with several survivors (a
+  ## callee's two returns, a nested `if` in the operand), the survivors are
+  ## separated by their own `G_i = R_i and D_i` -- the walker forks every
+  ## branch on a predicate and its negation, so at most one holds -- and
+  ##   pc   = base.pc   & [cond => (R_1 or ... or R_n)]
+  ##   dspc = base.dspc & [cond => (G_1 or ... or G_n)]
+  ##   env  = ite(cond, ite(G_1, a_1's, ite(G_2, a_2's, ... a_n's)), skip's)
+  ## (the last survivor needs no selector: under `cond` one `G_i` holds).
+  ## The two facts together are `cond => (G_1 or ... or G_n)`; `pc` keeps
+  ## only branch conditions, as everywhere (ADR-0012). The reads the body
+  ## hoisted were already forked (and their raises routed) on each
+  ## survivor, under `cond`; only the continuation is shared.
   ##
-  ## Declined (the two paths are returned as they are, as before S8w) when
-  ## the join would not be exact or not cheap: the body left more or fewer
-  ## than one survivor (a split drain's survivors are not separated by
-  ## `cond` alone), the paths' taint or heap state differ, a prefix was
-  ## rewritten, or an entry that differs is not a scalar (`iteSV` degrades a
-  ## composite). Entries only the body bound (its temporaries) are kept as
-  ## the body bound them: nothing on the skip side reads them.
-  if armOut.len != 1:
-    return armOut & @[skip]
-  let a = armOut[0]
-  if a.taint != skip.taint or not sameHeapState(a, skip) or
-     not hasZ3Prefix(a.pc, base.pc) or a.pc.len <= base.pc.len or
-     a.pc[base.pc.len].raw != cond.raw or
-     not hasZ3Prefix(a.defectSurvivorPc, base.defectSurvivorPc) or
-     not sameZ3Seq(skip.defectSurvivorPc, base.defectSurvivorPc):
-    return @[a, skip]
+  ## An entry joins through `joinSV`: scalars, and since S8aa strings, seqs,
+  ## refs and tuples / arrays of them. A heap array the body wrote (a
+  ## `ref` field store) joins the same way, `ite` over the arrays, when the
+  ## heap bookkeeping is the same (`sameHeapMeta`).
+  ##
+  ## Declined (the paths are returned as they are, as before S8w) when the
+  ## join would not be exact: a survivor's taint differs from the skip
+  ## path's, the body allocated (`sameHeapMeta`), a prefix was rewritten,
+  ## an entry does not join (`joinSV`), or an entry is bound on some
+  ## survivors and not others. Entries only the body bound (its
+  ## temporaries) are kept as the body bound them: nothing on the skip side
+  ## reads them.
+  if armOut.len == 0:
+    return @[skip]
+  let decline = armOut & @[skip]
+  if not sameZ3Seq(skip.defectSurvivorPc, base.defectSurvivorPc):
+    return decline
+  for a in armOut:
+    if a.taint != skip.taint or not sameHeapMeta(a, skip) or
+       not hasZ3Prefix(a.pc, base.pc) or a.pc.len <= base.pc.len or
+       a.pc[base.pc.len].raw != cond.raw or
+       not hasZ3Prefix(a.defectSurvivorPc, base.defectSurvivorPc):
+      return decline
+  let n = armOut.len
+  var rs, gs: seq[Option[Z3Bool]]
+  for a in armOut:
+    let r = conjTail(a.pc, base.pc.len + 1)
+    let d = conjTail(a.defectSurvivorPc, base.defectSurvivorPc.len)
+    rs.add r
+    gs.add(if r.isSome and d.isSome: some(r.get and d.get)
+           elif r.isSome: r
+           else: d)
+  # Several survivors are separated only by their own `G_i`: a survivor
+  # with none (an unconditional one) cannot be told apart, so decline.
+  if n > 1:
+    for g in gs:
+      if g.isNone: return decline
+  proc armValue(vals: seq[SymVal]): Option[SymVal] =
+    # ite(G_1, v_1, ite(G_2, v_2, ... v_n)).
+    var acc = some(vals[n - 1])
+    for i in countdown(n - 2, 0):
+      acc = joinSV(gs[i].get, vals[i], acc.get)
+      if acc.isNone: return acc
+    acc
   var env: Env
-  for k, v in a.env:
+  for k in armOut[0].env.keys:
+    var vals: seq[SymVal]
+    for a in armOut:
+      if not a.env.hasKey(k): return decline
+      vals.add a.env[k]
+    let armV = armValue(vals)
+    if armV.isNone: return decline
     if not skip.env.hasKey(k):
-      env[k] = v
+      env[k] = armV.get
       continue
     let e = skip.env[k]
-    if sameSV(v, e):
-      env[k] = v
-    elif v.kind == svBool and e.kind == svBool and
-         (e.bo.raw == cond.raw or (not e.bo).raw == cond.raw):
+    let av = armV.get
+    if av.kind == svBool and e.kind == svBool and not sameSV(av, e) and
+       (e.bo.raw == cond.raw or (not e.bo).raw == cond.raw):
       # RFC-0005 S8w2: the chain's own guard temporary. On the skip side
       # it IS the guard's operand -- `cond` itself for an `and` chain (so
       # false there), `not cond` for an `or` chain (so true there) -- and
@@ -11468,37 +11624,52 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
       # the `ite` form is equivalent but not the same query, and Z3 4.13.4
       # answered it with a different (valid, longer) model.
       env[k] =
-        if e.bo.raw == cond.raw: SymVal(kind: svBool, bo: cond and v.bo)
-        else: SymVal(kind: svBool, bo: e.bo or v.bo)
-    elif v.kind == e.kind and
-         v.kind in {svBool, svBV8, svBV16, svBV32, svBV64, svFloat32,
-                    svFloat64} and
-         (v.kind notin {svBV8, svBV16, svBV32, svBV64} or
-          v.signed == e.signed):
-      env[k] = iteSV(cond, v, e)
-    elif v.kind == svInt and e.kind == svInt and
-         v.ziWidth == e.ziWidth and v.ziSigned == e.ziSigned:
-      var m = iteSV(cond, v, e)
-      m.ziIvl = if v.ziIvl.isSome and e.ziIvl.isSome:
-                  some(interval(min(v.ziIvl.get.lo, e.ziIvl.get.lo),
-                                max(v.ziIvl.get.hi, e.ziIvl.get.hi)))
-                else: none(Interval)
-      env[k] = m
-    else:
-      return @[a, skip]
+        if e.bo.raw == cond.raw: SymVal(kind: svBool, bo: cond and av.bo)
+        else: SymVal(kind: svBool, bo: e.bo or av.bo)
+      continue
+    let j = joinSV(cond, av, e)
+    if j.isNone: return decline
+    env[k] = j.get
+  for a in armOut:
+    if a.env.len != armOut[0].env.len: return decline
   for k in skip.env.keys:
-    if not a.env.hasKey(k): return @[a, skip]
+    if not armOut[0].env.hasKey(k): return decline
+  # Heap arrays, in sorted key order (a build-independent term order, as
+  # the return merge's heap `ite`).
+  var hkeys: seq[string]
+  for k in skip.heaps.keys: hkeys.add k
+  sort(hkeys)
+  var heaps = skip.heaps
+  for k in hkeys:
+    var acc = armOut[n - 1].heaps[k]
+    var changed = acc.raw != skip.heaps[k].raw
+    for i in countdown(n - 2, 0):
+      let h = armOut[i].heaps[k]
+      if h.raw == acc.raw: continue
+      acc = wrap[Z3AnyAst](h.ctx, checkedIte(h.ctx, gs[i].get.raw, h.raw, acc.raw))
+      changed = true
+    if changed and acc.raw != skip.heaps[k].raw:
+      heaps[k] = wrap[Z3AnyAst](acc.ctx, checkedIte(acc.ctx, cond.raw, acc.raw,
+                                                    skip.heaps[k].raw))
   var pc = base.pc
-  if a.pc.len > base.pc.len + 1:
-    var rest = a.pc[base.pc.len + 1]
-    for i in base.pc.len + 2 ..< a.pc.len: rest = rest and a.pc[i]
-    pc.add cond.implies(rest)
+  var facts: Option[Z3Bool]
+  if n == 1:
+    if rs[0].isSome: pc.add cond.implies(rs[0].get)
+    facts = conjTail(armOut[0].defectSurvivorPc, base.defectSurvivorPc.len)
+  else:
+    var anyR = rs[0]
+    for i in 1 ..< n:
+      if anyR.isNone or rs[i].isNone: anyR = none(Z3Bool); break
+      anyR = some(anyR.get or rs[i].get)
+    if anyR.isSome: pc.add cond.implies(anyR.get)
+    var anyG = gs[0].get
+    for i in 1 ..< n: anyG = anyG or gs[i].get
+    facts = some(anyG)
   let merged = forkPath(skip, pc, env)
-  if a.defectSurvivorPc.len > base.defectSurvivorPc.len:
-    var facts = a.defectSurvivorPc[base.defectSurvivorPc.len]
-    for i in base.defectSurvivorPc.len + 1 ..< a.defectSurvivorPc.len:
-      facts = facts and a.defectSurvivorPc[i]
-    merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts)]
+  merged.heaps = heaps
+  for a in armOut: merged.heapDepth = max(merged.heapDepth, a.heapDepth)
+  if facts.isSome:
+    merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts.get)]
   @[merged]
 
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =

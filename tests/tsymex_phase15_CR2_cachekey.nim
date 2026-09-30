@@ -874,7 +874,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8w (alternating and/or chains joined, Case 2/3 guards with
     ## continue rotated, turned-down B4 offsets stamped and wrapping).
     ## 169->171 (170 is S8v's).
-    check symexWalkerVersion == "171"
+    ## RFC-0005 S8aa (unchecked zero divisors trap, the short-circuit join
+    ## over store shapes and multi-path operands, B6 negative starts, Int
+    ## same-width reinterprets). 171->172.
+    check symexWalkerVersion == "172"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -340,7 +340,7 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     a.borrowOp == b.borrowOp and fieldwiseEq(a.borrowLhs, b.borrowLhs) and
       fieldwiseEq(a.borrowRhs, b.borrowRhs) and
       a.borrowReturnsDistinct == b.borrowReturnsDistinct and
-      a.borrowDistinctName == b.borrowDistinctName
+      fieldwiseEq(a.borrowDistinctTy, b.borrowDistinctTy)
   of iekLambda:
     a.lambdaSite == b.lambdaSite and fieldwiseEqParams(a.lambdaParams, b.lambdaParams) and
       fieldwiseEq(a.lambdaBody, b.lambdaBody) and a.lambdaCaptures == b.lambdaCaptures and
@@ -578,7 +578,8 @@ proc sVar(): IRExpr = mkVar("sentinelVarName")
 proc sBinop(): IRExpr = mkBinop(bAdd, mkIntLit(11), mkVar("sentinelBinopVar"))
 proc sUnop(): IRExpr = mkUnop(uNeg, mkIntLit(5))
 proc sBorrowOp(): IRExpr =
-  mkBorrowOp(bXor, mkIntLit(5), mkVar("distSentinel"), true, "Meters")
+  mkBorrowOp(bXor, mkIntLit(5), mkVar("distSentinel"), true,
+             tDistinct("Meters", tInt(64, true)))
 proc sField(): IRExpr = mkField(mkVar("obj"), 3, "sentinelFieldName")
 proc sIndex(): IRExpr = mkIndex(mkVar("arr"), mkIntLit(2))
 proc sArrayLit(): IRExpr = mkArrayLit(@[mkIntLit(1), mkIntLit(2)], tInt(64, true))

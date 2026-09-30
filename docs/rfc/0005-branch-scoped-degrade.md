@@ -234,7 +234,7 @@ state = "pending"
 [[slice]]
 id    = "S8ad"
 title = "S8ac's remainder: a local distinct value with no distinct-typed parameter (`var m = Meters(0)`) is a walker fault (reboxDistinct: distinct sort not allocated) -- must be modelled, never weInternalWalkerFault; `start < 0 and y > 1 and start div y == start` (UNSAT) exhausts the 20M seqQueryRLimit to sxUnknown (nonlinear div under the seq theory) -- find a linear/bounded encoding or a sound pre-solve refutation so it decides"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ae"
@@ -4718,6 +4718,120 @@ single-reachable-generic pins).
   is still a column-0 source scan**, with the same backtick-operator and
   unusual-multi-line-signature caveats S8ab's own note first listed —
   unchanged by this slice.
+
+**As landed (S8ad, walker 175) — S8ac's remainder.**
+
+*A local distinct value allocates its own sort.* `D(x)` is the parser's
+identity (S8p), so `var m = Meters(0)` binds the bare base. The first
+borrowed arithmetic on it (`m + Meters(1)`) re-boxes the result as an
+`svDistinct`, and `reboxDistinct` assumed the distinct sort existed because
+"the operands were already allocated as this distinct type". With no
+`Meters` parameter, field or call result, nothing had allocated it:
+`weInternalWalkerFault` ("reboxDistinct: distinct sort `Meters` not
+allocated"). The borrow node now carries the distinct TYPE
+(`IRExpr.borrowDistinctTy`, which replaces `borrowDistinctName`), and the
+re-box takes the sort from `ensureDistinctSort`. That is the sort half of
+`allocDistinctSym`, factored out, and it is created at most once per run as
+before.
+
+With the sort in place, a probe found a second fault on the same values. A
+boxed result met its bare base in the element fold of a symbolic array read
+(`var a = [Meters(1), Meters(2), Meters(3)]; a[0] = a[0] + Meters(2); a[i]`):
+`iteSV: kind mismatch svBV64 vs svDistinct`. The base is the whole
+observable value, since every read ejects and `retBindEq` binds through it.
+So `iteSV` now merges the two bases when exactly one side is boxed.
+
+*The Int quotient's linear bounds sit beside every query.* A scan offset
+(`start`, a width-stamped Int) divided by a bitvector parameter (`y`, read
+through `bv2int`) is Z3's Euclidean `div` inside `truncDivInt`'s
+adjustment. Z3 relates `start div y` to `start` only through the product
+`y * q`, which is its nonlinear core. Under the sequence theory that core did
+not refute the UNSAT shapes within `seqQueryRLimit`. Its theory-free
+re-check (step 1b) did not either, so each ran to 40M steps and
+`sxUnknown`. Without a scan, `start` stays a bitvector (`bvsdiv`), and the
+same shape was UNSAT in 2.9M.
+
+`checkCapped` now decides every query (plain and capped, every step) with
+`divRangeFacts` asserted beside it. For each Int `a div b` and `a mod b` in
+the query, these are the linear bounds that hold for a divisor of known sign:
+- `0 <= r <= |b| - 1`, and `r <= a` for `a >= 0`.
+- `e` between `a` and 0, and within `a / 2` once `|b| >= 2`. The bounds are
+  given per sign of `a` and `b` in the doc comment.
+- When `|a| < |b|`, the pair itself: `e` is 0 or `+-1`, and `r` is `a`,
+  `a + b` or `a - b`.
+
+The last group came from symex-mingw. On Z3 4.13.4 the bounds alone refuted
+`start > 0` but not `start < 0`: `truncDivInt`'s quotient equals `start`
+only when `e == start == -1` with `r == 0`, and 4.13.4 did not see that
+`r == y - 1` there within 40M steps. Stating the pair for `|a| < |b|` makes
+that case linear on both versions.
+
+The remainder's twin, `start mod y <= -y`, also needed the Int value of the
+negated bitvector. `-y` lowers to `0 - y`, and Z3 did not connect
+`bv2int(0 - y)` to `bv2int(y)` beside the remainder. So `bv2int(-y)` (both
+the `bvneg` and the `0 - y` form, unsigned and signed) is asserted equal to
+`2^W - bv2int(y)` (0 at 0), or to `-sbv2int(y)` (`y` itself at `low`).
+
+Each fact is a theorem of the Euclidean pair or of two's complement, not a
+constraint on the input, so the query's models are unchanged. The pin checks
+every one against Z3's own operators on a grid of numerals. Decl kinds are
+read off the linked Z3, as `seqCapKinds` does, so the facts find the same
+terms on 4.13.4 and 5.1.
+
+With a scan, default settings (`isOptimised`), steps for the whole walk
+(`rlimitDelta`). The base column is the probe on Z3 5.1 with
+`queryRLimit = 20M`. The S8ad columns are the pinned suite, on the
+container's Z3 5.1 and on Z3 4.13.4 (symex-mingw's version, run locally with
+its Linux build):
+
+| Shape (UNSAT unless noted) | Base (5.1) | S8ad (5.1) | S8ad (4.13.4) |
+|---|---|---|---|
+| `start < 0 and y > 1 and start div y == start` | 40.4M, `sxUnknown` (260 s) | 0.88M | 1.19M |
+| `start > 0 and y > 1 and start div y == start` | 80.5M, `sxUnknown` (490 s) | 0.85M | 1.08M |
+| `start < -1 and y < -1 and start div y <= start` | -- | 1.13M | 1.14M |
+| `start < 0 and y > 1 and start mod y <= -y` | 40.4M, `sxUnknown` (150 s) | 1.19M | 1.02M |
+| `start < 0 and y > 1 and start mod y > 0` | 0.20M | 0.51M | 0.64M |
+| `start > 0 and y > 1 and start mod y >= y` | 0.82M | 0.84M | 1.09M |
+| `start mod y <= 1 - y` (SAT) | -- | 0.20M | 0.27M |
+| `start div y == start + 1` (SAT) | -- | 0.48M | 0.50M |
+| exact unchecked `start div y == start`, `start < 0` / `> 0` | past the 1500 s probe bound | 0.69M / 0.93M | 0.87M / 0.98M |
+
+Without the `|a| < |b|` group, 4.13.4 ran `start < 0` (both settings) to
+40M and `sxUnknown`, and `start mod y <= -y` to 7.2M.
+
+S8ac's `lowerArith` change (the linear `low(T) div -1` wrap) is not on this
+slice's base. The exact-unchecked rows decide here without it.
+
+Pins: `tests/tsymex_rfc0005_s8ad_remainder.nim`, with a `.nim.cfg` that sets
+`-d:symexQueryStats`.
+- (1) A local distinct value: borrowed sums on a straight line, on one
+  branch, in a loop, and in a short-circuit operand, plus a boxed element
+  beside bare ones read at a symbolic index. Each target is SAT with its
+  witness checked, and each dead twin is UNSAT. RED: `weInternalWalkerFault`
+  on every one; the array read then hit `iteSV: kind mismatch`.
+- (2) The div and mod shapes above. Each dead shape is `sxUnsat` within 3M
+  steps with no `beSolverUndef`. RED: `sxUnknown` at 40M and 80M. The SAT
+  neighbours (`start mod y <= 1 - y`, `start div y == start + 1`) keep a
+  witness that compiled code agrees with.
+- (3) Every fact (19 per `(a, b)` pair) is valid for `a` in -13..13 and `b`
+  in -6..6 (not 0), and
+  for every 8-bit `y`, both negation forms, both signednesses.
+- The `>= 175` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **An uninitialized local array with an element write is a walker fault.**
+  `var a: array[3, int]; a[0] = a[0] + 2` (or `a[1] = x`), then `a[i]`, is
+  `weInternalWalkerFault` (`iekIndex on non-array kind=svBV64`), and the same
+  happens at the base. The parser declines the zero-init (`zeroValueForType`
+  has no array arm: `feUnsupportedStmtKind`, "zero-init not modeled this
+  cycle"). The element write then binds the unbound name to a scalar, and the
+  read asserts. It is independent of `distinct`, since `array[3, Meters]`
+  faults the same way.
+- **The facts cover `div`/`mod` and negation only.** A quotient read
+  through other bitvector arithmetic (`bv2int(y + 1)`, `bv2int(2 * y)`) gets
+  no bridge. No failing shape was found. The general `bv2int` of `bvadd` /
+  `bvmul` identities would touch every stamped-offset query, which is why
+  they are not asserted.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

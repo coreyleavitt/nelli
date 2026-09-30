@@ -2366,19 +2366,16 @@ proc c1ClosurePoCApply*(): bool =
 
 # ---- Phase 15 Cluster C (C2a): closure CONSTRUCTION --------------------------
 
-proc allocDistinctSym(ty: IRType, baseName: string,
-                      pcOut: var seq[Z3Bool]): SymVal =
-  ## Allocation cost mirrored in allocCostOf's itDistinct arm (types.nim) --
-  ## update both together.
-  ## Phase 15 G4 (ADR-0008 D4). Allocate a `distinct T` SymVal: a fresh const of
-  ## the "DistinctName" uninterpreted sort plus its ejected base. The sort,
-  ## inject/eject func-decls, and (decidable-base) bijectivity axioms are
-  ## created AT MOST ONCE per (name, run) — guarded by the `currentDistinctSorts`
-  ## cache. The base SymVal is bound to `eject(distinctConst)` so the witness
-  ## eject-chain (and explicit conversions) resolve to a concrete base value.
+proc ensureDistinctSort(ty: IRType): DistinctSortEntry =
+  ## Phase 15 G4 (ADR-0008 D4), factored out of `allocDistinctSym` by
+  ## RFC-0005 S8ad. The "DistinctName" uninterpreted sort, its inject/eject
+  ## func-decls, and (decidable base) the bijectivity bookkeeping, created
+  ## AT MOST ONCE per (name, run) -- guarded by the `currentDistinctSorts`
+  ## cache. `reboxDistinct` calls it too: a borrowed arithmetic result of a
+  ## distinct type that no parameter carries (`var m = Meters(0); m = m +
+  ## Meters(1)`) found no sort and faulted the walker before S8ad.
   let ctx = requireCurrentContext()
   let name = ty.distinctName
-  # 1. Allocate (or reuse) the distinct sort + inject/eject func-decls + axioms.
   if not currentDistinctSorts.hasKey(name):
     let sort = mkUninterpretedSort(ctx, name)        # ADR D4: fresh sort
     # Pin the uninterpreted sort with a Z3 ref: without it, the heavy ast
@@ -2446,7 +2443,21 @@ proc allocDistinctSym(ty: IRType, baseName: string,
              "inject/eject round-trip guarantee")
       distinctBijectivityHints.add bijHint      # threadvar: fallback
       syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
-  let entry = currentDistinctSorts[name]
+  currentDistinctSorts[name]
+
+proc allocDistinctSym(ty: IRType, baseName: string,
+                      pcOut: var seq[Z3Bool]): SymVal =
+  ## Allocation cost mirrored in allocCostOf's itDistinct arm (types.nim) --
+  ## update both together.
+  ## Phase 15 G4 (ADR-0008 D4). Allocate a `distinct T` SymVal: a fresh const of
+  ## the "DistinctName" uninterpreted sort plus its ejected base. The sort
+  ## comes from `ensureDistinctSort`. The base SymVal is bound to
+  ## `eject(distinctConst)` so the witness eject-chain (and explicit
+  ## conversions) resolve to a concrete base value.
+  let ctx = requireCurrentContext()
+  let name = ty.distinctName
+  # 1. Allocate (or reuse) the distinct sort + inject/eject func-decls + axioms.
+  let entry = ensureDistinctSort(ty)
   # 2. A fresh const of the distinct sort for THIS occurrence.
   let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, baseName))
   # 3. The ejected base SymVal: a base allocated normally (gives a witness leaf
@@ -3589,7 +3600,7 @@ proc degradeAlloc(ty: IRType, kind: SymexErrorKind, msg: string,
   var fresh: seq[Z3Bool]
   allocateSym(ty, freshDegradeName(tag), fresh)
 
-proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
+proc reboxDistinct(distinctTy: IRType, base: SymVal): SymVal =
   ## Phase 15 G5. Re-box a BASE SymVal as a fresh `svDistinct` of `distinctName`
   ## — the result of a borrowed ARITHMETIC operator (`+`/`-`/`*`/`/` returning
   ## the distinct type). A fresh opaque const of the distinct sort carries the
@@ -3598,13 +3609,17 @@ proc reboxDistinct(distinctName: string, base: SymVal): SymVal =
   ##
   ## This operates entirely on the G4 boxed base — it does NOT apply the Z3
   ## `inject_T` function (which HANGS on the uninterpreted-fn-over-BV / MBQI
-  ## combination, per the G4 finding). The distinct sort is guaranteed present in
-  ## `currentDistinctSorts` because the operands were already allocated as this
-  ## distinct type earlier in the run.
+  ## combination, per the G4 finding).
+  ##
+  ## RFC-0005 S8ad: the sort comes from `ensureDistinctSort`. It used to be
+  ## ASSUMED present because "the operands were already allocated as this
+  ## distinct type", but `D(x)` is the parser's identity (S8p), so a local
+  ## `var m = Meters(0); m = m + Meters(1)` re-boxes a distinct type no
+  ## allocation ever saw: `weInternalWalkerFault` ("distinct sort not
+  ## allocated") at the base.
   let ctx = requireCurrentContext()
-  doAssert currentDistinctSorts.hasKey(distinctName),
-    "reboxDistinct: distinct sort `" & distinctName & "` not allocated"
-  let entry = currentDistinctSorts[distinctName]
+  let distinctName = distinctTy.distinctName
+  let entry = ensureDistinctSort(distinctTy)
   inc currentBorrowReboxCounter
   let constName = "borrow_" & distinctName & "#" & $currentBorrowReboxCounter
   let dAny = wrap[Z3AnyAst](ctx, rawConstOf(ctx, entry.sort.raw, constName))
@@ -4595,6 +4610,16 @@ template declinePlaceholderInLower(recv: SymVal, loc, what: string) =
 
 proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   ## Z3-level if-then-else over SymVals. Both branches must share kind.
+  if (t.kind == svDistinct) != (e.kind == svDistinct):
+    # RFC-0005 S8ad: one side a boxed `distinct` value, the other its bare
+    # base. `D(x)` is the parser's identity (S8p) while a borrowed
+    # arithmetic result is re-boxed (`reboxDistinct`), so the two meet
+    # wherever a local distinct value is merged: the element fold of
+    # `var a = [Meters(1), Meters(2)]; a[0] = a[0] + Meters(2)` read at a
+    # symbolic index. The base is the whole observable value (every read
+    # ejects, `retBindEq` binds through it), so the merge is of the bases.
+    # Before S8ad the assertion below faulted the walker.
+    return iteSV(cond, ejectBase(t), ejectBase(e))
   doAssert t.kind == e.kind, "iteSV: kind mismatch " &
     $t.kind & " vs " & $e.kind
   case t.kind
@@ -7148,7 +7173,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # reboxDistinct wrap (below).
       let baseRes = lowerArith(l, r, e.borrowOp)
       if e.borrowReturnsDistinct:
-        reboxDistinct(e.borrowDistinctName, baseRes)
+        reboxDistinct(e.borrowDistinctTy, baseRes)
       else:
         baseRes
     else:
@@ -8650,11 +8675,159 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
-proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
+var intDivDeclKinds {.threadvar.}:
+    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub: int]
+  ## RFC-0005 S8ad. The `Z3_decl_kind` ordinals `divRangeFacts` matches on
+  ## (Int `div` and `mod`, unsigned and signed `bv2int`, `bvneg`, `bvsub`),
+  ## read off
+  ## terms built once per thread, as `seqCapKinds` does: the header's values
+  ## are positional, so they are taken from the linked Z3 itself. A signed
+  ## `bv2int` that Z3 expands (to an `ite` over the unsigned one, as Z3 5.1
+  ## does) has the `ite`'s kind; `divRangeFacts` only matches it with one
+  ## argument, which an `ite` never has, and meets the unsigned one inside.
+
+proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8ad. Linear bounds on every Int quotient `e = a div b` and
+  ## remainder `r = a mod b` in `roots`. Z3's Int `div`/`mod` are Euclidean
+  ## (`a = b*e + r`, `0 <= r < |b|`); for a divisor of known sign both lie
+  ## between linear functions of the operands:
+  ##   b >= 1:           0 <= r <= b - 1
+  ##   b <= -1:          0 <= r <= -b - 1
+  ##   b != 0, a >= 0:   r <= a
+  ##   b >= 1, a >= 0:   0 <= e <= a,     and  2e <= a      when b >= 2
+  ##   b >= 1, a <  0:   a <= e <= -1,    and  a <= 2e + 1  when b >= 2
+  ##   b <= -1, a >= 0:  -a <= e <= 0,    and  -a <= 2e     when b <= -2
+  ##   b <= -1, a <  0:  1 <= e <= -a,    and  2e <= 1 - a  when b <= -2
+  ## and, when `|a| < |b|`, the pair itself:
+  ##   b >= 1,  0 <= a <= b - 1:   e == 0,   r == a
+  ##   b >= 1,  -b <= a <= -1:     e == -1,  r == a + b
+  ##   b <= -1, 0 <= a <= -b - 1:  e == 0,   r == a
+  ##   b <= -1, b <= a <= -1:      e == 1,   r == a - b
+  ## and, for a negated bitvector `y` (`bvneg y`, or `0 - y`, which is how
+  ## Nim's `-y` lowers) of width W read as an Int:
+  ##   ubv2int(-y) == (if y == 0: 0 else: 2^W - ubv2int(y))
+  ##   sbv2int(-y) == (if y == low: sbv2int(y) else: -sbv2int(y))
+  ## Each holds for every `a` and `b` (a theorem of the Euclidean pair, or
+  ## of two's complement, not a constraint on the input), so asserting them
+  ## beside the query leaves its models exactly as they were. `tests/tsymex_rfc0005_s8ad_remainder.nim`
+  ## checks every one against Z3's own `div` on a grid of numerals.
+  ##
+  ## Why: Z3 relates `a div b` to `a` only through the product `b*e`, i.e.
+  ## its nonlinear core. Under a sequence query, or with `b` a `bv2int`
+  ## (a width-stamped scan offset divided by a bitvector parameter,
+  ## `truncDivInt`), that core did not refute `start < 0 and y > 1 and
+  ## start div y == start` within 40M steps -- nor its theory-free
+  ## re-check (`checkCapped` step 1b) -- so the verdict was `sxUnknown`
+  ## (`beSolverUndef`). The bounds make that refutation linear. The
+  ## negation facts serve the remainder's twin, `start mod y <= -y`: `-y`
+  ## is the bitvector negation of the parameter, and Z3 did not connect its
+  ## `bv2int` to `y`'s beside the remainder within 40M steps either. The
+  ## `|a| < |b|` pair is for Z3 4.13.4 (symex-mingw): with `start < 0`,
+  ## `truncDivInt`'s quotient is `start` only at `e == start == -1` with
+  ## `r == 0`, and 4.13.4 did not find `r == y - 1` there within 40M steps.
+  if not intDivDeclKinds.ready:
+    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
+    let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
+    let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
+    intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
+      imod: kindOf(ctx, (x mod y).raw),
+      bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
+      sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
+      bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw))
+  let kinds = intDivDeclKinds
+  let (idiv, imod) = (kinds.idiv, kinds.imod)
+  let zero = mkInt(ctx, 0)
+  let one = mkInt(ctx, 1)
+  let two = mkInt(ctx, 2)
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    proc negated(ctx: Z3Context; x: Z3AnyAst): Option[Z3AnyAst] =
+      ## `y` when `x` is `bvneg y` or `0 - y`.
+      if getAstKind(x) != akApp: return none(Z3AnyAst)
+      let (d, xs) = unpackApp(x)
+      let xk = ord(Z3_get_decl_kind(ctx.raw, d))
+      if xk == kinds.bvneg and xs.len == 1: return some(xs[0])
+      if xk == kinds.bvsub and xs.len == 2 and getAstKind(xs[0]) == akNumeral and
+         $Z3_get_numeral_string(ctx.raw, xs[0].raw) == "0":
+        return some(xs[1])
+      none(Z3AnyAst)
+    let yNeg = if (k == kinds.bv2nat or k == kinds.sbv2int) and args.len == 1:
+                 negated(ctx, args[0])
+               else: none(Z3AnyAst)
+    if yNeg.isSome:
+      # `bv2int(-y)`, unsigned or signed (see the doc comment).
+      let signed = k == kinds.sbv2int and kinds.sbv2int != kinds.bv2nat
+      let yRaw = yNeg.get.raw
+      let ySort = ctx.checkErr Z3_get_sort(ctx.raw, yRaw)
+      let w = int(Z3_get_bv_sort_size(ctx.raw, ySort))
+      let yInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, yRaw, signed))
+      let tInt = wrap[Z3Int](ctx, t.raw)
+      proc bvNum(text: string): RawZ3Ast =
+        ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, ySort)
+      if signed:
+        # `low` of width W is the bit pattern 2^(W-1) (W <= 64 here).
+        let isLow = wrap[Z3Bool](ctx, checkedEq(ctx, yRaw,
+          bvNum($(1'u64 shl (w - 1)))))
+        result.add tInt == ite(isLow, yInt, zero - yInt)
+      else:
+        let isZero = wrap[Z3Bool](ctx, checkedEq(ctx, yRaw, bvNum("0")))
+        let twoWText = if w >= 64: "18446744073709551616" else: $(1'u64 shl w)
+        let twoW = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw,
+          twoWText.cstring, ctx.checkErr Z3_mk_int_sort(ctx.raw)))
+        result.add tInt == ite(isZero, zero, twoW - yInt)
+      continue
+    if (k != idiv and k != imod) or args.len != 2 or getSortKind(t) != skInt:
+      continue
+    let e = wrap[Z3Int](ctx, t.raw)
+    let a = wrap[Z3Int](ctx, args[0].raw)
+    let b = wrap[Z3Int](ctx, args[1].raw)
+    # `|a| < |b|`: the quotient is 0 or +-1 and the pair is linear in `a`.
+    let posSmall = (b >= one) and (zero <= a) and (a <= b - one)
+    let negSmall = (b >= one) and (zero - b <= a) and (a <= zero - one)
+    let posSmallN = (b <= zero - one) and (zero <= a) and (a <= zero - one - b)
+    let negSmallN = (b <= zero - one) and (b <= a) and (a <= zero - one)
+    if k == imod:
+      result.add implies(b >= one, (zero <= e) and (e <= b - one))
+      result.add implies(b <= zero - one, (zero <= e) and (e <= zero - one - b))
+      result.add implies((b != zero) and (a >= zero), e <= a)
+      result.add implies(posSmall, e == a)
+      result.add implies(negSmall, e == a + b)
+      result.add implies(posSmallN, e == a)
+      result.add implies(negSmallN, e == a - b)
+      continue
+    result.add implies(posSmall, e == zero)
+    result.add implies(negSmall, e == zero - one)
+    result.add implies(posSmallN, e == zero)
+    result.add implies(negSmallN, e == one)
+    let twoE = two * e
+    result.add implies((b >= one) and (a >= zero), (zero <= e) and (e <= a))
+    result.add implies((b >= two) and (a >= zero), twoE <= a)
+    result.add implies((b >= one) and (a < zero), (a <= e) and (e <= zero - one))
+    result.add implies((b >= two) and (a < zero), a <= twoE + one)
+    result.add implies((b <= zero - one) and (a >= zero),
+                       (zero - a <= e) and (e <= zero))
+    result.add implies((b <= zero - two) and (a >= zero), zero - a <= twoE)
+    result.add implies((b <= zero - one) and (a < zero),
+                       (one <= e) and (e <= zero - a))
+    result.add implies((b <= zero - two) and (a < zero), twoE <= one - a)
+
+proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
                        why: string] =
-  ## RFC-0005 S8k. Decide `rootsIn` (every assertion of one walker query)
+  ## RFC-0005 S8k. Decide `query` (every assertion of one walker query)
   ## with each string / seq leaf capped at `maxSeqLen` elements. `s` is the
   ## solver that answered (for its statistics), `m` its model in `ctx` for
   ## `zsSat`; `why` says why a `zsUnknown` is one, for the caller's
@@ -8727,6 +8900,10 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ## 1 (probed on the pinned Z3; a bare `(check-sat-assuming (true))` or a
   ## `push` is enough). So every model comes from a one-shot check, and
   ## the incremental core is consulted only to tell an UNSAT's cause.
+  # RFC-0005 S8ad: every step decides the query with the linear bounds of
+  # its Int quotients beside it (`divRangeFacts`): theorems, so the models
+  # are the query's own.
+  let rootsIn = @query & divRangeFacts(ctx, query)
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()

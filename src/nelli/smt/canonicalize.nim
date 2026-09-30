@@ -184,7 +184,18 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "174"
+const symexWalkerVersion* = "175"
+  ## RFC-0005 S8ad (2026-09-30) — S8ac's remainder. A borrowed arithmetic
+  ## result of a distinct type no parameter carries (`var m = Meters(0);
+  ## m = m + Meters(1)`) allocates the distinct sort itself
+  ## (`ensureDistinctSort`; the borrow node carries the distinct TYPE,
+  ## `IRExpr.borrowDistinctTy`), where it faulted the walker. Every query is
+  ## decided with the linear bounds of its Int quotients beside it
+  ## (`divRangeFacts`), so `start < 0 and y > 1 and start div y == start`
+  ## over a scan offset is refuted instead of running out of
+  ## `seqQueryRLimit`. 174 -> 175.
+  ##
+  ## (Prior: 174.)
   ## RFC-0005 S8ae (2026-09-30) — S8v's remainder. `seqRangeFacts` (step
   ## 1c) also links the theory's functions over one haystack and needle:
   ## `str.indexof >= 0` implies `str.contains` (and from 0 the converse),
@@ -4632,7 +4643,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<Un:" & unopTag(e.uop) & ";" & canonicalize(e.operand, env) & ">"
   of iekBorrowOp:   ## Phase 15 G5: the distinct name + base op + operands
                     ## content-address the borrow distinctly.
-    "Ex<Bw:" & e.borrowDistinctName & ";" & binopTag(e.borrowOp) & ";" &
+    "Ex<Bw:" & (if e.borrowDistinctTy == nil: ""
+                else: $e.borrowDistinctTy) & ";" & binopTag(e.borrowOp) & ";" &
       $e.borrowReturnsDistinct & ";" &
       canonicalize(e.borrowLhs, env) & ";" & canonicalize(e.borrowRhs, env) & ">"
   of iekField:

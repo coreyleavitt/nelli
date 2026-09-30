@@ -290,7 +290,7 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekBorrowOp:   ## Phase 15 G5
     newCall(bindSym"mkBorrowOp", emitBinop(e.borrowOp),
             emitExpr(e.borrowLhs), emitExpr(e.borrowRhs),
-            newLit(e.borrowReturnsDistinct), newLit(e.borrowDistinctName))
+            newLit(e.borrowReturnsDistinct), emitIRType(e.borrowDistinctTy))
   of iekField:
     newCall(bindSym"mkField", emitExpr(e.obj),
             newLit(e.fieldIx), newLit(e.fieldName))
@@ -2117,7 +2117,9 @@ type BorrowInfo = object
   isBorrow*:        bool
   returnsDistinct*: bool     ## true → arithmetic (re-box result as distinct);
                              ## false → comparison (raw bool result).
-  distinctName*:    string   ## the distinct return type to re-box into.
+  distinctTy*:      IRType   ## the distinct return type to re-box into
+                             ## (RFC-0005 S8ad: the type, so the walker can
+                             ## allocate its sort; nil for a comparison).
 
 proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
   ## Phase 15 G5. Classify an operator symbol: is it a `{.borrow.}` proc/func,
@@ -2148,10 +2150,9 @@ proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
     return BorrowInfo(isBorrow: false)
   let retCls = classifyType(formal[0])
   if retCls.ty.kind == itDistinct:
-    BorrowInfo(isBorrow: true, returnsDistinct: true,
-               distinctName: retCls.ty.distinctName)
+    BorrowInfo(isBorrow: true, returnsDistinct: true, distinctTy: retCls.ty)
   else:
-    BorrowInfo(isBorrow: true, returnsDistinct: false, distinctName: "")
+    BorrowInfo(isBorrow: true, returnsDistinct: false, distinctTy: nil)
 
 proc isUserCallee(sym: NimNode): bool =
   ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
@@ -3852,7 +3853,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let bop = binopForInfix(n[0].strVal)
           let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (borrow intercept)
           let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (borrow intercept)
-          return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctName)
+          return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctTy)
     # Phase 15 R5 (Cluster R). A `nil` ref/ptr comparison `p == nil` / `nil == p`
     # (`==`/`!=`). One operand is an `nnkNilLit`; the OTHER is the ref/ptr whose
     # type supplies the pointee for the per-sort `nilConst`. Lower the nil side to

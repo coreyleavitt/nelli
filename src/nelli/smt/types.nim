@@ -581,7 +581,7 @@ type
                         ## (distinct-typed) operands. The runtime ejects both
                         ## operands to their base SymVals, applies the base op,
                         ## and — for arithmetic — RE-BOXES the result as a fresh
-                        ## `svDistinct` (same `borrowDistinctName`); for a
+                        ## `svDistinct` (of `borrowDistinctTy`); for a
                         ## comparison returns the raw bool. This operates on the
                         ## G4 boxed-base value, NOT a Z3 `inject` function
                         ## application (which HANGS — see the G4 finding).
@@ -796,8 +796,12 @@ type
       borrowReturnsDistinct*: bool   ## true → re-box the base result as a fresh
                                      ## `svDistinct` (arithmetic); false →
                                      ## comparison, return the raw bool.
-      borrowDistinctName*: string    ## the distinct type to re-box into
-                                     ## (only meaningful when returnsDistinct).
+      borrowDistinctTy*:   IRType    ## the distinct type to re-box into
+                                     ## (`itDistinct`; nil unless
+                                     ## returnsDistinct). RFC-0005 S8ad: the
+                                     ## TYPE, not just its name, so the
+                                     ## re-box can allocate the distinct sort
+                                     ## when no parameter of that type did.
     of iekLambda:
       ## Phase 15 Cluster C (C1, ADR-0009). A lambda expression.
       lambdaSite*:     tuple[siteHash: int64, declOrder: int]
@@ -3530,11 +3534,11 @@ proc mkUnop*(op: IRUnop, operand: IRExpr): IRExpr =
   IRExpr(kind: iekUnop, uop: op, operand: operand)
 
 proc mkBorrowOp*(op: IRBinop, lhs, rhs: IRExpr,
-                 returnsDistinct: bool, distinctName: string): IRExpr =
+                 returnsDistinct: bool, distinctTy: IRType): IRExpr =
   ## Phase 15 G5: a `{.borrow.}`-proc operator on a `distinct T`.
   IRExpr(kind: iekBorrowOp, borrowOp: op, borrowLhs: lhs, borrowRhs: rhs,
          borrowReturnsDistinct: returnsDistinct,
-         borrowDistinctName: distinctName)
+         borrowDistinctTy: distinctTy)
 
 proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
                body: IRStmt, captures: seq[string], retTy: IRType,
@@ -5018,7 +5022,8 @@ proc render*(e: IRExpr): string =
   of iekBinop:   "(" & $e.bop & " " & render(e.lhs) & " " & render(e.rhs) & ")"
   of iekUnop:    "(" & $e.uop & " " & render(e.operand) & ")"
   of iekBorrowOp:  ## Phase 15 G5
-    "(borrow:" & e.borrowDistinctName & " " & $e.borrowOp & " " &
+    "(borrow:" & (if e.borrowDistinctTy == nil: ""
+                  else: e.borrowDistinctTy.distinctName) & " " & $e.borrowOp & " " &
       render(e.borrowLhs) & " " & render(e.borrowRhs) & ")"
   of iekField:
     let suffix = if e.fieldName.len > 0: "." & e.fieldName else: "[" & $e.fieldIx & "]"

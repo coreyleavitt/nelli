@@ -956,5 +956,13 @@ task test, "Run the test suite":
             # sequence functions (indexof / contains / prefixof / slices)
             # and range at / substr / to_code / to_int, so a query refuted
             # only through them is UNSAT, not a cap decline; walker 173->174.
-            "tsymex_rfc0005_s8ae_remainder"]:
+            "tsymex_rfc0005_s8ae_remainder",
+            # RFC-0005 S8ad -- S8ac's remainder: a borrowed result of a
+            # distinct type no parameter carries allocates its sort, a
+            # boxed distinct merges with its bare base; linear bounds on
+            # Int quotients / remainders and negated bitvectors decide
+            # `start div y == start` under the seq theory; walker 174->175.
+            # Reads per-query step counts via its `.nim.cfg`
+            # (`-d:symexQueryStats`).
+            "tsymex_rfc0005_s8ad_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

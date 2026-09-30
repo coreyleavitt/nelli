@@ -187,6 +187,11 @@ title = "S8q's termination remainder: and-chain lowering forks 2^(n-1) paths in 
 state = "pending"
 
 [[slice]]
+id    = "S8u"
+title = "S8s's precision remainder: variant constructor naming an else-covered tag (feUnsupportedExprKind), callee building a local Table/HashSet (weInternalWalkerFault svTable/svSet assert), callee new(result) ref result (retBindEq svRef vs svBV64 fault), multi-variant with a bool discriminator (weInternalWalkerFault), zero value for untouched distinct results and HashSet/Table fields, op= on an array element"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

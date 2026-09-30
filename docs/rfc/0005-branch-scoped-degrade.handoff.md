@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-30 06:25Z)
+## Current position (refreshed 2026-09-30 10:10Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -231,8 +231,8 @@
 - **S8r LANDED** (`674b3b4`/`d1c0f82`/`0fcaeae`, no walker bump; gate regressed=0 new-failing=0, 526 pass; symex-mingw fully GREEN at the pre-rebase sha). Culprit `tsymex_163rev_intoffset_range` (10 GB on Z3 4.13.4): checkCapped step 1b was not theory-free on 4.13.4 (string_solver=none ignored) and step 2 searched long strings behind assumption-gated caps. CI now has a per-suite watchdog (`scripts/run-ci-suite.ps1`, 240 s / 6 GB) and `derive-ci-suites.ps1` strips comments (ten suites had silently never run on Windows). Post-rebase 7 targeted suites green. Findings -> fence **S8v** (`aa800f3`); **S8v (opus) running** in `scratchpad/wt-s8v`. **S8t** gate `s8t-gate.log` running; **S8u** committed `86be17b` (walker 169), gates after.
 - **S8t LANDED** (`5509ef0`, walker 168; second gate regressed=0 new-failing=0 -- first gate's A2a_chokepoint_audit marker-count regression re-pinned; and/or chains linear, Q1/B0/pair-loop/isExact offsets promoted, B4 isIntOffset stamped (closed a false OverflowDefect), Linux sweep skip list now EMPTY, Windows `derive-ci-suites.ps1` skip list emptied too -- first symex-mingw run with an empty list being watched). Findings -> fence **S8w** (`fa7e172`); **S8w (opus) running** in `scratchpad/wt-s8w` (walker 171). **S8u** gate `s8u-gate.log` running (an earlier overlapping run was aborted -> `s8u-gate-aborted.*`). **S8v** committed `df5b9bf`, gates after S8u.
 - **S8t2 LANDED** (`ec1519c`, hotfix for S8t's Windows red on run 36667380693: nulwitness exit 1 + s8t_termination STATUS_STACK_OVERFLOW in nim.exe macro expansion). `boundEmittedDepth` hoists deep builder subtrees to lets; IR byte-identical, no walker bump; symex-mingw/fuzzer-mingw/fuzzer-msvc all green at ec1519c (first all-green corpus with the empty Windows skip list). Its Linux coverage rides on S8u's re-gate (S8u rebases onto it first).
-- **S8u** first gate on `86be17b` regressed=1 new-failing=1 -- both stale pins (n36 raise-site counts; s8i_models ref-arm now modelled); re-pinned `694ba49`, rebasing onto `ec1519c`, re-gates after S8v. **S8v** gate `s8v-gate.log` running. **S8w** `eb82d82` ungated; rebases onto `ec1519c`, gates after S8u's re-gate.
-- **Remaining:** S8v gate -> S8u re-gate + land -> S8v land -> S8w gate + land -> S11 -> completion gate -> ff main + tag.
+- **S8u LANDED** (`4656066`, walker 169; re-gate at `90a428d` regressed=1 new-failing=0 -- the one regression, `tsymex_r6_n36_raise_degrade` 0->137, is inherited: ~992s standalone at both S8u and its base `ec1519c`, identical checks; also S8t2's Linux gate). Windows CI on 4656066 running. Findings -> fence **S8z** (opus running); the n36_raise_degrade slowdown -> fence **S8y** (opus bisecting) (`6b4614a`). **S8x** (VM let-aliasing audit, opus) committed, awaiting gate slot. **S8v** gate at `ce99594` regressed=1 (`b1_stringbacked` rc=137) -- triaging, likely the same runtime-kill class. **S8w** gate running on `7bf7b15` (walker 171).
+- **Remaining:** S8w gate+land -> S8v triage+land -> S8x, S8y, S8z gates+land -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on

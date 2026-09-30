@@ -217,6 +217,11 @@ title = "S8u's remainder: array reads with a nonzero low bound (array[1..3, int]
 state = "pending"
 
 [[slice]]
+id    = "S8aa"
+title = "S8w's remainder: unchecked `low(T) div -1` is modelled as a wrap to low(T) but C traps SIGFPE (witness does not replay -- model the trap or decline); the and/or path join merges only scalar-differing paths, so a chain operand writing a string/seq/heap cell/ref or leaving >1 surviving path still forks 2^m; B6 with a negative offset returns sxUnknown when the unroll budget runs out under the IndexError target; `data.len.uint` in an unsigned B4 scan declines on its own path"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

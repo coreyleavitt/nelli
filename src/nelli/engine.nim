@@ -23,8 +23,7 @@
 ## front (label-keyed score tables) so a follow-up run seeds its targeted
 ## phase from where the last one left off.
 
-import std/[math, tables, sets, options, hashes, times, monotimes, algorithm,
-            strutils]
+import std/[math, tables, sets, options, hashes, times, monotimes, algorithm]
 export options
 import ./strategy, ./datasource, ./rng, ./choice, ./shrinker, ./db, ./int128
 # Settings, Report[T], Outcome, Necessity, ParetoEntry, EventStats,

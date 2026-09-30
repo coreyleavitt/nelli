@@ -937,5 +937,10 @@ task test, "Run the test suite":
             # trap, the short-circuit join covers strings, seqs, heap
             # cells, refs and multi-path operands, B6 negative starts
             # raise, `len.uint` reinterprets; walker 171->172.
-            "tsymex_rfc0005_s8aa_remainder"]:
+            "tsymex_rfc0005_s8aa_remainder",
+            # RFC-0005 S8v -- S8r's termination remainder: checkCapped's
+            # step 1c carries str.len / str.indexof / seq.last_indexof
+            # ranges, so a cap-only refutation through them declines without
+            # a string search on Z3 4.13.4; walker 172->173.
+            "tsymex_rfc0005_s8v_termination"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -8189,6 +8189,8 @@ type SeqCapKinds = object
   ## byte tests stayed in the slow lowered form (B7R-6 / B7r2-1a went
   ## `sxUnknown` under `seqQueryRLimit`).
   uninterp, select, int2bv, toCode, strAt, inRe: int
+  strLen, strIndex: int
+    ## RFC-0005 S8v: `str.len` and `str.indexof`, for `seqRangeFacts`.
 
 var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
   ## Read off terms built once per thread: the wrapper's `Z3DeclKindFFI`
@@ -8211,7 +8213,10 @@ proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
       toCode:   kindOf(ctx, toCode(ch).raw),
       strAt:    kindOf(ctx, ch.raw),
       inRe:     kindOf(ctx, matches(str, star(range(mkString(ctx, "\x00"),
-                                                   mkString(ctx, "\xff")))).raw)))
+                                                   mkString(ctx, "\xff")))).raw),
+      strLen:   kindOf(ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, str.raw)),
+      strIndex: kindOf(ctx, ctx.checkErr Z3_mk_seq_index(ctx.raw, str.raw,
+                                                         str.raw, c.raw))))
   seqCapDeclKinds.k
 
 proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
@@ -8333,6 +8338,71 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       result.lastIndex = true
     for a in args: stack.add a
 
+proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8v. The range the sequence theory gives each length and
+  ## index term in `roots`, for `checkCapped`'s step 1c. There the query
+  ## runs with no sequence theory (`querySolver`'s `seqTheory = false`),
+  ## so those functions are uninterpreted and take any integer:
+  ##   - `str.len(x) >= 0`;
+  ##   - `r = str.indexof(s, t, i)`: `r = -1`, or `0 <= r`, `i <= r` and
+  ##     `r + str.len(t) <= str.len(s)`;
+  ##   - `r = str.last_indexof(s, t)`: `r = -1`, or `0 <= r` and
+  ##     `r + str.len(t) <= str.len(s)`.
+  ## Each holds in every model of the sequence theory (an empty `t` at
+  ## `i = len(s)` gives `r = len(s)`, so the bound is `r + len(t) <=
+  ## len(s)`, not `r < len(s)`); pinned against the theory by
+  ## `tests/tsymex_rfc0005_s8v_termination.nim`. So asserting them keeps
+  ## every real model. They let step 1c see a cap's conflict that runs
+  ## through one of these values. S8r's range-checked search asked for `idx` outside
+  ## `0..1000` with `idx = str.indexof(s, ":", 0)`, `idx != -1` and `idx <
+  ## len(s)`: under the 128 cap only `idx <= -2` is left, which the
+  ## theory-free query admitted, so `checkCapped`'s step 1c was SAT and
+  ## step 2 ran the sequence theory. On Z3 4.13.4 that was a string search
+  ## of 58 s and 1.2 GB. Step 1b does not take them. Its UNSAT would stay
+  ## sound with them, but the terms they build stay in the walk's shared
+  ## context, and Z3's cost follows what the context holds (see
+  ## `checkCapped`): with them in step 1b, a SAT query of
+  ## `tsymex_r6_b1_stringbacked` B1-1 at 18.8M units ran out its 20M
+  ## budget on Z3 5.1, and the suite's total went from 60M units to 116M.
+  ## They are built only after step 1 came back UNSAT and step 1b found no
+  ## theory-free refutation, so these terms reach the context only on the
+  ## path to a cap decline or step 2. There they are checked twice: first
+  ## without the caps, where an UNSAT is the query's own, then with them
+  ## (step 1c). Quantifier bodies are not entered (their terms
+  ## are bound), and each distinct AST is visited once. `str.len` and
+  ## `str.indexof` are matched by decl kind (`SeqCapKinds`),
+  ## `seq.last_indexof` by name (see `seqLenCaps`).
+  let kinds = seqCapKinds(ctx)
+  let zero = mkInt(ctx, 0)
+  let minusOne = mkInt(ctx, -1)
+  proc lenOf(ctx: Z3Context; a: Z3AnyAst): Z3Int =
+    wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, a.raw))
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if k == kinds.strLen:
+      result.add wrap[Z3Int](ctx, t.raw) >= zero
+    elif k == kinds.strIndex and args.len == 3:
+      let r = wrap[Z3Int](ctx, t.raw)
+      let i = wrap[Z3Int](ctx, args[2].raw)
+      result.add (r == minusOne) or
+        ((zero <= r) and (i <= r) and
+         (r + lenOf(ctx, args[1]) <= lenOf(ctx, args[0])))
+    elif args.len == 2 and getSortKind(t) == skInt and
+         declName(ctx, decl) == "seq.last_indexof":
+      let r = wrap[Z3Int](ctx, t.raw)
+      result.add (r == minusOne) or
+        ((zero <= r) and (r + lenOf(ctx, args[1]) <= lenOf(ctx, args[0])))
+    for a in args: stack.add a
+
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
   ## Z3's simple solver: probed once per thread against the linked Z3
@@ -8414,10 +8484,13 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
   ##      string search, and without step 2's unsat core, which may name
   ##      the cap although the query's own bounds refute it too (Z3's cores
   ##      are not minimal).
-  ##   1c. after (1b), when (1) was UNSAT: the caps ASSERTED into the
-  ##      theory-free query. Its UNSAT means the caps refute every
-  ##      theory-free model, so the cap took part: `zsUnknown`, with no
-  ##      sequence-theory check (RFC-0005 S8r).
+  ##   1c. after (1b), when (1) was UNSAT: the theory-free query with the
+  ##      range each length and index term has in the theory
+  ##      (`seqRangeFacts`, RFC-0005 S8v). An UNSAT is the query's own, the
+  ##      facts being valid. Otherwise the caps are ASSERTED beside them:
+  ##      an UNSAT then means the caps refute every model the facts leave,
+  ##      so the cap took part: `zsUnknown`, with no sequence-theory check
+  ##      (RFC-0005 S8r).
   ##   2. if (1) is UNSAT: a fresh solver with the caps behind one
   ##      assumption literal, checked under it, and its unsat core read.
   ##      Without the literal in the core the query is UNSAT on its own;
@@ -8530,7 +8603,21 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
     # units and 1 GB to refute, and its sibling ran out of memory without
     # reaching a 20M `rlimit` (`tsymex_163rev_intoffset_range`, the corpus
     # shard 2 runner loss).
+    # RFC-0005 S8v: with the range the theory gives each length and index
+    # term (`seqRangeFacts`), so a cap conflict that runs through one of
+    # them (`str.indexof` below -1) is seen here, not searched for in (2).
+    # The facts are checked first WITHOUT the caps: they alone can refute
+    # the query (a scan's closed form `i > len(s)`, `tsymex_q1_scanlift`
+    # Q1-1b, needs `str.indexof`'s upper bound), and that UNSAT, every fact
+    # being valid, is the query's own; asserted beside the caps it would
+    # read as the cap's (a decline where step 2's core found none).
+    let facts = seqRangeFacts(ctx, roots)
+    if facts.len > 0:
+      let sTr = querySolver(ctx, roots, rl, seqTheory = false)
+      for f in facts: sTr.add f
+      if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
     let sTc = querySolver(ctx, roots, rl, seqTheory = false)
+    for f in facts: sTc.add f
     for c in caps: sTc.add c
     if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
     # Step 2: is the UNSAT the query's own?

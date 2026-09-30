@@ -194,7 +194,7 @@ state = "done"
 [[slice]]
 id    = "S8v"
 title = "S8r's termination remainder: checkCapped step 2 slow on Z3 4.13.4 when the theory-free query cannot see the cap conflict (58 s / 1.2 GB; add str.len >= 0 and -1 <= str.indexof < str.len facts to the theory-free query), tsymex_r4_strip 2.6x slower on 4.13.4 than at a696d80"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8w"
@@ -3938,6 +3938,140 @@ Re-pinned:
 - **`acDivByZero` off with `acOverflow` on** leaves the continuation
   unconstrained at a zero divisor: the user turned the check off.
   That is a policy choice, left as it is.
+
+**As landed (S8v, walker 173) — S8r's termination remainder.** Both
+items were measured on Linux against the Z3 4.13.4 shared library (the
+symex-mingw leg's build), as the peak RSS and user time of the test binary.
+
+*1. `checkCapped` step 2 on the `indexof` form.* Step 1c poses the caps
+against the query with no sequence theory (`querySolver`'s `seqTheory =
+false`). That treats every string function as uninterpreted, so `str.len(x)` and `str.indexof(s, t,
+i)` could take any integer. S8r's range-checked search is `idx =
+str.indexof(s, ":", 0)`, with `idx != -1`, `idx < len(s)` and `idx`
+outside `0..1000`. Under the 128 cap the theory-free query still had
+`idx <= -2`, so step 1c was SAT and step 2 ran the sequence theory under
+the cap's assumption literal. On 4.13.4 that is a string search.
+Step 1c now also asserts `seqRangeFacts`, the range the theory gives each
+such term, and checks the query with the facts twice: first without the
+caps, where an UNSAT is the query's own (`zsUnsat`), then with them, where
+an UNSAT is the cap decline as before. The facts are:
+- `str.len(x) >= 0`;
+- `r = str.indexof(s, t, i)`: `r = -1`, or `0 <= r`, `i <= r` and `r +
+  len(t) <= len(s)`;
+- `r = str.last_indexof(s, t)`: `r = -1`, or `0 <= r` and `r + len(t) <=
+  len(s)`.
+
+The brief's `str.indexof < str.len` is wrong for an empty needle, since
+`str.indexof(s, "", len(s)) = len(s)`, so the bound subtracts the needle's
+length instead. Each fact is valid in the theory, so the facts never
+refute a real model. The pin checks each fact's negation against the
+theory. `str.len` and `str.indexof` are matched by
+decl kind, which `SeqCapKinds` probes from the linked Z3. `last_indexof` is
+matched by name, as in `seqLenCaps`.
+
+*Only step 1c takes the facts, not step 1b.* The first cut
+(`df5b9bf`/`ce99594`) asserted them in every theory-free query, 1b
+included. That is sound too, since a 1b UNSAT stays the query's own. But
+the gate killed `tsymex_r6_b1_stringbacked` and `tsymex_r6_n36_raise_degrade`
+(rc 137). The machine was at load 40 on 6 cores. Alone, both pass at base
+and at the slice, so the kill was load. The deterministic count is what
+moved. On Z3 5.1, with `-d:symexQueryStats`:
+
+| `b1_stringbacked` | queries | total `rlimit` | user |
+|---|---|---|---|
+| aa800f3 | 57 | 60.4M | 283 s |
+| facts in 1b and 1c | 59 | 115.5M | 457 s |
+| facts in 1c only (`381a26e`) | 57 | 60.4M | 287 s |
+| facts in 1c, uncapped check first (landed) | 57 | 60.4M | 286 s |
+
+In B1-1, a SAT query that took 18.8M units at base ran out its 20M budget
+with the facts in 1b. The walk then needed two more queries to reach the
+same verdict. The facts' terms stay in the walk's shared context, and Z3's
+cost follows what the context holds (S8o). Step 1c runs only after step 1
+came back UNSAT and 1b found no theory-free refutation. So in 1c the terms
+reach the context only on the way to a cap decline or to step 2.
+`n36_raise_degrade` has 88 queries in all four runs, with the same 8
+`[OK]`. Its total was 605M units at aa800f3, 322M with the facts in 1b
+and 1c, 269M with the facts in 1c only, and 282M as landed.
+
+*The facts alone are checked first.* `381a26e` (pushed rebased as
+`0bb545b`) asserted the facts only beside the caps. The symex-mingw leg
+(run 36695764841) then failed the scan-lift UNSAT companions:
+`q1_scanlift` Q1-P1b, Q1-1b and Q1-2b, `r6_b5_chained` B5-1b and B5-3b,
+`r6_b7r_bytescan` B7R-1b, `phase15_A1_loopguard`, `q1_sibling_collision`,
+`r6_b4_readcstring`, `r6_n31_block_counter`, `r6_r3_svint_overflow` and
+`retest_char_needle`. Each came back `sxUnknown` where `sxUnsat` was due.
+They reproduce on Linux against 4.13.4, `q1_scanlift`'s three on 5.1
+too, and pass at 219f152. A scan's
+closed form clamps its index at the bound, so `i > s.len` is UNSAT, but
+theory-free the refutation needs `str.indexof`'s upper bound, a fact.
+With the facts only beside the caps, step 1c's UNSAT read as the cap's,
+where step 2's core had found the query's own UNSAT. The gate had run on
+`ce99594` (facts in 1b), so it never saw this arrangement. With the
+uncapped check, all twelve suites pass on 4.13.4. It runs on the same path
+as step 1c, after the facts are built, so `b1_stringbacked`'s count is
+unchanged (table above).
+
+On 4.13.4 at aa800f3 against this slice:
+
+| suite | aa800f3 | S8v |
+|---|---|---|
+| `rfc0005_s8r_theoryfree` | 53 s wall, 1,217 MB, 40 s user | 0.1 s wall, 53 MB, 0.0 s user |
+| `163rev_intoffset_range` | 115 s wall, 1,412 MB, 83 s user | 0.3 s wall, 57 MB, 0.2 s user |
+
+Every check passes on both shas. All three of `intoffset_range`'s range-checked searches
+are now step 1c declines.
+
+*2. `tsymex_r4_strip` was not slower at aa800f3.* S8r measured it at its
+pre-fix head. Measured again on 4.13.4 (the machine under gate load, so
+user time is the comparison):
+
+| sha | user |
+|---|---|
+| a696d80 (S8r's number) | 21 s |
+| 671fef5 | 47 s |
+| 674b3b4 (d1c0f82's parent) | 51 s |
+| aa800f3 | 22 s, 26 s, 26 s |
+| S8v | 25 s, 27 s |
+
+The source difference between 674b3b4 and d1c0f82 is only S8r's fix. The
+cost was S8r's first mechanism: on 4.13.4, step 1b ran the full sequence
+theory because the default solver ignores `smt.string_solver = none`.
+`strip`'s capped UNSATs paid for that search. Nothing is left to fix.
+
+Pins: `tests/tsymex_rfc0005_s8v_termination.nim`.
+- (1) The `indexof` query under the 128 cap is UNSAT as step 1c poses it
+  (no sequence theory, with the facts). RED: `zsSat`, on 5.1 as well as
+  4.13.4. Two companions:
+  - without the cap it stays SAT (a 1002-byte string satisfies it);
+  - an empty needle at `len(s)` is not refuted.
+- (1') Each emitted fact's negation is UNSAT with the theory (RED: no
+  facts).
+- (2) End to end, S8r's range-checked search is a `maxSeqLen` decline
+  from step 1c under `seqQueryRLimit = 200_000`. RED on 4.13.4: step 2
+  ran and declined with "whether the query is UNSAT on its own was not
+  decided: Z3: canceled".
+- (3) A loop scan's index past `s.len` is `sxUnsat`. RED at `381a26e`
+  on 4.13.4 and on 5.1 (a `maxSeqLen` decline).
+- The `>= 173` floor.
+
+Re-pinned: `phase15_CR2_cachekey` (172 -> 173; 170 was reserved for S8v, and S8w and S8aa landed first at 171 and 172).
+
+*Different mechanisms, reported and not fixed here.*
+- **Step 1c declines some queries that are UNSAT on their own.** Suppose a
+  query needs the sequence theory to be refuted, but its theory-free form
+  (now with the range facts) is refuted only by the cap. Step 1c declines
+  it with the cap message. Before S8r, step 2's core could have proven it
+  UNSAT. The range facts make this happen more often, because more
+  step 1c queries now hit the cap. An example is `str.indexof(s, ":",
+  0) > 200 and not str.contains(s, ":")`. Deciding these again would mean
+  running step 2 behind 1c's UNSAT with a bounded budget. That brings back
+  the 4.13.4 string search this slice removes.
+- **Other sequence functions stay unranged.** `str.at`, `str.substr`,
+  `str.to_code` (`-1..255` under the byte domain), `str.to_int` (`>= -1`)
+  and `str.++` (`len(a ++ b) = len(a) + len(b)`) get no facts. No
+  measured query needed them. A cap conflict that runs through one of them
+  still reaches step 2.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

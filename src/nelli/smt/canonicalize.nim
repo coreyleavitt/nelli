@@ -184,7 +184,19 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "172"
+const symexWalkerVersion* = "173"
+  ## RFC-0005 S8v (2026-09-30) — S8r's termination remainder.
+  ## `checkCapped`'s step 1c checks the query with no sequence theory with
+  ## the range the theory gives each `str.len` / `str.indexof` /
+  ## `seq.last_indexof` term (`seqRangeFacts`), each valid in the theory:
+  ## first alone, where an UNSAT is the query's own, then beside the caps.
+  ## The capped check now declines a cap-only refutation of that shape
+  ## without step 2's string search (58 s and 1.2 GB on Z3 4.13.4 for S8r's
+  ## range-checked search), where step 2's core could decide such a query
+  ## UNSAT on its own. That verdict can move on every Z3 build, so the key
+  ## moves. 172 -> 173.
+  ##
+  ## (Prior: 172.)
   ## RFC-0005 S8aa (2026-09-30) — S8w's remainder. With overflow checks off
   ## Nim emits no zero-divisor check, so `x div 0`/`x mod 0` reach the C
   ## division, which traps (SIGFPE): a zero divisor is now a survivor-only
@@ -216,7 +228,7 @@ const symexWalkerVersion* = "172"
   ## it bridges at its own width and signedness (`stampedIntToBV`). Path
   ## counts, query shapes, IR canonical forms (`St<Ij:`) and verdicts (a
   ## wrapped offset's `sxUnsat` becomes `sxSat`) change: 169 -> 171
-  ## (170 is S8v's).
+  ## (170 was reserved for S8v, which landed as 173).
   ##
   ## (Prior: 169.)
   ## RFC-0005 S8u (2026-09-29) — S8s's precision remainder. A variant

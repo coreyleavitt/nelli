@@ -871,7 +871,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8u (else-covered constructors, local tables and sets,
     ## `new(x)`, ref / table / set results, bool axes, distinct / ref /
     ## container zero values, array element writes). 168->169.
-    check symexWalkerVersion == "169"
+    ## RFC-0005 S8w (alternating and/or chains joined, Case 2/3 guards with
+    ## continue rotated, turned-down B4 offsets stamped and wrapping).
+    ## 169->171 (170 is S8v's).
+    check symexWalkerVersion == "171"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -917,5 +917,10 @@ task test, "Run the test suite":
             # constructors, local Table / HashSet, `new(result)`, bool
             # multi-variant axes, distinct / container zero values, array
             # element writes; walker 168->169.
-            "tsymex_rfc0005_s8u_precision"]:
+            "tsymex_rfc0005_s8u_precision",
+            # RFC-0005 S8w -- S8t's remainder: alternating and/or chains
+            # joined (linear paths), Case 2/3 while guards with continue
+            # rotated, turned-down B4 offsets stamped and wrapping;
+            # walker 169->171.
+            "tsymex_rfc0005_s8w_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -199,7 +199,7 @@ state = "pending"
 [[slice]]
 id    = "S8w"
 title = "S8t's remainder: alternating and/or chains ((a or b) and (c or d)) still fork 2^m paths, while guard whose first part hoists a read in a body with continue still declines (R14 Case 2), isIntOffset params rejected by promotion (banned, unsigned, isLoose, isExact unchecked) stay unstamped Ints and B4 offsets do not wrap under unchecked isOptimised, trace the base's false OverflowDefect witness (@[], -1) and probe other shapes for the same fault"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8x"
@@ -3412,7 +3412,10 @@ Re-pinned:
 - **The false `OverflowDefect` at the base** (`sutAccOverflow`, witness
   `(@[], -1)`) is gone with the stamp. How the unstamped offset produced
   an `OverflowDefect` at all was not traced; no other shape was probed
-  for it.
+  for it. *(Corrected by S8w: the finding's `raisedTypeId` was
+  `IndexDefect`, not `OverflowDefect`. E6 surfaces a reachable Defect
+  with its own type whatever the target, and `data[-1]` is a real
+  `IndexDefect` that replays. See S8w's note.)*
 - **`tsymex_snd3_6_equality_loop` is unverified on Windows.** Its
   `scripts/derive-ci-suites.ps1` skip entry is removed too (the list is
   now empty): it passes in under 65 s on Linux, and S8r's per-suite
@@ -3653,6 +3656,132 @@ Re-pinned, each checked against real Nim:
   - `rfc0005_s1b_kinds`
   - `rfc0005_s1c_verdict`
   - `augmented_assign`
+
+**As landed (S8w, walker 171) — S8t's remainder.**
+
+*Alternating `and`/`or` chains join.* The guard `if`s that
+`lowerShortCircuitParts` synthesizes carry `ifJoin`
+(`IRStmt.ifJoin`, rendered `ifj(`, canonical `St<Ij:`). For a one-arm
+`ifJoin` with no `else` the walker walks the guarded arm, and
+`mergeJoinPaths` (`runtime.nim`) joins the survivor with the skip path.
+The join applies when there is exactly one survivor, the taint and heap
+state are equal, and the arm's `pc`/`dspc` extend the base's. Env
+entries the arm left alone are shared (`sameSV`, identity by hash-consed
+handle and metadata). Differing scalars become `ite(cond, arm, skip)`:
+bool, BV of the same signedness, float, and a stamped Int of the same
+width and sign (with the interval hull). The arm's extra path facts
+enter as `cond => facts`, in `pc` and in `dspc`. If anything else
+differs, the two paths are returned unjoined, which is the pre-S8w
+behaviour. The chain's short-circuit order is unchanged. Only the
+paths after a guard are merged, and a raising read still forks its
+Defect inside the arm. With 6 alternating pairs (`(a or b) and (c or d)
+and ...`, `(a and b) or ...`, and in a `let`), the base made 133, 130 and
+379 Z3 calls; this slice makes at most 16.
+
+*A `while` guard with `continue` is rotated.* R14 Case 2 (the first
+operand hoists) and Case 3 (an `or` guard, or another shape with a
+preamble) declined when the body had a `continue`. Now they use
+`mkRotatedContinueWhile` (`dsl_parser.nim`). The body goes into a
+labelled block (S8m's break targets), and each of its `continue`s
+becomes `break` out of that block (`retargetContinue`). So a `continue`
+lands on the rotation's trailing guard refresh, and the next test sees
+the loop's current state. Nested `while`s own their `continue`s and are
+not entered. `retargetContinue` walks with a work list; it rewrites the
+body in place and adds one labelled block, so the emitted builder grows
+by a constant depth, which S8t2's `boundEmittedDepth` bounds like any
+other. Rebased on S8t2, `s8w_remainder`, `s8t_termination`,
+`r6_nulwitness`, `D1c_shortcircuit` and `r14_continue_guard` all compile
+under `ulimit -s 256` (and 1024) in the dev container.
+
+*A turned-down B4 offset is stamped and wraps.* `runSymexImpl` has an
+`isIntOffset` param that `promoteSound` turns down (`offsetStamp`: the
+ban scan, unsigned, or `isExact` with unchecked arithmetic). It is now
+stamped with its own width and signedness and confined to its declared
+range or its type's window (`intWindow`), with an `aeTypeRange`
+abstraction entry (none for `uint64`, whose window does not fit an
+`int64` interval). `lowerArith` wraps a stamped Int's result
+(`wrapIntToWidth`) when the Nim operation wraps:
+- unsigned `+ - *`;
+- signed `+ - * div` when `acOverflow` is off (`currentArithWraps`).
+
+The wrap is `ite(lo <= r <= hi, r, lo + (r - lo) mod 2^w)`, and it is
+skipped when `r`'s interval already fits. Checked signed arithmetic
+keeps its `overflowCondInt` forks. A bit operation or shift on a stamped
+Int bridges at its own width and signedness (`stampedIntToBV`). Before,
+a shift failed the walker's assertion, and a bit operation bridged
+unsigned at 64 bits.
+
+The same bridge now treats an unstamped Int (`.len`, `find`, `indexOf`,
+`parseInt`) as a signed 64-bit `int`, or takes the other operand's
+signedness against a BV. `(s.find('a') and -2) < 0` was a false
+`sxUnsat` (CR-1a's `svIntToBV` stamps unsigned), and `s.find('a') shr 1`
+was a walker fault.
+
+*The base's `OverflowDefect` finding was a correct `IndexDefect`.*
+At a58856d, `symexFind(sutAccOverflow, tRaisedExn("OverflowDefect"))`
+returned `sxRaised` with `raisedTypeId` `IndexDefect` and witness
+`(@[], -1)`. The same happens with `tIndexError()`, and with the
+`start + 1` removed. E6 surfaces any reachable Defect with its own type
+whatever the target, and `data[-1]` raises `IndexDefect` in Nim. S8t's
+note and test comment read it as a false `OverflowDefect`; both are
+corrected, and S8t's test now also checks the type. Probes at this tip
+(B4, Q1, B3 and B6 shapes; `tIndexError` and
+`tRaisedExn("OverflowDefect")`; `isExact` and `isLoose`) found no
+`sxRaised` whose witness fails to replay as the reported type.
+
+*Skipped-suite per-check comparison.* The skip list is empty (S8t
+emptied it), so there is nothing to compare.
+
+Pins: `tests/tsymex_rfc0005_s8w_remainder.nim`.
+- (1) 6 alternating pairs in `if` (both nestings) and `let` within 16
+  Z3 calls (RED: 133, 130, 379); guarded reads in an alternating chain
+  never raise; an unguarded one raises and replays.
+- (2) a hoisting-first-operand guard with `continue`: the exit after a
+  `continue` is reached, a stale guard's extra iteration is dead, the
+  guarded read never raises, and `r14_case2_degrade`'s shape is SAT; an
+  `or` guard with `continue` (Case 3) is SAT, its read never raises
+  (RED: `sxUnknown`, `feUnsupportedOp`).
+- (3) under unchecked `isExact` and `isOptimised`, `start + 1 < start`
+  and `start * 4 < 0` are SAT at the wrap (RED: false `sxUnsat`); the
+  B4 hit replays. A bit-banned offset's `OverflowDefect` is found, typed
+  and replayed (RED: `sxUnknown`); its hit replays. `(start and -2) < 0`
+  is SAT (RED: false `sxUnsat`); a shift on a banned offset is SAT (RED:
+  walker fault). `(s.find('a') and -2) < 0` and `(s.find('a') shr 1) < 0`
+  are SAT (RED: false `sxUnsat`, walker fault).
+- (4) B4 with a negative offset under both targets: `sxRaised`,
+  `IndexDefect`, replays as `IndexDefect`.
+- The `>= 171` floor.
+
+Re-pinned:
+- `phase15_CR2_cachekey` (169 -> 171; 170 is S8v's).
+- `r14_case2_degrade` test 1 and `r14_continue_guard` R14-6: `sxUnknown`
+  -> `sxSat`, with the witness checked against Nim's loop.
+- `rfc0005_s8t_termination`: the B4 `OverflowDefect` test's comment,
+  plus a `raisedTypeId == "OverflowDefect"` check.
+- `r6_n27_placeholder_read_audit`: `sameSV`'s svSeq arm has 2 marked
+  identity lines (74 -> 76 in `runtime.nim`).
+
+*Different mechanisms, reported and not fixed here.*
+- **`isLoose` leaves an `isIntOffset` param unstamped.** This is by
+  design: ADR-0001's `isLoose` is opt-in unsound, and the offset is
+  treated like every other `isLoose` int. Its shifts and masks bridge as
+  a signed 64-bit `int`.
+- **The join declines on anything but scalars.** If an operand's
+  hoisted code writes a string, seq, tuple, heap cell or ref, allocates,
+  or leaves more than one survivor, the two paths go on unjoined. An
+  alternating chain whose operands do that still forks 2^m paths.
+- **B6 with a negative offset is `sxUnknown`** (`beBudgetExhausted`,
+  k-unroll 5) for `tIndexError`. It is a precision gap, not a false
+  verdict. The pair loop's guard stays satisfiable past the bound.
+- **`data.len.uint` in an unsigned B4 scan declines on its path**
+  (`lowerConvIntReinterpret`, `feUnsupportedOpHavoc`: a same-width
+  signedness reinterpret of the Int-sorted `len`). The target stays SAT
+  with a replaying witness, and the decline is S6b's scoped one. A
+  `uint` offset's wrap (`start + 1 < start` at `high(uint)`) is SAT.
+- **Unchecked `low(T) div -1` is modelled as its wrap, `low(T)`.** In C
+  it traps (x86 `idiv`, SIGFPE) rather than wrapping. Before S8w it was
+  modelled as the out-of-window `-low(T)`, so neither form matches the
+  trap. A witness that depends on it would fail to replay.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

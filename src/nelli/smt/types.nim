@@ -1008,6 +1008,18 @@ type
     of isIf:
       branches*: seq[IRBranch]
       elseBody*: IRStmt          ## nil if no `else:` clause
+      ifJoin*: bool
+        ## RFC-0005 S8w. Set only on the guards `lowerShortCircuitParts`
+        ## (`dsl_parser.nim`) synthesises for an `and`/`or` chain: one
+        ## branch, no `else`, a body that is the next operand's evaluation.
+        ## The walker (`runtime.nim`'s `isIf` arm, `mergeJoinPaths`) joins
+        ## the body's single survivor and the skip path back into ONE path
+        ## (path condition `base and (armConds or not guard)`, each differing
+        ## scalar an `ite`), so an operand of the other operator (`(a or b)
+        ## and (c or d)`) no longer hands two paths to the rest of the
+        ## chain: m such operands forked 2^m paths. A pair it cannot join
+        ## exactly (a composite value that differs, a heap or taint that
+        ## differs, more than one body survivor) stays two paths, as before.
     of isLet:
       lname*: string
       lty*: IRType
@@ -1310,6 +1322,12 @@ type
                        ## sound-promotion path, as `isScanOffset`); before
                        ## S8t it was unconstrained and unstamped, so
                        ## arithmetic on it had no overflow obligation.
+                       ## RFC-0005 S8w: when that promotion is turned down
+                       ## (ban scan, unsigned, `isExact` with unchecked
+                       ## arithmetic) it is still stamped over its type's
+                       ## window, and its unchecked arithmetic wraps
+                       ## (`wrapIntToWidth`); only `isLoose` leaves it
+                       ## unstamped.
                        ## The DECLARED `IRType` stays `itInt` unchanged
                        ## (an allocation hint sibling to `isStringBacked`,
                        ## not a type change).
@@ -3739,8 +3757,9 @@ proc mkLabelledBlock*(label: string; stmts: seq[IRStmt]): IRStmt =
   ## RFC-0005 S8m. A break target: `break label` resumes after it.
   IRStmt(kind: isBlock, stmts: stmts, blkLabel: label)
 
-proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil): IRStmt =
-  IRStmt(kind: isIf, branches: branches, elseBody: elseBody)
+proc mkIf*(branches: seq[IRBranch], elseBody: IRStmt = nil,
+           join = false): IRStmt =
+  IRStmt(kind: isIf, branches: branches, elseBody: elseBody, ifJoin: join)
 
 proc mkLet*(name: string, ty: IRType, value: IRExpr,
            isIntOffsetLocal = false): IRStmt =
@@ -5094,7 +5113,7 @@ proc render*(s: IRStmt): string =
       arms.add "[" & render(br.cond) & "=>" & render(br.body) & "]"
     if s.elseBody != nil:
       arms.add "[else=>" & render(s.elseBody) & "]"
-    "if(" & arms & ")"
+    (if s.ifJoin: "ifj(" else: "if(") & arms & ")"   ## RFC-0005 S8w
   of isLet:
     "let(" & s.lname & ":" & $s.lty & "=" & render(s.lvalue) & ")"
   of isAssign:

@@ -327,15 +327,18 @@ suite "S8t (3): a B4 accumulating-scan offset keeps its overflow obligation":
     check hasTypeRangeEntry(r, "start")
 
   test "the OverflowDefect on the B4 offset is found":
-    ## RED: `sxRaised` with witness `(@[], -1)`, which in Nim raises
-    ## IndexDefect at the scan's entry read, not OverflowDefect: the
-    ## unstamped Int had no overflow fork on `start + 1`, and the one
-    ## reported was not a real one.
+    ## RED: `sxRaised` with witness `(@[], -1)` and `raisedTypeId`
+    ## IndexDefect: the unstamped Int had no overflow fork on `start + 1`,
+    ## so the only Defect found was the scan's entry read `data[-1]`, and
+    ## E6 surfaces a reachable Defect with its own type whatever the
+    ## target. (RFC-0005 S8w traced this; S8t first read it as a false
+    ## OverflowDefect. The finding was a correct, replaying IndexDefect.)
     let r = symexFind(sutAccOverflow, tRaisedExn("OverflowDefect"))
     checkpoint show(r.errors)
     check r.status == sxRaised
     if r.status == sxRaised:
       checkpoint "witness: " & $r.raisedWitness
+      check r.raisedTypeId == "OverflowDefect"
       check r.raisedWitness[1] == high(int)
 
   test "the B4 hit is still reachable, with a replayable witness":

@@ -1482,6 +1482,14 @@ var overflowConds* {.threadvar.}: seq[Z3Bool]
   ## predicates on Int terms hang Z3. Unsigned BV is skipped — Nim wraps silently.
   ## Reset alongside `divByZeroConds` at every reset site.
 
+var currentArithWraps* {.threadvar.}: bool
+  ## RFC-0005 S8w. `acOverflow notin settings.arithChecks` for the running
+  ## walk (set by `resetSymexRunState`, beside `currentMaxSplitParts`): the
+  ## program's signed arithmetic WRAPS (`-d:danger`, `--overflowChecks:off`)
+  ## instead of raising. `lowerArith` reads it to wrap a width-stamped
+  ## signed `svInt` result into its type's window (`wrapIntToWidth`); a
+  ## bit-vector wraps by construction and needs nothing.
+
 var obligationLog* {.threadvar.}: ObligationLog
   ## Issue #161 slice 2. Audit trail, NOT a raise-fork sink — deliberately
   ## NOT reset alongside `overflowConds`. The cond sinks are drained and
@@ -3704,6 +3712,24 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
 
+proc stampedIntToBV(sv: SymVal): SymVal =
+  ## RFC-0005 S8w: a WIDTH-STAMPED `svInt` (`ziWidth` in 8/16/32/64) is a
+  ## Nim int of that width and signedness whose value lies in its type's
+  ## window, so `int2bv` at that width is its exact bit pattern, and the
+  ## BV it yields carries the Nim type's signedness (so a signed
+  ## comparison, `shr`'s arithmetic shift, and the reconcile back are the
+  ## Nim ones). `svIntToBV` alone stamps every result unsigned, which is
+  ## right for the unstamped `.len`/`find` sentinels it was built for and
+  ## wrong for a signed param: `(x and -1) < 0` compared unsigned.
+  doAssert sv.kind == svInt and sv.ziWidth in [8, 16, 32, 64]
+  let k = case sv.ziWidth
+          of 8: svBV8
+          of 16: svBV16
+          of 32: svBV32
+          else: svBV64
+  result = svIntToBV(sv, k)
+  result.signed = sv.ziSigned
+
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
   ## Nim int (including plain `int`/`uint`, width 64) allocates as an svBV*
@@ -5688,6 +5714,48 @@ proc tryDischargeOverflowInt(a, b: SymVal, op: IRBinop): Option[Interval] =
   let (lo, hi) = intBounds(a.ziWidth)
   if r.get.lo >= lo and r.get.hi <= hi: r else: none(Interval)
 
+proc intWindow(width: int, signed: bool): tuple[lo, hi: Z3Int,
+                                                span: Z3Int,
+                                                ivl: Option[Interval]] =
+  ## RFC-0005 S8w. The value window of a Nim integer type of `width` bits as
+  ## Z3 Int numerals, its size `2^width`, and the window as an `Interval`
+  ## when `int64` can hold it (every signed width; unsigned below 64). The
+  ## unsigned 64-bit bounds exceed `int64`, so they are built by
+  ## arithmetic on numerals rather than read from a literal.
+  let two32 = mkZ3IntLit(1'i64 shl 32)
+  let span = if width == 64: two32 * two32
+             else: mkZ3IntLit(1'i64 shl width)
+  if signed:
+    let (lo, hi) = intBounds(width)
+    (mkZ3IntLit(lo), mkZ3IntLit(hi), span, some(interval(lo, hi)))
+  elif width == 64:
+    (mkZ3IntLit(0), span - mkZ3IntLit(1), span, none(Interval))
+  else:
+    let hi = (1'i64 shl width) - 1
+    (mkZ3IntLit(0), mkZ3IntLit(hi), span, some(interval(0, hi)))
+
+proc wrapIntToWidth(r: SymVal): SymVal =
+  ## RFC-0005 S8w. A width-stamped `svInt` arithmetic result reduced into
+  ## its type's window the way the machine does: `lo + (r - lo) mod 2^w`
+  ## (Z3's `mod` is Euclidean, non-negative for a positive divisor), which
+  ## is two's-complement wrap-around for a signed type and modular
+  ## arithmetic for an unsigned one. An in-window result is itself, so the
+  ## term is `ite(lo <= r <= hi, r, <wrapped>)`, and a result whose
+  ## propagated interval (`ziIvl`) already lies inside the window is
+  ## returned as it is. Before S8w an unbounded `svInt` result never
+  ## wrapped: an unsigned or unchecked-signed value computed past its
+  ## type's end (`high(int) + 1`, unchecked) was a large positive integer
+  ## where the program holds `low(int)` -- a false `sxUnsat` for any
+  ## branch on the wrapped value.
+  let win = intWindow(r.ziWidth, r.ziSigned)
+  if r.ziIvl.isSome and win.ivl.isSome and
+     r.ziIvl.get.lo >= win.ivl.get.lo and r.ziIvl.get.hi <= win.ivl.get.hi:
+    return r
+  let inWin = r.zi >= win.lo and r.zi <= win.hi
+  let wrapped = win.lo + ((r.zi - win.lo) mod win.span)
+  SymVal(kind: svInt, zi: ite(inWin, r.zi, wrapped), ziWidth: r.ziWidth,
+         ziSigned: r.ziSigned, ziIvl: win.ivl)
+
 proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
   ## CR-9(c) Stage C. Centralised arithmetic dispatch: exact copy of the
   ## `of bAdd,bSub,bMul,bDiv,bMod` arm body from `iekBinop` (~2707-2722).
@@ -5791,7 +5859,22 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
         arithTrapConds.add tc
         syncArithTrapCond(tc)
   if a.kind == svInt:
-    arithInt(a, b, op)
+    # RFC-0005 S8w: a width-stamped result wraps where the machine's does:
+    # always for an unsigned type (Nim's unsigned arithmetic is modular),
+    # and for a signed one when the build's arithmetic is unchecked
+    # (`currentArithWraps`). With checked signed arithmetic the value never
+    # leaves the window on a surviving path (`overflowCondInt` forks the
+    # raise), so there is nothing to wrap. `div` joins for the signed
+    # case: `low(T) div -1` at 8 and 16 bits yields `-low(T)` in C's
+    # promoted `int` and wraps back to `low(T)` (32 and 64 bits trap,
+    # `arithTrapConds` above).
+    let r = arithInt(a, b, op)
+    if r.ziWidth in {8, 16, 32, 64} and
+       ((not r.ziSigned and op in {bAdd, bSub, bMul}) or
+        (r.ziSigned and currentArithWraps and op in {bAdd, bSub, bMul, bDiv})):
+      wrapIntToWidth(r)
+    else:
+      r
   elif a.kind in {svFloat32, svFloat64}:
     arithFloat(a, b, op)        # Phase 15 F3
   else:
@@ -6922,10 +7005,40 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # width — when `r` is also svInt, e.g. an int-literal RHS) and
         # dispatch through the existing `binBV` machinery. This replaces
         # the former native crash with a correctly-modeled bitwise op.
+        # RFC-0005 S8w: a width-stamped operand bridges at its own width
+        # and signedness (`stampedIntToBV`); the other side follows it.
+        let lStamped = l.ziWidth in [8, 16, 32, 64]
         let targetKind =
-          if r.kind in {svBV8, svBV16, svBV32, svBV64}: r.kind else: svBV64
-        let lb = svIntToBV(l, targetKind)
-        let rb = if r.kind == svInt: svIntToBV(r, targetKind) else: r
+          if r.kind in {svBV8, svBV16, svBV32, svBV64}: r.kind
+          elif lStamped: stampedIntToBV(l).kind
+          elif r.kind == svInt and r.ziWidth in [8, 16, 32, 64]:
+            stampedIntToBV(r).kind
+          else: svBV64
+        # An UNSTAMPED Int (`.len`/`find`/`indexOf`/`parseInt`) is a Nim
+        # `int`: bridged at 64 bits it is SIGNED, so `find(..) and -2` of
+        # an absent `find` (-1) compares negative. `svIntToBV` stamps its
+        # result unsigned, which made `(s.find('a') and -2) < 0` a false
+        # `sxUnsat` (RFC-0005 S8w). Against a BV operand it takes that
+        # operand's signedness, as the Nim operation does.
+        let unstampedSigned =
+          if r.kind in {svBV8, svBV16, svBV32, svBV64}: r.signed
+          elif lStamped: l.ziSigned
+          else: true
+        var lb =
+          if lStamped and stampedIntToBV(l).kind == targetKind:
+            stampedIntToBV(l)
+          else: svIntToBV(l, targetKind)
+        if not (lStamped and stampedIntToBV(l).kind == targetKind):
+          lb.signed = unstampedSigned
+        var rb =
+          if r.kind == svInt and r.ziWidth in [8, 16, 32, 64] and
+             stampedIntToBV(r).kind == targetKind:
+            stampedIntToBV(r)
+          elif r.kind == svInt: svIntToBV(r, targetKind)
+          else: r
+        if r.kind == svInt and not (r.ziWidth in [8, 16, 32, 64] and
+                                    stampedIntToBV(r).kind == targetKind):
+          rb.signed = lb.signed
         case e.bop
         of bAnd: binBV(lb, rb, `and`)
         of bOr:  binBV(lb, rb, `or`)
@@ -6941,12 +7054,29 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     of bShl, bShr:
       let pp = probeProto(env, e)
       let l = lower(env, e.lhs, pp)
-      let r = lower(env, e.rhs, some(l))
-      doAssert l.kind notin {svInt, svBool},
-        "shift on promoted Z3Int — abstraction should have declined"
+      let r0 = lower(env, e.rhs, some(l))
+      # RFC-0005 S8w: an `isIntOffset` param the ban scan turned down is
+      # now a width-stamped `svInt` (`runSymexImpl`), and a shift on it is
+      # exactly the shift of its bit pattern (`stampedIntToBV`). An
+      # UNSTAMPED Int (`.len`/`find`/`indexOf`/`parseInt`) is a Nim `int`
+      # and shifts as a signed 64-bit one (it failed this arm's assertion,
+      # a walker fault, before S8w).
+      let lStamped = l.kind == svInt and l.ziWidth in [8, 16, 32, 64]
+      doAssert l.kind != svBool, "shift on a bool"
+      var lb =
+        if lStamped: stampedIntToBV(l)
+        elif l.kind == svInt: svIntToBV(l, svBV64)
+        else: l
+      if l.kind == svInt and not lStamped: lb.signed = true
+      let r =
+        if r0.kind == svInt:
+          (if r0.ziWidth in [8, 16, 32, 64] and
+              stampedIntToBV(r0).kind == lb.kind: stampedIntToBV(r0)
+           else: svIntToBV(r0, lb.kind))
+        else: r0
       case e.bop
-      of bShl: binBV(l, r, `shl`)
-      of bShr: shrBV(l, r)
+      of bShl: binBV(lb, r, `shl`)
+      of bShr: shrBV(lb, r)
       else: raise newException(ValueError, "unreachable")  # [raise-audited: category-c: op-narrowed by caller dispatch (own label: unreachable)]
     # ---- arithmetic — all preserve representation ----
     of bAdd, bSub, bMul, bDiv, bMod:
@@ -11160,6 +11290,190 @@ proc jumpTarget(w: WalkCtx; label: string): int =
     if w.loopStack[i].label == label: return i
   -1
 
+proc sameSV(a, b: SymVal): bool =
+  ## RFC-0005 S8w. True when `a` and `b` are provably the SAME symbolic
+  ## value: same kind, same metadata, and every Z3 term the same AST (Z3
+  ## hash-conses terms, so equal raw handles are equal terms). Used by
+  ## `mergeJoinPaths` to find the env entries a short-circuit guard's body
+  ## left alone. `false` is always safe (the join then either `ite`s the
+  ## entry or declines to join); it is returned for any kind not compared
+  ## field by field here.
+  if a.kind != b.kind: return false
+  case a.kind
+  of svBV8:  a.signed == b.signed and a.bv8.raw == b.bv8.raw
+  of svBV16: a.signed == b.signed and a.bv16.raw == b.bv16.raw
+  of svBV32: a.signed == b.signed and a.bv32.raw == b.bv32.raw
+  of svBV64: a.signed == b.signed and a.bv64.raw == b.bv64.raw
+  of svInt:
+    a.zi.raw == b.zi.raw and a.ziWidth == b.ziWidth and
+      a.ziSigned == b.ziSigned and a.ziIvl == b.ziIvl
+  of svBool: a.bo.raw == b.bo.raw
+  of svFloat32: a.fp32.raw == b.fp32.raw
+  of svFloat64: a.fp64.raw == b.fp64.raw
+  of svString: a.str.raw == b.str.raw
+  of svTuple:
+    if a.fields.len != b.fields.len or a.fieldNames != b.fieldNames:
+      return false
+    for i in 0 ..< a.fields.len:
+      if not sameSV(a.fields[i], b.fields[i]): return false
+    true
+  of svArray:
+    if a.arrElems.len != b.arrElems.len or a.arrElemTy != b.arrElemTy:
+      return false
+    for i in 0 ..< a.arrElems.len:
+      if not sameSV(a.arrElems[i], b.arrElems[i]): return false
+    true
+  of svSeq:
+    # Handle identity only, as `sameSymVal`'s arm: nothing is lowered or
+    # read as a value, and the placeholder flag is itself compared, so a
+    # placeholder never matches a backed seq (N27 audit, RFC-0005 S8w).
+    a.seqLen.raw == b.seqLen.raw and a.seqDataRaw.raw == b.seqDataRaw.raw and  # [placeholder-audited]
+      a.seqElemTy == b.seqElemTy and
+      a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder and  # [placeholder-audited]
+      a.seqUnsupportedFieldReason == b.seqUnsupportedFieldReason and
+      a.seqUnsupportedFieldKind == b.seqUnsupportedFieldKind
+  of svTable:
+    a.tabDataRaw.raw == b.tabDataRaw.raw and
+      a.tabPresentRaw.raw == b.tabPresentRaw.raw and
+      a.tabSize.raw == b.tabSize.raw and
+      a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
+  of svSet:
+    a.setMembersRaw.raw == b.setMembersRaw.raw and
+      a.setSize.raw == b.setSize.raw and a.setElemTy == b.setElemTy
+  of svVariant:
+    if a.vDisc.isNil or b.vDisc.isNil or not sameSV(a.vDisc[], b.vDisc[]) or
+       a.vDiscName != b.vDiscName or a.vObjectName != b.vObjectName or
+       a.vPlainFieldNames != b.vPlainFieldNames or
+       a.vPlainFields.len != b.vPlainFields.len or
+       a.vArmFields.len != b.vArmFields.len or
+       a.vArmFieldNames != b.vArmFieldNames:
+      return false
+    for i in 0 ..< a.vPlainFields.len:
+      if not sameSV(a.vPlainFields[i], b.vPlainFields[i]): return false
+    for tag, fs in a.vArmFields:
+      if not b.vArmFields.hasKey(tag): return false
+      let gs = b.vArmFields[tag]
+      if fs.len != gs.len: return false
+      for i in 0 ..< fs.len:
+        if not sameSV(fs[i], gs[i]): return false
+    true
+  of svUninterpRef:
+    a.uninterpAst.raw == b.uninterpAst.raw and a.sortName == b.sortName and
+      a.typeTag == b.typeTag
+  of svDistinct:
+    a.distinctAst.raw == b.distinctAst.raw and
+      a.distinctName == b.distinctName and
+      not a.distinctBaseSym.isNil and not b.distinctBaseSym.isNil and
+      sameSV(a.distinctBaseSym[], b.distinctBaseSym[])
+  of svRef:
+    a.refAst.raw == b.refAst.raw and a.refPointee == b.refPointee
+  of svPtr:
+    a.ptrAst.raw == b.ptrAst.raw and a.ptrFamily == b.ptrFamily and
+      a.ptrPointee == b.ptrPointee
+  of svMultiVariant, svClosure:
+    false
+
+proc sameZ3Seq(a, b: seq[Z3Bool]): bool =
+  ## RFC-0005 S8w. Element-wise identical path-condition prefixes.
+  if a.len != b.len: return false
+  for i in 0 ..< a.len:
+    if a[i].raw != b[i].raw: return false
+  true
+
+proc hasZ3Prefix(s, prefix: seq[Z3Bool]): bool =
+  if s.len < prefix.len: return false
+  for i in 0 ..< prefix.len:
+    if s[i].raw != prefix[i].raw: return false
+  true
+
+proc sameHeapState(a, b: Path): bool =
+  ## RFC-0005 S8w. The logical-heap fields `forkPath` deep-copies are equal
+  ## on both paths (the join keeps one copy).
+  if a.heapDepth != b.heapDepth or
+     a.freshnessAssertCount != b.freshnessAssertCount or
+     a.nilDeref != b.nilDeref or a.allocCounters != b.allocCounters or
+     a.heaps.len != b.heaps.len or a.liveRefs.len != b.liveRefs.len:
+    return false
+  for k, v in a.heaps:
+    if not b.heaps.hasKey(k) or b.heaps[k].raw != v.raw: return false
+  for k, v in a.liveRefs:
+    if not b.liveRefs.hasKey(k): return false
+    let u = b.liveRefs[k]
+    if u.len != v.len: return false
+    for i in 0 ..< v.len:
+      if u[i].raw != v[i].raw: return false
+  true
+
+proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
+                    skip: Path): seq[Path] =
+  ## RFC-0005 S8w. The join of an `IRStmt.ifJoin` guard (a short-circuit
+  ## chain's `if sc: <next operand>`, `lowerShortCircuitParts`): the body's
+  ## survivor `a` (forked from `base` with `cond`) and the skip path (`base`
+  ## with `not cond`) become ONE path with
+  ##   pc   = base.pc   & [cond => <a's own later branch conditions>]
+  ##   dspc = base.dspc & [cond => <a's own defect-survivor facts>]
+  ##   env  = a's env, with each entry the skip path holds differently
+  ##          `ite(cond, a's, skip's)`
+  ## which is exactly `base and ((cond and A) or not cond)`, the disjunction
+  ## of the two paths: `cond` separates them, so the `ite` picks each one's
+  ## value. The reads the body hoisted were already forked (and their raises
+  ## routed) on `a`, under `cond`; only the continuation is shared.
+  ##
+  ## Declined (the two paths are returned as they are, as before S8w) when
+  ## the join would not be exact or not cheap: the body left more or fewer
+  ## than one survivor (a split drain's survivors are not separated by
+  ## `cond` alone), the paths' taint or heap state differ, a prefix was
+  ## rewritten, or an entry that differs is not a scalar (`iteSV` degrades a
+  ## composite). Entries only the body bound (its temporaries) are kept as
+  ## the body bound them: nothing on the skip side reads them.
+  if armOut.len != 1:
+    return armOut & @[skip]
+  let a = armOut[0]
+  if a.taint != skip.taint or not sameHeapState(a, skip) or
+     not hasZ3Prefix(a.pc, base.pc) or a.pc.len <= base.pc.len or
+     a.pc[base.pc.len].raw != cond.raw or
+     not hasZ3Prefix(a.defectSurvivorPc, base.defectSurvivorPc) or
+     not sameZ3Seq(skip.defectSurvivorPc, base.defectSurvivorPc):
+    return @[a, skip]
+  var env: Env
+  for k, v in a.env:
+    if not skip.env.hasKey(k):
+      env[k] = v
+      continue
+    let e = skip.env[k]
+    if sameSV(v, e):
+      env[k] = v
+    elif v.kind == e.kind and
+         v.kind in {svBool, svBV8, svBV16, svBV32, svBV64, svFloat32,
+                    svFloat64} and
+         (v.kind notin {svBV8, svBV16, svBV32, svBV64} or
+          v.signed == e.signed):
+      env[k] = iteSV(cond, v, e)
+    elif v.kind == svInt and e.kind == svInt and
+         v.ziWidth == e.ziWidth and v.ziSigned == e.ziSigned:
+      var m = iteSV(cond, v, e)
+      m.ziIvl = if v.ziIvl.isSome and e.ziIvl.isSome:
+                  some(interval(min(v.ziIvl.get.lo, e.ziIvl.get.lo),
+                                max(v.ziIvl.get.hi, e.ziIvl.get.hi)))
+                else: none(Interval)
+      env[k] = m
+    else:
+      return @[a, skip]
+  for k in skip.env.keys:
+    if not a.env.hasKey(k): return @[a, skip]
+  var pc = base.pc
+  if a.pc.len > base.pc.len + 1:
+    var rest = a.pc[base.pc.len + 1]
+    for i in base.pc.len + 2 ..< a.pc.len: rest = rest and a.pc[i]
+    pc.add cond.implies(rest)
+  let merged = forkPath(skip, pc, env)
+  if a.defectSurvivorPc.len > base.defectSurvivorPc.len:
+    var facts = a.defectSurvivorPc[base.defectSurvivorPc.len]
+    for i in base.defectSurvivorPc.len + 1 ..< a.defectSurvivorPc.len:
+      facts = facts and a.defectSurvivorPc[i]
+    merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts)]
+  @[merged]
+
 proc walkIfFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## `wmFollowConcrete` counterpart to `isIf`'s `wmExplore` fork-every-arm
   ## loop (below). Reuses `lowerBoolInExpr`/`forkPath` — the same symbolic
@@ -11434,6 +11748,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## `wmExplore`), so this branch does not perturb it.
       return walkIfFollowConcrete(stmt, paths, w)
     var survivors: seq[Path]
+    if stmt.ifJoin and stmt.branches.len == 1 and stmt.elseBody == nil:
+      # RFC-0005 S8w: a short-circuit chain's guard (`IRStmt.ifJoin`). The
+      # body and the skip path are joined back into one path where that is
+      # exact (`mergeJoinPaths`), so the rest of the chain -- and the
+      # program after it -- is walked once, not once per outcome.
+      let br = stmt.branches[0]
+      for p in paths:
+        if w.shouldStop: return
+        let (condBool, cp2) = lowerBoolInExpr(p, br.cond, w)
+        var cont = drainScalarRaiseForks(cp2, w)
+        if cont.len == 0:
+          cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+        for cp in cont:
+          let armPath = forkPath(cp, cp.pc & @[condBool], cp.env)
+          let armOut = walk(br.body, @[armPath], w)
+          if w.shouldStop: return
+          let skipPath = forkPath(cp, cp.pc & @[not condBool], cp.env)
+          survivors.add mergeJoinPaths(cp, condBool, armOut, skipPath)
+      return survivors
     for p in paths:
       if w.shouldStop: return
       # Phase 15 S10b: evaluating a branch condition may itself raise (a
@@ -15701,6 +16034,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
                            ## threadvar's own doc comment for why it must not
                            ## join the raise-cond sinks' reset list.
   currentMaxSplitParts = settings.budget.maxSplitParts             ## CR-11/CR-18
+  currentArithWraps = acOverflow notin settings.arithChecks        ## RFC-0005 S8w
   parseIntRaiseConds = @[]        ## Phase 15 S10b: reset parseInt raise-predicate sink
   rfc0005RawStatus = sxUnknown  ## RFC-0005 S7: an aborted walk decides nothing
   unknownExnWarnings = @[]        ## Phase 15 E4: reset unknown-exn-type warning sink
@@ -16095,16 +16429,59 @@ proc runSymexImpl(prog: SymexProgram,
         # down: banned by the ban scan (a bit-twiddling op, or unprovable
         # arithmetic under unchecked `isOptimised`), unsigned, `isLoose`,
         # or `isExact` with unchecked arithmetic.
-        let soundWidth = if promoteSound: p.ty.width else: 0
-        let soundSigned = promoteSound and p.ty.signed
+        #
+        # RFC-0005 S8w: that remainder is closed except for `isLoose`. An
+        # `isIntOffset` param `promoteSound` turns down (`offsetStamp`) is
+        # stamped with its own width and signedness and confined to its
+        # type's window (or its declared range), like a sound promotion:
+        #   * checked signed arithmetic keeps its `overflowCondInt` forks;
+        #   * unchecked signed arithmetic (`isExact` without `acOverflow`,
+        #     or the `isOptimised` wrap scan's unprovable arithmetic) and
+        #     unsigned arithmetic wrap (`lowerArith`'s `wrapIntToWidth`),
+        #     as the bit-vector would;
+        #   * a bit operation bridges through `int2bv`, which is exact, and a
+        #     shift -- which the Int has no bit pattern for -- declines in
+        #     band (`lower`'s `bShl`/`bShr` arm), scoped to the paths that
+        #     reach it.
+        # Before S8w the param was an unbounded Int with no stamp: no
+        # overflow obligation, no wrap (`start + 1 < start` was `sxUnsat`
+        # under unchecked arithmetic although `high(int)` reaches it).
+        let offsetStamp = p.isIntOffset and not promoteSound and
+                          not promoteLoose and
+                          p.ty.width in [8, 16, 32, 64]
+        let soundWidth = if promoteSound or offsetStamp: p.ty.width else: 0
+        let soundSigned = (promoteSound or offsetStamp) and p.ty.signed
         # Slice 2: the same proven `ivl` that justifies the promotion also
         # seeds the static discharge. It is exactly the pair of constraints
         # added to `initialPC` just below, so the analysis and the path
         # condition cannot disagree about this param's range.
-        let soundIvl = if promoteSound: some(ivl) else: none(Interval)
+        let offsetWin = if offsetStamp: intWindow(p.ty.width, p.ty.signed)
+                        else: default(typeof(intWindow(8, true)))
+        let soundIvl =
+          if promoteSound: some(ivl)
+          elif offsetStamp and p.hasRange: some(interval(p.rangeLo, p.rangeHi))
+          elif offsetStamp: offsetWin.ivl
+          else: none(Interval)
         env[p.name] = SymVal(kind: svInt, zi: mkIntVar(p.name),
                              ziWidth: soundWidth, ziSigned: soundSigned,
                              ziIvl: soundIvl)
+        if offsetStamp and not p.hasRange:
+          # The declared-range case is the `elif` arm below, unchanged.
+          initialPC.add (env[p.name].zi >= offsetWin.lo)
+          initialPC.add (env[p.name].zi <= offsetWin.hi)
+          # `uint64`'s window does not fit an `int64` interval; its
+          # constraints are in the path condition, the audit entry is not.
+          if offsetWin.ivl.isSome:
+           log.add AbstractionEntry(
+            name: p.name,
+            interval: offsetWin.ivl.get,
+            evidence: aeTypeRange,
+            derivation: "accumulating-scan offset, " & $p.ty &
+              " window, width-stamped" &
+              (if not p.ty.signed: " (wraps: unsigned)"
+               elif acOverflow notin settings.arithChecks:
+                 " (wraps: unchecked arithmetic)"
+               else: " (overflow forks kept)"))
         if promoteSound:
           initialPC.add (env[p.name].zi >= mkZ3IntLit(rangeLo))
           initialPC.add (env[p.name].zi <= mkZ3IntLit(rangeHi))

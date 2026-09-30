@@ -157,9 +157,11 @@ proc sutOrGuardFaultWhile(s: string) =
 
 # ---------------------------------------------------------------------------
 # 6. The SAME `or`-guard-with-fault shape, but this body DOES contain a
-#    `continue` — now the rotation fallback would be unsafe (the exact hazard
-#    this fix eliminates), and there is no clean and-split for an `or` guard,
-#    so this SOUND-DEGRADES to sxUnknown, never a false verdict.
+#    `continue` — the plain rotation fallback would be unsafe (the exact
+#    hazard this fix eliminates), and there is no clean and-split for an `or`
+#    guard, so this sound-degraded to sxUnknown until RFC-0005 S8w, which
+#    rotates it with each `continue` retargeted onto the guard refresh
+#    (`mkRotatedContinueWhile`): it now gets R14-5's real verdict.
 # ---------------------------------------------------------------------------
 
 proc sutOrGuardFaultContinueWhile(s: string) =
@@ -220,11 +222,16 @@ suite "symex R14 — continue-safety of the and-split short-circuit while guard"
     check r.witness[0].len > 0
     check r.witness[0][0] != 'x'
 
-  test "R14-6: or-guard with a fault AND a continue sound-degrades to sxUnknown, never a false verdict":
-    ## The `continue` makes the rotation fallback unsafe, and there is no
-    ## clean and-split for an `or` guard -> sound-degrade (Invariant 3).
+  test "R14-6: or-guard with a fault AND a continue gets the real verdict (RFC-0005 S8w; it sound-degraded before)":
+    ## The `continue` made the plain rotation unsafe and this shape declined
+    ## (Invariant 3). S8w's continue-retargeting rotation re-evaluates the
+    ## guard after every `continue`, so it gets R14-5's verdict: the loop
+    ## exits with 0 iterations whenever s.len>0 and s[0]!='x'.
     let r = symexFind(sutOrGuardFaultContinueWhile, tLabel("afterOrGuardContinue"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0].len > 0
+      check r.witness[0][0] != 'x'
 
 suite "symex R14 — version pins":
 

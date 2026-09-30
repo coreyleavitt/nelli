@@ -184,7 +184,27 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "169"
+const symexWalkerVersion* = "171"
+  ## RFC-0005 S8w (2026-09-30) — S8t's remainder. An alternating `and`/`or`
+  ## chain's synthesized guard `if`s carry `ifJoin` (`IRStmt.ifJoin`), and
+  ## the walker joins the guarded and skipped paths back into one
+  ## (`mergeJoinPaths`, `runtime.nim`) when they differ only in scalars,
+  ## so a chain of m alternating pairs is linear in paths rather than 2^m
+  ## (6 pairs: 133 Z3 calls, now at most 16). A `while` guard whose first
+  ## operand hoists (R14 Case 2), or an `or` guard with a preamble (Case
+  ## 3), in a body that uses `continue`, is rotated with the body in a
+  ## labelled block its `continue`s break out of (`mkRotatedContinueWhile`,
+  ## `dsl_parser.nim`), so the guard is re-evaluated -- it declined. An
+  ## `isIntOffset` param that `promoteSound` turns down (ban scan,
+  ## unsigned, `isExact` with unchecked arithmetic) is width-stamped over
+  ## its type's window; unchecked signed and all unsigned arithmetic on a
+  ## stamped Int wraps (`wrapIntToWidth`), and a bit operation or shift on
+  ## it bridges at its own width and signedness (`stampedIntToBV`). Path
+  ## counts, query shapes, IR canonical forms (`St<Ij:`) and verdicts (a
+  ## wrapped offset's `sxUnsat` becomes `sxSat`) change: 169 -> 171
+  ## (170 is S8v's).
+  ##
+  ## (Prior: 169.)
   ## RFC-0005 S8u (2026-09-29) — S8s's precision remainder. A variant
   ## constructor naming a tag only an `else` arm covers builds the variant
   ## (was `feUnsupportedExprKind`). An uninitialised local `Table[string,
@@ -4704,7 +4724,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     for br in s.branches:
       parts.add "(" & canonicalize(br.cond, env) & "=>" &
         canonicalize(br.body, env) & ")"
-    "St<If:[" & parts.join(",") & "];else=" &
+    # RFC-0005 S8w: a joined short-circuit guard walks to one path where a
+    # plain `if` walks to two, so the flag is part of the statement's
+    # identity (`Ij`).
+    (if s.ifJoin: "St<Ij:[" else: "St<If:[") & parts.join(",") & "];else=" &
       canonicalize(s.elseBody, env) & ">"
   of isLet:
     let slot = bindLocal(env, s.lname)

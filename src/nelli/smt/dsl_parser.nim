@@ -625,7 +625,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     var seqLit = newTree(nnkBracket)
     for br in s.branches:
       seqLit.add emitBranch(br)
-    newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody))
+    newCall(bindSym"mkIf", prefix(seqLit, "@"), emitStmt(s.elseBody),
+            newLit(s.ifJoin))   ## RFC-0005 S8w
   of isLet:
     newCall(bindSym"mkLet", newLit(s.lname), emitIRType(s.lty), emitExpr(s.lvalue),
             newLit(s.lIsIntOffsetLocal))
@@ -2663,8 +2664,19 @@ proc lowerShortCircuitParts(op: IRBinop, parts: seq[ShortCircuitPart],
       inc j
     result.add mkAssign(sc, cur)
     if j < parts.len:
-      result.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(j)))], nil)
-  preamble.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(k)))], nil)
+      result.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(j)))], nil,
+                      join = true)
+  # RFC-0005 S8w: every guard is a JOIN (`IRStmt.ifJoin`): the walker merges
+  # the guard's two outcomes back into one path. Nesting (S8t) already kept
+  # a same-operator chain to n + 1 exits, but those exits all flowed on, and
+  # an operand of the OTHER operator (`(a or b)` inside an `and` chain) is
+  # this same lowering one level down, so each such operand doubled the
+  # paths reaching the rest of the chain: 2^m for m of them. Joined, the
+  # chain leaves as one path whose `sc` is the chain's value; the reads
+  # stay under their guards (a raise is still forked only inside the guard
+  # that reaches it).
+  preamble.add mkIf(@[mkBranch(guardOf(), mkBlock(nest(k)))], nil,
+                    join = true)
   mkVar(sc)
 
 proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
@@ -8028,6 +8040,49 @@ proc mkRotatedGuardWhile(cond: IRExpr, body: IRStmt, guardPre: seq[IRStmt]): IRS
     let rotatedBody = mkBlock(@[body] & guardPre)
     mkBlock(guardPre & @[mkWhile(cond, rotatedBody)])
 
+proc retargetContinue(s: IRStmt, label: string): IRStmt =
+  ## RFC-0005 S8w. `s` with every `continue` that leaves the loop being
+  ## built (an `isContinue`: a `for` loop's is already a labelled break,
+  ## `resolveContinue`) turned into `break label`. A nested `isWhile` owns
+  ## the `continue`s inside it and is not entered. The body was parsed for
+  ## this loop alone and is rewritten in place. Iterative, with an explicit
+  ## work list: a guard's nested short-circuit lowering makes `if`s as deep
+  ## as its chain is long.
+  var work = @[s]
+  while work.len > 0:
+    let n = work.pop()
+    if n == nil: continue
+    case n.kind
+    of isContinue:
+      n[] = IRStmt(kind: isBreak, brkLabel: label)[]
+    of isBlock:
+      for x in n.stmts: work.add x
+    of isIf:
+      for br in n.branches: work.add br.body
+      work.add n.elseBody
+    of isTry:
+      work.add n.tryBody
+      for h in n.tryHandlers: work.add h.body
+      work.add n.tryFinally
+    else:
+      discard
+  s
+
+proc mkRotatedContinueWhile(cond: IRExpr, body: IRStmt,
+                            guardPre: seq[IRStmt], ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8w. The rotation (`mkRotatedGuardWhile`) for a body that
+  ## has a `continue`: the body is wrapped in a labelled block and each of
+  ## its `continue`s becomes a `break` out of that block
+  ## (`retargetContinue`), so a `continue` lands on the trailing guard
+  ## refresh and the next guard test sees the loop's current state, as in
+  ## Nim, where `continue` re-evaluates the whole guard. Before S8w this
+  ## shape declined (R14 Case 2 / 3: `continue` skipped the refresh and the
+  ## guard temporary went stale). The loop's real guard stays the `isWhile`
+  ## guard, so S8k's feasibility pruning still applies to it.
+  let lbl = freshSynth(ctx, "cont")
+  let wrapped = mkLabelledBlock(lbl, @[retargetContinue(body, lbl)])
+  mkRotatedGuardWhile(cond, wrapped, guardPre)
+
 proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
                          body: IRStmt, ctx: ParseCtx): IRStmt =
   ## RFC-chapulin-hardening R14 (CRITICAL soundness fix). REPLACES the old
@@ -8077,7 +8132,10 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   ## refresh. So: whenever the clean and-split (above) is not available, fall
   ## back to the pre-R14 rotation (`mkRotatedGuardWhile`) IF AND ONLY IF the
   ## raw body provably contains no `continue` (`hasContinueShallow`) —
-  ## otherwise sound-degrade (Invariant 3: never a false verdict).
+  ## otherwise (RFC-0005 S8w; it sound-degraded before) the same rotation
+  ## with the body in a labelled block whose `continue`s become `break`s out
+  ## of it (`mkRotatedContinueWhile`), so every iteration, including one a
+  ## `continue` ends, runs the trailing refresh.
   ##
   ## Outcomes, decided by inspecting the RAW (untouched) guard node:
   ##  1. Top-level `A and B`, A a simple (non-hoisting) guard, B carrying the
@@ -8091,11 +8149,12 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   ##     short-circuit buried in `A`, e.g. `(X and Y) and B`) — splitting only
   ##     the outer `and` would leave `A`'s own guard temp exactly as stale as
   ##     the bug this proc fixes, so the clean split doesn't apply. Falls
-  ##     back to the rotation (body continue-free) or sound-degrades
-  ##     (body has continue). Rare.
+  ##     back to the rotation (body continue-free) or the continue-
+  ##     retargeting rotation (body has continue; S8w). Rare.
   ##  3. Anything else (a plain non-and/or guard whose parse hoists a
   ##     preamble for any reason, or a top-level `or` with a fault) — same
-  ##     fallback: rotation (continue-free) or sound-degrade (has continue).
+  ##     fallback: rotation (continue-free) or the continue-retargeting
+  ##     rotation (has continue; S8w).
   ##  4. No preamble at all needed for the guard — PLAIN `mkWhile(cond,
   ##     body)`, byte-identical to the pre-R1B fast path. This also covers an
   ##     UNBOUNDED single-expr guard with a genuinely-reachable fault (e.g.
@@ -8111,7 +8170,7 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   # `parseAtomicOperand` call reached while parsing the guard no-ops (plain
   # parseExpr, no hoist) instead of manufacturing a preamble. A manufactured
   # guard-cond preamble would flip the Case-1b/4 fast paths below into the
-  # Case-2/3 sound-degrade for continue-bearing loops that prove today.
+  # Case-2/3 rotation for continue-bearing loops that prove today.
   # Saved/restored (not blindly cleared) so this can never leak `false` past
   # its own scope even if guard parsing ever nests.
   let savedInGuardCond = ctx.inGuardCond
@@ -8167,16 +8226,12 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
         let cond = lowerShortCircuitParts(bAnd, parts, pre, ctx)
         mkRotatedGuardWhile(cond, body, pre)
       else:
-        # Case 2, continue present: no safe re-run mechanism for this rare
-        # nested shape — sound-degrade (Invariant 3: never a false verdict).
-        ctx.declineAtSite(
-          feUnsupportedOp,
-          "R14: short-circuit while-guard shape unmodeled (nested " &
-                 "and-chain with a fault on the guard's LHS, body contains " &
-                 "continue) — sound degrade",
-          "R14: short-circuit while-guard shape unmodeled " &
-            "(nested and-chain with a fault on the guard's LHS, body contains " &
-            "continue) — sound degrade")
+        # Case 2, continue present. RFC-0005 S8w: the rotation with each
+        # `continue` retargeted onto the trailing refresh
+        # (`mkRotatedContinueWhile`); it declined before S8w.
+        var pre: seq[IRStmt]
+        let cond = lowerShortCircuitParts(bAnd, parts, pre, ctx)
+        mkRotatedContinueWhile(cond, body, pre, ctx)
     else:
       var tmpPre: seq[IRStmt]
       let cond = parseExpr(guardNode, tmpPre, ctx)
@@ -8190,19 +8245,15 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
         # `continue` to ever skip the refresh.
         mkRotatedGuardWhile(cond, body, tmpPre)
       else:
-        # Case 3, continue present: no clean and-split is available (an
-        # `or`-guard with a fault, or a fault nested deeper) and the rotation
-        # is unsafe here — sound-degrade (Invariant 3: never a false verdict).
-        ctx.declineAtSite(
-          feUnsupportedOp,
-          "R14: short-circuit while-guard shape unmodeled (or-with-fault " &
-                 "/ nested, body contains continue) — sound degrade",
-          "R14: short-circuit while-guard shape unmodeled " &
-            "(or-with-fault / nested, body contains continue) — sound degrade")
+        # Case 3, continue present (an `or`-guard with a fault, or a fault
+        # nested deeper). RFC-0005 S8w: as Case 2 -- the rotation with each
+        # `continue` retargeted onto the trailing refresh; it declined
+        # before S8w.
+        mkRotatedContinueWhile(cond, body, tmpPre, ctx)
   ctx.inGuardCond = savedInGuardCond
   # N20 (RFC-chapulin-hardening bucket-2): when `result` came out a plain
-  # `isWhile` (cases 1/1b/4 above — the common shapes; the rotated/sound-
-  # degrade cases 2/3 are NOT `isWhile` at their top level and are left
+  # `isWhile` (cases 1/1b/4 above — the common shapes; the rotated
+  # cases 2/3 are NOT `isWhile` at their top level and are left
   # unmarked, a missed-opportunity, never a regression, per
   # `collectAssumedLoopBound`'s own doc), mark whether its RAW guard
   # references an assumed-bounded variable — purely diagnostic, zero

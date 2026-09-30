@@ -19,6 +19,13 @@
 ##    and-split available for this nested shape -> SOUND-DEGRADE to
 ##    `sxUnknown` (Invariant 3: never a false verdict).
 ##
+## RFC-0005 S8w: the second bullet no longer holds. With `continue`
+## present the body is wrapped in a labelled block whose `continue`s become
+## `break`s out of it (`mkRotatedContinueWhile`), so the rotation's trailing
+## refresh runs on every iteration and the shape gets its real verdict
+## (`sxSat`). The first test below is re-pinned to that verdict and its
+## witness replayed.
+##
 ## This suite pins BOTH halves so a future edit can't silently swap the
 ## degrade for an unsound false verdict, and can't silently over-degrade the
 ## continue-free companion that should still get a real answer.
@@ -59,9 +66,15 @@ proc caseTwoNoContinue(a, b: int, s: string) =
 
 suite "symex R14 Case-2 — sound limitation of the nested-hoisting and-guard shape":
 
-  test "Case-2 + continue: (a div b) > i and s[i] != 'z' guard sound-degrades to sxUnknown, never a false verdict":
+  test "Case-2 + continue: (a div b) > i and s[i] != 'z' guard gets its real sxSat verdict (RFC-0005 S8w)":
     let r = symexFind(caseTwoContinue, tLabel("hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    if r.status == sxSat:
+      let (a, b, s) = r.witness
+      check b != 0 and (a div b) >= 3
+      check s.len >= 3
+      check 'z' notin s[0 .. 2]
+      check (a div b) == 3 or (s.len > 3 and s[3] == 'z')
 
   test "Case-2, continue-free companion: same guard shape without continue still gets the real sxSat verdict via the rotation fallback":
     let r = symexFind(caseTwoNoContinue, tLabel("hit"))

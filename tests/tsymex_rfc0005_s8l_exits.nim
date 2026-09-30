@@ -191,18 +191,17 @@ proc callsBareVariant(x: int) =
   if x == 5 and x == 6: symexTarget("s8l_bare_variant_dead")
 
 type
-  BareE1 = enum bareE1 = 1, bareE2 = 2
   BareMV = object
-    ## Two `case` sections: a multi-variant with an arm field of an enum
-    ## whose first ordinal is 1 (zero memory is no value of it), which has
-    ## no modelled zero value. (RFC-0005 S8n gave
-    ## single-case variants one, S8p multi-variants with an explicit
-    ## ordinal-0 arm on every axis, S8s those whose ordinal 0 falls in an
-    ## `else` arm, and S8u those with a `HashSet[int]` arm field, this pin's
+    ## Two `case` sections: a multi-variant with a `HashSet[string]` arm
+    ## field (no backed cell sort), which has no modelled zero value.
+    ## (RFC-0005 S8n gave single-case variants one, S8p multi-variants with
+    ## an explicit ordinal-0 arm on every axis, S8s those whose ordinal 0
+    ## falls in an `else` arm, S8u those with a `HashSet[int]` arm field,
+    ## and S8z those with an enum field that has no ordinal 0, this pin's
     ## previous shape.)
     case k: BareVK
     of bvB: b: int
-    else: a: BareE1
+    else: a: HashSet[string]
     case j: BareVK
     of bvA: c: int
     of bvB: d: int
@@ -377,10 +376,18 @@ suite "S8l (1) finally runs on a return exit":
     check r.status == sxUnsat
 
   test "a bare return of a result with no zero default is a fresh symbol (feUnsupportedOpHavoc)":
+    ## RFC-0005 S8z: no type both allocates free without a decline of its
+    ## own and lacks a modelled zero any more (S8z gave an enum with no
+    ## ordinal 0 its zero, this pin's previous field; a `range` excluding
+    ## 0 cannot be a result's untouched field in Nim). The remaining
+    ## no-zero field, an unbacked `HashSet[string]`, allocates with its
+    ## `seUnsupportedSetCharInterop` (dcNoAnswer), so the run is honestly
+    ## sxUnknown: never the unsound sxUnsat, and no longer taint-only.
     let r = symexFind(callsBareMultiVariant, tLabel("s8l_bare_mv_dead"))
     checkpoint($r.status & " " & show(r.errors))
     check r.errors.anyIt(it.kind == feUnsupportedOpHavoc)
-    checkUnsatOverTaintOnly(r)
+    check r.errors.anyIt(it.kind == seUnsupportedSetCharInterop)
+    check r.status == sxUnknown
 
   test "top level: the finally sees the returned result (was sxUnknown feGlobalReadUnmodelled)":
     let r = symexFind(topFin, tLabel("s8l_topfin"))

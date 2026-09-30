@@ -18,7 +18,7 @@
 ##   (5) the concolic `if` walker drains an `if` condition's scalar raises,
 ##       and routes only the raises the replay took.
 ##   (6) the walker version floor.
-import std/[unittest, strutils, tables]
+import std/[unittest, strutils, tables, sets]
 import nelli
 import nelli/symex
 import nelli/smt/types
@@ -440,19 +440,19 @@ suite "S8i (3c) an array index stays an IndexDefect":
 # ---- (4) symbolic reassignment of a declined construction ---------------------
 #
 # Nim (2.2.10): `S8iV(kind: t)` with a runtime `t` sets no arm field, so
-# `a` is zero memory; the walker has no modelled default for an arm field
-# of an enum with no ordinal 0 and declines the construction (RFC-0005
-# S8f). The object is then unmodelled; a later `v.kind = u` must degrade on
-# that decline, not assert inside the walker. (The arm field was a `ref
-# int` until RFC-0005 S8u gave a `ref` its `nil` zero; that construction is
-# now modelled, pinned below.)
+# `a` is zero memory; the walker has no modelled default for a
+# `HashSet[string]` arm field (no backed cell sort) and declines the
+# construction (RFC-0005 S8f). The object is then unmodelled; a later
+# `v.kind = u` must degrade on that decline, not assert inside the walker.
+# (The arm field was a `ref int` until RFC-0005 S8u gave a `ref` its `nil`
+# zero, pinned below, and an enum with no ordinal 0 until S8z modelled its
+# zero memory, ordinal 0.)
 
 type
   S8iK = enum kA, kB
-  S8iE1 = enum s8iE1 = 1, s8iE2 = 2
   S8iV = object
     case kind: S8iK
-    of kA: a: S8iE1
+    of kA: a: HashSet[string]
     of kB: b: int
   S8iRV = object
     case kind: S8iK

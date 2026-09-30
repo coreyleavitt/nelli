@@ -431,6 +431,31 @@ proc scopedDeclineFieldTy(rawFty: IRType, fieldNameNode: NimNode,
   else:
     rawFty
 
+proc tagOrdOf(tagNode: NimNode;
+              enumOrdinals: seq[tuple[name: string, ordinal: int]]):
+              tuple[name: string, ord: int] =
+  ## RFC-0005 S8z. The (name, ordinal) of one variant tag label: an enum
+  ## member or an integer literal (a `range` discriminator's `of 0:`). A
+  ## top-level proc taking `enumOrdinals`, not a closure over it: a nested
+  ## proc capturing the per-`case` `var enumOrdinals` moved it into a
+  ## closure environment the macro VM did not re-zero per `case`, so a
+  ## second axis's tags doubled (a witness `case` with duplicate labels).
+  let tagName =
+    case tagNode.kind
+    of nnkSym, nnkIdent: tagNode.strVal
+    of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
+    else: ""
+  # Resolve ordinal from enumOrdinals or, if missing, from the literal.
+  var tagOrd = -1
+  for eo in enumOrdinals:
+    if eo.name == tagName: tagOrd = eo.ordinal; break
+  if tagOrd < 0 and tagNode.kind in nnkIntLit..nnkInt64Lit:
+    tagOrd = int(tagNode.intVal)
+  if tagOrd < 0:
+    error("symex Phase 11: could not resolve ordinal " &
+          "for tag `" & tagName & "`", tagNode)
+  (tagName, tagOrd)
+
 proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
                                   isRefWrapped: bool = false): IRType =
   ## Cluster H Step C (ADR-0022 Round-2): shared core that builds the FULL
@@ -508,7 +533,13 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
         # Build a name → ordinal map for the discriminator's
         # enum. The enum impl is the type-def's nnkEnumTy node.
         var enumOrdinals: seq[tuple[name: string, ordinal: int]]
-        let dImpl = discTypeSym.getImpl
+        # RFC-0005 S8z: an inline anonymous `range[lo..hi]` discriminator
+        # (`case d: range[0..2]`) is an `nnkBracketExpr`, not a symbol, and
+        # `getImpl` on it failed the whole file's compile ("node is not a
+        # symbol"). It has no enum to read; it takes the non-enum arm below,
+        # exactly as a named `range` alias does.
+        let dImpl = if discTypeSym.kind == nnkSym: discTypeSym.getImpl
+                    else: newEmptyNode()
         if dImpl.kind == nnkTypeDef and dImpl.len >= 3 and
            dImpl[2].kind == nnkEnumTy:
           # nnkEnumTy children: first is nnkEmpty, rest are
@@ -572,23 +603,33 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
               isElse: true)
             continue
           # Emit one arm per tag literal listed in this branch.
+          var tags: seq[tuple[name: string, ord: int]]
           for tagIx in 0 ..< lastIx:
             let tagNode = branch[tagIx]
-            let tagName =
-              case tagNode.kind
-              of nnkSym, nnkIdent: tagNode.strVal
-              of nnkIntLit..nnkInt64Lit: ""  # unusual but legal
-              else: ""
-            # Resolve ordinal from enumOrdinals or, if missing,
-            # from the literal.
-            var tagOrd = -1
-            for eo in enumOrdinals:
-              if eo.name == tagName: tagOrd = eo.ordinal; break
-            if tagOrd < 0 and tagNode.kind in nnkIntLit..nnkInt64Lit:
-              tagOrd = int(tagNode.intVal)
-            if tagOrd < 0:
-              error("symex Phase 11: could not resolve ordinal " &
-                    "for tag `" & tagName & "`", tagNode)
+            # RFC-0005 S8z: a range label (`of 0..1:`, `of kA..kC:`) is
+            # every ordinal between its bounds -- one arm per ordinal, as if
+            # each were listed. It was a compile error ("could not resolve
+            # ordinal for tag ``"). `getImpl` gives it as `Infix(.., lo, hi)`
+            # (`nnkRange` once semchecked).
+            let bounds =
+              if tagNode.kind == nnkRange and tagNode.len == 2:
+                @[tagNode[0], tagNode[1]]
+              elif tagNode.kind == nnkInfix and tagNode.len == 3 and
+                   tagNode[0].kind in {nnkIdent, nnkSym} and
+                   tagNode[0].strVal == "..":
+                @[tagNode[1], tagNode[2]]
+              else: @[]
+            if bounds.len == 2:
+              let lo = tagOrdOf(bounds[0], enumOrdinals).ord
+              let hi = tagOrdOf(bounds[1], enumOrdinals).ord
+              for o in lo .. hi:
+                var nm = ""
+                for eo in enumOrdinals:
+                  if eo.ordinal == o: nm = eo.name; break
+                if enumOrdinals.len == 0 or nm.len > 0: tags.add (nm, o)
+            else:
+              tags.add tagOrdOf(tagNode, enumOrdinals)
+          for (tagName, tagOrd) in tags:
             arms.add VariantArm(
               tagOrdinal: tagOrd, tagName: tagName,
               fieldNames: armFieldNames,
@@ -656,6 +697,88 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
   return tTuple(fields, names, objectName = s, nominalId = nominalId(nameSym),
                 nameIsRefAlias = isRefWrapped).keyedBySym(nameSym)
 
+const maxArrayIndexSpan = 4096
+  ## RFC-0005 S8z. The widest index type an array is modelled over. The
+  ## walker allocates one symbol per element, so an `array[int16, T]`
+  ## (65536 elements) declines scoped instead of exhausting the budget.
+
+proc arrayIndexBounds*(idx: NimNode): tuple[ok: bool, lo, hi: int64] =
+  ## RFC-0005 S8z. The index range `[lo, hi]` of an array type's index node
+  ## (`array[<idx>, T]`): an integer size `N` (`0 .. N-1`), a literal range
+  ## `lo .. hi` (int or char bounds), a `range[lo .. hi]`, or an ordinal
+  ## TYPE -- an enum, `char`/`uint8`/`int8`, a `range` alias. The
+  ## walker's array is positional: Nim's index `i` is position `i - lo`.
+  ## Before S8z only `N` and `lo .. hi` were read, the low bound was dropped
+  ## (an `array[1..3, T]` read `a[1]` at position 1: a false `sxUnsat`), and
+  ## any other index type was a macro-time `error`. `ok` is false for an
+  ## index type the walker does not model, and the caller declines it
+  ## scoped: one wider than `maxArrayIndexSpan`, and `bool` (its index
+  ## lowers to a Z3 Bool, which the walker's integer bounds check and
+  ## element select do not take).
+  const litKinds = {nnkCharLit} + {nnkIntLit..nnkUInt64Lit}
+  var lo, hi: int64
+  if idx.kind in litKinds and idx.kind != nnkCharLit:
+    lo = 0; hi = idx.intVal - 1
+  elif idx.kind in {nnkInfix, nnkRange} and idx.len >= 2:
+    let (a, b) = if idx.kind == nnkInfix and idx.len == 3: (idx[1], idx[2])
+                 else: (idx[0], idx[1])
+    if idx.kind == nnkInfix and
+       (idx[0].kind notin {nnkIdent, nnkSym} or idx[0].strVal != ".."):
+      return (false, 0'i64, 0'i64)
+    if a.kind notin litKinds or b.kind notin litKinds:
+      return (false, 0'i64, 0'i64)
+    lo = a.intVal; hi = b.intVal
+  elif idx.kind == nnkBracketExpr and idx.len == 2 and
+       isBuiltinTypeHead(idx[0], ["range"]):
+    let (a, b) = parseRangeBracket(idx)
+    lo = a; hi = b
+  elif idx.kind == nnkSym:
+    let cls = classifyType(idx)
+    case cls.ty.kind
+    of itInt:
+      if cls.ty.hasRange:
+        lo = cls.ty.rangeLo; hi = cls.ty.rangeHi
+      elif cls.ty.width == 8:
+        if cls.ty.signed: (lo = -128; hi = 127)
+        else: (lo = 0; hi = 255)
+      else:
+        return (false, 0'i64, 0'i64)
+    else:
+      return (false, 0'i64, 0'i64)
+  else:
+    return (false, 0'i64, 0'i64)
+  if hi < lo or hi - lo + 1 > maxArrayIndexSpan:
+    return (false, 0'i64, 0'i64)
+  (true, lo, hi)
+
+proc classifyArrayBracket(arr: NimNode): ClassifiedType =
+  ## RFC-0005 S8z. `array[<idx>, T]`, resolved: an `itArray` of the index
+  ## type's size, or the scoped `__unsupported:` decline for an index type
+  ## `arrayIndexBounds` does not model.
+  let b = arrayIndexBounds(arr[1])
+  if not b.ok:
+    return unranged(tUninterp("__unsupported:" & arr.repr.strip))
+  unranged(tArray(classifyType(arr[2]).ty, int(b.hi - b.lo + 1)))
+
+proc arrayTypeImpl(n: NimNode): NimNode =
+  ## RFC-0005 S8z. `n`'s type resolved to `array[<idx>, T]` (through `var`
+  ## and aliases), or nil when it is not an array.
+  var ty = n.getTypeImpl
+  if ty.kind == nnkVarTy and ty.len == 1: ty = ty[0].getTypeImpl
+  if ty.kind == nnkBracketExpr and ty.len == 3 and
+     isBuiltinTypeHead(ty[0], ["array"]):
+    ty
+  else: nil
+
+proc arrayIndexLow*(n: NimNode): int64 =
+  ## RFC-0005 S8z. The first index of the array `n` (0 for `array[N, T]`, 1
+  ## for `array[1..3, T]`, an enum's first ordinal for `array[E, T]`). Every
+  ## index site subtracts it: the walker's element `k` is Nim's `lo + k`.
+  let ty = arrayTypeImpl(n)
+  if ty == nil: return 0
+  let b = arrayIndexBounds(ty[1])
+  if b.ok: b.lo else: 0
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # `var T` strip (lvalue parameter).
@@ -720,19 +843,11 @@ proc classifyType*(ty: NimNode): ClassifiedType =
      resolved.len == 3 and
      isBuiltinTypeHead(resolved[0], ["array"]):   ## RFC-0005 S8d
     # resolved[1] is the index range (typically `0..N-1` from Nim's
-    # array literal sugar); we want N.
-    let idxRange = resolved[1]
-    var size: int
-    if idxRange.kind == nnkInfix and idxRange[0].strVal == ".." and
-       idxRange[1].kind in nnkIntLit..nnkInt64Lit and
-       idxRange[2].kind in nnkIntLit..nnkInt64Lit:
-      size = int(idxRange[2].intVal - idxRange[1].intVal + 1)
-    elif idxRange.kind in nnkIntLit..nnkInt64Lit:
-      size = int(idxRange.intVal)
-    else:
-      error("symex (Phase 4): array size must be a static integer", idxRange)
-    let elemCls = classifyType(resolved[2])
-    return unranged(tArray(elemCls.ty, size))
+    # array literal sugar); we want its size. RFC-0005 S8z: any ordinal
+    # index type (`arrayIndexBounds`); its low bound is read back at each
+    # index site (`arrayIndexLow`). One the walker does not model declines
+    # scoped (it was a macro-time `error`, failing the whole file).
+    return classifyArrayBracket(resolved)
   # ---- structural match: anonymous tuples ----
   # `(int, int)` parses to nnkTupleConstr; `tuple[a, b: int]` parses
   # to nnkTupleTy after semcheck.
@@ -765,6 +880,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # whose base is itself an itDistinct ("Meters"). Checked BEFORE the
     # object/enum/alias paths because a distinct over an object/enum base must
     # be walled off (the wall is the whole point), not unwrapped to the base.
+    # RFC-0005 S8z: an array type alias (`type Arr3 = array[3, int]`) is
+    # the array. It reached the text-match catch-all below and classified
+    # `__unsupported:Arr3`, so a value of the alias was opaque.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkBracketExpr and impl[2].len == 3 and
+       isBuiltinTypeHead(impl[2][0], ["array"]):
+      let arr = arrayTypeImpl(resolved)
+      if arr != nil: return classifyArrayBracket(arr)
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
       # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].

@@ -1153,6 +1153,14 @@ type
                             ## file:line:col + `n.repr` for the walk-time
                             ## classified-decline fallback arm; "" when not
                             ## populated by a B1-aware call site.
+      ixLo*:      int64    ## RFC-0005 S8z. An ARRAY receiver's first index
+                            ## (`array[1..3, T]`: 1; an enum's first ordinal).
+                            ## The walker's array is positional, so Nim's
+                            ## index `i` is element `i - ixLo`, and the bounds
+                            ## check is `ixLo <= i < ixLo + len`. 0 for every
+                            ## other receiver, and for a positional index the
+                            ## parser builds itself (the `for x in arr`
+                            ## unroll).
     of isIndexAssign:
       iaRecvName*: string  ## the seq-typed local/param NAME being rebound —
                             ## the parse site (dsl_parser.nim's `nnkAsgn` arm)
@@ -1168,6 +1176,8 @@ type
       iaLoc*:      string  ## siteLoc-captured `file:line:col: <repr>`, same
                             ## idiom as `ixLoc`, for the walk-time decline
                             ## fallback (non-svSeq receiver / placeholder).
+      iaLo*:       int64   ## RFC-0005 S8z. `ixLo`'s twin: an array
+                            ## receiver's first index (0 for a seq).
     of isSeqPop:
       spRecvName*: string  ## the seq-typed local/param NAME being shrunk —
                             ## same bare-`nnkSym`-only scope as `iaRecvName`.
@@ -4059,16 +4069,43 @@ proc isRenderableSeqElemTy*(elemTy: IRType): bool =
   elemTy.kind == itFloat32 or
   elemTy.kind == itRef
 
+func isContainerIntLeaf*(t: IRType): bool =
+  ## RFC-0005 S8z. A `Table` value / `HashSet` element type the container
+  ## models back: any fixed-width integer -- `int8`..`int64`,
+  ## `uint8`..`uint64`, `char`, `byte`, an enum, a `range` -- stored in the
+  ## 64-bit cell sign- or zero-extended by its own signedness and read back
+  ## at its own width, and `bool` (cell 0 / 1). Was `int` / `int64` only.
+  t != nil and (t.kind == itInt and t.width in {8, 16, 32, 64} or
+                t.kind == itBool)
+
+func isBackedTableTy*(keyTy, valTy: IRType): bool =
+  ## RFC-0005 S8z. The `Table[K, V]` shapes `allocateSym` backs: `string`
+  ## keys, a `isContainerIntLeaf` value. Every other key type (the model is
+  ## string-keyed) and value type (the cell is a 64-bit integer) is a scoped
+  ## decline (`seUnsupportedTableKeyType` / `seUnsupportedTableValType`).
+  keyTy != nil and keyTy.kind == itString and isContainerIntLeaf(valTy)
+
+func isBackedSetElemTy*(elemTy: IRType): bool =
+  ## RFC-0005 S8z. The `HashSet[T]` element types `allocateSym` backs.
+  isContainerIntLeaf(elemTy)
+
+func isCharAmbiguous(t: IRType): bool =
+  ## RFC-0005 S8z. `char`, `byte` and `uint8` classify to the same IRType,
+  ## and `emitTyAndReader` renders it `uint8`: a `HashSet[char]` witness
+  ## would be a `HashSet[uint8]`, which Nim does not convert.
+  t.kind == itInt and t.width == 8 and not t.signed and t.enumName.len == 0
+
 proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itTable` arm can render:
-  ## `Table[string, int64]`.
-  keyTy.kind == itString and
-  valTy.kind == itInt and valTy.signed and valTy.width == 64
+  ## the backed shapes (RFC-0005 S8z; was `Table[string, int64]`) but an
+  ## 8-bit unsigned value (`isCharAmbiguous`), a scoped witness decline.
+  isBackedTableTy(keyTy, valTy) and not isCharAmbiguous(valTy)
 
 proc isRenderableSetElemTy*(elemTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itSet` arm can render:
-  ## `HashSet[int64]`.
-  elemTy.kind == itInt and elemTy.signed and elemTy.width == 64
+  ## the backed element types (RFC-0005 S8z; was `HashSet[int64]`) but an
+  ## 8-bit unsigned one (`isCharAmbiguous`).
+  isBackedSetElemTy(elemTy) and not isCharAmbiguous(elemTy)
 
 proc isRecursionPlaceholder*(ty: IRType): bool =
   ## Cluster H Step C (ADR-0022 Round-2). True iff `ty` is a
@@ -4502,18 +4539,18 @@ proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
         msg: "Table key type not modeled: " & $t.tabKeyTy &
              " — only Table[string, V] is supported " &
              "(seUnsupportedTableKeyType)"))
-    elif not (t.tabValTy.kind == itInt and t.tabValTy.width == 64 and
-              t.tabValTy.signed):
+    elif not isBackedTableTy(t.tabKeyTy, t.tabValTy):
       result = some(FieldAllocIssue(kind: seUnsupportedTableValType,
         msg: "Table value type not modeled: " & $t.tabValTy &
-             " — only Table[string, int] is supported " &
+             " — only Table[string, V] with V a fixed-width integer, " &
+             "char, enum or range is supported " &
              "(seUnsupportedTableValType)"))
   of itSet:
-    if not (t.setElemTy.kind == itInt and t.setElemTy.width == 64):
+    if not isBackedSetElemTy(t.setElemTy):
       result = some(FieldAllocIssue(kind: seUnsupportedSetCharInterop,
         msg: "HashSet element type not modeled: " & $t.setElemTy &
-             " — only HashSet[int] (BV[64]) is supported " &
-             "(seUnsupportedSetCharInterop)"))
+             " — only HashSet[T] with T a fixed-width integer, char, " &
+             "enum or range is supported (seUnsupportedSetCharInterop)"))
   of itDistinct:
     result = unallocatableFieldIssue(t.distinctBase)
   of itTuple:
@@ -4617,15 +4654,16 @@ proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
          vcsPlainFields: plainFields, vcsLoc: loc)
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
-                   loc: string = ""): IRStmt =
+                   loc: string = ""; lo: int64 = 0): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
-         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc)
+         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc, ixLo: lo)
 
 proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
-                         loc: string = ""): IRStmt =
+                         loc: string = ""; lo: int64 = 0): IRStmt =
   ## N14: `xs[idx] = val` on a seq-typed local/param `recvName`.
+  ## RFC-0005 S8z: or an array one (`lo` its first index).
   IRStmt(kind: isIndexAssign, iaRecvName: recvName, iaIdx: idx,
-         iaVal: val, iaLoc: loc)
+         iaVal: val, iaLoc: loc, iaLo: lo)
 
 proc mkSeqPopStmt*(recvName, retName: string, loc: string = ""): IRStmt =
   ## N14: `retName := recvName.pop()`.
@@ -5144,9 +5182,12 @@ proc render*(s: IRStmt): string =
     let lhs = if s.retName.len > 0: s.retName & ":=" else: ""
     "call(" & lhs & s.callee & "(" & argstr & "))"
   of isIndex:
-    "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) & "])"
+    # RFC-0005 S8z: a nonzero first index renders (`@lo`).
+    "index(" & s.ixRetName & ":=" & render(s.ixArr) & "[" & render(s.ixIdx) &
+      (if s.ixLo != 0: "@" & $s.ixLo else: "") & "])"
   of isIndexAssign:
-    "indexAssign(" & s.iaRecvName & "[" & render(s.iaIdx) & "]:=" &
+    "indexAssign(" & s.iaRecvName & "[" & render(s.iaIdx) &
+      (if s.iaLo != 0: "@" & $s.iaLo else: "") & "]:=" &
       render(s.iaVal) & ")"
   of isSeqPop:
     "seqPop(" & s.spRetName & ":=" & s.spRecvName & ".pop())"

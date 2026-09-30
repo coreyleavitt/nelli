@@ -98,7 +98,17 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
         if v == "two":
           symexTarget("item1_probe_else_hit")
     let r = symexFind(probeElse, tLabel("item1_probe_else_hit"))
-    check r.status == sxUnknown
+    # RFC-0005 S8z re-pin: `var arr: array[3, string]` is now Nim's zero
+    # value (was a decline that tainted every path), so `arr[i]` read BEFORE
+    # the bounds guard surfaces its reachable `IndexDefect` (E6). Checked
+    # against Nim: the witness replays as `IndexDefect`. Never an `sxSat`.
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "IndexDefect"
+      var replayed = false
+      try: probeElse(r.raisedWitness[0], r.raisedWitness[1])
+      except IndexDefect: replayed = true
+      check replayed
 
   test "vulnerable array in the then branch":
     proc probeThen(flag: bool, i: int) =
@@ -112,7 +122,17 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
         if v == "two":
           symexTarget("item1_probe_then_hit")
     let r = symexFind(probeThen, tLabel("item1_probe_then_hit"))
-    check r.status == sxUnknown
+    # RFC-0005 S8z re-pin: `var arr: array[3, string]` is now Nim's zero
+    # value (was a decline that tainted every path), so `arr[i]` read BEFORE
+    # the bounds guard surfaces its reachable `IndexDefect` (E6). Checked
+    # against Nim: the witness replays as `IndexDefect`. Never an `sxSat`.
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "IndexDefect"
+      var replayed = false
+      try: probeThen(r.raisedWitness[0], r.raisedWitness[1])
+      except IndexDefect: replayed = true
+      check replayed
 
 suite "symex iteSV mergedegrade -- ordinary (non-composite) symbolic array indexing is unaffected":
   test "array[5, int] symbolic index -- still finds a real, correct witness (positive control)":

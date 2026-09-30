@@ -989,6 +989,13 @@ proc mkZ3IntLit(v: int64): Z3Int {.inline.}
   ## `rangeCondsIfNeeded`'s `svInt` arm needs it before its real definition
   ## appears.
 
+var allocEnumZeroLegal {.threadvar.}: bool
+  ## RFC-0005 S8z. Set by `freshRetSym` for the duration of its allocation:
+  ## a call's return value can hold an enum's ordinal 0 even when no member
+  ## has it (Nim zero-fills an untouched `result`, probed), so the range
+  ## conditions of an enum without ordinal 0 admit 0 there. Inputs (params)
+  ## keep the exact member range: their witness must render as a member.
+
 proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
   ## Issue #163 review R11. The CONSTRAINT half of the two-obligation
   ## contract every `range[lo..hi]`-typed value carries wherever it is
@@ -1027,10 +1034,20 @@ proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
   ## exactly the case it exists to cover. Handle `svInt` here, before
   ## falling through to `bvRangeConds` for the BV kinds.
   if ty.kind == itInt and ty.hasRange:
-    if v.kind == svInt:
-      @[v.zi >= mkZ3IntLit(ty.rangeLo), v.zi <= mkZ3IntLit(ty.rangeHi)]
-    else:
-      bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
+    let conds =
+      if v.kind == svInt:
+        @[v.zi >= mkZ3IntLit(ty.rangeLo), v.zi <= mkZ3IntLit(ty.rangeHi)]
+      else:
+        bvRangeConds(v, ty.rangeLo, ty.rangeHi, ty.signed)
+    if allocEnumZeroLegal and ty.enumName.len > 0 and conds.len == 2 and
+        not (ty.rangeLo <= 0 and 0 <= ty.rangeHi):
+      # RFC-0005 S8z: see `allocEnumZeroLegal`.
+      let zero =
+        if v.kind == svInt: @[v.zi >= mkZ3IntLit(0), v.zi <= mkZ3IntLit(0)]
+        else: bvRangeConds(v, 0, 0, ty.signed)
+      if zero.len == 2:
+        return @[(conds[0] and conds[1]) or (zero[0] and zero[1])]
+    conds
   else:
     @[]
 
@@ -1233,6 +1250,45 @@ var loweringDegradeErrors* {.threadvar.}: seq[SymexErrorInfo]
   ## `runSymexImpl` entry; drained (dedup'd) into `RawResult.errors` on every
   ## verdict branch — exactly the R9 `heapDepthErrors` idiom.
 
+func cellDomain(ty: IRType): tuple[bounded: bool, lo, hi: int64] =
+  ## RFC-0005 S8z. The cells a `HashSet[ty]` element can occupy, as an
+  ## interval of the cell read with `ty`'s signedness: the declared range,
+  ## else the width's. `bounded` is false for a full 64-bit type, whose every
+  ## cell is a value.
+  if ty.kind == itBool: (true, 0'i64, 1'i64)
+  elif ty.hasRange: (true, ty.rangeLo, ty.rangeHi)
+  elif ty.width == 64: (false, 0'i64, 0'i64)
+  elif ty.signed:
+    let h = (1'i64 shl (ty.width - 1)) - 1
+    (true, -h - 1, h)
+  else: (true, 0'i64, (1'i64 shl ty.width) - 1)
+
+func cellDomainSize(ty: IRType): int64 =
+  ## RFC-0005 S8z. The number of cells in `cellDomain(ty)`, capped at
+  ## `high(int64)` (only compared against the 1024 size ceiling).
+  let d = cellDomain(ty)
+  if not d.bounded: return high(int64)
+  if (ty.kind == itInt and ty.signed) or (d.lo >= 0 and d.hi >= 0):
+    let span = d.hi -% d.lo
+    if span < 0 or span == high(int64): high(int64) else: span + 1
+  else:
+    let span = cast[uint64](d.hi) - cast[uint64](d.lo)
+    if span >= uint64(high(int64)): high(int64) else: int64(span) + 1
+
+proc inCellDomain(c: Z3BitVec[64]; ty: IRType): Option[Z3Bool] =
+  ## RFC-0005 S8z. `c` is the cell of a value of `ty`; `none` when every
+  ## cell is.
+  let d = cellDomain(ty)
+  if not d.bounded: return none(Z3Bool)
+  let sgn = ty.kind == itInt and ty.signed
+  # [range-invariant: container-cell-domain -- the bounds are the element
+  # type's whole value domain (width, sign, enum ordinals), which the 64-bit
+  # cell is wider than; a membership COUNT, not a value's range fact]
+  let conds = bvRangeConds(SymVal(kind: svBV64, signed: sgn, bv64: c),  # [range-invariant: container-cell-domain]
+                           d.lo, d.hi, sgn)
+  if conds.len != 2: return none(Z3Bool)
+  some(conds[0] and conds[1])
+
 type ContainerCardRegistry* = object
   ## RFC-0005 S8f. What ties a `Table`'s / `HashSet`'s `len` to its content.
   ##
@@ -1269,7 +1325,9 @@ type ContainerCardRegistry* = object
   ## by Z3 AST handle (Z3 hash-conses equal terms).
   tabBases*: seq[tuple[present: Z3AnyAst, size: Z3Int]]
   tabKeys*:  seq[Z3String]
-  setBases*: seq[tuple[members: Z3AnyAst, size: Z3Int]]
+  setBases*: seq[tuple[members: Z3AnyAst, size: Z3Int, elemTy: IRType]]
+    ## RFC-0005 S8z: `elemTy` bounds the cells a member can occupy
+    ## (`cellDomain`) for a narrower element type.
   setKeys*:  seq[Z3BitVec[64]]
   seen:      HashSet[pointer]
 
@@ -1290,10 +1348,10 @@ proc registerTableBase(present: Z3AnyAst; size: Z3Int) =
   if firstSighting(cast[pointer](present.raw)):
     containerCard.tabBases.add (present: present, size: size)
 
-proc registerSetBase(members: Z3AnyAst; size: Z3Int) =
-  ## RFC-0005 S8f. An allocated `HashSet[int]`: its member array and size.
+proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType) =
+  ## RFC-0005 S8f. An allocated `HashSet[T]`: its member array and size.
   if firstSighting(cast[pointer](members.raw)):
-    containerCard.setBases.add (members: members, size: size)
+    containerCard.setBases.add (members: members, size: size, elemTy: elemTy)
 
 proc noteTableKey(k: Z3String) =
   ## RFC-0005 S8f. A key term some table array is selected or stored at.
@@ -1328,7 +1386,28 @@ proc containerCardConds(): seq[Z3Bool] =
   for b in containerCard.setBases:
     let members = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
       b.members.ctx, b.members.raw)
-    result.add (b.size >= distinctPresentCount(members, containerCard.setKeys))
+    if not cellDomain(b.elemTy).bounded:
+      result.add (b.size >= distinctPresentCount(members, containerCard.setKeys))
+      continue
+    # RFC-0005 S8z: a narrower element type. The key terms are global to
+    # the run, so a term may be a cell no member of THIS set can occupy;
+    # only in-domain terms count. The fresh members the extractor adds are
+    # in-domain cells no term names, so there must be enough of them:
+    # `size + (named in-domain cells absent) <= |domain|`.
+    var present = mkInt(0)
+    var absent = mkInt(0)
+    let keys = containerCard.setKeys
+    for i in 0 ..< keys.len:
+      var fresh = inCellDomain(keys[i], b.elemTy).get
+      for j in 0 ..< i:
+        fresh = fresh and (keys[i] != keys[j])
+      let isIn = select(members, keys[i])
+      present = present + ite(fresh and isIn, mkInt(1), mkInt(0))
+      absent = absent + ite(fresh and not isIn, mkInt(1), mkInt(0))
+    result.add (b.size >= present)
+    let dsize = cellDomainSize(b.elemTy)
+    if dsize < high(int64):
+      result.add (b.size + absent <= mkInt(dsize))
 
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
@@ -2725,6 +2804,16 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         "HashSet[int64]} plus scalar/tuple/array/object element or " &
         "value types therein")
       return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
+    # RFC-0005 S8z: a proc-valued (`__closure`) slot the walker has no
+    # `svClosure` for -- a closure-typed object field, a recursion-cut
+    # closure return -- is a scoped decline, not the sentinel below (it was
+    # `weInternalWalkerFault`). A closure value the walker BUILT (a lambda,
+    # a proc in value position, a callee's returned lambda) never allocates.
+    if ty.uninterpName == "__closure":
+      allocDegrade(ceUnsupportedHof,
+        "a proc-valued value with no lambda the walker built (a closure " &
+        "field or an unbound closure result) has no symbolic model")
+      return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
     # Genuine Defect-class walker-invariant sentinel -- `classifyType` only
     # ever builds an `itUninterp` with one of the three prefixes handled
     # above; reaching here means the walker itself produced a malformed
@@ -3052,8 +3141,9 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # `allocDegrade` + inert-placeholder idiom (mirrors the key-type arm
       # above and the itSet arm below, both of which already combine their
       # kind/width guard into a single condition for the same reason).
-      if ty.tabValTy.kind == itInt and ty.tabValTy.width == 64 and
-         ty.tabValTy.signed:
+      # RFC-0005 S8z: any fixed-width int value type (`isBackedTableTy`),
+      # held in the 64-bit cell (`cellOf` / `cellValue`).
+      if isBackedTableTy(ty.tabKeyTy, ty.tabValTy):
         let dataAst = toAnyAst(
           mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
         let presentAst = toAnyAst(
@@ -3072,7 +3162,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         # Inert placeholder, same contract as the key-type arm above.
         allocDegrade(seUnsupportedTableValType,
           "Table value type not modeled: " & $ty.tabValTy &
-          " — only Table[string, int] is supported (seUnsupportedTableValType)")
+          " — only Table[string, V] with V a fixed-width integer, char, " &
+          "enum or range is supported (seUnsupportedTableValType)")
         let lenSym = mkIntVar(baseName & ".len")
         pcOut.add (lenSym == mkInt(0))
         let dataAst = toAnyAst(
@@ -3083,14 +3174,17 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
                tabSize: lenSym, tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
   of itSet:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
-    if ty.setElemTy.kind == itInt and ty.setElemTy.width == 64:
+    # RFC-0005 S8z: any fixed-width int element type (`isBackedSetElemTy`),
+    # held in the 64-bit cell (`cellOf`); a narrower one also bounds the
+    # size by its domain.
+    if isBackedSetElemTy(ty.setElemTy):
       let memAst = toAnyAst(
         mkArrayVar[Z3BitVec[64], Z3Bool](baseName & ".members"))
       let sizeSym = mkIntVar(baseName & ".len")
       pcOut.add (sizeSym >= mkInt(0))
-      pcOut.add (sizeSym <= mkInt(1024))
+      pcOut.add (sizeSym <= mkInt(min(1024'i64, cellDomainSize(ty.setElemTy))))
       # RFC-0005 S8f: tie `sizeSym` to the member array at every check.
-      registerSetBase(memAst, sizeSym)
+      registerSetBase(memAst, sizeSym, ty.setElemTy)
       SymVal(kind: svSet, setMembersRaw: memAst,
              setSize: sizeSym, setElemTy: ty.setElemTy)
     else:
@@ -3100,7 +3194,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # legitimately selected from" contract as the itTable arms above.
       allocDegrade(seUnsupportedSetCharInterop,
         "HashSet element type not modeled: " & $ty.setElemTy &
-        " — only HashSet[int] (BV[64]) is supported (seUnsupportedSetCharInterop)")
+        " — only HashSet[T] with T a fixed-width integer, char, enum or " &
+        "range is supported (seUnsupportedSetCharInterop)")
       let sizeSym = mkIntVar(baseName & ".len")
       pcOut.add (sizeSym == mkInt(0))
       let memAst = toAnyAst(
@@ -3893,6 +3988,37 @@ proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   else:
     raiseAssert "truncBV: unsupported operand kind: " & $v.kind
 
+proc cellOf(v: SymVal; ty: IRType): Option[Z3BitVec[64]] =
+  ## RFC-0005 S8z. A `Table` value / `HashSet` element of the fixed-width
+  ## int type `ty` (`isContainerIntLeaf`) as its 64-bit container cell:
+  ## sign- or zero-extended by its own signedness (the cell of `-1'i8` is
+  ## `-1`, of `255'u8` is `255`), so equal values have equal cells and a
+  ## cell read back at `ty`'s width (`cellValue`) is the value. `none` for a
+  ## kind that is not an int of `ty`'s width or an Int-promoted value.
+  if ty.kind == itBool:
+    return (if v.kind == svBool:
+              some(ite(v.bo, mkBitVec[64](1'i64), mkBitVec[64](0'i64)))
+            else: none(Z3BitVec[64]))
+  case v.kind
+  of svBV8:  (if ty.width == 8:  some(lowerConvIntWidth(v, 64, v.signed).bv64)
+              else: none(Z3BitVec[64]))
+  of svBV16: (if ty.width == 16: some(lowerConvIntWidth(v, 64, v.signed).bv64)
+              else: none(Z3BitVec[64]))
+  of svBV32: (if ty.width == 32: some(lowerConvIntWidth(v, 64, v.signed).bv64)
+              else: none(Z3BitVec[64]))
+  of svBV64, svInt: (if ty.width == 64: bv64Operand(v)
+                     else: none(Z3BitVec[64]))
+  else: none(Z3BitVec[64])
+
+proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
+  ## RFC-0005 S8z. The value of type `ty` a 64-bit container cell holds: its
+  ## low `ty.width` bits (`cellOf`'s inverse on every cell it builds); a
+  ## `bool`'s is `cell != 0`.
+  if ty.kind == itBool:
+    return SymVal(kind: svBool, bo: not (c == mkBitVec[64](0'i64)))
+  let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
+  if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
+
 proc lowerConvIntTrunc(sv: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## RFC-0005 S8j. An unchecked narrowing conversion -- an unsigned target
   ## (`uint8(x)`, `byte(x)`, `uint32(x)` of a wider int). Nim keeps the low
@@ -3994,6 +4120,11 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
   ## v69 fwd-decl (defined below, CR-9(c) Stage B) — retBindEq's svTuple arm
   ## reconciles mixed int reps PER FIELD before recursing (a field can be
   ## svInt via range propagation while its retSym slot allocated svBV*).
+
+func isClosureTy(t: IRType): bool =
+  ## RFC-0005 S8z. The proc-valued type `classifyType` maps to the
+  ## `__closure` placeholder.
+  t != nil and t.kind == itUninterp and t.uninterpName == "__closure"
 
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
@@ -4476,11 +4607,8 @@ func containerZeroBacked(t: IRType): bool =
   ## builds: the shapes `allocateSym` backs (`Table[string, int]`,
   ## `HashSet[int]`, 64-bit).
   case t.kind
-  of itTable:
-    t.tabKeyTy.kind == itString and t.tabValTy.kind == itInt and
-      t.tabValTy.width == 64 and t.tabValTy.signed
-  of itSet:
-    t.setElemTy.kind == itInt and t.setElemTy.width == 64
+  of itTable: isBackedTableTy(t.tabKeyTy, t.tabValTy)   # RFC-0005 S8z
+  of itSet:   isBackedSetElemTy(t.setElemTy)            # RFC-0005 S8z
   else: false
 
 func variantZeroTotal(t: IRType): bool =
@@ -4530,8 +4658,17 @@ func defaultZeroTotal(t: IRType): bool =
   case t.kind
   of itBool, itString, itFloat32, itFloat64: true
   of itInt:
+    # RFC-0005 S8z: an ENUM's zero is ordinal 0 even when no member has it
+    # (`enum a = 1, b = 2`): Nim zero-fills the memory (probed: an untouched
+    # result field, result and local all read `ord == 0`). It was not total,
+    # so the untouched result became a free `retSym` constrained to the
+    # enum's ordinals -- excluding the value Nim returns (a false `sxUnsat`
+    # for a label reading it). A `range` excluding 0 stays non-total: Nim
+    # rejects its implicit zero at compile time ("requires explicit
+    # initialization"), and a variant discriminator must start at 0.
     t.width in {8, 16, 32, 64} and
-      (not t.hasRange or (t.rangeLo <= 0 and 0 <= t.rangeHi))
+      (not t.hasRange or (t.rangeLo <= 0 and 0 <= t.rangeHi) or
+       t.enumName.len > 0)
   of itTuple:
     for ft in t.fields:
       if not defaultZeroTotal(ft): return false
@@ -4919,7 +5056,12 @@ proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
   ## string byte-range floor, seq-len floor, …) are threaded into `pcOut`.
   ## `intOffsetPositions` (round-6 B5): forwarded verbatim to `allocateSym` —
   ## see its own doc for the chained-scan-composition rationale.
-  allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
+  ## RFC-0005 S8z: an enum without ordinal 0 may hold 0 here
+  ## (`allocEnumZeroLegal`).
+  let saved = allocEnumZeroLegal
+  allocEnumZeroLegal = true
+  result = allocateSym(ty, name, pcOut, intOffsetPositions = intOffsetPositions)
+  allocEnumZeroLegal = saved
 
 proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   ## Build a SymVal representing literal `ival` at `proto`'s
@@ -4995,6 +5137,82 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (never an int proto)
     raise newException(ValueError,  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see coerceIntLit's first site above)]
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
+
+proc bvIndexWindow(idx: SymVal): tuple[mn, mx: int64] =
+  ## RFC-0005 S8z. The values a BV index can hold under its signedness
+  ## (an unsigned 64-bit one capped at `high(int64)`: no array spans more).
+  let w = case idx.kind
+    of svBV8: 8
+    of svBV16: 16
+    of svBV32: 32
+    else: 64
+  if idx.signed:
+    (if w == 64: (low(int64), high(int64))
+     else: (-(1'i64 shl (w - 1)), (1'i64 shl (w - 1)) - 1))
+  else:
+    (0'i64, (if w == 64: high(int64) else: (1'i64 shl w) - 1))
+
+proc arrayIndexConds(idx: SymVal; lo: int64; n: int): tuple[inLo, inHi: Z3Bool] =
+  ## RFC-0005 S8z. The in-bounds conditions of an array read or write at
+  ## `idx` over the index range `lo .. lo + n - 1`. The zero-based signed
+  ## case keeps the exact formulas `isIndex` has always built (`0 <= i`,
+  ## `i < n`), so no existing query changes. Any other case -- a nonzero
+  ## first index (`array[1..3, T]`), or an unsigned index -- compares with
+  ## the index's own signedness over the bounds clamped to its window (a
+  ## bound past the window is always met; an empty intersection is never
+  ## in bounds). An unsigned index compared signed read `0xC8` as -56.
+  case idx.kind
+  of svInt:
+    (mkZ3IntLit(lo) <= idx.zi, idx.zi < mkZ3IntLit(lo + int64(n)))
+  of svBV8, svBV16, svBV32, svBV64:
+    if lo == 0 and idx.signed:
+      let loSV = coerceIntLit(idx, 0)
+      let hiSV = coerceIntLit(idx, int64(n))
+      case idx.kind
+      of svBV8:  (bvsle(loSV.bv8,  idx.bv8),  bvslt(idx.bv8,  hiSV.bv8))
+      of svBV16: (bvsle(loSV.bv16, idx.bv16), bvslt(idx.bv16, hiSV.bv16))
+      of svBV32: (bvsle(loSV.bv32, idx.bv32), bvslt(idx.bv32, hiSV.bv32))
+      else:      (bvsle(loSV.bv64, idx.bv64), bvslt(idx.bv64, hiSV.bv64))
+    else:
+      let (mn, mx) = bvIndexWindow(idx)
+      let hi = lo + int64(n) - 1
+      if hi < mn or lo > mx:
+        (mkBool(false), mkBool(false))
+      else:
+        # [range-invariant: index-defect-check -- the array's index range
+        # is the IndexDefect CONDITION, not the index value's own type range]
+        let c = bvRangeConds(idx, max(lo, mn), min(hi, mx), idx.signed)  # [range-invariant: index-defect-check]
+        ((if lo <= mn: mkBool(true) else: c[0]),
+         (if hi >= mx: mkBool(true) else: c[1]))
+  else:
+    raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (Nim array/seq indexing typing rules)]
+
+proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
+  ## RFC-0005 S8z. Element `idx` of an array whose first index is `lo`, as
+  ## an ite chain over the positions (element `k` is Nim's index `lo + k`),
+  ## under the caller's in-bounds conditions. A position whose index the
+  ## index's type cannot hold is never selected.
+  let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
+                   bvIndexWindow(idx)
+                 else: (low(int64), high(int64))
+  result = elems[0]
+  for k in 1 ..< elems.len:
+    let v = lo + int64(k)
+    if v < mn or v > mx: continue
+    result = iteSV(symEq(idx, coerceIntLit(idx, v)), elems[k], result)
+
+proc arrayStore(elems: seq[SymVal]; idx: SymVal; lo: int64;
+                val: SymVal): seq[SymVal] =
+  ## RFC-0005 S8z. The array `elems` with element `idx` replaced by `val`:
+  ## each position becomes `ite(idx == lo + k, val, old[k])`. Under the
+  ## caller's in-bounds conditions exactly one position is written.
+  let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
+                   bvIndexWindow(idx)
+                 else: (low(int64), high(int64))
+  for k in 0 ..< elems.len:
+    let v = lo + int64(k)
+    if v < mn or v > mx: result.add elems[k]
+    else: result.add iteSV(symEq(idx, coerceIntLit(idx, v)), val, elems[k])
 
 # Width-uniform BV arithmetic. Both operands must be the same width.
 template binBV(a, b: SymVal, op: untyped): SymVal =
@@ -5335,6 +5553,20 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
     (toSvIntPreserving(a), toSvIntPreserving(b))
   else:
     (a, b)  ## same kind (or non-int) — identity
+
+proc alignIntKind(v: SymVal; like: SVKind): Option[SymVal] =
+  ## RFC-0005 S8z. `v` in the representation `like` of the element it is
+  ## stored over (an array element write): unchanged when the kinds agree,
+  ## an Int-promoted value converted to the element's bit-vector width
+  ## (`svIntToBV`, exact for a value of the element's own type) or a
+  ## bit-vector to an Int (`toSvIntPreserving`). `none` for any other
+  ## mismatch; the caller declines it.
+  if v.kind == like: some(v)
+  elif v.kind == svInt and like in {svBV8, svBV16, svBV32, svBV64}:
+    some(svIntToBV(v, like))
+  elif v.kind in {svBV8, svBV16, svBV32, svBV64} and like == svInt:
+    some(toSvIntPreserving(v))
+  else: none(SymVal)
 
 proc cmpFloat(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 F2: IEEE equality via Z3 FP theory (`==`/`!=` on Z3Fp are
@@ -6656,22 +6888,24 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let keyProto = SymVal(kind: svString, str: mkString(""))
     let keySV = lower(env, e.tabKey, some(keyProto))
     doAssert keySV.kind == svString
-    let val = lower(env, e.tabVal)
+    # RFC-0005 S8z: a literal value is shaped at the value type's width.
+    let val = lower(env, e.tabVal, intLitProto(recv.tabValTy))
     # New table: data = store(old.data, k, v); present = store(old.present, k, true).
     # Size: increment if !present[k] before.
     case recv.tabValTy.kind
-    of itInt:
+    of itInt, itBool:   # RFC-0005 S8z: + bool
       let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
         recv.tabDataRaw.ctx, recv.tabDataRaw.raw)
       let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
         recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
       # RFC-0005 S8u: an Int-promoted value converts (`bv64Operand`); any
       # other kind declines. The `else` arm stored 0 in its place.
-      let vOpt = bv64Operand(val)
+      # RFC-0005 S8z: at the value type's width, into its 64-bit cell.
+      let vOpt = cellOf(val, recv.tabValTy)
       if vOpt.isNone:
         lowerDegrade(feUnsupportedOp,
           "iekTableSet: value lowered to " & plainEnglishSymValKind(val.kind) &
-          " — expected a 64-bit int (feUnsupportedOp)")
+          " — expected a " & $recv.tabValTy & " (feUnsupportedOp)")
         return recv
       let vbv = vOpt.get
       noteTableKey(keySV.str)   ## RFC-0005 S8f
@@ -6717,12 +6951,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekSetIncl:
     let recv = lower(env, e.mutRecv)
     if containerRecvDeclined(recv, svSet, "`s.incl(x)`"): return recv
-    let elemSV = lower(env, e.mutArg)
-    let elemOpt = bv64Operand(elemSV)   ## RFC-0005 S8u
+    # RFC-0005 S8z: the element at its own width, into its 64-bit cell.
+    let elemSV = lower(env, e.mutArg, intLitProto(recv.setElemTy))
+    let elemOpt = cellOf(elemSV, recv.setElemTy)   ## RFC-0005 S8u
     if elemOpt.isNone:
       lowerDegrade(feUnsupportedOp,
         "iekSetIncl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
-        " — expected a 64-bit int (feUnsupportedOp)")
+        " — expected a " & $recv.setElemTy & " (feUnsupportedOp)")
       return recv
     let elem = elemOpt.get
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
@@ -6737,12 +6972,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekSetExcl:
     let recv = lower(env, e.mutRecv)
     if containerRecvDeclined(recv, svSet, "`s.excl(x)`"): return recv
-    let elemSV = lower(env, e.mutArg)
-    let elemOpt = bv64Operand(elemSV)   ## RFC-0005 S8u
+    # RFC-0005 S8z: the element at its own width, into its 64-bit cell.
+    let elemSV = lower(env, e.mutArg, intLitProto(recv.setElemTy))
+    let elemOpt = cellOf(elemSV, recv.setElemTy)   ## RFC-0005 S8u
     if elemOpt.isNone:
       lowerDegrade(feUnsupportedOp,
         "iekSetExcl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
-        " — expected a 64-bit int (feUnsupportedOp)")
+        " — expected a " & $recv.setElemTy & " (feUnsupportedOp)")
       return recv
     let elem = elemOpt.get
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
@@ -6853,28 +7089,27 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # arm is inside `lower`, reachable evaluating `x in mySet` inside a loop
       # guard, the same C-backend silent-loss hazard as the CR-17(a) site
       # above. See `loweringDidDegrade`'s doc comment for the full mechanism.
-      if recv.setElemTy.kind != itInt or recv.setElemTy.width != 64:
+      if not isBackedSetElemTy(recv.setElemTy):   # RFC-0005 S8z
         lowerDegrade(seUnsupportedSetCharInterop,
-          "set[char] / HashSet membership not modeled — element type " &
-               $recv.setElemTy & " (width " & $recv.setElemTy.width &
-               " != 64) (seUnsupportedSetCharInterop)")
+          "HashSet membership not modeled — element type " &
+               $recv.setElemTy & " is not an integer or bool " &
+               "(seUnsupportedSetCharInterop)")   # RFC-0005 S8z: read `.width` of any kind
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__setContainsDegrade"), fresh)
-      let bv64Proto = SymVal(kind: svBV64, signed: true,
-                             bv64: mkBitVec[64](0'i64))
-      var keySV = lower(env, e.key, some(bv64Proto))
+      # RFC-0005 S8z: the key at the element type's width, into its 64-bit
+      # cell (`cellOf`; was a 64-bit prototype for every element type).
+      let keySV = lower(env, e.key, intLitProto(recv.setElemTy))
       # v64 (sibling audit, chapulin catalog #3 class): an svInt key is a
       # LEGITIMATE arrival — `.len`/`.find`/`parseInt` results lower
       # unconditionally to svInt (CR-1a), so `s.len in myIntSet` reached the
       # former `doAssert keySV.kind == svBV64` and native-crashed. Bridge
-      # svInt→BV64 via `svIntToBV` (CR-1a precedent); anything else degrades
-      # IN-BAND per SND-3 instead of asserting.
-      if keySV.kind == svInt:
-        keySV = svIntToBV(keySV, svBV64)
-      if keySV.kind != svBV64:
+      # svInt→BV64 via `svIntToBV` (CR-1a precedent, inside `cellOf`);
+      # anything else degrades IN-BAND per SND-3 instead of asserting.
+      let keyCell = cellOf(keySV, recv.setElemTy)
+      if keyCell.isNone:
         lowerDegrade(weInternalWalkerFault,
           "HashSet membership key lowered to " & plainEnglishSymValKind(keySV.kind) &
-               " — expected svBV64 (weInternalWalkerFault)")
+               " — expected a " & $recv.setElemTy & " (weInternalWalkerFault)")
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__setKeyDegrade"), fresh)
       # v65 / RFC-0005 S8f: record the key TERM (see
@@ -6882,10 +7117,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # the extractor renders its model value -- a symbolically-keyed
       # membership can be satisfied by a const-true model array, leaving
       # nothing else to enumerate the witness from.
-      noteSetKey(keySV.bv64)
+      noteSetKey(keyCell.get)
       let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
         recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
-      ofBool(select(typed, keySV.bv64))
+      ofBool(select(typed, keyCell.get))
     else:
       # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
       # `raise newException`. `x in mySeq`/`x in myArray`/`x in myString`
@@ -7470,6 +7705,24 @@ proc renderedSize(m: Z3Model; size: Z3Int): int =
   ## `[0, 1024]`; the clamp only guards a malformed model.
   int(max(0'i64, min(m.evalInt(size), 1024'i64)))
 
+func cellModelValue(c: int64; ty: IRType): int64 =
+  ## RFC-0005 S8z. The value a container cell's model value `c` holds at
+  ## `ty` (`cellValue`, concretely): its low `ty.width` bits, sign- or
+  ## zero-extended by `ty`'s signedness.
+  if ty.kind == itBool: (if c != 0: 1'i64 else: 0'i64)
+  elif ty.width >= 64: c
+  elif ty.signed: ashr(c shl (64 - ty.width), 64 - ty.width)
+  else: c and ((1'i64 shl ty.width) - 1)
+
+func cellInDomain(c: int64; ty: IRType): bool =
+  ## RFC-0005 S8z. `inCellDomain`, concretely.
+  let d = cellDomain(ty)
+  if not d.bounded: true
+  elif (ty.kind == itInt and ty.signed) or d.lo >= 0 and d.hi >= 0 and c >= 0:
+    c >= d.lo and c <= d.hi
+  else: cast[uint64](c) >= cast[uint64](d.lo) and
+        cast[uint64](c) <= cast[uint64](d.hi)
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -7482,18 +7735,19 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
   ## exactly the model's answer, and no select can see a fresh key, so the
   ## real table behaves as the model on the winning path.
   case sv.tabValTy.kind
-  of itInt:
+  of itInt, itBool:   # RFC-0005 S8z: + bool
     let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
       sv.tabDataRaw.ctx, sv.tabDataRaw.raw)
     let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
       sv.tabPresentRaw.ctx, sv.tabPresentRaw.raw)
     template emit(k: string; v0: int64) =
-      var v = v0
+      var v = cellModelValue(v0, sv.tabValTy)   # RFC-0005 S8z
       # Issue #163 review R4: a value no read on the winning path
       # range-constrained (a key read on an untaken branch, or a fresh fill
       # key) is the model's free choice and may fall outside a
       # `range[lo..hi]` value type -- see `clampToDeclaredRange`.
-      if sv.tabValTy.hasRange: v = clampToDeclaredRange(v, sv.tabValTy)
+      if sv.tabValTy.kind == itInt and sv.tabValTy.hasRange:   # S8z: bool
+        v = clampToDeclaredRange(v, sv.tabValTy)
       keyList.add k
       w.intVals[path & "." & k] = v
     var keyList: seq[string]
@@ -7596,7 +7850,11 @@ proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
   ## fresh members no term's value names until there are `len`. A store-
   ## chain key that no term names is not rendered: no select observes it,
   ## and counting it could exceed `len`.
-  doAssert sv.setElemTy.kind == itInt and sv.setElemTy.width == 64
+  ## RFC-0005 S8z: a narrower element type renders only the terms whose
+  ## cells are in its domain (`containerCardConds` counts only those), and
+  ## fills from the domain's low end.
+  doAssert isBackedSetElemTy(sv.setElemTy)
+  let ety = sv.setElemTy
   let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
     sv.setMembersRaw.ctx, sv.setMembersRaw.raw)
   var present: seq[int64]
@@ -7605,12 +7863,15 @@ proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
     let v = int64(m.evalInt(t))
     if v in named: continue
     named.incl v
-    if m.evalBool(select(typed, t)):
+    if cellInDomain(v, ety) and m.evalBool(select(typed, t)):
       present.add v
   let n = renderedSize(m, sv.setSize)
-  var fill = 0'i64
+  let d = cellDomain(ety)
+  var fill = if d.bounded: d.lo else: 0'i64
   while present.len < n:
+    if not cellInDomain(fill, ety): break   # unreachable: the size bound
     if fill notin named: present.add fill
+    if d.bounded and fill == d.hi: break
     inc fill
   w.setMembers[path] = present
 
@@ -11873,6 +12134,17 @@ proc markAmbiguous(w: var WalkCtx, construct: WalkerConstructKind) =
   inc w.concolicAmbiguousBranches
   w.concolicAmbiguousByConstruct.mgetOrPut(construct, 0) += 1
 
+proc declinedIndexEnv(env: Env; stmt: IRStmt; valTy: IRType): Env =
+  ## RFC-0005 S8z. The env of a declined table read `v = t[k]`: `v` bound
+  ## to a fresh value of the table's value type on the tainted path. It was
+  ## left unbound, so the next read of `v` took the unmodelled-global
+  ## stand-in (an int) and `v == "b"` on a `Table[string, string]` hit
+  ## `eqBV`'s kind assertion (`weInternalWalkerFault`).
+  result = env
+  var scratch: seq[Z3Bool]
+  result[stmt.ixRetName] = allocateSym(valTy,
+    freshDegradeName("__declinedIndexRead"), scratch)
+
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -11892,6 +12164,18 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     return
   let frameIx = w.callStack.high
   let retSym = w.callStack[frameIx].retSym
+  if isClosureTy(w.callStack[frameIx].retTy):
+    # RFC-0005 S8z: a closure-returning callee has no `retSym` to bind; the
+    # path carries its `svClosure` on `result`, which the `isCall` arm hands
+    # to the caller as the call's value.
+    if p.env.hasKey("result") and p.env["result"].kind == svClosure:
+      w.callStack[frameIx].returnedPaths.add p
+    else:
+      let d = w.degrade(ceUnsupportedHof,
+        "a closure-returning callee returns no lambda the walker built " &
+        "(an untouched nil proc, or a proc value from elsewhere)")
+      w.callStack[frameIx].returnedPaths.add forkPathTainted(p, p.pc, p.env, d)
+    return
   var retVal: SymVal
   if p.env.hasKey("result"):
     retVal = p.env["result"]
@@ -12966,7 +13250,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let d = w.degrade(seUnsupportedTableKeyType,
             "Table key type not modeled at index: " & $arrSV.tabKeyTy &
                  " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
-          survivors.add forkPathTainted(p, p.pc, p.env, d)
+          survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
           continue
         let keyProto = SymVal(kind: svString, str: mkString(""))
         let keySV = lower(p.env, stmt.ixIdx, some(keyProto))
@@ -12979,12 +13263,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         noteTableKey(keySV.str)   ## RFC-0005 S8f
         let presentCond = select(typedPresent, keySV.str)
         case arrSV.tabValTy.kind
-        of itInt:
-          doAssert arrSV.tabValTy.width == 64
+        of itInt, itBool:   # RFC-0005 S8z: + bool
           let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
             arrSV.tabDataRaw.ctx, arrSV.tabDataRaw.raw)
           let v = select(typedData, keySV.str)
-          let tableVal = liftBV(v, arrSV.tabValTy.signed)
+          # RFC-0005 S8z: read back at the value type's width.
+          let tableVal = cellValue(v, arrSV.tabValTy)
           var newEnv = p.env
           newEnv[stmt.ixRetName] = tableVal
           # Issue #163 wiring-audit W2 (Table-value sibling): a
@@ -13004,8 +13288,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # sibling decline a few lines below in this SAME `isIndex` arm.
           let d = w.degrade(seUnsupportedTableValType,
             "Table value type not modeled at index: " & $arrSV.tabValTy &
-                 " — only Table[string, int] is supported (seUnsupportedTableValType)")
-          survivors.add forkPathTainted(p, p.pc, p.env, d)
+                 " — only Table[string, V] with V a fixed-width integer, " &
+                 "char, enum or range is supported (seUnsupportedTableValType)")
+          survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
         continue
       # ---- Phase 5: dynamic seq[T] indexing ----
       if arrSV.kind == svSeq:
@@ -13197,32 +13482,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## discarded — no raise fork, no bounds narrowing. Drain and thread
       ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
       for cp in drainScalarRaiseForks(idxP, w):
-        # Build the in-bounds & OOB Z3 conditions.
-        let loSV  = coerceIntLit(idxSV, 0)
-        let hiSV  = coerceIntLit(idxSV, int64(n))
-        let inLoCond = case idxSV.kind
-          of svBV8:  bvsle(loSV.bv8,  idxSV.bv8)
-          of svBV16: bvsle(loSV.bv16, idxSV.bv16)
-          of svBV32: bvsle(loSV.bv32, idxSV.bv32)
-          of svBV64: bvsle(loSV.bv64, idxSV.bv64)
-          of svInt:  loSV.zi <= idxSV.zi
-          else: raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (Nim array/seq indexing typing rules)]
-        let inHiCond = case idxSV.kind
-          of svBV8:  bvslt(idxSV.bv8,  hiSV.bv8)
-          of svBV16: bvslt(idxSV.bv16, hiSV.bv16)
-          of svBV32: bvslt(idxSV.bv32, hiSV.bv32)
-          of svBV64: bvslt(idxSV.bv64, hiSV.bv64)
-          of svInt:  idxSV.zi < hiSV.zi
-          else: raise newException(ValueError, "isIndex: non-int index kind")  # [raise-audited: category-c: index-must-be-int invariant (see above)]
+        # Build the in-bounds & OOB Z3 conditions. RFC-0005 S8z: over the
+        # array's index range `ixLo .. ixLo + n - 1` (`array[1..3, T]`), not
+        # `0 ..< n`; element `k` is Nim's index `ixLo + k`.
+        let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.ixLo, n)
         # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
         # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
         maybeForkDefect(cp, not (inLoCond and inHiCond),
                         "IndexDefect", none(string), w)
         # In-bounds path continues with binding; build the value via ite.
-        var indexed = arrSV.arrElems[0]
-        for k in 1 ..< n:
-          let kSV = coerceIntLit(idxSV, int64(k))
-          indexed = iteSV(symEq(idxSV, kSV), arrSV.arrElems[k], indexed)
+        let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
         # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
         # wrapper), so a merge degrade's pending taint (`allocDegrade` /
         # `degradeAlloc`) would otherwise be drained by whatever `lower()`
@@ -13251,6 +13520,51 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # exact shape `lowerLeafInExpr`'s own `iekVar` admission covers, just
       # read straight from `Env` (no `IRExpr` wrapper needed for a bare name).
       let recvSV = p.env[stmt.iaRecvName]
+      if recvSV.kind == svArray and recvSV.arrElems.len > 0:
+        # RFC-0005 S8z: `a[i] = v` on an array at a symbolic index (it was
+        # `feUnsupportedStmtKind`). The same `IndexDefect` fork as `isIndex`,
+        # over the array's own index range (`iaLo`), then the receiver is
+        # rebound to the array with every position `k` replaced by
+        # `ite(i == iaLo + k, v, old[k])` (`arrayStore`) -- the per-element
+        # form of a Z3 `store`, since `svArray` keeps one value per element.
+        let n = recvSV.arrElems.len
+        let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w)
+        for cp in drainScalarRaiseForks(idxP, w):
+          let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
+          maybeForkDefect(cp, not (inLoCond and inHiCond),
+                          "IndexDefect", none(string), w)
+          let elemTy = recvSV.arrElemTy
+          let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w,
+                                          seqElemLitProto(elemTy))
+          for vp in drainScalarRaiseForks(valP, w):
+            let aligned = alignIntKind(valSV, recvSV.arrElems[0].kind)
+            if aligned.isNone:
+              # The write is dropped (the array keeps its old element): a
+              # stale env, so `feUnsupportedStmtKind` (dcSubstituted), which
+              # licenses no sxUnsat -- never the fresh class.
+              let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+              let d = w.degrade(feUnsupportedStmtKind,
+                locPrefix & "isIndexAssign: array element write of " &
+                     plainEnglishSymValKind(valSV.kind) & " over " &
+                     plainEnglishSymValKind(recvSV.arrElems[0].kind) &
+                     " not modelled; the write is dropped")
+              survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
+                                            vp.env, d)
+              continue
+            # A `range[lo..hi]` element type forks its RangeDefect exactly as
+            # the seq arm below does (#163 review R22 site 3).
+            let vpRanged =
+              if elemTy != nil and elemTy.kind == itInt and elemTy.hasRange and
+                 not carriesRangeCheck(stmt.iaVal, elemTy):
+                forkAssignRangeCheck(vp, valSV, elemTy, w)
+              else: vp
+            let vpM = drainPendingLowerEffects(vpRanged)
+            var newEnv = vpM.env
+            newEnv[stmt.iaRecvName] = SymVal(kind: svArray,
+              arrElems: arrayStore(recvSV.arrElems, idxSV, stmt.iaLo, aligned.get),
+              arrElemTy: elemTy)
+            survivors.add forkPath(vpM, vpM.pc & @[inLoCond, inHiCond], newEnv)
+        continue
       if recvSV.kind != svSeq:
         # Defense in depth (W2b precedent, `iekSeqAdd`'s own kind-mismatch
         # arm): SHOULD be unreachable given the parse-time itSeq gate, but a
@@ -14296,7 +14610,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           inc w.synthZ3
           let z3Name = stmt.retName & "_c" & $w.synthZ3
           var retInit: seq[Z3Bool]
-          let retSym = if sig.isVoid:
+          # RFC-0005 S8z: a closure-returning callee's value is the
+          # `svClosure` its body builds, handed to the caller per returned
+          # path below; there is no symbol to allocate (it was
+          # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
+          let closureRet = not sig.isVoid and isClosureTy(stmt.retTy)
+          let retSym = if sig.isVoid or closureRet:
                          SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
                        else:
                          # Round-6 B5: thread the parse-time-traced offset
@@ -14365,6 +14684,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           var fallThrough: seq[Path]
           if sig.isVoid:
             fallThrough = fallThroughRaw
+          elif closureRet:
+            # RFC-0005 S8z: as `completeReturn`'s closure arm.
+            for cp in fallThroughRaw:
+              if cp.env.hasKey("result") and cp.env["result"].kind == svClosure:
+                fallThrough.add cp
+              else:
+                let d = w.degrade(ceUnsupportedHof,
+                  "a closure-returning callee returns no lambda the walker " &
+                  "built (an untouched nil proc, or a proc value from elsewhere)")
+                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
           else:
             for cp in fallThroughRaw:
               if cp.env.hasKey("result"):
@@ -14450,7 +14779,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
           # `new(result)` callee with the same argument shape would return
           # the first call's address, and a heap write would be lost.
-          if calleeEscaped.len == 0 and
+          if calleeEscaped.len == 0 and not closureRet and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
              frame.returnedPaths[0].taint == {} and
              frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
@@ -14467,7 +14796,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for cp in frame.returnedPaths & fallThrough:
             var newEnv = p.env
             if stmt.retName.len > 0:
-              newEnv[stmt.retName] = retSym
+              newEnv[stmt.retName] =
+                if closureRet and cp.env.hasKey("result") and
+                    cp.env["result"].kind == svClosure:
+                  cp.env["result"]    # RFC-0005 S8z
+                else: retSym
             # #140: propagate var-param mutations back to caller's env.
             for (formalName, callerName) in varArgs:
               if cp.env.hasKey(formalName):
@@ -18952,6 +19285,29 @@ proc readSetInt*(w: RawWitness, name: string): HashSet[int] =
   if not w.setMembers.hasKey(name): return
   for v in w.setMembers[name]:
     result.incl int(v)
+
+proc witnessIntAs*[T](v: int64): T =
+  ## RFC-0005 S8z. A container cell's witness value (`cellModelValue`) as
+  ## the element type `T`: a 64-bit unsigned value keeps its bits.
+  when T is uint64 or T is uint: cast[T](v)
+  else: T(v)
+
+proc readTableStrIntAs*[T](w: RawWitness, name: string): Table[string, T] =
+  ## RFC-0005 S8z. `readTableStrInt` for any fixed-width int value type.
+  result = initTable[string, T]()
+  if not w.tabKeys.hasKey(name):
+    return
+  for k in w.tabKeys[name]:
+    let p = name & "." & k
+    if w.intVals.hasKey(p):
+      result[k] = witnessIntAs[T](w.intVals[p])
+
+proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
+  ## RFC-0005 S8z. `readSetInt` for any fixed-width int element type.
+  result = initHashSet[T]()
+  if not w.setMembers.hasKey(name): return
+  for v in w.setMembers[name]:
+    result.incl witnessIntAs[T](v)
 
 # ---- Phase 15 Cluster C (C2a): closure-construction test hooks ---------------
 #

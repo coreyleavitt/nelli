@@ -147,18 +147,18 @@ proc s6bTabFresh(t: Table[string, int]; n: int) =
 
 type
   S6bVK = enum s6bA, s6bB
-  S6bE1 = enum s6bE1 = 1, s6bE2 = 2
   S6bV = object
     ## Two `case` sections: a multi-variant. RFC-0005 S8n gave the
     ## single-case variant its zero value, S8p the multi-variant with an
     ## explicit ordinal-0 arm on every axis and S8s one whose ordinal 0
     ## falls in an `else` arm, so this site needs a type that still has
-    ## none: an arm field of an enum whose first ordinal is 1, so zero
-    ## memory is no value of it (a `HashSet[int]` field until RFC-0005 S8u
-    ## gave the empty set as its zero).
+    ## none: a `HashSet[string]` arm field, whose element has no backed
+    ## cell sort (a `HashSet[int]` field until RFC-0005 S8u gave the empty
+    ## set as its zero; an enum field with no ordinal 0 until S8z modelled
+    ## its zero memory, ordinal 0).
     case k: S6bVK
     of s6bB: b: int
-    else: a: S6bE1
+    else: a: HashSet[string]
     case j: S6bVK
     of s6bA: c: int
     of s6bB: d: int
@@ -443,11 +443,19 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check r.status == sxUnsat
     check r.errors.len == 0
 
-  test "untouched result without a zero default: dead target is sxUnsat":
+  test "untouched result without a zero default: the free retSym declines, never sxSat":
+    ## RFC-0005 S8z: no type both allocates free without a decline of its
+    ## own and lacks a modelled zero any more (S8z gave an enum with no
+    ## ordinal 0 its zero, this pin's previous field; a `range` excluding
+    ## 0 cannot be a result's untouched field in Nim). The remaining
+    ## no-zero field, an unbacked `HashSet[string]`, allocates with its
+    ## `seUnsupportedSetCharInterop` (dcNoAnswer), so the run is honestly
+    ## sxUnknown: never the unsound sxUnsat, and no longer taint-only.
     let r = symexFind(s6bFloatZeroDead, tLabel("s6b_float_zero_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
-    checkUnsatOverTaintOnly(r)
+    check r.errors.hasKind(seUnsupportedSetCharInterop)
+    check r.status == sxUnknown
 
   test "iteSV string merge (array index fold): dead target is sxUnsat":
     let r = symexFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
@@ -497,16 +505,23 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.status == sxUnsat
     check r.errors.len == 0
 
-  test "two havoc retSyms are independent: a candidate, confirmed by replay":
+  test "two havoc retSyms are independent: a candidate, never sxUnsat":
     ## Pre-S10 sxUnknown. RFC-0005 S10: reality reaches the target on every
     ## input (`n != n + 1`), so the replayed candidate is
     ## confirmed -> sxSat, with rules 1-2 having decided sxUnknown.
     ## (RFC-0005 S8p/S8s: over `Table` results; a `seq` and an `array`
     ## result are bound. S8u binds a `Table` too, so this is over two
     ## untouched results with no modelled zero.)
+    ## RFC-0005 S8z: no type both allocates free without a decline of its
+    ## own and lacks a modelled zero any more (S8z gave an enum with no
+    ## ordinal 0 its zero, this pin's previous field; a `range` excluding
+    ## 0 cannot be a result's untouched field in Nim). The remaining
+    ## no-zero field, an unbacked `HashSet[string]`, allocates with its
+    ## `seUnsupportedSetCharInterop` (dcNoAnswer), so the replay is not
+    ## reached: an honest sxUnknown, never sxUnsat.
     let r = symexFind(s6bMaybeVariantFresh, tLabel("s6b_seq_fresh"))
     show r
-    check r.status == sxSat
+    check r.status == sxUnknown
     check rfc0005RawStatus == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
 

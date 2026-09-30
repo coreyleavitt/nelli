@@ -214,7 +214,7 @@ state = "done"
 [[slice]]
 id    = "S8z"
 title = "S8u's remainder: array reads with a nonzero low bound (array[1..3, int]) ignore the bound (potential false sxUnsat); enum result with no ordinal 0 excludes Nim's actual zero value from the free retSym (potential false sxUnsat); array type alias classifies as uninterp; inline anonymous range discriminator is a typebridge compile error; array write at a symbolic index declines; closure-returning callee is weInternalWalkerFault (allocateSym(itUninterp)); remaining container shapes decline scoped"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8aa"
@@ -4386,6 +4386,195 @@ cover it. How many such hits there are still depends on the context.
 query's cost, so its per-query figures overstate the spend (S8ac's
 `rlimitDelta`). An unchecked solver's statistics read the context's
 counter without a check, which this slice uses (`rlimitCountNow`).
+
+**As landed (S8z, walker 177) — S8u's remainder.** The seven places S8u
+reported, plus two soundness gaps and three faults found on the way. Every
+expected value was checked against the pinned toolchain (Nim 2.2.10, debug
+build) by an oracle test that runs the SUT itself.
+
+1. **Array low bound.** An index read or write on an array whose index
+   range does not start at 0 selects position `i - lo`, bounds-checked
+   against `lo .. hi` (`isIndex.ixLo`, `isIndexAssign.iaLo`, and
+   `arrayIndexConds` / `arraySelect` / `arrayStore` in the walker).
+   `var a: array[1..3, int] = [7, 8, 9]; a[1] == 7` was a false `sxUnsat`;
+   a param's witness and a symbolic index read are exact. An array
+   indexed by an enum, a `char`, an `int8` / `uint8` or a `range` also
+   classifies (`arrayIndexBounds`; it was a macro-time error).
+2. **Enum without ordinal 0.** Nim zero-fills an untouched enum, so its
+   value is ordinal 0 even when no member has it (probed: an untouched
+   result field, result and local all read `ord == 0`). `defaultZeroTotal`
+   now counts such an enum total, and a call's free `retSym` admits
+   ordinal 0 beside the members (`allocEnumZeroLegal`, set only by
+   `freshRetSym`). `ord(v.a) == 0` on an untouched result was a false
+   `sxUnsat`. A `range` that excludes 0 stays non-total: Nim rejects its
+   implicit zero at compile time, and a discriminator must start at 0.
+3. **Array type alias.** `type Arr3 = array[3, int]` classifies as the
+   array (it was `uninterp[__unsupported:Arr3]`).
+4. **Inline `range` discriminator.** `case d: range[0..2]` compiles and is
+   modelled; a `lo..hi` arm label (`of 0..1:`) is one arm per ordinal. Both
+   were compile errors in `dsl_typebridge.nim`.
+5. **Symbolic-index array write.** `a[i] = v` and `a[i] op= v` are
+   modelled: the parser writes through a temporary (`mkIndexAssignStmt`
+   with the low bound) and the walker stores into the `svArray`. As in
+   Nim, the index is checked before the value is evaluated:
+   `a[5] = raiser()` raises `IndexDefect`, not the value's exception
+   (probed).
+6. **Closure-returning callee.** A callee whose `result` is a closure it
+   built (`result = proc(y: int): int = y + t`) hands the caller that
+   closure (`svClosure` through `completeReturn` and the call's
+   post-binding; the call cache is skipped for it). Before, the call's
+   `retSym` allocation raised in `allocateSym(itUninterp)`
+   (`weInternalWalkerFault`). Any other closure value (a `nil` result, a
+   free closure) is a scoped `ceUnsupportedHof` placeholder.
+7. **Container shapes.** A `Table[string, V]` value and a `HashSet[T]`
+   element of any fixed-width integer type (`int8` .. `uint64`, `char`,
+   `byte`, an enum, a `range`) or `bool` are modelled in the 64-bit cell:
+   stored sign- or zero-extended (`cellOf`), read back truncated
+   (`cellValue`), and a set's size bounded by its element's domain
+   (`HashSet[bool]` holds at most 2 members, `HashSet[E]` at most `|E|`:
+   `cellDomain` / `containerCardConds`). Witnesses render through
+   `readTableStrIntAs[T]` / `readSetIntAs[T]`. The shapes enumerated, and
+   what still declines scoped:
+   - `Table[K, V]` with a non-`string` key: the model and the S8f
+     registry / extractor are keyed by string
+     (`seUnsupportedTableKeyType`).
+   - `Table[string, V]` / `HashSet[T]` with a `string`, `float`, tuple,
+     object, `seq` or other non-integer `V` / `T`: every operation would
+     need a different cell sort (`seUnsupportedTableValType`,
+     `seUnsupportedSetCharInterop`).
+   - A `char` / `byte` / `uint8` container as a witness only: `char` and
+     `uint8` classify to the same IRType, so the renderer cannot name the
+     element type (`feUnsupportedWitnessType`). Such a container built
+     inside the SUT is modelled.
+   - `seq[T]` element shapes are unchanged by this slice.
+   - An array indexed by `bool`, or wider than 4096 elements
+     (`maxArrayIndexSpan`), declines as an unsupported type.
+
+Found on the way:
+
+- (a) **`pairs` loops (false `sxSat`).** `for i, x in pairs(c)` bound `i`
+  to the ELEMENT and never bound `x`: a label reading `i` alone was a
+  false `sxSat` (the index of an `array[3..5, T]` "reached" 0), and one
+  reading `x` was `feGlobalReadUnmodelled`. `i` is now the index (Nim's
+  `lo + k` over an array, in the index variable's type; the position over
+  a seq). A single-variable `for t in pairs(c)` declines scoped.
+- (b) **Uninitialised composite locals.** `var a: array[3, int]`,
+  `var r: Obj` and `var v: Variant` were a decline that left the name
+  unbound; the next element write or field read faulted
+  (`weInternalWalkerFault`: `recv.kind == svArray` in `isIndex`,
+  `lowerConvIntWidth` on an enum field). They are now `default(T)`
+  (`iekZeroValue`), with the in-band `feUnsupportedOpHavoc` fallback for a
+  field or element that has no modelled zero.
+- (c) Two `weInternalWalkerFault`s in declined container reads became
+  scoped declines: a `Table[string, string]` index read (`eqBV`'s kind
+  assert; `declinedIndexEnv` now binds the declined read's result), and a
+  `HashSet[string]` membership decline message that read `.width` on a
+  string type.
+- (d) The symbolic-index array write's backstop for a value whose
+  representation cannot be aligned to the element's drops the write, so it
+  records `feUnsupportedStmtKind` (dcSubstituted, a stale env), never the
+  fresh class: the `feUnsupportedOpHavoc` site audit stays at 14.
+- (e) **A proc value compared with `nil`** (`f == nil` on a closure a
+  callee returned). `nil` fell to the generic unsupported-literal dummy,
+  an int 0, and the walker compared the `svClosure` with it:
+  `weInternalWalkerFault` (`coerceIntLit`) whenever the closure path was
+  walked first. That order holds on the cpp backend and not on the c
+  backend, so only the cpp run showed it. The parser's nil-compare arm
+  now declines it scoped (`ceUnsupportedHof`, a bool placeholder) on the
+  path that reaches it.
+
+- **Consumer-visible (for S11's migration note).**
+  - **`sxUnknown` programs that now get verdicts:** the seven items and
+    (a) / (b) above.
+  - **Verdicts that change:** a label over an array with a nonzero low
+    bound, over an untouched enum with no ordinal 0, or over a `pairs`
+    loop's index could have been a wrong `sxUnsat` / `sxSat`.
+  - **Cache.** The canonical program form changes for an index on an array
+    with a nonzero low bound (`;lo=`). The walker bump to 177 invalidates
+    every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - **No clean no-zero type remains.** With S8z, every type that allocates
+    free without a decline of its own has a modelled zero (the only
+    exception, a `range` excluding 0, cannot be an untouched result in
+    Nim). The no-zero result pins therefore moved to a `HashSet[string]`
+    arm field, whose allocation adds `seUnsupportedSetCharInterop`
+    (dcNoAnswer): those pins are now `sxUnknown`, where they had been a
+    taint-only `sxUnsat` or a replay-confirmed `sxSat`.
+  - **Seq element `op=`.** `s[i] += v` on a `seq` is still
+    `feUnsupportedStmtKind` (the Class-B trigger the S1b / S1c / S3 and
+    `augmented_assign` pins now use).
+  - **Seq element write order.** `s[i] = f()` on a `seq` evaluates `f()`
+    before the bounds check; Nim checks the index first. The array path
+    is ordered correctly (item 5); the seq path is unchanged.
+  - **`char` renders as `uint8`.** A `char` scalar or `seq[char]`
+    witness renders as `uint8`; the container case is declined (item 7).
+  - **`low(a)` / `high(a)` on an array** are `feUnsupportedExprKind`.
+  - **Array witness index type.** An `array[1..3, int]` witness is
+    rendered as `array[0..2, int]`; the values are positional, so replay
+    is exact, but the type is not the parameter's.
+  - **Macro-VM closure capture (for S8x).** A nested proc inside
+    `classifyObjectRecordFields`' per-`case` loop that captured the loop's
+    `var enumOrdinals` made the VM keep one closure environment across
+    iterations without re-zeroing it: a multi-variant's second axis got its
+    enum tags twice, and its witness `case` failed to compile ("duplicate
+    case label"). Caught in this slice by the S8s / S8u pins and fixed by
+    making `tagOrdOf` a top-level proc; the same hazard class as S8x's
+    element aliasing, for S8x's audit to cover.
+
+Pins: `tests/tsymex_rfc0005_s8z_remainder.nim`. It covers:
+- (1) a low-bound literal read with a dead label (RED: false `sxUnsat` /
+  false `sxSat`), a param witness replayed (RED: `sxRaised`), a symbolic
+  index read;
+- (2) an untouched enum field with no ordinal 0 (RED: `sxUnknown`);
+- (3) an array alias param (RED: `feUnsupportedParamType`);
+- (4) an inline `range` discriminator with a range label (RED: compile
+  error "node is not a symbol");
+- (5) `a[i] = v`, `a[i] += v`, the index-before-value order and a
+  low-bound write, with dead labels (RED: `feUnsupportedStmtKind`);
+- (6) a closure-returning callee, exact with a dead label, and a `nil`
+  closure result, and a closure compared with `nil`, as scoped declines
+  (RED: `weInternalWalkerFault`; the nil compare on cpp);
+- (7) `Table[string, int32]`, `Table[string, enum]`, `Table[string,
+  bool]`, `HashSet[uint16]`, `HashSet[int8]`, `HashSet[enum]`,
+  `HashSet[bool]`, `HashSet[char]`, with witnesses, dead labels and
+  domain-bounded sizes, and the scoped declines (RED:
+  `feUnsupportedWitnessType`, `seUnsupportedSetCharInterop`,
+  `weInternalWalkerFault`);
+- (8) `pairs` over a low-bound array, an enum-indexed array and a seq, and
+  uninitialised array, object and variant locals (RED: false `sxSat`,
+  `feGlobalReadUnmodelled`, `weInternalWalkerFault`, compile error for the
+  enum-indexed array);
+- the `>= 177` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (177).
+- `r6_n43_parity`: the bad-value / bad-element cells moved from `int32`
+  (now backed) to `string`; `int32` is asserted allocatable.
+- The no-zero result pins moved from an enum field with no ordinal 0 (now
+  modelled) to a `HashSet[string]` arm field, and now expect `sxUnknown`
+  (see "No clean no-zero type remains"):
+  - `r6_r2_zerodefault_result` T5h-4
+  - `rfc0005_s6b_ops` (two tests)
+  - `rfc0005_s8l_exits`
+  - `rfc0005_s8i_models` (4): the declined construction's arm field.
+- The Class-B `feUnsupportedStmtKind` trigger is now a seq element's `+=`
+  (`q[b and 1] += b` on `@[p.x, p.y]`):
+  - `rfc0005_s3_monotonicity`
+  - `rfc0005_s1b_kinds`
+  - `rfc0005_s1c_verdict`
+  - `augmented_assign`
+- `r6_n36_raise_class_audit`: one marked `raise newException` site fewer
+  in `runtime.nim` (the array read's two per-bound copies of "isIndex:
+  non-int index kind" are one, in `arrayIndexConds`), category-c.
+- `r11_range_invariant_audit`: three new direct `bvRangeConds` calls in
+  `runtime.nim` (4 -> 7): a second one inside `rangeCondsIfNeeded`
+  (helper-internal), and two marker-exempt sites, `arrayIndexConds`
+  (`index-defect-check`) and `inCellDomain` (`container-cell-domain`).
+- `r6_itesv_mergedegrade` "vulnerable array in the else / then branch":
+  `sxUnknown` -> `sxRaised` (`IndexDefect`, the witness replays). The
+  SUT reads `arr[i]` before its bounds guard; the uninitialised
+  `var arr: array[3, string]` was a decline that tainted every path and
+  hid the reachable Defect ((b) above). Never an `sxSat`.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

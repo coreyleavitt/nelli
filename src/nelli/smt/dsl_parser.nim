@@ -673,11 +673,12 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
-            emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc))
+            emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc),
+            newLit(s.ixLo))   # RFC-0005 S8z
   of isIndexAssign:
     newCall(bindSym"mkIndexAssignStmt",
             newLit(s.iaRecvName), emitExpr(s.iaIdx),
-            emitExpr(s.iaVal), newLit(s.iaLoc))
+            emitExpr(s.iaVal), newLit(s.iaLoc), newLit(s.iaLo))   # RFC-0005 S8z
   of isSeqPop:
     newCall(bindSym"mkSeqPopStmt",
             newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc))
@@ -3897,6 +3898,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let nilIR = mkNil(refCls.ty)
         return (if nilIsLhs: mkBinop(op, nilIR, refIR)
                 else:        mkBinop(op, refIR, nilIR))
+      # RFC-0005 S8z: a proc value against `nil` (`f == nil` on a closure a
+      # callee returned). The walker has no nil closure, so this is a scoped
+      # decline on the path that reaches it, with a bool placeholder. Without
+      # this arm `nil` fell to the generic unsupported-literal dummy (an int
+      # 0), and the walker compared an `svClosure` against it: a
+      # `weInternalWalkerFault` whenever the closure path was walked first.
+      if refCls.ty.kind == itUninterp and refCls.ty.uninterpName == "__closure":
+        preamble.add ctx.declineAtSite(
+          ceUnsupportedHof,
+          "a proc value compared with nil in `" & n.repr &
+            "` is not modelled -- degraded to sxUnknown (ceUnsupportedHof)",
+          "proc value compared with nil (ceUnsupportedHof)")
+        return mkBoolLit(false)
     # v64 (§0 clause (b), chapulin round-3 natural-form probe): an infix the
     # DSL does not model — e.g. `a .. b` building an HSlice VALUE in a call-
     # argument position, which the bracket-slice interceptors never see —
@@ -4153,7 +4167,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let idxIR = parseExpr(n[1], preamble, ctx)
       ctx.indexConvPending = false
       let synth = freshSynth(ctx, "idx")
-      preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy)
+      # RFC-0005 S8z: the array's first index (`array[1..3, T]`: 1). It was
+      # dropped, so `a[1]` read position 1 -- the second element.
+      preamble.add mkIndexStmt(synth, arrIR, idxIR, lhsCls.ty.elemTy, "",
+                               arrayIndexLow(n[0]))
       mkVar(synth)
     of itSeq:
       # v67 (dev item 1) / round-6 B1: `data[a..b]` (slice, array-lambda
@@ -8710,18 +8727,31 @@ type FieldStep = object
   name:    string     ## the field's name ("" for an unnamed tuple element)
   tags:    seq[int]   ## variant: the arms declaring it (empty: a plain field)
   fieldTy: IRType
+  idx:     NimNode    ## RFC-0005 S8z: an array element at a SYMBOLIC index
+                      ## (`a[i]`): the index expression (nil otherwise)
+  lo:      int64      ## RFC-0005 S8z: the array's first index
 
-proc arrayIndexFromZero(recv: NimNode): bool =
-  ## RFC-0005 S8u. True when `recv`'s array type is indexed from 0
-  ## (`array[N, T]`, `array[0..k, T]`). `itArray` keeps only the size, and
-  ## an element's IR index is its position.
-  var ty = recv.getTypeImpl
-  if ty.kind == nnkVarTy and ty.len == 1: ty = ty[0].getTypeImpl
-  if ty.kind != nnkBracketExpr or ty.len != 3: return false
-  let ix = ty[1]
-  if ix.kind in nnkIntLit..nnkInt64Lit: return true
-  ix.kind == nnkInfix and ix.len == 3 and
-    ix[1].kind in nnkIntLit..nnkInt64Lit and ix[1].intVal == 0
+proc pureIndexExpr(n: NimNode): bool =
+  ## RFC-0005 S8z. True when the index expression `n` calls nothing: symbols,
+  ## literals, conversions, field and index reads, and builtin operators. A
+  ## write's chain is parsed more than once (the read `op=` and a variant
+  ## check make, then each rebuilt level), so an index that called a routine
+  ## would call it more than once; such an index declines.
+  case n.kind
+  of nnkSym, nnkCharLit..nnkUInt64Lit: true
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkHiddenDeref, nnkPar,
+     nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkStmtListExpr:
+    for i in 0 ..< n.len:
+      if n[i].kind != nnkEmpty and not (i == 0 and n.kind == nnkConv) and
+         not (i == 1 and n.kind == nnkDotExpr) and not pureIndexExpr(n[i]):
+        return false
+    true
+  of nnkInfix, nnkPrefix:
+    if n[0].kind != nnkSym or isUserCallee(n[0]): return false
+    for i in 1 ..< n.len:
+      if not pureIndexExpr(n[i]): return false
+    true
+  else: false
 
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
@@ -8743,17 +8773,24 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
     # RFC-0005 S8u: an array element at a constant index (`a[0]`,
     # `o.arr[2]`). Nim wraps the index in a conversion to the array's index
     # type; a literal one is in bounds (Nim rejects `a[7]` on an
-    # `array[3, T]` at compile time). A symbolic index declines: the rebuilt
-    # array has no per-element select. So does an array whose index type does
-    # not start at 0 (`array[1..3, T]`): `itArray` carries no low bound.
+    # `array[3, T]` at compile time). RFC-0005 S8z: the element's position
+    # is the literal less the array's first index (`array[1..3, T]`'s `a[1]`
+    # is position 0; S8u declined such an array). A symbolic index is a step
+    # too (`idx`): `valueFieldWrite` stores it with `isIndexAssign`.
+    step.lo = arrayIndexLow(recv)
     var ixNode = t[1]
     while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:
       ixNode = ixNode[ixNode.len - 1]
-    if ixNode.kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
-                          nnkInt64Lit} or not arrayIndexFromZero(recv):
+    if ixNode.kind in {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
+                       nnkInt64Lit, nnkCharLit}:
+      step.ix = int(ixNode.intVal - step.lo)
+      if step.ix < 0 or step.ix >= recvTy.size: return false
+    elif ixNode.typeKind != ntyNone and
+         classifyType(ixNode).ty.kind == itInt and
+         pureIndexExpr(ixNode):
+      step.idx = t[1]
+    else:
       return false
-    step.ix = int(ixNode.intVal)
-    if step.ix < 0 or step.ix >= recvTy.size: return false
     step.fieldTy = recvTy.elemTy
     return step.fieldTy != nil and
            not isUnsupportedFieldPlaceholder(step.fieldTy)
@@ -8822,9 +8859,13 @@ proc valueFieldTy(lhs: NimNode): IRType =
 proc valueFieldChecked(lhs: NimNode): bool =
   ## RFC-0005 S8s. True when some step of the chain `valueFieldTy` accepted
   ## is a variant ARM field: writing through it checks the discriminant.
+  ## RFC-0005 S8z: or an array element at a symbolic index, whose
+  ## `IndexDefect` Nim likewise raises before it evaluates the value
+  ## (probed: `a[5] = raiser()` raises `IndexDefect`, not the value's
+  ## `ValueError`).
   var step: FieldStep
   if not fieldStep(lhs, step): return false
-  step.tags.len > 0 or
+  step.tags.len > 0 or step.idx != nil or
     (step.recv.kind != nnkSym and valueFieldChecked(step.recv))
 
 proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
@@ -8842,7 +8883,21 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   discard fieldStep(lhs, step)
   let recvIR = parseExpr(step.recv, preamble, ctx)
   let rebuilt =
-    if step.recvTy.kind == itArray:
+    if step.recvTy.kind == itArray and step.idx != nil:
+      # RFC-0005 S8z: a symbolic index. The old array is copied into a
+      # temporary, `isIndexAssign` forks the `IndexDefect` and stores the one
+      # element (`ite` per position), and the temporary is the rebuilt value.
+      # The index is parsed as a read's is (`indexConvPending`: Nim checks it
+      # as an index, not as a conversion to the index type).
+      let tmp = freshSynth(ctx, "aw")
+      preamble.add mkLet(tmp, step.recvTy, recvIR)
+      ctx.indexConvPending = step.idx.kind in {nnkHiddenStdConv, nnkHiddenSubConv}
+      let idxIR = parseExpr(step.idx, preamble, ctx)
+      ctx.indexConvPending = false
+      preamble.add mkIndexAssignStmt(tmp, idxIR, newVal, siteLoc(step.recv),
+                                     step.lo)
+      mkVar(tmp)
+    elif step.recvTy.kind == itArray:
       # RFC-0005 S8u: the other elements are constant-index reads of the old
       # array (`iekIndex`'s concrete fast path: no fork).
       var elems: seq[IRExpr]
@@ -9260,6 +9315,20 @@ proc parseStmtInner(n: NimNode,
       # `for x in container` semchecks to `for x in items(container)`.
       let container = iterExpr[1]
       let recvCls = classifyType(container)
+      # RFC-0005 S8z: `for i, x in pairs(c)` (n.len == 4) binds `i` to the
+      # INDEX and `x` to the element. Before S8z this arm read only `n[0]`,
+      # so `i` was bound to the element and `x` was never bound: a label
+      # reading `i` alone (`if i == 0`) was a false `sxSat` over any array
+      # or seq, and one reading `x` a `feGlobalReadUnmodelled`. A
+      # single-variable `pairs` binds a `(key, val)` tuple, which this
+      # desugaring does not build: a scoped decline.
+      let isPairs = iterExpr[0].strVal == "pairs"
+      if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+        return ctx.declineMarker(feUnsupportedStmtKind,
+          &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
+          "variable(s): only `for x in c` and `for i, x in pairs(c)` are modelled")
+      if isPairs: n[1].expectKind nnkSym
+      let valName = if isPairs: n[1].strVal else: iterName
       if recvCls.ty.kind == itString:
         # Phase 15 S3 (ADR-0006): `for c in s` over a *symbolic* string is
         # unsupported — NOT for a byte/codepoint reason (byte-faithful makes
@@ -9291,16 +9360,23 @@ proc parseStmtInner(n: NimNode,
       case recvCls.ty.kind
       of itArray:
         # Static unroll: N iterations, each with `let i = arr[k]; body`.
+        # RFC-0005 S8z: under `pairs`, iteration `k` binds the index to
+        # Nim's `lo + k` (the array's first index plus the position), in the
+        # index variable's own type (an enum, `char`, a `range`).
         var preamble3: seq[IRStmt]
         let arrIR = parseExpr(container, preamble3, ctx)
         var stmts = preamble3
         var iters: seq[IRStmt]
+        let lo = arrayIndexLow(container)
+        let idxTy = if isPairs: classifyType(iterVar).ty else: nil
         for k in 0 ..< recvCls.ty.size:
-          # bind `iterName = arr[k]`
+          # bind `valName = arr[k]`
           let synth = freshSynth(ctx, "fa")
           iters.add mkIndexStmt(synth, arrIR, mkIntLit(int64(k)),
                                 recvCls.ty.elemTy)
-          iters.add mkLet(iterName, recvCls.ty.elemTy, mkVar(synth))
+          if isPairs:
+            iters.add mkLet(iterName, idxTy, mkIntLit(lo + int64(k)))
+          iters.add mkLet(valName, recvCls.ty.elemTy, mkVar(synth))
           iters.add body
         if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
         else: stmts.add iters
@@ -9317,10 +9393,14 @@ proc parseStmtInner(n: NimNode,
         # A-normalised index: isIndex stmt + bind via let
         let idxStmt = mkIndexStmt(synth, seqIR, mkVar(ivName),
                                   recvCls.ty.seqElemTy)
-        let bindIter = mkLet(iterName, recvCls.ty.seqElemTy, mkVar(synth))
+        let bindIter = mkLet(valName, recvCls.ty.seqElemTy, mkVar(synth))
         let incIv = mkAssign(ivName,
           mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
-        let loopBody = mkBlock(@[idxStmt, bindIter, body, incIv])
+        var loopStmts = @[idxStmt]
+        if isPairs:   # RFC-0005 S8z: `i` is the position
+          loopStmts.add mkLet(iterName, intTy, mkVar(ivName))
+        loopStmts.add @[bindIter, body, incIv]
+        let loopBody = mkBlock(loopStmts)
         let whileSt = mkWhile(cond, loopBody)
         var allStmts = preamble3
         allStmts.add initStmt
@@ -9568,7 +9648,19 @@ proc parseStmtInner(n: NimNode,
       if valNode.kind == nnkEmpty:
         for j in 0 ..< id.len - 2:
           let classified = classifyType(id[j])
-          let zero = zeroValueForType(classified.ty)
+          # RFC-0005 S8z: an array, object / tuple or variant local is
+          # Nim's `default(T)` too (`iekZeroValue` -> `defaultZero`, or an
+          # in-band `feUnsupportedOpHavoc` when an element or field has no
+          # modelled zero). It was this decline, which left the name
+          # unbound: `var a: array[3, int]; a[1] = x` then faulted in
+          # `isIndex` (`recv.kind == svArray` on the catch-all's int), and
+          # `var r: Obj; ord(r.e)` in `lowerConvIntWidth`. Kept here, not in
+          # `zeroValueForType`, whose other callers use it as a
+          # kind-correct catch-all dummy.
+          let zero =
+            if classified.ty.kind in {itArray, itTuple, itVariant, itMultiVariant}:
+              mkZeroValue(classified.ty)
+            else: zeroValueForType(classified.ty)
           if zero != nil:
             stmts.add mkLet(id[j].strVal, classified.ty, zero)
           else:

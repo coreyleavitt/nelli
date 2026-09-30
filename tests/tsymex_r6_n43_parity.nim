@@ -159,11 +159,15 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
   test "itTable: good key+val allocatable; bad key / bad val not":
     check unallocatableFieldIssue(tTable(tString(), tInt(64, signed = true))).isNone
     check unallocatableFieldIssue(badTable).isSome                                 ## bad key
-    check unallocatableFieldIssue(tTable(tString(), tInt(32, signed = true))).isSome  ## bad val (width)
+    check unallocatableFieldIssue(tTable(tString(), tString())).isSome  ## bad val
+    ## RFC-0005 S8z: a narrower int value is backed (was the bad-val cell).
+    check unallocatableFieldIssue(tTable(tString(), tInt(32, signed = true))).isNone
 
   test "itSet: good elem allocatable; bad elem not":
     check unallocatableFieldIssue(tSet(tInt(64, signed = true))).isNone
-    check unallocatableFieldIssue(tSet(tInt(32, signed = true))).isSome
+    check unallocatableFieldIssue(tSet(tString())).isSome
+    ## RFC-0005 S8z: a narrower int element is backed (was the bad cell).
+    check unallocatableFieldIssue(tSet(tInt(32, signed = true))).isNone
 
   test "itUninterp: the three classified marker prefixes are unallocatable; an unrecognized name is the Defect-class sentinel arm (predicate returns none -- allocateSym's own doc comment: unreachable from valid DSL surface)":
     check unallocatableFieldIssue(tUninterp("__ownership:Atomic")).isSome
@@ -207,8 +211,8 @@ type
   N43BadHeap = object
     good:        int
     tableKeyBad: Table[int, string]
-    tableValBad: Table[string, int32]
-    setBad:      HashSet[int32]
+    tableValBad: Table[string, string]   ## RFC-0005 S8z: was `int32`, now backed
+    setBad:      HashSet[string]         ## RFC-0005 S8z: was `int32`, now backed
     ownBad:      Atomic[bool]
       ## The REAL `std/atomics.Atomic[T]` (`__ownership:Atomic`). RFC-0005
       ## S8d: formerly a local `WeakRef[T] = distinct T` stand-in matched by
@@ -287,7 +291,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     check r.status == sxUnknown
     check seUnsupportedTableKeyType in errorKinds(r)
 
-  test "N43-H2: Table bad-VAL field of the WRONG WIDTH (Table[string, int32]) -- predicate and allocateSym's itTable arm now AGREE (N48, walker v109)":
+  test "N43-H2: Table bad-VAL field (Table[string, string]; was Table[string, int32] until RFC-0005 S8z backed it) -- predicate and allocateSym's itTable arm now AGREE (N48, walker v109)":
     ## Was a KNOWN-DISPARITY: `unallocatableFieldIssue` correctly flagged
     ## `Table[string, int32]` (val kind is itInt, but width 32 != 64) as
     ## unallocatable with `seUnsupportedTableValType`, but `allocateSym`'s
@@ -301,7 +305,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     ## already combine kind+shape into one condition), so a non-canonical
     ## itInt value type now reaches the SAME `allocDegrade` path as every
     ## other unsupported value type. Predicate and allocator agree.
-    check unallocatableFieldIssue(tTable(tString(), tInt(32, true))).isSome
+    check unallocatableFieldIssue(tTable(tString(), tString())).isSome
     let r = symexFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
@@ -309,7 +313,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     check seUnsupportedTableValType in errorKinds(r)
 
   test "N43-H3: HashSet bad-elem field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedSetCharInterop, no crash":
-    check unallocatableFieldIssue(tSet(tInt(32, true))).isSome
+    check unallocatableFieldIssue(tSet(tString())).isSome
     let r = symexFind(n43HeapSetBlock, tLabel("n43_heap_set"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)

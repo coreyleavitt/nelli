@@ -321,7 +321,7 @@ suite "symex R11 — permanent range-invariant regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "pinned inventory: bvRangeConds 5 calls (rangeCondsIfNeeded helper-internal; 2 concolic-trace-interval and 2 range-defect-check, marker-exempt)":
+  test "pinned inventory: bvRangeConds 8 calls (rangeCondsIfNeeded helper-internal 2; 2 concolic-trace-interval, 2 range-defect-check, 1 index-defect-check and 1 container-cell-domain, marker-exempt)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -355,13 +355,22 @@ suite "symex R11 — permanent range-invariant regression audit":
     ## forks RangeDefect when an integer converted to a `range`/enum target
     ## (`Natural(x)`, `let q: R = x`) lands outside it -- the same defect-
     ## CONDITION use as S8g's float site. Marker-exempt (`range-defect-check`).
-    check byFile[0][1] == 4               ## runtime.nim
+    ## runtime.nim 4 -> 7 (RFC-0005 S8z, walker 172). (a) A second call
+    ## inside `rangeCondsIfNeeded` itself (helper-internal): a result's
+    ## enum field with no ordinal 0 admits Nim's zero, ordinal 0, beside
+    ## its members (`allocEnumZeroLegal`). (b) `arrayIndexConds` bounds an
+    ## index by the ARRAY's index range (`array[1..3, T]`): the IndexDefect
+    ## CONDITION, marker-exempt (`index-defect-check`). (c) `inCellDomain`
+    ## bounds a narrow container element's 64-bit cell by the element
+    ## type's value domain, to count members: marker-exempt
+    ## (`container-cell-domain`).
+    check byFile[0][1] == 7               ## runtime.nim
     check byFile[2][1] == 1               ## runtime_floats.nim
     for i in 1 ..< byFile.len:
       if i != 2: check byFile[i][1] == 0  ## the other `include`d siblings
-    check byProc.len == 4
+    check byProc.len == 6
     check byProc[0][0] == "rangeCondsIfNeeded"
-    check byProc[0][1] == 1
+    check byProc[0][1] == 2
 
   test "pinned inventory: clampToDeclaredRange 7 calls (clampWitnessField 2, extractTableEntries 1, extractSeqElements 4), all in runtime.nim":
     var byFile: seq[(string, int)]

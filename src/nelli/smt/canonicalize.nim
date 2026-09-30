@@ -184,7 +184,29 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "176"
+const symexWalkerVersion* = "177"
+  ## RFC-0005 S8z (2026-09-30) — S8u's remainder. An array index read or
+  ## write honours the array's low bound (`isIndex.ixLo` /
+  ## `isIndexAssign.iaLo`): `a[1]` of an `array[1..3, int]` read its second
+  ## element, a false `sxUnsat`. An array element write at a symbolic index
+  ## is modelled, with its `IndexDefect` checked before the value is
+  ## evaluated (was `feUnsupportedStmtKind`). An array type alias, and an
+  ## array indexed by an enum, a `char` or a range, classifies as the array
+  ## (was uninterpreted). An inline `range` discriminator, and a `lo..hi`
+  ## arm label, compile and are modelled. An enum's zero value is ordinal
+  ## 0 even when no member has it, and a call result may hold it (an
+  ## untouched enum result read `sxUnsat`). A callee returning a closure
+  ## hands the caller the closure its body built (was
+  ## `weInternalWalkerFault`); any other closure value is a scoped
+  ## `ceUnsupportedHof`. A `Table[string, V]` value and a `HashSet[T]`
+  ## element of any fixed-width int type are modelled (were declines).
+  ## `for i, x in pairs(c)` binds `i` to the index (it was bound to the
+  ## element: a false `sxSat` for a label reading `i`). An uninitialised
+  ## array, object or variant local is Nim's zero value (was a decline that
+  ## left the name unbound, then `weInternalWalkerFault`).
+  ## 176 -> 177.
+  ##
+  ## (Prior: 176.)
   ## RFC-0005 S8y (2026-09-30) — the floor under n36_raise_degrade and
   ## s1c_verdict. (1) `checkCapped` drops a string's byte-domain constraint
   ## when the query defines the string over byte strings
@@ -4829,9 +4851,13 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]>"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
+    # RFC-0005 S8z: an array's first index changes which element a read
+    # selects, so it is part of the key (`;lo=`, only when nonzero: every
+    # key that has none stays byte-identical).
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
-      canonicalize(s.ixElemTy) & ">"
+      canonicalize(s.ixElemTy) &
+      (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") & ">"
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
     # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and
@@ -4841,7 +4867,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # uses `lookupLocal` (an EXISTING binding being rebound), not
     # `bindLocal` (`isIndex`'s `ixRetName` is a fresh let-name instead).
     "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
-      canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) & ">"
+      canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) &
+      (if s.iaLo != 0: ";lo=" & $s.iaLo else: "") & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

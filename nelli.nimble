@@ -969,5 +969,10 @@ task test, "Run the test suite":
             # implied byte-domain constraints dropped, and a tainted target
             # hit as deep as one that ran out of budget declined unsolved
             # (beSolverUndef); walker 175->176.
-            "tsymex_rfc0005_s8y_budget_decline"]:
+            "tsymex_rfc0005_s8y_budget_decline",
+            # RFC-0005 S8z: S8u's remainder -- array low bounds, aliases and
+            # symbolic-index writes, an enum zero without ordinal 0, range
+            # discriminators, closure results, narrow container cells;
+            # walker 176->177.
+            "tsymex_rfc0005_s8z_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

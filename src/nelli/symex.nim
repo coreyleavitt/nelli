@@ -664,6 +664,8 @@ proc stdName(name: string): NimNode =
   of "readSeqFloat32": bindSym"readSeqFloat32"
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
+  of "readTableStrIntAs": bindSym"readTableStrIntAs"   # RFC-0005 S8z
+  of "readSetIntAs": bindSym"readSetIntAs"             # RFC-0005 S8z
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
@@ -1035,13 +1037,21 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       error("symex Phase 5: seq witness reader for " & $ty &
             " not yet implemented")
   of itTable:
-    # Phase 5 cycle 5: Table[string, int] only.
+    # Phase 5 cycle 5: Table[string, int]. RFC-0005 S8z: and every other
+    # renderable value type, read through `readTableStrIntAs[T]`.
     if ty.tabKeyTy.kind == itString and
        ty.tabValTy.kind == itInt and ty.tabValTy.signed and
-       ty.tabValTy.width == 64:
+       ty.tabValTy.width == 64 and ty.tabValTy.enumName.len == 0:
       let tabTy = newTree(nnkBracketExpr,
         stdName("Table"), stdName("string"), stdName("int"))
       (tabTy, newCall(stdName("readTableStrInt"), witId, newLit(path)))
+    elif isRenderableTableTy(ty.tabKeyTy, ty.tabValTy):
+      let (valTyNode, _) = emitTyAndReader(ty.tabValTy, path, witId)
+      let tabTy = newTree(nnkBracketExpr,
+        stdName("Table"), stdName("string"), valTyNode)
+      (tabTy, newCall(newTree(nnkBracketExpr, stdName("readTableStrIntAs"),
+                              copyNimTree(valTyNode)),
+                      witId, newLit(path)))
     else:
       # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
       # the `itSeq` else-arm comment above. `parseProc*`'s recursive
@@ -1053,9 +1063,15 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
             $ty & ")")
   of itSet:
     if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
-       ty.setElemTy.width == 64:
+       ty.setElemTy.width == 64 and ty.setElemTy.enumName.len == 0:
       let setTy = newTree(nnkBracketExpr, stdName("HashSet"), stdName("int"))
       (setTy, newCall(stdName("readSetInt"), witId, newLit(path)))
+    elif isRenderableSetElemTy(ty.setElemTy):   # RFC-0005 S8z
+      let (elemTyNode, _) = emitTyAndReader(ty.setElemTy, path, witId)
+      let setTy = newTree(nnkBracketExpr, stdName("HashSet"), elemTyNode)
+      (setTy, newCall(newTree(nnkBracketExpr, stdName("readSetIntAs"),
+                              copyNimTree(elemTyNode)),
+                      witId, newLit(path)))
     else:
       # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
       # the `itSeq` else-arm comment above. `parseProc*`'s recursive
@@ -1689,13 +1705,11 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
       of itInt, itFloat32, itFloat64: wfFaithful
       of itRef: wf(ty.seqElemTy)   ## RFC-0005 S8h
       else: wfUnexecutable   ## the reader's defensive `error()` arm
-  of itTable:
-    if ty.tabKeyTy.kind == itString and ty.tabValTy.kind == itInt and
-       ty.tabValTy.signed and ty.tabValTy.width == 64: wfFaithful
+  of itTable:   # RFC-0005 S8z: every renderable shape
+    if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): wfFaithful
     else: wfUnexecutable
   of itSet:
-    if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
-       ty.setElemTy.width == 64: wfFaithful
+    if isRenderableSetElemTy(ty.setElemTy): wfFaithful
     else: wfUnexecutable
   of itVariant:
     var r = wf(ty.vDiscTy)

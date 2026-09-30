@@ -298,17 +298,16 @@ type
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
-  R2E1 = enum r2e1 = 1, r2e2 = 2
   R2MVE = object
-    ## A multi-variant with an arm field of an enum whose first ordinal is
-    ## 1: Nim's zero memory holds ordinal 0, which is no value of the enum
-    ## (probed: `ord(a) == 0`), so there is no legal zero to model.
-    ## (Its ordinal 0 in an `else` arm was this pin's shape until RFC-0005
-    ## S8s modelled that; a `HashSet[int]` arm field until S8u gave the
-    ## empty set as its zero.)
+    ## A multi-variant with a `HashSet[string]` arm field: a string-element
+    ## set has no backed cell sort, so there is no modelled zero. (Its
+    ## ordinal 0 in an `else` arm was this pin's shape until RFC-0005 S8s
+    ## modelled that; a `HashSet[int]` arm field until S8u gave the empty
+    ## set as its zero; an enum field with no ordinal 0 until S8z modelled
+    ## Nim's zero memory, ordinal 0, for it.)
     case k: R2VK
     of r2B: b: int
-    else: a: R2E1
+    else: a: HashSet[string]
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
@@ -375,11 +374,16 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
                       tLabel("multivariant_zero_nonzero"))
     check z.status == sxUnsat
 
-  test "T5h-4: a result type with no modelled zero (a multi-variant with an enum field that has no ordinal 0) still declines, never a bound wrong value":
+  test "T5h-4: a result type with no modelled zero (a multi-variant with a `HashSet[string]` field) still declines, never a bound wrong value":
     let r = symexFind(sutMultiVariantZeroDeclines,
                       tLabel("multivariant_zero_declines"))
-    check r.status == sxSat
-    check rfc0005RawStatus == sxUnknown
+    # RFC-0005 S8z: the reachable target was a replay-confirmed sxSat over
+    # an enum field with no ordinal 0, which S8z gives its zero. No type
+    # both allocates free without a decline of its own and lacks a
+    # modelled zero any more (a `range` excluding 0 is a compile error
+    # here), so the free retSym now carries the unbacked set's
+    # `seUnsupportedSetCharInterop` (dcNoAnswer) too: an honest sxUnknown.
+    check r.status == sxUnknown
     var sawKind = false
     for e in r.errors:
       # RFC-0005 S6b: the untouched result's per-call retSym is free and

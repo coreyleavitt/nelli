@@ -385,7 +385,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 76 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 75 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -432,11 +432,16 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## (now the base type's zero). No site was added; the multi-variant axis,
     ## container zero-init and `discFromRhs` sites kept their marks with
     ## the bool discriminator folded into their invariants.
-    check runtimeCount == 76
+    ## 76 -> 75 (RFC-0005 S8z, walker 172). `isIndex`'s array arm had two
+    ## copies of the category-c "isIndex: non-int index kind" raise, one
+    ## per bound. Its bounds moved to `arrayIndexConds` (the index range
+    ## with its low bound), shared with `isIndexAssign`'s new array arm,
+    ## which keeps one. No site was added.
+    check runtimeCount == 75
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 79 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 78 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -462,7 +467,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 79 -> 80: the same `discFromRhs` site added above (RFC-0005 S8g).
     ## 80 -> 81: the same `divLowByMinusOne` site added above (RFC-0005 S8i).
     ## 81 -> 79: the same two sites removed above (RFC-0005 S8u).
-    check cCount == 79
+    ## 79 -> 78: the same `isIndex` array-arm site removed above (RFC-0005
+    ## S8z).
+    check cCount == 78
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

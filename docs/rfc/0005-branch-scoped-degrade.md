@@ -242,6 +242,11 @@ title = "S8v's remainder: checkCapped step 1c declines queries that are UNSAT on
 state = "pending"
 
 [[slice]]
+id    = "S8af"
+title = "S8ab's remainder: close the VM-alias guard's gaps -- Table/`[]`-via-nnkCall aliasing (distinguish typed Table/seq index from string slicing by the callee's resolved symbol, not syntax), type identity by real type equality (sameType) instead of a depth-3 repr bound, instantiated coverage of generic procs (walk their instantiations), and make the guard fire in every CI leg rather than only under the one test file (register it where every leg runs it)"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

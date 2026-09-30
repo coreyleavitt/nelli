@@ -204,7 +204,7 @@ state = "done"
 [[slice]]
 id    = "S8x"
 title = "S8t2's remainder: audit compile-time (macro/VM) code in src/nelli for the `let x = s[i]` / `s[^1]` element-aliasing hazard S8t2 hit in the Nim VM (a let copy aliases the seq slot, so mutating the seq corrupts it); fix every live instance, add a macro-time regression pin for any that was reachable"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8y"
@@ -3820,6 +3820,101 @@ Net effect: three parallel unknown-forcing mechanisms (`sawUnknown`,
 `capForcedUnknown`, `closureForcedUnknown`) collapse into **one lattice plus
 one structural invariant**. This is a strict simplification of the verdict
 rule, not an addition to it — but it is reached in three slices, not one.
+
+**As landed (S8x, walker 171, no bump) — S8t2's remainder: the
+compile-time VM's `let` aliasing.** S8t2 found that in Nim's compile-time
+VM `let top = stack[^1]` binds the seq slot itself, so a later write to
+that frame showed through `top`. The whole symex front end runs in that VM:
+the parser, the type bridge, the name scopes and the macros' own helpers.
+S8x audited it.
+
+*What the VM does* (probed on Nim 2.2.10 patched, `const` against native,
+pinned in the test file):
+
+- A `let` of any non-scalar location aliases it: a seq or array element, an
+  object or tuple field, a `Table` value, or a whole local seq, string,
+  object or `set`. A tuple unpacked from one of these aliases it too.
+  Any in-place write to that location or anything inside it shows through
+  the `let`: a field write, `add`, `setLen`, `incl`, a nested `[]=`, a
+  `var`-parameter callee. So the hazard is wider than seq elements.
+- A non-`var` parameter aliases the caller's location the same way, while
+  the callee changes that location through a ref.
+- `var`, `result =`, a proc's return value, `pop`, a slice and a tuple
+  constructor all copy. Replacing the whole location (`s[i] = v`,
+  `obj.f = v`) detaches the `let`, which keeps the old value.
+- Scalars are copied into registers. A ref (`NimNode`, `IRExpr`, `IRStmt`,
+  `IRType`) is shared by design, so aliasing one changes nothing.
+- `for` values match native: `items` yields `lent` there too.
+
+*Method.* Scope: every file under `src/nelli` that declares a macro or a
+`compileTime` proc, plus everything the symex macros call at expansion
+time. That is `dsl_parser`, `dsl_typebridge`, `scoped_names`,
+`exn_hierarchy`, `stdlib_models`, `types`, the `symex.nim` macro helpers,
+and the macros in `fuzzmacro`, `derive`, `dsl`, `coverage`, `mutation`,
+`concolic`, `strategy` and `parallel`. A scan listed every `let` bound to a
+location (344), every `result =` of one, every call that passes a `ctx`
+value field, and every `for` loop that writes to its own container. Each
+hit was then classified by hand from its type and from what runs while it
+is live.
+
+| Site | Binding | Type | Written in place while live | Class | S8x |
+|---|---|---|---|---|---|
+| `boundEmittedDepth` (S8t2) | `let n = stack[^1].n`, `let i = stack[^1].i` | `NimNode`, `int` | `stack[^1].i`, `.h`; `add`/`pop` | safe (S8t2's fix) | pinned |
+| `resolveBreak` | `let t = ctx.procScoped.jumpTargets[i]` | `JumpTarget` (object) | `breakVia(ctx, i)` mints `brkLabel` in that element | **latent**: `t` is not read after the call | a `template` over the index, as `breakVia` / `resolveContinue` |
+| `ensureProcRegistered` | `let savedProcScoped = ctx.procScoped` | `ProcScopedCollectors` (object) | the callee's pre-passes and walk fill `ctx.procScoped` | **latent**: safe only because the next statement replaces the whole record, which detaches the `let`; a partial reset would make the restore a no-op | a `var` |
+| `lowerShortCircuitParts.nest` | `result = parts[k].pre`, then `result.add` | `seq[IRStmt]` | `result` | safe: `result =` copies | pinned (shape) |
+| `popJumpTarget` callers | `let jt = ctx.popJumpTarget()` | `JumpTarget` | later pushes, `brkLabel` mints | safe: `pop` copies | pinned (shape) |
+| `enterNameScope` / `leaveNameScope` (`ensureProcRegistered`, `parseProcAsValue`) | `result = nameScope`, `let savedNames = enterNameScope()` | `NameScope` (object of tables) | field resets, then the callee's claims in place | safe: `result =` copies | pinned on the real module |
+| caseNarrow push / read | `(subjectRepr: ..., tags: narrowTags)`; `for t in caseNarrow[i].tags` | tuple ctor; `int` values | nothing during the read | safe | — |
+| IRType `==` (`types.nim`), `emitMVBranch` (`symex.nim`) | `let bx = b.mvAxes[i]`, `let barm = bx.arms[k]`, `let ax = ty.mvAxes[axisIdx]`, `let elseArm = ax.arms[..]` | `VariantAxis`, `VariantArm` | nothing (read-only) | safe | — |
+| `ancestorsOf` (`exn_hierarchy`) | `let parent = userExnHierarchy[cur]` | `string` | nothing | safe | — |
+| `emitWitnessTuple` (`symex.nim`) | `let (savedCtx, savedUsed) = (...)`, `let used = witnessRefCtxUsed` | `NimNode`, `bool` | whole reassignment | safe | — |
+| scalar `ctx` saves (`savedInGuardCond`, `isIndexConv`, `cap`, `prior`) | `let x = ctx.<field>` | `bool` / `int` | — | safe | — |
+| the other ~330 location `let`s | `let x = n[i]`, `impl[3]`, `cls.ty`, `parsed.bodyNimNode`, ... | `NimNode` / IR refs / scalars | — | safe | — |
+| non-`var` params | the only call passing a `ctx` value field alongside `ctx` is `breakVia(ctx, ctx.procScoped.jumpTargets.high)` | `int` | — | safe | — |
+
+No instance is live: no `let` copy is read after an in-place write to its
+location. With no live instance there was no product RED. The RED is the
+new source pin, which failed on the two latent lines before the fix.
+
+*IR identity.* Neither change alters the IR. `canonicalize(prog)` and
+`repr(prog)` were dumped at 5f4c2bb and again at 219f152 (after S8u),
+each against this slice, and for `s8m_exits` and
+`r6_r4_collector_scoping` once more at 47c70d1 (after S8w), for every SUT that
+these suites pass to `symexFind`: `s8m_exits` (26, labelled breaks),
+`s8l_exits` (58), `s8e_scoping` (35), `r6_nulwitness` (9),
+`r6_r4_collector_scoping` (6, the collectors' save/restore) and
+`r6_a3_variantconstruct_sym` (10, case narrowing). The dumps are
+byte-identical. There is no walker bump.
+
+Pins: `tests/tsymex_rfc0005_s8x_vm_alias.nim`.
+- VM against native, each evaluated by `const` and at run time:
+  - S8t2's frame (VM 7, native 0) and its plain-locals fix.
+  - An element bound before a `var`-parameter callee writes it (latent (a)'s
+    shape; VM `"brk1"`, native `""`), and the index read that fixes it.
+  - A ref's value field: `let` aliases, a whole reset detaches, `var`
+    copies (latent (b)'s shape and fix).
+  - `result =` and `pop` copy.
+  - A whole local string, a local `set` and a non-`var` parameter alias.
+
+  A toolchain that changes any of these fails here first.
+- `enterNameScope` / `leaveNameScope` on the real module: leaving a
+  callee's scope drops its renames and keeps the caller's.
+- Source pin: no `let` in `dsl_parser.nim` binds a `ctx.procScoped` record
+  or element (`.len` / `.high` excepted). RED: `1331: let t =
+  ctx.procScoped.jumpTargets[i]` and `10497: let savedProcScoped =
+  ctx.procScoped`.
+
+*Different mechanisms, reported and not fixed here.*
+- **Only `ctx.procScoped` is mechanically guarded.** The VM hazard covers
+  every non-scalar `let`, and a non-`var` parameter, but a general lint needs
+  types. A line scan cannot tell a `NimNode` `let` (safe) from an object
+  `let`. The next value-typed save/restore added to the front end is
+  guarded only by review and by this note.
+- **The runtime walker has the same textual shapes and is not affected.**
+  Examples are `runtime.nim`'s `let savedStack = w.frame.handlerStack` before
+  `setLen`/`add`, and `let byRefEntry = descentEnv` before `descentEnv[...] =`.
+  They compile to native code, where `let` copies.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

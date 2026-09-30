@@ -1331,7 +1331,10 @@ proc resolveBreak(n: NimNode; ctx: ParseCtx): IRStmt =
       return mkBreak()   # no enclosing loop: the walker's weBreakOutsideLoop
     return breakVia(ctx, ctx.procScoped.jumpTargets.high)
   for i in countdown(ctx.procScoped.jumpTargets.high, 0):
-    let t = ctx.procScoped.jumpTargets[i]
+    # RFC-0005 S8x: read through the index, as `breakVia` and
+    # `resolveContinue` do. In the compile-time VM a `let` of the element
+    # aliases it, and `breakVia` mints `brkLabel` in that element in place.
+    template t: untyped = ctx.procScoped.jumpTargets[i]
     if not t.isLoop and t.blockSym != nil and sameBlockLabel(t.blockSym, label):
       return breakVia(ctx, i)
   ctx.declineMarker(feUnsupportedStmtKind,
@@ -10631,7 +10634,10 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # becoming a field of `ProcScopedCollectors` and is automatically covered
   # here — there is no separate five-touchpoint save/restore line for it to
   # omit.
-  let savedProcScoped = ctx.procScoped
+  # RFC-0005 S8x: a `var`, not a `let`. In the compile-time VM a `let` of
+  # `ctx.procScoped` aliases the record, which the callee's parse fills in
+  # place; only the whole-record reset below detached it. A `var` copies.
+  var savedProcScoped = ctx.procScoped
   ctx.procScoped = ProcScopedCollectors()
   # RFC-0005 S8e: a callee runs in its own env frame, so it is its own
   # naming scope -- claimed before `parseCalleeImpl`'s pre-passes read a

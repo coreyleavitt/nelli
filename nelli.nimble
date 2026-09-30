@@ -922,5 +922,9 @@ task test, "Run the test suite":
             # joined (linear paths), Case 2/3 while guards with continue
             # rotated, turned-down B4 offsets stamped and wrapping;
             # walker 169->171.
-            "tsymex_rfc0005_s8w_remainder"]:
+            "tsymex_rfc0005_s8w_remainder",
+            # RFC-0005 S8x -- S8t2's remainder: the compile-time VM's `let`
+            # aliasing pinned, the parser's two latent value-location lets
+            # bound by index / `var`; no walker bump.
+            "tsymex_rfc0005_s8x_vm_alias"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -257,6 +257,11 @@ title = "S8af's remainder: verify compile-time-VM reachability macro-by-macro fo
 state = "pending"
 
 [[slice]]
+id    = "S8ai"
+title = "S8ae's remainder: make step 1c's relational links semantic, not syntactic (a needle/string equal through a chain of equalities or a computed-but-equal term gets the same contains/prefixof/suffixof/indexof/substr links -- canonicalize by the query's equality classes); add sound facts for replace_all, regex membership, from_int, indexof from a nonzero start (converse direction) and word equations; route seq.last_indexof queries through step 1c instead of straight to the uncapped step 3"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

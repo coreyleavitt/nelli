@@ -401,6 +401,8 @@ proc emitExpr*(e: IRExpr): NimNode =
             emitExpr(e.hofClosure), emitIRType(e.hofRetElemTy), initArg)
   of iekNil:              ## Phase 15 R5
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
+  of iekZeroValue:        ## RFC-0005 S8u
+    newCall(bindSym"mkZeroValue", emitIRType(e.zvTy))
 
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
@@ -1479,7 +1481,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekLambda:
     discard  # lambdaBody is IRStmt; don't recurse into lambdas
   of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
-     iekGetCurrentExn, iekGetCurrentExnMsg, iekNil:
+     iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     discard  # no sub-exprs
 
 # ---- Forward decls -----------------------------------------------------------
@@ -5477,9 +5479,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       for arm in objTyFull.vArms:
         if not arm.isElse and arm.tagOrdinal == tagOrd:
           activeArm = arm; foundArm = true; break
+      # RFC-0005 S8u: a literal no explicit arm names selects the `else` arm
+      # (Nim's `case` is exhaustive, so a well-typed literal that misses
+      # every `of` is one the `else` covers). The discriminator is the
+      # literal's own ordinal; `lowerVariantLit` makes the else arm (key -1)
+      # the active one. Before S8u this declined (`feUnsupportedExprKind`).
+      var tagName = activeArm.tagName
       if not foundArm:
-        # Either an else-covered tag or a genuinely bad ordinal — both out
-        # of A1 scope (only explicit, non-else arms construct today).
+        for arm in objTyFull.vArms:
+          if arm.isElse:
+            activeArm = arm; foundArm = true
+            tagName = ""
+            for t in objTyFull.vDiscTags:
+              if t.ord == tagOrd: tagName = t.name; break
+            break
+      if not foundArm:
+        # A genuinely bad ordinal (no arm names it and there is no `else`):
+        # Nim rejects such a constructor, so this is unreachable; decline.
         preamble.add ctx.declineAtSite(
           feUnsupportedExprKind,
           siteMsg(n, "A1: variant construction with a tag not " &
@@ -5508,7 +5524,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       for i, fieldName in objTyFull.vPlainFieldNames:
         plainFieldExprs.add parseVariantCtorField(fieldName, objTyFull.vPlainFieldTypes[i],
                                                    byNameDisc, n, preamble, ctx)
-      return mkVariantLit(objTyFull, tagOrd, activeArm.tagName,
+      return mkVariantLit(objTyFull, tagOrd, tagName,
                            armFieldExprs, plainFieldExprs)
     of itMultiVariant:
       # RFC-0005 S8p: every discriminator a literal naming an explicit
@@ -5529,13 +5545,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let tagIR = parseExpr(byNameMV[ax.discName], preamble, ctx)
         if tagIR.kind != iekIntLit: mvOk = false; break
         var found = false
+        # RFC-0005 S8u: a literal no explicit arm of this axis names selects
+        # its `else` arm, as in the single-case arm above.
+        var namesExplicit = false
         for arm in ax.arms:
           if not arm.isElse and arm.tagOrdinal == int(tagIR.ival):
+            namesExplicit = true
+        for arm in ax.arms:
+          if (if namesExplicit: not arm.isElse and arm.tagOrdinal == int(tagIR.ival)
+              else: arm.isElse):
             var fs: seq[IRExpr]
             for i, fieldName in arm.fieldNames:
               fs.add parseVariantCtorField(fieldName, arm.fieldTypes[i],
                                            byNameMV, n, preamble, ctx)
-            mvTags.add arm.tagOrdinal
+            mvTags.add int(tagIR.ival)
             mvFields.add fs
             found = true
             break
@@ -8355,6 +8378,15 @@ proc zeroValueForType(ty: IRType): IRExpr =
                                        ## a decline, and every catch-all dummy of
                                        ## a ref type was an int that crashed the
                                        ## first `p != nil` (`eqBV`'s kind assert).
+  of itTable, itSet: mkZeroValue(ty)   ## RFC-0005 S8u: the empty container. An
+                                       ## uninitialised `var t: Table[K, V]` was a
+                                       ## decline that left `t` unbound, and the
+                                       ## first `t[k] = v` hit `lower`'s
+                                       ## `recv.kind == svTable` assertion
+                                       ## (`weInternalWalkerFault`).
+  of itDistinct:                       ## RFC-0005 S8u: the base type's zero. A
+    zeroValueForType(ty.distinctBase)  ## distinct value is its base value in
+                                       ## the IR (`D(x)` is the identity).
   else: nil                            ## seq/table/set/tuple/variant/… — defer
 
 proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
@@ -8616,12 +8648,25 @@ type ValueFieldWrite = object
 type FieldStep = object
   ## RFC-0005 S8s. One step of a value field chain: `recv.name` or a
   ## positional `recv[ix]` on a tuple, or `recv.name` on a variant.
+  ## RFC-0005 S8u: or `recv[<literal>]` on an array.
   recv:    NimNode    ## the receiver, hidden wrappers stripped
   recvTy:  IRType
-  ix:      int        ## tuple field index (-1 on a variant)
+  ix:      int        ## tuple field / array element index (-1 on a variant)
   name:    string     ## the field's name ("" for an unnamed tuple element)
   tags:    seq[int]   ## variant: the arms declaring it (empty: a plain field)
   fieldTy: IRType
+
+proc arrayIndexFromZero(recv: NimNode): bool =
+  ## RFC-0005 S8u. True when `recv`'s array type is indexed from 0
+  ## (`array[N, T]`, `array[0..k, T]`). `itArray` keeps only the size, and
+  ## an element's IR index is its position.
+  var ty = recv.getTypeImpl
+  if ty.kind == nnkVarTy and ty.len == 1: ty = ty[0].getTypeImpl
+  if ty.kind != nnkBracketExpr or ty.len != 3: return false
+  let ix = ty[1]
+  if ix.kind in nnkIntLit..nnkInt64Lit: return true
+  ix.kind == nnkInfix and ix.len == 3 and
+    ix[1].kind in nnkIntLit..nnkInt64Lit and ix[1].intVal == 0
 
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
@@ -8639,6 +8684,24 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   let recvTy = classifyType(recv).ty
   if recvTy == nil: return false
   step = FieldStep(recv: recv, recvTy: recvTy, ix: -1)
+  if t.kind == nnkBracketExpr and recvTy.kind == itArray:
+    # RFC-0005 S8u: an array element at a constant index (`a[0]`,
+    # `o.arr[2]`). Nim wraps the index in a conversion to the array's index
+    # type; a literal one is in bounds (Nim rejects `a[7]` on an
+    # `array[3, T]` at compile time). A symbolic index declines: the rebuilt
+    # array has no per-element select. So does an array whose index type does
+    # not start at 0 (`array[1..3, T]`): `itArray` carries no low bound.
+    var ixNode = t[1]
+    while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:
+      ixNode = ixNode[ixNode.len - 1]
+    if ixNode.kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
+                          nnkInt64Lit} or not arrayIndexFromZero(recv):
+      return false
+    step.ix = int(ixNode.intVal)
+    if step.ix < 0 or step.ix >= recvTy.size: return false
+    step.fieldTy = recvTy.elemTy
+    return step.fieldTy != nil and
+           not isUnsupportedFieldPlaceholder(step.fieldTy)
   if t.kind == nnkBracketExpr:
     if recvTy.kind != itTuple or
        t[1].kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
@@ -8724,7 +8787,15 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   discard fieldStep(lhs, step)
   let recvIR = parseExpr(step.recv, preamble, ctx)
   let rebuilt =
-    if step.recvTy.kind == itTuple:
+    if step.recvTy.kind == itArray:
+      # RFC-0005 S8u: the other elements are constant-index reads of the old
+      # array (`iekIndex`'s concrete fast path: no fork).
+      var elems: seq[IRExpr]
+      for i in 0 ..< step.recvTy.size:
+        elems.add(if i == step.ix: newVal
+                  else: mkIndex(recvIR, mkIntLit(i)))
+      mkArrayLit(elems, step.recvTy.elemTy)
+    elif step.recvTy.kind == itTuple:
       var elems: seq[IRExpr]
       for i in 0 ..< step.recvTy.fields.len:
         elems.add(if i == step.ix: newVal
@@ -9517,6 +9588,21 @@ proc parseStmtInner(n: NimNode,
           stmts.add pre
           stmts.add mkAssume(c)
         mkBlock(stmts)
+    elif n.len == 2 and isNewCall(n) and
+         (block:
+            let recv = unwrapHidden(n[1])
+            recv.kind == nnkSym and
+              recv.symKind in {nskVar, nskResult, nskParam, nskLet} and
+              classifyType(recv).ty.kind in {itRef, itPtr}):
+      # RFC-0005 S8u. `new(x)` -- system's `proc new[T](a: var ref T)` --
+      # allocates a fresh cell and stores its address in `x`: the same
+      # rebind as `x = new T` (Phase 15 R8b's `mkNewT` under `x`'s name,
+      # every field of the fresh cell zero-initialised). Before S8u the
+      # statement was not modelled, so a callee's `new(result)` left
+      # `result` as it was and `retBindEq` faulted on the kind mismatch
+      # (`weInternalWalkerFault`, "svRef vs svBV64").
+      let recv = unwrapHidden(n[1])
+      mkNewT(recv.strVal, classifyType(recv).ty)
     elif n.len >= 2 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["inc", "dec"]) and
          (block:
             let recv = unwrapHidden(n[1])

@@ -912,5 +912,10 @@ task test, "Run the test suite":
             # lowered with nested guards (linear paths), Q1/B0, pair-loop,
             # B4 and isExact scan offsets allocated as stamped Ints;
             # walker 167->168.
-            "tsymex_rfc0005_s8t_termination"]:
+            "tsymex_rfc0005_s8t_termination",
+            # RFC-0005 S8u -- S8s's precision remainder: else-covered
+            # constructors, local Table / HashSet, `new(result)`, bool
+            # multi-variant axes, distinct / container zero values, array
+            # element writes; walker 168->169.
+            "tsymex_rfc0005_s8u_precision"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

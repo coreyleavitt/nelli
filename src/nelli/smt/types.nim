@@ -618,6 +618,11 @@ type
                         ## the ref/ptr it is compared against (resolved at parse
                         ## time from the OTHER operand). `refEq` then decides
                         ## `p == nil` as a ground equality on `Ref_T` consts.
+    iekZeroValue        ## RFC-0005 S8u: Nim's zero value of `zvTy` (an
+                        ## uninitialised `var t: Table[K, V]` / `HashSet[T]`
+                        ## local): the walker's `defaultZero`, an empty
+                        ## container. A type with no modelled zero value
+                        ## declines in-band at lowering.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -834,6 +839,8 @@ type
       nilPointee*: IRType            ## the pointee type of the ref/ptr it is
                                      ## compared against (an `itRef`/`itPtr` full
                                      ## type when the other operand is `ptr T`)
+    of iekZeroValue:                 ## RFC-0005 S8u
+      zvTy*: IRType                  ## the type whose zero value this is
 
   IRStmtKind* = enum
     isBlock
@@ -3548,6 +3555,12 @@ proc mkNil*(pointee: IRType): IRExpr =
   ## per-sort `nilConst`.
   IRExpr(kind: iekNil, nilPointee: pointee)
 
+proc mkZeroValue*(ty: IRType): IRExpr =
+  ## RFC-0005 S8u. Nim's zero value of `ty` (`default(T)`), for an
+  ## uninitialised local whose type has no literal zero in the IR (a `Table`,
+  ## a `HashSet`). Lowers to the walker's `defaultZero`.
+  IRExpr(kind: iekZeroValue, zvTy: ty)
+
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
 
@@ -3573,8 +3586,9 @@ proc mkVariantLit*(ty: IRType, tagOrd: int, tagName: string,
   ## Round-6 A1 (ADR-0029). `ty` must be the full `itVariant` IRType (as
   ## returned by `classifyType` on the object-constructor node). `tagOrd`
   ## is the literal discriminant's ordinal — the caller has already matched
-  ## it against one non-else `VariantArm.tagOrdinal` in `ty.vArms` (else-arm
-  ## literal construction is out of A1 scope). `armFields`/`plainFields`
+  ## it against one non-else `VariantArm.tagOrdinal` in `ty.vArms`, or
+  ## (RFC-0005 S8u) found none, and then the `else` arm is the active one.
+  ## `armFields`/`plainFields`
   ## are the ACTIVE arm's and the shared plain fields' constructor exprs,
   ## in `VariantArm.fieldNames`/`ty.vPlainFieldNames` order respectively.
   doAssert ty.kind == itVariant,
@@ -3590,8 +3604,9 @@ proc mkMultiVariantLit*(ty: IRType, axisTags: seq[int],
                         axisFields: seq[seq[IRExpr]],
                         plainFields: seq[IRExpr]): IRExpr =
   ## RFC-0005 S8p. `ty` is the full `itMultiVariant` IRType; `axisTags[i]`
-  ## is a non-else arm ordinal of `ty.mvAxes[i]` and `axisFields[i]` that
-  ## arm's field exprs, in its `fieldNames` order.
+  ## is the literal discriminator of `ty.mvAxes[i]` and `axisFields[i]` the
+  ## field exprs of the arm it selects, in its `fieldNames` order. RFC-0005
+  ## S8u: an ordinal no explicit arm names selects the axis's `else` arm.
   doAssert ty.kind == itMultiVariant,
     "mkMultiVariantLit: not an itMultiVariant: " & $ty.kind
   doAssert axisTags.len == ty.mvAxes.len and axisFields.len == ty.mvAxes.len,
@@ -5064,6 +5079,8 @@ proc render*(e: IRExpr): string =
       initPart & ")"
   of iekNil:              ## Phase 15 R5
     "nil"
+  of iekZeroValue:        ## RFC-0005 S8u
+    "default(" & $e.zvTy & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

@@ -309,6 +309,9 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     ## RFC-0005 S8s.
     fieldwiseEq(a.vfsRecv, b.vfsRecv) and a.vfsFieldName == b.vfsFieldName and
       a.vfsTags == b.vfsTags and fieldwiseEq(a.vfsVal, b.vfsVal)
+  of iekZeroValue:
+    ## RFC-0005 S8u.
+    fieldwiseEq(a.zvTy, b.zvTy)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -600,6 +603,12 @@ proc sVariantFieldSetPlain(): IRExpr =
   ## RFC-0005 S8s. A plain field: no tags.
   mkVariantFieldSet(mkVar("sentinelVariant"), "sentinelPlainField", @[],
                     mkBoolLit(true))
+proc sZeroValueTable(): IRExpr =
+  ## RFC-0005 S8u. An uninitialised local `Table[string, int]`.
+  mkZeroValue(tTable(tString(), tInt(64, true)))
+proc sZeroValueSet(): IRExpr =
+  ## RFC-0005 S8u. An uninitialised local `HashSet[int]`.
+  mkZeroValue(tSet(tInt(64, true)))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -679,6 +688,10 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sVariantFieldSet(), roundtripExpr(sVariantFieldSet()))
   test "iekVariantFieldSet (plain field, no tags)":
     check fieldwiseEq(sVariantFieldSetPlain(), roundtripExpr(sVariantFieldSetPlain()))
+  test "iekZeroValue (Table[string, int])":
+    check fieldwiseEq(sZeroValueTable(), roundtripExpr(sZeroValueTable()))
+  test "iekZeroValue (HashSet[int])":
+    check fieldwiseEq(sZeroValueSet(), roundtripExpr(sZeroValueSet()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -757,6 +770,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekVariantLit: discard                  ## "iekVariantLit"
       of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
       of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
+      of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"

@@ -298,14 +298,17 @@ type
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
+  R2E1 = enum r2e1 = 1, r2e2 = 2
   R2MVE = object
-    ## A multi-variant with a `HashSet` arm field: Nim's zero value is
-    ## legal (an empty set), but `defaultZero` has no set arm, so it has no
-    ## modelled zero. (Its ordinal 0 in an `else` arm was this pin's shape
-    ## until RFC-0005 S8s modelled that.)
+    ## A multi-variant with an arm field of an enum whose first ordinal is
+    ## 1: Nim's zero memory holds ordinal 0, which is no value of the enum
+    ## (probed: `ord(a) == 0`), so there is no legal zero to model.
+    ## (Its ordinal 0 in an `else` arm was this pin's shape until RFC-0005
+    ## S8s modelled that; a `HashSet[int]` arm field until S8u gave the
+    ## empty set as its zero.)
     case k: R2VK
     of r2B: b: int
-    else: a: HashSet[int]
+    else: a: R2E1
     case j: R2VK
     of r2A: c: int
     of r2B: d: int
@@ -372,7 +375,7 @@ suite "symex round-6 R2 — honest decline: a return type defaultZero cannot bac
                       tLabel("multivariant_zero_nonzero"))
     check z.status == sxUnsat
 
-  test "T5h-4: a result type with no modelled zero (a multi-variant with a HashSet field) still declines, never a bound wrong value":
+  test "T5h-4: a result type with no modelled zero (a multi-variant with an enum field that has no ordinal 0) still declines, never a bound wrong value":
     let r = symexFind(sutMultiVariantZeroDeclines,
                       tLabel("multivariant_zero_declines"))
     check r.status == sxSat

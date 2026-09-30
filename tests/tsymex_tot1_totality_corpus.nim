@@ -314,7 +314,7 @@ proc corpusBareLenRead(n: int) =
 # fallthrough (no explicit `return`) after a CONDITIONAL, multi-statement
 # `result = expr` assignment, where the returned VALUE is a composite kind
 # outside the scalar-wired set `isReturn`'s explicit-return arm already
-# supports (`svTuple`/`svVariant` and every scalar — but NOT `svTable` here; a `seq` is bound since RFC-0005 S8p, an `array` since S8s).
+# supports (`svTuple`/`svVariant` and every scalar; a `seq` is bound since RFC-0005 S8p, an `array` since S8s, and the `Table` here since S8u, which moved this row out of the corpus).
 # Pre-fix this degraded to an UNSOUND unconstrained `retSym` (the BLOCKER
 # #12 root cause, see `tests/tsymex_r6_a6r_callwitness.nim`); post-fix, a
 # composite kind the walker doesn't yet have a `retBindEq` arm for degrades
@@ -323,8 +323,9 @@ proc corpusBareLenRead(n: int) =
 # `sxSat` and never a crash.
 proc corpusCompositeFallthroughReturn(t: Table[string, int];
                                       x: int): Table[string, int] =
-  ## RFC-0005 S8p binds a `seq` result and S8s an `array` one, so this row
-  ## passes a `Table` through, which `retBindEq` still does not bind.
+  ## RFC-0005 S8p binds a `seq` result, S8s an `array` one and S8u a
+  ## `Table` one, so this callee's result is now bound (see the A6-rider
+  ## suite at the end of the file).
   if x < 0:
     raise newException(ValueError, "negative")
   result = t
@@ -333,6 +334,12 @@ proc corpusCompositeImplicitFallthrough(t: Table[string, int]; x: int) =
   let s = corpusCompositeFallthroughReturn(t, x)
   if s.len == t.len:
     symexTarget("composite_implicit_fallthrough")
+
+proc corpusCompositeImplicitFallthroughDead(t: Table[string, int]; x: int) =
+  ## RFC-0005 S8u. Real Nim: `s.len == t.len` on every input that returns.
+  let s = corpusCompositeFallthroughReturn(t, x)
+  if s.len != t.len:
+    symexTarget("composite_implicit_fallthrough_dead")
 
 # ---------------------------------------------------------------------------
 # The table. `symexFind` requires a literal `typed` proc per call (macro-time
@@ -494,20 +501,6 @@ let corpus = @[
              status: rBareLenRead.status, errors: rBareLenRead.errors,
              expectedKind: seNestedSeqUnsupported, hasKindCheck: true),
 
-  CorpusItem(label: "A6-rider: composite-typed implicit-result call fallthrough",
-             surface: "3. internal-fault / uncertain-taint",
-             backstops: "Round-6 A6-rider (isCall's implicit-fallthrough " &
-                        "retSym binding — a composite return kind outside " &
-                        "the scalar/tuple/variant wired set mirrors " &
-                        "isReturn's own existing composite-return degrade " &
-                        "net rather than leaving retSym unconstrained)",
-             status: rCompositeFallthrough.status, errors: rCompositeFallthrough.errors,
-             expectedKind: feUnsupportedOp, hasKindCheck: false,
-             # RFC-0005 S10: `s.len == t.len` for every x >= 0 (S8s: was
-             # `[x][0] == x` over an `array` result), so the label
-             # is reachable; the path's taint is dcFreshSymbol only, and the
-             # replayed candidate is confirmed.
-             replayConfirms: true, rawStatus: uCompositeFallthrough),
 ]
 
 # =============================================================================
@@ -573,3 +566,23 @@ suite "symex TOT-1 — §0-totality regression corpus":
     ## gate. All three §0 surfaces this corpus exercises (CR-2a/b/c, SND-1,
     ## SND-1b, CR-1c) landed at or before walker v46.
     check parseInt(symexWalkerVersion) >= 46
+
+suite "symex TOT-1 — A6-rider: an assigned composite result on an implicit fallthrough":
+  ## Was a §0 corpus row (a replay-confirmed `feUnsupportedOpHavoc`
+  ## candidate). RFC-0005 S8u binds a `Table` result (`retBindEq`), the last
+  ## composite kind a callee could return through this site, so the row left
+  ## the corpus: the run is exact now. The A6-rider property it backstopped
+  ## -- `retSym` is never left unconstrained after an assigned result --
+  ## is what this checks: `s.len == t.len` for every x >= 0 (real Nim), and
+  ## `s.len != t.len` on no input.
+  test "a Table result assigned before an implicit fallthrough is bound (RFC-0005 S8u)":
+    check rCompositeFallthrough.status == sxSat
+    check uCompositeFallthrough == sxSat
+    check rCompositeFallthrough.errors.len == 0
+
+  test "its dead twin is sxUnsat, never a free retSym's sxSat (RFC-0005 S8u)":
+    let r = symexFind(corpusCompositeImplicitFallthroughDead,
+                      tLabel("composite_implicit_fallthrough_dead"))
+    checkpoint($r.status & " " & $r.errors)
+    check r.status == sxUnsat
+    check r.errors.len == 0

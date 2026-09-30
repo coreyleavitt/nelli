@@ -105,11 +105,13 @@ proc s6bBoolOrderFresh(a: bool) =
 
 # ---- fresh: composite result through a callee --------------------------------
 #
-# RFC-0005 S8p binds a `seq` result (`retBindEq`'s svSeq arm) and S8s an
-# `array` one, so these pins pass a `Table` through the callee, which
-# `retBindEq` still does not bind: the per-call retSym stays free
-# (`feUnsupportedOpHavoc`). The table is an input: a callee building its own
-# local `Table` is a walker fault (reported by S8s, not fixed there).
+# RFC-0005 S8p binds a `seq` result (`retBindEq`'s svSeq arm), S8s an
+# `array` one and S8u a `Table`, `HashSet`, `ref` or `ptr` one: every kind a
+# callee can return through the composite-result site now binds, so these
+# pins check the bound result (exact verdicts, no errors). The free-retSym
+# guards in (c) moved to the untouched-result site (`s6bMaybeVariant`, a
+# type with no modelled zero). A callee returning a closure faults before
+# reaching the site (`allocateSym(itUninterp)`, reported by S8u).
 
 proc s6bMkTab(t: Table[string, int]): Table[string, int] =
   result = t
@@ -145,15 +147,18 @@ proc s6bTabFresh(t: Table[string, int]; n: int) =
 
 type
   S6bVK = enum s6bA, s6bB
+  S6bE1 = enum s6bE1 = 1, s6bE2 = 2
   S6bV = object
     ## Two `case` sections: a multi-variant. RFC-0005 S8n gave the
     ## single-case variant its zero value, S8p the multi-variant with an
     ## explicit ordinal-0 arm on every axis and S8s one whose ordinal 0
     ## falls in an `else` arm, so this site needs a type that still has
-    ## none: an arm field of a type `defaultZero` has no arm for (`HashSet`).
+    ## none: an arm field of an enum whose first ordinal is 1, so zero
+    ## memory is no value of it (a `HashSet[int]` field until RFC-0005 S8u
+    ## gave the empty set as its zero).
     case k: S6bVK
     of s6bB: b: int
-    else: a: HashSet[int]
+    else: a: S6bE1
     case j: S6bVK
     of s6bA: c: int
     of s6bB: d: int
@@ -165,6 +170,22 @@ proc s6bMaybeVariant(n: int): S6bV =
   ## ordinal-0 arm on every axis until S8p). Never assigned: the pin is
   ## about the untouched path alone.
   discard n
+
+proc s6bMaybeVariantLive(n: int) =
+  ## RFC-0005 S8u (was over a free `Table` retSym). Real Nim: the untouched
+  ## result's `k` is its zero, `s6bA`, so the target is never reached; only
+  ## the free retSym separates them.
+  let f = s6bMaybeVariant(n)
+  if f.k == s6bB:
+    symexTarget("s6b_seq_result_live")
+
+proc s6bMaybeVariantFresh(n: int) =
+  ## RFC-0005 S8u (was over two free `Table` retSyms). Real Nim: both
+  ## results are the zero value, so `f.k == g.k` on every input.
+  let f = s6bMaybeVariant(n)
+  let g = s6bMaybeVariant(n)
+  if f.k == g.k:
+    symexTarget("s6b_seq_fresh")
 
 proc s6bFloatZeroDead(n: int) =
   let f = s6bMaybeVariant(n)
@@ -410,17 +431,17 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check not r.errors.hasKind(feUnsupportedOp)
     checkUnsatOverTaintOnly(r)
 
-  test "composite result (implicit-result fallthrough): dead target is sxUnsat":
+  test "composite result (implicit-result fallthrough): a Table result is bound, the dead target exactly sxUnsat (RFC-0005 S8u)":
     let r = symexFind(s6bTabResultDead, tLabel("s6b_seq_result_dead"))
     show r
-    check r.errors.hasKind(feUnsupportedOpHavoc)
-    checkUnsatOverTaintOnly(r)
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
-  test "composite result (explicit return): dead target is sxUnsat":
+  test "composite result (explicit return): a Table result is bound, the dead target exactly sxUnsat (RFC-0005 S8u)":
     let r = symexFind(s6bTabReturnDead, tLabel("s6b_seq_return_dead"))
     show r
-    check r.errors.hasKind(feUnsupportedOpHavoc)
-    checkUnsatOverTaintOnly(r)
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
   test "untouched result without a zero default: dead target is sxUnsat":
     let r = symexFind(s6bFloatZeroDead, tLabel("s6b_float_zero_dead"))
@@ -463,21 +484,38 @@ suite "RFC-0005 S6b (c) -- guards":
     check r.errors.hasKind(feUnsupportedOpHavoc)
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
-    let r = symexFind(s6bTabResultLive, tLabel("s6b_seq_result_live"))
+    ## RFC-0005 S8u: over the untouched result with no modelled zero (a
+    ## bound `Table` result is exact: `s.len != t.len` is sxUnsat, below).
+    let r = symexFind(s6bMaybeVariantLive, tLabel("s6b_seq_result_live"))
     show r
     check r.status == sxUnknown
+    check r.errors.hasKind(feUnsupportedOpHavoc)
+
+  test "a bound Table result decides its own target: sxUnsat (RFC-0005 S8u)":
+    let r = symexFind(s6bTabResultLive, tLabel("s6b_seq_result_live"))
+    show r
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
   test "two havoc retSyms are independent: a candidate, confirmed by replay":
     ## Pre-S10 sxUnknown. RFC-0005 S10: reality reaches the target on every
     ## input (`n != n + 1`), so the replayed candidate is
     ## confirmed -> sxSat, with rules 1-2 having decided sxUnknown.
     ## (RFC-0005 S8p/S8s: over `Table` results; a `seq` and an `array`
-    ## result are bound.)
-    let r = symexFind(s6bTabFresh, tLabel("s6b_seq_fresh"))
+    ## result are bound. S8u binds a `Table` too, so this is over two
+    ## untouched results with no modelled zero.)
+    let r = symexFind(s6bMaybeVariantFresh, tLabel("s6b_seq_fresh"))
     show r
     check r.status == sxSat
     check rfc0005RawStatus == sxUnknown
     check r.errors.hasKind(feUnsupportedOpHavoc)
+
+  test "two bound Table results agree: exact sxSat (RFC-0005 S8u)":
+    let r = symexFind(s6bTabFresh, tLabel("s6b_seq_fresh"))
+    show r
+    check r.status == sxSat
+    check rfc0005RawStatus == sxSat
+    check r.errors.len == 0
 
   test "a target decided only by the merged string is a candidate: sxUnknown":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
@@ -577,11 +615,17 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## free, a superset of the zero value Nim returns -- the fresh class of
     ## the `isCall` arm's untouched-result twin; pinned sxUnsat-licensing in
     ## `tsymex_rfc0005_s8l_exits.nim`). The composite-return site moved
-    ## from the `isReturn` arm into `completeReturn` unchanged.
+    ## from the `isReturn` arm into `completeReturn` unchanged. RFC-0005 S8u
+    ## added the thirteenth and fourteenth, both fresh: `lower`'s
+    ## `iekZeroValue` arm for a type with no modelled zero (a fresh value of
+    ## the type, a superset of Nim's `default(T)`), and `retBindEq`'s
+    ## kind-mismatch backstop (was a raise; `retSym` left free). The
+    ## call-return drains now also take a kind mismatch
+    ## (`retBindKindsAgree`) through their existing site.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 12
+    check sites.len == 14
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

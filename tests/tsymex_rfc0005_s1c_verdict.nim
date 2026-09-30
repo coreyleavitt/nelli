@@ -87,7 +87,7 @@ proc s1cTaintedCaught(p: S1cPoint, b: int) =
       raise newException(ValueError, "s1c tainted raise")
   except ValueError:
     var q = [p.x, p.y]
-    q[0] += b  # RFC-0005 S8p/S8s model a field and a tuple element; an array element still declines
+    q[b and 1] += b  # RFC-0005 S8p/S8s/S8u model a field, a tuple element and a constant-index array element; a symbolic index still declines
   symexTarget("s1c_after_catch")
 
 # (c) witness monotonicity, tainted arm FIRST: the `if` arm is walked before

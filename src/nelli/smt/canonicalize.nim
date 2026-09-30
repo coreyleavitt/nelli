@@ -184,7 +184,24 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "168"
+const symexWalkerVersion* = "169"
+  ## RFC-0005 S8u (2026-09-29) — S8s's precision remainder. A variant
+  ## constructor naming a tag only an `else` arm covers builds the variant
+  ## (was `feUnsupportedExprKind`). An uninitialised local `Table[string,
+  ## int]` / `HashSet[int]` is the empty container (`iekZeroValue`; the
+  ## first write hit `lower`'s receiver assertion, `weInternalWalkerFault`).
+  ## `new(x)` allocates, as `x = new T` does (a callee's `new(result)` was
+  ## `weInternalWalkerFault`). A callee's `ref` / `ptr` / table / set result
+  ## binds (`retBindEq`; was `feUnsupportedOpHavoc`), and the call cache no
+  ## longer admits a callee that allocated or wrote the heap. A
+  ## multi-variant `bool` axis allocates, constructs and reassigns (was
+  ## `weInternalWalkerFault`). The zero value of a `distinct` (its base's),
+  ## a `ref` (`nil`) and a backed table / set (empty) is modelled (was
+  ## `feUnsupportedOpHavoc`). An array element at a constant index is
+  ## written in place, `=` and `op=` (was `feUnsupportedStmtKind`). 168 ->
+  ## 169.
+  ##
+  ## (Prior: 168.)
   ## RFC-0005 S8t (2026-09-29) — S8q's termination remainder. A boolean
   ## `and`/`or` chain is lowered with ONE guard temporary whose guards nest
   ## (`lowerShortCircuitParts`, `dsl_parser.nim`): D1c's chained
@@ -4666,6 +4683,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       canonicalize(e.hofRetElemTy) & ">"
   of iekNil:                             ## Phase 15 R5
     "Ex<Nil:" & canonicalize(e.nilPointee) & ">"
+  of iekZeroValue:                       ## RFC-0005 S8u
+    "Ex<Zero:" & canonicalize(e.zvTy) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 

@@ -862,6 +862,13 @@ proc bvConst(ty: IRType, n: int64): SymVal =
   else:  raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always constructed as 8/16/32/64)]
                             "bvConst: unsupported width " & $ty.width)
 
+proc discConst(ty: IRType, n: int64): SymVal =
+  ## RFC-0005 S8u. A discriminator pinned to ordinal `n`: `bvConst` for an
+  ## enum / int / range discriminator, a Bool constant for a `bool` one
+  ## (Phase 15 F9c allocates that as svBool). `bvConst` asserted `itInt`.
+  if ty.kind == itBool: ofBool(mkBool(n != 0))
+  else: bvConst(ty, n)
+
 proc intLitProto(ty: IRType): Option[SymVal] =
   ## v69 (sello #1, bv32/svBV64 width confusion): the literal-shaping proto
   ## for a binding/argument site with a declared fixed-width int type. A bare
@@ -2788,9 +2795,12 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # unreachable, and a callee's zero-valued result contradicted its
       # own allocation.
       let (_, _, ordSet) = axisDiscriminatorDomain(ax)
-      if discInner.kind notin {svBV8, svBV16, svBV32, svBV64}:
-        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (multi-variant axis discriminator is always BV-allocated)]
-          "symex Phase 14: multi-variant axis disc must be a BV kind " &
+      # RFC-0005 S8u: a `bool` axis allocates an svBool discriminator, as a
+      # single-case `bool` variant does (Phase 15 F9c); `variantDiscEq` has
+      # its arm. This raised `weInternalWalkerFault` before S8u.
+      if discInner.kind notin {svBV8, svBV16, svBV32, svBV64, svBool}:
+        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (multi-variant axis discriminator is always BV- or (bool axis) Bool-allocated)]
+          "symex Phase 14: multi-variant axis disc must be a BV or bool kind " &
           "(got " & $discInner.kind & ")")
       if ordSet.len > 0:
         var clause = variantDiscEq(discInner, int64(ordSet[0]))
@@ -3368,6 +3378,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # representation; the ref/ptr operand it is compared against supplies the
     # comparison's shape (ref/ptr ==/!= dispatches via `refEq`, not a proto).
     none(SymVal)
+  of iekZeroValue:
+    # RFC-0005 S8u. An empty container: no integer representation.
+    none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
 
@@ -3660,6 +3673,37 @@ proc svIntToBV(sv: SymVal, likeKind: SVKind): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (doAssert sv.kind == svInt at entry)]
       "svIntToBV: target kind is not BV — got " & $likeKind)
 
+
+proc bv64Operand(v: SymVal): Option[Z3BitVec[64]] =
+  ## RFC-0005 S8u. A 64-bit int operand of a `Table[string, int]` value or a
+  ## `HashSet[int]` element: the bit-vector itself, or an Int-promoted value
+  ## converted (`svIntToBV`, exact for an int64). `none` for any other kind.
+  case v.kind
+  of svBV64: some(v.bv64)
+  of svInt: some(svIntToBV(v, svBV64).bv64)
+  else: none(Z3BitVec[64])
+
+proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
+  ## RFC-0005 S8u. True, after recording an in-band decline, when a table or
+  ## set mutation's receiver did not lower to `want`: the stand-in of an
+  ## earlier in-band degrade (an unbound local read as a global). The caller
+  ## returns the receiver unchanged. These were `doAssert`s, reported as
+  ## `weInternalWalkerFault`.
+  ## A table receiver whose key type is not `string` (`allocateSym`'s
+  ## declined, inert placeholder) is declined here too, before its key is
+  ## lowered against a string prototype (`coerceIntLit` raised on it).
+  if recv.kind == want:
+    if want == svTable and recv.tabKeyTy.kind != itString:
+      lowerDegrade(seUnsupportedTableKeyType,
+        op & ": Table key type not modeled: " & $recv.tabKeyTy &
+        " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
+      return true
+    return false
+  lowerDegrade(feUnsupportedOp,
+    op & ": receiver lowered to " & plainEnglishSymValKind(recv.kind) &
+    ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
+  true
+
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
   ## Nim int (including plain `int`/`uint`, width 64) allocates as an svBV*
@@ -3881,12 +3925,13 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal)
 
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
-                           svMultiVariant, svSeq, svDistinct, svArray}
+                           svMultiVariant, svSeq, svDistinct, svArray,
+                           svRef, svPtr, svTable, svSet}
   ## The value kinds `retBindEq` binds structurally; the two call-return
   ## drains (`completeReturn`, the `isCall` fall-through) decline any other
   ## (`feUnsupportedOpHavoc`). RFC-0005 S8p added `svMultiVariant`, `svSeq`
   ## and `svDistinct`, and made it one set (each drain had its own copy).
-  ## RFC-0005 S8s added `svArray`.
+  ## RFC-0005 S8s added `svArray`; S8u `svRef`, `svPtr`, `svTable`, `svSet`.
 
 proc armSelected(disc: SymVal; tagOrd: int;
                  arms: OrderedTable[int, seq[SymVal]]): Z3Bool =
@@ -3899,6 +3944,18 @@ proc armSelected(disc: SymVal; tagOrd: int;
   result = mkBool(true)
   for t in arms.keys:
     if t >= 0: result = result and not variantDiscEq(disc, int64(t))
+
+proc retBindKindsAgree(retSym, retVal: SymVal): bool =
+  ## RFC-0005 S8u. True when `retBindEq` can bind `retVal` to `retSym` at the
+  ## top level: the same kind once a `distinct` is ejected and mixed int
+  ## representations are reconciled. The call-return drains check it with
+  ## `retBindWiredKinds`, so a disagreeing pair takes their path-level
+  ## `feUnsupportedOpHavoc` decline (the path is forked tainted) instead of
+  ## `retBindEq`'s lowering-sink backstop.
+  let a = if retSym.kind == svDistinct: ejectBase(retSym) else: retSym
+  let b = if retVal.kind == svDistinct: ejectBase(retVal) else: retVal
+  let (ra, rb) = reconcileInt(a, b)
+  ra.kind == rb.kind
 
 proc retBindEq(retSym, retVal: SymVal): Z3Bool =
   ## Phase 15 G3: the binding constraint linking a call's fresh `retSym`
@@ -3951,9 +4008,18 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
     # not the `doAssert` this replaces — a genuine, still-mismatched kind
     # after reconciliation is exactly as "should never happen" as before,
     # but now fails the same catchable way every neighboring arm does.
-    raise newException(ValueError,  # [raise-audited: category-c: documented walker-invariant sentinel (own comment: PROVEN UNREACHABLE in valid Nim today -- defensive addition, no repro constructed)]
-      "retBindEq: kind mismatch " & $retSym.kind & " vs " & $retVal.kind &
-      " (after reconcileInt)")
+    #
+    # RFC-0005 S8u: in-band now, as the composite catch-all below. It was
+    # reachable: a callee whose `result` was an in-band degrade's stand-in
+    # (a field write on a `result` with no modelled zero value read the
+    # unmodelled global `result`, an int) met a composite `retSym` here, and
+    # the raise surfaced as `weInternalWalkerFault`. The stand-in's own
+    # degrade already taints the path; this records the unbound return.
+    allocDegrade(feUnsupportedOpHavoc,
+      "retBindEq: returned value's kind " & plainEnglishSymValKind(retVal.kind) &
+      " does not match the result's " & plainEnglishSymValKind(retSym.kind) &
+      " — result left unbound (feUnsupportedOpHavoc)")
+    return mkBool(true)
   case retSym.kind
   of svBool: retSym.bo == retVal.bo
   of svInt:  retSym.zi == retVal.zi
@@ -4088,10 +4154,36 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       let (es, ev) = reconcileInt(retSym.arrElems[i], retVal.arrElems[i])
       acc = acc and retBindEq(es, ev)
     acc
+  of svRef, svPtr:
+    ## RFC-0005 S8u: a `ref` / `ptr` binds its address. The heap it points
+    ## into is the path's (`heaps`, carried out of the callee by the return
+    ## merge), so the caller reads what the callee wrote. `checkedEq` records
+    ## a sort fault rather than build an ill-sorted equality. Before S8u a
+    ## ref result was `feUnsupportedOpHavoc`, and a callee's `new(result)`
+    ## a `weInternalWalkerFault` (the statement was not modelled).
+    let (a, b) = if retSym.kind == svRef: (retSym.refAst, retVal.refAst)
+                 else: (retSym.ptrAst, retVal.ptrAst)
+    wrap[Z3Bool](a.ctx, checkedEq(a.ctx, a.raw, b.raw))
+  of svTable:
+    ## RFC-0005 S8u: a `Table[string, int]` binds its present and data
+    ## arrays and its size (the whole value; `retSym` is fresh per call).
+    let ctx = retSym.tabSize.ctx
+    (retSym.tabSize == retVal.tabSize) and
+      wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabPresentRaw.raw,
+                                  retVal.tabPresentRaw.raw)) and
+      wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabDataRaw.raw,
+                                  retVal.tabDataRaw.raw))
+  of svSet:
+    ## RFC-0005 S8u: a `HashSet[int]` binds its member array and size.
+    let ctx = retSym.setSize.ctx
+    (retSym.setSize == retVal.setSize) and
+      wrap[Z3Bool](ctx, checkedEq(ctx, retSym.setMembersRaw.raw,
+                                  retVal.setMembersRaw.raw))
   else:
     # N46 (round-6 re-review): was a raw `raise newException`. Reached for
     # a proc returning `Table[K,V]`/`HashSet[T]`/`ref`/`ptr` (RFC-0005 S8p
-    # and S8s wired the multi-variant and the array) -- all ordinary Nim return-type
+    # and S8s wired the multi-variant and the array, S8u the ref, ptr, table
+    # and set) -- all ordinary Nim return-type
     # shapes, called from inside a loop reaches this unguarded. In-band
     # degrade: `mkBool(true)` mirrors the svSeq arm's own placeholder
     # idiom immediately above (sound vacuous binding).
@@ -4117,16 +4209,20 @@ func variantZeroTotal(t: IRType): bool
 func multiVariantZeroTotal(t: IRType): bool
   ## RFC-0005 S8p fwd-decl (defined beside `defaultZeroTotal`, below).
 
+func containerZeroBacked(t: IRType): bool
+  ## RFC-0005 S8u fwd-decl (defined beside `defaultZeroTotal`, below).
+
 proc defaultZero(t: IRType, baseName: string): SymVal =
   ## Recursive type-driven zero-init — Nim's `default(T)` value, expressed as
   ## a Z3 constant (never a fresh symbolic variable: the zero value is fully
   ## known, so no `pcOut`/path-condition threading is needed the way
   ## `allocateSym` needs for a genuinely free symbol). Inherits `allocateSym`'s
   ## scope for containers — Table with non-string keys and HashSet with
-  ## non-int64 elements still raise (RFC §A5 sub-deferral);
-  ## `itDistinct`/`itRef`/`itPtr` also still raise (never wired for
-  ## zero-init — out of both A5's and R2's scope; a caller reaching one of
-  ## these must classified-decline, never bind a wrong value), as does a
+  ## non-int64 elements still raise (RFC §A5 sub-deferral; RFC-0005 S8u
+  ## builds the empty `Table[string, int]` / `HashSet[int]`, and the zero of
+  ## a `distinct` (its base's) and of a `ref`/`ptr` (`nil`); a caller
+  ## reaching a raising shape must classified-decline, never bind a wrong
+  ## value), as does a
   ## variant (RFC-0005 S8n) or multi-variant (S8p) whose ordinal-0
   ## discriminator is not a legal tag (an explicit arm's, or one an `else`
   ## arm covers). `itFloat*` returns 0.0 since
@@ -4206,12 +4302,24 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svSeq, seqLen: mkInt(0),
              seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
   of itSet, itTable:
-    # RFC §A5 sub-deferral: container fields inherit `allocateSym`'s scope
-    # guard. Empty-container construction requires a fresh Z3Array
-    # allocation which the current SymVal shape doesn't expose a
-    # constructor for outside `allocateSym`; defer until a concrete
-    # consumer demands it.
-    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (RFC A5 sub-deferral, container zero-init) -- every defaultZero call site now wraps in try/except (N46 closed the one unguarded site, applyClosureGround)]
+    # RFC-0005 S8u: the empty container, for the shapes `allocateSym` backs
+    # (`Table[string, int]`, `HashSet[int]`): no key present (a constant
+    # `false` array) and size 0. The data array is a constant too; it is
+    # read only at a present key. `size >= |present keys|` (`containerCard`)
+    # holds of it trivially, so it is not registered. Any other shape keeps
+    # the A5 sub-deferral raise (`containerZeroBacked` is false for it, so a
+    # `defaultZeroTotal` caller never reaches it).
+    if containerZeroBacked(t):
+      if t.kind == itTable:
+        let present = mkConstArray[Z3String, Z3Bool](mkBool(false))
+        let data = mkConstArray[Z3String, Z3BitVec[64]](mkBitVec[64](0'i64))
+        return SymVal(kind: svTable, tabDataRaw: toAnyAst(data),
+                      tabPresentRaw: toAnyAst(present), tabSize: mkInt(0),
+                      tabKeyTy: t.tabKeyTy, tabValTy: t.tabValTy)
+      let members = mkConstArray[Z3BitVec[64], Z3Bool](mkBool(false))
+      return SymVal(kind: svSet, setMembersRaw: toAnyAst(members),
+                    setSize: mkInt(0), setElemTy: t.setElemTy)
+    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (RFC A5 sub-deferral, container zero-init of a shape allocateSym does not back) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8u)]
       "A5 zero-init: container field " & $t &
       " not yet supported (RFC §A5 sub-deferral)")
   of itVariant, itMultiVariant:
@@ -4268,20 +4376,40 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (a variant or multi-variant whose zero discriminator is not a legal tag has no default) -- every defaultZero call site now wraps in try/except or checks defaultZeroTotal (N46, S8n)]
       "A5 zero-init: variant " & $t & " has no legal zero value")
   of itDistinct:
-    # Phase 15 G4: a distinct-typed zero-init needs the per-run
-    # distinct-sort cache + pcOut threading, which this constructor-less
-    # context doesn't expose. Out of scope; raised loudly (Invariant 3).
-    raise newException(ValueError,  # [raise-audited: category-c: documented out-of-scope invariant (distinct zero-init not wired) -- every defaultZero call site now wraps in try/except (N46)]
-      "A5 zero-init: distinct " & $t &
-      " not supported (Phase 15 G4 sub-deferral)")
+    # RFC-0005 S8u: Nim's `default(D)` for `D = distinct B` is B's zero. A
+    # distinct value is its base value in the IR (the parser's `D(x)` is
+    # the identity, S8p), and `retBindEq` binds a distinct through its
+    # ejected base, so the base's zero is the whole value. Before S8u this
+    # raised (Phase 15 G4 sub-deferral): an untouched distinct result was
+    # `feUnsupportedOpHavoc`.
+    defaultZero(t.distinctBase, baseName)
   of itRef, itPtr:
-    # Phase 15 R1a STUB: zero-initing a ref/ptr is `nil`, but the logical-
-    # heap nil-const lands R5. Out of scope; classified halt.
-    raise (ref SymexRefUnresolvedError)(  # [raise-audited: converted-at-chokepoint -- all 3 defaultZero callers wrap ValueError/SymexRefUnresolvedError]
-      msg: "ref/ptr zero-init " & $t &
-           " not yet modeled (Cluster R R1a structural stub; nil lands R5)")
+    # RFC-0005 S8u: a `ref`/`ptr` is zero-initialised to `nil`: the per-sort
+    # `nilConst` Phase 15 R5's `iekNil` lowers to (an untouched `ref`
+    # result). Before S8u this raised (the R1a stub).
+    let ctx = requireCurrentContext()
+    let isPtr = t.kind == itPtr
+    let pointee = if isPtr: t.ptrPointeeTy else: t.refPointeeTy
+    discard allocRefSort(ctx, pointee)        ## ensure the sort + nilConst exist
+    let nilAst = currentNilConsts[refPointeeTypeId(pointee)]
+    if isPtr:
+      SymVal(kind: svPtr, ptrAst: nilAst, ptrFamily: true, ptrPointee: pointee)
+    else:
+      SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+func containerZeroBacked(t: IRType): bool =
+  ## RFC-0005 S8u. A `Table` / `HashSet` shape whose empty value `defaultZero`
+  ## builds: the shapes `allocateSym` backs (`Table[string, int]`,
+  ## `HashSet[int]`, 64-bit).
+  case t.kind
+  of itTable:
+    t.tabKeyTy.kind == itString and t.tabValTy.kind == itInt and
+      t.tabValTy.width == 64 and t.tabValTy.signed
+  of itSet:
+    t.setElemTy.kind == itInt and t.setElemTy.width == 64
+  else: false
 
 func variantZeroTotal(t: IRType): bool =
   ## RFC-0005 S8n: true when the all-zero memory of variant `t` is a value
@@ -4340,6 +4468,9 @@ func defaultZeroTotal(t: IRType): bool =
   of itSeq: true
   of itVariant: variantZeroTotal(t)   # RFC-0005 S8n
   of itMultiVariant: multiVariantZeroTotal(t)   # RFC-0005 S8p
+  of itTable, itSet: containerZeroBacked(t)     # RFC-0005 S8u
+  of itDistinct: defaultZeroTotal(t.distinctBase)   # RFC-0005 S8u
+  of itRef, itPtr: true                         # RFC-0005 S8u: nil
   else: false
 
 # ---------------------------------------------------------------------------
@@ -6356,7 +6487,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
            seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
   of iekTableSet:
     let recv = lower(env, e.tabRecv)
-    doAssert recv.kind == svTable
+    if containerRecvDeclined(recv, svTable, "`t[k] = v`"): return recv
     let keyProto = SymVal(kind: svString, str: mkString(""))
     let keySV = lower(env, e.tabKey, some(keyProto))
     doAssert keySV.kind == svString
@@ -6369,9 +6500,15 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         recv.tabDataRaw.ctx, recv.tabDataRaw.raw)
       let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
         recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
-      let vbv = case val.kind
-        of svBV64: val.bv64
-        else: mkBitVec[64](0'i64)
+      # RFC-0005 S8u: an Int-promoted value converts (`bv64Operand`); any
+      # other kind declines. The `else` arm stored 0 in its place.
+      let vOpt = bv64Operand(val)
+      if vOpt.isNone:
+        lowerDegrade(feUnsupportedOp,
+          "iekTableSet: value lowered to " & plainEnglishSymValKind(val.kind) &
+          " — expected a 64-bit int (feUnsupportedOp)")
+        return recv
+      let vbv = vOpt.get
       noteTableKey(keySV.str)   ## RFC-0005 S8f
       let newData = store(typedData, keySV.str, vbv)
       let newPresent = store(typedPresent, keySV.str, mkBool(true))
@@ -6398,7 +6535,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       return recv
   of iekTableDel:
     let recv = lower(env, e.mutRecv)
-    doAssert recv.kind == svTable
+    if containerRecvDeclined(recv, svTable, "`t.del(k)`"): return recv
     let keyProto = SymVal(kind: svString, str: mkString(""))
     let keySV = lower(env, e.mutArg, some(keyProto))
     let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
@@ -6414,28 +6551,40 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
   of iekSetIncl:
     let recv = lower(env, e.mutRecv)
-    doAssert recv.kind == svSet
-    let elem = lower(env, e.mutArg)
-    doAssert elem.kind == svBV64
+    if containerRecvDeclined(recv, svSet, "`s.incl(x)`"): return recv
+    let elemSV = lower(env, e.mutArg)
+    let elemOpt = bv64Operand(elemSV)   ## RFC-0005 S8u
+    if elemOpt.isNone:
+      lowerDegrade(feUnsupportedOp,
+        "iekSetIncl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
+        " — expected a 64-bit int (feUnsupportedOp)")
+      return recv
+    let elem = elemOpt.get
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
       recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
-    noteSetKey(elem.bv64)   ## RFC-0005 S8f
-    let wasMember = select(typed, elem.bv64)
-    let newMembers = store(typed, elem.bv64, mkBool(true))
+    noteSetKey(elem)   ## RFC-0005 S8f
+    let wasMember = select(typed, elem)
+    let newMembers = store(typed, elem, mkBool(true))
     let newSize = ite(wasMember, recv.setSize, recv.setSize + mkInt(1))
     SymVal(kind: svSet,
       setMembersRaw: toAnyAst(newMembers),
       setSize: newSize, setElemTy: recv.setElemTy)
   of iekSetExcl:
     let recv = lower(env, e.mutRecv)
-    doAssert recv.kind == svSet
-    let elem = lower(env, e.mutArg)
-    doAssert elem.kind == svBV64
+    if containerRecvDeclined(recv, svSet, "`s.excl(x)`"): return recv
+    let elemSV = lower(env, e.mutArg)
+    let elemOpt = bv64Operand(elemSV)   ## RFC-0005 S8u
+    if elemOpt.isNone:
+      lowerDegrade(feUnsupportedOp,
+        "iekSetExcl: element lowered to " & plainEnglishSymValKind(elemSV.kind) &
+        " — expected a 64-bit int (feUnsupportedOp)")
+      return recv
+    let elem = elemOpt.get
     let typed = wrap[Z3Array[Z3BitVec[64], Z3Bool]](
       recv.setMembersRaw.ctx, recv.setMembersRaw.raw)
-    noteSetKey(elem.bv64)   ## RFC-0005 S8f
-    let wasMember = select(typed, elem.bv64)
-    let newMembers = store(typed, elem.bv64, mkBool(false))
+    noteSetKey(elem)   ## RFC-0005 S8f
+    let wasMember = select(typed, elem)
+    let newMembers = store(typed, elem, mkBool(false))
     let newSize = ite(wasMember, recv.setSize - mkInt(1), recv.setSize)
     SymVal(kind: svSet,
       setMembersRaw: toAnyAst(newMembers),
@@ -6520,6 +6669,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let recv = lower(env, e.container)
     case recv.kind
     of svTable:
+      if containerRecvDeclined(recv, svTable, "`k in t`"):
+        # RFC-0005 S8u: a non-string-keyed table (declined at allocation).
+        var fresh: seq[Z3Bool]
+        return allocateSym(tBool(), freshDegradeName("__tabKeyDegrade"), fresh)
       let keyProto = SymVal(kind: svString, str: mkString(""))
       let keySV = lower(env, e.key, some(keyProto))
       doAssert keySV.kind == svString
@@ -6887,6 +7040,21 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       SymVal(kind: svPtr, ptrAst: nilAst, ptrFamily: true, ptrPointee: pointee)
     else:
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
+  of iekZeroValue:
+    # RFC-0005 S8u. An uninitialised `var t: Table[K, V]` / `HashSet[T]`
+    # local: Nim's `default(T)`, the empty container (`defaultZero`). A
+    # shape the walker does not back (`Table[int, V]`, `HashSet[string]`)
+    # has no zero value here: allocate it as `allocateSym` does, whose
+    # classified in-band decline taints the path.
+    if defaultZeroTotal(e.zvTy):
+      defaultZero(e.zvTy, "__zeroValue")
+    else:
+      var scratch: seq[Z3Bool]
+      let sv = allocateSym(e.zvTy, freshDegradeName("__zeroValueUnmodelled"),
+                           scratch)
+      lowerDegrade(feUnsupportedOpHavoc,
+        "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
+      sv
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -9739,6 +9907,17 @@ proc symValHash(sv: SymVal): uint =
           h = (h shl 1) xor symValHash(f)
     h
 
+proc heapUnchanged(a, b: Path): bool =
+  ## RFC-0005 S8u. `a`'s logical heap is `b`'s: the same per-type allocation
+  ## counters and the same heap array handle per sort (a store makes a new
+  ## handle). The call cache admits a callee only when its return path
+  ## leaves the caller's heap as it found it.
+  if a.allocCounters != b.allocCounters: return false
+  if a.heaps.len != b.heaps.len: return false
+  for k, h in a.heaps:
+    if not b.heaps.hasKey(k) or b.heaps[k].raw != h.raw: return false
+  true
+
 proc argShapeKey(callee: string, args: seq[SymVal]): string =
   ## (callee, argShapeHash) → a string key. Hash combination is XOR
   ## with bit rotation — collisions are merely cache misses, never
@@ -10817,8 +10996,12 @@ proc discFromRhs(rhs, oldDisc: SymVal): SymVal =
     result.signed = oldDisc.signed
   of svInt:
     result = SymVal(kind: svInt, zi: toZ3Int(rhs))
+  of svBool:
+    # RFC-0005 S8u: a `bool` discriminator (`of true: ...; else: ...`). The
+    # RHS of an assignment to it is a `bool`.
+    result = rhs
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (allocateSym's itVariant/itMultiVariant arms only ever allocate a BV/Int discriminator)]
+    raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (allocateSym's itVariant/itMultiVariant arms only ever allocate a BV/Int/Bool discriminator)]
       "discFromRhs: discriminator must be a BV or Z3Int kind (got " &
       $oldDisc.kind & ")")
 
@@ -10893,7 +11076,8 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   # Round-6 A2 (ADR-0029): svVariant joins the wired set —
   # retBindEq's general encoding (discEq + guarded per-arm field
   # eq + plain-field eq) binds a variant-returning callee.
-  if retSym.kind notin retBindWiredKinds:
+  if retSym.kind notin retBindWiredKinds or
+      not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
     # NOTE: `w.walkDegradeErrors`, NOT the `loweringDegradeErrors`
     # threadvar — that sink is reset at every `lowerInExpr` wrapper
     # entry, so an entry added HERE (after the wrapper returned)
@@ -11553,6 +11737,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         ## can appear in a string sub-expression, so no seed+drain needed here.
         ## If the parser ever emits non-string keyed tables, add the uniform
         ## seed/drain wrapper before the lower call.
+        if arrSV.tabKeyTy.kind != itString:
+          # RFC-0005 S8u: a non-string-keyed table is `allocateSym`'s
+          # declined, inert placeholder; its key must not be lowered against
+          # the string prototype below (`coerceIntLit` raised on an int
+          # literal, a `weInternalWalkerFault`).
+          let d = w.degrade(seUnsupportedTableKeyType,
+            "Table key type not modeled at index: " & $arrSV.tabKeyTy &
+                 " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
+          survivors.add forkPathTainted(p, p.pc, p.env, d)
+          continue
         let keyProto = SymVal(kind: svString, str: mkString(""))
         let keySV = lower(p.env, stmt.ixIdx, some(keyProto))
         doAssert keySV.kind == svString
@@ -12056,10 +12250,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         of svBV32: rhsSV.bv32 == mkBitVec[32](tagOrd)
         of svBV64: rhsSV.bv64 == mkBitVec[64](tagOrd)
         of svInt:  rhsSV.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+        of svBool: rhsSV.bo   == mkBool(tagOrd != 0)  ## RFC-0005 S8u: bool disc
         else:
           raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-            "isVariantReassignSymbolic: RHS must lower to a BV or " &
-            "Z3Int kind (got " & $rhsSV.kind & ")")
+            "isVariantReassignSymbolic: RHS must lower to a BV, " &
+            "Z3Int or Bool kind (got " & $rhsSV.kind & ")")
       ## R1 (Invariant-3 soundness fix): `stmt.vrsRhs` may itself deposit
       ## scalar-raise-fork predicates. Undrained, those were silently
       ## discarded — no raise fork, no bounds narrowing. Drain and thread
@@ -12101,9 +12296,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
               of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
               of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+              of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool disc
               else:
                 raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-                  "isVariantReassignSymbolic: old disc must be BV or Z3Int")
+                  "isVariantReassignSymbolic: old disc must be BV, Z3Int or Bool")
             let newDiscInner =
               if tag < 0: discFromRhs(rhsSV, oldSV.vDisc[]) else: newDiscConst
             let newDiscBoxed = new(SymVal)
@@ -12153,9 +12349,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
               of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
               of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+              of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool axis
               else:
                 raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-                  "isVariantReassignSymbolic: axis disc must be a BV kind")
+                  "isVariantReassignSymbolic: axis disc must be a BV or bool kind")
             let newDiscInner =
               if tag < 0: discFromRhs(rhsSV, oldAxis.disc[]) else: newDiscConst
             let newDiscBoxed = new(SymVal)
@@ -12352,7 +12549,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               fields.add defaultZero(ft, path)
             armFields[arm.tagOrdinal] = fields
           let discBoxed = new(SymVal)
-          discBoxed[] = bvConst(vcsTy.vDiscTy, int64(tag))
+          discBoxed[] = discConst(vcsTy.vDiscTy, int64(tag))
           let newSV = SymVal(kind: svVariant, vDisc: discBoxed,
                              vDiscName: vcsTy.vDiscName,
                              vObjectName: vcsTy.vObjectName,
@@ -12951,7 +13148,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for cp in fallThroughRaw:
               if cp.env.hasKey("result"):
                 let retVal = cp.env["result"]
-                if retVal.kind notin retBindWiredKinds:
+                if retVal.kind notin retBindWiredKinds or
+                    not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
                   # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
                   # composite arm: the per-call `retSym` is left free, the
                   # callee's effects ride `cp`, nothing is dropped.
@@ -13027,10 +13225,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # escaping. Conservatively skip caching when the callee added any such
           # fact, so a cache hit can never silently drop a `not overflow`/`not
           # divByZero` feasibility constraint. (Sound; merely less reuse.)
+          # RFC-0005 S8u: nor when the callee allocated or wrote the heap
+          # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
+          # `new(result)` callee with the same argument shape would return
+          # the first call's address, and a heap write would be lost.
           if calleeEscaped.len == 0 and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
              frame.returnedPaths[0].taint == {} and
-             frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len:
+             frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
+             heapUnchanged(frame.returnedPaths[0], p):
             let cp = frame.returnedPaths[0]
             let prefixLen = p.pc.len
             if cp.pc.len >= prefixLen:
@@ -14598,11 +14801,17 @@ proc variantLitArms(env: Env, arms: seq[VariantArm], tagOrd: int,
   ## every other arm's are fresh (see `lowerVariantLit`'s soundness note).
   ## Extracted from `lowerVariantLit` by RFC-0005 S8p, which reuses it per
   ## axis in `lowerMultiVariantLit`.
+  ## RFC-0005 S8u: `tagOrd` is the discriminator's value. When no explicit
+  ## arm names it, the active arm is the `else` arm (key -1), which the
+  ## parser only admits for an ordinal that arm covers.
+  var activeKey = -1
+  for arm in arms:
+    if not arm.isElse and arm.tagOrdinal == tagOrd: activeKey = tagOrd
   var armFields = initOrderedTable[int, seq[SymVal]]()
   var armNames  = initOrderedTable[int, seq[string]]()
   for arm in arms:
     armNames[arm.tagOrdinal] = arm.fieldNames
-    if arm.tagOrdinal == tagOrd:
+    if arm.tagOrdinal == activeKey:
       var fields: seq[SymVal]
       for fe in activeExprs:
         fields.add lower(env, fe)
@@ -14675,7 +14884,7 @@ proc lowerVariantLit(env: Env, e: IRExpr): SymVal =
   ## affect a reachable verdict.
   let ty = e.vlVariantTy
   let discBoxed = new(SymVal)
-  discBoxed[] = bvConst(ty.vDiscTy, int64(e.vlTagOrd))
+  discBoxed[] = discConst(ty.vDiscTy, int64(e.vlTagOrd))
   var plainFields: seq[SymVal]
   for fe in e.vlPlainFields:
     plainFields.add lower(env, fe)
@@ -14700,7 +14909,7 @@ proc lowerMultiVariantLit(env: Env, e: IRExpr): SymVal =
   var axes: seq[VariantAxisSym]
   for ai, ax in ty.mvAxes:
     let discBoxed = new(SymVal)
-    discBoxed[] = bvConst(ax.discTy, int64(e.mvlAxisTags[ai]))
+    discBoxed[] = discConst(ax.discTy, int64(e.mvlAxisTags[ai]))
     let (armFields, armNames) = variantLitArms(env, ax.arms, e.mvlAxisTags[ai],
                                                e.mvlAxisFields[ai],
                                                ty.mvObjectName & "." & ax.discName)

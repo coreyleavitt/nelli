@@ -191,15 +191,18 @@ proc callsBareVariant(x: int) =
   if x == 5 and x == 6: symexTarget("s8l_bare_variant_dead")
 
 type
+  BareE1 = enum bareE1 = 1, bareE2 = 2
   BareMV = object
-    ## Two `case` sections: a multi-variant with a `HashSet` arm field,
-    ## which has no modelled zero value. (RFC-0005 S8n gave single-case
-    ## variants one, S8p multi-variants with an explicit ordinal-0 arm on
-    ## every axis, and S8s those whose ordinal 0 falls in an `else` arm,
-    ## this pin's previous shape.)
+    ## Two `case` sections: a multi-variant with an arm field of an enum
+    ## whose first ordinal is 1 (zero memory is no value of it), which has
+    ## no modelled zero value. (RFC-0005 S8n gave
+    ## single-case variants one, S8p multi-variants with an explicit
+    ## ordinal-0 arm on every axis, S8s those whose ordinal 0 falls in an
+    ## `else` arm, and S8u those with a `HashSet[int]` arm field, this pin's
+    ## previous shape.)
     case k: BareVK
     of bvB: b: int
-    else: a: HashSet[int]
+    else: a: BareE1
     case j: BareVK
     of bvA: c: int
     of bvB: d: int

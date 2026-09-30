@@ -189,7 +189,7 @@ state = "done"
 [[slice]]
 id    = "S8u"
 title = "S8s's precision remainder: variant constructor naming an else-covered tag (feUnsupportedExprKind), callee building a local Table/HashSet (weInternalWalkerFault svTable/svSet assert), callee new(result) ref result (retBindEq svRef vs svBV64 fault), multi-variant with a bool discriminator (weInternalWalkerFault), zero value for untouched distinct results and HashSet/Table fields, op= on an array element"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8v"
@@ -3461,6 +3461,188 @@ on the symex-mingw leg, the file is itself the 1 MB compile check. The
 manual Linux check is the compile under a 1 MB stack:
 `podman run ... bash -c 'ulimit -s 1024; nim c --compileOnly --threads:on
 tests/tsymex_rfc0005_s8t_termination.nim'`.
+
+**As landed (S8u, walker 169) — S8s's precision remainder.** The six
+places S8s reported, plus soundness and fault gaps found on the way. Every
+expected value was checked against the pinned toolchain (Nim 2.2.10, debug
+build) by an oracle test that runs the SUT itself.
+
+1. **`else`-covered constructor.** A variant constructor naming a tag only
+   an `else` arm covers (`S8uVE(vk: u3B, ve: x)`) was
+   `feUnsupportedExprKind`. The parser now builds the variant literal on
+   the `else` arm, for the single-case variant and for each multi-variant
+   axis. It still declines when no arm, explicit or `else`, covers the tag.
+2. **Local `Table` / `HashSet`.** A callee building a local
+   `Table[string, int]` or `HashSet[int]` (`var t: Table[string, int];
+   t["a"] = n; result = t`) was `weInternalWalkerFault`: the uninitialised
+   local lowered to no container, and `lower`'s `iekTableSet` /
+   `iekSetIncl` asserted on the receiver. The local is now the empty
+   container (the new `iekZeroValue`, `default(T)`), and `retBindEq` binds
+   a table or set result (size, presence and data). Shapes the theory does
+   not back (`Table[int, int]`, `HashSet[string]`) decline in-band with a
+   scoped error, never a walker fault.
+3. **`new(result)`.** `new(x)` on a local, `var` parameter or `result`
+   now allocates exactly as `x = new T` does (`mkNewT`), so a callee's
+   `new(result)` is a fresh heap cell whose fields are zero. `retBindEq`
+   binds a `ref` / `ptr` result by address. The mismatch that faulted
+   ("retBindEq: kind mismatch svRef vs svBV64") is now an in-band
+   `feUnsupportedOpHavoc` backstop for any kinds that still disagree.
+4. **`bool` discriminator.** A multi-variant with a `bool` axis allocates,
+   constructs, zero-initialises and reassigns. The axis discriminator is an
+   `svBool`; its tag constants go through `discConst`, which yields a bool
+   for a `bool` discriminator and a bit-vector otherwise.
+5. **Zero values.** An untouched `distinct` result is its base type's
+   zero. A `ref` / `ptr` is `nil`. A backed `Table` / `HashSet`, alone or
+   as a field, is the empty container. Unbacked container shapes keep
+   having no zero value (`feUnsupportedOpHavoc`).
+6. **Array element writes.** `a[k] = v` and `a[k] op= v` at a constant
+   index `k` on an `array` whose index range starts at 0 rebuild the array
+   with one element replaced (`fieldStep`'s new array step). Before, both
+   were `feUnsupportedStmtKind`.
+
+Found on the way:
+
+- (a) The call cache replays a callee's path-condition delta, not its heap
+  effects. Once a `ref` result binds, a second cached `mkNode(x)` would
+  reuse the first call's cell, and the two results would alias. The cache
+  now admits only a callee that left the allocation counters and heap
+  handles unchanged (`heapUnchanged`).
+- (b) `iekTableSet` stored 0 in place of a value that lowered as an
+  unbounded Int (a promoted `int`). That was a wrong table content and so
+  a potential false verdict. The value now converts to 64 bits
+  (`bv64Operand`); any other kind declines.
+- (c) `iekSetIncl` / `iekSetExcl` asserted their element was a 64-bit
+  bit-vector (`weInternalWalkerFault` on an Int-promoted element). They
+  now convert it the same way, or decline.
+- (d) A table with a non-`string` key allocates as a declined, inert
+  placeholder. A key read or write on it then lowered the key against a
+  string prototype, and `coerceIntLit` raised (`weInternalWalkerFault`).
+  Every key site now declines it with `seUnsupportedTableKeyType`.
+- (e) A `bool` discriminator's reassignment (`isVariantReassignSymbolic`)
+  and `discFromRhs` had no `svBool` arm.
+
+- **Runtime.**
+  - `defaultZero` / `defaultZeroTotal` cover `itTable` and `itSet` (backed
+    shapes only, `containerZeroBacked`), `itDistinct` and `itRef` /
+    `itPtr`.
+  - `lower`'s `iekZeroValue` arm returns `defaultZero` when it is total,
+    otherwise a fresh value and an in-band `feUnsupportedOpHavoc`.
+  - `retBindWiredKinds` gains `svRef`, `svPtr`, `svTable`, `svSet`.
+  - `containerRecvDeclined` replaces the table / set receiver asserts.
+  - `variantLitArms` selects the `else` arm (key -1) when no explicit arm
+    names the tag.
+  - `heapUnchanged` gates call-cache admission.
+  - `retBindKindsAgree` sends a top-level kind mismatch between a call's
+    `retSym` and its returned value through the call-return drains'
+    path-level `feUnsupportedOpHavoc` decline (a tainted fork), ahead of
+    `retBindEq`'s lowering-sink backstop.
+- **IR / parser.**
+  - `iekZeroValue` (`zvTy`) has its emit, render (`default(T)`), canonical
+    (`Ex<Zero:`), abstraction and defect-fork-scan arms.
+  - `zeroValueForType` emits `iekZeroValue` for tables and sets, and
+    recurses through `distinct`.
+  - `fieldStep` takes `recv[<int literal>]` on an array whose index range
+    starts at 0 (`arrayIndexFromZero`), bounds-checked.
+  - The statement parser lowers `new(x)` to `mkNewT`.
+- **Consumer-visible (for S11's migration note).**
+  - **`sxUnknown` programs that now get verdicts:**
+    - a variant or multi-variant constructor naming an `else`-covered tag
+    - a callee building and returning a `Table[string, int]` or
+      `HashSet[int]`
+    - a `ref` result allocated with `new(result)`, or any `ref` / `ptr` /
+      table / set callee result
+    - a multi-variant with a `bool` discriminator
+    - an untouched `distinct`, `ref` or container-holding result
+    - an array element write at a constant index, `=` and `op=`
+  - **Walker faults that are now scoped declines:** a non-string-keyed
+    table's key access, an Int-promoted set element, a kind mismatch in
+    `retBindEq`.
+  - **Cache.** The canonical program form changes for any SUT with an
+    uninitialised table or set local. The walker bump to 169 invalidates
+    every symex cache entry.
+- **Different mechanisms, reported and not fixed here.**
+  - **Array low bound (false `sxUnsat`).** An index read on an array whose
+    index range does not start at 0 ignores the low bound: with
+    `var a: array[1..3, int] = [7, 8, 9]`, `a[1] == 7` is `sxUnsat`. The
+    read selects position 1 of the Z3 array, not position 0. This slice's
+    writes decline on such an array (`arrayIndexFromZero`) rather than
+    compound the error; the read path is untouched.
+  - **Array type aliases.** `type Arr3 = array[3, int]` classifies as
+    `uninterp[__unsupported:Arr3]`, so a value of the alias is opaque.
+  - **Anonymous `range` discriminator.** A variant whose discriminator is
+    an inline `range[lo..hi]` (not a named type) fails at compile time in
+    `dsl_typebridge.nim` ("node is not a symbol").
+  - **Symbolic-index array write.** `a[i] = v` / `a[i] += v` with a
+    non-constant `i` is still `feUnsupportedStmtKind`.
+  - **Other container shapes.** Tables other than `Table[string, int]` and
+    sets other than `HashSet[int]` still decline (scoped, in-band).
+  - **Closure-returning callee.** A callee returning a closure
+    (`proc mkF(t: int): proc(y: int): int`) is `weInternalWalkerFault`:
+    `allocateSym(itUninterp)` raises ("uninterpreted-ref allocation lands
+    with cluster E") when the call allocates its `retSym`. With S8u binding
+    `Table`, `HashSet`, `ref` and `ptr`, every kind a callee can return
+    through the composite-result `feUnsupportedOpHavoc` sites binds; the
+    closure is the one shape that would reach them, and it faults first.
+    Those sites keep their audit entries and are now reached only by a kind
+    mismatch (`retBindKindsAgree`).
+  - **Enum without ordinal 0.** An untouched result holding an enum whose
+    first ordinal is 1 is, in real Nim, zero memory: ordinal 0, no value of
+    the enum (probed). The walker's free `retSym` constrains the field to
+    the enum's ordinals, so it excludes the value Nim actually returns. A
+    label reading that field (`ord(v.a) == 0`) would be a false `sxUnsat`.
+    The no-zero pins below use this type only with labels that do not read
+    the field.
+
+Pins: `tests/tsymex_rfc0005_s8u_precision.nim`. It covers:
+- (1) an `else`-covered constructor, with a dead label (RED:
+  `feUnsupportedExprKind`);
+- (2) a callee's local `Table[string, int]` and `HashSet[int]`, witnesses
+  and dead labels (RED: `weInternalWalkerFault`), and an unbacked
+  `Table[int, int]` declining in-band (RED: `weInternalWalkerFault` from
+  `coerceIntLit`);
+- (3) `new(result)` with an untouched field's zero and a dead label (RED:
+  `weInternalWalkerFault`);
+- (4) a multi-variant with a `bool` axis, both axis values, replayed (RED:
+  `weInternalWalkerFault`);
+- (5) an untouched `distinct` result and one holding a `HashSet[int]` and a
+  `Table[string, int]`, with dead labels (RED: `feUnsupportedOpHavoc`);
+- (6) an array element's `=` and `+=` at a constant index, with dead labels
+  (RED: `feUnsupportedStmtKind`);
+- the `>= 169` floor.
+
+Re-pinned, each checked against real Nim:
+- `phase15_CR2_cachekey` pin (169).
+- `r6_r6_emit_roundtrip`: the `iekZeroValue` arm, two sentinels (a table
+  and a set) and their round-trip tests.
+- The no-zero result pins moved from a `HashSet[int]` arm field (now
+  modelled) to an arm field of an enum with no ordinal 0:
+  - `r6_r2_zerodefault_result` T5h-4
+  - `rfc0005_s6b_ops`
+  - `rfc0005_s8l_exits`
+- The composite-result havoc pins over a `Table` passed through a callee
+  now check the bound result: `rfc0005_s6b_ops`'s dead targets are exact
+  `sxUnsat`, its live target `sxUnsat` and its fresh pair exact `sxSat`,
+  with no errors. The two free-`retSym` guards moved to the untouched
+  no-zero result. `tot1_totality_corpus`'s A6-rider row left the §0
+  corpus (the run is exact) for its own suite: `sxSat` with no errors, and
+  a dead twin `sxUnsat`.
+- `rfc0005_s6b_ops` (d): the `feUnsupportedOpHavoc` audit counts 14 sites.
+  The two new ones are fresh: `iekZeroValue`'s fallback and `retBindEq`'s
+  kind-mismatch backstop.
+- `r6_n36_raise_class_audit`: two marked `raise newException` sites fewer
+  in `runtime.nim` (`retBindEq`'s kind mismatch, `defaultZero`'s
+  `itDistinct`), both category-c, and one marked `raise (ref Symex*)`
+  fewer (`defaultZero`'s `itRef` / `itPtr`).
+- `rfc0005_s8i_models` (4): the declined construction's arm field is now
+  an enum with no ordinal 0 (a `ref int` one is modelled). A new pin
+  checks the `ref` arm construction and its reassignment: `sxSat`, no
+  errors, replayed.
+- The Class-B `feUnsupportedStmtKind` trigger is now an array element's
+  `+=` at a symbolic index (`q[b and 1] += b`, always in bounds):
+  - `rfc0005_s3_monotonicity`
+  - `rfc0005_s1b_kinds`
+  - `rfc0005_s1c_verdict`
+  - `augmented_assign`
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

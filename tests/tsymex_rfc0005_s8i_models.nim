@@ -440,17 +440,31 @@ suite "S8i (3c) an array index stays an IndexDefect":
 # ---- (4) symbolic reassignment of a declined construction ---------------------
 #
 # Nim (2.2.10): `S8iV(kind: t)` with a runtime `t` sets no arm field, so
-# `a` is nil; the walker has no modelled default for a `ref` arm field and
-# declines the construction (RFC-0005 S8f). The object
-# is then unmodelled; a later `v.kind = u` must degrade on that decline,
-# not assert inside the walker.
+# `a` is zero memory; the walker has no modelled default for an arm field
+# of an enum with no ordinal 0 and declines the construction (RFC-0005
+# S8f). The object is then unmodelled; a later `v.kind = u` must degrade on
+# that decline, not assert inside the walker. (The arm field was a `ref
+# int` until RFC-0005 S8u gave a `ref` its `nil` zero; that construction is
+# now modelled, pinned below.)
 
 type
   S8iK = enum kA, kB
+  S8iE1 = enum s8iE1 = 1, s8iE2 = 2
   S8iV = object
+    case kind: S8iK
+    of kA: a: S8iE1
+    of kB: b: int
+  S8iRV = object
     case kind: S8iK
     of kA: a: ref int
     of kB: b: int
+
+proc refArmReassign(t, u: S8iK) =
+  ## RFC-0005 S8u. Real Nim: with t == u == kB no branch changes, and the
+  ## target is reached.
+  var v = S8iRV(kind: t)
+  v.kind = u
+  if v.kind == kB: symexTarget("s8i_ref_reassign")
 
 proc declinedReassign(t, u: S8iK) =
   var v = S8iV(kind: t)
@@ -476,6 +490,15 @@ suite "S8i (4) reassigning a declined construction degrades, never faults":
     check r.status == sxUnknown
     check not r.errors.hasKind(weInternalWalkerFault)
     check r.errors.hasKind(feUnsupportedOp)
+
+  test "a ref arm field's construction is modelled, and its reassignment (RFC-0005 S8u)":
+    let r = symexFind(refArmReassign, tLabel("s8i_ref_reassign"))
+    checkpoint($r.status & " " & show(r.errors))
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      check reproduces(refArmReassign(r.witness[0], r.witness[1]),
+                       "s8i_ref_reassign")
 
 # ---- (5) the concolic if-walker drains its condition's raises -----------------
 #

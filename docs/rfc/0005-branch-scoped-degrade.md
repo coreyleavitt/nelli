@@ -252,6 +252,11 @@ title = "S8y's remainder: lower str.indexof with a literal 1-char needle to a fr
 state = "pending"
 
 [[slice]]
+id    = "S8ah"
+title = "S8af's remainder: verify compile-time-VM reachability macro-by-macro for all 17 macros and instantiate-audit every VM-reachable generic among the 37 generic routines in scope (not just traceOneCallBoundary); lift the param check's depth-3 sibling-field bound (walk the full field graph with a visited set); classify generics never instantiated in the scope's compilation unit (force a representative instantiation or prove unreachable); run the guard as a build-time check wired into the symex compile path, not only as a test"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

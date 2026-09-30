@@ -124,8 +124,8 @@ suite "symex round-6 N16 — direct closure call: untouched-result path binds to
 #    `symexWalkerVersion`'s own doc comment) -- this SUT's `.add` now
 #    lowers cleanly, reaching `applyClosureGround`'s fallThrough loop for
 #    real, and THIS slice's own zero-default fix proves the honest verdict:
-#    sxSat, witness a == 0 (the only value satisfying both `a <= 0` and the
-#    zero-default path). Capability upgrade, not a behavior change in this
+#    sxSat, witness a <= 0 (every such `a` takes the zero-default path;
+#    RFC-0005 S8w2: the pin was `a == 0`, one model Z3 happened to pick). Capability upgrade, not a behavior change in this
 #    slice's own fix -- the pin flips from an honest decline to the real
 #    verdict the decline was always masking.
 # =============================================================================
@@ -141,10 +141,16 @@ proc sutHofMapIntZeroSat(a: int) =
 
 suite "symex round-6 N16 — C4 HOF inline path (map): N29-unblocked real verdict":
 
-  test "N16-2: conditional-body closure through inline map now proves sxSat (N29 fix unblocked it; witness a == 0)":
+  test "N16-2: conditional-body closure through inline map now proves sxSat (N29 fix unblocked it; witness a <= 0)":
     let r = symexFind(sutHofMapIntZeroSat, tLabel("hof_map_int_zero_sat"))
     check r.status == sxSat
-    check r.witness[0] == 0
+    if r.status == sxSat:
+      # Model-independent (RFC-0005 S8w2): replay the SUT's own condition.
+      let a = r.witness[0]
+      let ys = @[a].map(proc(x: int): int =
+        if x > 0:
+          result = x)
+      check a <= 0 and ys.len == 1 and ys[0] == 0
 
 # =============================================================================
 # 3. bool retTy variant (direct closure call).

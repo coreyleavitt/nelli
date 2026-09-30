@@ -173,12 +173,24 @@ suite "symex round-6 B7-rider -- B4 widened to a seq[byte] receiver (chapulin's 
   test "B7R-4-content: the witness's real seq[byte] receiver and real NUL terminator are exact":
     let r = symexFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))
     check r.status == sxSat
-    let (data, start) = r.witness
-    check start >= 0 and start <= data.len
-    check data.len == start + 3
-    check data[start] == ord('A').byte
-    check data[start + 1] == ord('B').byte
-    check data[start + 2] == 0'u8
+    # Model-independent (RFC-0005 S8w2): the path fixes `data[start ..
+    # start+2]` only; Z3 may put any bytes after the terminator, so the
+    # terminator is located where the witness's own replay puts it.
+    if r.status == sxSat:
+      let (data, start) = r.witness
+      check start >= 0 and start + 3 <= data.len
+      var payload = ""
+      var q = -1
+      try:
+        (payload, q) = readCStringByteSeq(data, start)
+      except ScanError:
+        checkpoint "no 0 byte terminates the witness after `start`"
+        fail()
+      check payload == "AB"
+      check q == start + 3
+      if start >= 0 and q == start + 3 and q <= data.len:
+        check data[start ..< q] == @[ord('A').byte, ord('B').byte, 0'u8]
+        check data[q - 1] == 0'u8
 
   test "B7R-4-cross: the witness, replayed through the real function, reproduces the exact found outcome":
     let r = symexFind(sutByteAccPayloadAB, tLabel("byte_acc_ab"))

@@ -116,12 +116,28 @@ suite "symex round-6 B4-rider -- NUL-delimited B4-shape scan, content strengthen
   test "NW-2-content: the witness's terminator byte is a real single NUL, not the 5-char escape text":
     let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))
     check r.status == sxSat
-    let (s, start) = r.witness
-    check start >= 0 and start <= s.len
-    check s.len == start + 3
-    check s[start] == 'A'
-    check s[start + 1] == 'B'
-    check ord(s[start + 2]) == 0
+    # Model-independent (RFC-0005 S8w2): the path fixes `s[start ..
+    # start+2]` only; Z3 may put any bytes after the terminator (4.13.4
+    # returned `"AB\0\xFE"`), so the terminator is located where the
+    # witness's own replay puts it, and that byte is checked, not `s.len`.
+    if r.status == sxSat:
+      let (s, start) = r.witness
+      check start >= 0 and start + 3 <= s.len
+      var payload = ""
+      var q = -1
+      try:
+        (payload, q) = readCStringNulTracer(s, start)
+      except ScanError:
+        checkpoint "no raw NUL byte terminates the witness after `start`"
+        fail()
+      check payload == "AB"
+      check q == start + 3
+      if start >= 0 and q == start + 3 and q <= s.len:
+        let extracted = s[start ..< q]
+        check extracted == "AB\0"
+        check ord(s[q - 1]) == 0
+        for esc in ["\\u{0}", "\\x00", "\\0"]:
+          check esc notin extracted
 
   test "NW-2-cross: the witness, replayed through the real function, reproduces the exact found outcome":
     let r = symexFind(sutAccNulPayloadAB, tLabel("payload_ab_nul"))

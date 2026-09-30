@@ -7063,6 +7063,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # a walker fault, before S8w).
       let lStamped = l.kind == svInt and l.ziWidth in [8, 16, 32, 64]
       doAssert l.kind != svBool, "shift on a bool"
+      if e.bop == bShr and l.kind == svInt and not lStamped and
+         e.rhs.kind == iekIntLit and e.rhs.ival in 0'i64 .. 62'i64:
+        # RFC-0005 S8w2: `x shr k` by a literal `k` on an unstamped Int
+        # stays in Int arithmetic. Nim's `shr` on a signed int is
+        # arithmetic, i.e. floor division by 2^k, and Z3's Int `div` by a
+        # positive divisor IS floor division (Euclidean), so this is the
+        # same value as the bridge below without its `int2bv`: over a
+        # `find` on a string that bridge cost Z3 4.13.4 the whole
+        # `seqQueryRLimit` (`s8w_findshift`, symex-mingw).
+        return SymVal(kind: svInt, zi: l.zi div mkInt(1'i64 shl e.rhs.ival))
       var lb =
         if lStamped: stampedIntToBV(l)
         elif l.kind == svInt: svIntToBV(l, svBV64)
@@ -8063,6 +8073,9 @@ when defined(symexQueryStats):
     propagations*: int
     memoryMb*:     float
     status*:       string
+    query*:        string  ## the answering solver's assertions, SMT-LIB
+                           ## text (RFC-0005 S8w2: pins a query's SHAPE,
+                           ## which no verdict shows)
 
   var symexQueryStats* {.threadvar.}: seq[SymexQueryStat]
     ## One entry per `check()`, in call order. Reset it yourself before a
@@ -8088,7 +8101,8 @@ when defined(symexQueryStats):
       decisions:    statInt(st, "decisions"),
       propagations: statInt(st, "propagations"),
       memoryMb:     (if st.contains("memory"): st.getFloat("memory") else: 0.0),
-      status:       status)
+      status:       status,
+      query:        $s)
 
   proc symexQueryStatsSummary*(): string =
     ## Compact, greppable one-liner per query plus a total -- the shape a
@@ -11443,6 +11457,19 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
     let e = skip.env[k]
     if sameSV(v, e):
       env[k] = v
+    elif v.kind == svBool and e.kind == svBool and
+         (e.bo.raw == cond.raw or (not e.bo).raw == cond.raw):
+      # RFC-0005 S8w2: the chain's own guard temporary. On the skip side
+      # it IS the guard's operand -- `cond` itself for an `and` chain (so
+      # false there), `not cond` for an `or` chain (so true there) -- and
+      # `ite(cond, v, e)` is exactly `cond and v`, resp. `e or v`. Built
+      # as the connective, the target query is the conjunction (the
+      # disjunction) the chain means, the shape the pre-S8w walk lowered:
+      # the `ite` form is equivalent but not the same query, and Z3 4.13.4
+      # answered it with a different (valid, longer) model.
+      env[k] =
+        if e.bo.raw == cond.raw: SymVal(kind: svBool, bo: cond and v.bo)
+        else: SymVal(kind: svBool, bo: e.bo or v.bo)
     elif v.kind == e.kind and
          v.kind in {svBool, svBV8, svBV16, svBV32, svBV64, svFloat32,
                     svFloat64} and

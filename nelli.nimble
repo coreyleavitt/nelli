@@ -926,5 +926,11 @@ task test, "Run the test suite":
             # RFC-0005 S8x -- S8t2's remainder: the compile-time VM's `let`
             # aliasing pinned, the parser's two latent value-location lets
             # bound by index / `var`; no walker bump.
-            "tsymex_rfc0005_s8x_vm_alias"]:
+            "tsymex_rfc0005_s8x_vm_alias",
+            # RFC-0005 S8w2 -- S8w's symex-mingw (Z3 4.13.4) hotfix: a
+            # short-circuit join builds the chain's connective, not an
+            # `ite`; a literal `shr` on an unstamped Int is Int floor
+            # division, not an `int2bv` bridge. Reads query text via its
+            # `.nim.cfg` (`-d:symexQueryStats`).
+            "tsymex_rfc0005_s8w2_hotfix"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

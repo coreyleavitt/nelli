@@ -192,6 +192,11 @@ title = "S8s's precision remainder: variant constructor naming an else-covered t
 state = "pending"
 
 [[slice]]
+id    = "S8v"
+title = "S8r's termination remainder: checkCapped step 2 slow on Z3 4.13.4 when the theory-free query cannot see the cap conflict (58 s / 1.2 GB; add str.len >= 0 and -1 <= str.indexof < str.len facts to the theory-free query), tsymex_r4_strip 2.6x slower on 4.13.4 than at a696d80"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

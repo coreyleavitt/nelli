@@ -184,7 +184,20 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "173"
+const symexWalkerVersion* = "174"
+  ## RFC-0005 S8ae (2026-09-30) — S8v's remainder. `seqRangeFacts` (step
+  ## 1c) also links the theory's functions over one haystack and needle:
+  ## `str.indexof >= 0` implies `str.contains` (and from 0 the converse),
+  ## a prefix is first found at 0, a prefix or suffix is contained, and a
+  ## slice or byte of `s` equal to the needle is contained and bounds its
+  ## first index; and it ranges
+  ## `str.at`, `str.substr`, `str.to_code` (0..255 on a byte leaf),
+  ## `str.to_int` and the length of equal sequences. Each is valid in the
+  ## theory. Queries refuted only through such a relation, which step 1c
+  ## declined on the cap since S8r (`s.find(':') > 200 and ':' notin s`),
+  ## are UNSAT again, with no sequence-theory search. 173 -> 174.
+  ##
+  ## (Prior: 173.)
   ## RFC-0005 S8v (2026-09-30) — S8r's termination remainder.
   ## `checkCapped`'s step 1c checks the query with no sequence theory with
   ## the range the theory gives each `str.len` / `str.indexof` /

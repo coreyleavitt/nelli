@@ -879,7 +879,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## same-width reinterprets). 171->172.
     ## RFC-0005 S8v (step 1c carries the sequence functions' ranges).
     ## 172->173.
-    check symexWalkerVersion == "173"
+    ## RFC-0005 S8ae (step 1c's facts link contains / prefixof / suffixof /
+    ## indexof / last_indexof / slices, and range at / substr / to_code /
+    ## to_int / sequence equalities). 173->174.
+    check symexWalkerVersion == "174"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

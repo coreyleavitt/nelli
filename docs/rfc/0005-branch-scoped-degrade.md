@@ -239,7 +239,7 @@ state = "pending"
 [[slice]]
 id    = "S8ae"
 title = "S8v's remainder: checkCapped step 1c declines queries that are UNSAT only through the sequence theory when their theory-free form is refuted only by the cap (e.g. `str.indexof(s, \":\", 0) > 200 and not str.contains(s, \":\")`) -- decide them without reintroducing the 4.13.4 step-2 string search (bounded step-2 core behind 1c's UNSAT, or a sound theory-level refutation); add range facts for str.at, str.substr, str.to_code (-1..255 byte domain), str.to_int (>= -1) and str.++ (len(a ++ b) = len(a) + len(b)) so cap conflicts through them are seen by step 1c"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8af"
@@ -4092,6 +4092,166 @@ Re-pinned: `phase15_CR2_cachekey` (172 -> 173; 170 was reserved for S8v, and S8w
   and `str.++` (`len(a ++ b) = len(a) + len(b)`) get no facts. No
   measured query needed them. A cap conflict that runs through one of them
   still reaches step 2.
+
+**As landed (S8ae, walker 174) — S8v's remainder.** Both items are in
+`seqRangeFacts`, the facts step 1c asserts beside its theory-free query.
+Step 2 is unchanged and still never runs behind a step 1c UNSAT.
+
+*1. UNSAT through a relation between two functions.* `s.find(':') > 200
+and ':' notin s` lowers to `str.indexof(s, ":", 0) > 200 and not
+str.contains(s, ":")`. With the theory it is UNSAT: a `contains` that is
+false makes `indexof` -1. Theory-free the two are unrelated. S8v's range
+fact lets `indexof > 200` through only when `len(s) > 200`, so the
+uncapped fact check is SAT and the capped one UNSAT, and step 1c declined
+it on the cap. The same held for `s.startsWith("abc") and s.find("abc")
+> 150`, `s[1..2] == "ab" and s.find("ab") > 150`, and `s[140] == ':' and
+':' notin s`. All four were `sxUnknown` at d9ea440, on Z3 5.1 and 4.13.4.
+
+The fence offered two ways to decide them. Both were measured.
+
+- *A bounded step 2 behind step 1c's UNSAT.* This was measured with a
+  probe build that ran step 2 under `rlimit` X after each step 1c cap
+  decline and took its answer when the core was empty. Its core decided
+  the `contains` pair. But on the `startsWith` and slice shapes it named
+  the cap, as it did before S8r (Z3's cores are not minimal), so those
+  stayed declines. `rlimit` does not bound it on a query that is SAT only
+  past the cap:
+
+  | Z3 | suite / query | X | slowest step 2 | peak RSS |
+  |---|---|---|---|---|
+  | 5.1 | `s.len > 210 and s[205] == 'x'` | 50k | 0.04 s | 62 MB |
+  | 5.1 | same | 200k | 49.1 s | 1,182 MB |
+  | 4.13.4 | `rfc0005_s8r_theoryfree` | 50k | 0.48 s | 83 MB |
+  | 4.13.4 | same | 200k | 4.7 s | 611 MB |
+  | 4.13.4 | same | 1M | 61.2 s | 9,064 MB |
+  | 4.13.4 | `163rev_intoffset_range` | 1M | 72.6 s | 9,084 MB |
+
+  Without the probe the three suites take 0.3 s. No X both decides the
+  prefix and slice shapes and stays bounded, so this was not landed.
+- *A sound theory-level refutation (landed).* The facts now also link
+  two functions over the same haystack `s` and needle `t`. A link is
+  made only when both terms are already in the query, so no
+  `str.contains` term is built that the query does not hold:
+  - `str.contains(s, t)`, `str.prefixof(t, s)`, `str.suffixof(t, s)`:
+    `len(t) <= len(s)`;
+  - `str.indexof(s, t, i) >= 0` implies `str.contains(s, t)`, and with `i
+    = 0` the converse;
+  - a prefix `t` has `str.indexof(s, t, 0) = 0`;
+  - a prefix or suffix is contained;
+  - a piece `p` of `s` at `i` (`str.at(s, i)`, `str.substr(s, i, n)`)
+    with a root equality `p = t` makes `t` contained. With `0 <= i <
+    len(s)` it also gives `0 <= str.indexof(s, t, j) <= i` for `0 <= j <=
+    i`.
+
+  A needle is matched by AST id. A char needle (`needleAsStr`'s
+  `str.from_code(bv2nat(#x3a))`) is matched as the literal it folds to,
+  which is what a byte test's character form compares against. The
+  uncapped fact check now refutes all four shapes. That UNSAT is the
+  query's own, so they are `sxUnsat` again, with no sequence-theory
+  search at all.
+
+  There is no `seq.last_indexof` link. A query holding one never
+  reaches step 1c: `checkCapped` decides it by the uncapped step 3, as
+  before (`s.rfind(':') > 200 and ':' notin s` was already `sxUnsat`).
+
+*2. Range facts.* These are added:
+- `c = str.at(s, i)`: `len(c) = 1` when `0 <= i < len(s)`, else 0.
+- `r = str.substr(s, i, n)`: `len(r) = min(n, len(s) - i)` when `0 <= i <
+  len(s)` and `0 < n`, else 0.
+- `k = str.to_code(c)`: `k >= -1`, and `k >= 0` iff `len(c) = 1`. `k <=
+  255` holds when `c` is `str.at` of a byte leaf, a string whose
+  byte-domain constraint is one of the query's roots (`byteLeafIds`,
+  factored out of `seqLenCaps`). That bound holds in every model of the
+  query, not of the theory alone. With no byte-domain root no upper
+  bound is claimed.
+- `v = str.to_int(x)`: `v >= -1`.
+- `x = y` over sequences: `len(x) = len(y)`.
+
+The last fact was not on the fence's list, but without it the others see
+nothing. Theory-free, Z3's rewriter folds `str.len` of a literal to a
+numeral, so `str.at(s, 200) == "x"` never reached the length of
+`str.at(s, 200)`. The rewriter folds `str.len(a ++ b)` to `len(a) +
+len(b)` too, with the theory off. So `str.++` needs no fact of its own:
+`len(s ++ t) > 300` under two 128 caps was already a step 1c UNSAT at
+d9ea440. What it lacked was the equality. `x == s & t and len(x) > 300`
+is now UNSAT under the caps on `s` and `t`, where it was SAT theory-free.
+A `str.++` branch was written and then removed, since the rewriter made
+it vacuous.
+
+*Validity.* On free operands Z3 proves most facts' negations UNSAT with
+the theory. It leaves a prefix's first index, the pieces' index bounds and
+the byte bound (even beside the byte-domain root) `unknown` within 5M
+units. The pin therefore checks each fact two ways against the linked
+Z3's own semantics:
+- its negation is never SAT with the theory;
+- it rewrites to `true` on every ground instance with strings over `{"a",
+  "\xff"}` of length at most 3 and integers in `-1..4`.
+
+A mutant `at` fact (`i <= len(s)`) fails both checks.
+
+Termination, measured against d9ea440 on the test binary built with
+`-d:symexQueryStats`:
+
+| Z3 | suite | wall (base / slice) | peak RSS | Z3 rlimit units |
+|---|---|---|---|---|
+| 5.1 | `r4_strip` | 114.8 s / 117.0 s | 268 / 268 MB | 20,028,658 / 20,031,362 |
+| 5.1 | `q1_scanlift` | 4.6 s / 3.4 s | 64 / 63 MB | 3,124,577 / 3,124,577 |
+| 5.1 | `r6_b5_chained` | 2.9 s / 3.1 s | 77 / 70 MB | 1,405,871 / 1,608,521 |
+| 5.1 | `rfc0005_s8r_theoryfree` | 0.1 s / 0.1 s | 50 / 50 MB | 39,202 / 39,202 |
+| 5.1 | `rfc0005_s8v_termination` | 0.2 s / 0.2 s | 62 / 62 MB | 43,233 / 43,233 |
+| 5.1 | `163rev_intoffset_range` | 0.3 s / 0.5 s | 63 / 63 MB | 164,217 / 164,217 |
+| 4.13.4 | `r4_strip` | 41.6 s / 43.1 s | 76 / 76 MB | 20,058,845 / 20,059,931 |
+| 4.13.4 | `q1_scanlift` | 2.8 s / 3.3 s | 61 / 62 MB | 2,972,540 / 3,152,948 |
+| 4.13.4 | `r6_b5_chained` | 2.1 s / 3.9 s | 72 / 73 MB | 1,377,412 / 1,573,533 |
+| 4.13.4 | `rfc0005_s8r_theoryfree` | 0.1 s / 0.1 s | 52 / 52 MB | 28,904 / 28,904 |
+| 4.13.4 | `rfc0005_s8v_termination` | 0.2 s / 0.3 s | 64 / 64 MB | 33,016 / 33,016 |
+| 4.13.4 | `163rev_intoffset_range` | 0.3 s / 0.4 s | 57 / 57 MB | 128,133 / 128,133 |
+
+Wall times were taken on a loaded host (load average about 25) and move by
+up to a second either way. The rlimit totals (`-d:symexQueryStats`) are
+deterministic, and the query and assert counts are identical in every row.
+The extra facts cost `r6_b5_chained` 14% more solver work on both
+versions and `q1_scanlift` 6% on 4.13.4. No query changed outcome, and none
+approaches a budget.
+
+Pins: `tests/tsymex_rfc0005_s8ae_remainder.nim`.
+- (1) End to end, `sxUnsat` for the four shapes above. RED at d9ea440: a
+  `maxSeqLen` decline on each, on Z3 5.1. Two companions:
+  - `find > 5 and in` stays `sxSat`;
+  - `(s & t).len > 300` stays a `maxSeqLen` decline.
+- (1) The example query is UNSAT theory-free with the facts and no cap.
+  RED: SAT.
+- (1') Each relational fact is valid, by the two checks above. RED: the
+  facts were missing.
+- (2) Step 1c posed on its own (theory-free, facts, caps): `str.at`,
+  `str.substr`, `str.to_code` past the cap, the byte bound, the
+  no-byte-domain companion, `str.to_int < -1`, and the concatenation
+  equality. RED at d9ea440: SAT for each, except the `str.++` case, whose
+  first RED form (`len(s ++ t)`) passed at base and was replaced by the
+  equality form. Each companion is SAT without the cap.
+- (2') Each range fact is valid, by the same two checks.
+- (2) End to end, `(s & t).len > 300` under `seqQueryRLimit = 200_000` is a
+  step 1c decline, with no "was not decided".
+- The `>= 174` floor.
+
+Re-pinned: `phase15_CR2_cachekey` (173 -> 174).
+
+*Different mechanisms, reported and not fixed here.*
+- **The links are syntactic.** A needle is linked to a `contains`,
+  `indexof` or piece only through the same AST, or through the literal
+  a char needle folds to. A chain of equalities (`p = y`, `y = t`) or a
+  computed needle that is equal but not identical gets no link. Such a
+  query is still a step 1c cap decline when it is refuted only through
+  the relation.
+- **Relations not covered.** No fact relates `str.replace_all`, regex
+  membership (`str.in_re`) or `str.from_int` to the other functions.
+  None relates `str.indexof` from a nonzero start to `str.contains` in
+  the converse direction, and none covers word equations (`s = a ++ b`
+  with a `contains` on a part). A query refuted only through one of these
+  is still a step 1c cap decline. Each one needs its own valid fact.
+- **`seq.last_indexof` queries skip step 1c altogether.** They go to the
+  uncapped step 3 (S8k's `lastIndex`), which is the one place the
+  uncapped sequence theory still runs. That is unchanged here.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

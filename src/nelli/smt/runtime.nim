@@ -8191,6 +8191,9 @@ type SeqCapKinds = object
   uninterp, select, int2bv, toCode, strAt, inRe: int
   strLen, strIndex: int
     ## RFC-0005 S8v: `str.len` and `str.indexof`, for `seqRangeFacts`.
+  strExtract, strToInt, strContains, strPrefix, strSuffix: int
+    ## RFC-0005 S8ae: `str.substr`, `str.to_int`, `str.contains`,
+    ## `str.prefixof` and `str.suffixof`, for `seqRangeFacts`.
 
 var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
   ## Read off terms built once per thread: the wrapper's `Z3DeclKindFFI`
@@ -8216,8 +8219,32 @@ proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
                                                    mkString(ctx, "\xff")))).raw),
       strLen:   kindOf(ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, str.raw)),
       strIndex: kindOf(ctx, ctx.checkErr Z3_mk_seq_index(ctx.raw, str.raw,
-                                                         str.raw, c.raw))))
+                                                         str.raw, c.raw)),
+      strExtract:  kindOf(ctx, substr(str, c, c).raw),
+      strToInt:    kindOf(ctx, toInt(str).raw),
+      strContains: kindOf(ctx, contains(str, ch).raw),
+      strPrefix:   kindOf(ctx, startsWith(str, ch).raw),
+      strSuffix:   kindOf(ctx, endsWith(str, ch).raw)))
   seqCapDeclKinds.k
+
+proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
+  ## The AST ids of the string leaves whose byte-domain constraint `s in
+  ## (\x00..\xff)*` is itself one of `roots`: built as the walker builds it
+  ## (`allocateSym`'s `itString` arm), so it is the same hash-consed AST.
+  ## Every character of such a leaf has a code in 0..255 in every model of
+  ## `roots`. Used by `seqLenCaps` (its byte tests) and, RFC-0005 S8ae, by
+  ## `seqRangeFacts` (`str.to_code`'s upper bound).
+  let kinds = seqCapKinds(ctx)
+  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
+  let byteReId = astId(ctx, byteRe.raw)
+  for r in roots:
+    let ra = toAnyAst(r)
+    if getAstKind(ra) == akApp and
+       ord(Z3_get_decl_kind(ctx.raw, unpackApp(ra).decl)) == kinds.inRe:
+      let args = unpackApp(ra).args
+      if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp:
+        result.incl astId(ctx, args[0].raw)
 
 proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     tuple[caps: seq[Z3Bool], lastIndex: bool,
@@ -8263,19 +8290,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     ## -1 for a non-application (a numeral, a variable, a quantifier).
     if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
     else: -1
-  # The string leaves whose byte-domain constraint is a root: built as the
-  # walker builds it (`allocateSym`'s `itString` arm), so it is the same
-  # hash-consed AST.
-  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
-  let byteReId = astId(ctx, byteRe.raw)
-  var byteLeaves: HashSet[int]
-  for r in roots:
-    let ra = toAnyAst(r)
-    if kindOf(ctx, ra) == kinds.inRe:
-      let args = unpackApp(ra).args
-      if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
-         ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp:
-        byteLeaves.incl astId(ctx, args[0].raw)
+  let byteLeaves = byteLeafIds(ctx, roots)
   proc byteTestChar(ctx: Z3Context; conv: Z3AnyAst):
       tuple[ok: bool, ch: Z3AnyAst] =
     ## `str.at(s, i)` when `conv` is `int2bv[8](str.to_code(str.at(s, i)))`
@@ -8372,11 +8387,71 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## are bound), and each distinct AST is visited once. `str.len` and
   ## `str.indexof` are matched by decl kind (`SeqCapKinds`),
   ## `seq.last_indexof` by name (see `seqLenCaps`).
+  ##
+  ## RFC-0005 S8ae adds, each as valid in the theory as the above (pinned
+  ## by `tests/tsymex_rfc0005_s8ae_remainder.nim`: the negation is never
+  ## SAT with the theory, and the fact is `true` on every small ground
+  ## instance under Z3's own rewriter):
+  ##   - `c = str.at(s, i)`: `len(c) = 1` if `0 <= i < len(s)`, else 0;
+  ##   - `r = str.substr(s, i, n)`: `len(r) = min(n, len(s) - i)` if `0 <=
+  ##     i < len(s)` and `0 < n`, else 0;
+  ##   - `k = str.to_code(c)`: `k >= -1`, `k >= 0` iff `len(c) = 1`, and `k
+  ##     <= 255` when `c` is `str.at` of a byte leaf (`byteLeafIds`: its
+  ##     byte-domain constraint is a root, so the bound holds in every model
+  ##     of `roots`, not of the theory alone);
+  ##   - `v = str.to_int(x)`: `v >= -1`;
+  ##   - `x = y` over sequences: `len(x) = len(y)`. Theory-free, the
+  ##     rewriter folds `str.len` of a literal (and of `a ++ b`, so `str.++`
+  ##     needs no fact of its own), so `str.at(s, 200) == "x"` reached no
+  ##     length without it;
+  ##   - `str.contains(s, t)`, `str.prefixof(t, s)`, `str.suffixof(t, s)`:
+  ##     `len(t) <= len(s)`;
+  ## and, linking two functions over the same haystack `s` and needle `t`
+  ## when both terms are in `roots` (no term the query does not hold is
+  ## built for them):
+  ##   - `str.indexof(s, t, i) >= 0` implies `str.contains(s, t)`, and with
+  ##     `i = 0` the converse; a prefix `t` has `str.indexof(s, t, 0) = 0`;
+  ##   - a prefix or suffix is contained;
+  ##   - a piece `p` of `s` at `i` (`str.at(s, i)`, `str.substr(s, i, n)`)
+  ##     with `p = t` a root equality: `t` is contained in `s`, and with `0
+  ##     <= i < len(s)`, `0 <= str.indexof(s, t, j) <= i` for `0 <= j <= i`.
+  ## No `seq.last_indexof` link: a query holding one never reaches step 1c
+  ## (`checkCapped` decides it by the uncapped step 3).
+  ## Before S8r step 2's unsat core decided a query refuted only through
+  ## such a relation (`str.indexof(s, ":", 0) > 200 and not str.contains(s,
+  ## ":")`); since, the range facts let step 1c see only the cap's
+  ## refutation, and it declined. The links make the uncapped fact check
+  ## refute it: the query's own UNSAT, with no string search. A needle is
+  ## matched by the literal a char needle folds to (`canon`). A running
+  ## step 2 behind step 1c was measured instead and rejected: its core
+  ## named the cap on the prefix and slice shapes too, and `rlimit` does
+  ## not bound it on a query SAT only past the cap (49 s and 1.2 GB under
+  ## 200k units on Z3 5.1, 9.3 GB under 1M on Z3 4.13.4).
   let kinds = seqCapKinds(ctx)
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   proc lenOf(ctx: Z3Context; a: Z3AnyAst): Z3Int =
     wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, a.raw))
+  var byteLeaves: HashSet[int]
+  # RFC-0005 S8ae: the terms the relational facts below link, keyed by the
+  # AST ids of their haystack `s` and needle `t`.
+  type Pair = tuple[s, t: int]
+  var containsOf, prefixOf, suffixOf: Table[Pair, Z3Bool]
+  var indexOfs: seq[tuple[s, t: Z3AnyAst, i, r: Z3Int]]
+  var pieces: seq[tuple[s, x: Z3AnyAst, i: Z3Int]]
+    ## `str.at(s, i)` and `str.substr(s, i, n)`: a piece of `s` at `i`.
+  var seqEqs: HashSet[Pair]
+    ## The sequence equalities in `roots`, both orders.
+  proc canon(ctx: Z3Context; a: Z3AnyAst): int =
+    ## The id a needle or an equality side is matched by: a char needle
+    ## (`needleAsStr`'s `str.from_code(bv2nat(#x3a))`) is matched as the
+    ## literal it folds to, which is what a byte test's character form
+    ## (`seqLenCaps`' `byteEqs`) compares against.
+    if getAstKind(a) == akApp and
+       declName(ctx, unpackApp(a).decl) == "str.from_code":
+      let f = ctx.checkErr Z3_simplify(ctx.raw, a.raw)
+      if Z3_is_string(ctx.raw, f): return astId(ctx, f)
+    astId(ctx, a.raw)
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
@@ -8396,12 +8471,108 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add (r == minusOne) or
         ((zero <= r) and (i <= r) and
          (r + lenOf(ctx, args[1]) <= lenOf(ctx, args[0])))
+      indexOfs.add (s: args[0], t: args[1], i: i, r: r)
     elif args.len == 2 and getSortKind(t) == skInt and
          declName(ctx, decl) == "seq.last_indexof":
       let r = wrap[Z3Int](ctx, t.raw)
       result.add (r == minusOne) or
         ((zero <= r) and (r + lenOf(ctx, args[1]) <= lenOf(ctx, args[0])))
+    elif k == kinds.strContains and args.len == 2:
+      # RFC-0005 S8ae: `str.contains(s, t)`.
+      let c = wrap[Z3Bool](ctx, t.raw)
+      result.add implies(c, lenOf(ctx, args[1]) <= lenOf(ctx, args[0]))
+      containsOf[(astId(ctx, args[0].raw), canon(ctx, args[1]))] = c
+    elif (k == kinds.strPrefix or k == kinds.strSuffix) and args.len == 2:
+      # RFC-0005 S8ae: `str.prefixof(t, s)` / `str.suffixof(t, s)`, the
+      # needle first.
+      let p = wrap[Z3Bool](ctx, t.raw)
+      result.add implies(p, lenOf(ctx, args[0]) <= lenOf(ctx, args[1]))
+      let key = (astId(ctx, args[1].raw), canon(ctx, args[0]))
+      if k == kinds.strPrefix: prefixOf[key] = p
+      else: suffixOf[key] = p
+    elif k == kinds.strAt and args.len == 2:
+      # RFC-0005 S8ae: `str.at(s, i)` is one character in range, else "".
+      let i = wrap[Z3Int](ctx, args[1].raw)
+      pieces.add (s: args[0], x: t, i: i)
+      result.add lenOf(ctx, t) ==
+        ite((zero <= i) and (i < lenOf(ctx, args[0])), mkInt(ctx, 1), zero)
+    elif k == kinds.strExtract and args.len == 3:
+      # RFC-0005 S8ae: `str.substr(s, i, n)` is "" unless `0 <= i < len(s)`
+      # and `0 < n`; then its length is `min(n, len(s) - i)`.
+      let i = wrap[Z3Int](ctx, args[1].raw)
+      let n = wrap[Z3Int](ctx, args[2].raw)
+      pieces.add (s: args[0], x: t, i: i)
+      let rest = lenOf(ctx, args[0]) - i
+      result.add lenOf(ctx, t) ==
+        ite((zero <= i) and (i < lenOf(ctx, args[0])) and (zero < n),
+            ite(n <= rest, n, rest), zero)
+    elif k == kinds.toCode and args.len == 1:
+      # RFC-0005 S8ae: -1 unless the argument is one character; at most
+      # 255 when that character is read off a byte leaf (`byteLeafIds`).
+      let code = wrap[Z3Int](ctx, t.raw)
+      result.add code >= minusOne
+      result.add (code >= zero) == (lenOf(ctx, args[0]) == mkInt(ctx, 1))
+      let c = args[0]
+      if getAstKind(c) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(c).decl)) == kinds.strAt:
+        if byteLeaves.len == 0: byteLeaves = byteLeafIds(ctx, roots)
+        if astId(ctx, unpackApp(c).args[0].raw) in byteLeaves:
+          result.add code <= mkInt(ctx, 255)
+    elif k == kinds.strToInt and args.len == 1:
+      # RFC-0005 S8ae: -1 for a non-numeral, else its non-negative value.
+      result.add wrap[Z3Int](ctx, t.raw) >= minusOne
+    elif args.len == 2 and getSortKind(args[0]) == skSeq and
+         declName(ctx, decl) == "=":
+      # RFC-0005 S8ae: equal sequences have equal lengths. Without the
+      # theory, `str.len` of a literal is folded to a numeral by the
+      # rewriter, so `str.at(s, 200) == "x"` would not otherwise reach the
+      # length of `str.at(s, 200)` and its fact above.
+      result.add implies(wrap[Z3Bool](ctx, t.raw),
+                         lenOf(ctx, args[0]) == lenOf(ctx, args[1]))
+      let (a0, a1) = (astId(ctx, args[0].raw), astId(ctx, args[1].raw))
+      let (c0, c1) = (canon(ctx, args[0]), canon(ctx, args[1]))
+      seqEqs.incl (a0, c1)
+      seqEqs.incl (a1, c0)
     for a in args: stack.add a
+  # RFC-0005 S8ae: facts that link two of the theory's functions over the
+  # same haystack and needle, each valid in the theory. Only terms already
+  # in `roots` are linked (no `str.contains` is built that the query does
+  # not hold), so a fact can only take part in a refutation through them.
+  proc key(ctx: Z3Context; s, t: Z3AnyAst): Pair =
+    (astId(ctx, s.raw), canon(ctx, t))
+  for e in indexOfs:
+    let kk = key(ctx, e.s, e.t)
+    let atZero = e.i == zero
+    if kk in containsOf:
+      # Found anywhere is contained; contained is found from 0.
+      let c = containsOf[kk]
+      result.add implies(e.r >= zero, c)
+      result.add implies(c and atZero, e.r >= zero)
+    if kk in prefixOf:
+      # A prefix is first found at 0.
+      result.add implies(prefixOf[kk] and atZero, e.r == zero)
+  for kk, p in prefixOf:
+    if kk in containsOf: result.add implies(p, containsOf[kk])
+  for kk, p in suffixOf:
+    if kk in containsOf: result.add implies(p, containsOf[kk])
+  # A piece of `s` equal to a needle `t` (`s[5] == ':'`, `s[1..2] == "ab"`):
+  # `t` is contained in `s`, and first found at or before the piece's
+  # start.
+  for pc in pieces:
+    let pid = astId(ctx, pc.x.raw)
+    let sid = astId(ctx, pc.s.raw)
+    let inRange = (zero <= pc.i) and (pc.i < lenOf(ctx, pc.s))
+    for kk, c in containsOf:
+      if kk.s == sid and (pid, kk.t) in seqEqs:
+        let tt = wrap[Z3String](ctx, Z3_get_app_arg(ctx.raw,
+                   Z3_to_app(ctx.raw, c.raw), 1))
+        result.add implies(wrap[Z3String](ctx, pc.x.raw) == tt, c)
+    for e in indexOfs:
+      if astId(ctx, e.s.raw) == sid and (pid, canon(ctx, e.t)) in seqEqs:
+        result.add implies((wrap[Z3String](ctx, pc.x.raw) ==
+                            wrap[Z3String](ctx, e.t.raw)) and inRange and
+                           (zero <= e.i) and (e.i <= pc.i),
+                           (zero <= e.r) and (e.r <= pc.i))
 
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
@@ -8611,6 +8782,10 @@ proc checkCapped(ctx: Z3Context; rootsIn: openArray[Z3Bool];
     # Q1-1b, needs `str.indexof`'s upper bound), and that UNSAT, every fact
     # being valid, is the query's own; asserted beside the caps it would
     # read as the cap's (a decline where step 2's core found none).
+    # RFC-0005 S8ae: the facts also link the theory's functions (an
+    # `indexof` found implies `contains`, and so on), so a query refuted
+    # only through such a link is decided here as its own UNSAT, not
+    # declined on the cap below.
     let facts = seqRangeFacts(ctx, roots)
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)

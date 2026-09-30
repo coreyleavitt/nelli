@@ -951,5 +951,10 @@ task test, "Run the test suite":
             # nnkCall aliasing, sameType identity (was repr text), forced
             # generic-instantiation coverage, scan.nim added to scope; no
             # walker bump.
-            "tsymex_rfc0005_s8ab_letaudit"]:
+            "tsymex_rfc0005_s8ab_letaudit",
+            # RFC-0005 S8ae -- S8v's remainder: step 1c's facts link the
+            # sequence functions (indexof / contains / prefixof / slices)
+            # and range at / substr / to_code / to_int, so a query refuted
+            # only through them is UNSAT, not a cap decline; walker 173->174.
+            "tsymex_rfc0005_s8ae_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -247,6 +247,11 @@ title = "S8ab's remainder: close the VM-alias guard's gaps -- Table/`[]`-via-nnk
 state = "pending"
 
 [[slice]]
+id    = "S8ag"
+title = "S8y's remainder: lower str.indexof with a literal 1-char needle to a fresh Int plus split axioms (s = pre ++ x ++ c ++ post, with chain facts pre_j = pre_i ++ x_i ++ c when start_j = ix_i + 1) across all three backends of the idiom -- an equivalence for 1-char needles that turns N36-1's 5-iteration exit solves (q103/q106) from 20M exhaustion into SAT candidates (~1.3M/4.7M in a fresh context); prove the equivalence, pin the verdict and cost per test"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

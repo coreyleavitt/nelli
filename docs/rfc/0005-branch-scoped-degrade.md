@@ -222,6 +222,11 @@ title = "S8w's remainder: unchecked `low(T) div -1` is modelled as a wrap to low
 state = "pending"
 
 [[slice]]
+id    = "S8ab"
+title = "S8x's remainder: only `ctx.procScoped` lets have a mechanical guard against the compile-time VM value-let aliasing hazard; build a type-aware guard (typed-AST check over the compile-time modules, or a macro-time assertion helper) that flags any `let`/non-var param binding a non-scalar value location in code reachable from the symex macros, and pin it so the next value-typed save/restore in the front end is caught mechanically rather than by review"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-09-30 00:45Z)
+## Current position (refreshed 2026-09-30 02:05Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -228,12 +228,13 @@
 - **S8p LANDED** (`fd18b2f`, walker 164; gate regressed=0 new-failing=0, 521 pass; skipped-suite per-check unchanged). Findings -> fence **S8s** (`bf43efd`); **S8s (opus) running** in `scratchpad/wt-s8s`, branch `rfc-0005-s8s` (walker 167). S8q gate `s8q-gate.log` running on `3771cc0` (rebases onto S8p at landing).
 - **S8q LANDED** (`5c5fade`, walker 165; gate regressed=0 new-failing=0, 524 pass; b7r_bytescan 51 s + b7r2_pathscope ~280 s now pass on Linux and are off the skip list; conjunctive symexAssume linear). Findings -> fence **S8t** (`a58856d`); **S8t (opus) running** in `scratchpad/wt-s8t` (walker 168). **S8r:** shard 2 GREEN on CI at `bfbdfd8`, but scan-tail B7R-3 regressed to sxRaised on Z3 4.13.4 -- agent told to rebase onto S8q, re-verify under dt413, and make sure an exhausted bounded check taints rather than prunes. **S8s** committed `b499d30` (walker 167), gating next.
 - **S8s LANDED** (`16e667f`, walker 167; gate regressed=0 new-failing=0, 523 pass; also fixed three extra soundness faults: false sxUnsat on else-arm discriminators, false sxSat from unbound else-arm fields, wrong range witness). Findings -> fence **S8u** (`f783ed0`); **S8u (opus) running** in `scratchpad/wt-s8u` (walker 169). **S8r:** rebased onto S8q -> Windows scan-tail all GREEN incl. B7R-3 (`00149e3`); Linux gate `s8r-gate.log` running. **S8t** committed `822b6e8` (walker 168), gates after S8r.
-- **Remaining:** S8r land -> S8t land -> S8u land -> S11 -> completion gate -> ff main + tag.
+- **S8r LANDED** (`674b3b4`/`d1c0f82`/`0fcaeae`, no walker bump; gate regressed=0 new-failing=0, 526 pass; symex-mingw fully GREEN at the pre-rebase sha). Culprit `tsymex_163rev_intoffset_range` (10 GB on Z3 4.13.4): checkCapped step 1b was not theory-free on 4.13.4 (string_solver=none ignored) and step 2 searched long strings behind assumption-gated caps. CI now has a per-suite watchdog (`scripts/run-ci-suite.ps1`, 240 s / 6 GB) and `derive-ci-suites.ps1` strips comments (ten suites had silently never run on Windows). Post-rebase 7 targeted suites green. Findings -> fence **S8v** (`aa800f3`); **S8v (opus) running** in `scratchpad/wt-s8v`. **S8t** gate `s8t-gate.log` running; **S8u** committed `86be17b` (walker 169), gates after.
+- **Remaining:** S8t land -> S8u land -> S8v land -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check S8r (`rfc-0005-s8r`, `s8r-gate.log`) S8t (`rfc-0005-s8t`, `s8t-gate.log`) and S8u (`rfc-0005-s8u`, `s8u-gate.log`); gates run from a
-  worktree at the sha they certify, never the live checkout. Order: S8r -> S8t -> S8u ->
+  resume, check S8t (`rfc-0005-s8t`, `s8t-gate.log`), S8u (`rfc-0005-s8u`, `s8u-gate.log`) and S8v (`rfc-0005-s8v`, `s8v-gate.log`); gates run from a
+  worktree at the sha they certify, never the live checkout. Order: S8t -> S8u -> S8v ->
   S11 -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 

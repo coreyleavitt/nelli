@@ -3405,6 +3405,58 @@ Re-pinned:
   shards and names it if it hangs. The next symex-mingw run is its
   Windows verification; no Windows runner ran it in this slice.
 
+**As landed (S8t2, walker 168, no bump) — S8t broke the Windows build.**
+symex-mingw at fa7e172 (run 36667380693) was red on two jobs, both inside
+the Nim compiler while it expanded the symex macro: scan-tail
+`tsymex_r6_nulwitness` (exit 1, about 5 s after the last import) and
+corpus shard 2 `tsymex_rfc0005_s8t_termination` (0xC00000FD,
+STATUS_STACK_OVERFLOW, still compiling). The Windows `nim.exe` main thread
+has a 1 MB stack.
+
+*Cause.* `emitStmt` turns the parsed IR into a builder expression with one
+Nim call per IR node, so the builder's AST is as deep as the IR, and the
+compiler semchecks it by native recursion. S8t's nested short-circuit
+guards (`mkIf` / `mkBranch` / `mkBlock` per operand) add about 7 AST levels
+per chain operand where D1c's chained guards were flat. The macro's own
+recursion (`lowerShortCircuitParts`, `flattenShortCircuitChain`) runs in
+the compile-time VM, whose calls do not use the native stack, and is not
+the cause.
+
+*Reproduced on Linux* with the compile under `ulimit -s` in the dev
+container (`nim c --compileOnly`):
+
+- `tsymex_r6_nulwitness` compiles at 256 KB at 29a4d26 and overflows
+  (SIGSEGV) at 256 KB at 92d3970; both compile at 512 KB and 1 MB, so
+  Linux frames are smaller than the Windows build's.
+- A 40-operand chain with raising reads compiles at 1 MB at 29a4d26 and
+  overflows at 1 MB at 92d3970.
+- `tsymex_rfc0005_s8t_termination` overflows at 256 KB at 92d3970.
+
+*Fix.* `boundEmittedDepth` (`dsl_parser.nim`) post-processes the body and
+callee-table builders: any call subtree taller than `emitHoistHeight` (24)
+is bound, innermost first, to a fresh `let` in a statement-list expression
+and referenced by its symbol. The walk is iterative. Every call in a
+builder is a pure `mk*` constructor over literals and bound symbols, so the
+value built is unchanged, and a builder no taller than the bound is emitted
+exactly as before. It runs after `placeDeclineScopes`, which reads the
+builders as emitted. With it, the 40-operand chain, `nulwitness`,
+`s8t_termination` and `D1c_shortcircuit` all compile at 256 KB.
+
+*IR identity.* The IR `lowerShortCircuitParts` builds is untouched; only
+its emission changed. The runtime-built `SymexProgram` was dumped
+(`canonicalize(prog)` and the full `repr(prog)`) for every SUT that
+`s8t_termination` (14), `D1c_shortcircuit` (7) and `nulwitness` (9) pass to
+`symexFind`, at 92d3970 and with the fix: the dumps are byte-identical.
+No walker bump, no gate.
+
+*Guard.* `tsymex_rfc0005_s8t_termination` gains a 40-operand chain SUT: a
+compile-time check that its raw builder is over 200 levels tall and the
+emitted one at most `emitHoistHeight + 8`, and a run that solves it. Built
+on the symex-mingw leg, the file is itself the 1 MB compile check. The
+manual Linux check is the compile under a 1 MB stack:
+`podman run ... bash -c 'ulimit -s 1024; nim c --compileOnly --threads:on
+tests/tsymex_rfc0005_s8t_termination.nim'`.
+
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's
 taint joins the calling path". Verified: **most `closureCallErrors` emitters

@@ -10899,6 +10899,55 @@ proc placeDeclineScopes(errs: var seq[SymexErrorInfo]; emitted: openArray[NimNod
       if e.scope.calleeKey notin keys: e.scope = DeclineScope(kind: dskUnplaced)
     else: discard
 
+const emitHoistHeight* = 24
+  ## RFC-0005 S8t2. The tallest call subtree `boundEmittedDepth` leaves
+  ## inline in an emitted IR builder; a taller one is bound to a `let`.
+
+proc boundEmittedDepth*(root: NimNode): NimNode =
+  ## RFC-0005 S8t2. The emitted IR builder (`emitStmt`/`emitProcs`) nests one
+  ## Nim call per IR node, so its AST is as deep as the IR, and the compiler
+  ## semchecks it by native recursion. S8t's nested short-circuit guards made
+  ## the IR ~7 AST levels deeper per chain operand, which overflowed the 1 MB
+  ## main-thread stack of the Windows `nim.exe` on a 10-operand chain
+  ## (`tsymex_r6_nulwitness`, STATUS_STACK_OVERFLOW compiling
+  ## `tsymex_rfc0005_s8t_termination`); a 40-operand chain overflowed 1 MB on
+  ## Linux too.
+  ##
+  ## Bounds the depth without changing the value built: any call subtree
+  ## taller than `emitHoistHeight` is bound, innermost first, to a fresh
+  ## `let` in a statement-list expression around `root`, and referenced by
+  ## that symbol where it stood. Every call in an emitted builder is a pure
+  ## constructor (`mk*` in `types.nim`, over literals and bound symbols, no
+  ## locals), so evaluating a subtree ahead of its left siblings builds the
+  ## same IR. A builder no taller than the bound is returned unchanged.
+  ## Walks the tree iteratively (post-order with an explicit stack).
+  if root == nil: return root
+  var lets = newNimNode(nnkLetSection)
+  # Frame: a node, the next child to visit, the tallest child so far.
+  var stack: seq[tuple[n: NimNode, i, h: int]] = @[(root, 0, 0)]
+  var done = 0            # height of the subtree just finished
+  while true:
+    # Plain copies: in the compile-time VM a `let` of a seq element can
+    # alias it, and the frame is updated below.
+    let n = stack[^1].n
+    let i = stack[^1].i
+    if i < n.len:
+      stack[^1].i = i + 1
+      stack.add (n[i], 0, 0)
+      continue
+    done = stack[^1].h + 1
+    discard stack.pop()
+    if stack.len == 0: break
+    let k = stack[^1].i - 1           # `n` is this parent's child k
+    if n.kind == nnkCall and done > emitHoistHeight:
+      let t = genSym(nskLet, "irPart")
+      lets.add newIdentDefs(t, newEmptyNode(), n)
+      stack[^1].n[k] = t
+      done = 1
+    stack[^1].h = max(stack[^1].h, done)
+  if lets.len == 0: root
+  else: newTree(nnkStmtListExpr, lets, root)
+
 proc demoteUnrenderableWitnessTy(ty: IRType): IRType =
   ## RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). `classifyType`
   ## is a SHARED, widely-reused classifier — it also runs on purely-internal
@@ -11025,6 +11074,10 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
   # RFC-0005 S8 (§2.5 point 4): placement check against the emitted IR.
   placeDeclineScopes(ctx.parseErrors, [result.bodyNimNode, result.procsNimNode])
+  # RFC-0005 S8t2: after the placement check, which reads the builders as
+  # emitted; the bound moves call subtrees but keeps every node.
+  result.bodyNimNode = boundEmittedDepth(result.bodyNimNode)
+  result.procsNimNode = boundEmittedDepth(result.procsNimNode)
   result.parseErrors = ctx.parseErrors
   result.parseErrorsNimNode = emitErrorSeq(ctx.parseErrors)   ## Phase 15 G1c
   result.annotationViolations = ctx.annotationViolations

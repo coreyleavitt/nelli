@@ -26,6 +26,8 @@ import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import nelli/smt/dsl_parser   ## S8t2: emitStmt, parseEntryImpl, emitHoistHeight
+import std/macros
 
 type ScanError = object of CatchableError
 
@@ -383,6 +385,56 @@ suite "S8t (2): the other scan shapes and isExact":
       let (data, start) = r.witness
       let (p, q) = scanPair(data, start)
       check p == start + 4 and q == start + 5
+
+# ---------------------------------------------------------------------------
+# RFC-0005 S8t2 -- the emitted IR builder's depth. S8t's nested guards made
+# the builder `emitStmt` produces ~7 AST levels deeper per chain operand, and
+# the compiler semchecks that AST by native recursion: a 10-operand chain
+# (`tsymex_r6_nulwitness`) overflowed the Windows `nim.exe`'s 1 MB stack,
+# and this 40-operand one overflowed 1 MB on Linux (`ulimit -s 1024`).
+# `boundEmittedDepth` binds any call subtree taller than `emitHoistHeight`
+# to a `let`. Compiling this file at all on Windows is half the guard; the
+# height check below is the platform-independent half.
+# ---------------------------------------------------------------------------
+
+proc sutChain40(s: string) =
+  if s.len == 40 and
+     s[0] == 'a' and s[1] == 'a' and s[2] == 'a' and s[3] == 'a' and
+     s[4] == 'a' and s[5] == 'a' and s[6] == 'a' and s[7] == 'a' and
+     s[8] == 'a' and s[9] == 'a' and s[10] == 'a' and s[11] == 'a' and
+     s[12] == 'a' and s[13] == 'a' and s[14] == 'a' and s[15] == 'a' and
+     s[16] == 'a' and s[17] == 'a' and s[18] == 'a' and s[19] == 'a' and
+     s[20] == 'a' and s[21] == 'a' and s[22] == 'a' and s[23] == 'a' and
+     s[24] == 'a' and s[25] == 'a' and s[26] == 'a' and s[27] == 'a' and
+     s[28] == 'a' and s[29] == 'a' and s[30] == 'a' and s[31] == 'a' and
+     s[32] == 'a' and s[33] == 'a' and s[34] == 'a' and s[35] == 'a' and
+     s[36] == 'a' and s[37] == 'a' and s[38] == 'a' and s[39] == 'a':
+    symexTarget("hit")
+
+proc emittedHeight(n: NimNode): int =
+  result = 1
+  for c in n: result = max(result, 1 + emittedHeight(c))
+
+macro builderHeights(fn: typed): untyped =
+  ## (height of the raw `emitStmt` builder, height of the one emitted)
+  let parsed = parseEntryImpl(fn, "builderHeights",
+                              defaultSymexSettings().budget.maxInstantiationsPerProc)
+  newLit((emittedHeight(emitStmt(parsed.body)),
+          emittedHeight(parsed.bodyNimNode)))
+
+suite "S8t2: the emitted IR builder's depth is bounded":
+
+  test "a 40-operand chain's builder is bound under emitHoistHeight":
+    const hs = builderHeights(sutChain40)
+    checkpoint "raw " & $hs[0] & ", emitted " & $hs[1]
+    check hs[0] > 200                        # the unbounded builder: deep
+    check hs[1] <= emitHoistHeight + 8       # what the compiler semchecks
+
+  test "the 40-operand chain still solves":
+    let r = symexFind(sutChain40, tLabel("hit"))
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == repeat('a', 40)
 
 suite "S8t: walker version floor":
 

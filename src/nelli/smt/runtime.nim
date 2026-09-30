@@ -8098,7 +8098,13 @@ when defined(symexQueryStats):
   ## Wall time cannot separate those; this can.
   type SymexQueryStat* = object
     assertions*:   int     ## constraints handed to this solver instance
-    rlimit*:       int     ## Z3 logical steps consumed (deterministic)
+    rlimit*:       int     ## Z3's step counter after the check. It is the
+                           ## CONTEXT's counter, cumulative over every
+                           ## check of the walk (RFC-0005 S8ac), not this
+                           ## query's cost -- that is `rlimitDelta`.
+    rlimitDelta*:  int     ## RFC-0005 S8ac: the steps THIS query spent,
+                           ## every solver `checkCapped` ran for it
+                           ## included (deterministic).
     conflicts*:    int
     decisions*:    int
     propagations*: int
@@ -8119,7 +8125,14 @@ when defined(symexQueryStats):
       if st.isInt(key): st.getInt(key) else: int(st.getFloat(key))
     else: 0
 
-  proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string) =
+  proc contextRLimitCount(ctx: Z3Context): int =
+    ## RFC-0005 S8ac. The context's step counter now. Z3 reports it with
+    ## any solver's statistics (it is the context's resource limit, not the
+    ## solver's), so a fresh solver reads it without checking anything.
+    statInt(newSolver(ctx).getStatistics(), "rlimit count")
+
+  proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string,
+                       rlimitBefore: int) =
     ## Called immediately after `check()`. Statistics are valid for
     ## sat/unsat/UNKNOWN alike -- the truncated-by-rlimit case is precisely
     ## the one N45 cares about (B5-4's trip-wire query), so it must not be
@@ -8128,6 +8141,7 @@ when defined(symexQueryStats):
     symexQueryStats.add SymexQueryStat(
       assertions:   nAsserts,
       rlimit:       statInt(st, "rlimit count"),
+      rlimitDelta:  statInt(st, "rlimit count") - rlimitBefore,
       conflicts:    statInt(st, "conflicts"),
       decisions:    statInt(st, "decisions"),
       propagations: statInt(st, "propagations"),
@@ -8138,24 +8152,31 @@ when defined(symexQueryStats):
   proc symexQueryStatsSummary*(): string =
     ## Compact, greppable one-liner per query plus a total -- the shape a
     ## `git bisect run` script wants to threshold on.
-    var totR, totA = 0
+    var totR, totA, totD = 0
     result = ""
     for i, q in symexQueryStats:
       result.add "  q" & $i & " " & q.status & " asserts=" & $q.assertions &
-                 " rlimit=" & $q.rlimit & " conflicts=" & $q.conflicts &
+                 " rlimit=" & $q.rlimit & " drlimit=" & $q.rlimitDelta &
+                 " conflicts=" & $q.conflicts &
                  " decisions=" & $q.decisions & " props=" & $q.propagations &
                  " memMB=" & $q.memoryMb & "\n"
       totR += q.rlimit
+      totD += q.rlimitDelta
       totA += q.assertions
     result.add "  TOTAL queries=" & $symexQueryStats.len &
-               " asserts=" & $totA & " rlimit=" & $totR & "\n"
+               " asserts=" & $totA & " rlimit=" & $totR &
+               " drlimit=" & $totD & "\n"
 
-  proc symexQueryStatsTotals*(): tuple[queries, asserts, rlimit: int] =
-    ## The three numbers a bisect thresholds on, without parsing prose.
+  proc symexQueryStatsTotals*(): tuple[queries, asserts, rlimit,
+                                       rlimitDelta: int] =
+    ## The numbers a bisect thresholds on, without parsing prose.
+    ## `rlimitDelta` (RFC-0005 S8ac) is the walk's real step total;
+    ## `rlimit` sums the cumulative counter and over-counts.
     for q in symexQueryStats:
       result.queries += 1
       result.asserts += q.assertions
       result.rlimit  += q.rlimit
+      result.rlimitDelta += q.rlimitDelta
 
   import std/exitprocs
   addExitProc(proc() =
@@ -8167,7 +8188,7 @@ when defined(symexQueryStats):
     let t = symexQueryStatsTotals()
     if t.queries > 0:
       echo "N45STATS queries=", t.queries, " asserts=", t.asserts,
-           " rlimit=", t.rlimit)
+           " rlimit=", t.rlimit, " drlimit=", t.rlimitDelta)
 
 # ---- RFC-0005 S8k: the per-term seq length cap (`maxSeqLen`) ---------------
 #
@@ -8903,6 +8924,8 @@ proc trySolve(ctx: Z3Context,
   ## `reason_unknown` (an exhausted `queryRLimit`, an incomplete theory).
   let roots = pathRoots(path)
   inc symexZ3CallCount
+  when defined(symexQueryStats):
+    let rlimitBefore = contextRLimitCount(ctx)
   let (r, s, model, why) = checkCapped(ctx, roots, settings,
                                        settings.budget.queryRLimit)
   when defined(symexQueryStats):
@@ -8912,7 +8935,7 @@ proc trySolve(ctx: Z3Context,
       (case r
        of zsSat: "sat"
        of zsUnsat: "unsat"
-       else: "unknown"))
+       else: "unknown"), rlimitBefore)
   case r
   of zsSat:
     let m = model

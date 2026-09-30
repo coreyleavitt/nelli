@@ -232,6 +232,11 @@ title = "S8aa's remainder: a callee assigning through a `var` ref parameter (`cu
 state = "pending"
 
 [[slice]]
+id    = "S8ad"
+title = "S8ac's remainder: a local distinct value with no distinct-typed parameter (`var m = Meters(0)`) is a walker fault (reboxDistinct: distinct sort not allocated) -- must be modelled, never weInternalWalkerFault; `start < 0 and y > 1 and start div y == start` (UNSAT) exhausts the 20M seqQueryRLimit to sxUnknown (nonlinear div under the seq theory) -- find a linear/bounded encoding or a sound pre-solve refutation so it decides"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

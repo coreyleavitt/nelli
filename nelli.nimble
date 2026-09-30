@@ -942,5 +942,11 @@ task test, "Run the test suite":
             # step 1c carries str.len / str.indexof / seq.last_indexof
             # ranges, so a cap-only refutation through them declines without
             # a string search on Z3 4.13.4; walker 172->173.
-            "tsymex_rfc0005_s8v_termination"]:
+            "tsymex_rfc0005_s8v_termination",
+            # RFC-0005 S8ab -- S8x's remainder: a type-aware typed-AST
+            # guard (getImpl + getTypeInst) over the same VM let-aliasing
+            # hazard, across all 15 files S8x's own audit covered, in
+            # place of S8x's one-file/one-pattern source-text pin; no
+            # walker bump.
+            "tsymex_rfc0005_s8ab_letaudit"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

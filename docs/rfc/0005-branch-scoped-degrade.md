@@ -224,7 +224,7 @@ state = "done"
 [[slice]]
 id    = "S8ab"
 title = "S8x's remainder: only `ctx.procScoped` lets have a mechanical guard against the compile-time VM value-let aliasing hazard; build a type-aware guard (typed-AST check over the compile-time modules, or a macro-time assertion helper) that flags any `let`/non-var param binding a non-scalar value location in code reachable from the symex macros, and pin it so the next value-typed save/restore in the front end is caught mechanically rather than by review"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ac"
@@ -4210,6 +4210,55 @@ Pins: `tests/tsymex_rfc0005_s8x_vm_alias.nim`.
   Examples are `runtime.nim`'s `let savedStack = w.frame.handlerStack` before
   `setLen`/`add`, and `let byRefEntry = descentEnv` before `descentEnv[...] =`.
   They compile to native code, where `let` copies.
+
+**As landed (S8ab, no bump) — S8x's remainder: a type-aware guard,
+across the whole scope.** S8ab replaced S8x's one-file/one-pattern
+source-text pin with a typed-AST walker: `getImpl()` on every top-level
+routine in the same 15 files S8x's own audit table covers (`{.all.}` on
+each `import`, since both of S8x's own findings were unexported procs a
+plain `import` cannot see), walking every `nnkLetSection` whose RHS is
+`nnkBracketExpr`/`nnkDotExpr`/`nnkSym` and whose bound name's
+`getTypeInst().typeKind` is `ntyObject`/`ntyTuple`/`ntySequence`/
+`ntyString`/`ntySet`/`ntyArray` (never `ntyRef`) — Option 1 of the
+slice's own brief, implemented as written. A companion non-`var`-param
+check flags a value-typed parameter only when a SIBLING `ref` parameter,
+mutated in place in the same body, reaches the same field type
+(`paramThenCallerWriteThroughRef`'s own shape) — a structural-only
+version (any non-`var` value parameter, unconditionally) produced 265
+hits across this scope, almost all ordinary read-only `string`/`seq`
+parameters, and was rejected for exactly the false-positive explosion
+the slice's brief rules out.
+
+Run across the real scope today: four `let` hits, all already in S8x's
+own table as reviewed-safe (`types.nim`'s `IRType` `==` and `symex.nim`'s
+`emitMVBranch`, both reading a `VariantAxis`/`VariantArm` element with
+nothing written while the binding is live) — allowlisted, one entry
+each, in `tests/tsymex_rfc0005_s8ab_letaudit.nim`. Zero param hits.
+RED, taken from S8x's own base (5f4c2bb): `resolveBreak`'s
+`let t = ctx.procScoped.jumpTargets[i]` and `ensureProcRegistered`'s
+`let savedProcScoped = ctx.procScoped`, replicated verbatim as unused
+fixture procs on the real `ParseCtx`/`ProcScopedCollectors`/`JumpTarget`
+types so the guard proves it still flags the exact historical shape.
+
+*Different mechanisms, reported and not fixed here.*
+- **A `[]`-style hazard reached through a proc call (Table's `[]`, a
+  distinct wrapper's `[]`) types as `nnkCall`, not `nnkBracketExpr`, and
+  is not covered.** Widening the RHS-shape check to "any `[]` call" was
+  tried and immediately caught STRING SLICING (`s[0 .. ^2]`, which always
+  copies) as a false positive — slicing lowers through the same `[]`
+  call. No confirmed compile-time Table-value instance exists in this
+  scope today.
+- **The param check's "same type reachable" test compares `repr` text**,
+  not true structural/generic identity, and walks a ref param's field
+  graph only 3 levels deep.
+- **A generic routine never instantiated in this scope's own compilation
+  unit** yields `getImpl()`'s un-instantiated generic tree; a `let`/param
+  depending on an uninstantiated generic parameter cannot be classified
+  and is silently skipped, the same way an unresolvable type already is.
+- **The guard is test-only reflection, not a build-time lint.** It runs
+  once, in `tests/tsymex_rfc0005_s8ab_letaudit.nim`, not on every
+  compile; a new hazard is caught the next time that suite runs, not at
+  the point it is written.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

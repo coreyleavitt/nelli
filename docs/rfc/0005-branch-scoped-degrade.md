@@ -202,6 +202,11 @@ title = "S8t's remainder: alternating and/or chains ((a or b) and (c or d)) stil
 state = "pending"
 
 [[slice]]
+id    = "S8x"
+title = "S8t2's remainder: audit compile-time (macro/VM) code in src/nelli for the `let x = s[i]` / `s[^1]` element-aliasing hazard S8t2 hit in the Nim VM (a let copy aliases the seq slot, so mutating the seq corrupts it); fix every live instance, add a macro-time regression pin for any that was reachable"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

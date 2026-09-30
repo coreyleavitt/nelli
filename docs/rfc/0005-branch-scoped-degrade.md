@@ -237,6 +237,11 @@ title = "S8ac's remainder: a local distinct value with no distinct-typed paramet
 state = "pending"
 
 [[slice]]
+id    = "S8ae"
+title = "S8v's remainder: checkCapped step 1c declines queries that are UNSAT only through the sequence theory when their theory-free form is refuted only by the cap (e.g. `str.indexof(s, \":\", 0) > 200 and not str.contains(s, \":\")`) -- decide them without reintroducing the 4.13.4 step-2 string search (bounded step-2 core behind 1c's UNSAT, or a sound theory-level refutation); add range facts for str.at, str.substr, str.to_code (-1..255 byte domain), str.to_int (>= -1) and str.++ (len(a ++ b) = len(a) + len(b)) so cap conflicts through them are seen by step 1c"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

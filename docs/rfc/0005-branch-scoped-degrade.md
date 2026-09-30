@@ -207,6 +207,16 @@ title = "S8t2's remainder: audit compile-time (macro/VM) code in src/nelli for t
 state = "pending"
 
 [[slice]]
+id    = "S8y"
+title = "Runtime regression: tsymex_r6_n36_raise_degrade went from under the sweep's 900s kill to ~992s standalone between S8s and S8t2 (identical checks), so gates show 0 -> 137; bisect the landing that slowed it, find the query mechanism, restore the runtime without giving up soundness, pin it by query/rlimit shape rather than wall time"
+state = "pending"
+
+[[slice]]
+id    = "S8z"
+title = "S8u's remainder: array reads with a nonzero low bound (array[1..3, int]) ignore the bound (potential false sxUnsat); enum result with no ordinal 0 excludes Nim's actual zero value from the free retSym (potential false sxUnsat); array type alias classifies as uninterp; inline anonymous range discriminator is a typebridge compile error; array write at a symbolic index declines; closure-returning callee is weInternalWalkerFault (allocateSym(itUninterp)); remaining container shapes decline scoped"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

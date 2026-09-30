@@ -1,6 +1,30 @@
-## RFC-0005 (soundness channels) slice S8ab -- S8x's remainder: a
+## RFC-0005 (soundness channels) slices S8ab + S8af -- S8x's remainder: a
 ## TYPE-AWARE mechanical guard for the compile-time VM `let`-aliasing
 ## hazard, over the whole scope S8x's own hand audit covered.
+##
+## S8af closes four of S8ab's own "different mechanisms, reported and not
+## fixed here" gaps (search this file for "S8af" to find each change):
+## 1. Table/`[]`-via-`nnkCall` aliasing, told apart from string slicing by
+##    the resolved callee's OWN return-type shape (`var T` vs `lent T` vs a
+##    plain value), never by call syntax -- `calleeReturnsVar`.
+## 2. Real type identity (`sameType`) in the param check, replacing the
+##    `repr`-text comparison that a type ALIAS could evade -- `sameType`
+##    call sites in `walkParams`, fixtures collected via `collectFieldTypes`.
+## 3. Generic procs: a REAL instantiation (forced by passing an actual call
+##    expression, not a bare name, through a `typed` macro parameter) is
+##    now auditable instead of silently skipped -- `auditGenericInstantiation`.
+## 4. CI: the guard now also runs as a named contract test on
+##    `fuzzer-mingw`/`fuzzer-msvc` (it already ran on `symex-mingw` via
+##    nelli.nimble's derived `tsymex_*` corpus) -- see
+##    `.github/workflows/fuzzer-mingw.yaml` / `fuzzer-msvc.yaml`.
+##
+## S8af also adds `smt/scan.nim` to the audited scope (a real gap: it walks
+## the SUT's IR "at macro time", per its own header, directly from
+## `symexFindAllWitnesses`'s un-quoted macro body -- `symex.nim:2826/2828`
+## -- with no quote-do wrapper between the macro and the call, so it is
+## genuinely compile-time-VM-executed and was simply missing from S8x's
+## original 15-file list). It contains zero `let`s today (all locals are
+## `var`), so this adds coverage, not a new hit.
 ##
 ## S8x (`tests/tsymex_rfc0005_s8x_vm_alias.nim`) found and fixed the two
 ## live-at-the-time hazards (`resolveBreak`'s `let t = ctx.procScoped.
@@ -69,13 +93,53 @@
 ##
 ## ---- Scope ----------------------------------------------------------
 ##
-## The same 15 files S8x's own audit table covers (its "Method"
-## paragraph): the six `smt/` front-end modules, `symex.nim`'s macro
-## helpers, and the eight other macro-declaring top-level modules.
-## `{.all.}` is required on every one of them: the two historical hazards
-## were both UNEXPORTED procs, and a plain `import` cannot see those at
-## all, so a guard restricted to exported symbols would have missed both
-## of S8x's own findings.
+## S8x's original 15 files (its "Method" paragraph: the six `smt/`
+## front-end modules, `symex.nim`'s macro helpers, and the eight other
+## macro-declaring top-level modules) PLUS `smt/scan.nim` (S8af: see the
+## file header's item above -- genuinely compile-time-VM-executed, was
+## simply missing). `{.all.}` is required on every one of them: the two
+## historical hazards were both UNEXPORTED procs, and a plain `import`
+## cannot see those at all, so a guard restricted to exported symbols
+## would have missed both of S8x's own findings.
+##
+## S8af also confirmed, file by file, that NOTHING ELSE reachable from
+## `symex.nim`'s imports belongs in this scope. `runtime.nim`/
+## `runtime_strings.nim` (and everything `runtime.nim` itself pulls in --
+## `abstraction.nim`, `regex_parser.nim`, `concolictaxonomy.nim`,
+## `../choice`) execute only at TEST RUNTIME: every call site is either
+## inside a `quote do:` block (backtick-interpolated identifiers --
+## `renderAsChoices(`witId`)` at `symex.nim:2520`,
+## `processIsolationSpawnWorker(`idLit`, `propSym`)` at
+## `fuzzmacro.nim:514`) or its own doc says so directly
+## (`saveSymexWitnessImpl`: "Runtime body of `saveSymexWitness`",
+## `symex.nim:245`). `canonicalize.nim` (`symexCacheKey`, `canonicalize`)
+## is the same: its callers operate on `db: ExampleDatabase`, a value that
+## does not exist until the compiled test binary runs, so the cache-key
+## computation cannot happen at macro-expansion time either. The
+## `engine/`, `optbox.nim`, `db.nim` family is the property-testing
+## ENGINE (pipeline phases, the example database, strategy generation) --
+## reachable only from `runtime.nim`'s / the PBT driver's own import
+## graph, never from the parser. `smt/dsl.nim` (confusable with the
+## already-scoped top-level `dsl.nim`) is a pure re-export facade -- zero
+## `proc`/`func`/`macro`/`template` declarations of its own, nothing to
+## audit. This matches S8x's own conclusion for `runtime.nim`, now
+## re-confirmed against every module one hop further out: it "compiles to
+## native code, where `let` copies" -- there is no VM-aliasing hazard to
+## find there, by construction, not by omission.
+##
+## The already-scoped `strategy.nim`/`parallel.nim`/`fuzzmacro.nim`/
+## `coverage.nim` generic combinators (`oneOf`, `map`, `isLinearisable`,
+## `processIsolationSpawnWorker`, `logCmp`, and `symex.nim`'s own
+## `renderInto`/`renderAsChoices`/`forAllWithSymexSeeds`/
+## `allRaiseFindings`/`sortedKeysOf`/`sortedElemsOf`) are audited (the
+## guard walks every top-level routine in a scoped file, not just the
+## macro-adjacent ones) but are ALSO runtime-only by the same test: each
+## is called only from inside a `quote do:` block or from property-test
+## execution, never from a macro's own un-quoted body. They are not
+## exempted from the walk (over-inclusion here is free and safe), just
+## from the "force a real instantiation" requirement below, since a
+## generic instantiation that never runs in the VM cannot hide a VM
+## hazard regardless of whether this guard can see it.
 ##
 ## ---- Known gaps (different mechanisms, reported and not fixed here) --
 ##
@@ -84,34 +148,38 @@
 ##   scan cannot parse at all (an unusual multi-line signature, a name
 ##   this scan's simple lexer mishandles) silently drops that routine from
 ##   coverage. The scan is structural text, same caveat as S8x's own.
-## - A `[]`-style hazard reached through a PROC call (Table's `[]`, a
-##   distinct wrapper's `[]`) types as `nnkCall`, not `nnkBracketExpr`,
-##   and is NOT covered -- the brief's three named shapes are exactly
-##   `nnkBracketExpr`/`nnkDotExpr`/`nnkSym`, and widening to "any `[]`
-##   call" was tried and immediately caught STRING SLICING
-##   (`s[0 .. ^2]`, which always copies) as a false positive, because
-##   slicing is ALSO lowered through a `[]` call. No confirmed compile-time
-##   Table-value instance exists in this scope today.
-## - The param check's "same type reachable" test compares `repr` text,
-##   not true structural/generic identity, and a ref param's field graph
-##   is walked only 3 levels deep.
-## - Generic procs never instantiated in this scope's own compilation unit
-##   get `getImpl()`'s un-instantiated generic tree; a `let`/param whose
-##   type depends on an uninstantiated generic parameter cannot be
-##   classified and is silently skipped (not a false negative signal --
-##   `getTypeInst` returns a generic placeholder or nil, filtered out by
-##   the same `objKinds`/`t.isNil` checks as any other unresolvable type).
+## - The param check's ref-param field graph is walked only 3 levels deep
+##   (`collectFieldTypes`'s own `depth` bound) -- unchanged by S8af, which
+##   fixed the COMPARISON (`sameType`, was `repr` text) but not this bound.
+## - A generic proc that is NEVER instantiated ANYWHERE this test binary
+##   reaches (not even via a forced fixture call, S8af's own mechanism)
+##   still cannot be classified: `getImpl()` on the bare, un-instantiated
+##   generic symbol gives back a tree whose bound names are `nnkIdent`,
+##   not `nnkSym` (probed, `probe_bare_generic2.nim`: the SAME guard code
+##   that already requires `nameNode.kind == nnkSym` before calling
+##   `getTypeInst()` is what silently drops these -- not, as an earlier
+##   draft of this note speculated, `getTypeInst` returning a generic
+##   placeholder). S8af closes this for every generic proc that IS
+##   instantiated somewhere reachable (which, per the scope note above, is
+##   every compile-time-VM-reachable one found in this scope today --
+##   `dsl_parser.traceOneCallBoundary[T]`, forced via
+##   `auditGenericInstantiation`) by forcing the instantiation itself
+##   rather than trying to classify the generic tree; a FUTURE generic
+##   proc added to compile-time-reachable code and never called anywhere
+##   (including by this file's own fixtures) is still only caught by
+##   review, same as S8x's own residual gap for plain `let`s.
 ##
 ## No walker bump: this is test-only reflection over already-compiled
 ## modules; the IR is untouched.
 
-import std/[macros, os, strutils, sequtils, unittest]
+import std/[macros, os, strutils, sequtils, tables, unittest]
 import nelli/smt/dsl_parser {.all.}
 import nelli/smt/dsl_typebridge {.all.}
 import nelli/smt/scoped_names {.all.}
 import nelli/smt/exn_hierarchy {.all.}
 import nelli/smt/stdlib_models {.all.}
 import nelli/smt/types {.all.}
+import nelli/smt/scan {.all.}  ## RFC-0005 S8af: added to scope, see the file header.
 import nelli/symex {.all.}
 import nelli/fuzzmacro {.all.}
 import nelli/derive {.all.}
@@ -183,20 +251,66 @@ proc unwrapHidden(n: NimNode): NimNode =
     if result.len == 0: break
     result = result[^1]
 
+const routineSymKinds = {nskProc, nskFunc, nskMethod, nskIterator,
+                          nskConverter, nskTemplate, nskMacro}
+
+proc calleeReturnsVar(callNode: NimNode): bool =
+  ## RFC-0005 S8af (closes S8ab's "`[]`-via-`nnkCall`" gap). True iff
+  ## `callNode` (an already-`unwrapHidden`-ed `nnkCall`) resolves to a
+  ## routine whose DECLARED return type is `var T` -- the one signature
+  ## shape this Nim VM proves aliases through a proc-call-mediated `[]`:
+  ## `tables.[]​(t: var Table[A, B], key: A): var B` (probed,
+  ## `probe_vm_table2.nim`: `t["k"].add(99)` after `let v = t["k"]` shows
+  ## through `v` in the VM, native copies). A `lent T` return (the
+  ## non-`var`-table overload, `[]​(t: Table[A, B], key: A): lent B`) and a
+  ## plain value return (string/seq/array SLICING,
+  ## `[]​(s: …; x: HSlice[…]): string`/`seq[T]`) both COPY in this VM --
+  ## same probe file, `tableLentOverload`. `lent`'s own surface syntax is
+  ## unresolved `nnkCommand` (`probe_lent2.nim`), indistinguishable from a
+  ## plain call by shape, so `var` (the compiler's own `nnkVarTy` on the
+  ## resolved signature) is the only shape-safe signal; widening to "any
+  ## proc call" was rejected the same way S8ab rejected "any `[]` call" --
+  ## every ordinary `let x = someProc(...)` returning a seq/string/object
+  ## BY VALUE would otherwise be flagged.
+  if callNode.kind != nnkCall or callNode.len == 0: return false
+  let callee = callNode[0]
+  if callee.kind != nnkSym or callee.symKind notin routineSymKinds: return false
+  var impl: NimNode
+  try: impl = callee.getImpl()
+  except CatchableError: return false
+  if impl.isNil or impl.kind == nnkNilLit or impl.len <= 3: return false
+  let formals = impl[3]
+  if formals.kind != nnkFormalParams or formals.len == 0: return false
+  formals[0].kind == nnkVarTy
+
 proc rootSym(n: NimNode): NimNode =
-  ## The base symbol of a `.field`/`[i]` chain (`ctx.procScoped.
-  ## jumpTargets[i]` -> `ctx`).
-  var cur = unwrapHidden(n)
-  while cur.kind in {nnkBracketExpr, nnkDotExpr}:
-    if cur.len == 0: return cur
-    cur = unwrapHidden(cur[0])
-  cur
+  ## The base symbol of a `.field`/`[i]`/aliasing-call chain (`ctx.
+  ## procScoped.jumpTargets[i]` -> `ctx`; RFC-0005 S8af: `t["k"]` where
+  ## `[]` resolves to a `var`-returning overload -> `t`, the receiver
+  ## argument, same as `.field`/`[i]`'s own first child).
+  result = unwrapHidden(n)
+  while true:
+    case result.kind
+    of nnkBracketExpr, nnkDotExpr:
+      if result.len == 0: return
+      result = unwrapHidden(result[0])
+    of nnkCall:
+      if calleeReturnsVar(result) and result.len > 1:
+        result = unwrapHidden(result[1])
+      else:
+        return
+    else:
+      return
 
 proc rhsAliasKind(n: NimNode): NimNode =
-  ## nil: not one of the three hazard shapes. Otherwise the (unwrapped)
-  ## RHS node to classify by type.
+  ## nil: not one of the hazard shapes. Otherwise the (unwrapped) RHS node
+  ## to classify by type. RFC-0005 S8af: `nnkCall` joins the original three
+  ## (`nnkBracketExpr`/`nnkDotExpr`/`nnkSym`) ONLY when `calleeReturnsVar`
+  ## -- see its own doc for why that gate, not "any call", is the right
+  ## line.
   let r = unwrapHidden(n)
   if r.kind in {nnkBracketExpr, nnkDotExpr, nnkSym}: return r
+  if r.kind == nnkCall and calleeReturnsVar(r): return r
   nil
 
 proc walkLets(n: NimNode; owner: string; hits: var seq[string]) =
@@ -259,11 +373,21 @@ proc bodyMutatesRoot(n: NimNode; target: NimNode): bool =
     if bodyMutatesRoot(c, target): return true
   false
 
-proc collectFieldTypeReprs(objTypeSym: NimNode; depth: int; into: var seq[string]) =
-  ## Field types reachable from a ref/object type symbol, depth-bounded
-  ## (3): the shape of `paramThenCallerWriteThroughRef(h: Holder; xs: seq
-  ## [int])`, where `xs` aliases `h.c.xs` because the CALLER passed the
-  ## same location twice.
+proc collectFieldTypes(objTypeSym: NimNode; depth: int; into: var seq[NimNode]) =
+  ## Field TYPES (not text) reachable from a ref/object type symbol,
+  ## depth-bounded (3, unchanged by S8af -- see the file header's "Known
+  ## gaps"): the shape of `paramThenCallerWriteThroughRef(h: Holder; xs:
+  ## seq[int])`, where `xs` aliases `h.c.xs` because the CALLER passed the
+  ## same location twice. RFC-0005 S8af: collects each field's RESOLVED
+  ## type (`getTypeInst()` on the field's own symbol) for comparison via
+  ## `sameType` in `walkParams`, not the raw declaration node's `repr` --
+  ## a type ALIAS (`type StrIntTable = Table[string, int]`; `xs:
+  ## StrIntTable` vs a sibling param `xs: Table[string, int]`) reprs
+  ## differently ("StrIntTable" vs "Table[string, int]") but IS the same
+  ## type (`sameType`'s own doc: "true... when comparing alias with
+  ## original type") -- probed, `probe_alias_mismatch.nim`: the OLD
+  ## repr-text compare said `false` on exactly this shape, a real false
+  ## negative the fixture below pins.
   if depth <= 0 or objTypeSym.kind != nnkSym: return
   var cur: NimNode
   try: cur = objTypeSym.getTypeImpl()
@@ -278,10 +402,15 @@ proc collectFieldTypeReprs(objTypeSym: NimNode; depth: int; into: var seq[string
   if recList.kind != nnkRecList: return
   for fld in recList:
     if fld.kind != nnkIdentDefs: continue
-    let fieldTypeNode = fld[1]
-    into.add fieldTypeNode.repr
-    if fieldTypeNode.kind == nnkSym:
-      collectFieldTypeReprs(fieldTypeNode, depth - 1, into)
+    let fieldNameSym = fld[0]
+    if fieldNameSym.kind != nnkSym: continue
+    var fieldType: NimNode
+    try: fieldType = fieldNameSym.getTypeInst()
+    except CatchableError: continue
+    if fieldType.isNil: continue
+    into.add fieldType
+    if fieldType.kind == nnkSym:
+      collectFieldTypes(fieldType, depth - 1, into)
 
 proc walkParams(impl: NimNode; owner: string; hits: var seq[string]) =
   if impl.len <= 6: return
@@ -289,7 +418,7 @@ proc walkParams(impl: NimNode; owner: string; hits: var seq[string]) =
   if formals.kind != nnkFormalParams: return
   let body = impl[6]
   var candidates: seq[tuple[nm: string, t: NimNode]]
-  var siblingFieldReprs: seq[string]
+  var siblingFieldTypes: seq[NimNode]
   for i in 1 ..< formals.len:
     let iddef = formals[i]
     if iddef.kind != nnkIdentDefs: continue
@@ -303,12 +432,18 @@ proc walkParams(impl: NimNode; owner: string; hits: var seq[string]) =
       # sibling value param stale -- an unmutated ref param can never
       # invalidate anything, whatever its field types are.
       if bodyMutatesRoot(body, sym):
-        collectFieldTypeReprs(t, 3, siblingFieldReprs)
+        collectFieldTypes(t, 3, siblingFieldTypes)
     elif t.typeKind in objKinds:
       candidates.add (macros.strVal(sym), t)
-  if siblingFieldReprs.len == 0: return
+  if siblingFieldTypes.len == 0: return
   for (nm, t) in candidates:
-    if t.repr in siblingFieldReprs:
+    # RFC-0005 S8af: `sameType`, not `t.repr in siblingFieldReprs` -- see
+    # `collectFieldTypes`'s own doc for the alias false negative this
+    # replaces.
+    var matched = false
+    for ft in siblingFieldTypes:
+      if sameType(t, ft): matched = true; break
+    if matched:
       hits.add owner & ": param " & nm & " : " & t.repr &
         " (" & $t.typeKind & ") -- a sibling ref param, mutated in this " &
         "body, reaches the same field type"
@@ -332,8 +467,7 @@ macro auditOne(procSym: typed; fileTag: static string): untyped =
     syms.add procSym
   else: discard
   for s in syms:
-    if s.symKind notin {nskProc, nskFunc, nskMethod, nskIterator,
-                         nskConverter, nskTemplate, nskMacro}:
+    if s.symKind notin routineSymKinds:
       continue
     var impl: NimNode
     try:
@@ -357,6 +491,38 @@ macro genAudits(names: static seq[string]; fileTag: static string): untyped =
     let call = newCall(bindSym"auditOne", ident(nm), newLit(fileTag))
     result.add nnkWhenStmt.newTree(nnkElifBranch.newTree(bindSym"true", newStmtList(call)))
 
+macro auditGenericInstantiation(callExpr: typed; fileTag: static string): untyped =
+  ## RFC-0005 S8af: closes S8ab's "generic procs ... silently skipped" gap.
+  ## Unlike `auditOne` (which resolves a BARE name and so always gets the
+  ## GENERIC, un-instantiated symbol -- `getImpl()` on THAT gives back a
+  ## tree whose bound names are `nnkIdent`, not `nnkSym`; probed,
+  ## `probe_bare_generic2.nim`), `callExpr` here is an actual CALL
+  ## EXPRESSION. Passing a call (not a name) as a `typed` macro argument
+  ## forces the compiler to produce the fully-substituted INSTANTIATED
+  ## symbol as the call's own callee -- `getImpl()` on THAT returns the
+  ## typed body with every generic parameter resolved to the concrete type
+  ## the call used (probed, `probe_generic_inst.nim`:
+  ## `probeCall(genericHelper(@[1, 2, 3]))` sees `let y`'s
+  ## `getTypeInst().typeKind == ntySequence`, not a generic placeholder).
+  ## The caller supplies a REAL call (real argument types, closures
+  ## included) so this only ever audits an instantiation that could
+  ## actually occur, never a synthetic one.
+  result = newEmptyNode()
+  if callExpr.kind notin {nnkCall, nnkCommand} or callExpr.len == 0: return
+  let callee = callExpr[0]
+  if callee.kind != nnkSym or callee.symKind notin routineSymKinds: return
+  var impl: NimNode
+  try:
+    impl = callee.getImpl()
+  except CatchableError as e:
+    walkErrs.add fileTag & ": " & macros.strVal(callee) &
+      " (forced instantiation) getImpl raised: " & e.msg
+    return
+  if impl.isNil or impl.kind == nnkNilLit: return
+  let owner = fileTag & ":" & macros.strVal(callee) & "[instantiated]"
+  walkLets(impl, owner, letHits)
+  walkParams(impl, owner, paramHits)
+
 template auditFile(dir, fname: string) =
   const path = dir / fname
   const names = extractTopLevelNames(path)
@@ -368,6 +534,8 @@ auditFile(smtDir, "scoped_names.nim")
 auditFile(smtDir, "exn_hierarchy.nim")
 auditFile(smtDir, "stdlib_models.nim")
 auditFile(smtDir, "types.nim")
+# RFC-0005 S8af: added to scope -- see the file header's item above.
+auditFile(smtDir, "scan.nim")
 auditFile(rootDir, "symex.nim")
 auditFile(rootDir, "fuzzmacro.nim")
 auditFile(rootDir, "derive.nim")
@@ -377,6 +545,28 @@ auditFile(rootDir, "mutation.nim")
 auditFile(rootDir, "concolic.nim")
 auditFile(rootDir, "strategy.nim")
 auditFile(rootDir, "parallel.nim")
+
+# ---- RFC-0005 S8af: forced generic instantiation, real production scope -----
+#
+# `traceOneCallBoundary[T]` (`dsl_parser.nim`) is the one compile-time-VM-
+# reachable generic proc this scope's own audit found (see the file
+# header's scope note for why every OTHER generic proc found here is
+# runtime-only and therefore not forced). Its own doc names its two real
+# instantiations: `seq[NimNode]` (`collectStringBackedByteSeqParamsImpl`'s
+# own `getCalleeMarked`/`isMarked` pair) and `HashSet[string]`
+# (`collectIntOffsetParamsImpl`'s). `seq[NimNode]` is forced here with
+# minimal closures matching the real signature -- never called, same as
+# the RED fixtures below, present only to be typed-checked (and thereby
+# instantiated).
+
+proc s8afFxGetCalleeMarked(calleeImpl: NimNode): seq[NimNode] = @[]
+proc s8afFxIsMarked(marked: seq[NimNode], formalSym: NimNode): bool = false
+proc s8afFxOnMatch(argNode: NimNode) = discard
+
+auditGenericInstantiation(
+  traceOneCallBoundary[seq[NimNode]](
+    newEmptyNode(), s8afFxGetCalleeMarked, s8afFxIsMarked, s8afFxOnMatch),
+  "dsl_parser.nim")
 
 const realScopeLetHits = block:
   var dedup: seq[string]
@@ -442,9 +632,78 @@ proc fxParamAliasShape(h: FxHolder; xs: seq[int]): int =
   h.c.xs.add 3
   xs.len
 
+# ---- RFC-0005 S8af RED fixtures ----------------------------------------
+
+proc fxTableBracketAliasShape(): int =
+  ## S8af gap 1 positive: Table's mutable `[]` overload
+  ## (`[]​(t: var Table[A, B], key: A): var B`) returns a real alias in
+  ## this VM -- typed as `nnkCall`, not `nnkBracketExpr`, so S8ab's own
+  ## RHS-shape check missed it entirely. `calleeReturnsVar` classifies it
+  ## by the resolved callee's `var` return, not by seeing a `[]` at all.
+  var t = initTable[string, seq[int]]()
+  t["k"] = @[1, 2, 3]
+  let v = t["k"]                             # RFC-0005 S8af hazard
+  t["k"].add 99
+  v.len
+
+proc fxStringSliceNotFlagged(s: string): string =
+  ## S8af gap 1 control: string slicing lowers through the SAME `[]`-call
+  ## syntax as `fxTableBracketAliasShape`'s hazard, but its resolved
+  ## callee (`[]​(s: string; x: HSlice[…]): string`) returns a plain
+  ## value, not `var T` -- must NOT be flagged. This is the exact false
+  ## positive S8ab's own note rejected "any `[]` call" for.
+  let v = s[0 .. ^2]
+  v
+
+proc fxTableLentNotFlagged(t: Table[string, seq[int]]): int =
+  ## S8af gap 1 control: the read-only `[]` overload
+  ## (`[]​(t: Table[A, B], key: A): lent B`) COPIES in this VM (probed,
+  ## `probe_vm_table2.nim`'s `tableLentOverload`) -- must NOT be flagged
+  ## even though it is also an `nnkCall`.
+  let v = t["k"]
+  v.len
+
+type
+  FxIntSeqAlias = seq[int]
+  FxInnerAlias = object
+    xs: FxIntSeqAlias
+  FxHolderAlias = ref object
+    c: FxInnerAlias
+
+proc fxParamAliasViaTypeAlias(h: FxHolderAlias; xs: seq[int]): int =
+  ## S8af gap 2 positive: `h.c.xs` is declared through a TYPE ALIAS
+  ## (`FxIntSeqAlias = seq[int]`), otherwise identical to
+  ## `fxParamAliasShape` above (same mutation, `.add`, so `bodyMutatesRoot`
+  ## sees it the same way -- the only variable is the field's declared
+  ## type). The OLD repr-text comparison ("FxIntSeqAlias" != "seq[int]")
+  ## MISSED this real `paramThenCallerWriteThroughRef` hazard -- `xs` may
+  ## be `h.c.xs`, passed twice by the caller. `sameType` sees through the
+  ## alias and catches it (probed, `probe_alias_mismatch.nim`, same shape
+  ## with `Table[string, int]`).
+  h.c.xs.add 3
+  xs.len
+
+proc fxGenericAliasShape[T](container: seq[T]): T =
+  ## S8af gap 3: a generic proc's OWN `let`, hazard-shaped only once `T`
+  ## is resolved to a non-scalar. `container[0]` is `nnkBracketExpr`, one
+  ## of the original three shapes -- this fixture isolates gap 3 (generic
+  ## instantiation coverage) from gap 1 (the new `nnkCall` shape).
+  let v = container[0]        # RFC-0005 S8af hazard, once T is non-scalar
+  v
+
 const fixtureNames = @["preFixResolveBreakShape", "preFixEnsureProcRegisteredShape",
-                       "fxParamAliasShape"]
+                       "fxParamAliasShape", "fxTableBracketAliasShape",
+                       "fxStringSliceNotFlagged", "fxTableLentNotFlagged",
+                       "fxParamAliasViaTypeAlias", "fxGenericAliasShape"]
 genAudits(fixtureNames, thisFile)
+
+# `fxGenericAliasShape` is walked TWICE: once above, bare, via `genAudits`
+# (proving the OLD/bare-name path sees nothing -- its body's bound names
+# are `nnkIdent`, not `nnkSym`, for an un-instantiated generic), and once
+# here, FORCED to a concrete `T = seq[int]` via `auditGenericInstantiation`
+# (proving the NEW path catches the hazard once real). Both results are
+# distinguished by owner-tag suffix in the tests below.
+auditGenericInstantiation(fxGenericAliasShape[seq[int]](@[@[1, 2, 3]]), thisFile)
 
 const fixtureLetHits = block:
   var dedup: seq[string]
@@ -466,17 +725,38 @@ suite "S8ab: type-aware guard for the compile-time VM let-aliasing hazard":
     # Taken from S8x's base (5f4c2bb): `resolveBreak`'s element let and
     # `ensureProcRegistered`'s whole-record let, both on the real
     # `ParseCtx`/`ProcScopedCollectors`/`JumpTarget` types.
-    check fixtureLetHits.len == 2
     check fixtureLetHits.anyIt(it.contains("preFixResolveBreakShape") and it.contains("JumpTarget"))
     check fixtureLetHits.anyIt(it.contains("preFixEnsureProcRegisteredShape") and
                                 it.contains("ProcScopedCollectors"))
 
   test "RED: the walker flags a non-var param aliased through a mutated ref sibling":
-    check fixtureParamHits.len == 1
-    check fixtureParamHits[0].contains("fxParamAliasShape")
-    check fixtureParamHits[0].contains("param xs")
+    check fixtureParamHits.anyIt(it.contains("fxParamAliasShape") and it.contains("param xs"))
 
-  test "GREEN: no getImpl/audit-machinery error across the 15-file scope":
+  test "S8af RED: Table's var-returning `[]` (nnkCall) is flagged, string slicing and the lent overload are not":
+    check fixtureLetHits.anyIt(it.contains("fxTableBracketAliasShape") and
+                                it.contains("let v") and it.contains("seq[int]"))
+    check not fixtureLetHits.anyIt(it.contains("fxStringSliceNotFlagged"))
+    check not fixtureLetHits.anyIt(it.contains("fxTableLentNotFlagged"))
+
+  test "S8af RED: a param aliased only through a type ALIAS is flagged (sameType, not repr text)":
+    check fixtureParamHits.anyIt(it.contains("fxParamAliasViaTypeAlias") and it.contains("param xs"))
+
+  test "S8af RED: a generic proc's hazard is invisible to the bare/un-instantiated walk":
+    # The bare-walk owner tag has no "[instantiated]" suffix -- distinct
+    # from the forced-instantiation hit the GREEN test below expects.
+    check not fixtureLetHits.anyIt(it.contains(thisFile & ":fxGenericAliasShape:"))
+
+  test "S8af GREEN: the SAME generic proc's hazard is caught once a real instantiation is forced":
+    check fixtureLetHits.anyIt(it.contains("fxGenericAliasShape[instantiated]") and
+                                it.contains("let v") and it.contains("seq[int]"))
+
+  test "S8af GREEN: the one compile-time-reachable generic proc in the real scope" &
+       " (traceOneCallBoundary[seq[NimNode]]) instantiates and audits cleanly":
+    check realScopeErrs.len == 0
+    check not realScopeLetHits.anyIt(it.contains("traceOneCallBoundary[instantiated]"))
+    check not realScopeParamHits.anyIt(it.contains("traceOneCallBoundary[instantiated]"))
+
+  test "GREEN: no getImpl/audit-machinery error across the 16-file scope":
     check realScopeErrs.len == 0
     if realScopeErrs.len > 0: echo realScopeErrs.join("\n")
 

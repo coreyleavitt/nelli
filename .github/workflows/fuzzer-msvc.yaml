@@ -316,7 +316,18 @@ jobs:
           # same trap. Named rather than globbed for the same reason the
           # half-(2) pin above is explicit: a surface contract should not
           # depend on filename luck.
-          foreach ($named in @('tsmoke', 'trequiresinit')) {
+          #
+          # tsymex_rfc0005_s8ab_letaudit.nim (RFC-0005 S8af): the
+          # compile-time-VM let-aliasing guard. It already runs on
+          # symex-mingw.yaml (auto-derived from nelli.nimble's `tsymex_*`
+          # corpus), but neither fuzzer leg's glob matches its name
+          # (`^(tfuzz|tdb|tengine_)`, nor the named-exact list) even though
+          # part of its audited scope -- `fuzzmacro.nim`, `derive.nim`,
+          # `dsl.nim`, `coverage.nim`, `mutation.nim`, `concolic.nim`,
+          # `strategy.nim`, `parallel.nim` -- is fuzzer-side code. Pinned
+          # here (and in fuzzer-mingw.yaml) so the guard is exercised under
+          # BOTH C compilers, not only mingw-via-symex-mingw.
+          foreach ($named in @('tsmoke', 'trequiresinit', 'tsymex_rfc0005_s8ab_letaudit')) {
             Write-Host "==> $named.nim (contract test)"
             nim c -r --cc:vcc --threads:on --hints:off --colors:off `
               --nimcache:_nimcache `

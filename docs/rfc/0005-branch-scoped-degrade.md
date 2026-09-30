@@ -244,7 +244,7 @@ state = "pending"
 [[slice]]
 id    = "S8af"
 title = "S8ab's remainder: close the VM-alias guard's gaps -- Table/`[]`-via-nnkCall aliasing (distinguish typed Table/seq index from string slicing by the callee's resolved symbol, not syntax), type identity by real type equality (sameType) instead of a depth-3 repr bound, instantiated coverage of generic procs (walk their instantiations), and make the guard fire in every CI leg rather than only under the one test file (register it where every leg runs it)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ag"
@@ -4259,6 +4259,107 @@ types so the guard proves it still flags the exact historical shape.
   once, in `tests/tsymex_rfc0005_s8ab_letaudit.nim`, not on every
   compile; a new hazard is caught the next time that suite runs, not at
   the point it is written.
+
+**As landed (S8af, no bump) — S8ab's remainder: closing the four
+reported gaps.** Same file (`tests/tsymex_rfc0005_s8ab_letaudit.nim`);
+no walker/IR change, so no `symexWalkerVersion` bump.
+
+1. **Table/`[]`-via-`nnkCall` aliasing.** A new `calleeReturnsVar`
+   resolves the callee of an `nnkCall` RHS/LHS-receiver through
+   `symKind`/`getImpl()` and reads its FIRST formal's type: `var T`
+   (Table's mutable `[]`) is a real aliasing shape and is now walked the
+   same as `nnkBracketExpr`; a plain-value or `lent T` return (string/seq
+   slicing, Table's read-only `[]`) is not. This is the distinction-by-
+   resolved-symbol S8ab's own note said was needed, not distinction-by-
+   syntax — the widened-syntax version S8ab already tried and rejected
+   (flagging every `[]` call) is exactly the string-slicing false positive
+   this now avoids by checking the return type instead. Probed against
+   real Table overloads before writing the fixture (`probe_vm_table2.nim`,
+   `probe_lent2.nim`): `` `[]`(t: var Table[K,V], k: K): var V `` vs. the
+   read-only/`lent` overloads differ exactly as assumed.
+2. **Type identity.** `collectFieldTypes` now collects the sibling
+   fields' `NimNode` types (via `getTypeInst()`), and `walkParams`
+   compares them with `sameType`, not `repr` text. RED fixture: a field
+   reached only through a `type X = Y` alias — repr text diverges
+   (`"FxIntSeqAlias"` vs `"seq[int]"`) where `sameType` does not (probed,
+   `probe_alias_mismatch.nim`). The 3-level field-walk depth bound is
+   unchanged; see the residual list below.
+3. **Generic procs.** Diagnosed the actual mechanism S8ab's note
+   described only as "silently skipped": an uninstantiated generic's
+   `getImpl()` tree binds `let`/param names as `nnkIdent`, not `nnkSym`
+   (`probe_bare_generic2.nim`), so `getTypeInst()` is never reachable on
+   them. `auditGenericInstantiation` forces a concrete instantiation by
+   passing a CALL EXPRESSION (not a bare identifier) as a `typed` macro
+   parameter — this resolves to the concrete instantiated symbol, whose
+   `getImpl()` tree binds every name as `nnkSym` as usual, and hands it to
+   the existing `walkLets`/`walkParams` unchanged. RED fixture
+   (`fxGenericAliasShape[T]`) proves the bare walk misses the hazard and
+   the forced-instantiation walk catches it. Wired to the one real-scope
+   generic this audit found actually instantiated from compile-time-VM-
+   reachable code: `traceOneCallBoundary[seq[NimNode]]`, called un-quoted
+   from `symexFindAllWitnesses`'s own macro body (`symex.nim:2826`) —
+   audited clean (zero hits). The mechanism generalizes to any other
+   instantiation; it was not run against every generic-bracketed routine
+   in the 16-file scope (37 by a column-0 `[` scan, mostly in
+   `strategy.nim`) — see the residual list below for why most of those
+   don't qualify.
+4. **CI coverage.** `symex-mingw.yaml` already ran this suite (auto-
+   derived `tsymex_*` corpus from `nelli.nimble`'s `test` task —
+   unchanged). Neither fuzzer leg did: `tsymex_rfc0005_s8ab_letaudit`
+   matches neither `fuzzer-mingw.yaml`/`fuzzer-msvc.yaml`'s glob
+   (`^(tfuzz|tdb|tengine_)...`) nor their named-contract-test list. Added
+   to both legs' `foreach ($named in @('tsmoke', 'trequiresinit', ...))`
+   list, so the guard now runs under gcc (Linux, via `dt-bounded.sh`),
+   mingw, and MSVC. There is still no CI leg that runs `nimble test`
+   itself on Linux; that gap is pre-existing, out of this slice's scope,
+   and is what `scripts/sweep.sh`'s manual gate stands in for.
+5. **Scope.** Confirmed the existing 15-file scope by re-tracing each
+   file's compile-time-VM reachability from S8x's own rationale, and
+   found one omission: `smt/scan.nim`'s `scanStmt`/`scanCall`/`scanAll`
+   are called directly (un-quoted) from `symexFindAllWitnesses`'s macro
+   body (`symex.nim:2826-2828`) — the same "called from inside a macro's
+   own un-quoted body" test that put the other 15 files in scope. Added
+   as the 16th file; clean (zero new hits). `runtime.nim`/
+   `runtime_strings.nim` remain correctly out of scope: every call site
+   that reaches them from the audited 16 files is inside a `quote do:`
+   block (code that RUNS at the property's own normal runtime, after
+   macro expansion has already finished), never called directly from a
+   macro's own Nim code the way `scan.nim`'s functions are. The same
+   holds transitively for everything reachable only from
+   `runtime.nim`/`runtime_strings.nim` (`canonicalize.nim`,
+   `abstraction.nim`, `regex_parser.nim`, `concolictaxonomy.nim`,
+   `engine/*`, `optbox.nim`, `db.nim`) and for `smt/dsl.nim` (the SMT-LIB
+   emission DSL, invoked only from runtime solver calls).
+
+Run across the real 16-file scope today, both gap-1 and gap-2 mechanisms
+active: the same four `let` hits as S8ab's own run (already allowlisted,
+unchanged), zero param hits, zero new hits from either the widened
+`nnkCall` walk or the `sameType` comparison. `dt-bounded.sh c` and
+`dt-bounded.sh cpp` both green, 10/10 tests.
+
+*Different mechanisms, reported and not fixed here.*
+- **The forced-generic-instantiation mechanism was demonstrated on one
+  real-scope generic, not run against all 37 generic-bracketed routines
+  in scope.** Most of those 37 are in `strategy.nim`; tracing
+  `fuzzMacroImpl` (the one macro body that reaches toward it) shows every
+  call into strategy-level generics is built inside a `quote do:` block
+  (code that runs at the fuzz campaign's own runtime, not at macro
+  expansion) rather than called directly from the macro's own Nim code —
+  so most are not actually compile-time-VM-reachable and do not need
+  forcing. This was not re-verified macro-by-macro for all 17 macros
+  across the scope; a generic proc that IS compile-time-VM-reachable
+  through a macro this audit didn't trace is still silently skipped by
+  the bare walk until it is individually forced the same way
+  `traceOneCallBoundary` was.
+- **The param check's sibling-field walk is still bounded to 3 levels
+  deep** (unchanged by the `sameType` fix, which corrects identity
+  comparison at whatever depth is reached, not the depth bound itself).
+- **A generic routine never instantiated anywhere in this scope's own
+  compilation unit** still yields an un-instantiated `getImpl()` tree
+  with no `typed` call expression available to force through
+  `auditGenericInstantiation` — unclassifiable, same as before S8af.
+- **The guard is still test-only reflection, not a build-time lint**
+  (unchanged from S8ab's own note).
 
 ### §2.6 The raise-routing recovery — *corrected*
 

@@ -947,6 +947,9 @@ task test, "Run the test suite":
             # guard (getImpl + getTypeInst) over the same VM let-aliasing
             # hazard, across all 15 files S8x's own audit covered, in
             # place of S8x's one-file/one-pattern source-text pin; no
+            # walker bump. Extended by S8af (same file): Table/`[]`-via-
+            # nnkCall aliasing, sameType identity (was repr text), forced
+            # generic-instantiation coverage, scan.nim added to scope; no
             # walker bump.
             "tsymex_rfc0005_s8ab_letaudit"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

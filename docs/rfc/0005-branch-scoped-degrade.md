@@ -229,7 +229,7 @@ state = "done"
 [[slice]]
 id    = "S8ac"
 title = "S8aa's remainder: a callee assigning through a `var` ref parameter (`cur = b`) is an internal walker fault (sort mismatch at array store value) -- must model or decline scoped, never weInternalWalkerFault; exact-mode `start div y` (width-stamped offset by a bitvector param) runs past 900s -- find the query cost and bound it; a shift by a count outside 0..<width is modelled as Z3's result but x86 masks the count (5 shl 64 == 5), so a witness depending on it may not replay -- model the target's masking or decline; the short-circuit join still declines when an operand allocates or when table/set/variant/distinct state differs"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ad"
@@ -4580,6 +4580,162 @@ Re-pinned, each checked against real Nim:
   SUT reads `arr[i]` before its bounds guard; the uninitialised
   `var arr: array[3, string]` was a decline that tainted every path and
   hid the reachable Defect ((b) above). Never an `sxSat`.
+
+**As landed (S8ac, walker 178) — S8aa's remainder.**
+
+*A `var` parameter is the caller's location.* The typed AST gives a `var`
+formal's every use as `nnkHiddenDeref` over the symbol, which the parser read
+as a `ref` dereference. A `var` REF parameter (`proc noteR(cur: var Box, b:
+Box) = cur = b`) therefore stored a `Ref` into the pointee's heap array
+(`weInternalWalkerFault`, "sort mismatch at array store value"), and a read of
+one was `heUnresolvedRef`. `isVarIndirection` now treats that deref as the
+variable itself, in expressions and as an assignment target.
+
+Probing the neighbouring shapes found a false `sxSat` the fence did not name.
+#140's write-back is by name (`varArgs`, formal to caller variable), so it
+covers a plain local only. A `var` actual that is a location (`setI(h.n, v)`,
+`o.a`, `s[0]`, an array element, `p[]`, `noteR(h.cur, b)`) was never written
+back, and the caller kept the old value (`h.n == 1 and v != 1` after
+`setI(h.n, v)` was `sxSat`). Every walked user call now goes through
+`userCallStmt`. For each such actual it binds the location's value to a
+temporary, passes the temporary, and assigns it back to the location through
+the ordinary assignment lowering (`parseAsgn`, factored out of
+`parseStmtInner`). The write-back runs on the normal exit and on a raised
+exit: the call is wrapped in a `try` whose `finally` is the write-back. That
+is copy-in/copy-out. Nim passes the address, and the two agree unless the
+callee can reach the location another way while it runs. So the call
+declines (`feUnsupportedOp`, scoped) when another argument names the same
+root variable, or when, for a heap location, another argument's type can hold
+a ref to the cell (`varActualMayAlias`).
+
+Three more channels lost the write-back (each a false `sxUnsat`, plain local
+included):
+- The call cache replays only the callee's `pcDelta`. A call with a `var`
+  argument is no longer cached.
+- A raise escaping the callee forked the caller's path without the callee's
+  writes. `isCall`'s escaped loop now applies them.
+- `routeRaise` searched every enclosing try for a matching `except` before
+  looking for a `finally`. So in `try: (try: raise finally: u = v) except
+  E: ...` the outer handler ran without the inner `finally`, and `u == v`
+  was a false `sxUnsat` in plain source. A try whose arms do not match but
+  which has a `finally` now takes the raise first (`pendingRaise`), as Nim
+  does. The separate top-down finally scan after the handler loop is gone.
+
+*An unchecked `div` of a stamped offset stays linear.* `-d:symexQueryStats`'s
+`rlimit` is the context's step counter, cumulative over the walk, so it never
+showed a query's own cost. Each stat now also records `rlimitDelta`, the steps
+that query spent: the counter is read from a fresh solver before
+`checkCapped`. The exit dump and `symexQueryStatsSummary` report the sum as
+`drlimit`.
+
+With it, S8aa's probe traced to one term. S8w wrapped an unchecked signed
+quotient on a width-stamped Int with `wrapIntToWidth`, i.e. `q mod 2^64` of a
+quotient that is already nonlinear (`start div y`, `y` a bitvector
+`bv2int`'d). The query ran past 900 s (unbounded `queryRLimit`), or out of
+`seqQueryRLimit` when a scan's seq was in it: 40M steps for `p div y == 3`
+and 20M for `start div y == 3`. A truncated quotient is never further from
+zero than its dividend, so the only quotient outside the window is `low(T)
+div -1`. `lowerArith` now selects `low(T)` for exactly that case, which is
+linear, and drops `bDiv` from the wrap. The same probe is 0.91M steps in all.
+The two quotients are `sxSat` at 0.47M and 0.80M.
+
+A bitvector route (`int2bv` of the stamped dividend, `bvsdiv`, `bv2int`
+back) was tried and is worse on Z3 5.1. `start div y == 3` went back to
+`seqQueryRLimit`, and the dead probe took 31M steps. It is not landed.
+
+*A shift count is masked to the operand width.* Probed on the pinned
+toolchain, c and cpp, debug and release. Nim 2.2.10's codegen emits `x <<
+(n & (W-1))` for `shl`, and `x >> (n & (W-1))` (arithmetic when signed) for
+`shr`: `5 shl 64 == 5`, `5 shl 65 == 10`, and `n = -1` shifts by `W-1`. The
+int8, int16 and int32 masks are 7, 15 and 31. The mask is in Nim's C output,
+not left to the machine, so the result is the same with gcc (Linux, mingw)
+and msvc.
+
+The model used Z3's saturating `bvshl`/`bvlshr`/`bvashr`. Non-replaying
+witnesses at the base:
+- `n == 64 and x == 5 and (x shl n) == 0` was `sxSat` at `(5, 64)`.
+- `n >= 64 and x != 0 and (x shl n) == x` was a false `sxUnsat`.
+- `3'u32 shl 33 == 6` was `sxUnsat`.
+- `int8 shl int` faulted the walker (`binBV: width mismatch`).
+
+`shiftCountBV` now masks the count on its own bit pattern and moves it to the
+operand's width. The fence called this C UB; it is not, because Nim masks
+first.
+
+*The short-circuit join covers allocation and container state.*
+`sameHeapMeta` became `heapMetaExtends`. A survivor's bookkeeping must extend
+the skip path's:
+- the same heap keys and nil-edge flag;
+- each counter at least the skip path's;
+- each live-ref list the skip path's followed by what the body minted.
+
+A fresh ref's facts are in the survivor's own `pc`, so the join holds them
+as `cond => R`. The joined path takes the largest counters and every minted
+ref (`joinHeapMeta`). Two survivors minting the same name for their first
+`new T` share one constant, constrained under each one's own `G_i`.
+
+`joinSV` now also joins:
+- a table: its data and presence arrays and its counter;
+- a set: its members and counter;
+- a distinct value: its constant and its base. G4's eject pin carries
+  over by congruence.
+- an object variant with the same arms: its discriminator and every field.
+  A field of an unselected arm is never read as a value.
+- an opaque ref.
+
+A multi-axis variant and a closure still decline, and the paths stay apart,
+which is exact.
+
+With 6 pairs, the base's Z3 calls against this slice's:
+
+| Operand writes | Base | S8ac |
+|---|---|---|
+| a heap cell, with a fresh `Box` | 87 | 8 |
+| a heap cell, with a fresh `Box` (dead target) | 441 | 9 |
+| a local, with a fresh `Box` | 75 | 8 |
+| a `Table` | 168 | 7 |
+| a `Table` (dead target) | 315 | 8 |
+| a `HashSet` | 150 | 7 |
+| a distinct value | 229 | 13 |
+| an object variant | 87 | 8 |
+
+Pins: `tests/tsymex_rfc0005_s8ac_remainder.nim`, with a `.nim.cfg` that sets
+`-d:symexQueryStats`.
+- (1) Every `var` ref shape: rebind, conditional, read, nested, through a
+  field, and field write. RED: `weInternalWalkerFault`.
+- (1) Located actuals: heap field, value field, seq and array element, `p[]`.
+  RED: each dead target a false `sxSat`.
+- (1) The cache, the raise, a raising field actual, and an expression-position
+  call. RED: `sxUnsat`.
+- (1) The inner `finally` under an outer `except`. RED: `sxUnsat`.
+- (1) The aliasing call declines, scoped.
+- (2) The dead quotient and the scan's hit, each at most 5M steps with no
+  `beSolverUndef`. RED: past 900 s.
+- (2) Both quotients `sxSat` within 5M. RED: `sxUnknown`.
+- (2) `rlimit` monotone and the deltas within it.
+- (3) Every witness above, with its value checked in compiled code.
+- (4) Each chain within 16 Z3 calls (20 for distinct), with its witness
+  checked, and the dead ones `sxUnsat`.
+- The `>= 174` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **A local distinct value with no distinct-typed parameter is a walker
+  fault.** `var m = Meters(0); m = m + Meters(1)` in a SUT with no `Meters`
+  parameter is `weInternalWalkerFault` (`reboxDistinct: distinct sort
+  'Meters' not allocated`). It is the same at the base. The join pin takes
+  `m0: Meters` as a parameter.
+- **`start < 0 and y > 1 and start div y == start` (UNSAT) is still
+  `sxUnknown`.** It runs to `seqQueryRLimit`, 40M steps, when a scan's seq is
+  in the query. It is nonlinear Int division by a `bv2int` term, and Z3's
+  nonlinear core is not complete under the sequence theory. The honest
+  verdict is `beSolverUndef`. It is not a hang, and the bitvector route above
+  does worse.
+- **A `var ptr` parameter passed `addr x`** is `heUnsafeCast`, the existing
+  scoped decline. **A routine declared inside the SUT** is
+  `feUnsupportedStmtKind`, also existing.
+- **Copy-in/copy-out declines on possible aliasing.** The check is by
+  argument (same root, or a type that can reach the cell). A callee that
+  reaches the location through a global is not in the symex fragment.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

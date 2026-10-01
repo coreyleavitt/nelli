@@ -4019,6 +4019,39 @@ proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
   let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
   if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
 
+proc shiftCountBV(r: SymVal, lhsKind: SVKind): SymVal =
+  ## RFC-0005 S8ac. The count of a Nim `shl`/`shr` as the C backend really
+  ## applies it. Nim 2.2.10's codegen masks the count with the operand
+  ## width: `x shl n` emits `x << (n & (W-1))` and a signed `shr` emits
+  ## `x >> (n & (W-1))` (probed, c and cpp, debug and release: `5 shl 64
+  ## == 5`, `5 shl 65 == 10`, `n = -1` shifts by `W-1`; int8/16/32 mask by
+  ## 7/15/31). Z3's `bvshl`/`bvlshr`/`bvashr` instead saturate a count
+  ## `>= W` (to 0 / the sign fill), which let a witness `x shl 64 == 0`
+  ## through that the compiled program never reaches. The mask is taken on
+  ## the count's own bit pattern, whose low `log2 W` bits are exactly
+  ## `n & (W-1)` for any count width and sign, and the masked value
+  ## (0..63) is then moved to the operand's width without loss.
+  let w = case lhsKind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          else: 64
+  let m = int64(w - 1)
+  let masked = case r.kind
+    of svBV8:  SymVal(kind: svBV8,  signed: false, bv8:  r.bv8  and mkBitVec[8](m))
+    of svBV16: SymVal(kind: svBV16, signed: false, bv16: r.bv16 and mkBitVec[16](m))
+    of svBV32: SymVal(kind: svBV32, signed: false, bv32: r.bv32 and mkBitVec[32](m))
+    of svBV64: SymVal(kind: svBV64, signed: false, bv64: r.bv64 and mkBitVec[64](m))
+    else: raiseAssert "shiftCountBV: non-BV shift count: " & $r.kind
+  let rw = case r.kind
+           of svBV8: 8
+           of svBV16: 16
+           of svBV32: 32
+           else: 64
+  if rw == w: masked
+  elif rw > w: truncBV(masked, w, false)
+  else: lowerConvIntWidth(masked, w, false)
+
 proc lowerConvIntTrunc(sv: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## RFC-0005 S8j. An unchecked narrowing conversion -- an unsigned target
   ## (`uint8(x)`, `byte(x)`, `uint32(x)` of a wider int). Nim keeps the low
@@ -6183,9 +6216,22 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     # promoted `int` and wraps back to `low(T)` (32 and 64 bits trap,
     # `arithTrapConds` above).
     let r = arithInt(a, b, op)
-    if r.ziWidth in {8, 16, 32, 64} and
+    if r.ziWidth in {8, 16, 32, 64} and r.ziSigned and currentArithWraps and
+       op == bDiv:
+      # RFC-0005 S8ac: a truncated quotient is never further from zero than
+      # its dividend, so the one quotient outside the window is `low(T) div
+      # -1` (`-low(T)`), which wraps back to `low(T)` (at 32 and 64 bits the
+      # path is confined off it by the trap above, so either value is
+      # exact). Selecting it directly keeps the wrap linear. `wrapIntToWidth`
+      # reduced the whole NONLINEAR quotient `mod 2^w` instead, and an exact
+      # `start div y` (a stamped offset over a bitvector parameter) ran out
+      # of `seqQueryRLimit` or past 900 s on that one term.
+      let win = intWindow(r.ziWidth, true)
+      SymVal(kind: svInt, zi: ite(divLowByMinusOne(a, b), win.lo, r.zi),
+             ziWidth: r.ziWidth, ziSigned: true, ziIvl: win.ivl)
+    elif r.ziWidth in {8, 16, 32, 64} and
        ((not r.ziSigned and op in {bAdd, bSub, bMul}) or
-        (r.ziSigned and currentArithWraps and op in {bAdd, bSub, bMul, bDiv})):
+        (r.ziSigned and currentArithWraps and op in {bAdd, bSub, bMul})):
       wrapIntToWidth(r)
     else:
       r
@@ -7395,12 +7441,17 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         elif l.kind == svInt: svIntToBV(l, svBV64)
         else: l
       if l.kind == svInt and not lStamped: lb.signed = true
-      let r =
+      # RFC-0005 S8ac: the count is masked to the operand width, as the C
+      # backend does (`shiftCountBV`), and so may be any int width: an
+      # `int8 shl int` failed `binBV`'s width assertion before (a walker
+      # fault).
+      var r =
         if r0.kind == svInt:
-          (if r0.ziWidth in [8, 16, 32, 64] and
-              stampedIntToBV(r0).kind == lb.kind: stampedIntToBV(r0)
+          (if r0.ziWidth in [8, 16, 32, 64]: stampedIntToBV(r0)
            else: svIntToBV(r0, lb.kind))
         else: r0
+      r = shiftCountBV(r, lb.kind)
+      r.signed = lb.signed
       case e.bop
       of bShl: binBV(lb, r, `shl`)
       of bShr: shrBV(lb, r)
@@ -12399,28 +12450,60 @@ proc hasZ3Prefix(s, prefix: seq[Z3Bool]): bool =
     if s[i].raw != prefix[i].raw: return false
   true
 
-proc sameHeapMeta(a, b: Path): bool =
-  ## RFC-0005 S8w (S8aa: the heap arrays themselves may differ). The
-  ## logical-heap bookkeeping `forkPath` deep-copies is equal on both paths
-  ## and they hold a heap array for the same pointee types, so the join can
-  ## keep one copy of the bookkeeping and `ite` the arrays. An allocation
-  ## (`new T`: a fresh ref, a counter, freshness facts) makes them differ.
-  ## `heapDepth` is not compared: it counts the dereferences walked on the
-  ## path (a budget, `heapDepthExhausted`), not program state, and the join
-  ## keeps the larger count, which only ever halts a path sooner.
-  if a.freshnessAssertCount != b.freshnessAssertCount or
-     a.nilDeref != b.nilDeref or a.allocCounters != b.allocCounters or
-     a.heaps.len != b.heaps.len or a.liveRefs.len != b.liveRefs.len:
+proc heapMetaExtends(a, skip: Path): bool =
+  ## RFC-0005 S8w (S8aa: the heap arrays themselves may differ; S8ac: the
+  ## body may allocate). A survivor's logical-heap bookkeeping EXTENDS the
+  ## skip path's: the same heap arrays by pointee type, the same nil-edge
+  ## flag, and for every type its fresh-ref counter at least the skip
+  ## path's and its live refs the skip path's followed by the refs the
+  ## body minted (`freshRef`/`assertFreshness`). The body's allocations
+  ## need no bookkeeping of the skip path's own: a fresh ref's facts
+  ## (`!= nil`, `!=` each prior) sit in the survivor's own path condition,
+  ## so the join holds them as `cond => R`, and on the skip side the ref is
+  ## a constant nothing there reads. `heapDepth` is not compared: it counts
+  ## the dereferences walked on the path (a budget, `heapDepthExhausted`),
+  ## not program state, and the join keeps the larger count, which only
+  ## ever halts a path sooner.
+  if a.nilDeref != skip.nilDeref or a.heaps.len != skip.heaps.len or
+     a.freshnessAssertCount < skip.freshnessAssertCount:
     return false
-  for k in a.heaps.keys:
-    if not b.heaps.hasKey(k): return false
-  for k, v in a.liveRefs:
-    if not b.liveRefs.hasKey(k): return false
-    let u = b.liveRefs[k]
-    if u.len != v.len: return false
+  for k in skip.heaps.keys:
+    if not a.heaps.hasKey(k): return false
+  for k, n in skip.allocCounters:
+    if a.allocCounters.getOrDefault(k, 0) < n: return false
+  for k, v in skip.liveRefs:
+    if not a.liveRefs.hasKey(k): return false
+    let u = a.liveRefs[k]
+    if u.len < v.len: return false
     for i in 0 ..< v.len:
       if u[i].raw != v[i].raw: return false
   true
+
+proc joinHeapMeta(merged: Path, arms: seq[Path]) =
+  ## RFC-0005 S8ac. The joined path's bookkeeping from the skip path's
+  ## (`merged`, forked from it) and each survivor's extension of it
+  ## (`heapMetaExtends`): every counter the largest, so a later `new T`
+  ## on the joined path mints a name no survivor used; every live ref any
+  ## survivor minted, so that `new T` is asserted distinct from each (on a
+  ## side where the ref was never minted it is an unconstrained constant,
+  ## and the inequality restricts nothing that side reads). Two survivors
+  ## of one body mint the same NAME for their first allocation of a type
+  ## (both count up from the skip path's counter); it is one constant,
+  ## constrained by each survivor's facts under that survivor's own `G_i`.
+  for a in arms:
+    for k, n in a.allocCounters:
+      if n > merged.allocCounters.getOrDefault(k, 0):
+        merged.allocCounters[k] = n
+    for k, v in a.liveRefs:
+      var cur = merged.liveRefs.getOrDefault(k, @[])
+      for r in v:
+        var seen = false
+        for c in cur:
+          if c.raw == r.raw: seen = true; break
+        if not seen: cur.add r
+      merged.liveRefs[k] = cur
+    merged.freshnessAssertCount = max(merged.freshnessAssertCount,
+                                      a.freshnessAssertCount)
 
 proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
   ## RFC-0005 S8w/S8aa. `ite(sel, t, e)` for two values of ONE program
@@ -12432,7 +12515,10 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
   ## value: a string (one Z3 string), a seq of one element type (its
   ## length and its data array; a placeholder is never merged), a `ref` /
   ## `ptr` to one pointee (the address), and a tuple / array whose elements
-  ## all join. Anything else declines (`iteSV` would degrade it).
+  ## all join. S8ac adds a table (data, presence, counter), a set
+  ## (members, counter), a distinct value (its constant and its base), an
+  ## object variant with the same arms (discriminator and every field) and
+  ## an opaque ref. A multi-axis variant and a closure decline.
   if sameSV(t, e): return some(t)
   if t.kind != e.kind: return none(SymVal)
   case t.kind
@@ -12487,7 +12573,96 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
       if x.isNone: return none(SymVal)
       es.add x.get
     some(SymVal(kind: svArray, arrElems: es, arrElemTy: t.arrElemTy))
-  else:
+  of svTable:
+    # RFC-0005 S8ac. A table IS its data and presence arrays and its
+    # cardinality counter (#144), so the `ite` of the three is the `ite` of
+    # the table.
+    if t.tabKeyTy != e.tabKeyTy or t.tabValTy != e.tabValTy:
+      return none(SymVal)
+    let ctx = t.tabDataRaw.ctx
+    let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                              t.tabDataRaw.raw, e.tabDataRaw.raw))
+    let present = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                                 t.tabPresentRaw.raw, e.tabPresentRaw.raw))
+    some(SymVal(kind: svTable, tabDataRaw: data, tabPresentRaw: present,
+                tabSize: ite(sel, t.tabSize, e.tabSize),
+                tabKeyTy: t.tabKeyTy, tabValTy: t.tabValTy))
+  of svSet:
+    # RFC-0005 S8ac. A set IS its membership array and its counter.
+    if t.setElemTy != e.setElemTy: return none(SymVal)
+    let ctx = t.setMembersRaw.ctx
+    let members = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                                 t.setMembersRaw.raw, e.setMembersRaw.raw))
+    some(SymVal(kind: svSet, setMembersRaw: members,
+                setSize: ite(sel, t.setSize, e.setSize),
+                setElemTy: t.setElemTy))
+  of svDistinct:
+    # RFC-0005 S8ac. A distinct value is its opaque constant and the base
+    # value G4's eject pin ties it to (`eject(d) == base`). The `ite` of
+    # both keeps the pin by congruence: `eject(ite(s, d1, d2))` is
+    # `ite(s, eject(d1), eject(d2))`, i.e. `ite(s, b1, b2)`, the joined
+    # base.
+    if t.distinctName != e.distinctName or t.distinctBaseSym.isNil or
+       e.distinctBaseSym.isNil:
+      return none(SymVal)
+    let b = joinSV(sel, t.distinctBaseSym[], e.distinctBaseSym[])
+    if b.isNone: return none(SymVal)
+    let ctx = t.distinctAst.ctx
+    var bs = new SymVal
+    bs[] = b.get
+    some(SymVal(kind: svDistinct,
+                distinctAst: wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                              t.distinctAst.raw, e.distinctAst.raw)),
+                distinctName: t.distinctName, distinctBaseSym: bs))
+  of svVariant:
+    # RFC-0005 S8ac. One object variant with the same arms: its
+    # discriminator and every field (plain, and each arm's, live or not)
+    # join. A field of an arm the joined discriminator does not select is
+    # never read as a value (the field access checks the discriminator
+    # first), so its `ite` is harmless.
+    if t.vDisc.isNil or e.vDisc.isNil or t.vDiscName != e.vDiscName or
+       t.vObjectName != e.vObjectName or
+       t.vPlainFieldNames != e.vPlainFieldNames or
+       t.vPlainFields.len != e.vPlainFields.len or
+       t.vArmFields.len != e.vArmFields.len or
+       t.vArmFieldNames != e.vArmFieldNames:
+      return none(SymVal)
+    let d = joinSV(sel, t.vDisc[], e.vDisc[])
+    if d.isNone: return none(SymVal)
+    var plain: seq[SymVal]
+    for i in 0 ..< t.vPlainFields.len:
+      let f = joinSV(sel, t.vPlainFields[i], e.vPlainFields[i])
+      if f.isNone: return none(SymVal)
+      plain.add f.get
+    var arms: OrderedTable[int, seq[SymVal]]
+    for tag, fs in t.vArmFields:
+      if not e.vArmFields.hasKey(tag): return none(SymVal)
+      let gs = e.vArmFields[tag]
+      if fs.len != gs.len: return none(SymVal)
+      var js: seq[SymVal]
+      for i in 0 ..< fs.len:
+        let f = joinSV(sel, fs[i], gs[i])
+        if f.isNone: return none(SymVal)
+        js.add f.get
+      arms[tag] = js
+    var dr = new SymVal
+    dr[] = d.get
+    some(SymVal(kind: svVariant, vDisc: dr, vDiscName: t.vDiscName,
+                vObjectName: t.vObjectName, vArmFields: arms,
+                vArmFieldNames: t.vArmFieldNames, vPlainFields: plain,
+                vPlainFieldNames: t.vPlainFieldNames))
+  of svUninterpRef:
+    # RFC-0005 S8ac. An opaque ref (an exception object) is its constant.
+    if t.sortName != e.sortName or t.typeTag != e.typeTag:
+      return none(SymVal)
+    let ctx = t.uninterpAst.ctx
+    some(SymVal(kind: svUninterpRef, sortName: t.sortName, typeTag: t.typeTag,
+                uninterpAst: wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                             t.uninterpAst.raw, e.uninterpAst.raw))))
+  of svMultiVariant, svClosure:
+    # RFC-0005 S8ac: declined. A multi-axis variant's axes and a closure's
+    # site-bound function symbol have no one term to select; the paths
+    # stay apart (the pre-S8w walk), which is exact.
     none(SymVal)
 
 proc conjTail(s: seq[Z3Bool], start: int): Option[Z3Bool] =
@@ -12527,11 +12702,13 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
   ## An entry joins through `joinSV`: scalars, and since S8aa strings, seqs,
   ## refs and tuples / arrays of them. A heap array the body wrote (a
   ## `ref` field store) joins the same way, `ite` over the arrays, when the
-  ## heap bookkeeping is the same (`sameHeapMeta`).
+  ## heap bookkeeping extends the skip path's (`heapMetaExtends`; since
+  ## S8ac the body may allocate, `joinHeapMeta`).
   ##
   ## Declined (the paths are returned as they are, as before S8w) when the
   ## join would not be exact: a survivor's taint differs from the skip
-  ## path's, the body allocated (`sameHeapMeta`), a prefix was rewritten,
+  ## path's, the bookkeeping does not extend the skip path's
+  ## (`heapMetaExtends`), a prefix was rewritten,
   ## an entry does not join (`joinSV`), or an entry is bound on some
   ## survivors and not others. Entries only the body bound (its
   ## temporaries) are kept as the body bound them: nothing on the skip side
@@ -12542,7 +12719,7 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
   if not sameZ3Seq(skip.defectSurvivorPc, base.defectSurvivorPc):
     return decline
   for a in armOut:
-    if a.taint != skip.taint or not sameHeapMeta(a, skip) or
+    if a.taint != skip.taint or not heapMetaExtends(a, skip) or
        not hasZ3Prefix(a.pc, base.pc) or a.pc.len <= base.pc.len or
        a.pc[base.pc.len].raw != cond.raw or
        not hasZ3Prefix(a.defectSurvivorPc, base.defectSurvivorPc):
@@ -12635,6 +12812,7 @@ proc mergeJoinPaths(base: Path, cond: Z3Bool, armOut: seq[Path],
     facts = some(anyG)
   let merged = forkPath(skip, pc, env)
   merged.heaps = heaps
+  joinHeapMeta(merged, armOut)
   for a in armOut: merged.heapDepth = max(merged.heapDepth, a.heapDepth)
   if facts.isSome:
     merged.defectSurvivorPc = base.defectSurvivorPc & @[cond.implies(facts.get)]
@@ -14758,6 +14936,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           popFrame(w)
           for er in calleeEscaped:
             var rEnv = p.env
+            # RFC-0005 S8ac: the callee wrote its `var` formals through the
+            # caller's variables before it raised; the handler sees those
+            # writes (#140's write-back ran on the returning paths only).
+            for (formalName, callerName) in varArgs:
+              if er.path.env.hasKey(formalName):
+                rEnv[callerName] = er.path.env[formalName]
             let raisePath = forkPath(er.path, er.path.pc, rEnv)
             survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
             if w.shouldStop: return survivors
@@ -14779,7 +14963,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
           # `new(result)` callee with the same argument shape would return
           # the first call's address, and a heap write would be lost.
-          if calleeEscaped.len == 0 and not closureRet and
+          # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
+          # variable. A hit replays only `pcDelta`, never the #140
+          # write-back, so the second call's writes would be lost.
+          if calleeEscaped.len == 0 and not closureRet and varArgs.len == 0 and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
              frame.returnedPaths[0].taint == {} and
              frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
@@ -15323,16 +15510,20 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
         for hp in handlerPaths:
           w.frame.caught.add (depth: i, path: hp)
         return @[]
-  # Phase 15 E5. No `except` arm matched, but a `finally` may still guard this
-  # raise: it must run on the RAISED exit path BEFORE the raise propagates
-  # onward. Scan the handler stack top-down for the deepest frame with a non-nil
-  # `finallyBlock`; if found, defer the raise to that try's `isTry` arm (which
-  # claims `pendingRaise` at its depth, runs the finally, and composes the
-  # result). This is the raised-path analogue of E3's caught channel. The
-  # finally interception happens BEFORE the escape/boundary fall-through below so
-  # that a `try: raise … finally: …` (no except) still runs its finally.
-  for i in countdown(w.frame.handlerStack.high, 0):
-    if w.frame.handlerStack[i].finallyBlock != nil:
+    # Phase 15 E5: a `finally` guards the raise too: it runs on the RAISED
+    # exit path before the raise propagates onward, deferred to that try's
+    # `isTry` arm (which claims `pendingRaise` at its depth, runs the
+    # finally, and composes the result) -- the raised-path analogue of E3's
+    # caught channel, and why a `try: raise … finally: …` (no except) runs
+    # its finally before the escape/boundary fall-through below.
+    # RFC-0005 S8ac: no arm of this try matched, and it has a `finally`.
+    # Nim runs that finally BEFORE an outer `except` sees the raise: defer to
+    # this try's `isTry` arm, which walks the finally and re-routes the
+    # raise from here outward (the stack is popped to this depth by then).
+    # Before S8ac the search went on to the outer tries first, so a
+    # `try: (try: raise finally: u = 1) except: ...` ran the outer handler
+    # without the inner finally's write (a false sxUnsat on `u == 1`).
+    if hf.finallyBlock != nil:
       w.frame.pendingRaise.add (depth: i, path: rp, typeId: typeId, msg: msg)
       return @[]
   # 2. No handler matched in this frame.

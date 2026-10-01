@@ -890,7 +890,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8z (array low bounds, aliases and symbolic-index writes,
     ## range discriminators, enum zero values, closure results, narrow
     ## table values and set elements). 176->177.
-    check symexWalkerVersion == "177"
+    ## RFC-0005 S8ac (var-parameter write-back, inner finally under an
+    ## outer except, masked shift counts, the linear unchecked div wrap,
+    ## the join over allocation and table / set / distinct / variant
+    ## state). 177->178.
+    check symexWalkerVersion == "178"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

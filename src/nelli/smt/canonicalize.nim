@@ -184,7 +184,20 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "177"
+const symexWalkerVersion* = "178"
+  ## RFC-0005 S8ac (2026-09-30) — S8aa's remainder. A callee that writes
+  ## through a `var` parameter whose actual is not a plain local (a ref,
+  ## a field, an element, `p[]`) writes back to that location
+  ## (`userCallStmt`), also on a raise and past the call cache, and a
+  ## `var` ref parameter is the variable, not a dereference; an inner
+  ## `finally` runs when an OUTER `except` catches (`routeRaise`). A shift
+  ## count is masked to the operand width as Nim's C output does. An
+  ## unchecked signed `div` on a stamped Int selects the one wrapping
+  ## quotient instead of reducing the nonlinear quotient `mod 2^w`. The
+  ## short-circuit join merges operands that allocate and table, set,
+  ## distinct, variant and opaque-ref state. 177 -> 178.
+  ##
+  ## (Prior: 177.)
   ## RFC-0005 S8z (2026-09-30) — S8u's remainder. An array index read or
   ## write honours the array's low bound (`isIndex.ixLo` /
   ## `isIndexAssign.iaLo`): `a[1]` of an `array[1..3, int]` read its second

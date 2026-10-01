@@ -1494,6 +1494,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
 proc parseStmt*(n: NimNode, ctx: ParseCtx): IRStmt
 proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt
+proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
+               preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt
+  ## RFC-0005 S8ac fwd decl (defined beside `parseStmtInner`).
 
 proc parseLoopBody(bodyNode: NimNode; ctx: ParseCtx; unrolled = false):
     tuple[body: IRStmt, brkLabel: string] =
@@ -1532,6 +1535,22 @@ proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
   ## `tryMatchAccumulatingScanIdiomShape`): the "user-proc call in expression
   ## position" `mkCall` site needs this BEFORE those recognizer shape-match
   ## procs are defined further down the file.
+proc isVarIndirection(n: NimNode): bool =
+  ## RFC-0005 S8ac. True when `n` is the compiler's `nnkHiddenDeref` over an
+  ## lvalue of `var T` type (a `var` formal, a `var`-returning call): the
+  ## by-reference indirection that makes the formal alias the caller's
+  ## variable, NOT a ref/ptr dereference. Reading it yields the variable's
+  ## value, and assigning it rebinds the variable. For `T = ref U` the two
+  ## are different operations: `cur = b` on `cur: var Box` rebinds the
+  ## caller's `Box`, whereas the ref-deref reading (before S8ac) stored `b`
+  ## INTO the old cell (`cur[] = b`, an ill-sorted heap store and
+  ## `weInternalWalkerFault`). A plain `ref` value is never wrapped this way
+  ## (its deref is an `nnkDerefExpr`, or the hidden deref under a
+  ## `nnkDotExpr`, whose operand type is the `ref` itself).
+  if n.kind != nnkHiddenDeref or n.len != 1: return false
+  let t = n[0].getTypeInst
+  (not t.isNil and t.kind == nnkVarTy) or n[0].typeKind == ntyVar
+
 proc unwrapHidden(n: NimNode): NimNode  ## Round-6 B1 fwd decl (defined
                                          ## below, beside `sameSym`):
                                          ## `parseExpr`'s itSeq bracket/`.len`
@@ -3071,6 +3090,179 @@ proc hoistCaseExpr(n: NimNode, preamble: var seq[IRStmt],
   preamble.add mkIf(branches, elseBody)
   mkVar(tmp)
 
+proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
+  ## RFC-0005 S8ac. The variable an lvalue chain (`o.a`, `h.cur`, `s[i]`,
+  ## `p[]`, `h.inner.n`) is rooted at, nil when it is rooted at anything
+  ## else (a call result, a literal). `heapSteps` collects the node of every
+  ## ref/ptr dereference on the way (the object or cell type the write lands
+  ## in is that node's type); a `var` formal's own indirection is not one.
+  var t = lv
+  while true:
+    case t.kind
+    of nnkSym: return t
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenAddr:
+      if t.len == 0: return nil
+      t = t[0]
+    of nnkDerefExpr, nnkHiddenDeref:
+      if t.len == 0: return nil
+      if not isVarIndirection(t): heapSteps.add t
+      t = t[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return nil
+      t = t[^1]
+    else: return nil
+
+proc mentionsSym(n, sym: NimNode): bool =
+  ## RFC-0005 S8ac. True when `sym` (by symbol identity) occurs in `n`.
+  if n.kind == nnkSym: return containsSym(@[sym], n)
+  for c in n:
+    if mentionsSym(c, sym): return true
+  false
+
+proc objectInherits(t: NimNode): bool =
+  ## RFC-0005 S8ac. True when object type `t` takes part in inheritance (it
+  ## derives from something, or is `{.inheritable.}` / `RootObj`), so a
+  ## `ref` of another object type may address it.
+  let impl = t.getTypeImpl
+  if impl.kind == nnkObjectTy and impl.len >= 2 and
+     impl[1].kind == nnkOfInherit:
+    return true
+  let ts = t.getTypeInst
+  if ts.kind == nnkSym and ts.strVal == "RootObj": return true
+  let d = if ts.kind == nnkSym: ts.getImpl else: newEmptyNode()
+  if d.kind == nnkTypeDef and d.len >= 1 and d[0].kind == nnkPragmaExpr:
+    for pr in d[0][1]:
+      if pr.kind in {nnkIdent, nnkSym} and pr.strVal == "inheritable":
+        return true
+  false
+
+proc typeReachesCell(t: NimNode; cells: seq[NimNode];
+                     seen: var seq[string]): bool =
+  ## RFC-0005 S8ac. True when a value of type `t` can hold a `ref`/`ptr`
+  ## that addresses a value of one of the `cells` types (the object types a
+  ## heap lvalue lives in): a ref/ptr whose pointee is one of them, or
+  ## either side takes part in inheritance, or an untyped `pointer`,
+  ## searched through object/tuple fields, seq/array elements, distinct
+  ## bases and pointees. Conservative: an unrecognised type shape is
+  ## reported as reaching.
+  if t.isNil: return true
+  var impl = t.getTypeImpl
+  if impl.kind == nnkVarTy and impl.len == 1: impl = impl[0].getTypeImpl
+  let key = t.repr & "|" & impl.repr
+  if key in seen: return false
+  seen.add key
+  case impl.kind
+  of nnkSym:
+    # Builtin scalars, strings, `pointer`.
+    impl.strVal == "pointer"
+  of nnkRefTy, nnkPtrTy:
+    let pointee = impl[0]
+    for c in cells:
+      if sameType(pointee, c) or objectInherits(pointee) or
+         objectInherits(c):
+        return true
+    typeReachesCell(pointee, cells, seen)
+  of nnkObjectTy:
+    if impl.len < 3 or impl[2].kind == nnkEmpty: return false
+    for f in impl[2]:
+      if f.kind == nnkIdentDefs:
+        if typeReachesCell(f[^2], cells, seen): return true
+      else:
+        return true   # a record case: not searched, assume it reaches
+    false
+  of nnkTupleTy, nnkTupleConstr:
+    for f in impl:
+      let ft = if f.kind == nnkIdentDefs: f[^2] else: f
+      if typeReachesCell(ft, cells, seen): return true
+    false
+  of nnkBracketExpr:
+    # seq[T], array[I, T], set[T], Table[...]: any type argument.
+    for i in 1 ..< impl.len:
+      if typeReachesCell(impl[i], cells, seen): return true
+    false
+  of nnkDistinctTy:
+    typeReachesCell(impl[0], cells, seen)
+  of nnkEnumTy, nnkRange, nnkInfix:
+    false
+  else:
+    true
+
+proc varActualMayAlias(n: NimNode; i: int; root: NimNode;
+                       heapSteps: seq[NimNode]): bool =
+  ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
+  ## (`userCallStmt`) copies the lvalue in, walks the callee on the copy and
+  ## copies it out. Nim passes the lvalue's ADDRESS, so the two agree unless
+  ## the callee can reach the same location another way while it runs:
+  ## through another argument that names the same root variable (by
+  ## address, or by a non-scalar value Nim may pass by pointer), or, for a
+  ## heap lvalue, through another argument whose type can hold a ref to the
+  ## cell. Then copy-in/copy-out is not Nim's semantics, and the call
+  ## declines.
+  var cells: seq[NimNode]
+  for d in heapSteps: cells.add d.getTypeInst
+  for j in 1 ..< n.len:
+    if j == i: continue
+    let a = n[j]
+    # A scalar passed by value cannot alias. A string can: Nim passes a
+    # non-`var` string by pointer, so it is checked like any composite.
+    if isInertArg(a) and a.typeKind != ntyString: continue
+    if mentionsSym(a, root): return true
+    if cells.len > 0:
+      var seen: seq[string]
+      if typeReachesCell(a.getTypeInst, cells, seen): return true
+  false
+
+proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
+                  retTy: IRType; offsetPositions: seq[int];
+                  preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8ac. The `isCall` of a walked user routine, with its
+  ## arguments lowered into `preamble`. A `var` formal's actual (Nim spells
+  ## it `nnkHiddenAddr`) that is a VARIABLE is written back by the walker
+  ## (#140, by name). One that is any other lvalue -- a field (`h.cur`,
+  ## `o.a`), an element (`s[0]`), a dereference (`p[]`) -- had no such
+  ## channel: its argument is a temporary, and the callee's writes to the
+  ## formal were dropped (a silent false verdict). It is now bound to a
+  ## temporary the walker writes back, and the call is wrapped as
+  ##   try: <call>
+  ##   finally: <lvalue> = <temporary>
+  ## so the write lands on every exit, a raise included, as it does in Nim
+  ## (the callee writes through the address before it raises). The write
+  ## takes `parseAsgn`'s lvalue arms, so an lvalue shape a source
+  ## assignment declines declines here too, as does a call where the
+  ## callee could reach the location another way (`varActualMayAlias`).
+  var argIRs: seq[IRExpr]
+  var writeBacks: seq[IRStmt]
+  for i in 1 ..< n.len:
+    var ir = parseExpr(n[i], preamble, ctx)
+    if n[i].kind == nnkHiddenAddr and n[i].len == 1:
+      var lv = n[i][0]
+      if isVarIndirection(lv): lv = lv[0]
+      if lv.kind != nnkSym:
+        var heapSteps: seq[NimNode]
+        let root = lvalueRoot(lv, heapSteps)
+        if root.isNil or varActualMayAlias(n, i, root, heapSteps):
+          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
+                    calleeSym.strVal & "` is not a variable and the callee " &
+                    "may reach it another way (or it has no root " &
+                    "variable): the callee's writes to it are not " &
+                    "modelled (feUnsupportedOp)"),
+            "var argument write-back not modelled (feUnsupportedOp)")
+        else:
+          if ir.kind != iekVar:
+            let t = freshSynth(ctx, "varArg")
+            preamble.add mkLet(t, classifyType(lv).ty, ir)
+            ir = mkVar(t)
+          var wbPre: seq[IRStmt]
+          let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), ir, wbPre, ctx)
+          # An lvalue shape `parseAsgn` declines is its own scoped marker
+          # (`isUnsupported`): every path leaving the call reaches it.
+          writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
+    argIRs.add ir
+  let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions)
+  if writeBacks.len == 0: call
+  else: mkTry(call, @[], mkBlock(writeBacks))
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -3155,9 +3347,6 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
   # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
   let callKey = ensureProcRegistered(ctx, calleeSym, n)
-  var argIRs: seq[IRExpr]
-  for i in 1 ..< n.len:
-    argIRs.add parseExpr(n[i], preamble, ctx)
   let retCls = classifyType(n)
   let synth = freshSynth(ctx, calleeName)
   # Round-6 B5 (ADR-0028 Leg 1, chained composition): if the callee's OWN
@@ -3166,7 +3355,8 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # so the call's fresh retSym allocates svInt there instead of the
   # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
   let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
-  preamble.add mkCall(callKey, synth, argIRs, retCls.ty, offsetPositions)
+  preamble.add userCallStmt(n, calleeSym, callKey, synth, retCls.ty,
+                            offsetPositions, preamble, ctx)
   mkVar(synth)
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -3779,6 +3969,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let dummy = zeroValueForType(dummyTy)
       if dummy != nil: dummy else: mkIntLit(0)
   of nnkDerefExpr, nnkHiddenDeref:
+    # RFC-0005 S8ac: a `var` formal's own indirection is its value (the ref
+    # itself for `var ref T`), not a heap read.
+    if isVarIndirection(n):
+      return parseExpr(n[0], preamble, ctx)
     # Phase 15 R1 (ADR-0010). `p[]` — a ref/ptr dereference. The typed AST emits
     # an explicit `nnkDerefExpr` (or a compiler-inserted `nnkHiddenDeref`) whose
     # operand `n[0]` is the ref/ptr expression. When that operand classifies as a
@@ -8705,10 +8899,7 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
   else:
     let callKey = ensureProcRegistered(ctx, calleeSym, n)
-    var argIRs: seq[IRExpr]
-    for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
-    mkCall(callKey, "", argIRs, tBool())
+    userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
 
 type ValueFieldWrite = object
   ## RFC-0005 S8p. A field write on a VALUE tuple or object, rebuilt as a
@@ -8918,6 +9109,228 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   else:
     valueFieldWrite(step.recv, rebuilt, preamble, ctx)
 
+proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
+               preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
+  ## The `nnkAsgn` statement (`lhs = rhs`), split out of `parseStmtInner`
+  ## by RFC-0005 S8ac so the var-argument write-back (`userCallStmt`) lowers
+  ## `<lvalue> = <the callee's final formal>` through the SAME lvalue arms a
+  ## source assignment takes. `rhsOverride`, when not nil, is the already
+  ## lowered right-hand side and `n[1]` is not read (except to rule out the
+  ## `new T` and discriminator-reassign shapes, which a write-back never
+  ## is).
+  template asgnRhs(): IRExpr =
+    (if rhsOverride != nil: rhsOverride else: parseExpr(n[1], preamble, ctx))
+  # Shapes after semcheck (some forms get re-wrapped):
+  #   * `name = expr`                 — simple env reassignment
+  #   * `t[k] = v`                    — Table set
+  # Var receivers may carry HiddenDeref/HiddenAddr — unwrap (unwrapHidden).
+  # Phase 15 R8b (ADR-0010). `p = new T` REBIND of a `var ref T` / `var ptr T`
+  # parameter. Because the param is a `var`, the typed LHS is a compiler-
+  # inserted `nnkHiddenDeref(sym)` (the lvalue indirection) — NOT an explicit
+  # `nnkDerefExpr` (which is the `p[] = v` heap-write shape). So `p = new int`
+  # presents as `Asgn[HiddenDeref[Sym p], Command[new, int]]`, whereas
+  # `p[] = v` is `Asgn[DerefExpr[HiddenDeref[Sym p]], v]`. Distinguish on the
+  # bare `nnkHiddenDeref` (var-ness) + a `new T` RHS: this is a VARIABLE rebind
+  # to a freshly allocated cell, lowered to `isNew` under the var name (the R2
+  # `freshRef` mints a new `Ref_T` const), NOT a heap store at the old address.
+  # The fresh binding flows back to the caller via the #140 `isVar` write-back
+  # (R8b extends it to svRef/svPtr in the walker's `isCall` return arm). Checked
+  # BEFORE the `nnkDerefExpr|nnkHiddenDeref` deref-write arm (which would treat
+  # this as `p[] = new int` and `parseExpr` the unsupported `new` command).
+  if n[0].kind == nnkHiddenDeref and n[0].len == 1 and
+     n[0][0].kind == nnkSym and (rhsOverride == nil and isNewCall(n[1])):
+    let sym = n[0][0]
+    let symCls = classifyType(sym)
+    if symCls.ty.kind in {itRef, itPtr}:
+      return mkNewT(sym.strVal, symCls.ty)
+  # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE through a ref/ptr deref.
+  # The LHS is an explicit `nnkDerefExpr` (or a compiler-inserted
+  # `nnkHiddenDeref`) whose operand classifies as a genuine `ref T`/`ptr T`.
+  # Lower it to an `isDerefWrite` stmt (the walker no-ops it at R3; the real
+  # `store` lands R4). This MUST be checked BEFORE `unwrap` (which strips a
+  # hidden deref down to the pointee and would lose the indirection). A
+  # hidden-deref over a NON-ref operand keeps the pre-R unwrap path below.
+  # RFC-0005 S8ac: `cur = b` on `cur: var ref T` is
+  # `Asgn[HiddenDeref[Sym cur], b]`: a REBIND of the caller's variable
+  # (the #140 `isVar` write-back carries it out), not a store into the
+  # cell `cur` points at. It takes the plain `name = expr` arm below.
+  if n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and n[0].len >= 1 and
+     not isVarIndirection(n[0]):
+    # Phase 15 R8b: a `var ref T` param's `p[] = v` is
+    # `Asgn[DerefExpr[HiddenDeref[Sym p]], v]` — the inner `HiddenDeref` is the
+    # `var`-ness lvalue indirection, which `classifyType` unwraps to the
+    # pointee (defeating the itRef detection). Strip that ONE var-level
+    # hidden-deref so the operand is the ref/ptr symbol (matching the deref-READ
+    # arm). For a plain `ref T` param `p[] = v` is `Asgn[DerefExpr[Sym p], v]`
+    # (no inner HiddenDeref) and this strip is a no-op.
+    var operand = n[0][0]
+    if operand.kind == nnkHiddenDeref and operand.len == 1 and
+       classifyType(operand[0]).ty.kind in {itRef, itPtr}:
+      operand = operand[0]
+    let opCls = classifyType(operand)
+    if opCls.ty.kind in {itRef, itPtr}:
+      let isPtr = opCls.ty.kind == itPtr
+      let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+      let ptrIR = parseExpr(operand, preamble, ctx)
+      let valIR = asgnRhs()
+      return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
+  # Phase 15 R6 (ADR-0010) + ADR-0013 S3. `p.field = v` — a FIELD WRITE through
+  # a `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`,
+  # OR — for a variant ARM field — semcheck wraps that dot-expr in a
+  # `nnkCheckedFieldExpr(<dotExpr>, <disc check call>)` (the runtime
+  # discriminant guard). Unwrap to the inner dot-expr — the runtime check is
+  # modeled symbolically by the walker's arm-field FieldDefect fork (ADR-0013
+  # D3), exactly as the READ side does (`of nnkCheckedFieldExpr: parseExpr(n[0])`).
+  # Lower to a field-split `isDerefWrite` (`store(heap_<objTid>__<field>, p, v)`
+  # — only that field's array changes; an aliased read of the same field sees
+  # the write). Checked BEFORE `unwrap` (which would strip the indirection).
+  let lhsFW = if n[0].kind == nnkCheckedFieldExpr and n[0].len >= 1: n[0][0]
+              else: n[0]
+  if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
+     lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1:
+    let operand = lhsFW[0][0]
+    let opCls = classifyType(operand)
+    if opCls.ty.kind in {itRef, itPtr}:
+      let isPtr = opCls.ty.kind == itPtr
+      let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+      if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
+        let fieldName = lhsFW[1].strVal
+        let fieldTy   = classifyType(lhsFW).ty   ## the field's type
+        let ptrIR = parseExpr(operand, preamble, ctx)
+        let valIR = asgnRhs()
+        return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
+                                 fieldName, isPtr)
+  let lhs = unwrapHidden(n[0])
+  if lhs.kind == nnkBracketExpr and lhs.len == 2:
+    let recv = unwrapHidden(lhs[0])
+    if recv.kind == nnkSym:
+      let recvCls = classifyType(recv)
+      if recvCls.ty.kind == itTable:
+        let key = parseExpr(lhs[1], preamble, ctx)
+        let val = asgnRhs()
+        return mkAssign(recv.strVal,
+          mkTableSet(mkVar(recv.strVal), key, val))
+      # Phase 15 S11: `s[i] = c` — string index ASSIGNMENT on an `itString`
+      # receiver. Z3 String theory strings are IMMUTABLE (ADR-0006), so this
+      # mutation has no sound symbolic encoding and is honestly classified
+      # `seUnsupportedStringOp` → `sxUnknown` (Invariant 3 — never a silent
+      # UNSAT, never a crash). The reason is immutability, NOT a byte/codepoint
+      # mismatch (the model is byte-faithful). Reuse the S9/S3 idiom: bind the
+      # receiver to an `iekStrUnsupported` op (carrying the surface op name);
+      # the residual `lower` arm raises `SymexUnsupportedStringOpError`, which
+      # the `runSymex` boundary maps to `seUnsupportedStringOp`.
+      if recvCls.ty.kind == itString:
+        let recvIR = mkVar(recv.strVal)
+        let idxIR  = parseExpr(lhs[1], preamble, ctx)
+        let valIR  = asgnRhs()
+        return mkAssign(recv.strVal,
+          mkStrOp(iekStrUnsupported, "string mutation",
+                  @[recvIR, idxIR, valIR]))
+      # N14 (RFC-chapulin-hardening bucket-2): `xs[i] = v` element
+      # ASSIGNMENT on a seq[T] receiver. Unlike the `itTable`/`itString`
+      # siblings above, this needs a REAL bounds-defect fork (Nim raises
+      # `IndexDefect` on an OOB write, exactly like a read) — the fork
+      # machinery (`forkDefect`) only exists at WALK time inside the
+      # statement dispatch, so this is its own A-normalised statement kind
+      # (`isIndexAssign`, mirrors `isIndex`'s own read-side fork), not an
+      # `iekXxx` expression evaluated inside the exception-free `lower()`.
+      if recvCls.ty.kind == itSeq:
+        let idxIR = parseExpr(lhs[1], preamble, ctx)
+        let valIR = asgnRhs()
+        return mkIndexAssignStmt(recv.strVal, idxIR, valIR, siteLoc(n))
+  if lhs.kind == nnkSym:
+    let nm = lhs.strVal
+    # Phase 15 R8b (ADR-0010): a `new T` RHS REBINDS the var to a freshly
+    # allocated cell (`p = new int`). Lower it to an `isNew` stmt under the
+    # LHS name — `freshRef` mints a fresh `Ref_T` const and binds it for `nm`,
+    # exactly as the let-section `new T` arm does (R2). The classified type
+    # comes from the LHS sym (a `var ref T` param classifies to `itRef`, the
+    # `var` stripped). Without this the assign would `parseExpr(new int)` and
+    # halt on the unsupported `nnkCommand`. The fresh binding flows back to the
+    # caller via the #140 `isVar` write-back (R8b extends it to svRef/svPtr).
+    if (rhsOverride == nil and isNewCall(n[1])):
+      let classified = classifyType(lhs)
+      if classified.ty.kind in {itRef, itPtr}:
+        return mkNewT(nm, classified.ty)
+    let val = asgnRhs()
+    # #163 review R27: resolve the target's declared range type by TRUE
+    # SYMBOL IDENTITY (`classifyType(lhs)`, `lhs` being the real `nnkSym`
+    # this assignment targets — not its printed name) so the walker's
+    # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
+    # unscoped, name-keyed `WalkCtx` table R22 used to route through.
+    # RFC-0005 S8j: nil too when `val` is itself the range-checked
+    # conversion into the target's bounds (S8i: the hidden conversion Nim
+    # puts on `q = x`, or an explicit `q = R(x)`) -- one check, as Nim
+    # makes, not the conversion's and then this site's.
+    let assignCls = classifyType(lhs)
+    let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange and
+                      not carriesRangeCheck(val, assignCls.ty):
+                     assignCls.ty
+                   else: nil
+    return mkAssign(nm, val, assignTy)
+  # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
+  # reassignment. Requires (a) the object to be a Sym in env,
+  # (b) the field to be the variant's discriminator name, and
+  # (c) the RHS to resolve to a static enum constant of the
+  # discriminator's enum. Symbolic RHS is a future cycle.
+  if lhs.kind == nnkDotExpr and lhs.len == 2 and rhsOverride == nil:
+    let recv = unwrapHidden(lhs[0])
+    let fieldNode = lhs[1]
+    if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
+      let recvCls = classifyType(recv)
+      # Phase 11 + Phase 14 A4. Three cases:
+      #   1. itVariant disc reassign with a static enum-constant RHS
+      #      → mkVariantReassign (Phase 11 cycle 6 path).
+      #   2. itVariant disc reassign with a symbolic RHS → A4's
+      #      mkVariantReassignSymbolic (walker forks).
+      #   3. itMultiVariant axis-disc reassign → same A4 IR with
+      #      vrsDiscName = axis name. Static-tag path on multi-
+      #      variant is a future cycle.
+      if recvCls.ty.kind == itVariant and
+         fieldNode.strVal == recvCls.ty.vDiscName:
+        let rhs = unwrapHidden(n[1])
+        # Try the static-tag path first.
+        let tagIR = parseExpr(rhs, preamble, ctx)
+        if tagIR.kind == iekIntLit:
+          var tagName = if rhs.kind == nnkSym: rhs.strVal else: ""
+          for arm in recvCls.ty.vArms:
+            if arm.tagOrdinal == int(tagIR.ival):
+              tagName = arm.tagName; break
+          return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName,
+                                   branchGroups(recvCls.ty.vArms))
+        # Symbolic RHS: A4 fork path.
+        return mkVariantReassignSymbolic(recv.strVal, "", tagIR,
+                                         branchGroups(recvCls.ty.vArms))
+      if recvCls.ty.kind == itMultiVariant:
+        # Identify which axis owns `fieldNode.strVal` as discName.
+        for ax in recvCls.ty.mvAxes:
+          if ax.discName == fieldNode.strVal:
+            let rhs = unwrapHidden(n[1])
+            let tagIR = parseExpr(rhs, preamble, ctx)
+            # Multi-axis disc reassign — static or symbolic, both
+            # go through the A4 symbolic IR for now (no Phase 11
+            # static path was ever implemented for multi-axis).
+            return mkVariantReassignSymbolic(
+              recv.strVal, ax.discName, tagIR, branchGroups(ax.arms))
+  # RFC-0005 S8p: `o.a = v` on a value tuple / object (see
+  # `valueFieldWrite`). A ranged int field keeps the decline unless `v` is
+  # itself the range-checked conversion: the rebuilt root assignment has no
+  # per-field RangeDefect fork.
+  let fieldTy = valueFieldTy(lhs)
+  if fieldTy != nil:
+    # RFC-0005 S8s: a write through a variant arm field checks the
+    # discriminant first -- Nim computes the field's address, raising
+    # `FieldDefect` out of the arm, before it evaluates the value. The
+    # read of `lhs` is that check (its `isVariantField` fork).
+    if valueFieldChecked(lhs):
+      discard parseExpr(lhs, preamble, ctx)
+    let val = asgnRhs()
+    if not (fieldTy.kind == itInt and fieldTy.hasRange and
+            not carriesRangeCheck(val, fieldTy)):
+      let fw = valueFieldWrite(lhs, val, preamble, ctx)
+      return mkAssign(fw.root, fw.value)
+  ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
+
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
@@ -8971,211 +9384,7 @@ proc parseStmtInner(n: NimNode,
         error(&"symex: unexpected if-arm kind {arm.kind}", arm)
     mkIf(branches, elseBody)
   of nnkAsgn:
-    # Shapes after semcheck (some forms get re-wrapped):
-    #   * `name = expr`                 — simple env reassignment
-    #   * `t[k] = v`                    — Table set
-    # Var receivers may carry HiddenDeref/HiddenAddr — unwrap (unwrapHidden).
-    # Phase 15 R8b (ADR-0010). `p = new T` REBIND of a `var ref T` / `var ptr T`
-    # parameter. Because the param is a `var`, the typed LHS is a compiler-
-    # inserted `nnkHiddenDeref(sym)` (the lvalue indirection) — NOT an explicit
-    # `nnkDerefExpr` (which is the `p[] = v` heap-write shape). So `p = new int`
-    # presents as `Asgn[HiddenDeref[Sym p], Command[new, int]]`, whereas
-    # `p[] = v` is `Asgn[DerefExpr[HiddenDeref[Sym p]], v]`. Distinguish on the
-    # bare `nnkHiddenDeref` (var-ness) + a `new T` RHS: this is a VARIABLE rebind
-    # to a freshly allocated cell, lowered to `isNew` under the var name (the R2
-    # `freshRef` mints a new `Ref_T` const), NOT a heap store at the old address.
-    # The fresh binding flows back to the caller via the #140 `isVar` write-back
-    # (R8b extends it to svRef/svPtr in the walker's `isCall` return arm). Checked
-    # BEFORE the `nnkDerefExpr|nnkHiddenDeref` deref-write arm (which would treat
-    # this as `p[] = new int` and `parseExpr` the unsupported `new` command).
-    if n[0].kind == nnkHiddenDeref and n[0].len == 1 and
-       n[0][0].kind == nnkSym and isNewCall(n[1]):
-      let sym = n[0][0]
-      let symCls = classifyType(sym)
-      if symCls.ty.kind in {itRef, itPtr}:
-        return mkNewT(sym.strVal, symCls.ty)
-    # Phase 15 R3 (ADR-0010). `p[] = v` — a heap WRITE through a ref/ptr deref.
-    # The LHS is an explicit `nnkDerefExpr` (or a compiler-inserted
-    # `nnkHiddenDeref`) whose operand classifies as a genuine `ref T`/`ptr T`.
-    # Lower it to an `isDerefWrite` stmt (the walker no-ops it at R3; the real
-    # `store` lands R4). This MUST be checked BEFORE `unwrap` (which strips a
-    # hidden deref down to the pointee and would lose the indirection). A
-    # hidden-deref over a NON-ref operand keeps the pre-R unwrap path below.
-    if n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and n[0].len >= 1:
-      # Phase 15 R8b: a `var ref T` param's `p[] = v` is
-      # `Asgn[DerefExpr[HiddenDeref[Sym p]], v]` — the inner `HiddenDeref` is the
-      # `var`-ness lvalue indirection, which `classifyType` unwraps to the
-      # pointee (defeating the itRef detection). Strip that ONE var-level
-      # hidden-deref so the operand is the ref/ptr symbol (matching the deref-READ
-      # arm). For a plain `ref T` param `p[] = v` is `Asgn[DerefExpr[Sym p], v]`
-      # (no inner HiddenDeref) and this strip is a no-op.
-      var operand = n[0][0]
-      if operand.kind == nnkHiddenDeref and operand.len == 1 and
-         classifyType(operand[0]).ty.kind in {itRef, itPtr}:
-        operand = operand[0]
-      let opCls = classifyType(operand)
-      if opCls.ty.kind in {itRef, itPtr}:
-        let isPtr = opCls.ty.kind == itPtr
-        let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
-        let ptrIR = parseExpr(operand, preamble, ctx)
-        let valIR = parseExpr(n[1], preamble, ctx)
-        return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
-    # Phase 15 R6 (ADR-0010) + ADR-0013 S3. `p.field = v` — a FIELD WRITE through
-    # a `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`,
-    # OR — for a variant ARM field — semcheck wraps that dot-expr in a
-    # `nnkCheckedFieldExpr(<dotExpr>, <disc check call>)` (the runtime
-    # discriminant guard). Unwrap to the inner dot-expr — the runtime check is
-    # modeled symbolically by the walker's arm-field FieldDefect fork (ADR-0013
-    # D3), exactly as the READ side does (`of nnkCheckedFieldExpr: parseExpr(n[0])`).
-    # Lower to a field-split `isDerefWrite` (`store(heap_<objTid>__<field>, p, v)`
-    # — only that field's array changes; an aliased read of the same field sees
-    # the write). Checked BEFORE `unwrap` (which would strip the indirection).
-    let lhsFW = if n[0].kind == nnkCheckedFieldExpr and n[0].len >= 1: n[0][0]
-                else: n[0]
-    if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
-       lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1:
-      let operand = lhsFW[0][0]
-      let opCls = classifyType(operand)
-      if opCls.ty.kind in {itRef, itPtr}:
-        let isPtr = opCls.ty.kind == itPtr
-        let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
-        if pointeeTy.kind in {itTuple, itVariant, itMultiVariant}:
-          let fieldName = lhsFW[1].strVal
-          let fieldTy   = classifyType(lhsFW).ty   ## the field's type
-          let ptrIR = parseExpr(operand, preamble, ctx)
-          let valIR = parseExpr(n[1], preamble, ctx)
-          return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
-                                   fieldName, isPtr)
-    let lhs = unwrapHidden(n[0])
-    if lhs.kind == nnkBracketExpr and lhs.len == 2:
-      let recv = unwrapHidden(lhs[0])
-      if recv.kind == nnkSym:
-        let recvCls = classifyType(recv)
-        if recvCls.ty.kind == itTable:
-          let key = parseExpr(lhs[1], preamble, ctx)
-          let val = parseExpr(n[1], preamble, ctx)
-          return mkAssign(recv.strVal,
-            mkTableSet(mkVar(recv.strVal), key, val))
-        # Phase 15 S11: `s[i] = c` — string index ASSIGNMENT on an `itString`
-        # receiver. Z3 String theory strings are IMMUTABLE (ADR-0006), so this
-        # mutation has no sound symbolic encoding and is honestly classified
-        # `seUnsupportedStringOp` → `sxUnknown` (Invariant 3 — never a silent
-        # UNSAT, never a crash). The reason is immutability, NOT a byte/codepoint
-        # mismatch (the model is byte-faithful). Reuse the S9/S3 idiom: bind the
-        # receiver to an `iekStrUnsupported` op (carrying the surface op name);
-        # the residual `lower` arm raises `SymexUnsupportedStringOpError`, which
-        # the `runSymex` boundary maps to `seUnsupportedStringOp`.
-        if recvCls.ty.kind == itString:
-          let recvIR = mkVar(recv.strVal)
-          let idxIR  = parseExpr(lhs[1], preamble, ctx)
-          let valIR  = parseExpr(n[1], preamble, ctx)
-          return mkAssign(recv.strVal,
-            mkStrOp(iekStrUnsupported, "string mutation",
-                    @[recvIR, idxIR, valIR]))
-        # N14 (RFC-chapulin-hardening bucket-2): `xs[i] = v` element
-        # ASSIGNMENT on a seq[T] receiver. Unlike the `itTable`/`itString`
-        # siblings above, this needs a REAL bounds-defect fork (Nim raises
-        # `IndexDefect` on an OOB write, exactly like a read) — the fork
-        # machinery (`forkDefect`) only exists at WALK time inside the
-        # statement dispatch, so this is its own A-normalised statement kind
-        # (`isIndexAssign`, mirrors `isIndex`'s own read-side fork), not an
-        # `iekXxx` expression evaluated inside the exception-free `lower()`.
-        if recvCls.ty.kind == itSeq:
-          let idxIR = parseExpr(lhs[1], preamble, ctx)
-          let valIR = parseExpr(n[1], preamble, ctx)
-          return mkIndexAssignStmt(recv.strVal, idxIR, valIR, siteLoc(n))
-    if lhs.kind == nnkSym:
-      let nm = lhs.strVal
-      # Phase 15 R8b (ADR-0010): a `new T` RHS REBINDS the var to a freshly
-      # allocated cell (`p = new int`). Lower it to an `isNew` stmt under the
-      # LHS name — `freshRef` mints a fresh `Ref_T` const and binds it for `nm`,
-      # exactly as the let-section `new T` arm does (R2). The classified type
-      # comes from the LHS sym (a `var ref T` param classifies to `itRef`, the
-      # `var` stripped). Without this the assign would `parseExpr(new int)` and
-      # halt on the unsupported `nnkCommand`. The fresh binding flows back to the
-      # caller via the #140 `isVar` write-back (R8b extends it to svRef/svPtr).
-      if isNewCall(n[1]):
-        let classified = classifyType(lhs)
-        if classified.ty.kind in {itRef, itPtr}:
-          return mkNewT(nm, classified.ty)
-      let val = parseExpr(n[1], preamble, ctx)
-      # #163 review R27: resolve the target's declared range type by TRUE
-      # SYMBOL IDENTITY (`classifyType(lhs)`, `lhs` being the real `nnkSym`
-      # this assignment targets — not its printed name) so the walker's
-      # RangeDefect fork (`forkAssignRangeCheck`) can find it without the
-      # unscoped, name-keyed `WalkCtx` table R22 used to route through.
-      # RFC-0005 S8j: nil too when `val` is itself the range-checked
-      # conversion into the target's bounds (S8i: the hidden conversion Nim
-      # puts on `q = x`, or an explicit `q = R(x)`) -- one check, as Nim
-      # makes, not the conversion's and then this site's.
-      let assignCls = classifyType(lhs)
-      let assignTy = if assignCls.ty.kind == itInt and assignCls.ty.hasRange and
-                        not carriesRangeCheck(val, assignCls.ty):
-                       assignCls.ty
-                     else: nil
-      return mkAssign(nm, val, assignTy)
-    # Phase 11 cycle 6: `obj.kind = tagLiteral` — discriminator
-    # reassignment. Requires (a) the object to be a Sym in env,
-    # (b) the field to be the variant's discriminator name, and
-    # (c) the RHS to resolve to a static enum constant of the
-    # discriminator's enum. Symbolic RHS is a future cycle.
-    if lhs.kind == nnkDotExpr and lhs.len == 2:
-      let recv = unwrapHidden(lhs[0])
-      let fieldNode = lhs[1]
-      if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
-        let recvCls = classifyType(recv)
-        # Phase 11 + Phase 14 A4. Three cases:
-        #   1. itVariant disc reassign with a static enum-constant RHS
-        #      → mkVariantReassign (Phase 11 cycle 6 path).
-        #   2. itVariant disc reassign with a symbolic RHS → A4's
-        #      mkVariantReassignSymbolic (walker forks).
-        #   3. itMultiVariant axis-disc reassign → same A4 IR with
-        #      vrsDiscName = axis name. Static-tag path on multi-
-        #      variant is a future cycle.
-        if recvCls.ty.kind == itVariant and
-           fieldNode.strVal == recvCls.ty.vDiscName:
-          let rhs = unwrapHidden(n[1])
-          # Try the static-tag path first.
-          let tagIR = parseExpr(rhs, preamble, ctx)
-          if tagIR.kind == iekIntLit:
-            var tagName = if rhs.kind == nnkSym: rhs.strVal else: ""
-            for arm in recvCls.ty.vArms:
-              if arm.tagOrdinal == int(tagIR.ival):
-                tagName = arm.tagName; break
-            return mkVariantReassign(recv.strVal, int(tagIR.ival), tagName,
-                                     branchGroups(recvCls.ty.vArms))
-          # Symbolic RHS: A4 fork path.
-          return mkVariantReassignSymbolic(recv.strVal, "", tagIR,
-                                           branchGroups(recvCls.ty.vArms))
-        if recvCls.ty.kind == itMultiVariant:
-          # Identify which axis owns `fieldNode.strVal` as discName.
-          for ax in recvCls.ty.mvAxes:
-            if ax.discName == fieldNode.strVal:
-              let rhs = unwrapHidden(n[1])
-              let tagIR = parseExpr(rhs, preamble, ctx)
-              # Multi-axis disc reassign — static or symbolic, both
-              # go through the A4 symbolic IR for now (no Phase 11
-              # static path was ever implemented for multi-axis).
-              return mkVariantReassignSymbolic(
-                recv.strVal, ax.discName, tagIR, branchGroups(ax.arms))
-    # RFC-0005 S8p: `o.a = v` on a value tuple / object (see
-    # `valueFieldWrite`). A ranged int field keeps the decline unless `v` is
-    # itself the range-checked conversion: the rebuilt root assignment has no
-    # per-field RangeDefect fork.
-    let fieldTy = valueFieldTy(lhs)
-    if fieldTy != nil:
-      # RFC-0005 S8s: a write through a variant arm field checks the
-      # discriminant first -- Nim computes the field's address, raising
-      # `FieldDefect` out of the arm, before it evaluates the value. The
-      # read of `lhs` is that check (its `isVariantField` fork).
-      if valueFieldChecked(lhs):
-        discard parseExpr(lhs, preamble, ctx)
-      let val = parseExpr(n[1], preamble, ctx)
-      if not (fieldTy.kind == itInt and fieldTy.hasRange and
-              not carriesRangeCheck(val, fieldTy)):
-        let fw = valueFieldWrite(lhs, val, preamble, ctx)
-        return mkAssign(fw.root, fw.value)
-    ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
+    return parseAsgn(n, nil, preamble, ctx)
   of nnkWhileStmt:
     var preamble2: seq[IRStmt]
     # RFC-chapulin-hardening Q1 (ADR-0025) / B3 / B4 / B6 (ADR-0028): try the
@@ -9891,10 +10100,8 @@ proc parseStmtInner(n: NimNode,
             mkAssign(recvName, mkTableSet(mkVar(recvName), key, val))
           else:
             let callKey = ensureProcRegistered(ctx, calleeSym, n)
-            var argIRs: seq[IRExpr]
-            for i in 1 ..< n.len:
-              argIRs.add parseExpr(n[i], preamble, ctx)
-            mkCall(callKey, "", argIRs, tBool())
+            userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble,
+                         ctx)
         # N49 (RFC-chapulin-hardening bucket-2, design round). A DOTTED-FIELD
         # lvalue receiver (`obj.seqField.add(x)`, `w.items.del(i)`, ...) never
         # matches the bare-symbol `#145 mutations` arm above (`recvName` there
@@ -9941,10 +10148,7 @@ proc parseStmtInner(n: NimNode,
                           "` unsupported (feUnsupportedOp)")
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
-          mkCall(callKey, "", argIRs, tBool())
+          userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
   of nnkDiscardStmt:
     # v68 (round 5, chapulin CRITICAL finding): a discarded expression is
     # WALKED, not dropped. Every `discard <expr>` is lowered to a synthetic

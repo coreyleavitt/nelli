@@ -974,5 +974,12 @@ task test, "Run the test suite":
             # symbolic-index writes, an enum zero without ordinal 0, range
             # discriminators, closure results, narrow container cells;
             # walker 176->177.
-            "tsymex_rfc0005_s8z_remainder"]:
+            "tsymex_rfc0005_s8z_remainder",
+            # RFC-0005 S8ac -- S8aa's remainder: var-parameter write-back
+            # (var refs, located actuals, raise / cache / outer-except
+            # finally), masked shift counts, the linear unchecked div wrap,
+            # the join over allocation and table / set / distinct / variant
+            # state; walker 177->178. Reads per-query step
+            # counts via its `.nim.cfg` (`-d:symexQueryStats`).
+            "tsymex_rfc0005_s8ac_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

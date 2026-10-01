@@ -297,6 +297,11 @@ title = "S8ao's remainder: a ref-object field of a compound sort (seq) has no fi
 state = "pending"
 
 [[slice]]
+id    = "S8aq"
+title = "S8ai's remainder: step 1 itself can run out of budget, so step 1c is never reached when step 1's capped solve is cancelled -- give step 1c a path that does not depend on step 1 completing, or decline with the budget reason; the fact that L is at least every found first index is not emitted (valid but unprovable within the pin's UNSAT budget) -- emit it in a form the solver can use, or show it is subsumed; str.replace_all is unreachable from the walker (Z3_mk_seq_replace_all is behind an optional nim-z3 build flag) -- make it reachable (enable the binding in nim-z3 and push, then bump the lock) or decline it as a scoped decline with the reason; the equality classes are syntactic over the roots, so an equality the query implies without stating it is not seen -- close them under implied equalities, or show the miss only costs completeness and never soundness, and pin it"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

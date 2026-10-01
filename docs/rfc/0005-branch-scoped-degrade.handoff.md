@@ -18,7 +18,7 @@
 - **Shared slice brief** for every implementing agent:
   `scratchpad/SLICE-BRIEF.md` (session scratchpad).
 
-## Current position (refreshed 2026-10-01 04:30Z)
+## Current position (refreshed 2026-10-01 08:30Z)
 
 - **Slices done:** 12 of 15 — S0 (`8a7384b`), S0b (spike), S1 (`d2c2226`),
   S1b (`a898905`), S2 (`48c30d6`, merged `1519608`), S1c (`489a1e7`),
@@ -233,16 +233,23 @@
 - **S8t2 LANDED** (`ec1519c`, hotfix for S8t's Windows red on run 36667380693: nulwitness exit 1 + s8t_termination STATUS_STACK_OVERFLOW in nim.exe macro expansion). `boundEmittedDepth` hoists deep builder subtrees to lets; IR byte-identical, no walker bump; symex-mingw/fuzzer-mingw/fuzzer-msvc all green at ec1519c (first all-green corpus with the empty Windows skip list). Its Linux coverage rides on S8u's re-gate (S8u rebases onto it first).
 - **Landed since last checkpoint (2026-09-30 23:45Z):** S8aa (`25a6241`, walker 172), S8v (`6152830`, walker 173), S8ab (`428a5ff`+`3ca5c31`, typed VM-alias guard, no bump), S8af (`782e9c1`, guard gaps closed, test-only, no sweep), S8ae (`5f77981`, walker 174, step-1c relational + range facts). Each gated clean (regressed=0 new-failing=0) with Windows green. Fence slices added from findings: S8ae (from S8v), S8af (from S8ab), S8ag (from S8y's replay: 1-char-needle indexof split lowering), S8ah (from S8af), S8ai (from S8ae).
 - **Landed since 2026-10-01 00:00Z:** S8ah (`1db2771`, no bump; guard walks macro reachability transitively through intermediate procs, 22 macros / 37 generics / 1 VM-reachable, unbounded field-graph depth, opt-in `nelliVmAliasAudit` build-time gate on one suite per Windows leg), S8ad (`94b8303`, walker 175; local distinct values allocate their own sort, `divRangeFacts` + exact quotient/remainder for |a|<|b|, rlimitDelta carry `cd983fd`). Fence slices added: S8aj (from S8ad: local array zero-init walker fault, bv2int links for add/sub/mul/shift, symex-mingw reshard), S8ak (from S8ah: zero-arg macro auto-invoke, AST-based name enumeration).
-- **In flight:** **S8y** holds the gate lock at `2f576ee`; rebased onto `94b8303` as `0c7730b` (walker 176), reruns + Windows after the gate. **S8z** (`63f098b`, Windows green) is next on the lock (10 s poll), then **S8ac** (gate at `6e80fe2`, rebased `83574a6`, walker tip+1, drops its duplicate rlimitDelta hunk). **S8ai** (opus, semantic step-1c links) waiting on the lock. **S8ag** (opus, indexof split lowering) built on S8y's `2f576ee`, follows S8y. **S8aj** (opus) and **S8ak** (sonnet) building.
+- **Landed since 04:30Z:** S8y (`59bf62e`, walker 176; n36/s1c pair-loop solve floor bounded, byte-domain shaping + scoped iteration-count decline), S8ak (`184c43d`, no bump; zero-arg macro resolution, AST-based name scan, and the guard's generic registry no longer keyed by line -- S8ad's 1-line shift had turned all three Windows legs red; letaudit now compiles with `-d:nelliVmAliasAudit` on Linux too), `e3cd0c7` (symex-mingw corpus 8 shards with a 40-min budget / 48-min stop, taken from S8aj ahead of its landing -- the 3-shard layout was losing shards to the 60-min job limit on every branch), S8z (`587d840`, walker 177), S8al (`6aec942`, no bump; force-and-audit fixtures, test hook resolves by symbol). Fence slices added: S8al (from S8ak), S8am (from S8z).
+- **PAUSED 2026-10-01 ~08:15Z: weekly model limit reached (resets 2026-10-03 02:00 America/New_York).** All agents stopped. Gate lock is FREE; the S8ag waiter was killed. State of each open slice:
+  - **S8ac** -- gate at `6e80fe2` CLEAN (`scratchpad/s8ac-gate.diff`: unchanged=489 regressed=0 new-failing=0 new-ok=39). Rebased to `e49cebd` (walker 178) in `scratchpad/wt-s8ac`; its 26 targeted reruns had not reported. Next: rebase `e49cebd` onto the tip (S8al is docs/guard only), rerun the targeted batch + CR2 + s8z_remainder + letaudit on both Z3 versions, push, Windows, land.
+  - **S8aj** -- gate at `0cd890e` CLEAN (`scratchpad/s8aj-gate.diff`: regressed=0 new-failing=0). Branch at `ed5487d` (rebased onto e7c7c48). Its reshard hunks are already on the channel (`e3cd0c7`); its item 1 overlaps S8z's uninit-composite-local fix -- keep one mechanism. Next: targeted recheck on the rebased tree, walker tip+1, Windows (report the 8 shard wall times), land.
+  - **S8ai** -- MID-REBASE onto e7c7c48 in `.claude/worktrees/agent-a3c4d65df67787ecf` (both picks applied; conflicts unresolved). Branch ref still `192f79f`. Not yet gated. Next: finish the rebase, walker tip+1, gate, Windows, land.
+  - **S8ag** -- MID-REBASE onto e7c7c48 in `.claude/worktrees/agent-a42795461b528af7d` (1 of 2 picks applied). Branch ref still `ee767b7`. Not yet gated. Next: finish the rebase, walker tip+1, gate, Windows, land. Carries S8y's leftovers (first 5-iteration hit still 20M; step-1-out/step-3-SAT hits outside the decline bound; use per-query rlimit deltas in pins).
+  - **S8am** -- branch created at e7c7c48 in `.claude/worktrees/agent-a74cdae051929e6ee`; no work yet.
+- **Gate order on resume:** S8ac (gated; land) -> S8aj (gated; land) -> S8ai -> S8ag -> S8am. Each takes walker tip+1 at landing.
 
-- **Remaining:** gates S8y -> S8z -> S8ac -> S8ai -> S8ag -> S8aj -> S8ak (serial, one lock, ~80-180 min each; walker renumbered tip+1 at each landing; new fence slices from each slice's findings) -> S11 -> completion gate -> ff main + tag.
+- **Remaining:** land S8ac, S8aj -> gate+land S8ai, S8ag, S8am (new fence slices from each one's findings) -> S11 -> completion gate -> ff main + tag.
 - **Open forks:** i2 (`blocked_by` edge, blocks nothing). i1 and i3 resolved.
 - **Resume:** `/loop /tdd rfc-0005 til done. do not defer anything. use opus
   5.5 as the agent for the most dificult chunks try to plan that out.` -- on
-  resume, check `scratchpad/gate.lock/owner` and each in-flight branch
-  (`rfc-0005-s8{y,z,ac,ai,ag,aj,ak}`); gates run from a worktree at the sha
-  they certify, never the live checkout. After the queue drains: S11 ->
-  completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
+  resume, re-read this section, then relaunch one agent per open slice in its
+  existing worktree (they keep their commits). Gates run from a worktree at
+  the sha they certify, never the live checkout. After the queue drains: S11
+  -> completion gate (DoD §6 end-to-end via symexFind) -> ff main + tag ->
   `quipu warm --push`.
 
 ## Implementation plan — model allocation

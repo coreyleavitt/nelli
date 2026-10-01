@@ -21,6 +21,14 @@
 ##       `dsl_parser.nim`, for the per-prefix argument). The decline is
 ##       pinned here for all three, reached through an uninitialized local
 ##       var -- the one call site this `nil` visibly degrades.
+##
+## RFC-0005 S8ap (S8ao's remainder) moved several of these pins forward:
+## `del`/`insert`/`incl`/`excl`/`[]=` and `add` on a dotted STRING field take
+## the field-path rebuild too, a ref object's seq field is a heap cell (so
+## `p.s.add v` is modelled), and the uninitialised `itUninterp` local
+## declines with its placeholder's own kind instead of
+## `feUnsupportedStmtKind`. The tests below say which slice each expectation
+## dates from; `tests/tsymex_rfc0005_s8ap_remainder.nim` pins S8ap itself.
 import std/[unittest, strutils, sequtils, atomics]
 import nelli/symex
 import nelli/smt/types
@@ -78,28 +86,26 @@ proc zTwoAdds(v, w: int) =
   if o.s.len != 2: symexTarget("twoadd_dead")
 
 proc zDelStillDeclines(v: int) =
-  ## `del`/`insert`/`incl`/`excl`/`[]=` on a dotted field are UNCHANGED --
-  ## this slice named `add` only.
+  ## `del`/`insert`/`incl`/`excl`/`[]=` on a dotted field were UNCHANGED by
+  ## S8ao (it named `add` only); RFC-0005 S8ap models them.
   var o: SQ
   o.s.add v
   o.s.del(0)
   if o.s.len == 0: symexTarget("delstill")
 
 proc zStrDotAddStillDeclines(c: int) =
-  ## `add` on a dotted STRING field is UNCHANGED -- the scope was the seq
-  ## case (`isKnownMutatingReceiverCall` matches itString too for bare
-  ## `add`, but S8ao's field-path routing gates on `itSeq` specifically).
+  ## `add` on a dotted STRING field was UNCHANGED by S8ao -- the scope was
+  ## the seq case. RFC-0005 S8ap routes it through `iekStrConcat`.
   var o: NM
   o.name.add(char(c))
   if o.name.len == 1: symexTarget("strdotadd")
 
 proc zRefDotAdd(p: RNode, v: int) =
-  ## A ref/ptr object's field. See the "different mechanism" note on its
-  ## own test below: a ref-object field of a COMPOUND sort (seq) has no
-  ## field-split heap representation yet, independent of this slice --
-  ## `p.s = @[...]` alone already raises `seUnsupportedCompoundSortLeaf`.
-  ## What this slice proves is that `.add` now shares THAT fate instead of
-  ## N49's narrower, earlier `feUnsupportedOp`.
+  ## A ref/ptr object's field. At S8ao a ref-object field of a COMPOUND sort
+  ## (seq) had no field-split heap representation -- `p.s = @[...]` alone
+  ## raised `seUnsupportedCompoundSortLeaf` -- and this pinned only that
+  ## `.add` shared THAT fate instead of N49's `feUnsupportedOp`. RFC-0005
+  ## S8ap gave the field a leaf-split heap cell, so it is now modelled.
   p.s = @[]
   p.s.add v
   if p.s.len == 1: symexTarget("refadd")
@@ -131,21 +137,13 @@ suite "S8ao (1): add through a field path":
     if r.status == sxSat: check r.witness[0] == 2 and r.witness[1] == 3
     discard run(zTwoAdds, "twoadd_dead", sxUnsat)
 
-  test "del/insert/incl/excl/[]= on a dotted field are unchanged":
-    let r = symexFind(zDelStillDeclines, tLabel("delstill"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
-    check r.errors.anyIt(it.kind == feUnsupportedOp and
-                         "del" in it.msg)
+  test "del on a dotted field: modelled since RFC-0005 S8ap (S8ao left it N49)":
+    let r = run(zDelStillDeclines, "delstill", sxSat)
+    check not r.errors.anyIt("N49" in it.msg)
 
-  test "add on a dotted STRING field is unchanged (scope was seq)":
-    let r = symexFind(zStrDotAddStillDeclines, tLabel("strdotadd"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
-    check r.errors.anyIt(it.kind == feUnsupportedOp and
-                         "add" in it.msg)
+  test "add on a dotted STRING field: modelled since RFC-0005 S8ap (S8ao left it N49)":
+    let r = run(zStrDotAddStillDeclines, "strdotadd", sxSat)
+    check not r.errors.anyIt("N49" in it.msg)
 
   test "a ref object's seq field: add now shares fate with plain assignment":
     ## Different mechanism, not fixed here (see the RFC's S8ao notes): a
@@ -160,9 +158,13 @@ suite "S8ao (1): add through a field path":
     ## -- proving the routing is real (it shares the real primitive, not a
     ## parallel one) -- rather than being blocked by its own narrower N49
     ## catch-all. This pins that it is no longer N49 specifically.
+    ## RFC-0005 S8ap: the field is a leaf-split heap cell now, so the
+    ## append is modelled outright.
     let r = symexFind(zRefDotAdd, tLabel("refadd"))
     checkpoint $r.status & " " & show(r.errors)
     check not r.errors.anyIt(it.kind == feUnsupportedOp and "N49" in it.msg)
+    check r.status == sxSat
+    check not r.errors.hasKind(seUnsupportedCompoundSortLeaf)
 
   test "symexWalkerVersion >= 181":
     check parseInt(symexWalkerVersion) >= 181
@@ -191,25 +193,24 @@ proc zUnsupportedGenericVar(x: int) =
 
 suite "S8ao (2): itUninterp has no zero":
 
-  template declines(fn: typed, lbl: string): untyped =
+  template declines(fn: typed, lbl: string, kind: SymexErrorKind): untyped =
+    ## RFC-0005 S8ap: the decline carries the placeholder's own kind (was
+    ## `feUnsupportedStmtKind` "zero-init not modeled" for all three).
     block:
       let r = symexFind(fn, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check not r.errors.hasKind(weInternalWalkerFault)
-      check r.errors.hasKind(feUnsupportedStmtKind)
-      check r.errors.anyIt(it.kind == feUnsupportedStmtKind and
-                           "itUninterp" in it.msg and
-                           "zero-init not modeled" in it.msg)
+      check r.errors.hasKind(kind)
 
   test "a closure-typed local (__closure) declines, never crashes":
-    declines(zClosureVar, "closurevar")
+    declines(zClosureVar, "closurevar", ceUnsupportedHof)
 
   test "an Atomic-typed local (__ownership:Atomic) declines, never crashes":
-    declines(zAtomicVar, "atomicvar")
+    declines(zAtomicVar, "atomicvar", heUnsupportedOwnership)
 
   test "an unrecognised generic local (__unsupported:*) declines, never crashes":
-    declines(zUnsupportedGenericVar, "weirdvar")
+    declines(zUnsupportedGenericVar, "weirdvar", feUnsupportedParamType)
 
   test "symexWalkerVersion >= 181 (item 2)":
     check parseInt(symexWalkerVersion) >= 181

@@ -44,7 +44,7 @@
 ## The battery deliberately routes through four LIVE, DISTINCT degrade
 ## funnels (S0b's own measurement categories) so S4/S5/S6/S7's later work
 ## each has pre-existing coverage in this file to extend, not invent:
-##   F1 -- `allocDegrade`/`heUnresolvedRef`  (heap ref-to-string field deref;
+##   F1 -- `allocDegrade`/`heUnresolvedRef`  (heap ref-to-distinct field deref;
 ##         the exact S0-pin-1 shape) -- classified at **S4**: the site split
 ##         off as `heUnsupportedPointeeRead` (`dcFreshSymbol`); F1 now fires
 ##         that kind, not `heUnresolvedRef`
@@ -147,11 +147,12 @@ template withPoisonedArm*(placement: static PoisonPlacement; poisonOn: bool;
 # ---- F1: allocDegrade / heUnsupportedPointeeRead (heUnresolvedRef pre-S4) --
 # Identical shape to `tsymex_rfc0005_s0_exhibit.nim`'s `s0DeadFreshSymbol`:
 # `liftHeapValue`'s unsupported-pointee `else` arm does not yet model a
-# `string` field read through a heap-deref'd `ref` (Cluster R1 covers only
-# PRIMITIVE pointees). Guarded `p != nil` so the poison body itself never
-# nil-derefs.
+# `distinct` field read through a heap-deref'd `ref` (it was a `string`
+# field until RFC-0005 S8ap modelled string fields on the heap). Guarded
+# `p != nil` so the poison body itself never nil-derefs.
+type S3F1Dist = distinct int
 type S3F1Node = ref object
-  s: string
+  s: S3F1Dist
 
 # ---- F2: degradeStrArm / seUnsupportedStringOp (toOct, no Z3 oct prim) -----
 # Identical trigger to `tsymex_a8_radix.nim`'s `octDegrade`: unconditional,

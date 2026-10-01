@@ -913,6 +913,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8an (nested routines with captures; globals threaded
     ## through calls; `addr x` as a `ptr` cell for a call; overloads and
     ## same-named nested routines keyed apart). 182->183.
+    ## RFC-0005 S8ap (compound-sort fields of a ref object are leaf-split
+    ## heap cells; dotted-field del/insert/incl/excl/[]=/[i]= and dotted
+    ## string add; an itUninterp var declines with its own kind). 182->183.
     check symexWalkerVersion == "183"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

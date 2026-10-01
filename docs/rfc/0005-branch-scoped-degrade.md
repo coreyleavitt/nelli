@@ -294,7 +294,7 @@ state = "done"
 [[slice]]
 id    = "S8ap"
 title = "S8ao's remainder: a ref-object field of a compound sort (seq) has no field-split heap representation (`p.s = @[...]` and `p.s.add v` are seUnsupportedCompoundSortLeaf) -- build compound-sort field-split heap storage; `del`/`insert`/`incl`/`excl`/`[]=` on a dotted field are still N49 feUnsupportedOp -- route them through the same field-write primitives as `add`; `add` on a dotted STRING field is N49 -- route it via iekStrConcat; the uninitialized-`var` decline for itUninterp gives one generic message for all three placeholder prefixes (__ownership, __closure, __unsupported) -- give each the precise kind allocateSym already uses"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8aq"
@@ -6730,6 +6730,198 @@ against Nim 2.2.10.
   `v` in `[0, 16)` it takes 0.56 s. The pins use the narrow range. An
   Int-sorted heap for unranged `int` pointees (or a bridging lemma) is the
   fix, in the heap model.
+
+**As landed (S8ap, walker 183) — S8ao's remainder.**
+
+*Compound-sort fields of a ref object are leaf-split heap cells.* A field
+(or a bare pointee, `ref seq[int]`) whose type is a backed seq, a
+`Table[string, V]` or a backed `HashSet` was `seUnsupportedCompoundSortLeaf`
+plus `heUnsupportedPointeeRead` on every access, and
+`heNewFieldZeroUnsupported` on every constructor: the logical heap is one Z3
+array per key, `Z3Array[Ref_T, V]`, and a compound value has no single term
+`V` (a seq is a data array and a length, a table a data array, a presence
+array and a size, a set a membership array and a size). S8ap keeps one heap
+array per LEAF instead. The leaf heaps of a cell share the cell's key: leaf 0
+keeps the key itself (so `heapKeyShapes[key]` still records the whole value
+type, which the witness reads), the others add `__@len`/`__@present`
+(`heapLeafSuffixes`). `@` cannot start a Nim identifier, so no field key
+collides with a leaf key, and `renderCell`'s field scan already skips any
+suffix holding `__`. Every array is indexed by the object's `Ref_T` address,
+so a read is a ground `select` per leaf, and a write is a `store` per leaf.
+The procs (`runtime_heap.nim`) are `heapCellArrays` (the current or input
+array of each leaf), `heapCellSelect`, `heapCellStore` and `heapCellIte`. A
+scalar cell is the one-leaf case and behaves exactly as before. Every
+`walkHeapArm` site that read or wrote a field heap goes through them: the
+main deref read and write, the variant arm-field read and write, the
+discriminator write's same-branch carry, and `new`/the constructor's
+zero-write. A constructor zero-writes such a field with `defaultZero`.
+
+- **Aliasing** is the scalar heap's own: two equal addresses select the same
+  cell of every leaf, so a write through `p` is read through `q` when
+  `p == q`, and only then.
+- **Nil** is unchanged. The deref still forks `NilAccessDefect` before any
+  leaf is touched.
+- **Merges** need nothing new. Path joins, the return merge and
+  `heapMetaExtends` work key by key, and each leaf is a key. A read that
+  selects among several arms' cells (an arm field shared by several tags,
+  the discriminator carry) uses `heapCellIte`, which builds one `ite` per
+  leaf. `iteSV` would havoc a compound or string merge.
+- **Well-formedness.** A free input cell must hold a value Nim can hold:
+  - a length or size in `[0, 1024]`;
+  - a string of bytes;
+  - a table's or set's size tied to the keys present, via
+    `ContainerCardRegistry`.
+
+  `heapCellWfConds` asserts these of the INPUT cell
+  `select(heap_<leaf>, p)` at every read of a compound or string cell.
+  The input heap holds the program's inputs, so a fact about every input
+  cell is a fact of the program for any address.
+- **Strings.** A `string` field keeps its single heap, and was already
+  writable. `liftHeapValue` now has an `itString` arm, so a read is the
+  select itself instead of a havoc.
+- **Witness.** `renderCellField`/`renderCell` render a string and a compound
+  cell from the model's INPUT heap (`renderHeapCompound`). The leaves are
+  written under the same names a by-value param of the type uses:
+  - `strVals`;
+  - `seqLens` plus `.<i>` elements;
+  - `tabKeys`;
+  - `setMembers`.
+
+  A `seq[ref T]` element becomes the position `<cell>.<field>[<i>]`, added
+  as a ref field is. `readCellField` reads them back through
+  `readCellSeq`/`readCellTable`/`readCellSet`, plus a string arm.
+  `refCellFidelity` counts such fields faithful: a string; a seq of
+  int/bool/float/ref; a `Table[string, int|bool]`; a backed `HashSet`.
+  A cell no path read is unconstrained in the model. A length outside
+  `[0, 1024]` therefore renders empty, and a non-byte string renders `""`
+  (`evalStrBytesOrEmpty`). Any well-formed value is a faithful rendering of a
+  cell nothing observed.
+
+*Dotted-field mutations take the field-write primitive.* S8ao's
+`dottedSeqAddShape`/`dottedFieldAdd` are generalised to
+`dottedFieldShape`/`dottedFieldMutate` (`dsl_parser.nim`):
+- **Mutations covered:** `del` (seq or Table), `insert`, `incl`, `excl`,
+  `[]=`, and `add` on a string field. A string or char argument becomes
+  `iekStrConcat`; any other argument becomes the bare arm's
+  `iekStrUnsupported`.
+- **How each lowers:** read the field, apply the bare-symbol arm's own IR to
+  the old value (`dottedOpExpr`), and write the field back through the same
+  primitive `<fieldPath> = v` uses. That is the R6 field-deref-write for a
+  ref/ptr step, or S8p's `valueFieldWrite` for a value step. So `del`'s
+  `IndexDefect` fork and `insert`'s lowering decline are the bare
+  variable's.
+- **Element assignment** `o.s[i] = v` / `p.s[i] = v` was the "unsupported
+  nnkAsgn shape" decline. It now reads the field into a fresh slot, runs
+  N14's `isIndexAssign` there (its IndexDefect fork included), and writes
+  the slot back (`dottedFieldIndexAssign`). A Table field takes
+  `mkTableSet`, and a string field S11's `iekStrUnsupported`.
+
+*An uninitialised `var` of an `itUninterp` placeholder declines with the
+placeholder's own kind* (`uninterpVarDecline`). These are the kinds
+`allocateSym` already uses for the same placeholder:
+
+| Placeholder | Kind |
+|---|---|
+| `__ownership:*` | `heUnsupportedOwnership` |
+| `__closure` | `ceUnsupportedHof` |
+| `__unsupported:*` | `feUnsupportedParamType` |
+| `__unsupported_witness:*` | `feUnsupportedWitnessType` |
+
+Before, all of them were one generic `feUnsupportedStmtKind`.
+`zeroValueForType` itself is unchanged: it still declines, for the reasons
+S8ao proved.
+
+Pins: `tests/tsymex_rfc0005_s8ap_remainder.nim`, 36 tests.
+- (1) Heap cells. Each case pairs a reachable target with an unreachable
+  twin, and witnesses replay through the SUT:
+  - write-then-read;
+  - an input seq read and rendered;
+  - the witness is the input cell, not the end-of-path value;
+  - aliasing and its no-alias twin;
+  - nil read and nil write raise;
+  - constructor and `new` zero-writes;
+  - string, Table and HashSet fields, including size tied to content;
+  - a float seq;
+  - a `seq[CNode]` whose elements render as heap positions;
+  - a path join;
+  - a bare `ref seq[int]`.
+- (2) Dotted mutations, value path and ref path:
+  - `del`, and `del` out of bounds;
+  - `[i] =`, and `[i] =` out of bounds;
+  - Table `[]=`/`del`;
+  - `incl`/`excl`;
+  - dotted `insert` matching the bare `insert`'s status and kinds.
+- (3) Dotted string `add`: a char argument and a string argument, value
+  path and ref path.
+- (4) All three `itUninterp` prefixes with their own kinds.
+- The `>= 183` floor.
+
+Moved forward because the old pins exercised exactly the gaps S8ap closes.
+For the ones that pinned a still-unmodelled site, the poison source was
+swapped for a field kind that still reaches the same site:
+- `s8ao_remainder`: dotted `del` and dotted string `add` are now `sxSat`;
+  `p.s.add v` is `sxSat`; the itUninterp kinds are as above.
+- `r6_n49_dottedfield_mutation`: `del` is `sxSat`; `insert` stays
+  `sxUnknown` through the bare decline.
+- `s0_exhibit`, `s3_monotonicity` F1 and `r6_heap_raise_totality`: string
+  field replaced by a `distinct int` field.
+- `s4_alloc`: string field replaced by a `distinct string` field; its IR
+  case uses `tDistinct`.
+- `r6_lows_declines` N41-2/3: Table field replaced by a tuple field.
+- `s6b_ops`: seq field replaced by a `distinct int` field (still
+  `heNewFieldZeroUnsupported`).
+
+*Different mechanisms, reported and not fixed here.*
+- **`insert` is unmodelled even on a bare seq.** Lowering declines
+  `iekSeqInsert` (`feUnsupportedOp`, "#143 follow-up"). A dotted `insert`
+  now takes the same IR and so the same decline. Making it modelled is an
+  `insert` lowering, not a field-path change.
+- **A `seq[string]`'s element operations fault the walker on a bare local
+  too.** `var s: seq[string]; s.add v; s[0] == "q"` reports
+  `weInternalWalkerFault`: the `a.kind == b.kind` assertion at
+  `runtime.nim` and "iekSeqAdd: unsupported elem string". A `seq[string]`
+  field holds a well-formed cell, but the same operations fault through it.
+  This is the seq-of-string element model, independent of the heap.
+- **A field of a value field of a ref (`p.inner.s`) is outside
+  `dottedFieldShape`.** It accepts one ref/ptr step directly before the
+  field, or a value chain from a local or param. `p.inner.s.add v` stays
+  N49. Reading `p.inner` itself is a tuple-valued heap cell, which is
+  still `seUnsupportedCompoundSortLeaf`.
+- **Some field kinds still have no heap leaf representation**
+  (`seUnsupportedCompoundSortLeaf` + `heUnsupportedPointeeRead`):
+  - by-value object, tuple and array fields;
+  - `Table` with a non-string key;
+  - `Table[string, V]` whose `V` is not backed.
+
+  A `distinct` field is still havocked (`heUnsupportedPointeeRead`). None of
+  these, nor a seq field with an unbacked element type, get a
+  construction-time zero (`heNewFieldZeroUnsupported`). They are the
+  remaining shapes of the same storage problem, but each needs its own leaf
+  layout (a tuple's fields, an array's elements).
+- **An unrenderable container inside a ref pointee demotes the whole
+  param.** Examples are `seq[bool]` and `seq[string]` fields, or a
+  `Table[int, int]`; the check is `isRenderableWitnessTy` /
+  `demoteUnrenderableWitnessTy`. The param demotes to
+  `__unsupported_witness:*` (`feUnsupportedWitnessType`) before the walk,
+  so such a field is reachable through a locally constructed object but
+  never through an input ref.
+- **A seq field of the object's own ref type crashes compilation.** A field
+  like `kids: seq[Node]` inside `Node` hits "VM call depth exceeded" in
+  type classification (`dsl_typebridge.nim`). A seq of a DIFFERENT ref type
+  works and is pinned.
+- **The heap-depth budget counts field reads.** Each `p.f` is a deref
+  against `maxHeapDepth` (8). A path that reads nine fields of one object
+  reports `heDepthExhausted`. The budget bounds derefs per path, not cells,
+  and was met here by a test that read four compound fields twice on one
+  path.
+- **Only part of a table's content renders.** `extractTableEntries` renders
+  `int`/`bool` values only, so a `Table[string, float]` field renders its
+  keys without values. Witness fidelity calls such a field lossy.
+- **The input cell's well-formedness is asserted only where it is read.** A
+  cell no path reads is unconstrained in the model, so the renderer clamps
+  it (above). This is sound, because nothing observed it. But
+  `renderedSize` and the `[0, 1024]` length window are the only guard, and
+  a future reader of unread cells would have to assert the facts itself.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

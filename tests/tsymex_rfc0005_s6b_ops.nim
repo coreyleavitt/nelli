@@ -225,8 +225,13 @@ proc s6bLn(x: float) =
 
 # ---- heNewFieldZeroUnsupported --------------------------------------------------
 
+type S6bDist = distinct int
 type S6bBox = ref object
-  items: seq[int]
+  ## RFC-0005 S8ap: `items` was a `seq[int]`, which a constructor now
+  ## zero-writes (a leaf-split heap cell); a `distinct` field still has no
+  ## construction-time zero (`zeroIRExprForType`), so it keeps these pins on
+  ## `heNewFieldZeroUnsupported`.
+  items: S6bDist
   v: int
 
 proc s6bNewSeqFieldDead(n: int) =
@@ -237,7 +242,7 @@ proc s6bNewSeqFieldDead(n: int) =
 
 proc s6bNewSeqFieldLive(n: int) =
   let b = S6bBox(v: n)
-  if b.items.len > 0:
+  if int(b.items) > 0:
     symexTarget("s6b_new_seq_field_live")
 
 # ---- halts --------------------------------------------------------------------
@@ -314,8 +319,8 @@ suite "RFC-0005 S6b -- oracles":
       check s6bMkTab(t).len == t.len
       check s6bRetTab(t).len != s6bMkTab(t).len + 1
 
-  test "oracle: an object-constructed ref's untouched seq field is empty":
-    check S6bBox(v: 3).items.len == 0
+  test "oracle: an object-constructed ref's untouched distinct field is zero":
+    check int(S6bBox(v: 3).items) == 0
 
   test "oracle: a ValueError returned by a helper IS caught by except ValueError":
     var caught = false
@@ -537,7 +542,7 @@ suite "RFC-0005 S6b (c) -- guards":
     show r
     check r.status == sxUnknown
 
-  test "an untouched new-ref seq field is a candidate: sxUnknown, never sxSat":
+  test "an untouched new-ref distinct field (a seq one until RFC-0005 S8ap) is a candidate: sxUnknown, never sxSat":
     let r = symexFind(s6bNewSeqFieldLive, tLabel("s6b_new_seq_field_live"))
     show r
     check r.errors.hasKind(heNewFieldZeroUnsupported)

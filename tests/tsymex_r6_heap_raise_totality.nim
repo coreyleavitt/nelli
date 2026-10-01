@@ -66,8 +66,12 @@ import nelli/smt/canonicalize
 # =============================================================================
 
 type
+  HeapDist = distinct int
   HeapStrNode = ref object
-    s: string
+    ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models;
+    ## a `distinct` field still reaches `liftHeapValue`'s unsupported-pointee
+    ## `else` arm, the site this suite pins.
+    s: HeapDist
     n: int
 
   HKindA = enum hkaX, hkaY
@@ -83,12 +87,13 @@ type
 
 # =============================================================================
 # Site: `liftHeapValue`'s unsupported-pointee-kind `else` (converted).
-# Triggered by an ordinary `string` field read through a heap-deref'd ref.
+# Triggered by a `distinct int` field read through a heap-deref'd ref (an
+# ordinary `string` field until RFC-0005 S8ap modelled it).
 # =============================================================================
 
 proc heapStrFieldRead(p: HeapStrNode) =
   if p != nil:
-    if p.s == "hello":
+    if int(p.s) == 7:
       symexTarget("heap_str_field_read")
 
 proc heapGoodIntFieldRead(p: HeapStrNode) =
@@ -104,7 +109,7 @@ proc heapGoodIntFieldUnsat(p: HeapStrNode) =
     if p.n == 1 and p.n == 2:
       symexTarget("heap_good_int_read_unsat")
 
-## THE CORE PROOF: hazard branch (string-field deref) evaluated FIRST in
+## THE CORE PROOF: hazard branch (distinct-field deref) evaluated FIRST in
 ## program order; the winning target sits on the OTHER, hazard-free branch.
 ## Correct verdict is unambiguously sxSat (the `else` branch is an
 ## unconditional, unguarded target hit). Pre-fix: the raw raise on the

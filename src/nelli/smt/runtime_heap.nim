@@ -214,18 +214,118 @@ proc pcImpliesNonNil(ctx: Z3Context, pc: seq[Z3Bool],
 # read its value sort (the G4 `baseRep` sort-probe idiom). Moved here from
 # runtime.nim in CR-7-deeper Stage 8+ (only called from runtime_heap.nim).
 
-proc heapValueSort(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
+# ---- RFC-0005 S8ap: compound-sort heap cells ---------------------------------
+# A heap array's value is one Z3 sort, and a seq / Table / HashSet value is
+# not one term: it is a seq's data array and length, a table's data array,
+# presence array and size, a set's member array and size (`allocateSym`'s
+# `itSeq`/`itTable`/`itSet` arms). Before S8ap a field (or bare pointee) of
+# such a type had no heap at all: `heapValueSort`'s `rawAnyAstOf` declined
+# (`seUnsupportedCompoundSortLeaf`) and `liftHeapValue` havocked the read
+# (`heUnsupportedPointeeRead`). It is now held LEAF-SPLIT: one heap array per
+# leaf, all indexed by the same `Ref_T` address, under the field's key plus a
+# per-leaf suffix (`heapLeafSuffixes`; leaf 0 keeps the key itself, so
+# `heapKeyShapes[key]` still names the field's whole type). Each leaf array is
+# an ordinary heap entry, so everything the scalar heap does per key --
+# per-path copies (`forkPath`), the `ite` joins of a branch and a return
+# merge, `heapMetaExtends`' key comparison -- applies leaf by leaf with no
+# change. Aliasing is the scalar heap's: two equal addresses select the same
+# cell of every leaf. A `string` is one Z3 term and keeps a single heap; it
+# was already writable, and `liftHeapValue` lifts it now.
+#
+# Well-formedness. A free INPUT cell must be a value Nim can hold: a length or
+# size in `[0, 1024]` (the bound every free seq/table/set gets, `allocateSym`),
+# a string of bytes (ADR-0006), a table's and a set's size at least the
+# number of distinct keys present (`ContainerCardRegistry`, whose extractors
+# render exactly that content). `heapCellWfConds` asserts these of the input
+# cell `select(heap_<leaf>, p)` at every read of a compound or string cell
+# (`isDeref`, an arm-field read, a discriminator write's same-branch carry):
+# the input heap holds the program's inputs, so a fact about every input cell
+# is a fact of the program, for ANY address -- including one a write on this
+# path has since overwritten, where the fact is merely unused. A written value
+# needs none: the program built it. A cell no path reads is unconstrained,
+# and cannot affect the path; the witness renderer (`renderHeapCompound`)
+# renders such a cell as any well-formed value.
+
+proc heapCompoundTy(ty: IRType): bool =
+  ## RFC-0005 S8ap. A heap value held leaf-split: a seq whose elements
+  ## `allocateSeqDataRaw` backs, a `Table[string, V]` and a `HashSet[T]`
+  ## `allocateSym` backs. A placeholder seq (an unbacked element type) is not
+  ## -- its value is inert by construction and keeps the pre-S8ap decline.
+  if ty == nil: return false
+  case ty.kind
+  of itSeq:
+    ty.seqUnsupportedFieldReason.len == 0 and isBackedSeqElemTy(ty.seqElemTy)
+  of itTable:
+    ty.tabKeyTy.kind == itString and isBackedTableTy(ty.tabKeyTy, ty.tabValTy)
+  of itSet: isBackedSetElemTy(ty.setElemTy)
+  else: false
+
+proc heapWfTy(ty: IRType): bool =
+  ## RFC-0005 S8ap. A heap value whose input cells carry a well-formedness
+  ## fact (`heapCellWfConds`): the compound kinds and `string`.
+  heapCompoundTy(ty) or (ty != nil and ty.kind == itString)
+
+proc heapLeafSuffixes(ty: IRType): seq[string] =
+  ## RFC-0005 S8ap. The key suffix of each leaf heap of a value of type `ty`,
+  ## in `svLeafAsts` order. `@` cannot begin a Nim identifier, so no field
+  ## key collides with a leaf key (and `renderCell`'s field scan skips them:
+  ## a suffix holding `__` is never a field).
+  if heapCompoundTy(ty):
+    case ty.kind
+    of itSeq:   @["", "__@len"]
+    of itTable: @["", "__@present", "__@len"]
+    else:       @["", "__@len"]                 ## itSet
+  else: @[""]
+
+proc svLeafAsts(sv: SymVal): seq[RawZ3Ast] =
+  ## RFC-0005 S8ap. The leaf terms of a compound value, in
+  ## `heapLeafSuffixes` order. Precondition: `sv.kind` is the compound kind.
+  case sv.kind
+  of svSeq:   @[sv.seqDataRaw.raw, sv.seqLen.raw] # [placeholder-audited]
+  of svTable: @[sv.tabDataRaw.raw, sv.tabPresentRaw.raw, sv.tabSize.raw]
+  of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
+  else:       @[rawAnyAstOf(sv)]
+
+proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst]): SymVal =
+  ## RFC-0005 S8ap. `proto` (a value of the cell's type) with its leaf terms
+  ## replaced by `leaves`. The inverse of `svLeafAsts`. The leaves are
+  ## OWNING handles: a raw term Z3 has not been asked to keep is only valid
+  ## until the next API call, so no caller holds raw leaves across calls.
+  result = proto
+  case proto.kind
+  of svSeq:
+    result.seqDataRaw = leaves[0] # [placeholder-audited]
+    result.seqLen = wrap[Z3Int](ctx, leaves[1].raw) # [placeholder-audited]
+  of svTable:
+    result.tabDataRaw = leaves[0]
+    result.tabPresentRaw = leaves[1]
+    result.tabSize = wrap[Z3Int](ctx, leaves[2].raw)
+  of svSet:
+    result.setMembersRaw = leaves[0]
+    result.setSize = wrap[Z3Int](ctx, leaves[1].raw)
+  else: discard
+
+proc heapValueSort(ctx: Z3Context, proto: SymVal, pointeeTy: IRType,
+                   leaf = 0): RawZ3Sort =
   ## Phase 15 R1. The Z3 value sort of the heap array `Z3Array[Ref_T, T_sym]`
   ## for pointee type `pointeeTy` — i.e. the sort of the SymVal a deref yields.
   ## A throwaway prototype is allocated (its init constraints are discarded —
   ## only the sort is read), mirroring G4's `baseRep` sort probe.
-  var scratchPC: seq[Z3Bool]
-  let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC)
+  ## RFC-0005 S8ap: for a compound pointee, the sort of leaf `leaf`
+  ## (`heapLeafSuffixes`). The prototype is now the CALLER's
+  ## (`mkHeapArrayVar`), which keeps it alive until the array sort is built:
+  ## the returned sort is a borrowed handle, and the sort of a table's or a
+  ## set's leaf array is referenced by nothing else, so destroying the
+  ## prototype here freed it before `Z3_mk_array_sort` read it (Z3: "invalid
+  ## array sort definition, parameter is not a sort"). A scalar's sort is
+  ## interned and never showed this.
+  if heapCompoundTy(pointeeTy):
+    return ctx.checkErr Z3_get_sort(ctx.raw, svLeafAsts(proto)[leaf])
   ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
 
 proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
                     pointeeTy: IRType, name: string,
-                    variantTy: IRType = nil): Z3AnyAst =
+                    variantTy: IRType = nil, leaf = 0): Z3AnyAst =
   ## Phase 15 R1 (ADR-0010). Build a FREE `Z3Array[Ref_T, T_sym]` variable —
   ## the initial heap for one pointee type on one path. The key sort `Ref_T`
   ## is a RUNTIME uninterpreted sort, so the typed `mkArrayVar[K, V]` (which
@@ -240,11 +340,17 @@ proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
   ## `heapKeyShapes` under the key (`name` less its `heap_` prefix), for
   ## `buildHeapSnapshot`, which renders the witness from the input constant
   ## this builds.
+  ##
+  ## RFC-0005 S8ap: `leaf` selects one leaf heap of a compound value
+  ## (`heapLeafSuffixes`); only leaf 0, whose key is the field's own, records
+  ## a shape.
   let key = if name.startsWith("heap_"): name["heap_".len .. ^1] else: name
-  if not heapKeyShapes.hasKey(key) or
-     (variantTy != nil and heapKeyShapes[key].variantTy == nil):
+  if leaf == 0 and (not heapKeyShapes.hasKey(key) or
+     (variantTy != nil and heapKeyShapes[key].variantTy == nil)):
     heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
-  let valSort = heapValueSort(ctx, pointeeTy)
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(pointeeTy, "__heapValSort", scratchPC)
+  let valSort = heapValueSort(ctx, proto, pointeeTy, leaf)
   let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, valSort)
   let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
   wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
@@ -266,6 +372,13 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
       raise newException(ValueError,  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
         "liftHeapValue: unsupported int width " & $pointeeTy.width)
   of itBool:   ofBool(wrap[Z3Bool](ctx, valRaw))
+  of itString:
+    # RFC-0005 S8ap. A `string` field is one Z3 string term: its heap was
+    # already written (`p.name = "ab"` stored it), and a read is the select
+    # itself. Before S8ap the read fell to the `else` arm below and was
+    # havocked (`heUnsupportedPointeeRead`). The input cell's byte-range fact
+    # is asserted by the read site (`heapCellWfConds`).
+    SymVal(kind: svString, str: wrap[Z3String](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
   of itUninterp:
@@ -353,6 +466,130 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
   let valRaw = checkedSelect(ctx, heap.raw, refAst.raw)
   liftHeapValue(ctx, valRaw, pointeeTy)
+
+type HeapCell = seq[tuple[key: string; arr: Z3AnyAst]]
+  ## RFC-0005 S8ap. The leaf heaps of one cell's value: one entry for a
+  ## scalar, one per `heapLeafSuffixes` entry for a compound value.
+
+proc heapCellArrays(ctx: Z3Context; p: Path; key: string; refSort: RawZ3Sort;
+                    valTy: IRType; variantTy: IRType = nil): HeapCell =
+  ## RFC-0005 S8ap. The heaps of `key` on path `p` -- each leaf's current
+  ## array, or its free input constant `heap_<leafKey>` when the path has
+  ## not touched it yet. Reads `p`, never writes it: the caller stores the
+  ## arrays on the path it continues with.
+  for i, suffix in heapLeafSuffixes(valTy):
+    let k = key & suffix
+    if p.heaps.hasKey(k):
+      result.add (k, p.heaps[k])
+    else:
+      result.add (k, mkHeapArrayVar(ctx, refSort, valTy, "heap_" & k,
+                                    (if i == 0: variantTy else: nil), i))
+
+proc heapCellSelect(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
+                    valTy: IRType): SymVal =
+  ## RFC-0005 S8ap. The value at `refAst`: `heapSelect` for a scalar; for a
+  ## compound value, a prototype of `valTy` whose leaves are the selects of
+  ## each leaf heap (the prototype's own constants, and its init facts, are
+  ## discarded -- only its kind and element types are kept).
+  if not heapCompoundTy(valTy):
+    return heapSelect(ctx, cell[0].arr, refAst, valTy)
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(valTy, "__heapCellProto", scratchPC)
+  var leaves: seq[Z3AnyAst]
+  for c in cell:
+    leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, c.arr.raw, refAst.raw))
+  svWithLeaves(ctx, proto, leaves)
+
+proc heapCellWfConds(ctx: Z3Context; key: string; refSort: RawZ3Sort;
+                     valTy: IRType; refAst: Z3AnyAst): seq[Z3Bool] =
+  ## RFC-0005 S8ap. The well-formedness of the INPUT cell at `refAst` (see
+  ## the section comment above): the facts `allocateSym` gives a free value
+  ## of `valTy`, stated of `select(heap_<leaf>, refAst)` for every leaf. A
+  ## table's and a set's cell is also registered with the
+  ## `ContainerCardRegistry`, which ties its size to the keys present at
+  ## every check and is what `extractTableEntries`/`extractSetMembers`
+  ## render. Empty for any other type (a scalar's range facts are the read
+  ## site's `rangeCondsIfNeeded`, unchanged).
+  if not heapWfTy(valTy): return @[]
+  var input: HeapCell
+  for i, suffix in heapLeafSuffixes(valTy):
+    input.add (key & suffix,
+               mkHeapArrayVar(ctx, refSort, valTy, "heap_" & key & suffix, nil, i))
+  let sv = heapCellSelect(ctx, input, refAst, valTy)
+  case sv.kind
+  of svString:
+    @[matches(sv.str, star(range(mkString("\x00"), mkString("\xff"))))]
+  of svSeq:
+    @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
+  of svTable:
+    registerTableBase(sv.tabPresentRaw, sv.tabSize)
+    @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
+  of svSet:
+    registerSetBase(sv.setMembersRaw, sv.setSize, valTy.setElemTy)
+    @[sv.setSize >= mkInt(0),
+      sv.setSize <= mkInt(min(1024'i64, cellDomainSize(valTy.setElemTy)))]
+  else: @[]
+
+proc heapCellStore(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
+                   valSV: SymVal; valTy: IRType): HeapCell =
+  ## RFC-0005 S8ap. `cell` with `valSV` stored at `refAst`, leaf by leaf. A
+  ## scalar keeps the pre-S8ap single store (`rawAnyAstOf`, whose own decline
+  ## is unchanged). A compound value whose kind does not match `valTy` (a
+  ## value some upstream degrade produced: a placeholder seq, a `seq[byte]`
+  ## held as a string) has no leaves to store: it is recorded as
+  ## `seUnsupportedCompoundSortLeaf` through `allocDegrade` (drained onto the
+  ## path by the caller, as the scalar store's decline is) and each leaf
+  ## stores a fresh term of its sort.
+  if not heapCompoundTy(valTy):
+    return @[(cell[0].key, wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, cell[0].arr.raw, refAst.raw, rawAnyAstOf(valSV))))]
+  let want = case valTy.kind
+    of itSeq: svSeq
+    of itTable: svTable
+    else: svSet
+  let fits = valSV.kind == want and
+    not (valSV.kind == svSeq and valSV.isUnsupportedFieldPlaceholder) # [placeholder-audited]
+  var leaves: seq[Z3AnyAst]
+  if fits:
+    for raw in svLeafAsts(valSV): leaves.add wrap[Z3AnyAst](ctx, raw)
+  else:
+    allocDegrade(seUnsupportedCompoundSortLeaf,
+      "heap store of a " & plainEnglishSymValKind(valSV.kind) & " into a `" &
+      $valTy & "` cell: the value has no leaves of that type " &
+      "(seUnsupportedCompoundSortLeaf)")
+    for c in cell:
+      let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, c.arr.raw)
+      leaves.add wrap[Z3AnyAst](ctx, freshOfSort(ctx,
+        ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort)))
+  for i, c in cell:
+    result.add (c.key, wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, c.arr.raw, refAst.raw, leaves[i].raw)))
+
+proc heapCellIte(ctx: Z3Context; cond: Z3Bool; t, e: SymVal;
+                 ty: IRType): SymVal =
+  ## RFC-0005 S8ap. `if cond: t else: e` for two values of a cell of type
+  ## `ty`. `iteSV` havocs a seq / Table / HashSet / string merge
+  ## (`feUnsupportedOpHavoc`: its operands are not one term); two cells of
+  ## one heap type have the same leaf sorts, so the merge is an `ite` per
+  ## leaf. Used where a heap read selects among several arms' cells (an arm
+  ## field shared by several tags, a discriminator write's carry).
+  if t.kind == svString and e.kind == svString:
+    return SymVal(kind: svString, str: wrap[Z3String](ctx,
+      checkedIte(ctx, cond.raw, t.str.raw, e.str.raw)))
+  if not heapCompoundTy(ty) or t.kind != e.kind:
+    return iteSV(cond, t, e)
+  let tl = svLeafAsts(t)
+  let el = svLeafAsts(e)
+  var leaves: seq[Z3AnyAst]
+  for i in 0 ..< tl.len:
+    leaves.add wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw, tl[i], el[i]))
+  svWithLeaves(ctx, t, leaves)
+
+proc heapCellZero(ty: IRType): SymVal =
+  ## RFC-0005 S8ap. Nim's zero of a compound cell (`new`, an object
+  ## constructor's omitted field): the empty seq / Table / HashSet,
+  ## `defaultZero`'s constant.
+  defaultZero(ty, "__heapCellZero")
 
 proc fieldHeapKey*(objTy: IRType, field: string): string =
   ## Phase 15 R6 (ADR-0010). The field-split heap key for `(objTy, field)`. An
@@ -789,17 +1026,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # `select` the field value, and bind an ite-chain over the matching arms.
           var armHeaps: seq[(string, Z3AnyAst)]
           var armSelects: seq[(int, SymVal)]
+          # RFC-0005 S8ap: a compound arm field is a leaf-split cell
+          # (`heapCellArrays`), its input cell well-formed (`heapCellWfConds`).
+          var armWf: seq[Z3Bool]
           for hit in armHits:
             let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dField
-            var armHeap: Z3AnyAst
-            if cpA.heaps.hasKey(armHeapKey):
-              armHeap = cpA.heaps[armHeapKey]
-            else:
-              let refSort = allocRefSort(ctx, objTy)
-              armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
-                                       "heap_" & armHeapKey, objTy)
-            armHeaps.add (armHeapKey, armHeap)
-            armSelects.add (hit.tagOrd, heapSelect(ctx, armHeap, refAst, hit.fieldTy))
+            let refSort = allocRefSort(ctx, objTy)
+            let armCell = heapCellArrays(ctx, cpA, armHeapKey, refSort,
+                                         hit.fieldTy, objTy)
+            for c in armCell: armHeaps.add (c.key, c.arr)
+            armSelects.add (hit.tagOrd, heapCellSelect(ctx, armCell, refAst, hit.fieldTy))
+            armWf.add heapCellWfConds(ctx, armHeapKey, refSort, hit.fieldTy, refAst)
           # Issue #163 review R3 (Part A). A ranged arm-specific field never
           # passed through `allocateSym`'s `itInt` arm either (the per-(arm,
           # field) heap array above is materialised lazily, right here, on
@@ -814,6 +1051,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Review R11: routed through `rangeCondsIfNeeded`.
           for idx, hit in armHits:
             childPc = childPc & rangeCondsIfNeeded(armSelects[idx][1], hit.fieldTy)
+          childPc = childPc & armWf
           # N42: second drain — covers a degrade from any arm-field heap just
           # materialised above (each iteration can independently degrade via
           # `allocateSym`; `loweringDidDegrade` is idempotent to drain once
@@ -823,7 +1061,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # lands on this path too, not on whichever path lowers next.
           var bound = armSelects[armSelects.len - 1][1]
           for k in countdown(armSelects.len - 2, 0):
-            bound = iteSV(discEq(int64(armSelects[k][0])), armSelects[k][1], bound)
+            bound = heapCellIte(ctx, discEq(int64(armSelects[k][0])),
+                                armSelects[k][1], bound, stmt.dElemTy)
           let cpB = drainPendingLowerEffects(cpA)
           var newEnv = cpB.env
           newEnv[stmt.dRetName] = bound
@@ -939,17 +1178,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var newEnv = cp0.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
-        var heap: Z3AnyAst
-        if cp0.heaps.hasKey(heapKey):
-          heap = cp0.heaps[heapKey]
-        else:
-          let refSort = allocRefSort(ctx, sortTy)
-          heap = mkHeapArrayVar(ctx, refSort, stmt.dElemTy,
-                                "heap_" & heapKey,
-                                (if isDiscDeref: stmt.dObjTy else: nil))
+        # RFC-0005 S8ap: a compound field / pointee is a leaf-split cell
+        # (`heapCellArrays`: one array per leaf, a scalar's single array
+        # unchanged).
+        let refSort = allocRefSort(ctx, sortTy)
+        let cell = heapCellArrays(ctx, cp0, heapKey, refSort, stmt.dElemTy,
+                                  (if isDiscDeref: stmt.dObjTy else: nil))
         let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
         newEnv = cp.env
-        let valSV = heapSelect(ctx, heap, refAst, stmt.dElemTy)
+        let valSV = heapCellSelect(ctx, cell, refAst, stmt.dElemTy)
         # N46-followup (walker v113): a SECOND drain, immediately after the
         # select — `liftHeapValue` (called from inside `heapSelect`) can now
         # degrade in-band (its own `else` arm, converted this slice) for a
@@ -985,11 +1222,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Review R11: routed through `rangeCondsIfNeeded` (defined in
         # runtime.nim, beside `bvRangeConds`; this file is `include`d there).
         childPc = childPc & rangeCondsIfNeeded(valSV, stmt.dElemTy)
+        # RFC-0005 S8ap: the input cell of a compound / string value is one
+        # Nim can hold (see `heapCellWfConds`).
+        childPc = childPc & heapCellWfConds(ctx, heapKey, refSort, stmt.dElemTy,
+                                            refAst)
         # Carry the (possibly freshly-materialised) heap forward on the surviving
         # path so a SECOND deref of the SAME ref reads the SAME array (a genuine
         # functional read — `p[] == 42 and p[] == 43` is unsat).
         var child = forkPath(cp2, childPc, newEnv)
-        child.heaps[heapKey] = heap
+        for c in cell: child.heaps[c.key] = c.arr
         survivors.add child
     survivors
   of isNew:
@@ -1074,6 +1315,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for slot in zeroSlots:
           let fname = slot.fname
           let fty = slot.ty
+          if heapCompoundTy(fty):
+            # RFC-0005 S8ap. A seq / Table / HashSet field is a leaf-split
+            # cell; Nim zeroes it to the empty container (`defaultZero`), stored
+            # into every leaf. It was the `heNewFieldZeroUnsupported` taint
+            # below (`zeroIRExprForType` has no IR zero for a container), so
+            # every `RNode(...)` with such a field ran on a tainted path.
+            let cell = heapCellArrays(ctx, child, slot.key, refSort, fty,
+                                      slot.variantTy)
+            for c in heapCellStore(ctx, cell, newRef, heapCellZero(fty), fty):
+              child.heaps[c.key] = c.arr
+            continue
           let zeroExpr = zeroIRExprForType(fty)
           if zeroExpr == nil:
             # SND-1: no clean zero encoding for this field's type this cycle
@@ -1122,8 +1374,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # key `isDeref`/`isDerefWrite` use for a non-field access) at a fresh
         # address: a free value, and `p[] != 0` a false `sxSat`. Same store
         # as the field loop above, into the whole-pointee heap.
+        # RFC-0005 S8ap: a compound pointee (`new seq[int]`) likewise, leaf
+        # by leaf.
         let zeroExpr = zeroIRExprForType(pointee)
-        if zeroExpr == nil:
+        if heapCompoundTy(pointee):
+          let cell = heapCellArrays(ctx, child, typeId, refSort, pointee)
+          for c in heapCellStore(ctx, cell, newRef, heapCellZero(pointee), pointee):
+            child.heaps[c.key] = c.arr
+        elif zeroExpr == nil:
           # SND-1 twin of the field loop's decline: no clean zero encoding
           # for this pointee type -- the cell stays fresh, on a tainted path.
           taintInPlace(child, w.degrade(heNewFieldZeroUnsupported,
@@ -1372,17 +1630,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
               else: discard
             # Store RHS into each matching arm's field heap.
+            # RFC-0005 S8ap: a compound arm field stores every leaf.
             for hit in armHitsW:
               let armHeapKey = baseId & "__@" & $hit.tagOrd & "__" & stmt.dwField
-              var armHeap: Z3AnyAst
-              if cpInArmRanged.heaps.hasKey(armHeapKey):
-                armHeap = cpInArmRanged.heaps[armHeapKey]
-              else:
-                let refSort = allocRefSort(ctx, objTy)
-                armHeap = mkHeapArrayVar(ctx, refSort, hit.fieldTy,
-                                         "heap_" & armHeapKey, objTy)
-              let storedRaw = checkedStore(ctx, armHeap.raw, refAst.raw, rawAnyAstOf(valSV))
-              cpInArmRanged.heaps[armHeapKey] = wrap[Z3AnyAst](ctx, storedRaw)
+              let armCell = heapCellArrays(ctx, cpInArmRanged, armHeapKey,
+                                           allocRefSort(ctx, objTy), hit.fieldTy,
+                                           objTy)
+              for c in heapCellStore(ctx, armCell, refAst, valSV, hit.fieldTy):
+                cpInArmRanged.heaps[c.key] = c.arr
             # N42 audit (round-6 fix round 7): unlike the plain-field write path
             # (below, in this same proc) and the disc-heap materialisation
             # above, THIS loop's `mkHeapArrayVar` calls happen AFTER the RHS's
@@ -1444,13 +1699,11 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # first use, exactly as `isDeref` does, so a write before any read still
         # has an array to store into and a later read of the same ref/field reads
         # this stored array. Ref SORT keys on the OBJECT; value sort on the field.
-        var heap: Z3AnyAst
-        if cp.heaps.hasKey(heapKey):
-          heap = cp.heaps[heapKey]
-        else:
-          let refSort = allocRefSort(ctx, sortTy)
-          heap = mkHeapArrayVar(ctx, refSort, stmt.dwElemTy, "heap_" & heapKey,
-                                (if isDiscWrite: stmt.dwObjTy else: nil))
+        # RFC-0005 S8ap: a compound field / pointee is a leaf-split cell.
+        let cell = heapCellArrays(ctx, cp, heapKey, allocRefSort(ctx, sortTy),
+                                  stmt.dwElemTy,
+                                  (if isDiscWrite: stmt.dwObjTy else: nil))
+        let heap = cell[0].arr
         # Lower the RHS with a pointee-typed prototype so an int literal coerces to
         # the matching BV width / sort the heap array expects (the seq/table store
         # idiom). The raw value-sorted ast feeds `Z3_mk_store` directly.
@@ -1529,28 +1782,31 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               let arm0 = objTy.vArms[armIx]
               for j, fname in arm0.fieldNames:
                 let fty = arm0.fieldTypes[j]
-                var keys: seq[string]
-                var arrs: seq[Z3AnyAst]
+                # RFC-0005 S8ap: per-tag leaf-split cells; the carried
+                # value is read from the INPUT-or-current cells, so the
+                # input cells' well-formedness is asserted with it.
+                var cells: seq[HeapCell]
+                var wf: seq[Z3Bool]
+                let refSortC = allocRefSort(ctx, objTy)
                 for t in g:
                   let k = baseId & "__@" & $t & "__" & fname
-                  keys.add k
-                  if cpS.heaps.hasKey(k):
-                    arrs.add cpS.heaps[k]
-                  else:
-                    arrs.add mkHeapArrayVar(ctx, allocRefSort(ctx, objTy), fty,
-                                            "heap_" & k, objTy)
-                var carried = heapSelect(ctx, arrs[^1], refAst, fty)
+                  cells.add heapCellArrays(ctx, cpS, k, refSortC, fty, objTy)
+                  wf.add heapCellWfConds(ctx, k, refSortC, fty, refAst)
+                var carried = heapCellSelect(ctx, cells[^1], refAst, fty)
                 for k in countdown(g.len - 2, 0):
-                  carried = iteSV(variantDiscEq(oldDisc, int64(g[k])),
-                                  heapSelect(ctx, arrs[k], refAst, fty), carried)
+                  carried = heapCellIte(ctx, variantDiscEq(oldDisc, int64(g[k])),
+                                        heapCellSelect(ctx, cells[k], refAst, fty),
+                                        carried, fty)
                 for k in 0 ..< g.len:
-                  cpS.heaps[keys[k]] = wrap[Z3AnyAst](ctx, checkedStore(ctx, arrs[k].raw, refAst.raw, rawAnyAstOf(carried)))
-          let storedRaw = checkedStore(ctx, heap.raw, refAst.raw, rawAnyAstOf(valSV))
-          let storedHeap = wrap[Z3AnyAst](ctx, storedRaw)
+                  for c in heapCellStore(ctx, cells[k], refAst, carried, fty):
+                    cpS.heaps[c.key] = c.arr
+                for c in wf: cpS.pc.add c
+          let stored = heapCellStore(ctx, cell, refAst, valSV, stmt.dwElemTy)
           # REPLACE the per-path heap binding with the stored array on the surviving
           # path (PER-PATH — an unforked branch never sees this update).
+          # RFC-0005 S8ap: every leaf of a compound cell.
           var child = forkPath(cpS, cpS.pc, cpS.env)
-          child.heaps[heapKey] = storedHeap
+          for c in stored: child.heaps[c.key] = c.arr
           # RFC-0005 S1c (S1b's measured leak, `tsymex_r6_n40_alloc_totality`
           # N40-4). `rawAnyAstOf(valSV)` in the store above runs AFTER
           # `lowerInExpr`'s drain, and for a value with no single-leaf Z3 sort

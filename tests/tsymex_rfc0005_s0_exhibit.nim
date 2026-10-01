@@ -16,7 +16,8 @@
 ## ----------------------------------------------------------------------------
 ## Pin 1 -- UNSAT exhibit (RFC-0005 S0, DoD item 1; FLIPPED to sxUnsat at S4)
 ## ----------------------------------------------------------------------------
-## `s0DeadFreshSymbol` reads `p.s` -- a `string` FIELD through a heap-deref'd
+## `s0DeadFreshSymbol` reads `p.s` -- a `distinct int` FIELD (a `string` one
+## until RFC-0005 S8ap modelled string fields) through a heap-deref'd
 ## `ref` -- which `liftHeapValue`'s unsupported-pointee-kind `else` arm
 ## (`runtime_heap.nim` ~294-300) does not yet model (Cluster R1 covers only
 ## PRIMITIVE pointees; a `string`/composite pointee lands here). That site
@@ -67,8 +68,13 @@ import nelli/smt/types
 import nelli/symex
 
 type
+  S0Dist = distinct int
   S0DeadNode = ref object
-    s: string
+    ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
+    ## (a string field is read and written through its heap); a `distinct`
+    ## field is still a pointee kind `liftHeapValue` havocs, so it keeps
+    ## this pin on the same `heUnsupportedPointeeRead` fresh-symbol site.
+    s: S0Dist
 
 proc s0DeadFreshSymbol(p: S0DeadNode, n: int) =
   if p != nil:

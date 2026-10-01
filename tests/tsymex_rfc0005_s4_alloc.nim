@@ -61,8 +61,14 @@ proc sevErrorKinds(errs: seq[SymexErrorInfo]): seq[SymexErrorKind] =
 # ---- SUTs (module scope so the macro resolves them via getImpl) -------------
 
 type
+  S4Str = distinct string
   S4Node = ref object
-    s: string
+    ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
+    ## (a string field read is the heap select itself). A `distinct string`
+    ## is still a pointee kind `liftHeapValue` havocs, so this suite stays
+    ## on the `heUnsupportedPointeeRead` fresh-symbol site with the same
+    ## string-valued reasoning (the reads convert with `string(...)`).
+    s: S4Str
 
   S4KindA = enum s4KindA1, s4KindA2
   S4KindB = enum s4KindB1, s4KindB2
@@ -92,20 +98,20 @@ proc s4DeadFreshSymbol(p: S4Node, n: int) =
 ## precision, never soundness.
 proc s4DeadThroughValue(p: S4Node) =
   if p != nil:
-    let v = p.s
+    let v = string(p.s)
     if v == "abc" and v == "xyz":
       symexTarget("s4_dead_through_value")
 
 ## The two-read spelling of the same contradiction: a spurious candidate.
 proc s4TwoReadsSpurious(p: S4Node) =
   if p != nil:
-    if p.s == "abc" and p.s == "xyz":
+    if string(p.s) == "abc" and string(p.s) == "xyz":
       symexTarget("s4_two_reads_spurious")
 
 ## Reachable ONLY through the degraded read: a candidate, never a clean win.
 proc s4LiveThroughValue(p: S4Node) =
   if p != nil:
-    if p.s == "hello":
+    if string(p.s) == "hello":
       symexTarget("s4_live_through_value")
 
 ## §2.1's introduction invariant: two DIFFERENT cells are independent in
@@ -113,7 +119,7 @@ proc s4LiveThroughValue(p: S4Node) =
 ## two reads one Z3 constant and proved this unreachable (false sxUnsat).
 proc s4TwoCells(a, b: S4Node) =
   if a != nil and b != nil:
-    if a.s != b.s:
+    if string(a.s) != string(b.s):
       symexTarget("s4_two_cells")
 
 ## Same invariant, repeat hits of the site across loop iterations.
@@ -122,7 +128,7 @@ proc s4TwoCellsLoop(a, b: S4Node) =
     var first = ""
     var differ = false
     for i in 0 .. 1:
-      let cur = if i == 0: a.s else: b.s
+      let cur = if i == 0: string(a.s) else: string(b.s)
       if i == 0: first = cur
       elif cur != first: differ = true
     if differ:
@@ -153,9 +159,9 @@ suite "RFC-0005 S4 -- oracles":
       check not (s == "abc" and s == "xyz")
 
   test "oracle: two distinct cells CAN hold different strings (the two-cells target is reachable)":
-    let a = S4Node(s: "x")
-    let b = S4Node(s: "y")
-    check a.s != b.s
+    let a = S4Node(s: S4Str("x"))
+    let b = S4Node(s: S4Str("y"))
+    check string(a.s) != string(b.s)
 
 # =============================================================================
 # (a) the classification rows S4 wrote (types.nim `classOf`, rows marked S4)
@@ -256,13 +262,16 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
     check "__liftHeapValueUnsupported\", freshLiftPc" notin readFile(heapSrc)
 
   test "IR level: the tainted path carries exactly {scSpurious}; unreachable is sxUnsat":
-    let pRef = tRef(tString())
+    # RFC-0005 S8ap: a `ref string` pointee is modelled now (the read is the
+    # heap select); a `ref` to a distinct string still havocs here.
+    let dTy = tDistinct("S4IrStr", tString())
+    let pRef = tRef(dTy)
     let params = @[IRParam(name: "p", ty: pRef)]
     # Guarded `p != nil` so `nilDerefFork` short-circuits (a NilAccessDefect
     # sxRaised would otherwise win the label target's precedence).
     let body = mkBlock(@[mkIf(@[mkBranch(
       mkBinop(bNe, mkVar("p"), mkNil(pRef)),
-      mkBlock(@[mkDeref("v", mkVar("p"), tString()), mkTargetLabel("hit")]))])])
+      mkBlock(@[mkDeref("v", mkVar("p"), dTy), mkTargetLabel("hit")]))])])
     let prog = SymexProgram(params: params, body: body)
     let hit = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     checkpoint($kindNames(hit.errors))

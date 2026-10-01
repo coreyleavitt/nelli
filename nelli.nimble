@@ -1020,5 +1020,12 @@ task test, "Run the test suite":
             # (a cell for the call; `let p = addr x`); module-level globals
             # threaded through calls; overloads and same-named nested
             # routines keyed apart; walker 182->183.
-            "tsymex_rfc0005_s8an_remainder"]:
+            "tsymex_rfc0005_s8an_remainder",
+            # RFC-0005 S8ap -- S8ao's remainder: a seq / Table / HashSet
+            # field of a ref object is a leaf-split heap cell and a string
+            # field is read too (aliasing, nil, witness); del / insert /
+            # incl / excl / []= / [i]= on a dotted field and `add` on a
+            # dotted string field take the field-write primitive; an
+            # itUninterp `var` declines with its own kind; walker 182->183.
+            "tsymex_rfc0005_s8ap_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

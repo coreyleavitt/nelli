@@ -232,6 +232,22 @@ const symexWalkerVersion* = "183"
   ## of one lvalue in the call and read back on every exit; `let p = addr
   ## x` whose uses are `p[]` and such arguments IS `x`; `p[] += v` is
   ## modelled. 182 -> 183.
+  ## RFC-0005 S8ap (2026-10-01) — S8ao's remainder. A seq / Table /
+  ## HashSet field (or bare pointee) of a `ref`/`ptr` object is held in the
+  ## logical heap LEAF-SPLIT (one array per leaf of the value -- a seq's data
+  ## and length, a table's data, presence and size, a set's members and
+  ## size -- all indexed by the object's `Ref_T` address; `heapCellArrays`/
+  ## `heapCellSelect`/`heapCellStore`, `runtime_heap.nim`), and a `string`
+  ## field is read as well as written. Each read asserts the INPUT cell's
+  ## well-formedness (`heapCellWfConds`), `new`/a constructor zero-writes
+  ## such a field, and the witness renders it from the input heap. Before:
+  ## `seUnsupportedCompoundSortLeaf` + `heUnsupportedPointeeRead` on any
+  ## access, `heNewFieldZeroUnsupported` on every constructor. `del`/
+  ## `insert`/`incl`/`excl`/`[]=` and `<field>[i] = v` on a dotted field,
+  ## and `add` on a dotted string field, take the bare-symbol arm's IR over
+  ## the field-write primitive (were N49 / "unsupported nnkAsgn shape").
+  ## An uninitialised `var` of an `itUninterp` placeholder declines with the
+  ## placeholder's own kind. 182 -> 183.
   ##
   ## (Prior: 182.)
   ## RFC-0005 S8ai (2026-10-01) — S8ae's remainder. `seqRangeFacts`' links

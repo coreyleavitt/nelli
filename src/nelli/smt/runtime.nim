@@ -1071,6 +1071,13 @@ proc variantDiscHeapKey(objTy: IRType): string
   ## `renderCell` names each axis's discriminator heap.
 proc mvAxisView(mv: IRType; axisIx: int): IRType
   ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
+proc heapCompoundTy(ty: IRType): bool
+  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
+  ## `renderCellField` renders a leaf-split compound cell.
+proc heapLeafSuffixes(ty: IRType): seq[string]
+  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
+proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst]): SymVal
+  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
@@ -8479,6 +8486,92 @@ proc renderHeapLeaf(m: Z3Model, w: var RawWitness, key, leafPath: string,
   clampWitnessField(w, leafPath, valTy)
   pointeeRendering(w, leafPath).get("<unobserved>")
 
+proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string] =
+  ## RFC-0005 S8ap. `evalStrBytes` for a string the model may leave outside
+  ## the byte range: a heap cell no path read is unconstrained (the byte
+  ## facts are asserted of the cells a path READS, `heapCellWfConds`), so its
+  ## model value may hold any codepoint. `none` for such a value; the caller
+  ## renders a well-formed stand-in, sound because no read observed it.
+  let ev = m.eval(a, modelCompletion = true)
+  let codepoints = getStringContents(ev)
+  var r = newString(codepoints.len)
+  for i, cp in codepoints:
+    if cp < 0 or cp > 255: return none(string)
+    r[i] = char(cp)
+  some(r)
+
+proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                        key, leafPath: string, addrAst: Z3AnyAst,
+                        valTy: IRType): string =
+  ## RFC-0005 S8ap. Write the INPUT value of the string or leaf-split
+  ## compound cell `key` at `addrAst` under `leafPath`, exactly as
+  ## `extractFromSymVal` writes a by-value param of the type (`strVals`,
+  ## `seqLens` + `.<i>` element leaves, `tabKeys`, `setMembers`); the
+  ## `pointsTo` fragment for it. A `seq[ref T]` element is the position
+  ## `<leafPath>[<i>]`, added as a ref field is (a nil one inline).
+  ##
+  ## A cell no path read is unconstrained in the model (the well-formedness
+  ## facts are the reads', `heapCellWfConds`), so a length outside `[0,
+  ## 1024]` renders empty and a non-byte string renders "" -- any
+  ## well-formed value is a correct rendering of a cell nothing observed.
+  let ctx = addrAst.ctx
+  if valTy.kind == itString:
+    let sv = heapSelect(ctx, inputHeap(key), addrAst, valTy)
+    if sv.kind != svString: return "<unsupported>"
+    let s = evalStrBytesOrEmpty(m, sv.str).get("")
+    w.strVals[leafPath] = s
+    return s.escape
+  var leaves: seq[Z3AnyAst]
+  for suffix in heapLeafSuffixes(valTy):
+    if not currentVariantHeaps.hasKey(key & suffix): return "<unobserved>"
+    leaves.add wrap[Z3AnyAst](ctx,
+      checkedSelect(ctx, inputHeap(key & suffix).raw, addrAst.raw))
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(valTy, "__heapRenderProto", scratchPC)
+  let sv = svWithLeaves(ctx, proto, leaves)
+  case sv.kind
+  of svSeq:
+    let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
+    let n = if raw >= 0 and raw <= 1024: int(raw) else: 0
+    w.seqLens[leafPath] = n
+    var parts: seq[string]
+    case sv.seqElemTy.kind
+    of itRef, itPtr:
+      let isPtr = sv.seqElemTy.kind == itPtr
+      let pointee = if isPtr: sv.seqElemTy.ptrPointeeTy
+                    else: sv.seqElemTy.refPointeeTy
+      for i in 0 ..< n:
+        let elem = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+          sv.seqDataRaw.raw, mkInt(i).raw)) # [placeholder-audited]
+        parts.add addPosition(b, m, RefPos(name: leafPath & "[" & $i & "]",
+                                           addrAst: elem, pointee: pointee),
+                              inlineNil = true)
+    of itString:
+      let typed = wrap[Z3Array[Z3Int, Z3String]](
+        sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
+      for i in 0 ..< n:
+        let e = evalStrBytesOrEmpty(m, select(typed, mkInt(i))).get("")
+        w.strVals[leafPath & "." & $i] = e
+        parts.add e.escape
+    else:
+      extractSeqElements(m, w, leafPath, sv, n)
+      for i in 0 ..< n:
+        parts.add pointeeRendering(w, leafPath & "." & $i).get("?")
+    "@[" & parts.join(", ") & "]"
+  of svTable:
+    extractTableEntries(m, w, leafPath, sv)
+    var parts: seq[string]
+    for k in w.tabKeys.getOrDefault(leafPath):
+      parts.add k.escape & ": " &
+                pointeeRendering(w, leafPath & "." & k).get("?")
+    "{" & parts.join(", ") & "}"
+  of svSet:
+    extractSetMembers(m, w, leafPath, sv)
+    var parts: seq[string]
+    for v in w.setMembers.getOrDefault(leafPath): parts.add $v
+    "{" & parts.join(", ") & "}"
+  else: "<unsupported>"
+
 proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                      cell: RefPos, key, fname: string, declTy: IRType): string =
   ## RFC-0005 S8h. One field of `cell`, from its input heap `key`.
@@ -8498,6 +8591,13 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     addPosition(b, m, RefPos(name: cell.name & "." & fname,
                              addrAst: childAddr, pointee: childPointee),
                 inlineNil = true)
+  of itString, itSeq, itTable, itSet:
+    # RFC-0005 S8ap: a string field, and a leaf-split compound field
+    # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`.
+    if valTy.kind == itString or heapCompoundTy(valTy):
+      renderHeapCompound(b, m, w, key, cell.name & "." & fname, cell.addrAst,
+                         valTy)
+    else: "<unsupported>"
   else:
     # A kind the logical heap does not model (`liftHeapValue` degrades a
     # read of it): no leaf, the typed witness keeps the zero value.
@@ -8513,6 +8613,11 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     let valTy = block:
       let t = heapKeyValTy(typeId)
       if t != nil: t else: cell.pointee
+    # RFC-0005 S8ap: a string or leaf-split compound pointee (`ref seq[int]`)
+    # too, written at `<cell>` itself.
+    if valTy.kind == itString or heapCompoundTy(valTy):
+      return some(renderHeapCompound(b, m, w, typeId, cell.name,
+                                     cell.addrAst, valTy))
     if valTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
       return none(string)
     return some(renderHeapLeaf(m, w, typeId, cell.name, cell.addrAst, valTy))
@@ -20180,6 +20285,18 @@ proc cellF64(c: RefWitness; path: string; v: var float64): bool =
 # Non-generic accessors: the generics below are instantiated in the caller's
 # module, so they never touch `RefWitness`'s private fields directly.
 proc cellNameOf(c: RefWitness; pos: string): string = c.cellOf.getOrDefault(pos, "")
+# RFC-0005 S8ap: a string and a leaf-split seq / Table / HashSet cell field
+# (`renderHeapCompound`), read under the same leaf names a by-value param
+# of the type uses.
+proc cellStr(c: RefWitness; path: string; v: var string): bool =
+  if c.w.strVals.hasKey(path): (v = c.w.strVals[path]; true) else: false
+proc cellSeqLen(c: RefWitness; path: string): int =
+  c.w.seqLens.getOrDefault(path, -1)
+proc cellTabKeys(c: RefWitness; path: string): seq[string] =
+  c.w.tabKeys.getOrDefault(path)
+proc cellHasTab(c: RefWitness; path: string): bool = c.w.tabKeys.hasKey(path)
+proc cellSetMembers(c: RefWitness; path: string): seq[int64] =
+  c.w.setMembers.getOrDefault(path)
 proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
 proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
 
@@ -20242,11 +20359,45 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   else:
     readCellField(c, cell, result[])
 
+proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
+  ## RFC-0005 S8ap. A seq cell field: `seqLens[path]` elements, each the leaf
+  ## `<path>.<i>`, a ref/ptr element the position `<path>[<i>]`. Absent (a
+  ## field no path materialised) keeps the empty seq.
+  let n = cellSeqLen(c, path)
+  if n < 0: return
+  f = newSeq[E](n)
+  for i in 0 ..< n:
+    when E is ref or E is ptr:
+      f[i] = resolveRef[E](c, refElemPos(path, i))
+    else:
+      readCellField(c, path & "." & $i, f[i])
+
+proc readCellTable[V](c: RefWitness; path: string; f: var Table[string, V]) =
+  ## RFC-0005 S8ap. A `Table[string, V]` cell field: the keys of
+  ## `tabKeys[path]`, each value the leaf `<path>.<key>` (`intVals`, a bool
+  ## value as 0/1 -- `extractTableEntries`'s layout).
+  if not cellHasTab(c, path): return
+  f = initTable[string, V]()
+  for k in cellTabKeys(c, path):
+    var v: V
+    var i: int64
+    if cellInt(c, path & "." & k, i):
+      when V is bool: v = i != 0
+      else: v = V(i)
+    f[k] = v
+
+proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
+  ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`.
+  f = initHashSet[E]()
+  for v in cellSetMembers(c, path): f.incl E(v)
+
 proc readCellField[F](c: RefWitness; path: string; f: var F) =
   ## RFC-0005 S8h. One field of a cell (or a scalar pointee). The kinds the
   ## logical heap models (`liftHeapValue`: int, bool, float, ref, ptr) read
   ## the snapshot's leaf; a leaf that is absent was never observed and keeps
-  ## `validDefault`. Every other kind keeps `validDefault` too: a read of it
+  ## `validDefault`. RFC-0005 S8ap: a string, seq, `Table[string, V]` and
+  ## `HashSet` field too (`renderHeapCompound`). Every other kind keeps
+  ## `validDefault` too: a read of it
   ## degrades the path (`heUnsupportedPointeeRead`), so no clean verdict
   ## rests on it, and `witnessFidelity` classifies such a pointee lossy.
   when F isnot ref and F isnot ptr:
@@ -20277,6 +20428,16 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
     var u: uint64
     if cellInt(c, path, i): f = F(i)
     elif cellUInt(c, path, u): f = F(int64(u))
+  elif F is string:
+    # RFC-0005 S8ap: a string field is read from the heap and rendered.
+    var x: string
+    if cellStr(c, path, x): f = x
+  elif F is seq:
+    readCellSeq(c, path, f)
+  elif F is Table:
+    when compiles(readCellTable(c, path, f)): readCellTable(c, path, f)
+  elif F is HashSet:
+    readCellSet(c, path, f)
   else:
     discard
 

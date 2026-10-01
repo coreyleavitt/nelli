@@ -198,6 +198,11 @@ type
     t: Table[string, int]   ## a VALID Table shape -- the gap is independent
                              ## of key/value-type support (N40 already covers
                              ## the unsupported-shape case).
+    tp: (int, int)          ## RFC-0005 S8ap: a `Table[string, int]` field
+                             ## is a leaf-split heap cell now (read and
+                             ## written through the heap), so N41-2/N41-3
+                             ## read this tuple field instead -- a pointee
+                             ## kind with no single-leaf sort still.
     n: int
 
 proc n41MkHeap(): ref N41Heap {.symexOpaque.} =
@@ -212,7 +217,7 @@ proc n41ClosureValidTableParamBlock(n: int) =
 proc n41HeapReadBlock() =
   let p = n41MkHeap()
   if p != nil:
-    discard p.t
+    discard p.tp
     symexTarget("n41_heap_read_block")
 
 suite "symex round-6 N41 -- compound-value sort derivation: classified decline, not a whole-run crash":
@@ -230,7 +235,7 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     check not sawFault
     check sawClassified
 
-  test "N41-2 RED->GREEN: a heap-deref READ of a VALID Table[string,int] field reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault) -- the family N40 flagged and masked":
+  test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault) -- the family N40 flagged and masked":
     let r = symexFind(n41HeapReadBlock, tLabel("n41_heap_read_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)

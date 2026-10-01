@@ -43,6 +43,15 @@
 ## tests were updated accordingly (walker floor raised to 181). `.del` and
 ## `.insert` through a dotted field are UNCHANGED (S8ao named `add` only) and
 ## still decline exactly as this file originally pinned.
+##
+## ---- Superseded further by RFC-0005 S8ap -----------------------------------
+## S8ap routed every remaining verb (`del`/`insert`/`incl`/`excl`/`[]=`, and
+## `add` on a string field) through the same field-path rebuild, with the
+## bare-symbol arm's own IR for each (`dottedFieldShape`/`dottedFieldMutate`,
+## `dsl_parser.nim`). `mutatePlainFieldDel` is now modelled (`sxSat`, the
+## target being reachable when `items` is non-empty); `mutatePlainFieldInsert`
+## still reports `sxUnknown`, but now through the bare `insert`'s own
+## lowering decline, not N49's (walker floor raised to 183).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -137,13 +146,19 @@ suite "N49 -- dotted-field lvalue mutation":
     let r = symexFind(mutateVariantArmField, tLabel("variant_added"))
     check r.status == sxSat
 
-  test "rider: plain object dotted-field seq .del() declines cleanly (no crash)":
+  test "rider: plain object dotted-field seq .del() is modeled (RFC-0005 S8ap)":
+    ## Pre-S8ap this declined cleanly (`sxUnknown`); S8ap routed `.del`
+    ## through the field path (see the module header).
     let r = symexFind(mutatePlainFieldDel, tLabel("plain_deleted"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    for e in r.errors: check "N49" notin e.msg
 
   test "rider: plain object dotted-field seq .insert() declines cleanly (no crash)":
+    ## Still `sxUnknown` after RFC-0005 S8ap -- now through the bare
+    ## `insert`'s own lowering decline (`feUnsupportedOp`), not N49's.
     let r = symexFind(mutatePlainFieldInsert, tLabel("plain_inserted"))
     check r.status == sxUnknown
+    for e in r.errors: check "N49" notin e.msg
 
 suite "N49 -- regression: unaffected shapes":
   test "an ordinary non-mutating call with a dotted-field argument is unaffected":
@@ -157,3 +172,6 @@ suite "N49 -- regression: unaffected shapes":
 suite "N49 -- walker version pin":
   test "walker version floor >= 122 (N49: dotted-field mutation crash -> classified decline)":
     check parseInt(symexWalkerVersion) >= 122
+
+  test "walker version floor >= 183 (RFC-0005 S8ap: dotted-field .del is modeled)":
+    check parseInt(symexWalkerVersion) >= 183

@@ -1681,9 +1681,30 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
     case f.kind
     of itBool, itInt, itFloat32, itFloat64: wfFaithful
     of itRef, itPtr: refCellFidelity(f, noms, inProgress)
+    # RFC-0005 S8ap: a string field, and a leaf-split seq / Table / HashSet
+    # field whose content `renderHeapCompound` writes and `readCellField`
+    # reads (`readCellSeq`/`readCellTable`/`readCellSet`): a seq of int,
+    # bool, float or ref/ptr, a `Table[string, int|bool]`, a backed
+    # `HashSet`. Any other compound field keeps its zero value (lossy).
+    of itString: wfFaithful
+    of itSeq:
+      if isUnsupportedFieldPlaceholder(f): wfLossy
+      else:
+        case f.seqElemTy.kind
+        of itBool, itInt, itFloat32, itFloat64: wfFaithful
+        of itRef, itPtr: refCellFidelity(f.seqElemTy, noms, inProgress)
+        else: wfLossy
+    of itTable:
+      if f.tabKeyTy.kind == itString and f.tabValTy.kind in {itInt, itBool} and
+         isBackedTableTy(f.tabKeyTy, f.tabValTy): wfFaithful
+      else: wfLossy
+    of itSet:
+      if isBackedSetElemTy(f.setElemTy): wfFaithful else: wfLossy
     else: wfLossy
   case pointee.kind
   of itBool, itInt, itFloat32, itFloat64: wfFaithful
+  of itString, itSeq, itTable, itSet:   # RFC-0005 S8ap: `ref seq[int]` etc.
+    fieldFidelity(pointee, inProgress)
   of itTuple:
     if pointee.objectName.len == 0: return wfLossy   ## `fieldPairs` names differ
     if pointee.nominalId.len > 0:

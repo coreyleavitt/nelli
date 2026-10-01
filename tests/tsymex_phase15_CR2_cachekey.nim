@@ -899,8 +899,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## of the Int div/mod pair). 178->179.
     ## RFC-0005 S8ao (`add` on a dotted seq field is modelled through the
     ## field path; `itUninterp`'s zero decline is proven, not widened).
-    ## 179->181 (180 is another slice's).
-    check symexWalkerVersion == "181"
+    ## 179->181.
+    ## RFC-0005 S8ai (step 1c's links follow equality classes; replace_all
+    ## / in_re / from_int / nonzero-start indexof / word-equation facts;
+    ## last_indexof queries take step 1c). 181->182.
+    check symexWalkerVersion == "182"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

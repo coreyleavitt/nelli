@@ -184,7 +184,23 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "181"
+const symexWalkerVersion* = "182"
+  ## RFC-0005 S8ai (2026-10-01) — S8ae's remainder. `seqRangeFacts`' links
+  ## are semantic: terms are matched by the query's equality classes (a
+  ## sequence equality joins its sides, a term joins what the simplifier
+  ## folds it to), each link guarded by the equality it rests on. New valid
+  ## facts: `str.replace_all` (unchanged without an occurrence, lengths),
+  ## `str.in_re` (the regex's word lengths), `str.from_int` (its digit
+  ## count, `str.to_int` of it), two `str.indexof` from ordered starts and a
+  ## suffix's (the converse direction), word equations (`h = a ++ b` with a
+  ## part holding the needle), and `seq.last_indexof`'s contains / prefix /
+  ## suffix / piece links. A query holding a `seq.last_indexof` now takes
+  ## step 1c's uncapped half before the uncapped step 3, so one refuted
+  ## through those links is decided without the long-string search; its
+  ## capped half is skipped, so one SAT only past the cap still reaches
+  ## step 3. 181 -> 182.
+  ##
+  ## (Prior: 181.)
   ## RFC-0005 S8ao (2026-10-01) — S8aj's remainder. `add` on a dotted SEQ
   ## field (`o.s.add v`, a nested `a.b.s.add v`, a ref/ptr object's
   ## `p.s.add v`) is modelled through the field path instead of declining
@@ -202,7 +218,7 @@ const symexWalkerVersion* = "181"
   ## there is no sound zero to fabricate — a classified decline stays the
   ## only sound answer; that half of this slice is comment-and-pin only
   ## (the `add`-through-field-path half above is what earns the bump).
-  ## 179 -> 181 (180 is another slice's).
+  ## 179 -> 181.
   ##
   ## (Prior: 179.)
   ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local

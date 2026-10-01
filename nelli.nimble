@@ -995,5 +995,10 @@ task test, "Run the test suite":
             # declining (N49); `zeroValueForType` keeps declining for
             # `itUninterp` -- proven the only sound answer, not widened;
             # walker 179->181.
-            "tsymex_rfc0005_s8ao_remainder"]:
+            "tsymex_rfc0005_s8ao_remainder",
+            # RFC-0005 S8ai -- S8ae's remainder: step 1c's links follow the
+            # query's equality classes; replace_all / in_re / from_int /
+            # nonzero-start indexof / word-equation facts; seq.last_indexof
+            # queries take step 1c; walker 181->182.
+            "tsymex_rfc0005_s8ai_semantic"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -8617,6 +8617,19 @@ type SeqCapKinds = object
   strExtract, strToInt, strContains, strPrefix, strSuffix: int
     ## RFC-0005 S8ae: `str.substr`, `str.to_int`, `str.contains`,
     ## `str.prefixof` and `str.suffixof`, for `seqRangeFacts`.
+  strConcat, strFromInt, strReplaceAll: int
+    ## RFC-0005 S8ai: `str.++`, `str.from_int` and `str.replace_all`, for
+    ## `seqRangeFacts`. `str.replace_all` is read off a parsed term: its
+    ## C constructor is absent below Z3 4.16 (`z3WithSeqReplaceAll`), the
+    ## SMT-LIB operator is not.
+  reToRe, reRange, reConcat, reUnion, reInter, rePlus, reOpt, reLoop,
+    rePower, reAllChar: int
+    ## RFC-0005 S8ai: the regex constructors `regexLenBounds` reads a
+    ## membership's length bounds off (any other is `0..`, no bound).
+    ## Every S8ai kind that shares its ordinal with another probed operator
+    ## (Z3 reports some operators under one catch-all internal ordinal, as
+    ## `seq.last_indexof`) is set to -2, so it matches nothing: its facts
+    ## are dropped rather than applied to a different operator.
 
 var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
   ## Read off terms built once per thread: the wrapper's `Z3DeclKindFFI`
@@ -8632,7 +8645,36 @@ proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
     let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8k_kind_probe_arr")
     let str = mkStringVar(ctx, "__s8o_kind_probe_str")
     let ch = at(str, c)
-    seqCapDeclKinds = (ready: true, k: SeqCapKinds(
+    # RFC-0005 S8ai: the regex constructors, over the string regex sort.
+    let reSort = Z3_mk_re_sort(ctx.raw, Z3_get_sort(ctx.raw, str.raw))
+    let lit = mkString(ctx, "a")
+    let reA = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_seq_to_re(ctx.raw, lit.raw))
+    let reR = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_re_range(ctx.raw, lit.raw,
+                                                               lit.raw))
+    var rePair = [reA.raw, reR.raw]
+    template reN(mk: untyped): int =
+      kindOf(ctx, ctx.checkErr mk(ctx.raw, 2,
+        cast[ptr UncheckedArray[RawZ3Ast]](rePair[0].addr)))
+    let replaceProbe = parseSmt2String(ctx,
+      "(declare-const __s8ai_kind_probe_str String)" &
+      "(assert (= __s8ai_kind_probe_str (str.replace_all " &
+      "__s8ai_kind_probe_str __s8ai_kind_probe_str __s8ai_kind_probe_str)))")
+    let replaceAllTerm = Z3_get_app_arg(ctx.raw,
+      Z3_to_app(ctx.raw, replaceProbe[0].raw), 1)
+    var k = SeqCapKinds(
+      strConcat:     kindOf(ctx, (str & str).raw),
+      strFromInt:    kindOf(ctx, toStr(c).raw),
+      strReplaceAll: kindOf(ctx, replaceAllTerm),
+      reToRe:    kindOf(ctx, reA.raw),
+      reRange:   kindOf(ctx, reR.raw),
+      reConcat:  reN(Z3_mk_re_concat),
+      reUnion:   reN(Z3_mk_re_union),
+      reInter:   reN(Z3_mk_re_intersect),
+      rePlus:    kindOf(ctx, ctx.checkErr Z3_mk_re_plus(ctx.raw, reA.raw)),
+      reOpt:     kindOf(ctx, ctx.checkErr Z3_mk_re_option(ctx.raw, reA.raw)),
+      reLoop:    kindOf(ctx, ctx.checkErr Z3_mk_re_loop(ctx.raw, reA.raw, 1, 2)),
+      rePower:   kindOf(ctx, ctx.checkErr Z3_mk_re_power(ctx.raw, reA.raw, 2)),
+      reAllChar: kindOf(ctx, ctx.checkErr Z3_mk_re_allchar(ctx.raw, reSort)),
       uninterp: kindOf(ctx, c.raw),
       select:   kindOf(ctx, select(arr, mkInt(ctx, 0)).raw),
       int2bv:   kindOf(ctx, intToBv[8](c, Z3BitVec[8]).raw),
@@ -8647,7 +8689,38 @@ proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
       strToInt:    kindOf(ctx, toInt(str).raw),
       strContains: kindOf(ctx, contains(str, ch).raw),
       strPrefix:   kindOf(ctx, startsWith(str, ch).raw),
-      strSuffix:   kindOf(ctx, endsWith(str, ch).raw)))
+      strSuffix:   kindOf(ctx, endsWith(str, ch).raw))
+    # RFC-0005 S8ai: disable an S8ai kind that is not unique. A power that
+    # shares the loop's ordinal is read by the loop arm (`regexLenBounds`),
+    # so only the power is dropped.
+    if k.rePower == k.reLoop: k.rePower = -2
+    let lastIndexKind = kindOf(ctx, ctx.checkErr Z3_mk_seq_last_index(ctx.raw,
+                                                  str.raw, str.raw))
+    let all = [k.uninterp, k.select, k.int2bv, k.toCode, k.strAt, k.inRe,
+               k.strLen, k.strIndex, k.strExtract, k.strToInt, k.strContains,
+               k.strPrefix, k.strSuffix, lastIndexKind, k.strConcat,
+               k.strFromInt, k.strReplaceAll, k.reToRe, k.reRange, k.reConcat,
+               k.reUnion, k.reInter, k.rePlus, k.reOpt, k.reLoop, k.rePower,
+               k.reAllChar]
+    template unique(f: untyped) =
+      var uses = 0
+      for a in all:
+        if a == f: inc uses
+      if uses > 1: f = -2
+    unique(k.strConcat)
+    unique(k.strFromInt)
+    unique(k.strReplaceAll)
+    unique(k.reToRe)
+    unique(k.reRange)
+    unique(k.reConcat)
+    unique(k.reUnion)
+    unique(k.reInter)
+    unique(k.rePlus)
+    unique(k.reOpt)
+    unique(k.reLoop)
+    if k.rePower != -2: unique(k.rePower)
+    unique(k.reAllChar)
+    seqCapDeclKinds = (ready: true, k: k)
   seqCapDeclKinds.k
 
 proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
@@ -8776,6 +8849,98 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       result.lastIndex = true
     for a in args: stack.add a
 
+type LitRel = enum
+  ## RFC-0005 S8ai: the relation `seqRangeFacts`' `litHolds` folds.
+  lrContains, lrPrefix, lrSuffix
+
+proc regexLenBounds(ctx: Z3Context; kinds: SeqCapKinds; re: Z3AnyAst):
+    tuple[lo, hi: int] =
+  ## RFC-0005 S8ai. Bounds on the length of every word of the regex `re`,
+  ## for `seqRangeFacts`' `str.in_re` fact: every word is at least `lo`
+  ## long and, unless `hi` is -1 (unbounded), at most `hi`. Read off the
+  ## constructors (`SeqCapKinds`): a literal `str.to_re` its length, a
+  ## range or any character 1, a concatenation the sums, a union the
+  ## widest, an intersection the narrowest, `*` `0..`, `+` `lo..`, `opt`
+  ## `0..hi`, a loop or power its counts times its body's. Any other
+  ## constructor (a complement, a non-literal `str.to_re`) is `0..`, which
+  ## claims nothing. An empty language has no word, so any bound holds of
+  ## it. Each count is clamped at a million (a lower bound clamped down, an
+  ## upper bound past it unbounded), so the arithmetic cannot overflow.
+  const big = 1_000_000
+  proc sumHi(a, b: int): int =
+    if a < 0 or b < 0 or a + b > big: -1 else: a + b
+  proc mulHi(a, n: int): int =
+    if a < 0: -1 elif n == 0 or a == 0: 0 elif a > big div n: -1 else: a * n
+  proc mulLo(a, n: int): int =
+    if n == 0 or a == 0: 0 elif a > big div n: big else: a * n
+  result = (lo: 0, hi: -1)
+  if getAstKind(re) != akApp: return
+  let (decl, args) = unpackApp(re)
+  let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+  if k == kinds.reToRe and args.len == 1:
+    if Z3_is_string(ctx.raw, args[0].raw):
+      let n = getStringLength(wrap[Z3String](ctx, args[0].raw))
+      result = (lo: min(n, big), hi: (if n > big: -1 else: n))
+  elif (k == kinds.reRange and args.len == 2) or
+       (k == kinds.reAllChar and args.len == 0):
+    result = (lo: 1, hi: 1)
+  elif k == kinds.reConcat and args.len >= 1:
+    result = (lo: 0, hi: 0)
+    for a in args:
+      let b = regexLenBounds(ctx, kinds, a)
+      result = (lo: min(big, result.lo + b.lo), hi: sumHi(result.hi, b.hi))
+  elif k == kinds.reUnion and args.len >= 1:
+    result = regexLenBounds(ctx, kinds, args[0])
+    for a in args[1 .. ^1]:
+      let b = regexLenBounds(ctx, kinds, a)
+      result = (lo: min(result.lo, b.lo),
+                hi: (if result.hi < 0 or b.hi < 0: -1 else: max(result.hi, b.hi)))
+  elif k == kinds.reInter and args.len >= 1:
+    result = regexLenBounds(ctx, kinds, args[0])
+    for a in args[1 .. ^1]:
+      let b = regexLenBounds(ctx, kinds, a)
+      result = (lo: max(result.lo, b.lo),
+                hi: (if result.hi < 0: b.hi elif b.hi < 0: result.hi
+                     else: min(result.hi, b.hi)))
+  elif k == kinds.rePlus and args.len == 1:
+    result = (lo: regexLenBounds(ctx, kinds, args[0]).lo, hi: -1)
+  elif k == kinds.reOpt and args.len == 1:
+    result = (lo: 0, hi: regexLenBounds(ctx, kinds, args[0]).hi)
+  elif (k == kinds.reLoop or k == kinds.rePower) and args.len == 1:
+    # `(_ re.loop lo hi)`, `(_ re.loop lo)` (no upper count) and `(_ re.^
+    # n)` carry their counts as the decl's integer parameters. A loop whose
+    # upper count is below its lower one (an empty language) is left at
+    # `0..`, as is any other parameter shape.
+    let np = int Z3_get_decl_num_parameters(ctx.raw, decl)
+    let b = regexLenBounds(ctx, kinds, args[0])
+    let lo = if np >= 1: int Z3_get_decl_int_parameter(ctx.raw, decl, 0) else: -1
+    if k == kinds.rePower and np == 1 and lo >= 0:
+      result = (lo: mulLo(b.lo, lo), hi: mulHi(b.hi, lo))
+    elif k == kinds.reLoop and np == 2 and lo >= 0:
+      let hi = int Z3_get_decl_int_parameter(ctx.raw, decl, 1)
+      # Z3's API takes an upper count of 0 for "no upper count": read it
+      # so, which claims less if the build meant `{""}` or no word.
+      if hi == 0: result = (lo: mulLo(b.lo, lo), hi: -1)
+      elif hi >= lo: result = (lo: mulLo(b.lo, lo), hi: mulHi(b.hi, hi))
+    elif k == kinds.reLoop and np == 1 and lo >= 0:
+      result = (lo: mulLo(b.lo, lo), hi: -1)
+  elif k == kinds.reLoop and args.len in 2 .. 3:
+    # The same loop with its counts as integer ARGUMENTS (`(re.loop r lo
+    # hi)`, SMT-LIB 2.5's form, which Z3's parser builds that way). Only
+    # numeral counts are read; an upper count below the lower one (an
+    # empty language) is left at `0..`.
+    proc count(a: Z3AnyAst): int =
+      if getAstKind(a) != akNumeral: return -1
+      let txt = $Z3_get_numeral_string(ctx.raw, a.raw)
+      if txt.len > 9 or txt.startsWith("-"): -1 else: parseInt(txt)
+    let b = regexLenBounds(ctx, kinds, args[0])
+    let lo = count(args[1])
+    let hi = if args.len == 3: count(args[2]) else: -2
+    if lo >= 0 and hi == -2:
+      result = (lo: mulLo(b.lo, lo), hi: -1)
+    elif lo >= 0 and hi >= lo:
+      result = (lo: mulLo(b.lo, lo), hi: mulHi(b.hi, hi))
+
 proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8v. The range the sequence theory gives each length and
   ## index term in `roots`, for `checkCapped`'s step 1c. There the query
@@ -8838,43 +9003,138 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ##   - a piece `p` of `s` at `i` (`str.at(s, i)`, `str.substr(s, i, n)`)
   ##     with `p = t` a root equality: `t` is contained in `s`, and with `0
   ##     <= i < len(s)`, `0 <= str.indexof(s, t, j) <= i` for `0 <= j <= i`.
-  ## No `seq.last_indexof` link: a query holding one never reaches step 1c
-  ## (`checkCapped` decides it by the uncapped step 3).
   ## Before S8r step 2's unsat core decided a query refuted only through
   ## such a relation (`str.indexof(s, ":", 0) > 200 and not str.contains(s,
   ## ":")`); since, the range facts let step 1c see only the cap's
   ## refutation, and it declined. The links make the uncapped fact check
-  ## refute it: the query's own UNSAT, with no string search. A needle is
-  ## matched by the literal a char needle folds to (`canon`). A running
+  ## refute it: the query's own UNSAT, with no string search. A running
   ## step 2 behind step 1c was measured instead and rejected: its core
   ## named the cap on the prefix and slice shapes too, and `rlimit` does
   ## not bound it on a query SAT only past the cap (49 s and 1.2 GB under
   ## 200k units on Z3 5.1, 9.3 GB under 1M on Z3 4.13.4).
+  ##
+  ## RFC-0005 S8ai. The links are semantic. S8ae matched a haystack and a
+  ## needle by AST (a char needle by the literal it folds to), so a needle
+  ## equal to another only through `y = t`, or a computed `"a" ++ "b"`
+  ## against `"ab"`, got no link. Terms are now grouped into the query's
+  ## equality classes: every sequence equality in `roots` joins its sides,
+  ## and a term joins the class of what Z3's simplifier folds it to. A link
+  ## between two terms whose haystacks or needles differ in AST is guarded
+  ## by their equality (`implies(y == t, ...)`), so it stays valid in the
+  ## theory on its own: theory-free, the guard follows from the query's
+  ## equalities by congruence, or from the rewriter. `seq.last_indexof` is
+  ## linked too, since a query holding one now takes step 1c (`checkCapped`).
+  ## And, each valid in the theory (pinned by
+  ## `tests/tsymex_rfc0005_s8ai_semantic.nim`, the two checks above, which
+  ## the same file shows catch a broken fact of each kind):
+  ##   - two `str.indexof(s, t, _)` from `0 <= j <= i`: `r_j >= i` implies
+  ##     `r_i = r_j`, and `r_i >= 0` implies `0 <= r_j <= r_i` (a nonzero
+  ##     start, the converse direction); a suffix `t` is found from any `0
+  ##     <= i <= len(s) - len(t)`, at most at `len(s) - len(t)`;
+  ##   - `L = seq.last_indexof(s, t)`: `L >= 0` iff `str.contains(s, t)`;
+  ##     a prefix gives `L >= 0`, a suffix `L = len(s) - len(t)`, a piece
+  ##     equal to `t` at `i` in range `L >= i`. (`L` at least every found
+  ##     `str.indexof(s, t, i)` is as valid, but neither Z3 refutes its
+  ##     negation within 1M units, which S8v's pin asks of every fact over
+  ##     `s`, `t`, `i`; it is not emitted.)
+  ##   - `r = str.replace_all(s, t, u)`: `r = s` for an empty `t` or with no
+  ##     occurrence (`not str.contains(s, t)`); `len(r)` against `len(s)`
+  ##     as `len(t)` against `len(u)`; with literal `t`, `u` (`len(t) >=
+  ##     1`) the growth bound `len(t) * len(r) <= len(u) * len(s)` (or `>=`
+  ##     when `u` is the shorter);
+  ##   - `str.in_re(s, R)`: `len(s)` within `R`'s word lengths
+  ##     (`regexLenBounds`), when they bound it;
+  ##   - `x = str.from_int(n)`: `len(x)` is 0 for `n < 0`, else the number
+  ##     of decimal digits of `n` (exact below 10^20, at least 21 above),
+  ##     and `str.to_int(x)` is `n` for `n >= 0`, else -1;
+  ##   - a word equation, `h` equal to `a_1 ++ ... ++ a_k` (`str.++`): a
+  ##     part equal to (or a literal holding) the needle, or containing it,
+  ##     makes `h` contain it, found from `0 <= i <= offset` at most within
+  ##     that part, with `L` at least the part's offset; a prefix of the
+  ##     first part (a suffix of the last) is one of `h`; and for a needle of
+  ##     length at most 1, `h` contains it only if some part does.
   let kinds = seqCapKinds(ctx)
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   proc lenOf(ctx: Z3Context; a: Z3AnyAst): Z3Int =
     wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, a.raw))
+  proc eqOf(ctx: Z3Context; a, b: Z3AnyAst): Z3Bool =
+    # Two terms of one equality class, so of one sort (an equality's sides
+    # and a term's simplified form share it).
+    wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, b.raw))
   var byteLeaves: HashSet[int]
-  # RFC-0005 S8ae: the terms the relational facts below link, keyed by the
-  # AST ids of their haystack `s` and needle `t`.
-  type Pair = tuple[s, t: int]
-  var containsOf, prefixOf, suffixOf: Table[Pair, Z3Bool]
+  # RFC-0005 S8ae / S8ai: the terms the relational facts below link.
+  type Rel = tuple[s, t: Z3AnyAst, p: Z3Bool]
+    ## `str.contains(s, t)`, `str.prefixof(t, s)`, `str.suffixof(t, s)`.
+  var containsL, prefixL, suffixL: seq[Rel]
   var indexOfs: seq[tuple[s, t: Z3AnyAst, i, r: Z3Int]]
+  var lastIdxs: seq[tuple[s, t: Z3AnyAst, r: Z3Int]]
   var pieces: seq[tuple[s, x: Z3AnyAst, i: Z3Int]]
     ## `str.at(s, i)` and `str.substr(s, i, n)`: a piece of `s` at `i`.
-  var seqEqs: HashSet[Pair]
-    ## The sequence equalities in `roots`, both orders.
-  proc canon(ctx: Z3Context; a: Z3AnyAst): int =
-    ## The id a needle or an equality side is matched by: a char needle
-    ## (`needleAsStr`'s `str.from_code(bv2nat(#x3a))`) is matched as the
-    ## literal it folds to, which is what a byte test's character form
-    ## (`seqLenCaps`' `byteEqs`) compares against.
+  var concats: seq[tuple[c: Z3AnyAst, parts: seq[Z3AnyAst]]]
+  var replaces: seq[tuple[s, t: Z3AnyAst, r: Z3AnyAst]]
+  var fromInts: seq[tuple[n: Z3Int, x: Z3AnyAst]]
+  var toInts: seq[tuple[x: Z3AnyAst, v: Z3Int]]
+  # RFC-0005 S8ai: the query's equality classes, a union-find over the ids
+  # of the terms' simplified forms. `simpOf` holds each simplified AST, so
+  # its id is not reused while this runs.
+  var simpOf: Table[int, Z3AnyAst]
+  var parent: Table[int, int]
+  proc simp(a: Z3AnyAst): Z3AnyAst =
+    let id = astId(ctx, a.raw)
+    if id notin simpOf:
+      simpOf[id] =
+        if getAstKind(a) == akApp and unpackApp(a).args.len > 0:
+          wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(ctx.raw, a.raw))
+        else: a
+    simpOf[id]
+  proc cls(a: Z3AnyAst): int =
+    result = astId(ctx, simp(a).raw)
+    while parent.getOrDefault(result, result) != result:
+      result = parent[result]
+  proc join(a, b: Z3AnyAst) =
+    let ra = cls(a)
+    let rb = cls(b)
+    if ra != rb: parent[ra] = rb
+  proc same(g: var seq[Z3Bool]; a, b: Z3AnyAst) =
+    ## The guard that `a` and `b` (one class) are equal, unless one AST.
+    if astId(ctx, a.raw) != astId(ctx, b.raw): g.add eqOf(ctx, a, b)
+  proc guarded(g: seq[Z3Bool]; f: Z3Bool): Z3Bool =
+    if g.len == 0: return f
+    var all = g[0]
+    for k in 1 ..< g.len: all = all and g[k]
+    implies(all, f)
+  proc litLen(a: Z3AnyAst): int =
+    ## The length of the string literal `a` folds to, or -1.
+    let f = simp(a)
+    if Z3_is_string(ctx.raw, f.raw): getStringLength(wrap[Z3String](ctx, f.raw))
+    else: -1
+  proc litHolds(rel: LitRel; a, b: Z3AnyAst): int =
+    ## `str.contains(a, b)` / `str.prefixof(a, b)` / `str.suffixof(a, b)`
+    ## over the literals `a` and `b` fold to: 1 true, 0 false, -1 when
+    ## either is not a literal.
+    if litLen(a) < 0 or litLen(b) < 0: return -1
+    let x = simp(a).raw
+    let y = simp(b).raw
+    let term = case rel
+      of lrContains: ctx.checkErr Z3_mk_seq_contains(ctx.raw, x, y)
+      of lrPrefix: ctx.checkErr Z3_mk_seq_prefix(ctx.raw, x, y)
+      of lrSuffix: ctx.checkErr Z3_mk_seq_suffix(ctx.raw, x, y)
+    let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(ctx.raw, term))
+    case $Z3_ast_to_string(ctx.raw, v.raw)
+    of "true": 1
+    of "false": 0
+    else: -1
+  proc flatten(a: Z3AnyAst; into: var seq[Z3AnyAst]) =
     if getAstKind(a) == akApp and
-       declName(ctx, unpackApp(a).decl) == "str.from_code":
-      let f = ctx.checkErr Z3_simplify(ctx.raw, a.raw)
-      if Z3_is_string(ctx.raw, f): return astId(ctx, f)
-    astId(ctx, a.raw)
+       ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl)) == kinds.strConcat:
+      for p in unpackApp(a).args: flatten(p, into)
+    else: into.add a
+  proc pow10(d: int): Z3Int =
+    var txt = "1"
+    for _ in 1 .. d: txt.add '0'
+    wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, txt.cstring,
+                                                Z3_get_sort(ctx.raw, zero.raw)))
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
@@ -8900,19 +9160,19 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       let r = wrap[Z3Int](ctx, t.raw)
       result.add (r == minusOne) or
         ((zero <= r) and (r + lenOf(ctx, args[1]) <= lenOf(ctx, args[0])))
+      lastIdxs.add (s: args[0], t: args[1], r: r)
     elif k == kinds.strContains and args.len == 2:
       # RFC-0005 S8ae: `str.contains(s, t)`.
       let c = wrap[Z3Bool](ctx, t.raw)
       result.add implies(c, lenOf(ctx, args[1]) <= lenOf(ctx, args[0]))
-      containsOf[(astId(ctx, args[0].raw), canon(ctx, args[1]))] = c
+      containsL.add (s: args[0], t: args[1], p: c)
     elif (k == kinds.strPrefix or k == kinds.strSuffix) and args.len == 2:
       # RFC-0005 S8ae: `str.prefixof(t, s)` / `str.suffixof(t, s)`, the
       # needle first.
       let p = wrap[Z3Bool](ctx, t.raw)
       result.add implies(p, lenOf(ctx, args[0]) <= lenOf(ctx, args[1]))
-      let key = (astId(ctx, args[1].raw), canon(ctx, args[0]))
-      if k == kinds.strPrefix: prefixOf[key] = p
-      else: suffixOf[key] = p
+      if k == kinds.strPrefix: prefixL.add (s: args[1], t: args[0], p: p)
+      else: suffixL.add (s: args[1], t: args[0], p: p)
     elif k == kinds.strAt and args.len == 2:
       # RFC-0005 S8ae: `str.at(s, i)` is one character in range, else "".
       let i = wrap[Z3Int](ctx, args[1].raw)
@@ -8944,6 +9204,47 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     elif k == kinds.strToInt and args.len == 1:
       # RFC-0005 S8ae: -1 for a non-numeral, else its non-negative value.
       result.add wrap[Z3Int](ctx, t.raw) >= minusOne
+      toInts.add (x: args[0], v: wrap[Z3Int](ctx, t.raw))
+    elif k == kinds.strConcat and args.len >= 2:
+      # RFC-0005 S8ai: a word, for the word-equation links below.
+      var parts: seq[Z3AnyAst]
+      flatten(t, parts)
+      concats.add (c: t, parts: parts)
+    elif k == kinds.strReplaceAll and args.len == 3:
+      # RFC-0005 S8ai: `r = str.replace_all(s, a, b)` replaces every
+      # (leftmost, non-overlapping) occurrence of a non-empty `a`, and is
+      # `s` for an empty one. Each of the `m` replacements changes the
+      # length by `len(b) - len(a)`, and `m * len(a) <= len(s)`.
+      let sL = lenOf(ctx, args[0])
+      let aL = lenOf(ctx, args[1])
+      let bL = lenOf(ctx, args[2])
+      let rL = lenOf(ctx, t)
+      result.add implies(aL == zero, eqOf(ctx, t, args[0]))
+      result.add implies(aL == bL, rL == sL)
+      result.add implies(aL <= bL, sL <= rL)
+      result.add implies(bL <= aL, rL <= sL)
+      let la = litLen(args[1])
+      let lb = litLen(args[2])
+      if la >= 1 and lb >= 0:
+        if lb >= la: result.add mkInt(ctx, la) * rL <= mkInt(ctx, lb) * sL
+        else: result.add mkInt(ctx, la) * rL >= mkInt(ctx, lb) * sL
+      replaces.add (s: args[0], t: args[1], r: t)
+    elif k == kinds.strFromInt and args.len == 1:
+      # RFC-0005 S8ai: `str.from_int(n)` is "" for `n < 0`, else the
+      # decimal digits of `n` with no leading zero.
+      let n = wrap[Z3Int](ctx, args[0].raw)
+      var digits = ite(n < pow10(19), mkInt(ctx, 19), mkInt(ctx, 20))
+      for d in countdown(18, 1): digits = ite(n < pow10(d), mkInt(ctx, d), digits)
+      result.add implies(n < pow10(20),
+                         lenOf(ctx, t) == ite(n < zero, zero, digits))
+      result.add implies(n >= pow10(20), lenOf(ctx, t) >= mkInt(ctx, 21))
+      fromInts.add (n: n, x: t)
+    elif k == kinds.inRe and args.len == 2:
+      # RFC-0005 S8ai: a member of `R` is as long as some word of `R`.
+      let b = regexLenBounds(ctx, kinds, args[1])
+      let m = wrap[Z3Bool](ctx, t.raw)
+      if b.lo > 0: result.add implies(m, lenOf(ctx, args[0]) >= mkInt(ctx, b.lo))
+      if b.hi >= 0: result.add implies(m, lenOf(ctx, args[0]) <= mkInt(ctx, b.hi))
     elif args.len == 2 and getSortKind(args[0]) == skSeq and
          declName(ctx, decl) == "=":
       # RFC-0005 S8ae: equal sequences have equal lengths. Without the
@@ -8952,50 +9253,208 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       # length of `str.at(s, 200)` and its fact above.
       result.add implies(wrap[Z3Bool](ctx, t.raw),
                          lenOf(ctx, args[0]) == lenOf(ctx, args[1]))
-      let (a0, a1) = (astId(ctx, args[0].raw), astId(ctx, args[1].raw))
-      let (c0, c1) = (canon(ctx, args[0]), canon(ctx, args[1]))
-      seqEqs.incl (a0, c1)
-      seqEqs.incl (a1, c0)
+      join(args[0], args[1])
     for a in args: stack.add a
-  # RFC-0005 S8ae: facts that link two of the theory's functions over the
-  # same haystack and needle, each valid in the theory. Only terms already
-  # in `roots` are linked (no `str.contains` is built that the query does
-  # not hold), so a fact can only take part in a refutation through them.
-  proc key(ctx: Z3Context; s, t: Z3AnyAst): Pair =
-    (astId(ctx, s.raw), canon(ctx, t))
+  # RFC-0005 S8ae: facts that link two of the theory's functions over one
+  # haystack and needle, each valid in the theory. Only terms already in
+  # `roots` are linked (no `str.contains` is built that the query does not
+  # hold), so a fact can only take part in a refutation through them.
+  # RFC-0005 S8ai: "one" is one equality class, and a link between terms
+  # whose haystacks or needles differ in AST is guarded by their equality.
+  proc pairGuard(s1, s2, t1, t2: Z3AnyAst): seq[Z3Bool] =
+    same(result, s1, s2)
+    same(result, t1, t2)
+  proc sameKey(s1, s2, t1, t2: Z3AnyAst): bool =
+    cls(s1) == cls(s2) and cls(t1) == cls(t2)
   for e in indexOfs:
-    let kk = key(ctx, e.s, e.t)
     let atZero = e.i == zero
-    if kk in containsOf:
-      # Found anywhere is contained; contained is found from 0.
-      let c = containsOf[kk]
-      result.add implies(e.r >= zero, c)
-      result.add implies(c and atZero, e.r >= zero)
-    if kk in prefixOf:
-      # A prefix is first found at 0.
-      result.add implies(prefixOf[kk] and atZero, e.r == zero)
-  for kk, p in prefixOf:
-    if kk in containsOf: result.add implies(p, containsOf[kk])
-  for kk, p in suffixOf:
-    if kk in containsOf: result.add implies(p, containsOf[kk])
+    for c in containsL:
+      if sameKey(e.s, c.s, e.t, c.t):
+        # Found anywhere is contained; contained is found from 0.
+        let g = pairGuard(e.s, c.s, e.t, c.t)
+        result.add guarded(g, implies(e.r >= zero, c.p))
+        result.add guarded(g, implies(c.p and atZero, e.r >= zero))
+    for p in prefixL:
+      if sameKey(e.s, p.s, e.t, p.t):
+        # A prefix is first found at 0.
+        result.add guarded(pairGuard(e.s, p.s, e.t, p.t),
+                           implies(p.p and atZero, e.r == zero))
+    for p in suffixL:
+      if sameKey(e.s, p.s, e.t, p.t):
+        # RFC-0005 S8ai: a suffix is found from any start up to its own.
+        let lastStart = lenOf(ctx, e.s) - lenOf(ctx, e.t)
+        result.add guarded(pairGuard(e.s, p.s, e.t, p.t),
+          implies(p.p and (zero <= e.i) and (e.i <= lastStart),
+                  (e.i <= e.r) and (e.r <= lastStart)))
+    for f in indexOfs:
+      if astId(ctx, e.r.raw) != astId(ctx, f.r.raw) and
+         sameKey(e.s, f.s, e.t, f.t):
+        # RFC-0005 S8ai: from `0 <= e.i <= f.i`, a first index at or past
+        # `f.i` is also the first from `f.i`, and one found from `f.i` is
+        # found from `e.i`, no later.
+        let g = pairGuard(e.s, f.s, e.t, f.t)
+        let ordered = (zero <= e.i) and (e.i <= f.i)
+        result.add guarded(g, implies(ordered and (e.r >= f.i), f.r == e.r))
+        result.add guarded(g, implies(ordered and (f.r >= zero),
+                                      (zero <= e.r) and (e.r <= f.r)))
+  for l in lastIdxs:
+    # RFC-0005 S8ai: `seq.last_indexof` is -1 exactly when not contained; a
+    # prefix is found, and a suffix is the last occurrence.
+    for c in containsL:
+      if sameKey(l.s, c.s, l.t, c.t):
+        result.add guarded(pairGuard(l.s, c.s, l.t, c.t), (l.r >= zero) == c.p)
+    for p in prefixL:
+      if sameKey(l.s, p.s, l.t, p.t):
+        result.add guarded(pairGuard(l.s, p.s, l.t, p.t),
+                           implies(p.p, l.r >= zero))
+    for p in suffixL:
+      if sameKey(l.s, p.s, l.t, p.t):
+        result.add guarded(pairGuard(l.s, p.s, l.t, p.t),
+          implies(p.p, l.r == lenOf(ctx, l.s) - lenOf(ctx, l.t)))
+  for p in prefixL:
+    for c in containsL:
+      if sameKey(p.s, c.s, p.t, c.t):
+        result.add guarded(pairGuard(p.s, c.s, p.t, c.t), implies(p.p, c.p))
+  for p in suffixL:
+    for c in containsL:
+      if sameKey(p.s, c.s, p.t, c.t):
+        result.add guarded(pairGuard(p.s, c.s, p.t, c.t), implies(p.p, c.p))
   # A piece of `s` equal to a needle `t` (`s[5] == ':'`, `s[1..2] == "ab"`):
-  # `t` is contained in `s`, and first found at or before the piece's
-  # start.
+  # `t` is contained in `s`, first found at or before the piece's start,
+  # and (RFC-0005 S8ai) last found at or after it.
   for pc in pieces:
-    let pid = astId(ctx, pc.x.raw)
-    let sid = astId(ctx, pc.s.raw)
     let inRange = (zero <= pc.i) and (pc.i < lenOf(ctx, pc.s))
-    for kk, c in containsOf:
-      if kk.s == sid and (pid, kk.t) in seqEqs:
-        let tt = wrap[Z3String](ctx, Z3_get_app_arg(ctx.raw,
-                   Z3_to_app(ctx.raw, c.raw), 1))
-        result.add implies(wrap[Z3String](ctx, pc.x.raw) == tt, c)
+    for c in containsL:
+      if sameKey(pc.s, c.s, pc.x, c.t):
+        result.add guarded(pairGuard(pc.s, c.s, pc.x, c.t), c.p)
     for e in indexOfs:
-      if astId(ctx, e.s.raw) == sid and (pid, canon(ctx, e.t)) in seqEqs:
-        result.add implies((wrap[Z3String](ctx, pc.x.raw) ==
-                            wrap[Z3String](ctx, e.t.raw)) and inRange and
-                           (zero <= e.i) and (e.i <= pc.i),
-                           (zero <= e.r) and (e.r <= pc.i))
+      if sameKey(pc.s, e.s, pc.x, e.t):
+        result.add guarded(pairGuard(pc.s, e.s, pc.x, e.t),
+          implies(inRange and (zero <= e.i) and (e.i <= pc.i),
+                  (zero <= e.r) and (e.r <= pc.i)))
+    for l in lastIdxs:
+      if sameKey(pc.s, l.s, pc.x, l.t):
+        result.add guarded(pairGuard(pc.s, l.s, pc.x, l.t),
+                           implies(inRange, l.r >= pc.i))
+  # RFC-0005 S8ai: word equations. `cc.c` is `a_1 ++ ... ++ a_k`; a term
+  # over a haystack of its class sees each part at its offset.
+  for cc in concats:
+    let kc = cls(cc.c)
+    var offs = newSeq[Z3Int](cc.parts.len)
+    var o = zero
+    for k, p in cc.parts:
+      offs[k] = o
+      o = o + lenOf(ctx, p)
+    for c in containsL:
+      if cls(c.s) != kc: continue
+      var gh: seq[Z3Bool]
+      same(gh, c.s, cc.c)
+      var direct = false      # some part is known to hold the needle
+      var complete = true     # every part's containment is known
+      var gAll = gh
+      var disj: seq[Z3Bool]
+      for p in cc.parts:
+        if cls(p) == cls(c.t):
+          var g = gh
+          same(g, p, c.t)
+          result.add guarded(g, c.p)
+          direct = true
+          continue
+        let lit = litHolds(lrContains, p, c.t)
+        if lit == 1:
+          result.add guarded(gh, c.p)
+          direct = true
+          continue
+        if lit == 0: continue
+        var known = false
+        for c2 in containsL:
+          if sameKey(c2.s, p, c2.t, c.t):
+            var g = gh
+            same(g, c2.s, p)
+            same(g, c2.t, c.t)
+            result.add guarded(g, implies(c2.p, c.p))
+            if not known:
+              same(gAll, c2.s, p)
+              same(gAll, c2.t, c.t)
+              disj.add c2.p
+              known = true
+        if not known: complete = false
+      if complete and not direct:
+        # A needle of at most one element lies within one part.
+        var oneOf = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_false(ctx.raw))
+        for d in disj: oneOf = oneOf or d
+        result.add guarded(gAll, implies(c.p and (lenOf(ctx, c.t) <= mkInt(ctx, 1)),
+                                         oneOf))
+    for first in [true, false]:
+      let lst = if first: prefixL else: suffixL
+      let p = if first: cc.parts[0] else: cc.parts[^1]
+      let rel = if first: lrPrefix else: lrSuffix
+      for pr in lst:
+        if cls(pr.s) != kc: continue
+        var gh: seq[Z3Bool]
+        same(gh, pr.s, cc.c)
+        if cls(p) == cls(pr.t):
+          var g = gh
+          same(g, p, pr.t)
+          result.add guarded(g, pr.p)
+        elif litHolds(rel, pr.t, p) == 1:
+          result.add guarded(gh, pr.p)
+        for pr2 in lst:
+          if sameKey(pr2.s, p, pr2.t, pr.t):
+            var g = gh
+            same(g, pr2.s, p)
+            same(g, pr2.t, pr.t)
+            result.add guarded(g, implies(pr2.p, pr.p))
+    for k, p in cc.parts:
+      let endK = offs[k] + lenOf(ctx, p)
+      for e in indexOfs:
+        if cls(e.s) != kc: continue
+        var gh: seq[Z3Bool]
+        same(gh, e.s, cc.c)
+        let from0 = (zero <= e.i) and (e.i <= offs[k])
+        if cls(p) == cls(e.t):
+          var g = gh
+          same(g, p, e.t)
+          result.add guarded(g, implies(from0, (zero <= e.r) and (e.r <= offs[k])))
+        elif litHolds(lrContains, p, e.t) == 1:
+          result.add guarded(gh, implies(from0, (zero <= e.r) and
+                                         (e.r + lenOf(ctx, e.t) <= endK)))
+        for c2 in containsL:
+          if sameKey(c2.s, p, c2.t, e.t):
+            var g = gh
+            same(g, c2.s, p)
+            same(g, c2.t, e.t)
+            result.add guarded(g, implies(c2.p and from0, (zero <= e.r) and
+                                          (e.r + lenOf(ctx, e.t) <= endK)))
+      for l in lastIdxs:
+        if cls(l.s) != kc: continue
+        var gh: seq[Z3Bool]
+        same(gh, l.s, cc.c)
+        if cls(p) == cls(l.t):
+          var g = gh
+          same(g, p, l.t)
+          result.add guarded(g, l.r >= offs[k])
+        elif litHolds(lrContains, p, l.t) == 1:
+          result.add guarded(gh, l.r >= offs[k])
+        for c2 in containsL:
+          if sameKey(c2.s, p, c2.t, l.t):
+            var g = gh
+            same(g, c2.s, p)
+            same(g, c2.t, l.t)
+            result.add guarded(g, implies(c2.p, l.r >= offs[k]))
+  # RFC-0005 S8ai: no occurrence, no replacement.
+  for rp in replaces:
+    for c in containsL:
+      if sameKey(rp.s, c.s, rp.t, c.t):
+        result.add guarded(pairGuard(rp.s, c.s, rp.t, c.t),
+                           implies(not c.p, eqOf(ctx, rp.r, rp.s)))
+  # RFC-0005 S8ai: `str.to_int(str.from_int(n))` is `n`, or -1 (`""`).
+  for f in fromInts:
+    for v in toInts:
+      if cls(v.x) == cls(f.x):
+        var g: seq[Z3Bool]
+        same(g, v.x, f.x)
+        result.add guarded(g, v.v == ite(f.n >= zero, f.n, minusOne))
 
 var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
                                          eq: int]
@@ -9362,13 +9821,15 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##      string search, and without step 2's unsat core, which may name
   ##      the cap although the query's own bounds refute it too (Z3's cores
   ##      are not minimal).
-  ##   1c. after (1b), when (1) was UNSAT: the theory-free query with the
+  ##   1c. after (1b), when (1) was UNSAT (RFC-0005 S8ai: a query holding
+  ##      a `seq.last_indexof` too): the theory-free query with the
   ##      range each length and index term has in the theory
   ##      (`seqRangeFacts`, RFC-0005 S8v). An UNSAT is the query's own, the
   ##      facts being valid. Otherwise the caps are ASSERTED beside them:
   ##      an UNSAT then means the caps refute every model the facts leave,
   ##      so the cap took part: `zsUnknown`, with no sequence-theory check
-  ##      (RFC-0005 S8r).
+  ##      (RFC-0005 S8r). A `seq.last_indexof` query skips that capped
+  ##      half and goes on to (3), which may find a model past the cap.
   ##   2. if (1) is UNSAT: a fresh solver with the caps behind one
   ##      assumption literal, checked under it, and its unsat core read.
   ##      Without the literal in the core the query is UNSAT on its own;
@@ -9379,7 +9840,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   3. the uncapped one-shot `check()` (the pre-S8k query) decides when
   ##      (1) ran out of budget -- asserted length caps can slow a query
   ##      Z3 answers quickly without them -- and, in place of (2), for a
-  ##      query holding a `seq.last_indexof` (below).
+  ##      query holding a `seq.last_indexof` that (1c) did not decide
+  ##      (below).
   ## Z3's cost on a string query is not a function of the query alone: it
   ## also follows what its CONTEXT already holds, and every query of one
   ## walk shares one context. The same lowered `s[0..2] == "aaa"` label
@@ -9477,7 +9939,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   if r1 == zsUnsat:
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
-  if r1 == zsUnsat and not lastIndex:
+  if r1 == zsUnsat:
     # Step 1c (RFC-0005 S8r): the caps against the query with no sequence
     # theory. (1b) found no theory-free refutation of the query alone; if
     # the caps now refute it, the cap takes part in the only refutation
@@ -9501,15 +9963,26 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # `indexof` found implies `contains`, and so on), so a query refuted
     # only through such a link is decided here as its own UNSAT, not
     # declined on the cap below.
+    # RFC-0005 S8ai: a query holding a `seq.last_indexof` takes this step
+    # too (it went straight to the uncapped step 3, the one place the
+    # uncapped sequence theory still ran), with `last_indexof`'s links.
+    # Step 1c is one-shot and theory-free, so the incremental core's wrong
+    # `seq.last_indexof` value (below) does not reach it; only step 2 is
+    # still skipped for such a query. Such a query takes only the uncapped
+    # half (an UNSAT that is its own): the capped half would decline one
+    # that is SAT only past the cap, which step 3 decides
+    # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
     let facts = seqRangeFacts(ctx, roots)
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f
       if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
-    let sTc = querySolver(ctx, roots, rl, seqTheory = false)
-    for f in facts: sTc.add f
-    for c in caps: sTc.add c
-    if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
+    if not lastIndex:
+      let sTc = querySolver(ctx, roots, rl, seqTheory = false)
+      for f in facts: sTc.add f
+      for c in caps: sTc.add c
+      if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
+  if r1 == zsUnsat and not lastIndex:
     # Step 2: is the UNSAT the query's own?
     let s2 = querySolver(ctx, roots, rl)
     let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")

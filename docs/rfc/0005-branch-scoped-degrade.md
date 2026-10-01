@@ -292,6 +292,11 @@ title = "S8aj's remainder: `add` on a dotted seq field (`o.s.add v`) is N49 feUn
 state = "done"
 
 [[slice]]
+id    = "S8ap"
+title = "S8ao's remainder: a ref-object field of a compound sort (seq) has no field-split heap representation (`p.s = @[...]` and `p.s.add v` are seUnsupportedCompoundSortLeaf) -- build compound-sort field-split heap storage; `del`/`insert`/`incl`/`excl`/`[]=` on a dotted field are still N49 feUnsupportedOp -- route them through the same field-write primitives as `add`; `add` on a dotted STRING field is N49 -- route it via iekStrConcat; the uninitialized-`var` decline for itUninterp gives one generic message for all three placeholder prefixes (__ownership, __closure, __unsupported) -- give each the precise kind allocateSym already uses"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

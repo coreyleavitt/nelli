@@ -262,6 +262,11 @@ title = "S8ae's remainder: make step 1c's relational links semantic, not syntact
 state = "pending"
 
 [[slice]]
+id    = "S8aj"
+title = "S8ad's remainder: an uninitialized local array with an element write (`var a: array[3, int]; a[0] = ...; a[i]`) is weInternalWalkerFault (iekIndex on non-array kind=svBV64) -- model Nim's zero-init of local arrays (and nested aggregates) so it is never a walker fault; extend divRangeFacts-style linear links to bv2int of other bitvector arithmetic (add, sub, mul, shifts) read as Int; reshard the symex-mingw corpus so no shard runs near the 60-minute job limit (a cancelled shard hides failures) and pin per-shard headroom"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

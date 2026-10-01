@@ -259,7 +259,7 @@ state = "done"
 [[slice]]
 id    = "S8ai"
 title = "S8ae's remainder: make step 1c's relational links semantic, not syntactic (a needle/string equal through a chain of equalities or a computed-but-equal term gets the same contains/prefixof/suffixof/indexof/substr links -- canonicalize by the query's equality classes); add sound facts for replace_all, regex membership, from_int, indexof from a nonzero start (converse direction) and word equations; route seq.last_indexof queries through step 1c instead of straight to the uncapped step 3"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8aj"
@@ -4767,6 +4767,229 @@ Pins: `tests/tsymex_rfc0005_s8ac_remainder.nim`, with a `.nim.cfg` that sets
 - **Copy-in/copy-out declines on possible aliasing.** The check is by
   argument (same root, or a type that can reach the cell). A callee that
   reaches the location through a global is not in the symex fragment.
+
+**As landed (S8ai, walker 182) — S8ae's remainder.** All three items are
+in `seqRangeFacts` and its use in `checkCapped`'s step 1c. Step 2 still
+never runs behind a step 1c UNSAT, and a step 1c UNSAT without the caps is
+still the query's own.
+
+*1. Semantic links.* The facts now group terms into the query's equality
+classes, a union-find over AST ids:
+- every sequence equality among the roots joins its two sides;
+- every term joins the class of what `Z3_simplify` folds it to, so a
+  computed `"a" ++ "b"` meets the literal `"ab"`.
+
+A link between two terms is made when their haystacks and needles are in
+the same classes. When they differ in AST, the link is guarded by their
+equality (`implies(t == y, ...)`), so each fact is still valid in the
+theory on its own. Theory-free, the guard follows from the query's
+equalities by congruence, or from the rewriter. A literal needle in a
+literal haystack (`str.contains("ab:", ":")`) is folded with Z3's own
+rewriter. `t == ":" and s.find(t) > 200 and ":" notin s` was a
+`maxSeqLen` decline at 58e52af. It is now `sxUnsat` by step 1c's uncapped
+check, as are:
+- a chain of equalities (`y = ":"`, `t = y`);
+- an equal haystack (`x = s`);
+- a computed needle;
+- a piece equal to the needle through a chain.
+
+*2. New facts.* Each is valid in the theory:
+- **`str.indexof` from two starts.** For `0 <= j <= i`:
+  - `r_j >= i` implies `r_i = r_j`;
+  - `r_i >= 0` implies `0 <= r_j <= r_i` (the converse direction).
+
+  A suffix `t` is found from every start `0 <= i <= len(s) - len(t)`, at
+  `len(s) - len(t)` at the latest.
+- **`r = str.replace_all(s, t, u)`.**
+  - `r = s` for an empty `t`, or when `not str.contains(s, t)`.
+  - `len(r)` compares with `len(s)` as `len(u)` compares with `len(t)`.
+  - With literal `t` and `u` (`len(t) >= 1`), the growth bound
+    `len(t) * len(r) <= len(u) * len(s)`, with `>=` when `u` is the shorter.
+  - Its kind is probed by parsing `str.replace_all`, since its builder
+    (`Z3_mk_seq_replace_all`) is optional in nim-z3. The walker never emits
+    it, so this only reaches SMT-LIB-parsed or hand-built queries.
+- **`str.in_re(s, R)`.** `len(s)` lies within the word lengths of `R`
+  (`regexLenBounds`), over these constructors:
+  - `to_re` of a literal;
+  - range and allchar;
+  - concatenation, union and intersection;
+  - plus and opt;
+  - `loop` and `^`, with their counts as decl parameters or as integer
+    arguments.
+
+  Any other constructor reads as `0..unbounded`.
+- **`x = str.from_int(n)`.**
+  - `len(x) = 0` for `n < 0`;
+  - otherwise `len(x)` is the number of decimal digits of `n`: exact below
+    `10^20`, and at least 21 above;
+  - `str.to_int(x)` is `n` for `n >= 0`, else -1.
+- **Word equations.** `h` is in the class of `a_1 ++ ... ++ a_k`. A part
+  equal to the needle, a literal part holding it, or a part that contains
+  it makes `h` contain it:
+  - it is found from `0 <= i <= offset`, at most within that part;
+  - `seq.last_indexof` is at least the part's offset;
+  - a prefix of the first part is a prefix of `h`, and a suffix of the
+    last part is a suffix of `h`;
+  - for a needle of length at most 1, `h` contains it only if some part
+    does.
+- **`L = seq.last_indexof(s, t)`.**
+  - `L >= 0` iff `str.contains(s, t)`;
+  - a prefix gives `L >= 0`;
+  - a suffix gives `L = len(s) - len(t)`;
+  - a piece equal to `t` at an in-range `i` gives `L >= i`.
+
+Each new kind is probed from the linked Z3 (`SeqCapKinds`). A kind that
+shares its ordinal with another probed operator is disabled (-2), and a
+`^` that probes as `loop` is read as `loop`. The `replace_all`, regex and
+`from_int` checks pass on Z3 5.1 and 4.13.4 alike, so none of those kinds
+is disabled on either.
+
+*Validity.* Each fact is checked in two ways against the linked Z3's
+semantics, as S8ae's are:
+- its negation is never SAT with the theory under 1M units;
+- it rewrites to `true` on every ground instance with strings over `{"a",
+  "\xff"}` of length at most 3 and integers in `-1..4`.
+
+A hand-built mutant of each kind fails at least one check. The mutants
+are:
+- a `replace_all` that never grows when `len(t) <= len(u)` (the
+  direction reversed);
+- a loop `{1,3}` capped at length 2;
+- every non-negative `from_int` at least two digits;
+- a nonzero-start `indexof` at or before the earlier start's result (the
+  converse reversed);
+- a needle in `a ++ b` held by `a` or `b` (straddling ignored);
+- `last_indexof + len(t) < len(s)` (strict).
+
+One link was written and then dropped: `L` is at least every found
+`str.indexof(s, t, i)`. It is valid. But S8v's pin asks every fact over
+`s`, `t`, `i` for a negation that Z3 proves UNSAT within 1M units, and
+neither Z3 does that for this one: 4.13.4 answers `unknown` even with `i =
+0`. Its in-between form ("a start at or before `L` finds one in `i..L`")
+was `unknown` on 5.1 too. S8v's pin was not weakened to admit them.
+
+*3. `seq.last_indexof` takes step 1c.* A query holding one went from step
+1 straight to the uncapped step 3. That was the one place the uncapped
+sequence theory still ran. It now takes step 1c's uncapped half. An UNSAT
+there is the query's own and is returned. Otherwise the query goes on to
+step 3 as before. It does not take the capped half: that would decline a
+query that is SAT only past the cap, which step 3 decides
+(`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8, was
+`sxSat` and read as a cap decline when the capped half was taken). Step 2
+is still skipped for such a query, since the incremental core's
+`seq.last_indexof` value is wrong. `s.len > 150 and s.endsWith(":") and
+s.rfind(':') != s.len - 1` under `seqQueryRLimit = 2_000` was "the
+uncapped query (it holds a seq.last_indexof) was not decided" at 58e52af.
+It is now `sxUnsat` by the suffix link.
+
+Termination, measured against 59bf62e (the channel after S8y) on the
+test binary built with `-d:symexQueryStats`:
+
+| Z3 | suite | wall (base / slice) | peak RSS | Z3 rlimit units |
+|---|---|---|---|---|
+| 5.1 | `r4_strip` | 153.2 s / 147.3 s | 186 / 186 MB | 20,030,283 / 20,030,293 |
+| 5.1 | `q1_scanlift` | 3.0 s / 2.9 s | 64 / 66 MB | 3,114,329 / 3,114,329 |
+| 5.1 | `r6_b5_chained` | 1.9 s / 2.4 s | 75 / 78 MB | 1,307,267 / 1,457,537 (+11.5%) |
+| 5.1 | `rfc0005_s8r_theoryfree` | 0.1 s / 0.2 s | 50 / 50 MB | 39,267 / 39,267 |
+| 5.1 | `rfc0005_s8v_termination` | 0.2 s / 0.3 s | 62 / 63 MB | 43,318 / 43,318 |
+| 5.1 | `rfc0005_s8ae_remainder` | 168.7 s / 134.0 s | 156 / 162 MB | 39,511 / 39,511 |
+| 5.1 | `163rev_intoffset_range` | 0.3 s / 0.5 s | 63 / 64 MB | 164,396 / 164,396 |
+| 4.13.4 | `r4_strip` | 25.4 s / 29.0 s | 66 / 66 MB | 20,042,052 / 20,042,074 |
+| 4.13.4 | `q1_scanlift` | 2.1 s / 2.4 s | 63 / 63 MB | 3,075,065 / 3,075,065 |
+| 4.13.4 | `r6_b5_chained` | 3.0 s / 2.0 s | 73 / 74 MB | 1,262,895 / 1,271,646 (+0.7%) |
+| 4.13.4 | `rfc0005_s8r_theoryfree` | 0.1 s / 0.4 s | 52 / 51 MB | 28,969 / 28,969 |
+| 4.13.4 | `rfc0005_s8v_termination` | 0.3 s / 0.2 s | 64 / 65 MB | 32,453 / 32,453 |
+| 4.13.4 | `rfc0005_s8ae_remainder` | 87.7 s / 92.9 s | 949 / 228 MB | 118,228 / 118,234 |
+| 4.13.4 | `163rev_intoffset_range` | 0.5 s / 0.7 s | 57 / 57 MB | 127,120 / 127,120 |
+
+Wall times were taken on a loaded host (load average 15 to 25) and move by
+tens of seconds on the long suites. The rlimit totals are deterministic.
+In every row the query and assert counts are identical, and so is every
+check's outcome. The totals that moved:
+- `r6_b5_chained` costs 11.5% more on Z3 5.1 and 0.7% more on 4.13.4, at
+  the same queries and outcomes. The figure depends on the base: against
+  4e76eac (before S8y dropped implied byte-domain constraints) the same
+  facts cost 10.4% less on 5.1 and 5.5% more on 4.13.4, and against 58e52af
+  (before S8ad) 11% and 13% less. What the facts cost on this suite is
+  solver search variance across query texts, not a trend. It is reported
+  here and not tuned.
+- `r4_strip` moves by 10 units on 5.1 and 22 on 4.13.4, against a 20M
+  total.
+- `s8ae_remainder` moves by 6 units on 4.13.4.
+
+Every other total is unchanged. The
+`s8ae_remainder` wall time is its validity checks, which run outside the
+walker and so outside these totals; its 4.13.4 peak RSS moved from 949 MB
+to 228 MB with the same checks. No query changed outcome, and none
+approaches a budget.
+
+Pins: `tests/tsymex_rfc0005_s8ai_semantic.nim`. Every check below was RED
+at 58e52af on Z3 5.1, unless stated otherwise.
+- (1) Step 1c posed on its own (theory-free, facts, caps) is UNSAT for
+  each of these. RED: SAT.
+  - one equality;
+  - a chain;
+  - a haystack equality;
+  - a computed needle;
+  - a piece through a chain.
+
+  Its no-equality companion stays SAT.
+- (1) End to end, `t == ":" and s.find(t) > 200 and ":" notin s` is
+  `sxUnsat`. RED: a `maxSeqLen` decline. Its `find > 5 and in` companion
+  stays `sxSat`.
+- (1) Every guarded link is valid by the two checks. There must be at
+  least 17. RED: 9.
+- (2) Step 1c posed on its own is UNSAT for each new fact's shape, with a
+  SAT companion for each. RED: SAT.
+  - `replace_all`: same-length pieces; growth both ways; no occurrence;
+    and past the cap (SAT without the cap).
+  - `in_re`: both loop forms; concat and union; and a 200-loop against
+    the cap.
+  - `from_int`: `n < 1000`, `n < 0`, `n >= 100`, the `to_int` round trip,
+    and `n < 2^64`.
+  - `indexof`: from a nonzero start, both directions, and a suffix.
+  - Word equations: a part containing the needle; `a ++ ":" ++ b`; the
+    1-character converse; prefix and suffix; and `indexof`. A
+    two-character needle straddling two parts stays SAT.
+- (2) Every new fact is valid by the two checks. There must be at least
+  40 (RED: 14), and at least 31 word-equation facts (RED: 21).
+- (2) The mutant check: each of the six broken facts is flagged.
+- (3) Step 1c posed on its own decides each `seq.last_indexof` link, with
+  a SAT companion. RED: SAT. Every such link is valid; there must be at
+  least 19 (RED: 14).
+- (3) End to end, under `seqQueryRLimit = 2_000`:
+  - the `endsWith` query above. RED: step 3's "was not decided".
+  - `s.rfind(':') > 200 and ':' notin s`. Already `sxUnsat` at 58e52af,
+    by step 3. It is now decided by step 1c.
+
+  The companion `rfind > 3 and in` stays `sxSat`.
+- The `>= 182` floor.
+
+Re-pinned: `phase15_CR2_cachekey` (181 -> 182; 179 -> 181 was S8ao's).
+
+*Different mechanisms, reported and not fixed here.*
+- **Step 1 itself can run out of budget.** `s.len > 10 and s[7] == ':'
+  and s.rfind(':') < 7` and `s.find(':') >= 0 and s.rfind(':') <
+  s.find(':')` are UNSAT on their own. Under `seqQueryRLimit = 2_000`, step
+  1 (the capped one-shot solve) is canceled. On Z3 4.13.4 that happens at
+  the default 20M for the second query, and at 2,000 for `':' in s and
+  s.rfind(':') < 0`. Step 1c runs only after an UNSAT in step 1, so it is
+  never reached. Step 3 is canceled too, and step 1b's fallback after (3)
+  takes no facts. The links that would decide these are pinned at step
+  1c's level. Running the facts in that fallback would decide them, but
+  the fallback's context cost is what S8v measured against step 1b.
+- **`L` at least every found first index is not emitted** (see Validity
+  above). A query refuted only through it (`rfind < find` with both
+  found) is not decided by step 1c.
+- **`str.replace_all` is unreachable from the walker.**
+  `Z3_mk_seq_replace_all` sits behind nim-z3's `-d:z3WithSeqReplaceAll`,
+  and the walker does not lower `strutils.replace` to it. The facts
+  serve parsed queries only.
+- **The equality classes are syntactic over the roots.** Only a sequence
+  equality the roots mention (outside quantifiers) joins two classes;
+  each link it enables is guarded by it, so one under a disjunction or a
+  negation stays sound. An equality the query implies without stating it
+  (`len(t) = 1 and str.to_code(t) = 58`) is not seen.
 
 **`closureForcedUnknown` needs more than a propagation fix — round 2
 correction.** Round 1 argued the closure veto is redundant "once the descent's

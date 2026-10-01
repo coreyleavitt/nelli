@@ -32,6 +32,17 @@
 ## RED (compile crash) -> GREEN (classified `sxUnknown`, never a crash, never
 ## a silent wrong verdict) -- walker v121->v122 (see `symexWalkerVersion`'s
 ## own doc comment, `canonicalize.nim`, for the full writeup).
+##
+## ---- Superseded in part by RFC-0005 S8ao ------------------------------------
+## The "out of proportion" call above was for a GENERIC value-typed field-write
+## rebind. S8ao built exactly that rebind for the narrower `.add`-on-a-seq-
+## field case (reusing S8p's `valueFieldWrite`, already landed for plain
+## `obj.seqField = v` by the time S8ao shipped) and routed `add` through it
+## ahead of this decline. `mutatePlainField` and `mutateVariantArmField` below
+## -- both bare `.add` -- now model the append instead of declining; their
+## tests were updated accordingly (walker floor raised to 181). `.del` and
+## `.insert` through a dotted field are UNCHANGED (S8ao named `add` only) and
+## still decline exactly as this file originally pinned.
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -48,9 +59,11 @@ type
     of kB: n: int
 
 proc mutatePlainField(w: Widget, x: int) =
-  ## Pre-fix: crashed the whole macro expansion (RED, confirmed via
-  ## stash-bisection against this slice's own diff -- reverting the
-  ## `dsl_parser.nim` change reproduces the compile-time abort exactly).
+  ## Pre-N49: crashed the whole macro expansion (RED, confirmed via
+  ## stash-bisection against N49's own diff -- reverting the `dsl_parser.nim`
+  ## change reproduces the compile-time abort exactly). Post-N49, pre-S8ao:
+  ## classified decline (`sxUnknown`). Post-S8ao: modeled, via the field-path
+  ## `.add` rebuild -- see the module header's "Superseded in part" note.
   var w2 = w
   w2.items.add(x)
   if w2.items.len > 0:
@@ -82,6 +95,10 @@ proc mutatePlainFieldInsert(w: Widget, x: int) =
 proc mutateVariantArmField(v: VariantThing, x: int) =
   ## Same crash class through a variant ARM field -- the receiver arrives
   ## as `nnkCheckedFieldExpr(dotExpr, discCheck)`, not a bare `nnkDotExpr`.
+  ## Post-S8ao: modeled, same as the plain-object case above --
+  ## `dottedSeqAddShape`/`dottedFieldAdd` (`dsl_parser.nim`) unwrap the
+  ## `nnkCheckedFieldExpr` and reuse `valueFieldWrite`, which already forks
+  ## the discriminant check for a variant-arm field write.
   var v2 = v
   if v2.kind == kA:
     v2.items2.add(x)
@@ -109,14 +126,16 @@ proc mutateBareLocal(xs: seq[int], x: int) =
   if ys.len > 0:
     symexTarget("bare_added")
 
-suite "N49 -- dotted-field lvalue mutation: honest classified decline":
-  test "plain object dotted-field seq .add() declines cleanly (no crash)":
+suite "N49 -- dotted-field lvalue mutation":
+  test "plain object dotted-field seq .add() is modeled (RFC-0005 S8ao)":
+    ## Pre-S8ao this declined cleanly (`sxUnknown`); S8ao routed `.add`
+    ## through the field path instead (see the module header).
     let r = symexFind(mutatePlainField, tLabel("plain_added"))
-    check r.status == sxUnknown
+    check r.status == sxSat
 
-  test "variant-arm object dotted-field seq .add() declines cleanly (no crash)":
+  test "variant-arm object dotted-field seq .add() is modeled (RFC-0005 S8ao)":
     let r = symexFind(mutateVariantArmField, tLabel("variant_added"))
-    check r.status == sxUnknown
+    check r.status == sxSat
 
   test "rider: plain object dotted-field seq .del() declines cleanly (no crash)":
     let r = symexFind(mutatePlainFieldDel, tLabel("plain_deleted"))

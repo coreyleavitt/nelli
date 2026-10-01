@@ -284,6 +284,19 @@ const allowlist = [
   "symex.nim:emitTyAndReaderShared: let elseArm : VariantArm (ntyObject) <- ax.arms[elseArmIx]",
 ]
 
+# RFC-0005 S8ak: a reachable/forced-generic key's `file:name` identity,
+# stripping the trailing `@<line>`. S8ad shifted `traceOneCallBoundary`
+# from `dsl_parser.nim:7269` to `:7270` by editing ABOVE it; the hardcoded
+# "@7269" this const used to carry went stale the instant that landed, and
+# re-typing "@7270" here would only move the same trap one edit further
+# out. Comparing identity (name+file) instead of the full key, below,
+# means no edit anywhere in `dsl_parser.nim` can ever desync this list
+# from reality again -- the production fix (`vm_alias_guard.nim`'s own
+# doc, item 6) makes the same change for the same reason.
+proc genericKeyPrefix(k: string): string =
+  let at = k.rfind('@')
+  if at < 0: k else: k[0 ..< at]
+
 # RFC-0005 S8ah: every generic the mechanical reachability walk finds
 # VM-reachable ANYWHERE in the real 16-file scope must appear here, with a
 # corresponding `vmGuardAuditInstantiation` call somewhere in this compile
@@ -291,7 +304,7 @@ const allowlist = [
 # is a GLOBAL compile-time list -- one made by `vm_alias_guard.nim`'s own
 # self-audit, which this file also pulls in by importing that module).
 const realScopeForcedGenerics = [
-  "dsl_parser.nim:traceOneCallBoundary@7269",
+  "dsl_parser.nim:traceOneCallBoundary",
 ]
 
 # `vmGuardForcedGenerics` is `{.compileTime.}` (VM-only storage); snapshot
@@ -503,6 +516,14 @@ vmGuardAuditMacroReachWithSpecs(s8ahFxQuotedGenericCall, thisFile, fixtureGeneri
 # tests below.
 vmGuardAuditInstantiation(fxGenericAliasShape[seq[int]](@[@[1, 2, 3]]), thisFile)
 
+# RFC-0005 S8ak: snapshot AFTER the forcing call just above, so this
+# includes `fxGenericAliasShape`'s own forced key alongside whatever
+# `vm_alias_guard.nim`'s own import-time self-audit already forced
+# (`globallyForcedGenerics`, snapshotted earlier, captures only the
+# latter -- this file's OWN forcing above runs later in module-init
+# order, so it is NOT yet in that earlier snapshot).
+const fixtureForcedGenerics = vmGuardForcedGenerics
+
 const fixtureLetHits = block:
   var dedup: seq[string]
   for h in vmGuardLetHits:
@@ -622,21 +643,29 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
     check not fixtureReachHits.anyIt(it.contains("s8ahFxQuotedGenericCall"))
 
   test "GREEN: every generic the real 16-file scope finds VM-reachable has a forced-instantiation audit":
+    # RFC-0005 S8ak: compared by `genericKeyPrefix` (name+file), never the
+    # full `file:name@line` key -- S8ad's `dsl_parser.nim` edit (7269 ->
+    # 7270) proved the full-key comparison breaks on ANY edit that shifts a
+    # registered generic's declaration, independent of whether the
+    # generic's own reachability or forced-ness actually changed.
     var reachableGenerics: seq[string]
     for h in realScopeReachHits:
       let genericKey = h.split(" -> ")[^1]
       if genericKey notin reachableGenerics: reachableGenerics.add genericKey
+    let globallyForcedPrefixes = globallyForcedGenerics.mapIt(genericKeyPrefix(it))
     var unforced: seq[string]
     for g in reachableGenerics:
-      if g notin realScopeForcedGenerics and g notin globallyForcedGenerics: unforced.add g
+      if genericKeyPrefix(g) notin realScopeForcedGenerics and
+         genericKeyPrefix(g) notin globallyForcedPrefixes: unforced.add g
     check unforced.len == 0
     if unforced.len > 0: echo "UNFORCED VM-REACHABLE GENERIC:\n" & unforced.join("\n")
     # And the converse: an entry on the forced list that the real scope no
     # longer finds reachable is stale (the same staleness check the
     # allowlist above already gets).
+    let reachablePrefixes = reachableGenerics.mapIt(genericKeyPrefix(it))
     var stale: seq[string]
     for g in realScopeForcedGenerics:
-      if g notin reachableGenerics: stale.add g
+      if g notin reachablePrefixes: stale.add g
     check stale.len == 0
     if stale.len > 0: echo "STALE FORCED-GENERIC ENTRY:\n" & stale.join("\n")
 
@@ -650,7 +679,11 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
     for h in realScopeReachHits:
       let genericKey = h.split(" -> ")[^1]
       if genericKey notin reachableGenerics: reachableGenerics.add genericKey
-    check reachableGenerics == @["dsl_parser.nim:traceOneCallBoundary@7269"]
+    # RFC-0005 S8ak: compared by identity (name+file), not the full key --
+    # see `genericKeyPrefix`'s own doc. The line is still reported in
+    # `reachableGenerics` itself (useful diagnostic detail); it is just
+    # never load-bearing for THIS assertion.
+    check reachableGenerics.mapIt(genericKeyPrefix(it)) == @["dsl_parser.nim:traceOneCallBoundary"]
 
 suite "S8ak: a zero-required-argument macro is resolved by symbol, not auto-invoked":
 
@@ -663,8 +696,11 @@ suite "S8ak: a zero-required-argument macro is resolved by symbol, not auto-invo
     # silently executed (producing `discard just(5); newLit(0)`'s `0`, an
     # `nnkIntLit`) instead of ever having its body walked, and this check
     # failed (`fixtureReachHits` held no entry for it at all).
+    # RFC-0005 S8ak: matched on "-> strategy.nim:just@", not the exact
+    # line -- see `genericKeyPrefix`'s own doc for why a hardcoded line in
+    # a check like this is exactly the trap that broke `traceOneCallBoundary`.
     check fixtureReachHits.anyIt(it.contains("s8akFxZeroArgDirectGenericCall") and
-                                  it.contains("-> strategy.nim:just@130"))
+                                  it.contains("-> strategy.nim:just@"))
 
   test "GREEN: no getImpl/audit-machinery error from resolving a zero-arg macro's name":
     check realScopeErrs.len == 0
@@ -692,3 +728,36 @@ suite "S8ak: extractTopLevelNames/extractTopLevelMacroNames enumerate from a rea
   test "GREEN: extractTopLevelNames also finds the split-keyword macro" &
        " (it audits every routine kind, not only procs)":
     check "s8akSplitKeywordMacro" in scanFixtureNames
+
+suite "S8ak: a reachable generic's hit key tracks the live declaration, never the " &
+      "registry's hand-typed line":
+
+  test "RED/GREEN (mechanism): a wrong/stale line in the generic's OWN spec entry must " &
+       "not desync the reachable-generic key from the forced-instantiation key":
+    # `fixtureGenericSpecs` (above) registers `fxGenericAliasShape` with
+    # `line: 0` -- deliberately wrong, since the real declaration is nowhere
+    # near line 0. This is exactly the shape of S8ad's real regression: an
+    # edit elsewhere in the file left the registry's OWN recorded line
+    # stale relative to where the generic actually lives.
+    #
+    # Before this fix, `vmGuardWalkForGenericCallsAux` built the reachable
+    # hit's key from `spec.line` (here, the wrong `0`), while
+    # `vmGuardAuditInstantiation`'s forced key (the `vmGuardAuditInstantiation`
+    # call just above `fixtureForcedGenerics`'s own snapshot) always derived
+    # its line LIVE from `getImpl()` (`fxGenericAliasShape`'s real
+    # declaration line) -- so `"...fxGenericAliasShape@0"` never matched
+    # `"...fxGenericAliasShape@<real line>"`, and a generic that IS already
+    # forced in this very file would still show up "unforced" by the exact
+    # same completeness check `realScopeReachHits`/`realScopeForcedGenerics`
+    # run on the real scope. After the fix, the reachable-generic key is
+    # derived from the MATCHED CALLEE's own live `getImpl()` too (see
+    # `vmGuardWalkForGenericCallsAux`'s own doc), so `spec.line` being wrong
+    # -- by one, by a thousand, in either direction -- can never matter.
+    var reach: seq[string]
+    for h in fixtureReachHits:
+      if h.contains("s8ahFxDirectGenericCall"): reach.add h.split(" -> ")[^1]
+    check reach.len == 1
+    check reach[0] in fixtureForcedGenerics
+    if reach.len == 1 and reach[0] notin fixtureForcedGenerics:
+      echo "REACHABLE-BUT-UNFORCED (line-keying desync): ", reach[0],
+           "\nFORCED KEYS: ", fixtureForcedGenerics.join(", ")

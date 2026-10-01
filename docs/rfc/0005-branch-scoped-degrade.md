@@ -5066,6 +5066,106 @@ additional coverage of this slice's actual change.
   shaped to avoid auto-invoke; not a gap in the real `vmGuardAuditNames`
   path, which item 1 fixes directly.
 
+**As landed (S8ak, second round, no bump) — the line-keyed registry fix
+and Linux build-time-audit coverage.** All three Windows legs went red at
+the channel tip (`94b8303`, S8ad) immediately after the round above
+landed: `symex.nim(3141)`'s and `vm_alias_guard.nim`'s own self-audits
+both `doAssert unforced.len == 0`, naming `dsl_parser.nim:
+traceOneCallBoundary@7269` as unforced even though it is, in fact,
+already forced. Root cause, confirmed by reading the code rather than
+assuming: `genericRoutineSpecs*: seq[GenericRoutineSpec]` (the 37-entry
+registry) hand-types each generic's declaration LINE as a literal;
+`calleeMatchesGeneric` (the eligibility check) never reads `spec.line` —
+only `spec.name`/`spec.file` — so that field was already dead for
+MATCHING, but `vmGuardWalkForGenericCallsAux` still baked it into the
+REACHABLE-generic hit key, while `vmGuardAuditInstantiation`'s own
+forced-instantiation key for the very same generic has always derived its
+line LIVE from `impl.lineInfoObj.line`. S8ad edited `dsl_parser.nim`
+*above* `traceOneCallBoundary`, shifting it from line 7269 to 7270;
+`genericRoutineSpecs` still said 7269; the two independently-built keys
+silently desynced. Linux never saw it: the sweep never turns on
+`-d:nelliVmAliasAudit`, so neither self-audit block is even semantically
+checked in any Linux-gated compile, and S8ak's own first round only ran
+`letaudit` by hand, pre-S8ad.
+
+1. **Fix: the reachable-generic hit key is now derived from the MATCHED
+   CALLEE's own live `getImpl()`**, exactly mirroring what
+   `vmGuardAuditInstantiation`'s forced key already did
+   (`vmGuardWalkForGenericCallsAux`, `vm_alias_guard.nim`; see that
+   procedure's own doc and the module header's item 6 for the full
+   mechanism). `calleeMatchesGeneric` (eligibility) is unchanged — it
+   never used `spec.line` either. `genericRoutineSpecs`' `line` field is
+   left as-is in the tuple (it still tells apart `logCmp`'s two same-file
+   overloads, `coverage.nim:540`/`:561`, and `map`'s,
+   `strategy.nim:236`/`:303`, for a human reading the table) but is now
+   NEVER consulted when building either key — an edit anywhere in the
+   file, not just the one line S8ad happened to shift, can no longer
+   desync the two sides. `checkUnsatOverTaintOnly` (`types.nim`, the
+   coordinator's second named check) carries the same kind of stale
+   registry line (hardcoded 3434; real declaration now at 3438, also
+   moved by S8ad) but was never actually reachable in the real scope (only
+   `traceOneCallBoundary` is), so it never manifested as a CI failure —
+   it is fixed by the same change, since the fix touches the KEY
+   derivation for every registered generic, not `traceOneCallBoundary`
+   specially.
+2. **RED test added, reusing existing scaffolding rather than new
+   fixtures.** `fixtureGenericSpecs` (the test file's own small
+   reachability-mechanism fixture list) already registered
+   `fxGenericAliasShape` with a deliberately wrong `line: 0` — pre-existing
+   S8ah scaffolding, never actually exercised at the `@line` suffix, since
+   the existing checks only `.contains()`-matched a prefix. A new test
+   (suite "S8ak: a reachable generic's hit key tracks the live
+   declaration, never the registry's hand-typed line") cross-checks
+   `s8ahFxDirectGenericCall`'s reach-hit key against a new
+   `fixtureForcedGenerics` snapshot (`vmGuardForcedGenerics`, taken AFTER
+   this file's own `fxGenericAliasShape[seq[int]]` forcing call, unlike
+   the earlier `globallyForcedGenerics` snapshot which runs before it).
+   Confirmed RED against the pre-fix key derivation — failure text:
+   `reach[0] was ...fxGenericAliasShape@0`, `fixtureForcedGenerics was
+   @[..., ...fxGenericAliasShape@394]`, i.e. the exact mismatch class,
+   reproduced on demand rather than only at the real scope's one
+   instance — then GREEN with the fix applied. The real-scope
+   completeness/converse/exact-match checks (`realScopeForcedGenerics`
+   and the "exactly 1 of 37" assertion) are also made line-independent
+   (a `genericKeyPrefix` helper strips the `@<line>` suffix before
+   comparing), so the TEST's own assertions cannot re-introduce the same
+   staleness trap by hardcoding a line number either — confirmed by the
+   same RED/GREEN run surfacing `traceOneCallBoundary@7270` (today's real,
+   live line) where the old hardcoded assertion said `@7269`. A second,
+   pre-existing hardcoded-line assertion in the S8ak-item-1 suite
+   (`-> strategy.nim:just@130`) was hardened the same way on sight, before
+   it could become a second copy of this exact bug.
+3. **Linux now exercises the build-time audit.** New
+   `tests/tsymex_rfc0005_s8ab_letaudit.nim.cfg` adds `-d:nelliVmAliasAudit`
+   — Nim auto-reads a `<file>.nim.cfg` sibling, so `scripts/sweep.sh`
+   (which compiles `tests/t*.nim` directly, each via `dt-bounded.sh`,
+   with no per-file special-casing) now compiles `symex.nim`'s and
+   `concolic.nim`'s own `when defined(nelliVmAliasAudit):` self-audit
+   blocks for this ONE suite on Linux too — a future line-shift like
+   S8ad's now goes red in the Linux gate, not only on the three Windows
+   legs. Scoped to this file alone (Nim's `.nim.cfg` lookup is per main
+   module filename): no other suite's compile changes, so the "tell me
+   first" condition does not apply and the full-suite sweep is still
+   correctly skipped for this slice (below). **Per-compile cost** (podman,
+   cpp backend, wall clock via `time scripts/dt-bounded.sh`): 52.9s
+   without the define, 70.7s with it — **+17.8s (~+34%)** for this one
+   suite's compile; zero cost everywhere else, since no other `.nim.cfg`
+   sets the define and it is `when`-gated out of every other compile unit.
+4. **Re-verified real-scope counts: unchanged.** Still 22 unique macro
+   names, still 37 registered generics, still exactly 1 VM-reachable
+   (`traceOneCallBoundary`) — the fix changes how a hit's KEY is built,
+   not which generics are found reachable or forced. `dt-bounded.sh c` and
+   `dt-bounded.sh cpp` both green at the rebased sha, 26/26 tests (one new:
+   the line-keying RED/GREEN mechanism test above).
+
+**The full-suite sweep gate stays skipped for this round too**, per the
+same reasoning as the first round above: the `src/` change is entirely
+inside the `when defined(nelliVmAliasAudit):`-reachable surface
+(`vmGuardWalkForGenericCallsAux`, called only from the opt-in audit path),
+and the one compile-affecting addition (`letaudit`'s new `.nim.cfg`) is
+scoped to that single suite, verified individually above. No ordinary
+`sweep.sh`/`nimble test` compile path changed.
+
 ### §2.6 The raise-routing recovery — *corrected*
 
 `routeRaise` (`runtime.nim:11380-11384`) kills any tainted path

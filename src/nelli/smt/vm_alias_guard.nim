@@ -78,6 +78,27 @@
 ##    OWN line never contains the name at all) -- a real parser has no line
 ##    boundaries to be confused by in the first place. See
 ##    `tests/s8ak_scan_fixture.nim` for both fixtured shapes.
+## 6. **A reachable generic's hit key is derived from the live callee, never
+##    `genericRoutineSpecs`' own hand-typed `line` field.** Found by a
+##    Windows-only build-time-gate failure (the Linux sweep never compiles
+##    with `-d:nelliVmAliasAudit` on): S8ad edited `dsl_parser.nim` above
+##    `traceOneCallBoundary`, shifting it from line 7269 to 7270;
+##    `genericRoutineSpecs` still said 7269, so the reachable-generic hit
+##    key (`vmGuardWalkForGenericCallsAux`, built from `spec.line`) and
+##    `vmGuardAuditInstantiation`'s forced-instantiation key (always built
+##    from the LIVE `getImpl().lineInfoObj.line`) silently stopped matching
+##    -- `traceOneCallBoundary` is both reachable AND already forced, but
+##    `symex.nim`'s and this module's own self-audits both reported it
+##    "unforced" and failed their `doAssert`. `calleeMatchesGeneric` (the
+##    ELIGIBILITY check) only ever compared `spec.name`/`spec.file` --
+##    `spec.line` was dead for MATCHING already, only ever used to build
+##    the hit string -- so building that string from the matched callee's
+##    own `getImpl()` instead fixes this with no change to eligibility, and
+##    makes the key immune to any future edit anywhere in the file, not
+##    just the one S8ad happened to make. `genericRoutineSpecs`' `line`
+##    field itself is unchanged (still needed to tell `logCmp`'s and
+##    `map`'s two same-file, same-name overloads apart during review; see
+##    its own doc) -- only the derived KEY stopped trusting it.
 ##
 ## No walker bump: this is compile-time reflection over already-compiled
 ## modules, same as S8ab/S8af/S8ah -- it never touches the SMT IR.
@@ -353,9 +374,32 @@ proc vmGuardWalkForGenericCallsAux(n: NimNode; macroTag: string;
   if n.kind in {nnkCall, nnkCommand} and n.len > 0:
     let callee = unwrapHidden(n[0])
     if callee.kind == nnkSym:
+      var registered = false
       for spec in specs:
-        if calleeMatchesGeneric(callee, spec):
-          hits.add macroTag & " -> " & spec.file & ":" & spec.name & "@" & $spec.line
+        if calleeMatchesGeneric(callee, spec): registered = true
+      if registered:
+        # RFC-0005 S8ak: the hit key is derived from the MATCHED CALLEE's
+        # own live `getImpl()`, never from `spec.line` -- `calleeMatchesGeneric`
+        # above only ever used `spec.name`/`spec.file` (never `spec.line`) to
+        # decide eligibility, so `spec.line` was already dead for MATCHING;
+        # it was still baked into this hit string, which is exactly what
+        # broke S8ad's `dsl_parser.nim` edit: that edit shifted
+        # `traceOneCallBoundary` from line 7269 to 7270, `genericRoutineSpecs`
+        # still said 7269, and `vmGuardAuditInstantiation`'s own forced-key
+        # (below) ALREADY derived its line live -- so the two keys silently
+        # stopped matching and a real, already-forced generic was reported
+        # "unforced" (`symex.nim`'s and `vm_alias_guard.nim`'s own
+        # self-audits both `doAssert unforced.len == 0`). Deriving THIS key
+        # live too means an edit anywhere else in the file -- above, below,
+        # anywhere -- can never desync it from the forced-instantiation key,
+        # which is the one invariant a registry keyed by "this routine's
+        # declaration line, hand-copied into a const table" cannot give.
+        var impl: NimNode
+        try: impl = callee.getImpl()
+        except CatchableError: impl = nil
+        if impl != nil and impl.kind != nnkNilLit:
+          hits.add macroTag & " -> " & extractFilename(impl.lineInfoObj.filename) &
+                    ":" & macros.strVal(callee) & "@" & $impl.lineInfoObj.line
       # RFC-0005 S8ah (real-scope finding): a macro's OWN body frequently
       # calls the generic only through an intermediate PROC (e.g.
       # `dsl_parser.nim`'s `traceOneCallBoundary` is called from

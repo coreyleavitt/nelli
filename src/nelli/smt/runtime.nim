@@ -3614,14 +3614,21 @@ proc indexSplitAxioms*(sp: IndexSplit):
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   let lenS = len(sp.s)
+  # "c notin t" is stated as `t in (allchar & ~c)*`, which for a
+  # one-character `c` holds exactly when `not contains(t, c)` does. The
+  # choice is measured, not derived: as `not contains`, round-6 B1-3's
+  # `data.len == 37` hit runs out at 20M on Z3 5.1; as the regex it is SAT
+  # in 122k (4.13.4: 549k against 224k). The RFC's S8ag note has the rest.
+  let noC = star(intersect(mkRegexAllChar[Z3String](ctx),
+                           complement(mkRegex(ctx, sp.c))))
   let found = (sp.ix >= zero) and
     (sp.s == concat(sp.pre, concat(sp.x, concat(sp.c, sp.post)))) and
     (len(sp.pre) == sp.start) and (sp.ix == sp.start + len(sp.x)) and
-    (not contains(sp.x, sp.c))
+    matches(sp.x, noC)
   (found: (sp.ix == minusOne) or found,
    notFound: implies(sp.ix == minusOne,
      (sp.start < zero) or (sp.start > lenS) or
-     (not contains(substr(sp.s, sp.start, lenS - sp.start), sp.c))))
+     matches(substr(sp.s, sp.start, lenS - sp.start), noC)))
 
 proc indexSplitChain*(a, b: IndexSplit): Z3Bool =
   ## RFC-0005 S8ag. The chain fact between two splits of one haystack: when
@@ -11550,6 +11557,23 @@ func budgetOutFloor(settings: SymexSettings): int =
   elif sq == 0: int(q)
   else: int(min(q, sq))
 
+type TargetSolveCost* = enum
+  ## RFC-0005 S8ag. What a target-hit solve's spend says about it.
+  tscCheap      ## neither below
+  tscBudgetOut  ## unknown, with the whole budget spent (S8y)
+  tscSlowSat    ## SAT, with at least half the budget spent: `checkCapped`'s
+                ## capped step 1 ran out and the uncapped step 3 found it
+
+func classifyTargetSolve*(st: SymexStatusKind; spent, floor: int):
+    TargetSolveCost =
+  ## RFC-0005 S8ag. `floor` is `budgetOutFloor`; 0 (unbounded) is never
+  ## costly. An UNSAT is never costly here: it is no candidate, and its
+  ## depth bounds nothing.
+  if floor <= 0: tscCheap
+  elif st == sxUnknown and spent >= floor: tscBudgetOut
+  elif st == sxSat and spent >= floor div 2: tscSlowSat
+  else: tscCheap
+
 func atLeastAsDeep(p: Path; depth: openArray[tuple[loop: int, iters: int]]):
     bool =
   ## RFC-0005 S8y. `p` has entered the body of each loop in `depth` at least
@@ -11634,13 +11658,12 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
   let spent = rlimitCountNow(w.z3) - spentBefore
   symexTargetSolveStats.units += spent
-  let floor = budgetOutFloor(solveSettings)
-  if st == sxUnknown:
-    if floor > 0 and spent >= floor:
-      inc symexTargetSolveStats.budgetOut
-      if p.taint != {} and p.loopIters.len > 0:
-        w.budgetOutDepths.add p.loopIters
-  elif st == sxSat and p.taint != {} and floor > 0 and spent >= floor div 2:
+  case classifyTargetSolve(st, spent, budgetOutFloor(solveSettings))
+  of tscBudgetOut:
+    inc symexTargetSolveStats.budgetOut
+    if p.taint != {} and p.loopIters.len > 0:
+      w.budgetOutDepths.add p.loopIters
+  of tscSlowSat:
     # RFC-0005 S8ag: a tainted SAT found only after half the budget --
     # `checkCapped`'s capped step 1 ran out and the uncapped step 3 found
     # a model -- spent 10M of a 20M budget and more, and is no budget-out.
@@ -11649,9 +11672,12 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
     # so a later tainted hit at least as deep is declined, classified, and
     # voids `sxUnsat` as the solve would have; what is given up is a
     # further candidate for S10's replay beside the one this hit found.
-    inc symexTargetSolveStats.slowSat
-    if p.loopIters.len > 0:
-      w.budgetOutDepths.add p.loopIters
+    # A clean hit's slow SAT bounds nothing: its SAT is a finding.
+    if p.taint != {}:
+      inc symexTargetSolveStats.slowSat
+      if p.loopIters.len > 0:
+        w.budgetOutDepths.add p.loopIters
+  of tscCheap: discard
   var errs: seq[SymexErrorInfo]
   if isCandidate:
     for i in exLiveStart ..< w.extractionErrors.len:

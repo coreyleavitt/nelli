@@ -11,6 +11,8 @@
 ##   ix = -1, or s = pre ++ x ++ c ++ post, len(pre) = i, ix = i + len(x),
 ##            c notin x
 ##   ix = -1 implies i < 0, or i > len(s), or c notin s[i ..]
+## (`c notin t` as the regex membership `t in (allchar & ~c)*`; the
+## differential in (1) checks that form)
 ## and, between two splits of one haystack, the chain fact
 ## (`indexSplitChain`): with both found and the second starting at the
 ## first's match plus one, its prefix is the first's prefix through the
@@ -33,7 +35,9 @@
 ##       `slowSat` and `rlimit` units;
 ##   (5) a tainted hit whose model search ran out its first half before the
 ##       uncapped search found a model (S8y's "step 1 out, step 3 SAT") is
-##       under the same scoped decline as a budget-out.
+##       under the same scoped decline as a budget-out: the rule itself by
+##       `classifyTargetSolve`, the walk by which kind of costly hit Z3
+##       gives (a slow SAT on 5.1, a budget-out on 4.13.4).
 import std/[unittest, strutils, random, options]
 import nelli/symex
 import nelli/smt/types
@@ -284,40 +288,57 @@ proc pairLoopS8ag(s: string) =
       i = p2
   symexTarget("s8ag_pair_after")
 
-const halfTainted = SymexSettings(
-  budget: ResourceBudget(seqQueryRLimit: 1_000_000))
-  ## At 1M (measured, Z3 5.1 and 4.13.4) one pair-loop hit runs out of its
-  ## capped first half and the uncapped search then finds a model, and no
-  ## hit runs out of the whole budget: the "step 1 out, step 3 SAT" case
-  ## S8y's budget-out bound did not take.
+const midTainted = SymexSettings(
+  budget: ResourceBudget(seqQueryRLimit: 400_000))
+  ## At 400k a pair-loop hit is costly on both Z3 versions, and shallow
+  ## enough that deeper hits follow it: on Z3 5.1 it is a slow SAT (step 1
+  ## out, step 3 SAT; 0 budget-outs, 7 declines), on 4.13.4 a budget-out
+  ## (3 declines). Which one depends on the Z3 build and even the
+  ## process's earlier contexts, so the walk is pinned on what both share,
+  ## and the slow-SAT classification itself by `classifyTargetSolve`.
 
 suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
 
-  test "one slow SAT, no budget-out; later hits as deep are declined":
+  test "classifyTargetSolve: a SAT after half the budget is slow":
+    check classifyTargetSolve(sxSat, 500, 1000) == tscSlowSat
+    check classifyTargetSolve(sxSat, 999, 1000) == tscSlowSat
+    check classifyTargetSolve(sxSat, 499, 1000) == tscCheap
+    check classifyTargetSolve(sxUnknown, 1000, 1000) == tscBudgetOut
+    check classifyTargetSolve(sxUnknown, 999, 1000) == tscCheap
+    # An UNSAT is no candidate and bounds nothing, however costly.
+    check classifyTargetSolve(sxUnsat, 1000, 1000) == tscCheap
+    # An unbounded solve is never costly.
+    check classifyTargetSolve(sxSat, 10_000_000, 0) == tscCheap
+    check classifyTargetSolve(sxUnknown, 10_000_000, 0) == tscCheap
+
+  test "a costly tainted hit bounds the deeper ones; with no budget-out it was a slow SAT":
     symexTargetSolveStats = default(typeof(symexTargetSolveStats))
-    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), halfTainted)
+    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
     let st = symexTargetSolveStats
     checkpoint show(r.errors)
     checkpoint "stats=" & $st
-    check st.budgetOut == 0
-    check st.slowSat == 1
+    check st.budgetOut + st.slowSat >= 1
     check st.declined >= 1
+    # Before S8ag a decline needed a budget-out; now a slow SAT alone
+    # gives one (Z3 5.1 at this budget).
+    if st.budgetOut == 0:
+      check st.slowSat >= 1
+    check st.slowSat <= 1
     # Each target-hit solve is bounded by the budget, so the walk's total
-    # is too: never more than (solved hits) x 1M, and in practice far less.
-    check st.units < 8 * 1_000_000
+    # is too, and in practice far below (solved hits) x 400k.
+    check st.units < 8 * 400_000
     check r.status == sxUnknown
 
-  test "with no budget-out, the declines are classified beSolverUndef, never sxUnsat":
-    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), halfTainted)
+  test "the declines are classified beSolverUndef, never sxUnsat":
+    let r = symexFind(pairLoopS8ag, tLabel("s8ag_pair_after"), midTainted)
     var declined = false
     for e in r.errors:
-      if e.kind == beSolverUndef and "not solved (RFC-0005 S8y)" in e.msg and
-         "found a model only after half" in e.msg:
+      if e.kind == beSolverUndef and "not solved (RFC-0005 S8y)" in e.msg:
         declined = true
     checkpoint show(r.errors)
     check declined
     check r.status != sxUnsat
 
 suite "S8ag: walker version floor":
-  test "symexWalkerVersion >= 176":
-    check parseInt(symexWalkerVersion) >= 176
+  test "symexWalkerVersion >= 182":
+    check parseInt(symexWalkerVersion) >= 182

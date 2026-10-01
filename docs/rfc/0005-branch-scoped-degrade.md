@@ -4777,7 +4777,8 @@ Pins: `tests/tsymex_rfc0005_s8ac_remainder.nim`, with a `.nim.cfg` that sets
 - **Copy-in/copy-out declines on possible aliasing.** The check is by
   argument (same root, or a type that can reach the cell). A callee that
   reaches the location through a global is not in the symex fragment.
-**As landed (S8ag, walker 176) — S8y's remainder: the one-character
+
+**As landed (S8ag, walker 182) — S8y's remainder: the one-character
 `str.indexof` split.** Two changes. (1) `iekStrFind` with a needle that
 folds to a one-character literal lowers to a fresh Int with split axioms
 in place of Z3's `str.indexof`. That covers the three closed forms of the
@@ -4785,16 +4786,27 @@ scan idiom: Q1's `tryRecognizeScanIdiom`, B3's `tryRecognizeScanPairIdiom`
 and B4's `tryRecognizeAccumulatingScan`. All three emit `iekStrFind`, and
 `lowerStrArm` is its only lowering. A caller's own `s.find(':')` takes
 the same path. (2) A tainted target hit that finds a model only after
-half its budget comes under S8y's scoped decline. Walker 175 -> 176.
+half its budget comes under S8y's scoped decline. Walker 179 -> 182.
 
 *1. The split.* `lowerIndexSplit` returns a fresh Int `ix` and fresh
 strings `pre`, `x` and `post`. The needle is `c`, the start `i`. Every
 query that reaches `ix` asserts (`indexSplitAxioms`):
 
 - (F) `ix = -1`, or: `ix >= 0`, `s = pre ++ x ++ c ++ post`, `len(pre) =
-  i`, `ix = i + len(x)` and `not contains(x, c)`;
-- (N) `ix = -1` implies `i < 0`, or `i > len(s)`, or `not contains(s[i
-  ..], c)`, where `s[i ..]` is `str.substr(s, i, len(s) - i)`.
+  i`, `ix = i + len(x)` and `c notin x`;
+- (N) `ix = -1` implies `i < 0`, or `i > len(s)`, or `c notin s[i ..]`,
+  where `s[i ..]` is `str.substr(s, i, len(s) - i)`.
+
+`c notin t` is asserted as `t in (allchar & ~c)*`
+(`str.in_re`/`re.inter`/`re.comp`), which for a one-character `c` holds
+exactly when `not contains(t, c)` does, so the proof below is the same for
+either. The regex is the one that works. Stated as `not contains`, round 6's
+B1-3 (`tsymex_r6_b1_stringbacked`, `data.len == 37` after a NUL scan)
+regressed on Z3 5.1. Its hit runs out at 20M (the suite goes RED, 528 s).
+As the regex it is SAT in 122k offline, against 20M+ out, and the suite is
+back to base. On 4.13.4 the same query is 224k as the regex and 549k as
+`not contains`. Regex in (F) with `not contains` in (N) still had B1-3's
+hit run out in-process on 5.1, so both arms take the regex.
 
 *Equivalence.* Z3 follows SMT-LIB's `str.indexof(s, t, i)`. It is -1 when
 `i < 0` or `i > len(s)`. For a non-empty `t` it is the least `j >= i` with
@@ -4863,25 +4875,22 @@ links the Int to `contains` as S8ae's `str.indexof` facts do, so `s.find(':')
 *2. N36-1's exit hits.* At 2f576ee on Z3 5.1:
 - the pair loop's first five-iteration exit hit (`loopIters` [4], S8y's
   q103/q106 floor) ran out of its tainted 20M budget;
-- the [3] hit before it spent 10.2M, with step 1 out and step 3 SAT.
+- the [3] hit before it spent 10.2M, with step 1 out and step 3 SAT;
+- S8y declined the deeper hits after the budget-out.
 
-On the split, per hit:
+On the split, every tainted hit in the file is SAT, and none costs more
+than 1.34M on 5.1. The [4] hit that ran out is SAT in 0.9M. The four hits
+S8y declined ([4] and [5], twice each) are SAT candidates. On 4.13.4 the
+dearest is [5] at 4.2M, which was 2.2M at base.
 
-| hit | 2f576ee | S8ag |
-|---|---|---|
-| [3] | SAT, 10.2M | SAT, 0.6-1.7M |
-| [4] | out, 20.0M | SAT, 3.9-6.9M |
-| [4], the sibling S8y declined | declined | SAT, 3.9M |
-| [5] | declined | SAT, 11.6-13.1M; the slow SAT, item 3 |
-| [5], second | declined | declined by item 3 (out, 20.1M, without it) |
-
-The figures vary by context, as S8y's note found; these are four runs.
-The verdicts are unchanged: N36-1, N36-1-noblock and s1c's N36 test are
-still `sxUnknown`. No hit changed between SAT and UNSAT.
+With `not contains` in the axioms (an earlier draft), [5] cost 11.6-13.1M
+and the second [5] ran out. The figures vary by context, as S8y's note
+found. The verdicts are unchanged: N36-1, N36-1-noblock and s1c's N36 test
+are still `sxUnknown`. No hit changed between SAT and UNSAT.
 
 *3. The slow-SAT bound.* `solveTargetHit` now handles a tainted hit that
 returns `sxSat` after spending at least half its budget
-(`budgetOutFloor div 2`):
+(`classifyTargetSolve`: `budgetOutFloor div 2`):
 - spending that much means `checkCapped`'s capped step 1 ran out, and the
   uncapped step 3 found the model;
 - the hit records its loop depths in `w.budgetOutDepths`, as a budget-out
@@ -4893,9 +4902,12 @@ What is given up is a further tainted candidate beside the one the slow
 hit found. A clean hit is always solved. `symexTargetSolveStats.units`
 now totals the target-hit `rlimit`, which gives the per-test cost pins.
 
-Without the bound, N36-1 on the split solves the second [5] hit and runs
-out of budget there: budgetOut=1, declined=0, 203 s. With it:
-budgetOut=0, declined=1, slowSat=1, 118 s.
+In the earlier draft with `not contains`, N36-1 without the bound solved
+the second [5] hit and ran out of budget there: budgetOut=1, declined=0,
+203 s. With the bound it had budgetOut=0, declined=1 and slowSat=1, in
+118 s. With the regex no N36 hit reaches half its budget, so the bound
+does not fire there. Section (5) pins it on the pair loop under a 400k
+budget, where it does fire on 5.1.
 
 *Measured.* Target-hit `rlimit` per suite (`-d:s8agTrace`, summed per
 hit) and wall time standalone at load 15-27, base 2f576ee against S8ag.
@@ -4903,30 +4915,41 @@ Every suite has the same OK count at base and at S8ag.
 
 | suite | Z3 5.1 base | Z3 5.1 S8ag | Z3 4.13.4 base | Z3 4.13.4 S8ag |
 |---|---|---|---|---|
-| n36_raise_degrade (8 OK) | 62.3M, 428 s, 2 out | 53.5M, 278 s, 0 out | 12.4M, 94 s | 8.3M, 75 s |
-| s1c_verdict (24 OK) | 54.3M, 323 s, 1 out | 17.9M, 112 s, 0 out | 7.4M, 77 s | 4.0M, 75 s |
-| q1_scanlift (13) | 0.82M | 0.21M | 0.71M | 0.24M |
-| r6_b5_chained (9) | 0.62M | 0.79M | 0.64M | 0.51M |
-| r6_nulwitness (14) | 0.13M | 0.24M | 0.25M | 0.14M |
-| r6_b4_readcstring (13) | 0.24M | 0.40M | 0.41M | 0.24M |
+| n36_raise_degrade (8 OK) | 62.3M, 428 s, 2 out | 8.2M, 41 s, 0 out | 12.4M, 94 s | 15.3M, 95 s |
+| s1c_verdict (24 OK) | 54.3M, 323 s, 1 out | 2.7M, 31 s, 0 out | 7.4M, 77 s | 8.6M, 79 s |
+| q1_scanlift (13) | 0.82M | 0.15M | 0.71M | 0.19M |
+| r6_b5_chained (9) | 0.62M | 0.57M | 0.64M | 0.40M |
+| r6_nulwitness (14) | 0.13M | 0.26M | 0.25M | 0.12M |
+| r6_b4_readcstring (13) | 0.24M | 0.40M | 0.41M | 0.22M |
 | s8r_theoryfree (3) | 0.01M | 0.02M | 0.01M | 0.01M |
 | s8v_termination (7) | 0.01M | 0.02M | 0.01M | 0.01M |
-| s8ae_remainder (16) | 0.04M | 0.05M | 0.12M | 0.10M |
+| s8ae_remainder (16) | 0.04M | 0.10M | 0.12M | 0.06M |
 | r4_strip (5) | 20.03M | 20.03M | 20.04M | 20.04M |
 
 r4_strip's 20M is its own adversarial pin (strip idempotence), unchanged.
 
+On Z3 4.13.4, n36 and s1c cost more than at base: +23% and +15%. The
+verdicts and per-hit statuses are identical, and nothing runs out. The
+extra cost is in the deepest pair-loop hits ([5]: 2.2M at base, 4.2M
+here), where the regex costs 4.13.4 more than `not contains` did (8.3M and
+4.0M in the earlier draft). That draft broke B1-3 on 5.1, which is the leg
+every Linux run takes, so the regex stays. Nothing on 4.13.4 nears a
+budget.
+
 Each hit's status (SAT, UNSAT or unknown) is identical at base and S8ag in
 q1, b5, nulwitness, b4, s8r, s8v, s8ae and r4, on both Z3 versions. The
 moves are these, and every one is intended:
-- n36 on 5.1: [4] unknown -> SAT, twice; and four hits S8y declined are
-  now SAT candidates.
-- s1c on 5.1: the last two tainted hits ([4] SAT, [5] out) are declined
-  by the slow-SAT bound.
-- On 4.13.4, n36 and s1c are identical per hit, and cheaper.
+- n36 on 5.1: [4] unknown -> SAT, twice; and the four hits S8y declined
+  ([4] and [5], twice each) are now SAT candidates.
+- s1c on 5.1: the last tainted hit ([5], out at 20.0M) is SAT in 0.5M.
+- On 4.13.4, n36 and s1c are identical per hit.
+- The r6 suites b1_stringbacked, b3_scanpair, n10_coverage_matrix,
+  b7r_bytescan and b7r2_pathscope are identical per check at base and
+  S8ag, on both Z3 versions. b1_stringbacked takes 67 s on 5.1, against
+  432 s at base.
 
 *Pins.*
-- `tsymex_rfc0005_s8ag_indexsplit` (14):
+- `tsymex_rfc0005_s8ag_indexsplit` (15):
   - (1) a 300-instance randomized differential of the axioms against Z3's
     `str.indexof`. It is RED on two mutants: the found arm without `c
     notin x`, and an off-by-one not-found range.
@@ -4936,16 +4959,23 @@ moves are these, and every one is intended:
     witness that satisfies the program.
   - (3) S8ae's step 1c link, the context guard, and the needles that are
     not split.
-  - (5) under a 1M budget the pair loop has budgetOut=0, slowSat=1,
-    declined>=1 and `sxUnknown`.
-  - The `>= 176` floor.
+  - (5) `classifyTargetSolve` (slow SAT at half the budget, budget-out at
+    all of it, an UNSAT or an unbounded solve never costly). Under a 400k
+    budget, the pair loop has a costly hit (`budgetOut + slowSat >= 1`)
+    with declines after it. With no budget-out the costly hit was a slow
+    SAT, which is Z3 5.1's case: 0 out, 1 slow, 3 declined. Z3 4.13.4's
+    case is 1 out and 5 declined. The result is `sxUnknown`, and each
+    decline is a classified `beSolverUndef`.
+  - The `>= 182` floor.
   - At 2f576ee the file does not compile (`IndexSplit`).
 - N36-1, N36-1-noblock and s1c's N36 test now pin `budgetOut == 0` (it was
   1 at 2f576ee, so these are RED there), `slowSat <= 1`, and `units < 40M`.
 - `tsymex_rfc0005_s8y_budget_decline`'s tight budget drops from 2M to
-  100k. At 2M the pair loop no longer runs out (0 out, 1 slow SAT). At
-  100k it runs out before any slow SAT, which pins S8y's mechanism alone
-  (`slowSat == 0`).
+  20k, and its pin from `budgetOut == 1` to `>= 1`. At 2M the pair loop
+  no longer runs out on Z3 5.1. At 20k a shallow hit runs out on both
+  versions: 2 budget-outs on each, with 22 declines on 5.1 and 24 on
+  4.13.4. A shallower hit walked after the first budget-out can run out
+  too.
 
 *Different mechanisms, reported and not fixed here.*
 - **S8y's own suite is red on Z3 4.13.4 at 2f576ee.** "one tainted
@@ -4953,10 +4983,25 @@ moves are these, and every one is intended:
   `budgetOut=1 declined=0`: the only budget-out there is the deepest hit,
   [5]. That is the symex-mingw leg's Z3, so S8y alone would ship a Windows
   red. S8ag's retuned budget passes on both versions.
-- **The per-hit cost still depends on the context.** For the same [5] hit
-  that is 11.6M in one build and 13.1M in another (s1c's N36 test: 17.9M
-  against 29.5M units). Adding a probe's own `rlimitCountNow` call is
-  enough to move it. The pins bound counts and a ceiling, not a figure.
+- **Which mechanism fires depends on the Z3 build, and on the process's
+  earlier contexts.** In the same pair loop at the same budget, one run
+  has a slow SAT and the next a budget-out: at 100k on Z3 4.13.4, a
+  standalone run against the same walk after the file's earlier tests.
+  So the pins require a costly hit and its declines, not which kind it
+  was.
+- **The per-hit cost still depends on the context.** In the earlier
+  `not contains` draft, the same [5] hit cost 11.6M in one build and 13.1M
+  in another (s1c's N36 test: 17.9M against 29.5M units). Adding a probe's
+  own `rlimitCountNow` call was enough to move it. Offline, one dumped
+  query's cost does not track its in-process cost: n36's [5] query is
+  unknown at 20M offline on 5.1 and SAT in 1.3M in the walk. So the pins
+  bound counts and a ceiling, not a figure, and encodings were chosen on
+  in-process runs.
+- **The encoding of `c notin t` decides Z3's cost, and the two versions
+  disagree.** The regex is far cheaper on 5.1 (n36 8.2M against 53.5M as
+  `not contains`), and required for B1-3. On 4.13.4 it is dearer on the
+  deepest pair-loop hits (n36 15.3M against 8.3M). No single encoding was
+  best on both. Asserting both forms was tried offline and was no better.
 - **Only literal one-character needles split.** `find("ab")`, a computed
   needle, and `rfind` / `seq.last_indexof` still lower to the sequence
   theory's own functions.

@@ -272,6 +272,11 @@ title = "S8ah's remainder: the VM-alias guard's macro-reachability walk must han
 state = "done"
 
 [[slice]]
+id    = "S8al"
+title = "S8ak's remainder: the forced-generic-instantiation half of the VM-alias guard has only run against one real generic (traceOneCallBoundary) -- exercise it with a fixture generic whose forced instantiation carries a let/param-aliasing hazard, so a regression in the force-and-audit path goes RED; make vmGuardAuditMacroReachWithSpecs (the test hook) resolve macros by symbol like the real vmGuardAuditNames path, so its fixtures no longer need a dummy required parameter to dodge zero-arg auto-invoke"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

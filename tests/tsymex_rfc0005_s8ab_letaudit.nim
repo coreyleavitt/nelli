@@ -62,6 +62,29 @@
 ##    compile pays nothing, with CI turning the define on in every leg
 ##    (`.github/workflows/{fuzzer-mingw,fuzzer-msvc,symex-mingw}.yaml`).
 ##
+## S8ak (search this file for "S8ak" to find each change) closes S8ah's own
+## two remaining gaps:
+## 1. **Zero-required-argument macros.** `vmGuardAuditNames` used to
+##    generate `vmGuardAuditRoutine(ident(nm), fileTag)` and let the
+##    compiler re-resolve `ident(nm)` as a fresh `typed` ARGUMENT
+##    EXPRESSION -- Nim auto-invokes a macro with no required parameters
+##    referenced bare in that position (probed: its own RESULT, e.g. an
+##    `nnkIntLit`, arrives in place of its symbol), so such a macro's body
+##    was never walked at all, a silent false negative. Now resolved via
+##    `bindSym(nm, brForceOpen)` (`nelli/smt/vm_alias_guard.nim`'s own doc
+##    has the full probed before/after). No real macro in the current
+##    16-file scope has zero required parameters (S8ah's own note already
+##    confirmed this), so this is a future-proofing fix, not a current
+##    real-scope hazard.
+## 2. **`extractTopLevelNames`/`extractTopLevelMacroNames`.** Replaced the
+##    column-0 source-TEXT scan with `parseStmt(staticRead(path))`, reading
+##    each top-level definition node's own name -- handles a backtick
+##    operator and a routine whose keyword and name sit on different
+##    physical lines the same way it handles an ordinary signature, since a
+##    real parser has no line boundaries to be confused by. Re-derived the
+##    real-scope counts mechanically against the new scan: still 22 macros,
+##    still 37 generics, still exactly 1 VM-reachable -- no change.
+##
 ## S8x (`tests/tsymex_rfc0005_s8x_vm_alias.nim`) found and fixed the two
 ## live-at-the-time hazards (`resolveBreak`'s `let t = ctx.procScoped.
 ## jumpTargets[i]`, `ensureProcRegistered`'s `let savedProcScoped = ctx.
@@ -435,11 +458,30 @@ macro s8ahFxQuotedGenericCall(dummy: static int): untyped =
   quote do:
     discard fxGenericAliasShape(@[1, 2, 3])
 
+# ---- RFC-0005 S8ak RED/GREEN fixture: a GENUINELY zero-required-argument
+# macro -- no dummy param, unlike the pair just above, which specifically
+# NEEDED one to dodge this very bug -- directly calling a REAL registered
+# generic (`just`, `strategy.nim:130`).
+#
+# Before S8ak's fix, `vmGuardAuditNames` resolved each discovered name via
+# `newCall(bindSym"vmGuardAuditRoutine", ident(nm), newLit(fileTag))`: the
+# generated `vmGuardAuditRoutine(ident(nm), fileTag)` call is re-semchecked
+# by the compiler, and Nim auto-invokes a zero-required-argument macro
+# referenced bare in that `typed`-argument expression position (same
+# mechanism as the dummy-param note above) -- `vmGuardAuditRoutine` then
+# receives this macro's own RESULT (an `nnkIntLit`), never its symbol, and
+# silently records nothing. `bindSym` (S8ak) resolves the name without
+# evaluating it, so the fix must flag this reachable.
+macro s8akFxZeroArgDirectGenericCall(): untyped =
+  discard just(5)
+  newLit(0)
+
 const fixtureNames = @["preFixResolveBreakShape", "preFixEnsureProcRegisteredShape",
                        "fxParamAliasShape", "fxTableBracketAliasShape",
                        "fxStringSliceNotFlagged", "fxTableLentNotFlagged",
                        "fxParamAliasViaTypeAlias", "fxGenericAliasShape",
-                       "fxParamAliasDeepShape", "fxParamAliasCyclicShape"]
+                       "fxParamAliasDeepShape", "fxParamAliasCyclicShape",
+                       "s8akFxZeroArgDirectGenericCall"]
 vmGuardAuditNames(fixtureNames, thisFile)
 
 # RFC-0005 S8ah: the reachability-mechanism fixtures use their OWN small
@@ -478,6 +520,24 @@ const fixtureReachHits = block:
   for h in vmGuardReachHits:
     if h.startsWith(thisFile) and h notin realScopeReachHits and h notin dedup: dedup.add h
   dedup
+
+# ---- RFC-0005 S8ak: extractTopLevelNames/extractTopLevelMacroNames, now
+# parsed from the module AST rather than scanned from source text --------
+#
+# `tests/s8ak_scan_fixture.nim` is a small, never-imported fixture source
+# (syntactically valid, not necessarily semantically valid -- it is only
+# ever `parseStmt`-ed, never compiled) carrying three shapes: a routine
+# whose keyword and name sit on different physical lines (RED under the
+# OLD column-0 scan: its first line, `"proc"`, does not satisfy
+# `line.startsWith("proc ")`, so the name is never even searched for), an
+# ordinary single-line backtick operator (already correct under the old
+# scan -- pinned here as a non-regression), and a signature whose
+# parameter list spans several lines (also already correct under the old
+# scan, since only the first line matters there -- pinned because the
+# slice's own brief names this shape explicitly).
+const scanFixturePath = currentSourcePath().parentDir() / "s8ak_scan_fixture.nim"
+const scanFixtureNames = extractTopLevelNames(scanFixturePath)
+const scanFixtureMacroNames = extractTopLevelMacroNames(scanFixturePath)
 
 # ---- tests --------------------------------------------------------------
 
@@ -591,3 +651,44 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
       let genericKey = h.split(" -> ")[^1]
       if genericKey notin reachableGenerics: reachableGenerics.add genericKey
     check reachableGenerics == @["dsl_parser.nim:traceOneCallBoundary@7269"]
+
+suite "S8ak: a zero-required-argument macro is resolved by symbol, not auto-invoked":
+
+  test "a genuinely zero-arg macro's direct call into a registered generic" &
+       " (just, strategy.nim) is flagged reachable":
+    # Pre-fix: `vmGuardAuditNames` generated `vmGuardAuditRoutine(ident(nm),
+    # fileTag)` and let the compiler re-resolve `ident(nm)` as a fresh
+    # `typed` argument -- Nim auto-invokes a zero-required-arg macro
+    # referenced bare there, so `s8akFxZeroArgDirectGenericCall` was
+    # silently executed (producing `discard just(5); newLit(0)`'s `0`, an
+    # `nnkIntLit`) instead of ever having its body walked, and this check
+    # failed (`fixtureReachHits` held no entry for it at all).
+    check fixtureReachHits.anyIt(it.contains("s8akFxZeroArgDirectGenericCall") and
+                                  it.contains("-> strategy.nim:just@130"))
+
+  test "GREEN: no getImpl/audit-machinery error from resolving a zero-arg macro's name":
+    check realScopeErrs.len == 0
+
+suite "S8ak: extractTopLevelNames/extractTopLevelMacroNames enumerate from a real parse" &
+      " of the module (parseStmt), not a column-0 text scan":
+
+  test "a routine whose keyword and name sit on different physical lines is still found":
+    # Pre-fix: the old scan required `line.startsWith("proc ")` on ONE
+    # line; a line containing only `"proc"` (the name is on the next line)
+    # fails that check outright, so `s8akSplitKeywordOp` never appeared in
+    # `extractTopLevelNames`'s result at all.
+    check "s8akSplitKeywordOp" in scanFixtureNames
+
+  test "GREEN: an ordinary single-line backtick operator name is still found (no regression)":
+    check "s8akOrdinaryBacktickOp" in scanFixtureNames
+
+  test "GREEN: a signature whose parameter list spans multiple lines is still found":
+    check "s8akMultiLineParams" in scanFixtureNames
+
+  test "extractTopLevelMacroNames finds a macro whose keyword and name sit" &
+       " on different physical lines":
+    check "s8akSplitKeywordMacro" in scanFixtureMacroNames
+
+  test "GREEN: extractTopLevelNames also finds the split-keyword macro" &
+       " (it audits every routine kind, not only procs)":
+    check "s8akSplitKeywordMacro" in scanFixtureNames

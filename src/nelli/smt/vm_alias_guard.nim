@@ -48,10 +48,49 @@
 ##    reachable with no forced audit is a gap, not a pass. The completeness
 ##    check lives with each self-audit's allowlist (see `symex.nim`).
 ##
+## **S8ak -- S8ah's own remainder, closed here:**
+## 4. **Zero-required-argument macros, resolved by symbol.** S8ah's walk
+##    (item 2 above) needed a NAME resolved to a `typed` macro symbol before
+##    `getImpl()` could run on it; the old path did that by generating
+##    `vmGuardAuditRoutine(ident(nm), fileTag)` and letting the COMPILER
+##    re-resolve `ident(nm)` as a fresh `typed` ARGUMENT EXPRESSION. Nim
+##    auto-invokes a macro with no required parameters when it is referenced
+##    bare in that position (probed, confirmed: the macro's own RESULT, an
+##    `nnkIntLit`, arrives in place of its symbol -- macros have no
+##    first-class "value" form the way an ordinary proc does, so a bare
+##    reference has no OTHER valid reading) -- a silent false negative, the
+##    exact shape S8ah's own remainder note left open. `vmGuardAuditNames`
+##    now resolves each name via `bindSym(nm, brForceOpen)` instead: pure
+##    NAME RESOLUTION (an API-level symbol lookup), never an expression
+##    evaluation, so the macro is never invoked -- `.getImpl()` reads
+##    straight off the resolved symbol. See that macro's own doc for the
+##    probed before/after node kinds.
+## 5. **`extractTopLevelNames`/`extractTopLevelMacroNames`, re-based on a
+##    real parse.** The column-0 line-text scan is replaced with
+##    `parseStmt(staticRead(path))` -- a genuine (if untyped) parse of the
+##    module's own source -- read for each top-level routine DEFINITION
+##    NODE's own name, instead of pattern-matching source TEXT line by
+##    line. This needs no special-casing for a backtick-quoted name
+##    (`nnkAccQuoted`, unwrapped the same way whether its `nnkPostfix`
+##    export-marker wrapper is present or not) or for a routine whose
+##    keyword and name sit on different physical lines (invisible to the
+##    old scan's `line.startsWith("proc ")`-style check, since the keyword's
+##    OWN line never contains the name at all) -- a real parser has no line
+##    boundaries to be confused by in the first place. See
+##    `tests/s8ak_scan_fixture.nim` for both fixtured shapes.
+##
 ## No walker bump: this is compile-time reflection over already-compiled
-## modules, same as S8ab/S8af -- it never touches the SMT IR.
+## modules, same as S8ab/S8af/S8ah -- it never touches the SMT IR.
 
 import std/[macros, os, strutils, tables]
+
+# RFC-0005 S8ak: `vmGuardAuditNames` resolves each discovered name via
+# `bindSym(nm, brForceOpen)` where `nm` is a runtime-computed `seq[string]`
+# element, not a literal identifier/string token written where the macro
+# itself is defined -- ordinary `bindSym` requires the latter. See
+# `vmGuardAuditNames`'s own doc for why this replaces the old
+# `ident(nm)`-via-`typed`-argument path.
+{.experimental: "dynamicBindSym".}
 
 # ---- shared hazard-shape primitives (S8ab/S8af, moved verbatim) -------------
 
@@ -359,61 +398,70 @@ proc vmGuardWalkForGenericCalls*(n: NimNode; macroTag: string;
   var visitedProcs: seq[string]
   vmGuardWalkForGenericCallsAux(n, macroTag, specs, visitedProcs, hits)
 
-# ---- name discovery (structural: column-0 source scan) ----------------------
+# ---- name discovery (RFC-0005 S8ak: parsed from the module AST) -------------
+
+const routineDefKinds* = {nnkProcDef, nnkFuncDef, nnkMacroDef, nnkTemplateDef,
+                           nnkIteratorDef, nnkConverterDef}
+
+proc routineDefName*(nameNode: NimNode): string =
+  ## RFC-0005 S8ak. A top-level routine definition's own name node, as
+  ## `parseStmt` returns it (untyped -- no `getImpl`/symbol involved yet),
+  ## is either a bare `nnkIdent`, that wrapped in `nnkPostfix` (the `*`
+  ## export marker), a backtick-quoted `nnkAccQuoted`, or `nnkPostfix`
+  ## wrapping THAT. Unwraps the export marker, then joins `nnkAccQuoted`'s
+  ## parts (an operator name is one part in practice, but joining handles
+  ## any backtick-quoted sequence uniformly rather than assuming exactly
+  ## one). Probed (`s8ak_probe_scratch.nim`, not shipped): confirms this
+  ## shape for both an ordinary and a backtick-quoted exported name.
+  var nn = nameNode
+  if nn.kind == nnkPostfix and nn.len == 2: nn = nn[1]
+  case nn.kind
+  of nnkIdent, nnkSym: nn.strVal
+  of nnkAccQuoted:
+    var s = ""
+    for part in nn:
+      s.add(if part.kind in {nnkIdent, nnkSym}: part.strVal else: part.repr)
+    s
+  else: ""
 
 proc extractTopLevelNames*(path: string): seq[string] =
-  ## Every top-level `proc`/`func`/`macro`/`template`/`iterator`/
-  ## `converter` name in `path`, in source order, deduplicated. See the
-  ## test file's header for the nested-def caveat (still audited, via the
-  ## outer proc's typed-body walk) and the backtick-operator handling.
-  let src = staticRead(path)
+  ## RFC-0005 S8ak: every top-level `proc`/`func`/`macro`/`template`/
+  ## `iterator`/`converter` name in `path`, in source order, deduplicated
+  ## -- enumerated by PARSING the module's source (`parseStmt`, a genuine
+  ## recursive-descent parse) and reading each top-level definition node's
+  ## own name, in place of the old column-0 line-TEXT scan. A real parser
+  ## has no line boundaries to be confused by: a backtick-quoted name and a
+  ## routine whose keyword and name sit on different physical lines (both
+  ## invisible to a line-based `line.startsWith("proc ")`-style check, the
+  ## latter because the keyword's OWN line never contains the name at all)
+  ## are handled the exact same way as an ordinary single-line signature --
+  ## see `tests/s8ak_scan_fixture.nim` for both fixtured shapes. Walks only
+  ## DIRECT children of the module's top statement list, same "top-level
+  ## only" scope the old scan had (see the test file's header for the
+  ## nested-def caveat -- a routine nested inside another body is audited
+  ## anyway, via the outer routine's own `impl` tree walk).
+  let tree = parseStmt(staticRead(path))
   var seen: seq[string]
-  for line in src.splitLines():
-    if line.len == 0 or line[0] notin {'p', 'f', 'm', 't', 'i', 'c'}: continue
-    var rest = ""
-    for kw in ["proc ", "func ", "macro ", "template ", "iterator ", "converter "]:
-      if line.startsWith(kw):
-        rest = line[kw.len .. ^1]
-        break
-    if rest.len == 0: continue
-    var nm = ""
-    if rest[0] == '`':
-      let close = rest.find('`', 1)
-      if close > 1: nm = rest[1 ..< close]
-    else:
-      var i = 0
-      if i < rest.len and rest[i] in {'A' .. 'Z', 'a' .. 'z', '_'}:
-        let start = i
-        while i < rest.len and rest[i] in {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}: inc i
-        nm = rest[start ..< i]
+  for n in tree:
+    if n.kind notin routineDefKinds: continue
+    let nm = routineDefName(n[0])
     if nm.len > 0 and nm notin seen:
       seen.add nm
       result.add nm
 
 proc extractTopLevelMacroNames*(path: string): seq[string] =
-  ## Same scan as `extractTopLevelNames`, restricted to lines starting
-  ## `macro ` -- used to build the "which of the scope's own macro names
-  ## exist in this file" list a reachability audit needs (a name that is
-  ## ALSO a proc/template elsewhere is still walked correctly by
-  ## `vmGuardAuditMacroReach`'s own `s.symKind != nskMacro: continue`
-  ## filter on each symChoice candidate; this is just a smaller candidate
-  ## list, not a correctness requirement).
-  let src = staticRead(path)
-  for line in src.splitLines():
-    if not line.startsWith("macro "): continue
-    let rest = line["macro ".len .. ^1]
-    var nm = ""
-    if rest.len > 0 and rest[0] == '`':
-      let close = rest.find('`', 1)
-      if close > 1: nm = rest[1 ..< close]
-    else:
-      var i = 0
-      if i < rest.len and rest[i] in {'A' .. 'Z', 'a' .. 'z', '_'}:
-        let start = i
-        while i < rest.len and rest[i] in {'A' .. 'Z', 'a' .. 'z', '0' .. '9', '_'}: inc i
-        nm = rest[start ..< i]
-    if nm.len > 0 and nm notin result:
-      result.add nm
+  ## Same scan as `extractTopLevelNames`, restricted to `nnkMacroDef` --
+  ## used to build the "which of the scope's own macro names exist in this
+  ## file" list a reachability audit needs (a name that is ALSO a
+  ## proc/template elsewhere is still walked correctly by
+  ## `vmGuardAuditMacroReach`'s own `s.symKind != nskMacro: continue` filter
+  ## on each symChoice candidate; this is just a smaller candidate list,
+  ## not a correctness requirement).
+  let tree = parseStmt(staticRead(path))
+  for n in tree:
+    if n.kind != nnkMacroDef: continue
+    let nm = routineDefName(n[0])
+    if nm.len > 0 and nm notin result: result.add nm
 
 # ---- compile-time accumulators (shared across every importer) --------------
 
@@ -434,53 +482,98 @@ var vmGuardForcedGenerics* {.compileTime.}: seq[string]
 
 # ---- the audit entry points (typed macros -- force resolution) -------------
 
-macro vmGuardAuditRoutine*(procSym: typed; fileTag: static string): untyped =
-  ## Audits every overload of `procSym` (a bare, possibly-overloaded
-  ## identifier resolved by the compiler to a `SymChoice` across every
-  ## visible module -- `getImpl()`'s own `lineInfoObj.filename` then
-  ## filters to the ones actually defined in `fileTag`) for both the
-  ## let-aliasing hazard shapes and the param-aliasing shape, AND (RFC-0005
-  ## S8ah) for direct, unquoted calls into one of the 37 generics, if this
-  ## overload is itself a macro.
-  result = newStmtList()
-  var syms: seq[NimNode]
-  case procSym.kind
-  of nnkClosedSymChoice, nnkOpenSymChoice:
-    for s in procSym: syms.add s
-  of nnkSym:
-    syms.add procSym
-  else: discard
-  for s in syms:
-    if s.symKind notin routineSymKinds:
-      continue
-    var impl: NimNode
-    try:
-      impl = s.getImpl()
-    except CatchableError as e:
-      vmGuardWalkErrs.add fileTag & ": " & macros.strVal(s) & " getImpl raised: " & e.msg
-      continue
-    if impl.isNil or impl.kind == nnkNilLit: continue
-    if not impl.lineInfoObj.filename.endsWith(fileTag): continue
-    let owner = fileTag & ":" & macros.strVal(s)
-    walkLets(impl, owner, vmGuardLetHits)
-    walkParams(impl, owner, vmGuardParamHits)
-    if s.symKind == nskMacro:
-      vmGuardWalkForGenericCalls(impl, owner, genericRoutineSpecs, vmGuardReachHits)
+proc vmGuardAuditOneSym*(s: NimNode; fileTag: string) =
+  ## RFC-0005 S8ak: the per-symbol audit body -- extracted from what was
+  ## S8ah's `vmGuardAuditRoutine` so `vmGuardAuditNames` (below, the only
+  ## caller now; see its own doc for why the OLD `vmGuardAuditRoutine`
+  ## `typed`-argument entry point was retired, not just refactored) can
+  ## call it directly once IT has resolved a symbol by a DIFFERENT route
+  ## (`bindSym`, never a `typed` argument). Audits `s` for both the
+  ## let-aliasing hazard shapes and the param-aliasing shape, AND (S8ah)
+  ## for direct, unquoted calls into one of the 37 generics if `s` is
+  ## itself a macro.
+  if s.symKind notin routineSymKinds: return
+  var impl: NimNode
+  try:
+    impl = s.getImpl()
+  except CatchableError as e:
+    vmGuardWalkErrs.add fileTag & ": " & macros.strVal(s) & " getImpl raised: " & e.msg
+    return
+  if impl.isNil or impl.kind == nnkNilLit: return
+  if not impl.lineInfoObj.filename.endsWith(fileTag): return
+  let owner = fileTag & ":" & macros.strVal(s)
+  walkLets(impl, owner, vmGuardLetHits)
+  walkParams(impl, owner, vmGuardParamHits)
+  if s.symKind == nskMacro:
+    vmGuardWalkForGenericCalls(impl, owner, genericRoutineSpecs, vmGuardReachHits)
 
 macro vmGuardAuditNames*(names: static seq[string]; fileTag: static string): untyped =
-  ## Emits one `vmGuardAuditRoutine(<bare name>, fileTag)` call per
-  ## discovered name -- each its own macro instantiation (a trivial `when
-  ## true:` keeps them distinct statements, since `vmGuardAuditRoutine`
-  ## needs a separate `typed` argument per name to resolve independently).
+  ## RFC-0005 S8ak. For each name, generates a FRESH, uniquely-scoped (its
+  ## own `block:`) NESTED MACRO DEFINITION whose own `bindSym(nm,
+  ## brForceOpen)` call -- the only way to obtain a macro's resolved symbol
+  ## without invoking it -- resolves that one name, and immediately invokes
+  ## it. This replaces the OLD approach (`newCall(bindSym"vmGuardAuditRoutine",
+  ## ident(nm), newLit(fileTag))`, wrapped in a `when true:` to keep each
+  ## instantiation distinct): generating `vmGuardAuditRoutine(ident(nm),
+  ## fileTag)` and letting the compiler re-semcheck `ident(nm)` as a fresh
+  ## `typed` ARGUMENT EXPRESSION is exactly where S8ah's own remainder bug
+  ## lived -- Nim auto-invokes a zero-required-argument macro referenced
+  ## bare in an expression context expecting a value (macros have no
+  ## first-class "value" form the way an ordinary proc does, so a bare
+  ## reference has no other valid reading), so `vmGuardAuditRoutine` would
+  ## receive the macro's OWN RESULT (e.g. an `nnkIntLit`), never its
+  ## symbol, and silently find nothing.
+  ##
+  ## `bindSym` itself avoids that (pure NAME RESOLUTION, never an
+  ## expression evaluation) -- but it resolves against the scope of
+  ## WHEREVER THE BINDSYM CALL ITSELF IS LEXICALLY WRITTEN, not the calling
+  ## macro's own call site (probed empirically, `s8ak_probe_{a,b,c}.nim`,
+  ## not shipped: a `bindSym` call written directly in THIS macro's own
+  ## body -- the first version of this fix -- fails to find a PRIVATE
+  ## symbol that is only visible via the CALLER's own `{.all.}}` import,
+  ## e.g. `symex.nim`'s private, generic `sortedKeysOf`, audited from the
+  ## TEST FILE's call site: "undeclared identifier"). Generating a NESTED
+  ## macro definition via `quote do:` and splicing it into the CALL SITE
+  ## fixes this: when the compiler processes that spliced code, it compiles
+  ## as part of the CALLING module (the test file / `symex.nim` /
+  ## `concolic.nim`'s own trailing self-audit block), so the nested macro's
+  ## OWN `bindSym` call resolves using THAT module's scope, `{.all.}}`
+  ## imports included -- same probe, same name, resolves correctly once
+  ## wrapped this way, and a genuinely zero-arg macro target's `.getImpl()`
+  ## comes back as its real, never-invoked body too.
+  ##
+  ## `vmGuardAuditOneSym` is itself resolved ONCE here, OUTSIDE the
+  ## per-name loop, via a plain `bindSym` call -- a SAME-MODULE lookup
+  ## (this macro and that proc are siblings in `vm_alias_guard.nim`),
+  ## unaffected by the cross-module issue above -- and spliced in as an
+  ## ALREADY-RESOLVED symbol, so the generated call-site code never needs
+  ## to re-resolve it by (bare) name itself.
+  ##
+  ## `{.experimental: "dynamicBindSym".}}` (declared at this module's top)
+  ## is required because `names`/`nm` is a runtime-computed string, not a
+  ## literal identifier/string token known when this macro was written --
+  ## ordinary `bindSym` requires the latter.
+  let auditOneSymSym = bindSym("vmGuardAuditOneSym")
+  let fileTagLit = newLit(fileTag)
   result = newStmtList()
   for nm in names:
-    let call = newCall(bindSym"vmGuardAuditRoutine", ident(nm), newLit(fileTag))
-    result.add nnkWhenStmt.newTree(nnkElifBranch.newTree(bindSym"true", newStmtList(call)))
+    let nmLit = newLit(nm)
+    result.add quote do:
+      block:
+        macro vmGuardAuditNameLocal(): untyped =
+          let resolved = bindSym(`nmLit`, brForceOpen)
+          case resolved.kind
+          of nnkClosedSymChoice, nnkOpenSymChoice:
+            for s in resolved: `auditOneSymSym`(s, `fileTagLit`)
+          of nnkSym:
+            `auditOneSymSym`(resolved, `fileTagLit`)
+          else: discard
+        vmGuardAuditNameLocal()
 
 macro vmGuardAuditMacroReachWithSpecs*(macroSym: typed; fileTag: static string;
                                         specs: static seq[GenericRoutineSpec]): untyped =
   ## RFC-0005 S8ah test hook: runs ONLY the reachability half of
-  ## `vmGuardAuditRoutine`, against a CALLER-SUPPLIED `specs` list rather
+  ## `vmGuardAuditOneSym`, against a CALLER-SUPPLIED `specs` list rather
   ## than the real `genericRoutineSpecs` registry. This is what lets
   ## `tests/tsymex_rfc0005_s8ab_letaudit.nim` prove the reachability
   ## MECHANISM itself (a direct call is flagged, a `quote do:`-only call

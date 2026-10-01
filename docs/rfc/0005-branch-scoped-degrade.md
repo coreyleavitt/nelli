@@ -269,7 +269,7 @@ state = "pending"
 [[slice]]
 id    = "S8ak"
 title = "S8ah's remainder: the VM-alias guard's macro-reachability walk must handle a zero-required-argument macro (Nim auto-invokes it when passed bare as a typed parameter, yielding its result instead of its symbol) -- resolve macros by symbol so a future zero-arg macro cannot be a silent false negative; replace extractTopLevelNames/extractTopLevelMacroNames' column-0 source scan with enumeration from the typed module AST (backtick operators and multi-line signatures included)"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -4946,6 +4946,110 @@ Pins: `tests/tsymex_rfc0005_s8ad_remainder.nim`, with a `.nim.cfg` that sets
   no bridge. No failing shape was found. The general `bv2int` of `bvadd` /
   `bvmul` identities would touch every stamped-offset query, which is why
   they are not asserted.
+
+**As landed (S8ak, no bump) — S8ah's remainder: zero-arg macro resolution
+by symbol, and a real-parse name scan.** Pure compile-time reflection, no
+walker/IR change; no `symexWalkerVersion` bump.
+
+1. **Zero-required-argument macros, resolved by symbol.** `vmGuardAuditNames`
+   (the audit entry point every real call site uses — the test file and
+   `symex.nim`'s/`concolic.nim`'s own build-time self-audits alike) now
+   resolves each name with `bindSym(nm, brForceOpen)` rather than generating
+   `vmGuardAuditRoutine(ident(nm), fileTag)` for the compiler to re-semcheck
+   as a fresh `typed` argument expression — the exact shape S8ah's own note
+   above identified as the auto-invoke trap (a bare zero-arg macro reference
+   in an expression-value context has no reading other than "call it", so
+   the audit macro would have received the target's own RESULT, never its
+   symbol). RED (`s8akFxZeroArgDirectGenericCall`, a genuinely zero-arg
+   macro whose body calls `just`, a registered generic in `strategy.nim`):
+   missed under the old `ident`-based path; GREEN under `bindSym`, flagged
+   reachable like any other direct call.
+
+   *A second, unanticipated scoping problem, found building this against
+   the real scope (not just the fixture).* `bindSym` resolves a name
+   against the scope of wherever the `bindSym` CALL ITSELF is lexically
+   written, not the call site of whatever macro contains it — probed and
+   confirmed with a 3-file minimal reproduction (`s8ak_probe_{a,b,c}.nim`,
+   deleted after confirming), not shipped. A straightforward port (calling
+   `bindSym` directly in `vmGuardAuditNames`'s own body, written in
+   `vm_alias_guard.nim`) compiled fine against the 14 files that module
+   already self-imports with `{.all.}}`, but failed — "undeclared
+   identifier" — auditing `symex.nim`'s own private, generic
+   `sortedKeysOf` from the TEST FILE's call site, which imports `nelli/symex
+   {.all.}}` but `vm_alias_guard.nim` deliberately does not (that would
+   reintroduce the `concolic.nim -> symex.nim -> vm_alias_guard.nim ->
+   concolic.nim` cycle S8ah's own build-time-gate design avoids). Fix,
+   confirmed by the same probe: `vmGuardAuditNames` now generates, per
+   name, a NESTED macro definition (`quote do: block: macro
+   vmGuardAuditNameLocal(): untyped = ... ; vmGuardAuditNameLocal()`)
+   spliced into the CALLER's own code, so when the compiler processes that
+   spliced block it compiles as part of the calling module — the nested
+   macro's own `bindSym` call then resolves using THAT module's scope,
+   `{.all.}}` imports included. `vmGuardAuditOneSym` itself (the shared
+   per-symbol audit body, extracted from S8ah's `vmGuardAuditRoutine`) is
+   resolved once, by a same-module `bindSym` call outside the per-name
+   loop, and spliced in as an already-resolved symbol, so the generated
+   code never re-resolves it by bare name. `vmGuardAuditRoutine` (the old
+   `typed`-argument entry point) is retired, not kept dormant: once
+   `vmGuardAuditNames` no longer generates calls into it, nothing calls it.
+
+2. **`extractTopLevelNames`/`extractTopLevelMacroNames`, from a real parse.**
+   Both now `parseStmt(staticRead(path))` the module and walk the resulting
+   typed-AST shape (`{nnkProcDef, nnkFuncDef, nnkMacroDef, nnkTemplateDef,
+   nnkIteratorDef, nnkConverterDef}`, unwrapping an `nnkPostfix` export
+   marker and joining `nnkAccQuoted` parts for a backtick name) rather than
+   scanning source lines for a `startsWith("proc ")`-style column-0 match.
+   Checked across the real 16-file scope before changing anything: the OLD
+   scan already handles a single-line backtick operator and a multi-line
+   parameter list correctly (`command grep` found no real-scope routine of
+   either shape that it missed) — the brief's two named cases were not
+   where the real gap was. RED (`s8akSplitKeywordOp`/`s8akSplitKeywordMacro`,
+   a fixture scan file never compiled, only `parseStmt`'d): a routine whose
+   keyword and name sit on different physical lines (valid Nim, confirmed
+   by a parse probe) is invisible to the old scan outright — a line
+   containing only `"proc"` fails `line.startsWith("proc ")`, so the name
+   on the NEXT line is never even searched for. GREEN under the real parse;
+   the already-correct single-line-backtick and multi-line-parameter-list
+   fixtures are pinned alongside it to prove no regression.
+
+   *Real-scope counts, re-derived mechanically against the new scan* (not
+   assumed to carry over from S8ah's count, which used the old scan): still
+   **22** unique macro names, still **37** registered generics, still
+   exactly **1** VM-reachable (`traceOneCallBoundary`) — no change. The
+   split-keyword gap the new scan closes does not exist anywhere in the
+   real 16-file scope today (every real routine's keyword and name already
+   share a physical line); item 2 is therefore a hardening of the
+   mechanism, not a correction of today's counts.
+
+Run across the real 16-file scope today: the same four `let` hits as S8af's
+own run (already allowlisted, unchanged), zero param hits, one reachable
+generic (`traceOneCallBoundary`, already forced) — identical to S8ah's own
+run, confirming neither fix changed what the real scope reports. Both
+`symex.nim`'s and `concolic.nim`'s own build-time self-audits
+(`-d:nelliVmAliasAudit`) recompiled clean (podman) against the new
+mechanism: `tests/tsymex_phase15_F8_smoke.nim` and
+`tests/tfuzzconcolicassist.nim` both still pass with the define on. `dt-bounded.sh
+c` and `dt-bounded.sh cpp` both green, 24/24 tests (7 new: two
+zero-arg-macro-reachability tests, five real-parse-scan tests).
+
+*Different mechanisms, reported and not fixed here.*
+- **The build-time gate still runs on one suite per CI leg, not the whole
+  corpus** — unchanged from S8ah's own note; still deliberate, same cost
+  reasoning.
+- **The forced-generic-instantiation mechanism is still only exercised
+  against one real generic** (`traceOneCallBoundary`, the only one
+  VM-reachable today) — `vmGuardForcedGenerics`'s completeness check would
+  still fail closed on a genuinely new reachable generic with no matching
+  forced audit, but the mechanism's "force and audit an instantiation"
+  half has only ever run against this one case.
+- **`vmGuardAuditMacroReachWithSpecs`'s own test fixtures still need a
+  required dummy parameter** (`s8ahFxDirectGenericCall`/
+  `s8ahFxQuotedGenericCall`) to avoid the auto-invoke trap item 1 above
+  fixes in the REAL audit path — the TEST HOOK itself takes a `typed`
+  argument (by design, so it can run against a caller-supplied `specs`
+  list instead of the real registry) and so still needs its fixtures
+  shaped to avoid auto-invoke; not a gap in the real `vmGuardAuditNames`
+  path, which item 1 fixes directly.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

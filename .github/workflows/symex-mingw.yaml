@@ -138,6 +138,10 @@ jobs:
     timeout-minutes: 5
     outputs:
       shards_json: ${{ steps.derive.outputs.shards_json }}
+      # RFC-0005 S8aj: the corpus job's matrix. The shard count is
+      # derive-ci-suites.ps1's `$shardCount` alone (8; it was 3, written
+      # here and there by hand).
+      shard_ids: ${{ steps.derive.outputs.shard_ids }}
     steps:
       - uses: actions/checkout@v6
 
@@ -154,7 +158,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2]
+        shard: ${{ fromJson(needs.derive-suites.outputs.shard_ids) }}
     name: corpus (shard ${{ matrix.shard }})
     steps:
       - uses: actions/checkout@v6
@@ -269,8 +273,29 @@ jobs:
             throw "corpus shard $($env:SHARD_IDX): empty suite list from derive-suites -- failing loudly"
           }
           Write-Host "shard $($env:SHARD_IDX): $($tests.Count) suites"
+          # RFC-0005 S8aj: the shard keeps its own headroom against this
+          # job's 60-minute limit. A shard the limit cancels reports nothing
+          # for the suites it had not reached, so a failure there is hidden.
+          # Past $stopMin the shard stops starting suites and names the ones
+          # it did not run (with time left for the examples step and the
+          # log upload); past $budgetMin it fails even when every suite
+          # passed, since the next suite added would push it toward the
+          # limit. Either way: raise `$shardCount` in
+          # scripts/derive-ci-suites.ps1. Every suite's compile-plus-run
+          # time is recorded, and the slowest are printed and written to
+          # the job summary, green or red.
+          $budgetMin = 40
+          $stopMin = 48
+          $shardClock = [System.Diagnostics.Stopwatch]::StartNew()
+          $times = @()
+          $notRun = @()
           $failed = @()
           foreach ($t in $tests) {
+            if ($shardClock.Elapsed.TotalMinutes -gt $stopMin) {
+              $notRun += $t
+              continue
+            }
+            $suiteClock = [System.Diagnostics.Stopwatch]::StartNew()
             # RFC-0005 S8r: each suite runs under a wall-clock and memory
             # watchdog (scripts/run-ci-suite.ps1). A suite that would starve
             # the runner is killed and named here instead of taking the
@@ -295,12 +320,29 @@ jobs:
               ./scripts/run-ci-suite.ps1 -Suite $t
             }
             if ($LASTEXITCODE -ne 0) { $failed += $t }
+            $times += [pscustomobject]@{ Suite = $t; Sec = [math]::Round($suiteClock.Elapsed.TotalSeconds, 1) }
           }
+          $shardMin = [math]::Round($shardClock.Elapsed.TotalMinutes, 1)
+          $top = $times | Sort-Object Sec -Descending | Select-Object -First 10
+          $summary = @("### corpus shard $($env:SHARD_IDX): $shardMin min, $($times.Count) of $($tests.Count) suites run (budget $budgetMin min, job limit 60)", '',
+                       '| suite | compile + run (s) |', '|---|---|')
+          foreach ($row in $top) { $summary += "| $($row.Suite) | $($row.Sec) |" }
+          Write-Host ($summary -join "`n")
+          if ($env:GITHUB_STEP_SUMMARY) { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value ($summary -join "`n") }
+          $bad = $false
           if ($failed.Count -gt 0) {
             Write-Host "FAILED: $($failed -join ', ')"
-            exit 1
+            $bad = $true
           }
-          Write-Host 'All suites in this shard passed.'
+          if ($notRun.Count -gt 0) {
+            Write-Host "NOT RUN (shard stopped at $stopMin min to stay inside the 60-minute job limit; raise `$shardCount in scripts/derive-ci-suites.ps1): $($notRun -join ', ')"
+            $bad = $true
+          } elseif ($shardMin -gt $budgetMin) {
+            Write-Host "SHARD OVER BUDGET: $shardMin min > $budgetMin min (the job limit is 60). Every suite ran, but the next one added may not; raise `$shardCount in scripts/derive-ci-suites.ps1."
+            $bad = $true
+          }
+          if ($bad) { exit 1 }
+          Write-Host "All suites in this shard passed, in $shardMin min."
 
       # RFC-0010 C3c. examples/symex_loops.nim stopped compiling at CR-9(b)
       # and nobody noticed for months, because examples/ is built by neither

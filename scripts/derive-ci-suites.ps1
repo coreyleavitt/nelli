@@ -24,10 +24,13 @@
       the tsymex_* set to get the shard-eligible corpus
     - asserts a corpus floor (150) and full accounting (matrix + skip +
       corpus == total tsymex_* count)
-    - round-robins the sorted corpus into 3 deterministic shards
-    - emits `shards_json` via $env:GITHUB_OUTPUT when running under GitHub
-      Actions (the env var is set), or prints it to stdout otherwise, so a
-      developer can run this script locally without a CI environment.
+    - round-robins the sorted corpus into $shardCount deterministic shards
+      (8 since RFC-0005 S8aj; it was 3)
+    - emits `shards_json`, and `shard_ids` (the corpus job's matrix, so the
+      count is written in this script alone), via $env:GITHUB_OUTPUT when
+      running under GitHub Actions (the env var is set), or prints them to
+      stdout otherwise, so a developer can run this script locally without
+      a CI environment.
 
 .PARAMETER RepoRoot
   Path to the repository root (the directory containing nelli.nimble and
@@ -205,14 +208,29 @@ if ($accountedFor -ne $allTsymex.Count) {
   throw "derive-suites: accounting mismatch -- $($allTsymex.Count) total tsymex_* suites vs $accountedFor accounted for (matrix + skip + corpus)"
 }
 
-# Round-robin by index into 3 shards, deterministic given the
+# Round-robin by index into $shardCount shards, deterministic given the
 # sorted corpus.
-$shardCount = 3
-$shards = @(
-  (New-Object 'System.Collections.Generic.List[string]'),
-  (New-Object 'System.Collections.Generic.List[string]'),
-  (New-Object 'System.Collections.Generic.List[string]')
-)
+#
+# RFC-0005 S8aj: 8 shards, was 3. At 3, the slowest shard's run step took
+# 44-60 min against the corpus job's 60-minute limit (runs 36807797996,
+# 36808365118 and 36785819850: 56.8, 59.4 and 56.6 min), and a shard the
+# limit cancels reports nothing for the suites it had not reached -- a
+# failure there is hidden, not reported. A suite costs its compile plus its
+# run, and the compile dominates (run 36808365118: 394 suites, 157.8 min
+# in all), so the round-robin's shards stay even: replayed on that run's
+# per-suite times, 8 shards come to 18.0-20.9 min each. The same runner
+# class varies by up to ~1.7x between runs of the same shard (shard 1:
+# 31.9 min at 5f77981, 54.5 min at 782e9c1), which 8 absorbs with the
+# limit still well away. The corpus job checks the headroom itself (its
+# `Run shard` step prints a timing summary, fails past 40 min, and past 48
+# min stops and names the suites it did not run); raise this number when
+# that check fires. The workflow's matrix is `shard_ids` (below), so the
+# count is written here alone.
+$shardCount = 8
+$shards = @()
+for ($i = 0; $i -lt $shardCount; $i++) {
+  $shards += ,(New-Object 'System.Collections.Generic.List[string]')
+}
 for ($i = 0; $i -lt $corpus.Count; $i++) {
   $shards[$i % $shardCount].Add($corpus[$i])
 }
@@ -229,15 +247,19 @@ Write-Host ""
 Write-Host "skip list:"
 foreach ($k in $skipReasons.Keys) { Write-Host "  $k -- $($skipReasons[$k])" }
 
-$shardsObj = [ordered]@{
-  '0' = @($shards[0])
-  '1' = @($shards[1])
-  '2' = @($shards[2])
+$shardsObj = [ordered]@{}
+for ($i = 0; $i -lt $shardCount; $i++) {
+  if ($shards[$i].Count -eq 0) {
+    throw "derive-suites: shard $i is empty -- $shardCount shards for $($corpus.Count) suites"
+  }
+  $shardsObj["$i"] = @($shards[$i])
 }
 $shardsJson = $shardsObj | ConvertTo-Json -Compress -Depth 5
+$shardIdsJson = ConvertTo-Json -Compress @(0..($shardCount - 1))
 
 if ($env:GITHUB_OUTPUT) {
   "shards_json=$shardsJson" >> $env:GITHUB_OUTPUT
+  "shard_ids=$shardIdsJson" >> $env:GITHUB_OUTPUT
 } else {
   # Local/dev run (no GITHUB_OUTPUT env var): print instead of writing to
   # the (nonexistent) GitHub Actions output file, same output contract
@@ -245,4 +267,6 @@ if ($env:GITHUB_OUTPUT) {
   Write-Host ""
   Write-Host "shards_json (no `$env:GITHUB_OUTPUT set -- printing instead of writing to it):"
   Write-Output $shardsJson
+  Write-Host "shard_ids:"
+  Write-Output $shardIdsJson
 }

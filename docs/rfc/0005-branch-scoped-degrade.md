@@ -5032,6 +5032,21 @@ mechanism: `tests/tsymex_phase15_F8_smoke.nim` and
 c` and `dt-bounded.sh cpp` both green, 24/24 tests (7 new: two
 zero-arg-macro-reachability tests, five real-parse-scan tests).
 
+**The full-suite sweep gate was skipped for this slice.** `vm_alias_guard.nim`
+is reachable from only two places outside the test file itself:
+`concolic.nim:542` and `symex.nim`'s own trailing block, both inside a
+`when defined(nelliVmAliasAudit):` guard the sweep never turns on (the
+block is not even semantically checked with the define off) — the same
+footing S8af's own note already recorded ("the guard is still test-only
+reflection, not a build-time lint"), unchanged by S8ah's later build-time
+wiring, which only widened what the OPT-IN define covers, not what an
+ordinary `nimble test`/`sweep.sh` compile exercises. No normal compile
+path changed, so no suite in the sweep could be affected; the two compiles
+that DO take the define (verified individually above) are the entire
+blast radius, and they're green. A full sweep would have re-certified the
+~536 suites S8ah's own gate already covers at the parent sha, for zero
+additional coverage of this slice's actual change.
+
 *Different mechanisms, reported and not fixed here.*
 - **The build-time gate still runs on one suite per CI leg, not the whole
   corpus** — unchanged from S8ah's own note; still deliberate, same cost

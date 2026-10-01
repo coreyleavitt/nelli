@@ -34,8 +34,20 @@
 ## so the walk completes cleanly and the pre-registered
 ## `feUnsupportedExprKind` classification (not `weInternalWalkerFault`)
 ## reaches `SymexResult.errors`.
+##
+## RFC-0005 S8aj (walker 177): `zeroValueForType` now has the zero for an
+## array, object, seq and variant (`mkZeroValue`, lowered by
+## `defaultZero`), so an omitted `seq` field is no longer unmodeled: it is
+## Nim's own zero, the empty seq. `Bag(tag: x).xs.len == 0` is TRUE in
+## compiled Nim, so the target is a real `sxSat` (x == 5) with no decline,
+## and its twin `xs.len != 0` is `sxUnsat`. The "guessed zero" R8-1 warned
+## against is a zero Nim does not give; this one it does. Both R8 pins
+## keep their invariants: never a false verdict (the SAT witness is
+## checked, the twin refuted) and never `weInternalWalkerFault`.
 import std/unittest
 import nelli/symex
+import nelli/smt/canonicalize
+import std/strutils
 
 type
   Bag = object
@@ -66,24 +78,32 @@ proc sutBagOmittedSeqField(x: int) =
   if b.tag == 5 and b.xs.len == 0:
     symexTarget("bag_omitted_seq_hit")
 
+proc sutBagOmittedSeqFieldDead(x: int) =
+  let b = Bag(tag: x)
+  if b.tag == 5 and b.xs.len != 0:
+    symexTarget("bag_omitted_seq_dead")
+
 suite "symex RFC-chapulin-hardening R8 — omitted non-scalar field construction-time degrade":
 
-  test "R8-1: omitted seq field -> sxUnknown (never a false sxSat/sxUnsat -- Invariant 3)":
+  test "R8-1: omitted seq field is Nim's empty seq -> a real sxSat, its twin sxUnsat (never a false verdict -- Invariant 3)":
     let r = symexFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
-    ## Load-bearing soundness assertion: this must NEVER become a false sxSat
-    ## (a guessed zero for a non-scalar field would be exactly the
-    ## false-verdict bug R8 must avoid introducing).
-    check r.status != sxSat
-    check r.status == sxUnknown
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == 5
+    let d = symexFind(sutBagOmittedSeqFieldDead, tLabel("bag_omitted_seq_dead"))
+    check d.status == sxUnsat
 
-  test "R8-2: reported error kind is the clean feUnsupportedExprKind degrade, NOT weInternalWalkerFault":
+  test "R8-2: no decline and never weInternalWalkerFault":
     let r = symexFind(sutBagOmittedSeqField, tLabel("bag_omitted_seq_hit"))
-    var sawClean = false
+    var sawDecline = false
     var sawFault = false
     for e in r.errors:
       if e.kind == feUnsupportedExprKind and e.severity == sevError:
-        sawClean = true
+        sawDecline = true
       if e.kind == weInternalWalkerFault:
         sawFault = true
-    check sawClean
+    check not sawDecline
     check not sawFault
+
+  test "symexWalkerVersion >= 177 (RFC-0005 S8aj: the omitted field's zero)":
+    check parseInt(symexWalkerVersion) >= 177

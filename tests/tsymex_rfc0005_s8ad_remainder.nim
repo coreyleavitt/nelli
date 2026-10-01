@@ -255,7 +255,7 @@ suite "S8ad (3): every fact divRangeFacts asserts is valid":
         let q = (ai div bi) == (ai div bi)
         let r = (ai mod bi) == (ai mod bi)
         let facts = divRangeFacts(ctx, [q, r])
-        check facts.len == 19
+        check facts.len == 23   # 19 + S8aj's `|b| <= a < 2|b|` pair (x2)
         checkpoint $a & " div/mod " & $b
         check allValid(ctx, facts)
         n += facts.len

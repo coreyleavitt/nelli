@@ -8653,7 +8653,25 @@ proc zeroValueForType(ty: IRType): IRExpr =
   of itDistinct:                       ## RFC-0005 S8u: the base type's zero. A
     zeroValueForType(ty.distinctBase)  ## distinct value is its base value in
                                        ## the IR (`D(x)` is the identity).
-  else: nil                            ## seq/table/set/tuple/variant/… — defer
+  of itArray, itTuple, itSeq, itVariant, itMultiVariant:
+    ## RFC-0005 S8aj: an aggregate's zero is its elements' and fields'
+    ## zeros, and a seq's is the empty seq: `defaultZero`'s recursion, the
+    ## walker's lowering of `iekZeroValue` (a shape it cannot zero, such as
+    ## a variant whose ordinal-0 tag is not legal, is allocated and
+    ## degraded there, never left unbound). An uninitialised
+    ## `var a: array[3, int]` was declined here and left `a` unbound, so the
+    ## first `a[0] = ...` bound it to a scalar and the next `a[i]` asserted
+    ## (`weInternalWalkerFault`, "iekIndex on non-array kind=svBV64"); an
+    ## object holding an array or a seq, and a local seq, did the same.
+    ## S8z independently fixed `itArray`/`itTuple`/`itVariant`/
+    ## `itMultiVariant` at the single call site that needed them then (the
+    ## uninitialised-`var` statement), special-cased there instead of here;
+    ## that call site now just delegates to this proc, which is this one
+    ## mechanism for every caller (construction-time field omission
+    ## included — `itSeq` was not covered by S8z's special case).
+    mkZeroValue(ty)
+  else: nil                            ## itUninterp: no zero (defaultZero
+                                       ## raises); the caller declines
 
 proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
   ## RFC-chapulin-hardening R8 (deferred LOW finding, telemetry hygiene). A
@@ -9863,13 +9881,15 @@ proc parseStmtInner(n: NimNode,
           # modelled zero). It was this decline, which left the name
           # unbound: `var a: array[3, int]; a[1] = x` then faulted in
           # `isIndex` (`recv.kind == svArray` on the catch-all's int), and
-          # `var r: Obj; ord(r.e)` in `lowerConvIntWidth`. Kept here, not in
-          # `zeroValueForType`, whose other callers use it as a
-          # kind-correct catch-all dummy.
-          let zero =
-            if classified.ty.kind in {itArray, itTuple, itVariant, itMultiVariant}:
-              mkZeroValue(classified.ty)
-            else: zeroValueForType(classified.ty)
+          # `var r: Obj; ord(r.e)` in `lowerConvIntWidth`. S8z special-cased
+          # this call site rather than `zeroValueForType` itself, out of
+          # caution for its other (catch-all-dummy) callers; RFC-0005 S8aj
+          # audited every one of those callers (each already discards its
+          # dummy under an SND-1 taint before it is ever read) and moved the
+          # fix into `zeroValueForType` directly, which also covers `itSeq`
+          # (`var s: seq[int]`, not fixed by the special case here) for
+          # free. Plain delegation below.
+          let zero = zeroValueForType(classified.ty)
           if zero != nil:
             stmts.add mkLet(id[j].strVal, classified.ty, zero)
           else:

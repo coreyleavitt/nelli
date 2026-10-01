@@ -264,7 +264,7 @@ state = "pending"
 [[slice]]
 id    = "S8aj"
 title = "S8ad's remainder: an uninitialized local array with an element write (`var a: array[3, int]; a[0] = ...; a[i]`) is weInternalWalkerFault (iekIndex on non-array kind=svBV64) -- model Nim's zero-init of local arrays (and nested aggregates) so it is never a walker fault; extend divRangeFacts-style linear links to bv2int of other bitvector arithmetic (add, sub, mul, shifts) read as Int; reshard the symex-mingw corpus so no shard runs near the 60-minute job limit (a cancelled shard hides failures) and pin per-shard headroom"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ak"
@@ -5623,6 +5623,211 @@ the define on. No ordinary `sweep.sh`/`nimble test` compile path changed.
   themselves are unchanged** — this slice is scoped entirely to the
   force-and-audit completeness mechanism and one test hook's symbol
   resolution, not to the hazard-detection shapes.
+**As landed (S8aj, walker 179) — S8ad's remainder.**
+
+*Rebased a second time, onto S8ac (walker 178).* This slice's branch point
+also predates S8ac, which bumped the walker 177->178 for an unrelated
+var-parameter write-back and short-circuit-join fix untouched by this
+slice's mechanism. No conflict beyond the walker-version doc block and the
+two brittle pins (CR2's `==` and this slice's own `>=` floor); S8ac did not
+touch `zeroValueForType`, `iteSV` or `divRangeFacts`. 178 -> 179.
+
+*A local aggregate takes Nim's zero, and S8z's parallel fix merges into
+one mechanism.* `zeroValueForType` had no arm for an array, an object
+(`itTuple`), a seq or a variant, so `var a: array[3, int]` was declined
+("zero-init not modeled this cycle") and `a` was left unbound. The first
+`a[0] = a[0] + 2` then bound it to a scalar, and the next `a[i]` asserted:
+`weInternalWalkerFault`, "iekIndex on non-array kind=svBV64". S8aj's branch
+point predates S8z, which found and fixed the same decline independently,
+but scoped to ONE call site (the uninitialised-`var` statement parser),
+for `itArray`/`itTuple`/`itVariant`/`itMultiVariant` only — not `itSeq`,
+and not the omitted-constructor-field path below. `zeroValueForType`
+itself now carries the fix for all five kinds (`mkZeroValue(ty)`, which the
+walker lowers through `defaultZero`: every element and field gets its own
+zero, and a seq is empty; a shape it cannot zero — a variant whose
+ordinal-0 tag is not legal — is allocated and degraded there, as any
+`iekZeroValue` is; only `itUninterp` still has no zero, and its caller
+declines it as before), and S8z's call-site special-case now collapses to
+a plain call to `zeroValueForType` — it was identical to this for the four
+kinds it covered, and gains `itSeq` for free. No caller of
+`zeroValueForType` relied on its old `nil` for these kinds for anything
+beyond "decline, and use a never-read placeholder" (checked against every
+call site: the CR-2a and P2a degrade paths already taint the path before
+their dummy is ever read), so widening it is a pure extension, not a
+behaviour change at the sites S8z left alone.
+
+With the zero in place, the loop shape hit a second fault. That shape is
+`a[0] = a[0] + x` and `a[2] = a[2] + k` in a loop, under `symexAssume` on
+`x`. The element fold met a width-stamped Int on one path and a bitvector
+on the other: `iteSV: kind mismatch svBV64 vs svInt`. An initialised
+`var a = [0, 0, 0]` faults the same way at the base, so this was not
+introduced by the zero. Both sides are the same Nim integer, so `iteSV` now
+merges them through `reconcileInt`, as every mixed operator does.
+
+Two existing suites pinned the decline, and both now get Nim's answer. The
+first Windows run of this slice caught them, so they are repinned here:
+- `tsymex_r6_itesv_mergedegrade`'s two-sibling probes. Each declares
+  `var arr: array[3, string]` and reads `arr[i]` before any guard on `i`.
+  With the zero modelled, an out-of-range `i` is a genuine `IndexDefect`.
+  The verdict moved from `sxUnknown` (the decline) to `sxRaised`, with
+  witness `i = low(int)`. The suite's guard is that the string merge never
+  yields a fabricated `sxSat`. That guard is now checked on the raise:
+  never `sxSat`, and the witness index out of range. S8z re-pinned this
+  same shape independently (same mechanism, same verdict), so the merge
+  keeps S8z's re-pin — it adds a real-Nim replay of the raised witness —
+  and S8aj's own addition is two new in-range twins
+  (`symexAssume(i in 0..2)`), which stay `sxUnknown` through the merge's
+  classified havoc; replay refutes their spurious candidates.
+- `tsymex_r8_omitted_field_degrade`. `Bag(tag: x)` omits a `seq` field,
+  and that field is now Nim's empty seq. So `b.tag == 5 and b.xs.len == 0`
+  is a real `sxSat` (`x == 5`), where it was an `sxUnknown` decline. The
+  `xs.len != 0` twin is `sxUnsat`. R8 warned against a "guessed zero" for a
+  non-scalar field. This is not a guess: it is the zero compiled Nim gives.
+
+*An unchecked sum that wraps decides.* The slice asked for `bv2int` links
+for `+`, `-`, `*` and shifts, beside S8ad's negation link, once a failing
+shape had been found. The search ran in two batches. Both used quotients,
+remainders, sums, differences, products and shifts of `y + 1`, `2 * y`,
+`y shl k` and `y shr k`, beside a scan.
+- A first batch of 12 shapes ran on 5.1. Every one decided. Seven came back
+  `sxRaised` because the probe left an overflow reachable, so the second
+  batch bounds its operands.
+- A second batch of 24 shapes ran on both versions, 18 of them checked and
+  6 unchecked. All but one decided. On 5.1 the dearest took 6.6M steps
+  (`(start + y) div (y + 1) > start`). On 4.13.4 the dearest took 19.0M
+  (unchecked `start mod (y + 1) <= -(y + 1)`).
+
+One did not decide: `start >= 0 and y > 1 and start + (y + 1) == start`
+under unchecked arithmetic beside a scan. It is UNSAT, and it was
+`sxUnknown` (`beSolverUndef`) at 40.6M steps on 5.1 and 40.9M on 4.13.4.
+
+The links are not what it lacks. The query was dumped and replayed offline
+on 4.13.4. With the `bv2int(y + 1) == wrap(bv2int(y) + 1)` link, with sign
+links for `y` and `y + 1`, and with all of those together, it was still
+unknown at 20M. Rewritten with a plain Int for `bv2int(y + 1)` it was UNSAT
+in 917 steps, so the hard part is the wrap, not the bitvector.
+
+`wrapIntToWidth` wraps an Int sum as `lo + (r - lo) mod 2^W`. A sum of two
+in-range operands that overflows puts `r - lo` in `[2^W, 2^(W+1))`. That is
+one window past S8ad's `|a| < |b|` pair. An underflow lands inside the
+pair's `negSmall` arm, which is why the difference twin already decided. So
+`divRangeFacts` now states that next window as well:
+- `b >= 1` and `b <= a <= 2b - 1`: `e == 1`, `r == a - b`.
+- `b <= -1` and `-b <= a <= -2b - 1`: `e == -1`, `r == a + b`.
+
+Offline, either of those facts alone made the dumped query UNSAT in 0.45M
+steps.
+
+The `bv2int` links were built and measured before this was found, then
+removed. They decided nothing, and they made other queries dearer. On 5.1,
+`(start + y) div (y + 1) > start` went from 6.6M to 31.6M. On 4.13.4,
+unchecked `start mod (y + 1) <= -(y + 1)` went from 19.0M to 29.8M.
+
+The same no-unused-facts rule applies to the window. Each fact is a
+theorem of the Euclidean pair. The pin checks both against Z3's own `div`
+and `mod`, first on S8ad's numeral grid (now 23 facts per pair), then at the
+wrap's own divisor, `+-2^64`, on both sides of every window edge. A
+deliberately broken variant, with the window one too wide (`a <= 2b`), is
+rejected at exactly `a == 2b` for each `b` in 1..6.
+
+Steps for the whole walk (`rlimitDelta`), unchecked (`isExact`,
+`{acDivByZero, acRange}`), with a scan:
+
+| Shape | Base (5.1) | S8aj (5.1) | Base (4.13.4) | S8aj (4.13.4) |
+|---|---|---|---|---|
+| `start >= 0 and y > 1 and start + (y + 1) == start` (UNSAT) | 40.6M, `sxUnknown` | 0.61M | 40.9M, `sxUnknown` | 1.19M |
+| `... start - (y + 1) == start` (UNSAT) | 0.88M | 0.78M | 1.31M | 1.60M |
+| `... start + (y + 1) < start` (SAT, witness overflows) | 6.1K | 111K | 6.3K | 246K |
+
+The SAT neighbour still decides in well under 1M steps. It is dearer
+because the window facts sit beside its model search.
+
+*Termination cost against the base.* Each suite was run whole at 94b8303 and
+at the slice, on both Z3 versions, with every query's `rlimitDelta` summed.
+Most were identical to the step, with the same number of queries and
+unknowns: `r4_strip`, `q1_scanlift`, `r6_b5_chained`,
+`r6_n36_raise_degrade`, `s8ae_remainder`, `s8v_termination` and
+`163rev_intoffset_range`. Their queries hold no Int `div` or `mod`, so the
+facts add nothing to them. `s8ad_remainder`, whose queries do, went from
+6.08M to 6.35M on 5.1 (+4.3%) and from 7.04M to 7.13M on 4.13.4 (+1.2%). It
+kept the same 125 queries and no unknowns. No query changed its answer.
+
+*symex-mingw has 8 corpus shards, and each one checks its own headroom.*
+At 3 shards, the slowest shard's run step took 44-60 min against the corpus
+job's 60-minute limit. Three runs (36807797996, 36808365118, 36785819850)
+reached 56.8, 59.4 and 56.6 min. A shard that the limit cancels reports
+nothing for the suites it has not reached yet, so a failure there is
+hidden.
+
+A suite's cost is its compile plus its run, and the compile dominates: run
+36808365118 spent 157.8 min in all on 394 suites. So the round-robin's
+shards stay even. Replayed on that run's per-suite times, 8 shards come to
+18.0-20.9 min each.
+
+`derive-ci-suites.ps1` now owns the count (`$shardCount`). It emits the
+matrix as `shard_ids`, so the workflow no longer repeats it by hand, and it
+throws on an empty shard.
+
+The corpus job's `Run shard` step times every suite. It prints the 10
+slowest, and writes them to the job summary whether the shard is green or
+red. It fails loudly in two cases:
+- **SHARD OVER BUDGET**: past 40 min, even when every suite passed.
+- **NOT RUN**: past 48 min it stops starting suites, which leaves time for
+  the examples step and the log upload, and names the suites it skipped.
+
+Either message says to raise `$shardCount`. Each of the step's three exits
+(green, over budget, not run) was exercised locally in the pwsh container
+with mock suites.
+
+At the channel tip before this slice (59bf62e, still 3 shards, run
+36817942850), the limit cancelled shard 0 at 60 min. Shards 1 and 2 took
+44.7 and 58.2 min. With 8 shards, the first real run (36821741052) took
+11.8-22.2 min per shard: 20.7, 22.2, 16.1, 17.5, 21.1, 21.9, 21.4 and 11.8
+min for shards 0-7. Every shard ran every suite, and each one printed its
+timing summary.
+
+The landed sha (0cd890e, run 36824933867) took 13.2-22.4 min per shard:
+21.1, 21.0, 15.8, 22.4, 20.8, 22.4, 20.9 and 13.2 min. That leaves at
+least 17 min below the 40-minute budget and 37 below the limit. On all
+three Windows legs (symex-mingw 36824933867, fuzzer-mingw 36824933826,
+fuzzer-msvc 36824933818), the one failure was the known
+`tsymex_rfc0005_s8ab_letaudit` guard-keying defect, which S8ak is fixing.
+It fails on the tip too.
+
+The reshard went onto the channel ahead of the rest of the slice, as
+e3cd0c7, because every slice was losing shards to the limit. Its own run
+(36833623417, green, S8ak's letaudit fix included) took 18.2-22.6 min per
+shard: 21.1, 22.1, 22.3, 22.6, 20.2, 18.2, 20.3 and 20.6 min for shards
+0-7. No shard came near the 40-minute budget, so the count stays at 8.
+
+Pins: `tests/tsymex_rfc0005_s8aj_remainder.nim`, with a `.nim.cfg` that sets
+`-d:symexQueryStats`.
+- (1) The array cases: an element write then a symbolic read (S8ad's
+  exhibit), untouched elements read as zero, reads at symbolic indices, and
+  writes in a loop, on one branch, and in a short-circuit operand.
+- (1) The nested aggregates: an array of objects, an object holding an array
+  (and an array of objects), a seq field, a local seq, an array of a
+  distinct type, an array of arrays, and a variant object.
+- (1) For each of those, the target is SAT with its witness checked, the
+  dead twin is `sxUnsat`, and there is no `weInternalWalkerFault`. RED at
+  the base: every one is `sxUnknown` with `weInternalWalkerFault`.
+- (2) The table above. Each UNSAT shape is decided within 3M steps with no
+  `beSolverUndef`, and the SAT witness is checked to overflow. RED at the
+  base: `start + (y + 1) == start` is `sxUnknown` at 40.57M.
+- (2) The facts hold at `+-2^64`, and the check rejects the broken window.
+- The `>= 179` floor.
+
+*Different mechanisms, reported and not fixed here.* (A symbolic-index
+array write, `a[i] = 7`, was declined — `feUnsupportedStmtKind`,
+"unsupported nnkAsgn shape" — at this slice's branch point; S8z modelled
+it independently, landed first on the channel, and this slice rebases onto
+that fix, so it is no longer true post-rebase and is dropped from this
+list.)
+- **`add` on a dotted seq field is declined.** `o.s.add v` is N49
+  `feUnsupportedOp`. `s.add v` on a local seq and `o.s = @[v]` are both
+  modelled (and pinned).
+- **An uninterpreted type has no zero.** `zeroValueForType` still returns
+  nil for `itUninterp`, and the caller declines as before.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

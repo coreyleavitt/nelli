@@ -894,7 +894,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## outer except, masked shift counts, the linear unchecked div wrap,
     ## the join over allocation and table / set / distinct / variant
     ## state). 177->178.
-    check symexWalkerVersion == "178"
+    ## RFC-0005 S8aj (local arrays, objects and seqs are zero-initialised;
+    ## an Int and a bitvector merge through reconcileInt; the next window
+    ## of the Int div/mod pair). 178->179.
+    check symexWalkerVersion == "179"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

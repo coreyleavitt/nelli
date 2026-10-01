@@ -86,6 +86,51 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
   ## `isIndex` statement over a composite-typed array, with the vulnerable
   ## array placed in EACH branch in turn (both orderings) to rule out an
   ## order-dependent escape.
+  ##
+  ## RFC-0005 S8aj (walker 177): `var arr: array[3, string]` now takes
+  ## Nim's zero instead of being declined, so the unguarded `arr[i]` is
+  ## modelled and its out-of-range read is a genuine `IndexDefect`
+  ## (`sxRaised`, at the base `sxUnknown` through the decline). The guard
+  ## this suite exists for -- the string merge never yields a fabricated
+  ## `sxSat` -- is checked on the raise (never `sxSat`, the witness index
+  ## out of range) and on the in-range twins below, where no raise exists
+  ## and the merge's classified havoc keeps the verdict `sxUnknown`.
+  template checkGenuineIndexRaise(r: untyped) =
+    check r.status != sxSat
+    check r.status == sxRaised
+    if r.status == sxRaised:
+      check r.raisedTypeId == "IndexDefect"
+      let i = r.raisedWitness[1]
+      check i < 0 or i >= 3
+
+  test "vulnerable array in the else branch, index in range":
+    proc probeElseIn(flag: bool, i: int) =
+      symexAssume(i >= 0 and i < 3)
+      var arr: array[3, string]
+      if flag:
+        arr = ["aaa", "bbb", "ccc"]
+      else:
+        arr = ["zero", "one", "two"]
+      let v = arr[i]
+      if v == "two":
+        symexTarget("item1_probe_else_in_hit")
+    let r = symexFind(probeElseIn, tLabel("item1_probe_else_in_hit"))
+    check r.status == sxUnknown
+
+  test "vulnerable array in the then branch, index in range":
+    proc probeThenIn(flag: bool, i: int) =
+      symexAssume(i >= 0 and i < 3)
+      var arr: array[3, string]
+      if flag:
+        arr = ["zero", "one", "two"]
+      else:
+        arr = ["aaa", "bbb", "ccc"]
+      let v = arr[i]
+      if v == "two":
+        symexTarget("item1_probe_then_in_hit")
+    let r = symexFind(probeThenIn, tLabel("item1_probe_then_in_hit"))
+    check r.status == sxUnknown
+
   test "vulnerable array in the else branch":
     proc probeElse(flag: bool, i: int) =
       var arr: array[3, string]
@@ -98,13 +143,14 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
         if v == "two":
           symexTarget("item1_probe_else_hit")
     let r = symexFind(probeElse, tLabel("item1_probe_else_hit"))
-    # RFC-0005 S8z re-pin: `var arr: array[3, string]` is now Nim's zero
-    # value (was a decline that tainted every path), so `arr[i]` read BEFORE
-    # the bounds guard surfaces its reachable `IndexDefect` (E6). Checked
-    # against Nim: the witness replays as `IndexDefect`. Never an `sxSat`.
-    check r.status == sxRaised
+    # RFC-0005 S8z re-pin (confirmed by S8aj with the same mechanism):
+    # `var arr: array[3, string]` is now Nim's zero value (was a decline
+    # that tainted every path), so `arr[i]` read BEFORE the bounds guard
+    # surfaces its reachable `IndexDefect` (E6). Checked against Nim: the
+    # witness replays as `IndexDefect`, and its index is out of range.
+    # Never an `sxSat`.
+    checkGenuineIndexRaise(r)
     if r.status == sxRaised:
-      check r.raisedTypeId == "IndexDefect"
       var replayed = false
       try: probeElse(r.raisedWitness[0], r.raisedWitness[1])
       except IndexDefect: replayed = true
@@ -122,13 +168,14 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
         if v == "two":
           symexTarget("item1_probe_then_hit")
     let r = symexFind(probeThen, tLabel("item1_probe_then_hit"))
-    # RFC-0005 S8z re-pin: `var arr: array[3, string]` is now Nim's zero
-    # value (was a decline that tainted every path), so `arr[i]` read BEFORE
-    # the bounds guard surfaces its reachable `IndexDefect` (E6). Checked
-    # against Nim: the witness replays as `IndexDefect`. Never an `sxSat`.
-    check r.status == sxRaised
+    # RFC-0005 S8z re-pin (confirmed by S8aj with the same mechanism):
+    # `var arr: array[3, string]` is now Nim's zero value (was a decline
+    # that tainted every path), so `arr[i]` read BEFORE the bounds guard
+    # surfaces its reachable `IndexDefect` (E6). Checked against Nim: the
+    # witness replays as `IndexDefect`, and its index is out of range.
+    # Never an `sxSat`.
+    checkGenuineIndexRaise(r)
     if r.status == sxRaised:
-      check r.raisedTypeId == "IndexDefect"
       var replayed = false
       try: probeThen(r.raisedWitness[0], r.raisedWitness[1])
       except IndexDefect: replayed = true

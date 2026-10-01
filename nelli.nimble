@@ -981,5 +981,12 @@ task test, "Run the test suite":
             # the join over allocation and table / set / distinct / variant
             # state; walker 177->178. Reads per-query step
             # counts via its `.nim.cfg` (`-d:symexQueryStats`).
-            "tsymex_rfc0005_s8ac_remainder"]:
+            "tsymex_rfc0005_s8ac_remainder",
+            # RFC-0005 S8aj -- S8ad's remainder: uninitialised local
+            # arrays, objects, variants and seqs take Nim's zero value (an
+            # element write then a read faulted the walker), and an Int
+            # merges with a bitvector through reconcileInt; an unchecked
+            # sum that wraps decides (divRangeFacts' next window); walker
+            # 178->179. Reads per-query step counts via its `.nim.cfg`.
+            "tsymex_rfc0005_s8aj_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

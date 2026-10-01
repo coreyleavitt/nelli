@@ -4816,6 +4816,18 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # ejects, `retBindEq` binds through it), so the merge is of the bases.
     # Before S8ad the assertion below faulted the walker.
     return iteSV(cond, ejectBase(t), ejectBase(e))
+  if t.kind != e.kind and t.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+     e.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+    # RFC-0005 S8aj: one side an Int (`svInt`, which carries its Nim width),
+    # the other a bitvector. They meet when an array element is an Int on
+    # one path and a bitvector on the other: a loop writing
+    # `a[0] = a[0] + x` and `a[2] = a[2] + k` under `symexAssume` on `x`
+    # (`var a: array[3, int]` and `var a = [0, 0, 0]` alike; it faulted at
+    # the base too). Both are the same Nim integer, so the merge is of
+    # their Int values (`reconcileInt`, as every mixed operator does); the
+    # assertion below faulted the walker.
+    let (rt, re) = reconcileInt(t, e)
+    return iteSV(cond, rt, re)
   doAssert t.kind == e.kind, "iteSV: kind mismatch " &
     $t.kind & " vs " & $e.kind
   case t.kind
@@ -9188,6 +9200,9 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## Nim's `-y` lowers) of width W read as an Int:
   ##   ubv2int(-y) == (if y == 0: 0 else: 2^W - ubv2int(y))
   ##   sbv2int(-y) == (if y == low: sbv2int(y) else: -sbv2int(y))
+  ## and (RFC-0005 S8aj) one window further up, `|b| <= a < 2|b|`:
+  ##   b >= 1,  b <= a <= 2b - 1:         e == 1,   r == a - b
+  ##   b <= -1, -b <= a <= -2b - 1:       e == -1,  r == a + b
   ## Each holds for every `a` and `b` (a theorem of the Euclidean pair, or
   ## of two's complement, not a constraint on the input), so asserting them
   ## beside the query leaves its models exactly as they were. `tests/tsymex_rfc0005_s8ad_remainder.nim`
@@ -9206,6 +9221,15 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## `|a| < |b|` pair is for Z3 4.13.4 (symex-mingw): with `start < 0`,
   ## `truncDivInt`'s quotient is `start` only at `e == start == -1` with
   ## `r == 0`, and 4.13.4 did not find `r == y - 1` there within 40M steps.
+  ## The window above is for unchecked arithmetic: `wrapIntToWidth` wraps
+  ## an Int sum as `lo + (r - lo) mod 2^W`, and a sum of two in-range
+  ## operands that overflows puts `r - lo` in `[2^W, 2^(W+1))`, just past
+  ## the `|a| < |b|` pair (an underflow lands in `negSmall`). With a
+  ## `bv2int(y + 1)` operand (`start >= 0 and y > 1 and start + (y + 1) ==
+  ## start`, UNSAT) neither 5.1 nor 4.13.4 refuted it within 40M steps;
+  ## with this pair it is 0.45M offline. Linking `bv2int(y + 1)` to
+  ## `bv2int(y)` (and likewise for `-`, `*`, shifts) did not decide it
+  ## and made other queries dearer, so it is not asserted.
   if not intDivDeclKinds.ready:
     proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
       ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
@@ -9279,7 +9303,13 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let negSmall = (b >= one) and (zero - b <= a) and (a <= zero - one)
     let posSmallN = (b <= zero - one) and (zero <= a) and (a <= zero - one - b)
     let negSmallN = (b <= zero - one) and (b <= a) and (a <= zero - one)
+    # S8aj: `|b| <= a < 2|b|`, the quotient is +-1 (see the doc comment).
+    let posNext = (b >= one) and (b <= a) and (a <= two * b - one)
+    let posNextN = (b <= zero - one) and (zero - b <= a) and
+                   (a <= zero - two * b - one)
     if k == imod:
+      result.add implies(posNext, e == a - b)
+      result.add implies(posNextN, e == a + b)
       result.add implies(b >= one, (zero <= e) and (e <= b - one))
       result.add implies(b <= zero - one, (zero <= e) and (e <= zero - one - b))
       result.add implies((b != zero) and (a >= zero), e <= a)
@@ -9292,6 +9322,8 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     result.add implies(negSmall, e == zero - one)
     result.add implies(posSmallN, e == zero)
     result.add implies(negSmallN, e == one)
+    result.add implies(posNext, e == one)
+    result.add implies(posNextN, e == zero - one)
     let twoE = two * e
     result.add implies((b >= one) and (a >= zero), (zero <= e) and (e <= a))
     result.add implies((b >= two) and (a >= zero), twoE <= a)

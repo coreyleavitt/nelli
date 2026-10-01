@@ -184,7 +184,26 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "178"
+const symexWalkerVersion* = "179"
+  ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local
+  ## array, object or seq (`var a: array[3, int]`, `var h: H` holding an
+  ## array or a seq field, `var s: seq[int]`) takes Nim's `default(T)`
+  ## (`zeroValueForType` -> `mkZeroValue`, lowered by `defaultZero`), where
+  ## the parser declined the zero-init and left the name unbound: the first
+  ## element write bound it to a scalar and the next read faulted the
+  ## walker ("iekIndex on non-array kind=svBV64"). `iteSV` merges a
+  ## width-stamped Int with a bitvector through `reconcileInt`, where an
+  ## array element fold after a loop faulted ("iteSV: kind mismatch svBV64
+  ## vs svInt"). `divRangeFacts` states the Int `div`/`mod` pair one window
+  ## past `|a| < |b|` (`|b| <= a < 2|b|`), where an overflowing unchecked
+  ## sum's `wrapIntToWidth` lands, so `start + (y + 1) == start` decides
+  ## instead of exhausting `seqQueryRLimit`. `zeroValueForType` grew the
+  ## same array/object/seq/variant zero S8z had already given the
+  ## uninitialised-`var` call site directly (`mkZeroValue`); that call site
+  ## now just calls `zeroValueForType`, which covers it (plus `itSeq`,
+  ## which S8z's call-site special-case had not). 178 -> 179.
+  ##
+  ## (Prior: 178.)
   ## RFC-0005 S8ac (2026-09-30) — S8aa's remainder. A callee that writes
   ## through a `var` parameter whose actual is not a plain local (a ref,
   ## a field, an element, `p[]`) writes back to that location

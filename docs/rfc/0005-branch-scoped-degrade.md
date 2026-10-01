@@ -6437,7 +6437,7 @@ Pins: `tests/tsymex_rfc0005_s8ao_remainder.nim`.
   requested and is not done here — it is a diagnostics-precision
   improvement, not a verdict change.
 
-**As landed (S8am, walker 180) — S8z's remainder.** The six mechanisms
+**As landed (S8am, walker 183) — S8z's remainder.** The six mechanisms
 S8z's own "Different mechanisms, reported and not fixed here" footer
 listed above (items 1–6 there) closed, plus one witness-extraction
 characteristic found on the way and reported, not fixed (out of scope).
@@ -6530,7 +6530,7 @@ Found on the way:
   updated here to assert `char`, not `uint8(ord(...))`.
 - **Consumer-visible (for S11's migration note).**
   - **`sxUnknown` programs that now get verdicts:** items 1, 2, 4, 6a and
-    6b above (verdict-affecting; `symexWalkerVersion` 179 → 180).
+    6b above (verdict-affecting; `symexWalkerVersion` 182 → 183).
   - **Witness type changes with no verdict change:** items 3 and 5
     (`renderAsChoicesVersion` 11 → 12).
   - **Cache.** Both version bumps invalidate every symex cache entry that

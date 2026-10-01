@@ -291,9 +291,9 @@ const symexWalkerVersion* = "183"
   ## resolving the render-site ambiguity it existed to avoid, below) — the
   ## placeholder forced every property over such a parameter to degrade
   ## `sxUnknown` regardless of the property, so admitting the real
-  ## parameter type is verdict-affecting, not merely cosmetic. 179 -> 180.
+  ## parameter type is verdict-affecting, not merely cosmetic. 182 -> 183.
   ##
-  ## (Prior: 179.)
+  ## (Prior: 182.)
   ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local
   ## array, object or seq (`var a: array[3, int]`, `var h: H` holding an
   ## array or a seq field, `var s: seq[int]`) takes Nim's `default(T)`

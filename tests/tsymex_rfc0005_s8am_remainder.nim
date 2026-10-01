@@ -371,4 +371,4 @@ suite "S8am (6c) non-string Table keys and non-int-family values/elements stay s
 
 suite "S8am walker version":
   test "symexWalkerVersion is at least S8am's":
-    check parseInt(symexWalkerVersion) >= 180
+    check parseInt(symexWalkerVersion) >= 183

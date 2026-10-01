@@ -287,6 +287,11 @@ title = "S8ac's remainder: a routine declared inside the SUT is feUnsupportedStm
 state = "pending"
 
 [[slice]]
+id    = "S8ao"
+title = "S8aj's remainder: `add` on a dotted seq field (`o.s.add v`) is N49 feUnsupportedOp while `s.add v` on a local seq and `o.s = @[v]` are modelled -- model add through a field path; an uninterpreted type has no zero (`zeroValueForType` returns nil for itUninterp and the caller declines) -- give itUninterp a zero (a fresh constant of the sort, or a declared default), or prove the decline is the only sound answer and pin it"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

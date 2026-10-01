@@ -5009,6 +5009,22 @@ moves are these, and every one is intended:
   query reaches. That is quadratic in the scans of one string. It is
   cheap at N36's five-deep chains (the totals above), but it is not
   bounded.
+- **"Use per-query rlimit deltas" (S8y's remainder item) needed no new
+  mechanism here.** Two call sites already measure a query's own spend,
+  not the context's running total, and neither is this slice's to
+  duplicate. `solveTargetHit`'s budget/slow-SAT classification
+  (`classifyTargetSolve`, above) has read `rlimitCountNow(w.z3)` before
+  and after each target-hit solve since S8y itself (`spentBefore` /
+  `spent`); S8ag only adds the slow-SAT arm on top of that existing
+  delta, it does not change how the delta is taken. The `-d:symexQueryStats`
+  debug build's own per-query figure (`SymexQueryStat.rlimitDelta`) was a
+  different, separately-landed fix: S8ac moved its base read from a
+  probe-only solver (which shifted the context's counter under every
+  later check) to the query's own first solver
+  (`noteQueryRLimitBefore`/`querySolver`), landed on the channel ahead of
+  this slice's rebase (9b820d3). Both are per-query deltas already; S8ag
+  keeps them as the one mechanism each, and adds neither a third nor a
+  duplicate.
 
 **As landed (S8ai, walker 182) — S8ae's remainder.** All three items are
 in `seqRangeFacts` and its use in `checkCapped`'s step 1c. Step 2 still

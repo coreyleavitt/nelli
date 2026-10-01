@@ -267,6 +267,11 @@ title = "S8ad's remainder: an uninitialized local array with an element write (`
 state = "pending"
 
 [[slice]]
+id    = "S8ak"
+title = "S8ah's remainder: the VM-alias guard's macro-reachability walk must handle a zero-required-argument macro (Nim auto-invokes it when passed bare as a typed parameter, yielding its result instead of its symbol) -- resolve macros by symbol so a future zero-arg macro cannot be a silent false negative; replace extractTopLevelNames/extractTopLevelMacroNames' column-0 source scan with enumeration from the typed module AST (backtick operators and multi-line signatures included)"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

@@ -282,6 +282,11 @@ title = "S8z's remainder: a seq element compound assignment (s[i] += x and other
 state = "pending"
 
 [[slice]]
+id    = "S8an"
+title = "S8ac's remainder: a routine declared inside the SUT is feUnsupportedStmtKind -- model nested proc/func declarations (with and without captures); a `var ptr` parameter passed `addr x` is the heUnsafeCast scoped decline -- model addr-of a local passed as ptr where the pointee is a tracked cell; copy-in/copy-out declines on possible aliasing by argument only, and a callee that reaches the location through a global is outside the fragment -- model module-level var reads/writes from a callee, or prove the decline covers every such path with a test"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

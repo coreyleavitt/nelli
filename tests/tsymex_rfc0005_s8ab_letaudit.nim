@@ -85,6 +85,36 @@
 ##    real-scope counts mechanically against the new scan: still 22 macros,
 ##    still 37 generics, still exactly 1 VM-reachable -- no change.
 ##
+## S8al (search this file for "S8al" to find each change) closes S8ak's own
+## two remaining gaps:
+## 1. **The force-and-audit half of the guard, exercised against a fixture
+##    generic.** In the real 16-file scope, the "a VM-reachable generic with
+##    no forced-instantiation audit fails the completeness check closed"
+##    comparison has only ever had ONE row to evaluate
+##    (`traceOneCallBoundary`, always forced) -- its FAILING branch had
+##    never actually run. Two new fixture generics
+##    (`s8alFxForcedHazardGeneric`/`s8alFxUnforcedHazardGeneric`), each
+##    reachable from its own zero-arg fixture macro, prove both outcomes:
+##    the forced one's hazard is reported, and the never-forced one is
+##    correctly reported unforced by the SAME comparison -- confirmed by
+##    deliberately skipping the forced generic's `vmGuardAuditInstantiation`
+##    call (podman, reverted after confirming): both of its own tests go
+##    RED (the hazard disappears from `fixtureLetHits`, and the
+##    completeness comparison's `unforced.len` goes from 0 to 1).
+## 2. **`vmGuardAuditMacroReachWithSpecs`, resolved by symbol.** This
+##    test-only reachability hook took the macro SYMBOL directly as a
+##    `typed` argument -- the exact auto-invoke trap S8ak's item 1 already
+##    fixed for `vmGuardAuditNames` (a genuinely zero-required-argument
+##    macro referenced bare in that position is auto-invoked by Nim, never
+##    resolved to its own symbol). RED (observed against the pre-fix
+##    signature, podman, reverted after confirming): a genuinely zero-arg
+##    macro passed this way was silently auto-invoked and never walked.
+##    Fixed with the same `bindSym`-via-nested-macro technique
+##    (`vmGuardAuditOneSymReachOnly`, `nelli/smt/vm_alias_guard.nim`) --
+##    which also let `s8ahFxDirectGenericCall`/`s8ahFxQuotedGenericCall`
+##    drop the dummy required parameter they carried purely to dodge the
+##    trap; both are now genuinely zero-arg and still correctly flagged.
+##
 ## S8x (`tests/tsymex_rfc0005_s8x_vm_alias.nim`) found and fixed the two
 ## live-at-the-time hazards (`resolveBreak`'s `let t = ctx.procScoped.
 ## jumpTargets[i]`, `ensureProcRegistered`'s `let savedProcScoped = ctx.
@@ -454,20 +484,23 @@ proc fxParamAliasCyclicShape(h: FxCyclicHolder; xs: seq[int]): int =
 # VM-reachable). Both reuse `fxGenericAliasShape` (above) as the generic
 # under test, forced via `vmGuardAuditInstantiation` once flagged.
 #
-# Both take a REQUIRED dummy param, never used: a bare, truly zero-arg
-# macro referenced by NAME (no call parens) as a `typed` macro argument is
-# NOT resolved to its own symbol by Nim -- it is silently AUTO-INVOKED
-# instead (probed separately: passing a zero-arg macro's bare name this
-# way yields `nnkIntLit`, the RESULT of calling it, never `nnkSym`). A
-# macro with at least one required parameter cannot be auto-invoked
-# without arguments, so the bare-name reference resolves to the macro's
-# own symbol, as every other audit call in this file already relies on.
+# RFC-0005 S8al: both are genuinely zero-required-argument macros -- no
+# dummy parameter. Before S8al, `vmGuardAuditMacroReachWithSpecs` took the
+# macro SYMBOL directly as a `typed` argument, which Nim auto-invokes for a
+# zero-arg macro referenced bare in that position (probed separately:
+# yields `nnkIntLit`, the RESULT of calling it, never `nnkSym`), so each
+# fixture needed a required dummy param purely to dodge that. S8al moved
+# this hook onto the same `bindSym`-by-name technique `vmGuardAuditNames`
+# already uses (S8ak) -- pure name resolution, never an expression
+# evaluation, so a zero-arg macro is never auto-invoked -- and the dummy
+# param is no longer needed; see `vmGuardAuditMacroReachWithSpecs`'s own
+# doc.
 
-macro s8ahFxDirectGenericCall(dummy: static int): untyped =
+macro s8ahFxDirectGenericCall(): untyped =
   let v = fxGenericAliasShape(@[1, 2, 3])
   newLit(v)
 
-macro s8ahFxQuotedGenericCall(dummy: static int): untyped =
+macro s8ahFxQuotedGenericCall(): untyped =
   quote do:
     discard fxGenericAliasShape(@[1, 2, 3])
 
@@ -504,8 +537,8 @@ vmGuardAuditNames(fixtureNames, thisFile)
 # ever searches for the REAL 37 registered generics, so it would never
 # flag a call to a test-only fixture generic.
 const fixtureGenericSpecs: seq[GenericRoutineSpec] = @[("fxGenericAliasShape", thisFile, 0)]
-vmGuardAuditMacroReachWithSpecs(s8ahFxDirectGenericCall, thisFile, fixtureGenericSpecs)
-vmGuardAuditMacroReachWithSpecs(s8ahFxQuotedGenericCall, thisFile, fixtureGenericSpecs)
+vmGuardAuditMacroReachWithSpecs("s8ahFxDirectGenericCall", thisFile, fixtureGenericSpecs)
+vmGuardAuditMacroReachWithSpecs("s8ahFxQuotedGenericCall", thisFile, fixtureGenericSpecs)
 
 # `fxGenericAliasShape` is walked TWICE: once above, bare, via
 # `vmGuardAuditNames` (proving the OLD/bare-name path sees nothing -- its
@@ -523,6 +556,70 @@ vmGuardAuditInstantiation(fxGenericAliasShape[seq[int]](@[@[1, 2, 3]]), thisFile
 # latter -- this file's OWN forcing above runs later in module-init
 # order, so it is NOT yet in that earlier snapshot).
 const fixtureForcedGenerics = vmGuardForcedGenerics
+
+# ---- RFC-0005 S8al: the force-and-audit half of the guard, exercised
+# end-to-end with a FIXTURE generic -- `fxGenericAliasShape` above is
+# forced too, but its own reachability is proven only through the
+# fixture-SPECS-only mechanism test (`vmGuardAuditMacroReachWithSpecs`
+# directly), never through the SAME "found reachable -> must be forced or
+# the completeness check fails closed" comparison the real 16-file scope's
+# own test ("GREEN: every generic the real 16-file scope finds
+# VM-reachable has a forced-instantiation audit", below) and
+# `vm_alias_guard.nim`'s own self-audit `doAssert unforced.len == 0` both
+# run in production. In the real scope, that comparison has only ever had
+# ONE row to check (`traceOneCallBoundary`, always forced) -- it has never
+# been exercised against a row that is REACHABLE-BUT-UNFORCED, so a
+# regression that broke the comparison itself (e.g. computing `unforced`
+# from the wrong list, or comparing the wrong key) could not have been
+# caught by the real scope alone. Two near-identical generics, each
+# reachable from its own zero-arg fixture macro (S8al: no dummy param
+# needed now -- see `vmGuardAuditMacroReachWithSpecs`'s own doc): one gets
+# a forced-instantiation audit, the other deliberately does not.
+
+proc s8alFxForcedHazardGeneric[T](container: seq[T]): T =
+  ## Forced below via `vmGuardAuditInstantiation` -- its let-aliasing
+  ## hazard (once `T` is non-scalar) must be reported, same shape as
+  ## `fxGenericAliasShape`'s own hazard.
+  let v = container[0]        # RFC-0005 S8al hazard, once T is non-scalar
+  v
+
+proc s8alFxUnforcedHazardGeneric[T](container: seq[T]): T =
+  ## Deliberately never forced: no `vmGuardAuditInstantiation` call for
+  ## this generic exists anywhere in this file. Proves the completeness
+  ## comparison fails CLOSED -- flags a reachable-but-unforced generic,
+  ## rather than silently treating "never checked" as "fine".
+  let v = container[0]        # RFC-0005 S8al hazard, once T is non-scalar
+  v
+
+macro s8alFxDirectForcedGenericCall(): untyped =
+  let v = s8alFxForcedHazardGeneric(@[1, 2, 3])
+  newLit(v)
+
+macro s8alFxDirectUnforcedGenericCall(): untyped =
+  let v = s8alFxUnforcedHazardGeneric(@[1, 2, 3])
+  newLit(v)
+
+const s8alFixtureSpecs: seq[GenericRoutineSpec] = @[
+  ("s8alFxForcedHazardGeneric", thisFile, 0),
+  ("s8alFxUnforcedHazardGeneric", thisFile, 0),
+]
+vmGuardAuditMacroReachWithSpecs("s8alFxDirectForcedGenericCall", thisFile, s8alFixtureSpecs)
+vmGuardAuditMacroReachWithSpecs("s8alFxDirectUnforcedGenericCall", thisFile, s8alFixtureSpecs)
+
+# Force ONLY `s8alFxForcedHazardGeneric`'s instantiation -- the sibling
+# generic above is left unforced on purpose (see its own doc). Confirmed
+# (podman, deleted after confirming): skipping this call -- the force path
+# breaking the way a future regression plausibly could -- turns both the
+# "hazard is reported" and "completeness comparison passes" tests below
+# RED (`unforced.len was 1`, and `fixtureLetHits` loses the
+# `[instantiated]` hit), proving they actually exercise the force-and-audit
+# path rather than passing vacuously.
+vmGuardAuditInstantiation(
+  s8alFxForcedHazardGeneric[seq[int]](@[@[1, 2, 3]]), thisFile)
+
+# Snapshot AFTER the forcing call just above -- same reasoning as
+# `fixtureForcedGenerics`'s own doc above.
+const s8alFixtureForcedGenerics = vmGuardForcedGenerics
 
 const fixtureLetHits = block:
   var dedup: seq[string]
@@ -684,6 +781,49 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
     # `reachableGenerics` itself (useful diagnostic detail); it is just
     # never load-bearing for THIS assertion.
     check reachableGenerics.mapIt(genericKeyPrefix(it)) == @["dsl_parser.nim:traceOneCallBoundary"]
+
+suite "S8al: the force-and-audit half of the guard, exercised against a fixture generic " &
+      "(not just traceOneCallBoundary)":
+
+  test "GREEN: the forced generic's own let-aliasing hazard is reported":
+    check fixtureLetHits.anyIt(it.contains("s8alFxForcedHazardGeneric[instantiated]") and
+                                it.contains("let v") and it.contains("seq[int]"))
+
+  test "GREEN (mechanism): a VM-reachable fixture generic WITH a forced-instantiation audit " &
+       "passes the SAME completeness comparison the real scope's own test uses":
+    var reachable: seq[string]
+    for h in fixtureReachHits:
+      if h.contains("s8alFxDirectForcedGenericCall"): reachable.add h.split(" -> ")[^1]
+    check reachable.len == 1
+    let forcedPrefixes = s8alFixtureForcedGenerics.mapIt(genericKeyPrefix(it))
+    var unforced: seq[string]
+    for g in reachable:
+      if genericKeyPrefix(g) notin forcedPrefixes: unforced.add g
+    check unforced.len == 0
+
+  test "RED (mechanism): the SAME completeness comparison fails CLOSED -- a VM-reachable " &
+       "generic with no forced-instantiation audit is reported unforced, not silently accepted":
+    # `s8alFxUnforcedHazardGeneric` is reachable (its own fixture macro
+    # calls it directly) but deliberately never forced anywhere in this
+    # file -- see its own doc above. Before this slice, the "force and
+    # audit" mechanism's completeness comparison had only ever been run
+    # against `traceOneCallBoundary`, which is ALWAYS forced -- this is the
+    # first time the comparison itself is exercised against a row that
+    # should come out unforced, proving a regression in the comparison
+    # (e.g. comparing the wrong key, or reading the wrong list) would show
+    # up here even though the real 16-file scope's own single row could
+    # never catch it.
+    var reachable: seq[string]
+    for h in fixtureReachHits:
+      if h.contains("s8alFxDirectUnforcedGenericCall"): reachable.add h.split(" -> ")[^1]
+    check reachable.len == 1
+    let forcedPrefixes = s8alFixtureForcedGenerics.mapIt(genericKeyPrefix(it))
+    var unforced: seq[string]
+    for g in reachable:
+      if genericKeyPrefix(g) notin forcedPrefixes: unforced.add g
+    check unforced.len == 1
+    if unforced.len == 1:
+      echo "CORRECTLY UNFORCED (expected, proves fail-closed): ", unforced[0]
 
 suite "S8ak: a zero-required-argument macro is resolved by symbol, not auto-invoked":
 

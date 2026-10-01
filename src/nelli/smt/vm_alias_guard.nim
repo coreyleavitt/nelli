@@ -100,8 +100,31 @@
 ##    `map`'s two same-file, same-name overloads apart during review; see
 ##    its own doc) -- only the derived KEY stopped trusting it.
 ##
+## **S8al -- S8ak's own remainder, closed here:**
+## 7. **`vmGuardAuditMacroReachWithSpecs` (the test-only reachability hook),
+##    resolved by symbol.** Took the macro SYMBOL directly as a `typed`
+##    argument, the exact auto-invoke trap item 4 above already fixed for
+##    `vmGuardAuditNames` -- a genuinely zero-required-argument macro
+##    referenced bare there is auto-invoked by Nim, not resolved to its own
+##    symbol. This test hook needed the same fix (same `bindSym`-via-
+##    nested-macro technique, see `vmGuardAuditOneSymReachOnly`), which also
+##    let the two existing reachability fixtures
+##    (`s8ahFxDirectGenericCall`/`s8ahFxQuotedGenericCall`) drop the dummy
+##    required parameter they carried purely to dodge the trap.
+## 8. **The force-and-audit half exercised against a fixture generic, not
+##    only `traceOneCallBoundary`.** The "found reachable -> must have a
+##    forced-instantiation audit or the completeness check fails closed"
+##    comparison (`vmGuardForcedGenerics`'s own doc, and each self-audit's
+##    `doAssert unforced.len == 0`) had, in the real scope, only ever had
+##    ONE row to evaluate -- always forced, so the comparison's FAILING
+##    branch had never actually been exercised. The test file's own new
+##    `s8alFxUnforcedHazardGeneric` fixture (reachable, deliberately never
+##    forced) proves the comparison correctly reports it unforced rather
+##    than silently passing; `s8alFxForcedHazardGeneric` (reachable, forced)
+##    proves the hazard itself is still reported once real.
+##
 ## No walker bump: this is compile-time reflection over already-compiled
-## modules, same as S8ab/S8af/S8ah -- it never touches the SMT IR.
+## modules, same as S8ab/S8af/S8ah/S8ak -- it never touches the SMT IR.
 
 import std/[macros, os, strutils, tables]
 
@@ -614,7 +637,26 @@ macro vmGuardAuditNames*(names: static seq[string]; fileTag: static string): unt
           else: discard
         vmGuardAuditNameLocal()
 
-macro vmGuardAuditMacroReachWithSpecs*(macroSym: typed; fileTag: static string;
+proc vmGuardAuditOneSymReachOnly*(s: NimNode; fileTag: string;
+                                   specs: seq[GenericRoutineSpec]) =
+  ## RFC-0005 S8ah/S8al: the per-symbol body `vmGuardAuditMacroReachWithSpecs`
+  ## (below) splices a call to, once it has resolved `s` by NAME via the
+  ## SAME `bindSym`-based nested-macro technique `vmGuardAuditNames` uses
+  ## (see that macro's own doc) -- extracted to a proc, same shape as
+  ## `vmGuardAuditOneSym`, so the generated code's `quote do:` body stays a
+  ## one-line call rather than repeating this logic inline.
+  if s.symKind != nskMacro: return
+  var impl: NimNode
+  try: impl = s.getImpl()
+  except CatchableError as e:
+    vmGuardWalkErrs.add fileTag & ": " & macros.strVal(s) & " (reach-only) getImpl raised: " & e.msg
+    return
+  if impl.isNil or impl.kind == nnkNilLit: return
+  if not impl.lineInfoObj.filename.endsWith(fileTag): return
+  let owner = fileTag & ":" & macros.strVal(s)
+  vmGuardWalkForGenericCalls(impl, owner, specs, vmGuardReachHits)
+
+macro vmGuardAuditMacroReachWithSpecs*(name: static string; fileTag: static string;
                                         specs: static seq[GenericRoutineSpec]): untyped =
   ## RFC-0005 S8ah test hook: runs ONLY the reachability half of
   ## `vmGuardAuditOneSym`, against a CALLER-SUPPLIED `specs` list rather
@@ -623,25 +665,38 @@ macro vmGuardAuditMacroReachWithSpecs*(macroSym: typed; fileTag: static string;
   ## MECHANISM itself (a direct call is flagged, a `quote do:`-only call
   ## is not) against its own small fixture generic, independent of
   ## whether that fixture happens to also be one of the real 37.
-  result = newEmptyNode()
-  var syms: seq[NimNode]
-  case macroSym.kind
-  of nnkClosedSymChoice, nnkOpenSymChoice:
-    for s in macroSym: syms.add s
-  of nnkSym:
-    syms.add macroSym
-  else: discard
-  for s in syms:
-    if s.symKind != nskMacro: continue
-    var impl: NimNode
-    try: impl = s.getImpl()
-    except CatchableError as e:
-      vmGuardWalkErrs.add fileTag & ": " & macros.strVal(s) & " (reach-only) getImpl raised: " & e.msg
-      continue
-    if impl.isNil or impl.kind == nnkNilLit: continue
-    if not impl.lineInfoObj.filename.endsWith(fileTag): continue
-    let owner = fileTag & ":" & macros.strVal(s)
-    vmGuardWalkForGenericCalls(impl, owner, specs, vmGuardReachHits)
+  ##
+  ## RFC-0005 S8al: `name` is now a `static string` (the macro's OWN name),
+  ## resolved to its symbol via `bindSym(name, brForceOpen)` inside a
+  ## NESTED macro spliced into the caller's own code -- exactly
+  ## `vmGuardAuditNames`'s own technique (see that macro's doc for the full
+  ## probed rationale: `bindSym` is pure name resolution, never an
+  ## expression evaluation, so a genuinely zero-required-argument macro is
+  ## never auto-invoked the way a bare `typed`-argument reference to one
+  ## would be). The OLD signature (`macroSym: typed`) took the macro
+  ## SYMBOL directly as a typed argument -- which is exactly where the
+  ## auto-invoke trap lived: passing a zero-arg macro bare in that position
+  ## has Nim invoke it and hand this macro the RESULT (an `nnkIntLit` or
+  ## similar), never the symbol, so its body was silently never walked.
+  ## This forced `s8ahFxDirectGenericCall`/`s8ahFxQuotedGenericCall` to
+  ## carry a dummy required parameter purely to dodge the auto-invoke --
+  ## no longer needed now that this hook resolves by symbol the same way
+  ## the real `vmGuardAuditNames` path already does.
+  let auditSym = bindSym("vmGuardAuditOneSymReachOnly")
+  let fileTagLit = newLit(fileTag)
+  let specsLit = newLit(specs)
+  let nameLit = newLit(name)
+  result = quote do:
+    block:
+      macro vmGuardAuditMacroReachLocal(): untyped =
+        let resolved = bindSym(`nameLit`, brForceOpen)
+        case resolved.kind
+        of nnkClosedSymChoice, nnkOpenSymChoice:
+          for s in resolved: `auditSym`(s, `fileTagLit`, `specsLit`)
+        of nnkSym:
+          `auditSym`(resolved, `fileTagLit`, `specsLit`)
+        else: discard
+      vmGuardAuditMacroReachLocal()
 
 macro vmGuardAuditInstantiation*(callExpr: typed; fileTag: static string): untyped =
   ## RFC-0005 S8af's forced-instantiation mechanism, moved verbatim.

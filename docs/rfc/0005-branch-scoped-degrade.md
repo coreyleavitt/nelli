@@ -274,7 +274,7 @@ state = "done"
 [[slice]]
 id    = "S8al"
 title = "S8ak's remainder: the forced-generic-instantiation half of the VM-alias guard has only run against one real generic (traceOneCallBoundary) -- exercise it with a fixture generic whose forced instantiation carries a let/param-aliasing hazard, so a regression in the force-and-audit path goes RED; make vmGuardAuditMacroReachWithSpecs (the test hook) resolve macros by symbol like the real vmGuardAuditNames path, so its fixtures no longer need a dummy required parameter to dodge zero-arg auto-invoke"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8am"
@@ -5364,6 +5364,88 @@ inside the `when defined(nelliVmAliasAudit):`-reachable surface
 and the one compile-affecting addition (`letaudit`'s new `.nim.cfg`) is
 scoped to that single suite, verified individually above. No ordinary
 `sweep.sh`/`nimble test` compile path changed.
+
+**As landed (S8al, no bump) — S8ak's remainder: the force-and-audit half
+of the guard exercised against a fixture generic, and
+`vmGuardAuditMacroReachWithSpecs` resolved by symbol.** Pure compile-time
+reflection and test-only fixtures; no walker/IR change, no
+`symexWalkerVersion` bump.
+
+1. **The force-and-audit half, exercised end-to-end against a fixture
+   generic.** In the real 16-file scope, the "a VM-reachable generic with
+   no forced-instantiation audit fails the completeness check closed"
+   comparison (`vmGuardForcedGenerics`'s own doc; each self-audit's
+   `doAssert unforced.len == 0`; the test file's own "every generic the
+   real scope finds VM-reachable has a forced-instantiation audit" test)
+   has only ever had ONE row to evaluate — `traceOneCallBoundary`, which is
+   always forced — so the comparison's FAILING branch had never actually
+   run; a regression that broke the comparison itself (the wrong key, the
+   wrong list) could not have been caught by the real scope alone. Two new
+   fixture generics close this: `s8alFxForcedHazardGeneric` (reachable from
+   its own zero-arg macro, `s8alFxDirectForcedGenericCall`, and forced via
+   `vmGuardAuditInstantiation`) and `s8alFxUnforcedHazardGeneric`
+   (reachable from `s8alFxDirectUnforcedGenericCall`, deliberately never
+   forced). RED (podman, reverted after confirming): commenting out the
+   forced generic's `vmGuardAuditInstantiation` call turns both of its own
+   tests red — `fixtureLetHits` loses the `s8alFxForcedHazardGeneric[instantiated]`
+   hit, and the completeness comparison's `unforced.len` goes from 0 to 1.
+   GREEN with the call restored: the forced generic's hazard is reported
+   (`fixtureLetHits.anyIt(... "s8alFxForcedHazardGeneric[instantiated]" ...)`),
+   the forced generic's own completeness comparison reports zero unforced,
+   and the SAME comparison run against the deliberately-unforced sibling
+   reports exactly one unforced entry — the mechanism fails closed, proven
+   by a fixture built to fail it, not only by the one real row that has
+   never failed.
+2. **`vmGuardAuditMacroReachWithSpecs`, resolved by symbol.** This
+   test-only reachability hook took the macro SYMBOL directly as a `typed`
+   argument — the exact auto-invoke trap S8ak's item 1 already fixed for
+   `vmGuardAuditNames`: a genuinely zero-required-argument macro referenced
+   bare in a `typed`-argument position is auto-invoked by Nim (its own
+   RESULT arrives in place of its symbol), never resolved to its symbol.
+   RED (podman, reverted after confirming): a genuinely zero-arg macro
+   passed to the pre-fix hook was silently auto-invoked and its body never
+   walked — the reachability check found nothing. Fix, same technique
+   `vmGuardAuditNames` already uses (S8ak): the hook now takes the macro's
+   NAME (`static string`) and resolves it via `bindSym(name, brForceOpen)`
+   inside a nested macro definition spliced into the caller's own code
+   (`vmGuardAuditOneSymReachOnly`, the extracted per-symbol body). This also
+   let `s8ahFxDirectGenericCall`/`s8ahFxQuotedGenericCall` drop the dummy
+   required parameter they carried purely to dodge the trap — both are now
+   genuinely zero-arg and still correctly flagged (the direct call
+   reachable, the quoted one not).
+
+Run across the real 16-file scope today: unchanged — still 22 unique macro
+names, still 37 registered generics, still exactly 1 VM-reachable
+(`traceOneCallBoundary`); neither change touches the real registry or
+walk, only the test-only fixture-spec hook and two new test-only fixture
+generics. `dt-bounded.sh c` and `dt-bounded.sh cpp` both green, 28/28 tests
+(3 new: the fixture's hazard-reported test and the two force/unforced
+completeness-comparison tests).
+
+**The full-suite sweep gate is skipped for this slice too**, same
+reasoning as S8ah/S8ak: the `src/` change
+(`vmGuardAuditOneSymReachOnly`/`vmGuardAuditMacroReachWithSpecs` in
+`vm_alias_guard.nim`) is reachable only from this one test file, never from
+`symex.nim`'s or `concolic.nim`'s own `when defined(nelliVmAliasAudit):`
+self-audit blocks (those call `vmGuardAuditNames`, not
+`vmGuardAuditMacroReachWithSpecs`), and no other suite's `.nim.cfg` turns
+the define on. No ordinary `sweep.sh`/`nimble test` compile path changed.
+
+*Different mechanisms, reported and not fixed here.*
+- **The build-time gate still runs on one suite per CI leg, not the whole
+  corpus** — unchanged from S8ah's/S8ak's own note; still deliberate, same
+  cost reasoning.
+- **A generic routine never instantiated anywhere in this scope's own
+  compilation unit still yields an un-instantiated `getImpl()` tree, same
+  as before S8af** — unrelated to this slice's fixtures, which are forced
+  (or deliberately left unforced) by hand, not discovered as
+  never-instantiated.
+- **The guard's own walker (`extractTopLevelNames`/`extractTopLevelMacroNames`)
+  is unchanged by this slice** — S8ak's real-parse scan already covers it.
+- **The param check's sibling-field walk and the let/param hazard shapes
+  themselves are unchanged** — this slice is scoped entirely to the
+  force-and-audit completeness mechanism and one test hook's symbol
+  resolution, not to the hazard-detection shapes.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

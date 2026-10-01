@@ -279,7 +279,7 @@ state = "done"
 [[slice]]
 id    = "S8am"
 title = "S8z's remainder: a seq element compound assignment (s[i] += x and other op=) still declines -- model it; verify s[i] = f() evaluation order against Nim (value before or after the bounds check) and pin whichever Nim does; char witnesses render as uint8 -- render char; low(a)/high(a) on an array are unsupported -- model them; a non-zero-based array (array[1..3, int]) witness renders as array[0..2, int] -- render the declared index range; close the remaining container declines where a sound model exists (non-string Table keys, non-integer values or elements, char/byte/uint8 container witnesses, bool-indexed arrays), keeping any that stay as scoped declines with a stated reason"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8an"
@@ -6436,6 +6436,120 @@ Pins: `tests/tsymex_rfc0005_s8ao_remainder.nim`.
   Sharpening the uninitialized-`var` site's diagnostic to match was not
   requested and is not done here — it is a diagnostics-precision
   improvement, not a verdict change.
+
+**As landed (S8am, walker 180) — S8z's remainder.** The six mechanisms
+S8z's own "Different mechanisms, reported and not fixed here" footer
+listed above (items 1–6 there) closed, plus one witness-extraction
+characteristic found on the way and reported, not fixed (out of scope).
+
+1. **Seq element `op=`.** `s[i] += x` and every other augmented assignment
+   on a `seq` element is modelled, mirroring the array path S8z already
+   fixed: the parser's `nnkInfix` augmented-assign handler gained an
+   `itSeq` branch beside its existing array one. Was
+   `feUnsupportedStmtKind`.
+2. **Seq element write order.** Nim's own evaluation order for
+   `s[i] = f()` was empirically determined with a compiled probe (Nim
+   2.2.10, debug build; an index expression with a visible side effect
+   beside an RHS call that also has one): the index is evaluated and
+   bounds-checked **before** the RHS. The walker's seq-assignment path
+   previously evaluated the RHS first (the array path, fixed earlier,
+   already had this right); `parseAsgn`'s `itSeq` branch now forces a
+   discarded bounds-check read before parsing the RHS, matching
+   `valueFieldWrite`'s existing array/tuple/object idiom. `s[9] = raiser()`
+   now raises `IndexDefect`, never the value's own exception, confirmed by
+   an oracle test that calls the real Nim code and asserts the side-effect
+   log stays empty.
+3. **`char` witness rendering.** A `char` scalar or `seq[char]` witness
+   renders as Nim's own `char`, not `uint8`. `IRType` gained a
+   provenance-only `isChar` field (parallel to the existing `enumName`
+   idiom: it affects rendering and `canonicalize()`'s cache key, not
+   structural `==`), set by `classifyType`'s `"char"` arm. `emitTyAndReader`
+   picks a new `readChar` runtime reader (`char(w.uintVals[name])`,
+   reusing the same 64-bit cell `char` / `byte` / `uint8` already shared) when
+   `isChar` is set. This is a render-only change: the underlying solve was
+   already sound, so it bumps `renderAsChoicesVersion` (11 → 12), not
+   `symexWalkerVersion`.
+4. **`low(a)` / `high(a)` on an array value.** Both fold to the array
+   type's own `lo` / `lo + size - 1` at parse time, mirroring the existing
+   `isStringLow` / `isStringHigh` carve-out. Was `feUnsupportedExprKind`.
+5. **Array witness index type.** An `array[1..3, int]` witness now renders
+   as `array[1..3, int]`, not `array[0..2, int]`: `IRType` gained a
+   provenance-only `lo` field (`itArray`, same idiom as `isChar` above),
+   threaded from `classifyArrayBracket` through `canonicalize` to
+   `emitTyAndReader`'s `itArray` arm, which builds `array[lo..hi, T]` via
+   an `infix` node when `lo != 0`. Render-only (the values were already
+   positional and exact); bumps `renderAsChoicesVersion` only.
+6. **Container shapes, closed further.**
+   - **`array[bool, T]`.** A `bool`-indexed array reads and writes at a
+     symbolic index: `arrayIndexBounds` gained an `itBool` case
+     (`lo = 0, hi = 1`), and a new `coerceArrayBoolIndex` helper
+     (`ite(idx.bo, 1, 0)`) is applied at the two walker call sites that
+     read an array index — not inside the shared `arrayIndexConds` /
+     `arraySelect` / `arrayStore` helpers, which the seq-index path also
+     uses, where a bool index can never arrive. Was declined as an
+     unsupported type.
+   - **`char` / `byte` / `uint8` container witness parameters.** With
+     `isChar` giving the renderer the provenance it was missing (item 3),
+     the `isCharAmbiguous` exclusion in `isRenderableTableTy` /
+     `isRenderableSetElemTy` is no longer needed and is removed: a
+     `Table[string, char]` value or `HashSet[char]` / `HashSet[byte]`
+     element is now a reachable witness parameter, using the same
+     `readTableStrIntAs[T]` / `readSetIntAs[T]` readers unmodified. Was
+     `feUnsupportedWitnessType` ("unsupported witness shape ... the
+     supported fragment is {...}") at the parser's parameter-level gate —
+     distinct from `seUnsupportedTableKeyType` /
+     `seUnsupportedTableValType` / `seUnsupportedSetCharInterop`, the
+     allocation-time kinds that apply only to a Table/HashSet
+     constructed *inside* the SUT (pinned independently by
+     `tsymex_r6_n39` / `n40` / `n43`).
+   - **Non-`string` Table keys and non-integer values / elements.**
+     Confirmed, by code reading and by three new pin tests, still
+     correctly declined (no sound 64-bit cell model exists for them) —
+     see "Different mechanisms" below.
+
+Found on the way:
+
+- **A raise-irrelevant parameter's witness is not a reliable bound.** For
+  `s[i] = raiser()`, finding the path that reaches `raiser`'s own
+  `ValueError` reports a sentinel-looking value for `i` (`low(int64)`)
+  rather than a value respecting the already-accumulated `0 <= i < s.len`
+  path condition, even though `i` plays no role in `ValueError`'s own
+  raise condition. Reproduced identically against the pre-existing,
+  already-S8z-fixed array write path (`a[i] = raiser()`), so this is a
+  general witness-extraction characteristic of the engine — a don't-care
+  symbol's reported value need not respect an accumulated-but-irrelevant
+  path constraint — not an S8am regression. The `tRaisedExn("IndexDefect")`
+  direction, where `i` *is* part of the raise condition, correctly reports
+  `i` outside the valid range.
+- **Four pre-existing suites assumed the old `char`-as-`uint8` rendering**
+  and one assumed the old `HashSet[char]`-parameter decline:
+  `tsymex_rfc0005_s8z_remainder.nim` (`setCharLocal`'s witness comparison,
+  and `setCharParam`'s own "scoped decline" test, repinned to the new
+  `sxSat`), `tsymex_phase15_S11_mutation.nim`, `tsymex_phase15_z3c_classify.nim`
+  (comment-only) and `tsymex_rfc0005_s8p_precision.nim`. All four are
+  updated here to assert `char`, not `uint8(ord(...))`.
+- **Consumer-visible (for S11's migration note).**
+  - **`sxUnknown` programs that now get verdicts:** items 1, 2, 4, 6a and
+    6b above (verdict-affecting; `symexWalkerVersion` 179 → 180).
+  - **Witness type changes with no verdict change:** items 3 and 5
+    (`renderAsChoicesVersion` 11 → 12).
+  - **Cache.** Both version bumps invalidate every symex cache entry that
+    touches a `char`, a non-zero-based array, a seq `op=`/assignment, a
+    `bool`-indexed array, or a `char`/`byte`/`uint8` Table value or
+    HashSet element.
+- **Different mechanisms, reported and not fixed here.**
+  - **Non-`string` Table keys.** Still `seUnsupportedTableKeyType`
+    (allocation-time) or `feUnsupportedWitnessType` (parameter-level): the
+    model and the S8f registry/extractor are keyed by string.
+  - **Non-integer Table values or HashSet elements** (`string`, `float`,
+    tuple, object, `seq`, ...). Still `seUnsupportedTableValType` /
+    `seUnsupportedSetCharInterop` (allocation-time) or
+    `feUnsupportedWitnessType` (parameter-level): every such shape would
+    need a different cell sort than the 64-bit integer one the container
+    model has.
+  - **The raise-irrelevant-parameter witness sentinel**, above: a true
+    engine characteristic, not scoped to this slice's mechanisms, and
+    outside what S8am was asked to fix.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

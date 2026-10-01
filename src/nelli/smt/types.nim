@@ -206,6 +206,25 @@ type
                                ## treatment) — cheap, and it forecloses any
                                ## future doubt about a generic/overload
                                ## dispatch keying on the enum's name.
+      isChar*: bool           ## RFC-0005 S8am (S8z's remainder, item 3).
+                               ## True iff this `itInt(width=8, signed=false)`
+                               ## is the lifted representation of a Nim
+                               ## `char` (`dsl_typebridge.classifyType`'s
+                               ## "char" arm) rather than `byte`/`uint8` --
+                               ## `char`/`byte`/`uint8` classify to the SAME
+                               ## structural `IRType` (one Z3 BitVec8 sort;
+                               ## the walker never reads this flag), so
+                               ## before this field there was no way to tell
+                               ## a `char` witness apart from a `uint8` one
+                               ## at render time (`isCharAmbiguous`,
+                               ## `emitTyAndReader`'s `itInt` arm always
+                               ## picked `uint8`). Same provenance-only
+                               ## contract as `enumName` just above: NOT
+                               ## part of `IRType.==` (a `char` and a
+                               ## `uint8` of the same width/signedness are
+                               ## one structural shape to every walker arm),
+                               ## IS rendered by `canonicalize` (same
+                               ## "cheap, forecloses future doubt" default).
     of itBool:
       discard
     of itTuple:
@@ -263,6 +282,28 @@ type
     of itArray:
       elemTy*: IRType
       size*: int
+      lo*: int64              ## RFC-0005 S8am (S8z's remainder, item 5).
+                               ## The array's DECLARED first index (0 for
+                               ## `array[3, T]`/`array[0..2, T]`, 1 for
+                               ## `array[1..3, T]`, an enum's first ordinal
+                               ## for `array[E, T]`) -- `arrayIndexLow`
+                               ## computed this from the raw NimNode at every
+                               ## call SITE (`isIndex.ixLo`/
+                               ## `isIndexAssign.iaLo`), but the TYPE itself
+                               ## carried only `size`, so a witness of
+                               ## `array[1..3, int]` rendered as a 0-based
+                               ## `array[0..2, int]` (same length and
+                               ## positional values -- replay is exact -- but
+                               ## not the parameter's own type). Default 0
+                               ## (every pre-existing `tArray` call site is
+                               ## unchanged). Same provenance-only contract as
+                               ## `enumName`/`isChar`: NOT part of
+                               ## `IRType.==` (the walker's own bounds checks
+                               ## and element select/store already take `lo`
+                               ## as a separate statement-level argument, at
+                               ## every site that needs it -- this field is
+                               ## consulted ONLY by the witness renderer), IS
+                               ## rendered by `canonicalize`.
     of itString:
       discard
     of itSeq:
@@ -3788,8 +3829,8 @@ proc mkLet*(name: string, ty: IRType, value: IRExpr,
 proc tBool*(): IRType =
   IRType(kind: itBool)
 
-proc tInt*(width: int = 64, signed: bool = true): IRType =
-  IRType(kind: itInt, width: width, signed: signed)
+proc tInt*(width: int = 64, signed: bool = true, isChar: bool = false): IRType =
+  IRType(kind: itInt, width: width, signed: signed, isChar: isChar)
 
 proc tUInt*(width: int): IRType =
   IRType(kind: itInt, width: width, signed: false)
@@ -3836,8 +3877,8 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
          nominalId: nominalId, isPlaceholder: isPlaceholder,
          nameIsRefAlias: nameIsRefAlias)
 
-proc tArray*(elemTy: IRType, size: int): IRType =
-  IRType(kind: itArray, elemTy: elemTy, size: size)
+proc tArray*(elemTy: IRType, size: int, lo: int64 = 0): IRType =
+  IRType(kind: itArray, elemTy: elemTy, size: size, lo: lo)
 
 proc tString*(): IRType =
   IRType(kind: itString)
@@ -4090,22 +4131,34 @@ func isBackedSetElemTy*(elemTy: IRType): bool =
   isContainerIntLeaf(elemTy)
 
 func isCharAmbiguous(t: IRType): bool =
-  ## RFC-0005 S8z. `char`, `byte` and `uint8` classify to the same IRType,
-  ## and `emitTyAndReader` renders it `uint8`: a `HashSet[char]` witness
-  ## would be a `HashSet[uint8]`, which Nim does not convert.
+  ## RFC-0005 S8z gave this predicate's RATIONALE: `char`, `byte` and
+  ## `uint8` classify to the SAME `IRType`, and `emitTyAndReader` rendered
+  ## every 8-bit unsigned value `uint8` regardless -- a `HashSet[char]`
+  ## witness would render `HashSet[uint8]`, which Nim does not implicitly
+  ## convert back to `HashSet[char]`. RFC-0005 S8am closed the actual gap
+  ## `IRType.isChar` carries exactly the provenance the renderer needed
+  ## (`primTyAndReader` now picks `char`/`readChar` when it is set), so
+  ## nothing is ambiguous anymore -- this predicate is kept ONLY as the
+  ## still-true structural fact its name describes (used nowhere else as a
+  ## witness gate; retained for the doc trail and in case a future
+  ## genuinely-ambiguous shape needs the same name).
   t.kind == itInt and t.width == 8 and not t.signed and t.enumName.len == 0
 
 proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itTable` arm can render:
-  ## the backed shapes (RFC-0005 S8z; was `Table[string, int64]`) but an
-  ## 8-bit unsigned value (`isCharAmbiguous`), a scoped witness decline.
-  isBackedTableTy(keyTy, valTy) and not isCharAmbiguous(valTy)
+  ## every backed shape (RFC-0005 S8z; was `Table[string, int64]`).
+  ## RFC-0005 S8am: an 8-bit unsigned value (`char`/`byte`/`uint8`) is no
+  ## longer excluded -- `isChar` (consulted by `emitTyAndReader`, via
+  ## `primTyAndReader`) resolves what used to be ambiguous (see
+  ## `isCharAmbiguous`'s own doc).
+  isBackedTableTy(keyTy, valTy)
 
 proc isRenderableSetElemTy*(elemTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itSet` arm can render:
-  ## the backed element types (RFC-0005 S8z; was `HashSet[int64]`) but an
-  ## 8-bit unsigned one (`isCharAmbiguous`).
-  isBackedSetElemTy(elemTy) and not isCharAmbiguous(elemTy)
+  ## every backed element type (RFC-0005 S8z; was `HashSet[int64]`).
+  ## RFC-0005 S8am: see `isRenderableTableTy`'s own note -- the 8-bit
+  ## unsigned exclusion is gone.
+  isBackedSetElemTy(elemTy)
 
 proc isRecursionPlaceholder*(ty: IRType): bool =
   ## Cluster H Step C (ADR-0022 Round-2). True iff `ty` is a

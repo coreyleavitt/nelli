@@ -591,6 +591,12 @@ proc primTyAndReader(ty: IRType): (string, string) =
       of 32: ("int32", "readInt32")
       of 64: ("int",   "readInt")
       else: ("int", "readInt")
+    elif ty.width == 8 and ty.isChar:
+      # RFC-0005 S8am (S8z's remainder, item 3): render a Nim `char` as
+      # `char`, not `uint8` -- `isChar` is the only thing that tells a
+      # `char` witness apart from a `byte`/`uint8` one (see `IRType.isChar`'s
+      # field doc: all three share one structural `itInt` shape).
+      ("char", "readChar")
     else:
       case ty.width
       of 8:  ("uint8",  "readUInt8")
@@ -629,6 +635,7 @@ proc stdName(name: string): NimNode =
   of "int64": bindSym"int64"
   of "uint": bindSym"uint"
   of "uint8": bindSym"uint8"
+  of "char": bindSym"char"               # RFC-0005 S8am
   of "uint16": bindSym"uint16"
   of "uint32": bindSym"uint32"
   of "uint64": bindSym"uint64"
@@ -647,6 +654,7 @@ proc stdName(name: string): NimNode =
   of "readInt32": bindSym"readInt32"
   of "readUInt": bindSym"readUInt"
   of "readUInt8": bindSym"readUInt8"
+  of "readChar": bindSym"readChar"       # RFC-0005 S8am
   of "readUInt16": bindSym"readUInt16"
   of "readUInt32": bindSym"readUInt32"
   of "readFloat": bindSym"readFloat"
@@ -936,8 +944,22 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       (subTy, subVal)
   of itArray:
     let (elemTyNode, _) = emitTyAndReader(ty.elemTy, path & ".0", witId)
+    # RFC-0005 S8am (S8z's remainder, item 5): a non-zero-based array
+    # (`array[1..3, int]`, `ty.lo == 1`) renders its DECLARED index range
+    # (`array[1..3, int]`), not Nim's `array[N, T]` sugar -- that sugar
+    # always means `array[0..N-1, T]`, so a witness built from it alone was
+    # typed `array[0..2, int]` for a `array[1..3, int]` parameter: same
+    # length, same positional values (replay stays exact), but not the
+    # parameter's own type (a caller could not assign it back to a slot
+    # declared with the real type without a conversion). The element
+    # LITERAL stays purely positional either way (`arrLit`, below) -- Nim's
+    # `[v0, v1, v2]` bracket literal needs no index annotations regardless
+    # of the target array's index origin.
+    let arrIdxNode =
+      if ty.lo == 0: newLit(ty.size)
+      else: infix(newLit(ty.lo), "..", newLit(ty.lo + int64(ty.size) - 1))
     let arrTy = newTree(nnkBracketExpr,
-      stdName("array"), newLit(ty.size), elemTyNode)
+      stdName("array"), arrIdxNode, elemTyNode)
     if ty.elemTy.kind in {itRef, itPtr} and resolvesByRef(ty.elemTy):
       # RFC-0005 S8f/S8h: element `i` is the position `path[i]`.
       return (arrTy, emitRefElemsReader(elemTyNode, path, witId,

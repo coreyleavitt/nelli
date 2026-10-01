@@ -1006,5 +1006,13 @@ task test, "Run the test suite":
             # chain facts), so N36's five-iteration exits find a model; a
             # tainted SAT after half its budget bounds later hits as a
             # budget-out does; walker 182->183.
-            "tsymex_rfc0005_s8ag_indexsplit"]:
+            "tsymex_rfc0005_s8ag_indexsplit",
+            # RFC-0005 S8am -- S8z's remainder: compound assignment on a
+            # seq element; a seq element assignment checks the index bound
+            # before the RHS; low/high on an array value; array[bool, T];
+            # char/byte/uint8 Table values and HashSet elements are
+            # reachable witness parameters; a char witness renders char,
+            # not uint8; a non-zero-based array witness renders its
+            # declared index range; walker 182->183, render 11->12.
+            "tsymex_rfc0005_s8am_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -412,7 +412,10 @@ suite "S8p (5) add of a char to a string":
     check r.status == sxSat
     if r.status == sxSat:
       check r.witness[0] == "q"
-      check r.witness[1] == uint8(ord('!'))   # a char witness renders as its byte
+      ## RFC-0005 S8am: a char witness renders Nim's own `char` (was
+      ## `uint8`, per the comment here when this test was first written --
+      ## see `IRType.isChar`'s own doc comment).
+      check r.witness[1] == '!'
     let d = symexFind(addCharParam, tLabel("s8p_addc_dead"))
     checkpoint($d.status & " " & show(d.errors))
     check d.status == sxUnsat

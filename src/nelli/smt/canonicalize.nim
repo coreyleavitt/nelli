@@ -49,7 +49,7 @@ proc cacheKeyRaised*(typeId: string): string =
   ## accumulate one entry per `(exnType, pathCond)` finding.
   ":raised:" & typeId
 
-const renderAsChoicesVersion* = "11"
+const renderAsChoicesVersion* = "12"
   ## Phase 12 cycle 3 introduced the constant; cycle 6 bumped it
   ## "1" → "2" to invalidate stale collection witnesses cached
   ## under the old length-prefix `renderAsChoices` encoding for
@@ -183,6 +183,24 @@ const renderAsChoicesVersion* = "11"
   ##   fix is not extraction-only, it corrects an under-constrained property
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
+  ## - "12" — RFC-0005 S8am, S8z's remainder. Two witness-rendering-only
+  ##   fixes (see `symexWalkerVersion`'s own "180" bullet for this same
+  ##   slice's verdict-affecting siblings, which are NOT here because an
+  ##   already-SAT verdict never changes for either fix below — only the
+  ##   rendered witness's declared Nim TYPE does). A `char` parameter (or
+  ##   `char` Table value / HashSet element, now that those are reachable
+  ##   at all per the "180" bullet's item 5) renders a Nim `char` literal
+  ##   (`primTyAndReader` picks `("char", "readChar")`) instead of
+  ##   `uint8` — `char`/`byte`/`uint8` share one structural `IRType`
+  ##   (`itInt`, width 8, unsigned), so the ONLY thing that told them apart
+  ##   was always going to be a NEW provenance field (`IRType.isChar`,
+  ##   excluded from `IRType.==` and `isChar`-silent when false, so a
+  ##   stale cache entry for a `byte`/`uint8` witness is unaffected — only
+  ##   a `char` one differs, from `uint8` to `char`-typed). A non-zero-based
+  ##   array (`array[1..3, int]`) renders its DECLARED index range
+  ##   (`array[1..3, int]`, via `IRType.lo`), not `array[0..2, int]` — the
+  ##   element VALUES were already positionally correct (S8z); only the
+  ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "183"
   ## RFC-0005 S8ag (2026-10-01) — S8y's remainder. `str.indexof(s, c, i)`
@@ -232,6 +250,48 @@ const symexWalkerVersion* = "183"
   ## only sound answer; that half of this slice is comment-and-pin only
   ## (the `add`-through-field-path half above is what earns the bump).
   ## 179 -> 181.
+  ##
+  ## (Prior: 179.)
+  ## RFC-0005 S8am (2026-10-01) — S8z's remainder. Five closed gaps that
+  ## change reachable VERDICTS (a program that previously forked a scoped
+  ## decline, `sxUnknown`, can now report `sxSat`/`sxUnsat` through the
+  ## newly-modelled path) — see `renderAsChoicesVersion`'s own "12" bullet
+  ## below for the SIBLING rendering-only fixes this same slice made,
+  ## which do not change any verdict and so do not belong here. (1) `s[i]
+  ## += v`/`-=`/`*=`/`&=` on a SEQ ELEMENT, previously a scoped decline
+  ## (`valueFieldTy`/`fieldStep` had no `itSeq` case). (2) `s[i] = f()` on
+  ## a seq now checks the index bound BEFORE evaluating `f()`, matching
+  ## Nim (probed against a compiled binary: an OOB `s[i] = raiser()` never
+  ## runs `raiser`'s side effect, raising `IndexDefect` immediately) —
+  ## A-normalisation (`userCallStmt`) hoisted `f()`'s call into the
+  ## preamble ahead of the `isIndexAssign` statement's own WALK-time bounds
+  ## check, so the call ran first regardless of the index; the array write
+  ## arm already had the correct order (S8z's `valueFieldChecked`), but a
+  ## bare seq element assignment did not. Both (1) and (2) force a
+  ## discarded bounds-check read (`mkIndexStmt`) before the RHS/operand is
+  ## parsed, reusing the SAME parsed index IR for the check and the real
+  ## write (never re-parsing the raw index node, which would
+  ## double-evaluate an impure one). (3) `low(a)`/`high(a)` on an ARRAY
+  ## VALUE now fold to the array's declared first/last index, mirroring
+  ## the pre-existing `isStringLow` carve-out; previously `calleeSym.strVal
+  ## in ["low","high"]`'s non-int-family branch declined any array
+  ## receiver (`feUnsupportedExprKind`). (4) `array[bool, T]` -- the index
+  ## coerces `svBool` to `svInt` (0/1) at the two walker sites that read
+  ## one (`isIndex`/`isIndexAssign`), not inside the shared
+  ## `arrayIndexConds`/`arraySelect`/`arrayStore` helpers, which only ever
+  ## took an int-family index and are also the `itSeq` index path's
+  ## helpers (where a bool index cannot arrive); `arrayIndexBounds` now
+  ## admits `itBool` (`lo=0, hi=1`) instead of declining it, and
+  ## `fieldStep` admits an `itBool` symbolic index alongside `itInt` for
+  ## the value-field-chain write path. (5) `Table[string, V]`/`HashSet[V]`
+  ## witness PARAMETERS where `V` is `char`/`byte`/`uint8` are no longer
+  ## routed to the `__unsupported_witness:` placeholder at `parseProc*`
+  ## classification time (`isRenderableTableTy`/`isRenderableSetElemTy`'s
+  ## `isCharAmbiguous` exclusion is gone, superseded by `IRType.isChar`
+  ## resolving the render-site ambiguity it existed to avoid, below) — the
+  ## placeholder forced every property over such a parameter to degrade
+  ## `sxUnknown` regardless of the property, so admitting the real
+  ## parameter type is verdict-affecting, not merely cosmetic. 179 -> 180.
   ##
   ## (Prior: 179.)
   ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local
@@ -4573,9 +4633,14 @@ proc canonicalize*(t: IRType): string =
     # rely on just below. Absent (the default "") encodes to nothing, so
     # every pre-existing key (every enum-free `itInt`, and every #162-era
     # key from before this field existed) is unchanged.
+    # RFC-0005 S8am: `isChar` renders too, same "cheap, forecloses future
+    # doubt" default as `enumName` just above -- see `IRType.isChar`'s own
+    # field doc. Absent (the default `false`) encodes to nothing, so every
+    # pre-existing key (every `itInt` that is not a Nim `char`) is unchanged.
     "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") &
       (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
-      (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") & ">"
+      (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") &
+      (if t.isChar: ":c" else: "") & ">"
   of itBool:
     "Ty<B>"
   of itString:
@@ -4604,7 +4669,12 @@ proc canonicalize*(t: IRType): string =
       parts.add nm & "=" & canonicalize(t.fields[i])
     "Ty<T:" & t.objectName & ":" & parts.join(";") & ">"
   of itArray:
-    "Ty<A:" & $t.size & ":" & canonicalize(t.elemTy) & ">"
+    # RFC-0005 S8am: `lo` renders too (same "cheap, forecloses future
+    # doubt" default as `IRType.lo`'s own field doc) -- absent (the
+    # default 0) encodes to nothing, so every pre-existing key (every
+    # zero-based array) is unchanged.
+    "Ty<A:" & $t.size & ":" & canonicalize(t.elemTy) &
+      (if t.lo != 0: ":lo=" & $t.lo else: "") & ">"
   of itSeq:
     "Ty<Sq:" & canonicalize(t.seqElemTy) & ">"
   of itTable:

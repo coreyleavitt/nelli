@@ -22,10 +22,11 @@
 ## class. M4 models it as the in-place concat-assign `s := s & otherStr`
 ## (`iekStrConcat`, walker v49→50); see the `addStr` test below, updated to
 ## the now-CORRECT `sxSat`. `s.add(c)` (a CHAR arg) is UNCHANGED and remains
-## `sxUnknown` — char is modeled as `itInt` (uint8) with no char→1-char-string
-## conversion IR, so M4 explicitly left it out of scope (type-classified on
-## the argument, not just the receiver). UPDATE (RFC-0005 S8p, walker 164):
-## a char arg is now appended as its 1-byte string, so `addChar` is `sxSat`.
+## `sxUnknown` — char is modeled as `itInt` (an 8-bit unsigned cell) with no
+## char→1-char-string conversion IR, so M4 explicitly left it out of scope
+## (type-classified on the argument, not just the receiver). UPDATE
+## (RFC-0005 S8p, walker 164): a char arg is now appended as its 1-byte
+## string, so `addChar` is `sxSat`.
 import std/[unittest, strutils]
 import nelli/symex
 
@@ -71,7 +72,10 @@ suite "symex Phase 15 S11 — string mutation classified + walker version 6":
     let r = symexFind(addChar, tLabel("addC"))
     check r.status == sxSat
     if r.status == sxSat:
-      check r.witness[0] == uint8(ord('c'))
+      ## RFC-0005 S8am: a char witness renders Nim's own `char` (was
+      ## `uint8` when this test was first written) -- see `IRType.isChar`'s
+      ## own doc comment.
+      check r.witness[0] == 'c'
 
   test "s.add(\"x\") string append → now MODELED (M4): real sxSat via iekStrConcat":
     let r = symexFind(addStr, tLabel("addS"))

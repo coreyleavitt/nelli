@@ -4681,6 +4681,25 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                        classifyType(n[1]).ty.kind == itString
     if isStringLow:
       return mkIntLit(0)
+    # RFC-0005 S8am (S8z's remainder, item 4): `low(a)`/`high(a)` where `a`
+    # is a VALUE of ARRAY type -- the symmetric carve-out to `isStringLow`/
+    # `isStringHigh` above, for the OTHER container `A0` never covered
+    # (`typeNodeName(n[1])` on an array VALUE yields the variable's own
+    # name, never a member of `intTyNames`, so this fell into the
+    # non-int-family decline below). Unlike a string's `len`, an array's
+    # bounds are part of its TYPE and fixed at compile time (Nim rejects an
+    # out-of-declared-range array index at compile time for a literal, and
+    # every element lives at a position the walker already knows --
+    # `classifyArrayBracket`/S8z), so both fold directly to a literal:
+    # `low(a)` is the array's declared first index (`ty.lo`, S8am's own
+    # `IRType.lo`), `high(a)` is `ty.lo + ty.size - 1`.
+    let isArrayLowHigh = calleeSym.strVal in ["low", "high"] and n.len == 2 and
+                         n[1].typeKind != ntyNone and
+                         classifyType(n[1]).ty.kind == itArray
+    if isArrayLowHigh:
+      let arrTy = classifyType(n[1]).ty
+      return mkIntLit(if calleeSym.strVal == "low": arrTy.lo
+                       else: arrTy.lo + int64(arrTy.size) - 1)
     if calleeSym.strVal in ["low", "high"] and n.len == 2 and not isStringHigh:
       let tyName = typeNodeName(n[1])
       if tyName in intTyNames:
@@ -9026,8 +9045,13 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
       step.ix = int(ixNode.intVal - step.lo)
       if step.ix < 0 or step.ix >= recvTy.size: return false
     elif ixNode.typeKind != ntyNone and
-         classifyType(ixNode).ty.kind == itInt and
+         classifyType(ixNode).ty.kind in {itInt, itBool} and
          pureIndexExpr(ixNode):
+      # RFC-0005 S8am (S8z's remainder, item 6): `itBool` joins `itInt`
+      # here -- an `array[bool, T]` field/element write's index
+      # (`o.arr[flag] = v`) is a value-field-chain step exactly like an int
+      # one; the walker side (`isIndexAssign`, via `valueFieldWrite`) is
+      # bool-index-ready since `coerceArrayBoolIndex` (runtime.nim).
       step.idx = t[1]
     else:
       return false
@@ -9345,7 +9369,22 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       # (`isIndexAssign`, mirrors `isIndex`'s own read-side fork), not an
       # `iekXxx` expression evaluated inside the exception-free `lower()`.
       if recvCls.ty.kind == itSeq:
+        # RFC-0005 S8am (S8z's remainder, item 2): Nim checks the index
+        # BEFORE it evaluates the assigned value (probed against real Nim:
+        # `s[5] = raiser()` raises `IndexDefect`, never `raiser`'s
+        # exception) -- the array write arm already had this order
+        # (`valueFieldChecked`'s discarded read), but a bare seq element
+        # assignment did not: the RHS was parsed (and any call it makes
+        # hoisted into the preamble) before the `isIndexAssign` statement's
+        # own bounds check, which only runs at WALK time. Force the check
+        # here, as a discarded `isIndex` read reusing the SAME parsed
+        # `idxIR` (never a second parse of the raw index node, which would
+        # double-evaluate an impure index), emitted before the RHS is
+        # parsed.
         let idxIR = parseExpr(lhs[1], preamble, ctx)
+        let checkSynth = freshSynth(ctx, "awck")
+        preamble.add mkIndexStmt(checkSynth, mkVar(recv.strVal), idxIR,
+                                 recvCls.ty.seqElemTy, siteLoc(n))
         let valIR = asgnRhs()
         return mkIndexAssignStmt(recv.strVal, idxIR, valIR, siteLoc(n))
   if lhs.kind == nnkSym:
@@ -10477,9 +10516,13 @@ proc parseStmtInner(n: NimNode,
         # same rebuilt-root write as `o.a = o.a + v` (`valueFieldWrite`).
         # `&=` needs a string field; a ranged int field declines (the
         # rebuilt write has no per-field RangeDefect fork).
+        # RFC-0005 S8am: hoisted out of the `fieldTy != nil` branch below
+        # so the seq-element arm further down (which `fieldTy` never
+        # matches -- `valueFieldTy`/`fieldStep` has no `itSeq` case) can
+        # read it too.
+        let baseOpStr = augOp.strVal[0 .. ^2]
         let fieldTy = valueFieldTy(lhs)
         if fieldTy != nil:
-          let baseOpStr = augOp.strVal[0 .. ^2]
           let fits =
             if baseOpStr == "&":
               fieldTy.kind == itString and classifyType(n[2]).ty.kind == itString
@@ -10494,6 +10537,51 @@ proc parseStmtInner(n: NimNode,
               else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
             let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
             return mkAssign(fw.root, fw.value)
+        # RFC-0005 S8am (S8z's remainder, item 1): `s[i] += v` (and -=, *=,
+        # &=) on a SEQ ELEMENT. `valueFieldTy`/`fieldStep` has no `itSeq`
+        # case -- a seq element is a REAL `isIndexAssign` store (a Z3
+        # `store` into the seq's backing array), not a value chain rebuilt
+        # root-to-leaf the way a tuple/object/array field is -- so it falls
+        # through `fieldTy == nil` above and needs its own arm here, mirroring
+        # `parseAsgn`'s plain `s[i] = v` `itSeq` arm (same receiver/element
+        # gate) plus this proc's own array arm just above (same
+        # read-old/build-new/write-back shape).
+        #
+        # Evaluation order (RFC-0005 S8z's remainder, item 2 -- probed
+        # against real Nim: `s[5] += raiser()` raises `IndexDefect`, never
+        # `raiser`'s exception): the index is parsed ONCE into `idxIR` and
+        # reused for both the bounds-checked READ (`mkIndexStmt`, its result
+        # discarded as `old`) and the final store (`mkIndexAssignStmt`) --
+        # never re-parsed from the raw node, which would evaluate an
+        # IMPURE index expression (one that calls a routine) twice. The
+        # discarded `isIndex` read is emitted BEFORE the RHS (`n[2]`) is
+        # parsed, so its `IndexDefect` fork lands in the preamble ahead of
+        # any call the RHS makes — the same ordering fix the plain-assign
+        # `itSeq` arm below applies for the same reason.
+        if lhs.kind == nnkBracketExpr and lhs.len == 2:
+          let seqRecv = unwrapHidden(lhs[0])
+          if seqRecv.kind == nnkSym:
+            let seqRecvCls = classifyType(seqRecv)
+            if seqRecvCls.ty.kind == itSeq:
+              let seqElemTy = seqRecvCls.ty.seqElemTy
+              let seqFits =
+                if baseOpStr == "&":
+                  seqElemTy.kind == itString and
+                    classifyType(n[2]).ty.kind == itString
+                else:
+                  (seqElemTy.kind == itInt and not seqElemTy.hasRange) or
+                    seqElemTy.kind in {itFloat32, itFloat64}
+              if seqFits:
+                let idxIR = parseExpr(lhs[1], preamble, ctx)
+                let checkSynth = freshSynth(ctx, "awck")
+                preamble.add mkIndexStmt(checkSynth, mkVar(seqRecv.strVal),
+                                         idxIR, seqElemTy, siteLoc(n))
+                let old = mkVar(checkSynth)
+                let rhsIR = parseExpr(n[2], preamble, ctx)
+                let newVal =
+                  if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
+                  else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
+                return mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
         return ctx.declineMarker(
           feUnsupportedStmtKind, &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")

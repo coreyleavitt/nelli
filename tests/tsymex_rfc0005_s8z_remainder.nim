@@ -291,9 +291,13 @@ suite "S8z (6) a closure-returning callee":
 #
 # A `Table[string, V]` value and a `HashSet[T]` element of any fixed-width
 # int type (`int8`..`uint64`, `char`, `byte`, an enum, a `range`) or `bool`
-# are now modelled in the 64-bit cell. What still declines, scoped: a non-`string`
-# key, a non-integer value or element, and -- as a witness only -- a
-# `char` / `byte` / `uint8` container parameter.
+# are now modelled in the 64-bit cell. What still declines, scoped: a non-
+# `string` key and a non-integer value or element. (RFC-0005 S8am closed
+# the THIRD decline this suite originally documented here -- a `char` /
+# `byte` / `uint8` container PARAMETER, witness-only -- by adding
+# `IRType.isChar`, the provenance the witness renderer needed; see
+# `setCharParam`'s own test below, which S8z had pinned declined and S8am
+# repins passing.)
 
 type S8zE3 = enum e3A, e3B, e3C
 
@@ -413,13 +417,18 @@ suite "S8z (7) container shapes":
   test "HashSet[char] local is modelled":
     let r = symexFind(setCharLocal, tLabel("s8z_sc"))
     expectExactSat(r)
-    if r.status == sxSat: check r.witness[0] == 'a'.uint8
+    ## RFC-0005 S8am: `r.witness[0]` is the `c: char` PARAMETER (not the
+    ## local `HashSet[char]`), and now renders Nim's own `char` (was
+    ## `uint8`, per S8z, when this test was first written -- see
+    ## `IRType.isChar`'s own doc comment).
+    if r.status == sxSat: check r.witness[0] == 'a'
 
-  test "scoped declines: a char-set witness, a non-string key, a non-int value or element":
-    let rc = symexFind(setCharParam, tLabel("s8z_scp"))
-    checkpoint($rc.status & " " & show(rc.errors))
-    check rc.status == sxUnknown
-    check feUnsupportedWitnessType in errKinds(rc)
+  test "HashSet[char] parameter witness is modelled (RFC-0005 S8am; was feUnsupportedWitnessType)":
+    let r = symexFind(setCharParam, tLabel("s8z_scp"))
+    expectExactSat(r)
+    if r.status == sxSat: check 'a' in r.witness[0]
+
+  test "scoped declines: a non-string key, a non-int value or element":
     let rk = symexFind(tabIntKey, tLabel("s8z_tik"))
     checkpoint($rk.status & " " & show(rk.errors))
     check rk.status == sxUnknown
@@ -432,7 +441,7 @@ suite "S8z (7) container shapes":
     checkpoint($rs.status & " " & show(rs.errors))
     check rs.status == sxUnknown
     check seUnsupportedSetCharInterop in errKinds(rs)
-    for r in [rc, rk, rv, rs]:
+    for r in [rk, rv, rs]:
       for e in r.errors: check e.kind != weInternalWalkerFault
 
 # ---- (8) found on the way: `pairs` loops, uninitialised composite locals -------------

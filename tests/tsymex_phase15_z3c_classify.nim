@@ -3,8 +3,10 @@ import nelli/symex
 
 # Phase 15 — Z3c: classifyType `char` branch + `sink`/`lent` strip
 # (see docs/symex/RFC-phase15-reconciliation.md §F / Cluster Z).
-# char is modelled as uint8; sink T / lent T are ownership annotations that
-# symex (by-value) strips to T.
+# char is modelled as an 8-bit unsigned int cell (RFC-0005 S8am: rendered
+# as Nim's own `char`, not `uint8` -- see `IRType.isChar`'s own doc
+# comment); sink T / lent T are ownership annotations that symex (by-value)
+# strips to T.
 
 proc charSut(c: char) =
   if c == 'A': symexTarget("hitA")
@@ -14,7 +16,7 @@ proc sinkIntSut(x: sink int) =
 
 suite "symex Phase 15 — Z3c classifyType (char, sink)":
 
-  test "char parameter is modelled (uint8) and symex finds a witness":
+  test "char parameter is modelled and symex finds a witness":
     let r = symexFind(charSut, tLabel("hitA"))
     check r.status == sxSat
 

@@ -712,9 +712,11 @@ proc arrayIndexBounds*(idx: NimNode): tuple[ok: bool, lo, hi: int64] =
   ## (an `array[1..3, T]` read `a[1]` at position 1: a false `sxUnsat`), and
   ## any other index type was a macro-time `error`. `ok` is false for an
   ## index type the walker does not model, and the caller declines it
-  ## scoped: one wider than `maxArrayIndexSpan`, and `bool` (its index
-  ## lowers to a Z3 Bool, which the walker's integer bounds check and
-  ## element select do not take).
+  ## scoped: one wider than `maxArrayIndexSpan`. (`bool` -- its index lowers
+  ## to a Z3 Bool, which the walker's integer bounds check and element
+  ## select did not take -- was in this list through RFC-0005 S8z; S8am
+  ## closed it by coercing the `svBool` index to `svInt` at the two walker
+  ## sites that read one, below this proc's own call sites.)
   const litKinds = {nnkCharLit} + {nnkIntLit..nnkUInt64Lit}
   var lo, hi: int64
   if idx.kind in litKinds and idx.kind != nnkCharLit:
@@ -743,6 +745,15 @@ proc arrayIndexBounds*(idx: NimNode): tuple[ok: bool, lo, hi: int64] =
         else: (lo = 0; hi = 255)
       else:
         return (false, 0'i64, 0'i64)
+    of itBool:
+      # RFC-0005 S8am (S8z's remainder, item 6): `array[bool, T]` -- Nim's
+      # ordinal `false`/`true`, positions 0/1. S8z's own doc comment above
+      # (on this proc) listed `bool` among the index types that decline;
+      # S8am closes it, now that the walker's array index lowering (below,
+      # `isIndex`/`isIndexAssign`) coerces an `svBool` index to `svInt`
+      # before calling `arrayIndexConds`/`arraySelect`/`arrayStore`, which
+      # only ever took an int-family `SymVal`.
+      lo = 0; hi = 1
     else:
       return (false, 0'i64, 0'i64)
   else:
@@ -758,7 +769,11 @@ proc classifyArrayBracket(arr: NimNode): ClassifiedType =
   let b = arrayIndexBounds(arr[1])
   if not b.ok:
     return unranged(tUninterp("__unsupported:" & arr.repr.strip))
-  unranged(tArray(classifyType(arr[2]).ty, int(b.hi - b.lo + 1)))
+  # RFC-0005 S8am (S8z's remainder, item 5): carry the declared low bound
+  # onto the TYPE (`IRType.lo`), not just this call's own `b.lo` local --
+  # the witness renderer (`emitTyAndReader`) only ever sees the `IRType`,
+  # never this proc's NimNode-derived bounds.
+  unranged(tArray(classifyType(arr[2]).ty, int(b.hi - b.lo + 1), lo = b.lo))
 
 proc arrayTypeImpl(n: NimNode): NimNode =
   ## RFC-0005 S8z. `n`'s type resolved to `array[<idx>, T]` (through `var`
@@ -1157,7 +1172,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   case (if resolved.kind in {nnkIdent, nnkSym}: typeSpelling(resolved) else: s)
   of "bool":     unranged(tBool())
   of "string":   unranged(tString())
-  of "char":     unranged(tInt(8,  signed = false))  ## Phase 15 Z3c: char = uint8
+  of "char":     unranged(tInt(8,  signed = false, isChar = true))  ## Phase 15
+                                                     ## Z3c: char = uint8;
+                                                     ## RFC-0005 S8am: `isChar`
+                                                     ## distinguishes it from
+                                                     ## `byte`/`uint8` at
+                                                     ## witness-render time.
   of "byte":     unranged(tInt(8,  signed = false))  ## Phase 15 S7a: byte = uint8
                                                      ## (bytes(s) element type)
   of "float", "float64": unranged(tFloat64())        ## Phase 15 F1

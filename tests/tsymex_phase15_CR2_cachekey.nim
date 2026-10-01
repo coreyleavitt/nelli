@@ -906,6 +906,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ag (a one-character `str.indexof` lowers to a fresh Int
     ## with split axioms; a tainted SAT after half the budget bounds later
     ## hits as a budget-out does). 182->183.
+    ## RFC-0005 S8am (seq element compound-assignment; seq element
+    ## assignment checks the index bound before the RHS; low/high on an
+    ## array value; array[bool, T]; char/byte/uint8 Table values and
+    ## HashSet elements are reachable witness parameters). 179->180.
     check symexWalkerVersion == "183"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
@@ -1019,4 +1023,16 @@ suite "Phase 15 CR-2 — version bumps":
     ## reached at all and how a degrade is classified in `r.errors`, never
     ## the FORMAT of an already-rendered witness. Same no-op precedent
     ## above.
-    check renderAsChoicesVersion == "11"
+    ## RFC-0005 S8am bumps, "11" → "12": a `char` parameter (or `char`
+    ## Table value / HashSet element) renders a Nim `char` literal instead
+    ## of `uint8` (`primTyAndReader` picks `IRType.isChar`'s `("char",
+    ## "readChar")`), and a non-zero-based array (`array[1..3, int]`)
+    ## renders its declared index range instead of always `array[0..N-1,
+    ## T]` (`IRType.lo`) -- both genuinely NEW/CHANGED witness CONTENT
+    ## (the Nim TYPE of an already-rendered value) for a previously-
+    ## reachable shape, same "8"/"9" precedent; verdicts are unchanged so
+    ## `symexWalkerVersion` does not bump for these two. (This slice's
+    ## OTHER five fixes -- see `symexWalkerVersion`'s own "180" bullet --
+    ## are verdict-surface changes and do not bump the render version,
+    ## same "N37"/Bucket-2 no-op precedent above.)
+    check renderAsChoicesVersion == "12"

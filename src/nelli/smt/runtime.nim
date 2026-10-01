@@ -5353,6 +5353,23 @@ proc bvIndexWindow(idx: SymVal): tuple[mn, mx: int64] =
   else:
     (0'i64, (if w == 64: high(int64) else: (1'i64 shl w) - 1))
 
+proc coerceArrayBoolIndex(idx: SymVal): SymVal =
+  ## RFC-0005 S8am (S8z's remainder, item 6): `array[bool, T]`'s index
+  ## lowers to `svBool` (there is no other Nim value a `bool`-typed
+  ## expression can produce), but `arrayIndexConds`/`arraySelect`/
+  ## `arrayStore` only ever took an int-family `SymVal` -- every OTHER
+  ## array index type lowers straight to one. Rather than teach those three
+  ## shared helpers a fourth kind (they are also the `seq` index path's
+  ## helpers, where a bool index can never arrive — `itSeq`'s index type is
+  ## always int-family, enforced at classify time), coerce AT THE TWO
+  ## CALLERS (`isIndex`/`isIndexAssign`, immediately below) before the
+  ## index ever reaches them: `false`/`true` to Nim's own ordinal values
+  ## 0/1, matching `arrayIndexBounds`'s `of itBool: lo = 0; hi = 1`.
+  if idx.kind == svBool:
+    SymVal(kind: svInt, zi: ite(idx.bo, mkZ3IntLit(1), mkZ3IntLit(0)))
+  else:
+    idx
+
 proc arrayIndexConds(idx: SymVal; lo: int64; n: int): tuple[inLo, inHi: Z3Bool] =
   ## RFC-0005 S8z. The in-bounds conditions of an array read or write at
   ## `idx` over the index range `lo .. lo + n - 1`. The zero-based signed
@@ -14411,7 +14428,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         continue
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w)
+      let (idxSVraw, idxP) = lowerInExpr(p, stmt.ixIdx, w)
+      # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
+      # `coerceArrayBoolIndex`'s own doc.
+      let idxSV = coerceArrayBoolIndex(idxSVraw)
       ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
       ## scalar-raise-fork predicates. Undrained, those were silently
       ## discarded — no raise fork, no bounds narrowing. Drain and thread
@@ -14463,7 +14483,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # `ite(i == iaLo + k, v, old[k])` (`arrayStore`) -- the per-element
         # form of a Z3 `store`, since `svArray` keeps one value per element.
         let n = recvSV.arrElems.len
-        let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w)
+        let (idxSVraw, idxP) = lowerInExpr(p, stmt.iaIdx, w)
+        # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
+        # `coerceArrayBoolIndex`'s own doc.
+        let idxSV = coerceArrayBoolIndex(idxSVraw)
         for cp in drainScalarRaiseForks(idxP, w):
           let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
           maybeForkDefect(cp, not (inLoCond and inHiCond),
@@ -19940,6 +19963,13 @@ proc readInt64*(w: RawWitness, name: string): int64 =       w.intVals[name]
 # Unsigned widths.
 proc readUInt*(w: RawWitness,   name: string): uint   = uint(  w.uintVals[name])
 proc readUInt8*(w: RawWitness,  name: string): uint8  = uint8( w.uintVals[name])
+proc readChar*(w: RawWitness, name: string): char =
+  ## RFC-0005 S8am (S8z's remainder, item 3). A Nim `char` witness: the SAME
+  ## `uintVals` cell `readUInt8` reads (`char`/`byte`/`uint8` share one
+  ## `itInt(width=8, signed=false)` Z3 representation -- `IRType.isChar`
+  ## only distinguishes them at render-SITE selection, in `primTyAndReader`;
+  ## the underlying model value is identical), reinterpreted as `char`.
+  char(w.uintVals[name])
 proc readUInt16*(w: RawWitness, name: string): uint16 = uint16(w.uintVals[name])
 proc readUInt32*(w: RawWitness, name: string): uint32 = uint32(w.uintVals[name])
 proc readUInt64*(w: RawWitness, name: string): uint64 =        w.uintVals[name]

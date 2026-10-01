@@ -8475,7 +8475,8 @@ when defined(symexQueryStats):
                            ## query's cost -- that is `rlimitDelta`.
     rlimitDelta*:  int     ## RFC-0005 S8ac: the steps THIS query spent,
                            ## every solver `checkCapped` ran for it
-                           ## included (deterministic).
+                           ## included (deterministic), counted from its
+                           ## first solver's creation.
     conflicts*:    int
     decisions*:    int
     propagations*: int
@@ -8486,6 +8487,12 @@ when defined(symexQueryStats):
                            ## which no verdict shows)
 
   var symexQueryStats* {.threadvar.}: seq[SymexQueryStat]
+  var symexQueryStatsPaused* {.threadvar.}: bool
+    ## RFC-0005 S8ac. While set, `trySolve` neither reads the step counter
+    ## nor records a stat, so a walk runs exactly as in a build without
+    ## `-d:symexQueryStats`. A suite compares a walk with it set against
+    ## the same walk recorded, to pin that the measurement leaves Z3's
+    ## search alone.
     ## One entry per `check()`, in call order. Reset it yourself before a
     ## measured region -- nothing clears it implicitly.
 
@@ -8496,11 +8503,23 @@ when defined(symexQueryStats):
       if st.isInt(key): st.getInt(key) else: int(st.getFloat(key))
     else: 0
 
-  proc contextRLimitCount(ctx: Z3Context): int =
-    ## RFC-0005 S8ac. The context's step counter now. Z3 reports it with
-    ## any solver's statistics (it is the context's resource limit, not the
-    ## solver's), so a fresh solver reads it without checking anything.
-    statInt(newSolver(ctx).getStatistics(), "rlimit count")
+  var queryRLimitBefore {.threadvar.}: int
+  var queryRLimitPending {.threadvar.}: bool
+    ## RFC-0005 S8ac. `trySolve` arms `queryRLimitPending`; the first solver
+    ## `checkCapped` builds for that query (`querySolver`) reads the
+    ## context's step counter into `queryRLimitBefore` before it is checked.
+    ## Z3 reports the counter with any solver's statistics (it is the
+    ## context's resource limit, not the solver's), and it moves by about
+    ## one unit per solver CREATED. So the read is taken from a solver the
+    ## query builds anyway: a solver made only to read it shifted the
+    ## counter under every later check, and with it Z3's search (a
+    ## different model for one S8ac pin), so the instrumented build no
+    ## longer decided as the plain one does.
+
+  proc noteQueryRLimitBefore(s: Z3Solver) =
+    if queryRLimitPending:
+      queryRLimitBefore = statInt(s.getStatistics(), "rlimit count")
+      queryRLimitPending = false
 
   proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string,
                        rlimitBefore: int) =
@@ -9134,6 +9153,8 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
     solverParams.set("smt.string_solver", "none")
   result.setParams(solverParams)
   for c in roots: result.add(c)
+  when defined(symexQueryStats):
+    noteQueryRLimitBefore(result)   # RFC-0005 S8ac: before any check
 
 var intDivDeclKinds {.threadvar.}:
     tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub: int]
@@ -9566,17 +9587,18 @@ proc trySolve(ctx: Z3Context,
   let roots = pathRoots(path)
   inc symexZ3CallCount
   when defined(symexQueryStats):
-    let rlimitBefore = contextRLimitCount(ctx)
+    queryRLimitPending = not symexQueryStatsPaused
   let (r, s, model, why) = checkCapped(ctx, roots, settings,
                                        settings.budget.queryRLimit)
   when defined(symexQueryStats):
-    # Counted from the same sources `pathRoots` collects, so it tracks
-    # them by construction rather than by a hand-maintained tally.
-    recordQueryStat(s, roots.len,
-      (case r
-       of zsSat: "sat"
-       of zsUnsat: "unsat"
-       else: "unknown"), rlimitBefore)
+    if not symexQueryStatsPaused:
+      # Counted from the same sources `pathRoots` collects, so it tracks
+      # them by construction rather than by a hand-maintained tally.
+      recordQueryStat(s, roots.len,
+        (case r
+         of zsSat: "sat"
+         of zsUnsat: "unsat"
+         else: "unknown"), queryRLimitBefore)
   case r
   of zsSat:
     let m = model

@@ -345,6 +345,29 @@ suite "S8ac (2): an exact unchecked div of an offset stays linear":
       prev = q.rlimit
     check walkSteps() <= symexQueryStats[^1].rlimit
 
+  test "measuring the steps does not change the model":
+    ## RFC-0005 S8ac. The context's step counter moves about one unit per
+    ## solver CREATED, and Z3's search depends on it. The measurement first
+    ## read it from a solver made for that purpose, one per query: the
+    ## counter under every later check shifted, and this build returned a
+    ## different `dy_hit` model than a build without `-d:symexQueryStats`
+    ## (`@[210, 254, 0]` for `@[140, 240, 0]` on Z3 5.1, `@[64, 254, 0]` for
+    ## `@[222, 4, 0]` on 4.13.4, at walker 174). It now reads the counter
+    ## from the query's own first solver. The same walk paused
+    ## (`symexQueryStatsPaused`: no read, no record, as the plain build
+    ## runs) and recorded must return the same model, on any Z3 and any
+    ## walker.
+    symexQueryStatsPaused = true
+    let plain = symexFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
+    symexQueryStatsPaused = false
+    symexQueryStats = @[]
+    let measured = symexFind(sutDivY, tLabel("dy_hit"), exactUnchecked)
+    check symexQueryStats.len >= 2
+    check plain.status == sxSat
+    check measured.status == sxSat
+    if plain.status == sxSat and measured.status == sxSat:
+      check measured.witness == plain.witness
+
 # ---- (3) shift counts outside `0 ..< width` ---------------------------------
 
 proc sutShl64(x, n: int) =

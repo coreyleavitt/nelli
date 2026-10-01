@@ -4624,9 +4624,25 @@ included):
 *An unchecked `div` of a stamped offset stays linear.* `-d:symexQueryStats`'s
 `rlimit` is the context's step counter, cumulative over the walk, so it never
 showed a query's own cost. Each stat now also records `rlimitDelta`, the steps
-that query spent: the counter is read from a fresh solver before
-`checkCapped`. The exit dump and `symexQueryStatsSummary` report the sum as
-`drlimit`.
+that query spent. The counter is read from the query's own first solver
+(`querySolver`), before it is checked. The exit dump and
+`symexQueryStatsSummary` report the sum as `drlimit`.
+
+The counter moves by about one unit per solver created (found by S8y), and
+Z3's search depends on it. The first cut read the counter from a solver made
+just for the read, once per query. That moved the counter under every later
+check, so the stats build returned a different `dy_hit` model than the plain
+build: `@[210, 254, 0]` instead of `@[140, 240, 0]` on Z3 5.1, and
+`@[64, 254, 0]` instead of `@[222, 4, 0]` on 4.13.4 (walker 174). S8ad
+carried that first cut (`cd983fd`) for its own step pins. Reading the counter
+from a solver the query builds anyway makes the two builds agree on both
+versions. "measuring the steps does not change the model" pins this inside
+one binary, so it does not depend on the Z3 version or the walker. The same
+walk runs twice: once with `symexQueryStatsPaused` set, which skips the read
+and the record as the plain build does, and once recorded. The two must
+return the same model. With the probe-solver read put back, the pin fails
+(`@[134, 222, 0]` recorded against `@[182, 86, 0]` paused, on 5.1 at walker
+176).
 
 With it, S8aa's probe traced to one term. S8w wrapped an unchecked signed
 quotient on a width-stamped Int with `wrapIntToWidth`, i.e. `q mod 2^64` of a

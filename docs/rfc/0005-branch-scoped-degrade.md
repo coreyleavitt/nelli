@@ -277,6 +277,11 @@ title = "S8ak's remainder: the forced-generic-instantiation half of the VM-alias
 state = "pending"
 
 [[slice]]
+id    = "S8am"
+title = "S8z's remainder: a seq element compound assignment (s[i] += x and other op=) still declines -- model it; verify s[i] = f() evaluation order against Nim (value before or after the bounds check) and pin whichever Nim does; char witnesses render as uint8 -- render char; low(a)/high(a) on an array are unsupported -- model them; a non-zero-based array (array[1..3, int]) witness renders as array[0..2, int] -- render the declared index range; close the remaining container declines where a sound model exists (non-string Table keys, non-integer values or elements, char/byte/uint8 container witnesses, bool-indexed arrays), keeping any that stay as scoped declines with a stated reason"
+state = "pending"
+
+[[slice]]
 id    = "S9"
 title = "Delete both blanket vetoes"
 state = "done"

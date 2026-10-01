@@ -1185,6 +1185,16 @@ type
                          ## purely an ADDITIVE precision gain, never a
                          ## soundness lever (an untraced position just keeps
                          ## the pre-existing BV default).
+      cGuardRoots*: seq[string]
+                         ## RFC-0005 S8an. The IR names of the ROOT
+                         ## variables of this call's `var` and `addr`
+                         ## actuals. The walk passes those by copy-in/
+                         ## copy-out; that is Nim's semantics only while the
+                         ## callee cannot reach the root another way. A root
+                         ## that is a module-level global, or a capture of
+                         ## the callee, is therefore withheld from the
+                         ## callee, and a callee that touches it declines
+                         ## (`isCall`). Empty for a call with neither.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -1292,6 +1302,9 @@ type
                              ## by `refPointeeTypeId(dObjTy) & "__" & dField`.
       dObjTy*:     IRType    ## Phase 15 R6: the OBJECT pointee type (the `Ref_T`
                              ## sort keys on this; nil for a bare `p[]`).
+      dCell*:      bool      ## RFC-0005 S8an: the read-back of an `addr`
+                             ## actual's cell after the call -- not a program
+                             ## dereference, so not counted by `heapDepth`.
     of isNew:
       nRetName*:   string    ## Phase 15 R1a: fresh ref let-name the alloc binds.
       nRefTy*:     IRType    ## the allocated `itRef`/`itPtr` type.
@@ -1310,6 +1323,10 @@ type
                              ## initialising discriminator write -- not an
                              ## assignment, so no branch-change `FieldDefect`
                              ## check (every other disc write is checked).
+      dwCell*:     bool      ## RFC-0005 S8an: the store of an `addr` actual's
+                             ## value into its cell before the call -- not a
+                             ## program dereference, so not counted by
+                             ## `heapDepth`.
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -1418,6 +1435,16 @@ type
                        ## `parseCalleeImpl` against the resolved concrete type;
                        ## user-defined concepts are trusted to the semchecker.
                        ## Empty for non-generic / unconstrained procs.
+    captures*: seq[string]
+                       ## RFC-0005 S8an. A routine declared inside another
+                       ## routine: the IR names of the enclosing routines'
+                       ## variables and parameters its body reaches (directly,
+                       ## or through a nested routine it calls). Nim captures
+                       ## them by reference; a walked call copies each one in
+                       ## from the caller's env and its value back out on
+                       ## every exit, so the callee's writes reach the
+                       ## enclosing variable (`isCall`). Empty for a
+                       ## module-level routine.
 
 # ---- Public symex-level types -----------------------------------------------
 # N47-followup (walker v110): kept in the SAME `type` section as the IR types
@@ -4643,10 +4670,12 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
   IRStmt(kind: isReturn, retExpr: e)
 
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
-            retIntOffsetPositions: seq[int] = @[]): IRStmt =
+            retIntOffsetPositions: seq[int] = @[],
+            guardRoots: seq[string] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
-         retIntOffsetPositions: retIntOffsetPositions)
+         retIntOffsetPositions: retIntOffsetPositions,
+         cGuardRoots: guardRoots)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false): IRStmt =
@@ -4770,11 +4799,13 @@ proc mkFieldDeref*(retName: string, p: IRExpr, fieldTy: IRType,
   IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: fieldTy,
          dPtrFamily: ptrFamily, dField: field, dObjTy: objTy)
 
-proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType): IRStmt =
+proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
+                 cell = false): IRStmt =
   ## Phase 15 R1a (ADR-0010). A-normalised `let retName = p[]` for a `ptr T`
   ## (the pointer-family deref; pointer arithmetic is classified in R8).
+  ## RFC-0005 S8an: `cell` marks an `addr` cell's read-back (`dCell`).
   IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
-         dPtrFamily: true)
+         dPtrFamily: true, dCell: cell)
 
 proc mkNewT*(retName: string, refTy: IRType): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
@@ -4782,12 +4813,13 @@ proc mkNewT*(retName: string, refTy: IRType): IRStmt =
   IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
-                   ptrFamily = false): IRStmt =
+                   ptrFamily = false, cell = false): IRStmt =
   ## Phase 15 R3 (ADR-0010). `p[] = value` — a heap WRITE through a `ref T`/
   ## `ptr T` deref. Structural at R3 (walker no-ops it); the real `store` lands
   ## R4.
+  ## RFC-0005 S8an: `cell` marks an `addr` cell's store (`dwCell`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
-         dwPtrFamily: ptrFamily)
+         dwPtrFamily: ptrFamily, dwCell: cell)
 
 proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
                         objTy: IRType, field: string,
@@ -5088,6 +5120,30 @@ proc looseSymexSettings*(): SymexSettings {.deprecated:
 
 import std/sequtils
 import std/strutils
+
+const globalEnvPrefix* = "__gl:"
+  ## RFC-0005 S8an. The IR name of a module-level variable starts with this
+  ## (`__gl:<module>.<name>`, minted by `scoped_names.strVal`). A local's
+  ## name never does (Nim identifiers cannot contain `:`), so a callee's own
+  ## `x` is never confused with the module's `x`, and the walker tells a
+  ## global from a local by its name alone: it threads every global binding
+  ## through each walked call (`isCall`).
+
+func isGlobalEnvName*(name: string): bool =
+  ## RFC-0005 S8an. True when the IR name `name` is a module-level variable.
+  name.len > globalEnvPrefix.len and name.startsWith(globalEnvPrefix)
+
+func displayName*(name: string): string =
+  ## RFC-0005 S8an. The source spelling of an IR name, for messages: a
+  ## global's `__gl:<module>.` prefix is dropped.
+  if isGlobalEnvName(name):
+    let dot = name.rfind('.')
+    if dot >= 0: return name[dot + 1 .. ^1]
+  name
+
+func displayNames*(names: seq[string]): seq[string] =
+  ## RFC-0005 S8an. `displayName` of each.
+  for n in names: result.add displayName(n)
 
 proc render*(e: IRExpr): string =
   if e == nil: return "nil"

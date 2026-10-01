@@ -666,10 +666,11 @@ proc emitStmt*(s: IRStmt): NimNode =
       # `mkCall`'s `@[]` default regardless of what the parser computed).
       var posLit = newTree(nnkBracket)
       for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
+      # RFC-0005 S8an: `cGuardRoots` round-trips the same way.
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              prefix(posLit, "@"))
+              prefix(posLit, "@"), newLit(s.cGuardRoots))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -735,8 +736,12 @@ proc emitStmt*(s: IRStmt): NimNode =
               emitIRType(s.dElemTy), emitIRType(s.dObjTy), newLit(s.dField),
               newLit(s.dPtrFamily))
     else:
-      let ctor = if s.dPtrFamily: bindSym"mkPtrDeref" else: bindSym"mkDeref"
-      newCall(ctor, newLit(s.dRetName), emitExpr(s.dPtr), emitIRType(s.dElemTy))
+      if s.dPtrFamily:
+        newCall(bindSym"mkPtrDeref", newLit(s.dRetName), emitExpr(s.dPtr),
+                emitIRType(s.dElemTy), newLit(s.dCell))   # RFC-0005 S8an
+      else:
+        newCall(bindSym"mkDeref", newLit(s.dRetName), emitExpr(s.dPtr),
+                emitIRType(s.dElemTy))
   of isNew:     ## Phase 15 R1a: allocation.
     newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy))
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
@@ -746,7 +751,8 @@ proc emitStmt*(s: IRStmt): NimNode =
               newLit(s.dwPtrFamily), newLit(s.dwInit))
     else:
       newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
-              emitIRType(s.dwElemTy), newLit(s.dwPtrFamily))
+              emitIRType(s.dwElemTy), newLit(s.dwPtrFamily),
+              newLit(s.dwCell))   # RFC-0005 S8an
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
             newLit(s.unMarker))
@@ -1007,6 +1013,12 @@ type
     procs*:      Table[string, ProcSig]
     parsing*:    HashSet[string]   ## currently-being-parsed callees
                                    ## (cycle break for mutual recursion)
+    keySyms*:    Table[string, NimNode]
+                                   ## RFC-0005 S8an. The routine symbol each
+                                   ## non-generic callee key was first
+                                   ## registered for (`ensureProcRegistered`
+                                   ## gives a different symbol of the same
+                                   ## spelling -- an overload -- its own key).
     synthCounter*: int
     userExnHierarchy*: Table[string, string]
                                    ## Phase 15 E4a. child -> direct-parent
@@ -1802,6 +1814,9 @@ proc collectBoundLocals(n: NimNode, into: var HashSet[string]) =
   else: discard
   for c in n: collectBoundLocals(c, into)
 
+proc isNestedRoutine(sym: NimNode): bool  ## RFC-0005 S8an fwd decl
+proc nestedCaptureSyms(impl: NimNode): seq[NimNode]  ## RFC-0005 S8an fwd decl
+
 proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
                         order: var seq[string], seen: var HashSet[string],
                         mutable: var seq[string]) =
@@ -1815,6 +1830,10 @@ proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
   ## local (`nskVar`/`nskForVar`) -- Nim captures those by reference, so their
   ## value at a call can differ from their value at construction. A `let` or
   ## a (non-`var`, the only capturable kind) param cannot change.
+  ## RFC-0005 S8an: a nested routine the body names (calls, or uses as a
+  ## value) reaches ITS captures through the lambda: they are the lambda's
+  ## captures too, so a write to one through the routine is seen as the
+  ## by-reference capture write it is.
   if n == nil: return
   if n.kind == nnkSym:
     if symKind(n) in {nskParam, nskLet, nskVar, nskForVar}:
@@ -1823,8 +1842,109 @@ proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
         seen.incl nm
         order.add nm
         if symKind(n) in {nskVar, nskForVar}: mutable.add nm
+    elif isNestedRoutine(n):
+      let ni = resolveRoutineImpl(n)
+      if ni != nil:
+        for s in nestedCaptureSyms(ni):
+          let nm = s.strVal
+          if nm notin bound and nm notin seen:
+            seen.incl nm
+            order.add nm
+            if symKind(s) in {nskVar, nskForVar}: mutable.add nm
     return
   for c in n: collectFreeVarRefs(c, bound, order, seen, mutable)
+
+# ---- RFC-0005 S8an: a routine declared inside another -----------------------
+
+const nestableRoutineSymKinds = {nskProc, nskFunc, nskConverter, nskIterator,
+                                 nskMethod}
+
+proc isNestedRoutine(sym: NimNode): bool =
+  ## RFC-0005 S8an. True when `sym` names a routine declared inside another
+  ## routine (its owner is a routine, not a module).
+  if sym.kind != nnkSym or symKind(sym) notin nestableRoutineSymKinds:
+    return false
+  let o = owner(sym)
+  o.kind == nnkSym and symKind(o) in nestableRoutineSymKinds
+
+proc collectDeclaredSyms(n: NimNode; into: var seq[NimNode]) =
+  ## RFC-0005 S8an. Every value symbol DECLARED anywhere in `n`: `let`/`var`
+  ## names (tuple unpacking included), for-variables, and the formal
+  ## parameters of `n` and of every routine or lambda nested in it.
+  if n == nil: return
+  case n.kind
+  of nnkIdentDefs, nnkVarTuple:
+    for i in 0 ..< n.len - 2:
+      var s = n[i]
+      if s.kind == nnkPragmaExpr and s.len > 0: s = s[0]
+      if s.kind == nnkSym: into.add s
+      elif s.kind == nnkVarTuple: collectDeclaredSyms(s, into)
+  of nnkForStmt:
+    for i in 0 ..< n.len - 2:
+      if n[i].kind == nnkSym: into.add n[i]
+      elif n[i].kind == nnkVarTuple: collectDeclaredSyms(n[i], into)
+  else: discard
+  for c in n: collectDeclaredSyms(c, into)
+
+proc collectOuterRefs(n: NimNode; refs, nested: var seq[NimNode]) =
+  ## RFC-0005 S8an. The local value symbols `n` reads or writes (`refs`:
+  ## `var`/`let`/param/for-variable, module-level globals excluded -- the
+  ## walker threads those separately), and the nested routines it names
+  ## (`nested`).
+  if n == nil: return
+  if n.kind == nnkSym:
+    if symKind(n) in {nskVar, nskLet, nskParam, nskForVar}:
+      if not isModuleGlobal(n) and not containsSym(refs, n): refs.add n
+    elif isNestedRoutine(n) and not containsSym(nested, n):
+      nested.add n
+    return
+  for c in n: collectOuterRefs(c, refs, nested)
+
+proc nestedCaptureSyms(impl: NimNode): seq[NimNode] =
+  ## RFC-0005 S8an. The enclosing routines' variables and parameters that
+  ## the nested routine `impl` reaches: those its body names without
+  ## declaring them, and those reached through each nested routine it names
+  ## (transitively -- `b` calling `a`, which captures `c`, reaches `c`).
+  ## Nim captures them by reference. Symbol identity throughout: two
+  ## variables of one spelling are two captures.
+  var work = @[impl]
+  var seen: seq[NimNode]
+  if impl.len > 0 and impl[0].kind == nnkSym: seen.add impl[0]
+  var ownDecls: seq[NimNode]
+  collectDeclaredSyms(impl, ownDecls)
+  var i = 0
+  while i < work.len:
+    let r = work[i]
+    inc i
+    var decls, refs, nested: seq[NimNode]
+    collectDeclaredSyms(r, decls)
+    collectOuterRefs(r, refs, nested)
+    for s in refs:
+      if not containsSym(decls, s) and not containsSym(ownDecls, s) and
+         not containsSym(result, s):
+        result.add s
+    for ns in nested:
+      if containsSym(seen, ns): continue
+      seen.add ns
+      let ni = resolveRoutineImpl(ns)
+      if ni != nil: work.add ni
+
+proc nestedSiteKey(sym, impl: NimNode): string =
+  ## RFC-0005 S8an. A nested routine's identity: its body hash and its
+  ## declaration's position (two nested routines may share a body and a
+  ## spelling while capturing different variables).
+  let li = impl.lineInfoObj
+  (if sym.kind == nnkSym: symBodyHash(sym) else: "") & "@" & $li.line &
+    ":" & $li.column & "#nested"
+
+proc nestedCaptureNames(calleeSym, impl: NimNode): seq[string] =
+  ## RFC-0005 S8an. `nestedCaptureSyms` as IR names (spelled in the
+  ## enclosing scope, which a callee's scope inherits). Empty for a
+  ## module-level routine.
+  if not isNestedRoutine(calleeSym): return
+  for s in nestedCaptureSyms(impl):
+    let nm = s.strVal
+    if nm notin result: result.add nm
 
 proc lambdaBodyHash(lam: NimNode): string =
   ## Phase 15 C1 (ADR-0009 D3, reconciliation §F-C). `symBodyHash` is a
@@ -1906,11 +2026,22 @@ proc parseProcAsValue(procSym, impl: NimNode, ctx: ParseCtx): IRExpr =
   ## fallback (`bodyHashPart`); `declOrder = 0` for a stable top-level name (D3).
   ## Calling it dispatches through the existing C2b `iekClosureCall` path; the
   ## walker materializes the zero-field unit-env via the C2a empty-capture path.
-  let site = (siteHash: int64(hash(bodyHashPart(procSym, impl))), declOrder: 0)
+  # RFC-0005 S8an: a nested routine's site is its declaration
+  # (`nestedSiteKey`), not its spelling and body alone.
+  let site = (siteHash: int64(hash(
+                if isNestedRoutine(procSym): nestedSiteKey(procSym, impl)
+                else: bodyHashPart(procSym, impl))), declOrder: 0)
   # RFC-0005 S8e: the proc's body runs in a unit-env closure of its own --
   # its own naming scope, as a callee's is.
   let savedNames = enterNameScope()
-  result = parseRoutineToLambda(impl, ctx, site, forceNoCaptures = true)
+  # RFC-0005 S8an: a routine declared inside another is a CLOSURE over the
+  # enclosing variables it names -- its captures are enumerated as a
+  # lambda's are, and its own locals keep clear of their names. Before,
+  # every one was a unit-env closure, and a capture read as an unbound name
+  # (`feGlobalReadUnmodelled`).
+  let nested = isNestedRoutine(procSym)
+  if nested: reserveScopedNames(nestedCaptureNames(procSym, impl))
+  result = parseRoutineToLambda(impl, ctx, site, forceNoCaptures = not nested)
   leaveNameScope(savedNames)
 
 # ---- Binop / unop helpers ----------------------------------------------------
@@ -3187,7 +3318,20 @@ proc typeReachesCell(t: NimNode; cells: seq[NimNode];
   else:
     true
 
-proc varActualMayAlias(n: NimNode; i: int; root: NimNode;
+proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
+  ## RFC-0005 S8an. Every variable an lvalue names: its root and the
+  ## variables in its index expressions (`s[i]` names `s` and `i`). The
+  ## write-back re-evaluates the lvalue after the call, so a callee that can
+  ## change ANY of them makes it a different location from the one Nim
+  ## passed.
+  if lv.kind == nnkSym:
+    if symKind(lv) in {nskVar, nskLet, nskParam, nskForVar, nskTemp} and
+       not containsSym(into, lv):
+      into.add lv
+    return
+  for c in lv: lvalueVarSyms(c, into)
+
+proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                        heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
   ## (`userCallStmt`) copies the lvalue in, walks the callee on the copy and
@@ -3198,15 +3342,137 @@ proc varActualMayAlias(n: NimNode; i: int; root: NimNode;
   ## heap lvalue, through another argument whose type can hold a ref to the
   ## cell. Then copy-in/copy-out is not Nim's semantics, and the call
   ## declines.
+  ## RFC-0005 S8an: every variable the lvalue names counts, not only its
+  ## root: `setIJ(s[i], i)` writes `s[old i]` in Nim, and the write-back
+  ## after the call wrote `s[new i]`. And a plain-variable actual is
+  ## checked too: `setIJ(i, i)` is one location written twice in the
+  ## callee's order, which two by-name write-backs do not reproduce.
   var cells: seq[NimNode]
   for d in heapSteps: cells.add d.getTypeInst
+  var syms: seq[NimNode]
+  lvalueVarSyms(lv, syms)
+  if not containsSym(syms, root): syms.add root
   for j in 1 ..< n.len:
     if j == i: continue
     let a = n[j]
     # A scalar passed by value cannot alias. A string can: Nim passes a
     # non-`var` string by pointer, so it is checked like any composite.
     if isInertArg(a) and a.typeKind != ntyString: continue
-    if mentionsSym(a, root): return true
+    for s in syms:
+      if mentionsSym(a, s): return true
+    if cells.len > 0:
+      var seen: seq[string]
+      if typeReachesCell(a.getTypeInst, cells, seen): return true
+  false
+
+# ---- RFC-0005 S8an: `addr x` passed as a `ptr T` ----------------------------
+
+proc addrActualLvalue(a: NimNode): NimNode =
+  ## RFC-0005 S8an. The lvalue `lv` of an actual spelled `addr lv` (or
+  ## `unsafeAddr lv`, which lowers to the same `nnkAddr`), nil otherwise.
+  var t = a
+  while t.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and t.len > 0:
+    t = t[^1]
+  if t.kind == nnkAddr and t.len == 1: t[0] else: nil
+
+proc isSymOf(n, sym: NimNode): bool =
+  ## RFC-0005 S8an. `n` is `sym` (by symbol identity), through conversions.
+  var t = n
+  while t.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and t.len > 0:
+    t = t[^1]
+  t.kind == nnkSym and containsSym(@[sym], t)
+
+proc ptrFormalStaysLocal(callee: NimNode; idx: int;
+                         seen: var seq[string]): bool
+
+proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
+  ## RFC-0005 S8an. True when every use of the pointer `f` in `n` is one
+  ## that cannot let it outlive the call: a dereference `f[]` (read, write,
+  ## or passed on as a `var` actual) that is not itself under `addr`, a
+  ## comparison (`==`, `!=`, `isNil`), or an argument to a `ptr` formal of a
+  ## user routine that itself keeps its pointer local. Anything else (a
+  ## store, a return, a capture, an argument to anything else) may escape.
+  case n.kind
+  of nnkSym:
+    return not containsSym(@[f], n)
+  of nnkDerefExpr, nnkHiddenDeref:
+    if n.len == 1 and isSymOf(n[0], f): return true
+  of nnkAddr:
+    if n.len == 1 and n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and
+       n[0].len == 1 and isSymOf(n[0][0], f):
+      return false
+  of nnkLambda, nnkDo, nnkProcDef, nnkFuncDef, nnkIteratorDef,
+     nnkConverterDef, nnkMethodDef:
+    return not mentionsSym(n, f)
+  of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkHiddenCallConv:
+    if n.len > 0 and n[0].kind == nnkSym:
+      let head = n[0]
+      let builtinCmp = macros.strVal(head) in ["==", "!=", "isNil"] and
+                       not isUserCallee(head)
+      let userCall = isUserCallee(head)
+      if builtinCmp or userCall:
+        for j in 1 ..< n.len:
+          if isSymOf(n[j], f):
+            if builtinCmp: continue
+            if not ptrFormalStaysLocal(head, j - 1, seen): return false
+          elif not ptrUsesStayLocal(n[j], f, seen):
+            return false
+        return true
+  else: discard
+  for c in n:
+    if not ptrUsesStayLocal(c, f, seen): return false
+  true
+
+proc ptrFormalStaysLocal(callee: NimNode; idx: int;
+                         seen: var seq[string]): bool =
+  ## RFC-0005 S8an. True when user routine `callee`'s `idx`-th formal is a
+  ## `ptr` whose every use stays local (`ptrUsesStayLocal`). A routine
+  ## already being checked is assumed to (the check is a greatest fixed
+  ## point: recursion passes the pointer to itself, which escapes only if
+  ## some other use does).
+  if callee.kind != nnkSym: return false
+  let key = macros.strVal(callee) & "@" & callee.lineInfo & "#" & $idx
+  if key in seen: return true
+  seen.add key
+  let impl = resolveRoutineImpl(callee)
+  if impl == nil or impl.len < 7: return false
+  let formal = impl[3]
+  if formal.kind != nnkFormalParams: return false
+  var k = 0
+  var fsym: NimNode = nil
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: return false
+    for j in 0 ..< id.len - 2:
+      if k == idx:
+        fsym = id[j]
+        if id[^2].kind == nnkVarTy or
+           id[j].getTypeImpl.kind != nnkPtrTy:
+          return false
+      inc k
+  if fsym == nil or fsym.kind != nnkSym: return false
+  ptrUsesStayLocal(body(impl), fsym, seen)
+
+proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
+                        heapSteps: seq[NimNode]): bool =
+  ## RFC-0005 S8an. `varActualMayAlias` for an `addr lv` actual: another
+  ## `addr` of the SAME lvalue is the same cell (`userCallStmt` shares it),
+  ## so it does not alias; any other argument that names the root, or can
+  ## hold a ref to a heap cell on the lvalue's path, does.
+  var cells: seq[NimNode]
+  for d in heapSteps: cells.add d.getTypeInst
+  var syms: seq[NimNode]
+  lvalueVarSyms(lv, syms)
+  if not containsSym(syms, root): syms.add root
+  let key = scopedRepr(lv)
+  for j in 1 ..< n.len:
+    if j == i: continue
+    let a = n[j]
+    let olv = addrActualLvalue(a)
+    if olv != nil and scopedRepr(olv) == key: continue
+    if isInertArg(a) and a.typeKind != ntyString: continue
+    for s in syms:
+      if mentionsSym(a, s): return true
     if cells.len > 0:
       var seen: seq[string]
       if typeReachesCell(a.getTypeInst, cells, seen): return true
@@ -3230,17 +3496,92 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   ## takes `parseAsgn`'s lvalue arms, so an lvalue shape a source
   ## assignment declines declines here too, as does a call where the
   ## callee could reach the location another way (`varActualMayAlias`).
+  ##
+  ## RFC-0005 S8an: an `addr lv` actual (`ptr T` formal) is a heap cell for
+  ## the call. `lv` is stored into a fresh `ptr` cell, the cell is the
+  ## argument (the callee reads and writes it through `p[]`), and the cell
+  ## is read back into `lv` in the same `finally`. Every `addr` of one
+  ## lvalue in one call is one cell, so `p == q` and a write through `p`
+  ## seen through `q` are exact. The model holds only while the pointer
+  ## cannot outlive the call (`ptrFormalStaysLocal`), and while the callee
+  ## cannot reach `lv` another way (`addrActualMayAlias`, and the
+  ## `cGuardRoots` the walker withholds); otherwise the call declines.
   var argIRs: seq[IRExpr]
   var writeBacks: seq[IRStmt]
+  var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
+  var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
   for i in 1 ..< n.len:
+    let addrLv = addrActualLvalue(n[i])
+    if addrLv != nil:
+      var heapSteps: seq[NimNode]
+      let root = lvalueRoot(addrLv, heapSteps)
+      block:
+        var syms: seq[NimNode]
+        lvalueVarSyms(addrLv, syms)
+        for s in syms:
+          if s.strVal notin guards: guards.add s.strVal
+      let key = scopedRepr(addrLv)
+      var cell = ""
+      for c in addrCells:
+        if c.key == key: cell = c.cell
+      if cell.len > 0:
+        argIRs.add mkVar(cell)
+        continue
+      cell = freshSynth(ctx, "addrCell")
+      addrCells.add (key: key, cell: cell)
+      let ptrTy = classifyType(n[i]).ty
+      let elemTy = classifyType(addrLv).ty
+      var seen: seq[string]
+      if root.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen):
+        preamble.add ctx.declineUnsafeCast(
+          siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
+                  calleeSym.strVal & "`, which may let the pointer escape " &
+                  "the call (it is stored, returned, captured or passed " &
+                  "on to a routine that may): the pointee is modelled as " &
+                  "a cell for the call only (heUnsafeCast)"),
+          "addr argument may escape the call (heUnsafeCast)")
+      elif addrActualMayAlias(n, i, addrLv, root, heapSteps):
+        preamble.add ctx.declineAtSite(feUnsupportedOp,
+          siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
+                  calleeSym.strVal & "` alongside another argument that " &
+                  "reaches the same location: the cell for the call and " &
+                  "the other argument are not one location in the walk " &
+                  "(feUnsupportedOp)"),
+          "addr argument aliases another argument (feUnsupportedOp)")
+      let lvIR = parseExpr(addrLv, preamble, ctx)
+      preamble.add mkNewT(cell, ptrTy)
+      preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
+                                cell = true)
+      let back = freshSynth(ctx, "addrBack")
+      var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
+      let w = parseAsgn(nnkAsgn.newTree(addrLv, newEmptyNode()), mkVar(back),
+                        wbPre, ctx)
+      writeBacks.add mkBlock(wbPre & @[w])
+      argIRs.add mkVar(cell)
+      continue
     var ir = parseExpr(n[i], preamble, ctx)
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
-      if lv.kind != nnkSym:
+      block:
+        var syms: seq[NimNode]
+        lvalueVarSyms(lv, syms)
+        for s in syms:
+          if s.strVal notin guards: guards.add s.strVal
+      if lv.kind == nnkSym:
+        # RFC-0005 S8an: a plain variable named by another argument that
+        # may pass it by address (`varActualMayAlias`) declines too.
+        if varActualMayAlias(n, i, lv, lv, @[]):
+          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
+                    calleeSym.strVal & "` is also reached through another " &
+                    "argument: the callee's writes through the two are " &
+                    "not modelled in its order (feUnsupportedOp)"),
+            "var argument write-back not modelled (feUnsupportedOp)")
+      else:
         var heapSteps: seq[NimNode]
         let root = lvalueRoot(lv, heapSteps)
-        if root.isNil or varActualMayAlias(n, i, root, heapSteps):
+        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps):
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is not a variable and the callee " &
@@ -3259,7 +3600,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
     argIRs.add ir
-  let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions)
+  let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions, guards)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -8828,6 +9169,37 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
+proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
+  ## RFC-0005 S8an. `let p = addr lv` (or `var`), one name, where `lv` names
+  ## the same location for as long as `p` lives: a variable, or a field
+  ## chain of value objects/tuples over one (no index, no dereference, which
+  ## could re-point between uses). `(nil, nil)` otherwise.
+  if c.kind notin {nnkLetSection, nnkVarSection} or c.len != 1: return
+  let d = c[0]
+  if d.kind != nnkIdentDefs or d.len != 3 or d[0].kind != nnkSym: return
+  var a = d[2]
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
+    a = a[^1]
+  if a.kind != nnkAddr or a.len != 1: return
+  var t = a[0]
+  while t.kind == nnkDotExpr and t.len == 2 and
+        t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
+    t = t[0]
+  if t.kind != nnkSym or symKind(t) != nskVar: return
+  (d[0], a)
+
+proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
+  ## RFC-0005 S8an. `n` with `p[]` spelled as the pointee lvalue and a bare
+  ## `p` (an argument; `addrAliasDecl`'s caller checked there is no other
+  ## use) spelled as `addr lv`.
+  if n.kind in {nnkDerefExpr, nnkHiddenDeref} and n.len == 1 and
+     isSymOf(n[0], p):
+    return copyNimTree(addrNode[0])
+  if isSymOf(n, p): return copyNimTree(addrNode)
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  for c in n: result.add substAddrAlias(c, p, addrNode)
+
 proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
   ## list, lowering `defer:` the way Nim does: a `defer: D` guards the REST of
@@ -8846,6 +9218,25 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
       break
+    # RFC-0005 S8an: `let p = addr x` whose every later use is `p[]` or an
+    # argument to a `ptr` formal that keeps it local (`ptrUsesStayLocal`)
+    # IS `x`: the rest of the list is parsed with `p[]` spelled `x` and
+    # `p` spelled `addr x` (the call-site cell). Any other use keeps the
+    # declaration, and `heUnsafeCast`.
+    let al = addrAliasDecl(c)
+    if al.p != nil:
+      var stays = true
+      for r in items[k + 1 ..< items.len]:
+        var seen: seq[string]
+        if not ptrUsesStayLocal(r, al.p, seen):
+          stays = false
+          break
+      if stays:
+        var rest: seq[NimNode]
+        for r in items[k + 1 ..< items.len]:
+          rest.add substAddrAlias(r, al.p, al.addrNode)
+        if rest.len > 0: stmts.add parseDeferList(rest, 0, ctx)
+        break
     stmts.add parseStmt(c, ctx)
   if stmts.len == 1: stmts[0] else: mkBlock(stmts)
 
@@ -10511,6 +10902,20 @@ proc parseStmtInner(n: NimNode,
                       augCls.ty
                     else: nil
         return mkAssign(nm, mkBinop(bop, mkVar(nm), rhsIR), augTy)
+      elif lhs.kind == nnkDerefExpr and lhs.len == 1 and
+           augOp.strVal != "&=" and
+           ((classifyType(lhs).ty.kind == itInt and
+             not classifyType(lhs).ty.hasRange) or
+            classifyType(lhs).ty.kind in {itFloat32, itFloat64}):
+        # RFC-0005 S8an: `p[] += v` -- the read, the operation and the
+        # write `p[] = p[] + v` (`parseAsgn`'s dereference arm), so a
+        # `ptr` formal bound to an `addr` cell is updated in place. A
+        # ranged pointee declines (the write has no RangeDefect fork).
+        let old = parseExpr(lhs, preamble, ctx)
+        let rhsIR = parseExpr(n[2], preamble, ctx)
+        let newVal = mkBinop(binopForInfix(augOp.strVal[0 .. ^2]), old, rhsIR)
+        return parseAsgn(nnkAsgn.newTree(lhs, newEmptyNode()), newVal,
+                         preamble, ctx)
       else:
         # RFC-0005 S8p: `o.a += v` on a value tuple / object field -- the
         # same rebuilt-root write as `o.a = o.a + v` (`valueFieldWrite`).
@@ -10589,6 +10994,16 @@ proc parseStmtInner(n: NimNode,
       feUnsupportedStmtKind, &"augmented assign: operator `{n[0].repr}` not in supported set " &
       &"{{+=,-=,*=,&=}} or wrong AST shape (len={n.len}); " &
       &"degrade to sxUnknown (sound, Invariant 3)")
+  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkConverterDef,
+     nnkTemplateDef, nnkMacroDef:
+    # RFC-0005 S8an. A routine declared inside the code under test does
+    # nothing where it is declared: a call reaches its body through
+    # `ensureProcRegistered` (a callee, with its captures threaded), and a
+    # use as a value builds the closure (`parseProcAsValue`); an iterator
+    # is inlined at its `for`, and a template or macro is already expanded
+    # at its uses. It was `feUnsupportedStmtKind`, which tainted every path
+    # past the declaration.
+    mkBlock(@[])
   else:
     ctx.declineMarker(feUnsupportedStmtKind, &"statement kind {n.kind} not in supported fragment")
 
@@ -10976,6 +11391,12 @@ proc instKeyFor(calleeSym: NimNode, typeSubst: Table[string, NimNode],
     if staticParamNames(impl).len > 0:
       # Scalar static param: force a per-instantiation-distinct, non-bare key.
       return name & "#" & bodyHashPart(calleeSym, impl) & "#static"
+    # RFC-0005 S8an: a routine declared inside another is keyed by its
+    # declaration site. Two nested routines of one spelling (`h` inside
+    # `a`, another `h` inside `b`) are different routines -- the bare name
+    # dispatched both calls to whichever registered first.
+    if isNestedRoutine(calleeSym):
+      return name & "#" & nestedSiteKey(calleeSym, impl)
     return name
   var keys: seq[string]
   for k in typeSubst.keys: keys.add k
@@ -11070,7 +11491,18 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   var typeSubst: Table[string, NimNode]
   if hasGenericParams(impl) and callSite != nil:
     typeSubst = gatherTypeSubst(callSite, impl)
-  let key = instKeyFor(calleeSym, typeSubst, impl)
+  var key = instKeyFor(calleeSym, typeSubst, impl)
+  # RFC-0005 S8an: a non-generic callee's key is its bare name, so two
+  # overloads (`ov(int)`, `ov(string)`) shared one registration and every
+  # call ran the first one's body -- a silent wrong verdict. A different
+  # symbol under a key already taken gets its own (`#<bodyHash>#ovl`); the
+  # first keeps the bare name, so a program without overloads is keyed as
+  # before.
+  if calleeSym.kind == nnkSym and key == name:
+    if ctx.keySyms.hasKey(key) and
+       not containsSym(@[ctx.keySyms[key]], calleeSym):
+      key = name & "#" & bodyHashPart(calleeSym, impl) & "#ovl"
+    if not ctx.keySyms.hasKey(key): ctx.keySyms[key] = calleeSym
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
   # Phase 15 G6 / RFC-0005 S8 (§2.5 point 3). A stdlib-concept violation is
@@ -11158,14 +11590,22 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # RFC-0005 S8e: a callee runs in its own env frame, so it is its own
   # naming scope -- claimed before `parseCalleeImpl`'s pre-passes read a
   # name, discarded (with its renames) once its IR is built.
+  # RFC-0005 S8an: a routine declared inside another reaches the enclosing
+  # variables it captures (`ProcSig.captures`), named as the enclosing scope
+  # names them (computed before the callee's scope opens; it would inherit
+  # the same renames). Its own locals and parameters keep clear of those
+  # names, so the walker can copy them into the callee's env.
+  let captures = nestedCaptureNames(calleeSym, impl)
   let savedNames = enterNameScope()
+  reserveScopedNames(captures)
   claimRoutine(impl)
   # RFC-0005 S8e: the call site's callee symbol is the generic INSTANCE; its
   # own proc type carries the instantiated formals as typed nodes (see
   # `instantiatedFormalTypes`).
-  let sig = parseCalleeImpl(impl, ctx, typeSubst,
+  var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil)
+  sig.captures = captures
   leaveNameScope(savedNames)
   ctx.procScoped = savedProcScoped
   ctx.procs[key] = sig
@@ -11435,7 +11875,9 @@ proc emitProcSig(sig: ProcSig): NimNode =
     newColonExpr(ident"params",  emitParamSeq(sig.params)),
     newColonExpr(ident"body",    emitStmt(sig.body)),
     newColonExpr(ident"retTy",   emitIRType(sig.retTy)),
-    newColonExpr(ident"isVoid",  newLit(sig.isVoid)))
+    newColonExpr(ident"isVoid",  newLit(sig.isVoid)),
+    # RFC-0005 S8an: the walker copies the captures in and out.
+    newColonExpr(ident"captures", newLit(sig.captures)))
 
 proc emitProcs(procs: Table[string, ProcSig]): NimNode =
   ## Emit a Table[string, ProcSig] builder. Uses a `block:` with an

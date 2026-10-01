@@ -6596,6 +6596,14 @@ include "runtime_exceptions.nim"  # Stage 8 CR-7 Cluster E: lowerExnArm
 
 include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
+var callGuardedNames {.threadvar.}: seq[string]
+  ## RFC-0005 S8an. The globals and captures that an ACTIVE walked call
+  ## withholds from its callee because they are also the root of one of its
+  ## `var`/`addr` actuals (`isCall`). A read of one inside the callee (or
+  ## anything it calls) is not bound, and `lower`'s `iekVar` arm declines it
+  ## as aliasing instead of as an unmodelled global. Pushed and popped
+  ## around each callee walk.
+
 proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   if e == nil:
     raise newException(ValueError, "lower: nil expression")  # [raise-audited: category-c: documented defensive invariant (nil-expression entry guard; moderate confidence, no specific unreachability argument beyond the general defensive pattern)]
@@ -6672,11 +6680,33 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # soundness argument #163 slice 4's opaque-call inertness proof rests
       # on needs this to be a genuine classified decline, not an accident of
       # an escaping exception.
-      lowerDegrade(feGlobalReadUnmodelled,
-        "module-level global '" & e.vname & "' is read but not " &
-             "modelled by the symbolic walker -- remove it from the " &
-             "reachable computation or pass it as an explicit parameter " &
-             "(feGlobalReadUnmodelled)")
+      if e.vname in callGuardedNames:
+        # RFC-0005 S8an: a callee (or one it calls) reads a global or a
+        # capture that is also a `var`/`addr` actual of an enclosing call.
+        # The walk passes that location by copy-in/copy-out, so the direct
+        # read would see the value from before the call's writes through
+        # the parameter: the name is withheld from the callee (`isCall`)
+        # and the read declines here.
+        lowerDegrade(feUnsupportedOp,
+          "`" & displayName(e.vname) & "` is reached by a callee both " &
+               "through a `var`/`addr` argument and directly; the walk " &
+               "passes the argument by copy-in/copy-out, so the direct " &
+               "access is not modelled (feUnsupportedOp)")
+      elif isGlobalEnvName(e.vname):
+        lowerDegrade(feGlobalReadUnmodelled,
+          "module-level global '" & displayName(e.vname) & "' is read " &
+               "but not modelled by the symbolic walker -- remove it " &
+               "from the reachable computation or pass it as an " &
+               "explicit parameter (feGlobalReadUnmodelled)")
+      else:
+        # RFC-0005 S8an: module-level globals are `__gl:`-named; any other
+        # unbound name is a variable the walk does not bind where it is
+        # read (a `{.global.}` local, or one only an unmodelled path
+        # reaches) -- the same decline, not mislabelled a module global.
+        lowerDegrade(feGlobalReadUnmodelled,
+          "'" & e.vname & "' is read where the symbolic walker has not " &
+               "bound it (not a parameter or a local of the walked " &
+               "routines it reaches) (feGlobalReadUnmodelled)")
       var fresh: seq[Z3Bool]
       let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
       allocateSym(ty, "__globalReadHavoc_" & e.vname, fresh)
@@ -10354,6 +10384,14 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   checkCapped(ctx, pathRoots(path, [arm]), settings,
               loopPruneRLimit(settings)).status == zsUnsat
 
+proc pathInfeasible(ctx: Z3Context; path: Path;
+                    settings: SymexSettings): bool =
+  ## RFC-0005 S8an. True only when `path`'s full query (`pathRoots`) is
+  ## UNSAT: no real execution reaches it. Bounded and sound for pruning
+  ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
+  checkCapped(ctx, pathRoots(path), settings,
+              loopPruneRLimit(settings)).status == zsUnsat
+
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
   ## (one per feasible iteration per path). Always on, like
@@ -11859,6 +11897,60 @@ proc heapUnchanged(a, b: Path): bool =
   for k, h in a.heaps:
     if not b.heaps.hasKey(k) or b.heaps[k].raw != h.raw: return false
   true
+
+func envHasGlobal(env: Env): bool =
+  ## RFC-0005 S8an. True when `env` binds a module-level global.
+  for k in env.keys:
+    if isGlobalEnvName(k): return true
+  false
+
+func guardedOuterNames(roots, captures: seq[string]): seq[string] =
+  ## RFC-0005 S8an. The roots of a call's `var`/`addr` actuals that the
+  ## callee could also reach directly: a module-level global, or one of its
+  ## captures (`IRStmt.cGuardRoots`, `ProcSig.captures`).
+  for g in roots:
+    if (isGlobalEnvName(g) or g in captures) and g notin result:
+      result.add g
+
+proc threadOuterBindings(calleeEnv: var Env; callerEnv: Env;
+                         captures, guarded: seq[string]): bool =
+  ## RFC-0005 S8an. Copy the caller's globals and the callee's captures
+  ## into the callee's env (a withheld name stays out). True when the call
+  ## shares any state outside its arguments with its caller.
+  for k, v in callerEnv:
+    if isGlobalEnvName(k) and k notin guarded:
+      calleeEnv[k] = v
+      result = true
+  for c in captures:
+    result = true
+    if c notin guarded and callerEnv.hasKey(c) and not calleeEnv.hasKey(c):
+      calleeEnv[c] = callerEnv[c]
+
+proc carryOuterBindings(dst: var Env; exitEnv: Env;
+                        captures, guarded: seq[string]) =
+  ## RFC-0005 S8an. On a callee exit, its globals and captures -- the
+  ## caller's own locations -- are carried back into the caller's env.
+  for k, v in exitEnv:
+    if isGlobalEnvName(k) and k notin guarded: dst[k] = v
+  for c in captures:
+    if c notin guarded and exitEnv.hasKey(c): dst[c] = exitEnv[c]
+
+func touchedGuard(exitEnv: Env; guarded: seq[string]): string =
+  ## RFC-0005 S8an. The first withheld name the callee bound (wrote), or "".
+  for g in guarded:
+    if exitEnv.hasKey(g): return g
+  ""
+
+proc guardDegrade(w: var WalkCtx; callee, name: string): Degrade =
+  ## RFC-0005 S8an. `callee` wrote `name` directly while `name` was also
+  ## one of its `var`/`addr` actuals. Nim's two writes land on one location
+  ## in program order; the copy-out of the argument would overwrite the
+  ## direct write. `dcSubstituted` (the exit value is not Nim's).
+  w.degrade(feUnsupportedOp,
+    "`" & displayName(name) & "` is reached by `" & callee & "` both " &
+         "through a `var`/`addr` argument and directly; the walk passes " &
+         "the argument by copy-in/copy-out, so the direct write is not " &
+         "modelled (feUnsupportedOp)")
 
 proc argShapeKey(callee: string, args: seq[SymVal]): string =
   ## (callee, argShapeHash) → a string key. Hash combination is XOR
@@ -15432,6 +15524,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # as `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
       # frontier prune (`dcOmitted`) would have stripped these survivors'
       # path taint — a witness through the havoc retSym reported clean sxSat.
+      # RFC-0005 S8an: a path that reaches the bail but that no execution
+      # can take (the `if` arms of a recursion are forked without a
+      # feasibility check, so `fact(1)`'s `k > 1` arm reaches the next
+      # level) is dropped, not bailed: it has no behaviour to lose. A
+      # recursion whose depth the arguments decide is then walked exactly
+      # within the budget.
+      var live: seq[Path]
+      for p in paths:
+        if not pathInfeasible(w.z3, p, w.settings): live.add p
+      if live.len == 0: return live
       let d = w.degrade(beBudgetExhaustedUnmodelled,
         "call-inlining depth budget exhausted (maxCallDepth=" &
              $w.settings.budget.maxCallDepth & ") while inlining `" &
@@ -15440,7 +15542,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "this SUT's real call nesting is deeper than the current " &
              "bound (beBudgetExhaustedUnmodelled)")
       var out2: seq[Path]
-      for p in paths:
+      for p in live:
         var newEnv = p.env
         var pcInit: seq[Z3Bool]
         if stmt.retName.len > 0:
@@ -15559,6 +15661,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             calleeEnv[formal.name] = argVals[i]
             if formal.isVar and stmt.cargs[i].kind == iekVar:
               varArgs.add (formal.name, stmt.cargs[i].vname)
+          # RFC-0005 S8an: the callee also reaches every module-level global
+          # and, for a routine declared inside another, the enclosing
+          # variables it captures. Nim shares those locations with the
+          # caller; the walk copies each binding in here and carries the
+          # callee's value back out on every exit (`carryOuterBindings`),
+          # which is the same thing for one call running at a time. A root
+          # of a `var`/`addr` actual that is one of them is WITHHELD
+          # (`guarded`): it would reach the callee twice, and copy-in/
+          # copy-out of the argument would then not be Nim's semantics. A
+          # callee that touches a withheld name declines.
+          let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
+          let threadsOuter = threadOuterBindings(calleeEnv, p.env,
+                                                 sig.captures, guarded)
           # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
           # non-bool, non-void return type (float/string/composite as well as
           # int) routes through `freshRetSym` so a value-returning generic
@@ -15605,7 +15720,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
           # so E3/E5 raise-flow threading is correct by construction.
           pushFrame(w)
+          let guardMark = callGuardedNames.len   ## RFC-0005 S8an
+          for g in guarded: callGuardedNames.add g
           let fallThroughRaw = walk(sig.body, @[calleePath], w)
+          callGuardedNames.setLen(guardMark)
           # Round-6 A6-rider (walker v86): a callee whose body reaches the end
           # via IMPLICIT fallthrough (no explicit `return`) after a
           # CONDITIONAL, multi-statement `result = expr` assignment —
@@ -15716,13 +15834,20 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           popFrame(w)
           for er in calleeEscaped:
             var rEnv = p.env
+            # RFC-0005 S8an: the callee's writes to globals and captures
+            # (before the `var` write-back, which is the later store).
+            carryOuterBindings(rEnv, er.path.env, sig.captures, guarded)
             # RFC-0005 S8ac: the callee wrote its `var` formals through the
             # caller's variables before it raised; the handler sees those
             # writes (#140's write-back ran on the returning paths only).
             for (formalName, callerName) in varArgs:
               if er.path.env.hasKey(formalName):
                 rEnv[callerName] = er.path.env[formalName]
-            let raisePath = forkPath(er.path, er.path.pc, rEnv)
+            var raisePath = forkPath(er.path, er.path.pc, rEnv)
+            let touched = touchedGuard(er.path.env, guarded)
+            if touched.len > 0:
+              raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
+                                          guardDegrade(w, stmt.callee, touched))
             survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
             if w.shouldStop: return survivors
           let frame = w.callStack[w.callStack.high]
@@ -15746,8 +15871,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
           # variable. A hit replays only `pcDelta`, never the #140
           # write-back, so the second call's writes would be lost.
+          # RFC-0005 S8an: nor when the callee reached a global or a
+          # capture. A hit replays only `pcDelta`: a read would return the
+          # first call's value across a write in between, and a write would
+          # be lost.
           if calleeEscaped.len == 0 and not closureRet and varArgs.len == 0 and
+             not threadsOuter and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
+             not envHasGlobal(frame.returnedPaths[0].env) and
              frame.returnedPaths[0].taint == {} and
              frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
              heapUnchanged(frame.returnedPaths[0], p):
@@ -15768,6 +15899,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                     cp.env["result"].kind == svClosure:
                   cp.env["result"]    # RFC-0005 S8z
                 else: retSym
+            # RFC-0005 S8an: the callee's globals and captures, as it left
+            # them (before the `var` write-back, which is the later store).
+            carryOuterBindings(newEnv, cp.env, sig.captures, guarded)
             # #140: propagate var-param mutations back to caller's env.
             for (formalName, callerName) in varArgs:
               if cp.env.hasKey(formalName):
@@ -15793,6 +15927,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # site uses the dedicated `forkPathMerged` (the union
             # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
             let merged = forkPathMerged(cp, cp.pc & retInit, newEnv, p)
+            # RFC-0005 S8an: the callee wrote a withheld root directly.
+            let touched = touchedGuard(cp.env, guarded)
+            if touched.len > 0:
+              taintInPlace(merged, guardDegrade(w, stmt.callee, touched))
             for tkey, callerCount in p.allocCounters:
               let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
               if callerCount > calleeCount:
@@ -16667,7 +16805,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   if clo.closureMutCaptures.len > 0 and clo.closureFrame != w.frame.frameId:
     closureDegrade(ceCaptureByRefUnmodelled,
       "closure call through " & label & " outside the frame that built it: " &
-           "its by-reference capture(s) " & clo.closureMutCaptures.join(", ") &
+           "its by-reference capture(s) " & displayNames(clo.closureMutCaptures).join(", ") &
            " are read as they stood at construction, not as they stand now " &
            "(ceCaptureByRefUnmodelled)")
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
@@ -16758,7 +16896,20 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       for er in escapedRaises:
         if er.path.env.hasKey(nm) and not sameSymVal(er.path.env[nm], entry):
           changed = true
-      if changed: written.add nm
+      if changed: written.add displayName(nm)
+    # RFC-0005 S8an: a module-level global is a by-reference location too,
+    # whether or not the lambda captured it lexically (a module-level proc
+    # used as a value captures nothing). A body exit whose binding of one is
+    # not the one the body met wrote it, and nothing carries it back.
+    var exitEnvs: seq[Env]
+    for cp in fallThrough: exitEnvs.add cp.env
+    for cp in frame.returnedPaths: exitEnvs.add cp.env
+    for er in escapedRaises: exitEnvs.add er.path.env
+    for ee in exitEnvs:
+      for nm, v in ee:
+        if isGlobalEnvName(nm) and displayName(nm) notin written and
+           (not byRefEntry.hasKey(nm) or not sameSymVal(v, byRefEntry[nm])):
+          written.add displayName(nm)
     if written.len > 0:
       closureDegrade(ceCaptureByRefUnmodelled,
         "closure call through " & label & ": the body writes its " &
@@ -18221,6 +18372,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
   z3ApiFirstError = ""
+  callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
                            ## threadvar's own doc comment for why it must not

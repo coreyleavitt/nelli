@@ -849,7 +849,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # heapDepth and HALT it (no survivor → sxUnknown) if it reaches the
       # effective budget BEFORE the select — a recursive `n.next.next…` walk can
       # never loop unboundedly. Per-path: a shallower path continues.
-      if heapDepthExhausted(p, w): continue
+      # RFC-0005 S8an: an `addr` cell's read-back is not a program
+      # dereference; it does not count.
+      if not stmt.dCell and heapDepthExhausted(p, w): continue
       ## Drain-coverage audit: `stmt.dPtr` is always an env-resident var —
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
@@ -1405,7 +1407,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R9: a deref-WRITE also bounds heap depth (same per-path counter
       # and effective budget as the read). HALT this path before the store if it
       # reaches the budget.
-      if heapDepthExhausted(p, w): continue
+      # RFC-0005 S8an: an `addr` cell's store is not a program write; it
+      # does not count.
+      if not stmt.dwCell and heapDepthExhausted(p, w): continue
       ## Drain-coverage audit: `stmt.dwPtr` is always an env-resident var —
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and

@@ -39,6 +39,7 @@
 import std/macros
 import std/tables
 import std/sets
+from ./types import globalEnvPrefix
 
 type
   NameScope* = object
@@ -62,10 +63,20 @@ const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## by the compiler at every use, and `result` is never declared by an
   ## `IdentDefs` (each routine's `result` is its own frame's slot).
 
+proc isModuleGlobal*(n: NimNode): bool =
+  ## RFC-0005 S8an. True when `n` is the symbol of a module-level `var` or
+  ## `let` (its owner is the module itself).
+  if n.kind != nnkSym or symKind(n) notin {nskVar, nskLet}: return false
+  let o = owner(n)
+  o.kind == nnkSym and symKind(o) == nskModule
+
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as
-  ## its scoped name (RFC-0005 S8e).
+  ## its scoped name (RFC-0005 S8e), and a module-level variable reads as
+  ## `__gl:<module>.<name>` (RFC-0005 S8an).
   result = macros.strVal(n)
+  if isModuleGlobal(n):
+    return globalEnvPrefix & macros.strVal(owner(n)) & "." & result
   if n.kind == nnkSym and nameScope.renames.len > 0:
     let cands = nameScope.renames.getOrDefault(result)
     for c in cands:
@@ -89,6 +100,14 @@ proc enterNameScope*(): NameScope =
 
 proc leaveNameScope*(saved: NameScope) =
   nameScope = saved
+
+proc reserveScopedNames*(names: seq[string]) =
+  ## RFC-0005 S8an. Mark `names` as in use in the current scope before its
+  ## routine is claimed: a routine declared inside another shares its env
+  ## with the enclosing variables it captures (`ProcSig.captures`), so a
+  ## local or parameter of its own with the same spelling must get a fresh
+  ## name.
+  for nm in names: nameScope.taken.incl nm
 
 proc claimDecl(n: NimNode) =
   var s = n

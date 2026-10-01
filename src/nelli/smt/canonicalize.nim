@@ -214,6 +214,24 @@ const symexWalkerVersion* = "183"
   ## model. A tainted target hit SAT only after half its budget (step 1
   ## out, step 3 SAT) now records its depths as a budget-out does, so a
   ## later tainted hit as deep is declined. 182 -> 183.
+  ## RFC-0005 S8an (2026-10-01) — S8ac's remainder. A routine declared
+  ## inside the code under test is walked (its declaration was
+  ## `feUnsupportedStmtKind`): a direct call threads its captures -- the
+  ## enclosing variables and parameters it names, transitively through the
+  ## nested routines it calls (`ProcSig.captures`) -- into the callee's env
+  ## and back out on every exit, a raise included; used as a value it is a
+  ## closure over them. Module-level globals are named `__gl:<module>.<x>`
+  ## and threaded the same way through every walked call (a callee's write
+  ## was dropped, a silent false verdict), and the call cache skips a call
+  ## that reaches one. A `var`/`addr` actual rooted at a global or a capture
+  ## the callee can reach directly (`IRStmt.cGuardRoots`) is withheld from
+  ## it and declines when touched; a closure body's write to a global
+  ## declines (`ceCaptureByRefUnmodelled`). `addr lv` passed to a `ptr T`
+  ## formal that keeps its pointer local is a heap cell for the call
+  ## (`dCell`/`dwCell`, not counted by `heapDepth`), shared by every `addr`
+  ## of one lvalue in the call and read back on every exit; `let p = addr
+  ## x` whose uses are `p[]` and such arguments IS `x`; `p[] += v` is
+  ## modelled. 182 -> 183.
   ##
   ## (Prior: 182.)
   ## RFC-0005 S8ai (2026-10-01) — S8ae's remainder. `seqRangeFacts`' links
@@ -4997,9 +5015,14 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # differing only in whether the walker treats an opaque call as inert
     # must not share a cache entry (the field changes the VERDICT: dropping
     # the taint can turn `sxUnknown` into `sxRaised`/`sxSat`).
+    # RFC-0005 S8an: the guarded roots change the verdict (a callee that
+    # touches one declines), so they key the call.
+    var guards: seq[string]
+    for g in s.cGuardRoots: guards.add lookupLocal(env, g)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
-      ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]>"
+      ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
+      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read
@@ -5086,7 +5109,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # fresh let-name binds a new slot. Distinct tag from `isNew` (Nw).
     let slot = bindLocal(env, s.dRetName)
     "St<Dr:$" & $slot & ";fam=" & (if s.dPtrFamily: "ptr" else: "ref") &
-      ";fld=" & s.dField & ";ety=" & canonicalize(s.dElemTy) &
+      ";fld=" & s.dField & (if s.dCell: ";cell" else: "") &   # RFC-0005 S8an
+      ";ety=" & canonicalize(s.dElemTy) &
       ";p=" & canonicalize(s.dPtr, env) & ">"
   of isNew:
     let slot = bindLocal(env, s.nRetName)
@@ -5096,6 +5120,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # No fresh let-name is bound (a write, not a read).
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
       ";fld=" & s.dwField & (if s.dwInit: ";init" else: "") &   # RFC-0005 S8l
+      (if s.dwCell: ";cell" else: "") &                          # RFC-0005 S8an
       ";ety=" & canonicalize(s.dwElemTy) &
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"
@@ -5145,6 +5170,8 @@ proc canonicalize*(sig: ProcSig): string =
   "Pr<" & sig.name & ";retTy=" & canonicalize(sig.retTy) &
     ";isVoid=" & $sig.isVoid &
     ";cc=[" & sig.conceptConstraints.join(",") & "]" &   ## Phase 15 G6
+    (if sig.captures.len > 0: ";cap=[" & sig.captures.join(",") & "]"
+     else: "") &                                         ## RFC-0005 S8an
     ";params=[" & params.join(",") & "]" &
     ";body=" & canonicalize(sig.body, env) & ">"
 

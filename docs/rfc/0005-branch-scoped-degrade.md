@@ -284,7 +284,7 @@ state = "done"
 [[slice]]
 id    = "S8an"
 title = "S8ac's remainder: a routine declared inside the SUT is feUnsupportedStmtKind -- model nested proc/func declarations (with and without captures); a `var ptr` parameter passed `addr x` is the heUnsafeCast scoped decline -- model addr-of a local passed as ptr where the pointee is a tracked cell; copy-in/copy-out declines on possible aliasing by argument only, and a callee that reaches the location through a global is outside the fragment -- model module-level var reads/writes from a callee, or prove the decline covers every such path with a test"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ao"
@@ -6550,6 +6550,165 @@ Found on the way:
   - **The raise-irrelevant-parameter witness sentinel**, above: a true
     engine characteristic, not scoped to this slice's mechanisms, and
     outside what S8am was asked to fix.
+
+**As landed (S8an, walker 183) — S8ac's remainder.**
+
+*A routine declared inside the code under test is walked.* A statement-
+position `proc`/`func` (and `iterator`, `converter`, `template`, `macro`)
+declaration was `feUnsupportedStmtKind`, which tainted every path past it.
+A declaration has no run-time effect, so it is now an empty statement
+(`parseStmtInner`); what is walked is each use. A CALL reaches the body
+through `ensureProcRegistered`, as any callee. Its captures are the
+enclosing variables and parameters the body names without declaring them,
+transitively through the nested routines it names (`b` calling `a`, which
+writes `c`, reaches `c`); they are computed by symbol identity
+(`nestedCaptureSyms`) and stored as IR names on `ProcSig.captures`. The
+callee's own locals and parameters keep clear of those names
+(`reserveScopedNames`, before `claimRoutine`), so the walker copies each
+capture into the callee's env at the call and back into the caller's on
+every exit, a raise included (`threadOuterBindings`/`carryOuterBindings`):
+Nim captures by reference, and a direct call reads and writes the
+enclosing variable as it stands. Used as a VALUE (`let f = addk`), a nested
+routine is a closure over its captures (`parseProcAsValue` no longer forces
+a unit env for it); a lambda that names a nested routine inherits that
+routine's captures (`collectFreeVarRefs`), so a write through it is the
+by-reference capture write the closure machinery already declines
+(`ceCaptureByRefUnmodelled`) -- before, the write landed in the closure's
+own env and was dropped (`sxUnsat`, `errors` empty).
+
+A nested routine is keyed by its declaration (`nestedSiteKey`: body hash
+and position), and an overload by its symbol. A non-generic callee was
+keyed by its bare name, so two nested `h` (one in `a1`, one in `b1`) and two
+top-level overloads `ov(int)`/`ov(string)` each shared one registration and
+every call ran the first body: `nc`/`ov` `sxUnsat`, `nc_dead` `sxSat`,
+`errors` empty. `ensureProcRegistered` now records the symbol each bare key
+was registered for (`ParseCtx.keySyms`); a different symbol of the same
+spelling gets `name#<bodyHash>#ovl`. A program without overloads is keyed
+exactly as before.
+
+Recursion is bounded by `maxCallDepth`. The explore-mode walk forks an
+`if` without a feasibility check, so `fact(1)`'s `k > 1` arm reached the
+next level and the depth bail even when the argument decided the depth:
+every recursive target was `beBudgetExhaustedUnmodelled`. A path that
+reaches the bail is now dropped when its query is UNSAT (`pathInfeasible`,
+bounded like `loopArmInfeasible`; an undecided query keeps the path), so a
+recursion whose depth the arguments decide is walked exactly within the
+budget. On a symbolic argument the deepest feasible path still bails and
+declines, scoped, with the budget named; with room it decides.
+
+*`addr lv` passed as a `ptr T` is a heap cell for the call.* An `addr`
+actual was `feUnsupportedExprKind` (`nnkAddr`), and `let p = addr x` was
+`heUnsafeCast`. `userCallStmt` now stores `lv` into a fresh `ptr` cell
+(`mkNewT` + `mkDerefWrite`), passes the cell, and reads it back into `lv`
+in the call's `finally`, so the write lands on every exit as Nim's does.
+Every `addr` of one lvalue in one call (`scopedRepr`) is ONE cell:
+`two(addr x, addr x, 8)` leaves `x == 3` and `same(addr x, addr x)` is true,
+`same(addr x, addr y)` false -- aliasing is exact, not declined. The
+cell's store and read-back are marked `dwCell`/`dCell` and do not count
+against `heapDepth` (a per-path count of heap operations, 8 by default:
+two `incP(addr x)` calls exhausted it on the synthetic copies alone). The
+model needs two facts, each checked, each a scoped decline when it fails:
+- the pointer cannot outlive the call (`ptrFormalStaysLocal`): every use of
+  the formal is `p[]` not under `addr`, a comparison, or an argument to a
+  `ptr` formal that itself stays local (recursively). Otherwise
+  `heUnsafeCast`, "may let the pointer escape";
+- the callee cannot reach `lv` another way (`addrActualMayAlias`; a `var`
+  actual on the same root, `mixP(addr x, x)`, is `feUnsupportedOp`), and
+  every variable `lv` names is a guard root (below).
+`let p = addr x` (or `var`) whose every later use in its statement list is
+`p[]` or such an argument IS `x`: the rest of the list is parsed with `p[]`
+spelled `x` and `p` spelled `addr x` (`addrAliasDecl`/`substAddrAlias`);
+`x` must name one location for `p`'s whole life (a variable, or a field
+chain of value objects over one). `p[] += v` on an unranged int or float
+pointee is modelled (`p[] = p[] + v`).
+
+*Module-level globals are threaded through every walked call.* A global
+was a bare name in the caller's env and absent from the callee's: the
+callee's write was dropped (`g` `sxUnsat`, `g_dead` `sxSat`), its read was
+`feGlobalReadUnmodelled`, and `setAlG(gCount, 8)` (whose callee also writes
+`gCount = 5` directly) was written back over the direct write (`ga_dead`
+`sxSat`), all with `errors` empty. A module-level `var`/`let` is now named
+`__gl:<module>.<x>` (`scoped_names.strVal`, so every site agrees), copied
+into each callee's env and carried back out on every exit, and a call that
+reaches a global or a capture is never cached (the cache replays only
+`pcDelta`). A global read before any write in the walk is still
+`feGlobalReadUnmodelled`: its value is whatever the program left there. A
+`var`/`addr` actual names its variables as `IRStmt.cGuardRoots`; one that
+is a global or a capture of the callee is WITHHELD from the callee's env
+(the copy-in/copy-out argument is its only route), a direct read of it
+anywhere under the call declines (`callGuardedNames`, `feUnsupportedOp`),
+and a direct write is caught on exit (`touchedGuard`) and declines. A
+closure body that writes a global declines (`ceCaptureByRefUnmodelled`,
+naming it), as one that writes a capture already did.
+
+The same audit found the copy-in/copy-out write-back unsound on its own
+lvalue. `varActualMayAlias` checked only the lvalue's root:
+`setIJ(s[i], i)` (whose callee writes `j = 1` then `x = 7`) writes `s[0]` in
+Nim, and the write-back after the call wrote `s[1]`; `setIJ(i, i)` leaves
+`i == 7` in Nim, and two by-name write-backs left 1 (both directions,
+`errors` empty). Every variable an lvalue names now counts
+(`lvalueVarSyms`), and a plain-variable `var` actual is checked too; both
+shapes decline, scoped, `feUnsupportedOp`.
+
+An unbound non-global name now reads "is read where the symbolic walker
+has not bound it" instead of calling itself a module-level global (same
+kind, `feGlobalReadUnmodelled`).
+
+Pins: `tests/tsymex_rfc0005_s8an_remainder.nim`, every expectation probed
+against Nim 2.2.10.
+- (1) A nested proc and func with no captures; captures of a parameter and
+  of a local, read as they stand at the call; written (`c += x` twice),
+  through a chain (`b` -> `a` -> `c`), shadowed inside the callee, and
+  written before a raise the caller catches; a nested routine as a closure
+  value (read as it stands at the call; a write declines, scoped); a `var`
+  actual that is also a capture declines (`feUnsupportedOp`); a lambda
+  writing a capture through a nested routine declines; a nested template
+  and iterator; same-named nested routines and top-level overloads;
+  recursion within the budget (concrete argument, and a capturing
+  recursion) and past it (declines with `maxCallDepth=3`, decides with 8).
+- (2) `setP`/`getP`/`incP`/`fwdP` through `addr x`; one cell for
+  `two(addr x, addr x)`, two for `addr x, addr y`, `same` both ways;
+  `let p = addr x`; `addr o.a`; a raising callee; an escaping callee
+  (`heUnsafeCast`); `mixP(addr x, x)` (`feUnsupportedOp`).
+- (3) A callee's write and read of a global, nested and across a raise; the
+  call cache across a write; a global first read in a callee declines; a
+  `var`/`addr` actual that is a global the callee writes or reads declines;
+  one that is a local while the callee writes a global is modelled; a
+  closure value or lambda writing a global declines; a lambda reading a
+  global reads it as it stands; `setIJ(s[i], i)` and `setIJ(i, i)` decline.
+- The `>= 183` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **The explore-mode walk forks an `if` without a feasibility check.**
+  S8an drops an infeasible path only at the call-depth bail; elsewhere an
+  infeasible arm is still walked to its end (a precision and cost matter,
+  not a verdict one: its query is UNSAT at every target). Recursion on a
+  symbolic argument therefore still reaches `maxCallDepth` on its deepest
+  feasible path and declines, scoped.
+- **An opaque or foreign call does not havoc globals.** A
+  `{.symexOpaque.}`/`importc` call that writes module state leaves the
+  walk's binding of every global unchanged across it -- true before S8an
+  for globals the entry proc itself wrote, and now for globals threaded
+  through callees too. Modelling it needs an effect summary (which globals
+  a foreign routine may write) the engine does not have.
+- **A global read before any write in the walk stays a decline.** Its
+  value at entry is the program's state at the time of the call, which the
+  walk does not know; making globals free inputs (or `default(T)` at
+  program start) is a separate modelling choice.
+- **A closure value's write to a capture or a global still declines**
+  (`ceCaptureByRefUnmodelled`), as does a closure called outside the frame
+  that built it reading a by-reference capture. Direct calls of a nested
+  routine are exact; closure values keep S9's scoped declines.
+- **A pointer that may escape, and `addr` outside a call argument or the
+  `let p = addr x` form, still decline** (`heUnsafeCast` /
+  `feUnsupportedExprKind`): storing `addr x` in an object, returning it,
+  comparing two `addr` expressions directly, or pointer arithmetic. The
+  slice title's "`var ptr` parameter passed `addr x`" cannot occur (Nim
+  rejects an `addr` rvalue for a `var` formal); the modelled shape is a
+  `ptr T` formal.
+- **Two `addr` of different parts of one root in one call decline**
+  (`two(addr o.a, addr o.b)`), conservatively: the alias check is by root
+  variable, not by disjoint path.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

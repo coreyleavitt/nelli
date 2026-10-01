@@ -1014,5 +1014,11 @@ task test, "Run the test suite":
             # reachable witness parameters; a char witness renders char,
             # not uint8; a non-zero-based array witness renders its
             # declared index range; walker 182->183, render 11->12.
-            "tsymex_rfc0005_s8am_remainder"]:
+            "tsymex_rfc0005_s8am_remainder",
+            # RFC-0005 S8an -- S8ac's remainder: nested procs/funcs (with
+            # captures, as values, recursion); `addr x` passed as a `ptr`
+            # (a cell for the call; `let p = addr x`); module-level globals
+            # threaded through calls; overloads and same-named nested
+            # routines keyed apart; walker 182->183.
+            "tsymex_rfc0005_s8an_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

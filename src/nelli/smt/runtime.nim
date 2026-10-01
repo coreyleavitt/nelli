@@ -3558,6 +3558,155 @@ var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## decidable machinery class as S6b regex membership; no Int/BV mixing
   ## (the CR-17 hang shape). Reset at `runSymexImpl` entry.
 
+type IndexSplit* = object
+  ## RFC-0005 S8ag. One `str.indexof(s, c, start)` whose needle `c` is a
+  ## one-character literal, lowered (`iekStrFind`) to the fresh Int `ix`
+  ## and the split `s = pre ++ x ++ c ++ post` (`indexSplitAxioms`).
+  ix*: Z3Int
+  s*, c*: Z3String
+  start*: Z3Int
+  pre*, x*, post*: Z3String
+
+var indexSplits* {.threadvar.}: seq[IndexSplit]
+  ## RFC-0005 S8ag. Every split lowered in the running walk, in lowering
+  ## order. Its axioms are not a pool asserted everywhere (as
+  ## `stripDecompConds` is): `indexSplitRoots` adds the ones a query
+  ## reaches, with the chain facts between them. Reset at `runSymexImpl`
+  ## entry.
+
+var indexSplitOf {.threadvar.}: tuple[ctx: Z3Context, ids: Table[int, int]]
+  ## RFC-0005 S8ag. `ix`'s AST id -> its index in `indexSplits`, valid only
+  ## in `ctx` (an AST id means nothing in another context).
+
+var indexSplitCounter* {.threadvar.}: int
+  ## RFC-0005 S8ag. Per-run unique-name counter for the splits' fresh
+  ## constants (the `stripSynthCounter` precedent: two occurrences must not
+  ## share a constant). Reset at `runSymexImpl` entry.
+
+proc oneCharLiteral*(needle: Z3String): Option[Z3String] =
+  ## RFC-0005 S8ag. `needle` as a one-character string literal when it is
+  ## one: a literal, or a char needle (`needleAsStr`'s
+  ## `str.from_code(bv2nat(#x3a))`) that Z3's rewriter folds to one.
+  let ctx = needle.ctx
+  let f = ctx.checkErr Z3_simplify(ctx.raw, needle.raw)
+  if Z3_is_string(ctx.raw, f) and Z3_get_string_length(ctx.raw, f) == 1:
+    some(wrap[Z3String](ctx, f))
+  else:
+    none(Z3String)
+
+proc indexSplitAxioms*(sp: IndexSplit):
+    tuple[found, notFound: Z3Bool] =
+  ## RFC-0005 S8ag. The two axioms that make `sp.ix` equal to Z3's
+  ## `str.indexof(sp.s, sp.c, sp.start)` for a one-character `sp.c`:
+  ##   found:    ix = -1, or ix >= 0 and s = pre ++ x ++ c ++ post and
+  ##             len(pre) = start and ix = start + len(x) and c notin x
+  ##   notFound: ix = -1 implies start < 0, or start > len(s), or c notin
+  ##             s[start ..]
+  ## Equivalence (the RFC's S8ag note has it in full): when `c` occurs in
+  ## `s` at or after a `start` in `0 .. len(s)`, its first such position
+  ## `r` gives the unique `ix = r` (pre = s[0 ..< start], x = s[start ..<
+  ## r], post = s[r + 1 ..]), and `notFound` rules out `ix = -1`; when it
+  ## does not, the found arm needs a `c` at or after `start` and is
+  ## impossible, so `ix = -1`, which `notFound` allows. So every `(s,
+  ## start)` has a model, and in every model `ix` is `str.indexof`'s value
+  ## (including `start = len(s)`: `s[start ..]` is "", so -1).
+  let ctx = sp.s.ctx
+  let zero = mkInt(ctx, 0)
+  let minusOne = mkInt(ctx, -1)
+  let lenS = len(sp.s)
+  let found = (sp.ix >= zero) and
+    (sp.s == concat(sp.pre, concat(sp.x, concat(sp.c, sp.post)))) and
+    (len(sp.pre) == sp.start) and (sp.ix == sp.start + len(sp.x)) and
+    (not contains(sp.x, sp.c))
+  (found: (sp.ix == minusOne) or found,
+   notFound: implies(sp.ix == minusOne,
+     (sp.start < zero) or (sp.start > lenS) or
+     (not contains(substr(sp.s, sp.start, lenS - sp.start), sp.c))))
+
+proc indexSplitChain*(a, b: IndexSplit): Z3Bool =
+  ## RFC-0005 S8ag. The chain fact between two splits of one haystack: when
+  ## both find their needle and `b` starts just past `a`'s match, `b`'s
+  ## prefix is `a`'s prefix through the match, and `a`'s suffix is `b`'s
+  ## gap, needle and suffix. Valid: both sides are the prefix (suffix) of
+  ## `s` of the same length. A scan chain (`readCString`'s next key starts
+  ## at `p + 1`) needs it to be found quickly: without it Z3 relates the
+  ## two decompositions of `s` only through a word equation.
+  let ctx = a.s.ctx
+  let zero = mkInt(ctx, 0)
+  implies((a.ix >= zero) and (b.ix >= zero) and
+          (b.start == a.ix + mkInt(ctx, 1)),
+          (b.pre == concat(a.pre, concat(a.x, a.c))) and
+          (a.post == concat(b.x, concat(b.c, b.post))))
+
+proc lowerIndexSplit*(s, c: Z3String; start: Z3Int): Z3Int =
+  ## RFC-0005 S8ag. A fresh Int standing for `str.indexof(s, c, start)`,
+  ## `c` a one-character literal, registered for `indexSplitRoots`.
+  let ctx = s.ctx
+  inc indexSplitCounter
+  let tag = "__s8ag_ix" & $indexSplitCounter
+  let sp = IndexSplit(ix: mkIntVar(ctx, tag), s: s, c: c, start: start,
+                      pre: mkStringVar(ctx, tag & "_pre"),
+                      x: mkStringVar(ctx, tag & "_x"),
+                      post: mkStringVar(ctx, tag & "_post"))
+  if indexSplitOf.ctx != ctx:
+    indexSplitOf = (ctx: ctx, ids: initTable[int, int]())
+  indexSplitOf.ids[astId(ctx, sp.ix.raw)] = indexSplits.len
+  indexSplits.add sp
+  sp.ix
+
+proc registeredIndexSplit*(ctx: Z3Context; a: RawZ3Ast): int =
+  ## RFC-0005 S8ag. The `indexSplits` index of the split whose `ix` is `a`
+  ## in `ctx`, or -1.
+  if indexSplitOf.ctx != ctx: return -1
+  indexSplitOf.ids.getOrDefault(astId(ctx, a), -1)
+
+proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8ag. The axioms of every split `base` reaches -- its `ix`
+  ## occurs in `base`, or in the haystack or start of a split already
+  ## reached -- and the chain facts (`indexSplitChain`) between reached
+  ## splits of one haystack. A split not reached is left out: its axioms
+  ## mention only its own fresh constants beside terms the reached ones
+  ## fix, and every value of those has an extension satisfying them, so
+  ## leaving them out prunes no model and adds none of the query's.
+  if indexSplitOf.ctx != ctx or indexSplits.len == 0: return
+  var reached: seq[int]
+  var isReached: HashSet[int]
+  var seen: HashSet[int]
+  var stack: seq[RawZ3Ast]
+  for r in base: stack.add r.raw
+  while true:
+    while stack.len > 0:
+      let t = stack.pop()
+      let id = astId(ctx, t)
+      if id in seen: continue
+      seen.incl id
+      if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+      let k = indexSplitOf.ids.getOrDefault(id, -1)
+      if k >= 0 and k notin isReached:
+        isReached.incl k
+        reached.add k
+      let app = Z3_to_app(ctx.raw, t)
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    # A reached split's haystack and start may hold further splits.
+    var grew = false
+    for k in reached:
+      for t in [indexSplits[k].s.raw, indexSplits[k].start.raw]:
+        if astId(ctx, t) notin seen:
+          stack.add t
+          grew = true
+    if not grew: break
+  reached.sort()
+  for k in reached:
+    let ax = indexSplitAxioms(indexSplits[k])
+    result.add ax.found
+    result.add ax.notFound
+  for i in reached:
+    for j in reached:
+      if i != j and astId(ctx, indexSplits[i].s.raw) ==
+                    astId(ctx, indexSplits[j].s.raw):
+        result.add indexSplitChain(indexSplits[i], indexSplits[j])
+
 var sliceViewCounter* {.threadvar.}: int
   ## v67 (dev item 1). Per-run unique-name counter for `iekSeqSlice`'s
   ## lambda bound variable — two slice views must not share the bound
@@ -8444,13 +8593,18 @@ proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
   # pointee) -- the typed witness's `resolveRef` reads them there.
   result.heapSnapshot = buildHeapSnapshot(m, result, env, params)
 
-var symexTargetSolveStats* {.threadvar.}: tuple[budgetOut, declined: int]
+var symexTargetSolveStats* {.threadvar.}:
+    tuple[budgetOut, declined, slowSat, units: int]
   ## RFC-0005 S8y. `solveTargetHit`'s own tally, never reset by the engine
   ## (tests reset it around a measured run): `budgetOut` counts target-hit
   ## solves, clean or tainted, that ran out of their budget; `declined`
   ## counts tainted hits declined unsolved because an earlier tainted hit
-  ## at most as deep had run out. Deterministic, like the `rlimit` it is
-  ## read from.
+  ## at most as deep had run out. RFC-0005 S8ag: `slowSat` counts tainted
+  ## hits whose model was found only after at least half their budget was
+  ## spent (`checkCapped`'s capped step 1 ran out and the uncapped step 3
+  ## found one), which bound later hits as a budget-out does; `units` is
+  ## the `rlimit` every target-hit solve spent. Deterministic, like the
+  ## `rlimit` it is read from.
 
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
@@ -9146,7 +9300,20 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     let k = ord(Z3_get_decl_kind(ctx.raw, decl))
-    if k == kinds.strLen:
+    let split = if k == kinds.uninterp and args.len == 0:
+                  registeredIndexSplit(ctx, t.raw)
+                else: -1
+    if split >= 0:
+      # RFC-0005 S8ag: a split's Int is `str.indexof(s, c, start)` in every
+      # model of a query that holds it (`indexSplitRoots` asserts its axioms
+      # wherever it is reached), so it takes that term's range and links.
+      let sp = indexSplits[split]
+      result.add (sp.ix == minusOne) or
+        ((zero <= sp.ix) and (sp.start <= sp.ix) and
+         (sp.ix + mkInt(ctx, 1) <= len(sp.s)))
+      indexOfs.add (s: toAnyAst(sp.s), t: toAnyAst(sp.c), i: sp.start,
+                    r: sp.ix)
+    elif k == kinds.strLen:
       result.add wrap[Z3Int](ctx, t.raw) >= zero
     elif k == kinds.strIndex and args.len == 3:
       let r = wrap[Z3Int](ctx, t.raw)
@@ -10018,10 +10185,12 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
 
-proc globalRoots(): seq[Z3Bool] =
+proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   ## The run-wide pools every walker query asserts beside its path's own
   ## facts. Each is definitional or true of every real input, so asserting
-  ## it anywhere prunes no real execution. RFC-0005 S8n split it out of
+  ## it anywhere prunes no real execution. RFC-0005 S8ag: `base` is the
+  ## rest of the query; the splits it (or a pool) reaches add their axioms
+  ## (`indexSplitRoots`). RFC-0005 S8n split it out of
   ## `pathRoots` so the concolic scratch solves (`concreteBranchOutcome`,
   ## `concretelyInfeasible`) see the same pools: without the closure
   ## axioms a closure call's result was free there, and every `if` on one
@@ -10060,12 +10229,21 @@ proc globalRoots(): seq[Z3Bool] =
   let cardConds = containerCardConds()
   for c in cardConds:
     roots.add c
+  # RFC-0005 S8ag: the axioms of each one-character `str.indexof` split the
+  # query reaches, with their chain facts. Definitional over each split's
+  # own fresh constants (`indexSplitRoots`), so they prune no model.
+  var reach = @base
+  reach.add roots
+  for c in indexSplitRoots(currentContext(), reach):
+    roots.add c
   roots
 
-proc pathRoots(path: Path): seq[Z3Bool] =
+proc pathRoots(path: Path; extra: openArray[Z3Bool] = []): seq[Z3Bool] =
   ## Every assertion a walker query of `path` is issued with, as `trySolve`
   ## has always made them (RFC-0005 S8k factored it out so the
-  ## loop-iteration feasibility check asks the same question).
+  ## loop-iteration feasibility check asks the same question). RFC-0005
+  ## S8ag: `extra` (that check's arm) joins the query here, ahead of
+  ## `globalRoots`, so a split only the arm reaches has its axioms.
   var roots: seq[Z3Bool]
   for c in path.pc:
     roots.add c
@@ -10076,7 +10254,8 @@ proc pathRoots(path: Path): seq[Z3Bool] =
   # which of these a closure's return-axiom uses as its implication guard.
   for c in path.defectSurvivorPc:
     roots.add c
-  roots.add globalRoots()
+  roots.add extra
+  roots.add globalRoots(roots)
   roots
 
 proc trySolve(ctx: Z3Context,
@@ -10148,7 +10327,7 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   let lit = $simplify(arm)
   if lit == "false": return true
   if lit == "true": return false
-  checkCapped(ctx, pathRoots(path) & @[arm], settings,
+  checkCapped(ctx, pathRoots(path, [arm]), settings,
               loopPruneRLimit(settings)).status == zsUnsat
 
 var symexLoopIterations* {.threadvar.}: int
@@ -11426,6 +11605,13 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
   ## S8v's extra terms). What is given up is a candidate, never a winner (a
   ## tainted SAT only feeds S10's replay), and a CLEAN hit is always
   ## solved: its SAT would be a finding.
+  ##
+  ## RFC-0005 S8ag. A tainted hit that finds a model only after spending
+  ## half its budget (`slowSat`: step 1 ran out, step 3 found one) records
+  ## its depths the same way. With the one-character `str.indexof` split
+  ## the pair loop's exit hits find models instead of running out, so the
+  ## costly hits are SATs, and the budget-out bound alone no longer
+  ## stopped a walk solving every deeper one.
   let isCandidate = scSpurious in p.taint
   let exStart = extractionErrors.len
   let exLiveStart = w.extractionErrors.len
@@ -11440,17 +11626,32 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
         return (status: sxUnknown, witness: RawWitness(), candidateErrs: @[],
                 undefWhy: "not solved (RFC-0005 S8y): an earlier tainted " &
                   "path reached the target after " & $iters &
-                  " loop iterations and ran out of its solver budget, and " &
-                  "this tainted path is at least as deep in each of those " &
-                  "loops")
+                  " loop iterations and ran out of its solver budget (or, " &
+                  "RFC-0005 S8ag, found a model only after half of it), " &
+                  "and this tainted path is at least as deep in each of " &
+                  "those loops")
   let spentBefore = rlimitCountNow(w.z3)
   let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
+  let spent = rlimitCountNow(w.z3) - spentBefore
+  symexTargetSolveStats.units += spent
+  let floor = budgetOutFloor(solveSettings)
   if st == sxUnknown:
-    let floor = budgetOutFloor(solveSettings)
-    if floor > 0 and rlimitCountNow(w.z3) - spentBefore >= floor:
+    if floor > 0 and spent >= floor:
       inc symexTargetSolveStats.budgetOut
       if p.taint != {} and p.loopIters.len > 0:
         w.budgetOutDepths.add p.loopIters
+  elif st == sxSat and p.taint != {} and floor > 0 and spent >= floor div 2:
+    # RFC-0005 S8ag: a tainted SAT found only after half the budget --
+    # `checkCapped`'s capped step 1 ran out and the uncapped step 3 found
+    # a model -- spent 10M of a 20M budget and more, and is no budget-out.
+    # Before, nothing bounded how many such hits a walk solved: S8y's
+    # decline took only budget-outs. It records its depths the same way,
+    # so a later tainted hit at least as deep is declined, classified, and
+    # voids `sxUnsat` as the solve would have; what is given up is a
+    # further candidate for S10's replay beside the one this hit found.
+    inc symexTargetSolveStats.slowSat
+    if p.loopIters.len > 0:
+      w.budgetOutDepths.add p.loopIters
   var errs: seq[SymexErrorInfo]
   if isCandidate:
     for i in exLiveStart ..< w.extractionErrors.len:
@@ -12510,7 +12711,10 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
   let rlimit = concreteBranchRLimit(settings)
-  let pools = globalRoots()
+  var reach = concreteEq
+  reach.add facts
+  reach.add cond
+  let pools = globalRoots(reach)
   let sTrue = newSolver(ctx)
   let spTrue = newParams(ctx)
   spTrue.set("rlimit", rlimit)
@@ -12549,7 +12753,7 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   sp.set("random_seed", 0'u)
   sv.setParams(sp)
   for c in concreteEq: sv.add(c)
-  for c in globalRoots(): sv.add(c)
+  for c in globalRoots(concreteEq & conds): sv.add(c)
   for c in conds: sv.add(c)
   sv.check() == zsUnsat
 
@@ -17992,6 +18196,9 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
+  indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
+  indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag
+  indexSplitCounter = 0                  ## RFC-0005 S8ag: reset split fresh-name counter
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
   variantLitFreshCounter = 0             ## Round-6 A1: reset variant-lit fresh-field counter
   variantConstructSymFreshCounter = 0    ## Round-6 A3: reset per-fork fresh-field counter
@@ -19396,10 +19603,12 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
   s.setParams(sp)
-  for c in initialPC: s.add(c)
-  for c in concreteEq: s.add(c)
+  var pinned = initialPC & concreteEq
   for p in resultPaths:
-    for c in p.pc: s.add(c)
+    for c in p.pc: pinned.add c
+  for c in pinned: s.add(c)
+  # RFC-0005 S8ag: a split's Int is free without its axioms.
+  for c in indexSplitRoots(ctx, pinned): s.add(c)
   result.pcSatByConcreteInputs = s.check() == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
@@ -19505,6 +19714,9 @@ proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
   s.setParams(sp)
   for c in conjuncts: s.add(c)
   s.add(target)
+  # RFC-0005 S8ag: the axioms of the one-character `str.indexof` splits
+  # the formula reaches (definitional, so a relaxed prefix keeps them).
+  for c in indexSplitRoots(ctx, conjuncts & @[target]): s.add(c)
   inc symexZ3CallCount
   (s.check(), s)
 

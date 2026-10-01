@@ -128,10 +128,13 @@ proc cleanLoopS8y(k: int, a: int, b: int) =
     symexTarget("s8y_clean_after")
 
 const tightTainted = SymexSettings(
-  budget: ResourceBudget(seqQueryRLimit: 2_000_000))
+  budget: ResourceBudget(seqQueryRLimit: 100_000))
   ## Small enough that a shallow pair-loop hit already runs out, so the
-  ## pin runs in seconds; the default budget reaches the same decline at
-  ## the fifth iteration (the n36 / s1c suites' own pins).
+  ## pin runs in seconds. RFC-0005 S8ag: was 2M; the one-character
+  ## `str.indexof` split makes every pair-loop hit SAT within 2M (and the
+  ## default 20M), so a budget-out now needs a budget this small. At 100k
+  ## the first budget-out comes before any slow SAT (S8ag's own bound),
+  ## so this pins S8y's mechanism alone.
 
 const starvedClean = SymexSettings(
   budget: ResourceBudget(queryRLimit: 5_000))
@@ -146,6 +149,7 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
     checkpoint show(r.errors)
     checkpoint "budgetOut=" & $st.budgetOut & " declined=" & $st.declined
     check st.budgetOut == 1
+    check st.slowSat == 0
     check st.declined >= 1
     check r.status == sxUnknown
 

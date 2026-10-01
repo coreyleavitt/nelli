@@ -903,7 +903,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ai (step 1c's links follow equality classes; replace_all
     ## / in_re / from_int / nonzero-start indexof / word-equation facts;
     ## last_indexof queries take step 1c). 181->182.
-    check symexWalkerVersion == "182"
+    ## RFC-0005 S8ag (a one-character `str.indexof` lowers to a fresh Int
+    ## with split axioms; a tainted SAT after half the budget bounds later
+    ## hits as a budget-out does). 182->183.
+    check symexWalkerVersion == "183"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

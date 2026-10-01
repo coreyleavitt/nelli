@@ -1000,5 +1000,11 @@ task test, "Run the test suite":
             # query's equality classes; replace_all / in_re / from_int /
             # nonzero-start indexof / word-equation facts; seq.last_indexof
             # queries take step 1c; walker 181->182.
-            "tsymex_rfc0005_s8ai_semantic"]:
+            "tsymex_rfc0005_s8ai_semantic",
+            # RFC-0005 S8ag -- S8y's remainder: a one-character literal
+            # str.indexof lowers to a fresh Int with split axioms (and
+            # chain facts), so N36's five-iteration exits find a model; a
+            # tainted SAT after half its budget bounds later hits as a
+            # budget-out does; walker 182->183.
+            "tsymex_rfc0005_s8ag_indexsplit"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

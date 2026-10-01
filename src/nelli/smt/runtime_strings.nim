@@ -336,9 +336,23 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # first walker-backlog entry the round-3 Defect net caught in the field
     # (the real parseTftpUri).
     let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrFind")
+    # RFC-0005 S8ag: a one-character literal needle -- every closed form
+    # of the scan idiom (Q1's `tryRecognizeScanIdiom`, B3's
+    # `tryRecognizeScanPairIdiom`, B4's `tryRecognizeAccumulatingScan`)
+    # finds one, as does a caller's `s.find(':')` -- lowers to a fresh Int
+    # with the split axioms (`lowerIndexSplit`, `indexSplitAxioms`), which
+    # every query reaching it asserts (`indexSplitRoots`). The same value
+    # in every model; Z3's own `str.indexof` ran out of 20M units on a
+    # five-deep readCString chain the split decides in under 5M.
+    let ch = oneCharLiteral(sub)
     if e.strArgs.len >= 3:
-      let start = lower(env, e.strArgs[2])
-      SymVal(kind: svInt, zi: indexOf(recv.str, sub, toZ3Int(start)))
+      let start = toZ3Int(lower(env, e.strArgs[2]))
+      if ch.isSome:
+        SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, ch.get, start))
+      else:
+        SymVal(kind: svInt, zi: indexOf(recv.str, sub, start))
+    elif ch.isSome:
+      SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, ch.get, mkInt(0)))
     else:
       SymVal(kind: svInt, zi: indexOf(recv.str, sub))
   of iekStrRfind:

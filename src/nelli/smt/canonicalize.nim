@@ -184,7 +184,20 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "182"
+const symexWalkerVersion* = "183"
+  ## RFC-0005 S8ag (2026-10-01) — S8y's remainder. `str.indexof(s, c, i)`
+  ## with a one-character literal needle (every closed form of the scan
+  ## idiom, Q1/B3/B4, and a caller's `s.find(':')`) lowers to a fresh Int
+  ## with the split axioms `s = pre ++ x ++ c ++ post`, `len(pre) = i`, `ix
+  ## = i + len(x)`, `c notin x` (or -1 with no `c` in `s[i ..]` or `i` out
+  ## of range), plus chain facts between two splits of one haystack
+  ## (`indexSplitRoots`). The same value in every model, a different query
+  ## text: N36's five-iteration exit solves, out of 20M before, find a
+  ## model. A tainted target hit SAT only after half its budget (step 1
+  ## out, step 3 SAT) now records its depths as a budget-out does, so a
+  ## later tainted hit as deep is declined. 182 -> 183.
+  ##
+  ## (Prior: 182.)
   ## RFC-0005 S8ai (2026-10-01) — S8ae's remainder. `seqRangeFacts`' links
   ## are semantic: terms are matched by the query's equality classes (a
   ## sequence equality joins its sides, a term joins what the simplifier

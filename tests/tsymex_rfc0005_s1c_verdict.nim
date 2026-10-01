@@ -363,8 +363,17 @@ suite "RFC-0005 S1c (g) -- a tainted path's solve is bounded (never a new non-te
     let r = symexFind(s1cRegionBlock, tLabel("s1c_region_block"))
     # RFC-0005 S8y: this test's runtime floor, by count (never wall time).
     checkpoint "S8y budgetOut=" & $symexTargetSolveStats.budgetOut &
-               " declined=" & $symexTargetSolveStats.declined
-    check symexTargetSolveStats.budgetOut <= 1
+               " declined=" & $symexTargetSolveStats.declined &
+               " slowSat=" & $symexTargetSolveStats.slowSat &
+               " units=" & $symexTargetSolveStats.units
+    # RFC-0005 S8ag: the one-character `str.indexof` split finds a model
+    # for the exit hits that ran out; at most one tainted hit is slow (its
+    # depth then bounds the rest), and the target solves stay under two
+    # 20M budgets (measured 18-30M on Z3 5.1, 4.0M on 4.13.4; 54M with a
+    # budget-out before).
+    check symexTargetSolveStats.budgetOut == 0
+    check symexTargetSolveStats.slowSat <= 1
+    check symexTargetSolveStats.units < 40_000_000
     checkpoint($kindNames(r.errors))
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedStringOp)

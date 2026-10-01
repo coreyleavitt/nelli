@@ -249,7 +249,7 @@ state = "done"
 [[slice]]
 id    = "S8ag"
 title = "S8y's remainder: lower str.indexof with a literal 1-char needle to a fresh Int plus split axioms (s = pre ++ x ++ c ++ post, with chain facts pre_j = pre_i ++ x_i ++ c when start_j = ix_i + 1) across all three backends of the idiom -- an equivalence for 1-char needles that turns N36-1's 5-iteration exit solves (q103/q106) from 20M exhaustion into SAT candidates (~1.3M/4.7M in a fresh context); prove the equivalence, pin the verdict and cost per test"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S8ah"
@@ -4777,6 +4777,193 @@ Pins: `tests/tsymex_rfc0005_s8ac_remainder.nim`, with a `.nim.cfg` that sets
 - **Copy-in/copy-out declines on possible aliasing.** The check is by
   argument (same root, or a type that can reach the cell). A callee that
   reaches the location through a global is not in the symex fragment.
+**As landed (S8ag, walker 176) — S8y's remainder: the one-character
+`str.indexof` split.** Two changes. (1) `iekStrFind` with a needle that
+folds to a one-character literal lowers to a fresh Int with split axioms
+in place of Z3's `str.indexof`. That covers the three closed forms of the
+scan idiom: Q1's `tryRecognizeScanIdiom`, B3's `tryRecognizeScanPairIdiom`
+and B4's `tryRecognizeAccumulatingScan`. All three emit `iekStrFind`, and
+`lowerStrArm` is its only lowering. A caller's own `s.find(':')` takes
+the same path. (2) A tainted target hit that finds a model only after
+half its budget comes under S8y's scoped decline. Walker 175 -> 176.
+
+*1. The split.* `lowerIndexSplit` returns a fresh Int `ix` and fresh
+strings `pre`, `x` and `post`. The needle is `c`, the start `i`. Every
+query that reaches `ix` asserts (`indexSplitAxioms`):
+
+- (F) `ix = -1`, or: `ix >= 0`, `s = pre ++ x ++ c ++ post`, `len(pre) =
+  i`, `ix = i + len(x)` and `not contains(x, c)`;
+- (N) `ix = -1` implies `i < 0`, or `i > len(s)`, or `not contains(s[i
+  ..], c)`, where `s[i ..]` is `str.substr(s, i, len(s) - i)`.
+
+*Equivalence.* Z3 follows SMT-LIB's `str.indexof(s, t, i)`. It is -1 when
+`i < 0` or `i > len(s)`. For a non-empty `t` it is the least `j >= i` with
+`t` at `j`, or -1 when there is none. With `|t| = 1` the empty-needle rule
+(`i` itself) never applies. Write `r = str.indexof(s, c, i)`. For every
+`s` and `i`:
+
+- *(F) and (N) have a model with `ix = r`.*
+  - If `r >= 0`, then `0 <= i <= r < len(s)`, `s[r] = c`, and there is no
+    `c` in `s[i ..< r]`. Take `pre = s[0 ..< i]`, `x = s[i ..< r]` and
+    `post = s[r + 1 ..]`. (F)'s second arm holds, and (N) holds because
+    `ix != -1`.
+  - If `r = -1`, take `ix = -1`. (F)'s first arm holds. (N)'s consequent
+    holds because `i` is outside `0 .. len(s)` or `s[i ..]` has no `c`.
+- *Every model has `ix = r`.*
+  - If `ix != -1`, (F)'s second arm holds. `len(pre) = i`, so `i >= 0`.
+    `s[ix] = c` with `ix = i + len(x)`, so `ix < len(s)`. And `s[i ..<
+    ix] = x` holds no `c`. So `ix` is the first `c` at or after `i`, which
+    is `r`.
+  - If `ix = -1`, (N) gives `i < 0`, `i > len(s)`, or no `c` in `s[i ..]`.
+    Each of those makes `r = -1`.
+
+The boundary cases are the ones SMT-LIB names:
+- `i = len(s)`: `s[i ..]` is `""`, so the result is -1, as Z3 gives.
+- `i > len(s)`: (N)'s second disjunct gives -1. (F) cannot hold, since it
+  needs `len(s) >= i + 1`.
+- `i < 0`: (F) needs `len(pre) = i`, which is impossible, so -1.
+
+Nothing about `c` beyond its length is used, so `"\0"` and `"\xff"` are
+covered alike.
+
+So a query with `ix` and its axioms has exactly the models the query with
+`str.indexof` had, extended by `pre`, `x` and `post`. A split's axioms
+mention only its own fresh constants beside `s` and `i`, so a query that
+never reaches `ix` can omit them. `indexSplitRoots` adds the axioms of the
+splits a query reaches. It closes over a reached split's `s` and `i`,
+which may hold another split.
+
+*Chain fact* (`indexSplitChain`). Take two splits `a` and `b` of one
+haystack `s` (the same AST). If `a.ix >= 0`, `b.ix >= 0` and `b.i = a.ix +
+1`, then `b.pre = a.pre ++ a.x ++ c_a` and `a.post = b.x ++ c_b ++ b.post`.
+
+It is valid. By (F), `a.pre ++ a.x ++ c_a` is the prefix of `s` of length
+`a.ix + 1`, and `b.pre` is the prefix of length `b.i`. The lengths are
+equal, so the prefixes are equal. The second equation follows by
+cancelling that prefix from the two decompositions of `s`.
+
+The fact is guarded by its own premise. So it is asserted for every
+ordered pair of reached splits of one haystack, with no syntactic match on
+`b.i`. That matters because readCString's next start is a call's return,
+`p1 = ix + 1`, a separate equation in the query.
+
+*Every solver site gets the axioms.* The split's Int is free without them.
+That would never cause a false UNSAT, but it could give a wrong witness.
+The sites are:
+- `globalRoots`, and through it `pathRoots`, `loopArmInfeasible`,
+  `concreteBranchOutcome` and `concretelyInfeasible`;
+- the concolic soundness pin;
+- `z3CheckBounded`.
+
+`tsymex_rfc0005_s7_closure`'s drain audit lists the new pool. Step 1c
+(`seqRangeFacts`) also ranges a split's Int (-1, or `i .. len(s) - 1`). It
+links the Int to `contains` as S8ae's `str.indexof` facts do, so `s.find(':')
+> 200 and ':' notin s` is still refuted theory-free.
+
+*2. N36-1's exit hits.* At 2f576ee on Z3 5.1:
+- the pair loop's first five-iteration exit hit (`loopIters` [4], S8y's
+  q103/q106 floor) ran out of its tainted 20M budget;
+- the [3] hit before it spent 10.2M, with step 1 out and step 3 SAT.
+
+On the split, per hit:
+
+| hit | 2f576ee | S8ag |
+|---|---|---|
+| [3] | SAT, 10.2M | SAT, 0.6-1.7M |
+| [4] | out, 20.0M | SAT, 3.9-6.9M |
+| [4], the sibling S8y declined | declined | SAT, 3.9M |
+| [5] | declined | SAT, 11.6-13.1M; the slow SAT, item 3 |
+| [5], second | declined | declined by item 3 (out, 20.1M, without it) |
+
+The figures vary by context, as S8y's note found; these are four runs.
+The verdicts are unchanged: N36-1, N36-1-noblock and s1c's N36 test are
+still `sxUnknown`. No hit changed between SAT and UNSAT.
+
+*3. The slow-SAT bound.* `solveTargetHit` now handles a tainted hit that
+returns `sxSat` after spending at least half its budget
+(`budgetOutFloor div 2`):
+- spending that much means `checkCapped`'s capped step 1 ran out, and the
+  uncapped step 3 found the model;
+- the hit records its loop depths in `w.budgetOutDepths`, as a budget-out
+  does, and is counted in `symexTargetSolveStats.slowSat`;
+- a later tainted hit at least as deep is declined: classified
+  `beSolverUndef`, which voids `sxUnsat`.
+
+What is given up is a further tainted candidate beside the one the slow
+hit found. A clean hit is always solved. `symexTargetSolveStats.units`
+now totals the target-hit `rlimit`, which gives the per-test cost pins.
+
+Without the bound, N36-1 on the split solves the second [5] hit and runs
+out of budget there: budgetOut=1, declined=0, 203 s. With it:
+budgetOut=0, declined=1, slowSat=1, 118 s.
+
+*Measured.* Target-hit `rlimit` per suite (`-d:s8agTrace`, summed per
+hit) and wall time standalone at load 15-27, base 2f576ee against S8ag.
+Every suite has the same OK count at base and at S8ag.
+
+| suite | Z3 5.1 base | Z3 5.1 S8ag | Z3 4.13.4 base | Z3 4.13.4 S8ag |
+|---|---|---|---|---|
+| n36_raise_degrade (8 OK) | 62.3M, 428 s, 2 out | 53.5M, 278 s, 0 out | 12.4M, 94 s | 8.3M, 75 s |
+| s1c_verdict (24 OK) | 54.3M, 323 s, 1 out | 17.9M, 112 s, 0 out | 7.4M, 77 s | 4.0M, 75 s |
+| q1_scanlift (13) | 0.82M | 0.21M | 0.71M | 0.24M |
+| r6_b5_chained (9) | 0.62M | 0.79M | 0.64M | 0.51M |
+| r6_nulwitness (14) | 0.13M | 0.24M | 0.25M | 0.14M |
+| r6_b4_readcstring (13) | 0.24M | 0.40M | 0.41M | 0.24M |
+| s8r_theoryfree (3) | 0.01M | 0.02M | 0.01M | 0.01M |
+| s8v_termination (7) | 0.01M | 0.02M | 0.01M | 0.01M |
+| s8ae_remainder (16) | 0.04M | 0.05M | 0.12M | 0.10M |
+| r4_strip (5) | 20.03M | 20.03M | 20.04M | 20.04M |
+
+r4_strip's 20M is its own adversarial pin (strip idempotence), unchanged.
+
+Each hit's status (SAT, UNSAT or unknown) is identical at base and S8ag in
+q1, b5, nulwitness, b4, s8r, s8v, s8ae and r4, on both Z3 versions. The
+moves are these, and every one is intended:
+- n36 on 5.1: [4] unknown -> SAT, twice; and four hits S8y declined are
+  now SAT candidates.
+- s1c on 5.1: the last two tainted hits ([4] SAT, [5] out) are declined
+  by the slow-SAT bound.
+- On 4.13.4, n36 and s1c are identical per hit, and cheaper.
+
+*Pins.*
+- `tsymex_rfc0005_s8ag_indexsplit` (14):
+  - (1) a 300-instance randomized differential of the axioms against Z3's
+    `str.indexof`. It is RED on two mutants: the found arm without `c
+    notin x`, and an off-by-one not-found range.
+  - (1) the -1 boundary cases, and the chain fact on 150 random two-scan
+    instances.
+  - (2) Q1, B3 and B4 each lower through a split and give `sxSat` with a
+    witness that satisfies the program.
+  - (3) S8ae's step 1c link, the context guard, and the needles that are
+    not split.
+  - (5) under a 1M budget the pair loop has budgetOut=0, slowSat=1,
+    declined>=1 and `sxUnknown`.
+  - The `>= 176` floor.
+  - At 2f576ee the file does not compile (`IndexSplit`).
+- N36-1, N36-1-noblock and s1c's N36 test now pin `budgetOut == 0` (it was
+  1 at 2f576ee, so these are RED there), `slowSat <= 1`, and `units < 40M`.
+- `tsymex_rfc0005_s8y_budget_decline`'s tight budget drops from 2M to
+  100k. At 2M the pair loop no longer runs out (0 out, 1 slow SAT). At
+  100k it runs out before any slow SAT, which pins S8y's mechanism alone
+  (`slowSat == 0`).
+
+*Different mechanisms, reported and not fixed here.*
+- **S8y's own suite is red on Z3 4.13.4 at 2f576ee.** "one tainted
+  budget-out; every later hit as deep is declined" fails with
+  `budgetOut=1 declined=0`: the only budget-out there is the deepest hit,
+  [5]. That is the symex-mingw leg's Z3, so S8y alone would ship a Windows
+  red. S8ag's retuned budget passes on both versions.
+- **The per-hit cost still depends on the context.** For the same [5] hit
+  that is 11.6M in one build and 13.1M in another (s1c's N36 test: 17.9M
+  against 29.5M units). Adding a probe's own `rlimitCountNow` call is
+  enough to move it. The pins bound counts and a ceiling, not a figure.
+- **Only literal one-character needles split.** `find("ab")`, a computed
+  needle, and `rfind` / `seq.last_indexof` still lower to the sequence
+  theory's own functions.
+- **The chain facts are all-pairs over the splits of one haystack** that a
+  query reaches. That is quadratic in the scans of one string. It is
+  cheap at N36's five-deep chains (the totals above), but it is not
+  bounded.
 
 **As landed (S8ai, walker 182) — S8ae's remainder.** All three items are
 in `seqRangeFacts` and its use in `checkCapped`'s step 1c. Step 2 still

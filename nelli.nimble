@@ -1027,5 +1027,14 @@ task test, "Run the test suite":
             # incl / excl / []= / [i]= on a dotted field and `add` on a
             # dotted string field take the field-write primitive; an
             # itUninterp `var` declines with its own kind; walker 182->183.
-            "tsymex_rfc0005_s8ap_remainder"]:
+            "tsymex_rfc0005_s8ap_remainder",
+            # RFC-0005 S8aq -- S8ai's remainder: step 1c no longer depends
+            # on step 1 reaching UNSAT (a cancelled step 1 still gets the
+            # facts-based decision); the dropped "L is at least every found
+            # index" link is reformulated as a ground fact that validates
+            # within budget; str.replace_all is reachable under this
+            # suite's own `-d:z3WithSeqReplaceAll` (`.nim.cfg`); a missed
+            # implied (non-stated) equality is shown to cost completeness
+            # only. Walker 182->187.
+            "tsymex_rfc0005_s8aq_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

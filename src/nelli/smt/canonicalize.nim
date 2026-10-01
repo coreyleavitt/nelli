@@ -202,7 +202,35 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "183"
+const symexWalkerVersion* = "187"
+  ## RFC-0005 S8aq (2026-10-01) — S8ai's remainder. Three independent
+  ## `checkCapped`/`seqRangeFacts` fixes, none changing an existing
+  ## verdict (each closes a gap that previously fell through to the
+  ## slower, still-correct uncapped steps, or was never reachable at
+  ## all): (1) step 1c (the facts-based decision) no longer requires step
+  ## 1's capped solve to have reached `zsUnsat` — a cancelled step 1
+  ## (`zsUnknown`, out of budget) now takes the SAME budget-independent
+  ## 1b/1c checks, since both are sound regardless of why step 1 did not
+  ## return SAT. (2) The dropped link "L (`seq.last_indexof`) is at least
+  ## every found `str.indexof`" is reformulated as a ground fact over a
+  ## fresh `str.indexof(s, t, L)` term (searching from `L` finds `L`
+  ## exactly when `L` is a real occurrence) — it validates within budget
+  ## and, folded into the existing `indexOfs` collection, reuses S8ai's
+  ## own pairwise ordering facts for the link. (3) `str.replace_all` is
+  ## reachable under this project's own opt-in `-d:z3WithSeqReplaceAll`
+  ## (a per-test-file `.nim.cfg`, `symexQueryStats`/`nelliVmAliasAudit`'s
+  ## precedent; nim-z3 already ships the binding and its `Available()`
+  ## guard unchanged) — the chokepoint now also catches nim-z3's own
+  ## `Z3FeatureUnavailableError`, so a Z3 build with the define on but the
+  ## symbol absent (below 4.16) still degrades honestly instead of
+  ## raising uncaught. A fourth item (equality classes over the query's
+  ## roots are syntactic, not closed under equalities the query only
+  ## IMPLIES) is shown, not fixed: a missed implied equality costs step
+  ## 1c a decision, never the walker a wrong one, since steps 2/3 still
+  ## see the full theory. 186 -> 187 (183-186 reserved for sibling S8**
+  ## slices on this channel).
+  ##
+  ## (Prior: 186.)
   ## RFC-0005 S8ag (2026-10-01) — S8y's remainder. `str.indexof(s, c, i)`
   ## with a one-character literal needle (every closed form of the scan
   ## idiom, Q1/B3/B4, and a caller's `s.find(':')`) lowers to a fresh Int

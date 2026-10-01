@@ -7029,6 +7029,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       degradeStrArm(e, seZ3StringIncomplete, ex.msg)
     except SymexUnsupportedRegexError as ex:
       degradeStrArm(e, seUnsupportedRegex, ex.msg)
+    except Z3FeatureUnavailableError as ex:
+      # RFC-0005 S8aq: nim-z3's OWN runtime guard (not one of nelli's
+      # classified carriers above) for a Z3-build-optional C constructor
+      # whose compile-time gate is on but the loaded Z3 lacks the symbol
+      # (`replaceAll`'s `Z3_mk_seq_replace_all`, absent below Z3 4.16, is
+      # the only such call this walker reaches -- `iekStrReplaceAll`,
+      # `runtime_strings.nim`, under this project's opt-in
+      # `-d:z3WithSeqReplaceAll`). Classified the SAME as the compile-time
+      # gate being off (`seZ3VersionMissing`, `dcFreshSymbol`): a Z3 build
+      # too old for the real op degrades exactly like a build the define
+      # never targeted, never an uncaught exception.
+      degradeStrArm(e, seZ3VersionMissing, ex.msg)
   of iekGetCurrentExnMsg, iekGetCurrentExn:
     # Stage 7 (CR-7) Cluster E: exception expression arms extracted into
     # `lowerExnArm` (defined above, before this proc body).
@@ -9594,6 +9606,31 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     same(result, t1, t2)
   proc sameKey(s1, s2, t1, t2: Z3AnyAst): bool =
     cls(s1) == cls(s2) and cls(t1) == cls(t2)
+  # RFC-0005 S8aq. "`L` (`seq.last_indexof(s, t)`) is at least every found
+  # `str.indexof(s, t, i)`" is valid -- `L` is itself an occurrence and no
+  # later one exists, so searching from `L` finds `L` exactly -- but S8ai
+  # dropped it: asked as a universal claim over free `s`, `t`, `i`, neither
+  # linked Z3 refutes its negation within the pin's 1M-unit budget, even at
+  # `i = 0`. Reformulated as one GROUND fact per `seq.last_indexof` term
+  # already in the query -- a FRESH `str.indexof(s, t, L)` term, L itself
+  # as the start -- it validates (below): `L >= 0` implies that fresh term
+  # equals `L`. Joined into `indexOfs` before the pairwise loop, the
+  # already-valid ordered-starts facts above (generic over any two
+  # `str.indexof` terms of one haystack/needle, not specific to this one)
+  # give the dropped link for free: for an existing `str.indexof(s, t, i)`
+  # with `0 <= i <= L`, `L >= 0` implies `0 <= i's result <= L`.
+  # `tsymex_rfc0005_s8aq_remainder.nim` pins both the ground fact's
+  # validity and the end-to-end link.
+  for l in lastIdxs:
+    let synRaw = ctx.checkErr Z3_mk_seq_index(ctx.raw, l.s.raw, l.t.raw, l.r.raw)
+    let syn = wrap[Z3Int](ctx, synRaw)
+    # The same definitional bound every discovered `str.indexof` term gets
+    # (this one is built here, not walked from `roots`, so it has none yet).
+    result.add (syn == minusOne) or
+      ((zero <= syn) and (l.r <= syn) and
+       (syn + lenOf(ctx, l.t) <= lenOf(ctx, l.s)))
+    result.add implies(l.r >= zero, syn == l.r)
+    indexOfs.add (s: l.s, t: l.t, i: l.r, r: syn)
   for e in indexOfs:
     let atZero = e.i == zero
     for c in containsL:
@@ -10141,23 +10178,28 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ## all of it:
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
-  ##   1b. after an UNSAT in (1), or an unknown in both (1) and (3),
-  ##      the query with NO sequence theory (`querySolver`'s
-  ##      `seqTheory = false`): its models are a superset of the real ones,
-  ##      so its UNSAT is the query's own. It decides the UNSATs whose
-  ##      contradiction is arithmetic over lengths and indices without any
-  ##      string search, and without step 2's unsat core, which may name
-  ##      the cap although the query's own bounds refute it too (Z3's cores
-  ##      are not minimal).
-  ##   1c. after (1b), when (1) was UNSAT (RFC-0005 S8ai: a query holding
-  ##      a `seq.last_indexof` too): the theory-free query with the
-  ##      range each length and index term has in the theory
-  ##      (`seqRangeFacts`, RFC-0005 S8v). An UNSAT is the query's own, the
-  ##      facts being valid. Otherwise the caps are ASSERTED beside them:
-  ##      an UNSAT then means the caps refute every model the facts leave,
-  ##      so the cap took part: `zsUnknown`, with no sequence-theory check
-  ##      (RFC-0005 S8r). A `seq.last_indexof` query skips that capped
-  ##      half and goes on to (3), which may find a model past the cap.
+  ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
+  ##      S8aq: step 1's OWN solve running out of budget no longer skips
+  ##      this), or after an unknown in both (1) and (3): the query with
+  ##      NO sequence theory (`querySolver`'s `seqTheory = false`): its
+  ##      models are a superset of the real ones, so its UNSAT is the
+  ##      query's own. It decides the UNSATs whose contradiction is
+  ##      arithmetic over lengths and indices without any string search,
+  ##      and without step 2's unsat core, which may name the cap although
+  ##      the query's own bounds refute it too (Z3's cores are not
+  ##      minimal).
+  ##   1c. after (1b), whenever (1) was NOT `zsSat` (RFC-0005 S8ai: a query
+  ##      holding a `seq.last_indexof` too; RFC-0005 S8aq: including when
+  ##      (1) merely ran out of budget, same reasoning as (1b) -- a facts
+  ##      UNSAT does not depend on what (1)'s own solve decided): the
+  ##      theory-free query with the range each length and index term has
+  ##      in the theory (`seqRangeFacts`, RFC-0005 S8v). An UNSAT is the
+  ##      query's own, the facts being valid. Otherwise the caps are
+  ##      ASSERTED beside them: an UNSAT then means the caps refute every
+  ##      model the facts leave, so the cap took part: `zsUnknown`, with no
+  ##      sequence-theory check (RFC-0005 S8r). A `seq.last_indexof` query
+  ##      skips that capped half and goes on to (3), which may find a model
+  ##      past the cap.
   ##   2. if (1) is UNSAT: a fresh solver with the caps behind one
   ##      assumption literal, checked under it, and its unsat core read.
   ##      Without the literal in the core the query is UNSAT on its own;
@@ -10264,10 +10306,24 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   template theoryFreeUnsat(): (bool, Z3Solver) =
     let sTf = querySolver(ctx, roots, rl, seqTheory = false)
     (sTf.check() == zsUnsat, sTf)
-  if r1 == zsUnsat:
+  # RFC-0005 S8aq: (1b) and (1c) below no longer gate on `r1 == zsUnsat`
+  # specifically. `r1` can only be `zsUnsat` or `zsUnknown` here (`zsSat`
+  # already returned), and a `zsUnknown` -- step 1's capped, full-theory
+  # solve merely ran OUT OF BUDGET, not refuted -- used to skip both and
+  # fall straight to step 3 with whatever budget remained: step 1c's
+  # facts, cheap and theory-free, were never tried for a query that needed
+  # them precisely because the full theory was too slow to finish in time.
+  # Both checks are sound regardless of why `r1` is not `zsSat`: a
+  # theory-free (1b) or facts-based (1c) UNSAT is the query's own, since
+  # their models are a superset of the real ones and the facts are valid
+  # in the theory, independent of what step 1's OWN solve did or did not
+  # decide. (`tsymex_rfc0005_s8aq_remainder.nim`, S8ai's own two
+  # not-pinned-end-to-end cases: `s[7] == ':' and rfind < 7` and `':' in s
+  # and rfind == -1`, both cancelled at step 1 under the tight budget.)
+  if r1 != zsSat:
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
-  if r1 == zsUnsat:
+  if r1 != zsSat:
     # Step 1c (RFC-0005 S8r): the caps against the query with no sequence
     # theory. (1b) found no theory-free refutation of the query alone; if
     # the caps now refute it, the cap takes part in the only refutation

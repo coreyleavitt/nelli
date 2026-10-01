@@ -299,7 +299,7 @@ state = "done"
 [[slice]]
 id    = "S8aq"
 title = "S8ai's remainder: step 1 itself can run out of budget, so step 1c is never reached when step 1's capped solve is cancelled -- give step 1c a path that does not depend on step 1 completing, or decline with the budget reason; the fact that L is at least every found first index is not emitted (valid but unprovable within the pin's UNSAT budget) -- emit it in a form the solver can use, or show it is subsumed; str.replace_all is unreachable from the walker (Z3_mk_seq_replace_all is behind an optional nim-z3 build flag) -- make it reachable (enable the binding in nim-z3 and push, then bump the lock) or decline it as a scoped decline with the reason; the equality classes are syntactic over the roots, so an equality the query implies without stating it is not seen -- close them under implied equalities, or show the miss only costs completeness and never soundness, and pin it"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -7792,3 +7792,120 @@ over-claimed `{.symexTransparent.}` pragmas; adding a fourth
 exists for two members. The trade is *how loudly you want an over-claimed
 pragma surfaced*, which is a product judgment rather than a design one — I have
 no basis to prefer either.
+
+**As landed (S8aq, walker 187) — S8ai's remainder.** All four items are in
+`checkCapped` and `seqRangeFacts`; none changes an existing verdict.
+
+*1. Step 1c no longer needs step 1 to reach `zsUnsat`.* `checkCapped`'s step
+1 (the capped one-shot solve) has exactly two non-SAT outcomes once the
+early `zsSat` return is taken out of the domain: `zsUnsat` and `zsUnknown`
+(cancelled, out of budget). Step 1b (the theory-free check) and step 1c
+(the facts-based check) were both gated `if r1 == zsUnsat`, so a query
+whose step 1 itself ran out of budget skipped both and fell straight to
+step 3 with whatever budget remained — the facts were never tried, even
+though both checks are sound independent of *why* step 1 did not return
+SAT. Both gates are now `if r1 != zsSat`. Step 2 (which needs an actual
+UNSAT to pull an unsat core from) is unchanged, still gated on
+`r1 == zsUnsat` alone. `s[7] == ':' and rfind < 7`, and `':' in s and rfind
+== -1` (on Z3 4.13.4), were the two cases S8ai flagged by name as not
+pinned end to end for this reason; both are now `sxUnsat` under a budget
+that cancels step 1.
+
+*2. The dropped link, reformulated as a ground fact.* S8ai's link ("`L`
+(`seq.last_indexof`) is at least every found `str.indexof(s, t, i)`") was
+valid but neither Z3 could refute its negation within S8v's 1M-unit pin,
+even at `i = 0`. Rather than assert it directly, `seqRangeFacts` now
+builds one synthetic `str.indexof(s, t, L)` term per `seq.last_indexof`
+occurrence — searching from `L` itself finds `L` exactly when `L` is a
+real occurrence, a MUCH narrower (ground) claim that validates within
+budget on both Z3 5.1 and 4.13.4. Folded into the existing `indexOfs`
+collection before the pairwise-ordering loop runs, S8ai's own two-starts
+facts apply to it automatically, giving the original link for any
+`str.indexof` term found from a start at or before `L` — no new pairwise
+code. The link needs an anchor already establishing `L >= 0`
+(`str.contains`/prefix/suffix — S8ai's existing link) somewhere in the
+query; see "different mechanisms" below.
+
+*3. `str.replace_all` is reachable, opt-in.* The walker's own call
+(`iekStrReplaceAll`, `runtime_strings.nim`) was unconditionally gated off
+(`when defined(z3WithSeqReplaceAll): ... else: raise
+SymexZ3VersionMissingError`), and nelli's build never set the define — so
+even on a Z3 new enough to support it, the real op was never tried.
+nim-z3 already ships the FFI binding (`Z3_mk_seq_replace_all`, `{.optional,
+prototype.}`) and its own `replaceAll` wrapper with an `Available()`
+runtime guard; no nim-z3 change was needed, only turning the flag on. The
+define is scoped to this slice's own test file
+(`tests/tsymex_rfc0005_s8aq_remainder.nim.cfg`, the same per-test-file
+mechanism `symexQueryStats`/`nelliVmAliasAudit` already use), so every
+other suite is unaffected — the default public surface is unchanged. The
+chokepoint (`runtime.nim`'s `lowerStrArm` catch) now also catches nim-z3's
+own `Z3FeatureUnavailableError`, classified the same as the compile-time
+gate being off (`seZ3VersionMissing`, `dcFreshSymbol`): a Z3 build with the
+define on but the C symbol absent (below 4.16, e.g. 4.13.4) still degrades
+honestly to a fresh stand-in instead of raising uncaught. A claim the real
+op would refute is then replay-refuted against that stand-in
+(`feReplayRefuted`, `sxUnknown`), never a false `sxSat`.
+
+*4. A missed implied equality costs completeness, never soundness —
+shown, not closed.* `seqRangeFacts`' union-find joins a term to another
+when a `(= a b)` sits somewhere in the query (at any nesting) or when
+`Z3_simplify` folds one to the other; it does not derive an equality the
+query only IMPLIES through unrelated reasoning. `y ++ "x" == z ++ "x"`
+implies `y == z` (concatenation is injective — ordinary word-equation
+reasoning, decided fast by both Z3 5.1 and 4.13.4's own theory), but the
+union-find only joins the two CONCATENATION terms (the asserted
+equality's own two sides), never descending through `str.++` to join `y`
+and `z` themselves. A query reaching `str.indexof(s, y, 0) > 200` and `not
+str.contains(s, z)` this way is not decided by step 1c (`stepOneC` returns
+`zsSat`/`zsUnknown`, never `zsUnsat`) — but the full, uncapped sequence
+theory (steps 2/3, exactly where `checkCapped` falls through) still
+decides it correctly. The miss costs step 1c a decision; it never costs
+the walker a wrong one. Closing the union-find under arbitrary implied
+equalities is not attempted here — it is an open-ended theorem-proving
+problem, not a bounded one.
+
+Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
+- (1) End to end, both of S8ai's named cases are `sxUnsat` under a budget
+  that cancels step 1 (`tight()`, `seqQueryRLimit = 2_000`), with no
+  `"was not decided"` error.
+- (2) The ground fact validates (negation UNSAT, ground-domain check). Step
+  1c alone decides "a found index (from 0) cannot exceed `L`" `zsUnsat`,
+  with its companion ("at or before `L`") `zsSat`; a hand-built strict
+  mutant fails the validity check. Both hold end to end too.
+- (3) End to end, under this suite's own `-d:z3WithSeqReplaceAll`: every
+  occurrence is really replaced (`sxSat`, confirmed by replay, never
+  `seZ3VersionMissing`) on a Z3 that has the symbol; the first-occurrence-
+  only and no-occurrence-unchanged claims the real op forbids are
+  `sxUnsat` there. On a Z3 without the symbol (4.13.4), all three degrade
+  to the fresh-stand-in behaviour, with a content-specific claim the real
+  op would refute landing `sxUnknown` + `feReplayRefuted`, never a wrong
+  `sxSat`.
+- (4) Step 1c misses the `y`/`z` word-equation case (never `zsUnsat`); the
+  uncapped theory still decides it `zsUnsat`, at 1M units, on both Z3
+  versions.
+- The `>= 187` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **Item 2's link needs an anchor already in the query.** The fresh
+  `str.indexof(s, t, L)` term's ordering facts only fire once something
+  else in the query already establishes `L >= 0` (a stated or
+  walker-produced `str.contains`/prefix/suffix term — S8ai's existing
+  link). A query that reaches the same mathematical fact through
+  `str.indexof`'s own base bound alone, with no contains/prefix/suffix
+  term anywhere in its roots, still falls through to steps 2/3 (still
+  correctly decided, just not by step 1c's shortcut). This is the same
+  *class* of gap as item 4 above (step 1c needs a syntactic foothold) but
+  through a missing anchor fact rather than a missing equality join;
+  synthesizing a `str.contains` term for every `seq.last_indexof`
+  occurrence that lacks one is its own slice-sized design question, not
+  attempted here.
+- **Regex replace-all sits behind the same kind of gate, for a different
+  reason.** nim-z3 declares `Z3_mk_seq_replace_re`/`Z3_mk_seq_replace_reAll`
+  the same optional/prototype way as `Z3_mk_seq_replace_all`, gated behind
+  `z3WithSeqReplaceRe`/`z3WithSeqReplaceReAll` in `regex.nim` — but per
+  nim-z3's own comment there, Z3's solver returns `unknown` on
+  `str.replace_re{,_all}` even for fully concrete inputs (unlike
+  `str.replace_all`, which it decides). Enabling that define was not
+  attempted: it would make the term constructible, not the operator any
+  more decidable, and is out of this slice's scope (plain
+  `str.replace_all` only).

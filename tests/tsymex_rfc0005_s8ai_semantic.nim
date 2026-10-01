@@ -406,8 +406,11 @@ suite "S8ai (3): a query holding seq.last_indexof takes step 1c":
   # small for the uncapped step 3, only step 1c's facts decide it. RED at
   # 58e52af: "the uncapped query (it holds a seq.last_indexof) was not
   # decided". (`s[7] == ':' and rfind < 7`, and `':' in s and rfind < 0`
-  # on Z3 4.13.4, are not pinned end to end: at this budget step 1 itself
-  # is canceled, so step 1c is not reached. Their links are pinned above.)
+  # on Z3 4.13.4, were not pinned end to end here: at this budget step 1
+  # itself is canceled, so step 1c was not reached. Their links are
+  # pinned above; both are now pinned end to end too, by RFC-0005 S8aq,
+  # which gives step 1c a path that does not depend on step 1 reaching
+  # UNSAT -- `tsymex_rfc0005_s8aq_remainder.nim`, suite "S8aq (1)".)
   template decidedBy1c(fn: typed; label: string) =
     proc tight(): SymexSettings =
       result = defaultSymexSettings()

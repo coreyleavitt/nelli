@@ -916,7 +916,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ap (compound-sort fields of a ref object are leaf-split
     ## heap cells; dotted-field del/insert/incl/excl/[]=/[i]= and dotted
     ## string add; an itUninterp var declines with its own kind). 182->183.
-    check symexWalkerVersion == "183"
+    ## RFC-0005 S8aq (step 1c no longer needs step 1 to reach UNSAT; the
+    ## dropped "L is at least every found index" link, reformulated as a
+    ## ground fact; str.replace_all reachable under this project's own
+    ## opt-in -d:z3WithSeqReplaceAll). 182->187 (183-186 reserved for
+    ## sibling slices on this channel).
+    check symexWalkerVersion == "187"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

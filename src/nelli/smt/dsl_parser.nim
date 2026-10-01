@@ -8670,8 +8670,39 @@ proc zeroValueForType(ty: IRType): IRExpr =
     ## mechanism for every caller (construction-time field omission
     ## included — `itSeq` was not covered by S8z's special case).
     mkZeroValue(ty)
-  else: nil                            ## itUninterp: no zero (defaultZero
-                                       ## raises); the caller declines
+  else:
+    ## RFC-0005 S8ao (S8aj's remainder): `itUninterp` STAYS a decline --
+    ## every value reaching here is a sort the walker chose not to give a
+    ## REAL Z3 representation to in the first place, not merely a shape
+    ## whose zero "isn't written down yet" (`itArray`/`itTuple`/`itSeq`/
+    ## `itVariant`/`itMultiVariant`, just above). `classifyType`
+    ## (`dsl_typebridge.nim`) builds `itUninterp` for exactly three
+    ## placeholder prefixes, and none has a sound zero to fabricate here:
+    ##   - `__ownership:*` (`owned T` / `Atomic[T]`, ADR-0010
+    ##     Breadth-LOW-L4): deliberately out of scope for the ref cluster
+    ##     -- no sort was ever allocated for these, so there is nothing to
+    ##     build a zero constant OF.
+    ##   - `__closure` (a proc-typed local with no initializer, e.g.
+    ##     `var f: proc(x: int): int`): Nim's real zero is a nil closure,
+    ##     but `svClosure` (`runtime.nim`) carries a SITE KEY into real
+    ##     lambda-body IR (`runtime_closures.nim`) -- there is no "nil
+    ##     closure" sentinel value today that a later `f(...)` call could
+    ##     soundly degrade through; minting one is a new SymVal shape
+    ##     (plus every call/compare site that would need to recognise it),
+    ##     out of proportion for a single caller's zero-init.
+    ##   - `__unsupported:<X>` (`classifyType`'s catch-all for a type name
+    ##     no structural arm recognises): `X` names some real Nim type the
+    ##     classifier never identified, so its actual shape -- and
+    ##     therefore its actual zero -- is UNKNOWN here. Fabricating a
+    ##     zero for an unidentified shape is exactly the "launder a gap
+    ##     into a sound-looking value" move RFC-0005 §3.1 rules out; the
+    ##     caller's classified decline is the only sound answer.
+    ## Pinned by `tests/tsymex_rfc0005_s8ao_remainder.nim` (all three
+    ## prefixes, reached through an uninitialized-`var` local -- the one
+    ## caller of `zeroValueForType` this arm's `nil` return still visibly
+    ## degrades, `feUnsupportedStmtKind` "zero-init not modeled this
+    ## cycle" -- never a crash, never a guessed value).
+    nil
 
 proc unsupportedFieldPlaceholder(ty: IRType): IRExpr =
   ## RFC-chapulin-hardening R8 (deferred LOW finding, telemetry hygiene). A
@@ -9126,6 +9157,67 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
     ValueFieldWrite(root: step.recv.strVal, value: rebuilt)
   else:
     valueFieldWrite(step.recv, rebuilt, preamble, ctx)
+
+proc dottedSeqAddShape(fieldNode: NimNode): bool =
+  ## RFC-0005 S8ao (S8aj's remainder). True iff `fieldNode` (a dotted field
+  ## chain -- `o.s`, `a.b.s`, or a ref/ptr object's field `p.s`) is a shape
+  ## `dottedFieldAdd` below can lower: either step of the R6 ref-field-write
+  ## arm (`parseAsgn`, `p.field = v`) -- a `nnkDotExpr` whose own receiver is
+  ## a `HiddenDeref`/`DerefExpr` over a genuine `ref`/`ptr` -- or a
+  ## `valueFieldTy`-accepted value-field chain. Pure (mirrors `valueFieldTy`'s
+  ## own "parses nothing" contract): the caller decides eligibility with this
+  ## BEFORE lifting the `.add` argument, so an ineligible shape (e.g. a
+  ## dotted field reached through a GLOBAL, not a local/param root -- S8an's
+  ## own separate remainder) falls through to the existing N49 decline with
+  ## its argument left unparsed, same as today.
+  let lhsFW = if fieldNode.kind == nnkCheckedFieldExpr and fieldNode.len >= 1:
+                fieldNode[0]
+              else: fieldNode
+  if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
+     lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1:
+    classifyType(lhsFW[0][0]).ty.kind in {itRef, itPtr}
+  else:
+    valueFieldTy(fieldNode) != nil
+
+proc dottedFieldAdd(fieldNode: NimNode, val: IRExpr,
+                    preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8ao (S8aj's remainder). `<fieldPath>.add(<val>)` where
+  ## `fieldPath` (`o.s`, `a.b.s`, a ref/ptr object's `p.s`) classifies to
+  ## `itSeq` -- precondition: `dottedSeqAddShape(fieldNode)` already holds.
+  ## `.add` is Nim/stdlib sugar for "read the field, append, write the field
+  ## back", not a new mutation PRIMITIVE, so this reuses whichever
+  ## field-write machinery the plain assignment `<fieldPath> = v` already
+  ## uses for the SAME lvalue shape: the R6 ref-object field-deref-write
+  ## (`mkFieldDeref`/`mkFieldDerefWrite`, mirroring `parseAsgn`'s own R6 arm,
+  ## just reading the field first instead of discarding it) for a `ref`/
+  ## `ptr` step, or S8p's value-field rebuild (`valueFieldWrite`) for a value
+  ## tuple/object step -- `o.s.add v`'s bare-symbol sibling `s.add(v)`
+  ## (`mkAssign(recvName, mkSeqAdd(mkVar(recvName), val))`, just above in
+  ## `parseStmtInner`) is the same "read, append, assign" shape one level up,
+  ## with no field chain to walk. The field READ this performs to get the
+  ## OLD value also forks any variant-arm discriminant check
+  ## (`valueFieldChecked`'s own reason for existing) for free -- no separate
+  ## discard-read is needed the way plain assignment needs one.
+  let lhsFW = if fieldNode.kind == nnkCheckedFieldExpr and fieldNode.len >= 1:
+                fieldNode[0]
+              else: fieldNode
+  if lhsFW.kind == nnkDotExpr and lhsFW.len == 2 and
+     lhsFW[0].kind in {nnkHiddenDeref, nnkDerefExpr} and lhsFW[0].len >= 1 and
+     classifyType(lhsFW[0][0]).ty.kind in {itRef, itPtr}:
+    let operand = lhsFW[0][0]
+    let opCls = classifyType(operand)
+    let isPtr = opCls.ty.kind == itPtr
+    let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+    let fieldName = lhsFW[1].strVal
+    let fieldTy = classifyType(fieldNode).ty
+    let ptrIR = parseExpr(operand, preamble, ctx)
+    let synth = freshSynth(ctx, "fderef")
+    preamble.add mkFieldDeref(synth, ptrIR, fieldTy, pointeeTy, fieldName, isPtr)
+    return mkFieldDerefWrite(ptrIR, mkSeqAdd(mkVar(synth), val), fieldTy,
+                             pointeeTy, fieldName, isPtr)
+  let oldVal = parseExpr(fieldNode, preamble, ctx)
+  let fw = valueFieldWrite(fieldNode, mkSeqAdd(oldVal, val), preamble, ctx)
+  mkAssign(fw.root, fw.value)
 
 proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
                preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
@@ -10146,6 +10238,17 @@ proc parseStmtInner(n: NimNode,
         # "unsupported nnkAsgn shape" catch-all, below) — RED (compile crash)
         # to GREEN (classified `sxUnknown`, never a crash), never a silent
         # wrong verdict.
+        #
+        # RFC-0005 S8ao (S8aj's remainder): `add` on a dotted SEQ field
+        # (`o.s.add v`, `a.b.s.add v`, a ref/ptr object's `p.s.add v`) is no
+        # longer blanket-declined here — `dottedSeqAddShape` recognises the
+        # field-write primitive the plain assignment `<fieldPath> = v` would
+        # use for the same lvalue, and `dottedFieldAdd` reuses it (see both,
+        # just above `parseAsgn`). `del`/`insert`/`incl`/`excl`/`[]=` on a
+        # dotted field are UNCHANGED — S8aj's remainder named `add` only; a
+        # genuine value-typed field-write REBIND for those stays out of
+        # proportion for THIS fix, same as the pre-S8ao comment above argued
+        # for the whole group.
         elif recv1 != nil and
              (block:
                 # A variant ARM field (`v.armField`, e.g. `v2.items2` above)
@@ -10159,13 +10262,21 @@ proc parseStmtInner(n: NimNode,
                                  else: recv1
                 fieldNode.kind == nnkDotExpr and
                 isKnownMutatingReceiverCall(calleeName, fieldNode, n.len)):
-          ctx.declineAtSite(
-            feUnsupportedOp,
-            siteMsg(n, "N49: dotted-field lvalue mutation `" &
-                              recv1.repr & "." & calleeName &
-                              "(...)` unsupported (feUnsupportedOp)"),
-            "N49: dotted-field lvalue mutation `" & calleeName &
-                          "` unsupported (feUnsupportedOp)")
+          let fieldNode = if recv1.kind == nnkCheckedFieldExpr and
+                             recv1.len >= 1: recv1[0]
+                           else: recv1
+          if calleeName == "add" and classifyType(fieldNode).ty.kind == itSeq and
+             dottedSeqAddShape(fieldNode):
+            let val = parseExpr(n[2], preamble, ctx)
+            dottedFieldAdd(fieldNode, val, preamble, ctx)
+          else:
+            ctx.declineAtSite(
+              feUnsupportedOp,
+              siteMsg(n, "N49: dotted-field lvalue mutation `" &
+                                recv1.repr & "." & calleeName &
+                                "(...)` unsupported (feUnsupportedOp)"),
+              "N49: dotted-field lvalue mutation `" & calleeName &
+                            "` unsupported (feUnsupportedOp)")
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
           userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)

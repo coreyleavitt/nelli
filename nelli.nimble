@@ -988,5 +988,12 @@ task test, "Run the test suite":
             # merges with a bitvector through reconcileInt; an unchecked
             # sum that wraps decides (divRangeFacts' next window); walker
             # 178->179. Reads per-query step counts via its `.nim.cfg`.
-            "tsymex_rfc0005_s8aj_remainder"]:
+            "tsymex_rfc0005_s8aj_remainder",
+            # RFC-0005 S8ao -- S8aj's remainder: `add` on a dotted seq
+            # field (`o.s.add v`, nested `a.b.s.add v`, a ref object's
+            # `p.s.add v`) is modelled through the field path instead of
+            # declining (N49); `zeroValueForType` keeps declining for
+            # `itUninterp` -- proven the only sound answer, not widened;
+            # walker 179->181.
+            "tsymex_rfc0005_s8ao_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

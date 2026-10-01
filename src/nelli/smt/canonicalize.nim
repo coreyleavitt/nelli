@@ -184,7 +184,27 @@ const renderAsChoicesVersion* = "11"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
 
-const symexWalkerVersion* = "179"
+const symexWalkerVersion* = "181"
+  ## RFC-0005 S8ao (2026-10-01) — S8aj's remainder. `add` on a dotted SEQ
+  ## field (`o.s.add v`, a nested `a.b.s.add v`, a ref/ptr object's
+  ## `p.s.add v`) is modelled through the field path instead of declining
+  ## (N49 `feUnsupportedOp`): reuses the SAME field-write primitive the
+  ## plain assignment `<fieldPath> = v` already uses for the lvalue shape
+  ## (S8p's value-field rebuild, or the R6 ref-object field-deref-write),
+  ## applied after reading the field and appending (`mkSeqAdd`) —
+  ## `dottedSeqAddShape`/`dottedFieldAdd`, `dsl_parser.nim`. `del`/
+  ## `insert`/`incl`/`excl`/`[]=` on a dotted field are unchanged (still
+  ## decline; S8aj's remainder named `add` only). `zeroValueForType`
+  ## (`dsl_parser.nim`) keeps declining for `itUninterp`: every value that
+  ## reaches it is a sort the walker never gave a real Z3 representation
+  ## to in the first place (`__ownership:*`, `__closure`, or
+  ## `__unsupported:<X>` for an `X` whose real shape is unknown here), so
+  ## there is no sound zero to fabricate — a classified decline stays the
+  ## only sound answer; that half of this slice is comment-and-pin only
+  ## (the `add`-through-field-path half above is what earns the bump).
+  ## 179 -> 181 (180 is another slice's).
+  ##
+  ## (Prior: 179.)
   ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local
   ## array, object or seq (`var a: array[3, int]`, `var h: H` holding an
   ## array or a seq field, `var s: seq[int]`) takes Nim's `default(T)`

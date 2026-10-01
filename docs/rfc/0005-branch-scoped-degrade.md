@@ -289,7 +289,7 @@ state = "pending"
 [[slice]]
 id    = "S8ao"
 title = "S8aj's remainder: `add` on a dotted seq field (`o.s.add v`) is N49 feUnsupportedOp while `s.add v` on a local seq and `o.s = @[v]` are modelled -- model add through a field path; an uninterpreted type has no zero (`zeroValueForType` returns nil for itUninterp and the caller declines) -- give itUninterp a zero (a fresh constant of the sort, or a declared default), or prove the decline is the only sound answer and pin it"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S9"
@@ -5833,6 +5833,123 @@ list.)
   modelled (and pinned).
 - **An uninterpreted type has no zero.** `zeroValueForType` still returns
   nil for `itUninterp`, and the caller declines as before.
+**As landed (S8ao, walker 181) — S8aj's remainder.**
+
+*`add` on a dotted seq field is modelled through the field path.*
+`o.s.add v` was N49 `feUnsupportedOp` — the dotted-field lvalue receiver
+never matches the bare-symbol `#145 mutations` arm (`recvName` there is a
+genuine env-slot the rebind machinery can reassign; `obj.seqField` has no
+such slot), so it fell to the blanket dotted-field decline. `.add` is not a
+new mutation primitive: it is Nim/stdlib sugar for "read the field, append,
+write the field back," and the field-WRITE half of that already has a
+primitive for every lvalue shape `<fieldPath> = v` supports — S8p's
+value-field rebuild (`valueFieldWrite`) for a value tuple/object step, the
+R6 ref-object field-deref-write (`mkFieldDeref`/`mkFieldDerefWrite`) for a
+`ref`/`ptr` step. Two new procs, `dottedSeqAddShape` (pure eligibility,
+mirroring `valueFieldTy`'s own "parses nothing" contract) and
+`dottedFieldAdd` (the lowering), sit beside `valueFieldWrite` in
+`dsl_parser.nim` and do exactly that: read the field (which, for a value
+step, also forks any variant-arm discriminant check for free — the same
+reason `valueFieldChecked` exists for plain assignment), `mkSeqAdd` the new
+element on, and write the result back through the SAME primitive assignment
+uses. The N49 dispatch site now gates `calleeName == "add"` and
+`classifyType(fieldNode).ty.kind == itSeq` and `dottedSeqAddShape(fieldNode)`
+before routing there; everything else (`del`/`insert`/`incl`/`excl`/`[]=` on
+a dotted field, and `add` on a dotted STRING field) keeps the original
+blanket decline unchanged — this slice named `add` on a seq field only.
+
+A base `o.s.add v` and a nested `a.b.s.add v` both take the value-field arm
+(the recursion is `valueFieldWrite`'s own, one level per step, unchanged by
+this slice). RED at the base: both were N49 `feUnsupportedOp`. GREEN: both
+are `sxSat` with the appended value in the witness, and the untouched-field
+twin is `sxUnsat`; two `.add` calls in sequence read the freshly-rebuilt
+field (not the proc-entry value), proving the rebuild is live, not cached.
+`del`/`insert`/… on a dotted field, and `add` on a dotted string field, are
+pinned unchanged (still N49).
+
+*A ref/ptr object's field add reuses the real primitive — and inherits its
+real gap.* `p.s.add v` for a `ref object` field now routes through
+`mkFieldDeref`/`mkFieldDerefWrite`, the SAME primitive `p.s = v` already
+uses. Probing surfaced that a ref-object field of a COMPOUND sort (`seq`)
+has no field-split heap representation yet at all — `p.s = @[...]` alone,
+with NO `.add` involved, already raises `seUnsupportedCompoundSortLeaf`
+("no single-leaf Z3 sort representation") from the heap-sort derivation
+itself, independent of this slice (the engine's own message names it R3+
+territory: "composite pointees — ref object / seq[ref T] — land R3+").
+Before S8ao, `p.s.add v` hit N49's narrower, EARLIER `feUnsupportedOp`
+first, which happened to hide this deeper, pre-existing gap. This slice's
+own pin proves the routing is real without claiming to have closed that
+gap: `p.s.add v` now fails the SAME way `p.s = @[...]` already does (shares
+the real primitive, not a parallel one), rather than being blocked by its
+own N49-specific catch-all.
+
+*`zeroValueForType` keeps declining for `itUninterp` — proven, not widened.*
+`classifyType` (`dsl_typebridge.nim`) builds `itUninterp` for exactly three
+placeholder prefixes, and none has a zero `zeroValueForType` can fabricate
+soundly:
+- `__ownership:*` (`owned T` / `Atomic[T]`, ADR-0010 Breadth-LOW-L4):
+  deliberately out of scope for the ref cluster — no Z3 sort was ever
+  allocated for these, so there is no sort to build a zero constant of.
+- `__closure` (a proc-typed local with no initializer, e.g.
+  `var f: proc(x: int): int`): Nim's real zero is a nil closure, but
+  `svClosure` carries a SITE KEY into real lambda-body IR
+  (`runtime_closures.nim`) — there is no "nil closure" sentinel today that a
+  later `f(...)` call could degrade through soundly; minting one is a new
+  `SymVal` shape (plus every call/compare site that would need to recognise
+  it), out of proportion for one caller's zero-init.
+- `__unsupported:<X>` (`classifyType`'s catch-all for a type name no
+  structural arm recognises): `X` names some real Nim type the classifier
+  never identified, so its actual shape — and therefore its actual zero —
+  is unknown at this call site. Fabricating a zero for an unidentified shape
+  is exactly the "launder a gap into a sound-looking value" move §3.1 rules
+  out.
+`allocateSym`'s own `itUninterp` arm already classifies these three
+precisely the instant a value of one is ALLOCATED
+(`heUnsupportedOwnership`/`feUnsupportedParamType`/`ceUnsupportedHof`).
+`zeroValueForType` declining first, at the uninitialized-`var` statement
+(its one caller whose decline is directly observable — every other caller
+already SND-1-taints before its dummy is ever read, per S8aj's own audit),
+is a classified halt one step earlier for the same reason, never a crash,
+never a guess. Pinned for all three prefixes, reached through an
+uninitialized local var of each shape: `sxUnknown`, `feUnsupportedStmtKind`,
+"zero-init not modeled this cycle," never `weInternalWalkerFault`.
+
+Pins: `tests/tsymex_rfc0005_s8ao_remainder.nim`.
+- (1) A base and a nested dotted seq-field `.add`: `sxSat` with the appended
+  value witnessed, the untouched-field twin `sxUnsat`, no
+  `weInternalWalkerFault`. Two sequential `.add`s read the live field.
+  `del`/`insert`/… and a dotted STRING field's `add` are unchanged (N49).
+  A ref object's seq field: `.add` no longer hits N49 specifically (shares
+  fate with plain assignment's own pre-existing `seUnsupportedCompoundSortLeaf`).
+- (2) All three `itUninterp` prefixes, reached via an uninitialized local:
+  `sxUnknown`/`feUnsupportedStmtKind`, never `weInternalWalkerFault`.
+- The `>= 181` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **A ref-object field of a compound sort (`seq`) has no field-split heap
+  representation.** `p.s = @[...]` alone (no `.add`) already raises
+  `seUnsupportedCompoundSortLeaf` — pre-existing, independent of this
+  slice, and explicitly out of scope per the engine's own message (R3+
+  territory, composite pointees). `.add` through such a field now shares
+  that fate instead of being blocked earlier by its own N49 catch-all, but
+  building real compound-sort field-split heap storage is not done here.
+- **`del`/`insert`/`incl`/`excl`/`[]=` on a dotted field are still N49
+  `feUnsupportedOp`.** This slice named `add` only; a genuine value-typed
+  field-write rebind for the others is the same "out of proportion for
+  this fix" argument N49's original comment made for the whole group.
+- **`add` on a dotted STRING field is still N49 `feUnsupportedOp`.** The
+  scope was the seq case; a dotted string field's `.add` would need the
+  SAME field-path routing applied to `iekStrConcat` instead of
+  `mkSeqAdd`, not attempted here.
+- **`itUninterp`'s three placeholder prefixes stay undifferentiated at the
+  uninitialized-`var` decline site.** `zeroValueForType`'s `nil` return
+  collapses all three into one generic `feUnsupportedStmtKind` "unmodeled
+  type itUninterp" message at that ONE call site, where `allocateSym`'s own
+  `itUninterp` arm already gives each prefix its own precise kind
+  (`heUnsupportedOwnership`/`feUnsupportedParamType`/`ceUnsupportedHof`).
+  Sharpening the uninitialized-`var` site's diagnostic to match was not
+  requested and is not done here — it is a diagnostics-precision
+  improvement, not a verdict change.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

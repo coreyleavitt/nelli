@@ -897,7 +897,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8aj (local arrays, objects and seqs are zero-initialised;
     ## an Int and a bitvector merge through reconcileInt; the next window
     ## of the Int div/mod pair). 178->179.
-    check symexWalkerVersion == "179"
+    ## RFC-0005 S8ao (`add` on a dotted seq field is modelled through the
+    ## field path; `itUninterp`'s zero decline is proven, not widened).
+    ## 179->181 (180 is another slice's).
+    check symexWalkerVersion == "181"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

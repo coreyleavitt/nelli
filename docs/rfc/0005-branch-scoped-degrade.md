@@ -4778,7 +4778,7 @@ Pins: `tests/tsymex_rfc0005_s8ac_remainder.nim`, with a `.nim.cfg` that sets
   argument (same root, or a type that can reach the cell). A callee that
   reaches the location through a global is not in the symex fragment.
 
-**As landed (S8ag, walker 182) — S8y's remainder: the one-character
+**As landed (S8ag, walker 183) — S8y's remainder: the one-character
 `str.indexof` split.** Two changes. (1) `iekStrFind` with a needle that
 folds to a one-character literal lowers to a fresh Int with split axioms
 in place of Z3's `str.indexof`. That covers the three closed forms of the
@@ -4786,7 +4786,7 @@ scan idiom: Q1's `tryRecognizeScanIdiom`, B3's `tryRecognizeScanPairIdiom`
 and B4's `tryRecognizeAccumulatingScan`. All three emit `iekStrFind`, and
 `lowerStrArm` is its only lowering. A caller's own `s.find(':')` takes
 the same path. (2) A tainted target hit that finds a model only after
-half its budget comes under S8y's scoped decline. Walker 179 -> 182.
+half its budget comes under S8y's scoped decline. Walker 182 -> 183.
 
 *1. The split.* `lowerIndexSplit` returns a fresh Int `ix` and fresh
 strings `pre`, `x` and `post`. The needle is `c`, the start `i`. Every
@@ -4966,7 +4966,7 @@ moves are these, and every one is intended:
     SAT, which is Z3 5.1's case: 0 out, 1 slow, 3 declined. Z3 4.13.4's
     case is 1 out and 5 declined. The result is `sxUnknown`, and each
     decline is a classified `beSolverUndef`.
-  - The `>= 182` floor.
+  - The `>= 183` floor.
   - At 2f576ee the file does not compile (`IndexSplit`).
 - N36-1, N36-1-noblock and s1c's N36 test now pin `budgetOut == 0` (it was
   1 at 2f576ee, so these are RED there), `slowSat <= 1`, and `units < 40M`.

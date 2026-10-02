@@ -340,5 +340,5 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
     check r.status != sxUnsat
 
 suite "S8ag: walker version floor":
-  test "symexWalkerVersion >= 182":
-    check parseInt(symexWalkerVersion) >= 182
+  test "symexWalkerVersion >= 183":
+    check parseInt(symexWalkerVersion) >= 183

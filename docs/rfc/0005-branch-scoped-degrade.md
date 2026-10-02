@@ -347,6 +347,11 @@ title = "S8as's remainder: fact-keyed call cache; adaptive if-arm feasibility ou
 state = "done"
 
 [[slice]]
+id = "S8be"
+title = "S8ax's remainder: opaque-body implicit Defects, foreign divergence on replay, {.global.} in procs, opaque raise subtypes, int(high(int32)) widening, recursive-frame overflow cost, lazy-read check placement, guard-condition clash reliance, returned closure tuples, opaque closure capture havoc, cache with capture cells, element-alias pointers as values, variant address cells"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

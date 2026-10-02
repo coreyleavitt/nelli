@@ -28,7 +28,7 @@ dep "z3" {
         url (url)"https://github.com/coreyleavitt/nim-z3"
         ref "main"
     }
-    identity "dag-sha256:9b181a87f2e32d24dd2f52b64f712f2f088a5bfa3e153a5c7b00ed59c3dac750"
+    identity "dag-sha256:3864c15d5f137bafb026a24f6432258b9f0c47c16aca7aa3e4d11a9848dc148e"
     version "0.0.0"
     src_dir "src"
     requires "softlink"
@@ -37,6 +37,6 @@ dep "z3" {
         kind "git"
         url "https://github.com/coreyleavitt/nim-z3.git"
         ref "main"
-        commit_sha "d3ae85891e536219cba7374b41f5377aa4fc543a"
+        commit_sha "ae509f0eea606bd085064ce1f1ab107c2cdd5806"
     }
 }

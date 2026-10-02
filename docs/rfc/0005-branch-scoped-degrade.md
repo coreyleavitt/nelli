@@ -7169,6 +7169,22 @@ against Nim 2.2.10.
   later operand's call that writes it, and a constructor element Nim stores
   before the call was read after it. Ten shapes gave a false `sxSat`,
   nothing recorded.
+- **An Int-sorted heap cell held any integer.** Found by the Windows legs
+  through S8aa's heap-join pin, after the slice first landed (pinned RED on
+  c6b69c1). Nothing bounded an input cell of an Int-sorted `int` heap by
+  its type: an `int8` field's `int(b.x) > 127` was a false `sxSat` (its
+  witness, `x: 128`, then crashed the typed result with a RangeDefect),
+  and `b.n + 1`'s overflow raise was SAT with `b.n` below `low(int)`, whose
+  witness extraction raised out of the walk and ended it with nothing
+  recorded: a false `sxUnsat` on a target after a heap write in a branch on
+  a seq element. Base has the second wherever its int heap was already
+  Int-sorted; item 4 widened both to every non-exact run and to narrow and
+  ranged cells. Each read of an Int-sorted heap now bounds the heap
+  constants it reads through (the input heap or an opaque call's havoc
+  constant, under any `store` and `ite`) at that address by the cell's
+  type (`intCellRangeFacts`, run-wide like `globalEntryFacts`: true of
+  every real heap at every address), and an Int witness that is not an
+  `int64` numeral records `feExtractionFailed` instead of raising.
 
 *(1) The call cache is keyed by the actuals and the facts.* A bucket per
 argument-shape hash holds every summary; a hit compares the actuals term by
@@ -7265,7 +7281,18 @@ it takes each address and fields of two arms never both live.
 Updated pins: S8an's `sutRecDeep` decides by default (witness 4) and the
 escape case `aesc` is `sxSat` (witness 2); S8as's `rb` (re-point under a
 branch) is `sxSat`; configdefaults' `boundedRecursionSut` via the default is
-`sxSat`; S7's call-cache audit reads `walkStmt`.
+`sxSat`; S7's call-cache audit reads `walkStmt`. Item 5 summarises what #163
+declined: `tsymex_163rev_inert_exclusions`' object, tuple, seq, ptr, pointer
+and cstring arguments and its R14d placement, `tsymex_163_opaque_transparent`'s
+var-param and ref-arg callees, and `tsymex_rectify_effects`' var-argument
+#137 pin (either replay outcome: the model the Z3 build picks decides it)
+now decide or replay, naming the havoc; the ptr, pointer and cstring
+cases stay `sxUnknown` only for their `nil` literal argument's own CR-2a
+decline. Item 8: R11.2 and R11.3 (`addr x`,
+`unsafeAddr x`) are `sxSat`, no `heUnsafeCast`; S6b's unsafe-cast halt pin
+reaches it through a seq element's pointer used as a value. The A2a
+chokepoint audit counts one `parseOperandPair` line as its family's two
+sites, and the S8ab let-alias guard's three new hazards are fixed.
 
 Pins: `tests/tsymex_rfc0005_s8ax_remainder.nim`, every expectation probed
 against Nim 2.2.10, floor `>= 197`.

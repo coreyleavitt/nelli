@@ -933,7 +933,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## array-of-seq merges, distinct-over-composite, in-place element and
     ## Table-value mutation, KeyError, float keys, container Table values).
     ## 191->193 (provisional).
-    check symexWalkerVersion == "193"
+    ## RFC-0005 S8bc (S8at's remainder: getOrDefault, borrow routines,
+    ## leaf-split seq elements, array-element insert, newSeq, Table
+    ## iteration, mgetOrPut, inlined-iterator parameter conversions,
+    ## seq[char] / seq[enum] witnesses). 193->203 (provisional; batch 2
+    ## takes 202).
+    check symexWalkerVersion == "203"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

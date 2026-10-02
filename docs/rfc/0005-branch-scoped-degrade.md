@@ -342,6 +342,11 @@ title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.
 state = "pending"
 
 [[slice]]
+id = "S8bc"
+title = "S8at's remainder: getOrDefault, borrow routines, leaf-split seq elements, array-element insert, newSeq, Table iteration, mgetOrPut, inlined-iterator param conversions, seq[char]/seq[enum] witness spelling"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

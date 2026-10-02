@@ -202,7 +202,11 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "193"
+const symexWalkerVersion* = "203"
+  ## RFC-0005 S8bc (2026-10-02) — S8at's remainder; provisional number (batch
+  ## 2 takes 202; the channel assigns the final one at merge).
+  ## S8BC-DOC-PENDING. 193->203.
+  ##
   ## RFC-0005 S8at (2026-10-02) — S8ar's remainder; provisional number (the
   ## channel assigns the final one at merge). An anonymous-tuple pointee's
   ## `new` zeroes it (a false sxSat); a by-value case-object field is a

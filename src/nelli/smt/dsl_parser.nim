@@ -3672,6 +3672,45 @@ proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                    $maxModelledInitialSize))])
   zeroValueForType(cls.ty)
 
+proc parseGetOrDefault(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                       ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc. The stdlib's `getOrDefault(t, key)` /
+  ## `getOrDefault(t, key, default)` on a modelled `Table`: the value at
+  ## `key` when the table has it, else `default` (or `default(V)`, the
+  ## value an uninitialised `var v: V` gets). `nil` for any other call, and
+  ## for a value type with no zero (it then walks the stdlib body, as
+  ## before). Lowered as
+  ##
+  ##   if contains(t, key): let r = t[key]   (`isIndex`: never raises here)
+  ##   else:                let r = default
+  ##
+  ## Nim evaluates `t`, `key` and `default` before the lookup, so the key
+  ## and the default are bound first (`parseAtomicOperand`). Presence is
+  ## `contains`, i.e. `hasKey`, which is exactly the stdlib's own
+  ## `rawGet(...) >= 0` test: a NaN float key is never present, so its
+  ## lookup is the default (`tabKeyNaN`, S8at). The stdlib body was walked
+  ## before; its `hashes.Hash` locals classify as no modelled type, so every
+  ## call declined, and under `and` it was a walker fault.
+  if calleeSym.kind != nnkSym or calleeSym.strVal != "getOrDefault" or
+     not isStdlibDecl(calleeSym) or n.len notin [3, 4]:
+    return nil
+  let recvCls = classifyType(n[1])
+  if recvCls.ty.kind != itTable: return nil
+  let valTy = recvCls.ty.tabValTy
+  let zero = if n.len == 3: zeroValueForType(valTy) else: nil
+  if n.len == 3 and zero == nil: return nil
+  let recvIR = liftIndexContainer(parseExpr(n[1], preamble, ctx),
+                                  recvCls.ty, preamble, ctx)
+  let keyIR = parseAtomicOperand(n[2], preamble, ctx)
+  let defIR = if n.len == 4: parseAtomicOperand(n[3], preamble, ctx)
+              else: zero
+  let synth = freshSynth(ctx, "tgod")
+  preamble.add mkIf(
+    @[mkBranch(mkContains(recvIR, keyIR),
+               mkIndexStmt(synth, recvIR, keyIR, valTy))],
+    mkLet(synth, valTy, defIR))
+  mkVar(synth)
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -5712,6 +5751,13 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let synth = freshSynth(ctx, "pop")
           preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n))
           return mkVar(synth)
+    # RFC-0005 S8bc: `getOrDefault(t, k[, d])` on a Table is the present
+    # value, else `d` (or `default(V)`). It walked the stdlib body before,
+    # whose `hashes.Hash` locals the model does not classify (a decline, and
+    # a walker fault under `and`).
+    block:
+      let godIR = parseGetOrDefault(n, calleeSym, preamble, ctx)
+      if godIR != nil: return godIR
     # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
     # on receiver kind for select-from-tabData semantics).
     if calleeSym.strVal == "[]" and n.len == 3:

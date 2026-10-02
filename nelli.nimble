@@ -1057,5 +1057,11 @@ task test, "Run the test suite":
             # seqs, by-value case-object fields, distinct over a composite
             # base, Table float keys and container values, KeyError,
             # 2^32-cell key domains; walker 191->193 (provisional).
-            "tsymex_rfc0005_s8at_remainder"]:
+            "tsymex_rfc0005_s8at_remainder",
+            # RFC-0005 S8bc -- S8at's remainder: getOrDefault, borrow
+            # routines, leaf-split seq elements, array-element insert,
+            # newSeq, Table iteration, mgetOrPut, inlined-iterator
+            # parameter conversions, seq[char] / seq[enum] witnesses;
+            # walker 193->203 (provisional).
+            "tsymex_rfc0005_s8bc_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

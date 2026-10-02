@@ -6115,6 +6115,24 @@ proc refMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
       " operand the model did not resolve to an address (heUnresolvedRef)",
     "__refMixedCmpDegrade")
 
+proc mixedBitwiseDecline(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0005 S8bc. An `and`/`or`/`xor` with a bool on ONE side only. Nim
+  ## types both operands alike (both `bool`, or both one integer type), so
+  ## one side lowered to a bool only because something upstream already
+  ## declined it: a value of a type the model does not classify (a plain
+  ## alias such as `hashes.Hash = int`) is `allocDegrade`'s tainted bool
+  ## placeholder. The arm asserted `r.kind == svBool` and aborted the run as
+  ## `weInternalWalkerFault` (`hc and maxHash(t)` inside the stdlib
+  ## `getOrDefault`'s walked body). Record the unresolved operand and hand
+  ## back a fresh value of the integer side's type: the path is tainted,
+  ## never a verdict.
+  let intSide = if a.kind == svBool: b else: a
+  degradeAlloc(tyOf(intSide), feUnsupportedOp,
+    "`" & $op & "` of a bool and a " & plainEnglishSymValKind(intSide.kind) &
+    " operand: one side is a value the model did not resolve to its " &
+    "declared type (feUnsupportedOp)",
+    "__mixedBitwiseDegrade")
+
 # ---- Lowering ---------------------------------------------------------------
 
 proc reconcileFloat*(a, b: SymVal): (SymVal, SymVal) =
@@ -8058,8 +8076,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let pp = probeProto(env, e)
       let l = lower(env, e.lhs, pp)
       let r = lower(env, e.rhs, pp)
+      if (l.kind == svBool) != (r.kind == svBool):
+        return mixedBitwiseDecline(l, r, e.bop)   ## RFC-0005 S8bc
       if l.kind == svBool:
-        doAssert r.kind == svBool
         case e.bop
         of bAnd: ofBool(l.bo and r.bo)
         of bOr:  ofBool(l.bo or  r.bo)

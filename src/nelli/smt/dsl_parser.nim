@@ -3623,6 +3623,55 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
+const maxModelledInitialSize = 1'i64 shl 20
+  ## RFC-0005 S8at. The largest `initialSize` an `initTable`/`initHashSet`
+  ## call is modelled at (see `parseInitContainer`).
+
+proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8at. `initTable[K, V](initialSize)` / `initHashSet[T](...)`
+  ## of the stdlib, when the result classifies as a modelled `Table` /
+  ## `HashSet`: the empty container (`zeroValueForType`, the value an
+  ## uninitialised `var t: Table[K, V]` already gets); `nil` for any other
+  ## call. The call was walked as a generic user callee, whose return type
+  ## names generics no argument binds, and `classifyType` aborted macro
+  ## expansion on it ("node has no type"): a crash on valid user code.
+  ##
+  ## The size only sizes the backing store, except that Nim converts it to
+  ## `Natural` (`slotsNeeded(count: Natural)`), so a negative size raises
+  ## `RangeDefect` -- forked here. A size above `maxModelledInitialSize`
+  ## overflows the slot arithmetic (`count div 2 + count + 4`, an
+  ## `OverflowDefect`) or exhausts memory allocating the store, depending on
+  ## its value and the host: that path is declined, scoped to it.
+  if calleeSym.kind != nnkSym or
+     calleeSym.strVal notin ["initTable", "initHashSet"] or
+     not isStdlibDecl(calleeSym) or n.len > 2:
+    return nil
+  let cls = classifyType(n)
+  if cls.ty.kind notin {itTable, itSet}: return nil
+  if n.len == 2:
+    var lit = n[1]
+    while lit.kind in {nnkHiddenStdConv, nnkConv} and lit.len >= 1:
+      lit = lit[lit.len - 1]
+    let literalOk = lit.kind in nnkCharLit..nnkUInt64Lit and
+      lit.intVal >= 0 and lit.intVal <= maxModelledInitialSize
+    if not literalOk:
+      let sizeIR = parseExpr(n[1], preamble, ctx)
+      let name = calleeSym.strVal
+      preamble.add mkIf(@[
+        mkBranch(mkBinop(bLt, sizeIR, mkIntLit(0)),
+                 mkRaise("RangeDefect", nil)),
+        mkBranch(mkBinop(bGt, sizeIR, mkIntLit(maxModelledInitialSize)),
+                 ctx.declineAtSite(feUnsupportedOp,
+                   "`" & name & "` with an initial size above " &
+                   $maxModelledInitialSize & " is not modelled: the slot " &
+                   "count overflows (OverflowDefect) or the store's " &
+                   "allocation exhausts memory, depending on the value " &
+                   "and the host -- path degraded to sxUnknown",
+                   name & ": initial size above " &
+                   $maxModelledInitialSize))])
+  zeroValueForType(cls.ty)
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -5072,6 +5121,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let arrTy = classifyType(n[1]).ty
       return mkIntLit(if calleeSym.strVal == "low": arrTy.lo
                        else: arrTy.lo + int64(arrTy.size) - 1)
+    # RFC-0005 S8at: `zeroDefault(T)` -- what the compiler fills an omitted
+    # field of an object constructor with (Nim 2, e.g. the injected
+    # `bv: BV(kind: 0, a: zeroDefault(int))` of `BVH(n: n)`) -- and
+    # `default(T)`: T's zero (`zeroValueForType`). Its `nnkType` argument
+    # fell to the catch-all (`feUnsupportedExprKind`), so every constructor
+    # omitting a case-object field declined. A type with no IR zero keeps
+    # the fall-through.
+    if calleeSym.strVal in ["zeroDefault", "default"] and n.len == 2 and
+       n.typeKind != ntyNone and isStdlibDecl(calleeSym):
+      let z = zeroValueForType(classifyType(n).ty)
+      if z != nil: return z
     if calleeSym.strVal in ["low", "high"] and n.len == 2 and not isStringHigh:
       let tyName = typeNodeName(n[1])
       if tyName in intTyNames:
@@ -5553,6 +5613,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           # `irKind` branches too, though they never read it — their result
           # kind is already implied by `e.kind` alone) closes the gap.
           return mkStrOp(irKind, calleeSym.strVal, sArgs, retTy = classifyType(n).ty)
+    # RFC-0005 S8at: the stdlib's `initTable` / `initHashSet`.
+    block:
+      let initIR = parseInitContainer(n, calleeSym, preamble, ctx)
+      if initIR != nil: return initIR
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).
@@ -9455,6 +9519,29 @@ proc heapFieldRoot(n: NimNode; operand: var NimNode;
     return true
   false
 
+proc wholeDerefRoot(n: NimNode; operand: var NimNode): bool =
+  ## RFC-0005 S8at. True iff `n` is `p[]` of a ref / ptr whose pointee is
+  ## held whole -- an anonymous tuple or an array (`wholeObjectPointee` is
+  ## false: no field names to split it by) -- so a value chain rooted there
+  ## (`p[0] = v`, `p[].a[1] = v`) is written back with one whole-pointee
+  ## `isDerefWrite`, the cell `p[]` reads. `operand` is the ref/ptr
+  ## expression. It was the "unsupported nnkAsgn shape" decline.
+  if n.kind notin {nnkHiddenDeref, nnkDerefExpr} or n.len < 1: return false
+  var op = n[0]
+  if op.kind == nnkHiddenDeref and op.len == 1 and
+     classifyType(op[0]).ty.kind in {itRef, itPtr}:
+    op = op[0]
+  if op.typeKind == ntyNone: return false
+  let opTy = classifyType(op).ty
+  if opTy.kind notin {itRef, itPtr}: return false
+  let pointee = if opTy.kind == itPtr: opTy.ptrPointeeTy else: opTy.refPointeeTy
+  if pointee == nil or pointee.kind notin {itTuple, itArray} or
+     wholeObjectPointee(pointee) or
+     (pointee.kind == itTuple and pointee.isPlaceholder):
+    return false
+  operand = op
+  true
+
 type FieldStep = object
   ## RFC-0005 S8s. One step of a value field chain: `recv.name` or a
   ## positional `recv[ix]` on a tuple, or `recv.name` on a variant.
@@ -9501,10 +9588,19 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   var t = unwrapHidden(lhs)
   if t.kind == nnkCheckedFieldExpr and t.len >= 1: t = t[0]
   if t.len != 2: return false
-  let recv = unwrapHidden(t[0])
-  if recv.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr}:
+  var derefOp: NimNode
+  # RFC-0005 S8at: `p[]` of a whole-held pointee is a chain root itself
+  # (`wholeDerefRoot`); `unwrapHidden` would strip the deref.
+  let recv = if wholeDerefRoot(t[0], derefOp): t[0] else: unwrapHidden(t[0])
+  if recv.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr,
+                      nnkHiddenDeref, nnkDerefExpr}:   ## RFC-0005 S8at
     return false
-  let recvTy = classifyType(recv).ty
+  var recvTy: IRType
+  if recv.kind in {nnkHiddenDeref, nnkDerefExpr}:
+    let o = classifyType(derefOp).ty
+    recvTy = if o.kind == itPtr: o.ptrPointeeTy else: o.refPointeeTy
+  else:
+    recvTy = classifyType(recv).ty
   if recvTy == nil: return false
   step = FieldStep(recv: recv, recvTy: recvTy, ix: -1)
   if t.kind == nnkBracketExpr and recvTy.kind == itArray:
@@ -9599,7 +9695,8 @@ proc valueFieldTy(lhs: NimNode): IRType =
   var operand: NimNode
   var fieldName: string
   if step.recv.kind != nnkSym and valueFieldTy(step.recv) == nil and
-     not heapFieldRoot(step.recv, operand, fieldName):   ## RFC-0005 S8ar
+     not heapFieldRoot(step.recv, operand, fieldName) and   ## RFC-0005 S8ar
+     not wholeDerefRoot(step.recv, operand):                ## RFC-0005 S8at
     return nil
   step.fieldTy
 
@@ -9664,6 +9761,14 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   var fieldName: string
   if step.recv.kind == nnkSym:
     ValueFieldWrite(root: step.recv.strVal, value: rebuilt)
+  elif wholeDerefRoot(step.recv, operand):
+    # RFC-0005 S8at: the chain's root is `p[]` of a whole-held pointee; the
+    # rebuilt value is stored whole, as `p[] = v`.
+    let opTy = classifyType(operand).ty
+    let isPtr = opTy.kind == itPtr
+    let pointeeTy = if isPtr: opTy.ptrPointeeTy else: opTy.refPointeeTy
+    let ptrIR = parseExpr(operand, preamble, ctx)
+    ValueFieldWrite(heap: mkDerefWrite(ptrIR, rebuilt, pointeeTy, isPtr))
   elif valueFieldTy(step.recv) == nil and
        heapFieldRoot(step.recv, operand, fieldName):
     # RFC-0005 S8ar: the chain's root is a ref/ptr object's field; the
@@ -9676,6 +9781,49 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
                                             pointeeTy, fieldName, isPtr))
   else:
     valueFieldWrite(step.recv, rebuilt, preamble, ctx)
+
+proc discReassignStmt(recvName: string; ty: IRType; discName: string;
+                      rhsNode: NimNode; preamble: var seq[IRStmt];
+                      ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8at. `recvName.<discName> = rhs` on the variant or
+  ## multi-variant variable `recvName` -- the Phase 11 / A4 statements the
+  ## bare-variable arm of `parseAsgn` builds (a static tag, a symbolic one,
+  ## a multi-variant axis), factored for a field chain's copy.
+  let rhs = unwrapHidden(rhsNode)
+  let tagIR = parseExpr(rhs, preamble, ctx)
+  if ty.kind == itVariant:
+    if tagIR.kind == iekIntLit:
+      var tagName = if rhs.kind == nnkSym: rhs.strVal else: ""
+      for arm in ty.vArms:
+        if arm.tagOrdinal == int(tagIR.ival):
+          tagName = arm.tagName; break
+      return mkVariantReassign(recvName, int(tagIR.ival), tagName,
+                               branchGroups(ty.vArms))
+    return mkVariantReassignSymbolic(recvName, "", tagIR, branchGroups(ty.vArms))
+  for ax in ty.mvAxes:
+    if ax.discName == discName:
+      return mkVariantReassignSymbolic(recvName, ax.discName, tagIR,
+                                       branchGroups(ax.arms))
+  ctx.declineMarker(feUnsupportedStmtKind,
+    "RFC-0005 S8at: discriminator `" & discName & "` names no axis of `" &
+    $ty & "`")
+
+proc writeBackField(recv: NimNode; newVal: IRExpr; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8at. `recv = newVal` for a field chain `valueFieldTy` or
+  ## `heapFieldRoot` accepts: the value chain's rebuilt root assignment, or
+  ## the field-deref write of a ref / ptr object's field.
+  if valueFieldTy(recv) != nil:
+    return valueFieldWrite(recv, newVal, preamble, ctx).toStmt
+  var operand: NimNode
+  var fieldName: string
+  discard heapFieldRoot(recv, operand, fieldName)
+  let opTy = classifyType(operand).ty
+  let isPtr = opTy.kind == itPtr
+  let pointeeTy = if isPtr: opTy.ptrPointeeTy else: opTy.refPointeeTy
+  let ptrIR = parseExpr(operand, preamble, ctx)
+  mkFieldDerefWrite(ptrIR, newVal, classifyType(recv).ty, pointeeTy,
+                    fieldName, isPtr)
 
 proc dottedFieldShape(fieldNode: NimNode): bool =
   ## RFC-0005 S8ao (S8aj's remainder), generalised by S8ap from `add` to
@@ -10053,8 +10201,30 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
   if lhs.kind == nnkDotExpr and lhs.len == 2 and rhsOverride == nil:
     let recv = unwrapHidden(lhs[0])
     let fieldNode = lhs[1]
-    if recv.kind == nnkSym and fieldNode.kind in {nnkIdent, nnkSym}:
+    # RFC-0005 S8at: the receiver may be a field chain (`o.v.kind = k`, a
+    # ref object's by-value case object `p.bv.kind = k`): the reassignment
+    # runs on a copy of the field, which is then written back
+    # (`writeBackField`), as any value-field write is. It was the
+    # "unsupported nnkAsgn shape" decline.
+    var chainOp: NimNode
+    var chainField: string
+    let chainRecv = recv.kind != nnkSym and fieldNode.kind in {nnkIdent, nnkSym} and
+      classifyType(recv).ty.kind in {itVariant, itMultiVariant} and
+      (valueFieldTy(recv) != nil or heapFieldRoot(recv, chainOp, chainField))
+    if (recv.kind == nnkSym or chainRecv) and fieldNode.kind in {nnkIdent, nnkSym}:
       let recvCls = classifyType(recv)
+      if chainRecv:
+        var isDiscName = recvCls.ty.kind == itVariant and
+                         fieldNode.strVal == recvCls.ty.vDiscName
+        if recvCls.ty.kind == itMultiVariant:
+          for ax in recvCls.ty.mvAxes:
+            if ax.discName == fieldNode.strVal: isDiscName = true
+        if isDiscName:
+          let tmp = freshSynth(ctx, "dr")
+          preamble.add mkLet(tmp, recvCls.ty, parseExpr(recv, preamble, ctx))
+          preamble.add discReassignStmt(tmp, recvCls.ty, fieldNode.strVal, n[1],
+                                        preamble, ctx)
+          return writeBackField(recv, mkVar(tmp), preamble, ctx)
       # Phase 11 + Phase 14 A4. Three cases:
       #   1. itVariant disc reassign with a static enum-constant RHS
       #      → mkVariantReassign (Phase 11 cycle 6 path).
@@ -11634,6 +11804,22 @@ proc gatherTypeSubst(callSite: NimNode, impl: NimNode): Table[string, NimNode] =
             if v != nil:
               result[sname] = v
       inc argIx
+  # RFC-0005 S8at: a generic name no argument binds -- one only the RETURN
+  # type mentions (`proc mk[T](): seq[T]`, the stdlib's `initTable[A, B]()`)
+  # -- is bound from the call's own instantiated type, matched structurally
+  # against the formal return type. Unbound, the return formal stayed
+  # generic, no instance type was handed to `parseCalleeImpl` (`typeSubst`
+  # was empty), and `classifyType` aborted macro expansion on the untyped
+  # formal ("node has no type").
+  proc bindFromReturn(f, a: NimNode; acc: var Table[string, NimNode]) =
+    if f.kind in {nnkIdent, nnkSym} and f.strVal in genericNames:
+      if f.strVal notin acc: acc[f.strVal] = a
+    elif f.kind == nnkBracketExpr and a.kind == nnkBracketExpr and
+         f.len == a.len:
+      for i in 1 ..< f.len: bindFromReturn(f[i], a[i], acc)
+  if formal.len > 0 and formal[0].kind != nnkEmpty and
+     callSite.typeKind notin {ntyNone, ntyVoid}:
+    bindFromReturn(unwrapGenericTy(formal[0]), callSite.getTypeInst, result)
 
 proc bodyHashPart(calleeSym, impl: NimNode): string =
   ## Module-disambiguating stable identity for a proc body (ADR-0008 D2).
@@ -11925,8 +12111,13 @@ proc typedFormal(mono, inst: NimNode): NimNode =
   ## `var seq[T]`. The instance's own typed formal is that type as
   ## instantiated, so it is classified instead -- its real model, or the
   ## recorded decline its shape already gets.
+  ##
+  ## RFC-0005 S8at: an EMPTY formal type -- a parameter declared by its
+  ## default alone, `newSeq[T](len = 0.Natural)` -- is the instance's typed
+  ## formal too. It was classified empty (the same "node has no type" abort)
+  ## once a generic bound only by its return type reached here.
   if inst != nil and inst.kind != nnkEmpty and
-     mono.kind notin {nnkSym, nnkIdent, nnkEmpty}:
+     mono.kind notin {nnkSym, nnkIdent}:
     inst
   else:
     mono
@@ -12017,8 +12208,13 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   for i in 1 ..< formal.len:
     let id = formal[i]
     id.expectKind nnkIdentDefs
-    let tyNode = typedFormal(id[id.len - 2],
+    var tyNode = typedFormal(id[id.len - 2],
       if flatIx < inst.params.len: inst.params[flatIx] else: nil)
+    # RFC-0005 S8at: a parameter declared by its default alone, with no
+    # instance formal to read (a non-generic callee): its default's type.
+    if tyNode.kind == nnkEmpty and id[id.len - 1].kind != nnkEmpty and
+       id[id.len - 1].typeKind != ntyNone:
+      tyNode = id[id.len - 1].getTypeInst
     let cls = classifyType(tyNode)
     let isVar = tyNode.kind == nnkVarTy
     flatIx += id.len - 2

@@ -261,7 +261,9 @@ proc heapTreeTy(ty: IRType): bool =
   ## RFC-0005 S8ar. A by-value aggregate held as the leaves of its parts: a
   ## tuple or object (`itTuple`), an array, a `distinct` (its base's
   ## leaves; a distinct value IS its base value, every read ejects).
-  heapCompoundTy(ty) and ty.kind in {itTuple, itArray, itDistinct}
+  ## RFC-0005 S8at: a by-value case object (`heapParts`).
+  heapCompoundTy(ty) and
+    ty.kind in {itTuple, itArray, itDistinct, itVariant, itMultiVariant}
 
 proc heapCompoundTy(ty: IRType): bool =
   ## RFC-0005 S8ap. A heap value held leaf-split: a seq whose elements
@@ -273,10 +275,16 @@ proc heapCompoundTy(ty: IRType): bool =
   ## whose parts are all `heapUnitTy` (`heapTreeTy`). They were
   ## `seUnsupportedCompoundSortLeaf` (a tuple is not one Z3 term) and a
   ## `distinct` field was havocked. Still not a cell value, each stated:
-  ## a by-value case object (`itVariant`/`itMultiVariant`: its fields
-  ## depend on the discriminator, and the arm-keyed layout ADR-0013 gives a
-  ## REF variant does not nest), a tuple holding one, an empty object (no
-  ## leaf to hold its cell), and any part that is itself not a cell value.
+  ## an empty object (no leaf to hold its cell), and any part that is
+  ## itself not a cell value.
+  ##
+  ## RFC-0005 S8at: a by-value case object (`itVariant`/`itMultiVariant`)
+  ## is a tree too: its discriminator, its plain fields, and every arm's
+  ## fields, each a part (`heapParts`). The value is the walker's
+  ## `svVariant`, which holds a slot for every arm; the discriminator says
+  ## which arm a read may see (`isVariantField`'s FieldDefect fork runs on
+  ## the selected value, as on any value variant). S8ar declined it (its
+  ## fields depend on the discriminator).
   if ty == nil: return false
   case ty.kind
   of itSeq:
@@ -290,6 +298,13 @@ proc heapCompoundTy(ty: IRType): bool =
       if not heapUnitTy(f): return false
     true
   of itArray: ty.size > 0 and heapUnitTy(ty.elemTy)
+  of itVariant, itMultiVariant:
+    # RFC-0005 S8at. An axis view (`mvAxisView`) is the REF layout's
+    # (ADR-0013), never a by-value cell.
+    if ty.kind == itVariant and ty.vIsAxisView: return false
+    for part in heapParts(ty):
+      if not heapUnitTy(part.ty): return false
+    true
   of itDistinct:
     # A scalar base only: a composite base has no distinct sort
     # (`ensureDistinctSort` reads one Z3 term of the base, and a seq or
@@ -327,11 +342,82 @@ proc heapPartLabel(ty: IRType; i: int): string =
 
 proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]] =
   ## RFC-0005 S8ar. The parts of a `heapTreeTy` value, in leaf order.
+  ## RFC-0005 S8at: a case object's are its discriminator, its plain fields
+  ## and each arm's fields, an arm field labelled `@<arm>_<field>` (`<arm>`
+  ## the arm's position in `vArms`: `of a, b: f` is two arms, each with its
+  ## own slot, as the walker's `svVariant` holds them). A multi-variant's
+  ## are its plain fields, then per axis its discriminator and arm fields
+  ## (`@<axis>_<arm>_<field>`).
   case ty.kind
   of itTuple:
     for i, f in ty.fields: result.add (heapPartLabel(ty, i), f)
   of itArray:
     for i in 0 ..< ty.size: result.add (heapPartLabel(ty, i), ty.elemTy)
+  of itVariant:
+    result.add (ty.vDiscName, ty.vDiscTy)
+    for i, f in ty.vPlainFieldTypes: result.add (ty.vPlainFieldNames[i], f)
+    for ai, arm in ty.vArms:
+      for j, f in arm.fieldTypes:
+        result.add ("@" & $ai & "_" & arm.fieldNames[j], f)
+  of itMultiVariant:
+    for i, f in ty.mvPlainFieldTypes: result.add (ty.mvPlainFieldNames[i], f)
+    for xi, ax in ty.mvAxes:
+      result.add (ax.discName, ax.discTy)
+      for ai, arm in ax.arms:
+        for j, f in arm.fieldTypes:
+          result.add ("@" & $xi & "_" & $ai & "_" & arm.fieldNames[j], f)
+  else: discard
+
+proc svPartsOf(sv: SymVal; ty: IRType): seq[SymVal] =
+  ## RFC-0005 S8at. The parts of a tree value, in `heapParts` order.
+  ## Precondition: `svFitsHeapTy(sv, ty)` (or `sv` a prototype of `ty`).
+  case ty.kind
+  of itTuple: result = sv.fields
+  of itArray: result = sv.arrElems
+  of itVariant:
+    result.add sv.vDisc[]
+    result.add sv.vPlainFields
+    for arm in ty.vArms: result.add sv.vArmFields[arm.tagOrdinal]
+  of itMultiVariant:
+    result.add sv.mvPlainFields
+    for xi, ax in ty.mvAxes:
+      result.add sv.mvAxes[xi].disc[]
+      for arm in ax.arms: result.add sv.mvAxes[xi].armFields[arm.tagOrdinal]
+  else: discard
+
+proc svWithParts(proto: SymVal; ty: IRType; parts: seq[SymVal]): SymVal =
+  ## RFC-0005 S8at. `proto` with its parts replaced by `parts`
+  ## (`svPartsOf`'s inverse). A discriminator is re-boxed: `vDisc` is a
+  ## `ref`, shared with `proto` otherwise.
+  result = proto
+  var k = 0
+  proc next(): SymVal =
+    result = parts[k]
+    inc k
+  case ty.kind
+  of itTuple:
+    for i in 0 ..< result.fields.len: result.fields[i] = next()
+  of itArray:
+    for i in 0 ..< result.arrElems.len: result.arrElems[i] = next()
+  of itVariant:
+    let d = new(SymVal)
+    d[] = next()
+    result.vDisc = d
+    for i in 0 ..< result.vPlainFields.len: result.vPlainFields[i] = next()
+    for arm in ty.vArms:
+      var fs = newSeq[SymVal](arm.fieldTypes.len)
+      for j in 0 ..< fs.len: fs[j] = next()
+      result.vArmFields[arm.tagOrdinal] = fs
+  of itMultiVariant:
+    for i in 0 ..< result.mvPlainFields.len: result.mvPlainFields[i] = next()
+    for xi, ax in ty.mvAxes:
+      let d = new(SymVal)
+      d[] = next()
+      result.mvAxes[xi].disc = d
+      for arm in ax.arms:
+        var fs = newSeq[SymVal](arm.fieldTypes.len)
+        for j in 0 ..< fs.len: fs[j] = next()
+        result.mvAxes[xi].armFields[arm.tagOrdinal] = fs
   else: discard
 
 proc heapLeafSuffixes(ty: IRType): seq[string] =
@@ -379,8 +465,9 @@ proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
     if ty.kind == itDistinct:
       return @[heapLeafRaw(ejectBase(sv), distinctGround(ty))]
     let parts = heapParts(ty)
+    let psvs = svPartsOf(sv, ty)   ## RFC-0005 S8at
     for i, part in parts:
-      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      let psv = psvs[i]
       if heapCompoundTy(part.ty): result.add svLeafAsts(psv, part.ty)
       else: result.add heapLeafRaw(psv, part.ty)
     return
@@ -407,6 +494,33 @@ proc svFitsHeapTy(sv: SymVal; ty: IRType): bool =
     if sv.kind != svArray or sv.arrElems.len != ty.size: return false
     for e in sv.arrElems:
       if not svFitsHeapTy(e, ty.elemTy): return false
+    true
+  of itVariant:
+    # RFC-0005 S8at. Every arm's slot, of its arity.
+    if sv.kind != svVariant or sv.vDisc == nil or
+       sv.vPlainFields.len != ty.vPlainFieldTypes.len:
+      return false
+    for arm in ty.vArms:
+      if not sv.vArmFields.hasKey(arm.tagOrdinal) or
+         sv.vArmFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+        return false
+    let ps = svPartsOf(sv, ty)
+    for i, part in heapParts(ty):
+      if not svFitsHeapTy(ps[i], part.ty): return false
+    true
+  of itMultiVariant:
+    if sv.kind != svMultiVariant or sv.mvAxes.len != ty.mvAxes.len or
+       sv.mvPlainFields.len != ty.mvPlainFieldTypes.len:
+      return false
+    for xi, ax in ty.mvAxes:
+      if sv.mvAxes[xi].disc == nil: return false
+      for arm in ax.arms:
+        if not sv.mvAxes[xi].armFields.hasKey(arm.tagOrdinal) or
+           sv.mvAxes[xi].armFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+          return false
+    let ps = svPartsOf(sv, ty)
+    for i, part in heapParts(ty):
+      if not svFitsHeapTy(ps[i], part.ty): return false
     true
   of itSeq: sv.kind == svSeq and not sv.isUnsupportedFieldPlaceholder # [placeholder-audited]
   of itTable: sv.kind == svTable
@@ -443,19 +557,17 @@ proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
   if ty != nil and heapTreeTy(ty):
     if ty.kind == itDistinct:
       return liftHeapValue(ctx, leaves[0].raw, ty)
-    result = proto
     var pos = 0
+    let pprotos = svPartsOf(proto, ty)   ## RFC-0005 S8at
+    var rebuilt: seq[SymVal]
     for i, part in heapParts(ty):
       let n = heapLeafSuffixes(part.ty).len
       let sub = leaves[pos ..< pos + n]
       pos += n
-      let pproto = if proto.kind == svTuple: proto.fields[i] else: proto.arrElems[i]
-      let rebuilt =
-        if heapCompoundTy(part.ty): svWithLeaves(ctx, pproto, sub, part.ty)
-        else: liftHeapValue(ctx, sub[0].raw, part.ty)
-      if result.kind == svTuple: result.fields[i] = rebuilt
-      else: result.arrElems[i] = rebuilt
-    return
+      rebuilt.add(
+        if heapCompoundTy(part.ty): svWithLeaves(ctx, pprotos[i], sub, part.ty)
+        else: liftHeapValue(ctx, sub[0].raw, part.ty))
+    return svWithParts(proto, ty, rebuilt)
   result = proto
   case proto.kind
   of svSeq:
@@ -728,6 +840,26 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
     r
   of svDistinct:
     svCellWf(ejectBase(sv), ty.distinctBase, nested)
+  of svVariant, svMultiVariant:
+    # RFC-0005 S8at. Each part's facts, and each discriminator in its
+    # legal domain (`allocateSym`'s clause: an `else` arm's ordinals
+    # included, its sentinel not).
+    var r: seq[Z3Bool]
+    if not heapTreeTy(ty) or not svFitsHeapTy(sv, ty): return r
+    let ps = svPartsOf(sv, ty)
+    for i, part in heapParts(ty): r.add svCellWf(ps[i], part.ty, true)
+    proc domainClause(d: SymVal; ordSet: seq[int]) =
+      if ordSet.len == 0: return
+      var clause = variantDiscEq(d, int64(ordSet[0]))
+      for k in 1 ..< ordSet.len:
+        clause = clause or variantDiscEq(d, int64(ordSet[k]))
+      r.add clause
+    if sv.kind == svVariant:
+      domainClause(sv.vDisc[], discriminatorDomain(ty)[2])
+    else:
+      for xi, ax in ty.mvAxes:
+        domainClause(sv.mvAxes[xi].disc[], axisDiscriminatorDomain(ax)[2])
+    r
   else:
     if nested: rangeCondsIfNeeded(sv, ty) else: @[]
 
@@ -1045,6 +1177,91 @@ proc degradeHeapArmForPath(p: Path; d: Degrade): Path =
   ## contract as the read-side overload (RFC-0005 S1: `d` is the token
   ## `heapArmDegrade` returned).
   forkPathTainted(p, p.pc, p.env, d)
+
+# RFC-0005 S8at. `p[]` of a ref / ptr case object. ADR-0013 lays a REF case
+# object out field by field -- the discriminator heap, a heap per plain
+# field and one per arm field (`<id>__@<tag>__<field>`), the heaps `p.kind`,
+# `p.f` and `new` read and write. `p[]` read and `p[] = v` wrote a separate,
+# whole-pointee heap no field access sees: a store `p[] = V(kind: b)` left
+# `p.kind` reading the old discriminator (a false `sxUnsat`), and the read
+# was the S8ar decline. Both now go through the field heaps, in the
+# by-value layout's part order (`heapParts`), so the value moved is the
+# `svVariant` the field reads see. No FieldDefect: a whole copy reads no
+# field by name.
+
+proc refVariantSlots(ty: IRType): seq[tuple[key: string; ty, variantTy: IRType]] =
+  ## RFC-0005 S8at. The ADR-0013 heap of each `heapParts(ty)` part of a ref
+  ## case object, in that order, with the variant (axis view) its key's
+  ## shape records (`isNew`'s zero slots use the same keys).
+  let baseId = refPointeeTypeId(ty)
+  case ty.kind
+  of itVariant:
+    result.add (variantDiscHeapKey(ty), ty.vDiscTy, ty)
+    for i, f in ty.vPlainFieldTypes:
+      result.add (fieldHeapKey(ty, ty.vPlainFieldNames[i]), f, IRType(nil))
+    for arm in ty.vArms:
+      for j, f in arm.fieldTypes:
+        result.add (baseId & "__@" & $arm.tagOrdinal & "__" & arm.fieldNames[j],
+                    f, ty)
+  of itMultiVariant:
+    let view0 = mvAxisView(ty, 0)
+    for i, f in ty.mvPlainFieldTypes:
+      result.add (fieldHeapKey(view0, ty.mvPlainFieldNames[i]), f, IRType(nil))
+    for xi in 0 ..< ty.mvAxes.len:
+      let view = mvAxisView(ty, xi)
+      result.add (variantDiscHeapKey(view), view.vDiscTy, view)
+      for arm in view.vArms:
+        for j, f in arm.fieldTypes:
+          result.add (baseId & "__@" & $arm.tagOrdinal & "__" & arm.fieldNames[j],
+                      f, view)
+  else: discard
+
+proc refVariantWhole(ty: IRType): bool =
+  ## RFC-0005 S8at. `p[]` of this pointee goes through the field heaps: a
+  ## case object whose every part a cell holds (a part that is not keeps
+  ## the stated decline of the read and the store).
+  ty != nil and ty.kind in {itVariant, itMultiVariant} and heapCompoundTy(ty)
+
+proc refVariantWholeRead(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
+                         refAst: Z3AnyAst; ty: IRType):
+                         tuple[val: SymVal; cells: HeapCell; conds: seq[Z3Bool]] =
+  ## RFC-0005 S8at. The case object at `refAst`: each part selected from its
+  ## field heap, with the facts a field read of it asserts -- an input
+  ## cell's well-formedness (`heapCellWfConds`), a scalar's declared range,
+  ## each discriminator's legal domain.
+  var parts: seq[SymVal]
+  for s in refVariantSlots(ty):
+    let cell = heapCellArrays(ctx, p, s.key, refSort, s.ty, s.variantTy)
+    let v = heapCellSelect(ctx, cell, refAst, s.ty)
+    parts.add v
+    for c in cell: result.cells.add c
+    result.conds.add heapCellWfConds(ctx, s.key, refSort, s.ty, refAst)
+    result.conds.add rangeCondsIfNeeded(v, s.ty)
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(ty, "__refVariantWholeProto", scratchPC)
+  result.val = svWithParts(proto, ty, parts)
+  if result.val.kind == svVariant:
+    let r = refVariantDiscRangeClause(ty, result.val.vDisc[])
+    if r.isSome: result.conds.add r.get
+  elif result.val.kind == svMultiVariant:
+    for xi in 0 ..< ty.mvAxes.len:
+      let r = refVariantDiscRangeClause(mvAxisView(ty, xi),
+                                        result.val.mvAxes[xi].disc[])
+      if r.isSome: result.conds.add r.get
+
+proc refVariantWholeStore(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
+                          refAst: Z3AnyAst; ty: IRType; val: SymVal): HeapCell =
+  ## RFC-0005 S8at. `val` stored at `refAst`, part by part into the field
+  ## heaps. Precondition: `svFitsHeapTy(val, ty)`. A promoted `int` part is
+  ## stored as its heap's bitvector (`heapLeafRaw`).
+  let parts = svPartsOf(val, ty)
+  for i, s in refVariantSlots(ty):
+    let cell = heapCellArrays(ctx, p, s.key, refSort, s.ty, s.variantTy)
+    let part =
+      if s.ty.kind == itInt and parts[i].kind == svInt:
+        liftHeapValue(ctx, heapLeafRaw(parts[i], s.ty), s.ty)
+      else: parts[i]
+    for c in heapCellStore(ctx, cell, refAst, part, s.ty): result.add c
 
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for
@@ -1384,6 +1601,20 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # through a possibly-nil object ref forks correctly (R5 composition).
       for cp0 in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
+        if not isField and refVariantWhole(stmt.dElemTy):
+          # RFC-0005 S8at: `p[]` of a case object reads its field heaps
+          # (`refVariantWholeRead`).
+          let rd = refVariantWholeRead(ctx, cp0, allocRefSort(ctx, sortTy),
+                                       refAst, stmt.dElemTy)
+          let cpW = drainPendingLowerEffects(cp0)
+          var envW = cpW.env
+          var valW = rd.val
+          stampHeapSteps(valW, step)
+          envW[stmt.dRetName] = valW
+          var childW = forkPath(cpW, cpW.pc & rd.conds, envW)
+          for c in rd.cells: childW.heaps[c.key] = c.arr
+          survivors.add childW
+          continue
         # N42 (round-6 fix round 7, walker v105). Materialising the per-path
         # heap array below calls `mkHeapArrayVar` -> `heapValueSort` ->
         # `allocateSym(stmt.dElemTy, ...)` (a THROWAWAY prototype allocation,
@@ -1542,7 +1773,17 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # zero-written. Before S8l a variant pointee never reached `isNew`. A
       # multi-variant pointee (`new(p)` on an inline `ref MV`) likewise.
       var zeroSlots: seq[tuple[fname, key: string; ty, variantTy: IRType]]
-      if pointee.kind == itTuple:
+      # RFC-0005 S8at: an ANONYMOUS tuple pointee (`ref (int, int)`) is held
+      # whole -- `p[]` and `p[0]` read the whole-pointee heap (the parser's
+      # `wholeObjectPointee` is false: no names to split it by) -- so it is
+      # zeroed there, below. The field loop zeroed `<id>__` (an empty field
+      # name) for every element, a heap no read sees: `p[1] != 0` after
+      # `new(p)` was a false `sxSat`.
+      var anonTuple = false
+      if pointee.kind == itTuple and not pointee.isPlaceholder:
+        for fname in pointee.fieldNames:
+          if fname.len == 0: anonTuple = true
+      if pointee.kind == itTuple and not anonTuple:
         for i, fname in pointee.fieldNames:
           zeroSlots.add (fname, fieldHeapKey(pointee, fname), pointee.fields[i],
                          IRType(nil))
@@ -1565,11 +1806,14 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for i, fname in arm.fieldNames:
               zeroSlots.add (fname, baseId & "__@" & $arm.tagOrdinal & "__" & fname,
                              arm.fieldTypes[i], view)
-      if pointee.kind in {itTuple, itVariant, itMultiVariant}:
+      if pointee.kind in {itTuple, itVariant, itMultiVariant} and not anonTuple:
         for slot in zeroSlots:
           let fname = slot.fname
           let fty = slot.ty
-          if heapCompoundTy(fty):
+          if heapCompoundTy(fty) and defaultZeroTotal(fty):
+            # RFC-0005 S8at: a case object field too (its zero: ordinal 0 and
+            # each field's zero; a type whose zero is no legal value keeps
+            # the taint below).
             # RFC-0005 S8ap. A seq / Table / HashSet field is a leaf-split
             # cell; Nim zeroes it to the empty container (`defaultZero`), stored
             # into every leaf. It was the `heNewFieldZeroUnsupported` taint
@@ -1631,7 +1875,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S8ap: a compound pointee (`new seq[int]`) likewise, leaf
         # by leaf.
         let zeroExpr = zeroIRExprForType(pointee)
-        if heapCompoundTy(pointee):
+        if heapCompoundTy(pointee) and defaultZeroTotal(pointee):
           let cell = heapCellArrays(ctx, child, typeId, refSort, pointee)
           for c in heapCellStore(ctx, cell, newRef, heapCellZero(pointee), pointee):
             child.heaps[c.key] = c.arr
@@ -1951,6 +2195,39 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.ptrFamilyHints.add ptrHintW # CR-9 Stage 5: LIVE WalkCtx field
       for cp in nilDerefFork(p, refAst, sortTy, w):
         if w.shouldStop: return survivors
+        if not isField and refVariantWhole(stmt.dwElemTy):
+          # RFC-0005 S8at: `p[] = v` of a case object stores each part into
+          # its field heap (`refVariantWholeStore`), the heaps `p.kind` and
+          # `p.f` read. A whole assignment is not a discriminator assignment:
+          # no FieldDefect.
+          var scratchW: seq[Z3Bool]
+          let protoW = allocateSym(stmt.dwElemTy, "__derefWriteProto", scratchW)
+          let (valW, cpLoweredW) = lowerInExpr(cp, stmt.dwValue, w, some(protoW))
+          for cpL in drainScalarRaiseForks(cpLoweredW, w):
+            var child = forkPath(cpL, cpL.pc, cpL.env)
+            if svFitsHeapTy(valW, stmt.dwElemTy):
+              for c in refVariantWholeStore(ctx, cpL, allocRefSort(ctx, sortTy),
+                                            refAst, stmt.dwElemTy, valW):
+                child.heaps[c.key] = c.arr
+            else:
+              # A value some upstream degrade produced: no parts to store.
+              # Each part's cell is havocked (a fresh term of its sort), as
+              # `heapCellStore` does for a compound value of the wrong kind.
+              allocDegrade(seUnsupportedCompoundSortLeaf,
+                "heap store of a " & plainEnglishSymValKind(valW.kind) &
+                " into a `" & $stmt.dwElemTy & "` cell: the value has no " &
+                "parts of that type (seUnsupportedCompoundSortLeaf)")
+              let refSortW = allocRefSort(ctx, sortTy)
+              for sl in refVariantSlots(stmt.dwElemTy):
+                for c in heapCellArrays(ctx, cpL, sl.key, refSortW, sl.ty,
+                                        sl.variantTy):
+                  let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, c.arr.raw)
+                  let fresh = freshOfSort(ctx,
+                    ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
+                  child.heaps[c.key] = wrap[Z3AnyAst](ctx,
+                    checkedStore(ctx, c.arr.raw, refAst.raw, fresh))
+            survivors.add drainPendingLowerEffects(child)
+          continue
         # Materialise the per-path heap (field-split array for a field write) on
         # first use, exactly as `isDeref` does, so a write before any read still
         # has an array to store into and a later read of the same ref/field reads

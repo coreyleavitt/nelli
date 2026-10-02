@@ -1103,6 +1103,9 @@ proc heapCompoundTy(ty: IRType): bool
   ## `renderCellField` renders a leaf-split compound cell.
 proc heapLeafSuffixes(ty: IRType): seq[string]
   ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
+proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
+  ## `renderHeapValue` renders a case object cell.
 proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
                   ty: IRType = nil): SymVal
 proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]]
@@ -2494,6 +2497,17 @@ proc stampHeapSteps(sv: var SymVal; steps: int) =
     for f in sv.fields.mitems: stampHeapSteps(f, steps)
   of svArray:
     for f in sv.arrElems.mitems: stampHeapSteps(f, steps)
+  of svVariant:
+    # RFC-0005 S8at: a case object is a cell value; a ref in any field is a
+    # heap step from the cell.
+    for f in sv.vPlainFields.mitems: stampHeapSteps(f, steps)
+    for _, fs in sv.vArmFields.mpairs:
+      for f in fs.mitems: stampHeapSteps(f, steps)
+  of svMultiVariant:
+    for f in sv.mvPlainFields.mitems: stampHeapSteps(f, steps)
+    for ax in sv.mvAxes.mitems:
+      for _, fs in ax.armFields.mpairs:
+        for f in fs.mitems: stampHeapSteps(f, steps)
   else: discard
 
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
@@ -8863,6 +8877,47 @@ proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       parts.add(if valTy.kind == itTuple: part.label & ": " & r else: r)
     return (if valTy.kind == itTuple: "(" else: "[") & parts.join(", ") &
            (if valTy.kind == itTuple: ")" else: "]")
+  of itVariant, itMultiVariant:
+    # RFC-0005 S8at. A case object cell: each discriminator at
+    # `<leafPath>.<disc>` and the fields of the arm it selects (an `else`
+    # arm when no explicit one does) and the plain fields at
+    # `<leafPath>.<field>`, the paths `readCellField`'s `fieldPairs` walk
+    # reads (discriminator first). The other arms' slots are not rendered:
+    # Nim holds no value for them.
+    if not svFitsHeapTy(sv, valTy): return "<unsupported>"
+    var parts: seq[string]
+    template axis(discName: string; discTy: IRType; disc: SymVal;
+                  arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let dp = leafPath & "." & discName
+      extractLeaf(m, w, dp, disc)
+      clampWitnessField(w, dp, discTy)
+      parts.add discName & ": " & pointeeRendering(w, dp).get("?")
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+            leafPath & "." & fname, armFields[arm.tagOrdinal][j], arm.fieldTypes[j])
+    if valTy.kind == itVariant:
+      axis(valTy.vDiscName, valTy.vDiscTy, sv.vDisc[], valTy.vArms, sv.vArmFields)
+      for i, fname in valTy.vPlainFieldNames:
+        parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+          leafPath & "." & fname, sv.vPlainFields[i], valTy.vPlainFieldTypes[i])
+    else:
+      for xi, ax in valTy.mvAxes:
+        axis(ax.discName, ax.discTy, sv.mvAxes[xi].disc[], ax.arms,
+             sv.mvAxes[xi].armFields)
+      for i, fname in valTy.mvPlainFieldNames:
+        parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+          leafPath & "." & fname, sv.mvPlainFields[i], valTy.mvPlainFieldTypes[i])
+    return "(" & parts.join(", ") & ")"
   else: discard
   # RFC-0005 S8ap: the svSeq reads below run only past this guard (N27).
   if sv.kind == svSeq and sv.isUnsupportedFieldPlaceholder: return "<unsupported>" # [placeholder-audited]
@@ -8931,7 +8986,8 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     addPosition(b, m, RefPos(name: cell.name & "." & fname,
                              addrAst: childAddr, pointee: childPointee),
                 inlineNil = true)
-  of itString, itSeq, itTable, itSet, itTuple, itArray, itDistinct:
+  of itString, itSeq, itTable, itSet, itTuple, itArray, itDistinct,
+     itVariant, itMultiVariant:   ## RFC-0005 S8at: + a by-value case object
     # RFC-0005 S8ap: a string field, and a leaf-split compound field
     # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`. RFC-0005
     # S8ar: a by-value tuple / object, array and `distinct` too.
@@ -8948,12 +9004,21 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                 cell: RefPos): Option[string] =
   ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
   let typeId = refPointeeTypeId(cell.pointee)
-  if cell.pointee.kind notin {itTuple, itVariant, itMultiVariant}:   # RFC-0005 S8l: + MV
+  # RFC-0005 S8at: an anonymous tuple pointee is held whole (`isNew`'s
+  # `anonTuple`), its elements the leaves `<cell>.Field<i>`.
+  var anonTuple = false
+  if cell.pointee.kind == itTuple and not cell.pointee.isPlaceholder:
+    for fname in cell.pointee.fieldNames:
+      if fname.len == 0: anonTuple = true
+  if cell.pointee.kind notin {itTuple, itVariant, itMultiVariant} or anonTuple:   # RFC-0005 S8l: + MV
     # A scalar pointee (`ref int`) lives in the whole-pointee heap `<typeId>`.
-    if not currentVariantHeaps.hasKey(typeId): return none(string)
     let valTy = block:
       let t = heapKeyValTy(typeId)
       if t != nil: t else: cell.pointee
+    # RFC-0005 S8at: a tree pointee's first leaf is not at `<typeId>` itself
+    # (`heapLeafSuffixes`); the observed test is of that leaf.
+    if not currentVariantHeaps.hasKey(typeId & heapLeafSuffixes(valTy)[0]):
+      return none(string)
     # RFC-0005 S8ap: a string or leaf-split compound pointee (`ref seq[int]`)
     # too, written at `<cell>` itself.
     if valTy.kind == itString or heapCompoundTy(valTy):

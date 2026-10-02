@@ -61,9 +61,12 @@ proc ptrSut(p: ptr int) =
   if p[] == 3:
     symexTarget("ptrHit")
 
-type LossyBox = object
-  n: int
-  s: string   ## a field kind the logical heap does not model (S8h)
+type
+  LossyDist = distinct int
+  LossyBox = object
+    n: int
+    s: LossyDist   ## a field kind the logical heap does not model (S8h;
+                   ## RFC-0005 S8ap models `string`, so a `distinct` here)
 
 proc lossySut(p: ref LossyBox) =
   tick()
@@ -168,7 +171,7 @@ suite "RFC-0005 S2 -- replayWitness":
     check sideEffects == 2
 
   test "witness fidelity: a lossy ref witness confirms on a hit, never refutes":
-    ## A pointee with a field kind the logical heap does not model (`string`)
+    ## A pointee with a field kind the logical heap does not model (`distinct`)
     ## keeps that field's zero value in the render -- safe to run, not the
     ## model.
     var box = new LossyBox

@@ -8529,6 +8529,8 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(valTy, "__heapRenderProto", scratchPC)
   let sv = svWithLeaves(ctx, proto, leaves)
+  # RFC-0005 S8ap: the svSeq reads below run only past this guard (N27).
+  if sv.kind == svSeq and sv.isUnsupportedFieldPlaceholder: return "<unsupported>" # [placeholder-audited]
   case sv.kind
   of svSeq:
     let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
@@ -20383,13 +20385,17 @@ proc readCellTable[V](c: RefWitness; path: string; f: var Table[string, V]) =
     var i: int64
     if cellInt(c, path & "." & k, i):
       when V is bool: v = i != 0
-      else: v = V(i)
+      elif V is SomeInteger or V is enum or V is char: v = V(i)
     f[k] = v
 
 proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
-  ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`.
+  ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`, whose
+  ## members are integers. Only an integer-like `E` is backed
+  ## (`isBackedSetElemTy`); any other keeps the empty set, and
+  ## `witnessFidelity` classifies its pointee lossy.
   f = initHashSet[E]()
-  for v in cellSetMembers(c, path): f.incl E(v)
+  when E is SomeInteger or E is enum or E is char or E is bool:
+    for v in cellSetMembers(c, path): f.incl E(v)
 
 proc readCellField[F](c: RefWitness; path: string; f: var F) =
   ## RFC-0005 S8h. One field of a cell (or a scalar pointee). The kinds the

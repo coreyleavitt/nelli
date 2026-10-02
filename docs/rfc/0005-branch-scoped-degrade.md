@@ -6870,6 +6870,18 @@ swapped for a field kind that still reaches the same site:
 - `r6_lows_declines` N41-2/3: Table field replaced by a tuple field.
 - `s6b_ops`: seq field replaced by a `distinct int` field (still
   `heNewFieldZeroUnsupported`).
+- `rfc0005_s2_replay`: the lossy-witness fixture's string field replaced
+  by a `distinct int` field (a string field now renders faithfully).
+- `r6_n27_placeholder_read_audit`: runtime.nim's marker count goes from 81
+  to 85. `renderHeapCompound`'s svSeq arm adds the placeholder guard and
+  three reads behind it.
+
+Caught on symex-mingw, not locally: `readCellSet` converted every member
+with `E(v)`, which does not compile for a `HashSet[string]` field
+(`r6_n43_parity`). Members are integers, and only an integer-like element
+is backed (`isBackedSetElemTy`). Any other element type keeps the empty
+set, and its pointee classifies as lossy. `readCellTable` is guarded the
+same way.
 
 *Different mechanisms, reported and not fixed here.*
 - **`insert` is unmodelled even on a bare seq.** Lowering declines

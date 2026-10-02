@@ -305,7 +305,13 @@ suite "RFC-0005 S11 (e) -- SymexFinding carries soundness, gaps, violations; the
     check warm.fromCache
     check sideEffects == before                 # a served entry never replays
     check warm.soundness == cold.soundness      # served unchanged
-    check warm.gaps.len == 0                    # errors are not cached
+    # RFC-0005 S8az: the `:sat` witness cache slot now carries gaps() too --
+    # `s11Confirm`'s winning path goes through a `dcFreshSymbol` decline
+    # (`a < a`), so even this confirmed-SAT cold run has a non-empty view,
+    # and the warm hit reports the SAME one (was: always `@[]`, "errors are
+    # not cached").
+    check cold.gaps.len > 0
+    check warm.gaps == cold.gaps
     check trusted(warm)
 
   test "an unknown and an unsat verdict serve their stored soundness":

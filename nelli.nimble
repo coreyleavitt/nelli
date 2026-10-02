@@ -1057,5 +1057,14 @@ task test, "Run the test suite":
             # miss); S8am's "raise-irrelevant-parameter witness sentinel" is
             # proved to be IndexDefect's own concrete, replayable witness
             # (Phase 15 E6 pre-emption), not a sentinel. Walker 190->195.
-            "tsymex_rfc0005_s8av_remainder"]:
+            "tsymex_rfc0005_s8av_remainder",
+            # RFC-0005 S8az -- S8av's own remainder: the :sat witness cache
+            # slot (CachedWitness) and each :raised:<type> sentinel
+            # (CachedRaised, loadSymexRaisedImpl's new return type) also
+            # serve their stored gaps() on a hit now, through the SAME
+            # gapsMeta/storedGaps pair CachedVerdict already used; an entry
+            # without gaps metadata (pre-S8az, or a third-party writer)
+            # still degrades to gaps: @[] rather than a miss. Walker
+            # 195->199.
+            "tsymex_rfc0005_s8az_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

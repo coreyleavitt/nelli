@@ -344,17 +344,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # every query reaching it asserts (`indexSplitRoots`). The same value
     # in every model; Z3's own `str.indexof` ran out of 20M units on a
     # five-deep readCString chain the split decides in under 5M.
-    let ch = oneCharLiteral(sub)
-    if e.strArgs.len >= 3:
-      let start = toZ3Int(lower(env, e.strArgs[2]))
-      if ch.isSome:
-        SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, ch.get, start))
-      else:
-        SymVal(kind: svInt, zi: indexOf(recv.str, sub, start))
-    elif ch.isSome:
-      SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, ch.get, mkInt(0)))
-    else:
-      SymVal(kind: svInt, zi: indexOf(recv.str, sub))
+    # RFC-0005 S8au: every needle splits -- a literal of any length and a
+    # computed one (`splitNeedle`; the axioms cover the empty needle and
+    # the overlap of a longer one, `indexSplitAxioms`).
+    let start = if e.strArgs.len >= 3: toZ3Int(lower(env, e.strArgs[2]))
+                else: mkInt(0)
+    SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, splitNeedle(sub), start))
   of iekStrRfind:
     # RFC Cluster 3 M3. `s.rfind(sub)` (strutils.rfind) → Z3 `lastIndexOf(s,
     # sub)` (`Z3_mk_seq_last_index`), the BYTE offset of the LAST occurrence, or
@@ -366,7 +361,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     requireStr(recv, "iekStrRfind")
     # v65: char needle bridged via needleAsStr (`hostPort.rfind(':')`).
     let sub = needleAsStr(lower(env, e.strArgs[1]), "iekStrRfind")
-    SymVal(kind: svInt, zi: lastIndexOf(recv.str, sub))
+    # RFC-0005 S8au: split like `find` (`lowerIndexSplit`, `last`): the
+    # last occurrence `s = pre ++ c ++ post` with no `c` past it. Z3's
+    # `seq.last_indexof` and Nim's `rfind` agree, the empty needle
+    # included (`len(s)`, probed on both Z3 versions).
+    SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, splitNeedle(sub),
+                                            mkInt(0), last = true))
   of iekStrReplaceAll:
     # Phase 15 S5 / RFC-0005 S8c. `strutils.replace(s, sub, by)` replaces
     # EVERY occurrence (both overloads: `string` and `char` sub/by), so it is

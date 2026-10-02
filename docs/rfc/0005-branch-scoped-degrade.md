@@ -329,7 +329,7 @@ state = "pending"
 [[slice]]
 id = "S8au"
 title = "S8ag's remainder: local distinct value with no distinct-typed parameter is a walker fault; nonlinear div by bv2int under the seq theory stays unknown; copy-in/out aliasing through a global; non-literal and multi-char needles and rfind/last_indexof do not split; all-pairs chain facts are quadratic per haystack; per-Z3-version encoding cost of c notin t"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8av"
@@ -8062,3 +8062,112 @@ Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
   attempted: it would make the term constructible, not the operator any
   more decidable, and is out of this slice's scope (plain
   `str.replace_all` only).
+
+**As landed (S8au, walker 194) — S8ag's remainder.** Suite
+`tsymex_rfc0005_s8au_remainder` (35 tests; run time 14 s c / 17 s cpp on
+Z3 5.1, 26 s on 4.13.4). Every verdict below was probed on both Z3
+versions; the base column is 5ffc922.
+
+- (1) *A local distinct value with no distinct param.* Already closed by
+  S8ad (walker 175): a local `distinct int` returned, stored in a field or
+  compared is modelled (`sxSat`/`sxUnsat`, no walker fault). Re-pinned. A
+  `seq[distinct]` local is a scoped decline (`sxUnknown`,
+  `seNestedSeqUnsupported`), never a fault.
+- (2) *`start < 0 and y > 1 and start div y == start`.* Already closed by
+  S8ad: `sxUnsat` on both versions (0.96M units on 5.1, 1.02M on 4.13.4;
+  base 0.94M / 1.02M). With a `find` feeding `start`, the target is
+  `sxUnsat` too (18.5M on 5.1 / 19.5M on 4.13.4; base 20.5M / 26.5M). The
+  string-indexed variant stays `sxUnknown`, from a different query (the
+  `start + 3` overflow raise path; below).
+- (3) *Copy-in/copy-out aliasing through a global.* RED at base: a `var`
+  or `addr` argument that the callee can also reach through a global (or a
+  closure capture) was modelled as a disjoint copy, so a write through one
+  name was invisible through the other -- a false `sxSat` on five dead
+  labels (`hg_dead`, `hgr_dead`, `hgv_dead`, `hga_dead`, `hc_dead`). The
+  parser now collects the callee's outer symbols (`calleeOuterSyms`) and,
+  when an argument's cell is reachable from one (`outerReachesCell`),
+  declines the call with `feUnsupportedOp` ("var/addr argument reachable
+  through a global"). A call whose callee touches no such symbol is
+  modelled as before.
+- *`var ptr` params passed `addr x`.* Was a `heUnsafeCast` decline. A `var
+  ptr T` formal whose body never rebinds the pointer is now treated like a
+  `ptr T` formal (`ptrFormalStaysLocal`, `nnkHiddenAddr` in
+  `ptrUsesStayLocal`/`substAddrAlias`), so `p[] = v` writes `x`. A rebind
+  still declines.
+- (4) *Index splits for non-literal needles, multi-char needles and
+  rfind.* `find` with any needle and any start, and `rfind`, now lower to
+  an `IndexSplit` (`splitNeedle` folds a computed needle to a literal when
+  it can). The find axioms generalise S8ag's to a needle of length `n`:
+  the no-earlier-match gap is `x ++ c[0 .. n-2]` (a match may overlap the
+  gap's end), and the needle's own length replaces the literal 1. An
+  `rfind` split states `s = pre ++ c ++ post`, `ix = len(pre)` and no match
+  in `c[1 ..] ++ post`; the empty needle is `ix = len(s)` (rfind) or
+  `ite(0 <= start <= len s, start, -1)` (find), probed against Nim and
+  both Z3s. A computed needle carries the `len(c) == 0` case split. A
+  literal needle of 2..16 characters also states `s[ix + k] == c[k]`
+  (exact: implied by the word equation); Z3 4.13.4 does not relate a read
+  past the first matched character to the word equation without it
+  (`mf_dead` ran out at 20M units on either `c notin t` form; with it,
+  24k). An rfind split and a find split of the same haystack and needle
+  are linked by `find >= 0 -> rfind >= find` (`indexSplitLastLink`). RED at
+  base, all `sxUnknown` with no split: the chained `"\r\n"` `mf_dead`
+  (20.3M units, ~350 s) is now `sxUnsat` in 0.1M; the rfind/find
+  `rf_dead` (20M) in 12k. S8aq's "declined" `foundExceedsLast`, base
+  `sxUnknown` at 20M, is now `sxUnsat` in 0.04M (that test is updated).
+  The axioms are checked by a 250-round differential per `c notin t` form
+  against Nim's `find`/`rfind`, and three mutants (S8ag's 1-char gap on a
+  longer needle, an rfind gap blind to an overlap, a computed needle
+  without its empty case) are each caught.
+- (5) *Chain facts.* All-pairs per haystack became consecutive pairs per
+  haystack (each split chained only to the next reached split of its
+  haystack), which is linear. Chain facts and hit units (5.1, base all
+  pairs -> new): n36 3040 -> 424, 6.07M -> 4.93M; s1c 1520 -> 212, 3.32M
+  -> 2.74M; b5_chained 40 -> 20, 0.60M -> 0.58M; q1_scanlift 14 -> 7,
+  0.16M -> 0.15M. No verdict regressed in the 20-suite measurement set on
+  either version; two improved (s8y 10 -> 9 unknowns on 5.1, s8aq 1 -> 0).
+- (6) *`c notin t` per Z3 version.* Kept per version: the regex form on
+  5.x, `not contains` on 4.x (`notInFormFor`). Hit units, with item 5 in
+  place:
+
+  | suite | 5.1 regex | 5.1 not-contains | 4.13.4 base | 4.13.4 regex | 4.13.4 not-contains |
+  |---|---|---|---|---|---|
+  | n36_raise_degrade | 4.93M | 82.5M (1 test fails) | 18.40M | 15.79M | 7.30M |
+  | s1c_verdict | 2.74M | 27.49M | 10.10M | 10.95M | 3.60M |
+  | b1_stringbacked | 0.48M | >= 24.6M (killed) | 0.26M | 0.26M | 3.13M |
+
+  Not-contains costs b1 12x on 4.13.4 (no verdict change) and saves 2.2x
+  on n36 and 3x on s1c; regex is not usable on 4.x for n36/s1c and
+  not-contains is not usable on 5.1 at all. The choice is cached per
+  process from `z3Version()`; `notInFormOverride` is the test hook.
+
+*Term-creation order is part of the encoding.* Z3's cost depended on the
+ORDER the split's terms were created in the context, and on terms created
+but never asserted: logically identical query text cost 0.37M units with
+S8ag's creation order and 7.7M with another (B1-1, 5.1). The split axioms
+now create their terms in S8ag's order (regex built up front, the found arm
+before its `ix = -1` disjunct, empty-needle and length terms created only
+when used), which restored 365389 units, base's exact figure.
+`seqLenCaps` marks a query holding an rfind split `lastIndex`, like the
+`seq.last_indexof` term it stands for, so it keeps S8o's regime (no
+capped verdict, one-shot step 3): without it `tsymex_rfc0005_s8o_termination`
+(4) became a cap decline.
+
+*Different mechanisms, reported and not fixed here.*
+- **`seq[distinct]` locals decline.** `seNestedSeqUnsupported`, plus a
+  stray `feGlobalReadUnmodelled` naming a `__sym_idx_N` temporary. Sound
+  (`sxUnknown`), but the second error names a compiler temporary as if it
+  were a global.
+- **Overflow/range raise paths over string-derived indices.** A query on
+  `start + 3` (or `s[i]` with no bound on `i`) over a capped string needs
+  `len(s) <= high(int)` to refute the overflow branch; the walker states
+  no such fact, so that raise query is `sxUnknown` (capped) while the
+  target query is decided. Seen in item 2's string variant and in rf_dead
+  without its `i < 100` assume.
+- **S8aw's link work now covers native terms only.** The walker no longer
+  emits `seq.last_indexof` or `str.indexof` for `rfind`/`find`; S8aw's
+  `L` vs `indexof` link applies to those terms where they still arise
+  (native `seqRangeFacts` inputs), and the walker path is covered by
+  `indexSplitLastLink`.
+- **Z3 context order sensitivity.** Above. Any later change to the split's
+  term construction can move costs by an order of magnitude with no change
+  in the asserted text; S8ag's B1-1 probe (0.37M) is the canary.

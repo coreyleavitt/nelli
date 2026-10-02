@@ -3393,6 +3393,15 @@ proc isSymOf(n, sym: NimNode): bool =
 proc ptrFormalStaysLocal(callee: NimNode; idx: int;
                          seen: var seq[string]): bool
 
+proc dropVarIndirection(n, f: NimNode): NimNode =
+  ## RFC-0005 S8au. `n` with every `nnkHiddenDeref(f)` -- the typed AST's
+  ## spelling of a use of the `var` formal `f` -- replaced by `f` itself.
+  if n.kind == nnkHiddenDeref and n.len == 1 and isSymOf(n[0], f):
+    return n[0]
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  for c in n: result.add dropVarIndirection(c, f)
+
 proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
   ## RFC-0005 S8an. True when every use of the pointer `f` in `n` is one
   ## that cannot let it outlive the call: a dereference `f[]` (read, write,
@@ -3422,6 +3431,12 @@ proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
           if isSymOf(n[j], f):
             if builtinCmp: continue
             if not ptrFormalStaysLocal(head, j - 1, seen): return false
+          elif userCall and n[j].kind == nnkHiddenAddr and n[j].len == 1 and
+               isSymOf(n[j][0], f):
+            # RFC-0005 S8au: the pointer variable itself passed to a `var
+            # ptr` formal. It stays local when that formal only ever
+            # dereferences it (never rebinds or stores it).
+            if not ptrFormalStaysLocal(head, j - 1, seen): return false
           elif not ptrUsesStayLocal(n[j], f, seen):
             return false
         return true
@@ -3447,17 +3462,30 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
   if formal.kind != nnkFormalParams: return false
   var k = 0
   var fsym: NimNode = nil
+  var isVarF = false
   for i in 1 ..< formal.len:
     let id = formal[i]
     if id.kind != nnkIdentDefs: return false
     for j in 0 ..< id.len - 2:
       if k == idx:
         fsym = id[j]
-        if id[^2].kind == nnkVarTy or
-           id[j].getTypeImpl.kind != nnkPtrTy:
+        if id[^2].kind == nnkVarTy:
+          # RFC-0005 S8au: `p: var ptr T`.
+          if id[^2].len != 1 or id[^2][0].getTypeImpl.kind != nnkPtrTy:
+            return false
+          isVarF = true
+        elif id[j].getTypeImpl.kind != nnkPtrTy:
           return false
       inc k
   if fsym == nil or fsym.kind != nnkSym: return false
+  if isVarF:
+    # RFC-0005 S8au: a `var ptr` formal's every use is spelled
+    # `nnkHiddenDeref(p)` (the caller's pointer variable). Read without
+    # that indirection, the body uses `p` exactly as a `ptr` formal's
+    # does, and the same rule applies: `p[]` stays local, a bare `p`
+    # (a rebind `p = q`, a store, a return) does not. A `var ptr` formal
+    # that only dereferences is a `ptr` formal; the `var` is never used.
+    return ptrUsesStayLocal(dropVarIndirection(body(impl), fsym), fsym, seen)
   ptrUsesStayLocal(body(impl), fsym, seen)
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
@@ -3484,6 +3512,57 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
       var seen: seq[string]
       if typeReachesCell(a.getTypeInst, cells, seen): return true
   false
+
+proc calleeOuterSyms(calleeSym: NimNode): seq[NimNode] =
+  ## RFC-0005 S8au. The variables outside its own frame that a call of
+  ## `calleeSym` can reach while it runs: every module-level global its
+  ## body names, every enclosing variable it captures (a nested routine,
+  ## `nestedCaptureSyms`), and, transitively, those of each user routine
+  ## its body names (a call, or the routine passed on as a value). A
+  ## lambda built inside the body is part of it, so its globals are found
+  ## too. Symbol identity throughout.
+  var work: seq[NimNode]
+  var seenR: seq[NimNode]
+  if calleeSym.kind == nnkSym: work.add calleeSym
+  var acc: seq[NimNode]
+  proc scan(n: NimNode; acc, work: var seq[NimNode]) =
+    if n == nil: return
+    if n.kind == nnkSym:
+      if isModuleGlobal(n):
+        if not containsSym(acc, n): acc.add n
+      elif isUserRoutine(n):
+        work.add n
+      return
+    for c in n: scan(c, acc, work)
+  var i = 0
+  while i < work.len:
+    let r = work[i]
+    inc i
+    if containsSym(seenR, r): continue
+    seenR.add r
+    let impl = resolveRoutineImpl(r)
+    if impl == nil or impl.len < 7: continue
+    if isNestedRoutine(r):
+      for s in nestedCaptureSyms(impl):
+        if not containsSym(acc, s): acc.add s
+    scan(body(impl), acc, work)
+  acc
+
+proc outerReachesCell(outer, heapSteps: seq[NimNode]): NimNode =
+  ## RFC-0005 S8au. The first of `outer` (`calleeOuterSyms`) whose type can
+  ## hold a ref to a cell on a heap lvalue's path (`typeReachesCell`), or
+  ## nil. Copy-in/copy-out of `p.x` is Nim's pass-by-address only while
+  ## the callee cannot reach `p.x` another way; a global or a capture of
+  ## type `Box` (`gBox.x = 5`) reaches it as surely as another argument
+  ## does (S8ac's `varActualMayAlias`), and the write-back after the call
+  ## then lands over the callee's direct write.
+  if heapSteps.len == 0: return nil
+  var cells: seq[NimNode]
+  for d in heapSteps: cells.add d.getTypeInst
+  for g in outer:
+    var seen: seq[string]
+    if typeReachesCell(g.getTypeInst, cells, seen): return g
+  nil
 
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
@@ -3517,6 +3596,15 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
+  # RFC-0005 S8au: what the callee reaches outside its arguments, computed
+  # once per call and only when a heap actual asks.
+  var outer: seq[NimNode]
+  var outerDone = false
+  proc outerOf(): seq[NimNode] =
+    if not outerDone:
+      outer = calleeOuterSyms(calleeSym)
+      outerDone = true
+    outer
   for i in 1 ..< n.len:
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
@@ -3555,6 +3643,17 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   "the other argument are not one location in the walk " &
                   "(feUnsupportedOp)"),
           "addr argument aliases another argument (feUnsupportedOp)")
+      elif (let g = outerReachesCell(outerOf(), heapSteps); g != nil):
+        # RFC-0005 S8au: the callee reaches the cell through a global or a
+        # capture, not only through its arguments.
+        preamble.add ctx.declineAtSite(feUnsupportedOp,
+          siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
+                  calleeSym.strVal & "`, which can also reach that heap " &
+                  "location through `" & macros.strVal(g) & "` (a " &
+                  "module-level global or a captured variable): the cell " &
+                  "for the call and the direct access are not one " &
+                  "location in the walk (feUnsupportedOp)"),
+          "addr argument reachable through a global (feUnsupportedOp)")
       let lvIR = parseExpr(addrLv, preamble, ctx)
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -3596,6 +3695,19 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                     "variable): the callee's writes to it are not " &
                     "modelled (feUnsupportedOp)"),
             "var argument write-back not modelled (feUnsupportedOp)")
+        elif (let g = outerReachesCell(outerOf(), heapSteps); g != nil):
+          # RFC-0005 S8au: the callee reaches the heap location through a
+          # global or a capture (`gBox.x = 5` while `p.x` is the actual and
+          # `gBox == p`). Nim writes one cell in the callee's order; the
+          # write-back after the call would land over the direct write.
+          writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
+                    calleeSym.strVal & "` is a heap location the callee " &
+                    "can also reach through `" & macros.strVal(g) & "` (a " &
+                    "module-level global or a captured variable): the " &
+                    "callee's writes through the two are not modelled in " &
+                    "its order (feUnsupportedOp)"),
+            "var argument reachable through a global (feUnsupportedOp)")
         else:
           if ir.kind != iekVar:
             let t = freshSynth(ctx, "varArg")
@@ -9232,6 +9344,11 @@ proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   ## RFC-0005 S8an. `n` with `p[]` spelled as the pointee lvalue and a bare
   ## `p` (an argument; `addrAliasDecl`'s caller checked there is no other
   ## use) spelled as `addr lv`.
+  ## RFC-0005 S8au: `p` passed to a `var ptr` formal (`nnkHiddenAddr(p)`)
+  ## is spelled `addr lv` too: the formal only dereferences it
+  ## (`ptrFormalStaysLocal`), so it is the `ptr` argument `addr lv`.
+  if n.kind == nnkHiddenAddr and n.len == 1 and isSymOf(n[0], p):
+    return copyNimTree(addrNode)
   if n.kind in {nnkDerefExpr, nnkHiddenDeref} and n.len == 1 and
      isSymOf(n[0], p):
     return copyNimTree(addrNode[0])

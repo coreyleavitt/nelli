@@ -202,7 +202,29 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "190"
+const symexWalkerVersion* = "194"
+  ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. Provisional
+  ## 194 (S8ar 191, S8as 192, S8at 193 in the same batch). (3) A
+  ## copy-in/copy-out `var` actual, or an `addr` actual, whose heap cell a
+  ## global or a capture the callee reaches (directly or through the user
+  ## routines it calls) can also hold, is a scoped `feUnsupportedOp`
+  ## decline: the callee's write through that global was lost to the
+  ## write-back (a false `sxSat`). A `var ptr` formal passed a local
+  ## `p = addr x` is S8an's local pointer, modelled (was `heUnsafeCast`).
+  ## (4) Every `find` needle -- a literal of any length, a computed one
+  ## (the empty needle by a `len(c) = 0` case split) -- and every `rfind`
+  ## lower to the S8ag index split, not Z3's `str.indexof` /
+  ## `seq.last_indexof`; an rfind split is linked to each find split of
+  ## its haystack and needle (a found index is at most the last one), and
+  ## a literal needle of 2..16 characters states its characters at the
+  ## match. S8aq's "declined" `foundExceedsLast` label is now `sxUnsat`.
+  ## (5) The split chain facts link consecutive splits of a haystack, not
+  ## every pair. (6) `c notin t` takes the cheaper form
+  ## for the linked Z3 (`notInFormFor`: 5.x the regex, 4.x `not
+  ## contains`). Items 1 and 2 (local distinct values, the negative
+  ## `div` fixed point) were closed by S8ad (walker 175) and are pinned
+  ## again in `tsymex_rfc0005_s8au_remainder`.
+  ##
   ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional
   ## number, and land stacked as one integration branch under ONE walker

@@ -7768,7 +7768,15 @@ Four independent items, none changing Z3/walker solving semantics.
   additionally pins the concrete replay.
 - Walker 190 → 195 (item 3 only; items 1, 2 and 4 change no cache or walker
   behavior). The CR2 cache-key pin and the new suite's own test both carry
-  the `>= 195` floor.
+  the `== 195` / `>= 195` floor. The CR2 pin
+  (`tests/tsymex_phase15_CR2_cachekey.nim`, "sub-test 5: symexWalkerVersion
+  matches the current pin") was initially missed in the pre-push local
+  verification sweep — it is not name-matched by `saveSymex|loadSymex`, the
+  grep this slice's test selection used — and only caught by the
+  `symex-mingw` Windows CI leg going red post-push (corpus shard 7). Updated
+  in a follow-up commit on the same branch; see
+  `symex-version-bump-cr2` precedent (every walker-version bump must update
+  **and run** this pin, not just `grep` for it).
 
 *Different mechanisms, reported and not fixed here.*
 - **The `:sat` witness and `:raised:<type>` cache slots still serve

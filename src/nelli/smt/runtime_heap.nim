@@ -246,18 +246,56 @@ proc pcImpliesNonNil(ctx: Z3Context, pc: seq[Z3Bool],
 # and cannot affect the path; the witness renderer (`renderHeapCompound`)
 # renders such a cell as any well-formed value.
 
+proc distinctGround(ty: IRType): IRType =
+  ## RFC-0005 S8ar. The base a `distinct` (chain) ejects to.
+  result = ty
+  while result != nil and result.kind == itDistinct: result = result.distinctBase
+
+proc heapUnitTy(ty: IRType): bool =
+  ## RFC-0005 S8ar. A value a heap cell can hold: a scalar one Z3 term
+  ## carries (`liftHeapValue`'s kinds), or a leaf-split compound value.
+  ty != nil and (ty.kind in {itInt, itBool, itFloat32, itFloat64, itString,
+                             itRef, itPtr} or heapCompoundTy(ty))
+
+proc heapTreeTy(ty: IRType): bool =
+  ## RFC-0005 S8ar. A by-value aggregate held as the leaves of its parts: a
+  ## tuple or object (`itTuple`), an array, a `distinct` (its base's
+  ## leaves; a distinct value IS its base value, every read ejects).
+  heapCompoundTy(ty) and ty.kind in {itTuple, itArray, itDistinct}
+
 proc heapCompoundTy(ty: IRType): bool =
   ## RFC-0005 S8ap. A heap value held leaf-split: a seq whose elements
   ## `allocateSeqDataRaw` backs, a `Table[string, V]` and a `HashSet[T]`
   ## `allocateSym` backs. A placeholder seq (an unbacked element type) is not
   ## -- its value is inert by construction and keeps the pre-S8ap decline.
+  ##
+  ## RFC-0005 S8ar: also a by-value tuple / object, array and `distinct`
+  ## whose parts are all `heapUnitTy` (`heapTreeTy`). They were
+  ## `seUnsupportedCompoundSortLeaf` (a tuple is not one Z3 term) and a
+  ## `distinct` field was havocked. Still not a cell value, each stated:
+  ## a by-value case object (`itVariant`/`itMultiVariant`: its fields
+  ## depend on the discriminator, and the arm-keyed layout ADR-0013 gives a
+  ## REF variant does not nest), a tuple holding one, an empty object (no
+  ## leaf to hold its cell), and any part that is itself not a cell value.
   if ty == nil: return false
   case ty.kind
   of itSeq:
     ty.seqUnsupportedFieldReason.len == 0 and isBackedSeqElemTy(ty.seqElemTy)
   of itTable:
-    ty.tabKeyTy.kind == itString and isBackedTableTy(ty.tabKeyTy, ty.tabValTy)
+    isBackedTableTy(ty.tabKeyTy, ty.tabValTy)
   of itSet: isBackedSetElemTy(ty.setElemTy)
+  of itTuple:
+    if ty.isPlaceholder or ty.fields.len == 0: return false
+    for f in ty.fields:
+      if not heapUnitTy(f): return false
+    true
+  of itArray: ty.size > 0 and heapUnitTy(ty.elemTy)
+  of itDistinct:
+    # A scalar base only: a composite base has no distinct sort
+    # (`ensureDistinctSort` reads one Z3 term of the base, and a seq or
+    # tuple is not one), so a re-boxed value would decline.
+    let g = distinctGround(ty)
+    g != nil and g.kind in {itInt, itBool, itFloat32, itFloat64, itString}
   else: false
 
 proc heapWfTy(ty: IRType): bool =
@@ -265,32 +303,146 @@ proc heapWfTy(ty: IRType): bool =
   ## fact (`heapCellWfConds`): the compound kinds and `string`.
   heapCompoundTy(ty) or (ty != nil and ty.kind == itString)
 
+proc heapPartLabel(ty: IRType; i: int): string =
+  ## RFC-0005 S8ar. The name of part `i` of a `heapTreeTy` tuple or array:
+  ## a field's name, `Field<i>` for an anonymous tuple's (`fieldPairs`'
+  ## spelling, which the witness reader walks), the position of an array
+  ## element.
+  if ty.kind == itTuple:
+    (if ty.fieldNames[i].len > 0: ty.fieldNames[i] else: "Field" & $i)
+  else: $i
+
+proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]] =
+  ## RFC-0005 S8ar. The parts of a `heapTreeTy` value, in leaf order.
+  case ty.kind
+  of itTuple:
+    for i, f in ty.fields: result.add (heapPartLabel(ty, i), f)
+  of itArray:
+    for i in 0 ..< ty.size: result.add (heapPartLabel(ty, i), ty.elemTy)
+  else: discard
+
 proc heapLeafSuffixes(ty: IRType): seq[string] =
   ## RFC-0005 S8ap. The key suffix of each leaf heap of a value of type `ty`,
   ## in `svLeafAsts` order. `@` cannot begin a Nim identifier, so no field
   ## key collides with a leaf key (and `renderCell`'s field scan skips them:
   ## a suffix holding `__` is never a field).
-  if heapCompoundTy(ty):
-    case ty.kind
-    of itSeq:   @["", "__@len"]
-    of itTable: @["", "__@present", "__@len"]
-    else:       @["", "__@len"]                 ## itSet
-  else: @[""]
+  ##
+  ## RFC-0005 S8ar: a tuple / object / array part `x` holds its leaves under
+  ## `__@.x` followed by the part's own suffixes, at every depth -- so no
+  ## two paths share a key (`o.inner.x` is `__@.inner__@.x`, `o.x` is
+  ## `__@.x`). A `distinct` has its (scalar) base's one leaf.
+  if not heapCompoundTy(ty): return @[""]
+  case ty.kind
+  of itSeq:   @["", "__@len"]
+  of itTable: @["", "__@present", "__@len"]
+  of itSet:   @["", "__@len"]
+  of itDistinct: @[""]
+  else:
+    var r: seq[string]
+    for part in heapParts(ty):
+      for sub in heapLeafSuffixes(part.ty):
+        r.add "__@." & part.label & sub
+    r
 
-proc svLeafAsts(sv: SymVal): seq[RawZ3Ast] =
+proc heapLeafRaw(sv: SymVal; ty: IRType): RawZ3Ast =
+  ## RFC-0005 S8ar. The term a scalar part `sv` of type `ty` stores: an
+  ## `int` part held as a Z3 Int (a promoted value) is the heap's bitvector
+  ## of its width (`isDerefWrite`'s own svInt -> BV coercion).
+  if ty.kind == itInt and sv.kind == svInt:
+    case ty.width
+    of 8:  return intToBv[8](sv.zi, Z3BitVec[8]).raw
+    of 16: return intToBv[16](sv.zi, Z3BitVec[16]).raw
+    of 32: return intToBv[32](sv.zi, Z3BitVec[32]).raw
+    else:  return intToBv[64](sv.zi, Z3BitVec[64]).raw
+  rawAnyAstOf(sv)
+
+proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
   ## RFC-0005 S8ap. The leaf terms of a compound value, in
   ## `heapLeafSuffixes` order. Precondition: `sv.kind` is the compound kind.
+  ## RFC-0005 S8ar: a tree value's parts in order (`ty` names the parts'
+  ## types; a part that is a scalar stores `heapLeafRaw`). Precondition for
+  ## a tree: `svFitsHeapTy(sv, ty)`.
+  if ty != nil and heapTreeTy(ty):
+    if ty.kind == itDistinct:
+      return @[heapLeafRaw(ejectBase(sv), distinctGround(ty))]
+    let parts = heapParts(ty)
+    for i, part in parts:
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      if heapCompoundTy(part.ty): result.add svLeafAsts(psv, part.ty)
+      else: result.add heapLeafRaw(psv, part.ty)
+    return
   case sv.kind
   of svSeq:   @[sv.seqDataRaw.raw, sv.seqLen.raw] # [placeholder-audited]
   of svTable: @[sv.tabDataRaw.raw, sv.tabPresentRaw.raw, sv.tabSize.raw]
   of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
   else:       @[rawAnyAstOf(sv)]
 
-proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst]): SymVal =
+proc svFitsHeapTy(sv: SymVal; ty: IRType): bool =
+  ## RFC-0005 S8ar. `sv` has the shape a cell of `ty` stores: a tree value
+  ## part by part, a compound value of its kind (not a placeholder seq), a
+  ## scalar of its kind (an `int` as a bitvector or a promoted Z3 Int). A
+  ## value some upstream degrade produced may not.
+  if ty == nil: return false
+  case ty.kind
+  of itDistinct: svFitsHeapTy(ejectBase(sv), distinctGround(ty))
+  of itTuple:
+    if sv.kind != svTuple or sv.fields.len != ty.fields.len: return false
+    for i, f in ty.fields:
+      if not svFitsHeapTy(sv.fields[i], f): return false
+    true
+  of itArray:
+    if sv.kind != svArray or sv.arrElems.len != ty.size: return false
+    for e in sv.arrElems:
+      if not svFitsHeapTy(e, ty.elemTy): return false
+    true
+  of itSeq: sv.kind == svSeq and not sv.isUnsupportedFieldPlaceholder # [placeholder-audited]
+  of itTable: sv.kind == svTable
+  of itSet: sv.kind == svSet
+  of itInt:
+    case sv.kind
+    of svInt: true
+    of svBV8: ty.width == 8
+    of svBV16: ty.width == 16
+    of svBV32: ty.width == 32
+    of svBV64: ty.width == 64
+    else: false
+  of itBool: sv.kind == svBool
+  of itFloat32: sv.kind == svFloat32
+  of itFloat64: sv.kind == svFloat64
+  of itString: sv.kind == svString
+  of itRef: sv.kind == svRef
+  of itPtr: sv.kind == svPtr
+  else: false
+
+proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal
+
+proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
+                  ty: IRType = nil): SymVal =
   ## RFC-0005 S8ap. `proto` (a value of the cell's type) with its leaf terms
   ## replaced by `leaves`. The inverse of `svLeafAsts`. The leaves are
   ## OWNING handles: a raw term Z3 has not been asked to keep is only valid
   ## until the next API call, so no caller holds raw leaves across calls.
+  ##
+  ## RFC-0005 S8ar: a tree value (`ty`) is rebuilt part by part, a scalar
+  ## part lifted from its leaf (`liftHeapValue`; a `distinct` is its base
+  ## re-boxed, `reboxDistinct`: the distinct constant is opaque, the base is
+  ## the value).
+  if ty != nil and heapTreeTy(ty):
+    if ty.kind == itDistinct:
+      return liftHeapValue(ctx, leaves[0].raw, ty)
+    result = proto
+    var pos = 0
+    for i, part in heapParts(ty):
+      let n = heapLeafSuffixes(part.ty).len
+      let sub = leaves[pos ..< pos + n]
+      pos += n
+      let pproto = if proto.kind == svTuple: proto.fields[i] else: proto.arrElems[i]
+      let rebuilt =
+        if heapCompoundTy(part.ty): svWithLeaves(ctx, pproto, sub, part.ty)
+        else: liftHeapValue(ctx, sub[0].raw, part.ty)
+      if result.kind == svTuple: result.fields[i] = rebuilt
+      else: result.arrElems[i] = rebuilt
+    return
   result = proto
   case proto.kind
   of svSeq:
@@ -320,7 +472,7 @@ proc heapValueSort(ctx: Z3Context, proto: SymVal, pointeeTy: IRType,
   ## array sort definition, parameter is not a sort"). A scalar's sort is
   ## interned and never showed this.
   if heapCompoundTy(pointeeTy):
-    return ctx.checkErr Z3_get_sort(ctx.raw, svLeafAsts(proto)[leaf])
+    return ctx.checkErr Z3_get_sort(ctx.raw, svLeafAsts(proto, pointeeTy)[leaf])
   ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
 
 proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
@@ -344,7 +496,12 @@ proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
   ## RFC-0005 S8ap: `leaf` selects one leaf heap of a compound value
   ## (`heapLeafSuffixes`); only leaf 0, whose key is the field's own, records
   ## a shape.
-  let key = if name.startsWith("heap_"): name["heap_".len .. ^1] else: name
+  var key = if name.startsWith("heap_"): name["heap_".len .. ^1] else: name
+  # RFC-0005 S8ar: a tree value's leaf 0 is not at the cell's own key
+  # (`__@.<part>`); its shape is recorded under the cell's key.
+  let suffix0 = heapLeafSuffixes(pointeeTy)[0]
+  if leaf == 0 and suffix0.len > 0 and key.endsWith(suffix0):
+    key.setLen(key.len - suffix0.len)
   if leaf == 0 and (not heapKeyShapes.hasKey(key) or
      (variantTy != nil and heapKeyShapes[key].variantTy == nil)):
     heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
@@ -381,6 +538,18 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     SymVal(kind: svString, str: wrap[Z3String](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itDistinct:
+    # RFC-0005 S8ar. A `distinct` cell holds its base's leaves
+    # (`heapCompoundTy`), so a scalar base's term is the base value; the
+    # distinct constant is opaque and fresh (`reboxDistinct`). Before S8ar a
+    # distinct field was havocked (the `else` arm below), as one over a
+    # composite base still is (it has no distinct sort to re-box into).
+    if heapCompoundTy(pointeeTy):
+      reboxDistinct(pointeeTy, liftHeapValue(ctx, valRaw, pointeeTy.distinctBase))
+    else:
+      degradeAlloc(pointeeTy, heUnsupportedPointeeRead,
+        "deref of `ref/ptr " & $pointeeTy & "` (a distinct over a " &
+        "composite base) not modeled", "__liftHeapValueUnsupported")
   of itUninterp:
     # N42 SPOT-PROBE FINDING (temporary — see N42 slice commit for the
     # permanent version of this comment): `itUninterp` had NO arm here,
@@ -498,7 +667,40 @@ proc heapCellSelect(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
   var leaves: seq[Z3AnyAst]
   for c in cell:
     leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, c.arr.raw, refAst.raw))
-  svWithLeaves(ctx, proto, leaves)
+  svWithLeaves(ctx, proto, leaves, valTy)
+
+proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
+  ## RFC-0005 S8ap (was `heapCellWfConds`' body); S8ar: recursive over a
+  ## tree value's parts. The facts a free value of `ty` has (`allocateSym`'s
+  ## init facts): a string of bytes, a length or size in `[0, 1024]`, a
+  ## table's and a set's size tied to its keys (`ContainerCardRegistry`),
+  ## and -- for a NESTED scalar part, which no read site sees -- its declared
+  ## range (`rangeCondsIfNeeded`; a cell's own scalar range is the read
+  ## site's).
+  case sv.kind
+  of svString:
+    @[matches(sv.str, star(range(mkString("\x00"), mkString("\xff"))))]
+  of svSeq:
+    @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
+  of svTable:
+    registerTableBase(sv.tabPresentRaw, sv.tabSize)
+    @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
+  of svSet:
+    registerSetBase(sv.setMembersRaw, sv.setSize, ty.setElemTy)
+    @[sv.setSize >= mkInt(0),
+      sv.setSize <= mkInt(min(1024'i64, cellDomainSize(ty.setElemTy)))]
+  of svTuple:
+    var r: seq[Z3Bool]
+    for i, f in sv.fields: r.add svCellWf(f, ty.fields[i], true)
+    r
+  of svArray:
+    var r: seq[Z3Bool]
+    for e in sv.arrElems: r.add svCellWf(e, ty.elemTy, true)
+    r
+  of svDistinct:
+    svCellWf(ejectBase(sv), ty.distinctBase, nested)
+  else:
+    if nested: rangeCondsIfNeeded(sv, ty) else: @[]
 
 proc heapCellWfConds(ctx: Z3Context; key: string; refSort: RawZ3Sort;
                      valTy: IRType; refAst: Z3AnyAst): seq[Z3Bool] =
@@ -516,19 +718,7 @@ proc heapCellWfConds(ctx: Z3Context; key: string; refSort: RawZ3Sort;
     input.add (key & suffix,
                mkHeapArrayVar(ctx, refSort, valTy, "heap_" & key & suffix, nil, i))
   let sv = heapCellSelect(ctx, input, refAst, valTy)
-  case sv.kind
-  of svString:
-    @[matches(sv.str, star(range(mkString("\x00"), mkString("\xff"))))]
-  of svSeq:
-    @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
-  of svTable:
-    registerTableBase(sv.tabPresentRaw, sv.tabSize)
-    @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
-  of svSet:
-    registerSetBase(sv.setMembersRaw, sv.setSize, valTy.setElemTy)
-    @[sv.setSize >= mkInt(0),
-      sv.setSize <= mkInt(min(1024'i64, cellDomainSize(valTy.setElemTy)))]
-  else: @[]
+  svCellWf(sv, valTy, false)
 
 proc heapCellStore(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
                    valSV: SymVal; valTy: IRType): HeapCell =
@@ -543,15 +733,12 @@ proc heapCellStore(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
   if not heapCompoundTy(valTy):
     return @[(cell[0].key, wrap[Z3AnyAst](ctx,
       checkedStore(ctx, cell[0].arr.raw, refAst.raw, rawAnyAstOf(valSV))))]
-  let want = case valTy.kind
-    of itSeq: svSeq
-    of itTable: svTable
-    else: svSet
-  let fits = valSV.kind == want and
-    not (valSV.kind == svSeq and valSV.isUnsupportedFieldPlaceholder) # [placeholder-audited]
+  # RFC-0005 S8ar: the shape check is recursive (`svFitsHeapTy`), for a
+  # tree value's parts.
+  let fits = svFitsHeapTy(valSV, valTy)
   var leaves: seq[Z3AnyAst]
   if fits:
-    for raw in svLeafAsts(valSV): leaves.add wrap[Z3AnyAst](ctx, raw)
+    for raw in svLeafAsts(valSV, valTy): leaves.add wrap[Z3AnyAst](ctx, raw)
   else:
     allocDegrade(seUnsupportedCompoundSortLeaf,
       "heap store of a " & plainEnglishSymValKind(valSV.kind) & " into a `" &
@@ -576,14 +763,14 @@ proc heapCellIte(ctx: Z3Context; cond: Z3Bool; t, e: SymVal;
   if t.kind == svString and e.kind == svString:
     return SymVal(kind: svString, str: wrap[Z3String](ctx,
       checkedIte(ctx, cond.raw, t.str.raw, e.str.raw)))
-  if not heapCompoundTy(ty) or t.kind != e.kind:
+  if not heapCompoundTy(ty) or not svFitsHeapTy(t, ty) or not svFitsHeapTy(e, ty):
     return iteSV(cond, t, e)
-  let tl = svLeafAsts(t)
-  let el = svLeafAsts(e)
+  let tl = svLeafAsts(t, ty)
+  let el = svLeafAsts(e, ty)
   var leaves: seq[Z3AnyAst]
   for i in 0 ..< tl.len:
     leaves.add wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw, tl[i], el[i]))
-  svWithLeaves(ctx, t, leaves)
+  svWithLeaves(ctx, t, leaves, ty)
 
 proc heapCellZero(ty: IRType): SymVal =
   ## RFC-0005 S8ap. Nim's zero of a compound cell (`new`, an object

@@ -18,6 +18,7 @@
 
 import std/tables
 import std/options
+from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm
 import std/sets
 import std/hashes
 import std/algorithm   ## N46 audit (RFC-chapulin-hardening bucket-2): sort() for
@@ -1102,7 +1103,12 @@ proc heapCompoundTy(ty: IRType): bool
   ## `renderCellField` renders a leaf-split compound cell.
 proc heapLeafSuffixes(ty: IRType): seq[string]
   ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
-proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst]): SymVal
+proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
+                  ty: IRType = nil): SymVal
+proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]]
+  ## RFC-0005 S8ar fwd-decl (defined in runtime_heap.nim, included below).
+proc distinctGround(ty: IRType): IRType
+  ## RFC-0005 S8ar fwd-decl (defined in runtime_heap.nim, included below).
   ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
@@ -8627,6 +8633,10 @@ proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string] =
     r[i] = char(cp)
   some(r)
 
+proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     ctx: Z3Context; leafPath: string, sv: SymVal,
+                     valTy: IRType): string
+
 proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                         key, leafPath: string, addrAst: Z3AnyAst,
                         valTy: IRType): string =
@@ -8655,7 +8665,45 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       checkedSelect(ctx, inputHeap(key & suffix).raw, addrAst.raw))
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(valTy, "__heapRenderProto", scratchPC)
-  let sv = svWithLeaves(ctx, proto, leaves)
+  let sv = svWithLeaves(ctx, proto, leaves, valTy)
+  renderHeapValue(b, m, w, ctx, leafPath, sv, valTy)
+
+proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     ctx: Z3Context; leafPath: string, sv: SymVal,
+                     valTy: IRType): string =
+  ## RFC-0005 S8ap (was `renderHeapCompound`'s tail); S8ar: recursive over a
+  ## tree value (`heapCompoundTy`'s tuple / object, array, `distinct`), each
+  ## part written at `<leafPath>.<label>` (`heapPartLabel`, the name
+  ## `readCellField`'s `fieldPairs` walk reads) and a scalar part as a
+  ## scalar field is (`extractLeaf`, clamped -- an unread part is free).
+  case valTy.kind
+  of itDistinct:
+    return renderHeapValue(b, m, w, ctx, leafPath, ejectBase(sv), distinctGround(valTy))
+  of itInt, itBool, itFloat32, itFloat64:
+    extractLeaf(m, w, leafPath, sv)
+    clampWitnessField(w, leafPath, valTy)
+    return pointeeRendering(w, leafPath).get("<unobserved>")
+  of itString:
+    if sv.kind != svString: return "<unsupported>"
+    let s = evalStrBytesOrEmpty(m, sv.str).get("")
+    w.strVals[leafPath] = s
+    return s.escape
+  of itRef, itPtr:
+    let (childAddr, childPointee) =
+      if sv.kind == svRef: (sv.refAst, sv.refPointee)
+      else: (sv.ptrAst, sv.ptrPointee)
+    return addPosition(b, m, RefPos(name: leafPath, addrAst: childAddr,
+                                    pointee: childPointee), inlineNil = true)
+  of itTuple, itArray:
+    var parts: seq[string]
+    for i, part in heapParts(valTy):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      let r = renderHeapValue(b, m, w, ctx, leafPath & "." & part.label, psv,
+                              part.ty)
+      parts.add(if valTy.kind == itTuple: part.label & ": " & r else: r)
+    return (if valTy.kind == itTuple: "(" else: "[") & parts.join(", ") &
+           (if valTy.kind == itTuple: ")" else: "]")
+  else: discard
   # RFC-0005 S8ap: the svSeq reads below run only past this guard (N27).
   if sv.kind == svSeq and sv.isUnsupportedFieldPlaceholder: return "<unsupported>" # [placeholder-audited]
   case sv.kind
@@ -8704,11 +8752,14 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
 proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                      cell: RefPos, key, fname: string, declTy: IRType): string =
   ## RFC-0005 S8h. One field of `cell`, from its input heap `key`.
-  if not currentVariantHeaps.hasKey(key): return "<unobserved>"
+  ## RFC-0005 S8ar: a tree value's first leaf is not at `key` itself
+  ## (`heapLeafSuffixes`), so the observed test is of that leaf.
   let valTy = block:
     let t = heapKeyValTy(key)
     if t != nil: t else: declTy
   if valTy == nil: return "<unobserved>"
+  if not currentVariantHeaps.hasKey(key & heapLeafSuffixes(valTy)[0]):
+    return "<unobserved>"
   case valTy.kind
   of itInt, itBool, itFloat32, itFloat64:
     renderHeapLeaf(m, w, key, cell.name & "." & fname, cell.addrAst, valTy)
@@ -8720,9 +8771,10 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     addPosition(b, m, RefPos(name: cell.name & "." & fname,
                              addrAst: childAddr, pointee: childPointee),
                 inlineNil = true)
-  of itString, itSeq, itTable, itSet:
+  of itString, itSeq, itTable, itSet, itTuple, itArray, itDistinct:
     # RFC-0005 S8ap: a string field, and a leaf-split compound field
-    # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`.
+    # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`. RFC-0005
+    # S8ar: a by-value tuple / object, array and `distinct` too.
     if valTy.kind == itString or heapCompoundTy(valTy):
       renderHeapCompound(b, m, w, key, cell.name & "." & fname, cell.addrAst,
                          valTy)
@@ -8757,8 +8809,13 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     if key.len > prefix.len and key.startsWith(prefix):
       let suffix = key[prefix.len .. ^1]
       # A Nim identifier never contains `__`; a suffix that does belongs to
-      # a different type whose id extends this one's.
-      if suffix[0] != '@' and "__" notin suffix: observed.add suffix
+      # a different type whose id extends this one's. RFC-0005 S8ar: or is a
+      # leaf of a tree-valued field, `<field>__@.<part>...`.
+      let fieldPart = block:
+        let at = suffix.find("__@.")
+        if at > 0: suffix[0 ..< at] else: suffix
+      if fieldPart[0] != '@' and "__" notin fieldPart and fieldPart notin observed:
+        observed.add fieldPart
   sort(observed)
   var parts: seq[string]
   var done: seq[string]
@@ -20602,7 +20659,12 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   ## rests on it, and `witnessFidelity` classifies such a pointee lossy.
   when F isnot ref and F isnot ptr:
     validDefault(f)
-  when F is ref:
+  when F is distinct:
+    # RFC-0005 S8ar: a `distinct` cell value is its base's leaf.
+    var b: typetraits.distinctBase(F)
+    readCellField(c, path, b)
+    when compiles(F(b)): f = F(b)
+  elif F is ref:
     f = resolveRef[F](c, path)
   elif F is ptr:
     when typeof(f[]) is object or typeof(f[]) is SomeNumber or
@@ -20638,6 +20700,18 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
     when compiles(readCellTable(c, path, f)): readCellTable(c, path, f)
   elif F is HashSet:
     readCellSet(c, path, f)
+  elif F is object or F is tuple:
+    # RFC-0005 S8ar: a by-value object / tuple field, each part the leaf
+    # `<path>.<name>` (`renderHeapValue`; an anonymous tuple's `FieldN`).
+    {.cast(uncheckedAssign).}:
+      for fname, fv in fieldPairs(f):
+        readCellField(c, path & "." & fname, fv)
+  elif F is array:
+    # RFC-0005 S8ar: an array field, element `i` (from 0) the leaf `<path>.<i>`.
+    var i = 0
+    for x in f.mitems:
+      readCellField(c, path & "." & $i, x)
+      inc i
   else:
     discard
 

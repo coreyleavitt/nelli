@@ -1861,10 +1861,28 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
       else: wfLossy
     of itSet:
       if isBackedSetElemTy(f.setElemTy): wfFaithful else: wfLossy
+    # RFC-0005 S8ar: a by-value object / tuple, array and `distinct` field,
+    # held leaf-split (`heapCompoundTy`), written part by part by
+    # `renderHeapValue` and read by `readCellField`'s `fieldPairs` / array /
+    # distinct arms. A part the heap does not model makes it lossy (its
+    # read degrades); so does a by-value case object.
+    of itTuple:
+      if f.isPlaceholder or f.fields.len == 0: wfLossy
+      else:
+        var r = wfFaithful
+        for g in f.fields: r = max(r, fieldFidelity(g, inProgress))
+        r
+    of itArray:
+      if f.size == 0: wfLossy else: fieldFidelity(f.elemTy, inProgress)
+    of itDistinct:
+      var g = f.distinctBase
+      while g.kind == itDistinct: g = g.distinctBase
+      if g.kind in {itInt, itBool, itFloat32, itFloat64, itString}: wfFaithful
+      else: wfLossy
     else: wfLossy
   case pointee.kind
   of itBool, itInt, itFloat32, itFloat64: wfFaithful
-  of itString, itSeq, itTable, itSet:   # RFC-0005 S8ap: `ref seq[int]` etc.
+  of itString, itSeq, itTable, itSet, itArray, itDistinct:   # RFC-0005 S8ap: `ref seq[int]` etc.; S8ar: + array, distinct
     fieldFidelity(pointee, inProgress)
   of itTuple:
     if pointee.objectName.len == 0: return wfLossy   ## `fieldPairs` names differ

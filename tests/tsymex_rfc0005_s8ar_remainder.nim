@@ -286,3 +286,143 @@ suite "S8ar (8): the heap-depth budget counts heap steps, not field reads":
     let r3 = symexFind(dKid, tLabel("d_kid"), budget(3))
     checkpoint $r3.status & " " & show(r3.errors)
     check r3.status == sxSat
+
+type
+  Meters = distinct int
+  Pt = object
+    x, y: int
+  FHolder = ref object
+    pt: Pt
+    tp: (int, bool)
+    arr: array[3, int]
+    m: Meters
+    nm: tuple[a: int, s: string]
+    nested: (Pt, int)
+  PtRef = ref Pt
+
+proc fPt(p: FHolder) =
+  if p != nil and p.pt.x == 3 and p.pt.y == p.pt.x + 1: symexTarget("f_pt")
+
+proc fTup(p: FHolder) =
+  if p != nil and p.tp[0] == 5 and p.tp[1]: symexTarget("f_tup")
+
+proc fArr(p: FHolder) =
+  if p != nil and p.arr[2] == 9 and p.arr[0] == -1: symexTarget("f_arr")
+
+proc fDist(p: FHolder) =
+  if p != nil and int(p.m) == 7: symexTarget("f_dist")
+
+proc fNested(p: FHolder) =
+  if p != nil and p.nested[0].y == 2 and p.nested[1] == 4: symexTarget("f_nested")
+
+proc fNamed(p: FHolder) =
+  if p != nil and p.nm.a == 1 and p.nm.s.len == 1 and p.nm.s[0] == '\xff':
+    symexTarget("f_named")
+
+proc fWrite(p: FHolder, v: int) =
+  if p == nil: return
+  p.pt = Pt(x: v, y: 2)
+  p.tp = (v, true)
+  p.m = Meters(v)
+  if p.pt.x == 5 and p.pt.y == 2 and p.tp[1]: symexTarget("f_write")
+  if p.pt.y != 2: symexTarget("f_write_dead")
+  if p.tp[0] != v: symexTarget("f_write_tup_dead")
+  if int(p.m) != v: symexTarget("f_write_dist_dead")
+
+proc fAlias(a, b: FHolder) =
+  if a == nil or b == nil: return
+  a.pt = Pt(x: 1, y: 1)
+  b.pt = Pt(x: 2, y: 2)
+  if a.pt.x == 2: symexTarget("f_alias")
+  if a.pt.x == 1 and b.pt.x == 1: symexTarget("f_alias_dead")
+
+proc fZero() =
+  let q = FHolder()
+  if int(q.m) == 0 and q.pt.x == 0 and q.arr[1] == 0 and not q.tp[1] and
+     q.nm.s.len == 0 and q.nested[0].y == 0:
+    symexTarget("f_zero")
+  if int(q.m) != 0: symexTarget("f_zero_dist_dead")
+  if q.pt.y != 0: symexTarget("f_zero_pt_dead")
+  if q.arr[2] != 0: symexTarget("f_zero_arr_dead")
+
+proc fNewZero() =
+  var q: FHolder
+  new(q)
+  if int(q.m) != 0: symexTarget("f_new_dist_dead")
+  if int(q.m) == 0: symexTarget("f_new_dist")
+
+proc fWhole(p: PtRef) =
+  if p == nil: return
+  p.x = 4
+  if p[].x != 4: symexTarget("f_whole_read_dead")
+  p[] = Pt(x: 2, y: 3)
+  if p.y == 3 and p[].x == 2: symexTarget("f_whole_write")
+  if p.y != 3: symexTarget("f_whole_write_dead")
+
+proc fWholeIn(p: PtRef) =
+  if p != nil and p[].x == 6 and p.y == 7: symexTarget("f_whole_in")
+
+
+suite "S8ar (5, 6): tuple, object, array and distinct fields of a heap cell":
+  template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
+    block:
+      let r = symexFind(fn, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & " " & show(r.errors)
+      check r.status == want
+      check not r.errors.hasKind(weInternalWalkerFault)
+      r
+
+  test "an object field":
+    let r = run(fPt, "f_pt", sxSat)
+    if r.status == sxSat: check reproduces(fPt(r.witness[0]), "f_pt")
+
+  test "an anonymous tuple field":
+    let r = run(fTup, "f_tup", sxSat)
+    if r.status == sxSat: check reproduces(fTup(r.witness[0]), "f_tup")
+
+  test "an array field":
+    let r = run(fArr, "f_arr", sxSat)
+    if r.status == sxSat: check reproduces(fArr(r.witness[0]), "f_arr")
+
+  test "a distinct field":
+    let r = run(fDist, "f_dist", sxSat)
+    if r.status == sxSat: check reproduces(fDist(r.witness[0]), "f_dist")
+
+  test "a tuple of an object and an int":
+    let r = run(fNested, "f_nested", sxSat)
+    if r.status == sxSat: check reproduces(fNested(r.witness[0]), "f_nested")
+
+  test "a named tuple with a string part (its bytes are facts of the read)":
+    let r = run(fNamed, "f_named", sxSat)
+    if r.status == sxSat: check reproduces(fNamed(r.witness[0]), "f_named")
+
+  test "writes of whole tree values":
+    let r = run(fWrite, "f_write", sxSat)
+    if r.status == sxSat:
+      check reproduces(fWrite(r.witness[0], r.witness[1]), "f_write")
+    discard run(fWrite, "f_write_dead", sxUnsat)
+    discard run(fWrite, "f_write_tup_dead", sxUnsat)
+    discard run(fWrite, "f_write_dist_dead", sxUnsat)
+
+  test "two refs to one cell share its tree value":
+    let r = run(fAlias, "f_alias", sxSat)
+    if r.status == sxSat:
+      check reproduces(fAlias(r.witness[0], r.witness[1]), "f_alias")
+    discard run(fAlias, "f_alias_dead", sxUnsat)
+
+  test "a constructed object zeroes every tree field; a distinct's zero is its base's":
+    discard run(fZero, "f_zero", sxSat)
+    discard run(fZero, "f_zero_dist_dead", sxUnsat)
+    discard run(fZero, "f_zero_pt_dead", sxUnsat)
+    discard run(fZero, "f_zero_arr_dead", sxUnsat)
+
+  test "new(T) zeroes a distinct field":
+    discard run(fNewZero, "f_new_dist", sxSat)
+    discard run(fNewZero, "f_new_dist_dead", sxUnsat)
+
+  test "p[] of an object reads and writes the field heaps":
+    discard run(fWhole, "f_whole_read_dead", sxUnsat)
+    discard run(fWhole, "f_whole_write", sxSat)
+    discard run(fWhole, "f_whole_write_dead", sxUnsat)
+    let r = run(fWholeIn, "f_whole_in", sxSat)
+    if r.status == sxSat: check reproduces(fWholeIn(r.witness[0]), "f_whole_in")

@@ -1289,6 +1289,18 @@ proc freshSynth(ctx: ParseCtx, prefixWord: string): string =
   inc ctx.synthCounter
   "__sym_" & prefixWord & "_" & $ctx.synthCounter
 
+proc wholeObjectPointee(pointeeTy: IRType): bool =
+  ## RFC-0005 S8ar. A `ref`/`ptr` pointee that is an object or named tuple
+  ## with fields: `p[]` reads and `p[] = v` writes it field by field, the
+  ## field heaps `p.f` uses. A placeholder (a recursive field's pointee) has
+  ## no field list here, and an anonymous tuple no field names.
+  if pointeeTy == nil or pointeeTy.kind != itTuple or pointeeTy.isPlaceholder or
+     pointeeTy.fields.len == 0:
+    return false
+  for fname in pointeeTy.fieldNames:
+    if fname.len == 0: return false
+  true
+
 # ---- RFC-0005 S8m: break / continue targets -----------------------------------
 #
 # Nim's `break` leaves the innermost enclosing `block` or loop, `break L`
@@ -4346,6 +4358,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let isPtr = opCls.ty.kind == itPtr
       let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
       let ptrIR = parseExpr(operand, preamble, ctx)
+      if wholeObjectPointee(pointeeTy):
+        # RFC-0005 S8ar. `p[]` of an object is the object of its fields, each
+        # read from its own field heap -- the cells `p.f` reads and writes.
+        # A whole-pointee heap for an object would be a second, unrelated
+        # store of the same fields.
+        var elems: seq[IRExpr]
+        for i, fname in pointeeTy.fieldNames:
+          let synth = freshSynth(ctx, "deref")
+          preamble.add mkFieldDeref(synth, ptrIR, pointeeTy.fields[i], pointeeTy,
+                                    fname, isPtr)
+          elems.add mkVar(synth)
+        return mkTupleLit(elems, pointeeTy)
       let synth = freshSynth(ctx, "deref")
       let stmt = if isPtr: mkPtrDeref(synth, ptrIR, pointeeTy)
                  else:     mkDeref(synth, ptrIR, pointeeTy)
@@ -9838,6 +9862,19 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
       let ptrIR = parseExpr(operand, preamble, ctx)
       let valIR = asgnRhs()
+      if wholeObjectPointee(pointeeTy):
+        # RFC-0005 S8ar: `p[] = v` of an object writes each field's own heap
+        # (the read side's reason, `parseExpr`'s deref arm).
+        let tmp = freshSynth(ctx, "dw")
+        preamble.add mkLet(tmp, pointeeTy, valIR)
+        let last = pointeeTy.fields.len - 1
+        for i in 0 ..< last:
+          preamble.add mkFieldDerefWrite(ptrIR,
+            mkField(mkVar(tmp), i, pointeeTy.fieldNames[i]), pointeeTy.fields[i],
+            pointeeTy, pointeeTy.fieldNames[i], isPtr)
+        return mkFieldDerefWrite(ptrIR,
+          mkField(mkVar(tmp), last, pointeeTy.fieldNames[last]),
+          pointeeTy.fields[last], pointeeTy, pointeeTy.fieldNames[last], isPtr)
       return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
   # Phase 15 R6 (ADR-0010) + ADR-0013 S3. `p.field = v` — a FIELD WRITE through
   # a `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`,

@@ -9606,31 +9606,30 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     same(result, t1, t2)
   proc sameKey(s1, s2, t1, t2: Z3AnyAst): bool =
     cls(s1) == cls(s2) and cls(t1) == cls(t2)
-  # RFC-0005 S8aq. "`L` (`seq.last_indexof(s, t)`) is at least every found
-  # `str.indexof(s, t, i)`" is valid -- `L` is itself an occurrence and no
-  # later one exists, so searching from `L` finds `L` exactly -- but S8ai
-  # dropped it: asked as a universal claim over free `s`, `t`, `i`, neither
-  # linked Z3 refutes its negation within the pin's 1M-unit budget, even at
-  # `i = 0`. Reformulated as one GROUND fact per `seq.last_indexof` term
-  # already in the query -- a FRESH `str.indexof(s, t, L)` term, L itself
-  # as the start -- it validates (below): `L >= 0` implies that fresh term
-  # equals `L`. Joined into `indexOfs` before the pairwise loop, the
-  # already-valid ordered-starts facts above (generic over any two
-  # `str.indexof` terms of one haystack/needle, not specific to this one)
-  # give the dropped link for free: for an existing `str.indexof(s, t, i)`
-  # with `0 <= i <= L`, `L >= 0` implies `0 <= i's result <= L`.
-  # `tsymex_rfc0005_s8aq_remainder.nim` pins both the ground fact's
-  # validity and the end-to-end link.
-  for l in lastIdxs:
-    let synRaw = ctx.checkErr Z3_mk_seq_index(ctx.raw, l.s.raw, l.t.raw, l.r.raw)
-    let syn = wrap[Z3Int](ctx, synRaw)
-    # The same definitional bound every discovered `str.indexof` term gets
-    # (this one is built here, not walked from `roots`, so it has none yet).
-    result.add (syn == minusOne) or
-      ((zero <= syn) and (l.r <= syn) and
-       (syn + lenOf(ctx, l.t) <= lenOf(ctx, l.s)))
-    result.add implies(l.r >= zero, syn == l.r)
-    indexOfs.add (s: l.s, t: l.t, i: l.r, r: syn)
+  # RFC-0005 S8aq (attempted, reverted). "`L` (`seq.last_indexof(s, t)`) is
+  # at least every found `str.indexof(s, t, i)`" is valid in the theory --
+  # `L` is itself an occurrence and no later one exists, so searching from
+  # `L` finds `L` exactly -- but S8ai dropped it: asked as a universal
+  # claim over free `s`, `t`, `i`, neither linked Z3 refutes its negation
+  # within the pin's 1M-unit budget, even at `i = 0`. S8aq tried two
+  # reformulations, both of which `tsymex_rfc0005_s8v_termination`'s
+  # per-fact validity pin caught as undecidable in practice, not just slow,
+  # on Z3 5.1 (not only Z3 4.13.4): (a) a fresh `str.indexof(s, t, L)` term
+  # joined into the pairwise loop below -- nesting `str.indexof` inside a
+  # `seq.last_indexof` argument is a theorem but Z3 does not decide its
+  # negation within 1M units; (b) the same link stated directly against an
+  # existing `str.indexof(s, t, i)` term with no nested term at all (`0 <=
+  # i <= L` implies `0 <= indexof(s, t, i) <= L`) -- still a theorem, and
+  # still not decided: raising the check's OWN budget to 50M units made Z3
+  # hang past a 240s wall-clock bound rather than return either answer, so
+  # this is not a budget-tuning gap. Z3's `str.indexof`/`seq.last_indexof`
+  # COMBINED reasoning is the obstacle (this file already documents a
+  # correctness bug in the same combination on Z3 4.13.4's incremental
+  # core), not the phrasing. Declined: no ground fact links these two
+  # functions here. `tsymex_rfc0005_s8aq_remainder.nim`'s "S8aq (2)" suite
+  # records the decline and what it costs (completeness only, per item 4's
+  # same class of gap -- steps 2/3 under the full theory still decide a
+  # query this would have shortcut).
   for e in indexOfs:
     let atZero = e.i == zero
     for c in containsL:

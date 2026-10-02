@@ -7811,20 +7811,28 @@ UNSAT to pull an unsat core from) is unchanged, still gated on
 pinned end to end for this reason; both are now `sxUnsat` under a budget
 that cancels step 1.
 
-*2. The dropped link, reformulated as a ground fact.* S8ai's link ("`L`
+*2. The dropped link — attempted, declined.* S8ai's link ("`L`
 (`seq.last_indexof`) is at least every found `str.indexof(s, t, i)`") was
 valid but neither Z3 could refute its negation within S8v's 1M-unit pin,
-even at `i = 0`. Rather than assert it directly, `seqRangeFacts` now
-builds one synthetic `str.indexof(s, t, L)` term per `seq.last_indexof`
-occurrence — searching from `L` itself finds `L` exactly when `L` is a
-real occurrence, a MUCH narrower (ground) claim that validates within
-budget on both Z3 5.1 and 4.13.4. Folded into the existing `indexOfs`
-collection before the pairwise-ordering loop runs, S8ai's own two-starts
-facts apply to it automatically, giving the original link for any
-`str.indexof` term found from a start at or before `L` — no new pairwise
-code. The link needs an anchor already establishing `L >= 0`
-(`str.contains`/prefix/suffix — S8ai's existing link) somewhere in the
-query; see "different mechanisms" below.
+even at `i = 0`. S8aq tried two reformulations as a ground fact
+`seqRangeFacts` could emit: first, a synthetic `str.indexof(s, t, L)` term
+per `seq.last_indexof` occurrence (searching from `L` finds `L` exactly
+when `L` is a real occurrence) folded into the existing `indexOfs`
+collection so S8ai's own pairwise-ordering facts would apply to it
+automatically; when `tsymex_rfc0005_s8v_termination.nim`'s own per-fact
+validity pin caught that as `zsUnknown` (not just slow — symex-mingw's
+Windows CI leg surfaced this on Z3 4.13.4, and it reproduces on Z3 5.1
+too), a second, simpler form stating the same bound directly against an
+existing `str.indexof(s, t, i)` term with no nested term at all. Raising
+the validity pin's own check budget 50x (1M → 50M units) made the second
+form hang past a 240s wall-clock bound on Z3 5.1 rather than return
+either answer. Both forms are genuine theorems — a small-domain exhaustive
+check over strings up to length 3 and integers -2..6 found no
+counterexample to either, and Z3 never returned `zsSat` (a disproof) for
+either, only `zsUnknown` (unable to decide) — so this is a tractability
+limit of Z3's combined `str.indexof`/`seq.last_indexof` reasoning, not an
+unsound fact. **Declined**: `seqRangeFacts` emits no fact linking the two
+functions. See "different mechanisms" below for what this costs.
 
 *3. `str.replace_all` is reachable, opt-in.* The walker's own call
 (`iekStrReplaceAll`, `runtime_strings.nim`) was unconditionally gated off
@@ -7868,10 +7876,13 @@ Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
 - (1) End to end, both of S8ai's named cases are `sxUnsat` under a budget
   that cancels step 1 (`tight()`, `seqQueryRLimit = 2_000`), with no
   `"was not decided"` error.
-- (2) The ground fact validates (negation UNSAT, ground-domain check). Step
-  1c alone decides "a found index (from 0) cannot exceed `L`" `zsUnsat`,
-  with its companion ("at or before `L`") `zsSat`; a hand-built strict
-  mutant fails the validity check. Both hold end to end too.
+- (2) The decline itself: step 1c never claims `zsUnsat` from the dropped
+  link (no false positive), a found index at or before `L` stays `zsSat`,
+  and a hand-built strict mutant of the (abandoned) fact still fails the
+  general validity-check machinery (pinning that machinery, independent of
+  `seqRangeFacts`'s own output). End to end, the query the dropped link
+  would have shortcut lands a sound `sxUnknown` (never a false `sxSat`),
+  with its companion still reachable.
 - (3) End to end, under this suite's own `-d:z3WithSeqReplaceAll`: every
   occurrence is really replaced (`sxSat`, confirmed by replay, never
   `seZ3VersionMissing`) on a Z3 that has the symbol; the first-occurrence-
@@ -7886,19 +7897,16 @@ Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
 - The `>= 187` floor.
 
 *Different mechanisms, reported and not fixed here.*
-- **Item 2's link needs an anchor already in the query.** The fresh
-  `str.indexof(s, t, L)` term's ordering facts only fire once something
-  else in the query already establishes `L >= 0` (a stated or
-  walker-produced `str.contains`/prefix/suffix term — S8ai's existing
-  link). A query that reaches the same mathematical fact through
-  `str.indexof`'s own base bound alone, with no contains/prefix/suffix
-  term anywhere in its roots, still falls through to steps 2/3 (still
-  correctly decided, just not by step 1c's shortcut). This is the same
-  *class* of gap as item 4 above (step 1c needs a syntactic foothold) but
-  through a missing anchor fact rather than a missing equality join;
-  synthesizing a `str.contains` term for every `seq.last_indexof`
-  occurrence that lacks one is its own slice-sized design question, not
-  attempted here.
+- **Item 2's gap is now permanent, not an anchor-availability question.**
+  A query that reaches "`L` is at least every found `str.indexof(s, t,
+  i)`" purely through `seqRangeFacts` falls through to steps 2/3 (still
+  correctly decided, just not by step 1c's shortcut) regardless of what
+  else is in the query — there is no anchor fact, stated or
+  walker-produced, that would make step 1c decide it, because
+  `seqRangeFacts` emits no fact joining the two functions at all (see item
+  2 above). This is the same *class* of gap as item 4 above (step 1c needs
+  a syntactic foothold it does not have), but here the foothold is
+  provably unreachable by Z3 in this combination, not merely unbuilt.
 - **Regex replace-all sits behind the same kind of gate, for a different
   reason.** nim-z3 declares `Z3_mk_seq_replace_re`/`Z3_mk_seq_replace_reAll`
   the same optional/prototype way as `Z3_mk_seq_replace_all`, gated behind

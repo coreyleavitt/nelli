@@ -11,13 +11,18 @@
 ## (2) The dropped link "L (`seq.last_indexof`) is at least every found
 ##     `str.indexof(s, t, i)`" is valid but S8ai could not get either Z3 to
 ##     refute its negation within 1M units, even at `i = 0` -- so it was
-##     never emitted. Reformulated as a ground fact over a FRESH
-##     `str.indexof(s, t, L)` term (searching from `L` itself finds `L`
-##     when `L` is a real occurrence), it both validates within budget and
-##     -- joined into the existing `indexOfs` collection, so the pairwise
-##     ordering facts step 1c already emits apply to it -- gives exactly
-##     the dropped link for any `str.indexof` term found at a start at or
-##     before `L`.
+##     never emitted. S8aq tried two reformulations as a ground fact
+##     `seqRangeFacts` could emit (a fresh `str.indexof(s, t, L)` term
+##     joined into the existing pairwise loop; the same bound stated
+##     directly against an existing `str.indexof(s, t, i)` term with no
+##     nested term at all) and both proved undecidable in practice, not
+##     just slow -- `tsymex_rfc0005_s8v_termination.nim`'s own per-fact
+##     validity pin caught each as `zsUnknown` on Z3 5.1 (not only Z3
+##     4.13.4), and raising that pin's own check budget 50x (1M -> 50M
+##     units) made Z3 hang past a 240s wall-clock bound rather than answer
+##     either way. Declined: no ground fact links `str.indexof` and
+##     `seq.last_indexof` here. (2) below pins the decline's shape instead
+##     of the (abandoned) fact's validity.
 ## (3) `str.replace_all` is unreachable from the walker because nim-z3's
 ##     `replaceAll` wrapper is `-d:z3WithSeqReplaceAll`-gated (the C
 ##     constructor is absent below Z3 4.16); nelli's own build never set
@@ -165,21 +170,13 @@ proc factFlaw(ctx: Z3Context; f: Z3Bool): string =
   if r == zsSat or cex.len > 0: return $f & " -> " & $r & ", ground: " & cex
   ""
 
-proc invalidFacts(ctx: Z3Context; roots: seq[Z3Bool]):
-    tuple[n: int, bad: seq[string]] =
-  let facts = seqRangeFacts(ctx, roots)
-  result.n = facts.len
-  for f in facts:
-    let flaw = factFlaw(ctx, f)
-    if flaw.len > 0: result.bad.add flaw
-
 proc foundExceedsLast(s, t: string) =
   # `t in s` anchors `seqRangeFacts`' contains <-> last_indexof link
   # (`l.r >= 0 iff contains`, S8ai): without SOME contains/prefix/suffix
   # term in the query, step 1c has no way to learn `L >= 0` at all (the
-  # base per-term bound alone says nothing about any OTHER term), so the
-  # new ordered-starts link never gets a foothold. `t in s` is already
-  # IMPLIED by `s.find(t, 0) >= 0` -- asserting it too narrows nothing.
+  # base per-term bound alone says nothing about any OTHER term). `t in s`
+  # is already IMPLIED by `s.find(t, 0) >= 0` -- asserting it too narrows
+  # nothing.
   if t in s and s.find(t, 0) >= 0 and s.rfind(t) < s.find(t, 0):
     symexTarget("s8aq_found_exceeds_last")
 
@@ -187,26 +184,46 @@ proc foundAtOrBeforeLast(s, t: string) =
   if t in s and s.find(t, 0) >= 0 and s.rfind(t) >= s.find(t, 0):
     symexTarget("s8aq_found_at_or_before_last")
 
-suite "S8aq (2): the dropped link, reformulated as a ground fact":
+proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
+  for e in errs:
+    if e.kind == k: return true
+  false
 
-  test "the ground fact (L >= 0 implies the fresh indexof(s, t, L) == L) is valid":
-    let ctx = newContext()
-    let roots = q(ctx, """(assert (>= (seq.last_indexof s t) 0))
-                          (assert (>= (str.indexof s t i) 0))""")
-    let (count, bad) = invalidFacts(ctx, roots)
-    checkpoint bad.join("; ")
-    check count >= 2
-    check bad.len == 0
+suite "S8aq (2): the dropped link is declined -- Z3 cannot decide the combination":
 
-  test "step 1c decides: a found index cannot exceed L":
-    # `str.contains` anchors the `L >= 0` link (see `foundExceedsLast`'s own
-    # comment, below); `i` is fixed at the literal 0 so `ordered` (`0 <= i
-    # <= L`) reduces to exactly that anchor.
+  # RFC-0005 S8aq attempted two reformulations of the dropped link ("L
+  # (`seq.last_indexof`) is at least every found `str.indexof`") as a
+  # ground fact `seqRangeFacts` could emit: a fresh `str.indexof(s, t, L)`
+  # term joined into the existing pairwise loop, and (when that proved
+  # undecidable within budget) the same bound stated directly against an
+  # existing `str.indexof(s, t, i)` term with no nested term at all.
+  # `tsymex_rfc0005_s8v_termination.nim`'s own per-fact validity pin --
+  # which asserts the FULL theory refutes every fact's negation within
+  # budget, the precondition for using a fact as a theory-free axiom at
+  # all -- caught BOTH as undecided (`zsUnknown`) on Z3 5.1, not just Z3
+  # 4.13.4; raising that pin's own check budget 50x (1M -> 50M units) made
+  # Z3 hang past a 240s wall-clock bound rather than answer either way, so
+  # this is not a budget-tuning gap. Declined: `seqRangeFacts` emits no
+  # fact linking `str.indexof` and `seq.last_indexof` together. What
+  # remains below pins the decline's shape: step 1c never falsely proves
+  # the (true) claim, and the one case engineered to need exactly this
+  # link is not decided even by the full theory at default settings
+  # (`sxUnknown`, never a false verdict) -- the same completeness-only
+  # cost item 4 documents for its own missed-equality gap, except here the
+  # full theory does not recover it either, so there is no step 2/3 safety
+  # net for this specific shape today.
+
+  test "step 1c does not claim UNSAT from the dropped link (no false positive)":
+    # Same query item 2 originally meant to decide: `str.contains` anchors
+    # the `L >= 0` link (see `foundExceedsLast`'s own comment, above); `i`
+    # is fixed at the literal 0. With the link declined, step 1c must not
+    # claim UNSAT here -- that would be using an unproven fact as if it
+    # were a theorem.
     let ctx = newContext()
     let roots = q(ctx, """(assert (str.contains s t))
                           (assert (>= (str.indexof s t 0) 0))
                           (assert (< (seq.last_indexof s t) (str.indexof s t 0)))""")
-    check stepOneC(ctx, roots) == zsUnsat
+    check stepOneC(ctx, roots) != zsUnsat
 
   test "companion: a found index at or before L is satisfiable":
     let ctx = newContext()
@@ -215,7 +232,11 @@ suite "S8aq (2): the dropped link, reformulated as a ground fact":
                           (assert (>= (seq.last_indexof s t) (str.indexof s t 0)))""")
     check stepOneC(ctx, roots) == zsSat
 
-  test "the validity check catches a broken (strict) mutant of the fact":
+  test "the validity check catches a broken (strict) mutant of the (declined) fact":
+    # `factFlaw`/`holdsOnSmallDomain` are the general validity-checking
+    # helpers this suite and `tsymex_rfc0005_s8v_termination.nim` both
+    # rely on; this pins that they still catch an actually-broken formula,
+    # independent of whether `seqRangeFacts` itself emits anything like it.
     let ctx = newContext()
     let mutant = q(ctx, """
       (assert (=> (>= (str.indexof s t i) 0)
@@ -226,10 +247,17 @@ suite "S8aq (2): the dropped link, reformulated as a ground fact":
     checkpoint $mutant & " -> " & flaw
     check flaw.len > 0
 
-  test "end to end: a found index (from 0) cannot exceed L":
+  test "end to end: declined -- sound sxUnknown, never a false sxSat":
+    # The one SUT shape engineered to need exactly this link: with it
+    # declined, the full (uncapped) sequence theory at DEFAULT settings
+    # also does not decide it within budget (the same Z3 weakness the
+    # suite-level comment measured, not a separate gap) -- `sxUnknown`,
+    # classified `beSolverUndef`, never a false `sxSat` or a silent wrong
+    # `sxUnsat`.
     let r = symexFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
     checkpoint show(r.errors)
-    check r.status == sxUnsat
+    check r.status == sxUnknown
+    check hasKind(r.errors, beSolverUndef)
 
   test "companion: a found index at or before L is reachable":
     let r = symexFind(foundAtOrBeforeLast, tLabel("s8aq_found_at_or_before_last"))
@@ -257,11 +285,6 @@ proc replaceGrowthAndRoundtrip(s: string) =
   # rather than fold it concretely.
   if s.len > 5 and ':' notin s and s.replace(":", ";;") != s:
     symexTarget("s8aq_replace_no_occurrence_unreachable")
-
-proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
-  for e in errs:
-    if e.kind == k: return true
-  false
 
 suite "S8aq (3): str.replace_all is reachable (this suite's -d:z3WithSeqReplaceAll)":
   # This suite's `-d:z3WithSeqReplaceAll` only turns ON the attempt to use

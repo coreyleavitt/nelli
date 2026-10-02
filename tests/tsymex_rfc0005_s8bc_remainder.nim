@@ -805,6 +805,185 @@ suite "S8bc (7): mgetOrPut":
     check not r.errors.hasKind(weInternalWalkerFault)
     if r.status == sxSat: check reproduces(emptyArg(r.witness[0]), "empty_arg")
 
+# ---- (6) Table iteration ---------------------------------------------------
+#
+# RFC-0005 S8bc: `pairs` / `keys` / `values` (and `for k, v in t`) over a
+# Table is a bounded unroll over an enumeration of its present keys in a
+# FREE order (`isTabKeys`). Nim's order is the hash order, so a table that
+# can hold two or more entries taints the path `feTableIterOrder`
+# (`dcFreshSymbol`): the candidate is replayed, and one whose label needs an
+# order Nim does not produce is refuted to sxUnknown.
+
+proc tiSum(a, b: int) =
+  if a < -100 or a > 100 or b < -100 or b > 100: return   # no overflow
+  var t = initTable[int, int]()
+  t[a] = 1
+  t[b] = 2
+  var s = 0
+  for k, v in t:
+    s += v + k
+  if s == 13 and a == 4: symexTarget("ti_sum")
+  # Every enumeration sums the same: a + b + 3 over two entries, b + 2 over
+  # one (a == b, the second write wins).
+  if a != b and s != a + b + 3: symexTarget("ti_sum_dead")
+  if a == b and s != b + 2: symexTarget("ti_sum_dead")
+
+proc tiOrder(a, b: int) =
+  # Nim 2.2.10 visits the keys 1, 2 of this table as 2 then 1 (probed).
+  if a != 1 or b != 2: return
+  var t = initTable[int, int]()
+  t[a] = 1
+  t[b] = 2
+  var first = -1
+  for k in t.keys:
+    if first == -1: first = k
+  if first == 2: symexTarget("ti_order_real")
+  if first == 1: symexTarget("ti_order_other")
+
+proc tiValues(a: int) =
+  var t = initTable[string, int]()
+  t["x"] = a
+  t["y"] = 3
+  var s = 0
+  for v in t.values:
+    s += v
+  if s == 10: symexTarget("ti_values")
+
+proc tiTuple(a: int) =
+  var t = initTable[int, int]()
+  t[1] = a
+  t[2] = 5
+  var s = 0
+  for (k, v) in t.pairs:
+    s += k * v
+  var u = 0
+  for kv in t.pairs:
+    u += kv[1]
+  if s == 16 and u == a + 5: symexTarget("ti_tuple")
+
+proc tiStrKey(x: string) =
+  var t = initTable[string, int]()
+  t["a"] = 1
+  t[x] = 2
+  var found = false
+  for k in t.keys:
+    if k == "zz":
+      found = true
+      break
+  if found: symexTarget("ti_strkey")
+  if t.len == 1 and x != "a": symexTarget("ti_strkey_dead")
+
+proc tiParam(t: Table[int, int]) =
+  symexAssume(t.len <= 3)
+  var c = 0
+  for k in t.keys:
+    inc c
+  if c != t.len: symexTarget("ti_param_dead")
+
+proc tiOne(a: int) =
+  var t = initTable[int, int]()
+  for k in t.keys: symexTarget("ti_empty_dead")
+  t[a] = 7
+  for k, v in t:
+    if k == 3 and v == 7: symexTarget("ti_one")
+
+proc tiGrow(a: int) =
+  var t = initTable[int, int]()
+  t[1] = 1
+  for k in t.keys:
+    t[k + a] = 0
+  symexTarget("ti_grow")
+
+proc tiFloat(a: float) =
+  var t = initTable[float, int]()
+  t[a] = 1
+  var c = 0
+  for k in t.keys: inc c
+  if c == 1: symexTarget("ti_float")
+
+suite "S8bc (6): Table iteration":
+  test "for k, v in t: an order-independent fold":
+    let r = symexFind(tiSum, tLabel("ti_sum"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check reproduces(tiSum(r.witness[0], r.witness[1]), "ti_sum")
+    let d = symexFind(tiSum, tLabel("ti_sum_dead"))
+    checkpoint $d.status & " " & show(d.errors)
+    check d.status == sxUnsat
+
+  test "an order Nim produces is found; another declines":
+    let r = symexFind(tiOrder, tLabel("ti_order_real"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check reproduces(tiOrder(r.witness[0], r.witness[1]), "ti_order_real")
+    let o = symexFind(tiOrder, tLabel("ti_order_other"))
+    checkpoint $o.status & " " & show(o.errors)
+    check o.status == sxUnknown
+    check o.errors.hasKind(feReplayRefuted)
+    check o.errors.hasKind(feTableIterOrder)
+
+  test "values, over a string-keyed table":
+    let r = symexFind(tiValues, tLabel("ti_values"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == 7
+      check reproduces(tiValues(r.witness[0]), "ti_values")
+
+  test "for (k, v) in t.pairs, and for kv in t.pairs":
+    let r = symexFind(tiTuple, tLabel("ti_tuple"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == 6
+      check reproduces(tiTuple(r.witness[0]), "ti_tuple")
+
+  test "keys of a string-keyed table, with a break":
+    let r = symexFind(tiStrKey, tLabel("ti_strkey"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == "zz"
+      check reproduces(tiStrKey(r.witness[0]), "ti_strkey")
+    let d = symexFind(tiStrKey, tLabel("ti_strkey_dead"))
+    checkpoint $d.status & " " & show(d.errors)
+    check d.status == sxUnsat
+
+  test "an input table: the enumeration is all of its keys":
+    let d = symexFind(tiParam, tLabel("ti_param_dead"))
+    checkpoint $d.status & " " & show(d.errors)
+    check d.status == sxUnsat
+
+  test "an empty or one-entry table is exact (no order taint)":
+    let d = symexFind(tiOne, tLabel("ti_empty_dead"))
+    checkpoint $d.status & " " & show(d.errors)
+    check d.status == sxUnsat
+    let r = symexFind(tiOne, tLabel("ti_one"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    check not r.errors.hasKind(feTableIterOrder)
+    if r.status == sxSat:
+      check r.witness[0] == 3
+      check reproduces(tiOne(r.witness[0]), "ti_one")
+
+  test "a body that changes the length declines on that path":
+    let r = symexFind(tiGrow, tLabel("ti_grow"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status in {sxSat, sxUnknown}
+    check r.errors.anyIt(it.kind == feUnsupportedOp and
+                         "length changed" in it.msg)
+    if r.status == sxSat:
+      check r.witness[0] == 0
+      check reproduces(tiGrow(r.witness[0]), "ti_grow")
+
+  test "a float key declines":
+    let r = symexFind(tiFloat, tLabel("ti_float"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.anyIt(it.kind == feUnsupportedOp and "float" in it.msg)
+
 suite "S8bc: walker version floor":
   test "walker version floor >= 203":
     check parseInt(symexWalkerVersion) >= 203

@@ -1047,6 +1047,14 @@ type
                       ## with a classified `heUnsafeCast` (sevError) → sxUnknown
                       ## (Invariant 3 — no silent fallback). `ucReason` records
                       ## which pattern was routed (`"cast[ptr T]"`/`"addr"`).
+    isTabKeys         ## RFC-0005 S8bc (item 6): `tkRetName := keys of tkRecv`,
+                      ## the key sequence a `for` over a `Table`'s `pairs` /
+                      ## `keys` / `values` walks. The walker binds a fresh
+                      ## `seq[K]` whose length is the table's size and whose
+                      ## first elements are distinct present keys (see the
+                      ## walk arm); the ORDER is free -- Nim's is the hash
+                      ## order -- so the path is replay-gated
+                      ## (`feTableIterOrder`).
 
   IRBranch* = object
     cond*: IRExpr     ## guard for this arm (already negation-folded for elif)
@@ -1364,6 +1372,12 @@ type
                                  ## The walker's arm records its reach under
                                  ## the same anchor. Identity only: excluded
                                  ## from `canonicalize` (like a local's name).
+    of isTabKeys:
+      tkRetName*: string         ## RFC-0005 S8bc: the fresh let-name bound to
+                                 ## the key sequence.
+      tkRecv*:    IRExpr         ## the table expression.
+      tkKeyTy*:   IRType         ## the table's key type (the seq's element).
+      tkLoc*:     string         ## siteLoc idiom, for the walk-time decline.
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
@@ -2347,6 +2361,19 @@ type
                           ## c (probed, Nim 2.2.10). The path is dropped.
                           ## `classOf` is `dcOmitted` (a HALT, token
                           ## discarded). sevError -> sxUnknown.
+    feTableIterOrder      ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s
+                          ## `pairs` / `keys` / `values` with two or more
+                          ## entries on the path. Nim visits the keys in the
+                          ## table's hash order; the walker visits them in a
+                          ## FREE order (`isTabKeys`: any enumeration of the
+                          ## present keys), which over-approximates: every
+                          ## real order is one of the models and nothing is
+                          ## forked away, so an `sxUnsat` holds for the real
+                          ## order too. A candidate whose label depends on the
+                          ## order may not be realised by Nim's order, so
+                          ## `classOf` is `dcFreshSymbol`: the candidate is
+                          ## replayed (S10), and a refuted one is `sxUnknown`
+                          ## -- the order-dependent program declines. sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -3380,6 +3407,11 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # dropped (token discarded), because c re-raises and cpp returns.
   # RFC-0005 S8m.
   of eeFinallyJumpOnRaise: dcOmitted
+  # RFC-0005 S8bc.
+  of feTableIterOrder: dcFreshSymbol
+    # A free enumeration of the present keys: every real iteration order is
+    # a model, nothing is forked away or dropped, and a candidate is
+    # replay-gated (see the enum member).
     # A HALT: the path whose `break` / `continue` leaves a `finally` during a
     # raised exit is dropped (token discarded): c re-raises, cpp does not.
 
@@ -4841,6 +4873,12 @@ proc mkSeqPopStmt*(recvName, retName: string, loc: string = ""): IRStmt =
   ## N14: `retName := recvName.pop()`.
   IRStmt(kind: isSeqPop, spRecvName: recvName, spRetName: retName, spLoc: loc)
 
+proc mkTabKeysStmt*(retName: string, recv: IRExpr, keyTy: IRType,
+                    loc: string = ""): IRStmt =
+  ## RFC-0005 S8bc (item 6). `retName := the key sequence of recv`.
+  IRStmt(kind: isTabKeys, tkRetName: retName, tkRecv: recv, tkKeyTy: keyTy,
+         tkLoc: loc)
+
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
 
@@ -5394,6 +5432,8 @@ proc render*(s: IRStmt): string =
       render(s.iaVal) & ")"
   of isSeqPop:
     "seqPop(" & s.spRetName & ":=" & s.spRecvName & ".pop())"
+  of isTabKeys:
+    "tabKeys(" & s.tkRetName & ":=" & render(s.tkRecv) & ")"
   of isVariantField:
     "vfield(" & s.vfRetName & ":=" & render(s.vfRecv) & "." &
       s.vfFieldName & ")"

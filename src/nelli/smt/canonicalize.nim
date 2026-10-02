@@ -5139,6 +5139,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
       canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) &
       (if s.iaLo != 0: ";lo=" & $s.iaLo else: "") & ">"
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6). Distinct `TK:` prefix; the bound key sequence
+    # is a fresh name (`bindLocal`), the table a content-addressed operand.
+    let retSlot = "$" & $bindLocal(env, s.tkRetName)
+    "St<TK:" & retSlot & "=" & canonicalize(s.tkRecv, env) & ";kty=" &
+      canonicalize(s.tkKeyTy) & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

@@ -685,6 +685,10 @@ proc emitStmt*(s: IRStmt): NimNode =
   of isSeqPop:
     newCall(bindSym"mkSeqPopStmt",
             newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc))
+  of isTabKeys:   # RFC-0005 S8bc (item 6)
+    newCall(bindSym"mkTabKeysStmt",
+            newLit(s.tkRetName), emitExpr(s.tkRecv), emitIRType(s.tkKeyTy),
+            newLit(s.tkLoc))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -10255,6 +10259,128 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
   let newVal = mkBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR)
   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
 
+proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
+  ## or `values` (`for k, v in t` is `pairs(t)` after semcheck; `for (k, v)
+  ## in t.pairs` and the single-variable `for kv in t.pairs` too), or nil
+  ## for any other loop. It fell to the iterator inliner, which walked the
+  ## stdlib body over the table's hidden slots and declined. Lowered as a
+  ## bounded unroll over the table's key set:
+  ##
+  ##   tabKeys(ks := t)               (`isTabKeys`: an enumeration of the
+  ##   let L = ks.len                  present keys in a FREE order)
+  ##   var i = 0
+  ##   while i < L:
+  ##     let k = ks[i]
+  ##     let v = t[k]                 (pairs / values: the LIVE value, as
+  ##     body                          Nim reads `t.data[h].val` per yield)
+  ##     if t.len != L: <decline>     (Nim asserts the length unchanged)
+  ##     i += 1
+  ##
+  ## The walker's k-unroll bounds the trip count (`maxLoopUnwind`, declining
+  ## past it), and a table that can hold two or more entries taints the path
+  ## `feTableIterOrder`: Nim visits the keys in hash order, the model in any
+  ## order, so a candidate is replayed and one whose label needs another
+  ## order than Nim's is refuted to sxUnknown -- the order-dependent program
+  ## declines; an order-independent one is confirmed. An sxUnsat holds for
+  ## every order, Nim's among them.
+  ##
+  ## The length check is a scoped decline, not a modelled `AssertionDefect`:
+  ## the assert is compiled out under `--assertions:off`. A table read
+  ## through a call or another non-variable expression is iterated from the
+  ## value bound once (the body cannot reach it). A float key declines: a
+  ## NaN entry counts in the size but is never present, so no enumeration
+  ## of the present keys has the size. `mpairs` / `mvalues` (a mutable view
+  ## of the value) keep the inliner's decline.
+  let iterExpr = n[^2]
+  if iterExpr.kind notin {nnkCall, nnkCommand} or iterExpr.len != 2 or
+     iterExpr[0].kind != nnkSym or
+     iterExpr[0].strVal notin ["pairs", "keys", "values"] or
+     not isStdlibDecl(iterExpr[0]):
+    return nil
+  let container = iterExpr[1]
+  let tabCls = classifyType(container)
+  if tabCls.ty.kind != itTable: return nil
+  let iterName = iterExpr[0].strVal
+  var vars: seq[NimNode]
+  for i in 0 ..< n.len - 2:
+    if n[i].kind == nnkVarTuple:
+      for c in n[i]:
+        if c.kind != nnkEmpty: vars.add c
+    else: vars.add n[i]
+  var shapeOk =
+    if iterName == "pairs": vars.len in [1, 2] else: vars.len == 1
+  for v in vars:
+    if v.kind != nnkSym: shapeOk = false
+  if not shapeOk:
+    return ctx.declineAtSite(feUnsupportedStmtKind,
+      siteMsg(n, "for-loop over a Table's `" & iterName & "` with " &
+              $vars.len & " loop variable(s) is not modelled"),
+      "for-loop over a Table's `" & iterName & "`: loop-variable shape")
+  let keyTy = tabCls.ty.tabKeyTy
+  let valTy = tabCls.ty.tabValTy
+  if keyTy.kind notin {itString, itInt, itBool}:
+    return ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "iteration over a Table keyed by " & $keyTy &
+              " is not modelled (a NaN float key counts in the size but is " &
+              "never present) -- path degraded to sxUnknown"),
+      "iteration over a Table keyed by " & $keyTy.kind & " is not modelled")
+  let intTy = tInt(64, signed = true)
+  let body = parseLoopBody(n[^1], ctx).body   # a `continue` leaves the body
+  var pre: seq[IRStmt]
+  let snapIR = liftIndexContainer(parseExpr(container, pre, ctx), tabCls.ty,
+                                  pre, ctx)
+  let bare = unwrapHidden(container)
+  let live = bare.kind == nnkSym or
+             (bare.kind == nnkDotExpr and dottedFieldShape(bare))
+  let ksName = freshSynth(ctx, "tks")
+  pre.add mkTabKeysStmt(ksName, snapIR, keyTy, siteLoc(n))
+  let lenName = freshSynth(ctx, "tkn")
+  pre.add mkLet(lenName, intTy, mkSeqLen(mkVar(ksName)))
+  let ivName = freshSynth(ctx, "iv")
+  pre.add mkLet(ivName, intTy, mkIntLit(0))
+  var loopStmts: seq[IRStmt]
+  let kSynth = freshSynth(ctx, "tkk")
+  loopStmts.add mkIndexStmt(kSynth, mkVar(ksName), mkVar(ivName), keyTy)
+  var vIR: IRExpr = nil
+  if iterName != "keys":
+    var inner: seq[IRStmt]
+    let recvNow =
+      if live: liftIndexContainer(parseExpr(container, inner, ctx),
+                                  tabCls.ty, inner, ctx)
+      else: snapIR
+    loopStmts.add inner
+    let vSynth = freshSynth(ctx, "tkv")
+    loopStmts.add mkIndexStmt(vSynth, recvNow, mkVar(kSynth), valTy)
+    vIR = mkVar(vSynth)
+  case iterName
+  of "keys": loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
+  of "values": loopStmts.add mkLet(vars[0].strVal, valTy, vIR)
+  else:
+    if vars.len == 2:
+      loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
+      loopStmts.add mkLet(vars[1].strVal, valTy, vIR)
+    else:
+      let tupTy = classifyType(vars[0]).ty
+      loopStmts.add mkLet(vars[0].strVal, tupTy,
+                          mkTupleLit(@[mkVar(kSynth), vIR], tupTy))
+  loopStmts.add body
+  if live:
+    var inner2: seq[IRStmt]
+    let lenNow = mkSeqLen(parseExpr(container, inner2, ctx))
+    loopStmts.add inner2
+    loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "the Table's length changed while iterating over it: " &
+                "Nim's `assert` there (compiled out under " &
+                "--assertions:off) is not modelled -- path degraded to " &
+                "sxUnknown"),
+        "the Table's length changed while iterating over it"))])
+  loopStmts.add mkAssign(ivName, mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
+  pre.add mkWhile(mkBinop(bLt, mkVar(ivName), mkVar(lenName)),
+                  mkBlock(loopStmts))
+  mkBlock(pre)
+
 proc insertArgs(elemTy: IRType; args: seq[IRExpr];
                 preamble: var seq[IRStmt]; ctx: ParseCtx): seq[IRExpr] =
   ## RFC-0005 S8ar. `insert(x, item, i)`'s two arguments bound to fresh
@@ -10869,6 +10995,12 @@ proc parseStmtInner(n: NimNode,
     #   * `for i in a..<b: body` → Infix(..<, a, b) — exclusive
     #   * `for x in arr: body`   → Sym arr — static-N array
     #   * `for x in s: body`     → Sym s — seq[T]
+    # RFC-0005 S8bc (item 6): a Table's `pairs` / `keys` / `values`, ahead of
+    # the loop-variable shape check below (its `for (k, v)` form is a
+    # `nnkVarTuple`).
+    block tableFor:
+      let tf = parseTableForLoop(n, ctx)
+      if tf != nil: return tf
     let iterVar = n[0]
     let iterExpr = n[^2]
     let bodyNode = n[^1]

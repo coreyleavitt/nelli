@@ -518,6 +518,8 @@ proc collectBan*(s: IRStmt, pol: BanPolicy): HashSet[string] =
     collectBanFromExpr(s.iaVal, pol, result)
   of isSeqPop:
     discard  ## no expr operands — nothing to ban-scan
+  of isTabKeys:
+    collectBanFromExpr(s.tkRecv, pol, result)   ## RFC-0005 S8bc
   of isVariantField:
     collectBanFromExpr(s.vfRecv, pol, result)
   of isVariantReassign:

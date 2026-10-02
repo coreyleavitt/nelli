@@ -15588,6 +15588,106 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       newEnv[stmt.spRetName] = popped
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6). `tkRetName := the keys of tkRecv`, the key
+    # sequence a `for` over a Table's `pairs` / `keys` / `values` walks
+    # (`parseTableForLoop`). Bound to a FRESH `seq[K]` `ks` whose length is
+    # the table's size; for every position `j` a loop can reach
+    # (`j < maxLoopUnwind`: the k-unroll walks no further, and declines past
+    # it), `j < size` implies
+    #
+    #   * `ks[j]` is present in the table, and
+    #   * `pos[ks[j]] == j` for one fresh array `pos` from keys to positions,
+    #     so the elements are pairwise distinct (O(n) facts, not O(n^2)).
+    #
+    # Each `ks[j]` is a key term of the run (`tabKeyTerm` registers it), so
+    # the S8f realizability facts (`containerCardConds`: a table's size is
+    # at least the number of distinct present key terms) make the `size`
+    # distinct present keys ALL the table's keys: one more would exceed the
+    # size, and an unnamed key would too. The sequence is therefore an
+    # enumeration of the table, in a FREE order. Nim's order is the hash
+    # order, one of the models: nothing is forked away and nothing dropped,
+    # so an sxUnsat holds; a candidate may depend on the order, so a path
+    # where the table can have two or more entries is tainted
+    # `feTableIterOrder` (`dcFreshSymbol`: replay-gated, S10), and one where
+    # it has at most one is exact and clean. A string key is a string of
+    # bytes (`seqStrElemConds`). The parser declines a float key (a NaN
+    # entry counts in the size but is never present).
+    var survivors: seq[Path]
+    for p0 in paths:
+      if w.shouldStop: return survivors
+      let (tsv, p) = lowerInExpr(p0, stmt.tkRecv, w)
+      let locPrefix = if stmt.tkLoc.len > 0: stmt.tkLoc & ": " else: ""
+      if tsv.kind != svTable or
+         tsv.tabKeyTy.kind notin {itString, itInt, itBool}:
+        let d = w.degrade(feUnsupportedOp,
+          locPrefix & "isTabKeys: receiver lowered to " &
+          plainEnglishSymValKind(tsv.kind) &
+          " -- expected a Table with a string, integer or bool key " &
+          "(feUnsupportedOp)")
+        var fresh: seq[Z3Bool]
+        var env2 = p.env
+        env2[stmt.tkRetName] = allocateSym(tSeq(stmt.tkKeyTy),
+          freshDegradeName("__tabKeysDegrade"), fresh)
+        survivors.add forkPathTainted(p, p.pc, env2, d)
+        continue
+      let ctx = requireCurrentContext()
+      let keyTy = tsv.tabKeyTy
+      let ks = SymVal(kind: svSeq, seqLen: tsv.tabSize,
+        seqDataRaw: allocateSeqDataRaw(keyTy, freshDegradeName("__tabKeys")),
+        seqElemTy: keyTy)
+      var facts: seq[Z3Bool]
+      # The position array, built raw (its key sort is runtime, as
+      # `tabTreeDataVars`'s arrays are) and wrapped at once so its reference
+      # is held; `intHold` keeps the Int sort's witness term alive across
+      # `Z3_mk_array_sort`.
+      var posArr = none(Z3AnyAst)
+      let intHold = mkZ3IntLit(0)
+      var keyed = true
+      for j in 0 ..< w.settings.budget.maxLoopUnwind:
+        let kj = seqElemAt(ks, mkZ3IntLit(int64(j)))
+        facts.add seqStrElemConds(kj)
+        let term = tabKeyTerm(kj, keyTy)
+        if term.isNone:
+          keyed = false
+          break
+        if posArr.isNone:
+          let keySort = ctx.checkErr Z3_get_sort(ctx.raw, term.get.raw)
+          let intSort = ctx.checkErr Z3_get_sort(ctx.raw, intHold.raw)
+          let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, keySort, intSort)
+          let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+            freshDegradeName("__tabKeyPos").cstring)
+          posArr = some(wrap[Z3AnyAst](ctx,
+            ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort)))
+        let present = wrap[Z3Bool](ctx,
+          checkedSelect(ctx, tsv.tabPresentRaw.raw, term.get.raw))
+        let pos = wrap[Z3Int](ctx,
+          checkedSelect(ctx, posArr.get.raw, term.get.raw))
+        let jz = mkZ3IntLit(int64(j))
+        facts.add ((not (jz < tsv.tabSize)) or (present and pos == jz))
+      if not keyed:
+        # Unreachable for a key type the guard above admits; kept in band.
+        let d = w.degrade(feUnsupportedOp,
+          locPrefix & "isTabKeys: a key of type " & $keyTy &
+          " has no table key term (feUnsupportedOp)")
+        var env2 = p.env
+        env2[stmt.tkRetName] = ks
+        survivors.add forkPathTainted(p, p.pc, env2, d)
+        continue
+      var env2 = p.env
+      env2[stmt.tkRetName] = ks
+      let atMostOne = tsv.tabSize <= mkZ3IntLit(1)
+      let lit = $simplify(atMostOne)
+      if lit != "false":
+        survivors.add forkPath(p, p.pc & facts & @[atMostOne], env2)
+      if lit != "true":
+        let d = w.degrade(feTableIterOrder,
+          locPrefix & "iteration over a Table with two or more entries: " &
+          "Nim visits the keys in hash order, the model in any order -- a " &
+          "witness is replayed against the real order (feTableIterOrder)")
+        survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
+                                      env2, d)
+    survivors
   of isVariantReassign:
     # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
     # the RFC-0005 S8f branch-change `FieldDefect` below, routed through

@@ -202,7 +202,22 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "194"
+const symexWalkerVersion* = "200"
+  ## RFC-0005 S8ba (2026-10-02) — S8au's remainder. Provisional 200.
+  ## (1) Every declining arm that owns a result binds it (a seq index or
+  ## pop on an unsupported receiver, a variant construct): the unbound
+  ## compiler temporary was read as an unmodelled global
+  ## (`feGlobalReadUnmodelled` naming `__sym_idx_N`); a parser temporary
+  ## read unbound is now `weInternalWalkerFault`. (2) A `seq` of a distinct
+  ## type is modelled: the backing array holds the base sort and a read
+  ## re-boxes; `.add` stores every backed element kind (it stored an `svInt`
+  ## element as the constant 0, a false `sxUnsat`, and declined int32,
+  ## string and float elements). (3) Step 1c states `len <= high(int)` for
+  ## every string / seq length its caps name. (4) A heap `var` / `addr`
+  ## actual a global or capture of the callee also reaches is passed by
+  ## reference: the callee is specialised to it (S8au declined). (5) A
+  ## split's axioms are built when it is lowered.
+  ##
   ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. Provisional
   ## 194 (S8ar 191, S8as 192, S8at 193 in the same batch). (3) A
   ## copy-in/copy-out `var` actual, or an `addr` actual, whose heap cell a

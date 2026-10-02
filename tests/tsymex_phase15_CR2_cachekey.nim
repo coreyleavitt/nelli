@@ -930,7 +930,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## declines; var ptr modelled; every find / rfind needle splits;
     ## consecutive chain facts; the c-notin-t form per Z3 version).
     ## Provisional 194.
-    check symexWalkerVersion == "194"
+    ## RFC-0005 S8ba (temporaries bound, seq[distinct], len <= high(int),
+    ## by-reference heap actuals, split axioms at lowering). Provisional
+    ## 200.
+    check symexWalkerVersion == "200"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

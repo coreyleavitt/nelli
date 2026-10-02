@@ -682,7 +682,8 @@ proc emitStmt*(s: IRStmt): NimNode =
             emitExpr(s.iaVal), newLit(s.iaLoc), newLit(s.iaLo))   # RFC-0005 S8z
   of isSeqPop:
     newCall(bindSym"mkSeqPopStmt",
-            newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc))
+            newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc),
+            (if s.spElemTy.isNil: newNilLit() else: emitIRType(s.spElemTy)))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -1538,8 +1539,25 @@ proc refExprClassify(n: NimNode): ClassifiedType  ## P2b fwd decl (defined
                                             ## opposed to a bare NAMED
                                             ## ref-object-alias symbol, which
                                             ## D1a value-models as itTuple.
+type ByRefSub = object
+  ## RFC-0005 S8ba. One formal of a call specialised to pass a heap lvalue
+  ## by reference (`userCallStmt`): the formal at `idx` (a `var T`, or a
+  ## `ptr T` when `isPtr`) is replaced in the callee's body by `tail`, the
+  ## caller's lvalue with its last ref spelled as the parameter `name`
+  ## (`markByRef`), and that parameter takes the formal's place.
+  idx: int
+  isPtr: bool
+  tail: NimNode
+  addrNode: NimNode   ## `addr tail`, for a bare use of a `ptr` formal
+  name: string
+  baseTy: IRType
+  keyPart: string
+  base: NimNode       ## the caller's ref, evaluated at the call
+
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
-                          callSite: NimNode = nil): string
+                          callSite: NimNode = nil;
+                          byRef: seq[ByRefSub] = @[]): string
+proc hasGenericParams(impl: NimNode): bool  ## RFC-0005 S8ba (fwd)
 proc bodyHashPart(calleeSym, impl: NimNode): string  ## C3 site key (fwd)
 proc calleeIntOffsetReturnPositions(calleeSym: NimNode): seq[int]
   ## Round-6 B5 fwd decl (ADR-0028 Leg 1, chained composition; defined below,
@@ -3564,6 +3582,136 @@ proc outerReachesCell(outer, heapSteps: seq[NimNode]): NimNode =
     if typeReachesCell(g.getTypeInst, cells, seen): return g
   nil
 
+proc byRefTypeKey(n: NimNode): string =
+  ## RFC-0005 S8ba. A type's spelling, the module that declares it (two
+  ## modules may each declare a `Box`) and the line and column of its
+  ## definition. No file path: the key reaches the cache key, which must
+  ## not depend on where the checkout lives.
+  let ti = n.getTypeInst
+  let li = ti.getTypeImpl.lineInfoObj
+  var owner = ""
+  if ti.kind == nnkSym:
+    let o = ti.owner
+    if o.kind == nnkSym: owner = macros.strVal(o)
+  ti.repr & "@" & owner & ":" & $li.line & ":" & $li.column
+
+proc byRefFormalSym(impl: NimNode; idx: int): tuple[f: NimNode, isPtr, ok: bool] =
+  ## RFC-0005 S8ba. The `idx`-th formal of `impl`, and whether it is a
+  ## `ptr T` (rather than a `var T`); `ok` is false for any other formal.
+  if impl == nil or impl.len < 7 or impl[3].kind != nnkFormalParams: return
+  var k = 0
+  for i in 1 ..< impl[3].len:
+    let id = impl[3][i]
+    if id.kind != nnkIdentDefs: return
+    for j in 0 ..< id.len - 2:
+      if k == idx:
+        if id[j].kind != nnkSym: return
+        if id[^2].kind == nnkVarTy: return (id[j], false, true)
+        if id[j].getTypeImpl.kind == nnkPtrTy: return (id[j], true, true)
+        return
+      inc k
+
+proc substByRefBody(n, f: NimNode; b: ByRefSub): NimNode =
+  ## RFC-0005 S8ba. `n` with every use of the formal `f` spelled as the
+  ## caller's lvalue `b.tail`: `f[]` (a `ptr` formal's dereference, or the
+  ## typed AST's `nnkHiddenDeref` of a `var` formal) is the lvalue, and a
+  ## bare `ptr` formal (passed on, compared) is `addr` of it, as
+  ## `substAddrAlias` spells a local alias.
+  if n.kind in {nnkDerefExpr, nnkHiddenDeref} and n.len == 1 and
+     isSymOf(n[0], f):
+    return copyNimTree(b.tail)
+  if b.isPtr:
+    if n.kind == nnkHiddenAddr and n.len == 1 and isSymOf(n[0], f):
+      return copyNimTree(b.addrNode)
+    if isSymOf(n, f): return copyNimTree(b.addrNode)
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  let isCallLike = n.kind in {nnkCall, nnkCommand, nnkInfix, nnkPrefix,
+                              nnkHiddenCallConv}
+  for i, c in n:
+    # A `var` formal passed on to another `var` formal is the bare symbol
+    # in the typed AST (Nim drops the deref/addr pair): it is the caller's
+    # lvalue passed by address, `nnkHiddenAddr(lvalue)`, the shape Nim
+    # gives `g(p.x)` written directly.
+    if not b.isPtr and isCallLike and i >= 1 and c.kind == nnkSym and
+       containsSym(@[f], c):
+      result.add copyNimTree(b.addrNode)
+    else:
+      result.add substByRefBody(c, f, b)
+
+proc substByRefImpl(impl: NimNode; subs: seq[ByRefSub]): NimNode =
+  ## RFC-0005 S8ba. `impl` with each by-reference formal's uses spelled as
+  ## its lvalue (`substByRefBody`).
+  result = copyNimTree(impl)
+  var bd = impl[6]
+  for b in subs:
+    let fs = byRefFormalSym(impl, b.idx)
+    bd = substByRefBody(bd, fs.f, b)
+  result[6] = bd
+
+proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
+              viaAddr: bool): ByRefSub =
+  ## RFC-0005 S8ba. Pass the heap lvalue `lv` to `calleeSym`'s `idx`-th
+  ## formal BY REFERENCE: Nim passes its address, so the callee's writes and
+  ## any direct access it makes through a global or a capture (`gBox.x = 5`
+  ## while `lv` is `p.x` and `gBox == p`) land on one cell in its order.
+  ## The callee is specialised: the formal's uses are spelled as `lv`, whose
+  ## last ref is a fresh parameter that takes the formal's place and is
+  ## given the ref the caller evaluates at the call (so a callee that
+  ## rebinds the variable the ref came from does not move the address, as
+  ## in Nim). `lv` must reach its cell through that one ref by value-object
+  ## fields only (`p.x`, `p.a.b`, `p[]`, `o.inner.x`; the ref a symbol or a
+  ## field of one), and the formal must have no use the specialisation
+  ## cannot spell (a non-generic callee; a `var T` formal, or a `ptr T` one,
+  ## every use of which is replaced). `actual` is the argument as written
+  ## (`nnkHiddenAddr(lv)`, or `addr lv` when `viaAddr`). `idx` is -1 when
+  ## the lvalue cannot be passed this way.
+  result.idx = -1
+  if calleeSym.kind != nnkSym: return
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or hasGenericParams(impl): return
+  let fs = byRefFormalSym(impl, idx)
+  if not fs.ok or fs.isPtr != viaAddr: return
+  var fields: seq[string]
+  var t = lv
+  while t.kind == nnkDotExpr and t.len == 2 and t[1].kind == nnkSym:
+    fields.add macros.strVal(t[1])
+    t = t[0]
+  if t.kind notin {nnkHiddenDeref, nnkDerefExpr} or t.len != 1 or
+     isVarIndirection(t):
+    return
+  # The marked symbol only names the parameter: a field's own symbol
+  # (`inner` in `o.inner`) carries the ref's type as well as a variable's.
+  let src =
+    if t[0].kind == nnkSym: t[0]
+    elif t[0].kind == nnkDotExpr and t[0].len == 2 and t[0][1].kind == nnkSym:
+      t[0][1]
+    else: nil
+  if src.isNil: return
+  let mk = markByRef(src)
+  if mk.isNil: return
+  proc rebuild(n: NimNode; depth: int; mk: NimNode): NimNode =
+    result = copyNimNode(n)
+    if depth == 0:
+      result.add mk
+    else:
+      result.add rebuild(n[0], depth - 1, mk)
+      result.add copyNimTree(n[1])
+  var b = ByRefSub(idx: idx, isPtr: fs.isPtr, tail: rebuild(lv, fields.len, mk),
+                   name: strVal(mk), baseTy: classifyType(t[0]).ty,
+                   base: t[0])
+  var a = actual
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
+    a = a[^1]
+  b.addrNode = copyNimNode(a)
+  b.addrNode.add copyNimTree(b.tail)
+  var path = ""
+  for k in countdown(fields.high, 0): path.add "." & fields[k]
+  b.keyPart = (if fs.isPtr: "p" else: "v") & byRefTypeKey(t[0]) & "/" &
+              byRefTypeKey(t) & path
+  if mentionsSym(substByRefBody(impl[6], fs.f, b), fs.f): return
+  b
+
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -3592,7 +3740,15 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   ## cannot outlive the call (`ptrFormalStaysLocal`), and while the callee
   ## cannot reach `lv` another way (`addrActualMayAlias`, and the
   ## `cGuardRoots` the walker withholds); otherwise the call declines.
+  ##
+  ## RFC-0005 S8ba: a heap lvalue (a `var` actual, or an `addr` one) the
+  ## callee can also reach through a global or a capture
+  ## (`outerReachesCell`) is passed by reference instead (`byRefSub`): the
+  ## call goes to a specialisation of the callee that reads and writes the
+  ## cell itself. It declines (S8au's `feUnsupportedOp`) only when the
+  ## lvalue or the formal has a shape that cannot be passed so.
   var argIRs: seq[IRExpr]
+  var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
@@ -3610,6 +3766,21 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     if addrLv != nil:
       var heapSteps: seq[NimNode]
       let root = lvalueRoot(addrLv, heapSteps)
+      block byRef:
+        # RFC-0005 S8ba: the cell the callee also reaches is passed by
+        # reference. Same gates as the cell model below, in its order.
+        for c in addrCells:
+          if c.key == scopedRepr(addrLv): break byRef
+        var seen: seq[string]
+        if root.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen) or
+           addrActualMayAlias(n, i, addrLv, root, heapSteps) or
+           outerReachesCell(outerOf(), heapSteps) == nil:
+          break byRef
+        let b = byRefSub(calleeSym, i - 1, addrLv, n[i], true)
+        if b.idx < 0: break byRef
+        byRefs.add b
+        argIRs.add parseExpr(b.base, preamble, ctx)
+        continue
       block:
         var syms: seq[NimNode]
         lvalueVarSyms(addrLv, syms)
@@ -3669,6 +3840,21 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
+      block byRef:
+        # RFC-0005 S8ba: a heap lvalue the callee also reaches through a
+        # global or a capture is passed by reference (`byRefSub`). Same
+        # gates as the write-back below, in its order.
+        if lv.kind == nnkSym: break byRef
+        var heapSteps: seq[NimNode]
+        let root = lvalueRoot(lv, heapSteps)
+        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps) or
+           outerReachesCell(outerOf(), heapSteps) == nil:
+          break byRef
+        let b = byRefSub(calleeSym, i - 1, lv, n[i], false)
+        if b.idx < 0: break byRef
+        byRefs.add b
+        argIRs.add parseExpr(b.base, preamble, ctx)
+        continue
       block:
         var syms: seq[NimNode]
         lvalueVarSyms(lv, syms)
@@ -3719,7 +3905,11 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
     argIRs.add ir
-  let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions, guards)
+  # RFC-0005 S8ba: the by-reference formals call the callee's
+  # specialisation to them.
+  let key = if byRefs.len == 0: callKey
+            else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
+  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -5705,7 +5895,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let recv = unwrapHidden(n[1])
         if recv.kind == nnkSym:
           let synth = freshSynth(ctx, "pop")
-          preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n))
+          preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n),
+                                    recvCls.ty.seqElemTy)   # RFC-0005 S8ba
           return mkVar(synth)
     # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
     # on receiver kind for select-from-tabData semantics).
@@ -11732,17 +11923,20 @@ proc conceptViolationMsg(impl: NimNode;
   parts.join("; ")
 
 proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
-                          callSite: NimNode = nil): string =
+                          callSite: NimNode = nil;
+                          byRef: seq[ByRefSub] = @[]): string =
   ## Registers the (monomorphized) callee under its instantiation key and
   ## returns that key. The CALLER must use the returned key as the `mkCall`
   ## callee name so the walker's `w.procs[stmt.callee]` dispatch lands on the
   ## exact `ProcSig` registered here (G1a: registration and dispatch share one
   ## key).
+  ## RFC-0005 S8ba: with `byRef`, the callee is registered specialised to
+  ## those by-reference formals (`ByRefSub`), under its own key.
   if calleeSym.kind notin {nnkSym, nnkIdent}:
     error("symex Phase 3: callee position is not a symbol — got " &
           $calleeSym.kind & " in `" & calleeSym.repr & "`", calleeSym)
   let name = calleeSym.strVal
-  let impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
+  var impl = resolveRoutineImpl(calleeSym)  ## RFC-parser-normalization N2
   if impl == nil:
     # v67 (§0 clause (b), dev item 1): this was a macro-time `error()` —
     # the LAST compile wall on the natural seq-slice value path
@@ -11799,6 +11993,14 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
        not containsSym(@[ctx.keySyms[key]], calleeSym):
       key = name & "#" & bodyHashPart(calleeSym, impl) & "#ovl"
     if not ctx.keySyms.hasKey(key): ctx.keySyms[key] = calleeSym
+  # RFC-0005 S8ba: a by-reference specialisation is its own routine, keyed
+  # by the formals it replaces and the shape of each lvalue (its base type
+  # and field path), not by the caller's variable. A recursive call that
+  # passes the same shape on reaches this key while it is being parsed.
+  if byRef.len > 0:
+    for b in byRef: key.add "#byref" & $b.idx & ":" & b.keyPart
+    if key notin ctx.procs and key notin ctx.parsing:
+      impl = substByRefImpl(impl, byRef)
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
   # Phase 15 G6 / RFC-0005 S8 (§2.5 point 3). A stdlib-concept violation is
@@ -11817,7 +12019,9 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # independently. A non-generic proc has exactly one instKey (empty typeSubst)
   # and trivially never exceeds the cap.
   let cap = ctx.maxInstantiationsPerProc
-  if cap > 0:
+  # RFC-0005 S8ba: a by-reference specialisation of a non-generic routine is
+  # not an instantiation (`byRefSub` refuses generic callees).
+  if cap > 0 and byRef.len == 0:
     # Base-proc identity must be STABLE across instantiations of the SAME
     # generic, so the per-proc counter actually accumulates. `symBodyHash`
     # (used by `bodyHashPart` for the instKey) is per-INSTANTIATION (each
@@ -11891,7 +12095,7 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # names them (computed before the callee's scope opens; it would inherit
   # the same renames). Its own locals and parameters keep clear of those
   # names, so the walker can copy them into the callee's env.
-  let captures = nestedCaptureNames(calleeSym, impl)
+  let captures = nestedCaptureNames(calleeSym, resolveRoutineImpl(calleeSym))
   let savedNames = enterNameScope()
   reserveScopedNames(captures)
   claimRoutine(impl)
@@ -11902,6 +12106,11 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil)
   sig.captures = captures
+  # RFC-0005 S8ba: each by-reference formal's slot holds the ref its lvalue
+  # is reached through, under the name the specialised body reads.
+  for b in byRef:
+    if b.idx < sig.params.len:
+      sig.params[b.idx] = IRParam(name: b.name, ty: b.baseTy)
   leaveNameScope(savedNames)
   ctx.procScoped = savedProcScoped
   ctx.procs[key] = sig

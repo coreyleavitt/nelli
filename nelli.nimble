@@ -1052,5 +1052,11 @@ task test, "Run the test suite":
             # consecutive chain facts; the c-notin-t form per Z3 version.
             # Items 1-2 (closed by S8ad) re-pinned. Walker 194
             # (provisional).
-            "tsymex_rfc0005_s8au_remainder"]:
+            "tsymex_rfc0005_s8au_remainder",
+            # RFC-0005 S8ba -- S8au's remainder: a declining arm binds its
+            # temporary (never read as a global); seq[distinct] modelled;
+            # len <= high(int) in step 1c; a heap var/addr actual a global
+            # or capture also reaches is passed by reference; split axioms
+            # built at lowering. Walker 200 (provisional).
+            "tsymex_rfc0005_s8ba_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

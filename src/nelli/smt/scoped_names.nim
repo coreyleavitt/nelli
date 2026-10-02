@@ -57,6 +57,11 @@ type
 
 var nameScope {.compileTime.}: NameScope
 var nameCounter {.compileTime.}: int
+var byRefCounter {.compileTime.}: int
+
+const byRefMarkColumn = -32123
+  ## RFC-0005 S8ba. The column a by-reference base carries (`markByRef`):
+  ## no source position has a negative column.
 
 const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## The runtime value bindings an env slot holds. A local `const` is folded
@@ -70,10 +75,33 @@ proc isModuleGlobal*(n: NimNode): bool =
   let o = owner(n)
   o.kind == nnkSym and symKind(o) == nskModule
 
+proc byRefName*(n: NimNode): string =
+  ## RFC-0005 S8ba. The IR name of a by-reference base (`markByRef`), or ""
+  ## when `n` is not one.
+  if n.kind != nnkSym: return ""
+  let li = n.lineInfoObj
+  if li.column != byRefMarkColumn or li.line <= 0: return ""
+  "__byref_" & $li.line
+
+proc markByRef*(base: NimNode): NimNode =
+  ## RFC-0005 S8ba. A copy of the symbol `base` (it keeps its symbol and
+  ## type) that names a fresh by-reference parameter: `strVal` reads it as
+  ## `__byref_<N>`, so a callee specialised to a heap lvalue (`p.x` for its
+  ## `var` formal) reads and writes that cell through the ref the caller
+  ## evaluated at the call. nil when the counter is spent (the line field
+  ## holds the number).
+  if base.kind != nnkSym or byRefCounter >= 65000: return nil
+  inc byRefCounter
+  result = copyNimNode(base)
+  result.setLineInfo(base.lineInfoObj.filename, byRefCounter, byRefMarkColumn)
+
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as
   ## its scoped name (RFC-0005 S8e), and a module-level variable reads as
-  ## `__gl:<module>.<name>` (RFC-0005 S8an).
+  ## `__gl:<module>.<name>` (RFC-0005 S8an). A by-reference base reads as
+  ## its parameter's name (RFC-0005 S8ba, `markByRef`).
+  let br = byRefName(n)
+  if br.len > 0: return br
   result = macros.strVal(n)
   if isModuleGlobal(n):
     return globalEnvPrefix & macros.strVal(owner(n)) & "." & result
@@ -89,6 +117,7 @@ proc resetNameScopes*() =
   ## key).
   nameScope = NameScope()
   nameCounter = 0
+  byRefCounter = 0
 
 proc enterNameScope*(): NameScope =
   ## Open a nested naming scope (a callee's own env). Keeps the enclosing

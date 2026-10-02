@@ -6654,6 +6654,17 @@ An unbound non-global name now reads "is read where the symbolic walker
 has not bound it" instead of calling itself a module-level global (same
 kind, `feGlobalReadUnmodelled`).
 
+Routine-kind tests go through the Cluster N vocabulary, as
+`tsymex_phase15_N2_kindgate_audit` requires: a nested routine is
+recognised by its impl's node kind (`routineShapedForClosureDetect`, via
+`namesRoutineDef`), not by a symbol-kind gate, and the statement arm and
+the pointer-use scan name `routineShapedForClosureDetect` /
+`RoutineNodes` rather than inline lists. `tsymex_rfc0005_s8_scope`'s
+`isUnsafeCast` exhibit was `let p = addr y` read through `p[]`, which this
+slice models; it is now `cast[ptr int](addr y)`, with the same contract
+(one parse record, `heUnsafeCast`, site-anchored, reached twice under its
+marker).
+
 Pins: `tests/tsymex_rfc0005_s8an_remainder.nim`, every expectation probed
 against Nim 2.2.10.
 - (1) A nested proc and func with no captures; captures of a parameter and
@@ -6709,6 +6720,16 @@ against Nim 2.2.10.
 - **Two `addr` of different parts of one root in one call decline**
   (`two(addr o.a, addr o.b)`), conservatively: the alias check is by root
   variable, not by disjoint path.
+- **An `int` heap cell costs Z3 tens of seconds on wide-range arithmetic.**
+  The `int` heap is `(Array Ref (_ BitVec 64))`, and an Int-sorted local
+  stored into it and read back goes through `int_to_bv`/`ubv_to_int`. With
+  `v` in `(-1000, 1000)`, the UNSAT query for "two `incP(addr x)` leave `x
+  != v + 2`" took 6.5M rlimit steps (37-41 s on Linux, past the Windows
+  corpus watchdog's 240 s for the suite). A plain `let r = new int; r[] =
+  v; r[] += 1` with the same range takes 58 s, so this predates S8an; with
+  `v` in `[0, 16)` it takes 0.56 s. The pins use the narrow range. An
+  Int-sorted heap for unranged `int` pointees (or a bridging lemma) is the
+  fix, in the heap model.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

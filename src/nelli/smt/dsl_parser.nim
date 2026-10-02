@@ -1856,16 +1856,22 @@ proc collectFreeVarRefs(n: NimNode, bound: HashSet[string],
 
 # ---- RFC-0005 S8an: a routine declared inside another -----------------------
 
-const nestableRoutineSymKinds = {nskProc, nskFunc, nskConverter, nskIterator,
-                                 nskMethod}
+proc namesRoutineDef(sym: NimNode): bool =
+  ## RFC-0005 S8an. True when `sym`'s impl is a routine DEFINITION, decided
+  ## by the impl's node kind (`routineShapedForClosureDetect`), never by a
+  ## symbol-kind gate (RFC-parser-normalization Cluster N).
+  if sym.kind != nnkSym: return false
+  let impl = getImpl(sym)
+  impl != nil and impl.kind in routineShapedForClosureDetect
 
 proc isNestedRoutine(sym: NimNode): bool =
   ## RFC-0005 S8an. True when `sym` names a routine declared inside another
   ## routine (its owner is a routine, not a module).
-  if sym.kind != nnkSym or symKind(sym) notin nestableRoutineSymKinds:
+  if sym.kind != nnkSym or symKind(sym) in {nskVar, nskLet, nskParam,
+                                            nskForVar, nskConst, nskType,
+                                            nskField, nskEnumField}:
     return false
-  let o = owner(sym)
-  o.kind == nnkSym and symKind(o) in nestableRoutineSymKinds
+  namesRoutineDef(sym) and namesRoutineDef(owner(sym))
 
 proc collectDeclaredSyms(n: NimNode; into: var seq[NimNode]) =
   ## RFC-0005 S8an. Every value symbol DECLARED anywhere in `n`: `let`/`var`
@@ -3401,8 +3407,7 @@ proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
     if n.len == 1 and n[0].kind in {nnkDerefExpr, nnkHiddenDeref} and
        n[0].len == 1 and isSymOf(n[0][0], f):
       return false
-  of nnkLambda, nnkDo, nnkProcDef, nnkFuncDef, nnkIteratorDef,
-     nnkConverterDef, nnkMethodDef:
+  of RoutineNodes:
     return not mentionsSym(n, f)
   of nnkInfix, nnkCall, nnkCommand, nnkPrefix, nnkHiddenCallConv:
     if n.len > 0 and n[0].kind == nnkSym:
@@ -10994,8 +10999,7 @@ proc parseStmtInner(n: NimNode,
       feUnsupportedStmtKind, &"augmented assign: operator `{n[0].repr}` not in supported set " &
       &"{{+=,-=,*=,&=}} or wrong AST shape (len={n.len}); " &
       &"degrade to sxUnknown (sound, Invariant 3)")
-  of nnkProcDef, nnkFuncDef, nnkIteratorDef, nnkConverterDef,
-     nnkTemplateDef, nnkMacroDef:
+  of routineShapedForClosureDetect:
     # RFC-0005 S8an. A routine declared inside the code under test does
     # nothing where it is declared: a call reaches its body through
     # `ensureProcRegistered` (a callee, with its captures threaded), and a

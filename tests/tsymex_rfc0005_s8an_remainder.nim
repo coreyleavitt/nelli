@@ -386,7 +386,11 @@ proc sutAddrRead(v: int) =
   if getP(addr x) != v: symexTarget("ar_dead")
 
 proc sutAddrInc(v: int) =
-  symexAssume(v > -1000 and v < 1000)  # no overflow path
+  # No overflow path. The range is narrow because a `ptr int` cell lives in
+  # the BV-sorted `int` heap, and an Int-to-BV round trip over a wide range
+  # costs Z3 ~40 s per UNSAT query here -- as it does for a plain `new int`
+  # (pre-existing; RFC-0005 S8an "Different mechanisms").
+  symexAssume(v >= 0 and v < 16)
   var x = v
   incP(addr x)
   incP(addr x)
@@ -419,7 +423,11 @@ proc sutAddrSame(v: int) =
   if same(addr x, addr y): symexTarget("as_dead")
 
 proc sutAddrLet(v: int) =
-  symexAssume(v > -1000 and v < 1000)  # no overflow path
+  # No overflow path. The range is narrow because a `ptr int` cell lives in
+  # the BV-sorted `int` heap, and an Int-to-BV round trip over a wide range
+  # costs Z3 ~40 s per UNSAT query here -- as it does for a plain `new int`
+  # (pre-existing; RFC-0005 S8an "Different mechanisms").
+  symexAssume(v >= 0 and v < 16)
   var x = 1
   let p = addr x
   setP(p, v)

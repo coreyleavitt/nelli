@@ -147,9 +147,11 @@ proc classBS8(x: int) =
     symexTarget("s8_classb")
 
 proc unsafeCastS8(x: int) =
-  ## The `isUnsafeCast` sibling of Class A.
+  ## The `isUnsafeCast` sibling of Class A. A `cast` to a pointer type:
+  ## RFC-0005 S8an models `let p = addr y` used only through `p[]` (it IS
+  ## `y`), which was this exhibit's spelling, so the exhibit is a real cast.
   var y = x
-  let p = addr y
+  let p = cast[ptr int](addr y)
   if p[] == 3:
     symexTarget("s8_unsafe")
 

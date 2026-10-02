@@ -259,12 +259,22 @@ proc s6bDeepDead(n: int) =
   if n == 5 and n == 6:
     symexTarget("s6b_deep_dead")
 
+type
+  S6bArmK = enum s6bKa, s6bKb
+  S6bArmV = object
+    case k: S6bArmK
+    of s6bKa: a: int
+    of s6bKb: b: int
+
+proc s6bKeepPtr(p: ptr int): ptr int = p
+
 proc s6bUnsafeCastDead(n: int) =
-  # RFC-0005 S8ax: `addr x` of a local is an address cell now, so the halt
-  # is reached through a seq element's pointer used as a value, which the
-  # alias rewrite turns back into a bare `addr`.
-  var s = @[n]
-  let q = addr s[0]
+  # RFC-0005 S8ax: `addr x` of a local is an address cell now. RFC-0005
+  # S8be: so is `addr s[i]` of a seq element, used as a value. The halt is
+  # reached through a variant arm field's pointer passed where it may
+  # escape the call.
+  var o = S6bArmV(k: s6bKa, a: n)
+  let q = s6bKeepPtr(addr o.a)
   discard q
   if n == 5 and n == 6:
     symexTarget("s6b_unsafe_cast_dead")

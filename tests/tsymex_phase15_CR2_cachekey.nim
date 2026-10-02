@@ -932,7 +932,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## heap). 190->192 (191 is S8ar's).
     ## RFC-0005 S8ax (S8as's remainder). Provisional 197 (193..196 are
     ## the S8at..S8aw siblings').
-    check symexWalkerVersion == "197"
+    ## RFC-0005 S8be (S8ax's remainder). Provisional 205 (198..204 are
+    ## the S8ay..S8bd siblings').
+    check symexWalkerVersion == "205"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

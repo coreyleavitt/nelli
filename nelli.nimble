@@ -1056,5 +1056,11 @@ task test, "Run the test suite":
             # adaptive if-arm checks and call depth; per-cell Int heaps;
             # opaque routine summaries; closure environments; evaluation
             # order; `addr` forms; alias precision; walker 192->197.
-            "tsymex_rfc0005_s8ax_remainder"]:
+            "tsymex_rfc0005_s8ax_remainder",
+            # RFC-0005 S8be -- S8ax's remainder: opaque implicit Defects
+            # and raise subtypes; a bounded replay; `{.global.}`; int32
+            # widening; Int-sorted call returns; tuples of closures; a
+            # capture-keyed call cache; element and case-object `addr`
+            # cells; walker 197->205.
+            "tsymex_rfc0005_s8be_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

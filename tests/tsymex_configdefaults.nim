@@ -175,7 +175,7 @@ proc fieldCount[T](): int =
 suite "RFC-0010 B3 — the deprecated merge still covers every field":
 
   test "a fully-overriding merge reproduces the override exactly":
-    # Every one of ResourceBudget's 14 fields and SymexSettings' 6 non-budget
+    # Every one of ResourceBudget's 14 fields and SymexSettings' 7 non-budget
     # fields set away from its default, so a `+` body missing a line drops that
     # field back and this fails naming it.
     let b = SymexSettings(
@@ -185,6 +185,7 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
       arithChecks: {acDivByZero},
       inlinePolicy: ipAlwaysAxiomatize,
       replay: false,                     # RFC-0005 S10
+      replayTimeoutMs: 1234,             # RFC-0005 S8be
       budget: ResourceBudget(
         queryRLimit: 111'u, maxFrontierSize: 222, maxCallDepth: 33,
         maxLoopUnwind: 44, maxHeapDepth: 55, maxFreshnessAssertions: 666,
@@ -207,8 +208,9 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
                                                # S8k added `maxSeqLen` and
                                                # `seqQueryRLimit`; S8ax
                                                # `maxRecursionDepth`
-    check fieldCount[SymexSettings]() == 7   # 6 scalars plus `budget`
-                                             # (RFC-0005 S10 added `replay`)
+    check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
+                                             # (RFC-0005 S10 added `replay`,
+                                             # S8be `replayTimeoutMs`)
 
   test "composing two different nested budget overrides keeps both":
     # `a` and `b` each change ONE, different, budget subfield. A whole-object

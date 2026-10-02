@@ -172,8 +172,13 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchProc" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8be item 10: a routine-typed argument is summarised like the
+    # others -- the call havocs what the routine may reach (the capture
+    # cells of a closure) and names it. No `nil` literal here, so the raise
+    # is reached and the replay confirms it.
+    check r.status == sxRaised
+    check not classified
+    check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchProc" in it.msg)
 
   test "a cstring argument is summarised, never treated as inert":
     let r = symexFind(withTouchCString, tRaisedExn("ValueError"))

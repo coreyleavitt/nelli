@@ -246,75 +246,11 @@ proc pcImpliesNonNil(ctx: Z3Context, pc: seq[Z3Bool],
 # and cannot affect the path; the witness renderer (`renderHeapCompound`)
 # renders such a cell as any well-formed value.
 
-proc distinctGround(ty: IRType): IRType =
-  ## RFC-0005 S8ar. The base a `distinct` (chain) ejects to.
-  result = ty
-  while result != nil and result.kind == itDistinct: result = result.distinctBase
-
-proc heapUnitTy(ty: IRType): bool =
-  ## RFC-0005 S8ar. A value a heap cell can hold: a scalar one Z3 term
-  ## carries (`liftHeapValue`'s kinds), or a leaf-split compound value.
-  ty != nil and (ty.kind in {itInt, itBool, itFloat32, itFloat64, itString,
-                             itRef, itPtr} or heapCompoundTy(ty))
-
-proc heapTreeTy(ty: IRType): bool =
-  ## RFC-0005 S8ar. A by-value aggregate held as the leaves of its parts: a
-  ## tuple or object (`itTuple`), an array, a `distinct` (its base's
-  ## leaves; a distinct value IS its base value, every read ejects).
-  ## RFC-0005 S8at: a by-value case object (`heapParts`).
-  heapCompoundTy(ty) and
-    ty.kind in {itTuple, itArray, itDistinct, itVariant, itMultiVariant}
-
-proc heapCompoundTy(ty: IRType): bool =
-  ## RFC-0005 S8ap. A heap value held leaf-split: a seq whose elements
-  ## `allocateSeqDataRaw` backs, a `Table[string, V]` and a `HashSet[T]`
-  ## `allocateSym` backs. A placeholder seq (an unbacked element type) is not
-  ## -- its value is inert by construction and keeps the pre-S8ap decline.
-  ##
-  ## RFC-0005 S8ar: also a by-value tuple / object, array and `distinct`
-  ## whose parts are all `heapUnitTy` (`heapTreeTy`). They were
-  ## `seUnsupportedCompoundSortLeaf` (a tuple is not one Z3 term) and a
-  ## `distinct` field was havocked. Still not a cell value, each stated:
-  ## an empty object (no leaf to hold its cell), and any part that is
-  ## itself not a cell value.
-  ##
-  ## RFC-0005 S8at: a by-value case object (`itVariant`/`itMultiVariant`)
-  ## is a tree too: its discriminator, its plain fields, and every arm's
-  ## fields, each a part (`heapParts`). The value is the walker's
-  ## `svVariant`, which holds a slot for every arm; the discriminator says
-  ## which arm a read may see (`isVariantField`'s FieldDefect fork runs on
-  ## the selected value, as on any value variant). S8ar declined it (its
-  ## fields depend on the discriminator).
-  if ty == nil: return false
-  case ty.kind
-  of itSeq:
-    ty.seqUnsupportedFieldReason.len == 0 and isBackedSeqElemTy(ty.seqElemTy)
-  of itTable:
-    isBackedTableTy(ty.tabKeyTy, ty.tabValTy)
-  of itSet: isBackedSetElemTy(ty.setElemTy)
-  of itTuple:
-    if ty.isPlaceholder or ty.fields.len == 0: return false
-    for f in ty.fields:
-      if not heapUnitTy(f): return false
-    true
-  of itArray: ty.size > 0 and heapUnitTy(ty.elemTy)
-  of itVariant, itMultiVariant:
-    # RFC-0005 S8at. An axis view (`mvAxisView`) is the REF layout's
-    # (ADR-0013), never a by-value cell.
-    if ty.kind == itVariant and ty.vIsAxisView: return false
-    for part in heapParts(ty):
-      if not heapUnitTy(part.ty): return false
-    true
-  of itDistinct:
-    # RFC-0005 S8at: a composite base too. S8ar admitted a scalar base only,
-    # since a composite base had no distinct sort (`ensureDistinctSort`
-    # derived inject/eject over one Z3 term of the base); it now has one
-    # without them, so a distinct over a compound cell value is held as its
-    # base's leaves (`heapLeafSuffixes`) and re-boxed on a read.
-    let g = distinctGround(ty)
-    g != nil and (g.kind in {itInt, itBool, itFloat32, itFloat64, itString} or
-                  heapCompoundTy(g))
-  else: false
+# RFC-0005 S8bc: `distinctGround`, `heapUnitTy`, `heapTreeTy`,
+# `heapCompoundTy`, `heapPartLabel` and `heapParts` moved to `types.nim`:
+# `isBackedSeqElemTy` (a seq whose element is a tree value is held
+# leaf-split, one array per leaf) and the heap's cell model are one
+# predicate, and the type bridge needs it at classify time.
 
 proc heapStandInTy(ty: IRType): bool =
   ## RFC-0005 S8ar. A value no cell holds, by a stated, scoped decline: a
@@ -333,43 +269,6 @@ proc heapWfTy(ty: IRType): bool =
   ## RFC-0005 S8ap. A heap value whose input cells carry a well-formedness
   ## fact (`heapCellWfConds`): the compound kinds and `string`.
   heapCompoundTy(ty) or (ty != nil and ty.kind == itString)
-
-proc heapPartLabel(ty: IRType; i: int): string =
-  ## RFC-0005 S8ar. The name of part `i` of a `heapTreeTy` tuple or array:
-  ## a field's name, `Field<i>` for an anonymous tuple's (`fieldPairs`'
-  ## spelling, which the witness reader walks), the position of an array
-  ## element.
-  if ty.kind == itTuple:
-    (if ty.fieldNames[i].len > 0: ty.fieldNames[i] else: "Field" & $i)
-  else: $i
-
-proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]] =
-  ## RFC-0005 S8ar. The parts of a `heapTreeTy` value, in leaf order.
-  ## RFC-0005 S8at: a case object's are its discriminator, its plain fields
-  ## and each arm's fields, an arm field labelled `@<arm>_<field>` (`<arm>`
-  ## the arm's position in `vArms`: `of a, b: f` is two arms, each with its
-  ## own slot, as the walker's `svVariant` holds them). A multi-variant's
-  ## are its plain fields, then per axis its discriminator and arm fields
-  ## (`@<axis>_<arm>_<field>`).
-  case ty.kind
-  of itTuple:
-    for i, f in ty.fields: result.add (heapPartLabel(ty, i), f)
-  of itArray:
-    for i in 0 ..< ty.size: result.add (heapPartLabel(ty, i), ty.elemTy)
-  of itVariant:
-    result.add (ty.vDiscName, ty.vDiscTy)
-    for i, f in ty.vPlainFieldTypes: result.add (ty.vPlainFieldNames[i], f)
-    for ai, arm in ty.vArms:
-      for j, f in arm.fieldTypes:
-        result.add ("@" & $ai & "_" & arm.fieldNames[j], f)
-  of itMultiVariant:
-    for i, f in ty.mvPlainFieldTypes: result.add (ty.mvPlainFieldNames[i], f)
-    for xi, ax in ty.mvAxes:
-      result.add (ax.discName, ax.discTy)
-      for ai, arm in ax.arms:
-        for j, f in arm.fieldTypes:
-          result.add ("@" & $xi & "_" & $ai & "_" & arm.fieldNames[j], f)
-  else: discard
 
 proc svPartsOf(sv: SymVal; ty: IRType): seq[SymVal] =
   ## RFC-0005 S8at. The parts of a tree value, in `heapParts` order.
@@ -435,7 +334,13 @@ proc heapLeafSuffixes(ty: IRType): seq[string] =
   ## `__@.x`). A `distinct` has its (scalar) base's one leaf.
   if not heapCompoundTy(ty): return @[""]
   case ty.kind
-  of itSeq:   @["", "__@len"]
+  of itSeq:
+    # RFC-0005 S8bc: a tree element's further leaves (`seqDataMore`), one
+    # per leaf of the element after its first.
+    var r = @["", "__@len"]
+    if seqBackedTy(ty) and isTreeSeqElemTy(ty.seqElemTy):
+      for i in 1 ..< heapLeafSuffixes(ty.seqElemTy).len: r.add "__@d" & $i
+    r
   of itTable:
     # RFC-0005 S8at: a container value's further leaves (`tabDataMore`).
     var r = @["", "__@present", "__@len"]
@@ -482,13 +387,47 @@ proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
       else: result.add heapLeafRaw(psv, part.ty)
     return
   case sv.kind
-  of svSeq:   @[sv.seqDataRaw.raw, sv.seqLen.raw] # [placeholder-audited]
+  of svSeq:
+    # RFC-0005 S8bc: and a tree element's further data arrays.
+    var r = @[sv.seqDataRaw.raw, sv.seqLen.raw] # [placeholder-audited]
+    for m in sv.seqDataMore: r.add m.raw
+    r
   of svTable:
     var r = @[sv.tabDataRaw.raw, sv.tabPresentRaw.raw, sv.tabSize.raw]
     for m in sv.tabDataMore: r.add m.raw   ## RFC-0005 S8at
     r
   of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
   else:       @[rawAnyAstOf(sv)]
+
+proc heapLeafTerm(sv: SymVal; ty: IRType): Z3AnyAst =
+  ## RFC-0005 S8bc. `heapLeafRaw`, as an owning handle: an `int` part held as
+  ## a Z3 Int is converted to the heap's bitvector, a term nothing else
+  ## holds, so its raw handle is not valid past the call that made it.
+  if ty.kind == itInt and sv.kind == svInt:
+    case ty.width
+    of 8:  return toAnyAst(intToBv[8](sv.zi, Z3BitVec[8]))
+    of 16: return toAnyAst(intToBv[16](sv.zi, Z3BitVec[16]))
+    of 32: return toAnyAst(intToBv[32](sv.zi, Z3BitVec[32]))
+    else:  return toAnyAst(intToBv[64](sv.zi, Z3BitVec[64]))
+  wrap[Z3AnyAst](requireCurrentContext(), rawAnyAstOf(sv))
+
+proc svLeafTerms(sv: SymVal; ty: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. `svLeafAsts`, as owning handles (`heapLeafTerm`). A seq
+  ## element store writes a value's leaves into the seq's data arrays across
+  ## several Z3 calls. Precondition for a tree: `svFitsHeapTy(sv, ty)`.
+  if ty != nil and heapTreeTy(ty):
+    if ty.kind == itDistinct:
+      let g = distinctGround(ty)
+      if heapCompoundTy(g): return svLeafTerms(ejectBase(sv), g)
+      return @[heapLeafTerm(ejectBase(sv), g)]
+    let psvs = svPartsOf(sv, ty)
+    for i, part in heapParts(ty):
+      if heapCompoundTy(part.ty): result.add svLeafTerms(psvs[i], part.ty)
+      else: result.add heapLeafTerm(psvs[i], part.ty)
+    return
+  # A container's leaves are the value's own fields, alive while `sv` is.
+  let ctx = requireCurrentContext()
+  for raw in svLeafAsts(sv, ty): result.add wrap[Z3AnyAst](ctx, raw)
 
 proc svFitsHeapTy(sv: SymVal; ty: IRType): bool =
   ## RFC-0005 S8ar. `sv` has the shape a cell of `ty` stores: a tree value
@@ -535,7 +474,15 @@ proc svFitsHeapTy(sv: SymVal; ty: IRType): bool =
     for i, part in heapParts(ty):
       if not svFitsHeapTy(ps[i], part.ty): return false
     true
-  of itSeq: sv.kind == svSeq and not sv.isUnsupportedFieldPlaceholder # [placeholder-audited]
+  of itSeq:
+    # RFC-0005 S8bc: a placeholder seq type holds a placeholder value, a
+    # backed one a backed value with one data array per element leaf.
+    if sv.kind != svSeq: return false
+    if not seqBackedTy(ty): return sv.isUnsupportedFieldPlaceholder # [placeholder-audited]
+    if sv.isUnsupportedFieldPlaceholder: return false # [placeholder-audited]
+    let want = if isTreeSeqElemTy(ty.seqElemTy):
+                 heapLeafSuffixes(ty.seqElemTy).len else: 1
+    1 + sv.seqDataMore.len == want
   of itTable: sv.kind == svTable
   of itSet: sv.kind == svSet
   of itInt:
@@ -589,6 +536,7 @@ proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
   of svSeq:
     result.seqDataRaw = leaves[0] # [placeholder-audited]
     result.seqLen = wrap[Z3Int](ctx, leaves[1].raw) # [placeholder-audited]
+    result.seqDataMore = leaves[2 .. ^1]   ## RFC-0005 S8bc
   of svTable:
     result.tabDataRaw = leaves[0]
     result.tabPresentRaw = leaves[1]
@@ -827,7 +775,7 @@ proc heapCellSelect(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
     leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, c.arr.raw, refAst.raw))
   svWithLeaves(ctx, proto, leaves, valTy)
 
-proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
+proc svCellWf(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool] =
   ## RFC-0005 S8ap (was `heapCellWfConds`' body); S8ar: recursive over a
   ## tree value's parts. The facts a free value of `ty` has (`allocateSym`'s
   ## init facts): a string of bytes, a length or size in `[0, 1024]`, a
@@ -835,29 +783,39 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
   ## and -- for a NESTED scalar part, which no read site sees -- its declared
   ## range (`rangeCondsIfNeeded`; a cell's own scalar range is the read
   ## site's).
+  ##
+  ## RFC-0005 S8bc: `bounded = false` drops the `1024` upper bounds, keeping
+  ## the rest. A seq ELEMENT's facts are asserted at every read of it, and an
+  ## element the body stored may hold a longer seq (`newSeq(n)`), so the
+  ## input bound would be a false fact there (a false unsat).
   case sv.kind
   of svString:
     @[matches(sv.str, star(range(mkString("\x00"), mkString("\xff"))))]
   of svSeq:
-    @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
+    if bounded: @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
+    else: @[sv.seqLen >= mkInt(0)] # [placeholder-audited]
   of svTable:
     registerTableBase(sv.tabPresentRaw, sv.tabSize, ty.tabKeyTy)
     registerTabTreeBase(sv)   ## RFC-0005 S8at
-    @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
+    if bounded: @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
+    else: @[sv.tabSize >= mkInt(0)]
   of svSet:
     registerSetBase(sv.setMembersRaw, sv.setSize, ty.setElemTy)
-    @[sv.setSize >= mkInt(0),
-      sv.setSize <= mkInt(min(1024'i64, cellDomainSize(ty.setElemTy)))]
+    if bounded:
+      @[sv.setSize >= mkInt(0),
+        sv.setSize <= mkInt(min(1024'i64, cellDomainSize(ty.setElemTy)))]
+    else:
+      @[sv.setSize >= mkInt(0), sv.setSize <= mkInt(cellDomainSize(ty.setElemTy))]
   of svTuple:
     var r: seq[Z3Bool]
-    for i, f in sv.fields: r.add svCellWf(f, ty.fields[i], true)
+    for i, f in sv.fields: r.add svCellWf(f, ty.fields[i], true, bounded)
     r
   of svArray:
     var r: seq[Z3Bool]
-    for e in sv.arrElems: r.add svCellWf(e, ty.elemTy, true)
+    for e in sv.arrElems: r.add svCellWf(e, ty.elemTy, true, bounded)
     r
   of svDistinct:
-    svCellWf(ejectBase(sv), distinctGround(ty), nested)
+    svCellWf(ejectBase(sv), distinctGround(ty), nested, bounded)
   of svVariant, svMultiVariant:
     # RFC-0005 S8at. Each part's facts, and each discriminator in its
     # legal domain (`allocateSym`'s clause: an `else` arm's ordinals
@@ -865,7 +823,7 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
     var r: seq[Z3Bool]
     if not heapTreeTy(ty) or not svFitsHeapTy(sv, ty): return r
     let ps = svPartsOf(sv, ty)
-    for i, part in heapParts(ty): r.add svCellWf(ps[i], part.ty, true)
+    for i, part in heapParts(ty): r.add svCellWf(ps[i], part.ty, true, bounded)
     proc domainClause(d: SymVal; ordSet: seq[int]) =
       if ordSet.len == 0: return
       var clause = variantDiscEq(d, int64(ordSet[0]))

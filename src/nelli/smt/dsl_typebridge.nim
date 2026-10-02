@@ -396,6 +396,15 @@ proc fieldDeclineMsg(n: NimNode, note: string): string =
   let li = n.lineInfoObj
   &"{li.filename}:{li.line}:{li.column}: {note} in `" & n.repr & "`"
 
+const maxRecursiveValueDepth* = 2
+  ## RFC-0005 S8bc (item 3). How many levels of a recursive value object
+  ## (`type T = object; kids: seq[T]`) below the outermost are modelled:
+  ## `p.kids[i].kids[j]` is, `p.kids[i].kids[j].kids` is the depth
+  ## placeholder (`seRecursiveValueDepth`).
+const recursiveDepthPrefix = "__unsupported:recursive value object depth bound "
+  ## RFC-0005 S8bc. The `uninterpName` prefix of the element type past the
+  ## depth bound (`scopedDeclineFieldTy` keys its decline kind on it).
+
 proc unsupportedFieldTy(fieldName: string, elemTy: IRType, n: NimNode): IRType =
   ## Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution 2026-08-15) —
   ## build the per-field UNSUPPORTED PLACEHOLDER `IRType` (see the
@@ -426,7 +435,14 @@ proc scopedDeclineFieldTy(rawFty: IRType, fieldNameNode: NimNode,
   ## unchanged. `fieldNameNode` supplies the field's own name for the decline
   ## message (falls back positionally like `fieldNameStr` does); `declNode`
   ## is the `nnkIdentDefs` group the field was declared in, for `lineInfo`.
-  if rawFty.kind == itSeq and not isBackedSeqElemTy(rawFty.seqElemTy):
+  if rawFty.kind == itSeq and rawFty.seqElemTy.kind == itUninterp and
+     rawFty.seqElemTy.uninterpName.startsWith(recursiveDepthPrefix):
+    # RFC-0005 S8bc: the seq at a recursive value object's depth bound.
+    tUnsupportedFieldSeq(rawFty.seqElemTy, fieldDeclineMsg(declNode,
+      "field `" & fieldNameStr(fieldNameNode, 0) & "` is a recursive value " &
+      "object's seq past the modelled depth (" & $maxRecursiveValueDepth &
+      " levels below the outermost value)"), kind = seRecursiveValueDepth)
+  elif rawFty.kind == itSeq and not isBackedSeqElemTy(rawFty.seqElemTy):
     unsupportedFieldTy(fieldNameStr(fieldNameNode, 0), rawFty.seqElemTy, declNode)
   else:
     rawFty
@@ -936,6 +952,22 @@ proc classifyType*(ty: NimNode): ClassifiedType =
        isBuiltinTypeHead(impl[2][0], ["array"]):
       let arr = arrayTypeImpl(resolved)
       if arr != nil: return classifyArrayBracket(arr)
+    # RFC-0005 S8bc: a named tuple type (`type P = tuple[x, y: int]`) is the
+    # tuple. It reached the text-match catch-all below and classified
+    # `__unsupported:P`, and a literal of it (`s.add((a, b))` into a
+    # `seq[P]`) aborted the compile (`mkTupleLit`'s itTuple assertion). A
+    # tuple is structural, so the witness spells it `tuple[x: int, ...]`,
+    # the same type.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkTupleTy:
+      var fields: seq[IRType]
+      var names: seq[string]
+      for id in impl[2]:
+        let fty = classifyType(id[id.len - 2]).ty
+        for j in 0 ..< id.len - 2:
+          fields.add fty
+          names.add id[j].strVal
+      return unranged(tTuple(fields, names))
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
       # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
@@ -1145,13 +1177,24 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       # and `scopedDeclineFieldTy` turns the enclosing seq field into its
       # per-field read decline.
       let oid = nominalId(resolved)
-      if oid in objectsInClassification:
-        if refWrapNode != nil:
-          let ph = namedRefPlaceholder(resolved)
-          return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(ph) else: tRef(ph))
+      if oid in objectsInClassification and refWrapNode != nil:
+        let ph = namedRefPlaceholder(resolved)
+        return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(ph) else: tRef(ph))
+      # RFC-0005 S8bc (item 3): a value object met again is UNROLLED, to
+      # `maxRecursiveValueDepth` levels below the outermost (a seq of a tree
+      # element is leaf-split now, so each level is a real seq of the next).
+      # Was the placeholder at the first recurrence (S8ar), so no element
+      # of the seq was ever read. Past the bound the element type is the
+      # depth placeholder (`recursiveDepthPrefix`), and
+      # `scopedDeclineFieldTy` turns the enclosing seq field into a
+      # placeholder declining with `seRecursiveValueDepth`. Each level is
+      # its own IR type (the next level's `seqElemTy` differs), so a value
+      # built at one level and stored at another is conformed or declined by
+      # the walker (`conformSV`).
+      if objectsInClassification.count(oid) > maxRecursiveValueDepth:
         # Keyed on the type's symbol, so the witness still spells the
         # field's element type (an empty `seq[O]`, never read).
-        return unranged(tUninterp("__unsupported:recursive value object " &
+        return unranged(tUninterp(recursiveDepthPrefix &
                                   s).keyedBySym(resolved))
       objectsInClassification.add oid
       let pointee = classifyObjectRecordFields(resolved, recList,

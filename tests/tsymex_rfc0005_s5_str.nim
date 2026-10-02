@@ -206,7 +206,7 @@ proc s5BackrefDead(s: string, n: int) =
 
 type S5Holder = object
   count: int
-  opts: seq[(string, string)]   ## unbacked elem (itTuple) -> R1 placeholder
+  opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> R1 placeholder
 
 proc s5PlaceholderLenDead(v: var S5Holder, n: int) =
   if v.opts.len > 0:
@@ -424,7 +424,9 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
       let a = src.find(arm)
       check a >= 0
       let r = src.find("raise (ref " & carrier & ")", a)
-      let l = src.find("lower(env, e.strArgs[0])", a)
+      # RFC-0005 S8bc (item 2): a string operand lowers through
+      # `lowerStrOperand` (`lower` plus the distinct-base eject).
+      let l = src.find("lowerStrOperand(env, e.strArgs[0])", a)
       checkpoint(arm & " lower@" & $l & " raise@" & $r)
       check r > a
       check l > a and l < r

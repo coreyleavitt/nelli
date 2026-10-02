@@ -323,7 +323,14 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
     # gives one (Z3 5.1 at this budget).
     if st.budgetOut == 0:
       check st.slowSat >= 1
-    check st.slowSat <= 1
+    # RFC-0005 S8bc: until S8bc `pairs.add((key, val))` was an in-band
+    # walker-fault decline (`iekSeqAdd: element lowered to tuple value`),
+    # which made every hit after it cheap. S8bc models the add, and on Z3
+    # 5.1 two hits are slow SATs (3 declined). The second was solved, so
+    # it is not at least as deep as the first in every loop (S8y's rule;
+    # the inner `b4ReadCString` loops count too). The bound still holds
+    # the walk to a handful of costly solves.
+    check st.slowSat + st.budgetOut <= 2
     # Each target-hit solve is bounded by the budget, so the walk's total
     # is too, and in practice far below (solved hits) x 400k.
     check st.units < 8 * 400_000

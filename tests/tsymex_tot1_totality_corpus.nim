@@ -197,7 +197,8 @@ proc corpusCstringParam(s: cstring, y: int) =
 type
   Widget = object
     a: int
-    b: int
+    b: ref int   # RFC-0005 S8bc: a seq of a plain object is renderable since
+                 # S8bc; a seq element holding a ref is not
 
 # `seq[Widget]` — a non-scalar/non-ref seq element — hits
 # `emitTyAndReader`'s `itSeq` catch-all (CR-2c).
@@ -279,7 +280,7 @@ type
   Tot1Packet = object
     tag: int
     case kind: Tot1PKind
-    of tot1pRrq: options: seq[(string, string)]
+    of tot1pRrq: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
     of tot1pData: blockNum: int
 
 proc corpusUnsupportedFieldRead(p: Tot1Packet) =
@@ -302,7 +303,7 @@ proc corpusUnsupportedFieldRead(p: Tot1Packet) =
 ## interception) — R1 landed `placeholderReadDeclineMsg`/
 ## `declinePlaceholderInLower` (`runtime.nim`, just above `freshRetSym`) as
 ## the shared chokepoint every `svSeq`-consuming `lower()` arm now calls.
-proc corpusMakeUnsupportedPairs(n: int): seq[(string, string)] =
+proc corpusMakeUnsupportedPairs(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   discard
 
 proc corpusBareLenRead(n: int) =

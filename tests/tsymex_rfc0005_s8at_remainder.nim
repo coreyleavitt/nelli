@@ -697,16 +697,20 @@ suite "S8at (6): a value object recurring through a seq":
     check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
 
-  test "its elements decline at the read, as a non-recursive element does":
+  test "its elements are read (RFC-0005 S8bc: a leaf-split seq element)":
+    # RFC-0005 S8bc re-pinned this. S8at declined both reads
+    # (`seNestedSeqUnsupported`): a seq of a tuple or object was backed in
+    # no position. S8bc holds such a seq leaf-split and unrolls the
+    # recursive value object to a bounded depth, so both are exact.
     let r = symexFind(vrKids, tLabel("vr_kids"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
+    check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
+    if r.status == sxSat: check reproduces(vrKids(r.witness[0]), "vr_kids")
     let f = symexFind(vrFlat, tLabel("vr_flat"))
     checkpoint $f.status & " " & show(f.errors)
-    check f.status == sxUnknown
-    check f.errors.hasKind(seNestedSeqUnsupported)
+    check f.status == sxSat
+    if f.status == sxSat: check reproduces(vrFlat(f.witness[0]), "vr_flat")
 
 # ---- (7) Table float keys and container values ------------------------------
 

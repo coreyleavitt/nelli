@@ -166,14 +166,24 @@ suite "symex round-6 B6 -- main option-region defect proof":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00dd\x00ee\x00ff\x00gg\x00hh\x00\x00")
       let n = s.len
-      var pairs: seq[(string, string)] = @[]
+      # RFC-0005 S8bc: the accumulator is a seq of seqs, an unbacked
+      # stand-in. A seq of tuples is backed since S8bc, and with every
+      # `add` modelled this non-recognized k-unroll runs past the 900 s
+      # bound -- as the same loop with NO accumulator already did at the
+      # S8bc base (460c51e). Before S8bc this pin's `sxUnknown` came from
+      # the in-band `iekSeqAdd` element-mismatch decline (filed as
+      # `weInternalWalkerFault`) on the tuple element, which cut the walk
+      # short; on a seq of seqs that decline still fires. Both the
+      # k-unroll's cost and that decline's kind are reported in RFC-0005's
+      # "As landed (S8bc)", not fixed here.
+      var pairs: seq[seq[string]] = @[]
       var i = 0
       while i < n:
         let (key, p1) = readCStringOpt(s, i)
         if key.len == 0:
           break
         let (val, p2) = readCStringOpt(s, p1)
-        pairs.add((key, val))
+        pairs.add(@[key, val])
         i = p2
       symexTarget("done")
     let r = symexFind(sut, tLabel("done"))
@@ -258,14 +268,24 @@ suite "symex round-6 B6 -- trip wire (recognizer stays narrow)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00dd\x00ee\x00ff\x00gg\x00hh\x00\x00")
       let n = s.len
-      var pairs: seq[(string, string)] = @[]
+      # RFC-0005 S8bc: the accumulator is a seq of seqs, an unbacked
+      # stand-in. A seq of tuples is backed since S8bc, and with every
+      # `add` modelled this non-recognized k-unroll runs past the 900 s
+      # bound -- as the same loop with NO accumulator already did at the
+      # S8bc base (460c51e). Before S8bc this pin's `sxUnknown` came from
+      # the in-band `iekSeqAdd` element-mismatch decline (filed as
+      # `weInternalWalkerFault`) on the tuple element, which cut the walk
+      # short; on a seq of seqs that decline still fires. Both the
+      # k-unroll's cost and that decline's kind are reported in RFC-0005's
+      # "As landed (S8bc)", not fixed here.
+      var pairs: seq[seq[string]] = @[]
       var i = 0
       while i < n:
         let (key, p1) = readCStringOpt(s, i)
         if key.len == 0:
           break
         let (val, p2) = readCStringOpt(s, p1)
-        pairs.add((key, val))
+        pairs.add(@[key, val])
         i = p2
       symexTarget("done")
     let r = symexFind(sut, tLabel("done"))

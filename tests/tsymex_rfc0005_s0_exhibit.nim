@@ -72,9 +72,10 @@ type
     ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
     ## heap cell holds (a seq of tuples is backed nowhere, a stated
     ## decline). The by-value case object this was (S8ar) is a cell
-    ## value since S8at.
+    ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
+    ## the part is a `seq[seq[int]]`.
     x: int
-    ys: seq[(int, int)]
+    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   S0DeadNode = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
     ## (a string field is read and written through its heap); a `distinct`
@@ -132,6 +133,11 @@ proc s0DeadFreshSymbol(p: S0DeadNode, n: int) =
 ## path (whose target hit is infeasible), and the `x == 42` path is clean.
 ##
 ## The ONLY `sevError` kind this run ever drains is `feUnsupportedExprKind`.
+##
+## RFC-0005 S8bc (item 5): no longer. The `isUnsupported` walk arm drops a
+## path no execution can take (`pathInfeasible`, S8an's rule) instead of
+## tainting it, so the contradictory branch's decline is not recorded at
+## all and this run drains NO `sevError`.
 
 proc s0CapVetoCompanion(x: int, deadGuard: bool) =
   if deadGuard and not deadGuard:
@@ -234,7 +240,7 @@ suite "RFC-0005 S0 pin 2 -- cap-veto companion (flipped sxSat at S9)":
     check r.status == sxSat
     check r.witness[0] == 42
 
-  test "the drained sevError kind set is EXACTLY {feUnsupportedExprKind}, from a branch disjoint from the witness":
+  test "the drained sevError kind set is EMPTY: the decline sits on an infeasible branch (RFC-0005 S8bc)":
     let r = symexFind(s0CapVetoCompanion, tLabel("s0_cap_veto_companion"))
     var sevErrorKinds: seq[SymexErrorKind]
     for e in r.errors:
@@ -244,7 +250,11 @@ suite "RFC-0005 S0 pin 2 -- cap-veto companion (flipped sxSat at S9)":
     # its parse-time kind and the walker records it again where a path
     # reaches the decline, so `feUnsupportedExprKind` is drained twice (the
     # parse-time entry + the walk-site entry). The set is unchanged.
-    check deduplicate(sevErrorKinds) == @[feUnsupportedExprKind]
+    #
+    # RFC-0005 S8bc (item 5): the walk arm now drops the decline on the
+    # infeasible branch (`deadGuard and not deadGuard`) rather than tainting
+    # it, and nothing else records it. Was `@[feUnsupportedExprKind]`.
+    check sevErrorKinds.len == 0
 
 suite "RFC-0005 S0 pin 3 -- closure-veto companion (flipped sxSat at S9)":
 

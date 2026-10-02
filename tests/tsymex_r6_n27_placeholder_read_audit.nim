@@ -266,13 +266,22 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## (an array of seqs at a symbolic index): six lines reading
     ## `seqDataRaw`/`seqLen` in the `else` of the arm's own
     ## `isUnsupportedFieldPlaceholder` guard. 91 + 6 = 97.
+    ## RFC-0005 S8bc: a seq of a tree element holds one data array per
+    ## leaf, so the seq sites build through `seqArrs` / `withSeqArrsOf` /
+    ## `mkSeqSV` / `seqStoreArrs` (seven marked reads: the two helpers'
+    ## own, `conformSV`'s guard pair, truncation length and rebuild,
+    ## `seqStoreArrs`' scalar store). Twenty marked reads at the sites
+    ## (`retBindEq` 3, `iteSV` 4, slice 1, add 1, del 1, insert 3, `astHash`
+    ## 1, `joinSV` 3, `isIndexAssign` 2, `isSeqPop` 1) became seven
+    ## (`retBindEq`, `extractTreeValue`'s guard and length, `astHash`,
+    ## `joinSV`, `isIndexAssign`, `isSeqPop`). 97 + 7 + 7 - 20 = 91.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 97
+    check runtimeCount == 91
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

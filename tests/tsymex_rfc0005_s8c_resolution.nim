@@ -351,7 +351,10 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
     let r = symexFind(s8cSeqEq, tLabel("s8c_seqeq"))
     dump(r.errors)
     check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
+    # RFC-0005 S8bc: a seq of a distinct is a leaf-split seq (was the
+    # unbacked placeholder, `seNestedSeqUnsupported`); the seq `==` itself
+    # is what declines now.
+    check r.errors.hasKind(feUnsupportedOp)
 
   test "sets.contains over a key with a user `==`/`hash`: sxUnknown, recorded":
     let r = symexFind(s8cSetKey, tLabel("s8c_setkey"))

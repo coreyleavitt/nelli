@@ -63,10 +63,10 @@ import nelli/smt/canonicalize
 # unbacked-element seq allocates a FRESH placeholder-flagged `retSym`
 # (`allocateSym`'s `itSeq` arm, via `freshRetSym`) regardless of what this
 # body itself does — the B7r2-1c call-boundary mechanism.
-proc makePairs(n: int): seq[(string, string)] =
+proc makePairs(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   discard
 
-proc readsLen(ps: seq[(string, string)]): int =
+proc readsLen(ps: seq[seq[string]]): int =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   ## Callee for the pass-to-callee form below. Its OWN formal binding is a
   ## direct value-copy of the caller's already-lowered actual (`isCall`'s
   ## `calleeEnv[formal.name] = argVals[i]`, runtime.nim ~7269) — the
@@ -81,7 +81,7 @@ type
   Rec = object
     tag: int
     case kind: RKind
-    of rkOpts: options: seq[(string, string)]
+    of rkOpts: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
     of rkPlain: plain: int
 
 # =============================================================================
@@ -188,7 +188,7 @@ proc sutBareEquality(n: range[0 .. 1000]) =
 
 proc sutBareMutation(n: int) =
   var ps = makePairs(n)
-  ps.add(("a", "b"))
+  ps.add(@["a", "b"])  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if n == 5:
     symexTarget("bare_mutation")
 

@@ -205,7 +205,18 @@ const renderAsChoicesVersion* = "12"
 const symexWalkerVersion* = "203"
   ## RFC-0005 S8bc (2026-10-02) — S8at's remainder; provisional number (batch
   ## 2 takes 202; the channel assigns the final one at merge).
-  ## S8BC-DOC-PENDING. 193->203.
+  ## 193->203. `getOrDefault` is modelled, and a mixed bool/int `and`
+  ## declines in-band (was a walker fault). A non-operator `{.borrow.}`
+  ## routine is its base routine. A seq of a tuple or object element is
+  ## held leaf-split, one data array per leaf (was unbacked in every
+  ## position); a recursive value object is unrolled to
+  ## `maxRecursiveValueDepth` and declines past it
+  ## (`seRecursiveValueDepth`). `insert` on an array element or Table value,
+  ## `newSeq` (`iekSeqNewZero`), Table iteration (`isTabKeys`) and
+  ## `mgetOrPut` are modelled; `inc`/`dec` on any receiver but a bare int
+  ## variable was silently dropped and is now the assignment. A decline on
+  ## an infeasible arm is dropped, not tainted. An inlined iterator keeps
+  ## its typed parameters, and an int conversion of a constant folds.
   ##
   ## RFC-0005 S8at (2026-10-02) — S8ar's remainder; provisional number (the
   ## channel assigns the final one at merge). An anonymous-tuple pointee's

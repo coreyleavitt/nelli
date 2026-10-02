@@ -12714,12 +12714,15 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # RFC-0005 S8bc: a callee's body is parsed outside any borrowed call's
   # argument views (a node of the callee spelled like the caller's argument
   # is not that argument).
-  let savedViews = borrowBaseViews
-  borrowBaseViews.setLen 0
+  # Swapped out, not `let`-copied: a compile-time `let` of a global seq
+  # aliases it in the VM, so the `setLen 0` emptied the saved views too
+  # (`vm_alias_guard`, RFC-0005 S8ab).
+  var savedViews: seq[tuple[node: NimNode, baseTy: NimNode]]
+  swap(savedViews, borrowBaseViews)
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil)
-  borrowBaseViews = savedViews
+  swap(savedViews, borrowBaseViews)
   sig.captures = captures
   leaveNameScope(savedNames)
   ctx.procScoped = savedProcScoped

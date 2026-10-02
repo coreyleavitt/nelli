@@ -1200,6 +1200,17 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
     elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float32")),
        newCall(stdName("readSeqFloat32"), witId, newLit(path)))
+    elif isTreeSeqElemTy(ty.seqElemTy):
+      # RFC-0005 S8bc (item 3): a seq of a by-value tuple, object, array or
+      # case object, held leaf-split. Each element is written in the heap's
+      # cell layout (`extractTreeValue`) and read as a cell field is
+      # (`readSeqAs` -> `readCellField`); only the element's TYPE comes from
+      # the recursion.
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
+                       copyNimTree(elemTyNode)),
+               witId, newLit(path)))
     elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # RFC-0005 S8f/S8h: element `i` is the position `path[i]` -- nil, the
       # same object as any other position holding its address (an earlier

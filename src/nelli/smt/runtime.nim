@@ -8662,6 +8662,32 @@ proc heapKeyValTy(key: string): IRType =
   ## The value type `mkHeapArrayVar` recorded for `key`, or nil.
   if heapKeyShapes.hasKey(key): heapKeyShapes[key].valTy else: nil
 
+# RFC-0005 S8bh (item 2): the key and code helpers of the ptr target model
+# (`ptrTargets`, runtime_heap.nim), here for `buildHeapSnapshot`.
+
+proc ptrTargetCode*(id: string): int64 =
+  ## RFC-0005 S8bh. The `sel` code of the target named `id` (a heap key, or
+  ## an env name); never 0, the own cell's code.
+  inheritTagCode("ptr:" & id)
+
+proc ptrSelKey(typeId: string): string = typeId & "__@ptrsel"
+proc ptrObjKey(typeId, famKey: string): string = typeId & "__@ptrobj__" & famKey
+
+proc ptrScalarPointee(t: IRType): bool =
+  ## RFC-0005 S8bh. The pointees whose `ptr` this model retargets: a scalar
+  ## or a string (held in one whole-pointee heap cell).
+  t != nil and t.kind in {itInt, itBool, itFloat32, itFloat64, itString}
+
+proc ptrFamilyKey(key: string): bool =
+  ## RFC-0005 S8bh. `key` is a field-split heap of a field (a plain field,
+  ## `<O>__<f>`, or a variant branch field, `<O>__@<ord>__<f>`), not an
+  ## internal one (a discriminator, a compound leaf, a tag level, this
+  ## model's own arrays).
+  let at = key.find("__@")
+  if at < 0: return "__" in key
+  let rest = key[at + 3 .. ^1]
+  rest.len > 0 and rest[0] in {'0'..'9'} and "__" in rest
+
 proc refAddrOf(m: Z3Model, addrAst: Z3AnyAst, pointee: IRType): string =
   ## RFC-0005 S8h. The model address of a ref, "" for nil. Prefixed with the
   ## pointee's type id: addresses of different `Ref_T` sorts never alias.
@@ -8977,6 +9003,43 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     let pointsTo = renderCell(b, m, w, cell)
     b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
     inc i
+  # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
+  # `ptrTargets`) is a field of an object the snapshot holds as a cell
+  # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed
+  # witness resolves to the field's address (`resolveRef`). A target the
+  # snapshot holds no cell for (a global, a `var` parameter, an object no
+  # position reaches) keeps the pointer's own cell; the replay of such a
+  # witness may then refute it (the pointer is not handed the location).
+  for pos in b.queue:
+    if not ptrScalarPointee(pos.pointee): continue
+    let typeId = refPointeeTypeId(pos.pointee)
+    let sk = ptrSelKey(typeId)
+    if not currentVariantHeaps.hasKey(sk): continue
+    let ctx = pos.addrAst.ctx
+    let selV = $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx, inputHeap(sk).raw,
+                                                         pos.addrAst.raw)))
+    let prefix = ptrObjKey(typeId, "")
+    var fams: seq[string]
+    for key in currentVariantHeaps.keys:
+      if key.startsWith(prefix): fams.add key[prefix.len .. ^1]
+    sort(fams)
+    for fam in fams:
+      if not currentVariantHeaps.hasKey(fam): continue
+      if selV != $ptrTargetCode(fam) and
+         selV != "#x" & toHex(ptrTargetCode(fam), 16).toLowerAscii: continue
+      let objMap = inputHeap(ptrObjKey(typeId, fam))
+      let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, objMap.raw,
+                                                      pos.addrAst.raw))
+      let objSort = ctx.checkErr Z3_get_sort(ctx.raw, objAddr.raw)
+      var oid = ""
+      for tid, srt in currentRefSorts:
+        if srt == objSort: oid = tid
+      let address = oid & "|" & $m.eval(objAddr)
+      let fsep = fam.rfind("__")
+      if oid.len > 0 and fsep >= 0 and b.cellOf.hasKey(address):
+        b.entries[b.entryOf[pos.name]].aliasRef =
+          some("&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1])
+      break
   b.entries
 
 proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
@@ -17333,13 +17396,17 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
         let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
                    elif met == "*": "a location"
                    else: "a heap cell of that type"
-        closureDegrade(
-          (if met.startsWith("n:"): ceCaptureByRefUnmodelled else: feUnsupportedOp),
-          "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
+        let msg = "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
                "argument's location, " & what & ", can also be reached by " &
                "the body outside its formals (a capture, a global or a proc " &
                "value it calls): the body's accesses through the two are " &
-               "not one location in the walk (RFC-0005 S8bh)")
+               "not one location in the walk (RFC-0005 S8bh)"
+        # One call per kind, each spelled on its own line: the S7 source pins
+        # (`tsymex_rfc0005_s7_closure`) read a site's kind off that line.
+        if met.startsWith("n:"):
+          closureDegrade(ceCaptureByRefUnmodelled, msg)
+        else:
+          closureDegrade(feUnsupportedOp, msg)
       for k in e.ccAddrArgs:
         if k >= cb.ptrLocal.len or not cb.ptrLocal[k]:
           closureDegrade(feUnsupportedOp,
@@ -20942,6 +21009,15 @@ proc newRefWitness*(w: RawWitness): RefWitness =
       if e.value == "nil": ""
       elif e.aliasRef.isSome: e.aliasRef.get
       else: e.name
+  # RFC-0005 S8bh (item 2). A position aliasing a `ptr` cell that is itself
+  # a field's address (`"&<cell>.<field>"`) aliases that address.
+  var positions: seq[string]
+  for pos in result.cellOf.keys: positions.add pos
+  for pos in positions:
+    let cell = result.cellOf[pos]
+    if cell.len > 0 and cell != pos and result.cellOf.hasKey(cell) and
+       result.cellOf[cell].startsWith("&"):
+      result.cellOf[pos] = result.cellOf[cell]
 
 proc refElemPos*(container: string; i: int): string =
   ## RFC-0005 S8h. The position of element `i` of a `seq`/`array` of refs.
@@ -21015,10 +21091,15 @@ proc validDefault[F](f: var F) =
 
 proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
-  let cell = cellNameOf(c, pos)
+  var cell = cellNameOf(c, pos)
   if cell.len == 0: return nil
   let built = cellBuilt(c, cell)
   if built != nil: return cast[T](built)
+  # RFC-0005 S8bh (item 2). A pointer to a field (`"&<cell>.<field>"`) is
+  # that field's address, recorded when its object was built. An object not
+  # built yet (its position comes later) leaves the pointer its own cell,
+  # read from the leaves the snapshot wrote under the position's name.
+  if cell.startsWith("&"): cell = pos
   when T is ref:
     new(result)
   else:
@@ -21032,6 +21113,9 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
     {.cast(uncheckedAssign).}:
       for fname, fv in fieldPairs(result[]):
         readCellField(c, cell & "." & fname, fv)
+        # RFC-0005 S8bh (item 2): the field's address, for a pointer the
+        # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
+        cellRecord(c, "&" & cell & "." & fname, cast[pointer](addr fv))
   else:
     readCellField(c, cell, result[])
 

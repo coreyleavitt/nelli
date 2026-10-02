@@ -483,8 +483,13 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## unresolved callee x2, raw-wrap fallback, no-walk and over-budget
     ## guards, uncertain arm, zero-default havoc, HOF filter / capturing map /
     ## mapArray / fold; RFC-0005 S9 adds the two by-reference capture sites
-    ## (applied out of frame, body writes a capture).
-    check degradeSites == 13
+    ## (applied out of frame, body writes a capture). RFC-0005 S8bh adds the
+    ## six declines of a closure call's `var`/`addr` effects (an actual the
+    ## body reaches outside its formals, as a capture or otherwise; an
+    ## escaping `addr` pointer; more than two actuals on one location; no
+    ## specialised body for an aliased pair; a var actual naming no
+    ## variable).
+    check degradeSites == 19
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():

@@ -5051,6 +5051,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<Nil:" & canonicalize(e.nilPointee) & ">"
   of iekZeroValue:                       ## RFC-0005 S8u
     "Ex<Zero:" & canonicalize(e.zvTy) & ">"
+  of iekSeqNewZero:                      ## RFC-0005 S8bc
+    "Ex<SNZ:" & canonicalize(e.snzElemTy) & ":" &
+      canonicalize(e.snzLen, env) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 

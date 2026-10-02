@@ -667,6 +667,11 @@ type
                         ## local): the walker's `defaultZero`, an empty
                         ## container. A type with no modelled zero value
                         ## declines in-band at lowering.
+    iekSeqNewZero       ## RFC-0005 S8bc (item 5): `newSeq[T](n)`, a seq of
+                        ## `snzLen` elements, each `snzElemTy`'s zero. The
+                        ## parser guards `0 <= n <= maxModelledInitialSize`
+                        ## first (a negative `n` raises `RangeDefect`, a
+                        ## larger one declines, scoped).
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -897,6 +902,9 @@ type
                                      ## type when the other operand is `ptr T`)
     of iekZeroValue:                 ## RFC-0005 S8u
       zvTy*: IRType                  ## the type whose zero value this is
+    of iekSeqNewZero:                ## RFC-0005 S8bc
+      snzLen*: IRExpr                ## the length (already range-guarded)
+      snzElemTy*: IRType             ## the element type
 
   IRStmtKind* = enum
     isBlock
@@ -3667,6 +3675,10 @@ proc mkZeroValue*(ty: IRType): IRExpr =
   ## a `HashSet`). Lowers to the walker's `defaultZero`.
   IRExpr(kind: iekZeroValue, zvTy: ty)
 
+proc mkSeqNewZero*(len: IRExpr, elemTy: IRType): IRExpr =
+  ## RFC-0005 S8bc (item 5). `newSeq[T](len)`: `len` zero elements.
+  IRExpr(kind: iekSeqNewZero, snzLen: len, snzElemTy: elemTy)
+
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
 
@@ -5336,6 +5348,8 @@ proc render*(e: IRExpr): string =
     "nil"
   of iekZeroValue:        ## RFC-0005 S8u
     "default(" & $e.zvTy & ")"
+  of iekSeqNewZero:       ## RFC-0005 S8bc
+    "newSeq[" & $e.snzElemTy & "](" & render(e.snzLen) & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

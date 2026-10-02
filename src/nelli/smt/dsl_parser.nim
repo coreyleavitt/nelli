@@ -403,6 +403,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
   of iekZeroValue:        ## RFC-0005 S8u
     newCall(bindSym"mkZeroValue", emitIRType(e.zvTy))
+  of iekSeqNewZero:       ## RFC-0005 S8bc
+    newCall(bindSym"mkSeqNewZero", emitExpr(e.snzLen), emitIRType(e.snzElemTy))
 
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
@@ -1439,6 +1441,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
              rhsHasInlineDefectFork(e.vfsVal)
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
+  of iekSeqNewZero:   ## RFC-0005 S8bc: its guard forks are preamble, not here
+    result = rhsHasInlineDefectFork(e.snzLen)
   of iekSeqSlice:
     # v67: a seq slice carries its own IndexDefect fork (the SND-4 OOB
     # deposit in its lowering; RFC-0005 S8g: and its RangeDefect) — always
@@ -3764,6 +3768,48 @@ proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                    $maxModelledInitialSize))])
   zeroValueForType(cls.ty)
 
+proc parseNewSeqLen(lenNode: NimNode; name: string;
+                    preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 5). `newSeq`'s length, guarded as Nim guards it:
+  ## the parameter is `Natural`, so a negative length raises `RangeDefect`
+  ## at the call (the typed argument's hidden conversion, stripped here and
+  ## checked explicitly, as `parseInitContainer` does its size). A length
+  ## above `maxModelledInitialSize` allocates that many elements: an
+  ## `OutOfMemDefect`, or not, depending on the host -- that path is
+  ## declined, scoped to it. A literal in range needs no guard.
+  var lit = lenNode
+  while lit.kind == nnkHiddenStdConv and lit.len >= 1:
+    lit = lit[lit.len - 1]
+  if lit.kind in nnkCharLit..nnkUInt64Lit and lit.intVal >= 0 and
+     lit.intVal <= maxModelledInitialSize:
+    return mkIntLit(lit.intVal)
+  let lenIR = parseAtomicOperand(lit, preamble, ctx)
+  preamble.add mkIf(@[
+    mkBranch(mkBinop(bLt, lenIR, mkIntLit(0)), mkRaise("RangeDefect", nil)),
+    mkBranch(mkBinop(bGt, lenIR, mkIntLit(maxModelledInitialSize)),
+             ctx.declineAtSite(feUnsupportedOp,
+               "`" & name & "` with a length above " &
+               $maxModelledInitialSize & " is not modelled: allocating it " &
+               "raises OutOfMemDefect or not, depending on the host -- " &
+               "path degraded to sxUnknown",
+               name & ": length above " & $maxModelledInitialSize))])
+  lenIR
+
+proc parseNewSeqExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 5). The stdlib's `newSeq[T](n)` (and
+  ## `newSeq[T]()`, `n = 0`): a seq of `n` zero elements (`iekSeqNewZero`).
+  ## `nil` for any other call. It was walked as the generic stdlib body,
+  ## which reaches an unsupported `when` and the seq payload cast
+  ## (`heUnsafeCast`), so every call declined.
+  if calleeSym.kind != nnkSym or calleeSym.strVal != "newSeq" or
+     not isStdlibDecl(calleeSym) or n.len != 2:
+    return nil
+  let cls = classifyType(n)
+  if cls.ty.kind != itSeq: return nil
+  mkSeqNewZero(parseNewSeqLen(n[1], "newSeq", preamble, ctx),
+               cls.ty.seqElemTy)
+
 proc parseGetOrDefault(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                        ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8bc. The stdlib's `getOrDefault(t, key)` /
@@ -5858,6 +5904,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           let synth = freshSynth(ctx, "pop")
           preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n))
           return mkVar(synth)
+    block:
+      # RFC-0005 S8bc (item 5): `newSeq[T](n)`.
+      let nsIR = parseNewSeqExpr(n, calleeSym, preamble, ctx)
+      if nsIR != nil: return nsIR
     # RFC-0005 S8bc: `getOrDefault(t, k[, d])` on a Table is the present
     # value, else `d` (or `default(V)`). It walked the stdlib body before,
     # whose `hashes.Hash` locals the model does not classify (a decline, and
@@ -10503,6 +10553,15 @@ proc parseStmtInner(n: NimNode,
   block borrowRoutine:
     let (rw, views) = borrowRoutineRewrite(n)
     if rw != nil: return parseBorrowViewedStmt(rw, views, preamble, ctx)
+  # RFC-0005 S8bc (item 5): `newSeq(s, n)` is `s = newSeq[T](n)`. The length
+  # is evaluated (and its guard forked) before `s` is written.
+  if n.kind in {nnkCall, nnkCommand} and n.len == 3 and
+     n[0].kind == nnkSym and n[0].strVal == "newSeq" and
+     isStdlibDecl(n[0]) and classifyType(n[1]).ty.kind == itSeq:
+    let target = unwrapHidden(n[1])
+    let lenIR = parseNewSeqLen(n[2], "newSeq", preamble, ctx)
+    return parseAsgn(nnkAsgn.newTree(target, newEmptyNode()),
+      mkSeqNewZero(lenIR, classifyType(n[1]).ty.seqElemTy), preamble, ctx)
   case n.kind
   # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a

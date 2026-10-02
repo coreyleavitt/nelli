@@ -2406,6 +2406,9 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
 
+proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8bc fwd-decl. `newSeq[T](n)` → n zero elements.
+
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst
   ## N14 fwd-decl (RFC-chapulin-hardening bucket-2). Defined AFTER `walk`
@@ -3760,6 +3763,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekZeroValue:
     # RFC-0005 S8u. An empty container: no integer representation.
+    none(SymVal)
+  of iekSeqNewZero:
+    # RFC-0005 S8bc. A seq: no integer representation.
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -8294,6 +8300,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       lowerDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
+  of iekSeqNewZero:
+    lowerSeqNewZero(env, e)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -17106,10 +17114,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # path actually reaches the decline (the reach-anchored record §2.5
     # point 1 builds on); a Class-B node's is `feUnsupportedStmtKind`.
     # RFC-0005 S8: the reach record carries the node's parse-minted anchor.
+    # RFC-0005 S8bc (item 5): a path that reaches the decline but that no
+    # execution can take is dropped, not tainted, as S8an drops one at the
+    # call-depth bail (`pathInfeasible`). The walker forks `if` arms without
+    # a feasibility check, so a SCOPED decline (a parse-time guard such as
+    # `newSeq`'s / `initTable`'s length above 2^20) was reached on every
+    # path, bound or not: `if n < 0 or n > 50: return` then `newSeq(n)`
+    # turned every dead label into sxUnknown. A dropped path has no
+    # behaviour to lose (its every later query carries the same UNSAT
+    # constraints); an undecided query keeps the path, tainted as before.
+    var live: seq[Path]
+    for p in paths:
+      if not pathInfeasible(w.z3, p, w.settings): live.add p
+    if live.len == 0: return live
     let d = w.degrade(stmt.unKind, stmt.reason,
                       scope = siteAnchored(stmt.unMarker))
     var out2: seq[Path]
-    for p in paths:
+    for p in live:
       out2.add forkPathTainted(p, p.pc, p.env, d)
     out2
   of isUnsafeCast:
@@ -18303,6 +18324,34 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
   SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
          seqDataRaw: dataRaw, seqElemTy: elemTy)
+
+proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bc (item 5). `newSeq[T](n)`: a seq of length `n` whose
+  ## every element is `T`'s zero -- the data array is the constant array
+  ## of that zero (`Z3_mk_const_array`), as an empty table's container
+  ## values are (`tabTreeDataZero`), so the element at any index below `n`
+  ## reads the zero. The parser has already forked a negative `n`
+  ## (`RangeDefect`) and declined one above `maxModelledInitialSize`. An
+  ## element type the seq does not back, or one with no modelled zero,
+  ## declines as a seq literal of it does.
+  let elemTy = e.snzElemTy
+  let lenSV = lower(env, e.snzLen)
+  if not isBackedSeqElemTy(elemTy) or not defaultZeroTotal(elemTy) or
+     lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+    lowerDegrade(seNestedSeqUnsupported,
+      "newSeq of a " & plainEnglishTypeKind(elemTy.kind) &
+        " element (or a non-integer length) not modelled")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
+  let ctx = requireCurrentContext()
+  let zero = defaultZero(elemTy, "__newSeqZero")
+  let leaves = svLeafAsts(zero, elemTy)
+  let idxHold = mkInt(0)
+  let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
+  let dataRaw = wrap[Z3AnyAst](ctx,
+    ctx.checkErr Z3_mk_const_array(ctx.raw, idxSort, leaves[0]))
+  SymVal(kind: svSeq, seqLen: toZ3Int(lenSV), seqDataRaw: dataRaw,
+         seqElemTy: elemTy)
 
 proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
   ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`

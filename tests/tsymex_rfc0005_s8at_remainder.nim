@@ -149,12 +149,13 @@ suite "S8at (2): initTable / initHashSet in a SUT":
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
 
-  test "newSeq through such a generic compiles; newSeq itself is not modelled":
-    # `newSeq` has no model: its stdlib body is walked until the call-depth
-    # budget runs out, an honest sxUnknown (reported, not fixed here).
+  test "newSeq through such a generic compiles, and is modelled":
+    # S8at pinned `sxSat` or `sxUnknown`: `newSeq` had no model, its stdlib
+    # body walked until the call-depth budget ran out. RFC-0005 S8bc
+    # (item 5) models it (`iekSeqNewZero`).
     let r = symexFind(retOnlyNewSeq, tLabel("ret_newseq"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status in {sxSat, sxUnknown}
+    check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
     if r.status == sxSat:
       check reproduces(retOnlyNewSeq(r.witness[0]), "ret_newseq")

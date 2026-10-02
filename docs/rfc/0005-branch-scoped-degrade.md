@@ -347,6 +347,11 @@ title = "S8at's remainder: getOrDefault, borrow routines, leaf-split seq element
 state = "done"
 
 [[slice]]
+id = "S8bl"
+title = "S8bc's remainder: var-param magics beyond inc/dec (swap etc.), non-terminating unrecognized pair loop, unbacked-element add fault, type aliases, inc borrow arity, borrow-view coverage, for-in array literal, mpairs/mvalues, table length change during iteration, ref-part seq element witnesses, long nested seqs in witnesses"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

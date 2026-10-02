@@ -336,30 +336,25 @@ suite "symex round-6 B7-rider -- mutation-fallback veto (B1's scanShapeReceiverM
     ## independently surfaces a genuine, unrelated `beBudgetExhausted` once
     ## the run is no longer whole-run-poisoned by a raw raise. See B1-4's
     ## own comment for the full writeup.
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled (`storeSeqElem`),
+    ## so the width decline this pinned is gone and the label is reached.
+    ## The receiver staying array-modelled is still what is checked: a
+    ## wrongly string-backed one reaches `iekSeqAdd`'s kind-mismatch decline
+    ## ("expected svSeq") instead of the store.
     let r = symexFind(mutatedByteReceiverStaysArray, tLabel("b7r_mutated_stays_array"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    var sawWidthDecline = false
+    check r.status == sxSat
     for e in r.errors:
       check "nested seq element type is not supported" notin e.msg
       check "receiver not svSeq" notin e.msg
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check "expected svSeq" notin e.msg
+      check "unsupported width" notin e.msg
 
   test "B7R-7 diagnostic: the no-loop ground truth hits the IDENTICAL pre-existing gap":
+    ## RFC-0005 S8ba: the gap is closed; the ground truth is a clean SAT.
     let r = symexFind(addMutationNoLoopDiagnostic, tLabel("b7r_add_no_loop_sat"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors[0].kind == weInternalWalkerFault
-    check "unsupported width" in r.errors[0].msg
-    var sawWidthDecline = false
-    for e in r.errors:
-      check "nested seq element type is not supported" notin e.msg
-      check "receiver not svSeq" notin e.msg
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+    checkpoint $r.errors
+    check r.status == sxSat
+    check r.errors.len == 0
 
 # -----------------------------------------------------------------------------
 # 8. Trip-wire: a byte-backed receiver whose bound is NOT syntactically its

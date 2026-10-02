@@ -1057,6 +1057,6 @@ task test, "Run the test suite":
             # temporary (never read as a global); seq[distinct] modelled;
             # len <= high(int) in step 1c; a heap var/addr actual a global
             # or capture also reaches is passed by reference; split axioms
-            # built at lowering. Walker 200 (provisional).
+            # built once, in a fixed order. Walker 200 (provisional).
             "tsymex_rfc0005_s8ba_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -180,21 +180,17 @@ proc sutW2aVarAliasedMutation(data: var seq[byte]) =
 suite "symex round-6 R4 -- W2a var-aliased mutation veto widened":
 
   test "R4-W2a: a var-aliased helper-call mutation excludes the receiver from string-backing -> honest classified decline, no crash":
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled, so the width
+    ## decline that proved the receiver stayed array-modelled is gone. The
+    ## proof is now the label reached with no kind-mismatch decline: a
+    ## wrongly string-backed receiver reaches `iekSeqAdd`'s "expected
+    ## svSeq" decline instead of the store.
     let r = symexFind(sutW2aVarAliasedMutation, tLabel("w2a_honest_verdict"))
-    # The receiver correctly stays ARRAY-modeled (not string-backed) post-fix
-    # -- reaching `iekSeqAdd`'s PRE-EXISTING, width-8-unsupported degrade
-    # (`.add` mutation lowering is width-64-only, a documented pre-existing
-    # gap unrelated to string-backing) is itself the proof: a wrongly
-    # string-backed receiver would have reached a DIFFERENT failure (the
-    # kind-mismatch route W2b's decline targets), not this one. No crash
-    # either way -- an honest classified decline, exactly what W2a's DoD
-    # allows ("falls to honest array modeling or classified decline").
-    check r.status == sxUnknown
-    var sawWidthDecline = false
+    checkpoint $r.errors
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check "expected svSeq" notin e.msg
+      check "unsupported width" notin e.msg
 
 # =============================================================================
 # 4. W2b -- kind-mismatch decline reachability. TWO-HOP construction: the
@@ -228,15 +224,17 @@ proc sutW2bTwoHopClosure(data: var seq[byte]) =
 suite "symex round-6 R4 -- W2b two-hop mutation closure":
 
   test "R4-W2b: a two-hop var-aliased mutation (through an intermediate proc) is still excluded -> honest classified decline, no crash":
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled, so the width
+    ## decline that proved the receiver stayed array-modelled is gone. The
+    ## proof is now the label reached with no kind-mismatch decline: a
+    ## wrongly string-backed receiver reaches `iekSeqAdd`'s "expected
+    ## svSeq" decline instead of the store.
     let r = symexFind(sutW2bTwoHopClosure, tLabel("w2b_two_hop_closure"))
-    # Same reasoning as R4-W2a: the width-8 decline (not a kind-mismatch
-    # decline) is itself the proof `s` stayed array-modeled two hops out.
-    check r.status == sxUnknown
-    var sawWidthDecline = false
+    checkpoint $r.errors
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check "expected svSeq" notin e.msg
+      check "unsupported width" notin e.msg
 
 # =============================================================================
 # 5. W3 -- considerCandidate's classifyType hits a monomorphized/generic

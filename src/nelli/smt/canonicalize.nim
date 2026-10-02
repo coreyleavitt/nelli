@@ -216,7 +216,8 @@ const symexWalkerVersion* = "200"
   ## every string / seq length its caps name. (4) A heap `var` / `addr`
   ## actual a global or capture of the callee also reaches is passed by
   ## reference: the callee is specialised to it (S8au declined). (5) A
-  ## split's axioms are built when it is lowered.
+  ## split's axioms are built once, at the first query reaching it, in
+  ## lowering order.
   ##
   ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. Provisional
   ## 194 (S8ar 191, S8as 192, S8at 193 in the same batch). (3) A

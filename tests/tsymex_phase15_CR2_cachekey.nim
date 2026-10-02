@@ -931,7 +931,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## consecutive chain facts; the c-notin-t form per Z3 version).
     ## Provisional 194.
     ## RFC-0005 S8ba (temporaries bound, seq[distinct], len <= high(int),
-    ## by-reference heap actuals, split axioms at lowering). Provisional
+    ## by-reference heap actuals, split axioms built once). Provisional
     ## 200.
     check symexWalkerVersion == "200"
 

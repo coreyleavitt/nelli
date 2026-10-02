@@ -5,8 +5,9 @@
 ##   (1) a local distinct value with no distinct-typed parameter: closed by
 ##       S8ad (`ensureDistinctSort`, walker 175); re-pinned over more shapes
 ##       (borrowed `+` / `==` / `<`, default-initialised, float base, a
-##       returned value, an object field). A `seq` of a distinct type is a
-##       scoped decline (a different mechanism, reported);
+##       returned value, an object field). A `seq` of a distinct type was
+##       a scoped decline (a different mechanism, reported); RFC-0005 S8ba
+##       models it;
 ##   (2) `start < 0 and y > 1 and start div y == start` under the sequence
 ##       theory: closed by S8ad (`divRangeFacts`) and pinned in
 ##       `tsymex_rfc0005_s8ad_remainder`; re-measured for S8au, not
@@ -14,8 +15,9 @@
 ##   (3) a copy-in/copy-out `var` actual (or an `addr` actual) whose heap
 ##       cell a global or a capture the callee reaches can also hold:
 ##       RED, a false `sxSat` (the callee's write through the global was
-##       lost to the write-back); now a scoped `feUnsupportedOp` decline
-##       naming the global;
+##       lost to the write-back); S8au declined it (`feUnsupportedOp`),
+##       and RFC-0005 S8ba passes the cell by reference, so the dead
+##       labels are `sxUnsat` (`tsymex_rfc0005_s8ba_remainder` (4));
 ##   (4) every `find` needle (a literal of any length, a computed one) and
 ##       `rfind` lower to S8ag's index split: the axioms by a randomized
 ##       differential against Z3's own terms with three mutants, and the
@@ -110,8 +112,8 @@ proc dField(x: int) =
   if o.m == Meters(3) and x != 2: symexTarget("fld_dead")
 
 proc dSeq(x: int) =
-  ## A different mechanism (reported, not fixed here): a `seq` of a
-  ## distinct type is not modelled; it declines, scoped, with no fault.
+  ## A different mechanism at S8au (it declined, scoped); RFC-0005 S8ba
+  ## models a `seq` of a distinct type.
   var s = @[Meters(1)]
   s.add(s[0] + Meters(x))
   if s[1] == Meters(3): symexTarget("sq")
@@ -123,12 +125,11 @@ suite "S8au (1): a local distinct value":
   test "flt": verdict(dFloat, "flt", sxSat)
   test "ret": (verdict(dRet, "ret", sxSat); verdict(dRet, "ret_dead", sxUnsat))
   test "fld": (verdict(dField, "fld", sxSat); verdict(dField, "fld_dead", sxUnsat))
-  test "a seq of a distinct type declines, scoped, with no walker fault":
+  test "a seq of a distinct type is modelled (RFC-0005 S8ba)":
     let r = symexFind(dSeq, tLabel("sq"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
-    check not r.errors.hasKind(weInternalWalkerFault)
+    check r.status == sxSat
+    check r.errors.len == 0
 
 # ---- (3) copy-in/copy-out through a global -----------------------------------
 
@@ -199,16 +200,18 @@ proc sutHeapCap(k: int) =
   if p.x == k and k != 5: symexTarget("hc_dead")
 
 suite "S8au (3): copy-in/copy-out through a global":
+  # RFC-0005 S8ba: the cell is passed by reference; S8au's declines are
+  # the verdicts Nim gives.
   test "hg":
-    declines(sutHeapG, "hg", feUnsupportedOp, "gBox")
-    declines(sutHeapG, "hg_dead", feUnsupportedOp, "gBox")
-  test "hgr": declines(sutHeapGRead, "hgr_dead", feUnsupportedOp, "gBox")
-  test "hgv": declines(sutHeapGVia, "hgv_dead", feUnsupportedOp, "gBox")
-  test "hga": declines(sutHeapGAddr, "hga_dead", feUnsupportedOp, "gBox")
+    verdict(sutHeapG, "hg", sxSat)
+    verdict(sutHeapG, "hg_dead", sxUnsat)
+  test "hgr": verdict(sutHeapGRead, "hgr_dead", sxUnsat)
+  test "hgv": verdict(sutHeapGVia, "hgv_dead", sxUnsat)
+  test "hga": verdict(sutHeapGAddr, "hga_dead", sxUnsat)
   test "ho":
     verdict(sutHeapOther, "ho", sxSat)
     verdict(sutHeapOther, "ho_dead", sxUnsat)
-  test "hc": declines(sutHeapCap, "hc_dead", feUnsupportedOp, "`q`")
+  test "hc": verdict(sutHeapCap, "hc_dead", sxUnsat)
 
 # ---- var ptr ------------------------------------------------------------------
 

@@ -16,14 +16,16 @@
 ##   (4) a `var` / `addr` actual whose heap cell the callee can also reach
 ##       through a global or a capture is passed by reference through that
 ##       cell (S8au declined it): S8au's five dead labels are `sxUnsat`;
-##   (5) a split's axioms are built when the split is lowered, so the order
-##       its terms reach the context is fixed by the program, not by the
-##       first query that reaches them; S8ag's B1-1 probe is the canary.
+##   (5) a split's axioms are built once, by the first query that reaches
+##       it, newly reached splits in lowering order and before any chain or
+##       link fact; later queries reuse them. S8ag's B1-1 probe is the
+##       canary (a unit ceiling, both Z3 versions).
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/runtime
+import z3
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -169,10 +171,39 @@ proc addF(x: float) =
   s.add(x)
   if s[0] == 1.5: symexTarget("af")
 
+type Mod10 = distinct int
+proc `==`(a, b: Mod10): bool = int(a) mod 10 == int(b) mod 10
+  ## A USER `==` (not borrowed): equality modulo 10. A builtin model that
+  ## compares a seq's cells by their base values would contradict it.
+
+proc uIn(k: int) =
+  let s = @[Mod10(3)]
+  if k == 13 and Mod10(k) in s: symexTarget("uin")
+  if Mod10(k) in s and k mod 10 != 3: symexTarget("uin_dead")
+
+proc uFind(k: int) =
+  let s = @[Mod10(1), Mod10(3)]
+  if k == 23 and s.find(Mod10(k)) == 1: symexTarget("ufind")
+
+proc uEq(k: int) =
+  let a = @[Mod10(k)]
+  let b = @[Mod10(3)]
+  if k == 13 and a == b: symexTarget("ueq")
+
 proc dParam(s: seq[Meters]) =
   if s.len > 0 and s[0] == Meters(3): symexTarget("dp")
 
 suite "S8ba (2): a seq of a distinct type is modelled":
+
+  test "a user `==` over the cells is never replaced by base equality":
+    for (st, lbl) in [(symexFind(uIn, tLabel("uin")).status, "uin"),
+                      (symexFind(uFind, tLabel("ufind")).status, "ufind"),
+                      (symexFind(uEq, tLabel("ueq")).status, "ueq")]:
+      checkpoint lbl & " " & $st
+      check st != sxUnsat
+    let d = symexFind(uIn, tLabel("uin_dead"))
+    checkpoint "uin_dead " & $d.status & " " & show(d.errors)
+    check d.status != sxSat
 
   test "add and index read":
     let r = clean(dSeq, "sq", sxSat)
@@ -459,7 +490,21 @@ proc opDataStyleSlice(data: seq[byte]) =
   if payload.len > 3 and payload[0] == 42'u8:
     symexTarget("opdata_slice_sat")
 
-suite "S8ba (5): split terms are built when the split is lowered":
+suite "S8ba (5): split terms are built once, in a fixed order":
+
+  test "a split's axioms are built by the first query that reaches it, once":
+    indexSplits = @[]
+    let ctx = newContext()
+    let ix = lowerIndexSplit(mkStringVar(ctx, "s8ba_s"), mkString(ctx, ":"),
+                             mkInt(ctx, 0))
+    check not indexSplits[^1].built   # lowering builds no axiom term
+    let q = @[ix >= mkInt(ctx, 0)]
+    let a = indexSplitRoots(ctx, q)
+    check indexSplits[^1].built
+    let b = indexSplitRoots(ctx, q)
+    check a.len == 2 and b.len == 2
+    for k in 0 ..< a.len: check a[k].raw == b[k].raw
+    indexSplits = @[]
 
   test "B1-1 stays under its unit ceiling":
     symexQueryStats = @[]

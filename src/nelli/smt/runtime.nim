@@ -3589,8 +3589,9 @@ type IndexSplit* = object
     ## RFC-0005 S8au: `ix` stands for `seq.last_indexof(s, c)` (`rfind`),
     ## not `str.indexof(s, c, start)`.
   found*, notFound*: Z3Bool
+  built*: bool
     ## RFC-0005 S8ba: the split's axioms (`indexSplitAxioms`), built once,
-    ## when the split is lowered (`lowerIndexSplit`).
+    ## by the first query that reaches the split (`indexSplitRoots`).
 
 var indexSplits* {.threadvar.}: seq[IndexSplit]
   ## RFC-0005 S8ag. Every split lowered in the running walk, in lowering
@@ -3847,21 +3848,11 @@ proc lowerIndexSplit*(s, c: Z3String; start: Z3Int; last = false): Z3Int =
   let ctx = s.ctx
   inc indexSplitCounter
   let tag = "__s8ag_ix" & $indexSplitCounter
-  var sp = IndexSplit(ix: mkIntVar(ctx, tag), s: s, c: c, start: start,
+  let sp = IndexSplit(ix: mkIntVar(ctx, tag), s: s, c: c, start: start,
                       pre: mkStringVar(ctx, tag & "_pre"),
                       x: mkStringVar(ctx, tag & "_x"),
                       post: mkStringVar(ctx, tag & "_post"),
                       last: last)
-  # RFC-0005 S8ba: the axioms' terms are created here, right after the
-  # split's own constants and in `indexSplitAxioms`' fixed order, so the
-  # order they reach the context is the program's lowering order. Built at
-  # the first query that reached the split (S8ag..S8au), it was whatever
-  # that query had created before them: Z3's cost follows that order
-  # (`checkCapped`), and S8au measured one unchanged query at 0.37M and
-  # 7.7M units under two orders.
-  let ax = indexSplitAxioms(sp)
-  sp.found = ax.found
-  sp.notFound = ax.notFound
   if indexSplitOf.ctx != ctx:
     indexSplitOf = (ctx: ctx, ids: initTable[int, int]())
   indexSplitOf.ids[astId(ctx, sp.ix.raw)] = indexSplits.len
@@ -3924,7 +3915,22 @@ proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
           grew = true
     if not grew: break
   reached.sort()
+  # RFC-0005 S8ba: the order a split's terms reach the context is fixed
+  # here, once. The first query that reaches a split builds its axioms,
+  # every newly reached split in lowering order and each in
+  # `indexSplitAxioms`' fixed term order, before any chain or link fact;
+  # later queries reuse them (`built`) and create none of its terms again.
+  # Built eagerly at lowering instead, the axioms of splits no query
+  # reaches sit in the context too, and Z3's cost follows what the context
+  # holds (`checkCapped`): measured on Z3 5.1, that cost 4.6x the target
+  # units on `r6_n36_raise_degrade`, 5.3x on `s1c_verdict` and 11x on
+  # `s8au_remainder`, and turned one more S8ag (5) hit into a slow SAT.
   for k in reached:
+    if not indexSplits[k].built:
+      let ax = indexSplitAxioms(indexSplits[k])
+      indexSplits[k].found = ax.found
+      indexSplits[k].notFound = ax.notFound
+      indexSplits[k].built = true
     result.add indexSplits[k].found
     result.add indexSplits[k].notFound
   var lastOn: Table[int, int]   ## haystack AST id -> latest reached split

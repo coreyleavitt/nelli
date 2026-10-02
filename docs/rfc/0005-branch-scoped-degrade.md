@@ -317,6 +317,31 @@ title = "S8ap's remainder. Faults first: a seq of the object's own ref type cras
 state = "pending"
 
 [[slice]]
+id = "S8as"
+title = "S8an's remainder: explore-mode if-forks without feasibility pruning (symbolic recursion declines); opaque calls do not invalidate globals; global read before write; closure capture/global writes; escaping pointers and addr outside modelled forms; path-based addr alias check; Int/BV conversion cost in int heap cells"
+state = "pending"
+
+[[slice]]
+id = "S8at"
+title = "S8ar's remainder: ref to anonymous tuple; initTable inside the function under test; symbolic index into array of seqs; by-value case-object fields (model + construction zero); distinct over composite base; value object recurring through a container; Table float keys and container values; uint8/char top-level container witness; nim-z3 sortOf(Z3Array) sort-lifetime fix and lock bump"
+state = "pending"
+
+[[slice]]
+id = "S8au"
+title = "S8ag's remainder: local distinct value with no distinct-typed parameter is a walker fault; nonlinear div by bv2int under the seq theory stays unknown; copy-in/out aliasing through a global; non-literal and multi-char needles and rfind/last_indexof do not split; all-pairs chain facts are quadratic per haystack; per-Z3-version encoding cost of c notin t"
+state = "pending"
+
+[[slice]]
+id = "S8av"
+title = "S8am's and S11's remainder: raise-irrelevant-parameter witness sentinel; public cache macros discard dbErrors; ExampleDatabase optional closures unchecked in db.nim wrappers (nil SIGSEGV); cache hit returns empty gaps for a served sfUnknown"
+state = "pending"
+
+[[slice]]
+id = "S8aw"
+title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.indexof (L at least every found index); regex replace_re/replace_reAll gated and undecidable in Z3"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

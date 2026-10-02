@@ -4,7 +4,7 @@
 ## paired with the same computation run for real in this file wherever the
 ## shape allows it.
 
-import std/[unittest, strutils]
+import std/[unittest, strutils, sequtils]
 import nelli/smt/canonicalize
 import nelli/symex
 
@@ -92,57 +92,74 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     expect ValueError: withTouchCString(Magic)
     withTouchCString(0)
 
-  test "an object argument still degrades -- not wrongly treated as inert":
+  test "an object argument is summarised, never treated as inert":
     let r = symexFind(withTouchObj, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchObj" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined. A
+    # by-value argument with no ref inside reaches no caller cell, so the
+    # summary writes nothing and the raise after it is decided.
+    check r.status == sxRaised
+    check not classified
 
-  test "a tuple argument still degrades -- not wrongly treated as inert":
+  test "a tuple argument is summarised, never treated as inert":
     let r = symexFind(withTouchTuple, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchTuple" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined. A
+    # by-value argument with no ref inside reaches no caller cell, so the
+    # summary writes nothing and the raise after it is decided.
+    check r.status == sxRaised
+    check not classified
 
-  test "a seq argument still degrades -- not wrongly treated as inert":
+  test "a seq argument is summarised, never treated as inert":
     let r = symexFind(withTouchSeq, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchSeq" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined. A
+    # by-value argument with no ref inside reaches no caller cell, so the
+    # summary writes nothing and the raise after it is decided.
+    check r.status == sxRaised
+    check not classified
 
-  test "a ptr argument still degrades -- not wrongly treated as inert":
+  test "a ptr argument is summarised, never treated as inert":
     let r = symexFind(withTouchPtr, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchPtr" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
+    # every cell its argument reaches holds fresh contents afterwards, and
+    # a hit reached through one is replayed. Not inert: the havoc is named.
+    check r.status == sxRaised
+    check not classified
+    check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchPtr" in it.msg)
 
-  test "a pointer argument still degrades -- not wrongly treated as inert":
+  test "a pointer argument is summarised, never treated as inert":
     let r = symexFind(withTouchPointer, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchPointer" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
+    # every cell its argument reaches holds fresh contents afterwards, and
+    # a hit reached through one is replayed. Not inert: the havoc is named.
+    check r.status == sxRaised
+    check not classified
+    check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchPointer" in it.msg)
 
-  test "a proc (callback) argument still degrades -- not wrongly treated as inert":
+  test "a proc (callback) argument is summarised, never treated as inert":
     let r = symexFind(withTouchProc, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
@@ -152,15 +169,19 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     check r.status == sxUnknown
     check classified
 
-  test "a cstring argument still degrades -- not wrongly treated as inert":
+  test "a cstring argument is summarised, never treated as inert":
     let r = symexFind(withTouchCString, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touchCString" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
+    # every cell its argument reaches holds fresh contents afterwards, and
+    # a hit reached through one is replayed. Not inert: the havoc is named.
+    check r.status == sxRaised
+    check not classified
+    check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchCString" in it.msg)
 
 # =============================================================================
 # R14c -- the wrap-scan whole-program ban.
@@ -262,7 +283,7 @@ suite "#163 review R14d -- an opaque call AFTER the target is invisible to it":
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
-  test "the SAME opaque call placed BEFORE the target still degrades it":
+  test "the SAME opaque call placed BEFORE the target is summarised and replayed":
     ## The asymmetry, made visible side by side: identical call, identical
     ## target, only the ORDER differs.
     let r = symexFind(targetAfterOpaque, tLabel("hit"))
@@ -271,8 +292,12 @@ suite "#163 review R14d -- an opaque call AFTER the target is invisible to it":
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "mutateAfter" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: the call is summarised (`m` holds a fresh value
+    # afterwards) and the hit is replayed, so the order no longer decides
+    # whether the target is reached -- both placements are sxSat.
+    check r.status == sxSat
+    check not classified
+    check r.errors.anyIt(it.kind == feGlobalHavoc and "mutateAfter" in it.msg)
 
 
 suite "#163 review round 1 -- walker version pin":

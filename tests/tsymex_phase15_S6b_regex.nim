@@ -8,9 +8,12 @@
 ##   * `s.find(re"pat")`     → DEFERRED: nim-z3 has no `indexOf`-on-regex
 ##                             API (only substring `indexOf`), so a regex
 ##                             `find` classifies `seUnsupportedRegex` (sxUnknown).
-##   * `s.replace(re"pat",x)`→ regex global replace, VERSION-GATED behind
-##                             `-d:z3WithSeqReplaceRe` (absent on this Z3 4.15.0
-##                             build) → sxUnknown + seZ3VersionMissing.
+##   * `s.replace(re"pat",x)`→ regex global replace. Was VERSION-GATED behind
+##                             `-d:z3WithSeqReplaceRe` (sxUnknown +
+##                             seZ3VersionMissing on every build); RFC-0005
+##                             S8aw lowers it in the walker (a literal, a
+##                             one-byte class, a class under `+`), so the
+##                             wrong claim below is now sxUnsat.
 ##
 ## On a parser `isErr` (backreference / lookahead / named group — the S6a
 ## rejected families), the walker emits `seUnsupportedRegex` (sxUnknown), never
@@ -76,8 +79,9 @@ suite "symex Phase 15 S6b — regex match walker integration":
     check r.errors.len >= 1
     check r.errors[0].kind == seUnsupportedRegex
 
-  test "regex replace on 4.15.0: sxUnknown + seZ3VersionMissing":
+  test "regex replace: \"foofoo\".replace(re\"f+\", \"x\") is \"xoox\", so \"xoxo\" is sxUnsat":
+    # RFC-0005 S8aw (was sxUnknown + seZ3VersionMissing: the gated
+    # `str.replace_re` was never built in).
     let r = symexFind(replaceRe, tLabel("hit"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seZ3VersionMissing
+    check r.status == sxUnsat
+    for e in r.errors: check e.kind != seZ3VersionMissing

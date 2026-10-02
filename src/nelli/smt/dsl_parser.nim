@@ -5318,7 +5318,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             # seUnsupportedRegex at walk time. Pattern in strOp; strArgs = [recv].
             return mkStrOp(iekStrFindRe, rePat, @[recvIR])
           of "replace":
-            # regex global replace → version-gated (z3WithSeqReplaceRe). The
+            # regex global replace → lowered by the walker (RFC-0005 S8aw). The
             # replacement is the OTHER (non-regex) string arg. strArgs =
             # [recv, replacement]; pattern in strOp.
             var replIR: IRExpr = mkStrLit("")

@@ -202,7 +202,19 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "190"
+const symexWalkerVersion* = "196"
+  ## RFC-0005 S8aw (2026-10-02) — regex `replace(s, re"p", by)` is lowered
+  ## by the walker (`runtime_strings.nim`, `regexReplaceShape` /
+  ## `regexReplaceUnrolled`) for a literal, a one-byte class and a class
+  ## under `+`: every leftmost non-overlapping PCRE match, unrolled per
+  ## position (exact for a receiver of known length, `ite(len <= 16, exact,
+  ## fresh)` plus `seZ3StringIncomplete` otherwise). It was a
+  ## `seZ3VersionMissing` fresh stand-in on every build (the gated
+  ## `str.replace_re` is first- and shortest-match, and Z3 leaves it
+  ## `unknown`); other shapes decline `seZ3StringIncomplete`, naming the
+  ## construct. Verdicts change: a concrete-receiver claim is now decided.
+  ## Provisional 196 (S8ar..S8av hold 191..195).
+  ##
   ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional
   ## number, and land stacked as one integration branch under ONE walker

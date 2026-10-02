@@ -114,7 +114,9 @@ proc s5TwoCellsReplaceAll(a, b: string) =
     symexTarget("s5_two_cells_replace_all")
 
 proc s5TwoCellsReplaceRe(a, b: string) =
-  if a.replace(re"x+", "y") != b.replace(re"x+", "y"):
+  # RFC-0005 S8aw: an alternation still declines to a fresh value (`x+` is
+  # now lowered, and its two cells differ for real).
+  if a.replace(re"x|xy", "y") != b.replace(re"x|xy", "y"):
     symexTarget("s5_two_cells_replace_re")
 
 proc s5TwoCellsSplit(a, b: string) =
@@ -252,7 +254,7 @@ suite "RFC-0005 S5 -- oracles":
 
   test "oracle: the two-cell targets are reachable (distinct inputs, distinct results)":
     check "a".replace("x", "y") != "b".replace("x", "y")
-    check "a".replace(re"x+", "y") != "b".replace(re"x+", "y")
+    check "a".replace(re"x|xy", "y") != "b".replace(re"x|xy", "y")
     check "a".split(",").len != "a,b".split(",").len
     check "a".split(",").join("-") != "b".split(",").join("-")
 
@@ -315,11 +317,13 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3VersionMissing]
 
-  test "seZ3VersionMissing (regex replace, supported pattern): -> sxUnsat":
+  test "seZ3StringIncomplete (regex replace past the unroll): -> sxUnsat":
+    # RFC-0005 S8aw: was seZ3VersionMissing (the gated `str.replace_re`);
+    # now the walker's unroll, fresh past 16 bytes of a symbolic receiver.
     let r = symexFind(s5DeadReplaceRe, tLabel("s5_dead_replace_re"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
-    check sevErrorKinds(r.errors) == @[seZ3VersionMissing]
+    check sevErrorKinds(r.errors) == @[seZ3StringIncomplete]
 
   test "seZ3StringIncomplete (general split): -> sxUnsat":
     let r = symexFind(s5DeadSplit, tLabel("s5_dead_split"))
@@ -358,11 +362,11 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
     check r.status != sxUnsat
     check r.errors.hasKind(seZ3VersionMissing)
 
-  test "seZ3VersionMissing: two cells' regex-replace results are independent -- never sxUnsat":
+  test "seZ3StringIncomplete: two cells' declined regex-replace results are independent -- never sxUnsat":
     let r = symexFind(s5TwoCellsReplaceRe, tLabel("s5_two_cells_replace_re"))
     checkpoint($kindNames(r.errors))
     check r.status != sxUnsat
-    check r.errors.hasKind(seZ3VersionMissing)
+    check r.errors.hasKind(seZ3StringIncomplete)
 
   test "seZ3StringIncomplete: two cells' splits are independent -- never sxUnsat":
     let r = symexFind(s5TwoCellsSplit, tLabel("s5_two_cells_split"))
@@ -419,11 +423,13 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
     const strSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
                    "smt" / "runtime_strings.nim"
     let src = readFile(strSrc)
-    for (arm, carrier) in [("of iekStrReplaceAll:", "SymexZ3VersionMissingError"),
-                           ("of iekStrReplaceRe:", "SymexZ3VersionMissingError")]:
+    ## RFC-0005 S8aw: the regex arm's decline is `regexReplaceShape`'s raise.
+    for (arm, raiseSite) in [
+        ("of iekStrReplaceAll:", "raise (ref SymexZ3VersionMissingError)"),
+        ("of iekStrReplaceRe:", "regexReplaceShape(e.strOp)")]:
       let a = src.find(arm)
       check a >= 0
-      let r = src.find("raise (ref " & carrier & ")", a)
+      let r = src.find(raiseSite, a)
       let l = src.find("lower(env, e.strArgs[0])", a)
       checkpoint(arm & " lower@" & $l & " raise@" & $r)
       check r > a

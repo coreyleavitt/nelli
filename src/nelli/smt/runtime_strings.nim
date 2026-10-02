@@ -125,6 +125,223 @@ proc runeToUtf8Sym(r: Z3Int): Z3String =
     ite(r < mkInt(0x800), b2,
       ite(r < mkInt(0x10000), b3, b4)))
 
+# ---- RFC-0005 S8aw: regex replace, the walker's own lowering ---------------
+#
+# `replace(s, re"p", by)` (std/re) appends `by` for EVERY leftmost,
+# non-overlapping PCRE match, scanning on from the match's end. Z3's
+# `str.replace_re` is first-match only and picks the SHORTEST leftmost match
+# (PCRE's `+` is greedy), and Z3 answers `unknown` on it even for concrete
+# operands, so it is not used. Three pattern shapes fix PCRE's match
+# selection by the shape alone, and are lowered position by position:
+#   * a fixed-length sequence of byte sets (a literal; one class): every
+#     match has length m, so a window match at `k` is a match iff no earlier
+#     match covers `k` -- leftmost-first, non-overlapping;
+#   * one byte set and a greedy `+`: every maximal run is one match.
+# Byte sets read the pattern as PCRE does WITHOUT UTF/UCP (Nim's `re` flags
+# are `{reStudy}`): `.` excludes `\n`, `\s` is {HT LF VT FF CR SP}, `\D \W
+# \S` are complements. Never matching the empty string, none of the three
+# meets Nim's NOTEMPTY_ATSTART retry. The IR keeps the pattern text only,
+# not `re` vs `rex` (extended: whitespace and `#` are not literal), so a
+# pattern holding either outside a class declines.
+
+const
+  regexReplaceUnroll* = 16
+    ## RFC-0005 S8aw. Positions unrolled for a receiver whose length is not
+    ## a known numeral: the value is exact while `len(s) <= 16`, and a fresh
+    ## string past it (`seZ3StringIncomplete` on the consuming path).
+  regexReplaceMaxKnown = 256
+    ## A receiver of known length up to this unrolls exactly, untainted.
+  pcreDigit = {'0'..'9'}
+  pcreWord = {'a'..'z', 'A'..'Z', '0'..'9', '_'}
+  pcreSpace = {'\t', '\n', '\v', '\f', '\r', ' '}
+  pcreAnyByte = {'\x00'..'\xFF'}
+
+type RegexReplaceShape = object
+  atoms: seq[set[char]]   ## one byte set per matched byte
+  plus: bool              ## a single atom under a greedy `+`
+
+proc regexDecline(pat, why: string) {.noreturn.} =
+  raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+    msg: "regex replace(s, re\"" & pat & "\", by) is not modeled: " & why &
+         " (RFC-0005 S8aw lowers a literal, a one-byte class and a class " &
+         "under `+`; the result is a fresh string, replay-gated)")
+
+proc pcreEscapeSet(pat: string; c: char): set[char] =
+  ## The byte set of `\c`, inside or outside a class.
+  case c
+  of 'd': pcreDigit
+  of 'w': pcreWord
+  of 's': pcreSpace
+  of 'D': pcreAnyByte - pcreDigit
+  of 'W': pcreAnyByte - pcreWord
+  of 'S': pcreAnyByte - pcreSpace
+  of 'n': {'\n'}
+  of 't': {'\t'}
+  of 'r': {'\r'}
+  of 'f': {'\f'}
+  of 'e': {'\e'}
+  of 'a': {'\a'}
+  else:
+    if c in {'a'..'z', 'A'..'Z', '0'..'9'}:
+      regexDecline(pat, "the escape \\" & c & " (an anchor, back-reference " &
+                        "or code escape)")
+    {c}   # PCRE: `\` before a non-alphanumeric is that byte
+
+proc pcreClassSet(pat: string; i: var int): set[char] =
+  ## `[...]` with `pat[i] == '['`; leaves `i` past the closing `]`.
+  inc i
+  var negated = false
+  if i < pat.len and pat[i] == '^':
+    negated = true
+    inc i
+  if i < pat.len and pat[i] == ']':
+    regexDecline(pat, "a class opening with `]`")
+  var cs: set[char]
+  var closed = false
+  while i < pat.len:
+    let c = pat[i]
+    if c == ']':
+      inc i
+      closed = true
+      break
+    if c == '[' and i + 1 < pat.len and pat[i + 1] in {':', '.', '='}:
+      regexDecline(pat, "a POSIX class")
+    var lo: set[char]
+    var single = true
+    var loCh = c
+    if c == '\\':
+      if i + 1 >= pat.len: regexDecline(pat, "a dangling `\\` in a class")
+      lo = pcreEscapeSet(pat, pat[i + 1])
+      single = card(lo) == 1 and pat[i + 1] notin {'d', 'w', 's', 'D', 'W', 'S'}
+      if single:
+        for b in lo: loCh = b
+      i += 2
+    else:
+      lo = {c}
+      inc i
+    if i + 1 < pat.len and pat[i] == '-' and pat[i + 1] != ']':
+      if not single: regexDecline(pat, "a range from a class escape")
+      var hiCh = pat[i + 1]
+      var adv = 2
+      if hiCh == '\\':
+        if i + 2 >= pat.len: regexDecline(pat, "a dangling `\\` in a class")
+        let hs = pcreEscapeSet(pat, pat[i + 2])
+        if card(hs) != 1 or pat[i + 2] in {'d', 'w', 's', 'D', 'W', 'S'}:
+          regexDecline(pat, "a range to a class escape")
+        for b in hs: hiCh = b
+        adv = 3
+      if hiCh < loCh:
+        # PCRE rejects it at compile time: `re"…"` raises in reality.
+        raise (ref SymexUnsupportedRegexError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+          msg: "regex re\"" & pat & "\": range out of order in a class " &
+               "(PCRE raises at compile time)")
+      cs = cs + {loCh .. hiCh}
+      i += adv
+    else:
+      cs = cs + lo
+  if not closed: regexDecline(pat, "an unterminated class")
+  if negated: pcreAnyByte - cs else: cs
+
+proc regexReplaceShape(pat: string): RegexReplaceShape =
+  ## RFC-0005 S8aw. Reads `pat` into one of the lowered shapes, or declines
+  ## naming the construct that leaves PCRE's match selection to the matcher
+  ## (alternation order, lazy/greedy choice, anchors, empty matches).
+  if pat.len == 0:
+    regexDecline(pat, "the empty pattern (empty matches)")
+  var i = 0
+  while i < pat.len:
+    let c = pat[i]
+    var atom: set[char]
+    case c
+    of '\\':
+      if i + 1 >= pat.len: regexDecline(pat, "a dangling `\\`")
+      atom = pcreEscapeSet(pat, pat[i + 1])
+      i += 2
+    of '[':
+      atom = pcreClassSet(pat, i)
+    of '.':
+      atom = pcreAnyByte - {'\n'}
+      inc i
+    of '|': regexDecline(pat, "an alternation (PCRE takes the first " &
+                              "alternative that matches, not the longest)")
+    of '(', ')': regexDecline(pat, "a group")
+    of '^', '$': regexDecline(pat, "an anchor")
+    of '*', '?', '{', '}', ']':
+      regexDecline(pat, "a quantifier or bracket `" & c & "` outside the " &
+                        "one-atom `+` shape")
+    of '+': regexDecline(pat, "a `+` with nothing to repeat")
+    of ' ', '\t', '\n', '\v', '\f', '\r', '#':
+      regexDecline(pat, "whitespace or `#` outside a class (literal under " &
+                        "`re`, ignored under `rex`; the IR keeps neither)")
+    else:
+      atom = {c}
+      inc i
+    result.atoms.add atom
+    if i < pat.len and pat[i] in {'*', '?', '{'}:
+      regexDecline(pat, "a quantifier that can match empty or is bounded")
+    if i < pat.len and pat[i] == '+':
+      if result.atoms.len != 1 or i + 1 != pat.len:
+        regexDecline(pat, "a `+` that is not the whole pattern's one atom " &
+                          "(greedy backtracking across atoms)")
+      result.plus = true
+      inc i
+
+proc inByteSet(code: Z3Int; cs: set[char]): Z3Bool =
+  ## `code` (a `toCode(at(s, k))`: -1 past the end) is a byte in `cs`, as a
+  ## disjunction over the set's runs.
+  var parts: seq[Z3Bool]
+  var b = 0
+  while b <= 255:
+    if char(b) notin cs:
+      inc b
+      continue
+    var e = b
+    while e + 1 <= 255 and char(e + 1) in cs: inc e
+    parts.add(if b == e: code == mkInt(b)
+              else: (code >= mkInt(b)) and (code <= mkInt(e)))
+    b = e + 1
+  if parts.len == 0: return mkBool(false)
+  result = parts[0]
+  for j in 1 ..< parts.len: result = result or parts[j]
+
+proc regexReplaceUnrolled(s, by: Z3String; sh: RegexReplaceShape;
+                          n: int): Z3String =
+  ## RFC-0005 S8aw. Nim's `replace(s, re, by)` for a receiver of at most `n`
+  ## bytes, as the concatenation of one piece per position `k < n`. Past
+  ## `len(s)`, `toCode(at(s, k))` is -1, in no byte set, so every piece there
+  ## is "". Fixed length m: `start(k)` is a window match at `k` that no
+  ## earlier start within `m - 1` covers; the piece is `by` at a start, ""
+  ## inside a match, the byte elsewhere. `+`: the piece is `by` at the first
+  ## byte of a run of the set, "" at the rest of the run.
+  let empty = mkString("")
+  let lenS = len(s)
+  var codes: seq[Z3Int]
+  for k in 0 ..< n: codes.add toCode(at(s, mkInt(k)))
+  result = empty
+  if sh.plus:
+    var prevIn = mkBool(false)
+    for k in 0 ..< n:
+      let inK = inByteSet(codes[k], sh.atoms[0])
+      let piece = ite(mkInt(k) < lenS,
+                      ite(inK, ite(prevIn, empty, by), at(s, mkInt(k))), empty)
+      result = if k == 0: piece else: concat(result, piece)
+      prevIn = inK
+  else:
+    let m = sh.atoms.len
+    var starts: seq[Z3Bool]
+    for k in 0 ..< n:
+      var covered = mkBool(false)
+      for j in max(0, k - m + 1) ..< k: covered = covered or starts[j]
+      var start = mkBool(false)
+      if k + m <= n:
+        start = inByteSet(codes[k], sh.atoms[0])
+        for j in 1 ..< m: start = start and inByteSet(codes[k + j], sh.atoms[j])
+        start = start and not covered
+      starts.add start
+      let piece = ite(mkInt(k) < lenS,
+                      ite(start, by, ite(covered, empty, at(s, mkInt(k)))), empty)
+      result = if k == 0: piece else: concat(result, piece)
+
 proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
   ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
@@ -496,15 +713,13 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       msg: "regex find(s, re\"…\") is not modeled: nim-z3 has no " &
            "indexOf-on-regex API (documented S6b deferral)")
   of iekStrReplaceRe:
-    # Phase 15 S6b. `s.replace(re"…", repl)` → Z3 `(seq.replace_re s r repl)`
-    # (`Z3_mk_seq_replace_re`) — VERSION-GATED behind `-d:z3WithSeqReplaceRe`
-    # (absent on this Z3 4.15.0 build). Identical gate shape to S5's replaceAll:
-    # the `replaceRe` proc only EXISTS when the gate is defined, so the call MUST
-    # sit inside the `when`. Without the gate → SymexZ3VersionMissingError →
-    # sxUnknown + seZ3VersionMissing (Invariant 3 — classified, never a crash).
+    # Phase 15 S6b; RFC-0005 S8aw. `s.replace(re"…", repl)`: every leftmost
+    # non-overlapping PCRE match replaced, lowered by the walker for the
+    # shapes `regexReplaceShape` accepts (see the S8aw block above
+    # `lowerStrArm`).
     #
-    # RFC-0005 S5: operands lowered and the pattern parsed BEFORE the gate on
-    # both builds -- `seZ3VersionMissing` is `dcFreshSymbol`, so the decline
+    # RFC-0005 S5: operands lowered and the pattern parsed BEFORE any
+    # decline -- `seZ3StringIncomplete` is `dcFreshSymbol`, so the decline
     # must drop no operand raise fork, and a pattern S6a rejects must keep
     # its ⊤ `seUnsupportedRegex` (a malformed `re"…"` raises in reality).
     let recv = lower(env, e.strArgs[0])
@@ -514,12 +729,32 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let pr = parseNimRegexToZ3Regex(e.strOp)
     if not pr.isOk:
       raise (ref SymexUnsupportedRegexError)(msg: pr.error)  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-    when defined(z3WithSeqReplaceRe):
-      SymVal(kind: svString, str: replaceRe(recv.str, pr.regex, repl.str))
-    else:
-      raise (ref SymexZ3VersionMissingError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
-        msg: "regex replace requires Z3 >= 4.15.5 (Z3_mk_seq_replace_re absent " &
-             "without -d:z3WithSeqReplaceRe)")
+    # RFC-0005 S8aw: the walker's own lowering (`regexReplaceShape`, above
+    # `lowerStrArm`); the gated `replaceRe` (`str.replace_re`) was first-
+    # match and shortest-match, two departures from Nim's `replace`, and Z3
+    # leaves it `unknown` on concrete operands. A shape outside the three
+    # declines `seZ3StringIncomplete` (`dcFreshSymbol`, as the version gate's
+    # `seZ3VersionMissing` was), naming the construct.
+    let sh = regexReplaceShape(e.strOp)
+    let lenS = simplify(len(recv.str))
+    if isNumeralAst(lenS.ctx, lenS.raw):
+      let n = parseInt(getNumeralString(lenS))
+      if n <= regexReplaceMaxKnown:
+        return SymVal(kind: svString,
+                      str: regexReplaceUnrolled(recv.str, repl.str, sh, n))
+    # Length not a known numeral: exact while `len(s) <= regexReplaceUnroll`,
+    # a fresh string past it. The fresh arm over-approximates the real
+    # result, so an UNSAT stands; the consuming path is tainted
+    # (`dcFreshSymbol`), so a SAT through the fresh arm is replay-gated.
+    lowerDegrade(seZ3StringIncomplete,
+      "regex replace(s, re\"" & e.strOp & "\", by) is unrolled over " &
+      $regexReplaceUnroll & " bytes of a receiver of unknown length: a " &
+      "longer receiver's result is a fresh string (RFC-0005 S8aw; " &
+      "replay-gated candidates)")
+    let exact = regexReplaceUnrolled(recv.str, repl.str, sh, regexReplaceUnroll)
+    let fresh = mkStringVar(freshDegradeName("__regexReplacePast"))
+    SymVal(kind: svString,
+           str: ite(len(recv.str) <= mkInt(regexReplaceUnroll), exact, fresh))
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by
     # nim-z3 as `concat` on `Z3String`. Both operands lower to svString (a string

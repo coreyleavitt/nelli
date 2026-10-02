@@ -543,8 +543,8 @@ type
                      ## `parseNimRegexToZ3Regex`); `strArgs == [recv]`.
     iekStrFindRe     ## `s.find(re"…")`    → DEFERRED (no Z3 indexOf/regex) (S6b)
                      ## pattern in `strOp`; classified `seUnsupportedRegex`.
-    iekStrReplaceRe  ## `s.replace(re"…",x)` → Z3 `(seq.replace_re …)`  (S6b)
-                     ## VERSION-GATED `-d:z3WithSeqReplaceRe`; pattern in `strOp`,
+    iekStrReplaceRe  ## `s.replace(re"…",x)` → the walker's per-position
+                     ## unroll (S6b; RFC-0005 S8aw); pattern in `strOp`,
                      ## `strArgs == [recv, replacement]`.
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)

@@ -1039,6 +1039,12 @@ task test, "Run the test suite":
             # implied (non-stated) equality is shown to cost completeness
             # only. Walker 182->190 (batch 1).
             "tsymex_rfc0005_s8aq_remainder",
+            # RFC-0005 S8aw -- regex `replace(s, re"p", by)` lowered by the
+            # walker (a literal, a one-byte class, a class under `+`;
+            # every leftmost non-overlapping PCRE match, unrolled per
+            # position) instead of the never-built `str.replace_re` gate;
+            # other shapes decline naming the construct. Walker 196.
+            "tsymex_rfc0005_s8aw_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

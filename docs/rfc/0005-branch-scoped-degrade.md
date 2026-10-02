@@ -339,7 +339,7 @@ state = "pending"
 [[slice]]
 id = "S8aw"
 title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.indexof (L at least every found index); regex replace_re/replace_reAll gated and undecidable in Z3"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -8062,3 +8062,131 @@ Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
   attempted: it would make the term constructible, not the operator any
   more decidable, and is out of this slice's scope (plain
   `str.replace_all` only).
+
+**As landed (S8aw, walker 196 provisional) — S8aq's remainder.** Item 2 is
+done; item 1 is escalated as a fork (below), its S8aq decline unchanged.
+
+*1. The `seqRangeFacts` / `str.indexof` join — no Z3-decided formulation
+exists; escalated.* Every positional form of "`L` (`seq.last_indexof(s,
+t)`) is at least every found `str.indexof(s, t, i)`" was posed to
+`querySolver([not f], 1M)` on Z3 5.1 and 4.13.4: the direct link (free
+`i`; `i = 0`, also at 10M units, 38-64 s; `t = ":"`); an occurrence
+witness `substr(s, idx, len t) = t`; `str.at(s, indexof(s, ":", 0)) =
+":"`; "a piece of `t` at `r` implies `L >= r`" (contains-suffix and
+prefixof forms); `indexof(s, t, L) = L`; "nothing after `L`" (contains and
+`indexof(s, t, L + 1) = -1` forms); a tight-prefix form; `at(L) = ":"`.
+All were `unknown` (cancelled). Only the non-positional facts decide
+(`indexof >= 0 -> contains`, the range fact, `L >= 0 <-> contains`,
+`L >= 0 -> indexof(s, t, 0) >= 0`, `L = -1 <-> indexof(s, t, 0) = -1`),
+all already emitted. The spec's assumption -- that a sound, Z3-decided
+form exists -- is wrong for both versions. The finding that frames the
+fork: S8ai's own shipped *links* (the pairwise `indexof` order links and
+the piece links) are equally undecided by that check; they pass only
+S8ai's weaker `factFlaw` bar (the negation is not SAT within 1M units AND
+the fact holds on every small ground instance). They ship because S8v's
+strict "every fact's negation is UNSAT" pin never sees them (its term set
+has one `indexof`); the join was blocked only because it fires on that
+exact term set. Fork: **(a)** hold *links* to the `factFlaw` bar and
+range facts to the strict one, restructuring the S8v pin to say so, and
+emit the join (recommended: it is the bar the shipped links already meet);
+**(b)** keep the join declined (S8aq's pins stand).
+
+*2. Regex replace is the walker's own lowering.* `replace(s, re"p", by)`
+(std/re) appends `by` for every leftmost, non-overlapping PCRE match. The
+old arm was `str.replace_re` behind `-d:z3WithSeqReplaceRe`, set by no
+build, so every regex replace was a `seZ3VersionMissing` fresh stand-in,
+and a claim the real op refutes came back `sxUnknown` even on a concrete
+receiver. Flipping the define would have been unsound twice over:
+`str.replace_re` replaces the FIRST match only, and SMT-LIB takes the
+SHORTEST leftmost match where PCRE's `+` is greedy (`"ff"` with `f+` is
+`"x"`, not `"xx"`). Z3 also leaves it `unknown` on concrete operands. No
+nim-z3 change. `regexReplaceShape` (`runtime_strings.nim`) reads the
+pattern as PCRE without UTF/UCP (`.` excludes `\n`; `\s` is
+`{HT LF VT FF CR SP}`; `\D \W \S` are complements; `\n \t \r \f \e \a`)
+into one of three shapes whose match selection the shape alone fixes:
+- **a fixed-length byte-set sequence** (a literal, or any mix of one-byte
+  atoms). Every match has length `m`, so a window match at `k` is a match
+  iff no start within `m - 1` before it is a match (leftmost-first,
+  non-overlapping, by induction on `k`);
+- **one byte set** (the `m = 1` case);
+- **one byte set under a greedy `+`**. Every maximal run of the set is one
+  match: `by` at the run's first byte, `""` for the rest.
+None of the three matches the empty string, so Nim's NOTEMPTY_ATSTART
+retry never applies. `regexReplaceUnrolled` concatenates one piece per
+position `k`, each guarded by `k < len(s)`. A receiver whose length
+simplifies to a numeral (up to 256) is unrolled exactly and untainted. Any
+other receiver is unrolled over `regexReplaceUnroll = 16` positions, and
+the value is `ite(len(s) <= 16, exact, fresh)`. The fresh arm
+over-approximates the real result, so an UNSAT stands. `lowerDegrade
+(seZ3StringIncomplete)` taints the consuming path (`dcFreshSymbol`, the
+same class the version gate's `seZ3VersionMissing` had), so a SAT is
+replay-gated. Any other shape (alternation, groups, anchors, `* ? {}`,
+`+` beyond the one-atom shape, an escape that is an anchor or
+back-reference, a class opening with `]` or holding a POSIX class) raises
+`seZ3StringIncomplete`, naming the construct. So does whitespace or `#`
+outside a class: the IR keeps the pattern text but not `re` vs `rex`, and
+under `rex` those are not literal. A reversed class range is PCRE's
+compile error and raises `seUnsupportedRegex` (dcNoAnswer). The unroll is
+16, not the 128 of `maxSeqLen`: each position's `str.at` term costs Z3 a
+split of `s`. At 32 a receiver whose length is past the unroll went
+`unknown` in the solver even for `len(s) > 40 and f == "b"`; 8 decided it
+in 0.6 s.
+
+Pins: `tests/tsymex_rfc0005_s8aw_remainder.nim` (about 11 s on Z3 5.1):
+- **Concrete receivers decide:**
+  - literal first-only `sxUnsat`, all-replaced `sxSat`;
+  - leftmost non-overlapping (`"aaa"`, `aa` -> `"xa"`);
+  - class deletion `sxUnsat`/`sxSat`;
+  - `\s+` collapse;
+  - greedy `f+` (`"xx"` `sxUnsat`, `"x"` `sxSat`);
+  - `.` vs `\n`;
+  - `\D`.
+- **Symbolic receivers:**
+  - deletion never grows the string (`sxUnsat`);
+  - an expansion solves for its receiver (`"aab"`);
+  - past the unroll, `sxSat`-or-`sxUnknown` with `seZ3StringIncomplete`,
+    and any `sxSat` really replays.
+- A known-length literal receiver is exact with no errors at all.
+- **Declines:**
+  - alternation `a|ab`: never claims, names the pattern; its PCRE-true
+    companion is `sxSat`;
+  - `a*`;
+  - whitespace;
+  - `[z-a]` (`seUnsupportedRegex`).
+- The `>= 196` floor.
+
+**Re-pinned:**
+- **S6b's replace test:** `"foofoo".replace(re"f+", "x") == "xoxo"` was
+  `sxUnknown` + `seZ3VersionMissing`; it is now `sxUnsat` (the real result
+  is `"xoox"`).
+- **`tsymex_rfc0005_s5_str`:**
+  - the dead-target regex replace is now `seZ3StringIncomplete`;
+  - the two-cells independence SUT uses a still-declining `x|xy`;
+  - the structural "operands lowered before the decline" pin targets
+    `regexReplaceShape`.
+
+*Different mechanisms, reported and not fixed here.*
+- **`match` and `contains` lower to full-string membership.**
+  `iekStrMatch` lowers both `s.match(re"p")` (PCRE-anchored at the start
+  only) and `s.contains(re"p")` (unanchored search) to full-string
+  membership `matches(s, R)`. Both can be a false `sxUnsat`:
+  `"abc".match(re"")` and `"abc".contains(re"b")` are true in Nim, false as
+  membership. S6b's "match contradiction: non-empty s vs `re""` is UNSAT"
+  pins one such wrong verdict.
+- **The S6a membership parser is not PCRE.**
+  - `.` includes `\n`.
+  - `\D \W \S` read as literal letters.
+  - `\s` is the parser's own whitespace set.
+
+  S8aw's replace lowering does not use it for byte sets, but `match`,
+  `contains` and `find` still do.
+- **`re` vs `rex` is lost in the IR** (`dsl_parser.nim` keeps the pattern
+  text only). Membership under `rex"a b"` reads the space as literal.
+- **A pattern PCRE rejects but S6a accepts.** A shape `regexReplaceShape`
+  declines falls to a fresh value (`dcFreshSymbol`), but in reality
+  `re"…"` raises at run time (the reversed range is the one such case
+  caught here). This was already true of the old version-gate stand-in.
+- **The unroll cost is Z3's per-`str.at` split.** A symbolic receiver past
+  16 bytes is a fresh value; a query that needs it is replay-gated, or
+  `unknown` if the solver times out. A `seq.foldl`/`seq.mapi`-based
+  lowering (exact for every length, no fresh arm) was not attempted.

@@ -1,12 +1,12 @@
-# Job: batch-3 gate (PRIORITY: set ~/work/PAUSE_SLICE_TESTS while this runs)
+# Job: batch-3 gate (PRIORITY: set /home/corey/tmp-usage/work/PAUSE_SLICE_TESTS while this runs)
 
 Certify `rfc-0005-batch3` at EXACTLY d42204d7522b0bf1ed2d44c0a0b59e91543878c6. That is RFC-0005 batch 3 (S8ax + S8ba + S8bd + S8bf on f488986, walker 209).
 
-1. **Gate worktree.** Create a worktree at that sha (`~/work/wt/b3gate`) and copy the deps in as real directories (see WORKER-BRIEF). Never edit it while the gate runs.
-2. **Targeted runs.** Run each suite below on BOTH Z3 5.1 (`scripts/dt-bounded.sh c`) and Z3 4.13.4 (`~/work/dt413.sh c`). Record the OK and FAILED counts and rc for each. The batch-3 integrator already ran the other 52 suites green on both versions.
+1. **Gate worktree.** Create a worktree at that sha (`/home/corey/tmp-usage/work/wt/b3gate`) and copy the deps in as real directories (see WORKER-BRIEF). Never edit it while the gate runs.
+2. **Targeted runs.** Run each suite below on BOTH Z3 5.1 (`scripts/dt-bounded.sh c`) and Z3 4.13.4 (`/home/corey/tmp-usage/work/dt413.sh c`). Record the OK and FAILED counts and rc for each. The batch-3 integrator already ran the other 52 suites green on both versions.
    - Never run the same file twice at once.
    - If anything fails, include the failing `[FAILED]` lines and the assertion output.
-3. **Full sweep.** Run it from the same worktree: `scripts/sweep.sh -j 4 ~/work/b3-gate.log`. If the slice agents are paused and the box is otherwise idle, use -j 6.
+3. **Full sweep.** Run it from the same worktree: `scripts/sweep.sh -j 4 /home/corey/tmp-usage/work/b3-gate.log`. If the slice agents are paused and the box is otherwise idle, use -j 6.
 4. **Push results to `worker-sls2`:**
    - `worker-reports/batch3-gate.log`, plus `.summary`, `.drift` and `.warnings` (the files sweep.sh writes next to the log);
    - `worker-reports/batch3-targeted.md`, the targeted table.

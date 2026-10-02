@@ -7,11 +7,11 @@ SendMessage to `Fix native crashes in proptest symex walker [13a13f]`.
 
 ## Environment (set up by job 1)
 
-- Main clone: `~/work/nelli`. Deps: `~/work/deps/{softlink,nim-z3}`.
+- Main clone: `/home/corey/tmp-usage/work/nelli`. Deps: `/home/corey/tmp-usage/work/deps/{softlink,nim-z3}`.
 - Test image: `localhost/nelli-dev:latest`.
-- Z3 4.13.4 runner: `~/work/dt413.sh <c|cpp> <test> [secs]` (runs from cwd).
+- Z3 4.13.4 runner: `/home/corey/tmp-usage/work/dt413.sh <c|cpp> <test> [secs]` (runs from cwd).
 - Nim, gcc and Z3 are NOT installed on the host. Everything that compiles
-  or runs goes through podman (`scripts/dt-bounded.sh`, `~/work/dt413.sh`,
+  or runs goes through podman (`scripts/dt-bounded.sh`, `/home/corey/tmp-usage/work/dt413.sh`,
   `scripts/sweep.sh`).
 
 ## Hard rules (from the project's slice brief)
@@ -41,11 +41,11 @@ SendMessage to `Fix native crashes in proptest symex walker [13a13f]`.
 
 ## Git
 
-- Work in a `git worktree` per job (`git worktree add ~/work/wt/<job> <ref>`),
-  never in `~/work/nelli` itself. A fresh worktree does not compile until you
+- Work in a `git worktree` per job (`git worktree add /home/corey/tmp-usage/work/wt/<job> <ref>`),
+  never in `/home/corey/tmp-usage/work/nelli` itself. A fresh worktree does not compile until you
   set it up:
   - copy `nim.cfg` into it;
-  - COPY the deps in as real directories (`mkdir -p _deps && cp -r ~/work/nelli/_deps/softlink ~/work/nelli/_deps/z3 _deps/`).
+  - COPY the deps in as real directories (`mkdir -p _deps && cp -r /home/corey/tmp-usage/work/nelli/_deps/softlink /home/corey/tmp-usage/work/nelli/_deps/z3 _deps/`).
     Symlinks do not work: only the checkout is mounted into the container at /work, so they dangle (`cannot open file: z3`).
 - Image builds on this WSL host need `podman --cgroup-manager=cgroupfs build ...`.
 - Stage explicit paths only. Never use `git add -A` or `git add .`.

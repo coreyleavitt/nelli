@@ -372,6 +372,11 @@ title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing thro
 state = "done"
 
 [[slice]]
+id = "S8bm"
+title = "Facts-first check perturbs the step-1 search: B1-1 q10 cost unstable (187k without facts-first vs 3.38M); restore tight unit ceilings"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

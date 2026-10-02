@@ -162,7 +162,9 @@ proc cappedS8(a: int8, b: int16, c: int32) =
   if szofS8(a) == 1 and szofS8(b) == 2 and szofS8(c) == 4:
     symexTarget("s8_capped")
 
-proc signatureS8(t: Table[string, seq[int]], y: int) =
+## RFC-0005 S8at backs a container value (this was
+## `Table[string, seq[int]]`); the bad value is a tuple now.
+proc signatureS8(t: Table[string, (int, int)], y: int) =
   ## Signature: the parameter type itself cannot be allocated. RFC-0005
   ## S8ar backs a `string` value (this was `Table[string, string]`); a
   ## container value is still unbacked.

@@ -107,16 +107,16 @@ proc s1cTaintedFirst(x: int) =
   elif x == 42:
     symexTarget("s1c_mono")
 
-# (d) N40-4's shape: a heap field WRITE of an unallocatable (`Table[float, _]`; `Table[int, _]` until RFC-0005 S8ar backed an integer key)
+# (d) N40-4's shape: a heap field WRITE of an unallocatable (`Table[(int, int), _]`; `Table[int, _]` until RFC-0005 S8ar backed an integer key, `Table[float, _]` until S8at backed a float one)
 # value through a call-returned ref.
 type S1cBadHeap = object
-  t: Table[float, string]
+  t: Table[(int, int), string]
   n: int
 
 proc s1cMkBadHeap(): ref S1cBadHeap {.symexOpaque.} =
   discard
 
-proc s1cMkBadTable(): Table[float, string] {.symexOpaque.} =
+proc s1cMkBadTable(): Table[(int, int), string] {.symexOpaque.} =
   discard
 
 proc s1cHeapWriteBlock() =

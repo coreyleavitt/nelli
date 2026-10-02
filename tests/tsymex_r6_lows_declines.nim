@@ -195,11 +195,11 @@ suite "symex round-6 N30 -- closure string-return type: classified decline (feUn
 
 type
   N41Case = object
-    ## RFC-0005 S8ar: a by-value case object; a tuple holding one is a
+    ## RFC-0005 S8ar: a by-value case object; a tuple holding one was a
     ## pointee kind with no leaf representation (S8ar's stated decline).
-    case k: bool
-    of true: a: int
-    of false: discard
+    ## RFC-0005 S8at: a case object is a heap cell value now; a seq of
+    ## tuples (backed nowhere) is the part that keeps the tuple a stand-in.
+    ys: seq[(int, int)]
   N41Heap = object
     t: Table[string, int]   ## a VALID Table shape -- the gap is independent
                              ## of key/value-type support (N40 already covers

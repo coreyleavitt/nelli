@@ -62,13 +62,12 @@ proc sevErrorKinds(errs: seq[SymexErrorInfo]): seq[SymexErrorKind] =
 
 type
   S4Str = object
-    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
-    ## (S8ar's stated decline); the `distinct` this was is a cell
-    ## value since S8ar.
+    ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
+    ## heap cell holds (a seq of tuples is backed nowhere, a stated
+    ## decline). The by-value case object this was (S8ar) is a cell
+    ## value since S8at.
     x: string
-    case k: bool
-    of true: a: int
-    of false: discard
+    ys: seq[(int, int)]
   S4Node = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
     ## (a string field read is the heap select itself). A `distinct string`
@@ -280,16 +279,13 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
   test "IR level: the tainted path carries exactly {scSpurious}; unreachable is sxUnsat":
     # RFC-0005 S8ap: a `ref string` pointee is modelled now (the read is the
     # heap select); a `ref` to a distinct string still havocs here.
-    # RFC-0005 S8ar: a distinct over a scalar base is a cell value now. A
-    # tuple holding a by-value case object still havocs (its stand-in cell,
-    # `heapStandInTy`); a distinct over a composite base does too, but its
-    # fresh value is itself a compound-sort decline (N47), which is not this
-    # site's {scSpurious}.
-    let caseTy = tVariant("S4IrCase", "k", tUInt(8), @[
-      VariantArm(tagOrdinal: 0, tagName: "a", fieldNames: @["a"],
-                 fieldTypes: @[tInt()]),
-      VariantArm(tagOrdinal: 1, tagName: "b", branchIx: 1)])
-    let dTy = tTuple(@[tInt(), caseTy], @["n", "c"], objectName = "S4IrBox")
+    # RFC-0005 S8ar: a distinct over a scalar base is a cell value now.
+    # RFC-0005 S8at: so is a by-value case object (S8ar's part here) and a
+    # distinct over a composite base. A tuple holding a seq of tuples still
+    # havocs (its stand-in cell, `heapStandInTy`): no Z3 array backs a
+    # tuple element.
+    let partTy = tSeq(tTuple(@[tInt(), tInt()]))
+    let dTy = tTuple(@[tInt(), partTy], @["n", "c"], objectName = "S4IrBox")
     let pRef = tRef(dTy)
     let params = @[IRParam(name: "p", ty: pRef)]
     # Guarded `p != nil` so `nilDerefFork` short-circuits (a NilAccessDefect

@@ -226,16 +226,16 @@ proc s6bLn(x: float) =
 # ---- heNewFieldZeroUnsupported --------------------------------------------------
 
 type S6bDist = object
-  ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
-  ## (S8ar's stated decline); the `distinct` this was is a cell
-  ## value since S8ar.
+  ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
+  ## heap cell holds (a seq of tuples is backed nowhere, a stated
+  ## decline). The by-value case object this was (S8ar) is a cell
+  ## value since S8at.
   x: int
-  case k: bool
-  of true: a: int
-  of false: discard
+  ys: seq[(int, int)]
 type S6bBox = ref object
   ## RFC-0005 S8ap: `items` was a `seq[int]`, which a constructor now
-  ## zero-writes (a leaf-split heap cell); a `distinct` field still has no
+  ## zero-writes (a leaf-split heap cell). RFC-0005 S8at zeroes a by-value
+  ## case object too; an object with a seq-of-tuples part has no
   ## construction-time zero (`zeroIRExprForType`), so it keeps these pins on
   ## `heNewFieldZeroUnsupported`.
   items: S6bDist

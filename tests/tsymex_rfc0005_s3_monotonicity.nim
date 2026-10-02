@@ -151,13 +151,12 @@ template withPoisonedArm*(placement: static PoisonPlacement; poisonOn: bool;
 # field until RFC-0005 S8ap modelled string fields on the heap). Guarded
 # `p != nil` so the poison body itself never nil-derefs.
 type S3F1Dist = object
-  ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
-  ## (S8ar's stated decline); the `distinct` this was is a cell
-  ## value since S8ar.
+  ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
+  ## heap cell holds (a seq of tuples is backed nowhere, a stated
+  ## decline). The by-value case object this was (S8ar) is a cell
+  ## value since S8at.
   x: int
-  case k: bool
-  of true: a: int
-  of false: discard
+  ys: seq[(int, int)]
 type S3F1Node = ref object
   s: S3F1Dist
 

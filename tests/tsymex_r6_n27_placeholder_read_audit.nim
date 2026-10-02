@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 94 marked lines (91 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 100 marked lines (97 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -262,13 +262,17 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## guard); `iekSeqInsert` adds its guard and five reads behind it; and
     ## `extractSeqElements` gains a `seq[string]` arm (one read, beside the
     ## other element kinds'). 85 - 2 + 1 + 6 + 1 = 91.
+    ## RFC-0005 S8at: `iteSV`'s svSeq arm merges two genuine seqs exactly
+    ## (an array of seqs at a symbolic index): six lines reading
+    ## `seqDataRaw`/`seqLen` in the `else` of the arm's own
+    ## `isUnsupportedFieldPlaceholder` guard. 91 + 6 = 97.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 91
+    check runtimeCount == 97
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

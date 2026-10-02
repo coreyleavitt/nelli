@@ -438,7 +438,7 @@ type
     n: int
   OddHolder = ref object
     hs: HashSet[string]
-    bad: Table[string, seq[int]]
+    bad: Table[string, (int, int)]   ## RFC-0005 S8at: was `seq[int]`, now backed
     n: int
 
 proc tIntKey(t: Table[int, int]) =
@@ -514,10 +514,12 @@ suite "S8ar (5, 9): every backed Table key and value type, rendered":
     discard run(tHeapWrite, "t_heap_write_dead", sxUnsat)
     discard run(tHeapWrite, "t_heap_write_len_dead", sxUnsat)
 
-  test "a Table whose value is a container declines, scoped and stated":
-    let r = run(tBad, "t_bad", sxUnknown)
-    check r.errors.anyIt(it.kind == seUnsupportedTableValType or
-                         "Table value type not modeled" in it.msg)
+  test "a Table whose value is a container is modelled (RFC-0005 S8at)":
+    # Pinned a scoped decline until RFC-0005 S8at held a container value
+    # leaf-split (`tvTree`); it is now exact and renders.
+    let r = run(tBad, "t_bad", sxSat)
+    check r.errors.len == 0
+    if r.status == sxSat: check reproduces(tBad(r.witness[0]), "t_bad")
 
 suite "S8ar (7): a container a ref pointee holds no longer demotes the parameter":
   test "a HashSet[string] and an unbacked Table field beside an int field":
@@ -726,54 +728,56 @@ suite "S8ar (10): every read of a cell asserts its well-formedness":
   test "a written cell is the value the program built":
     discard run(wfWritten, "wf_written_dead", sxUnsat)
 
-suite "S8ar: the declines that remain are scoped and stated":
+suite "S8ar: the declines that remained (closed by RFC-0005 S8at)":
   test "a by-value case object field: the field, not the parameter":
     let r = symexFind(declBV, tLabel("decl_bv"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat: check reproduces(declBV(r.witness[0]), "decl_bv")
+    # A scoped decline (`heUnsupportedPointeeRead`) until RFC-0005 S8at made
+    # a by-value case object a tree-valued heap cell; the read is exact.
     let r2 = symexFind(declBVRead, tLabel("decl_bv_read"))
     checkpoint $r2.status & " " & show(r2.errors)
-    check r2.status == sxUnknown
-    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
-                          "by-value case object" in it.msg)
-    check not r2.errors.hasKind(weInternalWalkerFault)
+    check r2.status == sxSat
+    check r2.errors.len == 0
+    if r2.status == sxSat:
+      check reproduces(declBVRead(r2.witness[0]), "decl_bv_read")
 
   test "a distinct over a composite base: the field, not the parameter":
     let r = symexFind(declDS, tLabel("decl_ds"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat: check reproduces(declDS(r.witness[0]), "decl_ds")
+    # A scoped decline (`heUnsupportedPointeeRead`) until RFC-0005 S8at held
+    # a distinct over a composite base as its base's leaves; the read and the
+    # store are exact.
     let r2 = symexFind(declDSRead, tLabel("decl_ds_read"))
     checkpoint $r2.status & " " & show(r2.errors)
-    check r2.status == sxUnknown
-    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
-                          "distinct over a composite base" in it.msg)
+    check r2.status == sxSat
+    # Only `geDistinctBijectivitySkipped`, a `sevHint`, remains.
+    check not r2.errors.anyIt(it.severity == sevError)
+    if r2.status == sxSat:
+      check reproduces(declDSRead(r2.witness[0]), "decl_ds_read")
     let r3 = symexFind(declDSWrite, tLabel("decl_ds_write"))
     checkpoint $r3.status & " " & show(r3.errors)
-    check r3.status == sxUnknown
-    check not r3.errors.hasKind(weInternalWalkerFault)   # an ill-sorted store before S8ar
-    check r3.errors.anyIt(it.kind == heUnsupportedPointeeRead and
-                          "distinct over a composite base" in it.msg)
-    check not r2.errors.hasKind(weInternalWalkerFault)
+    check r3.status == sxSat
+    check not r3.errors.anyIt(it.severity == sevError)   # an ill-sorted store before S8ar
+    if r3.status == sxSat:
+      check reproduces(declDSWrite(r3.witness[0]), "decl_ds_write")
 
   test "a tuple holding a by-value case object: the field, not the parameter":
     let r = symexFind(declTC, tLabel("decl_tc"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat: check reproduces(declTC(r.witness[0]), "decl_tc")
-    # The read is a havoc (`scSpurious` only, no compound-sort decline), so
-    # the candidate is replay-gated (S10) and confirms: the target does not
-    # depend on the value read.
+    # The read was a havoc (`heUnsupportedPointeeRead`, replay-gated) until
+    # RFC-0005 S8at made the case object a heap cell part; it is exact.
     let r2 = symexFind(declTCRead, tLabel("decl_tc_read"))
     checkpoint $r2.status & " " & show(r2.errors)
     check r2.status == sxSat
+    check r2.errors.len == 0
     if r2.status == sxSat:
       check reproduces(declTCRead(r2.witness[0]), "decl_tc_read")
-    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
-                          "a part of it is not a heap cell value" in it.msg)
-    check not r2.errors.hasKind(seUnsupportedCompoundSortLeaf)
-    check not r2.errors.hasKind(weInternalWalkerFault)
 
   test "uint8- and char-keyed Table parameters render (S8am's isChar tells them apart)":
     let r = symexFind(declU8, tLabel("decl_u8"))

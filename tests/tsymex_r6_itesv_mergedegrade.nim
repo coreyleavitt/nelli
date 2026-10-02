@@ -199,22 +199,27 @@ suite "symex iteSV mergedegrade -- svSeq genuine (non-placeholder) merge, walker
   ## `itInt` elem type IS backed, so all three elements are GENUINE (never
   ## `isUnsupportedFieldPlaceholder`) `svSeq` values -- exactly the branch
   ## re-opened this round.
-  test "symbolic index over array[3, seq[int]] param -- classified sxUnknown, never a fabricated sxSat":
+  ##
+  ## RFC-0005 S8at: two seqs of one backed element type now merge EXACTLY
+  ## (an `ite` of the element arrays and of the lengths), so each of these
+  ## is an exact `sxSat` whose witness replays in Nim -- the v115 hazard
+  ## (one operand's value forwarded unconditionally) is what the replay
+  ## rules out. They were the classified `feUnsupportedOpHavoc` decline.
+  test "symbolic index over array[3, seq[int]] param -- exact sxSat, the witness replays":
     proc pickSeqElem(arr: array[3, seq[int]], i: int) =
       if i >= 0 and i < 3:
         let v = arr[i]
         if v.len == 7:
           symexTarget("seqmerge_pick_hit")
     let r = symexFind(pickSeqElem, tLabel("seqmerge_pick_hit"))
-    check r.status == sxUnknown
-    var sawClassified = false
-    for e in r.errors:
-      # RFC-0005 S6b: the genuine seq merge is the fresh-symbol split.
-      if e.kind == feUnsupportedOpHavoc and "iteSV" in e.msg and "seq" in e.msg:
-        sawClassified = true
-    check sawClassified
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      symexCaptureBegin()
+      pickSeqElem(r.witness[0], r.witness[1])
+      check "seqmerge_pick_hit" in symexCaptureEnd()
 
-  test "two sibling array[3, seq[int]] params merged before a shared isIndex -- vulnerable array first":
+  test "two sibling array[3, seq[int]] params merged before a shared isIndex -- vulnerable array first, exact":
     proc probeSeqFirst(flag: bool, a: array[3, seq[int]], b: array[3, seq[int]], i: int) =
       var arr: array[3, seq[int]]
       if flag:
@@ -226,9 +231,14 @@ suite "symex iteSV mergedegrade -- svSeq genuine (non-placeholder) merge, walker
         if v.len == 7:
           symexTarget("seqmerge_sibling_first_hit")
     let r = symexFind(probeSeqFirst, tLabel("seqmerge_sibling_first_hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      symexCaptureBegin()
+      probeSeqFirst(r.witness[0], r.witness[1], r.witness[2], r.witness[3])
+      check "seqmerge_sibling_first_hit" in symexCaptureEnd()
 
-  test "two sibling array[3, seq[int]] params merged before a shared isIndex -- vulnerable array second":
+  test "two sibling array[3, seq[int]] params merged before a shared isIndex -- vulnerable array second, exact":
     proc probeSeqSecond(flag: bool, a: array[3, seq[int]], b: array[3, seq[int]], i: int) =
       var arr: array[3, seq[int]]
       if flag:
@@ -240,7 +250,12 @@ suite "symex iteSV mergedegrade -- svSeq genuine (non-placeholder) merge, walker
         if v.len == 7:
           symexTarget("seqmerge_sibling_second_hit")
     let r = symexFind(probeSeqSecond, tLabel("seqmerge_sibling_second_hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      symexCaptureBegin()
+      probeSeqSecond(r.witness[0], r.witness[1], r.witness[2], r.witness[3])
+      check "seqmerge_sibling_second_hit" in symexCaptureEnd()
 
 suite "symex iteSV mergedegrade -- tyOf plain-field threading for merge-degraded variants, walker v115":
   test "array[2, Variant] param symbolic-index merge, then a plain-field read -- classified decline, never the parser-blame raise":

@@ -63,13 +63,12 @@ proc ptrSut(p: ptr int) =
 
 type
   LossyDist = object
-    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
-    ## (S8ar's stated decline); the `distinct` this was is a cell
-    ## value since S8ar.
+    ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
+    ## heap cell holds (a seq of tuples is backed nowhere, a stated
+    ## decline). The by-value case object this was (S8ar) is a cell
+    ## value since S8at.
     x: int
-    case k: bool
-    of true: a: int
-    of false: discard
+    ys: seq[(int, int)]
   LossyBox = object
     n: int
     s: LossyDist   ## a field kind the logical heap does not model (S8h;

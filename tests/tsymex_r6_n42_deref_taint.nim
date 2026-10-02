@@ -100,7 +100,9 @@ type
     m: int
 
   N42BadTableHeap = object
-    t: Table[float, string]
+    ## RFC-0005 S8at backs a `float` key (this was `Table[float, string]`);
+    ## the bad key is a tuple now, which no Table backs.
+    t: Table[(int, int), string]
     n: int
 
   N42OuterTable = object
@@ -290,7 +292,7 @@ suite "symex N42 -- walker version pin":
 # both the ownership and table families) keeps the addition focused.
 # =============================================================================
 
-proc n44NonOpaqueTableSink(x: Table[float, string]): bool =
+proc n44NonOpaqueTableSink(x: Table[(int, int), string]): bool =
   ## Deliberately NOT `{.symexOpaque.}`: an opaque call unconditionally
   ## taints every surviving path on its own (`runtime.nim`'s `stmt.opaque`
   ## walk arm), which would make a call-argument probe built around one

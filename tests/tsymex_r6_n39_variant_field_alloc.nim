@@ -92,7 +92,9 @@ type
     ## type (only `Table[string, int]` is backed by `allocateSym`).
     case kind: VKind
     of vkGood: x: int
-    of vkBad: t: Table[string, seq[int]]
+    ## RFC-0005 S8at backs a container value (this was
+    ## `Table[string, seq[int]]`); the bad value is a tuple now.
+    of vkBad: t: Table[string, (int, int)]
 
   VBadSet = object
     ## `vkBad`'s field classifies to `itSet` with an unsupported element

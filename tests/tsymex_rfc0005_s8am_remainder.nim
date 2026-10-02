@@ -349,23 +349,26 @@ suite "S8am (6b) char/byte/uint8 Table values and HashSet elements are reachable
 # integer-like, string or float value, so `Table[int, int]` and
 # `Table[string, float]` now render (pinned `sxSat` in
 # tsymex_rfc0005_s8ar_remainder). The two pins below moved to shapes S8ar
-# still does not back: a `float` key and a container value.
+# still did not back: a `float` key and a container value. RFC-0005 S8at
+# backs both (`Table[float, int]` and `Table[string, seq[int]]` are pinned
+# `sxSat` in tsymex_rfc0005_s8at_remainder), so they moved again, to a tuple
+# key and a tuple value, which no Table backs.
 
-proc intKeyTable(t: Table[float, int]) =
+proc intKeyTable(t: Table[(int, int), int]) =
   if t.len > 0: symexTarget("s8am_ikt")
 
-proc floatValTable(t: Table[string, seq[int]]) =
+proc floatValTable(t: Table[string, (int, int)]) =
   if t.len > 0: symexTarget("s8am_fvt")
 
 proc stringSet(s: HashSet[string]) =
   if s.len > 0: symexTarget("s8am_ss")
 
 suite "S8am (6c) non-string Table keys and non-int-family values/elements stay scoped declines":
-  test "Table[float, int] param -- unbacked key -- feUnsupportedWitnessType":
+  test "Table[(int, int), int] param -- unbacked key -- feUnsupportedWitnessType":
     let r = intKeyTable.symexFind(tLabel("s8am_ikt"))
     expectUnknown(r, feUnsupportedWitnessType)
 
-  test "Table[string, seq[int]] param -- container value -- feUnsupportedWitnessType":
+  test "Table[string, (int, int)] param -- tuple value -- feUnsupportedWitnessType":
     let r = floatValTable.symexFind(tLabel("s8am_fvt"))
     expectUnknown(r, feUnsupportedWitnessType)
 

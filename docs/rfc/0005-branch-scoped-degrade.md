@@ -347,6 +347,11 @@ title = "S8au's remainder: seq[distinct] locals, compiler-temp misread as global
 state = "done"
 
 [[slice]]
+id = "S8bd"
+title = "S8ba's remainder: symbolic string index cost, seq[distinct] parameter witnesses, heap-depth budget, pass-by-reference through indexed/call refs and generic callees"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

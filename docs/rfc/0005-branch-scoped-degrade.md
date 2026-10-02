@@ -343,8 +343,8 @@ state = "done"
 
 [[slice]]
 id = "S8ay"
-title = "S8aw's remainder: regex match/contains semantics, PCRE parity, re vs rex, rejected patterns, exact replace past 16 bytes"
-state = "pending"
+title = "S8aw's remainder: regex match/contains semantics, PCRE parity, re vs rex, rejected patterns, exact replace past 16 bytes; step 1c before the full-theory search"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -8275,3 +8275,288 @@ Pins: `tests/tsymex_rfc0005_s8aw_remainder.nim` (about 11 s on Z3 5.1):
   to its budget before the theory-free facts' refutation decides. The
   pins run at the tight budget (which also pins that the verdict is step
   1c's). S8aq (2)'s re-pinned walk keeps the default and pays the cost.
+
+**As landed (S8ay, walker 198 provisional) — S8aw's remainder.** All six
+items are done; nothing is deferred. Item 6 (step 1c's cost) and the
+exhaustive membership check were added to the scope after S8aw's finding;
+the branch is rebased onto S8aw's final `4a8e51f`.
+
+*Wrong verdicts at 04e3a97, each pinned RED first in
+`tests/tsymex_rfc0005_s8ay_remainder.nim`.*
+- **`contains` was full-string membership.** `"abc".contains(re"b")` was
+  false to the walker, a false `sxSat` for `not contains`.
+- **`match` was full-string membership too, with `start` dropped.**
+  - `"abc".match(re"")` and `"abc".match(re"b", 1)` were false (false
+    `sxSat`).
+  - S6b's "match contradiction" pin (`s.len >= 1 and s.match(re"")` is
+    `sxUnsat`) was itself a false `sxUnsat`.
+  - `match` with an out-of-range `start` is true in Nim (`matchLen` returns
+    PCRE_ERROR_BADOFFSET, -24, which is not -1).
+- **`contains(s, R, start)` dropped `start`** (a false `sxUnsat`).
+- **The S6a reading was not PCRE's.** `.` matched `\n`; `\D \W \S \n \t`
+  were literal letters; `^` and `$` were literal bytes.
+- **`rex"..."` was read as `re"..."`.**
+- **A rejected pattern never raised.** `re"a**"` raises `RegexError` at run
+  time; an `except RegexError` / `except ValueError` handler target was a
+  false `sxUnsat`.
+- **`matchLen`, `findBounds`, `findAll`, `replacef` and `=~` crashed the
+  compile** ("node has no type").
+- **The captures overloads dropped their write.** `match(s, R, matches)`
+  dropped the `matches` write, a false `sxUnsat` for any claim on a
+  capture.
+
+*1. Each entry point asks its own question.* All of these were verified
+concretely against Nim's `std/re`:
+- `match(s, R, start)` holds when a prefix of `s[start..]` is in `R`, or
+  when `start` is out of range.
+- `contains` holds when `R` occurs in `s[start..]` (false out of range).
+- `startsWith` is `matchLen(s, R) >= 0`.
+- `endsWith` asks whether the match PCRE chooses at some `i` ends at
+  `len`.
+- `find` is the leftmost occurrence, -1 on a miss, -24 out of range.
+- `matchLen` is the length of the chosen match.
+- `findBounds` is `(find, find + chosen length - 1)`, `(-1/-24, 0)` on a
+  miss.
+- `^`/`\A` match at subject position 0 only, never at a non-zero `start`.
+
+`regex_parser.lowerRegexEntry` builds each formula from the pattern's
+top-level alternatives, with their anchors split off (`splitEdges`).
+- **`find`** is a fresh offset `q` (`__regexFind#N`) with a definitional
+  constraint: a match starts at `q`, and none starts earlier. "None
+  earlier" is one membership: the subject with a marker byte (code 256,
+  outside every byte set) inserted at `q` is not in `B* . X`. Here `X` is
+  the language with exactly one marker after a non-empty proper prefix.
+- **`matchLen`, `endsWith` and `findBounds`' second half** depend on which
+  match PCRE picks. They are lowered when the selection is the longest
+  match whose tail holds:
+  - a fixed-length body;
+  - a fixed prefix plus one byte-set run at the end;
+  - several alternatives of one fixed length.
+
+  Any other pattern is a fresh value (`seZ3StringIncomplete`), never a
+  claim.
+- **The int32 range.** `start.cint` raises `RangeDefect` outside int32 (for
+  `findBounds` only below, since it clamps first), deposited with the other
+  range checks.
+
+The DSL parser (`dsl_parser.nim`) now lowers each entry to
+`iekStrMatch` / `iekStrFindRe` with `strArgs = [recv, start]`, keyed on the
+callee's `Regex`-typed argument:
+- `findBounds` is a tuple of two `iekStrFindRe` halves, and declines unless
+  both operands are atomic, since one operand must not be lowered twice;
+- `findAll`, `split`, `replacef` and `multiReplace` decline to a fresh value
+  of the call's type;
+- the captures overloads are ⊤ (`seUnsupportedRegex`);
+- a var section's `{.inject.}` pragma name (from `=~`) is unwrapped.
+
+*2. A PCRE-faithful byte reader.* `src/nelli/smt/pcre_syntax.nim` (pure
+Nim, no Z3, so the compile-time parser can use it) reads PCRE 8.45 as
+`std/re` compiles it (no UTF, no UCP):
+- `.` is every byte but `\n`;
+- `\d \w \s` are ASCII, with `\s` = HT LF VT FF CR SP;
+- `\D \W \S` are their complements over all 256 bytes;
+- `\h \v \H \V`, POSIX classes, `\Q..\E`, `\c`, `\x`, octal, and `{` read
+  as a literal when it is not a quantifier;
+- quantifier bounds up to 65535.
+
+Its outcomes are:
+
+| Outcome | Meaning |
+|---|---|
+| `psOk` | a tree |
+| `psUnmodelled` | accepted, but holds an unmodelled construct (a back-reference, a lookaround, a possessive quantifier, an inner anchor) |
+| `psRejected` | rejected, with Nim's exact message |
+| `psUnknown` | a construct whose validity is not decided (named groups, inline options, `\p`) |
+
+`regex_parser.rxToZ3` builds the Z3 language from the tree, and S6a's
+`parseNimRegexToZ3Regex` is now a thin wrapper over it.
+
+Differential results against the concrete `re` / `rex`:
+
+| Check | Agree | Disagree | Out of scope |
+|---|---|---|---|
+| Reader, 630 patterns x both modes | rejected 181, accepted 449 | 0 | 158 `psUnknown` |
+| Formulas, 44 `re` + 3 `rex` patterns x 18 subjects x 17 entry/start combinations (378 s) | 13932 | 0 | 450 declined |
+
+Every rejection message matched byte for byte, caret included. A sample of
+both harnesses is a permanent suite in the S8ay test file: 106 reader
+cases, and 960 formula cases of which at least 700 decide.
+
+*3. `re` vs `rex` is in the IR.* `strOp` is now
+`<entry>:<re|rex|?>:<pattern>` (`encodeRegexSpec`). It is folded into the
+cache key, as `strOp` already was. A flag set other than `reStudy` /
+`reExtended`, or a non-literal `Regex`, reads as `?`, which is
+`psUnknown` (⊤). S8aw's whitespace-outside-a-class decline is gone:
+`re"a b"` is now exact, and `rex"a b"` reads as `ab`.
+
+*4. A rejected pattern is the `RegexError` raise.* The rejection set was
+taken concretely from PCRE 8.45 as linked, per message. `pcre_syntax`
+rejects with PCRE's message and offset.
+- The walker deposits the message into a new sink, `regexRaiseMsgs`. It is
+  plumbed like `arithTrapConds` through `WalkCtx`, `PendingLowerEffects`
+  and every reset.
+- `drainScalarRaiseForks` drains it as its last stage, routing
+  `RegexError` (registered `of ValueError`) with Nim's exact message. The
+  pattern is a literal, so every path through the call raises; the drain
+  returns no continuation.
+- The DSL parser marks such a call as an inline raise site
+  (`rhsHasInlineDefectFork`), so a `let` binding it gets its fork. A
+  non-literal `start` on `match`/`find` is marked for the same reason (its
+  `RangeDefect`).
+
+*5. Exact regex replace past 16 bytes.* Each option was measured on
+`tests/tprobe_s8ay_m5.nim` (scratch, not committed): a direct Z3 query over
+`s` and `r = replace(s, R, by)`, rlimit 20M.
+
+| Query | want | unroll16 (S8aw) 5.1 | index recursion 5.1 | **suffix recursion 5.1** | hybrid 5.1 | unroll16 4.13.4 | **suffix recursion 4.13.4** |
+|---|---|---|---|---|---|---|---|
+| Q1 len>40, `a`->`` == `b` | sat | sat (fresh arm) 16.5 s | unknown 37 s | sat 80 s | unknown 38 s | sat (fresh) 5.8 s | unknown 56 s |
+| Q2 `[0-9]`->`` grows, unbounded | unsat | sat (fresh, wrong) 17.8 s | unknown 320 s | unknown 126 s | unknown 111 s | sat (fresh, wrong) 8.6 s | unknown 111 s |
+| Q2b same, len<=6 | unsat | unsat 0.19 s | unsat 0.26 s | unsat 0.08 s | unsat 0.46 s | unsat 0.58 s | unsat 0.10 s |
+| Q3 len==3, `a`->`xy` == `xyxyb` | sat | sat 0.06 s | sat 0.21 s | sat 0.17 s | sat 0.05 s | sat 0.14 s | sat 0.15 s |
+| Q4 len>20, `f+`->`x` == `xoxo` | sat | unknown 149 s | sat 15.5 s | sat 31.8 s | unknown 129 s | unknown 55 s | sat 10.3 s |
+| Q5 len>20, `aa`->`x` == `xa` | unsat | unknown 70 s | unsat 1.1 s | unsat 0.48 s | unsat 3.0 s | unknown 54 s | unsat 1.6 s |
+| Q6 len>30, `[0-9]`->`` == `abc` | sat | sat (fresh) 9.3 s | unknown 70 s | sat 29.9 s | sat 40.8 s | sat (fresh) 3.1 s | sat 51.6 s |
+| Q7 `f+`->`x` contains `ff` | unsat | unknown 38 s | unknown 94 s | unknown 59.6 s | unknown 55 s | unknown 41 s | unknown 54.7 s |
+| Q8 `a`->`` contains `a` | unsat | unknown 38 s | unknown 79 s | unknown 46.8 s | unknown 41 s | unknown 25 s | unknown 41.3 s |
+| Q9 len>3, `aa`->`x` == `xxb` | sat | unknown 8 s | sat 0.32 s | sat 0.15 s | unknown 54 s | unknown 12 s | sat 0.20 s |
+
+Notes on the table:
+- `seq.foldli` (exact by construction) crashes Z3 5.1 with SIGSEGV inside
+  `Z3_mk_seq_foldli`, so it was dropped.
+- A "sat (fresh)" under the unroll is reached through its fresh arm,
+  replay-gated, not decided. Q2's is a wrong model, caught only by replay.
+- Q9's label in the harness said len>20; the measured query was len>3.
+
+Suffix recursion decides strictly more than the unroll and is never wrong,
+so it is adopted, untainted:
+- **`by` at a run's start.** `__regexReplaceRun#N(u, prevIn)` emits `by`
+  where a run of the set starts (a greedy `+`).
+- **The fixed-length window.** `__regexReplaceFixed#N(u)` emits `by` and
+  skips `m` bytes on a window match, else keeps the head byte.
+
+These are the walker's first `defineRecFun` functions. A receiver whose
+length is a numeral up to 256 keeps S8aw's exact unroll (faster). The
+unroll-plus-taint fallback is gone, so `regexReplaceUnroll` is deleted.
+
+What no encoding decides stays `beSolverUndef` (`sxUnknown`), never a
+claim: an unbounded length comparison (Q2), or `contains` over the result
+(Q7, Q8).
+
+The walker-level pins decide in seconds on both builds:
+
+| Pin | 5.1 | 4.13.4 |
+|---|---|---|
+| len>20 `a`->`` == `b`, `sxSat` | 2.2-3.0 s | 10.2 s |
+| len>20 `aa`->`x` == `xa`, `sxUnsat` | 0.5-2.3 s | 3.1 s |
+| len>20 `f+`->`x` == `x`, `sxSat` | 4.6-6.6 s | 2.5 s |
+
+*6. Step 1c decides before the full-theory search.* `checkCapped` ran
+step 1 (the capped full-theory solve, half the `seqQueryRLimit` budget)
+before step 1c's theory-free check. A query only step 1c refutes paid
+step 1's search to its budget first. A new step 0 runs step 1c's
+uncapped half first, under `factsFirstRLimit` = 1,000,000 units: the query
+with no sequence theory, plus `seqRangeFacts`. Its UNSAT is exactly what
+(1b) and (1c)'s uncapped half conclude after step 1 (the facts are valid,
+so its models are a superset of the real ones), and it subsumes (1b).
+Anything else falls through to the unchanged order, (1b) and (1c)
+included with their full budget, so no verdict is lost and none is
+added. The capped half (an UNSAT that blames the cap) stays after step 1.
+
+Walks measured at the default budget (`-d:symexQueryStats` units, then
+wall time):
+
+| Walk | Z3 5.1 before | Z3 5.1 after | Z3 4.13.4 before | Z3 4.13.4 after |
+|---|---|---|---|---|
+| S8aw join, start 0 (= S8aq (2)'s re-pinned walk), `sxUnsat` | 10,000,930, 14-20 s | 256, 0.02 s | 10,000,733, 7.2 s | 270, 0.01 s |
+| S8aw join, symbolic start, `sxUnsat` | 10,004,530, 13-23 s | 1,266, 0.02 s | 10,003,611, 8.9 s | 1,065, 0.02 s |
+| S8aq (1) `rfind` before a piece, `sxUnsat` | 503,664, 0.4-0.8 s | 804, 0.02 s | 1,876,603, 1.7 s | 274, 0.01 s |
+| S8aq (1) `':' in s` but `rfind == -1`, `sxUnsat` | 1,332 | 143 | 2,305 | 139 |
+| S8aw join companion, `sxSat` | 4,009 | 5,427 | 5,524 | 6,188 |
+| a `find` hit, `sxSat` | 65,423 | 70,622 | 48,518 | 48,908 |
+| a regex `find` hit, `sxSat` | 41,849 | 51,751 | 23,945 | 19,458 |
+| regex replace past 16 bytes, `sxSat` | 1,692,585 | 1,693,353 | 4,159,222 | 4,159,893 |
+
+A SAT query pays one extra theory-free check (a few thousand units at
+most here).
+
+*Exhaustive membership check.* This is S8aw's "every link is true" style
+applied to the new lowerings. `match` and `contains` (every `start` from
+-1 to len + 1), `startsWith` and `endsWith` were run for every subject
+over {a, b, LF} up to length 4, across 18 patterns (two of them `rex`),
+against the concrete call.
+- 32,276 cases, every one folded to a constant by Z3's rewriter, and 0
+  disagree.
+- `endsWith` declines by design on `a|ab`, `a*b`, `\Aa|b$` and `(ab)+`,
+  and the pin lists exactly those.
+- A companion test shows the enumeration tells the pre-S8ay full-string
+  membership apart from the real calls.
+
+**Pins:** `tests/tsymex_rfc0005_s8ay_remainder.nim` (its `.nim.cfg` sets
+`-d:symexQueryStats` for item 6's unit pin). About 65 s on Z3 5.1
+including the compile. It holds 40 tests, the `>= 198` floor among them.
+Item 6 is pinned at the default budget: both join walks are `sxUnsat`
+spending fewer than `factsFirstRLimit` units. This was RED at `8b2508f`
+(10,000,767 and 10,004,530 units).
+
+**Re-pinned:**
+- **`tsymex_phase15_S6b_regex`:**
+  - `match [a-z]+` and `match \d+` now check the first byte plus a
+    concrete replay (only a prefix must match);
+  - "match contradiction" `sxUnsat` -> `sxSat` (the false `sxUnsat`);
+  - the back-reference is now `seZ3StringIncomplete` naming
+    "backreference", `sxSat`-or-`sxUnknown`, any witness replayed (it was
+    `seUnsupportedRegex`).
+- **`tsymex_phase15_S7b_smoke`:** `match [a-z]+` pinned an all-lowercase
+  witness. That held only under full-string membership, and on Z3 4.13.4
+  the later bytes come back free. It now checks the first byte plus a
+  concrete replay.
+- **`tsymex_phase15_CR10_regex_overflow` test 3:** the bound is PCRE's
+  65535 (`\d{1,65536}` is "number too big"), not `high(cuint)`.
+- **`tsymex_rfc0005_s5_str`:**
+  - `s5BackrefDead` uses `re"(?P<n>x)"`, still ⊤;
+  - the dead-target regex replace uses `re"a*"`, still
+    `seZ3StringIncomplete`, because `a+` is exact now;
+  - the structural pin targets `regexReplaceShape(sp, pr.root)`.
+- **`tsymex_rfc0005_s8aw_remainder`:**
+  - past-the-unroll has no `seZ3StringIncomplete`;
+  - whitespace `re"a b"` is `sxUnsat`, exact;
+  - `[z-a]` is the `RegexError` raise (`sxUnsat` on the label, no
+    `seUnsupportedRegex`);
+  - `a*` keeps "can match empty".
+- **`tsymex_r6_n36_raise_class_audit`:** runtime_strings.nim 17 -> 18
+  marked sites.
+- **`tsymex_phase15_CR2_cachekey`:** `== "198"`.
+
+S6a's parser unit pins are unchanged and green (alternation stays a plain
+union).
+
+*Different mechanisms, reported and not fixed here.*
+- **Drain order within one expression.** `drainScalarRaiseForks` drains
+  its stages in a fixed order, the regex stage last, not in source order.
+  So a raise site lexically AFTER a rejected pattern in the same
+  expression is forked before it. In `int(s.match(re"a**")) +
+  parseInt(t)`, Nim always raises `RegexError`, but the walker also
+  reports a `ValueError` path for an unparsable `t` that never runs. This
+  follows from the code and is not pinned. The same fixed order already
+  governs the other stages (range vs arithmetic, for example), so it is a
+  drain-order mechanism, not a regex one.
+- **`Z3_mk_seq_foldli` crashes Z3 5.1 (SIGSEGV).** This is a nim-z3 / Z3
+  matter. It is the natural exact encoding for replace.
+- **Some replace queries stay undecided under every encoding measured.**
+  An unbounded length comparison over the result, and `contains` over it
+  (Q2, Q7, Q8), are `unknown` under every encoding; they surface as
+  `beSolverUndef`.
+- **Selection-dependent entries decline when PCRE's choice is not the
+  longest match.** `matchLen`, `endsWith` and the second half of
+  `findBounds` decline (a fresh value) for patterns such as `a|ab`. Modelling PCRE's backtracking order is a separate design.
+- **`findBounds` over a compound receiver or `start` declines.** The tuple
+  needs the operand twice, and lowering it twice would duplicate its raise
+  forks. The fix is a let-bound temporary in the parser.
+- **Some constructs are ⊤ (`psUnknown`).** Named groups, inline options
+  `(?i)`, `\p`, and verbs `(*...)`: the reader does not decide their
+  validity. The captures overloads are ⊤ because the `matches` write is
+  not modelled.
+- **`replace` with an alternation, an anchor or an empty-matching pattern
+  still declines** (`seZ3StringIncomplete`), as in S8aw. The suffix
+  recursion covers the same three shapes the unroll did.

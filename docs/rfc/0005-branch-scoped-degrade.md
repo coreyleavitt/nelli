@@ -352,6 +352,11 @@ title = "S8ay's remainder: regex drain order, foldli crash, PCRE selection seman
 state = "done"
 
 [[slice]]
+id = "S8bi"
+title = "S8bb's remainder A: regex nodes as defect carriers, closure exit facts on earlier raises, newSeq[T](n) and notin set-literal targets, recursive-function fuel audit"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

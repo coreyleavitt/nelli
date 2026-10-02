@@ -8923,7 +8923,10 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
   if declared != nil:
     for i, fname in declared.fieldNames:
       if fname.len == 0 or fname in done: continue
-      parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+      # RFC-0005 S8bh: an inherited field lives in its declaring type's
+      # heap (`fieldHeapKey`), not under this cell's root-keyed prefix.
+      parts.add fname & "=" & renderCellField(b, m, w, cell,
+                                              fieldHeapKey(declared, fname),
                                               fname, declared.fields[i])
       done.add fname
   elif cell.pointee.kind == itVariant:

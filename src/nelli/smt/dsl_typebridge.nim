@@ -155,6 +155,78 @@ proc nominalId*(n: NimNode): string =
     s
   else: n.repr
 
+proc inheritObjectBody(sym: NimNode): tuple[nomSym, obj: NimNode] =
+  ## RFC-0005 S8bh (item 3). The `nnkObjectTy` body a type symbol names and
+  ## the symbol `classifyType` keys its nominal id on: the symbol itself for
+  ## `type T = object ...` / `type T = ref object ...`, the object's own
+  ## symbol for `type T = ref Obj`. `(nil, nil)` for anything else (a
+  ## generic, a non-object).
+  if sym.kind != nnkSym: return (nil, nil)
+  let impl = sym.getImpl
+  if impl.kind != nnkTypeDef or impl.len < 3: return (nil, nil)
+  if impl[1].kind == nnkGenericParams: return (nil, nil)
+  let u = impl[2]
+  if u.kind == nnkObjectTy: return (sym, u)
+  if u.kind in {nnkRefTy, nnkPtrTy} and u.len == 1:
+    if u[0].kind == nnkObjectTy: return (sym, u[0])
+    if u[0].kind == nnkSym: return inheritObjectBody(u[0])
+  (nil, nil)
+
+proc inheritInfo*(sym: NimNode): tuple[chain, ownedNames, ownedIds: seq[string];
+                                       parent: NimNode] =
+  ## RFC-0005 S8bh (item 3). For a type declared `of` another (`RootObj`
+  ## included): the nominal ids from the hierarchy's root down to `sym`'s
+  ## type (`IRType.inheritChain`), every field of the chain with the id of
+  ## the type declaring it (`ownedFieldNames`/`ownedFieldIds`), and the
+  ## direct user parent's symbol (nil under `RootObj`). All empty for a type
+  ## without `of`, and for a chain this cannot follow (a generic parent, a
+  ## `case` object in the chain): those keep their pre-S8bh per-type keying.
+  ## Reads names only -- never a field's type -- so a recursion placeholder
+  ## (`namedRefPlaceholder`) can call it without recursing.
+  var cur = sym
+  var levels: seq[tuple[id: string; names: seq[string]]]
+  var first = true
+  while true:
+    let (nomSym, obj) = inheritObjectBody(cur)
+    if obj == nil or obj.len < 3: return
+    var names: seq[string]
+    if obj[2].kind == nnkRecList:
+      for d in obj[2]:
+        if d.kind != nnkIdentDefs: return   # a `case` (variant) part
+        for i in 0 ..< d.len - 2:
+          var nn = d[i]
+          if nn.kind == nnkPostfix: nn = nn[1]
+          if nn.kind == nnkPragmaExpr: nn = nn[0]
+          if nn.kind notin {nnkIdent, nnkSym}: return
+          names.add nn.strVal
+    levels.insert((nominalId(nomSym), names), 0)
+    let inh = obj[1]
+    if inh.kind != nnkOfInherit or inh.len != 1:
+      if first: return          # no `of`: not a hierarchy
+      return                    # a user parent without `of` cannot occur
+    let par = inh[0]
+    if par.kind == nnkSym and par.strVal == "RootObj": break
+    if par.kind != nnkSym: return
+    if first: result.parent = par
+    first = false
+    cur = par
+  for lv in levels:
+    result.chain.add lv.id
+    for nm in lv.names:
+      result.ownedNames.add nm
+      result.ownedIds.add lv.id
+
+proc withInheritInfo(t: IRType, sym: NimNode): IRType =
+  ## RFC-0005 S8bh (item 3). Stamp `inheritInfo(sym)` onto the freshly built
+  ## tuple `t` (placeholder or full) and return it.
+  if t.kind != itTuple: return t
+  let info = inheritInfo(sym)
+  if info.chain.len == 0: return t
+  t.inheritChain = info.chain
+  t.ownedFieldNames = info.ownedNames
+  t.ownedFieldIds = info.ownedIds
+  t
+
 var witnessTypeSyms {.compileTime.}: Table[string, NimNode]
   ## RFC-0005 S8e. `IRType.typeKey` -> the symbol of the named user type it
   ## was classified from. Never cleared: an entry is a fact about a symbol,
@@ -1097,8 +1169,27 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        underObj != nil and underObj.kind == nnkObjectTy:
       let recList = underObj[2]
-      let pointee = classifyObjectRecordFields(resolved, recList,
+      var pointee = classifyObjectRecordFields(resolved, recList,
                                                isRefWrapped = refWrapNode != nil)
+      if pointee.kind == itTuple:
+        # RFC-0005 S8bh (item 3). A type declared `of` a user type holds its
+        # ancestors' fields first, as Nim lays them out: they were missing
+        # (`new Derived` never zeroed an inherited field -- a false `sxSat`
+        # -- and a witness could not set one). The chain and owners key the
+        # sort and field heaps (`refPointeeTypeId`, `fieldHeapKey`).
+        let info = inheritInfo(resolved)
+        if info.chain.len > 0:
+          if info.parent != nil:
+            var parTy = classifyType(info.parent).ty
+            if parTy.kind in {itRef, itPtr}:
+              parTy = if parTy.kind == itRef: parTy.refPointeeTy
+                      else: parTy.ptrPointeeTy
+            if parTy.kind == itTuple:
+              pointee.fields = parTy.fields & pointee.fields
+              pointee.fieldNames = parTy.fieldNames & pointee.fieldNames
+          pointee.inheritChain = info.chain
+          pointee.ownedFieldNames = info.ownedNames
+          pointee.ownedFieldIds = info.ownedIds
       if refWrapNode != nil:   # RFC-0005 S8l: variants too
         return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(pointee)
                          else: tRef(pointee))
@@ -1227,7 +1318,7 @@ proc namedRefPlaceholder(objSym: NimNode): IRType =
   ## typed AST), so an empty-fielded named placeholder is sufficient and FINITE.
   let nm = if objSym.kind in {nnkSym, nnkIdent}: objSym.strVal else: objSym.repr
   tTuple(@[], @[], objectName = nm, nominalId = nominalId(objSym),
-         isPlaceholder = true).keyedBySym(objSym)
+         isPlaceholder = true).keyedBySym(objSym).withInheritInfo(objSym)
 
 proc isObjectTypeSym(sym: NimNode): bool =
   ## CR-19: Returns true iff `sym` (a nnkSym/nnkIdent) refers to a user-defined
@@ -1309,7 +1400,7 @@ proc classifyFieldType*(ty: NimNode): ClassifiedType =
       let nm = if inner.kind in {nnkSym, nnkIdent}: inner.strVal else: ""
       let placeholder = tTuple(@[], @[], objectName = nm,
                                nominalId = (if inner.kind in {nnkSym, nnkIdent}: nominalId(inner) else: ""),
-                               isPlaceholder = true).keyedBySym(inner)
+                               isPlaceholder = true).keyedBySym(inner).withInheritInfo(inner)
       return if resolved.kind == nnkRefTy: unranged(tRef(placeholder))
              else: unranged(tPtr(placeholder))
   classifyType(ty)

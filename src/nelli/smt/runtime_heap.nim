@@ -22,6 +22,15 @@
 # Placement in runtime.nim: between `walkBlock` and `walk`'s body
 # (after `walk`'s forward-decl and before `walk`'s body).
 
+proc sanitizeTypeId(base: string): string =
+  ## The heap/sort-name spelling of a type id: every character outside
+  ## `[A-Za-z0-9_]` becomes `_` (split out of `refPointeeTypeId` at RFC-0005
+  ## S8bh, whose `fieldHeapKey` spells a declaring type's id the same way).
+  result = base
+  for i in 0 ..< result.len:
+    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
+      result[i] = '_'
+
 proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## Phase 15 R1; flipped at Cluster H Step B (ADR-0022). A stable
   ## per-pointee-type identifier used to key the `Ref_T` sort + heap array +
@@ -53,7 +62,12 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## sorts for one Nim type: a Z3 sort error, or a false `sxUnsat`.
   ## RFC-0005 S8l: a multi-variant keys on its `mvNominalId` for the same
   ## reason (an inline `ref MV` field was that sort error).
-  let base = if pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
+  ## RFC-0005 S8bh (item 3): a type of an inheritance hierarchy keys on the
+  ## hierarchy's ROOT (`inheritChain[0]`): every ref of the hierarchy is an
+  ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
+  let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
+               pointeeTy.inheritChain[0]
+             elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
                pointeeTy.nominalId
              elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
                pointeeTy.vNominalId
@@ -61,10 +75,7 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
                pointeeTy.mvNominalId   # RFC-0005 S8l
              else:
                $pointeeTy
-  result = base
-  for i in 0 ..< result.len:
-    if result[i] notin {'a'..'z', 'A'..'Z', '0'..'9', '_'}:
-      result[i] = '_'
+  result = sanitizeTypeId(base)
 
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort =
   ## Phase 15 R1 (ADR-0010). Return the per-walker `Ref_<typeId>` uninterpreted
@@ -599,7 +610,31 @@ proc fieldHeapKey*(objTy: IRType, field: string): string =
   ## (unique across the flat inheritance layout — Nim forbids field shadowing).
   ## The `Ref_T` SORT still keys on the OBJECT (`refPointeeTypeId(objTy)`), so
   ## every field of one ref shares a single abstract address (aliasing observed).
+  ##
+  ## RFC-0005 S8bh (item 3): a field of an inheritance hierarchy keys on the
+  ## type that DECLARES it (`ownedFieldIds`), not on the static type it is
+  ## read through: `d.x` (static `Derived`) and `b.x` (static `Base`) are one
+  ## heap, and siblings' same-named fields are two. A field the type does
+  ## not list (a tag level, `@lvl<j>`, or a type without `of`) keeps the
+  ## `refPointeeTypeId` key -- the hierarchy's root for a tag level.
+  if objTy != nil and objTy.kind == itTuple:
+    let i = objTy.ownedFieldNames.find(field)
+    if i >= 0 and i < objTy.ownedFieldIds.len:
+      return sanitizeTypeId(objTy.ownedFieldIds[i]) & "__" & field
   refPointeeTypeId(objTy) & "__" & field
+
+proc inheritTagKey*(objTy: IRType, level: int): string =
+  ## RFC-0005 S8bh (item 3). The run-type tag heap of depth `level` of
+  ## `objTy`'s hierarchy: `<root>__@lvl<level>`. An object of a type of depth
+  ## `m` (its `inheritChain.len - 1`) stores `inheritTagCode` of its
+  ## ancestor at each depth `1..m` and the sentinel 0 at depth `m + 1`
+  ## (`isNew`). A down-conversion to a type `D` of depth `k` from a static
+  ## type of depth `s` reads depths `s + 1 .. k` and compares them with `D`'s
+  ## chain: depths `<= s` agree by static typing, and an object of depth
+  ## `m < k` fails at depth `m + 1` (the sentinel), with no closed-world list
+  ## of the hierarchy's types. A parameter's levels are free: its dynamic
+  ## type is any subtype of its static one.
+  fieldHeapKey(objTy, "@lvl" & $level)
 
 proc variantDiscHeapKey(objTy: IRType): string =
   ## ADR-0013 D1. The discriminator heap of a ref-to-variant: `<id>__@disc`.
@@ -1385,6 +1420,29 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for i, fname in arm.fieldNames:
               zeroSlots.add (fname, baseId & "__@" & $arm.tagOrdinal & "__" & fname,
                              arm.fieldTypes[i], view)
+      if pointee.kind == itTuple and pointee.inheritChain.len > 0:
+        # RFC-0005 S8bh (item 3). The run-type tag of a hierarchy object:
+        # its ancestor's `inheritTagCode` at each depth `1..m` and the
+        # sentinel 0 at depth `m + 1` (see `inheritTagKey`). Depth 0 is the
+        # root, which every object of the hierarchy shares: no check reads it.
+        let depth = pointee.inheritChain.len - 1
+        for lvl in 1 .. depth + 1:
+          let code = if lvl <= depth: inheritTagCode(pointee.inheritChain[lvl])
+                     else: 0'i64
+          let key = inheritTagKey(pointee, lvl)
+          let tagTy = tInt(64, signed = true)
+          let fheap = if child.heaps.hasKey(key): child.heaps[key]
+                      else: mkHeapArrayVar(ctx, refSort, tagTy, "heap_" & key)
+          var scratchPC: seq[Z3Bool]
+          let proto = allocateSym(tagTy, "__isNewTagProto", scratchPC)
+          let (tagRaw, childAfter) = lowerInExpr(child, mkIntLit(code), w,
+                                                 some(proto))
+          var tagSV = tagRaw
+          if tagSV.kind == svInt:
+            tagSV = liftBV(intToBv[64](tagSV.zi, Z3BitVec[64]), true)
+          child = childAfter
+          child.heaps[key] = wrap[Z3AnyAst](ctx, checkedStore(ctx, fheap.raw,
+            newRef.raw, rawAnyAstOf(tagSV)))
       if pointee.kind in {itTuple, itVariant, itMultiVariant}:
         for slot in zeroSlots:
           let fname = slot.fname

@@ -513,9 +513,26 @@ proc emitIRType*(t: IRType): NimNode =
     # substitute" branch, permanently rendering a placeholder's `{}` empty
     # body instead of resolving the real nominal type. `nameIsRefAlias` stays
     # NOT threaded — still genuinely codegen-only, no walk-time reader needs it.
-    newCall(bindSym"tTuple", prefix(fieldsLit, "@"),
+    var call = newCall(bindSym"tTuple", prefix(fieldsLit, "@"),
             prefix(namesLit, "@"), newLit(t.objectName), newLit(t.nominalId),
             newLit(t.isPlaceholder))
+    # RFC-0005 S8bh (item 3): the hierarchy chain and the field owners key
+    # the walker's sort and field heaps (`refPointeeTypeId`,
+    # `fieldHeapKey`), so they round-trip -- passed only when present, so a
+    # type declared without `of` emits the same call as before.
+    proc strSeqLit(xs: seq[string]): NimNode =
+      var b = newTree(nnkBracket)
+      for x in xs: b.add newLit(x)
+      prefix(b, "@")
+    if t.inheritChain.len > 0:
+      call.add newTree(nnkExprEqExpr, ident"inheritChain",
+                         strSeqLit(t.inheritChain))
+    if t.ownedFieldNames.len > 0:
+      call.add newTree(nnkExprEqExpr, ident"ownedFieldNames",
+                         strSeqLit(t.ownedFieldNames))
+      call.add newTree(nnkExprEqExpr, ident"ownedFieldIds",
+                         strSeqLit(t.ownedFieldIds))
+    call
   of itArray:
     newCall(bindSym"tArray", emitIRType(t.elemTy), newLit(t.size))
   of itSeq:
@@ -3929,6 +3946,28 @@ proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr =
         if "*" notin outer: outer.add "*"
   withLambdaEffects(lam, pairs, aliasBodies, ptrLocal, outer)
 
+proc hierarchyConv(n, operand: NimNode): tuple[isHier: bool;
+    tgtTy, tgtPointee: IRType; srcChain, tgtChain: seq[string]] =
+  ## RFC-0005 S8bh (item 3). `n` (an `nnkConv`) converts a ref (or ptr) of
+  ## one inheritance hierarchy to another type of the same hierarchy: both
+  ## pointees carry an `inheritChain` with the same root, one chain a prefix
+  ## of the other. Anything else (a value object, two unrelated types) is
+  ## not this conversion.
+  let t = classifyType(n).ty
+  let o = classifyType(operand).ty
+  if t == nil or o == nil or t.kind notin {itRef, itPtr} or o.kind != t.kind:
+    return
+  let tp = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
+  let op = if o.kind == itRef: o.refPointeeTy else: o.ptrPointeeTy
+  if tp == nil or op == nil or tp.kind != itTuple or op.kind != itTuple:
+    return
+  let tc = tp.inheritChain
+  let sc = op.inheritChain
+  if tc.len == 0 or sc.len == 0 or tc[0] != sc[0]: return
+  let short = min(tc.len, sc.len)
+  if tc[0 ..< short] != sc[0 ..< short]: return
+  (true, t, tp, sc, tc)
+
 proc byRefTypeKey(n: NimNode): string =
   ## RFC-0005 S8ba. A type's spelling, the module that declares it (two
   ## modules may each declare a `Box`) and the line and column of its
@@ -4041,6 +4080,13 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
     elif t[0].kind == nnkBracketExpr or
          (t[0].kind != nnkSym and t[0].len == 0 and byRefName(t[0]).len > 0):
       t[0]   ## RFC-0005 S8bd: marked as itself (`markByRef`)
+    elif t[0].kind in {nnkConv, nnkHiddenSubConv, nnkHiddenStdConv} and
+         t[0].len > 0 and hierarchyConv(t[0], t[0][^1]).isHier:
+      # RFC-0005 S8bh (item 3): a ref converted along its inheritance chain
+      # (`Base(d).x`) is the operand's own address; marked as itself, like an
+      # element, and evaluated once (with a down-conversion's check) before
+      # the call.
+      t[0]
     elif t[0].kind in {nnkCall, nnkCommand} and t[0].len > 0 and
          t[0][0].kind == nnkSym and isUserCallee(t[0][0]):
       # RFC-0005 S8bd: a call's result is named by the callee's own
@@ -4921,7 +4967,39 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let operand = n[n.len - 1]
     let tgt = typeNodeName(n[0])
     let src = valueTypeName(operand)
-    if tgt in fltTyNames and src in intTyNames:
+    let hier = hierarchyConv(n, operand)
+    if hier.isHier:
+      # RFC-0005 S8bh (item 3). A ref converted along its inheritance chain
+      # is the same address (one `Ref_<root>` sort, `refPointeeTypeId`): an
+      # up-conversion (`Base(d)`) is the operand itself. A down-conversion
+      # (`Derived(b)`) is too, after Nim's check that a non-nil `b`'s
+      # dynamic type is a `Derived` (else ObjectConversionDefect). The check
+      # compares `b`'s run-type tag at each depth below its static type's
+      # with `Derived`'s chain (`inheritTagKey`, runtime_heap.nim). Before
+      # S8bh both were the identity pass-through below, over two sorts: an
+      # ill-sorted term, and no check at all.
+      let opIR = parseExpr(operand, preamble, ctx)
+      if hier.tgtChain.len <= hier.srcChain.len:
+        opIR
+      else:
+        let cell = freshSynth(ctx, "objConv")
+        preamble.add mkLet(cell, hier.tgtTy, opIR)
+        var reads: seq[IRStmt]
+        var ok: IRExpr = nil
+        for lvl in hier.srcChain.len ..< hier.tgtChain.len:
+          let tag = freshSynth(ctx, "objConvTag")
+          reads.add mkFieldDeref(tag, mkVar(cell), tInt(64, signed = true),
+                                 hier.tgtPointee, "@lvl" & $lvl,
+                                 ptrFamily = hier.tgtTy.kind == itPtr)
+          let eq = mkBinop(bEq, mkVar(tag),
+                           mkIntLit(inheritTagCode(hier.tgtChain[lvl])))
+          ok = if ok == nil: eq else: mkBinop(bAnd, ok, eq)
+        reads.add mkIf(@[mkBranch(mkUnop(uNot, ok),
+                                  mkRaise("ObjectConversionDefect", nil))])
+        preamble.add mkIf(@[mkBranch(
+          mkBinop(bNe, mkVar(cell), mkNil(hier.tgtTy)), mkBlock(reads))])
+        mkVar(cell)
+    elif tgt in fltTyNames and src in intTyNames:
       mkConvIntToFloat(parseExpr(operand, preamble, ctx), if tgt == "float32": 32 else: 64)
     elif tgt in intTyNames and src in fltTyNames:
       # RFC-0005 S8g: the target's own width and signedness (`int8(f)` was

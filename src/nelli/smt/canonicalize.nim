@@ -4808,7 +4808,14 @@ proc canonicalize*(t: IRType): string =
     for i in 0 ..< t.fields.len:
       let nm = if i < t.fieldNames.len: t.fieldNames[i] else: ""
       parts.add nm & "=" & canonicalize(t.fields[i])
-    "Ty<T:" & t.objectName & ":" & parts.join(";") & ">"
+    # RFC-0005 S8bh (item 3): a hierarchy type's chain and field owners
+    # key its sort and heaps; absent for a type without `of`, so every
+    # pre-existing key is unchanged.
+    let inh =
+      if t.inheritChain.len == 0 and t.ownedFieldNames.len == 0: ""
+      else: ":inh=[" & t.inheritChain.join(",") & "];own=[" &
+            t.ownedFieldNames.join(",") & "|" & t.ownedFieldIds.join(",") & "]"
+    "Ty<T:" & t.objectName & ":" & parts.join(";") & inh & ">"
   of itArray:
     # RFC-0005 S8am: `lo` renders too (same "cheap, forecloses future
     # doubt" default as `IRType.lo`'s own field doc) -- absent (the

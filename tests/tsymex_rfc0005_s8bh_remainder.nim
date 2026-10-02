@@ -19,6 +19,7 @@ import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
+import nelli/smt/runtime
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -421,6 +422,226 @@ suite "S8bh (1): var writes through an indirect call":
   test "a proc field and a method call decline":
     declines(sutProcField, "pfld_dead", feUnsupportedStmtKind, "o.f")
     declines(sutMethod, "m_dead", feUnsupportedOp, "setM")
+
+# ---- 3. a ref converted along its inheritance chain -------------------------
+#
+# RFC-0005 S8bh item 3. Every type of a hierarchy keyed its own `Ref_<id>`
+# sort and its own field heaps, and a derived type's IR carried only the
+# fields it declared itself. `Base(d)`, `let b: Base = d` and a `Base`
+# parameter aliasing a `Mid` one therefore mixed two sorts (an ill-sorted
+# term, `weInternalWalkerFault`), or read an inherited field from a heap the
+# other static type never wrote (a false `sxUnsat`).
+
+type
+  Base3 = ref object of RootObj
+    x: int
+  Mid3 = ref object of Base3
+    y: int
+  Leaf3 = ref object of Mid3
+    z: int
+  Side3 = ref object of Base3
+    y: string   ## a sibling's field of the same name and another type
+
+proc sutCvEq(b: Base3; d: Mid3) =
+  if Base3(d) == b and d != nil: symexTarget("cv")
+
+proc sutCvLocal(k: int) =
+  let d = Mid3(x: k, y: k)
+  let b: Base3 = d
+  if Base3(d) == b: symexTarget("cvl")
+  if Base3(d) != b: symexTarget("cvl_dead")
+
+proc sutCvField(k: int) =
+  ## `setBoth(Base(d).x, b.x)`: one location passed twice.
+  let d = Mid3(x: k, y: k)
+  let b: Base3 = d
+  setBoth(Base3(d).x, b.x)
+  if d.x != 1: symexTarget("cvf_dead")
+  if d.x == 1 and k == 3: symexTarget("cvf")
+
+proc sutAliasParams(b: Base3; d: Mid3) =
+  ## `b` and `d` may be one object (`sutAliasParams(m, m)`).
+  if b == nil or d == nil: return
+  d.x = 1
+  b.x = 2
+  if d.x == 2: symexTarget("apar")
+  if d.x != 1 and d.x != 2: symexTarget("apar_dead")
+
+proc sutAliasDisjoint(b: Base3; d: Mid3) =
+  ## Control: two fresh objects never alias.
+  let m = Mid3(x: 1)
+  let n: Base3 = Base3(x: 5)
+  n.x = 2
+  if m.x != 1: symexTarget("adis_dead")
+
+proc sutInheritedZero(k: int) =
+  ## `Mid3()` zeroes the inherited `x` as well as its own `y`.
+  let d = Mid3()
+  if d.x != 0 or d.y != 0: symexTarget("iz_dead")
+  if d.x == 0: symexTarget("iz")
+
+proc sutUpRead(k: int) =
+  let d = Mid3(x: k, y: 7)
+  d.x = 3
+  let b: Base3 = d
+  if b.x != 3 or d.y != 7: symexTarget("ur_dead")
+  b.x = 4
+  if d.x == 4: symexTarget("ur")
+
+proc sutSiblings(k: int) =
+  ## `Mid3.y` and `Side3.y` are different fields.
+  let s = Side3(x: k, y: "a")
+  let m = Mid3(x: k, y: 3)
+  if m.y != 3 or s.y != "a": symexTarget("sib_dead")
+  if m.y == 3 and s.y == "a": symexTarget("sib")
+
+proc sutDown(k: int) =
+  let b: Base3 = Mid3(x: k, y: 4)
+  let d = Mid3(b)
+  if d.y != 4: symexTarget("dn_dead")
+  if d.y == 4: symexTarget("dn")
+
+proc sutDownLeaf(k: int) =
+  ## A `Leaf3` is a `Mid3`.
+  try:
+    let b: Base3 = Leaf3(x: k, y: 4, z: 1)
+    let d = Mid3(b)
+    if d.y == 4: symexTarget("dl")
+  except ObjectConversionDefect:
+    symexTarget("dl_raise_dead")
+
+proc sutDownFail(k: int) =
+  ## A plain `Base3` is not a `Mid3`: ObjectConversionDefect.
+  try:
+    let b = Base3(x: k)
+    let d = Mid3(b)
+    if d.y == 0: symexTarget("dnf_dead")
+  except ObjectConversionDefect:
+    symexTarget("dnf_raise")
+
+proc sutDownSide(k: int) =
+  ## Nor is a sibling.
+  try:
+    let b: Base3 = Side3(x: k, y: "s")
+    discard Mid3(b)
+    symexTarget("dns_dead")
+  except ObjectConversionDefect:
+    symexTarget("dns_raise")
+
+proc sutDownNil(b: Base3) =
+  ## A nil converts: Nim checks a non-nil ref only.
+  if b != nil: return
+  try:
+    let d = Mid3(b)
+    if d == nil: symexTarget("dnn")
+  except ObjectConversionDefect:
+    symexTarget("dnn_raise_dead")
+
+proc sutParamDown(b: Base3) =
+  ## A parameter's dynamic type is any subtype of its static one.
+  try:
+    let d = Mid3(b)
+    if d != nil: symexTarget("pdn")
+  except ObjectConversionDefect:
+    symexTarget("pdn_raise")
+
+type
+  BaseObj4 = object of RootObj
+    x: int
+  BaseR4 = ref BaseObj4
+  DerObj4 = object of BaseObj4
+    y: int
+  DerR4 = ref DerObj4
+
+proc sutObjStyle(b: BaseR4; d: DerR4) =
+  ## The `ref Obj` spelling of a hierarchy (its nominal ids are the
+  ## objects').
+  if b == nil or d == nil: return
+  d.x = 1
+  b.x = 2
+  if d.x == 2 and BaseR4(d) == b: symexTarget("os")
+  if d.x != 2 and BaseR4(d) == b: symexTarget("os_dead")
+  let e = DerR4(x: 3)
+  if e.y != 0: symexTarget("os_zero_dead")
+  try:
+    discard DerR4(BaseR4(x: 1))
+    symexTarget("os_down_dead")
+  except ObjectConversionDefect:
+    discard
+
+suite "S8bh (3): a ref converted along its inheritance chain":
+
+  test "nim":
+    let m = Mid3(x: 1, y: 2)
+    check Base3(m) == Base3(m)
+    sutAliasParams(m, m)
+    check m.x == 2
+    expect ObjectConversionDefect:
+      discard Mid3(Base3(x: 1))
+    expect ObjectConversionDefect:
+      discard Mid3(Base3(Side3()))
+    check Mid3(Base3(Leaf3(y: 4))).y == 4
+    check Mid3(Base3(nil)) == nil
+    check Mid3().x == 0
+
+  test "an up-conversion keeps the ref's identity":
+    ## RED: `weInternalWalkerFault` (an ill-sorted term).
+    let r = clean(sutCvEq, "cv", sxSat)
+    if r.status == sxSat:
+      check replayWitness(sutCvEq, r.witness, tLabel("cv"), {}) == roConfirmed
+    discard clean(sutCvLocal, "cvl", sxSat)
+    discard clean(sutCvLocal, "cvl_dead", sxUnsat)
+
+  test "one location reached through two static types":
+    ## RED: `sxRaised` (the ill-sorted index of a field heap).
+    discard clean(sutCvField, "cvf_dead", sxUnsat)
+    discard clean(sutCvField, "cvf", sxSat)
+    discard clean(sutUpRead, "ur_dead", sxUnsat)
+    discard clean(sutUpRead, "ur", sxSat)
+
+  test "parameters of two static types may alias":
+    ## RED: `sxUnsat` (a false one) -- two sorts never meet.
+    let r = clean(sutAliasParams, "apar", sxSat)
+    if r.status == sxSat:
+      check replayWitness(sutAliasParams, r.witness, tLabel("apar"), {}) ==
+        roConfirmed
+    discard clean(sutAliasParams, "apar_dead", sxUnsat)
+    discard clean(sutAliasDisjoint, "adis_dead", sxUnsat)
+
+  test "a derived object's inherited fields are zeroed and distinct":
+    discard clean(sutInheritedZero, "iz_dead", sxUnsat)
+    discard clean(sutInheritedZero, "iz", sxSat)
+    discard clean(sutSiblings, "sib_dead", sxUnsat)
+    discard clean(sutSiblings, "sib", sxSat)
+
+  test "a down-conversion checks the dynamic type":
+    discard clean(sutDown, "dn_dead", sxUnsat)
+    discard clean(sutDown, "dn", sxSat)
+    discard clean(sutDownLeaf, "dl", sxSat)
+    discard clean(sutDownLeaf, "dl_raise_dead", sxUnsat)
+    ## RED: `sxRaised` (the walker never raised ObjectConversionDefect).
+    discard clean(sutDownFail, "dnf_dead", sxUnsat)
+    discard clean(sutDownFail, "dnf_raise", sxSat)
+    discard clean(sutDownSide, "dns_dead", sxUnsat)
+    discard clean(sutDownSide, "dns_raise", sxSat)
+    discard clean(sutDownNil, "dnn", sxSat)
+    discard clean(sutDownNil, "dnn_raise_dead", sxUnsat)
+
+  test "the `ref Obj` spelling of a hierarchy":
+    let r = clean(sutObjStyle, "os", sxSat)
+    if r.status == sxSat:
+      check replayWitness(sutObjStyle, r.witness, tLabel("os"), {}) ==
+        roConfirmed
+    discard clean(sutObjStyle, "os_dead", sxUnsat)
+    discard clean(sutObjStyle, "os_zero_dead", sxUnsat)
+    discard clean(sutObjStyle, "os_down_dead", sxUnsat)
+
+  test "a parameter's down-conversion may go either way":
+    let r = clean(sutParamDown, "pdn_raise", sxSat)
+    if r.status == sxSat:
+      check replayWitness(sutParamDown, r.witness, tLabel("pdn_raise"), {}) ==
+        roConfirmed
+    discard clean(sutParamDown, "pdn", sxSat)
 
 suite "S8bh: walker version":
   test "symexWalkerVersion >= 208":

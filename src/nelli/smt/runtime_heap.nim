@@ -319,9 +319,30 @@ proc heapValueSort(ctx: Z3Context, proto: SymVal, pointeeTy: IRType,
   ## prototype here freed it before `Z3_mk_array_sort` read it (Z3: "invalid
   ## array sort definition, parameter is not a sort"). A scalar's sort is
   ## interned and never showed this.
+  if intHeapCell(pointeeTy):   # RFC-0005 S8as: Int-sorted `int` heap
+    return ctx.checkErr Z3_mk_int_sort(ctx.raw)
   if heapCompoundTy(pointeeTy):
     return ctx.checkErr Z3_get_sort(ctx.raw, svLeafAsts(proto)[leaf])
   ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
+
+proc heapStoreValue(valSV: SymVal; proto: SymVal; ty: IRType): SymVal =
+  ## RFC-0005 S8as. `valSV` in the heap's value sort for pointee/field type
+  ## `ty`: an Int for an `intHeapCell` (a BV operand through `bv2int`,
+  ## signed), otherwise `proto`'s bit-vector width for an svInt operand
+  ## (the `int2bv` coercion every store site carried inline).
+  if intHeapCell(ty):
+    if valSV.kind in {svBV8, svBV16, svBV32, svBV64}:
+      return SymVal(kind: svInt, zi: toZ3Int(valSV), ziWidth: 64,
+                    ziSigned: true)
+    return valSV
+  result = valSV
+  if valSV.kind == svInt:
+    case proto.kind
+    of svBV8:  result = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
+    of svBV16: result = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
+    of svBV32: result = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
+    of svBV64: result = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
+    else: discard
 
 proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
                     pointeeTy: IRType, name: string,
@@ -363,6 +384,9 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
   ## pointees (`ref object`, `seq[ref T]`) land R3+.
   case pointeeTy.kind
   of itInt:
+    if intHeapCell(pointeeTy):   # RFC-0005 S8as: an Int-sorted `int` heap
+      return SymVal(kind: svInt, zi: wrap[Z3Int](ctx, valRaw), ziWidth: 64,
+                    ziSigned: true)
     case pointeeTy.width
     of 8:  liftBV(wrap[Z3BitVec[8]](ctx, valRaw),  pointeeTy.signed)
     of 16: liftBV(wrap[Z3BitVec[16]](ctx, valRaw), pointeeTy.signed)
@@ -1356,13 +1380,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # Reconcile svInt↔BV sort mismatch (same idiom as isDerefWrite):
           # a literal int/bool zero may lower to svInt (Z3Int) while the
           # field-split heap's value sort is BV — coerce via int2bv.
-          if valSV.kind == svInt:
-            case proto.kind
-            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-            else: discard
+          valSV = heapStoreValue(valSV, proto, fty)   # RFC-0005 S8as
           let storedRaw = checkedStore(ctx, fheap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[fieldKey] = wrap[Z3AnyAst](ctx, storedRaw)
@@ -1398,13 +1416,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let proto = allocateSym(pointee, "__isNewZeroProto", scratchPC)
           let (valSVRaw, childAfter) = lowerInExpr(child, zeroExpr, w, some(proto))
           var valSV = valSVRaw
-          if valSV.kind == svInt:
-            case proto.kind
-            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-            else: discard
+          valSV = heapStoreValue(valSV, proto, pointee)   # RFC-0005 S8as
           let storedRaw = checkedStore(ctx, heap.raw, newRef.raw, rawAnyAstOf(valSV))
           child = childAfter
           child.heaps[typeId] = wrap[Z3AnyAst](ctx, storedRaw)
@@ -1622,13 +1634,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                  not carriesRangeCheck(stmt.dwValue, stmt.dwElemTy):   # RFC-0005 S8j
                 forkAssignRangeCheck(cpInArm, valSV, stmt.dwElemTy, w)
               else: cpInArm
-            if valSV.kind == svInt:
-              case proto.kind
-              of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-              of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-              of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-              of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-              else: discard
+            valSV = heapStoreValue(valSV, proto, stmt.dwElemTy)   # RFC-0005 S8as
             # Store RHS into each matching arm's field heap.
             # RFC-0005 S8ap: a compound arm field stores every leaf.
             for hit in armHitsW:
@@ -1738,13 +1744,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # but the heap array value sort is BV64.  Coerce via int2bv here rather
           # than in the heap-read path; equality-only goals are safe (no ordering
           # goal — the F5 int2bv/bv2int pathology does not apply here).
-          if valSV.kind == svInt:
-            case proto.kind
-            of svBV8:  valSV = liftBV(intToBv[8](valSV.zi, Z3BitVec[8]),  proto.signed)
-            of svBV16: valSV = liftBV(intToBv[16](valSV.zi, Z3BitVec[16]), proto.signed)
-            of svBV32: valSV = liftBV(intToBv[32](valSV.zi, Z3BitVec[32]), proto.signed)
-            of svBV64: valSV = liftBV(intToBv[64](valSV.zi, Z3BitVec[64]), proto.signed)
-            else: discard  ## proto is not a BV — no BV coercion needed
+          valSV = heapStoreValue(valSV, proto, stmt.dwElemTy)   # RFC-0005 S8as
           # RFC-0005 S8l. A discriminator write THROUGH a ref is checked exactly
           # like the value model's reassignment (S8f, `sameBranchCond`): Nim
           # raises `FieldDefect` ("assignment to discriminant changes object

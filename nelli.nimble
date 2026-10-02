@@ -1045,5 +1045,11 @@ task test, "Run the test suite":
             # render layer incl. the annotation-violation channel; also the
             # gaps() walkthrough. Public imports only. walker 182->190
             # (batch 1).
-            "tsymex_rfc0005_s11_surface"]:
+            "tsymex_rfc0005_s11_surface",
+            # RFC-0005 S8as -- S8an's remainder: if-arm pruning in a
+            # recursion; opaque-call effect summaries havoc globals; a
+            # global's entry value; closure capture/global write-back;
+            # more `addr` forms; a path-based alias check; an Int-sorted
+            # `int` heap; walker 190->192.
+            "tsymex_rfc0005_s8as_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

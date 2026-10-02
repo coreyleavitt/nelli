@@ -319,7 +319,7 @@ state = "pending"
 [[slice]]
 id = "S8as"
 title = "S8an's remainder: explore-mode if-forks without feasibility pruning (symbolic recursion declines); opaque calls do not invalidate globals; global read before write; closure capture/global writes; escaping pointers and addr outside modelled forms; path-based addr alias check; Int/BV conversion cost in int heap cells"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8at"
@@ -6959,6 +6959,184 @@ same way.
   it (above). This is sound, because nothing observed it. But
   `renderedSize` and the `[0, 1024]` length window are the only guard, and
   a future reader of unread cells would have to assert the facts itself.
+
+**As landed (S8as, walker 192) — S8an's remainder.**
+
+*Wrong verdicts found and fixed (each pinned RED on a49fa97 first).*
+- **An opaque call's write to a global was dropped.** `{.symexOpaque.}`
+  `opSet(v)` writing `gOp = v` left the walk's binding of `gOp` unchanged
+  across the call: a target behind the written value was a false `sxUnsat`
+  with `errors` empty -- directly, through a routine the opaque routine
+  calls, and for a nested opaque routine writing its capture.
+- **A closure called in the right operand of `and`/`or` ran
+  unconditionally.** `shortCircuitPartIsPure` judged a closure or HOF call
+  pure (`rhsHasInlineDefectFork` had no arm for `iekClosureCall` /
+  `iekHofCall`), so the right operand was lowered eagerly and its raise
+  taken on paths where the left operand had already decided: a false
+  verdict with `errors` empty. Both kinds now count as an inline fork, so
+  the operand is lowered under its guard.
+- **The call cache replayed a summary that was true only in the caller's
+  context.** A call is cached when its walk returns one path. A walk that
+  dropped a path as infeasible against the caller's facts (S8k's loop-guard
+  check, S8an's call-depth bail, and the `if` check below) can return one
+  path where another context has two. `s8asCount(n)` walked under `n == 0`
+  (the loop never runs) was cached and replayed for `n in 1..3`:
+  `s8asCount(n) == 2` was a false `sxUnsat`, `errors` empty, on the base
+  since S8k. With the `if` pruning, `fib(n)` under `n in 3..4` hit the same
+  hole. Every drop the solver decides is counted (`ctxPruneCount`), and a
+  call whose walk dropped one is not cached.
+
+*(1) Recursion on a symbolic argument.* Inside a recursive frame (the
+innermost callee is also an outer frame's, `inRecursiveFrame`) an `if` arm
+or else path whose query is UNSAT is dropped before it is walked
+(`ifArmInfeasible`: a literal arm without the solver, otherwise
+`pathInfeasible` under `loopPruneRLimit`; counted in `symexIfArmsPruned`).
+`fib(n)` under `n in 0..4` did not finish in 15 minutes at `maxCallDepth =
+6` without it; with it the SAT target decides in about 3 s at 5, and
+`fact(n)` under `n in 0..5` decides both ways at 6. An `if` outside a
+recursion is not checked: its arms are bounded by the program text. Past
+the budget the deepest paths still decline, `beBudgetExhaustedUnmodelled`
+naming `maxCallDepth=3`: `fact(5)` needs five frames and the default is
+three.
+
+*(2) An opaque call havocs what it may write.* An inert opaque call carries
+an effect summary, `IRStmt.opaqueHavoc`, built at parse time by
+`opaqueWriteSummary` over the routine's body, transitively through the user
+routines it calls (`scanOpaqueEffects`): every module-level `var` it names
+(`globalIRName`), every writable capture of a nested routine it reaches,
+and `*` (every `var` global) for a method or a bodiless foreign routine. A
+global or capture whose type is not ref-free (`irTypeRefFree`), a user
+routine with no body, a `cast` or an `asm` makes the call non-inert, which
+declines as before. After the call each name in the summary holds a fresh
+value of its type (`havocOpaqueWrites`), recorded once per call as
+`feGlobalHavoc` (`dcFreshSymbol`: a SAT through it is replay-gated, an UNSAT
+stands). A routine that writes nothing has an empty summary and stays
+clean; the inert `srand` pin in `tsymex_rfc0005_s8b_substitutions` is
+unchanged (`*` over a program with no globals havocs nothing).
+
+*(3) A global's entry value.* `SymexProgram.globals` (`collectGlobals`)
+lists every module-level variable the parsed program names, with its type
+and, for a `let` whose initialiser is a literal, that literal. A global read
+before the walk writes it (`lower`'s `iekVar` arm, `entryValueOf`) holds the
+literal, exactly, for such a `let`; otherwise one fresh value of its type
+per run (`__glEntry_<name>`, its type facts in `globalEntryFacts`, asserted
+with every query), recorded as `feGlobalHavoc`. A `var` with a literal
+initialiser is not taken at its initialiser: code that ran before the
+property (another test, an earlier call) may have changed it. A computed
+`let` is a fresh value too. The program key carries the globals.
+
+*(4) A closure's writes to captures and globals.* `applyClosureGround`
+seeds the body's env with the caller's global bindings and overlays any
+write an earlier closure call in the same lowering made. Each global, and
+each by-reference capture of a closure applied in the frame that built it
+(`closureFrame == frame.frameId`), that an exit leaves different from the
+entry gets a fresh value with one axiom per untainted exit (`exit pc =>
+value == exit value`, asserted with every query as the return axioms are),
+raise exits included (`ClosureRaise.writes`, applied on the routed raise
+path). The caller's env takes the value when the lowering drains
+(`closureEnvWrites`, step (e) of `drainPendingLowerEffects`). Nim runs a
+call in an operand before the operands are read (probed: `c + f()` with `f`
+setting `c = 10` and returning 5 is 15), which is the order the parser's
+operand hoisting already gives. A name the same expression read before the
+call, and a capture written by a closure applied outside its frame, keep
+the scoped `ceCaptureByRefUnmodelled` decline, which names the reason.
+
+*(5) More `addr` forms.* `let p = addr lv` (`fixedAddrNode`) now also
+takes constant indices into a value array (`addr a[1]`). A section
+declaring several names is split into one declaration per name, so an alias
+among them is seen. A statement of the same list that re-points the alias
+at another fixed location (`p = addr y`) switches its spelling for the
+statements after it (`addrRepoint`). A re-point under a branch is still a
+use that does not stay local and keeps `heUnsafeCast`, as does any real
+escape (stored, returned, compared, a seq element, a computed index).
+
+*(6) The alias check is by path.* Two `var` or `addr` actuals that are
+paths into one variable (`lvaluePath`: fields, then constant indices, no
+dereference and no variant-arm field) and part at some step
+(`lvaluesDisjoint`) are two locations: `two(addr o.a, addr o.b)`,
+`two(addr a[0], addr a[2])`, `twoVar(o.a, o.b)`. A whole and its part
+(`addr o.inner`, `addr o.inner.a`) still decline.
+
+*(7) The `int` heap is Int-sorted.* When every signed 64-bit int parameter
+is an Int (`intHeapIsInt`; never under `isExact`), every heap of plain
+`int` (`intHeapCell`: 64-bit, signed, no declared range -- a `ref int` /
+`ptr int` cell or an `int` field) is `(Array Ref Int)`. A value read from it
+is an Int stamped `ziWidth = 64`, so every overflow obligation stays
+(`overflowCondInt`); a bit-vector stored into it goes through `bv2int`
+(`heapStoreValue`, which every store site now calls). Measured on Linux,
+Z3 5.1, `v` in `(-1000, 1000)`: `let r = new int; r[] = v; r[] += 1; r[] !=
+v + 1` took 55.4 s before and 14-74 ms after; two `incP(addr x)` leaving
+`x != v + 2` took 25.7 s before and 20-89 ms after. S8an's `sutAddrInc` /
+`sutAddrLet` now use the wide range. When a parameter stays a bit-vector
+the heap does too: a BV stored through `bv2int` and compared with itself
+after a read is the F5 `int2bv(bv2int(v))` shape (S8an's `getP(addr x) !=
+v` ran past 400 s under an unconditional Int heap).
+
+Updated pins in `tests/tsymex_rfc0005_s8an_remainder.nim`: `cvw`, `lvn`,
+`gcl` and `glam` (a closure's write, declined there) are `sxSat`; `gfr` (a
+global read first, declined there) is a replay-gated candidate with
+`feGlobalHavoc`. `feGlobalHavoc` joins `tsymex_rfc0005_s1_lattice`'s
+reclassified set. `tsymex_rfc0005_s7_closure`'s audited solver-sink list
+gains `globalEntryFacts` (each fact mentions only its own fresh entry
+symbol and holds for every value of the type, so it prunes no real input).
+`scanOpaqueEffects` takes routine membership from `isUserRoutine` and the
+`resolveRoutineImpl` nil-core, as `tsymex_phase15_N2_kindgate_audit`
+requires, not from a bare symbol-kind set.
+
+Pins: `tests/tsymex_rfc0005_s8as_remainder.nim`, every expectation probed
+against Nim 2.2.10.
+- (1) `fib` and `fact` on a symbolic argument with room; the pruned-context
+  cache cases (`fib` under `n in 3..4`, the loop walked under `n == 0`);
+  `sumTo` past the default budget declines and decides with seven frames.
+- (2) An opaque routine's write to a global, through a routine it calls; a
+  nested opaque routine's write to its capture; a routine writing nothing
+  stays clean.
+- (3) A `var` global read first; a literal `let` (clean, exact); a computed
+  `let`; a callee reading the entry value and then the caller's write; a
+  closure reading the global as the caller holds it.
+- (4) A capture and a global written by a closure; a write on each of two
+  arms; two calls; two calls each reading the other's write; the operand
+  order; a closure under `and` (the wrong verdict above); a closure applied
+  outside its frame declines.
+- (5) `addr a[1]`, a re-point in the list, several pointers in a section; a
+  re-point under a branch declines.
+- (6) Two fields, two constant indices, nested paths, two `var` fields; a
+  whole and its part decline.
+- (7) Wide-range `new int` and `ptr int` arithmetic; an overflow on an Int
+  cell; a bit-vector parameter keeping the bit-vector heap.
+- The `>= 192` floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **An `if` outside a recursive frame is not feasibility-checked.** Its
+  arms are bounded by the program text, so this is cost, not termination;
+  a check at every `if` would add a solver call per branch to every walk.
+- **The call cache is off for a call whose walk pruned against its
+  context.** That is what makes it sound, and it costs reuse: `fib(n)` under
+  `n in 0..4` takes about 3 s to SAT and tens of seconds to prove an UNSAT
+  target, because every recursive call is walked afresh. A cache keyed by
+  the facts a pruning decision read would recover it.
+- **The default `maxCallDepth` of 3 still declines deeper recursion.** That
+  is the budget, not a modelling gap: the decline names it and raising it
+  decides.
+- **An Int-sorted `int` heap needs every int parameter to be an Int.** A
+  program mixing a promoted and an unpromoted parameter keeps the
+  bit-vector heap and the `int2bv` round trip for the promoted one; a ranged
+  `int` cell and a cell narrower than 64 bits stay bit-vectors. Choosing the
+  sort per heap from what is stored into it would cover the mixed case.
+- **An opaque routine's heap writes are not in its summary.** The summary
+  covers globals and captures; a routine reaching a global or capture that
+  is not ref-free, a `cast` or an `asm` stays non-inert and declines as
+  before. A method or a bodiless foreign routine havocs every `var` global.
+- **A `var` global initialised by a literal is not read at its
+  initialiser.** Code that ran before the property may have changed it, and
+  the walk does not know what ran. Only a literal `let` is exact.
+- **A closure applied outside the frame that built it, and a name the same
+  expression read before a closure call that writes it, still decline**
+  (`ceCaptureByRefUnmodelled`).
+- **`addr` stored, returned, compared, of a seq element or at a computed
+  index, and a re-point under a branch, still decline** (`heUnsafeCast`).
+  The path alias check does not split variant-arm fields or computed
+  indices, which still decline as aliasing.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

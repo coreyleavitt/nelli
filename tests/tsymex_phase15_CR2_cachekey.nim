@@ -926,7 +926,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## Provisional 188.
     ## RFC-0005 batch 1 lands S8ag, S8am, S8an, S8ap, S8aq and S11 as one
     ## walker number. 182->190.
-    check symexWalkerVersion == "190"
+    ## RFC-0005 S8as (if-arm pruning in a recursion; opaque-call write
+    ## summaries; a global's entry value; closure write-back; more
+    ## `addr` forms; a path-based alias check; an Int-sorted `int`
+    ## heap). 190->192 (191 is S8ar's).
+    check symexWalkerVersion == "192"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

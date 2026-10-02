@@ -657,7 +657,8 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkOpaqueCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              newLit(s.opaqueInert))
+              newLit(s.opaqueInert),
+              newLit(s.opaqueHavoc))   ## RFC-0005 S8as, same trap
     else:
       # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
       # NimNode-literal reconstruction (the generated proc rebuilds the IR
@@ -1486,15 +1487,18 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = rhsHasInlineDefectFork(e.borrowLhs) or
              rhsHasInlineDefectFork(e.borrowRhs)
   of iekClosureCall:
-    for a in e.ccArgs:
-      if rhsHasInlineDefectFork(a): return true
+    # RFC-0005 S8as: a closure call is an effect of its own -- its body may
+    # raise, and may write a capture or a global (`closureEnvWrites`). On
+    # the right of `and`/`or` it runs only under the guard; evaluated
+    # unconditionally, a raise or a write the short circuit skips happened
+    # anyway.
+    result = true
   of iekSeqLit:
     for a in e.seqLitElems:
       if rhsHasInlineDefectFork(a): return true
   of iekHofCall:
-    if rhsHasInlineDefectFork(e.hofSeq): return true
-    if rhsHasInlineDefectFork(e.hofClosure): return true
-    if e.hofInit != nil and rhsHasInlineDefectFork(e.hofInit): return true
+    # RFC-0005 S8as: it applies a closure (see `iekClosureCall`).
+    result = true
   of iekLambda:
     discard  # lambdaBody is IRStmt; don't recurse into lambdas
   of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
@@ -2238,6 +2242,91 @@ proc distinctParamOf(impl: NimNode): string =
         if pc.ty.kind == itDistinct:
           return pc.ty.distinctName
   ""
+
+const havocAllGlobals* = "*"
+  ## RFC-0005 S8as. In an `IRStmt.opaqueHavoc` summary: every writable
+  ## module-level variable the program reaches (`SymexProgram.globals`).
+
+type OpaqueEffects = object
+  ## RFC-0005 S8as. What an inert opaque call may write
+  ## (`opaqueWriteSummary`).
+  inert: bool          ## false: the summary cannot be bounded by rebinding
+  havoc: seq[string]   ## IR names, or `havocAllGlobals`
+
+proc isBodilessForeign(calleeSym: NimNode): bool  ## RFC-0005 S8as fwd decl
+
+proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
+                       seen: var seq[NimNode]) =
+  ## RFC-0005 S8as. See `opaqueWriteSummary`.
+  if n == nil or not acc.inert: return
+  case n.kind
+  of nnkSym:
+    let k = symKind(n)
+    if k in {nskVar, nskLet} and isModuleGlobal(n):
+      if not irTypeRefFree(classifyType(n.getTypeInst).ty):
+        acc.inert = false
+      elif k == nskVar:
+        let nm = globalIRName(n)
+        if nm notin acc.havoc: acc.havoc.add nm
+    elif k == nskMethod or isBodilessForeign(n):
+      # Dynamic dispatch, or a body outside Nim: it may write any
+      # module-level variable (a foreign routine through an exported one,
+      # or a callback).
+      if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
+    elif isUserRoutine(n):
+      # Routine membership through the Cluster N vocabulary
+      # (`isUserRoutine`'s `userRoutineSymKinds`, then the
+      # `resolveRoutineImpl` nil-core), as `tsymex_phase15_N2_kindgate_audit`
+      # requires: an iterator or converter has no walkable impl and makes
+      # the call non-inert below.
+      if containsSym(seen, n): return
+      seen.add n
+      block:
+        let impl = resolveRoutineImpl(n)
+        if impl == nil:
+          acc.inert = false
+          return
+        if isNestedRoutine(n):
+          for c in nestedCaptureSyms(impl):
+            let ck = symKind(c)
+            let writable = ck == nskVar or
+              (ck == nskParam and c.getTypeInst.kind == nnkVarTy)
+            if not writable: continue
+            if not irTypeRefFree(classifyType(c.getTypeInst).ty):
+              acc.inert = false
+              return
+            let nm = c.strVal
+            if nm notin acc.havoc: acc.havoc.add nm
+        scanOpaqueEffects(impl[6], acc, seen)
+      # A stdlib routine writes no variable of the program except through
+      # its arguments and the callbacks it is given, and both are scanned
+      # where they are named.
+  of nnkCast, nnkAsmStmt:
+    # A forged pointer or foreign code inline: no bound on what it writes.
+    acc.inert = false
+  else:
+    for c in n: scanOpaqueEffects(c, acc, seen)
+
+proc opaqueWriteSummary(calleeSym: NimNode): OpaqueEffects =
+  ## RFC-0005 S8as. The effect summary of an inert-shaped opaque call
+  ## (statement position, value arguments, `isInertOpaqueCall`): the
+  ## module-level `var`s its body may write, transitively through every
+  ## routine it names, and for a routine declared inside another, the
+  ## enclosing variables it captures. Before S8as such a call was a no-op
+  ## for the walk, on the argument that "the walker does not model globals
+  ## at all"; S8an made it model them, so a global the call wrote kept its
+  ## old value: a false `sxUnsat`. The walk now rebinds every name listed to
+  ## a fresh value of its type (`feGlobalHavoc`).
+  ##
+  ## Not inert (the walk keeps the call's `feOpaqueCallUnmodelled` taint)
+  ## when a rebinding cannot express the write: a cast or inline assembly,
+  ## a global or capture whose value reaches heap cells (the write may land
+  ## in a cell the walk holds), or a routine whose body cannot be read. A
+  ## method or a foreign routine may write anything:
+  ## `havocAllGlobals`.
+  result.inert = true
+  var seen: seq[NimNode]
+  scanOpaqueEffects(calleeSym, result, seen)
 
 const foreignImportPragmas = ["importc", "importcpp", "importobjc",
                               "importjs", "dynlib"]
@@ -3339,6 +3428,49 @@ proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
     return
   for c in lv: lvalueVarSyms(c, into)
 
+proc addrActualLvalue(a: NimNode): NimNode  ## RFC-0005 S8as fwd decl
+
+proc lvaluePath(lv: NimNode; steps: var seq[string]): NimNode =
+  ## RFC-0005 S8as. The root variable of an lvalue that is a plain PATH into
+  ## it -- object or tuple fields (`o.a.b`) and constant indices (`a[2]`) --
+  ## with the steps from the root outward; nil for anything else (a
+  ## dereference, a computed index, a variant arm's field, a conversion).
+  var t = lv
+  var rev: seq[string]
+  while true:
+    case t.kind
+    of nnkSym:
+      for k in countdown(rev.high, 0): steps.add rev[k]
+      return t
+    of nnkDotExpr:
+      if t.len != 2 or t[1].kind != nnkSym: return nil
+      rev.add "." & macros.strVal(t[1])
+      t = t[0]
+    of nnkBracketExpr:
+      if t.len != 2: return nil
+      var ix = t[1]
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+        ix = ix[^1]
+      if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: return nil
+      rev.add "[" & $ix.intVal & "]"
+      t = t[0]
+    else: return nil
+
+proc lvaluesDisjoint(a, b: NimNode): bool =
+  ## RFC-0005 S8as. `a` and `b` are paths into one variable
+  ## (`lvaluePath`) that part at some step -- two different fields, or two
+  ## different constant indices -- so they are two locations no write to
+  ## one can reach the other through. Neither is a prefix of the other (a
+  ## whole and its part overlap). A variant arm's field is not a path, so
+  ## two arms sharing storage never count.
+  var sa, sb: seq[string]
+  let ra = lvaluePath(a, sa)
+  let rb = lvaluePath(b, sb)
+  if ra.isNil or rb.isNil or not containsSym(@[ra], rb): return false
+  for k in 0 ..< min(sa.len, sb.len):
+    if sa[k] != sb[k]: return true
+  false
+
 proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                        heapSteps: seq[NimNode]): bool =
   ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
@@ -3366,6 +3498,12 @@ proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
     # A scalar passed by value cannot alias. A string can: Nim passes a
     # non-`var` string by pointer, so it is checked like any composite.
     if isInertArg(a) and a.typeKind != ntyString: continue
+    # RFC-0005 S8as: another `var` or `addr` actual on a disjoint path of
+    # the same variable (`o.a` and `o.b`, `a[0]` and `a[2]`) is another
+    # location.
+    let olv = if a.kind == nnkHiddenAddr and a.len == 1: a[0]
+              else: addrActualLvalue(a)
+    if olv != nil and lvaluesDisjoint(lv, olv): continue
     for s in syms:
       if mentionsSym(a, s): return true
     if cells.len > 0:
@@ -3477,6 +3615,11 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
     let a = n[j]
     let olv = addrActualLvalue(a)
     if olv != nil and scopedRepr(olv) == key: continue
+    # RFC-0005 S8as: an `addr` (or `var`) of a disjoint path of the same
+    # variable is another cell, and the alias check is by path: S8an
+    # declined any second argument naming the root.
+    let vlv = if a.kind == nnkHiddenAddr and a.len == 1: a[0] else: olv
+    if vlv != nil and lvaluesDisjoint(lv, vlv): continue
     if isInertArg(a) and a.typeKind != ntyString: continue
     for s in syms:
       if mentionsSym(a, s): return true
@@ -9209,24 +9352,51 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
+proc fixedAddrNode(e: NimNode): NimNode =
+  ## RFC-0005 S8an/S8as. `e` (through conversions) when it is `addr lv` and
+  ## `lv` names the same location for as long as a pointer to it lives: a
+  ## variable, then fields of value objects/tuples and (RFC-0005 S8as)
+  ## constant indices into value arrays -- no dereference and no computed
+  ## index, which could re-point between uses, and no seq element, which
+  ## a later `add` may move. nil otherwise.
+  var a = e
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
+    a = a[^1]
+  if a.kind != nnkAddr or a.len != 1: return nil
+  var t = a[0]
+  while true:
+    if t.kind == nnkDotExpr and t.len == 2 and
+       t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
+      t = t[0]
+    elif t.kind == nnkBracketExpr and t.len == 2 and
+         t[0].typeKind == ntyArray:
+      var ix = t[1]
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+        ix = ix[^1]
+      if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: return nil
+      t = t[0]
+    else: break
+  if t.kind != nnkSym or symKind(t) != nskVar: return nil
+  a
+
 proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
   ## RFC-0005 S8an. `let p = addr lv` (or `var`), one name, where `lv` names
-  ## the same location for as long as `p` lives: a variable, or a field
-  ## chain of value objects/tuples over one (no index, no dereference, which
-  ## could re-point between uses). `(nil, nil)` otherwise.
+  ## the same location for as long as `p` lives (`fixedAddrNode`).
+  ## `(nil, nil)` otherwise.
   if c.kind notin {nnkLetSection, nnkVarSection} or c.len != 1: return
   let d = c[0]
   if d.kind != nnkIdentDefs or d.len != 3 or d[0].kind != nnkSym: return
-  var a = d[2]
-  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
-    a = a[^1]
-  if a.kind != nnkAddr or a.len != 1: return
-  var t = a[0]
-  while t.kind == nnkDotExpr and t.len == 2 and
-        t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
-    t = t[0]
-  if t.kind != nnkSym or symKind(t) != nskVar: return
+  let a = fixedAddrNode(d[2])
+  if a == nil: return
   (d[0], a)
+
+proc addrRepoint(r, p: NimNode): NimNode =
+  ## RFC-0005 S8as. `r` is the statement `p = addr lv'` re-pointing the
+  ## alias `p` at another fixed location (`fixedAddrNode`): that node, nil
+  ## otherwise.
+  if r.kind in {nnkAsgn, nnkFastAsgn} and r.len == 2 and isSymOf(r[0], p):
+    return fixedAddrNode(r[1])
+  nil
 
 proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   ## RFC-0005 S8an. `n` with `p[]` spelled as the pointee lvalue and a bare
@@ -9263,18 +9433,40 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
     # IS `x`: the rest of the list is parsed with `p[]` spelled `x` and
     # `p` spelled `addr x` (the call-site cell). Any other use keeps the
     # declaration, and `heUnsafeCast`.
+    # RFC-0005 S8as: a section declaring several names is one declaration
+    # per name, so an alias among them is seen.
+    if c.kind in {nnkLetSection, nnkVarSection} and c.len > 1:
+      var anyAlias = false
+      for d in c:
+        if addrAliasDecl(newTree(c.kind, d)).p != nil: anyAlias = true
+      if anyAlias:
+        var expanded = items[0 ..< k]
+        for d in c: expanded.add newTree(c.kind, d)
+        expanded.add items[k + 1 ..< items.len]
+        stmts.add parseDeferList(expanded, k, ctx)
+        break
     let al = addrAliasDecl(c)
     if al.p != nil:
+      # RFC-0005 S8as: a statement of the list itself that re-points `p` at
+      # another fixed location (`p = addr y`) switches the spelling for
+      # the statements after it; a re-point anywhere else (under an `if`)
+      # is a use that does not stay local.
       var stays = true
       for r in items[k + 1 ..< items.len]:
+        if addrRepoint(r, al.p) != nil: continue
         var seen: seq[string]
         if not ptrUsesStayLocal(r, al.p, seen):
           stays = false
           break
       if stays:
         var rest: seq[NimNode]
+        var cur = al.addrNode
         for r in items[k + 1 ..< items.len]:
-          rest.add substAddrAlias(r, al.p, al.addrNode)
+          let rp = addrRepoint(r, al.p)
+          if rp != nil:
+            cur = rp
+            continue
+          rest.add substAddrAlias(r, al.p, cur)
         if rest.len > 0: stmts.add parseDeferList(rest, 0, ctx)
         break
     stmts.add parseStmt(c, ctx)
@@ -9391,11 +9583,20 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # SUT's symbolic state. Compute the predicate against the RAW
     # node `n` before parsing — parsing doesn't consume `n`, but the
     # predicate is about the call site's shape, not the parsed IR.
-    let inert = isInertOpaqueCall(n)
+    #
+    # RFC-0005 S8as: and its body's writes to module-level variables (and a
+    # nested routine's to its captures) are bounded by its effect summary
+    # (`opaqueWriteSummary`); a catalogued stdlib routine writes none.
+    var inert = isInertOpaqueCall(n)
+    var havoc: seq[string]
+    if inert and not (m.kind == smkOpaqueEffectful and not userCallee):
+      let eff = opaqueWriteSummary(calleeSym)
+      inert = eff.inert
+      havoc = eff.havoc
     var argIRs: seq[IRExpr]
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
-    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, havoc)
   else:
     let callKey = ensureProcRegistered(ctx, calleeSym, n)
     userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
@@ -12027,6 +12228,51 @@ type
                               ## for a void SUT.
     retTyNimNode*: NimNode    ## RFC-0005 S8p. Emit-time AST of `retTy`,
                               ## threaded into `SymexProgram.retTy`.
+    globals*: seq[IRGlobal]   ## RFC-0005 S8as. The module-level variables
+                              ## the parse named (`seenModuleGlobals`).
+    globalsNimNode*: NimNode  ## RFC-0005 S8as. Emit-time AST of `globals`,
+                              ## threaded into `SymexProgram.globals`.
+
+func isLiteralInit(v: NimNode): bool =
+  ## RFC-0005 S8as. `v` is a literal, possibly behind the conversion Nim
+  ## inserts to fit it to the declared type (`let g: int8 = 9`).
+  case v.kind
+  of nnkCharLit .. nnkFloat128Lit, nnkStrLit .. nnkTripleStrLit: true
+  of nnkHiddenStdConv, nnkConv:
+    v.len == 2 and isLiteralInit(v[1])
+  else: false
+
+proc collectGlobals(ctx: ParseCtx): seq[IRGlobal] =
+  ## RFC-0005 S8as. The module-level variables the parse named, each with
+  ## its entry-value model (`IRGlobal`). Only an immutable `let` has a value
+  ## the property can rely on, and only when its initialiser is a literal:
+  ## the walk then reads that literal. A `var` may hold anything by the
+  ## time the property runs -- other code, an earlier test, may have
+  ## assigned it -- so its entry value is free (the walker's
+  ## `entryValueOf`), as is a `let` whose initialiser is computed.
+  for g in seenModuleGlobals():
+    let ty = classifyType(g.getTypeInst).ty
+    var init: IRExpr = nil
+    if g.symKind == nskLet and
+       ty.kind in {itInt, itBool, itFloat32, itFloat64, itString}:
+      let impl = g.getImpl
+      if impl.kind == nnkIdentDefs and impl.len >= 3 and
+         isLiteralInit(impl[^1]):
+        var pre: seq[IRStmt]
+        let ir = parseExpr(impl[^1], pre, ctx)
+        if pre.len == 0: init = ir
+    result.add mkIRGlobal(globalIRName(g), ty, g.symKind == nskVar, init)
+
+proc emitGlobals(gs: seq[IRGlobal]): NimNode =
+  ## RFC-0005 S8as.
+  var lit = newTree(nnkBracket)
+  for g in gs:
+    lit.add newCall(bindSym"mkIRGlobal", newLit(g.name), emitIRType(g.ty),
+                    newLit(g.isVar),
+                    (if g.init == nil: newNilLit() else: emitExpr(g.init)))
+  if gs.len == 0:
+    return newCall(newTree(nnkBracketExpr, ident"newSeq", bindSym"IRGlobal"))
+  prefix(lit, "@")
 
 proc emitParam(p: IRParam): NimNode =
   newTree(nnkObjConstr,
@@ -12352,6 +12598,10 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   result.body = bodyIR
   result.procs = ctx.procs
   result.userExnHierarchyNimNode = emitStrStrTable(ctx.userExnHierarchy)
+  # RFC-0005 S8as: after every routine is parsed, so every global the walk
+  # can reach has been named.
+  result.globals = collectGlobals(ctx)
+  result.globalsNimNode = emitGlobals(result.globals)
   # RFC-0005 S8 (§2.5 point 4): placement check against the emitted IR.
   placeDeclineScopes(ctx.parseErrors, [result.bodyNimNode, result.procsNimNode])
   # RFC-0005 S8t2: after the placement check, which reads the builders as

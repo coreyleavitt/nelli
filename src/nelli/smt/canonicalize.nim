@@ -203,6 +203,34 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "209"
+  ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
+  ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink
+  ## order, and an `if` guard that raised on every path (a rejected
+  ## pattern) is walked no further: a raise written after another in one
+  ## `while` guard, or after a rejected pattern, was a false sxSat.
+  ## `findBounds` binds a compound receiver or `start` to a temporary
+  ## (it declined). `matchLen`, `endsWith` and `findBounds`' `last` on a
+  ## pattern whose match PCRE picks by priority (`a|ab`, `a*b`, `(ab)+`,
+  ## an anchor away from the edges) follow PCRE's order through the
+  ## languages of `pcre_select.nim` (they declined); `match` and
+  ## `startsWith` with an inner anchor too, and `contains`, `find` and
+  ## `findBounds` with one through a search automaton (all declined).
+  ## The pattern reader reads named groups, inline options (`(?i)`,
+  ## `(?s)`, `(?x)`, `(?U)`, `(?J)`), `\p{..}` / `\P{..}`, `(*UCP)` and
+  ## the verbs whose meaning does not depend on PCRE's optimizations
+  ## (all ⊤ before). The captures overloads (`match` / `matchLen` / `find`
+  ## / `contains` / `findBounds` with `matches`, and `=~`) write each group
+  ## of PCRE's chosen match by std/re's rule (`iekStrCaptureRe`; they were
+  ## ⊤). A string merge (`iteSV`, e.g. any `array[N, string]` element
+  ## read) is Z3's `ite`, no longer a fresh symbol. The newline
+  ## conventions (`(*CR)`, `(*CRLF)`, `(*ANYCRLF)`, `(*ANY)`, `(*LF)`) set
+  ## `$` / `\Z` / `.` and the run's final-newline reading, and `(*ACCEPT)`
+  ## ends the match where it is reached (both ⊤ before). `replace(s, re,
+  ## by)` for an alternation, an anchor or a pattern that can match empty
+  ## is PCRE's priority run with Nim's NOTEMPTY_ATSTART retry
+  ## (`regex_parser.replaceRunZ3`; it declined).
+  ## Provisional 201 (S8ba holds 200).
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker

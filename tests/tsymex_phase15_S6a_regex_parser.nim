@@ -125,14 +125,15 @@ suite "symex Phase 15 — S6a regex parser (standalone)":
     check "lookahead" in r.error
     check "seUnsupportedRegex" in r.error
 
-  test "parser: named group (?P<n>x) -> Err seUnsupportedRegex":
-    let r = parseNimRegexToZ3Regex("(?P<n>x)")
-    check (not r.isOk)
-    check "named group" in r.error
-    check "seUnsupportedRegex" in r.error
+  # RFC-0005 S8bb: a named group is a capturing group (PCRE 8.45 accepts
+  # all three spellings), so its full-string language is the body's.
 
-  test "parser: named group (?<n>x) -> Err seUnsupportedRegex":
+  test "parser: named group (?P<n>x) is a group":
+    let r = parseNimRegexToZ3Regex("(?P<n>x)")
+    check r.isOk
+    check rendersNonEmpty(r)
+
+  test "parser: named group (?<n>x) is a group":
     let r = parseNimRegexToZ3Regex("(?<n>x)")
-    check (not r.isOk)
-    check "named group" in r.error
-    check "seUnsupportedRegex" in r.error
+    check r.isOk
+    check rendersNonEmpty(r)

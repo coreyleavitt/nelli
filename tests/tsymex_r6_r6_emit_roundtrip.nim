@@ -787,7 +787,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind,
          iekStrContains, iekStrStartsWith, iekStrEndsWith,
          iekStrReplaceAll, iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe,
-         iekStrReplaceRe, iekStrConcat, iekIntToStr, iekStrToInt,
+         iekStrReplaceRe, iekStrCaptureRe, iekStrConcat, iekIntToStr,
+         iekStrToInt,
          iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
          iekRuneToStr, iekStrStrip, iekStrInOptionRegion:
         discard  ## "StrOpKinds shared arm" (2 tests: plain + strOp payload)

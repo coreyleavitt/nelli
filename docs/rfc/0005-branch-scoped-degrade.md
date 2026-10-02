@@ -372,6 +372,11 @@ title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing thro
 state = "done"
 
 [[slice]]
+id = "S8bb"
+title = "S8ay's remainder: regex drain order, foldli crash, PCRE selection semantics, findBounds temporaries, top constructs, replace coverage, suite runtime"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -10103,3 +10108,317 @@ has no suite: its row is pending.)
 - **PRECISION: a ref reached through a pointer dereference.** `pb[].x`
   still cannot be passed by reference (S8bd's reported item), so a pair
   holding it declines.
+
+**As landed (S8bb, walker 201 provisional) — S8ay's remainder.** All
+eight items are done. Nothing is deferred, but three constructs stay ⊤
+because modelling them would mean reproducing PCRE's optimiser (see the
+end of item 5). The branch is `rfc-0005-s8bb`, on S8ay's `ae08bfd`.
+
+*Wrong verdicts at ae08bfd, each pinned RED first.*
+- **Raises drained in a fixed order, not evaluation order** (item 1,
+  `tests/tsymex_rfc0005_s8bb_remainder.nim`). `drainScalarRaiseForks` ran
+  its sinks in a fixed sequence, with the regex stage last. A `while`
+  guard is not A-normalised, so its whole condition is one drain. Each
+  case below was a false `sxSat`:
+  - in `while s.find(re"(ab") + parseInt(t) > 0`, the walker forked a
+    `ValueError` that Nim never reaches, because `RegexError` comes first;
+  - in `ord(s[i]) + 10 div parseInt(t)` and `ord(s[i]) + 10 div b`, the
+    later raise was forked without the earlier one's survivor fact
+    (`i < s.len`).
+
+  Also, an `if` guard whose every continuation raised was still walked on
+  its placeholder value. `int(b)` of a bool hoists exactly such a guard,
+  so `int(s.match(re"a**")) + parseInt(t)` reported a `ValueError` path.
+- **PCRE's match choice was read as the longest match** (item 3). This
+  affected `matchLen`, `endsWith` and `findBounds`' `last`. S8ay declined
+  the patterns where the two differ (`a|ab`, `a*b`, `(ab)+`), and declined
+  every anchor away from a top-level edge. These were not wrong verdicts,
+  but declines S8ay listed, and the S8ay pin `endsWithAltOrder` is now
+  `sxUnsat`.
+- **The constructs S8ay left ⊤, and the captures overloads** (item 5,
+  `tests/tsymex_rfc0005_s8bb_captures.nim`). Every pin there was
+  `sxUnknown` at ae08bfd:
+  - named groups, `(?i)`, `\p{..}`, `(*UCP)`, `(*F)`, `(*MARK)`, the newline
+    conventions and `(*ACCEPT)`;
+  - a `matches` argument, whose write was not modelled.
+
+  `=~` at ae08bfd also hit an `AssertionDefect` (`eqBV a.kind == b.kind`,
+  runtime.nim:5643) on a capture comparison.
+- **Not a wrong verdict, an imprecision: an `array[N, string]` element
+  read was a havoc** (item 5, found through the captures arrays). `iteSV`'s string arm was the fresh-symbol
+  split, so `arr[i] == "two"` was never decided, even with a literal `i`.
+  It is now Z3's `ite`, which is exact, as for every scalar sort.
+  `tsymex_r6_itesv_mergedegrade` and `tsymex_rfc0005_s6b_ops` are
+  re-pinned: their string carrier is a seq merge now, and the string twins
+  pin the exact merge.
+- **`replace` with an alternation, an anchor or an empty-matching
+  pattern declined** (item 6, `tests/tsymex_rfc0005_s8bb_replace.nim`).
+  All 13 symbolic pins plus the floor fail at ae08bfd: the
+  ground `"ab".replace(re"x*", "-") != "-a-b-"`, the alternation, `$`/`^`,
+  `(*CRLF)a$`, `a(*ACCEPT)b|b`, and the symbolic receivers.
+
+*1. Drain order.* Each raise deposit is now logged in a `WalkCtx` order
+log. The drain cuts the deposits into runs and drains them in evaluation
+order, so a later raise is forked only on its predecessors' survivor
+facts. An `if` guard that raised on every path has no continuation,
+instead of falling back to its placeholder.
+
+*2. `Z3_mk_seq_foldli` SIGSEGV: a harness bug, not nim-z3 or Z3.* S8ay's
+measurement harness held a raw API lambda without `Z3_inc_ref` in a
+reference-counted context, and later API calls freed it. With the
+reference taken, the identical term works on Z3 5.1 and 4.13.4 (SAT).
+nim-z3's own `seqFoldli` and SMT-LIB text terms were never affected.
+Nothing changes in nelli or nim-z3. The fold is not used for `replace`:
+PCRE's chosen match needs the last `Match` point, which is lookahead and
+not a left fold.
+
+*3. PCRE's priority run* (`src/nelli/smt/pcre_select.nim`). The tree runs
+as a priority NFA under a Pike VM:
+- ordered threads and a depth-first closure;
+- `Match` cuts lower-priority threads, and the last recorded `Match` is
+  PCRE's result;
+- PCRE's empty-iteration rule for nullable loops;
+- bounded repeats are nested optionals;
+- `^`, `$`, `\z` and `\Z` are context reads (subject position 0, the end,
+  a final newline).
+
+The run is determinized into selection languages (`u[0..k)#u[k..]`: the
+chosen match ends at `k`), no-match languages, ends-at-end languages and
+per-start search languages. These are minimized and turned back into
+regexes for Z3. `regex_parser` lowers `matchLen`, `endsWith`, `findBounds`
+and the search entries over them.
+
+Validated against `std/re`, all decided with zero disagreements
+(`tests/tsymex_rfc0005_s8bb_selection.nim`):
+
+| Check | Cases |
+|---|---|
+| chosen end | 102,255 |
+| languages | 37,128 |
+| search languages | 37,128 |
+| ground Z3 formulas | 3,860 |
+
+*4. `findBounds` temporaries.* The parser binds a compound receiver or
+`start` to a `let` temporary (`dsl_parser`), so the tuple's two halves
+read one lowering, and its raise forks once.
+
+*5. The constructs.*
+- **Read exactly** (`pcre_syntax.nim`, `pcre_props.nim`; the property and
+  UCP tables were taken from PCRE 8.45 as linked):
+  - named groups in all three spellings;
+  - `(?i)`, `(?s)`, `(?x)`, `(?U)` and `(?J)`, with `-`, scoped to the
+    group;
+  - `\p`/`\P` without UTF (a byte is a Latin-1 code point);
+  - `(*UCP)`;
+  - `(*F)`, `(*FAIL)`, `(*MARK:x)` and `(*:x)`;
+  - the start options `(*LF)`, `(*NO_START_OPT)`, `(*NO_AUTO_POSSESS)`
+    and `(*BSR_..)`;
+  - the newline conventions `(*CR)`, `(*CRLF)`, `(*ANY)` and
+    `(*ANYCRLF)`, through the run's newline contexts (`nlBytes`,
+    `nlPair`);
+  - `(*ACCEPT)`, as an `rxAccept` that ends the match with the thread.
+- **The captures overloads.** A tagged run (`chosenCaps`) gives the
+  winning thread's group spans. Each written element is an
+  `iekStrCaptureRe` following `std/re`'s rule:
+  - the written count is 1 plus the highest set group;
+  - an unset group reads `""`;
+  - nothing is written when that count exceeds `matches.len`, or on a
+    miss;
+  - `findBounds` returns `(-1, 0)` on a miss.
+
+  The `matches` lvalue is copied out and written back
+  (`regexCapturesLvalue`: no call or side effect can move it).
+- **Validated** (`tests/tsymex_rfc0005_s8bb_constructs.nim`), zero
+  disagreements:
+
+  | Check | Cases |
+  |---|---|
+  | read constructs | 63,040 |
+  | `chosenCaps` | 10,940 |
+  | capture languages | 7,260 |
+  | capture Z3 values | 977 |
+  | runs under conventions and `(*ACCEPT)` | 178,128 |
+  | convention Z3 formulas | 1,334 |
+
+- **Still ⊤ (`psUnknown`), with evidence.** These depend on PCRE's
+  optimiser or step counts, not on the pattern's semantics:
+  - **`(*COMMIT)`, `(*PRUNE)`, `(*SKIP)`, `(*THEN)` and `(*LIMIT_..)`.**
+    `(*COMMIT)abc` finds 3 in "xyzabc", but -1 under `(*NO_START_OPT)`.
+    The verb's effect depends on whether PCRE's start-of-match
+    optimisation skipped the earlier starts.
+  - **UTF mode** (`(*UTF8)`, `(*UTF)`).
+  - **The CRLF bumpalong skip, where a match could observe it**
+    (`crlfSkipSeen`). Under a CRLF convention, PCRE does not retry at the
+    LF of a CRLF after failing at its CR, unless its start bits pass over
+    the CR. `(*CRLF)[\x09-\x0b]\z` finds 1 in "\r\n", while
+    `(*CRLF)(?:[\x09-\x0b]\x00)?.` finds -1.
+  - **`(?m)` and `(?X)`.**
+
+  Modelling these would mean reproducing `pcre_study` and the
+  auto-possessifier, which no RFC item asks for. This is the one spec
+  assumption item 5 did not survive ("`(*...)` verbs" as a construct
+  class).
+
+*6. `replace` by the priority run.* `pcre_select.runTable` determinizes
+the Pike run into a step table: states are ordered thread lists, keyed on
+NOTEMPTY_ATSTART and subject position 0, with the context (other, final
+newline, end) and an LF-lookahead bit. `regex_parser.replaceRunZ3` encodes
+Nim's loop as two Z3 recursive functions:
+- **`run(u, st)`** returns the rest of `u` after PCRE's chosen match, or
+  a code-256 marker when there is none;
+- **`rep(u, flags, fuel)`** follows Nim's `replace`:
+  - an empty match retries under NOTEMPTY_ATSTART at the same position;
+  - a non-empty match resumes at the rest;
+  - no match keeps `u[0]`;
+  - an empty receiver is `""`.
+
+Nim's semantics were probed concretely first, for example
+`"ab".replace(re"x*","-") == "-a-b-"`, `"aab"/a* -> "--b-"`,
+`"baaa"/a*? -> "-b------"`, `"a\n"/$ -> "a-\n-"` and
+`"a\r\nb"/(*CRLF)x* -> "-a-\r\n-b-"`.
+
+Validated:
+- the step table against `std/re`: 13,981 runs over 45 patterns;
+- the Z3 term: 3,485 subjects, each the only value.
+
+The S8aw/S8ay shapes keep their lowering. A pattern whose run sees the
+CRLF skip still declines (`seZ3StringIncomplete`).
+
+Encodings measured (Z3 5.1, the byte-range constraint every string
+parameter carries):
+
+| Encoding | Ground | `len 2, a\|ab -> "x"` (unsat) | Other symbolic |
+|---|---|---|---|
+| state as an `ite` term | out of `rlimit` on "ab"/`x*` | — | — |
+| an Int position argument | the rewriter unfolds without end | — | — |
+| A: end offset, rest by `substr` | 0.00-0.03 s | unknown 21 s | `== "xbx"` sat 0.2 s |
+| B: skip counter | ground `x*`/`a*?` unknown | — | — |
+| C: drop one byte per call | 0.00 s | unknown 19 s | all unknown |
+| D: the rest as a suffix | 0.00 s | unsat 2.5 s | `$` on 1 byte: no return past 1000 s |
+| **D + fuel (landed)** | 0.00 s | 13 s in the probe; `rlimit` in the walker | see below |
+
+The `fuel` argument is load-bearing. `rep`'s argument is `run`'s result,
+which Z3 cannot see is shorter than `u`, so without fuel it unfolded
+`rep(run(run(..)))` without end and without spending `rlimit`: about
+96k steps counted in 15 s, and over 1000 s under a 20M `rlimit`, on both
+Z3 versions. With fuel `2·len(s)+2`, every query measured returns within
+`rlimit`. Fuel is not a cut: each call drops a byte or is the single
+retry at its position.
+
+Symbolic pins:
+- `s.len == 1 and s.replace(re"x*","-") == "--"` is `sxUnsat`;
+- `s.len == 1 and s.replace(re"$","-") == "q-"` is `sxSat` with witness
+  "q";
+- `s.len == 2 and s[0] == 'a' and s.replace(re"a|ab","x") == "xb"` is
+  `sxSat` with witness "ab" (the longest-match reading would make it
+  unreachable).
+
+*7. Q2, Q7 and Q8 stay `beSolverUndef`.* Each query was measured under
+D + fuel, with the byte range, a 20M `rlimit` and no timeout:
+
+| Query | Z3 5.1 | Z3 4.13.4 |
+|---|---|---|
+| Q2 `[0-9] -> ""` grows (len ≤ 128) | unknown 36 s | unknown 35 s |
+| Q2 without the cap | unknown 30 s | unknown 47 s |
+| Q7 `f+ -> "x"` contains "ff" | unknown 27 s | unknown 33 s |
+| Q8 `a -> ""` contains "a" | unknown 33 s | unknown 33 s |
+| `a\|ab == "xbx"` (sat) | unknown 32 s | unknown 38 s |
+| `$ == "q-"` (sat), no length bound | sat 4 s | sat 10-12 s |
+| `x* == "-q-"` (sat) | sat 22 s | sat 30 s |
+| `x*` len 3 `== "-a-b-c-"`, `s != "abc"` | unknown 35 s | unknown 32 s |
+
+The suite is shared with other agents, so these times are measured under
+load (load average 16-40). Q2, Q7 and Q8 were also unknown under encoding
+A (26-37 s), and Q8 under D without fuel (19 s). They surface as `beSolverUndef`,
+which is honest and replay-gated, and never a verdict.
+
+*8. Suite runtime.* S8ay's exhaustive membership check moved to
+`tsymex_rfc0005_s8bb_exhaustive`, and the selection and construct checks
+are split by item (selection, constructs, captures, replace). The
+captures overloads' value check is split once more, one pattern per suite
+(`tsymex_rfc0005_s8bb_capvalues`, `_capvalues_plus`, `_capvalues_lf`,
+over `tests/s8bb_capvalues_check.nim`): as one suite it ran 93 s on the
+Windows leg. Each check runs over a deterministic subject set, and
+`-d:nelliRegexExhaustive` widens every set by one byte.
+
+The value check builds each query in its own Z3 context. In a context
+shared by one subject's queries, Z3 4.13.4 left `(a)|(b)` on "ab",
+`captureFirst` of `findBounds(0)`, m 2, g 1 `unknown` at the 10 s timeout,
+on Linux and on the Windows leg alike. Alone it is `unsat` in about a
+second, under any `random_seed`. Batching a call's elements into one
+disjunctive query was worse (ten or more `findBounds` calls unknown), and so was `simplify` on the
+definitions (two unknowns).
+
+Times, in seconds:
+- **Linux** is the run-only time of the built binary (real / user), on a
+  host shared with other agents (load average 25-50). Real time
+  overstates the cost here; user time is the steadier figure.
+- **Windows** is the `symex-mingw` leg's wall time (Z3 4.13.4) on the
+  final sha. Its watchdog is 240 s.
+
+| Suite | Linux, Z3 5.1 (real / user) | Windows, Z3 4.13.4 (wall) |
+|---|---|---|
+| `s8bb_remainder` | 5.5 / 4.8 | 4.9 |
+| `s8bb_exhaustive` | 93.1 / 21.2 | 28.6 |
+| `s8bb_selection` | 76.7 / 26.0 | 51.0 |
+| `s8bb_constructs` | 86.5 / 27.4 | 58.7 |
+| `s8bb_captures` | 22.1 / 14.4 | 23.1 |
+| `s8bb_capvalues` | 26.2 / 12.9 | 17.2 |
+| `s8bb_capvalues_plus` | 44.0 / 15.6 | 27.2 |
+| `s8bb_capvalues_lf` | 69.7 / 25.4 | 28.5 |
+| `s8bb_replace` | 20.4 / 11.0 | 19.4 |
+| `s8ay_remainder` | 24.0 / 12.3 | 8.4 |
+| `s8aw_remainder` | 8.2 / 4.5 | 6.1 |
+
+On Linux under Z3 4.13.4 the three value suites take 65.7 / 24.6,
+110.9 / 41.1 and 137.0 / 53.6. `s8bb_constructs` ran 38.7 s on the
+leg's previous run, so the leg's own variance is wide.
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_S6a_regex_parser`:** named groups are groups.
+- **`tsymex_rfc0005_s5_str`:**
+  - `s5BackrefDead` uses `\X`;
+  - the dead and two-cell regex replaces use `(*CRLF)a*` / `(*CRLF)x*`,
+    which still decline;
+  - the structural pin targets `regexDecline(sp, t.why)`.
+- **`tsymex_rfc0005_s8aw_remainder`:** `aw_alternation` and `aw_star`
+  are now `sxUnsat` with no decline.
+- **`tsymex_rfc0005_s8ay_remainder`:** `endsWithAltOrder` is `sxUnsat`,
+  and the exhaustive check has moved.
+- **`tsymex_r6_itesv_mergedegrade` and `tsymex_rfc0005_s6b_ops`:** the
+  string merge is exact.
+- **`tsymex_phase15_CR2_cachekey`:** `== "201"`.
+- **`tsymex_r6_n14_seqops`:** the del OOB pin was an artefact of the
+  fixed drain order. `del(x, i: Natural)` converts `i` before its index
+  check, so with the drain in evaluation order (item 1) the unguarded
+  `delOob` first raises `RangeDefect` (`i < 0`), as Nim does. That is now
+  pinned, and the `IndexDefect` fork is pinned on a twin that guards
+  `i >= 0`. The first symex-mingw run on this branch caught it.
+- **`tsymex_r6_r6_emit_roundtrip`:** the IR-kind exhaustiveness gate lists
+  `iekStrCaptureRe`. The gate is a compile-time `case`, and the first
+  symex-mingw run caught the compile failure.
+
+*Different mechanisms, reported and not fixed here.*
+- **`rhsHasInlineDefectFork` treats regex nodes as carriers only.**
+  `iekStrMatch`, `iekStrFindRe` and `iekStrReplaceRe` can raise
+  `RegexError` for a rejected pattern, but the predicate does not count
+  them. No wrong verdict was found through it: the short-circuit pins
+  pass, because the drain decides them.
+- **`drainPendingLowerEffects` attaches closure exit facts to raise
+  paths of raises evaluated before the closure call.** This is a possible
+  over-constraint and was there before S8bb.
+- **`newSeq[T](n)` in a symex target aborts the compile** ("node has no
+  type", `dsl_typebridge.nim:838`).
+- **A `notin {..}` / `in {..}` set literal over chars in a target is
+  `feUnsupportedExprKind` (nnkCurly).** The captures pins use `!=`
+  chains instead.
+- **Z3 recursive-function unfolding can bypass `rlimit`.** A recursion
+  whose argument is another recursive function's result is not known to
+  shrink, and Z3 unfolds it without counting steps (item 6). It is fixed
+  here by fuel, but any future recursive lowering must carry a
+  decreasing bound.
+- **Some symbolic replace queries stay undecided** (item 7): unbounded
+  length comparisons, `contains` over the result, and
+  `len(s) == 2 and replace(s, re"a|ab", "x") == "x"` under the walker's
+  budget (unsat in 13 s with the probe's single check). They surface as
+  `beSolverUndef`.

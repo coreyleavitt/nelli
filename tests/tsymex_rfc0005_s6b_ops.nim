@@ -193,10 +193,15 @@ proc s6bFloatZeroDead(n: int) =
   if n == 5 and n == 6:
     symexTarget("s6b_float_zero_dead")
 
-# ---- fresh: iteSV string merge ------------------------------------------------
+# ---- fresh: iteSV seq merge ---------------------------------------------------
+#
+# RFC-0005 S8bb: these were string merges, the fresh-symbol class's carrier;
+# a string merge is now Z3's exact `ite` (no taint), so the carrier is a seq
+# merge, still the fresh-symbol split. The string twins below pin the exact
+# merge.
 
 proc s6bStrIndexDead(i, n: int) =
-  let arr = ["a", "b", "c"]
+  let arr = [@[1], @[2], @[3]]
   if i >= 0 and i < 3:
     let s = arr[i]
     discard s
@@ -204,10 +209,24 @@ proc s6bStrIndexDead(i, n: int) =
     symexTarget("s6b_str_index_dead")
 
 proc s6bStrIndexLive(i: int) =
+  let arr = [@[1], @[2], @[3]]
+  if i >= 0 and i < 3:
+    if arr[i].len == 7:
+      symexTarget("s6b_str_index_live")
+
+proc s6bStrMergeDead(i, n: int) =
+  let arr = ["a", "b", "c"]
+  if i >= 0 and i < 3:
+    let s = arr[i]
+    discard s
+  if n == 5 and n == 6:
+    symexTarget("s6b_str_merge_dead")
+
+proc s6bStrMergeLive(i: int) =
   let arr = ["a", "b", "c"]
   if i >= 0 and i < 3:
     if arr[i] == "zzz":
-      symexTarget("s6b_str_index_live")
+      symexTarget("s6b_str_merge_live")
 
 # ---- substituted: tuple equality by name ---------------------------------------
 
@@ -472,11 +491,21 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check r.errors.hasKind(seUnsupportedSetCharInterop)
     check r.status == sxUnknown
 
-  test "iteSV string merge (array index fold): dead target is sxUnsat":
+  test "iteSV seq merge (array index fold): dead target is sxUnsat":
     let r = symexFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
     checkUnsatOverTaintOnly(r)
+
+  test "iteSV string merge is exact (RFC-0005 S8bb): no taint, exact verdicts":
+    let d = symexFind(s6bStrMergeDead, tLabel("s6b_str_merge_dead"))
+    show d
+    check d.status == sxUnsat
+    check not d.errors.hasKind(feUnsupportedOpHavoc)
+    let l = symexFind(s6bStrMergeLive, tLabel("s6b_str_merge_live"))
+    show l
+    check l.status == sxUnsat
+    check l.errors.len == 0
 
   test "heNewFieldZeroUnsupported: dead target is sxUnsat":
     let r = symexFind(s6bNewSeqFieldDead, tLabel("s6b_new_seq_field_dead"))
@@ -547,7 +576,7 @@ suite "RFC-0005 S6b (c) -- guards":
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
 
-  test "a target decided only by the merged string is a candidate: sxUnknown":
+  test "a target decided only by the merged seq is a candidate: sxUnknown":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
     show r
     check r.status == sxUnknown

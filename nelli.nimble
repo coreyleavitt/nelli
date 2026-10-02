@@ -1052,6 +1052,15 @@ task test, "Run the test suite":
             # past 16 bytes, step 1c's uncapped half first. Walker
             # 190->202 (batch 2).
             "tsymex_rfc0005_s8ay_remainder",
+            "tsymex_rfc0005_s8bb_remainder",
+            "tsymex_rfc0005_s8bb_exhaustive",
+            "tsymex_rfc0005_s8bb_selection",
+            "tsymex_rfc0005_s8bb_constructs",
+            "tsymex_rfc0005_s8bb_captures",
+            "tsymex_rfc0005_s8bb_capvalues",
+            "tsymex_rfc0005_s8bb_capvalues_plus",
+            "tsymex_rfc0005_s8bb_capvalues_lf",
+            "tsymex_rfc0005_s8bb_replace",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

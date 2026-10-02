@@ -31,6 +31,7 @@ import z3
 import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
+import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
@@ -3722,6 +3723,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # / a `findBounds` half, all svInt.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
+     iekStrCaptureRe,   # RFC-0005 S8bb: a capture group, a string
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
     # Phase 15 S5/S8/S10a: replace/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
@@ -3744,6 +3746,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
+                   iekStrCaptureRe,
                    iekIntToStr, iekStrToInt,
                    iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
@@ -5870,7 +5873,14 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
         return r
       degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
         "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
-  of svString, svTable, svSet, svVariant, svMultiVariant:
+  of svString:
+    # RFC-0005 S8bb: a string merge is Z3's `ite` over the two strings --
+    # exact, as for every scalar sort above. It was the fresh-symbol havoc
+    # of the group arm below, so reading an `array[N, string]` element
+    # (the index fold merges every element, a literal index too) was never
+    # decided: the captures overloads' `matches` arrays are such arrays.
+    SymVal(kind: svString, str: ite(cond, t.str, e.str))
+  of svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
     # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
     # above (walker v112) into its own placeholder-aware arm.
@@ -5938,7 +5948,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # the collision rationale. Item 9 (round-6 re-review): both sites now go
     # through the shared `degradeAlloc` pairing helper.
     # RFC-0005 S6b: the kind follows what `tyOf(t)` round-trips. For
-    # svString / svTable / svSet it is lossless (the stored key / value /
+    # svTable / svSet it is lossless (the stored key / value /
     # element types), so the placeholder is a fresh symbol of the operand's
     # own type: `feUnsupportedOpHavoc`. For svVariant / svMultiVariant it
     # rebuilds the arm-field types from live element SymVals and drops the
@@ -11999,6 +12009,13 @@ type
     typeId: string
     msg:    Option[string]
 
+  RaiseSinkKind = enum
+    ## RFC-0005 S8bb. Which raise sink a deposit went to, in the order
+    ## `drainScalarRaiseForks`'s fixed fallback drains them (see
+    ## `WalkCtx.raiseOrder`).
+    rskClosure, rskConvBound, rskParseInt, rskDivByZero, rskOverflow,
+    rskArithTrap, rskStrIndex, rskSeqOob, rskRange, rskRegex
+
   ClosureRaise = object
     ## RFC-0005 S7. A raise that escaped a closure body, awaiting routing from
     ## the calling path (`drainClosureRaises`). `priorExitPc` is the closure
@@ -12387,6 +12404,16 @@ type
                       ## arithmetic-trap predicates `lowerArith` deposits (see
                       ## the threadvar's doc). Drained by `drainArithTraps`.
                       ## Reset alongside `seqOobConds` at every reset site.
+    raiseOrder: seq[RaiseSinkKind]
+                      ## RFC-0005 S8bb. The evaluation-order log of the raise
+                      ## sinks above: every deposit (a `sync*` call, a closure
+                      ## raise) appends the sink it went to, so
+                      ## `drainScalarRaiseForks` forks the expression's raises
+                      ## in the order Nim evaluates them, not in a fixed sink
+                      ## order (which forked a raise written after another
+                      ## without the earlier one's survivor fact, and forked
+                      ## raises after a `RegexError` Nim never reaches). Saved
+                      ## and reset with the sinks.
     closureRaises: seq[ClosureRaise]
                       ## RFC-0005 S7. Raises that escaped a closure body's own
                       ## handlers during `applyClosureGround`'s descent (the
@@ -12796,6 +12823,7 @@ proc syncRangeDefectCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].rangeDefectConds.add cond
+    wp[].raiseOrder.add rskRange   # RFC-0005 S8bb
 
 proc syncExtractionError*(info: SymexErrorInfo) =
   ## CR-9 Stage 5 (extractionErrors migration). If `currentWalkCtxPtr != nil`
@@ -12829,6 +12857,7 @@ proc syncConvFloatToIntBoundCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].convFloatToIntBoundConds.add cond
+    wp[].raiseOrder.add rskConvBound   # RFC-0005 S8bb
 
 # NOTE (R5): these four sync procs share a body modulo the sink field, but each
 # is FORWARD-DECLARED above (~909-943) because the lowering code calls them long
@@ -12844,36 +12873,42 @@ proc syncParseIntRaiseCond*(cond: ParseIntRaise) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].parseIntRaiseConds.add cond
+    wp[].raiseOrder.add rskParseInt   # RFC-0005 S8bb
 
 proc syncDivByZeroCond*(cond: Z3Bool) =
   ## R16-3. div/mod-by-zero raise predicates. See syncParseIntRaiseCond.
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].divByZeroConds.add cond
+    wp[].raiseOrder.add rskDivByZero   # RFC-0005 S8bb
 
 proc syncOverflowCond*(cond: Z3Bool) =
   ## R16-4. signed-integer-overflow raise predicates. See syncParseIntRaiseCond.
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].overflowConds.add cond
+    wp[].raiseOrder.add rskOverflow   # RFC-0005 S8bb
 
 proc syncStrIndexOobCond*(cond: Z3Bool) =
   ## SND-4. string-index OOB raise predicates. See syncParseIntRaiseCond.
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].strIndexOobConds.add cond
+    wp[].raiseOrder.add rskStrIndex   # RFC-0005 S8bb
 
 proc syncSeqOobCond*(cond: Z3Bool) =
   ## N14. seq `del(i)` OOB raise predicates. See syncParseIntRaiseCond.
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].seqOobConds.add cond
+    wp[].raiseOrder.add rskSeqOob   # RFC-0005 S8bb
 
 proc syncRegexRaiseMsg*(msg: string) =
   ## RFC-0005 S8ay. See the forward declaration.
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].regexRaiseMsgs.add msg
+    wp[].raiseOrder.add rskRegex   # RFC-0005 S8bb
 
 proc syncArithTrapCond*(cond: Z3Bool) =
   ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
@@ -12881,6 +12916,7 @@ proc syncArithTrapCond*(cond: Z3Bool) =
   if currentWalkCtxPtr != nil:
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].arithTrapConds.add cond
+    wp[].raiseOrder.add rskArithTrap   # RFC-0005 S8bb
 
 proc seedCallerHeapInWalkCtx*(p: Path) =
   ## CR-9 Stage 6 Groups 3+4. If `currentWalkCtxPtr != nil` (a walk is
@@ -12926,6 +12962,7 @@ type
     convBound, rangeDefect: seq[Z3Bool]
     arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
     regexRaise: seq[string]                   ## RFC-0005 S8ay
+    raiseOrder: seq[RaiseSinkKind]            ## RFC-0005 S8bb
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
     didMutate: bool
@@ -12950,7 +12987,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
-    regexRaise: w.regexRaiseMsgs,
+    regexRaise: w.regexRaiseMsgs, raiseOrder: w.raiseOrder,
     closureRaises: w.closureRaises,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
@@ -12970,6 +13007,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
   w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  w.raiseOrder = @[]
   w.closureRaises = @[]
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
@@ -12989,6 +13027,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   rangeDefectConds = s.rangeDefect
   w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
   w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
+  w.raiseOrder = s.raiseOrder
   w.closureRaises = s.closureRaises
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
@@ -14611,10 +14650,11 @@ proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## `regexRaiseMsgs` threadvar). `re` raises whenever the call runs, so
   ## the raise takes the whole path: it is routed with the FIRST message
   ## (the first rejected pattern evaluated) and there is no continuation.
-  ## Ungated: `RegexError` is a `ValueError`, not a runtime check. The
-  ## last stage of `drainScalarRaiseForks`: the parser lowers only the
-  ## arguments BEFORE a rejected pattern (`regexCall`), so every other
-  ## raise this call deposits is evaluated earlier and forks first.
+  ## Ungated: `RegexError` is a `ValueError`, not a runtime check. RFC-0005
+  ## S8bb: a stage at the raise's place in evaluation order
+  ## (`drainScalarRaiseForks`), so a raise the expression evaluates later
+  ## is never forked; the parser lowers only the arguments BEFORE a
+  ## rejected pattern (`regexCall`).
   let msgs = block:
     if currentWalkCtxPtr != nil:
       let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
@@ -14632,7 +14672,7 @@ proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   discard routeRaise(rp, "RegexError", some(msgs[0]), w)
   @[]
 
-proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
+proc drainClosureRaises(p, orig: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
   ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
   ## into `w.closureRaises`) from the CALLING path `p`, as the `isCall` arm
@@ -14643,6 +14683,12 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## both sides' defect-survivor facts. The survivor needs no negation here:
   ## the call's exit-coverage fact (`applyClosureGround`) already confines the
   ## caller continuation to the body's value-bearing exits.
+  ##
+  ## RFC-0005 S8bb: `orig` is the path `drainPendingLowerEffects` returned
+  ## and `p` a survivor of the stages that drained the raises evaluated
+  ## BEFORE this call (their survivor facts extend `orig`'s, and they hold
+  ## on the raise path too). The exit-fact tail is stripped from `orig`'s
+  ## facts; `p`'s extension is kept.
   let raises = w.closureRaises
   w.closureRaises = @[]
   if raises.len == 0:
@@ -14650,15 +14696,19 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   # The caller's facts from BEFORE this expression's exit facts were
   # appended (`lastDrainedClosureExitPc` is exactly that tail, in order).
   let tail = lastDrainedClosureExitPc
-  var baseDsp = p.defectSurvivorPc
-  var tailOk = baseDsp.len >= tail.len
+  var baseDsp = orig.defectSurvivorPc
+  var tailOk = baseDsp.len >= tail.len and
+               p.defectSurvivorPc.len >= orig.defectSurvivorPc.len
   if tailOk:
     let off = baseDsp.len - tail.len
     for k in 0 ..< tail.len:
       if baseDsp[off + k].raw != tail[k].raw:
         tailOk = false
         break
-    if tailOk: baseDsp.setLen(off)
+    if tailOk:
+      baseDsp.setLen(off)
+      for k in orig.defectSurvivorPc.len ..< p.defectSurvivorPc.len:
+        baseDsp.add p.defectSurvivorPc[k]
   if not tailOk:
     # Not reachable by construction (every raise drain runs on the path
     # `drainPendingLowerEffects` just returned); if it ever is, the raise
@@ -14680,15 +14730,28 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   @[p]
 
 proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
-  ## RFC-0005 S7: first routes any closure-body raises (`drainClosureRaises`).
-  ## RFC-0005 S8g: then forks an expression's float -> int conversions on
+  ## RFC-0005 S7: routes any closure-body raises (`drainClosureRaises`).
+  ## RFC-0005 S8g: forks an expression's float -> int conversions on
   ## their domain (`drainConvFloatToIntFresh`: clean in range, a tainted
   ## fresh value outside).
-  ## R16-4 + SND-4 + N14 + S8g: then chains parseInt, div/mod-by-zero,
+  ## R16-4 + SND-4 + N14 + S8g: forks the parseInt, div/mod-by-zero,
   ## signed-integer-overflow, string-index-OOB, seq-del-OOB and RangeDefect
-  ## raise drains (RFC-0005 S8i: with the survivor-only arithmetic-trap
-  ## drain after the overflow stage). Each stage feeds the survivors of the previous stage so
-  ## every combination of independent defect conditions is explored.
+  ## raises (RFC-0005 S8i: plus the survivor-only arithmetic-trap drain),
+  ## and RFC-0005 S8ay the `RegexError` of a rejected pattern. Each stage
+  ## feeds the survivors of the previous stage so every combination of
+  ## independent defect conditions is explored.
+  ##
+  ## RFC-0005 S8bb: the stages run in EVALUATION order. `w.raiseOrder` logs
+  ## the sink of every deposit; the log is cut into runs of consecutive
+  ## deposits to one sink, and each run is a stage over exactly its own
+  ## deposits. Before S8bb the stages ran in the fixed sink order above
+  ## whatever the expression's order: in `int(s.match(re"a**")) +
+  ## parseInt(t)` the `ValueError` of `parseInt` was forked although Nim
+  ## raises `RegexError` first and never runs it, and in `ord(s[i]) ==
+  ## parseInt(t)` the `ValueError` fork lacked the index's survivor fact.
+  ## The regex stage has no survivor, so a run after it is never drained.
+  ## A deposit the log does not cover (a sink a reset site cleared without
+  ## the log) drains after the logged runs, in the fixed order.
   ##
   ## RFC-0005 S8g: each stage's sink is read ONCE here and reinstated before
   ## the stage runs on EACH survivor. The drains read-and-reset their sink,
@@ -14706,37 +14769,91 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let rangeSnap = w.rangeDefectConds
   let trapSnap = w.arithTrapConds
   let regexSnap = w.regexRaiseMsgs
-  template stage(inp: seq[Path]; sinkW, sinkT, snap, drain: untyped): seq[Path] =
+  let order = w.raiseOrder
+  w.raiseOrder = @[]
+  # Every sink starts empty: a run reinstates only its own slice, and a
+  # run the regex stage cuts off must not leave its deposits behind.
+  w.closureRaises = @[]
+  w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
+  w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
+  w.divByZeroConds = @[]; divByZeroConds = @[]
+  w.overflowConds = @[]; overflowConds = @[]
+  w.strIndexOobConds = @[]; strIndexOobConds = @[]
+  w.seqOobConds = @[]; seqOobConds = @[]
+  w.rangeDefectConds = @[]; rangeDefectConds = @[]
+  w.arithTrapConds = @[]; arithTrapConds = @[]
+  w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
+  var total: array[RaiseSinkKind, int]
+  total[rskClosure] = closureSnap.len
+  total[rskConvBound] = convSnap.len
+  total[rskParseInt] = parseSnap.len
+  total[rskDivByZero] = divSnap.len
+  total[rskOverflow] = ovfSnap.len
+  total[rskArithTrap] = trapSnap.len
+  total[rskStrIndex] = strSnap.len
+  total[rskSeqOob] = seqSnap.len
+  total[rskRange] = rangeSnap.len
+  total[rskRegex] = regexSnap.len
+  var used: array[RaiseSinkKind, int]
+  var runs: seq[tuple[k: RaiseSinkKind, lo, hi: int]]
+  for k in order:
+    if used[k] >= total[k]: continue
+    if runs.len > 0 and runs[^1].k == k and runs[^1].hi == used[k]:
+      inc runs[^1].hi
+    else:
+      runs.add (k, used[k], used[k] + 1)
+    inc used[k]
+  for k in RaiseSinkKind:
+    if used[k] < total[k]: runs.add (k, used[k], total[k])
+  template stage(inp: seq[Path]; sinkW, sinkT, snap, lo, hi, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
-      w.sinkW = snap
-      sinkT = snap
+      w.sinkW = snap[lo ..< hi]
+      sinkT = snap[lo ..< hi]
       outp.add drain(s, w)
     outp
-  var s0: seq[Path]
-  for s in @[p]:
-    w.closureRaises = closureSnap
-    s0.add drainClosureRaises(s, w)
-  let s1 = stage(s0, convFloatToIntBoundConds, convFloatToIntBoundConds,
-                 convSnap, drainConvFloatToIntFresh)
-  let s2 = stage(s1, parseIntRaiseConds, parseIntRaiseConds, parseSnap,
-                 drainParseIntRaises)
-  let s3 = stage(s2, divByZeroConds, divByZeroConds, divSnap,
-                 drainDivByZeroRaises)
-  let s4a = stage(s3, overflowConds, overflowConds, ovfSnap,
+  var cur = @[p]
+  for run in runs:
+    if cur.len == 0: break
+    let (lo, hi) = (run.lo, run.hi)
+    case run.k
+    of rskClosure:
+      var outp: seq[Path]
+      for s in cur:
+        w.closureRaises = closureSnap[lo ..< hi]
+        outp.add drainClosureRaises(s, p, w)
+      cur = outp
+    of rskConvBound:
+      cur = stage(cur, convFloatToIntBoundConds, convFloatToIntBoundConds,
+                  convSnap, lo, hi, drainConvFloatToIntFresh)
+    of rskParseInt:
+      cur = stage(cur, parseIntRaiseConds, parseIntRaiseConds, parseSnap,
+                  lo, hi, drainParseIntRaises)
+    of rskDivByZero:
+      cur = stage(cur, divByZeroConds, divByZeroConds, divSnap, lo, hi,
+                  drainDivByZeroRaises)
+    of rskOverflow:
+      cur = stage(cur, overflowConds, overflowConds, ovfSnap, lo, hi,
                   drainOverflowRaises)
-  # RFC-0005 S8i: after the overflow raises, so a `low(T) div -1` raises
-  # `OverflowDefect` (Nim's check runs first) and only its survivor is
-  # confined off the trap.
-  let s4 = stage(s4a, arithTrapConds, arithTrapConds, trapSnap,
-                 drainArithTraps)
-  let s5 = stage(s4, strIndexOobConds, strIndexOobConds, strSnap,
-                 drainStrIndexRaises)
-  let s6 = stage(s5, seqOobConds, seqOobConds, seqSnap, drainSeqOobRaises)
-  let s7 = stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap,
-                 drainRangeRaises)
-  # RFC-0005 S8ay: last -- see `drainRegexRaises`.
-  stage(s7, regexRaiseMsgs, regexRaiseMsgs, regexSnap, drainRegexRaises)
+    of rskArithTrap:
+      # RFC-0005 S8i: `lowerArith` deposits a trap after its overflow
+      # raise, so a `low(T) div -1` raises `OverflowDefect` (Nim's check
+      # runs first) and only its survivor is confined off the trap.
+      cur = stage(cur, arithTrapConds, arithTrapConds, trapSnap, lo, hi,
+                  drainArithTraps)
+    of rskStrIndex:
+      cur = stage(cur, strIndexOobConds, strIndexOobConds, strSnap, lo, hi,
+                  drainStrIndexRaises)
+    of rskSeqOob:
+      cur = stage(cur, seqOobConds, seqOobConds, seqSnap, lo, hi,
+                  drainSeqOobRaises)
+    of rskRange:
+      cur = stage(cur, rangeDefectConds, rangeDefectConds, rangeSnap, lo, hi,
+                  drainRangeRaises)
+    of rskRegex:
+      cur = stage(cur, regexRaiseMsgs, regexRaiseMsgs, regexSnap, lo, hi,
+                  drainRegexRaises)
+  cur
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -14949,6 +15066,7 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   regexRaiseMsgs = @[]
   w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
+  w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
@@ -14985,6 +15103,7 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
   regexRaiseMsgs = @[]
   w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
+  w.raiseOrder = @[]                    # RFC-0005 S8bb: reset the order log
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
@@ -16224,9 +16343,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for p in paths:
         if w.shouldStop: return
         let (condBool, cp2) = lowerBoolInExpr(p, br.cond, w)
-        var cont = drainScalarRaiseForks(cp2, w)
-        if cont.len == 0:
-          cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+        # RFC-0005 S8bb: no continuation (the guard raised on every path,
+        # a rejected pattern) walks no arm and no skip path.
+        let cont = drainScalarRaiseForks(cp2, w)
         for cp in cont:
           let armPath = forkPath(cp, cp.pc & @[condBool], cp.env)
           let armOut = walk(br.body, @[armPath], w)
@@ -16258,10 +16377,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # DES-4 invariant: `condBool` was computed from the pre-drain
           # `cp.env` and is a Z3 AST; the drains below never touch `env`, so
           # it stays valid on every continuation.
-          var cont = drainScalarRaiseForks(cp2, w)  ## closure/conv/parseInt/div/overflow/index/range forks
-          if cont.len == 0:
-            # The whole cond raised on every path (digits continuation infeasible).
-            cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+          let cont = drainScalarRaiseForks(cp2, w)  ## closure/conv/parseInt/div/overflow/index/range forks
+          # RFC-0005 S8bb: the guard raised on every path (a rejected
+          # pattern, `drainRegexRaises`): no arm, no later guard and no
+          # else is walked. This re-added the pre-drain path as a
+          # continuation, so code after a `RegexError` in a guard ran on
+          # the call's placeholder value.
           for cp in cont:
             let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
                                    cp.env)
@@ -17679,6 +17800,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           w.arithTrapConds = @[]
           regexRaiseMsgs = @[]
           w.regexRaiseMsgs = @[]
+          w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
           for arg in stmt.cargs:
             discard lower(p.env, arg)
           let pd = drainPendingLowerEffects(p)
@@ -17864,6 +17986,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
         regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
         w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
+        w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
           ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -19638,6 +19761,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for ri, er in escapedRaises:
     w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc,
                                      writes: raiseWrites[ri])  ## RFC-0005 S8as
+    w.raiseOrder.add rskClosure   # RFC-0005 S8bb
   # RFC-0005 S7 (closure-descent taint): the descent started from a clean
   # root, so whatever its exit paths picked up (a degrade inside the body)
   # must join the CALLING path -- through the pending-taint drain, the one

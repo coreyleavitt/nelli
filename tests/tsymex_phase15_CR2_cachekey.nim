@@ -969,6 +969,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## through different refs are passed by reference). Provisional 206.
     ## RFC-0005 batch 3 lands S8ax, S8ba, S8bd and S8bf as one walker
     ## number (205-208 are held by slices still running). 202->209.
+    ## RFC-0005 S8bb (raises drain in evaluation order; findBounds binds a
+    ## compound operand; PCRE leftmost-first selection, captures, replace
+    ## over the priority automaton). Provisional 201 (S8ba holds 200).
     check symexWalkerVersion == "209"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

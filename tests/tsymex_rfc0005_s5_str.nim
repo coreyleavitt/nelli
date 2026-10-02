@@ -86,8 +86,11 @@ proc s5DeadReplaceAll(s: string, n: int) =
 proc s5DeadReplaceRe(s: string, n: int) =
   # RFC-0005 S8ay: `re"a+"` is exact at every receiver length now (a
   # recursive function past the unroll), so it no longer declines; a
-  # pattern that can match empty still does (`seZ3StringIncomplete`).
-  let t = s.replace(re"a*", "b")
+  # pattern that can match empty still did (`seZ3StringIncomplete`).
+  # RFC-0005 S8bb: that is exact too (PCRE's priority run); one that can
+  # match empty under a CRLF convention, where PCRE's bumpalong skip over a
+  # CRLF's LF is its optimiser's call, still declines.
+  let t = s.replace(re"(*CRLF)a*", "b")
   discard t
   if n == 5 and n == 6:
     symexTarget("s5_dead_replace_re")
@@ -119,7 +122,9 @@ proc s5TwoCellsReplaceAll(a, b: string) =
 proc s5TwoCellsReplaceRe(a, b: string) =
   # RFC-0005 S8aw: an alternation still declines to a fresh value (`x+` is
   # now lowered, and its two cells differ for real).
-  if a.replace(re"x|xy", "y") != b.replace(re"x|xy", "y"):
+  # RFC-0005 S8bb: an alternation is exact now (PCRE's priority run); a
+  # pattern that can match empty under a CRLF convention still declines.
+  if a.replace(re"(*CRLF)x*", "y") != b.replace(re"(*CRLF)x*", "y"):
     symexTarget("s5_two_cells_replace_re")
 
 proc s5TwoCellsSplit(a, b: string) =
@@ -207,8 +212,9 @@ proc s5BackrefDead(s: string, n: int) =
   # RFC-0005 S8ay: a backreference is now a VALID pattern with an
   # unmodelled language (`seZ3StringIncomplete`, a fresh value, which does
   # not keep an unreachable target from sxUnsat). The ⊤ funnel this pins is
-  # a pattern whose validity is undecided: a named group.
-  if s.match(re"(?P<n>x)"):
+  # a pattern whose validity is undecided: `\X` (RFC-0005 S8bb reads named
+  # groups, which this pinned before).
+  if s.match(re"\X"):
     discard
   if n == 5 and n == 6:
     symexTarget("s5_backref_dead")
@@ -329,6 +335,7 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
     # then the walker's unroll, fresh past 16 bytes of a symbolic receiver.
     # RFC-0005 S8ay: exact past the unroll, so the site pinned here is the
     # empty-matching pattern's decline.
+    # RFC-0005 S8bb: the CRLF-skip decline (`pcre_select.runTable`).
     let r = symexFind(s5DeadReplaceRe, tLabel("s5_dead_replace_re"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
@@ -433,10 +440,11 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
                    "smt" / "runtime_strings.nim"
     let src = readFile(strSrc)
     ## RFC-0005 S8aw: the regex arm's decline is `regexReplaceShape`'s raise
-    ## (S8ay: over `pcre_syntax`'s tree).
+    ## (S8ay: over `pcre_syntax`'s tree). RFC-0005 S8bb: every shape is
+    ## lowered, and the decline is the priority run's (`runTable`).
     for (arm, raiseSite) in [
         ("of iekStrReplaceAll:", "raise (ref SymexZ3VersionMissingError)"),
-        ("of iekStrReplaceRe:", "regexReplaceShape(sp, pr.root)")]:
+        ("of iekStrReplaceRe:", "regexDecline(sp, t.why)")]:
       let a = src.find(arm)
       check a >= 0
       let r = src.find(raiseSite, a)

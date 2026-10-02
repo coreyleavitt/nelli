@@ -11379,8 +11379,7 @@ proc parseStmtInner(n: NimNode,
               "N49: dotted-field lvalue mutation `" & calleeName &
                             "` unsupported (feUnsupportedOp)")
         elif recv1 != nil and arrayElemLvalue(recv1) and
-             isKnownMutatingReceiverCall(calleeName, recv1, n.len) and
-             calleeName != "insert":
+             isKnownMutatingReceiverCall(calleeName, recv1, n.len):
           # RFC-0005 S8at: a mutation of an ARRAY ELEMENT (`a[1].add x`,
           # `p.a[i].del j`, a Table/HashSet element likewise), or of a
           # TABLE VALUE (`t["a"].add x`, `t[k].incl y`: `[]`'s `var`
@@ -11394,16 +11393,34 @@ proc parseStmtInner(n: NimNode,
           # (`dottedOpExpr`) and the result is written back through the
           # same lvalue arm `a[i] = v` takes (`parseAsgn`). The index is a
           # literal or a variable (`arrayElemLvalue`), so reading it twice
-          # is reading it once. `insert`'s two-phase lowering stays on the
-          # generic path.
+          # is reading it once.
           let oldTmp = freshSynth(ctx, "aelt")
           let eltTy = classifyType(recv1).ty
           preamble.add mkLet(oldTmp, eltTy, parseExpr(recv1, preamble, ctx))
           let op = mutationOp(calleeName, eltTy.kind, n)
           var args: seq[IRExpr]
           for i in 2 ..< n.len: args.add parseExpr(n[i], preamble, ctx)
+          var placeFrom = oldTmp
+          if op == doSeqInsert:
+            # RFC-0005 S8bc (item 4): `a[i].insert(x, j)`, the bare arm's and
+            # the dotted field's two phases (S8ar, `IRExpr.insGrow`). It fell
+            # to the generic call (`system.insert` inlined to an unsupported
+            # `when` and the seq payload cast). The arguments are bound once
+            # (`insertArgs`); the grow phase is its own element write, and
+            # the place phase reads the grown element back, so its
+            # IndexDefect (`j > len`) is judged against the seq the grow
+            # left, as Nim's single in-place call does.
+            args = insertArgs(eltTy.seqElemTy, args, preamble, ctx)
+            let grownTmp = freshSynth(ctx, "aeltGrow")
+            preamble.add mkLet(grownTmp, eltTy,
+              dottedOpExpr(doSeqInsertGrow, mkVar(oldTmp), args))
+            preamble.add parseAsgn(
+              nnkAsgn.newTree(elemLvalueBracket(recv1), newEmptyNode()),
+              mkVar(grownTmp), preamble, ctx)
+            placeFrom = freshSynth(ctx, "aeltPlace")
+            preamble.add mkLet(placeFrom, eltTy, parseExpr(recv1, preamble, ctx))
           let newTmp = freshSynth(ctx, "aeltNew")
-          preamble.add mkLet(newTmp, eltTy, dottedOpExpr(op, mkVar(oldTmp), args))
+          preamble.add mkLet(newTmp, eltTy, dottedOpExpr(op, mkVar(placeFrom), args))
           parseAsgn(nnkAsgn.newTree(elemLvalueBracket(recv1), newEmptyNode()),
                     mkVar(newTmp), preamble, ctx)
         else:

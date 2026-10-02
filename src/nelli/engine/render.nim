@@ -54,6 +54,43 @@ proc crashTypeLabel[T](r: Report[T]): string =
   of ckExitCode:      "exitCode:" & $c.exitCode
   of ckWinException:  "winException:0x" & toHex(c.code)
 
+# ---- RFC-0005 S11: symex findings -------------------------------------------
+#
+# Every renderer below shows `Report.symexFindings` -- per finding, the
+# verdict, whether it is `trusted()`, its `Soundness`, each gap with the
+# `DegradeClass` that names its lever, and every annotation violation (the
+# i3 channel: a user annotation's promise found false -- verdict-neutral, so
+# it is rendered loudly rather than folded into a status). All of it is
+# additive: a report with no findings renders byte-for-byte as before.
+
+func taintText(t: Taint): string =
+  ## `{}` / `{scSpurious}` / `{scSpurious, scIncomplete}`, as Nim prints a set.
+  $t
+
+proc symexFindingLines(f: SymexFinding): seq[string] =
+  ## The text rendering of one finding: a summary line, then one indented
+  ## line per gap and per annotation violation. Shared by `repro` (ofText)
+  ## and the JUnit `<system-out>`.
+  var head = f.targetDesc & " status=" & $f.status &
+             " trusted=" & $trusted(f) &
+             " pathTaint=" & taintText(f.soundness.pathTaint) &
+             " runTaint=" & taintText(f.soundness.runTaint) &
+             " replay=" & $f.soundness.replay
+  if f.fromCache: head &= " fromCache=true"
+  if f.defectTypeId.len > 0: head &= " defect=" & f.defectTypeId
+  result.add head
+  for g in f.gaps:
+    result.add "  gap " & $g.class & " " & g.kind & ": " & g.msg
+  for av in f.annotationViolations:
+    result.add "  annotation violation " & $av.kind & " {." & $av.pragma &
+               ".} " & av.callee & " at " & av.site & ": " & av.msg
+
+proc symexSection(findings: seq[SymexFinding]): string =
+  result = "[symex]\n"
+  for f in findings:
+    for line in symexFindingLines(f):
+      result &= "  " & line & "\n"
+
 proc repro*[T](r: Report[T]): string =
   ## Multi-line copy-pasteable repro string.
   result = "outcome=" & $r.outcome & "\n"
@@ -107,6 +144,8 @@ proc repro*[T](r: Report[T]): string =
                 " p90=" & s.p90.formatFloat(ffDecimal, 3) &
                 " p99=" & s.p99.formatFloat(ffDecimal, 3) &
                 " max=" & s.mx.formatFloat(ffDecimal, 3) & "\n"
+  if r.symexFindings.len > 0:
+    result &= symexSection(r.symexFindings)   # RFC-0005 S11
 
 proc xmlEscape(s: string): string =
   result = newStringOfCap(s.len)
@@ -131,6 +170,44 @@ proc jsonEscape(s: string): string =
     else:
       if ord(c) < 0x20: result.add "\\u00" & toHex(ord(c), 2).toLowerAscii
       else: result.add c
+
+proc taintJson(t: Taint): string =
+  result = "["
+  var first = true
+  for c in t:
+    if not first: result &= ","
+    result &= "\"" & $c & "\""
+    first = false
+  result &= "]"
+
+proc symexFindingJson(f: SymexFinding): string =
+  ## RFC-0005 S11. One element of the `symexFindings` array.
+  result = "{\"target\":\"" & jsonEscape(f.targetDesc) & "\""
+  result &= ",\"status\":\"" & $f.status & "\""
+  result &= ",\"covered\":" & $f.covered
+  result &= ",\"fromCache\":" & $f.fromCache
+  result &= ",\"trusted\":" & $trusted(f)
+  if f.defectTypeId.len > 0:
+    result &= ",\"defectTypeId\":\"" & jsonEscape(f.defectTypeId) & "\""
+  result &= ",\"soundness\":{\"pathTaint\":" &
+            taintJson(f.soundness.pathTaint) &
+            ",\"runTaint\":" & taintJson(f.soundness.runTaint) &
+            ",\"replay\":\"" & $f.soundness.replay & "\"}"
+  result &= ",\"gaps\":["
+  for i, g in f.gaps:
+    if i > 0: result &= ","
+    result &= "{\"class\":\"" & $g.class & "\",\"kind\":\"" &
+              jsonEscape(g.kind) & "\",\"msg\":\"" & jsonEscape(g.msg) &
+              "\"}"
+  result &= "]"
+  result &= ",\"annotationViolations\":["
+  for i, av in f.annotationViolations:
+    if i > 0: result &= ","
+    result &= "{\"pragma\":\"" & $av.pragma & "\",\"kind\":\"" &
+              $av.kind & "\",\"callee\":\"" & jsonEscape(av.callee) &
+              "\",\"site\":\"" & jsonEscape(av.site) &
+              "\",\"msg\":\"" & jsonEscape(av.msg) & "\"}"
+  result &= "]}"
 
 proc renderJson[T](r: Report[T]): string =
   result = "{"
@@ -175,6 +252,12 @@ proc renderJson[T](r: Report[T]): string =
       if i > 0: result &= ","
       result &= "\"" & jsonEscape(e) & "\""
     result &= "]"
+  if r.symexFindings.len > 0:   # RFC-0005 S11
+    result &= ",\"symexFindings\":["
+    for i, f in r.symexFindings:
+      if i > 0: result &= ","
+      result &= symexFindingJson(f)
+    result &= "]"
   result &= "}"
 
 proc renderJunit[T](r: Report[T], testName: string,
@@ -196,8 +279,17 @@ proc renderJunit[T](r: Report[T], testName: string,
     result &= ">"
     result &= xmlEscape(body)
     result &= "</failure>\n"
+  if r.symexFindings.len > 0:
+    # RFC-0005 S11: JUnit's own slot for captured output; the same text the
+    # `[symex]` section of `ofText` carries.
+    result &= "    <system-out>" & xmlEscape(symexSection(r.symexFindings)) &
+              "</system-out>\n"
   result &= "  </testcase>\n"
   result &= "</testsuite>\n"
+
+proc ghEscape(s: string): string =
+  ## GitHub workflow-command message escaping (`%`, CR, LF).
+  s.multiReplace(("%", "%25"), ("\r", "%0D"), ("\n", "%0A"))
 
 proc renderGithub[T](r: Report[T], testName: string): string =
   let level = if r.outcome in {otFalsified, otFlaky, otExhausted}: "error"
@@ -213,6 +305,25 @@ proc renderGithub[T](r: Report[T], testName: string): string =
   let crashSuffix = if r.crash.isSome: "; crash=" & $r.crash.get.kind else: ""
   result = "::" & level & params & "::" & testName & " — " & $r.outcome &
            " (counterexample: " & cx & "; seed=" & $r.seed & crashSuffix & ")"
+  # RFC-0005 S11: one more workflow command per symex fact worth a reader's
+  # attention, after the report's own line. An annotation violation is the
+  # user's code carrying a false promise -- an `::error`. A verdict that is
+  # not `trusted()` is a `::warning` naming its gaps. A trusted verdict adds
+  # nothing (the report line already covers it).
+  for f in r.symexFindings:
+    for av in f.annotationViolations:
+      result &= "\n::error title=symex annotation violation::" &
+                ghEscape(testName & " — {." & $av.pragma & ".} " & av.callee &
+                         " at " & av.site & " (" & $av.kind & "): " & av.msg)
+    if f.status notin {sfNotApplicable, sfReplayMiss} and not trusted(f):
+      var gapText = ""
+      for i, g in f.gaps:
+        if i > 0: gapText &= "; "
+        gapText &= g.kind & " (" & $g.class & ")"
+      result &= "\n::warning title=symex untrusted::" &
+                ghEscape(testName & " — " & f.targetDesc & " " & $f.status &
+                         " runTaint=" & taintText(f.soundness.runTaint) &
+                         (if gapText.len > 0: " gaps: " & gapText else: ""))
 
 proc renderReport*[T](r: Report[T], format = ofText,
                       testName = "property"): string =

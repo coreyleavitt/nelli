@@ -202,7 +202,19 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "187"
+const symexWalkerVersion* = "188"
+  ## RFC-0005 S11 (2026-10-01) — the public surface. The cache VALUE is
+  ## widened: every persisted verdict (`:sat` witness, `:unsat` / `:unk`
+  ## sentinel, `:raised:<type>` sentinel) carries its `Soundness` in the
+  ## entry's metadata, and a hit serves it unchanged (`symex.nim`); an entry
+  ## without it is a miss. The bump orphans every pre-S11 entry, whose
+  ## absent soundness would otherwise read as a miss forever. Walker side:
+  ## the Invariant-7 backstop fires on an `sxUnknown` whose errors taint
+  ## nothing (was: whose error list is empty), so `soundness.runTaint` is
+  ## never `{}` on an `sxUnknown`. 182 -> 188 (183–187 are held by slices
+  ## in flight; this takes tip+1 at landing).
+  ##
+  ## (Prior: 187.)
   ## RFC-0005 S8aq (2026-10-01) — S8ai's remainder. Three independent
   ## `checkCapped`/`seqRangeFacts` fixes, none changing an existing
   ## verdict (each closes a gap that previously fell through to the

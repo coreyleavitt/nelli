@@ -250,7 +250,7 @@ suite "symex Phase 7 — assertCoveredBy":
     saveSymexWitness(db, fnA, tLabel("db"), defaultSymexSettings(), f)
     let same = loadSymexWitnesses(db, fnA, tLabel("db"), defaultSymexSettings())
     check same.len == 1
-    check same[0][0].intVal == toInt128(99)
+    check same[0].choices[0].intVal == toInt128(99)
     # Distinct SUT — content-addressed key differs, nothing visible.
     let mismatched = loadSymexWitnesses(db, fnB, tLabel("db"),
       defaultSymexSettings())

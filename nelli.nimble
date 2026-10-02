@@ -1036,5 +1036,11 @@ task test, "Run the test suite":
             # suite's own `-d:z3WithSeqReplaceAll` (`.nim.cfg`); a missed
             # implied (non-stated) equality is shown to cost completeness
             # only. Walker 182->187.
-            "tsymex_rfc0005_s8aq_remainder"]:
+            "tsymex_rfc0005_s8aq_remainder",
+            # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
+            # trusted() / gaps() on SymexResult and SymexFinding, the bound
+            # echo, cached results carrying their stored Soundness, and the
+            # render layer incl. the annotation-violation channel; also the
+            # gaps() walkthrough. Public imports only. walker 182->188.
+            "tsymex_rfc0005_s11_surface"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

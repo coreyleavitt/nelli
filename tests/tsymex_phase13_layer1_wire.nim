@@ -35,12 +35,13 @@ suite "symex Phase 13 cycle 7 — Layer 1 verdict-cache wire":
     discard consumeSymexFindings()  # clear sink from prior tests
     let db = inMemoryDatabase()
 
-    # Pre-seed the verdict cache directly: derive the
-    # content-addressed key via cycle-2's helper, append the
-    # `:unsat` suffix, write the sentinel `@[]` with the cycle-3
-    # `verdictCacheMaxEntries` invariant.
-    let bareKey = symexCacheKeyForFn(handle, tLabel("one"))
-    db.save(bareKey & cacheKeyUnsat, @[], verdictCacheMaxEntries)
+    # Pre-seed the verdict cache under the content-addressed key
+    # `symexFindAllWitnesses` will look up. RFC-0005 S11: a sentinel must
+    # carry its `Soundness` in the entry metadata (a bare `@[]` sentinel
+    # is now a miss), so seed through the public verdict helper rather
+    # than writing the sentinel by hand.
+    saveSymexVerdict(db, handle, tLabel("one"), defaultSymexSettings(),
+                     sfUnsat, Soundness())
 
     symexZ3CallCount = 0
     let findings = symexFindAllWitnesses(handle, db)

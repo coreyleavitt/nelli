@@ -42,11 +42,11 @@ suite "symex Phase 13 cycle 6 — acceptUnknownAsCovered integration guard":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, prog, target,
-                         settingsStrict, sfUnknown, errors)
+                         settingsStrict, sfUnknown, Soundness(runTaint: {scIncomplete}), errors)
     let loadedLax = loadSymexVerdictImpl(db, prog, target,
                                           settingsLax, errors)
     let loadedStrict = loadSymexVerdictImpl(db, prog, target,
                                              settingsStrict, errors)
-    check loadedLax == some(sfUnknown)
-    check loadedStrict == some(sfUnknown)
+    check (loadedLax.isSome and loadedLax.get.status == sfUnknown)
+    check (loadedStrict.isSome and loadedStrict.get.status == sfUnknown)
     check loadedLax == loadedStrict

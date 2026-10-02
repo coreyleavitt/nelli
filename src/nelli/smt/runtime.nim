@@ -634,13 +634,20 @@ type
       ## nil dereference edge (`Path.nilDeref`), recorded at target-hit time
       ## beside `pathTaint`. Read only when the finding becomes a replay
       ## candidate (`SatCandidate.nilDerefOnPath`).
-    pathTaint*:    Taint
-      ## RFC-0005 S1 (§2.3). The taint of the path that produced this
-      ## finding, recorded at TARGET-HIT time (`isTargetLabel`'s sxSat,
+    soundness*:    Soundness
+      ## RFC-0005 S11 (§8.1) -- the one carrier (was S1's bare `pathTaint`
+      ## field). `soundness.pathTaint` is the taint of the path that produced
+      ## this finding, recorded at TARGET-HIT time (`isTargetLabel`'s sxSat,
       ## `routeRaise`'s sxRaised) because the winning path is not otherwise
-      ## available at verdict time. RFC-0005 S1c routes on it
-      ## (`admitSolvedHit`): a winner's is free of `scSpurious`; a candidate's
-      ## carries it.
+      ## available at verdict time; RFC-0005 S1c routes on it
+      ## (`admitSolvedHit`): a winner's is free of `scSpurious`, a
+      ## candidate's carries it. `soundness.runTaint` is derived once, at the
+      ## public boundary (`runSymex`), from the final `errors`.
+      ## `soundness.replay` is written only by the replay settle
+      ## (`symex.nim`'s `settleCandidate`).
+    bounds*:       ResourceBudget
+      ## RFC-0005 S11 (§8.2). The bound echo: `settings.budget`, stamped by
+      ## `runSymex` on every status, including a boundary abort.
     annotationViolations*: seq[AnnotationViolation]
       ## RFC-0005 S8 (§13.3, i3). `prog.annotationViolations`, copied onto
       ## every verdict branch by `runSymex`. Verdict-neutral (see
@@ -11905,13 +11912,13 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
 
 proc admitSolvedHit(w: var WalkCtx; r: RawResult) =
   ## RFC-0005 S1c (§2.3 "Candidate lifecycle"). Files a SOLVED finding by the
-  ## taint of the path that produced it (`r.pathTaint`, recorded at the hit):
+  ## taint of the path that produced it (`r.soundness.pathTaint`, recorded at the hit):
   ## a clean one into `w.found` (a winner; may halt the walk via
   ## `shouldStop`), an `scSpurious`-tainted one into `w.candidates` (never
   ## halts, never wins by itself -- only S10's replay can promote it; it
   ## still blocks `sxUnsat`, `decideVerdict` rule 4). `path.scIncomplete`
   ## alone is inert (§2.1): an omission cannot invent a model.
-  if scSpurious in r.pathTaint:
+  if scSpurious in r.soundness.pathTaint:
     w.candidates.add r
   else:
     w.found.add r
@@ -11922,10 +11929,10 @@ func toCandidate(r: RawResult): SatCandidate =
   ## field, so past this point the model is not spellable as a `sxSat`.
   case r.status
   of sxSat:
-    SatCandidate(status: sxSat, pathTaint: r.pathTaint, errors: r.errors,
+    SatCandidate(status: sxSat, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  nilDerefOnPath: r.nilDerefOnPath, input: r.witness)
   of sxRaised:
-    SatCandidate(status: sxRaised, pathTaint: r.pathTaint, errors: r.errors,
+    SatCandidate(status: sxRaised, pathTaint: r.soundness.pathTaint, errors: r.errors,
                  nilDerefOnPath: r.nilDerefOnPath,
                  raisedTypeId: r.raisedTypeId, isDefect: r.isDefect,
                  raisedMsg: r.raisedMsg, input: r.raisedWitness)
@@ -11975,10 +11982,10 @@ func decideVerdict*(found, candidates: openArray[RawResult]; runTaint: Taint;
   ## to carry; it now fires only on bucket 4, which the S8 pin keeps empty.
   if not reachUnknown:
     for i, f in found:                                         # rule 1
-      if f.status == sxSat and scSpurious notin f.pathTaint:
+      if f.status == sxSat and scSpurious notin f.soundness.pathTaint:
         return VerdictDecision(status: sxSat, winnerIdx: i)
     for i, f in found:                                         # rule 2
-      if f.status == sxRaised and scSpurious notin f.pathTaint:
+      if f.status == sxRaised and scSpurious notin f.soundness.pathTaint:
         return VerdictDecision(status: sxRaised, winnerIdx: i)
   if reachUnknown or found.len > 0 or candidates.len > 0:      # rule 4
     return VerdictDecision(status: sxUnknown, winnerIdx: -1)
@@ -16176,7 +16183,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S1: `pathTaint` is PRODUCED here -- the hitting path's
         # taint, which `admitSolvedHit` routes on.
         of sxSat:    w.admitSolvedHit(RawResult(status: sxSat, witness: wit,
-                                                pathTaint: p.taint,
+                                                soundness: Soundness(pathTaint: p.taint),
                                                 nilDerefOnPath: p.nilDeref,
                                                 errors: candErrs))
         of sxUnknown:
@@ -16660,7 +16667,7 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
       # RFC-0005 S1: `pathTaint` PRODUCED at the raised-finding hit; S1c
       # routes on it (clean -> `found`, spurious-tainted -> `candidates`).
       var r = toPublic(iv)
-      r.pathTaint = rp.taint
+      r.soundness.pathTaint = rp.taint
       r.nilDerefOnPath = rp.nilDeref   # RFC-0005 S8k
       r.errors.add candErrs
       w.admitSolvedHit(r)
@@ -18465,6 +18472,16 @@ proc runSymex*(prog: SymexProgram,
                "(RFC-0005 S8m; ekZ3Error)",
           scope: abortScope())])
   result.annotationViolations = prog.annotationViolations
+  # RFC-0005 S11 (§8.1). The public run coordinate, DERIVED (§2.2) from the
+  # final error list -- after every override above, so a boundary abort and
+  # the S8m Z3-API override carry their own error's coordinate too, and an
+  # `sxUnknown` never reports `{}` (Invariant-7 extension: every
+  # `sxUnknown` carries a `sevError`, and every `sevError` taints the run).
+  # It equals the `w.runTaint` the verdict read, plus a winner's witness
+  # extraction errors (the one sink `runSymexImpl` drains after deciding).
+  result.soundness.runTaint = runTaintOf(result.errors)
+  # RFC-0005 S11 (§8.2). The bound echo.
+  result.bounds = settings.budget
 
 proc raiseParamAllocIssue(issue: FieldAllocIssue) =
   ## N40 (round-6 fix round 6, walker v104). The pre-walk PARAMETER-entry
@@ -19251,8 +19268,14 @@ proc runSymexImpl(prog: SymexProgram,
     # RFC-0005 S1c: that includes a candidate with nothing recorded behind
     # it -- a spurious-tainted path whose degrade recorded no error (every
     # `Degrade` token comes from a recording funnel, so this is a walker bug).
+    # RFC-0005 S11 (§8.1, the Invariant-7 extension): "classified" means a
+    # reason that TAINTS the run -- `soundness.runTaint` is derived from
+    # these errors and must never be `{}` on an `sxUnknown`. An unknown whose
+    # only records are hints / plain warnings has no classified reason
+    # either, so the backstop fires on an empty run coordinate, not just on
+    # an empty list.
     var unknownErrs = exnWarnings & parseErrs & closureErrs
-    if unknownErrs.len == 0:
+    if runTaintOf(unknownErrs) == {}:
       unknownErrs.add SymexErrorInfo(
         kind: weInternalWalkerFault, severity: sevError,
         msg: "sxUnknown produced with no classified reason — an unclassified " &

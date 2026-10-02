@@ -11,6 +11,8 @@
 import std/[options, tables, times]
 import ../choice, ../datasource/distribution, ../optbox, ../crashinfo
 export distribution, optbox, crashinfo
+import ../smt/soundness   ## RFC-0005 S11: Z3-free and IR-free (a leaf)
+export soundness
 
 type
   SymexFindingStatus* = enum
@@ -68,6 +70,30 @@ type
       ## a Nim `Defect` subtype (`isDefect = true`): the qualified
       ## defect type name (e.g. `"AssertionDefect"`) for display. Empty
       ## on an ordinary `CatchableError` raise or a non-raised finding.
+    soundness*:      Soundness
+      ## RFC-0005 S11 (§8.1). The verdict's soundness record -- the same
+      ## value `SymexResult.soundness` carries: the winning path's taint,
+      ## the run coordinate, and whether a SAT claim was replay-confirmed.
+      ## Persisted with the verdict and served unchanged by a cache hit
+      ## (§7). Read it through `trusted(f)`.
+    gaps*:           seq[FindingGap]
+      ## RFC-0005 S11 (§8.1). The per-cause view (`gaps()` on a
+      ## `SymexResult`), projected to strings so this record stays free of
+      ## the `smt/types` dependency. EMPTY when `fromCache`: the cache keeps
+      ## the soundness, not the run's error list.
+    annotationViolations*: seq[AnnotationViolation]
+      ## RFC-0005 S11 (§13.3 i3 rendered). Every call site where a user
+      ## annotation's promise was found false. Verdict-neutral and loud: the
+      ## render layer reports each one. Parse-time facts, so a cache hit
+      ## carries them too.
+
+  FindingGap* = object
+    ## RFC-0005 S11. One entry of `SymexFinding.gaps`: a decline that built
+    ## the run coordinate, with the `DegradeClass` that names its lever (see
+    ## `gaps()` in `smt/types.nim` for the class -> lever table).
+    class*: DegradeClass
+    kind*:  string   ## the `SymexErrorKind`, by name (e.g. "beBudgetExhausted")
+    msg*:   string   ## the decline's message, naming the budget or call
 
   FalsifiedError* = object of CatchableError
     ## Raised by `ensure` when a property is violated.
@@ -197,6 +223,16 @@ type
       ## `Observation.crash` uses (`nelli/crashinfo`), so both front doors
       ## report crash identity the same way. `none` for a passing run, an
       ## ordinary falsification, or a flaky/exhausted/DB-error report.
+
+func trusted*(f: SymexFinding): bool =
+  ## RFC-0005 S11 (§8.1). `trusted()` for the report record: a `sfSat` /
+  ## `sfRaised` finding whose path was clean or replay-confirmed, or a
+  ## `sfUnsat` whose run under-approximated nothing. `sfUnknown` never; nor
+  ## `sfNotApplicable` / `sfReplayMiss`, which are not verdicts.
+  case f.status
+  of sfSat, sfRaised: trustedSat(f.soundness)
+  of sfUnsat:         trustedUnsat(f.soundness)
+  of sfUnknown, sfNotApplicable, sfReplayMiss: false
 
 func defaultSettings*(): Settings =
   ## The defaults now live on the type (RFC-0010), so this is `Settings()`.

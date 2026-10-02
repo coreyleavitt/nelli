@@ -21,7 +21,7 @@ suite "symex Phase 13 cycle 10 — verdict macro forms":
   test "saveSymexVerdict + loadSymexVerdict round-trip via the macro form":
     let db = inMemoryDatabase()
     saveSymexVerdict(db, fnXyz, tLabel("xyz"),
-                     defaultSymexSettings(), sfUnsat)
+                     defaultSymexSettings(), sfUnsat, Soundness())
     let loaded = loadSymexVerdict(db, fnXyz, tLabel("xyz"),
                                    defaultSymexSettings())
-    check loaded == some(sfUnsat)
+    check (loaded.isSome and loaded.get.status == sfUnsat)

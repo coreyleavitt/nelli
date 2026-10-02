@@ -32,16 +32,16 @@ suite "symex Phase 13 cycle 4 — UNSAT round-trip + migration":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, progA, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     let loaded = loadSymexVerdictImpl(db, progA, target,
                                        defaultSymexSettings(), errors)
-    check loaded == some(sfUnsat)
+    check (loaded.isSome and loaded.get.status == sfUnsat)
 
   test "load under a different prog returns none (content-addressing)":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, progA, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     # progB differs from progA by body — different H, different key.
     let loaded = loadSymexVerdictImpl(db, progB, target,
                                        defaultSymexSettings(), errors)

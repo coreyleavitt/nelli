@@ -161,13 +161,13 @@ suite "RFC-0005 S1 (b) -- the Path carrier and the degrade() funnel (runtime.nim
     check probe.lowerDrainedPath == pathTaint(classOf(seUnsupportedStringOp))
     check probe.lowerPendingAfterDrain == clean
 
-suite "RFC-0005 S1 (c) -- RawResult.pathTaint is produced at the target-hit site":
+suite "RFC-0005 S1 (c) -- RawResult.soundness.pathTaint is produced at the target-hit site":
 
   test "a clean label hit reports sxSat with pathTaint == {}":
     let prog = SymexProgram(params: @[], body: mkTargetLabel("hit"))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     check raw.status == sxSat
-    check raw.pathTaint == clean
+    check raw.soundness.pathTaint == clean
 
   test "no verdict change: an isUnsupported path still blocks SAT and degrades the run to sxUnknown":
     # RFC-0005 S1b: the node carries a kind (was kindless/transitional in S1).
@@ -273,7 +273,13 @@ suite "RFC-0005 S1 (d) -- the .taint / .runTaint writer grep-pin":
   test "WalkCtx.runTaint is written ONLY at runSymexImpl's drain (derived, never at a site)":
     let ws = allWriters("runTaint")
     checkpoint(report(ws))
-    check routinesOf(ws) == @["runtime.nim:runSymexImpl"]
+    check routinesOf(ws) == @[
+      # RFC-0005 S11: the PUBLIC run coordinate, `RawResult.soundness.runTaint`
+      # -- derived (`runTaintOf`) from the final error list at the one public
+      # exit, after the boundary overrides. Still derived, still not a site.
+      "runtime.nim:runSymex",
+      "runtime.nim:runSymexImpl",            # `w.runTaint`, the verdict input
+    ]
 
   test "scanner demonstration: an injected site-level write trips the pin; reads and declarations do not":
     check isTaintWrite("    p.taint = {}", "taint")

@@ -2133,8 +2133,10 @@ proc hasSymexTransparentPragma(calleeSym: NimNode): bool =
   ## `{.symexTransparent.}` proc whose result IS used (expression position),
   ## or whose statement-position arguments include a writable `var`/`ref`/
   ## `ptr`/possibly-ref-carrying-object, falls back to `{.symexOpaque.}`
-  ## handling instead — an over-claimed pragma costs precision (an extra
-  ## `sxUnknown`), never soundness (never a false witness), on EITHER route.
+  ## handling instead, and the broken promise is recorded as an
+  ## `AnnotationViolation` (RFC-0005 S8, verdict-neutral) — an over-claimed
+  ## pragma costs precision (the opaque call's `dcSubstituted` gap), never
+  ## soundness (never a false witness), on EITHER route.
   hasSymexPragma(calleeSym, "symexTransparent")
 
 const inertArgTypeKinds = {

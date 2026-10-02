@@ -178,15 +178,15 @@ suite "symex N1 — excluded-kind rejection via saveSymexVerdict (parseEntryImpl
 
   test "a template symbol is rejected by saveSymexVerdict":
     check not compiles(saveSymexVerdict(inMemoryDatabase(), doubleTemplate,
-                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+                          tLabel("x"), defaultSymexSettings(), sfUnsat, Soundness()))
 
   test "a let-bound closure/lambda var is rejected by saveSymexVerdict":
     check not compiles(saveSymexVerdict(inMemoryDatabase(), letBoundLambda,
-                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+                          tLabel("x"), defaultSymexSettings(), sfUnsat, Soundness()))
 
   test "an iterator symbol is rejected by saveSymexVerdict":
     check not compiles(saveSymexVerdict(inMemoryDatabase(), twoElemsIter,
-                          tLabel("x"), defaultSymexSettings(), sfUnsat))
+                          tLabel("x"), defaultSymexSettings(), sfUnsat, Soundness()))
 
 suite "symex N1 — excluded-kind rejection via loadSymexVerdict (parseEntryImpl)":
 

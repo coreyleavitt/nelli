@@ -2,9 +2,12 @@
 ##
 ## Bounded loops + the UNKNOWN downgrade. Phase 6 ships a *k-bounded*
 ## walker: each `while`/`for` is unrolled at most `maxLoopUnwind`
-## times (default 5). If a path survives k iterations without
-## reaching the target, it gets marked uncertain and the final
-## status flips to `sxUnknown`.
+## times (default 5). A path still looping at the bound is cut off,
+## and the cut is recorded as a `beBudgetExhausted` gap of class
+## `dcFabricated` (the analysis invented an end to the loop). If the
+## target was only reachable along cut-off paths, the status is
+## `sxUnknown`, and `gaps()` on the result names the bound that
+## caused it -- the lever to pull.
 ##
 ## This is the right trade-off for an automatic tool: invariant
 ## inference would let us reason about unbounded loops symbolically,
@@ -13,8 +16,10 @@
 ## is the practical sweet spot. We borrow it.
 ##
 ## When UNKNOWN means "the loop just needed more iterations than we
-## have", you have three honest moves:
-##   1. Bump `maxLoopUnwind` in `SymexSettings`.
+## have" (`gaps()` says `dcFabricated` / `beBudgetExhausted`, and
+## `r.bounds` echoes the `maxLoopUnwind` it ran under), you have three
+## honest moves:
+##   1. Bump `maxLoopUnwind` in `SymexSettings` (Case B below).
 ##   2. Accept UNKNOWN as covered via `acceptUnknownAsCovered = true`
 ##      — appropriate when the loop is part of trusted code you
 ##      don't want to verify symbolically.
@@ -49,10 +54,40 @@ proc loopDeep(x: int) =
 
 block unknownUnderBudget:
   # Default `maxLoopUnwind = 5`. The path needing 100 iterations
-  # gets marked uncertain → sxUnknown.
+  # is cut off at the bound → sxUnknown, and not `trusted()`.
   let r = symexFind(loopDeep, tLabel("hit-100"))
   doAssert r.status == sxUnknown
+  doAssert not r.trusted
   echo "loopDeep: status = sxUnknown (target beyond unwind budget)"
+
+# ---- Case B': reading the gap, then pulling its lever (RFC-0005) ----------
+
+proc loopEight(x: int) =
+  var i = 0
+  while i < x:
+    i = i + 1
+  if i == 8:
+    symexTarget("hit-8")
+
+block gapsWalkthrough:
+  # `gaps()` lists each cause behind a not-trusted verdict, with the
+  # `DegradeClass` that names its lever. Here every gap is the loop
+  # bound: `dcFabricated` / `beBudgetExhausted`, and `r.bounds` echoes
+  # the bound the run used.
+  let r = symexFind(loopEight, tLabel("hit-8"))
+  doAssert r.status == sxUnknown
+  for g in r.gaps():
+    doAssert g.class == dcFabricated and g.e.kind == beBudgetExhausted
+  doAssert r.bounds.maxLoopUnwind == 5
+  echo &"loopEight: sxUnknown, {r.gaps().len} gap(s), all dcFabricated " &
+       &"at maxLoopUnwind = {r.bounds.maxLoopUnwind}"
+  # Pull the lever the gap named.
+  const deeper = SymexSettings(budget: ResourceBudget(maxLoopUnwind: 12))
+  let r2 = symexFind(loopEight, tLabel("hit-8"), deeper)
+  doAssert r2.status == sxSat and r2.trusted
+  # Paths longer than 12 iterations still hit the new bound, so gaps()
+  # still lists them -- they just no longer decide the verdict.
+  echo &"loopEight at maxLoopUnwind = 12: sxSat, witness x = {r2.witness[0]}"
 
 # ---- Case C: downgrade UNKNOWN via assertCoveredBy settings ---------------
 

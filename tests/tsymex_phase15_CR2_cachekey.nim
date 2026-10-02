@@ -921,7 +921,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## ground fact; str.replace_all reachable under this project's own
     ## opt-in -d:z3WithSeqReplaceAll). 182->187 (183-186 reserved for
     ## sibling slices on this channel).
-    check symexWalkerVersion == "187"
+    ## RFC-0005 S11 (the cache value carries the Soundness; the
+    ## Invariant-7 backstop fires on an untainting sxUnknown). 182->188.
+    check symexWalkerVersion == "188"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

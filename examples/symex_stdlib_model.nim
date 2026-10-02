@@ -7,8 +7,12 @@
 ## When the walker encounters a call to an opaque proc, it:
 ##   * does **not** enter the body;
 ##   * synthesises a fresh symbolic value of the proc's return type;
-##   * marks the surviving path uncertain (final status will be at
-##     best `sxUnknown`, never `sxUnsat`).
+##   * records a `feOpaqueCallUnmodelled` gap of class `dcSubstituted`
+##     (RFC-0005): the paths through the call may be spurious, and the
+##     run may have missed behaviour. So a witness found past the call
+##     is `sxSat` only once replay has run the real proc on it and
+##     reproduced the target, and an `sxUnsat` is never `trusted()`.
+##     `gaps()` names the call.
 ##
 ## This is the right model for procs whose body is unimportant to
 ## symex either because:
@@ -21,7 +25,7 @@
 ## `crosshair.SymbolicFactory` — make-symbolic-of-type. The Nim
 ## ergonomic is a pragma on the proc itself, no extra registration.
 
-import std/[strformat]
+import std/[strformat, strutils]
 import nelli/symex
 
 # A user-defined opaque proc. Pretend it reads from an IMU.
@@ -39,12 +43,20 @@ proc dispatch(channel: int) =
 # The path `v > 1000` is *not* unsat — even though readSensor's
 # concrete body returns 0, the opaque-effectful model gives `v` a
 # fresh symbolic integer that Z3 can drive into the high range.
-# The walker can't prove SAT either (the path is uncertain because
-# we admitted ignorance about readSensor's output), so the status
-# is sxUnknown.
+# Z3's witness is a candidate only: replay runs `dispatch` on it,
+# the real readSensor returns 0, the alarm does not fire, and the
+# candidate is refuted. The status is sxUnknown.
 let r = symexFind(dispatch, tLabel("alarm"))
 doAssert r.status == sxUnknown,
   &"expected sxUnknown for opaque-proc path, got {r.status}"
+doAssert not r.trusted
+# The gap names the opaque call and its class.
+var named = false
+for g in r.gaps():
+  if g.e.kind == feOpaqueCallUnmodelled:
+    doAssert g.class == dcSubstituted
+    if "readSensor" in g.e.msg: named = true
+doAssert named
 echo "symex(dispatch, alarm): status = sxUnknown (honest under {.symexOpaque.})"
 
 # Without the pragma, symex would walk readSensor's body, conclude

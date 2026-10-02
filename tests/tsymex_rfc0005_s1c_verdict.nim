@@ -263,7 +263,7 @@ suite "RFC-0005 S1c (e) -- the candidate pool (w.candidates, RawResult.candidate
         mkBranch(mkBinop(bEq, xVar, mkIntLit(42)), mkTargetLabel("hit"))])]))
     let raw = runSymex(prog, SymexTarget(kind: stkLabel, label: "hit"))
     check raw.status == sxSat
-    check raw.pathTaint == {}              ## the winner is the CLEAN arm
+    check raw.soundness.pathTaint == {}              ## the winner is the CLEAN arm
     check raw.candidates.len == 1          ## the tainted arm was solved first
     check raw.candidates[0].pathTaint == allTop
 
@@ -294,9 +294,9 @@ suite "RFC-0005 S1c (e) -- the candidate pool (w.candidates, RawResult.candidate
 # S4 reclassifies a funnel (that is the ONLY way to observe rule 4 as distinct
 # from rule 5 today).
 
-proc sat(t: Taint): RawResult = RawResult(status: sxSat, pathTaint: t)
+proc sat(t: Taint): RawResult = RawResult(status: sxSat, soundness: Soundness(pathTaint: t))
 proc raised(t: Taint): RawResult =
-  RawResult(status: sxRaised, raisedTypeId: "ValueError", pathTaint: t)
+  RawResult(status: sxRaised, raisedTypeId: "ValueError", soundness: Soundness(pathTaint: t))
 const fresh = {scSpurious}   ## pathTaint(dcFreshSymbol) = runTaint(dcFreshSymbol)
 
 suite "RFC-0005 S1c (f) -- decideVerdict: the ordered decision procedure":

@@ -36,10 +36,10 @@ suite "symex Phase 13 cycle 5 — UNKNOWN round-trip + settings rotation":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnknown, errors)
+                         defaultSymexSettings(), sfUnknown, Soundness(runTaint: {scIncomplete}), errors)
     let loaded = loadSymexVerdictImpl(db, prog, target,
                                        defaultSymexSettings(), errors)
-    check loaded == some(sfUnknown)
+    check (loaded.isSome and loaded.get.status == sfUnknown)
 
   test "settings rotate the verdict cache; UNSAT and UNKNOWN coexist":
     # Same prog + target. Two verdicts persisted against different
@@ -47,9 +47,9 @@ suite "symex Phase 13 cycle 5 — UNKNOWN round-trip + settings rotation":
     # H). Each settings retrieves its own verdict.
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
-    saveSymexVerdictImpl(db, prog, target, settingsA, sfUnsat, errors)
-    saveSymexVerdictImpl(db, prog, target, settingsB, sfUnknown, errors)
+    saveSymexVerdictImpl(db, prog, target, settingsA, sfUnsat, Soundness(), errors)
+    saveSymexVerdictImpl(db, prog, target, settingsB, sfUnknown, Soundness(runTaint: {scIncomplete}), errors)
     let loadedA = loadSymexVerdictImpl(db, prog, target, settingsA, errors)
     let loadedB = loadSymexVerdictImpl(db, prog, target, settingsB, errors)
-    check loadedA == some(sfUnsat)
-    check loadedB == some(sfUnknown)
+    check (loadedA.isSome and loadedA.get.status == sfUnsat)
+    check (loadedB.isSome and loadedB.get.status == sfUnknown)

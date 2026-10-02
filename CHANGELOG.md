@@ -12,6 +12,67 @@ versioning is [semantic](https://semver.org/spec/v2.0.0.html).
 > reconstructed below from its release commit for exactly that reason.
 > RFC-z3-optional S5 adopted this as a deliberate practice, not a one-off.
 
+## [Unreleased] — 0.9.0
+
+Upgrading: `docs/migration/0.9.0.md`. **Read its §1 before you upgrade.** The
+symex entry points can now execute your SUT, and that SUT must link and load.
+Neither change produces a compile error.
+
+### Changed
+
+- **`fn` is executed at verdict time** (RFC-0005 S10). A witness on a path
+  through something the analysis could not model is replayed by calling `fn`
+  on it, and it is reported `sxSat`/`sxRaised` only if the real run reaches
+  the target. The SUT's side effects happen for real.
+- **`fn` must link and load** into the calling binary when replay is on. An
+  undefined `importc` fails the link, and a missing `dynlib` (e.g. PCRE1 for
+  `std/re`) fails at start-up. To opt out, set `SymexSettings.replay = false`
+  (cache key `;rp=off`).
+- **Verdicts are more precise** (RFC-0005).
+  - An over-taint-only run proves `sxUnsat`.
+  - The blanket decline vetoes are gone, and unreached declines are
+    `sevHint`.
+  - Many previously declined Nim shapes are modelled.
+  - Several Nim-unfaithful semantics are corrected, including float→int,
+    `low(T)` negation/`div`, `mod`, slices and `finally`/`defer`.
+  - Each moved verdict is listed in the migration note, §4–§5.
+- **The cache helpers carry soundness.** `saveSymexVerdict(Impl)` takes a
+  `Soundness`. `loadSymexVerdict(Impl)` returns `Option[CachedVerdict]`, and
+  `loadSymexWitnesses(Impl)` returns `seq[CachedWitness]`. A custom
+  `ExampleDatabase` used with the symex cache must implement
+  `saveWithMetaImpl`/`loadPrimaryWithMetaImpl`.
+- `RawResult.pathTaint` → `RawResult.soundness.pathTaint`.
+- `ResourceBudget.maxBytesEncodingLen` and
+  `SymexErrorKind.heRefVariantUnsupported` are removed.
+- The walker version bump invalidates every symex cache entry.
+
+### Added
+
+- **`Soundness`** (`pathTaint`, `runTaint`, `replay: ReplayStatus`) on
+  `SymexResult` and `SymexFinding` (RFC-0005 S11).
+- **`trusted(r)`**: the one predicate to branch on, for results and
+  findings.
+- **`gaps(r)`**: each cause behind an untrusted result, with the
+  `DegradeClass` that names its lever. `SymexFinding.gaps` carries it as
+  `FindingGap`s.
+- **`SymexResult.bounds`**: the `ResourceBudget` the run used, so an
+  `sxUnsat` states the bounds it is a proof under.
+- **The annotation-violation channel**: `annotationViolations` on
+  `SymexResult` and `SymexFinding` reports a false `{.symexTransparent.}`
+  promise without changing the verdict.
+- **Symex findings in every report format**:
+  - `ofText`: a `[symex]` section;
+  - `ofJson`: `symexFindings`;
+  - `ofJunit`: `<system-out>`;
+  - `ofGithubAnnotation`: an `::error` per violation and a `::warning` per
+    untrusted finding.
+
+  Output is unchanged when there are no findings.
+- `ResourceBudget.maxSeqLen` and `seqQueryRLimit`, along with
+  `symexLoopIterations`, `loopPruneRLimit` and `defaultLoopPruneRLimit`.
+- New `SymexErrorKind` members, all tail-appended. They are listed in the
+  migration note, §3.3.
+
 ## [0.8.0] — 2026-09-08
 
 Upgrading: `docs/migration/0.8.0.md`. **Read it before you upgrade** — this

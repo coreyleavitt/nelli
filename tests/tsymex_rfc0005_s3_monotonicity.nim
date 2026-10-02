@@ -618,9 +618,9 @@ suite "RFC-0005 S3 -- family 2b: over-taint-only unreachable target (S4/S5/S6's 
 # nelli's own PBT is not used here (§4.1's "otherwise a small exhaustive
 # enumeration" case).
 
-proc sat(t: Taint): RawResult = RawResult(status: sxSat, pathTaint: t)
+proc sat(t: Taint): RawResult = RawResult(status: sxSat, soundness: Soundness(pathTaint: t))
 proc raised(t: Taint): RawResult =
-  RawResult(status: sxRaised, raisedTypeId: "ValueError", pathTaint: t)
+  RawResult(status: sxRaised, raisedTypeId: "ValueError", soundness: Soundness(pathTaint: t))
 const fresh = {scSpurious}
 const allTop = {scSpurious, scIncomplete}
 

@@ -7,6 +7,8 @@
 import std/tables
 import std/options   ## Phase 15 R12: Option[string] for HeapSnapshotEntry.aliasRef/pointsTo
 export tables, options
+import ./soundness   ## RFC-0005 S11: the Z3-free soundness vocabulary
+export soundness
 ##
 ## The architecture (per [docs/SYMEX_PLAN.md](../../../docs/SYMEX_PLAN.md))
 ## is a classic front-end / back-end split:
@@ -2445,73 +2447,12 @@ type
       ## structural invariant, pinned by `tests/tsymex_rfc0005_s8_scope.nim`:
       ## no admitted entry is `dskUnplaced` except a named, enumerated one.
 
-  SymexAnnotation* = enum
-    ## RFC-0005 S8 (§13.3, i3 -- Corey 2026-09-26). A user annotation symex
-    ## honours on the strength of the user's promise.
-    saSymexTransparent  ## `{.symexTransparent.}`: "this call is void and
-                        ## observably inert -- drop it"
-
-  AnnotationViolationKind* = enum
-    ## RFC-0005 S8 (§13.3). WHICH promise of the annotation the call site
-    ## contradicts.
-    avResultUsed    ## the call's RESULT is used (expression position), but
-                    ## the pragma is honoured only in statement position
-                    ## (was `feTransparentResultUsed`, issue #163 review R10)
-    avArgNotInert   ## statement position, but an argument is not provably
-                    ## inert -- a `var`/`ref`/`ptr`/possibly-ref-carrying
-                    ## argument the callee could write through (was
-                    ## `feTransparentArgNotInert`, issue #163 review R7)
-
-  AnnotationViolation* = object
-    ## RFC-0005 S8 (§13.3, i3 resolved by Corey 2026-09-26). A user's
-    ## annotation claim that the parser found to be FALSE at a call site.
-    ## NOT a decline: nothing is approximated because of it -- the call falls
-    ## back to opaque handling, whose walk-time `feOpaqueCallUnmodelled`
-    ## degrade taints every path through it (the soundness), so this record
-    ## is verdict-NEUTRAL by construction: no `classOf`, no `DeclineScope`,
-    ## no taint, never read by the verdict. It is
-    ## error-severity in spirit -- the user's code carries a wrong promise --
-    ## and rides its own channel (`SymexProgram.annotationViolations` ->
-    ## `RawResult`/`SymexResult.annotationViolations`) so it stays loud
-    ## without masquerading as a modelling gap. S11 renders it.
-    pragma*: SymexAnnotation         ## the annotation that was violated
-    kind*:   AnnotationViolationKind ## which of its promises broke
-    callee*: string                  ## the annotated callee's name
-    site*:   string                  ## `file:line:col` of the call site
-    msg*:    string                  ## the human-readable explanation
-
-  # ---- RFC-0005 S1: soundness channels (§2.1) ------------------------------
-  # Declared HERE, in `smt/types.nim` (which imports no z3), so the lattice is
-  # Z3-free: RFC-0005 §8.2 -- RFC-0007's trace engine shares it.
-  SoundnessChannel* = enum
-    ## RFC-0005 §2.1. The two structurally opposite ways the walker can be
-    ## wrong about a program, named for the FAILURE MODE they license rather
-    ## than the approximation direction (so the verdict rule reads
-    ## `scSpurious notin winnerTaint` / `scIncomplete notin runTaint`).
-    scSpurious    ## over-approximating: modelled ⊇ real. A witness on such a
-                  ## path may be spurious. Blocks sxSat for THIS path.
-    scIncomplete  ## under-approximating: modelled ⊆ real. A proof over such a
-                  ## run may have missed behaviours. Blocks sxUnsat RUN-WIDE.
-
-  Taint* = set[SoundnessChannel]
-    ## RFC-0005 §2.1. The powerset lattice on two elements: `⊥ = {}` (clean,
-    ## the identity of join), `⊤ = {scSpurious, scIncomplete}` (the
-    ## incomparable/"wrong, not merely coarse" class of §0.2); join is set
-    ## union. Carried per PATH (`Path.taint`, written at degrade sites) and
-    ## per RUN (`WalkCtx.runTaint`, DERIVED at drain from the error seqs --
-    ## §2.2 "The run coordinate is derived, not written").
-
-  DegradeClass* = enum
-    ## RFC-0005 §2.2. What a degrade site SUBSTITUTES, named -- the five
-    ## meaningful points of the four-coordinate (path, run) product. A
-    ## `classOf` row is a reviewable judgment ("kind K is dcFabricated"),
-    ## and the coordinates are derived once, in `pathTaint`/`runTaint`.
-    dcFreshSymbol   ## substitutes a fresh unconstrained symbol: modelled ⊇ real
-    dcSubstituted   ## forced value / stale env: modelled neither ⊇ nor ⊆ real
-    dcFabricated    ## the survivor path is fiction, but the omission is real:
-                    ## ⊤ on the path, {scIncomplete} on the run (k-unroll survivor)
-    dcOmitted       ## path drop / halt / prune: modelled ⊆ real
-    dcNoAnswer      ## Z3 unknown / walker fault: no modelled program exists
+  # RFC-0005 S11: `SymexAnnotation`, `AnnotationViolationKind`,
+  # `AnnotationViolation`, `SoundnessChannel`, `Taint` and `DegradeClass`
+  # moved to the leaf module `smt/soundness.nim` (imported and re-exported
+  # at the top of this file) so the Z3-free `engine/types.nim` can carry
+  # them on `SymexFinding` without importing this module. Still Z3-free,
+  # still reachable from here: RFC-0005 §8.2's placement constraint holds.
 
   SymexProgram* = object
     ## Defined here (after `SymexErrorInfo`) so `parseErrors` can name it;
@@ -2661,6 +2602,16 @@ type
       ## verdict-NEUTRAL: it never changes `status`, and a call it names is
       ## still tainted through its own `feOpaqueCallUnmodelled` entry in
       ## `errors`. Empty when `fromCache`.
+    soundness*:    Soundness
+      ## RFC-0005 S11 (§8.1). The winning path's taint, the run coordinate
+      ## and how a SAT claim was settled -- one common field, so every status
+      ## (including `sxRaised`) is auditable without a `case`. Read it
+      ## through `trusted()`; the per-cause view is `gaps()`.
+    bounds*:       ResourceBudget
+      ## RFC-0005 S11 (§8.2). The bound echo: the `ResourceBudget` this run
+      ## used, on every status. An `sxUnsat` is a proof only under these
+      ## bounds -- and by §2.3 it has no under-approximating error to say
+      ## so, so the settings are the one carrier (RFC-0011 / RFC-0008).
     fromCache*:    bool
       ## Phase 14 cycle C1. `true` iff this result was served from
       ## the verdict cache (`:unsat`/`:unk` suffix) or the witness
@@ -3512,6 +3463,48 @@ func unplacedDeclines*(errors: openArray[SymexErrorInfo]): seq[SymexErrorInfo] =
   for e in errors:
     if taintsRun(e) and e.scope.kind == dskUnplaced:
       result.add e
+
+func trusted*[T](r: SymexResult[T]): bool =
+  ## RFC-0005 §8.1 -- the single predicate the RFC exists to license. A
+  ## `sxSat`/`sxRaised` is trusted when its winning path is clean or the real
+  ## `fn` confirmed it (`trustedSat`); a `sxUnsat` when nothing in the run
+  ## under-approximated (`trustedUnsat`); a `sxUnknown` never.
+  case r.status
+  of sxSat, sxRaised: trustedSat(r.soundness)
+  of sxUnsat:         trustedUnsat(r.soundness)
+  of sxUnknown:       false
+
+func gapsOf*(errors: openArray[SymexErrorInfo]):
+    seq[tuple[class: DegradeClass, e: SymexErrorInfo]] =
+  ## RFC-0005 S11. The body of `gaps()`, over a bare error list (shared with
+  ## `SymexFinding.gaps`, whose record holds no `SymexResult`). Every entry
+  ## `taintsRun` admits -- exactly the entries `runTaintOf` builds
+  ## `soundness.runTaint` from -- paired with its `classOf`, in error-list
+  ## order. Hints and plain warnings decided nothing and are left out.
+  for e in errors:
+    if taintsRun(e):
+      result.add (class: classOf(e.kind), e: e)
+
+func gaps*[T](r: SymexResult[T]): seq[tuple[class: DegradeClass, e: SymexErrorInfo]] =
+  ## RFC-0005 §8.1 -- the per-cause view. `soundness.runTaint` is the join
+  ## over every decline, so on a real SUT it is often ⊤ ("model gap" and
+  ## "budget problem" at once); this lists each cause with its class, and the
+  ## class names the lever:
+  ##   * `dcOmitted`      -- a path was dropped at a bound: raise the budget
+  ##                         the message names (`maxLoopUnwind`,
+  ##                         `maxCallDepth`, heap depth,
+  ##                         `maxClosureInlineCount`, ...). Fixable by the
+  ##                         caller.
+  ##   * `dcFreshSymbol`,
+  ##     `dcSubstituted`  -- a model gap: engine work, or mark the call
+  ##                         `{.symexTransparent.}` if it really is inert.
+  ##   * `dcFabricated`   -- the bound was hit and the continuation is
+  ##                         fiction (the k-unroll survivor); raising the
+  ##                         bound it names is the lever.
+  ##   * `dcNoAnswer`     -- the solver ran out of resources, or a walker
+  ##                         defect.
+  ## Empty on a clean run and on a result served from the cache.
+  gapsOf(r.errors)
 
 proc checkUnsatOverTaintOnly*[T](r: SymexResult[T]) =
   ## RFC-0005 §4.3 (landed S4): the checked justification for a pin that

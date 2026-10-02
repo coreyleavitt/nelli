@@ -28,11 +28,11 @@ suite "symex Phase 13 cycle 3 — verdict primitives":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     let loaded = loadSymexVerdictImpl(db, prog, target,
                                        defaultSymexSettings(), errors)
     check loaded.isSome
-    check loaded.get == sfUnsat
+    check loaded.get.status == sfUnsat
     check errors.len == 0
 
   test "tie-break: save UNSAT then UNKNOWN — load returns sfUnsat":
@@ -42,13 +42,13 @@ suite "symex Phase 13 cycle 3 — verdict primitives":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnknown, errors)
+                         defaultSymexSettings(), sfUnknown, Soundness(runTaint: {scIncomplete}), errors)
     let loaded = loadSymexVerdictImpl(db, prog, target,
                                        defaultSymexSettings(), errors)
     check loaded.isSome
-    check loaded.get == sfUnsat
+    check loaded.get.status == sfUnsat
 
   test "tie-break is LOAD-order not save-order: UNKNOWN saved first":
     # This is the only sequence that actually exercises the rule.
@@ -59,13 +59,13 @@ suite "symex Phase 13 cycle 3 — verdict primitives":
     let db = inMemoryDatabase()
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnknown, errors)
+                         defaultSymexSettings(), sfUnknown, Soundness(runTaint: {scIncomplete}), errors)
     saveSymexVerdictImpl(db, prog, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     let loaded = loadSymexVerdictImpl(db, prog, target,
                                        defaultSymexSettings(), errors)
     check loaded.isSome
-    check loaded.get == sfUnsat
+    check loaded.get.status == sfUnsat
 
   test "db.save failure accumulates errors; analysis continues":
     # A test-only database whose saveImpl raises. The verdict save
@@ -75,10 +75,17 @@ suite "symex Phase 13 cycle 3 — verdict primitives":
       saveImpl: proc(testId: string, choices: seq[ChoiceNode],
                      maxEntries: int) =
         raise newException(IOError, "disk full"),
-      loadPrimaryImpl: proc(testId: string): seq[seq[ChoiceNode]] = @[])
+      loadPrimaryImpl: proc(testId: string): seq[seq[ChoiceNode]] = @[],
+      # RFC-0005 S11: the verdict sentinel carries its soundness in the
+      # entry metadata, so the cache writes and reads through the `meta`
+      # pair -- the failing backend fails there too.
+      saveWithMetaImpl: proc(testId: string, choices: seq[ChoiceNode],
+                             meta: Table[string, string], maxEntries: int) =
+        raise newException(IOError, "disk full"),
+      loadPrimaryWithMetaImpl: proc(testId: string): seq[PrimaryEntry] = @[])
     var errors: seq[string] = @[]
     saveSymexVerdictImpl(failingDb, prog, target,
-                         defaultSymexSettings(), sfUnsat, errors)
+                         defaultSymexSettings(), sfUnsat, Soundness(), errors)
     check errors.len == 1
     check "disk full" in errors[0]
     # Load returns none (loadImpl returns @[] — empty/miss).

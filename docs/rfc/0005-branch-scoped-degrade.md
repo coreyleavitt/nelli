@@ -319,7 +319,7 @@ state = "pending"
 [[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
-state = "pending"
+state = "done"
 +++
 
 # RFC — soundness channels: separating over- from under-approximation
@@ -7552,6 +7552,116 @@ nobody noticing, because `examples/` is built by neither CI nor `nimble test`**.
 Putting the worked "read `gaps()`, pull the right lever" walkthrough there and
 nowhere else deposits this RFC's user-facing payoff in dead code. S11 puts the
 walkthrough in a **registered test file** and lets the example mirror it.
+
+**As landed (S11, walker 188).** Pins: `tests/tsymex_rfc0005_s11_surface.nim`
+(public imports only — `nelli`, `nelli/symex`), registered in `nelli.nimble`.
+Migration note: `docs/migration/0.9.0.md`, with a CHANGELOG `[Unreleased] —
+0.9.0` entry.
+
+- **Placement (a deviation from §8.2's sentence, not from its constraint).**
+  `SoundnessChannel`/`Taint`/`DegradeClass`, the new `ReplayStatus`/`Soundness`
+  and the annotation vocabulary (`SymexAnnotation`, `AnnotationViolationKind`,
+  `AnnotationViolation`) moved out of `smt/types.nim` into a new leaf module,
+  `smt/soundness.nim`, which has no imports at all. `smt/types.nim`,
+  `engine/types.nim` and `symex.nim` re-export it. The reason is
+  `SymexFinding`: `engine/types.nim` is the Z3-free record and must not import
+  `smt/types.nim`, but it now carries `Soundness` and `AnnotationViolation`.
+  §8.2's real requirement — the lattice is Z3-free so RFC-0007 can share it —
+  holds more strongly than before.
+- **One carrier.** `RawResult.pathTaint` became `RawResult.soundness`
+  (`pathTaint`, `runTaint`, `replay`), and `SymexResult` gained the same field
+  in its common section, exactly as §8.1 sketched.
+  - `runTaint` is derived once, at `runSymex`'s public exit, from the final
+    error list (`runTaintOf`, after the boundary overrides). The S1 writer pin
+    now names `runtime.nim:runSymex` beside `runSymexImpl`, with that
+    justification.
+  - `settleCandidate` re-derives `runTaint` for a confirmed claim, because the
+    candidate's own extraction errors join the result's list, and it is the
+    single writer of `rsConfirmed`.
+- **`trusted()`** is §8.1's predicate verbatim (`trustedSat` / `trustedUnsat`
+  on `Soundness`). `SymexFinding` has its own overload; `sfNotApplicable` and
+  `sfReplayMiss` are never trusted.
+- **`gaps()`** returns the `taintsRun` entries paired with `classOf` (via
+  `gapsOf`, shared with the finding). It therefore omits hints and warnings,
+  and its class join equals `soundness.runTaint`, which a test pins. The lever
+  table is its doc comment. `SymexFinding.gaps` is the Z3-free projection
+  (`FindingGap`: `class`, `kind` as a string, `msg`). It is empty on a cache
+  hit, because the cache stores the soundness, not the error list.
+- **Bound echo:** `bounds: ResourceBudget` on `RawResult` and `SymexResult`, set
+  from `settings.budget` on every status (§8.2's decision).
+- **Invariant-7 backstop strengthened.** The `sxUnknown` backstop used to fire
+  only on an EMPTY error list. An `sxUnknown` whose errors were all hints or
+  warnings (no run-tainting entry) shipped `runTaint == {}`, which breaks
+  §8.1's "`forcedBy != {}`" and leaves `gaps()` empty. It now fires when
+  `runTaintOf(errors) == {}`, which is the same `weInternalWalkerFault`, at
+  the same single site.
+- **Cache value schema (§7).** Each entry's `Soundness` rides the
+  `ExampleDatabase` per-entry metadata (F6's `save(..., meta)` /
+  `loadPrimaryWithMeta`), under the key `soundness` with a versioned encoding
+  (`"1:<pathBits>:<runBits>:<replayOrd>"`). This applies to the `:sat`
+  witness entries, the `:unsat`/`:unk` sentinels and each `:raised:<type>`
+  sentinel.
+  - A served result carries the stored `Soundness` unchanged.
+  - An entry without the metadata is a **miss**, with a note in the errors,
+    never a clean verdict.
+  - Replay already preceded persist (S10). `symexFindAllWitnesses` now saves
+    the settled `f.soundness` with the verdict.
+  - The public helpers changed shape. `saveSymexVerdict(Impl)` takes a
+    `Soundness`; `loadSymexVerdict(Impl)` returns `Option[CachedVerdict]`;
+    `loadSymexWitnesses(Impl)` returns `seq[CachedWitness]`.
+  - A backend that leaves the metadata closures nil (a hand-built
+    `ExampleDatabase`) is reported and skipped, never called. Calling a nil
+    closure is a SIGSEGV, which the cache's best-effort `try` cannot absorb,
+    and the S11 suite's first RED was exactly that crash.
+- **`SymexFinding` and the render layer.**
+  - Every finding built in `assertCoveredBy` and `symexFindAllWitnesses`
+    carries `soundness`, `gaps` and `annotationViolations`. The violations are
+    parse-time facts, so they are present on a cache hit too.
+  - `engine/render.nim` adds:
+    - `ofText`: a `[symex]` section;
+    - `ofJson`: a `symexFindings` array;
+    - `ofJunit`: `<system-out>`;
+    - `ofGithubAnnotation`: an `::error` per annotation violation, and a
+      `::warning` per untrusted finding other than not-applicable and
+      replay-miss.
+  - All of it is additive: a report with no findings renders byte-for-byte as
+    before, which is pinned.
+- **The seed filter** (`symexForAll`, `status == sfSat`) needed no change.
+  Since S10 every shipped `sfSat` is trusted by construction. A comment there
+  records why.
+- **Docs.**
+  - The `symexOpaque`/`symexTransparent` doc comments (and the parser's twin)
+    now describe the `dcSubstituted` gap, replay, and the
+    annotation-violation channel in place of "an extra `sxUnknown`".
+  - `examples/symex_loops.nim` mirrors the registered walkthrough (suite (c)).
+  - `examples/symex_stdlib_model.nim` reads its gap.
+- Walker 182 → 188 (S11 widened the cache value and strengthened the
+  backstop). The CR2 `==` pin was updated; the S11 file carries the `>= 188`
+  floor.
+
+*Different mechanisms, reported and not fixed here.*
+- **The public cache macros drop their DB errors.** `saveSymexWitness`,
+  `loadSymexWitnesses`, `saveSymexVerdict` and `loadSymexVerdict` collect
+  `dbErrors` into a block-local `{.used.}` variable and discard it. The comment
+  at the site has deferred the wiring since Phase 13 cycle 7. A caller of those
+  macros therefore never sees an S11 miss reason, or any other save or load
+  failure. `symexFindAllWitnesses` is unaffected: it routes its errors. This is
+  pre-existing, and a different mechanism from S11's schema: it is the
+  macros' error plumbing.
+- **`ExampleDatabase`'s optional closures are unchecked everywhere else.**
+  S11 guards the symex cache against nil `saveWithMetaImpl` /
+  `loadPrimaryWithMetaImpl`. `db.nim`'s public wrappers (`save(..., meta)`,
+  `loadPrimaryWithMeta`, and the corpus/secondary/scheduler wrappers) still
+  call whatever closure is set, and the fuzzer's F6 paths reach them, so a
+  partial hand-built backend crashes there with a SIGSEGV rather than an
+  error. This is pre-existing and belongs to `db.nim`'s record contract, not
+  to the symex surface.
+- **A cache hit's `gaps` is empty.** The schema stores the run's `Soundness`,
+  not its error list. A served `sfUnknown` is therefore untrusted, with its
+  `runTaint` intact, but it cannot name its levers until it is re-run cold.
+  Storing the classified errors as well would be a schema widening that §7 did
+  not ask for. It is recorded here so that a consumer who needs per-cause data
+  from a warm run knows the current shape.
 
 ### §8.2 Downstream RFCs
 

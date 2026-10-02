@@ -377,8 +377,10 @@ suite "RFC-0005 S10 (c) -- symexFindAllWitnesses / symexForAll, and the cache":
     check sideEffects == 1
     check loadSymexWitnesses(db, s10AllRefute, tLabel("s10_all_refute"),
                              defaultSymexSettings()).len == 0
-    check loadSymexVerdict(db, s10AllRefute, tLabel("s10_all_refute"),
-                           defaultSymexSettings()) == some(sfUnknown)
+    let storedVerdict = loadSymexVerdict(db, s10AllRefute,
+                                         tLabel("s10_all_refute"),
+                                         defaultSymexSettings())
+    check storedVerdict.isSome and storedVerdict.get.status == sfUnknown
 
   test "symexFindAllWitnesses: an scSpurious-tainted raise is replay-gated (confirmed -> sfRaised)":
     let db = inMemoryDatabase()

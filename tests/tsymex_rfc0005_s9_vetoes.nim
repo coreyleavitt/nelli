@@ -130,9 +130,11 @@ proc s9CapEscaped(x: int) =
     symexTarget("s9_capescaped")
 
 proc s9BodyWrite(x: int) =
-  ## The closure body WRITES the captured `var`: the write is not carried
-  ## back to the caller, so the application declines rather than leaving
-  ## `k == 0` behind it.
+  ## The closure body WRITES the captured `var`. S9: the write was not
+  ## carried back to the caller, so the application declined rather than
+  ## leaving `k == 0` behind it. RFC-0005 S8as writes it back (the closure is
+  ## applied in the frame that built it): `k == x` after `f(x)`, so the
+  ## label is dead.
   var k = 0
   let f = proc(v: int) = k = v
   f(x)
@@ -281,11 +283,13 @@ suite "RFC-0005 S9 (b) -- a closure reads its captured var at the call":
     check r.status == sxUnknown
     check r.errors.hasKind(ceCaptureByRefUnmodelled)
 
-  test "a body that writes a captured var declines, never the lost write's sxSat":
+  test "a body that writes a captured var writes it back -- the label is dead, sxUnsat":
+    ## RFC-0005 S8as (was the `ceCaptureByRefUnmodelled` decline, never the
+    ## lost write's sxSat).
     let r = symexFind(s9BodyWrite, tLabel("s9_bodywrite"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(ceCaptureByRefUnmodelled)
+    check r.status == sxUnsat
+    checkUnsatOverTaintOnly(r)
 
   test "ceCaptureByRefUnmodelled is dcSubstituted (the stand-in is a stale value)":
     check classOf(ceCaptureByRefUnmodelled) == dcSubstituted

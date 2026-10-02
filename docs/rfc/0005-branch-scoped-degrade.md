@@ -7075,7 +7075,12 @@ v` ran past 400 s under an unconditional Int heap).
 Updated pins in `tests/tsymex_rfc0005_s8an_remainder.nim`: `cvw`, `lvn`,
 `gcl` and `glam` (a closure's write, declined there) are `sxSat`; `gfr` (a
 global read first, declined there) is a replay-gated candidate with
-`feGlobalHavoc`. `feGlobalHavoc` joins `tsymex_rfc0005_s1_lattice`'s
+`feGlobalHavoc`. In `tsymex_rfc0005_s9_vetoes`, `s9BodyWrite` (a closure
+writing its captured `var`, declined there) is a clean `sxUnsat`: after
+`f(x)`, `k == x`. In `tsymex_163rev_degrade_classification`, the read of
+`var gLimit163rev` is `feGlobalHavoc`, naming the global, and is never
+`sxUnsat`; a SAT is replay-confirmed against the real limit.
+`feGlobalHavoc` joins `tsymex_rfc0005_s1_lattice`'s
 reclassified set. `tsymex_rfc0005_s7_closure`'s audited solver-sink list
 gains `globalEntryFacts` (each fact mentions only its own fresh entry
 symbol and holds for every value of the type, so it prunes no real input).

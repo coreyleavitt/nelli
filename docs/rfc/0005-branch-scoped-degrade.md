@@ -352,6 +352,11 @@ title = "S8ba's remainder: symbolic string index cost, seq[distinct] parameter w
 state = "done"
 
 [[slice]]
+id = "S8bf"
+title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing through let-bound ref copies"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

@@ -1,0 +1,13 @@
+sxSat    
+q0 unsat drlimit=258 conflicts=0 decisions=0
+q1 unsat drlimit=125 conflicts=0 decisions=0
+q2 sat drlimit=5704 conflicts=8 decisions=132
+q3 unsat drlimit=129 conflicts=0 decisions=0
+q4 sat drlimit=3619 conflicts=4 decisions=61
+q5 unsat drlimit=110 conflicts=0 decisions=0
+q6 sat drlimit=1234 conflicts=2 decisions=36
+q7 unsat drlimit=2407 conflicts=1 decisions=0
+q8 unsat drlimit=2418 conflicts=1 decisions=0
+q9 unsat drlimit=942 conflicts=1 decisions=0
+q10 sat drlimit=2276494 conflicts=1273 decisions=127334
+TOTAL queries=11 drlimit=2293440  

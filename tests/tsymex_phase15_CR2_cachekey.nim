@@ -928,33 +928,34 @@ suite "Phase 15 CR-2 — version bumps":
     ## walker number. 182->190.
     ## RFC-0005 S8ar (tree-valued heap cells; every backed Table key and
     ## value type; insert; seq[string]; dotted chains rooted at a ref
-    ## field; heap-step depth budget). 190->191 (provisional).
+    ## field; heap-step depth budget). Provisional 191.
     ## RFC-0005 S8at (S8ar's remainder: case-object and tuple heap cells,
     ## array-of-seq merges, distinct-over-composite, in-place element and
     ## Table-value mutation, KeyError, float keys, container Table values).
-    ## 191->193 (provisional).
+    ## Provisional 193.
     ## RFC-0005 S8as (if-arm pruning in a recursion; opaque-call write
     ## summaries; a global's entry value; closure write-back; more
     ## `addr` forms; a path-based alias check; an Int-sorted `int`
-    ## heap). 190->192 (191 is S8ar's).
+    ## heap). Provisional 192.
     ## RFC-0005 S8au (copy-in/copy-out through a global or capture
     ## declines; var ptr modelled; every find / rfind needle splits;
     ## consecutive chain facts; the c-notin-t form per Z3 version).
     ## Provisional 194.
     ## RFC-0005 S8av (the cache value carries gaps() on a verdict-cache hit,
-    ## closing S11's own "cache hit returns empty gaps" remainder). 190->195
-    ## (191-194 reserved for sibling slices landing on the same channel tip).
+    ## closing S11's own "cache hit returns empty gaps" remainder).
+    ## Provisional 195.
     ## RFC-0005 S8az (S8av's own remainder: the :sat witness and
-    ## :raised:<type> cache slots also carry gaps() on a hit now). 195->199
-    ## (196-198 reserved for sibling slices on the same channel tip; S8ay
-    ## holds 198).
+    ## :raised:<type> cache slots also carry gaps() on a hit now).
+    ## Provisional 199.
     ## RFC-0005 S8aw (regex replace lowered by the walker for a literal, a
     ## one-byte class and a class under `+`; the last_indexof/indexof join
     ## emitted). Provisional 196.
     ## RFC-0005 S8ay (the std/re entry points' own formulas over a
     ## PCRE-faithful reader; re vs rex in the IR; a rejected pattern raises
-    ## RegexError). Provisional 198 (S8ax holds 197).
-    check symexWalkerVersion == "199"
+    ## RegexError). Provisional 198.
+    ## RFC-0005 batch 2 lands S8ar, S8at, S8as, S8au, S8av, S8az, S8aw and
+    ## S8ay as one walker number. 190->202.
+    check symexWalkerVersion == "202"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

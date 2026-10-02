@@ -202,7 +202,14 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "199"
+const symexWalkerVersion* = "202"
+  ## RFC-0005 batch 2 (2026-10-02) — S8ar, S8at, S8as, S8au, S8av, S8az,
+  ## S8aw and S8ay were built in parallel on the channel tip (S8at on S8ar,
+  ## S8az on S8av, S8ay on S8aw), each with a provisional number, and land
+  ## stacked as one integration branch under ONE walker number. Their
+  ## bullets follow, newest work first; each names its provisional number.
+  ## 190 -> 202.
+  ##
   ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own
   ## formulas (`regex_parser.lowerRegexEntry`) over a PCRE-faithful byte
   ## reader (`pcre_syntax.nim`): `contains` is an occurrence in
@@ -212,18 +219,18 @@ const symexWalkerVersion* = "199"
   ## -24), `startsWith` / `endsWith` / `find` / `matchLen` / `findBounds`
   ## are lowered (leftmost and PCRE-chosen matches via definitional
   ## constraints), `start` outside int32 forks RangeDefect. `.` excludes
-  ## `\n`; `\D \W \S` are complements; `\s \h \v`, POSIX classes,
-  ## anchors `^ $ \A \z \Z` read as PCRE does. `re` vs `rex` rides in the
-  ## IR (`strOp` is `<entry>:<re|rex|?>:<pattern>`). A pattern PCRE
-  ## rejects raises `RegexError` with Nim's exact message (new
-  ## `regexRaiseMsgs` sink, the last `drainScalarRaiseForks` stage).
-  ## findAll / split / replacef / multiReplace / captures decline instead
-  ## of aborting the compile. Regex replace over a receiver of unknown
-  ## length is an exact recursive function past the 16-byte unroll (no
-  ## fresh arm). `checkCapped` runs step 1c's uncapped half first (step
-  ## 0, `factsFirstRLimit`), so a query only it refutes no longer runs out
-  ## step 1's budget first (the same UNSATs (1b) / (1c) reached after
-  ## step 1, at a fraction of the cost). Provisional 198 (S8ax holds 197).
+  ## `\n`; `\D \W \S` are complements; `\s \h \v`, POSIX classes, anchors `^
+  ## $ \A \z \Z` read as PCRE does. `re` vs `rex` rides in the IR (`strOp`
+  ## is `<entry>:<re|rex|?>:<pattern>`). A pattern PCRE rejects raises
+  ## `RegexError` with Nim's exact message (new `regexRaiseMsgs` sink, the
+  ## last `drainScalarRaiseForks` stage). findAll / split / replacef /
+  ## multiReplace / captures decline instead of aborting the compile. Regex
+  ## replace over a receiver of unknown length is an exact recursive
+  ## function past the 16-byte unroll (no fresh arm). `checkCapped` runs
+  ## step 1c's uncapped half first (step 0, `factsFirstRLimit`), so a query
+  ## only it refutes no longer runs out step 1's budget first (the same
+  ## UNSATs (1b) / (1c) reached after step 1, at a fraction of the cost).
+  ## Provisional 198; batch 2.
   ##
   ## RFC-0005 S8aw (2026-10-02) — regex `replace(s, re"p", by)` is lowered
   ## by the walker (`runtime_strings.nim`, `regexReplaceShape` /
@@ -239,8 +246,7 @@ const symexWalkerVersion* = "199"
   ## least every found `str.indexof(s, t, i)`", which S8aq declined because
   ## Z3 cannot refute its negation: links are held to S8ai's bar, their
   ## truth enumerated exhaustively. A first index past the last is now
-  ## `sxUnsat` (was `sxUnknown`). Provisional 196 (S8ar..S8av hold
-  ## 191..195).
+  ## `sxUnsat` (was `sxUnknown`). Provisional 196; batch 2.
   ##
   ## RFC-0005 S8az (2026-10-02) — S8av's own remainder. The cache VALUE is
   ## widened a third time: the `:sat` witness entry (`CachedWitness`) and
@@ -251,14 +257,13 @@ const symexWalkerVersion* = "199"
   ## run would (`symex.nim`'s `saveSymexWitnessImpl`/
   ## `loadSymexWitnessesImpl`/`saveSymexRaisedImpl`/`loadSymexRaisedImpl`,
   ## sharing S8av's `gapsMeta`/`storedGaps` encode/decode pair rather than
-  ## each growing its own). No solving semantics changed. Same convention
-  ## as S8av: the bump orphans every pre-S8az `:sat`/`:raised` entry (the
-  ## next miss re-derives with gaps attached), and an entry under the
-  ## current key that still lacks gaps metadata (e.g. a hand-built test
-  ## double or third-party writer) degrades to a hit with empty `gaps`
-  ## rather than a second miss — soundness remains the load-bearing field;
-  ## gaps is best-effort detail on top of it. 195 -> 199 (196-198 reserved
-  ## by sibling slices landing on the same channel tip; S8ay holds 198).
+  ## each growing its own). No solving semantics changed. Same convention as
+  ## S8av: the bump orphans every pre-S8az `:sat`/`:raised` entry (the next
+  ## miss re-derives with gaps attached), and an entry under the current key
+  ## that still lacks gaps metadata (e.g. a hand-built test double or
+  ## third-party writer) degrades to a hit with empty `gaps` rather than a
+  ## second miss — soundness remains the load-bearing field; gaps is
+  ## best-effort detail on top of it. Provisional 199; batch 2.
   ##
   ## RFC-0005 S8av (2026-10-02) — S8am's and S11's remainder, item 3. The
   ## cache VALUE is widened again: a persisted `:unsat` / `:unk` verdict
@@ -273,77 +278,71 @@ const symexWalkerVersion* = "199"
   ## entry under the current key that still lacks the gaps metadata (e.g. a
   ## third-party writer) degrades to a hit with empty `gaps` rather than a
   ## second miss — soundness remains the load-bearing field; gaps is
-  ## best-effort detail on top of it. 190 -> 195 (191-194 reserved by
-  ## sibling slices landing on the same channel tip).
+  ## best-effort detail on top of it. Provisional 195; batch 2.
   ##
-  ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. Provisional
-  ## 194 (S8ar 191, S8as 192, S8at 193 in the same batch). (3) A
+  ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. (3) A
   ## copy-in/copy-out `var` actual, or an `addr` actual, whose heap cell a
   ## global or a capture the callee reaches (directly or through the user
   ## routines it calls) can also hold, is a scoped `feUnsupportedOp`
   ## decline: the callee's write through that global was lost to the
-  ## write-back (a false `sxSat`). A `var ptr` formal passed a local
-  ## `p = addr x` is S8an's local pointer, modelled (was `heUnsafeCast`).
-  ## (4) Every `find` needle -- a literal of any length, a computed one
-  ## (the empty needle by a `len(c) = 0` case split) -- and every `rfind`
-  ## lower to the S8ag index split, not Z3's `str.indexof` /
-  ## `seq.last_indexof`; an rfind split is linked to each find split of
-  ## its haystack and needle (a found index is at most the last one), and
-  ## a literal needle of 2..16 characters states its characters at the
-  ## match. S8aq's "declined" `foundExceedsLast` label is now `sxUnsat`.
-  ## (5) The split chain facts link consecutive splits of a haystack, not
-  ## every pair. (6) `c notin t` takes the cheaper form
-  ## for the linked Z3 (`notInFormFor`: 5.x the regex, 4.x `not
-  ## contains`). Items 1 and 2 (local distinct values, the negative
-  ## `div` fixed point) were closed by S8ad (walker 175) and are pinned
-  ## again in `tsymex_rfc0005_s8au_remainder`.
+  ## write-back (a false `sxSat`). A `var ptr` formal passed a local `p =
+  ## addr x` is S8an's local pointer, modelled (was `heUnsafeCast`). (4)
+  ## Every `find` needle -- a literal of any length, a computed one (the
+  ## empty needle by a `len(c) = 0` case split) -- and every `rfind` lower
+  ## to the S8ag index split, not Z3's `str.indexof` / `seq.last_indexof`;
+  ## an rfind split is linked to each find split of its haystack and needle
+  ## (a found index is at most the last one), and a literal needle of 2..16
+  ## characters states its characters at the match. S8aq's "declined"
+  ## `foundExceedsLast` label is now `sxUnsat`. (5) The split chain facts
+  ## link consecutive splits of a haystack, not every pair. (6) `c notin t`
+  ## takes the cheaper form for the linked Z3 (`notInFormFor`: 5.x the
+  ## regex, 4.x `not contains`). Items 1 and 2 (local distinct values, the
+  ## negative `div` fixed point) were closed by S8ad (walker 175) and are
+  ## pinned again in `tsymex_rfc0005_s8au_remainder`.
+  ## Provisional 194; batch 2.
   ##
-  ## RFC-0005 S8at (2026-10-02) — S8ar's remainder; provisional number (the
-  ## channel assigns the final one at merge). An anonymous-tuple pointee's
-  ## `new` zeroes it (a false sxSat); a by-value case-object field is a
-  ## tree-valued heap cell, and a whole-pointee read of a ref case object
-  ## reads the same heaps its fields do; a symbolic index into an array of
-  ## seqs merges the elements exactly; a `distinct` over a composite base is
-  ## lowered through its base (index, `len`, field); `a[i].add x` on an array
-  ## element and `t[k].add x` on a Table value mutate in place; a Table's
-  ## absent-key `[]` raises `KeyError` (the handler was dead: a false
-  ## sxUnsat); Table keys may be floats (`-0.0` and `0.0` one key, a NaN
-  ## never found) and values may be a backed seq, HashSet or Table (one
-  ## data array per leaf); a 2^32-cell key domain no longer faults; an
-  ## inlined iterator parameter's conversion declines instead of failing
-  ## the compile. 191->193.
-  ##
-  ## RFC-0005 S8ar (2026-10-01) — S8ap's remainder; provisional number (the
-  ## channel assigns the final one at merge). A seq of the object's own ref
-  ## type classifies; `seq[string]` elements and `insert` are modelled;
-  ## value field chains rooted at a ref object's field (`p.inner.s.add v`)
-  ## write the field back; tuple / object / array / scalar-distinct fields
-  ## are tree-valued heap cells, zeroed by `new` and constructors; a Table
-  ## of any backed key (string or integer-like) and value (integer-like,
-  ## string, float) type is modelled and rendered; a ref pointee's
-  ## unrenderable container no longer demotes the parameter; the heap-depth
-  ## budget counts heap steps; a constant array index selects without a
-  ## merge; a distinct-over-composite store declines instead of building an
-  ## ill-sorted term. 190->191.
-  ##
-  ##
-  ## RFC-0005 S8as (2026-10-02) — S8an's remainder. Inside a recursive
-  ## frame an `if` arm (or else path) whose query is UNSAT is dropped before
-  ## it is walked. An inert opaque call carries an effect summary
+  ## RFC-0005 S8as (2026-10-02) — S8an's remainder. Inside a recursive frame
+  ## an `if` arm (or else path) whose query is UNSAT is dropped before it is
+  ## walked. An inert opaque call carries an effect summary
   ## (`IRStmt.opaqueHavoc`: the module-level `var`s and nested captures its
   ## routine may write, transitively; `*` for a method or a bodiless foreign
   ## routine) and every name in it holds a fresh value afterwards
-  ## (`feGlobalHavoc`, `dcFreshSymbol`). A global read before the walk writes
-  ## it holds its entry value (`SymexProgram.globals`): a `let` with a
-  ## literal initialiser exactly, anything else a fresh value
+  ## (`feGlobalHavoc`, `dcFreshSymbol`). A global read before the walk
+  ## writes it holds its entry value (`SymexProgram.globals`): a `let` with
+  ## a literal initialiser exactly, anything else a fresh value
   ## (`feGlobalHavoc`). A closure body's write to a global, or to a capture
   ## of a closure applied in the frame that built it, is written back to the
   ## caller (`closureEnvWrites`, raise exits included); a closure call in a
   ## short-circuit operand forks as an inline defect would. `let p = addr
   ## a[2]`, several pointers in one section and a re-point by a statement of
   ## the list are modelled, and the argument alias check is by path. The
-  ## 64-bit `int` heap is Int-sorted. Supersedes "190" (191 is S8ar's,
-  ## landing separately):
+  ## 64-bit `int` heap is Int-sorted. Provisional 192; batch 2.
+  ##
+  ## RFC-0005 S8at (2026-10-02) — S8ar's remainder. An anonymous-tuple
+  ## pointee's `new` zeroes it (a false sxSat); a by-value case-object field
+  ## is a tree-valued heap cell, and a whole-pointee read of a ref case
+  ## object reads the same heaps its fields do; a symbolic index into an
+  ## array of seqs merges the elements exactly; a `distinct` over a
+  ## composite base is lowered through its base (index, `len`, field);
+  ## `a[i].add x` on an array element and `t[k].add x` on a Table value
+  ## mutate in place; a Table's absent-key `[]` raises `KeyError` (the
+  ## handler was dead: a false sxUnsat); Table keys may be floats (`-0.0`
+  ## and `0.0` one key, a NaN never found) and values may be a backed seq,
+  ## HashSet or Table (one data array per leaf); a 2^32-cell key domain no
+  ## longer faults; an inlined iterator parameter's conversion declines
+  ## instead of failing the compile. Provisional 193; batch 2.
+  ##
+  ## RFC-0005 S8ar (2026-10-01) — S8ap's remainder. A seq of the object's
+  ## own ref type classifies; `seq[string]` elements and `insert` are
+  ## modelled; value field chains rooted at a ref object's field
+  ## (`p.inner.s.add v`) write the field back; tuple / object / array /
+  ## scalar-distinct fields are tree-valued heap cells, zeroed by `new` and
+  ## constructors; a Table of any backed key (string or integer-like) and
+  ## value (integer-like, string, float) type is modelled and rendered; a
+  ## ref pointee's unrenderable container no longer demotes the parameter;
+  ## the heap-depth budget counts heap steps; a constant array index selects
+  ## without a merge; a distinct-over-composite store declines instead of
+  ## building an ill-sorted term. Provisional 191; batch 2.
   ##
   ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional

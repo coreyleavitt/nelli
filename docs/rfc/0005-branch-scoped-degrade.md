@@ -6970,7 +6970,7 @@ same way.
   `renderedSize` and the `[0, 1024]` length window are the only guard, and
   a future reader of unread cells would have to assert the facts itself.
 
-**As landed (S8ar, walker 191, provisional) — S8ap's remainder.**
+**As landed (S8ar, walker 191) — S8ap's remainder.**
 
 *Faults first.*
 - **A seq of the object's own ref type classifies.** `classifyType` keeps
@@ -7233,7 +7233,7 @@ built. `tabDataVarOf` now holds a live term of each sort across the call.
   should hold both sorts while it builds the array sort, followed by a
   lock bump. It is not a walker change.
 
-**As landed (S8at, walker 193, provisional) — S8ar's remainder.** Pins:
+**As landed (S8at, walker 193) — S8ar's remainder.** Pins:
 `tests/tsymex_rfc0005_s8at_remainder.nim`. Every item was probed at the base
 (2e33081) before it was changed. Two of them hid a wrong verdict, and each
 was pinned RED first:
@@ -8154,6 +8154,21 @@ They land stacked, in that order, on one integration branch under ONE number:
 `renderAsChoicesVersion` 11 -> 12 is unchanged. S11 adds no separate cache
 schema version: its widened cache value rides the walker key.
 
+**Batch 2 (2026-10-02) — one walker number for eight slices.** S8ar, S8at,
+S8as, S8au, S8av, S8az, S8aw and S8ay were built in parallel on the channel tip
+(S8at on S8ar, S8az on S8av, S8ay on S8aw), each with a provisional walker
+number (S8ar 191, S8as 192, S8at 193, S8au 194, S8av 195, S8aw 196, S8ay 198,
+S8az 199). They land stacked, in that order, on one integration branch under
+ONE number: `symexWalkerVersion` 190 -> **202**, the CR2 `==` pin 202. Each
+slice's own `>=` floor stays at its provisional number; the "walker N" in each
+"As landed" heading is that provisional number. S8au and S8aw both closed S8aq
+item 2's end-to-end pin (`foundExceedsLast`, `sxUnknown` -> `sxUnsat`) through
+different terms: in the stack a SUT's `find` / `rfind` lower to S8au's index
+splits and take `indexSplitLastLink`, and S8aw's `seqRangeFacts` join covers
+the native `str.indexof` / `seq.last_indexof` terms that remain (a query built
+directly). S8az's and S8av's cache-value widenings ride the walker key, as
+S11's did.
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see
@@ -8992,7 +9007,7 @@ capped verdict, one-shot step 3): without it `tsymex_rfc0005_s8o_termination`
   term construction can move costs by an order of magnitude with no change
   in the asserted text; S8ag's B1-1 probe (0.37M) is the canary.
 
-**As landed (S8aw, walker 196 provisional) — S8aq's remainder.** Both
+**As landed (S8aw, walker 196) — S8aq's remainder.** Both
 items are done. Item 1 took fork (a) below, decided by the coordinator.
 
 *1. The `seqRangeFacts` / `str.indexof` join — emitted, under the links'
@@ -9200,7 +9215,7 @@ Pins: `tests/tsymex_rfc0005_s8aw_remainder.nim` (about 11 s on Z3 5.1):
   pins run at the tight budget (which also pins that the verdict is step
   1c's). S8aq (2)'s re-pinned walk keeps the default and pays the cost.
 
-**As landed (S8ay, walker 198 provisional) — S8aw's remainder.** All six
+**As landed (S8ay, walker 198) — S8aw's remainder.** All six
 items are done; nothing is deferred. Item 6 (step 1c's cost) and the
 exhaustive membership check were added to the scope after S8aw's finding;
 the branch is rebased onto S8aw's final `4a8e51f`.

@@ -1043,8 +1043,14 @@ task test, "Run the test suite":
             # walker (a literal, a one-byte class, a class under `+`;
             # every leftmost non-overlapping PCRE match, unrolled per
             # position) instead of the never-built `str.replace_re` gate;
-            # other shapes decline naming the construct. Walker 196.
+            # other shapes decline naming the construct; the last_indexof /
+            # indexof join emitted. Walker 190->202 (batch 2).
             "tsymex_rfc0005_s8aw_remainder",
+            # RFC-0005 S8ay -- S8aw's remainder: the std/re entry points'
+            # own formulas over a PCRE-faithful reader, re vs rex in the
+            # IR, a rejected pattern raises RegexError, exact regex replace
+            # past 16 bytes, step 1c's uncapped half first. Walker
+            # 190->202 (batch 2).
             "tsymex_rfc0005_s8ay_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
@@ -1057,26 +1063,26 @@ task test, "Run the test suite":
             # (tuple / object / array / distinct fields), every backed
             # Table key and value type, insert, seq[string] add, dotted
             # chains rooted at a ref field, ref pointees render by name,
-            # heap-step depth budget; walker 190->191 (provisional).
+            # heap-step depth budget; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8ar_remainder",
             # RFC-0005 S8at -- S8ar's remainder: a ref to an anonymous
             # tuple, initTable in a SUT, a symbolic index into an array of
             # seqs, by-value case-object fields, distinct over a composite
             # base, Table float keys and container values, KeyError,
-            # 2^32-cell key domains; walker 191->193 (provisional).
+            # 2^32-cell key domains; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8at_remainder",
             # RFC-0005 S8as -- S8an's remainder: if-arm pruning in a
             # recursion; opaque-call effect summaries havoc globals; a
             # global's entry value; closure capture/global write-back;
             # more `addr` forms; a path-based alias check; an Int-sorted
-            # `int` heap; walker 190->192.
+            # `int` heap; walker 190->202 (batch 2).
             "tsymex_rfc0005_s8as_remainder",
             # RFC-0005 S8au -- the S8an / S8ag remainder: a var / addr
             # actual reachable through a global or capture declines; var
             # ptr formals modelled; every find / rfind needle splits;
             # consecutive chain facts; the c-notin-t form per Z3 version.
-            # Items 1-2 (closed by S8ad) re-pinned. Walker 194
-            # (provisional).
+            # Items 1-2 (closed by S8ad) re-pinned. Walker 190->202
+            # (batch 2).
             "tsymex_rfc0005_s8au_remainder",
             # RFC-0005 S8av -- S8am's and S11's remainder: the public cache
             # macros (saveSymexWitness/loadSymexWitnesses/saveSymexVerdict/
@@ -1088,7 +1094,8 @@ task test, "Run the test suite":
             # without gaps metadata degrades to gaps: @[] rather than a
             # miss); S8am's "raise-irrelevant-parameter witness sentinel" is
             # proved to be IndexDefect's own concrete, replayable witness
-            # (Phase 15 E6 pre-emption), not a sentinel. Walker 190->195.
+            # (Phase 15 E6 pre-emption), not a sentinel. Walker 190->202
+            # (batch 2).
             "tsymex_rfc0005_s8av_remainder",
             # RFC-0005 S8az -- S8av's own remainder: the :sat witness cache
             # slot (CachedWitness) and each :raised:<type> sentinel
@@ -1097,6 +1104,6 @@ task test, "Run the test suite":
             # gapsMeta/storedGaps pair CachedVerdict already used; an entry
             # without gaps metadata (pre-S8az, or a third-party writer)
             # still degrades to gaps: @[] rather than a miss. Walker
-            # 195->199.
+            # 190->202 (batch 2).
             "tsymex_rfc0005_s8az_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

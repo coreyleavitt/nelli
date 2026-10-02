@@ -203,6 +203,47 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "202"
+  ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Provisional 206
+  ## (S8be holds 205). Two `var` / `addr` heap actuals of one call that may
+  ## be one cell through DIFFERENT refs (`let q = p; setBoth(p.x, q.x)`; a
+  ## let chain, a tuple, a field of another ref, two parameters) were
+  ## copied in and out in argument order, not the callee's write order: a
+  ## false `sxSat`. They are passed by reference (S8ba's specialisation),
+  ## so the writes land on the heap in the callee's order; one that cannot
+  ## be passed so declines (`varActualMayAlias`, `heapCellsMayMeet`).
+  ##
+  ## RFC-0005 S8bd (2026-10-02) — S8ba's remainder. Provisional 204.
+  ## (1) A bit-vector `i` whose Int views `bv2int(i)` and `bv2int(i +- c)`
+  ## both meet a length is linked by the exact two's-complement wrap
+  ## (`bvOffsetLinks`): `i < s.len and i + 1 > s.len` went from ~41M units
+  ## and `sxUnknown` to a decided `sxUnsat`. (2) A `seq` of a distinct
+  ## type has a witness (rendered and replayed); it was a scoped
+  ## `feUnsupportedWitnessType` decline. (3) `maxHeapDepth` bounds the depth
+  ## of a dereference chain (`heapChainDepth`), not the count of every
+  ## dereference on a path, which is held to `heapDerefsPerPathCap`: a SUT
+  ## that read one object nine times declined `heDepthExhausted` at the
+  ## default 8. (4) S8ba's by-reference specialisation takes an element's
+  ## ref (`a[i].x`, the index read once, before the call), a user call's
+  ## result (`getBox().x`, called once) and a generic callee (specialised
+  ## per instantiation); each was S8au's `feUnsupportedOp` decline. A
+  ## by-reference actual is lowered once, as its base.
+  ##
+  ## RFC-0005 S8ba (2026-10-02) — S8au's remainder. Provisional 200.
+  ## (1) Every declining arm that owns a result binds it (a seq index or
+  ## pop on an unsupported receiver, a variant construct): the unbound
+  ## compiler temporary was read as an unmodelled global
+  ## (`feGlobalReadUnmodelled` naming `__sym_idx_N`); a parser temporary
+  ## read unbound is now `weInternalWalkerFault`. (2) A `seq` of a distinct
+  ## type is modelled: the backing array holds the base sort and a read
+  ## re-boxes; `.add` stores every backed element kind (it stored an `svInt`
+  ## element as the constant 0, a false `sxUnsat`, and declined int32,
+  ## string and float elements). (3) Step 1c states `len <= high(int)` for
+  ## every string / seq length its caps name. (4) A heap `var` / `addr`
+  ## actual a global or capture of the callee also reaches is passed by
+  ## reference: the callee is specialised to it (S8au declined). (5) A
+  ## split's axioms are built once, at the first query reaching it, in
+  ## lowering order.
+  ##
   ## RFC-0005 S8ax (2026-10-02) — S8as's remainder. Supersedes "192"
   ## (193..196 are the S8at..S8aw siblings', landing separately).
   ## (1) The call cache is keyed by the actuals themselves (a bucket per

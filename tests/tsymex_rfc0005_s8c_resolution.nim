@@ -348,10 +348,13 @@ suite "RFC-0005 S8c -- a stdlib generic over a user routine: closed by the eleme
     check r.errors.hasKind(feUnsupportedOp)
 
   test "system.== over a seq of a user-`==` element: sxUnknown, recorded":
+    ## RFC-0005 S8ba: a `seq` of a distinct type is modelled now, so the
+    ## decline is no longer the fragment's `seNestedSeqUnsupported`; the
+    ## element comparison declines (`feUnsupportedOp`), still recorded.
     let r = symexFind(s8cSeqEq, tLabel("s8c_seqeq"))
     dump(r.errors)
     check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
+    check r.errors.hasKind(feUnsupportedOp)
 
   test "sets.contains over a key with a user `==`/`hash`: sxUnknown, recorded":
     let r = symexFind(s8cSetKey, tLabel("s8c_setkey"))

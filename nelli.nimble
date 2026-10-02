@@ -1111,5 +1111,20 @@ task test, "Run the test suite":
             # opaque routine summaries; closure environments; evaluation
             # order; `addr` forms; alias precision; walker 202->209
             # (batch 3).
-            "tsymex_rfc0005_s8ax_remainder"]:
+            "tsymex_rfc0005_s8ax_remainder",
+            # RFC-0005 S8ba -- S8au's remainder: a declining arm binds its
+            # temporary (never read as a global); seq[distinct] modelled;
+            # len <= high(int) in step 1c; a heap var/addr actual a global
+            # or capture also reaches is passed by reference; split axioms
+            # built once, in a fixed order. Walker 202->209 (batch 3).
+            "tsymex_rfc0005_s8ba_remainder",
+            # RFC-0005 S8bd: bit-vector offset links; seq[distinct]
+            # witnesses; maxHeapDepth bounds a chain; by-reference
+            # elements, call results and generic callees. Walker 202->209
+            # (batch 3).
+            "tsymex_rfc0005_s8bd_remainder",
+            # RFC-0005 S8bf: two var / addr heap actuals that may be one
+            # cell through different refs are passed by reference. Walker
+            # 202->209 (batch 3).
+            "tsymex_rfc0005_s8bf_alias"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

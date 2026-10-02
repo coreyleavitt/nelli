@@ -201,6 +201,11 @@ proc sutN25GenuineMutationStillVetoed(data: var seq[byte]) =
 suite "symex round-6 N25 -- regression: genuine (non-shadowed) mutation still vetoed":
 
   test "N25-2: a genuinely var-aliased mutation of the real formal still excludes it from string-backing, unchanged by this fix":
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled, so the width
+    ## decline that proved the receiver stayed array-modelled is gone. The
+    ## proof is now the label reached with no kind-mismatch decline: a
+    ## wrongly string-backed receiver reaches `iekSeqAdd`'s "expected
+    ## svSeq" decline instead of the store.
     let r = symexFind(sutN25GenuineMutationStillVetoed, tLabel("n25_genuine_veto_regression"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The

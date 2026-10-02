@@ -1141,7 +1141,9 @@ proc distinctGround(ty: IRType): IRType
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
-  ## supports int/bool elements; more arrive incrementally.
+  ## supports int/bool elements; more arrive incrementally. RFC-0005 S8ba:
+  ## a distinct element is backed by its base (`seqCellTy`).
+  let elemTy = seqCellTy(elemTy)
   case elemTy.kind
   of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] backing.
     # The element value sort is the per-walker uninterpreted `Ref_T` address
@@ -3415,7 +3417,7 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       pcOut.add (lenSym <= mkInt(1024))
       let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
       SymVal(kind: svSeq, seqLen: lenSym,
-             seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
+             seqDataRaw: dataRaw, seqElemTy: seqCellTy(ty.seqElemTy))   # RFC-0005 S8ba
   of itTable:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
@@ -3902,6 +3904,10 @@ type IndexSplit* = object
   last*: bool
     ## RFC-0005 S8au: `ix` stands for `seq.last_indexof(s, c)` (`rfind`),
     ## not `str.indexof(s, c, start)`.
+  found*, notFound*: Z3Bool
+  built*: bool
+    ## RFC-0005 S8ba: the split's axioms (`indexSplitAxioms`), built once,
+    ## by the first query that reaches the split (`indexSplitRoots`).
 
 var indexSplits* {.threadvar.}: seq[IndexSplit]
   ## RFC-0005 S8ag. Every split lowered in the running walk, in lowering
@@ -4225,10 +4231,24 @@ proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
           grew = true
     if not grew: break
   reached.sort()
+  # RFC-0005 S8ba: the order a split's terms reach the context is fixed
+  # here, once. The first query that reaches a split builds its axioms,
+  # every newly reached split in lowering order and each in
+  # `indexSplitAxioms`' fixed term order, before any chain or link fact;
+  # later queries reuse them (`built`) and create none of its terms again.
+  # Built eagerly at lowering instead, the axioms of splits no query
+  # reaches sit in the context too, and Z3's cost follows what the context
+  # holds (`checkCapped`): measured on Z3 5.1, that cost 4.6x the target
+  # units on `r6_n36_raise_degrade`, 5.3x on `s1c_verdict` and 11x on
+  # `s8au_remainder`, and turned one more S8ag (5) hit into a slow SAT.
   for k in reached:
-    let ax = indexSplitAxioms(indexSplits[k])
-    result.add ax.found
-    result.add ax.notFound
+    if not indexSplits[k].built:
+      let ax = indexSplitAxioms(indexSplits[k])
+      indexSplits[k].found = ax.found
+      indexSplits[k].notFound = ax.notFound
+      indexSplits[k].built = true
+    result.add indexSplits[k].found
+    result.add indexSplits[k].notFound
   var lastOn: Table[int, int]   ## haystack AST id -> latest reached split
   for k in reached:
     if indexSplits[k].last: continue
@@ -4440,6 +4460,14 @@ proc reboxDistinct(distinctTy: IRType, base: SymVal): SymVal =
   boxed[] = base
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: distinctName,
          distinctBaseSym: boxed)
+
+proc reboxSeqCell(elemTy: IRType, cell: SymVal): SymVal =
+  ## RFC-0005 S8ba. A seq element read at static type `elemTy`: a `distinct`
+  ## element's cell holds its base (`seqCellTy`), re-boxed here as a fresh
+  ## `svDistinct` over it (each level of a nested chain). Any other type
+  ## (or a nil type from a pre-S8ba IR) is the cell itself.
+  if elemTy == nil or elemTy.kind != itDistinct: return cell
+  reboxDistinct(elemTy, reboxSeqCell(elemTy.distinctBase, cell))
 
 proc bvTermToZ3Int*[W: static int](bv: Z3BitVec[W], signed: bool): Z3Int =
   ## `bv` as a Z3 Int, read as signed or unsigned. RFC-0005 S8o: a NUMERAL
@@ -5344,7 +5372,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       # len. Mirrors Nim's `default(seq[T]) == @[]`.
       let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
       SymVal(kind: svSeq, seqLen: mkInt(0),
-             seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
+             seqDataRaw: dataRaw, seqElemTy: seqCellTy(t.seqElemTy))   # RFC-0005 S8ba
   of itSet, itTable:
     # RFC-0005 S8u: the empty container, for the shapes `allocateSym` backs
     # (`Table[string, int]`, `HashSet[int]`): no key present (a constant
@@ -7499,6 +7527,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "but not modelled by the symbolic walker -- remove it " &
                "from the reachable computation or pass it as an " &
                "explicit parameter (feGlobalReadUnmodelled)")
+      elif e.vname.startsWith("__sym_"):
+        # RFC-0005 S8ba: a parser temporary (`freshSynth`; no Nim
+        # identifier starts with `_`) is bound by the statement the parser
+        # emitted before its read, so reaching it unbound is a walker
+        # inconsistency (a declining arm that dropped its result), never a
+        # global. It was reported as `feGlobalReadUnmodelled` naming the
+        # temporary.
+        lowerDegrade(weInternalWalkerFault,
+          "parser temporary '" & e.vname & "' is read but no statement " &
+               "bound it (weInternalWalkerFault)")
       else:
         # RFC-0005 S8an: module-level globals are `__gl:`-named; any other
         # unbound name is a variable the walk does not bind where it is
@@ -7896,11 +7934,14 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # copy of the store covering only `int` and `bool`: any other element
     # (`string`, `float`, a narrower int, a ref) was "iekSeqAdd: unsupported
     # elem/width" (`weInternalWalkerFault`), and an Int-promoted `int`
-    # stored the constant 0 in its place.
+    # stored the constant 0 in its place (RFC-0005 S8ba fixed the same arm:
+    # `var s: seq[int]; s.add(x); s[0] == 7` with `x: range[0..10]` was a
+    # false `sxUnsat`). RFC-0005 S8ba: a distinct element is stored as its
+    # base (`seqCellTy`, `ejectBase`).
     let val = lower(env, e.mutArg, intLitProto(recv.seqElemTy))
     let oldLen = recv.seqLen # [placeholder-audited]
     let newLen = oldLen + mkInt(1)
-    if not seqElemFits(val, recv.seqElemTy):
+    if not seqElemFits(ejectBase(val), seqCellTy(recv.seqElemTy)):
       # Unreachable for a typed Nim `add` (its argument has the element
       # type); a value some upstream degrade produced keeps the in-band
       # decline this arm always had for a representation mismatch.
@@ -8982,44 +9023,48 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
   ## element type to wrap/select with the right typed handle.
-  case sv.seqElemTy.kind
+  ## RFC-0005 S8bd: on the CELL type (`seqCellTy`): a `seq[distinct T]`
+  ## holds `T`'s sort and renders as `T`'s leaves, converted back by the
+  ## reader (`emitTyAndReader`).
+  let cellTy = seqCellTy(sv.seqElemTy)
+  case cellTy.kind
   of itInt:
-    case sv.seqElemTy.width
+    case cellTy.width
     of 8:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 16:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 32:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 64:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
       raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-        "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
+        "extractSeqElements: unsupported int width " & $cellTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
       sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
@@ -9059,7 +9104,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     discard
   else:
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-      "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
+      "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal) =
@@ -10108,7 +10153,7 @@ proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
 
 proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     tuple[caps: seq[Z3Bool], lastIndex: bool,
-          byteEqs: seq[tuple[old, new: Z3Bool]]] =
+          byteEqs: seq[tuple[old, new: Z3Bool]], lens: seq[Z3Int]] =
   ## RFC-0005 S8k. `len(t) <= cap` for every seq-sorted (string or seq)
   ## term `t` in `roots` that is an uninterpreted constant or application
   ## (an input, a fresh return, a closure/UF result) or an array `select`
@@ -10144,6 +10189,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## on the pinned Z3, each in a fresh context). The other exact
   ## rewrite, `x mod 256 == n`, fixed the first and made the second
   ## 110M.
+  ##
+  ## RFC-0005 S8ba: `lens` holds the length of each leaf above and each
+  ## `str.len` term in `roots`, for `checkCapped`'s `len <= high(int)`
+  ## facts (`nimLenFacts`). Only the terms: the facts are built where they
+  ## are asserted, so they reach the walk's shared context only on that
+  ## path (see `seqRangeFacts`' note on context cost).
   let kinds = seqCapKinds(ctx)
   let capInt = mkInt(ctx, cap)
   proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
@@ -10175,9 +10226,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if k == kinds.strLen:   # RFC-0005 S8ba
+      result.lens.add wrap[Z3Int](ctx, t.raw)
     if getSortKind(t) == skSeq and (k == kinds.uninterp or k == kinds.select):
       let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
       result.caps.add lenT <= capInt
+      result.lens.add lenT   # RFC-0005 S8ba
     elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
       let empty = mkString(ctx, "")
       let ff = mkString(ctx, "\xff")
@@ -10221,6 +10275,23 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       let sp = registeredIndexSplit(ctx, t.raw)
       if sp >= 0 and indexSplits[sp].last: result.lastIndex = true
     for a in args: stack.add a
+
+proc nimLenFacts(ctx: Z3Context; lens: openArray[Z3Int]): seq[Z3Bool] =
+  ## RFC-0005 S8ba. `len <= high(int)` for each length term `seqLenCaps`
+  ## collected (`lens`). Nim's `len` is an `int`, so every real string and
+  ## seq satisfies it; the sequence theory alone admits longer ones, and an
+  ## index bounded by a length (`i < len(s)`, then `i + 1`) could overflow
+  ## in a model no real input has: S8au's `readCStr` raise query and its
+  ## unbounded `rfind` label declined on the cap for exactly that. True of
+  ## every real input rather than of the theory, so not in `seqRangeFacts`
+  ## (whose facts are pinned valid in the theory); asserted beside them in
+  ## `checkCapped`'s step 1c, where an UNSAT is still the query's own. The
+  ## bit-vector encoding reads a length through these Int terms
+  ## (`int2bv`), so one fact covers both.
+  if lens.len == 0: return
+  let highInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw,
+    cstring($high(int64)), Z3_get_sort(ctx.raw, lens[0].raw)))
+  for l in lens: result.add l <= highInt
 
 type LitRel = enum
   ## RFC-0005 S8ai: the relation `seqRangeFacts`' `litHolds` folds.
@@ -11042,7 +11113,7 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
     noteQueryRLimitBefore(result)   # RFC-0005 S8ac: before any check
 
 var intDivDeclKinds {.threadvar.}:
-    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub: int]
+    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub, bvadd: int]
   ## RFC-0005 S8ad. The `Z3_decl_kind` ordinals `divRangeFacts` matches on
   ## (Int `div` and `mod`, unsigned and signed `bv2int`, `bvneg`, `bvsub`),
   ## read off
@@ -11051,6 +11122,21 @@ var intDivDeclKinds {.threadvar.}:
   ## `bv2int` that Z3 expands (to an `ite` over the unsigned one, as Z3 5.1
   ## does) has the `ite`'s kind; `divRangeFacts` only matches it with one
   ## argument, which an `ite` never has, and meets the unsigned one inside.
+  ## RFC-0005 S8bd: and `bvadd`, for `bvOffsetLinks`.
+
+proc ensureIntDivDeclKinds(ctx: Z3Context) =
+  if intDivDeclKinds.ready: return
+  proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
+  let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
+  let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
+  intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
+    imod: kindOf(ctx, (x mod y).raw),
+    bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
+    sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
+    bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw),
+    bvadd: kindOf(ctx, (v + v).raw))
 
 proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8ad. Linear bounds on every Int quotient `e = a div b` and
@@ -11102,18 +11188,10 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## start`, UNSAT) neither 5.1 nor 4.13.4 refuted it within 40M steps;
   ## with this pair it is 0.45M offline. Linking `bv2int(y + 1)` to
   ## `bv2int(y)` (and likewise for `-`, `*`, shifts) did not decide it
-  ## and made other queries dearer, so it is not asserted.
-  if not intDivDeclKinds.ready:
-    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
-      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
-    let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
-    let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
-    let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
-    intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
-      imod: kindOf(ctx, (x mod y).raw),
-      bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
-      sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
-      bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw))
+  ## and made other queries dearer, so it is not asserted. (RFC-0005 S8bd:
+  ## it is, for a `+`/`-` numeral, between two views the query already
+  ## holds -- `bvOffsetLinks`.)
+  ensureIntDivDeclKinds(ctx)
   let kinds = intDivDeclKinds
   let (idiv, imod) = (kinds.idiv, kinds.imod)
   let zero = mkInt(ctx, 0)
@@ -11216,6 +11294,111 @@ const factsFirstRLimit* = 1_000_000'u
   ## the full-theory search; one it cannot finish here is still tried
   ## with the whole budget after step 1. S8aw's join refutations took a
   ## few thousand units on Z3 5.1 and 4.13.4.
+proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bd. For every Int view `bv2int(x + c)` or `bv2int(x - c)`
+  ## in `roots` (`c` a bit-vector numeral, `bvadd` in either operand
+  ## order) whose operand's own view `bv2int(x)` is in `roots` too, read
+  ## the same way (unsigned, or Z3's one-argument signed `bv2int` where it
+  ## has one), the exact two's-complement link between the two views, at
+  ## width W:
+  ##   unsigned:  ubv2int(x + c) == (let v = ubv2int(x) + c;
+  ##                                 if v >= 2^W: v - 2^W else: v)
+  ##              ubv2int(x - c) == (let v = ubv2int(x) - c;
+  ##                                 if v < 0: v + 2^W else: v)
+  ##   signed:    sbv2int(x +- c) == (let v = sbv2int(x) +- c;
+  ##                                  if v > high: v - 2^W
+  ##                                  elif v < low: v + 2^W else: v)
+  ## with `c` read the same way as `x`. Each is a theorem of bit-vector
+  ## arithmetic (a definition of the wrap, not a constraint on the input),
+  ## so asserting them beside the query leaves its models as they were.
+  ## `tests/tsymex_rfc0005_s8bd_remainder.nim` checks every one against
+  ## Z3's own `bv2int` on a grid of numerals.
+  ##
+  ## Why: a string index `i` that is a bit-vector (an `int` parameter whose
+  ## `i + 1` can overflow) meets `s.len` through two Int views, `bv2int(i)`
+  ## (`i < s.len`) and `bv2int(i + 1)` (`i + 1 > s.len`), and Z3 relates
+  ## the two only by bit-blasting the conversion. `i >= 0 and i < s.len and
+  ## s[i] == 'a' and i + 1 > s.len` ran ~41M units to `sxUnknown`
+  ## (`beSolverUndef`) on both Z3 versions, in both integer encodings; the
+  ## character read was not the cost (without it, the same). The label
+  ## query replayed offline from its SMT-LIB text decides in 0.77M units
+  ## on 5.1 and 2.77M on 4.13.4, but in the walker's context it ran past
+  ## the whole budget; with this link, 2.8k and 4.0k offline.
+  ##
+  ## Only a pair whose both views are in the query is linked. RFC-0005 S8aj
+  ## measured the general link (`bv2int(y + 1)` to a `bv2int(y)` the query
+  ## did not hold) and rejected it: `(start + y) div (y + 1) > start` went
+  ## from 6.6M to 31.6M units on 5.1. There `y` is only compared as a
+  ## bit-vector (`y > 1`), so its Int view is new to the query, and the
+  ## link would bring it in; here both views are already terms Z3 must
+  ## reconcile, and the link states how.
+  ensureIntDivDeclKinds(ctx)
+  let kinds = intDivDeclKinds
+  let signedKind = kinds.sbv2int != kinds.bv2nat
+  var viewed: HashSet[(int, bool)]
+  var views: seq[tuple[t, arg: Z3AnyAst, signed: bool]]
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and (k == kinds.bv2nat or (signedKind and k == kinds.sbv2int)):
+      let signed = signedKind and k == kinds.sbv2int
+      viewed.incl (astId(ctx, args[0].raw), signed)
+      views.add (t: t, arg: args[0], signed: signed)
+  if views.len < 2: return
+  let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+  proc intText(text: string): Z3Int =
+    wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, intSort))
+  proc pow2(e: int): string =
+    ## 2^e as decimal text, 1 <= e <= 64.
+    if e >= 64: "18446744073709551616" else: $(1'u64 shl e)
+  for v in views:
+    if getAstKind(v.arg) != akApp: continue
+    let (d, xs) = unpackApp(v.arg)
+    if xs.len != 2: continue
+    let ak = ord(Z3_get_decl_kind(ctx.raw, d))
+    var x, c: Z3AnyAst
+    var plus: bool
+    if ak == kinds.bvadd and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], true)
+    elif ak == kinds.bvadd and isNumeralAst(ctx, xs[0].raw):
+      (x, c, plus) = (xs[1], xs[0], true)
+    elif ak == kinds.bvsub and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], false)
+    else: continue
+    if isNumeralAst(ctx, x.raw): continue
+    if (astId(ctx, x.raw), v.signed) notin viewed: continue
+    let w = int(Z3_get_bv_sort_size(ctx.raw,
+                  ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+    if w < 1 or w > 64: continue
+    let cu = parseBiggestUInt($Z3_get_numeral_string(ctx.raw, c.raw))
+    let cText =
+      if v.signed and cu >= (1'u64 shl (w - 1)):
+        "-" & (if w == 64: $((not cu) + 1) else: $((1'u64 shl w) - cu))
+      else: $cu
+    let xInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw,
+                                                         v.signed))
+    let tInt = wrap[Z3Int](ctx, v.t.raw)
+    let cInt = intText(cText)
+    let span = intText(pow2(w))
+    let sum = if plus: xInt + cInt else: xInt - cInt
+    if v.signed:
+      let hi = intText($((1'u64 shl (w - 1)) - 1))
+      let lo = intText("-" & pow2(w - 1))
+      result.add tInt == ite(sum > hi, sum - span,
+                             ite(sum < lo, sum + span, sum))
+    else:
+      let zero = intText("0")
+      result.add tInt == ite(sum >= span, sum - span,
+                             ite(sum < zero, sum + span, sum))
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
@@ -11309,7 +11492,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8ad: every step decides the query with the linear bounds of
   # its Int quotients beside it (`divRangeFacts`): theorems, so the models
   # are the query's own.
-  let rootsIn = @query & divRangeFacts(ctx, query)
+  # RFC-0005 S8bd: and with the exact link between the Int views of `x`
+  # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
+  let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()
@@ -11317,7 +11502,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
             (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
   let cap = settings.budget.maxSeqLen
   if cap <= 0: plain()
-  let (caps, lastIndex, byteEqs) = seqLenCaps(ctx, rootsIn, cap)
+  let (caps, lastIndex, byteEqs, lens) = seqLenCaps(ctx, rootsIn, cap)
   if caps.len == 0: plain()
   # Every step below decides the query with each byte equality in its
   # character form (`seqLenCaps`): the same predicate, so the same models.
@@ -11363,7 +11548,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # in a few thousand. Anything else (SAT, or unknown in the small budget)
   # falls through to the unchanged order below, (1b) and (1c) included
   # with their full budget, so no verdict is lost.
-  let facts = seqRangeFacts(ctx, roots)
+  # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
+  # true of every real input, so an UNSAT is still the query's own.
+  let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)
   block factsFirst:
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = querySolver(ctx, roots, pre, seqTheory = false)
@@ -11435,7 +11622,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # half (an UNSAT that is its own): the capped half would decline one
     # that is SAT only past the cap, which step 3 decides
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
-    # (`facts` is computed above, for the facts-first check.)
+    # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
+    # with each length at most `high(int)`, `nimLenFacts`.)
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f
@@ -15100,6 +15288,25 @@ proc declinedIndexEnv(env: Env; stmt: IRStmt; valTy: IRType): Env =
   result[stmt.ixRetName] = allocateSym(valTy,
     freshDegradeName("__declinedIndexRead"), scratch)
 
+proc declinedVariantEnv(env: Env; stmt: IRStmt): Env =
+  ## RFC-0005 S8ba. `declinedIndexEnv` for a declined symbolic variant
+  ## construction: its temporary bound to a fresh value of the variant type.
+  result = env
+  var scratch: seq[Z3Bool]
+  result[stmt.vcsResultVar] = allocateSym(stmt.vcsVariantTy,
+    freshDegradeName("__declinedVariant"), scratch)
+
+proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
+  ## RFC-0005 S8ba. `declinedIndexEnv` for a declined `v = s.pop()`: `v`
+  ## bound to a fresh value of the element type on the tainted path. Left
+  ## unbound, its next read was recorded as an unmodelled global
+  ## (`'__sym_pop_N' is read where ...`).
+  result = env
+  if stmt.spElemTy.isNil: return
+  var scratch: seq[Z3Bool]
+  result[stmt.spRetName] = allocateSym(stmt.spElemTy,
+    freshDegradeName("__declinedPop"), scratch)
+
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -15457,7 +15664,7 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
     let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,  # [placeholder-audited]
                               t.seqDataRaw.raw, e.seqDataRaw.raw))  # [placeholder-audited]
     some(SymVal(kind: svSeq, seqLen: ite(sel, t.seqLen, e.seqLen),  # [placeholder-audited]
-                seqDataRaw: data, seqElemTy: t.seqElemTy))
+                seqDataRaw: data, seqElemTy: seqCellTy(t.seqElemTy)))   # RFC-0005 S8ba
   of svRef:
     if t.refPointee != e.refPointee: none(SymVal)
     else: some(iteSV(sel, t, e))
@@ -16430,7 +16637,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # own kind instead of the misleading nested-seq claim.
           let d = w.degrade(placeholderReadDeclineKind(arrSV),
             placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
-          survivors.add forkPathTainted(p, p.pc, p.env, d)
+          # RFC-0005 S8ba: the read's temporary is bound on the tainted
+          # path. Left unbound, its next read was recorded as an unmodelled
+          # global (`'__sym_idx_N' is read where ...`).
+          survivors.add forkPathTainted(p, p.pc,
+            declinedIndexEnv(p.env, stmt, stmt.ixElemTy), d)
           continue
         # Seq index is Z3Int. Lower with an svInt proto for literals;
         # for env-resident BV-typed Nim ints we coerce via bv2int.
@@ -16543,7 +16754,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see isVariantReassign above)]
               "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
           var newEnv = cp.env
-          newEnv[stmt.ixRetName] = indexed
+          # RFC-0005 S8ba: a distinct element is re-boxed (its cell holds
+          # the base, `seqCellTy`).
+          newEnv[stmt.ixRetName] = reboxSeqCell(stmt.ixElemTy, indexed)
           survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond] & rangeConds,
                                  newEnv)
         continue
@@ -16587,7 +16800,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           locPrefix & "isIndex: unsupported receiver kind " &
                plainEnglishSymValKind(arrSV.kind) & " (expected array/seq/table/string) — " &
                "degraded to sxUnknown (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
+        survivors.add forkPathTainted(p, p.pc,   # RFC-0005 S8ba: bound
+          declinedIndexEnv(p.env, stmt, stmt.ixElemTy), d)
         continue
       let n = arrSV.arrElems.len
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -16776,12 +16990,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           locPrefix & "isSeqPop: receiver lowered to " &
                plainEnglishSymValKind(recvSV.kind) &
                " — expected svSeq (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
+        survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
         continue
       if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
         let d = w.degrade(placeholderReadDeclineKind(recvSV),
           placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
+        survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
         continue
       let lenZi = recvSV.seqLen # [placeholder-audited]
       let emptyCond = not (lenZi > mkInt(0))
@@ -16797,7 +17011,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var newEnv = p.env
       newEnv[stmt.spRecvName] = SymVal(kind: svSeq, seqLen: newLenZi,
         seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy) # [placeholder-audited]
-      newEnv[stmt.spRetName] = popped
+      newEnv[stmt.spRetName] = reboxSeqCell(stmt.spElemTy, popped)   # RFC-0005 S8ba
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors
   of isVariantReassign:
@@ -17058,8 +17272,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
       # RFC-0005 S6a: `beBudgetExhaustedUnmodelled` (`dcSubstituted`), not
       # the k-unroll's `beBudgetExhausted` — the construction is skipped,
-      # the destination left UNBOUND (a later read declines as
-      # `feGlobalReadUnmodelled`) and `vcsDiscExpr`/`vcsPlainFields` are
+      # the destination bound to a fresh value (RFC-0005 S8ba; it was left
+      # unbound) and `vcsDiscExpr`/`vcsPlainFields` are
       # never lowered, so their raise forks are dropped: a stale env.
       let d = w.degrade(beBudgetExhaustedUnmodelled,
         stmt.vcsLoc & ": variant constructor fork budget exhausted " &
@@ -17067,15 +17281,15 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
              "(beBudgetExhaustedUnmodelled)")
       for p in paths:
-        # `stmt.vcsResultVar` is deliberately left UNBOUND in `p.env` — the
-        # same safe-degrade idiom the P2b ref-variant decline uses (any
-        # later read misses the env and declines — observed in RFC-0005
-        # S6a as `feGlobalReadUnmodelled`'s havoc, ⊤ → sxUnknown, and the
-        # parser's A-normalised `let p = <temp>` makes that read immediate;
-        # SND-1's per-path taint is ALSO forced via `forkPathTainted` so the verdict never rides a
-        # bare `w.sawUnknown` alone). RFC-0005 S1: one token `d`, forked
-        # onto every path.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
+        # RFC-0005 S8ba: `stmt.vcsResultVar` is bound to a fresh value of
+        # the variant type on the tainted path (`declinedVariantEnv`). It
+        # was left UNBOUND, and the parser's A-normalised `let p = <temp>`
+        # then read it at once and declined a second time as an unmodelled
+        # global (`feGlobalReadUnmodelled`, RFC-0005 S6a's pin). SND-1's
+        # per-path taint is forced via `forkPathTainted` so the verdict
+        # never rides a bare `w.sawUnknown` alone. RFC-0005 S1: one token
+        # `d`, forked onto every path.
+        out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
       return out2
     # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
     # remediation). `maxVariantConstructorForks` above only bounds the OUTER
@@ -17109,7 +17323,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "(beBudgetExhaustedUnmodelled)")
       for p in paths:
         # Same safe-degrade idiom as the fork-count budget above.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
+        out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
       return out2
     # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
     # `paths`/`tag` fork loops (mirrors the two budget checks immediately
@@ -17148,7 +17362,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              " (arm-field allocation, not param-entry)")
       for p in paths:
         # Same safe-degrade idiom as the two budget checks above.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
+        out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
       return out2
     # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
     # syntax only when no arm field is set, so every arm field is its
@@ -17165,7 +17379,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                    vcsTy.vObjectName & "." & arm.fieldNames[j] &
                    "` has no modelled default value (" & $ft & ")")
             for p in paths:
-              out2.add forkPathTainted(p, p.pc, p.env, d)
+              out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
             return out2
     for p in paths:
       let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
@@ -19760,7 +19974,11 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst =
   ## Store `val` at index `idx` in the (erased) seq data array, returning the
-  ## new erased array. Mirrors the `iekSeqAdd` store dispatch.
+  ## new erased array. RFC-0005 S8ba: `iekSeqAdd` stores through here too
+  ## (it had its own int64/bool-only dispatch), and a distinct element is
+  ## stored as its base (`seqCellTy`, `ejectBase`).
+  let elemTy = seqCellTy(elemTy)
+  let val = ejectBase(val)
   case elemTy.kind
   of itInt:
     # #163 review R22 site 3 prerequisite: reconcile an `svInt`-shaped RHS
@@ -19883,7 +20101,7 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## genuinely-reachable index needs REAL element content) — declining
   ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
   ## case is affected, and only its BACKED-elemTy half changed behaviour.
-  let elemTy = e.seqLitElemTy
+  let elemTy = seqCellTy(e.seqLitElemTy)   # RFC-0005 S8ba: a distinct elem's base
   if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
     # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
     # EMPTY case) whose element type `allocateSeqDataRaw` cannot back --
@@ -20299,12 +20517,12 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i, env)
         dataRaw = storeSeqElem(dataRaw, e.hofRetElemTy, mkInt(i), mapped)
       SymVal(kind: svSeq, seqLen: mkInt(n),
-             seqDataRaw: dataRaw, seqElemTy: e.hofRetElemTy)
+             seqDataRaw: dataRaw, seqElemTy: seqCellTy(e.hofRetElemTy))   # RFC-0005 S8ba
     of "filter":
       # Result svSeq: pack kept elements (predicate true) into running compacted
       # indices. result length = sum ite(pred_i, 1, 0); for each i, if pred_i,
       # store elem_i at the current kept count. Bounded, quantifier-free.
-      let elemTy = e.hofRetElemTy   ## filter preserves element type
+      let elemTy = seqCellTy(e.hofRetElemTy)   ## filter preserves element type (RFC-0005 S8ba: its cell)
       # Round-6 N37: same unguarded-`allocateSeqDataRaw` conversion as the
       # `map` arm immediately above -- see its own comment for the full
       # rationale (identical hazard, identical fix).
@@ -20415,7 +20633,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)
       discard cb   ## body stashed but not descended on this path (see above)
       SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
-             seqDataRaw: toAnyAst(mappedArr), seqElemTy: e.hofRetElemTy)
+             seqDataRaw: toAnyAst(mappedArr), seqElemTy: seqCellTy(e.hofRetElemTy))   # RFC-0005 S8ba
     of "fold":
       # Axiom path: a raw `Z3_mk_app` of an uninterpreted fold result over the
       # seq's length + data + init (ground, C2b discipline — never a ∀ axiom).

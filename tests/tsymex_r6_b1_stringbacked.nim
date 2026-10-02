@@ -185,6 +185,11 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
     ## assert PRESENCE + correct classification across the whole list
     ## instead of position 0. The no-loop diagnostic below (same add-width
     ## gap, no unrelated loop noise) DOES land the reference at `errors[0]`.
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled (`storeSeqElem`),
+    ## so the width decline this pinned is gone and the label is reached.
+    ## The receiver staying array-modelled is still what is checked: a
+    ## wrongly string-backed one reaches `iekSeqAdd`'s kind-mismatch decline
+    ## ("expected svSeq") instead of the store.
     let r = symexFind(mutatedByteSeqStaysArray, tLabel("mutated_stays_array"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The

@@ -357,6 +357,21 @@ title = "S8as's remainder: fact-keyed call cache; adaptive if-arm feasibility ou
 state = "done"
 
 [[slice]]
+id = "S8ba"
+title = "S8au's remainder: seq[distinct] locals, compiler-temp misread as global, len(s) <= high(int) for string-derived indices, model global-reachable copy-in/out, deterministic split term order"
+state = "done"
+
+[[slice]]
+id = "S8bd"
+title = "S8ba's remainder: symbolic string index cost, seq[distinct] parameter witnesses, heap-depth budget, pass-by-reference through indexed/call refs and generic callees"
+state = "done"
+
+[[slice]]
+id = "S8bf"
+title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing through let-bound ref copies"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -9683,3 +9698,384 @@ union).
 - **`replace` with an alternation, an anchor or an empty-matching pattern
   still declines** (`seZ3StringIncomplete`), as in S8aw. The suffix
   recursion covers the same three shapes the unroll did.
+
+**As landed (S8ba, walker 200) — S8au's remainder.** Suite
+`tsymex_rfc0005_s8ba_remainder` (32 tests; c and cpp, both Z3 versions;
+timings below). The base is 9da3af6 (S8au); every item was RED there
+first.
+
+- (1) *A compiler temporary read as a global.* RED: a declined seq index
+  or pop (`seq[(int, string)]`) left its result temporary (`__sym_idx_N`,
+  `__sym_pop_N`) unbound, and its next read fell to the unbound-name arm,
+  which records `feGlobalReadUnmodelled` naming the temporary. Every
+  declining arm that owns a result now binds it: `declinedIndexEnv` at
+  isIndex's two forks, `declinedPopEnv` at isSeqPop's two (the pop's
+  element type is carried on `isSeqPop.spElemTy`), `declinedVariantEnv`
+  at the variant construct's four. A parser temporary (`__sym_*`, which
+  no Nim identifier can spell) read unbound is now
+  `weInternalWalkerFault`, never a global. Audit of the global read and
+  write sites: the walker classifies by `isGlobalEnvName` (the `__gl:`
+  prefix) and the parser by `isModuleGlobal` (the symbol's owner); no
+  other site confuses the two. `tsymex_rfc0005_s6a_budget`'s variant pin
+  loses its companion `feGlobalReadUnmodelled`, and
+  `tsymex_rfc0005_s8i_models` (4)'s kind write after a declined
+  construction no longer declines on its own (`feUnsupportedOp`): it is
+  the ordinary write on the bound free variant, and the construction's
+  `seUnsupportedSetCharInterop` keeps the run `sxUnknown`.
+- (2) *`seq[distinct]` locals.* RED: `seNestedSeqUnsupported` (and the
+  stray global of item 1). The cell type of a seq is its element type
+  with every distinct layer stripped (`seqCellTy`): the backing array
+  holds the base sort, a store unwraps (`ejectBase`), and a read
+  re-boxes (`reboxSeqCell`). Literal, `.add`, index read and write,
+  `pop`, `for` and the HOF map/filter all route through it. A
+  `seq[distinct]` PARAMETER stays a scoped `feUnsupportedWitnessType`
+  (its witness needs a distinct-typed renderer). A user `==` on the
+  element is never replaced by base equality: `x in s`, `s.find(x)` and
+  `s == t` over a `Mod10` element are pinned never `sxUnsat` (they
+  decline or go through the user routine), and `s8c_resolution`'s seq pin
+  now declines as `feUnsupportedOp` instead of the fragment's kind.
+  **Soundness bug found:** `iekSeqAdd` had its own int64/bool store
+  dispatch, which stored an `svInt` value (a `range` parameter under the
+  default `isOptimised` semantics) as the constant 0, so `var s:
+  seq[int]; s.add(x); s[0] == 7` with `x: range[0..10]` was a false
+  `sxUnsat`; and `.add` on `seq[int32]`, `seq[byte]`, `seq[string]` or
+  `seq[float]` was `weInternalWalkerFault`. It now lowers the value at the
+  element's width and stores through `storeSeqElem`. Five round-6 pins
+  that used the `seq[byte]` width decline as their evidence that a
+  receiver stayed array-modelled (b1 B1-4, b7r B7R-7, lows N25-2, r4
+  W2a/W2b) now reach their labels and pin the absence of the
+  kind-mismatch decline instead.
+- (3) *`len <= high(int)`.* Step 1c asserts, beside `seqRangeFacts`,
+  `l <= high(int64)` for every seq / string length its caps name
+  (`seqLenCaps` returns them as `lens`; `nimLenFacts`). Built on the 1c
+  path only: building them for every query, in `seqLenCaps`, took B1-1
+  from 187199 units to 3555731 (the context-cost effect of S8o). RED at
+  base, `sxUnknown` ("no model ... 128 elements"): S8au's item-2 string
+  variant `t` is now `sxUnsat` (0.98M units; its `hit` `sxSat`, 0.86M),
+  and `rf_dead` without its `i < 100` bound `sxUnsat` (21k); both also
+  under `isExact` (the bit-vector encoding).
+- (4) *By reference through the heap cell.* RED: S8au's five dead labels
+  were `sxUnknown` (its decline). A heap `var` actual, or an `addr` one,
+  that a global or capture of the callee also reaches
+  (`outerReachesCell`) is now passed by reference: the callee is
+  specialised (`byRefSub`, `ensureProcRegistered(byRef)`), its formal's
+  uses spelled as the caller's lvalue (`f[]` / the hidden deref of a `var`
+  formal; a bare `var` formal passed on is `nnkHiddenAddr(lvalue)`, a
+  bare `ptr` formal `addr lvalue`), and the lvalue's last ref is a
+  hidden parameter in the formal's slot. Its symbol is a copy of the
+  caller's (`markByRef`: same symbol and type, a sentinel line info) that
+  `strVal` reads as `__byref_<N>`, so every name lookup in the parser
+  sees it by construction. The caller passes the ref evaluated at the
+  call; there is no write-back and no guard root for that argument, so
+  the callee's writes through the formal and through the global land on
+  one heap cell in its order, and a callee that rebinds the global does
+  not move the address (`hr`). The specialisation is keyed by formal,
+  base type (module, line, column; no path) and field path, so a
+  recursive call reaches its own key while it is parsed. All five dead
+  labels are `sxUnsat`, their live labels `sxSat`; also pinned: a global
+  root (`hd`), a rebind in the callee (`hr`), a ref behind two refs
+  (`o.inner.x`, `hn`) and a ref in a value field (`t.b.x`, `ht`). A shape
+  it cannot spell (a ref reached through an index, a generic callee, a
+  formal with a use it cannot rewrite) keeps S8au's decline (pinned:
+  `a[0].x`).
+- (5) *Split term order.* The axioms of a split are built once, by the
+  first query that reaches it: newly reached splits in lowering order,
+  each in `indexSplitAxioms`' fixed term order, before any chain or link
+  fact, and reused after (`IndexSplit.built`; pinned on a lowered split).
+  The query text and its term order are those of S8au. Building them
+  eagerly at lowering was measured and rejected: it puts the axioms of
+  splits no query reaches into the context, and on Z3 5.1 the target
+  units grew 22.9M vs 5.0M on `r6_n36_raise_degrade`, 12.2M vs 2.3M on
+  `s1c_verdict` and 10.9M vs 0.95M on `s8au_remainder`, and one more S8ag
+  (5) hit became a slow SAT. Canary: B1-1 has a unit ceiling per linked
+  Z3: <= 1M on 5.x (187199 in the suite, 380570 alone) and <= 3M on 4.x
+  (2293304; the base spends the same 2.29M on 4.13.4).
+
+*Measurements* (target units, `-d:symexQueryStats` totals):
+
+| probe | base 9da3af6 | S8ba |
+|---|---|---|
+| B1-1, 5.1 / 4.13.4 | 380570 / 2293440 (alone) | 380570 / 2293440 (alone) |
+| S8au item-2 string `t`, 5.1 | `sxUnknown` | `sxUnsat`, 0.98M (`hit` `sxSat`, 0.86M) |
+| `rf_dead` without `i < 100`, 5.1 | `sxUnknown` | `sxUnsat`, 21k |
+| `nimLenFacts` in `seqLenCaps` (rejected), B1-1 5.1 | — | 3555731 |
+
+Split axioms built eagerly at lowering (rejected) against built once at
+first reach (landed), suite totals on Z3 5.1:
+
+| suite | eager | first reach |
+|---|---|---|
+| `r6_n36_raise_degrade` | 22935434 | 4962163 |
+| `s1c_verdict` | 12221318 | 2291541 |
+| `s8au_remainder` | 10944767 | 952407 |
+| `r6_b1_stringbacked` | 437902 | 437902 |
+
+*Suites* (17df7ea plus the per-version B1-1 ceiling; `ok/failed`; Z3
+5.1 c, Z3 4.13.4 c). Every suite below passes at the base on both
+versions, except where its pin moved by this slice:
+
+| suite | 5.1 | 4.13.4 |
+|---|---|---|
+| `rfc0005_s8ba_remainder` (new; cpp 5.1 32/0) | 32/0 | 32/0 |
+| `rfc0005_s8au_remainder` (re-pinned) | 35/0 | 35/0 |
+| `rfc0005_s8ag_indexsplit` | 15/0 | 15/0 |
+| `rfc0005_s8y_budget_decline` | 8/0 | 8/0 |
+| `rfc0005_s1c_verdict` | 24/0 | 24/0 |
+| `r6_n36_raise_degrade` | 8/0 | 8/0 |
+| `rfc0005_s8ai_semantic` | 25/0 | 25/0 |
+| `rfc0005_s8aq_remainder` | 13/0 | 13/0 |
+| `rfc0005_s8an_remainder` | 25/0 | 25/0 |
+| `rfc0005_s8o_termination` | 14/0 | 14/0 |
+| `phase16_m3_rfind` | 6/0 | 6/0 |
+| `phase15_CR2_cachekey` (200) | 6/0 | 6/0 |
+| `rfc0005_s6a_budget` (re-pinned) | 31/0 | 31/0 |
+| `rfc0005_s8c_resolution` (re-pinned) | 25/0 | 25/0 |
+| `r6_n27_placeholder_read_audit` (84 + 3) | 4/0 | 4/0 |
+| `r6_b1_stringbacked` (re-pinned) | 7/0 | 7/0 |
+| `r6_b7r_bytescan` (re-pinned) | 26/0 | 26/0 |
+| `r6_lows_collectors` (re-pinned) | 5/0 | 5/0 |
+| `r6_r4_collector_scoping` (re-pinned) | 7/0 | 7/0 |
+| `rfc0005_s8i_models` (re-pinned; caught by symex-mingw, outside the first list) | 39/0 | 39/0 |
+| 27 more feGlobal / source-scanning suites (`163rev`, `s1_lattice`, `s1b`, `s5_str`, `s6b`, `s8ab`, `s8b`, `s8l`, `s8n`, `s8p`, `s8z`, the A2a / N2 / r11 / pairing / n36 class audits, `inv_structured_kinds`, `b7r2`, `bug2`, `n13`, `lows_declines`, `n27_hof`, `n37`, `r1`, `r6_emit`, `tot1`) | all 0 failed | all 0 failed |
+
+The new suite runs in 53 s (5.1) and 54 s (4.13.4) with its compile.
+
+*Different mechanisms, reported and not fixed here.*
+- **`s[i] == 'a'` with `i + 1 > s.len` over a capped string.** `i >= 0
+  and i < s.len and s[i] == 'a' and i + 1 > s.len` runs about 41M units
+  to `sxUnknown` in both encodings (60-160 s; 96 s at base). Item 3
+  removed its overflow-raise error; what is left is the label query
+  itself, slow from the Int/BV mixing of `str.at` at a symbolic index.
+- **A `seq[distinct]` parameter.** Still a scoped
+  `feUnsupportedWitnessType` (a witness renderer for distinct-typed
+  elements is its own work).
+- **The heap-depth budget.** `hr_dead` and both `hn` labels make more
+  than `maxHeapDepth = 8` dereferences on one path and decline as
+  `heDepthExhausted` at the default; the suite raises the budget to pin
+  the verdict. The budget counts every dereference of a path, not the
+  depth of a chain.
+- **By reference needs a symbol or a field for the ref.** A ref reached
+  through an index (`a[i].x`) or a call keeps S8au's `feUnsupportedOp`.
+
+**As landed (S8bd, walker 204) — S8ba's remainder.** Suite
+`tsymex_rfc0005_s8bd_remainder` (23 tests; c both Z3 versions, cpp
+5.1). The base is 7af8468 (S8ba); every item was RED there first (item
+2's witness did not compile at all: the witness tuple held `int` where
+`seq[Meters]` was expected).
+
+- (1) *A bit-vector string index against the length.* RED on both Z3
+  versions and both encodings: `i >= 0 and i < s.len and s[i] == 'a' and
+  i + 1 > s.len` was `sxUnknown` (`beSolverUndef`) after 41-44M units.
+  The cause is not `str.at`: without the character read the cost was the
+  same, and with `i > s.len` (no `+ 1`) it was 170k. `i` is a bit-vector
+  (its `i + 1` may overflow) that meets `s.len` through two Int views,
+  `bv2int(i)` and `bv2int(i + 1)`, and Z3 relates them only by
+  bit-blasting the conversion. The label query replayed offline from its
+  SMT-LIB text decides (0.77M units on 5.1, 2.77M on 4.13.4), but it
+  ran past the whole budget inside the walker's context (S8o's
+  context-state effect). `bvOffsetLinks` states, beside every
+  `checkCapped` step's query, the exact two's-complement link between
+  `bv2int(x +- c)` and `bv2int(x)` (`c` a numeral, unsigned or Z3's
+  one-argument signed view), only when both views are in the query.
+  Each link is a theorem: the suite checks it against Z3's own `bv2int`
+  on a width-8 grid (360 cases: both signs, the wrap at both ends,
+  `x + c`, `c + x`, `x - c`). S8aj's rejected general link brought in an
+  Int view the query did not hold (6.6M to 31.6M); this one never does
+  (pinned: a lone `bv2int(x + 1)` is not linked).
+- (2) *A `seq[distinct]` parameter.* `isRenderableSeqElemTy` accepts a
+  distinct chain over a renderable int or float (not an enum);
+  `emitTyAndReader` reads the cells as the base seq (`seqCellTy`) and
+  converts each element back through the chain (`Km(Meters(int(x)))`);
+  `witnessFidelity` is faithful in lockstep; `extractSeqElements`
+  dispatches on the cell type. `seq[Meters]`, `seq[Grams]` (int32),
+  `seq[Secs]` (float) and `seq[Km]` (a distinct of a distinct) are
+  `sxSat` with witnesses that replay `roConfirmed`; S8ba's decline pin
+  is now `sxSat`.
+- (3) *The heap-depth budget.* The count was not needed: the walk of a
+  path is finite without it (`maxLoopUnwind` and `maxCallDepth` bound
+  every loop and recursion; 0 is not unlimited for either), and the
+  budget's own doc and name are a depth. The walker counted every
+  dereference of a path (`Path.heapDepth`, never decremented), so a
+  straight-line SUT reading one object's field ten times declined at the
+  default 8. `maxHeapDepth` now bounds the chain depth of the
+  dereference: one more than `heapChainDepth` of the dereferenced ref
+  (a read out of a heap cell keyed by a `Ref_T` sort is one more than
+  its ref; an `ite` is its deeper side; a read out of a seq's or array's
+  backing is its container's; anything else is a root). The check runs
+  once the ref is lowered. The count is kept as a hard cap,
+  `heapDerefsPerPathCap = 4096`, which bounds the heap terms one query
+  can hold. Each decline names its budget (`maxHeapDepth`,
+  `heapDerefsPerPathCap`). RED: `mr`/`mr_dead`, `hr_dead`, `hn`,
+  `hn_dead` and a seven-link chain were `heDepthExhausted` at the
+  default; they decide now, and a nine-link chain (default) or a
+  seven-link chain under `maxHeapDepth: 3` still declines and names it.
+  R10's exact thresholds (a two-hop chain decides at 3 and declines at
+  2), R11b's depth-3 walk and every heap suite are unchanged. S8ba's
+  `maxHeapDepth: 32` overrides are gone.
+- (4) *By reference: an element, a call result, a generic callee.* RED:
+  S8au's `feUnsupportedOp` (`a[0].x` and `s[nextI()].x` through a
+  global, `getB().x` without a root, `setGen(p.x, k)`); `a[gI].x` with a
+  callee that moves `gI` also hit `heDepthExhausted`. `byRefSub` takes
+  a ref that is an element (`a[i]`) or a user call's result, and a
+  generic callee. The ref is evaluated once, at its argument's
+  position, before the call; a by-reference actual is no longer lowered
+  a second time as an lvalue (S8ba lowered both, harmless for a symbol,
+  a second call for `getB()`). The callee's parameter is named by a
+  mark: an element's ref by a childless copy of its node (it keeps the
+  type and names nothing of the caller's; `parseExpr` and `lvalueRoot`
+  read it as the parameter), a call's by the callee's own `result`
+  symbol (same type). A call result is rooted at the call
+  (`byRefRoot`). A generic callee is specialised after monomorphisation,
+  under its instantiation's key extended by the by-reference parts, and
+  counts against `maxInstantiationsPerProc`. Pinned: `he`, `hi` (the
+  index read once, before the callee moves it), `hic` (the index call
+  made once), `hcr` (the call made once), `hgen`, and two instantiations
+  of one generic (`hgen2`, int16 and int).
+  **Soundness bug found:** a generic instance's body uses its own
+  parameter symbols, not those of its formal list. The specialisation
+  first matched nothing and silently dropped the formal's write (caught
+  by `hgen2_dead` before it landed). The same mismatch was live in
+  S8an's `ptrFormalStaysLocal`: it scanned the instance's body for the
+  formal list's symbol, found no use, and modelled an `addr` argument a
+  generic callee stores in a global as a cell for the call only, a
+  false `sxSat` (`ge_dead`, RED `sxSat` at the base). `formalInBody`
+  resolves the body's symbol for both (by name among the body's
+  parameter symbols, outside nested routines; ambiguous is a decline).
+
+*Measurements* (target units, `-d:symexQueryStats` totals; base 7af8468):
+
+| probe | base 5.1 | S8bd 5.1 | base 4.13.4 | S8bd 4.13.4 |
+|---|---|---|---|---|
+| `s[i] == 'a'`, `i + 1 > s.len` (dead) | `sxUnknown` 41.3M | `sxUnsat` 201k | `sxUnknown` 43.6M | `sxUnsat` 321k |
+| the same, `i + 1 == s.len` (live) | `sxSat` 430k | `sxSat` 373k | — | `sxSat` 457k |
+| without the character read (dead) | `sxUnknown` 40.4M | `sxUnsat` 227k | `sxUnknown` 43.3M | `sxUnsat` 801k |
+| `let j = i + 1` first | `sxRaised` 40.4M | `sxRaised` 319k | — | `sxRaised` 621k |
+| `s[i - 1]`, `i - 1 >= s.len` (dead) | `sxUnknown` | `sxUnsat` 438k | `sxUnknown` 43.7M | `sxUnsat` 1.48M |
+| dead, `isExact` | `sxUnknown` 41.3M | `sxUnsat` 200k | — | `sxUnsat` 321k |
+
+Offline replay of the dead label's query (SMT-LIB text, fresh context):
+as dumped 774639 / 2773337 units (5.1 / 4.13.4); with the exact
+unsigned link 2802 / 3990.
+
+*Suites* (5.1 c and 4.13.4 c, `ok/failed`; identical on both versions):
+
+| suite | 5.1 | 4.13.4 |
+|---|---|---|
+| `rfc0005_s8bd_remainder` (new; cpp 5.1 23/0) | 23/0 | 23/0 |
+| `rfc0005_s8ba_remainder` (re-pinned) | 32/0 | 32/0 |
+| `rfc0005_s8au_remainder` | 35/0 | 35/0 |
+| `rfc0005_s8i_models` | 39/0 | 39/0 |
+| `rfc0005_s8ag_indexsplit` | 15/0 | 15/0 |
+| `rfc0005_s1c_verdict` | 24/0 | 24/0 |
+| `r6_n36_raise_degrade` | 8/0 | 8/0 |
+| `rfc0005_s8an_remainder` | 25/0 | 25/0 |
+| `rfc0005_s8aj_remainder` | 21/0 | 21/0 |
+| `rfc0005_s8ad_remainder` | 13/0 | 13/0 |
+| `phase15_CR2_cachekey` (204) | 6/0 | 6/0 |
+| heap: `phase15_r9_recursive`, `r10_budget`, `r11b_smoke`, `R1a_ir`, `z3_infra`, `h_witness`, `h_verification`, `configdefaults`, `163rev`, `s0_exhibit`, `s1_lattice`, `s6b_ops`, `s8aa`, `s8ac`, `s8ap` | all 0 failed | all 0 failed |
+| feGlobal / source-scanning: `s1b`, `s4_alloc`, `s5_str`, `s6a`, `s7_closure`, `s8ab`, `s8b`, `s8l`, `s8m`, `s8n`, `s8p`, `s8z`, `s8_scope`, `s8x`, `s10_replay`, the A2a / N2 / r11 / pairing / n27 / n36 audits | all 0 failed | all 0 failed |
+
+The new suite runs in 6.4 s without its compile; 69 s (5.1) and 74 s
+(4.13.4) with it, on a host at load 14-22.
+
+*Different mechanisms, reported and not fixed here.*
+- **Two `var` heap actuals through different refs to one cell.**
+  `let q = p; setBoth(p.x, q.x)` with `setBoth(a, b: var int) = b = 2;
+  a = 1` is a false `sxSat` for `p.x != 1` (Nim gives 1; the
+  write-backs run in argument order and leave 2). `varActualMayAlias`
+  asks whether another argument's TYPE can hold a ref to the cell; the
+  other actual is `var int`, so it cannot, and the two roots are
+  different symbols. Present at the base (S8ac / S8an), not reached by
+  S8bd (no global or capture, so no by-reference path).
+- **`geDistinctBijectivitySkipped` on a distinct of a distinct over an
+  int.** `seq[Km]` (`Km = distinct Meters`, `Meters = distinct int`)
+  carries the hint "over non-decidable base itDistinct (FP/String)": the
+  round-trip axiom is skipped for a chain whose base is decidable. A
+  hint only (the verdict and witness are right here); it under-uses a
+  decidable axiom.
+- **A by-reference ref with no symbol, element or call form.** A ref
+  reached through a pointer dereference (`pb[].x`, `pb: ptr Box`), a
+  conversion or a cast is refused by `byRefSub` and falls back to S8au's
+  `feUnsupportedOp` (by the code path; not pinned).
+
+**As landed (S8bf, walker 206 provisional; S8be holds 205) — S8bd's
+soundness finding.** Suite `tsymex_rfc0005_s8bf_alias` (13 tests; c on
+both Z3 versions, cpp 5.1; the binary runs in ~2 s). The base is 09f6804
+(S8bd).
+
+- *The bug.* `let q = p; setBoth(p.x, q.x)` with `setBoth(a, b: var
+  int) = b = 2; a = 1` was a false `sxSat` for `p.x != 1`: the two
+  copy-in/copy-out write-backs ran in argument order, not the callee's
+  write order. `varActualMayAlias` asked whether another argument names
+  the lvalue's root or has a TYPE that can hold a ref to the cell; `q.x`
+  is a different symbol of type `var int`. RED at the base, every dead
+  label `sxSat` and every reachable twin `sxUnsat`: a `let` copy, a
+  `let`/`var` chain, a ref in a tuple (`t[0].x`), a ref through a field of
+  another ref (`o.inner.x`), two parameter refs (`p == q`), a `let` copy
+  of a parameter, a `var` formal forwarded to a second callee, two `addr`
+  actuals (`ptr int` formals) and a mixed `var` / `addr` pair.
+- *The check.* `heapCellsMayMeet` asks whether two heap lvalues may be one
+  cell whatever their roots: the objects their last dereferences address
+  may be one (same type, or either side takes part in inheritance) and
+  one field path from there is a prefix of the other (`p.x`/`q.x`,
+  `p.v`/`q.v.n`; an index, a tuple's included, matches any index). A
+  `ptr` dereference on either side meets any heap lvalue. Root identity
+  plays no part. `varActualMayAlias` and `addrActualMayAlias` consult it
+  for every other actual (`actualCell`: a `var` or `addr` actual's
+  lvalue, or a non-scalar value Nim may pass by pointer).
+- *The model.* `userCallStmt` gives each `var` / `addr` heap actual its
+  `peers`, the others whose cell may be its own, and passes every one of
+  them by reference (S8ba's `byRefSub`), each excused from the alias
+  check by the others: the callee's writes land on the heap in its order
+  and the heap decides whether the refs are one (the parameter pair is
+  `sxSat` both ways). An actual that cannot be passed so (`pb[].x`,
+  `pb: ptr Box`) takes the write-back, which declines `feUnsupportedOp`
+  naming it (pinned). Precision gained: one ref named twice
+  (`setBoth(p.x, p.x)`) and two elements of one array of refs were
+  declines and now decide. Two fields (`p.x`, `q.y`) and two fresh
+  allocations stay on the exact write-back path (pinned).
+- *Audit.* Every caller of `varActualMayAlias` (the by-reference gate,
+  the plain-variable write-back, the heap write-back) and of
+  `addrActualMayAlias` (the by-reference gate, the cell model) now sees
+  the cell. `outerReachesCell` is type-based (no root identity). The
+  walker's `cGuardRoots` compares root names, which is exact for a
+  variable; a heap cell reached through another global is
+  `outerReachesCell`'s. A plain variable and a `ptr` to it (`let pp = addr
+  x; setBoth(pp[], x)`) already declined (the alias is substituted at
+  parse). A large object passed by value beside a `var` of the same cell
+  (`setRead(p.v, q.v)`, which Nim passes by pointer) now declines.
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8bf_alias`
+13/0 (cpp 13/0), `s8bd_remainder` 23/0, `s8ba_remainder` 32/0,
+`s8au_remainder` 35/0, `s8an_remainder` 25/0, `s8ac_remainder` 19/0,
+`s8i_models` 39/0, `s8_scope` 28/0, `phase15_CR2_cachekey` (206) 6/0,
+`phase14_var_param` 1/0, `phase14_var_param_downstream` 2/0,
+`163_opaque_transparent` 15/0, `163rev_assign_scope` 10/0,
+`163rev_assign_sites` 33/0, `163rev_degrade_classification` 8/0,
+`163rev_inert_argfork` 9/0, `163rev_inert_exclusions` 15/0,
+`163rev_transparent_guard` 9/0, `163rev_transparent_result` 4/0,
+`phase12_witnesses` 10/0, `r5_bv32_width` 8/0, `r6_lows_blockparse`
+6/0, `rectify_effects` 5/0, `s2_replay` 15/0, `s6a_budget` 31/0. (S8as
+has no suite: its row is pending.)
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: a call through a proc-valued variable drops its `var`
+  writes.** `let f = setBoth; var x = k; var y = k; f(x, y); if x != 1:
+  symexTarget("d")` is `sxSat` with no error (Nim gives `x == 1`); the
+  same with a heap actual (`f(p.x, y)`). The closure-call arm
+  (`mkClosureCall`) lowers the arguments by value and has no write-back
+  at all; not an aliasing question.
+- **SOUNDNESS: a `ptr` parameter never addresses a ref object's field.**
+  `proc s(pi: ptr int; q: Box) = q.x = 1; pi[] = 2; if q.x == 2:
+  symexTarget("pd")` is `sxUnsat` (hint `hePtrFamily` only); Nim reaches
+  it with `pi = addr q.x`. The heap keeps `ptr int` cells apart from
+  `Box.x` fields, with or without a call (`setBoth(pi[], q.x)` is the same
+  `sxUnsat`, at the base by write-back and now by reference).
+- **SOUNDNESS (to confirm): an inheritance ref conversion is
+  ill-sorted.** `Base(d) == b` (`d: Derived`, `b: Base`) is
+  `weInternalWalkerFault` ("Z3 sort mismatch at equality"), and with
+  `setBoth(Base(d).x, b.x)` the dead label reports `sxRaised` beside the
+  faults. Identical at the base.
+- **PRECISION: a ref reached through a pointer dereference.** `pb[].x`
+  still cannot be passed by reference (S8bd's reported item), so a pair
+  holding it declines.

@@ -61,6 +61,11 @@ var seenGlobals {.compileTime.}: seq[NimNode]
   ## RFC-0005 S8as. The module-level variable symbols the parse has named
   ## (through `strVal`), in first-seen order: the globals the walked code
   ## reaches, whose entry value the walk models (`SymexProgram.globals`).
+var byRefCounter {.compileTime.}: int
+
+const byRefMarkColumn = -32123
+  ## RFC-0005 S8ba. The column a by-reference base carries (`markByRef`):
+  ## no source position has a negative column.
 
 const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## The runtime value bindings an env slot holds. A local `const` is folded
@@ -80,11 +85,38 @@ proc globalIRName*(n: NimNode): string =
   ## reached (`strVal` does).
   globalEnvPrefix & macros.strVal(owner(n)) & "." & macros.strVal(n)
 
+proc byRefName*(n: NimNode): string =
+  ## RFC-0005 S8ba. The IR name of a by-reference base (`markByRef`), or ""
+  ## when `n` is not one. RFC-0005 S8bd: a mark is a symbol, or a node with
+  ## no children (`markByRef` of an element or a call result).
+  if n.kind != nnkSym and n.len != 0: return ""
+  let li = n.lineInfoObj
+  if li.column != byRefMarkColumn or li.line <= 0: return ""
+  "__byref_" & $li.line
+
+proc markByRef*(base: NimNode): NimNode =
+  ## RFC-0005 S8ba. A copy of the symbol `base` (it keeps its symbol and
+  ## type) that names a fresh by-reference parameter: `strVal` reads it as
+  ## `__byref_<N>`, so a callee specialised to a heap lvalue (`p.x` for its
+  ## `var` formal) reads and writes that cell through the ref the caller
+  ## evaluated at the call. nil when the counter is spent (the line field
+  ## holds the number).
+  ## RFC-0005 S8bd: a base that is not a symbol (`a[i]`, `getBox()`) is
+  ## marked as a copy of its own node without its children: it keeps the
+  ## node's type, and names nothing of the caller's.
+  if byRefCounter >= 65000: return nil
+  inc byRefCounter
+  result = copyNimNode(base)
+  result.setLineInfo(base.lineInfoObj.filename, byRefCounter, byRefMarkColumn)
+
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as
   ## its scoped name (RFC-0005 S8e), and a module-level variable reads as
   ## `__gl:<module>.<name>` (RFC-0005 S8an) and is recorded as reached
-  ## (`seenModuleGlobals`, RFC-0005 S8as).
+  ## (`seenModuleGlobals`, RFC-0005 S8as). A by-reference base reads as its
+  ## parameter's name (RFC-0005 S8ba, `markByRef`).
+  let br = byRefName(n)
+  if br.len > 0: return br
   result = macros.strVal(n)
   if isModuleGlobal(n):
     var seen = false
@@ -107,6 +139,7 @@ proc resetNameScopes*() =
   nameScope = NameScope()
   nameCounter = 0
   seenGlobals = @[]   ## RFC-0005 S8as
+  byRefCounter = 0    ## RFC-0005 S8ba
 
 proc seenModuleGlobals*(): seq[NimNode] =
   ## RFC-0005 S8as. The module-level variables named since the last

@@ -336,6 +336,11 @@ suite "symex round-6 B7-rider -- mutation-fallback veto (B1's scanShapeReceiverM
     ## independently surfaces a genuine, unrelated `beBudgetExhausted` once
     ## the run is no longer whole-run-poisoned by a raw raise. See B1-4's
     ## own comment for the full writeup.
+    ## RFC-0005 S8ba: `.add` on a `seq[byte]` is modelled (`storeSeqElem`),
+    ## so the width decline this pinned is gone and the label is reached.
+    ## The receiver staying array-modelled is still what is checked: a
+    ## wrongly string-backed one reaches `iekSeqAdd`'s kind-mismatch decline
+    ## ("expected svSeq") instead of the store.
     let r = symexFind(mutatedByteReceiverStaysArray, tLabel("b7r_mutated_stays_array"))
     # RFC-0005 S8ar: `.add` stores at every backed element width
     # (`storeSeqElem`), so the width-8 decline this pinned is gone. The

@@ -1286,6 +1286,9 @@ type
                             ## same bare-`nnkSym`-only scope as `iaRecvName`.
       spRetName*:  string  ## fresh let-name bound to the popped element.
       spLoc*:      string  ## siteLoc idiom, same purpose as `iaLoc`.
+      spElemTy*:   IRType  ## RFC-0005 S8ba: the element type, so a declined
+                            ## pop binds `spRetName` to a fresh value of it
+                            ## (nil from a pre-S8ba caller: left unbound).
     of isVariantField:
       vfRetName*:       string
       vfRecv*:          IRExpr
@@ -4209,6 +4212,19 @@ proc allocCostOf*(t: IRType): int64 =
 proc isUnsupportedFieldPlaceholder*(ty: IRType): bool =
   ty.kind == itSeq and ty.seqUnsupportedFieldReason.len > 0
 
+proc seqCellTy*(elemTy: IRType): IRType =
+  ## RFC-0005 S8ba. The sort a seq's backing array holds for `elemTy`: a
+  ## `distinct T` element is stored as its base (followed down a nested
+  ## chain) and re-boxed where a read has the distinct static type
+  ## (`isIndex`, `isSeqPop`). A `D(x)` conversion is the parser's identity
+  ## (RFC-0005 S8p), so a base value is already what a distinct-typed local
+  ## holds; every use ejects to the base (`ejectBase`). Before S8ba a
+  ## `seq[Meters]` local was an unbacked placeholder and every read of it
+  ## declined.
+  result = elemTy
+  while result != nil and result.kind == itDistinct:
+    result = result.distinctBase
+
 proc isBackedSeqElemTy*(elemTy: IRType): bool =
   ## Mirrors EXACTLY the element kinds `allocateSeqDataRaw` (`runtime.nim`)
   ## can back with a real Z3 array-of-`V` representation — its `case
@@ -4224,7 +4240,9 @@ proc isBackedSeqElemTy*(elemTy: IRType): bool =
   ## `seq[string]` is backed here but not witness-renderable there — do not
   ## conflate them). Used by `classifyObjectRecordFields`
   ## (dsl_typebridge.nim) to detect a field needing the scoped-decline
-  ## placeholder above.
+  ## placeholder above. RFC-0005 S8ba: a distinct element is backed when
+  ## its base is (`seqCellTy`).
+  let elemTy = seqCellTy(elemTy)
   elemTy.kind in {itBool, itFloat32, itFloat64, itString, itRef, itPtr} or
   elemTy.kind == itInt
 
@@ -4258,6 +4276,18 @@ proc isRenderableSeqElemTy*(elemTy: IRType): bool =
   ## the witness READER (`emitTyAndReader`'s `itSeq` arm) was missing cases,
   ## so this predicate is widened in lockstep with that reader per this
   ## proc's own contract (see module doc comment above).
+  ##
+  ## RFC-0005 S8bd: a `distinct` element (any chain of them) whose cell
+  ## (`seqCellTy`) is a renderable int or float, not an enum: the reader
+  ## reads the cells as the base seq and converts each element back
+  ## through the chain (`emitTyAndReader`'s `itSeq` arm). S8ba backed such
+  ## a seq; only its witness was missing.
+  if elemTy.kind == itDistinct:
+    let cell = seqCellTy(elemTy)
+    if cell == nil: return false
+    if cell.kind == itInt: return cell.enumName.len == 0 and
+                                  isRenderableSeqElemTy(cell)
+    return cell.kind in {itFloat32, itFloat64}
   (elemTy.kind == itInt and
    (elemTy.width == 8 or elemTy.width == 16 or
     elemTy.width == 32 or elemTy.width == 64)) or
@@ -4977,9 +5007,11 @@ proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
   IRStmt(kind: isIndexAssign, iaRecvName: recvName, iaIdx: idx,
          iaVal: val, iaLoc: loc, iaLo: lo)
 
-proc mkSeqPopStmt*(recvName, retName: string, loc: string = ""): IRStmt =
+proc mkSeqPopStmt*(recvName, retName: string, loc: string = "",
+                   elemTy: IRType = nil): IRStmt =
   ## N14: `retName := recvName.pop()`.
-  IRStmt(kind: isSeqPop, spRecvName: recvName, spRetName: retName, spLoc: loc)
+  IRStmt(kind: isSeqPop, spRecvName: recvName, spRetName: retName, spLoc: loc,
+         spElemTy: elemTy)
 
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)

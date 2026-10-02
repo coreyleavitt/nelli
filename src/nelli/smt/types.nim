@@ -4151,12 +4151,28 @@ func isContainerIntLeaf*(t: IRType): bool =
   t != nil and (t.kind == itInt and t.width in {8, 16, 32, 64} or
                 t.kind == itBool)
 
+func isTableKeyTy*(keyTy: IRType): bool =
+  ## RFC-0005 S8ar. A `Table` key type the model backs: `string` (a Z3
+  ## string key) or an `isContainerIntLeaf` (its 64-bit cell, a `HashSet`
+  ## member's encoding). Was `string` only.
+  keyTy != nil and (keyTy.kind == itString or isContainerIntLeaf(keyTy))
+
+func isTableValTy*(valTy: IRType): bool =
+  ## RFC-0005 S8ar. A `Table` value type the model backs: an
+  ## `isContainerIntLeaf` (its 64-bit cell), a `string`, a `float32` or a
+  ## `float64` (a term of its own sort). Was the integer cell only. A value
+  ## that is itself a container, an aggregate or a ref is a scoped decline
+  ## (`seUnsupportedTableValType`): the data array holds one term per key,
+  ## and none of those is one term.
+  valTy != nil and (isContainerIntLeaf(valTy) or
+                    valTy.kind in {itString, itFloat32, itFloat64})
+
 func isBackedTableTy*(keyTy, valTy: IRType): bool =
-  ## RFC-0005 S8z. The `Table[K, V]` shapes `allocateSym` backs: `string`
-  ## keys, a `isContainerIntLeaf` value. Every other key type (the model is
-  ## string-keyed) and value type (the cell is a 64-bit integer) is a scoped
+  ## RFC-0005 S8z. The `Table[K, V]` shapes `allocateSym` backs. RFC-0005
+  ## S8ar: an `isTableKeyTy` key and an `isTableValTy` value (was `string`
+  ## keys and an integer value). Every other key or value type is a scoped
   ## decline (`seUnsupportedTableKeyType` / `seUnsupportedTableValType`).
-  keyTy != nil and keyTy.kind == itString and isContainerIntLeaf(valTy)
+  isTableKeyTy(keyTy) and isTableValTy(valTy)
 
 func isBackedSetElemTy*(elemTy: IRType): bool =
   ## RFC-0005 S8z. The `HashSet[T]` element types `allocateSym` backs.
@@ -4318,6 +4334,14 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
     # — trivially renderable. Otherwise it recurses `emitTyAndReader(pointee)`.
     let pointee = if ty.kind == itRef: ty.refPointeeTy else: ty.ptrPointeeTy
     if isRecursionPlaceholder(pointee):
+      true
+    elif (pointee.kind == itTuple and pointee.objectName.len > 0) or
+         pointee.kind in {itVariant, itMultiVariant}:
+      # RFC-0005 S8ar: a named object or case object pointee is spelled by
+      # its name (`refWitnessTypeNode`) and filled generically over the Nim
+      # type (`resolveRef` / `readCellField`), so a container field it holds
+      # is read or keeps its zero -- `witnessFidelity` says which -- and
+      # never reaches a reader `error()`. It demoted the whole parameter.
       true
     else:
       isRenderableWitnessTy(pointee)
@@ -4553,6 +4577,19 @@ type
     kind*: SymexErrorKind
     msg*: string
 
+proc tableKeyDeclineMsg*(keyTy: IRType): string =
+  ## RFC-0005 S8ar. The one statement of the key-type decline.
+  "Table key type not modeled: " & $keyTy & " — only a string or a " &
+    "fixed-width integer, char, enum, range or bool key is supported " &
+    "(seUnsupportedTableKeyType)"
+
+proc tableValDeclineMsg*(valTy: IRType): string =
+  ## RFC-0005 S8ar. The one statement of the value-type decline: the data
+  ## array holds one term per key.
+  "Table value type not modeled: " & $valTy & " — only a fixed-width " &
+    "integer, char, enum, range, bool, string or float value is supported " &
+    "(seUnsupportedTableValType)"
+
 proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
   ## N39 (round-6 fix round 5 — closing a mis-scoped safety certification in
   ## the raw-raise-in-lower CLASS), extended by N40 (round-6 fix round 6,
@@ -4619,17 +4656,12 @@ proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
   of itTable:
     # N40: the false-negative this slice closes -- see this proc's own doc
     # comment above.
-    if t.tabKeyTy.kind != itString:
+    if not isTableKeyTy(t.tabKeyTy):
       result = some(FieldAllocIssue(kind: seUnsupportedTableKeyType,
-        msg: "Table key type not modeled: " & $t.tabKeyTy &
-             " — only Table[string, V] is supported " &
-             "(seUnsupportedTableKeyType)"))
+        msg: tableKeyDeclineMsg(t.tabKeyTy)))
     elif not isBackedTableTy(t.tabKeyTy, t.tabValTy):
       result = some(FieldAllocIssue(kind: seUnsupportedTableValType,
-        msg: "Table value type not modeled: " & $t.tabValTy &
-             " — only Table[string, V] with V a fixed-width integer, " &
-             "char, enum or range is supported " &
-             "(seUnsupportedTableValType)"))
+        msg: tableValDeclineMsg(t.tabValTy)))
   of itSet:
     if not isBackedSetElemTy(t.setElemTy):
       result = some(FieldAllocIssue(kind: seUnsupportedSetCharInterop,

@@ -683,7 +683,7 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
   of svSeq:
     @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
   of svTable:
-    registerTableBase(sv.tabPresentRaw, sv.tabSize)
+    registerTableBase(sv.tabPresentRaw, sv.tabSize, ty.tabKeyTy)
     @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
   of svSet:
     registerSetBase(sv.setMembersRaw, sv.setSize, ty.setElemTy)

@@ -802,7 +802,7 @@ proc stdName(name: string): NimNode =
   of "readSeqString": bindSym"readSeqString"      # RFC-0005 S8ar
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
-  of "readTableStrIntAs": bindSym"readTableStrIntAs"   # RFC-0005 S8z
+  of "readTableAs": bindSym"readTableAs"   # RFC-0005 S8ar
   of "readSetIntAs": bindSym"readSetIntAs"             # RFC-0005 S8z
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
@@ -919,7 +919,20 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
       if impl.kind == nnkTypeDef and impl.len >= 3 and
          impl[2].kind in {nnkRefTy, nnkPtrTy}:
         return copyNimNode(sym)
-  let (innerTy, _) = emitTyAndReader(pointee, path, witId)
+  # RFC-0005 S8ar: a named object or case object is spelled by its name
+  # alone. `resolveRef` fills its cell generically over the Nim type
+  # (`readCellField`), so its fields need no reader here; building one
+  # reached `emitTyAndReader`'s unrenderable-container arms, which is why
+  # `isRenderableWitnessTy` demoted a param whose pointee held one.
+  let innerTy =
+    if pointee.kind == itTuple and pointee.objectName.len > 0:
+      userTypeName(pointee, pointee.objectName)
+    elif pointee.kind == itVariant:
+      userTypeName(pointee, pointee.vObjectName)
+    elif pointee.kind == itMultiVariant:
+      userTypeName(pointee, pointee.mvObjectName)
+    else:
+      emitTyAndReader(pointee, path, witId)[0]
   if pointee.kind == itTuple and pointee.nameIsRefAlias: innerTy
   else: wrapped(innerTy)
 
@@ -1205,7 +1218,7 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
             " not yet implemented")
   of itTable:
     # Phase 5 cycle 5: Table[string, int]. RFC-0005 S8z: and every other
-    # renderable value type, read through `readTableStrIntAs[T]`.
+    # renderable value type, read through `readTableAs[K, V]` (S8ar).
     if ty.tabKeyTy.kind == itString and
        ty.tabValTy.kind == itInt and ty.tabValTy.signed and
        ty.tabValTy.width == 64 and ty.tabValTy.enumName.len == 0:
@@ -1213,11 +1226,14 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
         stdName("Table"), stdName("string"), stdName("int"))
       (tabTy, newCall(stdName("readTableStrInt"), witId, newLit(path)))
     elif isRenderableTableTy(ty.tabKeyTy, ty.tabValTy):
+      # RFC-0005 S8ar: every backed key and value type, `readTableAs[K, V]`
+      # (was `readTableStrIntAs[V]`: a string key and an integer value).
+      let (keyTyNode, _) = emitTyAndReader(ty.tabKeyTy, path, witId)
       let (valTyNode, _) = emitTyAndReader(ty.tabValTy, path, witId)
       let tabTy = newTree(nnkBracketExpr,
-        stdName("Table"), stdName("string"), valTyNode)
-      (tabTy, newCall(newTree(nnkBracketExpr, stdName("readTableStrIntAs"),
-                              copyNimTree(valTyNode)),
+        stdName("Table"), keyTyNode, valTyNode)
+      (tabTy, newCall(newTree(nnkBracketExpr, stdName("readTableAs"),
+                              copyNimTree(keyTyNode), copyNimTree(valTyNode)),
                       witId, newLit(path)))
     else:
       # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
@@ -1856,8 +1872,9 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
         of itRef, itPtr: refCellFidelity(f.seqElemTy, noms, inProgress)
         else: wfLossy
     of itTable:
-      if f.tabKeyTy.kind == itString and f.tabValTy.kind in {itInt, itBool} and
-         isBackedTableTy(f.tabKeyTy, f.tabValTy): wfFaithful
+      # RFC-0005 S8ar: every backed shape (`readCellTable` reads the real
+      # key and value types, so a `char` key or value is faithful here).
+      if isBackedTableTy(f.tabKeyTy, f.tabValTy): wfFaithful
       else: wfLossy
     of itSet:
       if isBackedSetElemTy(f.setElemTy): wfFaithful else: wfLossy

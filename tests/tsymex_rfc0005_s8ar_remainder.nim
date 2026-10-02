@@ -426,3 +426,103 @@ suite "S8ar (5, 6): tuple, object, array and distinct fields of a heap cell":
     discard run(fWhole, "f_whole_write_dead", sxUnsat)
     let r = run(fWholeIn, "f_whole_in", sxSat)
     if r.status == sxSat: check reproduces(fWholeIn(r.witness[0]), "f_whole_in")
+
+type
+  TabHolder = ref object
+    ti: Table[int, int]
+    ts: Table[string, string]
+    tf: Table[string, float]
+    tb: Table[bool, int8]
+  BadTab = ref object
+    tq: Table[string, seq[int]]
+    n: int
+  OddHolder = ref object
+    hs: HashSet[string]
+    bad: Table[string, seq[int]]
+    n: int
+
+proc tIntKey(t: Table[int, int]) =
+  if t.hasKey(3) and t[3] == 7 and t.len == 1: symexTarget("t_intkey")
+
+proc tStrVal(t: Table[string, string]) =
+  if "a" in t and t["a"] == "xy": symexTarget("t_strval")
+
+proc tFloatVal(t: Table[string, float]) =
+  if "a" in t and t["a"] > 1.5: symexTarget("t_floatval")
+
+proc tLocal(v: string) =
+  var t: Table[int8, string]
+  t[-1] = v
+  t[4] = "z"
+  if t[-1] == "q" and t.len == 2: symexTarget("t_local")
+  if t.len != 2: symexTarget("t_local_len_dead")
+  t.del(-1)
+  if -1'i8 in t: symexTarget("t_local_del_dead")
+  if t.len == 1 and t[4] == "z": symexTarget("t_local_del")
+
+proc tHeap(p: TabHolder) =
+  if p == nil: return
+  if 2 in p.ti and p.ti[2] == -5 and "k" in p.ts and p.ts["k"] == "v" and
+     "f" in p.tf and p.tf["f"] == 0.5 and true in p.tb and p.tb[true] == -3:
+    symexTarget("t_heap")
+
+proc tHeapWrite(p: TabHolder, v: int) =
+  if p == nil: return
+  p.ti[v] = 1
+  if p.ti[v] != 1: symexTarget("t_heap_write_dead")
+  if p.ti.len == 0: symexTarget("t_heap_write_len_dead")
+
+proc tBad(p: BadTab) =
+  if p != nil and p.tq.len == 1: symexTarget("t_bad")
+
+proc tOdd(p: OddHolder) =
+  if p != nil and p.n == 9: symexTarget("t_odd")
+
+suite "S8ar (5, 9): every backed Table key and value type, rendered":
+  template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
+    block:
+      let r = symexFind(fn, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & " " & show(r.errors)
+      check r.status == want
+      check not r.errors.hasKind(weInternalWalkerFault)
+      r
+
+  test "an int key":
+    let r = run(tIntKey, "t_intkey", sxSat)
+    if r.status == sxSat: check reproduces(tIntKey(r.witness[0]), "t_intkey")
+
+  test "a string value":
+    let r = run(tStrVal, "t_strval", sxSat)
+    if r.status == sxSat: check reproduces(tStrVal(r.witness[0]), "t_strval")
+
+  test "a float value":
+    let r = run(tFloatVal, "t_floatval", sxSat)
+    if r.status == sxSat: check reproduces(tFloatVal(r.witness[0]), "t_floatval")
+
+  test "a local Table[int8, string]: set, del, len":
+    let r = run(tLocal, "t_local", sxSat)
+    if r.status == sxSat: check reproduces(tLocal(r.witness[0]), "t_local")
+    discard run(tLocal, "t_local_len_dead", sxUnsat)
+    discard run(tLocal, "t_local_del_dead", sxUnsat)
+    discard run(tLocal, "t_local_del", sxSat)
+
+  test "Table fields of a ref render every backed value type":
+    let r = run(tHeap, "t_heap", sxSat)
+    if r.status == sxSat: check reproduces(tHeap(r.witness[0]), "t_heap")
+
+  test "a write to an int-keyed Table field":
+    discard run(tHeapWrite, "t_heap_write_dead", sxUnsat)
+    discard run(tHeapWrite, "t_heap_write_len_dead", sxUnsat)
+
+  test "a Table whose value is a container declines, scoped and stated":
+    let r = run(tBad, "t_bad", sxUnknown)
+    check r.errors.anyIt(it.kind == seUnsupportedTableValType or
+                         "Table value type not modeled" in it.msg)
+
+suite "S8ar (7): a container a ref pointee holds no longer demotes the parameter":
+  test "a HashSet[string] and an unbacked Table field beside an int field":
+    let r = symexFind(tOdd, tLabel("t_odd"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedWitnessType)
+    if r.status == sxSat: check reproduces(tOdd(r.witness[0]), "t_odd")

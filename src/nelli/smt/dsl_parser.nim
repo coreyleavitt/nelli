@@ -4602,7 +4602,10 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     if wbs.len == 0: l else: mkTry(l, @[], mkBlock(wbs))
   proc backsFor(al: seq[int]): seq[IRStmt] =
     for b in backs:
-      let src = temps[al[b.i - 1] + 1]
+      # RFC-0005 S8bh, after S8x: a `var` copy, not a `let`. In the
+      # compile-time VM a `let` of a seq element aliases the element
+      # (`vm_alias_guard`).
+      var src = temps[al[b.i - 1] + 1]
       var wbPre: seq[IRStmt]
       let w = parseAsgn(nnkAsgn.newTree(b.lv, newEmptyNode()), mkVar(src),
                         wbPre, ctx)

@@ -324,7 +324,7 @@ state = "pending"
 [[slice]]
 id = "S8at"
 title = "S8ar's remainder: ref to anonymous tuple; initTable inside the function under test; symbolic index into array of seqs; by-value case-object fields (model + construction zero); distinct over composite base; value object recurring through a container; Table float keys and container values; uint8/char top-level container witness; nim-z3 sortOf(Z3Array) sort-lifetime fix and lock bump"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8au"
@@ -7222,6 +7222,189 @@ built. `tabDataVarOf` now holds a live term of each sort across the call.
   only shape a test reached. The fix belongs in nim-z3: `sortOf(Z3Array)`
   should hold both sorts while it builds the array sort, followed by a
   lock bump. It is not a walker change.
+
+**As landed (S8at, walker 193, provisional) — S8ar's remainder.** Pins:
+`tests/tsymex_rfc0005_s8at_remainder.nim`. Every item was probed at the base
+(2e33081) before it was changed. Two of them hid a wrong verdict, and each
+was pinned RED first:
+- **`new(p)` of a ref to an anonymous tuple gave a false `sxSat`.** It
+  zeroed heaps that no read looked at, so `p[1] != 0` after `new(p)` was
+  reachable.
+- **A Table's absent-key `[]` never raised `KeyError`.** The walker only
+  narrowed the surviving path to "the key is present". The handler of
+  `try: t[k] except KeyError:` was therefore dead, which gave a false
+  `sxUnsat` for any target inside it, and the boundary saw no `sxRaised`.
+
+*(1) A ref to an anonymous tuple* (`ref (int, int)`) classifies. It is held
+whole, as a ref to a named tuple is. `p[i]` reads and writes its element
+heaps, `p[] = v` stores every element, `new(p)` zeroes every element, and
+two such refs may alias. The witness renders it.
+
+*(2) `initTable[K, V]()` / `initHashSet[T]()` inside a SUT* are the empty
+container. They crashed type classification ("node has no type"), because
+a generic bound only by its return type has no instantiated type at the
+call node; the type is now unified from the call site. The initial size
+follows `system`:
+- a negative size raises `RangeDefect`;
+- a size up to 2^20 is modelled;
+- a size above 2^20 declines, scoped.
+
+*(3) A symbolic index into an array of seqs* merges the elements exactly.
+`iteSV` havocked every seq value (`feUnsupportedOpHavoc`). Two seqs whose
+element arrays share a sort (the same backed element type) now merge as an
+`ite` of the element arrays and of the lengths, and `a[i]` is that merge
+folded over the elements. The read covers locals, parameters and ref
+fields.
+
+Mutation works the same way. `a[i].add x`, on a local or through a ref, is
+lowered by the parser into the bare arm's assignment to the element
+(`arrayElemLvalue`), so an out-of-range `i` raises `IndexDefect` before
+anything changes. An array of Tables takes the same path.
+
+*(4) A by-value case-object field is a tree-valued heap cell.* Its parts
+are the discriminator, the plain fields and every arm's fields:
+- a read of an inactive arm's field forks `FieldDefect`;
+- construction zeroes the field: the ordinal-0 tag and its arm's zeroes
+  (`heNewFieldZeroUnsupported` no longer fires for it);
+- a discriminator move within one branch (`of wkB, wkC:`) keeps that
+  branch's fields, and a move to another branch raises `FieldDefect`.
+
+`p[]` of a ref case object reads and writes the same ADR-0013 field heaps
+that `p.kind` / `p.b` read. A tuple holding a case object works, as does a
+multi-variant field.
+
+*(5) A `distinct` over a composite base* (`distinct seq[int]`,
+`distinct (int, bool)`, a distinct object) is lowered through its base. Such
+a base has no single Z3 sort. `ensureDistinctSort` tried to derive
+inject/eject func-decls over one and declined every such parameter
+(`seUnsupportedCompoundSortLeaf`). Neither decl is ever applied for a
+non-decidable base, so a composite base now has none, and the value is its
+boxed base. Every read ejects to it (`ejectBase` at the index, `len` and
+field arms). As a heap cell, it is held as its base's leaves
+(`heapLeafSuffixes(distinctGround(ty))`), so construction zeroes it and a
+store re-boxes it.
+
+*(6) A value object that recurs through a container stays a scoped
+decline, and the item's premise was wrong.* The recursion is not what
+declines. A seq whose element is a tuple or object is backed in no position
+(`isBackedSeqElemTy`), recursive or not. `seq[VFlat]` with
+`VFlat = object a: int` declines identically (`seNestedSeqUnsupported`). A
+path that does not read the seq is exact, and a read declines at the read.
+The leaf-split seq element is listed below. Even with it, a recursive value
+is unbounded in depth and would still decline (S8ar's
+`scopedDeclineFieldTy`).
+
+*(7) Table float keys and container values.*
+
+Float keys follow `hash`/`==` on floats:
+- a key's cell is its IEEE bit pattern, with `-0.0` normalised to `0.0`
+  (`floatKeyCell`), so the two are one key;
+- a NaN key is never found (`tabKeyNaN`): `[]=` with a NaN key adds an
+  entry that no lookup, `hasKey` or `del` finds, and each NaN insert is its
+  own entry.
+
+`float32` keys are covered too. Their 2^32-cell domain exposed a separate
+base fault: `cellDomain` built the domain size with `mkInt`, which takes a
+`cint`, and raised `RangeDefect` on 2^32. That faulted the walker on every
+`HashSet[uint32]` and `Table[uint32, V]` as well. The size is now built
+with `mkZ3IntLit`.
+
+A Table value may be a backed seq, `HashSet` or `Table`
+(`isTableContainerValTy`). Such a value is held leaf-split (`tvTree`):
+- each of its `svLeafAsts` leaves has its own data array, the first in
+  `tabDataRaw` and the rest in `tabDataMore`;
+- each of those arrays is keyed by the table's key sort;
+- each array is a heap leaf `__@v<i>`.
+
+A read selects every leaf and rebuilds the value (`tabValAt`). A store
+writes every leaf, and a merge or a return binding covers every leaf.
+Because an input table's values are free arrays, the well-formedness facts
+of every value a check can read (`svCellWf` at every key term) are emitted
+at each check (`ContainerCardRegistry.tabTreeBases`).
+
+`t[k].add x` and `t[k].incl x` mutate the value in place, through
+`[]`'s `var` overload. The parser turns the typed
+`HiddenDeref(Call "[]"(t, k))` into the element lvalue, so an absent key
+raises `KeyError` before anything is added. The witness renders a container
+value, at any renderable element type.
+
+*(8) Top-level `uint8`/`char` container witnesses.* S8am's `IRType.isChar`
+(landed on the channel while this slice was open) tells the two apart, so
+no walker change was needed. The pins cover a top-level `seq[uint8]`,
+`HashSet[char]`, `Table[uint8, int]` and `Table[char, int]`. Each witness
+replays at its own declared type. `HashSet[uint32]` and
+`Table[uint32, int]` are pinned beside them, and they now run instead of
+faulting (item 7's `mkZ3IntLit`).
+
+*(9) The nim-z3 `sortOf(Z3Array)` sort-lifetime fix* is nim-z3 ae509f0
+("fix(sorts): hold each sort across the call that consumes it"), with the
+lock bumped to it. `tabDataVarOf`'s hold of a live key and value term is
+removed. Every raw `Z3_mk_array_sort` / `Z3_mk_func_decl` site in the
+walker was audited:
+- `allocateSeqDataRaw`'s ref arm and `mkHeapArrayVar` take the `Ref_` sort
+  from `allocRefSort`, which `inc_ref`s it for the run. The index sort is
+  `Z3_mk_int_sort`, the last call before the array sort.
+- `tabTreeDataVars` / `tabTreeDataZero` hold the key sort through a live
+  key term (`tabKeySortHold`), and each leaf sort through the live
+  prototype value.
+- `ensureDistinctSort` `inc_ref`s its uninterpreted sort, and a composite
+  base no longer declares func-decls at all.
+
+The roughly 26 `mkArrayVar[K, V]` call sites go through the fixed
+`sortOf`.
+
+Pins that moved, because they pinned a gap S8at closes:
+- **S8ar's poison source.** `s0_exhibit`, `s2_replay`, `s3_monotonicity`,
+  `s4_alloc`, `s6b_ops`, `r6_heap_raise_totality` and `r6_lows_declines`
+  (N41-2) read a by-value case-object field, or a tuple holding one, as
+  the `heUnsupportedPointeeRead` fresh symbol. That field is now a cell, so
+  they read an object with a `seq[(int, int)]` part. That part is still a
+  stand-in cell, and the read is still a pure `{scSpurious}` fresh symbol.
+- **S8ar's own decline pins** are now exact `sxSat` with a replayed
+  witness: the container-valued Table, the by-value case-object read, the
+  distinct-over-composite read and store, and the tuple holding a case
+  object. Only the `sevHint` `geDistinctBijectivitySkipped` remains.
+- **S8am's 6c pins** moved from `Table[float, int]` /
+  `Table[string, seq[int]]` to `Table[(int, int), int]` /
+  `Table[string, (int, int)]`.
+- **The other suites that pinned those two shapes as unbacked** moved the
+  same way: `CR2c_witnessreader_catchall`, `r6_n39`, `r6_n40`, `r6_n42`,
+  `r6_n43_parity`, `r6_b7r2_pathscope`, `rfc0005_s1c_verdict`,
+  `rfc0005_s8_scope`, `rfc0005_s8u_precision` and `rfc0005_s8z_remainder`.
+  Each now uses a tuple key or a tuple value.
+- **`r6_itesv_mergedegrade`'s three `array[3, seq[int]]` merge pins** are
+  now an exact `sxSat` whose witness replays (item 3). That replay is what
+  rules out v115's forwarded-operand hazard.
+- **`r6_n27_placeholder_read_audit`** counts 97 runtime markers (91 + 6),
+  for item 3's six guarded reads in `iteSV`.
+
+Caught along the way: a `pairs` loop over a `Table[K, seq[V]]` crashed the
+compile. The iterator inliner substitutes the loop variable with an untyped
+identifier, and a conversion of it reached `getTypeInst`. Both conversion
+arms of the parser now decline it (`feUnsupportedExprKind`), with the
+reason stated.
+
+*Different mechanisms, reported and not fixed here.*
+- **`getOrDefault` is unmodelled**, and under `and` it is a walker fault.
+- **A non-operator `{.borrow.}` routine** has the borrowed symbol as its
+  body (`feUnsupportedStmtKind`), over a scalar base too. Item 5's pins
+  convert explicitly.
+- **A seq of tuple or object elements is unbacked** in every position
+  (`isBackedSeqElemTy`). This, not recursion, is item 6's decline. The fix
+  is a leaf-split seq element, one array per leaf, as `tvTree` is for a
+  Table value.
+- **`insert` on an array element** (`a[i].insert(x, j)`) stays on the
+  generic path. `add` and the other bare-arm mutations are modelled.
+- **`newSeq` is not modelled.** A generic routine that calls it compiles,
+  and the call declines.
+- **Table iteration is unmodelled for every Table** ("unsupported for-loop
+  container kind: itTable"): `pairs`, `keys`, `values`.
+- **`mgetOrPut(...).add` is unmodelled.** It declines; it is never sat.
+- **A conversion of an inlined iterator's parameter declines** rather than
+  being typed. The parameter's type is not known at the substituted
+  identifier.
+- **A `seq[char]` / `seq[enum]` witness may be spelled `seq[uint8]`.**
+  `emitTyAndReader` was observed emitting it; not verified.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

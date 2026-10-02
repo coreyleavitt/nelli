@@ -312,6 +312,11 @@ title = "SAT relaxation: replay wired into verdict across both runSymex consumer
 state = "done"
 
 [[slice]]
+id    = "S8ar"
+title = "S8ap's remainder. Faults first: a seq of the object's own ref type crashes type classification (VM call depth) -- classify recursive ref element types without unbounded recursion; a plain seq[string] faults in add -- model it or decline cleanly, never a walker fault. Then: insert is unmodelled even on a plain seq -- model it; p.inner.s.add (a field path through a ref then a value) is outside the dotted-field shape and stays N49 -- extend the shape; tuple/array/object fields, non-string-keyed Tables and unbacked Table[string,V] still decline as seUnsupportedCompoundSortLeaf -- close those with a sound model, keeping any remaining decline scoped and stated; a distinct field is havocked and has no construction zero -- give it one; a container the witness cannot render demotes the parameter -- render it; the heap-depth budget counts field reads -- count heap steps only, or show field reads must count; Table witnesses render only int and bool values -- render every backed value type; well-formedness facts are asserted only at reads -- assert them wherever a cell enters the model, or show reads cover every path"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "pending"

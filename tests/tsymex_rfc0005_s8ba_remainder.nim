@@ -513,7 +513,13 @@ suite "S8ba (5): split terms are built once, in a fixed order":
     for q in symexQueryStats: units += q.rlimitDelta
     checkpoint symexQueryStatsSummary()
     check r.status == sxSat
-    check units <= 1_000_000
+    ## A ceiling per linked Z3: 187199 units here on 5.1 (380570 run
+    ## alone), 2293304 on 4.13.4, which the base (S8au) also spends. The
+    ## eager construction this replaces cost 5-11x more on the suites it
+    ## moved, so either ceiling trips on a change of that size.
+    let v = z3Version()
+    if v.major >= 5: check units <= 1_000_000
+    else: check units <= 3_000_000
 
 suite "S8ba: walker version floor":
 

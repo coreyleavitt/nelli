@@ -1045,5 +1045,17 @@ task test, "Run the test suite":
             # render layer incl. the annotation-violation channel; also the
             # gaps() walkthrough. Public imports only. walker 182->190
             # (batch 1).
-            "tsymex_rfc0005_s11_surface"]:
+            "tsymex_rfc0005_s11_surface",
+            # RFC-0005 S8av -- S8am's and S11's remainder: the public cache
+            # macros (saveSymexWitness/loadSymexWitnesses/saveSymexVerdict/
+            # loadSymexVerdict) route dbErrors via recordSymexDbError instead
+            # of discarding them; db.nim's F6/secondary/corpus/scheduler
+            # wrappers raise DbError on a nil optional closure instead of
+            # SIGSEGV-ing; a served sfUnknown/sfUnsat verdict cache hit also
+            # serves its stored gaps() (CachedVerdict widened, an entry
+            # without gaps metadata degrades to gaps: @[] rather than a
+            # miss); S8am's "raise-irrelevant-parameter witness sentinel" is
+            # proved to be IndexDefect's own concrete, replayable witness
+            # (Phase 15 E6 pre-emption), not a sentinel. Walker 190->195.
+            "tsymex_rfc0005_s8av_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

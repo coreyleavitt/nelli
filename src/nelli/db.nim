@@ -22,6 +22,19 @@
 ##   `remove` / `saveSecondary` / `saveCorpus` raise `DbError`. Useful
 ##   for the reference-corpus half of a multiplex.
 ##
+## **Optional closures (RFC-0005 S8av).** The F6 metadata, `secondary`,
+## `corpus` and `sched` closures (`saveWithMetaImpl`, `loadPrimaryWithMetaImpl`,
+## `saveSecondaryImpl`, `loadSecondaryImpl`, `saveCorpusImpl`, `loadCorpusImpl`,
+## `saveSchedImpl`, `loadSchedImpl`) are OPTIONAL on a hand-built
+## `ExampleDatabase` object literal (every first-party backend above sets all
+## of them). Their public wrappers nil-check before calling and raise
+## `DbError` when unset — the same signal `readOnlyDatabase` already uses for
+## "this backend does not support this write" — rather than dereferencing a
+## nil closure. A caller that cannot assume a section exists (third-party or
+## test-double backends) should check the closure field directly before
+## calling, the way `fuzz.nim`'s own corpus/secondary/sched call sites do, to
+## degrade to "section not persisted" instead of handling the exception.
+##
 ## RFC-fuzzer-nextgen S6 adds a FOURTH, independent per-test-id artifact —
 ## the `sched` checkpoint (`saveSched`/`loadSched`) — a single opaque
 ## `LearnedState` blob (`nelli/learnedstate`) capturing a fuzz campaign's
@@ -214,6 +227,19 @@ proc save*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
   ## any metadata already stored for this exact choice-seq; an empty
   ## `meta` behaves like the 4-arg `save` above (existing metadata, if
   ## any, carries forward — see the module doc's F6 section).
+  ##
+  ## RFC-0005 S8av: `saveWithMetaImpl` is OPTIONAL on a hand-built
+  ## `ExampleDatabase` (every first-party constructor in this file sets
+  ## it; a minimal third-party/test-double backend may not). Calling a
+  ## nil closure is a SIGSEGV, not a `CatchableError` any caller's `try`
+  ## can absorb — raise the module's own documented error type instead,
+  ## so the engine's existing `except DbError` sites (`engine/phases.nim`,
+  ## `engine/targeting.nim`) and the symex cache's `metaReady` guard both
+  ## see a typed, catchable failure.
+  if db.saveWithMetaImpl.isNil:
+    raise newException(DbError,
+      "save(testId, choices, meta): this ExampleDatabase backend has no " &
+      "saveWithMetaImpl (F6 per-entry metadata is not supported)")
   db.saveWithMetaImpl(testId, choices, meta, maxEntries)
 
 proc loadPrimary*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
@@ -222,6 +248,12 @@ proc loadPrimary*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
 proc loadPrimaryWithMeta*(db: ExampleDatabase, testId: string): seq[PrimaryEntry] =
   ## F6 (RFC-chapulin-hardening): `loadPrimary`'s entries paired with
   ## their per-entry metadata, same order (most-recent first, per F5).
+  ##
+  ## RFC-0005 S8av: see `save(..., meta)`'s identical nil-guard comment.
+  if db.loadPrimaryWithMetaImpl.isNil:
+    raise newException(DbError,
+      "loadPrimaryWithMeta(testId): this ExampleDatabase backend has no " &
+      "loadPrimaryWithMetaImpl (F6 per-entry metadata is not supported)")
   db.loadPrimaryWithMetaImpl(testId)
 
 proc remove*(db: ExampleDatabase, testId: string,
@@ -236,9 +268,22 @@ proc removeMany*(db: ExampleDatabase, testId: string,
 
 proc saveSecondary*(db: ExampleDatabase, testId: string,
                     entries: openArray[ScoredEntry], maxEntries = 16) =
+  ## RFC-0005 S8av: see `save(..., meta)`'s nil-guard comment — targeted
+  ## PBT's Pareto-front section is as optional as F6's metadata on a
+  ## hand-built backend.
+  if db.saveSecondaryImpl.isNil:
+    raise newException(DbError,
+      "saveSecondary(testId, entries): this ExampleDatabase backend has " &
+      "no saveSecondaryImpl (the targeted-PBT secondary section is not " &
+      "supported)")
   db.saveSecondaryImpl(testId, @entries, maxEntries)
 
 proc loadSecondary*(db: ExampleDatabase, testId: string): seq[ScoredEntry] =
+  if db.loadSecondaryImpl.isNil:
+    raise newException(DbError,
+      "loadSecondary(testId): this ExampleDatabase backend has no " &
+      "loadSecondaryImpl (the targeted-PBT secondary section is not " &
+      "supported)")
   db.loadSecondaryImpl(testId)
 
 proc saveCorpus*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
@@ -248,9 +293,22 @@ proc saveCorpus*(db: ExampleDatabase, testId: string, choices: seq[ChoiceNode],
   ## kept purely for the coverage it exercises survives across runs even
   ## after it stops falsifying anything. `maxEntries` default (256) mirrors
   ## `FuzzSettings.corpusLimit`'s "0 -> 256" convention.
+  ##
+  ## RFC-0005 S8av: see `save(..., meta)`'s nil-guard comment. The fuzzer's
+  ## F1 coverage-corpus admit path (F6) reaches this on every admitted
+  ## input, so a nil `saveCorpusImpl` on a hand-built backend is this
+  ## wrapper's own documented-error path, not a crash.
+  if db.saveCorpusImpl.isNil:
+    raise newException(DbError,
+      "saveCorpus(testId, choices): this ExampleDatabase backend has no " &
+      "saveCorpusImpl (the F1 coverage-corpus section is not supported)")
   db.saveCorpusImpl(testId, choices, maxEntries)
 
 proc loadCorpus*(db: ExampleDatabase, testId: string): seq[seq[ChoiceNode]] =
+  if db.loadCorpusImpl.isNil:
+    raise newException(DbError,
+      "loadCorpus(testId): this ExampleDatabase backend has no " &
+      "loadCorpusImpl (the F1 coverage-corpus section is not supported)")
   db.loadCorpusImpl(testId)
 
 proc saveSched*(db: ExampleDatabase, testId: string, data: seq[byte]) =
@@ -264,6 +322,13 @@ proc saveSched*(db: ExampleDatabase, testId: string, data: seq[byte]) =
   ## the bytes into/out of a `LearnedState` is `nelli/learnedstate`'s job,
   ## and deciding WHEN to call this is `fuzz.nim`'s (`FuzzSettings.
   ## checkpointCadence`).
+  ##
+  ## RFC-0005 S8av: see `save(..., meta)`'s nil-guard comment.
+  if db.saveSchedImpl.isNil:
+    raise newException(DbError,
+      "saveSched(testId, data): this ExampleDatabase backend has no " &
+      "saveSchedImpl (the fuzzer scheduler-checkpoint section is not " &
+      "supported)")
   db.saveSchedImpl(testId, data)
 
 proc loadSched*(db: ExampleDatabase, testId: string): seq[byte] =
@@ -271,6 +336,16 @@ proc loadSched*(db: ExampleDatabase, testId: string): seq[byte] =
   ## ever been saved under `testId` — indistinguishable, by design, from
   ## "nothing to resume" at the call site (`fuzz.nim` treats an empty
   ## result the same as a decode failure: cold-start, never an error).
+  ##
+  ## RFC-0005 S8av: see `save(..., meta)`'s nil-guard comment. A nil
+  ## `loadSchedImpl` is NOT the same as "nothing to resume" — it means the
+  ## backend never implemented the section at all — so it still raises
+  ## rather than silently returning `@[]` like a genuine cold start would.
+  if db.loadSchedImpl.isNil:
+    raise newException(DbError,
+      "loadSched(testId): this ExampleDatabase backend has no " &
+      "loadSchedImpl (the fuzzer scheduler-checkpoint section is not " &
+      "supported)")
   db.loadSchedImpl(testId)
 
 proc sectionSizes*(db: ExampleDatabase,

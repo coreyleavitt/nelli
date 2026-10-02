@@ -264,9 +264,13 @@ type
   CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness]
     ## RFC-0005 S11. One `:sat` cache entry: the witness's choice sequence
     ## and the soundness of the verdict that produced it.
-  CachedVerdict* = tuple[status: SymexFindingStatus, soundness: Soundness]
-    ## RFC-0005 S11. A `:unsat` / `:unk` cache hit: the status and the
-    ## soundness it was persisted with.
+  CachedVerdict* = tuple[status: SymexFindingStatus, soundness: Soundness,
+                        gaps: seq[FindingGap]]
+    ## RFC-0005 S11/S8av. A `:unsat` / `:unk` cache hit: the status, the
+    ## soundness it was persisted with, and (S8av) the per-cause `gaps()`
+    ## view from the run that produced it. `gaps` is `@[]` on an entry
+    ## written before S8av or by a writer that never recorded it — see
+    ## `storedGaps`.
 
 func taintBits(t: Taint): int =
   for c in t: result = result or (1 shl ord(c))
@@ -297,6 +301,56 @@ proc decodeSoundness(v: string): Option[Soundness] =
 proc soundnessMeta(s: Soundness): Table[string, string] =
   result = initTable[string, string]()
   result[soundnessMetaKey] = encodeSoundness(s)
+
+# ---- RFC-0005 S8av: the verdict cache value also carries `gaps()` ----------
+#
+# S11's remainder (§8.1's "Different mechanisms" list): a served `sfUnknown`
+# (or `sfUnsat`) cache hit returned `gaps: @[]` even when the run that
+# produced it had a non-empty per-cause view, because only `Soundness` rode
+# the entry metadata. `FindingGap` is already Z3-free (`class`, `kind`,
+# `msg` — see `findingGaps`), so it is stored the same way: each gap gets
+# its OWN set of metadata keys (`gapsc<i>`/`gapsk<i>`/`gapsm<i>`), sidestepping
+# any need to escape `msg` (an arbitrary, user-influenced string) inside a
+# single delimited value the way `encodeSoundness` can for its
+# always-one-digit fields. A `gapsnMetaKey`/`gapsVersionMetaKey` pair marks
+# how many entries to read back and which encoding wrote them, mirroring
+# `soundnessMetaVersion`. Missing/malformed metadata degrades to `@[]`
+# rather than a miss — `gaps` is best-effort detail on top of the
+# load-bearing `Soundness` (symexWalkerVersion's S8av bullet).
+
+const gapsVersionMetaKey = "gapsv"
+const gapsVersion = "1"
+const gapsCountMetaKey = "gapsn"
+
+proc gapsMeta(gaps: seq[FindingGap]): Table[string, string] =
+  result = initTable[string, string]()
+  result[gapsVersionMetaKey] = gapsVersion
+  result[gapsCountMetaKey] = $gaps.len
+  for i, g in gaps:
+    result["gapsc" & $i] = $ord(g.class)
+    result["gapsk" & $i] = g.kind
+    result["gapsm" & $i] = g.msg
+
+proc storedGaps(meta: Table[string, string]): seq[FindingGap] =
+  ## The inverse of `gapsMeta`; `@[]` for anything it did not write
+  ## (absent, wrong version, or malformed — never raises).
+  if meta.getOrDefault(gapsVersionMetaKey, "") != gapsVersion: return @[]
+  var n: int
+  try: n = parseInt(meta.getOrDefault(gapsCountMetaKey, ""))
+  except ValueError: return @[]
+  if n < 0: return @[]
+  for i in 0 ..< n:
+    let cKey = "gapsc" & $i
+    let kKey = "gapsk" & $i
+    let mKey = "gapsm" & $i
+    if cKey notin meta or kKey notin meta: return result   ## stop at the break
+    var classOrd: int
+    try: classOrd = parseInt(meta[cKey])
+    except ValueError: return result
+    if classOrd < ord(low(DegradeClass)) or classOrd > ord(high(DegradeClass)):
+      return result
+    result.add FindingGap(class: DegradeClass(classOrd), kind: meta[kKey],
+                          msg: meta.getOrDefault(mKey, ""))
 
 proc storedSoundness(meta: Table[string, string]): Option[Soundness] =
   if soundnessMetaKey notin meta: return none(Soundness)
@@ -387,7 +441,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
                             target: SymexTarget, settings: SymexSettings,
                             status: SymexFindingStatus,
                             soundness: Soundness,
-                            errors: var seq[string]) =
+                            errors: var seq[string],
+                            gaps: seq[FindingGap] = @[]) =
   ## Phase 13 cycle 3. Persist a non-SAT verdict (sfUnsat /
   ## sfUnknown) under the content-addressed key with the
   ## appropriate suffix. The stored value is the sentinel empty
@@ -395,6 +450,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## slot to a single entry so the positional load invariant
   ## `result[0] == @[]` cannot break. RFC-0005 S11: the sentinel
   ## carries `soundness` in its metadata, and a load serves it back.
+  ## RFC-0005 S8av: it also carries `gaps` (the run's per-cause
+  ## view, `@[]` by default for callers that have none to offer),
+  ## so a verdict cache hit can report the same `gaps()` a cold run
+  ## would (see `gapsMeta`/`storedGaps`).
   ##
   ## No-op for `sfSat` (use `saveSymexWitnessImpl`) and for
   ## `sfNotApplicable` (verdict is local context, not a Z3 outcome
@@ -421,8 +480,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
     renderingVersion = renderAsChoicesVersion) & suffix
+  var meta = soundnessMeta(soundness)
+  for k, v in gapsMeta(gaps): meta[k] = v
   try:
-    db.save(key, @[], soundnessMeta(soundness), verdictCacheMaxEntries)
+    db.save(key, @[], meta, verdictCacheMaxEntries)
   except CatchableError as e:
     errors.add "saveSymexVerdictImpl: " & $e.name & ": " & e.msg
 
@@ -438,10 +499,15 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## verdict wins regardless of save order.
   ##
   ## Returns the status (`sfUnsat` / `sfUnknown`) with its stored
-  ## `Soundness` on hit (RFC-0005 S11); `none` on full miss. A
-  ## sentinel without soundness metadata is a miss. Never exposes the raw `seq[seq[ChoiceNode]]`
-  ## to callers — the sentinel must not leak into any code path
-  ## that might pass it to `db.removeMany`.
+  ## `Soundness` and (RFC-0005 S8av) `gaps` on hit; `none` on full
+  ## miss. A sentinel without soundness metadata is a miss (S11) —
+  ## soundness is load-bearing. A sentinel WITH soundness but
+  ## without gaps metadata (pre-S8av, or a third-party writer) is
+  ## still a HIT, served with `gaps: @[]` (`storedGaps` degrades
+  ## rather than misses — see its own doc comment). Never exposes
+  ## the raw `seq[seq[ChoiceNode]]` to callers — the sentinel must
+  ## not leak into any code path that might pass it to
+  ## `db.removeMany`.
   ##
   ## Load errors are appended to `errors` and the call degrades
   ## to a miss so the analysis can re-derive cold.
@@ -458,7 +524,8 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
       if entries.len == 1 and entries[0].choices.len == 0:
         let s = storedSoundness(entries[0].meta)
         if s.isSome:
-          return some((status: verdict, soundness: s.get))
+          return some((status: verdict, soundness: s.get,
+                       gaps: storedGaps(entries[0].meta)))
         errors.add "loadSymexVerdictImpl: a sentinel without soundness " &
           "metadata (pre-RFC-0005-S11 format) is treated as a miss"
     except CatchableError as e:
@@ -2917,14 +2984,18 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
+      var dbErrors: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
-      # `dbErrors` is captured in this scope so the macro emission
-      # type-checks; Phase 13 cycle 7 wires the engine flow that
-      # threads these errors into Report.dbErrors. Until then the
-      # public macro form discards them — matching the pre-RFC
-      # behavior of silently swallowing rare DB failures.
+      # RFC-0005 S8av: route through the SAME thread-local sink
+      # `symexFindAllWitnesses` drains into `Report.dbErrors` (Phase 14
+      # cycle C2), so a caller of this standalone macro sees a save
+      # failure via `consumeSymexDbErrors()` instead of it being
+      # silently swallowed (was: declared `{.used.}` and discarded —
+      # S11's own note on `db.nim`'s "errors flow to Report.dbErrors"
+      # promise, left unwired since Phase 13 cycle 7).
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
 
 macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
                           target: static SymexTarget,
@@ -2947,18 +3018,26 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
-      loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
+      var dbErrors: seq[string] = @[]
+      let witnesses = loadSymexWitnessesImpl(`db`, prog, `targetExpr`,
+                                              `settings`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
+      witnesses
 
 # ---- Verdict macro forms (Phase 13 cycle 10) -------------------------------
 #
 # Mirror `saveSymexWitness` / `loadSymexWitnesses` for non-SAT
 # verdicts. `status: SymexFindingStatus` is a runtime value, not
 # static — the suffix (`:unsat` vs `:unk`) is dispatched at
-# runtime inside `saveSymexVerdictImpl`. Error accumulation is
-# internal and discarded (the user-facing macro doesn't carry a
-# Report); callers wanting error reporting use the `*Impl` procs
-# directly with their own `errors` seq.
+# runtime inside `saveSymexVerdictImpl`. RFC-0005 S8av: error
+# accumulation routes through `recordSymexDbError`/
+# `consumeSymexDbErrors` (the same sink `symexFindAllWitnesses`
+# drains into `Report.dbErrors`), so a caller of the standalone
+# macro form sees a save/load failure there instead of it being
+# silently swallowed; callers wanting a locally-scoped `errors` seq
+# instead use the `*Impl` procs directly.
 
 macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -2982,9 +3061,12 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
+      var dbErrors: seq[string] = @[]
       saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
                             `status`, `soundness`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
 
 macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -2993,8 +3075,8 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## Load a previously-persisted non-SAT verdict for `fn`'s
   ## content-addressed key. Checks `:unsat` then `:unk`
   ## (UNSAT-first load-order tie-break). Returns
-  ## `Option[CachedVerdict]`: the status and its stored `Soundness`
-  ## (RFC-0005 S11).
+  ## `Option[CachedVerdict]`: the status, its stored `Soundness`
+  ## (RFC-0005 S11) and `gaps` (RFC-0005 S8av).
   # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
   let parsed = parseEntryImpl(fn, "loadSymexVerdict",
                                settings.budget.maxInstantiationsPerProc)
@@ -3008,8 +3090,13 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
                               procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
-      loadSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
+      var dbErrors: seq[string] = @[]
+      let verdict = loadSymexVerdictImpl(`db`, prog, `targetExpr`,
+                                          `settings`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
+      verdict
 
 # ---- Layer 1 — symexFindAllWitnesses ---------------------------------------
 #
@@ -3225,6 +3312,7 @@ macro symexFindAllWitnesses*(fn: typed,
             if cachedVerdict.isSome:
               f.status = cachedVerdict.get.status
               f.soundness = cachedVerdict.get.soundness   ## RFC-0005 S11
+              f.gaps = cachedVerdict.get.gaps             ## RFC-0005 S8av
               f.fromCache = true
             elif cachedRaised.len > 0:
               # Phase 15 E2a (STRUCTURAL). A reachable raise was persisted for
@@ -3251,7 +3339,8 @@ macro symexFindAllWitnesses*(fn: typed,
                                       f, `dbErrorsId`)
               of sxUnsat, sxUnknown:
                 saveSymexVerdictImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
-                                      f.status, f.soundness, `dbErrorsId`)
+                                      f.status, f.soundness, `dbErrorsId`,
+                                      f.gaps)   ## RFC-0005 S8av
               of sxRaised:
                 # Phase 16 D1a. The defect fork is now unconditional;
                 # `routeRaise` populates `raisedWitness`. Carry it as

@@ -202,7 +202,23 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "190"
+const symexWalkerVersion* = "195"
+  ## RFC-0005 S8av (2026-10-02) — S8am's and S11's remainder, item 3. The
+  ## cache VALUE is widened again: a persisted `:unsat` / `:unk` verdict
+  ## sentinel now also carries its `seq[FindingGap]` (S11's `gaps()`,
+  ## already Z3-free) in the entry's metadata, so a served `sfUnknown` (or
+  ## `sfUnsat`) cache hit reports the SAME per-cause view a cold run would
+  ## (`symex.nim`'s `CachedVerdict`/`saveSymexVerdictImpl`/
+  ## `loadSymexVerdictImpl`). No solving semantics changed — this is the
+  ## same "cache value grew a field" shape as S11's own soundness bump
+  ## below, and follows its convention: the bump orphans every pre-S8av
+  ## verdict entry (so the NEXT miss re-derives with gaps attached), and an
+  ## entry under the current key that still lacks the gaps metadata (e.g. a
+  ## third-party writer) degrades to a hit with empty `gaps` rather than a
+  ## second miss — soundness remains the load-bearing field; gaps is
+  ## best-effort detail on top of it. 190 -> 195 (191-194 reserved by
+  ## sibling slices landing on the same channel tip).
+  ##
   ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional
   ## number, and land stacked as one integration branch under ONE walker

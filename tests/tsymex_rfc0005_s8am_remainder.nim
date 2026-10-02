@@ -156,12 +156,22 @@ suite "S8am (2) seq element assignment checks the index before the RHS":
     let r = seqAsgnOrder.symexFind(tRaisedExn("ValueError"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxRaised
-    ## NOT asserted: `r.raisedWitness[0]` lands in 0..2. `i` plays no role
-    ## in `orderRaiser`'s OWN raise condition (it raises unconditionally
-    ## once called), so nothing in `routeRaise`'s query need pin it down --
-    ## a witness-extraction characteristic confirmed PRE-EXISTING (same
-    ## free `i`, same sentinel, on the already-S8z-fixed ARRAY write's
-    ## identical shape), not a S8am order regression.
+    ## RFC-0005 S8av (corrects this comment's original claim): the finding
+    ## here is NOT a ValueError witness with an irrelevant, sentinel-valued
+    ## `i` -- `r.raisedTypeId` is actually `"IndexDefect"`. Phase 15 E6
+    ## makes a reachable `Defect` subtype surface unconditionally
+    ## (`routeRaise`'s `wantsRaise`: `raisedIsDefect` bypasses the caller's
+    ## `stkRaisedExn` type filter), and `shouldStop` halts the walk on ANY
+    ## `sxRaised`, so the search for `"ValueError"` here is pre-empted by
+    ## the IndexDefect path before `orderRaiser` (ValueError's own raise
+    ## site) is ever reached. `r.raisedWitness[0]` is consequently
+    ## IndexDefect's own witness -- fully relevant to IT (`i` is exactly
+    ## what `inLoCond`/`inHiCond` constrain) and fully replayable: calling
+    ## the real `seqAsgnOrder` with this witness reproduces the exact
+    ## `IndexDefect` reported. There is no witness-extraction "sentinel for
+    ## a don't-care parameter" defect; S8am's own note misattributed an
+    ## IndexDefect witness to the ValueError search it was looking for.
+    check r.raisedTypeId == "IndexDefect"
 
   test "walker: s[i] = f() reaches IndexDefect through an OUT-OF-BOUNDS index":
     ## Unlike `ValueError` above, `i` IS part of `IndexDefect`'s own raise
@@ -176,6 +186,11 @@ suite "S8am (2) seq element assignment checks the index before the RHS":
     let r = seqCompoundOrder.symexFind(tRaisedExn("ValueError"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxRaised
+    ## RFC-0005 S8av: same E6 pre-emption as the plain-assignment case
+    ## above -- the IndexDefect path halts the walk before `orderRaiser`
+    ## is reached, so this is IndexDefect's own (relevant, replayable)
+    ## witness, not a ValueError one.
+    check r.raisedTypeId == "IndexDefect"
 
   test "walker: s[i] += f() reaches IndexDefect through an OUT-OF-BOUNDS index (compound form)":
     let r = seqCompoundOrder.symexFind(tRaisedExn("IndexDefect"))

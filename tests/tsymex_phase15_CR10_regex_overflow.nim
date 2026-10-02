@@ -12,8 +12,9 @@
 ## GREEN state: returns `isOk == false` with an "unsupported" / "seUnsupportedRegex"
 ## message — honest classification, not a wrong verdict.
 ##
-## Also tests that the boundary value high(cuint) == 2^32-1 is accepted (not
-## rejected), and that any value > high(cuint) is rejected.
+## Also tests that any value > high(cuint) is rejected. RFC-0005 S8ay: the
+## real bound is PCRE's 65535 (a larger count is a compile error, so
+## `re` raises RegexError); the high(cuint) pin is replaced accordingly.
 import std/[unittest, strutils]
 import z3/context
 import nelli/smt/regex_parser
@@ -34,10 +35,18 @@ suite "symex Phase 15 CR-10 — regex {n,m} overflow guard":
     check (not r.isOk)
     check "seUnsupportedRegex" in r.error or "exceeds" in r.error or "unsupported" in r.error
 
-  test "CR-10: hi = 2^32-1 (high(cuint)) is accepted":
-    ## The maximum safe value should not be rejected.
-    let r = parseNimRegexToZ3Regex(r"\d{1,4294967295}")
-    check r.isOk
+  test "CR-10: the bound is PCRE's 65535, not high(cuint)":
+    ## RFC-0005 S8ay: this pinned `\d{1,4294967295}` (high(cuint)) as
+    ## accepted, but PCRE rejects every count above 65535 ("number too big
+    ## in {} quantifier"), so `re` raises RegexError for it. 65535 is the
+    ## largest count PCRE accepts.
+    let big = parseNimRegexToZ3Regex(r"\d{1,4294967295}")
+    check (not big.isOk)
+    check "number too big" in big.error
+    check parseNimRegexToZ3Regex(r"\d{1,65535}").isOk
+    let over = parseNimRegexToZ3Regex(r"\d{1,65536}")
+    check (not over.isOk)
+    check "number too big" in over.error
 
   test "CR-10: normal small repetition still works":
     let r = parseNimRegexToZ3Regex(r"\d{2,5}")

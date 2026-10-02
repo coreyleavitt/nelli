@@ -91,10 +91,13 @@ type
     ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
 
   SymexUnsupportedRegexError* = object of CatchableError
-    ## Phase 15 S6b. Raised during `lower` when S6a's `parseNimRegexToZ3Regex`
-    ## rejects a `re"…"` pattern (backreference / lookahead / named group, or a
-    ## malformed pattern), and for `iekStrFindRe` (no nim-z3 `indexOf`-on-regex
-    ## API — a documented deferral). Caught at the `runSymex` boundary →
+    ## Phase 15 S6b. Raised during `lower` for a `re"…"` pattern the walker
+    ## cannot answer for. RFC-0005 S8ay: a pattern whose validity
+    ## `pcre_syntax` does not decide (a named group, an unread escape, a
+    ## non-literal Regex) and the captures overloads; a valid pattern with an
+    ## unmodelled construct is `SymexZ3StringIncompleteError`, a rejected
+    ## one the `RegexError` raise, and `find` is lowered. Caught at the
+    ## `runSymex` boundary →
     ## `sxUnknown` carrying a `seUnsupportedRegex` (sevError) error — never a
     ## crash, never a silent UNSAT (ADR-0006, Invariant 3). The S6a error
     ## message rides in `msg`.
@@ -1652,6 +1655,17 @@ var seqOobConds* {.threadvar.}: seq[Z3Bool]
   ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
   ## Reset alongside `strIndexOobConds` at every reset site.
 
+var regexRaiseMsgs* {.threadvar.}: seq[string]
+  ## RFC-0005 S8ay. `RegexError` raises of an expression: one message per
+  ## `re"..."` / `rex"..."` whose pattern PCRE rejects (Nim's exact
+  ## `RegexError.msg`, from `pcre_syntax`). The raise is unconditional --
+  ## `re` compiles the pattern each time the call runs -- so the sink holds
+  ## messages, not predicates. `drainRegexRaises` (the LAST stage of
+  ## `drainScalarRaiseForks`) routes the first as a `RegexError` raise and
+  ## ends the continuation. `syncRegexRaiseMsg` appends to
+  ## `WalkCtx.regexRaiseMsgs` when in a walk. Reset alongside
+  ## `arithTrapConds` at every reset site.
+
 var arithTrapConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
   ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
@@ -1898,6 +1912,11 @@ proc syncSeqOobCond*(cond: Z3Bool)
   ## N14 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
   ## `cond` to `WalkCtx.seqOobConds` (the LIVE store for the seq del-OOB
   ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
+
+proc syncRegexRaiseMsg*(msg: string)
+  ## RFC-0005 S8ay fwd-decl. If `currentWalkCtxPtr != nil` (a walk is
+  ## active), appends `msg` to `WalkCtx.regexRaiseMsgs`. No-op when no
+  ## active walk. Defined after `WalkCtx`.
 
 proc syncArithTrapCond*(cond: Z3Bool)
   ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -3400,8 +3419,8 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # RFC M3: `s.rfind(sub)` → Z3Int too (same shape, `lastIndexOf` instead of
     # `indexOf`). svInt sentinel so a surrounding comparison (e.g.
     # `s.find("bc") == 1`, `s.rfind("bc") == 1`, `parseInt(s) == 42`) lowers its
-    # literal as a Z3Int. (iekStrFindRe's lower() raises a deferral; the proto
-    # keeps a surrounding `>= 0` comparison's literal side well-typed.)
+    # literal as a Z3Int. (RFC-0005 S8ay: iekStrFindRe is `find` / `matchLen`
+    # / a `findBounds` half, all svInt.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
@@ -6586,6 +6605,11 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
       allocateSym(tInt(e.strRetTy.width, e.strRetTy.signed),
                   freshDegradeName("__strArmDegrade"), fresh,
                   intOffsetPositions = @[0])
+    of itSeq, itTuple:
+      # RFC-0005 S8ay: a declined `std/re` call -- `findAll` / `split`
+      # (seq[string]), `findBounds` (tuple[first, last: int]). A string
+      # placeholder there is the wrong sort for the enclosing expression.
+      allocateSym(e.strRetTy, freshDegradeName("__strArmDegrade"), fresh)
     else:
       # itString and every other (seq/table/…) shape: the pre-existing
       # svString default. Sound over-approximation even for a genuinely
@@ -11015,6 +11039,10 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `strIndexOobConds` at every reset site.
+    regexRaiseMsgs: seq[string]
+                      ## RFC-0005 S8ay. LIVE accumulator for the `RegexError`
+                      ## messages of rejected patterns (see the threadvar's
+                      ## doc). Drained by `drainRegexRaises`.
     arithTrapConds: seq[Z3Bool]
                       ## RFC-0005 S8i. LIVE accumulator for the survivor-only
                       ## arithmetic-trap predicates `lowerArith` deposits (see
@@ -11484,6 +11512,12 @@ proc syncSeqOobCond*(cond: Z3Bool) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].seqOobConds.add cond
 
+proc syncRegexRaiseMsg*(msg: string) =
+  ## RFC-0005 S8ay. See the forward declaration.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].regexRaiseMsgs.add msg
+
 proc syncArithTrapCond*(cond: Z3Bool) =
   ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
   ## syncParseIntRaiseCond.
@@ -11534,6 +11568,7 @@ type
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
     arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
+    regexRaise: seq[string]                   ## RFC-0005 S8ay
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
     didMutate: bool
@@ -11556,6 +11591,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
+    regexRaise: w.regexRaiseMsgs,
     closureRaises: w.closureRaises,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
@@ -11571,6 +11607,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
+  w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   w.closureRaises = @[]
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
@@ -11589,6 +11626,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.rangeDefectConds = s.rangeDefect
   rangeDefectConds = s.rangeDefect
   w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
+  w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
   w.closureRaises = s.closureRaises
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
@@ -12628,6 +12666,32 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   for c in conds: surv.defectSurvivorPc.add(not c)
   @[surv]
 
+proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ay. Route the expression's `RegexError` (see the
+  ## `regexRaiseMsgs` threadvar). `re` raises whenever the call runs, so
+  ## the raise takes the whole path: it is routed with the FIRST message
+  ## (the first rejected pattern evaluated) and there is no continuation.
+  ## Ungated: `RegexError` is a `ValueError`, not a runtime check. The
+  ## last stage of `drainScalarRaiseForks`: the parser lowers only the
+  ## arguments BEFORE a rejected pattern (`regexCall`), so every other
+  ## raise this call deposits is evaluated earlier and forks first.
+  let msgs = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let m = wp[].regexRaiseMsgs
+      wp[].regexRaiseMsgs = @[]
+      regexRaiseMsgs = @[]   # keep threadvar reset in sync
+      m
+    else:
+      let m = regexRaiseMsgs
+      regexRaiseMsgs = @[]
+      m
+  if msgs.len == 0:
+    return @[p]
+  let rp = forkPath(p, p.pc, p.env)
+  discard routeRaise(rp, "RegexError", some(msgs[0]), w)
+  @[]
+
 proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
   ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
@@ -12698,6 +12762,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let seqSnap = w.seqOobConds
   let rangeSnap = w.rangeDefectConds
   let trapSnap = w.arithTrapConds
+  let regexSnap = w.regexRaiseMsgs
   template stage(inp: seq[Path]; sinkW, sinkT, snap, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
@@ -12725,7 +12790,10 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let s5 = stage(s4, strIndexOobConds, strIndexOobConds, strSnap,
                  drainStrIndexRaises)
   let s6 = stage(s5, seqOobConds, seqOobConds, seqSnap, drainSeqOobRaises)
-  stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap, drainRangeRaises)
+  let s7 = stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap,
+                 drainRangeRaises)
+  # RFC-0005 S8ay: last -- see `drainRegexRaises`.
+  stage(s7, regexRaiseMsgs, regexRaiseMsgs, regexSnap, drainRegexRaises)
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -12889,6 +12957,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]
+  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
@@ -12923,6 +12993,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]
+  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
@@ -15556,6 +15628,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           w.seqOobConds = @[]
           arithTrapConds = @[]
           w.arithTrapConds = @[]
+          regexRaiseMsgs = @[]
+          w.regexRaiseMsgs = @[]
           for arg in stmt.cargs:
             discard lower(p.env, arg)
           let pd = drainPendingLowerEffects(p)
@@ -15744,6 +15818,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.seqOobConds = @[]                ## N14: WalkCtx field
         arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
         w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+        regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
+        w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
           ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -18584,6 +18660,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
   arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]                   ## RFC-0005 S8ay: reset RegexError sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

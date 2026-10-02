@@ -537,15 +537,21 @@ type
                      ## `iekStrReplace` it used to reach is deleted.
     iekStrSplit      ## `s.split(sep)`     → bounded split             (S5)
     iekStrJoin       ## `xs.join(sep)`     → bounded concat            (S5)
-    iekStrMatch      ## `s.match(re"…")`   → Z3 `(seq.in.re s r)`      (S6b)
-                     ## byte-faithful regex membership. The raw `re"…"` pattern
-                     ## string rides in `strOp` (parsed at walk time by S6a's
-                     ## `parseNimRegexToZ3Regex`); `strArgs == [recv]`.
-    iekStrFindRe     ## `s.find(re"…")`    → DEFERRED (no Z3 indexOf/regex) (S6b)
-                     ## pattern in `strOp`; classified `seUnsupportedRegex`.
+    iekStrMatch      ## `std/re` `match` / `contains` / `startsWith` /
+                     ## `endsWith` → svBool (S6b; RFC-0005 S8ay: each entry
+                     ## point's own formula, `regex_parser.lowerRegexEntry`).
+                     ## `strOp` is `<entry>:<re|rex|?>:<pattern>`
+                     ## (`encodeRegexSpec`); `strArgs == [recv, start]`
+                     ## (`[recv]` for startsWith / endsWith, or when the
+                     ## pattern is rejected and `start` never runs).
+    iekStrFindRe     ## `find` / `matchLen` / a `findBounds` half
+                     ## (`findBoundsFirst` / `findBoundsLast`) → svInt
+                     ## (RFC-0005 S8ay; was a `seUnsupportedRegex` deferral).
+                     ## Same `strOp` / `strArgs` as `iekStrMatch`.
     iekStrReplaceRe  ## `s.replace(re"…",x)` → the walker's per-position
-                     ## unroll (S6b; RFC-0005 S8aw); pattern in `strOp`,
-                     ## `strArgs == [recv, replacement]`.
+                     ## unroll (S6b; RFC-0005 S8aw) or, for a receiver of
+                     ## unknown length, a recursive function (S8ay); `strOp`
+                     ## as `iekStrMatch`, `strArgs == [recv, replacement]`.
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
     iekStrToInt      ## `parseInt(s)`      → Z3 `(str.to.int s)`       (S10a)
@@ -802,11 +808,14 @@ type
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
-      ## S6b reuses `strOp` to carry the raw `re"…"` PATTERN string for
+      ## S6b reuses `strOp` to carry the `re"…"` PATTERN for
       ## `iekStrMatch`/`iekStrFindRe`/`iekStrReplaceRe` (no recursive IRRegex
-      ## type, no new field): the pattern is parsed at walk time by S6a's
-      ## `parseNimRegexToZ3Regex`, and canonicalize already folds `strOp` into
-      ## the cache key, so distinct patterns content-address distinctly.
+      ## type, no new field); RFC-0005 S8ay widened it to
+      ## `<entry>:<re|rex|?>:<pattern>` (`pcre_syntax.encodeRegexSpec`; a
+      ## declined regex call is `iekStrUnsupported` with `regex:` before it).
+      ## The pattern is read at walk time by `pcre_syntax.parsePcre`, and
+      ## canonicalize already folds `strOp` into the cache key, so distinct
+      ## patterns, entries and modes content-address distinctly.
       strArgs*: seq[IRExpr]
       strOp*:   string
       strRetTy*: IRType  ## Fix-slice item 5: the CALL EXPRESSION's static
@@ -3107,6 +3116,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # S5 audited: a MALFORMED pattern raises `RegexError` in reality (`re`
     # compiles at run time) and the decline drops that raise; `iekStrFindRe`
     # declines without lowering its receiver (its effects dropped). ⊤.
+    # RFC-0005 S8ay: a pattern PCRE rejects is now the `RegexError` raise
+    # and `find` is lowered; the kind's remaining sites are a pattern whose
+    # validity the reader does not decide (the raise may be dropped) and
+    # the captures overloads (their `matches` write is dropped). Still ⊤.
   of seZ3StringIncomplete: dcFreshSymbol
     # S5 (split -> seRuneDecodeSymbolic): the remaining sites are
     # `lowerStrArm`'s join/split declines, each converted by `degradeStrArm`

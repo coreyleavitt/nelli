@@ -929,7 +929,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8aw (regex replace lowered by the walker for a literal, a
     ## one-byte class and a class under `+`; the last_indexof/indexof join
     ## emitted). Provisional 196.
-    check symexWalkerVersion == "196"
+    ## RFC-0005 S8ay (the std/re entry points' own formulas over a
+    ## PCRE-faithful reader; re vs rex in the IR; a rejected pattern raises
+    ## RegexError). Provisional 198 (S8ax holds 197).
+    check symexWalkerVersion == "198"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

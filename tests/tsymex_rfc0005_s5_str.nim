@@ -84,7 +84,10 @@ proc s5DeadReplaceAll(s: string, n: int) =
     symexTarget("s5_dead_replace_all")
 
 proc s5DeadReplaceRe(s: string, n: int) =
-  let t = s.replace(re"a+", "b")
+  # RFC-0005 S8ay: `re"a+"` is exact at every receiver length now (a
+  # recursive function past the unroll), so it no longer declines; a
+  # pattern that can match empty still does (`seZ3StringIncomplete`).
+  let t = s.replace(re"a*", "b")
   discard t
   if n == 5 and n == 6:
     symexTarget("s5_dead_replace_re")
@@ -201,7 +204,11 @@ proc s5ToOctDead(x: int, n: int) =
     symexTarget("s5_tooct_dead")
 
 proc s5BackrefDead(s: string, n: int) =
-  if s.match(re"(.)\1"):
+  # RFC-0005 S8ay: a backreference is now a VALID pattern with an
+  # unmodelled language (`seZ3StringIncomplete`, a fresh value, which does
+  # not keep an unreachable target from sxUnsat). The ⊤ funnel this pins is
+  # a pattern whose validity is undecided: a named group.
+  if s.match(re"(?P<n>x)"):
     discard
   if n == 5 and n == 6:
     symexTarget("s5_backref_dead")
@@ -317,9 +324,11 @@ suite "RFC-0005 S5 (b) -- over-taint-only UNSAT, one SUT per classified kind":
     checkUnsatOverTaintOnly(r)
     check sevErrorKinds(r.errors) == @[seZ3VersionMissing]
 
-  test "seZ3StringIncomplete (regex replace past the unroll): -> sxUnsat":
+  test "seZ3StringIncomplete (regex replace that can match empty): -> sxUnsat":
     # RFC-0005 S8aw: was seZ3VersionMissing (the gated `str.replace_re`);
-    # now the walker's unroll, fresh past 16 bytes of a symbolic receiver.
+    # then the walker's unroll, fresh past 16 bytes of a symbolic receiver.
+    # RFC-0005 S8ay: exact past the unroll, so the site pinned here is the
+    # empty-matching pattern's decline.
     let r = symexFind(s5DeadReplaceRe, tLabel("s5_dead_replace_re"))
     checkpoint($kindNames(r.errors))
     checkUnsatOverTaintOnly(r)
@@ -423,10 +432,11 @@ suite "RFC-0005 S5 (c) -- introduction invariant: fresh per read, no constraint"
     const strSrc = currentSourcePath.parentDir() / ".." / "src" / "nelli" /
                    "smt" / "runtime_strings.nim"
     let src = readFile(strSrc)
-    ## RFC-0005 S8aw: the regex arm's decline is `regexReplaceShape`'s raise.
+    ## RFC-0005 S8aw: the regex arm's decline is `regexReplaceShape`'s raise
+    ## (S8ay: over `pcre_syntax`'s tree).
     for (arm, raiseSite) in [
         ("of iekStrReplaceAll:", "raise (ref SymexZ3VersionMissingError)"),
-        ("of iekStrReplaceRe:", "regexReplaceShape(e.strOp)")]:
+        ("of iekStrReplaceRe:", "regexReplaceShape(sp, pr.root)")]:
       let a = src.find(arm)
       check a >= 0
       let r = src.find(raiseSite, a)

@@ -382,8 +382,19 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `pcreClassSet`'s `SymexUnsupportedRegexError` (a reversed class
     ## range) were added. All three are reached only from `lowerStrArm`,
     ## through plain proc frames, so the chokepoint catches them.
+    ## runtime_strings.nim 17 -> 18 (RFC-0005 S8ay, walker 198): five regex
+    ## sites (`pcreClassSet`'s reversed range, the three
+    ## `parseNimRegexToZ3Regex` declines, the `iekStrFindRe` deferral) went
+    ## with the PCRE reader; `regexDecline` stays, and
+    ## `regexOutcomeGate` (2: an undecided pattern, an unmodelled
+    ## construct), `lowerRegexCall` (2: the entry formula's undecided /
+    ## unmodelled outcomes) and `lowerRegexDecline` (2: a declined entry, a
+    ## captures overload) were added. A REJECTED pattern is no raw raise: it
+    ## deposits into `regexRaiseMsgs`, drained as the RegexError raise
+    ## fork. All are reached only from `lowerStrArm`, through plain proc
+    ## frames, so the chokepoint catches them.
     check runtimeCount == 6
-    check runtimeStringsCount == 17
+    check runtimeStringsCount == 18
     # N46-followup-2 (round-6 re-review, heap-raise totality slice):
     # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
     # CONVERTED to the in-band degrade idiom (no longer raw raises, no

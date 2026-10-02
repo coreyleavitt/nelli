@@ -202,7 +202,24 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "196"
+const symexWalkerVersion* = "198"
+  ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own
+  ## formulas (`regex_parser.lowerRegexEntry`) over a PCRE-faithful byte
+  ## reader (`pcre_syntax.nim`): `contains` is an occurrence in
+  ## `s[start..]`, `match` a prefix match there (both were full-string
+  ## membership with `start` dropped -- false sxSat and sxUnsat both),
+  ## `start` past the end is PCRE_ERROR_BADOFFSET (`match` true, `find`
+  ## -24), `startsWith` / `endsWith` / `find` / `matchLen` / `findBounds`
+  ## are lowered (leftmost and PCRE-chosen matches via definitional
+  ## constraints), `start` outside int32 forks RangeDefect. `.` excludes
+  ## `\n`; `\D \W \S` are complements; `\s \h \v`, POSIX classes,
+  ## anchors `^ $ \A \z \Z` read as PCRE does. `re` vs `rex` rides in the
+  ## IR (`strOp` is `<entry>:<re|rex|?>:<pattern>`). A pattern PCRE
+  ## rejects raises `RegexError` with Nim's exact message (new
+  ## `regexRaiseMsgs` sink, the last `drainScalarRaiseForks` stage).
+  ## findAll / split / replacef / multiReplace / captures decline instead
+  ## of aborting the compile. Provisional 198 (S8ax holds 197).
+  ##
   ## RFC-0005 S8aw (2026-10-02) — regex `replace(s, re"p", by)` is lowered
   ## by the walker (`runtime_strings.nim`, `regexReplaceShape` /
   ## `regexReplaceUnrolled`) for a literal, a one-byte class and a class

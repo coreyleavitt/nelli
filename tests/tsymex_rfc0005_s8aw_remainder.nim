@@ -474,10 +474,14 @@ suite "S8aw (2): a regex replace over a symbolic receiver":
     proc tight(): SymexSettings =
       result = defaultSymexSettings()
       result.budget.seqQueryRLimit = 2_000_000
+    # RFC-0005 S8ay (item 5): the value past 16 bytes is exact now (a
+    # recursive function of the receiver, `regexReplaceRec`), so nothing is
+    # tainted; under this tight budget Z3 may still leave it undecided
+    # (`beSolverUndef`). It was `seZ3StringIncomplete` (a fresh value).
     let r = symexFind(pastUnroll, tLabel("aw_past_unroll"), tight())
     checkpoint $r.status & " " & show(r.errors)
     check r.status in {sxSat, sxUnknown}
-    check hasKind(r.errors, seZ3StringIncomplete)
+    check not hasKind(r.errors, seZ3StringIncomplete)
     if r.status == sxSat:
       check r.witness[0].len > 40
       check r.witness[0].replace(re"a", "") == "b"
@@ -551,17 +555,22 @@ suite "S8aw (2): exact on a known length; each decline names its construct":
     check r.status == sxUnknown
     check declineMsg(r, seZ3StringIncomplete, "can match empty")
 
-  test "whitespace outside a class declines (re vs rex is not in the IR)":
+  test "whitespace outside a class is exact (re vs rex is in the IR)":
+    # RFC-0005 S8ay: `re"a b"` reads the space as a literal byte (`rex`
+    # would skip it), so "a b" becomes "x": the claim is sxUnsat. It
+    # declined (`seZ3StringIncomplete`) while the IR lost `re` vs `rex`.
     let r = symexFind(spaceDecline, tLabel("aw_space"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check declineMsg(r, seZ3StringIncomplete, "whitespace")
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
-  test "a reversed class range is PCRE's compile error: seUnsupportedRegex":
+  test "a reversed class range is PCRE's compile error: a RegexError raise":
+    # RFC-0005 S8ay: `re"[z-a]"` raises RegexError when the call runs, so
+    # no path reaches the label (it was `seUnsupportedRegex`, ⊤). The raise
+    # itself is pinned in tsymex_rfc0005_s8ay_remainder (suite 4).
     let r = symexFind(reversedRange, tLabel("aw_reversed"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check declineMsg(r, seUnsupportedRegex, "out of order")
+    check r.status == sxUnsat
 
 suite "S8aw: walker version floor":
   test "symexWalkerVersion >= 196":

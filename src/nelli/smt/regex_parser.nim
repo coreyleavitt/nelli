@@ -1,49 +1,55 @@
-## Phase 15 — Cluster S, cycle S6a: standalone Nim-regex → Z3-regex parser.
+## Phase 15 S6a; RFC-0005 S8ay. Nim `std/re` patterns as Z3 regexes, and the
+## Z3 meaning of each `std/re` entry point.
 ##
-## A **self-contained** module — NO walker (`runtime.nim`) / `symex.nim`
-## dependency, NO Z3 solving. It translates a Nim `re"..."` pattern *string*
-## into a `Z3Regex[Z3String]` combinator tree, built on the `z3/regex`
-## primitives. Walker integration (`match`/`find` interception) is S6b.
+## RFC-0005 S8ay replaced S6a's own reader (which read `.` as any byte,
+## `\D \W \S \n \t` as literal letters, `^ $` as literal bytes, accepted
+## `a**`, and had no `rex`) with `pcre_syntax.nim`, a byte-level reader of
+## PCRE 8.45 as Nim compiles it, and gave every entry point its own formula
+## (`lowerRegexEntry`). Before S8ay every entry point was the full-string
+## membership `s in R` with `start` dropped: `contains` (an occurrence
+## anywhere) and `match` (a match of a PREFIX of `s[start..]`) were both
+## wrong.
 ##
 ## ## Byte-faithful model (ADR-0006)
 ##
-## Consistent with Cluster S's byte-faithful (≤ 0xFF) string model, character
-## classes operate over **bytes**:
-##   * `.`  → any single byte: `range('\x00', '\xFF')` (NOT `mkRegexAllChar`,
-##           which over a full-Unicode basis would admit codepoints > 0xFF that
-##           do not round-trip to a Nim byte). The byte-range `.` keeps `.`
-##           inside the same ≤0xFF alphabet as every other construct.
-##   * `[a-z]` → `range("a", "z")`.
-##   * `\d`  → `range("0", "9")`.
-##   * `\w`  → union of `[A-Za-z0-9_]`.
-##   * `\s`  → union of ` \t\n\r\f\v` (the standard PCRE whitespace set).
+## Strings are byte strings (every char <= 0xFF); a byte set is a union of
+## `re.range` over single-byte literals, never `re.allchar` (which would
+## admit codepoints > 0xFF). The only exception is `findMarker` (code 256),
+## which never occurs in a subject: it marks a position inside a derived
+## term (`reFind`'s leftmost-match encoding).
 ##
-## ## Result idiom
+## ## The entry points (Nim 2.2 `std/re`, all probed concretely)
 ##
-## The repo has **no `results` package** dependency (grep: 0 hits). Matching the
-## codebase's `isOk`-duck-typed convention (`engine/eval.nim`, `fuzz.nim`), the
-## parser returns a small `RegexParseResult` object exposing `isOk: bool`, the
-## parsed `regex` (valid only when `isOk`), and an `error` message (descriptive,
-## suitable to build a classified `seUnsupportedRegex` error in S6b).
-##
-## ## Grammar / precedence
-##
-## Recursive-descent over the pattern, lowest-to-highest binding:
-##   alternation `|`  <  concatenation  <  quantifier (`*` `+` `?` `{n,m}`)
-##   <  atom (`literal` `.` `[...]` `(...)` `\<esc>`).
-## Escapes `\.` `\*` `\(` … are literal; `\d` `\w` `\s` are classes.
+## `bad` is `start < 0 or start > s.len` (PCRE_ERROR_BADOFFSET, -24); `U`
+## is `s[start..]`; a `^`/`\A` alternative matches only at subject
+## position 0.
+##   * `match(s, R, start)`    -- `matchLen(...) != -1`: `bad`, or a prefix
+##                                of `U` is in R (Tail included).
+##   * `contains(s, R, start)` -- `find(...) >= 0`: not `bad`, and R occurs
+##                                in `U`.
+##   * `startsWith(s, R)`      -- `matchLen(s, R) >= 0`: `match` at 0.
+##   * `find(s, R, start)`     -- -24 if `bad`, -1 if no occurrence, else
+##                                the LEFTMOST occurrence start (a fresh Int
+##                                fixed by definitional constraints).
+##   * `matchLen(s, R, start)` -- -24 / -1 / the length of PCRE's chosen
+##                                match at `start`;
+##   * `endsWith(s, R)`        -- some `i < s.len` has
+##                                `matchLen(s, R, i) == s.len - i`;
+##   * `findBounds(s, R, start)` -- (`find`, its match's last index), or
+##                                (-1, 0) / (-24, 0).
+## `matchLen`, `endsWith` and `findBounds`'s `last` depend on WHICH match
+## PCRE picks, which only a "longest-selection" pattern fixes by its shape
+## (`selectionForm`): a fixed-length body, or a fixed-length prefix then one
+## greedy run of a single byte set (PCRE's backtracking then returns the
+## longest match whose Tail holds). Every other pattern declines for them.
 
 import std/strutils
-import z3/regex
-import z3/strings  # mkString (for byte-exact range endpoints)
-import z3/context  # Z3Context
-import z3/error    # checkErr (expanded by the regex varargs templates)
-import z3/ffi      # FFI symbols referenced by the varargs template bodies
+import z3
+import ./pcre_syntax
+export pcre_syntax
 
 type
   RegexParseResult* = object
-    ## `isOk`-duck-typed result (repo convention; no `results` dep).
-    ## `regex` is meaningful only when `isOk`; `error` only when not.
     isOk*: bool
     regex*: Z3Regex[Z3String]
     error*: string
@@ -54,284 +60,326 @@ proc ok(r: Z3Regex[Z3String]): RegexParseResult =
 proc err(msg: string): RegexParseResult =
   RegexParseResult(isOk: false, error: msg)
 
-# ---------------------------------------------------------------------------
-# Byte-faithful char helpers
-# ---------------------------------------------------------------------------
+# ---- byte sets and trees -----------------------------------------------------
 
-proc byteStr(b: int): Z3String =
-  ## A single-byte Z3 string for a 0..255 codepoint (byte-exact endpoint).
-  mkString($char(b))
+proc epsRe(): Z3Regex[Z3String] = mkRegex(mkString(""))
 
-proc byteRange(lo, hi: int): Z3Regex[Z3String] =
-  ## `[lo-hi]` over bytes — uses the `Z3String`-typed `range` so endpoints
-  ## may be any byte 0x00..0xFF (the `(string, string)` overload asserts a
-  ## single ASCII codepoint and would reject 0x80..0xFF).
-  range(byteStr(lo), byteStr(hi))
+proc findMarker*(): Z3String =
+  ## RFC-0005 S8ay. The one-character string of code 256: outside every
+  ## subject's byte alphabet, so it marks a position unambiguously.
+  simplify(fromCode(mkInt(256)))
 
-proc singleByte(c: char): Z3Regex[Z3String] =
-  mkRegex(mkString($c))
+proc byteSetRe*(cs: set[char]): Z3Regex[Z3String] =
+  ## `cs` as a union of byte ranges; the empty set is the empty language.
+  var parts: seq[Z3Regex[Z3String]]
+  var b = 0
+  while b <= 255:
+    if char(b) notin cs:
+      inc b
+      continue
+    var e = b
+    while e + 1 <= 255 and char(e + 1) in cs: inc e
+    parts.add(if b == e: mkRegex(mkString($char(b)))
+              else: range(mkString($char(b)), mkString($char(e))))
+    b = e + 1
+  if parts.len == 0: mkRegexEmpty[Z3String]()
+  elif parts.len == 1: parts[0]
+  else: union(parts)
 
-const
-  whitespaceBytes = [' ', '\t', '\n', '\r', '\f', '\v']
+proc atomRe(cs: set[char]; marked: bool): Z3Regex[Z3String] =
+  ## A byte of `cs`; under `marked`, followed by any number of markers (the
+  ## "insert one marker after a non-empty prefix" closure of `reFind`).
+  if marked: concat(byteSetRe(cs), star(mkRegex(findMarker())))
+  else: byteSetRe(cs)
 
-# ---------------------------------------------------------------------------
-# Parser
-# ---------------------------------------------------------------------------
+proc rxToZ3*(x: Rx; marked = false): Z3Regex[Z3String] =
+  ## The language of an anchor-free tree.
+  case x.kind
+  of rxSet: atomRe(x.bytes, marked)
+  of rxCat:
+    if x.kids.len == 0: return epsRe()
+    var parts: seq[Z3Regex[Z3String]]
+    for k in x.kids: parts.add rxToZ3(k, marked)
+    if parts.len == 1: parts[0] else: concat(parts)
+  of rxAlt:
+    var parts: seq[Z3Regex[Z3String]]
+    for k in x.kids: parts.add rxToZ3(k, marked)
+    if parts.len == 1: parts[0] else: union(parts)
+  of rxRep:
+    let sub = rxToZ3(x.sub, marked)
+    if x.hi == 0: epsRe()
+    elif x.hi < 0:
+      if x.lo == 0: star(sub)
+      elif x.lo == 1: plus(sub)
+      else: concat(power(sub, x.lo), star(sub))
+    elif x.lo == x.hi: power(sub, x.lo)
+    else: loop(sub, x.lo, x.hi)
+  of rxBol, rxEol, rxEolAbs:
+    raiseAssert "rxToZ3: anchors are split off by splitEdges first"
+
+proc tailRe(eol: RxKind; marked = false): Z3Regex[Z3String] =
+  ## What may follow the match up to the subject's end: anything (no
+  ## anchor), nothing or a final `\n` (`$`, `\Z`), nothing (`\z`).
+  case eol
+  of rxEol: union(epsRe(), atomRe({'\n'}, marked))
+  of rxEolAbs: epsRe()
+  else: star(atomRe(pcreAnyByte, marked))
+
+proc parseNimRegexToZ3Regex*(pattern: string;
+                             extended = false): RegexParseResult =
+  ## The full-string language of `re(pattern)` (`rex` when `extended`):
+  ## S6a's API, kept for its unit tests. A pattern with an anchor, an
+  ## unmodelled construct, a PCRE rejection or an undecided construct is
+  ## `isOk == false`, its `error` naming why.
+  let pr = parsePcre(pattern, extended)
+  case pr.status
+  of psOk:
+    let (fine, edges, why) = splitEdges(pr.root)
+    # A top-level alternation splits into several edges; the full-string
+    # language is still the plain union when no edge carries an anchor.
+    if not fine:
+      return err(why & " (seUnsupportedRegex: no full-string language)")
+    for e in edges:
+      if e.bol or e.eol != rxCat:
+        return err("an anchor (seUnsupportedRegex: no full-string language)")
+    ok(rxToZ3(pr.root))
+  of psUnmodelled, psUnknown:
+    err(pr.reason & " (seUnsupportedRegex)")
+  of psRejected:
+    err("PCRE rejects the pattern, `re` raises RegexError: " &
+        pr.errMsg.splitLines()[0] & " (seUnsupportedRegex)")
+
+# ---- selection forms ---------------------------------------------------------
 
 type
-  Parser = object
-    s: string
-    i: int
-    failed: bool
-    errMsg: string
+  SelKind* = enum skNone, skFixed, skRun
+  SelForm* = object
+    ## RFC-0005 S8ay. A pattern whose PCRE-chosen match at a position is
+    ## the LONGEST one whose Tail holds.
+    kind*: SelKind
+    bol*: bool
+    eol*: RxKind
+    m*: int                  ## fixed prefix length (skFixed: the length)
+    prefix*: Rx              ## fixed-length part
+    runSet*: set[char]       ## skRun: the repeated byte set
+    runLo*, runHi*: int      ## skRun: its bounds (-1: unbounded)
+    body*: Rx                ## the whole body, for language checks
+    why*: string             ## skNone: the reason
 
-proc fail(p: var Parser, msg: string) =
-  if not p.failed:
-    p.failed = true
-    p.errMsg = msg
+proc selectionForm*(edges: seq[Edge]): SelForm =
+  ## RFC-0005 S8ay. See `SelForm`.
+  if edges.len > 1:
+    # Several top-level alternatives: only all fixed-length, of one length
+    # and anchor-free, fixes the chosen length.
+    var kids: seq[Rx]
+    var m = -1
+    for e in edges:
+      let (lo, hi) = lenRange(e.body)
+      if e.bol or e.eol != rxCat or lo != hi or (m >= 0 and lo != m):
+        return SelForm(kind: skNone, why: "top-level alternatives of " &
+          "different lengths or with anchors (PCRE takes the first " &
+          "alternative that matches, not the longest)")
+      m = lo
+      kids.add e.body
+    let body = Rx(kind: rxAlt, kids: kids)
+    return SelForm(kind: skFixed, eol: rxCat, m: m, prefix: body, body: body)
+  let e = edges[0]
+  let (lo, hi) = lenRange(e.body)
+  if lo == hi:
+    return SelForm(kind: skFixed, bol: e.bol, eol: e.eol, m: lo,
+                   prefix: e.body, body: e.body)
+  let items = flattenCat(e.body)
+  let last = items[^1]
+  let pre = Rx(kind: rxCat, kids: items[0 .. ^2])
+  let (plo, phi) = lenRange(pre)
+  let (isSet, cs) = (if last.kind == rxRep: asSet(last.sub)
+                     else: (false, {}))
+  if plo != phi or not isSet:
+    return SelForm(kind: skNone, why: "a variable-length part other than " &
+      "one byte-set repetition at the end (PCRE's match choice follows " &
+      "its backtracking order, not the longest match)")
+  if last.lazy:
+    if e.eol != rxCat:
+      return SelForm(kind: skNone, why: "a lazy repetition before an " &
+                                        "end anchor")
+    # A lazy run at the end stops at its minimum.
+    let fixedBody = Rx(kind: rxCat, kids: items[0 .. ^2] & @[Rx(kind: rxRep,
+      sub: Rx(kind: rxSet, bytes: cs), lo: last.lo, hi: last.lo)])
+    return SelForm(kind: skFixed, bol: e.bol, eol: e.eol, m: plo + last.lo,
+                   prefix: fixedBody, body: fixedBody)
+  SelForm(kind: skRun, bol: e.bol, eol: e.eol, m: plo, prefix: pre,
+          runSet: cs, runLo: last.lo, runHi: last.hi, body: e.body)
 
-proc atEnd(p: Parser): bool = p.i >= p.s.len
-proc peek(p: Parser): char = (if p.atEnd: '\0' else: p.s[p.i])
-proc peekAt(p: Parser, k: int): char =
-  (if p.i + k >= p.s.len: '\0' else: p.s[p.i + k])
+# ---- entry-point lowering ----------------------------------------------------
 
-# forward decls
-proc parseAlternation(p: var Parser): Z3Regex[Z3String]
+type
+  RxOutcome* = enum
+    roValue       ## `b` / `i` / `s` hold the result; `defs` must be asserted
+    roRejected    ## PCRE rejects the pattern: `msg` is the RegexError msg
+    roUnmodelled  ## accepted, not modelled for this entry: `msg` says why
+    roUnknown     ## validity undecided: `msg` says why
 
-proc classFor(p: var Parser, c: char): Z3Regex[Z3String] =
-  ## `\d` `\w` `\s` character-class shorthands (byte-faithful unions).
-  case c
-  of 'd':
-    byteRange(ord('0'), ord('9'))
-  of 'w':
-    union(byteRange(ord('A'), ord('Z')),
-          byteRange(ord('a'), ord('z')),
-          byteRange(ord('0'), ord('9')),
-          singleByte('_'))
-  of 's':
-    var parts: seq[Z3Regex[Z3String]]
-    for ch in whitespaceBytes:
-      parts.add singleByte(ch)
-    union(parts)
-  else:
-    p.fail("unsupported escape class: \\" & c)
-    mkRegexEmpty[Z3String]()
+  RxResult* = object
+    outcome*: RxOutcome
+    b*: Z3Bool
+    i*: Z3Int
+    s*: Z3String
+    defs*: seq[Z3Bool]  ## definitional constraints on fresh constants
+    msg*: string
 
-proc parseEscape(p: var Parser): Z3Regex[Z3String] =
-  ## Called with `p.i` pointing at the backslash.
-  inc p.i  # consume '\'
-  if p.atEnd:
-    p.fail("dangling backslash at end of pattern")
-    return mkRegexEmpty[Z3String]()
-  let c = p.peek
-  inc p.i
-  case c
-  of '1', '2', '3', '4', '5', '6', '7', '8', '9':
-    p.fail("backreference \\" & c & " is not supported (seUnsupportedRegex)")
-    mkRegexEmpty[Z3String]()
-  of 'd', 'w', 's':
-    p.classFor(c)
-  else:
-    # \. \* \( \\ etc — literal escaped char.
-    singleByte(c)
 
-proc parseCharClass(p: var Parser): Z3Regex[Z3String] =
-  ## `[...]` — called with `p.i` at the opening `[`.
-  inc p.i  # consume '['
-  var negated = false
-  if p.peek == '^':
-    negated = true
-    inc p.i
-  var parts: seq[Z3Regex[Z3String]]
-  var sawClose = false
-  while not p.atEnd:
-    let c = p.peek
-    if c == ']':
-      inc p.i
-      sawClose = true
-      break
-    if c == '\\':
-      inc p.i
-      if p.atEnd:
-        p.fail("dangling backslash in character class")
-        return mkRegexEmpty[Z3String]()
-      let ec = p.peek
-      inc p.i
-      case ec
-      of 'd': parts.add byteRange(ord('0'), ord('9'))
-      of 'w':
-        parts.add byteRange(ord('A'), ord('Z'))
-        parts.add byteRange(ord('a'), ord('z'))
-        parts.add byteRange(ord('0'), ord('9'))
-        parts.add singleByte('_')
-      of 's':
-        for ch in whitespaceBytes: parts.add singleByte(ch)
-      else:
-        parts.add singleByte(ec)
+proc inSet(code: Z3Int; cs: set[char]): Z3Bool =
+  var parts: seq[Z3Bool]
+  var b = 0
+  while b <= 255:
+    if char(b) notin cs:
+      inc b
       continue
-    # range a-z (when not the last char before ']')
-    if p.peekAt(1) == '-' and p.peekAt(2) != ']' and p.peekAt(2) != '\0':
-      let lo = c
-      let hi = p.peekAt(2)
-      p.i += 3
-      parts.add byteRange(ord(lo), ord(hi))
+    var e = b
+    while e + 1 <= 255 and char(e + 1) in cs: inc e
+    parts.add(if b == e: code == mkInt(b)
+              else: (code >= mkInt(b)) and (code <= mkInt(e)))
+    b = e + 1
+  if parts.len == 0: return mkBool(false)
+  result = parts[0]
+  for j in 1 ..< parts.len: result = result or parts[j]
+
+proc orAll(xs: seq[Z3Bool]): Z3Bool =
+  if xs.len == 0: return mkBool(false)
+  result = xs[0]
+  for j in 1 ..< xs.len: result = result or xs[j]
+
+proc tailOk(s: Z3String; pos: Z3Int; eol: RxKind): Z3Bool =
+  ## The Tail at absolute position `pos` of `s`.
+  case eol
+  of rxEol: (pos == len(s)) or
+            ((pos + mkInt(1) == len(s)) and (at(s, pos) == mkString("\n")))
+  of rxEolAbs: pos == len(s)
+  else: mkBool(true)
+
+proc unmodelled(why: string): RxResult =
+  RxResult(outcome: roUnmodelled, msg: why)
+
+type FreshName* = proc (tag: string): string
+  ## A per-run-unique Z3 constant name for `tag`.
+
+proc chosenLen(s: Z3String; p: Z3Int; f: SelForm; fresh: FreshName;
+               defs: var seq[Z3Bool]): Z3Int =
+  ## PCRE's chosen match length at absolute position `p` (0 <= p <=
+  ## s.len), or -1: the longest match whose Tail holds (see `SelForm`).
+  let lenS = len(s)
+  let bolOk = (if f.bol: p == mkInt(0) else: mkBool(true))
+  let fits = (p + mkInt(f.m) <= lenS) and
+             matches(substr(s, p, mkInt(f.m)), rxToZ3(f.prefix))
+  case f.kind
+  of skFixed:
+    ite(bolOk and fits and tailOk(s, p + mkInt(f.m), f.eol),
+        mkInt(f.m), mkInt(-1))
+  of skRun:
+    # `r`: the maximal run of `runSet` from `q0`, fixed definitionally.
+    let q0 = p + mkInt(f.m)
+    let r = mkIntVar(fresh("__regexRun"))
+    defs.add ite(q0 <= lenS,
+      (r >= mkInt(0)) and (q0 + r <= lenS) and
+        matches(substr(s, q0, r), star(byteSetRe(f.runSet))) and
+        ((q0 + r == lenS) or not inSet(toCode(at(s, q0 + r)), f.runSet)),
+      r == mkInt(0))
+    let c = (if f.runHi < 0: r else: ite(r > mkInt(f.runHi), mkInt(f.runHi), r))
+    ite(bolOk and fits and (c >= mkInt(f.runLo)) and
+        tailOk(s, q0 + c, f.eol), mkInt(f.m) + c, mkInt(-1))
+  of skNone:
+    raiseAssert "chosenLen: no selection form"
+
+proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
+                      start: Z3Int; fresh: FreshName): RxResult =
+  ## RFC-0005 S8ay. The value of `sp.entry` on subject `s` from `start` (0
+  ## for `startsWith` / `endsWith`). `replace` is lowered by the walker
+  ## (`runtime_strings.nim`), not here.
+  case pr.status
+  of psRejected: return RxResult(outcome: roRejected, msg: pr.errMsg)
+  of psUnknown: return RxResult(outcome: roUnknown, msg: pr.reason)
+  of psUnmodelled:
+    return unmodelled(pr.reason)
+  of psOk: discard
+  let (fine, edges, why) = splitEdges(pr.root)
+  if not fine: return unmodelled(why)
+  let lenS = len(s)
+  let anyByte = byteSetRe(pcreAnyByte)
+  var nb, bl: seq[Z3Regex[Z3String]]
+  var nbM: seq[Z3Regex[Z3String]]
+  for e in edges:
+    let r = concat(rxToZ3(e.body), tailRe(e.eol))
+    if e.bol: bl.add r
     else:
-      parts.add singleByte(c)
-      inc p.i
-  if not sawClose:
-    p.fail("unterminated character class '['")
-    return mkRegexEmpty[Z3String]()
-  if parts.len == 0:
-    p.fail("empty character class '[]'")
-    return mkRegexEmpty[Z3String]()
-  var cls = (if parts.len == 1: parts[0] else: union(parts))
-  if negated:
-    # [^...] — complement, intersected with "single byte" so it still
-    # matches exactly one byte (complement alone admits any-length seqs).
-    cls = intersect(complement(cls), byteRange(0, 255))
-  cls
-
-proc parseGroup(p: var Parser): Z3Regex[Z3String] =
-  ## `(...)`, `(?:...)`, and the rejected `(?=...)`/`(?!...)`/`(?P<...>...)`.
-  inc p.i  # consume '('
-  if p.peek == '?':
-    let q = p.peekAt(1)
-    case q
-    of ':':
-      p.i += 2  # non-capturing group — transparent
-    of '=', '!':
-      p.fail("lookahead (?" & q & "...) is not supported (seUnsupportedRegex)")
-      return mkRegexEmpty[Z3String]()
-    of 'P', '<', '\'':
-      p.fail("named group (?" & q & "...) is not supported (seUnsupportedRegex)")
-      return mkRegexEmpty[Z3String]()
+      nb.add r
+      nbM.add concat(rxToZ3(e.body, marked = true), tailRe(e.eol, true))
+  let nbRe = (if nb.len == 0: mkRegexEmpty[Z3String]()
+              elif nb.len == 1: nb[0] else: union(nb))
+  let blRe = (if bl.len == 0: mkRegexEmpty[Z3String]()
+              elif bl.len == 1: bl[0] else: union(bl))
+  let bad = (start < mkInt(0)) or (start > lenS)
+  let u = substr(s, start, lenS - start)
+  let st0 = start == mkInt(0)
+  proc inNb(x: Z3String): Z3Bool =
+    (if nb.len > 0: matches(x, nbRe) else: mkBool(false))
+  proc inBl(x: Z3String): Z3Bool =
+    (if bl.len > 0: matches(x, blRe) else: mkBool(false))
+  let occurs = (if nb.len > 0: matches(u, concat(star(anyByte), nbRe))
+                else: mkBool(false)) or (st0 and inBl(u))
+  var res = RxResult(outcome: roValue)
+  proc leftmost(res: var RxResult): Z3Int =
+    # The leftmost occurrence offset `q` in `u` (when `occurs`): a match
+    # starts at `q`, and none starts earlier -- for an anchor-free
+    # alternative, the marked subject `u[0..<q] & '#' & u[q..]` is not in
+    # `B* . X`, X the words of the language with one marker inserted after
+    # a non-empty prefix (`rxToZ3(marked = true)` intersected with "exactly
+    # one marker").
+    let q = mkIntVar(fresh("__regexFind"))
+    let rest = substr(u, q, len(u) - q)
+    var atQ = @[inNb(rest)]
+    if bl.len > 0: atQ.add((q == mkInt(0)) and st0 and inBl(u))
+    var earlier: seq[Z3Bool]
+    if bl.len > 0: earlier.add(st0 and (q > mkInt(0)) and inBl(u))
+    if nb.len > 0:
+      let marked = concat(substr(u, mkInt(0), q), findMarker(), rest)
+      let one = concat(star(anyByte), mkRegex(findMarker()), star(anyByte))
+      let x = intersect(one, (if nbM.len == 1: nbM[0] else: union(nbM)))
+      earlier.add matches(marked, concat(star(anyByte), x))
+    res.defs.add ite(occurs,
+      (q >= mkInt(0)) and (q <= len(u)) and orAll(atQ) and not orAll(earlier),
+      q == mkInt(0))
+    q
+  case sp.entry
+  of "match":
+    res.b = bad or inNb(u) or (st0 and inBl(u))
+  of "startsWith":
+    res.b = inNb(s) or inBl(s)
+  of "contains":
+    res.b = (not bad) and occurs
+  of "find", "findBoundsFirst":
+    let q = leftmost(res)
+    res.i = ite(bad, mkInt(-24), ite(occurs, start + q, mkInt(-1)))
+  of "matchLen", "endsWith", "findBoundsLast":
+    let f = selectionForm(edges)
+    if f.kind == skNone:
+      return unmodelled(sp.entry & " depends on which match PCRE picks: " &
+                        f.why)
+    case sp.entry
+    of "matchLen":
+      res.i = ite(bad, mkInt(-24), chosenLen(s, start, f, fresh, res.defs))
+    of "endsWith":
+      # The chosen match at `i` is the longest, so it reaches the end iff
+      # `s[i..]` is in the body's language (`i < s.len`: non-empty).
+      let bodyRe = rxToZ3(f.body)
+      res.b =
+        if f.bol: (lenS >= mkInt(1)) and matches(s, bodyRe)
+        else: matches(s, concat(star(anyByte),
+                                intersect(bodyRe, plus(anyByte))))
     else:
-      p.fail("unsupported group flag (?" & q & "...) (seUnsupportedRegex)")
-      return mkRegexEmpty[Z3String]()
-  let inner = p.parseAlternation()
-  if p.failed:
-    return mkRegexEmpty[Z3String]()
-  if p.peek != ')':
-    p.fail("unterminated group '('")
-    return mkRegexEmpty[Z3String]()
-  inc p.i  # consume ')'
-  inner  # capturing groups are transparent for language membership
-
-proc parseAtom(p: var Parser): Z3Regex[Z3String] =
-  let c = p.peek
-  case c
-  of '.':
-    inc p.i
-    byteRange(0, 255)  # byte-faithful '.' (any single byte)
-  of '[':
-    p.parseCharClass()
-  of '(':
-    p.parseGroup()
-  of '\\':
-    p.parseEscape()
+      let q = leftmost(res)
+      let first = start + q
+      let ml = chosenLen(s, first, f, fresh, res.defs)
+      res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
   else:
-    inc p.i
-    singleByte(c)
-
-proc parseQuantified(p: var Parser): Z3Regex[Z3String] =
-  ## atom followed by an optional quantifier `* + ? {n,m}`.
-  var atom = p.parseAtom()
-  if p.failed: return mkRegexEmpty[Z3String]()
-  let c = p.peek
-  case c
-  of '*':
-    inc p.i
-    star(atom)
-  of '+':
-    inc p.i
-    plus(atom)
-  of '?':
-    inc p.i
-    option(atom)
-  of '{':
-    # {n} / {n,} / {n,m}
-    let save = p.i
-    inc p.i
-    var loStr = ""
-    while p.peek in {'0'..'9'}: loStr.add p.peek; inc p.i
-    if loStr.len == 0:
-      # not a quantifier — treat '{' as a literal (restore)
-      p.i = save
-      return atom
-    var hiStr = loStr
-    var hasComma = false
-    if p.peek == ',':
-      hasComma = true
-      inc p.i
-      hiStr = ""
-      while p.peek in {'0'..'9'}: hiStr.add p.peek; inc p.i
-    if p.peek != '}':
-      p.i = save
-      return atom
-    inc p.i  # consume '}'
-    let lo = parseInt(loStr)
-    # CR-10: cuint is 32-bit; Z3_mk_re_loop / power take cuint bounds. A
-    # repetition count ≥ 2^32 would silently truncate, producing a regex with
-    # WRONG bounds (potential false UNSAT/SAT).  Guard: if `lo` or `hi` exceeds
-    # high(cuint) treat the repetition as unsupported → honest sxUnknown.
-    if lo > int(high(cuint)):
-      p.fail("repetition lower bound " & loStr & " exceeds 2^32-1; " &
-             "unsupported (seUnsupportedRegex)")
-      return mkRegexEmpty[Z3String]()
-    if hasComma and hiStr.len == 0:
-      # {n,} — n or more.
-      concat(power(atom, lo), star(atom))
-    else:
-      let hi = parseInt(hiStr)
-      if hi > int(high(cuint)):
-        p.fail("repetition upper bound " & hiStr & " exceeds 2^32-1; " &
-               "unsupported (seUnsupportedRegex)")
-        return mkRegexEmpty[Z3String]()
-      if hi < lo:
-        p.fail("invalid counted repetition {n,m} with m < n")
-        return mkRegexEmpty[Z3String]()
-      loop(atom, lo, hi)
-  else:
-    atom
-
-proc parseConcat(p: var Parser): Z3Regex[Z3String] =
-  var parts: seq[Z3Regex[Z3String]]
-  while not p.atEnd and p.peek != '|' and p.peek != ')':
-    parts.add p.parseQuantified()
-    if p.failed: return mkRegexEmpty[Z3String]()
-  if parts.len == 0:
-    mkRegex(mkString(""))  # empty concatenation matches the empty string
-  elif parts.len == 1:
-    parts[0]
-  else:
-    concat(parts)
-
-proc parseAlternation(p: var Parser): Z3Regex[Z3String] =
-  var branches: seq[Z3Regex[Z3String]]
-  branches.add p.parseConcat()
-  if p.failed: return mkRegexEmpty[Z3String]()
-  while p.peek == '|':
-    inc p.i
-    branches.add p.parseConcat()
-    if p.failed: return mkRegexEmpty[Z3String]()
-  if branches.len == 1:
-    branches[0]
-  else:
-    union(branches)
-
-proc parseNimRegexToZ3Regex*(pattern: string): RegexParseResult =
-  ## Translate a Nim `re"..."` pattern string into a `Z3Regex[Z3String]`.
-  ##
-  ## Requires a current Z3 context (`newContext()`); the byte-faithful AST is
-  ## built against it. Returns `RegexParseResult(isOk: true, regex: …)` on
-  ## success, or `isOk: false` with a descriptive `error` for unsupported
-  ## constructs (backreferences, lookahead, named groups) and malformed input.
-  var p = Parser(s: pattern, i: 0)
-  let r = p.parseAlternation()
-  if p.failed:
-    return err(p.errMsg)
-  if not p.atEnd:
-    # leftover usually means an unbalanced ')'.
-    return err("unexpected trailing input near position " & $p.i &
-               " (unbalanced ')'?)")
-  ok(r)
+    raiseAssert "lowerRegexEntry: entry `" & sp.entry & "`"
+  res

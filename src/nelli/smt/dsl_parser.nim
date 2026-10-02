@@ -9430,6 +9430,30 @@ type ValueFieldWrite = object
   ## its new value.
   root:  string
   value: IRExpr
+  heap:  IRStmt   ## RFC-0005 S8ar: the chain is rooted at a ref/ptr
+                  ## object's field (`p.inner.s`): the field-deref write
+                  ## of the rebuilt field (`root`/`value` unused)
+
+proc toStmt(fw: ValueFieldWrite): IRStmt =
+  ## RFC-0005 S8ar. The statement that lands the rebuilt value.
+  if fw.heap != nil: fw.heap else: mkAssign(fw.root, fw.value)
+
+proc heapFieldRoot(n: NimNode; operand: var NimNode;
+                   fieldName: var string): bool =
+  ## RFC-0005 S8ar. True iff `n` is a ref/ptr object's field (`p.inner`):
+  ## `operand` is then the ref/ptr expression and `fieldName` the field. A
+  ## value field chain may be rooted there (`p.inner.s.add v`,
+  ## `p.inner.a = v`); the rebuilt field is written back to the heap cell
+  ## (`mkFieldDerefWrite`), as `p.inner = v` is. Before S8ar such a chain
+  ## was the "unsupported nnkAsgn shape" / N49 decline.
+  let t = if n.kind == nnkCheckedFieldExpr and n.len >= 1: n[0] else: n
+  if t.kind == nnkDotExpr and t.len == 2 and t[1].kind in {nnkSym, nnkIdent} and
+     t[0].kind in {nnkHiddenDeref, nnkDerefExpr} and t[0].len >= 1 and
+     classifyType(t[0][0]).ty.kind in {itRef, itPtr}:
+    operand = t[0][0]
+    fieldName = t[1].strVal
+    return true
+  false
 
 type FieldStep = object
   ## RFC-0005 S8s. One step of a value field chain: `recv.name` or a
@@ -9572,7 +9596,11 @@ proc valueFieldTy(lhs: NimNode): IRType =
   ## Pure: parses nothing, so a caller can ask before lifting any call.
   var step: FieldStep
   if not fieldStep(lhs, step): return nil
-  if step.recv.kind != nnkSym and valueFieldTy(step.recv) == nil: return nil
+  var operand: NimNode
+  var fieldName: string
+  if step.recv.kind != nnkSym and valueFieldTy(step.recv) == nil and
+     not heapFieldRoot(step.recv, operand, fieldName):   ## RFC-0005 S8ar
+    return nil
   step.fieldTy
 
 proc valueFieldChecked(lhs: NimNode): bool =
@@ -9632,8 +9660,20 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
       mkTupleLit(elems, step.recvTy)
     else:
       mkVariantFieldSet(recvIR, step.name, step.tags, newVal)
+  var operand: NimNode
+  var fieldName: string
   if step.recv.kind == nnkSym:
     ValueFieldWrite(root: step.recv.strVal, value: rebuilt)
+  elif valueFieldTy(step.recv) == nil and
+       heapFieldRoot(step.recv, operand, fieldName):
+    # RFC-0005 S8ar: the chain's root is a ref/ptr object's field; the
+    # rebuilt field is written back to its heap cell, as `p.inner = v`.
+    let opTy = classifyType(operand).ty
+    let isPtr = opTy.kind == itPtr
+    let pointeeTy = if isPtr: opTy.ptrPointeeTy else: opTy.refPointeeTy
+    let ptrIR = parseExpr(operand, preamble, ctx)
+    ValueFieldWrite(heap: mkFieldDerefWrite(ptrIR, rebuilt, step.recvTy,
+                                            pointeeTy, fieldName, isPtr))
   else:
     valueFieldWrite(step.recv, rebuilt, preamble, ctx)
 
@@ -9756,7 +9796,7 @@ proc dottedFieldMutate(fieldNode: NimNode, op: DottedOp, args: seq[IRExpr],
   let oldVal = parseExpr(fieldNode, preamble, ctx)
   let fw = valueFieldWrite(fieldNode, dottedOpExpr(op, oldVal, args),
                            preamble, ctx)
-  mkAssign(fw.root, fw.value)
+  fw.toStmt
 
 proc dottedFieldIndexAssign(n, fieldNode, idxNode: NimNode, rhs: IRExpr,
                             rhsNode: NimNode,
@@ -9796,7 +9836,7 @@ proc dottedFieldIndexAssign(n, fieldNode, idxNode: NimNode, rhs: IRExpr,
   let valIR = value()
   preamble.add mkIndexAssignStmt(tmp, idxIR, valIR, siteLoc(n))
   let fw = valueFieldWrite(fieldNode, mkVar(tmp), preamble, ctx)
-  mkAssign(fw.root, fw.value)
+  fw.toStmt
 
 proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
                preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
@@ -10065,7 +10105,7 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):
       let fw = valueFieldWrite(lhs, val, preamble, ctx)
-      return mkAssign(fw.root, fw.value)
+      return fw.toStmt
   ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
 
 proc parseStmtInner(n: NimNode,
@@ -11189,7 +11229,7 @@ proc parseStmtInner(n: NimNode,
               if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
               else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
             let fw = valueFieldWrite(lhs, newVal, preamble, ctx)
-            return mkAssign(fw.root, fw.value)
+            return fw.toStmt
         # RFC-0005 S8am (S8z's remainder, item 1): `s[i] += v` (and -=, *=,
         # &=) on a SEQ ELEMENT. `valueFieldTy`/`fieldStep` has no `itSeq`
         # case -- a seq element is a REAL `isIndexAssign` store (a Z3

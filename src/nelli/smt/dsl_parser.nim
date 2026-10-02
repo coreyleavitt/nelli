@@ -3411,8 +3411,99 @@ proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
     return
   for c in lv: lvalueVarSyms(c, into)
 
+proc heapCellTail(lv: NimNode): tuple[deref: NimNode, path: seq[string]] =
+  ## RFC-0005 S8bf. The last ref/ptr dereference an lvalue reaches its cell
+  ## through (`p.inner.x` is the `inner` deref), and the path from that
+  ## dereference's object to the cell: field names, and `[]` for an index
+  ## (any index, a tuple's included). `deref` is nil when the lvalue is not
+  ## in a heap cell (a variable, a field or element of one, a marked
+  ## by-reference parameter's own slot) or has a shape this does not read.
+  var t = lv
+  var rev: seq[string]
+  while true:
+    if t.kind != nnkSym and t.len == 0 and byRefName(t).len > 0: return
+    case t.kind
+    of nnkDotExpr:
+      if t.len != 2: return
+      rev.add(if t[1].kind in {nnkSym, nnkIdent}: macros.strVal(t[1])
+              else: "[]")
+      t = t[0]
+    of nnkBracketExpr:
+      if t.len == 0: return
+      rev.add "[]"
+      t = t[0]
+    of nnkCheckedFieldExpr, nnkHiddenAddr:
+      if t.len == 0: return
+      t = t[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return
+      t = t[^1]
+    of nnkDerefExpr, nnkHiddenDeref:
+      if t.len == 0: return
+      if isVarIndirection(t):
+        t = t[0]
+        continue
+      for k in countdown(rev.high, 0): result.path.add rev[k]
+      result.deref = t
+      return
+    else: return
+
+proc derefIsPtr(d: NimNode): bool =
+  ## RFC-0005 S8bf. `d` (a heap dereference) is through a `ptr`/`pointer`,
+  ## not a `ref`.
+  var o = d[0]
+  while o.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+        o.len > 0:
+    o = o[^1]
+  let k = o.getTypeImpl.kind
+  k == nnkPtrTy or (k == nnkSym and o.getTypeImpl.strVal == "pointer")
+
+proc heapCellsMayMeet(a, b: NimNode): bool =
+  ## RFC-0005 S8bf. True when the heap lvalues `a` and `b` may denote one
+  ## cell (or overlapping ones) whatever their roots: the caller cannot
+  ## tell two refs apart by the variables that hold them (`let q = p`, a
+  ## tuple or an object field holding `p`, two parameters), so ROOT
+  ## identity says nothing. They may meet when the objects their last
+  ## dereferences address may be one object (the same type, or either
+  ## takes part in inheritance) and one path from that object is a prefix
+  ## of the other (`p.x` and `q.x`; `p.v` and `q.v.n`; an index matches
+  ## any index). A `ptr` may address a value embedded anywhere, so a `ptr`
+  ## dereference on either side meets any heap lvalue. Conservative: an
+  ## lvalue shape `heapCellTail` does not read is not a heap lvalue here,
+  ## and is left to the root and type checks of `varActualMayAlias`.
+  let ta = heapCellTail(a)
+  let tb = heapCellTail(b)
+  if ta.deref.isNil or tb.deref.isNil: return false
+  if derefIsPtr(ta.deref) or derefIsPtr(tb.deref): return true
+  let ca = ta.deref.getTypeInst
+  let cb = tb.deref.getTypeInst
+  if not (sameType(ca, cb) or objectInherits(ca) or objectInherits(cb)):
+    return false
+  for k in 0 ..< min(ta.path.len, tb.path.len):
+    if ta.path[k] != tb.path[k] and ta.path[k] != "[]" and
+       tb.path[k] != "[]":
+      return false
+  true
+
+proc actualCell(a: NimNode): NimNode =
+  ## RFC-0005 S8bf. The location an actual hands its callee: the lvalue of
+  ## a `var` actual (`nnkHiddenAddr`, the formal's own indirection
+  ## dropped) or of an `addr lv` one; for a value Nim may pass by pointer
+  ## (anything but a scalar, `isInertArg`; a string is passed by pointer),
+  ## the value's own expression. nil for a scalar value.
+  var t = a
+  while t.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and t.len > 0 and
+        t.typeKind != ntyVarargs:
+    t = t[^1]
+  if t.kind in {nnkHiddenAddr, nnkAddr} and t.len == 1:
+    var lv = t[0]
+    if isVarIndirection(lv): lv = lv[0]
+    return lv
+  if isInertArg(a) and a.typeKind != ntyString: return nil
+  t
+
 proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
-                       heapSteps: seq[NimNode]): bool =
+                       heapSteps: seq[NimNode]; skip: seq[int] = @[]): bool =
   ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
   ## (`userCallStmt`) copies the lvalue in, walks the callee on the copy and
   ## copies it out. Nim passes the lvalue's ADDRESS, so the two agree unless
@@ -3427,14 +3518,24 @@ proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
   ## after the call wrote `s[new i]`. And a plain-variable actual is
   ## checked too: `setIJ(i, i)` is one location written twice in the
   ## callee's order, which two by-name write-backs do not reproduce.
+  ## RFC-0005 S8bf: and another argument whose location may be the same
+  ## heap cell through a DIFFERENT ref (`heapCellsMayMeet`): `let q = p;
+  ## setBoth(p.x, q.x)` names two roots, and `q.x`'s type (`var int`) holds
+  ## no ref, so neither check above saw it, and the two write-backs ran in
+  ## argument order (a false `sxSat`). `skip` holds the arguments passed by
+  ## reference with this one (`userCallStmt`), which are one cell in the
+  ## walk too.
   var cells: seq[NimNode]
   for d in heapSteps: cells.add d.getTypeInst
   var syms: seq[NimNode]
   lvalueVarSyms(lv, syms)
   if not containsSym(syms, root): syms.add root
   for j in 1 ..< n.len:
-    if j == i: continue
+    if j == i or j in skip: continue
     let a = n[j]
+    # RFC-0005 S8bf: the same heap cell through a different ref.
+    let oc = actualCell(a)
+    if oc != nil and heapCellsMayMeet(lv, oc): return true
     # A scalar passed by value cannot alias. A string can: Nim passes a
     # non-`var` string by pointer, so it is checked like any composite.
     if isInertArg(a) and a.typeKind != ntyString: continue
@@ -3564,11 +3665,13 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
   ptrUsesStayLocal(body(impl), fsym, seen)
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
-                        heapSteps: seq[NimNode]): bool =
+                        heapSteps: seq[NimNode]; skip: seq[int] = @[]): bool =
   ## RFC-0005 S8an. `varActualMayAlias` for an `addr lv` actual: another
   ## `addr` of the SAME lvalue is the same cell (`userCallStmt` shares it),
   ## so it does not alias; any other argument that names the root, or can
   ## hold a ref to a heap cell on the lvalue's path, does.
+  ## RFC-0005 S8bf: as does one whose location may be the same heap cell
+  ## through a different ref (`heapCellsMayMeet`; `skip` as there).
   var cells: seq[NimNode]
   for d in heapSteps: cells.add d.getTypeInst
   var syms: seq[NimNode]
@@ -3580,6 +3683,9 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
     let a = n[j]
     let olv = addrActualLvalue(a)
     if olv != nil and scopedRepr(olv) == key: continue
+    if j in skip: continue
+    let oc = actualCell(a)
+    if oc != nil and heapCellsMayMeet(lv, oc): return true
     if isInertArg(a) and a.typeKind != ntyString: continue
     for s in syms:
       if mentionsSym(a, s): return true
@@ -3823,6 +3929,14 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   ## call goes to a specialisation of the callee that reads and writes the
   ## cell itself. It declines (S8au's `feUnsupportedOp`) only when the
   ## lvalue or the formal has a shape that cannot be passed so.
+  ##
+  ## RFC-0005 S8bf: so is a heap lvalue that may be the same cell as
+  ## another heap lvalue actual of the call (`heapCellsMayMeet`: `let q =
+  ## p; setBoth(p.x, q.x)`). Each is passed by reference, so the callee's
+  ## writes through the two formals land on the heap in its order, and the
+  ## heap decides whether the two refs are one. An actual of such a pair
+  ## that cannot be passed so takes the write-back below, which declines
+  ## (`varActualMayAlias` sees the other).
   var argIRs: seq[IRExpr]
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
@@ -3837,6 +3951,25 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       outer = calleeOuterSyms(calleeSym)
       outerDone = true
     outer
+  # RFC-0005 S8bf: for each argument, the other `var`/`addr` heap actuals
+  # whose cell may be its own (`heapCellsMayMeet`). Two `addr`s of one
+  # lvalue are one cell already (`addrCells`), not a pair.
+  var peers = newSeq[seq[int]](n.len)
+  block:
+    var cellOf = newSeq[NimNode](n.len)
+    for i in 1 ..< n.len:
+      let c = actualCell(n[i])
+      if c != nil and (n[i].kind == nnkHiddenAddr or
+                       addrActualLvalue(n[i]) != nil):
+        cellOf[i] = c
+    for i in 1 ..< n.len:
+      if cellOf[i].isNil: continue
+      for j in 1 ..< n.len:
+        if j == i or cellOf[j].isNil: continue
+        if addrActualLvalue(n[i]) != nil and addrActualLvalue(n[j]) != nil and
+           scopedRepr(cellOf[i]) == scopedRepr(cellOf[j]):
+          continue
+        if heapCellsMayMeet(cellOf[i], cellOf[j]): peers[i].add j
   for i in 1 ..< n.len:
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
@@ -3852,9 +3985,11 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         # at the call (`byRefRoot`).
         var brSteps: seq[NimNode]
         let brRoot = byRefRoot(addrLv, brSteps)
+        # RFC-0005 S8bf: or one that may be another heap actual's cell
+        # (`peers`), every one of which is passed so too.
         if brRoot.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen) or
-           addrActualMayAlias(n, i, addrLv, brRoot, brSteps) or
-           outerReachesCell(outerOf(), brSteps) == nil:
+           addrActualMayAlias(n, i, addrLv, brRoot, brSteps, peers[i]) or
+           (peers[i].len == 0 and outerReachesCell(outerOf(), brSteps) == nil):
           break byRef
         let b = byRefSub(calleeSym, i - 1, addrLv, n[i], true)
         if b.idx < 0: break byRef
@@ -3929,8 +4064,11 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         if lv.kind == nnkSym: break byRef
         var heapSteps: seq[NimNode]
         let root = byRefRoot(lv, heapSteps)   ## RFC-0005 S8bd
-        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps) or
-           outerReachesCell(outerOf(), heapSteps) == nil:
+        # RFC-0005 S8bf: or one that may be another heap actual's cell
+        # (`peers`), every one of which is passed so too.
+        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps,
+                                           peers[i]) or
+           (peers[i].len == 0 and outerReachesCell(outerOf(), heapSteps) == nil):
           break byRef
         let b = byRefSub(calleeSym, i - 1, lv, n[i], false)
         if b.idx < 0: break byRef

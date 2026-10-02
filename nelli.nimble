@@ -1063,5 +1063,9 @@ task test, "Run the test suite":
             # witnesses; maxHeapDepth bounds a chain; by-reference
             # elements, call results and generic callees. Walker 204
             # (provisional).
-            "tsymex_rfc0005_s8bd_remainder"]:
+            "tsymex_rfc0005_s8bd_remainder",
+            # RFC-0005 S8bf: two var / addr heap actuals that may be one
+            # cell through different refs are passed by reference. Walker
+            # 206 (provisional).
+            "tsymex_rfc0005_s8bf_alias"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

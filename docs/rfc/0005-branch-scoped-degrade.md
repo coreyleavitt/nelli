@@ -354,7 +354,7 @@ state = "done"
 [[slice]]
 id = "S8bf"
 title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing through let-bound ref copies"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"

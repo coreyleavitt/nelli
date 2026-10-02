@@ -202,7 +202,16 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "204"
+const symexWalkerVersion* = "206"
+  ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Provisional 206
+  ## (S8be holds 205). Two `var` / `addr` heap actuals of one call that may
+  ## be one cell through DIFFERENT refs (`let q = p; setBoth(p.x, q.x)`; a
+  ## let chain, a tuple, a field of another ref, two parameters) were
+  ## copied in and out in argument order, not the callee's write order: a
+  ## false `sxSat`. They are passed by reference (S8ba's specialisation),
+  ## so the writes land on the heap in the callee's order; one that cannot
+  ## be passed so declines (`varActualMayAlias`, `heapCellsMayMeet`).
+  ##
   ## RFC-0005 S8bd (2026-10-02) — S8ba's remainder. Provisional 204.
   ## (1) A bit-vector `i` whose Int views `bv2int(i)` and `bv2int(i +- c)`
   ## both meet a length is linked by the exact two's-complement wrap

@@ -1680,7 +1680,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-     iekStrInOptionRegion:
+     iekStrInOptionRegion, iekStrCaptureRe:
     e.strArgs
   of iekBorrowOp: @[e.borrowLhs, e.borrowRhs]
   of iekClosureCall: e.ccArgs
@@ -1746,9 +1746,9 @@ func isEagerIR(e: IRExpr): bool =
   of iekBinop: e.bop in {bAdd, bSub, bMul}
   of iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains, iekStrStartsWith,
      iekStrEndsWith, iekStrReplaceAll, iekStrSplit, iekStrJoin, iekStrMatch,
-     iekStrFindRe, iekStrReplaceRe, iekStrConcat, iekIntToStr, iekStrToInt,
-     iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
-     iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
+     iekStrFindRe, iekStrReplaceRe, iekStrCaptureRe, iekStrConcat,
+     iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
+     iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
      iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
      iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp:
     true

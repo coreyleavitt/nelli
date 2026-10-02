@@ -193,15 +193,18 @@ proc s6bFloatZeroDead(n: int) =
   if n == 5 and n == 6:
     symexTarget("s6b_float_zero_dead")
 
-# ---- fresh: iteSV seq merge ---------------------------------------------------
+# ---- fresh: iteSV set merge ---------------------------------------------------
 #
 # RFC-0005 S8bb: these were string merges, the fresh-symbol class's carrier;
-# a string merge is now Z3's exact `ite` (no taint), so the carrier is a seq
-# merge, still the fresh-symbol split. The string twins below pin the exact
-# merge.
+# a string merge is now Z3's exact `ite` (no taint), so S8bb moved the
+# carrier to a seq merge. RFC-0005 batch 4: on the stack a seq merge is
+# exact too (S8at, batch 2: two seqs whose element arrays share a sort merge
+# as an `ite`), so the carrier is a `HashSet` merge, still `iteSV`'s
+# fresh-symbol arm. The string twins below pin the exact merge.
 
 proc s6bStrIndexDead(i, n: int) =
-  let arr = [@[1], @[2], @[3]]
+  var arr: array[3, HashSet[int]]
+  arr[1].incl 4
   if i >= 0 and i < 3:
     let s = arr[i]
     discard s
@@ -209,7 +212,10 @@ proc s6bStrIndexDead(i, n: int) =
     symexTarget("s6b_str_index_dead")
 
 proc s6bStrIndexLive(i: int) =
-  let arr = [@[1], @[2], @[3]]
+  ## Real Nim: every element's `len` is 0 or 1, so the target is never
+  ## reached; only the merge's fresh set separates them.
+  var arr: array[3, HashSet[int]]
+  arr[1].incl 4
   if i >= 0 and i < 3:
     if arr[i].len == 7:
       symexTarget("s6b_str_index_live")
@@ -491,7 +497,7 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check r.errors.hasKind(seUnsupportedSetCharInterop)
     check r.status == sxUnknown
 
-  test "iteSV seq merge (array index fold): dead target is sxUnsat":
+  test "iteSV set merge (array index fold): dead target is sxUnsat":
     let r = symexFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
@@ -576,7 +582,7 @@ suite "RFC-0005 S6b (c) -- guards":
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
 
-  test "a target decided only by the merged seq is a candidate: sxUnknown":
+  test "a target decided only by the merged set is a candidate: sxUnknown":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
     show r
     check r.status == sxUnknown

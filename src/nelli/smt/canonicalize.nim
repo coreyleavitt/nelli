@@ -247,6 +247,40 @@ const symexWalkerVersion* = "209"
   ## its typed parameters, and an int conversion of a constant folds.
   ## Provisional 203; batch 4.
   ##
+  ## RFC-0005 S8be (2026-10-02) — S8ax's remainder. Provisional, supersedes
+  ## "197" (198..204 are the S8ay..S8bd siblings', landing separately).
+  ## (1) An inert opaque call forks a raise of each `Defect` type its body
+  ## may raise (`IRStmt.opaqueDefects`, scanned by the parser; `Defect` for
+  ## one it cannot name), routed like its listed raises, a `finally`
+  ## included. (2) An opaque raise is split into the subtypes the handlers
+  ## in scope and a `tRaisedExn` filter name. (3) A routine's `{.global.}`
+  ## variable is a module-level one under a scoped name, initialised once.
+  ## (4) `int(high(int32))` and every widening of a 64-bit literal of a
+  ## narrower type lowers (it faulted). (5) A `seq` or string index read by
+  ## an operand is checked where the operand stands and read after a later
+  ## operand's call; a read the check no longer covers declines. (6) A
+  ## `while` guard orders its operands too, and a call left inline in a
+  ## later operand is bound before the earlier operands' reads. (7) An
+  ## opaque call that may run a closure havocs every capture cell, and takes
+  ## a routine-typed argument. (8) A routine returning a tuple holding
+  ## closures binds the tuple the callee built; a call through a proc-valued
+  ## expression (`t.f()`) binds the callee first. (9) The call cache keys a
+  ## callee threading globals or captures by their values at entry and
+  ## caches it when no exit wrote one (`CallCacheEntry.outer`). (10) The
+  ## fresh return of a walked or declined call to a signed or narrow int
+  ## routine taking an Int-sorted argument is Int-sorted, bounded by its
+  ## declared type. (11) `addr s[i]` of a routine's seq is an element cell
+  ## (`isNew.nAddrIdx`, `Path.elemCells`): identified by the seq and the
+  ## index as `addr` evaluated it, kept equal to the element after every
+  ## statement, inherited and carried by `var` formals and captures, dead
+  ## once the seq is resized or assigned whole (a dereference or comparison
+  ## that may reach it declines). `addr o` of a case object is a cell over
+  ## its field-split heaps; `addr o.a` of an arm field is an alias that
+  ## declines after a statement that may change the arm. (12) A replay runs
+  ## on its own thread, abandoned past `replayTimeoutMs`
+  ## (`feReplayTimedOut`, never a confirmed `sxSat`). Provisional 205;
+  ## batch 4.
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker
@@ -5373,7 +5407,9 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       (if s.opaqueHeapAll: ";heapAll" else: "") &
       (if s.opaqueRaises.len > 0: ";raises=[" & s.opaqueRaises.join(",") & "]"
        else: "") &
-      (if s.opaqueMayDefect: ";mayDefect" else: "") &
+      (if s.opaqueDefects.len > 0:   # RFC-0005 S8be
+         ";defects=[" & s.opaqueDefects.join(",") & "]"
+       else: "") &
       (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
@@ -5475,8 +5511,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # free name).
     let ofLocal = if s.nAddrOf.len > 0: ";of=" & canonicalize(mkVar(s.nAddrOf), env)
                   else: ""
+    # RFC-0005 S8be: an element cell's index.
+    let ofIdx = if s.nAddrIdx != nil: ";ix=" & canonicalize(s.nAddrIdx, env)
+                else: ""
     let slot = bindLocal(env, s.nRetName)
-    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ">"
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).
@@ -5684,6 +5723,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
     (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
      else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
+    (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""
+     else: ";rpt=" & $s.replayTimeoutMs) &   ## RFC-0005 S8be, same rule
     ">"
 
 # ---- Cache key -------------------------------------------------------------

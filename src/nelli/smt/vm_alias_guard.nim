@@ -239,7 +239,10 @@ proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
   of nnkCall, nnkCommand:
     if n.len > 0:
       let callee = n[0]
+      # RFC-0005 S8be: a method name may be a symbol choice or an
+      # accent-quoted name (`x.`=destroy``), which has no `strVal`.
       if callee.kind == nnkDotExpr and callee.len == 2 and
+         callee[1].kind in {nnkIdent, nnkSym} and
          macros.strVal(callee[1]) in mutMethods and rootSym(callee[0]) == target:
         return true
       if callee.kind == nnkSym and macros.strVal(callee) in mutMethods and

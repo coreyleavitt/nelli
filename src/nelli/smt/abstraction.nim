@@ -250,7 +250,8 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
 
 const BitTwiddlingOps* = {bShl, bShr, bAnd, bOr, bXor}
 
-proc collectVarRefs(e: IRExpr, into: var HashSet[string]) =
+proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
+  ## RFC-0005 S8be: exported (the walker's `freshCallRet`).
   if e == nil: return
   case e.kind
   of iekVar:

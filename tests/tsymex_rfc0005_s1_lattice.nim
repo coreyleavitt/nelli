@@ -70,7 +70,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         # RFC-0005 S8ax: an opaque call's heap writes and
                         # raises.
                         feOpaqueEffectHavoc,
-                        feTableIterOrder}   # RFC-0005 S8bc
+                        feTableIterOrder,   # RFC-0005 S8bc
+                        # RFC-0005 S8be: a replay abandoned past
+                        # `replayTimeoutMs`.
+                        feReplayTimedOut}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

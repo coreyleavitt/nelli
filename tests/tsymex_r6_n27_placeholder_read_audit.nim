@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 100 marked lines (97 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 98 marked lines (95 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -275,13 +275,20 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## 1, `joinSV` 3, `isIndexAssign` 2, `isSeqPop` 1) became seven
     ## (`retBindEq`, `extractTreeValue`'s guard and length, `astHash`,
     ## `joinSV`, `isIndexAssign`, `isSeqPop`). 97 + 7 + 7 - 20 = 91.
+    ##
+    ## RFC-0005 S8be added two element-cell helpers: `withElem` writes an
+    ## element of a seq the parser gave cells to, only a seq of scalars or
+    ## strings (always backed); `sameSeqLen` guards both sides'
+    ## `isUnsupportedFieldPlaceholder` (two lines) before comparing the
+    ## length handles. 85 + 4 = 89.
+    ## Batch 4 (S8bc then S8be): 91 + 4 = 95.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 91
+    check runtimeCount == 95
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

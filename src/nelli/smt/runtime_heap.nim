@@ -1295,9 +1295,88 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
 # statement that reads or writes it by name is unchanged, and the cell is
 # what a pointer reads and writes, wherever it travels.
 
+type VariantSlot = tuple[kind: char; ord: int; name, key: string;
+                         ty, variantTy: IRType]
+  ## RFC-0005 S8be. One heap of a case object's cell (ADR-0013 D1): its
+  ## discriminator (`kind` 'd'), a plain field ('p') or an arm's field ('a',
+  ## of arm `ord`), with the heap key, value type and the variant type its
+  ## heap is materialised with -- the slots `isNew` zero-writes.
+
+proc variantSlots(ty: IRType): seq[VariantSlot] =
+  ## RFC-0005 S8be. The heaps a cell of the case object type `ty` lives in.
+  let baseId = refPointeeTypeId(ty)
+  result.add ('d', 0, ty.vDiscName, variantDiscHeapKey(ty), ty.vDiscTy, ty)
+  for i, fname in ty.vPlainFieldNames:
+    result.add ('p', 0, fname, fieldHeapKey(ty, fname), ty.vPlainFieldTypes[i],
+                IRType(nil))
+  for arm in ty.vArms:
+    for i, fname in arm.fieldNames:
+      result.add ('a', arm.tagOrdinal, fname,
+                  baseId & "__@" & $arm.tagOrdinal & "__" & fname,
+                  arm.fieldTypes[i], ty)
+
+proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
+                      refAst: Z3AnyAst): SymVal =
+  ## RFC-0005 S8be. The case object held at `refAst` on `p`: a value of
+  ## `ty` whose discriminator and every field, of every arm, are the selects
+  ## of their heaps at `refAst`.
+  var scratchPC: seq[Z3Bool]
+  result = allocateSym(ty, "__addrCellProto", scratchPC)
+  let refSort = allocRefSort(ctx, ty)
+  for sl in variantSlots(ty):
+    let cell = heapCellArrays(ctx, p, sl.key, refSort, sl.ty, sl.variantTy)
+    let v = heapCellSelect(ctx, cell, refAst, sl.ty)
+    case sl.kind
+    of 'd':
+      var d = new SymVal
+      d[] = v
+      result.vDisc = d
+    of 'p':
+      let i = result.vPlainFieldNames.find(sl.name)
+      if i >= 0: result.vPlainFields[i] = v
+    else:
+      if result.vArmFieldNames.hasKey(sl.ord):
+        let i = result.vArmFieldNames[sl.ord].find(sl.name)
+        if i >= 0: result.vArmFields[sl.ord][i] = v
+
+proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                      v: SymVal) =
+  ## RFC-0005 S8be. Store the case object `v` into its cell at `refAst` on
+  ## `p`, heap by heap (a field `v` does not hold keeps its heap's value).
+  let refSort = allocRefSort(ctx, ty)
+  for sl in variantSlots(ty):
+    var fv: SymVal
+    var have = false
+    case sl.kind
+    of 'd':
+      if v.vDisc != nil:
+        fv = v.vDisc[]
+        have = true
+    of 'p':
+      let i = v.vPlainFieldNames.find(sl.name)
+      if i >= 0 and i < v.vPlainFields.len:
+        fv = v.vPlainFields[i]
+        have = true
+    else:
+      if v.vArmFieldNames.hasKey(sl.ord):
+        let i = v.vArmFieldNames[sl.ord].find(sl.name)
+        if i >= 0 and v.vArmFields.hasKey(sl.ord) and
+           i < v.vArmFields[sl.ord].len:
+          fv = v.vArmFields[sl.ord][i]
+          have = true
+    if not have: continue
+    let cell = heapCellArrays(ctx, p, sl.key, refSort, sl.ty, sl.variantTy)
+    var scratchPC: seq[Z3Bool]
+    let proto = allocateSym(sl.ty, "__addrCellProto", scratchPC)
+    for c in heapCellStore(ctx, cell, refAst,
+                           heapStoreValue(fv, proto, sl.ty), sl.ty):
+      p.heaps[c.key] = c.arr
+
 proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                    refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8ax. The value of the address cell at `refAst` on `p`.
+  ## RFC-0005 S8be: a case object's, from its field-split heaps.
+  if ty.kind == itVariant: return variantCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   heapCellSelect(ctx, cell, refAst, ty)
@@ -1307,6 +1386,9 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
   ## path the caller just forked) and return the cell's value read back:
   ## the variable's new binding, so the two stay one term.
+  if ty.kind == itVariant:   # RFC-0005 S8be
+    if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
+    return variantCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   var scratchPC: seq[Z3Bool]
@@ -1322,22 +1404,37 @@ proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
   ## The edge where it does is tainted (`feUnsupportedOp`, the cell's last
   ## value substituting for the slot's) when it is feasible; the rest
   ## continues untouched.
+  ##
+  ## RFC-0005 S8be: likewise an element cell whose memory Nim may have
+  ## freed (`deadElemRefs`: its seq was resized or assigned whole since
+  ## `addr` took it, or its routine returned).
   var dead: seq[Z3AnyAst]
   for o in p.addrOwners:
     if not liveFrame(w, o.frame): dead.add o.refAst
-  if dead.len == 0: return @[p]
+  let elemDead = deadElemRefs(p, w)
+  if dead.len == 0 and elemDead.len == 0: return @[p]
   let ctx = w.z3
   var hits: seq[Z3Bool]
-  for d in dead:
+  for d in dead & elemDead:
     hits.add wrap[Z3Bool](ctx, checkedEq(ctx, refAst.raw, d.raw))
   var anyHit = hits[0]
   for i in 1 ..< hits.len: anyHit = anyHit or hits[i]
   let hitPath = forkPath(p, p.pc & @[anyHit], p.env)
   if not pathInfeasible(ctx, hitPath, w.settings):
-    let d = w.degrade(feUnsupportedOp,
-      "RFC-0005 S8ax: a pointer dereferenced here may hold the address of " &
-           "a variable whose routine has returned; Nim reads or writes a " &
-           "dead stack slot, which the walk does not model (feUnsupportedOp)")
+    let d =
+      if elemDead.len == 0:
+        w.degrade(feUnsupportedOp,
+          "RFC-0005 S8ax: a pointer dereferenced here may hold the address " &
+               "of a variable whose routine has returned; Nim reads or " &
+               "writes a dead stack slot, which the walk does not model " &
+               "(feUnsupportedOp)")
+      else:
+        w.degrade(feUnsupportedOp,
+          "RFC-0005 S8be: a pointer dereferenced here may hold the address " &
+               "of a seq element whose memory Nim may have freed (the seq " &
+               "was resized or assigned whole since `addr` took it, or its " &
+               "routine returned), or of a returned routine's variable; the " &
+               "walk does not model freed memory (feUnsupportedOp)")
     result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
   result.add forkPath(p, p.pc & @[not anyHit], p.env)
 
@@ -1364,8 +1461,10 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       result.add p
       continue
     var why = ""
+    # RFC-0005 S8be: a case object's cell is its field-split heaps
+    # (`variantSlots`), as a `ref` to one is.
     if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
-                      itSeq}:
+                      itSeq, itVariant}:
       why = "of a variable of type " & $ty
     elif local in w.frame.outerNames or isGlobalEnvName(local):
       why = "of a variable an enclosing routine owns"
@@ -1397,6 +1496,65 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty)
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
+    child.env = env2
+    result.add drainPendingLowerEffects(child)
+
+proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8be. `addr s[i]` (`isNew` with `nAddrOf = s`, `nAddrIdx = i`;
+  ## the parser checked `i` against `s.len` just before): bind
+  ## `stmt.nRetName` to the address of that element, as `addr` evaluates
+  ## the index -- the cell `s[j]` already has in this frame when `j` equals
+  ## `i` (`Path.elemCells`), else a fresh `ptr`, distinct from every other
+  ## address and from nil, holding the element. The walk then keeps the
+  ## element and the heap at the cell equal (`syncElemCells`) until `s` is
+  ## resized. Declined (`feUnsupportedOp`) as `walkAddrCell` declines: a
+  ## seq an enclosing routine owns, or one a closure captures.
+  let ctx = w.z3
+  let ty = stmt.nRefTy.ptrPointeeTy
+  let root = stmt.nAddrOf
+  let typeId = refPointeeTypeId(ty)
+  for p in paths:
+    if w.shouldStop: return
+    var why = ""
+    if root in w.frame.outerNames or isGlobalEnvName(root):
+      why = "of an element of a seq an enclosing routine owns"
+    elif not p.env.hasKey(root) or p.env[root].kind != svSeq:
+      why = "of an element of a seq this frame does not hold"
+    else:
+      for (cl, _) in w.frame.capCells:
+        if cl == root: why = "of an element of a seq a closure captures"
+    let (idxSV, ip) = lowerInExpr(p, stmt.nAddrIdx, w)
+    let idx = toZ3Int(idxSV)
+    let refSort = allocRefSort(ctx, ty)
+    var child = forkPath(ip, ip.pc, ip.env)
+    let newRef = freshRef(ctx, refSort, typeId, child)
+    assertFreshness(ctx, child, typeId, newRef, w.settings)
+    var env2 = child.env
+    if why.len > 0:
+      env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
+                                   ptrFamily: true, ptrPointee: ty)
+      child.env = env2
+      let d = w.degrade(feUnsupportedOp,
+        "RFC-0005 S8be: `addr " & displayName(root) & "[i]` " & why &
+             " is not modelled: the pointer is not kept equal to the " &
+             "element (feUnsupportedOp)")
+      result.add forkPathTainted(child, child.pc, child.env, d)
+      continue
+    # The address `s[j]` already has, when `j` is this index.
+    # (Each term owned as it is built: Z3 keeps an unowned result only
+    # until the next call.)
+    var addrAst = newRef
+    for k in countdown(child.elemCells.high, 0):
+      let e = child.elemCells[k]
+      if e.frame != w.frame.frameId or e.root != root or e.dead: continue
+      let same = idx == e.idx
+      addrAst = wrap[Z3AnyAst](ctx,
+        checkedIte(ctx, same.raw, e.refAst.raw, addrAst.raw))
+    child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,
+                                 root: root, ty: ty, idx: idx)
+    discard addrCellStore(ctx, child, ty, newRef, seqElemAt(env2[root], idx))
+    env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: addrAst,
+                                 ptrFamily: true, ptrPointee: ty)
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
@@ -2041,6 +2199,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add child
     survivors
   of isNew:
+    if stmt.nAddrIdx != nil:
+      return walkElemCell(stmt, paths, w)   # RFC-0005 S8be
     if stmt.nAddrOf.len > 0:
       return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:

@@ -1258,10 +1258,13 @@ type
                          ## RFC-0005 S8ax. For an opaque call that is not
                          ## inert: why its effects cannot be summarised
                          ## (named in its `feOpaqueCallUnmodelled`).
-      opaqueMayDefect*: bool
-                         ## RFC-0005 S8ax. For an inert opaque call: a user
-                         ## or foreign routine, whose body may raise a
-                         ## `Defect` no `raises` list names.
+      opaqueDefects*: seq[string]
+                         ## RFC-0005 S8be. For an inert opaque call: the
+                         ## `Defect` types its body may raise, which no
+                         ## `raises` list names (`opaqueDefectTypes`;
+                         ## `"Defect"` for one the scan cannot name). The
+                         ## walk forks a raise of each. Replaces S8ax's
+                         ## `opaqueMayDefect` flag, which forked none.
       cGuardRoots*: seq[string]
                          ## RFC-0005 S8an. The IR names of the ROOT
                          ## variables of this call's `var` and `addr`
@@ -1392,6 +1395,10 @@ type
                              ## local `x`: the address cell of `x` in the
                              ## current frame, allocated on first use and
                              ## reused after (`nRetName` is its env name).
+      nAddrIdx*:   IRExpr    ## RFC-0005 S8be: with `nAddrOf` a seq
+                             ## variable, `addr nAddrOf[nAddrIdx]`: an element
+                             ## cell (`walkElemCell`), at the index's value
+                             ## when `addr` evaluates it. nil otherwise.
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
@@ -2370,6 +2377,16 @@ type
                           ## coordinates): what it produces is a
                           ## replay-gated candidate, and it never voids
                           ## `sxUnsat`. sevError.
+    feReplayTimedOut      ## RFC-0005 S8be (§4.2 `roTimedOut`). NOT a
+                          ## degrade: the verdict-time replay of a
+                          ## candidate's witness did not end within
+                          ## `SymexSettings.replayTimeoutMs` and was
+                          ## abandoned. Neither a confirmation nor a
+                          ## refutation: the real `fn` may be looping on
+                          ## that witness, or only slow. Recorded by
+                          ## `settleCandidate` like `feReplayRefuted`, so it
+                          ## never enters `runTaint`; always `sevHint`.
+                          ## `classOf` is `dcFreshSymbol`, for the same reason.
     feReplayRefuted       ## RFC-0005 S10 (§4.2 `roRefuted`). NOT a degrade:
                           ## the verdict-time replay of a candidate's witness
                           ## ran the real SUT to completion without reaching
@@ -3158,6 +3175,17 @@ type
       ## happen for real at verdict time. `replay = false` opts out: the
       ## macro emits no reference to `fn`, and a candidate stays `sxUnknown`
       ## as before S10. Static at every entry macro. In the cache key.
+    replayTimeoutMs*: int = 10_000
+      ## RFC-0005 S8be. The wall time one replay of a candidate's witness may
+      ## take. A witness can drive the real `fn` into a loop the model never
+      ## saw (a foreign or opaque routine's own), and a replay that does not
+      ## end hung the entry macro with it. The replay runs on a thread of its
+      ## own; past this bound it is abandoned (`roTimedOut`: the candidate
+      ## stays `sxUnknown`, with a `feReplayTimedOut` hint) and the thread
+      ## is left to finish, or not, on its own -- nothing can stop it safely.
+      ## `<= 0` runs the replay on the calling thread with no bound, as
+      ## before S8be; so does a build without `--threads:on`. In the cache
+      ## key when not the default.
 
 # ---- RFC-0005 S1: the channel algebra (§2.2) -------------------------------
 
@@ -3526,6 +3554,9 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # A verdict-time diagnostic, never drained into `runTaint` (see the
     # enum member): the refuted witness came from a `dcFreshSymbol`-only
     # path, which is the only taint replay runs on.
+  of feReplayTimedOut: dcFreshSymbol
+    # RFC-0005 S8be. As `feReplayRefuted`: verdict-time, never in
+    # `runTaint`, and only a `dcFreshSymbol`-only path is replayed.
   # RFC-0005 S8g.
   of feConvFloatToIntUndefined: dcFreshSymbol
     # The out-of-range float -> int continuation: a fresh value of the
@@ -5171,15 +5202,16 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false, havoc: seq[string] = @[],
                    heapTys: seq[IRType] = @[], heapAll = false,
-                   raises: seq[string] = @[], mayDefect = false,
+                   raises: seq[string] = @[], defects: seq[string] = @[],
                    why = ""): IRStmt =
   ## RFC-0005 S8as: `havoc` is an inert call's effect summary
-  ## (`IRStmt.opaqueHavoc`). RFC-0005 S8ax: `heapTys`, `heapAll`, `raises`
-  ## and `mayDefect` are the rest of it (`IRStmt.opaqueHeapTys` ...).
+  ## (`IRStmt.opaqueHavoc`). RFC-0005 S8ax: `heapTys`, `heapAll` and
+  ## `raises` are the rest of it (`IRStmt.opaqueHeapTys` ...); RFC-0005
+  ## S8be: and `defects` (`IRStmt.opaqueDefects`).
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
          opaqueHavoc: havoc, opaqueHeapTys: heapTys, opaqueHeapAll: heapAll,
-         opaqueRaises: raises, opaqueMayDefect: mayDefect, opaqueWhy: why)
+         opaqueRaises: raises, opaqueDefects: defects, opaqueWhy: why)
 
 proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =
@@ -5338,11 +5370,14 @@ proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
   IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
          dPtrFamily: true, dCell: cell)
 
-proc mkNewT*(retName: string, refTy: IRType, addrOf = ""): IRStmt =
+proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
+             addrIdx: IRExpr = nil): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
   ## RFC-0005 S8ax: `addrOf` names a local whose address cell this is.
-  IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf)
+  ## RFC-0005 S8be: `addrIdx`, an element of it (`isNew.nAddrIdx`).
+  IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf,
+         nAddrIdx: addrIdx)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
                    ptrFamily = false, cell = false): IRStmt =
@@ -5504,6 +5539,8 @@ proc `+`*(a, b: SymexSettings): SymexSettings {.deprecated:
   if b.arithChecks != d.arithChecks: result.arithChecks = b.arithChecks  ## R16-1
   if b.inlinePolicy != d.inlinePolicy: result.inlinePolicy = b.inlinePolicy
   if b.replay != d.replay: result.replay = b.replay   ## RFC-0005 S10
+  if b.replayTimeoutMs != d.replayTimeoutMs:   ## RFC-0005 S8be
+    result.replayTimeoutMs = b.replayTimeoutMs
 
 proc validateSymexSettings*(s: SymexSettings): seq[string] =
   ## Phase 15 C4 / R16-1. Returns a list of human-readable warnings about
@@ -5889,7 +5926,8 @@ proc render*(s: IRStmt): string =
       $s.dElemTy
   of isNew:
     s.nRetName & "=new(" & $s.nRefTy & ")" &
-      (if s.nAddrOf.len > 0: "@" & s.nAddrOf else: "")   # RFC-0005 S8ax
+      (if s.nAddrOf.len > 0: "@" & s.nAddrOf else: "") &   # RFC-0005 S8ax
+      (if s.nAddrIdx != nil: "[" & render(s.nAddrIdx) & "]" else: "")   # S8be
   of isDerefWrite:
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""

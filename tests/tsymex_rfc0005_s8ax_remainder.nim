@@ -335,15 +335,21 @@ suite "RFC-0005 S8ax (5): an opaque routine's effects":
     ## RED before S8ax: sxSat, `errors` empty (and a replay of it would not
     ## end).
     declines(sutOpaqueSpin, "os", feOpaqueCallUnmodelled, "`while` loop")
-  test "a Defect caught around the call declines":
-    ## RED before S8ax: sxUnsat, `errors` empty.
-    declines(sutOpaqueDefect, "od", feOpaqueCallUnmodelled, "Defect")
-  test "an arm naming a subtype of a raised type declines":
-    ## RED before S8ax: sxUnsat, `errors` empty.
+  test "a Defect caught around the call is raised":
+    ## RED before S8ax: sxUnsat, `errors` empty. S8ax declined it; RFC-0005
+    ## S8be forks the `DivByZeroDefect` the body raises (`10 div 0`), and
+    ## the replay confirms it.
+    verdict(sutOpaqueDefect, "od", sxSat)
+  test "an arm naming a subtype of a raised type is entered":
+    ## RED before S8ax: sxUnsat, `errors` empty. S8ax declined it; RFC-0005
+    ## S8be splits the raise into `S8axErr`, a candidate the replay settles:
+    ## confirmed on the witness `4`, refuted on any other (the model the
+    ## Z3 build picks decides which).
     let r = symexFind(sutOpaqueSubtype, tLabel("osub"))
-    checkpoint show(r.errors)
+    checkpoint $r.status & " " & show(r.errors)
     check r.status != sxUnsat
-    check r.errors.hasKind(feOpaqueCallUnmodelled)
+    check not r.errors.hasKind(feOpaqueCallUnmodelled)
+    check r.status == sxSat or r.errors.hasKind(feReplayRefuted)
   test "a write through a ref argument reaches its cell":
     ## S8as declined the call (a ref argument).
     verdict(sutOpaqueHeap, "oh", sxSat)
@@ -624,7 +630,11 @@ suite "RFC-0005 S8ax (7): evaluation order":
   test "a checked read whose value a later call changes declines":
     declines(sutOrdNeg, "ok", feEvalOrderUnmodelled, "reads after a later")
     declines(sutOrdDiv, "ok", feEvalOrderUnmodelled, "reads after a later")
-    declines(sutOrdIndex, "ok", feEvalOrderUnmodelled, "reads after a later")
+  test "an element is checked where it stands and read after the call":
+    ## S8ax declined it; RFC-0005 S8be checks the index before `g()` and
+    ## reads the element after it, as Nim does.
+    clean(sutOrdIndex, "ok", sxSat)
+    clean(sutOrdIndex, "bad", sxUnsat)
   test "a checked read the call leaves alone is exact":
     clean(sutOrdNegKept, "ok", sxSat)
     clean(sutOrdNegKept, "bad", sxUnsat)

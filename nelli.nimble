@@ -1141,5 +1141,11 @@ task test, "Run the test suite":
             # newSeq, Table iteration, mgetOrPut, inlined-iterator
             # parameter conversions, seq[char] / seq[enum] witnesses;
             # walker 209->217 (batch 4).
-            "tsymex_rfc0005_s8bc_remainder"]:
+            "tsymex_rfc0005_s8bc_remainder",
+            # RFC-0005 S8be -- S8ax's remainder: opaque implicit Defects
+            # and raise subtypes; a bounded replay; `{.global.}`; int32
+            # widening; Int-sorted call returns; tuples of closures; a
+            # capture-keyed call cache; element and case-object `addr`
+            # cells; walker 209->217 (batch 4).
+            "tsymex_rfc0005_s8be_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

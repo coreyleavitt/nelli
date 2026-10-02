@@ -977,6 +977,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## iteration, mgetOrPut, inlined-iterator parameter conversions,
     ## seq[char] / seq[enum] witnesses). 193->203 (provisional; batch 2
     ## takes 202).
+    ## RFC-0005 S8be (S8ax's remainder: opaque implicit Defects and raise
+    ## subtypes, a bounded replay, `{.global.}`, int32 widening, Int-sorted
+    ## call returns, tuples of closures, a capture-keyed call cache, element
+    ## and case-object address cells). Provisional 205.
     check symexWalkerVersion == "209"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

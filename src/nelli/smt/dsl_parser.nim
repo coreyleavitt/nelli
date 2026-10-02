@@ -673,7 +673,7 @@ proc emitStmt*(s: IRStmt): NimNode =
               emitIRTypeSeq(s.opaqueHeapTys),   ## RFC-0005 S8ax, same trap
               newLit(s.opaqueHeapAll),
               newLit(s.opaqueRaises),
-              newLit(s.opaqueMayDefect),
+              newLit(s.opaqueDefects),   ## RFC-0005 S8be
               newLit(s.opaqueWhy))
     else:
       # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
@@ -765,8 +765,12 @@ proc emitStmt*(s: IRStmt): NimNode =
         newCall(bindSym"mkDeref", newLit(s.dRetName), emitExpr(s.dPtr),
                 emitIRType(s.dElemTy))
   of isNew:     ## Phase 15 R1a: allocation.
-    newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
-            newLit(s.nAddrOf))   # RFC-0005 S8ax
+    if s.nAddrIdx != nil:   # RFC-0005 S8be: an element cell
+      newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
+              newLit(s.nAddrOf), emitExpr(s.nAddrIdx))
+    else:
+      newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
+              newLit(s.nAddrOf))   # RFC-0005 S8ax
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
@@ -1024,6 +1028,12 @@ type
                                    ## a wrong sat/unsat/raised verdict.
 
   ParseCtx* = ref object
+    seqIndexRets*: HashSet[string]
+                                   ## RFC-0005 S8be. The result names of the
+                                   ## `isIndex` statements that read a `seq`
+                                   ## element (not an array's or a table's):
+                                   ## `orderOperands` checks such an index
+                                   ## where Nim does and reads it late.
     indexConvPending*: bool
                                    ## RFC-0005 S8i. Set by the array-index
                                    ## parse for the one hidden conversion Nim
@@ -1791,6 +1801,97 @@ type OrderMode = enum
   omOperands      ## an operator's operands or a call's arguments
   omElements      ## a constructor's elements, filled in order
 
+func plainIR(e: IRExpr): bool =
+  ## RFC-0005 S8be. A variable or a literal: reading it checks nothing.
+  e != nil and (e.kind == iekVar or isLiteralIR(e))
+
+proc collectStrAts(e: IRExpr; acc: var seq[IRExpr]): bool =
+  ## RFC-0005 S8be. True when every check `e` makes inline is a string
+  ## index (`s[i]` of a plain string and index), collected into `acc`.
+  if e == nil: return true
+  case e.kind
+  of iekStrAt:
+    if e.strArgs.len != 2 or not plainIR(e.strArgs[0]) or
+       not plainIR(e.strArgs[1]):
+      return false
+    acc.add e
+    true
+  of iekConvIntWidth:
+    not e.ciwHasRange and collectStrAts(e.ciwOperand, acc)
+  of iekConvIntReinterpret: collectStrAts(e.cirOperand, acc)
+  else: not rhsHasInlineDefectFork(e)
+
+proc splitIndexChecks(seg: seq[IRStmt]; cut: int; ir: IRExpr;
+                      ctx: ParseCtx; early, tail: var seq[IRStmt]): bool =
+  ## RFC-0005 S8be. Nim checks a `seq` or string index where the operand
+  ## stands and reads the element with the enclosing operation, after a
+  ## later operand's call (probed on c and cpp: `int(s[i]) + f()` where `f`
+  ## replaces `s` reads the new string's element, and raises `IndexDefect`
+  ## against the old one). When the only checks among the trailing lazy
+  ## statements `seg[cut ..]` and the inline operand `ir` are such indices,
+  ## each is checked into `early` (a read into a temporary the walk
+  ## discards), and the reads move to `tail`. A read the check no longer
+  ## covers -- its index variable changed, or the element is past the
+  ## container's new end -- is undefined in Nim (an unchecked read), and
+  ## declines (`feEvalOrderUnmodelled`). Before S8be every such operand
+  ## declined when a later call wrote anything it read.
+  var strAts: seq[IRExpr]
+  var defined: seq[string]
+  for i in cut ..< seg.len:
+    let st = seg[i]
+    case st.kind
+    of isIndex:
+      if st.ixRetName notin ctx.seqIndexRets or not plainIR(st.ixArr) or
+         not plainIR(st.ixIdx):
+        return false
+      defined.add st.ixRetName
+    of isLet:
+      # A temporary bound to the operand's inline read (`int(s[i])`).
+      if not collectStrAts(st.lvalue, strAts): return false
+      defined.add st.lname
+    else: return false
+  if ir.kind != iekVar and not collectStrAts(ir, strAts): return false
+  # The checks run before the trailing statements, so they may read none
+  # of their results.
+  var reads: seq[string]
+  for i in cut ..< seg.len:
+    if seg[i].kind == isIndex:
+      irVars(seg[i].ixArr, reads)
+      irVars(seg[i].ixIdx, reads)
+  for e in strAts:
+    for a in e.strArgs: irVars(a, reads)
+  for nm in reads:
+    if nm in defined: return false
+  var sites: seq[tuple[idx, len: IRExpr]]
+  var checks: seq[IRStmt]
+  for i in cut ..< seg.len:
+    let st = seg[i]
+    if st.kind != isIndex: continue
+    checks.add mkIndexStmt(freshSynth(ctx, "ordchk"), st.ixArr, st.ixIdx,
+                          st.ixElemTy, st.ixLoc, st.ixLo)
+    sites.add (st.ixIdx, mkSeqLen(st.ixArr))
+  for e in strAts:
+    checks.add mkLet(freshSynth(ctx, "ordchk"), nil, e)
+    sites.add (e.strArgs[1], mkStrOp(iekStrLen, "len", @[e.strArgs[0]]))
+  if sites.len == 0: return false
+  var unchecked: IRExpr = nil
+  template orIn(d: IRExpr) =
+    unchecked = if unchecked == nil: d else: mkBinop(bOr, unchecked, d)
+  for (idx, ln) in sites:
+    if idx.kind == iekVar and not isSynthName(idx.vname):
+      let snap = freshSynth(ctx, "ordsnap")
+      early.add mkLet(snap, nil, mkVar(idx.vname))
+      orIn mkBinop(bNe, mkVar(idx.vname), mkVar(snap))
+    orIn mkBinop(bGe, idx, ln)
+  early.add checks
+  tail.add mkIf(@[mkBranch(unchecked, mkBlock(@[ctx.declineMarker(
+    feEvalOrderUnmodelled,
+    "an index Nim checked where the operand stands is read after a later " &
+    "operand's call that moved it past the container's end or changed it: " &
+    "an unchecked read, undefined in Nim (feEvalOrderUnmodelled)")]))])
+  for i in cut ..< seg.len: tail.add seg[i]
+  true
+
 proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
                    irs: var seq[IRExpr]; tys: seq[IRType]; mode: OrderMode;
                    ctx: ParseCtx; fixed: seq[bool] = @[]) =
@@ -1836,6 +1937,21 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
   for k in 0 ..< n:
     if not later[k] or (k < fixed.len and fixed[k]):
       outPre.add segs[k]
+      # RFC-0005 S8be: a call left inline in a later operand (a closure
+      # call in a `while` guard, which hoists nothing, or in a call's
+      # argument) runs where it stands, before the earlier operands' inline
+      # reads: bind it here, ahead of the reads the tail and the
+      # expression make. Before S8be the walk lowered it after them and
+      # declined the clash (`ceCaptureByRefUnmodelled`).
+      if k > 0 and irHasCall(irs[k]) and irs[k].kind != iekVar and
+         not (k < fixed.len and fixed[k]):
+        var earlierRead = false
+        for j in 0 ..< k:
+          if not isLiteralIR(irs[j]): earlierRead = true
+        if earlierRead:
+          let tmp = freshSynth(ctx, "ord")
+          outPre.add mkLet(tmp, tys[k], irs[k])
+          irs[k] = mkVar(tmp)
       continue
     var seg = segs[k]   # a copy: a VM `let` of an element aliases it (S8ab)
     if mode == omElements or isEagerIR(irs[k]) or irHasCall(irs[k]):
@@ -1859,6 +1975,9 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
     outPre.add seg[0 ..< cut]
     if not checked:
       for i in cut ..< seg.len: tail.add seg[i]
+      continue
+    # RFC-0005 S8be: an index check only: checked here, read late.
+    if not viaHeap and splitIndexChecks(seg, cut, irs[k], ctx, outPre, tail):
       continue
     # Checked: read where it stands, and decline where a later call
     # changed what it read.
@@ -2208,6 +2327,7 @@ proc parseSeqBracketAccess(n, recvRawNode: NimNode, objIR: IRExpr,
     else:
       let synth = freshSynth(ctx, "idx")
       preamble.add mkIndexStmt(synth, recvIR, idxIR, elemTy, siteLoc(n))
+      ctx.seqIndexRets.incl synth   # RFC-0005 S8be
       return mkVar(synth)
   else:
     preamble.add ctx.declineAtSite(
@@ -2905,8 +3025,8 @@ proc opaqueArgEffects(n, calleeSym: NimNode; acc: var OpaqueEffects) =
   ## dereference the cells are written instead, and the root keeps its
   ## value. Every heap a ref-carrying actual reaches may be written. An
   ## `addr` actual is a `var` one while the pointer cannot outlive the call
-  ## (`ptrFormalStaysLocal`). A routine-typed actual is not summarised: the
-  ## callee may call it, writing the caller's variables it captures.
+  ## (`ptrFormalStaysLocal`). RFC-0005 S8be: a routine-typed actual reaches
+  ## every heap and capture cell (it may run a closure).
   for i in 1 ..< n.len:
     let a = n[i]
     if isInertArg(a): continue
@@ -2937,10 +3057,10 @@ proc opaqueArgEffects(n, calleeSym: NimNode; acc: var OpaqueEffects) =
         let nm = if isModuleGlobal(root): globalIRName(root) else: root.strVal
         if nm notin acc.havoc: acc.havoc.add nm
       continue
-    if a.getTypeImpl.kind in {nnkProcTy, nnkIteratorTy}:
-      acc.notInert("the argument `" & a.repr & "` is a routine the call " &
-                   "may run")
-      return
+    # RFC-0005 S8be: a routine-typed actual is summarised as any other
+    # value: `reachPointees` makes a routine type reach every heap
+    # (`heapAll`), and the walk havocs every capture cell for it. S8ax
+    # declined the call (`feOpaqueCallUnmodelled`).
     var rs: seq[string]
     reachPointees(a.getTypeInst, acc, rs)
 
@@ -2960,6 +3080,185 @@ proc opaqueRaiseTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
                  else: tn.repr
     collectUserExnAncestors(tn, ctx)
     if typeId notin result: result.add typeId
+
+const anyDefect* = "Defect"
+  ## RFC-0005 S8be. In `IRStmt.opaqueDefects`: a `Defect` of a type the scan
+  ## cannot name (an unscanned routine, a closure, a re-raise). The walk
+  ## raises it as `Defect` and splits it over the handlers in scope.
+
+proc routineMagic(sym: NimNode): string =
+  ## RFC-0005 S8be. The `{.magic.}` name of the routine `sym` (`"AddI"` for
+  ## `system.+` on `int`), or "" when it has none.
+  if sym.kind != nnkSym: return ""
+  let impl =
+    try: sym.getImpl
+    except CatchableError: return ""
+  if impl.kind notin RoutineNodes or impl.len < 5: return ""
+  let prag = impl[4]
+  if prag.kind != nnkPragma: return ""
+  for p in prag:
+    if p.kind == nnkExprColonExpr and p.len == 2 and
+       p[0].kind in {nnkIdent, nnkSym} and macros.strVal(p[0]) == "magic" and
+       p[1].kind in {nnkStrLit, nnkIdent, nnkSym}:
+      return macros.strVal(p[1])
+  ""
+
+const
+  overflowMagics = ["AddI", "SubI", "MulI", "DivI", "ModI", "AddI64",
+                    "SubI64", "MulI64", "DivI64", "ModI64", "UnaryMinusI",
+                    "UnaryMinusI64", "AbsI", "Inc", "Dec", "Succ", "Pred"]
+    ## RFC-0005 S8be. Overflow-checked integer magics (`OverflowDefect`).
+  divMagics = ["DivI", "ModI", "DivI64", "ModI64", "DivU", "ModU",
+               "DivU64", "ModU64"]
+    ## RFC-0005 S8be. Integer division magics (`DivByZeroDefect`).
+  rangeMagics = ["Chr", "Inc", "Dec", "Succ", "Pred"]
+    ## RFC-0005 S8be. Magics that check a range or enum bound
+    ## (`RangeDefect`): `chr`, and a step past an enum's or a subrange's end.
+  maxDefectScanDepth = 8
+    ## RFC-0005 S8be. How many routines deep `scanOpaqueDefects` reads; a
+    ## deeper call counts as `anyDefect`.
+
+proc typeIsDefect(t: NimNode; ctx: ParseCtx): string =
+  ## RFC-0005 S8be. The exception type id of `t` (`ref T` or `T`) when `T`
+  ## is a `Defect` or a subtype of one, else "".
+  var s = t
+  if s.kind == nnkSym and s.symKind == nskType:
+    let impl = s.getTypeImpl
+    if impl.kind == nnkRefTy and impl.len == 1: s = impl[0]
+  elif s.kind in {nnkRefTy, nnkBracketExpr} and s.len >= 1:
+    s = s[^1]
+  s = canonicalExnTypeSym(s)
+  if s.kind notin {nnkSym, nnkIdent}: return ""
+  collectUserExnAncestors(s, ctx)
+  let nm = macros.strVal(s)
+  if isDefect(exnTypeTable, nm, ctx.userExnHierarchy): nm else: ""
+
+func intConvExact(dst, src: NimTypeKind): bool =
+  ## RFC-0005 S8be. A conversion from `src` to `dst` that never checks a
+  ## range: the same kind, a widening into a 64-bit integer, or an ordinal
+  ## to a float.
+  const signedNarrow = {ntyInt8, ntyInt16, ntyInt32, ntyChar, ntyBool,
+                        ntyEnum, ntyUInt8, ntyUInt16, ntyUInt32}
+  if dst == src: return true
+  case dst
+  of ntyInt, ntyInt64: src in signedNarrow + {ntyInt, ntyInt64}
+  of ntyUInt, ntyUInt64: src in {ntyUInt8, ntyUInt16, ntyUInt32, ntyChar,
+                                 ntyBool, ntyUInt, ntyUInt64}
+  of ntyFloat, ntyFloat32, ntyFloat64: true
+  else: false
+
+func isRoutineDefNode(n: NimNode): bool =
+  n.kind in RoutineNodes
+
+proc runRoutineDef(sym: NimNode): NimNode =
+  ## RFC-0005 S8be. The definition of the routine a call to `sym` runs (a
+  ## proc, func, converter, iterator or method; not a template or macro,
+  ## expanded before the scan sees it), or nil for any other symbol -- a
+  ## parameter or variable holding a closure.
+  if sym.kind != nnkSym or sym.symKind in {nskTemplate, nskMacro}: return nil
+  let impl =
+    try: sym.getImpl
+    except CatchableError: return nil
+  if impl.kind in RoutineNodes - {nnkTemplateDef, nnkMacroDef}: impl
+  else: nil
+
+proc scanOpaqueDefects(n: NimNode; acc: var seq[string];
+                       seen: var seq[NimNode]; depth: int; ctx: ParseCtx) =
+  ## RFC-0005 S8be. See `opaqueDefectTypes`.
+  template add(t: string) =
+    if t notin acc: acc.add t
+  if n == nil or anyDefect in acc and acc.len > 12: return
+  if isRoutineDefNode(n): return   # a routine declared here is not run here
+  case n.kind
+  of nnkBracketExpr:
+    if n.len == 2:
+      let k = n[0].typeKind
+      let tk = if k == ntyVar: n[0].getTypeInst[0].typeKind else: k
+      var ix = n[1]
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+            ix.len >= 1:
+        ix = ix[^1]
+      let literal = ix.kind in {nnkCharLit .. nnkUInt64Lit}
+      # An array's literal index is checked by the compiler; a tuple's is a
+      # field. Any other index of a container is checked at run time.
+      if tk in {ntySequence, ntyString, ntyOpenArray, ntyVarargs,
+                ntyUncheckedArray} or tk == ntyArray and not literal:
+        add "IndexDefect"
+      # The index's hidden conversion to the array's range is the index
+      # check itself (`IndexDefect`), not a `RangeDefect`.
+      scanOpaqueDefects(n[0], acc, seen, depth, ctx)
+      scanOpaqueDefects(ix, acc, seen, depth, ctx)
+    else:
+      for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+  of nnkCheckedFieldExpr:
+    add "FieldDefect"
+    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+  of nnkConv, nnkHiddenStdConv, nnkHiddenSubConv:
+    if n.len >= 2:
+      let src = n[^1]
+      if src.kind notin {nnkCharLit .. nnkFloat128Lit, nnkNilLit} and
+         src.typeKind != ntyNone and n.typeKind != ntyNone and
+         n.typeKind in {ntyInt .. ntyUInt64, ntyChar, ntyEnum, ntyRange,
+                        ntyBool} and
+         src.typeKind notin {ntyFloat .. ntyFloat128} and
+         not intConvExact(n.typeKind, src.typeKind):
+        add "RangeDefect"
+      scanOpaqueDefects(src, acc, seen, depth, ctx)
+  of nnkRaiseStmt:
+    if n.len == 0 or n[0].kind == nnkEmpty:
+      add anyDefect   # a re-raise of what the arm caught
+    else:
+      let d = typeIsDefect(n[0].getTypeInst, ctx)
+      if d.len > 0: add d
+      scanOpaqueDefects(n[0], acc, seen, depth, ctx)
+  of nnkCall, nnkInfix, nnkPrefix, nnkPostfix, nnkCommand, nnkCallStrLit,
+     nnkHiddenCallConv:
+    let f = n[0]
+    let fDef = runRoutineDef(f)
+    if fDef != nil:
+      let magic = routineMagic(f)
+      if magic.len > 0:
+        if magic in overflowMagics: add "OverflowDefect"
+        if magic in divMagics: add "DivByZeroDefect"
+        if magic in rangeMagics:
+          if magic == "Chr" or n.len > 1 and
+             n[1].typeKind in {ntyEnum, ntyRange, ntyChar, ntyVar}:
+            add "RangeDefect"
+      elif fDef.kind == nnkMethodDef:
+        add anyDefect   # dispatched: any override may run
+      elif not containsSym(seen, f):
+        seen.add f
+        # A converter's or iterator's body is scanned like a proc's.
+        if fDef.len > 6 and fDef[6].kind != nnkEmpty:
+          if depth >= maxDefectScanDepth: add anyDefect
+          else: scanOpaqueDefects(fDef[6], acc, seen, depth + 1, ctx)
+        # No body: foreign code, which raises no Nim exception.
+    elif f.kind != nnkSym or f.symKind notin {nskTemplate, nskMacro}:
+      # A closure or a routine-valued variable: any code at all.
+      if f.typeKind in {ntyProc, ntyVar} or f.kind != nnkSym:
+        add anyDefect
+    for i in 1 ..< n.len: scanOpaqueDefects(n[i], acc, seen, depth, ctx)
+  else:
+    for c in n: scanOpaqueDefects(c, acc, seen, depth, ctx)
+
+proc opaqueDefectTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
+  ## RFC-0005 S8be. The `Defect` types an inert opaque call may raise, which
+  ## no `raises` list tracks: an index (`IndexDefect`), a checked integer
+  ## operation (`OverflowDefect`, `DivByZeroDefect`), a range-checked
+  ## conversion (`RangeDefect`), a variant-arm field (`FieldDefect`), a
+  ## `raise` of a `Defect` type -- in its body and, transitively, in every
+  ## routine it calls (the stdlib's too, to `maxDefectScanDepth`). A call
+  ## the scan cannot read (a closure, a method, a re-raise, too deep) adds
+  ## `anyDefect`. Empty: the body raises no `Defect` (a `nil` dereference is
+  ## a SIGSEGV in the default build, not a Defect; see the S8be notes).
+  ##
+  ## Before S8be the walk forked none: `IndexDefect` out of an opaque call
+  ## was a false `sxUnsat`, and a `finally` reached only through it was
+  ## never walked.
+  var seen = @[calleeSym]
+  let impl = resolveRoutineImpl(calleeSym)
+  if impl == nil or impl.len <= 6 or impl[6].kind == nnkEmpty: return
+  scanOpaqueDefects(impl[6], result, seen, 0, ctx)
 
 const foreignImportPragmas = ["importc", "importcpp", "importobjc",
                               "importjs", "dynlib"]
@@ -3710,12 +4009,10 @@ proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
                       ctx: ParseCtx): (IRExpr, IRExpr) =
   ## RFC-0005 S8ax. `parseAtomicOperand` of a binary operator's two
   ## operands, with the left one read where Nim reads it when the right
-  ## one's statements may write (`orderOperands`). Unchanged inside a guard
-  ## condition, which hoists nothing (the walk's own read-before-write
-  ## check covers it there).
-  if ctx.inGuardCond:
-    let l = parseAtomicOperand(a, preamble, ctx)
-    return (l, parseAtomicOperand(b, preamble, ctx))
+  ## one's statements may write (`orderOperands`). RFC-0005 S8be: inside a
+  ## `while` guard too. S8ax left the guard in the parser's order and relied
+  ## on the walk's read-before-write check (`lowerClosureCall`), which
+  ## declines (`ceCaptureByRefUnmodelled`) what the order here decides.
   let m0 = preamble.len
   let l = parseAtomicOperand(a, preamble, ctx)
   let m1 = preamble.len
@@ -3740,8 +4037,7 @@ proc parseOrderedArgs(n: NimNode; first: int; preamble: var seq[IRStmt];
     tys.add(if c.typeKind != ntyNone: classifyType(c).ty else: nil)
     fixed.add c.kind == nnkHiddenAddr
     result.add parseExpr(c, preamble, ctx)
-  if not ctx.inGuardCond:
-    orderOperands(preamble, marks, result, tys, mode, ctx, fixed)
+  orderOperands(preamble, marks, result, tys, mode, ctx, fixed)   # S8be: guards too
 
 proc parseCtorFieldsInOrder(n: NimNode; objTy: IRType;
                             preamble: var seq[IRStmt];
@@ -3766,8 +4062,7 @@ proc parseCtorFieldsInOrder(n: NimNode; objTy: IRType;
     tys.add objTy.fields[ix]
     names.add child[0].strVal
     irs.add parseExpr(child[1], preamble, ctx)
-  if not ctx.inGuardCond:
-    orderOperands(preamble, marks, irs, tys, omElements, ctx)
+  orderOperands(preamble, marks, irs, tys, omElements, ctx)   # S8be: guards too
   for j, nm in names: result[nm] = irs[j]
 
 proc lowHighIntLit(tyName: string, wantLow: bool): int64 =
@@ -4554,6 +4849,45 @@ proc addrCellLocal(e: NimNode): NimNode =
     return nil
   t
 
+proc elemCellOf(e: NimNode): tuple[root, idx: NimNode] =
+  ## RFC-0005 S8be. `e` spelled `addr s[i]` (through conversions, and
+  ## through a `var` formal's hidden indirection) where `s` is a variable,
+  ## parameter or `result` of a routine of type `seq[T]`, `T` an `int`,
+  ## `bool`, `float` or `string`; `(nil, nil)` otherwise. Such an element
+  ## has an element cell in the walk (`walkElemCell`): the pointer is a
+  ## value like any other, and the walker keeps the element and the cell
+  ## equal until the seq is resized.
+  let lv = addrActualLvalue(e)
+  if lv == nil or lv.kind != nnkBracketExpr or lv.len != 2: return
+  var t = lv[0]
+  if isVarIndirection(t): t = t[0]
+  if t.kind != nnkSym or
+     symKind(t) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
+     isModuleGlobal(t) or t.typeKind notin {ntySequence, ntyVar}:
+    return
+  let sty = classifyType(t).ty
+  if sty.kind != itSeq or sty.seqElemTy == nil or
+     sty.seqElemTy.kind notin {itInt, itBool, itFloat32, itFloat64, itString}:
+    return
+  (t, lv[1])
+
+proc lowerElemCell(e, root, idx: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8be. `addr s[i]` (`elemCellOf`): the index is evaluated and
+  ## checked where `addr` takes it (an out-of-range index raises
+  ## `IndexDefect` there), and the cell is identified by the seq and that
+  ## value, whatever later happens to `i`.
+  let name = strVal(root)
+  let elemTy = classifyType(root).ty.seqElemTy
+  let ix = freshSynth(ctx, "elemIx")
+  preamble.add mkLet(ix, classifyType(idx).ty, parseExpr(idx, preamble, ctx))
+  preamble.add mkIndexStmt(freshSynth(ctx, "elemChk"), mkVar(name), mkVar(ix),
+                           elemTy, siteLoc(e))
+  let cell = freshSynth(ctx, "elemCell")
+  preamble.add mkNewT(cell, classifyType(e).ty, addrOf = name,
+                      addrIdx = mkVar(ix))
+  mkVar(cell)
+
 proc lowerAddrCell(e, x: NimNode; preamble: var seq[IRStmt];
                    ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8ax. `addr x` (`addrCellLocal`): the address cell of `x`,
@@ -5060,7 +5394,17 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       let ptrTy = classifyType(n[i]).ty
       let elemTy = classifyType(addrLv).ty
       var seen: seq[string]
-      if root.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen):
+      let escapes = root.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen)
+      # RFC-0005 S8be: an element of a routine's seq whose pointer may
+      # outlive the call is its element cell (`elemCellOf`), which the
+      # walker keeps equal to the element wherever the pointer goes.
+      let elc = elemCellOf(n[i])
+      if escapes and elc.root != nil and
+         not addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds):
+        addrCells.setLen(addrCells.len - 1)
+        argIRs.add lowerElemCell(n[i], elc.root, elc.idx, preamble, ctx)
+        continue
+      if escapes:
         preamble.add ctx.declineUnsafeCast(
           siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
                   calleeSym.strVal & "`, which may let the pointer escape " &
@@ -5181,9 +5525,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
     argIRs.add ir
-  if not ctx.inGuardCond:
-    orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
-                  argFixed)   ## RFC-0005 S8ax
+  orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
+                argFixed)   ## RFC-0005 S8ax; S8be: in a `while` guard too
   # RFC-0005 S8ax: the indices are free of side effects (`stableIndex`), so
   # reading them again after the arguments is reading the same values.
   for pairs in aliasConds:
@@ -6185,6 +6528,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let x = addrCellLocal(n)
     if x != nil:
       return lowerAddrCell(n, x, preamble, ctx)
+    # RFC-0005 S8be: `addr s[i]` of a routine's seq is its element cell.
+    let el = elemCellOf(n)
+    if el.root != nil:
+      return lowerElemCell(n, el.root, el.idx, preamble, ctx)
     let dummyTy = classifyType(n).ty
     preamble.add ctx.declineAtSite(
       feUnsupportedExprKind,
@@ -6844,6 +7191,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       error("symex: marker call `" & n[0].repr & "` used in expression " &
             "position; markers are statements only", n)
     let calleeSym = n[0]
+    if calleeSym.kind != nnkSym and calleeSym.typeKind == ntyProc:
+      # RFC-0005 S8be: a call through a proc-valued expression that is not
+      # a variable (`t.f()`, a closure in a returned tuple): bind the
+      # closure to a temporary, as `let g = t.f; g()` does. It was a
+      # compile-time error.
+      let cIR = parseExpr(calleeSym, preamble, ctx)
+      let tmp = freshSynth(ctx, "clo")
+      preamble.add mkLet(tmp, classifyType(calleeSym).ty, cIR)
+      var argIRs = parseOrderedArgs(n, 1, preamble, ctx)
+      return mkClosureCall(tmp, argIRs)
     if calleeSym.kind != nnkSym:
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
             "context; expression-position calls require the full macro flow.",
@@ -11338,7 +11695,7 @@ proc stableIndex(ix: NimNode; rest: openArray[NimNode]): bool =
   else: false
 
 proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
-    tuple[addrNode, seqRoot: NimNode] =
+    tuple[addrNode, seqRoot, armRoot: NimNode] =
   ## RFC-0005 S8ax. `e` (through conversions) when it is `addr lv` and `lv`
   ## is a variable's element path: fields of value objects and tuples,
   ## indices into value arrays, and an index into the variable itself when
@@ -11353,10 +11710,19 @@ proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
   var t = a[0]
   var seqStep = false
   var computed = false
+  var armStep = false
   while true:
     if t.kind == nnkDotExpr and t.len == 2 and
        t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
       t = t[0]
+    elif t.kind == nnkCheckedFieldExpr and t.len >= 1 and
+         t[0].kind == nnkDotExpr and t[0].len == 2:
+      # RFC-0005 S8be: a field of a case object's arm. Nim checks the arm
+      # where `addr` takes it; a statement that may change the object's
+      # arm (`mayRearm`) leaves the pointer naming another arm's memory.
+      if armStep: return
+      armStep = true
+      t = t[0][0]
     elif t.kind == nnkBracketExpr and t.len == 2 and
          t[0].typeKind in {ntyArray, ntySequence}:
       if not stableIndex(t[1], rest): return
@@ -11370,8 +11736,37 @@ proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
       t = t[0]
     else: break
   if t.kind != nnkSym or symKind(t) != nskVar or isModuleGlobal(t): return
-  if not seqStep and not computed: return
-  (a, (if seqStep: t else: nil))
+  if not seqStep and not computed and not armStep: return
+  # RFC-0005 S8be: one root at a time (an arm field under a seq element
+  # is two ways to go stale).
+  if seqStep and armStep: return
+  (a, (if seqStep: t else: nil), (if armStep: t else: nil))
+
+proc mayRearm(n, o: NimNode): bool =
+  ## RFC-0005 S8be. Statement `n` may change the arm of the case object
+  ## variable `o`: `o` occurs anywhere but as the object of a field access
+  ## (`o.f`, read or written in place); or `n` calls a nested routine or a
+  ## proc value, which may reach `o` by name.
+  case n.kind
+  of nnkSym:
+    if containsSym(@[o], n): return true
+    if isNestedRoutine(n): return true
+    if symKind(n) in {nskVar, nskLet, nskParam} and
+       n.getTypeInst.kind == nnkProcTy:
+      return true
+    return false
+  of nnkDotExpr:
+    if n.len == 2 and isSymOf(n[0], o): return false
+  of nnkCheckedFieldExpr:
+    if n.len >= 1 and n[0].kind == nnkDotExpr and n[0].len == 2 and
+       isSymOf(n[0][0], o):
+      return false
+  of RoutineNodes:
+    return mentionsSym(n, o)
+  else: discard
+  for c in n:
+    if mayRearm(c, o): return true
+  false
 
 proc mayResizeSeq(n, s: NimNode): bool =
   ## RFC-0005 S8ax. Statement `n` may move the storage of the seq variable
@@ -11470,6 +11865,7 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
     # (`elemAddrNode`): its index is checked where `addr` evaluates it, and
     # a use after a statement that may resize the seq declines.
     var seqRoot: NimNode = nil
+    var armRoot: NimNode = nil   ## RFC-0005 S8be
     var checkAt = false
     if al.p == nil and c.kind in {nnkLetSection, nnkVarSection} and
        c.len == 1 and c[0].kind == nnkIdentDefs and c[0].len == 3 and
@@ -11478,6 +11874,7 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
       if el.addrNode != nil:
         al = (c[0][0], el.addrNode)
         seqRoot = el.seqRoot
+        armRoot = el.armRoot
         checkAt = true
     if al.p != nil:
       # RFC-0005 S8as: a statement of the list itself that re-points `p` at
@@ -11502,15 +11899,26 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
           if rp != nil:
             cur = rp
             seqRoot = nil
+            armRoot = nil
             stale = false
             continue
-          let resizes = seqRoot != nil and mayResizeSeq(r, seqRoot)
+          let resizes = seqRoot != nil and mayResizeSeq(r, seqRoot) or
+                        armRoot != nil and mayRearm(r, armRoot)
           if (stale or resizes) and mentionsSym(r, al.p):
-            rest.add newCommentStmtNode(staleElemMarkerTag &
-              "RFC-0005 S8ax: `" & al.p.repr & "` points into seq `" &
-              seqRoot.repr & "`, which a statement before this use (or " &
-              "this statement) may resize: Nim may move the elements, and " &
-              "the pointer then names freed memory (feUnsupportedOp)")
+            if armRoot != nil:
+              # RFC-0005 S8be: an arm field's pointer after its object may
+              # have changed arm.
+              rest.add newCommentStmtNode(staleElemMarkerTag &
+                "RFC-0005 S8be: `" & al.p.repr & "` points at an arm field " &
+                "of `" & armRoot.repr & "`, which a statement before this " &
+                "use (or this statement) may give another arm: the pointer " &
+                "then names another arm's memory (feUnsupportedOp)")
+            else:
+              rest.add newCommentStmtNode(staleElemMarkerTag &
+                "RFC-0005 S8ax: `" & al.p.repr & "` points into seq `" &
+                seqRoot.repr & "`, which a statement before this use (or " &
+                "this statement) may resize: Nim may move the elements, and " &
+                "the pointer then names freed memory (feUnsupportedOp)")
           rest.add substAddrAlias(r, al.p, cur)
           if resizes: stale = true
         if rest.len > 0: stmts.add parseDeferList(rest, 0, ctx)
@@ -11640,12 +12048,14 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     let catalogued = m.kind == smkOpaqueEffectful and not userCallee
     var inert = if catalogued: isInertOpaqueCall(n) else: true
     var eff: OpaqueEffects
-    var raises: seq[string]
+    var raises, defects: seq[string]
     if not catalogued:
       eff = opaqueWriteSummary(calleeSym)
       opaqueArgEffects(n, calleeSym, eff)
       inert = eff.inert
-      if inert: raises = opaqueRaiseTypes(calleeSym, ctx)
+      if inert:
+        raises = opaqueRaiseTypes(calleeSym, ctx)
+        defects = opaqueDefectTypes(calleeSym, ctx)   # RFC-0005 S8be
     var heapTys: seq[IRType]
     for t in eff.heapTys:
       let it = classifyType(t).ty
@@ -11658,7 +12068,7 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
     mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, eff.havoc,
-                 heapTys, eff.heapAll, raises, not catalogued, eff.why)
+                 heapTys, eff.heapAll, raises, defects, eff.why)
   else:
     let callKey = ensureProcRegistered(ctx, calleeSym, n)
     userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
@@ -13202,16 +13612,44 @@ proc parseStmtInner(n: NimNode,
     var stmts: seq[IRStmt]
     for id0 in n:
       id0.expectKind nnkIdentDefs
-      # RFC-0005 S8ay: a name with a pragma (`var matches {.inject.}: ...`,
-      # the `std/re` `=~` template's expansion) arrives as an
-      # `nnkPragmaExpr` whose `[0]` is the symbol; every use below reads the
-      # name node as a symbol (`classifyType` aborted the compile on it:
-      # "node has no type").
+      # RFC-0005 S8ay: a name with a pragma also arrives from the `std/re`
+      # `=~` template's expansion (`var matches {.inject.}: ...`); it is an
+      # ordinary local under its symbol (the non-global case below).
+      # RFC-0005 S8be. A name with a pragma (`var c {.global.} = 0`) is a
+      # `PragmaExpr`, which has no type: `classifyType` below hard-errored
+      # on it (a compile-time crash of the whole `symexFind`). A
+      # `{.global.}` name is a module-level variable (`isRoutineGlobal`):
+      # Nim runs its initialiser once, at program start, not here, so its
+      # declaration is no statement of the walk, and every use of it reads
+      # the global. Any other pragma leaves an ordinary local, under its
+      # symbol; `{.noinit.}` without an initialiser has no defined value
+      # and declines.
       var id = id0
+      var hasPragma = false
       for j in 0 ..< id0.len - 2:
-        if id0[j].kind == nnkPragmaExpr:
-          if id == id0: id = copyNimTree(id0)
-          id[j] = id0[j][0]
+        if id0[j].kind == nnkPragmaExpr: hasPragma = true
+      if hasPragma:
+        id = newNimNode(nnkIdentDefs)
+        for j in 0 ..< id0.len - 2:
+          let d = id0[j]
+          if d.kind != nnkPragmaExpr:
+            id.add d
+            continue
+          if isModuleGlobal(d[0]): continue
+          var noInit = false
+          if d.len > 1:
+            for p in d[1]:
+              if p.kind in {nnkIdent, nnkSym} and p.strVal == "noinit":
+                noInit = true
+          if noInit and id0[^1].kind == nnkEmpty:
+            stmts.add ctx.declineMarker(feUnsupportedStmtKind,
+              "`{.noinit.}` variable `" & d[0].strVal & "` with no " &
+              "initialiser: its value is undefined")
+            continue
+          id.add d[0]
+        if id.len == 0: continue
+        id.add id0[^2]
+        id.add id0[^1]
       let valNode = id[id.len - 1]
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
@@ -13225,7 +13663,10 @@ proc parseStmtInner(n: NimNode,
       block:
         # RFC-0005 S8ax: `addr x` of a routine's variable is an ordinary
         # pointer value (its address cell, `addrCellLocal`).
-        let ucReason = if addrCellLocal(valNode) != nil: ""
+        # RFC-0005 S8be: so is `addr s[i]` of a routine's seq (its
+        # element cell, `elemCellOf`).
+        let ucReason = if addrCellLocal(valNode) != nil or
+                          elemCellOf(valNode).root != nil: ""
                        else: unsafeCastReason(valNode)
         if ucReason.len > 0:
           stmts.add ctx.declineUnsafeCast(

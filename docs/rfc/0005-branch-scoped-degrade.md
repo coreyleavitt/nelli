@@ -382,6 +382,11 @@ title = "S8at's remainder: getOrDefault, borrow routines, leaf-split seq element
 state = "done"
 
 [[slice]]
+id = "S8be"
+title = "S8ax's remainder: opaque-body implicit Defects, foreign divergence on replay, {.global.} in procs, opaque raise subtypes, int(high(int32)) widening, recursive-frame overflow cost, lazy-read check placement, guard-condition clash reliance, returned closure tuples, opaque closure capture havoc, cache with capture cells, element-alias pointers as values, variant address cells"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -7995,6 +8000,167 @@ Pins that moved, because they pinned a gap S8bc closes:
 - **A seq element with a ref part is not witness-renderable**: no ref
   positions are collected inside seq elements.
 - **An element's nested seq longer than 1024** renders empty in a witness.
+
+**As landed (S8be, walker 205) — S8ax's remainder.**
+
+*Wrong verdicts and crashes found and fixed (each pinned RED on 1050b92
+first).*
+- **An opaque routine never raised a Defect its body raises implicitly.**
+  An index check or an overflow check inside a `{.symexOpaque.}` body is
+  an `IndexDefect` or `OverflowDefect` the walk never forked:
+  `tRaisedExn("IndexDefect")` and `tRaisedExn("OverflowDefect")` through
+  one were a false `sxUnsat`, and a `finally` reached only on that exit
+  was never walked (a false `sxUnsat` on its target). All with `errors`
+  empty.
+- **A `{.global.}` variable inside a proc did not compile** under
+  `symexFind`, and was walked as a local where it parsed: re-initialised on
+  every call.
+- **`int(high(int32))` was a walker fault.** `high(int32)` lowers to an
+  untyped 64-bit literal, and widening it raised
+  (`weInternalWalkerFault`, "unsupported operand kind for widening") on
+  every widening of a narrow literal.
+- **A closure called through a tuple field (`t.f()`) did not compile**
+  ("cannot resolve callee `t.f`").
+- **A replay could hang the run.** A candidate's replay ran the real
+  routine on the calling thread with no bound; an opaque or foreign body
+  that loops on the witness held the run forever.
+
+*(1) Implicit Defects.* The parser scans an opaque body, and transitively
+every routine it calls to `maxDefectScanDepth`, for the checks Nim
+compiles into it (`opaqueDefectTypes`: an index, a checked integer
+operation, a range-checked conversion, a variant-arm field, a `raise` of a
+`Defect` type; `Defect` itself for a call it cannot read: a closure, a
+method, a re-raise, too deep) into `IRStmt.opaqueDefects`. A `nil`
+dereference is a SIGSEGV in the default build, not a Defect. The walker forks a raise of each
+with the listed raises, routed through the handlers in scope, a `finally`
+included (`feOpaqueEffectHavoc`: the fork is replay-gated).
+
+*(2) A replay that does not end.* Each replay runs on a thread of its own
+(`runReplayBounded`), abandoned past `SymexSettings.replayTimeoutMs`
+(default 10 000 ms, in the settings key as `;rpt=` only when not the
+default). The outcome is `roTimedOut`, recorded as `feReplayTimedOut`
+(`dcFreshSymbol`): never a confirmed `sxSat`, never a refutation. The
+thread cannot be stopped in-process, so an abandoned one keeps running
+(and its job stays allocated) until it ends or the process does. A build
+without threads, or `replayTimeoutMs <= 0`, replays on the calling thread
+as before. A 3 s sleep on the witness returns in about 1 s at 300 ms.
+
+*(3) `{.global.}` in a routine* is a module-level variable under a scoped
+name (`isRoutineGlobal`), initialised once, threaded through calls as any
+global and havocked at entry (`feGlobalHavoc`: an earlier run's calls may
+have changed it). The second call reads 2.
+
+*(4) An opaque raise of a subtype.* Each strict subtype of a listed type
+that a handler in scope or a `tRaisedExn` filter names is raised on a fork
+of its own (`raiseSplit`, `opaqueRaiseForks`); the replay settles which
+the routine raises. A handler naming a type the hierarchy does not know
+still declines.
+
+*(5) Widening.* An operand at least as wide as the target is a literal of
+the narrow source type; its target-width low bits are the value.
+
+*(6) A recursive frame's return.* The fresh return of a walked or declined
+call to a signed or narrow int routine taking an Int-sorted argument is
+Int-sorted, bounded by its declared type (`freshCallRet`), so no query
+mixes a bit-vector return with Int arithmetic. `sumTo(n)` under `n in
+0..5`, `maxCallDepth = 3`, extension off, dead target: 146 s
+(`beSolverUndef`) on 1050b92 -> 0.93 s.
+
+*(7) A lazy read's check.* A `seq` or string index read by an operand is
+checked where the operand stands and read after a later operand's call
+(`splitIndexChecks`), as Nim does. A container the call shrinks is read
+after it (`sutSeqShrink` decides; it declined `feEvalOrderUnmodelled`). A
+read the early check no longer covers (Nim reads freed memory: probed, it
+read 1) declines.
+
+*(8) The guard condition* is lowered under the same order model
+(`orderOperands`; the `inGuardCond` gates are gone), and a call left
+inline in a later operand is bound before the earlier operands' reads. It
+no longer relies on the walker's clash decline.
+
+*(9) A returned tuple of closures.* A routine whose return type holds a
+closure (`retCarriesClosure`) hands the caller the tuple the callee built,
+per returned path (`closureValueBuilt`); a call through a proc-valued
+expression binds the callee first.
+
+*(10) An opaque routine applying a closure* havocs every capture cell the
+call may reach, and accepts a routine-typed argument as inert.
+
+*(11) The call cache under capture cells.* A summary records the globals
+and capture cells the call threads in and the captures it reaches, with
+their values at entry (`CallCacheEntry.outer`); a hit needs the same
+values (`cacheOuterSame`), and only a summary none of whose exits wrote
+one is kept (`exitKeepsOuter`). `fib(n)` under `n in 0..6` in a frame
+holding a capture cell, `maxCallDepth = 8`, extension off: 43 walks, no
+hit, 29.9 s on 1050b92 -> 36 walks, 7 hits, 0.49 s (most of the time is
+item 6's: the walks no longer mix Int and bit-vector terms). A capture or
+global written between two calls, and a callee writing a global, are
+walked each time (pinned).
+
+*(12) Element and variant address cells.* `addr s[i]` of a routine's
+`seq` of scalars or strings lowers to an `isNew` with `nAddrIdx`: the
+index is bound once (`__elemIx`), checked where `addr` takes it, and the
+cell's identity is (seq, frame, that index). Two cells of one seq at equal
+indices are one pointer (an `ite` over the live cells), so a comparison is
+exact. After every statement the `walk` wrapper keeps cell and element
+equal (`syncElemCells`): a write by name reaches the cell, a write through
+the pointer reaches the seq, both in one non-call statement decline. A
+resize or a whole assignment (the length changes, or the seq is written
+whole) kills the cells: a dereference or comparison that may reach a dead
+one declines (`danglingFork`, `danglingCompareTaint`), the UB Nim leaves
+to the program. A callee inherits the cells of a `var` formal or capture
+bound to the seq and carries them back, its own cells included
+(`inheritElemCells`, `carryElemCells`); after a raise the heap wins. The
+pointer may be stored, compared, returned and passed. `addr o` of a case
+object is a cell over its field-split heaps (`variantSlots`,
+`variantCellValue`, `variantCellStore`); `addr o.a` of an arm field is an
+alias (`elemAddrNode`'s arm step) that declines after a statement that
+may change the arm (`mayRearm`).
+
+*(13)* The `maxCallDepth` decline is pinned naming the budget.
+
+The replay thread hands the escaped exception back in the closure's
+environment; ORC registers it as a cycle root in the replay thread's root
+list, and the calling thread's last decrement then unregistered it from its
+own (a SIGSEGV at exit in `tsymex_rfc0005_s2_replay`, found by this slice's
+gate). The thread runs a cycle collection before it signals completion.
+
+Updated pins: CR2 "205"; S1's lattice lists `feReplayTimedOut` as
+reclassified; configdefaults counts the new settings field and sets it in
+the full-override merge. S8ax's `od` (a `DivByZeroDefect` caught around an
+opaque call) is `sxSat`; `osub` (an arm naming a subtype) is entered,
+confirmed or refuted by the replay as the Z3 build's model decides, never
+declined; `sutOrdIndex` decides (`ok` `sxSat`, `bad` `sxUnsat`). #163's
+callback argument is summarised (`feOpaqueEffectHavoc`) and its raise is
+`sxRaised`. S6b's unsafe-cast halt is reached through a variant arm field's
+pointer passed where it may escape. The N2 kind-gate audit's two new sites
+route through `RoutineNodes` and the routine's definition
+(`runRoutineDef`); the S8ab let audit skips a dot-call whose name is not
+an identifier (it faulted at compile time).
+
+Pins: `tests/tsymex_rfc0005_s8be_remainder.nim`, every expectation probed
+against Nim 2.2.10, floor `>= 205`.
+
+*Different mechanisms, reported and not fixed here.*
+- **`r.isNil` is a false `sxUnsat`.** `if r.isNil: symexTarget(...)` over
+  a `ref` parameter (object or `int`) is `sxUnsat`, `errors` empty, where
+  `r == nil` is `sxSat`: the bodiless magic is not lowered to the nil
+  comparison. Present on 1050b92.
+- **A non-variant object's address cell is not field-split.** A pointer to
+  a plain object stored in another object clashes and ends
+  `seUnsupportedCompoundSortLeaf`.
+- **A callee assigning a `var seq` whole with the same length term** is
+  not seen as a resize: the cells stay live. Nim may reallocate there.
+- **`addr o.a` of an arm field used as a value** (passed where it may
+  escape, stored) stays `heUnsafeCast`.
+- **Element cells cover a `seq` of scalars or strings only**; a `seq` of
+  objects is S8bc's.
+- **An abandoned replay thread is not stopped**: it runs on, holding what
+  it holds, until it ends or the process exits, and may still write a
+  global a later replay, or the caller, reads.
+- **A replay runs on another thread**: a `{.threadvar.}` the routine reads
+  starts at its default there, not at the calling thread's value, and the
+  stack is Nim's thread stack (2 MiB on 64-bit).
 
 ### §2.6 The raise-routing recovery — *corrected*
 

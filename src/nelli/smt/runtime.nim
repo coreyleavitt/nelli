@@ -474,6 +474,20 @@ type
 
   Env = OrderedTable[string, SymVal]
 
+  ElemCell = object
+    ## RFC-0005 S8be. The address cell of element `idx` of the seq variable
+    ## `root` of frame `frame` (`addr root[idx]`, the index as `addr`
+    ## evaluated it): the walk keeps the heap at `refAst` and the element
+    ## equal statement by statement (`syncElemCells`) until the seq is
+    ## resized or assigned whole, when Nim may free its elements' memory
+    ## and the cell is `dead` (a dereference that may reach it declines).
+    refAst: Z3AnyAst
+    frame:  int
+    root:   string
+    ty:     IRType
+    idx:    Z3Int
+    dead:   bool
+
   Path = ref object
     pc:        seq[Z3Bool]
     defectSurvivorPc: seq[Z3Bool]
@@ -544,6 +558,11 @@ type
       ## Once that frame has returned, the pointer dangles: a dereference
       ## that may reach it declines (`danglingFork`). Inherited by every
       ## fork, and by the caller on a return.
+    elemCells: seq[ElemCell]
+      ## RFC-0005 S8be. The element cells this path allocated (`addr s[i]`,
+      ## `walkElemCell`), each a frame's view of one: the caller's entry and
+      ## a callee's (a `var` formal, a capture) share the cell. Inherited by
+      ## every fork, and by the caller on a return.
     loopIters: seq[tuple[loop: int, iters: int]]
       ## RFC-0005 S8y. For each `while` this path has run through (`loop`,
       ## the statement's identity within the walk), how many times its body
@@ -799,6 +818,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        freshnessAssertCount: parent.freshnessAssertCount,  ## Phase 15 R2
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
        addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
+       elemCells: parent.elemCells,                      ## RFC-0005 S8be
        loopIters: parent.loopIters)                      ## RFC-0005 S8y
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
@@ -851,6 +871,14 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
         if cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
           seen = true
       if not seen: merged.addrOwners.add o
+    # RFC-0005 S8be: and its element cells.
+    for o in caller.elemCells:
+      var seen = false
+      for e in merged.elemCells:
+        if e.frame == o.frame and
+           cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
+          seen = true
+      if not seen: merged.elemCells.add o
     merged
 
 proc atIteration(p: Path; loop, n: int) =
@@ -4920,6 +4948,9 @@ proc stampedIntToBV(sv: SymVal): SymVal =
   result = svIntToBV(sv, k)
   result.signed = sv.ziSigned
 
+proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal
+  ## RFC-0005 S8be fwd decl (`lowerConvIntWidth`); defined below.
+
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
   ## Nim int (including plain `int`/`uint`, width 64) allocates as an svBV*
@@ -4943,6 +4974,25 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
       return lowerConvIntWidth(stampedIntToBV(operandSV), tgtWidth, tgtSigned)
     return SymVal(kind: svInt, zi: operandSV.zi, ziWidth: tgtWidth,
                   ziSigned: tgtSigned, ziIvl: operandSV.ziIvl)
+  # RFC-0005 S8be. An operand at least as wide as the target is a literal
+  # of the narrow source type: `int(high(int32))`'s `high(int32)` lowers
+  # through `mkIntLit`, which carries no width, to a 64-bit bit-vector
+  # holding 2147483647. The parse widens only from the declared source
+  # type, so the value lies in its window, which the target's holds: the
+  # target-width low bits are the value. Every form faulted here
+  # (`weInternalWalkerFault`, "unsupported operand kind for widening").
+  let opWidth =
+    case operandSV.kind
+    of svBV8: 8
+    of svBV16: 16
+    of svBV32: 32
+    of svBV64: 64
+    else: 0
+  if opWidth >= tgtWidth:
+    if opWidth > tgtWidth: return truncBV(operandSV, tgtWidth, tgtSigned)
+    var same = operandSV
+    same.signed = tgtSigned
+    return same
   let srcSigned = operandSV.signed
   case operandSV.kind
   of svBV8:
@@ -5291,6 +5341,28 @@ func isClosureTy(t: IRType): bool =
   ## RFC-0005 S8z. The proc-valued type `classifyType` maps to the
   ## `__closure` placeholder.
   t != nil and t.kind == itUninterp and t.uninterpName == "__closure"
+
+func retCarriesClosure(t: IRType): bool =
+  ## RFC-0005 S8be. A return type holding a closure: the closure itself
+  ## (S8z) or a tuple with one in some element. The call hands the
+  ## returned value itself to the caller, per returned path; there is no
+  ## symbol to bind it to (a closure has none).
+  if isClosureTy(t): return true
+  if t != nil and t.kind == itTuple:
+    for f in t.fields:
+      if retCarriesClosure(f): return true
+  false
+
+func closureValueBuilt(v: SymVal; t: IRType): bool =
+  ## RFC-0005 S8be. `v`, a value of the closure-carrying type `t`, holds a
+  ## closure the walker built in every closure slot.
+  if isClosureTy(t): return v.kind == svClosure
+  if t != nil and t.kind == itTuple:
+    if v.kind != svTuple or v.fields.len != t.fields.len: return false
+    for i, f in t.fields:
+      if retCarriesClosure(f) and not closureValueBuilt(v.fields[i], f):
+        return false
+  true
 
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
@@ -12965,6 +13037,14 @@ type
       ## one. A hit replayed the other literal's summary -- `id(45048)`
       ## returned 8472, a false verdict either way with `errors` empty. A hit
       ## now needs the same actuals, handle for handle (`cacheArgsSame`).
+    outer: seq[tuple[name: string, val: SymVal]]
+      ## RFC-0005 S8be. The caller state outside the actuals the summary was
+      ## walked with: every global and capture cell (`capCellName`) the
+      ## call threads in (`threadOuterBindings`), and the captures it
+      ## reaches. A hit needs the same values (`cacheOuterSame`), and only
+      ## a summary none of whose exits wrote one is kept. S8an left any call
+      ## that threaded such state uncached, which is every call in a frame
+      ## holding a capture cell.
     pruneFacts: seq[seq[Z3Bool]]
       ## RFC-0005 S8ax. Per drop the walk decided against its context
       ## (`ctxPruneLog`), the facts the callee's walk added beyond the
@@ -14060,6 +14140,16 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
         if g.isVar and g.name notin names: names.add g.name
     elif nm notin names:
       names.add nm
+  # RFC-0005 S8be: a call that may run a closure (`opaqueHeapAll`: a
+  # routine reaches it through an argument, a global or a capture) may
+  # write every variable a live closure captures by reference, which lives
+  # in its env cell (`capCellName`); the frame's own copy takes the cell's
+  # value after the call (`walk`). Before S8be the cells kept their values:
+  # a target after the closure ran was a false `sxUnsat`, nothing recorded.
+  if stmt.opaqueHeapAll:
+    for k in p.env.keys:
+      if k.startsWith(globalEnvPrefix & "@cap") and k notin names:
+        names.add k
   var rebound: seq[string]
   for nm in names:
     var ty: IRType = nil
@@ -14084,12 +14174,6 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
               "assembly, dispatch or call foreign code)" else: "") &
            ": each holds fresh contents after the call, so a hit through " &
            "one is replayed (feOpaqueEffectHavoc)"))
-
-func envHasGlobal(env: Env): bool =
-  ## RFC-0005 S8an. True when `env` binds a module-level global.
-  for k in env.keys:
-    if isGlobalEnvName(k): return true
-  false
 
 func guardedOuterNames(roots, captures: seq[string]): seq[string] =
   ## RFC-0005 S8an. The roots of a call's `var`/`addr` actuals that the
@@ -14144,6 +14228,70 @@ proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
       if callerName == c.local:
         calleeEnv[addrCellName(formal)] = callerEnv[c.cell]
         result.add (local: formal, cell: addrCellName(formal), ty: c.ty)
+
+proc inheritElemCells(calleePath: Path; callerFrame, calleeFrame: int;
+                      varArgs: seq[(string, string)];
+                      captures, guarded: seq[string]) =
+  ## RFC-0005 S8be. As `inheritAddrCells`, for element cells: a seq of the
+  ## caller with element cells that the callee reaches by name -- a
+  ## capture, or the caller variable a `var` formal is -- has them in the
+  ## callee's frame too, under the name the callee knows it by, so the
+  ## callee's statements keep its elements and their cells equal.
+  let n = calleePath.elemCells.len
+  for k in 0 ..< n:
+    let e = calleePath.elemCells[k]
+    if e.frame != callerFrame or e.dead: continue
+    if e.root in captures and e.root notin guarded:
+      var c = e
+      c.frame = calleeFrame
+      calleePath.elemCells.add c
+    for (formal, callerName) in varArgs:
+      if callerName == e.root:
+        var c = e
+        c.frame = calleeFrame
+        c.root = formal
+        calleePath.elemCells.add c
+
+proc carryElemCells(p: Path; callerFrame, calleeFrame: int;
+                    varArgs: seq[(string, string)];
+                    captures, guarded: seq[string]) =
+  ## RFC-0005 S8be. On a callee exit, its view of each element cell of a
+  ## seq the caller owns (a `var` formal's caller variable, a capture)
+  ## becomes the caller's: a cell the caller already had takes the
+  ## callee's `dead`; one the callee took (`addr s[i]` of its `var`
+  ## formal) is the caller's from now on. Its view of a seq of its own
+  ## stays, owned by a returned frame (`deadElemRefs`).
+  var kept: seq[ElemCell]
+  for e in p.elemCells:
+    if e.frame != calleeFrame:
+      kept.add e
+      continue
+    var to = ""
+    if e.root in captures and e.root notin guarded: to = e.root
+    for (formal, callerName) in varArgs:
+      if formal == e.root: to = callerName
+    if to.len == 0:
+      kept.add e
+      continue
+    var had = false
+    for c in kept.mitems:
+      if c.frame == callerFrame and c.root == to and
+         cast[pointer](c.refAst.raw) == cast[pointer](e.refAst.raw):
+        had = true
+        if e.dead: c.dead = true
+    if not had:
+      var c = e
+      c.frame = callerFrame
+      c.root = to
+      kept.add c
+  # A caller cell the callee's view saw die, listed after it.
+  for c in kept.mitems:
+    if c.frame != callerFrame or c.dead: continue
+    for e in p.elemCells:
+      if e.frame == calleeFrame and e.dead and
+         cast[pointer](c.refAst.raw) == cast[pointer](e.refAst.raw):
+        c.dead = true
+  p.elemCells = kept
 
 type AddrCarry = tuple[moved: seq[Z3AnyAst]; lost: seq[string]]
 
@@ -14242,6 +14390,43 @@ proc cacheArgsSame(a, b: seq[SymVal]): bool =
   for i in 0 ..< a.len:
     if not sameSymVal(a[i], b[i]): return false
     if a[i].kind == svInt and a[i].ziSigned != b[i].ziSigned: return false
+  true
+
+proc outerState(env: Env; captures: seq[string]):
+    seq[tuple[name: string, val: SymVal]] =
+  ## RFC-0005 S8be. The globals and capture cells bound in `env`, and the
+  ## `captures` it binds, in the env's order (`CallCacheEntry.outer`).
+  for k, v in env:
+    if isGlobalEnvName(k) or k in captures: result.add (k, v)
+
+proc cacheOuterSame(a, b: seq[tuple[name: string, val: SymVal]]): bool =
+  ## RFC-0005 S8be. The same names bound to the same terms, handle for
+  ## handle. Order is not assumed.
+  if a.len != b.len: return false
+  for (nm, v) in a:
+    var found = false
+    for (nm2, v2) in b:
+      if nm2 == nm:
+        found = sameSymVal(v, v2)
+        break
+    if not found: return false
+  true
+
+proc exitKeepsOuter(exitEnv: Env; outerIn: seq[tuple[name: string,
+                    val: SymVal]]; captures: seq[string]): bool =
+  ## RFC-0005 S8be. A callee exit left every global, capture cell and
+  ## capture as it was entered with, and bound no global it was not (a
+  ## first read binds its entry value, which the caller must see).
+  for (nm, v) in outerIn:
+    if not exitEnv.hasKey(nm) or not sameSymVal(exitEnv[nm], v): return false
+  for k in exitEnv.keys:
+    if isGlobalEnvName(k) or k in captures:
+      var known = false
+      for (nm, _) in outerIn:
+        if nm == k:
+          known = true
+          break
+      if not known: return false
   true
 
 proc factsPrefixSame(full, prefix: seq[Z3Bool]): bool =
@@ -14560,6 +14745,43 @@ proc depthMayExtend(w: WalkCtx; live: int): bool =
   let above = (if d - 1 < w.depthWalks.len: w.depthWalks[d - 1] else: 0)
   here + live <= above
 
+proc freshCallRet(stmt: IRStmt; env: Env; z3Name: string;
+                  pcOut: var seq[Z3Bool]): SymVal =
+  ## RFC-0005 S8be. The fresh return value of a call: one the walk follows
+  ## (its `retSym`, bound to the callee's result on each exit) or does not
+  ## (`depthBail`, the cycle cut), bounded by the callee's declared type. A
+  ## fixed-width `int` was allocated as a bit-vector even where the actuals
+  ## are abstracted to the integer sort (`symexAssume` bounds), so the
+  ## caller's `k + <fresh>` and its overflow check mixed the sorts
+  ## (`bv2int`): `sumTo(n)` under `n in 0..5`, declined at depth 3, took
+  ## 146 s (Linux, Z3 5.1); it takes 0.9 s. When an actual reads an
+  ## integer-sorted variable, a signed or narrower-than-64-bit `int` return
+  ## is allocated in that sort, with the declared type's bounds; otherwise
+  ## as before.
+  let ty = stmt.retTy
+  if ty != nil and ty.kind == itInt and (ty.signed or ty.width < 64):
+    var refs: HashSet[string]
+    for a in stmt.cargs: collectVarRefs(a, refs)
+    var intSorted = false
+    for r in refs:
+      if env.hasKey(r) and env[r].kind == svInt:
+        intSorted = true
+        break
+    if intSorted:
+      result = freshRetSym(ty, z3Name, pcOut, intOffsetPositions = @[0])
+      if not ty.hasRange:
+        let w = if ty.width in [8, 16, 32, 64]: ty.width else: 64
+        let lo = if not ty.signed: 0'i64
+                 elif w == 64: low(int64)
+                 else: -(1'i64 shl (w - 1))
+        let hi = if w == 64: high(int64)
+                 elif ty.signed: (1'i64 shl (w - 1)) - 1
+                 else: (1'i64 shl w) - 1
+        pcOut.add(result.zi >= mkZ3IntLit(lo))
+        pcOut.add(result.zi <= mkZ3IntLit(hi))
+      return
+  freshRetSym(ty, z3Name, pcOut)
+
 proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
                atHard: bool): seq[Path] =
   ## RFC-0005 S8ax. The call-depth decline: each live path continues past
@@ -14613,7 +14835,7 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
     if stmt.retName.len > 0:
       inc w.synthZ3
       let z3Name = stmt.retName & "_d" & $w.synthZ3
-      newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+      newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
     result.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
 
 proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
@@ -14667,42 +14889,35 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
 
-proc handlerCatchesDefect(w: WalkCtx): bool =
-  ## RFC-0005 S8ax. Some `try` around the current point, in this frame or a
-  ## caller's, has an arm that catches a `Defect`: a bare `except:`, or one
-  ## naming a `Defect` type or an ancestor of `Defect` (`Exception`).
+proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
+                                                   unknown: seq[string]] =
+  ## RFC-0005 S8be. The types an abstract raise of `typeId` (one an opaque
+  ## call may raise, known only by its declared or scanned type) is split
+  ## into: `typeId` itself, every strict subtype of it that a `try` arm
+  ## around the current point names (in this frame or a caller's), and the
+  ## search's own `tRaisedExn` filter when it is one. The object raised may
+  ## be of any subtype; only those named somewhere can be told apart, and
+  ## each is raised on its own fork. `unknown`: arm types the hierarchy does
+  ## not know, which may be subtypes too.
+  result.types = @[typeId]
+  let known = isKnownExnType(typeId, w.statics.exnTable,
+                             w.statics.userExnHierarchy)
+  template consider(ht: string) =
+    if ht != typeId and ht notin result.types:
+      if not isKnownExnType(ht, w.statics.exnTable,
+                            w.statics.userExnHierarchy):
+        if ht notin result.unknown: result.unknown.add ht
+      elif known and isSubtypeOf(ht, typeId, w.statics.exnTable,
+                                 w.statics.userExnHierarchy):
+        result.types.add ht
   template scan(hs: seq[HandlerFrame]) =
     for hf in hs:
       for h in hf.handlers:
-        if h.typeIds.len == 0: return true
-        for ht in h.typeIds:
-          if isDefect(w.statics.exnTable, ht, w.statics.userExnHierarchy) or
-             isSubtypeOf("Defect", ht, w.statics.exnTable,
-                         w.statics.userExnHierarchy):
-            return true
+        for ht in h.typeIds: consider(ht)
   scan(w.frame.handlerStack)
   for f in w.frameStack: scan(f.handlerStack)
-  false
-
-proc handlerNamesSubtype(w: WalkCtx; typeId: string): bool =
-  ## RFC-0005 S8ax. Some `try` around the current point has an arm naming
-  ## a strict subtype of `typeId`. An opaque raise is known only by the
-  ## type its `raises` list names; the object raised may be of a subtype,
-  ## which that arm catches and the walk's raise of `typeId` does not.
-  template scan(hs: seq[HandlerFrame]) =
-    for hf in hs:
-      for h in hf.handlers:
-        for ht in h.typeIds:
-          # A type the hierarchy does not know may be a subtype too.
-          if ht != typeId and
-             (not isKnownExnType(ht, w.statics.exnTable,
-                                 w.statics.userExnHierarchy) or
-              isSubtypeOf(ht, typeId, w.statics.exnTable,
-                          w.statics.userExnHierarchy)):
-            return true
-  scan(w.frame.handlerStack)
-  for f in w.frameStack: scan(f.handlerStack)
-  false
+  if w.target.kind == stkRaisedExn and w.target.typeFilter.len > 0:
+    consider(w.target.typeFilter)
 
 proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
                       stmt: IRStmt): seq[Path] =
@@ -14718,40 +14933,43 @@ proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
   ##   `feOpaqueEffectHavoc` (`dcFreshSymbol`), replayed on a hit. The path
   ##   that returns assumes the call did not raise, a superset too, and
   ##   carries the same kind.
-  ## * A `try` arm naming a strict subtype of a raised type
-  ##   (`handlerNamesSubtype`) would catch an object the walk cannot raise:
-  ##   the fork is also `feOpaqueCallUnmodelled` (`dcSubstituted`), which
-  ##   voids an `sxUnsat`.
-  ## * A user or foreign routine may also raise a `Defect` (an index, an
-  ##   overflow, an explicit `raise`) that no `raises` list names. Where a
-  ##   `try` arm around the call catches a `Defect` (`handlerCatchesDefect`)
-  ##   the arm's continuation is not walked, so the returning path is
-  ##   `feOpaqueCallUnmodelled`. With no such arm the `Defect` ends the
-  ##   run, which the walk does not report either (see the S8ax notes).
-  if stmt.opaqueMayDefect and handlerCatchesDefect(w):
-    let d = w.degrade(feOpaqueCallUnmodelled,
-      "opaque call `" & stmt.callee & "` may raise a Defect inside its " &
-           "body, and a `try` arm around it catches Defects: that arm's " &
-           "continuation is not modelled (feOpaqueCallUnmodelled)")
-    for p in paths: taintInPlace(p, d)
-  if stmt.opaqueRaises.len == 0: return paths
+  ## * RFC-0005 S8be: so is each `Defect` type its body may raise
+  ##   (`IRStmt.opaqueDefects`, scanned by the parser), which no `raises`
+  ##   list names. Before S8be the walk raised none: `IndexDefect` out of an
+  ##   opaque call was a false `sxUnsat`, and a `finally` reached only
+  ##   through it was never walked (S8ax tainted the path where an arm
+  ##   caught Defects, and dropped the rest).
+  ## * RFC-0005 S8be: the object raised may be of a subtype of the type
+  ##   named. Each strict subtype a `try` arm around the call names, or the
+  ##   search's `tRaisedExn` filter names, is raised on a fork of its own
+  ##   (`raiseSplit`), so `except SubErr:` sees the raise it catches. Before
+  ##   S8be such an arm declined the call (`feOpaqueCallUnmodelled`). An arm
+  ##   naming a type the hierarchy does not know still does: it may be a
+  ##   subtype the split cannot see.
+  let raised = stmt.opaqueRaises & stmt.opaqueDefects
+  if raised.len == 0: return paths
   let dRet = w.degrade(feOpaqueEffectHavoc,
     "opaque call `" & stmt.callee & "` may raise " &
-         stmt.opaqueRaises.join(", ") & ": a path through it is forked for " &
+         raised.join(", ") & ": a path through it is forked for " &
          "each, and the path past it assumes it returned, so a hit on " &
          "either is replayed (feOpaqueEffectHavoc)")
   for p in paths:
-    for t in stmt.opaqueRaises:
-      if w.shouldStop: return
-      var rp = forkPathTainted(p, p.pc, p.env, dRet)
-      if handlerNamesSubtype(w, t):
-        rp = forkPathTainted(rp, rp.pc, rp.env, w.degrade(
-          feOpaqueCallUnmodelled,
-          "opaque call `" & stmt.callee & "` may raise a subtype of " & t &
-               ", which a `try` arm around it names: the raise is " &
-               "modelled as " & t & " only (feOpaqueCallUnmodelled)"))
-      result.add routeRaise(rp, t, none(string), w)
+    for t in raised:
+      let split = raiseSplit(w, t)
+      for st in split.types:
+        if w.shouldStop: return
+        var rp = forkPathTainted(p, p.pc, p.env, dRet)
+        if split.unknown.len > 0:
+          rp = forkPathTainted(rp, rp.pc, rp.env, w.degrade(
+            feOpaqueCallUnmodelled,
+            "opaque call `" & stmt.callee & "` may raise " & t &
+                 ", and a `try` arm around it names " &
+                 split.unknown.join(", ") & ", which the exception " &
+                 "hierarchy does not know: it may be a subtype the " &
+                 "raise is not split into (feOpaqueCallUnmodelled)"))
+        result.add routeRaise(rp, st, none(string), w)
     result.add forkPathTainted(p, p.pc, p.env, dRet)
+
 
 
 proc degradeUnmodelledReassign(p: Path, objName: string, kind: SVKind,
@@ -15363,6 +15581,24 @@ proc liveFrame(w: WalkCtx; frame: int): bool =
     if f.frameId == frame: return true
   false
 
+proc deadElemRefs(p: Path; w: WalkCtx): seq[Z3AnyAst] =
+  ## RFC-0005 S8be. The element cells (`Path.elemCells`) whose memory Nim
+  ## may have freed: one some frame saw its seq resized or assigned whole
+  ## (`dead`), or one only returned frames held.
+  for e in p.elemCells:
+    let r = cast[pointer](e.refAst.raw)
+    var dead = false
+    var held = false
+    for f in p.elemCells:
+      if cast[pointer](f.refAst.raw) != r: continue
+      if f.dead: dead = true
+      elif liveFrame(w, f.frame): held = true
+    if dead or not held:
+      var seen = false
+      for d in result:
+        if cast[pointer](d.raw) == r: seen = true
+      if not seen: result.add e.refAst
+
 proc danglingCompareTaint(p: Path; operands: seq[Z3AnyAst]): Path =
   ## RFC-0005 S8ax. `p` after an expression compared the `ptr` values
   ## `operands`: tainted (`feUnsupportedOp`) when one may be the address
@@ -15374,6 +15610,9 @@ proc danglingCompareTaint(p: Path; operands: seq[Z3AnyAst]): Path =
   var dead: seq[Z3AnyAst]
   for o in p.addrOwners:
     if not liveFrame(wp[], o.frame): dead.add o.refAst
+  # RFC-0005 S8be: an element's address whose memory Nim may have freed
+  # (`deadElemRefs`) is likewise one a later allocation may reuse.
+  dead.add deadElemRefs(p, wp[])
   if dead.len == 0: return p
   let ctx = wp[].z3
   var hits: seq[Z3Bool]
@@ -15891,11 +16130,13 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     return
   let frameIx = w.callStack.high
   let retSym = w.callStack[frameIx].retSym
-  if isClosureTy(w.callStack[frameIx].retTy):
+  if retCarriesClosure(w.callStack[frameIx].retTy):
     # RFC-0005 S8z: a closure-returning callee has no `retSym` to bind; the
     # path carries its `svClosure` on `result`, which the `isCall` arm hands
-    # to the caller as the call's value.
-    if p.env.hasKey("result") and p.env["result"].kind == svClosure:
+    # to the caller as the call's value. RFC-0005 S8be: a tuple holding a
+    # closure too (it was `ceUnsupportedHof`).
+    if p.env.hasKey("result") and
+       closureValueBuilt(p.env["result"], w.callStack[frameIx].retTy):
       w.callStack[frameIx].returnedPaths.add p
     else:
       let d = w.degrade(ceUnsupportedHof,
@@ -18624,7 +18865,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             if stmt.retName.len > 0:
               inc w.synthZ3
               let z3Name = stmt.retName & "_cyc" & $w.synthZ3
-              newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+              newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
             # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
             # `weRecursionCycleCut` through `degrade` (was a path-only
             # kindless ⊤ token that recorded nothing and marked the run only
@@ -18644,10 +18885,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # and, for a summary whose walk dropped an arm or path against its
           # context, the same drops under this caller's facts.
           var hit = -1
+          let outerIn = outerState(p.env, sig.captures)   # RFC-0005 S8be
           if w.callCache.hasKey(key):
             let bucket = w.callCache[key]
             for ei in 0 ..< bucket.len:
               if cacheArgsSame(bucket[ei].args, argVals) and
+                 cacheOuterSame(bucket[ei].outer, outerIn) and
                  pruneFactsHold(w.z3, p, bucket[ei].pruneFacts, w.settings):
                 hit = ei
                 break
@@ -18682,7 +18925,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # copy-out of the argument would then not be Nim's semantics. A
           # callee that touches a withheld name declines.
           let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
-          let threadsOuter = threadOuterBindings(calleeEnv, p.env,
+          discard threadOuterBindings(calleeEnv, p.env,
                                                  sig.captures, guarded)
           # RFC-0005 S8ax: an address-taken variable the callee reaches by
           # name -- a capture, or the caller variable a `var` formal is --
@@ -18702,7 +18945,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # `svClosure` its body builds, handed to the caller per returned
           # path below; there is no symbol to allocate (it was
           # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
-          let closureRet = not sig.isVoid and isClosureTy(stmt.retTy)
+          let closureRet = not sig.isVoid and
+                           retCarriesClosure(stmt.retTy)   # S8be: tuples too
           let retSym = if sig.isVoid or closureRet:
                          SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
                        else:
@@ -18710,8 +18954,13 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                          # positions so a chained scan's second-hop offset
                          # allocates svInt instead of the type-driven BV
                          # default (see `IRStmt.isCall.retIntOffsetPositions`).
-                         freshRetSym(stmt.retTy, z3Name, retInit,
-                                     stmt.retIntOffsetPositions)
+                         # RFC-0005 S8be: otherwise in the sort of its
+                         # actuals, bounded by its type (`freshCallRet`).
+                         if stmt.retIntOffsetPositions.len > 0:
+                           freshRetSym(stmt.retTy, z3Name, retInit,
+                                       stmt.retIntOffsetPositions)
+                         else:
+                           freshCallRet(stmt, p.env, z3Name, retInit)
           let pruneMark = ctxPruneLog.len   # RFC-0005 S8as/S8ax
           # RFC-0005 S8ax: the walks entered at each call depth, the
           # frontier the adaptive depth reads (`depthMayExtend`).
@@ -18740,6 +18989,10 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
           # so E3/E5 raise-flow threading is correct by construction.
           pushFrame(w)
+          # RFC-0005 S8be: and an element cell, likewise.
+          inheritElemCells(calleePath, w.frameStack[^1].frameId,
+            w.frame.frameId, varArgs, sig.captures, guarded)
+          let calleeFrameId = w.frame.frameId
           w.frame.addrCells = calleeAddrCells    ## RFC-0005 S8ax
           w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
           let guardMark = callGuardedNames.len   ## RFC-0005 S8an
@@ -18785,7 +19038,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           elif closureRet:
             # RFC-0005 S8z: as `completeReturn`'s closure arm.
             for cp in fallThroughRaw:
-              if cp.env.hasKey("result") and cp.env["result"].kind == svClosure:
+              if cp.env.hasKey("result") and
+                 closureValueBuilt(cp.env["result"], stmt.retTy):
                 fallThrough.add cp
               else:
                 let d = w.degrade(ceUnsupportedHof,
@@ -18869,6 +19123,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let carried = carryAddrCells(rEnv, er.path.env, calleeCells,
               varArgs, sig, guarded, w)   ## RFC-0005 S8ax
             var raisePath = forkPath(er.path, er.path.pc, rEnv)
+            carryElemCells(raisePath, w.frame.frameId, calleeFrameId,
+              varArgs, sig.captures, guarded)   ## RFC-0005 S8be
             raisePath = settleAddrCells(raisePath, carried, w)
             let touched = touchedGuard(er.path.env, guarded)
             if touched.len > 0:
@@ -18909,12 +19165,16 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # S8as left such a call uncached, which cost `fib` every reuse.
           var pruneFacts: seq[seq[Z3Bool]]
           let exitPaths = frame.returnedPaths & fallThrough
+          # RFC-0005 S8be: a callee threading globals, capture cells or
+          # captures is cached keyed by their values, when no exit wrote
+          # one (`exitKeepsOuter`); a withheld one still is not.
           var cacheable = calleeEscaped.len == 0 and not closureRet and
-            varArgs.len == 0 and not threadsOuter and exitPaths.len > 0 and
+            varArgs.len == 0 and guarded.len == 0 and exitPaths.len > 0 and
             exitPaths.len <= callCacheExitsMax
           if cacheable:
             for cp in exitPaths:
-              if envHasGlobal(cp.env) or cp.taint != {} or
+              if not exitKeepsOuter(cp.env, outerIn, sig.captures) or
+                 cp.taint != {} or
                  cp.defectSurvivorPc.len != p.defectSurvivorPc.len or
                  not heapUnchanged(cp, p) or
                  not factsPrefixSame(cp.pc, p.pc):
@@ -18928,7 +19188,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for cp in exitPaths:
               exits.add retInit & cp.pc[p.pc.len ..< cp.pc.len]
             let entry = CallCacheEntry(retSym: retSym, exits: exits,
-                                       args: argVals, pruneFacts: pruneFacts)
+                                       args: argVals, outer: outerIn,
+                                       pruneFacts: pruneFacts)
             # A bucket holds one entry per distinct context it was walked
             # in, up to `callCacheBucketMax`; past it the call is walked.
             if not w.callCache.hasKey(key): w.callCache[key] = @[]
@@ -18939,7 +19200,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             if stmt.retName.len > 0:
               newEnv[stmt.retName] =
                 if closureRet and cp.env.hasKey("result") and
-                    cp.env["result"].kind == svClosure:
+                    closureValueBuilt(cp.env["result"], stmt.retTy):
                   cp.env["result"]    # RFC-0005 S8z
                 else: retSym
             # RFC-0005 S8an: the callee's globals and captures, as it left
@@ -18973,6 +19234,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
             let merged = settleAddrCells(
               forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
+            carryElemCells(merged, w.frame.frameId, calleeFrameId,
+              varArgs, sig.captures, guarded)   ## RFC-0005 S8be
             # RFC-0005 S8an: the callee wrote a withheld root directly.
             let touched = touchedGuard(cp.env, guarded)
             if touched.len > 0:
@@ -19473,6 +19736,169 @@ proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
         changed = true
   if changed: forkPath(p, p.pc, env2) else: p
 
+const elemSnapPrefix = "__elemsnap#"
+  ## RFC-0005 S8be. As `addrSnapPrefix`, for a seq with element cells as a
+  ## statement began (`__elemsnap#<depth>#s#<root>`) and the value of each
+  ## of the frame's element cells then (`__elemsnap#<depth>#c#<k>`, `k` its
+  ## position in `Path.elemCells`).
+
+func elemSnapName(depth: int; what: string): string =
+  elemSnapPrefix & $depth & "#" & what
+
+proc frameElemCells(p: Path; frame: int): seq[int] =
+  ## RFC-0005 S8be. The positions in `p.elemCells` of `frame`'s live cells.
+  for k, e in p.elemCells:
+    if e.frame == frame and not e.dead: result.add k
+
+proc withElem(sv: SymVal; idx: Z3Int; v: SymVal): SymVal =
+  ## RFC-0005 S8be. The `svSeq` `sv` with element `idx` set to `v`. Only a
+  ## seq with element cells reaches here, and the parser gives cells only to
+  ## a seq of scalars or strings (`elemCellOf`), whose data is always backed.
+  result = sv
+  result.seqDataRaw = storeSeqElem(sv.seqDataRaw, sv.seqElemTy, idx, v) # [placeholder-audited]
+
+proc snapElemCells(p: Path; depth: int; w: WalkCtx): Path =
+  ## RFC-0005 S8be. `p` with this frame's seqs with element cells, and the
+  ## cells' values, recorded as the statement at `depth` begins.
+  let ks = frameElemCells(p, w.frame.frameId)
+  if ks.len == 0: return p
+  var env2 = p.env
+  for k in ks:
+    let e = p.elemCells[k]
+    env2[elemSnapName(depth, "c#" & $k)] =
+      addrCellValue(w.z3, p, e.ty, e.refAst)
+    if p.env.hasKey(e.root):
+      env2[elemSnapName(depth, "s#" & e.root)] = p.env[e.root]
+  forkPath(p, p.pc, env2)
+
+proc sameSeqLen(a, b: SymVal): bool =
+  ## RFC-0005 S8be. `a` and `b` are seqs of one length term. A placeholder
+  ## is never the same (its cells then die: the conservative side).
+  a.kind == svSeq and b.kind == svSeq and
+    not a.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+    not b.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+    cast[pointer](a.seqLen.raw) == cast[pointer](b.seqLen.raw) # [placeholder-audited]
+
+proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+                   w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8be. After `stmt`, each seq of the current frame with element
+  ## cells and the heap at those cells are made equal again, the side that
+  ## changed since the statement began winning (`elemSnapName`):
+  ##
+  ## * the seq resized or assigned whole (its length is another term, or
+  ##   the statement's last effect is its write by name, `lastWriteTo`):
+  ##   Nim may have moved its elements, so its cells die (a dereference
+  ##   that may reach one declines, `danglingFork`);
+  ## * the seq's elements written: each cell takes its element's value;
+  ## * a cell written through a pointer: its element takes the value.
+  ##
+  ## Both written within one statement is two writes the walk cannot
+  ## order: declined (`feUnsupportedOp`), the seq winning -- except in a
+  ## call, whose callee kept the two equal itself (`inheritElemCells`). So
+  ## is a seq a closure also captures (its env cell is a third copy).
+  ##
+  ## A statement with statements inside (a block, `if`, `while`, `try`) is
+  ## not synced as a whole: each statement inside was, and the two sides it
+  ## leaves are equal in value though not in term.
+  let ctx = w.z3
+  let compound = stmt.kind in {isBlock, isIf, isWhile, isTry}
+  for p in outs:
+    let ks = if compound: @[] else: frameElemCells(p, w.frame.frameId)
+    if ks.len == 0:
+      var env0 = p.env
+      if dropSnapshots(env0, elemSnapPrefix, depth):
+        result.add forkPath(p, p.pc, env0)
+      else:
+        result.add p
+      continue
+    var q = forkPath(p, p.pc, p.env)
+    var env2 = q.env
+    var clash: seq[string]
+    var roots: seq[string]
+    for k in ks:
+      if q.elemCells[k].root notin roots: roots.add q.elemCells[k].root
+    for root in roots:
+      if not env2.hasKey(root): continue
+      for (cl, _) in w.frame.capCells:
+        if cl == root and displayName(root) notin clash:
+          clash.add displayName(root)
+      let sNow = env2[root]
+      let sKey = elemSnapName(depth, "s#" & root)
+      let seqCh = env2.hasKey(sKey) and not sameSymVal(sNow, env2[sKey])
+      var written: seq[int]
+      for k in ks:
+        let e = q.elemCells[k]
+        if e.root != root: continue
+        let cKey = elemSnapName(depth, "c#" & $k)
+        if env2.hasKey(cKey) and
+           not sameSymVal(addrCellValue(ctx, q, e.ty, e.refAst), env2[cKey]):
+          written.add k
+      if seqCh and (lastWriteTo(stmt, root) or
+                    not sameSeqLen(sNow, env2[sKey])):
+        for k in ks:
+          if q.elemCells[k].root == root: q.elemCells[k].dead = true
+        continue
+      if sNow.kind != svSeq: continue
+      var sNew = sNow
+      if seqCh:
+        if written.len > 0 and stmt.kind != isCall and
+           displayName(root) notin clash:
+          clash.add displayName(root)
+      else:
+        for k in written:
+          let e = q.elemCells[k]
+          sNew = withElem(sNew, e.idx, addrCellValue(ctx, q, e.ty, e.refAst))
+        env2[root] = sNew
+      # Only the side that changed is copied: a cell another cell of the
+      # same index shadows is never one a pointer holds (`walkElemCell`
+      # hands out the older one).
+      if seqCh:
+        for k in ks:
+          let e = q.elemCells[k]
+          if e.root != root: continue
+          discard addrCellStore(ctx, q, e.ty, e.refAst, seqElemAt(sNew, e.idx))
+    discard dropSnapshots(env2, elemSnapPrefix, depth)
+    q.env = env2
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8be: the seq(s) " & clash.join(", ") & " were written " &
+             "by name and through a pointer to an element within one " &
+             "statement, or are also captured by a closure; the order of " &
+             "the writes is not modelled (feUnsupportedOp)"))
+    result.add drainPendingLowerEffects(q)
+
+proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8be. As `syncAddrCellsFromHeap`, for element cells: `p`
+  ## resumes in the current frame after a raise, and an element out of
+  ## step with its cell was written through a pointer by the call that
+  ## raised, so the element takes the cell's value -- unless the seq was
+  ## resized since the raising statement began (its innermost snapshot),
+  ## when its cells die.
+  let ks = frameElemCells(p, w.frame.frameId)
+  if ks.len == 0: return p
+  var q = forkPath(p, p.pc, p.env)
+  var env2 = q.env
+  for k in ks:
+    let e = q.elemCells[k]
+    if not env2.hasKey(e.root) or env2[e.root].kind != svSeq: continue
+    var snap = SymVal(kind: svBool)
+    var best = -1
+    for key, v in env2:
+      if key.startsWith(elemSnapPrefix) and key.endsWith("#s#" & e.root):
+        let rest = key[elemSnapPrefix.len .. ^1]
+        let d = parseInt(rest[0 ..< rest.find('#')])
+        if d > best:
+          best = d
+          snap = v
+    if best >= 0 and not sameSeqLen(env2[e.root], snap):
+      q.elemCells[k].dead = true
+      continue
+    let cur = addrCellValue(w.z3, q, e.ty, e.refAst)
+    if not sameSymVal(seqElemAt(env2[e.root], e.idx), cur):
+      env2[e.root] = withElem(env2[e.root], e.idx, cur)
+  q.env = env2
+  q
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
   ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
@@ -19498,14 +19924,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
   ##
   ## Likewise each address-taken variable and its heap cell
-  ## (`syncAddrCells`).
-  if w.frame.capCells.len == 0 and w.frame.addrCells.len == 0 or
-     stmt == nil or paths.len == 0:
+  ## (`syncAddrCells`), and each element cell and its element
+  ## (`syncElemCells`, RFC-0005 S8be).
+  if stmt == nil or paths.len == 0:
+    return walkStmt(stmt, paths, w)
+  var elems = false
+  for p in paths:
+    for e in p.elemCells:
+      if e.frame == w.frame.frameId and not e.dead: elems = true
+  if w.frame.capCells.len == 0 and w.frame.addrCells.len == 0 and
+     not elems:
     return walkStmt(stmt, paths, w)
   inc w.capSyncDepth
   let depth = w.capSyncDepth
   var ins: seq[Path]
-  for p in paths:
+  for p0 in paths:
+    let p = if stmt.kind in {isBlock, isIf, isWhile, isTry}: p0
+            else: snapElemCells(p0, depth, w)   # RFC-0005 S8be
     var env2 = p.env
     var changed = false
     for (local, cell) in w.frame.capCells:
@@ -19517,8 +19952,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         env2[addrSnapName(depth, c.local)] = env2[c.local]
         changed = true
     ins.add(if changed: forkPath(p, p.pc, env2) else: p)
-  let outs = walkStmt(stmt, ins, w)
+  let outs0 = walkStmt(stmt, ins, w)
   dec w.capSyncDepth
+  let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
   if w.frame.capCells.len == 0:
     return syncAddrCells(stmt, outs, depth, w)
   var byAddr: seq[string]
@@ -19653,6 +20089,8 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # RFC-0005 S8ax: likewise an address-taken variable whose cell the
   # raising call wrote through a pointer takes the cell's value.
   rp = syncAddrCellsFromHeap(rp, w)
+  # RFC-0005 S8be: and an element a pointer to it wrote.
+  rp = syncElemCellsFromHeap(rp, w)
   var unknownJoined = false
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):

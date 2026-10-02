@@ -357,6 +357,11 @@ title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing thro
 state = "done"
 
 [[slice]]
+id = "S8bh"
+title = "S8bf's remainder: var writes dropped through proc-variable calls; ptr parameters assumed disjoint from ref fields; ill-sorted up-conversion of refs"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

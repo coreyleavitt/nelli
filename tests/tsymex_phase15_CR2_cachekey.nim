@@ -905,25 +905,28 @@ suite "Phase 15 CR-2 — version bumps":
     ## last_indexof queries take step 1c). 181->182.
     ## RFC-0005 S8ag (a one-character `str.indexof` lowers to a fresh Int
     ## with split axioms; a tainted SAT after half the budget bounds later
-    ## hits as a budget-out does). 182->183.
+    ## hits as a budget-out does). Provisional 183.
     ## RFC-0005 S8am (seq element compound-assignment; seq element
     ## assignment checks the index bound before the RHS; low/high on an
     ## array value; array[bool, T]; char/byte/uint8 Table values and
-    ## HashSet elements are reachable witness parameters). 182->183.
+    ## HashSet elements are reachable witness parameters). Provisional 183.
     ## RFC-0005 S8an (nested routines with captures; globals threaded
     ## through calls; `addr x` as a `ptr` cell for a call; overloads and
-    ## same-named nested routines keyed apart). 182->183.
+    ## same-named nested routines keyed apart). Provisional 183.
     ## RFC-0005 S8ap (compound-sort fields of a ref object are leaf-split
     ## heap cells; dotted-field del/insert/incl/excl/[]=/[i]= and dotted
-    ## string add; an itUninterp var declines with its own kind). 182->183.
+    ## string add; an itUninterp var declines with its own kind).
+    ## Provisional 183.
     ## RFC-0005 S8aq (step 1c no longer needs step 1 to reach UNSAT; the
     ## dropped "L is at least every found index" link, reformulated as a
     ## ground fact; str.replace_all reachable under this project's own
-    ## opt-in -d:z3WithSeqReplaceAll). 182->187 (183-186 reserved for
-    ## sibling slices on this channel).
+    ## opt-in -d:z3WithSeqReplaceAll). Provisional 187.
     ## RFC-0005 S11 (the cache value carries the Soundness; the
-    ## Invariant-7 backstop fires on an untainting sxUnknown). 182->188.
-    check symexWalkerVersion == "188"
+    ## Invariant-7 backstop fires on an untainting sxUnknown).
+    ## Provisional 188.
+    ## RFC-0005 batch 1 lands S8ag, S8am, S8an, S8ap, S8aq and S11 as one
+    ## walker number. 182->190.
+    check symexWalkerVersion == "190"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

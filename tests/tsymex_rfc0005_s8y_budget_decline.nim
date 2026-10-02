@@ -28,17 +28,17 @@
 ##       winner, so what is lost is replay candidates on tainted paths
 ##       only. A clean path is always solved.
 ##
-## RFC-0005 S8aq (walker 187): step 1c's new ground fact can now decide a
-## shallow hit of (b)'s pair loop outright from facts alone instead of it
-## exhausting the budget, on some Z3 builds (observed: Z3 4.13.4) but not
-## others (Z3 5.1) -- a completeness gain, not a regression. Which hit (if
-## any) therefore ends up declined is Z3-build sensitive, so (b)'s own two
-## tests no longer pin `st.declined` or the specific decline message by
-## count; they pin the floor that must hold on every build regardless
-## (a budget-out happens, `beSolverUndef` classified, never `sxUnsat`).
-## (S8aq pinned `budgetOut <= 1`, the n36 / s1c floor at their default
-## budget; at S8ag's 20k `tightTainted` a shallower hit can run out after a
-## deeper one, so this suite keeps S8ag's `budgetOut >= 1`.)
+## RFC-0005 S8aq (walker 190, batch 1; provisional 187): step 1c's new
+## ground fact can now decide a shallow hit of (b)'s pair loop outright from
+## facts alone instead of it exhausting the budget, on some Z3 builds
+## (observed: Z3 4.13.4) but not others (Z3 5.1) -- a completeness gain, not
+## a regression. Which hit (if any) therefore ends up declined is Z3-build
+## sensitive, so (b)'s own two tests no longer pin `st.declined` or the
+## specific decline message by count; they pin the floor that must hold on
+## every build regardless (a budget-out happens, `beSolverUndef` classified,
+## never `sxUnsat`). (S8aq pinned `budgetOut <= 1`, the n36 / s1c floor at
+## their default budget; at S8ag's 20k `tightTainted` a shallower hit can
+## run out after a deeper one, so this suite keeps S8ag's `budgetOut >= 1`.)
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types

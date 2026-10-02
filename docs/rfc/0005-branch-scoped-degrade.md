@@ -7470,6 +7470,16 @@ cached, is recorded in §9.9.)
 Any new `SymexErrorKind` member is tail-appended (`types.nim:1287`). The in-run
 summary cache is handled at §2.4.
 
+**Batch 1 (2026-10-01) — one walker number for six slices.** S8ag, S8am, S8an,
+S8ap, S8aq and S11 were built in parallel on the channel tip, each with a
+provisional walker number (S8ag, S8am, S8an and S8ap 183; S8aq 187; S11 188).
+They land stacked, in that order, on one integration branch under ONE number:
+`symexWalkerVersion` 182 -> **190**, the CR2 `==` pin 190. Each slice's own
+`>=` floor stays at its provisional number (all at or below 190); the "walker
+183/187/188" in each "As landed" heading is that provisional number. S8am's
+`renderAsChoicesVersion` 11 -> 12 is unchanged. S11 adds no separate cache
+schema version: its widened cache value rides the walker key.
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see

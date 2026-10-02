@@ -1005,7 +1005,7 @@ task test, "Run the test suite":
             # str.indexof lowers to a fresh Int with split axioms (and
             # chain facts), so N36's five-iteration exits find a model; a
             # tainted SAT after half its budget bounds later hits as a
-            # budget-out does; walker 182->183.
+            # budget-out does; walker 182->190 (batch 1).
             "tsymex_rfc0005_s8ag_indexsplit",
             # RFC-0005 S8am -- S8z's remainder: compound assignment on a
             # seq element; a seq element assignment checks the index bound
@@ -1013,20 +1013,22 @@ task test, "Run the test suite":
             # char/byte/uint8 Table values and HashSet elements are
             # reachable witness parameters; a char witness renders char,
             # not uint8; a non-zero-based array witness renders its
-            # declared index range; walker 182->183, render 11->12.
+            # declared index range; walker 182->190 (batch 1), render
+            # 11->12.
             "tsymex_rfc0005_s8am_remainder",
             # RFC-0005 S8an -- S8ac's remainder: nested procs/funcs (with
             # captures, as values, recursion); `addr x` passed as a `ptr`
             # (a cell for the call; `let p = addr x`); module-level globals
             # threaded through calls; overloads and same-named nested
-            # routines keyed apart; walker 182->183.
+            # routines keyed apart; walker 182->190 (batch 1).
             "tsymex_rfc0005_s8an_remainder",
             # RFC-0005 S8ap -- S8ao's remainder: a seq / Table / HashSet
             # field of a ref object is a leaf-split heap cell and a string
             # field is read too (aliasing, nil, witness); del / insert /
             # incl / excl / []= / [i]= on a dotted field and `add` on a
             # dotted string field take the field-write primitive; an
-            # itUninterp `var` declines with its own kind; walker 182->183.
+            # itUninterp `var` declines with its own kind; walker
+            # 182->190 (batch 1).
             "tsymex_rfc0005_s8ap_remainder",
             # RFC-0005 S8aq -- S8ai's remainder: step 1c no longer depends
             # on step 1 reaching UNSAT (a cancelled step 1 still gets the
@@ -1035,12 +1037,13 @@ task test, "Run the test suite":
             # within budget; str.replace_all is reachable under this
             # suite's own `-d:z3WithSeqReplaceAll` (`.nim.cfg`); a missed
             # implied (non-stated) equality is shown to cost completeness
-            # only. Walker 182->187.
+            # only. Walker 182->190 (batch 1).
             "tsymex_rfc0005_s8aq_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the
             # render layer incl. the annotation-violation channel; also the
-            # gaps() walkthrough. Public imports only. walker 182->188.
+            # gaps() walkthrough. Public imports only. walker 182->190
+            # (batch 1).
             "tsymex_rfc0005_s11_surface"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

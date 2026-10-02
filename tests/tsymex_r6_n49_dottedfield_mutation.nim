@@ -51,7 +51,8 @@
 ## `dsl_parser.nim`). `mutatePlainFieldDel` is now modelled (`sxSat`, the
 ## target being reachable when `items` is non-empty); `mutatePlainFieldInsert`
 ## still reports `sxUnknown`, but now through the bare `insert`'s own
-## lowering decline, not N49's (walker floor raised to 183).
+## lowering decline, not N49's (walker floor raised to 183; RFC-0005 batch 1
+## lands it as 190).
 
 import std/[unittest, strutils]
 import nelli/symex

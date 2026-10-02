@@ -184,12 +184,12 @@ const renderAsChoicesVersion* = "12"
   ##   at PARSE time, a genuine verdict-class gap, not merely a rendering
   ##   change.
   ## - "12" — RFC-0005 S8am, S8z's remainder. Two witness-rendering-only
-  ##   fixes (see `symexWalkerVersion`'s own "180" bullet for this same
+  ##   fixes (see `symexWalkerVersion`'s own S8am bullet for this same
   ##   slice's verdict-affecting siblings, which are NOT here because an
   ##   already-SAT verdict never changes for either fix below — only the
   ##   rendered witness's declared Nim TYPE does). A `char` parameter (or
   ##   `char` Table value / HashSet element, now that those are reachable
-  ##   at all per the "180" bullet's item 5) renders a Nim `char` literal
+  ##   at all per the S8am bullet's item 5) renders a Nim `char` literal
   ##   (`primTyAndReader` picks `("char", "readChar")`) instead of
   ##   `uint8` — `char`/`byte`/`uint8` share one structural `IRType`
   ##   (`itInt`, width 8, unsigned), so the ONLY thing that told them apart
@@ -202,7 +202,13 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "188"
+const symexWalkerVersion* = "190"
+  ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
+  ## were built in parallel on the channel tip, each with a provisional
+  ## number, and land stacked as one integration branch under ONE walker
+  ## number. Their bullets follow, newest work first; each names its
+  ## provisional number. 182 -> 190.
+  ##
   ## RFC-0005 S11 (2026-10-01) — the public surface. The cache VALUE is
   ## widened: every persisted verdict (`:sat` witness, `:unsat` / `:unk`
   ## sentinel, `:raised:<type>` sentinel) carries its `Soundness` in the
@@ -211,10 +217,8 @@ const symexWalkerVersion* = "188"
   ## absent soundness would otherwise read as a miss forever. Walker side:
   ## the Invariant-7 backstop fires on an `sxUnknown` whose errors taint
   ## nothing (was: whose error list is empty), so `soundness.runTaint` is
-  ## never `{}` on an `sxUnknown`. 182 -> 188 (183–187 are held by slices
-  ## in flight; this takes tip+1 at landing).
+  ## never `{}` on an `sxUnknown`. Provisional 188; batch 1.
   ##
-  ## (Prior: 187.)
   ## RFC-0005 S8aq (2026-10-01) — S8ai's remainder. Three independent
   ## `checkCapped`/`seqRangeFacts` fixes, none changing an existing
   ## verdict (each closes a gap that previously fell through to the
@@ -239,21 +243,25 @@ const symexWalkerVersion* = "188"
   ## roots are syntactic, not closed under equalities the query only
   ## IMPLIES) is shown, not fixed: a missed implied equality costs step
   ## 1c a decision, never the walker a wrong one, since steps 2/3 still
-  ## see the full theory. 186 -> 187 (183-186 reserved for sibling S8**
-  ## slices on this channel).
+  ## see the full theory. Provisional 187; batch 1.
   ##
-  ## (Prior: 186.)
-  ## RFC-0005 S8ag (2026-10-01) — S8y's remainder. `str.indexof(s, c, i)`
-  ## with a one-character literal needle (every closed form of the scan
-  ## idiom, Q1/B3/B4, and a caller's `s.find(':')`) lowers to a fresh Int
-  ## with the split axioms `s = pre ++ x ++ c ++ post`, `len(pre) = i`, `ix
-  ## = i + len(x)`, `c notin x` (or -1 with no `c` in `s[i ..]` or `i` out
-  ## of range), plus chain facts between two splits of one haystack
-  ## (`indexSplitRoots`). The same value in every model, a different query
-  ## text: N36's five-iteration exit solves, out of 20M before, find a
-  ## model. A tainted target hit SAT only after half its budget (step 1
-  ## out, step 3 SAT) now records its depths as a budget-out does, so a
-  ## later tainted hit as deep is declined. 182 -> 183.
+  ## RFC-0005 S8ap (2026-10-01) — S8ao's remainder. A seq / Table /
+  ## HashSet field (or bare pointee) of a `ref`/`ptr` object is held in the
+  ## logical heap LEAF-SPLIT (one array per leaf of the value -- a seq's data
+  ## and length, a table's data, presence and size, a set's members and
+  ## size -- all indexed by the object's `Ref_T` address; `heapCellArrays`/
+  ## `heapCellSelect`/`heapCellStore`, `runtime_heap.nim`), and a `string`
+  ## field is read as well as written. Each read asserts the INPUT cell's
+  ## well-formedness (`heapCellWfConds`), `new`/a constructor zero-writes
+  ## such a field, and the witness renders it from the input heap. Before:
+  ## `seUnsupportedCompoundSortLeaf` + `heUnsupportedPointeeRead` on any
+  ## access, `heNewFieldZeroUnsupported` on every constructor. `del`/
+  ## `insert`/`incl`/`excl`/`[]=` and `<field>[i] = v` on a dotted field,
+  ## and `add` on a dotted string field, take the bare-symbol arm's IR over
+  ## the field-write primitive (were N49 / "unsupported nnkAsgn shape").
+  ## An uninitialised `var` of an `itUninterp` placeholder declines with the
+  ## placeholder's own kind. Provisional 183; batch 1.
+  ##
   ## RFC-0005 S8an (2026-10-01) — S8ac's remainder. A routine declared
   ## inside the code under test is walked (its declaration was
   ## `feUnsupportedStmtKind`): a direct call threads its captures -- the
@@ -271,23 +279,61 @@ const symexWalkerVersion* = "188"
   ## (`dCell`/`dwCell`, not counted by `heapDepth`), shared by every `addr`
   ## of one lvalue in the call and read back on every exit; `let p = addr
   ## x` whose uses are `p[]` and such arguments IS `x`; `p[] += v` is
-  ## modelled. 182 -> 183.
-  ## RFC-0005 S8ap (2026-10-01) — S8ao's remainder. A seq / Table /
-  ## HashSet field (or bare pointee) of a `ref`/`ptr` object is held in the
-  ## logical heap LEAF-SPLIT (one array per leaf of the value -- a seq's data
-  ## and length, a table's data, presence and size, a set's members and
-  ## size -- all indexed by the object's `Ref_T` address; `heapCellArrays`/
-  ## `heapCellSelect`/`heapCellStore`, `runtime_heap.nim`), and a `string`
-  ## field is read as well as written. Each read asserts the INPUT cell's
-  ## well-formedness (`heapCellWfConds`), `new`/a constructor zero-writes
-  ## such a field, and the witness renders it from the input heap. Before:
-  ## `seUnsupportedCompoundSortLeaf` + `heUnsupportedPointeeRead` on any
-  ## access, `heNewFieldZeroUnsupported` on every constructor. `del`/
-  ## `insert`/`incl`/`excl`/`[]=` and `<field>[i] = v` on a dotted field,
-  ## and `add` on a dotted string field, take the bare-symbol arm's IR over
-  ## the field-write primitive (were N49 / "unsupported nnkAsgn shape").
-  ## An uninitialised `var` of an `itUninterp` placeholder declines with the
-  ## placeholder's own kind. 182 -> 183.
+  ## modelled. Provisional 183; batch 1.
+  ##
+  ## RFC-0005 S8am (2026-10-01) — S8z's remainder. Five closed gaps that
+  ## change reachable VERDICTS (a program that previously forked a scoped
+  ## decline, `sxUnknown`, can now report `sxSat`/`sxUnsat` through the
+  ## newly-modelled path) — see `renderAsChoicesVersion`'s own "12" bullet
+  ## above for the SIBLING rendering-only fixes this same slice made,
+  ## which do not change any verdict and so do not belong here. (1) `s[i]
+  ## += v`/`-=`/`*=`/`&=` on a SEQ ELEMENT, previously a scoped decline
+  ## (`valueFieldTy`/`fieldStep` had no `itSeq` case). (2) `s[i] = f()` on
+  ## a seq now checks the index bound BEFORE evaluating `f()`, matching
+  ## Nim (probed against a compiled binary: an OOB `s[i] = raiser()` never
+  ## runs `raiser`'s side effect, raising `IndexDefect` immediately) —
+  ## A-normalisation (`userCallStmt`) hoisted `f()`'s call into the
+  ## preamble ahead of the `isIndexAssign` statement's own WALK-time bounds
+  ## check, so the call ran first regardless of the index; the array write
+  ## arm already had the correct order (S8z's `valueFieldChecked`), but a
+  ## bare seq element assignment did not. Both (1) and (2) force a
+  ## discarded bounds-check read (`mkIndexStmt`) before the RHS/operand is
+  ## parsed, reusing the SAME parsed index IR for the check and the real
+  ## write (never re-parsing the raw index node, which would
+  ## double-evaluate an impure one). (3) `low(a)`/`high(a)` on an ARRAY
+  ## VALUE now fold to the array's declared first/last index, mirroring
+  ## the pre-existing `isStringLow` carve-out; previously `calleeSym.strVal
+  ## in ["low","high"]`'s non-int-family branch declined any array
+  ## receiver (`feUnsupportedExprKind`). (4) `array[bool, T]` -- the index
+  ## coerces `svBool` to `svInt` (0/1) at the two walker sites that read
+  ## one (`isIndex`/`isIndexAssign`), not inside the shared
+  ## `arrayIndexConds`/`arraySelect`/`arrayStore` helpers, which only ever
+  ## took an int-family index and are also the `itSeq` index path's
+  ## helpers (where a bool index cannot arrive); `arrayIndexBounds` now
+  ## admits `itBool` (`lo=0, hi=1`) instead of declining it, and
+  ## `fieldStep` admits an `itBool` symbolic index alongside `itInt` for
+  ## the value-field-chain write path. (5) `Table[string, V]`/`HashSet[V]`
+  ## witness PARAMETERS where `V` is `char`/`byte`/`uint8` are no longer
+  ## routed to the `__unsupported_witness:` placeholder at `parseProc*`
+  ## classification time (`isRenderableTableTy`/`isRenderableSetElemTy`'s
+  ## `isCharAmbiguous` exclusion is gone, superseded by `IRType.isChar`
+  ## resolving the render-site ambiguity it existed to avoid, below) — the
+  ## placeholder forced every property over such a parameter to degrade
+  ## `sxUnknown` regardless of the property, so admitting the real
+  ## parameter type is verdict-affecting, not merely cosmetic. Provisional
+  ## 183; batch 1.
+  ##
+  ## RFC-0005 S8ag (2026-10-01) — S8y's remainder. `str.indexof(s, c, i)`
+  ## with a one-character literal needle (every closed form of the scan
+  ## idiom, Q1/B3/B4, and a caller's `s.find(':')`) lowers to a fresh Int
+  ## with the split axioms `s = pre ++ x ++ c ++ post`, `len(pre) = i`, `ix
+  ## = i + len(x)`, `c notin x` (or -1 with no `c` in `s[i ..]` or `i` out
+  ## of range), plus chain facts between two splits of one haystack
+  ## (`indexSplitRoots`). The same value in every model, a different query
+  ## text: N36's five-iteration exit solves, out of 20M before, find a
+  ## model. A tainted target hit SAT only after half its budget (step 1
+  ## out, step 3 SAT) now records its depths as a budget-out does, so a
+  ## later tainted hit as deep is declined. Provisional 183; batch 1.
   ##
   ## (Prior: 182.)
   ## RFC-0005 S8ai (2026-10-01) — S8ae's remainder. `seqRangeFacts`' links
@@ -326,48 +372,6 @@ const symexWalkerVersion* = "188"
   ## 179 -> 181.
   ##
   ## (Prior: 179.)
-  ## RFC-0005 S8am (2026-10-01) — S8z's remainder. Five closed gaps that
-  ## change reachable VERDICTS (a program that previously forked a scoped
-  ## decline, `sxUnknown`, can now report `sxSat`/`sxUnsat` through the
-  ## newly-modelled path) — see `renderAsChoicesVersion`'s own "12" bullet
-  ## below for the SIBLING rendering-only fixes this same slice made,
-  ## which do not change any verdict and so do not belong here. (1) `s[i]
-  ## += v`/`-=`/`*=`/`&=` on a SEQ ELEMENT, previously a scoped decline
-  ## (`valueFieldTy`/`fieldStep` had no `itSeq` case). (2) `s[i] = f()` on
-  ## a seq now checks the index bound BEFORE evaluating `f()`, matching
-  ## Nim (probed against a compiled binary: an OOB `s[i] = raiser()` never
-  ## runs `raiser`'s side effect, raising `IndexDefect` immediately) —
-  ## A-normalisation (`userCallStmt`) hoisted `f()`'s call into the
-  ## preamble ahead of the `isIndexAssign` statement's own WALK-time bounds
-  ## check, so the call ran first regardless of the index; the array write
-  ## arm already had the correct order (S8z's `valueFieldChecked`), but a
-  ## bare seq element assignment did not. Both (1) and (2) force a
-  ## discarded bounds-check read (`mkIndexStmt`) before the RHS/operand is
-  ## parsed, reusing the SAME parsed index IR for the check and the real
-  ## write (never re-parsing the raw index node, which would
-  ## double-evaluate an impure one). (3) `low(a)`/`high(a)` on an ARRAY
-  ## VALUE now fold to the array's declared first/last index, mirroring
-  ## the pre-existing `isStringLow` carve-out; previously `calleeSym.strVal
-  ## in ["low","high"]`'s non-int-family branch declined any array
-  ## receiver (`feUnsupportedExprKind`). (4) `array[bool, T]` -- the index
-  ## coerces `svBool` to `svInt` (0/1) at the two walker sites that read
-  ## one (`isIndex`/`isIndexAssign`), not inside the shared
-  ## `arrayIndexConds`/`arraySelect`/`arrayStore` helpers, which only ever
-  ## took an int-family index and are also the `itSeq` index path's
-  ## helpers (where a bool index cannot arrive); `arrayIndexBounds` now
-  ## admits `itBool` (`lo=0, hi=1`) instead of declining it, and
-  ## `fieldStep` admits an `itBool` symbolic index alongside `itInt` for
-  ## the value-field-chain write path. (5) `Table[string, V]`/`HashSet[V]`
-  ## witness PARAMETERS where `V` is `char`/`byte`/`uint8` are no longer
-  ## routed to the `__unsupported_witness:` placeholder at `parseProc*`
-  ## classification time (`isRenderableTableTy`/`isRenderableSetElemTy`'s
-  ## `isCharAmbiguous` exclusion is gone, superseded by `IRType.isChar`
-  ## resolving the render-site ambiguity it existed to avoid, below) — the
-  ## placeholder forced every property over such a parameter to degrade
-  ## `sxUnknown` regardless of the property, so admitting the real
-  ## parameter type is verdict-affecting, not merely cosmetic. 182 -> 183.
-  ##
-  ## (Prior: 182.)
   ## RFC-0005 S8aj (2026-10-01) — S8ad's remainder. An uninitialised local
   ## array, object or seq (`var a: array[3, int]`, `var h: H` holding an
   ## array or a seq field, `var s: seq[int]`) takes Nim's `default(T)`

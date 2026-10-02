@@ -312,6 +312,9 @@ proc fieldwiseEq(a, b: IRExpr): bool =
   of iekZeroValue:
     ## RFC-0005 S8u.
     fieldwiseEq(a.zvTy, b.zvTy)
+  of iekSeqNewZero:
+    ## RFC-0005 S8bc.
+    fieldwiseEq(a.snzLen, b.snzLen) and fieldwiseEq(a.snzElemTy, b.snzElemTy)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -398,6 +401,10 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     # precedent above).
     a.iaRecvName == b.iaRecvName and fieldwiseEq(a.iaIdx, b.iaIdx) and
       fieldwiseEq(a.iaVal, b.iaVal) and a.iaLoc == b.iaLoc
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6).
+    a.tkRetName == b.tkRetName and fieldwiseEq(a.tkRecv, b.tkRecv) and
+      fieldwiseEq(a.tkKeyTy, b.tkKeyTy) and a.tkLoc == b.tkLoc
   of isSeqPop:
     # Item 2 (round-6 fix round 3): see isIndexAssign's comment immediately
     # above -- same missing-arm gap, same N14 (9dbc3df) origin.
@@ -610,6 +617,9 @@ proc sZeroValueTable(): IRExpr =
 proc sZeroValueSet(): IRExpr =
   ## RFC-0005 S8u. An uninitialised local `HashSet[int]`.
   mkZeroValue(tSet(tInt(64, true)))
+proc sSeqNewZero(): IRExpr =
+  ## RFC-0005 S8bc. `newSeq[(int, bool)](n)`.
+  mkSeqNewZero(mkVar("n"), tTuple(@[tInt(64, true), tBool()], @["", ""]))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -693,6 +703,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sZeroValueTable(), roundtripExpr(sZeroValueTable()))
   test "iekZeroValue (HashSet[int])":
     check fieldwiseEq(sZeroValueSet(), roundtripExpr(sZeroValueSet()))
+  test "iekSeqNewZero":
+    check fieldwiseEq(sSeqNewZero(), roundtripExpr(sSeqNewZero()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -772,6 +784,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
       of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
       of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
+      of iekSeqNewZero: discard                  ## "iekSeqNewZero" (RFC-0005 S8bc)
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"
@@ -859,6 +872,10 @@ proc sSeqPopStmt(): IRStmt =
   ## `spRetName` set to distinct sentinel names (a swapped-argument emit bug
   ## would otherwise be invisible to `fieldwiseEq`), `spLoc` non-empty.
   mkSeqPopStmt("sentSpRecv", "sentSpRet", "sentinel.nim:11:11: sentSpRet := sentSpRecv.pop()")
+proc sTabKeysStmt(): IRStmt =
+  ## RFC-0005 S8bc (item 6): every field a sentinel.
+  mkTabKeysStmt("sentTkRet", mkVar("sentTkRecv"), tString(),
+                "sentinel.nim:12:12: for k in sentTkRecv.keys")
 proc sTargetLabel(): IRStmt = mkTargetLabel("sentLabel")
 proc sRaiseWithMsg(): IRStmt = mkRaise("ValueError", mkStrLit("boom"))
 proc sReraise(): IRStmt = mkReraise()
@@ -936,6 +953,8 @@ suite "R6 emit round-trip -- IRStmt kinds":
     check fieldwiseEq(sIndexAssignStmt(), roundtripStmt(sIndexAssignStmt()))
   test "isSeqPop (N14, item 2 -- was entirely missing from this audit)":
     check fieldwiseEq(sSeqPopStmt(), roundtripStmt(sSeqPopStmt()))
+  test "isTabKeys (RFC-0005 S8bc)":
+    check fieldwiseEq(sTabKeysStmt(), roundtripStmt(sTabKeysStmt()))
   test "isTargetLabel":
     check fieldwiseEq(sTargetLabel(), roundtripStmt(sTargetLabel()))
   test "isRaise (with message)":
@@ -989,6 +1008,7 @@ suite "R6 emit round-trip -- IRStmt kinds":
       of isIndex: discard                         ## "isIndex"
       of isIndexAssign: discard                   ## "isIndexAssign" (item 2, N14)
       of isSeqPop: discard                        ## "isSeqPop" (item 2, N14)
+      of isTabKeys: discard                       ## "isTabKeys" (RFC-0005 S8bc)
       of isTargetLabel: discard                   ## "isTargetLabel"
       of isRaise: discard                         ## "isRaise" (2 tests: msg + bare re-raise)
       of isTry: discard                           ## "isTry" (2 tests: with/without finally)

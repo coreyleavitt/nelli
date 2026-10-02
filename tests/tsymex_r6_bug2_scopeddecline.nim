@@ -52,7 +52,7 @@ type
   Packet = object
     tag: int                            ## plain field, shared across arms
     case kind: PKind
-    of pkRrq: options: seq[(string, string)]   ## the poisoned field
+    of pkRrq: options: seq[seq[string]]   ## the poisoned field (a seq of seqs: a seq of tuples is backed since RFC-0005 S8bc)
     of pkData: blockNum: int
     of pkAck: ackNum: int
 
@@ -117,7 +117,7 @@ type
     tag: int                       ## the ONLY field kind Nim itself accepts
                                     ## alongside a non-constant discriminant
     case kind: SymOp
-    of symRrq: options: seq[(string, string)]   ## the poisoned field
+    of symRrq: options: seq[seq[string]]   ## the poisoned field (a seq of seqs: a seq of tuples is backed since RFC-0005 S8bc)
     of symData: blockNum: int
 
 proc sutSymConstructUntouchedTag(b: byte, n: int) =
@@ -146,14 +146,14 @@ proc sutSymConstructTouchedArmDegrades(b: byte, n: int) =
 # is untouched by this slice's classify-time change and exercises the
 # PRE-EXISTING `allocateSeqDataRaw` degrade path). ------------------------
 proc sutLocalEmptySeqNoCrash(n: int) =
-  var pairs: seq[(string, string)] = @[]
+  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   discard pairs
   if n == 5:
     symexTarget("local_empty_seq_no_crash")
 
 proc sutLocalSeqTouchDegrades(n: int) =
-  var pairs: seq[(string, string)] = @[]
-  pairs.add(("a", "b"))
+  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  pairs.add(@["a", "b"])  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if n == 5:
     symexTarget("local_seq_touch_degrades")
 

@@ -80,7 +80,7 @@ type
     of n15rkA: a: int
     of n15rkB:
       count: int
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc n15ReassignToB(v: var N15Rec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -199,7 +199,7 @@ type
     ## pointee kind with no leaf representation (S8ar's stated decline).
     ## RFC-0005 S8at: a case object is a heap cell value now; a seq of
     ## tuples (backed nowhere) is the part that keeps the tuple a stand-in.
-    ys: seq[(int, int)]
+    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   N41Heap = object
     t: Table[string, int]   ## a VALID Table shape -- the gap is independent
                              ## of key/value-type support (N40 already covers
@@ -307,7 +307,7 @@ type
     of n12rkA: a: int
     of n12rkB:
       count: int
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc n12ReassignToB(v: var N12Rec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -342,7 +342,10 @@ suite "symex round-6 N12 -- decline messages render plain language, not internal
         sawKind = true
         check "itTuple" notin e.msg
         check "(seNestedSeqUnsupported)" notin e.msg
-        check "tuple type" in e.msg   ## the plain-language replacement
+        # RFC-0005 S8bc: the stand-in element is a seq now (a tuple element
+        # is backed), so the plain-language spelling is "seq type".
+        check "itSeq" notin e.msg
+        check "seq type" in e.msg   ## the plain-language replacement
     check sawKind
 
   test "N12-2 RED->GREEN: the declared-unsupported-FIELD chokepoint (a bare field read) does not leak \"itTuple\"/\"(seNestedSeqUnsupported)\" into the message either -- same funnel, same fix":
@@ -354,7 +357,8 @@ suite "symex round-6 N12 -- decline messages render plain language, not internal
         sawKind = true
         check "itTuple" notin e.msg
         check "(seNestedSeqUnsupported)" notin e.msg
-        check "tuple type" in e.msg
+        check "itSeq" notin e.msg   ## RFC-0005 S8bc: a seq stand-in
+        check "seq type" in e.msg
     check sawKind
 
   test "N12-3: the structured .kind field is UNCHANGED by the message-text fix -- callers matching on .kind (not text) see no behavior change":

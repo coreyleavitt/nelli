@@ -65,15 +65,19 @@ suite "S8ar (1): a seq of the object's own ref type":
     if r.status == sxSat:
       check reproduces(rInd(r.witness[0]), "r_ind")
 
-  test "a value object recurring through a seq declines scoped at the field":
+  test "a value object recurring through a seq is modelled to a bounded depth":
+    # RFC-0005 S8bc re-pinned this. S8ar declined the field (a scoped
+    # decline at the first recurrence); S8bc unrolls the value object to a
+    # bounded depth, the seq at each level a leaf-split seq of the next, so
+    # the length read is exact.
     let r = symexFind(rVRec, tLabel("vrec_v"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     let r2 = symexFind(rVRec, tLabel("vrec_kids"))
     checkpoint $r2.status & " " & show(r2.errors)
-    check r2.status == sxUnknown
+    check r2.status == sxSat
     check not r2.errors.hasKind(weInternalWalkerFault)
-    check r2.errors.anyIt("recursive value object" in it.msg or "seq[" in it.msg)
+    if r2.status == sxSat: check reproduces(rVRec(r2.witness[0]), "vrec_kids")
 
 proc sAdd(v: string) =
   var s: seq[string]

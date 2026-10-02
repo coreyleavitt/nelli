@@ -972,6 +972,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bb (raises drain in evaluation order; findBounds binds a
     ## compound operand; PCRE leftmost-first selection, captures, replace
     ## over the priority automaton). Provisional 201 (S8ba holds 200).
+    ## RFC-0005 S8bc (S8at's remainder: getOrDefault, borrow routines,
+    ## leaf-split seq elements, array-element insert, newSeq, Table
+    ## iteration, mgetOrPut, inlined-iterator parameter conversions,
+    ## seq[char] / seq[enum] witnesses). 193->203 (provisional; batch 2
+    ## takes 202).
     check symexWalkerVersion == "209"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

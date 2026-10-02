@@ -101,9 +101,9 @@ const routineShapedForClosureDetect* = RoutineNodes - {nnkDo, nnkLambda}
 const nestedRoutineScanBoundary* = RoutineNodes - {nnkDo}
   ## RFC-parser-normalization N3. Answers: "does this node start a NESTED
   ## scope the A3 (ADR-0014) shallow scanners — `hasYieldShallow`,
-  ## `hasReturnShallow`, `hasKindShallow` (and so `hasBreakContinueShallow`),
-  ## and `substIteratorParams` — must not descend into". A `yield`/`return`/
-  ## `break`/`continue`/parameter-name occurrence inside a nested routine
+  ## and `hasReturnShallow`, `hasKindShallow` (and so
+  ## `hasBreakContinueShallow`) — must not descend into". A `yield`/`return`/
+  ## `break`/`continue` occurrence inside a nested routine
   ## definition belongs to THAT routine, not to the iterator body being
   ## characterized for A3's inline transform, so descent stops here.
   ##
@@ -405,6 +405,8 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
   of iekZeroValue:        ## RFC-0005 S8u
     newCall(bindSym"mkZeroValue", emitIRType(e.zvTy))
+  of iekSeqNewZero:       ## RFC-0005 S8bc
+    newCall(bindSym"mkSeqNewZero", emitExpr(e.snzLen), emitIRType(e.snzElemTy))
 
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
@@ -699,6 +701,10 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkSeqPopStmt",
             newLit(s.spRecvName), newLit(s.spRetName), newLit(s.spLoc),
             (if s.spElemTy.isNil: newNilLit() else: emitIRType(s.spElemTy)))
+  of isTabKeys:   # RFC-0005 S8bc (item 6)
+    newCall(bindSym"mkTabKeysStmt",
+            newLit(s.tkRetName), emitExpr(s.tkRecv), emitIRType(s.tkKeyTy),
+            newLit(s.tkLoc))
   of isVariantField:
     var tagsLit = newTree(nnkBracket)
     for t in s.vfMatchingTags: tagsLit.add newLit(t)
@@ -1543,6 +1549,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
              rhsHasInlineDefectFork(e.vfsVal)
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
+  of iekSeqNewZero:   ## RFC-0005 S8bc: its guard forks are preamble, not here
+    result = rhsHasInlineDefectFork(e.snzLen)
   of iekSeqSlice:
     # v67: a seq slice carries its own IndexDefect fork (the SND-4 OOB
     # deposit in its lowering; RFC-0005 S8g: and its RangeDefect) — always
@@ -1686,6 +1694,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
   of iekClosureCall: e.ccArgs
   of iekSeqLit: e.seqLitElems
   of iekHofCall: @[e.hofSeq, e.hofClosure, e.hofInit]
+  of iekSeqNewZero: @[e.snzLen]   # RFC-0005 S8bc (batch 4)
   of iekLambda, iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     @[]
@@ -1750,7 +1759,8 @@ func isEagerIR(e: IRExpr): bool =
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
      iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
-     iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp:
+     iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp,
+     iekSeqNewZero:   # RFC-0005 S8bc (batch 4): `newSeq[T](n)`, a call
     true
   else: false
 
@@ -3025,6 +3035,94 @@ proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
   else:
     BorrowInfo(isBorrow: true, returnsDistinct: false, distinctTy: nil)
 
+proc distinctBaseTypeNode(ty: NimNode): NimNode =
+  ## RFC-0005 S8bc (item 2). The base type node of a `distinct` type node
+  ## (`DSq` with `DSq = distinct seq[int]` -> the typed `seq[int]`), or nil
+  ## when `ty` is not a named distinct type this can read. The node is the
+  ## type section's own, so it is typed (`getTypeInst` reads it), unlike any
+  ## node a macro could synthesize.
+  var t = ty
+  if t.kind == nnkVarTy and t.len == 1: t = t[0]
+  if t.kind != nnkSym: return nil
+  let impl = t.getImpl
+  if impl.kind == nnkTypeDef and impl.len >= 3 and
+     impl[2].kind == nnkDistinctTy and impl[2].len == 1:
+    return impl[2][0]
+  nil
+
+proc borrowRoutineRewrite(n: NimNode):
+    tuple[rw: NimNode, views: seq[tuple[node, baseTy: NimNode]]] =
+  ## RFC-0005 S8bc (item 2). A call of a NON-operator `{.borrow.}` routine
+  ## (`d.len`, `abs(m)`, `$m`, `inc(m)`), rewritten as a call of the routine
+  ## it borrows. Nim gives a borrowed routine no body: its `getImpl` body is
+  ## the base routine's symbol, and `f(a)` means `D(base(T(a)))` for each
+  ## `distinct T` formal (the result rewrapped when `f` returns `D`). Before
+  ## S8bc the call was walked as a user routine and its "body", that bare
+  ## symbol, declined (`feUnsupportedStmtKind`) -- over a scalar base too.
+  ##
+  ## `rw` is `n` with its head replaced by the base routine's symbol and the
+  ## SAME typed argument nodes. `views` (pushed onto `borrowBaseViews` while
+  ## `rw` parses) classifies each argument of a distinct formal at the
+  ## distinct's base type, and `rw` itself at the base of a distinct return
+  ## type, so the base routine's own arms (a builtin model, or a user
+  ## routine's walk) see `len(seq[int](d))`. Unwrapping and rewrapping are
+  ## value pass-throughs, as a written `T(d)` / `D(x)` is (`nnkConv`).
+  ##
+  ## `rw` is nil (the call is left alone) for an operator (an infix `+`/`<`
+  ## goes through `borrowIntercept`, and an operator called in call form
+  ## through the A7 comparison arm), a callee that is not a borrow, an arity
+  ## other than the borrow's formal count, or a distinct this cannot read
+  ## the base of (`distinctBaseTypeNode`); that keeps the routine-call path's
+  ## decline.
+  if n.kind notin {nnkCall, nnkCommand, nnkPrefix} or n.len < 2: return
+  let head = n[0]
+  if head.kind != nnkSym: return
+  let name = head.strVal
+  if name.len == 0 or
+     not (name[0] in {'a'..'z', 'A'..'Z', '_'} or name == "$"):
+    return
+  let impl = resolveRoutineImpl(head)
+  if impl == nil or not hasBorrowPragma(impl) or impl[6].kind != nnkSym:
+    return
+  let formal = impl[3]
+  if formal.kind != nnkFormalParams: return
+  var formalTys: seq[NimNode]
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: return
+    for j in 0 ..< id.len - 2: formalTys.add id[id.len - 2]
+  if formalTys.len != n.len - 1: return
+  var views: seq[tuple[node, baseTy: NimNode]]
+  for i in 1 ..< n.len:
+    if classifyType(formalTys[i - 1]).ty.kind != itDistinct: continue
+    let baseTy = distinctBaseTypeNode(formalTys[i - 1])
+    if baseTy == nil: return
+    views.add (n[i], baseTy)
+    # A `var` argument may arrive address-wrapped; the base routine's arm
+    # classifies what it unwraps too.
+    if n[i].kind in {nnkHiddenAddr, nnkHiddenDeref, nnkAddr} and n[i].len == 1:
+      views.add (n[i][0], baseTy)
+  var rw = copyNimNode(n)   # keeps `n`'s type (the borrow's return type)
+  rw.add impl[6]
+  for i in 1 ..< n.len: rw.add n[i]
+  # The base routine's arms read its own arity. A borrow declaring fewer
+  # formals than its base (the rest defaulted there) is left alone; Nim
+  # 2.2.10 itself crashes compiling one such borrow (`proc inc(m: var M)
+  # {.borrow.}`: an `IndexDefect` in the compiler), so it never reaches here.
+  let baseImpl = resolveRoutineImpl(impl[6])
+  if baseImpl == nil or baseImpl[3].kind != nnkFormalParams: return
+  var baseArity = 0
+  for i in 1 ..< baseImpl[3].len:
+    if baseImpl[3][i].kind != nnkIdentDefs: return
+    baseArity += baseImpl[3][i].len - 2
+  if baseArity != n.len - 1: return
+  if formal[0].kind != nnkEmpty and
+     classifyType(formal[0]).ty.kind == itDistinct:
+    let retBase = distinctBaseTypeNode(formal[0])
+    if retBase == nil: return
+    views.add (rw, retBase)
+  (rw, views)
+
 proc isUserCallee(sym: NimNode): bool =
   ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
   ## call whose head resolved to a user routine (`isUserRoutine`) is walked
@@ -3143,6 +3241,10 @@ proc valueTypeName(node: NimNode): string =
   ## RFC-0005 S8d: `typeSpelling` -- a user type named `int8`/`float32`/
   ## `bool` is spelled `user:<name>`, so the name-keyed conversion arms
   ## (`intTyNames`, `fltTyNames`, `"bool"`) never read it as the builtin.
+  # RFC-0005 S8bc: a borrowed routine's argument, viewed at its base.
+  for i in countdown(borrowBaseViews.high, 0):
+    if borrowBaseViews[i].node == node:
+      return typeSpelling(borrowBaseViews[i].baseTy.getTypeInst)
   typeSpelling(node.getTypeInst)
 
 proc typeNodeName(node: NimNode): string =
@@ -5154,6 +5256,154 @@ proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                    $maxModelledInitialSize))])
   zeroValueForType(cls.ty)
 
+proc parseNewSeqLen(lenNode: NimNode; name: string;
+                    preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 5). `newSeq`'s length, guarded as Nim guards it:
+  ## the parameter is `Natural`, so a negative length raises `RangeDefect`
+  ## at the call (the typed argument's hidden conversion, stripped here and
+  ## checked explicitly, as `parseInitContainer` does its size). A length
+  ## above `maxModelledInitialSize` allocates that many elements: an
+  ## `OutOfMemDefect`, or not, depending on the host -- that path is
+  ## declined, scoped to it. A literal in range needs no guard.
+  var lit = lenNode
+  while lit.kind == nnkHiddenStdConv and lit.len >= 1:
+    lit = lit[lit.len - 1]
+  if lit.kind in nnkCharLit..nnkUInt64Lit and lit.intVal >= 0 and
+     lit.intVal <= maxModelledInitialSize:
+    return mkIntLit(lit.intVal)
+  let lenIR = parseAtomicOperand(lit, preamble, ctx)
+  preamble.add mkIf(@[
+    mkBranch(mkBinop(bLt, lenIR, mkIntLit(0)), mkRaise("RangeDefect", nil)),
+    mkBranch(mkBinop(bGt, lenIR, mkIntLit(maxModelledInitialSize)),
+             ctx.declineAtSite(feUnsupportedOp,
+               "`" & name & "` with a length above " &
+               $maxModelledInitialSize & " is not modelled: allocating it " &
+               "raises OutOfMemDefect or not, depending on the host -- " &
+               "path degraded to sxUnknown",
+               name & ": length above " & $maxModelledInitialSize))])
+  lenIR
+
+proc parseNewSeqExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 5). The stdlib's `newSeq[T](n)` (and
+  ## `newSeq[T]()`, `n = 0`): a seq of `n` zero elements (`iekSeqNewZero`).
+  ## `nil` for any other call. It was walked as the generic stdlib body,
+  ## which reaches an unsupported `when` and the seq payload cast
+  ## (`heUnsafeCast`), so every call declined.
+  if calleeSym.kind != nnkSym or calleeSym.strVal != "newSeq" or
+     not isStdlibDecl(calleeSym) or n.len != 2:
+    return nil
+  let cls = classifyType(n)
+  if cls.ty.kind != itSeq: return nil
+  mkSeqNewZero(parseNewSeqLen(n[1], "newSeq", preamble, ctx),
+               cls.ty.seqElemTy)
+
+proc parseGetOrDefault(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                       ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc. The stdlib's `getOrDefault(t, key)` /
+  ## `getOrDefault(t, key, default)` on a modelled `Table`: the value at
+  ## `key` when the table has it, else `default` (or `default(V)`, the
+  ## value an uninitialised `var v: V` gets). `nil` for any other call, and
+  ## for a value type with no zero (it then walks the stdlib body, as
+  ## before). Lowered as
+  ##
+  ##   if contains(t, key): let r = t[key]   (`isIndex`: never raises here)
+  ##   else:                let r = default
+  ##
+  ## Nim evaluates `t`, `key` and `default` before the lookup, so the key
+  ## and the default are bound first (`parseAtomicOperand`). Presence is
+  ## `contains`, i.e. `hasKey`, which is exactly the stdlib's own
+  ## `rawGet(...) >= 0` test: a NaN float key is never present, so its
+  ## lookup is the default (`tabKeyNaN`, S8at). The stdlib body was walked
+  ## before; its `hashes.Hash` locals classify as no modelled type, so every
+  ## call declined, and under `and` it was a walker fault.
+  if calleeSym.kind != nnkSym or calleeSym.strVal != "getOrDefault" or
+     not isStdlibDecl(calleeSym) or n.len notin [3, 4]:
+    return nil
+  let recvCls = classifyType(n[1])
+  if recvCls.ty.kind != itTable: return nil
+  let valTy = recvCls.ty.tabValTy
+  let zero = if n.len == 3: zeroValueForType(valTy) else: nil
+  if n.len == 3 and zero == nil: return nil
+  let recvIR = liftIndexContainer(parseExpr(n[1], preamble, ctx),
+                                  recvCls.ty, preamble, ctx)
+  let keyIR = parseAtomicOperand(n[2], preamble, ctx)
+  let defIR = if n.len == 4: parseAtomicOperand(n[3], preamble, ctx)
+              else: zero
+  let synth = freshSynth(ctx, "tgod")
+  preamble.add mkIf(
+    @[mkBranch(mkContains(recvIR, keyIR),
+               mkIndexStmt(synth, recvIR, keyIR, valTy))],
+    mkLet(synth, valTy, defIR))
+  mkVar(synth)
+
+proc mgetOrPutCall(n: NimNode): NimNode =
+  ## RFC-0005 S8bc (item 7). The stdlib's `mgetOrPut(t, key, default)` /
+  ## `mgetOrPut(t, key)` call on a modelled `Table` under `n`'s hidden
+  ## wrappers (its `var B` result reaches every use as an `nnkHiddenDeref`),
+  ## or nil. Its key must be a literal or a plain variable: the cell is
+  ## addressed more than once (the presence test, the insert, the read and
+  ## a mutation's write back, all as `t[key]`), so evaluating the key twice
+  ## must be evaluating it once -- the S8at element arms' own gate
+  ## (`arrayElemLvalue`). Any other key keeps the stdlib body walk (a
+  ## decline, as before).
+  let c = unwrapHidden(n)
+  if c.kind notin {nnkCall, nnkCommand} or c.len notin [3, 4] or
+     c[0].kind != nnkSym or c[0].strVal != "mgetOrPut" or
+     not isStdlibDecl(c[0]):
+    return nil
+  if classifyType(unwrapHidden(c[1])).ty.kind != itTable: return nil
+  if unwrapHidden(c[2]).kind notin {nnkSym, nnkCharLit .. nnkUInt64Lit,
+                                    nnkFloatLit .. nnkFloat64Lit,
+                                    nnkStrLit .. nnkTripleStrLit}:
+    return nil
+  c
+
+proc parseMGetOrPut(n: NimNode; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 7). `mgetOrPut(t, key, default)` read as a value:
+  ## the get-or-insert. Lowered as
+  ##
+  ##   let d = default                       (Nim evaluates it eagerly)
+  ##   if contains(t, key): discard  else: t[key] = d
+  ##   let r = t[key]                        (`isIndex`: present here)
+  ##
+  ## The returned value is the cell's value at the call. The REFERENCE
+  ## `mgetOrPut` returns is modelled by its writers, not here: a mutation
+  ## through it (`t.mgetOrPut(k, @[]).add v`, `+= v`, `inc`, `= v`) reaches
+  ## the S8at element arms as the lvalue `t[key]` (`elemLvalueBracket`),
+  ## which read this value and write the result back to `t[key]` -- the
+  ## same cell the reference denotes, since nothing between the call and
+  ## the write can move it. The stdlib body was walked before: its
+  ## `hashes.Hash` locals classify as no modelled type (a decline), and the
+  ## `+=` / `inc` forms on its result declined or, for `inc`, dropped the
+  ## write (see the `inc`/`dec` arm).
+  let c = mgetOrPutCall(n)
+  if c == nil: return nil
+  let recvCls = classifyType(unwrapHidden(c[1]))
+  let valTy = recvCls.ty.tabValTy
+  let zero = if c.len == 3: zeroValueForType(valTy) else: nil
+  if c.len == 3 and zero == nil: return nil
+  let defIR = if c.len == 4: parseAtomicOperand(c[3], preamble, ctx)
+              else: zero
+  let keyIR = parseExpr(c[2], preamble, ctx)
+  let recvIR = liftIndexContainer(parseExpr(c[1], preamble, ctx),
+                                  recvCls.ty, preamble, ctx)
+  var ins: seq[IRStmt]
+  let store = parseAsgn(nnkAsgn.newTree(nnkBracketExpr.newTree(c[1], c[2]),
+                                        newEmptyNode()),
+                        defIR, ins, ctx)
+  ins.add store
+  preamble.add mkIf(@[mkBranch(mkContains(recvIR, keyIR), mkBlock(@[]))],
+                    mkBlock(ins))
+  # The receiver is read again AFTER the insert: `liftIndexContainer` may
+  # have bound a field receiver to a temp, which the insert does not update.
+  let recvAfter = liftIndexContainer(parseExpr(c[1], preamble, ctx),
+                                     recvCls.ty, preamble, ctx)
+  let synth = freshSynth(ctx, "mgop")
+  preamble.add mkIndexStmt(synth, recvAfter, keyIR, valTy)
+  mkVar(synth)
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -5250,11 +5500,32 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   preamble.add callStmt
   mkVar(synth)
 
+proc parseBorrowViewedExpr(rw: NimNode,
+                           views: seq[tuple[node, baseTy: NimNode]],
+                           preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 2). Parse a borrowed routine call's rewrite `rw`
+  ## (`borrowRoutineRewrite`) with its argument views pushed.
+  let mark = borrowBaseViews.len
+  borrowBaseViews.add views
+  result = parseExpr(rw, preamble, ctx)
+  borrowBaseViews.setLen mark
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
     return mkVar(byRefName(n))
+  # RFC-0005 S8bc (item 2): a non-operator `{.borrow.}` routine call is its
+  # base routine's call on the unwrapped arguments (`borrowRoutineRewrite`).
+  block borrowRoutine:
+    let (rw, views) = borrowRoutineRewrite(n)
+    if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
+  # RFC-0005 S8bc (item 7): `mgetOrPut(t, k[, d])` read as a value is the
+  # get-or-insert (`parseMGetOrPut`). Hooked ahead of the `nnkHiddenDeref`
+  # arm its `var B` result is wrapped in.
+  if n.kind in {nnkHiddenDeref, nnkCall, nnkCommand}:
+    let mg = parseMGetOrPut(n, preamble, ctx)
+    if mg != nil: return mg
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
     mkIntLit(n.intVal)
@@ -5495,21 +5766,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
-    if operand.kind == nnkIdent:
-      # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
-      # untyped ident (`substIteratorParams`): its type cannot be read,
-      # so which conversion this is (a narrowing, a range check, an
-      # int <-> float) is unknown. `valueTypeName` failed the whole
-      # compile ("node has no type") -- reached by `pairs` over a
-      # `Table[K, seq[V]]`. A recorded decline, as the catch-all's.
-      let dummyTy = classifyType(n).ty
-      preamble.add ctx.declineAtSite(
-        feUnsupportedExprKind,
-        "conversion `" & n.repr & "` of an inlined iterator parameter: " &
-          "its type is not known here",
-        "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
-      let dummy = zeroValueForType(dummyTy)
-      return (if dummy != nil: dummy else: mkIntLit(0))
+    # RFC-0005 S8bc: an inlined iterator's parameter is its typed formal
+    # symbol (the S8at untyped-ident decline here is gone with the
+    # substitution that produced the ident).
     let tgt = typeNodeName(n[0])
     let src = valueTypeName(operand)
     if tgt in fltTyNames and src in intTyNames:
@@ -5586,6 +5845,32 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let tgtWidthV = intTyWidth(tgtN)
       let srcSigned = intTySigned(srcN)
       let tgtSignedV = intTySigned(tgtN)
+      # RFC-0005 S8bc: a constant operand -- a typed integer literal
+      # (`int(-200'i16)`) or `low`/`high` of an int-family type
+      # (`int(high(int32))`, which the parser lowers to an untagged literal
+      # through `lowHighIntLit`) -- whose value the target holds is that
+      # value. It reached `mkConvIntWidth`, whose walker asserts a BV operand
+      # of the source width, while an untagged literal lowers at 64 bits: a
+      # `weInternalWalkerFault` on `y > int(high(int32))`. The hidden
+      # conversion arm already passes a literal through (`isIntLiteralNode`).
+      let lowHighOp = operand.kind == nnkCall and operand.len == 2 and
+        operand[0].kind == nnkSym and operand[0].strVal in ["low", "high"] and
+        isStdlibDecl(operand[0]) and typeNodeName(operand[1]) in intTyNames
+      if isIntLiteralNode(operand) or lowHighOp:
+        let v =
+          if lowHighOp:
+            lowHighIntLit(typeNodeName(operand[1]),
+                          wantLow = operand[0].strVal == "low")
+          else: operand.intVal
+        let fits =
+          if tgtSignedV:
+            tgtWidthV >= 64 or
+              (v >= -(1'i64 shl (tgtWidthV - 1)) and
+               v < (1'i64 shl (tgtWidthV - 1)))
+          else:
+            v >= 0 and (tgtWidthV >= 64 or v < (1'i64 shl tgtWidthV))
+        if fits and (srcSigned or v >= 0):
+          return mkIntLit(v)
       # RFC-0005 S8j: which conversions range-check. Probed on the pinned
       # toolchain (c and cpp identical), with the operand through a noinline
       # identity so nothing folds:
@@ -5655,6 +5940,21 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     else:
       parseExpr(operand, preamble, ctx)
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenAddr:
+    # RFC-0005 S8bc (item 7). An EMPTY `@[]` passed where a `seq[T]` is
+    # expected (`t[k] = @[]`, `mgetOrPut(t, k, @[])`, `getOrDefault(t, k,
+    # @[])`) types `seq[empty]` and reaches the parameter through
+    # `HiddenSubConv(Empty, Prefix(@, Bracket()))`. The `@` arm classifies
+    # the literal itself, whose element is no modelled type, so the empty
+    # seq was built over the unbacked placeholder sort (`Array Int Bool`)
+    # and the first store into it was a walker fault (`Z3 sort mismatch`).
+    # The conversion's own type is the `seq[T]` the literal becomes.
+    if n.kind == nnkHiddenSubConv and n.len == 2 and
+       n[1].kind == nnkPrefix and n[1].len == 2 and
+       n[1][0].kind == nnkSym and n[1][0].strVal == "@" and
+       n[1][1].kind == nnkBracket and n[1][1].len == 0:
+      let convCls = classifyType(n)
+      if convCls.ty.kind == itSeq:
+        return mkSeqLit(@[], convCls.ty.seqElemTy)
     # Issue #163 review (rev item 2). `nnkHiddenSubConv` joins the existing
     # `nnkHiddenStdConv` passthrough here: it is the conversion the compiler
     # inserts between a `range[..]` value and its BASE type (confirmed via a
@@ -5726,20 +6026,6 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `NimTypeKind` a generic/concept instantiation might produce.
       if isIntLiteralNode(wrapped):
         parseExpr(wrapped, preamble, ctx)
-      elif wrapped.kind == nnkIdent:
-        # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
-        # untyped ident (`substIteratorParams`), under a hidden conversion:
-        # `classifyType(wrapped)` failed the whole compile ("node has no
-        # type"), so whether the conversion widens is unknown. Reached by
-        # `pairs` over a `Table[K, seq[V]]`. A recorded decline, as the
-        # explicit conversion's (`nnkConv`).
-        preamble.add ctx.declineAtSite(
-          feUnsupportedExprKind,
-          "hidden conversion of inlined iterator parameter `" &
-            wrapped.repr & "`: its type is not known here",
-          "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
-        let dummy = zeroValueForType(classifyType(n).ty)
-        if dummy != nil: dummy else: mkIntLit(0)
       else:
         let outerCls = classifyType(n)
         let innerCls = classifyType(wrapped)
@@ -7373,6 +7659,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n),
                                     recvCls.ty.seqElemTy)   # RFC-0005 S8ba
           return mkVar(synth)
+    block:
+      # RFC-0005 S8bc (item 5): `newSeq[T](n)`.
+      let nsIR = parseNewSeqExpr(n, calleeSym, preamble, ctx)
+      if nsIR != nil: return nsIR
+    # RFC-0005 S8bc: `getOrDefault(t, k[, d])` on a Table is the present
+    # value, else `d` (or `default(V)`). It walked the stdlib body before,
+    # whose `hashes.Hash` locals the model does not classify (a decline, and
+    # a walker fault under `and`).
+    block:
+      let godIR = parseGetOrDefault(n, calleeSym, preamble, ctx)
+      if godIR != nil: return godIR
     # `[](t, k)` on a Table → A-normalised isIndex (runtime dispatches
     # on receiver kind for select-from-tabData semantics).
     if calleeSym.strVal == "[]" and n.len == 3:
@@ -8287,26 +8584,6 @@ proc hasBreakContinueShallow(n: NimNode): bool =
   ## loopStack.len==0 → path dropped while later inlined yields still run →
   ## wrong surviving state → false positive (CRIT-2/SF-1, ADR-0014 D4-2).
   hasKindShallow(n, {nnkBreakStmt, nnkContinueStmt})
-
-proc substIteratorParams(n: NimNode,
-                         paramSubst: Table[string, string]): NimNode =
-  ## Deep-copy `n`, replacing every `nnkSym`/`nnkIdent` whose `strVal` is
-  ## a key in `paramSubst` with a fresh `nnkIdent` of the mapped gensym'd
-  ## name. Only USE sites are affected: formal params never appear as
-  ## declaration-site `nnkSym` inside the body (they are the routine's own
-  ## formals, not body-declared locals), so `classifyType` on declaration-
-  ## site identifiers is unaffected. Does NOT descend into nested routines
-  ## to avoid capturing their params (different scope).
-  if n.kind in {nnkSym, nnkIdent}:
-    let s = n.strVal
-    if s in paramSubst:
-      return ident(paramSubst[s])
-    return n
-  if n.kind in nestedRoutineScanBoundary:
-    return n   ## own scope — do not substitute inside
-  result = n.copyNimNode()
-  for c in n:
-    result.add substIteratorParams(c, paramSubst)
 
 proc sameSym(a, b: NimNode): bool =
   ## RFC-chapulin-hardening R6 (ADR-0025 hardening). True iff `a` and `b` are
@@ -11775,6 +12052,13 @@ proc elemLvalueBracket(n: NimNode): NimNode =
   ## through `[]`'s `var` overload is the call `[](t, k)` under a hidden
   ## deref, which `parseAsgn`'s `t[k] = v` arm takes as the bracket.
   if n.kind == nnkBracketExpr and n.len == 2: return n
+  # RFC-0005 S8bc (item 7): the cell `mgetOrPut(t, k[, d])` returns a
+  # reference to is `t[k]` once the call has run (it inserts an absent key),
+  # so its writers write back through `t[k]`; their read of the cell's old
+  # value parses the call itself (`parseMGetOrPut`), which performs the
+  # insert first.
+  let mg = mgetOrPutCall(n)
+  if mg != nil: return nnkBracketExpr.newTree(mg[1], mg[2])
   let c = unwrapHidden(n)
   if c.kind in {nnkCall, nnkCommand} and c.len == 3 and
      c[0].kind == nnkSym and c[0].strVal == "[]":
@@ -11792,6 +12076,181 @@ proc arrayElemLvalue(n: NimNode): bool =
                                 nnkFloatLit .. nnkFloat64Lit,
                                 nnkStrLit .. nnkTripleStrLit} and
     classifyType(unwrapHidden(b[0])).ty.kind in {itArray, itTable}
+
+proc pureIndexNode(n: NimNode): bool =
+  ## RFC-0005 S8bc. An index evaluating it twice is evaluating it once: a
+  ## literal or a plain variable (the gate `arrayElemLvalue` applies).
+  unwrapHidden(n).kind in {nnkSym, nnkCharLit .. nnkUInt64Lit,
+                           nnkFloatLit .. nnkFloat64Lit,
+                           nnkStrLit .. nnkTripleStrLit}
+
+proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
+                       ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bc (item 7). `inc(x[, y])` / `dec(x[, y])` -- the system
+  ## magics -- on any receiver the bare-symbol int arm (Phase 15 R8) does
+  ## not take. SOUNDNESS: those reached the user-call fallback, where a
+  ## bodiless `{.magic.}` routine is registered with an EMPTY body, so the
+  ## write to the `var` receiver was dropped without a record: `inc a[1]`,
+  ## `inc t[k]`, `inc o.f`, `inc s[i]`, `inc p[]` left the value unchanged
+  ## and a target behind the old value was a clean, wrong sxSat. Now:
+  ##
+  ##   * an unranged int receiver that is an array element, a Table value or
+  ##     the cell `mgetOrPut` returns (`arrayElemLvalue`), a seq element
+  ##     with a pure index, a field path `dottedFieldShape` accepts, or a
+  ##     dereference, is `x = x +/- y`: the old value is read and bound
+  ##     first (the element's IndexDefect / KeyError, `mgetOrPut`'s insert),
+  ##     then the step, then the write through the plain assignment's own
+  ##     lvalue arm (`parseAsgn`);
+  ##   * every other receiver -- an enum, a char, a ranged int, any other
+  ##     shape -- declines on its path (`feUnsupportedOp`), never the silent
+  ##     no-op.
+  let lhs = unwrapHidden(n[1])
+  let lty = classifyType(n[1]).ty
+  let isInc = n[0].strVal == "inc"
+  let fieldNode = if lhs.kind == nnkCheckedFieldExpr and lhs.len >= 1: lhs[0]
+                  else: lhs
+  let target =
+    if lty.kind != itInt or lty.hasRange: nil
+    elif arrayElemLvalue(n[1]): elemLvalueBracket(n[1])
+    elif lhs.kind == nnkBracketExpr and lhs.len == 2 and
+         unwrapHidden(lhs[0]).kind == nnkSym and
+         classifyType(unwrapHidden(lhs[0])).ty.kind == itSeq and
+         pureIndexNode(lhs[1]): lhs
+    elif fieldNode.kind == nnkDotExpr and dottedFieldShape(fieldNode): lhs
+    elif lhs.kind == nnkDerefExpr and lhs.len == 1: lhs
+    else: nil
+  if target == nil:
+    return ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "`" & n[0].strVal & "` on `" & n[1].repr & "` (" &
+              $lty.kind & ") is not modelled -- path degraded to sxUnknown"),
+      "`" & n[0].strVal & "` on this receiver is not modelled")
+  let oldTmp = freshSynth(ctx, "incOld")
+  preamble.add mkLet(oldTmp, lty, parseExpr(n[1], preamble, ctx))
+  let stepIR = if n.len >= 3: parseExpr(n[2], preamble, ctx) else: mkIntLit(1)
+  let newVal = mkBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR)
+  parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
+
+proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
+  ## or `values` (`for k, v in t` is `pairs(t)` after semcheck; `for (k, v)
+  ## in t.pairs` and the single-variable `for kv in t.pairs` too), or nil
+  ## for any other loop. It fell to the iterator inliner, which walked the
+  ## stdlib body over the table's hidden slots and declined. Lowered as a
+  ## bounded unroll over the table's key set:
+  ##
+  ##   tabKeys(ks := t)               (`isTabKeys`: an enumeration of the
+  ##   let L = ks.len                  present keys in a FREE order)
+  ##   var i = 0
+  ##   while i < L:
+  ##     let k = ks[i]
+  ##     let v = t[k]                 (pairs / values: the LIVE value, as
+  ##     body                          Nim reads `t.data[h].val` per yield)
+  ##     if t.len != L: <decline>     (Nim asserts the length unchanged)
+  ##     i += 1
+  ##
+  ## The walker's k-unroll bounds the trip count (`maxLoopUnwind`, declining
+  ## past it), and a table that can hold two or more entries taints the path
+  ## `feTableIterOrder`: Nim visits the keys in hash order, the model in any
+  ## order, so a candidate is replayed and one whose label needs another
+  ## order than Nim's is refuted to sxUnknown -- the order-dependent program
+  ## declines; an order-independent one is confirmed. An sxUnsat holds for
+  ## every order, Nim's among them.
+  ##
+  ## The length check is a scoped decline, not a modelled `AssertionDefect`:
+  ## the assert is compiled out under `--assertions:off`. A table read
+  ## through a call or another non-variable expression is iterated from the
+  ## value bound once (the body cannot reach it). A float key declines: a
+  ## NaN entry counts in the size but is never present, so no enumeration
+  ## of the present keys has the size. `mpairs` / `mvalues` (a mutable view
+  ## of the value) keep the inliner's decline.
+  let iterExpr = n[^2]
+  if iterExpr.kind notin {nnkCall, nnkCommand} or iterExpr.len != 2 or
+     iterExpr[0].kind != nnkSym or
+     iterExpr[0].strVal notin ["pairs", "keys", "values"] or
+     not isStdlibDecl(iterExpr[0]):
+    return nil
+  let container = iterExpr[1]
+  let tabCls = classifyType(container)
+  if tabCls.ty.kind != itTable: return nil
+  let iterName = iterExpr[0].strVal
+  var vars: seq[NimNode]
+  for i in 0 ..< n.len - 2:
+    if n[i].kind == nnkVarTuple:
+      for c in n[i]:
+        if c.kind != nnkEmpty: vars.add c
+    else: vars.add n[i]
+  var shapeOk =
+    if iterName == "pairs": vars.len in [1, 2] else: vars.len == 1
+  for v in vars:
+    if v.kind != nnkSym: shapeOk = false
+  if not shapeOk:
+    return ctx.declineAtSite(feUnsupportedStmtKind,
+      siteMsg(n, "for-loop over a Table's `" & iterName & "` with " &
+              $vars.len & " loop variable(s) is not modelled"),
+      "for-loop over a Table's `" & iterName & "`: loop-variable shape")
+  let keyTy = tabCls.ty.tabKeyTy
+  let valTy = tabCls.ty.tabValTy
+  if keyTy.kind notin {itString, itInt, itBool}:
+    return ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "iteration over a Table keyed by " & $keyTy &
+              " is not modelled (a NaN float key counts in the size but is " &
+              "never present) -- path degraded to sxUnknown"),
+      "iteration over a Table keyed by " & $keyTy.kind & " is not modelled")
+  let intTy = tInt(64, signed = true)
+  let body = parseLoopBody(n[^1], ctx).body   # a `continue` leaves the body
+  var pre: seq[IRStmt]
+  let snapIR = liftIndexContainer(parseExpr(container, pre, ctx), tabCls.ty,
+                                  pre, ctx)
+  let bare = unwrapHidden(container)
+  let live = bare.kind == nnkSym or
+             (bare.kind == nnkDotExpr and dottedFieldShape(bare))
+  let ksName = freshSynth(ctx, "tks")
+  pre.add mkTabKeysStmt(ksName, snapIR, keyTy, siteLoc(n))
+  let lenName = freshSynth(ctx, "tkn")
+  pre.add mkLet(lenName, intTy, mkSeqLen(mkVar(ksName)))
+  let ivName = freshSynth(ctx, "iv")
+  pre.add mkLet(ivName, intTy, mkIntLit(0))
+  var loopStmts: seq[IRStmt]
+  let kSynth = freshSynth(ctx, "tkk")
+  loopStmts.add mkIndexStmt(kSynth, mkVar(ksName), mkVar(ivName), keyTy)
+  var vIR: IRExpr = nil
+  if iterName != "keys":
+    var inner: seq[IRStmt]
+    let recvNow =
+      if live: liftIndexContainer(parseExpr(container, inner, ctx),
+                                  tabCls.ty, inner, ctx)
+      else: snapIR
+    loopStmts.add inner
+    let vSynth = freshSynth(ctx, "tkv")
+    loopStmts.add mkIndexStmt(vSynth, recvNow, mkVar(kSynth), valTy)
+    vIR = mkVar(vSynth)
+  case iterName
+  of "keys": loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
+  of "values": loopStmts.add mkLet(vars[0].strVal, valTy, vIR)
+  else:
+    if vars.len == 2:
+      loopStmts.add mkLet(vars[0].strVal, keyTy, mkVar(kSynth))
+      loopStmts.add mkLet(vars[1].strVal, valTy, vIR)
+    else:
+      let tupTy = classifyType(vars[0]).ty
+      loopStmts.add mkLet(vars[0].strVal, tupTy,
+                          mkTupleLit(@[mkVar(kSynth), vIR], tupTy))
+  loopStmts.add body
+  if live:
+    var inner2: seq[IRStmt]
+    let lenNow = mkSeqLen(parseExpr(container, inner2, ctx))
+    loopStmts.add inner2
+    loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "the Table's length changed while iterating over it: " &
+                "Nim's `assert` there (compiled out under " &
+                "--assertions:off) is not modelled -- path degraded to " &
+                "sxUnknown"),
+        "the Table's length changed while iterating over it"))])
+  loopStmts.add mkAssign(ivName, mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
+  pre.add mkWhile(mkBinop(bLt, mkVar(ivName), mkVar(lenName)),
+                  mkBlock(loopStmts))
+  mkBlock(pre)
 
 proc insertArgs(elemTy: IRType; args: seq[IRExpr];
                 preamble: var seq[IRStmt]; ctx: ParseCtx): seq[IRExpr] =
@@ -11935,6 +12394,14 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
   ## is).
   template asgnRhs(): IRExpr =
     (if rhsOverride != nil: rhsOverride else: parseExpr(n[1], preamble, ctx))
+  # RFC-0005 S8bc (item 7): `t.mgetOrPut(k, d) = v`. Nim runs the call (the
+  # insert of an absent key, with `d` evaluated) before the right-hand side,
+  # then stores through the reference: the call's read is parsed for its
+  # effect and the store is `t[k] = v`.
+  if mgetOrPutCall(n[0]) != nil:
+    discard parseExpr(n[0], preamble, ctx)
+    return parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[0]), n[1]),
+                     rhsOverride, preamble, ctx)
   # Shapes after semcheck (some forms get re-wrapped):
   #   * `name = expr`                 — simple env reassignment
   #   * `t[k] = v`                    — Table set
@@ -12218,10 +12685,37 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
 
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
+                    ctx: ParseCtx): IRStmt
+
+proc parseBorrowViewedStmt(rw: NimNode,
+                           views: seq[tuple[node, baseTy: NimNode]],
+                           preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bc (item 2). `parseBorrowViewedExpr`'s statement form.
+  let mark = borrowBaseViews.len
+  borrowBaseViews.add views
+  result = parseStmtInner(rw, preamble, ctx)
+  borrowBaseViews.setLen mark
+
+proc parseStmtInner(n: NimNode,
+                    preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
   ## The `preamble` accumulates A-normalised calls from any expression
   ## the surrounding statement contains; callers wrap the resulting
   ## stmt with the preamble before returning.
+  # RFC-0005 S8bc (item 2): a statement-position borrowed routine call
+  # (`inc(m)`, `d.add(3)`), as `parseExpr`'s.
+  block borrowRoutine:
+    let (rw, views) = borrowRoutineRewrite(n)
+    if rw != nil: return parseBorrowViewedStmt(rw, views, preamble, ctx)
+  # RFC-0005 S8bc (item 5): `newSeq(s, n)` is `s = newSeq[T](n)`. The length
+  # is evaluated (and its guard forked) before `s` is written.
+  if n.kind in {nnkCall, nnkCommand} and n.len == 3 and
+     n[0].kind == nnkSym and n[0].strVal == "newSeq" and
+     isStdlibDecl(n[0]) and classifyType(n[1]).ty.kind == itSeq:
+    let target = unwrapHidden(n[1])
+    let lenIR = parseNewSeqLen(n[2], "newSeq", preamble, ctx)
+    return parseAsgn(nnkAsgn.newTree(target, newEmptyNode()),
+      mkSeqNewZero(lenIR, classifyType(n[1]).ty.seqElemTy), preamble, ctx)
   case n.kind
   # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a
@@ -12373,6 +12867,12 @@ proc parseStmtInner(n: NimNode,
     #   * `for i in a..<b: body` → Infix(..<, a, b) — exclusive
     #   * `for x in arr: body`   → Sym arr — static-N array
     #   * `for x in s: body`     → Sym s — seq[T]
+    # RFC-0005 S8bc (item 6): a Table's `pairs` / `keys` / `values`, ahead of
+    # the loop-variable shape check below (its `for (k, v)` form is a
+    # `nnkVarTuple`).
+    block tableFor:
+      let tf = parseTableForLoop(n, ctx)
+      if tf != nil: return tf
     let iterVar = n[0]
     let iterExpr = n[^2]
     let bodyNode = n[^1]
@@ -12612,9 +13112,18 @@ proc parseStmtInner(n: NimNode,
         # local spelled like a caller local gets its own slot (and a body
         # local shadowing an iterator param is not substituted as the param).
         claimRoutine(impl)
-        # D2 step 2: bind each formal param to a gensym'd let.
+        # D2 step 2: bind each formal param to a `let` of its own scoped
+        # name. RFC-0005 S8bc: the body keeps its TYPED parameter symbols.
+        # They were replaced by untyped `__sym_itp_N` idents
+        # (`substIteratorParams`), so every site that reads an operand's
+        # type (a conversion's source width, a hidden widening) could not:
+        # `int(n)` of a parameter declined (S8at), and a hidden `int32 ->
+        # int` widening of one was a walker fault. `claimRoutine(impl)`
+        # above already gives each formal a name unique in this scope (a
+        # caller local of the same spelling claimed first, so the formal is
+        # the one renamed), so the substitution bought nothing the scoped
+        # name does not.
         ctx.activeIterators.incl itSymName
-        var paramSubst = initTable[string, string]()  # param name → gensym'd name
         var preambleStmts: seq[IRStmt]
         var argIdx2 = 0
         for fi in 1 ..< formal.len:
@@ -12624,16 +13133,14 @@ proc parseStmtInner(n: NimNode,
           let cls = classifyType(tyNode)
           let defaultNode = paramDef[paramDef.len - 1]
           for pj in 0 ..< paramDef.len - 2:
-            let paramName = paramDef[pj].strVal
-            let synthName = freshSynth(ctx, "itp")
-            paramSubst[paramName] = synthName
+            let bindName = paramDef[pj].strVal   # scoped (RFC-0005 S8e)
             let argNode =
               if argIdx2 < iterExpr.len - 1: iterExpr[argIdx2 + 1]
               else: defaultNode  # use the pre-checked literal/const default
             var argPre: seq[IRStmt]
             let argIR = parseExpr(argNode, argPre, ctx)
             for s in argPre: preambleStmts.add s
-            preambleStmts.add mkLet(synthName, cls.ty, argIR)
+            preambleStmts.add mkLet(bindName, cls.ty, argIR)
             inc argIdx2
         # D2 step 3+4: substitute params in body, rewrite yields, parse.
         # Compute the iterator element type from its DECLARED return type in
@@ -12661,8 +13168,7 @@ proc parseStmtInner(n: NimNode,
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
             iterVarBindings.add (name, yieldElemTyTop.fields[k])
-        let substBody = substIteratorParams(implBody, paramSubst)
-        let bodyIR = parseIterBodyStmt(substBody, iterVarBindings, bodyNode, ctx)
+        let bodyIR = parseIterBodyStmt(implBody, iterVarBindings, bodyNode, ctx)
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:
@@ -12897,6 +13403,10 @@ proc parseStmtInner(n: NimNode,
                     incCls.ty
                   else: nil
       mkAssign(nm, mkBinop(bop, mkVar(nm), stepIR), incTy)
+    elif n.len >= 2 and n[0].kind == nnkSym and
+         isBuiltinNamed(n[0], ["inc", "dec"]):
+      # RFC-0005 S8bc (item 7): every other system `inc`/`dec`.
+      parseIncDecLvalue(n, preamble, ctx)
     else:
       # User-proc call as a statement (void-return). Only resolvable
       # against typed AST — isolation-mode falls to `isUnsupported`.
@@ -13105,8 +13615,7 @@ proc parseStmtInner(n: NimNode,
               "N49: dotted-field lvalue mutation `" & calleeName &
                             "` unsupported (feUnsupportedOp)")
         elif recv1 != nil and arrayElemLvalue(recv1) and
-             isKnownMutatingReceiverCall(calleeName, recv1, n.len) and
-             calleeName != "insert":
+             isKnownMutatingReceiverCall(calleeName, recv1, n.len):
           # RFC-0005 S8at: a mutation of an ARRAY ELEMENT (`a[1].add x`,
           # `p.a[i].del j`, a Table/HashSet element likewise), or of a
           # TABLE VALUE (`t["a"].add x`, `t[k].incl y`: `[]`'s `var`
@@ -13120,16 +13629,34 @@ proc parseStmtInner(n: NimNode,
           # (`dottedOpExpr`) and the result is written back through the
           # same lvalue arm `a[i] = v` takes (`parseAsgn`). The index is a
           # literal or a variable (`arrayElemLvalue`), so reading it twice
-          # is reading it once. `insert`'s two-phase lowering stays on the
-          # generic path.
+          # is reading it once.
           let oldTmp = freshSynth(ctx, "aelt")
           let eltTy = classifyType(recv1).ty
           preamble.add mkLet(oldTmp, eltTy, parseExpr(recv1, preamble, ctx))
           let op = mutationOp(calleeName, eltTy.kind, n)
           var args: seq[IRExpr]
           for i in 2 ..< n.len: args.add parseExpr(n[i], preamble, ctx)
+          var placeFrom = oldTmp
+          if op == doSeqInsert:
+            # RFC-0005 S8bc (item 4): `a[i].insert(x, j)`, the bare arm's and
+            # the dotted field's two phases (S8ar, `IRExpr.insGrow`). It fell
+            # to the generic call (`system.insert` inlined to an unsupported
+            # `when` and the seq payload cast). The arguments are bound once
+            # (`insertArgs`); the grow phase is its own element write, and
+            # the place phase reads the grown element back, so its
+            # IndexDefect (`j > len`) is judged against the seq the grow
+            # left, as Nim's single in-place call does.
+            args = insertArgs(eltTy.seqElemTy, args, preamble, ctx)
+            let grownTmp = freshSynth(ctx, "aeltGrow")
+            preamble.add mkLet(grownTmp, eltTy,
+              dottedOpExpr(doSeqInsertGrow, mkVar(oldTmp), args))
+            preamble.add parseAsgn(
+              nnkAsgn.newTree(elemLvalueBracket(recv1), newEmptyNode()),
+              mkVar(grownTmp), preamble, ctx)
+            placeFrom = freshSynth(ctx, "aeltPlace")
+            preamble.add mkLet(placeFrom, eltTy, parseExpr(recv1, preamble, ctx))
           let newTmp = freshSynth(ctx, "aeltNew")
-          preamble.add mkLet(newTmp, eltTy, dottedOpExpr(op, mkVar(oldTmp), args))
+          preamble.add mkLet(newTmp, eltTy, dottedOpExpr(op, mkVar(placeFrom), args))
           parseAsgn(nnkAsgn.newTree(elemLvalueBracket(recv1), newEmptyNode()),
                     mkVar(newTmp), preamble, ctx)
         else:
@@ -13417,6 +13944,33 @@ proc parseStmtInner(n: NimNode,
                   if baseOpStr == "&": mkStrOp(iekStrConcat, "&", @[old, rhsIR])
                   else: mkBinop(binopForInfix(baseOpStr), old, rhsIR)
                 return mkIndexAssignStmt(seqRecv.strVal, idxIR, newVal, siteLoc(n))
+        # RFC-0005 S8bc (item 7): `a[i] += v` on an ARRAY element not
+        # reached above, `t[k] += v` on a TABLE value, and `t.mgetOrPut(k,
+        # d) += v` on the cell `mgetOrPut` returns a reference to -- the
+        # S8at element arms' read / operate / write-back, with the write
+        # through `t[k]` (`elemLvalueBracket`). The read is bound before the
+        # right-hand side is parsed: `[]`'s `KeyError` (an absent key) and
+        # `mgetOrPut`'s insert come first, as Nim takes the address first.
+        # Declined before (this arm's final decline).
+        if arrayElemLvalue(n[1]):
+          let eltTy = classifyType(n[1]).ty
+          let eltFits =
+            if baseOpStr == "&":
+              eltTy.kind == itString and classifyType(n[2]).ty.kind == itString
+            else:
+              (eltTy.kind == itInt and not eltTy.hasRange) or
+                eltTy.kind in {itFloat32, itFloat64}
+          if eltFits:
+            let oldTmp = freshSynth(ctx, "augElt")
+            preamble.add mkLet(oldTmp, eltTy, parseExpr(n[1], preamble, ctx))
+            let rhsIR = parseExpr(n[2], preamble, ctx)
+            let newVal =
+              if baseOpStr == "&":
+                mkStrOp(iekStrConcat, "&", @[mkVar(oldTmp), rhsIR])
+              else: mkBinop(binopForInfix(baseOpStr), mkVar(oldTmp), rhsIR)
+            return parseAsgn(nnkAsgn.newTree(elemLvalueBracket(n[1]),
+                                             newEmptyNode()),
+                             newVal, preamble, ctx)
         return ctx.declineMarker(
           feUnsupportedStmtKind, &"augmented assign: LHS `{n[1].repr}` is not a simple variable " &
           &"(kind={n[1].kind}); degrade to sxUnknown (sound, Invariant 3)")
@@ -14066,9 +14620,18 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # RFC-0005 S8e: the call site's callee symbol is the generic INSTANCE; its
   # own proc type carries the instantiated formals as typed nodes (see
   # `instantiatedFormalTypes`).
+  # RFC-0005 S8bc: a callee's body is parsed outside any borrowed call's
+  # argument views (a node of the callee spelled like the caller's argument
+  # is not that argument).
+  # Swapped out, not `let`-copied: a compile-time `let` of a global seq
+  # aliases it in the VM, so the `setLen 0` emptied the saved views too
+  # (`vm_alias_guard`, RFC-0005 S8ab).
+  var savedViews: seq[tuple[node: NimNode, baseTy: NimNode]]
+  swap(savedViews, borrowBaseViews)
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil, byRef)
+  swap(savedViews, borrowBaseViews)
   sig.captures = captures
   # RFC-0005 S8ba: each by-reference formal's slot holds the ref its lvalue
   # is reached through, under the name the specialised body reads.

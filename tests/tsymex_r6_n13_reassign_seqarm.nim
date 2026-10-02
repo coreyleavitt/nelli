@@ -55,7 +55,7 @@ type
     of rkA: a: int
     of rkB:
       count: int
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc reassignToB(v: var Rec) =
   v.kind = rkB

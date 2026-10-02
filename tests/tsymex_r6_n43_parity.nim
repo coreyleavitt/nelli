@@ -160,7 +160,8 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 
   test "itSeq: deliberately EXCLUDED -- always allocatable per the predicate's own documented contract, backed or not (allocateSym's itSeq arm self-guards and never raises/degrades either way for this kind -- see the header note; the allocator-side half of this exact contract is pinned by the Bug #2/B7r2/N13 suites, not re-duplicated here)":
     check unallocatableFieldIssue(tSeq(tInt())).isNone                       ## backed elem
-    check unallocatableFieldIssue(tSeq(tTuple(@[tString(), tString()]))).isNone  ## unbacked elem -- STILL none
+    check unallocatableFieldIssue(tSeq(tSeq(tString()))).isNone  ## unbacked elem (RFC-0005 S8bc: a seq of seqs) -- STILL none
+    check unallocatableFieldIssue(tSeq(tTuple(@[tString(), tString()]))).isNone  ## RFC-0005 S8bc: a leaf-split tree elem
 
   test "itTable: good key+val allocatable; bad key / bad val not":
     check unallocatableFieldIssue(tTable(tString(), tInt(64, signed = true))).isNone
@@ -388,7 +389,10 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
 
 type
   N43WitnessObj = object
-    a: int
+    # RFC-0005 S8bc: a ref part. A seq of a plain object is a leaf-split,
+    # renderable seq since S8bc; a seq element holding a ref is still not
+    # renderable (no position is collected inside a seq element).
+    a: ref int
 
 proc n43ParamUnsupported(x: cstring, y: int) =
   if y == 42:

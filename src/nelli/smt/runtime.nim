@@ -347,6 +347,16 @@ type
         ## RFC-0005 S8ar. The heap steps (`refSteps`) of the cell this seq
         ## was read from; an element ref read out of it is that many steps
         ## from a root. 0 for a seq that is not a heap read.
+      seqDataMore*: seq[Z3AnyAst]
+        ## RFC-0005 S8bc (item 3). A seq whose element is a tree value
+        ## (`isTreeSeqElemTy`: a tuple, object, array, case object or
+        ## distinct of one) is held LEAF-SPLIT: one `Int -> leaf` data array
+        ## per leaf of the element (`heapLeafSuffixes(seqElemTy)`), leaf 0 in
+        ## `seqDataRaw` and the rest here, in order. Empty for a scalar
+        ## element. Every site that builds a seq from another carries these
+        ## (`seqArrs` / `withSeqArrsOf` / `mkSeqSV`); a read rebuilds the
+        ## element from the selects of every array (`seqElemAt`), a store
+        ## writes every array (`seqStoreArrs`).
     of svTable:
       tabDataRaw*:    Z3AnyAst
       tabDataMore*:   seq[Z3AnyAst]
@@ -1119,9 +1129,6 @@ proc variantDiscHeapKey(objTy: IRType): string
   ## `renderCell` names each axis's discriminator heap.
 proc mvAxisView(mv: IRType; axisIx: int): IRType
   ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
-proc heapCompoundTy(ty: IRType): bool
-  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
-  ## `renderCellField` renders a leaf-split compound cell.
 proc heapLeafSuffixes(ty: IRType): seq[string]
   ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
 proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
@@ -1130,15 +1137,12 @@ proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
 proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
                   ty: IRType = nil): SymVal
 proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast]
+proc svLeafTerms(sv: SymVal; ty: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8bc fwd-decl (defined in runtime_heap.nim, included below).
   ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
   ## A container `Table` value is held leaf-split (`tabValLeaves`).
-proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool]
+proc svCellWf(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool]
   ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
-proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]]
-  ## RFC-0005 S8ar fwd-decl (defined in runtime_heap.nim, included below).
-proc distinctGround(ty: IRType): IRType
-  ## RFC-0005 S8ar fwd-decl (defined in runtime_heap.nim, included below).
-  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
@@ -2499,6 +2503,9 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
 
+proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8bc fwd-decl. `newSeq[T](n)` → n zero elements.
+
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst
   ## N14 fwd-decl (RFC-chapulin-hardening bucket-2). Defined AFTER `walk`
@@ -2512,6 +2519,11 @@ proc seqElemFits(val: SymVal, elemTy: IRType): bool =
   ## RFC-0005 S8ar. True iff `storeSeqElem` can store `val` into a seq of
   ## `elemTy` as it is: the element's own kind, or (for an integer element)
   ## an Int-promoted value, which `storeSeqElem` converts at the width.
+  ## RFC-0005 batch 4: on the element's cell type (`seqCellTy`, S8ba) and
+  ## the value's base, as `storeSeqElem` / `seqStoreArrs` store them.
+  let elemTy = seqCellTy(elemTy)
+  var val = val
+  while val.kind == svDistinct: val = val.distinctBaseSym[]
   case elemTy.kind
   of itInt:
     val.kind == svInt or
@@ -2526,7 +2538,10 @@ proc seqElemFits(val: SymVal, elemTy: IRType): bool =
   of itString: val.kind == svString
   of itRef: val.kind == svRef
   of itPtr: val.kind == svPtr
-  else: false
+  else:
+    # RFC-0005 S8bc: a tree element's store checks the value itself
+    # (`seqStoreArrs`, which declines a value that does not fit).
+    isTreeSeqElemTy(elemTy)
 
 proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal
   ## N14 fwd-decl. Defined AFTER `walk`. `lower`'s `iekSeqDel` arm (defined
@@ -2571,6 +2586,90 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
   ## (non-tuple) `itInt` allocation; for `itTuple` it indexes `ty.fields`.
   ## Every OTHER caller passes `@[]` (identity — the pre-existing default
   ## allocation, unchanged).
+
+# ---- RFC-0005 S8bc (item 3): a seq of a tree element, held leaf-split ------
+#
+# A seq whose element is a by-value tuple, object, array, case object or
+# distinct of one (`isTreeSeqElemTy`) holds one `Int -> leaf` data array per
+# leaf of the element (`heapLeafSuffixes(elemTy)`, the heap's own cell
+# layout): leaf 0 in `seqDataRaw`, the rest in `seqDataMore`. A read selects
+# every array at the index and rebuilds the element from a prototype
+# (`seqElemAt`); a store writes each leaf of the value into its array
+# (`seqStoreArrs`). Every operation that builds a seq from another (slice,
+# insert, a merge, ...) does to each array what it did to the one. Before
+# S8bc a seq of such an element was the inert placeholder in every position
+# (`seNestedSeqUnsupported`), and any read of it declined.
+
+proc seqArrs(sv: SymVal): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. Every data array of a seq, in leaf order: `seqDataRaw`,
+  ## then `seqDataMore` (empty for a scalar element).
+  result = @[sv.seqDataRaw] # [placeholder-audited]
+  for m in sv.seqDataMore: result.add m
+
+proc withSeqArrsOf(sv: SymVal; arrs: seq[Z3AnyAst]): SymVal =
+  ## RFC-0005 S8bc. `sv` with its data arrays replaced (`seqArrs`' order).
+  result = sv
+  result.seqDataRaw = arrs[0] # [placeholder-audited]
+  result.seqDataMore = arrs[1 .. ^1]
+
+proc mkSeqSV(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
+  ## RFC-0005 S8bc. A backed seq value of `elemTy` from its length and its
+  ## data arrays (`seqArrs`' order).
+  ## RFC-0005 batch 4: the value's element type is the CELL type
+  ## (`seqCellTy`, S8ba): a `distinct` element is held as its base, and a
+  ## read at the distinct static type re-boxes.
+  SymVal(kind: svSeq, seqLen: len, seqDataRaw: arrs[0],
+         seqDataMore: arrs[1 .. ^1], seqElemTy: seqCellTy(elemTy))
+
+proc seqElemProto(elemTy: IRType): SymVal =
+  ## RFC-0005 S8bc. A value of a tree element type: the shape (kinds, element
+  ## types, a placeholder seq's flag) a read rebuilds from the selects of the
+  ## data arrays (`svWithLeaves`), and the leaf sorts the arrays are built
+  ## at. Its constants and init facts are discarded, as `heapCellSelect`'s
+  ## prototype's are. `allocateSym`, not `defaultZero`: it is total (a case
+  ## object whose zero is no legal value has no `defaultZero`).
+  var scratch: seq[Z3Bool]
+  allocateSym(elemTy, "__seqElemProto", scratch)
+
+proc allocateSeqArrs(elemTy: IRType; name: string): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. The free data arrays of a seq of `elemTy`: one
+  ## (`allocateSeqDataRaw`) for a scalar element; one per leaf for a tree
+  ## element, `Int -> <the leaf's sort>`, leaf 0 named `name` and leaf `i`
+  ## `name.@d<i>`. The sorts are runtime (a seq leaf is itself an array), so
+  ## the arrays are built raw, as `tabTreeDataVars`' are; the prototype and
+  ## `idxHold` keep the sorts alive across `Z3_mk_array_sort`.
+  ## RFC-0005 batch 4: built at the element's cell type (`seqCellTy`).
+  let elemTy = seqCellTy(elemTy)
+  if not isTreeSeqElemTy(elemTy): return @[allocateSeqDataRaw(elemTy, name)]
+  let ctx = requireCurrentContext()
+  let proto = seqElemProto(elemTy)
+  let idxHold = mkZ3IntLit(0)
+  let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
+  let leaves = svLeafTerms(proto, elemTy)
+  for i, leaf in leaves:
+    let valSort = ctx.checkErr Z3_get_sort(ctx.raw, leaf.raw)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, idxSort, valSort)
+    let nm = if i == 0: name else: name & ".@d" & $i
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, nm.cstring)
+    result.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc constSeqArrs(elemTy: IRType; elem: SymVal): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. Data arrays holding `elem` at every index (one constant
+  ## array per leaf): `newSeq[T](n)`'s zero elements.
+  ## RFC-0005 batch 4: at the element's cell type (`seqCellTy`), a
+  ## `distinct` zero stored as its base.
+  let elemTy = seqCellTy(elemTy)
+  var elem = elem
+  while elem.kind == svDistinct: elem = elem.distinctBaseSym[]
+  let ctx = requireCurrentContext()
+  let idxHold = mkZ3IntLit(0)
+  let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
+  let leaves =
+    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy)
+    else: @[wrap[Z3AnyAst](ctx, svLeafAsts(elem, elemTy)[0])]
+  for leaf in leaves:
+    result.add wrap[Z3AnyAst](ctx,
+      ctx.checkErr Z3_mk_const_array(ctx.raw, idxSort, leaf.raw))
 
 proc baseIsDecidable(base: IRType): bool =
   ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
@@ -3416,9 +3515,10 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # values that overflow `cint` during witness extraction.
       pcOut.add (lenSym >= mkInt(0))
       pcOut.add (lenSym <= mkInt(1024))
-      let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
-      SymVal(kind: svSeq, seqLen: lenSym,
-             seqDataRaw: dataRaw, seqElemTy: seqCellTy(ty.seqElemTy))   # RFC-0005 S8ba
+      # RFC-0005 S8bc: one array per leaf of a tree element; S8ba: of the
+      # element's cell type (`seqCellTy`, normalised by both helpers).
+      mkSeqSV(lenSym, allocateSeqArrs(ty.seqElemTy, baseName & ".data"),
+              ty.seqElemTy)
   of itTable:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
@@ -3855,6 +3955,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekZeroValue:
     # RFC-0005 S8u. An empty container: no integer representation.
+    none(SymVal)
+  of iekSeqNewZero:
+    # RFC-0005 S8bc. A seq: no integer representation.
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -4471,6 +4574,193 @@ proc reboxSeqCell(elemTy: IRType, cell: SymVal): SymVal =
   ## (or a nil type from a pre-S8ba IR) is the cell itself.
   if elemTy == nil or elemTy.kind != itDistinct: return cell
   reboxDistinct(elemTy, reboxSeqCell(elemTy.distinctBase, cell))
+proc svPartsOf(sv: SymVal; ty: IRType): seq[SymVal]
+proc svWithParts(proto: SymVal; ty: IRType; parts: seq[SymVal]): SymVal
+  ## RFC-0005 S8bc fwd-decls (defined in runtime_heap.nim, included below).
+
+func hasDepthBound(ty: IRType): bool =
+  ## RFC-0005 S8bc. `ty` holds, at some depth, the placeholder seq at a
+  ## recursive value object's depth bound (`seRecursiveValueDepth`).
+  if ty == nil: return false
+  case ty.kind
+  of itSeq:
+    (ty.seqUnsupportedFieldReason.len > 0 and
+     ty.seqUnsupportedFieldKind == seRecursiveValueDepth) or
+      hasDepthBound(ty.seqElemTy)
+  of itTuple:
+    for f in ty.fields:
+      if hasDepthBound(f): return true
+    false
+  of itArray: hasDepthBound(ty.elemTy)
+  of itDistinct: hasDepthBound(ty.distinctBase)
+  of itTable: hasDepthBound(ty.tabValTy)
+  of itVariant, itMultiVariant:
+    for part in heapParts(ty):
+      if hasDepthBound(part.ty): return true
+    false
+  else: false
+
+var seqConformCounter {.threadvar.}: int
+  ## RFC-0005 S8bc. Names the bound variable of each `conformSV` lambda.
+
+proc lambdaOver(ctx: Z3Context; iVar: Z3Int; body: Z3AnyAst): Z3AnyAst =
+  ## RFC-0005 S8bc. `lambda iVar. body`, as `iekSeqSlice` builds its view
+  ## (beta-reduced by Z3 at every select; no quantifier). Wrapped at once.
+  var iApp = ctx.checkErr Z3_to_app(ctx.raw, iVar.raw)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, 1'u32,
+    cast[ptr UncheckedArray[RawZ3App]](addr iApp), body.raw))
+
+proc variantShapeOk(sv: SymVal; ty: IRType): bool =
+  ## RFC-0005 S8bc. `sv` has every slot of case object `ty` (the precheck of
+  ## `svFitsHeapTy`'s variant arms, without the parts' own fit).
+  if ty.kind == itVariant:
+    if sv.kind != svVariant or sv.vDisc == nil or
+       sv.vPlainFields.len != ty.vPlainFieldTypes.len:
+      return false
+    for arm in ty.vArms:
+      if not sv.vArmFields.hasKey(arm.tagOrdinal) or
+         sv.vArmFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+        return false
+    return true
+  if sv.kind != svMultiVariant or sv.mvAxes.len != ty.mvAxes.len or
+     sv.mvPlainFields.len != ty.mvPlainFieldTypes.len:
+    return false
+  for xi, ax in ty.mvAxes:
+    if sv.mvAxes[xi].disc == nil: return false
+    for arm in ax.arms:
+      if not sv.mvAxes[xi].armFields.hasKey(arm.tagOrdinal) or
+         sv.mvAxes[xi].armFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+        return false
+  true
+
+proc conformSV(sv: SymVal; ty: IRType): Option[SymVal] =
+  ## RFC-0005 S8bc. `sv` in the layout of a slot of type `ty`, or none.
+  ##
+  ## A recursive value object is unrolled to a bounded depth (`typebridge`'s
+  ## `maxRecursiveValueDepth`), so one Nim type has an IR type per depth: a
+  ## value built in the body has the outermost depth's layout, and a slot one
+  ## level down a shallower one (`root.kids.add(leaf)`: `leaf.kids` holds the
+  ## next depth's elements, the slot's `kids` the one after). The conversion
+  ## TRUNCATES: a part the slot holds as the depth-bound placeholder becomes
+  ## that placeholder (keeping the length), every other leaf is kept. That is
+  ## sound, since every read of a placeholder declines. A seq of tree
+  ## elements converts element-wise under a lambda (no quantifier). The
+  ## reverse -- a shallower value into a deeper slot, which needs leaves the
+  ## value never had -- is none, and the caller declines
+  ## (`seRecursiveValueDepth`). Any other value is returned as it is (a
+  ## scalar's width is the store's own reconciliation).
+  if ty == nil: return some(sv)
+  case ty.kind
+  of itTuple:
+    if sv.kind != svTuple or sv.fields.len != ty.fields.len: return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var r = sv
+    for i, f in ty.fields:
+      let c = conformSV(sv.fields[i], f)
+      if c.isNone: return none(SymVal)
+      r.fields[i] = c.get
+    some(r)
+  of itArray:
+    if sv.kind != svArray or sv.arrElems.len != ty.size: return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var r = sv
+    for i in 0 ..< r.arrElems.len:
+      let c = conformSV(sv.arrElems[i], ty.elemTy)
+      if c.isNone: return none(SymVal)
+      r.arrElems[i] = c.get
+    some(r)
+  of itVariant, itMultiVariant:
+    if not variantShapeOk(sv, ty): return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var parts: seq[SymVal]
+    let ps = svPartsOf(sv, ty)
+    for i, part in heapParts(ty):
+      let c = conformSV(ps[i], part.ty)
+      if c.isNone: return none(SymVal)
+      parts.add c.get
+    some(svWithParts(sv, ty, parts))
+  of itDistinct:
+    if not hasDepthBound(ty): return some(sv)
+    let c = conformSV(ejectBase(sv), ty.distinctBase)
+    if c.isNone: return none(SymVal)
+    some(reboxDistinct(ty, c.get))
+  of itSeq:
+    if sv.kind != svSeq: return none(SymVal)
+    if not seqBackedTy(ty):
+      if sv.isUnsupportedFieldPlaceholder: return some(sv) # [placeholder-audited]
+      # Truncated to the slot's placeholder; the length is kept.
+      var scratch: seq[Z3Bool]
+      var r = allocateSym(ty, freshDegradeName("__seqConformTrunc"), scratch)
+      r.seqLen = sv.seqLen # [placeholder-audited]
+      return some(r)
+    if sv.isUnsupportedFieldPlaceholder: return none(SymVal) # [placeholder-audited]
+    # RFC-0005 batch 4: a seq value's element type is its cell type
+    # (`seqCellTy`, S8ba), so the slot's is compared and conformed as one.
+    let cellTy = seqCellTy(ty.seqElemTy)
+    if not isTreeSeqElemTy(cellTy) or sv.seqElemTy == cellTy:
+      return some(sv)
+    if not isTreeSeqElemTy(sv.seqElemTy): return none(SymVal)
+    let ctx = requireCurrentContext()
+    inc seqConformCounter
+    let iVar = mkIntVar("__seqconform_i" & $seqConformCounter)
+    let c = conformSV(seqElemAt(sv, iVar), cellTy)
+    if c.isNone or not svFitsHeapTy(c.get, cellTy): return none(SymVal)
+    var arrs: seq[Z3AnyAst]
+    for leaf in svLeafTerms(c.get, cellTy):
+      arrs.add lambdaOver(ctx, iVar, leaf)
+    var r = mkSeqSV(sv.seqLen, arrs, cellTy) # [placeholder-audited]
+    r.seqSteps = sv.seqSteps
+    some(r)
+  else: some(sv)
+
+proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]] =
+  ## RFC-0005 S8bc. The data arrays of `seqSV` with `val` stored at `idx`:
+  ## `storeSeqElem` for a scalar element (its callers check
+  ## `seqElemFits` first); for a tree element each leaf of `val`, conformed
+  ## to the element type (`conformSV`), into its own array. none when the
+  ## value does not fit -- a value of another depth's layout, or of a shape
+  ## some upstream degrade produced -- and the caller declines
+  ## (`seqStoreDecline`). Every leaf's sort is checked against its array's
+  ## range first, so no ill-sorted store is ever built.
+  let elemTy = seqSV.seqElemTy
+  if not isTreeSeqElemTy(elemTy):
+    return some(@[storeSeqElem(seqSV.seqDataRaw, elemTy, idx, val)]) # [placeholder-audited]
+  # RFC-0005 batch 4: a `distinct` value is stored as its base (the seq's
+  # element type is the cell type, `seqCellTy`).
+  let c = conformSV(ejectBase(val), elemTy)
+  if c.isNone or not svFitsHeapTy(c.get, elemTy): return none(seq[Z3AnyAst])
+  let ctx = requireCurrentContext()
+  let arrs = seqArrs(seqSV)
+  let leaves = svLeafTerms(c.get, elemTy)
+  if leaves.len != arrs.len: return none(seq[Z3AnyAst])
+  for i in 0 ..< arrs.len:
+    let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, arrs[i].raw)
+    if ctx.checkErr(Z3_get_array_sort_range(ctx.raw, arrSort)) !=
+       ctx.checkErr(Z3_get_sort(ctx.raw, leaves[i].raw)):
+      return none(seq[Z3AnyAst])
+  var outArrs: seq[Z3AnyAst]
+  for i in 0 ..< arrs.len:
+    outArrs.add wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, arrs[i].raw, idx.raw, leaves[i].raw))
+  some(outArrs)
+
+proc seqStoreDecline(op: string; elemTy: IRType; val: SymVal): SymVal =
+  ## RFC-0005 S8bc. The in-band decline of a tree element store that does not
+  ## fit (`seqStoreArrs` none): `seRecursiveValueDepth` when the element type
+  ## holds a depth bound (a value of another depth's layout), else
+  ## `feUnsupportedOp`. Returns a fresh placeholder seq of the declined
+  ## kind, so every later read of it declines too.
+  let kind = if hasDepthBound(elemTy): seRecursiveValueDepth else: feUnsupportedOp
+  let msg = op & ": a " & plainEnglishSymValKind(val.kind) &
+    " that does not fit an element of the seq (" & $elemTy & ")" &
+    (if kind == seRecursiveValueDepth:
+       " -- a recursive value object is unrolled to a bounded depth, and " &
+       "this value reaches past it (seRecursiveValueDepth)"
+     else: " (feUnsupportedOp)")
+  lowerDegrade(kind, msg)
+  var fresh: seq[Z3Bool]
+  allocateSym(tUnsupportedFieldSeq(elemTy, msg, kind = kind),
+              freshDegradeName("__seqStoreDecline"), fresh)
 
 proc bvTermToZ3Int*[W: static int](bv: Z3BitVec[W], signed: bool): Z3Int =
   ## `bv` as a Z3 Int, read as signed or unsigned. RFC-0005 S8o: a NUMERAL
@@ -4511,6 +4801,11 @@ proc toZ3Int(sv: SymVal): Z3Int =
   case sv.kind
   of svInt: sv.zi
   of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
+  of svDistinct:
+    # RFC-0005 S8bc (item 2): a `distinct` int used at its base (a borrowed
+    # `$`/`abs` lowered as the base routine on the unwrapped argument). The
+    # ejected base is the value Nim's `T(d)` gives (`ejectBase`).
+    toZ3Int(ejectBase(sv))
   else:
     raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (every call site pre-guards to svInt/BV kinds)]
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
@@ -5128,10 +5423,22 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       # leaves; the elements past the length are never read. Before S8p
       # this was an in-band `feUnsupportedOp` decline (N46): a seq-returning
       # callee, or a closure returning a seq, could not return a value.
+      # RFC-0005 S8bc: every data array of a tree element, pairwise (a
+      # value of another depth's layout is conformed first, `conformSV`).
       let ctx = retSym.seqLen.ctx # [placeholder-audited]
-      (retSym.seqLen == retVal.seqLen) and # [placeholder-audited]
-        wrap[Z3Bool](ctx, checkedEq(ctx, retSym.seqDataRaw.raw, # [placeholder-audited]
-                                    retVal.seqDataRaw.raw)) # [placeholder-audited]
+      let rv = conformSV(retVal, tSeq(retSym.seqElemTy))
+      let ra = seqArrs(retSym)
+      if rv.isNone or seqArrs(rv.get).len != ra.len:
+        degradeAlloc(tBool(), seRecursiveValueDepth,
+          "retBindEq: a seq value of another layout than the result's (" &
+          $retSym.seqElemTy & ") -- seRecursiveValueDepth",
+          "__retBindSeqLayout").bo
+      else:
+        let va = seqArrs(rv.get)
+        var acc = (retSym.seqLen == retVal.seqLen) # [placeholder-audited]
+        for i in 0 ..< ra.len:
+          acc = acc and wrap[Z3Bool](ctx, checkedEq(ctx, ra[i].raw, va[i].raw))
+        acc
   of svTuple:
     ## v69 (sello #2): structural per-field binding for a tuple-returning
     ## callee — the capability the v64 catalog-#6 degrade preserved as
@@ -5373,9 +5680,10 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       # Empty seq: len pinned to 0; the data array is allocated
       # so the SymVal shape is well-formed, but never read past
       # len. Mirrors Nim's `default(seq[T]) == @[]`.
-      let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
-      SymVal(kind: svSeq, seqLen: mkInt(0),
-             seqDataRaw: dataRaw, seqElemTy: seqCellTy(t.seqElemTy))   # RFC-0005 S8ba
+      # RFC-0005 S8bc: one array per leaf of a tree element; S8ba: of the
+      # element's cell type (`seqCellTy`, normalised by both helpers).
+      mkSeqSV(mkInt(0), allocateSeqArrs(t.seqElemTy, baseName & ".data"),
+              t.seqElemTy)
   of itSet, itTable:
     # RFC-0005 S8u: the empty container, for the shapes `allocateSym` backs
     # (`Table[string, int]`, `HashSet[int]`): no key present (a constant
@@ -5861,13 +6169,24 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # arrays and of the lengths. A symbolic index into an array of seqs
       # (`a[i].len`, `p.a[i][1]`) is this merge folded over the elements;
       # it was the havoc below for every such read.
+      # RFC-0005 S8bc: every data array of a tree element, each an `ite`;
+      # the arrays must agree in number and sort.
       let ctx = t.seqDataRaw.ctx # [placeholder-audited]
-      let ts = ctx.checkErr Z3_get_sort(ctx.raw, t.seqDataRaw.raw) # [placeholder-audited]
-      let es = ctx.checkErr Z3_get_sort(ctx.raw, e.seqDataRaw.raw) # [placeholder-audited]
-      if ts == es:   # hash-consed: identity is equality (`sortFault`)
-        var r = t
-        r.seqDataRaw = wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw, # [placeholder-audited]
-          t.seqDataRaw.raw, e.seqDataRaw.raw)) # [placeholder-audited]
+      let ta = seqArrs(t)
+      let ea = seqArrs(e)
+      var sameSorts = ta.len == ea.len
+      if sameSorts:
+        for i in 0 ..< ta.len:
+          # hash-consed: identity is equality (`sortFault`)
+          if ctx.checkErr(Z3_get_sort(ctx.raw, ta[i].raw)) !=
+             ctx.checkErr(Z3_get_sort(ctx.raw, ea[i].raw)):
+            sameSorts = false
+      if sameSorts:
+        var arrs: seq[Z3AnyAst]
+        for i in 0 ..< ta.len:
+          arrs.add wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw,
+            ta[i].raw, ea[i].raw))
+        var r = withSeqArrsOf(t, arrs)
         r.seqLen = ite(cond, t.seqLen, e.seqLen) # [placeholder-audited]
         r.seqSteps = max(t.seqSteps, e.seqSteps)
         return r
@@ -6495,6 +6814,24 @@ proc refMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
       (if a.kind in {svRef, svPtr}: b.kind else: a.kind)) &
       " operand the model did not resolve to an address (heUnresolvedRef)",
     "__refMixedCmpDegrade")
+
+proc mixedBitwiseDecline(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0005 S8bc. An `and`/`or`/`xor` with a bool on ONE side only. Nim
+  ## types both operands alike (both `bool`, or both one integer type), so
+  ## one side lowered to a bool only because something upstream already
+  ## declined it: a value of a type the model does not classify (a plain
+  ## alias such as `hashes.Hash = int`) is `allocDegrade`'s tainted bool
+  ## placeholder. The arm asserted `r.kind == svBool` and aborted the run as
+  ## `weInternalWalkerFault` (`hc and maxHash(t)` inside the stdlib
+  ## `getOrDefault`'s walked body). Record the unresolved operand and hand
+  ## back a fresh value of the integer side's type: the path is tainted,
+  ## never a verdict.
+  let intSide = if a.kind == svBool: b else: a
+  degradeAlloc(tyOf(intSide), feUnsupportedOp,
+    "`" & $op & "` of a bool and a " & plainEnglishSymValKind(intSide.kind) &
+    " operand: one side is a value the model did not resolve to its " &
+    "declared type (feUnsupportedOp)",
+    "__mixedBitwiseDegrade")
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -7837,16 +8174,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # teardown, memory-timing-dependent (the SAT path happened to
     # survive; the first non-SAT query died). Every intermediate is now
     # wrapped (inc_ref'd) IMMEDIATELY on creation.
-    let sel = wrap[Z3AnyAst](zctx,
-      checkedSelect(zctx, recv.seqDataRaw.raw, shifted.raw)) # [placeholder-audited]
-    var iApp = zctx.checkErr Z3_to_app(zctx.raw, iVar.raw)
-    let lam = wrap[Z3AnyAst](zctx,
-      zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
-        cast[ptr UncheckedArray[RawZ3App]](addr iApp), sel.raw))
-    SymVal(kind: svSeq,
-           seqLen: (hi - lo) + mkInt(1),
-           seqDataRaw: lam,
-           seqElemTy: recv.seqElemTy)
+    # RFC-0005 S8bc: one view per data array of a tree element.
+    var lams: seq[Z3AnyAst]
+    for arr in seqArrs(recv):
+      let sel = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, arr.raw, shifted.raw))
+      lams.add lambdaOver(zctx, iVar, sel)
+    mkSeqSV((hi - lo) + mkInt(1), lams, recv.seqElemTy)
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).
@@ -7964,9 +8298,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
           kind = weInternalWalkerFault),
         freshDegradeName("__seqAddElemMismatch"), fresh)
-    let newDataRaw = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, oldLen, val) # [placeholder-audited]
-    SymVal(kind: svSeq, seqLen: newLen,
-           seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+    let stored = seqStoreArrs(recv, oldLen, val)
+    if stored.isNone: return seqStoreDecline("iekSeqAdd", recv.seqElemTy, val)
+    mkSeqSV(newLen, stored.get, recv.seqElemTy)
   of iekTableSet:
     let recv = lower(env, e.tabRecv)
     if containerRecvDeclined(recv, svTable, "`t[k] = v`"): return recv
@@ -8154,9 +8489,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # own "value computed unconditionally, only ever OBSERVED on the
     # in-bounds survivor" doc precedent).
     let lastVal = seqElemAt(recv, lenZi - mkInt(1)) # [placeholder-audited]
-    let newData = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, lastVal) # [placeholder-audited]
-    SymVal(kind: svSeq, seqLen: lenZi - mkInt(1),
-           seqDataRaw: newData, seqElemTy: recv.seqElemTy)
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+    let stored = seqStoreArrs(recv, idxZi, lastVal)
+    if stored.isNone: return seqStoreDecline("iekSeqDel", recv.seqElemTy, lastVal)
+    mkSeqSV(lenZi - mkInt(1), stored.get, recv.seqElemTy)
   of iekSeqInsert:
     # RFC-0005 S8ar. `insert(x, item, i)` (system.nim): `i` is a `Natural`
     # (a negative `i` raises RangeDefect at the call, before any change);
@@ -8202,9 +8538,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
           tUnsupportedFieldSeq(recv.seqElemTy, declineMsg, kind = feUnsupportedOp),
           freshDegradeName("__seqInsertNoZero"), fresh)
       let zero = defaultZero(recv.seqElemTy, freshDegradeName("__seqInsertZero"))
-      let grown = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, lenZi, zero) # [placeholder-audited]
-      return SymVal(kind: svSeq, seqLen: lenZi + mkInt(1),
-                    seqDataRaw: grown, seqElemTy: recv.seqElemTy)
+      # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+      let grown = seqStoreArrs(recv, lenZi, zero)
+      if grown.isNone: return seqStoreDecline("iekSeqInsert", recv.seqElemTy, zero)
+      return mkSeqSV(lenZi + mkInt(1), grown.get, recv.seqElemTy)
     let val = lower(env, e.insVal, intLitProto(recv.seqElemTy))
     if not seqElemFits(val, recv.seqElemTy):
       let declineMsg = "iekSeqInsert: element lowered to " &
@@ -8222,24 +8559,28 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     syncSeqOobCond(oob)
     # data'[j] = (j <= i ? store(data, i, item)[j] : data[j - 1]).
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
-    let stored = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, val) # [placeholder-audited]
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`), and one
+    # shift lambda per data array.
+    let storedOpt = seqStoreArrs(recv, idxZi, val)
+    if storedOpt.isNone: return seqStoreDecline("iekSeqInsert", recv.seqElemTy, val)
+    let stored = storedOpt.get
+    let orig = seqArrs(recv)
     inc sliceViewCounter
     let jVar = mkIntVar("__insertview_j" & $sliceViewCounter)
     let below = jVar <= idxZi
     let jPrev = jVar - mkInt(1)
     # OWNERSHIP DISCIPLINE: every intermediate wrapped on creation (see
     # `iekSeqSlice`).
-    let selStored = wrap[Z3AnyAst](zctx, checkedSelect(zctx, stored.raw, jVar.raw))
-    let selPrev = wrap[Z3AnyAst](zctx,
-      checkedSelect(zctx, recv.seqDataRaw.raw, jPrev.raw)) # [placeholder-audited]
-    let body = wrap[Z3AnyAst](zctx,
-      checkedIte(zctx, below.raw, selStored.raw, selPrev.raw))
-    var jApp = zctx.checkErr Z3_to_app(zctx.raw, jVar.raw)
-    let lam = wrap[Z3AnyAst](zctx,
-      zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
-        cast[ptr UncheckedArray[RawZ3App]](addr jApp), body.raw))
-    SymVal(kind: svSeq, seqLen: lenZi, seqDataRaw: lam,
-           seqElemTy: recv.seqElemTy)
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< stored.len:
+      let selStored = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, stored[k].raw, jVar.raw))
+      let selPrev = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, orig[k].raw, jPrev.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, below.raw, selStored.raw, selPrev.raw))
+      lams.add lambdaOver(zctx, jVar, body)
+    mkSeqSV(lenZi, lams, recv.seqElemTy)
   of iekSeqPop:
     # `iekSeqPop` is DEAD CODE: no parse site constructs it. N14 modeled
     # `.pop()` via a dedicated statement (`isSeqPop`, mirroring `isIndex`),
@@ -8496,8 +8837,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let pp = probeProto(env, e)
       let l = lower(env, e.lhs, pp)
       let r = lower(env, e.rhs, pp)
+      if (l.kind == svBool) != (r.kind == svBool):
+        return mixedBitwiseDecline(l, r, e.bop)   ## RFC-0005 S8bc
       if l.kind == svBool:
-        doAssert r.kind == svBool
         case e.bop
         of bAnd: ofBool(l.bo and r.bo)
         of bOr:  ofBool(l.bo or  r.bo)
@@ -8708,6 +9050,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       lowerDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
+  of iekSeqNewZero:
+    lowerSeqNewZero(env, e)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -9030,6 +9374,92 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
   w.tabKeys[path] = keyList
 
 proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
+                        sv: SymVal, n: int)
+proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal)
+proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64
+  ## RFC-0005 S8bc fwd-decls, for `extractTreeValue`.
+
+proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
+                      sv: SymVal, ty: IRType) =
+  ## RFC-0005 S8bc (item 3). Write the tree value `sv` of type `ty` -- an
+  ## element of a leaf-split seq -- under `path`, in the layout the heap's
+  ## cell values have (`renderHeapValue`): each part at `<path>.<label>`
+  ## (`heapPartLabel`: a field's name, an anonymous tuple's `Field<i>`, an
+  ## array's position), a case object's discriminator and the fields of the
+  ## arm it selects (and the plain fields) at `<path>.<name>`. That is the
+  ## layout `readCellField`'s `fieldPairs` walk reads, which the witness
+  ## reader of a seq of such elements uses (`readSeqAs`). A ref or ptr part
+  ## writes nothing (no position is collected for it, and a parameter whose
+  ## seq element holds one is not renderable, `isRenderableWitnessTy`). A
+  ## scalar part no path read is free in the model and is clamped into its
+  ## range, as a cell's is (`clampWitnessField`).
+  if ty == nil: return
+  case ty.kind
+  of itDistinct:
+    extractTreeValue(m, w, path, ejectBase(sv), distinctGround(ty))
+  of itInt, itBool, itFloat32, itFloat64:
+    extractLeaf(m, w, path, sv)
+    clampWitnessField(w, path, ty)
+  of itString:
+    if sv.kind == svString:
+      w.strVals[path] = evalStrBytesOrEmpty(m, sv.str).get("")
+  of itTuple, itArray:
+    for i, part in heapParts(ty):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      extractTreeValue(m, w, path & "." & part.label, psv, part.ty)
+  of itVariant, itMultiVariant:
+    if not svFitsHeapTy(sv, ty): return
+    template axis(discName: string; discTy: IRType; disc: SymVal;
+                  arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let dp = path & "." & discName
+      extractLeaf(m, w, dp, disc)
+      clampWitnessField(w, dp, discTy)
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          extractTreeValue(m, w, path & "." & fname,
+            armFields[arm.tagOrdinal][j], arm.fieldTypes[j])
+    if ty.kind == itVariant:
+      axis(ty.vDiscName, ty.vDiscTy, sv.vDisc[], ty.vArms, sv.vArmFields)
+      for i, fname in ty.vPlainFieldNames:
+        extractTreeValue(m, w, path & "." & fname, sv.vPlainFields[i],
+                         ty.vPlainFieldTypes[i])
+    else:
+      for xi, ax in ty.mvAxes:
+        axis(ax.discName, ax.discTy, sv.mvAxes[xi].disc[], ax.arms,
+             sv.mvAxes[xi].armFields)
+      for i, fname in ty.mvPlainFieldNames:
+        extractTreeValue(m, w, path & "." & fname, sv.mvPlainFields[i],
+                         ty.mvPlainFieldTypes[i])
+  of itSeq:
+    if sv.kind != svSeq: return
+    if sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # A placeholder's content is never modelled (a read of it declines).
+      w.seqLens[path] = 0
+      return
+    # An element's nested length has no `1024` bound (`svCellWf`'s
+    # `bounded = false`); an unread one is free, so a length outside
+    # `[0, 1024]` renders empty, as a heap cell's does (`renderHeapValue`).
+    let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
+    let n = if raw >= 0 and raw <= 1024: int(raw) else: 0
+    w.seqLens[path] = n
+    extractSeqElements(m, w, path, sv, n)
+  of itTable:
+    if sv.kind == svTable: extractTableEntries(m, w, path, sv)
+  of itSet:
+    if sv.kind == svSet: extractSetMembers(m, w, path, sv)
+  else: discard
+
+proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
   ## element type to wrap/select with the right typed handle.
@@ -9037,6 +9467,13 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
   ## holds `T`'s sort and renders as `T`'s leaves, converted back by the
   ## reader (`emitTyAndReader`).
   let cellTy = seqCellTy(sv.seqElemTy)
+  if isTreeSeqElemTy(cellTy):
+    # RFC-0005 S8bc: a tree element, rebuilt from every data array
+    # (`seqElemAt`) and written in the heap's cell layout.
+    for i in 0 ..< n:
+      extractTreeValue(m, w, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                       cellTy)
+    return
   case cellTy.kind
   of itInt:
     case cellTy.width
@@ -9641,9 +10078,16 @@ proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
         w.strVals[leafPath & "." & $i] = e
         parts.add e.escape
     else:
-      extractSeqElements(m, w, leafPath, sv, n)
-      for i in 0 ..< n:
-        parts.add pointeeRendering(w, leafPath & "." & $i).get("?")
+      if isTreeSeqElemTy(sv.seqElemTy):
+        # RFC-0005 S8bc: a tree element, rebuilt from every data array and
+        # rendered as a tree cell value is (a ref part is a position).
+        for i in 0 ..< n:
+          parts.add renderHeapValue(b, m, w, ctx, leafPath & "." & $i,
+                                    seqElemAt(sv, mkInt(i)), sv.seqElemTy)
+      else:
+        extractSeqElements(m, w, leafPath, sv, n)
+        for i in 0 ..< n:
+          parts.add pointeeRendering(w, leafPath & "." & $i).get("?")
     "@[" & parts.join(", ") & "]"
   of svTable:
     extractTableEntries(m, w, leafPath, sv)
@@ -13485,7 +13929,9 @@ proc symValHash(sv: SymVal): uint =
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
   of svSeq:
-    astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
+    var h = astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
+    for m in sv.seqDataMore: h = h xor astHash(m)   ## RFC-0005 S8bc
+    h
   of svTable:
     var h = astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
     for m in sv.tabDataMore: h = h xor astHash(m)   ## RFC-0005 S8at
@@ -15622,6 +16068,12 @@ proc sameSV(a, b: SymVal): bool =
     # read as a value, and the placeholder flag is itself compared, so a
     # placeholder never matches a backed seq (N27 audit, RFC-0005 S8w).
     a.seqLen.raw == b.seqLen.raw and a.seqDataRaw.raw == b.seqDataRaw.raw and  # [placeholder-audited]
+      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
+      (block:
+        var r = true
+        for i in 0 ..< a.seqDataMore.len:
+          if a.seqDataMore[i].raw != b.seqDataMore[i].raw: r = false
+        r) and
       a.seqElemTy == b.seqElemTy and
       a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder and  # [placeholder-audited]
       a.seqUnsupportedFieldReason == b.seqUnsupportedFieldReason and
@@ -15779,11 +16231,15 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
       return none(SymVal)
     let ctx = t.seqDataRaw.ctx  # [placeholder-audited]
     # Wrapped (inc_ref'd) at once: a raw handle is not owned, and the next
-    # API call may reclaim it.
-    let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,  # [placeholder-audited]
-                              t.seqDataRaw.raw, e.seqDataRaw.raw))  # [placeholder-audited]
-    some(SymVal(kind: svSeq, seqLen: ite(sel, t.seqLen, e.seqLen),  # [placeholder-audited]
-                seqDataRaw: data, seqElemTy: seqCellTy(t.seqElemTy)))   # RFC-0005 S8ba
+    # API call may reclaim it. RFC-0005 S8bc: every data array of a tree
+    # element (the element types are equal, so the arrays agree).
+    let ta = seqArrs(t)
+    let ea = seqArrs(e)
+    if ta.len != ea.len: return none(SymVal)
+    var arrs: seq[Z3AnyAst]
+    for i in 0 ..< ta.len:
+      arrs.add wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw, ta[i].raw, ea[i].raw))
+    some(mkSeqSV(ite(sel, t.seqLen, e.seqLen), arrs, t.seqElemTy))  # [placeholder-audited]
   of svRef:
     if t.refPointee != e.refPointee: none(SymVal)
     else: some(iteSV(sel, t, e))
@@ -16805,6 +17261,22 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # cannot affect one), but NOT for witnesses — `extractSeqElements`
           # below clamps the reported value for exactly that reason.
           var rangeConds: seq[Z3Bool]
+          if isTreeSeqElemTy(arrSV.seqElemTy):
+            # RFC-0005 S8bc: a tree element, rebuilt from every data array
+            # (`seqElemAt`). Its well-formedness is asserted at the read, as
+            # W2 asserts a scalar element's range: a string part is bytes, a
+            # nested seq's length and a table's size are not negative (and a
+            # table's size is tied to its keys), a nested scalar part is in
+            # its declared range, a case object's discriminator in its
+            # domain. Not the `[0, 1024]` bound of an INPUT seq (`allocateSym`):
+            # an element the body stored may hold a longer seq.
+            indexed = seqElemAt(arrSV, idxZi)
+            rangeConds = svCellWf(indexed, arrSV.seqElemTy, true, bounded = false)
+            var newEnv = cp.env
+            newEnv[stmt.ixRetName] = indexed
+            survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond] & rangeConds,
+                                   newEnv)
+            continue
           case arrSV.seqElemTy.kind
           of itInt:
             case arrSV.seqElemTy.width
@@ -17077,8 +17549,26 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                not carriesRangeCheck(stmt.iaVal, recvSV.seqElemTy):   # RFC-0005 S8j
               forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
             else: vp
-          let newDataRaw = storeSeqElem(
-            recvSV.seqDataRaw, recvSV.seqElemTy, idxZi, valSV) # [placeholder-audited]
+          # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`); a
+          # value that does not fit declines on this path.
+          let storedOpt = seqStoreArrs(recvSV, idxZi, valSV)
+          if storedOpt.isNone:
+            let kind = if hasDepthBound(recvSV.seqElemTy): seRecursiveValueDepth
+                       else: feUnsupportedOp
+            let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+            let d = w.degrade(kind, locPrefix &
+              "isIndexAssign: a " & plainEnglishSymValKind(valSV.kind) &
+              " that does not fit an element of the seq (" &
+              $recvSV.seqElemTy & ") (" & $kind & ")")
+            var envD = vpRanged.env
+            var scratch: seq[Z3Bool]
+            envD[stmt.iaRecvName] = allocateSym(
+              tUnsupportedFieldSeq(recvSV.seqElemTy, "a store that does not " &
+                "fit the element type", kind = kind),
+              freshDegradeName("__seqAssignDecline"), scratch)
+            survivors.add forkPathTainted(vpRanged,
+              vpRanged.pc & @[inLoCond, inHiCond], envD, d)
+            continue
           # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
           # after a successful store. `recvSV` was already declined above
           # (this arm's own `isUnsupportedFieldPlaceholder` check at the top
@@ -17086,8 +17576,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # branch) and is never reassigned before this point — the
           # `.seqLen` read below is reached only on the non-placeholder path.
           var newEnv = vpRanged.env
-          newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen, # [placeholder-audited]
-            seqDataRaw: newDataRaw, seqElemTy: recvSV.seqElemTy)
+          newEnv[stmt.iaRecvName] = mkSeqSV(recvSV.seqLen, storedOpt.get, # [placeholder-audited]
+            recvSV.seqElemTy)
           survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isSeqPop:
@@ -17130,10 +17620,111 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # reassigned before this point — the `.seqDataRaw` read below is
       # reached only on the non-placeholder path.
       var newEnv = p.env
-      newEnv[stmt.spRecvName] = SymVal(kind: svSeq, seqLen: newLenZi,
-        seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy) # [placeholder-audited]
+      # RFC-0005 S8bc: every data array of a tree element, unchanged.
+      newEnv[stmt.spRecvName] = mkSeqSV(newLenZi, seqArrs(recvSV), # [placeholder-audited]
+        recvSV.seqElemTy)
       newEnv[stmt.spRetName] = reboxSeqCell(stmt.spElemTy, popped)   # RFC-0005 S8ba
       survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
+    survivors
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6). `tkRetName := the keys of tkRecv`, the key
+    # sequence a `for` over a Table's `pairs` / `keys` / `values` walks
+    # (`parseTableForLoop`). Bound to a FRESH `seq[K]` `ks` whose length is
+    # the table's size; for every position `j` a loop can reach
+    # (`j < maxLoopUnwind`: the k-unroll walks no further, and declines past
+    # it), `j < size` implies
+    #
+    #   * `ks[j]` is present in the table, and
+    #   * `pos[ks[j]] == j` for one fresh array `pos` from keys to positions,
+    #     so the elements are pairwise distinct (O(n) facts, not O(n^2)).
+    #
+    # Each `ks[j]` is a key term of the run (`tabKeyTerm` registers it), so
+    # the S8f realizability facts (`containerCardConds`: a table's size is
+    # at least the number of distinct present key terms) make the `size`
+    # distinct present keys ALL the table's keys: one more would exceed the
+    # size, and an unnamed key would too. The sequence is therefore an
+    # enumeration of the table, in a FREE order. Nim's order is the hash
+    # order, one of the models: nothing is forked away and nothing dropped,
+    # so an sxUnsat holds; a candidate may depend on the order, so a path
+    # where the table can have two or more entries is tainted
+    # `feTableIterOrder` (`dcFreshSymbol`: replay-gated, S10), and one where
+    # it has at most one is exact and clean. A string key is a string of
+    # bytes (`seqStrElemConds`). The parser declines a float key (a NaN
+    # entry counts in the size but is never present).
+    var survivors: seq[Path]
+    for p0 in paths:
+      if w.shouldStop: return survivors
+      let (tsv, p) = lowerInExpr(p0, stmt.tkRecv, w)
+      let locPrefix = if stmt.tkLoc.len > 0: stmt.tkLoc & ": " else: ""
+      if tsv.kind != svTable or
+         tsv.tabKeyTy.kind notin {itString, itInt, itBool}:
+        let d = w.degrade(feUnsupportedOp,
+          locPrefix & "isTabKeys: receiver lowered to " &
+          plainEnglishSymValKind(tsv.kind) &
+          " -- expected a Table with a string, integer or bool key " &
+          "(feUnsupportedOp)")
+        var fresh: seq[Z3Bool]
+        var env2 = p.env
+        env2[stmt.tkRetName] = allocateSym(tSeq(stmt.tkKeyTy),
+          freshDegradeName("__tabKeysDegrade"), fresh)
+        survivors.add forkPathTainted(p, p.pc, env2, d)
+        continue
+      let ctx = requireCurrentContext()
+      let keyTy = tsv.tabKeyTy
+      let ks = SymVal(kind: svSeq, seqLen: tsv.tabSize,
+        seqDataRaw: allocateSeqDataRaw(keyTy, freshDegradeName("__tabKeys")),
+        seqElemTy: keyTy)
+      var facts: seq[Z3Bool]
+      # The position array, built raw (its key sort is runtime, as
+      # `tabTreeDataVars`'s arrays are) and wrapped at once so its reference
+      # is held; `intHold` keeps the Int sort's witness term alive across
+      # `Z3_mk_array_sort`.
+      var posArr = none(Z3AnyAst)
+      let intHold = mkZ3IntLit(0)
+      var keyed = true
+      for j in 0 ..< w.settings.budget.maxLoopUnwind:
+        let kj = seqElemAt(ks, mkZ3IntLit(int64(j)))
+        facts.add seqStrElemConds(kj)
+        let term = tabKeyTerm(kj, keyTy)
+        if term.isNone:
+          keyed = false
+          break
+        if posArr.isNone:
+          let keySort = ctx.checkErr Z3_get_sort(ctx.raw, term.get.raw)
+          let intSort = ctx.checkErr Z3_get_sort(ctx.raw, intHold.raw)
+          let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, keySort, intSort)
+          let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+            freshDegradeName("__tabKeyPos").cstring)
+          posArr = some(wrap[Z3AnyAst](ctx,
+            ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort)))
+        let present = wrap[Z3Bool](ctx,
+          checkedSelect(ctx, tsv.tabPresentRaw.raw, term.get.raw))
+        let pos = wrap[Z3Int](ctx,
+          checkedSelect(ctx, posArr.get.raw, term.get.raw))
+        let jz = mkZ3IntLit(int64(j))
+        facts.add ((not (jz < tsv.tabSize)) or (present and pos == jz))
+      if not keyed:
+        # Unreachable for a key type the guard above admits; kept in band.
+        let d = w.degrade(feUnsupportedOp,
+          locPrefix & "isTabKeys: a key of type " & $keyTy &
+          " has no table key term (feUnsupportedOp)")
+        var env2 = p.env
+        env2[stmt.tkRetName] = ks
+        survivors.add forkPathTainted(p, p.pc, env2, d)
+        continue
+      var env2 = p.env
+      env2[stmt.tkRetName] = ks
+      let atMostOne = tsv.tabSize <= mkZ3IntLit(1)
+      let lit = $simplify(atMostOne)
+      if lit != "false":
+        survivors.add forkPath(p, p.pc & facts & @[atMostOne], env2)
+      if lit != "true":
+        let d = w.degrade(feTableIterOrder,
+          locPrefix & "iteration over a Table with two or more entries: " &
+          "Nim visits the keys in hash order, the model in any order -- a " &
+          "witness is replayed against the real order (feTableIterOrder)")
+        survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
+                                      env2, d)
     survivors
   of isVariantReassign:
     # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
@@ -18713,10 +19304,23 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # path actually reaches the decline (the reach-anchored record §2.5
     # point 1 builds on); a Class-B node's is `feUnsupportedStmtKind`.
     # RFC-0005 S8: the reach record carries the node's parse-minted anchor.
+    # RFC-0005 S8bc (item 5): a path that reaches the decline but that no
+    # execution can take is dropped, not tainted, as S8an drops one at the
+    # call-depth bail (`pathInfeasible`). The walker forks `if` arms without
+    # a feasibility check, so a SCOPED decline (a parse-time guard such as
+    # `newSeq`'s / `initTable`'s length above 2^20) was reached on every
+    # path, bound or not: `if n < 0 or n > 50: return` then `newSeq(n)`
+    # turned every dead label into sxUnknown. A dropped path has no
+    # behaviour to lose (its every later query carries the same UNSAT
+    # constraints); an undecided query keeps the path, tainted as before.
+    var live: seq[Path]
+    for p in paths:
+      if not pathInfeasible(w.z3, p, w.settings): live.add p
+    if live.len == 0: return live
     let d = w.degrade(stmt.unKind, stmt.reason,
                       scope = siteAnchored(stmt.unMarker))
     var out2: seq[Path]
-    for p in paths:
+    for p in live:
       out2.add forkPathTainted(p, p.pc, p.env, d)
     out2
   of isUnsafeCast:
@@ -19280,6 +19884,12 @@ proc sameSymVal(a, b: SymVal): bool =
     # placeholder flag is itself compared, so a placeholder never matches a
     # backed seq (N27 audit, RFC-0005 S9).
     same(a.seqLen, b.seqLen) and same(a.seqDataRaw, b.seqDataRaw) and  # [placeholder-audited]
+      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
+      (block:
+        var r = true
+        for i in 0 ..< a.seqDataMore.len:
+          if not same(a.seqDataMore[i], b.seqDataMore[i]): r = false
+        r) and
       a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
   of svTable:
     same(a.tabDataRaw, b.tabDataRaw) and
@@ -20039,6 +20649,20 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
   ## Read element `idx` of a `svSeq` as a SymVal (dispatch on element type).
   ## Mirrors the `isIndex`/seq walker arm. Caller guarantees `idx` in bounds.
   doAssert seqSV.kind == svSeq, "seqElemAt: not an svSeq"
+  if isTreeSeqElemTy(seqSV.seqElemTy):
+    # RFC-0005 S8bc: a tree element, from the select of every data array at
+    # `idx` (each wrapped at once), rebuilt over a prototype of the type.
+    let ctx = requireCurrentContext()
+    let arrs = seqArrs(seqSV)
+    if arrs.len != heapLeafSuffixes(seqSV.seqElemTy).len:
+      return degradeAlloc(seqSV.seqElemTy, weInternalWalkerFault,
+        "seqElemAt: a seq of " & $seqSV.seqElemTy & " holds " & $arrs.len &
+        " data arrays (weInternalWalkerFault)", "__seqElemAtLayout")
+    var leaves: seq[Z3AnyAst]
+    for a in arrs:
+      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, a.raw, idx.raw))
+    return svWithLeaves(ctx, seqElemProto(seqSV.seqElemTy), leaves,
+                        seqSV.seqElemTy)
   case seqSV.seqElemTy.kind
   of itInt:
     case seqSV.seqElemTy.width
@@ -20272,14 +20896,15 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   # already declines classified via `iekSeqAdd`'s own unbacked-elem `else`
   # arm rather than reaching the unchecked-wrap fast path, so this widening
   # introduces no new unsoundness there.
-  var dataRaw =
+  # RFC-0005 S8bc: one array per leaf of a tree element.
+  var arrs =
     if e.seqLitElems.len == 0:
       if isBackedSeqElemTy(elemTy):
-        allocateSeqDataRaw(elemTy, "__seqlit.data")
+        allocateSeqArrs(elemTy, "__seqlit.data")
       else:
-        toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
+        @[toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))]
     else:
-      allocateSeqDataRaw(elemTy, "__seqlit.data")
+      allocateSeqArrs(elemTy, "__seqlit.data")
   # RFC-0005 S8s. Each element lowers against the element type's prototype,
   # as `lowerTupleLit`'s fields do: an int literal with no prototype lowers
   # to a signed 64-bit value, and `storeSeqElem` then read the `bv8` of that
@@ -20291,9 +20916,33 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     else: none(SymVal)
   for i, ce in e.seqLitElems:
     let elemSV = lower(env, ce, elemProto)
-    dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
-  SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
-         seqDataRaw: dataRaw, seqElemTy: elemTy)
+    let cur = mkSeqSV(mkInt(i), arrs, elemTy)
+    let stored = seqStoreArrs(cur, mkInt(i), elemSV)
+    if stored.isNone: return seqStoreDecline("seq literal", elemTy, elemSV)
+    arrs = stored.get
+  mkSeqSV(mkInt(e.seqLitElems.len), arrs, elemTy)
+
+proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bc (item 5). `newSeq[T](n)`: a seq of length `n` whose
+  ## every element is `T`'s zero -- the data array is the constant array
+  ## of that zero (`Z3_mk_const_array`), as an empty table's container
+  ## values are (`tabTreeDataZero`), so the element at any index below `n`
+  ## reads the zero. The parser has already forked a negative `n`
+  ## (`RangeDefect`) and declined one above `maxModelledInitialSize`. An
+  ## element type the seq does not back, or one with no modelled zero,
+  ## declines as a seq literal of it does.
+  let elemTy = e.snzElemTy
+  let lenSV = lower(env, e.snzLen)
+  if not isBackedSeqElemTy(elemTy) or not defaultZeroTotal(elemTy) or
+     lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+    lowerDegrade(seNestedSeqUnsupported,
+      "newSeq of a " & plainEnglishTypeKind(elemTy.kind) &
+        " element (or a non-integer length) not modelled")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
+  let zero = defaultZero(elemTy, "__newSeqZero")
+  # RFC-0005 S8bc: one constant array per leaf of a tree element.
+  mkSeqSV(toZ3Int(lenSV), constSeqArrs(elemTy, zero), elemTy)
 
 proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
   ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`
@@ -20635,13 +21284,18 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
                " (nested seq element type is not supported)")
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupportedInline", fresh)
-      var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
+      # RFC-0005 S8bc: one array per leaf of a tree element (either side).
+      var arrs = allocateSeqArrs(e.hofRetElemTy, "__hofmap.data")
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
         let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i, env)
-        dataRaw = storeSeqElem(dataRaw, e.hofRetElemTy, mkInt(i), mapped)
-      SymVal(kind: svSeq, seqLen: mkInt(n),
-             seqDataRaw: dataRaw, seqElemTy: seqCellTy(e.hofRetElemTy))   # RFC-0005 S8ba
+        if not seqElemFits(mapped, e.hofRetElemTy):
+          return seqStoreDecline("map", e.hofRetElemTy, mapped)
+        let stored = seqStoreArrs(mkSeqSV(mkInt(i), arrs, e.hofRetElemTy),
+                                  mkInt(i), mapped)
+        if stored.isNone: return seqStoreDecline("map", e.hofRetElemTy, mapped)
+        arrs = stored.get
+      mkSeqSV(mkInt(n), arrs, e.hofRetElemTy)
     of "filter":
       # Result svSeq: pack kept elements (predicate true) into running compacted
       # indices. result length = sum ite(pred_i, 1, 0); for each i, if pred_i,
@@ -20657,7 +21311,8 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
                " (nested seq element type is not supported)")
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(elemTy), "__hofFilterUnsupportedInline", fresh)
-      var dataRaw = allocateSeqDataRaw(elemTy, "__hoffilter.data")
+      # RFC-0005 S8bc: one array per leaf of a tree element.
+      var arrs = allocateSeqArrs(elemTy, "__hoffilter.data")
       var keptLen: Z3Int = mkInt(0)
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
@@ -20666,10 +21321,11 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
         # Store elem_i at the CURRENT kept index. Stores past the final kept
         # length are never observed (reads are len-bounded), so an
         # unconditional store at `keptLen` is sound.
-        dataRaw = storeSeqElem(dataRaw, elemTy, keptLen, elemSV)
+        let stored = seqStoreArrs(mkSeqSV(keptLen, arrs, elemTy), keptLen, elemSV)
+        if stored.isNone: return seqStoreDecline("filter", elemTy, elemSV)
+        arrs = stored.get
         keptLen = keptLen + ite(predSV.bo, mkInt(1), mkInt(0))
-      SymVal(kind: svSeq, seqLen: simplify(keptLen),
-             seqDataRaw: dataRaw, seqElemTy: elemTy)
+      mkSeqSV(simplify(keptLen), arrs, elemTy)
     of "fold":
       # Left-fold: acc = folder(acc, elem_i), from the init accumulator.
       doAssert e.hofInit != nil, "fold inline path requires an init accumulator"
@@ -21285,7 +21941,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
-  intHeapIsInt = false   ## RFC-0005 S8as: set once the params are bound
+  intHeapIsInt = false   ## RFC-0005 S8as: set by runSymexImpl before any param is allocated
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
   intCellFactSeen = initHashSet[uint]()  ## RFC-0005 S8ax
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
@@ -21408,6 +22064,21 @@ proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
   let ctx = resetSymexRunState(settings)
+  # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
+  # run's ints are not exact (`intHeapIsInt`). S8as also required every
+  # plain `int` parameter to be an Int: a bit-vector stored into an Int heap
+  # and compared with itself after a read is `int2bv(bv2int(v)) != v`, the
+  # F5 shape Z3 does not finish. S8ax meets that bit-vector unconverted
+  # (`intOfBV`, `storedAt`) and bounds every cell an Int heap is read at by
+  # its type (`intCellRangeFacts`).
+  # RFC-0005 batch 4: decided here, before any parameter is allocated, not
+  # once they are bound. A parameter's leaf-split arrays -- a seq of tuples
+  # (S8bc), a table's container values (S8at) -- are built at allocation
+  # from `heapLeafTerm` / `heapLeafRaw`, which consult this flag, while
+  # every read lifts its select by the flag as it stands then
+  # (`liftHeapValue`). Set after binding, the arrays were bit-vector sorted
+  # and their reads Int: an ill-sorted term at the first comparison.
+  intHeapIsInt = settings.integerSemantics != isExact
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -21733,14 +22404,6 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
-  # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
-  # run's ints are not exact (`intHeapIsInt`). S8as also required every
-  # plain `int` parameter to be an Int: a bit-vector stored into an Int heap
-  # and compared with itself after a read is `int2bv(bv2int(v)) != v`, the
-  # F5 shape Z3 does not finish. S8ax meets that bit-vector unconverted
-  # (`intOfBV`, `storedAt`) and bounds every cell an Int heap is read at by
-  # its type (`intCellRangeFacts`).
-  intHeapIsInt = settings.integerSemantics != isExact
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
@@ -23427,6 +24090,17 @@ proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
   ## RFC-0005 S8at. A witness `seq[T]` of any renderable element type, at
   ## `name` (`extractFromSymVal`'s `seqLens` + `.<i>` element leaves): a
   ## `Table`'s seq value, which the table reader reaches generically.
+  ## RFC-0005 S8bc: also a by-value `seq[char]` / `seq[Enum]` (the fixed
+  ## width readers return `seq[uint8]`, not the declared type). A `char` or
+  ## enum element converts by value (`cast` from the 64-bit leaf is a
+  ## byte-order-dependent reinterpretation), and a string-backed `seq[char]`
+  ## (one whole-string leaf, as `readSeqUInt8` reads it) is read per byte.
+  when T is char:
+    if w.strVals.hasKey(name):
+      let s = w.strVals[name]
+      result = newSeq[T](s.len)
+      for i in 0 ..< s.len: result[i] = s[i]
+      return
   let n = w.seqLens.getOrDefault(name, 0)
   result = newSeq[T](n)
   for i in 0 ..< n:
@@ -23437,6 +24111,13 @@ proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
       if w.float32Vals.hasKey(p): result[i] = w.float32Vals[p]
     elif T is SomeFloat:
       if w.float64Vals.hasKey(p): result[i] = T(w.float64Vals[p])
+    elif T is char or T is enum:
+      if w.uintVals.hasKey(p): result[i] = T(w.uintVals[p])
+      elif w.intVals.hasKey(p): result[i] = T(w.intVals[p])
+    elif T is object or T is tuple or T is array or T is distinct:
+      # RFC-0005 S8bc (item 3): a tree element, written in the heap's cell
+      # layout (`extractTreeValue`), read as a by-value cell field is.
+      readCellField(newRefWitness(w), p, result[i])
     else:
       if w.uintVals.hasKey(p): result[i] = cast[T](w.uintVals[p])
       elif w.intVals.hasKey(p): result[i] = witnessIntAs[T](w.intVals[p])

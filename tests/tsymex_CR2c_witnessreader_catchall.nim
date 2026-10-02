@@ -55,7 +55,8 @@ import nelli/smt/canonicalize
 type
   Widget = object
     a: int
-    b: int
+    b: ref int   # RFC-0005 S8bc: a seq of a plain object is renderable since
+                 # S8bc; a seq element holding a ref is not
 
   ShapeKind = enum skWidgets, skCount
 
@@ -65,7 +66,9 @@ type
   ShapeBad = object
     case kind: ShapeKind
     of skWidgets:
-      widgets: seq[Widget]
+      widgets: seq[seq[Widget]]   # RFC-0005 S8bc: a seq of seqs stays the
+                                  # unbacked scoped-decline placeholder (a
+                                  # seq of objects is backed since S8bc)
     of skCount:
       count: int
 

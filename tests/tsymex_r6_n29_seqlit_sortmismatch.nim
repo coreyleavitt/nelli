@@ -113,8 +113,8 @@ suite "symex N29 -- three sequential .add calls off an empty literal":
 # =============================================================================
 
 proc sutUnbackedLitAdd(a: string, b: string) =
-  var pairs: seq[(string, string)] = @[]
-  pairs.add (a, b)
+  var pairs: seq[seq[string]] = @[]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
+  pairs.add @[a, b]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if pairs.len > 0:
     symexTarget("unbacked_add")
 

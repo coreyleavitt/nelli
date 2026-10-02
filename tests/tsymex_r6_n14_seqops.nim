@@ -421,7 +421,7 @@ type
     case kind: MKind
     of mkA: a: int
     of mkB:
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc mkPlaceholderRec(v: var MRec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -435,7 +435,7 @@ proc mutIndexAssignOnPlaceholder(v: var MRec, i: int) =
   mkPlaceholderRec(v)
   if v.kind == mkB:
     var o = v.opts
-    o[i] = ("k", "v")
+    o[i] = @["k", "v"]   # RFC-0005 S8bc: a seq stand-in element
     symexTarget("mut_indexassign_placeholder")
 
 proc mutPopOnPlaceholder(v: var MRec) =

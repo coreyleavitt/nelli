@@ -70,9 +70,10 @@ type
     ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
     ## heap cell holds (a seq of tuples is backed nowhere, a stated
     ## decline). The by-value case object this was (S8ar) is a cell
-    ## value since S8at.
+    ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
+    ## the part is a `seq[seq[int]]`.
     x: int
-    ys: seq[(int, int)]
+    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   HeapStrNode = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models;
     ## a `distinct` field still reaches `liftHeapValue`'s unsupported-pointee

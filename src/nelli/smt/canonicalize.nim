@@ -231,6 +231,22 @@ const symexWalkerVersion* = "209"
   ## (`regex_parser.replaceRunZ3`; it declined).
   ## Provisional 201 (S8ba holds 200).
   ##
+  ## RFC-0005 S8bc (2026-10-02) — S8at's remainder; provisional number (batch
+  ## 2 takes 202; the channel assigns the final one at merge).
+  ## 193->203. `getOrDefault` is modelled, and a mixed bool/int `and`
+  ## declines in-band (was a walker fault). A non-operator `{.borrow.}`
+  ## routine is its base routine. A seq of a tuple or object element is
+  ## held leaf-split, one data array per leaf (was unbacked in every
+  ## position); a recursive value object is unrolled to
+  ## `maxRecursiveValueDepth` and declines past it
+  ## (`seRecursiveValueDepth`). `insert` on an array element or Table value,
+  ## `newSeq` (`iekSeqNewZero`), Table iteration (`isTabKeys`) and
+  ## `mgetOrPut` are modelled; `inc`/`dec` on any receiver but a bare int
+  ## variable was silently dropped and is now the assignment. A decline on
+  ## an infeasible arm is dropped, not tainted. An inlined iterator keeps
+  ## its typed parameters, and an int conversion of a constant folds.
+  ## Provisional 203; batch 4.
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker
@@ -5274,6 +5290,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<Nil:" & canonicalize(e.nilPointee) & ">"
   of iekZeroValue:                       ## RFC-0005 S8u
     "Ex<Zero:" & canonicalize(e.zvTy) & ">"
+  of iekSeqNewZero:                      ## RFC-0005 S8bc
+    "Ex<SNZ:" & canonicalize(e.snzElemTy) & ":" &
+      canonicalize(e.snzLen, env) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 
@@ -5376,6 +5395,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<IxA:" & lookupLocal(env, s.iaRecvName) & "[" &
       canonicalize(s.iaIdx, env) & "]=" & canonicalize(s.iaVal, env) &
       (if s.iaLo != 0: ";lo=" & $s.iaLo else: "") & ">"
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6). Distinct `TK:` prefix; the bound key sequence
+    # is a fresh name (`bindLocal`), the table a content-addressed operand.
+    let retSlot = "$" & $bindLocal(env, s.tkRetName)
+    "St<TK:" & retSlot & "=" & canonicalize(s.tkRecv, env) & ";kty=" &
+      canonicalize(s.tkKeyTy) & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

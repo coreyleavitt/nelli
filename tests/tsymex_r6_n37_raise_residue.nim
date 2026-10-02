@@ -361,7 +361,7 @@ suite "symex N37 -- isRaise bare-reraise decline (walk-level generalization)":
 # =============================================================================
 
 proc n37SeqLitTupleElem(a: string, b: string) =
-  let pairs: seq[(string, string)] = @[(a, b)]
+  let pairs: seq[seq[string]] = @[@[a, b]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if pairs.len > 0:
     symexTarget("n37_seqlit_tuple")
 
@@ -377,7 +377,8 @@ suite "symex N37 -- lowerSeqLit non-empty literal, unbacked tuple elem":
     var saw = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == seNestedSeqUnsupported and "tuple type" in e.msg:
+      # RFC-0005 S8bc: the stand-in element is a seq (a tuple is backed).
+      if e.kind == seNestedSeqUnsupported and "seq type" in e.msg:
         saw = true
     check r.status == sxUnknown
     check saw
@@ -483,7 +484,7 @@ suite "symex N37 -- UNSAT companion: no over-degrade":
 proc n37HofMapTupleElem(a: int) =
   var xs: seq[int] = @[]
   xs.add a
-  let ys = xs.map(proc(x: int): (string, string) = ($x, $x))
+  let ys = xs.map(proc(x: int): seq[string] = @[$x, $x])  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if ys.len > 0:
     symexTarget("n37_hof_map_tuple")
 

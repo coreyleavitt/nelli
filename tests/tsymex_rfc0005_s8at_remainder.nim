@@ -149,12 +149,13 @@ suite "S8at (2): initTable / initHashSet in a SUT":
     checkpoint $d.status & " " & show(d.errors)
     check d.status == sxUnsat
 
-  test "newSeq through such a generic compiles; newSeq itself is not modelled":
-    # `newSeq` has no model: its stdlib body is walked until the call-depth
-    # budget runs out, an honest sxUnknown (reported, not fixed here).
+  test "newSeq through such a generic compiles, and is modelled":
+    # S8at pinned `sxSat` or `sxUnknown`: `newSeq` had no model, its stdlib
+    # body walked until the call-depth budget ran out. RFC-0005 S8bc
+    # (item 5) models it (`iekSeqNewZero`).
     let r = symexFind(retOnlyNewSeq, tLabel("ret_newseq"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status in {sxSat, sxUnknown}
+    check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
     if r.status == sxSat:
       check reproduces(retOnlyNewSeq(r.witness[0]), "ret_newseq")
@@ -653,14 +654,16 @@ suite "S8at (5): a distinct over a composite base":
     check r.status == sxSat
     if r.status == sxSat: check reproduces(doRead(r.witness[0]), "do_read")
 
-  test "a borrowed proc stays declined (a different mechanism)":
-    # RFC-0005 S8at: a `{.borrow.}` routine that is not an operator has the
-    # borrowed symbol as its body (`feUnsupportedStmtKind`), over a scalar
-    # base too; reported, not fixed here.
+  test "a borrowed proc":
+    # RFC-0005 S8at pinned this declined: a `{.borrow.}` routine that is not
+    # an operator had the borrowed symbol as its body
+    # (`feUnsupportedStmtKind`). RFC-0005 S8bc (item 2) lowers it as the base
+    # routine on the unwrapped argument.
     let r = symexFind(dsBorrow, tLabel("ds_borrow"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedStmtKind)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedStmtKind)
+    if r.status == sxSat: replays(dsBorrow(r.witness[0]), "ds_borrow")
 
 # ---- (6) a value object that recurs through a container ---------------------
 #
@@ -694,16 +697,20 @@ suite "S8at (6): a value object recurring through a seq":
     check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
 
-  test "its elements decline at the read, as a non-recursive element does":
+  test "its elements are read (RFC-0005 S8bc: a leaf-split seq element)":
+    # RFC-0005 S8bc re-pinned this. S8at declined both reads
+    # (`seNestedSeqUnsupported`): a seq of a tuple or object was backed in
+    # no position. S8bc holds such a seq leaf-split and unrolls the
+    # recursive value object to a bounded depth, so both are exact.
     let r = symexFind(vrKids, tLabel("vr_kids"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(seNestedSeqUnsupported)
+    check r.status == sxSat
     check not r.errors.hasKind(weInternalWalkerFault)
+    if r.status == sxSat: check reproduces(vrKids(r.witness[0]), "vr_kids")
     let f = symexFind(vrFlat, tLabel("vr_flat"))
     checkpoint $f.status & " " & show(f.errors)
-    check f.status == sxUnknown
-    check f.errors.hasKind(seNestedSeqUnsupported)
+    check f.status == sxSat
+    if f.status == sxSat: check reproduces(vrFlat(f.witness[0]), "vr_flat")
 
 # ---- (7) Table float keys and container values ------------------------------
 

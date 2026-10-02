@@ -4009,6 +4009,21 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
+    if operand.kind == nnkIdent:
+      # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
+      # untyped ident (`substIteratorParams`): its type cannot be read,
+      # so which conversion this is (a narrowing, a range check, an
+      # int <-> float) is unknown. `valueTypeName` failed the whole
+      # compile ("node has no type") -- reached by `pairs` over a
+      # `Table[K, seq[V]]`. A recorded decline, as the catch-all's.
+      let dummyTy = classifyType(n).ty
+      preamble.add ctx.declineAtSite(
+        feUnsupportedExprKind,
+        "conversion `" & n.repr & "` of an inlined iterator parameter: " &
+          "its type is not known here",
+        "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
+      let dummy = zeroValueForType(dummyTy)
+      return (if dummy != nil: dummy else: mkIntLit(0))
     let tgt = typeNodeName(n[0])
     let src = valueTypeName(operand)
     if tgt in fltTyNames and src in intTyNames:
@@ -4225,6 +4240,20 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `NimTypeKind` a generic/concept instantiation might produce.
       if isIntLiteralNode(wrapped):
         parseExpr(wrapped, preamble, ctx)
+      elif wrapped.kind == nnkIdent:
+        # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
+        # untyped ident (`substIteratorParams`), under a hidden conversion:
+        # `classifyType(wrapped)` failed the whole compile ("node has no
+        # type"), so whether the conversion widens is unknown. Reached by
+        # `pairs` over a `Table[K, seq[V]]`. A recorded decline, as the
+        # explicit conversion's (`nnkConv`).
+        preamble.add ctx.declineAtSite(
+          feUnsupportedExprKind,
+          "hidden conversion of inlined iterator parameter `" &
+            wrapped.repr & "`: its type is not known here",
+          "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
+        let dummy = zeroValueForType(classifyType(n).ty)
+        if dummy != nil: dummy else: mkIntLit(0)
       else:
         let outerCls = classifyType(n)
         let innerCls = classifyType(wrapped)
@@ -9856,6 +9885,45 @@ type DottedOp = enum
   doStrConcat, doStrUnsupported, doStrIndexAssign,
   doSeqInsertGrow   ## RFC-0005 S8ar: `insert`'s grow phase
 
+proc mutationOp(calleeName: string; fk: IRTypeKind; n: NimNode): DottedOp =
+  ## RFC-0005 S8ap (factored by S8at). The bare arm's IR for a mutation
+  ## `isKnownMutatingReceiverCall` accepted, by name and receiver kind.
+  case calleeName
+  of "add":
+    if fk == itSeq: doSeqAdd
+    elif classifyType(n[2]).ty.kind == itString or
+         unwrapHidden(n[2]).typeKind == ntyChar: doStrConcat
+    else: doStrUnsupported
+  of "del": (if fk == itSeq: doSeqDel else: doTabDel)
+  of "insert": doSeqInsert
+  of "incl": doSetIncl
+  of "excl": doSetExcl
+  else: doTabSet  # "[]="
+
+proc elemLvalueBracket(n: NimNode): NimNode =
+  ## RFC-0005 S8at. `n` as a two-child `nnkBracketExpr` (base, index), or
+  ## nil: an array element is one already (`a[1]`); a `Table` value read
+  ## through `[]`'s `var` overload is the call `[](t, k)` under a hidden
+  ## deref, which `parseAsgn`'s `t[k] = v` arm takes as the bracket.
+  if n.kind == nnkBracketExpr and n.len == 2: return n
+  let c = unwrapHidden(n)
+  if c.kind in {nnkCall, nnkCommand} and c.len == 3 and
+     c[0].kind == nnkSym and c[0].strVal == "[]":
+    return nnkBracketExpr.newTree(c[1], c[2])
+  nil
+
+proc arrayElemLvalue(n: NimNode): bool =
+  ## RFC-0005 S8at. `n` is an element of an array value (`a[1]`, `o.a[i]`,
+  ## `p.a[k]`), or the value of a `Table` at a key (`t["a"]`, `p.t[k]`),
+  ## indexed by a literal or a plain variable, so evaluating the index
+  ## twice is evaluating it once.
+  let b = elemLvalueBracket(n)
+  b != nil and
+    unwrapHidden(b[1]).kind in {nnkSym, nnkCharLit .. nnkUInt64Lit,
+                                nnkFloatLit .. nnkFloat64Lit,
+                                nnkStrLit .. nnkTripleStrLit} and
+    classifyType(unwrapHidden(b[0])).ty.kind in {itArray, itTable}
+
 proc insertArgs(elemTy: IRType; args: seq[IRExpr];
                 preamble: var seq[IRStmt]; ctx: ParseCtx): seq[IRExpr] =
   ## RFC-0005 S8ar. `insert(x, item, i)`'s two arguments bound to fresh
@@ -11133,19 +11201,7 @@ proc parseStmtInner(n: NimNode,
             # (name, receiver kind, arity) triple to one the bare arm models;
             # pick that arm's IR. Arguments are parsed left to right, before
             # the field is read (S8ao's order, and the bare arm's).
-            let fk = classifyType(fieldNode).ty.kind
-            let op =
-              case calleeName
-              of "add":
-                if fk == itSeq: doSeqAdd
-                elif classifyType(n[2]).ty.kind == itString or
-                     unwrapHidden(n[2]).typeKind == ntyChar: doStrConcat
-                else: doStrUnsupported
-              of "del": (if fk == itSeq: doSeqDel else: doTabDel)
-              of "insert": doSeqInsert
-              of "incl": doSetIncl
-              of "excl": doSetExcl
-              else: doTabSet  # "[]="
+            let op = mutationOp(calleeName, classifyType(fieldNode).ty.kind, n)
             var args: seq[IRExpr]
             for i in 2 ..< n.len: args.add parseExpr(n[i], preamble, ctx)
             if op == doSeqInsert:
@@ -11165,6 +11221,34 @@ proc parseStmtInner(n: NimNode,
                                 "(...)` unsupported (feUnsupportedOp)"),
               "N49: dotted-field lvalue mutation `" & calleeName &
                             "` unsupported (feUnsupportedOp)")
+        elif recv1 != nil and arrayElemLvalue(recv1) and
+             isKnownMutatingReceiverCall(calleeName, recv1, n.len) and
+             calleeName != "insert":
+          # RFC-0005 S8at: a mutation of an ARRAY ELEMENT (`a[1].add x`,
+          # `p.a[i].del j`, a Table/HashSet element likewise), or of a
+          # TABLE VALUE (`t["a"].add x`, `t[k].incl y`: `[]`'s `var`
+          # overload raises `KeyError` for an absent key, as the read here
+          # does, and the write back is then to a present key). It fell to
+          # the generic call below, which inlined the system `add` down to
+          # the NimSeqV2 payload cast (`heUnsafeCast`). Nim takes the
+          # element's address first (its IndexDefect), then evaluates the
+          # arguments, then mutates in place; here the element is read
+          # (forking the IndexDefect), the bare arm's IR is applied to it
+          # (`dottedOpExpr`) and the result is written back through the
+          # same lvalue arm `a[i] = v` takes (`parseAsgn`). The index is a
+          # literal or a variable (`arrayElemLvalue`), so reading it twice
+          # is reading it once. `insert`'s two-phase lowering stays on the
+          # generic path.
+          let oldTmp = freshSynth(ctx, "aelt")
+          let eltTy = classifyType(recv1).ty
+          preamble.add mkLet(oldTmp, eltTy, parseExpr(recv1, preamble, ctx))
+          let op = mutationOp(calleeName, eltTy.kind, n)
+          var args: seq[IRExpr]
+          for i in 2 ..< n.len: args.add parseExpr(n[i], preamble, ctx)
+          let newTmp = freshSynth(ctx, "aeltNew")
+          preamble.add mkLet(newTmp, eltTy, dottedOpExpr(op, mkVar(oldTmp), args))
+          parseAsgn(nnkAsgn.newTree(elemLvalueBracket(recv1), newEmptyNode()),
+                    mkVar(newTmp), preamble, ctx)
         else:
           let callKey = ensureProcRegistered(ctx, calleeSym, n)
           userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)

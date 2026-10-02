@@ -306,11 +306,14 @@ proc heapCompoundTy(ty: IRType): bool =
       if not heapUnitTy(part.ty): return false
     true
   of itDistinct:
-    # A scalar base only: a composite base has no distinct sort
-    # (`ensureDistinctSort` reads one Z3 term of the base, and a seq or
-    # tuple is not one), so a re-boxed value would decline.
+    # RFC-0005 S8at: a composite base too. S8ar admitted a scalar base only,
+    # since a composite base had no distinct sort (`ensureDistinctSort`
+    # derived inject/eject over one Z3 term of the base); it now has one
+    # without them, so a distinct over a compound cell value is held as its
+    # base's leaves (`heapLeafSuffixes`) and re-boxed on a read.
     let g = distinctGround(ty)
-    g != nil and g.kind in {itInt, itBool, itFloat32, itFloat64, itString}
+    g != nil and (g.kind in {itInt, itBool, itFloat32, itFloat64, itString} or
+                  heapCompoundTy(g))
   else: false
 
 proc heapStandInTy(ty: IRType): bool =
@@ -433,9 +436,14 @@ proc heapLeafSuffixes(ty: IRType): seq[string] =
   if not heapCompoundTy(ty): return @[""]
   case ty.kind
   of itSeq:   @["", "__@len"]
-  of itTable: @["", "__@present", "__@len"]
+  of itTable:
+    # RFC-0005 S8at: a container value's further leaves (`tabDataMore`).
+    var r = @["", "__@present", "__@len"]
+    if isTableContainerValTy(ty.tabValTy):
+      for i in 1 ..< heapLeafSuffixes(ty.tabValTy).len: r.add "__@v" & $i
+    r
   of itSet:   @["", "__@len"]
-  of itDistinct: @[""]
+  of itDistinct: heapLeafSuffixes(distinctGround(ty))   ## RFC-0005 S8at
   else:
     var r: seq[string]
     for part in heapParts(ty):
@@ -463,7 +471,9 @@ proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
   ## a tree: `svFitsHeapTy(sv, ty)`.
   if ty != nil and heapTreeTy(ty):
     if ty.kind == itDistinct:
-      return @[heapLeafRaw(ejectBase(sv), distinctGround(ty))]
+      let g = distinctGround(ty)
+      if heapCompoundTy(g): return svLeafAsts(ejectBase(sv), g)  ## RFC-0005 S8at
+      return @[heapLeafRaw(ejectBase(sv), g)]
     let parts = heapParts(ty)
     let psvs = svPartsOf(sv, ty)   ## RFC-0005 S8at
     for i, part in parts:
@@ -473,7 +483,10 @@ proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast] =
     return
   case sv.kind
   of svSeq:   @[sv.seqDataRaw.raw, sv.seqLen.raw] # [placeholder-audited]
-  of svTable: @[sv.tabDataRaw.raw, sv.tabPresentRaw.raw, sv.tabSize.raw]
+  of svTable:
+    var r = @[sv.tabDataRaw.raw, sv.tabPresentRaw.raw, sv.tabSize.raw]
+    for m in sv.tabDataMore: r.add m.raw   ## RFC-0005 S8at
+    r
   of svSet:   @[sv.setMembersRaw.raw, sv.setSize.raw]
   else:       @[rawAnyAstOf(sv)]
 
@@ -556,6 +569,9 @@ proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
   ## the value).
   if ty != nil and heapTreeTy(ty):
     if ty.kind == itDistinct:
+      let g = distinctGround(ty)
+      if heapCompoundTy(g):   ## RFC-0005 S8at: the base's leaves, re-boxed
+        return reboxDistinct(ty, svWithLeaves(ctx, ejectBase(proto), leaves, g))
       return liftHeapValue(ctx, leaves[0].raw, ty)
     var pos = 0
     let pprotos = svPartsOf(proto, ty)   ## RFC-0005 S8at
@@ -577,6 +593,7 @@ proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
     result.tabDataRaw = leaves[0]
     result.tabPresentRaw = leaves[1]
     result.tabSize = wrap[Z3Int](ctx, leaves[2].raw)
+    result.tabDataMore = leaves[3 .. ^1]   ## RFC-0005 S8at
   of svSet:
     result.setMembersRaw = leaves[0]
     result.setSize = wrap[Z3Int](ctx, leaves[1].raw)
@@ -825,6 +842,7 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
     @[sv.seqLen >= mkInt(0), sv.seqLen <= mkInt(1024)] # [placeholder-audited]
   of svTable:
     registerTableBase(sv.tabPresentRaw, sv.tabSize, ty.tabKeyTy)
+    registerTabTreeBase(sv)   ## RFC-0005 S8at
     @[sv.tabSize >= mkInt(0), sv.tabSize <= mkInt(1024)]
   of svSet:
     registerSetBase(sv.setMembersRaw, sv.setSize, ty.setElemTy)
@@ -839,7 +857,7 @@ proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool] =
     for e in sv.arrElems: r.add svCellWf(e, ty.elemTy, true)
     r
   of svDistinct:
-    svCellWf(ejectBase(sv), ty.distinctBase, nested)
+    svCellWf(ejectBase(sv), distinctGround(ty), nested)
   of svVariant, svMultiVariant:
     # RFC-0005 S8at. Each part's facts, and each discriminator in its
     # legal domain (`allocateSym`'s clause: an `else` arm's ordinals

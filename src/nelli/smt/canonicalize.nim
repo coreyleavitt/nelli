@@ -202,7 +202,22 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "191"
+const symexWalkerVersion* = "193"
+  ## RFC-0005 S8at (2026-10-02) — S8ar's remainder; provisional number (the
+  ## channel assigns the final one at merge). An anonymous-tuple pointee's
+  ## `new` zeroes it (a false sxSat); a by-value case-object field is a
+  ## tree-valued heap cell, and a whole-pointee read of a ref case object
+  ## reads the same heaps its fields do; a symbolic index into an array of
+  ## seqs merges the elements exactly; a `distinct` over a composite base is
+  ## lowered through its base (index, `len`, field); `a[i].add x` on an array
+  ## element and `t[k].add x` on a Table value mutate in place; a Table's
+  ## absent-key `[]` raises `KeyError` (the handler was dead: a false
+  ## sxUnsat); Table keys may be floats (`-0.0` and `0.0` one key, a NaN
+  ## never found) and values may be a backed seq, HashSet or Table (one
+  ## data array per leaf); a 2^32-cell key domain no longer faults; an
+  ## inlined iterator parameter's conversion declines instead of failing
+  ## the compile. 191->193.
+  ##
   ## RFC-0005 S8ar (2026-10-01) — S8ap's remainder; provisional number (the
   ## channel assigns the final one at merge). A seq of the object's own ref
   ## type classifies; `seq[string]` elements and `insert` are modelled;

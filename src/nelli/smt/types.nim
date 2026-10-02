@@ -3974,6 +3974,9 @@ proc satMul64*(a, b: int64): int64 =
   elif a > high(int64) div b: high(int64)
   else: a * b
 
+func isTableContainerValTy*(valTy: IRType): bool
+  ## RFC-0005 S8at fwd-decl (defined with `isTableValTy`).
+
 proc allocCostOf*(t: IRType): int64 =
   ## D2 (round-6 review remediation, N9 companion). Predicts, WITHOUT
   ## allocating anything, the number of leaf Z3 constant/array allocations
@@ -4029,7 +4032,9 @@ proc allocCostOf*(t: IRType): int64 =
   of itSeq:
     2'i64
   of itTable:
-    3'i64
+    # RFC-0005 S8at: a container value's leaves are data arrays too.
+    if isTableContainerValTy(t.tabValTy): satAdd64(2'i64, allocCostOf(t.tabValTy))
+    else: 3'i64
   of itSet:
     2'i64
   of itVariant:
@@ -4155,7 +4160,26 @@ func isTableKeyTy*(keyTy: IRType): bool =
   ## RFC-0005 S8ar. A `Table` key type the model backs: `string` (a Z3
   ## string key) or an `isContainerIntLeaf` (its 64-bit cell, a `HashSet`
   ## member's encoding). Was `string` only.
-  keyTy != nil and (keyTy.kind == itString or isContainerIntLeaf(keyTy))
+  ## RFC-0005 S8at: a `float32` or `float64` key, held as its IEEE bit
+  ## pattern with `-0.0` folded onto `0.0` and a NaN never found
+  ## (`floatKeyCell` / `tabKeyNaN`, runtime.nim).
+  keyTy != nil and (keyTy.kind in {itString, itFloat32, itFloat64} or
+                    isContainerIntLeaf(keyTy))
+
+func isBackedTableTy*(keyTy, valTy: IRType): bool
+
+func isTableContainerValTy*(valTy: IRType): bool =
+  ## RFC-0005 S8at. A `Table` value that is itself a container the model
+  ## backs: a seq of a backed element type, a backed `HashSet`, a backed
+  ## `Table`. The table holds it leaf-split, one data array per leaf of the
+  ## value (`heapLeafSuffixes`, the layout a heap cell of the type has):
+  ## a seq's element array and length, a set's members and size, a table's
+  ## own arrays. Declined before S8at (`seUnsupportedTableValType`).
+  valTy != nil and (
+    (valTy.kind == itSeq and valTy.seqUnsupportedFieldReason.len == 0 and
+     isBackedSeqElemTy(valTy.seqElemTy)) or
+    (valTy.kind == itSet and isContainerIntLeaf(valTy.setElemTy)) or
+    (valTy.kind == itTable and isBackedTableTy(valTy.tabKeyTy, valTy.tabValTy)))
 
 func isTableValTy*(valTy: IRType): bool =
   ## RFC-0005 S8ar. A `Table` value type the model backs: an
@@ -4164,8 +4188,10 @@ func isTableValTy*(valTy: IRType): bool =
   ## that is itself a container, an aggregate or a ref is a scoped decline
   ## (`seUnsupportedTableValType`): the data array holds one term per key,
   ## and none of those is one term.
+  ## RFC-0005 S8at: and a container value (`isTableContainerValTy`).
   valTy != nil and (isContainerIntLeaf(valTy) or
-                    valTy.kind in {itString, itFloat32, itFloat64})
+                    valTy.kind in {itString, itFloat32, itFloat64} or
+                    isTableContainerValTy(valTy))
 
 func isBackedTableTy*(keyTy, valTy: IRType): bool =
   ## RFC-0005 S8z. The `Table[K, V]` shapes `allocateSym` backs. RFC-0005
@@ -4199,7 +4225,15 @@ proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
   ## longer excluded -- `isChar` (consulted by `emitTyAndReader`, via
   ## `primTyAndReader`) resolves what used to be ambiguous (see
   ## `isCharAmbiguous`'s own doc).
-  isBackedTableTy(keyTy, valTy)
+  ## RFC-0005 S8at: a container value renders through `witnessTabVal`'s
+  ## seq / HashSet / Table readers: a seq of ints, floats, bools or
+  ## strings (not of refs, which the heap snapshot renders), any backed
+  ## HashSet, and a renderable Table.
+  if not isBackedTableTy(keyTy, valTy): return false
+  case valTy.kind
+  of itSeq: valTy.seqElemTy.kind in {itInt, itFloat32, itFloat64, itBool, itString}
+  of itTable: isRenderableTableTy(valTy.tabKeyTy, valTy.tabValTy)
+  else: true
 
 proc isRenderableSetElemTy*(elemTy: IRType): bool =
   ## Mirrors exactly the shape `emitTyAndReader`'s `itSet` arm can render:
@@ -4591,15 +4625,15 @@ proc unsupportedWitnessMsg*(shape: string): string =
 proc tableKeyDeclineMsg*(keyTy: IRType): string =
   ## RFC-0005 S8ar. The one statement of the key-type decline.
   "Table key type not modeled: " & $keyTy & " — only a string or a " &
-    "fixed-width integer, char, enum, range or bool key is supported " &
+    "fixed-width integer, char, enum, range, bool or float key is supported " &
     "(seUnsupportedTableKeyType)"
 
 proc tableValDeclineMsg*(valTy: IRType): string =
   ## RFC-0005 S8ar. The one statement of the value-type decline: the data
   ## array holds one term per key.
   "Table value type not modeled: " & $valTy & " — only a fixed-width " &
-    "integer, char, enum, range, bool, string or float value is supported " &
-    "(seUnsupportedTableValType)"
+    "integer, char, enum, range, bool, string or float value, or a seq, " &
+    "HashSet or Table of those, is supported (seUnsupportedTableValType)"
 
 proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
   ## N39 (round-6 fix round 5 — closing a mis-scoped safety certification in

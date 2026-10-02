@@ -345,6 +345,9 @@ type
         ## from a root. 0 for a seq that is not a heap read.
     of svTable:
       tabDataRaw*:    Z3AnyAst
+      tabDataMore*:   seq[Z3AnyAst]
+        ## RFC-0005 S8at. A container value's leaves after the first, one
+        ## data array each (`tabValLeaves`); empty for a scalar value.
       tabPresentRaw*: Z3AnyAst
       tabSize*:       Z3Int       ## #144: cardinality counter; mutations
                                   ## update this alongside the present
@@ -1108,6 +1111,11 @@ proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
   ## `renderHeapValue` renders a case object cell.
 proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
                   ty: IRType = nil): SymVal
+proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast]
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
+  ## A container `Table` value is held leaf-split (`tabValLeaves`).
+proc svCellWf(sv: SymVal; ty: IRType; nested: bool): seq[Z3Bool]
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
 proc heapParts(ty: IRType): seq[tuple[label: string; ty: IRType]]
   ## RFC-0005 S8ar fwd-decl (defined in runtime_heap.nim, included below).
 proc distinctGround(ty: IRType): IRType
@@ -1297,7 +1305,12 @@ func cellDomain(ty: IRType): tuple[bounded: bool, lo, hi: int64] =
   ## interval of the cell read with `ty`'s signedness: the declared range,
   ## else the width's. `bounded` is false for a full 64-bit type, whose every
   ## cell is a value.
-  if ty.kind == itBool: (true, 0'i64, 1'i64)
+  ## RFC-0005 S8at: a float `Table` key's cell is its IEEE bit pattern
+  ## (`floatKeyCell`): every 64-bit cell for a `float64`, the low 32 bits for
+  ## a `float32`.
+  if ty.kind == itFloat64: (false, 0'i64, 0'i64)
+  elif ty.kind == itFloat32: (true, 0'i64, 0xFFFF_FFFF'i64)
+  elif ty.kind == itBool: (true, 0'i64, 1'i64)
   elif ty.hasRange: (true, ty.rangeLo, ty.rangeHi)
   elif ty.width == 64: (false, 0'i64, 0'i64)
   elif ty.signed:
@@ -1371,6 +1384,10 @@ type ContainerCardRegistry* = object
     ## RFC-0005 S8z: `elemTy` bounds the cells a member can occupy
     ## (`cellDomain`) for a narrower element type.
   setKeys*:  seq[Z3BitVec[64]]
+  tabTreeBases*: seq[SymVal]
+    ## RFC-0005 S8at. Every INPUT table whose value is a container
+    ## (`tvTree`): the facts a free value of its value type has
+    ## (`svCellWf`) hold at every key, and are stated at every key term.
   seen:      HashSet[pointer]
 
 var containerCard* {.threadvar.}: ContainerCardRegistry
@@ -1401,6 +1418,16 @@ proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType) =
   if firstSighting(cast[pointer](members.raw)):
     containerCard.setBases.add (members: members, size: size, elemTy: elemTy)
 
+proc registerTabTreeBase(sv: SymVal) =
+  ## RFC-0005 S8at. An input table holding container values (see
+  ## `ContainerCardRegistry.tabTreeBases`); any other value is ignored.
+  if sv.kind == svTable and isTableContainerValTy(sv.tabValTy) and
+     firstSighting(cast[pointer](sv.tabDataRaw.raw)):
+    containerCard.tabTreeBases.add sv
+
+proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+
 proc noteTableKey(k: Z3String) =
   ## RFC-0005 S8f. A key term some table array is selected or stored at.
   if firstSighting(cast[pointer](k.raw)):
@@ -1415,32 +1442,32 @@ type TabValLeaf = enum
   ## RFC-0005 S8ar. The Z3 term a backed `Table` value is held as
   ## (`isTableValTy`): an integer-like value's 64-bit cell, or a term of the
   ## value's own sort.
-  tvCell, tvStr, tvF32, tvF64
+  ## RFC-0005 S8at: `tvTree`, a container value held leaf-split, one data
+  ## array per leaf (`tabValLeaves`).
+  tvCell, tvStr, tvF32, tvF64, tvTree
 
 func tabValLeaf(valTy: IRType): TabValLeaf =
+  if isTableContainerValTy(valTy): return tvTree   ## RFC-0005 S8at
   case valTy.kind
   of itString: tvStr
   of itFloat32: tvF32
   of itFloat64: tvF64
   else: tvCell
 
+proc tabTreeDataVars(name: string; keyTy, valTy: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc tabTreeDataZero(keyTy, valTy: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+
 proc tabDataVarOf[K](name: string; valTy: IRType): Z3AnyAst =
-  # nim-z3's `sortOf(Z3Array[K, V])` hands `Z3_mk_array_sort` two fresh,
-  # unreferenced sorts as call arguments. The C++ backend evaluates them
-  # right to left, and Z3 keeps only the last API result alive in a
-  # ref-counted context, so a sort no live term holds (a float's, before
-  # any float term exists) was freed by the key sort's construction: the
-  # array's range was a dangling sort (`k!0`; "fp sorts expected" at the
-  # first comparison). A live term of each sort holds both across the call.
-  let holdK {.used.} = (when K is Z3String: toAnyAst(mkString(""))
-                        else: toAnyAst(mkBitVec[64](0'i64)))
-  let holdV {.used.} =
-    case tabValLeaf(valTy)
-    of tvCell: toAnyAst(mkBitVec[64](0'i64))
-    of tvStr:  toAnyAst(mkString(""))
-    of tvF32:  toAnyAst(mkFloat32(0'f32))
-    of tvF64:  toAnyAst(mkFloat64(0.0))
+  # RFC-0005 S8at: the live key / value terms that held both sorts across
+  # `Z3_mk_array_sort` are gone -- nim-z3's `sortOf(Z3Array[K, V])` now
+  # holds them itself (nim-z3 ae509f0, `holdSort`).
   case tabValLeaf(valTy)
+  of tvTree: tabTreeDataVars(name, (when K is Z3String: tString() else: tInt()),
+                             valTy)[0]
   of tvCell: toAnyAst(mkArrayVar[K, Z3BitVec[64]](name))
   of tvStr:  toAnyAst(mkArrayVar[K, Z3String](name))
   of tvF32:  toAnyAst(mkArrayVar[K, Z3Float32](name))
@@ -1460,6 +1487,8 @@ proc tabPresentVar(name: string; keyTy: IRType): Z3AnyAst =
 
 proc tabDataZeroOf[K](valTy: IRType): Z3AnyAst =
   case tabValLeaf(valTy)
+  of tvTree: tabTreeDataZero((when K is Z3String: tString() else: tInt()),
+                             valTy)[0]
   of tvCell: toAnyAst(mkConstArray[K, Z3BitVec[64]](mkBitVec[64](0'i64)))
   of tvStr:  toAnyAst(mkConstArray[K, Z3String](mkString("")))
   of tvF32:  toAnyAst(mkConstArray[K, Z3Float32](mkFloat32(0'f32)))
@@ -1476,7 +1505,11 @@ proc emptyTable(keyTy, valTy: IRType): SymVal =
     else:
       (tabDataZeroOf[Z3BitVec[64]](valTy),
        toAnyAst(mkConstArray[Z3BitVec[64], Z3Bool](mkBool(false))))
-  SymVal(kind: svTable, tabDataRaw: data, tabPresentRaw: present,
+  # RFC-0005 S8at: a container value's further leaves, constant too.
+  let more = if tabValLeaf(valTy) == tvTree: tabTreeDataZero(keyTy, valTy)[1 .. ^1]
+             else: @[]
+  SymVal(kind: svTable, tabDataRaw: data, tabDataMore: more,
+         tabPresentRaw: present,
          tabSize: mkInt(0), tabKeyTy: keyTy, tabValTy: valTy)
 
 proc distinctPresentCount[K](arr: Z3Array[K, Z3Bool]; keys: seq[K]): Z3Int =
@@ -1496,6 +1529,23 @@ proc containerCardConds(): seq[Z3Bool] =
   ## allocated table and set: see `ContainerCardRegistry` for why this is
   ## both sound (true of every real table) and sufficient (every model
   ## satisfying it is realized by the extractors).
+  ## RFC-0005 S8at: first, the facts of every input table's container value
+  ## at every key term, `svCellWf`'s (a length and a size in range, a nested
+  ## table's and set's size tied to its keys, which registers it, and a
+  ## nested container-valued table, appended and so visited too). True of
+  ## a real table at every key, present or not.
+  var ti = 0
+  while ti < containerCard.tabTreeBases.len:
+    let b = containerCard.tabTreeBases[ti]
+    inc ti
+    let ctx = b.tabSize.ctx
+    var keys: seq[RawZ3Ast]
+    if b.tabKeyTy.kind == itString:
+      for k in containerCard.tabKeys: keys.add k.raw
+    else:
+      for k in containerCard.setKeys: keys.add k.raw
+    for k in keys:
+      result.add svCellWf(tabValAt(ctx, b, k), b.tabValTy, true)
   for b in containerCard.tabBases:
     let present = wrap[Z3Array[Z3String, Z3Bool]](b.present.ctx, b.present.raw)
     result.add (b.size >= distinctPresentCount(present, containerCard.tabKeys))
@@ -1523,7 +1573,10 @@ proc containerCardConds(): seq[Z3Bool] =
     result.add (b.size >= present)
     let dsize = cellDomainSize(b.elemTy)
     if dsize < high(int64):
-      result.add (b.size + absent <= mkInt(dsize))
+      # RFC-0005 S8at: `mkZ3IntLit`, not `mkInt` (a `cint`): a 32-bit
+      # unsigned or `float32` domain has 2^32 cells, which `mkInt` faulted
+      # on (`RangeDefect`, every `HashSet[uint32]` / `Table[uint32, V]`).
+      result.add (b.size + absent <= mkZ3IntLit(dsize))
 
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
@@ -2692,20 +2745,33 @@ proc ensureDistinctSort(ty: IRType): DistinctSortEntry =
       # FP / String / composite base → bijectivity SKIPPED (hang risk). Still
       # declare inject/eject so explicit conversions have func-decls, but assert
       # NO quantified axioms. Emit the classified sevHint (Invariant 3).
-      let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
-      var injDom = @[baseSort]
-      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("inject_" & name).cstring)
-      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-      var ejDom = @[sort.raw]
-      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("eject_" & name).cstring)
-      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-      incRefFD(ctx, inject)
-      incRefFD(ctx, eject)
-      let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
+      #
+      # RFC-0005 S8at: a COMPOSITE base (`distinct seq[int]`, `distinct
+      # (int, bool)`, a distinct object) has no single Z3 sort, so no
+      # inject/eject decl can be declared over it; deriving one recorded
+      # `seUnsupportedCompoundSortLeaf` and declined every such parameter.
+      # Neither decl is ever APPLIED for a non-decidable base (only the
+      # decidable branch's ground eject pin applies `eject`), so a
+      # composite base simply has none: the distinct value is its boxed base
+      # (`distinctBaseSym`), which every read ejects to (`ejectBase`).
+      var dentry = DistinctSortEntry(sort: sort)
+      if baseRep.kind notin {svTable, svSet, svSeq, svArray, svTuple,
+                             svVariant, svMultiVariant}:
+        let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
+        var injDom = @[baseSort]
+        let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+          ("inject_" & name).cstring)
+        let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
+          cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
+        var ejDom = @[sort.raw]
+        let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+          ("eject_" & name).cstring)
+        let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
+          cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
+        incRefFD(ctx, inject)
+        incRefFD(ctx, eject)
+        dentry.inject = inject
+        dentry.eject = eject
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
       syncDistinctSortEntry(name, dentry)
@@ -3312,6 +3378,11 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         # (`tabDataVar`); a narrower key type also bounds the size by its
         # domain, as a `HashSet`'s element type does.
         let dataAst = tabDataVar(baseName & ".data", ty.tabKeyTy, ty.tabValTy)
+        # RFC-0005 S8at: a container value's further leaves.
+        let moreAsts =
+          if tabValLeaf(ty.tabValTy) == tvTree:
+            tabTreeDataVars(baseName & ".data", ty.tabKeyTy, ty.tabValTy)[1 .. ^1]
+          else: @[]
         let presentAst = tabPresentVar(baseName & ".present", ty.tabKeyTy)
         let sizeSym = mkIntVar(baseName & ".len")
         pcOut.add (sizeSym >= mkInt(0))
@@ -3320,9 +3391,11 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
         pcOut.add (sizeSym <= mkInt(ceiling))   ## same ceiling as seqs
         # RFC-0005 S8f: tie `sizeSym` to the present array at every check.
         registerTableBase(presentAst, sizeSym, ty.tabKeyTy)
-        SymVal(kind: svTable, tabDataRaw: dataAst,
-               tabPresentRaw: presentAst, tabSize: sizeSym,
-               tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+        let tsv = SymVal(kind: svTable, tabDataRaw: dataAst, tabDataMore: moreAsts,
+                         tabPresentRaw: presentAst, tabSize: sizeSym,
+                         tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+        registerTabTreeBase(tsv)   ## RFC-0005 S8at
+        tsv
       else:
         # N40: was `raise (ref SymexUnsupportedTableValTypeError)` -- see
         # `allocDegrade`'s own doc comment for the totality design writeup.
@@ -4347,11 +4420,47 @@ proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
   let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
   if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
 
+proc floatKeyCell(k: SymVal; keyTy: IRType): Option[Z3BitVec[64]] =
+  ## RFC-0005 S8at. The 64-bit cell of a float `Table` key: the IEEE bit
+  ## pattern of the key Nim's table finds it by. `hash(float)` adds `0.0`,
+  ## so `-0.0` and `0.0` hash alike, and `==` makes them one key: both are
+  ## the cell of `+0.0`. A NaN is never `==` to itself, so a NaN key is
+  ## never found (`tabKeyNaN`); its cell is the canonical quiet NaN's, which
+  ## a lookup never consults. A `float32` key's 32 bits are zero-extended.
+  case keyTy.kind
+  of itFloat64:
+    if k.kind != svFloat64: return none(Z3BitVec[64])
+    let canon = ite(isZero(k.fp64), mkFloat64(0.0), k.fp64)
+    some(ite(isNaN(k.fp64), mkBitVec[64](0x7FF8_0000_0000_0000'i64),
+             toIeeeBv(canon)))
+  of itFloat32:
+    if k.kind != svFloat32: return none(Z3BitVec[64])
+    let canon = ite(isZero(k.fp32), mkFloat32(0'f32), k.fp32)
+    let bits = zeroExtend(toIeeeBv(canon), 32)
+    some(ite(isNaN(k.fp32), mkBitVec[64](0x7FC0_0000'i64), bits))
+  else: none(Z3BitVec[64])
+
+proc tabKeyNaN(k: SymVal; keyTy: IRType): Option[Z3Bool] =
+  ## RFC-0005 S8at. For a float key, whether it is a NaN: a NaN key is never
+  ## found, `t[NaN] = v` adds an entry no lookup reaches (the size grows,
+  ## nothing is stored), and `t.del(NaN)` removes nothing. `none` for every
+  ## other key type.
+  case keyTy.kind
+  of itFloat64: (if k.kind == svFloat64: some(isNaN(k.fp64)) else: none(Z3Bool))
+  of itFloat32: (if k.kind == svFloat32: some(isNaN(k.fp32)) else: none(Z3Bool))
+  else: none(Z3Bool)
+
 proc tabKeyTerm(k: SymVal; keyTy: IRType): Option[Z3AnyAst] =
   ## RFC-0005 S8ar. The term a backed table holds key `k` at: the string
   ## itself, or its 64-bit cell (`cellOf`); recorded in the run's key terms
   ## (`ContainerCardRegistry`: a cell key among the set keys, the encoding
   ## it shares). `none` for a value that is not of the key type.
+  ## RFC-0005 S8at: a float key's cell is `floatKeyCell`'s.
+  if keyTy.kind in {itFloat32, itFloat64}:
+    let fc = floatKeyCell(k, keyTy)
+    if fc.isNone: return none(Z3AnyAst)
+    noteSetKey(fc.get)
+    return some(toAnyAst(fc.get))
   if keyTy.kind == itString:
     if k.kind != svString: return none(Z3AnyAst)
     noteTableKey(k.str)
@@ -4361,25 +4470,25 @@ proc tabKeyTerm(k: SymVal; keyTy: IRType): Option[Z3AnyAst] =
   noteSetKey(c.get)
   some(toAnyAst(c.get))
 
-proc tabValTerm(v: SymVal; valTy: IRType): Option[Z3AnyAst] =
-  ## RFC-0005 S8ar. The term a backed table stores value `v` as
-  ## (`TabValLeaf`); `none` for a value that is not of the value type.
+proc tabValTerms(v: SymVal; valTy: IRType): Option[seq[Z3AnyAst]] =
+  ## RFC-0005 S8ar (`tabValTerm`). The terms a backed table stores value
+  ## `v` as, one per data array (`TabValLeaf`); `none` for a value that is
+  ## not of the value type.
+  ## RFC-0005 S8at: a container value is its leaves (`svLeafAsts`), one per
+  ## data array; one that does not have its type's shape is `none`.
   case tabValLeaf(valTy)
-  of tvStr: (if v.kind == svString: some(toAnyAst(v.str)) else: none(Z3AnyAst))
-  of tvF32: (if v.kind == svFloat32: some(toAnyAst(v.fp32)) else: none(Z3AnyAst))
-  of tvF64: (if v.kind == svFloat64: some(toAnyAst(v.fp64)) else: none(Z3AnyAst))
+  of tvTree:
+    if not svFitsHeapTy(v, valTy): return none(seq[Z3AnyAst])
+    let ctx = requireCurrentContext()
+    var r: seq[Z3AnyAst]
+    for raw in svLeafAsts(v, valTy): r.add wrap[Z3AnyAst](ctx, raw)
+    some(r)
+  of tvStr: (if v.kind == svString: some(@[toAnyAst(v.str)]) else: none(seq[Z3AnyAst]))
+  of tvF32: (if v.kind == svFloat32: some(@[toAnyAst(v.fp32)]) else: none(seq[Z3AnyAst]))
+  of tvF64: (if v.kind == svFloat64: some(@[toAnyAst(v.fp64)]) else: none(seq[Z3AnyAst]))
   of tvCell:
     let c = cellOf(v, valTy)
-    if c.isNone: none(Z3AnyAst) else: some(toAnyAst(c.get))
-
-proc tabValOf(ctx: Z3Context; raw: RawZ3Ast; valTy: IRType): SymVal =
-  ## RFC-0005 S8ar. The value of type `valTy` a data-array term holds
-  ## (`tabValTerm`'s inverse).
-  case tabValLeaf(valTy)
-  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, raw))
-  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw))
-  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw))
-  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, raw), valTy)
+    if c.isNone: none(seq[Z3AnyAst]) else: some(@[toAnyAst(c.get)])
 
 proc shiftCountBV(r: SymVal, lhsKind: SVKind): SymVal =
   ## RFC-0005 S8ac. The count of a Nim `shl`/`shr` as the C backend really
@@ -4770,7 +4879,8 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabPresentRaw.raw,
                                   retVal.tabPresentRaw.raw)) and
       wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabDataRaw.raw,
-                                  retVal.tabDataRaw.raw))
+                                  retVal.tabDataRaw.raw)) and
+      tabMoreEq(ctx, retSym, retVal)   ## RFC-0005 S8at
   of svSet:
     ## RFC-0005 S8u: a `HashSet[int]` binds its member array and size.
     let ctx = retSym.setSize.ctx
@@ -4992,6 +5102,71 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
+  ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
+  ## `keyRaw`: the select of each data array, read back as the value type
+  ## (`tabValTerms`' inverse).
+  ## RFC-0005 S8at: a container value is rebuilt from its leaves' selects
+  ## (`svWithLeaves` over its type's zero, whose leaves are all replaced).
+  let valTy = sv.tabValTy
+  let raw0 = checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw)
+  case tabValLeaf(valTy)
+  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, raw0))
+  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw0))
+  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw0))
+  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, raw0), valTy)
+  of tvTree:
+    var leaves = @[wrap[Z3AnyAst](ctx, raw0)]
+    for m in sv.tabDataMore:
+      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, m.raw, keyRaw))
+    svWithLeaves(ctx, defaultZero(valTy, "__tabValProto"), leaves, valTy)
+
+proc tabKeySortHold(keyTy: IRType): Z3AnyAst =
+  ## RFC-0005 S8at. A live term of the key sort a table of `keyTy` is keyed
+  ## by (a string, or a 64-bit cell): its sort is read off it, and it keeps
+  ## that sort alive across the array-sort construction.
+  if keyTy.kind == itString: toAnyAst(mkString(""))
+  else: toAnyAst(mkBitVec[64](0'i64))
+
+proc tabTreeDataVars(name: string; keyTy, valTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 S8at. The free data arrays of a table holding container
+  ## values, one per leaf of the value type (`heapLeafSuffixes`), each from
+  ## the key sort to the leaf's sort. The sorts are runtime (a seq leaf is
+  ## itself an array), so the arrays are built raw, as `mkHeapArrayVar`'s;
+  ## the prototype value and the key term hold both sorts alive across
+  ## `Z3_mk_array_sort`. Leaf 0 is named `name`, leaf i `name.@v<i>`.
+  let ctx = requireCurrentContext()
+  let proto = defaultZero(valTy, "__tabValSort")
+  let keyHold = tabKeySortHold(keyTy)
+  let keySort = ctx.checkErr Z3_get_sort(ctx.raw, keyHold.raw)
+  let leaves = svLeafAsts(proto, valTy)
+  for i, leaf in leaves:
+    let valSort = ctx.checkErr Z3_get_sort(ctx.raw, leaf)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, keySort, valSort)
+    let nm = if i == 0: name else: name & ".@v" & $i
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, nm.cstring)
+    result.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc tabTreeDataZero(keyTy, valTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 S8at. The data arrays of an empty table holding container
+  ## values: each leaf of the value type's zero, at every key (read only at
+  ## a present key).
+  let ctx = requireCurrentContext()
+  let proto = defaultZero(valTy, "__tabValZero")
+  let keyHold = tabKeySortHold(keyTy)
+  let keySort = ctx.checkErr Z3_get_sort(ctx.raw, keyHold.raw)
+  for leaf in svLeafAsts(proto, valTy):
+    result.add wrap[Z3AnyAst](ctx,
+      ctx.checkErr Z3_mk_const_array(ctx.raw, keySort, leaf))
+
+proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool =
+  ## RFC-0005 S8at. A container value's further data arrays equal, pairwise
+  ## (`retBindEq`'s table arm); `true` for a scalar value.
+  result = mkBool(true)
+  for i in 0 ..< min(a.tabDataMore.len, b.tabDataMore.len):
+    result = result and wrap[Z3Bool](ctx,
+      checkedEq(ctx, a.tabDataMore[i].raw, b.tabDataMore[i].raw))
 
 func containerZeroBacked(t: IRType): bool =
   ## RFC-0005 S8u. A `Table` / `HashSet` shape whose empty value `defaultZero`
@@ -5314,6 +5489,21 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # raise here regardless of what `seqElemTy` holds.
       # RFC-0005 S6b: `feUnsupportedOpHavoc` -- a lossless `tyOf`, a fresh
       # per-merge name, init facts discarded, both operands already built.
+      # RFC-0005 S8at: two seqs whose element arrays share a sort (the
+      # same backed element type) merge exactly: an `ite` of the element
+      # arrays and of the lengths. A symbolic index into an array of seqs
+      # (`a[i].len`, `p.a[i][1]`) is this merge folded over the elements;
+      # it was the havoc below for every such read.
+      let ctx = t.seqDataRaw.ctx # [placeholder-audited]
+      let ts = ctx.checkErr Z3_get_sort(ctx.raw, t.seqDataRaw.raw) # [placeholder-audited]
+      let es = ctx.checkErr Z3_get_sort(ctx.raw, e.seqDataRaw.raw) # [placeholder-audited]
+      if ts == es:   # hash-consed: identity is equality (`sortFault`)
+        var r = t
+        r.seqDataRaw = wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw, # [placeholder-audited]
+          t.seqDataRaw.raw, e.seqDataRaw.raw)) # [placeholder-audited]
+        r.seqLen = ite(cond, t.seqLen, e.seqLen) # [placeholder-audited]
+        r.seqSteps = max(t.seqSteps, e.seqSteps)
+        return r
       degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
         "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
   of svString, svTable, svSet, svVariant, svMultiVariant:
@@ -6954,7 +7144,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekField:
     # Lower the receiver, then pick the field by index (tuple) or
     # by name (variant — Phase 11).
-    let recv = lower(env, e.obj)
+    # RFC-0005 S8at: a distinct over a tuple / object is read through its
+    # base (`(int, bool)(d)[0]`; the conversion is the parser's identity).
+    let recv = ejectBase(lower(env, e.obj))
     case recv.kind
     of svTuple:
       recv.fields[e.fieldIx]
@@ -7031,7 +7223,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         " (expected tuple/variant/multi-variant) — degraded to sxUnknown " &
         "(feUnsupportedExprKind)", "__iekFieldUnsupportedDegrade")
   of iekSeqLen:
-    let recv = lower(env, e.lenObj)
+    # RFC-0005 S8at: a distinct over a container's `len` is its base's.
+    let recv = ejectBase(lower(env, e.lenObj))
     case recv.kind
     of svSeq:
       if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
@@ -7347,7 +7540,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let keySV = lower(env, e.tabKey, seqElemLitProto(recv.tabKeyTy))
     let val = lower(env, e.tabVal, seqElemLitProto(recv.tabValTy))
     let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)
-    let vOpt = tabValTerm(val, recv.tabValTy)
+    let vOpt = tabValTerms(val, recv.tabValTy)   ## RFC-0005 S8at: per leaf
     if kOpt.isNone or vOpt.isNone:
       # Unreachable for a typed Nim `[]=`; a value some upstream degrade
       # produced keeps the in-band decline this arm always had.
@@ -7362,13 +7555,36 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let tru = mkBool(true)
     let wasPresent = wrap[Z3Bool](ctx,
       checkedSelect(ctx, recv.tabPresentRaw.raw, k.raw))
+    let vs = vOpt.get
     let newData = wrap[Z3AnyAst](ctx,
-      checkedStore(ctx, recv.tabDataRaw.raw, k.raw, vOpt.get.raw))
+      checkedStore(ctx, recv.tabDataRaw.raw, k.raw, vs[0].raw))
+    # RFC-0005 S8at: a container value's further leaves, each in its array.
+    var newMore: seq[Z3AnyAst]
+    for i, m in recv.tabDataMore:
+      newMore.add wrap[Z3AnyAst](ctx, checkedStore(ctx, m.raw, k.raw, vs[i + 1].raw))
     let newPresent = wrap[Z3AnyAst](ctx,
       checkedStore(ctx, recv.tabPresentRaw.raw, k.raw, tru.raw))
     # size += 1 if !wasPresent
+    let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)
+    if nanOpt.isSome:
+      # RFC-0005 S8at: a NaN key adds an entry no lookup finds.
+      let nan = nanOpt.get
+      var keptMore: seq[Z3AnyAst]
+      for i, m in recv.tabDataMore:
+        keptMore.add wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw, m.raw,
+                                                     newMore[i].raw))
+      return SymVal(kind: svTable,
+        tabDataRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabDataRaw.raw, newData.raw)),
+        tabDataMore: keptMore,
+        tabPresentRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabPresentRaw.raw, newPresent.raw)),
+        tabSize: ite(nan or not wasPresent, recv.tabSize + mkInt(1),
+                     recv.tabSize),
+        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
     SymVal(kind: svTable,
       tabDataRaw: newData,
+      tabDataMore: newMore,
       tabPresentRaw: newPresent,
       tabSize: ite(wasPresent, recv.tabSize, recv.tabSize + mkInt(1)),
       tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
@@ -7389,8 +7605,21 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       checkedSelect(ctx, recv.tabPresentRaw.raw, k.raw))
     let newPresent = wrap[Z3AnyAst](ctx,
       checkedStore(ctx, recv.tabPresentRaw.raw, k.raw, fls.raw))
+    let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)
+    if nanOpt.isSome:
+      # RFC-0005 S8at: `t.del(NaN)` finds nothing to remove.
+      let nan = nanOpt.get
+      return SymVal(kind: svTable,
+        tabDataRaw: recv.tabDataRaw,
+        tabDataMore: recv.tabDataMore,   ## RFC-0005 S8at
+        tabPresentRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabPresentRaw.raw, newPresent.raw)),
+        tabSize: ite(wasPresent and not nan, recv.tabSize - mkInt(1),
+                     recv.tabSize),
+        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
     SymVal(kind: svTable,
       tabDataRaw: recv.tabDataRaw,
+      tabDataMore: recv.tabDataMore,   ## RFC-0005 S8at
       tabPresentRaw: newPresent,
       tabSize: ite(wasPresent, recv.tabSize - mkInt(1), recv.tabSize),
       tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
@@ -7601,8 +7830,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__tabKeyDegrade"), fresh)
       let ctx = recv.tabSize.ctx
-      ofBool(wrap[Z3Bool](ctx,
-        checkedSelect(ctx, recv.tabPresentRaw.raw, kOpt.get.raw)))
+      let found = wrap[Z3Bool](ctx,
+        checkedSelect(ctx, recv.tabPresentRaw.raw, kOpt.get.raw))
+      let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)   ## RFC-0005 S8at
+      ofBool(if nanOpt.isSome: found and not nanOpt.get else: found)
     of svSet:
       # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
       # Phase 16 INV: non-int64 element types (e.g. set[char] / HashSet[uint8])
@@ -8254,6 +8485,10 @@ proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string]
   ## RFC-0005 S8ar fwd-decl (defined below, by `renderHeapCompound`).
   ## `extractSeqElements` renders a `seq[string]` element with it.
 
+proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal)
+  ## RFC-0005 S8at fwd-decl: a container `Table` value is extracted as one.
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -8278,7 +8513,7 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
   var keyList: seq[string]
   proc emit(w: var RawWitness; k: string; keyRaw: RawZ3Ast) =
     let vpath = path & "." & k
-    let v = tabValOf(ctx, checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw), vty)
+    let v = tabValAt(ctx, sv, keyRaw)
     case tabValLeaf(vty)
     of tvCell:
       let c = case v.kind
@@ -8296,6 +8531,10 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
       w.strVals[vpath] = evalStrBytesOrEmpty(m, v.str).get("")
     of tvF32, tvF64:
       extractLeaf(m, w, vpath, v)
+    of tvTree:
+      # RFC-0005 S8at: a container value is written as a by-value param of
+      # its type is (`seqLens` + elements, `setMembers`, `tabKeys`).
+      extractFromSymVal(m, w, vpath, v)
   let present = sv.tabPresentRaw
   if kty.kind == itString:
     var named: HashSet[string]   ## every term's value, present or not
@@ -12412,7 +12651,9 @@ proc symValHash(sv: SymVal): uint =
   of svSeq:
     astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
   of svTable:
-    astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
+    var h = astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
+    for m in sv.tabDataMore: h = h xor astHash(m)   ## RFC-0005 S8at
+    h
   of svSet:
     astHash(sv.setMembersRaw)
   of svTuple:
@@ -13823,6 +14064,12 @@ proc sameSV(a, b: SymVal): bool =
       a.seqUnsupportedFieldKind == b.seqUnsupportedFieldKind
   of svTable:
     a.tabDataRaw.raw == b.tabDataRaw.raw and
+      a.tabDataMore.len == b.tabDataMore.len and
+      (block:
+        var same = true
+        for i in 0 ..< a.tabDataMore.len:
+          if a.tabDataMore[i].raw != b.tabDataMore[i].raw: same = false
+        same) and
       a.tabPresentRaw.raw == b.tabPresentRaw.raw and
       a.tabSize.raw == b.tabSize.raw and
       a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
@@ -14002,14 +14249,20 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
     # RFC-0005 S8ac. A table IS its data and presence arrays and its
     # cardinality counter (#144), so the `ite` of the three is the `ite` of
     # the table.
-    if t.tabKeyTy != e.tabKeyTy or t.tabValTy != e.tabValTy:
+    if t.tabKeyTy != e.tabKeyTy or t.tabValTy != e.tabValTy or
+       t.tabDataMore.len != e.tabDataMore.len:   ## RFC-0005 S8at
       return none(SymVal)
     let ctx = t.tabDataRaw.ctx
     let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
                               t.tabDataRaw.raw, e.tabDataRaw.raw))
     let present = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
                                  t.tabPresentRaw.raw, e.tabPresentRaw.raw))
-    some(SymVal(kind: svTable, tabDataRaw: data, tabPresentRaw: present,
+    var more: seq[Z3AnyAst]   ## RFC-0005 S8at
+    for i in 0 ..< t.tabDataMore.len:
+      more.add wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                              t.tabDataMore[i].raw, e.tabDataMore[i].raw))
+    some(SymVal(kind: svTable, tabDataRaw: data, tabDataMore: more,
+                tabPresentRaw: present,
                 tabSize: ite(sel, t.tabSize, e.tabSize),
                 tabKeyTy: t.tabKeyTy, tabValTy: t.tabValTy))
   of svSet:
@@ -14838,7 +15091,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## bindings (iekVar) or field projections (iekField); both are pure (no
       ## closure/float→int sinks), so lowerLeafInExpr handles them without
       ## seed+drain.
-      let arrSV = lowerLeafInExpr(p, stmt.ixArr)
+      # RFC-0005 S8at: a `distinct` over a seq/array/Table is read through
+      # its base (`seq[int](d)[i]` is the parser's identity, S8p), as every
+      # scalar distinct already is (`ejectBase`).
+      let arrSV = ejectBase(lowerLeafInExpr(p, stmt.ixArr))
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
         ## Table key: always a string expression — no float→int conv or closure
@@ -14876,11 +15132,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # Nim's `Table[K, V].[]` raises `KeyError` when the key is
         # absent. To preserve that semantics in symex we add a
         # presence constraint to the surviving path.
-        let presentCond = wrap[Z3Bool](ctx,
+        var presentCond = wrap[Z3Bool](ctx,
           checkedSelect(ctx, arrSV.tabPresentRaw.raw, k.raw))
+        let nanOpt = tabKeyNaN(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8at
+        if nanOpt.isSome: presentCond = presentCond and not nanOpt.get
+        # RFC-0005 S8at: the absent key RAISES (`KeyError`), routed to a
+        # handler as any raise is. It only narrowed the surviving path, so
+        # `try: t[k] except KeyError: ...` never ran its handler: a false
+        # `sxUnsat` for a target in it, and no `sxRaised` at the boundary.
+        maybeForkDefect(p, not presentCond, "KeyError", none(string), w)
         # RFC-0005 S8z: read back at the value type's width.
-        let tableVal = tabValOf(ctx,
-          checkedSelect(ctx, arrSV.tabDataRaw.raw, k.raw), arrSV.tabValTy)
+        let tableVal = tabValAt(ctx, arrSV, k.raw)
         var newEnv = p.env
         newEnv[stmt.ixRetName] = tableVal
         # Issue #163 wiring-audit W2 (Table-value sibling): a
@@ -17161,6 +17423,12 @@ proc sameSymVal(a, b: SymVal): bool =
       a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
   of svTable:
     same(a.tabDataRaw, b.tabDataRaw) and
+      a.tabDataMore.len == b.tabDataMore.len and
+      (block:
+        var r = true
+        for i in 0 ..< a.tabDataMore.len:
+          if not same(a.tabDataMore[i], b.tabDataMore[i]): r = false
+        r) and
       same(a.tabPresentRaw, b.tabPresentRaw) and same(a.tabSize, b.tabSize)
   of svSet:
     same(a.setMembersRaw, b.setMembersRaw) and same(a.setSize, b.setSize)
@@ -21108,12 +21376,53 @@ proc witnessIntAs*[T](v: int64): T =
 proc witnessTabKey*[K](k: string): K =
   ## RFC-0005 S8ar. A rendered table key (`extractTableEntries`) as `K`: a
   ## string as itself, a cell key from its decimal.
+  ## RFC-0005 S8at: a float key from its IEEE bit pattern (`floatKeyCell`).
   when K is string: k
+  elif K is float32: cast[float32](uint32(parseBiggestInt(k) and 0xFFFF_FFFF'i64))
+  elif K is SomeFloat: K(cast[float64](parseBiggestInt(k)))
   else: witnessIntAs[K](parseBiggestInt(k))
+
+proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
+  ## RFC-0005 S8z. `readSetInt` for any fixed-width int element type.
+  result = initHashSet[T]()
+  if not w.setMembers.hasKey(name): return
+  for v in w.setMembers[name]:
+    result.incl witnessIntAs[T](v)
+
+proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
+  ## RFC-0005 S8at. A witness `seq[T]` of any renderable element type, at
+  ## `name` (`extractFromSymVal`'s `seqLens` + `.<i>` element leaves): a
+  ## `Table`'s seq value, which the table reader reaches generically.
+  let n = w.seqLens.getOrDefault(name, 0)
+  result = newSeq[T](n)
+  for i in 0 ..< n:
+    let p = name & "." & $i
+    when T is string: result[i] = w.strVals.getOrDefault(p, "")
+    elif T is bool: result[i] = w.boolVals.getOrDefault(p, false)
+    elif T is float32:
+      if w.float32Vals.hasKey(p): result[i] = w.float32Vals[p]
+    elif T is SomeFloat:
+      if w.float64Vals.hasKey(p): result[i] = T(w.float64Vals[p])
+    else:
+      if w.uintVals.hasKey(p): result[i] = cast[T](w.uintVals[p])
+      elif w.intVals.hasKey(p): result[i] = witnessIntAs[T](w.intVals[p])
+
+proc readTableAs*[K, V](w: RawWitness, name: string): Table[K, V]
 
 proc witnessTabVal*[V](w: RawWitness; p: string; v: var V): bool =
   ## RFC-0005 S8ar. The rendered table value at leaf `p`, as `V`.
-  when V is string:
+  ## RFC-0005 S8at: a container value (`isTableContainerValTy`), read as a
+  ## by-value param of its type is; every rendered key has one.
+  when V is seq:
+    v = readSeqAs[typeof(items(default(V)))](w, p)
+    return true
+  elif V is HashSet:
+    v = readSetIntAs[typeof(items(default(V)))](w, p)
+    return true
+  elif V is Table:
+    v = readTableAs[typeof(keys(default(V))), typeof(values(default(V)))](w, p)
+    return true
+  elif V is string:
     if w.strVals.hasKey(p): (v = w.strVals[p]; return true)
   elif V is float32:
     if w.float32Vals.hasKey(p): (v = w.float32Vals[p]; return true)
@@ -21135,13 +21444,6 @@ proc readTableAs*[K, V](w: RawWitness, name: string): Table[K, V] =
     var v: V
     if witnessTabVal(w, name & "." & k, v):
       result[witnessTabKey[K](k)] = v
-
-proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
-  ## RFC-0005 S8z. `readSetInt` for any fixed-width int element type.
-  result = initHashSet[T]()
-  if not w.setMembers.hasKey(name): return
-  for v in w.setMembers[name]:
-    result.incl witnessIntAs[T](v)
 
 # ---- Phase 15 Cluster C (C2a): closure-construction test hooks ---------------
 #

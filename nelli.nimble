@@ -1051,5 +1051,11 @@ task test, "Run the test suite":
             # Table key and value type, insert, seq[string] add, dotted
             # chains rooted at a ref field, ref pointees render by name,
             # heap-step depth budget; walker 190->191 (provisional).
-            "tsymex_rfc0005_s8ar_remainder"]:
+            "tsymex_rfc0005_s8ar_remainder",
+            # RFC-0005 S8at -- S8ar's remainder: a ref to an anonymous
+            # tuple, initTable in a SUT, a symbolic index into an array of
+            # seqs, by-value case-object fields, distinct over a composite
+            # base, Table float keys and container values, KeyError,
+            # 2^32-cell key domains; walker 191->193 (provisional).
+            "tsymex_rfc0005_s8at_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

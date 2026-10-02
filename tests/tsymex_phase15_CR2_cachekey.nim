@@ -929,7 +929,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ar (tree-valued heap cells; every backed Table key and
     ## value type; insert; seq[string]; dotted chains rooted at a ref
     ## field; heap-step depth budget). 190->191 (provisional).
-    check symexWalkerVersion == "191"
+    ## RFC-0005 S8at (S8ar's remainder: case-object and tuple heap cells,
+    ## array-of-seq merges, distinct-over-composite, in-place element and
+    ## Table-value mutation, KeyError, float keys, container Table values).
+    ## 191->193 (provisional).
+    check symexWalkerVersion == "193"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

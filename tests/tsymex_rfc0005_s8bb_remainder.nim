@@ -275,3 +275,113 @@ suite "S8bb (4): findBounds binds a compound operand once":
   test "in a while guard":
     check verdict(fbGuardTarget, "bb_fb_guard_one").status == sxSat
     check verdict(fbGuardTargetMiss, "bb_fb_guard_three").status == sxUnsat
+
+# ---- item 3: PCRE's leftmost-first priority -----------------------------------
+#
+# `matchLen`, `endsWith` and `findBounds`'s `last` depend on WHICH match
+# PCRE returns. S8ay modelled them only where PCRE's choice is the longest
+# match and declined the rest (`a|ab`, `a*b`, `(ab)+`: a fresh value,
+# `seZ3StringIncomplete`); S8bb runs PCRE's priority order
+# (`pcre_select.nim`).
+
+proc mlAltGround(s: string) =
+  # PCRE takes `a`, the first alternative, not the longer `ab`.
+  if s == "ab" and s.matchLen(re"a|ab") == 2:
+    symexTarget("bb_ml_alt_ground")
+
+proc mlAltSym(s: string) =
+  if s.len == 2 and s.matchLen(re"a|ab") == 2:
+    symexTarget("bb_ml_alt_sym")
+
+proc mlAltSecond(s: string) =
+  if s.len == 3 and s.matchLen(re"b|ab") == 2:
+    symexTarget("bb_ml_alt_second")
+
+proc mlStarBack(s: string) =
+  if s == "aab" and s.matchLen(re"a*b") == 3:
+    symexTarget("bb_ml_star_back")
+
+proc mlGroupPlus(s: string) =
+  if s.matchLen(re"(ab)+") == 3:
+    symexTarget("bb_ml_group_plus")
+
+proc mlNullableLoop(s: string) =
+  if s == "aab" and s.matchLen(re"(a|)*b") != 3:
+    symexTarget("bb_ml_nullable")
+
+proc mlAnchorMid(s: string) =
+  # `a(^|b)`: `^` after a byte never holds, so only `ab` matches.
+  if s == "ab" and s.matchLen(re"a(^|b)") != 2:
+    symexTarget("bb_ml_anchor_mid")
+
+proc ewAltGround(s: string) =
+  if s == "ab" and s.endsWith(re"a|ab"):
+    symexTarget("bb_ew_alt_ground")
+
+proc ewAltSym(s: string) =
+  if s.len == 2 and s[0] == 'a' and s.endsWith(re"a|ab"):
+    symexTarget("bb_ew_alt_sym")
+
+proc fbAltLast(s: string) =
+  if s == "xab":
+    let (first, last) = s.findBounds(re"a|ab")
+    if first == 1 and last == 2:
+      symexTarget("bb_fb_alt_last")
+
+proc fbAltHit(s: string) =
+  if s == "xab":
+    let (first, last) = s.findBounds(re"a|ab")
+    if first == 1 and last == 1:
+      symexTarget("bb_fb_alt_hit")
+
+suite "S8bb (3): PCRE's match choice, not the longest match":
+
+  test "matchLen takes the first alternative that matches":
+    check verdict(mlAltGround, "bb_ml_alt_ground").status == sxUnsat
+    check verdict(mlAltSym, "bb_ml_alt_sym").status == sxUnsat
+    let r = verdict(mlAltSecond, "bb_ml_alt_second")
+    check r.status == sxSat
+    if r.status == sxSat: check r.witness[0].matchLen(re"b|ab") == 2
+
+  test "matchLen backtracks a greedy run":
+    check verdict(mlStarBack, "bb_ml_star_back").status == sxSat
+    check verdict(mlGroupPlus, "bb_ml_group_plus").status == sxUnsat
+
+  test "an empty loop iteration and an anchor away from the edges":
+    check verdict(mlNullableLoop, "bb_ml_nullable").status == sxUnsat
+    check verdict(mlAnchorMid, "bb_ml_anchor_mid").status == sxUnsat
+
+  test "endsWith reads the match PCRE picks at each position":
+    check verdict(ewAltGround, "bb_ew_alt_ground").status == sxUnsat
+    let r = verdict(ewAltSym, "bb_ew_alt_sym")
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == "aa"
+
+  test "findBounds' last is the chosen match's":
+    check verdict(fbAltLast, "bb_fb_alt_last").status == sxUnsat
+    check verdict(fbAltHit, "bb_fb_alt_hit").status == sxSat
+
+proc containsAnchorMid(s: string) =
+  # `a(^|b)` in "ba": `a` at 1, then `^` fails and there is no `b`.
+  if s == "ba" and s.contains(re"a(^|b)"):
+    symexTarget("bb_contains_anchor_mid")
+
+proc findAnchorMid(s: string) =
+  if s == "xaab" and s.find(re"a(^|b)") != 2:
+    symexTarget("bb_find_anchor_mid")
+
+proc findBoundsAnchorMid(s: string) =
+  if s.len == 3 and s[0] == 'a':
+    let (first, last) = s.findBounds(re"a(^|b)")
+    if first == 0 and last == 1:
+      symexTarget("bb_fb_anchor_mid")
+
+suite "S8bb (3): an occurrence search with an anchor away from the edges":
+
+  test "contains / find / findBounds follow the search automaton":
+    check verdict(containsAnchorMid, "bb_contains_anchor_mid").status == sxUnsat
+    check verdict(findAnchorMid, "bb_find_anchor_mid").status == sxUnsat
+    let r = verdict(findBoundsAnchorMid, "bb_fb_anchor_mid")
+    check r.status == sxSat
+    if r.status == sxSat: check r.witness[0][0 .. 1] == "ab"

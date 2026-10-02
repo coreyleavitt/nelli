@@ -38,14 +38,19 @@
 ##   * `findBounds(s, R, start)` -- (`find`, its match's last index), or
 ##                                (-1, 0) / (-24, 0).
 ## `matchLen`, `endsWith` and `findBounds`'s `last` depend on WHICH match
-## PCRE picks, which only a "longest-selection" pattern fixes by its shape
+## PCRE picks. A "longest-selection" pattern fixes it by its shape
 ## (`selectionForm`): a fixed-length body, or a fixed-length prefix then one
 ## greedy run of a single byte set (PCRE's backtracking then returns the
-## longest match whose Tail holds). Every other pattern declines for them.
+## longest match whose Tail holds). RFC-0005 S8bb: every other pattern
+## (`a|ab`, `a*b`, `(ab)+`, an anchor anywhere) goes through PCRE's
+## priority order itself, as the regular languages of `pcre_select.nim`;
+## S8ay declined them (a fresh value). `match` and `startsWith` with an
+## anchor away from a top-level edge use the same automaton.
 
 import std/strutils
 import z3
 import ./pcre_syntax
+import ./pcre_select
 export pcre_syntax
 
 type
@@ -290,6 +295,89 @@ proc chosenLen(s: Z3String; p: Z3Int; f: SelForm; fresh: FreshName;
   of skNone:
     raiseAssert "chosenLen: no selection form"
 
+proc selToZ3*(r: RNode): Z3Regex[Z3String] =
+  ## RFC-0005 S8bb. A `pcre_select` regex as Z3's.
+  case r.kind
+  of rkEmpty: mkRegexEmpty[Z3String]()
+  of rkEps: epsRe()
+  of rkSet: byteSetRe(r.bytes)
+  of rkMark: mkRegex(findMarker())
+  of rkStar: star(selToZ3(r.kids[0]))
+  of rkCat, rkAlt:
+    var parts: seq[Z3Regex[Z3String]]
+    for k in r.kids: parts.add selToZ3(k)
+    if parts.len == 1: parts[0]
+    elif r.kind == rkCat: concat(parts)
+    else: union(parts)
+
+type PrioLangs = object
+  ## RFC-0005 S8bb. A pattern's selection languages, per `atStart` variant
+  ## (index 1: the subject position is 0; one variant when the pattern has
+  ## no `^` / `\A`, where it does not matter).
+  ok: bool
+  why: string
+  hasBol: bool
+  mark, none, ends, noOcc, first: array[2, Z3Regex[Z3String]]
+
+proc prioLangs(sp: RegexSpec; pr: PcreParse; wantEnds: bool;
+               wantSearch = false): PrioLangs =
+  let n = buildNfa(pr.root, pr.groups)
+  let key = sp.flag & ":" & sp.pattern
+  result.hasBol = n.hasBol
+  result.ok = true
+  for v in 0 .. 1:
+    if v == 1 and not n.hasBol: break
+    let atStart = v == 1
+    var langs: seq[(LangKind, bool)] = @[(lkMark, false), (lkNone, false)]
+    if wantEnds: langs.add (lkEnds, true)
+    for (lk, nonEmpty) in langs:
+      # `lkEnds` serves `endsWith`'s suffixes, never empty.
+      let l = selectionLang(n, key, lk, atStart, nonEmpty = nonEmpty)
+      if not l.ok:
+        return PrioLangs(ok: false, why: l.why)
+      let z = selToZ3(l.re)
+      case lk
+      of lkMark: result.mark[v] = z
+      of lkNone: result.none[v] = z
+      of lkEnds: result.ends[v] = z
+    if wantSearch:
+      for sk in [skNoOcc, skFirst]:
+        let l = searchLang(n, key, sk, atStart)
+        if not l.ok:
+          return PrioLangs(ok: false, why: l.why)
+        if sk == skNoOcc: result.noOcc[v] = selToZ3(l.re)
+        else: result.first[v] = selToZ3(l.re)
+
+proc variant(pl: PrioLangs; atStart: Z3Bool;
+             f: proc (v: int): Z3Bool): Z3Bool =
+  if pl.hasBol: ite(atStart, f(1), f(0)) else: f(0)
+
+proc prioChosenLen(s: Z3String; p: Z3Int; pl: PrioLangs; fresh: FreshName;
+                   defs: var seq[Z3Bool]; valid: Z3Bool): Z3Int =
+  ## RFC-0005 S8bb. PCRE's match length at absolute position `p` of `s`
+  ## (`0 <= p <= s.len` where `valid`), or -1: a fresh Int fixed by a
+  ## definitional constraint over the marked suffix (`lkMark`) and the
+  ## no-match language (`lkNone`). Where not `valid` it is -1.
+  let u = substr(s, p, len(s) - p)
+  let k = mkIntVar(fresh("__regexLen"))
+  let marked = concat(substr(u, mkInt(0), k), findMarker(),
+                      substr(u, k, len(u) - k))
+  let def = variant(pl, p == mkInt(0), proc (v: int): Z3Bool =
+    ((k == mkInt(-1)) and matches(u, pl.none[v])) or
+    ((k >= mkInt(0)) and (k <= len(u)) and matches(marked, pl.mark[v])))
+  defs.add ite(valid, def, k == mkInt(-1))
+  k
+
+proc prioEndsWith(s: Z3String; pl: PrioLangs): Z3Bool =
+  ## RFC-0005 S8bb. `endsWith(s, R)`: some `i < s.len` whose match ends at
+  ## the end -- `s[i..]` (non-empty) in `lkEnds` of the variant of `i == 0`.
+  let anyByte = byteSetRe(pcreAnyByte)
+  if pl.hasBol:
+    (len(s) >= mkInt(1) and matches(s, pl.ends[1])) or
+      matches(s, concat(plus(anyByte), pl.ends[0]))
+  else:
+    matches(s, concat(star(anyByte), pl.ends[0]))
+
 proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
                       start: Z3Int; fresh: FreshName): RxResult =
   ## RFC-0005 S8ay. The value of `sp.entry` on subject `s` from `start` (0
@@ -302,8 +390,54 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     return unmodelled(pr.reason)
   of psOk: discard
   let (fine, edges, why) = splitEdges(pr.root)
-  if not fine: return unmodelled(why)
   let lenS = len(s)
+  let bad = (start < mkInt(0)) or (start > lenS)
+  let u = substr(s, start, lenS - start)
+  let st0 = start == mkInt(0)
+  if not fine:
+    # RFC-0005 S8bb: an anchor away from a top-level edge. The entries
+    # that need no occurrence search are the priority automaton's; an
+    # occurrence search (`contains`, `find`, `findBounds`) declines.
+    let search = sp.entry in ["contains", "find", "findBoundsFirst",
+                              "findBoundsLast"]
+    let pl = prioLangs(sp, pr, sp.entry == "endsWith", search)
+    if not pl.ok: return unmodelled(sp.entry & ": " & why & "; " & pl.why)
+    var res = RxResult(outcome: roValue)
+    if search:
+      # The leftmost match from `start`: `occurs` unless no position of
+      # `u` starts one; `q` its offset in `u` (the marked `u` in `skFirst`).
+      let occurs = not variant(pl, st0, proc (v: int): Z3Bool =
+        matches(u, pl.noOcc[v]))
+      let q = mkIntVar(fresh("__regexFind"))
+      let marked = concat(substr(u, mkInt(0), q), findMarker(),
+                          substr(u, q, len(u) - q))
+      res.defs.add ite(occurs,
+        (q >= mkInt(0)) and (q <= len(u)) and
+          variant(pl, st0, proc (v: int): Z3Bool = matches(marked, pl.first[v])),
+        q == mkInt(0))
+      case sp.entry
+      of "contains":
+        res.b = (not bad) and occurs
+      of "find", "findBoundsFirst":
+        res.i = ite(bad, mkInt(-24), ite(occurs, start + q, mkInt(-1)))
+      else:
+        let first = start + q
+        let ml = prioChosenLen(s, first, pl, fresh, res.defs,
+                               (not bad) and occurs)
+        res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
+      return res
+    case sp.entry
+    of "match":
+      res.b = bad or not variant(pl, st0, proc (v: int): Z3Bool =
+        matches(u, pl.none[v]))
+    of "startsWith":
+      res.b = not matches(s, pl.none[(if pl.hasBol: 1 else: 0)])
+    of "matchLen":
+      res.i = ite(bad, mkInt(-24),
+                  prioChosenLen(s, start, pl, fresh, res.defs, not bad))
+    else:
+      res.b = prioEndsWith(s, pl)
+    return res
   let anyByte = byteSetRe(pcreAnyByte)
   var nb, bl: seq[Z3Regex[Z3String]]
   var nbM: seq[Z3Regex[Z3String]]
@@ -317,9 +451,6 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
               elif nb.len == 1: nb[0] else: union(nb))
   let blRe = (if bl.len == 0: mkRegexEmpty[Z3String]()
               elif bl.len == 1: bl[0] else: union(bl))
-  let bad = (start < mkInt(0)) or (start > lenS)
-  let u = substr(s, start, lenS - start)
-  let st0 = start == mkInt(0)
   proc inNb(x: Z3String): Z3Bool =
     (if nb.len > 0: matches(x, nbRe) else: mkBool(false))
   proc inBl(x: Z3String): Z3Bool =
@@ -362,8 +493,24 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
   of "matchLen", "endsWith", "findBoundsLast":
     let f = selectionForm(edges)
     if f.kind == skNone:
-      return unmodelled(sp.entry & " depends on which match PCRE picks: " &
-                        f.why)
+      # RFC-0005 S8bb: PCRE's priority order (`pcre_select`).
+      let pl = prioLangs(sp, pr, sp.entry == "endsWith")
+      if not pl.ok:
+        return unmodelled(sp.entry & " depends on which match PCRE picks: " &
+                          f.why & "; " & pl.why)
+      case sp.entry
+      of "matchLen":
+        res.i = ite(bad, mkInt(-24),
+                    prioChosenLen(s, start, pl, fresh, res.defs, not bad))
+      of "endsWith":
+        res.b = prioEndsWith(s, pl)
+      else:
+        let q = leftmost(res)
+        let first = start + q
+        let ml = prioChosenLen(s, first, pl, fresh, res.defs,
+                               (not bad) and occurs)
+        res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
+      return res
     case sp.entry
     of "matchLen":
       res.i = ite(bad, mkInt(-24), chosenLen(s, start, f, fresh, res.defs))

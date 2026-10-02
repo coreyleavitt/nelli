@@ -1047,6 +1047,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8aw_remainder",
             "tsymex_rfc0005_s8ay_remainder",
             "tsymex_rfc0005_s8bb_remainder",
+            "tsymex_rfc0005_s8bb_exhaustive",
+            "tsymex_rfc0005_s8bb_selection",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

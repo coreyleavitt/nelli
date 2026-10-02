@@ -209,7 +209,13 @@ const symexWalkerVersion* = "201"
   ## pattern) is walked no further: a raise written after another in one
   ## `while` guard, or after a rejected pattern, was a false sxSat.
   ## `findBounds` binds a compound receiver or `start` to a temporary
-  ## (it declined). Provisional 201 (S8ba holds 200).
+  ## (it declined). `matchLen`, `endsWith` and `findBounds`' `last` on a
+  ## pattern whose match PCRE picks by priority (`a|ab`, `a*b`, `(ab)+`,
+  ## an anchor away from the edges) follow PCRE's order through the
+  ## languages of `pcre_select.nim` (they declined); `match` and
+  ## `startsWith` with an inner anchor too, and `contains`, `find` and
+  ## `findBounds` with one through a search automaton (all declined).
+  ## Provisional 201 (S8ba holds 200).
   ##
   ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own
   ## formulas (`regex_parser.lowerRegexEntry`) over a PCRE-faithful byte

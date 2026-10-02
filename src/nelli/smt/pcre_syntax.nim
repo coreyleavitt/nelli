@@ -50,6 +50,8 @@ type
     rxEolAbs   ## `\z`: end only
 
   Rx* = ref object
+    cap*: int          ## RFC-0005 S8bb: the capturing group this node is
+                       ## the body of (1-based), 0 if none
     case kind*: RxKind
     of rxSet:
       bytes*: set[char]
@@ -68,6 +70,7 @@ type
   PcreParse* = object
     status*: PcreStatus
     root*: Rx          ## psOk: the tree
+    groups*: int       ## psOk: capturing groups (RFC-0005 S8bb)
     errMsg*: string    ## psRejected: Nim's exact `RegexError.msg`
     reason*: string    ## psUnmodelled / psUnknown: the construct
 
@@ -530,7 +533,9 @@ proc readCat(r: var Reader; depth: int): Rx =
       else:
         inc r.i
       if capture: inc r.groups
+      let group = (if capture: r.groups else: 0)
       let inner = r.readAlt(depth + 1)
+      inner.cap = group
       if r.atEnd:
         r.reject("missing )", r.pat.len)
       inc r.i   # `)`
@@ -603,7 +608,7 @@ proc parsePcre*(pattern: string; extended = false): PcreParse =
       r.reject("reference to non-existent subpattern", pattern.len)
     if r.unmodelled.len > 0:
       return PcreParse(status: psUnmodelled, reason: r.unmodelled)
-    PcreParse(status: psOk, root: root)
+    PcreParse(status: psOk, root: root, groups: r.groups)
   except Stop:
     case r.status
     of psRejected: PcreParse(status: psRejected, errMsg: r.errMsg)

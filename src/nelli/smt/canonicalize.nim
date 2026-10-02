@@ -213,7 +213,12 @@ const symexWalkerVersion* = "196"
   ## `str.replace_re` is first- and shortest-match, and Z3 leaves it
   ## `unknown`); other shapes decline `seZ3StringIncomplete`, naming the
   ## construct. Verdicts change: a concrete-receiver claim is now decided.
-  ## Provisional 196 (S8ar..S8av hold 191..195).
+  ## And `seqRangeFacts` emits the join "`seq.last_indexof(s, t)` is at
+  ## least every found `str.indexof(s, t, i)`", which S8aq declined because
+  ## Z3 cannot refute its negation: links are held to S8ai's bar, their
+  ## truth enumerated exhaustively. A first index past the last is now
+  ## `sxUnsat` (was `sxUnknown`). Provisional 196 (S8ar..S8av hold
+  ## 191..195).
   ##
   ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional

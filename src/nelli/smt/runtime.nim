@@ -9367,10 +9367,16 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ##     <= i <= len(s) - len(t)`, at most at `len(s) - len(t)`;
   ##   - `L = seq.last_indexof(s, t)`: `L >= 0` iff `str.contains(s, t)`;
   ##     a prefix gives `L >= 0`, a suffix `L = len(s) - len(t)`, a piece
-  ##     equal to `t` at `i` in range `L >= i`. (`L` at least every found
-  ##     `str.indexof(s, t, i)` is as valid, but neither Z3 refutes its
-  ##     negation within 1M units, which S8v's pin asks of every fact over
-  ##     `s`, `t`, `i`; it is not emitted.)
+  ##     equal to `t` at `i` in range `L >= i`; and (RFC-0005 S8aw) `L` is
+  ##     at least every found `str.indexof(s, t, i)`.
+  ## A LINK is held to the bar S8ai set (the negation is never SAT with the
+  ## theory, and the fact is true on every small ground instance), not to
+  ## S8v's "the negation is UNSAT" bar for the single-function ranges: a
+  ## link is sound because it is TRUE of the theory, and whether Z3 refutes
+  ## its negation is a question of the solver's completeness. Neither Z3
+  ## refutes the pairwise, piece or join links' negations within 1M units
+  ## (RFC-0005 S8aw's As-landed note); each is pinned true by exhaustive
+  ## enumeration instead (`tests/tsymex_rfc0005_s8aw_remainder.nim`).
   ##   - `r = str.replace_all(s, t, u)`: `r = s` for an empty `t` or with no
   ##     occurrence (`not str.contains(s, t)`); `len(r)` against `len(s)`
   ##     as `len(t)` against `len(u)`; with literal `t`, `u` (`len(t) >=
@@ -9613,30 +9619,13 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     same(result, t1, t2)
   proc sameKey(s1, s2, t1, t2: Z3AnyAst): bool =
     cls(s1) == cls(s2) and cls(t1) == cls(t2)
-  # RFC-0005 S8aq (attempted, reverted). "`L` (`seq.last_indexof(s, t)`) is
-  # at least every found `str.indexof(s, t, i)`" is valid in the theory --
-  # `L` is itself an occurrence and no later one exists, so searching from
-  # `L` finds `L` exactly -- but S8ai dropped it: asked as a universal
-  # claim over free `s`, `t`, `i`, neither linked Z3 refutes its negation
-  # within the pin's 1M-unit budget, even at `i = 0`. S8aq tried two
-  # reformulations, both of which `tsymex_rfc0005_s8v_termination`'s
-  # per-fact validity pin caught as undecidable in practice, not just slow,
-  # on Z3 5.1 (not only Z3 4.13.4): (a) a fresh `str.indexof(s, t, L)` term
-  # joined into the pairwise loop below -- nesting `str.indexof` inside a
-  # `seq.last_indexof` argument is a theorem but Z3 does not decide its
-  # negation within 1M units; (b) the same link stated directly against an
-  # existing `str.indexof(s, t, i)` term with no nested term at all (`0 <=
-  # i <= L` implies `0 <= indexof(s, t, i) <= L`) -- still a theorem, and
-  # still not decided: raising the check's OWN budget to 50M units made Z3
-  # hang past a 240s wall-clock bound rather than return either answer, so
-  # this is not a budget-tuning gap. Z3's `str.indexof`/`seq.last_indexof`
-  # COMBINED reasoning is the obstacle (this file already documents a
-  # correctness bug in the same combination on Z3 4.13.4's incremental
-  # core), not the phrasing. Declined: no ground fact links these two
-  # functions here. `tsymex_rfc0005_s8aq_remainder.nim`'s "S8aq (2)" suite
-  # records the decline and what it costs (completeness only, per item 4's
-  # same class of gap -- steps 2/3 under the full theory still decide a
-  # query this would have shortcut).
+  # RFC-0005 S8aq tried "`L` (`seq.last_indexof(s, t)`) is at least every
+  # found `str.indexof(s, t, i)`" and declined it: neither Z3 refutes its
+  # negation (S8aq and S8aw tried twelve forms, up to 10M units). RFC-0005
+  # S8aw emits it, under the links' bar (the doc above): it is true -- a
+  # found `r = str.indexof(s, t, i) >= 0` is an occurrence of `t` at `r`,
+  # and `L` is the greatest occurrence; emitted in the `lastIdxs` loop
+  # below, and enumerated true by `tsymex_rfc0005_s8aw_remainder`.
   for e in indexOfs:
     let atZero = e.i == zero
     for c in containsL:
@@ -9671,6 +9660,12 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   for l in lastIdxs:
     # RFC-0005 S8ai: `seq.last_indexof` is -1 exactly when not contained; a
     # prefix is found, and a suffix is the last occurrence.
+    for e in indexOfs:
+      if sameKey(l.s, e.s, l.t, e.t):
+        # RFC-0005 S8aw: the join. `e.r >= 0` is an occurrence at `e.r`
+        # (an empty `t` occurs at every `0..len(s)`), and `L` is the last.
+        result.add guarded(pairGuard(l.s, e.s, l.t, e.t),
+                           implies(e.r >= zero, e.r <= l.r))
     for c in containsL:
       if sameKey(l.s, c.s, l.t, c.t):
         result.add guarded(pairGuard(l.s, c.s, l.t, c.t), (l.r >= zero) == c.p)

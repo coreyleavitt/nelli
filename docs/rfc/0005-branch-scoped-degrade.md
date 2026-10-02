@@ -8063,33 +8063,105 @@ Pins: `tests/tsymex_rfc0005_s8aq_remainder.nim`.
   more decidable, and is out of this slice's scope (plain
   `str.replace_all` only).
 
-**As landed (S8aw, walker 196 provisional) — S8aq's remainder.** Item 2 is
-done; item 1 is escalated as a fork (below), its S8aq decline unchanged.
+**As landed (S8aw, walker 196 provisional) — S8aq's remainder.** Both
+items are done. Item 1 took fork (a) below, decided by the coordinator.
 
-*1. The `seqRangeFacts` / `str.indexof` join — no Z3-decided formulation
-exists; escalated.* Every positional form of "`L` (`seq.last_indexof(s,
-t)`) is at least every found `str.indexof(s, t, i)`" was posed to
-`querySolver([not f], 1M)` on Z3 5.1 and 4.13.4: the direct link (free
-`i`; `i = 0`, also at 10M units, 38-64 s; `t = ":"`); an occurrence
-witness `substr(s, idx, len t) = t`; `str.at(s, indexof(s, ":", 0)) =
-":"`; "a piece of `t` at `r` implies `L >= r`" (contains-suffix and
-prefixof forms); `indexof(s, t, L) = L`; "nothing after `L`" (contains and
-`indexof(s, t, L + 1) = -1` forms); a tight-prefix form; `at(L) = ":"`.
-All were `unknown` (cancelled). Only the non-positional facts decide
-(`indexof >= 0 -> contains`, the range fact, `L >= 0 <-> contains`,
-`L >= 0 -> indexof(s, t, 0) >= 0`, `L = -1 <-> indexof(s, t, 0) = -1`),
-all already emitted. The spec's assumption -- that a sound, Z3-decided
-form exists -- is wrong for both versions. The finding that frames the
-fork: S8ai's own shipped *links* (the pairwise `indexof` order links and
-the piece links) are equally undecided by that check; they pass only
-S8ai's weaker `factFlaw` bar (the negation is not SAT within 1M units AND
-the fact holds on every small ground instance). They ship because S8v's
-strict "every fact's negation is UNSAT" pin never sees them (its term set
-has one `indexof`); the join was blocked only because it fires on that
-exact term set. Fork: **(a)** hold *links* to the `factFlaw` bar and
-range facts to the strict one, restructuring the S8v pin to say so, and
-emit the join (recommended: it is the bar the shipped links already meet);
-**(b)** keep the join declined (S8aq's pins stand).
+*1. The `seqRangeFacts` / `str.indexof` join — emitted, under the links'
+bar.* No form of "`L` (`seq.last_indexof(s, t)`) is at least every found
+`str.indexof(s, t, i)`" is decided by Z3. Each form was posed as
+`querySolver([not f], 1M)` on Z3 5.1 and 4.13.4. All were `unknown`
+(cancelled):
+- the direct link, with free `i`, with `i = 0` (also at 10M units, 38-64
+  s), and with `t = ":"`;
+- an occurrence witness `substr(s, idx, len t) = t`;
+- `str.at(s, indexof(s, ":", 0)) = ":"`;
+- "a piece of `t` at `r` implies `L >= r`", in contains-suffix and
+  prefixof forms;
+- `indexof(s, t, L) = L`;
+- "nothing after `L`", in contains and `indexof(s, t, L + 1) = -1` forms;
+- a tight-prefix form;
+- `at(L) = ":"`.
+
+Only the non-positional facts decide, and they were already emitted:
+- `indexof >= 0 -> contains`;
+- the range fact;
+- `L >= 0 <-> contains`;
+- `L >= 0 -> indexof(s, t, 0) >= 0`;
+- `L = -1 <-> indexof(s, t, 0) = -1`.
+
+S8ai's own shipped *links* (the pairwise order links and the piece links)
+are equally undecided by that check. They shipped because S8v's strict
+pin never sees them: its term set has one `indexof`. The join was blocked
+only because it fires on that exact term set. The resolution: a fact is
+sound iff it is TRUE of the theory. Whether Z3 refutes its negation is a
+question of the solver's completeness, not of soundness. So:
+- **Two bars, stated in the S8v pin.** A *range* fact (what one term
+  emits alone) is held to the strict bar: the negation is UNSAT with the
+  theory. A *link* (what two terms emit only together) is held to S8ai's
+  bar: the negation is never SAT, and the fact is true on every small
+  ground instance. The pin's comment says why the bars differ. It now
+  asserts exactly one link over its terms: the join.
+- **The join is emitted** (`seqRangeFacts`, the `lastIdxs` loop):
+  `implies(r >= 0, r <= L)` per `str.indexof` term `r` whose haystack and
+  needle are in `L`'s classes, guarded by their equalities as every link
+  is.
+
+*Proof of the join.* Write `occ(s, t, k)` for `0 <= k`, `k + |t| <= |s|`
+and `s[k .. k + |t|) = t`, and `O = {k | occ(s, t, k)}`. By SMT-LIB:
+- `str.indexof(s, t, i)` is `min {k in O | k >= i}` when `0 <= i <= |s|`
+  and that set is non-empty, and -1 otherwise;
+- `seq.last_indexof(s, t)` is `max O` when `O` is non-empty, and -1
+  otherwise.
+
+An empty `t` gives `O = 0..|s|`, so the last is `|s|`. Z3's ground
+evaluation agrees with all of this, as checked below.
+
+Let `r = str.indexof(s, t, i) >= 0`. Then `r` is in `{k in O | k >= i}`,
+which is a subset of `O`. So `O` is non-empty, `L = max O`, and `r <= L`.
+The guarded form follows by substituting equals: under `s1 = s2` and
+`t1 = t2` the two terms are over one haystack and needle. QED.
+
+*Enumeration* (`tests/tsymex_rfc0005_s8aw_remainder.nim`, "every link is
+true").
+- **The reference.** A reference of these semantics (`refIndexOf`,
+  `refLast`, `refAt`, `refSubstr`) is checked two ways:
+  - equal to `strutils.find` / `rfind` for every haystack and needle over
+    {a, b} up to length 6 and every start `0..len(s)`;
+  - equal to Z3's own ground evaluation (`Z3_simplify` of the literal
+    terms) over {a, b}, haystacks up to 4, needles up to 3, and starts
+    `-1..len(s) + 1`.
+- **The links.** Every link `seqRangeFacts` emits over one haystack and
+  needle is then evaluated as the proposition it states:
+  - the join;
+  - S8ai's pairwise order links (both directions);
+  - the piece links (`str.at` and `str.substr`: contained; found from
+    `i <= k` at most at `k`; `L >= k`);
+  - the contains, prefix and suffix links of both functions;
+  - both range facts.
+
+  The domain is every tuple over {a, b} with haystacks and needles up to
+  length 6, and over {a, b, c} with haystacks up to 5 and needles up to
+  3. Every start `i`, `j`, piece offset `k` and length `n` in
+  `-1..len(s) + 1` is covered. `L` is not enumerated as a free value: in
+  every link it is the function's value at `(s, t)`, and the range facts
+  admit no other.
+- **The result.** No counterexample to any link. A strict-join mutant
+  (`found < last`) is caught.
+
+*No soundness bug was found* in S8ai's shipped links.
+
+Pins:
+- **In `tsymex_rfc0005_s8aw_remainder.nim`:**
+  - step 1c UNSAT on S8aq's query, and from a free start;
+  - the companion stays SAT;
+  - end to end, a first index past the last is `sxUnsat` from 0 and from
+    a symbolic start, and the companion is `sxSat`;
+  - the emitted join is exactly one new fact over S8v's terms, never
+    refuted.
+- **Re-pinned:**
+  - S8aq (2)'s two decline pins (`!= zsUnsat`; `sxUnknown` +
+    `beSolverUndef`) are now the decision (`zsUnsat`; `sxUnsat`);
+  - S8v's per-fact pin splits range facts from links as above.
 
 *2. Regex replace is the walker's own lowering.* `replace(s, re"p", by)`
 (std/re) appends `by` for every leftmost, non-overlapping PCRE match. The
@@ -8190,3 +8262,11 @@ Pins: `tests/tsymex_rfc0005_s8aw_remainder.nim` (about 11 s on Z3 5.1):
   16 bytes is a fresh value; a query that needs it is replay-gated, or
   `unknown` if the solver times out. A `seq.foldl`/`seq.mapi`-based
   lowering (exact for every length, no fresh arm) was not attempted.
+- **A step-1c UNSAT still costs the full sequence budget first.** The
+  join's two end-to-end walks (`foundExceedsLast`, and the same from a
+  symbolic start) reach `sxUnsat` either way. Under the default
+  `seqQueryRLimit` each spends about 22 s of CPU (Z3 5.1); at 200,000
+  units each takes 0.1-0.2 s. So the walk runs a sequence-theory search
+  to its budget before the theory-free facts' refutation decides. The
+  pins run at the tight budget (which also pins that the verdict is step
+  1c's). S8aq (2)'s re-pinned walk keeps the default and pays the cost.

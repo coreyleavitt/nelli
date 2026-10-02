@@ -927,7 +927,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 1 lands S8ag, S8am, S8an, S8ap, S8aq and S11 as one
     ## walker number. 182->190.
     ## RFC-0005 S8aw (regex replace lowered by the walker for a literal, a
-    ## one-byte class and a class under `+`). Provisional 196.
+    ## one-byte class and a class under `+`; the last_indexof/indexof join
+    ## emitted). Provisional 196.
     check symexWalkerVersion == "196"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

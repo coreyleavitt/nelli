@@ -35,6 +35,61 @@ proc sidx(ctx: Z3Context; s, t: Z3String; i: Z3Int): Z3Int =
 proc slast(ctx: Z3Context; s, t: Z3String): Z3Int =
   wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_last_index(ctx.raw, s.raw, t.raw))
 
+proc freeConsts(ctx: Z3Context; f: Z3Bool): seq[Z3AnyAst] =
+  var seen: seq[int]
+  var stack = @[toAnyAst(f)]
+  while stack.len > 0:
+    let tm = stack.pop()
+    if getAstKind(tm) != akApp: continue
+    let args = unpackApp(tm).args
+    if args.len == 0 and getSortKind(tm) in {skInt, skSeq} and
+       not Z3_is_string(ctx.raw, tm.raw):
+      let id = astId(ctx, tm.raw)
+      if id notin seen:
+        seen.add id
+        result.add tm
+    for a in args: stack.add a
+
+proc holdsOnSmallDomain(ctx: Z3Context; f: Z3Bool): string =
+  ## RFC-0005 S8aw: S8ai's ground half of the links' bar (as
+  ## `tsymex_rfc0005_s8ai_semantic.nim`'s helper of the same name): "" when
+  ## `f` is `true` under Z3's rewriter on every string over {"a", "\xff"}
+  ## of length <= 3 and integer in -1..4 substituted for its constants.
+  var strs = @[""]
+  var frontier = @[""]
+  for _ in 1 .. 3:
+    var next: seq[string]
+    for w in frontier:
+      for c in ["a", "\xff"]: next.add w & c
+    strs.add next
+    frontier = next
+  let vars = freeConsts(ctx, f)
+  if vars.len == 0: return ""
+  var froms, tos: seq[RawZ3Ast]
+  for v in vars:
+    froms.add v.raw
+    tos.add v.raw
+  proc go(k: int): string =
+    if k == vars.len:
+      let g = ctx.checkErr Z3_simplify(ctx.raw, ctx.checkErr Z3_substitute(
+        ctx.raw, f.raw, cuint(froms.len),
+        cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+      let txt = $Z3_ast_to_string(ctx.raw, g)
+      return (if txt == "true": "" else: txt)
+    if getSortKind(vars[k]) == skInt:
+      for v in -1 .. 4:
+        tos[k] = mkInt(ctx, v).raw
+        let r = go(k + 1)
+        if r.len > 0: return r
+    else:
+      for w in strs:
+        tos[k] = mkString(ctx, w).raw
+        let r = go(k + 1)
+        if r.len > 0: return r
+    ""
+  go(0)
+
 proc stepOneC(ctx: Z3Context; roots: seq[Z3Bool]): Z3Solver =
   ## The query as step 1c poses it, less the caps: no sequence theory, with
   ## the range facts.
@@ -84,9 +139,22 @@ suite "S8v: step 1c carries the sequence functions' ranges":
     let r = sidx(ctx, s, mkString(ctx, ""), slen(ctx, s))
     check stepOneC(ctx, @[r == slen(ctx, s)]).check() == zsSat
 
-  test "each range fact is valid in the sequence theory":
-    # Every fact `seqRangeFacts` emits, over free operands, has an UNSAT
-    # negation WITH the theory: a theory-free UNSAT stays the query's own.
+  test "each range fact is valid in the sequence theory; each link is true":
+    # A fact is sound iff it is TRUE of the theory (then a theory-free UNSAT
+    # stays the query's own). Two bars, by kind (RFC-0005 S8aw):
+    #   - a RANGE fact (one function's range, what each term emits alone)
+    #     is held to the strict one: Z3 refutes its negation WITH the
+    #     theory. Each is a one-function bound Z3 decides at once, so the
+    #     strict bar costs nothing and catches a wrong bound at the source;
+    #   - a LINK (a fact over two functions, what the terms emit only
+    #     together: here S8aw's join, `indexof >= 0 -> indexof <= last`) is
+    #     held to S8ai's bar: its negation is never SAT, and it is true on
+    #     every small ground instance. Z3 does not decide the
+    #     `str.indexof`/`seq.last_indexof` combination (S8aq, S8aw: twelve
+    #     forms, up to 10M units), so the strict bar would reject a true
+    #     fact for the solver's incompleteness, not for unsoundness. Its
+    #     truth is enumerated exhaustively in
+    #     `tsymex_rfc0005_s8aw_remainder.nim`, as are S8ai's own links.
     let ctx = newContext()
     let s = mkStringVar(ctx, "s")
     let t = mkStringVar(ctx, "t")
@@ -94,12 +162,22 @@ suite "S8v: step 1c carries the sequence functions' ranges":
     let terms = @[slen(ctx, s) >= mkInt(ctx, 0),
                   sidx(ctx, s, t, i) >= mkInt(ctx, -2),
                   slast(ctx, s, t) >= mkInt(ctx, -2)]
+    var ranges: seq[string]
+    for term in terms:
+      for f in seqRangeFacts(ctx, @[term]):
+        ranges.add $f
     let facts = seqRangeFacts(ctx, terms)
-    check facts.len >= 3
+    check ranges.len >= 3
+    var links = 0
     for f in facts:
-      let q = querySolver(ctx, [not f], 1_000_000'u)
       checkpoint $f
-      check q.check() == zsUnsat
+      if $f in ranges:
+        check querySolver(ctx, [not f], 1_000_000'u).check() == zsUnsat
+      else:
+        inc links
+        check querySolver(ctx, [not f], 1_000_000'u).check() != zsSat
+        check holdsOnSmallDomain(ctx, f).len == 0
+    check links == 1
 
 # ---- (2) end to end: S8r's range-checked search -----------------------------
 #

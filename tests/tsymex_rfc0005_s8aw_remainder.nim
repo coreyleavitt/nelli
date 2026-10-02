@@ -1,4 +1,20 @@
-## RFC-0005 (soundness channels) slice S8aw -- S8aq's remainder, item 2.
+## RFC-0005 (soundness channels) slice S8aw -- S8aq's remainder.
+##
+## Item 1 (the first suites below). `seqRangeFacts` emits the join "`L =
+## seq.last_indexof(s, t)` is at least every found `str.indexof(s, t, i)`".
+## Neither Z3 refutes its negation (twelve forms tried, up to 10M units),
+## which S8aq took as a reason to decline it. A fact is sound iff it is
+## TRUE of the theory; whether Z3 proves it is a completeness question. So
+## the links are held to S8ai's bar (negation never SAT, true on every
+## small ground instance) and the single-function ranges to S8v's strict
+## one, and the truth of every link -- the join and S8ai's shipped
+## pairwise, piece, contains, prefix and suffix links, which ship on the
+## same argument and had never been checked beyond length 3 -- is
+## enumerated exhaustively in Nim, against a reference of the SMT-LIB
+## semantics that is itself checked against `strutils.find`/`rfind` and
+## against Z3's own ground evaluation.
+##
+## Item 2.
 ##
 ## Regex `replace(s, re"...", by)` (std/re) replaces EVERY leftmost,
 ## non-overlapping PCRE match of the pattern, in PCRE's own match order
@@ -31,7 +47,9 @@
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
+import nelli/smt/runtime
 import nelli/smt/canonicalize
+import z3
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -42,6 +60,275 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
   for e in errs:
     if e.kind == k: return true
   false
+
+# ---- item 1: the join, decided ------------------------------------------------
+
+const decls = """
+(declare-const s String) (declare-const t String)
+(declare-const i Int) (declare-const j Int)
+"""
+
+proc q(ctx: Z3Context; src: string): seq[Z3Bool] =
+  parseSmt2String(ctx, decls & src)
+
+proc stepOneC(ctx: Z3Context; roots: seq[Z3Bool]): Z3Status =
+  let sv = querySolver(ctx, roots, 1_000_000'u, seqTheory = false)
+  for f in seqRangeFacts(ctx, roots): sv.add f
+  sv.check()
+
+proc foundExceedsLast(s, t: string) =
+  if t in s and s.find(t, 0) >= 0 and s.rfind(t) < s.find(t, 0):
+    symexTarget("aw_found_exceeds_last")
+
+proc foundFromIExceedsLast(s, t: string; i: int) =
+  # A nonzero start: the join holds for every `i`, not only 0. (`find`
+  # with a start outside 0..len(s) can raise, so it is called in range.)
+  if i >= 0 and i <= s.len:
+    let r = s.find(t, i)
+    if r >= 0 and s.rfind(t) < r:
+      symexTarget("aw_found_from_i_exceeds_last")
+
+proc foundAtOrBeforeLast(s, t: string) =
+  if t in s and s.find(t, 0) >= 0 and s.rfind(t) >= s.find(t, 0):
+    symexTarget("aw_found_at_or_before_last")
+
+suite "S8aw (1): step 1c joins seqRangeFacts to str.indexof":
+
+  test "the join's query is UNSAT theory-free with the facts (step 1c)":
+    # RED at 5ffc922 (S8aq pinned it `!= zsUnsat`: the link was declined).
+    let ctx = newContext()
+    let roots = q(ctx, """(assert (str.contains s t))
+                          (assert (>= (str.indexof s t 0) 0))
+                          (assert (< (seq.last_indexof s t) (str.indexof s t 0)))""")
+    check stepOneC(ctx, roots) == zsUnsat
+
+  test "from a free start too":
+    let ctx = newContext()
+    let roots = q(ctx, """(assert (>= (str.indexof s t i) 0))
+                          (assert (< (seq.last_indexof s t) (str.indexof s t i)))""")
+    check stepOneC(ctx, roots) == zsUnsat
+
+  test "companion: a found index at or before L stays SAT":
+    let ctx = newContext()
+    let roots = q(ctx, """(assert (str.contains s t))
+                          (assert (>= (str.indexof s t 0) 0))
+                          (assert (>= (seq.last_indexof s t) (str.indexof s t 0)))""")
+    check stepOneC(ctx, roots) == zsSat
+
+  # The end-to-end pins run under a `seqQueryRLimit` too small for the
+  # sequence theory's own search: the verdict is step 1c's (the facts),
+  # not the theory's, and the default budget only spends ~20 s first.
+  proc tightSeq(): SymexSettings =
+    result = defaultSymexSettings()
+    result.budget.seqQueryRLimit = 200_000
+
+  test "end to end: a first index past the last is sxUnsat":
+    # RED at 5ffc922: sxUnknown + beSolverUndef (S8aq (2)).
+    let r = symexFind(foundExceedsLast, tLabel("aw_found_exceeds_last"), tightSeq())
+    checkpoint show(r.errors)
+    check r.status == sxUnsat
+
+  test "end to end: from a symbolic start, sxUnsat":
+    let r = symexFind(foundFromIExceedsLast, tLabel("aw_found_from_i_exceeds_last"),
+                      tightSeq())
+    checkpoint show(r.errors)
+    check r.status == sxUnsat
+
+  test "companion: a found index at or before L is reachable":
+    let r = symexFind(foundAtOrBeforeLast, tLabel("aw_found_at_or_before_last"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+
+# ---- item 1: every link is TRUE, by exhaustive enumeration ---------------------
+#
+# A reference of the SMT-LIB / Z3 semantics, over `occ(s, t, k)`: `t`
+# occurs in `s` at `k` (`0 <= k`, `k + len(t) <= len(s)`, the bytes equal).
+#   indexof(s, t, i) = min {k >= i | occ k} for 0 <= i <= len(s), else -1
+#   last(s, t)       = max {k | occ k}, else -1 (an empty `t`: len(s))
+#   at(s, k)         = s[k] for 0 <= k < len(s), else ""
+#   substr(s, k, n)  = s[k ..< min(k + n, len(s))] for 0 <= k < len(s) and
+#                      0 < n, else ""
+# Both are checked below: against `strutils.find`/`rfind`, and against
+# Z3's own ground evaluation of the same terms.
+
+proc occ(s, t: string; k: int): bool =
+  if k < 0 or k + t.len > s.len: return false
+  for m in 0 ..< t.len:
+    if s[k + m] != t[m]: return false
+  true
+
+proc refIndexOf(s, t: string; i: int): int =
+  if i < 0 or i > s.len: return -1
+  for k in i .. s.len:
+    if occ(s, t, k): return k
+  -1
+
+proc refLast(s, t: string): int =
+  for k in countdown(s.len, 0):
+    if occ(s, t, k): return k
+  -1
+
+proc refAt(s: string; k: int): string =
+  if k >= 0 and k < s.len: $s[k] else: ""
+
+proc refSubstr(s: string; k, n: int): string =
+  if k >= 0 and k < s.len and n > 0: s[k ..< min(k + n, s.len)] else: ""
+
+proc words(alpha: string; maxLen: int): seq[string] =
+  result = @[""]
+  var frontier = @[""]
+  for _ in 1 .. maxLen:
+    var next: seq[string]
+    for w in frontier:
+      for c in alpha: next.add w & c
+    result.add next
+    frontier = next
+
+proc linkCounterexamples(hay, needles: seq[string]): seq[string] =
+  ## Every link `seqRangeFacts` emits over one haystack and needle, as the
+  ## proposition it states (the guards equating two ASTs are discharged:
+  ## the haystacks and needles here ARE one), on the reference, for every
+  ## start `i`, `j` and piece `k`, `n` in -1 .. len(s) + 1. Empty when every
+  ## link holds on every tuple.
+  var s, t: string
+  var i, j, k, n: int
+  proc bad(res: var seq[string]; cond: bool; what: string) =
+    if not cond and res.len < 20:
+      res.add what & " s=" & escape(s) & " t=" & escape(t) & " i=" & $i &
+              " j=" & $j & " k=" & $k & " n=" & $n
+  for hs in hay:
+    for ts in needles:
+      s = hs
+      t = ts
+      i = 0; j = 0; k = 0; n = 0
+      let L = refLast(s, t)
+      let lenS = s.len
+      let lenT = t.len
+      let cont = s.contains(t)
+      let pre = s.startsWith(t)
+      let suf = s.endsWith(t)
+      # Range of `last` (S8v) and its links (S8ai).
+      result.bad(L == -1 or (0 <= L and L + lenT <= lenS), "range last")
+      result.bad((L >= 0) == cont, "last >= 0 iff contains")
+      result.bad(not pre or L >= 0, "prefix -> last >= 0")
+      result.bad(not suf or L == lenS - lenT, "suffix -> last = len s - len t")
+      var rs = newSeq[int](lenS + 3)          # rs[x + 1] = indexof(s, t, x)
+      for x in -1 .. lenS + 1: rs[x + 1] = refIndexOf(s, t, x)
+      # Which pieces equal `t`, per (k, n): `at` and `substr` both.
+      var pieceAt = newSeq[bool]((lenS + 3) * (lenS + 3))
+      for kk in -1 .. lenS + 1:
+        for nn in -1 .. lenS + 1:
+          pieceAt[(kk + 1) * (lenS + 3) + nn + 1] =
+            refSubstr(s, kk, nn) == t or refAt(s, kk) == t
+      for ii in -1 .. lenS + 1:
+        i = ii; j = 0; k = 0; n = 0
+        let ri = rs[ii + 1]
+        # Range of `indexof` (S8v).
+        result.bad(ri == -1 or (0 <= ri and ii <= ri and ri + lenT <= lenS),
+                   "range indexof")
+        # Contains / prefix / suffix links (S8ae, S8ai).
+        result.bad(not (ri >= 0) or cont, "indexof found -> contains")
+        result.bad(not (cont and ii == 0) or ri >= 0, "contains -> found from 0")
+        result.bad(not (pre and ii == 0) or ri == 0, "prefix -> found at 0")
+        result.bad(not (suf and 0 <= ii and ii <= lenS - lenT) or
+                   (ii <= ri and ri <= lenS - lenT), "suffix found from i")
+        # The join (S8aw).
+        result.bad(not (ri >= 0) or ri <= L, "join: found <= last")
+        # Pairwise order (S8ai), from `0 <= i <= j`.
+        for jj in -1 .. lenS + 1:
+          j = jj
+          if 0 <= ii and ii <= jj:
+            let rj = rs[jj + 1]
+            result.bad(not (ri >= jj) or rj == ri, "pairwise: r_i >= j -> r_j = r_i")
+            result.bad(not (rj >= 0) or (0 <= ri and ri <= rj),
+                       "pairwise: r_j found -> 0 <= r_i <= r_j")
+        j = 0
+        # Piece links (S8ae, S8ai): `str.at(s, k)` or `str.substr(s, k, n)`
+        # equal to `t`.
+        for kk in -1 .. lenS + 1:
+          k = kk
+          let inRange = 0 <= kk and kk < lenS
+          for nn in -1 .. lenS + 1:
+            n = nn
+            if pieceAt[(kk + 1) * (lenS + 3) + nn + 1]:
+              result.bad(cont, "piece -> contains")
+              result.bad(not (inRange and 0 <= ii and ii <= kk) or
+                         (0 <= ri and ri <= kk), "piece: found from i <= k, at most k")
+              result.bad(not inRange or L >= kk, "piece: last >= k")
+
+suite "S8aw (1): every link is true (exhaustive enumeration)":
+
+  test "the reference is Nim's own strutils.find / rfind":
+    # strutils.find(s, t, i) is `indexof` for 0 <= i <= len(s) (an empty
+    # `t` is found at `i`); rfind(s, t) is `last` (an empty `t`: len(s)).
+    var bad: seq[string]
+    for s in words("ab", 6):
+      for t in words("ab", 6):
+        if strutils.rfind(s, t) != refLast(s, t) and bad.len < 5:
+          bad.add "rfind " & s & " " & t
+        for i in 0 .. s.len:
+          if strutils.find(s, t, i) != refIndexOf(s, t, i) and bad.len < 5:
+            bad.add "find " & s & " " & t & " " & $i
+    checkpoint $bad
+    check bad.len == 0
+
+  test "the reference is Z3's own ground evaluation":
+    # The links are facts about Z3's functions, so the reference must be
+    # Z3's too: its rewriter folds each ground term to a numeral.
+    let ctx = newContext()
+    proc numTxt(v: int): string =
+      if v < 0: "(- " & $(-v) & ")" else: $v
+    var bad: seq[string]
+    var checked = 0
+    for s in words("ab", 4):
+      for t in words("ab", 3):
+        let ss = mkString(ctx, s)
+        let tt = mkString(ctx, t)
+        let lz = $wrap[Z3Int](ctx, ctx.checkErr Z3_simplify(ctx.raw,
+          ctx.checkErr Z3_mk_seq_last_index(ctx.raw, ss.raw, tt.raw)))
+        if lz != numTxt(refLast(s, t)) and bad.len < 10:
+          bad.add "last " & s & " " & t & " z3=" & lz
+        for i in -1 .. s.len + 1:
+          let iz = $wrap[Z3Int](ctx, ctx.checkErr Z3_simplify(ctx.raw,
+            ctx.checkErr Z3_mk_seq_index(ctx.raw, ss.raw, tt.raw,
+                                         mkInt(ctx, i).raw)))
+          inc checked
+          if iz != numTxt(refIndexOf(s, t, i)) and bad.len < 10:
+            bad.add "indexof " & s & " " & t & " " & $i & " z3=" & iz
+    checkpoint $checked & " " & $bad
+    check bad.len == 0
+
+  test "alphabet {a, b}: haystacks and needles up to length 6":
+    let ws = words("ab", 6)
+    let cex = linkCounterexamples(ws, ws)
+    checkpoint $cex
+    check cex.len == 0
+
+  test "alphabet {a, b, c}: haystacks up to length 5, needles up to 3":
+    let cex = linkCounterexamples(words("abc", 5), words("abc", 3))
+    checkpoint $cex
+    check cex.len == 0
+
+  test "the enumeration catches a broken link (a strict join)":
+    var hit = false
+    for s in words("ab", 3):
+      for t in words("ab", 2):
+        let r = refIndexOf(s, t, 0)
+        if r >= 0 and not (r < refLast(s, t)): hit = true
+    check hit
+
+  test "the emitted join: exactly one link over S8v's terms, never refuted":
+    # The terms of S8v's per-fact pin: one indexof, one last_indexof.
+    let ctx = newContext()
+    let roots = q(ctx, """(assert (>= (str.indexof s t i) (- 2)))
+                          (assert (>= (seq.last_indexof s t) (- 2)))""")
+    let alone = seqRangeFacts(ctx, @[roots[0]]).len +
+                seqRangeFacts(ctx, @[roots[1]]).len
+    let facts = seqRangeFacts(ctx, roots)
+    check facts.len == alone + 1
+    for f in facts:
+      checkpoint $f
+      check querySolver(ctx, @[not f], 1_000_000'u).check() != zsSat
 
 # ---- concrete receivers decide ---------------------------------------------
 

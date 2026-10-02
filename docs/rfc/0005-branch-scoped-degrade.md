@@ -344,7 +344,7 @@ state = "pending"
 [[slice]]
 id = "S8bc"
 title = "S8at's remainder: getOrDefault, borrow routines, leaf-split seq elements, array-element insert, newSeq, Table iteration, mgetOrPut, inlined-iterator param conversions, seq[char]/seq[enum] witness spelling"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -7420,6 +7420,181 @@ reason stated.
   identifier.
 - **A `seq[char]` / `seq[enum]` witness may be spelled `seq[uint8]`.**
   `emitTyAndReader` was observed emitting it; not verified.
+
+**As landed (S8bc, walker 203, provisional) — S8at's remainder.** Pins:
+`tests/tsymex_rfc0005_s8bc_remainder.nim`. Every item was probed at the
+base (460c51e) before it was changed. One hid a wrong verdict, pinned RED
+first:
+- **`inc`/`dec` on any receiver but a bare int variable was silently
+  dropped**, a false `sxSat`. An array element, a Table value, a seq
+  element, an object field or a dereference reached the user-call
+  fallback, where the bodiless magic is registered with an empty body: the
+  write was lost with no record, and a target behind the old value was a
+  clean, wrong `sxSat`.
+
+Walker faults found and fixed along the way:
+- `getOrDefault` under `and` (a declined `Hash` local met the `bAnd`
+  arm's `svBool` assertion).
+- `int(high(int32))` (`lowerConvIntWidth` on a 64-bit operand), with or
+  without an iterator.
+- A hidden `int32 -> int` widening of an inlined iterator's parameter.
+- `$` of a distinct int.
+- An empty `@[]` passed where a `seq[T]` is expected (typed `seq[empty]`,
+  built over the placeholder sort; the first store faulted).
+- `pairs.add((k, v))` on a seq of tuples (`iekSeqAdd: element lowered to
+  tuple value`, an in-band decline filed as `weInternalWalkerFault`). The
+  corpus's pair-loop SUTs hit it at the base.
+- A `seq[char]` object field was a compile error in the witness reader.
+- A named tuple alias (`LPt = tuple[x: int, y: int]`) classified as
+  unsupported, and a literal of it in `s.add((x, y))` crashed the compile
+  (`mkTupleLit`'s `itTuple` assertion). It now classifies as the tuple.
+
+*(1) `getOrDefault(t, k[, d])`* is `if contains(t, k): t[k] else: d` (or
+`default(V)`), with the key and the default bound before the lookup. A NaN
+float key is never present, so its lookup is the default. A mixed
+bool/integer `and`/`or`/`xor` declines in-band (`mixedBitwiseDecline`), a
+fresh value of the integer side's type on a tainted path.
+
+*(2) A non-operator `{.borrow.}` routine is its base routine.* A call is
+rewritten as the base routine on the same typed arguments, each classified
+at its distinct's base while the rewrite parses (`borrowBaseViews`, swapped
+out around a callee's own parse); the unwrap and the rewrap are value
+pass-throughs, as a written `T(d)` is. A distinct string operand of a
+string op (`lowerStrOperand`) and a distinct int at `toZ3Int` are ejected
+to the base.
+
+*(3) A seq of a tuple or object element is held leaf-split.* Such an
+element (`isTreeSeqElemTy`) has one data array per `heapLeafSuffixes`
+leaf, the first in `seqDataRaw` and the rest in `seqDataMore`, as `tvTree`
+is for a Table value:
+- a read selects every array and rebuilds the element over an
+  `allocateSym` prototype (`seqElemAt`); the element's well-formedness
+  (`svCellWf`, without the 1024 length bound, since a stored element's
+  nested seq may be longer than an input's) is asserted at the read;
+- a store conforms the value, checks each leaf's sort and stores per array
+  (`seqStoreArrs`); a mismatch declines in-band (`seqStoreDecline`);
+- `add`, `del`, `insert`, `pop`, an element assignment, a slice, a literal,
+  `newSeq`, `map`/`filter`, a merge (`iteSV`/`joinSV`) and a return
+  binding cover every array;
+- as a heap cell it is the leaves `__@d<i>`; a seq of any other unbacked
+  element is still no cell value (`heapCompoundTy`);
+- the witness writes each element in the heap cell layout
+  (`extractTreeValue`) and reads it back through `readCellField`
+  (`readSeqAs[T]`); an element with a ref part is not renderable.
+
+*A recursive value object* is unrolled to `maxRecursiveValueDepth = 2`
+levels below the outermost occurrence. Past that the field is the
+placeholder of kind `seRecursiveValueDepth` (`dcNoAnswer`), so a read
+there declines at the read. A store of a value one level deeper than the
+target's depth truncates it through `conformSV` (an element-wise lambda
+over the arrays), and the reverse direction declines. S8at's item 6 pins
+(`vrKids`, `vrFlat`) and S8ar's `vrec_kids` are now exact `sxSat` with a
+replayed witness.
+
+*(4) `insert` on an array element or a Table value* (`a[i].insert(x, j)`,
+`t[k].insert(x, j)`) takes the bare arm's two phases: the grow is its own
+element write, and the place phase reads the grown element back, so its
+`IndexDefect` sees the grown seq.
+
+*(5) `newSeq[T](n)` and `newSeq(s, n)`* lower to `iekSeqNewZero`: a seq of
+`n` elements over the constant array of `T`'s zero. A negative `n` raises
+`RangeDefect` (the `Natural` parameter), and a length above 2^20 declines,
+scoped, as `initTable`'s size does. Alongside it, the `isUnsupported` walk
+arm drops a path no execution can take (`pathInfeasible`, S8an's rule)
+instead of tainting it: `if`-arms are forked without a feasibility check,
+so a scoped guard decline behind a bound had turned every dead label into
+`sxUnknown`.
+
+*(6) Table iteration* (`pairs`, `keys`, `values`, and `for (k, v) in
+t.pairs`) lowers to a bounded unroll over `isTabKeys`: a fresh key sequence
+of the table's size whose elements are distinct present keys, which the
+realizability facts make all of its keys. The order is free (Nim's is the
+hash order). A table that can hold two or more entries taints the path
+`feTableIterOrder` (`dcFreshSymbol`), so an order-dependent candidate is
+replayed and refuted; an empty or one-entry table is exact. A length
+change in the body and a float key decline.
+
+*(7) `mgetOrPut(t, k[, d])`* read as a value is the get-or-insert: the
+default is bound, an absent key is inserted, and the cell is read. Its
+writers (`.add` and the other element mutations, `+=`, `inc`, `= v`)
+reach the S8at element arms as the lvalue `t[k]`. The key must be a literal
+or a variable, as for every element arm. `inc`/`dec` (the soundness bug
+above) are now `x = x +/- y` through the plain assignment's lvalue arm, and
+every other receiver declines. `t[k] += v` on a Table value or an array
+element is modelled, with `KeyError` for an absent key.
+
+*(8) An inlined iterator's parameters are typed.* The inliner binds each
+formal under its own scoped name and keeps the body's typed parameter
+symbols, so a conversion of a parameter (explicit or hidden) reads its
+type. The substitution to untyped identifiers and S8at's two ident decline
+arms are gone. An explicit int conversion of a constant (an int literal, or
+`low`/`high` of an int-family type) folds to the value.
+
+*(9) A `seq[char]` / `seq[enum]` witness* (top level, an object field, a
+Table value) is rendered through `readSeqAs[T]` at its own type, not as
+`seq[uint8]`.
+
+Pins that moved, because they pinned a gap S8bc closes:
+- **Every suite that used `seq[(int, int)]`, `seq[(string, string)]` or
+  `seq[Widget]` as the canonical unbacked seq** now uses a seq of seqs
+  (`seq[seq[int]]`, `seq[seq[string]]`), which is still unbacked:
+  `r6_bug2_scopeddecline`, `r6_heap_raise_totality`, `r6_lows_declines`
+  (N12's message now says "seq type"), `r6_n13_reassign_seqarm`,
+  `r6_n14_seqops`, `r6_n27_hof_placeholder`, `r6_n29_seqlit_sortmismatch`,
+  `r6_n37_raise_residue`, `r6_r1_placeholder_totality`, `rfc0005_s0_exhibit`,
+  `rfc0005_s2_replay`, `rfc0005_s3_monotonicity`, `rfc0005_s4_alloc` (and
+  its IR-level `tSeq(tSeq(tInt()))`), `rfc0005_s5_str`, `rfc0005_s6b_ops`
+  and `tot1_totality_corpus`.
+- **`CR2c_witnessreader_catchall` and `tot1_totality_corpus`'s `Widget`**
+  holds a `ref int`, so a seq of it stays unrenderable; CR-2c-N3's variant
+  arm is a `seq[seq[Widget]]`. `r6_n43_parity`'s witness object holds a
+  `ref int` for the same reason.
+- **`rfc0005_s8c_resolution`'s seq `==`** declines at the `==`
+  (`feUnsupportedOp`) rather than at the unbacked element.
+- **`rfc0005_s0_exhibit` pin 2**: the cast on the contradictory branch is
+  no longer recorded at all (item 5's infeasible-arm drop), so the drained
+  `sevError` set is empty.
+- **`r6_b6_optionregion` B6-1-red and B6-6**: the accumulator is a seq of
+  seqs. Their `sxUnknown` had come from the `iekSeqAdd` fault above; with
+  the add modelled, the non-recognized k-unroll ran past the 900 s bound
+  (see below).
+- **`rfc0005_s8ag_indexsplit`**: with the add modelled, two hits are slow
+  SATs on Z3 5.1 (was one); the pin is `slowSat + budgetOut <= 2`.
+- **`r6_n27_placeholder_read_audit`** counts 91 runtime markers (was 97):
+  item 3 rewrote the guarded seq reads in `iteSV`, `retBindEq` and the
+  seq arms.
+- **`rfc0005_s5_str`'s structural scan** looks for `lowerStrOperand`
+  (item 2).
+- **`r6_r6_emit_roundtrip`** covers `iekSeqNewZero` and `isTabKeys`.
+- **`rfc0005_s8ab_letaudit`**: `ensureProcRegistered`'s saved borrow views
+  are swapped out, not `let`-copied (a compile-time `let` of a global seq
+  aliases it in the VM).
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: a bodiless `{.magic.}` routine with a `var` parameter is a
+  no-op** beyond `inc`/`dec`: `swap(a[0], a[2])` is dropped and a target
+  behind the swap is a false `sxSat`. Item 7 fixed only `inc`/`dec`.
+- **The non-recognized pair loop does not terminate in 900 s.** B6's
+  `let n = s.len` trip-wire shape with no accumulator at all is killed at
+  900 s at the base too; the trip-wires were green only because the
+  `iekSeqAdd` fault cut the walk short.
+  Even so, B6-1-red and B6-6 are each a few minutes of solving: 285 s and
+  204 s at S8bc, 246 s and 191 s at the base, alone on Z3 5.1. The suite
+  runs 610-730 s alone (564-595 s at the base), and it was killed at the
+  900 s bound once under six-way parallel load.
+- **`add` to a local seq of an unbacked element** (`var p: seq[seq[T]] =
+  @[]; p.add(...)`) is the in-band element-mismatch decline filed as
+  `weInternalWalkerFault`, not a placeholder decline
+  (`seNestedSeqUnsupported`).
+- **A plain type alias** (`Hash = int`) classifies as no modelled type.
+- **Nim crashes on a fewer-formals `inc` borrow.**
+- **Borrow views cover only `classifyType` / `valueTypeName`.**
+- **`for x in [a, b]` over an array literal** faults.
+- **`mpairs` / `mvalues`** keep the inliner decline.
+- **A Table length change inside an iteration** is declined.
+- **A seq element with a ref part is not witness-renderable**: no ref
+  positions are collected inside seq elements.
+- **An element's nested seq longer than 1024** renders empty in a witness.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

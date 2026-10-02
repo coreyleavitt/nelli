@@ -372,6 +372,11 @@ title = "S8bd's soundness finding: copy-in/copy-out var write-back aliasing thro
 state = "done"
 
 [[slice]]
+id = "S8bk"
+title = "Address-of-argument timing: var/by-ref actuals whose base ref is rebound by a later argument's call"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

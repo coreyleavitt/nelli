@@ -347,6 +347,11 @@ title = "S8aw's remainder: regex match/contains semantics, PCRE parity, re vs re
 state = "done"
 
 [[slice]]
+id = "S8bb"
+title = "S8ay's remainder: regex drain order, foldli crash, PCRE selection semantics, findBounds temporaries, top constructs, replace coverage, suite runtime"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

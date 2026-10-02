@@ -121,8 +121,9 @@ proc s9Apply(g: proc(): int): int = g()
 
 proc s9CapEscaped(x: int) =
   ## The closure is applied by a CALLEE, where the captured `var` is not in
-  ## scope by name: its current value cannot be read, so the application is
-  ## an honest decline (`ceCaptureByRefUnmodelled`), never the stale 0.
+  ## scope by name. S9 declined (`ceCaptureByRefUnmodelled`), never the
+  ## stale 0; RFC-0005 S8ax reads the variable's env cell there, which holds
+  ## 5, so the label is dead.
   var k = 0
   let f = proc(): int = k
   k = 5
@@ -277,11 +278,12 @@ suite "RFC-0005 S9 (b) -- a closure reads its captured var at the call":
     check r.status == sxUnsat
     checkUnsatOverTaintOnly(r)
 
-  test "applied by a callee: an honest decline, never the stale snapshot's sxSat":
+  test "applied by a callee: the variable as it stands, never the stale snapshot's sxSat":
+    # RFC-0005 S8ax (was the honest `ceCaptureByRefUnmodelled` decline).
     let r = symexFind(s9CapEscaped, tLabel("s9_capescaped"))
     checkpoint($r.status & " " & show(r.errors))
-    check r.status == sxUnknown
-    check r.errors.hasKind(ceCaptureByRefUnmodelled)
+    check r.status == sxUnsat
+    checkUnsatOverTaintOnly(r)
 
   test "a body that writes a captured var writes it back -- the label is dead, sxUnsat":
     ## RFC-0005 S8as (was the `ceCaptureByRefUnmodelled` decline, never the

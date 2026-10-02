@@ -332,8 +332,13 @@ proc heapStoreValue(valSV: SymVal; proto: SymVal; ty: IRType): SymVal =
   ## (the `int2bv` coercion every store site carried inline).
   if intHeapCell(ty):
     if valSV.kind in {svBV8, svBV16, svBV32, svBV64}:
-      return SymVal(kind: svInt, zi: toZ3Int(valSV), ziWidth: 64,
-                    ziSigned: true)
+      # RFC-0005 S8ax: through `toSvIntPreserving`, which records the
+      # conversion (`intOfBV`), so a read meeting the same bit-vector again
+      # meets it unconverted.
+      var iv = toSvIntPreserving(valSV)
+      iv.ziWidth = ty.width
+      iv.ziSigned = true
+      return iv
     return valSV
   result = valSV
   if valSV.kind == svInt:
@@ -366,7 +371,9 @@ proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
   ## (`heapLeafSuffixes`); only leaf 0, whose key is the field's own, records
   ## a shape.
   let key = if name.startsWith("heap_"): name["heap_".len .. ^1] else: name
-  if leaf == 0 and (not heapKeyShapes.hasKey(key) or
+  # RFC-0005 S8ax: a havocked heap's constant (`heapInputName`, `@ep<n>`) is
+  # not an input heap: the witness renders the input one.
+  if leaf == 0 and "@ep" notin key and (not heapKeyShapes.hasKey(key) or
      (variantTy != nil and heapKeyShapes[key].variantTy == nil)):
     heapKeyShapes[key] = HeapKeyShape(valTy: pointeeTy, variantTy: variantTy)
   var scratchPC: seq[Z3Bool]
@@ -385,8 +392,8 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
   case pointeeTy.kind
   of itInt:
     if intHeapCell(pointeeTy):   # RFC-0005 S8as: an Int-sorted `int` heap
-      return SymVal(kind: svInt, zi: wrap[Z3Int](ctx, valRaw), ziWidth: 64,
-                    ziSigned: true)
+      return SymVal(kind: svInt, zi: wrap[Z3Int](ctx, valRaw),
+                    ziWidth: pointeeTy.width, ziSigned: true)
     case pointeeTy.width
     of 8:  liftBV(wrap[Z3BitVec[8]](ctx, valRaw),  pointeeTy.signed)
     of 16: liftBV(wrap[Z3BitVec[16]](ctx, valRaw), pointeeTy.signed)
@@ -481,6 +488,28 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
       "composite pointees — ref object / seq[ref T] — land R3+)",
       "__liftHeapValueUnsupported")
 
+var storeDeclKind {.threadvar.}: int
+  ## RFC-0005 S8ax. The `Z3_decl_kind` ordinal of an array store, read off a
+  ## probe term (as `seqCapKinds` does); 0 until first read.
+
+proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
+  ## RFC-0005 S8ax. The value `arr` holds at `idx` when `arr` is a store at
+  ## that same term (`store(h, idx, v)`), or `none`.
+  if storeDeclKind == 0:
+    let probe = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_store_probe")
+    let st = ctx.checkErr Z3_mk_store(ctx.raw, probe.raw,
+                                      mkInt(ctx, 0).raw, mkInt(ctx, 0).raw)
+    storeDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, st)))) + 1
+  if Z3_get_ast_kind(ctx.raw, arr) != Z3_APP_AST: return none(RawZ3Ast)
+  let app = Z3_to_app(ctx.raw, arr)
+  if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
+     storeDeclKind or Z3_get_app_num_args(ctx.raw, app) != 3:
+    return none(RawZ3Ast)
+  if cast[pointer](Z3_get_app_arg(ctx.raw, app, 1)) != cast[pointer](idx):
+    return none(RawZ3Ast)
+  some(Z3_get_app_arg(ctx.raw, app, 2))
+
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
   ## Phase 15 R1 (ADR-0010). The GROUND heap read `select(heap, p)` — a single
@@ -488,7 +517,14 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## result is the value-sorted ast; lift it into a SymVal. This is the whole
   ## of R1's deref: a decidable array select, NO quantifier (the G4 lesson —
   ## a ∀ over the uninterpreted Ref_T sort would HANG Z3).
-  let valRaw = checkedSelect(ctx, heap.raw, refAst.raw)
+  # RFC-0005 S8ax: a read at the address the heap's last store wrote is
+  # that store's value, read off the term (`select(store(h, a, v), a)` is
+  # `v`), so a value stored and read back is the same term: the bit-vector
+  # an Int-sorted heap stored then meets its source unconverted
+  # (`intOfBV`).
+  let hit = storedAt(ctx, heap.raw, refAst.raw)
+  let valRaw = if hit.isSome: hit.get
+               else: checkedSelect(ctx, heap.raw, refAst.raw)
   liftHeapValue(ctx, valRaw, pointeeTy)
 
 type HeapCell = seq[tuple[key: string; arr: Z3AnyAst]]
@@ -506,7 +542,7 @@ proc heapCellArrays(ctx: Z3Context; p: Path; key: string; refSort: RawZ3Sort;
     if p.heaps.hasKey(k):
       result.add (k, p.heaps[k])
     else:
-      result.add (k, mkHeapArrayVar(ctx, refSort, valTy, "heap_" & k,
+      result.add (k, mkHeapArrayVar(ctx, refSort, valTy, heapInputName(p, k),
                                     (if i == 0: variantTy else: nil), i))
 
 proc heapCellSelect(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
@@ -960,7 +996,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
-                                      "heap_" & discHeapKey, objTy)
+                                      heapInputName(cp0, discHeapKey), objTy)
           # N42: drain any `allocateSym` degrade from the disc-heap value-sort
           # probe above into this path's own taint (SND-1) — see the main
           # (non-variant-field) `isDeref` arm's own N42 comment, above, for
@@ -1371,7 +1407,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if child.heaps.hasKey(fieldKey):
             fheap = child.heaps[fieldKey]
           else:
-            fheap = mkHeapArrayVar(ctx, refSort, fty, "heap_" & fieldKey,
+            fheap = mkHeapArrayVar(ctx, refSort, fty,
+                                   heapInputName(child, fieldKey),
                                    slot.variantTy)
           var scratchPC: seq[Z3Bool]
           let proto = allocateSym(fty, "__isNewZeroProto", scratchPC)
@@ -1411,7 +1448,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if child.heaps.hasKey(typeId):
             heap = child.heaps[typeId]
           else:
-            heap = mkHeapArrayVar(ctx, refSort, pointee, "heap_" & typeId)
+            heap = mkHeapArrayVar(ctx, refSort, pointee,
+                                  heapInputName(child, typeId))
           var scratchPC: seq[Z3Bool]
           let proto = allocateSym(pointee, "__isNewZeroProto", scratchPC)
           let (valSVRaw, childAfter) = lowerInExpr(child, zeroExpr, w, some(proto))
@@ -1532,7 +1570,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           else:
             let refSort = allocRefSort(ctx, objTy)
             discHeap = mkHeapArrayVar(ctx, refSort, objTy.vDiscTy,
-                                      "heap_" & discHeapKeyW, objTy)
+                                      heapInputName(cp, discHeapKeyW), objTy)
           # N42 audit: defensive drain, mirroring the read-side disc-heap
           # site — `objTy.vDiscTy` is always a primitive ordinal by
           # variant-discriminant construction, so this never actually

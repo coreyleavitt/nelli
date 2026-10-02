@@ -342,6 +342,11 @@ title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.
 state = "pending"
 
 [[slice]]
+id = "S8ax"
+title = "S8as's remainder: fact-keyed call cache; adaptive if-arm feasibility outside recursion; adaptive maxCallDepth under a hard budget; per-cell Int/BV int heap sorts; opaque routine summaries for heap writes, non-ref-free globals and captures, cast/asm and raises; closure applied outside its frame; evaluation order of a read and a later call that writes it; addr stored, returned, compared, of seq elements, at computed indices, re-pointed under a branch; alias precision for variant-arm fields and computed indices"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

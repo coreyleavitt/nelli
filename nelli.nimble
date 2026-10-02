@@ -1051,5 +1051,10 @@ task test, "Run the test suite":
             # global's entry value; closure capture/global write-back;
             # more `addr` forms; a path-based alias check; an Int-sorted
             # `int` heap; walker 190->192.
-            "tsymex_rfc0005_s8as_remainder"]:
+            "tsymex_rfc0005_s8as_remainder",
+            # RFC-0005 S8ax -- S8as's remainder: a fact-keyed call cache;
+            # adaptive if-arm checks and call depth; per-cell Int heaps;
+            # opaque routine summaries; closure environments; evaluation
+            # order; `addr` forms; alias precision; walker 192->197.
+            "tsymex_rfc0005_s8ax_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

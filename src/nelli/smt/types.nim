@@ -1197,6 +1197,28 @@ type
                          ## rebinds each to a fresh value of its type and
                          ## records `feGlobalHavoc` (`dcFreshSymbol`). A call
                          ## whose summary is unbounded is not inert at all.
+      opaqueHeapTys*: seq[IRType]
+                         ## RFC-0005 S8ax. For an inert opaque call: the
+                         ## `ref`/`ptr` types whose cells it may write (its
+                         ## arguments', globals' and captures' types reach
+                         ## them). The walk havocs each pointee's heaps.
+      opaqueHeapAll*: bool
+                         ## RFC-0005 S8ax. For an inert opaque call: it may
+                         ## write any heap cell (a cast, inline assembly, a
+                         ## method, a foreign routine, an untyped pointer).
+      opaqueRaises*: seq[string]
+                         ## RFC-0005 S8ax. For an inert opaque call: the
+                         ## catchable exception types it may raise (its
+                         ## inferred `raises` list). The walk forks a raise
+                         ## of each.
+      opaqueWhy*: string
+                         ## RFC-0005 S8ax. For an opaque call that is not
+                         ## inert: why its effects cannot be summarised
+                         ## (named in its `feOpaqueCallUnmodelled`).
+      opaqueMayDefect*: bool
+                         ## RFC-0005 S8ax. For an inert opaque call: a user
+                         ## or foreign routine, whose body may raise a
+                         ## `Defect` no `raises` list names.
       cGuardRoots*: seq[string]
                          ## RFC-0005 S8an. The IR names of the ROOT
                          ## variables of this call's `var` and `addr`
@@ -2369,6 +2391,24 @@ type
                           ## `dcFreshSymbol` (`{scSpurious}`), so a hit
                           ## through it is a replay-gated candidate and it
                           ## never voids `sxUnsat`. sevError.
+    feOpaqueEffectHavoc   ## RFC-0005 S8ax. An inert opaque call's other
+                          ## effects: the heap cells its summary reaches
+                          ## take fresh contents (`IRStmt.opaqueHeapTys`,
+                          ## `opaqueHeapAll`), a raise of each type its
+                          ## `raises` list names is forked
+                          ## (`opaqueRaises`), and the path that returns
+                          ## past a call that may raise assumes it did not.
+                          ## Each path is a superset of what the real call
+                          ## does there, nothing is dropped: `classOf` is
+                          ## `dcFreshSymbol`, a hit is replayed, and an
+                          ## `sxUnsat` stands. sevError.
+    feEvalOrderUnmodelled ## RFC-0005 S8ax. An operand Nim checks where it
+                          ## stands but reads after a later operand's call
+                          ## (`a[i] + f()`, `-x + f()`, `x div 2 + f()`),
+                          ## where that call changed what the operand reads:
+                          ## the walk checks and reads it in one place, so
+                          ## the path that reaches the change declines.
+                          ## Default class (no answer). sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2879,6 +2919,17 @@ type
       ## Pick a bound close to the depth actually needed and verify
       ## empirically before raising it substantially; the exact ceiling is
       ## build/platform-dependent, not a fixed constant.
+    maxRecursionDepth*: int = 24
+      ## RFC-0005 S8ax. The hard budget on the call-inlining depth. Past
+      ## `maxCallDepth` the walk keeps inlining while the frontier is not
+      ## growing -- the callee walks entered at the next depth would not
+      ## outnumber those at the depth above -- up to this depth (or
+      ## `maxCallDepth`, when that is higher). A recursion whose depth its
+      ## arguments decide is then followed to its base case; one that fans
+      ## out declines at `maxCallDepth` as before. Default `24`. Past it the
+      ## call declines (`beBudgetExhaustedUnmodelled`), naming both budgets.
+      ## `0` turns the extension off. The same native-stack ceiling as
+      ## `maxCallDepth` applies (safe through 85 on the Linux debug build).
     maxLoopUnwind*: int = 5
       ## Phase-6 loop unrolling cap; >= 1 — one of the ResourceBudget fields
       ## `0` does NOT mean unlimited for (RFC-0010 B4; see the type's own
@@ -3409,6 +3460,12 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # RFC-0005 S8as: a fresh value of the global's type (the entry value, or
     # after an opaque call that may write it); its operands are none, and
     # nothing is forked or dropped.
+  of feOpaqueEffectHavoc: dcFreshSymbol
+    # RFC-0005 S8ax: fresh heap contents after an opaque call, a raise the
+    # call may make, or the return past one: each a superset, nothing
+    # dropped.
+  of feEvalOrderUnmodelled: dcNoAnswer
+    # RFC-0005 S8ax: a decline; the conservative default.
     # A HALT: the path whose `break` / `continue` leaves a `finally` during a
     # raised exit is dropped (token discarded): c re-raises, cpp does not.
 
@@ -4717,12 +4774,17 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
          cGuardRoots: guardRoots)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
-                   inert = false, havoc: seq[string] = @[]): IRStmt =
+                   inert = false, havoc: seq[string] = @[],
+                   heapTys: seq[IRType] = @[], heapAll = false,
+                   raises: seq[string] = @[], mayDefect = false,
+                   why = ""): IRStmt =
   ## RFC-0005 S8as: `havoc` is an inert call's effect summary
-  ## (`IRStmt.opaqueHavoc`).
+  ## (`IRStmt.opaqueHavoc`). RFC-0005 S8ax: `heapTys`, `heapAll`, `raises`
+  ## and `mayDefect` are the rest of it (`IRStmt.opaqueHeapTys` ...).
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
-         opaqueHavoc: havoc)
+         opaqueHavoc: havoc, opaqueHeapTys: heapTys, opaqueHeapAll: heapAll,
+         opaqueRaises: raises, opaqueMayDefect: mayDefect, opaqueWhy: why)
 
 proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
                  init: IRExpr): IRGlobal =
@@ -5001,6 +5063,7 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   if b.seqQueryRLimit != d.seqQueryRLimit: result.seqQueryRLimit = b.seqQueryRLimit   ## RFC-0005 S8k
   if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
   if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
+  if b.maxRecursionDepth != d.maxRecursionDepth: result.maxRecursionDepth = b.maxRecursionDepth   ## RFC-0005 S8ax
   if b.maxLoopUnwind != d.maxLoopUnwind: result.maxLoopUnwind = b.maxLoopUnwind
   if b.maxHeapDepth != d.maxHeapDepth: result.maxHeapDepth = b.maxHeapDepth
   if b.maxFreshnessAssertions != d.maxFreshnessAssertions:
@@ -5198,6 +5261,13 @@ const globalEnvPrefix* = "__gl:"
 func isGlobalEnvName*(name: string): bool =
   ## RFC-0005 S8an. True when the IR name `name` is a module-level variable.
   name.len > globalEnvPrefix.len and name.startsWith(globalEnvPrefix)
+
+func capCellName*(frame: int; local: string): string =
+  ## RFC-0005 S8ax. The env cell of the local `local` of frame `frame` that
+  ## a closure captures by reference: a global's name (`__gl:`), so every
+  ## call threads it as it threads a global, under no module (`@cap<frame>`
+  ## is not a Nim identifier). `displayName` gives back `local`.
+  globalEnvPrefix & "@cap" & $frame & "." & local
 
 func displayName*(name: string): string =
   ## RFC-0005 S8an. The source spelling of an IR name, for messages: a

@@ -2039,8 +2039,7 @@ func intHeapCell(ty: IRType): bool =
   ## stored through `bv2int` and read back into a BV comparison is the F5
   ## `int2bv(bv2int(v))` shape, which is the slow direction the other way.
   {.cast(noSideEffect).}:
-    intHeapIsInt and ty != nil and ty.kind == itInt and ty.width == 64 and
-      ty.signed and not ty.hasRange
+    intHeapIsInt and ty != nil and ty.kind == itInt and ty.signed
 
 var heapKeyShapes {.threadvar.}: Table[string, HeapKeyShape]
   ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
@@ -4076,6 +4075,35 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
 
+var intOfBV {.threadvar.}: Table[uint, tuple[zi: Z3Int, bv: SymVal]]
+  ## RFC-0005 S8ax. Each Int a bit-vector was converted to at a sort
+  ## boundary (`toSvIntPreserving`), keyed by the Int term's address, with
+  ## the bit-vector it came from. The entry holds the term, so the address
+  ## is not reused for another term while it is listed. `reconcileInt` and
+  ## `stampedIntToBV` take the bit-vector back instead of converting the
+  ## Int again: `int2bv(bv2int(v))` and `bv2int(r) == bv2int(v)` are exact
+  ## but cost Z3 minutes, and since S8ax every signed `int` heap is
+  ## Int-sorted (`intHeapCell`), so a bit-vector `int` stored and read back
+  ## crosses the boundary twice. Cleared by `resetSymexRunState`.
+
+proc bvOfInt(sv: SymVal): Option[SymVal] =
+  ## RFC-0005 S8ax. The bit-vector `sv` (an `svInt`) is the conversion of,
+  ## if `intOfBV` lists it and its width and signedness agree.
+  if sv.kind != svInt: return none(SymVal)
+  let k = cast[uint](cast[pointer](sv.zi.raw))
+  if k notin intOfBV: return none(SymVal)
+  let e = intOfBV[k]
+  if cast[pointer](e.zi.raw) != cast[pointer](sv.zi.raw): return none(SymVal)
+  let w = case e.bv.kind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          else: 64
+  if sv.ziWidth != 0 and (sv.ziWidth != w or
+                          sv.ziSigned != e.bv.signed):
+    return none(SymVal)
+  some(e.bv)
+
 proc stampedIntToBV(sv: SymVal): SymVal =
   ## RFC-0005 S8w: a WIDTH-STAMPED `svInt` (`ziWidth` in 8/16/32/64) is a
   ## Nim int of that width and signedness whose value lies in its type's
@@ -4086,6 +4114,8 @@ proc stampedIntToBV(sv: SymVal): SymVal =
   ## right for the unstamped `.len`/`find` sentinels it was built for and
   ## wrong for a signed param: `(x and -1) < 0` compared unsigned.
   doAssert sv.kind == svInt and sv.ziWidth in [8, 16, 32, 64]
+  let back = bvOfInt(sv)          # RFC-0005 S8ax: a converted bit-vector
+  if back.isSome: return back.get
   let k = case sv.ziWidth
           of 8: svBV8
           of 16: svBV16
@@ -4108,6 +4138,15 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
   ## each (srcWidth, tgtWidth) pair needs its OWN literal call site — the
   ## same reason `toBv64ForFp` (runtime_floats.nim) enumerates per-width
   ## arms instead of computing `extra` as a runtime value.
+  if operandSV.kind == svInt:
+    # RFC-0005 S8ax: a narrow cell of an Int-sorted heap (`intHeapCell`)
+    # reads as a width-stamped Int. Widening keeps its value, so it is
+    # restamped; only a signed source widened to an unsigned target wraps,
+    # and that goes through the bit-vector of the source's width.
+    if operandSV.ziWidth > 0 and operandSV.ziSigned and not tgtSigned:
+      return lowerConvIntWidth(stampedIntToBV(operandSV), tgtWidth, tgtSigned)
+    return SymVal(kind: svInt, zi: operandSV.zi, ziWidth: tgtWidth,
+                  ziSigned: tgtSigned, ziIvl: operandSV.ziIvl)
   let srcSigned = operandSV.signed
   case operandSV.kind
   of svBV8:
@@ -5817,7 +5856,9 @@ proc toSvIntPreserving(sv: SymVal): SymVal =
   if sv.kind == svInt:
     sv
   else:
-    SymVal(kind: svInt, zi: toZ3Int(sv),
+    let zi = toZ3Int(sv)
+    intOfBV[cast[uint](cast[pointer](zi.raw))] = (zi: zi, bv: sv)   # RFC-0005 S8ax
+    SymVal(kind: svInt, zi: zi,
            ziWidth: bvKindWidth(sv.kind), ziSigned: sv.signed)
 
 proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
@@ -5840,6 +5881,17 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
   if a.kind != b.kind and
      a.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
      b.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+    # RFC-0005 S8ax: an Int that is the conversion of a bit-vector of the
+    # other operand's kind and signedness (`intOfBV`) meets it as that
+    # bit-vector, unconverted.
+    if a.kind == svInt:
+      let bv = bvOfInt(a)
+      if bv.isSome and bv.get.kind == b.kind and bv.get.signed == b.signed:
+        return (bv.get, b)
+    if b.kind == svInt:
+      let bv = bvOfInt(b)
+      if bv.isSome and bv.get.kind == a.kind and bv.get.signed == a.signed:
+        return (a, bv.get)
     (toSvIntPreserving(a), toSvIntPreserving(b))
   else:
     (a, b)  ## same kind (or non-int) — identity
@@ -10618,16 +10670,34 @@ const defaultLoopPruneRLimit* = 250_000'u
   ## unrolled iteration per path, and a concretely-decided guard never
   ## reaches the solver at all (it simplifies to a literal first).
 
-var ctxPruneCount {.threadvar.}: int
-  ## RFC-0005 S8as. Counts the paths and arms a feasibility check against
-  ## the path's own facts dropped (`loopArmInfeasible`, `pathInfeasible`).
-  ## Such a drop depends on the caller's context, not only on the
-  ## arguments: a call whose walk dropped one returned a summary true only
-  ## in that context, so the call cache (keyed by argument shape) must not
-  ## keep it. `fib(n)` under `n in 3..4` cached `fib(n - 2)`'s one returned
-  ## path from inside `fib(n - 1)`'s frame (where `n - 2 < 2` had been
-  ## dropped) and replayed it at the outer call: a false `sxUnsat`. Only
-  ## differences are read, so it is never reset.
+type PruneFact = object
+  ## RFC-0005 S8ax. One feasibility check against a path's own facts that
+  ## dropped an arm or a path (`loopArmInfeasible`, `pathInfeasible`): the
+  ## path's facts as they stood (`pc`, `dsp` = its `defectSurvivorPc`) and
+  ## the arm's own conjuncts (`extra`). Their conjunction (with
+  ## `globalRoots`) was UNSAT.
+  pc, dsp, extra: seq[Z3Bool]
+
+var ctxPruneLog {.threadvar.}: seq[PruneFact]
+  ## RFC-0005 S8as/S8ax. Every drop a feasibility check against the path's
+  ## own facts decided (`loopArmInfeasible`, `pathInfeasible`, and a cache
+  ## hit's re-check, `pruneFactsHold`), in walk order. Such a drop depends on
+  ## the caller's context, not only on the arguments, so a call whose walk
+  ## dropped one returned a summary true only where the dropped facts are
+  ## still infeasible. S8as made such a call uncacheable (it counted the
+  ## drops); S8ax keys its summary on them instead: the call cache stores,
+  ## per drop, the facts the callee's walk added beyond the caller's
+  ## (`CallCacheEntry.pruneFacts`), and a hit replays the summary only where
+  ## each is still UNSAT under the replaying caller's facts. `fib(n)` under
+  ## `n in 3..4` cached `fib(n - 2)`'s one returned path from inside
+  ## `fib(n - 1)`'s frame (where `n - 2 < 2` had been dropped): replayed at
+  ## the outer call without the check it was a false `sxUnsat` (S8as).
+  ## Reset per run.
+
+proc logPrune(path: Path; extra: openArray[Z3Bool]) =
+  ## RFC-0005 S8ax. Record a context-dependent drop (`ctxPruneLog`).
+  ctxPruneLog.add PruneFact(pc: path.pc, dsp: path.defectSurvivorPc,
+                            extra: @extra)
 
 func loopPruneRLimit*(settings: SymexSettings): uint =
   ## RFC-0005 S8k. `defaultLoopPruneRLimit`, or the caller's `queryRLimit`
@@ -10650,7 +10720,7 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   if lit == "true": return false
   result = checkCapped(ctx, pathRoots(path, [arm]), settings,
                        loopPruneRLimit(settings)).status == zsUnsat
-  if result: inc ctxPruneCount   # RFC-0005 S8as
+  if result: logPrune(path, [arm])   # RFC-0005 S8as/S8ax
 
 proc pathInfeasible(ctx: Z3Context; path: Path;
                     settings: SymexSettings): bool =
@@ -10659,12 +10729,16 @@ proc pathInfeasible(ctx: Z3Context; path: Path;
   ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
   result = checkCapped(ctx, pathRoots(path), settings,
                        loopPruneRLimit(settings)).status == zsUnsat
-  if result: inc ctxPruneCount   # RFC-0005 S8as
+  if result: logPrune(path, [])   # RFC-0005 S8as/S8ax
 
 var symexIfArmsPruned* {.threadvar.}: int
   ## RFC-0005 S8as. Counts the `if` arms (and else paths) the `wmExplore`
   ## walk dropped as infeasible inside a recursive frame (`ifArmInfeasible`).
   ## Always on, like `symexLoopIterations`; tests reset it and read it.
+
+var symexIfArmsChecked* {.threadvar.}: int
+  ## RFC-0005 S8ax. Counts the `if` arms (and else paths) `ifArmInfeasible`
+  ## sent to the solver. Always on; tests reset it and read it.
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -10833,6 +10907,13 @@ type
                                       ## is refused (`ceInlineBudgetExceeded`). C2a
                                       ## deferred this field (no descent until C2b).
     handlerStack: seq[HandlerFrame]   ## Phase 15 E1: per-frame active tries.
+    capCells: seq[tuple[local, cell: string]]
+                                      ## RFC-0005 S8ax: the by-reference
+                                      ## captures a closure built (or applied)
+                                      ## in this frame holds, each with its env
+                                      ## cell (`capCellName`), kept equal to the
+                                      ## local statement by statement
+                                      ## (`syncCapCells`).
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
     escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
                                       ## frame's handlers; drained by the caller's
@@ -10929,6 +11010,11 @@ type
       ## actually changed the outcome AT THIS decision (the intended-vs-
       ## unrelated coverage split).
 
+  IfSiteStat = object
+    ## RFC-0005 S8ax. How often one `if` arm (or else path) outside a
+    ## recursion was checked, and how often the check dropped it.
+    checks, prunes: int
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
@@ -10963,6 +11049,8 @@ type
                                 ## (saves `frame`, installs a fresh empty one)
                                 ## before walking the callee body and `popFrame`s
                                 ## on return. See pushFrame/popFrame below.
+    capSyncDepth: int           ## RFC-0005 S8ax: the statement nesting depth
+                                ## `walk` snapshots capture cells at
     frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
                                 ## `pushFrame` minted (ids are never reused
                                 ## within a walk).
@@ -10990,8 +11078,22 @@ type
     budgetOutDepths: seq[seq[tuple[loop: int, iters: int]]]
       ## RFC-0005 S8y. The loop depths (`Path.loopIters`) of each tainted
       ## target hit whose solve ran out of budget (`solveTargetHit`).
-    callCache: Table[string, CallCacheEntry]
+    callCache: Table[string, seq[CallCacheEntry]]
+                       ## RFC-0005 S8ax: a bucket per `argShapeKey`; each
+                       ## entry carries its exact arguments and the facts its
+                       ## walk dropped (`CallCacheEntry`).
     activeCalls: HashSet[string]
+    depthWalks: seq[int]
+                       ## RFC-0005 S8ax: callee walks entered at each call
+                       ## depth (`depthMayExtend`).
+    depthHardHits: int
+                       ## RFC-0005 S8ax: declines at the hard call-depth
+                       ## budget so far; an extension that sees this move
+                       ## is abandoned at its root (`depthBail`).
+    ifSites: Table[pointer, IfSiteStat]
+                       ## RFC-0005 S8ax: per-`if`-arm feasibility-check
+                       ## record, keyed by the arm's IR node
+                       ## (`ifArmInfeasible`).
     synthZ3:   int
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
@@ -11233,7 +11335,25 @@ type
     ## retSym binds to the caller's retName and the pcDelta extends
     ## the current path's pc — no re-walking required.
     retSym:  SymVal
-    pcDelta: seq[Z3Bool]
+    exits:   seq[seq[Z3Bool]]
+      ## The constraint delta of each exit, `retInit` first. RFC-0005 S8ax:
+      ## one per exit path (explicit returns and fall-through alike), each
+      ## replayed as its own path. Before S8ax only a callee with exactly
+      ## one explicit-return path and no fall-through was cached, so an
+      ## expression-bodied routine (`if k < 2: k else: ...`) never was.
+    args:    seq[SymVal]
+      ## RFC-0005 S8ax. The actuals the summary was walked with. The bucket
+      ## key (`argShapeKey`) is a hash of their Z3 ASTs, and Z3's AST hash is
+      ## 32 bits and not injective: the BV64 literals 8472 and 45048 share
+      ## one. A hit replayed the other literal's summary -- `id(45048)`
+      ## returned 8472, a false verdict either way with `errors` empty. A hit
+      ## now needs the same actuals, handle for handle (`cacheArgsSame`).
+    pruneFacts: seq[seq[Z3Bool]]
+      ## RFC-0005 S8ax. Per drop the walk decided against its context
+      ## (`ctxPruneLog`), the facts the callee's walk added beyond the
+      ## caller's (path facts, defect-survivor facts, the arm). Each was
+      ## UNSAT with the caller's facts; the summary is replayed only where
+      ## each still is (`pruneFactsHold`).
 
 proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
              sink = dsWalk; scope = walkSite()): Degrade =
@@ -11795,6 +11915,19 @@ proc currentFrameId(): int =
   if currentWalkCtxPtr == nil: -1
   else: cast[ptr WalkCtx](currentWalkCtxPtr)[].frame.frameId
 
+proc registerCapCell(local: string; v: SymVal) =
+  ## RFC-0005 S8ax (fwd-declared in `runtime_closures.nim`). A closure built
+  ## in the current frame captures the local `local` by reference: from now
+  ## on the frame keeps it in its env cell too (`capCellName`, bound to `v`,
+  ## the local's value, through `closureEnvWrites`). Outside a walk (a
+  ## probe) nothing is kept, and an application elsewhere declines.
+  if currentWalkCtxPtr == nil: return
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  let cell = capCellName(wp[].frame.frameId, local)
+  if (local: local, cell: cell) notin wp[].frame.capCells:
+    wp[].frame.capCells.add (local: local, cell: cell)
+  closureEnvWrites.add (cell, v)
+
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
   ## fresh, empty one for the callee being descended into. The handler stack is
@@ -12204,6 +12337,65 @@ proc heapUnchanged(a, b: Path): bool =
     if not b.heaps.hasKey(k) or b.heaps[k].raw != h.raw: return false
   true
 
+const heapEpochPrefix = "@hv:"
+  ## RFC-0005 S8ax. An `allocCounters` key `@hv:<typeId>` (or `@hv:*`) counts
+  ## the opaque calls on the path that havocked that pointee's heaps (every
+  ## heap). `@` begins no type id, so it never collides with a `new` counter.
+
+func heapKeyOfId(k, id: string): bool =
+  ## RFC-0005 S8ax. Heap key `k` belongs to pointee type id `id`: the
+  ## scalar heap itself, or one of its field / discriminator / leaf heaps
+  ## (`<id>__...`).
+  k == id or k.startsWith(id & "__")
+
+proc heapInputName(p: Path; k: string): string =
+  ## RFC-0005 S8ax. The name of the heap array `k` is read from when `p`
+  ## has not touched it: the free input constant `heap_<k>`, or, once an
+  ## opaque call on `p` havocked `k`'s pointee (`heapEpochPrefix`), a
+  ## constant of its own for that havoc, so the read no longer sees the
+  ## input heap. One name per havoc count, so every read between two havocs
+  ## agrees. The `@` keeps it out of `heapKeyShapes` (`mkHeapArrayVar`).
+  var n = 0
+  for ck, c in p.allocCounters:
+    if ck.startsWith(heapEpochPrefix):
+      let id = ck[heapEpochPrefix.len .. ^1]
+      if id == "*" or heapKeyOfId(k, id): n += c
+  if n == 0: "heap_" & k else: "heap_" & k & "@ep" & $n
+
+proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
+  ## RFC-0005 S8ax. An inert opaque call returned on `p`: every heap cell
+  ## its summary reaches (`IRStmt.opaqueHeapTys`, or every heap for
+  ## `opaqueHeapAll`) holds fresh contents. A heap the path holds is
+  ## replaced by a fresh constant of its sort; one it has not touched yet is
+  ## read from a constant of its own from here on (`heapInputName`). True
+  ## when anything was havocked.
+  var ids: seq[string]
+  for t in stmt.opaqueHeapTys:
+    let pointee = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
+    let id = refPointeeTypeId(pointee)
+    if id notin ids: ids.add id
+  if not stmt.opaqueHeapAll and ids.len == 0: return false
+  let ctx = requireCurrentContext()
+  var keys: seq[string]
+  for k in p.heaps.keys: keys.add k
+  for k in keys:
+    var hit = stmt.opaqueHeapAll
+    for id in ids:
+      if heapKeyOfId(k, id): hit = true
+    if not hit: continue
+    let old = p.heaps[k]
+    let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, old.raw)
+    inc w.synthZ3
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+      ("heap_" & k & "@hv" & $w.synthZ3).cstring)
+    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                              arrSort))
+  if stmt.opaqueHeapAll: ids = @["*"]
+  for id in ids:
+    let ck = heapEpochPrefix & id
+    p.allocCounters[ck] = p.allocCounters.getOrDefault(ck, 0) + 1
+  true
+
 proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
   ## RFC-0005 S8as. An inert opaque call returned on `p`: rebind every name
   ## its effect summary lists (`IRStmt.opaqueHavoc`; `havocAllGlobals` is
@@ -12212,9 +12404,12 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
   ## every value it can hold either way, so nothing real is excluded and the
   ## path carries `feGlobalHavoc` (`dcFreshSymbol`): an UNSAT stands, a SAT
   ## is replayed. A global the walk has not bound yet is bound here too: its
-  ## entry value (`entryValueOf`) is what it held BEFORE the call. A name
-  ## whose type reaches heap cells never gets here (the parser keeps such a
-  ## call non-inert), except through `havocAllGlobals`, where it declines.
+  ## entry value (`entryValueOf`) is what it held BEFORE the call.
+  ##
+  ## RFC-0005 S8ax: a name whose type reaches heap cells is rebound too (a
+  ## fresh `ref` is any address, nil included), and the cells it reaches
+  ## take fresh contents (`havocOpaqueHeaps`, `feOpaqueEffectHavoc`). S8as
+  ## kept such a call non-inert, and declined one under `havocAllGlobals`.
   var names: seq[string]
   for nm in stmt.opaqueHavoc:
     if nm == "*":
@@ -12228,12 +12423,6 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
     if p.env.hasKey(nm): ty = tyOf(p.env[nm])
     elif w.statics.globals.hasKey(nm): ty = w.statics.globals[nm].ty
     else: continue        # never read by the walked code
-    if not irTypeRefFree(ty):
-      taintInPlace(p, w.degrade(feOpaqueCallUnmodelled,
-        "opaque call `" & stmt.callee & "` may write `" & displayName(nm) &
-             "`, whose value reaches heap cells the walk holds; the write " &
-             "is not modelled (feOpaqueCallUnmodelled)"))
-      continue
     var facts: seq[Z3Bool]
     p.env[nm] = allocateSym(ty, freshDegradeName("__opaqueHavoc_" &
                                                  displayName(nm)), facts)
@@ -12244,6 +12433,14 @@ proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
       "opaque call `" & stmt.callee & "` may write " & rebound.join(", ") &
            " (its effect summary): each holds a fresh value of its type " &
            "after the call, so a hit through it is replayed (feGlobalHavoc)"))
+  if havocOpaqueHeaps(w, p, stmt):
+    taintInPlace(p, w.degrade(feOpaqueEffectHavoc,
+      "opaque call `" & stmt.callee & "` may write the heap cells its " &
+           "arguments, globals and captures reach" &
+           (if stmt.opaqueHeapAll: " (any cell: it may cast, run inline " &
+              "assembly, dispatch or call foreign code)" else: "") &
+           ": each holds fresh contents after the call, so a hit through " &
+           "one is replayed (feOpaqueEffectHavoc)"))
 
 func envHasGlobal(env: Env): bool =
   ## RFC-0005 S8an. True when `env` binds a module-level global.
@@ -12307,6 +12504,63 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
   for a in args:
     h = (h shl 1) xor symValHash(a)
   callee & "#" & $h
+
+proc sameSymVal(a, b: SymVal): bool   ## RFC-0005 S8ax fwd decl (RFC-0005 S9)
+
+const callCacheBucketMax = 8
+  ## RFC-0005 S8ax. The summaries kept per `argShapeKey`: one per distinct
+  ## actual list or pruned context a call was walked in. A bound on the
+  ## re-checks a lookup can cost, not on soundness (a full bucket walks).
+const callCacheExitsMax = 16
+  ## RFC-0005 S8ax. The exit paths a cached summary may replay.
+
+proc cacheArgsSame(a, b: seq[SymVal]): bool =
+  ## RFC-0005 S8ax. The two actual lists are the same terms, handle for
+  ## handle (`sameSymVal`), with an Int's signedness stamp too (it decides
+  ## the callee's overflow obligations). `false` on any doubt: a miss.
+  if a.len != b.len: return false
+  for i in 0 ..< a.len:
+    if not sameSymVal(a[i], b[i]): return false
+    if a[i].kind == svInt and a[i].ziSigned != b[i].ziSigned: return false
+  true
+
+proc factsPrefixSame(full, prefix: seq[Z3Bool]): bool =
+  ## RFC-0005 S8ax. `prefix` is a prefix of `full`, handle for handle.
+  if full.len < prefix.len: return false
+  for i in 0 ..< prefix.len:
+    if cast[pointer](full[i].raw) != cast[pointer](prefix[i].raw): return false
+  true
+
+proc pruneFactsSince(mark: int; p: Path; facts: var seq[seq[Z3Bool]]): bool =
+  ## RFC-0005 S8ax. The drops logged since `mark` (`ctxPruneLog`), each as
+  ## the facts it added beyond `p`'s (the caller's path at the call): the
+  ## callee's own path facts and defect-survivor facts, then the arm. False
+  ## when a drop's path does not extend `p` (a merge rebuilt its facts):
+  ## its dependence on the context is then not separable, and the call is
+  ## not cached.
+  for i in mark ..< ctxPruneLog.len:
+    let f = ctxPruneLog[i]
+    if not factsPrefixSame(f.pc, p.pc) or
+       not factsPrefixSame(f.dsp, p.defectSurvivorPc):
+      return false
+    facts.add f.pc[p.pc.len ..< f.pc.len] &
+              f.dsp[p.defectSurvivorPc.len ..< f.dsp.len] & f.extra
+  true
+
+proc pruneFactsHold(ctx: Z3Context; p: Path; facts: seq[seq[Z3Bool]];
+                    settings: SymexSettings): bool =
+  ## RFC-0005 S8ax. Every drop a cached summary's walk decided is decided
+  ## the same way under `p`, the replaying caller's path: its facts are
+  ## UNSAT with `p`'s (the same bounded check, `loopPruneRLimit`). An
+  ## undecided check is `false` (the call is walked). Each check that holds
+  ## is itself a drop decided against `p`'s context, logged for an
+  ## enclosing call's summary (`logPrune`).
+  for d in facts:
+    if checkCapped(ctx, pathRoots(p, d), settings,
+                   loopPruneRLimit(settings)).status != zsUnsat:
+      return false
+  for d in facts: logPrune(p, d)
+  true
 
 # ============================================================================
 # Fork-site registry (Phase 15 H1 deep-copy contract — ADR-0010)
@@ -12478,7 +12732,127 @@ proc inRecursiveFrame(w: WalkCtx): bool =
     if w.callStack[k].callee == top: return true
   false
 
-proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool): bool =
+const ifSiteProbeMax = 3
+  ## RFC-0005 S8ax. How many times an `if` arm outside a recursion is
+  ## checked without the check ever dropping it before the walk stops
+  ## checking it (`ifArmInfeasible`).
+
+proc armHeavy(body: IRStmt): bool =
+  ## RFC-0005 S8ax. `body` holds a loop or a call: walking it when no
+  ## execution reaches it costs more than the solver call that would have
+  ## dropped it. A straight-line arm (assignments, a return, a raise, a
+  ## label) is walked in about the time a check takes, so outside a
+  ## recursion it is not checked (`ifArmInfeasible`).
+  if body == nil: return false
+  case body.kind
+  of isWhile, isCall: return true
+  of isBlock:
+    for c in body.stmts:
+      if armHeavy(c): return true
+  of isIf:
+    for b in body.branches:
+      if armHeavy(b.body): return true
+    return armHeavy(body.elseBody)
+  of isTry:
+    for h in body.tryHandlers:
+      if armHeavy(h.body): return true
+    return armHeavy(body.tryBody) or armHeavy(body.tryFinally)
+  else: discard
+  false
+
+proc armDeclines(body: IRStmt): bool =
+  ## RFC-0005 S8ax. `body` is a block of nothing but a decline marker
+  ## (`isUnsupported`), the shape `orderOperands` guards with the condition
+  ## under which it applies: walking it records a decline whether or not
+  ## any execution reaches it, so the arm is always checked
+  ## (`ifArmInfeasible`).
+  if body == nil: return false
+  case body.kind
+  of isUnsupported: true
+  of isBlock: body.stmts.len == 1 and armDeclines(body.stmts[0])
+  else: false
+
+func hardCallDepth(settings: SymexSettings): int =
+  ## RFC-0005 S8ax. The deepest call stack the walk inlines into:
+  ## `maxRecursionDepth`, or `maxCallDepth` when that is set higher (a
+  ## caller's explicit depth is never cut).
+  max(settings.budget.maxCallDepth, settings.budget.maxRecursionDepth)
+
+proc depthMayExtend(w: WalkCtx; live: int): bool =
+  ## RFC-0005 S8ax. At or past `maxCallDepth`, inline this call anyway when
+  ## the stack is under the hard budget (`hardCallDepth`) and the frontier
+  ## is not growing: the walks entered at this depth, these `live` paths
+  ## included, number no more than those entered one level up. A recursion
+  ## whose arguments decide its depth (`sumTo(n)` with `n` in `0..5`) walks
+  ## one feasible path per level and is followed to its base case; one that
+  ## fans out (`fib`) outgrows the level above at once and declines at
+  ## `maxCallDepth` as before. Every extended level is still bounded by the
+  ## hard budget, which bounds the native recursion of `walk` (see the
+  ## depth check in `walk`'s `isCall` arm for the measured stack ceiling).
+  let d = w.callStack.len
+  if d < 1 or d >= hardCallDepth(w.settings): return false
+  let here = (if d < w.depthWalks.len: w.depthWalks[d] else: 0)
+  let above = (if d - 1 < w.depthWalks.len: w.depthWalks[d - 1] else: 0)
+  here + live <= above
+
+proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
+               atHard: bool): seq[Path] =
+  ## RFC-0005 S8ax. The call-depth decline: each live path continues past
+  ## the call with a fresh return value, tainted. `atHard`: the hard budget
+  ## was reached (here or under an abandoned extension); otherwise the
+  ## frontier was growing and the budget was not extended.
+  ##
+  ## (Before S8ax, inline in `walk`'s `isCall` arm.) Bail: continue with a
+  ## fresh unconstrained retSym; flag unknown. The surviving paths are marked
+  ## uncertain so any target hit on them degrades to sxUnknown (the witness
+  ## would otherwise be an unsoundly-Z3-defaulted value).
+  ## #161/#163 handoff follow-up: this used to set `sawUnknown` bare — the
+  ## run-level Invariant-7 backstop (`runSymexImpl`) then reported an
+  ## unclassified `weInternalWalkerFault`, indistinguishable from a real
+  ## walker bug. `beBudgetExhausted` (chapulin catalog #5(b)) already names
+  ## exactly this shape — "a walk budget ran out with paths still live" —
+  ## for `maxLoopUnwind`/`maxFrontierSize`; this call-inlining depth cap is
+  ## a sibling of the SAME budget family, so it reuses the kind rather than
+  ## adding a near-duplicate. The message names the exhausted budget and its
+  ## current value so "raise maxCallDepth" reads as actionable configuration
+  ## advice, not a shrug.
+  ## RFC-0005 S6a: that reuse is exactly what §3.2's standing rule forbids
+  ## once `classOf` reads one word per kind — this bail is not a k-unroll
+  ## survivor. It continues with a fresh havoc `retSym` but DROPS the
+  ## callee's var-param writes, heap writes and raises (and never lowers the
+  ## actuals): a stale env, `dcSubstituted`. Split off as
+  ## `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
+  ## frontier prune (`dcOmitted`) would have stripped these survivors' path
+  ## taint — a witness through the havoc retSym reported clean sxSat.
+  ## RFC-0005 S8an: a path that reaches the bail but that no execution can
+  ## take is dropped (by the caller), not bailed: it has no behaviour to
+  ## lose.
+  let why =
+    if atHard:
+      "the call stack reached the hard budget (maxRecursionDepth=" &
+        $w.settings.budget.maxRecursionDepth & ")"
+    else:
+      "the walks at the next depth would outnumber those at this " &
+        "one, so the budget was not extended (maxRecursionDepth=" &
+        $w.settings.budget.maxRecursionDepth & " bounds an extension)"
+  let d = w.degrade(beBudgetExhaustedUnmodelled,
+    "call-inlining depth budget exhausted (maxCallDepth=" &
+         $w.settings.budget.maxCallDepth & ") while inlining `" &
+         stmt.callee & "` — " & why & "; raise " &
+         "settings.budget.maxCallDepth or maxRecursionDepth if " &
+         "this SUT's real call nesting is deeper than the current " &
+         "bound (beBudgetExhaustedUnmodelled)")
+  for p in live:
+    var newEnv = p.env
+    var pcInit: seq[Z3Bool]
+    if stmt.retName.len > 0:
+      inc w.synthZ3
+      let z3Name = stmt.retName & "_d" & $w.synthZ3
+      newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+    result.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+
+proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
+                     site: pointer; body: IRStmt): bool =
   ## RFC-0005 S8as. The `wmExplore` walk forked every `if` arm without a
   ## feasibility check, so a recursion on a symbolic argument walked arms no
   ## execution takes (`fact(1)`'s `k > 1`) down to `maxCallDepth` -- where
@@ -12488,23 +12862,132 @@ proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool): bool =
   ## (or else path) whose query is UNSAT is now dropped before it is walked.
   ## `last` is the arm's own conjunct, decided without the solver when it is
   ## a literal. Sound exactly as `loopArmInfeasible` is: an undecided query
-  ## keeps the arm. Outside a recursion an `if` is not checked: its arms are
-  ## bounded by the program text, and the check would cost every walk a
-  ## solver call per branch.
-  if not inRecursiveFrame(w): return false
-  let lit = $simplify(last)
-  if lit == "false":
-    inc symexIfArmsPruned
-    return true
-  if pathInfeasible(w.z3, armPath, w.settings):
-    inc symexIfArmsPruned
-    return true
-  false
+  ## keeps the arm.
+  ##
+  ## RFC-0005 S8ax: outside a recursion the check is ADAPTIVE. Only an arm
+  ## that holds a loop or a call is checked (`armHeavy`): a solver call is
+  ## dearer than walking a few straight-line statements. And per site
+  ## (`site`, the arm's IR node), once a site has been checked
+  ## `ifSiteProbeMax` times, it is checked again only while at least one in
+  ## four of its checks dropped the arm. Measured (Linux, Z3 5.1, paired
+  ## runs, minimum of two; off / this policy / every arm checked):
+  ## s8k_bounds 29.4 / 29.6 / 55.7 s, s8p_precision 5.4 / 3.7 / 2.5 s,
+  ## s8as_remainder 37.4 / 26.8 / 47.2 s, s8an_remainder 11.7 / 13.9 /
+  ## 19.8 s, phase3_recursion 5.1 / 6.0 / 6.9 s. Checking every arm doubled
+  ## the string-heavy suites; checking only heavy arms keeps most of the
+  ## win where dead arms guard real work. Dropping is sound whichever way
+  ## the policy goes (the arm is UNSAT); the policy only decides where the
+  ## solver call is spent.
+  ##
+  ## An arm that only declines (`armDeclines`) is always checked: walked
+  ## where no execution reaches it, it voids the verdict for nothing.
+  let recursive = inRecursiveFrame(w) or armDeclines(body)
+  if not recursive:
+    if not armHeavy(body): return false
+    let st = w.ifSites.getOrDefault(site)
+    if st.checks >= ifSiteProbeMax and st.prunes * 4 < st.checks:
+      return false
+  inc symexIfArmsChecked
+  result = $simplify(last) == "false" or
+           pathInfeasible(w.z3, armPath, w.settings)
+  if result: inc symexIfArmsPruned
+  if not recursive:
+    var st = w.ifSites.getOrDefault(site)
+    inc st.checks
+    if result: inc st.prunes
+    w.ifSites[site] = st
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
+
+proc handlerCatchesDefect(w: WalkCtx): bool =
+  ## RFC-0005 S8ax. Some `try` around the current point, in this frame or a
+  ## caller's, has an arm that catches a `Defect`: a bare `except:`, or one
+  ## naming a `Defect` type or an ancestor of `Defect` (`Exception`).
+  template scan(hs: seq[HandlerFrame]) =
+    for hf in hs:
+      for h in hf.handlers:
+        if h.typeIds.len == 0: return true
+        for ht in h.typeIds:
+          if isDefect(w.statics.exnTable, ht, w.statics.userExnHierarchy) or
+             isSubtypeOf("Defect", ht, w.statics.exnTable,
+                         w.statics.userExnHierarchy):
+            return true
+  scan(w.frame.handlerStack)
+  for f in w.frameStack: scan(f.handlerStack)
+  false
+
+proc handlerNamesSubtype(w: WalkCtx; typeId: string): bool =
+  ## RFC-0005 S8ax. Some `try` around the current point has an arm naming
+  ## a strict subtype of `typeId`. An opaque raise is known only by the
+  ## type its `raises` list names; the object raised may be of a subtype,
+  ## which that arm catches and the walk's raise of `typeId` does not.
+  template scan(hs: seq[HandlerFrame]) =
+    for hf in hs:
+      for h in hf.handlers:
+        for ht in h.typeIds:
+          # A type the hierarchy does not know may be a subtype too.
+          if ht != typeId and
+             (not isKnownExnType(ht, w.statics.exnTable,
+                                 w.statics.userExnHierarchy) or
+              isSubtypeOf(ht, typeId, w.statics.exnTable,
+                          w.statics.userExnHierarchy)):
+            return true
+  scan(w.frame.handlerStack)
+  for f in w.frameStack: scan(f.handlerStack)
+  false
+
+proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
+                      stmt: IRStmt): seq[Path] =
+  ## RFC-0005 S8ax. The raises of an inert opaque call that returned on
+  ## `paths` (its writes already havocked). Before S8ax the call never
+  ## raised: `try: boom(v) except ValueError: ...` was a false `sxUnsat`,
+  ## and a target after a call that always raises a false `sxSat`, both
+  ## with nothing recorded.
+  ##
+  ## * Each type its `raises` list names (`IRStmt.opaqueRaises`) is raised
+  ##   on a fork of every path, routed like any raise (`routeRaise`). The
+  ##   fork does not know WHEN the call raises, so it is a superset:
+  ##   `feOpaqueEffectHavoc` (`dcFreshSymbol`), replayed on a hit. The path
+  ##   that returns assumes the call did not raise, a superset too, and
+  ##   carries the same kind.
+  ## * A `try` arm naming a strict subtype of a raised type
+  ##   (`handlerNamesSubtype`) would catch an object the walk cannot raise:
+  ##   the fork is also `feOpaqueCallUnmodelled` (`dcSubstituted`), which
+  ##   voids an `sxUnsat`.
+  ## * A user or foreign routine may also raise a `Defect` (an index, an
+  ##   overflow, an explicit `raise`) that no `raises` list names. Where a
+  ##   `try` arm around the call catches a `Defect` (`handlerCatchesDefect`)
+  ##   the arm's continuation is not walked, so the returning path is
+  ##   `feOpaqueCallUnmodelled`. With no such arm the `Defect` ends the
+  ##   run, which the walk does not report either (see the S8ax notes).
+  if stmt.opaqueMayDefect and handlerCatchesDefect(w):
+    let d = w.degrade(feOpaqueCallUnmodelled,
+      "opaque call `" & stmt.callee & "` may raise a Defect inside its " &
+           "body, and a `try` arm around it catches Defects: that arm's " &
+           "continuation is not modelled (feOpaqueCallUnmodelled)")
+    for p in paths: taintInPlace(p, d)
+  if stmt.opaqueRaises.len == 0: return paths
+  let dRet = w.degrade(feOpaqueEffectHavoc,
+    "opaque call `" & stmt.callee & "` may raise " &
+         stmt.opaqueRaises.join(", ") & ": a path through it is forked for " &
+         "each, and the path past it assumes it returned, so a hit on " &
+         "either is replayed (feOpaqueEffectHavoc)")
+  for p in paths:
+    for t in stmt.opaqueRaises:
+      if w.shouldStop: return
+      var rp = forkPathTainted(p, p.pc, p.env, dRet)
+      if handlerNamesSubtype(w, t):
+        rp = forkPathTainted(rp, rp.pc, rp.env, w.degrade(
+          feOpaqueCallUnmodelled,
+          "opaque call `" & stmt.callee & "` may raise a subtype of " & t &
+               ", which a `try` arm around it names: the raise is " &
+               "modelled as " & t & " only (feOpaqueCallUnmodelled)"))
+      result.add routeRaise(rp, t, none(string), w)
+    result.add forkPathTainted(p, p.pc, p.env, dRet)
+
 
 proc degradeUnmodelledReassign(p: Path, objName: string, kind: SVKind,
                                w: var WalkCtx): Path =
@@ -14317,7 +14800,7 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
-proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   if w.shouldStop or stmt == nil or paths.len == 0:
     return paths
   case stmt.kind
@@ -14398,7 +14881,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for cp in cont:
             let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
                                    cp.env)
-            if not ifArmInfeasible(w, armPath, condBool):
+            if not ifArmInfeasible(w, armPath, condBool,
+                                   cast[pointer](br.body), br.body):
               survivors.add walk(br.body, @[armPath], w)
             if w.shouldStop: return
             next.add (cp, accumNegated & @[not condBool])
@@ -14406,7 +14890,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       for (cp, accumNegated) in states:
         let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
         if accumNegated.len > 0 and
-           ifArmInfeasible(w, elsePath, accumNegated[^1]):
+           ifArmInfeasible(w, elsePath, accumNegated[^1],
+                           cast[pointer](stmt), stmt.elseBody):
           continue
         if stmt.elseBody != nil:
           survivors.add walk(stmt.elseBody, @[elsePath], w)
@@ -15794,9 +16279,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S8as: the call ran (on the survivors of its arguments'
         # raise forks), so each name its effect summary lists
         # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
-        if stmt.opaqueHavoc.len > 0:
-          for sp in out1: havocOpaqueWrites(w, sp, stmt)
-        return out1
+        # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+        for sp in out1: havocOpaqueWrites(w, sp, stmt)
+        return opaqueRaiseForks(w, out1, stmt)
       # Don't resolve a body; allocate fresh retSym; mark path
       # uncertain so any target reached on this path degrades to
       # sxUnknown rather than emitting an unsound witness.
@@ -15809,8 +16294,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # dedups by message, so N calls to the same callee collapse to one
       # entry while two different callees each get named.
       # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
+      # RFC-0005 S8ax: a summary the parser could not bound says why.
       let d = w.degrade(feOpaqueCallUnmodelled,
-        "opaque call `" & stmt.callee & "` is not modeled — its result " &
+        "opaque call `" & stmt.callee & "` is not modeled — " &
+             (if stmt.opaqueWhy.len > 0: stmt.opaqueWhy & "; " else: "") &
+             "its result " &
              "and any state it touches are unknown, so every path through it " &
              "is tainted. If the call cannot affect the code under test " &
              "(void, value arguments, nothing read back), mark it " &
@@ -15900,57 +16388,38 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # `ulimit -s`) unconstrained linear recursion is safe through a cap of
     # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
     # the safe ceiling is build/platform-dependent, not a fixed constant.
-    if w.callStack.len >= w.settings.budget.maxCallDepth:
-      # Bail: continue with a fresh unconstrained retSym; flag unknown.
-      # The surviving paths are marked uncertain so any target hit on
-      # them degrades to sxUnknown (the witness would otherwise be
-      # an unsoundly-Z3-defaulted value).
-      # #161/#163 handoff follow-up: this used to set `sawUnknown` bare —
-      # the run-level Invariant-7 backstop (`runSymexImpl`) then reported an
-      # unclassified `weInternalWalkerFault`, indistinguishable from a real
-      # walker bug. `beBudgetExhausted` (chapulin catalog #5(b)) already
-      # names exactly this shape — "a walk budget ran out with paths still
-      # live" — for `maxLoopUnwind`/`maxFrontierSize`; this call-inlining
-      # depth cap is a sibling of the SAME budget family, so it reuses the
-      # kind rather than adding a near-duplicate. The message names the
-      # exhausted budget and its current value so "raise maxCallDepth" reads
-      # as actionable configuration advice, not a shrug.
-      # RFC-0005 S6a: that reuse is exactly what §3.2's standing rule
-      # forbids once `classOf` reads one word per kind — this bail is not a
-      # k-unroll survivor. It continues with a fresh havoc `retSym` but
-      # DROPS the callee's var-param writes, heap writes and raises (and
-      # never lowers the actuals): a stale env, `dcSubstituted`. Split off
-      # as `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
-      # frontier prune (`dcOmitted`) would have stripped these survivors'
-      # path taint — a witness through the havoc retSym reported clean sxSat.
-      # RFC-0005 S8an: a path that reaches the bail but that no execution
-      # can take (the `if` arms of a recursion are forked without a
-      # feasibility check, so `fact(1)`'s `k > 1` arm reaches the next
-      # level) is dropped, not bailed: it has no behaviour to lose. A
-      # recursion whose depth the arguments decide is then walked exactly
-      # within the budget.
-      var live: seq[Path]
+    # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
+    # while the frontier is not growing (`depthMayExtend`) and the stack is
+    # under the hard budget (`maxRecursionDepth`). A path no execution can
+    # take is dropped first either way (S8an, below).
+    let overDepth = w.callStack.len >= w.settings.budget.maxCallDepth
+    var depthLive: seq[Path]
+    var extendDepth = false
+    if overDepth:
       for p in paths:
-        if not pathInfeasible(w.z3, p, w.settings): live.add p
-      if live.len == 0: return live
-      let d = w.degrade(beBudgetExhaustedUnmodelled,
-        "call-inlining depth budget exhausted (maxCallDepth=" &
-             $w.settings.budget.maxCallDepth & ") while inlining `" &
-             stmt.callee & "` — the call stack is at least as deep as the " &
-             "configured budget; raise settings.budget.maxCallDepth if " &
-             "this SUT's real call nesting is deeper than the current " &
-             "bound (beBudgetExhaustedUnmodelled)")
-      var out2: seq[Path]
-      for p in live:
-        var newEnv = p.env
-        var pcInit: seq[Z3Bool]
-        if stmt.retName.len > 0:
-          inc w.synthZ3
-          let z3Name = stmt.retName & "_d" & $w.synthZ3
-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-      out2
+        if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
+      if depthLive.len == 0: return depthLive
+      extendDepth = depthMayExtend(w, depthLive.len)
+    if overDepth and not extendDepth:
+      # The decline, and its history: `depthBail`.
+      if w.callStack.len >= hardCallDepth(w.settings): inc w.depthHardHits
+      depthBail(w, stmt, depthLive, w.callStack.len >= hardCallDepth(w.settings))
     else:
+      let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
+      # RFC-0005 S8ax: the first extended level is the extension's root. A
+      # recursion that reaches the hard budget below it is unbounded on
+      # some path; every path it returns then carries a chain of returns as
+      # long as the extension, and each later query pays for it. Measured
+      # (Linux, Z3 5.1, loaded host) on `sumTo(n) == 465` with `n >= 0`
+      # unconstrained: 44.5 s declining at `maxCallDepth = 3` without the
+      # extension, 393 s with a hard budget of 4 when the paths that
+      # bottomed out within it were kept, killed at 900 s past 5. So the
+      # root drops everything the extension walked and declines here, at
+      # `maxCallDepth`, exactly as before S8ax: an unbounded recursion costs
+      # what it did, and only one its arguments bound is followed.
+      let extRoot = extendDepth and
+        w.callStack.len == w.settings.budget.maxCallDepth
+      let hardMark = w.depthHardHits
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return
@@ -16041,8 +16510,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                    "(weRecursionCycleCut)")
             survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
             continue
+          # RFC-0005 S8ax: a hit needs the same actuals (the key is a hash)
+          # and, for a summary whose walk dropped an arm or path against its
+          # context, the same drops under this caller's facts.
+          var hit = -1
           if w.callCache.hasKey(key):
-            let entry = w.callCache[key]
+            let bucket = w.callCache[key]
+            for ei in 0 ..< bucket.len:
+              if cacheArgsSame(bucket[ei].args, argVals) and
+                 pruneFactsHold(w.z3, p, bucket[ei].pruneFacts, w.settings):
+                hit = ei
+                break
+          if hit >= 0:
+            let entry = w.callCache[key][hit]
             w.callStats[stmt.callee] = CallStat(
               name: stmt.callee,
               walked: w.callStats[stmt.callee].walked,
@@ -16050,7 +16530,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             var newEnv = p.env
             if stmt.retName.len > 0:
               newEnv[stmt.retName] = entry.retSym
-            survivors.add forkPath(p, p.pc & entry.pcDelta, newEnv)
+            for ex in entry.exits:
+              survivors.add forkPath(p, p.pc & ex, newEnv)
             continue
           # Build callee env
           var calleeEnv: Env
@@ -16096,7 +16577,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                          # default (see `IRStmt.isCall.retIntOffsetPositions`).
                          freshRetSym(stmt.retTy, z3Name, retInit,
                                      stmt.retIntOffsetPositions)
-          let prunesBefore = ctxPruneCount   # RFC-0005 S8as
+          let pruneMark = ctxPruneLog.len   # RFC-0005 S8as/S8ax
+          # RFC-0005 S8ax: the walks entered at each call depth, the
+          # frontier the adaptive depth reads (`depthMayExtend`).
+          while w.depthWalks.len <= w.callStack.len: w.depthWalks.add 0
+          inc w.depthWalks[w.callStack.len]
           w.callStack.add CallFrame(
             callee: stmt.callee, retSym: retSym,
             retName: stmt.retName,
@@ -16275,24 +16760,37 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # capture. A hit replays only `pcDelta`: a read would return the
           # first call's value across a write in between, and a write would
           # be lost.
-          # RFC-0005 S8as: nor when the callee's walk dropped a path or arm
-          # as infeasible in this caller's context (`ctxPruneCount`).
-          if calleeEscaped.len == 0 and not closureRet and varArgs.len == 0 and
-             not threadsOuter and ctxPruneCount == prunesBefore and
-             frame.returnedPaths.len == 1 and fallThrough.len == 0 and
-             not envHasGlobal(frame.returnedPaths[0].env) and
-             frame.returnedPaths[0].taint == {} and
-             frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
-             heapUnchanged(frame.returnedPaths[0], p):
-            let cp = frame.returnedPaths[0]
-            let prefixLen = p.pc.len
-            if cp.pc.len >= prefixLen:
-              # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
-              # string byte-range floor) must ride in `pcDelta` so a cache REPLAY
-              # re-asserts them on the cached retSym.
-              w.callCache[key] = CallCacheEntry(
-                retSym: retSym,
-                pcDelta: retInit & cp.pc[prefixLen ..< cp.pc.len])
+          # RFC-0005 S8as/S8ax: a callee whose walk dropped a path or arm as
+          # infeasible in this caller's context is cached with those drops
+          # (`pruneFactsSince`): a hit re-checks them (`pruneFactsHold`).
+          # S8as left such a call uncached, which cost `fib` every reuse.
+          var pruneFacts: seq[seq[Z3Bool]]
+          let exitPaths = frame.returnedPaths & fallThrough
+          var cacheable = calleeEscaped.len == 0 and not closureRet and
+            varArgs.len == 0 and not threadsOuter and exitPaths.len > 0 and
+            exitPaths.len <= callCacheExitsMax
+          if cacheable:
+            for cp in exitPaths:
+              if envHasGlobal(cp.env) or cp.taint != {} or
+                 cp.defectSurvivorPc.len != p.defectSurvivorPc.len or
+                 not heapUnchanged(cp, p) or
+                 not factsPrefixSame(cp.pc, p.pc):
+                cacheable = false
+                break
+          if cacheable and pruneFactsSince(pruneMark, p, pruneFacts):
+            # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+            # string byte-range floor) must ride in each exit's delta so a
+            # cache REPLAY re-asserts them on the cached retSym.
+            var exits: seq[seq[Z3Bool]]
+            for cp in exitPaths:
+              exits.add retInit & cp.pc[p.pc.len ..< cp.pc.len]
+            let entry = CallCacheEntry(retSym: retSym, exits: exits,
+                                       args: argVals, pruneFacts: pruneFacts)
+            # A bucket holds one entry per distinct context it was walked
+            # in, up to `callCacheBucketMax`; past it the call is walked.
+            if not w.callCache.hasKey(key): w.callCache[key] = @[]
+            if w.callCache[key].len < callCacheBucketMax:
+              w.callCache[key].add entry
           for cp in frame.returnedPaths & fallThrough:
             var newEnv = p.env
             if stmt.retName.len > 0:
@@ -16338,6 +16836,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               if callerCount > calleeCount:
                 merged.allocCounters[tkey] = callerCount
             survivors.add merged
+      if extRoot and w.depthHardHits > hardMark:
+        return depthBail(w, stmt, paths, true)
       survivors
   of isAssert:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -16691,6 +17191,120 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
     @[]
 
+const capSnapPrefix = "__capsnap#"
+  ## RFC-0005 S8ax. A frame-local name (no `__gl:` prefix, so no call
+  ## threads it) holding a cell's value as a statement began, at one
+  ## statement nesting depth: `__capsnap#<depth>#<cell>`.
+
+func capSnapName(depth: int; cell: string): string =
+  capSnapPrefix & $depth & "#" & cell
+
+proc syncCapCellsFromCells(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` resumes in the current frame after a raise (a
+  ## handler, a `finally`): a capture whose cell differs from its local was
+  ## written through the cell by the call that raised, and the local takes
+  ## it. (Every other write the raise carries reaches both: a closure
+  ## applied here writes the local and the cell to one value.)
+  if w.frame.capCells.len == 0: return p
+  var env2 = p.env
+  var changed = false
+  for (local, cell) in w.frame.capCells:
+    if env2.hasKey(local) and env2.hasKey(cell) and
+       not sameSymVal(env2[local], env2[cell]):
+      env2[local] = env2[cell]
+      changed = true
+  if changed: forkPath(p, p.pc, env2) else: p
+
+proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
+  ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
+  ##
+  ## Nim keeps a variable a closure captures by reference in a heap env the
+  ## closure shares with its frame: a write through either is seen by the
+  ## other, wherever the closure is applied. The walk keeps the local as
+  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
+  ## every call threads it as it threads a global) as the one the closure
+  ## reads and writes away from the frame. After each statement the side
+  ## that changed since it began wins: a write to the local is copied to
+  ## the cell; a write to the cell (a call applied the closure) is copied
+  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
+  ## winning:
+  ##
+  ## * both written, to different values: two writes the walk cannot order;
+  ## * the cell written by anything but a call statement (an expression's
+  ##   closure call applied the closure away from here): the statement may
+  ##   have read the local before the write;
+  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
+  ##   parameter IS the cell, which the callee's copy is not.
+  ##
+  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
+  if w.frame.capCells.len == 0 or stmt == nil or paths.len == 0:
+    return walkStmt(stmt, paths, w)
+  inc w.capSyncDepth
+  let depth = w.capSyncDepth
+  var ins: seq[Path]
+  for p in paths:
+    var env2 = p.env
+    var changed = false
+    for (local, cell) in w.frame.capCells:
+      if env2.hasKey(local) and env2.hasKey(cell):
+        env2[capSnapName(depth, cell)] = env2[local]
+        changed = true
+    ins.add(if changed: forkPath(p, p.pc, env2) else: p)
+  let outs = walkStmt(stmt, ins, w)
+  dec w.capSyncDepth
+  var byAddr: seq[string]
+  if stmt.kind == isCall:
+    for (local, _) in w.frame.capCells:
+      if local in stmt.cGuardRoots: byAddr.add displayName(local)
+  for p in outs:
+    var env2 = p.env
+    var touched = false
+    var clash = byAddr
+    for (local, cell) in w.frame.capCells:
+      let snap = capSnapName(depth, cell)
+      if not env2.hasKey(local) or not env2.hasKey(cell): continue
+      if not env2.hasKey(snap):
+        # Registered by this statement: `registerCapCell` bound both.
+        if not sameSymVal(env2[local], env2[cell]):
+          env2[cell] = env2[local]
+          touched = true
+        continue
+      let lCh = not sameSymVal(env2[local], env2[snap])
+      let cCh = not sameSymVal(env2[cell], env2[snap])
+      # Both written to one value is a closure applied here carrying its
+      # write to both (`applyClosureGround`).
+      let agree = sameSymVal(env2[local], env2[cell])
+      if lCh and cCh and not agree or
+         cCh and not lCh and stmt.kind != isCall:
+        if displayName(local) notin clash: clash.add displayName(local)
+      if lCh:
+        env2[cell] = env2[local]
+      elif cCh:
+        env2[local] = env2[cell]
+      touched = true
+    # This depth's snapshots, and any a path that left a nested statement
+    # early (a `break`) still carries.
+    var stale: seq[string]
+    for k in env2.keys:
+      if k.startsWith(capSnapPrefix):
+        let rest = k[capSnapPrefix.len .. ^1]
+        let hash = rest.find('#')
+        if hash > 0 and parseInt(rest[0 ..< hash]) >= depth: stale.add k
+    for k in stale: env2.del k
+    if not touched and stale.len == 0 and clash.len == 0:
+      result.add p
+      continue
+    var q = forkPath(p, p.pc, env2)
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(ceCaptureByRefUnmodelled,
+        "the by-reference capture(s) " & clash.join(", ") & " of a " &
+             "closure were written through the closure's env and in the " &
+             "frame within one statement, or passed by address while the " &
+             "closure may run; the order of the two is not modelled " &
+             "(ceCaptureByRefUnmodelled)"))
+    result.add q
+
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
   ## Phase 15 E3. Route a raise on path `p` carrying `typeId`/`msg`. This is the
@@ -16763,7 +17377,9 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   var unknownTok: Degrade
   if not raisedKnown:
     unknownTok = w.degrade(eeUnknownExnType, typeId, dsUnknownExn)
-  var rp = p
+  # RFC-0005 S8ax: a capture the raising call wrote through its cell is
+  # the local's value wherever the raise resumes in this frame.
+  var rp = syncCapCellsFromCells(p, w)
   var unknownJoined = false
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
@@ -17245,10 +17861,22 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # (`refreshByRefCaptures`). Anywhere else the env does not bind their
   # names, so the body reads the construction-time snapshot -- a value the
   # variable may no longer hold: decline (`dcSubstituted`) and descend on it.
-  if clo.closureMutCaptures.len > 0 and clo.closureFrame != w.frame.frameId:
+  #
+  # RFC-0005 S8ax: the env cell of each one (`capCellName`), threaded to
+  # every frame as a global is, holds the variable as it stands now: the
+  # body reads that, wherever it is applied. Only a capture with no cell
+  # (built where no walk kept one) still declines.
+  var cellOf = initTable[string, string]()
+  for nm in clo.closureMutCaptures:
+    let cell = capCellName(clo.closureFrame, nm)
+    if callerEnv.hasKey(cell): cellOf[nm] = cell
+  var uncelled: seq[string]
+  for nm in clo.closureMutCaptures:
+    if not cellOf.hasKey(nm): uncelled.add nm
+  if uncelled.len > 0 and clo.closureFrame != w.frame.frameId:
     closureDegrade(ceCaptureByRefUnmodelled,
       "closure call through " & label & " outside the frame that built it: " &
-           "its by-reference capture(s) " & displayNames(clo.closureMutCaptures).join(", ") &
+           "its by-reference capture(s) " & displayNames(uncelled).join(", ") &
            " are read as they stood at construction, not as they stand now " &
            "(ceCaptureByRefUnmodelled)")
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
@@ -17273,6 +17901,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     if isGlobalEnvName(k) or (inFrame and k in clo.closureMutCaptures and
                               descentEnv.hasKey(k)):
       descentEnv[k] = v
+  # RFC-0005 S8ax: away from its frame a capture is its cell's value.
+  if not inFrame:
+    for nm, cell in cellOf:
+      if descentEnv.hasKey(cell): descentEnv[nm] = descentEnv[cell]
   let byRefEntry = descentEnv  ## RFC-0005 S9: the captures as the body met them
   for i, p in cb.params:
     if i < argSyms.len: descentEnv[p.name] = argSyms[i]
@@ -17292,6 +17924,11 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
+  # RFC-0005 S8ax: the body keeps each celled capture equal to its cell
+  # statement by statement, as the building frame does (`walk`), so a call
+  # in the body that applies the closure again meets the body's writes.
+  for nm, cell in cellOf:
+    w.frame.capCells.add (local: nm, cell: cell)
   # Phase 15 R1b call-ENTRY heap threading for the CLOSURE arm: the closure
   # body descends with the CALLER's threaded heap (seeded into the caller-heap
   # threadvars by the walk arm before this expression was lowered), instead of
@@ -17352,8 +17989,11 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     for cp in fallThrough: exitEnvs.add cp.env
     for cp in frame.returnedPaths: exitEnvs.add cp.env
     for er in escapedRaises: exitEnvs.add er.path.env
+    var ownCells: seq[string]   ## RFC-0005 S8ax: carried with their capture
+    for _, cell in cellOf: ownCells.add cell
     for ee in exitEnvs:
       for nm, v in ee:
+        if nm in ownCells: continue
         let byRef = isGlobalEnvName(nm) or
           (nm in clo.closureMutCaptures and byRefEntry.hasKey(nm))
         if byRef and nm notin written and
@@ -17388,7 +18028,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
         if ty == nil and cp.env.hasKey(nm): ty = tyOf(cp.env[nm])
       for er in escapedRaises:
         if ty == nil and er.path.env.hasKey(nm): ty = tyOf(er.path.env[nm])
-      if not isGlobalEnvName(nm) and not inFrame:
+      if not isGlobalEnvName(nm) and not inFrame and not cellOf.hasKey(nm):
         declined.add displayName(nm) & " (applied outside the frame that " &
                      "built the closure)"
         continue
@@ -17422,9 +18062,17 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
           ax = guard.implies(eq)
         currentClosureCallAxioms.add ax
         currentClosureCallAxiomStrs.add $ax
-      carried.add (nm, wv)
+      # RFC-0005 S8ax: a celled capture's write lands in its cell; in the
+      # building frame in the local too (the frame's `walk` sees both
+      # written to one value).
+      let cellDst = cellOf.getOrDefault(nm, "")
+      if inFrame or cellDst.len == 0: carried.add (nm, wv)
+      if cellDst.len > 0: carried.add (cellDst, wv)
       for ri, er in escapedRaises:
-        raiseWrites[ri].add (nm, exitVal(er.path.env))
+        if inFrame or cellDst.len == 0:
+          raiseWrites[ri].add (nm, exitVal(er.path.env))
+        if cellDst.len > 0:
+          raiseWrites[ri].add (cellDst, exitVal(er.path.env))
     if declined.len > 0:
       closureDegrade(ceCaptureByRefUnmodelled,
         "closure call through " & label & ": the body writes the " &
@@ -18943,6 +19591,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
   globalEntryVals = initTable[string, SymVal]()  ## RFC-0005 S8as
   globalEntryFacts = @[]                         ## RFC-0005 S8as
+  ctxPruneLog = @[]                              ## RFC-0005 S8ax
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
@@ -18953,6 +19602,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   intHeapIsInt = false   ## RFC-0005 S8as: set once the params are bound
+  intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
@@ -19410,7 +20060,7 @@ proc runSymexImpl(prog: SymexProgram,
       if p.ty.kind == itInt and p.ty.width == 64 and p.ty.signed:
         if env.hasKey(p.name) and env[p.name].kind == svInt: anyInt = true
         else: allInt = false
-    intHeapIsInt = settings.integerSemantics != isExact and anyInt and allInt
+    intHeapIsInt = settings.integerSemantics != isExact
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
@@ -19420,7 +20070,7 @@ proc runSymexImpl(prog: SymexProgram,
     found: @[],
     settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
-    callCache: initTable[string, CallCacheEntry](),
+    callCache: initTable[string, seq[CallCacheEntry]](),
     activeCalls: initHashSet[string](),
     initialEnv: env,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
@@ -20278,7 +20928,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     params: prog.params, mode: wmFollowConcrete,
     found: @[], settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
-    callCache: initTable[string, CallCacheEntry](),
+    callCache: initTable[string, seq[CallCacheEntry]](),
     activeCalls: initHashSet[string](), initialEnv: env,
     concreteEq: concreteEq,
     statics: WalkerStatics(exnTable: exnTypeTable,

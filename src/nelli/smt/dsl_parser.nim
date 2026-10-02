@@ -26,6 +26,7 @@
 ## The walker only ever sees calls as statements.
 
 import std/macros except strVal   ## RFC-0005 S8e: `scoped_names.strVal` keys a name by its symbol
+import std/effecttraits   ## RFC-0005 S8ax: an opaque routine's inferred `raises`
 import std/options    ## RFC-chapulin-hardening Q1: tryRecognizeScanIdiom's Option[IRStmt]
 import std/strformat
 import std/strutils
@@ -609,6 +610,13 @@ proc emitExprSeq(xs: seq[IRExpr]): NimNode =
     lit.add emitExpr(x)
   prefix(lit, "@")
 
+proc emitIRTypeSeq(ts: seq[IRType]): NimNode =
+  ## RFC-0005 S8ax. `emitExprSeq` for types (`IRStmt.opaqueHeapTys`).
+  var lit = newTree(nnkBracket)
+  for t in ts:
+    lit.add emitIRType(t)
+  prefix(lit, "@")
+
 proc emitStmt*(s: IRStmt): NimNode =
   if s == nil:
     return newNilLit()
@@ -658,7 +666,12 @@ proc emitStmt*(s: IRStmt): NimNode =
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
               newLit(s.opaqueInert),
-              newLit(s.opaqueHavoc))   ## RFC-0005 S8as, same trap
+              newLit(s.opaqueHavoc),   ## RFC-0005 S8as, same trap
+              emitIRTypeSeq(s.opaqueHeapTys),   ## RFC-0005 S8ax, same trap
+              newLit(s.opaqueHeapAll),
+              newLit(s.opaqueRaises),
+              newLit(s.opaqueMayDefect),
+              newLit(s.opaqueWhy))
     else:
       # Round-6 B5: `retIntOffsetPositions` MUST round-trip through this
       # NimNode-literal reconstruction (the generated proc rebuilds the IR
@@ -1505,6 +1518,297 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     discard  # no sub-exprs
 
+# ---- RFC-0005 S8ax: an operand and a later operand's call -------------------
+#
+# Nim (2.2.10, c and cpp alike) evaluates a routine call, and an overflow-
+# checked `+`/`-`/`*`, where it stands, into a temporary; every other operand
+# shape -- a variable, a field, an element, a dereference, a conversion, a
+# comparison, a bit operation, `-x`, `x div y`, `len` -- is an inline C
+# expression, read when its enclosing operation is, after the calls of every
+# later operand. Its checks (an index's bound, `-x`'s and `div`'s overflow
+# and zero divisor) are statements emitted where it stands. A constructor
+# (`[..]`, `@[..]`, `(..)`, `T(..)`) fills its elements in order. Probed:
+#
+#   var x = 1; proc g(): int = (x = 10; 0)
+#   x + g() == 10        x.a + g() == 10 (value field)   int(y) + g() == 10
+#   (x * 1) + g() == 1   succ(x) + g() == 2              (x and 7) + g(): late
+#   [x, g()][0] == 1     (x, g())[0] == 1   @[x, g()][0] == 1   T(a: x, ..) 1
+#   -x + g() == -10, but with x == low(int) before g() it raises
+#   s[i] + g() with g() moving i out of bounds reads past the end, no raise
+#   k(x + 0, g()) == 100 (k(a, b) = a * 100 + b), k(x, g()) == 1000
+#
+# The parser hoists a compound operator operand into a `let` where it stands
+# (`parseAtomicOperand`) and leaves a call argument inline (read at the
+# call), so each disagreed with Nim somewhere: a lazy operand hoisted early,
+# an eager call argument read late, a constructor element read late. The
+# walk reads a value where `orderOperands` places it.
+
+proc irKids(e: IRExpr): seq[IRExpr] =
+  ## RFC-0005 S8ax. The sub-expressions of `e`.
+  if e == nil: return @[]
+  case e.kind
+  of iekConvIntToFloat, iekConvFloatToInt: @[e.convOperand]
+  of iekConvIntWidth: @[e.ciwOperand]
+  of iekConvIntReinterpret: @[e.cirOperand]
+  of iekMathCall: e.mathArgs
+  of iekBinop: @[e.lhs, e.rhs]
+  of iekUnop: @[e.operand]
+  of iekField: @[e.obj]
+  of iekIndex: @[e.arr, e.idx]
+  of iekArrayLit: e.lelems
+  of iekTupleLit: e.telems
+  of iekVariantLit: e.vlArmFields & e.vlPlainFields
+  of iekMultiVariantLit:
+    var r: seq[IRExpr]
+    for fs in e.mvlAxisFields: r.add fs
+    r & e.mvlPlainFields
+  of iekVariantFieldSet: @[e.vfsRecv, e.vfsVal]
+  of iekSeqLen: @[e.lenObj]
+  of iekSeqSlice: @[e.ssBase, e.ssLo, e.ssHi]
+  of iekContains: @[e.container, e.key]
+  of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel: @[e.mutRecv, e.mutArg]
+  of iekSeqDel: @[e.delSeq, e.delIdx]
+  of iekSeqInsert: @[e.insSeq, e.insVal, e.insIdx]
+  of iekSeqPop: @[e.popSeq]
+  of iekTableSet: @[e.tabRecv, e.tabKey, e.tabVal]
+  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind,
+     iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
+     iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+     iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
+     iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
+     iekStrInOptionRegion:
+    e.strArgs
+  of iekBorrowOp: @[e.borrowLhs, e.borrowRhs]
+  of iekClosureCall: e.ccArgs
+  of iekSeqLit: e.seqLitElems
+  of iekHofCall: @[e.hofSeq, e.hofClosure, e.hofInit]
+  of iekLambda, iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
+     iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
+    @[]
+
+proc irHasCall(e: IRExpr): bool =
+  ## RFC-0005 S8ax. `e` applies a closure somewhere (`iekClosureCall`,
+  ## `iekHofCall`): lowering it may write a capture or a global.
+  if e == nil: return false
+  if e.kind in {iekClosureCall, iekHofCall}: return true
+  for k in irKids(e):
+    if irHasCall(k): return true
+  false
+
+proc irVars(e: IRExpr; acc: var seq[string]) =
+  ## RFC-0005 S8ax. The variables `e` reads, added to `acc`.
+  if e == nil: return
+  if e.kind == iekVar:
+    if e.vname notin acc: acc.add e.vname
+    return
+  for k in irKids(e): irVars(k, acc)
+
+func isSynthName(nm: string): bool = nm.startsWith("__sym_")
+  ## RFC-0005 S8ax. A parser temporary (`freshSynth`): bound once, written
+  ## by no call.
+
+proc stmtMayWrite(s: IRStmt): bool =
+  ## RFC-0005 S8ax. Running `s` may change a value an earlier operand of the
+  ## same expression reads: it calls a routine or a closure, or assigns
+  ## something other than a parser temporary. A read, a check, an
+  ## allocation or a decline marker does not.
+  if s == nil: return false
+  case s.kind
+  of isLet: irHasCall(s.lvalue)
+  of isAssign: not isSynthName(s.aname) or irHasCall(s.avalue)
+  of isDeref: irHasCall(s.dPtr)
+  of isIndex: irHasCall(s.ixArr) or irHasCall(s.ixIdx)
+  of isVariantField: irHasCall(s.vfRecv)
+  of isNew, isUnsupported: false
+  of isBlock:
+    for c in s.stmts:
+      if stmtMayWrite(c): return true
+    false
+  of isIf:
+    for b in s.branches:
+      if irHasCall(b.cond) or stmtMayWrite(b.body): return true
+    stmtMayWrite(s.elseBody)
+  else: true
+
+func isEagerIR(e: IRExpr): bool =
+  ## RFC-0005 S8ax. Nim evaluates `e` where it stands, into a temporary: a
+  ## closure application, or an overflow-checked `+`/`-`/`*` (`succ`/`pred`
+  ## are parsed as one), or a string operation (a routine call in Nim). Any
+  ## other shape is an inline expression Nim reads with its enclosing
+  ## operation.
+  if e == nil: return false
+  case e.kind
+  of iekClosureCall, iekHofCall, iekMathCall: true
+  of iekBinop: e.bop in {bAdd, bSub, bMul}
+  of iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains, iekStrStartsWith,
+     iekStrEndsWith, iekStrReplaceAll, iekStrSplit, iekStrJoin, iekStrMatch,
+     iekStrFindRe, iekStrReplaceRe, iekStrConcat, iekIntToStr, iekStrToInt,
+     iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
+     iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
+     iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
+     iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp:
+    true
+  else: false
+
+func isLiteralIR(e: IRExpr): bool =
+  e == nil or e.kind in {iekIntLit, iekFloatLit, iekBoolLit, iekStrLit,
+                         iekNil, iekZeroValue, iekLambda}
+
+proc lazyStmt(s: IRStmt): bool =
+  ## RFC-0005 S8ax. `s` is part of an inline (lazy) operand: a read
+  ## (`isDeref`, `isIndex`, `isVariantField`) or a temporary bound to a
+  ## lazy expression.
+  case s.kind
+  of isDeref, isIndex, isVariantField: not stmtMayWrite(s)
+  of isLet: isSynthName(s.lname) and not isEagerIR(s.lvalue) and
+            not irHasCall(s.lvalue)
+  else: false
+
+proc lazyChecked(s: IRStmt): bool =
+  ## RFC-0005 S8ax. Running the lazy statement `s` checks something Nim
+  ## checks where the operand stands (a bound, a field's arm, an overflow,
+  ## a zero divisor): it cannot simply be moved after a later call.
+  case s.kind
+  of isIndex, isVariantField: true
+  of isLet: rhsHasInlineDefectFork(s.lvalue)
+  else: false
+
+type OrderMode = enum
+  omOperands      ## an operator's operands or a call's arguments
+  omElements      ## a constructor's elements, filled in order
+
+proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
+                   irs: var seq[IRExpr]; tys: seq[IRType]; mode: OrderMode;
+                   ctx: ParseCtx; fixed: seq[bool] = @[]) =
+  ## RFC-0005 S8ax. Operand `k` of an expression was parsed into
+  ## `irs[k]`, its statements into `preamble[marks[k] ..< marks[k+1]]` (the
+  ## last up to the end). Where a later operand's statements may write
+  ## (`stmtMayWrite`), place each operand's read where Nim makes it:
+  ##
+  ## * an element of a constructor (`omElements`), or an argument Nim
+  ##   evaluates into a temporary (`isEagerIR`) left inline, is bound to a
+  ##   temporary at the end of its own statements;
+  ## * the trailing lazy statements of an operand (`lazyStmt`), when none
+  ##   checks anything, move after the last operand's statements, where Nim
+  ##   reads them;
+  ## * when one checks something (`lazyChecked`), they stay, and the
+  ##   variables they read are snapshotted before them; after the last
+  ##   operand's statements a path on which any differs declines
+  ##   (`feEvalOrderUnmodelled`). A read through the heap (`isDeref`), an
+  ##   index or a variant-arm field among them declines whenever a later
+  ##   operand may write: its container has no comparison to snapshot.
+  ##
+  ## An operand `fixed[k]` marks (a `var` or `addr` argument, passed by
+  ## address) is left as it is.
+  let n = irs.len
+  if n < 2: return
+  var segs = newSeq[seq[IRStmt]](n)
+  for k in 0 ..< n:
+    let hi = if k + 1 < n: marks[k + 1] else: preamble.len
+    segs[k] = preamble[marks[k] ..< hi]
+  var writes = newSeq[bool](n)
+  for k in 0 ..< n:
+    for s in segs[k]:
+      if stmtMayWrite(s): writes[k] = true
+    if irHasCall(irs[k]): writes[k] = true
+  var later = newSeq[bool](n)
+  var any = false
+  for k in countdown(n - 2, 0):
+    later[k] = writes[k + 1] or later[k + 1]
+    any = any or later[k]
+  if not any: return
+  var outPre = preamble[0 ..< marks[0]]
+  var tail: seq[IRStmt]
+  for k in 0 ..< n:
+    if not later[k] or (k < fixed.len and fixed[k]):
+      outPre.add segs[k]
+      continue
+    let seg = segs[k]
+    if mode == omElements or isEagerIR(irs[k]) or irHasCall(irs[k]):
+      outPre.add seg
+      if mode == omElements and not isLiteralIR(irs[k]) or
+         irs[k].kind != iekVar and not isLiteralIR(irs[k]):
+        let tmp = freshSynth(ctx, "ord")
+        outPre.add mkLet(tmp, tys[k], irs[k])
+        irs[k] = mkVar(tmp)
+      continue
+    # The trailing lazy statements, and whether any checks something.
+    var cut = seg.len
+    while cut > 0 and lazyStmt(seg[cut - 1]): dec cut
+    var checked = false
+    var viaHeap = false
+    for i in cut ..< seg.len:
+      if lazyChecked(seg[i]): checked = true
+      if seg[i].kind == isDeref: viaHeap = true
+    if irs[k].kind != iekVar and rhsHasInlineDefectFork(irs[k]):
+      checked = true
+    outPre.add seg[0 ..< cut]
+    if not checked:
+      for i in cut ..< seg.len: tail.add seg[i]
+      continue
+    # Checked: read where it stands, and decline where a later call
+    # changed what it read.
+    var reads: seq[string]
+    var defined: seq[string]
+    for i in cut ..< seg.len:
+      let s = seg[i]
+      case s.kind
+      of isLet:
+        irVars(s.lvalue, reads)
+        defined.add s.lname
+      of isIndex:
+        irVars(s.ixArr, reads)
+        irVars(s.ixIdx, reads)
+        defined.add s.ixRetName
+      of isVariantField:
+        irVars(s.vfRecv, reads)
+        defined.add s.vfRetName
+      of isDeref:
+        irVars(s.dPtr, reads)
+        defined.add s.dRetName
+      else: discard
+    if irs[k].kind != iekVar: irVars(irs[k], reads)
+    var cmp: seq[(string, string)]
+    # A seq, array or object read by an index or a variant-arm field read
+    # has no `!=` the walker lowers; the comparisons are on the scalars a
+    # checked `let` reads (`rhsHasInlineDefectFork`'s operations).
+    var comparable = not viaHeap
+    for i in cut ..< seg.len:
+      if seg[i].kind in {isIndex, isVariantField}: comparable = false
+    for nm in reads:
+      if nm in defined or isSynthName(nm): continue
+      cmp.add (nm, freshSynth(ctx, "ordsnap"))
+    if irs[k].kind != iekVar:
+      # An inline checked argument: evaluate it here, as Nim checks it.
+      for (nm, snap) in cmp:
+        outPre.add mkLet(snap, nil, mkVar(nm))
+      outPre.add seg[cut ..< seg.len]
+      let tmp = freshSynth(ctx, "ord")
+      outPre.add mkLet(tmp, tys[k], irs[k])
+      irs[k] = mkVar(tmp)
+    else:
+      for (nm, snap) in cmp:
+        outPre.add mkLet(snap, nil, mkVar(nm))
+      outPre.add seg[cut ..< seg.len]
+    let why = "an operand Nim checks where it stands but reads after a " &
+              "later operand's call, which may change what it reads " &
+              "(feEvalOrderUnmodelled)"
+    if not comparable or cmp.len == 0 and viaHeap:
+      tail.add ctx.declineMarker(feEvalOrderUnmodelled, why)
+      continue
+    if cmp.len == 0: continue
+    var differs: IRExpr = nil
+    for (nm, snap) in cmp:
+      let d = mkBinop(bNe, mkVar(nm), mkVar(snap))
+      differs = if differs == nil: d else: mkBinop(bOr, differs, d)
+    tail.add mkIf(@[mkBranch(differs,
+                    mkBlock(@[ctx.declineMarker(feEvalOrderUnmodelled, why)]))])
+  outPre.add tail
+  # In place: `preamble` may be a caller's sequence another expression is
+  # appending to.
+  preamble.setLen(0)
+  for s in outPre: preamble.add s
+
 # ---- Forward decls -----------------------------------------------------------
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr
@@ -2252,11 +2556,107 @@ type OpaqueEffects = object
   ## (`opaqueWriteSummary`).
   inert: bool          ## false: the summary cannot be bounded by rebinding
   havoc: seq[string]   ## IR names, or `havocAllGlobals`
+  heapTys: seq[NimNode]
+    ## RFC-0005 S8ax: the `ref`/`ptr` types whose cells the call may write
+    ## (`IRStmt.opaqueHeapTys`)
+  heapAll: bool        ## RFC-0005 S8ax: every heap cell (`opaqueHeapAll`)
+  why: string          ## RFC-0005 S8ax: why the call is not inert
 
 proc isBodilessForeign(calleeSym: NimNode): bool  ## RFC-0005 S8as fwd decl
+proc objectInherits(t: NimNode): bool  ## RFC-0005 S8ax fwd decl
+
+proc reachRecFields(rec: NimNode; acc: var OpaqueEffects;
+                    seen: var seq[string])
+
+proc reachPointees(t: NimNode; acc: var OpaqueEffects;
+                   seen: var seq[string]) =
+  ## RFC-0005 S8ax. Every `ref`/`ptr` type a value of type `t` can hold,
+  ## through object and tuple fields (variant arms included), container
+  ## elements, distinct bases and pointees: the heaps a write through such
+  ## a value may land in (`OpaqueEffects.heapTys`). A pointee that takes
+  ## part in inheritance (a ref of a base addresses a subtype's cells, keyed
+  ## by the subtype), an untyped `pointer` or `cstring`, a routine type (a
+  ## closure's environment), or a shape not recognised reaches every heap
+  ## (`heapAll`).
+  if t.isNil:
+    acc.heapAll = true
+    return
+  var impl = t.getTypeImpl
+  if impl.kind == nnkVarTy and impl.len == 1: impl = impl[0].getTypeImpl
+  let key = t.repr & "|" & impl.repr
+  if key in seen: return
+  seen.add key
+  case impl.kind
+  of nnkSym:
+    if macros.strVal(impl) in ["pointer", "cstring"]: acc.heapAll = true
+  of nnkRefTy, nnkPtrTy:
+    if impl.len < 1:
+      acc.heapAll = true
+      return
+    let pointee = impl[0]
+    if objectInherits(pointee):
+      acc.heapAll = true
+      return
+    acc.heapTys.add t
+    reachPointees(pointee, acc, seen)
+  of nnkObjectTy:
+    if impl.len >= 3 and impl[2].kind != nnkEmpty:
+      reachRecFields(impl[2], acc, seen)
+  of nnkTupleTy, nnkTupleConstr:
+    for f in impl:
+      let ft = if f.kind == nnkIdentDefs: f[^2] else: f
+      reachPointees(ft, acc, seen)
+  of nnkBracketExpr:
+    for i in 1 ..< impl.len:
+      reachPointees(impl[i], acc, seen)
+  of nnkDistinctTy:
+    reachPointees(impl[0], acc, seen)
+  of nnkEnumTy, nnkRange, nnkInfix:
+    discard
+  else:
+    acc.heapAll = true
+
+proc reachRecFields(rec: NimNode; acc: var OpaqueEffects;
+                    seen: var seq[string]) =
+  ## RFC-0005 S8ax. `reachPointees` over an object's record list, every
+  ## arm of a record case included.
+  case rec.kind
+  of nnkIdentDefs:
+    reachPointees(rec[^2], acc, seen)
+  of nnkRecList, nnkRecCase, nnkOfBranch, nnkElse:
+    for c in rec:
+      if c.kind in {nnkIdentDefs, nnkRecList, nnkRecCase, nnkOfBranch,
+                    nnkElse}:
+        reachRecFields(c, acc, seen)
+  else: discard
+
+proc notInert(acc: var OpaqueEffects; why: string) =
+  ## RFC-0005 S8ax. The summary cannot be bounded: say why once.
+  if acc.inert:
+    acc.inert = false
+    acc.why = why
+
+proc isNoReturnRoutine(sym: NimNode): bool =
+  ## RFC-0005 S8ax. `sym` is a routine declared `{.noreturn.}` (`quit`).
+  if sym.kind != nnkSym: return false
+  let impl =
+    try: sym.getImpl
+    except CatchableError: return false
+  if impl.kind notin RoutineNodes: return false
+  let prag = impl.pragma
+  if prag.kind != nnkPragma: return false
+  for p in prag:
+    let name =
+      case p.kind
+      of nnkIdent, nnkSym: macros.strVal(p)
+      of nnkExprColonExpr, nnkCall:
+        if p[0].kind in {nnkIdent, nnkSym}: macros.strVal(p[0]) else: ""
+      else: ""
+    if name == "noreturn": return true
+  false
 
 proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
-                       seen: var seq[NimNode]) =
+                       seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8as. See `opaqueWriteSummary`.
   if n == nil or not acc.inert: return
   case n.kind
@@ -2264,69 +2664,171 @@ proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
     let k = symKind(n)
     if k in {nskVar, nskLet} and isModuleGlobal(n):
       if not irTypeRefFree(classifyType(n.getTypeInst).ty):
-        acc.inert = false
-      elif k == nskVar:
+        # RFC-0005 S8ax: a global that reaches heap cells (S8as declined
+        # it): every cell its type reaches may be written, and a `var` one
+        # is rebound below.
+        var rs: seq[string]
+        reachPointees(n.getTypeInst, acc, rs)
+      if k == nskVar:
         let nm = globalIRName(n)
         if nm notin acc.havoc: acc.havoc.add nm
     elif k == nskMethod or isBodilessForeign(n):
       # Dynamic dispatch, or a body outside Nim: it may write any
       # module-level variable (a foreign routine through an exported one,
-      # or a callback).
+      # or a callback), and (RFC-0005 S8ax) any cell one of them reaches.
       if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
+      acc.heapAll = true
+    elif isNoReturnRoutine(n):
+      # RFC-0005 S8ax: the call may end the process instead of returning.
+      acc.notInert("it may call `" & macros.strVal(n) & "`, which never " &
+                   "returns")
     elif isUserRoutine(n):
       # Routine membership through the Cluster N vocabulary
       # (`isUserRoutine`'s `userRoutineSymKinds`, then the
       # `resolveRoutineImpl` nil-core), as `tsymex_phase15_N2_kindgate_audit`
       # requires: an iterator or converter has no walkable impl and makes
       # the call non-inert below.
+      if containsSym(stack, n):
+        # RFC-0005 S8ax: a recursion may not end, and a replay of a witness
+        # through it would not either.
+        acc.notInert("it may recurse through `" & macros.strVal(n) &
+                     "`, which may not terminate")
+        return
       if containsSym(seen, n): return
       seen.add n
       block:
         let impl = resolveRoutineImpl(n)
         if impl == nil:
-          acc.inert = false
+          acc.notInert("`" & macros.strVal(n) & "` has no body to read")
           return
         if isNestedRoutine(n):
           for c in nestedCaptureSyms(impl):
             let ck = symKind(c)
             let writable = ck == nskVar or
               (ck == nskParam and c.getTypeInst.kind == nnkVarTy)
-            if not writable: continue
             if not irTypeRefFree(classifyType(c.getTypeInst).ty):
-              acc.inert = false
-              return
+              # RFC-0005 S8ax: a capture that reaches heap cells, a `let`
+              # one included: its cells are written through it (S8as
+              # declined a writable one and missed a `let` one).
+              var rs: seq[string]
+              reachPointees(c.getTypeInst, acc, rs)
+            if not writable: continue
             let nm = c.strVal
             if nm notin acc.havoc: acc.havoc.add nm
-        scanOpaqueEffects(impl[6], acc, seen)
+        stack.add n
+        scanOpaqueEffects(impl[6], acc, seen, stack)
+        stack.setLen(stack.len - 1)
       # A stdlib routine writes no variable of the program except through
       # its arguments and the callbacks it is given, and both are scanned
       # where they are named.
   of nnkCast, nnkAsmStmt:
-    # A forged pointer or foreign code inline: no bound on what it writes.
-    acc.inert = false
+    # RFC-0005 S8ax: a forged pointer or foreign code inline may write any
+    # module-level variable and any heap cell (S8as declined it). A local
+    # of the caller is reachable only through an argument, which the call
+    # site summarises, or through an address, which is a heap cell.
+    if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
+    acc.heapAll = true
+  of nnkWhileStmt:
+    # RFC-0005 S8ax: a loop may not end, and a replay of a witness through
+    # it would not either.
+    acc.notInert("its body holds a `while` loop, which may not terminate")
   else:
-    for c in n: scanOpaqueEffects(c, acc, seen)
+    for c in n: scanOpaqueEffects(c, acc, seen, stack)
 
 proc opaqueWriteSummary(calleeSym: NimNode): OpaqueEffects =
   ## RFC-0005 S8as. The effect summary of an inert-shaped opaque call
-  ## (statement position, value arguments, `isInertOpaqueCall`): the
-  ## module-level `var`s its body may write, transitively through every
-  ## routine it names, and for a routine declared inside another, the
-  ## enclosing variables it captures. Before S8as such a call was a no-op
-  ## for the walk, on the argument that "the walker does not model globals
-  ## at all"; S8an made it model them, so a global the call wrote kept its
-  ## old value: a false `sxUnsat`. The walk now rebinds every name listed to
-  ## a fresh value of its type (`feGlobalHavoc`).
+  ## (statement position): the module-level `var`s its body may write,
+  ## transitively through every routine it names, and for a routine
+  ## declared inside another, the enclosing variables it captures. Before
+  ## S8as such a call was a no-op for the walk, on the argument that "the
+  ## walker does not model globals at all"; S8an made it model them, so a
+  ## global the call wrote kept its old value: a false `sxUnsat`. The walk
+  ## now rebinds every name listed to a fresh value of its type
+  ## (`feGlobalHavoc`).
+  ##
+  ## RFC-0005 S8ax: and the heaps it may write -- every `ref`/`ptr` type a
+  ## global or capture it reaches can hold (`reachPointees`), or every heap
+  ## after a cast, inline assembly, a method or a foreign routine. S8as
+  ## declined each of those. The call's arguments are summarised by
+  ## `opaqueArgEffects`, its raises by `opaqueRaiseTypes`.
   ##
   ## Not inert (the walk keeps the call's `feOpaqueCallUnmodelled` taint)
-  ## when a rebinding cannot express the write: a cast or inline assembly,
-  ## a global or capture whose value reaches heap cells (the write may land
-  ## in a cell the walk holds), or a routine whose body cannot be read. A
-  ## method or a foreign routine may write anything:
-  ## `havocAllGlobals`.
+  ## when the call may not return (RFC-0005 S8ax: a `while` loop, a
+  ## recursion, a `{.noreturn.}` routine -- a witness through it is
+  ## replayed, and the replay would not end), or a routine has no body to
+  ## read.
   result.inert = true
-  var seen: seq[NimNode]
-  scanOpaqueEffects(calleeSym, result, seen)
+  var seen, stack: seq[NimNode]
+  scanOpaqueEffects(calleeSym, result, seen, stack)
+
+proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode  ## RFC-0005 S8ax fwd decl
+proc addrActualLvalue(a: NimNode): NimNode  ## RFC-0005 S8ax fwd decl
+proc ptrFormalStaysLocal(callee: NimNode; idx: int;
+                         seen: var seq[string]): bool  ## RFC-0005 S8ax fwd decl
+
+proc opaqueArgEffects(n, calleeSym: NimNode; acc: var OpaqueEffects) =
+  ## RFC-0005 S8ax. The writes an opaque call `n` may make through its
+  ## arguments, added to `acc` (S8as kept any call with a non-value
+  ## argument opaque). A `var` actual's root variable is rebound when the
+  ## actual is the variable or a path into its value; through a
+  ## dereference the cells are written instead, and the root keeps its
+  ## value. Every heap a ref-carrying actual reaches may be written. An
+  ## `addr` actual is a `var` one while the pointer cannot outlive the call
+  ## (`ptrFormalStaysLocal`). A routine-typed actual is not summarised: the
+  ## callee may call it, writing the caller's variables it captures.
+  for i in 1 ..< n.len:
+    let a = n[i]
+    if isInertArg(a): continue
+    var lv: NimNode = nil
+    if a.kind == nnkHiddenAddr and a.len == 1:
+      lv = a[0]
+      if isVarIndirection(lv): lv = lv[0]
+    else:
+      let alv = addrActualLvalue(a)
+      if alv != nil:
+        var seenP: seq[string]
+        if not ptrFormalStaysLocal(calleeSym, i - 1, seenP):
+          acc.notInert("the pointer `addr " & alv.repr & "` may outlive " &
+                       "the call")
+          return
+        lv = alv
+    if lv != nil:
+      var heapSteps: seq[NimNode]
+      let root = lvalueRoot(lv, heapSteps)
+      if root.isNil or symKind(root) notin {nskVar, nskParam, nskLet,
+                                            nskForVar, nskTemp}:
+        acc.notInert("the `var` argument `" & lv.repr & "` has no root " &
+                     "variable")
+        return
+      var rs: seq[string]
+      reachPointees(root.getTypeInst, acc, rs)
+      if heapSteps.len == 0:
+        let nm = if isModuleGlobal(root): globalIRName(root) else: root.strVal
+        if nm notin acc.havoc: acc.havoc.add nm
+      continue
+    if a.getTypeImpl.kind in {nnkProcTy, nnkIteratorTy}:
+      acc.notInert("the argument `" & a.repr & "` is a routine the call " &
+                   "may run")
+      return
+    var rs: seq[string]
+    reachPointees(a.getTypeInst, acc, rs)
+
+proc opaqueRaiseTypes(calleeSym: NimNode; ctx: ParseCtx): seq[string] =
+  ## RFC-0005 S8ax. The catchable exception types `calleeSym` may raise:
+  ## its inferred `raises` list (`std/effecttraits`, which follows every
+  ## routine it calls; `Defect`s are not tracked, see the walker's inert
+  ## arm). Before S8ax an inert opaque call never raised:
+  ## `try: boom(v) except ValueError: ...` was a false `sxUnsat`, and a
+  ## target after a call that always raises a false `sxSat`.
+  let lst =
+    try: getRaisesList(calleeSym)
+    except CatchableError: newEmptyNode()
+  for tn0 in lst:
+    let tn = canonicalExnTypeSym(tn0)
+    let typeId = if tn.kind in {nnkSym, nnkIdent}: macros.strVal(tn)
+                 else: tn.repr
+    collectUserExnAncestors(tn, ctx)
+    if typeId notin result: result.add typeId
 
 const foreignImportPragmas = ["importc", "importcpp", "importobjc",
                               "importjs", "dynlib"]
@@ -2981,6 +3483,70 @@ proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
   preamble.add mkLet(tmp, ty, ir)
   mkVar(tmp)
 
+proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
+                      ctx: ParseCtx): (IRExpr, IRExpr) =
+  ## RFC-0005 S8ax. `parseAtomicOperand` of a binary operator's two
+  ## operands, with the left one read where Nim reads it when the right
+  ## one's statements may write (`orderOperands`). Unchanged inside a guard
+  ## condition, which hoists nothing (the walk's own read-before-write
+  ## check covers it there).
+  if ctx.inGuardCond:
+    let l = parseAtomicOperand(a, preamble, ctx)
+    return (l, parseAtomicOperand(b, preamble, ctx))
+  let m0 = preamble.len
+  let l = parseAtomicOperand(a, preamble, ctx)
+  let m1 = preamble.len
+  let r = parseAtomicOperand(b, preamble, ctx)
+  var ops = @[l, r]
+  orderOperands(preamble, @[m0, m1], ops, @[IRType(nil), nil], omOperands,
+                ctx)
+  (ops[0], ops[1])
+
+proc parseOrderedArgs(n: NimNode; first: int; preamble: var seq[IRStmt];
+                      ctx: ParseCtx; mode = omOperands): seq[IRExpr] =
+  ## RFC-0005 S8ax. `parseExpr` of `n[first ..< n.len]` (a call's arguments,
+  ## or with `omElements` a constructor's elements), each read where Nim
+  ## reads it (`orderOperands`). A by-address argument (`var`) is left as
+  ## it is.
+  var marks: seq[int]
+  var tys: seq[IRType]
+  var fixed: seq[bool]
+  for i in first ..< n.len:
+    let c = if n[i].kind == nnkExprColonExpr: n[i][1] else: n[i]
+    marks.add preamble.len
+    tys.add(if c.typeKind != ntyNone: classifyType(c).ty else: nil)
+    fixed.add c.kind == nnkHiddenAddr
+    result.add parseExpr(c, preamble, ctx)
+  if not ctx.inGuardCond:
+    orderOperands(preamble, marks, result, tys, mode, ctx, fixed)
+
+proc parseCtorFieldsInOrder(n: NimNode; objTy: IRType;
+                            preamble: var seq[IRStmt];
+                            ctx: ParseCtx): Table[string, IRExpr] =
+  ## RFC-0005 S8ax. The present non-ref fields of the object constructor
+  ## `n`, parsed in SOURCE order, which is the order Nim fills them in, each
+  ## read where Nim reads it (`orderOperands`). The constructor then
+  ## assembles them in the type's declared order; before S8ax it also
+  ## parsed them in that order, so a field written by a call in a field
+  ## after it in the declaration but before it in the source was read
+  ## before the call.
+  var marks: seq[int]
+  var tys: seq[IRType]
+  var names: seq[string]
+  var irs: seq[IRExpr]
+  for k in 1 ..< n.len:
+    let child = n[k]
+    if child.kind != nnkExprColonExpr: continue
+    let ix = objTy.fieldNames.find(child[0].strVal)
+    if ix < 0 or objTy.fields[ix].kind in {itRef, itPtr}: continue
+    marks.add preamble.len
+    tys.add objTy.fields[ix]
+    names.add child[0].strVal
+    irs.add parseExpr(child[1], preamble, ctx)
+  if not ctx.inGuardCond:
+    orderOperands(preamble, marks, irs, tys, omElements, ctx)
+  for j, nm in names: result[nm] = irs[j]
+
 proc lowHighIntLit(tyName: string, wantLow: bool): int64 =
   ## Round-6 A0: the int64 bit-pattern for `low(tyName)`/`high(tyName)`,
   ## `tyName` guaranteed (by the caller) to be one of `intTyNames`. Unsigned
@@ -3428,7 +3994,6 @@ proc lvalueVarSyms(lv: NimNode; into: var seq[NimNode]) =
     return
   for c in lv: lvalueVarSyms(c, into)
 
-proc addrActualLvalue(a: NimNode): NimNode  ## RFC-0005 S8as fwd decl
 
 proc lvaluePath(lv: NimNode; steps: var seq[string]): NimNode =
   ## RFC-0005 S8as. The root variable of an lvalue that is a plain PATH into
@@ -3527,9 +4092,6 @@ proc isSymOf(n, sym: NimNode): bool =
   while t.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and t.len > 0:
     t = t[^1]
   t.kind == nnkSym and containsSym(@[sym], t)
-
-proc ptrFormalStaysLocal(callee: NimNode; idx: int;
-                         seen: var seq[string]): bool
 
 proc ptrUsesStayLocal(n, f: NimNode; seen: var seq[string]): bool =
   ## RFC-0005 S8an. True when every use of the pointer `f` in `n` is one
@@ -3660,7 +4222,15 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
+  # RFC-0005 S8ax: where each argument's statements start, its type, and
+  # whether it is passed by address (`orderOperands`).
+  var argMarks: seq[int]
+  var argTys: seq[IRType]
+  var argFixed: seq[bool]
   for i in 1 ..< n.len:
+    argMarks.add preamble.len
+    argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
+    argFixed.add(n[i].kind == nnkHiddenAddr or addrActualLvalue(n[i]) != nil)
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
       var heapSteps: seq[NimNode]
@@ -3750,6 +4320,9 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
     argIRs.add ir
+  if not ctx.inGuardCond:
+    orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
+                  argFixed)   ## RFC-0005 S8ax
   let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions, guards)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
@@ -3805,9 +4378,7 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
         "but its result is used here; the pragma is honoured only " &
         "in statement position, so it is treated as opaque instead " &
         "of dropped")
-    var argIRs: seq[IRExpr]
-    for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
+    var argIRs = parseOrderedArgs(n, 1, preamble, ctx)   ## RFC-0005 S8ax
     let retCls = classifyType(n)
     let synth = freshSynth(ctx, calleeName)
     # #163 slice 4: stays `inert = false` (the `mkOpaqueCall` default) —
@@ -3830,9 +4401,7 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       if impl.kind notin routineShapedForClosureDetect:
         let ti = calleeSym.getTypeInst
         if ti.kind == nnkProcTy:
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
+          let argIRs = parseOrderedArgs(n, 1, preamble, ctx)  ## RFC-0005 S8ax
           return mkClosureCall(calleeName, argIRs)
   # User-proc call in expression position. A-normalise. The instantiation
   # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
@@ -3846,8 +4415,12 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # so the call's fresh retSym allocates svInt there instead of the
   # type-driven BV default (see `IRStmt.isCall.retIntOffsetPositions`'s doc).
   let offsetPositions = calleeIntOffsetReturnPositions(calleeSym)
-  preamble.add userCallStmt(n, calleeSym, callKey, synth, retCls.ty,
-                            offsetPositions, preamble, ctx)
+  # RFC-0005 S8ax: bound first -- `userCallStmt` may rebuild `preamble`
+  # (`orderOperands`), and `preamble.add userCallStmt(.., preamble, ..)`
+  # appended to the sequence as it stood before the call.
+  let callStmt = userCallStmt(n, calleeSym, callKey, synth, retCls.ty,
+                              offsetPositions, preamble, ctx)
+  preamble.add callStmt
   mkVar(synth)
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
@@ -4522,8 +5095,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n[0].strVal == "&" and
        classifyType(n[1]).ty.kind == itString and
        classifyType(n[2]).ty.kind == itString:
-      let lhs = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (string-concat)
-      let rhs = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (string-concat)
+      let (lhs, rhs) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (string-concat); RFC-0005 S8ax order
       return mkStrOp(iekStrConcat, "&", @[lhs, rhs])
     # Phase 15 G5: a `{.borrow.}` operator on a `distinct T`. In the typed AST
     # `m1 + m2` (with `proc \`+\`(a,b: Meters): Meters {.borrow.}`) is an
@@ -4537,8 +5109,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         let bi = borrowInfoFor(n[0])
         if bi.isBorrow:
           let bop = binopForInfix(n[0].strVal)
-          let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (borrow intercept)
-          let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (borrow intercept)
+          let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (borrow intercept); RFC-0005 S8ax order
           return mkBorrowOp(bop, l, r, bi.returnsDistinct, bi.distinctTy)
     # Phase 15 R5 (Cluster R). A `nil` ref/ptr comparison `p == nil` / `nil == p`
     # (`==`/`!=`). One operand is an `nnkNilLit`; the OTHER is the ref/ptr whose
@@ -4685,8 +5256,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # unconditionally: no short-circuit guard could ever apply, and this
         # is exactly the faithful lowering the pre-restructure
         # `preamble.add rhsPreamble` gave for this same family.
-        let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2b chokepoint (bitwise and/or)
-        let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2b chokepoint (bitwise and/or)
+        let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2b chokepoint (bitwise and/or); RFC-0005 S8ax order
         mkBinop(op, l, r)
       else:
         # A2b EXCLUSION (boolean and/or, constraint 1): itBool, or untyped —
@@ -4717,8 +5287,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # arithmetic, shl/shr, xor — never bAnd/bOr, which are handled entirely
       # above in the `if op in {bAnd, bOr}` block and never fall through here;
       # constraint 1 is satisfied structurally by this branch's exclusivity).
-      let l = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (general infix)
-      let r = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (general infix)
+      let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (general infix); RFC-0005 S8ax order
       mkBinop(op, l, r)
   of nnkPrefix:
     # RFC-0005 S8c: a user prefix operator (`-`/`not`/`$`/`@` on a user type)
@@ -4779,8 +5348,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # comes from the whole expression's `seq[T]` type (works for `@[]` too).
       if n[1].kind != nnkBracket:
         error("symex: unsupported `@` operand (expected a seq literal `@[..]`)", n)
-      var elems: seq[IRExpr]
-      for c in n[1]: elems.add parseExpr(c, preamble, ctx)
+      # RFC-0005 S8ax: elements filled in order (`orderOperands`).
+      let elems = parseOrderedArgs(n[1], 0, preamble, ctx, omElements)
       # Recover the element IRType. Prefer the seq's own type; fall back to the
       # first element's classified type for a non-empty literal.
       let seqCls = classifyType(n)
@@ -4794,8 +5363,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   of nnkBracket:
     # Static array literal `[a, b, c]`. The element type comes from
     # the first element; uniform homogeneity is enforced by Nim.
-    var elems: seq[IRExpr]
-    for c in n: elems.add parseExpr(c, preamble, ctx)
+    # RFC-0005 S8ax: elements filled in order (`orderOperands`).
+    let elems = parseOrderedArgs(n, 0, preamble, ctx, omElements)
     let elemCls = classifyType(n[0])
     mkArrayLit(elems, elemCls.ty)
   of nnkBracketExpr:
@@ -5901,8 +6470,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       ## RFC-parser-normalization N2: `getImpl` + kind-check -> `resolveRoutineImpl`.
       let ci = resolveRoutineImpl(calleeSym)
       if ci == nil or not hasBorrowPragma(ci): break runeCompareIntercept
-      let lhs = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (rune-compare)
-      let rhs = parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (rune-compare)
+      let (lhs, rhs) = parseOperandPair(n[1], n[2], preamble, ctx)  ## A2a chokepoint (rune-compare); RFC-0005 S8ax order
       return mkBinop(binopForInfix(calleeSym.strVal), lhs, rhs)
     # RFC-0005 S8c: every builtin-by-name model above has had its chance
     # (and, since the user-callee gate at the top of this arm, sees only
@@ -5988,10 +6556,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # A named tuple constructor `(x: a, y: b)` presents each field as an
     # `nnkExprColonExpr[name, valueExpr]` child; unwrap to the value.
     let tupleTy = classifyType(n).ty
-    var elems: seq[IRExpr]
-    for child in n:
-      let elemNode = if child.kind == nnkExprColonExpr: child[1] else: child
-      elems.add parseExpr(elemNode, preamble, ctx)
+    # RFC-0005 S8ax: elements filled in order (`orderOperands`).
+    let elems = parseOrderedArgs(n, 0, preamble, ctx, omElements)
     mkTupleLit(elems, tupleTy)
   of nnkObjConstr:
     # RFC-chapulin-hardening P2a (walker v52->53): a value-object (non-ref)
@@ -6434,6 +7000,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                 fty, objTy, fieldName, isPtrCtor)
         return mkVar(tmp)
       preamble.add mkNewT(tmp, objTyFull)
+      let inOrder = parseCtorFieldsInOrder(n, objTy, preamble, ctx)  ## RFC-0005 S8ax
       for i, fieldName in objTy.fieldNames:
         if not byName.hasKey(fieldName): continue
         let fty = objTy.fields[i]
@@ -6464,6 +7031,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                         "from an unresolvable expression " &
                                         "(feUnsupportedExprKind)")
           valIR = mkNil(fty)
+        elif inOrder.hasKey(fieldName):
+          valIR = inOrder[fieldName]
         else:
           valIR = parseExpr(valNode, preamble, ctx)
         preamble.add mkFieldDerefWrite(mkVar(tmp), valIR, fty, objTy,
@@ -6473,6 +7042,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # P2a / P2b (pre-H1 shape, UNCHANGED): a plain (non-ref) value-object
     # constructor still builds a positional `itTuple` literal.
     var elems: seq[IRExpr]
+    let inOrder = parseCtorFieldsInOrder(n, objTy, preamble, ctx)  ## RFC-0005 S8ax
     for i, fieldName in objTy.fieldNames:
       let fty = objTy.fields[i]
       let isRefField = fty.kind in {itRef, itPtr}
@@ -6498,6 +7068,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                         "from an unresolvable expression " &
                                         "(feUnsupportedExprKind)")
           elems.add mkNil(fty)
+        elif inOrder.hasKey(fieldName):
+          elems.add inOrder[fieldName]
         else:
           elems.add parseExpr(valNode, preamble, ctx)
       elif isRefField:
@@ -9587,16 +10159,32 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
     # RFC-0005 S8as: and its body's writes to module-level variables (and a
     # nested routine's to its captures) are bounded by its effect summary
     # (`opaqueWriteSummary`); a catalogued stdlib routine writes none.
-    var inert = isInertOpaqueCall(n)
-    var havoc: seq[string]
-    if inert and not (m.kind == smkOpaqueEffectful and not userCallee):
-      let eff = opaqueWriteSummary(calleeSym)
+    #
+    # RFC-0005 S8ax: a user or foreign routine's writes through its
+    # arguments and to the heap are summarised too (`opaqueArgEffects`,
+    # `reachPointees`), and its raises are forked (`opaqueRaiseTypes`).
+    let catalogued = m.kind == smkOpaqueEffectful and not userCallee
+    var inert = if catalogued: isInertOpaqueCall(n) else: true
+    var eff: OpaqueEffects
+    var raises: seq[string]
+    if not catalogued:
+      eff = opaqueWriteSummary(calleeSym)
+      opaqueArgEffects(n, calleeSym, eff)
       inert = eff.inert
-      havoc = eff.havoc
+      if inert: raises = opaqueRaiseTypes(calleeSym, ctx)
+    var heapTys: seq[IRType]
+    for t in eff.heapTys:
+      let it = classifyType(t).ty
+      if it == nil or it.kind notin {itRef, itPtr}: continue
+      var dup = false
+      for h in heapTys:
+        if $h == $it: dup = true
+      if not dup: heapTys.add it
     var argIRs: seq[IRExpr]
     for i in 1 ..< n.len:
       argIRs.add parseExpr(n[i], preamble, ctx)
-    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, havoc)
+    mkOpaqueCall(calleeName, "", argIRs, tBool(), inert, eff.havoc,
+                 heapTys, eff.heapAll, raises, not catalogued, eff.why)
   else:
     let callKey = ensureProcRegistered(ctx, calleeSym, n)
     userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
@@ -9951,7 +10539,8 @@ proc dottedFieldIndexAssign(n, fieldNode, idxNode: NimNode, rhs: IRExpr,
     return mkFieldDerefWrite(ptrIR, mkVar(synth), fieldTy, pointeeTy,
                              fieldName, isPtr)
   let tmp = freshSynth(ctx, "fidx")
-  preamble.add mkLet(tmp, fieldTy, parseExpr(fieldNode, preamble, ctx))
+  let fieldIR = parseExpr(fieldNode, preamble, ctx)   ## RFC-0005 S8ax: first
+  preamble.add mkLet(tmp, fieldTy, fieldIR)
   let idxIR = parseExpr(idxNode, preamble, ctx)
   let valIR = value()
   preamble.add mkIndexAssignStmt(tmp, idxIR, valIR, siteLoc(n))

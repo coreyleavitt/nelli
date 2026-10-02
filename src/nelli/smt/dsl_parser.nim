@@ -5382,7 +5382,27 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           # Arguments AFTER the pattern: `start` (an int), `by` (replace's
           # string) or a captures array. Nim evaluates arguments left to
           # right and `re` raises before any later argument runs, so a
-          # rejected pattern lowers the receiver alone.
+          # rejected pattern lowers the receiver alone. RFC-0005 S8bb: the
+          # receiver is parsed FIRST, so a temporary it hoists precedes the
+          # later arguments' in the preamble (evaluation order).
+          # RFC-0005 S8bb: `findBounds` lowers its receiver and `start`
+          # twice (one `iekStrFindRe` per half), so a compound one is bound
+          # to a fresh `let` -- lowered, and its raises deposited, once, in
+          # evaluation order (the receiver's temporary before `start` is
+          # parsed). Unconditional, also in a `while` guard: a guard
+          # preamble routes the loop through the rotation
+          # (`mkShortCircuitWhile`), which re-runs it every iteration.
+          # S8ay declined the call instead (a fresh value).
+          let bindTwice = calleeSym.strVal == "findBounds" and not rejected
+          proc bindOnce(ir: IRExpr; node: NimNode;
+                        preamble: var seq[IRStmt]): IRExpr =
+            if not bindTwice or (isAtomicIR(ir) and ir.kind != iekStrAt):
+              return ir
+            let tmp = freshSynth(ctx, "regexOperand")
+            preamble.add mkLet(tmp, classifyType(node).ty, ir)
+            mkVar(tmp)
+          let recvIR = bindOnce(parseExpr(n[1], preamble, ctx), n[1],
+                                preamble)
           var startIR: IRExpr = mkIntLit(0)
           var byIR: IRExpr = mkStrLit("")
           var captures = false
@@ -5391,10 +5411,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
               let a = n[i]
               let k = a.typeKind
               if k in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64}:
-                startIR = parseExpr(a, preamble, ctx)
+                startIR = bindOnce(parseExpr(a, preamble, ctx), a, preamble)
               elif k == ntyString: byIR = parseExpr(a, preamble, ctx)
               else: captures = true   # `matches: var openArray[...]`
-          let recvIR = parseExpr(n[1], preamble, ctx)
           template decline(retTy: IRType; what = entry): IRExpr =
             mkStrOp(iekStrUnsupported,
                     "regex:" & encodeRegexSpec(what, flag, rePat),
@@ -5415,10 +5434,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                            @[recvIR, startIR], tInt())
           of "findBounds":
             # (first, last): two lowerings over the same receiver and start,
-            # so both must be atoms -- a compound one would be lowered (and
-            # its raises deposited) twice.
-            if not (isAtomicIR(recvIR) and isAtomicIR(startIR)):
-              return decline(classifyType(n).ty)
+            # both atoms (`bindOnce` above).
             return mkTupleLit(@[
               mkStrOp(iekStrFindRe,
                       encodeRegexSpec("findBoundsFirst", flag, rePat),

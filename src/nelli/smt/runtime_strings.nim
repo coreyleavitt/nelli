@@ -373,8 +373,9 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
 
 proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
   ## RFC-0005 S8ay. A `std/re` call the walker declines (findAll, split,
-  ## replacef, multiReplace, the captures overloads, findBounds over a
-  ## compound operand). The receiver is lowered first, keeping its raise
+  ## replacef, multiReplace, the captures overloads; RFC-0005 S8bb: no
+  ## longer findBounds over a compound operand, which the parser binds to a
+  ## temporary). The receiver is lowered first, keeping its raise
   ## forks; a rejected pattern is still the `RegexError` raise. The
   ## captures overloads write their `matches` argument, which no fresh
   ## value covers, so they are ⊤ (`seUnsupportedRegex`); the rest return
@@ -393,8 +394,7 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
   if not sp.entry.endsWith("Captures"):
     raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
       msg: what & " is not modeled (RFC-0005 S8ay: " & sp.entry & " needs " &
-           "every match, or an operand would be lowered twice; the value " &
-           "is a fresh one, replay-gated)")
+           "every match; the value is a fresh one, replay-gated)")
   raise (ref SymexUnsupportedRegexError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
     msg: what & " with a captures array is not modeled: the call writes " &
          "its `matches` argument (RFC-0005 S8ay, seUnsupportedRegex)")

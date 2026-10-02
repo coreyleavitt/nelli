@@ -202,7 +202,15 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "198"
+const symexWalkerVersion* = "201"
+  ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
+  ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink
+  ## order, and an `if` guard that raised on every path (a rejected
+  ## pattern) is walked no further: a raise written after another in one
+  ## `while` guard, or after a rejected pattern, was a false sxSat.
+  ## `findBounds` binds a compound receiver or `start` to a temporary
+  ## (it declined). Provisional 201 (S8ba holds 200).
+  ##
   ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own
   ## formulas (`regex_parser.lowerRegexEntry`) over a PCRE-faithful byte
   ## reader (`pcre_syntax.nim`): `contains` is an occurrence in

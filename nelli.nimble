@@ -1046,6 +1046,7 @@ task test, "Run the test suite":
             # other shapes decline naming the construct. Walker 196.
             "tsymex_rfc0005_s8aw_remainder",
             "tsymex_rfc0005_s8ay_remainder",
+            "tsymex_rfc0005_s8bb_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

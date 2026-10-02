@@ -932,7 +932,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ay (the std/re entry points' own formulas over a
     ## PCRE-faithful reader; re vs rex in the IR; a rejected pattern raises
     ## RegexError). Provisional 198 (S8ax holds 197).
-    check symexWalkerVersion == "198"
+    ## RFC-0005 S8bb (raises drain in evaluation order; findBounds binds a
+    ## compound operand; PCRE leftmost-first selection, captures, replace
+    ## over the priority automaton). Provisional 201 (S8ba holds 200).
+    check symexWalkerVersion == "201"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

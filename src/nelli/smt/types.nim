@@ -1342,6 +1342,10 @@ type
     of isNew:
       nRetName*:   string    ## Phase 15 R1a: fresh ref let-name the alloc binds.
       nRefTy*:     IRType    ## the allocated `itRef`/`itPtr` type.
+      nAddrOf*:    string    ## RFC-0005 S8ax: non-empty for `addr x` of the
+                             ## local `x`: the address cell of `x` in the
+                             ## current frame, allocated on first use and
+                             ## reused after (`nRetName` is its env name).
     of isDerefWrite:
       dwPtr*:      IRExpr    ## Phase 15 R3: the ref/ptr expr being written through.
       dwValue*:    IRExpr    ## the RHS value stored into `dwPtr[]`.
@@ -4935,10 +4939,11 @@ proc mkPtrDeref*(retName: string, p: IRExpr, elemTy: IRType,
   IRStmt(kind: isDeref, dRetName: retName, dPtr: p, dElemTy: elemTy,
          dPtrFamily: true, dCell: cell)
 
-proc mkNewT*(retName: string, refTy: IRType): IRStmt =
+proc mkNewT*(retName: string, refTy: IRType, addrOf = ""): IRStmt =
   ## Phase 15 R1a (ADR-0010). `let retName = new(T)` allocation binding a fresh
   ## ref. `refTy` is the allocated `itRef`/`itPtr` type.
-  IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy)
+  ## RFC-0005 S8ax: `addrOf` names a local whose address cell this is.
+  IRStmt(kind: isNew, nRetName: retName, nRefTy: refTy, nAddrOf: addrOf)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
                    ptrFamily = false, cell = false): IRStmt =
@@ -5269,6 +5274,12 @@ func capCellName*(frame: int; local: string): string =
   ## is not a Nim identifier). `displayName` gives back `local`.
   globalEnvPrefix & "@cap" & $frame & "." & local
 
+func addrCellName*(local: string): string =
+  ## RFC-0005 S8ax. The env name of the address cell of the variable
+  ## `local` (`addr local`): frame local (no `__gl:` prefix), never a Nim
+  ## identifier.
+  "__addr." & local
+
 func displayName*(name: string): string =
   ## RFC-0005 S8an. The source spelling of an IR name, for messages: a
   ## global's `__gl:<module>.` prefix is dropped.
@@ -5472,7 +5483,8 @@ proc render*(s: IRStmt): string =
     s.dRetName & "=deref<" & fam & ">(" & render(s.dPtr) & ")" & fld & ":" &
       $s.dElemTy
   of isNew:
-    s.nRetName & "=new(" & $s.nRefTy & ")"
+    s.nRetName & "=new(" & $s.nRefTy & ")" &
+      (if s.nAddrOf.len > 0: "@" & s.nAddrOf else: "")   # RFC-0005 S8ax
   of isDerefWrite:
     let fam = if s.dwPtrFamily: "ptr" else: "ref"
     let fld = if s.dwField.len > 0: "." & s.dwField else: ""

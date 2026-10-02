@@ -326,10 +326,12 @@ suite "RFC-0010 B4 round 2 — maxCallDepth is a documented exception, not unlim
 
   test "an explicit large bound genuinely reaches deeper recursion":
     # The default cap (3) is too shallow for this SUT's needed depth (up to
-    # 9) and declines; an explicit large bound must actually let the walker
-    # descend that far and find the real witness.
+    # 9) and declined; an explicit large bound must actually let the walker
+    # descend that far and find the real witness. RFC-0005 S8ax: `n < 10`
+    # bounds the recursion, so the adaptive depth follows it past the
+    # default cap and the default now finds the witness too (`n == 7`).
     let viaDefault = symexFind(boundedRecursionSut, tLabel("bounded_recursion_hit"))
-    check viaDefault.status == sxUnknown
+    check viaDefault.status == sxSat
     let viaLargeBound = symexFind(boundedRecursionSut,
         tLabel("bounded_recursion_hit"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 20)))

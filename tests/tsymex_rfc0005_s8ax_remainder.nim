@@ -128,6 +128,10 @@ proc sutDownMixed(n: int) =
   symexAssume(n >= 0)
   if s8axDown(n) and n == 5: symexTarget("dm")
 
+proc sutFibFree(x: int) =
+  # `x` free: `fib` fans out, so the depth is not extended.
+  if s8axFib(x) == 13: symexTarget("ff")
+
 suite "RFC-0005 S8ax: walker version":
   test "symexWalkerVersion is at least 197":
     check parseInt(symexWalkerVersion) >= 197
@@ -179,8 +183,22 @@ suite "RFC-0005 S8ax (3): the call depth adapts to the frontier":
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check r.errors.hasKind(beBudgetExhaustedUnmodelled)
+  test "a recursion that fans out is not extended":
+    ## RED (on 7190da2): `tsymex_phase3_recursion`'s `fib(x) == 13` was
+    ## killed at 900 s: the depth-first frontier test admitted `fib`'s
+    ## leftmost chain to the hard budget. Now 12 walks.
+    let r = symexFind(sutFibFree, tLabel("ff"))
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.hasKind(beBudgetExhaustedUnmodelled)
+    let st = r.callStats.filterIt(it.name == "s8axFib")
+    check st.len == 1
+    check st[0].walked <= 20
   test "maxRecursionDepth = 0 turns the extension off":
-    let r = symexFind(sutSumToAx, tLabel("st"),
+    ## `sutDownBounded`, not `sutSumToAx`: a declined `sumTo` frame leaves
+    ## `k + <fresh>` whose overflow query runs for minutes (on the base
+    ## too, 468 s), which the test is not about.
+    let r = symexFind(sutDownBounded, tLabel("db"),
       SymexSettings(budget: ResourceBudget(maxRecursionDepth: 0)))
     checkpoint show(r.errors)
     check r.status == sxUnknown
@@ -700,3 +718,308 @@ suite "RFC-0005 S8ax (6): a closure applied away from its frame":
     clean(sutCloBranch, "bad", sxUnsat)
   test "a capture passed by address while the closure runs declines":
     declines(sutCloByAddr, "ok", ceCaptureByRefUnmodelled, "passed by address")
+
+# ---- (8) `addr` of a routine's variable is an address cell ------------------
+#
+# DECLINES before S8ax: `addr x` anywhere but a `let p = addr x` the alias
+# rewrite took, or a `ptr` actual of a call, was `feUnsupportedExprKind`
+# (CR-2a, `nnkAddr`) or `heUnsafeCast` ("unsafe pointer materialisation"):
+# a pointer stored in an object, returned, compared, re-pointed on one arm,
+# kept by a callee, or into a seq element. `addr x` of a routine variable
+# is now a `ptr` cell that holds `x` for the frame's lifetime, with `x` kept
+# equal to it after every statement. A pointer that may outlive its frame
+# declines where it is dereferenced or compared; a pointer into a seq
+# declines where it is used after a statement that may resize the seq.
+# Every verdict probed against the compiler.
+
+type S8axPBox = object
+  p: ptr int
+
+var gS8axP: ptr int
+
+proc s8axSetGetP(a: var int; p: ptr int): int =
+  a = 5
+  p[]
+
+proc s8axGetP(x: var int): ptr int = addr x
+
+proc s8axDangling(): ptr int =
+  var y = 3
+  result = addr y
+
+proc s8axKeepP(p: ptr int) = gS8axP = p
+
+proc s8axRaiseP(p: ptr int) =
+  p[] = 7
+  raise newException(ValueError, "x")
+
+proc s8axSwapP(a, b: ptr int) =
+  let t = a[]
+  a[] = b[]
+  b[] = t
+
+proc s8axRecP(n: int; p: ptr int) =
+  var y = n
+  var b = S8axPBox(p: addr y)
+  if n > 0:
+    s8axRecP(n - 1, b.p)
+  p[] += y
+
+type S8axPair = object
+  a, b: int
+
+proc sutAddrStored(v: int) =
+  var x = v
+  var b = S8axPBox(p: addr x)
+  b.p[] = 6
+  if x == 6: symexTarget("ok")
+  if x != 6: symexTarget("bad")
+
+proc sutAddrStoredCall(v: int) =
+  var x = v
+  var b = S8axPBox(p: addr x)
+  let r = s8axSetGetP(x, b.p)
+  if r == 5 and x == 5: symexTarget("ok")
+  if r != 5 or x != 5: symexTarget("bad")
+
+proc sutAddrReturned(v: int) =
+  var x = v
+  let p = s8axGetP(x)
+  p[] = 7
+  if x == 7: symexTarget("ok")
+  if x != 7: symexTarget("bad")
+
+proc sutAddrCompared(v: int) =
+  var x = v
+  var y = v
+  let p = addr x
+  let q = addr y
+  let r = addr x
+  if p == r and p != q: symexTarget("ok")
+  if p == q or p != r: symexTarget("bad")
+
+proc sutAddrBranch(c: bool) =
+  var x = 1
+  var y = 2
+  var p = addr x
+  if c: p = addr y
+  p[] = 3
+  if c and y == 3 and x == 1: symexTarget("ok")
+  if (c and x == 3) or (not c and y == 3): symexTarget("bad")
+
+proc sutAddrKept(v: int) =
+  symexAssume(v > -100 and v < 100)
+  var x = v
+  s8axKeepP(addr x)
+  x = x + 1
+  if gS8axP[] == v + 1: symexTarget("ok")
+  if gS8axP[] != v + 1: symexTarget("bad")
+
+proc sutAddrRaised(v: int) =
+  var x = v
+  var b = S8axPBox(p: addr x)
+  try:
+    s8axRaiseP(b.p)
+  except ValueError:
+    if x == 7: symexTarget("ok")
+    if x != 7: symexTarget("bad")
+
+proc sutAddrSwap(v, w: int) =
+  var x = v
+  var y = w
+  var bx = S8axPBox(p: addr x)
+  s8axSwapP(bx.p, addr y)
+  if x == w and y == v: symexTarget("ok")
+  if x != w or y != v: symexTarget("bad")
+
+proc sutAddrRec(v: int) =
+  var x = 0
+  var b = S8axPBox(p: addr x)
+  s8axRecP(2, b.p)
+  if x == 3: symexTarget("ok")
+  if x != 3: symexTarget("bad")
+
+proc sutAddrDangling(v: int) =
+  let p = s8axDangling()
+  if p[] == 3: symexTarget("ok")
+
+proc sutAddrDeadCompare(v: int) =
+  let p = s8axDangling()
+  let q = s8axDangling()
+  if p == q: symexTarget("ok")
+
+proc sutAddrLostFormal(v: int) =
+  var o = S8axPair(a: v, b: 0)
+  let p = s8axGetP(o.a)
+  p[] = 3
+  if o.a == 3: symexTarget("ok")
+
+proc sutAddrSeqElem(v: int) =
+  var s = @[1, v, 3]
+  let p = addr s[1]
+  p[] = 9
+  if s[1] == 9 and s[0] == 1: symexTarget("ok")
+  if s[1] != 9 or s[0] != 1: symexTarget("bad")
+
+proc sutAddrSeqWrite(v: int) =
+  var s = @[1, v, 3]
+  let p = addr s[1]
+  s[1] = 4
+  if p[] == 4: symexTarget("ok")
+  if p[] != 4: symexTarget("bad")
+
+proc sutAddrSeqResized(v: int) =
+  var s = @[1, v, 3]
+  let p = addr s[1]
+  s.add 4
+  if p[] == v: symexTarget("ok")
+
+proc sutAddrIndexArr(i: int) =
+  var a = [1, 2, 3]
+  if i >= 0 and i < 3:
+    let p = addr a[i]
+    p[] = 10
+    if a[1] == 10 and i == 1: symexTarget("ok")
+    if (a[1] == 10) != (i == 1): symexTarget("bad")
+
+proc sutAddrIndexSeq(i: int) =
+  var s = @[1, 2, 3]
+  if i >= 0 and i < 3:
+    let p = addr s[i]
+    p[] = 10
+    if s[2] == 10 and i == 2: symexTarget("ok")
+    if (s[2] == 10) != (i == 2): symexTarget("bad")
+
+proc sutAddrIndexChecked(i: int) =
+  var s = @[1, 2, 3]
+  let p = addr s[i]
+  if i == 1: symexTarget("ok")
+  if i == 5: symexTarget("bad")
+
+suite "RFC-0005 S8ax (8): `addr` of a routine's variable":
+  test "a pointer stored in an object":
+    ## RED: `feUnsupportedExprKind` (CR-2a, `nnkAddr`).
+    verdict(sutAddrStored, "ok", sxSat)
+    verdict(sutAddrStored, "bad", sxUnsat)
+    verdict(sutAddrStoredCall, "ok", sxSat)
+    verdict(sutAddrStoredCall, "bad", sxUnsat)
+  test "a pointer returned through a var formal":
+    ## RED: `feUnsupportedExprKind` (CR-2a, `nnkAddr`).
+    verdict(sutAddrReturned, "ok", sxSat)
+    verdict(sutAddrReturned, "bad", sxUnsat)
+  test "pointers compared":
+    ## RED: `feUnsupportedExprKind` (CR-2a, `nnkAddr`).
+    verdict(sutAddrCompared, "ok", sxSat)
+    verdict(sutAddrCompared, "bad", sxUnsat)
+  test "a pointer re-pointed on one arm":
+    ## RED: `heUnsafeCast` (unsafe pointer materialisation).
+    verdict(sutAddrBranch, "ok", sxSat)
+    verdict(sutAddrBranch, "bad", sxUnsat)
+  test "a pointer a callee keeps, a raise, a swap, a recursion":
+    verdict(sutAddrKept, "ok", sxSat)
+    verdict(sutAddrKept, "bad", sxUnsat)
+    verdict(sutAddrRaised, "ok", sxSat)
+    verdict(sutAddrRaised, "bad", sxUnsat)
+    verdict(sutAddrSwap, "ok", sxSat)
+    verdict(sutAddrSwap, "bad", sxUnsat)
+    verdict(sutAddrRec, "ok", sxSat)
+    verdict(sutAddrRec, "bad", sxUnsat)
+  test "a pointer to a returned frame's variable declines":
+    declines(sutAddrDangling, "ok", feUnsupportedOp, "dereferenced here")
+    declines(sutAddrDeadCompare, "ok", feUnsupportedOp, "compared here")
+  test "a var formal's address bound to a field declines":
+    declines(sutAddrLostFormal, "ok", feUnsupportedOp, "var` formal")
+  test "the address of a seq element":
+    ## RED: `heUnsafeCast` (unsafe pointer materialisation).
+    verdict(sutAddrSeqElem, "ok", sxSat)
+    verdict(sutAddrSeqElem, "bad", sxUnsat)
+    verdict(sutAddrSeqWrite, "ok", sxSat)
+    verdict(sutAddrSeqWrite, "bad", sxUnsat)
+  test "a seq element's pointer used after a resize declines":
+    declines(sutAddrSeqResized, "ok", feUnsupportedOp, "resize")
+  test "the address of a computed index":
+    ## RED: `heUnsafeCast` (unsafe pointer materialisation).
+    verdict(sutAddrIndexArr, "ok", sxSat)
+    verdict(sutAddrIndexArr, "bad", sxUnsat)
+    verdict(sutAddrIndexSeq, "ok", sxSat)
+    verdict(sutAddrIndexSeq, "bad", sxUnsat)
+  test "a computed index is checked where `addr` takes it":
+    verdict(sutAddrIndexChecked, "ok", sxSat)
+    let r = symexFind(sutAddrIndexChecked, tLabel("bad"))
+    check r.status == sxRaised
+
+# ---- (9) two by-address arguments: a solver check of disjointness ---------
+#
+# DECLINES before S8ax: `setTwo(s[i], s[j])` and `setTwo(o.a1, o.a2)` (two
+# fields of a variant arm) declined at parse time, the path check
+# (`lvaluesDisjoint`) seeing neither a computed index nor an arm's field.
+# A computed index now pairs with the other path's, and the call declines
+# only on the paths where the pairs may all be equal; two arm fields are
+# two locations (Nim checks the arm where it takes each address).
+
+proc s8axSetTwo(a, b: var int) =
+  a = 1
+  b = 2
+
+proc s8axSetTwoP(a, b: ptr int) =
+  a[] = 1
+  b[] = 2
+
+type
+  S8axK = enum skA, skB
+  S8axV = object
+    n: int
+    case k: S8axK
+    of skA:
+      a1, a2: int
+    of skB:
+      b1: int
+
+proc sutAliasIndex(i, j: int) =
+  var s = [0, 0, 0, 0]
+  if i >= 0 and i < 4 and j >= 0 and j < 4 and i != j:
+    s8axSetTwo(s[i], s[j])
+    if s[i] == 1 and s[j] == 2: symexTarget("ok")
+    if s[i] != 1 or s[j] != 2: symexTarget("bad")
+
+proc sutAliasIndexEq(i, j: int) =
+  var s = @[0, 0, 0, 0]
+  if i >= 0 and i < 4 and j >= 0 and j < 4:
+    s8axSetTwo(s[i], s[j])
+    if i == j and s[i] == 2: symexTarget("ok")
+
+proc sutAliasIndexP(i: int) =
+  var s = [0, 0, 0, 0]
+  if i >= 0 and i < 3:
+    s8axSetTwoP(addr s[i], addr s[i + 1])
+    if s[i] == 1 and s[i + 1] == 2: symexTarget("ok")
+    if s[i] != 1 or s[i + 1] != 2: symexTarget("bad")
+
+proc sutAliasArm(v: int) =
+  var o = S8axV(k: skA, a1: v, a2: 0)
+  s8axSetTwo(o.a1, o.a2)
+  if o.a1 == 1 and o.a2 == 2: symexTarget("ok")
+  if o.a1 != 1 or o.a2 != 2: symexTarget("bad")
+
+proc sutAliasArmOther(v: int) =
+  var o = S8axV(k: skA, a1: v, a2: 0)
+  s8axSetTwo(o.a1, o.b1)
+  symexTarget("ok")
+
+suite "RFC-0005 S8ax (9): by-address arguments that may be one location":
+  test "two computed indices proven distinct":
+    ## RED: `feUnsupportedOp` ("var argument write-back not modelled";
+    ## the `addr` form "addr argument aliases another argument").
+    verdict(sutAliasIndex, "ok", sxSat)
+    verdict(sutAliasIndex, "bad", sxUnsat)
+    verdict(sutAliasIndexP, "ok", sxSat)
+    verdict(sutAliasIndexP, "bad", sxUnsat)
+  test "two computed indices that may be equal decline":
+    declines(sutAliasIndexEq, "ok", feUnsupportedOp, "one location")
+  test "two fields of one variant arm":
+    ## RED: `feUnsupportedOp` ("var argument write-back not modelled").
+    verdict(sutAliasArm, "ok", sxSat)
+    verdict(sutAliasArm, "bad", sxUnsat)
+  test "fields of two arms raise where the address is taken":
+    let r = symexFind(sutAliasArmOther, tLabel("ok"))
+    check r.status == sxRaised

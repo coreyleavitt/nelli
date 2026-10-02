@@ -212,7 +212,9 @@ const symexWalkerVersion* = "197"
   ## loop or a call is feasibility-checked, adaptively per site; an arm
   ## that only declines always is. (3) Past `maxCallDepth` a recursion its
   ## arguments bound is followed up to `maxRecursionDepth` (default 24); a
-  ## call past it declines naming both budgets. (4) A signed `int` heap
+  ## call past it declines naming both budgets; a body that may recurse
+  ## twice on one execution is not extended, nor is anything under an
+  ## extension once it reached the hard budget. (4) A signed `int` heap
   ## under Int semantics has Int-sorted cells (any width, ranged too); a
   ## bit-vector stored and read back is the same term (a conversion memo
   ## and read-over-write). (5) An inert opaque call havocs the heap cells
@@ -224,7 +226,17 @@ const symexWalkerVersion* = "197"
   ## the variable as it stands. (7) Operands are read where Nim reads them:
   ## a constructor element and an eager argument before a later call, an
   ## inline read after it; a checked inline read a later call changes
-  ## declines (`feEvalOrderUnmodelled`).
+  ## declines (`feEvalOrderUnmodelled`). (8) `addr x` of a routine's
+  ## variable is an address cell (`addrCellName`, `isNew.nAddrOf`): a `ptr`
+  ## that holds `x` for the frame's lifetime, kept equal to `x` after every
+  ## statement, inherited by a callee through a capture or a `var` formal
+  ## and carried back; a dereference or comparison of a pointer that may
+  ## name a returned frame's cell declines (`feUnsupportedOp`). `let p =
+  ## addr` of a computed index or a seq element is an alias checked where
+  ## `addr` takes it; a use after a statement that may resize the seq
+  ## declines. (9) Two by-address arguments on paths that part only at
+  ## computed indices decline only on the paths where the indices may be
+  ## equal; two fields of a variant arm are two locations.
   ##
   ## RFC-0005 S8as (2026-10-02) — S8an's remainder. Inside a recursive
   ## frame an `if` arm (or else path) whose query is UNSAT is dropped before
@@ -5231,8 +5243,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";ety=" & canonicalize(s.dElemTy) &
       ";p=" & canonicalize(s.dPtr, env) & ">"
   of isNew:
+    # RFC-0005 S8ax: an address cell names its local (a slot, or the
+    # free name).
+    let ofLocal = if s.nAddrOf.len > 0: ";of=" & canonicalize(mkVar(s.nAddrOf), env)
+                  else: ""
     let slot = bindLocal(env, s.nRetName)
-    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ">"
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).

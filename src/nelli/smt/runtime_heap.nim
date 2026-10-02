@@ -766,6 +766,121 @@ proc nilDerefFork(p: Path, refAst: Z3AnyAst, elemTy: IRType,
   # NON-NIL continuation: assert `p != nil` and continue the deref normally.
   @[forkPath(p, p.pc & @[not eqNil], p.env)]
 
+# ---- RFC-0005 S8ax: address cells ------------------------------------------
+#
+# `addr x` of a routine's variable `x` is a pointer like any other: stored in
+# an object, returned, compared, re-pointed under a branch. The walk gives
+# `x` a heap cell (a fresh `ptr` of `x`'s type, allocated by the first `addr
+# x` the frame evaluates and reused after) and keeps the two equal statement
+# by statement (`walk`): `x` stays the frame's own binding, so every
+# statement that reads or writes it by name is unchanged, and the cell is
+# what a pointer reads and writes, wherever it travels.
+
+proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
+                   refAst: Z3AnyAst): SymVal =
+  ## RFC-0005 S8ax. The value of the address cell at `refAst` on `p`.
+  let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
+                            ty)
+  heapCellSelect(ctx, cell, refAst, ty)
+
+proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                   v: SymVal): SymVal =
+  ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
+  ## path the caller just forked) and return the cell's value read back:
+  ## the variable's new binding, so the two stay one term.
+  let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
+                            ty)
+  var scratchPC: seq[Z3Bool]
+  let proto = allocateSym(ty, "__addrCellProto", scratchPC)
+  let stored = heapCellStore(ctx, cell, refAst, heapStoreValue(v, proto, ty), ty)
+  for c in stored: p.heaps[c.key] = c.arr
+  heapCellSelect(ctx, stored, refAst, ty)
+
+proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. A `ptr` dereference on `p` that may reach the address
+  ## cell of a variable whose frame has returned (`Path.addrOwners`): Nim
+  ## reads or writes a dead stack slot there, which the walk does not model.
+  ## The edge where it does is tainted (`feUnsupportedOp`, the cell's last
+  ## value substituting for the slot's) when it is feasible; the rest
+  ## continues untouched.
+  var dead: seq[Z3AnyAst]
+  for o in p.addrOwners:
+    if not liveFrame(w, o.frame): dead.add o.refAst
+  if dead.len == 0: return @[p]
+  let ctx = w.z3
+  var hits: seq[Z3Bool]
+  for d in dead:
+    hits.add wrap[Z3Bool](ctx, checkedEq(ctx, refAst.raw, d.raw))
+  var anyHit = hits[0]
+  for i in 1 ..< hits.len: anyHit = anyHit or hits[i]
+  let hitPath = forkPath(p, p.pc & @[anyHit], p.env)
+  if not pathInfeasible(ctx, hitPath, w.settings):
+    let d = w.degrade(feUnsupportedOp,
+      "RFC-0005 S8ax: a pointer dereferenced here may hold the address of " &
+           "a variable whose routine has returned; Nim reads or writes a " &
+           "dead stack slot, which the walk does not model (feUnsupportedOp)")
+    result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
+  result.add forkPath(p, p.pc & @[not anyHit], p.env)
+
+proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. `addr x` (`isNew` with `nAddrOf = x`): bind
+  ## `stmt.nRetName` to `x`'s address cell, allocating it on the first
+  ## `addr x` of the frame: a fresh `ptr`, distinct from every other address
+  ## and from nil, holding `x`'s value, recorded in
+  ## `CallFrameCtx.addrCells` (the frame's statements keep the two equal)
+  ## and `Path.addrOwners`. Declined (`feUnsupportedOp`, the cell then a
+  ## pointer the walk does not keep equal to the variable): a variable an
+  ## enclosing routine owns (a nested routine's capture: its frame is not
+  ## this one; in a closure body, its captures), one a closure captures
+  ## (its env cell is a second copy), and a variable whose type
+  ## has no heap cell the walk keeps equal by handle (an array, a table, a
+  ## set, a case object, a ref, a distinct or opaque type).
+  let ctx = w.z3
+  let ty = stmt.nRefTy.ptrPointeeTy
+  let local = stmt.nAddrOf
+  let typeId = refPointeeTypeId(ty)
+  for p in paths:
+    if w.shouldStop: return
+    if p.env.hasKey(stmt.nRetName) and p.env[stmt.nRetName].kind == svPtr:
+      result.add p
+      continue
+    var why = ""
+    if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
+                      itSeq}:
+      why = "of a variable of type " & $ty
+    elif local in w.frame.outerNames or isGlobalEnvName(local):
+      why = "of a variable an enclosing routine owns"
+    elif not p.env.hasKey(local):
+      why = "of a variable this frame does not hold"
+    else:
+      for (cl, _) in w.frame.capCells:
+        if cl == local: why = "of a variable a closure captures"
+    let refSort = allocRefSort(ctx, ty)
+    var child = forkPath(p, p.pc, p.env)
+    let newRef = freshRef(ctx, refSort, typeId, child)
+    assertFreshness(ctx, child, typeId, newRef, w.settings)
+    var env2 = child.env
+    env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef, ptrFamily: true,
+                                 ptrPointee: ty)
+    if why.len > 0:
+      child.env = env2
+      let d = w.degrade(feUnsupportedOp,
+        "RFC-0005 S8ax: `addr " & displayName(local) & "` " & why &
+             " is not modelled: the pointer is not kept equal to the " &
+             "variable (feUnsupportedOp)")
+      result.add forkPathTainted(child, child.pc, child.env, d)
+      continue
+    block:
+      var known = false
+      for c in w.frame.addrCells:
+        if c.local == local: known = true
+      if not known:
+        w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty)
+    child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
+    env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
+    child.env = env2
+    result.add drainPendingLowerEffects(child)
+
 proc refVariantDiscRangeClause(objTy: IRType, discSV: SymVal): Option[Z3Bool] =
   ## ADR-0013 D4.5 (Slice 1). Build the disc-range disjunction for a
   ## ref-to-variant pointee, mirroring `allocateSym(itVariant)` logic.
@@ -1189,7 +1304,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # Phase 15 R5: fork the nil path (the defect) off; continue on non-nil.
       # The nil-fork keys on the OBJECT ref sort (`sortTy`) so a field access
       # through a possibly-nil object ref forks correctly (R5 composition).
-      for cp0 in nilDerefFork(p, refAst, sortTy, w):
+      # RFC-0005 S8ax: first, a `ptr` that may hold a dead frame's address
+      # cell (`danglingFork`).
+      var nilForks: seq[Path]
+      for pd in (if refSV.kind == svPtr: danglingFork(p, refAst, w) else: @[p]):
+        nilForks.add nilDerefFork(pd, refAst, sortTy, w)
+      for cp0 in nilForks:
         if w.shouldStop: return survivors
         # N42 (round-6 fix round 7, walker v105). Materialising the per-path
         # heap array below calls `mkHeapArrayVar` -> `heapValueSort` ->
@@ -1294,6 +1414,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         survivors.add child
     survivors
   of isNew:
+    if stmt.nAddrOf.len > 0:
+      return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:
     #   1. `freshRef` increments `path.allocCounters[typeId]` (per-path; R1b
     #      threads + max-merges it) and mints a fresh `Ref_T` const
@@ -1737,7 +1859,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           msg: "witness involves unmanaged ptr")
         ptrFamilyHints.add ptrHintW   # threadvar: fallback
         w.ptrFamilyHints.add ptrHintW # CR-9 Stage 5: LIVE WalkCtx field
-      for cp in nilDerefFork(p, refAst, sortTy, w):
+      # RFC-0005 S8ax: a `ptr` that may hold a dead frame's address cell
+      # (`danglingFork`), before the nil fork.
+      var nilForks: seq[Path]
+      for pd in (if refSV.kind == svPtr: danglingFork(p, refAst, w) else: @[p]):
+        nilForks.add nilDerefFork(pd, refAst, sortTy, w)
+      for cp in nilForks:
         if w.shouldStop: return survivors
         # Materialise the per-path heap (field-split array for a field write) on
         # first use, exactly as `isDeref` does, so a write before any read still

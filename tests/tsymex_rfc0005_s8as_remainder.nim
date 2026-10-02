@@ -484,8 +484,12 @@ suite "RFC-0005 S8as (5): more `addr` forms are modelled":
   test "several pointers declared in one section":
     verdict(sutAddrTwoDecls, "md", sxSat)
     verdict(sutAddrTwoDecls, "md_dead", sxUnsat)
-  test "a pointer re-pointed under a branch still declines":
-    declines(sutAddrRepointBranch, "rb", heUnsafeCast, "addr")
+  test "a pointer re-pointed under a branch is decided":
+    ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
+    ## so a pointer re-pointed on one arm is exact (it declined here).
+    verdict(sutAddrRepointBranch, "rb", sxSat)
+    let r = symexFind(sutAddrRepointBranch, tLabel("rb"))
+    if r.status == sxSat: check r.witness[0] <= 0
 
 suite "RFC-0005 S8as (1): recursion on a symbolic argument":
   test "the walk drops an infeasible `if` arm inside a recursion":

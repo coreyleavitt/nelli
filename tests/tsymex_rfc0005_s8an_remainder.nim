@@ -506,8 +506,12 @@ suite "S8an (2): the address of a local passed as a ptr":
     verdict(sutAddrRaise, "ae", sxSat)
     verdict(sutAddrRaise, "ae_dead", sxUnsat)
 
-  test "a callee that may let the pointer escape declines, scoped":
-    declines(sutAddrEscape, "aesc", heUnsafeCast, "escape")
+  test "a callee that keeps the pointer is decided":
+    ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
+    ## which outlives the call, so the escape no longer declines.
+    verdict(sutAddrEscape, "aesc", sxSat)
+    let r = symexFind(sutAddrEscape, tLabel("aesc"))
+    if r.status == sxSat: check r.witness[0] == 2
 
   test "an addr actual the callee also reaches as a var declines, scoped":
     ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write).

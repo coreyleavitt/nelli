@@ -757,7 +757,8 @@ proc emitStmt*(s: IRStmt): NimNode =
         newCall(bindSym"mkDeref", newLit(s.dRetName), emitExpr(s.dPtr),
                 emitIRType(s.dElemTy))
   of isNew:     ## Phase 15 R1a: allocation.
-    newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy))
+    newCall(bindSym"mkNewT", newLit(s.nRetName), emitIRType(s.nRefTy),
+            newLit(s.nAddrOf))   # RFC-0005 S8ax
   of isDerefWrite:   ## Phase 15 R3: heap write `p[] = v` (walker no-ops at R3).
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
@@ -4021,23 +4022,90 @@ proc lvaluePath(lv: NimNode; steps: var seq[string]): NimNode =
       t = t[0]
     else: return nil
 
+type
+  AliasIndexPairs = seq[tuple[a, b: NimNode]]
+    ## RFC-0005 S8ax. Index pairs whose values all being equal makes two
+    ## lvalues one location (`aliasPath`).
+  PathStep = tuple[field: string; ix: NimNode]
+
+proc stableIndex(ix: NimNode; rest: openArray[NimNode]): bool  ## RFC-0005 S8ax fwd decl
+
+proc aliasSteps(lv: NimNode; steps: var seq[PathStep]): NimNode =
+  ## RFC-0005 S8ax. `lvaluePath` with a variant arm's field (Nim's
+  ## `nnkCheckedFieldExpr`) as a field step and a computed index of a value
+  ## array or the variable's seq that is free of side effects
+  ## (`stableIndex`) as an index step (`ix`; `field` is "" there). nil for
+  ## any other shape.
+  var t = lv
+  var rev: seq[PathStep]
+  while true:
+    case t.kind
+    of nnkSym:
+      for k in countdown(rev.high, 0): steps.add rev[k]
+      return t
+    of nnkCheckedFieldExpr:
+      if t.len < 1 or t[0].kind != nnkDotExpr: return nil
+      t = t[0]
+    of nnkDotExpr:
+      if t.len != 2 or t[1].kind != nnkSym: return nil
+      rev.add (field: "." & macros.strVal(t[1]), ix: nil)
+      t = t[0]
+    of nnkBracketExpr:
+      if t.len != 2: return nil
+      var ix = t[1]
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+        ix = ix[^1]
+      if ix.kind in {nnkCharLit .. nnkUInt64Lit}:
+        rev.add (field: "[" & $ix.intVal & "]", ix: nil)
+      elif t[0].typeKind in {ntyArray, ntySequence} and
+           stableIndex(t[1], []):
+        rev.add (field: "", ix: t[1])
+      else: return nil
+      t = t[0]
+    else: return nil
+
+proc aliasPath(a, b: NimNode; pairs: var AliasIndexPairs): bool =
+  ## RFC-0005 S8ax. `a` and `b` are paths into one variable (`aliasSteps`)
+  ## that are one location only when every index pair added to `pairs` is
+  ## equal: they part at a field step or two different constant indices
+  ## (no pair, always two locations), or they part only where a computed
+  ## index stands (the walk checks the pairs, `aliasGuardStmt`). False
+  ## when neither applies -- a different root, a non-path, or one path a
+  ## prefix of the other with no computed index (a whole and its part).
+  ## Two fields of different variant arms count as two locations: Nim
+  ## checks the arm when it takes each one's address, so they are never
+  ## both live.
+  var sa, sb: seq[PathStep]
+  let ra = aliasSteps(a, sa)
+  let rb = aliasSteps(b, sb)
+  if ra.isNil or rb.isNil or not containsSym(@[ra], rb): return false
+  var found: AliasIndexPairs
+  for k in 0 ..< min(sa.len, sb.len):
+    let x = sa[k]
+    let y = sb[k]
+    if x.ix == nil and y.ix == nil:
+      if x.field != y.field: return true
+    elif x.ix != nil and y.ix != nil:
+      found.add (a: x.ix, b: y.ix)
+    else:
+      return false   # a constant against a computed index: not paired
+  if found.len == 0: return false
+  pairs.add found
+  true
+
 proc lvaluesDisjoint(a, b: NimNode): bool =
   ## RFC-0005 S8as. `a` and `b` are paths into one variable
   ## (`lvaluePath`) that part at some step -- two different fields, or two
   ## different constant indices -- so they are two locations no write to
   ## one can reach the other through. Neither is a prefix of the other (a
-  ## whole and its part overlap). A variant arm's field is not a path, so
-  ## two arms sharing storage never count.
-  var sa, sb: seq[string]
-  let ra = lvaluePath(a, sa)
-  let rb = lvaluePath(b, sb)
-  if ra.isNil or rb.isNil or not containsSym(@[ra], rb): return false
-  for k in 0 ..< min(sa.len, sb.len):
-    if sa[k] != sb[k]: return true
-  false
+  ## whole and its part overlap).
+  ## RFC-0005 S8ax: a variant arm's field is a path too (`aliasPath`).
+  var pairs: AliasIndexPairs
+  aliasPath(a, b, pairs) and pairs.len == 0
 
 proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
-                       heapSteps: seq[NimNode]): bool =
+                       heapSteps: seq[NimNode];
+                       conds: var seq[AliasIndexPairs]): bool =
   ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
   ## (`userCallStmt`) copies the lvalue in, walks the callee on the copy and
   ## copies it out. Nim passes the lvalue's ADDRESS, so the two agree unless
@@ -4068,7 +4136,13 @@ proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
     # location.
     let olv = if a.kind == nnkHiddenAddr and a.len == 1: a[0]
               else: addrActualLvalue(a)
-    if olv != nil and lvaluesDisjoint(lv, olv): continue
+    # RFC-0005 S8ax: or one only when computed indices are equal, which
+    # the walk checks (`conds`, `aliasGuardStmt`).
+    if olv != nil:
+      var pairs: AliasIndexPairs
+      if aliasPath(lv, olv, pairs):
+        if pairs.len > 0: conds.add pairs
+        continue
     for s in syms:
       if mentionsSym(a, s): return true
     if cells.len > 0:
@@ -4085,6 +4159,32 @@ proc addrActualLvalue(a: NimNode): NimNode =
   while t.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and t.len > 0:
     t = t[^1]
   if t.kind == nnkAddr and t.len == 1: t[0] else: nil
+
+proc addrCellLocal(e: NimNode): NimNode =
+  ## RFC-0005 S8ax. The variable `x` of `e` spelled `addr x` (through
+  ## conversions, and through a `var` formal's hidden indirection) when `x`
+  ## is a variable, parameter or `result` of a routine; nil otherwise (a
+  ## field, an element, a dereference, a module-level variable). Such an
+  ## `x` has an address cell in the walk (`mkNewT`'s `addrOf`): the
+  ## pointer is a value like any other -- stored, returned, compared,
+  ## re-pointed -- and the walker keeps `x` and its cell equal.
+  let lv = addrActualLvalue(e)
+  if lv == nil: return nil
+  var t = lv
+  if isVarIndirection(t): t = t[0]
+  if t.kind != nnkSym or
+     symKind(t) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
+     isModuleGlobal(t):
+    return nil
+  t
+
+proc lowerAddrCell(e, x: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8ax. `addr x` (`addrCellLocal`): the address cell of `x`,
+  ## allocated by its first `addr` in the frame and the same pointer after.
+  let name = strVal(x)
+  preamble.add mkNewT(addrCellName(name), classifyType(e).ty, addrOf = name)
+  mkVar(addrCellName(name))
 
 proc isSymOf(n, sym: NimNode): bool =
   ## RFC-0005 S8an. `n` is `sym` (by symbol identity), through conversions.
@@ -4161,7 +4261,8 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
   ptrUsesStayLocal(body(impl), fsym, seen)
 
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
-                        heapSteps: seq[NimNode]): bool =
+                        heapSteps: seq[NimNode];
+                        conds: var seq[AliasIndexPairs]): bool =
   ## RFC-0005 S8an. `varActualMayAlias` for an `addr lv` actual: another
   ## `addr` of the SAME lvalue is the same cell (`userCallStmt` shares it),
   ## so it does not alias; any other argument that names the root, or can
@@ -4181,7 +4282,11 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
     # variable is another cell, and the alias check is by path: S8an
     # declined any second argument naming the root.
     let vlv = if a.kind == nnkHiddenAddr and a.len == 1: a[0] else: olv
-    if vlv != nil and lvaluesDisjoint(lv, vlv): continue
+    if vlv != nil:   # RFC-0005 S8ax: `conds`, as `varActualMayAlias`
+      var pairs: AliasIndexPairs
+      if aliasPath(lv, vlv, pairs):
+        if pairs.len > 0: conds.add pairs
+        continue
     if isInertArg(a) and a.typeKind != ntyString: continue
     for s in syms:
       if mentionsSym(a, s): return true
@@ -4227,6 +4332,10 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var argMarks: seq[int]
   var argTys: seq[IRType]
   var argFixed: seq[bool]
+  # RFC-0005 S8ax: index pairs under which two by-address arguments are
+  # one location (`aliasPath`); the call declines on the paths where they
+  # all may be equal.
+  var aliasConds: seq[AliasIndexPairs]
   for i in 1 ..< n.len:
     argMarks.add preamble.len
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
@@ -4240,6 +4349,21 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         lvalueVarSyms(addrLv, syms)
         for s in syms:
           if s.strVal notin guards: guards.add s.strVal
+      # RFC-0005 S8ax: `addr x` of a routine's variable is its address
+      # cell (`addrCellLocal`), which outlives the call: the callee may
+      # keep the pointer, and the walker keeps `x` equal to the cell.
+      let cellX = addrCellLocal(n[i])
+      if cellX != nil:
+        if addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds):
+          preamble.add ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
+                    calleeSym.strVal & "` alongside another argument that " &
+                    "reaches the same location: the cell for the call and " &
+                    "the other argument are not one location in the walk " &
+                    "(feUnsupportedOp)"),
+            "addr argument aliases another argument (feUnsupportedOp)")
+        argIRs.add lowerAddrCell(n[i], cellX, preamble, ctx)
+        continue
       let key = scopedRepr(addrLv)
       var cell = ""
       for c in addrCells:
@@ -4260,7 +4384,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   "on to a routine that may): the pointee is modelled as " &
                   "a cell for the call only (heUnsafeCast)"),
           "addr argument may escape the call (heUnsafeCast)")
-      elif addrActualMayAlias(n, i, addrLv, root, heapSteps):
+      elif addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds):
         preamble.add ctx.declineAtSite(feUnsupportedOp,
           siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
                   calleeSym.strVal & "` alongside another argument that " &
@@ -4291,7 +4415,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       if lv.kind == nnkSym:
         # RFC-0005 S8an: a plain variable named by another argument that
         # may pass it by address (`varActualMayAlias`) declines too.
-        if varActualMayAlias(n, i, lv, lv, @[]):
+        if varActualMayAlias(n, i, lv, lv, @[], aliasConds):
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is also reached through another " &
@@ -4301,7 +4425,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       else:
         var heapSteps: seq[NimNode]
         let root = lvalueRoot(lv, heapSteps)
-        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps):
+        if root.isNil or
+           varActualMayAlias(n, i, lv, root, heapSteps, aliasConds):
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is not a variable and the callee " &
@@ -4323,6 +4448,21 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   if not ctx.inGuardCond:
     orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
                   argFixed)   ## RFC-0005 S8ax
+  # RFC-0005 S8ax: the indices are free of side effects (`stableIndex`), so
+  # reading them again after the arguments is reading the same values.
+  for pairs in aliasConds:
+    var cond: IRExpr = nil
+    for pr in pairs:
+      let eq = mkBinop(bEq, parseExpr(pr.a, preamble, ctx),
+                       parseExpr(pr.b, preamble, ctx))
+      cond = if cond == nil: eq else: mkBinop(bAnd, cond, eq)
+    preamble.add mkIf(@[IRBranch(cond: cond,
+      body: ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "two arguments of `" & calleeSym.strVal & "` passed by " &
+                "address are one location when their indices are equal, " &
+                "which this path allows: the callee's writes through the " &
+                "two are not modelled in its order (feUnsupportedOp)"),
+        "by-address arguments may be one location (feUnsupportedOp)"))])
   let call = mkCall(callKey, retName, argIRs, retTy, offsetPositions, guards)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
@@ -5032,6 +5172,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                     $n.kind & " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(dummyTy)
       if dummy != nil: dummy else: mkIntLit(0)
+  of nnkAddr:
+    # RFC-0005 S8ax: `addr x` of a routine's variable is its address cell.
+    # Any other `addr` (a field, an element, a module-level variable) has
+    # no cell: the catch-all's decline, message for message.
+    let x = addrCellLocal(n)
+    if x != nil:
+      return lowerAddrCell(n, x, preamble, ctx)
+    let dummyTy = classifyType(n).ty
+    preamble.add ctx.declineAtSite(
+      feUnsupportedExprKind,
+      "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+             n.repr & "` — not in the supported expression fragment",
+      "CR-2a: unsupported expression kind " &
+                                  $n.kind & " (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(dummyTy)
+    if dummy != nil: dummy else: mkIntLit(0)
   of nnkDerefExpr, nnkHiddenDeref:
     # RFC-0005 S8ac: a `var` formal's own indirection is its value (the ref
     # itself for `var ref T`), not a heap read.
@@ -9962,6 +10118,106 @@ proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
   if a == nil: return
   (d[0], a)
 
+const staleElemMarkerTag = "nelli:S8ax:stale-elem:"
+  ## RFC-0005 S8ax. The text of the comment statement `parseDeferList`
+  ## places before a statement that may dereference a pointer to a seq
+  ## element after the seq may have been resized; `parseStmt` declines it.
+
+proc stableIndex(ix: NimNode; rest: openArray[NimNode]): bool =
+  ## RFC-0005 S8ax. Index expression `ix` has the same value at every
+  ## statement of `rest`: literals, `let`s, constants and non-`var`
+  ## parameters, a `var` no statement of `rest` names, and the integer
+  ## operators and conversions over them. A call (side effects, or a
+  ## result that differs) is not.
+  case ix.kind
+  of nnkCharLit .. nnkUInt64Lit: true
+  of nnkSym:
+    case symKind(ix)
+    of nskConst, nskLet: not isModuleGlobal(ix) or symKind(ix) == nskConst
+    of nskParam: ix.getTypeInst.kind != nnkVarTy
+    of nskVar:
+      if isModuleGlobal(ix): return false
+      for r in rest:
+        if mentionsSym(r, ix): return false
+      true
+    else: false
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    ix.len > 0 and stableIndex(ix[^1], rest)
+  of nnkInfix:
+    ix.len == 3 and ix[0].kind == nnkSym and
+      macros.strVal(ix[0]) in ["+", "-", "*", "div", "mod"] and
+      not isUserCallee(ix[0]) and
+      stableIndex(ix[1], rest) and stableIndex(ix[2], rest)
+  else: false
+
+proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
+    tuple[addrNode, seqRoot: NimNode] =
+  ## RFC-0005 S8ax. `e` (through conversions) when it is `addr lv` and `lv`
+  ## is a variable's element path: fields of value objects and tuples,
+  ## indices into value arrays, and an index into the variable itself when
+  ## it is a seq, each index stable over `rest` (`stableIndex`) -- so `lv`
+  ## names one location at every statement of `rest`, unless the seq is
+  ## resized (`seqRoot`, nil for none). `(nil, nil)` otherwise, and for a
+  ## path `fixedAddrNode` already takes.
+  var a = e
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
+    a = a[^1]
+  if a.kind != nnkAddr or a.len != 1: return
+  var t = a[0]
+  var seqStep = false
+  var computed = false
+  while true:
+    if t.kind == nnkDotExpr and t.len == 2 and
+       t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
+      t = t[0]
+    elif t.kind == nnkBracketExpr and t.len == 2 and
+         t[0].typeKind in {ntyArray, ntySequence}:
+      if not stableIndex(t[1], rest): return
+      var ix = t[1]
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+        ix = ix[^1]
+      if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: computed = true
+      if t[0].typeKind == ntySequence:
+        if t[0].kind != nnkSym or seqStep: return
+        seqStep = true
+      t = t[0]
+    else: break
+  if t.kind != nnkSym or symKind(t) != nskVar or isModuleGlobal(t): return
+  if not seqStep and not computed: return
+  (a, (if seqStep: t else: nil))
+
+proc mayResizeSeq(n, s: NimNode): bool =
+  ## RFC-0005 S8ax. Statement `n` may move the storage of the seq variable
+  ## `s`: `s` occurs anywhere but under an element access `s[i]` or as the
+  ## argument of a read-only builtin (`len`, `high`, `low`, iteration,
+  ## `contains`, `find`, `$`, `==`); or `n` calls a nested routine or a
+  ## proc value, which may reach `s` by name.
+  case n.kind
+  of nnkSym:
+    if containsSym(@[s], n): return true
+    if isNestedRoutine(n): return true
+    if symKind(n) in {nskVar, nskLet, nskParam} and
+       n.getTypeInst.kind == nnkProcTy:
+      return true
+    return false
+  of nnkBracketExpr:
+    if n.len == 2 and isSymOf(n[0], s):
+      return mayResizeSeq(n[1], s)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix:
+    if n.len >= 2 and n[0].kind == nnkSym and not isUserCallee(n[0]) and
+       macros.strVal(n[0]) in ["len", "high", "low", "items", "pairs",
+                               "mitems", "mpairs", "contains", "find", "$",
+                               "==", "!="]:
+      for j in 1 ..< n.len:
+        if not isSymOf(n[j], s) and mayResizeSeq(n[j], s): return true
+      return false
+  of RoutineNodes:
+    return mentionsSym(n, s)
+  else: discard
+  for c in n:
+    if mayResizeSeq(c, s): return true
+  false
+
 proc addrRepoint(r, p: NimNode): NimNode =
   ## RFC-0005 S8as. `r` is the statement `p = addr lv'` re-pointing the
   ## alias `p` at another fixed location (`fixedAddrNode`): that node, nil
@@ -10017,7 +10273,20 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
         expanded.add items[k + 1 ..< items.len]
         stmts.add parseDeferList(expanded, k, ctx)
         break
-    let al = addrAliasDecl(c)
+    var al = addrAliasDecl(c)
+    # RFC-0005 S8ax: an element path with a computed index, or into a seq
+    # (`elemAddrNode`): its index is checked where `addr` evaluates it, and
+    # a use after a statement that may resize the seq declines.
+    var seqRoot: NimNode = nil
+    var checkAt = false
+    if al.p == nil and c.kind in {nnkLetSection, nnkVarSection} and
+       c.len == 1 and c[0].kind == nnkIdentDefs and c[0].len == 3 and
+       c[0][0].kind == nnkSym:
+      let el = elemAddrNode(c[0][2], items[k + 1 ..< items.len])
+      if el.addrNode != nil:
+        al = (c[0][0], el.addrNode)
+        seqRoot = el.seqRoot
+        checkAt = true
     if al.p != nil:
       # RFC-0005 S8as: a statement of the list itself that re-points `p` at
       # another fixed location (`p = addr y`) switches the spelling for
@@ -10033,12 +10302,25 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
       if stays:
         var rest: seq[NimNode]
         var cur = al.addrNode
+        if checkAt:
+          rest.add newTree(nnkDiscardStmt, copyNimTree(al.addrNode[0]))
+        var stale = false
         for r in items[k + 1 ..< items.len]:
           let rp = addrRepoint(r, al.p)
           if rp != nil:
             cur = rp
+            seqRoot = nil
+            stale = false
             continue
+          let resizes = seqRoot != nil and mayResizeSeq(r, seqRoot)
+          if (stale or resizes) and mentionsSym(r, al.p):
+            rest.add newCommentStmtNode(staleElemMarkerTag &
+              "RFC-0005 S8ax: `" & al.p.repr & "` points into seq `" &
+              seqRoot.repr & "`, which a statement before this use (or " &
+              "this statement) may resize: Nim may move the elements, and " &
+              "the pointer then names freed memory (feUnsupportedOp)")
           rest.add substAddrAlias(r, al.p, cur)
+          if resizes: stale = true
         if rest.len > 0: stmts.add parseDeferList(rest, 0, ctx)
         break
     stmts.add parseStmt(c, ctx)
@@ -11295,7 +11577,10 @@ proc parseStmtInner(n: NimNode,
       # hit parseExpr's hard `error()` (a compile-time failure, not a classified
       # halt); R11 converts it to the classified-error path.
       block:
-        let ucReason = unsafeCastReason(valNode)
+        # RFC-0005 S8ax: `addr x` of a routine's variable is an ordinary
+        # pointer value (its address cell, `addrCellLocal`).
+        let ucReason = if addrCellLocal(valNode) != nil: ""
+                       else: unsafeCastReason(valNode)
         if ucReason.len > 0:
           stmts.add ctx.declineUnsafeCast(
             "unsafe pointer materialisation (" & ucReason & ") not modeled",
@@ -11718,6 +12003,11 @@ proc parseStmtInner(n: NimNode,
       # Bare `discard` (empty child) — genuinely a no-op.
       mkBlock(@[])
   of nnkEmpty, nnkCommentStmt:
+    # RFC-0005 S8ax: `staleElemUseMarker`'s comment is a decline.
+    if n.kind == nnkCommentStmt and n.strVal.startsWith(staleElemMarkerTag):
+      return ctx.declineAtSite(feUnsupportedOp,
+        n.strVal[staleElemMarkerTag.len .. ^1],
+        "pointer to a seq element used after a resize (feUnsupportedOp)")
     mkBlock(@[])
   of nnkConstSection, nnkBindStmt, nnkMixinStmt:
     # SND-1 (RFC-chapulin-hardening Cluster 1) fallout fix. These three node

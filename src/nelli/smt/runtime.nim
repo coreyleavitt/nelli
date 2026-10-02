@@ -510,6 +510,12 @@ type
       ## by every fork below it, and carried to the finding
       ## (`RawResult.nilDerefOnPath`), so replay never executes a witness
       ## whose real run would dereference nil and kill the host process.
+    addrOwners: seq[tuple[refAst: Z3AnyAst; frame: int]]
+      ## RFC-0005 S8ax. Each address cell this path allocated
+      ## (`CallFrameCtx.addrCells`) and the frame whose variable it holds.
+      ## Once that frame has returned, the pointer dangles: a dereference
+      ## that may reach it declines (`danglingFork`). Inherited by every
+      ## fork, and by the caller on a return.
     loopIters: seq[tuple[loop: int, iters: int]]
       ## RFC-0005 S8y. For each `while` this path has run through (`loop`,
       ## the statement's identity within the walk), how many times its body
@@ -764,6 +770,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        liveRefs: hs.liveRefs,                            ## Phase 15 R2
        freshnessAssertCount: parent.freshnessAssertCount,  ## Phase 15 R2
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
+       addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
        loopIters: parent.loopIters)                      ## RFC-0005 S8y
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
@@ -809,6 +816,13 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
           e.iters = max(e.iters, n)
           seen = true
       if not seen: merged.loopIters.add (loop: loop, iters: n)
+    # RFC-0005 S8ax: likewise the caller's address cells.
+    for o in caller.addrOwners:
+      var seen = false
+      for e in merged.addrOwners:
+        if cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
+          seen = true
+      if not seen: merged.addrOwners.add o
     merged
 
 proc atIteration(p: Path; loop, n: int) =
@@ -5770,6 +5784,11 @@ template neBV(a, b: SymVal): SymVal =
         "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
         "__neBVDegrade")
 
+var pendingPtrCompares {.threadvar.}: seq[Z3AnyAst]
+  ## RFC-0005 S8ax. The `ptr` operands `refEq` compared since the last
+  ## `drainPendingLowerEffects`, which declines the path when one may be a
+  ## dead frame's address cell (`danglingCompareTaint`).
+
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
   ## equality of the two `Ref_T`-sorted address consts (`Z3_mk_eq`, negated for
@@ -5778,6 +5797,8 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## fresh allocations is an unreachable branch). No heap read happens here.
   let aAst = (if a.kind == svRef: a.refAst else: a.ptrAst)
   let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
+  if a.kind == svPtr: pendingPtrCompares.add aAst   # RFC-0005 S8ax
+  if b.kind == svPtr: pendingPtrCompares.add bAst
   let ctx = requireCurrentContext()
   let eq = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, bAst.raw))
   case op
@@ -10914,6 +10935,20 @@ type
                                       ## cell (`capCellName`), kept equal to the
                                       ## local statement by statement
                                       ## (`syncCapCells`).
+    addrCells: seq[tuple[local, cell: string; ty: IRType]]
+                                      ## RFC-0005 S8ax: the variables of this
+                                      ## frame whose address was taken
+                                      ## (`isNew.nAddrOf`), each with the env
+                                      ## name of its pointer (`cell`) and its
+                                      ## type; the variable and the heap at
+                                      ## the pointer are kept equal statement
+                                      ## by statement (`walk`). A path that
+                                      ## has no `cell` binding never took it.
+    outerNames: seq[string]           ## RFC-0005 S8ax: the enclosing
+                                      ## routines' variables this frame
+                                      ## reaches by name (a nested routine's
+                                      ## captures; a closure body's
+                                      ## captures and globals).
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
     escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
                                       ## frame's handlers; drained by the caller's
@@ -11090,6 +11125,9 @@ type
                        ## RFC-0005 S8ax: declines at the hard call-depth
                        ## budget so far; an extension that sees this move
                        ## is abandoned at its root (`depthBail`).
+    extHardMark: int   ## RFC-0005 S8ax: `depthHardHits` when the current
+                       ## extension's root began, -1 outside one; once it
+                       ## moves, no call under the root extends again.
     ifSites: Table[pointer, IfSiteStat]
                        ## RFC-0005 S8ax: per-`if`-arm feasibility-check
                        ## record, keyed by the arm's IR node
@@ -12479,6 +12517,83 @@ proc carryOuterBindings(dst: var Env; exitEnv: Env;
   for c in captures:
     if c notin guarded and exitEnv.hasKey(c): dst[c] = exitEnv[c]
 
+type AddrCellEntry = tuple[local, cell: string; ty: IRType]
+
+proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
+                      callerCells: seq[AddrCellEntry];
+                      varArgs: seq[(string, string)];
+                      captures, guarded: seq[string]): seq[AddrCellEntry] =
+  ## RFC-0005 S8ax. The address cells a callee frame starts with: each
+  ## address-taken caller variable it reaches by name -- a capture it is
+  ## threaded (`threadOuterBindings`), or the caller variable a `var` formal
+  ## is (#140's `varArgs`, under the formal's name) -- with the pointer
+  ## bound in `calleeEnv`. The callee's statements then keep that name and
+  ## the cell equal, so a write through the formal is seen through a
+  ## pointer the callee also holds, in program order.
+  for c in callerCells:
+    if not callerEnv.hasKey(c.cell): continue
+    if c.local in captures and c.local notin guarded:
+      calleeEnv[c.cell] = callerEnv[c.cell]
+      result.add c
+    for (formal, callerName) in varArgs:
+      if callerName == c.local:
+        calleeEnv[addrCellName(formal)] = callerEnv[c.cell]
+        result.add (local: formal, cell: addrCellName(formal), ty: c.ty)
+
+type AddrCarry = tuple[moved: seq[Z3AnyAst]; lost: seq[string]]
+
+proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
+                    varArgs: seq[(string, string)]; sig: ProcSig;
+                    guarded: seq[string]; w: var WalkCtx): AddrCarry =
+  ## RFC-0005 S8ax. On a callee exit (`w.frame` is the caller's again), each
+  ## address cell of a variable the caller owns -- a `var` formal's caller
+  ## variable, a capture -- becomes (or stays) the caller's cell for it:
+  ## `getP(x: var int): ptr int = addr x` returns the address of the
+  ## caller's `x`. `moved` are those cells (`settleAddrCells` gives them to
+  ## the caller's frame); `lost` are cells of a `var` formal bound to
+  ## something with no cell (a field, an element, a module-level variable).
+  ## A cell of the callee's own variable stays the callee's: it dangles now
+  ## (`danglingFork`).
+  for c in calleeCells:
+    if not exitEnv.hasKey(c.cell) or exitEnv[c.cell].kind != svPtr: continue
+    var to = ""
+    for (formal, callerName) in varArgs:
+      if formal == c.local: to = callerName
+    if to.len == 0 and c.local in sig.captures and c.local notin guarded:
+      to = c.local
+    var isVarFormal = false
+    for f in sig.params:
+      if f.name == c.local and f.isVar: isVarFormal = true
+    # A parser temporary (`__sym_varArg_<n>`, the copy a field or element
+    # actual is passed through) is not the location: the cell is lost.
+    if to.len > 0 and not isGlobalEnvName(to) and not to.startsWith("__"):
+      dst[addrCellName(to)] = exitEnv[c.cell]
+      var known = false
+      for k in w.frame.addrCells:
+        if k.local == to: known = true
+      if not known:
+        w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty)
+      result.moved.add exitEnv[c.cell].ptrAst
+    elif isVarFormal or to.len > 0:
+      result.lost.add displayName(c.local)
+
+proc settleAddrCells(p: Path; carried: AddrCarry; w: var WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` (a callee exit's caller path) with the moved cells
+  ## owned by the caller's frame, and tainted for any lost one
+  ## (`feUnsupportedOp`: the pointer outlives the call, but nothing keeps
+  ## the location it names equal to it).
+  for r in carried.moved:
+    for o in p.addrOwners.mitems:
+      if cast[pointer](o.refAst.raw) == cast[pointer](r.raw):
+        o.frame = w.frame.frameId
+  if carried.lost.len > 0:
+    taintInPlace(p, w.degrade(feUnsupportedOp,
+      "RFC-0005 S8ax: the address of the `var` formal(s) " &
+           carried.lost.join(", ") & " was taken, and the formal is bound " &
+           "to a field, an element or a module-level variable, which has no " &
+           "address cell the walk keeps equal to it (feUnsupportedOp)"))
+  p
+
 func touchedGuard(exitEnv: Env; guarded: seq[string]): string =
   ## RFC-0005 S8an. The first withheld name the callee bound (wrote), or "".
   for g in guarded:
@@ -12778,6 +12893,31 @@ func hardCallDepth(settings: SymexSettings): int =
   ## caller's explicit depth is never cut).
   max(settings.budget.maxCallDepth, settings.budget.maxRecursionDepth)
 
+proc recursiveCallsOnAPath(body: IRStmt; names: seq[string]): int =
+  ## RFC-0005 S8ax. The most calls to a routine of `names` one execution of
+  ## `body` may make: summed along a sequence, the largest over the arms of
+  ## an `if` or a `try`, and two (many) for one inside a loop.
+  if body == nil: return 0
+  case body.kind
+  of isCall:
+    if body.callee in names: 1 else: 0
+  of isBlock:
+    var n = 0
+    for c in body.stmts: n += recursiveCallsOnAPath(c, names)
+    n
+  of isIf:
+    var n = recursiveCallsOnAPath(body.elseBody, names)
+    for b in body.branches: n = max(n, recursiveCallsOnAPath(b.body, names))
+    n
+  of isTry:
+    var h = 0
+    for x in body.tryHandlers: h = max(h, recursiveCallsOnAPath(x.body, names))
+    recursiveCallsOnAPath(body.tryBody, names) + h +
+      recursiveCallsOnAPath(body.tryFinally, names)
+  of isWhile:
+    if recursiveCallsOnAPath(body.wbody, names) > 0: 2 else: 0
+  else: 0
+
 proc depthMayExtend(w: WalkCtx; live: int): bool =
   ## RFC-0005 S8ax. At or past `maxCallDepth`, inline this call anyway when
   ## the stack is under the hard budget (`hardCallDepth`) and the frontier
@@ -12785,12 +12925,32 @@ proc depthMayExtend(w: WalkCtx; live: int): bool =
   ## included, number no more than those entered one level up. A recursion
   ## whose arguments decide its depth (`sumTo(n)` with `n` in `0..5`) walks
   ## one feasible path per level and is followed to its base case; one that
-  ## fans out (`fib`) outgrows the level above at once and declines at
-  ## `maxCallDepth` as before. Every extended level is still bounded by the
+  ## fans out (`fib`: a body that may recurse twice on one execution,
+  ## `recursiveCallsOnAPath`) declines at `maxCallDepth` as before. So does
+  ## every call under an extension that has already reached the hard budget
+  ## (`WalkCtx.extHardMark`): its root drops all it walked. Measured (Linux,
+  ## Z3 5.1) on `fib(x) == 13`, `x` free: the depth-first frontier test
+  ## alone admitted the leftmost chain to the hard budget and walked every
+  ## frame on the way back again, 6.1 s at a hard budget of 5, 17.7 s at 8,
+  ## killed at 600 s at 24. Every extended level is still bounded by the
   ## hard budget, which bounds the native recursion of `walk` (see the
   ## depth check in `walk`'s `isCall` arm for the measured stack ceiling).
   let d = w.callStack.len
   if d < 1 or d >= hardCallDepth(w.settings): return false
+  # Abandoned: a path under this extension's root reached the hard budget,
+  # and the root drops all it walked. Walking on would only cost: a fan-out
+  # (`fib`) explored depth first enters one walk per level before its
+  # siblings, so the frontier test admits its leftmost chain to the hard
+  # budget, and every frame on the way back would extend again.
+  if w.extHardMark >= 0 and w.depthHardHits > w.extHardMark: return false
+  # A body that may recurse twice on one execution (`fib`) fans out: the
+  # frontier test, explored depth first, sees one walk per level before the
+  # siblings, so it is not extended at all.
+  let top = w.callStack[^1].callee
+  if top in w.procs:
+    var names: seq[string]
+    for f in w.callStack: names.add f.callee
+    if recursiveCallsOnAPath(w.procs[top].body, names) > 1: return false
   let here = (if d < w.depthWalks.len: w.depthWalks[d] else: 0)
   let above = (if d - 1 < w.depthWalks.len: w.depthWalks[d - 1] else: 0)
   here + live <= above
@@ -13482,6 +13642,40 @@ proc drainClosureExitHeap(p: Path): Path =
     merged.liveRefs[tkey] = refs
   merged
 
+proc liveFrame(w: WalkCtx; frame: int): bool =
+  ## RFC-0005 S8ax. `frame` has not returned: it is the current frame or
+  ## one below it.
+  if w.frame.frameId == frame: return true
+  for f in w.frameStack:
+    if f.frameId == frame: return true
+  false
+
+proc danglingCompareTaint(p: Path; operands: seq[Z3AnyAst]): Path =
+  ## RFC-0005 S8ax. `p` after an expression compared the `ptr` values
+  ## `operands`: tainted (`feUnsupportedOp`) when one may be the address
+  ## cell of a variable whose frame has returned (`Path.addrOwners`). Nim
+  ## compares a dead stack slot's address there, which a later frame may
+  ## reuse; the walk's cells stay distinct, so the outcome is not Nim's.
+  if currentWalkCtxPtr == nil or operands.len == 0: return p
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  var dead: seq[Z3AnyAst]
+  for o in p.addrOwners:
+    if not liveFrame(wp[], o.frame): dead.add o.refAst
+  if dead.len == 0: return p
+  let ctx = wp[].z3
+  var hits: seq[Z3Bool]
+  for a in operands:
+    for d in dead:
+      hits.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, d.raw))
+  var anyHit = hits[0]
+  for i in 1 ..< hits.len: anyHit = anyHit or hits[i]
+  if pathInfeasible(ctx, forkPath(p, p.pc & @[anyHit], p.env), wp[].settings):
+    return p
+  forkPathTainted(p, p.pc, p.env, wp[].degrade(feUnsupportedOp,
+    "RFC-0005 S8ax: a pointer compared here may hold the address of a " &
+         "variable whose routine has returned; Nim compares a dead stack " &
+         "slot's address, which a later call may reuse (feUnsupportedOp)"))
+
 proc drainPendingLowerEffects(p: Path): Path =
   ## Phase 15 re-review (S-1/S-2/S-3/S-4/NI-1/NI-2 drain consolidation).
   ## Single choke-point that drains ALL out-of-band `lower()`/`lowerBool()`
@@ -13544,6 +13738,11 @@ proc drainPendingLowerEffects(p: Path): Path =
     for (k, v) in closureEnvWrites: env2[k] = v
     p2 = forkPath(p2, p2.pc, env2)
     closureEnvWrites = @[]
+  # (f) RFC-0005 S8ax: a `ptr` comparison against a dead frame's cell.
+  if pendingPtrCompares.len > 0:
+    let operands = pendingPtrCompares
+    pendingPtrCompares = @[]
+    p2 = danglingCompareTaint(p2, operands)
   loweringReadNames = @[]
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
@@ -16420,9 +16619,15 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       let extRoot = extendDepth and
         w.callStack.len == w.settings.budget.maxCallDepth
       let hardMark = w.depthHardHits
+      let outerExtMark = w.extHardMark
+      if extRoot: w.extHardMark = hardMark
       var survivors: seq[Path]
       for p in paths:
-        if w.shouldStop: return
+        if w.shouldStop:
+          w.extHardMark = outerExtMark
+          return
+        # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
+        if extRoot and w.depthHardHits > hardMark: break
         # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
         # CLOSURE call lowered out of `p.env` below (a closure passed as an
         # argument, or invoked while lowering an actual) descends with this
@@ -16554,6 +16759,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
           let threadsOuter = threadOuterBindings(calleeEnv, p.env,
                                                  sig.captures, guarded)
+          # RFC-0005 S8ax: an address-taken variable the callee reaches by
+          # name -- a capture, or the caller variable a `var` formal is --
+          # keeps its address cell there (`inheritAddrCells`).
+          let calleeAddrCells = inheritAddrCells(calleeEnv, p.env,
+            w.frame.addrCells, varArgs, sig.captures, guarded)
           # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
           # non-bool, non-void return type (float/string/composite as well as
           # int) routes through `freshRetSym` so a value-returning generic
@@ -16605,6 +16815,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
           # so E3/E5 raise-flow threading is correct by construction.
           pushFrame(w)
+          w.frame.addrCells = calleeAddrCells    ## RFC-0005 S8ax
+          w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
           let guardMark = callGuardedNames.len   ## RFC-0005 S8an
           for g in guarded: callGuardedNames.add g
           let fallThroughRaw = walk(sig.body, @[calleePath], w)
@@ -16716,6 +16928,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # point is preserved on `er.path` (R1b merge — structural now, inert until
           # Cluster R). The handler-body continuations join the call's survivors.
           let calleeEscaped = w.frame.escaped
+          let calleeCells = w.frame.addrCells   ## RFC-0005 S8ax
           popFrame(w)
           for er in calleeEscaped:
             var rEnv = p.env
@@ -16728,13 +16941,18 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for (formalName, callerName) in varArgs:
               if er.path.env.hasKey(formalName):
                 rEnv[callerName] = er.path.env[formalName]
+            let carried = carryAddrCells(rEnv, er.path.env, calleeCells,
+              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
             var raisePath = forkPath(er.path, er.path.pc, rEnv)
+            raisePath = settleAddrCells(raisePath, carried, w)
             let touched = touchedGuard(er.path.env, guarded)
             if touched.len > 0:
               raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
                                           guardDegrade(w, stmt.callee, touched))
             survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
-            if w.shouldStop: return survivors
+            if w.shouldStop:
+              w.extHardMark = outerExtMark   # RFC-0005 S8ax
+              return survivors
           let frame = w.callStack[w.callStack.high]
           w.callStack.setLen(w.callStack.high)
           w.activeCalls.excl key
@@ -16806,6 +17024,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for (formalName, callerName) in varArgs:
               if cp.env.hasKey(formalName):
                 newEnv[callerName] = cp.env[formalName]
+            let carried = carryAddrCells(newEnv, cp.env, calleeCells,
+              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
             # Phase 15 R1b return-MERGE: the post-call caller path carries the
             # callee's exit heap state back out (ADR-0010 R1b).
             # `forkPathMerged(cp, ...)` forks from `cp` (the returned
@@ -16826,7 +17046,8 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
             # site uses the dedicated `forkPathMerged` (the union
             # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
-            let merged = forkPathMerged(cp, cp.pc & retInit, newEnv, p)
+            let merged = settleAddrCells(
+              forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
             # RFC-0005 S8an: the callee wrote a withheld root directly.
             let touched = touchedGuard(cp.env, guarded)
             if touched.len > 0:
@@ -16836,6 +17057,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               if callerCount > calleeCount:
                 merged.allocCounters[tkey] = callerCount
             survivors.add merged
+      w.extHardMark = outerExtMark
       if extRoot and w.depthHardHits > hardMark:
         return depthBail(w, stmt, paths, true)
       survivors
@@ -17215,6 +17437,104 @@ proc syncCapCellsFromCells(p: Path; w: WalkCtx): Path =
       changed = true
   if changed: forkPath(p, p.pc, env2) else: p
 
+const addrSnapPrefix = "__addrsnap#"
+  ## RFC-0005 S8ax. As `capSnapPrefix`, for an address-taken variable's
+  ## value as a statement began: `__addrsnap#<depth>#<local>`.
+
+func addrSnapName(depth: int; local: string): string =
+  addrSnapPrefix & $depth & "#" & local
+
+func lastWriteTo(stmt: IRStmt; local: string): bool =
+  ## RFC-0005 S8ax. The statement's last effect is the write of `local` by
+  ## name (an assignment or declaration of it): its value is the later one.
+  stmt.kind == isAssign and stmt.aname == local or
+    stmt.kind == isLet and stmt.lname == local
+
+proc dropSnapshots(env: var Env; prefix: string; depth: int): bool =
+  ## RFC-0005 S8ax. Delete `env`'s snapshots under `prefix` taken at `depth`
+  ## or deeper (a path that left a nested statement early, a `break`, still
+  ## carries its). True when any was deleted.
+  var stale: seq[string]
+  for k in env.keys:
+    if k.startsWith(prefix):
+      let rest = k[prefix.len .. ^1]
+      let hash = rest.find('#')
+      if hash > 0 and parseInt(rest[0 ..< hash]) >= depth: stale.add k
+  for k in stale: env.del k
+  stale.len > 0
+
+proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+                   w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
+  ## current frame (`CallFrameCtx.addrCells`) and the heap at its cell are
+  ## made equal again. The side that changed since the statement began wins
+  ## (`addrSnapName` holds the variable's value then, which was the cell's):
+  ## memory written through a pointer is read into the variable; the
+  ## variable written by name is stored into the cell. Both written within
+  ## one statement is two writes the walk cannot order, unless the
+  ## statement's last effect is the write by name (`lastWriteTo`):
+  ## declined (`feUnsupportedOp`), the variable's value winning. So is a
+  ## variable a closure also captures (its env cell is a third copy).
+  let ctx = w.z3
+  for p in outs:
+    var env2 = p.env
+    var q: Path = nil
+    var clash: seq[string]
+    for c in w.frame.addrCells:
+      if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
+         env2[c.cell].kind != svPtr:
+        continue
+      for (cl, _) in w.frame.capCells:
+        if cl == c.local and displayName(cl) notin clash:
+          clash.add displayName(cl)
+      let refAst = env2[c.cell].ptrAst
+      let cur = addrCellValue(ctx, (if q == nil: p else: q), c.ty, refAst)
+      let xv = env2[c.local]
+      if sameSymVal(xv, cur): continue
+      if q == nil: q = forkPath(p, p.pc, p.env)
+      let snap = addrSnapName(depth, c.local)
+      let hasSnap = env2.hasKey(snap)
+      if hasSnap and sameSymVal(xv, env2[snap]):
+        env2[c.local] = cur
+        continue
+      if not (hasSnap and sameSymVal(cur, env2[snap])) and
+         not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
+        clash.add displayName(c.local)
+      env2[c.local] = addrCellStore(ctx, q, c.ty, refAst, xv)
+    let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
+    if q == nil and not dropped and clash.len == 0:
+      result.add p
+      continue
+    if q == nil: q = forkPath(p, p.pc, env2)
+    else: q.env = env2
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8ax: the address-taken variable(s) " & clash.join(", ") &
+             " were written by name and through a pointer within one " &
+             "statement, or are also captured by a closure; the order of " &
+             "the writes is not modelled (feUnsupportedOp)"))
+    result.add drainPendingLowerEffects(q)
+
+proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` resumes in the current frame after a raise (a
+  ## handler, a `finally`): an address-taken variable out of step with its
+  ## cell was written through a pointer by the call that raised (every
+  ## statement before the raising one left the two equal, and a write by
+  ## name in the raising statement -- an assignment of the call's value,
+  ## a `var` actual's copy-out -- never happens on its raise, or reaches
+  ## the cell too, `inheritAddrCells`), so the variable takes the cell's
+  ## value.
+  var env2 = p.env
+  var changed = false
+  for c in w.frame.addrCells:
+    if env2.hasKey(c.local) and env2.hasKey(c.cell) and
+       env2[c.cell].kind == svPtr:
+      let cur = addrCellValue(w.z3, p, c.ty, env2[c.cell].ptrAst)
+      if not sameSymVal(env2[c.local], cur):
+        env2[c.local] = cur
+        changed = true
+  if changed: forkPath(p, p.pc, env2) else: p
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
   ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
@@ -17238,7 +17558,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ##   parameter IS the cell, which the callee's copy is not.
   ##
   ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
-  if w.frame.capCells.len == 0 or stmt == nil or paths.len == 0:
+  ##
+  ## Likewise each address-taken variable and its heap cell
+  ## (`syncAddrCells`).
+  if w.frame.capCells.len == 0 and w.frame.addrCells.len == 0 or
+     stmt == nil or paths.len == 0:
     return walkStmt(stmt, paths, w)
   inc w.capSyncDepth
   let depth = w.capSyncDepth
@@ -17250,9 +17574,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if env2.hasKey(local) and env2.hasKey(cell):
         env2[capSnapName(depth, cell)] = env2[local]
         changed = true
+    for c in w.frame.addrCells:
+      if env2.hasKey(c.local) and env2.hasKey(c.cell):
+        env2[addrSnapName(depth, c.local)] = env2[c.local]
+        changed = true
     ins.add(if changed: forkPath(p, p.pc, env2) else: p)
   let outs = walkStmt(stmt, ins, w)
   dec w.capSyncDepth
+  if w.frame.capCells.len == 0:
+    return syncAddrCells(stmt, outs, depth, w)
   var byAddr: seq[string]
   if stmt.kind == isCall:
     for (local, _) in w.frame.capCells:
@@ -17304,6 +17634,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
              "closure may run; the order of the two is not modelled " &
              "(ceCaptureByRefUnmodelled)"))
     result.add q
+  if w.frame.addrCells.len > 0:
+    result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
@@ -17380,6 +17712,9 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   # RFC-0005 S8ax: a capture the raising call wrote through its cell is
   # the local's value wherever the raise resumes in this frame.
   var rp = syncCapCellsFromCells(p, w)
+  # RFC-0005 S8ax: likewise an address-taken variable whose cell the
+  # raising call wrote through a pointer takes the cell's value.
+  rp = syncAddrCellsFromHeap(rp, w)
   var unknownJoined = false
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
@@ -17924,6 +18259,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
+  # RFC-0005 S8ax: the captures (and globals) the body reaches by name are
+  # not its own variables: `walkAddrCell` gives none of them a cell.
+  for k in byRefEntry.keys: w.frame.outerNames.add k
   # RFC-0005 S8ax: the body keeps each celled capture equal to its cell
   # statement by statement, as the building frame does (`walk`), so a call
   # in the body that applies the closure again meets the body's writes.
@@ -20063,6 +20401,7 @@ proc runSymexImpl(prog: SymexProgram,
     intHeapIsInt = settings.integerSemantics != isExact
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
+    extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx, target: target, params: prog.params,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
                        ## is also the zero-value, so pre-G1a callers already
@@ -20923,6 +21262,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
 
   # ---- Step 3: follow the concrete trace, collecting modelable constraints
   var w = WalkCtx(
+    extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
     params: prog.params, mode: wmFollowConcrete,

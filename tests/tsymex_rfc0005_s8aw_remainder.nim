@@ -504,14 +504,13 @@ proc alternationOrderHit(s: string) =
 suite "S8aw (2): other pattern shapes decline, scoped and named":
 
   test "an alternation: the result PCRE never gives is not claimed":
+    # RFC-0005 S8bb (item 6): an alternation is lowered by PCRE's priority
+    # run (`regex_parser.replaceRunZ3`), so the claim is sxUnsat, untainted.
+    # It declined here (`seZ3StringIncomplete` naming `a|ab`) before.
     let r = symexFind(alternationOrder, tLabel("aw_alternation"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, seZ3StringIncomplete)
-    var named = false
-    for e in r.errors:
-      if e.kind == seZ3StringIncomplete and "a|ab" in e.msg: named = true
-    check named
+    check r.status == sxUnsat
+    check not hasKind(r.errors, seZ3StringIncomplete)
     check not hasKind(r.errors, seZ3VersionMissing)
 
   test "companion: the result PCRE gives is reachable (replay-confirmed)":
@@ -551,12 +550,14 @@ suite "S8aw (2): exact on a known length; each decline names its construct":
     check r.status == sxUnsat
     check r.errors.len == 0
 
-  test "a quantifier that matches empty declines (empty-match semantics)":
-    # Nim: "b".replace(re"a*", "x") == "xbx" -- the decline never claims.
+  test "a quantifier that matches empty is exact (empty-match semantics)":
+    # Nim: "b".replace(re"a*", "x") == "xbx". RFC-0005 S8bb (item 6): Nim's
+    # NOTEMPTY_ATSTART retry is modelled, so the claim is sxUnsat; it
+    # declined ("can match empty") before.
     let r = symexFind(starDecline, tLabel("aw_star"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check declineMsg(r, seZ3StringIncomplete, "can match empty")
+    check r.status == sxUnsat
+    check not declineMsg(r, seZ3StringIncomplete, "can match empty")
 
   test "whitespace outside a class is exact (re vs rex is in the IR)":
     # RFC-0005 S8ay: `re"a b"` reads the space as a literal byte (`rex`

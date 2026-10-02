@@ -45,6 +45,7 @@ const selPatterns = ["", "a", "a|ab", "ab|a", "a*b", "a*", "a*?", "a+?b",
   "\\S+$"]
 
 const markSym = 256
+const markSym2 = 257
 
 proc ends(r: RNode; w: seq[int]; i: int): seq[int] =
   ## Every end of a match of the selection regex `r` from `i` in `w`.
@@ -55,6 +56,8 @@ proc ends(r: RNode; w: seq[int]; i: int): seq[int] =
     if i < w.len and w[i] < 256 and char(w[i]) in r.bytes: @[i + 1] else: @[]
   of rkMark:
     if i < w.len and w[i] == markSym: @[i + 1] else: @[]
+  of rkMark2:
+    if i < w.len and w[i] == markSym2: @[i + 1] else: @[]
   of rkCat:
     var cur = @[i]
     for k in r.kids:

@@ -215,6 +215,20 @@ const symexWalkerVersion* = "201"
   ## languages of `pcre_select.nim` (they declined); `match` and
   ## `startsWith` with an inner anchor too, and `contains`, `find` and
   ## `findBounds` with one through a search automaton (all declined).
+  ## The pattern reader reads named groups, inline options (`(?i)`,
+  ## `(?s)`, `(?x)`, `(?U)`, `(?J)`), `\p{..}` / `\P{..}`, `(*UCP)` and
+  ## the verbs whose meaning does not depend on PCRE's optimizations
+  ## (all ⊤ before). The captures overloads (`match` / `matchLen` / `find`
+  ## / `contains` / `findBounds` with `matches`, and `=~`) write each group
+  ## of PCRE's chosen match by std/re's rule (`iekStrCaptureRe`; they were
+  ## ⊤). A string merge (`iteSV`, e.g. any `array[N, string]` element
+  ## read) is Z3's `ite`, no longer a fresh symbol. The newline
+  ## conventions (`(*CR)`, `(*CRLF)`, `(*ANYCRLF)`, `(*ANY)`, `(*LF)`) set
+  ## `$` / `\Z` / `.` and the run's final-newline reading, and `(*ACCEPT)`
+  ## ends the match where it is reached (both ⊤ before). `replace(s, re,
+  ## by)` for an alternation, an anchor or a pattern that can match empty
+  ## is PCRE's priority run with Nim's NOTEMPTY_ATSTART retry
+  ## (`regex_parser.replaceRunZ3`; it declined).
   ## Provisional 201 (S8ba holds 200).
   ##
   ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own

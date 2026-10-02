@@ -30,6 +30,7 @@ import z3
 import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
+import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
@@ -3423,6 +3424,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # / a `findBounds` half, all svInt.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
+     iekStrCaptureRe,   # RFC-0005 S8bb: a capture group, a string
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
     # Phase 15 S5/S8/S10a: replace/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
@@ -3445,6 +3447,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
+                   iekStrCaptureRe,
                    iekIntToStr, iekStrToInt,
                    iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
@@ -5147,7 +5150,14 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # per-merge name, init facts discarded, both operands already built.
       degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
         "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
-  of svString, svTable, svSet, svVariant, svMultiVariant:
+  of svString:
+    # RFC-0005 S8bb: a string merge is Z3's `ite` over the two strings --
+    # exact, as for every scalar sort above. It was the fresh-symbol havoc
+    # of the group arm below, so reading an `array[N, string]` element
+    # (the index fold merges every element, a literal index too) was never
+    # decided: the captures overloads' `matches` arrays are such arrays.
+    SymVal(kind: svString, str: ite(cond, t.str, e.str))
+  of svTable, svSet, svVariant, svMultiVariant:
     # N46: same walk-reachable array-index-merge hazard as the
     # `svUninterpRef` arm above -- see its comment. `svSeq` is peeled off
     # above (walker v112) into its own placeholder-aware arm.
@@ -5215,7 +5225,7 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     # the collision rationale. Item 9 (round-6 re-review): both sites now go
     # through the shared `degradeAlloc` pairing helper.
     # RFC-0005 S6b: the kind follows what `tyOf(t)` round-trips. For
-    # svString / svTable / svSet it is lossless (the stored key / value /
+    # svTable / svSet it is lossless (the stored key / value /
     # element types), so the placeholder is a fresh symbol of the operand's
     # own type: `feUnsupportedOpHavoc`. For svVariant / svMultiVariant it
     # rebuilds the arm-field types from live element SymVals and drops the

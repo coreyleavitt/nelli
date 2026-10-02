@@ -552,6 +552,14 @@ type
                      ## unroll (S6b; RFC-0005 S8aw) or, for a receiver of
                      ## unknown length, a recursive function (S8ay); `strOp`
                      ## as `iekStrMatch`, `strArgs == [recv, replacement]`.
+    iekStrCaptureRe  ## RFC-0005 S8bb: a capture group of a captures
+                     ## overload's chosen match (`match` / `matchLen` /
+                     ## `find` / `contains` / `findBounds` with `matches`)
+                     ## → svString, `""` when the group is unset. `strOp`
+                     ## as `iekStrMatch` with the entry
+                     ## `capValue|<call>|<group>`; `strArgs == [recv,
+                     ## start]`. Its `capWritten|<call>|<group>` twin is an
+                     ## `iekStrMatch` (`strArgs == [recv, start, len]`).
     iekStrConcat     ## `a & b`            → Z3 `(seq.++ a b)`          (S3)
     iekIntToStr      ## `$i`               → Z3 `(int.to.str i)`       (S10a)
     iekStrToInt      ## `parseInt(s)`      → Z3 `(str.to.int s)`       (S10a)
@@ -801,6 +809,7 @@ type
     of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
        iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+       iekStrCaptureRe,
        iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
        iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
@@ -3781,6 +3790,7 @@ const StrOpKinds* = {
   iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+  iekStrCaptureRe,
   iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,

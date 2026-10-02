@@ -253,8 +253,11 @@ suite "S8ay (1): contains / match / startsWith / endsWith / find":
       check hasKind(r.errors, seZ3StringIncomplete)
 
   test "the captures overloads: the `matches` write is not dropped":
-    check verdict(capturesMatch, "ay_captures").status == sxUnknown
-    check verdict(tildeCaptures, "ay_tilde").status == sxUnknown
+    # RFC-0005 S8bb re-pin: the write is modelled (std/re's rule, see
+    # `regex_parser.lowerCapture`), so both reach their target (was the
+    # sxUnknown decline).
+    check verdict(capturesMatch, "ay_captures").status == sxSat
+    check verdict(tildeCaptures, "ay_tilde").status == sxSat
 
 # ---- item 2: PCRE's reading of the pattern ------------------------------------
 

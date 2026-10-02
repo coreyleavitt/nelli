@@ -1410,10 +1410,32 @@ proc regexLiteralOf(a: NimNode): (string, string) =
       else: return ("?", "")
   ((if extended: "rex" else: "re"), lit.strVal)
 
+proc regexCapturesLvalue(n: NimNode): bool =
+  ## RFC-0005 S8bb. A captures overload's `matches` lvalue whose location
+  ## nothing in it can move: variables, fields, dereferences and indexes by
+  ## a variable or literal. The call reads it into a copy and writes the
+  ## copy back after the match (`parseAsgn`), which re-evaluates the lvalue;
+  ## with no call or side effect in it, that is the location Nim wrote.
+  case n.kind
+  of nnkSym:
+    symKind(n) in {nskVar, nskParam, nskTemp, nskForVar, nskResult}
+  of nnkDotExpr:
+    n.len == 2 and regexCapturesLvalue(n[0])
+  of nnkHiddenDeref, nnkDerefExpr:
+    n.len == 1 and regexCapturesLvalue(n[0])
+  of nnkBracketExpr:
+    n.len == 2 and regexCapturesLvalue(n[0]) and
+      (n[1].kind in nnkCharLit..nnkUInt64Lit or
+       (n[1].kind == nnkSym and symKind(n[1]) in {nskVar, nskLet, nskParam,
+                                                  nskConst, nskForVar}))
+  else: false
+
 proc regexCallForks(e: IRExpr): bool =
   ## RFC-0005 S8ay. A regex call forks a raise of its own: `RegexError` for
   ## a pattern PCRE rejects, `RangeDefect` for a `start` outside int32 (Nim
   ## passes `start.cint`).
+  # RFC-0005 S8bb: a captures overload's group (`iekStrCaptureRe`) forks
+  # nothing: it reads the call's own operands after the call.
   if e.kind notin {iekStrMatch, iekStrFindRe, iekStrReplaceRe,
                    iekStrUnsupported}:
     return false
@@ -1421,6 +1443,7 @@ proc regexCallForks(e: IRExpr): bool =
   if op.startsWith("regex:"): op = op[6 .. ^1]
   elif e.kind == iekStrUnsupported: return false
   let sp = decodeRegexSpec(op)
+  if sp.entry.startsWith("capture"): return false   # RFC-0005 S8bb
   if sp.flag in ["re", "rex"] and
      parsePcre(sp.pattern, sp.flag == "rex").status == psRejected:
     return true
@@ -1537,6 +1560,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekStrLen, iekStrFind, iekStrRfind, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+     iekStrCaptureRe,
      iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
      iekStrStrip, iekStrInOptionRegion:
@@ -5393,7 +5417,18 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           # preamble routes the loop through the rotation
           # (`mkShortCircuitWhile`), which re-runs it every iteration.
           # S8ay declined the call instead (a fresh value).
-          let bindTwice = calleeSym.strVal == "findBounds" and not rejected
+          # RFC-0005 S8bb: a captures overload (a `matches` argument, the
+          # one after the pattern that is neither `start` nor `by`) reads
+          # its receiver and `start` again for each group it writes, so they
+          # are bound once too.
+          var capsNode: NimNode = nil
+          if not rejected:
+            for i in reIdx + 1 ..< n.len:
+              if n[i].typeKind notin {ntyInt, ntyInt8, ntyInt16, ntyInt32,
+                                      ntyInt64, ntyString}:
+                capsNode = n[i]
+          let bindTwice = (calleeSym.strVal == "findBounds" or
+                           capsNode != nil) and not rejected
           proc bindOnce(ir: IRExpr; node: NimNode;
                         preamble: var seq[IRStmt]): IRExpr =
             if not bindTwice or (isAtomicIR(ir) and ir.kind != iekStrAt):
@@ -5418,10 +5453,106 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             mkStrOp(iekStrUnsupported,
                     "regex:" & encodeRegexSpec(what, flag, rePat),
                     @[recvIR], retTy)
+          var capLv: NimNode = nil
+          var capTy: IRType = nil
           if captures:
-            # The captures overloads write `matches`; the walker does not
-            # model the write, so the call declines (seUnsupportedRegex, ⊤).
-            return decline(classifyType(n).ty, entry & "Captures")
+            # RFC-0005 S8bb: the captures overloads write `matches` (see
+            # `regex_parser.lowerCapture` for std/re's rule). Modelled when
+            # the pattern is read (`psOk`: its group count is known), the
+            # argument is an `array[N, string]` / `seq[string]` lvalue whose
+            # location no expression in it can move (`regexCapturesLvalue`)
+            # and the call is one that reports a match. Otherwise the call
+            # declines as S8ay's did (seUnsupportedRegex, ⊤): the write is
+            # never dropped.
+            capLv = capsNode
+            while capLv.kind in {nnkHiddenStdConv, nnkHiddenAddr,
+                                 nnkHiddenDeref, nnkHiddenSubConv} and
+                  capLv.len >= 1:
+              capLv = capLv[^1]
+            if regexCapturesLvalue(capLv) and capLv.typeKind != ntyNone:
+              let t = classifyType(capLv).ty
+              let el =
+                if t.kind == itArray: t.elemTy
+                elif t.kind == itSeq: t.seqElemTy
+                else: nil
+              # `findBounds`' bounds overload: `tuple[first, last: int]`.
+              if el != nil and (el.kind == itString or
+                  (entry == "findBounds" and el.kind == itTuple and
+                   el.fields.len == 2 and el.fields[0].kind == itInt and
+                   el.fields[1].kind == itInt)):
+                capTy = t
+            if capTy == nil or flag == "?" or
+               entry notin ["match", "matchLen", "find", "contains",
+                            "findBounds"] or
+               parsePcre(rePat, flag == "rex").status != psOk:
+              return decline(classifyType(n).ty, entry & "Captures")
+          proc plainCall(): IRExpr =
+            case entry
+            of "match", "contains":
+              mkStrOp(iekStrMatch, encodeRegexSpec(entry, flag, rePat),
+                      @[recvIR, startIR])
+            of "find", "matchLen":
+              mkStrOp(iekStrFindRe, encodeRegexSpec(entry, flag, rePat),
+                      @[recvIR, startIR], tInt())
+            else:
+              # RFC-0005 S8bb: (-1, 0) on a bad offset with captures.
+              mkTupleLit(@[
+                mkStrOp(iekStrFindRe,
+                        encodeRegexSpec("findBoundsFirstCap", flag, rePat),
+                        @[recvIR, startIR], tInt()),
+                mkStrOp(iekStrFindRe,
+                        encodeRegexSpec("findBoundsLast", flag, rePat),
+                        @[recvIR, startIR], tInt())], classifyType(n).ty)
+          if capTy != nil:
+            # The call, then each group's element (`iekStrCaptureRe`: the
+            # element after the call, from its value before), stored into
+            # a copy of `matches` that is then written back -- in Nim the
+            # writes follow the match, and nothing in the call can move the
+            # lvalue (`regexCapturesLvalue`), so copy-out is exact. A seq's
+            # element `g - 1` exists only when `g <= len`.
+            let callTmp = freshSynth(ctx, "regexCall")
+            preamble.add mkLet(callTmp, classifyType(n).ty, plainCall())
+            let arrTmp = freshSynth(ctx, "regexMatches")
+            preamble.add mkLet(arrTmp, capTy, parseExpr(capLv, preamble, ctx))
+            let isArr = capTy.kind == itArray
+            let elTy = (if isArr: capTy.elemTy else: capTy.seqElemTy)
+            let lenIR =
+              if isArr: mkIntLit(int64(capTy.size))
+              else: mkSeqLen(mkVar(arrTmp))
+            let groups = parsePcre(rePat, flag == "rex").groups
+            let upTo = (if isArr: min(groups, capTy.size) else: groups)
+            for g in 1 .. upTo:
+              let old = freshSynth(ctx, "regexOld")
+              let pos = mkIntLit(int64(g - 1))
+              var body: seq[IRStmt]
+              body.add mkIndexStmt(old, mkVar(arrTmp), pos, elTy, siteLoc(n))
+              proc spec(what: string): string =
+                encodeRegexSpec(what & "|" & entry & "|" & $g, flag, rePat)
+              let v =
+                if elTy.kind == itString:
+                  mkStrOp(iekStrCaptureRe, spec("capture"),
+                          @[recvIR, startIR, lenIR, mkVar(old)])
+                else:
+                  mkTupleLit(@[
+                    mkStrOp(iekStrFindRe, spec("captureFirst"),
+                            @[recvIR, startIR, lenIR, mkField(mkVar(old), 0)],
+                            elTy.fields[0]),
+                    mkStrOp(iekStrFindRe, spec("captureLast"),
+                            @[recvIR, startIR, lenIR, mkField(mkVar(old), 1)],
+                            elTy.fields[1])], elTy)
+              body.add mkIndexAssignStmt(arrTmp, pos, v, siteLoc(n))
+              if isArr:
+                for b in body: preamble.add b
+              else:
+                preamble.add mkIf(@[mkBranch(
+                  mkBinop(bGe, mkSeqLen(mkVar(arrTmp)), mkIntLit(int64(g))),
+                  mkBlock(body))])
+            var wbPre: seq[IRStmt]
+            let w = parseAsgn(nnkAsgn.newTree(capLv, newEmptyNode()),
+                              mkVar(arrTmp), wbPre, ctx)
+            for b in wbPre: preamble.add b
+            preamble.add w
+            return mkVar(callTmp)
           case entry
           of "match", "contains":
             return mkStrOp(iekStrMatch, encodeRegexSpec(entry, flag, rePat),

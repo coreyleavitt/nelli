@@ -64,20 +64,20 @@ import nelli/symex
 import nelli/smt/canonicalize
 
 suite "symex iteSV mergedegrade -- composite-merge degrade, single path":
-  test "symbolic index over array[3, string] local literal -- classified sxUnknown, never a fabricated sxSat":
+  test "symbolic index over array[3, string] local literal -- exact (RFC-0005 S8bb), never a fabricated sxSat":
     proc pickString(i: int) =
       let arr = ["zero", "one", "two"]
       if i >= 0 and i < 3:
         if arr[i] == "two":
           symexTarget("item1_pick_string_hit")
     let r = symexFind(pickString, tLabel("item1_pick_string_hit"))
-    check r.status == sxUnknown
-    var sawClassified = false
+    # RFC-0005 S8bb re-pin: a string merge is Z3's `ite` (it was the
+    # fresh-symbol havoc, sxUnknown), so the target is found and the
+    # witness is the one index that selects "two".
+    check r.status == sxSat
+    if r.status == sxSat: check r.witness[0] == 2
     for e in r.errors:
-      # RFC-0005 S6b: the string merge is the fresh-symbol split.
-      if e.kind == feUnsupportedOpHavoc and "iteSV" in e.msg and "string" in e.msg:
-        sawClassified = true
-    check sawClassified
+      check not (e.kind == feUnsupportedOpHavoc and "iteSV" in e.msg)
 
 suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIndex":
   ## Reproduces the specific shape the verification round constructed to
@@ -89,19 +89,11 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
   ##
   ## RFC-0005 S8aj (walker 177): `var arr: array[3, string]` now takes
   ## Nim's zero instead of being declined, so the unguarded `arr[i]` is
-  ## modelled and its out-of-range read is a genuine `IndexDefect`
-  ## (`sxRaised`, at the base `sxUnknown` through the decline). The guard
-  ## this suite exists for -- the string merge never yields a fabricated
-  ## `sxSat` -- is checked on the raise (never `sxSat`, the witness index
-  ## out of range) and on the in-range twins below, where no raise exists
-  ## and the merge's classified havoc keeps the verdict `sxUnknown`.
-  template checkGenuineIndexRaise(r: untyped) =
-    check r.status != sxSat
-    check r.status == sxRaised
-    if r.status == sxRaised:
-      check r.raisedTypeId == "IndexDefect"
-      let i = r.raisedWitness[1]
-      check i < 0 or i >= 3
+  ## modelled and its out-of-range read is a genuine `IndexDefect`.
+  ## RFC-0005 S8bb: the string merge this suite guarded (it must never
+  ## yield a fabricated `sxSat`) is now Z3's exact `ite`, so every probe
+  ## below is decided: `sxSat` with the one witness that selects "two"
+  ## (they were the havoc's `sxUnknown`, or the raise's `sxRaised`).
 
   test "vulnerable array in the else branch, index in range":
     proc probeElseIn(flag: bool, i: int) =
@@ -115,7 +107,11 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
       if v == "two":
         symexTarget("item1_probe_else_in_hit")
     let r = symexFind(probeElseIn, tLabel("item1_probe_else_in_hit"))
-    check r.status == sxUnknown
+    # RFC-0005 S8bb re-pin: the string merge is exact (was the havoc's
+    # sxUnknown): the target needs the else branch and index 2.
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == false and r.witness[1] == 2
 
   test "vulnerable array in the then branch, index in range":
     proc probeThenIn(flag: bool, i: int) =
@@ -129,7 +125,10 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
       if v == "two":
         symexTarget("item1_probe_then_in_hit")
     let r = symexFind(probeThenIn, tLabel("item1_probe_then_in_hit"))
-    check r.status == sxUnknown
+    # RFC-0005 S8bb re-pin: as above, the then branch and index 2.
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == true and r.witness[1] == 2
 
   test "vulnerable array in the else branch":
     proc probeElse(flag: bool, i: int) =
@@ -146,15 +145,14 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
     # RFC-0005 S8z re-pin (confirmed by S8aj with the same mechanism):
     # `var arr: array[3, string]` is now Nim's zero value (was a decline
     # that tainted every path), so `arr[i]` read BEFORE the bounds guard
-    # surfaces its reachable `IndexDefect` (E6). Checked against Nim: the
-    # witness replays as `IndexDefect`, and its index is out of range.
-    # Never an `sxSat`.
-    checkGenuineIndexRaise(r)
-    if r.status == sxRaised:
-      var replayed = false
-      try: probeElse(r.raisedWitness[0], r.raisedWitness[1])
-      except IndexDefect: replayed = true
-      check replayed
+    # surfaces its reachable `IndexDefect` (E6).
+    # RFC-0005 S8bb re-pin: the string merge is now exact (it was the
+    # fresh-symbol havoc), so the target itself is decided reachable: the
+    # one in-range witness selecting "two" (the raise stays reachable for
+    # an out-of-range `i`, the in-range twins above have none).
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == false and r.witness[1] == 2
 
   test "vulnerable array in the then branch":
     proc probeThen(flag: bool, i: int) =
@@ -171,15 +169,14 @@ suite "symex iteSV mergedegrade -- two sibling paths merged before a shared isIn
     # RFC-0005 S8z re-pin (confirmed by S8aj with the same mechanism):
     # `var arr: array[3, string]` is now Nim's zero value (was a decline
     # that tainted every path), so `arr[i]` read BEFORE the bounds guard
-    # surfaces its reachable `IndexDefect` (E6). Checked against Nim: the
-    # witness replays as `IndexDefect`, and its index is out of range.
-    # Never an `sxSat`.
-    checkGenuineIndexRaise(r)
-    if r.status == sxRaised:
-      var replayed = false
-      try: probeThen(r.raisedWitness[0], r.raisedWitness[1])
-      except IndexDefect: replayed = true
-      check replayed
+    # surfaces its reachable `IndexDefect` (E6).
+    # RFC-0005 S8bb re-pin: the string merge is now exact (it was the
+    # fresh-symbol havoc), so the target itself is decided reachable: the
+    # one in-range witness selecting "two" (the raise stays reachable for
+    # an out-of-range `i`, the in-range twins above have none).
+    check r.status == sxSat
+    if r.status == sxSat:
+      check r.witness[0] == true and r.witness[1] == 2
 
 suite "symex iteSV mergedegrade -- ordinary (non-composite) symbolic array indexing is unaffected":
   test "array[5, int] symbolic index -- still finds a real, correct witness (positive control)":

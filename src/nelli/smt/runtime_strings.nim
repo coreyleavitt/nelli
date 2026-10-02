@@ -158,42 +158,38 @@ type RegexReplaceShape = object
 proc regexDecline(sp: RegexSpec; why: string) {.noreturn.} =
   raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
     msg: "regex replace(s, " & sp.flag & "\"" & sp.pattern & "\", by) is " &
-         "not modeled: " & why & " (RFC-0005 S8aw lowers a fixed-length " &
-         "sequence of byte sets and one byte set under a greedy `+`; the " &
-         "result is a fresh string, replay-gated)")
+         "not modeled: " & why & " (RFC-0005 S8bb lowers every pattern " &
+         "PCRE's priority run reads; the result is a fresh string, " &
+         "replay-gated)")
 
-proc regexReplaceShape(sp: RegexSpec; root: Rx): RegexReplaceShape =
-  ## RFC-0005 S8aw; S8ay reads `pcre_syntax`'s tree. One of the lowered
-  ## shapes, or a decline naming the construct that leaves PCRE's match
-  ## selection to the matcher.
-  let (fine, edges, why) = splitEdges(root)
-  if not fine: regexDecline(sp, why)
-  if edges.len != 1:
-    regexDecline(sp, "an alternation (PCRE takes the first alternative " &
-                     "that matches, not the longest)")
+proc regexReplaceShape(pr: PcreParse): (bool, RegexReplaceShape) =
+  ## RFC-0005 S8aw; S8ay reads `pcre_syntax`'s tree. One of the shapes
+  ## lowered by the unroll / `regexReplaceRec`, or `false`: RFC-0005 S8bb
+  ## lowers every other pattern by the priority run
+  ## (`regex_parser.replaceRunZ3`).
+  var sh: RegexReplaceShape
+  let (fine, edges, _) = splitEdges(pr.root)
+  if not fine or edges.len != 1: return (false, sh)
   let e = edges[0]
-  if e.bol or e.eol != rxCat: regexDecline(sp, "an anchor")
-  if lenRange(e.body)[0] == 0:
-    regexDecline(sp, "a pattern that can match empty (Nim's " &
-                     "NOTEMPTY_ATSTART retry decides the matches)")
+  if e.bol or e.eol != rxCat or lenRange(e.body)[0] == 0: return (false, sh)
   let items = flattenCat(e.body)
   for it in items:
     let (isSet, cs) = asSet(it)
     if isSet:
-      result.atoms.add cs
+      sh.atoms.add cs
       continue
     if it.kind == rxRep:
       let (subSet, ss) = asSet(it.sub)
       if subSet and it.lo == it.hi:
-        for _ in 0 ..< it.lo: result.atoms.add ss
+        for _ in 0 ..< it.lo: sh.atoms.add ss
         continue
       if subSet and items.len == 1 and it.lo == 1 and it.hi < 0 and
          not it.lazy:
-        result.atoms.add ss
-        result.plus = true
+        sh.atoms.add ss
+        sh.plus = true
         continue
-    regexDecline(sp, "a variable-length part other than the whole " &
-                     "pattern being one byte set under a greedy `+`")
+    return (false, sh)
+  (true, sh)
 
 proc inByteSet(code: Z3Int; cs: set[char]): Z3Bool =
   ## `code` (a `toCode(at(s, k))`: -1 past the end) is a byte in `cs`, as a
@@ -337,7 +333,11 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
   ## Before S8ay `match` and `contains` were both full-string membership
   ## with `start` dropped, and `find` declined.
   let sp = decodeRegexSpec(e.strOp)
-  let kind = (if e.kind == iekStrMatch: svBool else: svInt)
+  let kind =
+    case e.kind
+    of iekStrMatch: svBool
+    of iekStrCaptureRe: svString   # RFC-0005 S8bb: a capture group
+    else: svInt
   let recv = lower(env, e.strArgs[0])
   requireStr(recv, $e.kind)
   let pr = parseSpec(sp)
@@ -346,21 +346,44 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
   var start = mkInt(0)
   if e.strArgs.len >= 2:
     start = toZ3Int(lower(env, e.strArgs[1]))
+  # RFC-0005 S8bb: a captures overload's group reads the call's own
+  # operands (atoms the parser bound) after the call: the call's
+  # `RangeDefect` is already forked, so the group adds none.
+  if e.strArgs.len >= 2 and not sp.entry.startsWith("capture"):
     # Nim passes `start.cint` to PCRE: outside int32 it raises RangeDefect
     # (`findBounds` first clamps to `MaxReBufSize`, high(cint), so only
     # below). Gated with every range check by `drainRangeRaises`.
     let below = start < mkInt(-2147483648'i64)
     let outside =
-      if sp.entry in ["findBoundsFirst", "findBoundsLast"]: below
+      if sp.entry in ["findBoundsFirst", "findBoundsFirstCap",
+                      "findBoundsLast"]: below
       else: below or (start > mkInt(2147483647'i64))
     rangeDefectConds.add outside
     syncRangeDefectCond(outside)
   regexOutcomeGate(sp, pr)
-  let r = lowerRegexEntry(sp, pr, recv.str, start, regexFreshName)
+  # RFC-0005 S8bb: a captures overload's group carries the length of its
+  # `matches` argument and the element's value before the call.
+  # (`findBounds`' bounds overload: an svInt field, `iekStrFindRe`.)
+  let capture = sp.entry.startsWith("capture")
+  var arrLen = mkInt(0)
+  var old = mkString("")
+  var oldI = mkInt(0)
+  if capture:
+    arrLen = toZ3Int(lower(env, e.strArgs[2]))
+    let o = lower(env, e.strArgs[3])
+    if e.kind == iekStrCaptureRe:
+      requireStr(o, $e.kind)
+      old = o.str
+    else:
+      oldI = toZ3Int(o)
+  let r = lowerRegexEntry(sp, pr, recv.str, start, regexFreshName, arrLen,
+                          old, oldI)
   case r.outcome
   of roValue:
     for d in r.defs: stripDecompConds.add d
-    if kind == svBool: SymVal(kind: svBool, bo: r.b)
+    case kind
+    of svBool: SymVal(kind: svBool, bo: r.b)
+    of svString: SymVal(kind: svString, str: r.s)
     else: SymVal(kind: svInt, zi: r.i)
   of roRejected: regexRejected(r.msg, kind)
   of roUnknown:
@@ -742,15 +765,17 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       raise (ref SymexZ3StringIncompleteError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
         msg: "general symbolic string.split is not bounded-encodable " &
              "(universal-quantifier hang risk; general path → sxUnknown)")
-  of iekStrMatch, iekStrFindRe:
+  of iekStrMatch, iekStrFindRe, iekStrCaptureRe:
     # Phase 15 S6b; RFC-0005 S8ay. Every `std/re` entry point but replace
-    # (see `lowerRegexCall`).
+    # (see `lowerRegexCall`); RFC-0005 S8bb: and a captures overload's
+    # groups.
     lowerRegexCall(env, e)
   of iekStrReplaceRe:
     # Phase 15 S6b; RFC-0005 S8aw, S8ay. `s.replace(re"…", repl)`: every
     # leftmost non-overlapping PCRE match replaced, lowered by the walker
     # for the shapes `regexReplaceShape` accepts (see the S8aw block above
-    # `lowerStrArm`).
+    # `lowerStrArm`), and RFC-0005 S8bb for every other pattern PCRE's
+    # priority run reads (`regex_parser.replaceRunZ3`).
     #
     # RFC-0005 S5: operands lowered and the pattern parsed BEFORE any
     # decline -- `seZ3StringIncomplete` is `dcFreshSymbol`, so the decline
@@ -766,7 +791,20 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     let repl = lower(env, e.strArgs[1])
     requireStr(repl, "iekStrReplaceRe")
     regexOutcomeGate(sp, pr)
-    let sh = regexReplaceShape(sp, pr.root)
+    # RFC-0005 S8bb (item 6): every pattern the priority run reads. The
+    # S8aw / S8ay shapes keep their lowering; any other (an alternation, an
+    # anchor, a pattern that matches empty, a newline convention's dot) is
+    # the run's (`regex_parser.replaceRunZ3`). Under a CRLF convention whose
+    # bumpalong skip a match could observe, the occurrence is PCRE's
+    # optimiser's call (`pcre_select.crlfSkipSeen`): a decline.
+    let n = buildNfa(pr)
+    let (isShape, sh) = regexReplaceShape(pr)
+    if not isShape or crlfSkipSeen(n):
+      let t = runTable(n)
+      if not t.ok: regexDecline(sp, t.why)
+      return SymVal(kind: svString,
+                    str: replaceRunZ3(recv.str, repl.str, t, pr.nl,
+                                      regexFreshName))
     let lenS = simplify(len(recv.str))
     if isNumeralAst(lenS.ctx, lenS.raw):
       let n = parseInt(getNumeralString(lenS))
@@ -1111,7 +1149,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
-                   iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+                   iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrCaptureRe,
                    iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
                    iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,

@@ -314,7 +314,7 @@ state = "done"
 [[slice]]
 id    = "S8ar"
 title = "S8ap's remainder. Faults first: a seq of the object's own ref type crashes type classification (VM call depth) -- classify recursive ref element types without unbounded recursion; a plain seq[string] faults in add -- model it or decline cleanly, never a walker fault. Then: insert is unmodelled even on a plain seq -- model it; p.inner.s.add (a field path through a ref then a value) is outside the dotted-field shape and stays N49 -- extend the shape; tuple/array/object fields, non-string-keyed Tables and unbacked Table[string,V] still decline as seUnsupportedCompoundSortLeaf -- close those with a sound model, keeping any remaining decline scoped and stated; a distinct field is havocked and has no construction zero -- give it one; a container the witness cannot render demotes the parameter -- render it; the heap-depth budget counts field reads -- count heap steps only, or show field reads must count; Table witnesses render only int and bool values -- render every backed value type; well-formedness facts are asserted only at reads -- assert them wherever a cell enters the model, or show reads cover every path"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8as"
@@ -6959,6 +6959,254 @@ same way.
   it (above). This is sound, because nothing observed it. But
   `renderedSize` and the `[0, 1024]` length window are the only guard, and
   a future reader of unread cells would have to assert the facts itself.
+
+**As landed (S8ar, walker 191, provisional) — S8ap's remainder.**
+
+*Faults first.*
+- **A seq of the object's own ref type classifies.** `classifyType` keeps
+  the `nominalId`s of the named objects whose fields it is classifying
+  (`dsl_typebridge.nim`). A Nim type graph is cyclic wherever a container
+  breaks the value nesting. R9's `namedRefPlaceholder` cut the cycle only
+  for a direct ref field (`next: N`), so `kids: seq[N]` expanded `N` again
+  without end ("maximum call depth for the VM exceeded"). A named type met
+  again while its own fields are being classified is now a reference to it:
+  - a ref/ptr type becomes the R9 placeholder and shares its `Ref_` sort;
+  - a value object can only recur through a container, so its value is
+    unbounded in depth, and it declines scoped (`__unsupported:`).
+    `scopedDeclineFieldTy` turns the enclosing seq field into that field's
+    per-read decline, not the parameter's.
+- **`seq[string]` is modelled.** `iekSeqAdd` had its own per-kind copy of
+  the store, covering only `int` and `bool`. Any other element kind was
+  "iekSeqAdd: unsupported elem/width" (`weInternalWalkerFault`), and an
+  Int-promoted `int` stored the constant 0. The arm now lowers the element
+  at the element type's width and stores through `storeSeqElem`, the store
+  every other seq write uses. A string element read is asserted a string of
+  bytes (`seqStrElemConds`), the fact a free `string` has. The witness
+  renders a `seq[string]` and a `seq[bool]`.
+
+*`insert` is modelled* (`iekSeqInsert`), on a bare seq and on every dotted
+field. It follows `system.insert(x, item, i)`:
+1. `i` is a `Natural`, so a negative `i` raises `RangeDefect` at the call,
+   before any change.
+2. `setLen(x, len + 1)`: the new last element is `T`'s zero.
+3. The elements at `i ..< len` move up one.
+4. `x[i] = item`, which raises `IndexDefect` for `i > len` after the seq
+   has grown. Probed: `@[1,2,3].insert(9, 5)`, caught, leaves
+   `@[1, 2, 3, 0]`.
+
+The parser emits the call as two assignments to the receiver, a grow phase
+and then a place phase, so each phase's defect forks with the state Nim
+raises it in. The shift is the array lambda `iekSeqSlice` already builds
+(`Z3_mk_lambda_const`, beta-reduced at every select), so it needs no
+quantifier; N14 had declined `insert` as needing one. An element type whose
+all-zero memory is not a value of the type (a variant whose ordinal-0 tag
+is illegal) has no `setLen` element and declines.
+
+*A value chain rooted at a ref object's field writes back.* The covered
+shapes are:
+- `p.inner.s.add v`;
+- `p.inner.a = v`;
+- `p.inner.sub.x = v`;
+- `p.inner.s[0] = v`;
+- `p.inner.t[k] = v`.
+
+`dottedFieldShape` accepted one ref/ptr step directly before the field, or
+a value chain from a local or a parameter. A chain whose root is a ref
+object's field (`heapFieldRoot`) is now a `ValueFieldWrite` with `heap`
+set. The parser rebuilds the chain's value and writes the root field back
+through the R6 field-deref write (`mkFieldDerefWrite`). The store, its nil
+fork and aliasing are therefore the heap's own.
+
+*Tuple, object, array and distinct fields are tree-valued heap cells.* S8ap
+split a compound cell into one heap array per leaf. S8ar applies the same
+split recursively to a by-value aggregate (`heapTreeTy`):
+- a tuple or object part `x` holds its leaves under `__@.x`, followed by the
+  part's own suffixes, at every depth, so no two paths share a key
+  (`o.inner.x` is `__@.inner__@.x`, `o.x` is `__@.x`);
+- an anonymous tuple's parts are `FieldN` and an array's elements their
+  positions (`heapPartLabel`, the names `fieldPairs` gives the witness
+  reader);
+- a `distinct` over a scalar base is its base's one leaf; a read re-boxes
+  the base (`reboxDistinct`).
+
+A read rebuilds the value part by part, and a write stores each part
+(`svFitsHeapTy` checks the shape first). The witness renders each part at
+`<field>.<label>` (`renderHeapValue`, `readCellField`). A constant array
+index (`a[1]`) now folds to that element in `arraySelect`/`arrayStore`. The
+ite chain merged every element, and a merge of two seq values is `iteSV`'s
+havoc, so `a[1].len` of an `array[N, seq[T]]` read a fresh seq even at a
+constant index.
+
+*Every construction zeroes a tree field.* `new(T)` and an object
+constructor write each part's zero, and a distinct's zero is its base's.
+Before S8ar a distinct field had none (`heNewFieldZeroUnsupported`).
+
+*Every backed Table key and value type is modelled and rendered.*
+- A key is a string or an integer-like 64-bit cell (`tabKeyTerm`). A
+  cell-keyed table registers its present array as a `HashSet` of its key
+  type would (`ContainerCardRegistry`), so a narrower key type bounds the
+  size by its domain.
+- A value is an integer-like cell, a `string` or a `float32`/`float64`
+  (`TabValLeaf`, `tabValOf`). The data and present arrays take their sorts
+  from these (`tabDataVar`), where every table was `Z3Array[Z3String,
+  Z3BitVec[64]]`.
+- `extractTableEntries` renders every backed key and value type, and the
+  witness reads it back with `readTableAs[K, V]` (`witnessTabKey`,
+  `witnessTabVal`). It rendered `int`/`bool` values only.
+- `isBackedTableTy` is the one test of backedness. Each op had its own
+  value-type `else` arm.
+
+*A container inside a ref pointee no longer demotes the parameter.* A ref
+whose pointee is a named object, tuple or case object is spelled by name in
+the witness (`refWitnessTypeNode`) and filled field by field through
+`readCellField`. A field the model does not back renders as its zero, and
+`witnessFidelity` calls the pointee lossy (`fieldFidelity`'s `itTable` arm
+is `isBackedTableTy`). Before, `isRenderableWitnessTy` demoted the whole
+parameter to `__unsupported_witness:*` before the walk.
+
+*The heap-depth budget counts heap steps.* A ref carries its distance from
+a root (`refSteps`). That distance is 0 for a parameter, a `new` or `nil`,
+and `k + 1` for a ref read out of a cell reached through a `k`-step ref:
+- a seq read from a cell carries the steps of its element refs
+  (`seqSteps`);
+- a merged ref takes the deeper of its two sides;
+- a deref's step is its ref's steps plus one (`heapStepOf`), and
+  `maxHeapDepth` bounds that step.
+
+`p.heapDepth` is the deepest step the path has taken. Before S8ar every
+deref incremented it, so ten field reads of one parameter exhausted a
+budget of 8, though each read was one step from the root.
+
+*Well-formedness: reads cover every path (the item's second option).*
+`heapCellWfConds` asserts the facts of the input cell
+`select(heap_<leaf>, p)` at every read of it:
+- a string of bytes;
+- a length or size in `[0, 1024]`;
+- a table's or set's size tied to its keys;
+- for a nested scalar part, its declared range.
+
+S8ar makes this recursive over a tree's parts, and adds the arm cells of a
+ref variant and the element string of a `seq[string]` read. A cell enters
+the model in one of three ways, and each is covered:
+- **as an input**, which no path observes until it reads the cell, and the
+  read asserts the facts;
+- **as a write**, whose value is one the program built, already
+  well-formed by its own construction facts;
+- **as a construction zero**, which is a constant.
+
+An input cell no path reads is unconstrained, and the renderer clamps it
+(S8ap). That is sound, because nothing observed it. Every part kind has a
+dead-twin pin:
+- a nested seq length;
+- an array of seqs;
+- a cell-keyed Table's size against its keys;
+- a `HashSet[int8]` past its domain;
+- a ref variant's arm seq and set;
+- a written tree read back.
+
+*The declines that remain, each scoped to the access and stated in its
+message:*
+- **A by-value case object field** (`heapStandInTy`). Its fields depend on
+  its discriminator, and the arm-keyed layout ADR-0013 gives a ref case
+  object does not nest. Every read is `heUnsupportedPointeeRead`, and the
+  message names the cause: "a by-value case object is not a heap cell
+  value: its fields depend on its discriminator (RFC-0005 S8ar, scoped to
+  this read)". Every store is too ("heap store into a `T` cell (a by-value
+  case object) not modeled"). The cell's array has a Bool stand-in sort
+  (`heapValueSort`), because no value of the type is ever stored. Before,
+  the sort derivation also recorded `seUnsupportedCompoundSortLeaf`.
+- **A tuple, object or array with a part that is not a cell value**, such
+  as `(int, <case object>)`. It takes the same stand-in, and the message
+  is "a part of it is not a heap cell value".
+- **A `distinct` over a composite base** (`distinct seq[int]`). It has no
+  distinct sort to re-box into (`ensureDistinctSort` reads one Z3 term of
+  the base), so it takes the same stand-in and the same per-access decline.
+  Its store was an ill-sorted term (`weInternalWalkerFault`). The fresh
+  value a read yields is still a compound-sort decline of its own
+  (`seUnsupportedCompoundSortLeaf`, N47): `allocDistinctSym` cannot give a
+  distinct over a seq a sort. A parameter of that type has the same
+  decline. The path reading it is therefore ⊤, not only `scSpurious`.
+- **A value object that recurs through a container** (`type O = object;
+  kids: seq[O]`). The enclosing field declines per read, as above.
+- **A `Table` whose key or value the model does not back**: a `float` key,
+  or a container value (`Table[string, seq[int]]`).
+- **A top-level witness of a container whose element, key or value is an
+  8-bit unsigned integer.** `uint8` and `char` are one IR type, so the
+  reader cannot tell which to build. The message (`unsupportedWitnessMsg`)
+  states this.
+
+The parameter in each is still walked, and any path that does not touch the
+declined access stays exact. The last suite of the new file pins these.
+
+Pins: `tests/tsymex_rfc0005_s8ar_remainder.nim`, 50 tests, one suite per
+item. Each reachable target has an unreachable twin, and witnesses replay
+through the SUT. The file also pins the `>= 191` floor.
+
+Moved forward because the old pins exercised exactly the gaps S8ar closes.
+For the ones that pinned a still-unmodelled site, the poison source was
+swapped for a shape that still reaches the same site:
+- `s8ap_remainder`, `r6_n49_dottedfield_mutation`, `r6_n14_seqops`:
+  `insert`, bare and dotted, is `sxSat`.
+- `s0_exhibit`, `s3_monotonicity` F1, `r6_heap_raise_totality`,
+  `s6b_ops`, `rfc0005_s2_replay`: the `distinct int` field is now a
+  by-value case object field. It still reaches `liftHeapValue`'s
+  unsupported read, `heNewFieldZeroUnsupported`, and a lossy witness.
+- `s4_alloc`: the `distinct string` field is now a case object holding a
+  string. Its IR case is a ref to an object holding a case object. Its
+  structural pin counts three `heUnsupportedPointeeRead` sites in
+  `runtime_heap.nim`: two read sites, each a `degradeAlloc` with a fresh
+  name, and `heapCellStore`'s stand-in store.
+- `r6_lows_declines` N41-2/3: the tuple field is now `(int, <case
+  object>)`. N41-2 now expects the stated `heUnsupportedPointeeRead` in
+  place of `seUnsupportedCompoundSortLeaf`.
+- `r6_n43_parity`, `r6_n39_variant_field_alloc`, `r6_n40_alloc_totality`,
+  `r6_n42_deref_taint`, `rfc0005_s1c_verdict`, `rfc0005_s8z_remainder`,
+  `CR2c_witnessreader_catchall`: `Table[int, _]` / `Table[string, string]`
+  poison became `Table[float, _]` / `Table[string, seq[int]]`.
+- `phase15_M1_seq_fixedwidth` M1-10: a `seq[string]` parameter is `sxSat`.
+- `r6_n27_placeholder_read_audit`: runtime.nim's marker count goes from 85
+  to 91:
+  - `iekSeqAdd`'s two per-kind store reads become one `storeSeqElem` read;
+  - `iekSeqInsert` adds its guard and five reads behind it;
+  - `extractSeqElements` gains a `seq[string]` arm.
+
+Caught on cpp, not on c: a `Table[string, float]` read compared against a
+dangling sort ("fp sorts expected", `k!0` as the data array's range).
+nim-z3's `sortOf(Z3Array[K, V])` passes two unreferenced sorts to
+`Z3_mk_array_sort` as call arguments. C++ evaluates them right to left,
+and a ref-counted Z3 context keeps only its last API result alive. A float
+sort that no live term held was therefore freed when the key sort was
+built. `tabDataVarOf` now holds a live term of each sort across the call.
+
+*Different mechanisms, reported and not fixed here.*
+- **A ref to an anonymous tuple (`type P = ref (int, int)`) is an
+  unsupported parameter type** (`feUnsupportedParamType`). A ref to a named
+  object or tuple works. This is parameter-type classification, not the
+  heap.
+- **`initTable[K, V]()` inside a SUT does not compile.** `classifyType`
+  (`dsl_typebridge.nim`) calls `getTypeInst` on a node with no type, and
+  compilation stops with "node has no type". It fails the same way at the
+  base (1409cf0). A `var t: Table[K, V]` declaration is modelled, and the
+  S8ar pins use it.
+- **A seq-valued array element at a symbolic index havocs.** For an
+  `array[N, seq[T]]`, `p.a[i].len` with a symbolic `i` merges the elements
+  through `iteSV`, which havocs a seq value (`feUnsupportedOpHavoc`).
+  Replay then refutes the candidate. A constant index folds since S8ar. The
+  general fix is a per-leaf seq-valued `ite`, as `heapCellIte` builds for
+  heap cells. That is a change to `iteSV`, not to the heap.
+- **Constructing an object leaves a by-value case-object field unzeroed.**
+  `PHold(n: n)`, where `PHold` has a by-value case object field `c`,
+  reports `heNewFieldZeroUnsupported` plus the field's stated store
+  decline, and the path is tainted. A case object's zero depends on the arm
+  its ordinal-0 tag selects. The fix belongs with modelling by-value case
+  objects as cell values.
+- **Every other `mkArrayVar` call has the same sort-lifetime hazard.**
+  The nim-z3 cause above applies wherever both the key sort and the value
+  sort can be held by no live term: a bitvector or float value, or a
+  bitvector key. Only the Table data array is guarded here, and it is the
+  only shape a test reached. The fix belongs in nim-z3: `sortOf(Z3Array)`
+  should hold both sorts while it builds the array sort, followed by a
+  lock bump. It is not a walker change.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

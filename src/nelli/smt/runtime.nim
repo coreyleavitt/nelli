@@ -1422,6 +1422,21 @@ func tabValLeaf(valTy: IRType): TabValLeaf =
   else: tvCell
 
 proc tabDataVarOf[K](name: string; valTy: IRType): Z3AnyAst =
+  # nim-z3's `sortOf(Z3Array[K, V])` hands `Z3_mk_array_sort` two fresh,
+  # unreferenced sorts as call arguments. The C++ backend evaluates them
+  # right to left, and Z3 keeps only the last API result alive in a
+  # ref-counted context, so a sort no live term holds (a float's, before
+  # any float term exists) was freed by the key sort's construction: the
+  # array's range was a dangling sort (`k!0`; "fp sorts expected" at the
+  # first comparison). A live term of each sort holds both across the call.
+  let holdK {.used.} = (when K is Z3String: toAnyAst(mkString(""))
+                        else: toAnyAst(mkBitVec[64](0'i64)))
+  let holdV {.used.} =
+    case tabValLeaf(valTy)
+    of tvCell: toAnyAst(mkBitVec[64](0'i64))
+    of tvStr:  toAnyAst(mkString(""))
+    of tvF32:  toAnyAst(mkFloat32(0'f32))
+    of tvF64:  toAnyAst(mkFloat64(0.0))
   case tabValLeaf(valTy)
   of tvCell: toAnyAst(mkArrayVar[K, Z3BitVec[64]](name))
   of tvStr:  toAnyAst(mkArrayVar[K, Z3String](name))

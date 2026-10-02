@@ -948,6 +948,12 @@ suite "Phase 15 CR-2 — version bumps":
     ## :raised:<type> cache slots also carry gaps() on a hit now). 195->199
     ## (196-198 reserved for sibling slices on the same channel tip; S8ay
     ## holds 198).
+    ## RFC-0005 S8aw (regex replace lowered by the walker for a literal, a
+    ## one-byte class and a class under `+`; the last_indexof/indexof join
+    ## emitted). Provisional 196.
+    ## RFC-0005 S8ay (the std/re entry points' own formulas over a
+    ## PCRE-faithful reader; re vs rex in the IR; a rejected pattern raises
+    ## RegexError). Provisional 198 (S8ax holds 197).
     check symexWalkerVersion == "199"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

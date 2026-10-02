@@ -39,6 +39,7 @@ import ./dsl_typebridge
 import ./stdlib_models
 import ./exn_hierarchy   ## Phase 15 E4a: exnTypeTable (known-base sentinel)
 import ./scoped_names    ## RFC-0005 S8e: scope-keyed names (`strVal`, claims)
+import ./pcre_syntax     ## RFC-0005 S8ay: the regex `strOp` encoding; a rejected `re"..."` is a raise site
 
 # ---- Cluster N: routine-impl resolution (RFC-parser-normalization #146/#148) --
 #
@@ -1375,6 +1376,70 @@ proc resolveContinue(ctx: ParseCtx): IRStmt =
       return mkBreak(t.contLabel)
   mkContinue()   # no enclosing loop: the walker's weBreakOutsideLoop
 
+# ---- RFC-0005 S8ay: `std/re` call recognition -------------------------------
+
+const regexEntryNames = ["match", "find", "contains", "replace", "matchLen",
+                         "findBounds", "findAll", "startsWith", "endsWith",
+                         "split", "replacef", "multiReplace"]
+  ## The `std/re` procs taking a `Regex` (the `=~` template expands to a
+  ## `match` with a captures array).
+
+proc isRegexTyped(a: NimNode): bool =
+  ## `a` is a `std/re` `Regex` value (`ref RegexDesc`).
+  if a.typeKind == ntyNone: return false
+  let t = a.getTypeInst
+  t.kind == nnkSym and t.strVal == "Regex"
+
+proc regexLiteralOf(a: NimNode): (string, string) =
+  ## RFC-0005 S8ay. `(flag, pattern)` of a `Regex` argument: flag `re` or
+  ## `rex` for `re"..."` / `rex"..."` / `re("...")` / `rex("...")` whose
+  ## flags are the defaults or `reStudy` / `reExtended` alone (PCRE_EXTENDED
+  ## is the only one of them that changes what matches), else `?` -- a
+  ## Regex value, a non-literal pattern, or a flag (`reIgnoreCase`,
+  ## `reMultiLine`, `reDotAll`) the walker does not model.
+  var x = a
+  while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and x.len > 0:
+    x = x[^1]
+  if x.kind notin {nnkCallStrLit, nnkCall} or x.len < 2 or
+     x[0].kind notin {nnkSym, nnkIdent} or x[0].strVal notin ["re", "rex"]:
+    return ("?", "")
+  var lit = x[1]
+  while lit.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and lit.len > 0:
+    lit = lit[^1]
+  if lit.kind notin {nnkStrLit, nnkRStrLit, nnkTripleStrLit}:
+    return ("?", "")
+  var extended = x[0].strVal == "rex"   # the defaults: {reStudy} / +reExtended
+  if x.len >= 3:
+    var fl = x[2]
+    while fl.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and fl.len > 0:
+      fl = fl[^1]
+    if fl.kind != nnkCurly: return ("?", "")
+    extended = false
+    for f in fl:
+      if f.kind notin {nnkSym, nnkIdent}: return ("?", "")
+      case f.strVal
+      of "reStudy": discard
+      of "reExtended": extended = true
+      else: return ("?", "")
+  ((if extended: "rex" else: "re"), lit.strVal)
+
+proc regexCallForks(e: IRExpr): bool =
+  ## RFC-0005 S8ay. A regex call forks a raise of its own: `RegexError` for
+  ## a pattern PCRE rejects, `RangeDefect` for a `start` outside int32 (Nim
+  ## passes `start.cint`).
+  if e.kind notin {iekStrMatch, iekStrFindRe, iekStrReplaceRe,
+                   iekStrUnsupported}:
+    return false
+  var op = e.strOp
+  if op.startsWith("regex:"): op = op[6 .. ^1]
+  elif e.kind == iekStrUnsupported: return false
+  let sp = decodeRegexSpec(op)
+  if sp.flag in ["re", "rex"] and
+     parsePcre(sp.pattern, sp.flag == "rex").status == psRejected:
+    return true
+  e.kind in {iekStrMatch, iekStrFindRe} and e.strArgs.len >= 2 and
+    e.strArgs[1].kind != iekIntLit
+
 # ---- R16-2b: detect inline float→int conversions in RHS IR trees ------------
 
 proc rhsHasInlineDefectFork(e: IRExpr): bool =
@@ -1488,6 +1553,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
      iekStrConcat, iekIntToStr, iekRadixFmt,
      iekStrUnsupported, iekStrToLower, iekStrToUpper, iekRuneToStr,
      iekStrStrip, iekStrInOptionRegion:
+    if regexCallForks(e): return true   # RFC-0005 S8ay
     ## Round-6 B6: `iekStrInOptionRegion` is never reachable from ordinary
     ## and/or RHS surface syntax (it is synthesized only by
     ## `tryRecognizePairLoopIdiom`'s closed-form replacement, never parsed
@@ -5660,42 +5726,81 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # Only a COMPILE-TIME literal pattern is extractable; a symbolic Regex
         # value can't be parsed at walk time → routes to `iekStrUnsupported`.
         block regexCall:
-          if calleeSym.strVal notin ["match", "find", "contains", "replace"]:
+          # RFC-0005 S8ay: every `std/re` entry point taking a `Regex`, not
+          # only match/find/contains/replace. The others (matchLen,
+          # findBounds, findAll, split, replacef, the captures overloads and
+          # the `=~` template's expansion) fell through to the uniform
+          # argument parse and aborted the compile ("node has no type").
+          if calleeSym.strVal notin regexEntryNames:
             break regexCall
-          # locate the `re"…"` arg (nnkCallStrLit with callee re/rex).
-          var rePat = ""
           var reIdx = -1
           for i in 2 ..< n.len:
-            let a = n[i]
-            if a.kind == nnkCallStrLit and a.len >= 2 and
-               a[0].kind in {nnkSym, nnkIdent} and
-               a[0].strVal in ["re", "rex"] and
-               a[1].kind in {nnkRStrLit, nnkStrLit, nnkTripleStrLit}:
-              rePat = a[1].strVal
+            if isRegexTyped(n[i]):
               reIdx = i
               break
           if reIdx < 0:
-            break regexCall   # not a regex call (string-arg overload) — fall through
+            break regexCall   # the string-argument overload: not a regex call
+          let entry = calleeSym.strVal
+          let (flag, rePat) = regexLiteralOf(n[reIdx])
+          # A rejected pattern raises `RegexError` (`object of ValueError`)
+          # when `re` runs; an `except ValueError` handler must see it.
+          ctx.userExnHierarchy["RegexError"] = "ValueError"
+          let rejected = flag != "?" and
+                         parsePcre(rePat, flag == "rex").status == psRejected
+          # Arguments AFTER the pattern: `start` (an int), `by` (replace's
+          # string) or a captures array. Nim evaluates arguments left to
+          # right and `re` raises before any later argument runs, so a
+          # rejected pattern lowers the receiver alone.
+          var startIR: IRExpr = mkIntLit(0)
+          var byIR: IRExpr = mkStrLit("")
+          var captures = false
+          if not rejected:
+            for i in reIdx + 1 ..< n.len:
+              let a = n[i]
+              let k = a.typeKind
+              if k in {ntyInt, ntyInt8, ntyInt16, ntyInt32, ntyInt64}:
+                startIR = parseExpr(a, preamble, ctx)
+              elif k == ntyString: byIR = parseExpr(a, preamble, ctx)
+              else: captures = true   # `matches: var openArray[...]`
           let recvIR = parseExpr(n[1], preamble, ctx)
-          case calleeSym.strVal
+          template decline(retTy: IRType; what = entry): IRExpr =
+            mkStrOp(iekStrUnsupported,
+                    "regex:" & encodeRegexSpec(what, flag, rePat),
+                    @[recvIR], retTy)
+          if captures:
+            # The captures overloads write `matches`; the walker does not
+            # model the write, so the call declines (seUnsupportedRegex, ⊤).
+            return decline(classifyType(n).ty, entry & "Captures")
+          case entry
           of "match", "contains":
-            # membership predicate → svBool. Pattern in strOp; strArgs = [recv].
-            return mkStrOp(iekStrMatch, rePat, @[recvIR])
-          of "find":
-            # DEFERRED: nim-z3 has no indexOf-on-regex API → classified
-            # seUnsupportedRegex at walk time. Pattern in strOp; strArgs = [recv].
-            return mkStrOp(iekStrFindRe, rePat, @[recvIR])
+            return mkStrOp(iekStrMatch, encodeRegexSpec(entry, flag, rePat),
+                           @[recvIR, startIR])
+          of "startsWith", "endsWith":
+            return mkStrOp(iekStrMatch, encodeRegexSpec(entry, flag, rePat),
+                           @[recvIR])
+          of "find", "matchLen":
+            return mkStrOp(iekStrFindRe, encodeRegexSpec(entry, flag, rePat),
+                           @[recvIR, startIR], tInt())
+          of "findBounds":
+            # (first, last): two lowerings over the same receiver and start,
+            # so both must be atoms -- a compound one would be lowered (and
+            # its raises deposited) twice.
+            if not (isAtomicIR(recvIR) and isAtomicIR(startIR)):
+              return decline(classifyType(n).ty)
+            return mkTupleLit(@[
+              mkStrOp(iekStrFindRe,
+                      encodeRegexSpec("findBoundsFirst", flag, rePat),
+                      @[recvIR, startIR], tInt()),
+              mkStrOp(iekStrFindRe,
+                      encodeRegexSpec("findBoundsLast", flag, rePat),
+                      @[recvIR, startIR], tInt())], classifyType(n).ty)
           of "replace":
-            # regex global replace → version-gated (z3WithSeqReplaceRe). The
-            # replacement is the OTHER (non-regex) string arg. strArgs =
-            # [recv, replacement]; pattern in strOp.
-            var replIR: IRExpr = mkStrLit("")
-            for i in 2 ..< n.len:
-              if i != reIdx and n[i].kind != nnkIntLit:
-                replIR = parseExpr(n[i], preamble, ctx)
-                break
-            return mkStrOp(iekStrReplaceRe, rePat, @[recvIR, replIR])
-          else: discard
+            return mkStrOp(iekStrReplaceRe, encodeRegexSpec(entry, flag, rePat),
+                           @[recvIR, byIR])
+          else:
+            # findAll, split, replacef, multiReplace: declined
+            # (seZ3StringIncomplete, a fresh value of the call's type).
+            return decline(classifyType(n).ty)
         # Phase 15 S3: `s[i]` (index read) and `s[a..b]` (slice) arrive as a
         # `[]` call on the string. The slice argument is an `nnkInfix(.., a, b)`
         # / `nnkInfix(..<, a, b)` which is NOT a scalar IR expr — handle both
@@ -11142,8 +11247,18 @@ proc parseStmtInner(n: NimNode,
       mkReturnVal(parseExpr(inner, preamble, ctx))
   of nnkLetSection, nnkVarSection:
     var stmts: seq[IRStmt]
-    for id in n:
-      id.expectKind nnkIdentDefs
+    for id0 in n:
+      id0.expectKind nnkIdentDefs
+      # RFC-0005 S8ay: a name with a pragma (`var matches {.inject.}: ...`,
+      # the `std/re` `=~` template's expansion) arrives as an
+      # `nnkPragmaExpr` whose `[0]` is the symbol; every use below reads the
+      # name node as a symbol (`classifyType` aborted the compile on it:
+      # "node has no type").
+      var id = id0
+      for j in 0 ..< id0.len - 2:
+        if id0[j].kind == nnkPragmaExpr:
+          if id == id0: id = copyNimTree(id0)
+          id[j] = id0[j][0]
       let valNode = id[id.len - 1]
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the

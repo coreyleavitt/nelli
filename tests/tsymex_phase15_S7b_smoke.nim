@@ -124,12 +124,16 @@ suite "symex Phase 15 S7b — Z3-string regression smoke (cross-op composition)"
     check r.status == sxSat
     check r.witness[0] == "x"
 
-  test "regex match [a-z]+ -> sxSat with an all-lowercase length-3 witness":
+  test "regex match [a-z]+ -> sxSat with a lowercase-led length-3 witness":
+    # RFC-0005 S8ay: `match` is a PREFIX match, so only the first byte must
+    # be lowercase; this pinned all three, which held only while `match`
+    # was (wrongly) full-string membership, and on Z3 4.13.4 the model's
+    # later bytes are free.
     let r = symexFind(regexLowerSut, tLabel("hit"))
     check r.status == sxSat
     check r.witness[0].len == 3
-    for c in r.witness[0]:
-      check c in {'a'..'z'}
+    check r.witness[0][0] in {'a'..'z'}
+    check r.witness[0].match(re"[a-z]+")
 
   test "string equality s == \"hello\" -> sxSat, witness 'hello'":
     let r = symexFind(equalitySut, tLabel("hit"))

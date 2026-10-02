@@ -203,6 +203,45 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "199"
+  ## RFC-0005 S8ay (2026-10-02) — the `std/re` entry points get their own
+  ## formulas (`regex_parser.lowerRegexEntry`) over a PCRE-faithful byte
+  ## reader (`pcre_syntax.nim`): `contains` is an occurrence in
+  ## `s[start..]`, `match` a prefix match there (both were full-string
+  ## membership with `start` dropped -- false sxSat and sxUnsat both),
+  ## `start` past the end is PCRE_ERROR_BADOFFSET (`match` true, `find`
+  ## -24), `startsWith` / `endsWith` / `find` / `matchLen` / `findBounds`
+  ## are lowered (leftmost and PCRE-chosen matches via definitional
+  ## constraints), `start` outside int32 forks RangeDefect. `.` excludes
+  ## `\n`; `\D \W \S` are complements; `\s \h \v`, POSIX classes,
+  ## anchors `^ $ \A \z \Z` read as PCRE does. `re` vs `rex` rides in the
+  ## IR (`strOp` is `<entry>:<re|rex|?>:<pattern>`). A pattern PCRE
+  ## rejects raises `RegexError` with Nim's exact message (new
+  ## `regexRaiseMsgs` sink, the last `drainScalarRaiseForks` stage).
+  ## findAll / split / replacef / multiReplace / captures decline instead
+  ## of aborting the compile. Regex replace over a receiver of unknown
+  ## length is an exact recursive function past the 16-byte unroll (no
+  ## fresh arm). `checkCapped` runs step 1c's uncapped half first (step
+  ## 0, `factsFirstRLimit`), so a query only it refutes no longer runs out
+  ## step 1's budget first (the same UNSATs (1b) / (1c) reached after
+  ## step 1, at a fraction of the cost). Provisional 198 (S8ax holds 197).
+  ##
+  ## RFC-0005 S8aw (2026-10-02) — regex `replace(s, re"p", by)` is lowered
+  ## by the walker (`runtime_strings.nim`, `regexReplaceShape` /
+  ## `regexReplaceUnrolled`) for a literal, a one-byte class and a class
+  ## under `+`: every leftmost non-overlapping PCRE match, unrolled per
+  ## position (exact for a receiver of known length, `ite(len <= 16, exact,
+  ## fresh)` plus `seZ3StringIncomplete` otherwise). It was a
+  ## `seZ3VersionMissing` fresh stand-in on every build (the gated
+  ## `str.replace_re` is first- and shortest-match, and Z3 leaves it
+  ## `unknown`); other shapes decline `seZ3StringIncomplete`, naming the
+  ## construct. Verdicts change: a concrete-receiver claim is now decided.
+  ## And `seqRangeFacts` emits the join "`seq.last_indexof(s, t)` is at
+  ## least every found `str.indexof(s, t, i)`", which S8aq declined because
+  ## Z3 cannot refute its negation: links are held to S8ai's bar, their
+  ## truth enumerated exhaustively. A first index past the last is now
+  ## `sxUnsat` (was `sxUnknown`). Provisional 196 (S8ar..S8av hold
+  ## 191..195).
+  ##
   ## RFC-0005 S8az (2026-10-02) — S8av's own remainder. The cache VALUE is
   ## widened a third time: the `:sat` witness entry (`CachedWitness`) and
   ## each `:raised:<type>` sentinel (`CachedRaised`) now ALSO carry their

@@ -189,41 +189,28 @@ proc hasKind(errs: seq[SymexErrorInfo]; k: SymexErrorKind): bool =
     if e.kind == k: return true
   false
 
-suite "S8aq (2): the dropped link is declined -- Z3 cannot decide the combination":
+suite "S8aq (2): the dropped link -- emitted since RFC-0005 S8aw":
 
-  # RFC-0005 S8aq attempted two reformulations of the dropped link ("L
-  # (`seq.last_indexof`) is at least every found `str.indexof`") as a
-  # ground fact `seqRangeFacts` could emit: a fresh `str.indexof(s, t, L)`
-  # term joined into the existing pairwise loop, and (when that proved
-  # undecidable within budget) the same bound stated directly against an
-  # existing `str.indexof(s, t, i)` term with no nested term at all.
-  # `tsymex_rfc0005_s8v_termination.nim`'s own per-fact validity pin --
-  # which asserts the FULL theory refutes every fact's negation within
-  # budget, the precondition for using a fact as a theory-free axiom at
-  # all -- caught BOTH as undecided (`zsUnknown`) on Z3 5.1, not just Z3
-  # 4.13.4; raising that pin's own check budget 50x (1M -> 50M units) made
-  # Z3 hang past a 240s wall-clock bound rather than answer either way, so
-  # this is not a budget-tuning gap. Declined: `seqRangeFacts` emits no
-  # fact linking `str.indexof` and `seq.last_indexof` together. What
-  # remains below pins the decline's shape: step 1c never falsely proves
-  # the (true) claim, and the one case engineered to need exactly this
-  # link is not decided even by the full theory at default settings
-  # (`sxUnknown`, never a false verdict) -- the same completeness-only
-  # cost item 4 documents for its own missed-equality gap, except here the
-  # full theory does not recover it either, so there is no step 2/3 safety
-  # net for this specific shape today.
+  # S8aq declined the link "L (`seq.last_indexof`) is at least every found
+  # `str.indexof`": neither Z3 refutes its negation within budget, and
+  # S8v's per-fact pin asked that of every fact. RFC-0005 S8aw emits it:
+  # a fact is sound iff it is true of the theory, so links are held to
+  # S8ai's bar (negation never SAT, true on every small ground instance),
+  # S8v's pin holds only the single-function ranges to the strict one, and
+  # the link's truth is enumerated exhaustively
+  # (`tsymex_rfc0005_s8aw_remainder.nim`). The two pins below that
+  # recorded the decline (`!= zsUnsat`, `sxUnknown`) now record the
+  # decision.
 
-  test "step 1c does not claim UNSAT from the dropped link (no false positive)":
+  test "step 1c decides the link's query UNSAT (S8aw; was != zsUnsat)":
     # Same query item 2 originally meant to decide: `str.contains` anchors
     # the `L >= 0` link (see `foundExceedsLast`'s own comment, above); `i`
-    # is fixed at the literal 0. With the link declined, step 1c must not
-    # claim UNSAT here -- that would be using an unproven fact as if it
-    # were a theorem.
+    # is fixed at the literal 0.
     let ctx = newContext()
     let roots = q(ctx, """(assert (str.contains s t))
                           (assert (>= (str.indexof s t 0) 0))
                           (assert (< (seq.last_indexof s t) (str.indexof s t 0)))""")
-    check stepOneC(ctx, roots) != zsUnsat
+    check stepOneC(ctx, roots) == zsUnsat
 
   test "companion: a found index at or before L is satisfiable":
     let ctx = newContext()
@@ -247,17 +234,18 @@ suite "S8aq (2): the dropped link is declined -- Z3 cannot decide the combinatio
     checkpoint $mutant & " -> " & flaw
     check flaw.len > 0
 
-  test "end to end: decided through S8au's rfind-find split link":
+  test "end to end: decided sxUnsat (S8au split link; was sxUnknown + beSolverUndef)":
     # The one SUT shape engineered to need exactly this link. With it
-    # declined here, the full (uncapped) sequence theory at default
-    # settings did not decide it within budget: `sxUnknown`,
-    # `beSolverUndef` (S8aq). RFC-0005 S8au lowers both `find` and `rfind`
-    # to index splits and links an rfind split to a find split of the same
-    # haystack and needle (`indexSplitLastLink`: a found index is at most
-    # the last one) -- this link, stated over the splits' own Ints, where
-    # its validity follows from their axioms. The dead label is now
-    # refuted. `seqRangeFacts` still emits no fact joining the native
-    # `str.indexof` / `seq.last_indexof` terms (the tests above).
+    # declined, the full (uncapped) sequence theory at default settings
+    # did not decide it within budget: `sxUnknown`, `beSolverUndef` (S8aq).
+    # RFC-0005 S8au and S8aw both close it, through different terms; in the
+    # batch-2 stack the SUT takes S8au's. S8au lowers both `find` and
+    # `rfind` to index splits and links an rfind split to a find split of
+    # the same haystack and needle (`indexSplitLastLink`: a found index is
+    # at most the last one), stated over the splits' own Ints. S8aw emits
+    # the same link for the native `str.indexof` / `seq.last_indexof` terms
+    # that remain (a query built directly, as the stepOneC test above does);
+    # a SUT's find/rfind no longer produces those terms.
     let r = symexFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
     checkpoint show(r.errors)
     check r.status == sxUnsat

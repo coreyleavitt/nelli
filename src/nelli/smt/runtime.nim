@@ -92,10 +92,13 @@ type
     ## (Invariant 3 — structured, never a silent UNSAT, never a hang).
 
   SymexUnsupportedRegexError* = object of CatchableError
-    ## Phase 15 S6b. Raised during `lower` when S6a's `parseNimRegexToZ3Regex`
-    ## rejects a `re"…"` pattern (backreference / lookahead / named group, or a
-    ## malformed pattern), and for `iekStrFindRe` (no nim-z3 `indexOf`-on-regex
-    ## API — a documented deferral). Caught at the `runSymex` boundary →
+    ## Phase 15 S6b. Raised during `lower` for a `re"…"` pattern the walker
+    ## cannot answer for. RFC-0005 S8ay: a pattern whose validity
+    ## `pcre_syntax` does not decide (a named group, an unread escape, a
+    ## non-literal Regex) and the captures overloads; a valid pattern with an
+    ## unmodelled construct is `SymexZ3StringIncompleteError`, a rejected
+    ## one the `RegexError` raise, and `find` is lowered. Caught at the
+    ## `runSymex` boundary →
     ## `sxUnknown` carrying a `seUnsupportedRegex` (sevError) error — never a
     ## crash, never a silent UNSAT (ADR-0006, Invariant 3). The S6a error
     ## message rides in `msg`.
@@ -1823,6 +1826,17 @@ var seqOobConds* {.threadvar.}: seq[Z3Bool]
   ## `syncSeqOobCond` appends to `WalkCtx.seqOobConds` when in a walk.
   ## Reset alongside `strIndexOobConds` at every reset site.
 
+var regexRaiseMsgs* {.threadvar.}: seq[string]
+  ## RFC-0005 S8ay. `RegexError` raises of an expression: one message per
+  ## `re"..."` / `rex"..."` whose pattern PCRE rejects (Nim's exact
+  ## `RegexError.msg`, from `pcre_syntax`). The raise is unconditional --
+  ## `re` compiles the pattern each time the call runs -- so the sink holds
+  ## messages, not predicates. `drainRegexRaises` (the LAST stage of
+  ## `drainScalarRaiseForks`) routes the first as a `RegexError` raise and
+  ## ends the continuation. `syncRegexRaiseMsg` appends to
+  ## `WalkCtx.regexRaiseMsgs` when in a walk. Reset alongside
+  ## `arithTrapConds` at every reset site.
+
 var arithTrapConds* {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S8i. SURVIVOR-ONLY sink for the arithmetic that TRAPS in the
   ## generated C rather than raising: signed `mod` of `low(T)` by `-1` at 32
@@ -2069,6 +2083,11 @@ proc syncSeqOobCond*(cond: Z3Bool)
   ## N14 fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active), appends
   ## `cond` to `WalkCtx.seqOobConds` (the LIVE store for the seq del-OOB
   ## raise-fork sink). No-op when no active walk. Defined after `WalkCtx`.
+
+proc syncRegexRaiseMsg*(msg: string)
+  ## RFC-0005 S8ay fwd-decl. If `currentWalkCtxPtr != nil` (a walk is
+  ## active), appends `msg` to `WalkCtx.regexRaiseMsgs`. No-op when no
+  ## active walk. Defined after `WalkCtx`.
 
 proc syncArithTrapCond*(cond: Z3Bool)
   ## RFC-0005 S8i fwd-decl. If `currentWalkCtxPtr != nil` (a walk is active),
@@ -3684,8 +3703,8 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # RFC M3: `s.rfind(sub)` → Z3Int too (same shape, `lastIndexOf` instead of
     # `indexOf`). svInt sentinel so a surrounding comparison (e.g.
     # `s.find("bc") == 1`, `s.rfind("bc") == 1`, `parseInt(s) == 42`) lowers its
-    # literal as a Z3Int. (iekStrFindRe's lower() raises a deferral; the proto
-    # keeps a surrounding `>= 0` comparison's literal side well-typed.)
+    # literal as a Z3Int. (RFC-0005 S8ay: iekStrFindRe is `find` / `matchLen`
+    # / a `findBounds` half, all svInt.)
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
@@ -7250,6 +7269,11 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
       allocateSym(tInt(e.strRetTy.width, e.strRetTy.signed),
                   freshDegradeName("__strArmDegrade"), fresh,
                   intOffsetPositions = @[0])
+    of itSeq, itTuple:
+      # RFC-0005 S8ay: a declined `std/re` call -- `findAll` / `split`
+      # (seq[string]), `findBounds` (tuple[first, last: int]). A string
+      # placeholder there is the wrong sort for the enclosing expression.
+      allocateSym(e.strRetTy, freshDegradeName("__strArmDegrade"), fresh)
     else:
       # itString and every other (seq/table/…) shape: the pre-existing
       # svString default. Sound over-approximation even for a genuinely
@@ -10295,10 +10319,16 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ##     <= i <= len(s) - len(t)`, at most at `len(s) - len(t)`;
   ##   - `L = seq.last_indexof(s, t)`: `L >= 0` iff `str.contains(s, t)`;
   ##     a prefix gives `L >= 0`, a suffix `L = len(s) - len(t)`, a piece
-  ##     equal to `t` at `i` in range `L >= i`. (`L` at least every found
-  ##     `str.indexof(s, t, i)` is as valid, but neither Z3 refutes its
-  ##     negation within 1M units, which S8v's pin asks of every fact over
-  ##     `s`, `t`, `i`; it is not emitted.)
+  ##     equal to `t` at `i` in range `L >= i`; and (RFC-0005 S8aw) `L` is
+  ##     at least every found `str.indexof(s, t, i)`.
+  ## A LINK is held to the bar S8ai set (the negation is never SAT with the
+  ## theory, and the fact is true on every small ground instance), not to
+  ## S8v's "the negation is UNSAT" bar for the single-function ranges: a
+  ## link is sound because it is TRUE of the theory, and whether Z3 refutes
+  ## its negation is a question of the solver's completeness. Neither Z3
+  ## refutes the pairwise, piece or join links' negations within 1M units
+  ## (RFC-0005 S8aw's As-landed note); each is pinned true by exhaustive
+  ## enumeration instead (`tests/tsymex_rfc0005_s8aw_remainder.nim`).
   ##   - `r = str.replace_all(s, t, u)`: `r = s` for an empty `t` or with no
   ##     occurrence (`not str.contains(s, t)`); `len(r)` against `len(s)`
   ##     as `len(t)` against `len(u)`; with literal `t`, `u` (`len(t) >=
@@ -10550,30 +10580,13 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     same(result, t1, t2)
   proc sameKey(s1, s2, t1, t2: Z3AnyAst): bool =
     cls(s1) == cls(s2) and cls(t1) == cls(t2)
-  # RFC-0005 S8aq (attempted, reverted). "`L` (`seq.last_indexof(s, t)`) is
-  # at least every found `str.indexof(s, t, i)`" is valid in the theory --
-  # `L` is itself an occurrence and no later one exists, so searching from
-  # `L` finds `L` exactly -- but S8ai dropped it: asked as a universal
-  # claim over free `s`, `t`, `i`, neither linked Z3 refutes its negation
-  # within the pin's 1M-unit budget, even at `i = 0`. S8aq tried two
-  # reformulations, both of which `tsymex_rfc0005_s8v_termination`'s
-  # per-fact validity pin caught as undecidable in practice, not just slow,
-  # on Z3 5.1 (not only Z3 4.13.4): (a) a fresh `str.indexof(s, t, L)` term
-  # joined into the pairwise loop below -- nesting `str.indexof` inside a
-  # `seq.last_indexof` argument is a theorem but Z3 does not decide its
-  # negation within 1M units; (b) the same link stated directly against an
-  # existing `str.indexof(s, t, i)` term with no nested term at all (`0 <=
-  # i <= L` implies `0 <= indexof(s, t, i) <= L`) -- still a theorem, and
-  # still not decided: raising the check's OWN budget to 50M units made Z3
-  # hang past a 240s wall-clock bound rather than return either answer, so
-  # this is not a budget-tuning gap. Z3's `str.indexof`/`seq.last_indexof`
-  # COMBINED reasoning is the obstacle (this file already documents a
-  # correctness bug in the same combination on Z3 4.13.4's incremental
-  # core), not the phrasing. Declined: no ground fact links these two
-  # functions here. `tsymex_rfc0005_s8aq_remainder.nim`'s "S8aq (2)" suite
-  # records the decline and what it costs (completeness only, per item 4's
-  # same class of gap -- steps 2/3 under the full theory still decide a
-  # query this would have shortcut).
+  # RFC-0005 S8aq tried "`L` (`seq.last_indexof(s, t)`) is at least every
+  # found `str.indexof(s, t, i)`" and declined it: neither Z3 refutes its
+  # negation (S8aq and S8aw tried twelve forms, up to 10M units). RFC-0005
+  # S8aw emits it, under the links' bar (the doc above): it is true -- a
+  # found `r = str.indexof(s, t, i) >= 0` is an occurrence of `t` at `r`,
+  # and `L` is the greatest occurrence; emitted in the `lastIdxs` loop
+  # below, and enumerated true by `tsymex_rfc0005_s8aw_remainder`.
   for e in indexOfs:
     let atZero = e.i == zero
     for c in containsL:
@@ -10608,6 +10621,12 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   for l in lastIdxs:
     # RFC-0005 S8ai: `seq.last_indexof` is -1 exactly when not contained; a
     # prefix is found, and a suffix is the last occurrence.
+    for e in indexOfs:
+      if sameKey(l.s, e.s, l.t, e.t):
+        # RFC-0005 S8aw: the join. `e.r >= 0` is an occurrence at `e.r`
+        # (an empty `t` occurs at every `0..len(s)`), and `L` is the last.
+        result.add guarded(pairGuard(l.s, e.s, l.t, e.t),
+                           implies(e.r >= zero, e.r <= l.r))
     for c in containsL:
       if sameKey(l.s, c.s, l.t, c.t):
         result.add guarded(pairGuard(l.s, c.s, l.t, c.t), (l.r >= zero) == c.p)
@@ -11103,6 +11122,14 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
                        (one <= e) and (e <= zero - a))
     result.add implies((b <= zero - two) and (a < zero), twoE <= one - a)
 
+const factsFirstRLimit* = 1_000_000'u
+  ## RFC-0005 S8ay (item 6). The budget of `checkCapped`'s facts-first
+  ## check (step 1c's uncapped half, run before step 1). Small on purpose:
+  ## it only lets a refutation that needs no string search answer before
+  ## the full-theory search; one it cannot finish here is still tried
+  ## with the whole budget after step 1. S8aw's join refutations took a
+  ## few thousand units on Z3 5.1 and 4.13.4.
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -11119,6 +11146,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ## model search, run under half of it each, so a query that finds no
   ## model spends at most the budget searching; steps 1b and 2 run under
   ## all of it:
+  ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
+  ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
+  ##      An UNSAT is the query's own and returns at once; anything else
+  ##      goes on to (1), with (1b) and (1c) below unchanged.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -11233,6 +11264,24 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
         "seqQueryRLimit = " & $sq & ")"
   let capText = "no model with every string / seq at most " & $cap &
     " elements (maxSeqLen); a longer one was not searched"
+  # RFC-0005 S8ay (item 6): step 1c's UNCAPPED half runs FIRST, under a
+  # small budget (`factsFirstRLimit`). It is theory-free: the query with no
+  # sequence theory plus `seqRangeFacts`, every fact valid in the theory,
+  # so its models are a superset of the real ones and an UNSAT is the
+  # query's own -- exactly what (1b) and (1c)'s uncapped half conclude
+  # after step 1, nothing more (and it subsumes (1b): the same query with
+  # more assertions). Before S8ay a query only step 1c refutes paid step
+  # 1's full-theory search to its half budget first: S8aw's join walks
+  # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
+  # in a few thousand. Anything else (SAT, or unknown in the small budget)
+  # falls through to the unchanged order below, (1b) and (1c) included
+  # with their full budget, so no verdict is lost.
+  let facts = seqRangeFacts(ctx, roots)
+  block factsFirst:
+    let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
+    let sPre = querySolver(ctx, roots, pre, seqTheory = false)
+    for f in facts: sPre.add f
+    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
   # Step 1: the caps asserted, one-shot.
   let s1 = querySolver(ctx, roots, rlHalf)
   for c in caps: s1.add c
@@ -11299,7 +11348,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # half (an UNSAT that is its own): the capped half would decline one
     # that is SAT only past the cap, which step 3 decides
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
-    let facts = seqRangeFacts(ctx, roots)
+    # (`facts` is computed above, for the facts-first check.)
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f
@@ -11987,6 +12036,10 @@ type
                       ## `currentWalkCtxPtr != nil`. Drained by
                       ## `drainSeqOobRaises` (via `drainScalarRaiseForks`).
                       ## Reset alongside `strIndexOobConds` at every reset site.
+    regexRaiseMsgs: seq[string]
+                      ## RFC-0005 S8ay. LIVE accumulator for the `RegexError`
+                      ## messages of rejected patterns (see the threadvar's
+                      ## doc). Drained by `drainRegexRaises`.
     arithTrapConds: seq[Z3Bool]
                       ## RFC-0005 S8i. LIVE accumulator for the survivor-only
                       ## arithmetic-trap predicates `lowerArith` deposits (see
@@ -12456,6 +12509,12 @@ proc syncSeqOobCond*(cond: Z3Bool) =
     let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
     wp[].seqOobConds.add cond
 
+proc syncRegexRaiseMsg*(msg: string) =
+  ## RFC-0005 S8ay. See the forward declaration.
+  if currentWalkCtxPtr != nil:
+    let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+    wp[].regexRaiseMsgs.add msg
+
 proc syncArithTrapCond*(cond: Z3Bool) =
   ## RFC-0005 S8i. Survivor-only arithmetic-trap predicates. See
   ## syncParseIntRaiseCond.
@@ -12506,6 +12565,7 @@ type
     divByZero, overflow, strIndexOob, seqOob: seq[Z3Bool]
     convBound, rangeDefect: seq[Z3Bool]
     arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
+    regexRaise: seq[string]                   ## RFC-0005 S8ay
     closureRaises: seq[ClosureRaise]
     exitPc: seq[Z3Bool]
     didMutate: bool
@@ -12530,6 +12590,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
+    regexRaise: w.regexRaiseMsgs,
     closureRaises: w.closureRaises,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
@@ -12548,6 +12609,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.convFloatToIntBoundConds = @[]; convFloatToIntBoundConds = @[]
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
+  w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   w.closureRaises = @[]
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
@@ -12566,6 +12628,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.rangeDefectConds = s.rangeDefect
   rangeDefectConds = s.rangeDefect
   w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
+  w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
   w.closureRaises = s.closureRaises
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
@@ -13698,6 +13761,32 @@ proc drainArithTraps(p: Path, w: var WalkCtx): seq[Path] =
   for c in conds: surv.defectSurvivorPc.add(not c)
   @[surv]
 
+proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ay. Route the expression's `RegexError` (see the
+  ## `regexRaiseMsgs` threadvar). `re` raises whenever the call runs, so
+  ## the raise takes the whole path: it is routed with the FIRST message
+  ## (the first rejected pattern evaluated) and there is no continuation.
+  ## Ungated: `RegexError` is a `ValueError`, not a runtime check. The
+  ## last stage of `drainScalarRaiseForks`: the parser lowers only the
+  ## arguments BEFORE a rejected pattern (`regexCall`), so every other
+  ## raise this call deposits is evaluated earlier and forks first.
+  let msgs = block:
+    if currentWalkCtxPtr != nil:
+      let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+      let m = wp[].regexRaiseMsgs
+      wp[].regexRaiseMsgs = @[]
+      regexRaiseMsgs = @[]   # keep threadvar reset in sync
+      m
+    else:
+      let m = regexRaiseMsgs
+      regexRaiseMsgs = @[]
+      m
+  if msgs.len == 0:
+    return @[p]
+  let rp = forkPath(p, p.pc, p.env)
+  discard routeRaise(rp, "RegexError", some(msgs[0]), w)
+  @[]
+
 proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
   ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
@@ -13771,6 +13860,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let seqSnap = w.seqOobConds
   let rangeSnap = w.rangeDefectConds
   let trapSnap = w.arithTrapConds
+  let regexSnap = w.regexRaiseMsgs
   template stage(inp: seq[Path]; sinkW, sinkT, snap, drain: untyped): seq[Path] =
     var outp: seq[Path]
     for s in inp:
@@ -13798,7 +13888,10 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let s5 = stage(s4, strIndexOobConds, strIndexOobConds, strSnap,
                  drainStrIndexRaises)
   let s6 = stage(s5, seqOobConds, seqOobConds, seqSnap, drainSeqOobRaises)
-  stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap, drainRangeRaises)
+  let s7 = stage(s6, rangeDefectConds, rangeDefectConds, rangeSnap,
+                 drainRangeRaises)
+  # RFC-0005 S8ay: last -- see `drainRegexRaises`.
+  stage(s7, regexRaiseMsgs, regexRaiseMsgs, regexSnap, drainRegexRaises)
 
 proc drainClosureExitHeap(p: Path): Path =
   ## Phase 15 CR-1. Apply the exit heap from the most recent `applyClosureGround`
@@ -13970,6 +14063,8 @@ proc lowerInExpr(p: Path, e: IRExpr, w: var WalkCtx,
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]
+  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let sv = lower(p.env, e, proto)
@@ -14004,6 +14099,8 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   w.seqOobConds = @[]                   # N14: reset seq del-OOB raise sink
   arithTrapConds = @[]
   w.arithTrapConds = @[]                # RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]
+  w.regexRaiseMsgs = @[]                # RFC-0005 S8ay: reset RegexError sink
   w.closureRaises = @[]                 # RFC-0005 S7: reset closure-raise sink
   seedCallerHeapThreadvars(p)           # also calls seedCallerHeapInWalkCtx(p)
   let b = lowerBool(p.env, e)
@@ -16668,6 +16765,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           w.seqOobConds = @[]
           arithTrapConds = @[]
           w.arithTrapConds = @[]
+          regexRaiseMsgs = @[]
+          w.regexRaiseMsgs = @[]
           for arg in stmt.cargs:
             discard lower(p.env, arg)
           let pd = drainPendingLowerEffects(p)
@@ -16861,6 +16960,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         w.seqOobConds = @[]                ## N14: WalkCtx field
         arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
         w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+        regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
+        w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
         for i, formal in sig.params:
           ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
           ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
@@ -19825,6 +19926,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   strIndexOobConds = @[]                 ## SND-4: reset string-index OOB raise-fork sink
   seqOobConds = @[]                      ## N14: reset seq del-OOB raise-fork sink
   arithTrapConds = @[]                   ## RFC-0005 S8i: reset arithmetic-trap sink
+  regexRaiseMsgs = @[]                   ## RFC-0005 S8ay: reset RegexError sink
   currentClosureSyms = initTable[ClosureSymKey, RawZ3FuncDecl]()  ## Phase 15 C2a
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()

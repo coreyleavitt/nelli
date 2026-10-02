@@ -1657,13 +1657,69 @@ template symexTransparent*() {.pragma.}
 # the caller's process -- and a `scSpurious` path is tainted precisely because
 # it ran through an unmodelled (often effectful: `echo`/`writeFile`, #137) call.
 #
-# NON-TERMINATION (§4.2). There is deliberately no watchdog: an in-process one
-# is not safely buildable under §1.5's no-nested-try constraint, and Invariant
-# 3 is instead preserved by the ELIGIBILITY GATE -- a `dcFabricated`
-# (k-unroll survivor) witness is by §0.3 an input on which the real program
-# may still be looping, and the gate declines it without running it. What
-# remains is the ordinary risk any PBT library takes calling a user proc,
-# which nelli already takes in `forAll`/`fuzz`.
+# NON-TERMINATION (§4.2). Invariant 3 is preserved first by the ELIGIBILITY
+# GATE -- a `dcFabricated` (k-unroll survivor) witness is by §0.3 an input on
+# which the real program may still be looping, and the gate declines it
+# without running it. RFC-0005 S8be: an eligible witness may still drive a
+# routine the model never walked (a foreign or opaque body) into a loop, and
+# the replay then never returned. Each replay now runs on a thread of its own
+# and is abandoned past `SymexSettings.replayTimeoutMs` (`roTimedOut`,
+# `runReplayBounded`). Abandoned, not stopped: no thread can be stopped
+# safely in-process, so it keeps running (and keeps whatever it holds) until
+# it ends or the process does.
+
+when compileOption("threads"):
+  import std/[typedthreads, atomics, monotimes, times, os]
+
+  type ReplayJob = object
+    ## RFC-0005 S8be. One bounded replay, in shared memory: the body and its
+    ## completion flag. Leaked, with its `Thread`, when the replay is
+    ## abandoned -- the thread still reads both.
+    body: proc () {.closure, gcsafe.}
+    done: Atomic[bool]
+
+  proc replayThreadMain(job: ptr ReplayJob) {.thread.} =
+    job.body()
+    # The body hands refs back to the calling thread (the escaped
+    # exception, in the closure's environment). ORC registers a ref whose
+    # count drops above zero as a cycle root in THIS thread's root list;
+    # the calling thread's final decrement would then unregister it from
+    # its own list (a SIGSEGV in `unregisterCycle`). A collection here
+    # empties this thread's list and clears each survivor's root index.
+    when defined(gcOrc): GC_runOrc()
+    job.done.store(true)
+
+proc runReplayBounded*(body: proc () {.closure, gcsafe.};
+                       timeoutMs: int): bool =
+  ## RFC-0005 S8be. Run one replay `body`; false when it did not end within
+  ## `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build without
+  ## threads, runs it on the calling thread with no bound (true). The
+  ## thread has Nim's thread stack (2 MiB on 64-bit), not the calling
+  ## thread's; a `{.threadvar.}` of the SUT starts at its default there.
+  when compileOption("threads"):
+    if timeoutMs <= 0:
+      body()
+      return true
+    let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
+    job.body = body
+    let th = cast[ptr Thread[ptr ReplayJob]](
+      allocShared0(sizeof(Thread[ptr ReplayJob])))
+    createThread(th[], replayThreadMain, job)
+    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+    var pause = 1
+    while not job.done.load:
+      if getMonoTime() >= deadline:
+        return false            # abandoned: `job` and `th` stay allocated
+      sleep(pause)
+      pause = min(pause * 2, 20)
+    joinThread(th[])
+    `=destroy`(job[])
+    deallocShared(job)
+    deallocShared(th)
+    true
+  else:
+    body()
+    true
 
 type ReplayOutcome* = enum
   ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
@@ -1692,6 +1748,11 @@ type ReplayOutcome* = enum
                   ## fragment, a target kind outside replay scope, or a lossy
                   ## witness that did not reach the target. The candidate
                   ## stays sxUnknown
+  roTimedOut      ## RFC-0005 S8be: the real fn ran past
+                  ## `SymexSettings.replayTimeoutMs` on this witness and the
+                  ## replay was abandoned -- it may be looping, or only slow.
+                  ## Neither confirmed nor refuted: the candidate stays
+                  ## sxUnknown, with a `feReplayTimedOut` hint
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -1968,7 +2029,9 @@ proc formalParamTypes(fn: NimNode): seq[NimNode] =
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
                         extraLossy: NimNode = newLit(false);
-                        nilDeref: NimNode = newLit(false)): NimNode =
+                        nilDeref: NimNode = newLit(false);
+                        timeoutMs: NimNode = newLit(
+                          SymexSettings().replayTimeoutMs)): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
   ## an expression of type `ReplayOutcome`. `witness` is the typed witness
@@ -1985,6 +2048,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## kill the process -- declined, never executed. Order of refusal, each
   ## one WITHOUT executing `fn`: ineligible taint, unexecutable witness
   ## shape, out-of-scope target kind, a nil-dereference path.
+  ## `timeoutMs` (RFC-0005 S8be) is an `int` expression bounding the run
+  ## (`runReplayBounded`); past it the outcome is `roTimedOut`.
   var noms: Table[string, IRType]
   var seenNoms: HashSet[string]
   for p in params: collectNominals(p.ty, noms, seenNoms)
@@ -2001,6 +2066,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let tgtId = genSym(nskLet, "replayTarget")
   let escId = genSym(nskVar, "replayEscaped")
   let boundId = genSym(nskVar, "replayArgsBound")
+  let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
+  let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
   let splat = emitWitnessSplat(fn, params.len, witId, paramTys,
                                newAssignment(boundId, newLit(true)))
   let lossy = newLit(fidelity == wfLossy)
@@ -2034,16 +2101,23 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         else:
           var `escId`: ref Exception = nil
           var `boundId` = false
-          # §4.2 "Capture reentrancy": a nested frame, so an enclosing user
-          # capture (`assertCoveredBy`) keeps its hits and does not see ours.
-          symexCaptureBegin()
-          try:
-            `splat`
-          except Exception as e:
-            `escId` = e
-          let hits = symexCaptureEnd()
-          if not `boundId`: roInconclusive   # a conversion raised: fn never ran
-          elif replayReached(`tgtId`, hits, `escId`): roConfirmed
+          var `hitsId`: HashSet[string]
+          # RFC-0005 S8be: the run is bounded (`runReplayBounded`); it may
+          # run on a thread of its own, which owns the capture frame.
+          let `endedId` = runReplayBounded(proc () {.closure, gcsafe.} =
+            {.cast(gcsafe).}:
+              # §4.2 "Capture reentrancy": a nested frame, so an enclosing
+              # user capture (`assertCoveredBy`) keeps its hits and does not
+              # see ours.
+              symexCaptureBegin()
+              try:
+                `splat`
+              except Exception as e:
+                `escId` = e
+              `hitsId` = symexCaptureEnd(), `timeoutMs`)
+          if not `endedId`: roTimedOut
+          elif not `boundId`: roInconclusive   # a conversion raised: fn never ran
+          elif replayReached(`tgtId`, `hitsId`, `escId`): roConfirmed
           elif `lossy` or `extraLossy` or `converted`: roInconclusive
           else: roRefuted
 
@@ -2104,10 +2178,13 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
 #     `dynlib` such as `std/re`'s PCRE, now fails the build or start-up).
 #     Not containable at runtime; `SymexSettings.replay = false` (static)
 #     emits no reference to `fn` at all -- the pre-S10 verdict.
-#   * Non-termination -- no watchdog (§1.5: not safely buildable in-process);
-#     bounded by the eligibility gate, which never runs a `dcFabricated`
-#     (k-unroll survivor) witness. What remains is the risk `forAll`/`fuzz`
-#     already take calling a user proc.
+#   * Non-termination -- bounded by the eligibility gate, which never runs a
+#     `dcFabricated` (k-unroll survivor) witness, and (RFC-0005 S8be) by
+#     `replayTimeoutMs`: a replay runs on its own thread and is abandoned
+#     past it (`roTimedOut`). The abandoned thread is not stopped -- nothing
+#     can stop it safely -- so a replay that loops forever keeps a core and
+#     its memory, and runs concurrently with the caller, until the process
+#     ends.
 #   * Defects -- caught by the replay frame and classified; under
 #     `--panics:on` nothing is replayed (`replayInScope`); a raw-`ptr`
 #     witness is never executed (`witnessFidelity`); a candidate whose path
@@ -2163,11 +2240,22 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
   ##     `sevHint` naming the witness's confirmed model gap (§4.2).
   ##   * `roInconclusive` -- unchanged.
+  ##   * `roTimedOut` (RFC-0005 S8be) -- stays `sxUnknown`, plus a
+  ##     `feReplayTimedOut` `sevHint`: the replay was abandoned, so the
+  ##     witness is neither confirmed nor refuted.
   ## Private (the only candidate -> verdict constructor); see the section
   ## comment.
   result = raw
   case outcome
   of roInconclusive: discard
+  of roTimedOut:
+    result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
+      msg: "replay of a " & $c.status & " candidate (" &
+           (if c.status == sxRaised: "raise " & c.raisedTypeId
+            else: "target hit") &
+           ") was abandoned: the real fn ran past replayTimeoutMs on the " &
+           "solver's witness -- it may not terminate there, or is only " &
+           "slow; neither confirmed nor refuted (feReplayTimedOut)")
   of roRefuted:
     result.errors.add SymexErrorInfo(kind: feReplayRefuted, severity: sevHint,
       msg: "replay refuted a " & $c.status & " candidate (" &
@@ -2253,7 +2341,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   let replay = emitReplayWitness(fn, params, typedId, replayTgt,
     newDotExpr(candId, ident"pathTaint"),
     newCall(bindSym"candidateLossy", candId),
-    newDotExpr(candId, ident"nilDerefOnPath"))
+    newDotExpr(candId, ident"nilDerefOnPath"),
+    newDotExpr(settings, ident"replayTimeoutMs"))   # RFC-0005 S8be
   result = quote do:
     block:
       let `rawId` = `runCall`

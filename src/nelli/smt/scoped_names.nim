@@ -67,18 +67,52 @@ const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## by the compiler at every use, and `result` is never declared by an
   ## `IdentDefs` (each routine's `result` is its own frame's slot).
 
-proc isModuleGlobal*(n: NimNode): bool =
-  ## RFC-0005 S8an. True when `n` is the symbol of a module-level `var` or
-  ## `let` (its owner is the module itself).
+proc isRoutineGlobal*(n: NimNode): bool =
+  ## RFC-0005 S8be. True when `n` is a routine's `{.global.}` variable
+  ## (`proc f() = var c {.global.} = 0`). Nim gives it static storage and
+  ## runs its initialiser once, at program start, so it is a module-level
+  ## variable under a name its routine scopes. Its declaration keeps the
+  ## pragma (`getImpl` is the `IdentDefs`, the name a `PragmaExpr`).
   if n.kind != nnkSym or symKind(n) notin {nskVar, nskLet}: return false
   let o = owner(n)
-  o.kind == nnkSym and symKind(o) == nskModule
+  if o.kind != nnkSym or symKind(o) == nskModule: return false
+  let impl = n.getImpl
+  if impl.kind != nnkIdentDefs or impl.len < 3 or
+     impl[0].kind != nnkPragmaExpr or impl[0].len < 2:
+    return false
+  for p in impl[0][1]:
+    let nm =
+      case p.kind
+      of nnkIdent, nnkSym: macros.strVal(p)
+      of nnkExprColonExpr:
+        if p[0].kind in {nnkIdent, nnkSym}: macros.strVal(p[0]) else: ""
+      else: ""
+    if nm == "global": return true
+  false
+
+proc isModuleGlobal*(n: NimNode): bool =
+  ## RFC-0005 S8an. True when `n` is the symbol of a module-level `var` or
+  ## `let` (its owner is the module itself). RFC-0005 S8be: or a routine's
+  ## `{.global.}` variable (`isRoutineGlobal`), which is one in all but
+  ## scope.
+  if n.kind != nnkSym or symKind(n) notin {nskVar, nskLet}: return false
+  let o = owner(n)
+  (o.kind == nnkSym and symKind(o) == nskModule) or isRoutineGlobal(n)
 
 proc globalIRName*(n: NimNode): string =
   ## RFC-0005 S8an/S8as. The IR name of the module-level variable `n`
   ## (`isModuleGlobal`): `__gl:<module>.<name>`. Does not record `n` as
-  ## reached (`strVal` does).
-  globalEnvPrefix & macros.strVal(owner(n)) & "." & macros.strVal(n)
+  ## reached (`strVal` does). RFC-0005 S8be: a routine's `{.global.}`
+  ## variable is `__gl:<module>@<routine>@<signature hash>.<name>`: one per
+  ## routine (and per generic instance, as Nim keeps one per instance), and
+  ## never a module-level name (`@` is in no Nim identifier).
+  let o = owner(n)
+  if symKind(o) != nskModule:
+    var m = o
+    while m.kind == nnkSym and symKind(m) != nskModule: m = owner(m)
+    return globalEnvPrefix & macros.strVal(m) & "@" & macros.strVal(o) &
+           "@" & signatureHash(o) & "." & macros.strVal(n)
+  globalEnvPrefix & macros.strVal(o) & "." & macros.strVal(n)
 
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as

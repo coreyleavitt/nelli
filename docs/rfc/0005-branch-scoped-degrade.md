@@ -342,6 +342,11 @@ title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.
 state = "pending"
 
 [[slice]]
+id = "S8ba"
+title = "S8au's remainder: seq[distinct] locals, compiler-temp misread as global, len(s) <= high(int) for string-derived indices, model global-reachable copy-in/out, deterministic split term order"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

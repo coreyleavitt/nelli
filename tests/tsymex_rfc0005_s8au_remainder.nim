@@ -254,6 +254,7 @@ proc sutVarPtrRebind(v: int) =
   reVP(p, addr y)
   p[] = v
   if y == 3: symexTarget("vpr")
+  if y != v or x != 0: symexTarget("vpr_dead")
 
 suite "S8au: var ptr":
   test "addr x cannot be passed to a var ptr formal":
@@ -268,7 +269,19 @@ suite "S8au: var ptr":
   test "vpi":
     verdict(sutVarPtrInc, "vpi", sxSat)
     verdict(sutVarPtrInc, "vpi_dead", sxUnsat)
-  test "vpr": declines(sutVarPtrRebind, "vpr", heUnsafeCast, "addr")
+  test "vpr":
+    ## S8au pinned this as a decline (`heUnsafeCast`, the `addr y` actual).
+    ## RFC-0005 batch 3: S8ax's address cells model `addr y` (a `ptr` cell
+    ## holding `y` for the frame's lifetime), so the re-pointed `p` writes
+    ## `y`, as Nim does (`tests/tsymex_rfc0005_s8ax_remainder.nim` (8)).
+    verdict(sutVarPtrRebind, "vpr", sxSat)
+    verdict(sutVarPtrRebind, "vpr_dead", sxUnsat)
+    var x = 0
+    var y = 0
+    var p = addr x
+    reVP(p, addr y)
+    p[] = 3
+    check y == 3 and x == 0
   test "nim":
     var x = 0
     var p = addr x

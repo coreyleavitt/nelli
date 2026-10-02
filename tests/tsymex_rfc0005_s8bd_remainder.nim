@@ -391,6 +391,7 @@ proc sutGenericEscape(k: int) =
   keepPtrG(addr x, k)
   gP[] = 7
   if x != 7: symexTarget("ge_dead")
+  if x == 7 and k == 3: symexTarget("ge")
 
 suite "S8bd (4): more lvalues and callees are passed by reference":
 
@@ -445,10 +446,21 @@ suite "S8bd (4): more lvalues and callees are passed by reference":
     ## RED: `sxSat` (a false one). S8an's `ptrFormalStaysLocal` read the
     ## generic instance's body with its formal list's symbol, found no
     ## use, and modelled the escaping pointer as a cell for the call.
-    let r = symexFind(sutGenericEscape, tLabel("ge_dead"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(heUnsafeCast)
+    ## S8bd made it decline (`heUnsafeCast`). RFC-0005 batch 3: S8ax's
+    ## address cells model it -- `addr x` is a `ptr` cell holding `x` for
+    ## the frame's lifetime, so the kept pointer writes `x`, as Nim does.
+    let rd = symexFind(sutGenericEscape, tLabel("ge_dead"))
+    checkpoint "ge_dead " & $rd.status & " " & show(rd.errors)
+    check rd.status == sxUnsat
+    for e in rd.errors: check e.severity != sevError
+    let rl = symexFind(sutGenericEscape, tLabel("ge"))
+    checkpoint "ge " & $rl.status & " " & show(rl.errors)
+    check rl.status == sxSat
+    for e in rl.errors: check e.severity != sevError
+    var x = 0
+    keepPtrG(addr x, 1)
+    gP[] = 7
+    check x == 7
 
 suite "S8bd: walker version":
   test "symexWalkerVersion >= 204":

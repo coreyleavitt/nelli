@@ -202,7 +202,7 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "206"
+const symexWalkerVersion* = "208"
   ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Provisional 206
   ## (S8be holds 205). Two `var` / `addr` heap actuals of one call that may
   ## be one cell through DIFFERENT refs (`let q = p; setBoth(p.x, q.x)`; a
@@ -5060,14 +5060,23 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       ";caps=[" & caps.join(",") & "];params=[" & ptys.join(",") & "]" &
       ";byref=[" & e.lambdaMutCaptures.join(",") & "]" &   ## RFC-0005 S9
       ";retTy=" & canonicalize(e.lambdaRetTy) &
-      ";body=" & canonicalize(e.lambdaBody, env) & ">"
+      ";body=" & canonicalize(e.lambdaBody, env) &
+      # RFC-0005 S8bh: the effect summary (the alias bodies derive from the
+      # body; their pairs, the local-pointer flags and the reach do not).
+      ";alias=" & $e.lambdaAliasPairs & ";ptrLocal=" & $e.lambdaPtrLocal &
+      ";outer=[" & e.lambdaOuter.join(",") & "]>"
   of iekClosureCall:                     ## Phase 15 C1: distinct partition from
                                          ## an isCall to the same name (Cn:) so a
                                          ## proc-valued-variable call never
                                          ## cache-collides with a named call.
     var argKeys: seq[string]
     for a in e.ccArgs: argKeys.add canonicalize(a, env)
-    "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")>"
+    # RFC-0005 S8bh: the call's `var`/`addr` effects.
+    var vts: seq[string]
+    for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
+      ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)

@@ -861,9 +861,46 @@ type
                                      ## construction. A subset of
                                      ## `lambdaCaptures`; a `let`/param capture
                                      ## cannot change, and stays by value.
+      lambdaAliasPairs*: seq[tuple[keep, gone: int]]
+                                     ## RFC-0005 S8bh: for each pair of
+                                     ## same-typed `var` formals, the body with
+                                     ## formal `gone` spelled as formal `keep`
+                                     ## (`lambdaAliasBodies`, parallel): the
+                                     ## callee as it runs when one location is
+                                     ## passed to both.
+      lambdaAliasBodies*: seq[IRStmt]
+      lambdaPtrLocal*: seq[bool]     ## RFC-0005 S8bh: per formal, a `ptr`
+                                     ## formal every use of which stays local
+                                     ## to the call (S8an's
+                                     ## `ptrFormalStaysLocal`), so an `addr`
+                                     ## actual may be modelled as a cell.
+      lambdaOuter*: seq[string]      ## RFC-0005 S8bh: what the body can reach
+                                     ## outside its formals while it runs:
+                                     ## `n:<name>` per variable (a capture, a
+                                     ## module-level global, transitively),
+                                     ## `t:<key>` per object type a ref/ptr
+                                     ## those hold may address, `*` when that
+                                     ## is not known (a proc value it calls).
     of iekClosureCall:               ## A-normalised like isCall (D6)
       ccCallee*:  string             ## name of the proc-valued variable
       ccArgs*:    seq[IRExpr]
+      ccVarTys*:  seq[IRType]        ## RFC-0005 S8bh: per argument, the
+                                     ## formal's type when it is a `var`
+                                     ## formal (nil otherwise; empty when the
+                                     ## callee has none). The walker writes
+                                     ## the formal's exit value to the actual
+                                     ## (an `iekVar`) after the call.
+      ccAlias*:   seq[int]           ## RFC-0005 S8bh: per argument, the
+                                     ## argument whose location it shares
+                                     ## (itself when none); empty when none
+                                     ## share. Selects `lambdaAliasBodies`.
+      ccAddrArgs*: seq[int]          ## RFC-0005 S8bh: arguments that are an
+                                     ## `addr lv` cell (`lambdaPtrLocal`).
+      ccTouch*:   seq[string]        ## RFC-0005 S8bh: the variables and
+                                     ## heap object types the `var`/`addr`
+                                     ## actuals' locations involve (as
+                                     ## `lambdaOuter`; `t:?` for a type any
+                                     ## ref may address).
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
@@ -3628,10 +3665,27 @@ proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
          lambdaCaptures: captures, lambdaRetTy: retTy,
          lambdaMutCaptures: mutCaptures)
 
-proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
+proc mkClosureCall*(callee: string, args: seq[IRExpr];
+                    varTys: seq[IRType] = @[]; alias: seq[int] = @[];
+                    addrArgs: seq[int] = @[];
+                    touch: seq[string] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
-  ## variable. A-normalised like `isCall`.
-  IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
+  ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
+  ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
+  ## (see `ccVarTys`).
+  IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
+         ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
+         ccTouch: touch)
+
+proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
+                        aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
+                        outer: seq[string]): IRExpr =
+  ## RFC-0005 S8bh. `e` (an `iekLambda`) with its effect summary set.
+  result = e
+  result.lambdaAliasPairs = aliasPairs
+  result.lambdaAliasBodies = aliasBodies
+  result.lambdaPtrLocal = ptrLocal
+  result.lambdaOuter = outer
 
 proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType,
                declinedPlaceholder: bool = false): IRExpr =
@@ -5268,7 +5322,9 @@ proc render*(e: IRExpr): string =
   of iekClosureCall:      ## Phase 15 C1
     var asr: seq[string]
     for a in e.ccArgs: asr.add render(a)
-    e.ccCallee & "@(" & asr.join(",") & ")"
+    e.ccCallee & "@(" & asr.join(",") & ")" &
+      (if e.ccAlias.len > 0: "[alias:" & $e.ccAlias & "]"   ## RFC-0005 S8bh
+       else: "")
   of iekSeqLit:           ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add render(c)

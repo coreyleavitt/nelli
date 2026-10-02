@@ -2183,6 +2183,10 @@ type ClosureBody* = object  ## Phase 15 C2b. The descent payload for a lambda
   params*:   seq[IRParam]
   captures*: seq[string]
   retTy*:    IRType
+  aliasPairs*:  seq[tuple[keep, gone: int]]   ## RFC-0005 S8bh (`lambdaAliasPairs`)
+  aliasBodies*: seq[IRStmt]                   ## RFC-0005 S8bh
+  ptrLocal*:    seq[bool]                     ## RFC-0005 S8bh (`lambdaPtrLocal`)
+  outer*:       seq[string]                   ## RFC-0005 S8bh (`lambdaOuter`)
 
 func closureRetStructured(t: IRType): bool =
   ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
@@ -11071,6 +11075,11 @@ type
     ## NOT raise; the drain strips those (`lastDrainedClosureExitPc`).
     raised:      EscapedRaise
     priorExitPc: seq[Z3Bool]
+    varOuts:     seq[tuple[name: string, val: SymVal]]
+                 ## RFC-0005 S8bh: the `var` formals' values where the body
+                 ## raised, written to the caller's actuals on the raise path
+                 ## (the callee wrote through their addresses before it
+                 ## raised).
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -11395,6 +11404,12 @@ type
                       ## arithmetic-trap predicates `lowerArith` deposits (see
                       ## the threadvar's doc). Drained by `drainArithTraps`.
                       ## Reset alongside `seqOobConds` at every reset site.
+    closureVarOuts: seq[tuple[name: string, val: SymVal]]
+                      ## RFC-0005 S8bh. The `var` formals' exit values of the
+                      ## closure calls lowered in the current expression,
+                      ## each for the caller variable its actual names
+                      ## (`applyClosureGround`); `drainPendingLowerEffects`
+                      ## writes them onto the consuming path, in call order.
     closureRaises: seq[ClosureRaise]
                       ## RFC-0005 S7. Raises that escaped a closure body's own
                       ## handlers during `applyClosureGround`'s descent (the
@@ -11910,6 +11925,7 @@ type
     convBound, rangeDefect: seq[Z3Bool]
     arithTrap: seq[Z3Bool]                    ## RFC-0005 S8i
     closureRaises: seq[ClosureRaise]
+    closureVarOuts: seq[tuple[name: string, val: SymVal]]   ## RFC-0005 S8bh
     exitPc: seq[Z3Bool]
     didMutate: bool
     exitHeaps: Table[string, Z3AnyAst]
@@ -11931,7 +11947,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     overflow: w.overflowConds, strIndexOob: w.strIndexOobConds,
     seqOob: w.seqOobConds, convBound: w.convFloatToIntBoundConds,
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
-    closureRaises: w.closureRaises,
+    closureRaises: w.closureRaises, closureVarOuts: w.closureVarOuts,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
     exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
@@ -11947,6 +11963,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.rangeDefectConds = @[]; rangeDefectConds = @[]
   w.arithTrapConds = @[]; arithTrapConds = @[]
   w.closureRaises = @[]
+  w.closureVarOuts = @[]        ## RFC-0005 S8bh
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
 
@@ -11965,6 +11982,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   rangeDefectConds = s.rangeDefect
   w.arithTrapConds = s.arithTrap; arithTrapConds = s.arithTrap
   w.closureRaises = s.closureRaises
+  w.closureVarOuts = s.closureVarOuts   ## RFC-0005 S8bh
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
   w.closureExitHeaps = s.exitHeaps; currentClosureExitHeaps = s.exitHeaps
@@ -13041,6 +13059,9 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
   for cr in raises:
     let er = cr.raised
     var rp = forkPathMerged(er.path, p.pc & er.path.pc, p.env, p)
+    # RFC-0005 S8bh: the `var` actuals hold what the body had written to
+    # them where it raised.
+    for o in cr.varOuts: rp.env[o.name] = o.val
     rp.defectSurvivorPc = baseDsp & cr.priorExitPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
     discard routeRaise(rp, er.typeId, er.msg, w)
@@ -13211,6 +13232,18 @@ proc drainPendingLowerEffects(p: Path): Path =
   # very `loweringDegradeErrors` entries `lowerDegrade` recorded.
   if loweringPendingTaint != {}:
     p2 = forkPathTainted(p2, p2.pc, p2.env, takeLoweringPendingDegrade())
+  # (e) RFC-0005 S8bh: the `var` formals' exit values of the closure calls
+  # this lower() made, written to the caller variables their actuals name
+  # (`applyClosureGround`), in call order. Before S8bh they were dropped: a
+  # call through a proc value (`let f = setBoth; f(x, y)`) left `x` and `y`
+  # as they were (a false `sxSat`). Fork before mutating, as above.
+  if currentWalkCtxPtr != nil:
+    let wo = cast[ptr WalkCtx](currentWalkCtxPtr)
+    if wo[].closureVarOuts.len > 0:
+      var env2 = p2.env
+      for o in wo[].closureVarOuts: env2[o.name] = o.val
+      p2 = forkPath(p2, p2.pc, env2)
+      wo[].closureVarOuts = @[]
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -17188,7 +17221,58 @@ proc sameSymVal(a, b: SymVal): bool =
     false   # no identity arm: conservatively "changed"
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal   ## Phase 15 C4 fwd-decl.
+                        label: string; bodyOverride: IRStmt = nil;
+                        varOuts: seq[tuple[name: string, param: int]] = @[]):
+                        SymVal   ## Phase 15 C4 fwd-decl.
+
+proc havocUnknownClosureEffects(e: IRExpr) =
+  ## RFC-0005 S8bh. A call through a proc value the walk cannot resolve
+  ## (`ceClosureUnknownCallee`) may write every `var` actual and every heap
+  ## cell (its arguments', and whatever its own captures reach). The call
+  ## declines; its effects are havocked rather than dropped, so a fact the
+  ## call may have changed is not kept past it: each `var` actual gets a
+  ## fresh value of its formal's type, and each heap a fresh array of its
+  ## sort.
+  if currentWalkCtxPtr == nil: return
+  let ctx = requireCurrentContext()
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  for k, t in e.ccVarTys:
+    if t.isNil or k >= e.ccArgs.len or e.ccArgs[k].kind != iekVar: continue
+    var facts: seq[Z3Bool]
+    let v = allocateSym(t, freshDegradeName("__closureUnknownVarOut"), facts)
+    for f in facts: currentClosureExitPc.add f
+    wp[].closureVarOuts.add (name: e.ccArgs[k].vname, val: v)
+  if wp[].callerHeaps.len > 0:
+    var fresh = initTable[string, Z3AnyAst]()
+    var keys: seq[string]
+    for k in wp[].callerHeaps.keys: keys.add k
+    sort(keys)
+    for k in keys:
+      let h = wp[].callerHeaps[k]
+      let srt = Z3_get_sort(ctx.raw, h.raw)
+      fresh[k] = wrap[Z3AnyAst](ctx, freshOfSort(ctx, srt))
+    wp[].closureDidMutateHeap = true; currentClosureDidMutateHeap = true
+    wp[].closureExitHeaps = fresh; currentClosureExitHeaps = fresh
+    wp[].closureExitAllocCounters = wp[].callerAllocCounters
+    currentClosureExitAllocCounters = wp[].callerAllocCounters
+    wp[].closureExitLiveRefs = wp[].callerLiveRefs
+    currentClosureExitLiveRefs = wp[].callerLiveRefs
+
+proc touchMeetsOuter(touch, outer: seq[string]): string =
+  ## RFC-0005 S8bh. The first location a call's `var`/`addr` actuals involve
+  ## (`ccTouch`) that the closure body can also reach outside its formals
+  ## (`lambdaOuter`), or "" when none. `*` in `outer` reaches everything; a
+  ## `t:?` on either side meets every object type on the other.
+  if touch.len == 0: return ""
+  if "*" in outer: return touch[0]
+  var anyOuterT = false
+  for o in outer:
+    if o.startsWith("t:"): anyOuterT = true
+  for t in touch:
+    if t in outer: return t
+    if t == "t:?" and anyOuterT: return t
+    if t.startsWith("t:") and "t:?" in outer: return t
+  ""
 
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2b (ADR-0009 D6). Closure APPLICATION. Resolve `e.ccCallee` to an
@@ -17214,6 +17298,7 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
+    havocUnknownClosureEffects(e)   ## RFC-0005 S8bh
     # No semantics: a well-sorted-for-int stand-in so a downstream read does
     # not crash.
     var fresh: seq[Z3Bool]
@@ -17222,10 +17307,85 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   let clo = refreshByRefCaptures(env[e.ccCallee], env)
   var argSyms: seq[SymVal]
   for a in e.ccArgs: argSyms.add lower(env, a)
-  return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`")
+  # RFC-0005 S8bh: the call's `var`/`addr` effects. Each `var` formal's
+  # exit value is written to its actual (an `iekVar`: the variable, or the
+  # temporary the parser writes back to a non-variable lvalue), as the
+  # `isCall` arm's #140 write-back does for a direct call. Actuals that
+  # share one location (`ccAlias`) run the body specialised to it
+  # (`aliasBodies`). The model holds only while the body cannot reach those
+  # locations another way (`touchMeetsOuter`) and an `addr` cell's pointer
+  # cannot outlive the call (`ptrLocal`); otherwise the call declines.
+  var bodyOverride: IRStmt = nil
+  var outs: seq[tuple[name: string, param: int]]
+  if e.ccVarTys.len > 0 or e.ccAddrArgs.len > 0:
+    let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
+    let bodies =
+      if currentWalkCtxPtr != nil:
+        cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+      else: currentClosureBodies
+    if bodies.hasKey(siteKey):
+      let cb = bodies[siteKey]
+      let met = touchMeetsOuter(e.ccTouch, cb.outer)
+      if met.len > 0:
+        let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
+                   elif met == "*": "a location"
+                   else: "a heap cell of that type"
+        closureDegrade(
+          (if met.startsWith("n:"): ceCaptureByRefUnmodelled else: feUnsupportedOp),
+          "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
+               "argument's location, " & what & ", can also be reached by " &
+               "the body outside its formals (a capture, a global or a proc " &
+               "value it calls): the body's accesses through the two are " &
+               "not one location in the walk (RFC-0005 S8bh)")
+      for k in e.ccAddrArgs:
+        if k >= cb.ptrLocal.len or not cb.ptrLocal[k]:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: argument " & $(k + 1) &
+                 " is `addr` of a location, and the body may let the pointer " &
+                 "escape the call (it is stored, returned, captured or passed " &
+                 "on): the pointee is modelled as a cell for the call only " &
+                 "(RFC-0005 S8bh)")
+      var gone = -1
+      var keep = -1
+      for k, a in e.ccAlias:
+        if a != k:
+          if gone >= 0:
+            gone = -2
+            break
+          gone = k
+          keep = a
+      if gone == -2:
+        closureDegrade(feUnsupportedOp,
+          "closure call through `" & e.ccCallee & "`: more than two `var` " &
+               "arguments share one location (RFC-0005 S8bh)")
+      elif gone >= 0:
+        var found = false
+        for ix, pr in cb.aliasPairs:
+          if pr.keep == keep and pr.gone == gone:
+            bodyOverride = cb.aliasBodies[ix]
+            found = true
+        if not found:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: `var` arguments " &
+                 $(keep + 1) & " and " & $(gone + 1) & " are one location, " &
+                 "and the body has no form specialised to that (RFC-0005 S8bh)")
+      for k, t in e.ccVarTys:
+        if t.isNil or k >= e.ccArgs.len: continue
+        if e.ccArgs[k].kind != iekVar:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: `var` argument " &
+                 $(k + 1) & " names no variable to write back (RFC-0005 S8bh)")
+          continue
+        let src = if e.ccAlias.len > k: e.ccAlias[k] else: k
+        if src < cb.params.len:
+          outs.add (name: e.ccArgs[k].vname, param: src)
+  return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`",
+                            bodyOverride, outs)
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal =
+                        label: string; bodyOverride: IRStmt = nil;
+                        varOuts: seq[tuple[name: string, param: int]] = @[]):
+                        SymVal =
   ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
   ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
   ## build the per-site funcSym application (raw `Z3_mk_app` over flattened
@@ -17434,7 +17594,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                                          else: pending.callerAlloc),
                          liveRefs: (if chainHeap: pending.exitLiveRefs
                                     else: pending.callerLiveRefs))  ## Phase 15 CR-5
-  let fallThrough = walk(cb.body, @[descentBase], w)
+  # RFC-0005 S8bh: the body specialised to the call's shared locations.
+  let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
+                         @[descentBase], w)
   let frame = w.callStack[frameIx]
   # RFC-0005 S7: capture the raises that escaped the body's own handlers
   # BEFORE `popFrame` discards the closure frame (as the `isCall` arm does);
@@ -17481,8 +17643,39 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
              "by-reference capture(s) " & written.join(", ") & "; the " &
              "write is not carried back to the caller " &
              "(ceCaptureByRefUnmodelled)")
+  # RFC-0005 S8bh: each `var` formal's value where the body raised rides
+  # the raise to its actual.
   for er in escapedRaises:
-    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc)
+    var ro: seq[tuple[name: string, val: SymVal]]
+    for o in varOuts:
+      let pn = cb.params[o.param].name
+      if er.path.env.hasKey(pn): ro.add (name: o.name, val: er.path.env[pn])
+    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc,
+                                     varOuts: ro)
+  # RFC-0005 S8bh: each `var` formal's exit value, merged over the
+  # value-bearing exits by their branch conditions (as the exit heaps are,
+  # below), for its actual. The caller continues only on those exits (the
+  # exit-coverage fact), so the first exit's value is the merge's default.
+  for o in varOuts:
+    let pn = cb.params[o.param].name
+    var merged: SymVal
+    var have = false
+    var exits: seq[tuple[bc: seq[Z3Bool], env: Env]]
+    for cp in fallThrough: exits.add (bc: cp.pc, env: cp.env)
+    for cp in frame.returnedPaths:
+      exits.add (bc: (if cp.pc.len > 0: cp.pc[0 ..< cp.pc.high] else: cp.pc),
+                 env: cp.env)
+    for ex in exits:
+      if not ex.env.hasKey(pn): continue
+      let v = ex.env[pn]
+      if not have or ex.bc.len == 0:
+        merged = v
+        have = true
+      else:
+        var guard = ex.bc[0]
+        for k in 1 ..< ex.bc.len: guard = guard and ex.bc[k]
+        merged = iteSV(guard, v, merged)
+    if have: w.closureVarOuts.add (name: o.name, val: merged)
   # RFC-0005 S7 (closure-descent taint): the descent started from a clean
   # root, so whatever its exit paths picked up (a degrade inside the body)
   # must join the CALLING path -- through the pending-taint drain, the one

@@ -938,7 +938,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## and generic callees). Provisional 204.
     ## RFC-0005 S8bf (two var / addr heap actuals that may be one cell
     ## through different refs are passed by reference). Provisional 206.
-    check symexWalkerVersion == "206"
+    ## RFC-0005 S8bh (var / addr effects of a call through a proc value;
+    ## ptr parameters may address a ref object's field; ref conversions
+    ## keep identity). Provisional 208.
+    check symexWalkerVersion == "208"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

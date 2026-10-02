@@ -380,16 +380,44 @@ proc emitExpr*(e: IRExpr): NimNode =
     for c in e.lambdaCaptures: capsLit.add newLit(c)
     var mutCapsLit = newTree(nnkBracket)     ## RFC-0005 S9
     for c in e.lambdaMutCaptures: mutCapsLit.add newLit(c)
-    newCall(bindSym"mkLambda",
+    let lam = newCall(bindSym"mkLambda",
             newLit(e.lambdaSite.siteHash), newLit(e.lambdaSite.declOrder),
             prefix(paramsLit, "@"), emitStmt(e.lambdaBody),
             prefix(capsLit, "@"), emitIRType(e.lambdaRetTy),
             newTree(nnkExprEqExpr, ident"mutCaptures",
                     newCall(bindSym"@", mutCapsLit)))
+    # RFC-0005 S8bh: the effect summary.
+    var pairsLit = newTree(nnkBracket)
+    for pr in e.lambdaAliasPairs:
+      pairsLit.add newTree(nnkTupleConstr,
+        newColonExpr(ident"keep", newLit(pr.keep)),
+        newColonExpr(ident"gone", newLit(pr.gone)))
+    var bodiesLit = newTree(nnkBracket)
+    for b in e.lambdaAliasBodies: bodiesLit.add emitStmt(b)
+    var plLit = newTree(nnkBracket)
+    for b in e.lambdaPtrLocal: plLit.add newLit(b)
+    var outerLit = newTree(nnkBracket)
+    for o in e.lambdaOuter: outerLit.add newLit(o)
+    newCall(bindSym"withLambdaEffects", lam,
+            newCall(bindSym"@", pairsLit), newCall(bindSym"@", bodiesLit),
+            newCall(bindSym"@", plLit), newCall(bindSym"@", outerLit))
   of iekClosureCall:      ## Phase 15 C1
     var argsLit = newTree(nnkBracket)
     for a in e.ccArgs: argsLit.add emitExpr(a)
-    newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"))
+    # RFC-0005 S8bh: the call's `var`/`addr` effects.
+    var vtLit = newTree(nnkBracket)
+    for t in e.ccVarTys:
+      vtLit.add(if t.isNil: newCall(bindSym"IRType", newNilLit())
+                else: emitIRType(t))
+    var alLit = newTree(nnkBracket)
+    for a in e.ccAlias: alLit.add newLit(a)
+    var adLit = newTree(nnkBracket)
+    for a in e.ccAddrArgs: adLit.add newLit(a)
+    var tcLit = newTree(nnkBracket)
+    for t in e.ccTouch: tcLit.add newLit(t)
+    newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"),
+            newCall(bindSym"@", vtLit), newCall(bindSym"@", alLit),
+            newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit))
   of iekSeqLit:           ## Phase 15 C4
     var elemsLit = newTree(nnkBracket)
     for c in e.seqLitElems: elemsLit.add emitExpr(c)
@@ -1983,6 +2011,9 @@ proc lambdaBodyHash(lam: NimNode): string =
   let li = lam.lineInfoObj
   li.filename & ":" & $li.line & ":" & $li.column
 
+proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr
+  ## RFC-0005 S8bh fwd decl
+
 proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
                           site: tuple[siteHash: int64, declOrder: int],
                           forceNoCaptures = false): IRExpr =
@@ -2029,8 +2060,11 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
     var seen: HashSet[string]
     collectFreeVarRefs(bodyNode, bound, captures, seen, mutCaptures)
   let bodyIR = parseStmt(bodyNode, ctx)
-  mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy,
-           mutCaptures)
+  # RFC-0005 S8bh: with the summary a call through it needs to apply its
+  # `var`/`addr` effects (`lambdaEffects`).
+  lambdaEffects(n, ctx,
+    mkLambda(site.siteHash, site.declOrder, params, bodyIR, captures, retTy,
+             mutCaptures))
 
 proc parseLambda(n: NimNode, ctx: ParseCtx): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009). Parse an `nnkLambda` / expression-
@@ -3745,6 +3779,156 @@ proc outerReachesCell(outer, heapSteps: seq[NimNode]): NimNode =
     if typeReachesCell(g.getTypeInst, cells, seen): return g
   nil
 
+# ---- RFC-0005 S8bh: a call through a proc value -----------------------------
+
+proc cellTypeKey(t: NimNode): string =
+  ## RFC-0005 S8bh. A key for the object (or value) type a ref/ptr
+  ## addresses, the same whether read from a pointer type's pointee or from
+  ## a dereference: its implementation's spelling. Two types spelled alike
+  ## share a key (a collision only makes more calls decline).
+  if t.isNil: return "t:?"
+  let im = if t.kind in {nnkObjectTy, nnkTupleTy}: t else: t.getTypeImpl
+  "t:" & $hash(im.repr)
+
+proc typeReachKeys(t: NimNode; into: var seq[string]; seen: var seq[string]) =
+  ## RFC-0005 S8bh. `typeReachesCell`, enumerated: the `cellTypeKey` of
+  ## every object type a ref held by a value of type `t` may address; `t:?`
+  ## for any object type (a `ptr`, which may address a value embedded
+  ## anywhere, `pointer`, or a ref into an inheritance hierarchy); `*` for
+  ## an unknown reach (a proc value, whose own captures are not known, or a
+  ## type shape not searched).
+  template add(k: string) =
+    if k notin into: into.add k
+  if t.isNil:
+    add "*"
+    return
+  var impl = t.getTypeImpl
+  if impl.kind == nnkVarTy and impl.len == 1: impl = impl[0].getTypeImpl
+  let key = t.repr & "|" & impl.repr
+  if key in seen: return
+  seen.add key
+  case impl.kind
+  of nnkSym:
+    if impl.strVal == "pointer": add "t:?"
+  of nnkPtrTy:
+    add "t:?"
+    typeReachKeys(impl[0], into, seen)
+  of nnkRefTy:
+    add cellTypeKey(impl[0])
+    if objectInherits(impl[0]): add "t:?"
+    typeReachKeys(impl[0], into, seen)
+  of nnkObjectTy:
+    if impl.len < 3 or impl[2].kind == nnkEmpty: return
+    for f in impl[2]:
+      if f.kind == nnkIdentDefs: typeReachKeys(f[^2], into, seen)
+      else: add "*"
+  of nnkTupleTy, nnkTupleConstr:
+    for f in impl:
+      typeReachKeys((if f.kind == nnkIdentDefs: f[^2] else: f), into, seen)
+  of nnkBracketExpr:
+    for i in 1 ..< impl.len: typeReachKeys(impl[i], into, seen)
+  of nnkDistinctTy:
+    typeReachKeys(impl[0], into, seen)
+  of nnkEnumTy, nnkRange, nnkInfix:
+    discard
+  else:
+    add "*"
+
+proc substFormal(n, gone, keep: NimNode): NimNode =
+  ## RFC-0005 S8bh. `n` with every use of the formal `gone` spelled as the
+  ## formal `keep` (symbol identity; a lambda nested in `n` included, as it
+  ## captures the formal).
+  if n.kind == nnkSym and containsSym(@[gone], n): return keep
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  for c in n: result.add substFormal(c, gone, keep)
+
+proc lambdaEffects(n: NimNode; ctx: ParseCtx; lam: IRExpr): IRExpr =
+  ## RFC-0005 S8bh. `lam` (the `iekLambda` of routine `n`) with what a call
+  ## through it needs to apply its `var`/`addr` effects as a direct call
+  ## does (`closureCallIR`, `lowerClosureCall`):
+  ##   * for each pair of same-typed `var` formals, the body with the second
+  ##     spelled as the first: the callee as it runs when one location is
+  ##     passed to both (`f(x, x)`, or `f(p.x, q.x)` with `p == q`), its
+  ##     writes through the two landing on one location in its order;
+  ##   * for each `ptr` formal, whether every use of it stays local to the
+  ##     call (S8an's `ptrUsesStayLocal`), so an `addr` actual may be a cell;
+  ##   * what the body can reach outside its formals: the variables it
+  ##     names that it does not declare (captures, module-level globals,
+  ##     and those of each routine it calls, transitively) and the object
+  ##     types their refs may address (`typeReachKeys`); `*` when that is
+  ##     not known (a proc-valued formal or capture it may call).
+  let formal = n[3]
+  var syms, tys: seq[NimNode]
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: continue
+    for j in 0 ..< id.len - 2:
+      syms.add id[j]
+      tys.add id[^2]
+  let bodyNode = body(n)
+  var pairs: seq[tuple[keep, gone: int]]
+  var aliasBodies: seq[IRStmt]
+  var varIx: seq[int]
+  for k in 0 ..< syms.len:
+    if tys[k].kind == nnkVarTy and tys[k].len == 1: varIx.add k
+  # Four `var` formals make six specialisations; more are not made (a call
+  # sharing a location among them declines).
+  if varIx.len in 2 .. 4:
+    for a in 0 ..< varIx.len:
+      for b in a + 1 ..< varIx.len:
+        let i = varIx[a]
+        let j = varIx[b]
+        if not sameType(tys[i][0], tys[j][0]): continue
+        let keep = formalInBody(n, syms[i])
+        let gone = formalInBody(n, syms[j])
+        if keep.isNil or gone.isNil or keep.kind != nnkSym or
+           gone.kind != nnkSym:
+          continue
+        pairs.add (keep: i, gone: j)
+        aliasBodies.add parseStmt(substFormal(bodyNode, gone, keep), ctx)
+  var ptrLocal: seq[bool]
+  for k in 0 ..< syms.len:
+    var pl = false
+    if tys[k].kind != nnkVarTy and syms[k].kind == nnkSym and
+       syms[k].getTypeImpl.kind == nnkPtrTy:
+      let fb = formalInBody(n, syms[k])
+      if fb != nil:
+        var seen: seq[string]
+        pl = ptrUsesStayLocal(bodyNode, fb, seen)
+    ptrLocal.add pl
+  var outer: seq[string]
+  block reach:
+    var decls, refs, nested: seq[NimNode]
+    collectDeclaredSyms(n, decls)
+    collectOuterRefs(bodyNode, refs, nested)
+    var os: seq[NimNode]
+    for s in refs:
+      if not containsSym(decls, s) and not containsSym(os, s): os.add s
+    var work = nested
+    proc scan(m: NimNode; os, work: var seq[NimNode]) =
+      if m == nil: return
+      if m.kind == nnkSym:
+        if isModuleGlobal(m):
+          if not containsSym(os, m): os.add m
+        elif isUserRoutine(m):
+          work.add m
+        return
+      for c in m: scan(c, os, work)
+    scan(bodyNode, os, work)
+    for r in work:
+      for s in calleeOuterSyms(r):
+        if not containsSym(os, s): os.add s
+    var seen: seq[string]
+    for s in os:
+      let nm = "n:" & s.strVal
+      if nm notin outer: outer.add nm
+      typeReachKeys(s.getTypeInst, outer, seen)
+    for k in 0 ..< syms.len:
+      if syms[k].kind == nnkSym and syms[k].getTypeImpl.kind == nnkProcTy:
+        if "*" notin outer: outer.add "*"
+  withLambdaEffects(lam, pairs, aliasBodies, ptrLocal, outer)
+
 proc byRefTypeKey(n: NimNode): string =
   ## RFC-0005 S8ba. A type's spelling, the module that declares it (two
   ## modules may each declare a `Box`) and the line and column of its
@@ -4138,6 +4322,264 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
+proc simpleRefExpr(e: NimNode): bool =
+  ## RFC-0005 S8bh. `e` reads a ref with no effect and no index: a
+  ## variable, or a field of one (through dereferences).
+  case e.kind
+  of nnkSym: true
+  of nnkDotExpr: e.len == 2 and simpleRefExpr(e[0])
+  of nnkHiddenDeref, nnkDerefExpr, nnkHiddenStdConv, nnkHiddenSubConv:
+    e.len >= 1 and simpleRefExpr(e[^1])
+  else: false
+
+proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
+                   preamble: var seq[IRStmt]; ctx: ParseCtx):
+                   tuple[e: IRExpr, hoisted: bool] =
+  ## RFC-0005 S8bh. The `iekClosureCall` of `n`, a call through the proc
+  ## value `calleeSym`. Before S8bh its arguments were lowered by value and
+  ## nothing carried a `var` formal's writes back: `let f = setBoth; f(x,
+  ## y)` left `x` and `y` as they were (a false `sxSat`), whether `f` was a
+  ## proc used as a value, a lambda, a generic callee's proc parameter or a
+  ## proc passed to a callee; and an `addr` actual declined
+  ## (`feUnsupportedExprKind`). A call with a `var` formal or an `addr`
+  ## actual is now applied as a direct call is (`userCallStmt`):
+  ##   * a `var` actual that is a variable is written by the walker after
+  ##     the call (`ccVarTys`: the formal's exit value, by name, as #140);
+  ##   * any other lvalue (a field, an element, a heap cell) is copied into
+  ##     a temporary the walker writes, and the temporary is written back
+  ##     to the lvalue when the call returns or raises (S8ac's shape);
+  ##   * an `addr lv` actual is a cell for the call (S8an's shape), one per
+  ##     lvalue;
+  ##   * one location passed twice (`f(x, x)`) runs the body specialised to
+  ##     it (`ccAlias`, `lambdaAliasBodies`), and two heap lvalues that are
+  ##     one cell exactly when their refs are equal (`f(p.x, q.x)`, S8bf's
+  ##     peers) branch on that equality: the specialised body when they
+  ##     are, the plain one when not. Two `addr` peers share their cell
+  ##     when the refs are equal.
+  ## The call is hoisted to a statement (`let <synth> = <call>`), so its
+  ## writes land before the rest of the expression reads them, and the
+  ## result is that temporary (`hoisted`). What the body can reach on its
+  ## own is known only once the callee is (`lowerClosureCall`), which
+  ## declines a call whose locations it can also reach (`ccTouch`). A shape
+  ## this does not model declines here (`feUnsupportedOp`).
+  let ti = calleeSym.getTypeInst
+  var varTys: seq[IRType]
+  var anyVar = false
+  var retVoid = true
+  if ti.kind == nnkProcTy and ti.len > 0 and ti[0].kind == nnkFormalParams:
+    let fp = ti[0]
+    retVoid = fp[0].kind == nnkEmpty or
+              (fp[0].kind == nnkSym and macros.strVal(fp[0]) == "void")
+    for i in 1 ..< fp.len:
+      let id = fp[i]
+      if id.kind != nnkIdentDefs: continue
+      let isVar = id[^2].kind == nnkVarTy
+      for j in 0 ..< id.len - 2:
+        varTys.add(if isVar: classifyType(id[^2]).ty else: nil)
+        if isVar: anyVar = true
+  var anyAddr = false
+  for i in 1 ..< n.len:
+    if addrActualLvalue(n[i]) != nil: anyAddr = true
+  if not anyVar and not anyAddr:
+    var argIRs: seq[IRExpr]
+    for i in 1 ..< n.len:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+    return (e: mkClosureCall(calleeName, argIRs), hoisted: false)
+  let nArgs = n.len - 1
+  proc isVarFormal(k: int): bool = k < varTys.len and varTys[k] != nil
+  proc declineHere(msg: string): IRStmt =
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "call through `" & calleeName & "`: " & msg &
+              " (feUnsupportedOp, RFC-0005 S8bh)"),
+      "closure call var/addr effect not modelled (feUnsupportedOp)")
+  # The location each `var`/`addr` actual hands the callee.
+  var lvOf = newSeq[NimNode](nArgs + 1)
+  for i in 1 ..< n.len:
+    let a = addrActualLvalue(n[i])
+    if a != nil:
+      lvOf[i] = a
+    elif isVarFormal(i - 1):
+      if n[i].kind == nnkHiddenAddr and n[i].len == 1:
+        var lv = n[i][0]
+        if isVarIndirection(lv): lv = lv[0]
+        lvOf[i] = lv
+      elif n[i].kind == nnkSym:
+        lvOf[i] = n[i]   ## a `var` formal passed on (Nim drops the addr)
+  # S8bf's peers: two heap lvalues that may be one cell through different
+  # refs. Two `addr`s, or two `var`s, of one lvalue are one location
+  # already (`same`), not a pair.
+  var same = newSeq[int](nArgs + 1)
+  for i in 1 ..< n.len: same[i] = i
+  var peers = newSeq[seq[int]](nArgs + 1)
+  for i in 1 ..< n.len:
+    if lvOf[i].isNil: continue
+    for j in 1 ..< i:
+      if lvOf[j].isNil: continue
+      if (addrActualLvalue(n[i]) != nil) != (addrActualLvalue(n[j]) != nil):
+        continue
+      if scopedRepr(lvOf[i]) == scopedRepr(lvOf[j]):
+        if same[i] == i: same[i] = same[j]
+  for i in 1 ..< n.len:
+    if lvOf[i].isNil or same[i] != i: continue
+    for j in 1 ..< n.len:
+      if j == i or lvOf[j].isNil or same[j] != j: continue
+      if lvOf[i].kind != nnkSym and lvOf[j].kind != nnkSym and
+         heapCellsMayMeet(lvOf[i], lvOf[j]):
+        peers[i].add j
+  var argIRs: seq[IRExpr]
+  var alias = newSeq[int](nArgs)
+  for k in 0 ..< nArgs:
+    # Two `addr`s of one lvalue are one cell already: no specialisation.
+    alias[k] = (if addrActualLvalue(n[k + 1]) != nil: k else: same[k + 1] - 1)
+  var addrArgs: seq[int]
+  var touch: seq[string]
+  var declines: seq[IRStmt]
+  var temps = newSeq[string](nArgs + 1)     ## the walker-written location
+  var backs: seq[tuple[i: int, lv: NimNode]]   ## lvalue write-backs
+  var cellBacks: seq[IRStmt]
+  var cellOfArg = newSeq[string](nArgs + 1)
+  proc addTouch(lv: NimNode; heapSteps: seq[NimNode]) =
+    var syms: seq[NimNode]
+    lvalueVarSyms(lv, syms)
+    for s in syms:
+      let nm = "n:" & s.strVal
+      if nm notin touch: touch.add nm
+    for d in heapSteps:
+      let k = if derefIsPtr(d) or objectInherits(d.getTypeInst): "t:?"
+              else: cellTypeKey(d.getTypeInst)
+      if k notin touch: touch.add k
+  for i in 1 ..< n.len:
+    let k = i - 1
+    let lv = lvOf[i]
+    if lv.isNil:
+      argIRs.add parseExpr(n[i], preamble, ctx)
+      continue
+    let viaAddr = addrActualLvalue(n[i]) != nil
+    var heapSteps: seq[NimNode]
+    let root = lvalueRoot(lv, heapSteps)
+    addTouch(lv, heapSteps)
+    var skip = peers[i]
+    for j in 1 ..< n.len:
+      if j != i and same[j] == same[i]: skip.add j
+    if same[i] != i:
+      # The same location as an earlier actual: the same cell / variable.
+      if viaAddr:
+        argIRs.add mkVar(cellOfArg[same[i]])
+        addrArgs.add k
+      elif temps[same[i]].len > 0:
+        argIRs.add mkVar(temps[same[i]])
+      else:
+        argIRs.add parseExpr(n[i], preamble, ctx)
+      continue
+    if root.isNil:
+      declines.add declineHere("`" & lv.repr & "` has no root variable")
+    elif viaAddr:
+      if addrActualMayAlias(n, i, lv, root, heapSteps, skip):
+        declines.add declineHere("`addr " & lv.repr & "` is passed alongside " &
+          "another argument that reaches the same location")
+    elif varActualMayAlias(n, i, lv, root, heapSteps, skip):
+      declines.add declineHere("`var` argument `" & lv.repr & "` is also " &
+        "reached through another argument")
+    if viaAddr:
+      let cell = freshSynth(ctx, "addrCell")
+      cellOfArg[i] = cell
+      let ptrTy = classifyType(n[i]).ty
+      let elemTy = classifyType(lv).ty
+      let lvIR = parseExpr(lv, preamble, ctx)
+      preamble.add mkNewT(cell, ptrTy)
+      preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
+                                cell = true)
+      let back = freshSynth(ctx, "addrBack")
+      var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
+      let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), mkVar(back),
+                        wbPre, ctx)
+      cellBacks.add mkBlock(wbPre & @[w])
+      argIRs.add mkVar(cell)
+      addrArgs.add k
+      continue
+    var ir = parseExpr(n[i], preamble, ctx)
+    if lv.kind == nnkSym:
+      if ir.kind != iekVar:
+        declines.add declineHere("`var` argument `" & lv.repr & "` names no " &
+          "variable the walk can write")
+      argIRs.add ir
+      continue
+    let t = freshSynth(ctx, "varArg")
+    preamble.add mkLet(t, classifyType(lv).ty, ir)
+    temps[i] = t
+    backs.add (i: i, lv: lv)
+    argIRs.add mkVar(t)
+  # The peer pairs: each argument at most one, mutual, both `var` or both
+  # `addr`, through refs read without effect, along one field path.
+  var pair: tuple[a, b: int] = (0, 0)
+  var pairOk = true
+  for i in 1 ..< n.len:
+    if peers[i].len == 0: continue
+    if peers[i].len > 1:
+      pairOk = false
+      continue
+    let j = peers[i][0]
+    if i < j:
+      if pair.a != 0: pairOk = false
+      else: pair = (i, j)
+  var eqCond: IRExpr = nil
+  if pair.a != 0 and pairOk:
+    let ta = heapCellTail(lvOf[pair.a])
+    let tb = heapCellTail(lvOf[pair.b])
+    var pathOk = ta.path == tb.path and "[]" notin ta.path
+    if ta.deref.isNil or tb.deref.isNil or derefIsPtr(ta.deref) or
+       derefIsPtr(tb.deref) or not simpleRefExpr(ta.deref[0]) or
+       not simpleRefExpr(tb.deref[0]) or
+       not sameType(ta.deref.getTypeInst, tb.deref.getTypeInst):
+      pathOk = false
+    if pathOk:
+      eqCond = mkBinop(bEq, parseExpr(ta.deref[0], preamble, ctx),
+                       parseExpr(tb.deref[0], preamble, ctx))
+    else:
+      pairOk = false
+  if not pairOk:
+    declines.add declineHere("two or more of its `var`/`addr` arguments may " &
+      "be one heap cell through different refs, in a shape not modelled " &
+      "(more than a pair, a `ptr` dereference, an index, an effectful ref " &
+      "or different field paths)")
+  let retTy = if retVoid: tBool() else: classifyType(n).ty
+  let synth = freshSynth(ctx, "closureCall")
+  proc callWith(al: seq[int]; touchV: seq[string]): IRExpr =
+    var aliasV = al
+    var identity = true
+    for k, a in aliasV:
+      if a != k: identity = false
+    if identity: aliasV = @[]
+    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV)
+  proc wrap(call: IRExpr; wbs: seq[IRStmt]): IRStmt =
+    let l = mkLet(synth, retTy, call)
+    if wbs.len == 0: l else: mkTry(l, @[], mkBlock(wbs))
+  proc backsFor(al: seq[int]): seq[IRStmt] =
+    for b in backs:
+      let src = temps[al[b.i - 1] + 1]
+      var wbPre: seq[IRStmt]
+      let w = parseAsgn(nnkAsgn.newTree(b.lv, newEmptyNode()), mkVar(src),
+                        wbPre, ctx)
+      result.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
+    for c in cellBacks: result.add c
+  for d in declines: preamble.add d
+  if eqCond != nil and addrActualLvalue(n[pair.a]) != nil:
+    # Two `addr` peers: one cell when the refs are equal.
+    preamble.add mkIf(@[IRBranch(cond: eqCond,
+      body: mkAssign(cellOfArg[pair.b], mkVar(cellOfArg[pair.a])))])
+    preamble.add wrap(callWith(alias, touch), backsFor(alias))
+  elif eqCond != nil:
+    # Two `var` peers: the body specialised to one location when the refs
+    # are equal.
+    var al2 = alias
+    al2[pair.b - 1] = pair.a - 1
+    preamble.add mkIf(@[IRBranch(cond: eqCond,
+                                 body: wrap(callWith(al2, touch), backsFor(al2)))],
+                      wrap(callWith(alias, touch), backsFor(alias)))
+  else:
+    preamble.add wrap(callWith(alias, touch), backsFor(alias))
+  (e: mkVar(synth), hoisted: true)
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -4214,10 +4656,8 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       if impl.kind notin routineShapedForClosureDetect:
         let ti = calleeSym.getTypeInst
         if ti.kind == nnkProcTy:
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
-          return mkClosureCall(calleeName, argIRs)
+          # RFC-0005 S8bh: with its `var`/`addr` effects.
+          return closureCallIR(n, calleeSym, calleeName, preamble, ctx).e
   # User-proc call in expression position. A-normalise. The instantiation
   # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
   # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
@@ -5617,10 +6057,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if impl.kind notin routineShapedForClosureDetect:
         let ti = calleeSym.getTypeInst
         if ti.kind == nnkProcTy:
-          var argIRs: seq[IRExpr]
-          for i in 1 ..< n.len:
-            argIRs.add parseExpr(n[i], preamble, ctx)
-          return mkClosureCall(calleeSym.strVal, argIRs)
+          # RFC-0005 S8bh: with its `var`/`addr` effects.
+          return closureCallIR(n, calleeSym, calleeSym.strVal, preamble, ctx).e
     # Phase 15 C4 (Des-LOW-L3). DSL higher-order calls — `filter`/`map`/`fold`
     # over `seq[T]` taking a CLOSURE arg, dispatched to the walker's HOF
     # handlers (inline / axiom), NOT the generic isCall descent. The interception
@@ -11238,15 +11676,15 @@ proc parseStmtInner(n: NimNode,
               let impl = calleeSym.getImpl
               impl.kind notin routineShapedForClosureDetect and
                 calleeSym.getTypeInst.kind == nnkProcTy):
-        var argIRs: seq[IRExpr]
-        for i in 1 ..< n.len:
-          argIRs.add parseExpr(n[i], preamble, ctx)
         # The closure call is value-producing IR; in statement position its
         # EFFECTS (a `symexTarget`/write inside the lowered body) are what matter,
         # so bind it to a synthetic sink `let` (the `discardExn` idiom) — the
         # walker descends the closure body and the binding's value is dropped.
-        mkLet(freshSynth(ctx, "closureCallSink"), tBool(),
-              mkClosureCall(calleeSym.strVal, argIRs))
+        # RFC-0005 S8bh: a call with `var`/`addr` effects is already a
+        # statement of the preamble (`closureCallIR`).
+        let cc = closureCallIR(n, calleeSym, calleeSym.strVal, preamble, ctx)
+        if cc.hoisted: mkBlock(@[])
+        else: mkLet(freshSynth(ctx, "closureCallSink"), tBool(), cc.e)
       else:
         let calleeName = calleeSym.strVal
         # Unwrap semcheck-inserted HiddenDeref / HiddenAddr / HiddenStdConv

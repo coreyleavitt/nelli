@@ -1067,5 +1067,8 @@ task test, "Run the test suite":
             # RFC-0005 S8bf: two var / addr heap actuals that may be one
             # cell through different refs are passed by reference. Walker
             # 206 (provisional).
-            "tsymex_rfc0005_s8bf_alias"]:
+            "tsymex_rfc0005_s8bf_alias",
+            # RFC-0005 S8bh: var / addr effects of a call through a proc
+            # value. Walker 208 (provisional).
+            "tsymex_rfc0005_s8bh_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

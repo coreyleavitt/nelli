@@ -25,12 +25,19 @@
 ##     sxUnsat for any claim on a capture.
 ## Item 5: `replace(s, re, by)` over a receiver of unknown length is exact
 ## past S8aw's 16-byte unroll.
+## Item 6: a query only step 1c refutes no longer pays step 1's
+## full-theory search first (S8aw's join walk: 10,000,930 units at
+## 8b2508f, about 20 s on Z3 5.1; pinned by units, this file's .nim.cfg).
 import std/[unittest, strutils, re]
 import z3
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
 import nelli/smt/regex_parser
+import nelli/smt/runtime
+
+when not defined(symexQueryStats):
+  {.error: "tsymex_rfc0005_s8ay_remainder needs -d:symexQueryStats (its .nim.cfg)".}
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -516,6 +523,142 @@ suite "S8ay (1/2): the entry formulas against the concrete std/re":
           check got == real
           inc decided
     check decided >= 700
+
+# ---- the membership entries, exhaustively (S8aw's "every link is true") -------
+#
+# `match` / `contains` (every `start` from -1 to len + 1) and `startsWith` /
+# `endsWith`, for EVERY subject over {a, b, LF} up to length 4, against the
+# concrete `std/re` call. Each formula is built on the ground subject and
+# folded by Z3's rewriter; one it does not fold is checked by a solver.
+# `endsWith` on a pattern whose PCRE choice is not fixed by the longest
+# match (`a|ab`, `a*b`, `(ab)+`) declines by design (a fresh value, never a claim);
+# those are listed, not compared. `match` / `contains` / `startsWith` never
+# decline on a pattern the reader accepts.
+
+proc words(alpha: string; maxLen: int): seq[string] =
+  result = @[""]
+  var frontier = @[""]
+  for _ in 1 .. maxLen:
+    var next: seq[string]
+    for w in frontier:
+      for c in alpha: next.add w & c
+    result.add next
+    frontier = next
+
+const exhPatterns = [("", false), ("a", false), ("b+", false), ("a|ab", false),
+  ("a*b", false), (".", false), ("[^a]", false), ("^a", false),
+  ("a$", false), ("a\\Z", false), ("a\\z", false), ("\\Aa|b$", false),
+  ("(ab)+", false), ("a.b", false), ("\\s", false), ("\\S+$", false),
+  ("a b", true), ("a # c\nb", true)]
+
+suite "S8ay (1/2): every membership value is the concrete call's (exhaustive)":
+
+  test "match / contains / startsWith / endsWith over {a, b, LF}, length <= 4":
+    let ctx = newContext()
+    setCurrentContext(ctx)
+    proc fresh(tag: string): string = tag
+    var bad: seq[string]
+    var checked, folded = 0
+    var declinedEnds: seq[string]
+    for (p, ext) in exhPatterns:
+      let rx = (if ext: rex(p) else: re(p))
+      for subj in words("ab\n", 4):
+        var cases: seq[(string, int, bool)]
+        for st in -1 .. subj.len + 1:
+          cases.add ("match", st, subj.match(rx, st))
+          cases.add ("contains", st, subj.contains(rx, st))
+        cases.add ("startsWith", 0, subj.startsWith(rx))
+        cases.add ("endsWith", 0, subj.endsWith(rx))
+        for (name, st, real) in cases:
+          let sp = RegexSpec(entry: name, flag: (if ext: "rex" else: "re"),
+                             pattern: p)
+          let r = lowerRegexEntry(sp, parseSpec(sp), mkString(subj),
+                                  mkInt(st), fresh)
+          if r.outcome == roUnmodelled and name == "endsWith":
+            if p notin declinedEnds: declinedEnds.add p
+            continue
+          if r.outcome != roValue or r.defs.len > 0:
+            if bad.len < 10: bad.add "not lowered: " & escape(p) & " " & name
+            continue
+          inc checked
+          let f = $wrap[Z3Bool](ctx, ctx.checkErr Z3_simplify(ctx.raw, r.b.raw))
+          var got: bool
+          if f == "true" or f == "false":
+            inc folded
+            got = f == "true"
+          else:
+            let sol = newSolver(ctx)
+            sol.add r.b
+            got = $sol.check() == "zsSat"
+          if got != real and bad.len < 10:
+            bad.add (if ext: "rex " else: "re ") & escape(p) & " " &
+                    escape(subj) & " " & name & "(" & $st & ") real " & $real
+    checkpoint $checked & " cases, " & $folded & " folded; endsWith " &
+               "declined on " & $declinedEnds & "; " & $bad
+    check bad.len == 0
+    check checked > 10_000
+    check declinedEnds == @["a|ab", "a*b", "\\Aa|b$", "(ab)+"]
+
+  test "the enumeration catches the pre-S8ay lowering (full-string membership)":
+    # `match` and `contains` were both `matches(s, R)` before S8ay. Over
+    # the same words the enumeration must tell that apart from the real
+    # calls, or it could not have caught the bug it guards.
+    let ctx = newContext()
+    setCurrentContext(ctx)
+    var caught = 0
+    for p in ["a", "b+", "a.b"]:
+      let rx = re(p)
+      let full = rxToZ3(parsePcre(p).root)
+      for subj in words("ab\n", 3):
+        let f = $wrap[Z3Bool](ctx, ctx.checkErr Z3_simplify(ctx.raw,
+          matches(mkString(subj), full).raw))
+        if (f == "true") != subj.contains(rx) or
+           (f == "true") != subj.match(rx):
+          inc caught
+    checkpoint $caught
+    check caught > 0
+
+# ---- item 6: step 1c's refutation without the full budget first ------------
+#
+# S8aw's join walk (a first index past the last) is refuted only by step
+# 1c's facts. Until S8ay `checkCapped` ran step 1's full-theory search to
+# half the default `seqQueryRLimit` first: 10,000,930 units, about 20 s on
+# Z3 5.1, for a refutation the facts find in a few thousand. The
+# facts-first check (`factsFirstRLimit`) answers it before step 1. Pinned
+# at the DEFAULT budget by the units the walk spends (`rlimitDelta`, this
+# file's `-d:symexQueryStats`), which no verdict shows.
+
+proc joinFoundExceedsLast(s, t: string) =
+  if t in s and s.find(t, 0) >= 0 and s.rfind(t) < s.find(t, 0):
+    symexTarget("ay_join")
+
+proc joinFromI(s, t: string; i: int) =
+  if i >= 0 and i <= s.len:
+    let r = s.find(t, i)
+    if r >= 0 and s.rfind(t) < r:
+      symexTarget("ay_join_i")
+
+proc unitsSpent(): int =
+  ## The Z3 units every query since the last reset spent.
+  for q in symexQueryStats: result += q.rlimitDelta
+
+suite "S8ay (6): step 1c decides before the full-theory search":
+
+  test "the join walk is sxUnsat at the default budget, within factsFirstRLimit":
+    symexQueryStats = @[]
+    let r = symexFind(joinFoundExceedsLast, tLabel("ay_join"))
+    let units = unitsSpent()
+    checkpoint $r.status & " " & show(r.errors) & " units=" & $units
+    check r.status == sxUnsat
+    check units < int(factsFirstRLimit)
+
+  test "from a symbolic start too":
+    symexQueryStats = @[]
+    let r = symexFind(joinFromI, tLabel("ay_join_i"))
+    let units = unitsSpent()
+    checkpoint $r.status & " " & show(r.errors) & " units=" & $units
+    check r.status == sxUnsat
+    check units < int(factsFirstRLimit)
 
 suite "S8ay: walker version floor":
   test "symexWalkerVersion >= 198":

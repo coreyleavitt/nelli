@@ -118,6 +118,9 @@ suite "S8aw (1): step 1c joins seqRangeFacts to str.indexof":
   # The end-to-end pins run under a `seqQueryRLimit` too small for the
   # sequence theory's own search: the verdict is step 1c's (the facts),
   # not the theory's, and the default budget only spends ~20 s first.
+  # (RFC-0005 S8ay: no longer -- `checkCapped` runs step 1c's uncapped
+  # half first, so the default budget decides it in a few hundred units;
+  # pinned in tsymex_rfc0005_s8ay_remainder (6).)
   proc tightSeq(): SymexSettings =
     result = defaultSymexSettings()
     result.budget.seqQueryRLimit = 200_000

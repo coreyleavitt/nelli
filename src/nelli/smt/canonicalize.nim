@@ -218,7 +218,12 @@ const symexWalkerVersion* = "198"
   ## rejects raises `RegexError` with Nim's exact message (new
   ## `regexRaiseMsgs` sink, the last `drainScalarRaiseForks` stage).
   ## findAll / split / replacef / multiReplace / captures decline instead
-  ## of aborting the compile. Provisional 198 (S8ax holds 197).
+  ## of aborting the compile. Regex replace over a receiver of unknown
+  ## length is an exact recursive function past the 16-byte unroll (no
+  ## fresh arm). `checkCapped` runs step 1c's uncapped half first (step
+  ## 0, `factsFirstRLimit`), so a query only it refutes no longer runs out
+  ## step 1's budget first (the same UNSATs (1b) / (1c) reached after
+  ## step 1, at a fraction of the cost). Provisional 198 (S8ax holds 197).
   ##
   ## RFC-0005 S8aw (2026-10-02) — regex `replace(s, re"p", by)` is lowered
   ## by the walker (`runtime_strings.nim`, `regexReplaceShape` /

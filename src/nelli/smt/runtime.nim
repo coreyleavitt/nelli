@@ -10185,6 +10185,14 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
                        (one <= e) and (e <= zero - a))
     result.add implies((b <= zero - two) and (a < zero), twoE <= one - a)
 
+const factsFirstRLimit* = 1_000_000'u
+  ## RFC-0005 S8ay (item 6). The budget of `checkCapped`'s facts-first
+  ## check (step 1c's uncapped half, run before step 1). Small on purpose:
+  ## it only lets a refutation that needs no string search answer before
+  ## the full-theory search; one it cannot finish here is still tried
+  ## with the whole budget after step 1. S8aw's join refutations took a
+  ## few thousand units on Z3 5.1 and 4.13.4.
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -10201,6 +10209,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ## model search, run under half of it each, so a query that finds no
   ## model spends at most the budget searching; steps 1b and 2 run under
   ## all of it:
+  ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
+  ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
+  ##      An UNSAT is the query's own and returns at once; anything else
+  ##      goes on to (1), with (1b) and (1c) below unchanged.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -10315,6 +10327,24 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
         "seqQueryRLimit = " & $sq & ")"
   let capText = "no model with every string / seq at most " & $cap &
     " elements (maxSeqLen); a longer one was not searched"
+  # RFC-0005 S8ay (item 6): step 1c's UNCAPPED half runs FIRST, under a
+  # small budget (`factsFirstRLimit`). It is theory-free: the query with no
+  # sequence theory plus `seqRangeFacts`, every fact valid in the theory,
+  # so its models are a superset of the real ones and an UNSAT is the
+  # query's own -- exactly what (1b) and (1c)'s uncapped half conclude
+  # after step 1, nothing more (and it subsumes (1b): the same query with
+  # more assertions). Before S8ay a query only step 1c refutes paid step
+  # 1's full-theory search to its half budget first: S8aw's join walks
+  # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
+  # in a few thousand. Anything else (SAT, or unknown in the small budget)
+  # falls through to the unchanged order below, (1b) and (1c) included
+  # with their full budget, so no verdict is lost.
+  let facts = seqRangeFacts(ctx, roots)
+  block factsFirst:
+    let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
+    let sPre = querySolver(ctx, roots, pre, seqTheory = false)
+    for f in facts: sPre.add f
+    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
   # Step 1: the caps asserted, one-shot.
   let s1 = querySolver(ctx, roots, rlHalf)
   for c in caps: s1.add c
@@ -10381,7 +10411,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # half (an UNSAT that is its own): the capped half would decline one
     # that is SAT only past the cap, which step 3 decides
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
-    let facts = seqRangeFacts(ctx, roots)
+    # (`facts` is computed above, for the facts-first check.)
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f

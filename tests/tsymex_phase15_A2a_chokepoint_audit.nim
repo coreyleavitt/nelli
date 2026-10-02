@@ -151,6 +151,12 @@ suite "symex A2a — permanent parseAtomicOperand chokepoint audit":
       for rawLine in dslParserSrc.splitLines():
         inc lineNo
         if rawLine.contains(marker):
+          # RFC-0005 S8ax: `parseOperandPair(` atomizes both operands of a
+          # binary operator through `parseAtomicOperand` (then orders their
+          # reads), so one tagged line of it is the family's two sites.
+          if rawLine.contains("parseOperandPair("):
+            found += 2
+            continue
           inc found
           if not rawLine.contains("parseAtomicOperand("):
             violations.add Violation(lineNo: lineNo, lineText: rawLine,

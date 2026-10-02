@@ -1724,7 +1724,7 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
     if not later[k] or (k < fixed.len and fixed[k]):
       outPre.add segs[k]
       continue
-    let seg = segs[k]
+    var seg = segs[k]   # a copy: a VM `let` of an element aliases it (S8ab)
     if mode == omElements or isEagerIR(irs[k]) or irHasCall(irs[k]):
       outPre.add seg
       if mode == omElements and not isLiteralIR(irs[k]) or
@@ -4081,12 +4081,11 @@ proc aliasPath(a, b: NimNode; pairs: var AliasIndexPairs): bool =
   if ra.isNil or rb.isNil or not containsSym(@[ra], rb): return false
   var found: AliasIndexPairs
   for k in 0 ..< min(sa.len, sb.len):
-    let x = sa[k]
-    let y = sb[k]
-    if x.ix == nil and y.ix == nil:
-      if x.field != y.field: return true
-    elif x.ix != nil and y.ix != nil:
-      found.add (a: x.ix, b: y.ix)
+    # Indexed in place: a VM `let` of an element aliases it (S8ab).
+    if sa[k].ix == nil and sb[k].ix == nil:
+      if sa[k].field != sb[k].field: return true
+    elif sa[k].ix != nil and sb[k].ix != nil:
+      found.add (a: sa[k].ix, b: sb[k].ix)
     else:
       return false   # a constant against a computed index: not paired
   if found.len == 0: return false

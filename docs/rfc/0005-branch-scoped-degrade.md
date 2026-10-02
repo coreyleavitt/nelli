@@ -342,6 +342,11 @@ title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.
 state = "done"
 
 [[slice]]
+id = "S8ay"
+title = "S8aw's remainder: regex match/contains semantics, PCRE parity, re vs rex, rejected patterns, exact replace past 16 bytes"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

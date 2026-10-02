@@ -7549,6 +7549,9 @@ Pins that moved, because they pinned a gap S8bc closes:
   holds a `ref int`, so a seq of it stays unrenderable; CR-2c-N3's variant
   arm is a `seq[seq[Widget]]`. `r6_n43_parity`'s witness object holds a
   `ref int` for the same reason.
+- **`phase15_M1_seq_fixedwidth` M1-11** (`seq[Widget]` param) is now an
+  exact `sxSat`, as M1-10's `seq[string]` became at S8ar. Caught on
+  symex-mingw (corpus shard 7), not by the local runs.
 - **`rfc0005_s8c_resolution`'s seq `==`** declines at the `==`
   (`feUnsupportedOp`) rather than at the unbacked element.
 - **`rfc0005_s0_exhibit` pin 2**: the cast on the contradictory branch is

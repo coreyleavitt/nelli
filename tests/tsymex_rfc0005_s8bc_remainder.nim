@@ -850,6 +850,9 @@ proc tiValues(a: int) =
   if s == 10: symexTarget("ti_values")
 
 proc tiTuple(a: int) =
+  # Bounded: `s += k * v` overflows for a huge `a`, a real `OverflowDefect`
+  # that wins over the label (seen on Windows, RFC-0005 S8bc).
+  if a < -1000 or a > 1000: return
   var t = initTable[int, int]()
   t[1] = a
   t[2] = 5

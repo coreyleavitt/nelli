@@ -4141,6 +4141,18 @@ proc isRenderableSeqElemTy*(elemTy: IRType): bool =
   ## the witness READER (`emitTyAndReader`'s `itSeq` arm) was missing cases,
   ## so this predicate is widened in lockstep with that reader per this
   ## proc's own contract (see module doc comment above).
+  ##
+  ## RFC-0005 S8bd: a `distinct` element (any chain of them) whose cell
+  ## (`seqCellTy`) is a renderable int or float, not an enum: the reader
+  ## reads the cells as the base seq and converts each element back
+  ## through the chain (`emitTyAndReader`'s `itSeq` arm). S8ba backed such
+  ## a seq; only its witness was missing.
+  if elemTy.kind == itDistinct:
+    let cell = seqCellTy(elemTy)
+    if cell == nil: return false
+    if cell.kind == itInt: return cell.enumName.len == 0 and
+                                  isRenderableSeqElemTy(cell)
+    return cell.kind in {itFloat32, itFloat64}
   (elemTy.kind == itInt and
    (elemTy.width == 8 or elemTy.width == 16 or
     elemTy.width == 32 or elemTy.width == 64)) or

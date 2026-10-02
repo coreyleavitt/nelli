@@ -637,7 +637,70 @@ proc mvAxisOfField(mv: IRType; field: string): int =
       if field in arm.fieldNames: return i
   0
 
-proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
+var heapChainKinds {.threadvar.}: tuple[ready: bool, select, ite: int]
+  ## RFC-0005 S8bd. The `Z3_decl_kind` ordinals `heapChainDepth` matches
+  ## on, read off terms built once per thread (`seqCapKinds`' discipline).
+
+proc heapChainDepth*(ctx: Z3Context; refAst: Z3AnyAst): int =
+  ## RFC-0005 S8bd. How many heap dereferences the ref `refAst` itself was
+  ## reached through: 0 for a root (a parameter, a global, a fresh `new`,
+  ## a local bound to one), and for a ref read out of a heap cell
+  ## (`select(H, r)`, `H` keyed by a `Ref_T` sort) one more than `r`'s.
+  ## A merge (`ite`) is its deeper side; a read out of a seq's or array's
+  ## backing (`select` at an Int index) is its container's depth. Every
+  ## other term is a root.
+  if not heapChainKinds.ready:
+    let b = mkBoolVar(ctx, "__s8bd_kind_probe_b")
+    let x = mkIntVar(ctx, "__s8bd_kind_probe_x")
+    let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bd_kind_probe_arr")
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    heapChainKinds = (ready: true, select: kindOf(select(arr, x).raw),
+                      ite: kindOf(ite(b, x, x + mkInt(ctx, 1)).raw))
+  let kinds = heapChainKinds
+  var memo: Table[int, int]
+  proc go(a: Z3AnyAst): int =
+    if getAstKind(a) != akApp: return 0
+    let id = astId(ctx, a.raw)
+    if id in memo: return memo[id]
+    let (decl, args) = unpackApp(a)
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    var d = 0
+    if k == kinds.select and args.len == 2:
+      let dom = arrayKey(ctx, ctx.checkErr Z3_get_sort(ctx.raw, args[0].raw))
+      d = if getSortKind(ctx, dom) == skUninterpreted: 1 + go(args[1])
+          else: go(args[0])
+    elif k == kinds.ite and args.len == 3:
+      d = max(go(args[1]), go(args[2]))
+    memo[id] = d
+    d
+  go(refAst)
+
+const heapDerefsPerPathCap* = 4096
+  ## RFC-0005 S8bd. The hard cap on the dereferences one path makes in all
+  ## (`Path.heapDepth` counts them), whatever their depth. The walk of a
+  ## path is finite without it (`maxLoopUnwind` and `maxCallDepth` bound
+  ## every loop and recursion); it bounds the heap terms one query can hold.
+
+func heapDerefDecline*(chainDepth, derefCount, limit: int): string =
+  ## RFC-0005 S8bd. The decline a dereference makes, or "" when it is within
+  ## budget. `chainDepth` is the dereference's own depth (one more than its
+  ## ref's, `heapChainDepth`), `derefCount` the path's count including it,
+  ## `limit` the effective `maxHeapDepth` (`effectiveHeapDepthLimit`).
+  ## The budget bounds the depth of a chain (`n.next.next...`), as its name
+  ## and its doc say. Before S8bd it was compared with the path's count of
+  ## every dereference, so a straight-line SUT that touched one object's
+  ## fields nine times declined under the default of 8 (`o.inner.x`, read
+  ## and written through a call: S8ba's `hn`, `hr`).
+  if limit > 0 and chainDepth >= limit:
+    "heap depth budget of " & $limit & " exceeded (maxHeapDepth): a " &
+      "dereference " & $chainDepth & " heap reads from its root"
+  elif derefCount > heapDerefsPerPathCap:
+    "heap dereference hard cap of " & $heapDerefsPerPathCap & " on one " &
+      "path exceeded (heapDerefsPerPathCap)"
+  else: ""
+
+proc heapDepthExhausted(p: Path, w: var WalkCtx; refAst: Z3AnyAst): bool =
   ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
   ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
   ## at every fork via H1), then test it against the effective limit. On
@@ -646,16 +709,20 @@ proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
   ## caller HALTS this path (binds nothing, contributes no survivor → sxUnknown).
   ## Otherwise return `false` and the deref/store proceeds normally. Per-path: a
   ## shallower path's deref does not exhaust and continues.
+  ## RFC-0005 S8bd: the limit bounds the dereference's chain depth
+  ## (`heapChainDepth` of the ref `refAst`, plus this hop); the count is
+  ## held to `heapDerefsPerPathCap` (`heapDerefDecline`).
   inc p.heapDepth
   let limit = effectiveHeapDepthLimit(w.settings)
-  if limit > 0 and p.heapDepth >= limit:
+  let msg = heapDerefDecline(heapChainDepth(w.z3, refAst) + 1, p.heapDepth,
+                             limit)
+  if msg.len > 0:
     # RFC-0005 S1: a HALT site — the caller drops `p` (no survivor), so the
     # former `p.uncertain = true` mutation carried nothing anywhere and is
     # gone; the token is discarded. `dsHeapDepth` writes the threadvar +
     # LIVE WalkCtx field exactly as the two hand-written adds did, and the
     # run act is derived at drain from that entry (was `w.sawUnknown`).
-    discard w.degrade(heDepthExhausted,
-      "heap depth budget of " & $limit & " exceeded", dsHeapDepth)
+    discard w.degrade(heDepthExhausted, msg, dsHeapDepth)
     return true
   false
 
@@ -894,7 +961,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        if heapDepthExhausted(p, w): continue
         let refSV = lowerLeafInExpr(p, stmt.dPtr)
         let refAst = case refSV.kind
           of svRef: refSV.refAst
@@ -919,6 +985,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
               "__armFieldReadUnresolvedRef", d)
             continue
+        # RFC-0005 S8bd: the budget bounds the depth of the chain the ref
+        # was reached through (`heapChainDepth`), so it is read off the
+        # lowered ref.
+        if heapDepthExhausted(p, w, refAst): continue
         if refSV.kind == svPtr:
           let ptrHint = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -1089,8 +1159,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # effective budget BEFORE the select — a recursive `n.next.next…` walk can
       # never loop unboundedly. Per-path: a shallower path continues.
       # RFC-0005 S8an: an `addr` cell's read-back is not a program
-      # dereference; it does not count.
-      if not stmt.dCell and heapDepthExhausted(p, w): continue
+      # dereference; it does not count. (RFC-0005 S8bd: the check is made
+      # once the ref is lowered, below.)
       ## Drain-coverage audit: `stmt.dPtr` is always an env-resident var —
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
@@ -1117,6 +1187,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           survivors.add degradeHeapArmForPath(p, stmt.dElemTy, stmt.dRetName,
             "__derefReadUnresolvedRef", d)
           continue
+      # RFC-0005 S8bd: the budget bounds the depth of the chain the ref
+      # was reached through (`heapChainDepth`), so it is read off the
+      # lowered ref.
+      if not stmt.dCell and heapDepthExhausted(p, w, refAst): continue
       # Phase 15 R8. An UNMANAGED `ptr T` deref routes through the SAME heap as
       # a `ref T` (the `of svPtr` arm above), but emits a non-halting
       # `hePtrFamily` hint so a consumer can distinguish unmanaged ptr from
@@ -1486,7 +1560,6 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        if heapDepthExhausted(p, w): continue
         let refSV = lowerLeafInExpr(p, stmt.dwPtr)
         let refAst = case refSV.kind
           of svRef: refSV.refAst
@@ -1503,6 +1576,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               "arm-field deref-write of non-ref/ptr SymVal kind=" & plainEnglishSymValKind(refSV.kind))
             survivors.add degradeHeapArmForPath(p, d)
             continue
+        # RFC-0005 S8bd: the budget bounds the depth of the chain the ref
+        # was reached through (`heapChainDepth`), so it is read off the
+        # lowered ref.
+        if heapDepthExhausted(p, w, refAst): continue
         if refSV.kind == svPtr:
           let ptrHintAW = SymexErrorInfo(kind: hePtrFamily, severity: sevHint,
             msg: "witness involves unmanaged ptr")
@@ -1663,8 +1740,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # and effective budget as the read). HALT this path before the store if it
       # reaches the budget.
       # RFC-0005 S8an: an `addr` cell's store is not a program write; it
-      # does not count.
-      if not stmt.dwCell and heapDepthExhausted(p, w): continue
+      # does not count. (RFC-0005 S8bd: the check is made once the ref is
+      # lowered, below.)
       ## Drain-coverage audit: `stmt.dwPtr` is always an env-resident var —
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and
@@ -1686,6 +1763,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             " (Cluster R R4 expects an svRef/svPtr at the write site)")
           survivors.add degradeHeapArmForPath(p, d)
           continue
+      # RFC-0005 S8bd: the budget bounds the depth of the chain the ref
+      # was reached through (`heapChainDepth`), so it is read off the
+      # lowered ref.
+      if not stmt.dwCell and heapDepthExhausted(p, w, refAst): continue
       # Phase 15 R8. A write THROUGH an unmanaged `ptr T` also flags hePtrFamily
       # (same heap store as ref; sevHint, non-halting).
       if refSV.kind == svPtr:

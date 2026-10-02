@@ -77,8 +77,9 @@ proc isModuleGlobal*(n: NimNode): bool =
 
 proc byRefName*(n: NimNode): string =
   ## RFC-0005 S8ba. The IR name of a by-reference base (`markByRef`), or ""
-  ## when `n` is not one.
-  if n.kind != nnkSym: return ""
+  ## when `n` is not one. RFC-0005 S8bd: a mark is a symbol, or a node with
+  ## no children (`markByRef` of an element or a call result).
+  if n.kind != nnkSym and n.len != 0: return ""
   let li = n.lineInfoObj
   if li.column != byRefMarkColumn or li.line <= 0: return ""
   "__byref_" & $li.line
@@ -90,7 +91,10 @@ proc markByRef*(base: NimNode): NimNode =
   ## `var` formal) reads and writes that cell through the ref the caller
   ## evaluated at the call. nil when the counter is spent (the line field
   ## holds the number).
-  if base.kind != nnkSym or byRefCounter >= 65000: return nil
+  ## RFC-0005 S8bd: a base that is not a symbol (`a[i]`, `getBox()`) is
+  ## marked as a copy of its own node without its children: it keeps the
+  ## node's type, and names nothing of the caller's.
+  if byRefCounter >= 65000: return nil
   inc byRefCounter
   result = copyNimNode(base)
   result.setLineInfo(base.lineInfoObj.filename, byRefCounter, byRefMarkColumn)

@@ -933,7 +933,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ba (temporaries bound, seq[distinct], len <= high(int),
     ## by-reference heap actuals, split axioms built once). Provisional
     ## 200.
-    check symexWalkerVersion == "200"
+    ## RFC-0005 S8bd (bit-vector offset links, seq[distinct] witnesses,
+    ## the heap budget bounds a chain, by-reference elements, call results
+    ## and generic callees). Provisional 204.
+    check symexWalkerVersion == "204"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -234,12 +234,13 @@ suite "S8ba (2): a seq of a distinct type is modelled":
     discard clean(addStr, "as", sxSat)
     discard clean(addF, "af", sxSat)
 
-  test "a seq[distinct] parameter stays a scoped witness decline":
+  test "a seq[distinct] parameter has a witness (RFC-0005 S8bd)":
+    ## S8ba pinned this as a scoped `feUnsupportedWitnessType` decline;
+    ## S8bd renders it (`tsymex_rfc0005_s8bd_remainder.nim`).
     let r = symexFind(dParam, tLabel("dp"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedWitnessType)
-    check not r.errors.hasKind(weInternalWalkerFault)
+    check r.status == sxSat
+    check r.errors.len == 0
 
   test "nim":
     var s = @[Meters(1)]
@@ -413,8 +414,6 @@ proc sutHeapTupField(k: int) =
   if t.b.x == k and k != 5: symexTarget("ht_dead")
 
 proc sutHeapArrElem(k: int) =
-  ## The ref is an array element: not a shape the specialisation spells,
-  ## so S8au's decline stands.
   var a = [Box(x: 0)]
   gBox = a[0]
   setXG(a[0].x, k)
@@ -460,24 +459,24 @@ suite "S8ba (4): a heap cell the callee also reaches is passed by reference":
   test "a global root":
     discard clean(sutHeapDirect, "hd", sxSat)
     discard clean(sutHeapDirect, "hd_dead", sxUnsat)
-  # These two paths make more than the default eight dereferences
-  # (`maxHeapDepth`, which declines them as `heDepthExhausted`); the
-  # budget is raised so the verdict itself is pinned.
-  const deep = SymexSettings(budget: ResourceBudget(maxHeapDepth: 32))
+  # RFC-0005 S8bd: these paths made more than the default eight
+  # dereferences and declined as `heDepthExhausted` until `maxHeapDepth`
+  # bounded a chain's depth rather than the count; they are pinned at the
+  # default budget.
   test "a rebind in the callee does not move the address":
-    discard clean(sutHeapRebind, "hr", sxSat, deep)
-    discard clean(sutHeapRebind, "hr_dead", sxUnsat, deep)
+    discard clean(sutHeapRebind, "hr", sxSat)
+    discard clean(sutHeapRebind, "hr_dead", sxUnsat)
   test "a cell behind two refs":
-    discard clean(sutHeapNested, "hn", sxSat, deep)
-    discard clean(sutHeapNested, "hn_dead", sxUnsat, deep)
+    discard clean(sutHeapNested, "hn", sxSat)
+    discard clean(sutHeapNested, "hn_dead", sxUnsat)
   test "a ref held in a value field":
-    discard clean(sutHeapTupField, "ht", sxSat, deep)
-    discard clean(sutHeapTupField, "ht_dead", sxUnsat, deep)
-  test "a shape it cannot pass still declines":
-    let r = symexFind(sutHeapArrElem, tLabel("he_dead"), deep)
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
+    discard clean(sutHeapTupField, "ht", sxSat)
+    discard clean(sutHeapTupField, "ht_dead", sxUnsat)
+  test "an array element is passed by reference (RFC-0005 S8bd)":
+    ## S8ba pinned this as S8au's `feUnsupportedOp` decline; S8bd passes
+    ## an element's ref (`tsymex_rfc0005_s8bd_remainder.nim` pins the
+    ## shapes that still decline).
+    discard clean(sutHeapArrElem, "he_dead", sxUnsat)
 
 # ---- (5) split term order -------------------------------------------------------
 

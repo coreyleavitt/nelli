@@ -3255,6 +3255,9 @@ proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
   ## in is that node's type); a `var` formal's own indirection is not one.
   var t = lv
   while true:
+    # RFC-0005 S8bd: a by-reference base marked from an element or a call
+    # result (`markByRef`) is a root, as a marked symbol is.
+    if t.kind != nnkSym and t.len == 0 and byRefName(t).len > 0: return t
     case t.kind
     of nnkSym: return t
     of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenAddr:
@@ -3269,12 +3272,63 @@ proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
       t = t[^1]
     else: return nil
 
+proc byRefRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
+  ## RFC-0005 S8bd. `lvalueRoot`, except that a lvalue reached through a
+  ## ref a call returns (`getBox().x`) is rooted at that call: passed by
+  ## reference, the call is evaluated once, before the callee runs, and the
+  ## cell is the one its ref addresses. (A write-back would evaluate the
+  ## call a second time, so `lvalueRoot` has no root for it.)
+  result = lvalueRoot(lv, heapSteps)
+  if result != nil: return
+  heapSteps.setLen 0
+  var t = lv
+  while true:
+    case t.kind
+    of nnkDotExpr, nnkCheckedFieldExpr, nnkHiddenAddr:
+      if t.len == 0: return nil
+      t = t[0]
+    of nnkDerefExpr, nnkHiddenDeref:
+      if t.len == 0 or isVarIndirection(t): return nil
+      heapSteps.add t
+      t = t[0]
+      if t.kind in {nnkCall, nnkCommand} and t.len > 0 and
+         t[0].kind == nnkSym and isUserCallee(t[0]):
+        return t
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return nil
+      t = t[^1]
+    else: return nil
+
 proc mentionsSym(n, sym: NimNode): bool =
   ## RFC-0005 S8ac. True when `sym` (by symbol identity) occurs in `n`.
   if n.kind == nnkSym: return containsSym(@[sym], n)
   for c in n:
     if mentionsSym(c, sym): return true
   false
+
+proc formalInBody(impl, f: NimNode): NimNode =
+  ## RFC-0005 S8bd. The symbol the body of `impl` uses for its formal `f`.
+  ## It is `f` itself, except in a generic instance, whose formal list
+  ## keeps the generic's symbols while its body uses the instance's: there
+  ## it is the body's one parameter symbol of `f`'s name (a lambda's own
+  ## parameters, inside the body, are not searched). nil when more than
+  ## one symbol of that name is found. (S8an's `ptrFormalStaysLocal` read
+  ## a generic callee's body with the formal list's symbol, found no use of
+  ## it, and took an escaping pointer for a local one: a false `sxSat`.)
+  if f.isNil or mentionsSym(impl[6], f): return f
+  var found: NimNode = nil
+  var ambiguous = false
+  proc scan(n: NimNode) =
+    if n.kind == nnkSym:
+      if symKind(n) == nskParam and macros.strVal(n) == macros.strVal(f):
+        if found.isNil: found = n
+        elif not containsSym(@[found], n): ambiguous = true
+      return
+    if n.kind in RoutineNodes: return
+    for c in n: scan(c)
+  scan(impl[6])
+  if ambiguous: return nil
+  if found.isNil: f else: found
 
 proc objectInherits(t: NimNode): bool =
   ## RFC-0005 S8ac. True when object type `t` takes part in inheritance (it
@@ -3496,6 +3550,9 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
           return false
       inc k
   if fsym == nil or fsym.kind != nnkSym: return false
+  # RFC-0005 S8bd: the body's own symbol for the formal (`formalInBody`).
+  fsym = formalInBody(impl, fsym)
+  if fsym == nil: return false
   if isVarF:
     # RFC-0005 S8au: a `var ptr` formal's every use is spelled
     # `nnkHiddenDeref(p)` (the caller's pointer variable). Read without
@@ -3646,7 +3703,7 @@ proc substByRefImpl(impl: NimNode; subs: seq[ByRefSub]): NimNode =
   var bd = impl[6]
   for b in subs:
     let fs = byRefFormalSym(impl, b.idx)
-    bd = substByRefBody(bd, fs.f, b)
+    bd = substByRefBody(bd, formalInBody(impl, fs.f), b)
   result[6] = bd
 
 proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
@@ -3666,10 +3723,15 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   ## every use of which is replaced). `actual` is the argument as written
   ## (`nnkHiddenAddr(lv)`, or `addr lv` when `viaAddr`). `idx` is -1 when
   ## the lvalue cannot be passed this way.
+  ##
+  ## RFC-0005 S8bd: the ref may also be an element (`a[i].x`; the index is
+  ## read once, with the ref, before the call) or a user call's result
+  ## (`getBox().x`, called once), and the callee may be generic: the
+  ## specialisation is made of the instantiation (`ensureProcRegistered`).
   result.idx = -1
   if calleeSym.kind != nnkSym: return
   let impl = resolveRoutineImpl(calleeSym)
-  if impl == nil or hasGenericParams(impl): return
+  if impl == nil: return
   let fs = byRefFormalSym(impl, idx)
   if not fs.ok or fs.isPtr != viaAddr: return
   var fields: seq[string]
@@ -3686,6 +3748,18 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
     if t[0].kind == nnkSym: t[0]
     elif t[0].kind == nnkDotExpr and t[0].len == 2 and t[0][1].kind == nnkSym:
       t[0][1]
+    elif t[0].kind == nnkBracketExpr or
+         (t[0].kind != nnkSym and t[0].len == 0 and byRefName(t[0]).len > 0):
+      t[0]   ## RFC-0005 S8bd: marked as itself (`markByRef`)
+    elif t[0].kind in {nnkCall, nnkCommand} and t[0].len > 0 and
+         t[0][0].kind == nnkSym and isUserCallee(t[0][0]):
+      # RFC-0005 S8bd: a call's result is named by the callee's own
+      # `result` symbol, which has the type the call returns.
+      let ci = resolveRoutineImpl(t[0][0])
+      if ci != nil and ci.len > 7 and ci[7].kind == nnkSym and
+         sameType(ci[7].getTypeInst, t[0].getTypeInst):
+        ci[7]
+      else: nil
     else: nil
   if src.isNil: return
   let mk = markByRef(src)
@@ -3709,7 +3783,9 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   for k in countdown(fields.high, 0): path.add "." & fields[k]
   b.keyPart = (if fs.isPtr: "p" else: "v") & byRefTypeKey(t[0]) & "/" &
               byRefTypeKey(t) & path
-  if mentionsSym(substByRefBody(impl[6], fs.f, b), fs.f): return
+  # RFC-0005 S8bd: the body's own symbol for the formal (`formalInBody`).
+  let f = formalInBody(impl, fs.f)
+  if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
@@ -3772,9 +3848,13 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         for c in addrCells:
           if c.key == scopedRepr(addrLv): break byRef
         var seen: seq[string]
-        if root.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen) or
-           addrActualMayAlias(n, i, addrLv, root, heapSteps) or
-           outerReachesCell(outerOf(), heapSteps) == nil:
+        # RFC-0005 S8bd: a lvalue reached through a call's ref is rooted
+        # at the call (`byRefRoot`).
+        var brSteps: seq[NimNode]
+        let brRoot = byRefRoot(addrLv, brSteps)
+        if brRoot.isNil or not ptrFormalStaysLocal(calleeSym, i - 1, seen) or
+           addrActualMayAlias(n, i, addrLv, brRoot, brSteps) or
+           outerReachesCell(outerOf(), brSteps) == nil:
           break byRef
         let b = byRefSub(calleeSym, i - 1, addrLv, n[i], true)
         if b.idx < 0: break byRef
@@ -3836,7 +3916,9 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       writeBacks.add mkBlock(wbPre & @[w])
       argIRs.add mkVar(cell)
       continue
-    var ir = parseExpr(n[i], preamble, ctx)
+    # RFC-0005 S8bd: a by-reference actual is evaluated once, as its base
+    # (below); the lvalue itself is lowered only when it is not one.
+    var byRefTaken = false
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
@@ -3846,7 +3928,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         # gates as the write-back below, in its order.
         if lv.kind == nnkSym: break byRef
         var heapSteps: seq[NimNode]
-        let root = lvalueRoot(lv, heapSteps)
+        let root = byRefRoot(lv, heapSteps)   ## RFC-0005 S8bd
         if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps) or
            outerReachesCell(outerOf(), heapSteps) == nil:
           break byRef
@@ -3854,7 +3936,12 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         if b.idx < 0: break byRef
         byRefs.add b
         argIRs.add parseExpr(b.base, preamble, ctx)
-        continue
+        byRefTaken = true
+    if byRefTaken: continue
+    var ir = parseExpr(n[i], preamble, ctx)
+    if n[i].kind == nnkHiddenAddr and n[i].len == 1:
+      var lv = n[i][0]
+      if isVarIndirection(lv): lv = lv[0]
       block:
         var syms: seq[NimNode]
         lvalueVarSyms(lv, syms)
@@ -4010,6 +4097,10 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   mkVar(synth)
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  # RFC-0005 S8bd: a by-reference base marked from an element or a call
+  # result (`markByRef`) is its parameter, as a marked symbol is.
+  if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
+    return mkVar(byRefName(n))
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
     mkIntLit(n.intVal)
@@ -11569,7 +11660,8 @@ proc parseStmt*(n: NimNode): IRStmt =
 proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =
                        initTable[string, NimNode](),
-                     instTy: NimNode = nil): ProcSig
+                     instTy: NimNode = nil;
+                     byRef: seq[ByRefSub] = @[]): ProcSig
 
 # ---- Phase 15 G6: stdlib concept membership (trust boundary) ---------------
 #
@@ -11997,9 +12089,12 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # by the formals it replaces and the shape of each lvalue (its base type
   # and field path), not by the caller's variable. A recursive call that
   # passes the same shape on reaches this key while it is being parsed.
+  # RFC-0005 S8bd: the key of a generic callee's specialisation extends its
+  # instantiation's key, so each instantiation has its own; its body is
+  # specialised after monomorphisation (`parseCalleeImpl`).
   if byRef.len > 0:
     for b in byRef: key.add "#byref" & $b.idx & ":" & b.keyPart
-    if key notin ctx.procs and key notin ctx.parsing:
+    if key notin ctx.procs and key notin ctx.parsing and typeSubst.len == 0:
       impl = substByRefImpl(impl, byRef)
   if key in ctx.procs or key in ctx.parsing:
     return key  ## already known, or actively being parsed (mutual-recursion)
@@ -12020,8 +12115,10 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # and trivially never exceeds the cap.
   let cap = ctx.maxInstantiationsPerProc
   # RFC-0005 S8ba: a by-reference specialisation of a non-generic routine is
-  # not an instantiation (`byRefSub` refuses generic callees).
-  if cap > 0 and byRef.len == 0:
+  # not an instantiation. RFC-0005 S8bd: one of a generic routine is (its
+  # own body, registered once per instantiation and lvalue shape), and
+  # counts against the cap.
+  if cap > 0 and (byRef.len == 0 or typeSubst.len > 0):
     # Base-proc identity must be STABLE across instantiations of the SAME
     # generic, so the per-proc counter actually accumulates. `symBodyHash`
     # (used by `bodyHashPart` for the instKey) is per-INSTANTIATION (each
@@ -12104,7 +12201,7 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # `instantiatedFormalTypes`).
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
-    else: nil)
+    else: nil, byRef)
   sig.captures = captures
   # RFC-0005 S8ba: each by-reference formal's slot holds the ref its lvalue
   # is reached through, under the name the specialised body reads.
@@ -12152,7 +12249,8 @@ proc typedFormal(mono, inst: NimNode): NimNode =
 proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
                      typeSubst: Table[string, NimNode] =
                        initTable[string, NimNode](),
-                     instTy: NimNode = nil): ProcSig =
+                     instTy: NimNode = nil;
+                     byRef: seq[ByRefSub] = @[]): ProcSig =
   ## Build a `ProcSig` from a callee's `nnkProcDef`. Recursively parses
   ## the body; the parsing-set in `ctx` short-circuits mutual recursion.
   ## For generic procs, `typeSubst` carries `T → concreteTypeNode`
@@ -12161,8 +12259,13 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   ## sole caller (`ensureProcRegistered`, via `resolveRoutineImpl`) — a
   ## membership-only assertion, so it routes onto `walkableRoutineKinds`.
   impl.expectKind walkableRoutineKinds
-  let monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
+  var monoImpl = if typeSubst.len > 0: monomorphize(impl, typeSubst)
                  else: impl
+  # RFC-0005 S8bd: a generic callee is specialised to its by-reference
+  # formals (`ByRefSub`) once monomorphised, so the lvalue the caller
+  # passes (already concrete) is not rewritten with the type parameters.
+  if byRef.len > 0 and typeSubst.len > 0:
+    monoImpl = substByRefImpl(monoImpl, byRef)
   # Phase 15 G6: capture concept constraints + validate stdlib conformance.
   # `resolveGenericDescriptor(impl)` (RFC-parser-normalization C2) resolves
   # each param on the ORIGINAL (pre-monomorphize) impl. For each param whose

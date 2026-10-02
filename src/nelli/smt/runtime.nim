@@ -8269,44 +8269,48 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
   ## element type to wrap/select with the right typed handle.
-  case sv.seqElemTy.kind
+  ## RFC-0005 S8bd: on the CELL type (`seqCellTy`): a `seq[distinct T]`
+  ## holds `T`'s sort and renders as `T`'s leaves, converted back by the
+  ## reader (`emitTyAndReader`).
+  let cellTy = seqCellTy(sv.seqElemTy)
+  case cellTy.kind
   of itInt:
-    case sv.seqElemTy.width
+    case cellTy.width
     of 8:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 16:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 32:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 64:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
       raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-        "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
+        "extractSeqElements: unsupported int width " & $cellTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
       sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
@@ -8336,7 +8340,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     discard
   else:
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-      "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
+      "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal) =
@@ -10248,7 +10252,7 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
     noteQueryRLimitBefore(result)   # RFC-0005 S8ac: before any check
 
 var intDivDeclKinds {.threadvar.}:
-    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub: int]
+    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub, bvadd: int]
   ## RFC-0005 S8ad. The `Z3_decl_kind` ordinals `divRangeFacts` matches on
   ## (Int `div` and `mod`, unsigned and signed `bv2int`, `bvneg`, `bvsub`),
   ## read off
@@ -10257,6 +10261,21 @@ var intDivDeclKinds {.threadvar.}:
   ## `bv2int` that Z3 expands (to an `ite` over the unsigned one, as Z3 5.1
   ## does) has the `ite`'s kind; `divRangeFacts` only matches it with one
   ## argument, which an `ite` never has, and meets the unsigned one inside.
+  ## RFC-0005 S8bd: and `bvadd`, for `bvOffsetLinks`.
+
+proc ensureIntDivDeclKinds(ctx: Z3Context) =
+  if intDivDeclKinds.ready: return
+  proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
+  let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
+  let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
+  intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
+    imod: kindOf(ctx, (x mod y).raw),
+    bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
+    sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
+    bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw),
+    bvadd: kindOf(ctx, (v + v).raw))
 
 proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8ad. Linear bounds on every Int quotient `e = a div b` and
@@ -10308,18 +10327,10 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## start`, UNSAT) neither 5.1 nor 4.13.4 refuted it within 40M steps;
   ## with this pair it is 0.45M offline. Linking `bv2int(y + 1)` to
   ## `bv2int(y)` (and likewise for `-`, `*`, shifts) did not decide it
-  ## and made other queries dearer, so it is not asserted.
-  if not intDivDeclKinds.ready:
-    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
-      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
-    let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
-    let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
-    let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
-    intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
-      imod: kindOf(ctx, (x mod y).raw),
-      bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
-      sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
-      bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw))
+  ## and made other queries dearer, so it is not asserted. (RFC-0005 S8bd:
+  ## it is, for a `+`/`-` numeral, between two views the query already
+  ## holds -- `bvOffsetLinks`.)
+  ensureIntDivDeclKinds(ctx)
   let kinds = intDivDeclKinds
   let (idiv, imod) = (kinds.idiv, kinds.imod)
   let zero = mkInt(ctx, 0)
@@ -10415,6 +10426,112 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
                        (one <= e) and (e <= zero - a))
     result.add implies((b <= zero - two) and (a < zero), twoE <= one - a)
 
+proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bd. For every Int view `bv2int(x + c)` or `bv2int(x - c)`
+  ## in `roots` (`c` a bit-vector numeral, `bvadd` in either operand
+  ## order) whose operand's own view `bv2int(x)` is in `roots` too, read
+  ## the same way (unsigned, or Z3's one-argument signed `bv2int` where it
+  ## has one), the exact two's-complement link between the two views, at
+  ## width W:
+  ##   unsigned:  ubv2int(x + c) == (let v = ubv2int(x) + c;
+  ##                                 if v >= 2^W: v - 2^W else: v)
+  ##              ubv2int(x - c) == (let v = ubv2int(x) - c;
+  ##                                 if v < 0: v + 2^W else: v)
+  ##   signed:    sbv2int(x +- c) == (let v = sbv2int(x) +- c;
+  ##                                  if v > high: v - 2^W
+  ##                                  elif v < low: v + 2^W else: v)
+  ## with `c` read the same way as `x`. Each is a theorem of bit-vector
+  ## arithmetic (a definition of the wrap, not a constraint on the input),
+  ## so asserting them beside the query leaves its models as they were.
+  ## `tests/tsymex_rfc0005_s8bd_remainder.nim` checks every one against
+  ## Z3's own `bv2int` on a grid of numerals.
+  ##
+  ## Why: a string index `i` that is a bit-vector (an `int` parameter whose
+  ## `i + 1` can overflow) meets `s.len` through two Int views, `bv2int(i)`
+  ## (`i < s.len`) and `bv2int(i + 1)` (`i + 1 > s.len`), and Z3 relates
+  ## the two only by bit-blasting the conversion. `i >= 0 and i < s.len and
+  ## s[i] == 'a' and i + 1 > s.len` ran ~41M units to `sxUnknown`
+  ## (`beSolverUndef`) on both Z3 versions, in both integer encodings; the
+  ## character read was not the cost (without it, the same). The label
+  ## query replayed offline from its SMT-LIB text decides in 0.77M units
+  ## on 5.1 and 2.77M on 4.13.4, but in the walker's context it ran past
+  ## the whole budget; with this link, 2.8k and 4.0k offline.
+  ##
+  ## Only a pair whose both views are in the query is linked. RFC-0005 S8aj
+  ## measured the general link (`bv2int(y + 1)` to a `bv2int(y)` the query
+  ## did not hold) and rejected it: `(start + y) div (y + 1) > start` went
+  ## from 6.6M to 31.6M units on 5.1. There `y` is only compared as a
+  ## bit-vector (`y > 1`), so its Int view is new to the query, and the
+  ## link would bring it in; here both views are already terms Z3 must
+  ## reconcile, and the link states how.
+  ensureIntDivDeclKinds(ctx)
+  let kinds = intDivDeclKinds
+  let signedKind = kinds.sbv2int != kinds.bv2nat
+  var viewed: HashSet[(int, bool)]
+  var views: seq[tuple[t, arg: Z3AnyAst, signed: bool]]
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and (k == kinds.bv2nat or (signedKind and k == kinds.sbv2int)):
+      let signed = signedKind and k == kinds.sbv2int
+      viewed.incl (astId(ctx, args[0].raw), signed)
+      views.add (t: t, arg: args[0], signed: signed)
+  if views.len < 2: return
+  let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+  proc intText(text: string): Z3Int =
+    wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, intSort))
+  proc pow2(e: int): string =
+    ## 2^e as decimal text, 1 <= e <= 64.
+    if e >= 64: "18446744073709551616" else: $(1'u64 shl e)
+  for v in views:
+    if getAstKind(v.arg) != akApp: continue
+    let (d, xs) = unpackApp(v.arg)
+    if xs.len != 2: continue
+    let ak = ord(Z3_get_decl_kind(ctx.raw, d))
+    var x, c: Z3AnyAst
+    var plus: bool
+    if ak == kinds.bvadd and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], true)
+    elif ak == kinds.bvadd and isNumeralAst(ctx, xs[0].raw):
+      (x, c, plus) = (xs[1], xs[0], true)
+    elif ak == kinds.bvsub and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], false)
+    else: continue
+    if isNumeralAst(ctx, x.raw): continue
+    if (astId(ctx, x.raw), v.signed) notin viewed: continue
+    let w = int(Z3_get_bv_sort_size(ctx.raw,
+                  ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+    if w < 1 or w > 64: continue
+    let cu = parseBiggestUInt($Z3_get_numeral_string(ctx.raw, c.raw))
+    let cText =
+      if v.signed and cu >= (1'u64 shl (w - 1)):
+        "-" & (if w == 64: $((not cu) + 1) else: $((1'u64 shl w) - cu))
+      else: $cu
+    let xInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw,
+                                                         v.signed))
+    let tInt = wrap[Z3Int](ctx, v.t.raw)
+    let cInt = intText(cText)
+    let span = intText(pow2(w))
+    let sum = if plus: xInt + cInt else: xInt - cInt
+    if v.signed:
+      let hi = intText($((1'u64 shl (w - 1)) - 1))
+      let lo = intText("-" & pow2(w - 1))
+      result.add tInt == ite(sum > hi, sum - span,
+                             ite(sum < lo, sum + span, sum))
+    else:
+      let zero = intText("0")
+      result.add tInt == ite(sum >= span, sum - span,
+                             ite(sum < zero, sum + span, sum))
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -10503,7 +10620,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8ad: every step decides the query with the linear bounds of
   # its Int quotients beside it (`divRangeFacts`): theorems, so the models
   # are the query's own.
-  let rootsIn = @query & divRangeFacts(ctx, query)
+  # RFC-0005 S8bd: and with the exact link between the Int views of `x`
+  # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
+  let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()

@@ -1118,6 +1118,39 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
       let seqTy = newTree(nnkBracketExpr, stdName("seq"), elemTyNode)
       (seqTy, newCall(newTree(nnkBracketExpr, stdName("newSeq"), elemTyNode), newLit(0)))
+    elif ty.seqElemTy.kind == itDistinct:
+      # RFC-0005 S8bd. A `seq[D]`, `D` a chain of `distinct` over an int or
+      # float (`isRenderableSeqElemTy`): the cells hold the base
+      # (`seqCellTy`, S8ba), so they are read as the base seq, and each
+      # element is converted back through the chain, innermost first
+      # (`Km(Meters(int(x)))`). Every conversion keeps the value.
+      let cell = seqCellTy(ty.seqElemTy)
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      let (_, baseReader) = emitTyAndReader(tSeq(cell), path, witId)
+      let (cellTyNode, _) = emitTyAndReader(cell, path & ".0", witId)
+      let raw = genSym(nskLet, "rawSeq")
+      let res = genSym(nskVar, "distinctSeq")
+      let k = genSym(nskForVar, "k")
+      proc conv(t: IRType; x: NimNode): NimNode =
+        if t.kind == itDistinct:
+          newCall(userTypeName(t, t.distinctName), conv(t.distinctBase, x))
+        else:
+          newCall(cellTyNode, x)
+      let elemConv = conv(ty.seqElemTy, newTree(nnkBracketExpr, raw, k))
+      # System's `len` and `..<`, bound here (RFC-0005 S8e: the caller's
+      # scope may shadow either).
+      let lenCall = newCall(bindSym"len", raw)
+      let upTo = bindSym"..<"
+      let newSeqCall = newCall(newTree(nnkBracketExpr, stdName("newSeq"),
+                                       elemTyNode), copyNimTree(lenCall))
+      let reader = quote do:
+        block:
+          let `raw` = `baseReader`
+          var `res` = `newSeqCall`
+          for `k` in `upTo`(0, `lenCall`):
+            `res`[`k`] = `elemConv`
+          `res`
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode), reader)
     # Phase 5 cycle 1: only seq[int] tested; specialised reader.
     elif ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
        ty.seqElemTy.width == 64:
@@ -1890,6 +1923,9 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
       case ty.seqElemTy.kind
       of itInt, itFloat32, itFloat64: wfFaithful
       of itRef: wf(ty.seqElemTy)   ## RFC-0005 S8h
+      of itDistinct:   ## RFC-0005 S8bd: the base seq, converted back
+        if isRenderableSeqElemTy(ty.seqElemTy): wfFaithful
+        else: wfUnexecutable
       else: wfUnexecutable   ## the reader's defensive `error()` arm
   of itTable:   # RFC-0005 S8z: every renderable shape
     if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): wfFaithful

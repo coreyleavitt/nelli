@@ -202,7 +202,23 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "200"
+const symexWalkerVersion* = "204"
+  ## RFC-0005 S8bd (2026-10-02) — S8ba's remainder. Provisional 204.
+  ## (1) A bit-vector `i` whose Int views `bv2int(i)` and `bv2int(i +- c)`
+  ## both meet a length is linked by the exact two's-complement wrap
+  ## (`bvOffsetLinks`): `i < s.len and i + 1 > s.len` went from ~41M units
+  ## and `sxUnknown` to a decided `sxUnsat`. (2) A `seq` of a distinct
+  ## type has a witness (rendered and replayed); it was a scoped
+  ## `feUnsupportedWitnessType` decline. (3) `maxHeapDepth` bounds the depth
+  ## of a dereference chain (`heapChainDepth`), not the count of every
+  ## dereference on a path, which is held to `heapDerefsPerPathCap`: a SUT
+  ## that read one object nine times declined `heDepthExhausted` at the
+  ## default 8. (4) S8ba's by-reference specialisation takes an element's
+  ## ref (`a[i].x`, the index read once, before the call), a user call's
+  ## result (`getBox().x`, called once) and a generic callee (specialised
+  ## per instantiation); each was S8au's `feUnsupportedOp` decline. A
+  ## by-reference actual is lowered once, as its base.
+  ##
   ## RFC-0005 S8ba (2026-10-02) — S8au's remainder. Provisional 200.
   ## (1) Every declining arm that owns a result binds it (a seq index or
   ## pop on an unsupported receiver, a variant construct): the unbound

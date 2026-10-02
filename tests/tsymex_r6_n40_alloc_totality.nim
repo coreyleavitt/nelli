@@ -12,7 +12,7 @@
 ##
 ## This file pins the NEWLY-FOUND unguarded walk-time families the N40 spot
 ## check surfaced, plus the `unallocatableFieldIssue` FALSE NEGATIVE it closed
-## (a non-string-key `Table[int, string]` — ordinary Nim syntax — was
+## (a non-string-key `Table[float, string]` — ordinary Nim syntax — was
 ## previously an UNTAGGED `ValueError` crash in `allocateSym`'s `itTable` arm,
 ## not even a classified carrier):
 ##
@@ -44,7 +44,7 @@
 ##   4. `runtime_closures.nim`'s lambda RETURN sort allocation
 ##      (`buildClosure`'s own `retRep`) — same FINDING as #3.
 ##   5. The N39 predicate gap itself: a variant arm field of type
-##      `Table[int, string]` (bad KEY, not bad VALUE) — `unallocatableFieldIssue`
+##      `Table[float, string]` (bad KEY, not bad VALUE) — `unallocatableFieldIssue`
 ##      did not flag this prior to N40, so N39's own `isVariantConstructSym`/
 ##      `lowerVariantLit` guards silently let it through to the (pre-N40) raw
 ##      `ValueError` crash.
@@ -55,12 +55,17 @@
 ##
 ## Walker version: v103 -> v104 (a genuine verdict-surface change — see the
 ## per-family notes below for which shapes were empirically RED pre-fix).
+## ---- RFC-0005 S8ar -----------------------------------------------------------
+## S8ar backs every integer-like Table key and every integer-like, string or
+## float value, so this file's poison tables (`Table[int, string]`,
+## `Table[string, string]`) became modelled. Each was swapped for a shape
+## still unbacked: a `float` key and a `seq[int]` value.
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
 # =============================================================================
-# Family 1: N39 predicate gap -- Table[int, string] (bad KEY) variant arm field
+# Family 1: N39 predicate gap -- Table[float, string] (bad KEY) variant arm field
 # =============================================================================
 # Mirrors tests/tsymex_r6_n39_variant_field_alloc.nim's own VBadTable shape
 # exactly, substituting a bad-KEY Table for N39's bad-VALUE Table -- the
@@ -76,7 +81,7 @@ type
     ## N39's own `VBadTable` (bad VALUE type).
     case kind: VKind
     of vkGood: x: int
-    of vkBad: t: Table[int, string]
+    of vkBad: t: Table[float, string]
 
 proc n40SymTableKeyBlock(b: byte) =
   let k = if b == 1'u8: vkGood else: vkBad
@@ -102,13 +107,13 @@ proc n40LitTableKeyBlock(a: int) =
 
 type
   BadTableHeap = object
-    t: Table[int, string]
+    t: Table[float, string]
     n: int
 
 proc n40MkBadHeap(): ref BadTableHeap {.symexOpaque.} =
   discard
 
-proc n40MkBadTable(): Table[int, string] {.symexOpaque.} =
+proc n40MkBadTable(): Table[float, string] {.symexOpaque.} =
   discard
 
 proc n40HeapReadBlock() =
@@ -154,13 +159,13 @@ proc n40HeapWriteBlock() =
 proc n40ClosureParamBlock(n: int) =
   for i in 0 ..< 1:
     block:
-      let f = proc(t: Table[int, string]): int = n
+      let f = proc(t: Table[float, string]): int = n
       symexTarget("n40_closure_param_block")
 
 proc n40ClosureRetBlock(n: int) =
   for i in 0 ..< 1:
     block:
-      let g = proc(x: int): Table[int, string] = n40MkBadTable()
+      let g = proc(x: int): Table[float, string] = n40MkBadTable()
       symexTarget("n40_closure_ret_block")
 
 # =============================================================================
@@ -168,7 +173,7 @@ proc n40ClosureRetBlock(n: int) =
 # semantics -- unaffected by allocateSym's own totality.
 # =============================================================================
 
-proc n40ParamBoundaryTable(t: Table[int, string], y: int) =
+proc n40ParamBoundaryTable(t: Table[float, string], y: int) =
   if y == 42:
     symexTarget("n40_param_boundary_table")
 
@@ -199,7 +204,7 @@ proc n40PlainUnsat(x: int) =
   if x == 1 and x == 2:
     symexTarget("n40_plain_unsat")
 
-suite "symex N40 -- family 1: Table[int,string] (bad KEY) variant arm field":
+suite "symex N40 -- family 1: Table[float,string] (bad KEY) variant arm field":
 
   test "N40-1: symbolic-disc construction reaching an unsupported-KEY Table arm field -- honest sxUnknown, never a false sxUnsat":
     let r = symexFind(n40SymTableKeyBlock, tLabel("n40_sym_tablekey_block"))
@@ -268,7 +273,7 @@ suite "symex N40 -- family 4/5: lambda with an unallocatable param/return type":
 
 suite "symex N40 -- companion: param-boundary decline unchanged":
 
-  test "N40-7: a top-level Table[int,string] SUT param still whole-run-degrades via CR-2c's pre-existing witness demotion (feUnsupportedWitnessType, ONE error, unaffected by allocateSym's own totality)":
+  test "N40-7: a top-level Table[float,string] SUT param still whole-run-degrades via CR-2c's pre-existing witness demotion (feUnsupportedWitnessType, ONE error, unaffected by allocateSym's own totality)":
     ## A top-level param's type-tree is ALREADY intercepted by CR-2c's
     ## `demoteUnrenderableWitnessTy` before it ever reaches `allocateSym` as a
     ## raw `itTable` -- this test proves that pre-existing path is unaffected

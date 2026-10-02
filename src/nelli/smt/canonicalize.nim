@@ -202,8 +202,21 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "190"
-  ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
+const symexWalkerVersion* = "191"
+  ## RFC-0005 S8ar (2026-10-01) — S8ap's remainder; provisional number (the
+  ## channel assigns the final one at merge). A seq of the object's own ref
+  ## type classifies; `seq[string]` elements and `insert` are modelled;
+  ## value field chains rooted at a ref object's field (`p.inner.s.add v`)
+  ## write the field back; tuple / object / array / scalar-distinct fields
+  ## are tree-valued heap cells, zeroed by `new` and constructors; a Table
+  ## of any backed key (string or integer-like) and value (integer-like,
+  ## string, float) type is modelled and rendered; a ref pointee's
+  ## unrenderable container no longer demotes the parameter; the heap-depth
+  ## budget counts heap steps; a constant array index selects without a
+  ## merge; a distinct-over-composite store declines instead of building an
+  ## ill-sorted term. 190->191.
+  ##
+  ## RFC-0005 batch 1 (2026-10-01, walker 190) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional
   ## number, and land stacked as one integration branch under ONE walker
   ## number. Their bullets follow, newest work first; each names its

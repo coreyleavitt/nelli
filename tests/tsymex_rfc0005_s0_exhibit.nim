@@ -68,7 +68,14 @@ import nelli/smt/types
 import nelli/symex
 
 type
-  S0Dist = distinct int
+  S0Dist = object
+    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
+    ## (S8ar's stated decline); the `distinct` this was is a cell
+    ## value since S8ar.
+    x: int
+    case k: bool
+    of true: a: int
+    of false: discard
   S0DeadNode = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
     ## (a string field is read and written through its heap); a `distinct`

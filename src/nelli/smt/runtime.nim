@@ -2936,13 +2936,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     if ty.uninterpName.startsWith("__unsupported_witness:"):
       # N40: was `raise (ref SymexClassifiedDegradeError)` -- see
       # `allocDegrade`'s own doc comment for the totality design writeup.
-      allocDegrade(feUnsupportedWitnessType,
-        "unsupported witness shape `" &
-        ty.uninterpName.substr(len("__unsupported_witness:")) &
-        "`; the supported fragment is {seq[int64], seq[float64], " &
-        "seq[float32], seq[ref T], Table[string, int64], " &
-        "HashSet[int64]} plus scalar/tuple/array/object element or " &
-        "value types therein")
+      allocDegrade(feUnsupportedWitnessType, unsupportedWitnessMsg(
+        ty.uninterpName.substr(len("__unsupported_witness:"))))
       return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
     # RFC-0005 S8z: a proc-valued (`__closure`) slot the walker has no
     # `svClosure` for -- a closure-typed object field, a recursion-cut
@@ -5593,9 +5588,19 @@ proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## an ite chain over the positions (element `k` is Nim's index `lo + k`),
   ## under the caller's in-bounds conditions. A position whose index the
   ## index's type cannot hold is never selected.
+  ##
+  ## RFC-0005 S8ar: an index that folds to a position (a literal, `a[1]`)
+  ## selects that element with no merge. The ite chain merged every
+  ## element, and a merge of two seq values is `iteSV`'s havoc
+  ## (`feUnsupportedOpHavoc`), so `a[1].len` of an `array[N, seq[T]]` read
+  ## a fresh seq even at a constant index.
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
+  for k in 0 ..< elems.len:
+    let v = lo + int64(k)
+    if v < mn or v > mx: continue
+    if $simplify(symEq(idx, coerceIntLit(idx, v))) == "true": return elems[k]
   result = elems[0]
   for k in 1 ..< elems.len:
     let v = lo + int64(k)
@@ -5613,7 +5618,14 @@ proc arrayStore(elems: seq[SymVal]; idx: SymVal; lo: int64;
   for k in 0 ..< elems.len:
     let v = lo + int64(k)
     if v < mn or v > mx: result.add elems[k]
-    else: result.add iteSV(symEq(idx, coerceIntLit(idx, v)), val, elems[k])
+    else:
+      # RFC-0005 S8ar: a position the index folds to (or away from) takes
+      # the value (or keeps its own) with no merge -- see `arraySelect`.
+      let eq = symEq(idx, coerceIntLit(idx, v))
+      case $simplify(eq)
+      of "true": result.add val
+      of "false": result.add elems[k]
+      else: result.add iteSV(eq, val, elems[k])
 
 # Width-uniform BV arithmetic. Both operands must be the same width.
 template binBV(a, b: SymVal, op: untyped): SymVal =

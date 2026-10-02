@@ -62,7 +62,14 @@ proc ptrSut(p: ptr int) =
     symexTarget("ptrHit")
 
 type
-  LossyDist = distinct int
+  LossyDist = object
+    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
+    ## (S8ar's stated decline); the `distinct` this was is a cell
+    ## value since S8ar.
+    x: int
+    case k: bool
+    of true: a: int
+    of false: discard
   LossyBox = object
     n: int
     s: LossyDist   ## a field kind the logical heap does not model (S8h;

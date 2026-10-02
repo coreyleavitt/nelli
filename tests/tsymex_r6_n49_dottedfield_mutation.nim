@@ -53,6 +53,10 @@
 ## still reports `sxUnknown`, but now through the bare `insert`'s own
 ## lowering decline, not N49's (walker floor raised to 183; RFC-0005 batch 1
 ## lands it as 190).
+##
+## ---- Superseded further by RFC-0005 S8ar -----------------------------------
+## S8ar models `insert` (bare and dotted alike), so `mutatePlainFieldInsert`
+## reaches its target (`sxSat`).
 
 import std/[unittest, strutils]
 import nelli/symex
@@ -93,11 +97,10 @@ proc mutatePlainFieldDel(w: Widget, x: int) =
 
 proc mutatePlainFieldInsert(w: Widget, x: int) =
   ## Rider (code-symmetry pin): `.insert(v, i)` through a dotted-field
-  ## receiver. `.insert` stays classified-declined even for a bare-symbol
-  ## receiver (N14's own adjudication -- unbounded-shift modeling is out of
-  ## scope for this engine's doctrine), so the VERDICT here is unchanged
-  ## either way; this pin still exercises N49's own receiver-shape gate for
-  ## completeness/symmetry with the `.add`/`.del` pins above.
+  ## receiver. `.insert` was classified-declined even for a bare-symbol
+  ## receiver until RFC-0005 S8ar modelled it; this pin still exercises
+  ## N49's own receiver-shape gate for symmetry with the `.add`/`.del` pins
+  ## above.
   var w2 = w
   w2.items.insert(x, 0)
   symexTarget("plain_inserted")
@@ -154,11 +157,11 @@ suite "N49 -- dotted-field lvalue mutation":
     check r.status == sxSat
     for e in r.errors: check "N49" notin e.msg
 
-  test "rider: plain object dotted-field seq .insert() declines cleanly (no crash)":
-    ## Still `sxUnknown` after RFC-0005 S8ap -- now through the bare
-    ## `insert`'s own lowering decline (`feUnsupportedOp`), not N49's.
+  test "rider: plain object dotted-field seq .insert() is modelled (no crash)":
+    ## `sxUnknown` through RFC-0005 S8ap (the bare `insert`'s lowering
+    ## decline); RFC-0005 S8ar models `insert`.
     let r = symexFind(mutatePlainFieldInsert, tLabel("plain_inserted"))
-    check r.status == sxUnknown
+    check r.status == sxSat
     for e in r.errors: check "N49" notin e.msg
 
 suite "N49 -- regression: unaffected shapes":

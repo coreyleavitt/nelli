@@ -433,12 +433,15 @@ suite "S8ap (2): del/insert/incl/excl/[]= on a dotted field":
     discard run(dVSet, "dv_set", sxSat)
     discard run(dVSet, "dv_set_dead", sxUnsat)
 
-  test "o.s.insert takes the bare insert's IR and its decline":
+  test "o.s.insert takes the bare insert's IR":
+    ## RFC-0005 S8ar models `insert` (it was the bare arm's lowering
+    ## decline, which this pin shared): both now reach the target.
     let rb = symexFind(bareInsert, tLabel("bare_ins"))
     let rd = symexFind(dVInsert, tLabel("dv_ins"))
     checkpoint "bare " & $rb.status & " " & show(rb.errors)
     checkpoint "dotted " & $rd.status & " " & show(rd.errors)
     check rd.status == rb.status
+    check rd.status == sxSat
     check not rd.errors.anyIt("N49" in it.msg)
     for e in rb.errors:
       if e.severity == sevError: check rd.errors.hasKind(e.kind)

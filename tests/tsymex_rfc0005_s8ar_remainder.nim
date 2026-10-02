@@ -618,3 +618,167 @@ suite "S8ar (4): a value chain rooted at a ref object's field":
 
   test "an alias sees the write":
     discard run(dAlias, "d_alias_dead", sxUnsat)
+
+type
+  WKind = enum wkA, wkB
+  WVar = ref object
+    case kind: WKind
+    of wkA: xs: seq[int]
+    of wkB: hs: HashSet[int8]
+  WHolder = ref object
+    tp: (seq[int], int)
+    a2: array[2, seq[int]]
+    tt: Table[int, int]
+    hs: HashSet[int8]
+  ByValVar = object
+    case kind: WKind
+    of wkA: a: int
+    of wkB: b: bool
+  DSeq = distinct seq[int]
+  DeclHolder = ref object
+    bv: ByValVar
+    n: int
+  DeclHolder2 = ref object
+    ds: DSeq
+    n: int
+
+proc wfTree(p: WHolder) =
+  if p == nil: return
+  if p.tp[0].len < 0 or p.tp[0].len > 1024: symexTarget("wf_tp_dead")
+  if p.a2[1].len < 0: symexTarget("wf_a2_dead")
+  if p.tt.len == 0 and 3 in p.tt: symexTarget("wf_tt_dead")
+  if p.hs.len > 256: symexTarget("wf_hs_dead")
+  if p.tp[0].len == 2 and p.a2[1].len == 1 and 3 in p.tt and p.hs.len == 256:
+    symexTarget("wf_tree")
+
+proc wfArm(p: WVar) =
+  if p == nil: return
+  if p.kind == wkA and p.xs.len < 0: symexTarget("wf_arm_dead")
+  if p.kind == wkB and p.hs.len > 256: symexTarget("wf_arm_set_dead")
+  if p.kind == wkA and p.xs.len == 3: symexTarget("wf_arm")
+
+proc wfWritten(p: WHolder, v: int) =
+  if p == nil: return
+  p.tp = (@[v], 1)
+  if p.tp[0].len != 1: symexTarget("wf_written_dead")
+
+proc declBV(p: DeclHolder) =
+  if p != nil and p.n == 1: symexTarget("decl_bv")
+
+proc declBVRead(p: DeclHolder) =
+  if p != nil and p.bv.kind == wkB: symexTarget("decl_bv_read")
+
+proc declDS(p: DeclHolder2) =
+  if p != nil and p.n == 1: symexTarget("decl_ds")
+
+proc declDSRead(p: DeclHolder2) =
+  if p == nil: return
+  let d = p.ds
+  if p.n == 2: symexTarget("decl_ds_read")
+
+proc declDSWrite(p: DeclHolder2) =
+  if p == nil: return
+  p.ds = DSeq(@[1])
+  if p.n == 2: symexTarget("decl_ds_write")
+
+type
+  DeclHolder3 = ref object
+    tc: (int, ByValVar)
+    n: int
+
+proc declTC(p: DeclHolder3) =
+  if p != nil and p.n == 1: symexTarget("decl_tc")
+
+proc declTCRead(p: DeclHolder3) =
+  if p == nil: return
+  let t = p.tc
+  if p.n == 2: symexTarget("decl_tc_read")
+
+proc declU8(t: Table[uint8, int]) =
+  if t.len == 1: symexTarget("decl_u8")
+
+suite "S8ar (10): every read of a cell asserts its well-formedness":
+  template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
+    block:
+      let r = symexFind(fn, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & " " & show(r.errors)
+      check r.status == want
+      check not r.errors.hasKind(weInternalWalkerFault)
+      r
+
+  test "tree parts: a nested seq, an array of seqs, a cell-keyed Table, a HashSet":
+    discard run(wfTree, "wf_tp_dead", sxUnsat)
+    discard run(wfTree, "wf_a2_dead", sxUnsat)
+    discard run(wfTree, "wf_tt_dead", sxUnsat)
+    discard run(wfTree, "wf_hs_dead", sxUnsat)
+    let r = run(wfTree, "wf_tree", sxSat)
+    if r.status == sxSat: check reproduces(wfTree(r.witness[0]), "wf_tree")
+
+  test "a ref variant's arm cells":
+    discard run(wfArm, "wf_arm_dead", sxUnsat)
+    discard run(wfArm, "wf_arm_set_dead", sxUnsat)
+    let r = run(wfArm, "wf_arm", sxSat)
+    if r.status == sxSat: check reproduces(wfArm(r.witness[0]), "wf_arm")
+
+  test "a written cell is the value the program built":
+    discard run(wfWritten, "wf_written_dead", sxUnsat)
+
+suite "S8ar: the declines that remain are scoped and stated":
+  test "a by-value case object field: the field, not the parameter":
+    let r = symexFind(declBV, tLabel("decl_bv"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat: check reproduces(declBV(r.witness[0]), "decl_bv")
+    let r2 = symexFind(declBVRead, tLabel("decl_bv_read"))
+    checkpoint $r2.status & " " & show(r2.errors)
+    check r2.status == sxUnknown
+    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
+                          "by-value case object" in it.msg)
+    check not r2.errors.hasKind(weInternalWalkerFault)
+
+  test "a distinct over a composite base: the field, not the parameter":
+    let r = symexFind(declDS, tLabel("decl_ds"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat: check reproduces(declDS(r.witness[0]), "decl_ds")
+    let r2 = symexFind(declDSRead, tLabel("decl_ds_read"))
+    checkpoint $r2.status & " " & show(r2.errors)
+    check r2.status == sxUnknown
+    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
+                          "distinct over a composite base" in it.msg)
+    let r3 = symexFind(declDSWrite, tLabel("decl_ds_write"))
+    checkpoint $r3.status & " " & show(r3.errors)
+    check r3.status == sxUnknown
+    check not r3.errors.hasKind(weInternalWalkerFault)   # an ill-sorted store before S8ar
+    check r3.errors.anyIt(it.kind == heUnsupportedPointeeRead and
+                          "distinct over a composite base" in it.msg)
+    check not r2.errors.hasKind(weInternalWalkerFault)
+
+  test "a tuple holding a by-value case object: the field, not the parameter":
+    let r = symexFind(declTC, tLabel("decl_tc"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxSat
+    if r.status == sxSat: check reproduces(declTC(r.witness[0]), "decl_tc")
+    # The read is a havoc (`scSpurious` only, no compound-sort decline), so
+    # the candidate is replay-gated (S10) and confirms: the target does not
+    # depend on the value read.
+    let r2 = symexFind(declTCRead, tLabel("decl_tc_read"))
+    checkpoint $r2.status & " " & show(r2.errors)
+    check r2.status == sxSat
+    if r2.status == sxSat:
+      check reproduces(declTCRead(r2.witness[0]), "decl_tc_read")
+    check r2.errors.anyIt(it.kind == heUnsupportedPointeeRead and
+                          "a part of it is not a heap cell value" in it.msg)
+    check not r2.errors.hasKind(seUnsupportedCompoundSortLeaf)
+    check not r2.errors.hasKind(weInternalWalkerFault)
+
+  test "a uint8-keyed Table parameter's witness (char-ambiguous)":
+    let r = symexFind(declU8, tLabel("decl_u8"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.anyIt(it.kind == feUnsupportedWitnessType and
+                         "8-bit unsigned" in it.msg)
+
+suite "S8ar: walker version floor":
+  test "walker version floor >= 191":
+    check parseInt(symexWalkerVersion) >= 191

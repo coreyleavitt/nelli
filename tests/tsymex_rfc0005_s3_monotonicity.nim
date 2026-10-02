@@ -150,7 +150,14 @@ template withPoisonedArm*(placement: static PoisonPlacement; poisonOn: bool;
 # `distinct` field read through a heap-deref'd `ref` (it was a `string`
 # field until RFC-0005 S8ap modelled string fields on the heap). Guarded
 # `p != nil` so the poison body itself never nil-derefs.
-type S3F1Dist = distinct int
+type S3F1Dist = object
+  ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
+  ## (S8ar's stated decline); the `distinct` this was is a cell
+  ## value since S8ar.
+  x: int
+  case k: bool
+  of true: a: int
+  of false: discard
 type S3F1Node = ref object
   s: S3F1Dist
 

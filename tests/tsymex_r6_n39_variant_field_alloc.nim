@@ -71,6 +71,11 @@
 ## the same commit as certification-accuracy hardening (mechanism argument,
 ## no isolable RED->GREEN flip observed). See `symexWalkerVersion`'s own
 ## doc comment (`canonicalize.nim`) for the full writeup.
+## ---- RFC-0005 S8ar -----------------------------------------------------------
+## S8ar backs every integer-like Table key and every integer-like, string or
+## float value, so this file's poison tables (`Table[int, string]`,
+## `Table[string, string]`) became modelled. Each was swapped for a shape
+## still unbacked: a `float` key and a `seq[int]` value.
 import std/[unittest, strutils, tables, sets]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -87,7 +92,7 @@ type
     ## type (only `Table[string, int]` is backed by `allocateSym`).
     case kind: VKind
     of vkGood: x: int
-    of vkBad: t: Table[string, string]
+    of vkBad: t: Table[string, seq[int]]
 
   VBadSet = object
     ## `vkBad`'s field classifies to `itSet` with an unsupported element

@@ -169,14 +169,10 @@ suite "symex RFC-chapulin-hardening M1 — seq[byte]/fixed-width-int witness rea
     check r.witness[0].a == @[42'u8]
     check r.witness[0].n == 7
 
-  test "M1-10 (regression): seq[string] element type still degrades to sxUnknown":
+  test "M1-10: a seq[string] param renders (RFC-0005 S8ar; it degraded before)":
     let r = symexFind(sutSeqStringStillUnknown, tLabel("seq_string_still_unknown"))
-    check r.status == sxUnknown
-    var sawKind = false
-    for e in r.errors:
-      if e.kind == feUnsupportedWitnessType and e.severity == sevError:
-        sawKind = true
-    check sawKind
+    check r.status == sxSat
+    for e in r.errors: check e.kind != feUnsupportedWitnessType
 
   test "M1-11 (regression): seq[Widget] (object element) still degrades to sxUnknown":
     let r = symexFind(sutSeqWidgetStillUnknown, tLabel("seq_widget_still_unknown"))

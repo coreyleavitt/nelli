@@ -298,6 +298,19 @@ proc heapCompoundTy(ty: IRType): bool =
     g != nil and g.kind in {itInt, itBool, itFloat32, itFloat64, itString}
   else: false
 
+proc heapStandInTy(ty: IRType): bool =
+  ## RFC-0005 S8ar. A value no cell holds, by a stated, scoped decline: a
+  ## by-value case object, a `distinct` over a composite base, and a tuple,
+  ## object or array with a part that is not a cell value (`heapCompoundTy`'s
+  ## docstring). Every read of such a cell is `liftHeapValue`'s
+  ## `heUnsupportedPointeeRead` (a fresh symbol) and every store
+  ## `heapCellStore`'s, so the cell's array holds no value of the type and
+  ## its sort is a stand-in (`heapValueSort`: Bool). Before S8ar the sort
+  ## derivation also recorded `seUnsupportedCompoundSortLeaf` for the same
+  ## access, and a store built an ill-sorted term.
+  ty != nil and not heapCompoundTy(ty) and
+    ty.kind in {itVariant, itMultiVariant, itDistinct, itTuple, itArray}
+
 proc heapWfTy(ty: IRType): bool =
   ## RFC-0005 S8ap. A heap value whose input cells carry a well-formedness
   ## fact (`heapCellWfConds`): the compound kinds and `string`.
@@ -473,6 +486,8 @@ proc heapValueSort(ctx: Z3Context, proto: SymVal, pointeeTy: IRType,
   ## interned and never showed this.
   if heapCompoundTy(pointeeTy):
     return ctx.checkErr Z3_get_sort(ctx.raw, svLeafAsts(proto, pointeeTy)[leaf])
+  if heapStandInTy(pointeeTy):   ## RFC-0005 S8ar
+    return ctx.checkErr Z3_mk_bool_sort(ctx.raw)
   ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(proto))
 
 proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
@@ -620,10 +635,24 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     # `allocateSym`'s init-side `pcOut` (the byte-faithful char-range /
     # length-ceiling well-formedness facts) -- so each read is a fresh,
     # wholly unconstrained symbol of the pointee's own type.
+    #
+    # RFC-0005 S8ar: the message states the scope. A by-value case object is
+    # not a cell value (`heapCompoundTy`: its fields depend on its
+    # discriminator, and the arm-keyed layout a REF case object has does not
+    # nest); neither is a tuple or array holding a part that is not one. The
+    # pre-S8ar text ("composite pointees land R3+") predated every compound
+    # cell.
+    let why =
+      if pointeeTy.kind in {itVariant, itMultiVariant}:
+        "a by-value case object is not a heap cell value: its fields " &
+          "depend on its discriminator"
+      elif pointeeTy.kind in {itTuple, itArray}:
+        "a part of it is not a heap cell value"
+      else:
+        "not a heap cell value"
     degradeAlloc(pointeeTy, heUnsupportedPointeeRead,
-      "deref of `ref/ptr " & $pointeeTy & "` (non-primitive pointee) " &
-      "not yet modeled (Cluster R R1 covers primitive pointees; " &
-      "composite pointees — ref object / seq[ref T] — land R3+)",
+      "deref of `ref/ptr " & $pointeeTy & "` not modeled: " & why &
+      " (RFC-0005 S8ar, scoped to this read)",
       "__liftHeapValueUnsupported")
 
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
@@ -730,6 +759,26 @@ proc heapCellStore(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
   ## `seUnsupportedCompoundSortLeaf` through `allocDegrade` (drained onto the
   ## path by the caller, as the scalar store's decline is) and each leaf
   ## stores a fresh term of its sort.
+  if heapStandInTy(valTy):
+    # RFC-0005 S8ar: a by-value case object, a distinct over a composite
+    # base, or an aggregate with a part that is neither, is not a cell value
+    # (`heapStandInTy`; a read of it is `liftHeapValue`'s stated decline).
+    # The scalar store below built an ill-sorted term for a distinct
+    # (`weInternalWalkerFault`) and `seUnsupportedCompoundSortLeaf` for the
+    # others. Declined the same way as the read, and the cell holds a fresh
+    # term of its sort.
+    let what =
+      case valTy.kind
+      of itDistinct: "a distinct over a composite base"
+      of itTuple, itArray: "a part of it is not a heap cell value"
+      else: "a by-value case object"
+    allocDegrade(heUnsupportedPointeeRead,
+      "heap store into a `" & $valTy & "` cell (" & what & ") not modeled")
+    let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, cell[0].arr.raw)
+    let fresh = freshOfSort(ctx,
+      ctx.checkErr Z3_get_array_sort_range(ctx.raw, arrSort))
+    return @[(cell[0].key, wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, cell[0].arr.raw, refAst.raw, fresh)))]
   if not heapCompoundTy(valTy):
     return @[(cell[0].key, wrap[Z3AnyAst](ctx,
       checkedStore(ctx, cell[0].arr.raw, refAst.raw, rawAnyAstOf(valSV))))]

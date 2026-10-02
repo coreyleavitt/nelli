@@ -99,12 +99,15 @@ proc sutSeqSeqInt(ws: seq[seq[int]], y: int) =
 
 # SUT 3: Table[string, string] — value type is not itInt(64, signed), hits
 # emitTyAndReader's itTable catch-all ("only Table[string, int] supported").
-proc sutTableStrStr(t: Table[string, string], y: int) =
+# RFC-0005 S8ar renders a string value; the value is now a `seq[int]`, which
+# no Table backs.
+proc sutTableStrStr(t: Table[string, seq[int]], y: int) =
   if y == 42:
     symexTarget("table_strstr_target")
 
-# SUT 4: Table[int, int] — key type is not itString.
-proc sutTableIntInt(t: Table[int, int], y: int) =
+# SUT 4: Table[int, int] — key type is not itString. RFC-0005 S8ar backs an
+# integer-like key; the key is now a `float`, which no Table backs.
+proc sutTableIntInt(t: Table[float, int], y: int) =
   if y == 42:
     symexTarget("table_intint_target")
 

@@ -61,7 +61,14 @@ proc sevErrorKinds(errs: seq[SymexErrorInfo]): seq[SymexErrorKind] =
 # ---- SUTs (module scope so the macro resolves them via getImpl) -------------
 
 type
-  S4Str = distinct string
+  S4Str = object
+    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
+    ## (S8ar's stated decline); the `distinct` this was is a cell
+    ## value since S8ar.
+    x: string
+    case k: bool
+    of true: a: int
+    of false: discard
   S4Node = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models
     ## (a string field read is the heap select itself). A `distinct string`
@@ -98,20 +105,20 @@ proc s4DeadFreshSymbol(p: S4Node, n: int) =
 ## precision, never soundness.
 proc s4DeadThroughValue(p: S4Node) =
   if p != nil:
-    let v = string(p.s)
+    let v = p.s.x
     if v == "abc" and v == "xyz":
       symexTarget("s4_dead_through_value")
 
 ## The two-read spelling of the same contradiction: a spurious candidate.
 proc s4TwoReadsSpurious(p: S4Node) =
   if p != nil:
-    if string(p.s) == "abc" and string(p.s) == "xyz":
+    if p.s.x == "abc" and p.s.x == "xyz":
       symexTarget("s4_two_reads_spurious")
 
 ## Reachable ONLY through the degraded read: a candidate, never a clean win.
 proc s4LiveThroughValue(p: S4Node) =
   if p != nil:
-    if string(p.s) == "hello":
+    if p.s.x == "hello":
       symexTarget("s4_live_through_value")
 
 ## §2.1's introduction invariant: two DIFFERENT cells are independent in
@@ -119,7 +126,7 @@ proc s4LiveThroughValue(p: S4Node) =
 ## two reads one Z3 constant and proved this unreachable (false sxUnsat).
 proc s4TwoCells(a, b: S4Node) =
   if a != nil and b != nil:
-    if string(a.s) != string(b.s):
+    if a.s.x != b.s.x:
       symexTarget("s4_two_cells")
 
 ## Same invariant, repeat hits of the site across loop iterations.
@@ -128,7 +135,7 @@ proc s4TwoCellsLoop(a, b: S4Node) =
     var first = ""
     var differ = false
     for i in 0 .. 1:
-      let cur = if i == 0: string(a.s) else: string(b.s)
+      let cur = if i == 0: a.s.x else: b.s.x
       if i == 0: first = cur
       elif cur != first: differ = true
     if differ:
@@ -159,9 +166,9 @@ suite "RFC-0005 S4 -- oracles":
       check not (s == "abc" and s == "xyz")
 
   test "oracle: two distinct cells CAN hold different strings (the two-cells target is reachable)":
-    let a = S4Node(s: S4Str("x"))
-    let b = S4Node(s: S4Str("y"))
-    check string(a.s) != string(b.s)
+    let a = S4Node(s: S4Str(x: "x"))
+    let b = S4Node(s: S4Str(x: "y"))
+    check a.s.x != b.s.x
 
 # =============================================================================
 # (a) the classification rows S4 wrote (types.nim `classOf`, rows marked S4)
@@ -257,14 +264,32 @@ suite "RFC-0005 S4 (c) -- introduction invariant: the fresh symbol carries no co
       if t.len == 0 or isCommentLine(t): continue
       if "heUnsupportedPointeeRead" in t: emitting.add t
     checkpoint($emitting)
-    check emitting.len == 1
-    check emitting[0].startsWith("degradeAlloc(")
+    # RFC-0005 S8ar: two read sites (`liftHeapValue`'s distinct-over-composite
+    # arm and its `else` arm), each a `degradeAlloc` with a fresh name, and
+    # `heapCellStore`'s stand-in store, which allocates no symbol of the type
+    # (its cell gets a `Z3_mk_fresh_const` of the stand-in sort).
+    check emitting.len == 3
+    var reads, stores = 0
+    for t in emitting:
+      if t.startsWith("degradeAlloc("): inc reads
+      elif t.startsWith("allocDegrade("): inc stores
+    check reads == 2
+    check stores == 1
     check "__liftHeapValueUnsupported\", freshLiftPc" notin readFile(heapSrc)
 
   test "IR level: the tainted path carries exactly {scSpurious}; unreachable is sxUnsat":
     # RFC-0005 S8ap: a `ref string` pointee is modelled now (the read is the
     # heap select); a `ref` to a distinct string still havocs here.
-    let dTy = tDistinct("S4IrStr", tString())
+    # RFC-0005 S8ar: a distinct over a scalar base is a cell value now. A
+    # tuple holding a by-value case object still havocs (its stand-in cell,
+    # `heapStandInTy`); a distinct over a composite base does too, but its
+    # fresh value is itself a compound-sort decline (N47), which is not this
+    # site's {scSpurious}.
+    let caseTy = tVariant("S4IrCase", "k", tUInt(8), @[
+      VariantArm(tagOrdinal: 0, tagName: "a", fieldNames: @["a"],
+                 fieldTypes: @[tInt()]),
+      VariantArm(tagOrdinal: 1, tagName: "b", branchIx: 1)])
+    let dTy = tTuple(@[tInt(), caseTy], @["n", "c"], objectName = "S4IrBox")
     let pRef = tRef(dTy)
     let params = @[IRParam(name: "p", ty: pRef)]
     # Guarded `p != nil` so `nilDerefFork` short-circuits (a NilAccessDefect

@@ -66,6 +66,11 @@
 ## Walker: v104 -> v105 (see `symexWalkerVersion`'s own doc comment,
 ## `canonicalize.nim`, for the full writeup). CR-2 `==` pin 104 -> 105
 ## (`tests/tsymex_phase15_CR2_cachekey.nim`).
+## ---- RFC-0005 S8ar -----------------------------------------------------------
+## S8ar backs every integer-like Table key and every integer-like, string or
+## float value, so this file's poison tables (`Table[int, string]`,
+## `Table[string, string]`) became modelled. Each was swapped for a shape
+## still unbacked: a `float` key and a `seq[int]` value.
 import std/[unittest, strutils, tables, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -95,7 +100,7 @@ type
     m: int
 
   N42BadTableHeap = object
-    t: Table[int, string]
+    t: Table[float, string]
     n: int
 
   N42OuterTable = object
@@ -285,7 +290,7 @@ suite "symex N42 -- walker version pin":
 # both the ownership and table families) keeps the addition focused.
 # =============================================================================
 
-proc n44NonOpaqueTableSink(x: Table[int, string]): bool =
+proc n44NonOpaqueTableSink(x: Table[float, string]): bool =
   ## Deliberately NOT `{.symexOpaque.}`: an opaque call unconditionally
   ## taints every surviving path on its own (`runtime.nim`'s `stmt.opaque`
   ## walk arm), which would make a call-argument probe built around one

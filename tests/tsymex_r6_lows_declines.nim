@@ -194,11 +194,18 @@ suite "symex round-6 N30 -- closure string-return type: classified decline (feUn
 # =============================================================================
 
 type
+  N41Case = object
+    ## RFC-0005 S8ar: a by-value case object; a tuple holding one is a
+    ## pointee kind with no leaf representation (S8ar's stated decline).
+    case k: bool
+    of true: a: int
+    of false: discard
   N41Heap = object
     t: Table[string, int]   ## a VALID Table shape -- the gap is independent
                              ## of key/value-type support (N40 already covers
                              ## the unsupported-shape case).
-    tp: (int, int)          ## RFC-0005 S8ap: a `Table[string, int]` field
+    tp: (int, N41Case)      ## RFC-0005 S8ar: was `(int, int)`, a cell
+                             ## value since S8ar. RFC-0005 S8ap: a `Table[string, int]` field
                              ## is a leaf-split heap cell now (read and
                              ## written through the heap), so N41-2/N41-3
                              ## read this tuple field instead -- a pointee
@@ -235,7 +242,11 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     check not sawFault
     check sawClassified
 
-  test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault) -- the family N40 flagged and masked":
+  test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) is a classified decline (not weInternalWalkerFault) -- the family N40 flagged and masked":
+    # RFC-0005 S8ar: a tuple with a part that is not a heap cell value has a
+    # stand-in cell sort, so the sort derivation no longer reaches
+    # `seUnsupportedCompoundSortLeaf`; the read is the stated, scoped
+    # `heUnsupportedPointeeRead`.
     let r = symexFind(n41HeapReadBlock, tLabel("n41_heap_read_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
@@ -244,7 +255,9 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     var sawClassified = false
     for e in r.errors:
       if e.kind == weInternalWalkerFault: sawFault = true
-      if e.kind == seUnsupportedCompoundSortLeaf: sawClassified = true
+      if e.kind == heUnsupportedPointeeRead and
+         "a part of it is not a heap cell value" in e.msg:
+        sawClassified = true
     check not sawFault
     check sawClassified
 

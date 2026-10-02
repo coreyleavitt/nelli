@@ -4577,6 +4577,18 @@ type
     kind*: SymexErrorKind
     msg*: string
 
+proc unsupportedWitnessMsg*(shape: string): string =
+  ## RFC-0005 S8ar. The one statement of the witness-shape decline, shared
+  ## by `allocateSym` and `unallocatableFieldIssue` (N40's parity). The
+  ## pre-S8ar text listed `Table[string, int64]` and `HashSet[int64]` as the
+  ## whole container fragment, three slices out of date.
+  "unsupported witness shape `" & shape & "`: a witness renders " &
+    "scalars, strings, tuples, arrays, objects, refs and the seqs, Tables " &
+    "and HashSets the model backs, but not a container whose element, key " &
+    "or value is an 8-bit unsigned integer (`uint8` and `char` are one IR " &
+    "type, so the reader cannot tell which to build) or a type the model " &
+    "does not back"
+
 proc tableKeyDeclineMsg*(keyTy: IRType): string =
   ## RFC-0005 S8ar. The one statement of the key-type decline.
   "Table key type not modeled: " & $keyTy & " — only a string or a " &
@@ -4641,11 +4653,7 @@ proc unallocatableFieldIssue*(t: IRType): Option[FieldAllocIssue] =
       # own contract already claimed "the SAME ... message", which this
       # restores).
       result = some(FieldAllocIssue(kind: feUnsupportedWitnessType,
-        msg: "unsupported witness shape `" & n[22 .. ^1] &
-             "`; the supported fragment is {seq[int64], seq[float64], " &
-             "seq[float32], seq[ref T], Table[string, int64], " &
-             "HashSet[int64]} plus scalar/tuple/array/object element or " &
-             "value types therein"))
+        msg: unsupportedWitnessMsg(n[22 .. ^1])))
     elif n.len >= 14 and n[0 ..< 14] == "__unsupported:":
       # N40: same message-drift fix as the witness-type arm above.
       result = some(FieldAllocIssue(kind: feUnsupportedParamType,

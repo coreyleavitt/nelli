@@ -66,7 +66,14 @@ import nelli/smt/canonicalize
 # =============================================================================
 
 type
-  HeapDist = distinct int
+  HeapDist = object
+    ## RFC-0005 S8ar: a by-value case object, which no heap cell holds
+    ## (S8ar's stated decline); the `distinct` this was is a cell
+    ## value since S8ar.
+    x: int
+    case k: bool
+    of true: a: int
+    of false: discard
   HeapStrNode = ref object
     ## RFC-0005 S8ap: `s` was a `string`, which the logical heap now models;
     ## a `distinct` field still reaches `liftHeapValue`'s unsupported-pointee
@@ -93,7 +100,7 @@ type
 
 proc heapStrFieldRead(p: HeapStrNode) =
   if p != nil:
-    if int(p.s) == 7:
+    if p.s.x == 7:
       symexTarget("heap_str_field_read")
 
 proc heapGoodIntFieldRead(p: HeapStrNode) =

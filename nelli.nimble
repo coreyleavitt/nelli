@@ -1045,5 +1045,11 @@ task test, "Run the test suite":
             # render layer incl. the annotation-violation channel; also the
             # gaps() walkthrough. Public imports only. walker 182->190
             # (batch 1).
-            "tsymex_rfc0005_s11_surface"]:
+            "tsymex_rfc0005_s11_surface",
+            # RFC-0005 S8ar -- S8ap's remainder: tree-valued heap cells
+            # (tuple / object / array / distinct fields), every backed
+            # Table key and value type, insert, seq[string] add, dotted
+            # chains rooted at a ref field, ref pointees render by name,
+            # heap-step depth budget; walker 190->191 (provisional).
+            "tsymex_rfc0005_s8ar_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

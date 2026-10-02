@@ -202,17 +202,26 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "202"
-  ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Provisional 206
-  ## (S8be holds 205). Two `var` / `addr` heap actuals of one call that may
-  ## be one cell through DIFFERENT refs (`let q = p; setBoth(p.x, q.x)`; a
+const symexWalkerVersion* = "209"
+  ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
+  ## S8bf (one chain on S8au) were built on the channel with provisional
+  ## numbers and land stacked as one integration branch under ONE walker
+  ## number; 205 to 208 are held by slices still running. Their bullets
+  ## follow, newest work first; each names its provisional number. The
+  ## stack keeps S8ar's and S8bd's heap-depth measures both (the deeper
+  ## decides, `heapDepthExhausted`). 202 -> 209.
+  ##
+  ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Two `var` /
+  ## `addr` heap actuals of one call that may be one cell through DIFFERENT
+  ## refs (`let q = p; setBoth(p.x, q.x)`; a
   ## let chain, a tuple, a field of another ref, two parameters) were
   ## copied in and out in argument order, not the callee's write order: a
   ## false `sxSat`. They are passed by reference (S8ba's specialisation),
   ## so the writes land on the heap in the callee's order; one that cannot
   ## be passed so declines (`varActualMayAlias`, `heapCellsMayMeet`).
+  ## Provisional 206; batch 3.
   ##
-  ## RFC-0005 S8bd (2026-10-02) — S8ba's remainder. Provisional 204.
+  ## RFC-0005 S8bd (2026-10-02) — S8ba's remainder.
   ## (1) A bit-vector `i` whose Int views `bv2int(i)` and `bv2int(i +- c)`
   ## both meet a length is linked by the exact two's-complement wrap
   ## (`bvOffsetLinks`): `i < s.len and i + 1 > s.len` went from ~41M units
@@ -226,9 +235,10 @@ const symexWalkerVersion* = "202"
   ## ref (`a[i].x`, the index read once, before the call), a user call's
   ## result (`getBox().x`, called once) and a generic callee (specialised
   ## per instantiation); each was S8au's `feUnsupportedOp` decline. A
-  ## by-reference actual is lowered once, as its base.
+  ## by-reference actual is lowered once, as its base. Provisional 204;
+  ## batch 3.
   ##
-  ## RFC-0005 S8ba (2026-10-02) — S8au's remainder. Provisional 200.
+  ## RFC-0005 S8ba (2026-10-02) — S8au's remainder.
   ## (1) Every declining arm that owns a result binds it (a seq index or
   ## pop on an unsupported receiver, a variant construct): the unbound
   ## compiler temporary was read as an unmodelled global
@@ -242,10 +252,9 @@ const symexWalkerVersion* = "202"
   ## actual a global or capture of the callee also reaches is passed by
   ## reference: the callee is specialised to it (S8au declined). (5) A
   ## split's axioms are built once, at the first query reaching it, in
-  ## lowering order.
+  ## lowering order. Provisional 200; batch 3.
   ##
-  ## RFC-0005 S8ax (2026-10-02) — S8as's remainder. Supersedes "192"
-  ## (193..196 are the S8at..S8aw siblings', landing separately).
+  ## RFC-0005 S8ax (2026-10-02) — S8as's remainder.
   ## (1) The call cache is keyed by the actuals themselves (a bucket per
   ## argument-shape hash, compared term for term) and by the drops the
   ## summary's walk decided against its context: a hash collision replayed
@@ -277,7 +286,8 @@ const symexWalkerVersion* = "202"
   ## `addr` takes it; a use after a statement that may resize the seq
   ## declines. (9) Two by-address arguments on paths that part only at
   ## computed indices decline only on the paths where the indices may be
-  ## equal; two fields of a variant arm are two locations.
+  ## equal; two fields of a variant arm are two locations. Provisional 197;
+  ## batch 3.
   ##
   ## RFC-0005 batch 2 (2026-10-02) — S8ar, S8at, S8as, S8au, S8av, S8az,
   ## S8aw and S8ay were built in parallel on the channel tip (S8at on S8ar,

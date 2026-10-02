@@ -967,7 +967,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## and generic callees). Provisional 204.
     ## RFC-0005 S8bf (two var / addr heap actuals that may be one cell
     ## through different refs are passed by reference). Provisional 206.
-    check symexWalkerVersion == "202"
+    ## RFC-0005 batch 3 lands S8ax, S8ba, S8bd and S8bf as one walker
+    ## number (205-208 are held by slices still running). 202->209.
+    check symexWalkerVersion == "209"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

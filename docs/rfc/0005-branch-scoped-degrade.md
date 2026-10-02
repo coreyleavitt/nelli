@@ -8368,6 +8368,30 @@ the native `str.indexof` / `seq.last_indexof` terms that remain (a query built
 directly). S8az's and S8av's cache-value widenings ride the walker key, as
 S11's did.
 
+**Batch 3 (2026-10-02) — one walker number for four slices.** S8ax (on
+S8as) and the S8ba -> S8bd -> S8bf chain (on S8au) were built on the channel,
+each with a provisional walker number (S8ax 197, S8ba 200, S8bd 204, S8bf
+206). They land stacked, in that order, on one integration branch under ONE
+number: `symexWalkerVersion` 202 -> **209** (205 to 208 are held by slices
+still running), the CR2 `==` pin 209. Each slice's own `>=` floor stays at
+its provisional number; the "walker N" in each "As landed" heading is that
+provisional number. Where two slices fixed one thing, the stack keeps both:
+- *The heap-depth budget.* S8ar (batch 2) and S8bd each replaced the
+  per-path dereference count with a depth, S8ar by the heap step stamped on
+  the ref's value (`heapStepOf`), S8bd by the chain the ref's term was
+  reached through (`heapChainDepth`). `heapDepthExhausted` takes both and
+  the deeper decides, at S8bd's check sites (after the ref is lowered);
+  `Path.heapDepth` is the count again, held to `heapDerefsPerPathCap`.
+- *`.add`'s store.* S8ar and S8ba both routed `iekSeqAdd` through
+  `storeSeqElem`; S8ar's `seqElemFits` arm is kept, on the cell type, so
+  S8ba's distinct elements store as their base. The r6 width-8 re-pins and
+  the N27 inventory keep S8ar's versions.
+- *Call arguments.* `userCallStmt` keeps S8ax's argument order and
+  index-alias declines (`aliasConds`) beside S8ba's by-reference path and
+  S8bf's `peers`; the by-reference gates pass S8ax's `conds`, and any index
+  pairs they find are declined on their paths as the cell model's are.
+- *Step 1c.* S8ay's facts-first check asserts S8ba's `nimLenFacts` too.
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see
@@ -9998,7 +10022,7 @@ The new suite runs in 6.4 s without its compile; 69 s (5.1) and 74 s
   conversion or a cast is refused by `byRefSub` and falls back to S8au's
   `feUnsupportedOp` (by the code path; not pinned).
 
-**As landed (S8bf, walker 206 provisional; S8be holds 205) — S8bd's
+**As landed (S8bf, walker 206) — S8bd's
 soundness finding.** Suite `tsymex_rfc0005_s8bf_alias` (13 tests; c on
 both Z3 versions, cpp 5.1; the binary runs in ~2 s). The base is 09f6804
 (S8bd).

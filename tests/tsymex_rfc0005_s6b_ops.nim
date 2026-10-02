@@ -267,8 +267,11 @@ proc s6bDeepDead(n: int) =
     symexTarget("s6b_deep_dead")
 
 proc s6bUnsafeCastDead(n: int) =
-  var x = n
-  let q = addr x
+  # RFC-0005 S8ax: `addr x` of a local is an address cell now, so the halt
+  # is reached through a seq element's pointer used as a value, which the
+  # alias rewrite turns back into a bare `addr`.
+  var s = @[n]
+  let q = addr s[0]
   discard q
   if n == 5 and n == 6:
     symexTarget("s6b_unsafe_cast_dead")

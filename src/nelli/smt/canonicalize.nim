@@ -203,6 +203,41 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "202"
+  ## RFC-0005 S8ax (2026-10-02) — S8as's remainder. Supersedes "192"
+  ## (193..196 are the S8at..S8aw siblings', landing separately).
+  ## (1) The call cache is keyed by the actuals themselves (a bucket per
+  ## argument-shape hash, compared term for term) and by the drops the
+  ## summary's walk decided against its context: a hash collision replayed
+  ## another call's return. (2) Outside a recursion an `if` arm holding a
+  ## loop or a call is feasibility-checked, adaptively per site; an arm
+  ## that only declines always is. (3) Past `maxCallDepth` a recursion its
+  ## arguments bound is followed up to `maxRecursionDepth` (default 24); a
+  ## call past it declines naming both budgets; a body that may recurse
+  ## twice on one execution is not extended, nor is anything under an
+  ## extension once it reached the hard budget. (4) A signed `int` heap
+  ## under Int semantics has Int-sorted cells (any width, ranged too); a
+  ## bit-vector stored and read back is the same term (a conversion memo
+  ## and read-over-write). (5) An inert opaque call havocs the heap cells
+  ## its arguments, globals and captures reach (any cell for a cast, asm,
+  ## a method or foreign code) and forks the raises it may make;
+  ## `feOpaqueEffectHavoc` (`dcFreshSymbol`). (6) A closure's by-reference
+  ## captures live in an env cell (`capCellName`), threaded as a global, so
+  ## a closure applied away from the frame that built it reads and writes
+  ## the variable as it stands. (7) Operands are read where Nim reads them:
+  ## a constructor element and an eager argument before a later call, an
+  ## inline read after it; a checked inline read a later call changes
+  ## declines (`feEvalOrderUnmodelled`). (8) `addr x` of a routine's
+  ## variable is an address cell (`addrCellName`, `isNew.nAddrOf`): a `ptr`
+  ## that holds `x` for the frame's lifetime, kept equal to `x` after every
+  ## statement, inherited by a callee through a capture or a `var` formal
+  ## and carried back; a dereference or comparison of a pointer that may
+  ## name a returned frame's cell declines (`feUnsupportedOp`). `let p =
+  ## addr` of a computed index or a seq element is an alias checked where
+  ## `addr` takes it; a use after a statement that may resize the seq
+  ## declines. (9) Two by-address arguments on paths that part only at
+  ## computed indices decline only on the paths where the indices may be
+  ## equal; two fields of a variant arm are two locations.
+  ##
   ## RFC-0005 batch 2 (2026-10-02) — S8ar, S8at, S8as, S8au, S8av, S8az,
   ## S8aw and S8ay were built in parallel on the channel tip (S8at on S8ar,
   ## S8az on S8av, S8ay on S8aw), each with a provisional number, and land
@@ -5228,7 +5263,20 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       # RFC-0005 S8as: an inert opaque call's effect summary rebinds the
       # names it lists, so it changes the verdict.
       (if s.opaqueHavoc.len > 0: ";havoc=[" & s.opaqueHavoc.join(",") & "]"
-       else: "") & ">"
+       else: "") &
+      # RFC-0005 S8ax: the heaps it havocs, the raises it forks and the
+      # defect check change the verdict too.
+      (if s.opaqueHeapTys.len > 0:
+         block:
+           var hs: seq[string]
+           for h in s.opaqueHeapTys: hs.add canonicalize(h)
+           ";heaps=[" & hs.join(",") & "]"
+       else: "") &
+      (if s.opaqueHeapAll: ";heapAll" else: "") &
+      (if s.opaqueRaises.len > 0: ";raises=[" & s.opaqueRaises.join(",") & "]"
+       else: "") &
+      (if s.opaqueMayDefect: ";mayDefect" else: "") &
+      (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read
@@ -5319,8 +5367,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       ";ety=" & canonicalize(s.dElemTy) &
       ";p=" & canonicalize(s.dPtr, env) & ">"
   of isNew:
+    # RFC-0005 S8ax: an address cell names its local (a slot, or the
+    # free name).
+    let ofLocal = if s.nAddrOf.len > 0: ";of=" & canonicalize(mkVar(s.nAddrOf), env)
+                  else: ""
     let slot = bindLocal(env, s.nRetName)
-    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ">"
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).
@@ -5461,6 +5513,11 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        a string / seq; a query it cuts off is
   ##                        sxUnknown. Rendered `;sqr=` only when not the
   ##                        default 20M (default keys unchanged).
+  ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
+  ##                        depth extends to past `maxCallDepth`; a call
+  ##                        past it declines, so it changes the verdict.
+  ##                        Rendered `;mrd=` only when not the default 24
+  ##                        (default keys unchanged).
   ##   maxFreshnessAssertions — cap on `newRef != prior` inequalities; when hit,
   ##                        dropped constraints allow Z3 to alias refs it
   ##                        otherwise could not → false-SAT direction.
@@ -5521,6 +5578,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
     (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
+    (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
+     else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
     ">"
 
 # ---- Cache key -------------------------------------------------------------

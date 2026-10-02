@@ -28,13 +28,13 @@ proc castPtr(x: int) =
   if p[] == 1:
     symexTarget("hit")
 
-# Bare `addr` to a ptr binding — same classification (heUnsafeCast).
+# Bare `addr` to a ptr binding — an address cell since RFC-0005 S8ax.
 proc bareAddr(x: int) =
   let p = addr x
   if p[] == 2:
     symexTarget("hit")
 
-# `unsafeAddr` to a ptr binding — same classification. (`unsafeAddr` lowers to
+# `unsafeAddr` to a ptr binding — likewise. (`unsafeAddr` lowers to
 # the same `nnkAddr` node as `addr` in the typed AST.)
 proc unsafeAddrSut(x: int) =
   let p = unsafeAddr x
@@ -60,21 +60,29 @@ suite "symex Phase 15 R11 — unsafe cast / addr classification (heUnsafeCast)":
         check e.severity == sevError
     check sawUnsafeCast
 
-  test "R11.2: bare `addr x` to a ptr → sxUnknown + heUnsafeCast":
+  test "R11.2: bare `addr x` to a ptr is an address cell (RFC-0005 S8ax) → sxSat, no heUnsafeCast":
+    # RFC-0005 S8ax item 8: `addr` of a routine's variable is a heap cell
+    # the walk keeps equal to the variable, so `p[]` is `x` and the target
+    # is decided. A cast to `ptr` (R11.1) still halts.
     let r = symexFind(bareAddr, tLabel("hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    if r.status == sxSat: check r.witness[0] == 2
     var sawUnsafeCast = false
     for e in r.errors:
       if e.kind == heUnsafeCast: sawUnsafeCast = true
-    check sawUnsafeCast
+    check not sawUnsafeCast
 
-  test "R11.3: `unsafeAddr x` to a ptr → sxUnknown + heUnsafeCast":
+  test "R11.3: `unsafeAddr x` to a ptr is an address cell (RFC-0005 S8ax) → sxSat, no heUnsafeCast":
+    # RFC-0005 S8ax item 8: `addr` of a routine's variable is a heap cell
+    # the walk keeps equal to the variable, so `p[]` is `x` and the target
+    # is decided. A cast to `ptr` (R11.1) still halts.
     let r = symexFind(unsafeAddrSut, tLabel("hit"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    if r.status == sxSat: check r.witness[0] == 3
     var sawUnsafeCast = false
     for e in r.errors:
       if e.kind == heUnsafeCast: sawUnsafeCast = true
-    check sawUnsafeCast
+    check not sawUnsafeCast
 
   test "R11.4: a normal no-cast SUT still works (sxSat, NO heUnsafeCast)":
     let r = symexFind(noCast, tLabel("hit"))

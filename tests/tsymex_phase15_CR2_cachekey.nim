@@ -955,6 +955,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RegexError). Provisional 198.
     ## RFC-0005 batch 2 lands S8ar, S8at, S8as, S8au, S8av, S8az, S8aw and
     ## S8ay as one walker number. 190->202.
+    ## RFC-0005 S8ax (S8as's remainder: a fact-keyed call cache, adaptive
+    ## arm checks and call depth, per-cell Int heaps, opaque summaries,
+    ## closure environments, evaluation order, address cells, alias
+    ## precision). Provisional 197.
     check symexWalkerVersion == "202"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

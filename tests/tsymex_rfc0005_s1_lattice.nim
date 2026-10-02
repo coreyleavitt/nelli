@@ -66,7 +66,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         eeFinallyJumpOnRaise,
                         # RFC-0005 S8as: a global given a fresh value (an
                         # opaque call's write, a read before any write).
-                        feGlobalHavoc}
+                        feGlobalHavoc,
+                        # RFC-0005 S8ax: an opaque call's heap writes and
+                        # raises.
+                        feOpaqueEffectHavoc}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

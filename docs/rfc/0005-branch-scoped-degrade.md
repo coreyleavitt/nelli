@@ -352,6 +352,11 @@ title = "S8av's remainder: gaps on :sat witness and :raised cache hits"
 state = "done"
 
 [[slice]]
+id = "S8ax"
+title = "S8as's remainder: fact-keyed call cache; adaptive if-arm feasibility outside recursion; adaptive maxCallDepth under a hard budget; per-cell Int/BV int heap sorts; opaque routine summaries for heap writes, non-ref-free globals and captures, cast/asm and raises; closure applied outside its frame; evaluation order of a read and a later call that writes it; addr stored, returned, compared, of seq elements, at computed indices, re-pointed under a branch; alias precision for variant-arm fields and computed indices"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -7608,6 +7613,185 @@ against Nim 2.2.10.
   index, and a re-point under a branch, still decline** (`heUnsafeCast`).
   The path alias check does not split variant-arm fields or computed
   indices, which still decline as aliasing.
+
+**As landed (S8ax, walker 197) — S8as's remainder.**
+
+*Wrong verdicts found and fixed (each pinned RED on b7f7061 first).*
+- **The call cache replayed another call's return.** The key was
+  `argShapeKey`, an XOR of 32-bit Z3 AST hashes, and a hit replayed the
+  first call's return with no check that the actuals were the same. The
+  literals 8472 and 45048 hash alike, so `id(45048)` returned 8472: a false
+  `sxUnsat` and a false `sxSat`, `errors` empty.
+- **An inert opaque call never raised and always returned.** `try:
+  boom(v) except ValueError` was a false `sxUnsat`; a target after a
+  routine that always raises, or one that never returns for some input, a
+  false `sxSat`; `tRaisedExn("ValueError")` through it a false `sxUnsat`. A
+  nested opaque routine's write through a captured `let` ref was dropped,
+  and a `Defect` its body raises, caught around the call, was a false
+  `sxUnsat`. All with `errors` empty.
+- **Operands were read in the parser's order, not Nim's.** Each operand's
+  statements were hoisted where the operand stood, so a variable, field,
+  ref field, dereference or element Nim reads inline was read before a
+  later operand's call that writes it, and a constructor element Nim stores
+  before the call was read after it. Ten shapes gave a false `sxSat`,
+  nothing recorded.
+- **An Int-sorted heap cell held any integer.** Found by the Windows legs
+  through S8aa's heap-join pin, after the slice first landed (pinned RED on
+  c6b69c1). Nothing bounded an input cell of an Int-sorted `int` heap by
+  its type: an `int8` field's `int(b.x) > 127` was a false `sxSat` (its
+  witness, `x: 128`, then crashed the typed result with a RangeDefect),
+  and `b.n + 1`'s overflow raise was SAT with `b.n` below `low(int)`, whose
+  witness extraction raised out of the walk and ended it with nothing
+  recorded: a false `sxUnsat` on a target after a heap write in a branch on
+  a seq element. Base has the second wherever its int heap was already
+  Int-sorted; item 4 widened both to every non-exact run and to narrow and
+  ranged cells. Each read of an Int-sorted heap now bounds the heap
+  constants it reads through (the input heap or an opaque call's havoc
+  constant, under any `store` and `ite`) at that address by the cell's
+  type (`intCellRangeFacts`, run-wide like `globalEntryFacts`: true of
+  every real heap at every address), and an Int witness that is not an
+  `int64` numeral records `feExtractionFailed` instead of raising.
+
+*(1) The call cache is keyed by the actuals and the facts.* A bucket per
+argument-shape hash holds every summary; a hit compares the actuals term by
+term. A summary records the drops its walk decided against its own
+context (S8k's loop guard, S8an's depth bail, the `if` check), and a hit
+replays it only where every one of them still holds. `fib(n)` under `n in
+0..4` at `maxCallDepth = 5`: `fb_dead` 25.3 s, 49 walks, no hit (S8as left a
+pruned summary uncached) -> 8.2 s, 27 walks, 20 hits.
+
+*(2) `if` arms outside a recursion are checked adaptively.* Only an arm
+that holds a loop or a call is checked (a solver call costs more than a
+few straight-line statements). Per site, after `ifSiteProbeMax` checks the
+site is checked again only while at least one in four of its checks
+dropped the arm. An arm that is nothing but a decline marker is always
+checked, so a decline no execution reaches is not recorded. A dead arm of
+eight calls to a three-way routine (`n > 10` under `n in 0..3`): killed at
+600 s on b7f7061 -> 90 ms. Suite costs, off / this policy / every arm:
+s8k_bounds 29.4 / 29.6 / 55.7 s, s8p_precision 5.4 / 3.7 / 2.5 s,
+s8as_remainder 37.4 / 26.8 / 47.2 s.
+
+*(3) The call depth adapts under a hard budget.* At `maxCallDepth` a call
+is inlined anyway while the stack is under `maxRecursionDepth` (default
+24, in the settings key only when not the default) and the frontier is
+not growing: the walks entered at this depth, the live paths included,
+number no more than those one level up (`depthMayExtend`). `sumTo(n)` under
+`n in 0..5` decides. A body that may recurse twice on one execution
+(`recursiveCallsOnAPath`: `fib`) is not extended: explored depth first,
+the frontier test sees one walk per level before the siblings, and the
+first cut admitted `fib`'s leftmost chain to the hard budget
+(`tsymex_phase3_recursion`'s `fib(x) == 13` was killed at 900 s; now 1.5 s,
+12 walks). Nothing under an extension extends again once it reached the
+hard budget (`WalkCtx.extHardMark`). Past the hard budget the call declines naming both budgets, and the
+extension's root drops what it walked, so an unbounded recursion costs
+what it did before. `maxRecursionDepth = 0` turns the extension off.
+
+*(4) Every signed `int` heap cell is Int-sorted under Int semantics.*
+Ranged and narrower cells too, each cell's sort its type's. A bit-vector
+stored and read back meets its source unconverted (a conversion memo,
+`intOfBV`, and read-over-write at the heap's last store). Before -> after
+(Linux, Z3 5.1): a mixed Int and bit-vector run 50.6 s -> 0.03 s, a ranged
+cell 71.1 s -> 0.03 s, a narrow cell 18.0 s -> 0.02 s.
+
+*(5) An opaque routine's effects.* An inert opaque call havocs the heap
+cells its arguments, globals and captures reach, and every heap for a
+`cast`, an `asm`, a method or foreign code (`feOpaqueEffectHavoc`,
+`dcFreshSymbol`: a SAT through it is replay-gated). It forks each raise its
+`raises` list allows, routed through the handlers in scope. A `Defect`
+handler in scope, a handler naming a subtype of a listed type, and a
+routine that may not return decline.
+
+*(6) A closure applied away from its frame.* A by-reference capture lives
+in an env cell (`capCellName`) threaded through calls as a global is, so a
+closure returned from its frame, or applied by a callee, reads and writes
+the variable as it stands; the frame keeps the cell and its local equal
+statement by statement, across a raise and a branch. A capture passed by
+address while the closure may run declines (`ceCaptureByRefUnmodelled`).
+
+*(7) Evaluation order.* Nim (probed on c and cpp) evaluates a call, a
+checked `+ - *` and every constructor element where it stands, and reads a
+variable, field, ref field, dereference or element with its enclosing
+operation, after later operands' calls. `orderOperands` binds eager
+operands before a later call and moves inline reads after it; a checked
+inline read whose value a later call changes declines
+(`feEvalOrderUnmodelled`).
+
+*(8) `addr` of a routine's variable is an address cell.* `addr x`, for a
+routine variable, parameter or `result` (`addrCellLocal`), lowers to an
+`isNew` with `nAddrOf = x` and the name `addrCellName(x)`. The walker
+(`walkAddrCell`) allocates the cell once per frame, stores `x` into it and
+registers it (`CallFrameCtx.addrCells`, `Path.addrOwners`); after every
+statement the `walk` wrapper keeps `x` and the cell equal
+(`syncAddrCells`: a write by name goes to the cell, a write through a
+pointer to `x`; both in one statement decline). A callee inherits the
+cells of its captures and of `var` formals bound to celled variables
+(`inheritAddrCells`), and they move back on return (`carryAddrCells`); a
+cell of a `var` formal bound to a field, element or global is lost, which
+declines. After a raise the heap wins (`syncAddrCellsFromHeap`). A
+dereference or comparison of a pointer that may name a returned frame's
+cell declines (`danglingFork`; drain stage (f), `danglingCompareTaint`).
+So a pointer stored in an object, returned, compared, kept by a callee,
+re-pointed on one arm, or carried through a raise, swap or recursion is
+exact. `let p = addr lv` of a computed index or a seq element
+(`elemAddrNode`) is an alias whose index is checked where `addr` takes it
+(an out-of-range index raises there); a use after a statement that may
+resize the seq (`mayResizeSeq`) declines.
+
+*(9) Alias precision.* `aliasPath` pairs the computed indices where two
+by-address actuals' paths part; the call declines only on the paths where
+the pairs may all be equal (an `if` over the equalities guarding the
+decline marker, decided by the solver). Two fields of a variant arm are a
+path (`nnkCheckedFieldExpr`): two locations, since Nim checks the arm where
+it takes each address and fields of two arms never both live.
+
+Updated pins: S8an's `sutRecDeep` decides by default (witness 4) and the
+escape case `aesc` is `sxSat` (witness 2); S8as's `rb` (re-point under a
+branch) is `sxSat`; configdefaults' `boundedRecursionSut` via the default is
+`sxSat`; S7's call-cache audit reads `walkStmt`. Item 5 summarises what #163
+declined: `tsymex_163rev_inert_exclusions`' object, tuple, seq, ptr, pointer
+and cstring arguments and its R14d placement, `tsymex_163_opaque_transparent`'s
+var-param and ref-arg callees, and `tsymex_rectify_effects`' var-argument
+#137 pin (either replay outcome: the model the Z3 build picks decides it)
+now decide or replay, naming the havoc; the ptr, pointer and cstring
+cases stay `sxUnknown` only for their `nil` literal argument's own CR-2a
+decline. Item 8: R11.2 and R11.3 (`addr x`,
+`unsafeAddr x`) are `sxSat`, no `heUnsafeCast`; S6b's unsafe-cast halt pin
+reaches it through a seq element's pointer used as a value. The A2a
+chokepoint audit counts one `parseOperandPair` line as its family's two
+sites, and the S8ab let-alias guard's three new hazards are fixed.
+
+Pins: `tests/tsymex_rfc0005_s8ax_remainder.nim`, every expectation probed
+against Nim 2.2.10, floor `>= 197`.
+
+*Different mechanisms, reported and not fixed here.*
+- **A Defect an opaque body raises implicitly is not surfaced.** Only the
+  `raises` list is forked; an `IndexDefect` or `OverflowDefect` inside the
+  body is not `sxRaised`, and a `finally` reached only through one is not
+  walked on that exit.
+- **A foreign routine may diverge.** Replay of a SAT through one may not
+  terminate.
+- **A `{.global.}` variable inside a proc crashes the parser.**
+- **Opaque raise precision.** A handler naming a subtype of a listed type
+  declines rather than splitting the raise.
+- **`int(high(int32))` widening** is mis-handled on the widening path.
+- **An unbounded recursion still declines at `maxCallDepth`**, by design:
+  its frontier grows.
+- **A declined recursive frame's `k + <fresh>` overflow query is slow**:
+  `sumTo(n)` under `n in 0..5` at depth 3 without the extension takes 250 s
+  (468 s on b7f7061) and ends `beSolverUndef`.
+- **Nil-dereference and string-index checks of a lazily read operand**
+  happen where the read moved, not where Nim checks them.
+- **Guard-condition mode relies on the walker's clash decline** for the
+  evaluation-order cases.
+- **A tuple of closures returned** stays `ceUnsupportedHof`.
+- **An opaque routine applying a closure argument does not havoc the
+  closure's capture cells.**
+- **The call cache is bypassed in frames holding capture cells**: cost, not
+  soundness.
+- **An element alias's pointer used as a value** (stored, compared,
+  returned) still declines, as does `addr` of a seq element with an index
+  variable reassigned while the pointer lives, a `seq` of objects, and any
+  address cell of a variant object (`heUnsafeCast`).
 
 ### §2.6 The raise-routing recovery — *corrected*
 

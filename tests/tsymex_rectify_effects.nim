@@ -84,7 +84,7 @@ suite "symex effects #137, as narrowed by #163":
     check r.status == sxUnknown
     check classified
 
-  test "#137 still holds where it must: a var-argument opaque call taints":
+  test "#137 still holds where it must: a var-argument opaque call taints (summarised since RFC-0005 S8ax)":
     proc passesVar(x: int) =
       var local = x
       mutates(local)
@@ -94,7 +94,13 @@ suite "symex effects #137, as narrowed by #163":
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feOpaqueCallUnmodelled and "mutates" in e.msg:
+      if e.kind == feGlobalHavoc and "mutates" in e.msg:
         classified = true
-    check r.status == sxUnknown
+    # RFC-0005 S8ax item 5: the var argument holds a fresh value after the
+    # call (`feGlobalHavoc` names the callee), so the path stays uncertain
+    # and a hit through it is replayed: confirmed when the model's `x`
+    # really reaches, refuted (and so sxUnknown) when it does not. Which
+    # one depends on the model the Z3 build picks; never sxUnsat.
+    check r.status in {sxUnknown, sxSat}
+    if r.status == sxSat: check r.witness[0] + 1 > 5
     check classified

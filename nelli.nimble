@@ -1105,5 +1105,11 @@ task test, "Run the test suite":
             # without gaps metadata (pre-S8az, or a third-party writer)
             # still degrades to gaps: @[] rather than a miss. Walker
             # 190->202 (batch 2).
-            "tsymex_rfc0005_s8az_remainder"]:
+            "tsymex_rfc0005_s8az_remainder",
+            # RFC-0005 S8ax -- S8as's remainder: a fact-keyed call cache;
+            # adaptive if-arm checks and call depth; per-cell Int heaps;
+            # opaque routine summaries; closure environments; evaluation
+            # order; `addr` forms; alias precision; walker 202->209
+            # (batch 3).
+            "tsymex_rfc0005_s8ax_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

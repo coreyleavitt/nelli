@@ -450,9 +450,13 @@ suite "RFC-0005 S8as (4): a closure's writes reach the caller":
     verdict(sutShortCircuitWrite, "sw_dead", sxUnsat)
     verdict(sutShortCircuitRaise, "sr", sxSat)
     verdict(sutShortCircuitRaise, "sr_dead", sxUnsat)
-  test "a capture written by a closure applied outside its frame declines":
-    declines(sutOutOfFrame, "of", ceCaptureByRefUnmodelled,
-             "outside the frame")
+  test "a capture written by a closure applied outside its frame is kept":
+    # RFC-0005 S8ax: the capture lives in an env cell the walk threads to
+    # every frame (was the scoped `ceCaptureByRefUnmodelled` decline).
+    let r = symexFind(sutOutOfFrame, tLabel("of"))
+    checkpoint show(r.errors)
+    check r.status == sxSat
+    check not r.errors.hasKind(ceCaptureByRefUnmodelled)
 
 suite "RFC-0005 S8as (6): the alias check is by path":
   test "two fields of one object are two cells":
@@ -480,8 +484,12 @@ suite "RFC-0005 S8as (5): more `addr` forms are modelled":
   test "several pointers declared in one section":
     verdict(sutAddrTwoDecls, "md", sxSat)
     verdict(sutAddrTwoDecls, "md_dead", sxUnsat)
-  test "a pointer re-pointed under a branch still declines":
-    declines(sutAddrRepointBranch, "rb", heUnsafeCast, "addr")
+  test "a pointer re-pointed under a branch is decided":
+    ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
+    ## so a pointer re-pointed on one arm is exact (it declined here).
+    verdict(sutAddrRepointBranch, "rb", sxSat)
+    let r = symexFind(sutAddrRepointBranch, tLabel("rb"))
+    if r.status == sxSat: check r.witness[0] <= 0
 
 suite "RFC-0005 S8as (1): recursion on a symbolic argument":
   test "the walk drops an infeasible `if` arm inside a recursion":
@@ -506,8 +514,11 @@ suite "RFC-0005 S8as (1): recursion on a symbolic argument":
     verdict(sutLoopCache, "lc2", sxSat)
   test "past the call-depth budget it declines with the reason":
     ## `sumTo(5)` needs six frames; the default budget is three, so the
-    ## deep paths decline and say which budget to raise.
-    declines(sutSumTo, "st", beBudgetExhaustedUnmodelled, "maxCallDepth=3")
+    ## deep paths declined and said which budget to raise. RFC-0005 S8ax:
+    ## the frontier does not grow with depth, so the walk now extends past
+    ## `maxCallDepth` and reaches the label (the decline past the hard
+    ## budget is pinned in `tsymex_rfc0005_s8ax_remainder`).
+    verdict(sutSumTo, "st", sxSat)
     verdictS(sutSumTo, "st", sxSat,
              SymexSettings(budget: ResourceBudget(maxCallDepth: 7)))
 

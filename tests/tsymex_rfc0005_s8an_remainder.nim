@@ -345,9 +345,17 @@ suite "S8an (1): a routine declared inside the code under test":
 
   test "recursion past the call-depth budget declines, and decides with room":
     ## On a symbolic argument every level's `k <= 1` is open, so the walk
-    ## unrolls to `maxCallDepth` (3 by default) and the deepest path
-    ## declines; the satisfiable `fact(4) == 24` is found with room.
-    declines(sutRecDeep, "rd", beBudgetExhaustedUnmodelled, "maxCallDepth=3")
+    ## unrolled to `maxCallDepth` (3 by default) and the deepest path
+    ## declined. RFC-0005 S8ax: `n <= 5` bounds the recursion, so the
+    ## adaptive depth follows it past `maxCallDepth` and the default
+    ## settings now decide; the unbounded shape's decline is pinned in
+    ## tsymex_rfc0005_s8ax_remainder. The satisfiable `fact(4) == 24` is
+    ## found with room either way.
+    block:
+      let r0 = symexFind(sutRecDeep, tLabel("rd"))
+      checkpoint show(r0.errors)
+      check r0.status == sxSat
+      if r0.status == sxSat: check r0.witness[0] == 4
     let r = symexFind(sutRecDeep, tLabel("rd"),
       SymexSettings(budget: ResourceBudget(maxCallDepth: 8)))
     checkpoint show(r.errors)
@@ -498,8 +506,12 @@ suite "S8an (2): the address of a local passed as a ptr":
     verdict(sutAddrRaise, "ae", sxSat)
     verdict(sutAddrRaise, "ae_dead", sxUnsat)
 
-  test "a callee that may let the pointer escape declines, scoped":
-    declines(sutAddrEscape, "aesc", heUnsafeCast, "escape")
+  test "a callee that keeps the pointer is decided":
+    ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
+    ## which outlives the call, so the escape no longer declines.
+    verdict(sutAddrEscape, "aesc", sxSat)
+    let r = symexFind(sutAddrEscape, tLabel("aesc"))
+    if r.status == sxSat: check r.witness[0] == 2
 
   test "an addr actual the callee also reaches as a var declines, scoped":
     ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write).

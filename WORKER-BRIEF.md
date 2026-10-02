@@ -45,8 +45,9 @@ SendMessage to `Fix native crashes in proptest symex walker [13a13f]`.
   never in `~/work/nelli` itself. A fresh worktree does not compile until you
   set it up:
   - copy `nim.cfg` into it;
-  - `ln -sfn ~/work/deps/softlink _deps/softlink`;
-  - `ln -sfn ~/work/deps/nim-z3 _deps/z3`.
+  - COPY the deps in as real directories (`mkdir -p _deps && cp -r ~/work/nelli/_deps/softlink ~/work/nelli/_deps/z3 _deps/`).
+    Symlinks do not work: only the checkout is mounted into the container at /work, so they dangle (`cannot open file: z3`).
+- Image builds on this WSL host need `podman --cgroup-manager=cgroupfs build ...`.
 - Stage explicit paths only. Never use `git add -A` or `git add .`.
 - **Commits.** Conventional messages (`feat(symex): RFC-0005 S8xx -- ...`)
   with a body that explains why. NO Co-Authored-By trailer, and never mention

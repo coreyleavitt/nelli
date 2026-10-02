@@ -344,7 +344,7 @@ state = "pending"
 [[slice]]
 id = "S8ba"
 title = "S8au's remainder: seq[distinct] locals, compiler-temp misread as global, len(s) <= high(int) for string-derived indices, model global-reachable copy-in/out, deterministic split term order"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -8176,3 +8176,156 @@ capped verdict, one-shot step 3): without it `tsymex_rfc0005_s8o_termination`
 - **Z3 context order sensitivity.** Above. Any later change to the split's
   term construction can move costs by an order of magnitude with no change
   in the asserted text; S8ag's B1-1 probe (0.37M) is the canary.
+
+**As landed (S8ba, walker 200) — S8au's remainder.** Suite
+`tsymex_rfc0005_s8ba_remainder` (32 tests; c and cpp, both Z3 versions;
+timings below). The base is 9da3af6 (S8au); every item was RED there
+first.
+
+- (1) *A compiler temporary read as a global.* RED: a declined seq index
+  or pop (`seq[(int, string)]`) left its result temporary (`__sym_idx_N`,
+  `__sym_pop_N`) unbound, and its next read fell to the unbound-name arm,
+  which records `feGlobalReadUnmodelled` naming the temporary. Every
+  declining arm that owns a result now binds it: `declinedIndexEnv` at
+  isIndex's two forks, `declinedPopEnv` at isSeqPop's two (the pop's
+  element type is carried on `isSeqPop.spElemTy`), `declinedVariantEnv`
+  at the variant construct's four. A parser temporary (`__sym_*`, which
+  no Nim identifier can spell) read unbound is now
+  `weInternalWalkerFault`, never a global. Audit of the global read and
+  write sites: the walker classifies by `isGlobalEnvName` (the `__gl:`
+  prefix) and the parser by `isModuleGlobal` (the symbol's owner); no
+  other site confuses the two. `tsymex_rfc0005_s6a_budget`'s variant pin
+  loses its companion `feGlobalReadUnmodelled`.
+- (2) *`seq[distinct]` locals.* RED: `seNestedSeqUnsupported` (and the
+  stray global of item 1). The cell type of a seq is its element type
+  with every distinct layer stripped (`seqCellTy`): the backing array
+  holds the base sort, a store unwraps (`ejectBase`), and a read
+  re-boxes (`reboxSeqCell`). Literal, `.add`, index read and write,
+  `pop`, `for` and the HOF map/filter all route through it. A
+  `seq[distinct]` PARAMETER stays a scoped `feUnsupportedWitnessType`
+  (its witness needs a distinct-typed renderer). A user `==` on the
+  element is never replaced by base equality: `x in s`, `s.find(x)` and
+  `s == t` over a `Mod10` element are pinned never `sxUnsat` (they
+  decline or go through the user routine), and `s8c_resolution`'s seq pin
+  now declines as `feUnsupportedOp` instead of the fragment's kind.
+  **Soundness bug found:** `iekSeqAdd` had its own int64/bool store
+  dispatch, which stored an `svInt` value (a `range` parameter under the
+  default `isOptimised` semantics) as the constant 0, so `var s:
+  seq[int]; s.add(x); s[0] == 7` with `x: range[0..10]` was a false
+  `sxUnsat`; and `.add` on `seq[int32]`, `seq[byte]`, `seq[string]` or
+  `seq[float]` was `weInternalWalkerFault`. It now lowers the value at the
+  element's width and stores through `storeSeqElem`. Five round-6 pins
+  that used the `seq[byte]` width decline as their evidence that a
+  receiver stayed array-modelled (b1 B1-4, b7r B7R-7, lows N25-2, r4
+  W2a/W2b) now reach their labels and pin the absence of the
+  kind-mismatch decline instead.
+- (3) *`len <= high(int)`.* Step 1c asserts, beside `seqRangeFacts`,
+  `l <= high(int64)` for every seq / string length its caps name
+  (`seqLenCaps` returns them as `lens`; `nimLenFacts`). Built on the 1c
+  path only: building them for every query, in `seqLenCaps`, took B1-1
+  from 187199 units to 3555731 (the context-cost effect of S8o). RED at
+  base, `sxUnknown` ("no model ... 128 elements"): S8au's item-2 string
+  variant `t` is now `sxUnsat` (0.98M units; its `hit` `sxSat`, 0.86M),
+  and `rf_dead` without its `i < 100` bound `sxUnsat` (21k); both also
+  under `isExact` (the bit-vector encoding).
+- (4) *By reference through the heap cell.* RED: S8au's five dead labels
+  were `sxUnknown` (its decline). A heap `var` actual, or an `addr` one,
+  that a global or capture of the callee also reaches
+  (`outerReachesCell`) is now passed by reference: the callee is
+  specialised (`byRefSub`, `ensureProcRegistered(byRef)`), its formal's
+  uses spelled as the caller's lvalue (`f[]` / the hidden deref of a `var`
+  formal; a bare `var` formal passed on is `nnkHiddenAddr(lvalue)`, a
+  bare `ptr` formal `addr lvalue`), and the lvalue's last ref is a
+  hidden parameter in the formal's slot. Its symbol is a copy of the
+  caller's (`markByRef`: same symbol and type, a sentinel line info) that
+  `strVal` reads as `__byref_<N>`, so every name lookup in the parser
+  sees it by construction. The caller passes the ref evaluated at the
+  call; there is no write-back and no guard root for that argument, so
+  the callee's writes through the formal and through the global land on
+  one heap cell in its order, and a callee that rebinds the global does
+  not move the address (`hr`). The specialisation is keyed by formal,
+  base type (module, line, column; no path) and field path, so a
+  recursive call reaches its own key while it is parsed. All five dead
+  labels are `sxUnsat`, their live labels `sxSat`; also pinned: a global
+  root (`hd`), a rebind in the callee (`hr`), a ref behind two refs
+  (`o.inner.x`, `hn`) and a ref in a value field (`t.b.x`, `ht`). A shape
+  it cannot spell (a ref reached through an index, a generic callee, a
+  formal with a use it cannot rewrite) keeps S8au's decline (pinned:
+  `a[0].x`).
+- (5) *Split term order.* The axioms of a split are built once, by the
+  first query that reaches it: newly reached splits in lowering order,
+  each in `indexSplitAxioms`' fixed term order, before any chain or link
+  fact, and reused after (`IndexSplit.built`; pinned on a lowered split).
+  The query text and its term order are those of S8au. Building them
+  eagerly at lowering was measured and rejected: it puts the axioms of
+  splits no query reaches into the context, and on Z3 5.1 the target
+  units grew 22.9M vs 5.0M on `r6_n36_raise_degrade`, 12.2M vs 2.3M on
+  `s1c_verdict` and 10.9M vs 0.95M on `s8au_remainder`, and one more S8ag
+  (5) hit became a slow SAT. Canary: B1-1 has a unit ceiling per linked
+  Z3: <= 1M on 5.x (187199 in the suite, 380570 alone) and <= 3M on 4.x
+  (2293304; the base spends the same 2.29M on 4.13.4).
+
+*Measurements* (target units, `-d:symexQueryStats` totals):
+
+| probe | base 9da3af6 | S8ba |
+|---|---|---|
+| B1-1, 5.1 / 4.13.4 | 380570 / 2293440 (alone) | 380570 / 2293440 (alone) |
+| S8au item-2 string `t`, 5.1 | `sxUnknown` | `sxUnsat`, 0.98M (`hit` `sxSat`, 0.86M) |
+| `rf_dead` without `i < 100`, 5.1 | `sxUnknown` | `sxUnsat`, 21k |
+| `nimLenFacts` in `seqLenCaps` (rejected), B1-1 5.1 | — | 3555731 |
+
+Split axioms built eagerly at lowering (rejected) against built once at
+first reach (landed), suite totals on Z3 5.1:
+
+| suite | eager | first reach |
+|---|---|---|
+| `r6_n36_raise_degrade` | 22935434 | 4962163 |
+| `s1c_verdict` | 12221318 | 2291541 |
+| `s8au_remainder` | 10944767 | 952407 |
+| `r6_b1_stringbacked` | 437902 | 437902 |
+
+*Suites* (17df7ea plus the per-version B1-1 ceiling; `ok/failed`; Z3
+5.1 c, Z3 4.13.4 c). Every suite below passes at the base on both
+versions, except where its pin moved by this slice:
+
+| suite | 5.1 | 4.13.4 |
+|---|---|---|
+| `rfc0005_s8ba_remainder` (new; cpp 5.1 32/0) | 32/0 | 32/0 |
+| `rfc0005_s8au_remainder` (re-pinned) | 35/0 | 35/0 |
+| `rfc0005_s8ag_indexsplit` | 15/0 | 15/0 |
+| `rfc0005_s8y_budget_decline` | 8/0 | 8/0 |
+| `rfc0005_s1c_verdict` | 24/0 | 24/0 |
+| `r6_n36_raise_degrade` | 8/0 | 8/0 |
+| `rfc0005_s8ai_semantic` | 25/0 | 25/0 |
+| `rfc0005_s8aq_remainder` | 13/0 | 13/0 |
+| `rfc0005_s8an_remainder` | 25/0 | 25/0 |
+| `rfc0005_s8o_termination` | 14/0 | 14/0 |
+| `phase16_m3_rfind` | 6/0 | 6/0 |
+| `phase15_CR2_cachekey` (200) | 6/0 | 6/0 |
+| `rfc0005_s6a_budget` (re-pinned) | 31/0 | 31/0 |
+| `rfc0005_s8c_resolution` (re-pinned) | 25/0 | 25/0 |
+| `r6_n27_placeholder_read_audit` (84 + 3) | 4/0 | 4/0 |
+| `r6_b1_stringbacked` (re-pinned) | 7/0 | 7/0 |
+| `r6_b7r_bytescan` (re-pinned) | 26/0 | 26/0 |
+| `r6_lows_collectors` (re-pinned) | 5/0 | 5/0 |
+| `r6_r4_collector_scoping` (re-pinned) | 7/0 | 7/0 |
+| 27 more feGlobal / source-scanning suites (`163rev`, `s1_lattice`, `s1b`, `s5_str`, `s6b`, `s8ab`, `s8b`, `s8l`, `s8n`, `s8p`, `s8z`, the A2a / N2 / r11 / pairing / n36 class audits, `inv_structured_kinds`, `b7r2`, `bug2`, `n13`, `lows_declines`, `n27_hof`, `n37`, `r1`, `r6_emit`, `tot1`) | all 0 failed | all 0 failed |
+
+The new suite runs in 53 s (5.1) and 54 s (4.13.4) with its compile.
+
+*Different mechanisms, reported and not fixed here.*
+- **`s[i] == 'a'` with `i + 1 > s.len` over a capped string.** `i >= 0
+  and i < s.len and s[i] == 'a' and i + 1 > s.len` runs about 41M units
+  to `sxUnknown` in both encodings (60-160 s; 96 s at base). Item 3
+  removed its overflow-raise error; what is left is the label query
+  itself, slow from the Int/BV mixing of `str.at` at a symbolic index.
+- **A `seq[distinct]` parameter.** Still a scoped
+  `feUnsupportedWitnessType` (a witness renderer for distinct-typed
+  elements is its own work).
+- **The heap-depth budget.** `hr_dead` and both `hn` labels make more
+  than `maxHeapDepth = 8` dereferences on one path and decline as
+  `heDepthExhausted` at the default; the suite raises the budget to pin
+  the verdict. The budget counts every dereference of a path, not the
+  depth of a chain.
+- **By reference needs a symbol or a field for the ref.** A ref reached
+  through an index (`a[i].x`) or a call keeps S8au's `feUnsupportedOp`.

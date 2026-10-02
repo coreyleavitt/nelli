@@ -7130,13 +7130,15 @@ message:*
   kids: seq[O]`). The enclosing field declines per read, as above.
 - **A `Table` whose key or value the model does not back**: a `float` key,
   or a container value (`Table[string, seq[int]]`).
-- **A top-level witness of a container whose element, key or value is an
-  8-bit unsigned integer.** `uint8` and `char` are one IR type, so the
-  reader cannot tell which to build. The message (`unsupportedWitnessMsg`)
-  states this.
 
 The parameter in each is still walked, and any path that does not touch the
 declined access stays exact. The last suite of the new file pins these.
+
+On the rebase onto batch 1 (walker 190), S8am's `IRType.isChar` had
+already removed the char-ambiguity witness decline. The `uint8` key
+exclusion S8ar had added to `isRenderableTableTy` was dropped with it.
+`readTableAs[K, V]` builds a `uint8`- or `char`-keyed witness, and the
+last suite pins both as `sxSat` and replaying.
 
 Pins: `tests/tsymex_rfc0005_s8ar_remainder.nim`, 50 tests, one suite per
 item. Each reachable target has an unreachable twin, and witnesses replay

@@ -4581,13 +4581,12 @@ proc unsupportedWitnessMsg*(shape: string): string =
   ## RFC-0005 S8ar. The one statement of the witness-shape decline, shared
   ## by `allocateSym` and `unallocatableFieldIssue` (N40's parity). The
   ## pre-S8ar text listed `Table[string, int64]` and `HashSet[int64]` as the
-  ## whole container fragment, three slices out of date.
+  ## whole container fragment, three slices out of date. (S8am's `isChar`
+  ## made an 8-bit unsigned element, key or value renderable.)
   "unsupported witness shape `" & shape & "`: a witness renders " &
     "scalars, strings, tuples, arrays, objects, refs and the seqs, Tables " &
     "and HashSets the model backs, but not a container whose element, key " &
-    "or value is an 8-bit unsigned integer (`uint8` and `char` are one IR " &
-    "type, so the reader cannot tell which to build) or a type the model " &
-    "does not back"
+    "or value is a type the model does not back"
 
 proc tableKeyDeclineMsg*(keyTy: IRType): string =
   ## RFC-0005 S8ar. The one statement of the key-type decline.

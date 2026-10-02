@@ -344,22 +344,28 @@ suite "S8am (6b) char/byte/uint8 Table values and HashSet elements are reachable
 # suite pins THAT shape (the one item 6 is actually about) to confirm this
 # slice's `isCharAmbiguous` relaxation did not widen the gate past what is
 # actually backed.
+#
+# RFC-0005 S8ar backs every string or integer-like key and every
+# integer-like, string or float value, so `Table[int, int]` and
+# `Table[string, float]` now render (pinned `sxSat` in
+# tsymex_rfc0005_s8ar_remainder). The two pins below moved to shapes S8ar
+# still does not back: a `float` key and a container value.
 
-proc intKeyTable(t: Table[int, int]) =
+proc intKeyTable(t: Table[float, int]) =
   if t.len > 0: symexTarget("s8am_ikt")
 
-proc floatValTable(t: Table[string, float]) =
+proc floatValTable(t: Table[string, seq[int]]) =
   if t.len > 0: symexTarget("s8am_fvt")
 
 proc stringSet(s: HashSet[string]) =
   if s.len > 0: symexTarget("s8am_ss")
 
 suite "S8am (6c) non-string Table keys and non-int-family values/elements stay scoped declines":
-  test "Table[int, int] param -- non-string key -- feUnsupportedWitnessType":
+  test "Table[float, int] param -- unbacked key -- feUnsupportedWitnessType":
     let r = intKeyTable.symexFind(tLabel("s8am_ikt"))
     expectUnknown(r, feUnsupportedWitnessType)
 
-  test "Table[string, float] param -- non-int-family value -- feUnsupportedWitnessType":
+  test "Table[string, seq[int]] param -- container value -- feUnsupportedWitnessType":
     let r = floatValTable.symexFind(tLabel("s8am_fvt"))
     expectUnknown(r, feUnsupportedWitnessType)
 

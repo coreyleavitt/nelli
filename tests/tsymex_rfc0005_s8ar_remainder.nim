@@ -695,7 +695,10 @@ proc declTCRead(p: DeclHolder3) =
   if p.n == 2: symexTarget("decl_tc_read")
 
 proc declU8(t: Table[uint8, int]) =
-  if t.len == 1: symexTarget("decl_u8")
+  if 7'u8 in t and t[7'u8] == 3: symexTarget("decl_u8")
+
+proc declChar(t: Table[char, string]) =
+  if 'k' in t and t['k'] == "v": symexTarget("decl_char")
 
 suite "S8ar (10): every read of a cell asserts its well-formedness":
   template run(fn: typed, lbl: string, want: SymexStatusKind): untyped =
@@ -772,12 +775,15 @@ suite "S8ar: the declines that remain are scoped and stated":
     check not r2.errors.hasKind(seUnsupportedCompoundSortLeaf)
     check not r2.errors.hasKind(weInternalWalkerFault)
 
-  test "a uint8-keyed Table parameter's witness (char-ambiguous)":
+  test "uint8- and char-keyed Table parameters render (S8am's isChar tells them apart)":
     let r = symexFind(declU8, tLabel("decl_u8"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.anyIt(it.kind == feUnsupportedWitnessType and
-                         "8-bit unsigned" in it.msg)
+    check r.status == sxSat
+    if r.status == sxSat: check reproduces(declU8(r.witness[0]), "decl_u8")
+    let r2 = symexFind(declChar, tLabel("decl_char"))
+    checkpoint $r2.status & " " & show(r2.errors)
+    check r2.status == sxSat
+    if r2.status == sxSat: check reproduces(declChar(r2.witness[0]), "decl_char")
 
 suite "S8ar: walker version floor":
   test "walker version floor >= 191":

@@ -1340,9 +1340,10 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # RFC-0005 S8ar: the step is the ref's distance from a root plus one,
       # not a count of the path's derefs.
       # RFC-0005 S8an: an `addr` cell's read-back is not a program
-      # dereference; it does not count.
-      if not stmt.dCell and
-         heapDepthExhausted(p, w, heapStepOf(p, stmt.dPtr)): continue
+      # dereference; it does not count against the budget. Its value is
+      # still stamped with the step (below), as any heap read's is.
+      let step = heapStepOf(p, stmt.dPtr)   ## RFC-0005 S8ar
+      if not stmt.dCell and heapDepthExhausted(p, w, step): continue
       ## Drain-coverage audit: `stmt.dPtr` is always an env-resident var —
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means

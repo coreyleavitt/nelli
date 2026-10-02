@@ -202,12 +202,17 @@ suite "symex round-6 N25 -- regression: genuine (non-shadowed) mutation still ve
 
   test "N25-2: a genuinely var-aliased mutation of the real formal still excludes it from string-backing, unchanged by this fix":
     let r = symexFind(sutN25GenuineMutationStillVetoed, tLabel("n25_genuine_veto_regression"))
-    check r.status == sxUnknown
-    var sawWidthDecline = false
+    # RFC-0005 S8ar: `.add` stores at every backed element width
+    # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
+    # receiver staying ARRAY-modelled is now shown by the add succeeding: a
+    # receiver wrongly string-backed reaches `iekSeqAdd`'s receiver-kind
+    # decline ("expected svSeq", a `weInternalWalkerFault`) and is never
+    # sxSat.
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check e.kind != weInternalWalkerFault
+      check "nested seq element type is not supported" notin e.msg
+      check "expected svSeq" notin e.msg
 
 # =============================================================================
 # Version pin

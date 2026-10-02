@@ -166,7 +166,7 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
     let r = symexFind(dataLenStringBacked, tLabel("data_len_sat"))
     check r.status == sxSat
 
-  test "B1-4: a mutated seq[byte] param stays array-modeled (pre-existing add-width gap, not the string-mismatch fault)":
+  test "B1-4: a mutated seq[byte] param stays array-modeled (its add is modelled since RFC-0005 S8ar; not the string-mismatch fault)":
     ## N47-followup (walker v110, diagnosis round after bea6921): N47 (v109)
     ## converted the raw `.add`-width raise into an in-band degrade, but the
     ## degraded receiver's REBIND left `data.len`/`data[0]` (both reached by
@@ -186,29 +186,31 @@ suite "symex round-6 B1 — string-backed seq[byte] params":
     ## instead of position 0. The no-loop diagnostic below (same add-width
     ## gap, no unrelated loop noise) DOES land the reference at `errors[0]`.
     let r = symexFind(mutatedByteSeqStaysArray, tLabel("mutated_stays_array"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    var sawWidthDecline = false
+    # RFC-0005 S8ar: `.add` stores at every backed element width
+    # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
+    # receiver staying ARRAY-modelled is now shown by the add succeeding: a
+    # receiver wrongly string-backed reaches `iekSeqAdd`'s receiver-kind
+    # decline ("expected svSeq", a `weInternalWalkerFault`) and is never
+    # sxSat.
+    check r.status == sxSat
     for e in r.errors:
+      check e.kind != weInternalWalkerFault
       check "nested seq element type is not supported" notin e.msg
-      check "receiver not svSeq" notin e.msg
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check "expected svSeq" notin e.msg
 
-  test "B1-4 diagnostic: the no-loop ground truth hits the IDENTICAL pre-existing gap":
+  test "B1-4 diagnostic: the no-loop ground truth is sxSat (the add-width gap closed in RFC-0005 S8ar)":
     let r = symexFind(addMutationNoLoopDiagnostic, tLabel("add_no_loop_sat"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors[0].kind == weInternalWalkerFault
-    check "unsupported width" in r.errors[0].msg
-    var sawWidthDecline = false
+    # RFC-0005 S8ar: `.add` stores at every backed element width
+    # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
+    # receiver staying ARRAY-modelled is now shown by the add succeeding: a
+    # receiver wrongly string-backed reaches `iekSeqAdd`'s receiver-kind
+    # decline ("expected svSeq", a `weInternalWalkerFault`) and is never
+    # sxSat.
+    check r.status == sxSat
     for e in r.errors:
+      check e.kind != weInternalWalkerFault
       check "nested seq element type is not supported" notin e.msg
-      check "receiver not svSeq" notin e.msg
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check "expected svSeq" notin e.msg
 
   test "B1-5: a seq[byte] param with no consuming loop is unaffected (regression sweep)":
     let r = symexFind(noConsumingLoop, tLabel("no_consuming_loop_sat"))

@@ -103,8 +103,9 @@ proc endsWithHit(s: string) =
 
 proc endsWithRun(s: string) =
   # A greedy run at the end: PCRE's match is the longest, so `endsWith` is
-  # "some non-empty suffix is in the language".
-  if s.endsWith(re"b+") and not s.contains(re"b"):
+  # "some non-empty suffix is in the language". Bounded: unbounded, Z3
+  # 4.13.4 leaves it undecided past maxSeqLen (`beSolverUndef`).
+  if s.len <= 8 and s.endsWith(re"b+") and not s.contains(re"b"):
     symexTarget("ay_ends_run")
 
 proc endsWithAltOrder(s: string) =

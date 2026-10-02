@@ -1052,6 +1052,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bb_constructs",
             "tsymex_rfc0005_s8bb_captures",
             "tsymex_rfc0005_s8bb_capvalues",
+            "tsymex_rfc0005_s8bb_capvalues_plus",
+            "tsymex_rfc0005_s8bb_capvalues_lf",
             "tsymex_rfc0005_s8bb_replace",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound

@@ -279,6 +279,14 @@ proc delOob(xs: seq[int], i: int) =
   ys.del(i)
   discard ys
 
+proc delOobNatural(xs: seq[int], i: int) =
+  ## RFC-0005 S8bb: `i` past the `Natural` conversion, so the first raise
+  ## `del` can reach is its index check.
+  var ys = xs
+  if i >= 0:
+    ys.del(i)
+  discard ys
+
 suite "N14 — seq `.del(i)` (swap-with-last)":
   test "SAT: del shrinks .len by exactly one":
     let r = symexFind(delShrinksLen, tLabel("del_len_ok"))
@@ -309,7 +317,7 @@ suite "N14 — seq `.del(i)` (swap-with-last)":
     check r.status == sxUnsat
 
   test "defect: OOB index forks IndexDefect on del":
-    let r = symexFind(delOob, tIndexError())
+    let r = symexFind(delOobNatural, tIndexError())
     check r.status == sxRaised
     check r.raisedTypeId == "IndexDefect"
     let xs = r.raisedWitness[0]
@@ -317,6 +325,17 @@ suite "N14 — seq `.del(i)` (swap-with-last)":
     ## RFC-0005 S8g: only i >= len is IndexDefect; i < 0 is RangeDefect
     ## (probed: `@[1,2,3].del(-1)` raises RangeDefect).
     check i >= xs.len
+
+  test "defect: del's Natural conversion raises first (RangeDefect, i < 0)":
+    ## RFC-0005 S8bb: the raises fork in evaluation order. `del(x, i:
+    ## Natural)` converts `i` before its index check runs, so a negative
+    ## `i` is the first raise -- this suite pinned the IndexDefect fork on
+    ## the unguarded `delOob` only because the drain forked the seq-OOB sink
+    ## before the RangeDefect sink whatever the order.
+    let r = symexFind(delOob, tIndexError())
+    check r.status == sxRaised
+    check r.raisedTypeId == "RangeDefect"
+    check r.raisedWitness[1] < 0
 
   test "walker version floor >= 121 (N14 del)":
     check parseInt(symexWalkerVersion) >= 121

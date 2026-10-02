@@ -451,10 +451,22 @@ proc heapLeafSuffixes(ty: IRType): seq[string] =
         r.add "__@." & part.label & sub
     r
 
+proc heapStoreValue(valSV: SymVal; proto: SymVal; ty: IRType): SymVal
+
 proc heapLeafRaw(sv: SymVal; ty: IRType): RawZ3Ast =
   ## RFC-0005 S8ar. The term a scalar part `sv` of type `ty` stores: an
   ## `int` part held as a Z3 Int (a promoted value) is the heap's bitvector
   ## of its width (`isDerefWrite`'s own svInt -> BV coercion).
+  ##
+  ## RFC-0005 batch 3: a signed `int` part of an Int-sorted heap
+  ## (`intHeapCell`, S8as; every signed `int` since S8ax) is held as an
+  ## Int, the sort `liftHeapValue` reads it back as and `heapValueSort`
+  ## gives its leaf heap (from this term), as `heapStoreValue` stores a
+  ## scalar cell. Before, S8ar's tree leaves stored the bit-vector while
+  ## the read wrapped it as an Int: an ill-sorted term at the first
+  ## comparison (`Sorts (_ BitVec 64) and Int are incompatible`).
+  if ty.kind == itInt and intHeapCell(ty):
+    return heapStoreValue(sv, sv, ty).zi.raw
   if ty.kind == itInt and sv.kind == svInt:
     case ty.width
     of 8:  return intToBv[8](sv.zi, Z3BitVec[8]).raw
@@ -1055,8 +1067,14 @@ proc heapCellStore(ctx: Z3Context; cell: HeapCell; refAst: Z3AnyAst;
     return @[(cell[0].key, wrap[Z3AnyAst](ctx,
       checkedStore(ctx, cell[0].arr.raw, refAst.raw, fresh)))]
   if not heapCompoundTy(valTy):
+    # RFC-0005 batch 3: an `int` value in its heap's sort (`heapLeafRaw`:
+    # an Int for an Int-sorted heap, else the bit-vector of its width), as
+    # a tree value's leaves are; S8at's whole store of a ref case object
+    # passed a constructor's bit-vector part into an Int-sorted field heap.
+    let raw = if valTy != nil: heapLeafRaw(valSV, valTy)
+              else: rawAnyAstOf(valSV)
     return @[(cell[0].key, wrap[Z3AnyAst](ctx,
-      checkedStore(ctx, cell[0].arr.raw, refAst.raw, rawAnyAstOf(valSV))))]
+      checkedStore(ctx, cell[0].arr.raw, refAst.raw, raw)))]
   # RFC-0005 S8ar: the shape check is recursive (`svFitsHeapTy`), for a
   # tree value's parts.
   let fits = svFitsHeapTy(valSV, valTy)
@@ -1581,16 +1599,12 @@ proc refVariantWholeRead(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
 proc refVariantWholeStore(ctx: Z3Context; p: Path; refSort: RawZ3Sort;
                           refAst: Z3AnyAst; ty: IRType; val: SymVal): HeapCell =
   ## RFC-0005 S8at. `val` stored at `refAst`, part by part into the field
-  ## heaps. Precondition: `svFitsHeapTy(val, ty)`. A promoted `int` part is
-  ## stored as its heap's bitvector (`heapLeafRaw`).
+  ## heaps. Precondition: `svFitsHeapTy(val, ty)`. An `int` part is stored
+  ## in its heap's sort (`heapCellStore`, through `heapLeafRaw`).
   let parts = svPartsOf(val, ty)
   for i, s in refVariantSlots(ty):
     let cell = heapCellArrays(ctx, p, s.key, refSort, s.ty, s.variantTy)
-    let part =
-      if s.ty.kind == itInt and parts[i].kind == svInt:
-        liftHeapValue(ctx, heapLeafRaw(parts[i], s.ty), s.ty)
-      else: parts[i]
-    for c in heapCellStore(ctx, cell, refAst, part, s.ty): result.add c
+    for c in heapCellStore(ctx, cell, refAst, parts[i], s.ty): result.add c
 
 proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## Stage 7 (CR-7) Cluster R extraction. Called from `walk`'s case arm for

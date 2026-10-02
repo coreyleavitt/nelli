@@ -8485,3 +8485,85 @@ The new suite runs in 6.4 s without its compile; 69 s (5.1) and 74 s
   reached through a pointer dereference (`pb[].x`, `pb: ptr Box`), a
   conversion or a cast is refused by `byRefSub` and falls back to S8au's
   `feUnsupportedOp` (by the code path; not pinned).
+
+**As landed (S8bf, walker 206 provisional; S8be holds 205) — S8bd's
+soundness finding.** Suite `tsymex_rfc0005_s8bf_alias` (13 tests; c on
+both Z3 versions, cpp 5.1; the binary runs in ~2 s). The base is 09f6804
+(S8bd).
+
+- *The bug.* `let q = p; setBoth(p.x, q.x)` with `setBoth(a, b: var
+  int) = b = 2; a = 1` was a false `sxSat` for `p.x != 1`: the two
+  copy-in/copy-out write-backs ran in argument order, not the callee's
+  write order. `varActualMayAlias` asked whether another argument names
+  the lvalue's root or has a TYPE that can hold a ref to the cell; `q.x`
+  is a different symbol of type `var int`. RED at the base, every dead
+  label `sxSat` and every reachable twin `sxUnsat`: a `let` copy, a
+  `let`/`var` chain, a ref in a tuple (`t[0].x`), a ref through a field of
+  another ref (`o.inner.x`), two parameter refs (`p == q`), a `let` copy
+  of a parameter, a `var` formal forwarded to a second callee, two `addr`
+  actuals (`ptr int` formals) and a mixed `var` / `addr` pair.
+- *The check.* `heapCellsMayMeet` asks whether two heap lvalues may be one
+  cell whatever their roots: the objects their last dereferences address
+  may be one (same type, or either side takes part in inheritance) and
+  one field path from there is a prefix of the other (`p.x`/`q.x`,
+  `p.v`/`q.v.n`; an index, a tuple's included, matches any index). A
+  `ptr` dereference on either side meets any heap lvalue. Root identity
+  plays no part. `varActualMayAlias` and `addrActualMayAlias` consult it
+  for every other actual (`actualCell`: a `var` or `addr` actual's
+  lvalue, or a non-scalar value Nim may pass by pointer).
+- *The model.* `userCallStmt` gives each `var` / `addr` heap actual its
+  `peers`, the others whose cell may be its own, and passes every one of
+  them by reference (S8ba's `byRefSub`), each excused from the alias
+  check by the others: the callee's writes land on the heap in its order
+  and the heap decides whether the refs are one (the parameter pair is
+  `sxSat` both ways). An actual that cannot be passed so (`pb[].x`,
+  `pb: ptr Box`) takes the write-back, which declines `feUnsupportedOp`
+  naming it (pinned). Precision gained: one ref named twice
+  (`setBoth(p.x, p.x)`) and two elements of one array of refs were
+  declines and now decide. Two fields (`p.x`, `q.y`) and two fresh
+  allocations stay on the exact write-back path (pinned).
+- *Audit.* Every caller of `varActualMayAlias` (the by-reference gate,
+  the plain-variable write-back, the heap write-back) and of
+  `addrActualMayAlias` (the by-reference gate, the cell model) now sees
+  the cell. `outerReachesCell` is type-based (no root identity). The
+  walker's `cGuardRoots` compares root names, which is exact for a
+  variable; a heap cell reached through another global is
+  `outerReachesCell`'s. A plain variable and a `ptr` to it (`let pp = addr
+  x; setBoth(pp[], x)`) already declined (the alias is substituted at
+  parse). A large object passed by value beside a `var` of the same cell
+  (`setRead(p.v, q.v)`, which Nim passes by pointer) now declines.
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8bf_alias`
+13/0 (cpp 13/0), `s8bd_remainder` 23/0, `s8ba_remainder` 32/0,
+`s8au_remainder` 35/0, `s8an_remainder` 25/0, `s8ac_remainder` 19/0,
+`s8i_models` 39/0, `s8_scope` 28/0, `phase15_CR2_cachekey` (206) 6/0,
+`phase14_var_param` 1/0, `phase14_var_param_downstream` 2/0,
+`163_opaque_transparent` 15/0, `163rev_assign_scope` 10/0,
+`163rev_assign_sites` 33/0, `163rev_degrade_classification` 8/0,
+`163rev_inert_argfork` 9/0, `163rev_inert_exclusions` 15/0,
+`163rev_transparent_guard` 9/0, `163rev_transparent_result` 4/0,
+`phase12_witnesses` 10/0, `r5_bv32_width` 8/0, `r6_lows_blockparse`
+6/0, `rectify_effects` 5/0, `s2_replay` 15/0, `s6a_budget` 31/0. (S8as
+has no suite: its row is pending.)
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: a call through a proc-valued variable drops its `var`
+  writes.** `let f = setBoth; var x = k; var y = k; f(x, y); if x != 1:
+  symexTarget("d")` is `sxSat` with no error (Nim gives `x == 1`); the
+  same with a heap actual (`f(p.x, y)`). The closure-call arm
+  (`mkClosureCall`) lowers the arguments by value and has no write-back
+  at all; not an aliasing question.
+- **SOUNDNESS: a `ptr` parameter never addresses a ref object's field.**
+  `proc s(pi: ptr int; q: Box) = q.x = 1; pi[] = 2; if q.x == 2:
+  symexTarget("pd")` is `sxUnsat` (hint `hePtrFamily` only); Nim reaches
+  it with `pi = addr q.x`. The heap keeps `ptr int` cells apart from
+  `Box.x` fields, with or without a call (`setBoth(pi[], q.x)` is the same
+  `sxUnsat`, at the base by write-back and now by reference).
+- **SOUNDNESS (to confirm): an inheritance ref conversion is
+  ill-sorted.** `Base(d) == b` (`d: Derived`, `b: Base`) is
+  `weInternalWalkerFault` ("Z3 sort mismatch at equality"), and with
+  `setBoth(Base(d).x, b.x)` the dead label reports `sxRaised` beside the
+  faults. Identical at the base.
+- **PRECISION: a ref reached through a pointer dereference.** `pb[].x`
+  still cannot be passed by reference (S8bd's reported item), so a pair
+  holding it declines.

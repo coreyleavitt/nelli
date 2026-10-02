@@ -21412,6 +21412,17 @@ proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
   ## RFC-0005 S8at. A witness `seq[T]` of any renderable element type, at
   ## `name` (`extractFromSymVal`'s `seqLens` + `.<i>` element leaves): a
   ## `Table`'s seq value, which the table reader reaches generically.
+  ## RFC-0005 S8bc: also a by-value `seq[char]` / `seq[Enum]` (the fixed
+  ## width readers return `seq[uint8]`, not the declared type). A `char` or
+  ## enum element converts by value (`cast` from the 64-bit leaf is a
+  ## byte-order-dependent reinterpretation), and a string-backed `seq[char]`
+  ## (one whole-string leaf, as `readSeqUInt8` reads it) is read per byte.
+  when T is char:
+    if w.strVals.hasKey(name):
+      let s = w.strVals[name]
+      result = newSeq[T](s.len)
+      for i in 0 ..< s.len: result[i] = s[i]
+      return
   let n = w.seqLens.getOrDefault(name, 0)
   result = newSeq[T](n)
   for i in 0 ..< n:
@@ -21422,6 +21433,9 @@ proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
       if w.float32Vals.hasKey(p): result[i] = w.float32Vals[p]
     elif T is SomeFloat:
       if w.float64Vals.hasKey(p): result[i] = T(w.float64Vals[p])
+    elif T is char or T is enum:
+      if w.uintVals.hasKey(p): result[i] = T(w.uintVals[p])
+      elif w.intVals.hasKey(p): result[i] = T(w.intVals[p])
     else:
       if w.uintVals.hasKey(p): result[i] = cast[T](w.uintVals[p])
       elif w.intVals.hasKey(p): result[i] = witnessIntAs[T](w.intVals[p])

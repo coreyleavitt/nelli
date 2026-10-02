@@ -804,6 +804,7 @@ proc stdName(name: string): NimNode =
   of "readSetInt": bindSym"readSetInt"
   of "readTableAs": bindSym"readTableAs"   # RFC-0005 S8ar
   of "readSetIntAs": bindSym"readSetIntAs"             # RFC-0005 S8z
+  of "readSeqAs": bindSym"readSeqAs"                   # RFC-0005 S8bc
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
@@ -1147,6 +1148,20 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
        ty.seqElemTy.width == 64:
       (newTree(nnkBracketExpr, stdName("seq"), stdName("int")),
        newCall(stdName("readSeqInt"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itInt and
+         (ty.seqElemTy.isChar or ty.seqElemTy.enumName.len > 0):
+      # RFC-0005 S8bc: a `char` or enum element. The fixed-width arm below
+      # keys on width and signedness only, so `seq[char]` and `seq[Col]`
+      # were spelled `seq[uint8]`: a top-level witness did not replay at
+      # the parameter's type, and an object field of either type failed
+      # the compile (`seq[uint8]` assigned to a `seq[char]` slot). The
+      # element type is rendered as a scalar of it is (`char`, the enum),
+      # and read through `readSeqAs[T]`.
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
+                       copyNimTree(elemTyNode)),
+               witId, newLit(path)))
     elif ty.seqElemTy.kind == itInt:
       # RFC-chapulin-hardening M1: fixed-width-int seq elements
       # (`byte`/`uint8..uint64`, `int8..int32` — `int64` is the arm above).

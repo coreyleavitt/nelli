@@ -99,9 +99,9 @@ const routineShapedForClosureDetect* = RoutineNodes - {nnkDo, nnkLambda}
 const nestedRoutineScanBoundary* = RoutineNodes - {nnkDo}
   ## RFC-parser-normalization N3. Answers: "does this node start a NESTED
   ## scope the A3 (ADR-0014) shallow scanners — `hasYieldShallow`,
-  ## `hasReturnShallow`, `hasKindShallow` (and so `hasBreakContinueShallow`),
-  ## and `substIteratorParams` — must not descend into". A `yield`/`return`/
-  ## `break`/`continue`/parameter-name occurrence inside a nested routine
+  ## and `hasReturnShallow`, `hasKindShallow` (and so
+  ## `hasBreakContinueShallow`) — must not descend into". A `yield`/`return`/
+  ## `break`/`continue` occurrence inside a nested routine
   ## definition belongs to THAT routine, not to the iterator body being
   ## characterized for A3's inline transform, so descent stops here.
   ##
@@ -4048,21 +4048,9 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Phase 15 F5: detect int<->float conversions; other explicit conversions
     # (int widening, etc.) fall through to pass-through unwrapping.
     let operand = n[n.len - 1]
-    if operand.kind == nnkIdent:
-      # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
-      # untyped ident (`substIteratorParams`): its type cannot be read,
-      # so which conversion this is (a narrowing, a range check, an
-      # int <-> float) is unknown. `valueTypeName` failed the whole
-      # compile ("node has no type") -- reached by `pairs` over a
-      # `Table[K, seq[V]]`. A recorded decline, as the catch-all's.
-      let dummyTy = classifyType(n).ty
-      preamble.add ctx.declineAtSite(
-        feUnsupportedExprKind,
-        "conversion `" & n.repr & "` of an inlined iterator parameter: " &
-          "its type is not known here",
-        "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
-      let dummy = zeroValueForType(dummyTy)
-      return (if dummy != nil: dummy else: mkIntLit(0))
+    # RFC-0005 S8bc: an inlined iterator's parameter is its typed formal
+    # symbol (the S8at untyped-ident decline here is gone with the
+    # substitution that produced the ident).
     let tgt = typeNodeName(n[0])
     let src = valueTypeName(operand)
     if tgt in fltTyNames and src in intTyNames:
@@ -4139,6 +4127,32 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       let tgtWidthV = intTyWidth(tgtN)
       let srcSigned = intTySigned(srcN)
       let tgtSignedV = intTySigned(tgtN)
+      # RFC-0005 S8bc: a constant operand -- a typed integer literal
+      # (`int(-200'i16)`) or `low`/`high` of an int-family type
+      # (`int(high(int32))`, which the parser lowers to an untagged literal
+      # through `lowHighIntLit`) -- whose value the target holds is that
+      # value. It reached `mkConvIntWidth`, whose walker asserts a BV operand
+      # of the source width, while an untagged literal lowers at 64 bits: a
+      # `weInternalWalkerFault` on `y > int(high(int32))`. The hidden
+      # conversion arm already passes a literal through (`isIntLiteralNode`).
+      let lowHighOp = operand.kind == nnkCall and operand.len == 2 and
+        operand[0].kind == nnkSym and operand[0].strVal in ["low", "high"] and
+        isStdlibDecl(operand[0]) and typeNodeName(operand[1]) in intTyNames
+      if isIntLiteralNode(operand) or lowHighOp:
+        let v =
+          if lowHighOp:
+            lowHighIntLit(typeNodeName(operand[1]),
+                          wantLow = operand[0].strVal == "low")
+          else: operand.intVal
+        let fits =
+          if tgtSignedV:
+            tgtWidthV >= 64 or
+              (v >= -(1'i64 shl (tgtWidthV - 1)) and
+               v < (1'i64 shl (tgtWidthV - 1)))
+          else:
+            v >= 0 and (tgtWidthV >= 64 or v < (1'i64 shl tgtWidthV))
+        if fits and (srcSigned or v >= 0):
+          return mkIntLit(v)
       # RFC-0005 S8j: which conversions range-check. Probed on the pinned
       # toolchain (c and cpp identical), with the operand through a noinline
       # identity so nothing folds:
@@ -4279,20 +4293,6 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # `NimTypeKind` a generic/concept instantiation might produce.
       if isIntLiteralNode(wrapped):
         parseExpr(wrapped, preamble, ctx)
-      elif wrapped.kind == nnkIdent:
-        # RFC-0005 S8at: an inlined iterator's parameter, substituted by an
-        # untyped ident (`substIteratorParams`), under a hidden conversion:
-        # `classifyType(wrapped)` failed the whole compile ("node has no
-        # type"), so whether the conversion widens is unknown. Reached by
-        # `pairs` over a `Table[K, seq[V]]`. A recorded decline, as the
-        # explicit conversion's (`nnkConv`).
-        preamble.add ctx.declineAtSite(
-          feUnsupportedExprKind,
-          "hidden conversion of inlined iterator parameter `" &
-            wrapped.repr & "`: its type is not known here",
-          "conversion of an inlined iterator parameter (feUnsupportedExprKind)")
-        let dummy = zeroValueForType(classifyType(n).ty)
-        if dummy != nil: dummy else: mkIntLit(0)
       else:
         let outerCls = classifyType(n)
         let innerCls = classifyType(wrapped)
@@ -6669,26 +6669,6 @@ proc hasBreakContinueShallow(n: NimNode): bool =
   ## loopStack.len==0 → path dropped while later inlined yields still run →
   ## wrong surviving state → false positive (CRIT-2/SF-1, ADR-0014 D4-2).
   hasKindShallow(n, {nnkBreakStmt, nnkContinueStmt})
-
-proc substIteratorParams(n: NimNode,
-                         paramSubst: Table[string, string]): NimNode =
-  ## Deep-copy `n`, replacing every `nnkSym`/`nnkIdent` whose `strVal` is
-  ## a key in `paramSubst` with a fresh `nnkIdent` of the mapped gensym'd
-  ## name. Only USE sites are affected: formal params never appear as
-  ## declaration-site `nnkSym` inside the body (they are the routine's own
-  ## formals, not body-declared locals), so `classifyType` on declaration-
-  ## site identifiers is unaffected. Does NOT descend into nested routines
-  ## to avoid capturing their params (different scope).
-  if n.kind in {nnkSym, nnkIdent}:
-    let s = n.strVal
-    if s in paramSubst:
-      return ident(paramSubst[s])
-    return n
-  if n.kind in nestedRoutineScanBoundary:
-    return n   ## own scope — do not substitute inside
-  result = n.copyNimNode()
-  for c in n:
-    result.add substIteratorParams(c, paramSubst)
 
 proc sameSym(a, b: NimNode): bool =
   ## RFC-chapulin-hardening R6 (ADR-0025 hardening). True iff `a` and `b` are
@@ -10788,9 +10768,18 @@ proc parseStmtInner(n: NimNode,
         # local spelled like a caller local gets its own slot (and a body
         # local shadowing an iterator param is not substituted as the param).
         claimRoutine(impl)
-        # D2 step 2: bind each formal param to a gensym'd let.
+        # D2 step 2: bind each formal param to a `let` of its own scoped
+        # name. RFC-0005 S8bc: the body keeps its TYPED parameter symbols.
+        # They were replaced by untyped `__sym_itp_N` idents
+        # (`substIteratorParams`), so every site that reads an operand's
+        # type (a conversion's source width, a hidden widening) could not:
+        # `int(n)` of a parameter declined (S8at), and a hidden `int32 ->
+        # int` widening of one was a walker fault. `claimRoutine(impl)`
+        # above already gives each formal a name unique in this scope (a
+        # caller local of the same spelling claimed first, so the formal is
+        # the one renamed), so the substitution bought nothing the scoped
+        # name does not.
         ctx.activeIterators.incl itSymName
-        var paramSubst = initTable[string, string]()  # param name → gensym'd name
         var preambleStmts: seq[IRStmt]
         var argIdx2 = 0
         for fi in 1 ..< formal.len:
@@ -10800,16 +10789,14 @@ proc parseStmtInner(n: NimNode,
           let cls = classifyType(tyNode)
           let defaultNode = paramDef[paramDef.len - 1]
           for pj in 0 ..< paramDef.len - 2:
-            let paramName = paramDef[pj].strVal
-            let synthName = freshSynth(ctx, "itp")
-            paramSubst[paramName] = synthName
+            let bindName = paramDef[pj].strVal   # scoped (RFC-0005 S8e)
             let argNode =
               if argIdx2 < iterExpr.len - 1: iterExpr[argIdx2 + 1]
               else: defaultNode  # use the pre-checked literal/const default
             var argPre: seq[IRStmt]
             let argIR = parseExpr(argNode, argPre, ctx)
             for s in argPre: preambleStmts.add s
-            preambleStmts.add mkLet(synthName, cls.ty, argIR)
+            preambleStmts.add mkLet(bindName, cls.ty, argIR)
             inc argIdx2
         # D2 step 3+4: substitute params in body, rewrite yields, parse.
         # Compute the iterator element type from its DECLARED return type in
@@ -10837,8 +10824,7 @@ proc parseStmtInner(n: NimNode,
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
             iterVarBindings.add (name, yieldElemTyTop.fields[k])
-        let substBody = substIteratorParams(implBody, paramSubst)
-        let bodyIR = parseIterBodyStmt(substBody, iterVarBindings, bodyNode, ctx)
+        let bodyIR = parseIterBodyStmt(implBody, iterVarBindings, bodyNode, ctx)
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:

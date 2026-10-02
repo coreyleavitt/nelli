@@ -7169,6 +7169,19 @@ swapped for a shape that still reaches the same site:
   - `iekSeqAdd`'s two per-kind store reads become one `storeSeqElem` read;
   - `iekSeqInsert` adds its guard and five reads behind it;
   - `extractSeqElements` gains a `seq[string]` arm.
+- `r6_b1_stringbacked` B1-4, `r6_b7r_bytescan` B7R-7, `r6_lows_collectors`
+  N25-2, `r6_r4_collector_scoping` R4-W2a/b: a mutated `seq[byte]`
+  receiver's `add` is modelled. These pins showed the receiver stayed
+  array-modelled by its width-8 `add` decline. They now show it by the
+  `add` succeeding: the run is `sxSat` with no receiver-kind walker fault.
+  A receiver wrongly string-backed reaches `iekSeqAdd`'s "expected svSeq"
+  decline instead.
+- `rfc0005_s8u_precision`, `rfc0005_s8_scope`: an unbacked Table is now
+  `Table[float, int]` / `Table[string, seq[int]]`.
+
+Caught on symex-mingw, not by the local affected-suite runs: the six
+suites in the last two bullets above. They pinned the closed gaps, and
+none was in the set run locally.
 
 Caught on cpp, not on c: a `Table[string, float]` read compared against a
 dangling sort ("fp sorts expected", `k!0` as the data array's range).

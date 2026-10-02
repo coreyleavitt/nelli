@@ -941,7 +941,14 @@ suite "Phase 15 CR-2 — version bumps":
     ## declines; var ptr modelled; every find / rfind needle splits;
     ## consecutive chain facts; the c-notin-t form per Z3 version).
     ## Provisional 194.
-    check symexWalkerVersion == "194"
+    ## RFC-0005 S8av (the cache value carries gaps() on a verdict-cache hit,
+    ## closing S11's own "cache hit returns empty gaps" remainder). 190->195
+    ## (191-194 reserved for sibling slices landing on the same channel tip).
+    ## RFC-0005 S8az (S8av's own remainder: the :sat witness and
+    ## :raised:<type> cache slots also carry gaps() on a hit now). 195->199
+    ## (196-198 reserved for sibling slices on the same channel tip; S8ay
+    ## holds 198).
+    check symexWalkerVersion == "199"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

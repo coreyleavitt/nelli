@@ -48,15 +48,17 @@ suite "symex Phase 15 E2a — structural sxRaised cascade + multi-finding cache"
     saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(), found, errors)
     check errors.len == 0
 
-    # Fresh load — reconstruct the full seq from the DB (no Z3).
+    # Fresh load — reconstruct the full seq from the DB (no Z3). RFC-0005
+    # S8az: `loadSymexRaisedImpl` now returns `seq[CachedRaised]` (the
+    # `RawResult` paired with its stored `gaps`), not a bare `seq[RawResult]`.
     var loadErrors: seq[string] = @[]
     let reloaded = loadSymexRaisedImpl(db, prog, target,
                                        defaultSymexSettings(), loadErrors)
     check reloaded.len == 2
     var typeIds: seq[string]
     for r in reloaded:
-      check r.status == sxRaised
-      typeIds.add r.raisedTypeId
+      check r.raw.status == sxRaised
+      typeIds.add r.raw.raisedTypeId
     check "ValueError" in typeIds
     check "IOError" in typeIds
 

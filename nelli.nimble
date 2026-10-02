@@ -1070,5 +1070,26 @@ task test, "Run the test suite":
             # consecutive chain facts; the c-notin-t form per Z3 version.
             # Items 1-2 (closed by S8ad) re-pinned. Walker 194
             # (provisional).
-            "tsymex_rfc0005_s8au_remainder"]:
+            "tsymex_rfc0005_s8au_remainder",
+            # RFC-0005 S8av -- S8am's and S11's remainder: the public cache
+            # macros (saveSymexWitness/loadSymexWitnesses/saveSymexVerdict/
+            # loadSymexVerdict) route dbErrors via recordSymexDbError instead
+            # of discarding them; db.nim's F6/secondary/corpus/scheduler
+            # wrappers raise DbError on a nil optional closure instead of
+            # SIGSEGV-ing; a served sfUnknown/sfUnsat verdict cache hit also
+            # serves its stored gaps() (CachedVerdict widened, an entry
+            # without gaps metadata degrades to gaps: @[] rather than a
+            # miss); S8am's "raise-irrelevant-parameter witness sentinel" is
+            # proved to be IndexDefect's own concrete, replayable witness
+            # (Phase 15 E6 pre-emption), not a sentinel. Walker 190->195.
+            "tsymex_rfc0005_s8av_remainder",
+            # RFC-0005 S8az -- S8av's own remainder: the :sat witness cache
+            # slot (CachedWitness) and each :raised:<type> sentinel
+            # (CachedRaised, loadSymexRaisedImpl's new return type) also
+            # serve their stored gaps() on a hit now, through the SAME
+            # gapsMeta/storedGaps pair CachedVerdict already used; an entry
+            # without gaps metadata (pre-S8az, or a third-party writer)
+            # still degrades to gaps: @[] rather than a miss. Walker
+            # 195->199.
+            "tsymex_rfc0005_s8az_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

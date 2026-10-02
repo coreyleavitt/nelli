@@ -168,15 +168,17 @@ suite "symex Phase 15 E7 — Cluster-E regression smoke + walker version 7":
     saveSymexRaisedImpl(db, prog, target, defaultSymexSettings(), found, saveErrors)
     check saveErrors.len == 0
 
-    # Fresh load — reconstruct the full seq from the DB alone (no Z3).
+    # Fresh load — reconstruct the full seq from the DB alone (no Z3). RFC-0005
+    # S8az: `loadSymexRaisedImpl` now returns `seq[CachedRaised]` (the
+    # `RawResult` paired with its stored `gaps`), not a bare `seq[RawResult]`.
     var loadErrors: seq[string] = @[]
     let reloaded = loadSymexRaisedImpl(db, prog, target,
                                        defaultSymexSettings(), loadErrors)
     check reloaded.len == 2
     var typeIds: seq[string]
     for rr in reloaded:
-      check rr.status == sxRaised
-      typeIds.add rr.raisedTypeId
+      check rr.raw.status == sxRaised
+      typeIds.add rr.raw.raisedTypeId
     check "ValueError" in typeIds
     check "IOError" in typeIds
 

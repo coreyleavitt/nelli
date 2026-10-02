@@ -202,7 +202,41 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "194"
+const symexWalkerVersion* = "199"
+  ## RFC-0005 S8az (2026-10-02) — S8av's own remainder. The cache VALUE is
+  ## widened a third time: the `:sat` witness entry (`CachedWitness`) and
+  ## each `:raised:<type>` sentinel (`CachedRaised`) now ALSO carry their
+  ## `seq[FindingGap]` in the entry's metadata, the same way S8av widened
+  ## the `:unsat`/`:unk` verdict sentinel below — so a served `sfSat` or
+  ## `sfRaised` cache hit reports the SAME per-cause `gaps()` view a cold
+  ## run would (`symex.nim`'s `saveSymexWitnessImpl`/
+  ## `loadSymexWitnessesImpl`/`saveSymexRaisedImpl`/`loadSymexRaisedImpl`,
+  ## sharing S8av's `gapsMeta`/`storedGaps` encode/decode pair rather than
+  ## each growing its own). No solving semantics changed. Same convention
+  ## as S8av: the bump orphans every pre-S8az `:sat`/`:raised` entry (the
+  ## next miss re-derives with gaps attached), and an entry under the
+  ## current key that still lacks gaps metadata (e.g. a hand-built test
+  ## double or third-party writer) degrades to a hit with empty `gaps`
+  ## rather than a second miss — soundness remains the load-bearing field;
+  ## gaps is best-effort detail on top of it. 195 -> 199 (196-198 reserved
+  ## by sibling slices landing on the same channel tip; S8ay holds 198).
+  ##
+  ## RFC-0005 S8av (2026-10-02) — S8am's and S11's remainder, item 3. The
+  ## cache VALUE is widened again: a persisted `:unsat` / `:unk` verdict
+  ## sentinel now also carries its `seq[FindingGap]` (S11's `gaps()`,
+  ## already Z3-free) in the entry's metadata, so a served `sfUnknown` (or
+  ## `sfUnsat`) cache hit reports the SAME per-cause view a cold run would
+  ## (`symex.nim`'s `CachedVerdict`/`saveSymexVerdictImpl`/
+  ## `loadSymexVerdictImpl`). No solving semantics changed — this is the
+  ## same "cache value grew a field" shape as S11's own soundness bump
+  ## below, and follows its convention: the bump orphans every pre-S8av
+  ## verdict entry (so the NEXT miss re-derives with gaps attached), and an
+  ## entry under the current key that still lacks the gaps metadata (e.g. a
+  ## third-party writer) degrades to a hit with empty `gaps` rather than a
+  ## second miss — soundness remains the load-bearing field; gaps is
+  ## best-effort detail on top of it. 190 -> 195 (191-194 reserved by
+  ## sibling slices landing on the same channel tip).
+  ##
   ## RFC-0005 S8au (2026-10-02) — the S8an / S8ag remainder. Provisional
   ## 194 (S8ar 191, S8as 192, S8at 193 in the same batch). (3) A
   ## copy-in/copy-out `var` actual, or an `addr` actual, whose heap cell a

@@ -334,12 +334,17 @@ state = "done"
 [[slice]]
 id = "S8av"
 title = "S8am's and S11's remainder: raise-irrelevant-parameter witness sentinel; public cache macros discard dbErrors; ExampleDatabase optional closures unchecked in db.nim wrappers (nil SIGSEGV); cache hit returns empty gaps for a served sfUnknown"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8aw"
 title = "S8aq's remainder: step 1c has no foothold joining seqRangeFacts to str.indexof (L at least every found index); regex replace_re/replace_reAll gated and undecidable in Z3"
 state = "pending"
+
+[[slice]]
+id = "S8az"
+title = "S8av's remainder: gaps on :sat witness and :raised cache hits"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -8321,7 +8326,7 @@ Migration note: `docs/migration/0.9.0.md`, with a CHANGELOG `[Unreleased] —
   macros therefore never sees an S11 miss reason, or any other save or load
   failure. `symexFindAllWitnesses` is unaffected: it routes its errors. This is
   pre-existing, and a different mechanism from S11's schema: it is the
-  macros' error plumbing.
+  macros' error plumbing. **(Resolved by S8av, below.)**
 - **`ExampleDatabase`'s optional closures are unchecked everywhere else.**
   S11 guards the symex cache against nil `saveWithMetaImpl` /
   `loadPrimaryWithMetaImpl`. `db.nim`'s public wrappers (`save(..., meta)`,
@@ -8329,13 +8334,184 @@ Migration note: `docs/migration/0.9.0.md`, with a CHANGELOG `[Unreleased] —
   call whatever closure is set, and the fuzzer's F6 paths reach them, so a
   partial hand-built backend crashes there with a SIGSEGV rather than an
   error. This is pre-existing and belongs to `db.nim`'s record contract, not
-  to the symex surface.
+  to the symex surface. **(Resolved by S8av, below.)**
 - **A cache hit's `gaps` is empty.** The schema stores the run's `Soundness`,
   not its error list. A served `sfUnknown` is therefore untrusted, with its
   `runTaint` intact, but it cannot name its levers until it is re-run cold.
   Storing the classified errors as well would be a schema widening that §7 did
   not ask for. It is recorded here so that a consumer who needs per-cause data
-  from a warm run knows the current shape.
+  from a warm run knows the current shape. **(Resolved by S8av for the
+  `:unsat`/`:unk` verdict cache, below, and by S8az for the remaining `:sat`
+  witness and `:raised:<type>` cache slots.)**
+
+**As landed (S8av, walker 195) — S8am's and S11's remainder.** Pins:
+`tests/tsymex_rfc0005_s8av_remainder.nim` (registered in `nelli.nimble`), plus
+corrected comments/assertions in `tests/tsymex_rfc0005_s8am_remainder.nim`.
+Four independent items, none changing Z3/walker solving semantics.
+
+- **(1) The public cache macros now route `dbErrors`.** `saveSymexWitness`,
+  `loadSymexWitnesses`, `saveSymexVerdict` and `loadSymexVerdict` drain their
+  local `dbErrors` into `recordSymexDbError` — the same thread-local sink
+  `symexFindAllWitnesses` already drains into `Report.dbErrors` via
+  `finalizePhase`. No macro signature changed (all four keep returning what
+  they returned before); `docs/migration/0.9.0.md` needs no entry because the
+  public surface is unchanged, only its error visibility improved.
+- **(2) `db.nim`'s optional-closure wrappers nil-check and raise `DbError`.**
+  `save(..., meta)`, `loadPrimaryWithMeta`, `saveSecondary`, `loadSecondary`,
+  `saveCorpus`, `loadCorpus`, `saveSched` and `loadSched` each check their own
+  closure field before calling it, raising `db.nim`'s own documented `DbError`
+  (its established "irrecoverable condition" type, already caught at every
+  engine call site — `engine/phases.nim`, `engine/targeting.nim`) instead of
+  dereferencing a nil closure. The base `save`/`loadPrimary`/`remove`/
+  `removeMany` wrappers are untouched: every first-party backend
+  (`directoryBasedDatabase`/`inMemoryDatabase`/`multiplexedDatabase`/
+  `readOnlyDatabase`) always sets them, so there is no real nil path to guard
+  there, and `fuzz.nim`'s own call sites already gate corpus/secondary/
+  scheduler calls on the raw closure field (`tests/tfuzzcorpus_nilguard.nim`)
+  — this fix protects any OTHER caller (a hand-built test double, or future
+  code) that calls a wrapper directly without checking first.
+- **(3) A verdict cache hit also serves its stored `gaps`.** `CachedVerdict`
+  gained a `gaps: seq[FindingGap]` field; `saveSymexVerdictImpl` takes an
+  optional `gaps` parameter (default `@[]`) and `loadSymexVerdictImpl` returns
+  it, both riding the entry's existing metadata table under new `gapsv`/
+  `gapsn`/`gapsc<i>`/`gapsk<i>`/`gapsm<i>` keys (`gapsMeta`/`storedGaps`) —
+  one metadata key per gap field rather than one delimited string, since
+  `msg` is an arbitrary, user-influenced string the `encodeSoundness`-style
+  single-digit encoding can't safely carry. `symexFindAllWitnesses`'s verdict
+  cache-hit branch now sets `f.gaps` from the load; the cold-save branch
+  passes `f.gaps` through. Schema version: `symexWalkerVersion` 190 → 195,
+  following S11's own precedent (bump the walker version when the cache VALUE
+  widens, even though no solving semantics changed) — this orphans every
+  pre-S8av verdict entry, so the next miss re-derives with gaps attached. An
+  entry under the CURRENT key that still lacks gaps metadata (e.g. a
+  third-party writer, or any record written by code that doesn't pass `gaps`)
+  degrades to a hit with `gaps: @[]` rather than a second miss — `storedGaps`
+  is tolerant by construction, because `Soundness` remains the load-bearing
+  field and `gaps` is best-effort detail on top of it. Both shapes are pinned.
+- **(4) S8am's "raise-irrelevant-parameter witness sentinel" is not a
+  sentinel.** Investigated with a debug probe (`trySolve`'s model dump) and
+  an oracle-style replay against the compiled SUT. For
+  `seqAsgnOrder.symexFind(tRaisedExn("ValueError"))`, the reported finding's
+  `raisedTypeId` is actually `"IndexDefect"`, not `"ValueError"`: Phase 15 E6
+  makes a reachable `Defect` subtype surface unconditionally
+  (`routeRaise`'s `wantsRaise`, the `raisedIsDefect` branch bypasses the
+  caller's `stkRaisedExn` type filter), and `shouldStop` halts the walk on
+  ANY `sxRaised` — so the IndexDefect path pre-empts the search before
+  `orderRaiser` (`ValueError`'s own raise site) is ever reached. The witness
+  is IndexDefect's own: fully relevant to IT (`i` is exactly what
+  `inLoCond`/`inHiCond` constrain) and concretely replayable — calling the
+  real compiled SUT with the reported value reproduces the exact
+  `IndexDefect`, confirmed on both Z3 5.1 and Z3 4.13.4 (the two builds
+  produce different "ugly" large witness values, as expected of an
+  unconstrained-direction model-completion pick, but both replay correctly).
+  There is no witness-extraction defect to fix; S8am's own note misattributed
+  an IndexDefect witness to the ValueError search it was looking for. Fixed
+  by correcting the claim: `tests/tsymex_rfc0005_s8am_remainder.nim`'s two
+  affected tests now assert `r.raisedTypeId == "IndexDefect"` instead of
+  disclaiming the witness, and `tests/tsymex_rfc0005_s8av_remainder.nim`
+  additionally pins the concrete replay.
+- Walker 190 → 195 (item 3 only; items 1, 2 and 4 change no cache or walker
+  behavior). The CR2 cache-key pin and the new suite's own test both carry
+  the `== 195` / `>= 195` floor. The CR2 pin
+  (`tests/tsymex_phase15_CR2_cachekey.nim`, "sub-test 5: symexWalkerVersion
+  matches the current pin") was initially missed in the pre-push local
+  verification sweep — it is not name-matched by `saveSymex|loadSymex`, the
+  grep this slice's test selection used — and only caught by the
+  `symex-mingw` Windows CI leg going red post-push (corpus shard 7). Updated
+  in a follow-up commit on the same branch; see
+  `symex-version-bump-cr2` precedent (every walker-version bump must update
+  **and run** this pin, not just `grep` for it).
+
+*Different mechanisms, reported and not fixed here.*
+- **The `:sat` witness and `:raised:<type>` cache slots still serve
+  `gaps: @[]` on a hit.** S8av widened only the `:unsat`/`:unk` verdict cache
+  (item 3 above), matching the brief's literal scope ("a cache hit returning
+  empty gaps for a served `sfUnknown`"). A SAT witness's `gaps` is less
+  critical in practice (the witness itself is the actionable artifact), and a
+  cached `sxRaised` finding has no `errors` list to classify in the first
+  place under the current E2a/E2b protocol. Widening those two slots the same
+  way, if ever wanted, is a separate, independently-scoped schema change.
+  **(Resolved by S8az, below.)**
+
+**As landed (S8az, walker 199) — S8av's own remainder.** Pins:
+`tests/tsymex_rfc0005_s8az_remainder.nim` (registered in `nelli.nimble`), plus
+a corrected assertion in `tests/tsymex_rfc0005_s11_surface.nim` (the
+`:sat`-slot pin that asserted the OLD "errors are not cached" behavior the
+fix is meant to change) and updated call sites in
+`tests/tsymex_phase15_E2a_cascade.nim` / `tests/tsymex_phase15_E7_smoke.nim`
+(`loadSymexRaisedImpl`'s widened return type). No Z3/walker solving semantics
+changed.
+
+- **The `:sat` witness slot now serves its stored `gaps`.** `CachedWitness`
+  gained a `gaps: seq[FindingGap]` field, mirroring `CachedVerdict`'s S8av
+  shape exactly. `saveSymexWitnessImpl` folds `gapsMeta(finding.gaps)` into
+  the same `meta` table `soundnessMeta` already builds (one `db.save` call,
+  one metadata table — not two writes); `loadSymexWitnessesImpl` reads it
+  back via `storedGaps`. `symexFindAllWitnesses`'s SAT cache-hit branch now
+  sets `f.gaps` from the load; the cold-save branch already had `f.gaps` set
+  (from `findingGaps(raw.errors)`, computed once before the `case raw.status`
+  split) before calling `saveSymexWitnessImpl(..., f, ...)`, so the witness
+  path needed no new plumbing to produce the value — only to persist and
+  re-serve it. An entry saved before S8az (soundness present, no gaps
+  metadata) degrades to a hit with `gaps: @[]`, matching S8av's own
+  degrade-not-miss rule. Pinned end-to-end with `s11Confirm`'s own
+  mechanism (`a < a` modelled as a fresh symbol, replay-confirmed): even a
+  CONFIRMED, trusted-by-construction `sfSat` can carry a non-empty `gaps()`,
+  because `gaps()` is the per-cause view of the whole run's error list, not
+  of the winning path's own taint alone — `trusted(f)` and `f.gaps.len > 0`
+  are independent facts. This also required correcting
+  `tests/tsymex_rfc0005_s11_surface.nim`'s own pin, which asserted
+  `warm.gaps.len == 0  # errors are not cached` for exactly this SUT; that
+  assertion described the bug this slice fixes, not an invariant.
+- **The `:raised:<type>` slot now serves its stored `gaps`, via a new
+  `CachedRaised` tuple.** `RawResult` (the `smt/runtime.nim` walker type)
+  does NOT gain a `gaps` field: `FindingGap` lives one layer up, in
+  `engine/types.nim`, specifically so `engine/types` and `SymexFinding`
+  stay free of the Z3-coupled `smt/*` dependency (§11's own placement
+  rule, restated at the top of this RFC) — and the inverse holds too,
+  `smt/runtime.nim` has no business depending on `engine/types.nim`.
+  Instead `loadSymexRaisedImpl`'s return type widens from a bare
+  `seq[RawResult]` to `seq[CachedRaised]`, a new named tuple
+  `(raw: RawResult, gaps: seq[FindingGap])` — the same shape
+  `CachedWitness`/`CachedVerdict` already use, just without reusing
+  `RawResult`'s own fields for it. `saveSymexRaisedImpl` takes a new
+  `gaps: seq[seq[FindingGap]] = @[]` parameter, indexed exactly like its
+  existing `found: seq[RawResult]` (the per-type first-seen selection that
+  already builds `sounds` alongside `typeIds` now builds `gapsByType`
+  alongside it too), and folds each type's gaps into the SAME per-type
+  sentinel metadata table its soundness already rides — no new DB key, no
+  change to the index-slot protocol. This widens the signature of a public
+  (`*`-exported) proc and changes a public return type, so the two existing
+  direct callers (`tests/tsymex_phase15_E2a_cascade.nim`,
+  `tests/tsymex_phase15_E7_smoke.nim`, both hand-building `seq[RawResult]`
+  and reading `.status`/`.raisedTypeId` off the reload) were updated to read
+  `.raw.status`/`.raw.raisedTypeId` — their own assertions are otherwise
+  unchanged. `symexFindAllWitnesses`'s raised cache-hit branch now sets
+  `f.gaps` from `cachedRaised[0].gaps`; the cold-raised branch passes
+  `@[f.gaps]` into `saveSymexRaisedImpl` (matching its own single-element
+  `@[raw]` for `found`). Pinned end-to-end with a `s10AllAssertConfirm`-style
+  SUT (`a < a` guarding a raw `assert`, replay-confirmed): a genuine
+  `sfRaised` whose run carries the same fresh-symbol decline.
+- **Both widened slots keep S8av's degrade-not-miss rule**, and both get a
+  dedicated pin for it (mirroring S8av's own pre-shape test): an entry with
+  soundness metadata but no gaps metadata — the exact shape every `:sat`/
+  `:raised:<type>` entry written before this slice has — is still a HIT,
+  served with `gaps: @[]`, never a second miss.
+- **Audit of every other cache read path.** `symexFindAllWitnesses`'s three
+  cache-hit branches (SAT, verdict, raised) and its cold-save branches are
+  now all gaps-complete — this slice's own review of `emitRunSymexReplayed`
+  (S10's shared replay-settle emitter, the "replay-verdict path") found no
+  OTHER point where a settled `RawResult`'s `errors` are computed and then
+  dropped before a save: `f.gaps = findingGaps(raw.errors)` is set once, on
+  the settled `raw`, before the `case raw.status` dispatch that saves it, for
+  every status. There is no second consumer of `loadSymexVerdictImpl`/
+  `loadSymexWitnessesImpl`/`loadSymexRaisedImpl` outside `symexFindAllWitnesses`
+  and the public macro wrappers (`loadSymexVerdict`/`loadSymexWitnesses`,
+  which pass the widened tuples through unchanged — no macro signature
+  changed).
+- Walker 195 → 199 (the cache VALUE widened a second and third time; no
+  solving semantics changed). The CR2 `==` pin and the new suite's own test
+  both carry the `== 199` / `>= 199` floor.
 
 ### §8.2 Downstream RFCs
 

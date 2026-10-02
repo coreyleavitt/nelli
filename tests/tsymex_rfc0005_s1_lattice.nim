@@ -63,7 +63,10 @@ suite "RFC-0005 S1 (a) -- the channel algebra":
                         eeFinallyReturnOnRaise,
                         # RFC-0005 S8m: a `break` / `continue` leaving a
                         # `finally` on a raised exit (backend-divergent).
-                        eeFinallyJumpOnRaise}
+                        eeFinallyJumpOnRaise,
+                        # RFC-0005 S8as: a global given a fresh value (an
+                        # opaque call's write, a read before any write).
+                        feGlobalHavoc}
 
   test "classOf is total and maps every not-yet-reclassified kind to dcNoAnswer (the conservative ⊤ default)":
     for k in SymexErrorKind:

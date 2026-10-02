@@ -1057,5 +1057,11 @@ task test, "Run the test suite":
             # seqs, by-value case-object fields, distinct over a composite
             # base, Table float keys and container values, KeyError,
             # 2^32-cell key domains; walker 191->193 (provisional).
-            "tsymex_rfc0005_s8at_remainder"]:
+            "tsymex_rfc0005_s8at_remainder",
+            # RFC-0005 S8as -- S8an's remainder: if-arm pruning in a
+            # recursion; opaque-call effect summaries havoc globals; a
+            # global's entry value; closure capture/global write-back;
+            # more `addr` forms; a path-based alias check; an Int-sorted
+            # `int` heap; walker 190->192.
+            "tsymex_rfc0005_s8as_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

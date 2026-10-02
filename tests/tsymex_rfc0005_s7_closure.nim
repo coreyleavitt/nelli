@@ -430,14 +430,20 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## definitional over the split's own fresh constants. `globalRoots` takes
     ## the rest of the query to find them, and `loopArmInfeasible`'s arm
     ## joins it through `pathRoots`' `extra`.
+    ##
+    ## RFC-0005 S8as added `globalEntryFacts`: the type facts of a global's
+    ## entry value, a fresh `__glEntry_<name>` symbol per run (`entryValueOf`).
+    ## Each mentions only its own symbol and holds for every value of the
+    ## type, so it is definitional and prunes no real input.
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
       for t in routineBody(smtDir / "runtime.nim", routine):
         if t.startsWith("for c in ") and t.endsWith(":"):
           drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
-                       "currentClosureCallAxioms", "stripDecompConds",
-                       "cardConds", "indexSplitRoots(currentContext(), reach)"]
+                       "currentClosureCallAxioms", "globalEntryFacts",
+                       "stripDecompConds", "cardConds",
+                       "indexSplitRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
       routineBody(smtDir / "runtime.nim", "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:

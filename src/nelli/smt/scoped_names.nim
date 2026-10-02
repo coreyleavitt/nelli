@@ -57,6 +57,10 @@ type
 
 var nameScope {.compileTime.}: NameScope
 var nameCounter {.compileTime.}: int
+var seenGlobals {.compileTime.}: seq[NimNode]
+  ## RFC-0005 S8as. The module-level variable symbols the parse has named
+  ## (through `strVal`), in first-seen order: the globals the walked code
+  ## reaches, whose entry value the walk models (`SymexProgram.globals`).
 
 const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## The runtime value bindings an env slot holds. A local `const` is folded
@@ -70,13 +74,26 @@ proc isModuleGlobal*(n: NimNode): bool =
   let o = owner(n)
   o.kind == nnkSym and symKind(o) == nskModule
 
+proc globalIRName*(n: NimNode): string =
+  ## RFC-0005 S8an/S8as. The IR name of the module-level variable `n`
+  ## (`isModuleGlobal`): `__gl:<module>.<name>`. Does not record `n` as
+  ## reached (`strVal` does).
+  globalEnvPrefix & macros.strVal(owner(n)) & "." & macros.strVal(n)
+
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as
   ## its scoped name (RFC-0005 S8e), and a module-level variable reads as
-  ## `__gl:<module>.<name>` (RFC-0005 S8an).
+  ## `__gl:<module>.<name>` (RFC-0005 S8an) and is recorded as reached
+  ## (`seenModuleGlobals`, RFC-0005 S8as).
   result = macros.strVal(n)
   if isModuleGlobal(n):
-    return globalEnvPrefix & macros.strVal(owner(n)) & "." & result
+    var seen = false
+    for g in seenGlobals:
+      if g == n:
+        seen = true
+        break
+    if not seen: seenGlobals.add n
+    return globalIRName(n)
   if n.kind == nnkSym and nameScope.renames.len > 0:
     let cands = nameScope.renames.getOrDefault(result)
     for c in cands:
@@ -89,6 +106,12 @@ proc resetNameScopes*() =
   ## key).
   nameScope = NameScope()
   nameCounter = 0
+  seenGlobals = @[]   ## RFC-0005 S8as
+
+proc seenModuleGlobals*(): seq[NimNode] =
+  ## RFC-0005 S8as. The module-level variables named since the last
+  ## `resetNameScopes`.
+  seenGlobals
 
 proc enterNameScope*(): NameScope =
   ## Open a nested naming scope (a callee's own env). Keeps the enclosing

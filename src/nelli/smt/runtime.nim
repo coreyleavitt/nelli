@@ -1578,6 +1578,22 @@ proc containerCardConds(): seq[Z3Bool] =
       # on (`RangeDefect`, every `HashSet[uint32]` / `Table[uint32, V]`).
       result.add (b.size + absent <= mkZ3IntLit(dsize))
 
+var closureEnvWrites {.threadvar.}: seq[(string, SymVal)]
+  ## RFC-0005 S8as. The by-reference writes of the closure calls lowered in
+  ## the expression in progress -- a module-level variable, or a capture of
+  ## a closure applied in the frame that built it -- each as the fresh value
+  ## the call's exit axioms define (`applyClosureGround`). In call order; a
+  ## later entry for a name supersedes an earlier one. `lower` cannot write
+  ## the env it reads, so `drainPendingLowerEffects` binds them on the
+  ## calling path, which is where Nim's write lands: the parser hoists every
+  ## call operand into a statement of its own ahead of its expression
+  ## (`parseAtomicOperand`), so the write precedes the reads that follow.
+var loweringReadNames {.threadvar.}: seq[string]
+  ## RFC-0005 S8as. The names `lower`'s `iekVar` arm read in the expression
+  ## in progress, in order. A closure call that writes a name already read
+  ## there (not as its own argument) declines: which value Nim reads then
+  ## depends on an evaluation order the walk does not model.
+
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
   ## bool`, walker v58, ADR-0023). The PENDING path taint of an in-band
@@ -2121,6 +2137,15 @@ proc isFollowConcreteWalk*(): bool
   ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
   ## above. Defined after `WalkCtx` (needs the cast).
 
+proc programGlobal(name: string): Option[IRGlobal]  ## RFC-0005 S8as fwd decl
+proc entryValueOf(name: string): SymVal  ## RFC-0005 S8as fwd decl
+
+proc pendingEnvWriteIx(name: string): int =
+  ## RFC-0005 S8as. The index of the latest pending closure write of `name`
+  ## (`closureEnvWrites`), or -1.
+  result = -1
+  for i in countdown(closureEnvWrites.high, 0):
+    if closureEnvWrites[i][0] == name: return i
 proc unwrittenResultZero(): Option[SymVal]
   ## RFC-0005 S8n fwd-decl. The value of a callee's `result` read before
   ## anything wrote it: the innermost call frame's return type's zero value
@@ -2147,6 +2172,30 @@ type
                        ## or a whole scalar pointee's
     variantTy: IRType  ## the variant object, for its `__@disc` and
                        ## `__@<ord>__<field>` heaps; nil otherwise
+
+var intHeapIsInt {.threadvar.}: bool
+  ## RFC-0005 S8as. A heap of plain `int` (`intHeapCell`) is Int-sorted:
+  ## the run's `integerSemantics` is not `isExact` and every signed 64-bit
+  ## int parameter is bound to an Int. Cleared by `resetSymexRunState`, set
+  ## by `runSymexImpl` once the parameters are bound.
+
+func intHeapCell(ty: IRType): bool =
+  ## RFC-0005 S8as. `ty` is Nim's `int` (64-bit, signed, no declared range)
+  ## and the run's ints are Int-sorted (`intHeapIsInt`): its heap -- a
+  ## `ref int` / `ptr int` cell, an `int` field -- is `(Array Ref Int)`.
+  ## It was `(Array Ref (_ BitVec 64))`, and under `isOptimised` a param
+  ## with an asserted range is an Int (`promoteSound`), so storing it went
+  ## through `int2bv` and reading it back through `bv2int`: with `v` in
+  ## `(-1000, 1000)`, `let r = new int; r[] = v; r[] += 1; r[] != v + 1`
+  ## took Z3 55 s for its UNSAT. A width-stamped Int (`ziWidth = 64`) keeps
+  ## every overflow obligation (`overflowCondInt`), so the values and the
+  ## defects are the bit-vector's. A BV value is stored through `bv2int`
+  ## (`heapStoreValue`). Otherwise the heap stays a bit-vector: a BV value
+  ## stored through `bv2int` and read back into a BV comparison is the F5
+  ## `int2bv(bv2int(v))` shape, which is the slow direction the other way.
+  {.cast(noSideEffect).}:
+    intHeapIsInt and ty != nil and ty.kind == itInt and ty.width == 64 and
+      ty.signed and not ty.hasRange
 
 var heapKeyShapes {.threadvar.}: Table[string, HeapKeyShape]
   ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
@@ -2360,6 +2409,15 @@ proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `cb`
   ## into `WalkCtx.statics.closureBodies[siteKey]`. No-op when no active
   ## walk (probe paths). Defined after `WalkCtx` type.
+
+var globalEntryVals {.threadvar.}: Table[string, SymVal]
+  ## RFC-0005 S8as. The entry value of each `var` global (or computed `let`)
+  ## read before the walk wrote it: one fresh value per run, shared by every
+  ## path and frame (`entryValueOf`). Reset per run.
+var globalEntryFacts {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8as. The allocation facts of those values (a seq's length is
+  ## at least 0, a range's bounds): true of every value of the type, so
+  ## asserted into every check (`globalRoots`), as the values are run-wide.
 
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
@@ -7045,7 +7103,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
-    if env.hasKey(e.vname):
+    loweringReadNames.add e.vname      ## RFC-0005 S8as
+    if pendingEnvWriteIx(e.vname) >= 0:
+      # RFC-0005 S8as: a closure call earlier in this same expression wrote
+      # the name. Nim reads the variable after every call of the
+      # expression has run; the walk reads it here, in operand order, and
+      # the two differ when a later call writes it again. Read the latest
+      # write and decline.
+      lowerDegrade(ceCaptureByRefUnmodelled,
+        "`" & displayName(e.vname) & "` is read in the same expression as " &
+             "a closure call that writes it; the order of that read and " &
+             "the write is not modelled (ceCaptureByRefUnmodelled)")
+      closureEnvWrites[pendingEnvWriteIx(e.vname)][1]
+    elif env.hasKey(e.vname):
       # RFC-0005 S9: a closure read here carries its by-reference captures
       # as they stand now (a no-op for every other value).
       refreshByRefCaptures(env[e.vname], env)
@@ -7053,6 +7123,20 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # RFC-0005 S8n: a callee's `result` read before its first write is
       # the zero value Nim initialised it to (was `feGlobalReadUnmodelled`).
       unwrittenResultZero().get
+    elif not isFollowConcreteWalk() and e.vname notin callGuardedNames and
+         isGlobalEnvName(e.vname) and programGlobal(e.vname).isSome:
+      # RFC-0005 S8as: a global read before the walk wrote it holds its
+      # ENTRY value -- what it holds when the property runs. An immutable
+      # `let` initialised by a literal holds that literal, always: read
+      # exactly. Anything else may hold any value of its type by then (a
+      # `var` that other code, or an earlier test, assigned): one fresh
+      # value per run (`globalEntryVals`), shared by every read, so two
+      # reads before any write agree. A hit through it may need a value
+      # the property never meets, so the path carries `feGlobalHavoc`
+      # (`dcFreshSymbol`): a SAT is replayed, and an UNSAT holds for every
+      # entry value, so it stands. Before S8as the read declined
+      # (`feGlobalReadUnmodelled`).
+      entryValueOf(e.vname)
     elif not isFollowConcreteWalk():
       # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
       # symbolic walker) reaching a name absent from `env` is NEVER a
@@ -11067,6 +11151,9 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   # recorded, `ceClosureBodyUncertain`).
   for c in currentClosureCallAxioms:
     roots.add c
+  # RFC-0005 S8as: the entry values' type facts (`globalEntryFacts`).
+  for c in globalEntryFacts:
+    roots.add c
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
   # into every check — definitional clauses over per-occurrence fresh
   # strings (see `stripDecompConds`' doc for the soundness argument).
@@ -11160,6 +11247,17 @@ const defaultLoopPruneRLimit* = 250_000'u
   ## unrolled iteration per path, and a concretely-decided guard never
   ## reaches the solver at all (it simplifies to a literal first).
 
+var ctxPruneCount {.threadvar.}: int
+  ## RFC-0005 S8as. Counts the paths and arms a feasibility check against
+  ## the path's own facts dropped (`loopArmInfeasible`, `pathInfeasible`).
+  ## Such a drop depends on the caller's context, not only on the
+  ## arguments: a call whose walk dropped one returned a summary true only
+  ## in that context, so the call cache (keyed by argument shape) must not
+  ## keep it. `fib(n)` under `n in 3..4` cached `fib(n - 2)`'s one returned
+  ## path from inside `fib(n - 1)`'s frame (where `n - 2 < 2` had been
+  ## dropped) and replayed it at the outer call: a false `sxUnsat`. Only
+  ## differences are read, so it is never reset.
+
 func loopPruneRLimit*(settings: SymexSettings): uint =
   ## RFC-0005 S8k. `defaultLoopPruneRLimit`, or the caller's `queryRLimit`
   ## when that is set and smaller (a caller's budget is never exceeded).
@@ -11179,16 +11277,23 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   let lit = $simplify(arm)
   if lit == "false": return true
   if lit == "true": return false
-  checkCapped(ctx, pathRoots(path, [arm]), settings,
-              loopPruneRLimit(settings)).status == zsUnsat
+  result = checkCapped(ctx, pathRoots(path, [arm]), settings,
+                       loopPruneRLimit(settings)).status == zsUnsat
+  if result: inc ctxPruneCount   # RFC-0005 S8as
 
 proc pathInfeasible(ctx: Z3Context; path: Path;
                     settings: SymexSettings): bool =
   ## RFC-0005 S8an. True only when `path`'s full query (`pathRoots`) is
   ## UNSAT: no real execution reaches it. Bounded and sound for pruning
   ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
-  checkCapped(ctx, pathRoots(path), settings,
-              loopPruneRLimit(settings)).status == zsUnsat
+  result = checkCapped(ctx, pathRoots(path), settings,
+                       loopPruneRLimit(settings)).status == zsUnsat
+  if result: inc ctxPruneCount   # RFC-0005 S8as
+
+var symexIfArmsPruned* {.threadvar.}: int
+  ## RFC-0005 S8as. Counts the `if` arms (and else paths) the `wmExplore`
+  ## walk dropped as infeasible inside a recursive frame (`ifArmInfeasible`).
+  ## Always on, like `symexLoopIterations`; tests reset it and read it.
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -11256,6 +11361,11 @@ type
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
     sutRetTy: IRType
+    globals: Table[string, IRGlobal]
+                        ## RFC-0005 S8as: the program's module-level variables
+                        ## by IR name (`SymexProgram.globals`): a read before
+                        ## any write takes the entry value (`entryValueOf`),
+                        ## and an opaque call rebinds those it may write.
                         ## RFC-0005 S8p: the SUT's own return type (nil for a
                         ## void SUT), from `SymexProgram.retTy`. The SUT frame
                         ## has no `CallFrame`, so `unwrittenResultZero` reads
@@ -11330,6 +11440,10 @@ type
     ## NOT raise; the drain strips those (`lastDrainedClosureExitPc`).
     raised:      EscapedRaise
     priorExitPc: seq[Z3Bool]
+    writes:      seq[(string, SymVal)]
+                 ## RFC-0005 S8as. The by-reference names the call writes
+                 ## back (`closureEnvWrites`), as THIS raising exit left
+                 ## them: the raise leaves from the call with them.
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -12178,6 +12292,8 @@ type
     callerHeapDepth: int
     callerAlloc: Table[string, int]
     callerLiveRefs: Table[string, seq[Z3AnyAst]]
+    envWrites: seq[(string, SymVal)]          ## RFC-0005 S8as
+    readNames: seq[string]                    ## RFC-0005 S8as
 
 proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## RFC-0005 S7. See `PendingLowerEffects`. The WalkCtx fields are the LIVE
@@ -12195,7 +12311,10 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
     exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
     callerHeapDepth: w.callerHeapDepth, callerAlloc: w.callerAllocCounters,
-    callerLiveRefs: w.callerLiveRefs)
+    callerLiveRefs: w.callerLiveRefs,
+    envWrites: closureEnvWrites, readNames: loweringReadNames)
+  closureEnvWrites = @[]
+  loweringReadNames = @[]
   loweringPendingTaint = {}
   w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
   w.divByZeroConds = @[]; divByZeroConds = @[]
@@ -12234,6 +12353,8 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.callerHeapDepth = s.callerHeapDepth; currentCallerHeapDepth = s.callerHeapDepth
   w.callerAllocCounters = s.callerAlloc; currentCallerAllocCounters = s.callerAlloc
   w.callerLiveRefs = s.callerLiveRefs; currentCallerLiveRefs = s.callerLiveRefs
+  closureEnvWrites = s.envWrites       ## RFC-0005 S8as
+  loweringReadNames = s.readNames      ## RFC-0005 S8as
 
 proc isFollowConcreteWalk*(): bool =
   ## RFC-fuzzer-nextgen G3fix. See fwd-decl above. `wp.mode` only exists once
@@ -12245,6 +12366,22 @@ proc isFollowConcreteWalk*(): bool =
     wp.mode == wmFollowConcrete
   else:
     false
+
+func globalsTable(gs: seq[IRGlobal]): Table[string, IRGlobal] =
+  ## RFC-0005 S8as.
+  for g in gs: result[g.name] = g
+
+proc programGlobal(name: string): Option[IRGlobal] =
+  ## RFC-0005 S8as. The module-level variable `name` of the program being
+  ## walked, when its entry value is modelled: its type reaches no heap cell
+  ## (`irTypeRefFree`), so a fresh value of the type is every value it can
+  ## hold. none() outside a walk or for any other global.
+  if currentWalkCtxPtr == nil: return none(IRGlobal)
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if not wp.statics.globals.hasKey(name): return none(IRGlobal)
+  let g = wp.statics.globals[name]
+  if not irTypeRefFree(g.ty): return none(IRGlobal)
+  some(g)
 
 proc unwrittenResultZero(): Option[SymVal] =
   ## RFC-0005 S8n. See fwd-decl above. `lower`'s `iekVar` arm asks this when
@@ -12698,6 +12835,47 @@ proc heapUnchanged(a, b: Path): bool =
     if not b.heaps.hasKey(k) or b.heaps[k].raw != h.raw: return false
   true
 
+proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
+  ## RFC-0005 S8as. An inert opaque call returned on `p`: rebind every name
+  ## its effect summary lists (`IRStmt.opaqueHavoc`; `havocAllGlobals` is
+  ## every writable global of the program) to a fresh value of its type.
+  ## The call may or may not have written each one, and a fresh value is
+  ## every value it can hold either way, so nothing real is excluded and the
+  ## path carries `feGlobalHavoc` (`dcFreshSymbol`): an UNSAT stands, a SAT
+  ## is replayed. A global the walk has not bound yet is bound here too: its
+  ## entry value (`entryValueOf`) is what it held BEFORE the call. A name
+  ## whose type reaches heap cells never gets here (the parser keeps such a
+  ## call non-inert), except through `havocAllGlobals`, where it declines.
+  var names: seq[string]
+  for nm in stmt.opaqueHavoc:
+    if nm == "*":
+      for g in w.statics.globals.values:
+        if g.isVar and g.name notin names: names.add g.name
+    elif nm notin names:
+      names.add nm
+  var rebound: seq[string]
+  for nm in names:
+    var ty: IRType = nil
+    if p.env.hasKey(nm): ty = tyOf(p.env[nm])
+    elif w.statics.globals.hasKey(nm): ty = w.statics.globals[nm].ty
+    else: continue        # never read by the walked code
+    if not irTypeRefFree(ty):
+      taintInPlace(p, w.degrade(feOpaqueCallUnmodelled,
+        "opaque call `" & stmt.callee & "` may write `" & displayName(nm) &
+             "`, whose value reaches heap cells the walk holds; the write " &
+             "is not modelled (feOpaqueCallUnmodelled)"))
+      continue
+    var facts: seq[Z3Bool]
+    p.env[nm] = allocateSym(ty, freshDegradeName("__opaqueHavoc_" &
+                                                 displayName(nm)), facts)
+    for f in facts: p.pc.add f
+    rebound.add displayName(nm)
+  if rebound.len > 0:
+    taintInPlace(p, w.degrade(feGlobalHavoc,
+      "opaque call `" & stmt.callee & "` may write " & rebound.join(", ") &
+           " (its effect summary): each holds a fresh value of its type " &
+           "after the call, so a hit through it is replayed (feGlobalHavoc)"))
+
 func envHasGlobal(env: Env): bool =
   ## RFC-0005 S8an. True when `env` binds a module-level global.
   for k in env.keys:
@@ -12921,6 +13099,38 @@ proc effectiveHeapDepthLimit(settings: SymexSettings): int =
   else: 256
 
 # heapDepthExhausted moved to runtime_heap.nim (CR-7-deeper Stage 8+).
+
+proc inRecursiveFrame(w: WalkCtx): bool =
+  ## RFC-0005 S8as. True when the innermost inlined call's callee is also an
+  ## outer frame's: the walk is inside a recursion.
+  if w.callStack.len < 2: return false
+  let top = w.callStack[^1].callee
+  for k in 0 ..< w.callStack.high:
+    if w.callStack[k].callee == top: return true
+  false
+
+proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool): bool =
+  ## RFC-0005 S8as. The `wmExplore` walk forked every `if` arm without a
+  ## feasibility check, so a recursion on a symbolic argument walked arms no
+  ## execution takes (`fact(1)`'s `k > 1`) down to `maxCallDepth` -- where
+  ## S8an's bail dropped them -- and one with two recursive calls (`fib`)
+  ## multiplied them at each level: `fib(n)` under `n in 0..5` did not end
+  ## in 13 minutes at `maxCallDepth = 4`. Inside a recursive frame an arm
+  ## (or else path) whose query is UNSAT is now dropped before it is walked.
+  ## `last` is the arm's own conjunct, decided without the solver when it is
+  ## a literal. Sound exactly as `loopArmInfeasible` is: an undecided query
+  ## keeps the arm. Outside a recursion an `if` is not checked: its arms are
+  ## bounded by the program text, and the check would cost every walk a
+  ## solver call per branch.
+  if not inRecursiveFrame(w): return false
+  let lit = $simplify(last)
+  if lit == "false":
+    inc symexIfArmsPruned
+    return true
+  if pathInfeasible(w.z3, armPath, w.settings):
+    inc symexIfArmsPruned
+    return true
+  false
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
 
@@ -13301,7 +13511,10 @@ proc drainClosureRaises(p: Path, w: var WalkCtx): seq[Path] =
       "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)")
   for cr in raises:
     let er = cr.raised
-    var rp = forkPathMerged(er.path, p.pc & er.path.pc, p.env, p)
+    # RFC-0005 S8as: the raising exit's own by-reference writes.
+    var renv = p.env
+    for (k, v) in cr.writes: renv[k] = v
+    var rp = forkPathMerged(er.path, p.pc & er.path.pc, renv, p)
     rp.defectSurvivorPc = baseDsp & cr.priorExitPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
     discard routeRaise(rp, er.typeId, er.msg, w)
@@ -13472,6 +13685,14 @@ proc drainPendingLowerEffects(p: Path): Path =
   # very `loweringDegradeErrors` entries `lowerDegrade` recorded.
   if loweringPendingTaint != {}:
     p2 = forkPathTainted(p2, p2.pc, p2.env, takeLoweringPendingDegrade())
+  # (e) RFC-0005 S8as: the by-reference writes of the expression's closure
+  # calls land on the calling path (`closureEnvWrites`), in call order.
+  if closureEnvWrites.len > 0:
+    var env2 = p2.env
+    for (k, v) in closureEnvWrites: env2[k] = v
+    p2 = forkPath(p2, p2.pc, env2)
+    closureEnvWrites = @[]
+  loweringReadNames = @[]
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -14820,12 +15041,16 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           for cp in cont:
             let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
                                    cp.env)
-            survivors.add walk(br.body, @[armPath], w)
+            if not ifArmInfeasible(w, armPath, condBool):
+              survivors.add walk(br.body, @[armPath], w)
             if w.shouldStop: return
             next.add (cp, accumNegated & @[not condBool])
         states = next
       for (cp, accumNegated) in states:
         let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
+        if accumNegated.len > 0 and
+           ifArmInfeasible(w, elsePath, accumNegated[^1]):
+          continue
         if stmt.elseBody != nil:
           survivors.add walk(stmt.elseBody, @[elsePath], w)
         else:
@@ -16224,6 +16449,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let pd = drainPendingLowerEffects(p)
           for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
             out1.add sp
+        # RFC-0005 S8as: the call ran (on the survivors of its arguments'
+        # raise forks), so each name its effect summary lists
+        # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
+        if stmt.opaqueHavoc.len > 0:
+          for sp in out1: havocOpaqueWrites(w, sp, stmt)
         return out1
       # Don't resolve a body; allocate fresh retSym; mark path
       # uncertain so any target reached on this path degrades to
@@ -16524,6 +16754,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                          # default (see `IRStmt.isCall.retIntOffsetPositions`).
                          freshRetSym(stmt.retTy, z3Name, retInit,
                                      stmt.retIntOffsetPositions)
+          let prunesBefore = ctxPruneCount   # RFC-0005 S8as
           w.callStack.add CallFrame(
             callee: stmt.callee, retSym: retSym,
             retName: stmt.retName,
@@ -16702,8 +16933,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # capture. A hit replays only `pcDelta`: a read would return the
           # first call's value across a write in between, and a write would
           # be lost.
+          # RFC-0005 S8as: nor when the callee's walk dropped a path or arm
+          # as infeasible in this caller's context (`ctxPruneCount`).
           if calleeEscaped.len == 0 and not closureRet and varArgs.len == 0 and
-             not threadsOuter and
+             not threadsOuter and ctxPruneCount == prunesBefore and
              frame.returnedPaths.len == 1 and fallThrough.len == 0 and
              not envHasGlobal(frame.returnedPaths[0].env) and
              frame.returnedPaths[0].taint == {} and
@@ -17456,7 +17689,34 @@ proc sameSymVal(a, b: SymVal): bool =
     false   # no identity arm: conservatively "changed"
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal   ## Phase 15 C4 fwd-decl.
+                        label: string; callerEnv: Env): SymVal   ## Phase 15 C4 fwd-decl.
+
+proc entryValueOf(name: string): SymVal =
+  ## RFC-0005 S8as. The entry value of the module-level variable `name`
+  ## (`programGlobal(name)` is some): what it holds when the property runs.
+  ## An immutable `let` initialised by a literal holds that literal, always:
+  ## read exactly. Anything else may hold any value of its type by then (a
+  ## `var` that other code, or an earlier test, assigned): one fresh value
+  ## per run (`globalEntryVals`), shared by every read, so two reads before
+  ## any write agree. A hit through it may need a value the property never
+  ## meets, so the reading path carries `feGlobalHavoc` (`dcFreshSymbol`):
+  ## a SAT is replayed, and an UNSAT holds for every entry value, so it
+  ## stands.
+  let g = programGlobal(name).get
+  if g.init != nil:
+    return lower(initOrderedTable[string, SymVal](), g.init,
+                 (if g.ty.kind == itInt: some(bvConst(g.ty, 0))
+                  else: none(SymVal)))
+  if not globalEntryVals.hasKey(name):
+    var facts: seq[Z3Bool]
+    globalEntryVals[name] =
+      allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
+    for f in facts: globalEntryFacts.add f
+  lowerDegrade(feGlobalHavoc,
+    "module-level variable '" & displayName(name) & "' is read before " &
+         "the walk writes it: it may hold any value of its type when the " &
+         "property runs, so a hit through it is replayed (feGlobalHavoc)")
+  globalEntryVals[name]
 
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2b (ADR-0009 D6). Closure APPLICATION. Resolve `e.ccCallee` to an
@@ -17488,12 +17748,26 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
   # RFC-0005 S9: the by-reference captures as they stand at THIS call.
   let clo = refreshByRefCaptures(env[e.ccCallee], env)
+  # RFC-0005 S8as: the names this expression read before the call (its own
+  # arguments' reads come after the mark: Nim reads them before the call).
+  let readBefore = loweringReadNames
   var argSyms: seq[SymVal]
   for a in e.ccArgs: argSyms.add lower(env, a)
-  return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`")
+  let nWrites = closureEnvWrites.len
+  result = applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`", env)
+  var clash: seq[string]
+  for i in nWrites ..< closureEnvWrites.len:
+    let nm = closureEnvWrites[i][0]
+    if nm in readBefore and displayName(nm) notin clash:
+      clash.add displayName(nm)
+  if clash.len > 0:
+    lowerDegrade(ceCaptureByRefUnmodelled,
+      "closure call through `" & e.ccCallee & "` writes " & clash.join(", ") &
+           ", which the same expression reads; the order of that read and " &
+           "the write is not modelled (ceCaptureByRefUnmodelled)")
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal =
+                        label: string; callerEnv: Env): SymVal =
   ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
   ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
   ## build the per-site funcSym application (raw `Z3_mk_app` over flattened
@@ -17649,6 +17923,20 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     let envRec = clo.closureEnv[]
     for i, nm in envRec.fieldNames:
       descentEnv[nm] = envRec.fields[i]
+  # RFC-0005 S8as: the module-level variables as the caller holds them.
+  # They are one location in every frame, so the body reads what the caller
+  # wrote (an unbound one reads its entry value, `entryValueOf`). Before
+  # S8as the body met none of them, and a read declined.
+  for k, v in callerEnv:
+    if isGlobalEnvName(k) and not descentEnv.hasKey(k): descentEnv[k] = v
+  # RFC-0005 S8as: a closure call earlier in the same expression may have
+  # written one of them, or (applied in the frame that built this closure)
+  # one of its captures: the body meets that write (`closureEnvWrites`).
+  let inFrame = clo.closureFrame == w.frame.frameId
+  for (k, v) in closureEnvWrites:
+    if isGlobalEnvName(k) or (inFrame and k in clo.closureMutCaptures and
+                              descentEnv.hasKey(k)):
+      descentEnv[k] = v
   let byRefEntry = descentEnv  ## RFC-0005 S9: the captures as the body met them
   for i, p in cb.params:
     if i < argSyms.len: descentEnv[p.name] = argSyms[i]
@@ -17716,41 +18004,101 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # and nothing carries the write back. Any exit -- a value exit or an
   # escaping raise -- whose capture is not the one the body met declines
   # the call (`dcSubstituted`: the write is dropped).
-  block byRefWrites:
-    var written: seq[string]
-    for nm in clo.closureMutCaptures:
-      if not byRefEntry.hasKey(nm): continue
-      let entry = byRefEntry[nm]
-      var changed = false
-      for cp in fallThrough:
-        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
-      for cp in frame.returnedPaths:
-        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
-      for er in escapedRaises:
-        if er.path.env.hasKey(nm) and not sameSymVal(er.path.env[nm], entry):
-          changed = true
-      if changed: written.add displayName(nm)
-    # RFC-0005 S8an: a module-level global is a by-reference location too,
-    # whether or not the lambda captured it lexically (a module-level proc
-    # used as a value captures nothing). A body exit whose binding of one is
-    # not the one the body met wrote it, and nothing carries it back.
+  # RFC-0005 S9 / S8an / S8as (capture by reference). A body that WRITES a
+  # by-reference location -- a mutable capture, or a module-level variable,
+  # whether or not the lambda captured it lexically -- writes the caller's
+  # variable; the descent env is the body's own. A name is written when an
+  # exit (a value exit or an escaping raise) binds it to anything but the
+  # value the body met.
+  var written: seq[string]
+  block collectWritten:
     var exitEnvs: seq[Env]
     for cp in fallThrough: exitEnvs.add cp.env
     for cp in frame.returnedPaths: exitEnvs.add cp.env
     for er in escapedRaises: exitEnvs.add er.path.env
     for ee in exitEnvs:
       for nm, v in ee:
-        if isGlobalEnvName(nm) and displayName(nm) notin written and
+        let byRef = isGlobalEnvName(nm) or
+          (nm in clo.closureMutCaptures and byRefEntry.hasKey(nm))
+        if byRef and nm notin written and
            (not byRefEntry.hasKey(nm) or not sameSymVal(v, byRefEntry[nm])):
-          written.add displayName(nm)
-    if written.len > 0:
+          written.add nm
+  # RFC-0005 S8as: the write is carried back. Each written name gets one
+  # fresh value per call occurrence, defined by one GROUND axiom per value
+  # exit -- `exitPc_i ⇒ w == v_i`, v_i the name as exit i left it -- the
+  # shape of the call result's own axioms (`assertArm` below): definitional,
+  # so the global pool prunes no model of any other symbol, and an exit
+  # whose arm was dropped (a tainted sub-path) leaves `w` free. The calling
+  # path binds the name to `w` (`closureEnvWrites`, drained by
+  # `drainPendingLowerEffects`); a raising exit carries its own values out
+  # with the raise (`ClosureRaise.writes`). Before S8as every such call
+  # declined (`ceCaptureByRefUnmodelled`). Still declined, scoped: a
+  # capture written by a closure applied outside the frame that built it
+  # (the env there does not hold the variable), and a name whose value
+  # reaches heap cells (`irTypeRefFree`).
+  var carried: seq[(string, SymVal)]
+  var raiseWrites = newSeq[seq[(string, SymVal)]](escapedRaises.len)
+  block writeBack:
+    var declined: seq[string]
+    for nm in written:
+      template exitVal(ee: Env): SymVal =
+        if ee.hasKey(nm): ee[nm]
+        elif byRefEntry.hasKey(nm): byRefEntry[nm]
+        else: entryValueOf(nm)   # an unbound global this exit left alone
+      var ty: IRType = nil
+      for cp in fallThrough:
+        if cp.env.hasKey(nm): ty = tyOf(cp.env[nm])
+      for cp in frame.returnedPaths:
+        if ty == nil and cp.env.hasKey(nm): ty = tyOf(cp.env[nm])
+      for er in escapedRaises:
+        if ty == nil and er.path.env.hasKey(nm): ty = tyOf(er.path.env[nm])
+      if not isGlobalEnvName(nm) and not inFrame:
+        declined.add displayName(nm) & " (applied outside the frame that " &
+                     "built the closure)"
+        continue
+      if ty == nil or not irTypeRefFree(ty) or
+         (not byRefEntry.hasKey(nm) and programGlobal(nm).isNone):
+        declined.add displayName(nm) & " (its value reaches heap cells)"
+        continue
+      var facts: seq[Z3Bool]
+      let wv = allocateSym(ty, freshDegradeName("__closureWrite_" &
+                                                displayName(nm)), facts)
+      var ok = wv.kind in retBindWiredKinds
+      var exits: seq[(seq[Z3Bool], SymVal)]
+      for cp in frame.returnedPaths:
+        if cp.taint == {}: exits.add (cp.pc, exitVal(cp.env))
+      for cp in fallThrough:
+        if cp.taint == {}: exits.add (cp.pc, exitVal(cp.env))
+      for (_, ev) in exits:
+        if not retBindKindsAgree(wv, ev): ok = false
+      if not ok:
+        declined.add displayName(nm) & " (no value binding for its type)"
+        continue
+      for f in facts:
+        currentClosureCallAxioms.add f
+        currentClosureCallAxiomStrs.add $f
+      for (pc, ev) in exits:
+        let eq = retBindEq(wv, ev)
+        var ax = eq
+        if pc.len > 0:
+          var guard = pc[0]
+          for k in 1 ..< pc.len: guard = guard and pc[k]
+          ax = guard.implies(eq)
+        currentClosureCallAxioms.add ax
+        currentClosureCallAxiomStrs.add $ax
+      carried.add (nm, wv)
+      for ri, er in escapedRaises:
+        raiseWrites[ri].add (nm, exitVal(er.path.env))
+    if declined.len > 0:
       closureDegrade(ceCaptureByRefUnmodelled,
-        "closure call through " & label & ": the body writes its " &
-             "by-reference capture(s) " & written.join(", ") & "; the " &
+        "closure call through " & label & ": the body writes the " &
+             "by-reference location(s) " & declined.join(", ") & "; the " &
              "write is not carried back to the caller " &
              "(ceCaptureByRefUnmodelled)")
-  for er in escapedRaises:
-    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc)
+  for (k, v) in carried: closureEnvWrites.add (k, v)
+  for ri, er in escapedRaises:
+    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc,
+                                     writes: raiseWrites[ri])  ## RFC-0005 S8as
   # RFC-0005 S7 (closure-descent taint): the descent started from a clean
   # root, so whatever its exit paths picked up (a degrade inside the body)
   # must join the CALLING path -- through the pending-taint drain, the one
@@ -18623,7 +18971,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
-        let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i)
+        let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i, env)
         dataRaw = storeSeqElem(dataRaw, e.hofRetElemTy, mkInt(i), mapped)
       SymVal(kind: svSeq, seqLen: mkInt(n),
              seqDataRaw: dataRaw, seqElemTy: e.hofRetElemTy)
@@ -18646,7 +18994,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       var keptLen: Z3Int = mkInt(0)
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
-        let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i)
+        let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i, env)
         doAssert predSV.kind == svBool, "filter predicate did not return Bool"
         # Store elem_i at the CURRENT kept index. Stores past the final kept
         # length are never observed (reads are len-bounded), so an
@@ -18661,7 +19009,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       var acc = lower(env, e.hofInit)
       for i in 0 ..< n:
         let elemSV = seqElemAt(seqSV, mkInt(i))
-        acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i)
+        acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i, env)
       acc
     else:
       raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)  # [raise-audited: category-c: parser-controlled op-string invariant (e.hofOp is restricted to map/filter/fold by the parser)]
@@ -19257,6 +19605,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
+  globalEntryVals = initTable[string, SymVal]()  ## RFC-0005 S8as
+  globalEntryFacts = @[]                         ## RFC-0005 S8as
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
@@ -19266,6 +19616,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
+  intHeapIsInt = false   ## RFC-0005 S8as: set once the params are bound
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
@@ -19711,6 +20062,19 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
+  # RFC-0005 S8as: the `int` heap is Int-sorted when every plain `int`
+  # parameter is an Int (`intHeapIsInt`), and only then. A bit-vector
+  # parameter stored into an Int heap and compared with itself after a
+  # read is `int2bv(bv2int(v)) != v`, the F5 shape Z3 does not finish
+  # (S8an's `getP(addr x) != v` ran past 400 s under an Int heap).
+  block:
+    var anyInt = false
+    var allInt = true
+    for p in prog.params:
+      if p.ty.kind == itInt and p.ty.width == 64 and p.ty.signed:
+        if env.hasKey(p.name) and env[p.name].kind == svInt: anyInt = true
+        else: allInt = false
+    intHeapIsInt = settings.integerSemantics != isExact and anyInt and allInt
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
     z3: ctx, target: target, params: prog.params,
@@ -19725,7 +20089,8 @@ proc runSymexImpl(prog: SymexProgram,
     initialEnv: env,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
                            userExnHierarchy: prog.userExnHierarchy,  ## E4a
-                           sutRetTy: prog.retTy),  ## RFC-0005 S8p
+                           sutRetTy: prog.retTy,  ## RFC-0005 S8p
+                           globals: globalsTable(prog.globals)),  ## S8as
   )
   # Phase 15 C2b: publish a pointer to the live WalkCtx so `lowerClosureCall`
   # (running in the `lower` evaluator, no `WalkCtx` parameter) can drive the
@@ -20582,7 +20947,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
     concreteEq: concreteEq,
     statics: WalkerStatics(exnTable: exnTypeTable,
                            userExnHierarchy: prog.userExnHierarchy,
-                           sutRetTy: prog.retTy),
+                           sutRetTy: prog.retTy,
+                           globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
   let initial = Path(pc: initialPC, env: env)

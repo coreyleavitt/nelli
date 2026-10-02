@@ -231,7 +231,26 @@ const symexWalkerVersion* = "193"
   ## merge; a distinct-over-composite store declines instead of building an
   ## ill-sorted term. 190->191.
   ##
-  ## RFC-0005 batch 1 (2026-10-01, walker 190) — S8ag, S8am, S8an, S8ap, S8aq and S11
+  ##
+  ## RFC-0005 S8as (2026-10-02) — S8an's remainder. Inside a recursive
+  ## frame an `if` arm (or else path) whose query is UNSAT is dropped before
+  ## it is walked. An inert opaque call carries an effect summary
+  ## (`IRStmt.opaqueHavoc`: the module-level `var`s and nested captures its
+  ## routine may write, transitively; `*` for a method or a bodiless foreign
+  ## routine) and every name in it holds a fresh value afterwards
+  ## (`feGlobalHavoc`, `dcFreshSymbol`). A global read before the walk writes
+  ## it holds its entry value (`SymexProgram.globals`): a `let` with a
+  ## literal initialiser exactly, anything else a fresh value
+  ## (`feGlobalHavoc`). A closure body's write to a global, or to a capture
+  ## of a closure applied in the frame that built it, is written back to the
+  ## caller (`closureEnvWrites`, raise exits included); a closure call in a
+  ## short-circuit operand forks as an inline defect would. `let p = addr
+  ## a[2]`, several pointers in one section and a re-point by a statement of
+  ## the list are modelled, and the argument alias check is by path. The
+  ## 64-bit `int` heap is Int-sorted. Supersedes "190" (191 is S8ar's,
+  ## landing separately):
+  ##
+  ## RFC-0005 batch 1 (2026-10-01) — S8ag, S8am, S8an, S8ap, S8aq and S11
   ## were built in parallel on the channel tip, each with a provisional
   ## number, and land stacked as one integration branch under ONE walker
   ## number. Their bullets follow, newest work first; each names its
@@ -5111,7 +5130,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
-      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") & ">"
+      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      # RFC-0005 S8as: an inert opaque call's effect summary rebinds the
+      # names it lists, so it changes the verdict.
+      (if s.opaqueHavoc.len > 0: ";havoc=[" & s.opaqueHavoc.join(",") & "]"
+       else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read
@@ -5283,9 +5306,17 @@ proc canonicalize*(prog: SymexProgram): string =
   # RFC-0005 S8p: the SUT's return type keys the program (its zero value
   # is what an unwritten `result` reads); a void SUT's key is unchanged.
   let retPart = if prog.retTy == nil: "" else: ";ret=" & canonicalize(prog.retTy)
+  # RFC-0005 S8as: each global's type and entry model (a `let`'s literal
+  # initialiser, or none) decide what a read before any write is; a program
+  # with no globals keys as before.
+  var glParts: seq[string]
+  for g in prog.globals:
+    glParts.add g.name & ":" & canonicalize(g.ty) & "=" &
+      (if g.init == nil: "free" else: canonicalize(g.init))
+  let glPart = if glParts.len == 0: "" else: ";gl=[" & glParts.join(",") & "]"
   "Pg<params=[" & paramParts.join(",") & "];body=" &
     canonicalize(prog.body, env) &
-    ";procs=[" & procParts.join(",") & "]" & retPart & ">"
+    ";procs=[" & procParts.join(",") & "]" & retPart & glPart & ">"
 
 # ---- SymexTarget -----------------------------------------------------------
 

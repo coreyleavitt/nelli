@@ -1196,6 +1196,16 @@ type
                          ## purely an ADDITIVE precision gain, never a
                          ## soundness lever (an untraced position just keeps
                          ## the pre-existing BV default).
+      opaqueHavoc*: seq[string]
+                         ## RFC-0005 S8as. For an INERT opaque call
+                         ## (`opaqueInert`): the IR names of the module-level
+                         ## variables (and, for a routine declared inside
+                         ## another, the captured enclosing variables) its
+                         ## body may write -- its effect summary
+                         ## (`opaqueWriteSummary`, dsl_parser.nim). The walk
+                         ## rebinds each to a fresh value of its type and
+                         ## records `feGlobalHavoc` (`dcFreshSymbol`). A call
+                         ## whose summary is unbounded is not inert at all.
       cGuardRoots*: seq[string]
                          ## RFC-0005 S8an. The IR names of the ROOT
                          ## variables of this call's `var` and `addr`
@@ -1430,6 +1440,23 @@ type
                        ## checked arithmetic), so its overflow obligations
                        ## stay live. Since S8t an `isIntOffset` param is
                        ## allocated the same way.
+
+  IRGlobal* = object
+    ## RFC-0005 S8as. A module-level variable the code under test reaches
+    ## (`__gl:<module>.<x>`, RFC-0005 S8an). The walk binds a global when it
+    ## writes it; a read before any write takes the global's ENTRY value:
+    ## the value it holds when the property runs, which other code may have
+    ## set (`entryValueOf`, runtime.nim).
+    name*: string      ## the IR name (`__gl:<module>.<x>`)
+    ty*:   IRType
+    isVar*: bool       ## a `var` (writable); false for an immutable `let`,
+                       ## which no call can change
+    init*: IRExpr      ## the initialiser of an immutable (`let`) global
+                       ## whose initialiser is a compile-time constant:
+                       ## its value whenever the property can run. nil for
+                       ## a `var` (other code may have written it) and for
+                       ## a `let` with any other initialiser (one value per
+                       ## run, unknown): the entry value is then free.
 
   ProcSig* = object
     name*:    string
@@ -2339,6 +2366,18 @@ type
                           ## c (probed, Nim 2.2.10). The path is dropped.
                           ## `classOf` is `dcOmitted` (a HALT, token
                           ## discarded). sevError -> sxUnknown.
+    feGlobalHavoc         ## RFC-0005 S8as. A module-level variable whose
+                          ## value the walk does not know takes a fresh
+                          ## value of its type: a read before any write in
+                          ## the walk (the value the property meets, which
+                          ## other code may have set -- `IRGlobal`), or a
+                          ## global an inert opaque call's effect summary
+                          ## says it may write (`IRStmt.opaqueHavoc`). Every
+                          ## real value is a model, nothing is forked away
+                          ## and no effect is dropped: `classOf` is
+                          ## `dcFreshSymbol` (`{scSpurious}`), so a hit
+                          ## through it is a replay-gated candidate and it
+                          ## never voids `sxUnsat`. sevError.
 
   DefectKind* = enum
     ## Phase 15 Z3. Nim defect families the walker may model as raise-paths.
@@ -2470,6 +2509,9 @@ type
     params*: seq[IRParam]
     body*: IRStmt
     procs*: Table[string, ProcSig]   ## transitively reachable callees
+    globals*: seq[IRGlobal]          ## RFC-0005 S8as. The module-level
+                                     ## variables the walked code names, with
+                                     ## their entry-value model.
     retTy*: IRType                   ## RFC-0005 S8p. The SUT's own return
                                      ## type; nil for a void SUT. The zero
                                      ## value `result` holds before the body
@@ -3372,6 +3414,10 @@ func classOf*(k: SymexErrorKind): DegradeClass =
     # dropped (token discarded), because c re-raises and cpp returns.
   # RFC-0005 S8m.
   of eeFinallyJumpOnRaise: dcOmitted
+  of feGlobalHavoc: dcFreshSymbol
+    # RFC-0005 S8as: a fresh value of the global's type (the entry value, or
+    # after an opaque call that may write it); its operands are none, and
+    # nothing is forked or dropped.
     # A HALT: the path whose `break` / `continue` leaves a `finally` during a
     # raised exit is dropped (token discarded): c re-raises, cpp does not.
 
@@ -4756,9 +4802,36 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
          cGuardRoots: guardRoots)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
-                   inert = false): IRStmt =
+                   inert = false, havoc: seq[string] = @[]): IRStmt =
+  ## RFC-0005 S8as: `havoc` is an inert call's effect summary
+  ## (`IRStmt.opaqueHavoc`).
   IRStmt(kind: isCall, callee: callee, cargs: args,
-         retName: retName, retTy: retTy, opaque: true, opaqueInert: inert)
+         retName: retName, retTy: retTy, opaque: true, opaqueInert: inert,
+         opaqueHavoc: havoc)
+
+proc mkIRGlobal*(name: string, ty: IRType, isVar: bool,
+                 init: IRExpr): IRGlobal =
+  ## RFC-0005 S8as. See `IRGlobal`.
+  IRGlobal(name: name, ty: ty, isVar: isVar, init: init)
+
+func irTypeRefFree*(t: IRType): bool =
+  ## RFC-0005 S8as. A value of `t` reaches no heap cell: scalars, strings,
+  ## and arrays, seqs, sets, tuples and objects built only from them. A
+  ## location of such a type is changed only by assigning it, so rebinding
+  ## its name to a fresh value models any write to it.
+  if t == nil: return false
+  case t.kind
+  of itInt, itBool, itFloat32, itFloat64, itString: true
+  of itArray: irTypeRefFree(t.elemTy)
+  of itSeq: irTypeRefFree(t.seqElemTy)
+  of itSet: irTypeRefFree(t.setElemTy)
+  of itDistinct: irTypeRefFree(t.distinctBase)
+  of itTuple:
+    if t.isPlaceholder: return false
+    for f in t.fields:
+      if not irTypeRefFree(f): return false
+    true
+  else: false
 
 proc mkVariantFieldStmt*(retName: string, recv: IRExpr, fieldName: string,
                          fieldTy: IRType, matchingTags: seq[int]): IRStmt =

@@ -933,6 +933,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## array-of-seq merges, distinct-over-composite, in-place element and
     ## Table-value mutation, KeyError, float keys, container Table values).
     ## 191->193 (provisional).
+    ## RFC-0005 S8as (if-arm pruning in a recursion; opaque-call write
+    ## summaries; a global's entry value; closure write-back; more
+    ## `addr` forms; a path-based alias check; an Int-sorted `int`
+    ## heap). 190->192 (191 is S8ar's).
     check symexWalkerVersion == "193"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

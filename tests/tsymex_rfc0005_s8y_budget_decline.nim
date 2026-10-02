@@ -27,6 +27,18 @@
 ##       exactly as the solver's own unknown does. A candidate is never a
 ##       winner, so what is lost is replay candidates on tainted paths
 ##       only. A clean path is always solved.
+##
+## RFC-0005 S8aq (walker 187): step 1c's new ground fact can now decide a
+## shallow hit of (b)'s pair loop outright from facts alone instead of it
+## exhausting the budget, on some Z3 builds (observed: Z3 4.13.4) but not
+## others (Z3 5.1) -- a completeness gain, not a regression. Which hit (if
+## any) therefore ends up declined is Z3-build sensitive, so (b)'s own two
+## tests no longer pin `st.declined` or the specific decline message by
+## count; they pin the floor that must hold on every build regardless
+## (a budget-out happens, `beSolverUndef` classified, never `sxUnsat`).
+## (S8aq pinned `budgetOut <= 1`, the n36 / s1c floor at their default
+## budget; at S8ag's 20k `tightTainted` a shallower hit can run out after a
+## deeper one, so this suite keeps S8ag's `budgetOut >= 1`.)
 import std/[unittest, strutils]
 import nelli/symex
 import nelli/smt/types
@@ -154,16 +166,31 @@ suite "S8y (b): a tainted hit at least as deep as an exhausted one is declined":
     # least as deep, so a shallower one can still run out after it (Z3
     # 4.13.4 has two at this budget).
     check st.budgetOut >= 1
-    check st.declined >= 1
+    # RFC-0005 S8aq: `st.declined` is no longer pinned to >= 1 here. Step
+    # 1c's new ground fact (item 2, the `seq.last_indexof`-is-at-least-
+    # every-found-`str.indexof` link) now decides some of this walk's
+    # shallower tainted hits outright from facts alone -- the very
+    # completeness gain S8aq was for -- so WHICH hit (if any) is the one
+    # whose own solve exhausts the budget is Z3-build sensitive, and
+    # whether a later, equally deep hit is left to decline with it. Both
+    # are sound. (S8aq, written against the 2M budget, pinned `budgetOut
+    # <= 1` here; at S8ag's 20k budget a shallower hit can run out after a
+    # deeper one, so the batch keeps S8ag's `>= 1` instead.)
     check r.status == sxUnknown
 
   test "the decline is recorded as a classified beSolverUndef, so never sxUnsat":
     let r = symexFind(pairLoopS8y, tLabel("s8y_pair_after"), tightTainted)
-    var declined = false
+    # RFC-0005 S8aq: whether the SPECIFIC "not solved (RFC-0005 S8y)"
+    # decline placeholder fires is the same Z3-build-sensitive question as
+    # the preceding test's. The invariant that must hold on every build is
+    # that an unsolved tainted hit is classified `beSolverUndef` -- an S8y
+    # decline placeholder or a genuine solver `unknown`, both produced by
+    # the same code path in `solveTargetHit` -- and so never promoted to a
+    # false `sxUnsat`.
+    var undef = false
     for e in r.errors:
-      if e.kind == beSolverUndef and "not solved (RFC-0005 S8y)" in e.msg:
-        declined = true
-    check declined
+      if e.kind == beSolverUndef: undef = true
+    check undef
     check r.status != sxUnsat
 
   test "a clean path is always solved, however many budget-outs precede it":

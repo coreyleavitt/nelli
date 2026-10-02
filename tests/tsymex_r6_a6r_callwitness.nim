@@ -236,11 +236,30 @@ proc sutOmittedSeqField(data: seq[byte]) =
     if pkt.blockNum == 5'u16:
       symexTarget("omitted_seq_field")
 
-suite "symex round-6 A6-rider -- constructor-omitting-seq[byte]-field stays out of scope":
+proc sutOmittedSeqFieldDead(data: seq[byte]) =
+  ## RFC-0005 S8at: the dead twin. The omitted `payload` is Nim's zero (an
+  ## empty seq), so no input reaches this target.
+  let wireOp = readU16Helper(data, 0)
+  if wireOp == 3'u16:
+    let pkt = Pkt(opcode: pkData, blockNum: 5'u16)
+    if pkt.payload.len != 0 or pkt.blockNum != 5'u16:
+      symexTarget("omitted_seq_field_dead")
 
-  test "R10: unchanged honest degrade (sxUnknown), not newly broken by this rider's fix":
+suite "symex round-6 A6-rider -- a constructor omitting a seq[byte] field":
+
+  test "R10: the omitted field is Nim's zero -- exact sxSat that replays, and its dead twin is sxUnsat (RFC-0005 S8at)":
+    # Pinned the honest degrade (sxUnknown) until RFC-0005 S8at: a case
+    # object's construction zeroes every omitted field (its arm's zeroes),
+    # so the run is exact. `@[0, 3]` reaches the target in Nim.
     let r = symexFind(sutOmittedSeqField, tLabel("omitted_seq_field"))
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
+    if r.status == sxSat:
+      symexCaptureBegin()
+      sutOmittedSeqField(r.witness[0])
+      check "omitted_seq_field" in symexCaptureEnd()
+    let d = symexFind(sutOmittedSeqFieldDead, tLabel("omitted_seq_field_dead"))
+    check d.status == sxUnsat
 
 suite "symex round-6 A6-rider -- version pins":
 

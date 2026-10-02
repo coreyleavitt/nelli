@@ -7377,6 +7377,16 @@ Pins that moved, because they pinned a gap S8at closes:
   rules out v115's forwarded-operand hazard.
 - **`r6_n27_placeholder_read_audit`** counts 97 runtime markers (91 + 6),
   for item 3's six guarded reads in `iteSV`.
+- **`r6_a6r_callwitness` R10** is now an exact `sxSat`. It pinned the
+  honest degrade (`sxUnknown`) of a case-object constructor that omits a
+  `seq[byte]` field. Item 4's construction zero makes the omitted field
+  Nim's empty seq, the witness `@[0, 3]` replays, and a dead twin reading
+  the field as non-empty is `sxUnsat`.
+
+Caught on symex-mingw (scan-tail), not by the local affected-suite runs:
+the R10 pin. It is a scan-tail matrix suite, and none of those was in the
+local set. Before the second push, every scan-tail suite and every
+`tsymex_r6_*` suite ran locally on both Z3 versions.
 
 Caught along the way: a `pairs` loop over a `Table[K, seq[V]]` crashed the
 compile. The iterator inliner substitutes the loop variable with an untyped

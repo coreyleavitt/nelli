@@ -8195,7 +8195,11 @@ first.
   write sites: the walker classifies by `isGlobalEnvName` (the `__gl:`
   prefix) and the parser by `isModuleGlobal` (the symbol's owner); no
   other site confuses the two. `tsymex_rfc0005_s6a_budget`'s variant pin
-  loses its companion `feGlobalReadUnmodelled`.
+  loses its companion `feGlobalReadUnmodelled`, and
+  `tsymex_rfc0005_s8i_models` (4)'s kind write after a declined
+  construction no longer declines on its own (`feUnsupportedOp`): it is
+  the ordinary write on the bound free variant, and the construction's
+  `seUnsupportedSetCharInterop` keeps the run `sxUnknown`.
 - (2) *`seq[distinct]` locals.* RED: `seNestedSeqUnsupported` (and the
   stray global of item 1). The cell type of a seq is its element type
   with every distinct layer stripped (`seqCellTy`): the backing array
@@ -8309,6 +8313,7 @@ versions, except where its pin moved by this slice:
 | `r6_b7r_bytescan` (re-pinned) | 26/0 | 26/0 |
 | `r6_lows_collectors` (re-pinned) | 5/0 | 5/0 |
 | `r6_r4_collector_scoping` (re-pinned) | 7/0 | 7/0 |
+| `rfc0005_s8i_models` (re-pinned; caught by symex-mingw, outside the first list) | 39/0 | 39/0 |
 | 27 more feGlobal / source-scanning suites (`163rev`, `s1_lattice`, `s1b`, `s5_str`, `s6b`, `s8ab`, `s8b`, `s8l`, `s8n`, `s8p`, `s8z`, the A2a / N2 / r11 / pairing / n36 class audits, `inv_structured_kinds`, `b7r2`, `bug2`, `n13`, `lows_declines`, `n27_hof`, `n37`, `r1`, `r6_emit`, `tot1`) | all 0 failed | all 0 failed |
 
 The new suite runs in 53 s (5.1) and 54 s (4.13.4) with its compile.

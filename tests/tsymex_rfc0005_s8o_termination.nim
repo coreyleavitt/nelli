@@ -193,6 +193,12 @@ suite "S8o (3): pcSatByConcreteInputs runs under the concolic budget":
 # its core from the wrong value (probed: removing the `not lastIndex`
 # guard turns this `sxSat` into `sxUnsat`).
 #
+# RFC-0005 S8au: `rfind` now lowers to an index split (a fresh Int with
+# `s = pre ++ c ++ post` axioms), so this query holds no `seq.last_indexof`
+# term. `seqLenCaps` still marks it `lastIndex` (the split stands for the
+# term), so it keeps this regime and its `sxSat`: without that it is a cap
+# decline (probed).
+#
 # Probe: `lastIdx("abc", repeat('x', 11))` reaches its label.
 
 proc lastIdx(s, t: string) =

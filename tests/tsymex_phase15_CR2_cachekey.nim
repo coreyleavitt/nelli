@@ -937,7 +937,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## summaries; a global's entry value; closure write-back; more
     ## `addr` forms; a path-based alias check; an Int-sorted `int`
     ## heap). 190->192 (191 is S8ar's).
-    check symexWalkerVersion == "193"
+    ## RFC-0005 S8au (copy-in/copy-out through a global or capture
+    ## declines; var ptr modelled; every find / rfind needle splits;
+    ## consecutive chain facts; the c-notin-t form per Z3 version).
+    ## Provisional 194.
+    check symexWalkerVersion == "194"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

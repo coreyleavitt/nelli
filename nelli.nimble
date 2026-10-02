@@ -1063,5 +1063,12 @@ task test, "Run the test suite":
             # global's entry value; closure capture/global write-back;
             # more `addr` forms; a path-based alias check; an Int-sorted
             # `int` heap; walker 190->192.
-            "tsymex_rfc0005_s8as_remainder"]:
+            "tsymex_rfc0005_s8as_remainder",
+            # RFC-0005 S8au -- the S8an / S8ag remainder: a var / addr
+            # actual reachable through a global or capture declines; var
+            # ptr formals modelled; every find / rfind needle splits;
+            # consecutive chain facts; the c-notin-t form per Z3 version.
+            # Items 1-2 (closed by S8ad) re-pinned. Walker 194
+            # (provisional).
+            "tsymex_rfc0005_s8au_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

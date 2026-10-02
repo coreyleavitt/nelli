@@ -247,17 +247,21 @@ suite "S8aq (2): the dropped link is declined -- Z3 cannot decide the combinatio
     checkpoint $mutant & " -> " & flaw
     check flaw.len > 0
 
-  test "end to end: declined -- sound sxUnknown, never a false sxSat":
-    # The one SUT shape engineered to need exactly this link: with it
-    # declined, the full (uncapped) sequence theory at DEFAULT settings
-    # also does not decide it within budget (the same Z3 weakness the
-    # suite-level comment measured, not a separate gap) -- `sxUnknown`,
-    # classified `beSolverUndef`, never a false `sxSat` or a silent wrong
-    # `sxUnsat`.
+  test "end to end: decided through S8au's rfind-find split link":
+    # The one SUT shape engineered to need exactly this link. With it
+    # declined here, the full (uncapped) sequence theory at default
+    # settings did not decide it within budget: `sxUnknown`,
+    # `beSolverUndef` (S8aq). RFC-0005 S8au lowers both `find` and `rfind`
+    # to index splits and links an rfind split to a find split of the same
+    # haystack and needle (`indexSplitLastLink`: a found index is at most
+    # the last one) -- this link, stated over the splits' own Ints, where
+    # its validity follows from their axioms. The dead label is now
+    # refuted. `seqRangeFacts` still emits no fact joining the native
+    # `str.indexof` / `seq.last_indexof` terms (the tests above).
     let r = symexFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
     checkpoint show(r.errors)
-    check r.status == sxUnknown
-    check hasKind(r.errors, beSolverUndef)
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
   test "companion: a found index at or before L is reachable":
     let r = symexFind(foundAtOrBeforeLast, tLabel("s8aq_found_at_or_before_last"))

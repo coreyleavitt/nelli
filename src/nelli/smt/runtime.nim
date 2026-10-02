@@ -4184,6 +4184,11 @@ proc toZ3Int(sv: SymVal): Z3Int =
   case sv.kind
   of svInt: sv.zi
   of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
+  of svDistinct:
+    # RFC-0005 S8bc (item 2): a `distinct` int used at its base (a borrowed
+    # `$`/`abs` lowered as the base routine on the unwrapped argument). The
+    # ejected base is the value Nim's `T(d)` gives (`ejectBase`).
+    toZ3Int(ejectBase(sv))
   else:
     raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (every call site pre-guards to svInt/BV kinds)]
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)

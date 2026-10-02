@@ -653,14 +653,16 @@ suite "S8at (5): a distinct over a composite base":
     check r.status == sxSat
     if r.status == sxSat: check reproduces(doRead(r.witness[0]), "do_read")
 
-  test "a borrowed proc stays declined (a different mechanism)":
-    # RFC-0005 S8at: a `{.borrow.}` routine that is not an operator has the
-    # borrowed symbol as its body (`feUnsupportedStmtKind`), over a scalar
-    # base too; reported, not fixed here.
+  test "a borrowed proc":
+    # RFC-0005 S8at pinned this declined: a `{.borrow.}` routine that is not
+    # an operator had the borrowed symbol as its body
+    # (`feUnsupportedStmtKind`). RFC-0005 S8bc (item 2) lowers it as the base
+    # routine on the unwrapped argument.
     let r = symexFind(dsBorrow, tLabel("ds_borrow"))
     checkpoint $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedStmtKind)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedStmtKind)
+    if r.status == sxSat: replays(dsBorrow(r.witness[0]), "ds_borrow")
 
 # ---- (6) a value object that recurs through a container ---------------------
 #

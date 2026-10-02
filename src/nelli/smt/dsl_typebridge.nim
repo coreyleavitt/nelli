@@ -808,8 +808,27 @@ var objectsInClassification {.compileTime.}: seq[string]
   ## VM exceeded"). A named type met again while its own fields are being
   ## classified is a REFERENCE to that type, not a second expansion of it.
 
+var borrowBaseViews* {.compileTime.}: seq[tuple[node, baseTy: NimNode]]
+  ## RFC-0005 S8bc (item 2). The argument nodes of a `{.borrow.}` routine
+  ## call the parser is lowering as its BASE routine right now, each with the
+  ## base type it is viewed at (`parseBorrowRoutineCall`). Nim gives a
+  ## borrowed routine no body: `proc len(d: DSq): int {.borrow.}` is
+  ## `len(seq[int](d))`, and the base routine's arms classify their
+  ## argument nodes. A macro cannot make a TYPED `seq[int](d)` node (a
+  ## synthesized node has no type, and `getTypeInst` on one fails the whole
+  ## compile), so the original, typed argument node is kept and classified
+  ## at its base type while the rewritten call is parsed. The value side
+  ## needs nothing: a conversion between a distinct and its base is a
+  ## pass-through in this engine (the walker ejects an `svDistinct` where a
+  ## base value is used, `ejectBase`), exactly as for a written `T(d)`.
+  ## Pushed and popped by the parser around that one call; empty otherwise.
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
+  # RFC-0005 S8bc: an argument of a borrowed routine, viewed at its base.
+  for i in countdown(borrowBaseViews.high, 0):
+    if borrowBaseViews[i].node == ty:
+      return classifyType(borrowBaseViews[i].baseTy)
   # `var T` strip (lvalue parameter).
   if ty.kind == nnkVarTy and ty.len == 1:
     return classifyType(ty[0])

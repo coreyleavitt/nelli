@@ -2325,6 +2325,94 @@ proc borrowInfoFor(calleeSym: NimNode): BorrowInfo =
   else:
     BorrowInfo(isBorrow: true, returnsDistinct: false, distinctTy: nil)
 
+proc distinctBaseTypeNode(ty: NimNode): NimNode =
+  ## RFC-0005 S8bc (item 2). The base type node of a `distinct` type node
+  ## (`DSq` with `DSq = distinct seq[int]` -> the typed `seq[int]`), or nil
+  ## when `ty` is not a named distinct type this can read. The node is the
+  ## type section's own, so it is typed (`getTypeInst` reads it), unlike any
+  ## node a macro could synthesize.
+  var t = ty
+  if t.kind == nnkVarTy and t.len == 1: t = t[0]
+  if t.kind != nnkSym: return nil
+  let impl = t.getImpl
+  if impl.kind == nnkTypeDef and impl.len >= 3 and
+     impl[2].kind == nnkDistinctTy and impl[2].len == 1:
+    return impl[2][0]
+  nil
+
+proc borrowRoutineRewrite(n: NimNode):
+    tuple[rw: NimNode, views: seq[tuple[node, baseTy: NimNode]]] =
+  ## RFC-0005 S8bc (item 2). A call of a NON-operator `{.borrow.}` routine
+  ## (`d.len`, `abs(m)`, `$m`, `inc(m)`), rewritten as a call of the routine
+  ## it borrows. Nim gives a borrowed routine no body: its `getImpl` body is
+  ## the base routine's symbol, and `f(a)` means `D(base(T(a)))` for each
+  ## `distinct T` formal (the result rewrapped when `f` returns `D`). Before
+  ## S8bc the call was walked as a user routine and its "body", that bare
+  ## symbol, declined (`feUnsupportedStmtKind`) -- over a scalar base too.
+  ##
+  ## `rw` is `n` with its head replaced by the base routine's symbol and the
+  ## SAME typed argument nodes. `views` (pushed onto `borrowBaseViews` while
+  ## `rw` parses) classifies each argument of a distinct formal at the
+  ## distinct's base type, and `rw` itself at the base of a distinct return
+  ## type, so the base routine's own arms (a builtin model, or a user
+  ## routine's walk) see `len(seq[int](d))`. Unwrapping and rewrapping are
+  ## value pass-throughs, as a written `T(d)` / `D(x)` is (`nnkConv`).
+  ##
+  ## `rw` is nil (the call is left alone) for an operator (an infix `+`/`<`
+  ## goes through `borrowIntercept`, and an operator called in call form
+  ## through the A7 comparison arm), a callee that is not a borrow, an arity
+  ## other than the borrow's formal count, or a distinct this cannot read
+  ## the base of (`distinctBaseTypeNode`); that keeps the routine-call path's
+  ## decline.
+  if n.kind notin {nnkCall, nnkCommand, nnkPrefix} or n.len < 2: return
+  let head = n[0]
+  if head.kind != nnkSym: return
+  let name = head.strVal
+  if name.len == 0 or
+     not (name[0] in {'a'..'z', 'A'..'Z', '_'} or name == "$"):
+    return
+  let impl = resolveRoutineImpl(head)
+  if impl == nil or not hasBorrowPragma(impl) or impl[6].kind != nnkSym:
+    return
+  let formal = impl[3]
+  if formal.kind != nnkFormalParams: return
+  var formalTys: seq[NimNode]
+  for i in 1 ..< formal.len:
+    let id = formal[i]
+    if id.kind != nnkIdentDefs: return
+    for j in 0 ..< id.len - 2: formalTys.add id[id.len - 2]
+  if formalTys.len != n.len - 1: return
+  var views: seq[tuple[node, baseTy: NimNode]]
+  for i in 1 ..< n.len:
+    if classifyType(formalTys[i - 1]).ty.kind != itDistinct: continue
+    let baseTy = distinctBaseTypeNode(formalTys[i - 1])
+    if baseTy == nil: return
+    views.add (n[i], baseTy)
+    # A `var` argument may arrive address-wrapped; the base routine's arm
+    # classifies what it unwraps too.
+    if n[i].kind in {nnkHiddenAddr, nnkHiddenDeref, nnkAddr} and n[i].len == 1:
+      views.add (n[i][0], baseTy)
+  var rw = copyNimNode(n)   # keeps `n`'s type (the borrow's return type)
+  rw.add impl[6]
+  for i in 1 ..< n.len: rw.add n[i]
+  # The base routine's arms read its own arity. A borrow declaring fewer
+  # formals than its base (the rest defaulted there) is left alone; Nim
+  # 2.2.10 itself crashes compiling one such borrow (`proc inc(m: var M)
+  # {.borrow.}`: an `IndexDefect` in the compiler), so it never reaches here.
+  let baseImpl = resolveRoutineImpl(impl[6])
+  if baseImpl == nil or baseImpl[3].kind != nnkFormalParams: return
+  var baseArity = 0
+  for i in 1 ..< baseImpl[3].len:
+    if baseImpl[3][i].kind != nnkIdentDefs: return
+    baseArity += baseImpl[3][i].len - 2
+  if baseArity != n.len - 1: return
+  if formal[0].kind != nnkEmpty and
+     classifyType(formal[0]).ty.kind == itDistinct:
+    let retBase = distinctBaseTypeNode(formal[0])
+    if retBase == nil: return
+    views.add (rw, retBase)
+  (rw, views)
+
 proc isUserCallee(sym: NimNode): bool =
   ## RFC-0005 S8c. The gate every builtin-by-name dispatch site consults: a
   ## call whose head resolved to a user routine (`isUserRoutine`) is walked
@@ -2443,6 +2531,10 @@ proc valueTypeName(node: NimNode): string =
   ## RFC-0005 S8d: `typeSpelling` -- a user type named `int8`/`float32`/
   ## `bool` is spelled `user:<name>`, so the name-keyed conversion arms
   ## (`intTyNames`, `fltTyNames`, `"bool"`) never read it as the builtin.
+  # RFC-0005 S8bc: a borrowed routine's argument, viewed at its base.
+  for i in countdown(borrowBaseViews.high, 0):
+    if borrowBaseViews[i].node == node:
+      return typeSpelling(borrowBaseViews[i].baseTy.getTypeInst)
   typeSpelling(node.getTypeInst)
 
 proc typeNodeName(node: NimNode): string =
@@ -3807,7 +3899,22 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                             offsetPositions, preamble, ctx)
   mkVar(synth)
 
+proc parseBorrowViewedExpr(rw: NimNode,
+                           views: seq[tuple[node, baseTy: NimNode]],
+                           preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bc (item 2). Parse a borrowed routine call's rewrite `rw`
+  ## (`borrowRoutineRewrite`) with its argument views pushed.
+  let mark = borrowBaseViews.len
+  borrowBaseViews.add views
+  result = parseExpr(rw, preamble, ctx)
+  borrowBaseViews.setLen mark
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+  # RFC-0005 S8bc (item 2): a non-operator `{.borrow.}` routine call is its
+  # base routine's call on the unwrapped arguments (`borrowRoutineRewrite`).
+  block borrowRoutine:
+    let (rw, views) = borrowRoutineRewrite(n)
+    if rw != nil: return parseBorrowViewedExpr(rw, views, preamble, ctx)
   case n.kind
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
     mkIntLit(n.intVal)
@@ -10374,10 +10481,28 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
 
 proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
+                    ctx: ParseCtx): IRStmt
+
+proc parseBorrowViewedStmt(rw: NimNode,
+                           views: seq[tuple[node, baseTy: NimNode]],
+                           preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bc (item 2). `parseBorrowViewedExpr`'s statement form.
+  let mark = borrowBaseViews.len
+  borrowBaseViews.add views
+  result = parseStmtInner(rw, preamble, ctx)
+  borrowBaseViews.setLen mark
+
+proc parseStmtInner(n: NimNode,
+                    preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt =
   ## The `preamble` accumulates A-normalised calls from any expression
   ## the surrounding statement contains; callers wrap the resulting
   ## stmt with the preamble before returning.
+  # RFC-0005 S8bc (item 2): a statement-position borrowed routine call
+  # (`inc(m)`, `d.add(3)`), as `parseExpr`'s.
+  block borrowRoutine:
+    let (rw, views) = borrowRoutineRewrite(n)
+    if rw != nil: return parseBorrowViewedStmt(rw, views, preamble, ctx)
   case n.kind
   # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a
@@ -12191,9 +12316,15 @@ proc ensureProcRegistered(ctx: ParseCtx, calleeSym: NimNode,
   # RFC-0005 S8e: the call site's callee symbol is the generic INSTANCE; its
   # own proc type carries the instantiated formals as typed nodes (see
   # `instantiatedFormalTypes`).
+  # RFC-0005 S8bc: a callee's body is parsed outside any borrowed call's
+  # argument views (a node of the callee spelled like the caller's argument
+  # is not that argument).
+  let savedViews = borrowBaseViews
+  borrowBaseViews.setLen 0
   var sig = parseCalleeImpl(impl, ctx, typeSubst,
     if typeSubst.len > 0 and calleeSym.kind == nnkSym: calleeSym.getTypeInst
     else: nil)
+  borrowBaseViews = savedViews
   sig.captures = captures
   leaveNameScope(savedNames)
   ctx.procScoped = savedProcScoped

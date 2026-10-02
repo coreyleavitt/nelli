@@ -62,18 +62,21 @@ proc s1bSolverUndefRaise(a, b, c, d: int) =
   if a * b * c * d == 1234567:
     raise newException(ValueError, "s1b rare")
 
-# Class-B `isUnsupported` (no parse-time error of its own): a seq
+# Class-B `isUnsupported` (no parse-time error of its own): a NESTED seq
 # element's augmented assignment is dropped whole
 # (`tsymex_augmented_assign.nim`; a field-LHS one is modelled since
 # RFC-0005 S8p, a tuple element's since S8s, an array element's at a
-# constant index since S8u and at a symbolic one since S8z, this pin's
-# previous shape). `b and 1` is 0 or 1, always in bounds.
+# constant index since S8u and at a symbolic one since S8z, a single-level
+# seq element's since S8am -- this pin's previous shape, now closed). A
+# nested seq element (`qq[0][i]`) still declines: `unwrapHidden(lhs[0])`
+# is itself an `nnkBracketExpr`, not an `nnkSym`, so it never matches the
+# seq-element arm. `b and 1` is 0 or 1, always in bounds.
 type S1bPoint = object
   x, y: int
 
 proc s1bFieldAug(p: S1bPoint, b: int) =
-  var q = @[p.x, p.y]
-  q[b and 1] += b  # RFC-0005 S8p/S8s/S8u/S8z model a field, a tuple element and an array element; a seq element's `+=` still declines
+  var qq = @[@[p.x, p.y]]
+  qq[0][b and 1] += b  # nested-seq element LHS -- always declines
   if b > 0:
     symexTarget("s1b_fieldaug")
 

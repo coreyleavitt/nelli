@@ -75,8 +75,9 @@ proc s1cTaintedRareRaise(a, b, c, d: int) =
     raise newException(ValueError, "s1c rare")
 
 # (b) a tainted raise caught by a handler whose body holds a Class-B
-# `isUnsupported` (a field-LHS augmented assignment) -- recorded only where a
-# path actually reaches it, so its kind appears iff the handler is walked.
+# `isUnsupported` (an augmented assign with an operator outside the
+# modelled set) -- recorded only where a path actually reaches it, so its
+# kind appears iff the handler is walked.
 type S1cPoint = object
   x, y: int
 
@@ -86,8 +87,14 @@ proc s1cTaintedCaught(p: S1cPoint, b: int) =
     if b + s > 0:
       raise newException(ValueError, "s1c tainted raise")
   except ValueError:
-    var q = @[p.x, p.y]
-    q[b and 1] += b  # RFC-0005 S8p/S8s/S8u/S8z model a field, a tuple element and an array element; a seq element's `+=` still declines
+    var qq = @[@[p.x, p.y]]
+    qq[0][b and 1] += b  # a nested-seq element LHS: `unwrapHidden(lhs[0])`
+                         # is itself an `nnkBracketExpr` (`qq[0]`), not an
+                         # `nnkSym`, so it never matches the seq-element
+                         # arm and always declines (feUnsupportedStmtKind)
+                         # -- unlike the single-level `q[b and 1] += b`
+                         # this test used before, which RFC-0005 S8am went
+                         # on to model, closing that decline.
   symexTarget("s1c_after_catch")
 
 # (c) witness monotonicity, tainted arm FIRST: the `if` arm is walked before

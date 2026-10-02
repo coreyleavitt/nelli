@@ -5,9 +5,11 @@
 ## these fell through to `isUnsupported` → `sxUnknown`.
 ##
 ## Scope (SIMPLE-VARIABLE LHS ONLY — see dsl_parser.nim `of nnkInfix:`):
-##   * Covered: plain `var` / `let` / local-sym LHS.
-##   * Degraded (sound): field LHS (`obj.f += y`), index LHS (`a[i] += y`),
-##     any `op=` not in {+=, -=, *=}. Invariant 3 — never a wrong verdict.
+##   * Covered: plain `var` / `let` / local-sym LHS. Field LHS (`obj.f +=
+##     y`, RFC-0005 S8p) and index LHS -- array (S8u/S8z) and seq
+##     (S8am) -- are modelled too, by mirroring arms; see each proc below.
+##   * Degraded (sound): any `op=` not in {+=, -=, *=}. Invariant 3 --
+##     never a wrong verdict.
 ##
 ## Tests (RED→GREEN order):
 ##   1. `+=` gives same verdict AND same witness as explicit `s = s + x`.
@@ -104,13 +106,19 @@ proc sutFieldAugModelled(p: AugPoint, b: int) =
     if q.x == p.x + b + 1:
       symexTarget("field_aug_dead")
 
-proc sutFieldAugDegrades(p: AugPoint, b: int) =
-  var q = @[p.x, p.y]  ## a seq copy of the struct param
-  q[b and 1] += b  ## seq-element LHS → mkUnsupported → sawUnknown
-                   ## (an array element's is modelled: RFC-0005 S8u at a
-                   ## constant index, S8z at a symbolic one; `b and 1` is
-                   ## 0 or 1, always in bounds)
-  ## No symexTarget: target not reached + sawUnknown=true → sxUnknown
+proc sutSeqElemAugModelled(p: AugPoint, b: int) =
+  ## RFC-0005 S8am: a seq-element `+=` is modelled too (mirrors the array
+  ## path's existing compound-assign arm: RFC-0005 S8u at a constant
+  ## index, S8z at a symbolic one, S8am for a seq), so a label it guards
+  ## is decided. Both operands are bounded first, so neither `+` can
+  ## overflow. `b and 1` is 0 or 1, always in bounds.
+  if b > 0 and b < 1000 and p.x > 0 and p.x < 1000 and p.y > 0 and p.y < 1000:
+    var q = @[p.x, p.y]
+    q[b and 1] += b
+    ## Real Nim: q[b and 1] is p.x+b or p.y+b, never p.x+p.y+b+1 (p.x,
+    ## p.y > 0 rules out the one coincidental solution for either arm).
+    if q[b and 1] == p.x + p.y + b + 1:
+      symexTarget("seq_elem_aug_dead")
 
 # ===========================================================================
 # Tests
@@ -167,14 +175,10 @@ suite "Augmented-assignment desugaring (walker v31)":
     let r = symexFind(sutFieldAugModelled, tLabel("field_aug_dead"))
     check r.status == sxUnsat
 
-  test "positional-element augmented assign degrades soundly → sxUnknown":
-    ## `q[b and 1] += b` on a seq: the LHS (after unwrapping hidden-deref
-    ## wrappers) is nnkBracketExpr, NOT nnkSym, and not a value field chain
-    ## (RFC-0005 S8p's field route; S8s added a tuple element, S8u an array
-    ## element at a constant index, S8z at a symbolic one; not a seq's). The nnkInfix arm degrades to
-    ## mkUnsupported → sawUnknown=true.
-    ## With no symexTarget in the proc and sawUnknown=true, the verdict is
-    ## sxUnknown (not sxSat — which would be wrong — and not sxUnsat — which
-    ## would be unsound because we can't prove the label is unreachable).
-    let r = symexFind(sutFieldAugDegrades, tLabel("never_label"))
-    check r.status == sxUnknown
+  test "positional-element augmented assign on a seq is modelled (RFC-0005 S8am) → sxUnsat":
+    ## `q[b and 1] += b` on a seq used to degrade (the LHS, after
+    ## unwrapping hidden-deref wrappers, is nnkBracketExpr over a seq --
+    ## not a value field chain, and not an array). RFC-0005 S8am closed
+    ## that gap, mirroring the array path's own compound-assign arm.
+    let r = symexFind(sutSeqElemAugModelled, tLabel("seq_elem_aug_dead"))
+    check r.status == sxUnsat

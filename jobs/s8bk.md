@@ -35,3 +35,22 @@ Flip it to `done` at the end.
 
 ## Report
 Write `worker-reports/s8bk.md` in the DONE format from WORKER-BRIEF.
+
+## REVISION 1 (coordinator, after the S8bk BLOCKER at worker-sls2 11cd931). This supersedes the Finding and Scope above.
+
+The worker's evidence is accepted. Nim takes a var/addr actual's address AFTER the later arguments are evaluated (`T1_ = moveP(); touch(&(*gP).x, T1_);`). The job's "snapshot early" fix was backwards. Implement the agent's corrected design:
+
+1. **Pin the real bug RED** (false sxSat at the base). The value is read early but written back to the late address in:
+   - copy-in/copy-out;
+   - the S8an addr cell;
+   - the S8bd by-ref element base (`gA[gi].x`), which evaluates the index early.
+2. **Fixed var/addr operands become late reads**, like S8ax's lazy operands. Both the address and the copied-in value are taken at the call, after every later argument. Copy-out writes back through that same late address.
+3. **Address checks stay where Nim does them.**
+   - The bound check, nil check, etc. stay at the argument's own position, using the values seen there.
+   - When a later argument's call changes what that check read (the `touch(a[gi], incI())` case), Nim accesses through an index it never checked. That is UB. Decline it with `feEvalOrderUnmodelled` and name the reason; never model it as a defined access. Reuse S8ax's snapshot to detect the change.
+4. **A call used as the base** (`getB().x`) stays eager and is evaluated exactly once.
+5. **The by-ref symbol base (`gP`) is already right.** Pin it so it stays that way.
+6. **Proc-variable variants.** S8bh (indirect-call copy-out) is not on this base. Implement and pin the direct-call forms only. The coordinator is adding the proc-variable forms to S8bh's integration.
+7. **Pin the native semantics from your probes.** `old.x=10 gP.x=105` is a satisfiable witness that replays roConfirmed. Pin it alongside the dead twin.
+
+Everything else is as above: walker 212, the test file, the verification suites on both Z3 versions, cpp once, a push, then the DONE report.

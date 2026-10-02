@@ -338,6 +338,10 @@ type
         ## N47-followup (walker v110). Mirrors `IRType.seqUnsupportedFieldKind`
         ## alongside the reason above; meaningful only when
         ## `seqUnsupportedFieldReason.len > 0`.
+      seqSteps*: int
+        ## RFC-0005 S8ar. The heap steps (`refSteps`) of the cell this seq
+        ## was read from; an element ref read out of it is that many steps
+        ## from a root. 0 for a seq that is not a heap read.
     of svTable:
       tabDataRaw*:    Z3AnyAst
       tabPresentRaw*: Z3AnyAst
@@ -431,12 +435,18 @@ type
       refAst*:     Z3AnyAst
       refPointee*: IRType   ## Phase 15 R1: the `ref T` pointee type (IRType is
                             ## itself a `ref object`, so no extra boxing).
+      refSteps*:   int      ## RFC-0005 S8ar. Heap steps from a root: 0 for a
+                            ## parameter, a `new` or `nil`; `k + 1` for a ref
+                            ## read out of a cell reached through a `k`-step
+                            ## ref. `maxHeapDepth` bounds a deref's step
+                            ## (`heapStepOf`), not the number of derefs.
     of svPtr:
       ## Phase 15 Cluster R (R1, ADR-0010). Same model as `svRef` for `ptr T`.
       ## `ptrFamily` marks the pointer family (R8).
       ptrAst*:     Z3AnyAst
       ptrFamily*:  bool
       ptrPointee*: IRType   ## Phase 15 R1: the `ptr T` pointee type.
+      ptrSteps*:   int      ## RFC-0005 S8ar. As `refSteps`.
 
   VariantAxisSym* = object
     discName*:      string
@@ -1057,6 +1067,15 @@ proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
     conds
   else:
     @[]
+
+proc seqStrElemConds(v: SymVal): seq[Z3Bool] =
+  ## RFC-0005 S8ar. The well-formedness of a string read out of a backing
+  ## store (a `seq[string]` element): it is a string of bytes, the fact
+  ## `allocateSym` gives a free `string` and `heapCellWfConds` a string
+  ## heap cell. Empty for any other kind.
+  if v.kind == svString:
+    @[matches(v.str, star(range(mkString("\x00"), mkString("\xff"))))]
+  else: @[]
 
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
   ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
@@ -2260,6 +2279,26 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
   ## `lowerSeqLit`'s per-element construction and the HOF `.map`/`.filter`
   ## rebuild.
 
+proc seqElemFits(val: SymVal, elemTy: IRType): bool =
+  ## RFC-0005 S8ar. True iff `storeSeqElem` can store `val` into a seq of
+  ## `elemTy` as it is: the element's own kind, or (for an integer element)
+  ## an Int-promoted value, which `storeSeqElem` converts at the width.
+  case elemTy.kind
+  of itInt:
+    val.kind == svInt or
+      (case elemTy.width
+       of 8: val.kind == svBV8
+       of 16: val.kind == svBV16
+       of 32: val.kind == svBV32
+       else: val.kind == svBV64)
+  of itBool: val.kind == svBool
+  of itFloat32: val.kind == svFloat32
+  of itFloat64: val.kind == svFloat64
+  of itString: val.kind == svString
+  of itRef: val.kind == svRef
+  of itPtr: val.kind == svPtr
+  else: false
+
 proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal
   ## N14 fwd-decl. Defined AFTER `walk`. `lower`'s `iekSeqDel` arm (defined
   ## BEFORE it) needs it to read the swap-source element (`data[len-1]`)
@@ -2354,6 +2393,28 @@ proc rawSortOf(sv: SymVal): RawZ3Sort =
   ## the inject/eject domains/ranges and bind the base-side quantified variable.
   let ctx = requireCurrentContext()
   ctx.checkErr Z3_get_sort(ctx.raw, rawAstOf(sv))
+
+proc heapStepsOf(sv: SymVal): int =
+  ## RFC-0005 S8ar. A ref's or ptr's heap steps from a root (`refSteps`);
+  ## 0 for any other value.
+  case sv.kind
+  of svRef: sv.refSteps
+  of svPtr: sv.ptrSteps
+  else: 0
+
+proc stampHeapSteps(sv: var SymVal; steps: int) =
+  ## RFC-0005 S8ar. Mark every ref a heap read produced (`sv`, or a ref inside
+  ## it) as `steps` heap steps from a root. A seq records `steps` for the
+  ## element refs an index read takes out of it (`seqSteps`).
+  case sv.kind
+  of svRef: sv.refSteps = max(sv.refSteps, steps)
+  of svPtr: sv.ptrSteps = max(sv.ptrSteps, steps)
+  of svSeq: sv.seqSteps = max(sv.seqSteps, steps)
+  of svTuple:
+    for f in sv.fields.mitems: stampHeapSteps(f, steps)
+  of svArray:
+    for f in sv.arrElems.mitems: stampHeapSteps(f, steps)
+  else: discard
 
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   ## The raw ast of ANY base SymVal that may underlie a distinct type — used
@@ -5255,10 +5316,15 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     let ctx = refT.ctx
     let mergedRaw = checkedIte(ctx, cond.raw, refT.raw, refE.raw)
     let merged = wrap[Z3AnyAst](ctx, mergedRaw)
+    # RFC-0005 S8ar: the merged ref is as many steps from a root as the
+    # deeper of the two.
+    let steps = max(heapStepsOf(t), heapStepsOf(e))
     if t.kind == svPtr:
-      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
+      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee,
+             ptrSteps: steps)
     else:
-      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee)
+      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee,
+             refSteps: steps)
 
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
@@ -7099,74 +7165,31 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # N1 fix: a mutation of untrusted content is itself untrusted).
       declinePlaceholderInLower(recv, "", "mutation (.add)")
       return recv
-    let val = lower(env, e.mutArg)
-    # New seq: data = store(old.data, old.len, val); len = old.len + 1
+    # RFC-0005 S8ar: the element is lowered at the element type's width (a
+    # literal into a `seq[int8]` is an 8-bit value) and stored through
+    # `storeSeqElem`, the store every other seq write uses, which backs
+    # every element kind `isBackedSeqElemTy` admits. This arm had its own
+    # copy of the store covering only `int` and `bool`: any other element
+    # (`string`, `float`, a narrower int, a ref) was "iekSeqAdd: unsupported
+    # elem/width" (`weInternalWalkerFault`), and an Int-promoted `int`
+    # stored the constant 0 in its place.
+    let val = lower(env, e.mutArg, intLitProto(recv.seqElemTy))
     let oldLen = recv.seqLen # [placeholder-audited]
     let newLen = oldLen + mkInt(1)
-    var newDataRaw: Z3AnyAst
-    case recv.seqElemTy.kind
-    of itInt:
-      case recv.seqElemTy.width
-      of 64:
-        let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-          recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
-        let vbv = case val.kind
-          of svBV64: val.bv64
-          of svInt:  mkBitVec[64](0'i64)  ## fallback (shouldn't happen)
-          else: mkBitVec[64](0'i64)
-        let stored = store(typed, oldLen, vbv)
-        newDataRaw = toAnyAst(stored)
-      else:
-        # Round-6 N47 (walker v109): was a raw `raise newException(
-        # ValueError, ...)` — an UNCLASSIFIED-carrier raise that sat OUTSIDE
-        # N36's (walker v101) own audit scope (`tsymex_r6_n36_raise_class_
-        # audit.nim` greps only for `raise (ref Symex*)`, never a bare
-        # `newException(ValueError, ...)`), but reachable from inside
-        # nested `walkBlock` frames via the EXACT SAME C-backend
-        # goto-exception hazard (ADR-0023/SND-3) N36 closed for the
-        # classified-carrier sites: unwinding this raise through two or
-        # more stacked recursive `walk` frames (e.g. a `.add` mutation
-        # inside a one-level-call-trace callee's inlined block, R4-W2b's
-        # two-hop shape) silently lost the raise, and the walk fell back to
-        # exhausting the enclosing loop's unroll budget instead of ever
-        # reaching this decline (confirmed empirically: N36's unrelated
-        # `isVariantReassign` try/except, added elsewhere in this SAME
-        # recursively-invoked `walk` proc, was sufficient by itself to flip
-        # this latent hazard from benign to live — R4-W2b regressed at
-        # c50b50f with no change to this arm's own code). In-band degrade
-        # via the chokepoint instead, mirroring this SAME arm's
-        # kind-mismatch decline above (and N36's own established idiom).
-        # N47-followup (walker v110): `declineMsg` reused verbatim as the
-        # placeholder's reason below — see the kind-mismatch arm's own note
-        # a few lines up for the full mechanism.
-        let declineMsg = "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
-             " (weInternalWalkerFault)"
-        lowerDegrade(weInternalWalkerFault, declineMsg)
-        var fresh: seq[Z3Bool]
-        return allocateSym(
-          tUnsupportedFieldSeq(tInt(8, false), declineMsg,
-            kind = weInternalWalkerFault),
-          "__seqAddWidthUnsupported", fresh)
-    of itBool:
-      let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-        recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
-      doAssert val.kind == svBool
-      newDataRaw = toAnyAst(store(typed, oldLen, val.bo))
-    else:
-      # Round-6 N47 (walker v109): same conversion, same reachability
-      # argument, as the sibling unsupported-width decline immediately
-      # above — see its comment for the full evidence chain.
-      # N47-followup (walker v110): `declineMsg` reused verbatim as the
-      # placeholder's reason below — see the kind-mismatch arm's own note
-      # (above) for the full mechanism.
-      let declineMsg = "iekSeqAdd: unsupported elem " & plainEnglishTypeKind(recv.seqElemTy.kind) &
-             " (weInternalWalkerFault)"
+    if not seqElemFits(val, recv.seqElemTy):
+      # Unreachable for a typed Nim `add` (its argument has the element
+      # type); a value some upstream degrade produced keeps the in-band
+      # decline this arm always had for a representation mismatch.
+      let declineMsg = "iekSeqAdd: element lowered to " &
+        plainEnglishSymValKind(val.kind) & " for a seq[" &
+        plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
       lowerDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
           kind = weInternalWalkerFault),
-        "__seqAddElemUnsupported", fresh)
+        freshDegradeName("__seqAddElemMismatch"), fresh)
+    let newDataRaw = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, oldLen, val) # [placeholder-audited]
     SymVal(kind: svSeq, seqLen: newLen,
            seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
   of iekTableSet:
@@ -7331,24 +7354,95 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let newData = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, lastVal) # [placeholder-audited]
     SymVal(kind: svSeq, seqLen: lenZi - mkInt(1),
            seqDataRaw: newData, seqElemTy: recv.seqElemTy)
-  of iekSeqInsert, iekSeqPop:
-    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-    # `raise newException`. `iekSeqInsert` (N14 item 4, decline-with-doctrine:
-    # a general symbolic-length shift needs either a quantifier or an
-    # unbounded per-index unroll, both outside this engine's quantifier-free
-    # doctrine — see the N14 test suite's own doc comment for the full
-    # adjudication) stays classified here, unchanged from its pre-N14 shape.
-    # `iekSeqPop` is now DEAD CODE: no parse site ever constructs it (grep
-    # confirms zero `"pop"` recognition sites pre-N14), and N14 modeled
-    # `.pop()` via a NEW dedicated statement (`isSeqPop`, mirroring `isIndex`)
-    # instead of this expression kind — `.pop()` needs a FRESH return-value
-    # bind alongside the receiver rebind, a shape this single-result
-    # expression arm cannot carry. Left in place (both the IR kind and this
-    # arm) rather than deleted: removing an IR kind mid-round is out of this
-    # slice's scope, and an unreachable exhaustive-match arm costs nothing.
-    let recv = case e.kind
-      of iekSeqInsert: lower(env, e.insSeq)
-      else:            lower(env, e.popSeq)
+  of iekSeqInsert:
+    # RFC-0005 S8ar. `insert(x, item, i)` (system.nim): `i` is a `Natural`
+    # (a negative `i` raises RangeDefect at the call, before any change);
+    # then `setLen(x, len + 1)` (the new last element is T's zero), the
+    # elements at `i ..< len` move up one, and `x[i] = item` -- which raises
+    # IndexDefect for `i > len`, AFTER the seq has grown (probed:
+    # `@[1,2,3].insert(9, 5)` caught leaves `@[1, 2, 3, 0]`). The parser
+    # emits the call as two assignments to the receiver, the grow phase
+    # (`insGrow`) and then the place phase, so each phase's defect forks
+    # with the state Nim raises it in. N14 had declined `insert` as needing
+    # a quantifier; the shift is the array lambda `iekSeqSlice` already
+    # builds (beta-reduced by Z3 at every select).
+    let recv = lower(env, e.insSeq)
+    if recv.kind != svSeq:
+      # Defense in depth (W2b precedent): the parser emits `insert` only for
+      # an itSeq receiver.
+      let declineMsg = "iekSeqInsert: receiver lowered to " &
+        plainEnglishSymValKind(recv.kind) & " — expected svSeq (weInternalWalkerFault)"
+      lowerDegrade(weInternalWalkerFault, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
+        freshDegradeName("__seqInsertKindMismatch"), fresh)
+    if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      declinePlaceholderInLower(recv, "", "mutation (.insert)")
+      return recv
+    let idxZi = toZ3Int(lower(env, e.insIdx, some(SymVal(kind: svInt, zi: mkInt(0)))))
+    let lenZi = recv.seqLen # [placeholder-audited]
+    if e.insGrow:
+      let negIdx = idxZi < mkInt(0)
+      rangeDefectConds.add negIdx
+      syncRangeDefectCond(negIdx)
+      if not defaultZeroTotal(recv.seqElemTy):
+        # A backed element type whose all-zero memory is not a value of
+        # the type (a variant whose ordinal-0 tag is illegal) has no
+        # `setLen` element to model.
+        let declineMsg = "iekSeqInsert: the element type " &
+          plainEnglishTypeKind(recv.seqElemTy.kind) &
+          " has no zero value for insert's setLen (feUnsupportedOp)"
+        lowerDegrade(feUnsupportedOp, declineMsg)
+        var fresh: seq[Z3Bool]
+        return allocateSym(
+          tUnsupportedFieldSeq(recv.seqElemTy, declineMsg, kind = feUnsupportedOp),
+          freshDegradeName("__seqInsertNoZero"), fresh)
+      let zero = defaultZero(recv.seqElemTy, freshDegradeName("__seqInsertZero"))
+      let grown = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, lenZi, zero) # [placeholder-audited]
+      return SymVal(kind: svSeq, seqLen: lenZi + mkInt(1),
+                    seqDataRaw: grown, seqElemTy: recv.seqElemTy)
+    let val = lower(env, e.insVal, intLitProto(recv.seqElemTy))
+    if not seqElemFits(val, recv.seqElemTy):
+      let declineMsg = "iekSeqInsert: element lowered to " &
+        plainEnglishSymValKind(val.kind) & " for a seq[" &
+        plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
+      lowerDegrade(weInternalWalkerFault, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
+        freshDegradeName("__seqInsertElemMismatch"), fresh)
+    # The grow phase made `lenZi` the new length, so `x[i]` is out of
+    # bounds exactly when `i >= lenZi` (`i > ` the length at the call).
+    let oob = idxZi >= lenZi
+    seqOobConds.add oob
+    syncSeqOobCond(oob)
+    # data'[j] = (j <= i ? store(data, i, item)[j] : data[j - 1]).
+    let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
+    let stored = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, val) # [placeholder-audited]
+    inc sliceViewCounter
+    let jVar = mkIntVar("__insertview_j" & $sliceViewCounter)
+    let below = jVar <= idxZi
+    let jPrev = jVar - mkInt(1)
+    # OWNERSHIP DISCIPLINE: every intermediate wrapped on creation (see
+    # `iekSeqSlice`).
+    let selStored = wrap[Z3AnyAst](zctx, checkedSelect(zctx, stored.raw, jVar.raw))
+    let selPrev = wrap[Z3AnyAst](zctx,
+      checkedSelect(zctx, recv.seqDataRaw.raw, jPrev.raw)) # [placeholder-audited]
+    let body = wrap[Z3AnyAst](zctx,
+      checkedIte(zctx, below.raw, selStored.raw, selPrev.raw))
+    var jApp = zctx.checkErr Z3_to_app(zctx.raw, jVar.raw)
+    let lam = wrap[Z3AnyAst](zctx,
+      zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
+        cast[ptr UncheckedArray[RawZ3App]](addr jApp), body.raw))
+    SymVal(kind: svSeq, seqLen: lenZi, seqDataRaw: lam,
+           seqElemTy: recv.seqElemTy)
+  of iekSeqPop:
+    # `iekSeqPop` is DEAD CODE: no parse site constructs it. N14 modeled
+    # `.pop()` via a dedicated statement (`isSeqPop`, mirroring `isIndex`),
+    # since `.pop()` needs a FRESH return-value bind alongside the receiver
+    # rebind, a shape this single-result expression arm cannot carry.
+    let recv = lower(env, e.popSeq)
     lowerDegrade(feUnsupportedOp,
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
@@ -8015,6 +8109,10 @@ func cellInDomain(c: int64; ty: IRType): bool =
   else: cast[uint64](c) >= cast[uint64](d.lo) and
         cast[uint64](c) <= cast[uint64](d.hi)
 
+proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string]
+  ## RFC-0005 S8ar fwd-decl (defined below, by `renderHeapCompound`).
+  ## `extractSeqElements` renders a `seq[string]` element with it.
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -8119,6 +8217,16 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     for i in 0 ..< n:
       let elem = SymVal(kind: svFloat64, fp64: select(typed, mkInt(i)))
       extractLeaf(m, w, path & "." & $i, elem)
+  of itString:
+    # RFC-0005 S8ar: a `seq[string]` witness. An element no path read is
+    # unconstrained in the model (the byte facts are its reads',
+    # `seqStrElemConds`), so a non-byte value renders "" -- any byte string
+    # is a correct rendering of an element nothing observed.
+    let typed = wrap[Z3Array[Z3Int, Z3String]](
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
+    for i in 0 ..< n:
+      w.strVals[path & "." & $i] =
+        evalStrBytesOrEmpty(m, select(typed, mkInt(i))).get("")
   of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elements.
     # The per-element pointee VALUES of a `seq[ref T]` were observed only
     # through the heap (`select(path.heaps[T], elem)`); the full per-element
@@ -14619,6 +14727,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let typed = wrap[Z3Array[Z3Int, Z3String]](
               arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
             indexed = SymVal(kind: svString, str: select(typed, idxZi))
+            # RFC-0005 S8ar: an element of a free `seq[string]` is a Nim
+            # string -- bytes (ADR-0006). Asserted at the read, as W2 does
+            # an element's range: a free backing array holds any Z3 string.
+            rangeConds = seqStrElemConds(indexed)
           of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
             # The element is an abstract `Ref_T` address (the backing array is a
             # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
@@ -14632,11 +14744,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                           else: arrSV.seqElemTy.refPointeeTy
             let elemRaw = checkedSelect(ctx, arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
             let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
+            # RFC-0005 S8ar: the element is as many heap steps from a root
+            # as the cell the seq was read from (`seqSteps`).
             if isPtr:
               indexed = SymVal(kind: svPtr, ptrAst: elemAny,
-                               ptrFamily: true, ptrPointee: pointee)
+                               ptrFamily: true, ptrPointee: pointee,
+                               ptrSteps: arrSV.seqSteps)
             else:
-              indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
+              indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee,
+                               refSteps: arrSV.seqSteps)
           else:
             raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see isVariantReassign above)]
               "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
@@ -20650,6 +20766,21 @@ proc readSeqFloat32*(w: RawWitness, name: string): seq[float32] =
     let path = name & "." & $i
     if w.float32Vals.hasKey(path):
       result[i] = w.float32Vals[path]
+
+proc readSeqBool*(w: RawWitness, name: string): seq[bool] =
+  ## RFC-0005 S8ar: a `seq[bool]` witness, from `boolVals` (an element absent
+  ## from the model is `false`, Nim's zero).
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[bool](n)
+  for i in 0 ..< n:
+    result[i] = w.boolVals.getOrDefault(name & "." & $i, false)
+
+proc readSeqString*(w: RawWitness, name: string): seq[string] =
+  ## RFC-0005 S8ar: a `seq[string]` witness, from `strVals`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[string](n)
+  for i in 0 ..< n:
+    result[i] = w.strVals.getOrDefault(name & "." & $i, "")
 
 proc readTableStrInt*(w: RawWitness, name: string): Table[string, int] =
   ## Phase 5 cycle 5: build a `Table[string, int]` populated with the

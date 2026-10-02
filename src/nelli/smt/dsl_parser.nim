@@ -346,7 +346,7 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSeqDel", emitExpr(e.delSeq), emitExpr(e.delIdx))
   of iekSeqInsert:
     newCall(bindSym"mkSeqInsert", emitExpr(e.insSeq),
-            emitExpr(e.insVal), emitExpr(e.insIdx))
+            emitExpr(e.insVal), emitExpr(e.insIdx), newLit(e.insGrow))
   of iekSeqPop:
     newCall(bindSym"mkSeqPop", emitExpr(e.popSeq))
   of iekTableSet:
@@ -1440,9 +1440,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     # RFC-0005 S8g: `del` forks its own IndexDefect / RangeDefect.
     result = true
   of iekSeqInsert:
-    result = rhsHasInlineDefectFork(e.insSeq) or
-             rhsHasInlineDefectFork(e.insVal) or
-             rhsHasInlineDefectFork(e.insIdx)
+    # RFC-0005 S8ar: each phase of `insert` forks its own defect (the
+    # grow phase RangeDefect, the place phase IndexDefect).
+    result = true
   of iekSeqPop:
     result = rhsHasInlineDefectFork(e.popSeq)
   of iekTableSet:
@@ -9641,7 +9641,23 @@ type DottedOp = enum
   ## (`parseStmtInner`), one per mutation: `dottedFieldMutate` applies to a
   ## field's old value the same one the bare arm applies to a variable's.
   doSeqAdd, doSeqDel, doSeqInsert, doTabDel, doTabSet, doSetIncl, doSetExcl,
-  doStrConcat, doStrUnsupported, doStrIndexAssign
+  doStrConcat, doStrUnsupported, doStrIndexAssign,
+  doSeqInsertGrow   ## RFC-0005 S8ar: `insert`'s grow phase
+
+proc insertArgs(elemTy: IRType; args: seq[IRExpr];
+                preamble: var seq[IRStmt]; ctx: ParseCtx): seq[IRExpr] =
+  ## RFC-0005 S8ar. `insert(x, item, i)`'s two arguments bound to fresh
+  ## locals, in Nim's order (item, then i). `insert` lowers in two phases
+  ## (`IRExpr.insGrow`), each of which reads both arguments; an argument
+  ## that reads the seq itself (`s.insert(v, s.len)`) must see the seq
+  ## as it was at the call, not as the grow phase left it. The index local
+  ## takes an Int proto (`lIsIntOffsetLocal`), the representation `del`'s
+  ## index lowers to.
+  let tv = freshSynth(ctx, "insv")
+  let ti = freshSynth(ctx, "insi")
+  preamble.add mkLet(tv, elemTy, args[0])
+  preamble.add mkLet(ti, tInt(), args[1], isIntOffsetLocal = true)
+  @[mkVar(tv), mkVar(ti)]
 
 proc dottedOpExpr(op: DottedOp; old: IRExpr; args: seq[IRExpr]): IRExpr =
   ## RFC-0005 S8ap. The new value of the field: `op` over its old value and
@@ -9651,6 +9667,7 @@ proc dottedOpExpr(op: DottedOp; old: IRExpr; args: seq[IRExpr]): IRExpr =
   of doSeqAdd:    mkSeqAdd(old, args[0])
   of doSeqDel:    mkSeqDel(old, args[0])
   of doSeqInsert: mkSeqInsert(old, args[0], args[1])
+  of doSeqInsertGrow: mkSeqInsert(old, args[0], args[1], grow = true)
   of doTabDel:    mkTableDel(old, args[0])
   of doTabSet:    mkTableSet(old, args[0], args[1])
   of doSetIncl:   mkSetIncl(old, args[0])
@@ -10773,9 +10790,15 @@ proc parseStmtInner(n: NimNode,
             mkAssign(recvName, mkSeqDel(mkVar(recvName), idx))
           # `s.insert(v, i)` on a seq
           elif calleeName == "insert" and recvCls.ty.kind == itSeq and n.len == 4:
-            let val = parseExpr(n[2], preamble, ctx)
-            let idx = parseExpr(n[3], preamble, ctx)
-            mkAssign(recvName, mkSeqInsert(mkVar(recvName), val, idx))
+            # RFC-0005 S8ar: the grow phase, then the place phase (see
+            # `insertArgs` and `IRExpr.insGrow`).
+            let args = insertArgs(recvCls.ty.seqElemTy,
+                                  @[parseExpr(n[2], preamble, ctx),
+                                    parseExpr(n[3], preamble, ctx)],
+                                  preamble, ctx)
+            preamble.add mkAssign(recvName,
+              mkSeqInsert(mkVar(recvName), args[0], args[1], grow = true))
+            mkAssign(recvName, mkSeqInsert(mkVar(recvName), args[0], args[1]))
           # `t.del(k)` on a Table
           elif calleeName == "del" and recvCls.ty.kind == itTable and n.len == 3:
             let key = parseExpr(n[2], preamble, ctx)
@@ -10878,6 +10901,14 @@ proc parseStmtInner(n: NimNode,
               else: doTabSet  # "[]="
             var args: seq[IRExpr]
             for i in 2 ..< n.len: args.add parseExpr(n[i], preamble, ctx)
+            if op == doSeqInsert:
+              # RFC-0005 S8ar: the grow phase is its own field write, so the
+              # place phase's IndexDefect sees the grown field.
+              args = insertArgs(classifyType(fieldNode).ty.seqElemTy, args,
+                                preamble, ctx)
+              let grow = dottedFieldMutate(fieldNode, doSeqInsertGrow, args,
+                                           preamble, ctx)
+              preamble.add grow
             dottedFieldMutate(fieldNode, op, args, preamble, ctx)
           else:
             ctx.declineAtSite(

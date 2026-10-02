@@ -794,6 +794,20 @@ proc arrayIndexLow*(n: NimNode): int64 =
   let b = arrayIndexBounds(ty[1])
   if b.ok: b.lo else: 0
 
+proc namedRefPlaceholder(objSym: NimNode): IRType   ## fwd decl (RFC-0005 S8ar)
+
+var objectsInClassification {.compileTime.}: seq[string]
+  ## RFC-0005 S8ar. The `nominalId`s of the named object types whose record
+  ## fields `classifyType` is classifying right now, innermost last. A Nim
+  ## type graph is cyclic wherever a container breaks the value nesting:
+  ## `type N = ref object; kids: seq[N]` reaches `N` again through
+  ## `classifyFieldType(seq[N])` -> `classifyType(N)`. R9's
+  ## `namedRefPlaceholder` cut the cycle only for a DIRECT ref field
+  ## (`next: N`); a ref reached through a seq/Table/HashSet/tuple/array
+  ## element expanded `N` again, without end ("maximum call depth for the
+  ## VM exceeded"). A named type met again while its own fields are being
+  ## classified is a REFERENCE to that type, not a second expansion of it.
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # `var T` strip (lvalue parameter).
@@ -1088,6 +1102,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           # pre-H1 `return classifyType(inner)`. RFC-0005 S8l: a variant
           # (`VRef = ref VObj`) is wrapped too; it used to be returned
           # unchanged, value-modelling the ref (see the flip note below).
+          # RFC-0005 S8ar: `inner` met again inside its own fields (a
+          # `seq[NodeRef]` field of `Obj`) is a reference to `Obj`, keyed as
+          # `classifyFieldType` keys a direct `NodeRef` field (S8l).
+          if nominalId(inner) in objectsInClassification:
+            let ph = namedRefPlaceholder(inner)
+            return unranged(if underObj.kind == nnkPtrTy: tPtr(ph) else: tRef(ph))
           let objCls = classifyType(inner)
           if objCls.ty.kind in {itTuple, itVariant, itMultiVariant}:   # RFC-0005 S8l: + variants
             return unranged(if underObj.kind == nnkPtrTy: tPtr(objCls.ty)
@@ -1097,8 +1117,27 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        underObj != nil and underObj.kind == nnkObjectTy:
       let recList = underObj[2]
+      # RFC-0005 S8ar: a type met again while its own fields are classified.
+      # A ref/ptr type is a heap reference to itself (the R9 placeholder,
+      # sharing its `Ref_` sort through `nominalId`). A VALUE object can only
+      # recur through a container (`type O = object; kids: seq[O]`), so its
+      # value is unbounded in depth: it declines scoped, as any type the
+      # walker does not model (`__unsupported:`, `feUnsupportedParamType`),
+      # and `scopedDeclineFieldTy` turns the enclosing seq field into its
+      # per-field read decline.
+      let oid = nominalId(resolved)
+      if oid in objectsInClassification:
+        if refWrapNode != nil:
+          let ph = namedRefPlaceholder(resolved)
+          return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(ph) else: tRef(ph))
+        # Keyed on the type's symbol, so the witness still spells the
+        # field's element type (an empty `seq[O]`, never read).
+        return unranged(tUninterp("__unsupported:recursive value object " &
+                                  s).keyedBySym(resolved))
+      objectsInClassification.add oid
       let pointee = classifyObjectRecordFields(resolved, recList,
                                                isRefWrapped = refWrapNode != nil)
+      objectsInClassification.setLen(objectsInClassification.len - 1)
       if refWrapNode != nil:   # RFC-0005 S8l: variants too
         return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(pointee)
                          else: tRef(pointee))

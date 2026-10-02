@@ -637,18 +637,30 @@ proc mvAxisOfField(mv: IRType; field: string): int =
       if field in arm.fieldNames: return i
   0
 
-proc heapDepthExhausted(p: Path, w: var WalkCtx): bool =
+proc heapStepOf(p: Path; ptrExpr: IRExpr): int =
+  ## RFC-0005 S8ar. The heap step a deref through `ptrExpr` takes: one more
+  ## than the ref's own steps from a root (`refSteps`). A parameter's or a
+  ## `new`'s field is step 1, the field of a ref read out of it step 2.
+  heapStepsOf(lowerLeafInExpr(p, ptrExpr)) + 1
+
+proc heapDepthExhausted(p: Path, w: var WalkCtx, step: int): bool =
   ## Phase 15 R9. The SOLE heap-depth check site, shared by `of isDeref:` and
-  ## `of isDerefWrite:`. INCREMENT `p.heapDepth` (per-path; threaded/deep-copied
-  ## at every fork via H1), then test it against the effective limit. On
-  ## exhaustion: record a classified `heDepthExhausted` (sevError) into the
-  ## heap-depth sink via `degrade` (RFC-0005 S1), and return `true` so the
-  ## caller HALTS this path (binds nothing, contributes no survivor → sxUnknown).
-  ## Otherwise return `false` and the deref/store proceeds normally. Per-path: a
-  ## shallower path's deref does not exhaust and continues.
-  inc p.heapDepth
+  ## `of isDerefWrite:`. Test the deref's heap `step` (`heapStepOf`) against
+  ## the effective limit. On exhaustion: record a classified
+  ## `heDepthExhausted` (sevError) into the heap-depth sink via `degrade`
+  ## (RFC-0005 S1), and return `true` so the caller HALTS this path (binds
+  ## nothing, contributes no survivor → sxUnknown). Otherwise return `false`
+  ## and the deref/store proceeds normally. Per-path: a shallower path's
+  ## deref does not exhaust and continues.
+  ##
+  ## RFC-0005 S8ar: the budget bounds how many heap steps from a root a
+  ## deref is, not how many derefs a path makes. Before S8ar every deref
+  ## incremented `p.heapDepth`, so a path reading nine fields of one
+  ## parameter exhausted a budget of 8 though every read was one step from
+  ## the root. `p.heapDepth` is now the deepest step the path has taken.
+  if step > p.heapDepth: p.heapDepth = step
   let limit = effectiveHeapDepthLimit(w.settings)
-  if limit > 0 and p.heapDepth >= limit:
+  if limit > 0 and step >= limit:
     # RFC-0005 S1: a HALT site — the caller drops `p` (no survivor), so the
     # former `p.uncertain = true` mutation carried nothing anywhere and is
     # gone; the token is discarded. `dsHeapDepth` writes the threadvar +
@@ -894,7 +906,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        if heapDepthExhausted(p, w): continue
+        let step = heapStepOf(p, stmt.dPtr)   ## RFC-0005 S8ar
+        if heapDepthExhausted(p, w, step): continue
         let refSV = lowerLeafInExpr(p, stmt.dPtr)
         let refAst = case refSV.kind
           of svRef: refSV.refAst
@@ -1065,6 +1078,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                 armSelects[k][1], bound, stmt.dElemTy)
           let cpB = drainPendingLowerEffects(cpA)
           var newEnv = cpB.env
+          stampHeapSteps(bound, step)   ## RFC-0005 S8ar
           newEnv[stmt.dRetName] = bound
           var child = forkPath(cpB, childPc, newEnv)
           child.heaps[discHeapKey] = discHeap
@@ -1084,13 +1098,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
-      # Phase 15 R9: bound recursive heap traversal. INCREMENT this path's
-      # heapDepth and HALT it (no survivor → sxUnknown) if it reaches the
-      # effective budget BEFORE the select — a recursive `n.next.next…` walk can
-      # never loop unboundedly. Per-path: a shallower path continues.
+      # Phase 15 R9: bound recursive heap traversal. HALT this path (no
+      # survivor → sxUnknown) if the deref's heap step reaches the effective
+      # budget BEFORE the select. Per-path: a shallower path continues.
+      # RFC-0005 S8ar: the step is the ref's distance from a root plus one,
+      # not a count of the path's derefs.
       # RFC-0005 S8an: an `addr` cell's read-back is not a program
       # dereference; it does not count.
-      if not stmt.dCell and heapDepthExhausted(p, w): continue
+      if not stmt.dCell and
+         heapDepthExhausted(p, w, heapStepOf(p, stmt.dPtr)): continue
       ## Drain-coverage audit: `stmt.dPtr` is always an env-resident var —
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
@@ -1186,7 +1202,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                   (if isDiscDeref: stmt.dObjTy else: nil))
         let cp = drainPendingLowerEffects(cp0)   ## N42 per-path taint drain
         newEnv = cp.env
-        let valSV = heapCellSelect(ctx, cell, refAst, stmt.dElemTy)
+        var valSV = heapCellSelect(ctx, cell, refAst, stmt.dElemTy)
+        stampHeapSteps(valSV, step)   ## RFC-0005 S8ar
         # N46-followup (walker v113): a SECOND drain, immediately after the
         # select — `liftHeapValue` (called from inside `heapSelect`) can now
         # degrade in-band (its own `else` arm, converted this slice) for a
@@ -1486,7 +1503,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       var survivors: seq[Path]
       for p in paths:
         if w.shouldStop: return survivors
-        if heapDepthExhausted(p, w): continue
+        let step = heapStepOf(p, stmt.dwPtr)   ## RFC-0005 S8ar
+        if heapDepthExhausted(p, w, step): continue
         let refSV = lowerLeafInExpr(p, stmt.dwPtr)
         let refAst = case refSV.kind
           of svRef: refSV.refAst
@@ -1659,12 +1677,13 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return survivors
-      # Phase 15 R9: a deref-WRITE also bounds heap depth (same per-path counter
+      # Phase 15 R9: a deref-WRITE also bounds heap depth (the same step
       # and effective budget as the read). HALT this path before the store if it
       # reaches the budget.
       # RFC-0005 S8an: an `addr` cell's store is not a program write; it
       # does not count.
-      if not stmt.dwCell and heapDepthExhausted(p, w): continue
+      if not stmt.dwCell and
+         heapDepthExhausted(p, w, heapStepOf(p, stmt.dwPtr)): continue
       ## Drain-coverage audit: `stmt.dwPtr` is always an env-resident var —
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and

@@ -509,6 +509,7 @@ type
     iekSeqAdd    ## #145: `s.add(v)` — returns new svSeq.
     iekSeqDel    ## #145: `s.del(i)` — Nim swap-with-last semantics.
     iekSeqInsert ## #145: `s.insert(v, i)` — shift later elements.
+                 ## RFC-0005 S8ar: one of two phases (`insGrow`).
     iekSeqPop    ## #143: `s.pop()` — returns the popped value;
                  ## a separate isAssign updates the seq.
     iekTableSet  ## #145: returns new svTable with `[k]=v`.
@@ -786,6 +787,14 @@ type
       insSeq*: IRExpr
       insVal*: IRExpr
       insIdx*: IRExpr
+      insGrow*: bool   ## RFC-0005 S8ar. Nim's `insert` grows the seq by
+                       ## one zero element (`setLen`) BEFORE it stores
+                       ## `x[i] = item`, so an `i > len` IndexDefect leaves
+                       ## the seq one longer. The parser emits two
+                       ## assignments: the grow phase (`insGrow`: the
+                       ## Natural check of `i`, then the zero element) and
+                       ## the place phase (the shift and the store, whose
+                       ## IndexDefect sees the grown seq).
     of iekSeqPop:
       popSeq*: IRExpr
     of iekTableSet:
@@ -3803,8 +3812,9 @@ proc mkSeqAdd*(recv, val: IRExpr): IRExpr =
   IRExpr(kind: iekSeqAdd, mutRecv: recv, mutArg: val)
 proc mkSeqDel*(seqx, idx: IRExpr): IRExpr =
   IRExpr(kind: iekSeqDel, delSeq: seqx, delIdx: idx)
-proc mkSeqInsert*(seqx, val, idx: IRExpr): IRExpr =
-  IRExpr(kind: iekSeqInsert, insSeq: seqx, insVal: val, insIdx: idx)
+proc mkSeqInsert*(seqx, val, idx: IRExpr; grow = false): IRExpr =
+  IRExpr(kind: iekSeqInsert, insSeq: seqx, insVal: val, insIdx: idx,
+         insGrow: grow)
 proc mkSeqPop*(seqx: IRExpr): IRExpr =
   IRExpr(kind: iekSeqPop, popSeq: seqx)
 proc mkTableSet*(recv, key, val: IRExpr): IRExpr =
@@ -4128,7 +4138,9 @@ proc isRenderableSeqElemTy*(elemTy: IRType): bool =
     elemTy.width == 32 or elemTy.width == 64)) or
   elemTy.kind == itFloat64 or
   elemTy.kind == itFloat32 or
-  elemTy.kind == itRef
+  elemTy.kind == itRef or
+  # RFC-0005 S8ar: `readSeqBool` / `readSeqString`.
+  elemTy.kind in {itBool, itString}
 
 func isContainerIntLeaf*(t: IRType): bool =
   ## RFC-0005 S8z. A `Table` value / `HashSet` element type the container
@@ -5211,7 +5223,9 @@ proc render*(e: IRExpr): string =
     render(e.key) & " in " & render(e.container)
   of iekSeqAdd:    render(e.mutRecv) & ".add(" & render(e.mutArg) & ")"
   of iekSeqDel:    render(e.delSeq) & ".del(" & render(e.delIdx) & ")"
-  of iekSeqInsert: render(e.insSeq) & ".insert(" & render(e.insVal) &
+  of iekSeqInsert: render(e.insSeq) &
+                   (if e.insGrow: ".insertGrow(" else: ".insert(") &
+                   render(e.insVal) &
                    "," & render(e.insIdx) & ")"
   of iekSeqPop:    render(e.popSeq) & ".pop()"
   of iekTableSet:  render(e.tabRecv) & "[" & render(e.tabKey) & "]:=" &

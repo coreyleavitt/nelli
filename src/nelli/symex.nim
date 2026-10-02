@@ -798,6 +798,8 @@ proc stdName(name: string): NimNode =
   of "readSeqUInt64": bindSym"readSeqUInt64"
   of "readSeqFloat64": bindSym"readSeqFloat64"
   of "readSeqFloat32": bindSym"readSeqFloat32"
+  of "readSeqBool": bindSym"readSeqBool"          # RFC-0005 S8ar
+  of "readSeqString": bindSym"readSeqString"      # RFC-0005 S8ar
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
   of "readTableStrIntAs": bindSym"readTableStrIntAs"   # RFC-0005 S8z
@@ -988,6 +990,15 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # `sxUnknown`). This placeholder therefore only needs to TYPECHECK,
       # never to be evaluated. Emit an `int` placeholder + a compile-time
       # `{.warning.}`, mirroring the `__closure` precedent above.
+      # RFC-0005 S8ar: a recursive VALUE object met again inside its own
+      # fields (`type O = object; kids: seq[O]`) declines as `__unsupported:`
+      # but is keyed on its symbol: it only ever sits as the element type of
+      # a scoped-decline field placeholder (an empty `seq[O]`), whose reader
+      # needs the type's spelling and never its value.
+      let recSym = witnessTypeSym(ty)
+      if recSym != nil:
+        let tyNode = copyNimNode(recSym)
+        return (tyNode, defaultValueOf(tyNode))
       let placeholder = quote do:
         block:
           {.warning: "symex: an unsupported parameter/witness type degrades " &
@@ -1149,6 +1160,12 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
           else:  ("uint64", "readSeqUInt64")
       (newTree(nnkBracketExpr, stdName("seq"), stdName(elemTyName)),
        newCall(stdName(readerName), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itBool:   ## RFC-0005 S8ar
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("bool")),
+       newCall(stdName("readSeqBool"), witId, newLit(path)))
+    elif ty.seqElemTy.kind == itString:   ## RFC-0005 S8ar
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("string")),
+       newCall(stdName("readSeqString"), witId, newLit(path)))
     elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float")),
        newCall(stdName("readSeqFloat64"), witId, newLit(path)))
@@ -1835,6 +1852,7 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
       else:
         case f.seqElemTy.kind
         of itBool, itInt, itFloat32, itFloat64: wfFaithful
+        of itString: wfFaithful   ## RFC-0005 S8ar: `renderHeapCompound`'s string arm
         of itRef, itPtr: refCellFidelity(f.seqElemTy, noms, inProgress)
         else: wfLossy
     of itTable:
@@ -1889,6 +1907,7 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
     else:
       case ty.seqElemTy.kind
       of itInt, itFloat32, itFloat64: wfFaithful
+      of itBool, itString: wfFaithful   ## RFC-0005 S8ar
       of itRef: wf(ty.seqElemTy)   ## RFC-0005 S8h
       else: wfUnexecutable   ## the reader's defensive `error()` arm
   of itTable:   # RFC-0005 S8z: every renderable shape

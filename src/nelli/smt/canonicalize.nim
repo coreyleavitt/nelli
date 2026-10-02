@@ -4968,7 +4968,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SqD:" & canonicalize(e.delSeq, env) & ";" &
       canonicalize(e.delIdx, env) & ">"
   of iekSeqInsert:
-    "Ex<SqI:" & canonicalize(e.insSeq, env) & ";" &
+    "Ex<SqI" & (if e.insGrow: "g:" else: ":") &
+      canonicalize(e.insSeq, env) & ";" &
       canonicalize(e.insVal, env) & ";" &
       canonicalize(e.insIdx, env) & ">"
   of iekSeqPop:    "Ex<SqP:" & canonicalize(e.popSeq, env) & ">"

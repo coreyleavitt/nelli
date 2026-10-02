@@ -8087,7 +8087,21 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv64))
     else:         w.uintVals[path] = m.evalUint(sv.bv64)
   of svInt:
-    let v = int64(m.evalInt(sv.zi))
+    # RFC-0005 S8ax: `evalInt` raises on a value outside `int64`, and a
+    # raise out of the walk ends it with nothing recorded (a false
+    # `sxUnsat`). Every cell an Int-sorted heap read is bounded
+    # (`intCellRangeFacts`); one the query never read is only the model's,
+    # and is recorded as not extracted instead.
+    let ev = m.eval(sv.zi, modelCompletion = true)
+    var v: int64
+    if not Z3_get_numeral_int64(ev.ctx.raw, ev.raw, addr v):
+      let exErrI = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
+        msg: "integer witness at '" & path & "' is not an int64 numeral (" &
+             $ev & ")",
+        scope: walkSite())
+      extractionErrors.add exErrI     # threadvar: fallback
+      syncExtractionError(exErrI)     # CR-9 Stage 5: LIVE WalkCtx field
+      v = 0
     w.intVals[path] = v
     # Phase 14 A6: a promoted variant discriminator lands in svInt
     # but the witness reader for its underlying `itInt(unsigned)`
@@ -19941,6 +19955,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   intHeapIsInt = false   ## RFC-0005 S8as: set once the params are bound
   intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
+  intCellFactSeen = initHashSet[uint]()  ## RFC-0005 S8ax
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
@@ -20386,19 +20401,14 @@ proc runSymexImpl(prog: SymexProgram,
             mkBinop(bLe, mkVar(p.name), mkIntLit(p.rangeHi)))
     of itBool:
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
-  # RFC-0005 S8as: the `int` heap is Int-sorted when every plain `int`
-  # parameter is an Int (`intHeapIsInt`), and only then. A bit-vector
-  # parameter stored into an Int heap and compared with itself after a
-  # read is `int2bv(bv2int(v)) != v`, the F5 shape Z3 does not finish
-  # (S8an's `getP(addr x) != v` ran past 400 s under an Int heap).
-  block:
-    var anyInt = false
-    var allInt = true
-    for p in prog.params:
-      if p.ty.kind == itInt and p.ty.width == 64 and p.ty.signed:
-        if env.hasKey(p.name) and env[p.name].kind == svInt: anyInt = true
-        else: allInt = false
-    intHeapIsInt = settings.integerSemantics != isExact
+  # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
+  # run's ints are not exact (`intHeapIsInt`). S8as also required every
+  # plain `int` parameter to be an Int: a bit-vector stored into an Int heap
+  # and compared with itself after a read is `int2bv(bv2int(v)) != v`, the
+  # F5 shape Z3 does not finish. S8ax meets that bit-vector unconverted
+  # (`intOfBV`, `storedAt`) and bounds every cell an Int heap is read at by
+  # its type (`intCellRangeFacts`).
+  intHeapIsInt = settings.integerSemantics != isExact
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
     extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way

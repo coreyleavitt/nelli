@@ -419,6 +419,40 @@ proc sutIntNarrowWiden(v: int32) =
   r[] = v
   if int(r[]) > 5 and int64(r[]) < 9: symexTarget("nwd")
 
+# WRONG VERDICTS (found by the Windows legs on S8as's own tests): nothing
+# bounded an Int-sorted cell's input value by its type. `b.x` of an `int8`
+# field read as any integer, so `int(b.x) > 127` was a false sxSat, whose
+# witness (`x: 128`) crashed the typed result with a RangeDefect; and
+# `b.n + 1`'s overflow raise was SAT with `b.n` below `low(int)`, whose
+# witness extraction raised out of the walk and ended it with nothing
+# recorded: a false sxUnsat on a target after a heap write in a branch on a
+# seq element (S8aa's heap join, and base too where the heap was Int).
+
+type
+  S8axBoxN = ref object
+    n: int
+  S8axBox8 = ref object
+    x: int8
+  S8axBoxR = ref object
+    r: range[0..9]
+
+proc sutCellBranch(data: seq[byte], b: S8axBoxN) =
+  symexAssume(data.len == 4 and b != nil)
+  let n0 = b.n
+  if data[0] != 1'u8:
+    b.n = b.n + 1
+  if b.n == n0 + 1: symexTarget("cb")
+
+proc sutCell8(b: S8axBox8, d: int) =
+  symexAssume(b != nil and d > -5 and d < 5)
+  if int(b.x) > 127: symexTarget("c8_dead")
+  if int(b.x) == -128: symexTarget("c8")
+
+proc sutCellR(b: S8axBoxR, d: int) =
+  symexAssume(b != nil and d > -5 and d < 5)
+  if int(b.r) > 9: symexTarget("cr_dead")
+  if int(b.r) == 9: symexTarget("cr")
+
 const s8axTight = SymexSettings(budget: ResourceBudget(queryRLimit: 5_000_000))
 
 suite "RFC-0005 S8ax (4): Int-sorted int heap cells":
@@ -438,6 +472,14 @@ suite "RFC-0005 S8ax (4): Int-sorted int heap cells":
   test "a bit-vector stored through `addr` and read back":
     verdictS(sutIntAddrBV, "ab", sxSat, s8axTight)
     verdictS(sutIntAddrBV, "ab_dead", sxUnsat, s8axTight)
+  test "an input cell holds a value of its type":
+    ## RED: `c8_dead` sxSat (then a RangeDefect building the witness), and
+    ## `cb` sxUnsat with nothing recorded.
+    verdict(sutCellBranch, "cb", sxSat)
+    verdict(sutCell8, "c8_dead", sxUnsat)
+    verdict(sutCell8, "c8", sxSat)
+    verdict(sutCellR, "cr_dead", sxUnsat)
+    verdict(sutCellR, "cr", sxSat)
 
 # ---- (7) a read and a later call that writes what it reads ------------------
 #

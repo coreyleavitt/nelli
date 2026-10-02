@@ -497,8 +497,8 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
   ## that same term (`store(h, idx, v)`), or `none`.
   if storeDeclKind == 0:
     let probe = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_store_probe")
-    let st = ctx.checkErr Z3_mk_store(ctx.raw, probe.raw,
-                                      mkInt(ctx, 0).raw, mkInt(ctx, 0).raw)
+    let st = checkedStore(ctx, probe.raw, mkInt(ctx, 0).raw,
+                          mkInt(ctx, 0).raw)
     storeDeclKind = ord(Z3_get_decl_kind(ctx.raw,
       Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, st)))) + 1
   if Z3_get_ast_kind(ctx.raw, arr) != Z3_APP_AST: return none(RawZ3Ast)
@@ -509,6 +509,69 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
   if cast[pointer](Z3_get_app_arg(ctx.raw, app, 1)) != cast[pointer](idx):
     return none(RawZ3Ast)
   some(Z3_get_app_arg(ctx.raw, app, 2))
+
+var iteDeclKind {.threadvar.}: int
+  ## RFC-0005 S8ax. The `Z3_decl_kind` ordinal of an `ite`, read off a probe
+  ## term as `storeDeclKind` is; 0 until first read.
+
+var intCellFactSeen {.threadvar.}: HashSet[uint]
+  ## RFC-0005 S8ax. The `select(base, idx)` terms `intCellRangeFacts` has
+  ## bounded this run, by address (each fact holds its term, so the address
+  ## is not reused while it is listed). Reset by `resetSymexRunState`.
+
+proc intCellRangeFacts(ctx: Z3Context; arr, idx: RawZ3Ast; ty: IRType) =
+  ## RFC-0005 S8ax. An Int-sorted heap (`intHeapCell`) holds, at every
+  ## address, a value of its Nim type, but nothing in the Int sort says so:
+  ## an input cell read unchanged was any integer, so `b.n + 1`'s overflow
+  ## raise was SAT with `b.n` below `low(int)`, and extracting that model's
+  ## witness raised out of the walk, which ended it with nothing recorded (a
+  ## false `sxUnsat` on the target the walk never reached). Each heap
+  ## constant `arr` reads through -- the input heap, or the fresh one an
+  ## opaque call havocs, under any `store` and `ite` the walk built over it
+  ## -- gets its type's bounds at `idx` (`globalEntryFacts`): true of every
+  ## real heap at every address, so asserting it anywhere prunes no real
+  ## execution.
+  if storeDeclKind == 0 or iteDeclKind == 0:
+    let a = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_chain_probe_a")
+    let b = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_chain_probe_b")
+    let st = checkedStore(ctx, a.raw, mkInt(ctx, 0).raw, mkInt(ctx, 0).raw)
+    storeDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, st)))) + 1
+    let it = checkedIte(ctx, mkBoolVar(ctx, "__s8ax_chain_probe_c").raw,
+                        a.raw, b.raw)
+    iteDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, it)))) + 1
+  var lo, hi: int64
+  if ty.hasRange:
+    lo = ty.rangeLo
+    hi = ty.rangeHi
+  elif ty.width in [8, 16, 32]:
+    lo = -(1'i64 shl (ty.width - 1))
+    hi = (1'i64 shl (ty.width - 1)) - 1
+  else:
+    lo = low(int64)
+    hi = high(int64)
+  var todo = @[arr]
+  while todo.len > 0:
+    let a = todo.pop()
+    if Z3_get_ast_kind(ctx.raw, a) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, a)
+    let n = Z3_get_app_num_args(ctx.raw, app)
+    if n == 0:
+      let sel = checkedSelect(ctx, a, idx)
+      let key = cast[uint](cast[pointer](sel))
+      if key notin intCellFactSeen:
+        intCellFactSeen.incl key
+        let v = wrap[Z3Int](ctx, sel)
+        globalEntryFacts.add(v >= mkZ3IntLit(lo))
+        globalEntryFacts.add(v <= mkZ3IntLit(hi))
+      continue
+    let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1
+    if k == storeDeclKind and n == 3:
+      todo.add Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == iteDeclKind and n == 3:
+      todo.add Z3_get_app_arg(ctx.raw, app, 1)
+      todo.add Z3_get_app_arg(ctx.raw, app, 2)
 
 proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
                 pointeeTy: IRType): SymVal =
@@ -523,6 +586,8 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   # an Int-sorted heap stored then meets its source unconverted
   # (`intOfBV`).
   let hit = storedAt(ctx, heap.raw, refAst.raw)
+  if hit.isNone and intHeapCell(pointeeTy):
+    intCellRangeFacts(ctx, heap.raw, refAst.raw, pointeeTy)   # RFC-0005 S8ax
   let valRaw = if hit.isSome: hit.get
                else: checkedSelect(ctx, heap.raw, refAst.raw)
   liftHeapValue(ctx, valRaw, pointeeTy)

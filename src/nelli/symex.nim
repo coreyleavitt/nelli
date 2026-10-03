@@ -937,6 +937,16 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   if pointee.kind == itTuple and pointee.nameIsRefAlias: innerTy
   else: wrapped(innerTy)
 
+proc unrenderedReader(msg: string): NimNode =
+  ## RFC-0005 S8bx (item 2). The reader of a container no witness reader
+  ## reads: CR-2c's invariant guard, which fails the compile with `msg` when
+  ## it is EMITTED -- a parameter whose witness reads the container (the
+  ## predicate and the reader drifted). A caller that needs the container's
+  ## TYPE only (a placeholder seq's element) discards it, and compiles.
+  let m = newLit(msg)
+  quote do:
+    {.error: `m`.}
+
 proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
   ## Recursive: returns (Nim type AST, witness-construction expression). The
@@ -1126,7 +1136,10 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
   of itString:
     (stdName("string"), newCall(stdName("readString"), witId, newLit(path)))
   of itSeq:
-    if isUnsupportedFieldPlaceholder(ty):
+    # RFC-0005 S8bx (item 2): one classifier, shared with
+    # `isRenderableWitnessTy`, picks the reader (`seqWitnessReader`).
+    case seqWitnessReader(ty)
+    of swrPlaceholder:
       # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
       # 2026-08-15): a declared field whose element kind is unbacked (e.g.
       # `seq[(string,string)]`) — `runtime.nim`'s `allocateSym` never
@@ -1143,13 +1156,11 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
       let seqTy = newTree(nnkBracketExpr, stdName("seq"), elemTyNode)
       (seqTy, newCall(newTree(nnkBracketExpr, stdName("newSeq"), elemTyNode), newLit(0)))
-    # Phase 5 cycle 1: only seq[int] tested; specialised reader.
-    elif ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
-       ty.seqElemTy.width == 64:
+    of swrInt64:
+      # Phase 5 cycle 1: only seq[int] tested; specialised reader.
       (newTree(nnkBracketExpr, stdName("seq"), stdName("int")),
        newCall(stdName("readSeqInt"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itInt and
-         (ty.seqElemTy.isChar or ty.seqElemTy.enumName.len > 0):
+    of swrScalarAs:
       # RFC-0005 S8bc: a `char` or enum element. The fixed-width arm below
       # keys on width and signedness only, so `seq[char]` and `seq[Col]`
       # were spelled `seq[uint8]`: a top-level witness did not replay at
@@ -1162,7 +1173,7 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
        newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
                        copyNimTree(elemTyNode)),
                witId, newLit(path)))
-    elif ty.seqElemTy.kind == itInt:
+    of swrFixedInt:
       # RFC-chapulin-hardening M1: fixed-width-int seq elements
       # (`byte`/`uint8..uint64`, `int8..int32` — `int64` is the arm above).
       # `extractSeqElements`/`allocateSeqDataRaw`/`seqElemAt` (runtime.nim)
@@ -1188,19 +1199,19 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
           else:  ("uint64", "readSeqUInt64")
       (newTree(nnkBracketExpr, stdName("seq"), stdName(elemTyName)),
        newCall(stdName(readerName), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itBool:   ## RFC-0005 S8ar
+    of swrBool:   ## RFC-0005 S8ar
       (newTree(nnkBracketExpr, stdName("seq"), stdName("bool")),
        newCall(stdName("readSeqBool"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itString:   ## RFC-0005 S8ar
+    of swrString:   ## RFC-0005 S8ar
       (newTree(nnkBracketExpr, stdName("seq"), stdName("string")),
        newCall(stdName("readSeqString"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
+    of swrFloat64:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float")),
        newCall(stdName("readSeqFloat64"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
+    of swrFloat32:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float32")),
        newCall(stdName("readSeqFloat32"), witId, newLit(path)))
-    elif isTreeSeqElemTy(ty.seqElemTy):
+    of swrTree:
       # RFC-0005 S8bc (item 3): a seq of a by-value tuple, object, array or
       # case object, held leaf-split. Each element is written in the heap's
       # cell layout (`extractTreeValue`) and read as a cell field is
@@ -1216,7 +1227,7 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
        newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
                        copyNimTree(elemTyNode)),
                src, newLit(path)))
-    elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
+    of swrRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # RFC-0005 S8f/S8h: element `i` is the position `path[i]` -- nil, the
       # same object as any other position holding its address (an earlier
       # element, a param), or its own cell. (R3 rendered each element a
@@ -1227,26 +1238,21 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let reader = emitRefElemsReader(elemTy, path, witId, lenCall,
         newCall(nnkBracketExpr.newTree(stdName("newSeq"), elemTy), lenCall))
       (newTree(nnkBracketExpr, stdName("seq"), elemTy), reader)
-    else:
-      # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
-      # `else` used to `error()` at macro-expansion time, aborting
-      # compilation of the whole test file — a THIRD macro-`error()` site
-      # class, distinct from CR-2a/CR-2b. It is now unreachable for ANY SUT
-      # PARAMETER witness type, top-level OR nested: `parseProc*`'s
-      # parameter-classification loop (`dsl_parser.nim`), via
-      # `demoteUnrenderableWitnessTy`, runs each parameter through the
-      # RECURSIVE `isRenderableWitnessTy` predicate (`smt/types.nim`), which
-      # mirrors EXACTLY this reader's type-tree walk (tuple/object fields,
-      # array elems, variant arms, distinct bases, ref pointees) reusing the
-      # `isRenderableSeqElemTy` leaf check. Any parameter whose witness tree
-      # contains a non-renderable seq element — at any depth — is routed to
-      # an `itUninterp("__unsupported_witness:" & s)` placeholder BEFORE this
-      # `itSeq` is ever built, so the whole run degrades to a classified
-      # `sxUnknown` at parameter-allocation time instead. Retained as a
-      # defensive internal-invariant guard (should never fire) in case the
-      # predicate and this reader ever drift apart.
-      error("symex Phase 5: seq witness reader for " & $ty &
-            " not yet implemented")
+    of swrNone:
+      # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality): no
+      # parameter whose witness READS this seq reaches here --
+      # `demoteUnrenderableWitnessTy` (`dsl_parser.nim`) routes any parameter
+      # `isRenderableWitnessTy` rejects to an `__unsupported_witness:`
+      # placeholder, and that predicate judges a seq on this same
+      # classifier. RFC-0005 S8bx (item 2): a seq whose TYPE alone is
+      # needed does reach here -- the element of a placeholder seq of seqs,
+      # whose reader is discarded -- so the type is rendered, and the guard
+      # rides the reader: it fails the compile only where it is emitted
+      # (was a macro-time `error()`, which failed every such type).
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       unrenderedReader("seq witness reader for " & $ty &
+                        " not yet implemented"))
   of itTable:
     # Phase 5 cycle 5: Table[string, int]. RFC-0005 S8z: and every other
     # renderable value type, read through `readTableAs[K, V]` (S8ar).
@@ -1267,14 +1273,16 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
                               copyNimTree(keyTyNode), copyNimTree(valTyNode)),
                       witId, newLit(path)))
     else:
-      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
-      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
-      # `isRenderableWitnessTy` predicate applies `isRenderableTableTy` at
-      # every Table leaf and routes any non-`Table[string, int]` parameter
-      # shape to the `__unsupported_witness:` placeholder before this
-      # `itTable` is built.
-      error("symex Phase 5: only Table[string, int] supported (got " &
-            $ty & ")")
+      # CR-2c: no parameter whose witness READS this Table reaches here --
+      # see the `itSeq` arm's `swrNone`. `isRenderableWitnessTy` applies
+      # `isRenderableTableTy` at every Table leaf. RFC-0005 S8bx (item 2):
+      # the type alone is rendered (a field of a placeholder seq's element),
+      # and the guard rides the reader.
+      let (keyTyNode, _) = emitTyAndReader(ty.tabKeyTy, path, witId)
+      let (valTyNode, _) = emitTyAndReader(ty.tabValTy, path, witId)
+      (newTree(nnkBracketExpr, stdName("Table"), keyTyNode, valTyNode),
+       unrenderedReader("symex Phase 5: only Table[string, int] supported " &
+                        "(got " & $ty & ")"))
   of itSet:
     if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
        ty.setElemTy.width == 64 and ty.setElemTy.enumName.len == 0:
@@ -1287,13 +1295,13 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
                               copyNimTree(elemTyNode)),
                       witId, newLit(path)))
     else:
-      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
-      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
-      # `isRenderableWitnessTy` predicate applies `isRenderableSetElemTy` at
-      # every HashSet leaf and routes any non-`HashSet[int]` parameter shape
-      # to the `__unsupported_witness:` placeholder before this `itSet` is
-      # built.
-      error("symex Phase 5: only HashSet[int] supported")
+      # CR-2c: no parameter whose witness READS this HashSet reaches here --
+      # see the `itSeq` arm's `swrNone`. `isRenderableWitnessTy` applies
+      # `isRenderableSetElemTy` at every HashSet leaf. RFC-0005 S8bx (item
+      # 2): the type alone is rendered, and the guard rides the reader.
+      let (elemTyNode, _) = emitTyAndReader(ty.setElemTy, path, witId)
+      (newTree(nnkBracketExpr, stdName("HashSet"), elemTyNode),
+       unrenderedReader("symex Phase 5: only HashSet[int] supported"))
   of itVariant:
     # Phase 11 cycle 7 + plain-field sharing (post-cycle-12) —
     # construct the variant on the arm Z3 picked. Witness layout

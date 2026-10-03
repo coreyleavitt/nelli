@@ -1085,5 +1085,8 @@ task test, "Run the test suite":
             # RFC-0005 S8bx -- S8bl's remainder: a raise inside in-walk
             # witness extraction (lost on the C backend; fault injection
             # through the file's .nim.cfg); walker 213->228 (provisional).
-            "tsymex_rfc0005_s8bx_extractraise"]:
+            "tsymex_rfc0005_s8bx_extractraise",
+            # S8bx item 2: one classifier for the seq witness reader and
+            # the renderability predicate; a type is always rendered.
+            "tsymex_rfc0005_s8bx_witnessdrift"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

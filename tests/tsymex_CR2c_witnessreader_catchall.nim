@@ -60,14 +60,6 @@ type
       # RFC-0005 S8bl: so is a seq element holding a ref; one holding a
       # ref inside a Table is not (`treeRefPartInContainer`).
 
-  WidgetR = object
-    # RFC-0005 S8bl: the pre-S8bl `Widget` (a ref part), renderable since
-    # S8bl. `ShapeBad`'s untouched arm keeps it: the witness reader is
-    # emitted for every arm, and an element shape no reader reads (a ref
-    # inside a Table) is the reader's compile-time invariant guard.
-    a: int
-    b: ref int
-
   ShapeKind = enum skWidgets, skCount
 
   # A variant object whose skWidgets arm carries an UNRENDERABLE field
@@ -76,9 +68,13 @@ type
   ShapeBad = object
     case kind: ShapeKind
     of skWidgets:
-      widgets: seq[seq[WidgetR]]  # RFC-0005 S8bc: a seq of seqs stays the
+      widgets: seq[seq[Widget]]   # RFC-0005 S8bc: a seq of seqs stays the
                                   # unbacked scoped-decline placeholder (a
-                                  # seq of objects is backed since S8bc)
+                                  # seq of objects is backed since S8bc).
+                                  # RFC-0005 S8bx: its element TYPE renders
+                                  # even when no reader reads the element
+                                  # (S8bl's `WidgetR` worked around the
+                                  # compile crash).
     of skCount:
       count: int
 

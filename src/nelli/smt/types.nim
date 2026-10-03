@@ -4231,27 +4231,47 @@ func isBackedSeqElemTy*(elemTy: IRType): bool =
 # ONE shared helper per container kind — never duplicate the match between
 # the classify site and the codegen site, or the two can silently drift
 # apart (over- or under-triggering the degrade).
-proc isRenderableSeqElemTy*(elemTy: IRType): bool =
-  ## Mirrors exactly the shapes `emitTyAndReader`'s `itSeq` arm can render:
-  ## any fixed-width int (`int8/16/32/64`, `uint8/16/32/64` — `byte` is the
-  ## `uint8` alias), `float64`, `float32`, or a `ref` element (rendered via
-  ## `new(T)` defaults, R3).
-  ##
-  ## RFC-chapulin-hardening M1 widened this from int64-only to the full
-  ## fixed-width-int family: `extractSeqElements`/`allocateSeqDataRaw`/
-  ## `seqElemAt` (`smt/runtime.nim`) already dispatched on every `(signed,
-  ## width)` combination below (Phase 15 C4's seq-index/HOF plumbing) — only
-  ## the witness READER (`emitTyAndReader`'s `itSeq` arm) was missing cases,
-  ## so this predicate is widened in lockstep with that reader per this
-  ## proc's own contract (see module doc comment above).
-  (elemTy.kind == itInt and
-   (elemTy.width == 8 or elemTy.width == 16 or
-    elemTy.width == 32 or elemTy.width == 64)) or
-  elemTy.kind == itFloat64 or
-  elemTy.kind == itFloat32 or
-  elemTy.kind == itRef or
-  # RFC-0005 S8ar: `readSeqBool` / `readSeqString`.
-  elemTy.kind in {itBool, itString}
+type
+  SeqWitnessReader* = enum
+    ## RFC-0005 S8bx (item 2). The reader `emitTyAndReader`'s `itSeq` arm
+    ## builds for a seq type, chosen by `seqWitnessReader` -- the ONE
+    ## classifier the arm dispatches on and `isRenderableWitnessTy` judges,
+    ## so the reader and the predicate cannot drift apart. (They did: the
+    ## predicate called a placeholder seq renderable whatever its element,
+    ## while the reader recursed into the element and could hit its guard.)
+    swrPlaceholder  ## the unbacked scoped-decline placeholder: an empty literal
+    swrInt64        ## `readSeqInt`
+    swrScalarAs     ## a `char` or enum element: `readSeqAs[T]`
+    swrFixedInt     ## any other fixed-width int: `readSeqInt8` .. `readSeqUInt64`
+    swrBool         ## `readSeqBool` (RFC-0005 S8ar)
+    swrString       ## `readSeqString` (RFC-0005 S8ar)
+    swrFloat64      ## `readSeqFloat64` (Phase 15 F9b)
+    swrFloat32      ## `readSeqFloat32` (Phase 15 F9b)
+    swrTree         ## a by-value tree element: `readSeqAs[T]` (RFC-0005 S8bc)
+    swrRef          ## a `ref` element: each element a position (R3, S8f/S8h)
+    swrNone         ## no reader
+
+proc seqWitnessReader*(ty: IRType): SeqWitnessReader =
+  ## RFC-0005 S8bx (item 2). The reader of the seq type `ty` (was
+  ## `isRenderableSeqElemTy`, a second copy of the arm's element dispatch).
+  ## RFC-chapulin-hardening M1: every fixed-width int; RFC-0005 S8ar: `bool`
+  ## and `string`; S8bc: a `char` or enum element, and a tree element.
+  if isUnsupportedFieldPlaceholder(ty): return swrPlaceholder
+  let e = ty.seqElemTy
+  case e.kind
+  of itInt:
+    if e.width notin {8, 16, 32, 64}: swrNone
+    elif e.signed and e.width == 64 and not e.isChar and e.enumName.len == 0:
+      swrInt64
+    elif e.isChar or e.enumName.len > 0: swrScalarAs
+    else: swrFixedInt
+  of itBool: swrBool
+  of itString: swrString
+  of itFloat64: swrFloat64
+  of itFloat32: swrFloat32
+  of itRef: swrRef
+  else:
+    if isTreeSeqElemTy(e): swrTree else: swrNone
 
 func isContainerIntLeaf*(t: IRType): bool =
   ## RFC-0005 S8z. A `Table` value / `HashSet` element type the container
@@ -4595,18 +4615,18 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
     # an unbacked element kind (the very reason this placeholder exists)
     # would demote the WHOLE parameter to `__unsupported_witness:` — a
     # different route back to Bug #2's whole-run poisoning.
-    if isUnsupportedFieldPlaceholder(ty):
-      true
-    # `emitTyAndReader`'s `itSeq` arm: int64/float64/float32 are leaf readers;
-    # a `ref` element renders `new(T)` defaults but STILL builds the pointee
-    # TYPE by recursing `emitTyAndReader(refPointeeTy)` — so a `seq[ref P]` is
-    # renderable iff `P` is. Every other element kind hits the `error()` site.
-    elif isRenderableSeqElemTy(ty.seqElemTy):
-      if ty.seqElemTy.kind == itRef:
-        isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
-      else:
-        true
-    elif isTreeSeqElemTy(ty.seqElemTy):
+    # RFC-0005 S8bx (item 2): judged on the reader `emitTyAndReader`'s
+    # `itSeq` arm dispatches on (`seqWitnessReader`). A placeholder reads no
+    # content, and its element TYPE is always rendered (a reader no witness
+    # reaches is never emitted), so it is renderable whatever its element.
+    case seqWitnessReader(ty)
+    of swrPlaceholder: true
+    # A `ref` element is a position, and the reader builds its pointee's
+    # type: a `seq[ref P]` is renderable iff `P` is.
+    of swrRef: isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
+    of swrInt64, swrScalarAs, swrFixedInt, swrBool, swrString, swrFloat64,
+       swrFloat32: true
+    of swrTree:
       # RFC-0005 S8bc (item 3): a tree element, read through `readSeqAs`
       # (`readCellField`), its type rendered by recursion. A ref or ptr
       # part is not: no position is collected for it inside a seq element.
@@ -4615,8 +4635,7 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
       # Table or HashSet is not.
       isRenderableWitnessTy(ty.seqElemTy) and
         not treeRefPartInContainer(ty.seqElemTy)
-    else:
-      false
+    of swrNone: false
   of itTable:
     isRenderableTableTy(ty.tabKeyTy, ty.tabValTy)   ## leaf-only (no recursion)
   of itSet:

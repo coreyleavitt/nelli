@@ -839,6 +839,35 @@ var borrowBaseViews* {.compileTime.}: seq[tuple[node, baseTy: NimNode]]
   ## base value is used, `ejectBase`), exactly as for a written `T(d)`.
   ## Pushed and popped by the parser around that one call; empty otherwise.
 
+proc borrowViewBase(n: NimNode): NimNode =
+  ## RFC-0005 S8bl (item 4). The base type node `n` is viewed at while a
+  ## borrowed routine's rewrite parses (`borrowBaseViews`), or nil.
+  for i in countdown(borrowBaseViews.high, 0):
+    if borrowBaseViews[i].node == n: return borrowBaseViews[i].baseTy
+  nil
+
+proc viewTypeKind*(n: NimNode): NimTypeKind =
+  ## RFC-0005 S8bl (item 4). `std/macros.typeKind`, through the borrow
+  ## views: an argument of a borrowed routine is of its distinct's base
+  ## type while the base routine's arms parse it. S8bc consulted the views
+  ## in `classifyType` and `valueTypeName` only, so an arm that read
+  ## `typeKind` / `getTypeInst` / `getTypeImpl` saw the distinct
+  ## (`dsl_parser` reads all three through these).
+  let b = borrowViewBase(n)
+  if b != nil: macros.typeKind(b) else: macros.typeKind(n)
+
+proc viewTypeInst*(n: NimNode): NimNode =
+  ## RFC-0005 S8bl (item 4). `std/macros.getTypeInst`, through the borrow
+  ## views (`viewTypeKind`).
+  let b = borrowViewBase(n)
+  if b != nil: macros.getTypeInst(b) else: macros.getTypeInst(n)
+
+proc viewTypeImpl*(n: NimNode): NimNode =
+  ## RFC-0005 S8bl (item 4). `std/macros.getTypeImpl`, through the borrow
+  ## views (`viewTypeKind`).
+  let b = borrowViewBase(n)
+  if b != nil: macros.getTypeImpl(b) else: macros.getTypeImpl(n)
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # RFC-0005 S8bc: an argument of a borrowed routine, viewed at its base.
@@ -1296,6 +1325,19 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   of "Natural":  ranged(tInt(64, signed = true), 0'i64, high(int64))
   of "Positive": ranged(tInt(64, signed = true), 1'i64, high(int64))
   else:
+    # RFC-0005 S8bl (item 4). A plain alias -- `type Hash* = int`
+    # (std/hashes), `type IntSeq = seq[int]`, a user `Natural = int` -- IS
+    # the type it names: Nim gives the two one identity. It reached this
+    # catch-all and declined (`feUnsupportedParamType`), so a `Hash` local
+    # held a placeholder and every value of a user alias was opaque. The
+    # aliased type node is classified, by its own symbol (S8d's rule: a
+    # user `Natural = int` is a plain `int`, not `system.Natural`).
+    if resolved.kind == nnkSym:
+      let aliasImpl = resolved.getImpl
+      if aliasImpl.kind == nnkTypeDef and aliasImpl.len >= 3 and
+         aliasImpl[2].kind in {nnkSym, nnkBracketExpr} and
+         aliasImpl[2] != resolved:
+        return classifyType(aliasImpl[2])
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
     # Option 2). This text-match catch-all used to `error()` at MACRO-
     # EXPANSION time, aborting compilation of the whole test file before any

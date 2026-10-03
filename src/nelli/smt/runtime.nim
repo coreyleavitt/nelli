@@ -1550,6 +1550,15 @@ proc containerCardConds(): seq[Z3Bool] =
       for k in containerCard.setKeys: keys.add k.raw
     for k in keys:
       result.add svCellWf(tabValAt(ctx, b, k), b.tabValTy, true)
+  # RFC-0005 S8bl: every string key term is a string of bytes. True of
+  # every real key, so it prunes no real input; it binds a term recorded on
+  # ANOTHER path too, whose symbols are free on this one (a key of another
+  # path's `isTabKeys` enumeration). The table extractor renders each present
+  # key term (`extractTableEntries`), and such a term, unconstrained, took a
+  # codepoint above 255: `evalStrBytes` raised inside the walk, a walker
+  # fault (C++) or, lost on the C backend's unwind, a false sxUnsat.
+  for k in containerCard.tabKeys:
+    result.add seqStrElemConds(SymVal(kind: svString, str: k))
   for b in containerCard.tabBases:
     let present = wrap[Z3Array[Z3String, Z3Bool]](b.present.ctx, b.present.raw)
     result.add (b.size >= distinctPresentCount(present, containerCard.tabKeys))
@@ -3976,6 +3985,14 @@ proc lowerIndexSplit*(s, c: Z3String; start: Z3Int): Z3Int =
   ## RFC-0005 S8ag. A fresh Int standing for `str.indexof(s, c, start)`,
   ## `c` a one-character literal, registered for `indexSplitRoots`.
   let ctx = s.ctx
+  # RFC-0005 S8bl (item 2): a ground haystack and start (a string pinned
+  # by `symexAssume(s == "lit")`, scanned from a ground offset) fold to
+  # their numeral -- Z3's rewriter evaluates `str.indexof` of literals. The
+  # split's word equations over a literal took Z3 up to the whole
+  # `seqQueryRLimit` to refute an infeasible loop exit (B6-1-red, B6-6).
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, indexOf(s, c, start).raw)
+  if Z3_is_numeral_ast(ctx.raw, folded):
+    return wrap[Z3Int](ctx, folded)
   inc indexSplitCounter
   let tag = "__s8ag_ix" & $indexSplitCounter
   let sp = IndexSplit(ix: mkIntVar(ctx, tag), s: s, c: c, start: start,
@@ -7826,6 +7843,22 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let val = lower(env, e.mutArg, intLitProto(recv.seqElemTy))
     let oldLen = recv.seqLen # [placeholder-audited]
     let newLen = oldLen + mkInt(1)
+    if not isBackedSeqElemTy(recv.seqElemTy):
+      # RFC-0005 S8bl (item 3). A seq of an element the model does not back
+      # (`seq[seq[T]]`) that is not a placeholder: a local built from an
+      # empty literal (`var p: seq[seq[T]] = @[]`), whose length is exact
+      # but whose elements have no arrays to store into. The add declines
+      # as such a seq does everywhere else (`seNestedSeqUnsupported`, a
+      # placeholder decline); it was the in-band element mismatch below,
+      # filed as `weInternalWalkerFault`. The argument is lowered first, so
+      # its raises are kept (S5).
+      let declineMsg = "iekSeqAdd: an element added to a seq of " &
+        $recv.seqElemTy & ", an element type the model does not back " &
+        "(seNestedSeqUnsupported)"
+      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(tUnsupportedFieldSeq(recv.seqElemTy, declineMsg),
+                         freshDegradeName("__seqAddUnbacked"), fresh)
     if not seqElemFits(val, recv.seqElemTy):
       # Unreachable for a typed Nim `add` (its argument has the element
       # type); a value some upstream degrade produced keeps the in-band
@@ -8029,6 +8062,23 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # raise BEFORE any consumer observes this result (mirrors `iekStrAt`'s
     # own "value computed unconditionally, only ever OBSERVED on the
     # in-bounds survivor" doc precedent).
+    if e.delShift:
+      # RFC-0005 S8bl: `delete(s, i)` -- every element after `i` moves down
+      # one (`movingCopy(x[j], x[j+1])`, then `setLen(len - 1)`): each data
+      # array is `lambda j. ite(j < i, a[j], a[j + 1])`. The defects are
+      # `del`'s (a `Natural` index; `i > high(x)` raises IndexDefect).
+      let ctx = requireCurrentContext()
+      inc sliceViewCounter
+      let jVar = mkIntVar("__delete_j" & $sliceViewCounter)
+      let below = jVar < idxZi
+      let next = jVar + mkInt(1)
+      var arrs: seq[Z3AnyAst]
+      for arr in seqArrs(recv):
+        let here = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, jVar.raw))
+        let after = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, next.raw))
+        arrs.add lambdaOver(ctx, jVar, wrap[Z3AnyAst](ctx,
+          checkedIte(ctx, below.raw, here.raw, after.raw)))
+      return mkSeqSV(lenZi - mkInt(1), arrs, recv.seqElemTy)
     let lastVal = seqElemAt(recv, lenZi - mkInt(1)) # [placeholder-audited]
     # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
     let stored = seqStoreArrs(recv, idxZi, lastVal)
@@ -8907,6 +8957,18 @@ proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
 proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64
   ## RFC-0005 S8bc fwd-decls, for `extractTreeValue`.
 
+const maxWitnessSeqLen* = 1 shl 20
+  ## RFC-0005 S8bl (item 4). The longest nested seq (a seq inside a seq
+  ## element or a heap cell, which has no allocation bound) a witness
+  ## renders at its model length -- `newSeq`'s modelled size bound
+  ## (`maxModelledInitialSize`). Was 1024.
+
+proc witnessSeqLen(raw: int64): int =
+  ## RFC-0005 S8bl (item 4). A nested seq's rendered length: its model
+  ## length within `[0, maxWitnessSeqLen]`, else 0 (an unread length is
+  ## free, and the path does not depend on it).
+  if raw >= 0 and raw <= maxWitnessSeqLen: int(raw) else: 0
+
 proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
                       sv: SymVal, ty: IRType) =
   ## RFC-0005 S8bc (item 3). Write the tree value `sv` of type `ty` -- an
@@ -8974,10 +9036,11 @@ proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
       w.seqLens[path] = 0
       return
     # An element's nested length has no `1024` bound (`svCellWf`'s
-    # `bounded = false`); an unread one is free, so a length outside
-    # `[0, 1024]` renders empty, as a heap cell's does (`renderHeapValue`).
-    let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
-    let n = if raw >= 0 and raw <= 1024: int(raw) else: 0
+    # `bounded = false`). RFC-0005 S8bl (item 4): it renders at its model
+    # length up to `maxWitnessSeqLen` (was 1024: a path that needs a longer
+    # nested seq rendered it empty, and the replay refuted the witness);
+    # past that -- an unread length is free -- it renders empty.
+    let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
     w.seqLens[path] = n
     extractSeqElements(m, w, path, sv, n)
   of itTable:
@@ -9307,6 +9370,69 @@ proc registerNominalIfFull(ty: IRType) =
     heapWitnessNominalRegistry[ty.nominalId] = ty
 
 proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
+                         acc: var seq[RefPos])
+  ## RFC-0005 S8bl fwd decl (defined below `collectTreeRefPositions`).
+
+proc collectTreeRefPositions(m: Z3Model, path: string, sv: SymVal,
+                             ty: IRType, acc: var seq[RefPos]) =
+  ## RFC-0005 S8bl (item 4). The `ref`/`ptr` positions inside the tree value
+  ## `sv` of type `ty` -- an element of a leaf-split seq -- named in the
+  ## heap's cell layout (`extractTreeValue`, `heapPartLabel`), which is the
+  ## layout the witness reader resolves them in (`readSeqAs` ->
+  ## `readCellField`: a part at `<path>.<label>`, a seq's ref element at
+  ## `<path>[<i>]` and its tree element at `<path>.<i>`). Before S8bl no
+  ## position was collected inside a seq element, and a parameter whose
+  ## element held a ref was not witness-renderable. A ref inside a Table or
+  ## HashSet stays unrenderable (`treeRefPartInContainer`).
+  if ty == nil: return
+  case ty.kind
+  of itDistinct:
+    collectTreeRefPositions(m, path, ejectBase(sv), distinctGround(ty), acc)
+  of itRef, itPtr:
+    collectRefPositions(m, path, sv, acc)
+  of itTuple, itArray:
+    for i, part in heapParts(ty):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      collectTreeRefPositions(m, path & "." & part.label, psv, part.ty, acc)
+  of itVariant, itMultiVariant:
+    if not svFitsHeapTy(sv, ty): return
+    template axis(disc: SymVal; arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          collectTreeRefPositions(m, path & "." & fname,
+            armFields[arm.tagOrdinal][j], arm.fieldTypes[j], acc)
+    if ty.kind == itVariant:
+      axis(sv.vDisc[], ty.vArms, sv.vArmFields)
+      for i, fname in ty.vPlainFieldNames:
+        collectTreeRefPositions(m, path & "." & fname, sv.vPlainFields[i],
+                                ty.vPlainFieldTypes[i], acc)
+    else:
+      for xi, ax in ty.mvAxes:
+        axis(sv.mvAxes[xi].disc[], ax.arms, sv.mvAxes[xi].armFields)
+      for i, fname in ty.mvPlainFieldNames:
+        collectTreeRefPositions(m, path & "." & fname, sv.mvPlainFields[i],
+                                ty.mvPlainFieldTypes[i], acc)
+  of itSeq:
+    if sv.kind != svSeq or sv.isUnsupportedFieldPlaceholder: return # [placeholder-audited]
+    if sv.seqElemTy.kind in {itRef, itPtr}:
+      collectRefPositions(m, path, sv, acc)
+    elif isTreeSeqElemTy(sv.seqElemTy):
+      let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
+      for i in 0 ..< n:
+        collectTreeRefPositions(m, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                                sv.seqElemTy, acc)
+  else: discard
+
+proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                          acc: var seq[RefPos]) =
   ## RFC-0005 S8h. The `ref`/`ptr` positions inside the input value `sv` at
   ## `path`, named as `emitTyAndReader` names them (`.<field>`/`.<i>` for a
@@ -9331,7 +9457,14 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                 else: path & "." & $i
       collectRefPositions(m, sub, e, acc)
   of svSeq:
-    if sv.seqElemTy.kind in {itRef, itPtr} and
+    if isTreeSeqElemTy(sv.seqElemTy) and treeHasRefPart(sv.seqElemTy) and
+       not sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # RFC-0005 S8bl (item 4): a tree element's ref parts.
+      let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
+      for i in 0 ..< n:
+        collectTreeRefPositions(m, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                                sv.seqElemTy, acc)
+    elif sv.seqElemTy.kind in {itRef, itPtr} and
        not sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
       # Allocation bounds `seqLen` to `[0, 1024]`.
@@ -9578,8 +9711,7 @@ proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
   if sv.kind == svSeq and sv.isUnsupportedFieldPlaceholder: return "<unsupported>" # [placeholder-audited]
   case sv.kind
   of svSeq:
-    let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
-    let n = if raw >= 0 and raw <= 1024: int(raw) else: 0
+    let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
     w.seqLens[leafPath] = n
     var parts: seq[string]
     case sv.seqElemTy.kind
@@ -11589,6 +11721,21 @@ func loopPruneRLimit*(settings: SymexSettings): uint =
   let q = settings.budget.queryRLimit
   if q != 0 and q < defaultLoopPruneRLimit: q else: defaultLoopPruneRLimit
 
+type GuardLiteral = enum glOpen, glTrue, glFalse
+
+proc guardLiteral(cond: Z3Bool): GuardLiteral =
+  ## RFC-0005 S8bl. `cond` simplified to a literal, decided without the
+  ## solver as `loopArmInfeasible` decides a loop guard. With a ground scan
+  ## (a pinned input, a callee's ground result) most `if` guards fold, and
+  ## walking the side a literal rules out forked every `if` in two: five
+  ## folded guards in a loop body were 32 copies of one path per iteration.
+  ## Sound: the side dropped carries a `false` conjunct, so no query on it
+  ## is satisfiable.
+  let lit = $simplify(cond)
+  if lit == "true": glTrue
+  elif lit == "false": glFalse
+  else: glOpen
+
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
                        settings: SymexSettings): bool =
   ## RFC-0005 S8k. True only when `path`'s full query (`pathRoots`) plus
@@ -12832,6 +12979,41 @@ func budgetOutFloor(settings: SymexSettings): int =
   if q == 0: int(sq)
   elif sq == 0: int(q)
   else: int(min(q, sq))
+
+proc groundedLike(sym, val: SymVal): SymVal =
+  ## RFC-0005 S8bl (item 2). `sym` with each scalar leaf replaced by `val`'s
+  ## when Z3's rewriter folds that to a literal of the same kind (an Int or
+  ## 64-bit numeral, a string literal), through tuples; `sym`'s own leaf
+  ## otherwise. Sound wherever the path asserts `sym == val`.
+  result = sym
+  if sym.kind != val.kind: return
+  case sym.kind
+  of svInt:
+    let ctx = sym.zi.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.zi.raw)
+    if Z3_is_numeral_ast(ctx.raw, f): result.zi = wrap[Z3Int](ctx, f)
+  of svBV64:
+    let ctx = sym.bv64.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.bv64.raw)
+    if Z3_is_numeral_ast(ctx.raw, f): result.bv64 = wrap[Z3BitVec[64]](ctx, f)
+  of svString:
+    let ctx = sym.str.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.str.raw)
+    if Z3_is_string(ctx.raw, f): result.str = wrap[Z3String](ctx, f)
+  of svTuple:
+    if sym.fields.len != val.fields.len: return
+    for i in 0 ..< sym.fields.len:
+      result.fields[i] = groundedLike(sym.fields[i], val.fields[i])
+  else: discard
+
+func assumedStringPin(e: IRExpr): tuple[name, lit: string] =
+  ## RFC-0005 S8bl (item 2). `(s, lit)` for an assumed `s == lit` (or
+  ## `lit == s`) of a variable and a string literal; `("", "")` otherwise.
+  if e == nil or e.kind != iekBinop or e.bop != bEq: return
+  if e.lhs.kind == iekVar and e.rhs.kind == iekStrLit:
+    return (e.lhs.vname, e.rhs.sval)
+  if e.rhs.kind == iekVar and e.lhs.kind == iekStrLit:
+    return (e.rhs.vname, e.lhs.sval)
 
 type TargetSolveCost* = enum
   ## RFC-0005 S8ag. What a target-hit solve's spend says about it.
@@ -15217,10 +15399,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         var cont = drainScalarRaiseForks(cp2, w)
         if cont.len == 0:
           cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+        # RFC-0005 S8bl: a guard that folds to a literal takes one side
+        # only (`guardLiteral`).
+        let lit = guardLiteral(condBool)
         for cp in cont:
+          if lit == glFalse:
+            survivors.add forkPath(cp, cp.pc, cp.env)
+            continue
           let armPath = forkPath(cp, cp.pc & @[condBool], cp.env)
           let armOut = walk(br.body, @[armPath], w)
           if w.shouldStop: return
+          if lit == glTrue:
+            survivors.add armOut
+            continue
           let skipPath = forkPath(cp, cp.pc & @[not condBool], cp.env)
           survivors.add mergeJoinPaths(cp, condBool, armOut, skipPath)
       return survivors
@@ -15252,12 +15443,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           if cont.len == 0:
             # The whole cond raised on every path (digits continuation infeasible).
             cont = @[forkPath(cp2, cp2.pc, cp2.env)]
+          # RFC-0005 S8bl: a guard that folds to a literal takes one side
+          # only (`guardLiteral`).
+          let lit = guardLiteral(condBool)
           for cp in cont:
-            let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
-                                   cp.env)
-            survivors.add walk(br.body, @[armPath], w)
-            if w.shouldStop: return
-            next.add (cp, accumNegated & @[not condBool])
+            if lit != glFalse:
+              let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
+                                     cp.env)
+              survivors.add walk(br.body, @[armPath], w)
+              if w.shouldStop: return
+            if lit != glTrue:
+              next.add (cp, accumNegated & @[not condBool])
         states = next
       for (cp, accumNegated) in states:
         let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
@@ -15415,7 +15611,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for dp in drainScalarRaiseForks(pb, w):
           if loopArmInfeasible(w.z3, dp, cond, w.settings):
             survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
-          else:
+          elif not pathInfeasible(w.z3, dp, w.settings):
+            # RFC-0005 S8bl: a guard that folds to a literal `true` is
+            # walked without the solver (`loopArmInfeasible`), so a path
+            # whose pc is itself contradictory -- its every term ground, as
+            # a scan over a pinned string now is -- ran to the bound and
+            # recorded `beBudgetExhausted`. No execution takes it: dropped.
             undecided.add dp
       active = undecided
     # Break-paths exit the loop directly (with their accumulated pc/env).
@@ -16125,6 +16326,87 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           "witness is replayed against the real order (feTableIterOrder)")
         survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
                                       env2, d)
+    survivors
+  of isSetLen:
+    # RFC-0005 S8bl (item 1). `slRetName := setLen(slBase, slLen)`, the value
+    # system's `setLen` magic leaves in its `var` argument (`parseSetLen`
+    # guards the length and writes the result back). A magic has no body:
+    # before S8bl the call was registered with an EMPTY one and the argument
+    # kept its old value (a string's: a false sxSat; a seq's walked into the
+    # `seqs_v2` payload cast).
+    #
+    #   * a seq: the length is `slLen`; each data array is the view
+    #     `lambda i. ite(i < oldLen, arr[i], zero)`, so a grown slot reads
+    #     the element's zero and a kept one its value (a shrunk-then-grown
+    #     seq reads zeros: the second call's `oldLen` is the shrunk length);
+    #   * a string (or a string-backed `seq[byte]`): the first `slLen` bytes
+    #     when it shrinks, else the string followed by a pad of
+    #     `slLen - len` NUL bytes -- a fresh string, whose length and
+    #     all-NUL content are facts of the path (no quantifier).
+    var survivors: seq[Path]
+    for p0 in paths:
+      if w.shouldStop: return survivors
+      let (baseSV, p1) = lowerInExpr(p0, stmt.slBase, w)
+      let (lenSV0, p) = lowerInExpr(p1, stmt.slLen, w)
+      let locPrefix = if stmt.slLoc.len > 0: stmt.slLoc & ": " else: ""
+      let lenOk = lenSV0.kind in {svInt, svBV8, svBV16, svBV32, svBV64}
+      var env2 = p.env
+      if baseSV.kind == svSeq and baseSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+        let d = w.degrade(placeholderReadDeclineKind(baseSV),
+          placeholderReadDeclineMsg(baseSV, stmt.slLoc, "mutation (setLen)"))
+        env2[stmt.slRetName] = baseSV
+        survivors.add forkPathTainted(p, p.pc, env2, d)
+        continue
+      if baseSV.kind == svSeq and lenOk and
+         isBackedSeqElemTy(baseSV.seqElemTy) and
+         defaultZeroTotal(baseSV.seqElemTy):
+        let ctx = requireCurrentContext()
+        let newLen = toZ3Int(lenSV0)
+        let oldLen = baseSV.seqLen # [placeholder-audited]
+        let zeroArrs = constSeqArrs(baseSV.seqElemTy,
+          defaultZero(baseSV.seqElemTy, "__setLenZero"))
+        inc sliceViewCounter
+        let iVar = mkIntVar("__setlen_i" & $sliceViewCounter)
+        let kept = iVar < oldLen
+        var arrs: seq[Z3AnyAst]
+        for k, arr in seqArrs(baseSV):
+          let old = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, iVar.raw))
+          let z = wrap[Z3AnyAst](ctx,
+            checkedSelect(ctx, zeroArrs[k].raw, iVar.raw))
+          let body = wrap[Z3AnyAst](ctx,
+            checkedIte(ctx, kept.raw, old.raw, z.raw))
+          arrs.add lambdaOver(ctx, iVar, body)
+        env2[stmt.slRetName] = mkSeqSV(newLen, arrs, baseSV.seqElemTy)
+        survivors.add forkPath(p, p.pc, env2)
+      elif baseSV.kind == svString and lenOk:
+        let newLen = toZ3Int(lenSV0)
+        let oldLen = len(baseSV.str)
+        let grows = newLen > oldLen
+        # Two paths, the shrink (or no change) and the grow, so each binds a
+        # plain term (a `str.at` over an `ite` of strings ran Z3 out of
+        # `seqQueryRLimit`). The grow appends a fresh pad of the added
+        # length in `("\0")*`, a fact of the path (no quantifier).
+        var envShrink = env2
+        envShrink[stmt.slRetName] = SymVal(kind: svString,
+          str: substr(baseSV.str, mkInt(0), newLen))
+        survivors.add forkPath(p, p.pc & @[not grows], envShrink)
+        let pad = mkStringVar(freshDegradeName("__setLenPad"))
+        env2[stmt.slRetName] = SymVal(kind: svString,
+          str: concat(baseSV.str, pad))
+        survivors.add forkPath(p, p.pc & @[grows,
+          len(pad) == newLen - oldLen,
+          matches(pad, star(mkRegex(mkString("\x00"))))], env2)
+      else:
+        let d = w.degrade(feUnsupportedOp,
+          locPrefix & "setLen: the argument lowered to " &
+          plainEnglishSymValKind(baseSV.kind) & " and the length to " &
+          plainEnglishSymValKind(lenSV0.kind) & " -- expected a seq of " &
+          "a backed element with a zero, or a string, and an integer " &
+          "(feUnsupportedOp)")
+        var fresh: seq[Z3Bool]
+        env2[stmt.slRetName] = allocateSym(stmt.slTy,
+          freshDegradeName("__setLenDegrade"), fresh)
+        survivors.add forkPathTainted(p, p.pc, env2, d)
     survivors
   of isVariantReassign:
     # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
@@ -17295,6 +17577,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                 if closureRet and cp.env.hasKey("result") and
                     cp.env["result"].kind == svClosure:
                   cp.env["result"]    # RFC-0005 S8z
+                elif cp.taint == {} and cp.env.hasKey("result"):
+                  # RFC-0005 S8bl (item 2): a result Z3's rewriter folds to
+                  # literals is bound AS them (the pc keeps `retSym ==
+                  # result`, so nothing else changes): the caller's later
+                  # terms over it stay ground. A scan chain over a pinned
+                  # string otherwise re-entered the S8ag split with a fresh
+                  # start symbol each iteration, and Z3 spent its whole
+                  # `seqQueryRLimit` refuting each infeasible loop exit.
+                  groundedLike(retSym, cp.env["result"])
                 else: retSym
             # RFC-0005 S8an: the callee's globals and captures, as it left
             # them (before the `var` write-back, which is the later store).
@@ -17366,8 +17657,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p0 in paths:
       if w.shouldStop: return
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
+      let pin = assumedStringPin(stmt.acond)
       for p in drainScalarRaiseForks(pb0, w):   ## RFC-0005 S8g: every continuation
-        out2.add forkPath(p, p.pc & @[cond], p.env)
+        var env2 = p.env
+        if pin.name.len > 0 and env2.hasKey(pin.name) and
+           env2[pin.name].kind == svString:
+          # RFC-0005 S8bl (item 2): `symexAssume(s == "lit")` pins `s` to
+          # the literal on this path, so the path reads it AS the literal
+          # from here on. The pc carries the equality, so every query is
+          # unchanged up to it; what changes is that every later term over
+          # `s` is ground, and Z3's rewriter evaluates it (`str.indexof`,
+          # `str.substr`, `str.at` of a literal). Before, each read went
+          # through the S8ag index-split word equations, and refuting an
+          # infeasible loop exit over the pinned string took Z3 the whole
+          # `seqQueryRLimit` (20M, ~100 s) per exit: an unrecognised pair
+          # loop over a 9-pair literal (B6-1-red, B6-6) spent 200-750 s.
+          # The parameter's model value is read from the solver's model,
+          # which satisfies the same equality (`initialEnv` is untouched).
+          env2[pin.name] = SymVal(kind: svString, str: mkString(pin.lit))
+        out2.add forkPath(p, p.pc & @[cond], env2)
     out2
   of isTargetLabel:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -22023,6 +22331,16 @@ proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
   if not w.setMembers.hasKey(name): return
   for v in w.setMembers[name]:
     result.incl witnessIntAs[T](v)
+
+proc readSeqAs*[T](c: RefWitness, name: string): seq[T] =
+  ## RFC-0005 S8bl (item 4). A witness `seq[T]` of a tree element holding a
+  ## ref part, read through the witness tuple's ONE `RefWitness` (its
+  ## positions, `collectTreeRefPositions`), so a cell two positions share --
+  ## two elements, an element and a param -- is one object.
+  let n = c.w.seqLens.getOrDefault(name, 0)
+  result = newSeq[T](n)
+  for i in 0 ..< n:
+    readCellField(c, name & "." & $i, result[i])
 
 proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
   ## RFC-0005 S8at. A witness `seq[T]` of any renderable element type, at

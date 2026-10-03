@@ -938,7 +938,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## iteration, mgetOrPut, inlined-iterator parameter conversions,
     ## seq[char] / seq[enum] witnesses). 193->203 (provisional; batch 2
     ## takes 202).
-    check symexWalkerVersion == "203"
+    ## RFC-0005 S8bl (S8bc's remainder: var-parameter system magics, the
+    ## unbacked-element add, type aliases, mpairs / mvalues, Table length
+    ## change, seq-element ref parts and long nested seqs in witnesses).
+    ## 203->213 (provisional).
+    check symexWalkerVersion == "213"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

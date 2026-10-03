@@ -322,7 +322,8 @@ proc fieldwiseEq(a, b: IRExpr): bool =
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     fieldwiseEq(a.mutRecv, b.mutRecv) and fieldwiseEq(a.mutArg, b.mutArg)
-  of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx)
+  of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx) and
+                  a.delShift == b.delShift   # RFC-0005 S8bl
   of iekSeqInsert:
     fieldwiseEq(a.insSeq, b.insSeq) and fieldwiseEq(a.insVal, b.insVal) and
       fieldwiseEq(a.insIdx, b.insIdx)
@@ -405,6 +406,11 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     # RFC-0005 S8bc (item 6).
     a.tkRetName == b.tkRetName and fieldwiseEq(a.tkRecv, b.tkRecv) and
       fieldwiseEq(a.tkKeyTy, b.tkKeyTy) and a.tkLoc == b.tkLoc
+  of isSetLen:
+    # RFC-0005 S8bl (item 1).
+    a.slRetName == b.slRetName and fieldwiseEq(a.slBase, b.slBase) and
+      fieldwiseEq(a.slLen, b.slLen) and fieldwiseEq(a.slTy, b.slTy) and
+      a.slLoc == b.slLoc
   of isSeqPop:
     # Item 2 (round-6 fix round 3): see isIndexAssign's comment immediately
     # above -- same missing-arm gap, same N14 (9dbc3df) origin.
@@ -626,6 +632,7 @@ proc sStrLit(): IRExpr = mkStrLit("sentinelString")
 proc sContains(): IRExpr = mkContains(mkVar("s"), mkVar("k"))
 proc sSeqAdd(): IRExpr = mkSeqAdd(mkVar("s"), mkIntLit(9))
 proc sSeqDel(): IRExpr = mkSeqDel(mkVar("s"), mkIntLit(2))
+proc sSeqDelete(): IRExpr = mkSeqDel(mkVar("s"), mkIntLit(2), shift = true)
 proc sSeqInsert(): IRExpr = mkSeqInsert(mkVar("s"), mkIntLit(7), mkIntLit(1))
 proc sSeqPop(): IRExpr = mkSeqPop(mkVar("s"))
 proc sTableSet(): IRExpr = mkTableSet(mkVar("t"), mkStrLit("k"), mkIntLit(1))
@@ -717,6 +724,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqAdd(), roundtripExpr(sSeqAdd()))
   test "iekSeqDel":
     check fieldwiseEq(sSeqDel(), roundtripExpr(sSeqDel()))
+  test "iekSeqDel (delete, RFC-0005 S8bl)":
+    check fieldwiseEq(sSeqDelete(), roundtripExpr(sSeqDelete()))
   test "iekSeqInsert":
     check fieldwiseEq(sSeqInsert(), roundtripExpr(sSeqInsert()))
   test "iekSeqPop":
@@ -875,6 +884,11 @@ proc sTabKeysStmt(): IRStmt =
   ## RFC-0005 S8bc (item 6): every field a sentinel.
   mkTabKeysStmt("sentTkRet", mkVar("sentTkRecv"), tString(),
                 "sentinel.nim:12:12: for k in sentTkRecv.keys")
+proc sSetLenStmt(): IRStmt =
+  ## RFC-0005 S8bl (item 1): every field a sentinel.
+  mkSetLenStmt("sentSlRet", mkVar("sentSlBase"), mkVar("sentSlLen"),
+               tSeq(tInt(64, signed = true)),
+               "sentinel.nim:13:13: setLen(sentSlBase, sentSlLen)")
 proc sTargetLabel(): IRStmt = mkTargetLabel("sentLabel")
 proc sRaiseWithMsg(): IRStmt = mkRaise("ValueError", mkStrLit("boom"))
 proc sReraise(): IRStmt = mkReraise()
@@ -954,6 +968,8 @@ suite "R6 emit round-trip -- IRStmt kinds":
     check fieldwiseEq(sSeqPopStmt(), roundtripStmt(sSeqPopStmt()))
   test "isTabKeys (RFC-0005 S8bc)":
     check fieldwiseEq(sTabKeysStmt(), roundtripStmt(sTabKeysStmt()))
+  test "isSetLen (RFC-0005 S8bl)":
+    check fieldwiseEq(sSetLenStmt(), roundtripStmt(sSetLenStmt()))
   test "isTargetLabel":
     check fieldwiseEq(sTargetLabel(), roundtripStmt(sTargetLabel()))
   test "isRaise (with message)":
@@ -1008,6 +1024,7 @@ suite "R6 emit round-trip -- IRStmt kinds":
       of isIndexAssign: discard                   ## "isIndexAssign" (item 2, N14)
       of isSeqPop: discard                        ## "isSeqPop" (item 2, N14)
       of isTabKeys: discard                       ## "isTabKeys" (RFC-0005 S8bc)
+      of isSetLen: discard                        ## "isSetLen" (RFC-0005 S8bl)
       of isTargetLabel: discard                   ## "isTargetLabel"
       of isRaise: discard                         ## "isRaise" (2 tests: msg + bare re-raise)
       of isTry: discard                           ## "isTry" (2 tests: with/without finally)

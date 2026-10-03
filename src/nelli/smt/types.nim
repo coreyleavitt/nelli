@@ -788,6 +788,9 @@ type
     of iekSeqDel:
       delSeq*: IRExpr
       delIdx*: IRExpr
+      delShift*: bool
+        ## RFC-0005 S8bl: `delete(s, i)` -- the elements after `i` move down
+        ## one (`del`'s swap-with-last when false). Same defects.
     of iekSeqInsert:
       insSeq*: IRExpr
       insVal*: IRExpr
@@ -1055,6 +1058,12 @@ type
                       ## walk arm); the ORDER is free -- Nim's is the hash
                       ## order -- so the path is replay-gated
                       ## (`feTableIterOrder`).
+    isSetLen          ## RFC-0005 S8bl (item 1): `slRetName := setLen(slBase,
+                      ## slLen)`, the value system's `setLen` magic leaves in
+                      ## its `var` argument: the first `slLen` elements (or
+                      ## bytes), the rest the element's zero (a string's
+                      ## `'\0'`). The parser has guarded `slLen` (`RangeDefect`
+                      ## below 0) and writes the result back to the argument.
 
   IRBranch* = object
     cond*: IRExpr     ## guard for this arm (already negation-folded for elif)
@@ -1378,6 +1387,13 @@ type
       tkRecv*:    IRExpr         ## the table expression.
       tkKeyTy*:   IRType         ## the table's key type (the seq's element).
       tkLoc*:     string         ## siteLoc idiom, for the walk-time decline.
+    of isSetLen:
+      slRetName*: string         ## RFC-0005 S8bl: the fresh let-name bound to
+                                 ## the resized value.
+      slBase*:    IRExpr         ## the argument's value before the call.
+      slLen*:     IRExpr         ## the new length (already range-guarded).
+      slTy*:      IRType         ## the argument's type (a seq or a string).
+      slLoc*:     string         ## siteLoc idiom, for the walk-time decline.
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
@@ -3866,8 +3882,8 @@ proc mkGetCurrentExnMsg*(): IRExpr =
 
 proc mkSeqAdd*(recv, val: IRExpr): IRExpr =
   IRExpr(kind: iekSeqAdd, mutRecv: recv, mutArg: val)
-proc mkSeqDel*(seqx, idx: IRExpr): IRExpr =
-  IRExpr(kind: iekSeqDel, delSeq: seqx, delIdx: idx)
+proc mkSeqDel*(seqx, idx: IRExpr; shift = false): IRExpr =
+  IRExpr(kind: iekSeqDel, delSeq: seqx, delIdx: idx, delShift: shift)
 proc mkSeqInsert*(seqx, val, idx: IRExpr; grow = false): IRExpr =
   IRExpr(kind: iekSeqInsert, insSeq: seqx, insVal: val, insIdx: idx,
          insGrow: grow)
@@ -4500,6 +4516,29 @@ func treeHasRefPart*(ty: IRType): bool =
     false
   else: false
 
+func treeRefPartInContainer*(ty: IRType): bool =
+  ## RFC-0005 S8bl (item 4). `ty` holds a `ref` or `ptr` inside a `Table` or
+  ## `HashSet` at some depth: a position a witness cannot name (the cell
+  ## readers read no ref out of a table value or a set member). A ref part
+  ## reached through parts, array or seq elements and distincts only is a
+  ## position (`collectTreeRefPositions`).
+  if ty == nil: return false
+  case ty.kind
+  of itDistinct: treeRefPartInContainer(ty.distinctBase)
+  of itSeq: treeRefPartInContainer(ty.seqElemTy)
+  of itArray: treeRefPartInContainer(ty.elemTy)
+  of itTable: treeHasRefPart(ty.tabKeyTy) or treeHasRefPart(ty.tabValTy)
+  of itSet: treeHasRefPart(ty.setElemTy)
+  of itTuple:
+    for f in ty.fields:
+      if treeRefPartInContainer(f): return true
+    false
+  of itVariant, itMultiVariant:
+    for part in heapParts(ty):
+      if treeRefPartInContainer(part.ty): return true
+    false
+  else: false
+
 proc isRenderableWitnessTy*(ty: IRType): bool =
   ## RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality), nested-aggregate
   ## completeness. RECURSIVE renderability predicate over the WHOLE witness
@@ -4571,7 +4610,11 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
       # RFC-0005 S8bc (item 3): a tree element, read through `readSeqAs`
       # (`readCellField`), its type rendered by recursion. A ref or ptr
       # part is not: no position is collected for it inside a seq element.
-      isRenderableWitnessTy(ty.seqElemTy) and not treeHasRefPart(ty.seqElemTy)
+      # RFC-0005 S8bl (item 4): a ref part reached through parts and
+      # elements is a position (`collectTreeRefPositions`); one inside a
+      # Table or HashSet is not.
+      isRenderableWitnessTy(ty.seqElemTy) and
+        not treeRefPartInContainer(ty.seqElemTy)
     else:
       false
   of itTable:
@@ -5080,6 +5123,12 @@ proc mkTabKeysStmt*(retName: string, recv: IRExpr, keyTy: IRType,
   IRStmt(kind: isTabKeys, tkRetName: retName, tkRecv: recv, tkKeyTy: keyTy,
          tkLoc: loc)
 
+proc mkSetLenStmt*(retName: string, base, newLen: IRExpr, ty: IRType,
+                   loc: string = ""): IRStmt =
+  ## RFC-0005 S8bl (item 1). `retName := setLen(base, newLen)`.
+  IRStmt(kind: isSetLen, slRetName: retName, slBase: base, slLen: newLen,
+         slTy: ty, slLoc: loc)
+
 proc mkAssert*(cond: IRExpr): IRStmt =
   IRStmt(kind: isAssert, acond: cond)
 
@@ -5546,7 +5595,9 @@ proc render*(e: IRExpr): string =
   of iekContains:
     render(e.key) & " in " & render(e.container)
   of iekSeqAdd:    render(e.mutRecv) & ".add(" & render(e.mutArg) & ")"
-  of iekSeqDel:    render(e.delSeq) & ".del(" & render(e.delIdx) & ")"
+  of iekSeqDel:
+    render(e.delSeq) & (if e.delShift: ".delete(" else: ".del(") &
+      render(e.delIdx) & ")"
   of iekSeqInsert: render(e.insSeq) &
                    (if e.insGrow: ".insertGrow(" else: ".insert(") &
                    render(e.insVal) &
@@ -5635,6 +5686,9 @@ proc render*(s: IRStmt): string =
     "seqPop(" & s.spRetName & ":=" & s.spRecvName & ".pop())"
   of isTabKeys:
     "tabKeys(" & s.tkRetName & ":=" & render(s.tkRecv) & ")"
+  of isSetLen:
+    "setLen(" & s.slRetName & ":=" & render(s.slBase) & "," &
+      render(s.slLen) & ")"
   of isVariantField:
     "vfield(" & s.vfRetName & ":=" & render(s.vfRecv) & "." &
       s.vfFieldName & ")"

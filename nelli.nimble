@@ -1063,5 +1063,23 @@ task test, "Run the test suite":
             # newSeq, Table iteration, mgetOrPut, inlined-iterator
             # parameter conversions, seq[char] / seq[enum] witnesses;
             # walker 193->203 (provisional).
-            "tsymex_rfc0005_s8bc_remainder"]:
+            # RFC-0005 S8bl (item 5): split in three (a / b / c), the
+            # single file's compile having taken 77 s on Windows.
+            "tsymex_rfc0005_s8bc_remainder_a",
+            "tsymex_rfc0005_s8bc_remainder_b",
+            "tsymex_rfc0005_s8bc_remainder_c",
+            # RFC-0005 S8bl -- S8bc's remainder: the system magics with a
+            # `var` parameter (swap, wasMoved, move, reset, setLen, add on
+            # an element, new on a field) and the guard scan over them,
+            # add to a seq of an unbacked element, plain type aliases,
+            # mpairs / mvalues, a Table length change while iterating,
+            # ref parts and long nested seqs in witnesses; walker
+            # 203->213 (provisional).
+            "tsymex_rfc0005_s8bl_magics",
+            "tsymex_rfc0005_s8bl_setlen",
+            "tsymex_rfc0005_s8bl_magicscan",
+            "tsymex_rfc0005_s8bl_gaps",
+            "tsymex_rfc0005_s8bl_borrow",
+            "tsymex_rfc0005_s8bl_seqops",
+            "tsymex_rfc0005_s8bl_pairloop"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -213,6 +213,7 @@ const symexWalkerVersion* = "225"
   ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
   ## signed Int bridge); a `var` one is written back over what it views
   ## (`iekSeqSplice`).
+  ## `mitems` / `mpairs` make the loop variable the element itself.
   ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a

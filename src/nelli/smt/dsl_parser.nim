@@ -14256,6 +14256,117 @@ proc parseStmtInner(n: NimNode,
                     preamble: var seq[IRStmt],
                     ctx: ParseCtx): IRStmt
 
+proc yieldedElement(n: NimNode): NimNode =
+  ## RFC-0005 S8bu. The typed element `a[i]` an instantiated `mitems` /
+  ## `mpairs` yields by address (`yield a[i]`, `yield (i, a[i])`); nil when
+  ## the body has no such yield.
+  if n.kind == nnkYieldStmt and n.len == 1:
+    var e = n[0]
+    while e.kind in {nnkHiddenSubConv, nnkHiddenStdConv} and e.len == 2:
+      e = e[1]
+    if e.kind in {nnkTupleConstr, nnkPar} and e.len == 2: e = e[1]
+    if e.kind == nnkHiddenAddr and e.len == 1: e = e[0]
+    if e.kind == nnkBracketExpr and e.len == 2 and e[1].kind == nnkSym:
+      return e
+    return nil
+  for c in n:
+    let r = yieldedElement(c)
+    if r != nil: return r
+  nil
+
+proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bu. `for x in mitems(c)` / `for i, x in mpairs(c)` over a
+  ## seq or an array. Nim yields each element by address (`var T`), and its
+  ## inline expansion makes the body's `x` that element: `x` is spelled
+  ## `c[k]` in the body (`substByRefBody`, as an iterator's `var` formal is),
+  ## `k` the iteration's position (a marked copy of the iterator's own
+  ## counter, `markByRef`, so the element node keeps its type). A write
+  ## through `x`, through another name for the element (`addr c[k]` taken
+  ## before the loop), and a read of `c` in the body are all one location.
+  ## `c` is a location (`iterArgPath`); its indices are read once, when the
+  ## loop starts. A seq is walked as Nim's `while k < L` with `L` its length
+  ## when the loop starts; a length that changed by the end of an iteration
+  ## (Nim's `assert`) is declined on its paths. An array is unrolled. Before,
+  ## the stdlib body was inlined and declined at `unCheckedInc`'s pragma (a
+  ## seq) or at `low(IX)` (an array).
+  let isPairs = iterExpr[0].strVal == "mpairs"
+  if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
+      "variable(s): only `for x in mitems(c)` and `for i, x in mpairs(c)` " &
+      "are modelled")
+  var c = iterExpr[1]
+  if c.kind == nnkHiddenAddr and c.len == 1: c = c[0]
+  c = openArraySource(c)
+  let cls = classifyType(c).ty
+  var impl: NimNode = nil
+  if iterExpr[0].kind == nnkSym:
+    impl = iterExpr[0].getImpl
+  let ybr = if impl != nil and impl.kind == nnkIteratorDef: yieldedElement(body(impl))
+            else: nil
+  var hasIx = false
+  if cls.kind notin {itSeq, itArray} or ybr == nil or
+     not iterArgPath(c, hasIx):
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"RFC-0005 S8bu: `{iterExpr[0].strVal}` over `{c.repr}` (a " &
+      &"{cls.kind}) is not modelled: the walk follows it over a seq or an " &
+      "array location only")
+  var pre: seq[IRStmt]
+  var ok = true
+  let fixed = if hasIx: hoistIterIndices(c, pre, ctx, ok) else: c
+  let mark = markByRef(ybr[1])
+  if not ok or mark.isNil:
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"RFC-0005 S8bu: `{iterExpr[0].strVal}` over `{c.repr}`: an index of " &
+      "the location has no name the walk can fix")
+  let elem = copyNimNode(ybr)
+  elem.add copyNimTree(stripFieldChecks(fixed))
+  elem.add mark
+  var sub = ByRefSub(isPtr: false, tail: elem)
+  sub.addrNode = newNimNode(nnkHiddenAddr)
+  sub.addrNode.add copyNimTree(elem)
+  let xSym = n[n.len - 3]
+  let body0 = substByRefBody(bodyNode, xSym, sub)
+  let k = strVal(mark)
+  let kTy = classifyType(ybr[1]).ty
+  let (body, unrollBrk) = parseLoopBody(body0, ctx,
+                                        unrolled = cls.kind == itArray)
+  var stmts = pre
+  if cls.kind == itArray:
+    let lo = arrayIndexLow(c)
+    var iters: seq[IRStmt]
+    for q in 0 ..< cls.size:
+      iters.add mkLet(k, kTy, mkIntLit(lo + int64(q)))
+      if isPairs:
+        iters.add mkLet(strVal(n[0]), classifyType(n[0]).ty, mkVar(k))
+      iters.add body
+    if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
+    else: stmts.add iters
+    return mkBlock(stmts)
+  let seqIR = parseExpr(fixed, stmts, ctx)
+  let lenName = freshSynth(ctx, "miLen")
+  let intTy = tInt(64, signed = true)
+  stmts.add mkLet(lenName, intTy, mkSeqLen(seqIR))
+  let iv = freshSynth(ctx, "miIv")
+  stmts.add mkLet(iv, intTy, mkIntLit(0))
+  var loopStmts = @[mkLet(k, kTy, mkVar(iv))]
+  if isPairs:
+    loopStmts.add mkLet(strVal(n[0]), classifyType(n[0]).ty, mkVar(iv))
+  loopStmts.add body
+  loopStmts.add mkAssign(iv, mkBinop(bAdd, mkVar(iv), mkIntLit(1)))
+  var lp: seq[IRStmt]
+  let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
+  for st in lp: loopStmts.add st
+  loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
+              "during an iteration of `" & iterExpr[0].strVal & "`: Nim's " &
+              "`assert` there, and the element it yielded by address, are " &
+              "not modelled (feUnsupportedOp)"),
+      "mitems over a seq whose length changed (feUnsupportedOp)"))])
+  stmts.add mkWhile(mkBinop(bLt, mkVar(iv), mkVar(lenName)), mkBlock(loopStmts))
+  mkBlock(stmts)
+
 proc parseBorrowViewedStmt(rw: NimNode,
                            views: seq[tuple[node, baseTy: NimNode]],
                            preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt =
@@ -14473,6 +14584,10 @@ proc parseStmtInner(n: NimNode,
       allStmts.add initStmt
       allStmts.add whileSt
       mkBlock(allStmts)
+    elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
+         iterExpr[0].kind == nnkSym and
+         isBuiltinNamed(iterExpr[0], ["mitems", "mpairs"]):
+      parseMutIter(n, iterExpr, bodyNode, ctx)   # RFC-0005 S8bu
     elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
          iterExpr[0].kind == nnkSym and isBuiltinNamed(iterExpr[0], ["items", "pairs"]):
       # `for x in container` semchecks to `for x in items(container)`.

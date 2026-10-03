@@ -29,9 +29,9 @@ suite "S8bs: other by-address parameters and iterators":
     clean(sutSink, "sk_dead", sxUnsat)
     clean(sutIterVar, "iv", sxSat)
     clean(sutIterVar, "iv_dead", sxUnsat)
-    # `mitems` expands to a pragma statement the walk does not support.
-    declines(sutMitems, "mi", "nnkPragma")
-    declines(sutMitems, "mi_dead", "nnkPragma")
+    # RFC-0005 S8bu: `mitems` yields each element by address.
+    clean(sutMitems, "mi", sxSat)
+    clean(sutMitems, "mi_dead", sxUnsat)
   test "nim: an inlined iterator's parameters":
     let ks6 = [-1, 0, 5, 40, 41, 42, 43, 44, 45]
     let h = nativeHits(sutIterVarSeq, ks6) + nativeHits(sutIterVarInt, ks6) +

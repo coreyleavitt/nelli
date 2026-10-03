@@ -1171,5 +1171,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bu_calls",
             # item 4: openArray views (read, `var`).
             "tsymex_rfc0005_s8bu_views",
-            "tsymex_rfc0005_s8bu_varviews"]:
+            "tsymex_rfc0005_s8bu_varviews",
+            # item 4: mitems / mpairs.
+            "tsymex_rfc0005_s8bu_mitems"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

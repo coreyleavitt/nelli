@@ -352,6 +352,11 @@ title = "S8ax's remainder: opaque-body implicit Defects, foreign divergence on r
 state = "done"
 
 [[slice]]
+id = "S8bo"
+title = "S8be's remainder: isNil false UNSAT, plain-object address cells, same-length whole seq assign as resize, escaping arm-field addr, element cells over seqs of objects, abandoned replay threads, threadvar/stack fidelity of threaded replay"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

@@ -5272,7 +5272,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # the reason -- once S4-S6 reclassify, the kind alone decides the node's
     # `DegradeClass` (and so the verdict), so two nodes differing only in
     # kind must never share a cache entry.
-    "St<Un:" & $s.unKind & ";" & s.reason.escape & ">"
+    "St<Un:" & $s.unKind & ";" & s.reason.escape &
+      (if s.unIfFeasible: ";iff" else: "") & ">"   ## RFC-0005 S8bn
   of isUnsafeCast:
     # Phase 15 R11. Content-address by the routed pointer-materialisation reason.
     "St<Uc:" & s.ucReason.escape & ">"

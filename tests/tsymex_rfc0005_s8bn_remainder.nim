@@ -276,3 +276,122 @@ suite "S8bn (5): an always-raising closure is a raise":
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxRaised
     for e in r.errors: check e.severity == sevHint
+
+# ---- 6b. S8bk's late address on a call through a proc value -----------------
+#
+# RFC-0005 S8bn item 6 (S8bk's integration note). Nim takes a `var` / `addr`
+# actual's address AT THE CALL, after every later argument: `let f = touch;
+# f(gB.x, moveB())` compiles to `T1_ = moveB(); f(&(*gB).x, T1_)`, so when
+# `moveB` rebinds `gB` the callee reads and writes the new object. S8bh's
+# call through a proc value copied the value in (or filled the `addr` cell)
+# where the argument stood and wrote it back through the late address. Only
+# the address's checks (an index's bound) run where the argument stands; a
+# later call that changes what one read declines.
+
+type LBox = ref object
+  x: int
+
+var gB: LBox
+var gLArr: array[3, int]
+var gLs: seq[int]
+var gLi: int
+
+proc moveB(): int =
+  gB = LBox(x: 100)
+  0
+
+proc bumpLArr(): int =
+  gLArr[0] = 50
+  0
+
+proc bumpLs(): int =
+  gLs[0] = 50
+  0
+
+proc incLi(): int =
+  inc gLi
+  0
+
+proc ltouch(v: var int; k: int) = v = v + 5 + k
+proc ltouchP(v: ptr int; k: int) = v[] = v[] + 5 + k
+
+proc sutLateCopy(k: int) =
+  if k < 0 or k > 1000: return
+  let f = ltouch
+  gB = LBox(x: k)
+  let old = gB
+  f(gB.x, moveB())
+  if gB.x == 105 and old.x == k and k == 3: symexTarget("lcp")
+  if gB.x != 105 or old.x != k: symexTarget("lcp_dead")
+
+proc sutLateAddr(k: int) =
+  if k < 0 or k > 1000: return
+  let f = ltouchP
+  gB = LBox(x: k)
+  let old = gB
+  f(addr gB.x, moveB())
+  if gB.x == 105 and old.x == k and k == 9: symexTarget("lad")
+  if gB.x != 105 or old.x != k: symexTarget("lad_dead")
+
+proc sutLateArr(k: int) =
+  ## The later call writes the element: the callee reads it after.
+  if k < 0 or k > 1000: return
+  let f = ltouch
+  gLArr = [k, 20, 30]
+  gLi = 0
+  f(gLArr[gLi], bumpLArr())
+  if gLArr[0] == 55 and k == 6: symexTarget("lar")
+  if gLArr[0] != 55: symexTarget("lar_dead")
+
+proc sutLateSeq(k: int) =
+  if k < 0 or k > 1000: return
+  let f = ltouch
+  gLs = @[k, 20, 30]
+  gLi = 0
+  f(gLs[gLi], bumpLs())
+  if gLs[0] == 55 and k == 7: symexTarget("lsq")
+  if gLs[0] != 55: symexTarget("lsq_dead")
+
+proc sutLateIdxMoved(k: int) =
+  ## The later call moves the index Nim checked: UB, declined.
+  if k < 0 or k > 1000: return
+  let f = ltouch
+  gLArr = [k, 20, 30]
+  gLi = 0
+  f(gLArr[gLi], incLi())
+  if gLArr[1] == 25 and k == 1: symexTarget("lim")
+
+suite "S8bn (6b): a by-address argument's address is taken at the call":
+
+  test "nim":
+    gB = LBox(x: 3)
+    let old = gB
+    let f = ltouch
+    f(gB.x, moveB())
+    check gB.x == 105 and old.x == 3
+    gB = LBox(x: 3)
+    let old2 = gB
+    let g = ltouchP
+    g(addr gB.x, moveB())
+    check gB.x == 105 and old2.x == 3
+    gLArr = [6, 20, 30]
+    gLi = 0
+    f(gLArr[gLi], bumpLArr())
+    check gLArr[0] == 55
+    gLs = @[7, 20, 30]
+    f(gLs[gLi], bumpLs())
+    check gLs[0] == 55
+
+  test "a copy-in and an addr cell at the call":
+    ## RED: the dead labels `sxSat` (false), the live ones `sxUnsat`.
+    discard clean(sutLateCopy, "lcp", sxSat)
+    discard clean(sutLateCopy, "lcp_dead", sxUnsat)
+    discard clean(sutLateAddr, "lad", sxSat)
+    discard clean(sutLateAddr, "lad_dead", sxUnsat)
+    discard clean(sutLateArr, "lar", sxSat)
+    discard clean(sutLateArr, "lar_dead", sxUnsat)
+    discard clean(sutLateSeq, "lsq", sxSat)
+    discard clean(sutLateSeq, "lsq_dead", sxUnsat)
+
+  test "a later call that moves a checked index declines":
+    declines(sutLateIdxMoved, "lim", feUnsupportedOp, "never checked")

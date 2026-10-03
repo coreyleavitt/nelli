@@ -16987,10 +16987,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # path actually reaches the decline (the reach-anchored record §2.5
     # point 1 builds on); a Class-B node's is `feUnsupportedStmtKind`.
     # RFC-0005 S8: the reach record carries the node's parse-minted anchor.
+    # RFC-0005 S8bn: a decline guarding an unchecked fork (`unIfFeasible`)
+    # is reached only by the paths an execution can take (`pathInfeasible`,
+    # as the call-depth bail drops them).
+    var reached = paths
+    if stmt.unIfFeasible:
+      reached = @[]
+      for p in paths:
+        if not pathInfeasible(w.z3, p, w.settings): reached.add p
+      if reached.len == 0: return reached
     let d = w.degrade(stmt.unKind, stmt.reason,
                       scope = siteAnchored(stmt.unMarker))
     var out2: seq[Path]
-    for p in paths:
+    for p in reached:
       out2.add forkPathTainted(p, p.pc, p.env, d)
     out2
   of isUnsafeCast:

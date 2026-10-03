@@ -1429,6 +1429,12 @@ type
                                  ## The walker's arm records its reach under
                                  ## the same anchor. Identity only: excluded
                                  ## from `canonicalize` (like a local's name).
+      unIfFeasible*: bool        ## RFC-0005 S8bn: the decline guards a
+                                 ## condition the walk forks without a
+                                 ## feasibility check (a late address's
+                                 ## changed index, `placeLateAddrs`); a path
+                                 ## reaching it that no execution takes is
+                                 ## dropped, not recorded.
     of isUnsafeCast:
       ucReason*: string          ## Phase 15 R11: which unsafe pointer-materialisation
                                  ## pattern was routed (`"cast[ptr T]"`, `"addr"`).
@@ -4976,7 +4982,7 @@ proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
          dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
-                    marker: int): IRStmt =
+                    marker: int; ifFeasible = false): IRStmt =
   ## RFC-0005 S1b. An `isUnsupported` node now carries the classified `kind`
   ## the walker records when a path reaches it (§2.2). Reuse the kind the
   ## site already classifies under -- a Class-A site passes its parse-time
@@ -4986,7 +4992,8 @@ proc mkUnsupported*(kind: SymexErrorKind; reason: string;
   ## RFC-0005 S8: `marker` is the site's anchor (`unMarker`). The parser
   ## never calls this directly -- `declineAtSite`/`declineMarker`
   ## (`dsl_parser.nim`) mint the id; hand-built IR passes its own.
-  IRStmt(kind: isUnsupported, unKind: kind, reason: reason, unMarker: marker)
+  IRStmt(kind: isUnsupported, unKind: kind, reason: reason, unMarker: marker,
+         unIfFeasible: ifFeasible)
 
 # ---- RFC-0005 S1b: unregistered-callee keys (§2.5 point 3) ------------------
 # The parser declines three kinds of callee by NOT registering a `ProcSig`

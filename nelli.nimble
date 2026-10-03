@@ -1073,6 +1073,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bj_replace",
             "tsymex_rfc0005_s8bj_replace_lemmas",
             "tsymex_rfc0005_s8bj_walker",
+            "tsymex_rfc0005_s8bt_libversion",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

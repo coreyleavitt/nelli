@@ -203,7 +203,15 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "211"
+const symexWalkerVersion* = "224"
+  ## RFC-0005 S8bt (2026-10-03) — S8bj's remainder. SOUNDNESS: the walker
+  ## reads a regex only when std/re's libpcre is a build the model is
+  ## verified against (`pcre_engine.verifiedLibs`, version string and
+  ## engine); any other library declines every regex call (S8bj recorded
+  ## it in the cache key but read it with 8.45's model). Provisional 224
+  ## (the S8bt slot).
+  ##
+  ## (Prior: 211.)
   ## RFC-0005 S8bj (2026-10-02) — the regex constructs S8bb left
   ## undecided or declined. The backtracking verbs `(*COMMIT)`,
   ## `(*PRUNE)`, `(*SKIP)`, `(*SKIP:NAME)`, `(*THEN)` and the marks follow

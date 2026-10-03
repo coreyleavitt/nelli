@@ -1458,10 +1458,17 @@ proc zeroRepAndCaseless(x: Rx; zero, ci: var bool) =
 proc parseSpec*(sp: RegexSpec): PcreParse =
   ## The walker's reading of a regex literal: `parsePcre`, and RFC-0005
   ## S8bj's library-version scoping (`pcre_engine.pcreBefore838`).
+  ## RFC-0005 S8bt (SOUNDNESS): with a libpcre build the model is not
+  ## verified against (`pcre_engine.verifiedLibs`) every pattern is
+  ## `psUnknown`, its reason `unverifiedLibReason()`: whether that library
+  ## accepts a pattern, and what it matches, are not known.
   if sp.flag notin ["re", "rex"]:
     return PcreParse(status: psUnknown,
                      reason: "a Regex value that is not a `re\"...\"` / " &
                              "`rex\"...\"` literal")
+  let unverified = unverifiedLibReason()
+  if unverified.len > 0:
+    return PcreParse(status: psUnknown, reason: unverified)
   result = parsePcre(sp.pattern, sp.flag == "rex")
   if result.status == psOk:
     var zero, ci = false

@@ -9,6 +9,12 @@
 ## the library std/re would load: the same names as Nim's `pcre` wrapper,
 ## `pcre_config(PCRE_CONFIG_JIT)`. A library it cannot load or ask counts as
 ## a JIT one (the declines then stand: sound).
+##
+## RFC-0005 S8bt (SOUNDNESS). The model is PCRE 8.45's interpreter, checked
+## against other builds; the walker reads a regex only when std/re's library
+## is one of them (`verifiedLibs`), and declines every regex call otherwise
+## (`unverifiedLibReason`, read by `pcre_syntax.parseSpec`). S8bj recorded
+## the library in the cache key but read every one with 8.45's model.
 import std/[dynlib, strutils]
 
 const pcreConfigJit = 9'i32   ## pcre.h's PCRE_CONFIG_JIT
@@ -30,6 +36,24 @@ type PcreConfig = proc (what: int32; where: pointer): int32 {.cdecl, gcsafe.}
 var engineKnown {.threadvar.}: bool
 var engineJit {.threadvar.}: bool
 
+# RFC-0005 S8bt: a test can stand in another library (`overridePcreLib`).
+# A plain global, not a threadvar: the walker may run on another thread.
+var libOverride: tuple[on: bool, version: string, jit: bool]
+
+proc overridePcreLib*(version: string; jit: bool) =
+  ## RFC-0005 S8bt. Makes `pcreVersion` / `pcreRunsJit` report `version` and
+  ## `jit` instead of the loaded library's (tests).
+  {.cast(gcsafe).}:
+    libOverride = (true, version, jit)
+
+proc clearPcreLibOverride*() =
+  {.cast(gcsafe).}:
+    libOverride = (false, "", false)
+
+proc overridden(): tuple[on: bool, version: string, jit: bool] =
+  {.cast(gcsafe).}:
+    result = libOverride
+
 proc probeJit(): bool =
   let h = loadLibPattern(pcreLib)
   if h == nil: return true
@@ -42,6 +66,8 @@ proc probeJit(): bool =
 proc pcreRunsJit*(): bool =
   ## RFC-0005 S8bj. Whether std/re's unanchored calls run on PCRE's JIT
   ## (true when the library cannot be asked). Cached per thread.
+  let o = overridden()
+  if o.on: return o.jit
   if not engineKnown:
     engineJit = probeJit()
     engineKnown = true
@@ -55,6 +81,8 @@ var versionStr {.threadvar.}: string
 proc pcreVersion*(): string =
   ## RFC-0005 S8bj. std/re's libpcre's `pcre_version()` ("8.45 2021-06-15"),
   ## "" when it cannot be asked. Cached per thread.
+  let o = overridden()
+  if o.on: return o.version
   if not versionKnown:
     versionKnown = true
     let h = loadLibPattern(pcreLib)
@@ -85,3 +113,45 @@ proc pcreEngineName*(): string =
   ## The engine as the symex cache key records it (with the version).
   (if pcreRunsJit(): "pcre-jit-" else: "pcre-interp-") &
     pcreVersion().split(' ')[0]
+
+type VerifiedLib* = object
+  ## RFC-0005 S8bt. A libpcre build the model has been checked against: its
+  ## `pcre_version()` string and engine, and the evidence.
+  version*: string
+  jit*: bool
+  evidence*: string
+
+const verifiedLibs* = [
+  VerifiedLib(version: "8.45 2021-06-15", jit: false, evidence:
+    "the model's own reference: every regex suite (Linux test image)"),
+  VerifiedLib(version: "8.37 2015-04-28", jit: true, evidence:
+    "every regex suite on the Windows legs (Nim's pcre64.dll, JIT), the " &
+    "S8bj tri-oracle and the S8bj suites against a local JIT build"),
+  VerifiedLib(version: "8.37 2015-04-28", jit: false, evidence:
+    "the S8bj tri-oracle: identical to 8.45's interpreter on 56764 verb " &
+    "patterns, and the start-of-match data on 142108 patterns but the " &
+    "declined `{0}` case")]
+
+proc isVerifiedLib*(version: string; jit: bool): bool =
+  ## RFC-0005 S8bt. Whether `version` on that engine is in `verifiedLibs`.
+  for v in verifiedLibs:
+    if v.version == version and v.jit == jit: return true
+  false
+
+proc pcreLibVerified*(): bool =
+  ## RFC-0005 S8bt. Whether std/re's libpcre is a verified build.
+  isVerifiedLib(pcreVersion(), pcreRunsJit())
+
+proc unverifiedLibReason*(): string =
+  ## RFC-0005 S8bt. Why the walker declines every regex call with std/re's
+  ## libpcre, "" when it is a verified build.
+  if pcreLibVerified(): return ""
+  var known: seq[string]
+  for v in verifiedLibs:
+    known.add v.version.split(' ')[0] & (if v.jit: " JIT" else: "")
+  "std/re's libpcre (" &
+    (if pcreVersion().len == 0: "a version the walker cannot ask"
+     else: pcreVersion()) &
+    (if pcreRunsJit(): ", JIT" else: ", interpreter") &
+    ") is not a build the regex model is verified against (" &
+    known.join(", ") & "): psUnverifiedLib"

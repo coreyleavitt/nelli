@@ -281,6 +281,22 @@ const symexWalkerVersion* = "209"
   ## (`feReplayTimedOut`, never a confirmed `sxSat`). Provisional 205;
   ## batch 4.
   ##
+  ## RFC-0005 S8bh (2026-10-02) — S8bf's remainder. (1) A call through a
+  ## proc value applies the call's effects as a direct call does: a `var`
+  ## formal's exit value is written to its actual (by name, through a
+  ## temporary written back on return and on raise, or an `addr` cell),
+  ## one location passed twice runs a body specialised to it, and two heap
+  ## peers branch on their refs' equality (`closureVarOuts`,
+  ## `lambdaAliasBodies`); the writes were dropped, a false `sxSat`. (2) A
+  ## `ptr` of unknown origin addresses its own cell or a target chosen by
+  ## the free input arrays `<T>__@ptrsel` / `<T>__@ptrobj__<K>`: a field
+  ## family the path materialised, a global, or a root `var` parameter. It
+  ## was assumed disjoint from them, a false `sxUnsat`. (3) A ref hierarchy
+  ## names one address space: the sort keys on the root, a field's heap on
+  ## its declaring type, a derived type carries its ancestors' fields, an
+  ## up-conversion is the operand and a down-conversion checks the run-type
+  ## tag (`ObjectConversionDefect`). Provisional 208; batch 4.
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker
@@ -5050,7 +5066,14 @@ proc canonicalize*(t: IRType): string =
     for i in 0 ..< t.fields.len:
       let nm = if i < t.fieldNames.len: t.fieldNames[i] else: ""
       parts.add nm & "=" & canonicalize(t.fields[i])
-    "Ty<T:" & t.objectName & ":" & parts.join(";") & ">"
+    # RFC-0005 S8bh (item 3): a hierarchy type's chain and field owners
+    # key its sort and heaps; absent for a type without `of`, so every
+    # pre-existing key is unchanged.
+    let inh =
+      if t.inheritChain.len == 0 and t.ownedFieldNames.len == 0: ""
+      else: ":inh=[" & t.inheritChain.join(",") & "];own=[" &
+            t.ownedFieldNames.join(",") & "|" & t.ownedFieldIds.join(",") & "]"
+    "Ty<T:" & t.objectName & ":" & parts.join(";") & inh & ">"
   of itArray:
     # RFC-0005 S8am: `lo` renders too (same "cheap, forecloses future
     # doubt" default as `IRType.lo`'s own field doc) -- absent (the
@@ -5303,14 +5326,23 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       ";caps=[" & caps.join(",") & "];params=[" & ptys.join(",") & "]" &
       ";byref=[" & e.lambdaMutCaptures.join(",") & "]" &   ## RFC-0005 S9
       ";retTy=" & canonicalize(e.lambdaRetTy) &
-      ";body=" & canonicalize(e.lambdaBody, env) & ">"
+      ";body=" & canonicalize(e.lambdaBody, env) &
+      # RFC-0005 S8bh: the effect summary (the alias bodies derive from the
+      # body; their pairs, the local-pointer flags and the reach do not).
+      ";alias=" & $e.lambdaAliasPairs & ";ptrLocal=" & $e.lambdaPtrLocal &
+      ";outer=[" & e.lambdaOuter.join(",") & "]>"
   of iekClosureCall:                     ## Phase 15 C1: distinct partition from
                                          ## an isCall to the same name (Cn:) so a
                                          ## proc-valued-variable call never
                                          ## cache-collides with a named call.
     var argKeys: seq[string]
     for a in e.ccArgs: argKeys.add canonicalize(a, env)
-    "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")>"
+    # RFC-0005 S8bh: the call's `var`/`addr` effects.
+    var vts: seq[string]
+    for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
+      ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)

@@ -229,6 +229,21 @@ const mutMethods* = ["add", "setLen", "del", "delete", "insert", "incl",
   "removeSuffix"]
   ## S8x's `scan.py` MUT_METH vocabulary, reused at the typed level.
 
+proc calleeName(n: NimNode): string =
+  ## RFC-0005 S8bh. The routine name a callee node spells, or "" when it
+  ## spells none: an identifier or symbol, the first candidate of an
+  ## overload choice (every candidate has the one name), the name inside
+  ## backquotes or under a generic instantiation (`f[T]`). `strVal` on any
+  ## other kind is a compile error, which every typed body holding such a
+  ## callee (`x.f[T](...)`) used to trip.
+  case n.kind
+  of nnkIdent, nnkSym: macros.strVal(n)
+  of nnkOpenSymChoice, nnkClosedSymChoice, nnkAccQuoted, nnkBracketExpr:
+    if n.len > 0: calleeName(n[0]) else: ""
+  of nnkPostfix:
+    if n.len > 1: calleeName(n[1]) else: ""
+  else: ""
+
 proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
   if n == nil: return false
   case n.kind
@@ -242,10 +257,9 @@ proc bodyMutatesRoot*(n: NimNode; target: NimNode): bool =
       # RFC-0005 S8be: a method name may be a symbol choice or an
       # accent-quoted name (`x.`=destroy``), which has no `strVal`.
       if callee.kind == nnkDotExpr and callee.len == 2 and
-         callee[1].kind in {nnkIdent, nnkSym} and
-         macros.strVal(callee[1]) in mutMethods and rootSym(callee[0]) == target:
+         calleeName(callee[1]) in mutMethods and rootSym(callee[0]) == target:
         return true
-      if callee.kind == nnkSym and macros.strVal(callee) in mutMethods and
+      if callee.kind == nnkSym and calleeName(callee) in mutMethods and
          n.len > 1 and rootSym(n[1]) == target:
         return true
   else: discard

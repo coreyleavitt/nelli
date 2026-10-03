@@ -281,6 +281,35 @@ type
                                  ## `==`-unequal but share a Z3 sort via
                                  ## `nominalId` — see `refPointeeTypeId`); this
                                  ## flag is a WITNESS-RENDERING concern only.
+      inheritChain*: seq[string] ## RFC-0005 S8bh (item 3). The nominal ids
+                                 ## of an inheritance hierarchy's types from
+                                 ## its ROOT (the type declared `of RootObj`)
+                                 ## down to this one, inclusive; empty for a
+                                 ## type declared without `of`. A ref of any
+                                 ## type of one hierarchy names one address
+                                 ## space: `refPointeeTypeId` keys the
+                                 ## `Ref_<id>` sort on `inheritChain[0]`, so
+                                 ## `Base(d) == b` and a `Base` parameter
+                                 ## aliasing a `Derived` one compare
+                                 ## addresses of ONE sort (before S8bh, two
+                                 ## sorts: an ill-sorted term, or a false
+                                 ## `sxUnsat` where they alias). Its length
+                                 ## is the type's depth + 1: the
+                                 ## down-conversion check reads the dynamic
+                                 ## type's ancestor at each depth (see
+                                 ## `inheritTagCode`).
+      ownedFieldNames*: seq[string]  ## RFC-0005 S8bh (item 3). With
+      ownedFieldIds*: seq[string]    ## `ownedFieldIds`: each field of the
+                                 ## hierarchy chain and the nominal id of the
+                                 ## type that DECLARES it. `fieldHeapKey`
+                                 ## keys a field's heap on its declaring
+                                 ## type, so `d.x` (static `Derived`) and
+                                 ## `b.x` (static `Base`) read one heap, and
+                                 ## two siblings' same-named fields (`Mid.y:
+                                 ## int`, `Side.y: string`) stay two. Filled
+                                 ## for a recursion placeholder too (names
+                                 ## only, no field types), so a field read
+                                 ## through a placeholder keys alike.
     of itArray:
       elemTy*: IRType
       size*: int
@@ -893,9 +922,46 @@ type
                                      ## construction. A subset of
                                      ## `lambdaCaptures`; a `let`/param capture
                                      ## cannot change, and stays by value.
+      lambdaAliasPairs*: seq[tuple[keep, gone: int]]
+                                     ## RFC-0005 S8bh: for each pair of
+                                     ## same-typed `var` formals, the body with
+                                     ## formal `gone` spelled as formal `keep`
+                                     ## (`lambdaAliasBodies`, parallel): the
+                                     ## callee as it runs when one location is
+                                     ## passed to both.
+      lambdaAliasBodies*: seq[IRStmt]
+      lambdaPtrLocal*: seq[bool]     ## RFC-0005 S8bh: per formal, a `ptr`
+                                     ## formal every use of which stays local
+                                     ## to the call (S8an's
+                                     ## `ptrFormalStaysLocal`), so an `addr`
+                                     ## actual may be modelled as a cell.
+      lambdaOuter*: seq[string]      ## RFC-0005 S8bh: what the body can reach
+                                     ## outside its formals while it runs:
+                                     ## `n:<name>` per variable (a capture, a
+                                     ## module-level global, transitively),
+                                     ## `t:<key>` per object type a ref/ptr
+                                     ## those hold may address, `*` when that
+                                     ## is not known (a proc value it calls).
     of iekClosureCall:               ## A-normalised like isCall (D6)
       ccCallee*:  string             ## name of the proc-valued variable
       ccArgs*:    seq[IRExpr]
+      ccVarTys*:  seq[IRType]        ## RFC-0005 S8bh: per argument, the
+                                     ## formal's type when it is a `var`
+                                     ## formal (nil otherwise; empty when the
+                                     ## callee has none). The walker writes
+                                     ## the formal's exit value to the actual
+                                     ## (an `iekVar`) after the call.
+      ccAlias*:   seq[int]           ## RFC-0005 S8bh: per argument, the
+                                     ## argument whose location it shares
+                                     ## (itself when none); empty when none
+                                     ## share. Selects `lambdaAliasBodies`.
+      ccAddrArgs*: seq[int]          ## RFC-0005 S8bh: arguments that are an
+                                     ## `addr lv` cell (`lambdaPtrLocal`).
+      ccTouch*:   seq[string]        ## RFC-0005 S8bh: the variables and
+                                     ## heap object types the `var`/`addr`
+                                     ## actuals' locations involve (as
+                                     ## `lambdaOuter`; `t:?` for a type any
+                                     ## ref may address).
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
@@ -3849,10 +3915,27 @@ proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
          lambdaCaptures: captures, lambdaRetTy: retTy,
          lambdaMutCaptures: mutCaptures)
 
-proc mkClosureCall*(callee: string, args: seq[IRExpr]): IRExpr =
+proc mkClosureCall*(callee: string, args: seq[IRExpr];
+                    varTys: seq[IRType] = @[]; alias: seq[int] = @[];
+                    addrArgs: seq[int] = @[];
+                    touch: seq[string] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
-  ## variable. A-normalised like `isCall`.
-  IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args)
+  ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
+  ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
+  ## (see `ccVarTys`).
+  IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
+         ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
+         ccTouch: touch)
+
+proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
+                        aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
+                        outer: seq[string]): IRExpr =
+  ## RFC-0005 S8bh. `e` (an `iekLambda`) with its effect summary set.
+  result = e
+  result.lambdaAliasPairs = aliasPairs
+  result.lambdaAliasBodies = aliasBodies
+  result.lambdaPtrLocal = ptrLocal
+  result.lambdaOuter = outer
 
 proc mkSeqLit*(elems: seq[IRExpr], elemTy: IRType,
                declinedPlaceholder: bool = false): IRExpr =
@@ -4112,8 +4195,13 @@ proc withEnumName*(ty: IRType, name: string): IRType =
 
 proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
              objectName: string = "", nominalId: string = "",
-             isPlaceholder: bool = false, nameIsRefAlias: bool = false): IRType =
+             isPlaceholder: bool = false, nameIsRefAlias: bool = false,
+             inheritChain: seq[string] = @[],
+             ownedFieldNames: seq[string] = @[],
+             ownedFieldIds: seq[string] = @[]): IRType =
   ## `fieldNames.len` must equal `fields.len` or be empty (positional).
+  ## RFC-0005 S8bh: `inheritChain`/`ownedFieldNames`/`ownedFieldIds` -- see
+  ## the `IRType` field docs; empty for a type declared without `of`.
   ## `isPlaceholder` (Cluster H Step C): true ONLY for a recursion-truncated
   ## named-ref placeholder (`namedRefPlaceholder` and the inline-ref-field
   ## placeholder, `dsl_typebridge.nim`) — see the `IRType.isPlaceholder`
@@ -4125,7 +4213,23 @@ proc tTuple*(fields: seq[IRType], fieldNames: seq[string] = @[],
               else: newSeq[string](fields.len)   ## all-""
   IRType(kind: itTuple, fields: fields, fieldNames: names, objectName: objectName,
          nominalId: nominalId, isPlaceholder: isPlaceholder,
-         nameIsRefAlias: nameIsRefAlias)
+         nameIsRefAlias: nameIsRefAlias, inheritChain: inheritChain,
+         ownedFieldNames: ownedFieldNames, ownedFieldIds: ownedFieldIds)
+
+proc inheritTagCode*(nominalId: string): int64 =
+  ## RFC-0005 S8bh (item 3). The run-type tag a hierarchy object stores for
+  ## the type `nominalId` (FNV-1a over the id, folded to 62 bits, never 0:
+  ## 0 is the "no deeper type" sentinel). The parser emits the codes a
+  ## down-conversion checks and the walker's allocation stores them; both
+  ## call this one proc, at compile time and at run time alike, so it
+  ## avoids `hashes.hash`, whose string hash differs between the VM and
+  ## native code.
+  var h = 0xcbf29ce484222325'u64
+  for c in nominalId:
+    h = h xor uint64(ord(c))
+    h = h * 0x100000001b3'u64
+  result = int64(h and 0x3FFF_FFFF_FFFF_FFFF'u64)
+  if result == 0: result = 1
 
 proc tArray*(elemTy: IRType, size: int, lo: int64 = 0): IRType =
   IRType(kind: itArray, elemTy: elemTy, size: size, lo: lo)
@@ -5828,7 +5932,9 @@ proc render*(e: IRExpr): string =
   of iekClosureCall:      ## Phase 15 C1
     var asr: seq[string]
     for a in e.ccArgs: asr.add render(a)
-    e.ccCallee & "@(" & asr.join(",") & ")"
+    e.ccCallee & "@(" & asr.join(",") & ")" &
+      (if e.ccAlias.len > 0: "[alias:" & $e.ccAlias & "]"   ## RFC-0005 S8bh
+       else: "")
   of iekSeqLit:           ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add render(c)

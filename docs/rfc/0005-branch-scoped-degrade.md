@@ -387,6 +387,11 @@ title = "S8ax's remainder: opaque-body implicit Defects, foreign divergence on r
 state = "done"
 
 [[slice]]
+id = "S8bh"
+title = "S8bf's remainder: var writes dropped through proc-variable calls; ptr parameters assumed disjoint from ref fields; ill-sorted up-conversion of refs"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -10771,3 +10776,102 @@ leg's previous run, so the leg's own variance is wide.
   `len(s) == 2 and replace(s, re"a|ab", "x") == "x"` under the walker's
   budget (unsat in 13 s with the probe's single check). They surface as
   `beSolverUndef`.
+
+**As landed (S8bh, walker 208 provisional) — S8bf's remainder.** Suite
+`tsymex_rfc0005_s8bh_remainder` (32 tests; c on both Z3 versions, cpp
+5.1; the binary runs in ~5 s). The base is 77e57a7 (S8bf). S8ax is not
+in the base: item 2 builds on S8an's `addr` cells, not on S8ax's address
+cells.
+
+- *Item 1: a call through a proc value drops its `var` writes.* `let f =
+  setBoth; f(x, y); if x != 1` was a false `sxSat`, and so was every heap
+  form (`f(p.x, y)`, S8bf's peers `f(p.x, q.x)`); an `addr` actual
+  declined. The closure-call arm now applies the call's effects as a
+  direct call does: a `var` formal's exit value, merged over the body's
+  value exits, is written to its actual by name (`closureVarOuts`); a
+  raise carries the value where the body raised; a non-variable lvalue
+  goes through a temporary written back on return and on raise (S8ac's
+  shape); an `addr` actual is an S8an cell. One location passed twice
+  runs a body specialised to it (`lambdaAliasBodies`); two heap peers
+  branch on their refs' equality. It declines (`feUnsupportedOp` /
+  `ceCaptureByRefUnmodelled`, naming S8bh) when the body can reach an
+  actual's location outside its formals or an `addr` cell's pointer may
+  escape. An unknown target havocs its `var` actuals and the heap. Audit,
+  all pinned: a proc-valued variable, a lambda, a generic callee's proc
+  parameter, a proc passed to a callee, a call in an expression and
+  under a branch, a write before a raise; a proc field in an object and
+  a method call decline. The six new closure-sink sites are counted in
+  the S7 source pins (`tsymex_rfc0005_s7_closure`, 13 -> 19; the
+  two-kind site is split so each line names its kind).
+- *Item 2: a `ptr` of unknown origin addresses only its own cells.* `q.x
+  = 1; pi[] = 2; if q.x == 2` was a false `sxUnsat`, likewise a global
+  (`addr g`), a `var` parameter (`addr v`), a `ptr string` against a
+  string field, and the write in a callee. Each address of the pointer
+  sort now has a target, chosen by the free input array `<T>__@ptrsel`:
+  0 is the own cell; a field family's code names that family at the
+  object `<T>__@ptrobj__<K>[P]` (a free input array too); a variable's
+  code names a global or a root `var` parameter. Both arrays are
+  functions of the address, so every deref of one pointer, and of every
+  pointer equal to it, agrees on its target. A read is the `ite` chain
+  over the candidates; a write stores into each under its guard (and into
+  the own cell). The candidates are the field families the path has
+  materialised (one it has not touched reads its free input cell, so a
+  write it missed stays possible), the env's globals and the SUT's `var`
+  parameters. A `new` (so an `addr` cell) stores `sel = 0` at its fresh
+  address, and a pointer the walk allocated has no candidates; a target
+  object predates every allocation (`ptrPreKey`, read by
+  `assertFreshness`). Scoped declines (`feUnsupportedOp`, naming S8bh),
+  where no finite candidate set exists in this model: an element of a
+  seq/table/set held in a heap cell; a part of a by-value aggregate
+  global or `var` parameter; a root `var` parameter while a callee runs;
+  a callee's or a closure's `var` formal (copied in and out). The
+  snapshot aims a pointer whose input target is a field of a cell it
+  holds at that field (`aliasRef = "&<cell>.<field>"`), and the typed
+  witness hands the pointer the field's address: the alias witness
+  replays `roConfirmed` (pinned). Controls pinned `sxUnsat`: an `int`
+  pointer against a `bool` field, an object the SUT allocates, a local.
+- *Item 3: a ref converted along its inheritance chain.* Every type of a
+  hierarchy keyed its own Ref sort and field heaps, and a derived type's
+  IR held only its declared fields: `Base(d) == b` was ill-sorted
+  (`weInternalWalkerFault`), `setBoth(Base(d).x, b.x)` was `sxRaised`, a
+  `Base` parameter never aliased a `Derived` one (a false `sxUnsat`),
+  `Derived()` left inherited fields unzeroed (a false `sxSat`), and a
+  down-conversion never raised. A hierarchy now names one address space:
+  the sort keys on the root (`inheritChain[0]`), a field's heap on the
+  type that declares it (`ownedFieldIds`), and a derived type carries
+  its ancestors' fields. An up-conversion is the operand. A
+  down-conversion checks a non-nil ref's run-type tag, stored per depth
+  at allocation with a sentinel one level below (`inheritTagKey`), and
+  raises `ObjectConversionDefect`; a parameter's tags are free, so its
+  conversion may go either way. A converted base passes by reference to
+  a `var` formal.
+
+*Suites* (`ok/failed`, c; 5.1 / 4.13.4 where they differ): `h_witness` 11/0, `phase15_CR2_cachekey` 6/0, `s7_closure` 37/0, `s8_scope` 28/0, `s8ac_remainder` 19/0, `s8an_remainder` 25/0, `s8au_remainder` 35/0, `s8bd_remainder` 23/0, `s8ba_remainder` 32/0, `s8bf_alias` 13/0, `s8bh_remainder` 32/0, `s8i_models` 39/0, `s9_vetoes` 19/0, `s8ab_letaudit` 28/0 (see below). With the rest of the closure / HOF / ptr / inheritance / witness suites (`command grep -l` over `ptr `, `closure`, `proc(`, `of RootObj`, `heapSnapshot`) and every `163`/`163rev` suite: 128 suites; the 127 besides `s8ab_letaudit` hold 1832 checks, all OK, identical on 5.1 and 4.13.4 at 3422595; cpp 5.1 `s8bh_remainder` 32/0. `s8ab_letaudit` did not compile at 3422595 (below) and is 28/0 on both versions at 657f37a; `s8x_vm_alias` 7/0 there.
+
+*Windows:* at 3422595 all three legs were red on one suite, `tsymex_rfc0005_s8ab_letaudit` (compile error in `vm_alias_guard`, fuzzer-mingw 37058311018, symex-mingw 37058311067, fuzzer-msvc 37058311020). Fixed in 657f37a: `bodyMutatesRoot` read `strVal` off a callee name node that S8bh's parser code spells as neither an identifier nor a symbol (now `calleeName`, total), and the walk then flagged a real VM let-alias in `closureCallIR` (now a `var` copy). At 657f37a all green: fuzzer-mingw 37063867369, symex-mingw 37063867374, fuzzer-msvc 37063867415.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a ptr alias witness depends on parameter order.** The
+  typed witness builds positions in parameter order, so a pointer whose
+  target object's parameter comes after it (`s(pi: ptr int; q: Q)`)
+  keeps its own cell and the replay refutes the (sound) `sxSat`.
+- **PRECISION: a ptr aimed at a global or a `var` parameter has no
+  renderable witness.** The snapshot holds no cell for either; the
+  `sxSat` is sound and its replay refutes.
+- **PRECISION: a callee's or closure's `var` formal declines any ptr
+  deref of a type it may hold**, also when its actual is a local no
+  outside pointer can address (copy-in/copy-out has no location for it).
+- **PRECISION: a ptr into a seq/table/set element held in a heap cell, or
+  into a by-value aggregate global or `var` parameter, declines.**
+- **PRECISION: an always-raising void closure reports
+  `ceClosureBodyDiverged`.**
+- **PRECISION: a proc field in an object and a method call decline**
+  (item 1's audit); the unknown-target havoc does not reach globals, the
+  path's taint covers it.
+- **PRECISION: the `of` operator is unsupported**, and a general `nil`
+  literal (`let b: Base = nil`) does not parse (both pre-existing).
+- **PRECISION: generic, `{.inheritable.}` and case-object hierarchies
+  keep per-type keying**, so a conversion among them still declines or
+  stays per-type.
+- **PRECISION: a parameter's run-type tags are free**, unconstrained by
+  its static type, so alias states may be over-approximated.

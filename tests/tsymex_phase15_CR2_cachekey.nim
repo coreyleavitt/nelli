@@ -981,6 +981,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## subtypes, a bounded replay, `{.global.}`, int32 widening, Int-sorted
     ## call returns, tuples of closures, a capture-keyed call cache, element
     ## and case-object address cells). Provisional 205.
+    ## RFC-0005 S8bh (var / addr effects of a call through a proc value;
+    ## ptr parameters may address a ref object's field; ref conversions
+    ## keep identity). Provisional 208.
     check symexWalkerVersion == "209"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

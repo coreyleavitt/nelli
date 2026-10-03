@@ -1147,5 +1147,10 @@ task test, "Run the test suite":
             # widening; Int-sorted call returns; tuples of closures; a
             # capture-keyed call cache; element and case-object `addr`
             # cells; walker 209->217 (batch 4).
-            "tsymex_rfc0005_s8be_remainder"]:
+            "tsymex_rfc0005_s8be_remainder",
+            # RFC-0005 S8bh -- S8bf's remainder: var / addr effects of a
+            # call through a proc value; a ptr of unknown origin may address
+            # a ref field, a global or a var parameter; ref conversions along
+            # a hierarchy keep identity; walker 209->217 (batch 4).
+            "tsymex_rfc0005_s8bh_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

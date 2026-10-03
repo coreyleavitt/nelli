@@ -158,7 +158,11 @@ proc buildClosure(env: Env, e: IRExpr): SymVal =
   # site is the reach-back key (ADR-0009 D6: the body is descended at apply).
   let siteKey = (e.lambdaSite.siteHash, e.lambdaSite.declOrder)
   let cBody = ClosureBody(body: e.lambdaBody, params: e.lambdaParams,
-                          captures: capNames, retTy: e.lambdaRetTy)
+                          captures: capNames, retTy: e.lambdaRetTy,
+                          aliasPairs: e.lambdaAliasPairs,      ## RFC-0005 S8bh
+                          aliasBodies: e.lambdaAliasBodies,
+                          ptrLocal: e.lambdaPtrLocal,
+                          outer: e.lambdaOuter)
   currentClosureBodies[siteKey] = cBody
   # CR-9 Stage 4: also populate WalkerStatics when a walk is active so
   # applyClosureGround can read from statics via the nil-guard.

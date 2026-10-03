@@ -377,6 +377,11 @@ title = "Facts-first check perturbs the step-1 search: B1-1 q10 cost unstable (1
 state = "done"
 
 [[slice]]
+id = "S8bp"
+title = "S8bm's remainder: isolate the post-step-1 solver steps from walk-context state, move per-thread kind probes out of the first walk's context, unbounded endsWith/contains regex query on Z3 4.13.4"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

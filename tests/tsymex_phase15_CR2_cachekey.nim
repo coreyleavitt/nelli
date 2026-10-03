@@ -1010,6 +1010,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bn (S8bh's remainder: ptr witnesses and targets, proc
     ## fields and methods, `of` / `nil`, hierarchies, parameter tags).
     ## Provisional 215.
+    ## RFC-0005 S8bl (S8bc's remainder: var-parameter system magics, the
+    ## unbacked-element add, type aliases, mpairs / mvalues, Table length
+    ## change, seq-element ref parts and long nested seqs in witnesses).
+    ## 203->213 (provisional).
     check symexWalkerVersion == "223"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

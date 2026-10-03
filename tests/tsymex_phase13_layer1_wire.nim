@@ -62,11 +62,15 @@ suite "symex Phase 13 cycle 7 — Layer 1 verdict-cache wire":
     check drained[0].status == sfUnsat
     check drained[0].fromCache == true
 
-# Cold-path SUT: target is provably unreachable (`x != x` is false
-# for all int). Z3 returns UNSAT after a small handful of operations.
+# Cold-path SUT: target is provably unreachable (no int is both above 5
+# and below 3). Z3 returns UNSAT after a small handful of operations.
+# RFC-0005 S8bl: was `x != x`, which simplifies to `false`; a guard that
+# folds to a literal no longer walks the side it rules out, so that
+# target was never reached and Z3 never called.
 proc fnGhost(x: int) =
-  if x != x:
-    symexTarget("ghost")
+  if x > 5:
+    if x < 3:
+      symexTarget("ghost")
 
 suite "symex Phase 13 cycle 8 — cold path saves UNSAT verdict":
   test "first call: cold UNSAT (Z3 invoked); second call: warm (cache served)":

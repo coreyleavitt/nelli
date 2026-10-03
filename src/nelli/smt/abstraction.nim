@@ -252,6 +252,7 @@ const BitTwiddlingOps* = {bShl, bShr, bAnd, bOr, bXor}
 
 proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
   ## RFC-0005 S8be: exported (the walker's `freshCallRet`).
+  ## RFC-0005 S8bl: and for the parser's `writesName`.
   if e == nil: return
   case e.kind
   of iekVar:
@@ -522,6 +523,9 @@ proc collectBan*(s: IRStmt, pol: BanPolicy): HashSet[string] =
     discard  ## no expr operands — nothing to ban-scan
   of isTabKeys:
     collectBanFromExpr(s.tkRecv, pol, result)   ## RFC-0005 S8bc
+  of isSetLen:                                  ## RFC-0005 S8bl
+    collectBanFromExpr(s.slBase, pol, result)
+    collectBanFromExpr(s.slLen, pol, result)
   of isVariantField:
     collectBanFromExpr(s.vfRecv, pol, result)
   of isVariantReassign:

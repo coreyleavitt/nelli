@@ -74,10 +74,15 @@ proc s11Deep(n: int) =
 proc s11Both(n: int) =
   ## Both levers at once: the RFC's "one `echo` and one deep loop" SUT, whose
   ## run coordinate is ⊤ and whose `gaps()` names each cause separately.
+  ## RFC-0005 S8bl: the sensor is read before the loop. Read behind
+  ## `i == 8 and`, it is reached only on a path whose `i` is a literal
+  ## other than 8 (every exit within the bound), and a guard that folds to
+  ## `false` no longer walks its arm: the substitution decided nothing.
+  let k = s11Sensor()
   var i = 0
   while i < n:
     i = i + 1
-  if i == 8 and s11Sensor() == 7:
+  if i == 8 and k == 7:
     symexTarget("s11_both")
 
 var s11ProbeState = 11

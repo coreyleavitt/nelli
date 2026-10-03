@@ -1363,11 +1363,16 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # cell layout (`extractTreeValue`) and read as a cell field is
       # (`readSeqAs` -> `readCellField`); only the element's TYPE comes from
       # the recursion.
+      # RFC-0005 S8bl (item 4): an element with a ref part reads through
+      # the witness tuple's `RefWitness`, whose positions the element's
+      # refs are (`collectTreeRefPositions`).
       let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      let src = if treeHasRefPart(ty.seqElemTy): refWitnessCtx(witId)
+                else: witId
       (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
        newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
                        copyNimTree(elemTyNode)),
-               witId, newLit(path)))
+               src, newLit(path)))
     elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # RFC-0005 S8f/S8h: element `i` is the position `path[i]` -- nil, the
       # same object as any other position holding its address (an earlier

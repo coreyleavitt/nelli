@@ -108,9 +108,11 @@ suite "RFC-0005 S8d -- a user type named like a stdlib type head is not the stdl
   test "user alias `Natural = int`: not range[0..high(int)] (was a false sxUnsat)":
     let r = symexFind(s8dNatural, tLabel("s8d_natural"))
     dump(r.errors)
-    check r.status != sxUnsat
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedParamType)
+    # RFC-0005 S8bl moved this pin: a plain alias classifies as its target
+    # (this `Natural` is `int`), so the negative input is an exact witness;
+    # it was the alias decline.
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedParamType)
 
   test "user alias `int8 = int`: `low(int8)` is not -128 (was a false sxSat)":
     let r = symexFind(s8dLowInt8, tLabel("s8d_low_int8"))
@@ -122,9 +124,11 @@ suite "RFC-0005 S8d -- a user type named like a stdlib type head is not the stdl
   test "user `Rune = distinct RuneImpl`: not a Unicode scalar (was a false sxUnsat)":
     let r = symexFind(s8dRune, tLabel("s8d_rune"))
     dump(r.errors)
-    check r.status != sxUnsat
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedParamType)
+    # RFC-0005 S8bl moved this pin: `RuneImpl = int32` is a plain alias,
+    # now its target, so the distinct reads as an int32 and a negative one
+    # is an exact witness (was the alias decline).
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedParamType)
 
   test "user enum named `bool`: its third member is reachable (was a false sxUnsat)":
     let r = symexFind(s8dBool, tLabel("s8d_bool"))

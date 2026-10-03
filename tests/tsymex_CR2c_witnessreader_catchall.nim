@@ -55,8 +55,18 @@ import nelli/smt/canonicalize
 type
   Widget = object
     a: int
-    b: ref int   # RFC-0005 S8bc: a seq of a plain object is renderable since
-                 # S8bc; a seq element holding a ref is not
+    b: Table[string, ref int]
+      # RFC-0005 S8bc: a seq of a plain object is renderable since S8bc.
+      # RFC-0005 S8bl: so is a seq element holding a ref; one holding a
+      # ref inside a Table is not (`treeRefPartInContainer`).
+
+  WidgetR = object
+    # RFC-0005 S8bl: the pre-S8bl `Widget` (a ref part), renderable since
+    # S8bl. `ShapeBad`'s untouched arm keeps it: the witness reader is
+    # emitted for every arm, and an element shape no reader reads (a ref
+    # inside a Table) is the reader's compile-time invariant guard.
+    a: int
+    b: ref int
 
   ShapeKind = enum skWidgets, skCount
 
@@ -66,7 +76,7 @@ type
   ShapeBad = object
     case kind: ShapeKind
     of skWidgets:
-      widgets: seq[seq[Widget]]   # RFC-0005 S8bc: a seq of seqs stays the
+      widgets: seq[seq[WidgetR]]  # RFC-0005 S8bc: a seq of seqs stays the
                                   # unbacked scoped-decline placeholder (a
                                   # seq of objects is backed since S8bc)
     of skCount:

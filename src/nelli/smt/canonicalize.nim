@@ -260,6 +260,28 @@ const symexWalkerVersion* = "223"
   ## `ccVarPtrSafe`, the variant hierarchy fields), so
   ## cached entries rotate.
   ##
+  ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
+  ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
+  ## magic with a `var` parameter was registered with an empty body, so its
+  ## write was dropped (`swap`, a string's `setLen`, `s[i].add c`: false
+  ## sxSat) or its parse crashed the compile (`wasMoved`, `move`); each is
+  ## modelled (`isSetLen` for `setLen`) or declines naming the magic
+  ## (`varParamMagics`). `add` to a seq of an unbacked element is a
+  ## placeholder decline (was a walker fault); a plain type alias is its
+  ## target; `mpairs` / `mvalues` write the table; a Table length change
+  ## while iterating raises `AssertionDefect`; a seq element's ref parts
+  ## are witness positions, and a nested seq renders up to 2^20 elements.
+  ## Every string table key term is a byte string (an unconstrained key of
+  ## another path's enumeration crashed witness extraction: a false sxUnsat
+  ## on the C backend). An assumed `s == "lit"` binds `s` as the literal, a
+  ## ground one-character `indexof` folds, and a clean call result that
+  ## folds to literals is bound as them (the unrecognised pair loop over a
+  ## pinned string: 640-750 s to under a second). A loop path still active
+  ## at the unroll bound whose pc is contradictory is dropped, and an `if`
+  ## guard that folds to a literal takes one side only. `seq.delete`
+  ## shifts the tail down; `for x in [a, b]` binds the literal; borrow
+  ## views reach every parser type query.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -5462,7 +5484,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<" & $e.kind & ":" & canonicalize(e.mutRecv, env) & ";" &
       canonicalize(e.mutArg, env) & ">"
   of iekSeqDel:
-    "Ex<SqD:" & canonicalize(e.delSeq, env) & ";" &
+    (if e.delShift: "Ex<SqDs:" else: "Ex<SqD:") &
+      canonicalize(e.delSeq, env) & ";" &
       canonicalize(e.delIdx, env) & ">"
   of iekSeqInsert:
     "Ex<SqI" & (if e.insGrow: "g:" else: ":") &
@@ -5654,6 +5677,12 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     let retSlot = "$" & $bindLocal(env, s.tkRetName)
     "St<TK:" & retSlot & "=" & canonicalize(s.tkRecv, env) & ";kty=" &
       canonicalize(s.tkKeyTy) & ">"
+  of isSetLen:
+    # RFC-0005 S8bl (item 1). Distinct `SL:` prefix; the resized value is a
+    # fresh name (`bindLocal`), the operands content-addressed.
+    let slSlot = "$" & $bindLocal(env, s.slRetName)
+    "St<SL:" & slSlot & "=" & canonicalize(s.slBase, env) & "," &
+      canonicalize(s.slLen, env) & ";ty=" & canonicalize(s.slTy) & ">"
   of isSeqPop:
     # N14. Distinct `SqP:` prefix; both operand NAMES are content-addressed
     # via `lookupLocal`/`bindLocal` exactly like `isIndexAssign`/`isIndex`

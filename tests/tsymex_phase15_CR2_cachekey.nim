@@ -986,7 +986,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## keep identity). Provisional 208.
     ## RFC-0005 batch 4: S8bb, S8bc, S8be and S8bh stacked on batch 3.
     ## 209->217.
-    check symexWalkerVersion == "217"
+    ## RFC-0005 S8bs (a var, addr or by-pointer actual whose variable has
+    ## an address cell is bound to that cell; by-value seqs share element
+    ## cells). 217->222.
+    check symexWalkerVersion == "222"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

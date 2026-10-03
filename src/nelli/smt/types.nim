@@ -1150,15 +1150,21 @@ type
     typeIds*: seq[string]  ## qualified Nim exception type names
     body*:    IRStmt
 
-  VarLoc* = tuple[temp, root: string; path: seq[string]; byAddr: bool]
-    ## RFC-0005 S8bs. Where a call's copy-in/copy-out argument came from
-    ## (`IRStmt.cVarLocs`): `temp` is the IR name the call is given -- the
-    ## temporary a `var` actual that is not a variable is passed through
-    ## (`byAddr` false), or the cell an `addr lv` actual is for the call
-    ## (`byAddr` true) -- and the location is the variable `root` along
-    ## `path`: a field step is the field's name, an index step `[` and the
-    ## IR name of a `let` holding the index, and `?` a step the walk cannot
-    ## follow.
+  VarLoc* = tuple[temp, root: string; path: seq[string]; mode: string]
+    ## RFC-0005 S8bs. Where an argument the walk passes as a value came from
+    ## (`IRStmt.cVarLocs`), when Nim passes it by address or shares its
+    ## memory. `mode` is:
+    ##   * `var`: `temp` is the temporary a `var` actual that is not a
+    ##     variable is copied through and written back from;
+    ##   * `addr`: `temp` is the cell an `addr lv` actual is for the call;
+    ##   * `ptr`: `temp` is `#<k>`, the `k`-th argument, a by-value one Nim
+    ##     passes by address (an array, an inheritable object, an object or
+    ##     tuple larger than three words);
+    ##   * `copy`: likewise, one Nim copies but whose seq or string memory
+    ##     the copy shares (a seq, a string, an object or tuple holding one).
+    ## The location is the variable `root` along `path`: a field step is
+    ## the field's name, an index step `[` and the IR name of a `let`
+    ## holding the index, and `?` a step the walk cannot follow.
 
   IRStmt* = ref object
     case kind*: IRStmtKind

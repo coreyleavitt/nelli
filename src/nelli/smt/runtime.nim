@@ -17141,7 +17141,10 @@ include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 proc bindVarLocs(calleePath: Path; callerEnv: Env;
                  callerCells: seq[AddrCellEntry]; callerFrame: int;
                  locs: seq[VarLoc]; varArgs: seq[(string, string)];
-                 cells: var seq[AddrCellEntry]; w: var WalkCtx): string =
+                 params: seq[string];
+                 cells: var seq[AddrCellEntry];
+                 elemShares: var seq[(string, string)];
+                 w: var WalkCtx): string =
   ## RFC-0005 S8bs. A `var` actual that is a path into a routine's variable
   ## (`b.x`, `IRStmt.cVarLocs`) is passed by copy-in/copy-out, through a
   ## temporary written back after the call. That is Nim's semantics only
@@ -17157,10 +17160,20 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ## bound to the cell `s[i]` has when `i` equals its index, else to a fresh
   ## one holding the element, as `walkElemCell` takes it.
   ##
+  ## A by-value argument Nim passes by address (`VarLoc`'s `ptr`: a large
+  ## or inheritable object, an array) reads the location as the callee's
+  ## writes through a pointer leave it: its formal is bound the same way (it
+  ## is never written by name). One Nim copies but whose seq or string
+  ## memory the copy shares (`copy`) sees the writes to its elements: a seq
+  ## with element cells has them under the formal's name too (`elemShares`,
+  ## for `inheritElemCells`).
+  ##
   ## Returns why the call declines, or "": a path the walk cannot follow,
-  ## a variable that has both a cell and element cells, and an `addr` of a
-  ## part of an address-taken variable (`byAddr`: the cell for the call is
-  ## a second copy of a location the callee can reach through the pointer).
+  ## a variable that has both a cell and element cells, an `addr` of a part
+  ## of an address-taken variable (the cell for the call is a second copy
+  ## of a location the callee can reach through the pointer), and a `copy`
+  ## of an address-taken variable (a write through the pointer to an
+  ## element is seen through the copy, an assignment of the whole is not).
   let ctx = w.z3
   for loc in locs:
     var rootCells: seq[AddrCellEntry]
@@ -17174,14 +17187,29 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         elems.add e
     if rootCells.len == 0 and elems.len == 0: continue
     let what = "`" & displayName(loc.root) & "`"
-    if loc.byAddr:
+    if loc.mode == "addr":
       return "an `addr` of a part of " & what & ", whose address is taken, " &
              "is a cell for the call the callee may also reach through that " &
              "pointer"
     var formal = ""
-    for (f, callerName) in varArgs:
-      if callerName == loc.temp: formal = f
+    if loc.temp.startsWith("#"):
+      let k = parseInt(loc.temp[1 .. ^1])
+      if k < params.len: formal = params[k]
+    else:
+      for (f, callerName) in varArgs:
+        if callerName == loc.temp: formal = f
     if formal.len == 0: continue
+    if loc.mode == "copy":
+      if rootCells.len > 0:
+        return "a by-value argument shares the memory of " & what &
+               ", whose address is taken: a write through the pointer to " &
+               "an element is seen through it, and an assignment of the " &
+               "whole is not"
+      if loc.path.len > 0:
+        return "a by-value argument shares the memory of a part of " & what &
+               ", which has element cells"
+      elemShares.add (formal, loc.root)
+      continue
     if "?" in loc.path:
       return "the `var` argument is a part of " & what & ", whose address " &
              "is taken, along a path the walk does not follow"
@@ -19236,8 +19264,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # RFC-0005 S8bs: a `var` actual that is a part of an address-taken
           # variable is bound to its cell (`bindVarLocs`).
           var entryCells = calleeAddrCells
+          var elemShares: seq[(string, string)]
+          var paramNames: seq[string]
+          for f in sig.params: paramNames.add f.name
           let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
-            w.frame.frameId, stmt.cVarLocs, varArgs, entryCells, w)
+            w.frame.frameId, stmt.cVarLocs, varArgs, paramNames, entryCells,
+            elemShares, w)
           if locWhy.len > 0:
             taintInPlace(calleePath, w.degrade(feUnsupportedOp,
               "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
@@ -19251,7 +19283,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           pushFrame(w)
           # RFC-0005 S8be: and an element cell, likewise.
           inheritElemCells(calleePath, w.frameStack[^1].frameId,
-            w.frame.frameId, varArgs, sig.captures, guarded)
+            w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
           let calleeFrameId = w.frame.frameId
           w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
           w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
@@ -19384,7 +19416,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
               varArgs, sig, guarded, w)   ## RFC-0005 S8ax
             var raisePath = forkPath(er.path, er.path.pc, rEnv)
             carryElemCells(raisePath, w.frame.frameId, calleeFrameId,
-              varArgs, sig.captures, guarded)   ## RFC-0005 S8be
+              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
             raisePath = settleAddrCells(raisePath, carried, w)
             let touched = touchedGuard(er.path.env, guarded)
             if touched.len > 0:
@@ -19495,7 +19527,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             let merged = settleAddrCells(
               forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
             carryElemCells(merged, w.frame.frameId, calleeFrameId,
-              varArgs, sig.captures, guarded)   ## RFC-0005 S8be
+              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
             # RFC-0005 S8an: the callee wrote a withheld root directly.
             let touched = touchedGuard(cp.env, guarded)
             if touched.len > 0:

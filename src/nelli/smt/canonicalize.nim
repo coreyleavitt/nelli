@@ -202,7 +202,18 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "217"
+const symexWalkerVersion* = "222"
+  ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
+  ## variable has an address cell was copied in and written back, so a
+  ## callee's write through the pointer was clobbered; an object's address
+  ## cell lived in its whole-pointee heap, not the field heaps its writes
+  ## use. A call's `cVarLocs` (canonicalized) name where each copied,
+  ## `addr`, by-pointer or memory-sharing argument came from; the callee's
+  ## formal is bound to the variable's cell along that path, element cells
+  ## are shared with a by-value seq, and anything the walk cannot bind
+  ## declines. An inlined iterator's formals name the caller's locations as
+  ## Nim's expansion does (they were copies). 217 -> 222.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -5448,7 +5459,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
         steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
                   else: st)
       locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
-               "/" & steps.join("/") & (if l.byAddr: "&" else: "")
+               "/" & steps.join("/") & ":" & l.mode
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &

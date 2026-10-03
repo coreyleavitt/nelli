@@ -3807,7 +3807,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # consumed only via `.len`/index — never a direct `==` — so it needs no
     # comparison proto here.)
     none(SymVal)
-  of iekContains:
+  of iekContains, iekTabRemovedSince:   # S8bx: a Bool
     none(SymVal)
   of iekGetCurrentExnMsg:
     # Phase 15 E8: `getCurrentExceptionMsg()` → Z3String. svString sentinel so a
@@ -5461,6 +5461,46 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+proc presenceRemoved(cur, base: Z3AnyAst): bool =
+  ## RFC-0005 S8bx (item 4). The presence array `cur` is NOT `base` under
+  ## stores of `true` alone (through `ite` merges): some store between them
+  ## writes `false` (a removal), or `cur` is reached otherwise (a fresh
+  ## array, a callee's havoc). Conservative: only `true` stores down to
+  ## `base` on every branch is "no removal".
+  let ctx = cur.ctx
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  # The decl kinds of a store and an `ite`, read off well-sorted probes (as
+  # `seqCapKinds` reads its kinds).
+  let probeArr = mkArrayVar[Z3Bool, Z3Bool](ctx, "__s8bx_kind_probe_arr")
+  let probeC = mkBoolVar(ctx, "__s8bx_kind_probe_c")
+  let probeStore = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_store(ctx.raw,
+    probeArr.raw, probeC.raw, probeC.raw))
+  let probeIte = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw,
+    probeC.raw, probeArr.raw, probeStore.raw))
+  let storeKind = kindOf(probeStore.raw)
+  let iteKind = kindOf(probeIte.raw)
+  var stack = @[cur.raw]
+  var steps = 0
+  while stack.len > 0:
+    let t = stack.pop()
+    if t == base.raw: continue
+    inc steps
+    if steps > 100_000 or Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST:
+      return true
+    let app = Z3_to_app(ctx.raw, t)
+    let k = kindOf(t)
+    if k == storeKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      let v = Z3_get_app_arg(ctx.raw, app, 2)
+      if $wrap[Z3Bool](ctx, v) != "true": return true
+      stack.add Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == iteKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      stack.add Z3_get_app_arg(ctx.raw, app, 1)
+      stack.add Z3_get_app_arg(ctx.raw, app, 2)
+    else:
+      return true
+  false
 
 proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
   ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
@@ -8237,6 +8277,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
     return recv
+  of iekTabRemovedSince:
+    # RFC-0005 S8bx (item 4). Whether a key was removed from the table since
+    # it was `trBase`, read off the term: the presence array is `trBase`'s
+    # under a chain of stores (`[]=` stores `true`, `del` / `pop` / `take`
+    # store `false`, `clear` is a fresh array), so a `false` store, or any
+    # other shape between the two, is a removal -- or one this cannot rule
+    # out, which is the same answer (the slot walk is then declined).
+    let cur = lower(env, e.trCur)
+    let base = lower(env, e.trBase)
+    SymVal(kind: svBool, bo: mkBool(
+      cur.kind != svTable or base.kind != svTable or
+      presenceRemoved(cur.tabPresentRaw, base.tabPresentRaw)))
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind

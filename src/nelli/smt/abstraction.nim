@@ -171,6 +171,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekConvIntReinterpret,
      iekMathCall,
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
+     iekTabRemovedSince,
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
      iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
@@ -281,6 +282,9 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
   of iekContains:
     collectVarRefs(e.container, into)
     collectVarRefs(e.key, into)
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    collectVarRefs(e.trCur, into)
+    collectVarRefs(e.trBase, into)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     collectVarRefs(e.mutRecv, into)
     collectVarRefs(e.mutArg, into)

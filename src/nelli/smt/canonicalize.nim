@@ -213,6 +213,16 @@ const symexWalkerVersion* = "228"
   ## extraction is now recorded as it is raised (`extractionRaiseHook`),
   ## ends the walk, and makes the run `sxUnknown` + `weInternalWalkerFault`
   ## on both backends.
+  ## The seq witness reader and the renderability predicate share one
+  ## classifier (`seqWitnessReader`): a placeholder seq of an element no
+  ## reader reads crashed the compile. SOUNDNESS: an `mpairs` / `mvalues`
+  ## view passed to a call with its Table was two copies of one location
+  ## (swapped verdicts); the walker keeps the two formals equal in the
+  ## callee (`cViewAliases`, `syncViewAliases`). SOUNDNESS: a key removed
+  ## from a Table while iterating it, the length kept, followed the
+  ## enumeration taken at loop entry (a false sxUnsat / sxSat for one entry;
+  ## Nim's slot walk depends on the hashes): the path declines
+  ## (`iekTabRemovedSince`).
   ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
   ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
   ## magic with a `var` parameter was registered with an empty body, so its
@@ -5036,6 +5046,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
       canonicalize(e.key, env) & ">"
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    "Ex<TRm:" & canonicalize(e.trCur, env) & ";" &
+      canonicalize(e.trBase, env) & ">"
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     "Ex<" & $e.kind & ":" & canonicalize(e.mutRecv, env) & ";" &
       canonicalize(e.mutArg, env) & ">"

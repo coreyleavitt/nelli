@@ -365,6 +365,8 @@ proc emitExpr*(e: IRExpr): NimNode =
             emitExpr(e.tabKey), emitExpr(e.tabVal))
   of iekTableDel:
     newCall(bindSym"mkTableDel", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    newCall(bindSym"mkTabRemovedSince", emitExpr(e.trCur), emitExpr(e.trBase))
   of iekSetIncl:
     newCall(bindSym"mkSetIncl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of iekSetExcl:
@@ -1471,6 +1473,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     result = true
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4): two variables
+    result = false
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     result = rhsHasInlineDefectFork(e.mutRecv) or rhsHasInlineDefectFork(e.mutArg)
   of iekSeqDel:
@@ -10778,6 +10782,14 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
   let ivName = freshSynth(ctx, "iv")
   pre.add mkLet(ivName, intTy, mkIntLit(0))
   var loopStmts: seq[IRStmt]
+  # RFC-0005 S8bx (item 4): the table as this iteration begins, against
+  # which a removal in the body is read (`iekTabRemovedSince`).
+  let snapIter = freshSynth(ctx, "tki")
+  if live:
+    var snapPre: seq[IRStmt]
+    let nowIR = parseExpr(container, snapPre, ctx)
+    loopStmts.add snapPre
+    loopStmts.add mkLet(snapIter, tabCls.ty, nowIR)
   let kSynth = freshSynth(ctx, "tkk")
   loopStmts.add mkIndexStmt(kSynth, mkVar(ksName), mkVar(ivName), keyTy)
   var vIR: IRExpr = nil
@@ -10852,6 +10864,24 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
           "the Table's length changed while iterating over it")
     loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
                                   lenChanged)])
+    # RFC-0005 S8bx (item 4): a key removed in this iteration with the
+    # length kept (another key, or the same one, inserted): Nim's slot walk
+    # goes on over slots that depend on the keys' hashes and the capacity --
+    # the new key's slot against the current one, and `del`'s backshift of a
+    # later entry into the hole (a key visited twice, another skipped;
+    # native runs in `tsymex_rfc0005_s8bx_iterchange`). Not modelled: the
+    # path declines (it followed the enumeration taken at loop entry, which
+    # was a false `sxUnsat` / `sxSat` for a one-entry table).
+    var inner3: seq[IRStmt]
+    let tabNow = parseExpr(container, inner3, ctx)
+    loopStmts.add inner3
+    loopStmts.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a key was removed from the Table while iterating over " &
+                "it, and its length kept: the rest of Nim's walk over the " &
+                "hash slots depends on the keys' hashes, which are not " &
+                "modelled -- path degraded to sxUnknown"),
+        "a key removed from the Table while iterating over it"))])
   loopStmts.add mkAssign(ivName, mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
   pre.add mkWhile(mkBinop(bLt, mkVar(ivName), mkVar(lenName)),
                   mkBlock(loopStmts))

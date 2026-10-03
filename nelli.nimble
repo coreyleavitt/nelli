@@ -1126,5 +1126,13 @@ task test, "Run the test suite":
             # RFC-0005 S8bf: two var / addr heap actuals that may be one
             # cell through different refs are passed by reference. Walker
             # 202->209 (batch 3).
-            "tsymex_rfc0005_s8bf_alias"]:
+            "tsymex_rfc0005_s8bf_alias",
+            # RFC-0005 S8bg -- S8bd's remainder: a by-reference lvalue
+            # reached through a representation-preserving conversion
+            # (distinct, range to base) is modelled through; one reached
+            # through a cast gets a scoped decline naming the cast instead
+            # of a crash; the distinct-bijectivity hint walks the whole
+            # distinct chain before judging non-decidability. Walker
+            # 209->218.
+            "tsymex_rfc0005_s8bg_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -156,9 +156,15 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
       let w: seq[Grams] = a.witness[0]
       check w.len == 2 and int32(w[1]) == 70000'i32
       check replayWitness(dParam32, a.witness, tLabel("d32"), {}) == roConfirmed
-    # A distinct of a float, or of a distinct, carries S8ba's
-    # `geDistinctBijectivitySkipped` hint (sevHint): the sort is modelled
-    # without the round-trip axiom.
+    # A distinct of a float carries S8ba's `geDistinctBijectivitySkipped`
+    # hint (sevHint): the sort is modelled without the round-trip axiom. A
+    # distinct of a distinct over a DECIDABLE base (`Km` here) does not,
+    # since RFC-0005 S8bg: the hint used to fire for it too (the immediate
+    # base's own representative is a nested `svDistinct`, never a
+    # bijectivity-primitive kind, regardless of what its real base is),
+    # wrongly naming the chain's base non-decidable when it is `int`. See
+    # `tsymex_rfc0005_s8bg_remainder.nim` for the dedicated pins (one
+    # level, two levels, a genuinely non-decidable base).
     template hinted(fn: typed, lbl: string): untyped =
       block:
         let r = symexFind(fn, tLabel(lbl))
@@ -172,6 +178,10 @@ suite "S8bd (2): a seq[distinct] parameter has a witness":
       check float(w[0]) > 2.5
       check replayWitness(dParamF, b.witness, tLabel("df"), {}) == roConfirmed
     let c = hinted(dParamNested, "dn")
+    # RFC-0005 S8bg: `Km`'s real base (`int`, through `Meters`) is
+    # decidable, so no hint fires for it any more (unlike `dParamF`'s
+    # `Secs` above, over an actually non-decidable `float`).
+    check c.errors.len == 0
     if c.status == sxSat:
       let w: seq[Km] = c.witness[0]
       check int(Meters(w[0])) == 11

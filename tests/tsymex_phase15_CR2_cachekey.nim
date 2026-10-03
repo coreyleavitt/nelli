@@ -969,7 +969,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## through different refs are passed by reference). Provisional 206.
     ## RFC-0005 batch 3 lands S8ax, S8ba, S8bd and S8bf as one walker
     ## number (205-208 are held by slices still running). 202->209.
-    check symexWalkerVersion == "209"
+    ## RFC-0005 S8bg (S8bd's remainder: by-reference through a
+    ## representation-preserving conversion, a scoped cast decline instead
+    ## of a crash, the distinct-chain-aware bijectivity hint). Provisional
+    ## 218 (210-217 held by slices still running). 209->218.
+    check symexWalkerVersion == "218"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

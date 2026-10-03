@@ -4033,6 +4033,34 @@ proc byRefRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode =
       t = t[^1]
     else: return nil
 
+proc lvalueCastBlocks(lv: NimNode): bool =
+  ## RFC-0005 S8bg. True when `lvalueRoot`'s chain (a dot/bracket/deref walk
+  ## through representation-preserving conversions) is blocked by a `cast`:
+  ## the lvalue reaches its heap location through a `cast` that
+  ## reinterprets memory, a shape `lvalueRoot`/`byRefRoot` do not peel (they
+  ## return nil instead, the same as for any other shape they do not know,
+  ## which left a cast-reached `var`/`addr` actual to fall into generic
+  ## read machinery not expecting its dummy decline value -- a crash, not a
+  ## decline). Scanning this chain first, before that machinery runs, lets
+  ## the cast get its own named decline instead.
+  var t = lv
+  while true:
+    if t.kind != nnkSym and t.len == 0 and byRefName(t).len > 0: return false
+    case t.kind
+    of nnkSym: return false
+    of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenAddr:
+      if t.len == 0: return false
+      t = t[0]
+    of nnkDerefExpr, nnkHiddenDeref:
+      if t.len == 0: return false
+      t = t[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: return false
+      t = t[^1]
+    of nnkCast:
+      return true
+    else: return false
+
 proc mentionsSym(n, sym: NimNode): bool =
   ## RFC-0005 S8ac. True when `sym` (by symbol identity) occurs in `n`.
   if n.kind == nnkSym: return containsSym(@[sym], n)
@@ -4080,6 +4108,54 @@ proc objectInherits(t: NimNode): bool =
       if pr.kind in {nnkIdent, nnkSym} and pr.strVal == "inheritable":
         return true
   false
+
+proc reprBase(t: NimNode): NimNode =
+  ## RFC-0005 S8bg. `t` peeled through every `distinct` and `range` wrapper
+  ## to its representation base: a `range` keeps its base's bit layout (the
+  ## range check is compile-time only), and so does a `distinct`'s base,
+  ## recursively (a `distinct` of a `distinct`).
+  var impl = t.getTypeImpl
+  while true:
+    case impl.kind
+    of nnkDistinctTy:
+      if impl.len == 0: return impl
+      impl = impl[0].getTypeImpl
+    of nnkBracketExpr:
+      # `range[lo..hi]`'s `getTypeImpl` is `BracketExpr(range, Infix(.., lo,
+      # hi))` (two children, the bound expression itself one more): its
+      # representation base is its bound literals' own type.
+      if impl.len == 2 and impl[0].kind in {nnkSym, nnkIdent} and
+         macros.strVal(impl[0]) == "range" and impl[1].kind == nnkInfix and
+         impl[1].len == 3:
+        impl = impl[1][1].getTypeImpl
+      else:
+        return impl
+    else:
+      return impl
+
+proc convReprPreserving(operand, conv: NimNode): bool =
+  ## RFC-0005 S8bg. True when a conversion from `operand`'s type to `conv`'s
+  ## (an `nnkConv`/`nnkHiddenStdConv`/`nnkHiddenSubConv`) keeps the same
+  ## representation: a `distinct` unwrap or rewrap, or a `range` to its
+  ## base (or back). False for a conversion that changes the bit layout
+  ## (`int` to `float`, a different-width integer): byRefSub leaves those
+  ## declined, as before.
+  ##
+  ## A `ref`/`ptr` object inheritance up/downcast is the same address too
+  ## (`objectInherits`, as `typeReachesCell` treats it for aliasing), but
+  ## is deliberately NOT included here: the heap model gives every
+  ## declared ref/ptr type its own Z3 sort, inheritance notwithstanding, so
+  ## substituting the operand for the conversion (as this does for a
+  ## distinct or a range) leaves the by-reference formal one sort and the
+  ## direct access through the alias (`gAnimal`, `Animal`-sorted) another
+  ## -- a sort mismatch at walk time (`weInternalWalkerFault`), not a
+  ## soundness bug (the path is tainted, not wrongly decided) but not a
+  ## working case either. Left declining, as before S8bg (RFC's "different
+  ## mechanisms" list, PRECISION).
+  let fromTy = operand.getTypeInst
+  let toTy = conv.getTypeInst
+  if sameType(fromTy, toTy): return true
+  sameType(reprBase(fromTy), reprBase(toTy))
 
 proc typeReachesCell(t: NimNode; cells: seq[NimNode];
                      seen: var seq[string]): bool =
@@ -4730,6 +4806,21 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   let fs = byRefFormalSym(impl, idx)
   if not fs.ok or fs.isPtr != viaAddr: return
   var fields: seq[string]
+  # RFC-0005 S8bg: a representation-preserving conversion of the whole
+  # lvalue (`int(b.m)`, a `distinct` unwrap outside every field, or a
+  # `range` to its base) is transparent too: stripped before the
+  # field/deref walk below, which then sees the conversion's own operand,
+  # unconverted. A conversion cannot sit any deeper in the chain (at the
+  # `t[0]` position just below, the operand of the mandatory deref further
+  # down): to be dereferenced at all, it would have to convert TO a
+  # ref/ptr, which only a `ref`/`ptr` inheritance up/downcast does, and
+  # that one is NOT representation-preserving here (the heap model gives
+  # every declared ref/ptr type its own Z3 sort; see `convReprPreserving`)
+  # -- so there is no shape for a conversion to reach that position.
+  var lv = lv
+  while lv.kind in {nnkConv, nnkHiddenStdConv, nnkHiddenSubConv} and
+        lv.len > 0 and convReprPreserving(lv[^1], lv):
+    lv = lv[^1]
   var t = lv
   while t.kind == nnkDotExpr and t.len == 2 and t[1].kind == nnkSym:
     fields.add macros.strVal(t[1])
@@ -4757,6 +4848,7 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
       else: nil
     else: nil
   if src.isNil: return
+  let baseNode = t[0]
   let mk = markByRef(src)
   if mk.isNil: return
   proc rebuild(n: NimNode; depth: int; mk: NimNode): NimNode =
@@ -4767,8 +4859,8 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
       result.add rebuild(n[0], depth - 1, mk)
       result.add copyNimTree(n[1])
   var b = ByRefSub(idx: idx, isPtr: fs.isPtr, tail: rebuild(lv, fields.len, mk),
-                   name: strVal(mk), baseTy: classifyType(t[0]).ty,
-                   base: t[0])
+                   name: strVal(mk), baseTy: classifyType(baseNode).ty,
+                   base: baseNode)
   var a = actual
   while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0:
     a = a[^1]
@@ -4776,7 +4868,7 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   b.addrNode.add copyNimTree(b.tail)
   var path = ""
   for k in countdown(fields.high, 0): path.add "." & fields[k]
-  b.keyPart = (if fs.isPtr: "p" else: "v") & byRefTypeKey(t[0]) & "/" &
+  b.keyPart = (if fs.isPtr: "p" else: "v") & byRefTypeKey(baseNode) & "/" &
               byRefTypeKey(t) & path
   # RFC-0005 S8bd: the body's own symbol for the formal (`formalInBody`).
   let f = formalInBody(impl, fs.f)
@@ -4975,31 +5067,56 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     # RFC-0005 S8bd: a by-reference actual is evaluated once, as its base
     # (below); the lvalue itself is lowered only when it is not one.
     var byRefTaken = false
+    # RFC-0005 S8bg: a `var` actual reached through a `cast` (`cast[ptr
+    # T](p)[]`): `lvalueRoot`/`byRefRoot` have no case for a `cast`, and
+    # below it, the ordinary read does not expect the dummy value a
+    # decline already recorded while parsing the cast as a plain
+    # expression (`parseExpr`'s own `nnkCast` arm) -- a crash
+    # (`lowerLeafInExpr`'s container-kind assert), not a decline. Caught
+    # here, before either the by-reference attempt or that read runs, with
+    # its own decline naming the cast.
+    var castBlocked = false
+    var castLv: NimNode = nil
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
-      block byRef:
-        # RFC-0005 S8ba: a heap lvalue the callee also reaches through a
-        # global or a capture is passed by reference (`byRefSub`). Same
-        # gates as the write-back below, in its order.
-        if lv.kind == nnkSym: break byRef
-        var heapSteps: seq[NimNode]
-        let root = byRefRoot(lv, heapSteps)   ## RFC-0005 S8bd
-        # RFC-0005 S8bf: or one that may be another heap actual's cell
-        # (`peers`), every one of which is passed so too.
-        # RFC-0005 S8ax: `aliasConds`, as for an `addr` actual above.
-        var brConds: seq[AliasIndexPairs]
-        if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps,
-                                           brConds, peers[i]) or
-           (peers[i].len == 0 and outerReachesCell(outerOf(), heapSteps) == nil):
-          break byRef
-        let b = byRefSub(calleeSym, i - 1, lv, n[i], false)
-        if b.idx < 0: break byRef
-        aliasConds.add brConds
-        byRefs.add b
-        argIRs.add parseExpr(b.base, preamble, ctx)
-        byRefTaken = true
+      if lv.kind != nnkSym and lvalueCastBlocks(lv):
+        castBlocked = true
+        castLv = lv
+      else:
+        block byRef:
+          # RFC-0005 S8ba: a heap lvalue the callee also reaches through a
+          # global or a capture is passed by reference (`byRefSub`). Same
+          # gates as the write-back below, in its order.
+          if lv.kind == nnkSym: break byRef
+          var heapSteps: seq[NimNode]
+          let root = byRefRoot(lv, heapSteps)   ## RFC-0005 S8bd
+          # RFC-0005 S8bf: or one that may be another heap actual's cell
+          # (`peers`), every one of which is passed so too.
+          # RFC-0005 S8ax: `aliasConds`, as for an `addr` actual above.
+          var brConds: seq[AliasIndexPairs]
+          if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps,
+                                             brConds, peers[i]) or
+             (peers[i].len == 0 and outerReachesCell(outerOf(), heapSteps) == nil):
+            break byRef
+          let b = byRefSub(calleeSym, i - 1, lv, n[i], false)
+          if b.idx < 0: break byRef
+          aliasConds.add brConds
+          byRefs.add b
+          argIRs.add parseExpr(b.base, preamble, ctx)
+          byRefTaken = true
     if byRefTaken: continue
+    if castBlocked:
+      writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "`var` argument `" & castLv.repr & "` of `" &
+                calleeSym.strVal & "` is reached through a `cast`, which " &
+                "may reinterpret the memory at that address: the callee's " &
+                "writes through it are not modelled (feUnsupportedOp)"),
+        "var argument reached through a cast (feUnsupportedOp)")
+      let dummyTy = classifyType(castLv).ty
+      let dummy = zeroValueForType(dummyTy)
+      argIRs.add(if dummy != nil: dummy else: mkIntLit(0))
+      continue
     var ir = parseExpr(n[i], preamble, ctx)
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]

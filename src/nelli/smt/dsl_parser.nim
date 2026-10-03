@@ -14071,6 +14071,36 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
         return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
                                  fieldName, isPtr)
   let lhs = unwrapHidden(n[0])
+  if lhs.kind == nnkBracketExpr and lhs.len == 2 and
+     lhs[0].kind in {nnkDerefExpr, nnkHiddenDeref} and lhs[0].len == 1 and
+     not isVarIndirection(lhs[0]):
+    # RFC-0005 S8bu: `p[][i] = v`, an element of a seq written through a
+    # `ref`/`ptr` to the whole seq (`gps = addr s`). It was the
+    # "unsupported nnkAsgn shape" decline. The pointer is read once, the
+    # seq read through it, the element checked before the value is
+    # evaluated (as `s[i] = v`), written (`isIndexAssign`, its IndexDefect
+    # fork), and the seq stored back: an in-place write of the cell, which
+    # a by-value copy sharing its memory sees (`syncAddrCells`' `view`).
+    var operand = lhs[0][0]
+    if operand.kind == nnkHiddenDeref and operand.len == 1 and
+       classifyType(operand[0]).ty.kind in {itRef, itPtr}:
+      operand = operand[0]
+    let opCls = classifyType(operand)
+    if opCls.ty.kind in {itRef, itPtr}:
+      let isPtr = opCls.ty.kind == itPtr
+      let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+      if pointeeTy.kind == itSeq:
+        let pt = freshSynth(ctx, "dixPtr")
+        preamble.add mkLet(pt, opCls.ty, parseExpr(operand, preamble, ctx))
+        let tmp = freshSynth(ctx, "dixSeq")
+        preamble.add(if isPtr: mkPtrDeref(tmp, mkVar(pt), pointeeTy)
+                     else: mkDeref(tmp, mkVar(pt), pointeeTy))
+        let idxIR = parseExpr(lhs[1], preamble, ctx)
+        preamble.add mkIndexStmt(freshSynth(ctx, "awck"), mkVar(tmp), idxIR,
+                                 pointeeTy.seqElemTy, siteLoc(n))
+        let valIR = asgnRhs()
+        preamble.add mkIndexAssignStmt(tmp, idxIR, valIR, siteLoc(n))
+        return mkDerefWrite(mkVar(pt), mkVar(tmp), pointeeTy, isPtr)
   if lhs.kind == nnkBracketExpr and lhs.len == 2:
     let recv = unwrapHidden(lhs[0])
     if recv.kind == nnkSym:

@@ -216,6 +216,9 @@ const symexWalkerVersion* = "225"
   ## `mitems` / `mpairs` make the loop variable the element itself.
   ## A path into an address-taken variable steps through an array element,
   ## at a constant or a symbolic index.
+  ## A by-value seq of an address-taken seq is a `view` of its cell, which
+  ## declines once the cell is assigned whole or resized; `p[][i] = v` is
+  ## modelled.
   ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a

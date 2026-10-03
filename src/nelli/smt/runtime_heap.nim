@@ -827,6 +827,51 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
     return none(RawZ3Ast)
   some(Z3_get_app_arg(ctx.raw, app, 2))
 
+var selectDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The `Z3_decl_kind` ordinal (+ 1) of an array `select`,
+  ## read off a probe term as `storeDeclKind` is.
+
+proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8bu. `t` with each `select(store(a, i, v), i)` (the same
+  ## index term) read as `v`: a cell's value read back after it was stored.
+  if storeDeclKind == 0:
+    discard storedAt(ctx, t, t)   # reads `storeDeclKind`
+  if selectDeclKind == 0:
+    let probe = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bu_select_probe")
+    let sel = ctx.checkErr Z3_mk_select(ctx.raw, probe.raw, mkInt(ctx, 0).raw)
+    selectDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, sel)))) + 1
+  result = t
+  for _ in 0 ..< 100_000:
+    if Z3_get_ast_kind(ctx.raw, result) != Z3_APP_AST: return
+    let app = Z3_to_app(ctx.raw, result)
+    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
+       selectDeclKind or Z3_get_app_num_args(ctx.raw, app) != 2:
+      return
+    let v = storedAt(ctx, Z3_get_app_arg(ctx.raw, app, 0),
+                     Z3_get_app_arg(ctx.raw, app, 1))
+    if v.isNone: return
+    result = v.get
+
+proc storeChainOver(ctx: Z3Context; arr, base: RawZ3Ast): bool =
+  ## RFC-0005 S8bu. `arr` is `base` under a chain of `store`s (`store(...
+  ## store(base, i1, v1)..., in, vn)`), `base` itself included, each read
+  ## back through a cell's `select` (`peelSelect`).
+  if storeDeclKind == 0:
+    discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
+  let base = peelSelect(ctx, base)
+  var t = arr
+  for _ in 0 ..< 100_000:
+    t = peelSelect(ctx, t)
+    if cast[pointer](t) == cast[pointer](base): return true
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+    let app = Z3_to_app(ctx.raw, t)
+    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
+       storeDeclKind or Z3_get_app_num_args(ctx.raw, app) != 3:
+      return false
+    t = Z3_get_app_arg(ctx.raw, app, 0)
+  false
+
 var constArrayDeclKind {.threadvar.}: int
   ## RFC-0005 batch 4. The `Z3_decl_kind` ordinal (+ 1) of a constant array
   ## (`(as const ...)`), read off a probe term as `storeDeclKind` is.
@@ -1745,7 +1790,7 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         if c.local == local and not c.bound: known = true   # RFC-0005 S8bs
       if not known:
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
-                               path: @[], ixs: @[], bound: false)
+                               path: @[], ixs: @[], bound: false, view: false)
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
     child.env = env2

@@ -16653,16 +16653,32 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # plain term (a `str.at` over an `ite` of strings ran Z3 out of
         # `seqQueryRLimit`). The grow appends a fresh pad of the added
         # length in `("\0")*`, a fact of the path (no quantifier).
+        #
+        # RFC-0005 S8bx (item 5): the result is a fresh string LEAF `r`
+        # with the byte-domain fact every string input carries
+        # (`allocateSym`), bound to the prefix / extension by an equation.
+        # A byte read of the result, `int2bv[8](str.to_code(str.at(r, i)))
+        # == n`, is then a byte test on a byte leaf, which `seqLenCaps`
+        # rewrites to the character form `str.at(r, i) == "\xNN"`: Z3
+        # decides that, where the code form over a `str.at` of the concat
+        # (or substr) was left undecided by both pinned Z3s within
+        # `seqQueryRLimit`.
+        var leafShrink: seq[Z3Bool]
+        let rShrink = allocateSym(tString(),
+          freshDegradeName("__setLenStr"), leafShrink)
         var envShrink = env2
-        envShrink[stmt.slRetName] = SymVal(kind: svString,
-          str: substr(baseSV.str, mkInt(0), newLen))
-        survivors.add forkPath(p, p.pc & @[not grows], envShrink)
+        envShrink[stmt.slRetName] = rShrink
+        survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
+          rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
+        var leafGrow: seq[Z3Bool]
+        let rGrow = allocateSym(tString(),
+          freshDegradeName("__setLenStr"), leafGrow)
         let pad = mkStringVar(freshDegradeName("__setLenPad"))
-        env2[stmt.slRetName] = SymVal(kind: svString,
-          str: concat(baseSV.str, pad))
-        survivors.add forkPath(p, p.pc & @[grows,
+        env2[stmt.slRetName] = rGrow
+        survivors.add forkPath(p, p.pc & leafGrow & @[grows,
           len(pad) == newLen - oldLen,
-          matches(pad, star(mkRegex(mkString("\x00"))))], env2)
+          matches(pad, star(mkRegex(mkString("\x00")))),
+          rGrow.str == concat(baseSV.str, pad)], env2)
       else:
         let d = w.degrade(feUnsupportedOp,
           locPrefix & "setLen: the argument lowered to " &

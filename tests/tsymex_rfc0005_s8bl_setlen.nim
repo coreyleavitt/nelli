@@ -30,8 +30,8 @@ proc slStr(s: string, n: int) =
   t.setLen(n)
   if t.len != n: symexTarget("sl_str_dead")
   # The pad is NUL bytes, and a shrink keeps the prefix. Pinned on ground
-  # strings: over a symbolic one `t[n - 1]` is a `str.at` of a concat (or
-  # substr) both pinned Z3s leave undecided within `seqQueryRLimit`.
+  # strings here; over a symbolic one (a `str.at` of the concat, undecided
+  # by both pinned Z3s until RFC-0005 S8bx) in `tsymex_rfc0005_s8bx_setlenstr`.
   if s == "ab" and n == 5 and t != "ab\0\0\0": symexTarget("sl_str_pad_dead")
   if n == s.len + 2 and s == "ab" and t[3] == '\0' and t[1] == 'b':
     symexTarget("sl_str_pad")

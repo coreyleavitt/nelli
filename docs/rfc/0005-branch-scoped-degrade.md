@@ -367,6 +367,11 @@ title = "S8bh's remainder: ptr alias witnesses (parameter order, global/var-para
 state = "done"
 
 [[slice]]
+id = "S8bw"
+title = "S8bn's remainder: walker fault reading an array-global element, aggregate global reads (tuple/object/array globals), pointers into case objects / seqs of aggregates / tables of non-int values, generic case objects"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

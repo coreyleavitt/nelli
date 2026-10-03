@@ -944,7 +944,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bn (S8bh's remainder: ptr witnesses and targets, proc
     ## fields and methods, `of` / `nil`, hierarchies, parameter tags).
     ## Provisional 215.
-    check symexWalkerVersion == "215"
+    ## RFC-0005 S8bw (S8bn's remainder: typed global reads, in-band
+    ## receiver declines, aggregate globals, pointers into case objects and
+    ## aggregate containers). Provisional 227.
+    check symexWalkerVersion == "227"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

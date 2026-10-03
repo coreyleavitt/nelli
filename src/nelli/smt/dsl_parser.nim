@@ -337,6 +337,26 @@ proc emitIRType*(t: IRType): NimNode
 proc emitStmt*(s: IRStmt): NimNode
 proc emitParam(p: IRParam): NimNode     ## fwd: Phase 15 C1 (lambdaParams)
 
+var globalTyCache {.compileTime.}: Table[string, IRType]
+
+proc globalVarTy(name: string): IRType =
+  ## RFC-0005 S8bw. The declared type of the module-level global `name`
+  ## (`__gl:`-named), or nil for any other name or a global of a kind the
+  ## walk holds no value for (a proc, a ref or ptr, an opaque type): a read
+  ## of an unwritten global is a value of this type, where it was an `int`
+  ## stand-in whatever the type (`gArr[2] = k` then faulted reading
+  ## `gArr[2]`).
+  if not isGlobalEnvName(name): return nil
+  if globalTyCache.hasKey(name): return globalTyCache[name]
+  let sym = globalSymOf(name)
+  if sym != nil and sym.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt,
+       ntyInt8, ntyInt16, ntyInt32, ntyInt64, ntyUInt, ntyUInt8, ntyUInt16,
+       ntyUInt32, ntyUInt64, ntyFloat, ntyFloat32, ntyFloat64, ntyString,
+       ntyArray, ntyTuple, ntyObject, ntySequence, ntyDistinct, ntyRange,
+       ntyGenericInst}:
+    result = classifyType(sym).ty
+  globalTyCache[name] = result
+
 proc emitExpr*(e: IRExpr): NimNode =
   case e.kind
   of iekIntLit:
@@ -364,7 +384,11 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
-    newCall(bindSym"mkVar", newLit(e.vname))
+    let gty = if e.vGlobalTy != nil: e.vGlobalTy else: globalVarTy(e.vname)
+    if gty != nil:   # RFC-0005 S8bw
+      newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty))
+    else:
+      newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
     newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs), emitExpr(e.rhs))
   of iekUnop:
@@ -12309,6 +12333,22 @@ proc parseStmtInner(n: NimNode,
     for id in n:
       id.expectKind nnkIdentDefs
       let valNode = id[id.len - 1]
+      # RFC-0005 S8bw (item 1): a name with a pragma (`var a {.global.}:
+      # array[3, int]`) is an `nnkPragmaExpr`, which the arms below read as
+      # a symbol: the build failed ("node has no type"). `{.global.}` keeps
+      # the value of the previous call, which the walk does not know, and
+      # `{.noinit.}` holds no zero value, so the binding declines; its
+      # later reads are unbound names, declined where they are read.
+      block:
+        var prag = ""
+        for j in 0 ..< id.len - 2:
+          if id[j].kind == nnkPragmaExpr: prag = id[j].repr
+        if prag.len > 0:
+          stmts.add ctx.declineMarker(feUnsupportedStmtKind,
+            "a variable declared with a pragma (`" & prag & "`) is not " &
+            "modelled: a `{.global.}` local keeps its previous value, a " &
+            "`{.noinit.}` one has none (RFC-0005 S8bw; feUnsupportedStmtKind)")
+          continue
       # Phase 15 R11 (ADR-0010, RFC §R11). An unsafe POINTER MATERIALISATION RHS
       # (`cast[ptr T](...)`, `addr x`, `unsafeAddr x`) is unmodelable in the
       # logical-heap model — classify `heUnsafeCast` (sevError) so the verdict

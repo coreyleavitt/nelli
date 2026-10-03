@@ -7007,7 +7007,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "bound it (not a parameter or a local of the walked " &
                "routines it reaches) (feGlobalReadUnmodelled)")
       var fresh: seq[Z3Bool]
-      let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
+      # RFC-0005 S8bw (item 1): a global's stand-in is a value of its
+      # declared type (`vGlobalTy`). It was `tInt(64)` when no prototype was
+      # in scope, whatever the type, and a later array, seq or tuple
+      # operation on it faulted (`gArr[2] = k`, `gSeq.map(f)`).
+      let ty = if e.vGlobalTy != nil: e.vGlobalTy
+               elif proto.isSome: tyOf(proto.get)
+               else: tInt(64, true)
       allocateSym(ty, "__globalReadHavoc_" & e.vname, fresh)
     else:
       # RFC-fuzzer-nextgen G3fix safety net (only reached in
@@ -7688,8 +7694,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     SymVal(kind: svArray, arrElems: elems, arrElemTy: e.lelemTy)
   of iekIndex:
     let recv = lower(env, e.arr)
-    doAssert recv.kind == svArray,
-      "iekIndex on non-array kind=" & $recv.kind
+    if recv.kind != svArray or recv.arrElems.len == 0:
+      # RFC-0005 S8bw (item 1): a receiver that did not lower to an array
+      # (the stand-in of an earlier in-band decline: a global read before
+      # any write was an int) declines in-band. This was a `doAssert`, a
+      # `weInternalWalkerFault` (`gArr[2] = k` then `gArr[2]`).
+      return degradeAlloc(
+        (if proto.isSome: tyOf(proto.get) else: tInt(64, true)),
+        feUnsupportedExprKind,
+        "iekIndex: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
+          (if recv.kind == svArray: " of no elements" else: "") &
+          ", not an array -- degraded to sxUnknown (feUnsupportedExprKind)",
+        "__indexRecvDegrade")
     if e.idx.kind == iekIntLit:
       # Fast path: concrete index. No fork; direct element lookup.
       let ix = int(e.idx.ival)
@@ -7704,7 +7720,6 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # element[0] — for OOB-handling cycle 8, the OOB path forks
       # before this point and adds the OOB constraint to its pc.
       let idxSV = lower(env, e.idx)
-      doAssert recv.arrElems.len > 0
       var res = recv.arrElems[0]
       for k in 1 ..< recv.arrElems.len:
         let kSV = coerceIntLit(idxSV, int64(k))
@@ -13568,7 +13583,7 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   let p2 = drainPendingLowerEffects(p)
   (b, p2)
 
-proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
+proc lowerLeafInExpr(p: Path, e: IRExpr): (SymVal, Path) =
   ## Phase 15 CR-9 Stage 3. A container/pointer operand of a deref/index/field
   ## arm that is side-effect-free — no closure call, no float→int conversion —
   ## so no seed/drain is needed. The assert makes any violation loud.
@@ -13578,10 +13593,18 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
   ##   iekField    — struct field projection, pure.
   ## (RFC-0005 S8c deleted the third admitted kind, `iekStrBytes`, with the
   ## name-only `bytes(s)` model that produced it.)
+  ##
+  ## RFC-0005 S8bw (item 1): pure, but not decline-free -- a global read
+  ## before any write declines in-band (`lowerDegrade`). That pending taint
+  ## lands on the returned path, `p` forked tainted; it was left for some
+  ## later drain, and on the arms that fork no further it leaked to the
+  ## walk end (`weInternalWalkerFault`, `gSeq[0] = k`).
   doAssert e.kind in {iekVar, iekField},
     "lowerLeafInExpr: expected side-effect-free container expr; got " & $e.kind &
     " — add seed+drain if parser changes"
-  lower(p.env, e)
+  let sv = lower(p.env, e)
+  if loweringPendingTaint == {}: return (sv, p)
+  (sv, forkPathTainted(p, p.pc, p.env, takeLoweringPendingDegrade()))
 
 # nilDerefFork moved to runtime_heap.nim (CR-7-deeper Stage 8+).
 
@@ -13883,6 +13906,21 @@ proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
   var scratch: seq[Z3Bool]
   result[stmt.spRetName] = allocateSym(stmt.spElemTy,
     freshDegradeName("__declinedPop"), scratch)
+
+proc unboundRecvMsg(name, op: string): string =
+  ## RFC-0005 S8bw (item 1). The decline of a statement whose receiver
+  ## `name` the path has not bound: a module-level global read before any
+  ## write (`lower`'s `iekVar` arm words it the same), or a name the walk
+  ## does not bind where it is used. The statement read it from the env
+  ## directly, and an unbound name was a `KeyError` (`weInternalWalkerFault`):
+  ## `gSeq[0] = k`, `gSeq.pop()`.
+  if isGlobalEnvName(name):
+    op & ": module-level global '" & displayName(name) & "' is read " &
+      "before any write in the walk, so its value is not modelled " &
+      "(feGlobalReadUnmodelled)"
+  else:
+    op & ": '" & name & "' is read where the symbolic walker has not " &
+      "bound it (feGlobalReadUnmodelled)"
 
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
@@ -15094,14 +15132,14 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     of wmExplore: discard
     of wmFollowConcrete: discard
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return
       ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
       ## expression. The parser A-normalises most container expressions to named
       ## bindings (iekVar) or field projections (iekField); both are pure (no
       ## closure/float→int sinks), so lowerLeafInExpr handles them without
       ## seed+drain.
-      let arrSV = lowerLeafInExpr(p, stmt.ixArr)
+      let (arrSV, p) = lowerLeafInExpr(p0, stmt.ixArr)
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
         ## Table key: always a string expression — no float→int conv or closure
@@ -15395,6 +15433,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # `p.env[stmt.iaRecvName]` is a direct, side-effect-free lookup — the
       # exact shape `lowerLeafInExpr`'s own `iekVar` admission covers, just
       # read straight from `Env` (no `IRExpr` wrapper needed for a bare name).
+      if not p.env.hasKey(stmt.iaRecvName):
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unboundRecvMsg(stmt.iaRecvName, "element write"))
+        survivors.add forkPathTainted(p, p.pc, p.env, d)
+        continue
       let recvSV = p.env[stmt.iaRecvName]
       if recvSV.kind == svArray and recvSV.arrElems.len > 0:
         # RFC-0005 S8z: `a[i] = v` on an array at a symbolic index (it was
@@ -15527,6 +15570,11 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var survivors: seq[Path]
     for p in paths:
       if w.shouldStop: return
+      if not p.env.hasKey(stmt.spRecvName):
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unboundRecvMsg(stmt.spRecvName, "pop"))
+        survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
+        continue
       let recvSV = p.env[stmt.spRecvName]
       if recvSV.kind != svSeq:
         let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
@@ -15583,15 +15631,27 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrObjName):
-        out2.add p
+        # RFC-0005 S8bw (item 1): the old discriminator decides Nim's
+        # branch-change `FieldDefect`. An unbound object (a global before
+        # any write) was skipped: the write was dropped with no decline and
+        # `gV.kind = vkB` was a clean `sxSat` past a reassignment Nim makes
+        # raise from the zero value's branch.
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unboundRecvMsg(stmt.vrObjName, "discriminator reassignment"))
+        out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let oldSV = p.env[stmt.vrObjName]
       if oldSV.kind notin {svVariant, svMultiVariant}:
         # RFC-0005 S8i: a declined construction's placeholder.
         out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
         continue
-      doAssert oldSV.kind == svVariant,
-        "isVariantReassign on non-variant kind=" & $oldSV.kind
+      if oldSV.kind == svMultiVariant:
+        # RFC-0005 S8bw (item 1): the parser emits this statement for a
+        # single-axis variant only (a multi-axis one takes the symbolic
+        # form); a multi-variant here declines as an unmodelled reassignment.
+        # This was a `doAssert`.
+        out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
+        continue
       let oldDisc = oldSV.vDisc[]
       let tagOrd = int64(stmt.vrNewTag)
       let newDiscInner: SymVal =
@@ -15652,7 +15712,10 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     var out2: seq[Path]
     for p in paths:
       if not p.env.hasKey(stmt.vrsObjName):
-        out2.add p
+        # RFC-0005 S8bw (item 1): as `isVariantReassign` above.
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unboundRecvMsg(stmt.vrsObjName, "discriminator reassignment"))
+        out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let oldSV = p.env[stmt.vrsObjName]
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
@@ -15989,13 +16052,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # SymVals; the out-of-arm path adds `disc NOT IN matchingTags`
     # and (under `tFieldDefect`) is solved for a witness.
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return
       ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
       ## the parser A-normalises so variant object accesses are through named
       ## bindings (no complex expression as receiver). A violation here means
       ## the parser emitted a non-var receiver and drains would be needed.
-      let recv = lowerLeafInExpr(p, stmt.vfRecv)
+      let (recv, p) = lowerLeafInExpr(p0, stmt.vfRecv)
       # Phase 14 cycle A1c: select the axis-local disc + arm tables
       # by SymVal kind. For svMultiVariant, locate the axis whose
       # arm field-name lists include vfFieldName — the parser
@@ -18713,7 +18776,15 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   ## seqInlineThreshold (≤ 8) — no combinatorial fan-out.
   let ctx = requireCurrentContext()
   let seqSV = lower(env, e.hofSeq)
-  doAssert seqSV.kind == svSeq, "lowerHofCall: receiver is not an svSeq"
+  let hofResTy = if e.hofOp == "fold": e.hofRetElemTy else: tSeq(e.hofRetElemTy)
+  if seqSV.kind != svSeq:
+    # RFC-0005 S8bw (item 1): a receiver that did not lower to a seq (the
+    # stand-in of an earlier in-band decline) declines in-band. This was a
+    # `doAssert`, a `weInternalWalkerFault` (`gSeq.map(f)`).
+    return degradeAlloc(hofResTy, feUnsupportedExprKind,
+      "higher-order call (." & e.hofOp & "): receiver lowered to " &
+        plainEnglishSymValKind(seqSV.kind) & ", not a seq -- degraded to " &
+        "sxUnknown (feUnsupportedExprKind)", "__hofRecvDegrade")
   if seqSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
     # N27 (walker v97, D1 verifier finding): decline through the R1
     # chokepoint BEFORE touching `concreteSeqLen`/`seqElemAt`/`seqDataRaw` or
@@ -18772,7 +18843,13 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   # Build the closure value (svClosure) from the lambda arg (C2a construction:
   # snapshots captures, stashes the body, declares the per-site funcSym).
   let cloSV = lower(env, e.hofClosure)
-  doAssert cloSV.kind == svClosure, "lowerHofCall: closure arg is not an svClosure"
+  if cloSV.kind != svClosure:
+    # RFC-0005 S8bw (item 1): as the receiver above (a proc-typed global
+    # read before any write); was a `doAssert`.
+    return degradeAlloc(hofResTy, feUnsupportedExprKind,
+      "higher-order call (." & e.hofOp & "): its proc argument lowered to " &
+        plainEnglishSymValKind(cloSV.kind) & ", not a closure -- degraded " &
+        "to sxUnknown (feUnsupportedExprKind)", "__hofClosureDegrade")
 
   # Settings (via the live WalkCtx, mirroring lowerClosureCall).
   var policy = ipHybrid

@@ -750,6 +750,11 @@ type
       bval*: bool
     of iekVar:
       vname*: string
+      vGlobalTy*: IRType  ## RFC-0005 S8bw: a module-level global's declared
+                          ## type (`vname` is `__gl:`-named), set by the
+                          ## emitter; nil for every other name. A global
+                          ## read before any write is a value of this type,
+                          ## not an `int` stand-in.
     of iekBinop:
       bop*: IRBinop
       lhs*, rhs*: IRExpr
@@ -3696,6 +3701,11 @@ proc mkBoolLit*(v: bool): IRExpr =
 
 proc mkVar*(name: string): IRExpr =
   IRExpr(kind: iekVar, vname: name)
+
+proc mkGlobalVar*(name: string; ty: IRType): IRExpr =
+  ## RFC-0005 S8bw. A read of the module-level global `name` (`__gl:`-named)
+  ## whose declared type is `ty`.
+  IRExpr(kind: iekVar, vname: name, vGlobalTy: ty)
 
 proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
   IRExpr(kind: iekBinop, bop: op, lhs: lhs, rhs: rhs)

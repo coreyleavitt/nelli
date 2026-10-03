@@ -1074,5 +1074,9 @@ task test, "Run the test suite":
             # RFC-0005 S8bn: S8bh's remainder -- ptr witnesses and targets,
             # proc fields and methods, `of` / `nil`, hierarchies, parameter
             # tags, S8bk's late address. Walker 215 (provisional).
-            "tsymex_rfc0005_s8bn_remainder"]:
+            "tsymex_rfc0005_s8bn_remainder",
+            # RFC-0005 S8bw: S8bn's remainder -- in-band receiver declines,
+            # aggregate globals, pointers into case objects and aggregate
+            # containers. Walker 227 (provisional).
+            "tsymex_rfc0005_s8bw_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

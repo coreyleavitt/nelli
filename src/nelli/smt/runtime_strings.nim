@@ -408,8 +408,14 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # seq (the split special cases produce one); a symbolic-length join would
     # need an unbounded fold — classified seZ3StringIncomplete.
     let recv = lower(env, e.strArgs[0])
-    doAssert recv.kind == svSeq and recv.seqElemTy.kind == itString,
-      "iekStrJoin: receiver not svSeq[string]"
+    if recv.kind != svSeq or recv.seqElemTy.kind != itString:
+      # RFC-0005 S8bw (item 1): the stand-in of an earlier in-band decline
+      # (a `seq[string]` global read before any write was an int). This was
+      # a `doAssert`, a `weInternalWalkerFault` (`gStrs.join(",")`).
+      return degradeAlloc(tString(), feUnsupportedExprKind,
+        "join: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
+          ", not a seq[string] -- degraded to sxUnknown " &
+          "(feUnsupportedExprKind)", "__joinRecvDegrade")
     let sep = lower(env, e.strArgs[1])
     requireStr(sep, "iekStrJoin")
     if getAstKind(recv.seqLen) != akNumeral: # [placeholder-audited]

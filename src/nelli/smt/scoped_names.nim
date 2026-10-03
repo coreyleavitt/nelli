@@ -58,6 +58,10 @@ type
 var nameScope {.compileTime.}: NameScope
 var nameCounter {.compileTime.}: int
 var byRefCounter {.compileTime.}: int
+var moduleGlobalSyms {.compileTime.}: Table[string, NimNode]
+  ## RFC-0005 S8bw. The symbol of every module-level global `strVal` named,
+  ## by its `__gl:` name, so the emitter can give a read its declared type
+  ## (`globalSymOf`).
 
 const byRefMarkColumn = -32123
   ## RFC-0005 S8ba. The column a by-reference base carries (`markByRef`):
@@ -108,12 +112,19 @@ proc strVal*(n: NimNode): string =
   if br.len > 0: return br
   result = macros.strVal(n)
   if isModuleGlobal(n):
-    return globalEnvPrefix & macros.strVal(owner(n)) & "." & result
+    result = globalEnvPrefix & macros.strVal(owner(n)) & "." & result
+    moduleGlobalSyms[result] = n
+    return
   if n.kind == nnkSym and nameScope.renames.len > 0:
     let cands = nameScope.renames.getOrDefault(result)
     for c in cands:
       if c.sym == n:
         return c.name
+
+proc globalSymOf*(name: string): NimNode =
+  ## RFC-0005 S8bw. The symbol of the module-level global `name` (an
+  ## `__gl:` name `strVal` produced), or nil.
+  moduleGlobalSyms.getOrDefault(name, nil)
 
 proc resetNameScopes*() =
   ## Start a top-level parse: no renames, no claims, counter at zero (so a

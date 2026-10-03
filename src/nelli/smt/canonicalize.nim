@@ -202,7 +202,15 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "215"
+const symexWalkerVersion* = "227"
+  ## RFC-0005 S8bw (2026-10-03) -- S8bn's remainder. Provisional 227. A
+  ## module-level global read before any write is a value of its declared
+  ## type (`iekVar.vGlobalTy`), never an `int` stand-in, and every receiver
+  ## a global, a capture or a heap read reaches declines in-band where it
+  ## was a walker fault (`gArr[2] = k`, `gSeq.pop()`, `gSeq.map(f)`); a
+  ## discriminator reassignment of an unbound object declines where it was
+  ## dropped (a false `sxSat`). Verdicts move and the IR gains a field, so
+  ## cached entries rotate.
   ## RFC-0005 S8bn (2026-10-03) -- S8bh's remainder, all precision.
   ## Provisional 215. A `ptr` witness replays whatever the parameter order
   ## and when aimed at a global or a `var` parameter (`@aim:`); a `var`
@@ -4991,7 +4999,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for a in e.mathArgs: parts.add canonicalize(a, env)
     "Ex<MC:" & e.mathOp & ":" & parts.join(",") & ">"
   of iekBoolLit:   "Ex<BL:" & $e.bval & ">"
-  of iekVar:       "Ex<V:" & lookupLocal(env, e.vname) & ">"
+  of iekVar:
+    # RFC-0005 S8bw: a global's declared type decides the value its unwritten
+    # parts hold, so it is part of the program's form.
+    if e.vGlobalTy == nil: "Ex<V:" & lookupLocal(env, e.vname) & ">"
+    else: "Ex<V:" & lookupLocal(env, e.vname) & ":" &
+            canonicalize(e.vGlobalTy) & ">"
   of iekBinop:
     "Ex<Bn:" & binopTag(e.bop) & ";" &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"

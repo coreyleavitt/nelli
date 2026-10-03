@@ -1723,9 +1723,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           msg: "arm-specific field `." & stmt.dField & "` is declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
-      for p in paths:
+      for p0 in paths:
         if w.shouldStop: return survivors
-        let refSV = lowerLeafInExpr(p, stmt.dPtr)
+        let (refSV, p) = lowerLeafInExpr(p0, stmt.dPtr)   ## RFC-0005 S8bw
         let refAst = case refSV.kind
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
@@ -1916,7 +1916,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       elif isField:   fieldHeapKey(stmt.dObjTy, stmt.dField)
       else:           typeId
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return survivors
       # Phase 15 R9: bound recursive heap traversal. INCREMENT this path's
       # heapDepth and HALT it (no survivor → sxUnknown) if it reaches the
@@ -1929,7 +1929,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref operands are named bindings (no
       ## complex expression as the ref/ptr operand). A violation here means
       ## the parser emitted a non-var deref operand and drains would be needed.
-      let refSV = lowerLeafInExpr(p, stmt.dPtr)
+      let (refSV, p) = lowerLeafInExpr(p0, stmt.dPtr)   ## RFC-0005 S8bw
       let refAst = case refSV.kind
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst
@@ -2386,9 +2386,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           msg: "arm-specific field write `." & stmt.dwField & "` declared by no arm " &
                "of variant `" & $objTy & "` (degenerate IR — should not occur)")
       var survivors: seq[Path]
-      for p in paths:
+      for p0 in paths:
         if w.shouldStop: return survivors
-        let refSV = lowerLeafInExpr(p, stmt.dwPtr)
+        let (refSV, p) = lowerLeafInExpr(p0, stmt.dwPtr)   ## RFC-0005 S8bw
         let refAst = case refSV.kind
           of svRef: refSV.refAst
           of svPtr: refSV.ptrAst
@@ -2562,7 +2562,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       elif isField:   fieldHeapKey(stmt.dwObjTy, stmt.dwField)
       else:           typeId
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return survivors
       # Phase 15 R9: a deref-WRITE also bounds heap depth (same per-path counter
       # and effective budget as the read). HALT this path before the store if it
@@ -2574,7 +2574,7 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## the parser A-normalises so deref-write operands are named bindings.
       ## A violation here means the parser emitted a non-var write-ptr and
       ## drains would be needed before the lower call.
-      let refSV = lowerLeafInExpr(p, stmt.dwPtr)
+      let (refSV, p) = lowerLeafInExpr(p0, stmt.dwPtr)   ## RFC-0005 S8bw
       let refAst = case refSV.kind
         of svRef: refSV.refAst
         of svPtr: refSV.ptrAst

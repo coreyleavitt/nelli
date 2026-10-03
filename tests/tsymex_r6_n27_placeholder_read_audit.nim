@@ -261,13 +261,18 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## RFC-0005 S8ba replaced `iekSeqAdd`'s own int64/bool store dispatch
     ## (two marked `seqDataRaw` reads) with one marked `storeSeqElem` call,
     ## after the same placeholder guard. 85 - 2 + 1 = 84.
+    ##
+    ## RFC-0005 S8bw added `svAsts`'s svSeq arm (the Z3 terms a global's
+    ## value holds, scanned for its unwritten leaves): two lines collecting
+    ## `seqDataRaw`/`seqLen` as terms, lowering nothing -- a placeholder's
+    ## inert array and pinned length are terms like any other. 84 + 2 = 86.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 84
+    check runtimeCount == 86
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

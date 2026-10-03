@@ -33,6 +33,7 @@ import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3R
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
+import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
@@ -6885,6 +6886,175 @@ include "runtime_exceptions.nim"  # Stage 8 CR-7 Cluster E: lowerExnArm
 
 include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
+# ---- RFC-0005 S8bw (item 2): a global's unwritten parts ---------------------
+#
+# A module-level global is bound in the walk's env at its first write (S8an).
+# A tuple, object or array global is written a part at a time: `g.a = v`
+# rebuilds `g` from `v` and copies of its other parts (`valueFieldWrite`).
+# Before any write those parts hold whatever the program left there, which
+# the walk does not know. The value a read of an unbound global gives is its
+# INITIAL value: one constant per leaf of its declared type, the same for
+# every read in the run (`globalInitValue`). Each such constant is an
+# UNWRITTEN leaf (`glUnwritten`). Copying one is no observation: a rebuild's
+# copies (`iekVar.vCopy`) carry the leaves back into `g`, and a later write
+# replaces them. Every other read -- the outermost access of a chain over a
+# global (`g`, `g.b`, `g.arr[i]`), an element read, a pointer's dereference,
+# a discriminator's reassignment -- declines (`feGlobalReadUnmodelled`, as a
+# scalar global read before any write does) when its value mentions one.
+
+var glUnwrittenCtx {.threadvar.}: RawZ3Context
+var glInitVals {.threadvar.}: Table[string, SymVal]
+  ## The initial value of each global read before its first write, by name.
+var glUnwritten {.threadvar.}: Table[int, string]
+  ## Ast id of each unwritten leaf -> the part it stands for (`gArr[2]`).
+var glUnwrittenAsts {.threadvar.}: seq[Z3AnyAst]
+  ## The unwritten leaves themselves (`unwrittenIndependent` renames them).
+var lowerAsReceiver {.threadvar.}: bool
+  ## Set by an access arm (`iekField`, `iekIndex`, `isIndex`) right before
+  ## it lowers its receiver; consumed at `lower`'s entry. A receiver's value
+  ## is not observed by itself: the access's result is.
+
+proc glUnwrittenFresh(ctx: Z3Context) =
+  ## A new context is a new run: no unwritten leaf is live.
+  if glUnwrittenCtx != ctx.raw:
+    glUnwrittenCtx = ctx.raw
+    glInitVals = initTable[string, SymVal]()
+    glUnwritten = initTable[int, string]()
+    glUnwrittenAsts = @[]
+
+proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
+  ## Every Z3 term a value holds, compound or not.
+  case sv.kind
+  of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
+     svString, svRef, svPtr:
+    acc.add rawAnyAstOf(sv)
+  of svTuple:
+    for f in sv.fields: svAsts(f, acc)
+  of svArray:
+    for f in sv.arrElems: svAsts(f, acc)
+  of svSeq:
+    acc.add sv.seqDataRaw.raw # [placeholder-audited]
+    acc.add sv.seqLen.raw # [placeholder-audited]
+  of svTable:
+    acc.add sv.tabDataRaw.raw
+    acc.add sv.tabPresentRaw.raw
+    acc.add sv.tabSize.raw
+  of svSet:
+    acc.add sv.setMembersRaw.raw
+    acc.add sv.setSize.raw
+  of svVariant:
+    svAsts(sv.vDisc[], acc)
+    for fs in sv.vArmFields.values:
+      for f in fs: svAsts(f, acc)
+    for f in sv.vPlainFields: svAsts(f, acc)
+  of svMultiVariant:
+    for ax in sv.mvAxes:
+      svAsts(ax.disc[], acc)
+      for fs in ax.armFields.values:
+        for f in fs: svAsts(f, acc)
+    for f in sv.mvPlainFields: svAsts(f, acc)
+  of svDistinct:
+    acc.add sv.distinctAst.raw
+    if sv.distinctBaseSym != nil: svAsts(sv.distinctBaseSym[], acc)
+  of svUninterpRef:
+    acc.add sv.uninterpAst.raw
+  of svClosure:
+    if sv.closureEnv != nil: svAsts(sv.closureEnv[], acc)
+
+proc registerUnwritten(ctx: Z3Context; sv: SymVal; part: string) =
+  ## Record each leaf of the initial value `sv` of `part` as unwritten.
+  case sv.kind
+  of svTuple:
+    for i, f in sv.fields:
+      registerUnwritten(ctx, f, part & "." &
+        (if i < sv.fieldNames.len: sv.fieldNames[i] else: $i))
+  of svArray:
+    for i, f in sv.arrElems:
+      registerUnwritten(ctx, f, part & "[" & $i & "]")
+  else:
+    var acc: seq[RawZ3Ast]
+    svAsts(sv, acc)
+    for a in acc:
+      glUnwritten[astId(ctx, a)] = part
+      glUnwrittenAsts.add wrap[Z3AnyAst](ctx, a)
+
+proc globalInitValue(name: string; ty: IRType): SymVal =
+  ## The value the global `name` of declared type `ty` holds before its
+  ## first write in the walk: its unwritten leaves.
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  if glInitVals.hasKey(name): return glInitVals[name]
+  var facts: seq[Z3Bool]
+  result = allocateSym(ty, "__glInit_" & displayName(name), facts)
+  glInitVals[name] = result
+  registerUnwritten(ctx, result, displayName(name))
+
+proc unwrittenIn(sv: SymVal; simplified = false): string =
+  ## The part an unwritten leaf `sv` mentions stands for, or "" when it
+  ## mentions none. `simplified`: an element read's `ite` over every
+  ## element is simplified first, so a constant index picks its element.
+  if glUnwritten.len == 0: return ""
+  let ctx = currentContext()
+  if ctx == nil or glUnwrittenCtx != ctx.raw: return ""
+  var roots: seq[RawZ3Ast]
+  svAsts(sv, roots)
+  var keep: seq[Z3AnyAst]
+  if simplified:
+    for i in 0 ..< roots.len:
+      keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(ctx.raw, roots[i]))
+      roots[i] = keep[^1].raw
+  var seen: HashSet[int]
+  var stack = roots
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let part = glUnwritten.getOrDefault(id, "")
+    if part.len > 0: return part
+    case Z3_get_ast_kind(ctx.raw, t)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    of Z3_QUANTIFIER_AST:
+      stack.add Z3_get_quantifier_body(ctx.raw, t)
+    else: discard
+  ""
+
+proc unwrittenReadMsg(part: string): string =
+  ## The decline of a read that observes the unwritten part `part` (a
+  ## global, or a part of one, before any write in the walk).
+  "module-level global '" & part & "' is read but not modelled by the " &
+    "symbolic walker -- remove it from the reachable computation or pass " &
+    "it as an explicit parameter (feGlobalReadUnmodelled)"
+
+proc globalChainRoot(e: IRExpr): IRExpr =
+  ## The `iekVar` an access chain (`g.a.b`, `g.arr[i]`) is rooted at, or nil.
+  var cur = e
+  while cur != nil:
+    case cur.kind
+    of iekVar: return cur
+    of iekField: cur = cur.obj
+    of iekIndex: cur = cur.arr
+    else: return nil
+  nil
+
+proc globalReadPart(e: IRExpr; v: SymVal; simplified = false): string =
+  ## The unwritten part `v`, the value of the outermost access `e` of a
+  ## chain over a global (not a rebuild's copy), mentions, or "".
+  if glUnwritten.len == 0: return ""
+  let root = globalChainRoot(e)
+  if root == nil or root.vCopy or not isGlobalEnvName(root.vname): return ""
+  unwrittenIn(v, simplified)
+
+proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
+  ## `lower`'s observation: decline in-band when the read `e` of a global
+  ## mentions an unwritten part.
+  let part = globalReadPart(e, v, simplified)
+  if part.len > 0:
+    lowerDegrade(feGlobalReadUnmodelled, unwrittenReadMsg(part))
+
 var callGuardedNames {.threadvar.}: seq[string]
   ## RFC-0005 S8an. The globals and captures that an ACTIVE walked call
   ## withholds from its callee because they are also the root of one of its
@@ -6893,7 +7063,9 @@ var callGuardedNames {.threadvar.}: seq[string]
   ## as aliasing instead of as an unmodelled global. Pushed and popped
   ## around each callee walk.
 
-proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
+  ## `lower`'s body: `lower` itself observes a global read's value
+  ## (RFC-0005 S8bw).
   if e == nil:
     raise newException(ValueError, "lower: nil expression")  # [raise-audited: category-c: documented defensive invariant (nil-expression entry guard; moderate confidence, no specific unreachability argument beyond the general defensive pattern)]
   case e.kind
@@ -6981,12 +7153,16 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "through a `var`/`addr` argument and directly; the walk " &
                "passes the argument by copy-in/copy-out, so the direct " &
                "access is not modelled (feUnsupportedOp)")
+      elif isGlobalEnvName(e.vname) and e.vGlobalTy != nil:
+        # RFC-0005 S8bw (item 2): a global of a known type, read before
+        # its first write in the walk, holds its initial value -- one
+        # unwritten constant per leaf. `lower` declines an observation of
+        # one (a read of `g` or of an unwritten part); a rebuild's copy or
+        # a receiver is no observation, so `g.a = v` binds `g` with its
+        # other parts unwritten, and a later read of `g.a` decides.
+        return globalInitValue(e.vname, e.vGlobalTy)
       elif isGlobalEnvName(e.vname):
-        lowerDegrade(feGlobalReadUnmodelled,
-          "module-level global '" & displayName(e.vname) & "' is read " &
-               "but not modelled by the symbolic walker -- remove it " &
-               "from the reachable computation or pass it as an " &
-               "explicit parameter (feGlobalReadUnmodelled)")
+        lowerDegrade(feGlobalReadUnmodelled, unwrittenReadMsg(displayName(e.vname)))
       elif e.vname.startsWith("__sym_"):
         # RFC-0005 S8ba: a parser temporary (`freshSynth`; no Nim
         # identifier starts with `_`) is bound by the statement the parser
@@ -7035,6 +7211,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekField:
     # Lower the receiver, then pick the field by index (tuple) or
     # by name (variant — Phase 11).
+    lowerAsReceiver = true   ## RFC-0005 S8bw: the field is the read
     let recv = lower(env, e.obj)
     case recv.kind
     of svTuple:
@@ -7693,6 +7870,7 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       elems.add lower(env, c, protoSV)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: e.lelemTy)
   of iekIndex:
+    lowerAsReceiver = true   ## RFC-0005 S8bw: the element is the read
     let recv = lower(env, e.arr)
     if recv.kind != svArray or recv.arrElems.len == 0:
       # RFC-0005 S8bw (item 1): a receiver that did not lower to an array
@@ -8065,6 +8243,18 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       lowerDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
+
+proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+  ## Lower `e` under `env` (`lowerExpr`). RFC-0005 S8bw (item 2): the value
+  ## of a read of a global -- the outermost access of a chain over it, not
+  ## a receiver of one -- declines in-band when it mentions an unwritten
+  ## part (`observeGlobalRead`); an element read is simplified first, so a
+  ## constant index picks its element.
+  let asReceiver = lowerAsReceiver
+  lowerAsReceiver = false
+  result = lowerExpr(env, e, proto)
+  if not asReceiver and e != nil and e.kind in {iekVar, iekField, iekIndex}:
+    observeGlobalRead(e, result, simplified = e.kind == iekIndex)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -8748,6 +8938,8 @@ type PtrLeafAim = object
   ## seq held in a heap field family (`fam`).
   name: string
   path: seq[int]
+  steps: seq[string]   ## RFC-0005 S8bw (item 3): `path` as the witness
+                       ## names it (`ptrAimInto`)
   seqIdx: bool
   tabKey: bool
   fam: string
@@ -8759,6 +8951,10 @@ var ptrLeafAims {.threadvar.}: Table[int64, PtrLeafAim]
 
 proc ptrLeafPathStr(path: seq[int]; seqIdx: bool): string =
   for i in path: result.add "/" & $i
+  if seqIdx: result.add "/*"
+proc ptrLeafPathStr(steps: seq[string]; seqIdx: bool): string =
+  ## RFC-0005 S8bw (item 3). The steps as the witness names them.
+  for s in steps: result.add "/" & s
   if seqIdx: result.add "/*"
 proc ptrObjKey(typeId, famKey: string): string = typeId & "__@ptrobj__" & famKey
 
@@ -8775,7 +8971,10 @@ proc ptrFamilyKey(key: string): bool =
   let at = key.find("__@")
   if at < 0: return "__" in key
   let rest = key[at + 3 .. ^1]
-  rest.len > 0 and rest[0] in {'0'..'9'} and "__" in rest
+  # RFC-0005 S8bw (item 3): an `else` branch's field (`__@-1__<f>`) too; it
+  # was no target, so a pointer to one was never seen to write it.
+  rest.len > 0 and (rest[0] in {'0'..'9'} or rest.startsWith("-1__")) and
+    "__" in rest
 
 proc refAddrOf(m: Z3Model, addrAst: Z3AnyAst, pointee: IRType): string =
   ## RFC-0005 S8h. The model address of a ref, "" for nil. Prefixed with the
@@ -9173,7 +9372,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     for code, la in ptrLeafAims:
       if la.fam.len > 0 or la.typeId != typeId: continue
       if la.name notin names or not ptrSelMatches(selV, code): continue
-      var aim = ptrAimPrefix & la.name & ptrLeafPathStr(la.path, false)
+      var aim = ptrAimPrefix & la.name & ptrLeafPathStr(la.steps, false)
       if la.seqIdx:
         let ik = ptrIdxKey(typeId)
         if not currentVariantHeaps.hasKey(ik): break
@@ -11150,6 +11349,42 @@ proc pathInfeasible(ctx: Z3Context; path: Path;
   ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
   checkCapped(ctx, pathRoots(path), settings,
               loopPruneRLimit(settings)).status == zsUnsat
+
+proc unwrittenIndependent(ctx: Z3Context; path: Path; v: SymVal;
+                          extra: openArray[Z3Bool];
+                          settings: SymexSettings): bool =
+  ## RFC-0005 S8bw (item 2). True when `v`, an element read at a symbolic
+  ## index, is the same whatever the unwritten parts it mentions hold, on
+  ## every execution of `path` under `extra`: the query with `v` differing
+  ## from its copy over fresh stand-ins of those parts is UNSAT
+  ## (`gArr[k] = 5` then `gArr[k]` reads an `ite` over every element, the
+  ## unwritten ones included, and is 5 on every path). Bounded as the loop
+  ## pruning check is; an undecided query is a dependence.
+  var froms, tos: seq[RawZ3Ast]
+  var keep: seq[Z3AnyAst]
+  for a in glUnwrittenAsts:
+    froms.add a.raw
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fresh_const(ctx.raw,
+      "__glUnwrittenAlt", ctx.checkErr Z3_get_sort(ctx.raw, a.raw)))
+    tos.add keep[^1].raw
+  if froms.len == 0: return true
+  var leaves: seq[RawZ3Ast]
+  svAsts(v, leaves)
+  var diffs: seq[RawZ3Ast]
+  for l in leaves:
+    let alt = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw, l,
+      cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+    keep.add alt
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_not(ctx.raw,
+      checkedEq(ctx, l, alt.raw)))
+    diffs.add keep[^1].raw
+  if diffs.len == 0: return true
+  let differs = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_or(ctx.raw,
+    cuint(diffs.len), cast[ptr UncheckedArray[RawZ3Ast]](diffs[0].addr)))
+  var arm = differs
+  for c in extra: arm = arm and c
+  loopArmInfeasible(ctx, path, arm, settings)
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -13907,6 +14142,19 @@ proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
   result[stmt.spRetName] = allocateSym(stmt.spElemTy,
     freshDegradeName("__declinedPop"), scratch)
 
+proc unwrittenDisc(sv: SymVal): string =
+  ## RFC-0005 S8bw (item 2). The unwritten part a variant's discriminator
+  ## (each axis's, for a multi-variant) mentions, or "": a reassignment
+  ## reads it for Nim's branch-change check.
+  case sv.kind
+  of svVariant: unwrittenIn(sv.vDisc[])
+  of svMultiVariant:
+    for ax in sv.mvAxes:
+      let part = unwrittenIn(ax.disc[])
+      if part.len > 0: return part
+    ""
+  else: ""
+
 proc unboundRecvMsg(name, op: string): string =
   ## RFC-0005 S8bw (item 1). The decline of a statement whose receiver
   ## `name` the path has not bound: a module-level global read before any
@@ -15139,7 +15387,17 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       ## bindings (iekVar) or field projections (iekField); both are pure (no
       ## closure/float→int sinks), so lowerLeafInExpr handles them without
       ## seed+drain.
-      let (arrSV, p) = lowerLeafInExpr(p0, stmt.ixArr)
+      lowerAsReceiver = true   ## RFC-0005 S8bw: the element is the read
+      let (arrSV, p1) = lowerLeafInExpr(p0, stmt.ixArr)
+      # RFC-0005 S8bw (item 2): an array global's element read observes the
+      # one element (below); a seq, table or string global's read observes
+      # its length or key set, so the whole receiver.
+      let p =
+        if arrSV.kind != svArray and
+           globalReadPart(stmt.ixArr, arrSV).len > 0:
+          forkPathTainted(p1, p1.pc, p1.env, w.degrade(feGlobalReadUnmodelled,
+            unwrittenReadMsg(globalReadPart(stmt.ixArr, arrSV))))
+        else: p1
       # ---- Phase 5: Table[K, V] indexing ----
       if arrSV.kind == svTable:
         ## Table key: always a string expression — no float→int conv or closure
@@ -15406,6 +15664,9 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                         "IndexDefect", none(string), w)
         # In-bounds path continues with binding; build the value via ite.
         let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
+        let unwrittenPart =
+          if stmt.ixCheckOnly: ""
+          else: globalReadPart(stmt.ixArr, indexed, simplified = true)
         # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
         # wrapper), so a merge degrade's pending taint (`allocDegrade` /
         # `degradeAlloc`) would otherwise be drained by whatever `lower()`
@@ -15416,7 +15677,15 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         let cpM = drainPendingLowerEffects(cp)
         var newEnv = cpM.env
         newEnv[stmt.ixRetName] = indexed
-        survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
+        if unwrittenPart.len > 0 and
+           (stmt.ixIdx.kind == iekIntLit or
+            not unwrittenIndependent(w.z3, cpM, indexed,
+                                     [inLoCond, inHiCond], w.settings)):
+          survivors.add forkPathTainted(cpM, cpM.pc & @[inLoCond, inHiCond],
+            newEnv, w.degrade(feGlobalReadUnmodelled,
+                              unwrittenReadMsg(unwrittenPart)))
+        else:
+          survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
     survivors
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2): `xs[idx] = v` element ASSIGNMENT.
@@ -15641,6 +15910,13 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let oldSV = p.env[stmt.vrObjName]
+      if unwrittenDisc(oldSV).len > 0:
+        # RFC-0005 S8bw (item 2): a global whose discriminator no write
+        # reached (another field was written first).
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unwrittenReadMsg(unwrittenDisc(oldSV)))
+        out2.add forkPathTainted(p, p.pc, p.env, d)
+        continue
       if oldSV.kind notin {svVariant, svMultiVariant}:
         # RFC-0005 S8i: a declined construction's placeholder.
         out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
@@ -15718,6 +15994,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         out2.add forkPathTainted(p, p.pc, p.env, d)
         continue
       let oldSV = p.env[stmt.vrsObjName]
+      if unwrittenDisc(oldSV).len > 0:
+        # RFC-0005 S8bw (item 2): as `isVariantReassign` above.
+        let d = w.degrade(feGlobalReadUnmodelled,
+          unwrittenReadMsg(unwrittenDisc(oldSV)))
+        out2.add forkPathTainted(p, p.pc, p.env, d)
+        continue
       ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
       let (rhsSV, pr) = lowerInExpr(p, stmt.vrsRhs, w)
       proc rhsEq(tagOrd: int64): Z3Bool =
@@ -21366,6 +21648,7 @@ proc ptrAimPath*(p: pointer; name: string): tuple[hit: bool; path: seq[string]] 
   result.path = a[name.len + 1 .. ^1].split('/')
   result.hit = true
 
+{.push fieldChecks: off.}   # RFC-0005 S8bw (item 3): see `ptrAimByName`
 proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
   ## RFC-0005 S8bn (item 4). The address of the part of `x` the steps
   ## `path[i ..]` name (a field's position, an element's index, a table
@@ -21383,10 +21666,22 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
   else:
     let n = try: parseInt(path[i]) except ValueError: -1
     when T is tuple or (T is object and not (T is ref)):
+      # RFC-0005 S8bw (item 3): a case object's step names its field
+      # (`f<name>`): `fieldPairs` walks only the active branch, so a
+      # position is not one field (`ptrAimByName`). A discriminator is not
+      # addressable (`when compiles`).
+      if path[i].len >= 1 and path[i][0] == 'f':
+        when T is object:
+          let fname = path[i][1 .. ^1]
+          ptrAimByName(x, fname):
+            when compiles(ptrAimInto[typeof(it), U](it, path, i + 1)):
+              return ptrAimInto[typeof(it), U](it, path, i + 1)
+        return nil
       var k = 0
       for _, f in fieldPairs(x):
-        if k == n:
-          return ptrAimInto[typeof(f), U](f, path, i + 1)
+        when compiles(ptrAimInto[typeof(f), U](f, path, i + 1)):
+          if k == n:
+            return ptrAimInto[typeof(f), U](f, path, i + 1)
         inc k
     elif T is array or T is seq:
       var k = 0
@@ -21395,6 +21690,7 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
           return ptrAimInto[typeof(e), U](e, path, i + 1)
         inc k
     nil
+{.pop.}
 
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 

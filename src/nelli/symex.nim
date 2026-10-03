@@ -924,6 +924,14 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   # tells (a `ref VObj` alias's pointee symbol is the value object `VObj`).
   if pointee.kind in {itVariant, itMultiVariant}:
     let sym = witnessTypeSym(pointee)
+    if sym != nil and sym.kind == nnkBracketExpr:
+      # RFC-0005 S8bw (item 3): a generic case object instance; its head's
+      # declaration tells, as for a generic placeholder above.
+      let gi = sym[0].getImpl
+      if gi.kind == nnkTypeDef and gi.len >= 3 and
+         gi[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimTree(sym)
+      return wrapped(copyNimTree(sym))
     if sym != nil:
       let impl = sym.getImpl
       if impl.kind == nnkTypeDef and impl.len >= 3 and

@@ -386,7 +386,8 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekVar:
     let gty = if e.vGlobalTy != nil: e.vGlobalTy else: globalVarTy(e.vname)
     if gty != nil:   # RFC-0005 S8bw
-      newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty))
+      newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty),
+              newLit(e.vCopy))
     else:
       newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
@@ -833,7 +834,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
             emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc),
-            newLit(s.ixLo))   # RFC-0005 S8z
+            newLit(s.ixLo),   # RFC-0005 S8z
+            newLit(s.ixCheckOnly))   # RFC-0005 S8bw
   of isIndexAssign:
     newCall(bindSym"mkIndexAssignStmt",
             newLit(s.iaRecvName), emitExpr(s.iaIdx),
@@ -11022,11 +11024,15 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
-proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
+proc addrAliasDecl(c: NimNode): tuple[p, addrNode, root: NimNode;
+                                       checked: bool] =
   ## RFC-0005 S8an. `let p = addr lv` (or `var`), one name, where `lv` names
   ## the same location for as long as `p` lives: a variable, or a field
   ## chain of value objects/tuples over one (no index, no dereference, which
   ## could re-point between uses). `(nil, nil)` otherwise.
+  ## RFC-0005 S8bw (item 3): a field of a case object's branch too
+  ## (`checked`: Nim checks the branch where it takes the address), and a
+  ## chain over a `var` parameter (`root`, the variable).
   if c.kind notin {nnkLetSection, nnkVarSection} or c.len != 1: return
   let d = c[0]
   if d.kind != nnkIdentDefs or d.len != 3 or d[0].kind != nnkSym: return
@@ -11035,11 +11041,40 @@ proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
     a = a[^1]
   if a.kind != nnkAddr or a.len != 1: return
   var t = a[0]
-  while t.kind == nnkDotExpr and t.len == 2 and
-        t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
+  var checked = false
+  while true:
+    if t.kind == nnkCheckedFieldExpr and t.len >= 1 and
+       t[0].kind == nnkDotExpr:
+      checked = true
+      t = t[0]
+    elif t.kind == nnkDotExpr and t.len == 2 and
+         t[0].getTypeImpl.kind in {nnkObjectTy, nnkTupleTy}:
+      t = t[0]
+    else: break
+  if t.kind == nnkHiddenDeref and t.len == 1 and t[0].kind == nnkSym and
+     symKind(t[0]) == nskParam and t[0].getTypeInst.kind == nnkVarTy:
     t = t[0]
-  if t.kind != nnkSym or symKind(t) != nskVar: return
-  (d[0], a)
+  elif t.kind != nnkSym or symKind(t) != nskVar: return
+  (d[0], a, t, checked)
+
+proc rootMutatedIn(n, root: NimNode): bool =
+  ## RFC-0005 S8bw (item 3). `n` assigns into the variable `root` (any
+  ## part of it) or takes its address (a `var` argument, `addr`).
+  proc rootOf(x: NimNode): NimNode =
+    var y = x
+    while y.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkBracketExpr,
+                     nnkHiddenDeref, nnkDerefExpr, nnkHiddenStdConv,
+                     nnkHiddenSubConv, nnkConv} and y.len >= 1:
+      y = if y.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv}: y[^1]
+          else: y[0]
+    y
+  if n.kind in {nnkAsgn, nnkFastAsgn} and n.len >= 1 and
+     isSymOf(rootOf(n[0]), root): return true
+  if n.kind in {nnkHiddenAddr, nnkAddr} and n.len == 1 and
+     isSymOf(rootOf(n[0]), root): return true
+  for ch in n:
+    if rootMutatedIn(ch, root): return true
+  false
 
 proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   ## RFC-0005 S8an. `n` with `p[]` spelled as the pointee lvalue and a bare
@@ -11089,7 +11124,17 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
         if not ptrUsesStayLocal(r, al.p, seen):
           stays = false
           break
+        # RFC-0005 S8bw (item 3): a branch field stays the pointee only
+        # while nothing can change its object's branch.
+        if al.checked and rootMutatedIn(r, al.root):
+          stays = false
+          break
       if stays:
+        # RFC-0005 S8bw (item 3): taking the address of a branch field
+        # checks the branch (`FieldDefect`), as a read of it does.
+        if al.checked:
+          stmts.add parseStmt(nnkDiscardStmt.newTree(copyNimTree(al.addrNode[0])),
+                              ctx)
         var rest: seq[NimNode]
         for r in items[k + 1 ..< items.len]:
           rest.add substAddrAlias(r, al.p, al.addrNode)
@@ -11394,6 +11439,14 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   var step: FieldStep
   discard fieldStep(lhs, step)
   let recvIR = parseExpr(step.recv, preamble, ctx)
+  # RFC-0005 S8bw (item 2): every use of `recvIR` below copies the old
+  # parts back into the same root, so a global root's unwritten parts are
+  # not observed by it.
+  block:
+    var root = recvIR
+    while root != nil and root.kind in {iekField, iekIndex}:
+      root = if root.kind == iekField: root.obj else: root.arr
+    if root != nil and root.kind == iekVar: root.vCopy = true
   let rebuilt =
     if step.recvTy.kind == itArray and step.idx != nil:
       # RFC-0005 S8z: a symbolic index. The old array is copied into a
@@ -11844,7 +11897,13 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
     # `FieldDefect` out of the arm, before it evaluates the value. The
     # read of `lhs` is that check (its `isVariantField` fork).
     if valueFieldChecked(lhs):
-      discard parseExpr(lhs, preamble, ctx)
+      let checkRead = parseExpr(lhs, preamble, ctx)
+      # RFC-0005 S8bw (item 2): the read only checks the index; its value
+      # is never used (`ixCheckOnly`).
+      if checkRead.kind == iekVar:
+        for st in preamble:
+          if st.kind == isIndex and st.ixRetName == checkRead.vname:
+            st.ixCheckOnly = true
     let val = asgnRhs()
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):

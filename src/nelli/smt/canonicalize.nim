@@ -5004,7 +5004,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # parts hold, so it is part of the program's form.
     if e.vGlobalTy == nil: "Ex<V:" & lookupLocal(env, e.vname) & ">"
     else: "Ex<V:" & lookupLocal(env, e.vname) & ":" &
-            canonicalize(e.vGlobalTy) & ">"
+            canonicalize(e.vGlobalTy) & (if e.vCopy: ":copy" else: "") & ">"
   of iekBinop:
     "Ex<Bn:" & binopTag(e.bop) & ";" &
       canonicalize(e.lhs, env) & ";" & canonicalize(e.rhs, env) & ">"
@@ -5211,7 +5211,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Ix:" & retSlot & "=" & canonicalize(s.ixArr, env) &
       "[" & canonicalize(s.ixIdx, env) & "];ety=" &
       canonicalize(s.ixElemTy) &
-      (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") & ">"
+      (if s.ixLo != 0: ";lo=" & $s.ixLo else: "") &
+      (if s.ixCheckOnly: ";check" else: "") & ">"   # RFC-0005 S8bw
   of isIndexAssign:
     # N14 (RFC-chapulin-hardening bucket-2). Distinct `IxA:` prefix (never
     # collides with `Ix:`'s read-side content-address) — `xs[i] = v` and

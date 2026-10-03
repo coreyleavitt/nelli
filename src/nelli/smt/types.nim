@@ -513,6 +513,12 @@ type
     iekSeqPop    ## #143: `s.pop()` — returns the popped value;
                  ## a separate isAssign updates the seq.
     iekTableSet  ## #145: returns new svTable with `[k]=v`.
+    iekTabRemovedSince
+                 ## RFC-0005 S8bx (item 4). Whether a key was removed from
+                 ## the table `trCur` since it was the value `trBase` (a
+                 ## `del`, `pop`, `take` or `clear` in between): Nim's slot
+                 ## walk over a table that lost a key and kept its length
+                 ## depends on the keys' hashes (`parseTableForLoop`).
     iekTableDel  ## #145: returns new svTable with k absent.
     iekSetIncl   ## #145: returns new svSet with elem included.
     iekSetExcl   ## #145: returns new svSet with elem excluded.
@@ -782,6 +788,9 @@ type
     of iekContains:
       container*: IRExpr
       key*: IRExpr
+    of iekTabRemovedSince:   ## RFC-0005 S8bx (item 4)
+      trCur*:  IRExpr
+      trBase*: IRExpr
     of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
       mutRecv*: IRExpr
       mutArg*:  IRExpr
@@ -3903,6 +3912,9 @@ proc mkTableSet*(recv, key, val: IRExpr): IRExpr =
   IRExpr(kind: iekTableSet, tabRecv: recv, tabKey: key, tabVal: val)
 proc mkTableDel*(recv, key: IRExpr): IRExpr =
   IRExpr(kind: iekTableDel, mutRecv: recv, mutArg: key)
+proc mkTabRemovedSince*(cur, base: IRExpr): IRExpr =
+  ## RFC-0005 S8bx (item 4).
+  IRExpr(kind: iekTabRemovedSince, trCur: cur, trBase: base)
 proc mkSetIncl*(recv, elem: IRExpr): IRExpr =
   IRExpr(kind: iekSetIncl, mutRecv: recv, mutArg: elem)
 proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
@@ -5637,6 +5649,8 @@ proc render*(e: IRExpr): string =
   of iekTableSet:  render(e.tabRecv) & "[" & render(e.tabKey) & "]:=" &
                    render(e.tabVal)
   of iekTableDel:  render(e.mutRecv) & ".del(" & render(e.mutArg) & ")"
+  of iekTabRemovedSince:
+    "removedSince(" & render(e.trCur) & ", " & render(e.trBase) & ")"
   of iekSetIncl:   render(e.mutRecv) & ".incl(" & render(e.mutArg) & ")"
   of iekSetExcl:   render(e.mutRecv) & ".excl(" & render(e.mutArg) & ")"
   of StrOpKinds:

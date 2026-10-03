@@ -1091,5 +1091,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bx_witnessdrift",
             # S8bx item 3: an mpairs view passed to one call with its
             # Table is one location (IRStmt.cViewAliases, syncViewAliases).
-            "tsymex_rfc0005_s8bx_mpairs"]:
+            "tsymex_rfc0005_s8bx_mpairs",
+            # S8bx item 4: a key removed while iterating a Table, the
+            # length kept, declines (native runs prove the slot walk
+            # depends on the hashes).
+            "tsymex_rfc0005_s8bx_iterchange"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

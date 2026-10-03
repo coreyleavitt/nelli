@@ -320,6 +320,8 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
   of iekStrLit: a.sval == b.sval
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
+  of iekTabRemovedSince:   # RFC-0005 S8bx
+    fieldwiseEq(a.trCur, b.trCur) and fieldwiseEq(a.trBase, b.trBase)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     fieldwiseEq(a.mutRecv, b.mutRecv) and fieldwiseEq(a.mutArg, b.mutArg)
   of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx) and
@@ -638,6 +640,8 @@ proc sSeqInsert(): IRExpr = mkSeqInsert(mkVar("s"), mkIntLit(7), mkIntLit(1))
 proc sSeqPop(): IRExpr = mkSeqPop(mkVar("s"))
 proc sTableSet(): IRExpr = mkTableSet(mkVar("t"), mkStrLit("k"), mkIntLit(1))
 proc sTableDel(): IRExpr = mkTableDel(mkVar("t"), mkStrLit("k"))
+proc sTabRemovedSince(): IRExpr =   ## RFC-0005 S8bx
+  mkTabRemovedSince(mkVar("tabNow"), mkVar("tabSnap"))
 proc sSetIncl(): IRExpr = mkSetIncl(mkVar("st"), mkIntLit(4))
 proc sSetExcl(): IRExpr = mkSetExcl(mkVar("st"), mkIntLit(4))
 proc sStrOpPlain(): IRExpr = mkStrOp(iekStrLen, "len", @[mkVar("s")])
@@ -735,6 +739,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sTableSet(), roundtripExpr(sTableSet()))
   test "iekTableDel":
     check fieldwiseEq(sTableDel(), roundtripExpr(sTableDel()))
+  test "iekTabRemovedSince (RFC-0005 S8bx)":
+    check fieldwiseEq(sTabRemovedSince(), roundtripExpr(sTabRemovedSince()))
   test "iekSetIncl":
     check fieldwiseEq(sSetIncl(), roundtripExpr(sSetIncl()))
   test "iekSetExcl":
@@ -799,6 +805,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"
       of iekContains: discard                    ## "iekContains"
+      of iekTabRemovedSince: discard             ## "iekTabRemovedSince (RFC-0005 S8bx)"
       of iekSeqAdd: discard                      ## "iekSeqAdd"
       of iekSeqDel: discard                      ## "iekSeqDel"
       of iekSeqInsert: discard                   ## "iekSeqInsert"

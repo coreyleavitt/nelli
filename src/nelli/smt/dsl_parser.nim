@@ -453,7 +453,11 @@ proc emitIRType*(t: IRType): NimNode =
     # `classifyType` computed, no matter what `symex.emitTyAndReader`
     # (which reads the macro-time `IRType` directly and needs no round trip
     # of its own) does with the name at witness-codegen time.
-    if t.enumName.len > 0:
+    if t.enumName.len > 0 and t.enumRange:   # RFC-0005 S8bv
+      newCall(bindSym"withEnumRange",
+              newCall(bindSym"withEnumName", ranged, newLit(t.enumName)),
+              newLit(t.rangeLo), newLit(t.rangeHi))
+    elif t.enumName.len > 0:
       newCall(bindSym"withEnumName", ranged, newLit(t.enumName))
     else:
       ranged
@@ -1661,6 +1665,16 @@ proc parseStmtBare(n: NimNode, ctx: ParseCtx): IRStmt
 proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
                preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt
   ## RFC-0005 S8ac fwd decl (defined beside `parseStmtInner`).
+
+proc subrangeMemberEnum(n: NimNode): NimNode =
+  ## RFC-0005 S8bv. The enum type symbol of an enum member `n` typed as a
+  ## subrange of it (`range[a1..a2]`), read off the subrange's bound; nil
+  ## for any other type.
+  let ti = n.getTypeImpl
+  if ti.kind == nnkBracketExpr and ti.len == 2 and ti[1].kind == nnkInfix and
+     ti[1].len == 3 and ti[1][1].typeKind == ntyEnum:
+    return ti[1][1].getTypeInst
+  nil
 
 proc itemsArgDirect(n: NimNode): bool =
   ## RFC-0005 S8bv. Whether Nim maps `n`, an inline iterator's argument,
@@ -4195,9 +4209,15 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         # ORIGINAL `nnkTypeDef` as written in source, `nnkEnumFieldDef`
         # values intact.
         let directTy = n.getType
-        if directTy.kind == nnkEnumTy:
+        # RFC-0005 S8bv: a member typed as an enum SUBRANGE (`a1` in a
+        # `set[SE]` literal, `SE = range[a1..a2]`) is the enum's member: the
+        # enum is the type of the subrange's bounds.
+        let subEnum = if directTy.kind == nnkBracketExpr and
+                         n.symKind == nskEnumField: subrangeMemberEnum(n)
+                      else: nil
+        if directTy.kind == nnkEnumTy or subEnum != nil:
           var enumBody: NimNode = nil
-          let tyInst = n.getTypeInst
+          let tyInst = if subEnum != nil: subEnum else: n.getTypeInst
           if tyInst.kind == nnkSym:
             let implInst = tyInst.getImpl
             if implInst.kind == nnkTypeDef and implInst.len >= 3 and
@@ -4695,18 +4715,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             # crash, never a silent wrong verdict).
             declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
                                  valueTypeName(wrapped), valueTypeName(n))
-        elif outerTy.kind == itBitSet and innerTy.kind == itBitSet and
-             bitSetDomain(outerTy.bsElemTy) != bitSetDomain(innerTy.bsElemTy):
-          # RFC-0005 S8bq: a builtin set converted to one over another base
-          # range has another bit layout; it is not modelled (it was never
-          # reached: no set value classified before S8bq).
-          preamble.add ctx.declineAtSite(feUnsupportedExprKind,
-            "conversion of `" & wrapped.repr & "` from " & $innerTy & " to " &
-              $outerTy & " is not modelled (feUnsupportedExprKind)",
-            "builtin set conversion between base ranges " &
-              "(feUnsupportedExprKind)")
-          mkZeroValue(outerTy)
         else:
+          # RFC-0005 S8bv: no arm for a builtin set between two base
+          # domains. Nim has no such conversion: every one is a type
+          # mismatch, and a set literal is typed as its target, converting
+          # each ELEMENT (pinned natively in tsymex_rfc0005_s8bv_remainder).
           parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:
     # Issue #163 review (rev item 1). The compiler inserts `nnkHiddenCallConv`

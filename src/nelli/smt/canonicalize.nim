@@ -4813,7 +4813,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<I:" & $t.width & ":" & (if t.signed: "s" else: "u") &
       (if t.hasRange: ":r[" & $t.rangeLo & "," & $t.rangeHi & "]" else: "") &
       (if t.enumName.len > 0: ":e[" & t.enumName & "]" else: "") &
-      (if t.isChar: ":c" else: "") & ">"
+      (if t.isChar: ":c" else: "") &
+      (if t.enumRange: ":er" else: "") & ">"   # RFC-0005 S8bv: as `isChar`
   of itBool:
     "Ty<B>"
   of itString:

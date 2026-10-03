@@ -24,6 +24,7 @@
 import std/macros
 import std/strutils
 import std/strformat
+import std/options   ## RFC-0005 S8bv: `classifyEnumSubrange`
 import std/sequtils
 import std/tables     ## RFC-0005 S8e: the witness type-symbol registry
 import std/compilesettings   ## RFC-0005 S8c: `libPath` for `isStdlibDecl`
@@ -794,6 +795,28 @@ proc arrayIndexLow*(n: NimNode): int64 =
   let b = arrayIndexBounds(ty[1])
   if b.ok: b.lo else: 0
 
+proc classifyEnumSubrange(rangeNode: NimNode): Option[ClassifiedType] =
+  ## RFC-0005 S8bv. `range[a1..a2]` over an enum: the enum (`classifyType` of
+  ## a bound, whose type is the enum) narrowed to the subrange's ordinals,
+  ## marked `enumRange`. `rangeNode` is a typed `range[lo .. hi]`; its
+  ## bounds are ordinal literals typed with the enum, on the formal's
+  ## `getTypeInst` and an alias's `getTypeImpl` alike. Before S8bv the
+  ## inline spelling classified as an `int` range (its witness did not
+  ## compile) and the alias spelling, whose definition names the members,
+  ## was unsupported.
+  let body = rangeNode[1]
+  if body.kind != nnkInfix or body.len != 3: return none(ClassifiedType)
+  let (lo, hi) = (body[1], body[2])
+  if lo.kind notin {nnkIntLit .. nnkUInt64Lit} or
+     hi.kind notin {nnkIntLit .. nnkUInt64Lit} or
+     lo.typeKind != ntyEnum:
+    return none(ClassifiedType)
+  let base = classifyType(lo).ty
+  if base.kind != itInt or base.enumName.len == 0:
+    return none(ClassifiedType)
+  some(ClassifiedType(ty: base.withEnumRange(lo.intVal, hi.intVal),
+                      range: (true, lo.intVal, hi.intVal)))
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # `var T` strip (lvalue parameter).
@@ -851,6 +874,8 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   if resolved.kind == nnkBracketExpr and
      resolved.len == 2 and
      isBuiltinTypeHead(resolved[0], ["range"]):   ## RFC-0005 S8d
+    let sub = classifyEnumSubrange(resolved)   ## RFC-0005 S8bv
+    if sub.isSome: return sub.get
     let (lo, hi) = parseRangeBracket(resolved)
     return ranged(rangeBaseType(resolved[1][1]), lo, hi)
   # ---- structural match: array[N, T] ----
@@ -955,6 +980,17 @@ proc classifyType*(ty: NimNode): ClassifiedType =
     # signed answer deliberately — Nim has no `+` on chars, so a char range
     # carries no arithmetic obligation to get wrong — this widening only
     # stops the alias route from declining before it reaches that mapping.
+    # RFC-0005 S8bv: an enum subrange alias (`type SE = range[a1..a2]`):
+    # its definition names the members, so it is read off the type's typed
+    # implementation, whose bounds are the enum's ordinals.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkBracketExpr and impl[2].len == 2 and
+       isBuiltinTypeHead(impl[2][0], ["range"]):
+      let ti = resolved.getTypeImpl
+      if ti.kind == nnkBracketExpr and ti.len == 2 and
+         isBuiltinTypeHead(ti[0], ["range"]):
+        let sub = classifyEnumSubrange(ti)
+        if sub.isSome: return sub.get
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkBracketExpr and
        impl[2].len == 2 and

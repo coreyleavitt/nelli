@@ -599,10 +599,10 @@ suite "S8bq (2): builtin set values":
     check verdict(bsReturn, "bq_bs_return").status == sxUnsat
   test "a set array element":
     check verdict(bsArrayElem, "bq_bs_array_elem").status == sxUnsat
-  test "iterating a set is not modelled (classified decline)":
+  test "iterating a set is modelled (RFC-0005 S8bv)":
     let r = verdict(bsIter, "bq_bs_iter")
-    check r.status == sxUnknown
-    check r.errors.len > 0
+    check r.status == sxSat
+    check r.errors.len == 0
 
 suite "S8bq (5): set literals with non-constant elements":
   test "membership in a literal of variables":

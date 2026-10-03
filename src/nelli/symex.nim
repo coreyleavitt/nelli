@@ -805,6 +805,7 @@ proc stdName(name: string): NimNode =
   of "set": bindSym"set"                               # RFC-0005 S8bq
   of "readBitSetAs": bindSym"readBitSetAs"             # RFC-0005 S8bq
   of "range": bindSym"range"                           # RFC-0005 S8bv
+  of "witnessIntAs": bindSym"witnessIntAs"             # RFC-0005 S8bv
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
@@ -1026,8 +1027,20 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # ordinal-convertible value, sound regardless of signedness or a
       # negative/sparse ordinal domain (R2/R18's fixes already put the
       # correct width/signed/range on `ty` before this ever runs).
-      (userTypeName(ty, ty.enumName),
-       newCall(userTypeName(ty, ty.enumName), rawReader))
+      if ty.enumRange:
+        # RFC-0005 S8bv: an enum subrange is `range[E(lo)..E(hi)]` (a
+        # `set[E]` / `seq[E]` does not fit a `set[SE]` / `seq[SE]` slot),
+        # its value the ordinal converted to it.
+        let e = userTypeName(ty, ty.enumName)
+        let rng = newTree(nnkBracketExpr, stdName("range"),
+          infix(newCall(e, newLit(ty.rangeLo)), "..",
+                newCall(copyNimTree(e), newLit(ty.rangeHi))))
+        (rng, newCall(newTree(nnkBracketExpr, stdName("witnessIntAs"),
+                              copyNimTree(rng)),
+                      newCall(stdName("int64"), rawReader)))
+      else:
+        (userTypeName(ty, ty.enumName),
+         newCall(userTypeName(ty, ty.enumName), rawReader))
     else:
       (stdName(tyName), rawReader)
   of itTuple:

@@ -1662,6 +1662,23 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
                preamble: var seq[IRStmt], ctx: ParseCtx): IRStmt
   ## RFC-0005 S8ac fwd decl (defined beside `parseStmtInner`).
 
+proc itemsArgDirect(n: NimNode): bool =
+  ## RFC-0005 S8bv. Whether Nim maps `n`, an inline iterator's argument,
+  ## DIRECTLY into the iterator body (`transf.putArgInto`'s
+  ## `paDirectMapping`): a symbol or literal, a field / deref of one, or a
+  ## `{..}` / `[..]` of such. The body then re-reads `n` wherever the
+  ## iterator reads its parameter; any other argument is evaluated once into
+  ## a temporary.
+  case n.kind
+  of nnkEmpty .. nnkNilLit: true
+  of nnkDotExpr, nnkDerefExpr, nnkHiddenDeref, nnkAddr, nnkHiddenAddr:
+    itemsArgDirect(n[0])
+  of nnkCurly, nnkBracket:
+    for c in n:
+      if not itemsArgDirect(c): return false
+    true
+  else: false
+
 proc parseLoopBody(bodyNode: NimNode; ctx: ParseCtx; unrolled = false):
     tuple[body: IRStmt, brkLabel: string] =
   ## RFC-0005 S8m. Parse a desugared `for` loop's body as a jump target. A
@@ -10937,8 +10954,19 @@ proc parseStmtInner(n: NimNode,
       # RFC-0005 S8m: an array is unrolled (a `break` leaves the block
       # around the whole unroll); a seq is a `while` whose increment follows
       # the body (a `continue` leaves the body's block).
+      if recvCls.ty.kind == itBitSet and
+         bitSetDomain(recvCls.ty.bsElemTy).size > maxBitSetIterDomain:
+        # RFC-0005 S8bv: one unrolled step per value of the base type, up to
+        # `maxBitSetIterDomain` values.
+        return ctx.declineAtSite(feUnsupportedStmtKind,
+          &"`for x in s` over a `{recvCls.ty}` is not modelled: its base " &
+            &"type has {bitSetDomain(recvCls.ty.bsElemTy).size} values, more " &
+            &"than maxBitSetIterDomain ({maxBitSetIterDomain}) -- path " &
+            "degraded to sxUnknown",
+          &"for x in a set: domain above maxBitSetIterDomain " &
+            &"({maxBitSetIterDomain})")
       let (body, unrollBrk) = parseLoopBody(bodyNode, ctx,
-                                            unrolled = recvCls.ty.kind == itArray)
+        unrolled = recvCls.ty.kind in {itArray, itBitSet})
       let intTy = tInt(64, signed = true)
       case recvCls.ty.kind
       of itArray:
@@ -10989,6 +11017,45 @@ proc parseStmtInner(n: NimNode,
         allStmts.add initStmt
         allStmts.add whileSt
         mkBlock(allStmts)
+      of itBitSet:
+        # RFC-0005 S8bv (item 1). `system.items(a: set[T])` is
+        #   var i = low(T); while i <= high(T): (if T(i) in a: yield T(i)); inc i
+        # so the loop is unrolled over T's domain, ascending: step `i` is
+        # `if lo + i in a: (let x = lo + i; body)`. Each step's guard is a
+        # join (`ifJoin`): the body's survivors and the skip path merge back
+        # into one path where that is exact (`mergeJoinPaths`), so a set of
+        # `n` values walks `n` steps, not `2^n` paths. `a` is re-read at
+        # every step when Nim maps the argument directly (a variable, a field
+        # of one, a literal of them: `itemsArgDirect`), so a member the body
+        # adds or removes ahead is (not) visited; any other expression is
+        # evaluated once, before the loop, into a temporary, as Nim does.
+        let setTy = recvCls.ty
+        let elemTy = setTy.bsElemTy
+        let dom = bitSetDomain(elemTy)
+        let direct = itemsArgDirect(container)
+        var stmts: seq[IRStmt]
+        var once: IRExpr
+        if not direct:
+          let tmp = freshSynth(ctx, "bsit")
+          let e = parseExpr(container, stmts, ctx)
+          stmts.add mkLet(tmp, setTy, e)
+          once = mkVar(tmp)
+        var iters: seq[IRStmt]
+        for i in 0 ..< dom.size:
+          let v = dom.lo + int64(i)
+          let key = if elemTy.kind == itBool: mkBoolLit(v == 1)
+                    else: mkIntLit(v)
+          let sIR = if direct: parseExpr(container, iters, ctx) else: once
+          let guard = freshSynth(ctx, "bsin")
+          iters.add mkLet(guard, tBool(),
+                          mkBitSet(bsoContains, @[sIR, key], setTy))
+          iters.add mkIf(@[mkBranch(mkVar(guard),
+                                    mkBlock(@[mkLet(valName, elemTy, key),
+                                              body]))],
+                         nil, join = true)
+        if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
+        else: stmts.add iters
+        mkBlock(stmts)
       else:
         # itString is handled by the early return above (before body parse).
         ctx.declineMarker(feUnsupportedStmtKind, &"unsupported for-loop container kind: {recvCls.ty.kind}")

@@ -6654,6 +6654,113 @@ proc intBounds(width: int): (int64, int64) =
   else:
     raise newException(ValueError, "intBounds: unsupported width " & $width)  # [raise-audited: category-c: width-exhaustive (IRType.width for itInt is always 8/16/32/64)]
 
+var bvIvlDeclKinds {.threadvar.}:
+    tuple[ready: bool, add, sub, ite, sext, zext: int]
+  ## RFC-0005 S8bv. The decl kinds `bvSignedInterval` reads, taken from the
+  ## linked Z3 (as `seqCapKinds` does): the wrapper binds only part of the
+  ## C enum.
+
+const bvIvlNodeBudget = 4096
+  ## RFC-0005 S8bv. The most distinct subterms one `bvSignedInterval` call
+  ## visits before it answers "any value of the width".
+
+proc bvSignedInterval(ctx: Z3Context; t: RawZ3Ast): Interval =
+  ## RFC-0005 S8bv. An over-approximation of the values the signed
+  ## bit-vector term `t` (at most 64 bits) can take, read off its
+  ## structure: a numeral is itself, `bvadd` / `bvsub` the interval sum /
+  ## difference when it cannot wrap, `ite` the hull of its arms, a sign
+  ## extension its operand, a zero extension its operand's unsigned range;
+  ## anything else is the whole width. Sound by construction: every rule
+  ## contains every value the term takes. Memoised per call only (an AST id
+  ## outlives no call here, so it is never reused for another term).
+  if not bvIvlDeclKinds.ready:
+    proc kindOf(a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    let v = mkBitVecVar[8](ctx, "__s8bv_ivl_probe")
+    let c = mkBoolVar(ctx, "__s8bv_ivl_probe_c")
+    bvIvlDeclKinds = (ready: true, add: kindOf((v + v).raw),
+      sub: kindOf((v - v).raw), ite: kindOf(ite(c, v, v).raw),
+      sext: kindOf(ctx.checkErr Z3_mk_sign_ext(ctx.raw, 8, v.raw)),
+      zext: kindOf(ctx.checkErr Z3_mk_zero_ext(ctx.raw, 8, v.raw)))
+  let kinds = bvIvlDeclKinds
+  var memo: Table[int, Interval]
+  var budget = bvIvlNodeBudget
+  proc widthOf(a: RawZ3Ast): int =
+    int(Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, a)))
+  proc full(w: int): Interval =
+    if w >= 64: interval(low(int64), high(int64))
+    else: interval(-(1'i64 shl (w - 1)), (1'i64 shl (w - 1)) - 1)
+  proc fits(r: Option[Interval]; w: int): bool =
+    r.isSome and r.get.lo >= full(w).lo and r.get.hi <= full(w).hi
+  proc go(a: RawZ3Ast): Interval =
+    let w = widthOf(a)
+    if w < 1 or w > 64: return interval(low(int64), high(int64))
+    let id = astId(ctx, a)
+    if id in memo: return memo[id]
+    if budget <= 0: return full(w)
+    dec budget
+    result = full(w)
+    case Z3_get_ast_kind(ctx.raw, a)
+    of Z3_NUMERAL_AST:
+      var u: uint64
+      if Z3_get_numeral_uint64(ctx.raw, a, addr u):
+        let v = if w >= 64: cast[int64](u)
+                elif u >= (1'u64 shl (w - 1)): int64(u) - (1'i64 shl w)
+                else: int64(u)
+        result = interval(v, v)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, a)
+      let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+      let n = int(Z3_get_app_num_args(ctx.raw, app))
+      template arg(i: int): RawZ3Ast = Z3_get_app_arg(ctx.raw, app, cuint(i))
+      if k == kinds.ite and n == 3:
+        let x = go(arg(1))
+        let y = go(arg(2))
+        result = interval(min(x.lo, y.lo), max(x.hi, y.hi))
+      elif k == kinds.add and n >= 1:
+        var acc = some(go(arg(0)))
+        for i in 1 ..< n:
+          if acc.isNone: break
+          acc = add(acc.get, go(arg(i)))
+        if fits(acc, w): result = acc.get
+      elif k == kinds.sub and n == 2:
+        let r = sub(go(arg(0)), go(arg(1)))
+        if fits(r, w): result = r.get
+      elif k == kinds.sext and n == 1:
+        result = go(arg(0))
+      elif k == kinds.zext and n == 1:
+        let aw = widthOf(arg(0))
+        let x = go(arg(0))
+        if x.lo >= 0: result = x
+        elif aw < 63: result = interval(0, (1'i64 shl aw) - 1)
+    else: discard
+    memo[id] = result
+  go(t)
+
+proc bvOverflowDischarged(a, b: SymVal, op: IRBinop): bool =
+  ## RFC-0005 S8bv. `overflowCond(a, b, op)` is unsatisfiable on structural
+  ## grounds: the operands' `bvSignedInterval`s combine to an interval that
+  ## fits the width. `lowerArith` then pushes no `OverflowDefect` fork for
+  ## the op. A counter a joined loop step increments (`k = ite(g, k + 1,
+  ## k)`, `for x in s: inc k` over a builtin set) is bounded by its step
+  ## count, so its forks were all infeasible, and each one's boundary query
+  ## re-solved the whole chain: a `set[char]` loop ran for minutes.
+  let ctx = requireCurrentContext()
+  let w = case a.kind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          else: 64
+  let x = bvSignedInterval(ctx, rawAnyAstOf(a))
+  let y = bvSignedInterval(ctx, rawAnyAstOf(b))
+  let r = case op
+          of bAdd: add(x, y)
+          of bSub: sub(x, y)
+          of bMul: mul(x, y)
+          else: none(Interval)
+  let (lo, hi) = intBounds(w)
+  r.isSome and r.get.lo >= lo and r.get.hi <= hi
+
 proc overflowCondInt(a, b: SymVal, op: IRBinop): Z3Bool =
   ## R3 (S2, walker v91): the Int-sort counterpart to `overflowCond`, for a
   ## WIDTH-TYPED `svInt` operand (`a.ziWidth != 0 and a.ziSigned`). For
@@ -6855,7 +6962,8 @@ proc lowerArith(a, b: SymVal, op: IRBinop): SymVal =
     else:
       divByZeroConds.add c
       syncDivByZeroCond(c)
-  if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and a.signed:
+  if op in {bAdd, bSub, bMul} and a.kind in {svBV8, svBV16, svBV32, svBV64} and
+     a.signed and not bvOverflowDischarged(a, b, op):   # RFC-0005 S8bv
     let oc = overflowCond(a, b, op)
     overflowConds.add oc
     syncOverflowCond(oc)

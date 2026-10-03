@@ -202,7 +202,10 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "220"
+const symexWalkerVersion* = "226"
+  ## RFC-0005 S8bv (2026-10-03) — S8bq's remainder, all precision. `for x
+  ## in s` over a builtin set is unrolled over the base type's domain in
+  ## ascending order (it declined). Provisional 226.
   ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
   ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
   ## to its path, as S8bc declines `newSeq`'s (it was modelled as an

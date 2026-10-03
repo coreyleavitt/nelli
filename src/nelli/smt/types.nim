@@ -4036,6 +4036,12 @@ const maxBitSetDomain* = 1 shl 16
   ## RFC-0005 S8bq. Nim's own limit on a set's base type: at most 2^16
   ## values.
 
+const maxBitSetIterDomain* = 256
+  ## RFC-0005 S8bv. The largest base-type domain `for x in s` over a builtin
+  ## set is unrolled over (one guarded step per value of `T`): `char`,
+  ## `int8`, `uint8`, `bool` and any enum or range of at most 256 values. A
+  ## larger domain (`set[int16]`) declines, scoped to its path.
+
 proc bitSetDomain*(elemTy: IRType): tuple[ok: bool, lo: int64, size: int] =
   ## RFC-0005 S8bq. The values of a `set[elemTy]` base type: `lo` and the
   ## count, bit `i` of the set standing for value `lo + i`. A `bool`

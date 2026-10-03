@@ -465,8 +465,11 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
   test "the call cache admits only a clean callee path":
     var gated = false
     # RFC-0005 S8ax: the statement dispatcher is `walkStmt`; `walk` is the
-    # capture-cell sync wrapper around it.
-    for t in routineBody(smtDir / "runtime.nim", "walkStmt"):
+    # capture-cell sync wrapper around it. RFC-0005 batch 6: its `isCall`
+    # arm is `walkCallArm`, which `walkStmt` calls.
+    check "walkCallArm(stmt, paths, w)" in
+      routineBody(smtDir / "runtime.nim", "walkStmt").join("\n")
+    for t in routineBody(smtDir / "runtime.nim", "walkCallArm"):
       if "cp.taint != {}" in t: gated = true  # RFC-0005 S8ax: every exit
     check gated
 

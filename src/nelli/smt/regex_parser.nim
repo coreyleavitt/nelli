@@ -620,22 +620,37 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
   # RFC-0005 S8bj: an unanchored attempt also reads whether it starts at a
   # CRLF's LF past the start offset (a SKIP:NAME without its MARK).
   let eligs = (if search and n.hasNeverSkip: @[false, true] else: @[false])
-  var setRe, capRe: seq[seq[Z3Regex[Z3String]]]   # [group][variant*2+elig]
+  # RFC-0005 S8bt: the found attempt's `ignore_skip_arg` (a mixed
+  # SKIP:NAME's count kept from the attempt before), read off the search
+  # (`foundIgn`).
+  let igs = (if search: attemptIgns(n) else: @[0'i8])
+  var firstIg: seq[seq[Z3Regex[Z3String]]]       # [ign][variant]
+  if igs.len > 1:
+    for ig in igs:
+      var f: seq[Z3Regex[Z3String]]
+      for pc in pl.vars:
+        let l = searchLangV(n, key, skFirst, pc, foundIgn = ig)
+        if not l.ok: return unmodelled(sp.entry & ": " & l.why)
+        f.add selToZ3(l.re)
+      firstIg.add f
+  # [group][(ign * variants + variant) * 2 + elig]
+  var setRe, capRe: seq[seq[Z3Regex[Z3String]]]
   for h in 1 .. pr.groups:
     var a, c: seq[Z3Regex[Z3String]]
-    for pc in pl.vars:
-      for el in [false, true]:
-        if el and el notin eligs:
-          a.add a[^1]
-          if h == g: c.add c[^1]
-          continue
-        let ls = captureLangV(n, key, h, pc, false, not search, el)
-        if not ls.ok: return unmodelled(sp.entry & ": " & ls.why)
-        a.add selToZ3(ls.re)
-        if h == g:
-          let lc = captureLangV(n, key, h, pc, true, not search, el)
-          if not lc.ok: return unmodelled(sp.entry & ": " & lc.why)
-          c.add selToZ3(lc.re)
+    for ig in igs:
+      for pc in pl.vars:
+        for el in [false, true]:
+          if el and el notin eligs:
+            a.add a[^1]
+            if h == g: c.add c[^1]
+            continue
+          let ls = captureLangV(n, key, h, pc, false, not search, el, ig)
+          if not ls.ok: return unmodelled(sp.entry & ": " & ls.why)
+          a.add selToZ3(ls.re)
+          if h == g:
+            let lc = captureLangV(n, key, h, pc, true, not search, el, ig)
+            if not lc.ok: return unmodelled(sp.entry & ": " & lc.why)
+            c.add selToZ3(lc.re)
     setRe.add a
     capRe.add c
   let lenS = len(s)
@@ -656,9 +671,22 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
                 (p > start) and rawClassIs(s, p, pcCR) and
                 (toCode(at(s, p)) == mkInt(10))
               else: mkBool(false))
+  let nv = pl.vars.len
   proc atVariant(f: proc (i: int): Z3Bool): Z3Bool =
-    variant(pl, s, p, proc (v: int): Z3Bool =
-      ite(elig, f(2 * v + 1), f(2 * v)))
+    proc atIgn(gi: int): Z3Bool =
+      variant(pl, s, p, proc (v: int): Z3Bool =
+        ite(elig, f(2 * (gi * nv + v) + 1), f(2 * (gi * nv + v))))
+    result = atIgn(igs.high)
+    if igs.len > 1:
+      # The found attempt's count: the `skFirst` language of that count
+      # holds of `u` marked at `q`.
+      let lenU = len(u)
+      let markedQ = concat(substr(u, mkInt(0), p - start), findMarker(),
+                           substr(u, p - start, lenU - (p - start)))
+      for gi in countdown(igs.high - 1, 0):
+        let isIg = variant(pl, s, start, proc (v: int): Z3Bool =
+          matches(markedQ, firstIg[gi][v]))
+        result = ite(isIg, atIgn(gi), result)
   proc isSet(h: int): Z3Bool =
     atVariant(proc (i: int): Z3Bool = matches(w, setRe[h - 1][i]))
   var fits, higher: seq[Z3Bool]
@@ -1026,15 +1054,25 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
   ##     PCRE again from the match's end.
   ## An invalid UTF-8 subject is returned as is (every call is an error).
   ## Pinned against `std/re` (`tests/tsymex_rfc0005_s8bj_replace.nim`).
+  ## RFC-0005 S8bt: an attempt that leaves pcre_exec.c's `ignore_skip_arg`
+  ## set for the next one (`Leaf.ign`, `ig > 0`) returns code `260 + ig`
+  ## for a bump, `270 + ig` for the SKIP mark, `320 + 8 * register + ig`
+  ## for a SKIP landing at a register; the next attempt starts in that
+  ## value's start state (`mode` carries it).
   let ctx = s.ctx
   let empty = mkString("")
-  let bump = codeStr(256)
   let commit = codeStr(257)
-  let skipMark = codeStr(258)
   let nlSet = nlBytes(n.nl)
   let pair = nlPair(n.nl)
-  proc refStr(reg: int; skip: bool): Z3String =
-    codeStr(300 + 2 * reg + ord(skip))
+  let igns = t.igns
+  proc bumpOf(ig: int8): Z3String =
+    codeStr(if ig == 0: 256 else: 260 + int(ig))
+  proc skipMarkOf(ig: int8): Z3String =
+    codeStr(if ig == 0: 258 else: 270 + int(ig))
+  let bump = bumpOf(0)
+  proc refStr(reg: int; skip: bool; ig = 0'i8): Z3String =
+    if skip and ig != 0: codeStr(320 + 8 * reg + int(ig))
+    else: codeStr(300 + 2 * reg + ord(skip))
   let run = defineRecFun[Z3String, Z3Int, Z3String](ctx, fresh("__regexStep"),
     proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3String]; u: Z3String;
           st: Z3Int): Z3String =
@@ -1048,23 +1086,25 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
       let tl = substr(u, mkInt(1), lenU - mkInt(1))
       proc leafVal(lf: Leaf): Z3String =
         case lf.kind
-        of lfBump: result = bump
+        of lfBump: result = bumpOf(lf.ign)
         of lfCommit: result = commit
         of lfMatch: result = (if lf.reg < 0: u else: refStr(lf.reg, false))
         of lfSkip:
-          result = (if lf.reg < 0: concat(skipMark, u)
-                    else: refStr(lf.reg, true))
+          result = (if lf.reg < 0: concat(skipMarkOf(lf.ign), u)
+                    else: refStr(lf.reg, true, lf.ign))
         of lfNext:
           let later = self(tl, mkInt(int(lf.next)))
           result = later
           for i in countdown(lf.regMap.high, 0):
             let m = lf.regMap[i]
-            for skip in [false, true]:
+            var vs = @[(false, 0'i8)]
+            for ig in igns: vs.add (true, ig)
+            for (skip, ig) in vs:
               let here =
-                if m >= 0: refStr(m, skip)
-                elif skip: concat(skipMark, u)
+                if m >= 0: refStr(m, skip, ig)
+                elif skip: concat(skipMarkOf(ig), u)
                 else: u
-              result = ite(later == refStr(i, skip), here, result)
+              result = ite(later == refStr(i, skip, ig), here, result)
       proc row(leaves: seq[Leaf]): Z3String =
         # The bytes grouped by leaf, the largest group the default.
         var groups: seq[(Leaf, set[char])]
@@ -1108,7 +1148,9 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
   let j = n.jit
   let pcs = (if n.needPc: @[pcStart, pcOther, pcLF, pcCRLF, pcCR, pcNl]
              else: @[pcStart, pcOther])
-  proc modeNum(cur: int; pc: PrevClass): Z3Int = mkInt(cur * 8 + ord(pc))
+  proc modeNum(cur: int; pc: PrevClass; ig = 0'i8): Z3Int =
+    # RFC-0005 S8bt: plus 1000 * the next attempt's `ignore_skip_arg`.
+    mkInt(1000 * int(ig) + cur * 8 + ord(pc))
   let rep = defineRecFun[Z3String, Z3Int, Z3Int, Z3String](ctx,
     fresh("__regexStepReplace"),
     proc (self: Z3FuncDecl[(Z3String, Z3Int, Z3Int), Z3String];
@@ -1120,7 +1162,7 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
       proc next(c: char; pc: PrevClass): PrevClass =
         (if n.needPc: nextClass(c, pc) else: pcOther)
       proc callAfter(v: Z3String; cur: int; pcOf: proc (c: char): PrevClass;
-                     lastByte: Z3Int): Z3String =
+                     lastByte: Z3Int; ig = 0'i8): Z3String =
         # `self(v, cur, class)`, the class read off the byte before `v`
         # (`lastByte`) as numerals.
         var byClass: seq[(PrevClass, set[char])]
@@ -1132,35 +1174,37 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
               g[1].incl char(x)
               found = true
           if not found: byClass.add (c, {char(x)})
-        result = self(v, modeNum(cur, byClass[0][0]), f1)
+        result = self(v, modeNum(cur, byClass[0][0], ig), f1)
         for gi in 1 ..< byClass.len:
           result = ite(inSet(lastByte, byClass[gi][1]),
-                       self(v, modeNum(cur, byClass[gi][0]), f1), result)
-      proc step(cur: int; pc: PrevClass): Z3String =
+                       self(v, modeNum(cur, byClass[gi][0], ig), f1), result)
+      proc step(cur: int; pc: PrevClass; ig = 0'i8): Z3String =
         # Keep `u[0]`, go on from the next byte.
         concat(at(u, mkInt(0)),
-               callAfter(tl, cur, proc (c: char): PrevClass = next(c, pc), b))
-      proc restAt(v: Z3String; cur: int; pc: PrevClass): Z3String =
+               callAfter(tl, cur, proc (c: char): PrevClass = next(c, pc), b,
+                         ig))
+      proc restAt(v: Z3String; cur: int; pc: PrevClass;
+                  ig = 0'i8): Z3String =
         # Go on from the suffix `v` of `u` (shorter than `u`).
         let d = lenU - len(v)
         let b1 = toCode(at(u, d - mkInt(1)))
         if not n.needPc:
-          return self(v, modeNum(cur, pcOther), f1)
+          return self(v, modeNum(cur, pcOther, ig), f1)
         # The class before `v`: its last byte, and a CR before an LF.
         let prevCR = ite(d >= mkInt(2), toCode(at(u, d - mkInt(2))) == mkInt(13),
                          mkBool(pc == pcCR))
         ite(b1 == mkInt(10),
-            ite(prevCR, self(v, modeNum(cur, pcCRLF), f1),
-                self(v, modeNum(cur, pcLF), f1)),
-            callAfter(v, cur, proc (c: char): PrevClass = next(c, pcOther), b1))
-      proc attempt(pc: PrevClass; ne, elig: bool): Z3String =
-        let st = t.start[(canonPc0(n, pc), ne, elig)]
+            ite(prevCR, self(v, modeNum(cur, pcCRLF, ig), f1),
+                self(v, modeNum(cur, pcLF, ig), f1)),
+            callAfter(v, cur, proc (c: char): PrevClass = next(c, pcOther), b1,
+                      ig))
+      proc attempt(pc: PrevClass; ne, elig: bool; ig = 0'i8): Z3String =
+        let st = t.start[(canonPc0(n, pc), ne, elig, ig)]
         let r = run(u, mkInt(st))
         let lenR = len(r)
-        let isSkip = (lenR >= mkInt(1)) and
-                     (substr(r, mkInt(0), mkInt(1)) == skipMark)
+        let head = substr(r, mkInt(0), mkInt(1))
         let landing = substr(r, mkInt(1), lenR - mkInt(1))
-        let bumped =
+        proc bumped(ig1: int8): Z3String =
           if anchored: u
           elif n.utf and n.engine == peJit837:
             # RFC-0005 S8bt: the JIT bumps one byte from a continuation
@@ -1168,21 +1212,28 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
             ite(lenU == mkInt(0), empty,
                 ite(b >= mkInt(0xC0), step(cuMid, pc), step(cuLanded, pc)))
           else: ite(lenU == mkInt(0), empty,
-                    step((if n.utf: cuMid else: cuLanded), pc))
+                    step((if n.utf: cuMid else: cuLanded), pc, ig1))
         # RFC-0005 S8bt: the JIT resumes at a landing with its scan (no
         # CRLF start skip).
         let landCur = (if n.engine == peJit837: cuScan else: cuLanded)
-        let skipped =
+        proc skipped(ig1: int8): Z3String =
+          # A jump past the start keeps `ignore_skip_arg`; one that does
+          # not is a bump, which resets it.
           if anchored: u
           else: ite(len(landing) < lenU,
                     concat(substr(u, mkInt(0), lenU - len(landing)),
-                           restAt(landing, landCur, pc)),
-                    bumped)
+                           restAt(landing, landCur, pc, ig1)),
+                    bumped(0))
         let matched = concat(by, ite(lenR == mkInt(0), empty,
           ite(lenR == lenU, self(u, modeNum(cuS0ne, pc), f1),
               restAt(r, cuS0, pc))))
-        ite(r == bump, bumped, ite(r == commit, u,
-            ite(isSkip, skipped, matched)))
+        result = matched
+        for ig1 in igns:
+          result = ite((lenR >= mkInt(1)) and (head == skipMarkOf(ig1)),
+                       skipped(ig1), result)
+        result = ite(r == commit, u, result)
+        for ig1 in igns:
+          result = ite(r == bumpOf(ig1), bumped(ig1), result)
       proc created(pc: PrevClass; atS0: bool): Z3Bool =
         # The start-of-match scan stops here.
         if anchored: return mkBool(true)
@@ -1218,30 +1269,32 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
             visit = ite(inSet(byteAt(j.rangeRight), cs),
                         step(cuPass(t - 1), pc), visit)
         ite(lenU <= mkInt(j.max - 1), go, visit)
-      proc body(cur: int; pc: PrevClass): Z3String =
+      proc body(cur: int; pc: PrevClass; ig = 0'i8): Z3String =
+        # RFC-0005 S8bt: `ig` the next attempt's `ignore_skip_arg`; the
+        # start-of-match scan and the CRLF start skip keep it.
         if cur > cuMid:
           # Passing a position the JIT's scan jumped over.
           return ite(lenU == mkInt(0), empty, step(cuPass(cur - 5), pc))
         case cur
         of cuMid:
           ite((lenU > mkInt(0)) and inSet(b, {'\x80'..'\xBF'}),
-              step(cuMid, pc), body(cuLanded, pc))
+              step(cuMid, pc, ig), body(cuLanded, pc, ig))
         of cuLanded:
           if n.skipActive and pc == pcCR:
-            ite((lenU > mkInt(0)) and (b == mkInt(10)), step(cuScan, pc),
-                body(cuScan, pc))
-          else: body(cuScan, pc)
+            ite((lenU > mkInt(0)) and (b == mkInt(10)), step(cuScan, pc, ig),
+                body(cuScan, pc, ig))
+          else: body(cuScan, pc, ig)
         of cuScan:
           let elig = n.hasNeverSkip and n.skipActive and pc == pcCR
           let go =
             if elig:
               ite((lenU > mkInt(0)) and (b == mkInt(10)),
-                  attempt(pc, false, true), attempt(pc, false, false))
-            else: attempt(pc, false, false)
+                  attempt(pc, false, true, ig), attempt(pc, false, false, ig))
+            else: attempt(pc, false, false, ig)
           if jitOn: jitScanHere(go, pc)
           else:
             ite(created(pc, false), go,
-                ite(lenU == mkInt(0), empty, step(cuScan, pc)))
+                ite(lenU == mkInt(0), empty, step(cuScan, pc, ig)))
         else:
           let go = attempt(pc, cur == cuS0ne, false)
           if jitOn: jitScanHere(go, pc)
@@ -1252,12 +1305,15 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
       var curs = @[cuS0, cuS0ne, cuScan, cuLanded, cuMid]
       if jitOn:
         for p in 1 ..< j.rangeLen: curs.add cuPass(p)
-      for cur in curs:
-        if anchored and cur >= cuScan: continue
-        if cur == cuMid and not n.utf: continue
-        for pc in pcs:
-          if pc == pcStart and cur >= cuScan: continue
-          result = ite(mode == modeNum(cur, pc), body(cur, pc), result)
+      for ig in igns:
+        for cur in curs:
+          if anchored and cur >= cuScan: continue
+          if cur == cuMid and not n.utf: continue
+          if ig != 0 and cur in {cuS0, cuS0ne}: continue
+          for pc in pcs:
+            if pc == pcStart and cur >= cuScan: continue
+            result = ite(mode == modeNum(cur, pc, ig), body(cur, pc, ig),
+                         result)
       result = ite(fuel <= mkInt(0), empty, result))
   result = ite(len(s) == mkInt(0), empty,
                rep(s, modeNum(cuS0, pcStart), mkInt(2) * len(s) + mkInt(2)))

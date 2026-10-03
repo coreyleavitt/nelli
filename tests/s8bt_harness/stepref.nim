@@ -11,8 +11,10 @@ proc finalNl(n: Nfa; s: string; j: int): bool =
   (rest == 1 and s[j] in nlBytes(n.nl)) or
     (nlPair(n.nl) and rest == 2 and s[j] == '\r' and s[j + 1] == '\n')
 
-proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int) =
-  ## The table's attempt at `x`: its outcome and position.
+proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int,
+                                                             int8) =
+  ## The table's attempt at `x`: its outcome, position and the next
+  ## attempt's `ignore_skip_arg` (RFC-0005 S8bt).
   var st = st0
   var regs: seq[int]
   for j in x .. s.len:
@@ -28,9 +30,9 @@ proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int) =
       regs = nr
       st = lf.next
     of lfMatch, lfSkip:
-      return (lf.kind, (if lf.reg < 0: j else: regs[lf.reg]))
+      return (lf.kind, (if lf.reg < 0: j else: regs[lf.reg]), lf.ign)
     else:
-      return (lf.kind, 0)
+      return (lf.kind, 0, lf.ign)
   raiseAssert "runRef: no leaf at the end"
 
 proc execRef*(n: Nfa; t: StepTable; s: string; start: int;
@@ -38,6 +40,7 @@ proc execRef*(n: Nfa; t: StepTable; s: string; start: int;
   ## The engine's loop over the table's attempts.
   let jit = n.engine == peJit837
   var x = start
+  var ign = 0'i8
   while true:
     if jit and n.jit.on and not n.anchoredPat: x = n.jit.scanFrom(s, x)
     else:
@@ -45,7 +48,8 @@ proc execRef*(n: Nfa; t: StepTable; s: string; start: int;
     let pc = canonPc0(n, classAt(s, x))
     let elig = n.hasNeverSkip and x > start and x < s.len and
                s[x - 1] == '\r' and s[x] == '\n' and n.skipActive
-    let (k, pos) = runRef(n, t, s, x, t.start[(pc, ne and x == start, elig)])
+    let (k, pos, ig) = runRef(n, t, s, x,
+                              t.start[(pc, ne and x == start, elig, ign)])
     var next: int
     var landed = false
     case k
@@ -54,7 +58,10 @@ proc execRef*(n: Nfa; t: StepTable; s: string; start: int;
     of lfSkip:
       landed = pos > x
       next = (if landed: pos else: x + 1)
-    else: next = x + 1
+      ign = (if landed: ig else: 0'i8)
+    else:
+      next = x + 1
+      ign = ig
     if n.utf and not landed:
       if jit:
         if x < s.len:

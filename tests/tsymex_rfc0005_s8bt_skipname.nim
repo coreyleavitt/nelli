@@ -85,6 +85,29 @@ proc check1(p: string; subjects: seq[string]; t: var Tally) =
       if got != want:
         t.bad.add escape(p) & " find/last(" & escape(s) & ", " & $st &
                   ") = " & $got & ", re: " & $want
+    if pr.groups > 0:
+      # The found attempt's groups (its count kept from the attempt
+      # before: `pcreExecIgn`).
+      for st in 0 .. s.len:
+        var bs: array[3, tuple[first, last: int]]
+        for i in 0 ..< bs.len: bs[i] = (first: -9, last: -9)
+        let r = findBounds(s, rx, bs, st)
+        let ((rc, a, _), ign) = pcreExecIgn(nu, s, st, false)
+        if rc == pcreUnmodelled: continue
+        var got = @[(-9, -9), (-9, -9), (-9, -9)]
+        if rc == 1:
+          let (_, cs) = chosenCapsAt(nu, s, a, st, false, ign)
+          var hi = 0
+          for i in 1 .. cs.len:
+            if cs[i - 1][0] >= 0: hi = i
+          for i in 1 .. min(hi, 3):
+            got[i - 1] = (if cs[i - 1][0] < 0: (-1, 0)
+                          else: (cs[i - 1][0], cs[i - 1][1] - 1))
+        var want: seq[(int, int)]
+        for x in bs: want.add (x.first, x.last)
+        if r.first >= 0 and got != want:
+          t.bad.add escape(p) & " captures(" & escape(s) & ", " & $st &
+                    ") = " & $got & ", re: " & $want
     let wantR = replace(s, rx, "-")
     var unm = false
     let gotR = pcreReplace(nu, s, "-", unm)
@@ -106,6 +129,9 @@ proc staleCorpus*(): seq[string] =
         let p = a & "|" & b & "|" & c
         if "SKIP:B" in p and ("MARK" in p or "(*SKIP)" in p):
           result.add p
+          # Every fourth with its alternatives as groups.
+          if result.len mod 8 == 1:
+            result.add "(" & a & ")|(" & b & ")|(" & c & ")"
 
 # The patterns are split four ways between this file and its `_b` .. `_d`
 # twins (which include this one with `s8btSkipPart = 1` .. `3`), so each

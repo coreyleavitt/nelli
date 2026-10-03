@@ -357,6 +357,11 @@ title = "S8bb's remainder A: regex nodes as defect carriers, closure exit facts 
 state = "done"
 
 [[slice]]
+id = "S8bq"
+title = "S8bi's remainder: huge newSeq n modelled as succeeding, set-typed values/params and builtin incl/excl, re\"(ab\" literal raise, newSeqUninit path taint, set literals with non-constant elements"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

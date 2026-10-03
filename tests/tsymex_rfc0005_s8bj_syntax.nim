@@ -129,7 +129,7 @@ suite "S8bj: the reader against re()":
       check pr.status == psOk
       var msg: cstring
       var off: cint
-      let h = pcre.compile(p, 0, addr msg, addr off, nil)
+      let h = pcre.compile(p.cstring, 0, addr msg, addr off, nil)
       var opts: culong
       discard pcre.fullinfo(h, nil, pcre.INFO_OPTIONS, addr opts)
       var ml, rl: uint32

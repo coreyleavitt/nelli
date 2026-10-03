@@ -117,7 +117,7 @@ const readPatterns = [
 
 const stillUndecided = ["(?m)a", "(?X)a", "(*UTF8)a", "(*UTF)a",
   "(*COMMIT)a", "(*PRUNE)a", "(*SKIP)a", "(*THEN)a", "(*PRUNE:n)a",
-  "(?<n>a)(?<n>A)", "\\p{Foo}", "(?i)*", "(*LIMIT_MATCH=9)a",
+  "(?<n>a)(?<n>A)", "\\p{Foo}", "(*LIMIT_MATCH=9)a",
   "(*LIMIT_RECURSION=9)a", "a(*ACCEPT)?", "\\R"]
 
 suite "S8bb (5): the constructs S8ay left undecided, against std/re":

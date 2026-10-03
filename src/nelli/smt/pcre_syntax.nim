@@ -126,12 +126,36 @@ type
     ## RFC-0005 S8bj.
     vbCommit, vbPrune, vbSkip, vbSkipName, vbThen, vbMark
 
+  AtomOp* = enum
+    ## RFC-0005 S8bj. The opcode PCRE compiles a one-character item to
+    ## (pcre_compile.c), which its start-of-match optimiser reads
+    ## (`pcre_startopt.nim`).
+    aoChar       ## OP_CHAR / OP_CHARI: the character `ch` (a literal, an
+                 ## escape, or a class of one character)
+    aoNot        ## OP_NOT / OP_NOTI: a negated class of one character
+    aoClass      ## OP_CLASS: a bitmap class
+    aoNClass     ## OP_NCLASS: a bitmap class taking every character > 255
+    aoXClass     ## OP_XCLASS (`xNot`, `xMap`, `xProp`)
+    aoType       ## OP_DIGIT .. OP_WORDCHAR: `\d \D \s \S \w \W`
+    aoHSpace     ## OP_HSPACE: `\h`
+    aoVSpace     ## OP_VSPACE: `\v`
+    aoNotSpace   ## OP_NOT_HSPACE / OP_NOT_VSPACE: `\H` / `\V`
+    aoAny        ## OP_ANY / OP_ALLANY: `.` and `\N`
+    aoProp       ## OP_PROP / OP_NOTPROP: `\p`, and `(*UCP)`'s classes
+    aoFail       ## OP_FAIL: `(*F)` / `(*FAIL)`
+
   Rx* = ref object
     cap*: int          ## RFC-0005 S8bb: the capturing group this node is
                        ## the body of (1-based), 0 if none
     crlfDot*: bool     ## RFC-0005 S8bb: rxSet / rxChars of `.` / `\N`
                        ## under `(*CRLF)`: a CR only when no LF follows it
     multi*: bool       ## RFC-0005 S8bj: rxBol / rxEol under `(?m)`
+    op*: AtomOp        ## RFC-0005 S8bj: rxSet / rxChars: the opcode
+    ch*: int32         ## RFC-0005 S8bj: aoChar: the character
+    ci*: bool          ## RFC-0005 S8bj: aoChar / aoNot: caseless
+    negType*: bool     ## RFC-0005 S8bj: aoType: `\D \S \W`
+    xNot*, xMap*, xProp*: bool
+      ## RFC-0005 S8bj: aoXClass: negated, with a bitmap, with a property
     case kind*: RxKind
     of rxSet:
       bytes*: set[char]
@@ -167,8 +191,9 @@ type
     utf*: bool         ## psOk: UTF mode (RFC-0005 S8bj)
     noStartOpt*: bool  ## psOk: `(*NO_START_OPT)` (RFC-0005 S8bj)
     limitMatch*, limitRecursion*: int64
-      ## psOk: `(*LIMIT_MATCH=)` / `(*LIMIT_RECURSION=)`, -1 when not
-      ## given (RFC-0005 S8bj)
+      ## psOk: `(*LIMIT_MATCH=)` / `(*LIMIT_RECURSION=)` (the smallest
+      ## given), -1 when not given (RFC-0005 S8bj). `pcre_exec` applies one
+      ## only below its default `pcreDefaultLimit`.
     errMsg*: string    ## psRejected: Nim's exact `RegexError.msg`
     reason*: string    ## psUnmodelled / psUnknown: the construct
 
@@ -381,23 +406,23 @@ proc skipX(r: var Reader) =
     else:
       break
 
-proc mkSet(s: set[char]): Rx = Rx(kind: rxSet, bytes: s)
+proc mkSet(s: set[char]; op: AtomOp): Rx = Rx(kind: rxSet, bytes: s, op: op)
 
 proc topCp(r: Reader): int32 =
   ## RFC-0005 S8bj. The largest character value: U+10FFFF in UTF mode.
   (if r.utf: maxCp else: 255'i32)
 
-proc mkAtom(r: Reader; s: CpSet): Rx =
-  ## RFC-0005 S8bj. One character of `s`: a byte set, or in UTF mode a
-  ## code point set.
-  if r.utf: Rx(kind: rxChars, cps: cpNorm(s))
-  else: mkSet(cpBytes(s))
+proc mkAtom(r: Reader; s: CpSet; op: AtomOp): Rx =
+  ## RFC-0005 S8bj. One character of `s` (compiled to `op`): a byte set, or
+  ## in UTF mode a code point set.
+  if r.utf: Rx(kind: rxChars, cps: cpNorm(s), op: op)
+  else: mkSet(cpBytes(s), op)
 
 proc mkDot(r: Reader; dotall: bool): Rx =
   ## RFC-0005 S8bb. `.` (`dotall`: under `(?s)`) or `\N` (never dotall).
   ## RFC-0005 S8bj: every code point in UTF mode.
-  if dotall: return r.mkAtom(@[(0'i32, r.topCp)])
-  result = r.mkAtom(cpComplement(cpOfBytes(nlBytes(r.nl)), r.topCp))
+  if dotall: return r.mkAtom(@[(0'i32, r.topCp)], aoAny)
+  result = r.mkAtom(cpComplement(cpOfBytes(nlBytes(r.nl)), r.topCp), aoAny)
   result.crlfDot = r.nl == nlCRLF
 
 proc noteChar(r: var Reader; c: int32) =
@@ -427,6 +452,12 @@ proc foldCps(r: var Reader; s: CpSet): CpSet =
         return s
   cpUnion(s, cpOfBytes(fold(cpBytes(s))))
 
+proc mkChar(r: var Reader; c: int32): Rx =
+  ## RFC-0005 S8bj. A literal character (OP_CHAR / OP_CHARI).
+  result = r.mkAtom(r.foldCps(@[(c, c)]), aoChar)
+  result.ch = c
+  result.ci = r.caseless
+
 proc mkCat(kids: seq[Rx]): Rx = Rx(kind: rxCat, kids: kids)
 
 proc isHex(c: char): bool = c in {'0'..'9', 'a'..'f', 'A'..'F'}
@@ -446,12 +477,15 @@ type Esc = object
   c: int32
   s: CpSet
   n: int
+  op: AtomOp    ## RFC-0005 S8bj: ekSet: the opcode
+  neg: bool     ## RFC-0005 S8bj: ekSet: a negated type (`\D \S \W`)
 
 proc escSet(r: var Reader; s: set[char]; negated: bool): Esc =
   ## RFC-0005 S8bj. An ASCII escape class: in UTF mode its complement takes
   ## every code point above 0xFF too.
   let base = cpOfBytes(s)
-  Esc(kind: ekSet, s: (if negated: cpComplement(base, r.topCp) else: base))
+  Esc(kind: ekSet, s: (if negated: cpComplement(base, r.topCp) else: base),
+      op: aoType, neg: negated)
 
 proc isCountedRepeat(r: Reader; j: int): bool
 
@@ -478,17 +512,23 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
   of 'n': Esc(kind: ekChar, c: 10)
   of 'r': Esc(kind: ekChar, c: 13)
   of 't': Esc(kind: ekChar, c: 9)
-  of 'd': r.escSet(pcreDigit, false)
-  of 'D': r.escSet(pcreDigit, true)
-  of 'w', 'W', 's', 'S':
+  of 'd', 'D', 'w', 'W', 's', 'S':
     # RFC-0005 S8bb: `(*UCP)` reads them as Unicode properties.
     if r.ucp and r.utf:
       r.unmodelled("the escape \\" & c & " under (*UCP) in UTF mode")
-      return Esc(kind: ekSet)
+      return Esc(kind: ekSet, op: aoProp)
     let (u, us) = (if r.ucp: pcreUcpSet("\\" & c) else: (false, {}))
-    if u: Esc(kind: ekSet, s: cpOfBytes(us))
+    if u: Esc(kind: ekSet, s: cpOfBytes(us), op: aoProp)
+    elif r.ucp and c in {'d', 'D'}:
+      # RFC-0005 S8bj: `\p{Nd}` / `\P{Nd}` (OP_PROP): below 0x100 the
+      # ASCII digits.
+      var e = r.escSet(pcreDigit, c == 'D')
+      e.op = aoProp
+      e
     else:
       case c
+      of 'd': r.escSet(pcreDigit, false)
+      of 'D': r.escSet(pcreDigit, true)
       of 'w': r.escSet(pcreWord, false)
       of 'W': r.escSet(pcreWord, true)
       of 's': r.escSet(pcreSpace, false)
@@ -515,16 +555,18 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
     if r.utf:
       # RFC-0005 S8bj: a property of every code point, not of a byte.
       r.unmodelled("the property \\" & c & "{" & name & "} in UTF mode")
-      return Esc(kind: ekSet)
-    Esc(kind: ekSet, s: cpOfBytes(if neg: pcreAnyByte - ps else: ps))
-  of 'h', 'H':
-    if r.utf:
-      Esc(kind: ekSet, s: (if c == 'h': uHSpace else: cpComplement(uHSpace)))
-    else: r.escSet(pcreHSpace, c == 'H')
-  of 'v', 'V':
-    if r.utf:
-      Esc(kind: ekSet, s: (if c == 'v': uVSpace else: cpComplement(uVSpace)))
-    else: r.escSet(pcreVSpace, c == 'V')
+      return Esc(kind: ekSet, op: aoProp)
+    Esc(kind: ekSet, s: cpOfBytes(if neg: pcreAnyByte - ps else: ps),
+        op: aoProp)
+  of 'h', 'H', 'v', 'V':
+    let list = (if c in {'h', 'H'}: (if r.utf: uHSpace else: cpOfBytes(pcreHSpace))
+                else: (if r.utf: uVSpace else: cpOfBytes(pcreVSpace)))
+    let op = (case c
+              of 'h': aoHSpace
+              of 'v': aoVSpace
+              else: aoNotSpace)
+    Esc(kind: ekSet, op: op,
+        s: (if c in {'h', 'v'}: list else: cpComplement(list, r.topCp)))
   of 'b':
     if inClass: Esc(kind: ekChar, c: 8)
     else: Esc(kind: ekAssert)
@@ -694,9 +736,13 @@ proc readChar(r: var Reader): int32 =
   result = int32(ord(r.cur))
   inc r.i
 
-proc readClass(r: var Reader): CpSet =
+proc readClass(r: var Reader): Rx =
   ## `r.cur == '['` outside a class. Leaves `r.i` past the closing `]`.
-  ## RFC-0005 S8bj: the members are code points (bytes without UTF).
+  ## RFC-0005 S8bj: the members are code points (bytes without UTF), and
+  ## the atom carries the opcode pcre_compile.c gives the class: a class
+  ## of one character is OP_CHAR (OP_NOT when negated); otherwise OP_CLASS
+  ## / OP_NCLASS, or OP_XCLASS when it lists characters above 0xFF (UTF)
+  ## or holds a property -- the class end in `compile_branch`.
   inc r.i
   var negated = false
   if r.cur == '^':
@@ -704,6 +750,13 @@ proc readClass(r: var Reader): CpSet =
     inc r.i
   var cs: CpSet
   var first = true
+  var items = 0          ## class items read
+  var single = false     ## the last item was one character
+  var oneCh = 0'i32      ## ... that character
+  var flip = false       ## PCRE's should_flip_negation
+  var xclass = false     ## characters above 0xFF listed (UTF mode)
+  var hasProp = false    ## a property item (xclass_has_prop)
+  var has8 = false       ## an item below 0x100 (class_has_8bitchar)
   while true:
     if r.atEnd:
       r.reject("missing terminating ] for character class", r.pat.len)
@@ -712,6 +765,8 @@ proc readClass(r: var Reader): CpSet =
       inc r.i
       break
     first = false
+    inc items
+    single = false
     # One item: a character (`lo`, range-able) or a set.
     var isChar = true
     var lo = int32(ord(c))
@@ -725,6 +780,7 @@ proc readClass(r: var Reader): CpSet =
         var neg = false
         if name.len > 0 and name[0] == '^':
           neg = true
+          flip = true
           name = name[1 .. ^1]
         var (ok, ps) = posixSet(name)
         if not ok:
@@ -740,6 +796,9 @@ proc readClass(r: var Reader): CpSet =
                          "in UTF mode")
           let (u, us) = pcreUcpSet("[[:" & name & ":]]")
           if u: ps = us
+          # RFC-0005 S8bj: `(*UCP)` substitutes a property for these.
+          if name notin ["ascii", "cntrl", "xdigit", "blank"]: hasProp = true
+        has8 = true
         r.i = t + 2
         isChar = false
         itemSet = (if neg: cpComplement(cpOfBytes(ps), r.topCp)
@@ -755,6 +814,15 @@ proc readClass(r: var Reader): CpSet =
       of ekSet:
         isChar = false
         itemSet = e.s
+        case e.op
+        of aoProp: hasProp = true
+        of aoType:
+          has8 = true
+          if e.neg: flip = true
+        else:
+          # `\h \H \v \V`: in UTF mode their lists reach above 0xFF.
+          has8 = true
+          if r.utf: xclass = true
       else: r.unknown("an escape in a class")
     else:
       lo = r.readChar()
@@ -763,10 +831,10 @@ proc readClass(r: var Reader): CpSet =
       # PCRE: `-` after a class escape is a literal (`[\d-z]`).
       cs = cpUnion(cs, itemSet)
       continue
+    var hi = lo
     if r.cur == '-' and r.i + 1 < r.pat.len and r.at(1) != ']':
       # A range `lo-hi`.
       inc r.i
-      var hi: int32
       if r.cur == '[' and r.at(1) in {':', '.', '='} and
          r.checkPosixSyntax(r.i) >= 0:
         r.unknown("a range to a POSIX class")
@@ -782,10 +850,27 @@ proc readClass(r: var Reader): CpSet =
       if hi < lo:
         r.reject("range out of order in character class", r.i - 1)
       r.noteChar(hi)
-      cs = cpUnion(cs, r.foldCps(@[(lo, hi)]))
-    else:
-      cs = cpUnion(cs, r.foldCps(@[(lo, lo)]))
-  if negated: cpComplement(cs, r.topCp) else: cs
+    if lo == hi:
+      # PCRE reads a range `a-a` as its one character.
+      single = true
+      oneCh = lo
+    if lo < 256: has8 = true
+    if hi > 255: xclass = true
+    cs = cpUnion(cs, r.foldCps(@[(lo, hi)]))
+  if hasProp: xclass = true
+  let members = (if negated: cpComplement(cs, r.topCp) else: cs)
+  if items == 1 and single and not hasProp:
+    # PCRE's one-character optimisation: OP_CHAR[I] / OP_NOT[I].
+    result = r.mkAtom(members, (if negated: aoNot else: aoChar))
+    result.ch = oneCh
+    result.ci = r.caseless
+  elif xclass and (hasProp or not flip or r.ucp):
+    result = r.mkAtom(members, aoXClass)
+    result.xNot = negated
+    result.xMap = has8
+    result.xProp = hasProp
+  else:
+    result = r.mkAtom(members, (if negated == flip: aoClass else: aoNClass))
 
 proc isCountedRepeat(r: Reader; j: int): bool =
   ## PCRE's `is_counted_repeat` at `pat[j-1] == '{'`.
@@ -886,7 +971,7 @@ proc readVerb(r: var Reader): Rx =
     node = Rx(kind: rxVerb, verb: vbCommit)
   of "F", "FAIL":
     if hasArg: r.reject(noArg, j)
-    node = r.mkAtom(@[])
+    node = r.mkAtom(@[], aoFail)
   of "PRUNE":
     node = Rx(kind: rxVerb, verb: vbPrune)
   of "SKIP":
@@ -909,15 +994,12 @@ proc readCat(r: var Reader; depth: int): Rx =
   ## One alternative, up to `|`, `)` or the end.
   var items: seq[Rx]
   var prev = pvNone
-  var zeroWidth = false   ## RFC-0005 S8bb: the last item was `(?i)`, ...
   while true:
     r.skipX()
     if r.atEnd: break
     let c = r.cur
     if c == '|' or c == ')': break
     let start = r.i
-    let afterZero = zeroWidth
-    zeroWidth = false
     case c
     of '*', '+', '?', '{':
       var lo, hi: int
@@ -925,15 +1007,15 @@ proc readCat(r: var Reader; depth: int): Rx =
         if not r.isCountedRepeat(r.i + 1):
           # A literal `{`.
           inc r.i
-          items.add r.mkAtom(@[(int32('{'), int32('{'))])
+          items.add r.mkChar(int32('{'))
           prev = pvAtom
           continue
         (lo, hi) = r.readCounts()
       else:
         lo = (if c == '+': 1 else: 0)
         hi = (if c == '?': 1 else: -1)
-      if afterZero:
-        r.unknown("a quantifier after an option setting")
+      # RFC-0005 S8bj: an option setting `(?i)` leaves nothing to repeat
+      # (pcre_compile.c sets `previous = NULL`).
       if prev == pvNone:
         r.reject("nothing to repeat", r.i)
       discard start
@@ -967,7 +1049,7 @@ proc readCat(r: var Reader; depth: int): Rx =
     of '[':
       if r.at(1) in {':', '.', '='} and r.checkPosixSyntax(r.i) >= 0:
         r.unknown("a POSIX class outside a class")
-      items.add r.mkAtom(r.readClass())
+      items.add r.readClass()
       prev = pvAtom
     of '(':
       if r.at(1) == '*' and r.at(2) in {'a'..'z', 'A'..'Z', ':'}:
@@ -1030,7 +1112,6 @@ proc readCat(r: var Reader; depth: int): Rx =
             if r.cur == ')':
               inc r.i
               prev = pvNone
-              zeroWidth = true
               continue
             capture = false
             inc r.i   # `:`
@@ -1051,7 +1132,6 @@ proc readCat(r: var Reader; depth: int): Rx =
             # To the end of the enclosing group: `saved` is not restored.
             inc r.i
             prev = pvNone
-            zeroWidth = true
             continue
           capture = false
           inc r.i   # `:`
@@ -1078,10 +1158,12 @@ proc readCat(r: var Reader; depth: int): Rx =
       case e.kind
       of ekChar:
         r.noteChar(e.c)
-        items.add r.mkAtom(r.foldCps(@[(e.c, e.c)]))
+        items.add r.mkChar(e.c)
         prev = pvAtom
       of ekSet:
-        items.add r.mkAtom(e.s)
+        let a = r.mkAtom(e.s, e.op)
+        a.negType = e.neg
+        items.add a
         prev = pvAtom
       of ekDot:
         items.add r.mkDot(false)
@@ -1110,14 +1192,14 @@ proc readCat(r: var Reader; depth: int): Rx =
             break
           let q = r.readChar()
           r.noteChar(q)
-          items.add r.mkAtom(r.foldCps(@[(q, q)]))
+          items.add r.mkChar(q)
           prev = pvAtom
       of ekQuoteEnd:
         discard   # a stray `\E` is ignored; `prev` unchanged
     else:
       let q = r.readChar()
       r.noteChar(q)
-      items.add r.mkAtom(r.foldCps(@[(q, q)]))
+      items.add r.mkChar(q)
       prev = pvAtom
   mkCat(items)
 
@@ -1176,13 +1258,13 @@ proc parsePcre*(pattern: string; extended = false): PcreParse =
       elif opt("LIMIT_MATCH="):
         let (ok, v, p) = r.readLimit(r.i + 14)
         if not ok: break
-        if v < pcreDefaultLimit and (limitMatch < 0 or v < limitMatch):
+        if limitMatch < 0 or v < limitMatch:
           limitMatch = v
         r.i = p
       elif opt("LIMIT_RECURSION="):
         let (ok, v, p) = r.readLimit(r.i + 18)
         if not ok: break
-        if v < pcreDefaultLimit and (limitRecursion < 0 or v < limitRecursion):
+        if limitRecursion < 0 or v < limitRecursion:
           limitRecursion = v
         r.i = p
       # RFC-0005 S8bb: the newline conventions; the last one wins.

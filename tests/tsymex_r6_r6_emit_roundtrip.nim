@@ -317,7 +317,11 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     fieldwiseEq(a.snzLen, b.snzLen) and fieldwiseEq(a.snzElemTy, b.snzElemTy)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
-    fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
+    fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and
+      fieldwiseEq(a.ssHi, b.ssHi) and a.ssView == b.ssView   # RFC-0005 S8bu
+  of iekSeqSplice:   # RFC-0005 S8bu
+    fieldwiseEq(a.spBase, b.spBase) and fieldwiseEq(a.spAt, b.spAt) and
+      fieldwiseEq(a.spPart, b.spPart)
   of iekStrLit: a.sval == b.sval
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
@@ -622,6 +626,11 @@ proc sSeqNewZero(): IRExpr =
   mkSeqNewZero(mkVar("n"), tTuple(@[tInt(64, true), tBool()], @["", ""]))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
+proc sSeqSliceView(): IRExpr =
+  ## RFC-0005 S8bu: `ssView` is `true` here (it defaults to `false`).
+  mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4), view = true)
+proc sSeqSplice(): IRExpr =
+  mkSeqSplice(mkVar("data"), mkIntLit(2), mkVar("part"))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
 proc sContains(): IRExpr = mkContains(mkVar("s"), mkVar("k"))
 proc sSeqAdd(): IRExpr = mkSeqAdd(mkVar("s"), mkIntLit(9))
@@ -709,6 +718,12 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
     check fieldwiseEq(sSeqSlice(), roundtripExpr(sSeqSlice()))
+  test "iekSeqSlice (a view, RFC-0005 S8bu)":
+    let reconstructed = roundtripExpr(sSeqSliceView())
+    check fieldwiseEq(sSeqSliceView(), reconstructed)
+    check reconstructed.ssView
+  test "iekSeqSplice":
+    check fieldwiseEq(sSeqSplice(), roundtripExpr(sSeqSplice()))
   test "iekStrLit":
     check fieldwiseEq(sStrLit(), roundtripExpr(sStrLit()))
   test "iekContains":
@@ -786,7 +801,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
       of iekSeqNewZero: discard                  ## "iekSeqNewZero" (RFC-0005 S8bc)
       of iekSeqLen: discard                      ## "iekSeqLen"
-      of iekSeqSlice: discard                    ## "iekSeqSlice"
+      of iekSeqSlice: discard                    ## "iekSeqSlice" (2 tests: plain + view)
+      of iekSeqSplice: discard                   ## "iekSeqSplice" (RFC-0005 S8bu)
       of iekStrLit: discard                      ## "iekStrLit"
       of iekContains: discard                    ## "iekContains"
       of iekSeqAdd: discard                      ## "iekSeqAdd"

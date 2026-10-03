@@ -20206,6 +20206,9 @@ proc viewFollows(ctx: Z3Context; old, cur: SymVal): bool =
   ## never simplified, which would fold an assignment of the whole that
   ## agrees with a store chain into one.
   if old.kind != svSeq or cur.kind != svSeq: return false
+  if old.isUnsupportedFieldPlaceholder or # [placeholder-audited]
+     cur.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+    return false
   if cast[pointer](peelSelect(ctx, old.seqLen.raw)) != # [placeholder-audited]
      cast[pointer](peelSelect(ctx, cur.seqLen.raw)): # [placeholder-audited]
     return false

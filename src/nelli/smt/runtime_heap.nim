@@ -838,7 +838,7 @@ proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast =
     discard storedAt(ctx, t, t)   # reads `storeDeclKind`
   if selectDeclKind == 0:
     let probe = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bu_select_probe")
-    let sel = ctx.checkErr Z3_mk_select(ctx.raw, probe.raw, mkInt(ctx, 0).raw)
+    let sel = checkedSelect(ctx, probe.raw, mkInt(ctx, 0).raw)
     selectDeclKind = ord(Z3_get_decl_kind(ctx.raw,
       Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, sel)))) + 1
   result = t

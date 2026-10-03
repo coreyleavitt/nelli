@@ -282,13 +282,18 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## `isUnsupportedFieldPlaceholder` (two lines) before comparing the
     ## length handles. 85 + 4 = 89.
     ## Batch 4 (S8bc then S8be): 91 + 4 = 95.
+    ##
+    ## RFC-0005 S8bu: `iekSeqSplice`'s lowering guards both operands
+    ## (two lines) before reading the base's data context and length and
+    ## the part's length (three); `viewFollows` guards both sides (two)
+    ## before comparing their length terms (two). 95 + 9 = 104.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 95
+    check runtimeCount == 104
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

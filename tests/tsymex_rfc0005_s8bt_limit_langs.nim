@@ -10,7 +10,8 @@ import z3
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/[pcre_syntax, pcre_select, regex_parser]
-import ./s8bt_harness/[member, stepref, limit_corpus]
+import nelli/smt/pcre_engine
+import ./s8bt_harness/[member, stepref, limit_oracle]
 
 var t0 = epochTime()
 proc lap(): string =
@@ -138,10 +139,10 @@ suite "S8bt: a limit between, symbolically":
       if not t.ok:
         bad.add escape(p) & " " & t.why
         continue
-      let rx = re(p)
+      let o = initLimitOracle(p)
       for s in subjects():
         inc runs
-        let want = replace(s, rx, "-")
+        let want = o.replaceInterp(s, "-")
         if pcreReplace(n, s, "-") != want: bad.add "ref " & escape(p) & " " & escape(s)
         if replaceRef(n, t, s, "-") != want:
           bad.add "table " & escape(p) & " " & escape(s)
@@ -157,7 +158,7 @@ suite "S8bt: a limit between, symbolically":
         prm.set("timeout", 10000)
         sol.setParams(prm)
         sol.add sv == mkString(s)
-        sol.add r != mkString(replace(s, rx, "-"))
+        sol.add r != mkString(o.replaceInterp(s, "-"))
         let res = $sol.check()
         if res != "zsUnsat" and bad.len < 20:
           bad.add "z3 " & escape(p) & " " & escape(s) & " " & res
@@ -186,10 +187,14 @@ proc replaceTarget(s: string) =
 suite "S8bt: a limit between, through the walker":
 
   test "verdicts":
-    for (f, label) in [(findErrTarget, "bt_limit_find_err"),
-                       (findOkTarget, "bt_limit_find_ok"),
-                       (matchLenTarget, "bt_limit_matchlen"),
-                       (replaceTarget, "bt_limit_replace")]:
+    # An unanchored call on the JIT (the Windows legs) declines: its
+    # accounting is not modelled.
+    var targets = @[(matchLenTarget, "bt_limit_matchlen")]
+    if pcreSearchEngine() == peInterp:
+      targets.add [(findErrTarget, "bt_limit_find_err"),
+                   (findOkTarget, "bt_limit_find_ok"),
+                   (replaceTarget, "bt_limit_replace")]
+    for (f, label) in targets:
       let t1 = epochTime()
       let r = symexFind(f, tLabel(label))
       echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t1,

@@ -32,8 +32,10 @@ proc rcWith(o: LimitOracle; s: string; start: int; lim: int;
     ex.flags = ex.flags or EXTRA_MATCH_LIMIT
     ex.match_limit = clong(lim)
   var ov: array[30, cint]
+  # std/re's calls without a `matches` argument: an ovector of 3 (no room
+  # for a group).
   pcre.exec(o.code, addr ex, s.cstring, cint(s.len), cint(start),
-            (if anchored: pcre.ANCHORED else: 0), addr ov[0], 30)
+            (if anchored: pcre.ANCHORED else: 0), addr ov[0], 3)
 
 proc threshold*(o: LimitOracle; s: string; start: int; recursion = false;
                 anchored = false; cap = 100_000): int =
@@ -48,3 +50,29 @@ proc threshold*(o: LimitOracle; s: string; start: int; recursion = false;
     if o.rcWith(s, start, mid, recursion, anchored) == errc: lo = mid + 1
     else: hi = mid
   lo
+
+proc execInterp*(o: LimitOracle; s: string; start: int;
+                 anchored = false; notEmptyAtStart = false): (int, int, int) =
+  ## The call itself on the interpreter, with the pattern's own limits:
+  ## `(rc, first, end)`.
+  var ov: array[30, cint]
+  var opts: cint = (if anchored: pcre.ANCHORED else: 0)
+  if notEmptyAtStart: opts = opts or pcre.NOTEMPTY_ATSTART
+  # std/re's calls without a `matches` argument: an ovector of 3.
+  let rc = pcre.exec(o.code, o.extra, s.cstring, cint(s.len), cint(start),
+                     opts, addr ov[0], 3)
+  if rc < 0: (int(rc), 0, 0) else: (1, int(ov[0]), int(ov[1]))
+
+proc replaceInterp*(o: LimitOracle; s, by: string): string =
+  ## std/re's `replace` loop over the interpreter.
+  var prev = 0
+  var ne = false
+  while prev < s.len:
+    let (rc, a, b) = o.execInterp(s, prev, false, ne)
+    ne = false
+    if rc < 0: break
+    result.add s[prev ..< a]
+    result.add by
+    if a == b: ne = true
+    prev = b
+  result.add s[min(prev, s.len) .. ^1]

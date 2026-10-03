@@ -110,15 +110,18 @@ proc typeKind(x: Rx): PKind =
 proc atomList(x: Rx; utf: bool; l: var PList): bool =
   ## The item's property list (false: an item `get_chr_property_list`
   ## does not accept).
+  # RFC-0005 S8bt: a caseless character's other case is `fcc`'s below 128
+  # (below 256 without UTF), else UCD_OTHERCASE.
+  let oc = (if x.ch < 128 or not utf: otherCase(x.ch) else: ucdOther(x.ch))
   case x.op
   of aoChar:
     l.kind = pkChar
     l.chars = @[x.ch]
-    if x.ci and otherCase(x.ch) != x.ch: l.chars.add otherCase(x.ch)
+    if x.ci and oc != x.ch: l.chars.add oc
   of aoNot:
     l.kind = pkNot
     l.chars = @[x.ch]
-    if x.ci and otherCase(x.ch) != x.ch: l.chars.add otherCase(x.ch)
+    if x.ci and oc != x.ch: l.chars.add oc
   of aoClass:
     l.kind = pkClass
     l.bits = classBits(x)
@@ -133,7 +136,12 @@ proc atomList(x: Rx; utf: bool; l: var PList): bool =
     # `\H` leaves out the space, `\V` the LF.
     l.kind = (if ' ' notin classBits(x): pkNotHSpace else: pkNotVSpace)
   of aoAny: l.kind = anyKind(x, utf)
-  of aoProp: l.kind = pkProp
+  of aoProp:
+    if x.clist:
+      # RFC-0005 S8bt: PT_CLIST becomes its caseless set's characters.
+      l.kind = (if x.clistNot: pkNot else: pkChar)
+      l.chars = ucdCaseSets[ucdCaseSet(x.ch)]
+    else: l.kind = pkProp
   of aoFail: return false
   true
 

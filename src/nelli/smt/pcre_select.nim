@@ -98,25 +98,101 @@ const
   maxRegexSize* = 40000
   symFin = 256       ## 256 ..< 261: a final newline byte `finBytes[i]`
   symR2 = 261        ## RFC-0005 S8bb: the CR of a final CRLF
-  symMark = 262      ## the marker `#` (a capture's start, RFC-0005 S8bb)
-  symMark2 = 263     ## RFC-0005 S8bb: a capture's end marker
-  symLand = 264      ## RFC-0005 S8bj: a `(*SKIP)` landing (verifiers only)
-  nSyms = 265
+  # RFC-0005 S8bt: `(*ANY)` in UTF mode (`uAny`): the multi-byte newlines
+  # U+0085 (C2 85), U+2028 and U+2029 (E2 80 A8 / A9). The lead byte of
+  # one is always read as a symbol of its own, so the reading stays
+  # unique: a final one (`symFC2`, `symFE2`, then `symF80`, and the final
+  # byte as `symFin + 4` (0x85), `symFA8` or `symFA9`), or one with more
+  # after it (`symNC2`, `symNE2`, its other bytes read plain).
+  symFC2 = 262
+  symFE2 = 263
+  symF80 = 264
+  symFA8 = 265
+  symFA9 = 266
+  symNC2 = 267
+  symNE2 = 268
+  symMark = 269      ## the marker `#` (a capture's start, RFC-0005 S8bb)
+  symMark2 = 270     ## RFC-0005 S8bb: a capture's end marker
+  symLand = 271      ## RFC-0005 S8bj: a `(*SKIP)` landing (verifiers only)
+  nSyms = 272
   finBytes = ['\n', '\r', '\v', '\f', '\x85']
   nlMust = 1'i8      ## a newline byte read plain: another byte follows
   nlFinal = 2'i8     ## the final newline was read: only markers follow
   nlCRb = 4'i8       ## a CR read plain (CRLF a newline): no final LF next
   nlR2 = 8'i8        ## `symR2` read: the final LF is next
+  # RFC-0005 S8bt (`uAny`): a multi-byte newline's progress, `16 * k`.
+  # With `nlR2`, a final one: k = 1 after symFC2 (fin 0x85 next), 2 after
+  # symFE2 (symF80 next), 3 after symF80 (symFA8 / symFA9 next). Without:
+  # k = 1 after symNC2 (a plain 0x85 next), 2 after symNE2 (a plain 0x80
+  # next), 3 after it (a plain A8 / A9 next); k = 4 after a plain C2 (no
+  # 0x85 next), 5 after a plain E2, 6 after a plain E2 80 (no A8 / A9 next).
+  nlU = 16'i8
 
 proc symByte(s: int): char =
   if s < 256: char(s)
   elif s < symR2: finBytes[s - symFin]
-  else: '\r'
+  elif s == symR2: '\r'
+  else:
+    case s
+    of symFC2, symNC2: '\xC2'
+    of symFE2, symNE2: '\xE2'
+    of symF80: '\x80'
+    of symFA8: '\xA8'
+    else: '\xA9'
 
-proc nlStepFor(nl: NlConv; st: int8; s: int): int8 =
+proc nlStepU(st: int8; s: int): int8 =
+  ## RFC-0005 S8bt. `nlStepFor` under `(*ANY)` in UTF mode: the single-byte
+  ## newlines are LF, VT, FF and CR (and CRLF); 0x85 alone is no newline.
+  let k = (st shr 4) and 7
+  let base = st and 15
+  let b = symByte(s)
+  if (st and nlR2) != 0 and k > 0:
+    # A final multi-byte newline: its next symbol.
+    case k
+    of 1: return (if s == symFin + 4: nlFinal else: -1'i8)
+    of 2: return (if s == symF80: nlR2 or (3 * nlU) else: -1'i8)
+    else: return (if s in [symFA8, symFA9]: nlFinal else: -1'i8)
+  if k in 1 .. 3:
+    # A multi-byte newline with more after it: its bytes, plain.
+    case k
+    of 1: return (if s == 0x85: nlMust else: -1'i8)
+    of 2: return (if s == 0x80: 3 * nlU else: -1'i8)
+    else: return (if s in [0xA8, 0xA9]: nlMust else: -1'i8)
+  # After a plain lead: not the rest of a newline.
+  if k == 4 and b == '\x85': return -1
+  if k == 6 and b in {'\xA8', '\xA9'} and s < 256: return -1
+  case s
+  of symFC2, symFE2:
+    if (base and nlR2) != 0: return -1
+    return nlR2 or (if s == symFC2: nlU else: 2 * nlU)
+  of symNC2: return nlU
+  of symNE2: return 2 * nlU
+  of symF80, symFA8, symFA9: return -1
+  else: discard
+  if s >= symFin and s < symR2:
+    if b notin {'\n', '\r', '\v', '\f'}: return -1
+    if (base and nlR2) != 0: return (if b == '\n': nlFinal else: -1'i8)
+    if (base and nlCRb) != 0 and b == '\n': return -1
+    return nlFinal
+  if s == symR2:
+    if (base and nlR2) != 0: return -1
+    return nlR2
+  if (base and nlR2) != 0: return -1
+  result = 0
+  if b in {'\n', '\r', '\v', '\f'}: result = result or nlMust
+  if (base and nlCRb) != 0 and b == '\n': result = result or nlMust
+  if b == '\r': result = result or nlCRb
+  if b == '\xC2': result = result or (4 * nlU)
+  if b == '\xE2': result = result or (5 * nlU)
+  if k == 5 and b == '\x80': result = result or (6 * nlU)
+
+proc nlStepFor(nl: NlConv; st: int8; s: int; u = false): int8 =
   ## RFC-0005 S8bb. The `nl` state after symbol `s` (not a marker), or -1
-  ## when `s` cannot follow (the reading would not be unique).
+  ## when `s` cannot follow (the reading would not be unique). RFC-0005
+  ## S8bt: `u`, `(*ANY)` in UTF mode (`nlStepU`).
   if (st and nlFinal) != 0: return -1
+  if u: return nlStepU(st, s)
+  if s > symR2: return -1
   let nl1 = nlBytes(nl)
   let b = symByte(s)
   if s >= symFin and s < symR2:
@@ -135,7 +211,29 @@ proc nlStepFor(nl: NlConv; st: int8; s: int): int8 =
   if (st and nlCRb) != 0 and b == '\n': result = result or nlMust
   if nlPair(nl) and b == '\r': result = result or nlCRb
 
-proc nlCanEnd(st: int8): bool = (st and (nlMust or nlR2)) == 0
+proc nlCanEnd(st: int8): bool =
+  (st and (nlMust or nlR2)) == 0 and ((st shr 4) and 7) notin 1 .. 3
+
+proc nlStates(u: bool): seq[int8] =
+  ## RFC-0005 S8bt. The `nl` states the verifiers' fixpoint ranges over.
+  if not u:
+    for x in 0'i8 .. 15'i8: result.add x
+  else:
+    result = @[0'i8, nlMust, nlFinal, nlCRb, nlMust or nlCRb, nlR2]
+    for k in 1'i8 .. 3'i8:
+      result.add k * nlU
+      result.add nlR2 or (k * nlU)
+    for k in 4'i8 .. 6'i8: result.add k * nlU
+
+proc nlSlot(st: int8): int =
+  ## RFC-0005 S8bt. A state's index (0 .. 15) for `univIdx`: itself below
+  ## 16; the multi-byte ones in the slots `nlStepFor` never reaches
+  ## without `uAny`'s states (`nlStates(true)` holds no base state there).
+  if st < 16: return int(st)
+  const slots = [3, 6, 7, 9, 10, 11, 12, 13, 14]
+  let k = int((st shr 4) and 7)
+  if (st and nlR2) != 0: slots[k - 1]
+  else: slots[k + 2]
 
 type
   Ctx* = enum
@@ -143,8 +241,13 @@ type
     cxNll     ## the rest of the subject is a newline
     cxEnd     ## the subject ends here
 
-proc symCtx(s: int): Ctx =
-  (if s < symFin: cxOther else: cxNll)
+proc symCtx(s: int; u = false): Ctx =
+  ## RFC-0005 S8bt: under `uAny`, a final multi-byte newline's lead starts
+  ## it; its other bytes are inside a character.
+  if s < symFin: cxOther
+  elif u and s == symFin + 4: cxOther
+  elif s <= symFE2: cxNll
+  else: cxOther
 
 # ---- the byte before a position -------------------------------------------------
 
@@ -157,18 +260,40 @@ type
     pcLF      ## an LF not after a CR
     pcCRLF    ## an LF after a CR
     pcCR      ## a CR
-    pcNl      ## VT, FF or NEL (newlines under `(*ANY)` only)
+    pcNl      ## VT, FF or NEL (newlines under `(*ANY)` only); RFC-0005
+              ## S8bt: under `(*ANY)` in UTF mode, VT, FF, U+0085, U+2028
+              ## or U+2029
+    pcU1      ## RFC-0005 S8bt (`uAny`): a C2 (a NEL's lead)
+    pcU2      ## RFC-0005 S8bt (`uAny`): an E2
+    pcU3      ## RFC-0005 S8bt (`uAny`): an E2 80
 
-proc nextClass*(b: char; pc: PrevClass): PrevClass =
+proc nextClass*(b: char; pc: PrevClass; u = false): PrevClass =
+  ## RFC-0005 S8bt: `u`, `(*ANY)` in UTF mode: the multi-byte newlines
+  ## (0x85 alone is no newline).
+  if u:
+    return (case b
+            of '\n': (if pc == pcCR: pcCRLF else: pcLF)
+            of '\r': pcCR
+            of '\v', '\f': pcNl
+            of '\xC2': pcU1
+            of '\xE2': pcU2
+            of '\x80': (if pc == pcU2: pcU3 else: pcOther)
+            of '\x85': (if pc == pcU1: pcNl else: pcOther)
+            of '\xA8', '\xA9': (if pc == pcU3: pcNl else: pcOther)
+            else: pcOther)
   case b
   of '\n': (if pc == pcCR: pcCRLF else: pcLF)
   of '\r': pcCR
   of '\v', '\f', '\x85': pcNl
   else: pcOther
 
-proc classAt*(s: string; x: int): PrevClass =
+proc classAt*(s: string; x: int; u = false): PrevClass =
   ## The class of what precedes position `x` of `s`.
   if x <= 0: return pcStart
+  if u:
+    result = pcOther
+    for j in max(0, x - 3) ..< x: result = nextClass(s[j], result, true)
+    return
   nextClass(s[x - 1], (if x >= 2 and s[x - 2] == '\r': pcCR else: pcOther))
 
 proc wasNl*(nl: NlConv; pc: PrevClass): bool =
@@ -283,6 +408,33 @@ proc countsLimits*(n: Nfa): bool =
   ## RFC-0005 S8bt. A limit between 0 and the default, read off the
   ## automaton's `match()` calls.
   n.costs and (n.matchLimit >= 0 or n.recLimit < high(int))
+
+proc uAny*(n: Nfa): bool =
+  ## RFC-0005 S8bt. `(*ANY)` in UTF mode: U+0085, U+2028 and U+2029 are
+  ## multi-byte newlines (and a lone 0x85 byte is none).
+  n.utf and n.nl == nlANY
+
+proc nlBytesOf*(n: Nfa): set[char] =
+  ## RFC-0005 S8bt. The bytes that are a newline on their own.
+  if uAny(n): {'\n', '\v', '\f', '\r'} else: nlBytes(n.nl)
+
+proc nlStartsAt*(n: Nfa; s: string; j: int): bool =
+  ## RFC-0005 S8bt. A newline starts at `j` of `s` (`(?m)$`'s IS_NEWLINE;
+  ## a CR under `(*CRLF)` aside).
+  if j >= s.len: return false
+  if s[j] in nlBytesOf(n): return true
+  if not uAny(n): return false
+  if s[j] == '\xC2': return j + 1 < s.len and s[j + 1] == '\x85'
+  s[j] == '\xE2' and j + 2 < s.len and s[j + 1] == '\x80' and
+    s[j + 2] in {'\xA8', '\xA9'}
+
+proc symNls(n: Nfa; s: int): bool =
+  ## RFC-0005 S8bt. A newline starts at symbol `s`.
+  if s < 256: char(s) in nlBytesOf(n)
+  elif s < symR2: not (uAny(n) and s == symFin + 4) and
+                  symByte(s) in nlBytesOf(n)
+  elif s == symR2: '\r' in nlBytesOf(n)
+  else: s in [symFC2, symFE2, symNC2, symNE2]
 
 proc needPc*(n: Nfa): bool =
   ## RFC-0005 S8bj. The automata track the byte before each position.
@@ -895,6 +1047,8 @@ type
   StepCtx = object
     ctx: Ctx          ## the rest of the subject
     nb: int           ## the byte here, -1 at the end
+    nls: bool         ## RFC-0005 S8bt: a newline starts here (`(?m)$`;
+                      ## `nlStartsAt`)
     finCRLF: bool     ## the bytes here are a final CRLF (symR2)
     pc: PrevClass     ## what precedes this position
     pos0: bool        ## subject position 0
@@ -1099,7 +1253,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         if not s.multi:
           if sc.ctx in {cxNll, cxEnd}: go(s.out1)
           else: dead()
-        elif sc.ctx == cxEnd or (sc.nb >= 0 and char(sc.nb) in nlBytes(n.nl)):
+        elif sc.ctx == cxEnd or sc.nls:
           go(s.out1)
         elif n.nl == nlCRLF and sc.nb == ord('\r'):
           # OP_DOLLM's IS_NEWLINE: a CR is one only with an LF after it.
@@ -1423,9 +1577,13 @@ proc outcome[T](items: seq[Item[T]]): OutcomeKind =
 
 proc ctxAt(n: Nfa; u: string; j: int): Ctx =
   if j >= u.len: cxEnd
-  elif j == u.len - 1 and u[j] in nlBytes(n.nl): cxNll
+  elif j == u.len - 1 and u[j] in nlBytesOf(n): cxNll
   elif nlPair(n.nl) and j == u.len - 2 and u[j] == '\r' and
        u[j + 1] == '\n': cxNll
+  elif uAny(n) and u[j] in {'\xC2', '\xE2'} and nlStartsAt(n, u, j) and
+       j + (if u[j] == '\xC2': 2 else: 3) == u.len:
+    # RFC-0005 S8bt: a final multi-byte newline.
+    cxNll
   else: cxOther
 
 proc initMarks(n: Nfa): seq[int32] =
@@ -1473,7 +1631,7 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
   var items = @[Item[T](kind: ikThread, st: int32(n.start),
                         marks: initMarks(n), anc: -1, stl: ign0, cap: cap0)]
   var ctr = 0'i32
-  var pc = classAt(s, x)
+  var pc = classAt(s, x, uAny(n))
   let elig = (not anchored) and x > s0 and x < s.len and s[x - 1] == '\r' and
              s[x] == '\n' and n.skipActive
   for j in x .. s.len:
@@ -1481,6 +1639,7 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     let nextLF = (not atEnd) and s[j] == '\n'
     items = resolve(items, nextLF)
     let sc = StepCtx(ctx: ctxAt(n, s, j), nb: (if atEnd: -1 else: ord(s[j])),
+                     nls: nlStartsAt(n, s, j),
                      finCRLF: n.nl == nlCRLF and j == s.len - 2 and
                               s[j] == '\r' and s[j + 1] == '\n',
                      pc: pc, pos0: j == 0, atStart: j == x,
@@ -1505,7 +1664,7 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
       if items.len > 0:
         result.ign = nextIgn(oc, items[0], oc == okSkip and result.pos > x)
       return
-    pc = nextClass(s[j], pc)
+    pc = nextClass(s[j], pc, uAny(n))
 
 proc noSave(t: int8; slot: int; sc: StepCtx): int8 = t
 
@@ -1539,7 +1698,7 @@ proc created*(n: Nfa; s: string; x, s0: int): bool =
   of fkStartline:
     if x == s0: true
     else:
-      let pc = classAt(s, x)
+      let pc = classAt(s, x, uAny(n))
       wasNl(n.nl, pc) and
         not (pc == pcCR and s[x] == '\n' and n.nl in {nlANY, nlANYCRLF})
 
@@ -1786,7 +1945,7 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
       acc = nlCanEnd(k.nl)
       isSink = true
       for s in 0 ..< symMark:
-        let nls = nlStepFor(n.nl, k.nl, s)
+        let nls = nlStepFor(n.nl, k.nl, s, uAny(n))
         if nls < 0: continue
         var k2 = k
         k2.nl = nls
@@ -1796,10 +1955,11 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         if (just and (1 or 4)) != 0: 1'i32
         elif k.atStart: 0'i32
         else: 2'i32)
-      proc mkCtx(ctx: Ctx; nb: int; finCRLF: bool; endEv: bool): StepCtx =
+      proc mkCtx(ctx: Ctx; nb: int; finCRLF: bool; endEv: bool;
+                 nls = false): StepCtx =
         var just = k.just
         if endEv: just = just or 1
-        StepCtx(ctx: ctx, nb: nb, finCRLF: finCRLF, pc: k.pc,
+        StepCtx(ctx: ctx, nb: nb, nls: nls, finCRLF: finCRLF, pc: k.pc,
                 pos0: k.atStart and pc0 == pcStart, atStart: k.atStart,
                 noEmpty: k.atStart and spec.noEmpty,
                 crlfElig: k.atStart and spec.crlfElig,
@@ -1834,23 +1994,25 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
       if (k.nl and nlFinal) == 0:
         var cache = initTable[(Ctx, int, bool, bool), seq[Item[int8]]]()
         for s in 0 ..< symMark:
-          let nls = nlStepFor(n.nl, k.nl, s)
+          let nls = nlStepFor(n.nl, k.nl, s, uAny(n))
           if nls < 0: continue
           let c = symByte(s)
-          let ctx = symCtx(s)
+          let ctx = symCtx(s, uAny(n))
           let fin = s == symR2
-          # The closure depends on the byte only through these.
-          let nbKey = (if c in nlBytes(n.nl): ord(c)
+          let here = symNls(n, s)
+          # The closure depends on the byte only through these (RFC-0005
+          # S8bt: and through a possessive exit's test, `costs`).
+          let nbKey = (if n.costs or c in nlBytes(n.nl): ord(c)
                        elif c == '\r': ord(c)
                        else: -2)
-          let ck = (ctx, nbKey * 2 + (if c == '\n': 1 else: 0), fin, false)
+          let ck = (ctx, nbKey * 2 + (if c == '\n': 1 else: 0), fin, here)
           var cl: seq[Item[int8]]
           if ck in cache:
             cl = cache[ck]
           else:
             var ctr = 1_000_000'i32
             cl = closure(n, resolve(k.items, c == '\n'),
-                         mkCtx(ctx, ord(c), fin, false), ctr, save)
+                         mkCtx(ctx, ord(c), fin, false, here), ctr, save)
             cache[ck] = cl
           var items = capCosts(n, normalize(advance(n, cl, c)))
           var oc = outcome(items)
@@ -1870,7 +2032,7 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
               continue
           else:
             k2.items = canon(items)
-            k2.pc = (if n.needPc: nextClass(c, k.pc) else: pcOther)
+            k2.pc = (if n.needPc: nextClass(c, k.pc, uAny(n)) else: pcOther)
           row[s] = int32 intern(k2)
     result.trans.add row
     result.accept.add acc
@@ -2336,7 +2498,7 @@ proc hash(k: SKey): Hash =
 
 proc univIdx(nl, u: int8): uint8 =
   ## A (final-newline state, UTF-8 validator state) pair as one index.
-  uint8(int(nl) * 8 + (if u >= 10: int(u) - 6 else: int(u)))
+  uint8(nlSlot(nl) * 8 + (if u >= 10: int(u) - 6 else: int(u)))
 
 proc jitScanObservable*(n: Nfa): bool =
   ## RFC-0005 S8bt. Whether PCRE 8.37's JIT prefix scan reads differently
@@ -2359,6 +2521,12 @@ proc byteReps(n: Nfa; extra: seq[set[char]]): array[256, int] =
   for st in n.states:
     if st.kind == nkByte: sets.add st.bytes
   sets.add nlBytes(n.nl)
+  # RFC-0005 S8bt: a possessive exit's test; `uAny`'s multi-byte newlines.
+  for st in n.states:
+    if st.kind == nkPoss: sets.add st.bytes
+  if uAny(n):
+    for b in ['\xC2', '\xE2', '\x80', '\x85']: sets.add {b}
+    sets.add {'\xA8', '\xA9'}
   sets.add {'\r'}
   sets.add {'\n'}
   sets.add {'\v', '\f', '\x85'}
@@ -2415,13 +2583,15 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
     if sym >= 256 or reps[sym] == sym: syms.add sym
   var bad = newSeq[set[0'u8 .. 127'u8]](t.len)
   proc idx(sg: int; u: int8): uint8 = univIdx(int8(sg), u)
+  let nlSts = nlStates(uAny(n))
   for c in 0 ..< t.len:
-    for sg in 0 .. 15:
+    for sg in nlSts:
       for u in uStates:
         var b = u == 0 and nlCanEnd(int8(sg)) and not a[c]
         if not b:
           for sym in syms:
-            if nlStepFor(n.nl, int8(sg), sym) >= 0 and t[c][sym] < 0 and
+            if nlStepFor(n.nl, int8(sg), sym, uAny(n)) >= 0 and
+               t[c][sym] < 0 and
                (not n.utf or utfStep(u, symByte(sym)) >= 0):
               b = true
               break
@@ -2430,11 +2600,11 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
   while changed:
     changed = false
     for c in 0 ..< t.len:
-      for sg in 0 .. 15:
+      for sg in nlSts:
         for u in uStates:
           if idx(sg, u) in bad[c]: continue
           for sym in syms:
-            let s2 = nlStepFor(n.nl, int8(sg), sym)
+            let s2 = nlStepFor(n.nl, int8(sg), sym, uAny(n))
             if s2 < 0: continue
             let u2 = (if n.utf: utfStep(u, symByte(sym)) else: 0'i8)
             if u2 < 0: continue
@@ -2445,7 +2615,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
               break
   result.univ = newSeq[set[0'u8 .. 127'u8]](t.len)
   for c in 0 ..< t.len:
-    for sg in 0 .. 15:
+    for sg in nlSts:
       for u in uStates:
         if idx(sg, u) notin bad[c]: result.univ[c].incl idx(sg, u)
 
@@ -2878,7 +3048,7 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
         if s < 256 and reps[s] != s:
           row[s] = row[reps[s]]
           continue
-        let nls = nlStepFor(n.nl, k.nl, s)
+        let nls = nlStepFor(n.nl, k.nl, s, uAny(n))
         if nls < 0: continue
         let c = ord(symByte(s))
         var u2 = 0'i8
@@ -2905,7 +3075,7 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
         if nodes.len == 0: continue
         nodes.sort()
         row[s] = int32 intern(SKey(nodes: nodes,
-          pc: (if n.needPc: nextClass(char(c), k.pc) else: pcOther),
+          pc: (if n.needPc: nextClass(char(c), k.pc, uAny(n)) else: pcOther),
           nl: nls, atS0: false, phase: k.phase, utf: u2))
     result.trans.add row
     result.accept.add acc
@@ -3123,6 +3293,9 @@ type
     atEnd*: Leaf
     other*, nll*: seq[Leaf]   ## per byte (256): the rest is not / is a
                               ## final newline
+    nlsU*: seq[Leaf]
+      ## RFC-0005 S8bt (`uAny`): per byte, a multi-byte newline that is not
+      ## final starts here (only C2 and E2 differ from `other`)
   StepTable* = object
     ## RFC-0005 S8bj. The agenda's attempt as a step table: a state is a
     ## normalized agenda whose positions are registers (the suffix where
@@ -3220,8 +3393,8 @@ proc stepTable*(n: Nfa): StepTable =
     let k = keys[i]
     let regs = int32(tagsOf(k.items).len)
     let st = k.start
-    proc mkCtx(ctx: Ctx; nb: int; fin: bool): StepCtx =
-      StepCtx(ctx: ctx, nb: nb, finCRLF: fin, pc: k.pc,
+    proc mkCtx(ctx: Ctx; nb: int; fin: bool; nls = false): StepCtx =
+      StepCtx(ctx: ctx, nb: nb, nls: nls, finCRLF: fin, pc: k.pc,
               pos0: (st and 8) != 0, atStart: st != 0,
               noEmpty: (st and 2) != 0, crlfElig: (st and 4) != 0,
               eligAll: k.elig, anchored: false, tagNow: regs)
@@ -3269,25 +3442,38 @@ proc stepTable*(n: Nfa): StepTable =
       row.atEnd = leafOf(dropThreads(cl), pcOther, fine)
     row.other = newSeq[Leaf](256)
     row.nll = newSeq[Leaf](256)
+    row.nlsU = newSeq[Leaf](256)
+    let ua = uAny(n)
     var cache = initTable[(int, int), seq[Item[int8]]]()
-    for ci, ctx in [cxOther, cxNll]:
+    # RFC-0005 S8bt: under `uAny` a multi-byte newline's lead (C2, E2)
+    # starts a final one (`nll`), one with more after it (`nlsU`), or none.
+    for ci, ctx in [cxOther, cxNll, cxOther]:
       for b in 0 .. 255:
         let c = char(b)
-        if ctx == cxNll and c notin nlBytes(n.nl) and
-           not (nlPair(n.nl) and c == '\r'):
+        let lead = ua and c in {'\xC2', '\xE2'}
+        if ci == 1 and c notin nlBytesOf(n) and
+           not (nlPair(n.nl) and c == '\r') and not lead:
+          continue
+        if ci == 2 and not lead:
+          row.nlsU[b] = row.other[b]
           continue
         let fin = ctx == cxNll and n.nl == nlCRLF and c == '\r'
-        # The closure depends on the byte only as a newline byte or a CR.
-        let ck = (ci, (if c in nlBytes(n.nl) or c in {'\r', '\n'}: b else: -1))
+        let here = c in nlBytesOf(n) or (lead and ci > 0)
+        # The closure depends on the byte only as a newline byte or a CR
+        # (RFC-0005 S8bt: or a possessive exit's test, `costs`).
+        let ck = (ci, (if n.costs or here or c in {'\r', '\n'}: b else: -1))
         var cl: seq[Item[int8]]
         if ck in cache: cl = cache[ck]
         else:
           var ctr = 1_000_000'i32
-          cl = closure(n, resolve(k.items, c == '\n'), mkCtx(ctx, b, fin),
+          cl = closure(n, resolve(k.items, c == '\n'), mkCtx(ctx, b, fin, here),
                        ctr, noSave)
           cache[ck] = cl
-        let lf = leafOf(advance(n, cl, c), nextClass(c, k.pc), fine)
-        if ci == 0: row.other[b] = lf else: row.nll[b] = lf
+        let lf = leafOf(advance(n, cl, c), nextClass(c, k.pc, ua), fine)
+        case ci
+        of 0: row.other[b] = lf
+        of 1: row.nll[b] = lf
+        else: row.nlsU[b] = lf
     if not fine:
       if stale: return StepTable(ok: false, why: staleWhy)
       return StepTable(ok: false, why: "the pattern's run holds more than " &

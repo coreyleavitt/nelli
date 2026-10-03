@@ -215,9 +215,14 @@ proc scanPrefix(code: seq[Code]; cc0: int; pos: var seq[PrefixPos];
     var oc = ""
     if caseless:
       if utf and atom.ch > 127:
-        # A non-ASCII caseless character: not modelled here (the reader
-        # declines Unicode case folding in UTF mode).
-        caseless = false
+        # RFC-0005 S8bt: `char_has_othercase` / `char_othercase` read
+        # UCD_OTHERCASE; an other case of another UTF-8 length stops the
+        # scan here.
+        let o = ucdOther(atom.ch)
+        if o != atom.ch:
+          oc = utf8Encode(o)
+          if oc.len != bs.len: return consumed
+        else: caseless = false
       else:
         let o = otherCaseByte(char(atom.ch))
         if o != char(atom.ch): oc = $o

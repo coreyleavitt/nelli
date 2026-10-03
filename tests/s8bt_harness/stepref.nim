@@ -8,8 +8,10 @@ import nelli/smt/[pcre_syntax, pcre_select, pcre_jit, pcre_engine]
 
 proc finalNl(n: Nfa; s: string; j: int): bool =
   let rest = s.len - j
-  (rest == 1 and s[j] in nlBytes(n.nl)) or
-    (nlPair(n.nl) and rest == 2 and s[j] == '\r' and s[j + 1] == '\n')
+  (rest == 1 and s[j] in nlBytesOf(n)) or
+    (nlPair(n.nl) and rest == 2 and s[j] == '\r' and s[j + 1] == '\n') or
+    (uAny(n) and s[j] in {'\xC2', '\xE2'} and nlStartsAt(n, s, j) and
+     rest == (if s[j] == '\xC2': 2 else: 3))
 
 proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int,
                                                              int8) =
@@ -22,6 +24,8 @@ proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int,
     let lf =
       if j == s.len: row.atEnd
       elif finalNl(n, s, j): row.nll[ord(s[j])]
+      elif uAny(n) and s[j] in {'\xC2', '\xE2'} and nlStartsAt(n, s, j):
+        row.nlsU[ord(s[j])]
       else: row.other[ord(s[j])]
     case lf.kind
     of lfNext:
@@ -45,7 +49,7 @@ proc execRef*(n: Nfa; t: StepTable; s: string; start: int;
     if jit and n.jit.on and not n.anchoredPat: x = n.jit.scanFrom(s, x)
     else:
       while not created(n, s, x, start): inc x
-    let pc = canonPc0(n, classAt(s, x))
+    let pc = canonPc0(n, classAt(s, x, uAny(n)))
     let elig = n.hasNeverSkip and x > start and x < s.len and
                s[x - 1] == '\r' and s[x] == '\n' and n.skipActive
     let (k, pos, ig) = runRef(n, t, s, x,

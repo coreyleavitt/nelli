@@ -141,6 +141,14 @@ proc item(c: var Comp; b: var Br; x: Rx) =
     case x.op
     of aoChar: c.oneChar(b, x.ch, x.ci)
     of aoFail: discard   # OP_FAIL sets nothing
+    of aoProp:
+      if x.clist and not x.clistNot:
+        # RFC-0005 S8bt: ONE_CHAR's OP_PROP PT_CLIST: no first character
+        # from here on, and nothing else changes.
+        if b.fcf == reqUnset:
+          b.fcf = reqNone
+          b.zfcf = reqNone
+      else: b.noFirst()
     else: b.noFirst()
   of rxCat, rxAlt: c.group(b, x)
   of rxRep:
@@ -280,7 +288,10 @@ proc tableBit(bits: var set[char]; utf: bool; ch: int32; ci: bool) =
   ## letter when caseless.
   let b = (if utf: ord(utf8Encode(ch)[0]) else: int(ch))
   bits.incl char(b)
-  if utf and ch > 127: return
+  if utf and ch > 127:
+    # RFC-0005 S8bt: caseless, the lead byte of UCD_OTHERCASE too.
+    if ci: bits.incl utf8Encode(ucdOther(ch))[0]
+    return
   if ci and isLetter(b): bits.incl char(otherCase(b))
 
 proc mapBits(bits: var set[char]; x: Rx; utf: bool) =

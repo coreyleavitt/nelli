@@ -93,6 +93,10 @@ proc prefixOf(pc: PrevClass): string =
   of pcCRLF: "\r\n"
   of pcCR: "\r"
   of pcNl: "\x0c"
+  # RFC-0005 S8bt: inside a character (no start variant).
+  of pcU1: "\xC2"
+  of pcU2: "\xE2"
+  of pcU3: "\xE2\x80"
 
 const patterns = [
   # verbs

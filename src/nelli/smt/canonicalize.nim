@@ -202,7 +202,28 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "218"
+const symexWalkerVersion* = "223"
+  ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg and S8bi land stacked
+  ## on batch 4 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bc's `iekSeqNewZero` and S8bi's `iekSeqNew` are one kind
+  ## (`iekSeqNew`) with one parser guard (`parseNewSeqLen`: `RangeDefect`
+  ## on a negative length, a scoped `feUnsupportedOp` decline above
+  ## `maxModelledInitialSize`, for `newSeqOfCap` and `newSeqUninit` too, so
+  ## a huge length is never modelled as succeeding) and one lowering
+  ## (`lowerSeqNew`, S8bc's leaf-split arrays for every element type: a
+  ## `newSeq` of tuples is modelled, not `seNestedSeqUnsupported`). S8bi's
+  ## inline `RangeDefect` is dropped (it is the preamble's), so `newSeq` is
+  ## a raise site only through its length. S8bk's late address reaches a
+  ## call through a proc value (`closureCallIR`): `let f = touch; f(gP.x,
+  ## moveP())` read `gP.x` before `moveP` rebound `gP` (a false `sxUnsat`),
+  ## and a `var` / `addr` actual reached through a `cast` declines naming
+  ## the cast there too (it was a `weInternalWalkerFault`). S8bi's
+  ## `keepInlineRaiseOrder` runs inside S8ax's `parseOperandPair`. S8bh's
+  ## unknown-callee `var` havoc logs its facts as `rskClosureExit`. The
+  ## threaded replay (S8be) collects the calling thread's ORC cycle roots
+  ## first (a SIGSEGV in `unregisterCycle`). 217 -> 223.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration

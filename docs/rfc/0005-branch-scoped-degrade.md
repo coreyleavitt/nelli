@@ -8792,7 +8792,7 @@ met, the stack keeps both:
   closure raise carries S8as's by-reference writes and S8bh's `var` outs,
   and is logged in S8bb's `raiseOrder`.
 - *Operands.* S8ax's `irKids` / `isEagerIR` cover S8bb's `iekStrCaptureRe`
-  and S8bc's `iekSeqNewZero`.
+  and S8bc's `iekSeqNewZero` (batch 5: `iekSeqNew`).
 - *Table iteration on Z3 4.13.4.* S8bc's `tiTuple` (`s += k * v` over
   `pairs`) was SAT on 4.13.4 at the slice's tip only through what earlier
   queries had left in the walk's Z3 context: its last query, replayed in a
@@ -8803,6 +8803,45 @@ met, the stack keeps both:
   the key is one of the keys stored (`constFalseStoreKeys`, a theorem of
   the array theory): the same query is SAT in about 40K units fresh, and
   90K in the walk.
+
+**Batch 5 (2026-10-03) — one walker number for four slices.** S8bm, S8bk,
+S8bg and S8bi (each provisional: 214, 212, 218, 210) land stacked on batch
+4, in that order: `symexWalkerVersion` 217 -> **223**, the CR2 `==` pin
+223, each slice's `>=` floor unchanged. S8bj had no report when the batch
+closed and is not in it. Where slices met:
+- *One `newSeq`.* S8bc's `iekSeqNewZero` and S8bi's `iekSeqNew` are one
+  kind, `iekSeqNew`. Every constructor (`newSeq`, `newSeq(s, n)`,
+  `newSeqOfCap`, `newSeqUninit`) is guarded by S8bc's `parseNewSeqLen`:
+  `RangeDefect` on a negative length, and a scoped `feUnsupportedOp`
+  decline above `maxModelledInitialSize`, so a huge length is never
+  modelled as succeeding. S8bi's inline `RangeDefect` is dropped. The
+  lowering keeps S8bc's leaf-split arrays for every element type, and
+  `newSeqUninit` keeps its `feUnsupportedOpHavoc` taint. S8bi's pins
+  moved: a `newSeq` of tuples is now `sxSat` (it was
+  `seNestedSeqUnsupported`). Four unbounded-length pins (`nsShortCircuit`,
+  `nsNonZero`, `nsNonNegRaise`, `nsOfCapLen`) are now `sxUnknown`, with the
+  length decline as their only error, and a companion bounded to 1000
+  keeps each `sxUnsat`.
+- *Late address through a proc value.* S8bk's `placeLateAddr` reaches
+  S8bh's `closureCallIR`: `let f = touch; f(gP.x, moveP())` read `gP.x`
+  before `moveP` rebound `gP` (a false `sxUnsat`; native old.x = 10,
+  gP.x = 105). It is pinned RED-first in the S8bk suite. S8bk's late
+  addresses are `fixed` operands and S8be's `splitIndexChecks` handles only
+  non-fixed ones, so the two never handle one operand twice.
+- *Casts through a proc value.* S8bg's cast decline reaches `closureCallIR`
+  too. The cast was a `weInternalWalkerFault`; it is pinned in the S8bg
+  suite.
+- *Raise order.* S8bi's `keepInlineRaiseOrder` runs inside S8ax's
+  `parseOperandPair`, before `orderOperands`. S8bi's `rskClosureExit` stage
+  replaces S7's `priorExitPc`. The drain keeps S8as's by-reference writes
+  and S8bh's `var` outs, and S8bh's unknown-callee `var` havoc logs its
+  facts as `rskClosureExit`.
+- *Threaded replay.* S8be's `runReplayBounded` collects the calling
+  thread's ORC cycle roots before it hands the job to the replay thread.
+  The merged S8bg suite crashed with a SIGSEGV in `unregisterCycle`.
+- *B1-1 under S8bm's own context* uses 46,529 units on Z3 5.1 (ceiling
+  100k) and 79,510 on 4.13.4 (ceiling 160k), with batch 4's `isTabKeys`
+  facts in the translated query.
 
 ## §8 — Consumer surface and migration
 

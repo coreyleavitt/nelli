@@ -139,8 +139,8 @@ jobs:
     outputs:
       shards_json: ${{ steps.derive.outputs.shards_json }}
       # RFC-0005 S8aj: the corpus job's matrix. The shard count is
-      # derive-ci-suites.ps1's `$shardCount` alone (8; it was 3, written
-      # here and there by hand).
+      # derive-ci-suites.ps1's `$shardCount` alone (10; it was 3, written
+      # here and there by hand, then 8).
       shard_ids: ${{ steps.derive.outputs.shard_ids }}
     steps:
       - uses: actions/checkout@v6

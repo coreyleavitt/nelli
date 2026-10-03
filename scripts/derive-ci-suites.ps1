@@ -226,7 +226,13 @@ if ($accountedFor -ne $allTsymex.Count) {
 # min stops and names the suites it did not run); raise this number when
 # that check fires. The workflow's matrix is `shard_ids` (below), so the
 # count is written here alone.
-$shardCount = 8
+#
+# RFC-0005 batch 6: 10 shards, was 8. With 8, the corpus had grown to 58
+# suites a shard, and five shards of symex-mingw run 37159787233
+# (a8f0970) failed the 40-min check: 40.1, 41.4, 41.6, 43.7 and 44.8 min,
+# every suite run. 10 shards take that to about 47 suites
+# each, ~33-36 min on those times, below the check again.
+$shardCount = 10
 $shards = @()
 for ($i = 0; $i -lt $shardCount; $i++) {
   $shards += ,(New-Object 'System.Collections.Generic.List[string]')

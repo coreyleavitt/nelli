@@ -1126,5 +1126,10 @@ task test, "Run the test suite":
             # RFC-0005 S8bf: two var / addr heap actuals that may be one
             # cell through different refs are passed by reference. Walker
             # 202->209 (batch 3).
-            "tsymex_rfc0005_s8bf_alias"]:
+            "tsymex_rfc0005_s8bf_alias",
+            # RFC-0005 S8bm: step 1 searches in a context of its own (the
+            # same with and without the facts-first check); a slice
+            # element's byte test in character form; B1-1's tight unit
+            # ceiling. Walker 209->214.
+            "tsymex_rfc0005_s8bm_stability"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

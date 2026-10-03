@@ -1198,5 +1198,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bs_addrglobal",
             "tsymex_rfc0005_s8bs_byref",
             "tsymex_rfc0005_s8bs_iterparams",
-            "tsymex_rfc0005_s8bs_byvalue"]:
+            "tsymex_rfc0005_s8bs_byvalue",
+            # RFC-0005 S8bn: S8bh's remainder -- ptr witnesses and targets,
+            # proc fields and methods, `of` / `nil`, hierarchies, parameter
+            # tags, S8bk's late address. Walker 215 (provisional).
+            "tsymex_rfc0005_s8bn_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

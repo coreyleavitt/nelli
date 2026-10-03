@@ -172,8 +172,12 @@ suite "S8ao (1): add through a field path":
 # ---- (2) itUninterp has no zero -- proven, not widened ----------------------
 
 type
+  # RFC-0005 S8bn classifies a generic object instance (`G[int]`); a generic
+  # CASE object is still unrecognised, so it stands in for the placeholder.
   Weird[T] = object
-    x: T
+    case k: bool
+    of true: x: T
+    of false: discard
 
 proc zClosureVar(x: int) =
   ## `__closure`: a proc-typed local with no initializer.

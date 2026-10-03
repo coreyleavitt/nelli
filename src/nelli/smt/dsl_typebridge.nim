@@ -64,6 +64,10 @@ proc isStdlibDecl*(sym: NimNode): bool =
 const userRoutineSymKinds = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}
 
+const procValueSymKinds* = {nskProc, nskFunc}
+  ## RFC-0005 S8bn (item 6). The routines a proc-typed value (a proc field's
+  ## assignment, `dsl_parser.pfProcSym`) can name directly.
+
 proc isUserRoutine*(sym: NimNode): bool =
   ## RFC-0005 S8c. True iff `sym` resolves to a routine declared OUTSIDE the
   ## stdlib -- the SUT's own procs, a nimble package's, nelli's. Such a call
@@ -172,6 +176,17 @@ proc inheritObjectBody(sym: NimNode): tuple[nomSym, obj: NimNode] =
     if u[0].kind == nnkSym: return inheritObjectBody(u[0])
   (nil, nil)
 
+proc isInheritableRoot(sym: NimNode): bool =
+  ## RFC-0005 S8bn (item 8). `sym` names a type declared `{.inheritable.}`
+  ## (a hierarchy root without `of`).
+  if sym.kind != nnkSym: return false
+  let impl = sym.getImpl
+  if impl.kind != nnkTypeDef or impl.len < 1 or impl[0].kind != nnkPragmaExpr:
+    return false
+  for pr in impl[0][1]:
+    if pr.kind in {nnkIdent, nnkSym} and pr.strVal == "inheritable": return true
+  false
+
 proc inheritInfo*(sym: NimNode): tuple[chain, ownedNames, ownedIds: seq[string];
                                        parent: NimNode] =
   ## RFC-0005 S8bh (item 3). For a type declared `of` another (`RootObj`
@@ -183,16 +198,30 @@ proc inheritInfo*(sym: NimNode): tuple[chain, ownedNames, ownedIds: seq[string];
   ## `case` object in the chain): those keep their pre-S8bh per-type keying.
   ## Reads names only -- never a field's type -- so a recursion placeholder
   ## (`namedRefPlaceholder`) can call it without recursing.
+  ##
+  ## RFC-0005 S8bn (item 8): one level of the chain may hold a `case` part
+  ## (a case object under `RootObj`, or a type derived from one): its plain
+  ## fields are owned as any level's; its discriminator and branch fields
+  ## key on the root through the variant's own keys. A chain with two
+  ## levels holding one keeps per-type keying.
   var cur = sym
   var levels: seq[tuple[id: string; names: seq[string]]]
   var first = true
+  var caseLevels = 0
   while true:
     let (nomSym, obj) = inheritObjectBody(cur)
     if obj == nil or obj.len < 3: return
     var names: seq[string]
     if obj[2].kind == nnkRecList:
+      var hasCase = false
       for d in obj[2]:
-        if d.kind != nnkIdentDefs: return   # a `case` (variant) part
+        if d.kind == nnkRecCase:
+          if hasCase: return            # two axes: a multi-variant
+          hasCase = true
+          inc caseLevels
+          if caseLevels > 1: return
+          continue
+        if d.kind != nnkIdentDefs: return
         for i in 0 ..< d.len - 2:
           var nn = d[i]
           if nn.kind == nnkPostfix: nn = nn[1]
@@ -202,10 +231,13 @@ proc inheritInfo*(sym: NimNode): tuple[chain, ownedNames, ownedIds: seq[string];
     levels.insert((nominalId(nomSym), names), 0)
     let inh = obj[1]
     if inh.kind != nnkOfInherit or inh.len != 1:
-      if first: return          # no `of`: not a hierarchy
-      return                    # a user parent without `of` cannot occur
+      # RFC-0005 S8bn (item 8): a `{.inheritable.}` type is a hierarchy's
+      # root, as `RootObj`'s child is.
+      if isInheritableRoot(nomSym) or isInheritableRoot(cur): break
+      return                    # no `of`: not a hierarchy
     let par = inh[0]
-    if par.kind == nnkSym and par.strVal == "RootObj": break
+    # RFC-0005 S8bn (item 8): `of RootRef` (`ref RootObj`) roots one too.
+    if par.kind == nnkSym and par.strVal in ["RootObj", "RootRef"]: break
     if par.kind != nnkSym: return
     if first: result.parent = par
     first = false
@@ -911,12 +943,191 @@ var borrowBaseViews* {.compileTime.}: seq[tuple[node, baseTy: NimNode]]
   ## base value is used, `ejectBase`), exactly as for a written `T(d)`.
   ## Pushed and popped by the parser around that one call; empty otherwise.
 
+type GenericArg = tuple[name: string; ty: IRType; id, spelling: string;
+                        node: NimNode]
+  ## RFC-0005 S8bn (item 8). One type argument of a generic object instance:
+  ## the parameter's name, the argument's classified type, and its nominal id
+  ## and spelling (the instance's identity and its name in a witness).
+
+var genericFrames {.compileTime.}: seq[seq[GenericArg]]
+  ## RFC-0005 S8bn (item 8). The arguments of the generic instances being
+  ## classified, innermost last: a parameter named in a body resolves in
+  ## the innermost frame (`classifyType`'s first arm).
+var genericInProgress {.compileTime.}: seq[string]
+  ## RFC-0005 S8bn (item 8). The instance ids being classified: a field
+  ## that re-enters one (`next: GNode[T]`) takes its named placeholder.
+
+proc genericParamArg(n: NimNode): int =
+  ## RFC-0005 S8bn (item 8). The innermost frame's index of the parameter
+  ## `n` names, or -1.
+  if genericFrames.len == 0 or n.kind notin {nnkSym, nnkIdent}: return -1
+  let nm = n.strVal
+  for i, a in genericFrames[^1]:
+    if a.name == nm: return i
+  -1
+
+proc userGenericObjectImpl(head: NimNode): NimNode =
+  ## RFC-0005 S8bn (item 8). The `TypeDef` of a user generic object type
+  ## (`type G[T] = object ...` / `ref object ...` / `ptr object ...`) with
+  ## no `case` part, or nil.
+  if head.kind != nnkSym or head.symKind != nskType or isStdlibDecl(head):
+    return nil
+  let impl = head.getImpl
+  if impl.kind != nnkTypeDef or impl.len < 3 or
+     impl[1].kind != nnkGenericParams: return nil
+  var u = impl[2]
+  if u.kind in {nnkRefTy, nnkPtrTy} and u.len == 1: u = u[0]
+  if u.kind != nnkObjectTy or u.len < 3: return nil
+  if u[2].kind == nnkRecList:
+    for d in u[2]:
+      if d.kind != nnkIdentDefs: return nil
+  impl
+
+proc genericParamNames(impl: NimNode): seq[string] =
+  for g in impl[1]:
+    if g.kind in {nnkSym, nnkIdent}: result.add g.strVal
+    elif g.kind == nnkIdentDefs:
+      for j in 0 ..< g.len - 2: result.add g[j].strVal
+
+proc genericArgOf(name: string; arg: NimNode): GenericArg =
+  ## RFC-0005 S8bn (item 8). `arg` (a type argument as written in a typed
+  ## instance, or in a body under the current frame) for the parameter
+  ## `name`.
+  let k = genericParamArg(arg)
+  if k >= 0:
+    var a = genericFrames[^1][k]
+    a.name = name
+    return a
+  (name: name, ty: classifyType(arg).ty, id: nominalId(arg), spelling: arg.repr,
+   node: arg)
+
+proc genericInstanceId(head: NimNode; args: seq[GenericArg]): tuple[id, spelling: string] =
+  var ids, sps: seq[string]
+  for a in args:
+    ids.add a.id
+    sps.add a.spelling
+  (nominalId(head) & "[" & ids.join(",") & "]",
+   head.strVal & "[" & sps.join(", ") & "]")
+
+proc classifyGenericInstance(head, impl: NimNode;
+                             args: seq[GenericArg]): ClassifiedType
+
+proc genericArgsOfInst(inst: NimNode; impl: NimNode): seq[GenericArg] =
+  ## RFC-0005 S8bn (item 8). The arguments of the instance `inst`
+  ## (`G[A, B]`), one per parameter of `impl`.
+  let names = genericParamNames(impl)
+  for i in 1 ..< inst.len:
+    if i - 1 < names.len: result.add genericArgOf(names[i - 1], inst[i])
+
+proc classifyGenericInstance(head, impl: NimNode;
+                             args: seq[GenericArg]): ClassifiedType =
+  ## RFC-0005 S8bn (item 8). A user generic object instance (`G[int]`):
+  ## its body classified with each parameter resolved to its argument
+  ## (`genericFrames`), keyed on the instance (`genericInstanceId`) and
+  ## spelled as written (a witness names `G[int]`). A parent that is a
+  ## generic instance (`of GBase[T]`) is classified the same way, with the
+  ## arguments the derived type passes it, and joins the hierarchy as a
+  ## non-generic parent does (`inheritChain`, `ownedFieldIds`): S8bh's
+  ## shared address space. Before S8bn a generic object type was
+  ## `feUnsupportedParamType`.
+  let (id, spelling) = genericInstanceId(head, args)
+  var u = impl[2]
+  let wrap = if u.kind in {nnkRefTy, nnkPtrTy}: u.kind else: nnkEmpty
+  if u.kind in {nnkRefTy, nnkPtrTy}: u = u[0]
+  if id in genericInProgress:
+    let ph = tTuple(@[], @[], objectName = spelling, nominalId = id,
+                    isPlaceholder = true)
+    var inst = nnkBracketExpr.newTree(head)
+    for a in args: inst.add a.node
+    witnessTypeSyms[id] = inst
+    ph.typeKey = id
+    return unranged(case wrap
+      of nnkRefTy: tRef(ph)
+      of nnkPtrTy: tPtr(ph)
+      else: ph)
+  genericInProgress.add id
+  genericFrames.add args
+  var fields: seq[IRType]
+  var names: seq[string]
+  if u[2].kind == nnkRecList:
+    for d in u[2]:
+      let tn = d[d.len - 2]
+      let k = genericParamArg(tn)
+      let fty = if k >= 0: genericFrames[^1][k].ty
+                else: classifyFieldType(tn).ty
+      for j in 0 ..< d.len - 2:
+        names.add fieldNameStr(d[j], j)
+        fields.add fty
+  # The parent: a generic instance, a plain object, or a root.
+  var chain: seq[string]
+  var ownedNames, ownedIds: seq[string]
+  var parentOk = true
+  let inh = u[1]
+  if inh.kind == nnkOfInherit and inh.len == 1:
+    let par = inh[0]
+    var parTy: IRType = nil
+    if par.kind == nnkBracketExpr and par.len >= 2:
+      let pimpl = userGenericObjectImpl(par[0])
+      if pimpl == nil: parentOk = false
+      else:
+        let pargs = genericArgsOfInst(par, pimpl)
+        parTy = classifyGenericInstance(par[0], pimpl, pargs).ty
+    elif par.kind == nnkSym and par.strVal notin ["RootObj", "RootRef"]:
+      parTy = classifyType(par).ty
+    if parTy != nil:
+      if parTy.kind == itRef: parTy = parTy.refPointeeTy
+      elif parTy.kind == itPtr: parTy = parTy.ptrPointeeTy
+      if parTy.kind != itTuple or parTy.inheritChain.len == 0:
+        parentOk = false
+      else:
+        fields = parTy.fields & fields
+        names = parTy.fieldNames & names
+        chain = parTy.inheritChain
+        ownedNames = parTy.ownedFieldNames
+        ownedIds = parTy.ownedFieldIds
+    if parentOk:
+      chain.add id
+      for nm in names[ownedNames.len .. ^1]:
+        ownedNames.add nm
+        ownedIds.add id
+  discard genericFrames.pop()
+  discard genericInProgress.pop()
+  if not parentOk:
+    return unranged(tUninterp("__unsupported:" & spelling))
+  var t = tTuple(fields, names, objectName = spelling, nominalId = id,
+                 nameIsRefAlias = wrap != nnkEmpty)
+  # The witness names the instance by its head symbol applied to the
+  # arguments' own nodes (`userTypeName`), as a symbol names a plain type.
+  var inst = nnkBracketExpr.newTree(head)
+  for a in args: inst.add a.node
+  witnessTypeSyms[id] = inst
+  t.typeKey = id
+  if chain.len > 0:
+    t.inheritChain = chain
+    t.ownedFieldNames = ownedNames
+    t.ownedFieldIds = ownedIds
+  unranged(case wrap
+    of nnkRefTy: tRef(t)
+    of nnkPtrTy: tPtr(t)
+    else: t)
+
 proc classifyType*(ty: NimNode): ClassifiedType =
   ## Map a typed-AST type node to a `ClassifiedType`.
   # RFC-0005 S8bc: an argument of a borrowed routine, viewed at its base.
   for i in countdown(borrowBaseViews.high, 0):
     if borrowBaseViews[i].node == ty:
       return classifyType(borrowBaseViews[i].baseTy)
+  # RFC-0005 S8bn (item 8): a generic object's parameter, in its body, is
+  # the argument of the instance being classified.
+  block:
+    let k = genericParamArg(ty)
+    if k >= 0: return unranged(genericFrames[^1][k].ty)
+  # RFC-0005 S8bn (item 8): an instance written in a generic body (`seq[T]`
+  # is typed there; `GBase8[T]` is not) of a user generic object.
+  if ty.kind == nnkBracketExpr and ty.len >= 2 and genericFrames.len > 0:
+    let gimpl = userGenericObjectImpl(ty[0])
+    if gimpl != nil:
+      return classifyGenericInstance(ty[0], gimpl, genericArgsOfInst(ty, gimpl))
   # `var T` strip (lvalue parameter).
   if ty.kind == nnkVarTy and ty.len == 1:
     return classifyType(ty[0])
@@ -959,6 +1170,12 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   var resolved = ty.getTypeInst
   if resolved.kind == nnkVarTy and resolved.len == 1:
     resolved = resolved[0]
+  # RFC-0005 S8bn (item 8): a user generic object instance (`G[int]`).
+  if resolved.kind == nnkBracketExpr and resolved.len >= 2:
+    let gimpl = userGenericObjectImpl(resolved[0])
+    if gimpl != nil:
+      return classifyGenericInstance(resolved[0], gimpl,
+                                     genericArgsOfInst(resolved, gimpl))
   # Phase 15 Z3c / G3: `sink T` / `lent T` are ownership annotations; symex is
   # by-value, so strip the wrapper and classify T. The node shape varies:
   # `sink[T]` / `lent[T]` is an nnkBracketExpr, but a GENERIC `sink T` formal
@@ -1272,25 +1489,50 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       var pointee = classifyObjectRecordFields(resolved, recList,
                                                isRefWrapped = refWrapNode != nil)
       objectsInClassification.setLen(objectsInClassification.len - 1)
-      if pointee.kind == itTuple:
+      if pointee.kind in {itTuple, itVariant}:
         # RFC-0005 S8bh (item 3). A type declared `of` a user type holds its
         # ancestors' fields first, as Nim lays them out: they were missing
         # (`new Derived` never zeroed an inherited field -- a false `sxSat`
         # -- and a witness could not set one). The chain and owners key the
         # sort and field heaps (`refPointeeTypeId`, `fieldHeapKey`).
+        # RFC-0005 S8bn (item 8): a case object of the chain makes every type
+        # at and below it a variant: the case object's own fields, or its
+        # discriminator and branches with the derived type's fields added to
+        # the plain ones.
         let info = inheritInfo(resolved)
         if info.chain.len > 0:
+          var parTy: IRType = nil
           if info.parent != nil:
-            var parTy = classifyType(info.parent).ty
+            parTy = classifyType(info.parent).ty
             if parTy.kind in {itRef, itPtr}:
               parTy = if parTy.kind == itRef: parTy.refPointeeTy
                       else: parTy.ptrPointeeTy
-            if parTy.kind == itTuple:
-              pointee.fields = parTy.fields & pointee.fields
-              pointee.fieldNames = parTy.fieldNames & pointee.fieldNames
-          pointee.inheritChain = info.chain
-          pointee.ownedFieldNames = info.ownedNames
-          pointee.ownedFieldIds = info.ownedIds
+          if pointee.kind == itTuple and parTy != nil and
+             parTy.kind == itVariant:
+            var v = tVariant(objectName = pointee.objectName,
+              discName = parTy.vDiscName, discTy = parTy.vDiscTy,
+              arms = parTy.vArms,
+              plainFieldNames = parTy.vPlainFieldNames & pointee.fieldNames,
+              plainFieldTypes = parTy.vPlainFieldTypes & pointee.fields,
+              discTags = parTy.vDiscTags,
+              nominalId = pointee.nominalId).keyedBySym(resolved)
+            pointee = v
+          elif pointee.kind == itVariant and parTy != nil and
+               parTy.kind == itTuple:
+            pointee.vPlainFieldNames = parTy.fieldNames & pointee.vPlainFieldNames
+            pointee.vPlainFieldTypes = parTy.fields & pointee.vPlainFieldTypes
+          elif pointee.kind == itTuple and parTy != nil and
+               parTy.kind == itTuple:
+            pointee.fields = parTy.fields & pointee.fields
+            pointee.fieldNames = parTy.fieldNames & pointee.fieldNames
+          if pointee.kind == itTuple:
+            pointee.inheritChain = info.chain
+            pointee.ownedFieldNames = info.ownedNames
+            pointee.ownedFieldIds = info.ownedIds
+          else:
+            pointee.vInheritChain = info.chain
+            pointee.vOwnedFieldNames = info.ownedNames
+            pointee.vOwnedFieldIds = info.ownedIds
       if refWrapNode != nil:   # RFC-0005 S8l: variants too
         return unranged(if refWrapNode.kind == nnkPtrTy: tPtr(pointee)
                          else: tRef(pointee))

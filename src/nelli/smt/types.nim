@@ -405,6 +405,17 @@ type
         ## axis exactly as a single-axis variant, and the flag gives its
         ## discriminator heap its own key (one per axis). Never built by the
         ## parser; NOT part of `IRType.==` or the canonical form.
+      vInheritChain*:    seq[string]
+        ## RFC-0005 S8bn (item 8). `itTuple.inheritChain` for a variant of
+        ## an inheritance hierarchy (a case object under `RootObj`, or a
+        ## type derived from one): the sort and every heap the variant's
+        ## own key names (discriminator, arm fields, tag levels) key on the
+        ## hierarchy's root. Empty for a variant declared without `of`.
+      vOwnedFieldNames*: seq[string]
+      vOwnedFieldIds*:   seq[string]
+        ## RFC-0005 S8bn (item 8). `itTuple.ownedFieldNames`/`Ids` for the
+        ## variant's plain fields: each keys its heap on the type that
+        ## declares it (`fieldHeapKey`).
       vPlainFieldNames*: seq[string]
                                     # Phase 11 post-cycle-12: plain
                                     # (non-recCase) fields shared
@@ -961,6 +972,9 @@ type
                                      ## share. Selects `lambdaAliasBodies`.
       ccAddrArgs*: seq[int]          ## RFC-0005 S8bh: arguments that are an
                                      ## `addr lv` cell (`lambdaPtrLocal`).
+      ccVarPtrSafe*: seq[int]        ## RFC-0005 S8bn (item 3): per
+                                     ## argument, `IRStmt.cVarPtrSafe`'s
+                                     ## code for a `var` actual.
       ccTouch*:   seq[string]        ## RFC-0005 S8bh: the variables and
                                      ## heap object types the `var`/`addr`
                                      ## actuals' locations involve (as
@@ -1373,6 +1387,16 @@ type
                          ## the `var` formal to the cell at that path, so
                          ## the callee's writes through the two are one
                          ## location in its order, or declines.
+      cVarPtrSafe*: seq[int]
+                         ## RFC-0005 S8bn (item 3). Per argument, what a
+                         ## `var` actual's location is to a `ptr` of unknown
+                         ## origin (`varActualPtrSafety`): 0 a location one
+                         ## may address (a global, a heap cell, a local whose
+                         ## address is taken, any other shape), 1 a local
+                         ## whose address is never taken (no pointer's
+                         ## target), 2 the caller's own `var` formal passed
+                         ## on (whatever its own actual is). Empty when the
+                         ## call has no `var` actual.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -3919,6 +3943,16 @@ proc mkMathCall*(op: string, args: seq[IRExpr]): IRExpr =   ## Phase 15 F6
 proc mkBoolLit*(v: bool): IRExpr =
   IRExpr(kind: iekBoolLit, bval: v)
 
+proc discTagLit*(e: IRExpr): IRExpr =
+  ## RFC-0005 batch 6. A discriminant tag or `case` label as the ordinal
+  ## literal the variant machinery reads: since S8bn (item 7) a `bool`
+  ## constant the typed AST folded to `0`/`1` parses to `iekBoolLit`, which
+  ## the static-tag paths took for a symbolic tag (`VBox(on: true, a: 0)`
+  ## declined as an A3 constructor with an arm-specific field).
+  if e != nil and e.kind == iekBoolLit:
+    IRExpr(kind: iekIntLit, ival: (if e.bval: 1 else: 0))
+  else: e
+
 proc mkVar*(name: string): IRExpr =
   IRExpr(kind: iekVar, vname: name)
 
@@ -3952,14 +3986,15 @@ proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
 proc mkClosureCall*(callee: string, args: seq[IRExpr];
                     varTys: seq[IRType] = @[]; alias: seq[int] = @[];
                     addrArgs: seq[int] = @[];
-                    touch: seq[string] = @[]): IRExpr =
+                    touch: seq[string] = @[];
+                    varPtrSafe: seq[int] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
   ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
   ## (see `ccVarTys`).
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
          ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
-         ccTouch: touch)
+         ccTouch: touch, ccVarPtrSafe: varPtrSafe)
 
 proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
                         aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
@@ -4984,7 +5019,10 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
                plainFieldNames: seq[string] = @[],
                plainFieldTypes: seq[IRType] = @[],
                discTags: seq[tuple[name: string, ord: int]] = @[],
-               nominalId = ""): IRType =
+               nominalId = "";
+               inheritChain: seq[string] = @[];
+               ownedFieldNames: seq[string] = @[];
+               ownedFieldIds: seq[string] = @[]): IRType =
   ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
@@ -4999,7 +5037,19 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
          vDiscName: discName, vDiscTy: discTy, vArms: arms,
          vDiscTags: discTags, vNominalId: nominalId,
          vPlainFieldNames: plainFieldNames,
-         vPlainFieldTypes: plainFieldTypes)
+         vPlainFieldTypes: plainFieldTypes,
+         vInheritChain: inheritChain,                ## RFC-0005 S8bn
+         vOwnedFieldNames: ownedFieldNames, vOwnedFieldIds: ownedFieldIds)
+
+proc hierChain*(t: IRType): seq[string] =
+  ## RFC-0005 S8bn (item 8). The inheritance chain of an object type, a
+  ## plain one (`inheritChain`) or a case object (`vInheritChain`); empty
+  ## for anything else.
+  if t == nil: return
+  case t.kind
+  of itTuple: t.inheritChain
+  of itVariant: t.vInheritChain
+  else: @[]
 
 proc mkMultiVariant*(objectName: string,
                      axes: seq[VariantAxis],
@@ -5349,11 +5399,13 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             retIntOffsetPositions: seq[int] = @[],
             guardRoots: seq[string] = @[];
-            varLocs: seq[VarLoc] = @[]): IRStmt =
+            varLocs: seq[VarLoc] = @[];
+            varPtrSafe: seq[int] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions,
-         cGuardRoots: guardRoots, cVarLocs: varLocs)
+         cGuardRoots: guardRoots, cVarLocs: varLocs,
+         cVarPtrSafe: varPtrSafe)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false, havoc: seq[string] = @[],

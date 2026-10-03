@@ -523,8 +523,12 @@ suite "S8ap (3): add on a dotted string field":
 # ---- (4) the uninitialised var of an itUninterp placeholder ---------------------
 
 type
+  # RFC-0005 S8bn classifies a generic object instance (`G[int]`); a generic
+  # CASE object is still unrecognised, so it stands in for the placeholder.
   Weird[T] = object
-    x: T
+    case k: bool
+    of true: x: T
+    of false: discard
 
 proc uClosureVar(x: int) =
   var f: proc(y: int): int

@@ -37,6 +37,7 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
+from ./smt/scoped_names import isModuleGlobal   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
@@ -932,7 +933,9 @@ proc userTypeName(ty: IRType, spelling: string): NimNode =
   ## from something other than a symbol), which is all the emitter wrote
   ## before.
   let sym = witnessTypeSym(ty)
-  if sym != nil: copyNimNode(sym) else: ident(spelling)
+  if sym == nil: ident(spelling)
+  elif sym.kind == nnkSym: copyNimNode(sym)
+  else: copyNimTree(sym)   ## RFC-0005 S8bn: a generic instance `G[int]`
 
 proc defaultValueOf(tyNode: NimNode): NimNode =
   ## RFC-0005 S8e. The default value of the type `tyNode` names, as
@@ -1000,9 +1003,11 @@ proc resolvesByRef(ty: IRType): bool =
   let pointee = refPointeeOf(ty)
   if isRecursionPlaceholder(pointee) and witnessTypeSym(pointee) == nil:
     return false
+  # RFC-0005 S8bn: a `ptr string` too (S8bh retargets one like a scalar);
+  # `alloc0` holds an empty string.
   ty.kind == itRef or
     pointee.kind in {itTuple, itVariant, itMultiVariant, itInt, itBool,
-                     itFloat32, itFloat64}
+                     itFloat32, itFloat64, itString}
 
 proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   ## RFC-0005 S8h. The Nim type of the `ref`/`ptr` position `ty`. A named ref
@@ -1016,6 +1021,13 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   if isRecursionPlaceholder(pointee):
     let sym = witnessTypeSym(pointee)
     if sym == nil: return wrapped(ident(pointee.objectName))
+    if sym.kind == nnkBracketExpr:
+      # RFC-0005 S8bn: a generic instance; its head's declaration tells.
+      let gi = sym[0].getImpl
+      if gi.kind == nnkTypeDef and gi.len >= 3 and
+         gi[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimTree(sym)
+      return wrapped(copyNimTree(sym))
     let impl = sym.getImpl
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind in {nnkRefTy, nnkPtrTy}:
@@ -1737,6 +1749,23 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   let (t, r) = emitTyAndReaderShared(ty, path, witId)
   (copyNimTree(t), copyNimTree(r))
 
+proc irTypeHoldsPtr(t: IRType; depth = 0): bool =
+  ## RFC-0005 S8bn (item 1). A value of type `t` holds a `ptr` somewhere
+  ## (conservative past a depth bound).
+  if t == nil: return false
+  if depth > 8: return true
+  case t.kind
+  of itPtr: true
+  of itRef: irTypeHoldsPtr(t.refPointeeTy, depth + 1)
+  of itTuple:
+    for f in t.fields:
+      if irTypeHoldsPtr(f, depth + 1): return true
+    false
+  of itArray: irTypeHoldsPtr(t.elemTy, depth + 1)
+  of itSeq: irTypeHoldsPtr(t.seqElemTy, depth + 1)
+  of itDistinct: irTypeHoldsPtr(t.distinctBase, depth + 1)
+  else: false
+
 proc emitWitnessTuple(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) =
   ## The witness tuple of `params` over the `RawWitness` `witId`: (its type,
   ## its value). RFC-0005 S8h: every `ref`/`ptr` position in it resolves
@@ -1748,17 +1777,39 @@ proc emitWitnessTuple(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) 
   witnessRefCtxUsed = false
   var tupleTy = newTree(nnkTupleConstr)
   var tup = newTree(nnkTupleConstr)
+  var vals: seq[NimNode]
   for p in params:
     let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
     tupleTy.add pTy
     tup.add pVal
+    vals.add pVal
   let used = witnessRefCtxUsed
   (witnessRefCtx, witnessRefCtxUsed) = (savedCtx, savedUsed)
   if not used:
     return (tupleTy, tup)
   let ctxInit = newCall(stdName("newRefWitness"), witId)
-  (tupleTy, nnkBlockExpr.newTree(newEmptyNode(),
-     newStmtList(newLetStmt(ctxId, ctxInit), tup)))
+  # RFC-0005 S8bn (item 1). Every position is built before any `ptr` that
+  # may address it: a parameter holding no pointer first, then one holding
+  # a pointer inside it, then a `ptr` parameter, each group in parameter
+  # order. A pointer aimed at a field (`"&<cell>.<field>"`) then finds its
+  # object built whichever parameter comes first; in parameter order,
+  # `(pi: ptr int; q: Q)` built `pi` first and left it its own cell, so the
+  # replay refuted a sound `sxSat`. The tuple keeps parameter order.
+  var stmts = newStmtList(newLetStmt(ctxId, ctxInit))
+  var ids = newSeq[NimNode](params.len)
+  for rank in 0 .. 2:
+    for i, p in params:
+      let r = if p.ty != nil and p.ty.kind == itPtr: 2
+              elif irTypeHoldsPtr(p.ty): 1
+              else: 0
+      if r != rank: continue
+      ids[i] = genSym(nskLet, "witPos")
+      stmts.add newTree(nnkLetSection,
+        newIdentDefs(ids[i], copyNimTree(tupleTy[i]), vals[i]))
+  var ordered = newTree(nnkTupleConstr)
+  for id in ids: ordered.add id
+  stmts.add ordered
+  (tupleTy, nnkBlockExpr.newTree(newEmptyNode(), stmts))
 
 # ---- Body markers -----------------------------------------------------------
 
@@ -2214,7 +2265,9 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
 
 proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
                       paramTys: seq[NimNode] = @[];
-                      afterBind: NimNode = nil): NimNode =
+                      afterBind: NimNode = nil;
+                      params: seq[IRParam] = @[];
+                      globals: seq[NimNode] = @[]): NimNode =
   ## `callee(wit[0], wit[1], …)` with each argument first bound to a fresh
   ## `var` local, so `var T` parameters receive an addressable lvalue (Phase
   ## 14 A7b). Zero-cost for non-var params. Shared by `assertCoveredBy` and
@@ -2229,10 +2282,19 @@ proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
   ## as `int`, a `distinct` as its base) -- and a non-void `callee` has its
   ## result discarded. `afterBind` is spliced between the bindings and the
   ## call, so a caller can tell a conversion that raised from a `fn` that did.
+  ##
+  ## RFC-0005 S8bn (item 2): with `params` (`fn`'s IR parameters) and
+  ## `globals` (the module-level `var`s `fn` can reach), a `ptr` parameter
+  ## the witness aimed at a variable (`ptrAimsAt`) is handed that variable's
+  ## address once the arguments are bound: a `var` parameter's own local
+  ## (the one `fn` receives), or the global itself. No witness cell can be
+  ## either location.
   var preamble = newStmtList()
   var call = newCall(callee)
+  var pvars: seq[NimNode]
   for i in 0 ..< nParams:
     let pvar = genSym(nskVar, "pvar" & $i)
+    pvars.add pvar
     let elem = nnkBracketExpr.newTree(witId, newLit(i))
     let init =
       if paramTys.len == 0: elem
@@ -2243,6 +2305,33 @@ proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
     preamble.add newTree(nnkVarSection,
       newIdentDefs(pvar, newEmptyNode(), init))
     call.add pvar
+  for j in 0 ..< min(nParams, params.len):
+    if params[j].ty == nil or params[j].ty.kind != itPtr: continue
+    let pj = pvars[j]
+    for i in 0 ..< min(nParams, params.len):
+      if i == j or not params[i].isVar: continue
+      let pi = pvars[i]
+      let nm = newLit(params[i].name)
+      preamble.add quote do:
+        when typeof(addr `pi`) is typeof(`pj`):
+          if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `pi`
+        # RFC-0005 S8bn (item 4): or a part of it (`ptrAimPath`).
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`pi`), typeof(`pj`[])](`pi`, pa.path, 0)
+    for g in globals:
+      let nm = newLit(globalEnvPrefix & macros.strVal(owner(g)) & "." &
+                      macros.strVal(g))
+      preamble.add quote do:
+        when typeof(addr `g`) is typeof(`pj`):
+          if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `g`
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`g`), typeof(`pj`[])](`g`, pa.path, 0)
   if afterBind != nil: preamble.add afterBind
   if paramTys.len == 0:
     return newStmtList(preamble, call)
@@ -2307,8 +2396,15 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let boundId = genSym(nskVar, "replayArgsBound")
   let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
   let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
+  let aimsId = genSym(nskLet, "replayAims")       # RFC-0005 batch 6
+  # RFC-0005 S8bn (item 2): the module-level `var`s `fn` can reach, which a
+  # `ptr` parameter's witness may be aimed at.
+  var globals: seq[NimNode]
+  for g in calleeOuterSyms(fn):
+    if isModuleGlobal(g) and g.symKind == nskVar: globals.add g
   let splat = emitWitnessSplat(fn, params.len, witId, paramTys,
-                               newAssignment(boundId, newLit(true)))
+                               newAssignment(boundId, newLit(true)),
+                               params, globals)
   let lossy = newLit(fidelity == wfLossy)
   # RFC-0005 S10. The rendered witness type is not always the parameter
   # type (a `Rune` renders as `int`, a `distinct` as its base, a table as
@@ -2341,10 +2437,14 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           var `escId`: ref Exception = nil
           var `boundId` = false
           var `hitsId`: HashSet[string]
+          # RFC-0005 batch 6: the pointers the witness aimed at a variable
+          # (S8bn), recorded on this thread, for the replay's thread.
+          let `aimsId` = ptrAimsSnapshot()
           # RFC-0005 S8be: the run is bounded (`runReplayBounded`); it may
           # run on a thread of its own, which owns the capture frame.
           let `endedId` = runReplayBounded(proc () {.closure, gcsafe.} =
             {.cast(gcsafe).}:
+              ptrAimsAdopt(`aimsId`)
               # §4.2 "Capture reentrancy": a nested frame, so an enclosing
               # user capture (`assertCoveredBy`) keeps its hits and does not
               # see ours.
@@ -2678,6 +2778,34 @@ proc parseEntryImplWarned(fn: NimNode, apiName: string,
   warnIncoherentSettings(settings, apiName)
   parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
 
+proc methodPrelude(fn: NimNode): NimNode =
+  ## RFC-0005 S8bn (item 6). nil when every method `fn` calls (transitively)
+  ## is registered (`dsl_parser.methodRegistry`); otherwise the statements
+  ## that register them, emitted into the CALLER's scope, where each name
+  ## resolves to every overload visible there. The entry macro then expands
+  ## again after them, and its parse dispatches each method call over the
+  ## overrides (`methodDispatchStmt`). A name not visible at the caller is
+  ## recorded as such, and its calls stay declined.
+  let names = unregisteredMethodNames(fn)
+  if names.len == 0: return nil
+  result = newStmtList()
+  for nm in names:
+    let id = ident(nm)
+    let reg = newCall(bindSym"symexRegisterMethods", newLit(nm), id)
+    let none = newCall(bindSym"symexRegisterNoMethods", newLit(nm))
+    result.add quote do:
+      when declared(`id`): `reg`
+      else: `none`
+
+proc targetLit(t: SymexTarget): NimNode =
+  ## RFC-0005 S8bn. A static `SymexTarget` as an expression, for an entry
+  ## macro's re-expansion (`methodPrelude`).
+  case t.kind
+  of stkLabel: newCall(bindSym"tLabel", newLit(t.label))
+  of stkRaisedExn: newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
+  else: nnkObjConstr.newTree(bindSym"SymexTarget",
+                             newColonExpr(ident"kind", newLit(t.kind)))
+
 macro symexFind*(fn: typed,
                  target: static SymexTarget,
                  settings: static SymexSettings = defaultSymexSettings()
@@ -2692,6 +2820,11 @@ macro symexFind*(fn: typed,
   # (below `warnIncoherentSettings`), which warns on an incoherent
   # `settings` and THEN calls `parseEntryImpl` — a single call site both
   # entries share.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFind", fn,
+      targetLit(target), newLit(settings)))
   let parsed = parseEntryImplWarned(fn, "symexFind", settings)
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -2823,6 +2956,11 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   ## sequence (`seq[ChoiceNode]`) the corpus entry replays; `bindings` says,
   ## per `fn` parameter, whether it's a direct (symbolic) draw or a
   ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicCollect",
+      fn, trace, bindings, newLit(settings), newLit(maxDraws)))
   let parsed = parseEntryImplWarned(fn, "concolicCollect", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
@@ -2857,6 +2995,12 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   ## along the concrete replay, i.e. an index into the collected
   ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
   ## frontier-stall selection on top of this later.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicFlip",
+      fn, trace, bindings, targetBranchIndex, newLit(settings),
+      newLit(maxDraws), newLit(maxRelaxationAttempts), newLit(z3TimeoutMs)))
   let parsed = parseEntryImplWarned(fn, "concolicFlip", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
@@ -3410,6 +3554,11 @@ macro symexFindAllWitnesses*(fn: typed,
   # `symexForAll`, which emits a call to this macro rather than routing
   # through `symexFind`/`assertCoveredBy` (its own settings never touched
   # `warnIncoherentSettings` before this).
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFindAllWitnesses",
+      fn, db, newLit(symexSettings), excludeTargets))
   let parsed = parseEntryImplWarned(fn, "symexFindAllWitnesses", symexSettings)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)

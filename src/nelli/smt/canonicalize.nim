@@ -241,6 +241,25 @@ const symexWalkerVersion* = "223"
   ## declines. An inlined iterator's formals name the caller's locations as
   ## Nim's expansion does (they were copies). 217 -> 222.
   ##
+  ## RFC-0005 S8bn (2026-10-03) -- S8bh's remainder, all precision.
+  ## Provisional 215. A `ptr` witness replays whatever the parameter order
+  ## and when aimed at a global or a `var` parameter (`@aim:`); a `var`
+  ## formal whose actual is a local never addressed is no pointer's target;
+  ## a `ptr` may address a field or element of a by-value aggregate `var`
+  ## parameter or global, or an element of a seq held in the heap (S8ax's
+  ## identity: root, path, snapshot index), declining once the path
+  ## resized the seq; an always-raising void closure is a raise; a call
+  ## through a proc field (by value, or a heap field's shadow code over the
+  ## procs assigned to it) and a method call (dispatched on the run-type
+  ## tag) are walked, and an unknown target havocs the globals; `of` is a
+  ## tag test and `nil` parses in every typed position; `{.inheritable.}`,
+  ## `of RootRef` and case-object hierarchies share S8bh's address space;
+  ## a parameter's run-type tags lie in its static type's subtree; S8bk's
+  ## late address on S8bh's indirect-call path. Verdicts move (sxUnknown
+  ## to sxSat / sxUnsat) and the IR gains fields (`cVarPtrSafe`,
+  ## `ccVarPtrSafe`, the variant hierarchy fields), so
+  ## cached entries rotate.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -5252,7 +5271,13 @@ proc canonicalize*(t: IRType): string =
       ";plain=[" & plainParts.join(";") & "]" &
       ";disc=" & t.vDiscName & "=" & canonicalize(t.vDiscTy) &
       ";dtags=[" & ordParts.join(",") & "]" &
-      ";[" & armParts.join(",") & "]>"
+      ";[" & armParts.join(",") & "]" &
+      # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners
+      # key its sort and heaps; absent for a variant without `of`.
+      (if t.vInheritChain.len == 0: ""
+       else: ";inh=[" & t.vInheritChain.join(",") & "];own=[" &
+             t.vOwnedFieldNames.join(",") & "|" &
+             t.vOwnedFieldIds.join(",") & "]") & ">"
   of itMultiVariant:
     # Phase 14 (ADR-0003 D1). Distinct prefix `MVr:` and distinct
     # axis-grouped format `;axes=[...]` ensure cache keys do not
@@ -5486,7 +5511,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
-      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
+      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") & ">"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5598,7 +5624,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       (if s.opaqueDefects.len > 0:   # RFC-0005 S8be
          ";defects=[" & s.opaqueDefects.join(",") & "]"
        else: "") &
-      (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") & ">"
+      (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") &
+      # RFC-0005 S8bn: whether a `var` actual may be a pointer's target
+      # changes the verdict (a deref in the callee declines or not).
+      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read

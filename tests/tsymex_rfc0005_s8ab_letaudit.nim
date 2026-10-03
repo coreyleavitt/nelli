@@ -766,9 +766,11 @@ suite "S8ah: macro-by-macro reachability of the 37 generics":
     check stale.len == 0
     if stale.len > 0: echo "STALE FORCED-GENERIC ENTRY:\n" & stale.join("\n")
 
-  test "GREEN: the real scope has 22 unique macro names, not the fence's stale 17":
+  test "GREEN: the real scope has 24 unique macro names, not the fence's stale 17":
     # See `realScopeMacroNames`'s own doc comment for the reconciliation.
-    check realScopeMacroNames.len == 22
+    # RFC-0005 S8bn: 22 -> 24, `dsl_parser`'s `symexRegisterMethods` and
+    # `symexRegisterNoMethods` (the method registry the entry macros emit).
+    check realScopeMacroNames.len == 24
 
   test "GREEN: exactly 1 of the 37 registered generics is VM-reachable from any macro in scope" &
        " (the other 36 are proven unreachable by the SAME mechanical walk, not left unclassified)":

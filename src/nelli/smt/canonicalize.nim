@@ -202,7 +202,23 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "209"
+const symexWalkerVersion* = "217"
+  ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
+  ## (on S8ax) and S8bh (on S8bf) were built on the channel with
+  ## provisional numbers and land stacked on batch 3 as one integration
+  ## branch under ONE walker number. Their bullets follow, each naming its
+  ## provisional number. The stack's own changes: a signed `int` heap leaf
+  ## of a leaf-split seq element (`heapLeafTerm`), S8bh's inherit-tag store
+  ## and its `ptr`-target family store are in the heap's value sort
+  ## (`heapStoreValue`; S8ax's Int-sorted heaps), and `intHeapIsInt` is set
+  ## before any parameter is allocated (a `Table` of a tuple parameter was
+  ## ill-sorted). S8be's call through a proc-valued expression (`t.f(x)`)
+  ## goes through S8bh's `closureCallIR`, so its `var` writes land (they
+  ## were dropped: a false `sxSat`), and a closure call emits S8ax's
+  ## computed-index alias guard as a direct call does. A closure raise
+  ## carries S8as's by-reference writes and S8bh's `var` outs both, logged
+  ## in S8bb's `raiseOrder`. 209 -> 217.
+  ##
   ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
   ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink
   ## order, and an `if` guard that raised on every path (a rejected

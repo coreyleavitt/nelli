@@ -8751,6 +8751,29 @@ provisional number. Where two slices fixed one thing, the stack keeps both:
   pairs they find are declined on their paths as the cell model's are.
 - *Step 1c.* S8ay's facts-first check asserts S8ba's `nimLenFacts` too.
 
+**Batch 4 (2026-10-02) — one walker number for four slices.** S8bb (on
+S8ay), S8bc (on S8at), S8be (on S8ax) and S8bh (on S8bf) were built on the
+channel, each with a provisional walker number (S8bb 201, S8bc 203, S8be
+205, S8bh 208). They land stacked on batch 3, in that order, under ONE
+number: `symexWalkerVersion` 209 -> **217**, the CR2 `==` pin 217. Each
+slice's own `>=` floor stays at its provisional number. Where two slices
+met, the stack keeps both:
+- *Int-sorted heaps.* S8ax stores a signed `int` heap value as an Int. S8bc's
+  leaf-split seq elements (`heapLeafTerm`), S8bh's inherit-tag store and its
+  `ptr`-target family store go through `heapStoreValue`, and `intHeapIsInt`
+  is set before any parameter is allocated (a `Table` of a tuple parameter
+  built an ill-sorted term).
+- *Seq cells.* S8bc's leaf-split constructors and `seqElemFits` hold a
+  distinct element as its base (S8ba's `seqCellTy`).
+- *Calls through a proc value.* S8be's `t.f(x)` arm goes through S8bh's
+  `closureCallIR` in S8ax's operand order, so a `var` formal's write lands
+  (it was dropped: a false `sxSat`). The closure call emits S8ax's
+  computed-index alias guard (`aliasConds`), as `userCallStmt` does. A
+  closure raise carries S8as's by-reference writes and S8bh's `var` outs,
+  and is logged in S8bb's `raiseOrder`.
+- *Operands.* S8ax's `irKids` / `isEagerIR` cover S8bb's `iekStrCaptureRe`
+  and S8bc's `iekSeqNewZero`.
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see

@@ -1668,58 +1668,249 @@ template symexTransparent*() {.pragma.}
 # safely in-process, so it keeps running (and keeps whatever it holds) until
 # it ends or the process does.
 
+# RFC-0005 S8bo. An abandoned replay's thread runs on: it may write what a
+# later replay reads, while that one runs (a confirmation no single-threaded
+# run of the routine makes). A replay that starts while one is still running
+# is therefore neither confirmed nor refuted (`rrContended`, `roContended`).
+# And the replay thread is not the calling thread: it runs the routine on a
+# stack the calling thread's size (`replayStackSize`), with the calling
+# thread's values of the thread variables the routine may reach
+# (`emitReplayWitness`), which it hands back when it ends.
+
+type ReplayRun* = enum
+  ## RFC-0005 S8bo. How one bounded replay (`runReplayBounded`) ended.
+  rrEnded       ## it ended, and no abandoned replay ran beside it
+  rrAbandoned   ## it ran past its bound and was abandoned (`roTimedOut`)
+  rrContended   ## it ended, but an earlier abandoned replay was still
+                ## running when it started (`roContended`)
+
 when compileOption("threads"):
-  import std/[typedthreads, atomics, monotimes, times, os]
+  import std/[typedthreads, atomics, monotimes, times, os, locks]
 
   type ReplayJob = object
     ## RFC-0005 S8be. One bounded replay, in shared memory: the body and its
     ## completion flag. Leaked, with its `Thread`, when the replay is
     ## abandoned -- the thread still reads both.
+    ## RFC-0005 S8bo: and the stack to run the body on (0: the thread's own).
     body: proc () {.closure, gcsafe.}
     done: Atomic[bool]
+    stackSize: int
+    th: ptr Thread[ptr ReplayJob]
+
+  var abandonedLock: Lock
+  var abandoned: seq[ptr ReplayJob]
+    ## RFC-0005 S8bo. Every replay abandoned so far whose thread has not been
+    ## seen to end (`abandonedLock`).
+  initLock(abandonedLock)
+
+  proc reapAbandoned(): int =
+    ## RFC-0005 S8bo. Joins and frees the abandoned replays that have ended;
+    ## the number still running.
+    withLock abandonedLock:
+      var live: seq[ptr ReplayJob]
+      for j in abandoned:
+        if j.done.load:
+          joinThread(j.th[])
+          `=destroy`(j[])
+          deallocShared(j.th)
+          deallocShared(j)
+        else:
+          live.add j
+      {.cast(gcsafe).}:
+        abandoned = live
+      result = live.len
+
+  proc replayAbandonedLive*(): int =
+    ## RFC-0005 S8bo. How many abandoned replays are still running.
+    reapAbandoned()
+
+  when defined(windows):
+    proc getCurrentThreadStackLimits(lo, hi: ptr uint)
+      {.importc: "GetCurrentThreadStackLimits", stdcall, dynlib: "kernel32".}
+    proc convertThreadToFiberR(param: pointer): pointer
+      {.importc: "ConvertThreadToFiber", stdcall, dynlib: "kernel32".}
+    proc convertFiberToThreadR(): int32
+      {.importc: "ConvertFiberToThread", stdcall, dynlib: "kernel32".}
+    proc createFiberExR(stackCommit, stackReserve: csize_t, flags: uint32,
+                        startAddr, param: pointer): pointer
+      {.importc: "CreateFiberEx", stdcall, dynlib: "kernel32".}
+    proc deleteFiberR(f: pointer)
+      {.importc: "DeleteFiber", stdcall, dynlib: "kernel32".}
+    proc switchToFiberR(f: pointer)
+      {.importc: "SwitchToFiber", stdcall, dynlib: "kernel32".}
+
+    type FiberReplay = object
+      job: ptr ReplayJob
+      mainFiber: pointer
+
+    proc replayFiberMain(param: pointer) {.stdcall.} =
+      let f = cast[ptr FiberReplay](param)
+      f.job.body()
+      switchToFiberR(f.mainFiber)
+
+    proc runOnStack(job: ptr ReplayJob) =
+      ## RFC-0005 S8bo. `job.body` on a fiber whose stack reserve is
+      ## `job.stackSize` (the calling thread's). The body catches what it
+      ## raises: nothing unwinds across the switch.
+      let mainFiber = convertThreadToFiberR(nil)
+      if mainFiber == nil:
+        job.body()
+        return
+      var f = FiberReplay(job: job, mainFiber: mainFiber)
+      let fib = createFiberExR(csize_t(64 * 1024), csize_t(job.stackSize), 1,
+                               cast[pointer](replayFiberMain), addr f)
+      if fib == nil:
+        discard convertFiberToThreadR()
+        job.body()
+        return
+      # The fiber's entry never returns through its epilogue: keep the
+      # debug build's frame chain off its (freed) stack, as
+      # `runSymexWithBigStack` does.
+      when declared(getFrameState) and declared(setFrameState):
+        let savedFrames = getFrameState()
+      switchToFiberR(fib)
+      when declared(getFrameState) and declared(setFrameState):
+        setFrameState(savedFrames)
+      deleteFiberR(fib)
+      discard convertFiberToThreadR()
+
+    proc callerStackSize(): int =
+      var lo, hi: uint
+      getCurrentThreadStackLimits(addr lo, addr hi)
+      int(hi - lo)
+
+  elif defined(linux):
+    import std/posix
+
+    type
+      StackT {.importc: "stack_t", header: "<signal.h>", bycopy.} = object
+        ss_sp: pointer
+        ss_flags: cint
+        ss_size: csize_t
+      UContext {.importc: "ucontext_t", header: "<ucontext.h>",
+                 bycopy.} = object
+        uc_link: ptr UContext
+        uc_stack: StackT
+
+    proc getcontext(u: ptr UContext): cint
+      {.importc, header: "<ucontext.h>".}
+    proc makecontext(u: ptr UContext; fn: proc () {.noconv.}; argc: cint)
+      {.importc, header: "<ucontext.h>", varargs.}
+    proc swapcontext(o, u: ptr UContext): cint
+      {.importc, header: "<ucontext.h>".}
+
+    let mainThread = pthread_self()
+      ## The thread that initialised this module: the program's main one.
+
+    var coroJob {.threadvar.}: ptr ReplayJob
+
+    proc coroMain() {.noconv.} =
+      coroJob.body()   # returns to `uc_link`
+
+    proc runOnStack(job: ptr ReplayJob) =
+      ## RFC-0005 S8bo. `job.body` on a stack of `job.stackSize` bytes (the
+      ## calling thread's), with a guard page below it, as the kernel gives
+      ## the main thread: an overflow faults as it would there.
+      let page = int(sysconf(SC_PAGESIZE))
+      let size = (job.stackSize + page - 1) div page * page
+      let mem = mmap(nil, size + page, PROT_READ or PROT_WRITE,
+                     MAP_PRIVATE or MAP_ANONYMOUS, -1, 0)
+      if mem == MAP_FAILED:
+        job.body()
+        return
+      discard mprotect(mem, page, PROT_NONE)
+      var here, there: UContext
+      if getcontext(addr there) != 0:
+        discard munmap(mem, size + page)
+        job.body()
+        return
+      there.uc_stack.ss_sp = cast[pointer](cast[uint](mem) + uint(page))
+      there.uc_stack.ss_size = csize_t(size)
+      there.uc_link = addr here
+      coroJob = job
+      makecontext(addr there, coroMain, 0)
+      discard swapcontext(addr here, addr there)
+      discard munmap(mem, size + page)
+
+    proc callerStackSize(): int =
+      ## The main thread's stack is its `RLIMIT_STACK` (capped; an unlimited
+      ## one at 64 MiB). Any other thread's is taken to be Nim's own
+      ## (0: the replay thread's default), which every Nim thread has.
+      if pthread_equal(pthread_self(), mainThread) == 0: return 0
+      var rl: RLimit
+      if getrlimit(RLIMIT_STACK, rl) != 0: return 0
+      let cur = int(rl.rlim_cur)
+      if cur <= 0 or cur > (256 shl 20): 64 shl 20 else: cur
+
+  else:
+    proc runOnStack(job: ptr ReplayJob) = job.body()
+    proc callerStackSize(): int = 0
 
   proc replayThreadMain(job: ptr ReplayJob) {.thread.} =
-    job.body()
+    if job.stackSize > 0: runOnStack(job)
+    else: job.body()
     # The body hands refs back to the calling thread (the escaped
     # exception, in the closure's environment). ORC registers a ref whose
     # count drops above zero as a cycle root in THIS thread's root list;
     # the calling thread's final decrement would then unregister it from
-    # its own list (a SIGSEGV in `unregisterCycle`). A collection here
+    # its own (a SIGSEGV in `unregisterCycle`). A collection here
     # empties this thread's list and clears each survivor's root index.
     when defined(gcOrc): GC_runOrc()
     job.done.store(true)
 
+  proc replayStackSize*(): int =
+    ## RFC-0005 S8bo. The stack a replay started from this thread runs on:
+    ## this thread's own size where it is known (the main thread on Linux,
+    ## any thread on Windows), else Nim's thread stack (2 MiB on 64-bit).
+    let s = callerStackSize()
+    if s > 0: s else: 256 * 1024 * sizeof(int)
+else:
+  proc replayAbandonedLive*(): int = 0
+    ## RFC-0005 S8bo. A build without threads abandons no replay.
+  proc replayStackSize*(): int = 0
+    ## RFC-0005 S8bo. A build without threads replays on the calling thread.
+
 proc runReplayBounded*(body: proc () {.closure, gcsafe.};
-                       timeoutMs: int): bool =
-  ## RFC-0005 S8be. Run one replay `body`; false when it did not end within
-  ## `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build without
-  ## threads, runs it on the calling thread with no bound (true). The
-  ## thread has Nim's thread stack (2 MiB on 64-bit), not the calling
-  ## thread's; a `{.threadvar.}` of the SUT starts at its default there.
+                       timeoutMs: int): ReplayRun =
+  ## RFC-0005 S8be. Run one replay `body`; `rrAbandoned` when it did not end
+  ## within `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build
+  ## without threads, runs it on the calling thread with no bound.
+  ## RFC-0005 S8bo: `rrContended` when it ended but an earlier abandoned
+  ## replay was still running as it started, so either may have written
+  ## what the other read. The thread runs `body` on a stack the calling
+  ## thread's size (`replayStackSize`); the caller (`emitReplayWitness`)
+  ## carries its thread variables in and out.
   when compileOption("threads"):
+    let contended = reapAbandoned() > 0
     if timeoutMs <= 0:
       body()
-      return true
+      return (if contended: rrContended else: rrEnded)
     let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
     job.body = body
+    job.stackSize = callerStackSize()
     let th = cast[ptr Thread[ptr ReplayJob]](
       allocShared0(sizeof(Thread[ptr ReplayJob])))
+    job.th = th
     createThread(th[], replayThreadMain, job)
     let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
     var pause = 1
     while not job.done.load:
       if getMonoTime() >= deadline:
-        return false            # abandoned: `job` and `th` stay allocated
+        # Abandoned: `job` and `th` stay allocated until it is seen to end.
+        withLock abandonedLock:
+          {.cast(gcsafe).}:
+            abandoned.add job
+        return rrAbandoned
       sleep(pause)
       pause = min(pause * 2, 20)
     joinThread(th[])
     `=destroy`(job[])
     deallocShared(job)
     deallocShared(th)
-    true
+    if contended: rrContended else: rrEnded
   else:
     body()
-    true
+    rrEnded
 
 type ReplayOutcome* = enum
   ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
@@ -1753,6 +1944,11 @@ type ReplayOutcome* = enum
                   ## replay was abandoned -- it may be looping, or only slow.
                   ## Neither confirmed nor refuted: the candidate stays
                   ## sxUnknown, with a `feReplayTimedOut` hint
+  roContended     ## RFC-0005 S8bo: the replay ended, but an earlier
+                  ## abandoned replay was still running when it started and
+                  ## may have written what this one read. Neither confirmed
+                  ## nor refuted: the candidate stays sxUnknown, with a
+                  ## `feReplayTimedOut` hint
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -2026,6 +2222,63 @@ proc formalParamTypes(fn: NimNode): seq[NimNode] =
     if t.kind == nnkVarTy: t = t[0]
     for _ in 0 ..< d.len - 2: result.add t
 
+proc isThreadvarSym(n: NimNode): bool =
+  ## RFC-0005 S8bo. `n` is the symbol of a `{.threadvar.}` variable.
+  if n.kind != nnkSym or symKind(n) != nskVar: return false
+  let impl =
+    try: n.getImpl
+    except CatchableError: return false
+  if impl.kind != nnkIdentDefs or impl.len < 1 or
+     impl[0].kind != nnkPragmaExpr or impl[0].len < 2:
+    return false
+  for p in impl[0][1]:
+    if p.kind in {nnkIdent, nnkSym} and p.strVal == "threadvar": return true
+  false
+
+proc scanThreadvars(n: NimNode; vars: var seq[NimNode];
+                    seen: var seq[string]; complete: var bool) =
+  ## RFC-0005 S8bo. See `threadvarsReached`.
+  case n.kind
+  of nnkSym:
+    let k = symKind(n)
+    if isThreadvarSym(n):
+      for v in vars:
+        if v == n: return
+      vars.add n
+    elif k == nskMethod:
+      complete = false   # dynamic dispatch: any override may run
+    elif isUserRoutine(n):
+      let key = n.signatureHash
+      if key in seen: return
+      seen.add key
+      # Through the Cluster N nil-core, as `scanOpaqueEffects` reads a
+      # routine: one it does not resolve has no body this scan can read.
+      let impl = resolveRoutineImpl(n)
+      if impl == nil or impl[6].kind == nnkEmpty:
+        complete = false  # no body to read (a foreign routine)
+        return
+      scanThreadvars(impl[6], vars, seen, complete)
+  of nnkCall, nnkCommand:
+    if n.len > 0 and n[0].kind == nnkSym and
+       symKind(n[0]) in {nskParam, nskLet, nskVar, nskResult, nskForVar}:
+      complete = false   # a proc value: code this scan does not see
+    for c in n: scanThreadvars(c, vars, seen, complete)
+  else:
+    for c in n: scanThreadvars(c, vars, seen, complete)
+
+proc threadvarsReached(fn: NimNode): seq[NimNode] =
+  ## RFC-0005 S8bo. The `{.threadvar.}`s the routine `fn` may read or write:
+  ## named in its body or in the body of a routine it names, transitively
+  ## (a stdlib routine reaches none of the program's). Empty when some code
+  ## it may run cannot be read (a method, a foreign routine, a call through
+  ## a proc value): carrying only some of them in would make the replay's
+  ## thread state one no thread has, whereas none at all is a fresh
+  ## thread's.
+  var seen: seq[string]
+  var complete = true
+  scanThreadvars(fn, result, seen, complete)
+  if not complete: result.setLen(0)
+
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
                         extraLossy: NimNode = newLit(false);
@@ -2068,6 +2321,24 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let boundId = genSym(nskVar, "replayArgsBound")
   let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
   let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
+  # RFC-0005 S8bo: the calling thread's thread variables, carried into the
+  # replay thread before the run and back out of it after.
+  var tvSave = newStmtList()
+  var tvIn = newStmtList()
+  var tvOut = newStmtList()
+  var tvBack = newStmtList()
+  for tv in threadvarsReached(fn):
+    let saved = genSym(nskLet, "tvSaved")
+    let outv = genSym(nskVar, "tvOut")
+    tvSave.add quote do:
+      let `saved` = `tv`
+      var `outv` = `saved`
+    tvIn.add quote do:
+      `tv` = `saved`
+    tvOut.add quote do:
+      `outv` = `tv`
+    tvBack.add quote do:
+      `tv` = `outv`
   let splat = emitWitnessSplat(fn, params.len, witId, paramTys,
                                newAssignment(boundId, newLit(true)))
   let lossy = newLit(fidelity == wfLossy)
@@ -2102,10 +2373,12 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
           var `escId`: ref Exception = nil
           var `boundId` = false
           var `hitsId`: HashSet[string]
+          `tvSave`
           # RFC-0005 S8be: the run is bounded (`runReplayBounded`); it may
           # run on a thread of its own, which owns the capture frame.
           let `endedId` = runReplayBounded(proc () {.closure, gcsafe.} =
             {.cast(gcsafe).}:
+              `tvIn`
               # §4.2 "Capture reentrancy": a nested frame, so an enclosing
               # user capture (`assertCoveredBy`) keeps its hits and does not
               # see ours.
@@ -2114,12 +2387,16 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                 `splat`
               except Exception as e:
                 `escId` = e
-              `hitsId` = symexCaptureEnd(), `timeoutMs`)
-          if not `endedId`: roTimedOut
-          elif not `boundId`: roInconclusive   # a conversion raised: fn never ran
-          elif replayReached(`tgtId`, `hitsId`, `escId`): roConfirmed
-          elif `lossy` or `extraLossy` or `converted`: roInconclusive
-          else: roRefuted
+              `hitsId` = symexCaptureEnd()
+              `tvOut`, `timeoutMs`)
+          if `endedId` == rrAbandoned: roTimedOut
+          else:
+            `tvBack`
+            if `endedId` == rrContended: roContended
+            elif not `boundId`: roInconclusive   # a conversion raised: fn never ran
+            elif replayReached(`tgtId`, `hitsId`, `escId`): roConfirmed
+            elif `lossy` or `extraLossy` or `converted`: roInconclusive
+            else: roRefuted
 
 macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
                      pathTaint: Taint): untyped =
@@ -2240,6 +2517,8 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
   ##     `sevHint` naming the witness's confirmed model gap (§4.2).
   ##   * `roInconclusive` -- unchanged.
+  ##   * `roContended` (RFC-0005 S8bo) -- as `roTimedOut`: an abandoned
+  ##     replay was still running beside this one.
   ##   * `roTimedOut` (RFC-0005 S8be) -- stays `sxUnknown`, plus a
   ##     `feReplayTimedOut` `sevHint`: the replay was abandoned, so the
   ##     witness is neither confirmed nor refuted.
@@ -2248,6 +2527,14 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   result = raw
   case outcome
   of roInconclusive: discard
+  of roContended:   # RFC-0005 S8bo
+    result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
+      msg: "replay of a " & $c.status & " candidate (" &
+           (if c.status == sxRaised: "raise " & c.raisedTypeId
+            else: "target hit") &
+           ") ran while an earlier abandoned replay was still running, " &
+           "which may have written what it read; neither confirmed nor " &
+           "refuted (feReplayTimedOut)")
   of roTimedOut:
     result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
       msg: "replay of a " & $c.status & " candidate (" &

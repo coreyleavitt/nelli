@@ -847,9 +847,26 @@ type VariantSlot = tuple[kind: char; ord: int; name, key: string;
   ## discriminator (`kind` 'd'), a plain field ('p') or an arm's field ('a',
   ## of arm `ord`), with the heap key, value type and the variant type its
   ## heap is materialised with -- the slots `isNew` zero-writes.
+  ## RFC-0005 S8bo: a plain object's field is a 't' slot.
 
-proc variantSlots(ty: IRType): seq[VariantSlot] =
+proc fieldSplitObject(ty: IRType): bool =
+  ## RFC-0005 S8bo. A plain (non-variant) object whose cell is its
+  ## field-split heaps, as a `ref` to one is (`isNew`'s zero slots): every
+  ## field named. A positional tuple keeps the one heap of its whole value.
+  if ty == nil or ty.kind != itTuple or ty.fieldNames.len == 0: return false
+  for f in ty.fieldNames:
+    if f.len == 0: return false
+  true
+
+proc objectSlots(ty: IRType): seq[VariantSlot] =
   ## RFC-0005 S8be. The heaps a cell of the case object type `ty` lives in.
+  ## RFC-0005 S8bo: or of the plain object type `ty` (`fieldSplitObject`):
+  ## one heap per field, keyed as a field read through a pointer keys it.
+  if ty.kind == itTuple:
+    for i, fname in ty.fieldNames:
+      result.add ('t', 0, fname, fieldHeapKey(ty, fname), ty.fields[i],
+                  IRType(nil))
+    return
   let baseId = refPointeeTypeId(ty)
   result.add ('d', 0, ty.vDiscName, variantDiscHeapKey(ty), ty.vDiscTy, ty)
   for i, fname in ty.vPlainFieldNames:
@@ -861,18 +878,22 @@ proc variantSlots(ty: IRType): seq[VariantSlot] =
                   baseId & "__@" & $arm.tagOrdinal & "__" & fname,
                   arm.fieldTypes[i], ty)
 
-proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
-                      refAst: Z3AnyAst): SymVal =
+proc objectCellValue(ctx: Z3Context; p: Path; ty: IRType;
+                     refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8be. The case object held at `refAst` on `p`: a value of
   ## `ty` whose discriminator and every field, of every arm, are the selects
-  ## of their heaps at `refAst`.
+  ## of their heaps at `refAst`. RFC-0005 S8bo: or the plain object, field
+  ## by field.
   var scratchPC: seq[Z3Bool]
   result = allocateSym(ty, "__addrCellProto", scratchPC)
   let refSort = allocRefSort(ctx, ty)
-  for sl in variantSlots(ty):
+  for sl in objectSlots(ty):
     let cell = heapCellArrays(ctx, p, sl.key, refSort, sl.ty, sl.variantTy)
     let v = heapCellSelect(ctx, cell, refAst, sl.ty)
     case sl.kind
+    of 't':
+      let i = result.fieldNames.find(sl.name)
+      if i >= 0: result.fields[i] = v
     of 'd':
       var d = new SymVal
       d[] = v
@@ -885,15 +906,22 @@ proc variantCellValue(ctx: Z3Context; p: Path; ty: IRType;
         let i = result.vArmFieldNames[sl.ord].find(sl.name)
         if i >= 0: result.vArmFields[sl.ord][i] = v
 
-proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
-                      v: SymVal) =
+proc objectCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                     v: SymVal) =
   ## RFC-0005 S8be. Store the case object `v` into its cell at `refAst` on
   ## `p`, heap by heap (a field `v` does not hold keeps its heap's value).
+  ## RFC-0005 S8bo: or the plain object `v`.
   let refSort = allocRefSort(ctx, ty)
-  for sl in variantSlots(ty):
+  for sl in objectSlots(ty):
     var fv: SymVal
     var have = false
     case sl.kind
+    of 't':
+      if v.kind == svTuple:
+        let i = v.fieldNames.find(sl.name)
+        if i >= 0 and i < v.fields.len:
+          fv = v.fields[i]
+          have = true
     of 'd':
       if v.vDisc != nil:
         fv = v.vDisc[]
@@ -922,7 +950,9 @@ proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                    refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8ax. The value of the address cell at `refAst` on `p`.
   ## RFC-0005 S8be: a case object's, from its field-split heaps.
-  if ty.kind == itVariant: return variantCellValue(ctx, p, ty, refAst)
+  ## RFC-0005 S8bo: a plain object's, likewise.
+  if ty.kind == itVariant or fieldSplitObject(ty):
+    return objectCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   heapCellSelect(ctx, cell, refAst, ty)
@@ -932,9 +962,9 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
   ## path the caller just forked) and return the cell's value read back:
   ## the variable's new binding, so the two stay one term.
-  if ty.kind == itVariant:   # RFC-0005 S8be
-    if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
-    return variantCellValue(ctx, p, ty, refAst)
+  if ty.kind == itVariant or fieldSplitObject(ty):   # RFC-0005 S8be, S8bo
+    if v.kind in {svVariant, svTuple}: objectCellStore(ctx, p, ty, refAst, v)
+    return objectCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   var scratchPC: seq[Z3Bool]
@@ -979,8 +1009,10 @@ proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
           "RFC-0005 S8be: a pointer dereferenced here may hold the address " &
                "of a seq element whose memory Nim may have freed (the seq " &
                "was resized or assigned whole since `addr` took it, or its " &
-               "routine returned), or of a returned routine's variable; the " &
-               "walk does not model freed memory (feUnsupportedOp)")
+               "routine returned), of an arm field of a case object that " &
+               "may have changed arm since (RFC-0005 S8bo), or of a " &
+               "returned routine's variable; the walk does not model freed " &
+               "memory (feUnsupportedOp)")
     result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
   result.add forkPath(p, p.pc & @[not anyHit], p.env)
 
@@ -1008,7 +1040,8 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       continue
     var why = ""
     # RFC-0005 S8be: a case object's cell is its field-split heaps
-    # (`variantSlots`), as a `ref` to one is.
+    # (`objectSlots`), as a `ref` to one is; RFC-0005 S8bo: a plain
+    # object's too.
     if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
                       itSeq, itVariant}:
       why = "of a variable of type " & $ty
@@ -1062,10 +1095,19 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
   for p in paths:
     if w.shouldStop: return
     var why = ""
+    var whyKind = feUnsupportedOp
     if root in w.frame.outerNames or isGlobalEnvName(root):
       why = "of an element of a seq an enclosing routine owns"
     elif not p.env.hasKey(root) or p.env[root].kind != svSeq:
       why = "of an element of a seq this frame does not hold"
+    elif p.env[root].isUnsupportedFieldPlaceholder or # [placeholder-audited]
+         not isBackedSeqElemTy(ty):
+      # RFC-0005 S8bo: a seq of objects. The walk holds no element of it
+      # (a placeholder of length 0), so there is nothing to keep the cell
+      # equal to: the cell is a pointer to a fresh object, on a path that
+      # declines as every element access of that seq does.
+      why = "of an element of a seq whose elements the walk does not hold"
+      whyKind = seNestedSeqUnsupported
     else:
       for (cl, _) in w.frame.capCells:
         if cl == root: why = "of an element of a seq a closure captures"
@@ -1080,10 +1122,10 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
                                    ptrFamily: true, ptrPointee: ty)
       child.env = env2
-      let d = w.degrade(feUnsupportedOp,
+      let d = w.degrade(whyKind,
         "RFC-0005 S8be: `addr " & displayName(root) & "[i]` " & why &
              " is not modelled: the pointer is not kept equal to the " &
-             "element (feUnsupportedOp)")
+             "element (" & $whyKind & ")")
       result.add forkPathTainted(child, child.pc, child.env, d)
       continue
     # The address `s[j]` already has, when `j` is this index.
@@ -1092,7 +1134,9 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     var addrAst = newRef
     for k in countdown(child.elemCells.high, 0):
       let e = child.elemCells[k]
-      if e.frame != w.frame.frameId or e.root != root or e.dead: continue
+      if e.frame != w.frame.frameId or e.root != root or e.dead or
+         e.field.len > 0:
+        continue
       let same = idx == e.idx
       addrAst = wrap[Z3AnyAst](ctx,
         checkedIte(ctx, same.raw, e.refAst.raw, addrAst.raw))
@@ -1101,6 +1145,96 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     discard addrCellStore(ctx, child, ty, newRef, seqElemAt(env2[root], idx))
     env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: addrAst,
                                  ptrFamily: true, ptrPointee: ty)
+    child.env = env2
+    result.add drainPendingLowerEffects(child)
+
+proc armFieldValue(v: SymVal; field: string; tags: seq[int]): SymVal =
+  ## RFC-0005 S8bo. Arm field `field` of the case object `v`, declared by
+  ## the arms `tags`: the slot of the arm `v`'s discriminator selects (an
+  ## `ite` over them; one arm, its slot).
+  var vals: seq[(int, SymVal)]
+  for t in tags:
+    if v.vArmFieldNames.hasKey(t):
+      let i = v.vArmFieldNames[t].find(field)
+      if i >= 0: vals.add (t, v.vArmFields[t][i])
+  result = vals[^1][1]
+  for k in countdown(vals.len - 2, 0):
+    result = iteSV(variantDiscEq(v.vDisc[], int64(vals[k][0])), vals[k][1],
+                   result)
+
+proc withArmField(v: SymVal; field: string; tags: seq[int];
+                  x: SymVal): SymVal =
+  ## RFC-0005 S8bo. The case object `v` with arm field `field` set to `x` in
+  ## every arm of `tags` (as `lowerVariantFieldSet` writes it).
+  result = v
+  for t in tags:
+    if result.vArmFieldNames.hasKey(t):
+      let i = result.vArmFieldNames[t].find(field)
+      if i >= 0: result.vArmFields[t][i] = x
+
+proc walkFieldCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bo. `addr o.a` of an arm field (`isNew` with `nAddrOf = o`,
+  ## `nAddrField = a`; the parser checked the arm just before): bind
+  ## `stmt.nRetName` to the field's cell -- the one it already has in this
+  ## frame (`Path.elemCells`), else a fresh `ptr`, distinct from every other
+  ## address and from nil, holding the field. The walk then keeps the field
+  ## and the heap at the cell equal (`syncElemCells`) until the object may
+  ## change arm, when the pointer names another arm's memory and the cell
+  ## dies (a dereference that may reach it declines). Declined
+  ## (`feUnsupportedOp`) as `walkElemCell` declines: an object an enclosing
+  ## routine owns, or one a closure captures. Before S8bo such a pointer
+  ## that could escape was `heUnsafeCast`.
+  let ctx = w.z3
+  let ty = stmt.nRefTy.ptrPointeeTy
+  let root = stmt.nAddrOf
+  let field = stmt.nAddrField
+  let typeId = refPointeeTypeId(ty)
+  for p in paths:
+    if w.shouldStop: return
+    var why = ""
+    var tags: seq[int]
+    if root in w.frame.outerNames or isGlobalEnvName(root):
+      why = "of a field of an object an enclosing routine owns"
+    elif not p.env.hasKey(root) or p.env[root].kind != svVariant:
+      why = "of a field of an object this frame does not hold"
+    else:
+      for (cl, _) in w.frame.capCells:
+        if cl == root: why = "of a field of an object a closure captures"
+      for t, names in p.env[root].vArmFieldNames:
+        if field in names: tags.add t
+      if why.len == 0 and tags.len == 0:
+        why = "of a field no arm of the object holds"
+    var known = -1
+    if why.len == 0:
+      for k, e in p.elemCells:
+        if e.frame == w.frame.frameId and e.root == root and
+           e.field == field and not e.dead:
+          known = k
+    if known >= 0:
+      var env1 = p.env
+      env1[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: p.elemCells[known].refAst,
+                                   ptrFamily: true, ptrPointee: ty)
+      result.add forkPath(p, p.pc, env1)
+      continue
+    let refSort = allocRefSort(ctx, ty)
+    var child = forkPath(p, p.pc, p.env)
+    let newRef = freshRef(ctx, refSort, typeId, child)
+    assertFreshness(ctx, child, typeId, newRef, w.settings)
+    var env2 = child.env
+    env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
+                                 ptrFamily: true, ptrPointee: ty)
+    if why.len > 0:
+      child.env = env2
+      let d = w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bo: `addr " & displayName(root) & "." & field & "` " &
+             why & " is not modelled: the pointer is not kept equal to the " &
+             "field (feUnsupportedOp)")
+      result.add forkPathTainted(child, child.pc, child.env, d)
+      continue
+    child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,
+                                 root: root, ty: ty, field: field, tags: tags)
+    discard addrCellStore(ctx, child, ty, newRef,
+                          armFieldValue(env2[root], field, tags))
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
@@ -1578,6 +1712,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # per `cp.heaps.hasKey(heapKey)` below) still safely drains any
         # STILL-PENDING flag from an earlier, not-yet-drained degrade on this
         # same path (idempotent either way).
+        # RFC-0005 S8bo. `p[]` of a plain object: its value is the
+        # field-split heaps, as `isNew` writes them and a field read reads
+        # them. Keyed on the whole object it was a compound heap sort
+        # (`seUnsupportedCompoundSortLeaf`) over a heap no field access sees.
+        if not isField and fieldSplitObject(stmt.dElemTy):
+          let cp = drainPendingLowerEffects(cp0)
+          var objEnv = cp.env
+          objEnv[stmt.dRetName] = objectCellValue(ctx, cp, stmt.dElemTy, refAst)
+          survivors.add drainPendingLowerEffects(forkPath(cp, cp.pc, objEnv))
+          continue
         var newEnv = cp0.env
         # Materialise the per-path heap (field-split array for a field deref) on
         # first use. The ref SORT keys on the OBJECT; the value sort on the field.
@@ -1639,6 +1783,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isNew:
     if stmt.nAddrIdx != nil:
       return walkElemCell(stmt, paths, w)   # RFC-0005 S8be
+    if stmt.nAddrField.len > 0:
+      return walkFieldCell(stmt, paths, w)  # RFC-0005 S8bo
     if stmt.nAddrOf.len > 0:
       return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:
@@ -2091,6 +2237,22 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         nilForks.add nilDerefFork(pd, refAst, sortTy, w)
       for cp in nilForks:
         if w.shouldStop: return survivors
+        # RFC-0005 S8bo. `p[] = v` of a plain object stores `v` field by
+        # field into the heaps a field access reads (see `isDeref`).
+        if not isField and fieldSplitObject(stmt.dwElemTy):
+          let (objSV, cpObj) = lowerInExpr(cp, stmt.dwValue, w)
+          for cpL in drainScalarRaiseForks(cpObj, w):
+            var child = forkPath(cpL, cpL.pc, cpL.env)
+            if objSV.kind == svTuple:
+              objectCellStore(ctx, child, stmt.dwElemTy, refAst, objSV)
+              survivors.add drainPendingLowerEffects(child)
+            else:
+              let d = heapArmDegrade(seUnsupportedCompoundSortLeaf,
+                "RFC-0005 S8bo: a whole-object store through a pointer of a " &
+                "value that is not an object (" &
+                plainEnglishSymValKind(objSV.kind) & ")")
+              survivors.add degradeHeapArmForPath(child, d)
+          continue
         # Materialise the per-path heap (field-split array for a field write) on
         # first use, exactly as `isDeref` does, so a write before any read still
         # has an array to store into and a later read of the same ref/field reads

@@ -202,7 +202,27 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "205"
+const symexWalkerVersion* = "216"
+  ## RFC-0005 S8bo (2026-10-02) — S8be's remainder. Provisional, supersedes
+  ## "205" (206..215 are the S8bf..S8bn siblings', landing separately).
+  ## (1) `isNil(x)` lowers to `x == nil`; a nil comparison sees through a
+  ## conversion or cast to `pointer`. A `{.magic.}` routine with no
+  ## executable body that reaches the user-call fall-through declines (it
+  ## was walked as an empty body: a constant result).
+  ## (2) A plain object's address cell, and a whole `p[]` read or write of
+  ## an object pointee, are its field-split heaps (`objectSlots`).
+  ## (3) Any write of a seq by name kills its element cells, whatever it
+  ## writes (an equal value kept them live).
+  ## (4) `addr o.a` of a case object's arm field whose pointer may escape is
+  ## a field cell (`isNew.nAddrField`, `walkFieldCell`), kept equal to the
+  ## field until the object may change arm (it was `heUnsafeCast`).
+  ## (5) `addr s[i]` of a seq of objects is an element cell, declined
+  ## (`seNestedSeqUnsupported`) while the walk holds no element of it.
+  ## (6) A replay started while an abandoned one still runs is neither
+  ## confirmed nor refuted (`roContended`). (7) A replay runs on a stack the
+  ## calling thread's size, with the calling thread's values of the
+  ## `{.threadvar.}`s the routine reaches, handed back after. A record with
+  ## a `when` classifies as an uninterpreted type (it failed the compile).
   ## RFC-0005 S8be (2026-10-02) — S8ax's remainder. Provisional, supersedes
   ## "197" (198..204 are the S8ay..S8bd siblings', landing separately).
   ## (1) An inert opaque call forks a raise of each `Defect` type its body
@@ -5285,8 +5305,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # RFC-0005 S8be: an element cell's index.
     let ofIdx = if s.nAddrIdx != nil: ";ix=" & canonicalize(s.nAddrIdx, env)
                 else: ""
+    # RFC-0005 S8bo: a field cell's arm field.
+    let ofFld = if s.nAddrField.len > 0: ";fld=" & s.nAddrField else: ""
     let slot = bindLocal(env, s.nRetName)
-    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx & ">"
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx &
+      ofFld & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).

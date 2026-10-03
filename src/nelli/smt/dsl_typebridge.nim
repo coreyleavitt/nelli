@@ -498,6 +498,13 @@ proc classifyObjectRecordFields*(nameSym: NimNode, recList: NimNode,
     if member.kind == nnkRecCase:
       hasRecCase = true
       break
+  # RFC-0005 S8bo. A record holding a `when` (system's `Channel`, whose
+  # fields depend on the build) has no one field list: it is an
+  # uninterpreted type. It failed the whole compile here (an opaque
+  # routine's effect summary classifies every global it names).
+  for member in recList:
+    if member.kind == nnkRecWhen:
+      return tUninterp("__unsupported:" & s)
   if hasRecCase:
     # ---- Phase 11 single-axis + Phase 14 multi-axis lowering --
     # Each `nnkRecCase` in `recList` becomes one VariantAxis.

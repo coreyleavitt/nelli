@@ -3766,3 +3766,86 @@ proc pcreReplace*(n: Nfa; s, by: string): string =
   var unmodelled = false
   result = pcreReplace(n, s, by, unmodelled)
   doAssert not unmodelled, "pcreReplace: a call the model does not read"
+
+# ---- RFC-0005 S8bt (item 7): facts of every `replace` value -------------------
+
+type ReplaceFacts* = object
+  ## RFC-0005 S8bt. What every match of a pattern is, for the lemmas of a
+  ## `replace` value (`regex_parser.replaceLemmas`), true of every subject:
+  mn*, mx*: int
+    ## the shortest and longest match in bytes (`mx` -1: unbounded)
+  sure*: set[char]
+    ## the bytes that are always inside a match of Nim's `replace` loop:
+    ## an attempt at a position holding one matches, whatever follows it
+  first*: set[char]
+    ## every match's first byte is one of these (all 256 when not computed)
+
+proc hasAcceptRx(x: Rx): bool =
+  case x.kind
+  of rxAccept: true
+  of rxCat, rxAlt:
+    for k in x.kids:
+      if hasAcceptRx(k): return true
+    false
+  of rxRep: hasAcceptRx(x.sub)
+  else: false
+
+proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
+  ## RFC-0005 S8bt. The facts of `n` (read from `root`).
+  ##   * The match lengths are the tree's word lengths (`lenRange`; a verb
+  ##     or an anchor is zero-width), except that `(*ACCEPT)` ends a match
+  ##     early: then the shortest is 0.
+  ##   * A byte `b` is `sure` when, for every class of what precedes the
+  ##     start (`startClasses`) and with or without NOTEMPTY_ATSTART, no
+  ##     subject from a position holding `b` is in the attempt's no-match
+  ##     language (`lkNone`'s automaton). Such a position is never left
+  ##     between matches: Nim's loop searches from every position up to it,
+  ##     and the search attempts there -- the start-of-match scan and the
+  ##     minimum-length and required-character checks skip only positions
+  ##     where no match starts. Stated only where nothing else moves the
+  ##     search: no COMMIT, PRUNE, SKIP or THEN (a SKIP jumps past
+  ##     positions, a COMMIT ends the search), no UTF mode (an invalid
+  ##     subject is an error and kept whole) and no limit below PCRE's
+  ##     default (an error keeps the rest); an LF is not sure where the
+  ##     bumpalong's CRLF skip can pass over it (`skipActive`).
+  ##   * A byte is outside `first` when no attempt at a position holding
+  ##     it matches, whatever follows: for every class of what precedes the
+  ##     start, the no-match verifier (`buildVerifier`, the attempt as the
+  ##     search runs it) accepts every well-formed continuation after it.
+  ##     Not computed in UTF mode or with a SKIP:NAME that has no MARK (its
+  ##     attempt is re-run differently).
+  let (lo, hi) = lenRange(root)
+  result.mn = (if hasAcceptRx(root): 0 else: lo)
+  result.mx = hi
+  result.first = {'\x00' .. '\xFF'}
+  if n.ok and not n.utf and not n.hasNeverSkip:
+    var first: set[char]
+    var fine = true
+    for pc in startClasses(n):
+      var why: string
+      var igns: set[int8]
+      let v = buildVerifier(n, exNoMatch, pc, false, 0, 0, fine, why, igns)
+      if not fine: break
+      for sym in 0 ..< symMark:
+        let nls = nlStepFor(n.nl, 0'i8, sym)
+        if nls < 0: continue
+        let t = (if v.trans.len == 0: -1'i32 else: v.trans[0][sym])
+        if t < 0 or univIdx(nls, 0) notin v.univ[t]:
+          first.incl symByte(sym)
+    if fine: result.first = first
+  if not n.ok or n.utf or limitEffect(n)[0] != leNone or n.hasCommit or
+     n.hasSkip or n.hasThen or n.hasPrune or n.hasNeverSkip:
+    return
+  var sure: set[char] = {'\x00' .. '\xFF'}
+  for pc in startClasses(n):
+    for ne in [false, true]:
+      let d = buildAttempt(n, AttemptSpec(acc: acNone, anchored: true,
+                                          noEmpty: ne, pc0: pc))
+      if not d.ok: return
+      let (trans, _, mapped) = minimizeMap(d)
+      let st = mapped[0]
+      if st < 0: continue          # no subject fails the attempt
+      for sym in 0 ..< symMark:
+        if trans[st][sym] >= 0: sure.excl symByte(sym)
+  if n.skipActive: sure.excl '\n'
+  result.sure = sure

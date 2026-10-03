@@ -168,6 +168,13 @@ proc regexReplaceShape(pr: PcreParse): (bool, RegexReplaceShape) =
   ## lowers every other pattern by the priority run
   ## (`regex_parser.replaceRunZ3`).
   var sh: RegexReplaceShape
+  # RFC-0005 S8bt (item 7): a pattern that is one byte set as a whole (an
+  # alternation of sets, `[0-9]|x`) is the one-set shape: its matches are
+  # its single bytes, whichever alternative PCRE tries first.
+  let (oneSet, cs1) = asSet(pr.root)
+  if oneSet:
+    sh.atoms.add cs1
+    return (true, sh)
   let (fine, edges, _) = splitEdges(pr.root)
   if not fine or edges.len != 1: return (false, sh)
   let e = edges[0]
@@ -813,42 +820,51 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     of leZero: return recv
     of leNone, leCounted: discard
     let (isShape, sh) = regexReplaceShape(pr)
+    let lenS = simplify(len(recv.str))
+    let known = isNumeralAst(lenS.ctx, lenS.raw)
+    var term: Z3String
     if not isShape or pr.utf or crlfSkipObservable(n) or n.costs:
       if legacyRun(n):
         let t = runTable(n)
         if not t.ok: regexDecline(sp, t.why)
-        return SymVal(kind: svString,
-                      str: replaceRunZ3(recv.str, repl.str, t, pr.nl,
-                                        regexFreshName))
-      let t = stepTable(n)
-      if not t.ok: regexDecline(sp, t.why)
-      return SymVal(kind: svString,
-                    str: replaceStepZ3(recv.str, repl.str, n, t,
-                                       regexFreshName))
-    let lenS = simplify(len(recv.str))
-    if isNumeralAst(lenS.ctx, lenS.raw):
-      let n = parseInt(getNumeralString(lenS))
-      if n <= regexReplaceMaxKnown:
-        return SymVal(kind: svString,
-                      str: regexReplaceUnrolled(recv.str, repl.str, sh, n))
-    # RFC-0005 S8ay (item 5): length not a known numeral -- the exact value
-    # by structural recursion over the receiver's suffixes
-    # (`regexReplaceRec`), untainted. S8aw unrolled 16 positions and gave a
-    # receiver longer than that a fresh string (`seZ3StringIncomplete`), so
-    # every claim past 16 bytes was a replay-gated candidate and no UNSAT
-    # there was possible. Measured on both pinned Z3 builds (the S8ay
-    # "As landed" table); a query Z3 leaves undecided is `beSolverUndef`,
-    # never a wrong verdict.
+        term = replaceRunZ3(recv.str, repl.str, t, pr.nl, regexFreshName)
+      else:
+        let t = stepTable(n)
+        if not t.ok: regexDecline(sp, t.why)
+        term = replaceStepZ3(recv.str, repl.str, n, t, regexFreshName)
+      # A receiver of known length: the term alone (Z3 unfolds it to the
+      # end; RFC-0005 S8bt keeps these as S8bb / S8bj lowered them).
+      if known: return SymVal(kind: svString, str: term)
+    else:
+      if known:
+        let ln = parseInt(getNumeralString(lenS))
+        if ln <= regexReplaceMaxKnown:
+          return SymVal(kind: svString,
+                        str: regexReplaceUnrolled(recv.str, repl.str, sh, ln))
+      # RFC-0005 S8ay (item 5): length not a known numeral -- the exact
+      # value by structural recursion over the receiver's suffixes
+      # (`regexReplaceRec`), untainted. S8aw unrolled 16 positions and gave
+      # a receiver longer than that a fresh string (`seZ3StringIncomplete`),
+      # so every claim past 16 bytes was a replay-gated candidate and no
+      # UNSAT there was possible. Measured on both pinned Z3 builds (the
+      # S8ay "As landed" table); a query Z3 leaves undecided is
+      # `beSolverUndef`, never a wrong verdict.
+      term = regexReplaceRec(recv.str, repl.str, sh)
     # RFC-0005 S8bj (item 5): the value's length relation and image
     # (`regex_parser.replaceLemmas`), facts Z3's unfolding of the exact
-    # term does not reach (S8bb's Q2, Q7, Q8 stayed `unknown`).
+    # term does not reach (S8bb's Q2, Q7, Q8 stayed `unknown`). RFC-0005
+    # S8bt (item 7): for every pattern and `by` (`pcre_select.replaceFacts`),
+    # the run table's and the step table's values included (S8bj stated
+    # them for S8aw's shapes only).
     # The value is a fresh `r` whose definition sits in its own sink, so a
-    # query can be tried without it (`regexRecDefConds`).
+    # query can be tried without it (`regexRecDefConds`), with its facts
+    # (`regexRecFactConds`, RFC-0005 S8bt: S8bj's were in
+    # `stripDecompConds`).
     let r = mkStringVar(regexFreshName("__regexReplaceValue"))
-    regexRecDefConds.add r == regexReplaceRec(recv.str, repl.str, sh)
-    for d in replaceLemmas(recv.str, repl.str, r, sh.atoms, sh.plus,
+    regexRecDefConds.add r == term
+    for d in replaceLemmas(recv.str, repl.str, r, replaceFacts(n, pr.root),
                            regexFreshName):
-      stripDecompConds.add d
+      regexRecFactConds.add d
     SymVal(kind: svString, str: r)
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by

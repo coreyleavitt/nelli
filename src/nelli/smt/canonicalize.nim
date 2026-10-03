@@ -209,6 +209,10 @@ const symexWalkerVersion* = "225"
   ## Int-heap / bit-vector bridge gave Z3 UNSAT queries it never decided,
   ## and `queryRLimit` now defaults to 20M, so no query is unbounded under
   ## the defaults (an exhausted one declines). 222 -> 225.
+  ## An `openArray[T]` is the seq it views (a seq, an array's elements, a
+  ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
+  ## signed Int bridge); a `var` one is written back over what it views
+  ## (`iekSeqSplice`).
   ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
@@ -5334,7 +5338,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
-                   canonicalize(e.ssHi, env) & ">"   ## v67: seq-slice view
+                   canonicalize(e.ssHi, env) &
+                   (if e.ssView: ":view" else: "") & ">"   ## v67; S8bu
+  of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
+                   canonicalize(e.spAt, env) & ":" &
+                   canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &

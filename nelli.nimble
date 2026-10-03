@@ -1168,5 +1168,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bu_term",
             # items 2-3: closure and proc-value calls into an address-taken
             # variable, and `addr` of a part of one.
-            "tsymex_rfc0005_s8bu_calls"]:
+            "tsymex_rfc0005_s8bu_calls",
+            # item 4: openArray views (read, `var`).
+            "tsymex_rfc0005_s8bu_views",
+            "tsymex_rfc0005_s8bu_varviews"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -3837,7 +3837,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # surrounding op (comparison, arithmetic) lowers literals at the
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekSeqSlice:
+  of iekSeqSlice, iekSeqSplice:
     # v67: a slice VALUE is a seq — no scalar prototype to offer.
     none(SymVal)
   of iekStrLit:
@@ -8203,7 +8203,15 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.ssLo, intProto)
     let hiSV = lower(env, e.ssHi, intProto)
-    if loSV.kind != svInt or hiSV.kind != svInt:
+    # RFC-0005 S8bu: a `toOpenArray` view's bounds are the caller's own
+    # `int`s, almost always bit-vectors; they take the signed Int bridge,
+    # which S8bu's inverse facts (`bvIntInverseFacts`) let Z3 decide and
+    # the query bounds (`queryRLimit`, `queryTimeoutMs`) end either way.
+    # A slice's keep ADR-0027's decline.
+    let bridged = e.ssView and
+      loSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+      hiSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64}
+    if not bridged and (loSV.kind != svInt or hiSV.kind != svInt):
       # Round-6 N37: was a raw `raise (ref SymexClassifiedDegradeError)` --
       # reached from inside nested `walkBlock` frames via the SAME two-hop
       # literal-seeded-local trick N36 section 1 demonstrated for
@@ -8225,8 +8233,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
              "(→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBoundDegrade"), fresh)
-    let lo = loSV.zi
-    let hi = hiSV.zi
+    let lo = if bridged: toZ3Int(loSV) else: loSV.zi
+    let hi = if bridged: toZ3Int(hiSV) else: hiSV.zi
     # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
     # lo <= hi + 1` (the last conjunct admits the empty slice). Deposit the
     # OOB predicate into the SND-4 sink — `drainStrIndexRaises` routes an
@@ -8270,6 +8278,51 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         checkedSelect(zctx, arr.raw, shifted.raw))
       lams.add lambdaOver(zctx, iVar, sel)
     mkSeqSV((hi - lo) + mkInt(1), lams, recv.seqElemTy)
+  of iekSeqSplice:
+    # RFC-0005 S8bu: `base` with `part` written over it from `at` (a `var
+    # openArray` view of a `toOpenArray` slice, written back). The parser
+    # builds it only after the slice was taken in bounds, of the length
+    # `part` has (an openArray's length never changes): an array-lambda
+    # `ite(at <= i < at + part.len, part[i - at], base[i])`.
+    let base = lower(env, e.spBase)
+    let part = lower(env, e.spPart)
+    let atSV = lower(env, e.spAt, some(SymVal(kind: svInt, zi: mkInt(0))))
+    if base.kind != svSeq or part.kind != svSeq or
+       atSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64} or
+       base.isUnsupportedFieldPlaceholder or # [placeholder-audited]
+       part.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage, the view or the offset lowered as " &
+             plainEnglishSymValKind(base.kind) & "/" &
+             plainEnglishSymValKind(part.kind) & "/" &
+             plainEnglishSymValKind(atSV.kind) &
+             " — expected a seq, a seq and an Int (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    let at = toZ3Int(atSV)   # the view's bridge (`ssView`)
+    inc sliceViewCounter
+    let zctx = base.seqDataRaw.ctx # [placeholder-audited]
+    let iVar = mkIntVar("__spliceview_i" & $sliceViewCounter)
+    let inPart = (iVar >= at) and (iVar < at + part.seqLen) # [placeholder-audited]
+    let shifted = iVar - at
+    let bArrs = seqArrs(base)
+    let pArrs = seqArrs(part)
+    if bArrs.len != pArrs.len:
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage and the view have different element " &
+             "shapes (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< bArrs.len:
+      let fromPart = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, pArrs[k].raw, shifted.raw))
+      let fromBase = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, bArrs[k].raw, iVar.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, inPart.raw, fromPart.raw, fromBase.raw))
+      lams.add lambdaOver(zctx, iVar, body)
+    mkSeqSV(base.seqLen, lams, base.seqElemTy) # [placeholder-audited]
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).

@@ -19,12 +19,12 @@ suite "S8bs: other by-address parameters and iterators":
       check l in h
       check (l & "_dead") notin h
   test "other by-address parameters":
-    # openArray parameters are not modelled (reported in the RFC): the
-    # `var` one declines at the call, the read one at its indexing.
-    declines(sutVarOpenArray, "oa", "along a path the walk does not follow")
-    declines(sutVarOpenArray, "oa_dead", "along a path the walk does not follow")
-    declines(sutOpenArrayRead, "or", "on unsupported type")
-    declines(sutOpenArrayRead, "or_dead", "on unsupported type")
+    # RFC-0005 S8bu: an openArray is a view of its seq (a `var` one the seq
+    # passed by address).
+    clean(sutVarOpenArray, "oa", sxSat)
+    clean(sutVarOpenArray, "oa_dead", sxUnsat)
+    clean(sutOpenArrayRead, "or", sxSat)
+    clean(sutOpenArrayRead, "or_dead", sxUnsat)
     clean(sutSink, "sk", sxSat)
     clean(sutSink, "sk_dead", sxUnsat)
     clean(sutIterVar, "iv", sxSat)

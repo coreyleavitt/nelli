@@ -627,6 +627,11 @@ type
                      ## follow ADR-0027: svInt proto, BV-sorted bound
                      ## declines classified. Fields: `ssBase`/`ssLo`/`ssHi`
                      ## (hi already ..<-adjusted by the parser).
+    iekSeqSplice     ## RFC-0005 S8bu: the seq `spBase` with its elements
+                     ## `spAt ..< spAt + spPart.len` replaced by `spPart`'s
+                     ## (the same length): a `var openArray` view of a
+                     ## `toOpenArray` slice written back to its storage.
+                     ## Lowered as an array-lambda like `iekSeqSlice`.
     iekStrStrip      ## Round-4 Slice B (ADR-0026): `strutils.strip(s,
                      ## leading, trailing, chars)` with COMPILE-TIME-literal
                      ## flags and char set → quantifier-free DECOMPOSITION
@@ -820,6 +825,12 @@ type
       ssBase*: IRExpr
       ssLo*:   IRExpr
       ssHi*:   IRExpr
+      ssView*: bool    ## RFC-0005 S8bu: a `toOpenArray` view, whose
+                       ## bit-vector bounds take the signed Int bridge
+    of iekSeqSplice:   ## RFC-0005 S8bu
+      spBase*: IRExpr
+      spAt*:   IRExpr
+      spPart*: IRExpr
     of iekStrLit:
       sval*: string
     of iekContains:
@@ -4104,10 +4115,16 @@ proc mkVariantFieldSet*(recv: IRExpr, fieldName: string, tags: seq[int],
 proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
 
-proc mkSeqSlice*(base, lo, hi: IRExpr): IRExpr =
+proc mkSeqSlice*(base, lo, hi: IRExpr; view = false): IRExpr =
   ## v67: seq-slice VALUE (array-lambda view — see `iekSeqSlice`). `hi` is
   ## INCLUSIVE; the parser pre-adjusts `..<` to `hi - 1`.
-  IRExpr(kind: iekSeqSlice, ssBase: base, ssLo: lo, ssHi: hi)
+  ## RFC-0005 S8bu: `view`, a `toOpenArray` view (`ssView`).
+  IRExpr(kind: iekSeqSlice, ssBase: base, ssLo: lo, ssHi: hi, ssView: view)
+
+proc mkSeqSplice*(base, at, part: IRExpr): IRExpr =
+  ## RFC-0005 S8bu. `base` with `part` written over it from position `at`
+  ## (see `iekSeqSplice`).
+  IRExpr(kind: iekSeqSplice, spBase: base, spAt: at, spPart: part)
 
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
@@ -5950,6 +5967,9 @@ proc render*(e: IRExpr): string =
   of iekIndex:   render(e.arr) & "[" & render(e.idx) & "]"
   of iekSeqSlice:
     render(e.ssBase) & "[" & render(e.ssLo) & ".." & render(e.ssHi) & "]"
+  of iekSeqSplice:
+    "splice(" & render(e.spBase) & ", " & render(e.spAt) & ", " &
+      render(e.spPart) & ")"
   of iekArrayLit:
     var inner = ""
     for i, c in e.lelems:

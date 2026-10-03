@@ -176,3 +176,12 @@ Earlier shas:
 - Probes, logs and runners are in `/home/corey/tmp-usage/work/s8bp-work/`:
   - `probe*.nim`, `raw/`, `v/<tag>/summary.txt`;
   - before: `raw/p1-*`, `p3-*`, `p5-*`; after: `raw/after-*`.
+
+## Scratch-clobber incident (verdict: not affected)
+
+S8bp's only file in the shared session scratchpad was a read-only copy of CI run 37120679400's `gh run view --log-failed` output. It was written at 07:24 and moved to `s8bp-work/raw/ci-28676e0-symex-mingw.log` at about 09:30.
+
+- **Scripts:** every runner (`slot.sh`, `trun.sh`, `prun.sh`, `brun.sh`), plus the job lists, probe sources, logs and results, was created in and stayed in `/home/corey/tmp-usage/work/s8bp-work/`.
+- **Search:** a grep of those scripts, job lists and probes finds no reference to `scratchpad` or `/tmp/claude`. No file in the scratchpad mentions `s8bp`.
+- **Runs:** every verification run went through `s8bp-work/trun.sh` or `prun.sh` and `slot.sh`, into `scripts/dt-bounded.sh` (in the S8bp or baseline worktree) or `/home/corey/tmp-usage/work/dt413.sh`. None executed a script from the scratchpad.
+- **Verdict:** no S8bp result came from a clobbered script, and none needs re-running.

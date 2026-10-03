@@ -5,7 +5,12 @@
 ## was modelled as an allocation that succeeds. A real run raises
 ## `OutOfMemDefect`, or not, depending on the host. The path is declined,
 ## scoped to it, exactly as S8bc declines `newSeq`'s (`iekSeqNewZero`).
-import std/[unittest, strutils]
+##
+## Item 3: a `Regex` value built outside a regex call (`let r = re"(ab"`)
+## was `feUnsupportedExprKind` (`nnkCallStrLit`), and the call form
+## (`re("(ab")`, `re(p)`) aborted the compile ("node has no type"). It is
+## a constructor call: a pattern PCRE rejects raises `RegexError`.
+import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -87,6 +92,63 @@ proc hugeOtherPath(n, k: int) =
   elif k == 2 and n == 7:
     symexTarget("bq_huge_other_path")
 
+# ---- item 3: a Regex value is a constructor call ----------------------------
+
+proc reLetRejected(s: string) =
+  try:
+    let r = re"(ab"
+    if s.match(r): discard
+  except RegexError:
+    symexTarget("bq_re_let_rejected")
+
+proc reLetRejectedAfter(s: string) =
+  # Nothing after the constructor runs.
+  try:
+    let r = re"(ab"
+    symexTarget("bq_re_let_rejected_after")
+    discard s.match(r)
+  except RegexError: discard
+
+proc reCallRejected(s: string) =
+  try:
+    let r = re("(ab")
+    discard s.match(r)
+  except ValueError:
+    symexTarget("bq_re_call_rejected")
+
+proc reRexRejected() =
+  try:
+    discard rex"a)"
+  except RegexError:
+    symexTarget("bq_re_rex_rejected")
+
+proc reLetValid(s: string) =
+  let r = re"ab"
+  if s.len == 2 and s.match(r):
+    symexTarget("bq_re_let_valid")
+
+proc reLetValidNo(s: string) =
+  let r = re"ab"
+  if s.len == 2 and s.match(r) and s[0] != 'a':
+    symexTarget("bq_re_let_valid_no")
+
+proc reValidNotNil() =
+  let r = re"ab"
+  if r == nil:
+    symexTarget("bq_re_valid_not_nil")
+
+proc reValidRaises() =
+  try:
+    discard re"a+b"
+  except RegexError:
+    symexTarget("bq_re_valid_raises")
+
+proc reValueVar(s, p: string) =
+  try:
+    let r = re(p)
+    if s.match(r): symexTarget("bq_re_value_var")
+  except RegexError: discard
+
 suite "S8bq: walker version":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 220
@@ -119,3 +181,28 @@ suite "S8bq (1): a length above 2^20 is declined, not modelled as allocated":
     check verdict(hugeNegStill, "bq_huge_neg_still").status == sxSat
   test "the decline is scoped to its path":
     check verdict(hugeOtherPath, "bq_huge_other_path").status == sxSat
+
+suite "S8bq (3): a Regex value is a constructor call":
+  test "a rejected literal bound by let raises RegexError":
+    let r = verdict(reLetRejected, "bq_re_let_rejected")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "nothing after a rejected constructor runs":
+    check verdict(reLetRejectedAfter, "bq_re_let_rejected_after").status == sxUnsat
+  test "the call form re(\"(ab\") raises":
+    check verdict(reCallRejected, "bq_re_call_rejected").status == sxSat
+  test "rex with a rejected pattern raises":
+    check verdict(reRexRejected, "bq_re_rex_rejected").status == sxSat
+  test "a valid literal bound by let is the literal at a regex call":
+    let r = verdict(reLetValid, "bq_re_let_valid")
+    check r.status == sxSat
+    check r.errors.len == 0
+    check verdict(reLetValidNo, "bq_re_let_valid_no").status == sxUnsat
+  test "a valid Regex is not nil":
+    check verdict(reValidNotNil, "bq_re_valid_not_nil").status == sxUnsat
+  test "a valid pattern does not raise":
+    check verdict(reValidRaises, "bq_re_valid_raises").status == sxUnsat
+  test "a pattern that is not a literal declines, classified":
+    let r = verdict(reValueVar, "bq_re_value_var")
+    check r.status == sxUnknown
+    check r.errors.hasKind(seUnsupportedRegex)

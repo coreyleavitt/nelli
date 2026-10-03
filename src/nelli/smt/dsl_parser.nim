@@ -1089,6 +1089,14 @@ type
                                    ## preamble-emptiness routing
                                    ## (`mkShortCircuitWhile`) and degrade
                                    ## `continue`-bearing loops that prove today.
+    regexLetLiterals*: seq[tuple[sym: NimNode, flag, pattern: string]]
+                                   ## RFC-0005 S8bq (item 3). Each `let r =
+                                   ## re"..."` (or `rex`) whose pattern PCRE
+                                   ## accepts: the symbol and its literal. A
+                                   ## regex call given `r` reads the literal
+                                   ## (`regexLiteralOfCtx`), exactly as if it
+                                   ## had been written there: the constructor
+                                   ## already ran, and a `let` cannot change.
     procScoped*: ProcScopedCollectors
                                    ## D4 (design finding, accepted). The four
                                    ## former individually-scoped collector
@@ -1412,6 +1420,31 @@ proc regexLiteralOf(a: NimNode): (string, string) =
       of "reExtended": extended = true
       else: return ("?", "")
   ((if extended: "rex" else: "re"), lit.strVal)
+
+proc regexCtorCall(n: NimNode): NimNode =
+  ## RFC-0005 S8bq (item 3). `n` (under hidden conversions) when it is a
+  ## call of `std/re`'s `re` / `rex` constructor -- `re"..."`
+  ## (`nnkCallStrLit`), `re("...")`, `re(p)`, `rex(p, flags)` -- else nil.
+  var x = n
+  while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and x.len > 0:
+    x = x[^1]
+  if x.kind notin {nnkCallStrLit, nnkCall} or x.len < 2 or
+     x[0].kind != nnkSym or x[0].strVal notin ["re", "rex"] or
+     not isStdlibDecl(x[0]) or not isRegexTyped(x):
+    return nil
+  x
+
+proc regexLiteralOfCtx(a: NimNode; ctx: ParseCtx): (string, string) =
+  ## RFC-0005 S8bq (item 3). `regexLiteralOf`, and for a `let` symbol bound
+  ## to an accepted literal (`ParseCtx.regexLetLiterals`), that literal.
+  result = regexLiteralOf(a)
+  if result[0] != "?": return
+  var x = a
+  while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and x.len > 0:
+    x = x[^1]
+  if x.kind == nnkSym and symKind(x) == nskLet:
+    for e in ctx.regexLetLiterals:
+      if e.sym == x: return (e.flag, e.pattern)
 
 proc regexCapturesLvalue(n: NimNode): bool =
   ## RFC-0005 S8bb. A captures overload's `matches` lvalue whose location
@@ -3783,6 +3816,38 @@ proc parseSeqNew(op: string; argNode: NimNode; seqTy: IRType;
   mkSeqNew(lenIR, seqTy.seqElemTy,
            zeroed = op != "newSeqUninit", ofCap = op == "newSeqOfCap")
 
+proc parseRegexCtor(c: NimNode; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bq (item 3). A `std/re` constructor call outside a regex
+  ## call (`regexCtorCall`): `let r = re"(ab"`, `discard rex(p)`. Nim runs
+  ## PCRE's compile there, which raises `RegexError` for a pattern it
+  ## rejects; otherwise the value is a new `Regex` (a fresh, non-nil ref:
+  ## its fields are not exported, so its identity is all a caller sees).
+  ## A literal the reader leaves undecided, and a pattern that is not a
+  ## literal, decline (`seUnsupportedRegex`, scoped), as they do inside a
+  ## regex call. Before S8bq the literal form was `feUnsupportedExprKind`
+  ## (`nnkCallStrLit`) and the call form aborted the compile ("node has
+  ## no type", from `ensureProcRegistered`'s walk of `re`).
+  let (flag, pat) = regexLiteralOf(c)
+  ctx.userExnHierarchy["RegexError"] = "ValueError"
+  let status = if flag == "?": psUnknown
+               else: parsePcre(pat, flag == "rex").status
+  case status
+  of psRejected:
+    preamble.add mkRaise("RegexError", nil)
+  of psOk, psUnmodelled:
+    discard
+  of psUnknown:
+    preamble.add ctx.declineAtSite(seUnsupportedRegex,
+      "`" & c.repr & "`: whether PCRE accepts the pattern is not decided " &
+        "(seUnsupportedRegex: the pattern is not a literal the reader " &
+        "decides)",
+      "regex constructor: pattern acceptance not decided " &
+        "(seUnsupportedRegex)")
+  let tmp = freshSynth(ctx, "regex")
+  preamble.add mkNewT(tmp, classifyType(c).ty)
+  mkVar(tmp)
+
 proc peelConstConv(n: NimNode): NimNode =
   ## RFC-0005 S8bi. Strip the compiler's implicit conversions (`HiddenStdConv`
   ## with an empty type slot) around a value.
@@ -5202,6 +5267,19 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                    " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(classifyType(n).ty)
       return (if dummy != nil: dummy else: mkIntLit(0))
+  of nnkCallStrLit:
+    # RFC-0005 S8bq (item 3): `re"..."` / `rex"..."` outside a regex call.
+    if regexCtorCall(n) != nil:
+      return parseRegexCtor(n, preamble, ctx)
+    let dummyTy = classifyType(n).ty
+    preamble.add ctx.declineAtSite(
+      feUnsupportedExprKind,
+      "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+             n.repr & "` — not in the supported expression fragment",
+      "CR-2a: unsupported expression kind " &
+                                  $n.kind & " (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(dummyTy)
+    if dummy != nil: dummy else: mkIntLit(0)
   of nnkCall:
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &
@@ -5216,6 +5294,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `abs`/... is not that builtin; it is walked like any other user call.
     if isUserCallee(calleeSym):
       return parseRoutineCallExpr(n, calleeSym, preamble, ctx)
+    # RFC-0005 S8bq: a `re` / `rex` constructor, before
+    # `ensureProcRegistered` walks it (see `parseRegexCtor`).
+    if regexCtorCall(n) != nil:
+      return parseRegexCtor(n, preamble, ctx)
     # RFC-0005 S8bi: the seq constructors, before `ensureProcRegistered`
     # gets the generic magic (see `parseSeqNew`).
     if n.len == 2 and isBuiltinNamed(calleeSym, seqNewBuiltins):
@@ -5562,7 +5644,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           if reIdx < 0:
             break regexCall   # the string-argument overload: not a regex call
           let entry = calleeSym.strVal
-          let (flag, rePat) = regexLiteralOf(n[reIdx])
+          let (flag, rePat) = regexLiteralOfCtx(n[reIdx], ctx)
           # A rejected pattern raises `RegexError` (`object of ValueError`)
           # when `re` runs; an `except ValueError` handler must see it.
           ctx.userExnHierarchy["RegexError"] = "ValueError"
@@ -10957,6 +11039,15 @@ proc parseStmtInner(n: NimNode,
           let classified = classifyType(id[j])
           stmts.add mkNewT(id[j].strVal, classified.ty)
         continue
+      # RFC-0005 S8bq (item 3): `let r = re"..."` with a pattern PCRE
+      # accepts -- a regex call given `r` reads the literal.
+      if n.kind == nnkLetSection and id.len == 3 and id[0].kind == nnkSym:
+        let rc = regexCtorCall(valNode)
+        if rc != nil:
+          let (flag, pat) = regexLiteralOf(rc)
+          if flag != "?" and
+             parsePcre(pat, flag == "rex").status in {psOk, psUnmodelled}:
+            ctx.regexLetLiterals.add (sym: id[0], flag: flag, pattern: pat)
       # ADR-0014 D6: a bare iterator sym in VALUE position (`let it = someIter`)
       # has no supported IR scalar type — `classifyType` would hard-error on the
       # `iterator(...): T` type. Emit an mkUnsupported to set sawUnknown and skip

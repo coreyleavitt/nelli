@@ -939,7 +939,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## closure exit facts in evaluation order; newSeq and set literals
     ## modelled; fueled replace recursions). Provisional 210 (batch 3 holds
     ## 209, S8bh 208).
-    check symexWalkerVersion == "210"
+    ## RFC-0005 S8bq (S8bi's remainder: huge newSeq lengths declined, set
+    ## values, `re"..."` literals, newSeqUninit read taint, set literals
+    ## with non-constant elements). Provisional 220.
+    check symexWalkerVersion == "220"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

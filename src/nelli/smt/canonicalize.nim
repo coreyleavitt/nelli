@@ -202,7 +202,11 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "210"
+const symexWalkerVersion* = "220"
+  ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
+  ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
+  ## to its path, as S8bc declines `newSeq`'s (it was modelled as an
+  ## allocation that succeeds: a false sxSat). Provisional 220.
   ## RFC-0005 S8bi (2026-10-02) — S8bb's remainder, part A. A call through
   ## a closure, a `map`/`filter` over one, a borrowed arithmetic operator,
   ## every regex call and `newSeq` are raise sites for the short-circuit

@@ -3740,6 +3740,13 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
 const seqNewBuiltins = ["newSeq", "newSeqOfCap", "newSeqUninit"]
   ## RFC-0005 S8bi. The seq constructors `parseSeqNew` models.
 
+const maxModelledInitialSize = 1'i64 shl 20
+  ## RFC-0005 S8bq (item 1). The largest length a `newSeq` /
+  ## `newSeqOfCap` / `newSeqUninit` call is modelled at. The same constant
+  ## (name and value) as S8at's `initTable` / `initHashSet` size and S8bc's
+  ## `newSeq` length (`iekSeqNewZero`, batch 4), so the integration keeps
+  ## one definition for the three.
+
 proc parseSeqNew(op: string; argNode: NimNode; seqTy: IRType;
                  preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8bi. `newSeq[T](n)`, `newSeqOfCap[T](n)`, `newSeqUninit[T](n)`
@@ -3749,11 +3756,31 @@ proc parseSeqNew(op: string; argNode: NimNode; seqTy: IRType;
   ## it is peeled here and `n` read at its own type. Before S8bi the call
   ## fell through to `ensureProcRegistered`, whose parameter walk of the
   ## generic magic aborted the compile ("node has no type").
+  ##
+  ## RFC-0005 S8bq (item 1). A length above `maxModelledInitialSize`
+  ## allocates that many elements (`newSeqOfCap`: that much capacity): an
+  ## `OutOfMemDefect`, or not, depending on the host. That path is
+  ## declined, scoped to it, exactly as S8bc's `parseNewSeqLen` declines
+  ## `newSeq`'s; before S8bq it was modelled as an allocation that succeeds.
+  ## A literal in range needs no guard, and the length is read once.
   var a = argNode
   while a.kind in {nnkHiddenStdConv, nnkConv} and a.len == 2 and
         a[0].kind == nnkEmpty:
     a = a[1]
-  mkSeqNew(parseExpr(a, preamble, ctx), seqTy.seqElemTy,
+  let inRangeLit = a.kind in nnkCharLit..nnkUInt64Lit and a.intVal >= 0 and
+                   a.intVal <= maxModelledInitialSize
+  let lenIR = if inRangeLit: parseExpr(a, preamble, ctx)
+              else: parseAtomicOperand(a, preamble, ctx)
+  if not inRangeLit:
+    preamble.add mkIf(@[
+      mkBranch(mkBinop(bGt, lenIR, mkIntLit(maxModelledInitialSize)),
+               ctx.declineAtSite(feUnsupportedOp,
+                 "`" & op & "` with a length above " &
+                 $maxModelledInitialSize & " is not modelled: allocating " &
+                 "it raises OutOfMemDefect or not, depending on the host " &
+                 "-- path degraded to sxUnknown",
+                 op & ": length above " & $maxModelledInitialSize))])
+  mkSeqNew(lenIR, seqTy.seqElemTy,
            zeroed = op != "newSeqUninit", ofCap = op == "newSeqOfCap")
 
 proc peelConstConv(n: NimNode): NimNode =

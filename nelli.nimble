@@ -1060,6 +1060,7 @@ task test, "Run the test suite":
             # order, newSeq / newSeqOfCap / newSeqUninit, set literals in
             # `in`/`notin`, and the recursive-definition fuel scan. Walker 210.
             "tsymex_rfc0005_s8bi_remainder",
+            "tsymex_rfc0005_s8bq_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

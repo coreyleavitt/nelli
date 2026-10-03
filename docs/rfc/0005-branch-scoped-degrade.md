@@ -10210,38 +10210,74 @@ binary runs in a few seconds). The base is the S8bf/S11 tip.
   decline plus three tainted `weInternalWalkerFault`s, identical on both
   labels -- a safe abstention, not a wrong verdict).
 
-*Suites* (`ok/failed`, c on Z3 5.1; cpp 5.1 for the new suite only, once;
-the 4.13.4 image was not available in this worktree this round, so that
-leg is carried by CI rather than re-run locally here -- see the BLOCKER
-note): `s8bg_remainder` 13/0 (cpp 13/0), `s8bd_remainder` 23/0 (the
-`dParamNested` comment/assert update included), `s8ax_remainder` 52/0,
-`s8ba_remainder` 32/0, `s8au_remainder` 35/0, `s8an_remainder` 25/0,
-`s8i_models` 39/0, `phase15_CR2_cachekey` (218) 6/0,
-`phase15_g4_distinct_sort` 4/0, `phase15_g5_distinct_borrow` 3/0,
-`h_stepC_heapidentity` 10/0.
+*Suites* (`ok/failed`, c on Z3 5.1 AND Z3 4.13.4 -- identical pass counts
+on both, via the session scratchpad's `dt413.sh`, the symex-mingw leg's
+own Z3 build, run against this worktree; cpp 5.1 for the new suite only,
+once): `s8bg_remainder` 13/0 (cpp 13/0, 4.13.4 13/0), `s8bd_remainder`
+23/0 (the `dParamNested` comment/assert update included; 4.13.4 23/0),
+`s8ax_remainder` 52/0 (4.13.4 52/0), `s8ba_remainder` 32/0 (4.13.4 32/0),
+`s8au_remainder` 35/0 (4.13.4 35/0), `s8an_remainder` 25/0 (4.13.4 25/0),
+`s8i_models` 39/0 (4.13.4 39/0), `phase15_CR2_cachekey` (218) 6/0 (4.13.4
+6/0), `phase15_g4_distinct_sort` 4/0 (4.13.4 4/0), `phase15_g5_distinct_borrow`
+3/0 (4.13.4 3/0), `h_stepC_heapidentity` 10/0 (4.13.4 10/0). No divergence
+between Z3 versions anywhere in this set.
 
 *Different mechanisms, reported and not fixed here.*
 - **SOUNDNESS: an `addr`-of-local cell aliased through a global `ptr`
-  gives swapped verdicts across a frame boundary.** `var b: Box = Box(x:
-  0); let pb = addr b; gpb = pb` (`gpb: ptr Box`, a global), then
-  `setXG(pb[].x, k)` where `setXG(v: var int, k: int) = (v = k;
-  gpb[].x = 5)`: real Nim passes `var` parameters by address, so the
-  callee's `v = k` and `gpb[].x = 5` both land on `b.x` in program order,
-  leaving `b.x == 5` after the call regardless of `k` -- the target
-  `b.x == 5 and gpb[].x == 5 and k == 1` is reachable, and
-  `b.x == k and k != 5` is dead. The engine gives the OPPOSITE verdict
-  (`sxUnsat` for the first, `sxSat` for the second, each with only
-  `hePtrFamily`'s hint, no decline): it falls back to copy-in/copy-out for
-  this `var` actual, because S8ax's address-cell tracking
-  (`addrCellLocal`) syncs `pb`'s target to `b`'s cell only within `b`'s
-  OWNING frame, so `varActualMayAlias`/`outerReachesCell`, asked from
-  INSIDE `setXG`'s frame whether `pb[].x` is reachable through the global
-  `gpb`, do not recognise the two as one cell -- the alias is real, but
-  invisible across the frame boundary this way, and `byRefSub` is never
-  tried. Reproduced at the base (pre-S8bg) and unchanged after it: the
-  mechanism is S8ax's address-cell model and `outerReachesCell`'s cell
-  typing, not anything this slice touched. Out of scope for S8bg;
-  reported for a future slice on S8ax's remainder.
+  gives swapped verdicts across a frame boundary.** Minimal reproducer:
+
+  ```nim
+  type Box = object
+    x: int
+  var gpb: ptr Box
+
+  proc setXG(v: var int, k: int) =
+    v = k
+    gpb[].x = 5
+
+  proc sutAddrCellByRef(k: int) =
+    var b: Box = Box(x: 0)
+    let pb = addr b
+    gpb = pb
+    setXG(pb[].x, k)
+    if b.x == 5 and gpb[].x == 5 and k == 1: symexTarget("ac")
+    if b.x == k and k != 5: symexTarget("ac_dead")
+  ```
+
+  Native truth: real Nim passes `var` parameters by address, so the
+  callee's `v = k` and `gpb[].x = 5` both land on `b.x` in program order
+  (`gpb` aliases `b` through `pb`), leaving `b.x == 5` after the call
+  regardless of `k` -- target `"ac"` (`b.x == 5 and gpb[].x == 5 and
+  k == 1`) is REACHABLE, and `"ac_dead"` (`b.x == k and k != 5`) is DEAD.
+  Engine verdict: the OPPOSITE of native truth on both --
+  `symexFind(sutAddrCellByRef, tLabel("ac"))` returns `sxUnsat` (wrongly
+  refuting a reachable target) and `tLabel("ac_dead")` returns `sxSat`
+  (wrongly finding a dead target reachable), each with only
+  `hePtrFamily`'s hint (`sevHint`, "witness involves unmanaged ptr") and
+  no decline -- a silent wrong verdict, not a safe abstention. The engine
+  falls back to copy-in/copy-out for this `var` actual because S8ax's
+  address-cell tracking (`addrCellLocal`) syncs `pb`'s target to `b`'s
+  cell only within `b`'s OWNING frame, so `varActualMayAlias`/
+  `outerReachesCell`, asked from INSIDE `setXG`'s frame whether `pb[].x`
+  is reachable through the global `gpb`, do not recognise the two as one
+  cell -- the alias is real, but invisible across the frame boundary this
+  way, and `byRefSub` is never tried; copy-in/copy-out then lets the
+  callee's final write to `v` (`k`) clobber, on return, the write `gpb[].x
+  = 5` already made to the same memory during the call, which is not what
+  real by-address `var` passing does.
+
+  Reproduced identically on this branch's own base (pre-S8bg) and
+  unchanged after it (S8bg touches conversions, casts and the distinct
+  hint, none of this mechanism); also reproduced, byte-for-byte identical
+  verdicts and errors, on `origin/rfc-0005-batch4` at `8165899` (checked
+  directly, in an isolated worktree pinned to that sha, not the live
+  checkout) -- batch 4's S8be reworked address cells but did not touch
+  this cross-frame gap: `ac: sxUnsat [hePtrFamily/sevHint: witness
+  involves unmanaged ptr]`, `ac_dead: sxSat [hePtrFamily/sevHint: witness
+  involves unmanaged ptr]`, on both. The mechanism is S8ax's
+  address-cell model and `outerReachesCell`'s cell typing, not anything
+  S8bg or S8be touched. Out of scope for S8bg; reported for a future
+  slice on S8ax's remainder.
 - **PRECISION (confirmed, RFC-0005 S8bg): an inheritance ref conversion is
   ill-sorted, safely.** See the note of the same name just above S8bg's
   own entry -- moved there since it sits directly beside S8bg's own

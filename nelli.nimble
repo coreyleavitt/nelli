@@ -1061,6 +1061,15 @@ task test, "Run the test suite":
             # and raise subtypes; a bounded replay; `{.global.}`; int32
             # widening; Int-sorted call returns; tuples of closures; a
             # capture-keyed call cache; element and case-object `addr`
-            # cells; walker 197->205.
-            "tsymex_rfc0005_s8be_remainder"]:
+            # cells; walker 197->205. Split in three by S8bo (83 s).
+            "tsymex_rfc0005_s8be_remainder",
+            "tsymex_rfc0005_s8be_remainder_b",
+            "tsymex_rfc0005_s8be_remainder_c",
+            # RFC-0005 S8bo -- S8be's remainder: isNil and unlowered
+            # magics; plain-object, arm-field and seq-of-object address
+            # cells, whole seq assignment as a resize; abandoned and
+            # threaded replay fidelity; walker 205->216.
+            "tsymex_rfc0005_s8bo_nil",
+            "tsymex_rfc0005_s8bo_cells",
+            "tsymex_rfc0005_s8bo_replay"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

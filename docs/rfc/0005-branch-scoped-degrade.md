@@ -392,6 +392,11 @@ title = "S8bf's remainder: var writes dropped through proc-variable calls; ptr p
 state = "done"
 
 [[slice]]
+id = "S8bs"
+title = "addr-of-local cell aliased through a global ptr across a frame boundary: var actual copy-in/out clobbers the callee's write through the alias (swapped verdicts)"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

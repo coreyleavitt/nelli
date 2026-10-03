@@ -402,6 +402,11 @@ title = "S8bs's remainder: non-terminating Int-heap/BV-local UNSAT queries under
 state = "done"
 
 [[slice]]
+id = "S8ca"
+title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pin, structural viewFollows in-place check, addr s[i] of element-cell seqs to calls, closures over address-taken vars and heap lvalues, seq args to proc values, string as openArray[char], negative toOpenArray and resizing mitems, gps[].add through ptr-to-seq, S8bu suite compile time"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

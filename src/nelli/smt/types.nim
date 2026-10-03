@@ -3003,12 +3003,12 @@ type
     ## two equally-sound modeling strategies rather than gating an exhaustion
     ## decline, so `0` means the SEMANTIC OPPOSITE of unlimited: "always
     ## axiomatize, never inline."
-    queryRLimit*: uint = 20_000_000
+    queryRLimit*: uint = 250_000_000
       ## Z3 logical step count bound. `0` is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
       ##
-      ## RFC-0005 S8bu: the default is `20_000_000`, no longer `0`. Every
+      ## RFC-0005 S8bu: the default is `250_000_000`, no longer `0`. Every
       ## other solve the walker issues was already bounded under the
       ## defaults (the loop and path feasibility checks, the tainted
       ## target-hit solve, the concrete-branch solves, and every query
@@ -3017,10 +3017,15 @@ type
       ## (S8bs's int-field read across the signed `bv2int` bridge) left the
       ## walk running forever. Now such a query runs out of the budget and
       ## is `sxUnknown` with `beSolverUndef` naming it: a decline, never a
-      ## hang. `20M` is the bound `seqQueryRLimit`, the tainted target-hit
-      ## solve and `concreteBranchRLimit` already use by default
-      ## (`defaultConcreteBranchRLimit`), so no query that finished under
-      ## one of them is cut shorter. An explicit `0` still means unbounded
+      ## hang. Not the `20M` the other bounds use: a target-hit query that
+      ## decides without one can need more (`tsymex_augmented_assign`'s
+      ## 64-bit `acc * x == 12` needs between 100M and 150M units on Z3
+      ## 4.13.4, about 55 s, and 20M made it `beSolverUndef`); `250M` is past
+      ## that with room, and at ~2M units/s about two minutes of search.
+      ## The default does not raise the solves bounded by
+      ## `defaultConcreteBranchRLimit` (`concreteBranchRLimit`,
+      ## `taintedSolveRLimit`), which take a `queryRLimit` other than this
+      ## default as the caller's. An explicit `0` still means unbounded
       ## (this type's `0 = unlimited` contract, RFC-0010).
     maxSeqLen*: int = 128
       ## RFC-0005 S8k. The longest string / seq (in elements -- bytes for a
@@ -3059,7 +3064,6 @@ type
       ## which decides both at once, but other string queries still cost
       ## that much, and unbounded (the default `queryRLimit`) nothing
       ## stopped a within-cap query that needed more.
-      ## RFC-0005 S8bu: `queryRLimit` now has the same 20M default.
       ## `20M` is the bound `concreteBranchRLimit` and the tainted target-hit
       ## solve already use by default (`defaultConcreteBranchRLimit`): a few
       ## minutes of sequence search at most. Deterministic (a step count,

@@ -68,6 +68,7 @@ suite "RFC-0010 B2 — ResourceBudget: the empty literal IS the default":
     check lit.maxSeqLen == want.maxSeqLen             # RFC-0005 S8k
     check lit.seqQueryRLimit == want.seqQueryRLimit   # RFC-0005 S8k
     check lit.maxRecursionDepth == want.maxRecursionDepth   # RFC-0005 S8ax
+    check lit.queryTimeoutMs == want.queryTimeoutMs         # RFC-0005 S8bu
 
   test "an explicitly-written zero still means unlimited":
     # `0 = unlimited` is this type's documented contract for 10 of its 13
@@ -194,7 +195,8 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
         seqInlineThreshold: 131, maxVariantConstructorForks: 141,
         maxVariantConstructorFieldAllocs: 151,
         maxSeqLen: 161, seqQueryRLimit: 171'u,   # RFC-0005 S8k
-        maxRecursionDepth: 181))                  # RFC-0005 S8ax
+        maxRecursionDepth: 181,                   # RFC-0005 S8ax
+        queryTimeoutMs: 191'u))                   # RFC-0005 S8bu
     check defaultSymexSettings() + b == b
 
   test "the field counts the merge was written against have not changed":
@@ -203,11 +205,12 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # and the pin passes while `+` silently ignores it. Pinning the counts is
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
-    check fieldCount[ResourceBudget]() == 15   # RFC-0005 S8c deleted
+    check fieldCount[ResourceBudget]() == 16   # RFC-0005 S8c deleted
                                                # `maxBytesEncodingLen`;
                                                # S8k added `maxSeqLen` and
                                                # `seqQueryRLimit`; S8ax
-                                               # `maxRecursionDepth`
+                                               # `maxRecursionDepth`; S8bu
+                                               # `queryTimeoutMs`
     check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
                                              # (RFC-0005 S10 added `replay`,
                                              # S8be `replayTimeoutMs`)

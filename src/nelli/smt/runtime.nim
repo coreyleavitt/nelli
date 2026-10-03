@@ -12093,18 +12093,39 @@ proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add tInt == ite(sum >= span, sum - span,
                              ite(sum < zero, sum + span, sum))
 
+var int2bvDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The `Z3_decl_kind` ordinal (+ 1) of `int2bv`, read off a
+  ## probe term as `intDivDeclKinds` are.
+var eqDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The same, of `=`.
+
+proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast
+  ## RFC-0005 S8bu. Defined in `runtime_heap.nim`.
+
 proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
-  ## RFC-0005 S8bu. For every bit-vector `x` (width W) whose signed Int view
-  ## `sbv2int(x)` is in `roots`, the view's inverse:
-  ##   x == int2bv_W(sbv2int(x))
-  ## A theorem of two's complement (`int2bv` takes its argument mod 2^W),
-  ## so asserting it beside the query leaves its models as they were.
-  ## `tests/tsymex_rfc0005_s8bu_term.nim` checks it at width 8 for every
-  ## `x`. The view is found as the term `Z3_mk_bv2int(x, true)` builds:
-  ## Z3 shares equal terms, so the view the walker built (`bvTermToZ3Int`)
-  ## and the one built here are the same AST, whether the linked Z3 keeps
-  ## the signed `bv2int` as one operator or expands it (to an `ite` over the
-  ## unsigned one, as Z3 5.1 and 4.13.4 do).
+  ## RFC-0005 S8bu. Facts that let Z3 invert the signed Int view `sbv2int`
+  ## of the bit-vectors in `roots`, each a theorem of two's complement (the
+  ## view is injective, and `int2bv` takes its argument mod 2^W), so
+  ## asserting them beside the query leaves its models as they were:
+  ##   * for every `int2bv_W(t)` term in `roots` whose `t` is `sbv2int(x)`,
+  ##     with `x` of width W:  int2bv_W(t) == x;
+  ##   * for every equality `a == b` in `roots` whose `a` is `sbv2int(x)`
+  ##     and `b` is `sbv2int(y)`, `x` and `y` of one width:
+  ##     a == b  implies  x == y;
+  ## where a term "is" a view when it is one once each `select(store(h, i,
+  ## v), i)` in it is read as `v` (`peelSelect`; a theorem of arrays, so
+  ## each fact stays one): an `int` stored into a heap cell and read back
+  ## out of it is that store's view.
+  ## Neither brings a term the query does not hold: an `int2bv` of every
+  ## view (the first form for every view, before) made Z3 bit-blast Int
+  ## arithmetic, and `tsymex_rfc0005_s8ad_remainder`'s quotient queries
+  ## stopped advancing Z3's step counter; the second form for every pair of
+  ## views took 4.13.4 past those queries' step pins. `tests/tsymex_rfc0005_s8bu_term.nim`
+  ## checks both forms valid at width 8. A view is found as the term
+  ## `Z3_mk_bv2int(x, true)` builds: Z3 shares equal terms, so the view the
+  ## walker built (`bvTermToZ3Int`) and the one built here are the same AST,
+  ## whether the linked Z3 keeps the signed `bv2int` as one operator or
+  ## expands it (to an `ite` over the unsigned one, as Z3 5.1 and 4.13.4 do).
   ##
   ## Why: an `int` stored in an Int-sorted heap (`intHeapCell`) crosses the
   ## sort boundary through the signed view, and a callee's result read back
@@ -12115,13 +12136,24 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## decides in a few hundred (the unsigned view needs none: Z3 asserts
   ## `int2bv(ubv2int(x)) == x` itself). Under the then-unbounded default
   ## `queryRLimit` the walk never terminated (S8bs's int-field and
-  ## `seq[int]` SUTs). Only a view the query holds is inverted, as
-  ## `bvOffsetLinks` links only views the query holds: a new view would
-  ## bring the bridge into a query that had none.
+  ## `seq[int]` SUTs).
   ensureIntDivDeclKinds(ctx)
+  if int2bvDeclKind == 0:
+    let probe = mkIntVar(ctx, "__s8bu_int2bv_probe")
+    let t = ctx.checkErr Z3_mk_int2bv(ctx.raw, 8, probe.raw)
+    int2bvDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, t)))) + 1
+  if eqDeclKind == 0:
+    let pa = mkIntVar(ctx, "__s8bu_eq_probe_a")
+    let pb = mkIntVar(ctx, "__s8bu_eq_probe_b")
+    let t = checkedEq(ctx, pa.raw, pb.raw)
+    eqDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, t)))) + 1
   let bv2nat = intDivDeclKinds.bv2nat
   var seen: HashSet[int]
   var args1: seq[Z3AnyAst]
+  var backs: seq[Z3AnyAst]   ## the `int2bv` terms
+  var eqs: seq[Z3AnyAst]     ## the equalities
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
   while stack.len > 0:
@@ -12132,19 +12164,45 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     for a in args: stack.add a
-    if args.len == 1 and ord(Z3_get_decl_kind(ctx.raw, decl)) == bv2nat and
-       not isNumeralAst(ctx, args[0].raw):
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and k == bv2nat and not isNumeralAst(ctx, args[0].raw):
       args1.add args[0]
+    elif args.len == 1 and k + 1 == int2bvDeclKind:
+      backs.add t
+    elif args.len == 2 and k + 1 == eqDeclKind:
+      eqs.add t
   var done: HashSet[int]
+  var views: seq[tuple[x, sv: Z3AnyAst; w: cuint]]
   for x in args1:
     let xid = astId(ctx, x.raw)
     if xid in done: continue
     done.incl xid
-    let sv = ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true)
-    if astId(ctx, sv) notin seen: continue
-    let w = Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, x.raw))
-    let back = ctx.checkErr Z3_mk_int2bv(ctx.raw, w, sv)
-    result.add wrap[Z3Bool](ctx, checkedEq(ctx, x.raw, back))
+    let sv = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true))
+    if astId(ctx, sv.raw) notin seen: continue
+    views.add (x: x, sv: sv,
+               w: Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+  if views.len == 0: return
+  var viewIx: Table[int, int]   ## a view's AST id -> its index in `views`
+  for i, v in views: viewIx[astId(ctx, v.sv.raw)] = i
+  template viewOf(t: Z3AnyAst): int =
+    ## The index in `views` of the view `t` is (`peelSelect`), else -1.
+    viewIx.getOrDefault(astId(ctx, peelSelect(ctx, t.raw)), -1)
+  for t in backs:
+    let (_, args) = unpackApp(t)
+    let w = Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, t.raw))
+    let i = viewOf(args[0])
+    if i >= 0 and views[i].w == w:
+      result.add wrap[Z3Bool](ctx, checkedEq(ctx, t.raw, views[i].x.raw))
+  var paired: HashSet[(int, int)]
+  for t in eqs:
+    let (_, args) = unpackApp(t)
+    let i = viewOf(args[0])
+    let j = viewOf(args[1])
+    if i < 0 or j < 0 or i == j or views[i].w != views[j].w: continue
+    if (i, j) in paired: continue
+    paired.incl (i, j)
+    let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
+    result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
@@ -14010,8 +14068,10 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
   ## same validated finite backstop, for the same mixed-theory divergence
   ## class, that R7's `concreteBranchRLimit` applies. Pure, so the "never
   ## unbounded under default settings" contract is unit-testable without
-  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`).
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`). RFC-0005
+  ## S8bu: `queryRLimit`'s own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
 proc rlimitCountNow(ctx: Z3Context): int =
@@ -16120,8 +16180,10 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   ## `defaultConcreteBranchRLimit`. Split out as its own pure function so
   ## the "under default settings this site is genuinely bounded, not
   ## silently 0/unlimited" contract is directly unit-testable without
-  ## needing to provoke a real Z3 divergence.
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## needing to provoke a real Z3 divergence. RFC-0005 S8bu: `queryRLimit`'s
+  ## own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
 proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],

@@ -7,9 +7,12 @@
 ## sbv2int(k) and r != k`, or `r == int2bv(sbv2int(k)) and r != k`. Under
 ## the default `queryRLimit` (then 0, unbounded) the walk never finished.
 ## Pinned here (the RFC's "As landed (S8bu)" note has the design):
-##   (1) the shapes decide: beside the query, each bit-vector whose signed
-##       Int view it holds is asserted equal to `int2bv` of that view, a
-##       theorem of two's complement (`bvIntInverseFacts`);
+##   (1) the shapes decide: beside the query, the inverse of each signed
+##       Int view it holds -- an `int2bv` of the view is the bit-vector, and
+##       two views it equates are of equal bit-vectors -- theorems of two's
+##       complement (`bvIntInverseFacts`). Only terms the query holds are
+##       related: an `int2bv` of every view made Z3 bit-blast S8ad's Int
+##       quotients (`tsymex_rfc0005_s8ad_remainder` hung on Windows);
 ##   (2) arithmetic on an `int` read back out of an Int-sorted heap stays
 ##       in the bit-vector it was stored from: a literal beside it lowers as
 ##       that bit-vector (`probeProto`), so `v * 2` is `bvmul(2, k)`, not
@@ -132,21 +135,40 @@ suite "S8bu (1): the signed bv2int bridge decides":
     clean(sutHeapArith, "ta_dead", sxUnsat)
 
   test "the inverse facts are theorems":
-    ## Every fact `bvIntInverseFacts` states, at width 8 over every `x`, is
-    ## valid: with `x` fixed, its negation is UNSAT.
+    ## Both forms `bvIntInverseFacts` states (an `int2bv` of a view the
+    ## query holds is its bit-vector; two views are equal only for equal
+    ## bit-vectors) are valid at width 8, for every `x` and `y`: with both
+    ## free, each one's negation is UNSAT.
     let ctx = newContext()
     let x = mkBitVecVar[8](ctx, "s8bu_x")
-    let sv = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true))
-    var n = 0
-    for xv in 0 .. 255:
-      let facts = bvIntInverseFacts(ctx, [sv == sv])
-      checkpoint $xv
-      check facts.len == 1
-      for f in facts:
-        let s = querySolver(ctx, [x == mkBitVec[8](ctx, xv), not f], 0)
-        check s.check() == zsUnsat
-        inc n
-    check n == 256
+    let y = mkBitVecVar[8](ctx, "s8bu_y2")
+    proc sv(b: Z3BitVec[8]): Z3Int =
+      wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, b.raw, true))
+    let back = wrap[Z3BitVec[8]](ctx, ctx.checkErr Z3_mk_int2bv(ctx.raw, 8,
+                                                               sv(x).raw))
+    let facts = bvIntInverseFacts(ctx, [back == back, sv(x) == sv(y)])
+    check facts.len == 2
+    # And through a heap cell: `y`'s view stored, then read back.
+    let h = wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, mkArrayVar[Z3Int, Z3Int](ctx, "s8bu_h").raw,
+                   mkInt(ctx, 0).raw, sv(y).raw))
+    let rd = wrap[Z3Int](ctx, checkedSelect(ctx, h.raw, mkInt(ctx, 0).raw))
+    let viaHeap = bvIntInverseFacts(ctx, [sv(x) == rd])
+    check viaHeap.len == 1
+    for f in facts & viaHeap:
+      checkpoint $f
+      check querySolver(ctx, [not f], 0).check() == zsUnsat
+
+  test "no fact brings a term the query does not hold":
+    ## A view with no `int2bv` of it, and two views the query does not
+    ## equate: no fact (an `int2bv` of every view made Z3 bit-blast the Int
+    ## arithmetic of `tsymex_rfc0005_s8ad_remainder`'s quotients).
+    let ctx = newContext()
+    let x = mkBitVecVar[8](ctx, "s8bu_z")
+    let y = mkBitVecVar[8](ctx, "s8bu_z2")
+    let sx = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true))
+    let sy = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, y.raw, true))
+    check bvIntInverseFacts(ctx, [sx > mkInt(ctx, 3), sx <= sy]).len == 0
 
   test "an unsigned-only view is not linked":
     let ctx = newContext()
@@ -171,7 +193,12 @@ suite "S8bu (1): the signed bv2int bridge decides":
 suite "S8bu (1): no query is unbounded under the defaults":
 
   test "queryRLimit and queryTimeoutMs default to finite budgets":
-    check ResourceBudget().queryRLimit == 20_000_000'u
+    check ResourceBudget().queryRLimit == 250_000_000'u
+    # The solves `defaultConcreteBranchRLimit` bounds keep it.
+    check concreteBranchRLimit(defaultSymexSettings()) ==
+          defaultConcreteBranchRLimit
+    check taintedSolveRLimit(defaultSymexSettings()) ==
+          defaultConcreteBranchRLimit
     check defaultSymexSettings().budget.queryRLimit != 0'u
     check ResourceBudget().queryTimeoutMs == 600_000'u
     check ";qto=" notin canonicalize(defaultSymexSettings())

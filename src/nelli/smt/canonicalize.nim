@@ -204,11 +204,13 @@ const renderAsChoicesVersion* = "12"
 
 const symexWalkerVersion* = "225"
   ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
-  ## query is decided beside each signed Int view's inverse (`x ==
-  ## int2bv(sbv2int(x))`, `bvIntInverseFacts`): an `int` read across the
-  ## Int-heap / bit-vector bridge gave Z3 UNSAT queries it never decided,
-  ## and `queryRLimit` now defaults to 20M, so no query is unbounded under
-  ## the defaults (an exhausted one declines). 222 -> 225.
+  ## query is decided beside the inverse of each signed Int view it holds
+  ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==
+  ## sbv2int(y)` implies `x == y`; `bvIntInverseFacts`): an `int` read
+  ## across the Int-heap / bit-vector bridge gave Z3 UNSAT queries it never
+  ## decided, and `queryRLimit` now defaults to 250M and `queryTimeoutMs`
+  ## to 10 minutes, so no query is unbounded under the defaults (an
+  ## exhausted one declines). 222 -> 225.
   ## An `openArray[T]` is the seq it views (a seq, an array's elements, a
   ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
   ## signed Int bridge); a `var` one is written back over what it views

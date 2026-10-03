@@ -802,6 +802,8 @@ proc stdName(name: string): NimNode =
   of "readSetInt": bindSym"readSetInt"
   of "readTableStrIntAs": bindSym"readTableStrIntAs"   # RFC-0005 S8z
   of "readSetIntAs": bindSym"readSetIntAs"             # RFC-0005 S8z
+  of "set": bindSym"set"                               # RFC-0005 S8bq
+  of "readBitSetAs": bindSym"readBitSetAs"             # RFC-0005 S8bq
   of "readSeqLen": bindSym"readSeqLen"
   of "newRefWitness": bindSym"newRefWitness"      # RFC-0005 S8h
   of "resolveRef": bindSym"resolveRef"            # RFC-0005 S8h
@@ -1230,6 +1232,14 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # to the `__unsupported_witness:` placeholder before this `itSet` is
       # built.
       error("symex Phase 5: only HashSet[int] supported")
+  of itBitSet:
+    # RFC-0005 S8bq: a builtin `set[T]`, from the members the runtime
+    # extracted (`bitSetModelMembers`); `T`'s own reader names the type.
+    let (elemTyNode, _) = emitTyAndReader(ty.bsElemTy, path, witId)
+    let setTy = newTree(nnkBracketExpr, stdName("set"), elemTyNode)
+    (setTy, newCall(newTree(nnkBracketExpr, stdName("readBitSetAs"),
+                            copyNimTree(elemTyNode)),
+                    witId, newLit(path)))
   of itVariant:
     # Phase 11 cycle 7 + plain-field sharing (post-cycle-12) —
     # construct the variant on the arm Z3 picked. Witness layout
@@ -1843,7 +1853,7 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
       else: wfLossy
     of itSet:
       if isBackedSetElemTy(f.setElemTy): wfFaithful else: wfLossy
-    else: wfLossy
+    else: wfLossy   ## RFC-0005 S8bq: a builtin set field keeps its zero
   case pointee.kind
   of itBool, itInt, itFloat32, itFloat64: wfFaithful
   of itString, itSeq, itTable, itSet:   # RFC-0005 S8ap: `ref seq[int]` etc.
@@ -1897,6 +1907,7 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
   of itSet:
     if isRenderableSetElemTy(ty.setElemTy): wfFaithful
     else: wfUnexecutable
+  of itBitSet: wfFaithful   ## RFC-0005 S8bq: every member is rendered
   of itVariant:
     var r = wf(ty.vDiscTy)
     for f in ty.vPlainFieldTypes: r = worst(r, wf(f))

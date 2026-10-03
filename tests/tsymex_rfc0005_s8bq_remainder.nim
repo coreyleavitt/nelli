@@ -10,6 +10,15 @@
 ## was `feUnsupportedExprKind` (`nnkCallStrLit`), and the call form
 ## (`re("(ab")`, `re(p)`) aborted the compile ("node has no type"). It is
 ## a constructor call: a pattern PCRE rejects raises `RegexError`.
+##
+## Item 2: a builtin `set[T]` (a parameter, a local, a field, a result) was
+## unclassified, so every set-typed value declined. It is one bit-vector
+## with a bit per value of `T`: membership, `incl`, `excl`, `+`, `-`, `*`,
+## `<=`, `<`, `==`, `card` and literals are exact.
+##
+## Item 5: `k in {..}` over a literal with a non-constant element declined.
+## The key is evaluated first and not checked; every element is evaluated,
+## in order, converted (range-checked) to the base type.
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
@@ -149,6 +158,206 @@ proc reValueVar(s, p: string) =
     if s.match(r): symexTarget("bq_re_value_var")
   except RegexError: discard
 
+# ---- item 2: builtin set values ----------------------------------------------
+
+type E4 = enum e0, e1, e2, e3
+const tinySeqBudget = SymexSettings(budget: ResourceBudget(seqQueryRLimit: 1'u))
+type Holder = object
+  cs: set[char]
+  n: int
+
+proc bsParamMember(s: set[char]; c: char) =
+  if c in s and c == 'q' and card(s) == 1:
+    symexTarget("bq_bs_param_member")
+
+proc bsInclMember(s: set[char]; c: char) =
+  var u = s
+  u.incl c
+  if c notin u:
+    symexTarget("bq_bs_incl_member")
+
+proc bsExclMember(s: set[char]; c: char) =
+  var u = s
+  excl(u, c)
+  if c in u:
+    symexTarget("bq_bs_excl_member")
+
+proc bsInclOther(s: set[E4]; e: E4) =
+  # `incl` adds exactly one member. (Over `set[char]` the count query is a
+  # 256-bit pigeonhole: bounded by `seqQueryRLimit`, see `bsCardBounded`.)
+  var u = s
+  u.incl e
+  if card(u) > card(s) + 1 or (e in s and u != s):
+    symexTarget("bq_bs_incl_other")
+
+proc bsCardBounded(s: set[char]) =
+  if card(s) == 3:
+    symexTarget("bq_bs_card_bounded")
+
+proc bsUnion(s, t: set[char]; c: char) =
+  if c in s + t and c notin s and c notin t:
+    symexTarget("bq_bs_union")
+
+proc bsDiff(s, t: set[char]; c: char) =
+  if c in s - t and c in t:
+    symexTarget("bq_bs_diff")
+
+proc bsInter(s, t: set[char]; c: char) =
+  if c in s * t and c notin s:
+    symexTarget("bq_bs_inter")
+
+proc bsInterSat(s, t: set[char]) =
+  if 'z' in s * t and card(s) == 1 and card(t) == 2:
+    symexTarget("bq_bs_inter_sat")
+
+proc bsSubset(s, t: set[char]; c: char) =
+  if s <= t and c in s and c notin t:
+    symexTarget("bq_bs_subset")
+
+proc bsProper(s, t: set[char]) =
+  if s < t and s == t:
+    symexTarget("bq_bs_proper")
+
+proc bsProperSat(s, t: set[char]) =
+  if s < t and card(s) == 2 and t >= s and t != s:
+    symexTarget("bq_bs_proper_sat")
+
+proc bsCardBound(s: set[char]) =
+  if card(s) == 3 and s <= {'a', 'b'}:
+    symexTarget("bq_bs_card_bound")
+
+proc bsLen(s: set[char]) =
+  if s.len == 2 and 'a' in s:
+    symexTarget("bq_bs_len")
+
+proc bsConstLit() =
+  let ls = {'a'..'c', 'x'}
+  if card(ls) != 4 or 'b' notin ls or 'd' in ls:
+    symexTarget("bq_bs_const_lit")
+
+proc bsEnum(es: set[E4]; e: E4) =
+  var u = es
+  u.incl e
+  if u == {e0..e3} and card(es) == 3:
+    symexTarget("bq_bs_enum")
+
+proc bsEnumNo(es: set[E4]) =
+  if card(es) > 4:
+    symexTarget("bq_bs_enum_no")
+
+proc bsBool(x: bool) =
+  var b: set[bool]
+  b.incl x
+  if card(b) == 2 or x notin b:
+    symexTarget("bq_bs_bool")
+
+proc bsInt8(s: set[int8]) =
+  if -128'i8 in s and 127'i8 in s and card(s) == 2:
+    symexTarget("bq_bs_int8")
+
+proc bsUInt8(s: set[uint8]; k: uint8) =
+  if k in s and k > 250'u8 and card(s) == 1:
+    symexTarget("bq_bs_uint8")
+
+proc bsRangeIncl(x: int) =
+  var rs: set[range[0..9]]
+  try:
+    rs.incl x
+  except RangeDefect:
+    if x == 20: symexTarget("bq_bs_range_incl")
+
+proc bsRangeIn(x: int) =
+  var rs: set[range[0..9]] = {3}
+  try:
+    if x in rs: discard
+  except RangeDefect:
+    if x == -1: symexTarget("bq_bs_range_in")
+
+proc bsRangeInOk(x: int) =
+  var rs: set[range[0..9]] = {3}
+  try:
+    if x in rs and x != 3: symexTarget("bq_bs_range_in_ok")
+  except RangeDefect: discard
+
+proc bsField(h: Holder; c: char) =
+  var g = h
+  g.cs.incl c
+  if c notin g.cs:
+    symexTarget("bq_bs_field")
+
+proc bsFieldSat(h: Holder) =
+  if 'k' in h.cs and h.n == 2:
+    symexTarget("bq_bs_field_sat")
+
+proc bsMerge(c: char) =
+  var u: set[char]
+  if c == 'a': u.incl 'a'
+  else: u.incl 'b'
+  if card(u) == 2 or ('a' in u) != (c == 'a'):
+    symexTarget("bq_bs_merge")
+
+proc mkSet(c: char): set[char] = {c, 'z'}
+
+proc bsReturn(c: char) =
+  let r = mkSet(c)
+  if c notin r or 'z' notin r:
+    symexTarget("bq_bs_return")
+
+proc bsArrayElem(i: int; c: char) =
+  var a: array[2, set[char]]
+  a[1].incl c
+  if i >= 0 and i <= 1 and c in a[i] and i == 0:
+    symexTarget("bq_bs_array_elem")
+
+proc bsIter(s: set[char]) =
+  var k = 0
+  for c in s: inc k
+  if k == 2: symexTarget("bq_bs_iter")
+
+# ---- item 5: set literals with non-constant elements -------------------------
+
+proc nlMember(c, d: char) =
+  if c in {d, 'x'} and c != 'x' and c != d:
+    symexTarget("bq_nl_member")
+
+proc nlRange(c, lo, hi: char) =
+  if c in {lo..hi} and (c < lo or c > hi):
+    symexTarget("bq_nl_range")
+
+proc nlRangeSat(c, lo, hi: char) =
+  if c in {lo..hi} and c == 'm' and hi == 'n':
+    symexTarget("bq_nl_range_sat")
+
+proc nlElemCheck(y, b: int) =
+  # Every element is converted, also after a match.
+  try:
+    discard y in {3, b}
+  except RangeDefect:
+    if y == 3 and b == 70000: symexTarget("bq_nl_elem_check")
+
+proc nlKeyUnchecked(x, a: int) =
+  try:
+    if x in {a, 3}: discard
+  except RangeDefect:
+    if a >= 0 and a <= 65535: symexTarget("bq_nl_key_unchecked")
+
+proc nlValue(c, lo, hi: char) =
+  let l = {c, lo..hi}
+  if c notin l or (lo <= hi and lo notin l) or card(l) == 0:
+    symexTarget("bq_nl_value")
+
+proc nlValueEmpty(lo, hi: char) =
+  let r = {lo..hi}
+  if card(r) == 3 and hi == 'e':
+    symexTarget("bq_nl_value_empty")
+
+proc nlWhile(s: string; a, b: char) =
+  var i = 0
+  while i < s.len and s[i] in {a, b}:
+    inc i
+  if s.len == 2 and i == 2 and s[0] != s[1]:
+    symexTarget("bq_nl_while")
+
 suite "S8bq: walker version":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 220
@@ -206,3 +415,86 @@ suite "S8bq (3): a Regex value is a constructor call":
     let r = verdict(reValueVar, "bq_re_value_var")
     check r.status == sxUnknown
     check r.errors.hasKind(seUnsupportedRegex)
+
+suite "S8bq (2): builtin set values":
+  test "a set[char] parameter's members":
+    let r = verdict(bsParamMember, "bq_bs_param_member")
+    check r.status == sxSat
+    check r.errors.len == 0
+    check $r.witness == "({'q'}, 'q')"
+  test "incl adds the element":
+    check verdict(bsInclMember, "bq_bs_incl_member").status == sxUnsat
+  test "excl removes the element":
+    check verdict(bsExclMember, "bq_bs_excl_member").status == sxUnsat
+  test "incl adds exactly one member":
+    check verdict(bsInclOther, "bq_bs_incl_other").status == sxUnsat
+  test "+ is the union":
+    check verdict(bsUnion, "bq_bs_union").status == sxUnsat
+  test "- is the difference":
+    check verdict(bsDiff, "bq_bs_diff").status == sxUnsat
+  test "* is the intersection":
+    check verdict(bsInter, "bq_bs_inter").status == sxUnsat
+    check verdict(bsInterSat, "bq_bs_inter_sat").status == sxSat
+  test "<= is the subset":
+    check verdict(bsSubset, "bq_bs_subset").status == sxUnsat
+  test "< is a proper subset; >= and != too":
+    check verdict(bsProper, "bq_bs_proper").status == sxUnsat
+    check verdict(bsProperSat, "bq_bs_proper_sat").status == sxSat
+  test "a query counting a set's members runs under seqQueryRLimit":
+    let r = symexFind(bsCardBounded, tLabel("bq_bs_card_bounded"),
+                      tinySeqBudget)
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    check r.errors.hasMsg(beSolverUndef, "counts a builtin set's members")
+    check verdict(bsCardBounded, "bq_bs_card_bounded").status == sxSat
+  test "card counts the members":
+    check verdict(bsCardBound, "bq_bs_card_bound").status == sxUnsat
+    check verdict(bsLen, "bq_bs_len").status == sxSat
+  test "a literal of constants as a value":
+    check verdict(bsConstLit, "bq_bs_const_lit").status == sxUnsat
+  test "an enum set":
+    check verdict(bsEnum, "bq_bs_enum").status == sxSat
+    check verdict(bsEnumNo, "bq_bs_enum_no").status == sxUnsat
+  test "a bool set":
+    check verdict(bsBool, "bq_bs_bool").status == sxUnsat
+  test "int8 and uint8 sets":
+    check verdict(bsInt8, "bq_bs_int8").status == sxSat
+    let r = verdict(bsUInt8, "bq_bs_uint8")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "incl range-checks its element":
+    check verdict(bsRangeIncl, "bq_bs_range_incl").status == sxSat
+  test "membership in a set value range-checks the key":
+    check verdict(bsRangeIn, "bq_bs_range_in").status == sxSat
+    check verdict(bsRangeInOk, "bq_bs_range_in_ok").status == sxUnsat
+  test "a set field":
+    check verdict(bsField, "bq_bs_field").status == sxUnsat
+    let r = verdict(bsFieldSat, "bq_bs_field_sat")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "paths merge a set":
+    check verdict(bsMerge, "bq_bs_merge").status == sxUnsat
+  test "a set returned by a call":
+    check verdict(bsReturn, "bq_bs_return").status == sxUnsat
+  test "a set array element":
+    check verdict(bsArrayElem, "bq_bs_array_elem").status == sxUnsat
+  test "iterating a set is not modelled (classified decline)":
+    let r = verdict(bsIter, "bq_bs_iter")
+    check r.status == sxUnknown
+    check r.errors.len > 0
+
+suite "S8bq (5): set literals with non-constant elements":
+  test "membership in a literal of variables":
+    check verdict(nlMember, "bq_nl_member").status == sxUnsat
+  test "membership in a range with variable bounds":
+    check verdict(nlRange, "bq_nl_range").status == sxUnsat
+    check verdict(nlRangeSat, "bq_nl_range_sat").status == sxSat
+  test "every element is converted, after a match too":
+    check verdict(nlElemCheck, "bq_nl_elem_check").status == sxSat
+  test "the key is not range-checked":
+    check verdict(nlKeyUnchecked, "bq_nl_key_unchecked").status == sxUnsat
+  test "a literal with variable elements as a value":
+    check verdict(nlValue, "bq_nl_value").status == sxUnsat
+    check verdict(nlValueEmpty, "bq_nl_value_empty").status == sxSat
+  test "in a while guard":
+    check verdict(nlWhile, "bq_nl_while").status == sxSat

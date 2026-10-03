@@ -381,6 +381,8 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
     SymVal(kind: svString, str: wrap[Z3String](ctx, valRaw))
   of itFloat32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, valRaw))
   of itFloat64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, valRaw))
+  of itBitSet:   ## RFC-0005 S8bq: a builtin set field is one bit-vector
+    bitSetSV(wrap[Z3AnyAst](ctx, valRaw), pointeeTy.bsElemTy)
   of itUninterp:
     # N42 SPOT-PROBE FINDING (temporary — see N42 slice commit for the
     # permanent version of this comment): `itUninterp` had NO arm here,

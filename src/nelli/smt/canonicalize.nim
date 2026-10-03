@@ -4844,6 +4844,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<Tb:" & canonicalize(t.tabKeyTy) & ";" & canonicalize(t.tabValTy) & ">"
   of itSet:
     "Ty<Se:" & canonicalize(t.setElemTy) & ">"
+  of itBitSet:   ## RFC-0005 S8bq: Nim's builtin `set[T]`
+    "Ty<BS:" & canonicalize(t.bsElemTy) & ">"
   of itVariant:
     var plainParts: seq[string]
     for i in 0 ..< t.vPlainFieldNames.len:
@@ -5107,6 +5109,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
       (if e.snZeroed: "zero" else: "uninit") &
       (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
+  of iekBitSet:                          ## RFC-0005 S8bq
+    var parts: seq[string]
+    for a in e.bsArgs: parts.add canonicalize(a, env)
+    "Ex<BitSet:" & $e.bsOp & ":" & canonicalize(e.bsSetTy) & ":" &
+      parts.join(",") & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 

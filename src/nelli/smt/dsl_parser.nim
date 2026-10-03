@@ -407,6 +407,11 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekSeqNew:           ## RFC-0005 S8bi
     newCall(bindSym"mkSeqNew", emitExpr(e.snArg), emitIRType(e.snElemTy),
             newLit(e.snZeroed), newLit(e.snOfCap))
+  of iekBitSet:           ## RFC-0005 S8bq
+    var args = newNimNode(nnkBracket)
+    for a in e.bsArgs: args.add emitExpr(a)
+    newCall(bindSym"mkBitSet", newLit(e.bsOp), prefix(args, "@"),
+            emitIRType(e.bsSetTy))
 
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
@@ -524,6 +529,8 @@ proc emitIRType*(t: IRType): NimNode =
     newCall(bindSym"tTable", emitIRType(t.tabKeyTy), emitIRType(t.tabValTy))
   of itSet:
     newCall(bindSym"tSet", emitIRType(t.setElemTy))
+  of itBitSet:     ## RFC-0005 S8bq
+    newCall(bindSym"tBitSet", emitIRType(t.bsElemTy))
   of itVariant:
     # Phase 11 cycle 3 + plain-field sharing — emit a runtime-
     # reconstructible IR literal for itVariant. Discriminator,
@@ -1635,6 +1642,11 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     # RFC-0005 S8bi: the `Natural` conversion of the argument forks a
     # RangeDefect.
     result = true
+  of iekBitSet:
+    # RFC-0005 S8bq: a set operation never raises; an element's range
+    # check is its own (conversion) node.
+    for a in e.bsArgs:
+      if rhsHasInlineDefectFork(a): return true
   of iekLambda:
     discard  # lambdaBody is IRStmt; don't recurse into lambdas
   of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
@@ -3878,13 +3890,23 @@ proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
   ## membership never raises (probe: `70000 in {1, 3}` and `-1 in {1, 3}`
   ## are false). Before S8bi the literal was `feUnsupportedExprKind`
   ## (`nnkCurly`).
+  ##
+  ## RFC-0005 S8bq (item 5): an element need not be a constant. Nim then
+  ## evaluates the key, then every element left to right, each converted to
+  ## the base type and range-checked, with no short circuit (probes:
+  ## `k() in {e(), 3}` runs `k` first; `3 in {3, b}` with `b = 70000`
+  ## raises `RangeDefect`), and the key still unchecked. So the key is read
+  ## first, and each element is bound in order (`parseAtomicOperand`) with
+  ## its conversion. Before S8bq such a literal declined
+  ## (`feUnsupportedExprKind`).
   var lit = setNode
   while lit.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkStmtListExpr} and
         lit.len >= 1:
     lit = lit[lit.len - 1]
   if lit.kind != nnkCurly: return nil
+  var allConst = true
   for el in lit:
-    if not isConstSetElem(el): return nil
+    if not isConstSetElem(el): allConst = false
   var key = parseExpr(peelConstConv(keyNode), preamble, ctx)
   if not ctx.inGuardCond and not isAtomicIR(key) and
      keyNode.typeKind != ntyNone:
@@ -3897,6 +3919,22 @@ proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
   template addTerm(t: IRExpr) =
     result = if first: t else: mkBinop(bOr, result, t)
     first = false
+  if not allConst:
+    # RFC-0005 S8bq (item 5): every element, in order, with its conversion.
+    var terms: seq[IRExpr]
+    for el in lit:
+      var e = el
+      while e.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and e.len == 2 and
+            e[0].kind == nnkEmpty and e[1].kind == nnkRange:
+        e = e[1]
+      if e.kind == nnkRange and e.len == 2:
+        let lo = parseAtomicOperand(e[0], preamble, ctx)
+        let hi = parseAtomicOperand(e[1], preamble, ctx)
+        terms.add mkBinop(bAnd, mkBinop(bGe, key, lo), mkBinop(bLe, key, hi))
+      else:
+        terms.add mkBinop(bEq, key, parseAtomicOperand(el, preamble, ctx))
+    for t in terms: addTerm t
+    return
   for el in lit:
     let e = peelConstConv(el)
     if e.kind == nnkRange and key.kind == iekStrAt and
@@ -3916,6 +3954,88 @@ proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
       else:
         mkBinop(bEq, key, parseExpr(e, preamble, ctx))
     addTerm term
+
+proc parseBitSetLit(n: NimNode; setTy: IRType; preamble: var seq[IRStmt];
+                    ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bq (item 2, and item 5's non-constant elements). A set
+  ## literal as a value of the builtin `set[T]` `setTy`: `bsoLit` of each
+  ## element as a pair (`e, e`, one node) and each range as its bounds.
+  ## Elements are evaluated left to right, each with its conversion to `T`,
+  ## which range-checks it (probe: `{z, 1}` with `z = 70000` raises
+  ## `RangeDefect`; `{lo..hi}` with `hi < lo` is empty).
+  var args: seq[IRExpr]
+  for el in n:
+    var e = el
+    while e.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and e.len == 2 and
+          e[0].kind == nnkEmpty and e[1].kind == nnkRange:
+      e = e[1]
+    if e.kind == nnkRange and e.len == 2:
+      let lo = parseAtomicOperand(e[0], preamble, ctx)
+      let hi = parseAtomicOperand(e[1], preamble, ctx)
+      args.add lo
+      args.add hi
+    else:
+      let v = parseAtomicOperand(el, preamble, ctx)
+      args.add v
+      args.add v
+  mkBitSet(bsoLit, args, setTy)
+
+proc bitSetElemPure(n: NimNode): bool =
+  ## RFC-0005 S8bq. `n` calls nothing: a literal, a symbol, a conversion, a
+  ## field or an index of such. Evaluating it moves no location.
+  case n.kind
+  of nnkCharLit .. nnkUInt64Lit, nnkSym, nnkNilLit: true
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkDotExpr, nnkBracketExpr,
+     nnkHiddenDeref, nnkDerefExpr, nnkCheckedFieldExpr, nnkPar:
+    for c in n:
+      if c.kind notin {nnkEmpty, nnkType} and c.kind != nnkSym and
+         not bitSetElemPure(c):
+        return false
+    true
+  else: false
+
+proc bitSetLvalueStable(n: NimNode): bool =
+  ## RFC-0005 S8bq. `regexCapturesLvalue`'s locations, an index under the
+  ## compiler's conversion (`a[1]` on an `array[2, T]` converts `1`) too.
+  case n.kind
+  of nnkSym:
+    symKind(n) in {nskVar, nskParam, nskTemp, nskForVar, nskResult}
+  of nnkDotExpr:
+    n.len == 2 and bitSetLvalueStable(n[0])
+  of nnkHiddenDeref, nnkDerefExpr:
+    n.len == 1 and bitSetLvalueStable(n[0])
+  of nnkBracketExpr:
+    let ix = peelConstConv(n[1])
+    n.len == 2 and bitSetLvalueStable(n[0]) and
+      (ix.kind in nnkCharLit..nnkUInt64Lit or
+       (ix.kind == nnkSym and symKind(ix) in {nskVar, nskLet, nskParam,
+                                              nskConst, nskForVar}))
+  else: false
+
+proc parseBitSetInclExcl(n: NimNode; preamble: var seq[IRStmt];
+                         ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bq (item 2). The statement `incl(s, k)` / `excl(s, k)` on a
+  ## builtin set: `s = incl(s, k)` through the assignment's lvalue arms. Nim
+  ## takes `s`'s address, then evaluates `k` (converted to `T`, which
+  ## range-checks it), then writes. The model reads `s`, evaluates `k` and
+  ## writes `s` again, which is that location only if nothing between can
+  ## move it: `s` a variable, or a location `bitSetLvalueStable` admits
+  ## with an element that calls nothing. Any other shape declines, scoped.
+  ## Before S8bq a builtin set never classified, so this was a decline.
+  let lv = unwrapHidden(n[1])
+  let setTy = classifyType(lv).ty
+  let name = n[0].strVal
+  if not (lv.kind == nnkSym or
+          (bitSetLvalueStable(lv) and bitSetElemPure(n[2]))):
+    return ctx.declineAtSite(feUnsupportedOp,
+      "`" & name & "` on `" & lv.repr & "` with `" & n[2].repr & "`: the " &
+        "element may move the location it writes (feUnsupportedOp)",
+      name & " on a location its element may move (feUnsupportedOp)")
+  let cur = parseAtomicOperand(lv, preamble, ctx)
+  let k = parseAtomicOperand(n[2], preamble, ctx)
+  let op = if name == "incl": bsoIncl else: bsoExcl
+  parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()),
+            mkBitSet(op, @[cur, k], setTy), preamble, ctx)
 
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
@@ -4558,6 +4678,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
             # crash, never a silent wrong verdict).
             declineIntWidthConv(n, preamble, ctx, "hidden narrowing",
                                  valueTypeName(wrapped), valueTypeName(n))
+        elif outerTy.kind == itBitSet and innerTy.kind == itBitSet and
+             bitSetDomain(outerTy.bsElemTy) != bitSetDomain(innerTy.bsElemTy):
+          # RFC-0005 S8bq: a builtin set converted to one over another base
+          # range has another bit layout; it is not modelled (it was never
+          # reached: no set value classified before S8bq).
+          preamble.add ctx.declineAtSite(feUnsupportedExprKind,
+            "conversion of `" & wrapped.repr & "` from " & $innerTy & " to " &
+              $outerTy & " is not modelled (feUnsupportedExprKind)",
+            "builtin set conversion between base ranges " &
+              "(feUnsupportedExprKind)")
+          mkZeroValue(outerTy)
         else:
           parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:
@@ -4674,6 +4805,23 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `<`/`<=`/`==`. `{.borrow.}` operators stay on `borrowIntercept` below.
     if isUserCallee(n[0]):
       return parseRoutineCallExpr(n, n[0], preamble, ctx)
+    # RFC-0005 S8bq (item 2): `+ - * <= < ==` on builtin sets (`>=`, `>`
+    # and `!=` reach here as `<=`, `<` and `not ==`).
+    if n.len == 3 and isBuiltinNamed(n[0], ["+", "-", "*", "<=", "<", "=="]) and
+       n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itBitSet:
+      let setTy = classifyType(n[1]).ty
+      let op = case n[0].strVal
+               of "+": bsoUnion
+               of "-": bsoDiff
+               of "*": bsoInter
+               of "<=": bsoLe
+               of "<": bsoLt
+               else: bsoEq
+      let l = parseAtomicOperand(n[1], preamble, ctx)
+      let mark = preamble.len
+      let r = parseAtomicOperand(n[2], preamble, ctx)
+      keepInlineRaiseOrder(l, n[1], mark, preamble, ctx)
+      return mkBitSet(op, @[l, r], setTy)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
     # classify as `itString` — `s & t`, `s & "lit"`, `"lit" & s`. This guard
@@ -5267,6 +5415,22 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                                    " (feUnsupportedExprKind)")
       let dummy = zeroValueForType(classifyType(n).ty)
       return (if dummy != nil: dummy else: mkIntLit(0))
+  of nnkCurly:
+    # RFC-0005 S8bq (item 2): a set literal as a builtin set value. Any other
+    # curly (a table constructor's `{k: v}` reaches its own arm first) is the
+    # catch-all's decline.
+    let setTy = if n.typeKind != ntyNone: classifyType(n).ty else: nil
+    if setTy != nil and setTy.kind == itBitSet:
+      return parseBitSetLit(n, setTy, preamble, ctx)
+    let dummyTy = classifyType(n).ty
+    preamble.add ctx.declineAtSite(
+      feUnsupportedExprKind,
+      "CR-2a: unsupported expression kind " & $n.kind & " in `" &
+             n.repr & "` — not in the supported expression fragment",
+      "CR-2a: unsupported expression kind " &
+                                  $n.kind & " (feUnsupportedExprKind)")
+    let dummy = zeroValueForType(dummyTy)
+    if dummy != nil: dummy else: mkIntLit(0)
   of nnkCallStrLit:
     # RFC-0005 S8bq (item 3): `re"..."` / `rex"..."` outside a regex call.
     if regexCtorCall(n) != nil:
@@ -6031,6 +6195,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # Stdlib builtins recognised by name (Phase 5+):
     # `len(c)` on seq/Table/HashSet → iekSeqLen (semantic: "container
     # cardinality", lowered against the right counter at runtime).
+    # RFC-0005 S8bq (item 2): `card(s)` / `len(s)` of a builtin set.
+    if n.len == 2 and isBuiltinNamed(calleeSym, ["len", "card"]) and
+       n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itBitSet:
+      return mkBitSet(bsoCard, @[parseExpr(n[1], preamble, ctx)],
+                      classifyType(n[1]).ty)
     if calleeSym.strVal in ["len", "card"] and n.len == 2:
       let argCls = classifyType(n[1])
       if argCls.ty.kind in {itSeq, itTable, itSet}:
@@ -6058,6 +6227,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if n.len == 3 and isBuiltinNamed(calleeSym, ["contains"]):
       let member = parseSetLitMember(n[1], n[2], preamble, ctx)
       if member != nil: return member
+      # RFC-0005 S8bq (item 2): `k in s` on a builtin set value. The key's
+      # conversion to `T` is parsed with it, so it is range-checked (probe:
+      # `x in rs` for `rs: set[range[0..9]]` and `x = 20` raises
+      # `RangeDefect`; only a literal's key is not checked).
+      if n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itBitSet:
+        let setTy = classifyType(n[1]).ty
+        let sIR = parseAtomicOperand(n[1], preamble, ctx)
+        let mark = preamble.len
+        let kIR = parseAtomicOperand(n[2], preamble, ctx)
+        keepInlineRaiseOrder(sIR, n[1], mark, preamble, ctx)
+        return mkBitSet(bsoContains, @[sIR, kIR], setTy)
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
        n.len == 3:
       var containsRecvNode = n[1]
@@ -9519,12 +9699,12 @@ proc zeroValueForType(ty: IRType): IRExpr =
                                        ## a decline, and every catch-all dummy of
                                        ## a ref type was an int that crashed the
                                        ## first `p != nil` (`eqBV`'s kind assert).
-  of itTable, itSet: mkZeroValue(ty)   ## RFC-0005 S8u: the empty container. An
-                                       ## uninitialised `var t: Table[K, V]` was a
-                                       ## decline that left `t` unbound, and the
-                                       ## first `t[k] = v` hit `lower`'s
-                                       ## `recv.kind == svTable` assertion
-                                       ## (`weInternalWalkerFault`).
+  of itTable, itSet, itBitSet:
+    ## RFC-0005 S8u: the empty container. An uninitialised `var t: Table[K,
+    ## V]` was a decline that left `t` unbound, and the first `t[k] = v` hit
+    ## `lower`'s `recv.kind == svTable` assertion (`weInternalWalkerFault`).
+    ## RFC-0005 S8bq: a builtin set's is `{}`.
+    mkZeroValue(ty)
   of itDistinct:                       ## RFC-0005 S8u: the base type's zero. A
     zeroValueForType(ty.distinctBase)  ## distinct value is its base value in
                                        ## the IR (`D(x)` is the identity).
@@ -11190,6 +11370,12 @@ proc parseStmtInner(n: NimNode,
       let lv = unwrapHidden(n[1])
       let rhs = parseSeqNew("newSeq", n[2], classifyType(lv).ty, preamble, ctx)
       parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), rhs, preamble, ctx)
+    elif n.len == 3 and n[0].kind == nnkSym and
+         isBuiltinNamed(n[0], ["incl", "excl"]) and
+         unwrapHidden(n[1]).typeKind != ntyNone and
+         classifyType(unwrapHidden(n[1])).ty.kind == itBitSet:
+      # RFC-0005 S8bq (item 2). `incl` / `excl` on a builtin set.
+      parseBitSetInclExcl(n, preamble, ctx)
     elif n.len >= 2 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["inc", "dec"]) and
          (block:
             let recv = unwrapHidden(n[1])

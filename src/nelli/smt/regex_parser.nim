@@ -1220,44 +1220,77 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
                rep(s, modeNum(cuS0, pcStart), mkInt(2) * len(s) + mkInt(2)))
   if n.utf: result = ite(matches(s, utf8ValidRe()), result, s)
 
-# ---- RFC-0005 S8bj (item 5): facts of a `replace` value ------------------------
+# ---- RFC-0005 S8bj (item 5), S8bt (item 7): facts of a `replace` value -------
 
-proc replaceLemmas*(s, by, r: Z3String; atoms: seq[set[char]]; plus: bool;
+proc replaceLemmas*(s, by, r: Z3String; f: ReplaceFacts;
                     fresh: FreshName): seq[Z3Bool] =
-  ## RFC-0005 S8bj. Facts of `r = replace(s, re, by)` for an S8aw shape
-  ## (`atoms` a sequence of byte sets, one under a greedy `+` when `plus`),
-  ## true of every receiver; Z3's unfolding of the exact recursive term
-  ## does not reach them (S8bb's Q2, Q7, Q8 stayed `unknown`):
+  ## RFC-0005 S8bj, S8bt. Facts of `r = replace(s, re, by)`, true of every
+  ## receiver; Z3's unfolding of the exact recursive term does not reach
+  ## them (S8bb's Q2, Q7, Q8 stayed `unknown`). Nim's loop writes `s` as
+  ## `g0 m1 g1 .. mk gk` (the matches `mi`, left to right and disjoint) and
+  ## `r` as `g0 by g1 .. by gk`; `f` bounds the matches
+  ## (`pcre_select.replaceFacts`):
   ##   * the lengths: `k` matches removing `c` bytes, `len(r) = len(s) - c
-  ##     + k * len(by)`, each match `m = atoms.len` bytes (at least `m`
-  ##     under `plus`), `c <= len(s)` -- stated when `len(by)` is a numeral
-  ##     (linear arithmetic);
-  ##   * the image: for one byte set `S` and a literal `by`, every byte of
-  ##     `s` in `S` is inside a match (a `+` run is maximal, a single byte
-  ##     is its own match), so `r` is bytes outside `S` and copies of `by`:
-  ##     `r in ([^S] | by)*`.
+  ##     + kb` with `kb = k * len(by)`, `k * mn <= c <= k * mx`, `c <=
+  ##     len(s)`, and at most `2 * len(s) + 1` matches when one can be
+  ##     empty (at most one empty match per position, `len(s) + 1` of them,
+  ##     and a non-empty one per byte). RFC-0005 S8bt: for a `by` of
+  ##     unknown length `kb` is a fresh Int with the product's linear
+  ##     consequences (S8bj stated the relation for a numeral only);
+  ##   * RFC-0005 S8bt: no match (`k == 0`) leaves `r == s`, and when no
+  ##     match is empty one starts at a byte of `first`, so `k >= 1` needs
+  ##     such a byte in `s`;
+  ##   * the image: every `sure` byte of `s` is inside a match, so a byte of
+  ##     `r` outside `by` is not sure: `r in ([^sure] | by)*` for a literal
+  ##     `by`; and per sure byte `b`, `contains(r, b)` only when
+  ##     `contains(by, b)` -- for any `by` (RFC-0005 S8bt; S8bj: a one-set
+  ##     pattern, a literal `by` and at most 16 plain ASCII bytes). The
+  ##     byte is a one-character term (`fromCode`), so any byte is stated.
+  ##     Z3 4.13.4 does not derive `not contains(r, "ff")` from the
+  ##     membership alone (S8bj's first Windows run), hence both forms.
+  let k = mkIntVar(fresh("__regexReplaceK"))
+  let c = mkIntVar(fresh("__regexReplaceC"))
+  let kb = mkIntVar(fresh("__regexReplaceKB"))
+  result.add (k >= mkInt(0)) and (c >= mkInt(0)) and (c <= len(s)) and
+             (len(r) == len(s) - c + kb)
+  result.add c >= k * mkInt(f.mn)
+  if f.mx >= 0: result.add c <= k * mkInt(f.mx)
+  if f.mn == 0: result.add k <= mkInt(2) * len(s) + mkInt(1)
   let lenBy = simplify(len(by))
   if isNumeralAst(lenBy.ctx, lenBy.raw):
-    let nb = parseInt(getNumeralString(lenBy))
-    let m = atoms.len
-    let k = mkIntVar(fresh("__regexReplaceK"))
-    let c = mkIntVar(fresh("__regexReplaceC"))
-    result.add (k >= mkInt(0)) and (c <= len(s)) and
-               (len(r) == len(s) - c + k * mkInt(nb))
-    result.add(if plus: c >= k * mkInt(m) else: c == k * mkInt(m))
-  if atoms.len == 1:
-    let byS = simplify(by)
-    if Z3_is_string(byS.ctx.raw, byS.raw):
-      result.add matches(r, star(union(byteSetRe(pcreAnyByte - atoms[0]),
-                                       mkRegex(byS))))
-      # The same fact per byte, as `contains` (Z3 4.13.4 does not derive
-      # `not contains(r, "ff")` from the membership): a matched byte `b`
-      # that `by` does not contain is not in `r`. Stated for a small set of
-      # plain ASCII bytes (no literal-escape question); sound to omit.
-      const plainBytes = {'0'..'9', 'a'..'z', 'A'..'Z', ' ', ',', '.', ':',
-                          ';', '-', '_', '/', '+', '=', '!', '?', '@', '#'}
-      let byCodes = getStringContents(byS)
-      if card(atoms[0]) <= 16 and atoms[0] <= plainBytes:
-        for b in atoms[0]:
-          if ord(b) notin byCodes:
-            result.add not contains(r, mkString($b))
+    result.add kb == k * mkInt(parseInt(getNumeralString(lenBy)))
+  else:
+    result.add (kb >= mkInt(0)) and
+               implies(len(by) == mkInt(0), kb == mkInt(0)) and
+               implies(k == mkInt(0), kb == mkInt(0)) and
+               implies(len(by) >= mkInt(1), kb >= k) and
+               implies(k >= mkInt(1), kb >= len(by))
+  # No match leaves the receiver as it is; a match (never empty when
+  # `mn >= 1`) starts at a byte of `first`.
+  result.add implies(k == mkInt(0), r == s)
+  if f.mn >= 1 and f.first.card < 256:
+    # As `contains` facts for a small set (Z3 relates them to the query's
+    # own `contains` at once; it did not reach the membership's conflict
+    # under `recFactsRLimit`), else as a membership.
+    if f.first.card <= 32:
+      var some: seq[Z3Bool]
+      for b in f.first: some.add contains(s, codeStr(ord(b)))
+      result.add implies(k >= mkInt(1), orAll(some))
+    else:
+      let anyB = star(byteSetRe(pcreAnyByte))
+      result.add implies(k >= mkInt(1),
+                         matches(s, concat(@[anyB, byteSetRe(f.first), anyB])))
+  if f.sure.card == 0: return
+  let byS = simplify(by)
+  let literal = Z3_is_string(byS.ctx.raw, byS.raw)
+  if literal:
+    result.add matches(r, star(union(byteSetRe(pcreAnyByte - f.sure),
+                                     mkRegex(byS))))
+    let byCodes = getStringContents(byS)
+    for b in f.sure:
+      if ord(b) notin byCodes:
+        result.add not contains(r, codeStr(ord(b)))
+  else:
+    for b in f.sure:
+      let u = codeStr(ord(b))
+      result.add implies(contains(r, u), contains(by, u))

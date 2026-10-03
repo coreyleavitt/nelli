@@ -827,6 +827,40 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
     return none(RawZ3Ast)
   some(Z3_get_app_arg(ctx.raw, app, 2))
 
+var constArrayDeclKind {.threadvar.}: int
+  ## RFC-0005 batch 4. The `Z3_decl_kind` ordinal (+ 1) of a constant array
+  ## (`(as const ...)`), read off a probe term as `storeDeclKind` is.
+
+proc constFalseStoreKeys(ctx: Z3Context; arr: RawZ3Ast): Option[seq[RawZ3Ast]] =
+  ## RFC-0005 batch 4. The index terms of `arr` when it is a chain of
+  ## `store`s over the constant-false array (`store(...store(K false, k1,
+  ## v1)..., kn, vn)`, a table's presence array built from the empty table),
+  ## or `none`. A term `x` with `select(arr, x)` true is then one of
+  ## `k1..kn`: any other reads the base, false. A theorem of the array
+  ## theory, so asserting it prunes no model.
+  if storeDeclKind == 0:
+    discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
+  if constArrayDeclKind == 0:
+    let s = ctx.checkErr Z3_get_sort(ctx.raw, mkInt(ctx, 0).raw)
+    let probe = ctx.checkErr Z3_mk_const_array(ctx.raw, s, mkBool(ctx, false).raw)
+    constArrayDeclKind = ord(Z3_get_decl_kind(ctx.raw,
+      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, probe)))) + 1
+  var keys: seq[RawZ3Ast]
+  var a = arr
+  while true:
+    if Z3_get_ast_kind(ctx.raw, a) != Z3_APP_AST: return none(seq[RawZ3Ast])
+    let app = Z3_to_app(ctx.raw, a)
+    let k = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1
+    if k == storeDeclKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      keys.add Z3_get_app_arg(ctx.raw, app, 1)
+      a = Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == constArrayDeclKind and Z3_get_app_num_args(ctx.raw, app) == 1:
+      if Z3_get_bool_value(ctx.raw, Z3_get_app_arg(ctx.raw, app, 0)) != Z3_L_FALSE:
+        return none(seq[RawZ3Ast])
+      return some(keys)
+    else:
+      return none(seq[RawZ3Ast])
+
 var iteDeclKind {.threadvar.}: int
   ## RFC-0005 S8ax. The `Z3_decl_kind` ordinal of an `ite`, read off a probe
   ## term as `storeDeclKind` is; 0 until first read.

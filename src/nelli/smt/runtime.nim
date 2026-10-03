@@ -18043,6 +18043,20 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           checkedSelect(ctx, posArr.get.raw, term.get.raw))
         let jz = mkZ3IntLit(int64(j))
         facts.add ((not (jz < tsv.tabSize)) or (present and pos == jz))
+        # RFC-0005 batch 4: a table the SUT built from the empty one is
+        # present only at the keys it stored (`constFalseStoreKeys`), so
+        # `ks[j]` is one of them: the same fact as `present` in a form Z3
+        # can case-split on. `s += k * v` over `pairs` multiplied two free
+        # 64-bit terms, whose key was bounded only through the presence
+        # array: Z3 4.13.4 ran out of its 20M budget on that query from a
+        # fresh context (SAT in about 40K units with the keys spelled).
+        let dom = constFalseStoreKeys(ctx, tsv.tabPresentRaw.raw)
+        if dom.isSome and dom.get.len > 0:
+          var anyKey = wrap[Z3Bool](ctx, checkedEq(ctx, term.get.raw, dom.get[0]))
+          for i in 1 ..< dom.get.len:
+            anyKey = anyKey or
+              wrap[Z3Bool](ctx, checkedEq(ctx, term.get.raw, dom.get[i]))
+          facts.add ((not (jz < tsv.tabSize)) or anyKey)
       if not keyed:
         # Unreachable for a key type the guard above admits; kept in band.
         let d = w.degrade(feUnsupportedOp,

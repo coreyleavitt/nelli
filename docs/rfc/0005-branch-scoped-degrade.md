@@ -8773,6 +8773,16 @@ met, the stack keeps both:
   and is logged in S8bb's `raiseOrder`.
 - *Operands.* S8ax's `irKids` / `isEagerIR` cover S8bb's `iekStrCaptureRe`
   and S8bc's `iekSeqNewZero`.
+- *Table iteration on Z3 4.13.4.* S8bc's `tiTuple` (`s += k * v` over
+  `pairs`) was SAT on 4.13.4 at the slice's tip only through what earlier
+  queries had left in the walk's Z3 context: its last query, replayed in a
+  fresh 4.13.4 context, runs out of the 20M budget at the slice's tip and
+  in the stack alike, and batch 3 changed the earlier queries. The key of
+  each visited position was bounded only through the presence array.
+  `isTabKeys` now also asserts, for a table built from the empty one, that
+  the key is one of the keys stored (`constFalseStoreKeys`, a theorem of
+  the array theory): the same query is SAT in about 40K units fresh, and
+  90K in the walk.
 
 ## §8 — Consumer surface and migration
 

@@ -217,7 +217,10 @@ const symexWalkerVersion* = "217"
   ## were dropped: a false `sxSat`), and a closure call emits S8ax's
   ## computed-index alias guard as a direct call does. A closure raise
   ## carries S8as's by-reference writes and S8bh's `var` outs both, logged
-  ## in S8bb's `raiseOrder`. 209 -> 217.
+  ## in S8bb's `raiseOrder`. A `for` over a table built from the empty one
+  ## asserts each key it visits is one of the keys stored
+  ## (`constFalseStoreKeys`): `s += k * v` over `pairs` ran Z3 4.13.4 out
+  ## of budget once batch 3 moved what its context held. 209 -> 217.
   ##
   ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
   ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink

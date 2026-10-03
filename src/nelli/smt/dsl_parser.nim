@@ -679,11 +679,13 @@ proc emitStmt*(s: IRStmt): NimNode =
       # `mkCall`'s `@[]` default regardless of what the parser computed).
       var posLit = newTree(nnkBracket)
       for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
-      # RFC-0005 S8an: `cGuardRoots` round-trips the same way.
+      # RFC-0005 S8an: `cGuardRoots` round-trips the same way, and RFC-0005
+      # S8bx's `cViewAliases`.
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              prefix(posLit, "@"), newLit(s.cGuardRoots))
+              prefix(posLit, "@"), newLit(s.cGuardRoots),
+              newLit(s.cViewAliases))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -10615,6 +10617,76 @@ proc mutViewWriteBack(s: IRStmt; name: string;
   else:
     result = if writesName(s, name): mkBlock(@[s, writeBack()]) else: s
 
+func irLocPath(e: IRExpr): string =
+  ## RFC-0005 S8bx (item 3). `e` as a location path (`t`, `o.tab`), or ""
+  ## for any other expression.
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField:
+    let r = irLocPath(e.obj)
+    if r.len == 0: "" else: r & "." & e.fieldName
+  else: ""
+
+proc markViewAliases(s: IRStmt; vName, tabPath, keyName: string;
+                     n: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bx (item 3). In an `mpairs` / `mvalues` body, a call that
+  ## receives the loop variable `vName` and the table (the location
+  ## `tabPath`) gets one `cViewAliases` entry: in Nim the two formals are
+  ## one location (the slot `v` views), so a write through either is seen
+  ## through the other inside the callee. Copy-in/copy-out of the two
+  ## separately had the callee read the table without the view's write
+  ## (and the view without the table's): verdicts swapped against native
+  ## runs. A call that also receives a location HOLDING the table (`o` for
+  ## `o.tab`), or a part of the view, declines: the two formals are not
+  ## one location there, and no entry relates them.
+  if s == nil: return nil
+  case s.kind
+  of isBlock:
+    for i in 0 ..< s.stmts.len:
+      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, keyName, n, ctx)
+    s
+  of isIf:
+    for i in 0 ..< s.branches.len:
+      s.branches[i].body =
+        markViewAliases(s.branches[i].body, vName, tabPath, keyName, n, ctx)
+    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, keyName, n, ctx)
+    s
+  of isWhile:
+    s.wbody = markViewAliases(s.wbody, vName, tabPath, keyName, n, ctx)
+    s
+  of isTry:
+    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, keyName, n, ctx)
+    for i in 0 ..< s.tryHandlers.len:
+      s.tryHandlers[i].body =
+        markViewAliases(s.tryHandlers[i].body, vName, tabPath, keyName, n, ctx)
+    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, keyName, n,
+                                   ctx)
+    s
+  of isCall:
+    if s.opaque: return s
+    var viewIx, tabIx = -1
+    var partial = false
+    for i, a in s.cargs:
+      let lp = irLocPath(a)
+      if lp == vName: viewIx = i
+      elif lp == tabPath: tabIx = i
+      elif lp.len > 0 and (lp.startsWith(vName & ".") or
+                           tabPath.startsWith(lp & ".")):
+        partial = true
+    if viewIx < 0 or (tabIx < 0 and not partial): return s
+    if partial:
+      return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a call in the body of this `for` receives the loop " &
+                "variable and a location holding the Table, or a part of " &
+                "the loop variable: the two are one location in Nim, which " &
+                "is not modelled -- path degraded to sxUnknown"),
+        "a call receives an `mpairs` view and a location holding its " &
+        "Table"), s])
+    s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName)
+    s
+  else: s
+
 proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
   ## or `values` (`for k, v in t` is `pairs(t)` after semcheck; `for (k, v)
@@ -10742,6 +10814,11 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
           dottedFieldMutate(bare, doTabSet, @[mkVar(kSynth), mkVar(vName)],
                             wbPre, ctx)
       if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
+    # RFC-0005 S8bx (item 3): a call receiving both the view and the table.
+    var scratch: seq[IRStmt]
+    body = markViewAliases(body, vName,
+                           irLocPath(parseExpr(container, scratch, ctx)),
+                           kSynth, n, ctx)
     body = mutViewWriteBack(body, vName, writeBack)
   case iterName
   of "mpairs", "mvalues": discard

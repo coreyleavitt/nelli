@@ -12065,6 +12065,13 @@ type
                                       ## walking its body, runs the finally on each,
                                       ## and sends the fall-through on (`exitJump`):
                                       ## the jump twin of `pendingReturn`.
+    viewAliases: seq[tuple[view, tab: string; key: SymVal]]
+                                      ## RFC-0005 S8bx (item 3): this callee's
+                                      ## formal `view` is the slot of its formal
+                                      ## `tab` at `key` (an `mpairs` view passed
+                                      ## with its table, `IRStmt.cViewAliases`).
+                                      ## `walkBlock` keeps the two equal after
+                                      ## every statement (`syncViewAliases`).
 
   WalkMode = enum
     ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
@@ -15404,11 +15411,124 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       survivors.add forkPathTainted(p, p.pc, p.env, d)
   survivors
 
+proc sameSymVal(a, b: SymVal): bool
+  ## RFC-0005 S8bx fwd-decl (defined with the closure machinery below).
+
+const viewSnapPrefix = "__s8bx_viewsnap#"
+  ## RFC-0005 S8bx (item 3). The env names holding a view-aliased formal's
+  ## value as the statement began (`snapViewAliases`).
+
+proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
+                     w: var WalkCtx): string =
+  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
+  ## frame (just pushed). Returns why the call declines, or "": the view's
+  ## formal is by value and not a scalar (Nim may pass it by address, so it
+  ## would see the table's writes: not modelled), or the key is unbound.
+  ## A by-value scalar view is a copy, and nothing relates it to the table.
+  ## A call made inside such a callee that passes both formals on carries
+  ## the pair into its own callee (Nim passes the one location on).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal]]
+  for a in stmt.cViewAliases:
+    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
+       not callerEnv.hasKey(a.keyName):
+      return "and the walk does not bind the two"
+    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
+               key: callerEnv[a.keyName])
+  if w.frameStack.len > 0:
+    for a in w.frameStack[^1].viewAliases:
+      var vi, ti = -1
+      for i, arg in stmt.cargs:
+        if arg.kind == iekVar:
+          if arg.vname == a.view: vi = i
+          elif arg.vname == a.tab: ti = i
+      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
+        pairs.add (viewArg: vi, tabArg: ti, key: a.key)
+  for a in pairs:
+    let vf = sig.params[a.viewArg]
+    if not vf.isVar:
+      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
+      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    w.frame.viewAliases.add (view: vf.name, tab: sig.params[a.tabArg].name,
+                             key: a.key)
+  ""
+
+proc snapViewAliases(paths: seq[Path]; w: WalkCtx): seq[Path] =
+  ## RFC-0005 S8bx (item 3). Each path with each view-aliased formal's value
+  ## (and its table's) recorded as the statement begins.
+  for p in paths:
+    var env2 = p.env
+    for a in w.frame.viewAliases:
+      if env2.hasKey(a.view) and env2.hasKey(a.tab):
+        env2[viewSnapPrefix & a.view] = env2[a.view]
+        env2[viewSnapPrefix & a.tab] = env2[a.tab]
+    result.add forkPath(p, p.pc, env2)
+
+proc syncViewAliases(outs: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bx (item 3). After a statement of a callee whose formal
+  ## `view` is the slot of its formal `tab` at `key`: the side the
+  ## statement wrote is carried to the other -- the view's value stored
+  ## into the table at the key, or the table's value at the key read into
+  ## the view. Both written to different values is two writes the walk
+  ## cannot order, and a table write that may have removed the key leaves
+  ## the view on a slot Nim's `del` refills from another entry: both
+  ## decline (`feUnsupportedOp`). A statement nested in this one has
+  ## already synced and dropped the snapshot, which then leaves the pair
+  ## alone.
+  let ctx = w.z3
+  for p in outs:
+    var env2 = p.env
+    var why = ""
+    var changed = false
+    for a in w.frame.viewAliases:
+      let sv = viewSnapPrefix & a.view
+      let st = viewSnapPrefix & a.tab
+      if not (env2.hasKey(sv) and env2.hasKey(st) and env2.hasKey(a.view) and
+              env2.hasKey(a.tab)):
+        continue
+      let tabV = env2[a.tab]
+      let keyO = if tabV.kind == svTable: tabKeyTerm(a.key, tabV.tabKeyTy)
+                 else: none(Z3AnyAst)
+      if keyO.isNone:
+        why = "the table is not a modelled Table value"
+        continue
+      let k = keyO.get
+      let vCh = not sameSymVal(env2[a.view], env2[sv])
+      let tCh = not sameSymVal(tabV, env2[st])
+      if vCh and tCh:
+        why = "the view and the table were both written in one statement"
+      elif vCh:
+        var e2 = env2
+        e2[viewSnapPrefix & "key"] = a.key
+        env2[a.tab] = lower(e2, mkTableSet(mkVar(a.tab),
+          mkVar(viewSnapPrefix & "key"), mkVar(a.view)))
+        changed = true
+      elif tCh:
+        let present = wrap[Z3Bool](ctx,
+          checkedSelect(ctx, tabV.tabPresentRaw.raw, k.raw))
+        if guardLiteral(present) != glTrue:
+          why = "the table write may have removed the view's key"
+        else:
+          env2[a.view] = tabValAt(ctx, tabV, k.raw)
+          changed = true
+    for a in w.frame.viewAliases:
+      env2.del(viewSnapPrefix & a.view)
+      env2.del(viewSnapPrefix & a.tab)
+    var q = forkPath(p, p.pc, env2)
+    if why.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & why &
+             "; the two are one location in Nim, and the order of the " &
+             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
+    result.add(if changed: drainPendingLowerEffects(q) else: q)
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
     if w.shouldStop: return
-    result = walk(s, result, w)
+    if w.frame.viewAliases.len > 0:   # RFC-0005 S8bx (item 3)
+      result = syncViewAliases(walk(s, snapViewAliases(result, w), w), w)
+    else:
+      result = walk(s, result, w)
     if result.len == 0: return
     # Phase 14 cycle C3 (ADR-0004). Post-step frontier prune. A
     # `maxFrontierSize` of 0 keeps the unbounded baseline; any
@@ -17494,9 +17614,18 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
           # so E3/E5 raise-flow threading is correct by construction.
           pushFrame(w)
+          # RFC-0005 S8bx (item 3): an `mpairs` view passed with its table.
+          let viewWhy = bindViewAliases(stmt, sig, p.env, w)
+          let calleeIn =
+            if viewWhy.len == 0: calleePath
+            else:
+              forkPathTainted(calleePath, calleePath.pc, calleePath.env,
+                w.degrade(feUnsupportedOp,
+                  "`" & stmt.callee & "` receives an `mpairs` view and its " &
+                  "Table, " & viewWhy & " (RFC-0005 S8bx; feUnsupportedOp)"))
           let guardMark = callGuardedNames.len   ## RFC-0005 S8an
           for g in guarded: callGuardedNames.add g
-          let fallThroughRaw = walk(sig.body, @[calleePath], w)
+          let fallThroughRaw = walk(sig.body, @[calleeIn], w)
           callGuardedNames.setLen(guardMark)
           # Round-6 A6-rider (walker v86): a callee whose body reaches the end
           # via IMPLICIT fallthrough (no explicit `return`) after a

@@ -390,7 +390,8 @@ proc fieldwiseEq(a, b: IRStmt): bool =
   of isCall:
     a.callee == b.callee and fieldwiseEqExprSeq(a.cargs, b.cargs) and a.retName == b.retName and
       fieldwiseEq(a.retTy, b.retTy) and a.opaque == b.opaque and
-      a.retIntOffsetPositions == b.retIntOffsetPositions
+      a.retIntOffsetPositions == b.retIntOffsetPositions and
+      a.cViewAliases == b.cViewAliases   # RFC-0005 S8bx
   of isIndex:
     a.ixRetName == b.ixRetName and fieldwiseEq(a.ixArr, b.ixArr) and fieldwiseEq(a.ixIdx, b.ixIdx) and
       fieldwiseEq(a.ixElemTy, b.ixElemTy) and a.ixLoc == b.ixLoc
@@ -848,8 +849,10 @@ proc sAssert(): IRStmt = mkAssert(mkBinop(bLt, mkVar("x"), mkIntLit(10)))
 proc sAssume(): IRStmt = mkAssume(mkBinop(bGe, mkVar("y"), mkIntLit(3)))
 proc sCallWithOffsets(): IRStmt =
   ## The historically-dropped B5 field: `retIntOffsetPositions`.
+  ## RFC-0005 S8bx: and `cViewAliases`.
   mkCall("sentinelCallee", "sentinelRet", @[mkIntLit(1), mkVar("arg2")],
-         tInt(64, true), retIntOffsetPositions = @[0, 2])
+         tInt(64, true), retIntOffsetPositions = @[0, 2],
+         viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey")])
 proc sOpaqueCall(): IRStmt =
   mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
 proc sVariantFieldStmt(): IRStmt =

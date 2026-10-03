@@ -1088,5 +1088,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bx_extractraise",
             # S8bx item 2: one classifier for the seq witness reader and
             # the renderability predicate; a type is always rendered.
-            "tsymex_rfc0005_s8bx_witnessdrift"]:
+            "tsymex_rfc0005_s8bx_witnessdrift",
+            # S8bx item 3: an mpairs view passed to one call with its
+            # Table is one location (IRStmt.cViewAliases, syncViewAliases).
+            "tsymex_rfc0005_s8bx_mpairs"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

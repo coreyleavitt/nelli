@@ -5159,10 +5159,16 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # touches one declines), so they key the call.
     var guards: seq[string]
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
+    # RFC-0005 S8bx (item 3): an mpairs view aliased to its table in the
+    # callee changes what the callee reads, so it keys the call.
+    var views: seq[string]
+    for a in s.cViewAliases:
+      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
-      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") & ">"
+      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      (if views.len > 0: ";view=[" & views.join(",") & "]" else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read

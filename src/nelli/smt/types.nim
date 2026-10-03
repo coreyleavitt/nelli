@@ -1231,6 +1231,16 @@ type
                          ## the callee, is therefore withheld from the
                          ## callee, and a callee that touches it declines
                          ## (`isCall`). Empty for a call with neither.
+      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName: string]]
+                         ## RFC-0005 S8bx (item 3). In the body of a `for`
+                         ## over a Table's `mpairs` / `mvalues`, a call that
+                         ## receives both the loop variable (`viewArg`, a
+                         ## `var` formal: Nim's `var V` view of the slot) and
+                         ## the table itself (`tabArg`): one location under
+                         ## two formals. `keyName` names the loop's key in the
+                         ## caller. The walker keeps the two formals equal
+                         ## statement by statement in the callee
+                         ## (`syncViewAliases`). Empty for every other call.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -5056,11 +5066,13 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             retIntOffsetPositions: seq[int] = @[],
-            guardRoots: seq[string] = @[]): IRStmt =
+            guardRoots: seq[string] = @[],
+            viewAliases: seq[tuple[viewArg, tabArg: int; keyName: string]] =
+              @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions,
-         cGuardRoots: guardRoots)
+         cGuardRoots: guardRoots, cViewAliases: viewAliases)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false): IRStmt =

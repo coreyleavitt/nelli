@@ -5,7 +5,7 @@
 ## a caseless class range's `add_to_class`), against the libpcre std/re
 ## loads; then whole patterns, concretely (`pcreExec`, `pcreReplace`)
 ## against std/re on UTF-8 subjects.
-import std/[unittest, strutils, re, times, sets, algorithm]
+import std/[unittest, strutils, re, times, sets, algorithm, sequtils]
 import nelli/smt/[pcre_syntax, pcre_select, pcre_ucd, pcre_engine]
 
 var t0 = epochTime()
@@ -14,7 +14,21 @@ proc lap(): string =
   result = formatFloat(t - t0, ffDecimal, 1) & " s"
   t0 = t
 
+const noExtra: seq[int32] = @[]
+
+# The tests are split five ways between this file and its `_b` .. `_e`
+# twins (which include it with `s8btUtfPart` = 1 .. 4), so each runs under
+# 60 s on the Windows legs: part 0 the properties, (*UCP) and the
+# patterns; parts 1, 2 the characters' folding (halves); parts 3, 4 the
+# ranges' (halves).
+when not declared(s8btUtfPart):
+  const s8btUtfPart = 0
+
 proc enc(c: int32): string = utf8Encode(c)
+
+proc esc(c: int32): string =
+  ## `c` as a pattern escape (no character is special then).
+  "\\x{" & toHex(c, 6) & "}"
 
 proc valid(c: int32): bool = c >= 0 and c <= maxCp and (c < 0xD800 or c > 0xDFFF)
 
@@ -61,95 +75,101 @@ proc checkSet(p: string; extra: openArray[int32]; bad: var seq[string]):
 
 suite "S8bt: UTF mode's Unicode tables against libpcre":
 
-  test "every property (\\p and \\P)":
-    var bad: seq[string]
-    var n = 0
-    for (name, _) in ucdProps:
-      if name.startsWith("["): continue
-      n += checkSet("(*UTF8)\\p{" & name & "}", sample, bad)
-      n += checkSet("(*UTF8)\\P{" & name & "}", [], bad)
-      n += checkSet("(*UTF8)\\p{^" & name & "}", [], bad)
-    echo "  ", ucdProps.len - 3, " properties, ", n, " code points, ",
-         bad.len, " differ, ", lap()
-    checkpoint bad.join("\n")
-    check bad.len == 0
+  when s8btUtfPart == 0:
+    test "every property (\\p and \\P)":
+      var bad: seq[string]
+      var n = 0
+      for (name, _) in ucdProps:
+        if name.startsWith("["): continue
+        n += checkSet("(*UTF8)\\p{" & name & "}", sample, bad)
+        n += checkSet("(*UTF8)\\P{" & name & "}", noExtra, bad)
+        n += checkSet("(*UTF8)\\p{^" & name & "}", noExtra, bad)
+      echo "  ", ucdProps.len - 3, " properties, ", n, " code points, ",
+           bad.len, " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0
 
-  test "(*UCP): \\d \\s \\w and the POSIX classes":
-    var bad: seq[string]
-    var n = 0
-    for e in ["\\d", "\\D", "\\s", "\\S", "\\w", "\\W"]:
-      n += checkSet("(*UTF8)(*UCP)" & e, sample, bad)
-      n += checkSet("(*UTF8)(*UCP)[" & e & "]", [], bad)
-    for name in ["alpha", "lower", "upper", "alnum", "ascii", "blank",
-                 "cntrl", "digit", "graph", "print", "punct", "space",
-                 "word", "xdigit"]:
-      for neg in ["", "^"]:
-        n += checkSet("(*UTF8)(*UCP)[[:" & neg & name & ":]]", sample, bad)
-        n += checkSet("(*UTF8)(*UCP)[[:" & neg & name & ":]\\x{2028}]", [],
-                      bad)
-        n += checkSet("(*UTF8)(*UCP)[^[:" & neg & name & ":]]", [], bad)
-    # Mixed with properties, ranges and negation.
-    for p in ["(*UTF8)[\\p{Lu}a-c]", "(*UTF8)[^\\p{L}\\d]",
-              "(*UTF8)(*UCP)[\\w\\x{2000}-\\x{200f}]", "(*UTF8)[\\P{Greek}]",
-              "(*UTF8)(*UCP)[^\\s\\p{N}]", "(*UTF8)(?i)[\\p{Ll}]"]:
-      n += checkSet(p, sample, bad)
-    echo "  ", n, " code points, ", bad.len, " differ, ", lap()
-    checkpoint bad.join("\n")
-    check bad.len == 0
+  when s8btUtfPart == 0:
+    test "(*UCP): \\d \\s \\w and the POSIX classes":
+      var bad: seq[string]
+      var n = 0
+      for e in ["\\d", "\\D", "\\s", "\\S", "\\w", "\\W"]:
+        n += checkSet("(*UTF8)(*UCP)" & e, sample, bad)
+        n += checkSet("(*UTF8)(*UCP)[" & e & "]", noExtra, bad)
+      for name in ["alpha", "lower", "upper", "alnum", "ascii", "blank",
+                   "cntrl", "digit", "graph", "print", "punct", "space",
+                   "word", "xdigit"]:
+        for neg in ["", "^"]:
+          n += checkSet("(*UTF8)(*UCP)[[:" & neg & name & ":]]", sample, bad)
+          n += checkSet("(*UTF8)(*UCP)[[:" & neg & name & ":]\\x{2028}]", [],
+                        bad)
+          n += checkSet("(*UTF8)(*UCP)[^[:" & neg & name & ":]]", noExtra, bad)
+      # Mixed with properties, ranges and negation.
+      for p in ["(*UTF8)[\\p{Lu}a-c]", "(*UTF8)[^\\p{L}\\d]",
+                "(*UTF8)(*UCP)[\\w\\x{2000}-\\x{200f}]", "(*UTF8)[\\P{Greek}]",
+                "(*UTF8)(*UCP)[^\\s\\p{N}]", "(*UTF8)(?i)[\\p{Ll}]"]:
+        n += checkSet(p, sample, bad)
+      echo "  ", n, " code points, ", bad.len, " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0
 
-  test "case folding: each character, caseless":
-    var bad: seq[string]
-    var n = 0
-    var cased: seq[int32]
-    for (lo, hi, d) in ucdOtherCase:
-      for c in lo .. hi:
-        cased.add c
-    for st in ucdCaseSets:
-      for c in st: cased.add c
-    for c in cased:
-      var near: seq[int32]
-      for d in [-2'i32, -1, 1, 2, 32, -32]: near.add c + d
-      near.add ucdOther(c)
-      near.add ucdOther(ucdOther(c))
-      if c < 0x600:
-        for x in 0'i32 ..< 0x600: near.add x
-      n += checkSet("(*UTF8)(?i)" & enc(c), near, bad)
-      n += checkSet("(*UTF8)(?i)[" & enc(c) & "]", near, bad)
-      n += checkSet("(*UTF8)(?i)[^" & enc(c) & "]", near, bad)
-      if bad.len > 40: break
-    echo "  ", cased.len, " characters, ", n, " code points, ", bad.len,
-         " differ, ", lap()
-    checkpoint bad.join("\n")
-    check bad.len == 0
+  when s8btUtfPart in 1 .. 2:
+    test "case folding: each character, caseless":
+      var bad: seq[string]
+      var n = 0
+      var cased: seq[int32]
+      for (lo, hi, d) in ucdOtherCase:
+        for c in lo .. hi:
+          cased.add c
+      for st in ucdCaseSets:
+        for c in st: cased.add c
+      for ci, c in cased:
+        if ci mod 2 != s8btUtfPart - 1: continue
+        var near: seq[int32]
+        for d in [-2'i32, -1, 1, 2, 32, -32]: near.add c + d
+        near.add ucdOther(c)
+        near.add ucdOther(ucdOther(c))
+        if c < 0x600:
+          for x in 0'i32 ..< 0x600: near.add x
+        n += checkSet("(*UTF8)(?i)" & esc(c), near, bad)
+        n += checkSet("(*UTF8)(?i)[" & esc(c) & "]", near, bad)
+        n += checkSet("(*UTF8)(?i)[^" & esc(c) & "]", near, bad)
+        if bad.len > 40: break
+      echo "  ", cased.len, " characters, ", n, " code points, ", bad.len,
+           " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0
 
-  test "case folding: caseless class ranges":
-    var bad: seq[string]
-    var n = 0
-    var ranges: seq[(int32, int32)]
-    # Ranges that start, end and extend on runs of other cases, through
-    # characters with caseless sets, and across scripts.
-    for (lo, hi, d) in ucdOtherCase[0 .. min(ucdOtherCase.high, 400)]:
-      ranges.add (lo, hi)
-      ranges.add (max(lo - 3, 0), lo + 1)
-      ranges.add (hi - 1, hi + 5)
-    for x in [(0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x6A'i32, 0x6C'i32),
-              (0x72'i32, 0x74'i32), (0xC0'i32, 0xFF'i32), (0x100'i32, 0x17F'i32),
-              (0x370'i32, 0x3FF'i32), (0x391'i32, 0x3A9'i32), (0x2100'i32, 0x2140'i32),
-              (0x1E00'i32, 0x1EFF'i32), (0x10400'i32, 0x1044F'i32),
-              (0x1F0'i32, 0x1F5'i32), (0x0'i32, 0x10FFFF'i32)]:
-      ranges.add x
-    for (lo, hi) in ranges:
-      if not valid(lo) or not valid(hi) or lo > hi: continue
-      let p = "(*UTF8)(?i)[" & enc(lo) & "-" & enc(hi) & "]"
-      var near: seq[int32]
-      for c in max(lo - 64, 0) .. min(hi + 64, maxCp):
-        if hi - lo < 4000: near.add c
-      n += checkSet(p, near & sample, bad)
-      if bad.len > 40: break
-    echo "  ", ranges.len, " ranges, ", n, " code points, ", bad.len,
-         " differ, ", lap()
-    checkpoint bad.join("\n")
-    check bad.len == 0
+  when s8btUtfPart in 3 .. 4:
+    test "case folding: caseless class ranges":
+      var bad: seq[string]
+      var n = 0
+      var ranges: seq[(int32, int32)]
+      # Ranges that start, end and extend on runs of other cases, through
+      # characters with caseless sets, and across scripts.
+      for (lo, hi, d) in ucdOtherCase[0 .. min(ucdOtherCase.high, 400)]:
+        ranges.add (lo, hi)
+        ranges.add (max(lo - 3, 0), lo + 1)
+        ranges.add (hi - 1, hi + 5)
+      for x in [(0x41'i32, 0x5A'i32), (0x61'i32, 0x7A'i32), (0x6A'i32, 0x6C'i32),
+                (0x72'i32, 0x74'i32), (0xC0'i32, 0xFF'i32), (0x100'i32, 0x17F'i32),
+                (0x370'i32, 0x3FF'i32), (0x391'i32, 0x3A9'i32), (0x2100'i32, 0x2140'i32),
+                (0x1E00'i32, 0x1EFF'i32), (0x10400'i32, 0x1044F'i32),
+                (0x1F0'i32, 0x1F5'i32), (0x0'i32, 0x10FFFF'i32)]:
+        ranges.add x
+      for ri, (lo, hi) in ranges:
+        if ri mod 2 != s8btUtfPart - 3: continue
+        if not valid(lo) or not valid(hi) or lo > hi: continue
+        let p = "(*UTF8)(?i)[" & esc(lo) & "-" & esc(hi) & "]"
+        var near: seq[int32]
+        for c in max(lo - 64, 0) .. min(hi + 64, maxCp):
+          if hi - lo < 4000: near.add c
+        n += checkSet(p, near & sample, bad)
+        if bad.len > 40: break
+      echo "  ", ranges.len, " ranges, ", n, " code points, ", bad.len,
+           " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0
 
 const
   utfPats* = [
@@ -175,43 +195,44 @@ proc utfWords(): seq[string] =
 
 suite "S8bt: UTF patterns, concretely, against std/re":
 
-  test "find, last and replace at every start":
-    var bad: seq[string]
-    var calls = 0
-    for p in utfPats:
-      let pr = parsePcre(p)
-      check pr.status == psOk
-      if pr.status != psOk:
-        bad.add escape(p) & ": " & pr.reason
-        continue
-      let n = buildNfa(pr, pcreSearchEngine())
-      check n.ok
-      if not n.ok:
-        bad.add escape(p) & ": " & n.why
-        continue
-      let rx = re(p)
-      for s in utfWords():
-        var st = 0
-        while st <= s.len:
-          inc calls
-          let want = (find(s, rx, st), findBounds(s, rx, st).last)
-          let (rc, a, b) = pcreExec(n, s, st, false)
-          let got = (if rc == 1: (a, b - 1) elif rc == -1: (-1, 0)
-                     else: (rc, 0))
-          if got != want and bad.len < 40:
-            bad.add escape(p) & " find/last(" & escape(s) & ", " & $st &
-                    ") = " & $got & ", std/re: " & $want
-          let ml = s.matchLen(rx, st)
-          let (rc2, _, b2) = pcreExec(n, s, st, true)
-          let gotMl = (if rc2 == 1: b2 - st else: rc2)
-          if gotMl != ml and bad.len < 40:
-            bad.add escape(p) & " matchLen(" & escape(s) & ", " & $st &
-                    ") = " & $gotMl & ", std/re: " & $ml
-          inc st
-        let want = replace(s, rx, "-")
-        if pcreReplace(n, s, "-") != want and bad.len < 40:
-          bad.add escape(p) & " replace(" & escape(s) & ")"
-    echo "  ", utfPats.len, " patterns, ", calls, " calls, ", bad.len,
-         " differ, ", lap()
-    checkpoint bad.join("\n")
-    check bad.len == 0
+  when s8btUtfPart == 0:
+    test "find, last and replace at every start":
+      var bad: seq[string]
+      var calls = 0
+      for p in utfPats:
+        let pr = parsePcre(p)
+        check pr.status == psOk
+        if pr.status != psOk:
+          bad.add escape(p) & ": " & pr.reason
+          continue
+        let n = buildNfa(pr, pcreSearchEngine())
+        check n.ok
+        if not n.ok:
+          bad.add escape(p) & ": " & n.why
+          continue
+        let rx = re(p)
+        for s in utfWords():
+          var st = 0
+          while st <= s.len:
+            inc calls
+            let want = (find(s, rx, st), findBounds(s, rx, st).last)
+            let (rc, a, b) = pcreExec(n, s, st, false)
+            let got = (if rc == 1: (a, b - 1) elif rc == -1: (-1, 0)
+                       else: (rc, 0))
+            if got != want and bad.len < 40:
+              bad.add escape(p) & " find/last(" & escape(s) & ", " & $st &
+                      ") = " & $got & ", std/re: " & $want
+            let ml = s.matchLen(rx, st)
+            let (rc2, _, b2) = pcreExec(n, s, st, true)
+            let gotMl = (if rc2 == 1: b2 - st else: rc2)
+            if gotMl != ml and bad.len < 40:
+              bad.add escape(p) & " matchLen(" & escape(s) & ", " & $st &
+                      ") = " & $gotMl & ", std/re: " & $ml
+            inc st
+          let want = replace(s, rx, "-")
+          if pcreReplace(n, s, "-") != want and bad.len < 40:
+            bad.add escape(p) & " replace(" & escape(s) & ")"
+      echo "  ", utfPats.len, " patterns, ", calls, " calls, ", bad.len,
+           " differ, ", lap()
+      checkpoint bad.join("\n")
+      check bad.len == 0

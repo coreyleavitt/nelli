@@ -168,35 +168,51 @@ suite "S8bt: a limit between, symbolically":
     check bad.len == 0
 
 proc findErrTarget(s: string) =
-  if s.len <= 6 and s.find(re"(*LIMIT_MATCH=4)a+b") == -8:
+  if s.len <= 4 and s.find(re"(*LIMIT_MATCH=6)(?:a|b)*c") == -8:
     symexTarget("bt_limit_find_err")
+
+proc findNeverTarget(s: string) =
+  # libpcre: no subject of length 6 or less makes this call an error.
+  if s.len <= 6 and s.find(re"(*LIMIT_MATCH=4)a+b") == -8:
+    symexTarget("bt_limit_find_never")
 
 proc findOkTarget(s: string) =
   if s.len <= 6 and s.find(re"(*LIMIT_MATCH=4)a+b") == 1:
     symexTarget("bt_limit_find_ok")
 
 proc matchLenTarget(s: string) =
-  if s.len <= 4 and s.matchLen(re"(*LIMIT_RECURSION=2)a+b|ab") == -21:
+  if s.len <= 4 and s.matchLen(re"(*LIMIT_RECURSION=3)(?:a|b)*c") == -21:
     symexTarget("bt_limit_matchlen")
 
+proc matchLenNeverTarget(s: string) =
+  # libpcre: no subject of length 4 or less makes this call an error.
+  if s.len <= 4 and s.matchLen(re"(*LIMIT_RECURSION=2)a+b|ab") == -21:
+    symexTarget("bt_limit_matchlen_never")
+
 proc replaceTarget(s: string) =
-  if s.len == 3 and s.replace(re"(*LIMIT_MATCH=4)a+b", "-") == s and
-     s.contains(re"ab"):
+  # A limit error ends `replace` as a miss does: the subject comes back.
+  if s.len == 2 and s.replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == s and
+     s.contains(re"c"):
     symexTarget("bt_limit_replace")
 
 suite "S8bt: a limit between, through the walker":
 
-  test "verdicts":
-    # An unanchored call on the JIT (the Windows legs) declines: its
-    # accounting is not modelled.
-    var targets = @[(matchLenTarget, "bt_limit_matchlen")]
+  template verdict(sut: untyped; label: string; want = sxSat) =
+    let t1 = epochTime()
+    let r = symexFind(sut, tLabel(label))
+    echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t1,
+                                                       ffDecimal, 1), " s"
+    check r.status == want
+
+  test "an anchored call: sxSat, and sxUnsat where libpcre has none":
+    verdict(matchLenTarget, "bt_limit_matchlen")
+    verdict(matchLenNeverTarget, "bt_limit_matchlen_never", sxUnsat)
+
+  # An unanchored call on the JIT (the Windows legs) declines: its
+  # accounting is not modelled.
+  test "unanchored calls on the interpreter: sxSat":
     if pcreSearchEngine() == peInterp:
-      targets.add [(findErrTarget, "bt_limit_find_err"),
-                   (findOkTarget, "bt_limit_find_ok"),
-                   (replaceTarget, "bt_limit_replace")]
-    for (f, label) in targets:
-      let t1 = epochTime()
-      let r = symexFind(f, tLabel(label))
-      echo "  ", label, ": ", r.status, " ", formatFloat(epochTime() - t1,
-                                                         ffDecimal, 1), " s"
-      check r.status == sxSat
+      verdict(findErrTarget, "bt_limit_find_err")
+      verdict(findOkTarget, "bt_limit_find_ok")
+      verdict(findNeverTarget, "bt_limit_find_never", sxUnsat)
+      verdict(replaceTarget, "bt_limit_replace")

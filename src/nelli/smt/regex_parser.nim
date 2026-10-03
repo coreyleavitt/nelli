@@ -578,10 +578,16 @@ proc callError(pl: PrioLangs; s: Z3String; start: Z3Int; anchored: bool;
     # the search's at a fresh `q`), if pcre_exec.c makes it.
     let u = substr(s, start, lenS - start)
     let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
-    proc hitOf(l, lAt: seq[Z3Regex[Z3String]]; tag: string): Z3Bool =
+    var hits: array[2, Z3Bool]
+    for i in 0 .. 1:
+      let l = (if i == 0: pl.errM else: pl.errR)
+      let lAt = (if i == 0: pl.errMAt else: pl.errRAt)
+      let tag = (if i == 0: "__regexLimitM" else: "__regexLimitR")
       let has = variant(pl, s, start, proc (v: int): Z3Bool =
         matches(u, l[v]))
-      if anchored: return has and madeAtZ3(n, u, filt)
+      if anchored:
+        hits[i] = has and madeAtZ3(n, u, filt)
+        continue
       let q = mkIntVar(fresh(tag))
       let (pre, rest) = splitAt(u, q, fresh, tag, defs)
       let marked = concat(pre, findMarker(), rest)
@@ -590,9 +596,9 @@ proc callError(pl: PrioLangs; s: Z3String; start: Z3Int; anchored: bool;
           variant(pl, s, start, proc (v: int): Z3Bool =
             matches(marked, lAt[v])),
         q == mkInt(0))
-      has and madeAtZ3(n, rest, filt)
-    let hitM = hitOf(pl.errM, pl.errMAt, "__regexLimitM")
-    let hitR = hitOf(pl.errR, pl.errRAt, "__regexLimitR")
+      hits[i] = has and madeAtZ3(n, rest, filt)
+    let hitM = hits[0]
+    let hitR = hits[1]
     okParts.add not (hitM or hitR)
     code = ite(hitM, mkInt(pcreErrMatchLimit),
                ite(hitR, mkInt(pcreErrRecursionLimit), code))

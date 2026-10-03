@@ -24,10 +24,13 @@ const pats = [
   "bc(*MARK:A)(*SKIP:A)x|a(*SKIP:B)y|ab(*SKIP)q|c",
   "b(*MARK:A)(*SKIP:A)x|a(*SKIP:B)y|a(*SKIP)q|b",
   "a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x|.",
-  "(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c",
   "(*CRLF)\\s(*SKIP:B)y|\\sb(*MARK:A)(*SKIP:A)x|b",
   "(*CRLF)[\\x09-\\x0b](*SKIP:B)a|[\\x09-\\x0b]",
   "(*CRLF)(*MARK:A)\\s(*SKIP:B)b(*SKIP:A)|(*SKIP)\\s"]
+
+const unbounded = "(?:a(*SKIP:B)y|ab(*SKIP)q|b(*MARK:A)(*SKIP:A)x)+|c"
+  ## A repeat runs a SKIP:NAME per iteration, and its re-runs keep a count
+  ## that grows with the subject: no finite automaton holds it (`argCap`).
 
 proc subjectsFor(p: string): seq[string] =
   if p.startsWith("(*CRLF)"): words("ab\r\n", 4) else: words("abcx", 4)
@@ -82,6 +85,17 @@ suite "S8bt: mixed (*SKIP:NAME), symbolically":
     checkpoint bad[0 ..< min(bad.len, 30)].join("\n")
     check declined == 0
     check bad.len == 0
+
+  test "a count past argCap declines, by name":
+    let n = buildNfa(parsePcre(unbounded))
+    check n.ok and n.countArgs
+    let l = searchLangV(n, "skipname:" & unbounded, skFirst, pcOther)
+    check not l.ok
+    check l.why == staleWhy
+    let t = stepTable(n)
+    check not t.ok
+    # The step table's rows grow with the count too: its cap may come first.
+    check t.why == staleWhy or "step-table cap" in t.why
 
   test "step table: find and replace":
     var bad: seq[string]

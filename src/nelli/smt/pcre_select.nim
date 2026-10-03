@@ -456,58 +456,85 @@ proc add(b: var Build; s: NState): int =
   b.n.states.add s
   b.n.states.high
 
-proc utf8Seqs(lo, hi: int32; acc: var seq[seq[(char, char)]]) =
-  ## RFC-0005 S8bj. The code points `lo .. hi` (surrogates left out: no
-  ## valid subject holds one) as UTF-8 byte-range sequences.
-  if lo > hi: return
-  if lo <= 0xDFFF and hi >= 0xD800:
-    utf8Seqs(lo, 0xD7FF, acc)
-    utf8Seqs(0xE000, hi, acc)
-    return
-  for b in [0x7F'i32, 0x7FF, 0xFFFF]:
-    if lo <= b and hi > b:
-      utf8Seqs(lo, b, acc)
-      utf8Seqs(b + 1, hi, acc)
-      return
-  if hi <= 0x7F:
-    acc.add @[(char(lo), char(hi))]
-    return
-  for i in 1 .. 3:
-    let m = (1'i32 shl (6 * i)) - 1
-    if (lo and not m) != (hi and not m):
-      if (lo and m) != 0:
-        utf8Seqs(lo, lo or m, acc)
-        utf8Seqs((lo or m) + 1, hi, acc)
-        return
-      if (hi and m) != m:
-        utf8Seqs(lo, (hi and not m) - 1, acc)
-        utf8Seqs(hi and not m, hi, acc)
-        return
-  let a = utf8Encode(lo)
-  let z = utf8Encode(hi)
-  var sq: seq[(char, char)]
-  for k in 0 ..< a.len: sq.add (a[k], z[k])
-  acc.add sq
-
 proc compChars(b: var Build; x: Rx; next: int): int =
   ## RFC-0005 S8bj. One character of `x.cps` in UTF mode, as UTF-8 bytes.
+  ## RFC-0005 S8bt: as a byte trie with shared tails -- per lead byte, the
+  ## continuation bytes' value ranges, one node per distinct (length,
+  ## ranges) -- so a large property set stays small.
+  var memo = initTable[(int, seq[(int32, int32)]), int]()
+  proc node(b: var Build; rem: int; rs: seq[(int32, int32)]): int =
+    # The continuation bytes (`rem` of them) whose value lies in `rs`.
+    if rem == 0: return next
+    let key = (rem, rs)
+    if key in memo: return memo[key]
+    let span = 1'i32 shl (6 * (rem - 1))
+    # Per first byte (0..63), the remaining value's ranges.
+    var groups: seq[(seq[(int32, int32)], set[char])]
+    for k in 0'i32 .. 63'i32:
+      let lo0 = k * span
+      let hi0 = lo0 + span - 1
+      var sub: seq[(int32, int32)]
+      for (lo, hi) in rs:
+        if hi < lo0 or lo > hi0: continue
+        sub.add (max(lo, lo0) - lo0, min(hi, hi0) - lo0)
+      if sub.len == 0: continue
+      var found = false
+      for g in groups.mitems:
+        if g[0] == sub:
+          g[1].incl char(0x80 + k)
+          found = true
+          break
+      if not found: groups.add (sub, {char(0x80 + k)})
+    var e = -1
+    for gi in countdown(groups.high, 0):
+      let t = b.add NState(kind: nkByte, bytes: groups[gi][1],
+                           out1: b.node(rem - 1, groups[gi][0]))
+      e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
+    memo[key] = e
+    e
   var single: set[char]
-  var multi: seq[seq[(char, char)]]
-  for (lo, hi) in x.cps:
-    var acc: seq[seq[(char, char)]]
-    utf8Seqs(lo, hi, acc)
-    for sq in acc:
-      if sq.len == 1:
-        for c in sq[0][0] .. sq[0][1]: single.incl c
-      else:
-        multi.add sq
+  # (lead byte, its continuation length, the remaining value's ranges)
+  var leads: seq[(int, int, seq[(int32, int32)])]
+  proc addLead(lead, rem: int; lo, hi: int32) =
+    for l in leads.mitems:
+      if l[0] == lead:
+        l[2].add (lo, hi)
+        return
+    leads.add (lead, rem, @[(lo, hi)])
+  for (lo0, hi0) in x.cps:
+    for (lo, hi) in [(lo0, min(hi0, 0xD7FF'i32)), (max(lo0, 0xE000'i32), hi0)]:
+      if lo > hi: continue
+      var c = lo
+      while c <= hi:
+        if c < 0x80:
+          let e = min(hi, 0x7F'i32)
+          for v in c .. e: single.incl char(v)
+          c = e + 1
+        else:
+          let (rem, shift) = (if c < 0x800: (1, 6) elif c < 0x10000: (2, 12)
+                              else: (3, 18))
+          let blk = (c shr shift) shl shift
+          let e = min(hi, blk + (1'i32 shl shift) - 1)
+          let lead = (case rem
+                      of 1: 0xC0
+                      of 2: 0xE0
+                      else: 0xF0) or int(c shr shift)
+          addLead(lead, rem, c - blk, e - blk)
+          c = e + 1
+  # Lead bytes with the same tail share one state.
+  var byTail: seq[(int, seq[(int32, int32)], set[char])]
+  for (lead, rem, rs) in leads:
+    var found = false
+    for t in byTail.mitems:
+      if t[0] == rem and t[1] == rs:
+        t[2].incl char(lead)
+        found = true
+        break
+    if not found: byTail.add (rem, rs, {char(lead)})
   var e = -1
-  for sq in multi:
-    var t = next
-    for k in countdown(sq.high, 0):
-      var bs: set[char]
-      for c in sq[k][0] .. sq[k][1]: bs.incl c
-      t = b.add NState(kind: nkByte, bytes: bs, out1: t)
+  for ti in countdown(byTail.high, 0):
+    let (rem, rs, ls) = byTail[ti]
+    let t = b.add NState(kind: nkByte, bytes: ls, out1: b.node(rem, rs))
     e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
   if single.card > 0 or e < 0:
     let t = b.add NState(kind: nkByte, bytes: single, crlfDot: x.crlfDot,
@@ -663,7 +690,7 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
   ## RFC-0005 S8bt. A repeat with pcre_exec.c's `match()` calls (`costs`).
   ## A single-character repeat backs off one character at a time from its
   ## longest run, each try of the rest an RMATCH but the last (at the
-  ## minimum: TAIL_RECURSE); a lazy one tries the rest by RMATCH before
+  ## minimum: TAIL_RECURSE; a class's is an RMATCH too); a lazy one tries the rest by RMATCH before
   ## each further character; a possessive one (`Nfa.possess`) goes on only
   ## from its longest run, in the same frame. A group's copies follow
   ## pcre_compile.c's layout (`compLoopCost`; an optional copy behind
@@ -687,10 +714,13 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
       else:
         guard = sub.bytes
     proc atomTo(b: var Build; t: int): int = b.compItem(sub, t, base + 1)
+    # A class repeat (OP_CLASS / OP_NCLASS / OP_XCLASS) tries the rest
+    # by RMATCH at its minimum too.
+    let cls = sub.op in {aoClass, aoNClass, aoXClass}
     proc exitAt(b: var Build; first: bool): int =
       if poss: b.add NState(kind: nkPoss, bytes: guard, out1: next)
       elif lazy: b.cost(true, next)
-      else: b.cost(not first, next)
+      else: b.cost(cls or not first, next)
     if x.hi < 0:
       if lazy:
         let head = b.add NState(kind: nkSplit)
@@ -746,8 +776,6 @@ proc nameIndex(b: var Build; name: string): int =
 proc cost(b: var Build; deep: bool; next: int): int =
   ## RFC-0005 S8bt. A `match()` call before `next`.
   b.add NState(kind: nkCost, deep: deep, out1: next)
-
-proc compRepCost(b: var Build; x: Rx; next, base: int): int
 
 proc compItem(b: var Build; x: Rx; next, base: int): int =
   if b.overflow: return 0
@@ -1098,7 +1126,7 @@ proc then(a, b: Cost): Cost =
        dv: (if a.dv > 0: a.dv elif b.dv > 0: a.cc + b.dv else: 0),
        pk: max(a.pk, b.pk))
 
-proc spent(c: Cost): bool = c.cc > 0
+proc spent(c: Cost): bool = c.cc > 0 or c.pk > 0
 
 proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
                             int8) =
@@ -1462,7 +1490,12 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
   let f = cur[0]
   case f.term
   of tmArgOff:
+    # RFC-0005 S8bt: its calls go to what follows it.
+    let c = f.co
     cur = cur[1 .. ^1]
+    if c.cc > 0 or c.pk > 0:
+      if cur.len > 0: cur[0].co = c.then(cur[0].co)
+      else: cur = @[Item[T](kind: ikCost, co: c)]
     return true
   of tmArgSkip, tmBarrier:
     let counted = f.ac > 0     # 0: not counted, never ignored
@@ -1837,16 +1870,17 @@ proc capCosts[T](n: Nfa; items: seq[Item[T]]): seq[Item[T]] =
   let l = n.matchLimit
   let r = n.recLimit
   var pre = 0
-  # RFC-0005 S8bt: depths keep `argCap + 2` above the limit, so a re-run's
-  # lift (`rerunCosts`, at most one frame per counted SKIP:NAME) still
-  # tells them apart.
-  let top = int16(min(r, 30000) + argCap + 2)
+  # Where a SKIP:NAME can re-run the attempt, depths (and the deepest)
+  # keep `argCap + 2` above the limit, so the re-run's lift (`rerunCosts`,
+  # at most one frame per counted SKIP:NAME) still tells them apart.
+  let lift = n.hasNeverSkip
+  let top = int16(min(r, 30000) + (if lift: argCap + 2 else: 0))
   for it in items:
     var x = it
     x.co.pk = 0
     x.co.cc = (if l >= 0: min(x.co.cc, int32(l + 1)) else: 0'i32)
     x.co.dp = (if r < high(int): min(x.co.dp, top) else: 0'i16)
-    x.co.md = (if r < high(int): min(x.co.md, top) else: 0'i16)
+    x.co.md = (if r < high(int) and lift: min(x.co.md, top) else: 0'i16)
     if x.co.dv > 0:
       x.co.dv = (if l >= 0: min(x.co.dv, int32(l + 2)) else: 1'i32)
     result.add x
@@ -2403,9 +2437,11 @@ proc langOf(d: Dfa; what: string): SelLang =
                    "is past its size cap (" & $maxDfaStates & " states)")
   let (trans, acc) = minimize(d)
   let (fine, r) = toRegex(trans, acc)
-  if fine: SelLang(ok: true, re: r, states: d.trans.len, minStates: trans.len)
-  else: SelLang(ok: false, why: "the pattern's " & what & " regex is past " &
-                "its size cap (" & $maxRegexSize & " nodes)")
+  result = SelLang(ok: fine, re: r, states: d.trans.len,
+                   minStates: trans.len)
+  if fine: return
+  result.why = "the pattern's " & what & " regex is past its size cap (" &
+               $maxRegexSize & " nodes)"
 
 proc langOfU(n: Nfa; invalidAccepts: bool; d: Dfa; what: string): SelLang =
   ## `langOf`, on valid UTF-8 words in UTF mode (`utfProduct`).

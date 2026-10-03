@@ -65,10 +65,25 @@ proc replaceQuery(n: Nfa; t: StepTable; maxLen: int; target: string): string =
 echo "caps: dfa ", maxDfaStates, " step ", maxStepStates, " regs ", maxRegs
 
 echo "== A. automaton states: the attempt's and the search's languages"
-for k in [3, 5, 7, 8, 9, 10, 11, 12]:
-  for fam in ["(*UTF)(?:a|b)*a(?:a|b){K}c", "(*UTF)(?:a|b)*?a(?:a|b){K}c",
-              "(*UTF)(?:a|b|c)*a(?:a|b|c){K}$"]:
-    let p = fam.replace("K", $k)
+proc words(k: int): string =
+  ## `k` alternatives of distinct 4-byte words (a trie of ~3k states).
+  var alts: seq[string]
+  for i in 0 ..< k:
+    var w = ""
+    var x = i * 7919 + 13
+    for _ in 0 ..< 4:
+      w.add char(ord('a') + x mod 26)
+      x = x div 26 + i
+    alts.add w
+  "(?:" & alts.join("|") & ")"
+for (k, fam) in [(2, "(*UTF)(?:a|b)*a(?:a|b){K}c"), (3, "(*UTF)(?:a|b)*a(?:a|b){K}c"),
+                 (4, "(*UTF)(?:a|b)*a(?:a|b){K}c"), (5, "(*UTF)(?:a|b)*a(?:a|b){K}c"),
+                 (3, "(*UTF)(?:a|b)*?a(?:a|b){K}c"), (3, "(*UTF)(?:a|b|c)*a(?:a|b|c){K}$"),
+                 (4, "(*UTF)(?:a|b|c)*a(?:a|b|c){K}$"),
+                 (50, "W"), (200, "W"), (500, "W"), (1000, "W"), (2000, "W"),
+                 (200, "Wx+"), (1000, "Wx+")]:
+    let p = (if fam.startsWith("W"): words(k) & fam[1 .. ^1]
+             else: fam.replace("K", $k))
     let n = buildNfa(parsePcre(p))
     var t0 = epochTime()
     let m = selectionLangV(n, "probe:" & p, lkMark, pcOther)
@@ -82,12 +97,12 @@ for k in [3, 5, 7, 8, 9, 10, 11, 12]:
              " " & formatFloat(tf, ffDecimal, 2) & " s"
     if not f.ok: line.add " (" & f.why & ")"
     if m.ok and f.ok:
-      line.add " | find " & entryQuery(p, "find", k + 4, 1)
+      line.add " | find " & entryQuery(p, "find", min(k, 6) + 4, 1)
     echo line
     flushFile(stdout)
 
 echo "== B. step-table states: replace"
-for k in [2, 4, 6, 7, 8, 9, 10, 11]:
+for k in [2, 4, 6, 8, 10]:
   for fam in ["(*UTF)(?:a|b)*a(?:a|b){K}", "(*UTF)a(*SKIP)(?:a|b){K}c|.",
               "(*UTF)(?:ab|a){K}c"]:
     let p = fam.replace("K", $k)
@@ -109,7 +124,7 @@ proc regsOf(t: StepTable): int =
   for r in t.rows:
     for lf in r.other & r.nll & @[r.atEnd]:
       result = max(result, lf.regMap.len)
-for k in [2, 4, 6, 7, 8, 10, 12]:
+for k in [2, 4, 6, 8]:
   for fam in ["(*CRLF)(?m)(?:a$\\r?){K}b",
               "(*UTF)(?:a(*THEN)b|a){K}c", "(*UTF)(?:a(*SKIP)b|a\\s){K}",
               "(*CRLF)(?m)(?:.$){K}x|."]:

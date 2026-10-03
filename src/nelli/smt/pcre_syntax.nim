@@ -988,7 +988,11 @@ proc readClass(r: var Reader): Rx =
       oneCh = lo
     if lo < 256: has8 = true
     if hi > 255: xclass = true
-    cs = cpUnion(cs, r.foldCps(@[(lo, hi)]))
+    let folded = r.foldCps(@[(lo, hi)])
+    # RFC-0005 S8bt: `add_to_class` lists every caseless other case above
+    # 0xFF in the class's extra data (an OP_XCLASS).
+    if r.utf and folded.len > 0 and folded[^1].hi > 255: xclass = true
+    cs = cpUnion(cs, folded)
   if hasProp: xclass = true
   let members = (if negated: cpComplement(cs, r.topCp) else: cs)
   if items == 1 and single and not hasProp:

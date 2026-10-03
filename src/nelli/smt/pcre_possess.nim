@@ -15,6 +15,7 @@
 import std/sets
 import ./pcre_syntax
 import ./pcre_code
+import ./pcre_ucd
 
 type
   PKind = enum
@@ -82,8 +83,8 @@ proc column(k: PKind): int =
 
 proc otherCase(c: int32): int32 =
   ## pcre_chartables.c's `fcc` (the default tables): ASCII letters.
-  if c in ord('a')'i32 .. ord('z')'i32: c - 32
-  elif c in ord('A')'i32 .. ord('Z')'i32: c + 32
+  if c >= int32(ord('a')) and c <= int32(ord('z')): c - 32
+  elif c >= int32(ord('A')) and c <= int32(ord('Z')): c + 32
   else: c
 
 proc classBits(x: Rx): set[char] =

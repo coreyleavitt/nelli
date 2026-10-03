@@ -24,6 +24,7 @@
 ## Pure Nim: the walker reads it at walk time, with no libpcre.
 
 import ./pcre_syntax
+import ./pcre_ucd
 
 type
   StartOpt* = object
@@ -314,7 +315,13 @@ proc atomBits(bits: var set[char]; x: Rx; utf: bool): bool =
   ## on it.
   case x.op
   of aoChar: tableBit(bits, utf, x.ch, x.ci)
-  of aoNot, aoNotSpace, aoAny, aoProp, aoFail: return false
+  of aoProp:
+    # RFC-0005 S8bt: PT_CLIST lists its characters (OP_PROP only).
+    if not x.clist or x.clistNot: return false
+    for c in ucdCaseSets[ucdCaseSet(x.ch)]:
+      if utf: bits.incl utf8Encode(c)[0]
+      else: bits.incl char(min(c, 0xFF))
+  of aoNot, aoNotSpace, aoAny, aoFail: return false
   of aoClass: mapBits(bits, x, utf)
   of aoNClass, aoXClass:
     if x.op == aoXClass:
@@ -372,6 +379,9 @@ proc startBits(bits: var set[char]; x: Rx; utf: bool): Ssb =
           # OP_BRAZERO carries on; a first copy that is DONE stops.
           if it.lo >= 1 and r == ssbDone: stop = true
         else:
+          # RFC-0005 S8bt: a PT_CLIST repeat that may be absent is an
+          # OP_TYPESTAR / OP_TYPEQUERY / OP_TYPEUPTO, which fails.
+          if s.clist and it.lo == 0: return ssbFail
           if not atomBits(bits, s, utf): return ssbFail
           if it.lo >= 1: stop = true
       of rxBol, rxEol, rxEolAbs, rxVerb, rxAccept:

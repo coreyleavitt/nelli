@@ -354,7 +354,7 @@ state = "done"
 [[slice]]
 id = "S8bo"
 title = "S8be's remainder: isNil false UNSAT, plain-object address cells, same-length whole seq assign as resize, escaping arm-field addr, element cells over seqs of objects, abandoned replay threads, threadvar/stack fidelity of threaded replay"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -7497,6 +7497,152 @@ against Nim 2.2.10, floor `>= 205`.
 - **A replay runs on another thread**: a `{.threadvar.}` the routine reads
   starts at its default there, not at the calling thread's value, and the
   stack is Nim's thread stack (2 MiB on 64-bit).
+
+**As landed (S8bo, walker 216) — S8be's remainder.**
+
+*Wrong verdicts and crashes found and fixed (each pinned RED on ef08ada
+first).*
+- **`r.isNil` was a false `sxUnsat`** on a `ref` or `ptr` parameter, a
+  local `ref` and a `ref` field, `errors` empty: the bodiless `IsNil`
+  magic was registered as a user routine and its empty body walked, so its
+  result was the constant `false`.
+- **`ashr(-1, 1) == -1` was a false `sxUnsat`**, `errors` empty: the same
+  mechanism for any `{.magic.}` whose body is only its doc comment and
+  `runnableExamples`.
+- **`pointer(p) == nil` was a walker fault** ("coerceIntLit: composite
+  prototype") on a `ptr int`; `cast[pointer](r) == nil` declined.
+- **`wasMoved(x)` and `move(x)` failed the whole compile** in
+  `parseCalleeImpl` (the `=wasMoved` hook's formals are bare symbols).
+- **A whole assignment of a seq left its element cells live** when the
+  value term did not change (a callee's `s = t` repeating the held value,
+  `s = t` after `let t = s`): a read through the dangling pointer was a
+  confirmed `sxSat` on memory Nim had freed.
+- **A replay that ran while an abandoned one was still running could be
+  confirmed by the abandoned replay's late write** (pinned with a
+  handshake that makes the abandoned replay write a global the later one
+  reads: `sxSat` on ef08ada, no single-threaded run of the routine reaches
+  it).
+- **A replay reading a `{.threadvar.}` was refuted** where the calling
+  thread's value reaches the target (the replay thread's copy was 0).
+- **A replay whose routine holds a 3 MiB frame killed the process**
+  (SIGSEGV on the replay thread's 2 MiB stack; the calling thread has
+  8 MiB on Linux).
+- **A global of a type whose record holds a `when` (system's `Channel`)
+  named in an opaque routine failed the whole compile**
+  (`classifyObjectRecordFields`, "Expected nnkIdentDefs, got nnkRecWhen").
+
+*(1) `isNil` and unlowered magics.* `isNil(x)` lowers through the code
+`x == nil` uses (`parseNilCompare`, factored out of the R5 arm), which
+sees through a conversion or cast to `pointer` of a `ref`/`ptr`
+(`nilSideCore`). A proc value declines as `== nil` does
+(`ceUnsupportedHof`); `pointer` and `cstring` parameters stay
+`feUnsupportedParamType`. The guard: a `{.magic.}` routine with no
+executable body (`stubBody`) that reaches the user-call fall-through
+(`ensureProcRegistered`) declines (`feUnsupportedOp`, "the compiler magic
+`swap` ... has no symbolic model") instead of being walked, and a routine
+whose formals are not all `IdentDefs` (a compiler-generated hook)
+declines instead of failing the compile. A magic with a real body (`min`)
+is walked as before.
+
+*(2) A plain object's address cell* is its field-split heaps, as a `ref`
+to one is (`objectSlots`, `objectCellValue`, `objectCellStore`, which S8be's
+case-object cell generalises); so is a whole `p[]` read or write of an
+object pointee, through a `ptr` or a `ref` (it was keyed on the whole
+object: `seUnsupportedCompoundSortLeaf`). A positional tuple keeps the one
+heap of its whole value (`fieldSplitObject`).
+
+*(3) A whole seq assignment.* Any write of the seq by name
+(`lastWriteTo`) kills its element cells, whatever value it writes: Nim's
+`=copy`/`=sink` points the seq at another block. A callee's whole
+assignment of its `var` formal kills the inherited cells the same way.
+
+*(4) An arm field's address as a value.* `addr o.a` of a routine's case
+object's arm field whose pointer may escape (stored, or passed to a
+routine that may keep it) is a field cell (`isNew.nAddrField`,
+`walkFieldCell`, `ElemCell.field`/`tags`): the arm is checked where `addr`
+takes it (`FieldDefect`), and `syncElemCells` keeps field and cell equal.
+A statement after which the discriminator is another term kills the cell
+(the pointer names another arm's memory) and a dereference that may reach
+it declines; a whole assignment in the same arm keeps it (Nim reuses the
+memory), the cell taking the new field. A pointer that stays local is
+S8be's alias, as before. S6b's unsafe-cast halt moved to `cast[ptr
+int](n)`.
+
+*(5) Element cells over seqs of objects.* `elemCellOf` accepts a seq of
+objects (and named tuples), whose cell is the field-split object cell of
+(2). **This base holds no element of a seq of objects** (it is a
+placeholder of length 0; every access is `seNestedSeqUnsupported`), and
+the representation that would hold them is S8bc's leaf-split heap (batch
+4). So the cell declines (`walkElemCell`, `seNestedSeqUnsupported`, "of
+an element of a seq whose elements the walk does not hold") where before
+`addr` itself did (`feUnsupportedExprKind`). Escalated as a BLOCKER for
+the integrator: on the leaf-split base, `walkElemCell`'s placeholder
+decline goes; `seqElemAt`/`withElem` (the element read and write
+`syncElemCells` and `syncElemCellsFromHeap` use) need the leaf-split
+object element; `sameSeqLen` must compare the leaf-split length term.
+`objectCellStore`/`objectCellValue`, the cell side, already handle the
+object.
+
+*(6) An abandoned replay.* `runReplayBounded` returns a `ReplayRun`.
+Abandoned jobs are kept (`abandoned`, under a lock) until seen to end,
+then joined and freed (`reapAbandoned`); a replay that starts while one
+still runs is `rrContended`, the outcome `roContended`: neither confirmed
+nor refuted, a `feReplayTimedOut` hint ("ran while an earlier abandoned
+replay was still running"). It still runs (the pin's abandoned replay is
+released by it). `replayAbandonedLive()` reports how many run; S8be's
+bounded-replay pin waits for its 3 s spin before its confirming replay.
+
+*(7) The replay thread's context.* The replay runs the routine on a stack
+the calling thread's size (`replayStackSize`): on Linux the main
+thread's `RLIMIT_STACK` (a `ucontext` coroutine on an `mmap`ed stack with
+a guard page, `runOnStack`), on Windows the calling thread's reserve
+(`GetCurrentThreadStackLimits`, a fiber); elsewhere, and for a non-main
+calling thread on Linux, Nim's thread stack. The `{.threadvar.}`s the
+routine may reach (`threadvarsReached`: named in its body or any routine
+it names, transitively) are copied from the calling thread before the run
+and back after it ends. When some code it may run cannot be read (a
+method, a foreign routine, a call through a proc value) none is copied:
+some copied and some not is a thread state no thread has, none at all is
+a fresh thread's.
+
+*(8)* S8be's suite is split in three (`tsymex_rfc0005_s8be_remainder`,
+items 1-8; `_b`, items 9-11; `_c`, items 12-13); S8bo's pins are three
+files (`tsymex_rfc0005_s8bo_nil`, `_cells`, `_replay`), floor `>= 216`.
+Measured serially on a box at load 10-16 (8 cores, other agents' runs
+alongside), a one-test file compiling `symexFind` once took 57 s (c) and
+76 s (cpp) to compile and run; each split file came within about 20 s of
+that floor, which no split can go under. The 60 s budget is not
+measurable at that load.
+
+Updated pins: CR2 "216"; S6b's unsafe-cast halt (above); S8be's (2),
+which now waits for its abandoned spin before its confirming replay.
+
+*Different mechanisms, reported and not fixed here.*
+- **A seq of objects has no element representation on this base**
+  (item 5's escalation): its element cells decline. PRECISION.
+- **`newSeq[T](n)` in a callee fails the whole compile** ("node has no
+  type", `classifyType` in `parseCalleeImpl`). Present on ef08ada.
+  PRECISION (a compile failure, no wrong verdict).
+- **A positional tuple's address cell** keeps one heap of its whole value:
+  a field access through a pointer to it declines. PRECISION.
+- **An arm field of a multi-axis case object** (`itMultiVariant`) has no
+  field cell: an escaping pointer to it stays `heUnsafeCast`. PRECISION.
+- **A whole `p[]` read of a plain object** does not assert its fields'
+  declared ranges (`rangeCondsIfNeeded`), as a field read does: an
+  over-approximation, replay-checked. PRECISION.
+- **Every unmodelled magic declines** (`swap`, `ashr`, `wasMoved`,
+  `move`, `+%`, ...). PRECISION.
+- **The replay's stack fidelity** covers the Linux main thread and
+  Windows; a non-main calling thread on Linux, and other systems, replay on
+  Nim's 2 MiB thread stack. PRECISION.
+- **One abandoned replay that never ends leaves every later replay in the
+  process `roContended`.** PRECISION.
+- **`tsymex_configdefaults` dies under the cpp backend** in "an explicit
+  finite maxCallDepth also completes cleanly (round 2 crash pin)": the
+  process exits 1 after the 23 tests before it pass, on ef08ada as on
+  S8bo's head (the walker's recursion exhausts the native stack; the cpp
+  frames are larger). The C backend passes all 24. PRECISION (a crash, no
+  wrong verdict).
 
 ### §2.6 The raise-routing recovery — *corrected*
 

@@ -13,9 +13,9 @@
 ## and generated ones (one to three items of a pool of characters, classes,
 ## escapes, repeats, groups, alternations, anchors, verbs and options, in
 ## and out of UTF mode).
-import std/[unittest, strutils]
+import std/[unittest, strutils, re]
 import pcre
-import nelli/smt/[pcre_syntax, pcre_startopt]
+import nelli/smt/[pcre_syntax, pcre_startopt, pcre_engine]
 
 const probed = staticRead("s8bj_harness/fullinfo-linux-8.45.txt")
 
@@ -78,12 +78,22 @@ proc mine(so: StartOpt): Real =
        firstChar: so.firstChar, reqChar: so.reqChar,
        minLength: so.minLength, bits: so.bits)
 
+var oldLibSkipped = 0
+
 proc check1(p: string; bad: var seq[string]; n: var int) =
   let pr = parsePcre(p)
   if pr.status != psOk: return
   inc n
   let want = real(p)
   let got = mine(startOpt(pr))
+  # RFC-0005 S8bj: PCRE 8.37 (the Windows legs') drops the caseless flag of
+  # a required character after a `{0}` item; the walker declines those
+  # patterns there (`pcre_syntax.parseSpec`), pinned below.
+  if want != got and pcreBefore838() and "{0}" in p and
+     parseSpec(RegexSpec(entry: "find", flag: "re", pattern: p)).status ==
+       psUnmodelled:
+    inc oldLibSkipped
+    return
   if want != got:
     bad.add escape(p) & "\n    read " & $got & "\n    pcre " & $want
 
@@ -138,3 +148,18 @@ suite "S8bj: PCRE's start-of-match data from the reader's tree":
     checkpoint bad[0 ..< min(bad.len, 25)].join("\n")
     check bad.len == 0
     check n >= 30_000
+
+suite "S8bj: the library version scopes the walker's reading":
+
+  test "PCRE before 8.38 drops a caseless required character after {0}":
+    # std/re's own library decides it: 8.37 does not match "A", 8.45 does.
+    let old = not "A".contains(re"x{0}(?i)a")
+    check pcreBefore838() == old
+    let sp = RegexSpec(entry: "find", flag: "re", pattern: "x{0}(?i)a")
+    check parseSpec(sp).status == (if old: psUnmodelled else: psOk)
+    # Without a `{0}` item, or with no caseless character, it is read.
+    for p in ["(?i)a", "x{0}a"]:
+      check parseSpec(RegexSpec(entry: "find", flag: "re",
+                                pattern: p)).status == psOk
+    echo "  libpcre ", pcreVersion(), ", ", oldLibSkipped,
+         " generated patterns declined as pre-8.38"

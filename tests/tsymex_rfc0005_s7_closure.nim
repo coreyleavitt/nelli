@@ -430,6 +430,11 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## definitional over the split's own fresh constants. `globalRoots` takes
     ## the rest of the query to find them, and `loopArmInfeasible`'s arm
     ## joins it through `pathRoots`' `extra`.
+    ##
+    ## RFC-0005 S8bj adds `regexRecDefConds`, after `stripDecompConds`: each
+    ## is `r == regexReplaceRec(s, ..)` for one replace occurrence's own
+    ## fresh value `r` -- definitional, admits every channel. `checkCapped`
+    ## first tries the query without them (a weaker query: its UNSAT holds).
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
       for t in routineBody(smtDir / "runtime.nim", routine):
@@ -437,7 +442,8 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
           drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
                        "currentClosureCallAxioms", "stripDecompConds",
-                       "cardConds", "indexSplitRoots(currentContext(), reach)"]
+                       "regexRecDefConds", "cardConds",
+                       "indexSplitRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
       routineBody(smtDir / "runtime.nim", "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:

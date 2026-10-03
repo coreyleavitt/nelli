@@ -18,6 +18,7 @@
 
 import std/[strutils, tables, algorithm, sha1]
 import ./types
+import ./pcre_engine
 
 const
   cacheKeySat*     = ":sat"
@@ -202,7 +203,32 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "201"
+const symexWalkerVersion* = "211"
+  ## RFC-0005 S8bj (2026-10-02) — the regex constructs S8bb left
+  ## undecided or declined. The backtracking verbs `(*COMMIT)`,
+  ## `(*PRUNE)`, `(*SKIP)`, `(*SKIP:NAME)`, `(*THEN)` and the marks follow
+  ## pcre_exec.c: the attempt is an ordered agenda (`pcre_select.nim`) in
+  ## which a verb's item sits after the continuation it guards and THEN
+  ## jumps to the end of the alternative of its innermost multi-way group;
+  ## the search runs PCRE's start-of-match scan (first character, line
+  ## start, start bits; `pcre_startopt.nim`, pinned against `pcre_fullinfo`)
+  ## and its bumpalong with the CRLF start skip (S8bb declined where the
+  ## skip was observable: `crlfSkipSeen` is gone). `(*LIMIT_MATCH=0)` /
+  ## `(*LIMIT_RECURSION=0)` are the error of the first `match()` call, after
+  ## the minimum-length and required-character checks; a limit between 0
+  ## and PCRE's default declines. UTF mode reads characters as UTF-8 byte
+  ## sequences (code points up to U+00FF are not Nim bytes there; an
+  ## invalid subject is PCRE_ERROR_BADUTF8, a start inside a character
+  ## PCRE_ERROR_BADUTF8_OFFSET; `replace` returns such a subject as is).
+  ## `(?m)` gives `^` / `$` their line meaning under every newline
+  ## convention, and `(?X)` its compile-time errors. `replace` for every
+  ## pattern S8bb's run does not read is the agenda's step table
+  ## (`regex_parser.replaceStepZ3`). Under a JIT-enabled libpcre
+  ## (`pcre_engine.nim`, asked at walk time; the cache key records it) the
+  ## unanchored calls whose result the JIT computes differently decline.
+  ## Provisional 211 (the S8bj slot).
+  ##
+  ## (Prior: 201.)
   ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
   ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink
   ## order, and an `if` guard that raised on every path (a rejected
@@ -5459,5 +5485,8 @@ proc symexCacheKey*(prog: SymexProgram, target: SymexTarget,
     "|z3=" & z3Version &
     "|nim=" & nimVersion &
     "|w=" & walkerVersion &
-    "|r=" & renderingVersion
+    "|r=" & renderingVersion &
+    # RFC-0005 S8bj: std/re's unanchored calls run on PCRE's JIT or its
+    # interpreter, which the walker reads differently (`pcre_engine`).
+    "|pcre=" & pcreEngineName()
   "sx:" & $secureHash(canon)

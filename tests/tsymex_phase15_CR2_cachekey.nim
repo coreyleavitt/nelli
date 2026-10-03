@@ -935,7 +935,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bb (raises drain in evaluation order; findBounds binds a
     ## compound operand; PCRE leftmost-first selection, captures, replace
     ## over the priority automaton). Provisional 201 (S8ba holds 200).
-    check symexWalkerVersion == "201"
+    ## RFC-0005 S8bj (the backtracking verbs, PCRE's start-of-match scan
+    ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
+    ## `(?X)`; replace over the agenda's step table; the libpcre engine in
+    ## the cache key). Provisional 211.
+    check symexWalkerVersion == "211"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

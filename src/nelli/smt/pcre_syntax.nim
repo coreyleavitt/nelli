@@ -104,6 +104,7 @@
 
 import std/[strutils, algorithm]
 import ./pcre_props
+import ./pcre_engine
 
 type
   RxKind* = enum
@@ -1444,10 +1445,30 @@ proc decodeRegexSpec*(strOp: string): RegexSpec =
   RegexSpec(entry: strOp[0 ..< a], flag: strOp[a + 1 ..< b],
             pattern: strOp[b + 1 .. ^1])
 
+proc zeroRepAndCaseless(x: Rx; zero, ci: var bool) =
+  if x.kind in {rxSet, rxChars} and x.ci: ci = true
+  case x.kind
+  of rxCat, rxAlt:
+    for k in x.kids: zeroRepAndCaseless(k, zero, ci)
+  of rxRep:
+    if x.hi == 0: zero = true
+    zeroRepAndCaseless(x.sub, zero, ci)
+  else: discard
+
 proc parseSpec*(sp: RegexSpec): PcreParse =
+  ## The walker's reading of a regex literal: `parsePcre`, and RFC-0005
+  ## S8bj's library-version scoping (`pcre_engine.pcreBefore838`).
   if sp.flag notin ["re", "rex"]:
     return PcreParse(status: psUnknown,
                      reason: "a Regex value that is not a `re\"...\"` / " &
                              "`rex\"...\"` literal")
-  parsePcre(sp.pattern, sp.flag == "rex")
+  result = parsePcre(sp.pattern, sp.flag == "rex")
+  if result.status == psOk:
+    var zero, ci = false
+    zeroRepAndCaseless(result.root, zero, ci)
+    if zero and ci and pcreBefore838():
+      return PcreParse(status: psUnmodelled,
+        reason: "a `{0}` item in a pattern with caseless characters, and " &
+                "std/re's libpcre predates 8.38 (its required-character " &
+                "data drops the caseless flag there)")
 

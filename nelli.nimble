@@ -1057,9 +1057,22 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bb_replace",
             # RFC-0005 S8bj -- the reader on verbs, start options, UTF mode,
             # (?m) and (?X) against re(); PCRE's start-of-match data from the
-            # tree against pcre_fullinfo.
+            # tree against pcre_fullinfo; the agenda attempt and search
+            # (concrete, languages, Z3 entry formulas, replace) against
+            # std/re; Q2/Q7/Q8 decided; walker verdicts, floor >= 211.
             "tsymex_rfc0005_s8bj_syntax",
             "tsymex_rfc0005_s8bj_startopt",
+            "tsymex_rfc0005_s8bj_verbs",
+            "tsymex_rfc0005_s8bj_langs",
+            "tsymex_rfc0005_s8bj_langs_b",
+            "tsymex_rfc0005_s8bj_entries",
+            "tsymex_rfc0005_s8bj_entries_multiline",
+            "tsymex_rfc0005_s8bj_entries_utf",
+            "tsymex_rfc0005_s8bj_entries_utf_b",
+            "tsymex_rfc0005_s8bj_entries_utf_c",
+            "tsymex_rfc0005_s8bj_replace",
+            "tsymex_rfc0005_s8bj_replace_lemmas",
+            "tsymex_rfc0005_s8bj_walker",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

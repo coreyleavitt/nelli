@@ -8809,11 +8809,11 @@ met, the stack keeps both:
   the array theory): the same query is SAT in about 40K units fresh, and
   90K in the walk.
 
-**Batch 5 (2026-10-03) — one walker number for four slices.** S8bm, S8bk,
-S8bg and S8bi (each provisional: 214, 212, 218, 210) land stacked on batch
-4, in that order: `symexWalkerVersion` 217 -> **223**, the CR2 `==` pin
-223, each slice's `>=` floor unchanged. S8bj had no report when the batch
-closed and is not in it. Where slices met:
+**Batch 5 (2026-10-03) — one walker number for five slices.** S8bm, S8bk,
+S8bg, S8bi and S8bj (each provisional: 214, 212, 218, 210, 211) land
+stacked on batch 4, in that order: `symexWalkerVersion` 217 -> **223**,
+the CR2 `==` pin 223, each slice's `>=` floor unchanged. S8bj landed after
+the walker-223 commit, keeping 223. Where slices met:
 - *One `newSeq`.* S8bc's `iekSeqNewZero` and S8bi's `iekSeqNew` are one
   kind, `iekSeqNew`. Every constructor (`newSeq`, `newSeq(s, n)`,
   `newSeqOfCap`, `newSeqUninit`) is guarded by S8bc's `parseNewSeqLen`:
@@ -8854,6 +8854,12 @@ closed and is not in it. Where slices met:
   `cnt == 2` (`sxUnsat`), and `initTable[int, int](f(x))` counted 2. The
   argument is now bound to a `let` unless it is an atom
   (`sizeOperandOnce`). It is pinned in the S8bi suite with native checks.
+- *Regex (S8bj).* `checkCapped` keeps S8bd's `bvOffsetLinks` in the query
+  ahead of S8bj's step without `regexRecDefConds`. The drain-list audit
+  names S8as's `globalEntryFacts` and S8bj's `regexRecDefConds` both.
+  S8bi's fuel audit caught S8bj's step-table `run` (`__regexStep`)
+  recursing without fuel. It now takes `len(u) + 1` from `rep`, as S8bi's
+  `run` does.
 - *B1-1 under S8bm's own context* uses 46,529 units on Z3 5.1 (ceiling
   100k) and 79,510 on 4.13.4 (ceiling 160k), with batch 4's `isTabKeys`
   facts in the translated query.

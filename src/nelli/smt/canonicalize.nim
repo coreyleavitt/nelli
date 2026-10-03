@@ -204,9 +204,9 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "223"
-  ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg and S8bi land stacked
-  ## on batch 4 as one integration branch under ONE walker number; their
-  ## bullets follow, each naming its provisional number. The stack's own
+  ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg, S8bi and S8bj land
+  ## stacked on batch 4 as one integration branch under ONE walker number;
+  ## their bullets follow, each naming its provisional number. The stack's own
   ## changes: S8bc's `iekSeqNewZero` and S8bi's `iekSeqNew` are one kind
   ## (`iekSeqNew`) with one parser guard (`parseNewSeqLen`: `RangeDefect`
   ## on a negative length, a scoped `feUnsupportedOp` decline above
@@ -227,7 +227,8 @@ const symexWalkerVersion* = "223"
   ## (`parseNewSeqLen`, `parseInitContainer`) is bound once
   ## (`sizeOperandOnce`): in a `while` guard, or as `initTable`'s size, a
   ## closure call in it was applied by each guard branch and by the result
-  ## (a false `sxSat` and a false `sxUnsat` on what it writes). 217 -> 223.
+  ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
+  ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
   ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with

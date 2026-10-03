@@ -998,8 +998,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## closure exit facts in evaluation order; newSeq and set literals
     ## modelled; fueled replace recursions). Provisional 210 (batch 3 holds
     ## 209, S8bh 208).
-    ## RFC-0005 batch 5: S8bm, S8bk, S8bg and S8bi stacked on batch 4 (one
-    ## newSeq lowering; late addresses through a proc value). 217->223.
+    ## RFC-0005 batch 5: S8bm, S8bk, S8bg, S8bi and S8bj stacked on batch 4
+    ## (one newSeq lowering; late addresses through a proc value). 217->223.
     ## RFC-0005 S8bj (the backtracking verbs, PCRE's start-of-match scan
     ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
     ## `(?X)`; replace over the agenda's step table; the libpcre engine in

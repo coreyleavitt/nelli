@@ -78,6 +78,11 @@ proc ptrStrSut(p: ptr string) =
   if p[].len == 3:
     symexTarget("ptrStrHit")
 
+proc ptrSeqSut(p: ptr seq[int]) =
+  tick()
+  if p[].len == 3:
+    symexTarget("ptrSeqHit")
+
 proc raiser(x: int) =
   tick()
   if x == 7:
@@ -193,13 +198,22 @@ suite "RFC-0005 S2 -- replayWitness":
           roConfirmed
     check sideEffects == 1
 
-  test "witness fidelity: an unexecutable ptr witness is never run":
-    ## `ptr string` does not render through `resolveRef`: running its
-    ## placeholder would SIGSEGV. Declined at macro time, so even a reaching,
-    ## valid input is not run.
+  test "witness fidelity: a ptr string witness is a real cell and runs":
+    ## RFC-0005 S8bn (item 2): a `ptr string` renders through `resolveRef`
+    ## (it was the unexecutable example below until S8bn).
     var strVal = "abc"
     sideEffects = 0
     check replayWitness(ptrStrSut, (addr strVal,), tLabel("ptrStrHit"), {}) ==
+          roConfirmed
+    check sideEffects == 1
+
+  test "witness fidelity: an unexecutable ptr witness is never run":
+    ## `ptr seq[int]` does not render through `resolveRef`: running its
+    ## placeholder would SIGSEGV. Declined at macro time, so even a reaching,
+    ## valid input is not run.
+    var seqVal = @[1, 2, 3]
+    sideEffects = 0
+    check replayWitness(ptrSeqSut, (addr seqVal,), tLabel("ptrSeqHit"), {}) ==
           roInconclusive
     check sideEffects == 0
 

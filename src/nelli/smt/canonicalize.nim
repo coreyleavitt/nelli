@@ -202,7 +202,25 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "208"
+const symexWalkerVersion* = "215"
+  ## RFC-0005 S8bn (2026-10-03) -- S8bh's remainder, all precision.
+  ## Provisional 215. A `ptr` witness replays whatever the parameter order
+  ## and when aimed at a global or a `var` parameter (`@aim:`); a `var`
+  ## formal whose actual is a local never addressed is no pointer's target;
+  ## a `ptr` may address a field or element of a by-value aggregate `var`
+  ## parameter or global, or an element of a seq held in the heap (S8ax's
+  ## identity: root, path, snapshot index), declining once the path
+  ## resized the seq; an always-raising void closure is a raise; a call
+  ## through a proc field (by value, or a heap field's shadow code over the
+  ## procs assigned to it) and a method call (dispatched on the run-type
+  ## tag) are walked, and an unknown target havocs the globals; `of` is a
+  ## tag test and `nil` parses in every typed position; `{.inheritable.}`,
+  ## `of RootRef` and case-object hierarchies share S8bh's address space;
+  ## a parameter's run-type tags lie in its static type's subtree; S8bk's
+  ## late address on S8bh's indirect-call path. Verdicts move (sxUnknown
+  ## to sxSat / sxUnsat) and the IR gains fields (`cVarPtrSafe`,
+  ## `ccVarPtrSafe`, `unIfFeasible`, the variant hierarchy fields), so
+  ## cached entries rotate.
   ## RFC-0005 S8bf (2026-10-02) — S8bd's soundness finding. Provisional 206
   ## (S8be holds 205). Two `var` / `addr` heap actuals of one call that may
   ## be one cell through DIFFERENT refs (`let q = p; setBoth(p.x, q.x)`; a
@@ -4850,7 +4868,13 @@ proc canonicalize*(t: IRType): string =
       ";plain=[" & plainParts.join(";") & "]" &
       ";disc=" & t.vDiscName & "=" & canonicalize(t.vDiscTy) &
       ";dtags=[" & ordParts.join(",") & "]" &
-      ";[" & armParts.join(",") & "]>"
+      ";[" & armParts.join(",") & "]" &
+      # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners
+      # key its sort and heaps; absent for a variant without `of`.
+      (if t.vInheritChain.len == 0: ""
+       else: ";inh=[" & t.vInheritChain.join(",") & "];own=[" &
+             t.vOwnedFieldNames.join(",") & "|" &
+             t.vOwnedFieldIds.join(",") & "]") & ">"
   of itMultiVariant:
     # Phase 14 (ADR-0003 D1). Distinct prefix `MVr:` and distinct
     # axis-grouped format `;axes=[...]` ensure cache keys do not

@@ -67,6 +67,9 @@ proc refPointeeTypeId*(pointeeTy: IRType): string =
   ## address of one sort, as in Nim, where `Base(d)` is `d`'s own address.
   let base = if pointeeTy.kind == itTuple and pointeeTy.inheritChain.len > 0:
                pointeeTy.inheritChain[0]
+             elif pointeeTy.kind == itVariant and
+                  pointeeTy.vInheritChain.len > 0:
+               pointeeTy.vInheritChain[0]   # RFC-0005 S8bn (item 8)
              elif pointeeTy.kind == itTuple and pointeeTy.nominalId.len > 0:
                pointeeTy.nominalId
              elif pointeeTy.kind == itVariant and pointeeTy.vNominalId.len > 0:
@@ -631,6 +634,11 @@ proc fieldHeapKey*(objTy: IRType, field: string): string =
     let i = objTy.ownedFieldNames.find(field)
     if i >= 0 and i < objTy.ownedFieldIds.len:
       return sanitizeTypeId(objTy.ownedFieldIds[i]) & "__" & field
+  # RFC-0005 S8bn (item 8): a case-object hierarchy's plain field likewise.
+  if objTy != nil and objTy.kind == itVariant:
+    let i = objTy.vOwnedFieldNames.find(field)
+    if i >= 0 and i < objTy.vOwnedFieldIds.len:
+      return sanitizeTypeId(objTy.vOwnedFieldIds[i]) & "__" & field
   refPointeeTypeId(objTy) & "__" & field
 
 proc inheritTagKey*(objTy: IRType, level: int): string =
@@ -910,7 +918,10 @@ proc tyMayHold(t, pointee: IRType; depth = 0): bool =
     false
   of itArray: tyMayHold(t.elemTy, pointee, depth + 1)
   of itSeq: tyMayHold(t.seqElemTy, pointee, depth + 1)
-  of itSet: tyMayHold(t.setElemTy, pointee, depth + 1)
+  of itSet:
+    # RFC-0005 S8bn (item 4): no Nim operation yields the address of a
+    # HashSet's member (it has no `var` accessor), so no pointer has one.
+    false
   of itTable:
     tyMayHold(t.tabKeyTy, pointee, depth + 1) or
       tyMayHold(t.tabValTy, pointee, depth + 1)
@@ -950,10 +961,183 @@ proc svMayHold(sv: SymVal; pointee: IRType; depth = 0): bool =
 type PtrTarget = object
   ## RFC-0005 S8bh. One candidate target of a pointer: a field family (its
   ## heap `famKey`, the object `objAddr`) or a variable (`envName`).
+  ## RFC-0005 S8bn (item 4): or a part of a variable -- the field / element
+  ## `path` below it, its last step the pointer's seq index (`seqIdx`) for
+  ## a seq element -- or an element of a seq held in a field family
+  ## (`famKey` with `seqIdx`). `idx` is the index (`ptrIdxKey`).
   code: int64
   famKey: string
   objAddr: Z3AnyAst
   envName: string
+  path: seq[int]
+  seqIdx: bool
+  idx: Z3AnyAst
+  tabKey: bool        ## RFC-0005 S8bn (item 4): a `Table[string, V]` value
+                      ## at the pointer's key (`idx`, `ptrKeyAt`)
+
+proc ptrSeqElemMatches(e, pointee: IRType): bool =
+  ## RFC-0005 S8bn (item 4). A seq of `e` holds locations a `ptr pointee`
+  ## may address directly (a scalar or string element of the type).
+  e != nil and ptrScalarPointee(pointee) and
+    (e == pointee or (e.kind == itInt and pointee.kind == itInt and
+                      e.width == pointee.width and e.signed == pointee.signed))
+
+proc ptrTabValMatches(v, pointee: IRType): bool =
+  ## RFC-0005 S8bn (item 4). A `Table[string, V]`'s values are locations a
+  ## `ptr pointee` may address, held as the model's 64-bit cells: an
+  ## integer `V` of the pointee's type.
+  v != nil and v.kind == itInt and v.width == 64 and
+    pointee.kind == itInt and pointee.width == 64 and
+    v.signed == pointee.signed
+
+proc ptrVarLeaves(sv: SymVal; pointee: IRType; path: seq[int]; depth: int;
+                  acc: var seq[tuple[path: seq[int]; seqIdx, tabKey: bool]]): bool =
+  ## RFC-0005 S8bn (item 4). The parts of the by-value value `sv` a
+  ## `ptr pointee` may address, each a (path, seq index) below the root --
+  ## S8ax's element-alias identity (root, path, snapshot index): a scalar or
+  ## string leaf, a field of a tuple or object, an element of an array (each
+  ## position a step), an element of a seq (a step the pointer's index
+  ## names). False when a part may hold one but has no such identity here (a
+  ## case object, a table, a set, a seq of aggregates).
+  if depth > 8: return not svMayHold(sv, pointee)
+  case sv.kind
+  of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
+     svString:
+    if svMayHold(sv, pointee): acc.add (path, false, false)
+    true
+  of svTuple:
+    for i, f in sv.fields:
+      if not ptrVarLeaves(f, pointee, path & @[i], depth + 1, acc): return false
+    true
+  of svArray:
+    for i, e in sv.arrElems:
+      if not ptrVarLeaves(e, pointee, path & @[i], depth + 1, acc): return false
+    true
+  of svSeq:
+    if not sv.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+       ptrSeqElemMatches(sv.seqElemTy, pointee):
+      acc.add (path, true, false)
+      true
+    else: not tyMayHold(sv.seqElemTy, pointee)
+  of svTable:
+    if sv.tabKeyTy != nil and sv.tabKeyTy.kind == itString and
+       ptrTabValMatches(sv.tabValTy, pointee):
+      acc.add (path, false, true)
+      true
+    else: not tyMayHold(sv.tabValTy, pointee)
+  of svSet: true      # a set's members have no address (`tyMayHold`)
+  else: not svMayHold(sv, pointee)
+
+proc svAtPath(sv: SymVal; path: seq[int]; i = 0): SymVal =
+  ## RFC-0005 S8bn (item 4). The part of `sv` at `path[i ..]`.
+  if i >= path.len: return sv
+  case sv.kind
+  of svTuple: svAtPath(sv.fields[path[i]], path, i + 1)
+  of svArray: svAtPath(sv.arrElems[path[i]], path, i + 1)
+  else: sv
+
+proc svWithPath(sv: SymVal; path: seq[int]; v: SymVal; i = 0): SymVal =
+  ## RFC-0005 S8bn (item 4). `sv` with its part at `path[i ..]` replaced.
+  if i >= path.len: return v
+  result = sv
+  case sv.kind
+  of svTuple: result.fields[path[i]] = svWithPath(sv.fields[path[i]], path, v, i + 1)
+  of svArray: result.arrElems[path[i]] = svWithPath(sv.arrElems[path[i]], path, v, i + 1)
+  else: discard
+
+proc ptrIdxAt(ctx: Z3Context; p: Path; typeId: string; refSort: RawZ3Sort;
+              ptrAst: Z3AnyAst): Z3AnyAst =
+  ## RFC-0005 S8bn (item 4). `<T>__@ptridx[P]`: the element index of a
+  ## pointer whose target is a seq element (an input array, never stored).
+  let k = ptrIdxKey(typeId)
+  if not p.heaps.hasKey(k):
+    let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, intSort)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & k).cstring)
+    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                               arrSort))
+  wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[k].raw, ptrAst.raw))
+
+proc ptrKeyAt(ctx: Z3Context; p: Path; typeId: string; refSort: RawZ3Sort;
+              ptrAst: Z3AnyAst): Z3AnyAst =
+  ## RFC-0005 S8bn (item 4). `<T>__@ptrkey[P]`: the key of a pointer whose
+  ## target is a `Table[string, V]` value (an input array, never stored).
+  ## Noted with the table keys (`noteTableKey`), so a witness renders it.
+  let k = ptrKeyKey(typeId)
+  if not p.heaps.hasKey(k):
+    let strSort = ctx.checkErr Z3_mk_string_sort(ctx.raw)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, strSort)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & k).cstring)
+    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                               arrSort))
+  result = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[k].raw, ptrAst.raw))
+  noteTableKey(wrap[Z3String](ctx, result.raw))
+
+proc ptrIdxInRange(ctx: Z3Context; idx: Z3AnyAst; len: Z3AnyAst): Z3Bool =
+  ## RFC-0005 S8bn (item 4). `0 <= idx < len` over Z3 integers.
+  let zero = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, 0,
+    ctx.checkErr Z3_get_sort(ctx.raw, idx.raw)))
+  let lo = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_le(ctx.raw, zero.raw, idx.raw))
+  let hi = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_lt(ctx.raw, idx.raw, len.raw))
+  lo and hi
+
+proc z3OpName(ctx: Z3Context; a: RawZ3Ast): string =
+  ## RFC-0005 S8bn (item 4). The operator of an application term ("store",
+  ## "select", "ite", ...), "" for a non-application.
+  if Z3_get_ast_kind(ctx.raw, a) != Z3_APP_AST: return ""
+  $Z3_get_symbol_string(ctx.raw, Z3_get_decl_name(ctx.raw,
+    Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+
+proc z3Arg(ctx: Z3Context; a: RawZ3Ast; i: int): Z3AnyAst =
+  wrap[Z3AnyAst](ctx, Z3_get_app_arg(ctx.raw, Z3_to_app(ctx.raw, a), cuint(i)))
+
+proc lenUntouched(ctx: Z3Context; arr: Z3AnyAst; inLen: Z3AnyAst;
+                  depth = 0): bool =
+  ## RFC-0005 S8bn (item 4). The length heap `arr` (stores and merges over
+  ## its input array) holds the input lengths by construction: every store
+  ## into it stores a read of a length cell back (an element write
+  ## re-stores the length it read), never a computed length. A length that
+  ## changed and changed back (`add` then `pop`, which may move the
+  ## elements) stores a computed term and fails.
+  if depth > 64: return false
+  let a = wrap[Z3AnyAst](ctx, arr.raw)
+  case z3OpName(ctx, a.raw)
+  of "store":
+    # The value re-stored is a read of the length cell at the store's own
+    # address (not another object's length: a seq replaced by another).
+    let v = z3Arg(ctx, a.raw, 2)
+    if v.raw != inLen.raw:
+      if z3OpName(ctx, v.raw) != "select": return false
+      if z3Arg(ctx, v.raw, 1).raw != z3Arg(ctx, a.raw, 1).raw: return false
+    lenUntouched(ctx, z3Arg(ctx, a.raw, 0), inLen, depth + 1)
+  of "ite":
+    lenUntouched(ctx, z3Arg(ctx, a.raw, 1), inLen, depth + 1) and
+      lenUntouched(ctx, z3Arg(ctx, a.raw, 2), inLen, depth + 1)
+  else: true              # the input constant
+
+proc tabNoDeletion(ctx: Z3Context; arr: Z3AnyAst; depth = 0): bool =
+  ## RFC-0005 S8bn (item 4). The present array `arr` stores no `false`: no
+  ## key was deleted on the path (a deletion may shift other entries).
+  if depth > 64: return false
+  let a = wrap[Z3AnyAst](ctx, arr.raw)
+  case z3OpName(ctx, a.raw)
+  of "store":
+    let v = z3Arg(ctx, a.raw, 2)
+    if $simplify(wrap[Z3Bool](ctx, v.raw)) != "true": return false
+    tabNoDeletion(ctx, z3Arg(ctx, a.raw, 0), depth + 1)
+  of "ite":
+    tabNoDeletion(ctx, z3Arg(ctx, a.raw, 1), depth + 1) and
+      tabNoDeletion(ctx, z3Arg(ctx, a.raw, 2), depth + 1)
+  else: true
+
+proc sameTerm(ctx: Z3Context; w: WalkCtx; p: Path; a, b: Z3AnyAst): bool =
+  ## RFC-0005 S8bn (item 4). `a` and `b` are equal on path `p`: one term,
+  ## equal by simplification, or their difference infeasible on the path
+  ## (`loopArmInfeasible`, bounded; an undecided query is "not equal").
+  if a.raw == b.raw: return true
+  let eq = wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, b.raw))
+  if $simplify(eq) == "true": return true
+  loopArmInfeasible(ctx, p, not eq, w.settings)
 
 proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                 pointee: IRType; refSort: RawZ3Sort; typeId: string):
@@ -974,18 +1158,72 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   let proto = allocateSym(pointee, "__ptrTargetProto", scratch)
   let valSort = heapValueSort(ctx, proto, pointee)
   # The variables: globals, and the SUT's `var` parameters.
+  # RFC-0005 S8bn (item 4): a part of a by-value aggregate variable -- a
+  # field, an array element, a seq element -- is a target too, named by
+  # its path below the variable (`ptrVarLeaves`). A seq element is the
+  # pointer's index (`ptrIdxAt`) into the seq: within its INPUT length (the
+  # pointer addressed an element when the run began), and only while the
+  # path has not changed that length (a resize may move the buffer, which
+  # would leave the pointer dangling).
+  template addVarLeaves(vnm: string; vsv: SymVal; vwhat: string) =
+    var leaves: seq[tuple[path: seq[int]; seqIdx, tabKey: bool]]
+    if not ptrVarLeaves(vsv, pointee, @[], 0, leaves):
+      result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+        "address a part of " & vwhat & ", a case object, table, set or " &
+        "seq of aggregates this model holds no element identity for -- " &
+        "not modelled (RFC-0005 S8bn; feUnsupportedOp)"
+      return
+    for lf in leaves:
+      if lf.path.len == 0 and not lf.seqIdx and not lf.tabKey:
+        result.targets.add PtrTarget(code: ptrTargetCode(vnm), envName: vnm)
+        continue
+      let code = ptrTargetCode(vnm & ptrLeafPathStr(lf.path, lf.seqIdx) &
+                               (if lf.tabKey: "/#" else: ""))
+      var t = PtrTarget(code: code, envName: vnm, path: lf.path,
+                        seqIdx: lf.seqIdx, tabKey: lf.tabKey)
+      if lf.tabKey:
+        # A table value: the pointer's key, present in the input table; the
+        # entries stay where they are only while the path has not changed
+        # which keys are present (a resize or a deletion may move them).
+        let cur = svAtPath(vsv, lf.path)
+        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
+                  else: SymVal(kind: svBool)
+        if ini.kind != svTable or cur.kind != svTable or
+           not sameTerm(ctx, w, p, cur.tabPresentRaw, ini.tabPresentRaw) or
+           not tabNoDeletion(ctx, cur.tabPresentRaw) or
+           not sameTerm(ctx, w, p, wrap[Z3AnyAst](ctx, cur.tabSize.raw),
+                        wrap[Z3AnyAst](ctx, ini.tabSize.raw)):
+          result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+            "address a value of the table " & vwhat & ", whose keys this " &
+            "path changed: its entries may have moved, so the pointer may " &
+            "dangle -- not modelled (RFC-0005 S8bn; feUnsupportedOp)"
+          return
+        t.idx = ptrKeyAt(ctx, p, typeId, refSort, ptrAst)
+        idxFacts.add (code, wrap[Z3Bool](ctx, checkedSelect(ctx,
+                                         ini.tabPresentRaw.raw, t.idx.raw)))
+      if lf.seqIdx:
+        let cur = svAtPath(vsv, lf.path)
+        let ini = if w.initialEnv.hasKey(vnm): svAtPath(w.initialEnv[vnm], lf.path)
+                  else: SymVal(kind: svBool)
+        if ini.kind != svSeq or cur.kind != svSeq or
+           cur.seqLen.raw != ini.seqLen.raw:
+          result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+            "address an element of the seq " & vwhat & ", whose length " &
+            "this path changed: a resize may move its elements, so the " &
+            "pointer may dangle -- not modelled (RFC-0005 S8bn; " &
+            "feUnsupportedOp)"
+          return
+        t.idx = ptrIdxAt(ctx, p, typeId, refSort, ptrAst)
+        idxFacts.add (code, ptrIdxInRange(ctx, t.idx,
+                                          wrap[Z3AnyAst](ctx, ini.seqLen.raw)))
+      ptrLeafAims[code] = PtrLeafAim(name: vnm, path: lf.path,
+                                     seqIdx: lf.seqIdx, tabKey: lf.tabKey,
+                                     typeId: typeId)
+      result.targets.add t
+  var idxFacts: seq[tuple[code: int64; inRange: Z3Bool]]
   for name, sv in p.env.pairs:
     if not isGlobalEnvName(name): continue
-    if sv.kind in {svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32,
-                   svFloat64, svString}:
-      if svMayHold(sv, pointee):
-        result.targets.add PtrTarget(code: ptrTargetCode(name), envName: name)
-    elif svMayHold(sv, pointee):
-      result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
-        "address a part of the global `" & displayName(name) & "`, a " &
-        "by-value aggregate this model holds no cell for -- not modelled " &
-        "(RFC-0005 S8bh; feUnsupportedOp)"
-      return
+    addVarLeaves(name, sv, "the global `" & displayName(name) & "`")
   # A callee's `var` formal is a copy of its actual, written back when the
   # callee returns (copy-in/copy-out). Nim passes the location: a store
   # through the pointer into the actual's location is visible through the
@@ -1022,18 +1260,25 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       result.targets.add PtrTarget(code: ptrTargetCode(prm.name),
                                    envName: prm.name)
     elif tyMayHold(prm.ty, pointee):
-      result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
-        "address a part of the `var` parameter `" & prm.name & "`, a " &
-        "by-value aggregate this model holds no cell for -- not modelled " &
-        "(RFC-0005 S8bh; feUnsupportedOp)"
-      return
+      addVarLeaves(prm.name, sv, "the `var` parameter `" & prm.name & "`")
   # The field families the path has materialised.
   var famKeys: seq[string]
+  var seqFamKeys: seq[string]
+  var tabFamKeys: seq[string]
   for key in p.heaps.keys:
     if key == typeId or key.startsWith(typeId & "__@"): continue
     let vt = heapKeyValTy(key)
     if vt == nil: continue
     if heapCompoundTy(vt) and "__@len" notin key and "__@present" notin key:
+      # RFC-0005 S8bn (item 4): an element of a seq held in a field family:
+      # the family's object (as a scalar family's) and the pointer's index.
+      if vt.kind == itSeq and ptrSeqElemMatches(vt.seqElemTy, pointee):
+        seqFamKeys.add key
+        continue
+      if vt.kind == itTable and vt.tabKeyTy != nil and
+         vt.tabKeyTy.kind == itString and ptrTabValMatches(vt.tabValTy, pointee):
+        tabFamKeys.add key
+        continue
       if tyMayHold(vt, pointee):
         result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
           "address an element of a " & $vt.kind & " held in a heap cell " &
@@ -1081,6 +1326,128 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         else: p.liveRefs[pk] = @[objAddr]
     result.targets.add PtrTarget(code: ptrTargetCode(key), famKey: key,
                                  objAddr: objAddr)
+  seqFamKeys.sort()
+  for key in seqFamKeys:
+    let arrSort = sortOfRaw(ctx, p.heaps[key].raw)
+    let objSort = ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort)
+    let lenKey = key & "__@len"
+    let ok = ptrObjKey(typeId, key)
+    if not p.heaps.hasKey(ok):
+      let mapSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, objSort)
+      let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & ok).cstring)
+      p.heaps[ok] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                                 mapSort))
+    let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[ok].raw,
+                                                    ptrAst.raw))
+    # The seq's input length at the object, and its length on this path:
+    # one term, or the elements may have moved (see `addVarLeaves`).
+    let lsym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+                                                ("heap_" & lenKey).cstring)
+    let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+    let inArr = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, lsym,
+      ctx.checkErr Z3_mk_array_sort(ctx.raw, objSort, intSort)))
+    let inLen = wrap[Z3AnyAst](ctx, checkedSelect(ctx, inArr.raw, objAddr.raw))
+    if p.heaps.hasKey(lenKey):
+      let curLen = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[lenKey].raw,
+                                                     objAddr.raw))
+      if not sameTerm(ctx, w, p, curLen, inLen) or
+         not lenUntouched(ctx, p.heaps[lenKey], inLen):
+        result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+          "address an element of a seq held in a heap cell (`" & key &
+          "`) whose length this path changed: a resize may move its " &
+          "elements, so the pointer may dangle -- not modelled (RFC-0005 " &
+          "S8bn; feUnsupportedOp)"
+        return
+    var oid = ""
+    for tid, srt in currentRefSorts:
+      if srt == objSort: oid = tid
+    if oid.len > 0:
+      template neq2(a, b: Z3AnyAst): Z3Bool =
+        not wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, b.raw))
+      if currentNilConsts.hasKey(oid):
+        p.pc.add neq2(objAddr, currentNilConsts[oid])
+      for r in p.liveRefs.getOrDefault(oid, @[]):
+        p.pc.add neq2(objAddr, r)
+      let pk = ptrPreKey(oid)
+      var seen = false
+      for r in p.liveRefs.getOrDefault(pk, @[]):
+        if r.raw == objAddr.raw: seen = true
+      if not seen:
+        if p.liveRefs.hasKey(pk): p.liveRefs[pk].add objAddr
+        else: p.liveRefs[pk] = @[objAddr]
+    let code = ptrTargetCode(key & "/*")
+    let idx = ptrIdxAt(ctx, p, typeId, refSort, ptrAst)
+    idxFacts.add (code, ptrIdxInRange(ctx, idx, inLen))
+    ptrLeafAims[code] = PtrLeafAim(fam: key, seqIdx: true, typeId: typeId)
+    result.targets.add PtrTarget(code: code, famKey: key, objAddr: objAddr,
+                                 seqIdx: true, idx: idx)
+  # RFC-0005 S8bn (item 4): a value of a `Table[string, V]` held in a field
+  # family, at the pointer's key: present in the object's input table, and
+  # only while the path has not changed which keys are present there.
+  tabFamKeys.sort()
+  for key in tabFamKeys:
+    let arrSort = sortOfRaw(ctx, p.heaps[key].raw)
+    let objSort = ctx.checkErr Z3_get_array_sort_domain(ctx.raw, arrSort)
+    let ok = ptrObjKey(typeId, key)
+    if not p.heaps.hasKey(ok):
+      let mapSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, refSort, objSort)
+      let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & ok).cstring)
+      p.heaps[ok] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                                 mapSort))
+    let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[ok].raw,
+                                                    ptrAst.raw))
+    var inPresent: Z3AnyAst
+    var moved = false
+    for leaf in ["__@present", "__@len"]:
+      let lk = key & leaf
+      let leafSort =
+        if p.heaps.hasKey(lk): sortOfRaw(ctx, p.heaps[lk].raw)
+        else: ctx.checkErr Z3_mk_array_sort(ctx.raw, objSort,
+          (if leaf == "__@len": ctx.checkErr Z3_mk_int_sort(ctx.raw)
+           else: ctx.checkErr Z3_mk_array_sort(ctx.raw,
+                   ctx.checkErr Z3_mk_string_sort(ctx.raw),
+                   ctx.checkErr Z3_mk_bool_sort(ctx.raw))))
+      let lsym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, ("heap_" & lk).cstring)
+      let inArr = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, lsym,
+                                                               leafSort))
+      let inVal = wrap[Z3AnyAst](ctx, checkedSelect(ctx, inArr.raw, objAddr.raw))
+      if leaf == "__@present": inPresent = inVal
+      if p.heaps.hasKey(lk):
+        let curVal = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[lk].raw,
+                                                       objAddr.raw))
+        if not sameTerm(ctx, w, p, curVal, inVal): moved = true
+        if leaf == "__@present" and not tabNoDeletion(ctx, p.heaps[lk]):
+          moved = true
+    if moved:
+      result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+        "address a value of a table held in a heap cell (`" & key & "`) " &
+        "whose keys this path changed: its entries may have moved, so the " &
+        "pointer may dangle -- not modelled (RFC-0005 S8bn; feUnsupportedOp)"
+      return
+    var oid = ""
+    for tid, srt in currentRefSorts:
+      if srt == objSort: oid = tid
+    if oid.len > 0:
+      template neq3(a, b: Z3AnyAst): Z3Bool =
+        not wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, b.raw))
+      if currentNilConsts.hasKey(oid):
+        p.pc.add neq3(objAddr, currentNilConsts[oid])
+      for r in p.liveRefs.getOrDefault(oid, @[]):
+        p.pc.add neq3(objAddr, r)
+      let pk = ptrPreKey(oid)
+      var seen = false
+      for r in p.liveRefs.getOrDefault(pk, @[]):
+        if r.raw == objAddr.raw: seen = true
+      if not seen:
+        if p.liveRefs.hasKey(pk): p.liveRefs[pk].add objAddr
+        else: p.liveRefs[pk] = @[objAddr]
+    let code = ptrTargetCode(key & "/#")
+    let kt = ptrKeyAt(ctx, p, typeId, refSort, ptrAst)
+    idxFacts.add (code, wrap[Z3Bool](ctx, checkedSelect(ctx, inPresent.raw,
+                                                         kt.raw)))
+    ptrLeafAims[code] = PtrLeafAim(fam: key, tabKey: true, typeId: typeId)
+    result.targets.add PtrTarget(code: code, famKey: key, objAddr: objAddr,
+                                 tabKey: true, idx: kt)
   if result.targets.len == 0: return
   let sk = ptrSelKey(typeId)
   if not p.heaps.hasKey(sk):
@@ -1088,6 +1455,13 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                  "heap_" & sk)
   result.sel = wrap[Z3AnyAst](ctx, checkedSelect(ctx, p.heaps[sk].raw,
                                                  ptrAst.raw))
+  # RFC-0005 S8bn (item 4): a seq element target's index is within the
+  # seq's input length.
+  for f in idxFacts:
+    let s = sortOfRaw(ctx, result.sel.raw)
+    let isT = wrap[Z3Bool](ctx, checkedEq(ctx, result.sel.raw,
+      wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, f.code, s)).raw))
+    p.pc.add((not isT) or f.inRange)
 
 proc ptrSelIs(ctx: Z3Context; sel: Z3AnyAst; code: int64): Z3Bool =
   ## RFC-0005 S8bh. `sel == code`.
@@ -1119,8 +1493,22 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   for i in countdown(tg.targets.high, 0):
     let t = tg.targets[i]
     let tv =
-      if t.famKey.len > 0: heapSelect(ctx, p.heaps[t.famKey], t.objAddr, pointee)
-      else: p.env[t.envName]
+      if t.famKey.len > 0 and (t.seqIdx or t.tabKey):
+        # RFC-0005 S8bn (item 4): the element of the object's seq, or the
+        # value of its table at the pointer's key.
+        let data = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+          p.heaps[t.famKey].raw, t.objAddr.raw))
+        liftHeapValue(ctx, checkedSelect(ctx, data.raw, t.idx.raw), pointee)
+      elif t.famKey.len > 0: heapSelect(ctx, p.heaps[t.famKey], t.objAddr, pointee)
+      elif t.seqIdx:
+        let sq = svAtPath(p.env[t.envName], t.path)
+        liftHeapValue(ctx, checkedSelect(ctx, sq.seqDataRaw.raw, t.idx.raw),
+                      pointee)
+      elif t.tabKey:
+        let tb = svAtPath(p.env[t.envName], t.path)
+        liftHeapValue(ctx, checkedSelect(ctx, tb.tabDataRaw.raw, t.idx.raw),
+                      pointee)
+      else: svAtPath(p.env[t.envName], t.path)
     result.val = ptrIteSV(ctx, ptrSelIs(ctx, tg.sel, t.code), tv, result.val)
 
 proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
@@ -1133,7 +1521,38 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   if tg.decline.len > 0: return tg.decline
   for t in tg.targets:
     let guard = ptrSelIs(ctx, tg.sel, t.code)
-    if t.famKey.len > 0:
+    if t.famKey.len > 0 and (t.seqIdx or t.tabKey):
+      # RFC-0005 S8bn (item 4): the element of the object's seq, or the
+      # value of its table at the pointer's key.
+      let arr = p.heaps[t.famKey]
+      let data = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, t.objAddr.raw))
+      let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, data.raw, t.idx.raw,
+                                                   rawAnyAstOf(val)))
+      let stored = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw,
+                                                    t.objAddr.raw, data2.raw))
+      p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
+                                                          stored.raw, arr.raw))
+    elif t.seqIdx:
+      let root = p.env[t.envName]
+      var sq = svAtPath(root, t.path)
+      let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, sq.seqDataRaw.raw,
+                                                   t.idx.raw, rawAnyAstOf(val)))
+      sq.seqDataRaw = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw, data2.raw, # [placeholder-audited]
+                                                     sq.seqDataRaw.raw)) # [placeholder-audited]
+      p.env[t.envName] = svWithPath(root, t.path, sq)
+    elif t.tabKey:
+      let root = p.env[t.envName]
+      var tb = svAtPath(root, t.path)
+      let data2 = wrap[Z3AnyAst](ctx, checkedStore(ctx, tb.tabDataRaw.raw,
+                                                   t.idx.raw, rawAnyAstOf(val)))
+      tb.tabDataRaw = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw, data2.raw,
+                                                     tb.tabDataRaw.raw))
+      p.env[t.envName] = svWithPath(root, t.path, tb)
+    elif t.path.len > 0:
+      let root = p.env[t.envName]
+      p.env[t.envName] = svWithPath(root, t.path,
+        ptrIteSV(ctx, guard, val, svAtPath(root, t.path)))
+    elif t.famKey.len > 0:
       let arr = p.heaps[t.famKey]
       let stored = checkedStore(ctx, arr.raw, t.objAddr.raw, rawAnyAstOf(val))
       p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
@@ -1261,8 +1680,12 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # For itVariant: classify the field — disc, plain, or arm-specific.
     let isVariantPointee = isField and stmt.dObjTy.kind == itVariant
     let isDiscDeref = isVariantPointee and stmt.dField == stmt.dObjTy.vDiscName
+    # RFC-0005 S8bn (item 8): a run-type tag level (`@lvl<j>`) of a
+    # case-object hierarchy is no arm's field.
     let isArmField = isVariantPointee and not isDiscDeref and
-                     stmt.dField notin stmt.dObjTy.vPlainFieldNames
+                     stmt.dField notin stmt.dObjTy.vPlainFieldNames and
+                     not stmt.dField.startsWith("@lvl") and
+                     not stmt.dField.startsWith("@pf_")   ## RFC-0005 S8bn
     if isArmField:
       # ADR-0013 D2 (Slice 2): arm-specific field READ through a ref-to-variant.
       # Mirror the value-variant `isVariantField` walk arm EXACTLY, lifted to the
@@ -1749,14 +2172,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             for i, fname in arm.fieldNames:
               zeroSlots.add (fname, baseId & "__@" & $arm.tagOrdinal & "__" & fname,
                              arm.fieldTypes[i], view)
-      if pointee.kind == itTuple and pointee.inheritChain.len > 0:
+      if hierChain(pointee).len > 0:
         # RFC-0005 S8bh (item 3). The run-type tag of a hierarchy object:
         # its ancestor's `inheritTagCode` at each depth `1..m` and the
         # sentinel 0 at depth `m + 1` (see `inheritTagKey`). Depth 0 is the
         # root, which every object of the hierarchy shares: no check reads it.
-        let depth = pointee.inheritChain.len - 1
+        # RFC-0005 S8bn (item 8): a case object's chain too (`hierChain`).
+        let chain = hierChain(pointee)
+        let depth = chain.len - 1
         for lvl in 1 .. depth + 1:
-          let code = if lvl <= depth: inheritTagCode(pointee.inheritChain[lvl])
+          let code = if lvl <= depth: inheritTagCode(chain[lvl])
                      else: 0'i64
           let key = inheritTagKey(pointee, lvl)
           let tagTy = tInt(64, signed = true)
@@ -1786,6 +2211,22 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                       slot.variantTy)
             for c in heapCellStore(ctx, cell, newRef, heapCellZero(fty), fty):
               child.heaps[c.key] = c.arr
+            continue
+          if fty.kind == itUninterp and fty.uninterpName == "__closure" and
+             slot.variantTy == nil:
+            # RFC-0005 S8bn (item 6). A proc field is held as its shadow
+            # code (`@pf_<f>`, `dsl_parser.procFieldCallIR`): `new` stores 0,
+            # nil. The field's own cell is never written or read as a value
+            # (a read of it allocates a proc value with no lambda, declined).
+            let sk = fieldHeapKey(pointee, "@pf_" & fname)
+            let tagTy = tInt(64, signed = true)
+            let sheap = if child.heaps.hasKey(sk): child.heaps[sk]
+                        else: mkHeapArrayVar(ctx, refSort, tagTy, "heap_" & sk)
+            let zero = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw, 0,
+              ctx.checkErr Z3_get_array_sort_range(ctx.raw,
+                                                   sortOfRaw(ctx, sheap.raw))))
+            child.heaps[sk] = wrap[Z3AnyAst](ctx, checkedStore(ctx, sheap.raw,
+              newRef.raw, zero.raw))
             continue
           let zeroExpr = zeroIRExprForType(fty)
           if zeroExpr == nil:

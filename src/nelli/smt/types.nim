@@ -405,6 +405,17 @@ type
         ## axis exactly as a single-axis variant, and the flag gives its
         ## discriminator heap its own key (one per axis). Never built by the
         ## parser; NOT part of `IRType.==` or the canonical form.
+      vInheritChain*:    seq[string]
+        ## RFC-0005 S8bn (item 8). `itTuple.inheritChain` for a variant of
+        ## an inheritance hierarchy (a case object under `RootObj`, or a
+        ## type derived from one): the sort and every heap the variant's
+        ## own key names (discriminator, arm fields, tag levels) key on the
+        ## hierarchy's root. Empty for a variant declared without `of`.
+      vOwnedFieldNames*: seq[string]
+      vOwnedFieldIds*:   seq[string]
+        ## RFC-0005 S8bn (item 8). `itTuple.ownedFieldNames`/`Ids` for the
+        ## variant's plain fields: each keys its heap on the type that
+        ## declares it (`fieldHeapKey`).
       vPlainFieldNames*: seq[string]
                                     # Phase 11 post-cycle-12: plain
                                     # (non-recCase) fields shared
@@ -4469,7 +4480,10 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
                plainFieldNames: seq[string] = @[],
                plainFieldTypes: seq[IRType] = @[],
                discTags: seq[tuple[name: string, ord: int]] = @[],
-               nominalId = ""): IRType =
+               nominalId = "";
+               inheritChain: seq[string] = @[];
+               ownedFieldNames: seq[string] = @[];
+               ownedFieldIds: seq[string] = @[]): IRType =
   ## Phase 11 + Phase 14 (A2). Tagged sum type — Nim variant object.
   ##
   ## `plainFieldNames`/`plainFieldTypes` carry the always-present
@@ -4484,7 +4498,19 @@ proc tVariant*(objectName, discName: string, discTy: IRType,
          vDiscName: discName, vDiscTy: discTy, vArms: arms,
          vDiscTags: discTags, vNominalId: nominalId,
          vPlainFieldNames: plainFieldNames,
-         vPlainFieldTypes: plainFieldTypes)
+         vPlainFieldTypes: plainFieldTypes,
+         vInheritChain: inheritChain,                ## RFC-0005 S8bn
+         vOwnedFieldNames: ownedFieldNames, vOwnedFieldIds: ownedFieldIds)
+
+proc hierChain*(t: IRType): seq[string] =
+  ## RFC-0005 S8bn (item 8). The inheritance chain of an object type, a
+  ## plain one (`inheritChain`) or a case object (`vInheritChain`); empty
+  ## for anything else.
+  if t == nil: return
+  case t.kind
+  of itTuple: t.inheritChain
+  of itVariant: t.vInheritChain
+  else: @[]
 
 proc mkMultiVariant*(objectName: string,
                      axes: seq[VariantAxis],

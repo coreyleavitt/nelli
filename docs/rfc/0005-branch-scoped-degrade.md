@@ -364,7 +364,7 @@ state = "done"
 [[slice]]
 id = "S8bn"
 title = "S8bh's remainder: ptr alias witnesses (parameter order, global/var-param targets), var-formal ptr declines, ptrs into heap-held containers and by-value aggregates, diverging void closures, proc fields and methods, unknown-target global havoc, `of` operator and nil literals, generic/inheritable/case-object hierarchies, run-time type tags tied to static types"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -8676,3 +8676,114 @@ cells.
   stays per-type.
 - **PRECISION: a parameter's run-type tags are free**, unconstrained by
   its static type, so alias states may be over-approximated.
+
+**As landed (S8bn, walker 215 provisional) — S8bh's remainder.** Suite
+`tsymex_rfc0005_s8bn_remainder` (36 tests; c on both Z3 versions,
+cpp 5.1). The base is a28c9c3 (S8bh). Neither S8ax nor S8bk is in the
+base: item 4 builds S8ax's element-alias identity on S8bh's `ptrsel`
+model, and S8bk's late-address rule is ported (item 6b), not
+cherry-picked.
+
+- *Items 1-2: a `ptr` alias witness replays.* The typed witness now
+  builds the parameters in rank order (no pointer, a pointer inside, a
+  top-level pointer) and the tuple in parameter order, so a pointer
+  whose target object's parameter follows it is resolved after the
+  object (`s(pi: ptr int; q: Q)`). A pointer whose input target is a
+  global or a SUT `var` parameter is aimed at it by name
+  (`aliasRef = "@aim:<name>"`); the replay's splat hands it that
+  variable's address once the arguments are bound (`ptrAimsAt`). A
+  `ptr string` target merges as one string `ite` (`ptrIteSV`). Every
+  alias witness, both parameter orders, int and string, global and `var`
+  parameter, replays `roConfirmed` (pinned).
+- *Item 3: a `var` formal whose actual no pointer can address.* The
+  parser records, per `var` / `addr` actual, whether its location is a
+  local whose address the routine never takes, or a `var` parameter
+  passed on whole (`cVarPtrSafe` / `ccVarPtrSafe`); only the other
+  formals are a pointer's possible targets while the callee runs
+  (`CallFrame.ptrRiskFormals`). A pointer that may address one still
+  declines (pinned).
+- *Item 4: a pointer into an aggregate.* A field or element of a
+  by-value aggregate `var` parameter or global (tuple, object, array,
+  seq, `Table[string, int]`), and an element of a seq or a value of a
+  table held in a heap field family, is a candidate target, named by
+  S8ax's identity (root, path, snapshot index): a constant path below the
+  variable, and for a seq element the pointer's own index
+  (`<T>__@ptridx[P]`, an input array) within the seq's input length, for
+  a table value the pointer's own key (`<T>__@ptrkey[P]`) present in the
+  input table. A container the path resized declines ("may dangle": a
+  resize may move the elements), also when its length or key set came
+  back to the input's (`add` then `pop`, a deletion: `lenUntouched`,
+  `tabNoDeletion` read the term's stores). A set's members have no
+  address in Nim (no `var` accessor), so a set holds no target and no
+  longer declines. The snapshot aims such a pointer at
+  `@aim:<name>/<step>/...` (a key as `k<hex>`) or
+  `&<cell>.<field>.<index|key>`, and the replay resolves the steps
+  (`ptrAimInto`); witnesses replay `roConfirmed`. A case object, a seq of
+  aggregates and a table of another value type keep the decline.
+- *Item 5: an always-raising void closure is a raise.* The closure
+  body's divergence degrade (`ceClosureBodyDiverged`) applies only when
+  no raise escapes it.
+- *Item 6: proc fields, methods, unknown targets.* A call through a proc
+  field of a by-value object is a call through the proc value the field
+  holds (S8bh's path). A heap object's proc field is held as a shadow
+  code (`@pf_<f>`): every assignment and constructor stores the code of
+  the proc it names, among the procs the entry's routines assign to the
+  field (`procFieldAssigns`, scanned before the parse), `new` stores 0
+  (nil), any other value -1; the call dispatches over the candidates, and
+  any other code takes the unknown-target path, declined only on a path
+  an execution takes (`unIfFeasible`). A method call dispatches over the
+  overrides visible at the entry, deepest first on the run-type tag; an
+  entry macro whose SUT calls a method first emits, into the caller's
+  scope, `symexRegisterMethods(<name>, <name>)` (the overloads resolve
+  there) and expands again. An unknown target also havocs every global.
+  The S8bh pins `pfld_dead` and `m_dead` move from a decline to
+  `sxUnsat`.
+- *Item 6b: S8bk's late address on S8bh's indirect-call path.* A `var` /
+  `addr` actual of a call through a proc value is addressed at the
+  call, after every later argument, and copied out through that address;
+  index and length checks stay where Nim makes them; a later argument
+  that changes what a check read declines (`feUnsupportedOp` here,
+  `feEvalOrderUnmodelled` on S8bk's base), reached only on a feasible
+  path. Its own commit, for the batch integration to drop or merge.
+- *Item 7: `of` and `nil`.* `x of T` over a hierarchy ref is a test of
+  the run-type tag (false for nil, the levels below the static type
+  compared with `T`'s chain); Nim's folded `of` (a bool-typed int
+  literal) parses as a bool. `nil` parses in every typed position whose
+  type is a ref or ptr.
+- *Item 8: generic, `{.inheritable.}`, `of RootRef` and case-object
+  hierarchies* join S8bh's address space (one case level in the chain;
+  its plain fields owned as any level's). A generic object type was not
+  classified at all (`G[int]` was `feUnsupportedParamType`): an instance
+  is now classified with its arguments substituted into the body
+  (`classifyGenericInstance`, `genericFrames`), keyed on the instance and
+  named in a witness by its head symbol applied to the arguments; a
+  generic parent (`of GBase[T]`) joins the chain as a plain parent does,
+  and a recursive field (`next: GNode[T]`) takes the named placeholder.
+  A field the classified type does not list now declines where it
+  failed the build.
+- *Item 9: a parameter's run-type tags* are its static type's chain at
+  the depths down to that type; the depths below stay free.
+
+*Repins.* S8bh's `pfld_dead` / `m_dead` (now `sxUnsat`), `psg` (a
+resized seq global declines "may dangle") and `pvf` (clean `sxSat`);
+S8ab's macro count (22 to 24, the two method-registry macros); S8ao /
+S8ap's unrecognised-generic example (now a generic case object); S8d's
+user generic `Option` (now `sxSat`); S2's unexecutable `ptr` witness (a
+`ptr string` now runs, so the example is `ptr seq[int]`); the CR2 walker
+pin. The routine-kind gates the item-6 scans add route through
+`isUserRoutine` / `procValueSymKinds` (the N2 kindgate audit).
+
+*Sweep.* 101 suites (the S8 remainders, the closure, ptr, witness,
+hierarchy and 163-audit families, and every source-reading audit),
+1448 tests, 0 failed on Z3 5.1 and on 4.13.4 (c); the S8bn suite on cpp
+(5.1) 36/36. Windows at 2f16ac9: symex-mingw 37120957833, fuzzer-mingw
+37120957825, fuzzer-msvc 37120957845, all green.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a pointer into a case object, a seq of aggregates or a
+  table of a non-`int` value** keeps the decline (no element identity in
+  this model), as does a generic case object.
+- **PRECISION: an aggregate global read** (`var g: tuple[...]`, an
+  array global) is `feGlobalReadUnmodelled` / a walker fault on this
+  base, before any pointer is involved; item 4's global path is pinned
+  through `var` parameters.

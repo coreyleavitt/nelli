@@ -139,6 +139,81 @@ const routineImplMinArity = 7
   ## below it. This is a defensive arity floor guarding the re-tree below,
   ## not a claim that 7 is the ONLY legal arity.
 
+var methodRegistry {.compileTime.}: Table[string, seq[NimNode]]
+  ## RFC-0005 S8bn (item 6). Per method name, the methods of that name
+  ## visible where an entry macro was called. A macro cannot list a
+  ## method's overrides (the dispatcher Nim builds is codegen's), and a
+  ## `bindSym` resolves in the library's scope, not the caller's; so an
+  ## entry macro whose SUT calls a method first emits, into the caller's
+  ## scope, `symexRegisterMethods("<name>", <name>)`, whose argument the
+  ## compiler resolves there to every overload of the name, and then
+  ## expands again (`unregisteredMethodNames`).
+var methodNamesTried {.compileTime.}: HashSet[string]
+  ## RFC-0005 S8bn (item 6). The names an entry has registered (or found
+  ## not visible), so a re-expansion ends.
+
+macro symexRegisterMethods*(name: static string; overloads: typed): untyped =
+  ## RFC-0005 S8bn (item 6). Record `overloads` (a symbol, or a choice of
+  ## every overload visible at the call) as the methods named `name`.
+  ## Emitted by the entry macros, never written by a user.
+  methodNamesTried.incl name
+  var syms: seq[NimNode]
+  if overloads.kind == nnkSym: syms.add overloads
+  else:
+    for c in overloads:
+      if c.kind == nnkSym: syms.add c
+  for c in syms:
+    if c.symKind == nskMethod:
+      var seen = false
+      for m in methodRegistry.getOrDefault(name):
+        if m == c: seen = true
+      if not seen: methodRegistry.mgetOrPut(name, @[]).add c
+  newEmptyNode()
+
+macro symexRegisterNoMethods*(name: static string): untyped =
+  ## RFC-0005 S8bn (item 6). The method name `name` is not visible where
+  ## the entry macro was called: its calls stay undispatched (declined).
+  methodNamesTried.incl name
+  newEmptyNode()
+
+proc unregisteredMethodNames*(fn: NimNode): seq[string] =
+  ## RFC-0005 S8bn (item 6). The names of the methods `fn` calls,
+  ## transitively through the user routines it names and the overrides
+  ## registered so far, that no entry has registered yet.
+  var work: seq[NimNode]
+  var seenR: seq[NimNode]
+  if fn.kind == nnkSym: work.add fn
+  for _, ms in methodRegistry:
+    for m in ms: work.add m
+  var i = 0
+  proc scan(n: NimNode; acc: var seq[string]; work: var seq[NimNode]) =
+    if n == nil: return
+    if n.kind == nnkSym:
+      if n.symKind == nskMethod:
+        let nm = macros.strVal(n)
+        if nm notin methodNamesTried and nm notin acc: acc.add nm
+      elif isUserRoutine(n) and n.getImpl.kind != nnkNilLit:
+        work.add n
+      return
+    for c in n: scan(c, acc, work)
+  while i < work.len:
+    let r = work[i]
+    inc i
+    var dup = false
+    for x in seenR:
+      if x == r: dup = true
+    if dup: continue
+    seenR.add r
+    let impl = r.getImpl
+    if impl.kind notin RoutineNodes or impl.len < 7: continue
+    scan(impl[6], result, work)
+
+var dispatchedMethods {.compileTime.}: seq[NimNode]
+  ## RFC-0005 S8bn (item 6). The method symbols a dispatch on the run-type
+  ## tag (`methodDispatchStmt`) calls: each is walked as the override it
+  ## is, chosen for the receiver's dynamic type. Never cleared: an entry is
+  ## a fact about a symbol.
+
 proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## THE shared nil-core (RFC-parser-normalization Invariant-3's "one
   ## predicate"). `getImpl`s `sym`; returns the impl node when its kind is
@@ -211,9 +286,16 @@ proc resolveRoutineImpl*(sym: NimNode): NimNode =
   ## receiver's dynamic type, so walking the base body would substitute one
   ## override for another -- it stays unresolved (a recorded callee decline).
   let impl = sym.getImpl
-  if impl.kind notin walkableRoutineKinds + {nnkConverterDef}:
+  # RFC-0005 S8bn (item 6): a method the dispatch selected for the
+  # receiver's dynamic type is walked like a proc.
+  var dispatched = false
+  if impl.kind == nnkMethodDef:
+    for m in dispatchedMethods:
+      if m == sym: dispatched = true
+  if impl.kind notin walkableRoutineKinds + {nnkConverterDef} and
+     not dispatched:
     result = nil
-  elif impl.kind in {nnkFuncDef, nnkConverterDef}:
+  elif impl.kind in {nnkFuncDef, nnkConverterDef} or dispatched:
     if impl.len >= routineImplMinArity:
       var kids: seq[NimNode]
       for c in impl.children: kids.add c
@@ -604,7 +686,10 @@ proc emitIRType*(t: IRType): NimNode =
       prefix(plainNamesLit, "@"),
       prefix(plainTypesLit, "@"),
       prefix(discTagsLit, "@"),
-      newLit(t.vNominalId))   # RFC-0005 S8j: keys the `Ref_<id>` sort
+      newLit(t.vNominalId),   # RFC-0005 S8j: keys the `Ref_<id>` sort
+      # RFC-0005 S8bn (item 8): a case-object hierarchy's chain and owners.
+      newLit(t.vInheritChain), newLit(t.vOwnedFieldNames),
+      newLit(t.vOwnedFieldIds))
   of itMultiVariant:
     # Phase 14 cycle A1a stub. Re-emit a runtime-reconstructible
     # `mkMultiVariant(…)` call. Full A1b (parser-side classification)
@@ -1202,11 +1287,13 @@ proc declineAtSite(ctx: ParseCtx; kind: SymexErrorKind; msg, reason: string):
                                      scope: siteAnchored(m))
   mkUnsupported(kind, reason, m)
 
-proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string):
-    IRStmt =
+proc declineMarker(ctx: ParseCtx; kind: SymexErrorKind; reason: string;
+                   ifFeasible = false): IRStmt =
   ## RFC-0005 S8. A Class-B decline: a marker with no parse-time record (the
   ## walker's reach record, anchored at the same id, is its only record).
-  mkUnsupported(kind, reason, ctx.nextMarker())
+  ## RFC-0005 S8bn: `ifFeasible` -- reached only on a path an execution
+  ## takes (`isUnsupported.unIfFeasible`).
+  mkUnsupported(kind, reason, ctx.nextMarker(), ifFeasible)
 
 proc declineUnsafeCast(ctx: ParseCtx; msg, reason: string): IRStmt =
   ## RFC-0005 S8. `heUnsafeCast`'s `declineAtSite`: the marker is the
@@ -3963,10 +4050,11 @@ proc hierarchyConv(n, operand: NimNode): tuple[isHier: bool;
     return
   let tp = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
   let op = if o.kind == itRef: o.refPointeeTy else: o.ptrPointeeTy
-  if tp == nil or op == nil or tp.kind != itTuple or op.kind != itTuple:
+  if tp == nil or op == nil:
     return
-  let tc = tp.inheritChain
-  let sc = op.inheritChain
+  # RFC-0005 S8bn (item 8): a case object of a hierarchy too (`hierChain`).
+  let tc = hierChain(tp)
+  let sc = hierChain(op)
   if tc.len == 0 or sc.len == 0 or tc[0] != sc[0]: return
   let short = min(tc.len, sc.len)
   if tc[0 ..< short] != sc[0 ..< short]: return
@@ -4580,8 +4668,8 @@ proc placeLateAddrs(preamble: var seq[IRStmt]; marks: seq[int];
     for i in cut ..< la.hi:
       if guards[i - cut] != nil:
         tail.add mkIf(@[mkBranch(guards[i - cut],
-          mkBlock(@[mkUnsupported(feUnsupportedOp, why, ctx.nextMarker(),
-                                  ifFeasible = true)]))])
+          mkBlock(@[ctx.declineMarker(feUnsupportedOp, why,
+                                      ifFeasible = true)]))])
       tail.add preamble[i]
     for i in la.hi ..< ends[k]: tail.add preamble[i]
   preamble = outPre & tail
@@ -4862,6 +4950,184 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     preamble.add wrap(callWith(alias, touch), backsFor(alias))
   (e: mkVar(synth), hoisted: true)
 
+proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
+                        retTy: IRType; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRStmt
+  ## RFC-0005 S8bn fwd decl
+
+var procFieldAssigns {.compileTime.}: Table[string, seq[NimNode]]
+  ## RFC-0005 S8bn (item 6). Per proc field of an object type (`pfKey`), the
+  ## procs the entry's routines assign to it (`o.f = p`, `T(f: p)`), in
+  ## first-seen order: a heap object's proc field holds one of them, or
+  ## nil, or (an input's, a field assigned another kind of value) a proc no
+  ## assignment names. Filled by `parseEntryImpl` (`scanProcFieldAssigns`)
+  ## before the parse; read where a call through a heap proc field
+  ## dispatches (`procFieldCallIR`).
+
+proc pfObjKey(objNode: NimNode): string =
+  ## RFC-0005 S8bn (item 6). The object type of `objNode` (a ref's
+  ## pointee), as `procFieldAssigns` keys it.
+  var o = objNode
+  while o.kind in {nnkHiddenDeref, nnkDerefExpr} and o.len == 1: o = o[0]
+  let ti = o.getTypeImpl
+  if ti.kind in {nnkRefTy, nnkPtrTy} and ti.len == 1: return ti[0].repr
+  o.getTypeInst.repr
+
+proc pfProcSym(v: NimNode): NimNode =
+  ## RFC-0005 S8bn (item 6). The proc a proc-valued expression names
+  ## directly (through Nim's hidden conversions), or nil.
+  var x = v
+  while x.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv,
+                   nnkHiddenCallConv} and x.len > 0:
+    x = x[^1]
+  if x.kind == nnkSym and x.symKind in procValueSymKinds: x else: nil
+
+proc pfAdd(key: string; sym: NimNode) =
+  for x in procFieldAssigns.getOrDefault(key):
+    if x == sym: return
+  procFieldAssigns.mgetOrPut(key, @[]).add sym
+
+proc scanProcFieldAssigns*(fn: NimNode) =
+  ## RFC-0005 S8bn (item 6). Fill `procFieldAssigns` from `fn` and every
+  ## user routine it names, transitively.
+  procFieldAssigns = initTable[string, seq[NimNode]]()
+  var work: seq[NimNode]
+  var seenR: seq[NimNode]
+  if fn.kind == nnkSym: work.add fn
+  proc scan(n: NimNode; work: var seq[NimNode]) =
+    if n == nil: return
+    case n.kind
+    of nnkSym:
+      if isUserRoutine(n) and n.getImpl.kind != nnkNilLit:
+        work.add n
+      return
+    of nnkAsgn:
+      if n.len == 2:
+        var l = n[0]
+        if l.kind == nnkCheckedFieldExpr and l.len >= 1: l = l[0]
+        if l.kind == nnkDotExpr and l.len == 2 and l[1].kind == nnkSym and
+           l.getTypeInst.kind == nnkProcTy:
+          let ps = pfProcSym(n[1])
+          if ps != nil: pfAdd(pfObjKey(l[0]) & "." & macros.strVal(l[1]), ps)
+    of nnkObjConstr:
+      for i in 1 ..< n.len:
+        let c = n[i]
+        if c.kind == nnkExprColonExpr and c.len == 2 and c[0].kind == nnkSym and
+           c[1].kind != nnkNilLit and c[1].getTypeInst.kind == nnkProcTy:
+          let ps = pfProcSym(c[1])
+          if ps != nil: pfAdd(pfObjKey(n) & "." & macros.strVal(c[0]), ps)
+    of nnkTypeSection, nnkTypeDef, nnkPragma, nnkCommentStmt:
+      return
+    else: discard
+    for c in n: scan(c, work)
+  var i = 0
+  while i < work.len:
+    let r = work[i]
+    inc i
+    var dup = false
+    for x in seenR:
+      if x == r: dup = true
+    if dup: continue
+    seenR.add r
+    let impl = r.getImpl
+    if impl.kind notin RoutineNodes or impl.len < 7: continue
+    scan(impl[6], work)
+
+proc pfCode(key: string; v: NimNode): int64 =
+  ## RFC-0005 S8bn (item 6). The shadow code of a proc field's value `v`: 0
+  ## for nil, the 1-based position of the proc it names in
+  ## `procFieldAssigns[key]`, -1 for any other value (no candidate).
+  if v.kind == nnkNilLit: return 0
+  let ps = pfProcSym(v)
+  if ps == nil: return -1
+  let cs = procFieldAssigns.getOrDefault(key)
+  for i, c in cs:
+    if c == ps: return int64(i + 1)
+  -1
+
+proc isClosureFieldTy(t: IRType): bool =
+  t != nil and t.kind == itUninterp and t.uninterpName == "__closure"
+
+proc isProcFieldCall(n: NimNode): bool =
+  ## RFC-0005 S8bn (item 6). `n` calls the proc stored in an object's field
+  ## (`o.f(x)`: the callee is a field access of proc type).
+  n.kind in {nnkCall, nnkCommand} and n.len >= 1 and
+    n[0].kind in {nnkDotExpr, nnkCheckedFieldExpr} and
+    n[0].getTypeInst.kind == nnkProcTy
+
+proc procFieldCallIR(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx):
+    tuple[e: IRExpr, hoisted: bool] =
+  ## RFC-0005 S8bn (item 6). A call through a proc field is a call through a
+  ## proc value: the field is read once, into a temporary, and the call
+  ## takes S8bh's proc-value path (`closureCallIR`) through it, `var` /
+  ## `addr` effects included. Nim reads the callee before the arguments.
+  ## A field holding a proc the walk knows (a by-value object built with
+  ## it) runs that proc's body; one it does not (an input, a heap field)
+  ## has no target (`ceClosureUnknownCallee`, its effects havocked).
+  ##
+  ## A proc field of a heap object (`ref`/`ptr` object) is held as a shadow
+  ## code (`@pf_<f>`, `pfCode`): each assignment and constructor stores the
+  ## code of the proc it names, `new` stores 0 (nil). The call reads the
+  ## code and dispatches over the procs the routines assign to the field
+  ## (`procFieldAssigns`), each a walked call; any other code (nil, an
+  ## input's proc, a value no assignment names) takes the proc-value path
+  ## above, declined -- only on a path an execution takes (`ifFeasible`).
+  let dot = if n[0].kind == nnkCheckedFieldExpr: n[0][0] else: n[0]
+  var operand = if dot.kind == nnkDotExpr: dot[0] else: nil
+  if operand != nil and operand.kind in {nnkHiddenDeref, nnkDerefExpr} and
+     operand.len == 1:
+    operand = operand[0]
+  let opTy = if operand != nil: classifyType(operand).ty else: nil
+  if opTy != nil and opTy.kind in {itRef, itPtr}:
+    let isPtr = opTy.kind == itPtr
+    let pointee = if isPtr: opTy.ptrPointeeTy else: opTy.refPointeeTy
+    if pointee != nil and pointee.kind == itTuple and dot[1].kind == nnkSym:
+      let field = macros.strVal(dot[1])
+      let key = pfObjKey(dot[0]) & "." & field
+      let cands = procFieldAssigns.getOrDefault(key)
+      let codeT = freshSynth(ctx, "procFieldCode")
+      preamble.add mkFieldDeref(codeT, parseExpr(operand, preamble, ctx),
+                                tInt(64, signed = true), pointee,
+                                "@pf_" & field, isPtr)
+      let pt = n[0].getTypeInst      # nnkProcTy[FormalParams[ret, ...], ...]
+      let rt = if pt.len > 0 and pt[0].kind == nnkFormalParams: pt[0][0]
+               else: newEmptyNode()
+      let isVoid = rt.kind == nnkEmpty or
+                   (rt.kind == nnkSym and macros.strVal(rt) == "void")
+      let retTy = if isVoid: tBool() else: classifyType(n).ty
+      let retName = if isVoid: "" else: freshSynth(ctx, "procFieldRet")
+      var branches: seq[IRBranch]
+      for i, c in cands:
+        var call = newNimNode(nnkCall, n)
+        call.add c
+        for j in 1 ..< n.len: call.add n[j]
+        let ck = ensureProcRegistered(ctx, c, call)
+        var pre: seq[IRStmt]
+        let st = userCallStmt(call, c, ck, retName, retTy, @[], pre, ctx)
+        branches.add mkBranch(mkBinop(bEq, mkVar(codeT), mkIntLit(int64(i + 1))),
+                              mkBlock(pre & @[st]))
+      var other: seq[IRStmt]
+      other.add ctx.declineMarker(feUnsupportedOp,
+        siteMsg(n, "a call through the heap proc field `" & field & "` " &
+                "holding a proc no assignment the walk sees names (an " &
+                "input's, nil, or a computed value): no target to run " &
+                "(RFC-0005 S8bn; feUnsupportedOp)"), ifFeasible = true)
+      let fv = freshSynth(ctx, "procField")
+      other.add mkLet(fv, classifyType(n[0]).ty, parseExpr(n[0], other, ctx))
+      let cc = closureCallIR(n, n[0], fv, other, ctx)
+      if isVoid:
+        if not cc.hoisted:
+          other.add mkLet(freshSynth(ctx, "closureCallSink"), tBool(), cc.e)
+      else:
+        other.add mkLet(retName, retTy, cc.e)
+      preamble.add(if branches.len == 0: mkBlock(other)
+                   else: mkIf(branches, mkBlock(other)))
+      if isVoid: return (mkBoolLit(true), true)
+      return (mkVar(retName), false)
+  let fv = freshSynth(ctx, "procField")
+  preamble.add mkLet(fv, classifyType(n[0]).ty, parseExpr(n[0], preamble, ctx))
+  closureCallIR(n, n[0], fv, preamble, ctx)
+
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8c. An expression-position call to a ROUTINE (not a builtin
@@ -4943,6 +5209,15 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
   # User-proc call in expression position. A-normalise. The instantiation
   # key returned by `ensureProcRegistered` (G1a) is the dispatch key the
   # walker looks up — it MUST be the `mkCall` callee name (not the bare name).
+  # RFC-0005 S8bn (item 6): a method dispatches on the receiver's dynamic
+  # type.
+  if calleeSym.kind == nnkSym and calleeSym.symKind == nskMethod:
+    let synthM = freshSynth(ctx, calleeName)
+    let d = methodDispatchStmt(n, calleeSym, synthM, classifyType(n).ty,
+                               preamble, ctx)
+    if d != nil:
+      preamble.add d
+      return mkVar(synthM)
   let callKey = ensureProcRegistered(ctx, calleeSym, n)
   let retCls = classifyType(n)
   let synth = freshSynth(ctx, calleeName)
@@ -4956,14 +5231,222 @@ proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                             offsetPositions, preamble, ctx)
   mkVar(synth)
 
+proc methodOverrides(sym: NimNode): seq[NimNode] =
+  ## RFC-0005 S8bn (item 6). Every method named as `sym` that is visible
+  ## where the entry macro was called (`methodRegistry`): the base method
+  ## and its overrides.
+  for c in methodRegistry.getOrDefault(macros.strVal(sym)):
+    if c.kind == nnkSym and c.symKind == nskMethod: result.add c
+
+proc methodRecvPointee(m: NimNode): IRType =
+  ## RFC-0005 S8bn (item 6). The object type of method `m`'s first
+  ## parameter (its receiver), or nil.
+  let impl = m.getImpl
+  if impl.kind != nnkMethodDef or impl.len < 4 or impl[3].len < 2: return nil
+  let t = classifyType(impl[3][1][^2]).ty
+  if t == nil or t.kind != itRef: return nil
+  t.refPointeeTy
+
+proc sameTailParams(a, b: NimNode): bool =
+  ## RFC-0005 S8bn (item 6). Methods `a` and `b` take the same parameters
+  ## after the receiver (an override, not another overload).
+  let fa = a.getImpl[3]
+  let fb = b.getImpl[3]
+  var ta, tb: seq[NimNode]
+  for i in 1 ..< fa.len:
+    for _ in 0 ..< fa[i].len - 2: ta.add fa[i][^2]
+  for i in 1 ..< fb.len:
+    for _ in 0 ..< fb[i].len - 2: tb.add fb[i][^2]
+  if ta.len != tb.len: return false
+  for k in 1 ..< ta.len:
+    if ta[k].repr != tb[k].repr: return false
+  true
+
+proc methodDispatchStmt(n, calleeSym: NimNode; retName: string;
+                        retTy: IRType; preamble: var seq[IRStmt];
+                        ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bn (item 6). A method call dispatches on the receiver's
+  ## dynamic type: Nim runs the most specific override whose receiver type
+  ## is the dynamic type or an ancestor of it. Before S8bn the call
+  ## declined (the base body would substitute for an override). The
+  ## overrides are the methods of the name visible at the entry
+  ## (`methodOverrides`), with the call's other parameters, whose receiver
+  ## is in the static receiver type's hierarchy: those at or above it (the
+  ## deepest of them is the fallback), and those below it, each tested on
+  ## the run-type tag at the depths below the static type's (`of`'s test,
+  ## `parseOfTest`), deepest first. The receiver is read once; a nil one
+  ## takes the dereference edge (Nim's dispatcher reads its type). nil
+  ## when the call is not dispatchable this way (the caller then declines,
+  ## as before).
+  if n.len < 2: return nil
+  let recv = n[1]
+  var recvNode = recv
+  while recvNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenDeref} and
+        recvNode.len > 0:
+    recvNode = recvNode[^1]
+  let st = classifyType(recv).ty
+  if st == nil or st.kind != itRef: return nil
+  let sp = st.refPointeeTy
+  let sc = hierChain(sp)
+  if sc.len == 0 or not simpleRefExpr(recvNode): return nil
+  var below: seq[tuple[depth: int; sym: NimNode; chain: seq[string]]]
+  var fallback: NimNode = nil
+  var fallbackDepth = -1
+  for m in methodOverrides(calleeSym):
+    if not sameTailParams(m, calleeSym): continue
+    let mp = methodRecvPointee(m)
+    let mc = hierChain(mp)
+    if mc.len == 0 or mc[0] != sc[0]: continue
+    let short = min(mc.len, sc.len)
+    if mc[0 ..< short] != sc[0 ..< short]: continue
+    if mc.len <= sc.len:
+      if mc.len > fallbackDepth:
+        fallbackDepth = mc.len
+        fallback = m
+    else:
+      below.add (depth: mc.len, sym: m, chain: mc)
+  if fallback == nil: return nil
+  below.sort(proc (a, b: auto): int = cmp(b.depth, a.depth))
+  # The receiver, read once; its tag at the first depth below the static
+  # type is read even when no override is below (the dispatcher's read of a
+  # nil receiver's type).
+  let cell = freshSynth(ctx, "methodRecv")
+  preamble.add mkLet(cell, st, parseExpr(recv, preamble, ctx))
+  var maxLvl = sc.len
+  for b in below: maxLvl = max(maxLvl, b.chain.len - 1)
+  var tags = initTable[int, string]()
+  for lvl in sc.len .. maxLvl:
+    let t = freshSynth(ctx, "methodTag")
+    preamble.add mkFieldDeref(t, mkVar(cell), tInt(64, signed = true), sp,
+                              "@lvl" & $lvl)
+    tags[lvl] = t
+  proc callOf(m: NimNode): IRStmt =
+    dispatchedMethods.add m
+    var c = copyNimNode(n)
+    c.add m
+    for i in 1 ..< n.len: c.add n[i]
+    let key = ensureProcRegistered(ctx, m, c)
+    var pre: seq[IRStmt]
+    let call = userCallStmt(c, m, key, retName, retTy, @[], pre, ctx)
+    mkBlock(pre & @[call])
+  var branches: seq[IRBranch]
+  for b in below:
+    var ok: IRExpr = nil
+    for lvl in sc.len ..< b.chain.len:
+      let eq = mkBinop(bEq, mkVar(tags[lvl]),
+                       mkIntLit(inheritTagCode(b.chain[lvl])))
+      ok = if ok == nil: eq else: mkBinop(bAnd, ok, eq)
+    branches.add mkBranch(ok, callOf(b.sym))
+  let fb = callOf(fallback)
+  if branches.len == 0: fb
+  else: mkIf(branches, fb)
+
+proc userOrMethodCallStmt(n, calleeSym: NimNode; preamble: var seq[IRStmt];
+                          ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bn (item 6). A statement-position user call: a method
+  ## dispatches on the receiver's dynamic type (`methodDispatchStmt`);
+  ## anything else, or a method not dispatchable so, is walked (or
+  ## declined) as before.
+  if calleeSym.kind == nnkSym and calleeSym.symKind == nskMethod:
+    let d = methodDispatchStmt(n, calleeSym, "", tBool(), preamble, ctx)
+    if d != nil: return d
+  let callKey = ensureProcRegistered(ctx, calleeSym, n)
+  userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
+
+proc isOfTest(n: NimNode): bool =
+  ## RFC-0005 S8bn (item 7). `n` is the `of` operator (`x of T`): the
+  ## system magic, never a user routine of that name.
+  n.kind in {nnkInfix, nnkCall, nnkCommand} and n.len == 3 and
+    n[0].kind == nnkSym and macros.strVal(n[0]) == "of" and
+    not isUserCallee(n[0])
+
+proc parseOfTest(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bn (item 7). `x of T` over a ref (or ptr) of an inheritance
+  ## hierarchy: false for nil, else a test of `x`'s run-type tag (S8bh's
+  ## per-depth tags, `inheritTagKey`). Depths up to `x`'s static type agree
+  ## by static typing (S8bn item 9 ties a parameter's to it), so a `T` at
+  ## or above it is `x != nil`; a deeper `T` compares each deeper level
+  ## with `T`'s chain, a test of the whole subtree below `T` (a descendant
+  ## of `T` agrees on `T`'s levels). A `T` off `x`'s chain is false. Before
+  ## S8bn `of` was unsupported.
+  let operand = n[1]
+  let o = classifyType(operand).ty
+  # The type operand's own type is `typeDesc[T]`: classify `T`.
+  var tn = n[2].getTypeInst
+  if tn.kind == nnkBracketExpr and tn.len == 2 and tn[0].kind == nnkSym and
+     macros.strVal(tn[0]).normalize == "typedesc":
+    tn = tn[1]
+  let t = classifyType(tn).ty
+  proc pointeeOf(x: IRType): IRType =
+    if x == nil: nil
+    elif x.kind == itRef: x.refPointeeTy
+    elif x.kind == itPtr: x.ptrPointeeTy
+    else: x
+  let op = pointeeOf(o)
+  let tp = pointeeOf(t)
+  let sc = hierChain(op)
+  let tc = hierChain(tp)
+  if o == nil or o.kind notin {itRef, itPtr} or sc.len == 0 or tc.len == 0 or
+     sc[0] != tc[0]:
+    preamble.add ctx.declineAtSite(feUnsupportedExprKind,
+      siteMsg(n, "`of` on a value outside a modelled ref hierarchy " &
+              "(RFC-0005 S8bn; feUnsupportedExprKind)"),
+      "`of` outside a modelled hierarchy (feUnsupportedExprKind)")
+    return mkBoolLit(false)
+  let opIR = parseExpr(operand, preamble, ctx)
+  let short = min(sc.len, tc.len)
+  if sc[0 ..< short] != tc[0 ..< short]:
+    return mkBoolLit(false)          # `T` is off `x`'s chain
+  let cell = freshSynth(ctx, "ofObj")
+  preamble.add mkLet(cell, o, opIR)
+  let nonNil = mkBinop(bNe, mkVar(cell), mkNil(o))
+  if tc.len <= sc.len:
+    return nonNil
+  let res = freshSynth(ctx, "ofRes")
+  preamble.add mkLet(res, tBool(), mkBoolLit(false))
+  var reads: seq[IRStmt]
+  var ok: IRExpr = nil
+  for lvl in sc.len ..< tc.len:
+    let tag = freshSynth(ctx, "ofTag")
+    reads.add mkFieldDeref(tag, mkVar(cell), tInt(64, signed = true), op,
+                           "@lvl" & $lvl, ptrFamily = o.kind == itPtr)
+    let eq = mkBinop(bEq, mkVar(tag), mkIntLit(inheritTagCode(tc[lvl])))
+    ok = if ok == nil: eq else: mkBinop(bAnd, ok, eq)
+  reads.add mkAssign(res, ok)
+  preamble.add mkIf(@[mkBranch(nonNil, mkBlock(reads))])
+  mkVar(res)
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
     return mkVar(byRefName(n))
+  if isOfTest(n): return parseOfTest(n, preamble, ctx)   ## RFC-0005 S8bn
   case n.kind
+  of nnkNilLit:
+    # RFC-0005 S8bn (item 7). A `nil` literal in any typed position (`let
+    # b: Base = nil`, an argument, a `return`, an assignment) is its type's
+    # nil; it parsed only in a comparison and a ref field's constructor
+    # value. A position whose type is not a ref or ptr declines.
+    let t = classifyType(n).ty
+    if t != nil and t.kind in {itRef, itPtr}:
+      mkNil(t)
+    else:
+      preamble.add ctx.declineAtSite(feUnsupportedExprKind,
+        siteMsg(n, "`nil` of a type the walk holds no nil for (" & $t &
+                ") (RFC-0005 S8bn; feUnsupportedExprKind)"),
+        "nil literal of an unmodelled type (feUnsupportedExprKind)")
+      mkIntLit(0)
   of nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit, nnkInt64Lit:
-    mkIntLit(n.intVal)
+    # RFC-0005 S8bn (item 7): Nim folds an `of` test static typing decides
+    # (`m of Base` for `m: Mid`, `s of Mid` for a sibling `s`) to a bool-
+    # typed int literal 0 or 1. (`typeKind`, not `getTypeInst`: an untyped
+    # literal -- the isolation entry, `tsymex_phase1_dsl` -- has no type.)
+    if n.kind == nnkIntLit and n.intVal in 0'i64 .. 1'i64 and
+       n.typeKind == ntyBool:
+      mkBoolLit(n.intVal == 1)
+    else:
+      mkIntLit(n.intVal)
   of nnkUIntLit .. nnkUInt64Lit:
     mkIntLit(n.intVal)
   of nnkCharLit:
@@ -6114,7 +6597,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         if fn == fieldName:
           ix = i; break
       if ix < 0:
-        error(&"symex: field `{fieldName}` not in type {lhsCls.ty}", n)
+        # RFC-0005 S8bn: a field the classified type does not list (a
+        # generic object's inherited field: its parent is not classified)
+        # declines, where it failed the build.
+        preamble.add ctx.declineAtSite(feUnsupportedExprKind,
+          siteMsg(n, "field `" & fieldName & "` is not in the type the walk " &
+                  "classified (" & $lhsCls.ty & ") (RFC-0005 S8bn; " &
+                  "feUnsupportedExprKind)"),
+          "a field the classified type does not list (feUnsupportedExprKind)")
+        let dummy = zeroValueForType(classifyType(n).ty)
+        return (if dummy != nil: dummy else: mkIntLit(0))
       let objIR = parseExpr(n[0], preamble, ctx)
       # Round-6 Bug #2: this field's DECLARED type is a scoped-decline
       # placeholder (`isUnsupportedFieldPlaceholder`) — decline THIS READ
@@ -6242,6 +6734,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if isMarkerCall(n):
       error("symex: marker call `" & n[0].repr & "` used in expression " &
             "position; markers are statements only", n)
+    if isProcFieldCall(n):
+      return procFieldCallIR(n, preamble, ctx).e   ## RFC-0005 S8bn
     let calleeSym = n[0]
     if calleeSym.kind != nnkSym:
       error(&"symex: cannot resolve callee `{n[0].repr}` in untyped " &
@@ -7576,6 +8070,17 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
         return mkVar(tmp)
       preamble.add mkNewT(tmp, objTyFull)
       for i, fieldName in objTy.fieldNames:
+        if isClosureFieldTy(objTy.fields[i]) and byName.hasKey(fieldName):
+          # RFC-0005 S8bn (item 6): a proc field's shadow code
+          # (`procFieldCallIR`); `new` stored 0 (nil) for an omitted one.
+          let valNode = byName[fieldName]
+          let code = pfCode(pfObjKey(n) & "." & fieldName, valNode)
+          if code == -1:
+            preamble.add mkLet(freshSynth(ctx, "procFieldInit"),
+                               objTy.fields[i], parseExpr(valNode, preamble, ctx))
+          preamble.add mkFieldDerefWrite(mkVar(tmp), mkIntLit(code),
+            tInt(64, signed = true), objTy, "@pf_" & fieldName, isPtrCtor)
+          continue
         if not byName.hasKey(fieldName): continue
         let fty = objTy.fields[i]
         let isRefField = fty.kind in {itRef, itPtr}
@@ -10686,8 +11191,7 @@ proc parseRoutineCallStmt(n, calleeSym: NimNode, preamble: var seq[IRStmt],
       argIRs.add parseExpr(n[i], preamble, ctx)
     mkOpaqueCall(calleeName, "", argIRs, tBool(), inert)
   else:
-    let callKey = ensureProcRegistered(ctx, calleeSym, n)
-    userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
+    userOrMethodCallStmt(n, calleeSym, preamble, ctx)   ## RFC-0005 S8bn
 
 type ValueFieldWrite = object
   ## RFC-0005 S8p. A field write on a VALUE tuple or object, rebuilt as a
@@ -11110,6 +11614,16 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
       let ptrIR = parseExpr(operand, preamble, ctx)
       let valIR = asgnRhs()
+      # RFC-0005 S8bn (item 6): a whole-object store replaces its proc
+      # fields with values this model names no candidate for (-1).
+      var pfWrites: seq[IRStmt]
+      if pointeeTy.kind == itTuple:
+        for i, fname in pointeeTy.fieldNames:
+          if isClosureFieldTy(pointeeTy.fields[i]):
+            pfWrites.add mkFieldDerefWrite(ptrIR, mkIntLit(-1),
+              tInt(64, signed = true), pointeeTy, "@pf_" & fname, isPtr)
+      if pfWrites.len > 0:
+        return mkBlock(@[mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)] & pfWrites)
       return mkDerefWrite(ptrIR, valIR, pointeeTy, isPtr)
   # Phase 15 R6 (ADR-0010) + ADR-0013 S3. `p.field = v` — a FIELD WRITE through
   # a `ref object` / `ptr object`. LHS is `nnkDotExpr(nnkHiddenDeref(p), field)`,
@@ -11134,6 +11648,17 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
         let fieldName = lhsFW[1].strVal
         let fieldTy   = classifyType(lhsFW).ty   ## the field's type
         let ptrIR = parseExpr(operand, preamble, ctx)
+        if pointeeTy.kind == itTuple and isClosureFieldTy(fieldTy):
+          # RFC-0005 S8bn (item 6): a heap proc field holds its shadow code
+          # (`procFieldCallIR`); a value no assignment names is evaluated
+          # for its effects and stored as -1 (no candidate).
+          let code = pfCode(pfObjKey(lhsFW[0]) & "." & fieldName, n[1])
+          if code == -1:
+            preamble.add mkLet(freshSynth(ctx, "procFieldRhs"), fieldTy,
+                               asgnRhs())
+          return mkFieldDerefWrite(ptrIR, mkIntLit(code),
+                                   tInt(64, signed = true), pointeeTy,
+                                   "@pf_" & fieldName, isPtr)
         let valIR = asgnRhs()
         return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
                                  fieldName, isPtr)
@@ -11975,7 +12500,12 @@ proc parseStmtInner(n: NimNode,
       # User-proc call as a statement (void-return). Only resolvable
       # against typed AST — isolation-mode falls to `isUnsupported`.
       let calleeSym = n[0]
-      if calleeSym.kind != nnkSym:
+      if isProcFieldCall(n):
+        # RFC-0005 S8bn (item 6): a call through a proc field.
+        let cc = procFieldCallIR(n, preamble, ctx)
+        if cc.hoisted: mkBlock(@[])
+        else: mkLet(freshSynth(ctx, "closureCallSink"), tBool(), cc.e)
+      elif calleeSym.kind != nnkSym:
         ctx.declineMarker(feUnsupportedStmtKind, &"call to `{n[0].repr}` not in supported fragment")
       # Phase 15 R13 (sub-track A). A CLOSURE CALL through a proc-valued
       # variable/param in STATEMENT position (e.g. `capture()` — a `let`-bound
@@ -12083,9 +12613,7 @@ proc parseStmtInner(n: NimNode,
             let val = parseExpr(n[3], preamble, ctx)
             mkAssign(recvName, mkTableSet(mkVar(recvName), key, val))
           else:
-            let callKey = ensureProcRegistered(ctx, calleeSym, n)
-            userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble,
-                         ctx)
+            userOrMethodCallStmt(n, calleeSym, preamble, ctx)   ## RFC-0005 S8bn
         # N49 (RFC-chapulin-hardening bucket-2, design round). A DOTTED-FIELD
         # lvalue receiver (`obj.seqField.add(x)`, `w.items.del(i)`, ...) never
         # matches the bare-symbol `#145 mutations` arm above (`recvName` there
@@ -12177,8 +12705,7 @@ proc parseStmtInner(n: NimNode,
               "N49: dotted-field lvalue mutation `" & calleeName &
                             "` unsupported (feUnsupportedOp)")
         else:
-          let callKey = ensureProcRegistered(ctx, calleeSym, n)
-          userCallStmt(n, calleeSym, callKey, "", tBool(), @[], preamble, ctx)
+          userOrMethodCallStmt(n, calleeSym, preamble, ctx)   ## RFC-0005 S8bn
   of nnkDiscardStmt:
     # v68 (round 5, chapulin CRITICAL finding): a discarded expression is
     # WALKED, not dropped. Every `discard <expr>` is lowered to a synthetic
@@ -13472,7 +13999,9 @@ proc collectEmittedAnchors(n: NimNode; markers: var HashSet[int];
       keys.incl n.strVal
   of nnkCall:
     let nm = callNameOf(n)
-    if nm == "mkUnsupported" and n.len == 4 and n[3].kind in nnkIntLit..nnkInt64Lit:
+    # RFC-0005 S8bn: a fifth argument, `ifFeasible`, may follow the marker.
+    if nm == "mkUnsupported" and n.len in 4 .. 5 and
+       n[3].kind in nnkIntLit..nnkInt64Lit:
       markers.incl int(n[3].intVal)
     elif nm == "mkUnsafeCast" and n.len == 3 and n[2].kind in nnkIntLit..nnkInt64Lit:
       markers.incl int(n[2].intVal)
@@ -13697,4 +14226,5 @@ proc parseEntryImpl*(fn: NimNode, apiName: string, maxInst: int): ParseResult =
   ## commit 1adcd33) and consume `.params` at macro time the same way
   ## `symexFindAllWitnesses` does — all nine entry macros now route through
   ## `parseEntryImpl`.
+  scanProcFieldAssigns(fn)   ## RFC-0005 S8bn (item 6)
   parseProc(resolveEntryImpl(fn, apiName), maxInst)

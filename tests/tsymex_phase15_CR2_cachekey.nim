@@ -941,7 +941,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bh (var / addr effects of a call through a proc value;
     ## ptr parameters may address a ref object's field; ref conversions
     ## keep identity). Provisional 208.
-    check symexWalkerVersion == "208"
+    ## RFC-0005 S8bn (S8bh's remainder: ptr witnesses and targets, proc
+    ## fields and methods, `of` / `nil`, hierarchies, parameter tags).
+    ## Provisional 215.
+    check symexWalkerVersion == "215"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

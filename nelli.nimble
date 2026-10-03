@@ -1070,5 +1070,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bf_alias",
             # RFC-0005 S8bh: var / addr effects of a call through a proc
             # value. Walker 208 (provisional).
-            "tsymex_rfc0005_s8bh_remainder"]:
+            "tsymex_rfc0005_s8bh_remainder",
+            # RFC-0005 S8bn: S8bh's remainder -- ptr witnesses and targets,
+            # proc fields and methods, `of` / `nil`, hierarchies, parameter
+            # tags, S8bk's late address. Walker 215 (provisional).
+            "tsymex_rfc0005_s8bn_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

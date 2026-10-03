@@ -97,11 +97,13 @@ suite "RFC-0005 S8d -- a user type named like a stdlib type head is not the stdl
     check r.status == sxUnknown
     check r.errors.hasKind(feUnsupportedParamType)
 
-  test "user generic `Option`: the recorded user-generic decline (pin: no Option model exists)":
+  test "user generic `Option`: a user generic object, never options.Option's model":
+    ## RFC-0005 S8bn (item 8) classifies a user generic object instance, so
+    ## this real hit is sxSat (it was the recorded user-generic decline);
+    ## `options.Option` below stays declined (no model exists for it).
     let r = symexFind(s8dOption, tLabel("s8d_option"))
     dump(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedParamType)
+    check r.status == sxSat
 
   test "user alias `Natural = int`: not range[0..high(int)] (was a false sxUnsat)":
     let r = symexFind(s8dNatural, tLabel("s8d_natural"))

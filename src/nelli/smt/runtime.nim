@@ -1069,6 +1069,13 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## ADR-0013 Slice 2 fwd-decl (defined in runtime_heap.nim, included below).
   ## `extractFromSymVal` (D5 witness serialization) selects the active arm's
   ## fields out of `currentVariantHeaps` before the heap cluster is included.
+proc inheritTagKey*(objTy: IRType, level: int): string
+  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
+  ## `allocateSym` ties a hierarchy ref's run-type tags to its static type.
+proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
+                    pointeeTy: IRType, name: string,
+                    variantTy: IRType = nil, leaf = 0): Z3AnyAst
+  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
 proc fieldHeapKey*(objTy: IRType, field: string): string
   ## Cluster H H_witness fwd-decl (defined in runtime_heap.nim, included
   ## below). `buildHeapSnapshot`'s recursive descent needs the field-split
@@ -2860,6 +2867,29 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, baseName.cstring)
     let refRaw = ctx.checkErr Z3_mk_const(ctx.raw, sym, refSort)
     let refAny = wrap[Z3AnyAst](ctx, refRaw)
+    if hierChain(pointee).len > 1:
+      # RFC-0005 S8bn (item 9). A non-nil ref of a hierarchy type S (depth
+      # `s`) addresses an object whose dynamic type is S or one of its
+      # descendants: its run-type tags at depths `1..s` are S's own chain
+      # (`inheritTagKey`). They were free, so a parameter of static type
+      # `Mid` aliasing one of static type `Base` could fail `Mid(b)` (a
+      # false `sxSat`, a witness no Nim value realises). The facts are on the
+      # INPUT tag heaps (`heap_<key>`), which an allocation never changes
+      # (it stores into the path's heap); the depths below `s` stay free:
+      # any descendant.
+      let tagTy = tInt(64, signed = true)
+      let nilAst = currentNilConsts[refPointeeTypeId(pointee)]
+      let isNil = wrap[Z3Bool](ctx, checkedEq(ctx, refAny.raw, nilAst.raw))
+      let chain = hierChain(pointee)   ## RFC-0005 S8bn: a case object's too
+      for lvl in 1 ..< chain.len:
+        let key = inheritTagKey(pointee, lvl)
+        let arr = mkHeapArrayVar(ctx, refSort, tagTy, "heap_" & key)
+        # Each raw term is wrapped (ref-counted) before the next Z3 call:
+        # an unwrapped one may be collected under it.
+        let tag = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, refRaw))
+        let code = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw,
+          inheritTagCode(chain[lvl]), sortOfRaw(ctx, tag.raw)))
+        pcOut.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, tag.raw, code.raw)))
     if ty.kind == itRef:
       SymVal(kind: svRef, refAst: refAny, refPointee: pointee)
     else:
@@ -8687,6 +8717,34 @@ const ptrAimPrefix* = "@aim:"
   ## target is a variable (a global, a `var` parameter): `@aim:<IR name>`.
 
 proc ptrSelKey(typeId: string): string = typeId & "__@ptrsel"
+proc ptrIdxKey(typeId: string): string = typeId & "__@ptridx"
+proc ptrKeyKey(typeId: string): string = typeId & "__@ptrkey"
+  ## RFC-0005 S8bn (item 4). The input array `Ref_T -> String` naming the
+  ## key of a pointer whose target is a `Table[string, V]` value.
+  ## RFC-0005 S8bn (item 4). The input array `Ref_T -> Int` naming the
+  ## element a `ptr T` of unknown origin addresses when its target is an
+  ## element of a seq (`ptrTargets`): the snapshot index of the element
+  ## identity (root, path, index).
+
+type PtrLeafAim = object
+  ## RFC-0005 S8bn (item 4). What a `sel` code names, for the snapshot: a
+  ## part of a variable (`name`, the field / element `path` below it, and
+  ## whether the last step is the pointer's seq index), or an element of a
+  ## seq held in a heap field family (`fam`).
+  name: string
+  path: seq[int]
+  seqIdx: bool
+  tabKey: bool
+  fam: string
+  typeId: string
+
+var ptrLeafAims {.threadvar.}: Table[int64, PtrLeafAim]
+  ## RFC-0005 S8bn (item 4). Every `sel` code `ptrTargets` gave a part of a
+  ## variable or a heap-held seq element this run; reset at run entry.
+
+proc ptrLeafPathStr(path: seq[int]; seqIdx: bool): string =
+  for i in path: result.add "/" & $i
+  if seqIdx: result.add "/*"
 proc ptrObjKey(typeId, famKey: string): string = typeId & "__@ptrobj__" & famKey
 
 proc ptrScalarPointee(t: IRType): bool =
@@ -9042,7 +9100,15 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     var aimed = false
     for fam in fams:
       if not currentVariantHeaps.hasKey(fam): continue
-      if not ptrSelMatches(selV, ptrTargetCode(fam)): continue
+      # RFC-0005 S8bn (item 4): an element of a seq held in the family.
+      let seqCode = ptrTargetCode(fam & "/*")
+      let isSeqFam = ptrSelMatches(selV, seqCode) and
+                     ptrLeafAims.hasKey(seqCode)
+      let tabCode = ptrTargetCode(fam & "/#")
+      let isTabFam = ptrSelMatches(selV, tabCode) and
+                     ptrLeafAims.hasKey(tabCode)
+      if not isSeqFam and not isTabFam and
+         not ptrSelMatches(selV, ptrTargetCode(fam)): continue
       let objMap = inputHeap(ptrObjKey(typeId, fam))
       let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, objMap.raw,
                                                       pos.addrAst.raw))
@@ -9053,8 +9119,21 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
       let address = oid & "|" & $m.eval(objAddr)
       let fsep = fam.rfind("__")
       if oid.len > 0 and fsep >= 0 and b.cellOf.hasKey(address):
-        b.entries[b.entryOf[pos.name]].aliasRef =
-          some("&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1])
+        var aim = "&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1]
+        if isSeqFam:
+          let ik = ptrIdxKey(typeId)
+          if currentVariantHeaps.hasKey(ik):
+            aim.add "." & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+              inputHeap(ik).raw, pos.addrAst.raw)))
+          else: aim = ""
+        elif isTabFam:
+          let kk = ptrKeyKey(typeId)
+          if currentVariantHeaps.hasKey(kk):
+            aim.add "." & m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(ctx,
+              inputHeap(kk).raw, pos.addrAst.raw)))
+          else: aim = ""
+        if aim.len > 0:
+          b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
       aimed = true
       break
     if aimed: continue
@@ -9071,7 +9150,28 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     for nm in names:
       if ptrSelMatches(selV, ptrTargetCode(nm)):
         b.entries[b.entryOf[pos.name]].aliasRef = some(ptrAimPrefix & nm)
+        aimed = true
         break
+    if aimed: continue
+    # RFC-0005 S8bn (item 4): a part of a variable -- a field, an array
+    # element, a seq element (`@aim:<name>/<step>/.../<index>`).
+    for code, la in ptrLeafAims:
+      if la.fam.len > 0 or la.typeId != typeId: continue
+      if la.name notin names or not ptrSelMatches(selV, code): continue
+      var aim = ptrAimPrefix & la.name & ptrLeafPathStr(la.path, false)
+      if la.seqIdx:
+        let ik = ptrIdxKey(typeId)
+        if not currentVariantHeaps.hasKey(ik): break
+        aim.add "/" & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+          inputHeap(ik).raw, pos.addrAst.raw)))
+      elif la.tabKey:
+        # A table key: `k` and its bytes in hex (a key may hold a `/`).
+        let kk = ptrKeyKey(typeId)
+        if not currentVariantHeaps.hasKey(kk): break
+        aim.add "/k" & toHex(m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(
+          ctx, inputHeap(kk).raw, pos.addrAst.raw))))
+      b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
+      break
   b.entries
 
 proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
@@ -17369,17 +17469,34 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[]):
                         SymVal   ## Phase 15 C4 fwd-decl.
 
-proc havocUnknownClosureEffects(e: IRExpr) =
+proc havocUnknownClosureEffects(e: IRExpr; env: Env) =
   ## RFC-0005 S8bh. A call through a proc value the walk cannot resolve
   ## (`ceClosureUnknownCallee`) may write every `var` actual and every heap
   ## cell (its arguments', and whatever its own captures reach). The call
   ## declines; its effects are havocked rather than dropped, so a fact the
   ## call may have changed is not kept past it: each `var` actual gets a
   ## fresh value of its formal's type, and each heap a fresh array of its
-  ## sort.
+  ## sort. RFC-0005 S8bn (item 6): and each module-level global bound on
+  ## the calling path (`env`), which any routine may write; before S8bn only
+  ## the path's taint stood for that, and the global kept its value past
+  ## the call.
   if currentWalkCtxPtr == nil: return
   let ctx = requireCurrentContext()
   let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  var gnames: seq[string]
+  for k in env.keys:
+    if isGlobalEnvName(k): gnames.add k
+  sort(gnames)
+  for g in gnames:
+    let sv = env[g]
+    if sv.kind notin {svInt, svBV8, svBV16, svBV32, svBV64, svBool, svFloat32,
+                      svFloat64, svString, svRef, svTuple, svArray, svSeq}:
+      continue
+    var facts: seq[Z3Bool]
+    let v = allocateSym(tyOf(sv), freshDegradeName("__closureUnknownGlobal"),
+                        facts)
+    for f in facts: currentClosureExitPc.add f
+    wp[].closureVarOuts.add (name: g, val: v)
   for k, t in e.ccVarTys:
     if t.isNil or k >= e.ccArgs.len or e.ccArgs[k].kind != iekVar: continue
     var facts: seq[Z3Bool]
@@ -17442,7 +17559,7 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
-    havocUnknownClosureEffects(e)   ## RFC-0005 S8bh
+    havocUnknownClosureEffects(e, env)   ## RFC-0005 S8bh, S8bn
     # No semantics: a well-sorted-for-int stand-in so a downstream read does
     # not crash.
     var fresh: seq[Z3Bool]
@@ -19356,6 +19473,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
   currentWinningGlobals = @[]                         ## RFC-0005 S8bn
+  ptrLeafAims = initTable[int64, PtrLeafAim]()        ## RFC-0005 S8bn
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
   currentCallerHeapDepth = 0                          ## Phase 15 R1b
@@ -21160,6 +21278,47 @@ proc ptrAimsAt*(p: pointer; name: string): bool =
   ## variable itself, which no witness cell can be.
   p != nil and ptrAims.getOrDefault(p, "") == name
 
+proc ptrAimPath*(p: pointer; name: string): tuple[hit: bool; path: seq[string]] =
+  ## RFC-0005 S8bn (item 4). The witness pointer `p` was aimed at a part of
+  ## the variable `name` (`@aim:<name>/<step>/...`): the steps, each a field
+  ## position, an element index, or a table key (`k<hex>`), for
+  ## `ptrAimInto`.
+  if p == nil: return
+  let a = ptrAims.getOrDefault(p, "")
+  if not a.startsWith(name & "/"): return
+  result.path = a[name.len + 1 .. ^1].split('/')
+  result.hit = true
+
+proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
+  ## RFC-0005 S8bn (item 4). The address of the part of `x` the steps
+  ## `path[i ..]` name (a field's position, an element's index, a table
+  ## key), or nil.
+  when T is U:
+    if i == path.len: return addr x
+  if i >= path.len: return nil
+  when T is Table:
+    if path[i].len >= 1 and path[i][0] == 'k':
+      let key = try: parseHexStr(path[i][1 .. ^1]) except ValueError: ""
+      when compiles(x.hasKey(key)):
+        if x.hasKey(key):
+          return ptrAimInto[typeof(x[key]), U](x[key], path, i + 1)
+    return nil
+  else:
+    let n = try: parseInt(path[i]) except ValueError: -1
+    when T is tuple or (T is object and not (T is ref)):
+      var k = 0
+      for _, f in fieldPairs(x):
+        if k == n:
+          return ptrAimInto[typeof(f), U](f, path, i + 1)
+        inc k
+    elif T is array or T is seq:
+      var k = 0
+      for e in x.mitems:
+        if k == n:
+          return ptrAimInto[typeof(e), U](e, path, i + 1)
+        inc k
+    nil
+
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 
 proc validDefault[F](f: var F) =
@@ -21250,6 +21409,10 @@ proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
       f[i] = resolveRef[E](c, refElemPos(path, i))
     else:
       readCellField(c, path & "." & $i, f[i])
+      # RFC-0005 S8bn (item 4): the element's address, for a pointer the
+      # snapshot aims at it (`aliasRef = "&<cell>.<field>.<index>"`).
+      if path.len > 0 and path[0] != '&':
+        cellRecord(c, "&" & path & "." & $i, cast[pointer](addr f[i]))
 
 proc readCellTable[V](c: RefWitness; path: string; f: var Table[string, V]) =
   ## RFC-0005 S8ap. A `Table[string, V]` cell field: the keys of
@@ -21264,6 +21427,12 @@ proc readCellTable[V](c: RefWitness; path: string; f: var Table[string, V]) =
       when V is bool: v = i != 0
       elif V is SomeInteger or V is enum or V is char: v = V(i)
     f[k] = v
+  # RFC-0005 S8bn (item 4): each value's address, once every key is in (a
+  # later insertion may move them), for a pointer the snapshot aims at it
+  # (`aliasRef = "&<cell>.<field>.<key>"`).
+  if path.len > 0 and path[0] != '&':
+    for k in cellTabKeys(c, path):
+      cellRecord(c, "&" & path & "." & k, cast[pointer](addr f[k]))
 
 proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
   ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`, whose

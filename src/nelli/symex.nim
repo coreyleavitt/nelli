@@ -818,7 +818,9 @@ proc userTypeName(ty: IRType, spelling: string): NimNode =
   ## from something other than a symbol), which is all the emitter wrote
   ## before.
   let sym = witnessTypeSym(ty)
-  if sym != nil: copyNimNode(sym) else: ident(spelling)
+  if sym == nil: ident(spelling)
+  elif sym.kind == nnkSym: copyNimNode(sym)
+  else: copyNimTree(sym)   ## RFC-0005 S8bn: a generic instance `G[int]`
 
 proc defaultValueOf(tyNode: NimNode): NimNode =
   ## RFC-0005 S8e. The default value of the type `tyNode` names, as
@@ -904,6 +906,13 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   if isRecursionPlaceholder(pointee):
     let sym = witnessTypeSym(pointee)
     if sym == nil: return wrapped(ident(pointee.objectName))
+    if sym.kind == nnkBracketExpr:
+      # RFC-0005 S8bn: a generic instance; its head's declaration tells.
+      let gi = sym[0].getImpl
+      if gi.kind == nnkTypeDef and gi.len >= 3 and
+         gi[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimTree(sym)
+      return wrapped(copyNimTree(sym))
     let impl = sym.getImpl
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind in {nnkRefTy, nnkPtrTy}:
@@ -2042,12 +2051,23 @@ proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
       preamble.add quote do:
         when typeof(addr `pi`) is typeof(`pj`):
           if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `pi`
+        # RFC-0005 S8bn (item 4): or a part of it (`ptrAimPath`).
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`pi`), typeof(`pj`[])](`pi`, pa.path, 0)
     for g in globals:
       let nm = newLit(globalEnvPrefix & macros.strVal(owner(g)) & "." &
                       macros.strVal(g))
       preamble.add quote do:
         when typeof(addr `g`) is typeof(`pj`):
           if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `g`
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`g`), typeof(`pj`[])](`g`, pa.path, 0)
   if afterBind != nil: preamble.add afterBind
   if paramTys.len == 0:
     return newStmtList(preamble, call)
@@ -2461,6 +2481,34 @@ proc parseEntryImplWarned(fn: NimNode, apiName: string,
   warnIncoherentSettings(settings, apiName)
   parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
 
+proc methodPrelude(fn: NimNode): NimNode =
+  ## RFC-0005 S8bn (item 6). nil when every method `fn` calls (transitively)
+  ## is registered (`dsl_parser.methodRegistry`); otherwise the statements
+  ## that register them, emitted into the CALLER's scope, where each name
+  ## resolves to every overload visible there. The entry macro then expands
+  ## again after them, and its parse dispatches each method call over the
+  ## overrides (`methodDispatchStmt`). A name not visible at the caller is
+  ## recorded as such, and its calls stay declined.
+  let names = unregisteredMethodNames(fn)
+  if names.len == 0: return nil
+  result = newStmtList()
+  for nm in names:
+    let id = ident(nm)
+    let reg = newCall(bindSym"symexRegisterMethods", newLit(nm), id)
+    let none = newCall(bindSym"symexRegisterNoMethods", newLit(nm))
+    result.add quote do:
+      when declared(`id`): `reg`
+      else: `none`
+
+proc targetLit(t: SymexTarget): NimNode =
+  ## RFC-0005 S8bn. A static `SymexTarget` as an expression, for an entry
+  ## macro's re-expansion (`methodPrelude`).
+  case t.kind
+  of stkLabel: newCall(bindSym"tLabel", newLit(t.label))
+  of stkRaisedExn: newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
+  else: nnkObjConstr.newTree(bindSym"SymexTarget",
+                             newColonExpr(ident"kind", newLit(t.kind)))
+
 macro symexFind*(fn: typed,
                  target: static SymexTarget,
                  settings: static SymexSettings = defaultSymexSettings()
@@ -2475,6 +2523,11 @@ macro symexFind*(fn: typed,
   # (below `warnIncoherentSettings`), which warns on an incoherent
   # `settings` and THEN calls `parseEntryImpl` — a single call site both
   # entries share.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFind", fn,
+      targetLit(target), newLit(settings)))
   let parsed = parseEntryImplWarned(fn, "symexFind", settings)
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -2605,6 +2658,11 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   ## sequence (`seq[ChoiceNode]`) the corpus entry replays; `bindings` says,
   ## per `fn` parameter, whether it's a direct (symbolic) draw or a
   ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicCollect",
+      fn, trace, bindings, newLit(settings), newLit(maxDraws)))
   let parsed = parseEntryImplWarned(fn, "concolicCollect", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
@@ -2638,6 +2696,12 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   ## along the concrete replay, i.e. an index into the collected
   ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
   ## frontier-stall selection on top of this later.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicFlip",
+      fn, trace, bindings, targetBranchIndex, newLit(settings),
+      newLit(maxDraws), newLit(maxRelaxationAttempts), newLit(z3TimeoutMs)))
   let parsed = parseEntryImplWarned(fn, "concolicFlip", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
@@ -3165,6 +3229,11 @@ macro symexFindAllWitnesses*(fn: typed,
   # `symexForAll`, which emits a call to this macro rather than routing
   # through `symexFind`/`assertCoveredBy` (its own settings never touched
   # `warnIncoherentSettings` before this).
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFindAllWitnesses",
+      fn, db, newLit(symexSettings), excludeTargets))
   let parsed = parseEntryImplWarned(fn, "symexFindAllWitnesses", symexSettings)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)

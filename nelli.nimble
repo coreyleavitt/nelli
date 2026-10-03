@@ -1095,5 +1095,7 @@ task test, "Run the test suite":
             # S8bx item 4: a key removed while iterating a Table, the
             # length kept, declines (native runs prove the slot walk
             # depends on the hashes).
-            "tsymex_rfc0005_s8bx_iterchange"]:
+            "tsymex_rfc0005_s8bx_iterchange",
+            # S8bx item 5: a string's setLen over a symbolic string decides.
+            "tsymex_rfc0005_s8bx_setlenstr"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

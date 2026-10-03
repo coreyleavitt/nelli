@@ -222,7 +222,9 @@ const symexWalkerVersion* = "228"
   ## from a Table while iterating it, the length kept, followed the
   ## enumeration taken at loop entry (a false sxUnsat / sxSat for one entry;
   ## Nim's slot walk depends on the hashes): the path declines
-  ## (`iekTabRemovedSince`).
+  ## (`iekTabRemovedSince`). A string's `setLen` binds a fresh byte leaf
+  ## equal to the prefix / extension, so a byte read of a symbolic string's
+  ## result decides on both pinned Z3s (was `sxUnknown`).
   ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
   ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
   ## magic with a `var` parameter was registered with an empty body, so its

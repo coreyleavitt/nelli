@@ -1152,5 +1152,14 @@ task test, "Run the test suite":
             # call through a proc value; a ptr of unknown origin may address
             # a ref field, a global or a var parameter; ref conversions along
             # a hierarchy keep identity; walker 209->217 (batch 4).
-            "tsymex_rfc0005_s8bh_remainder"]:
+            "tsymex_rfc0005_s8bh_remainder",
+            # RFC-0005 S8bs -- a var, addr or by-pointer actual whose
+            # variable is address-taken is bound to its cell; heap lvalues
+            # go by reference; by-value seqs share element cells; inlined
+            # iterator formals name the caller's locations; walker 222.
+            # Split in four by theme (shared SUTs in s8bs_suts.nim).
+            "tsymex_rfc0005_s8bs_addrglobal",
+            "tsymex_rfc0005_s8bs_byref",
+            "tsymex_rfc0005_s8bs_iterparams",
+            "tsymex_rfc0005_s8bs_byvalue"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

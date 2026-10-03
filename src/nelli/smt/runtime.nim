@@ -4030,6 +4030,16 @@ var currentMaxSplitParts* {.threadvar.}: int
   ## kind used by the general symbolic split path — rather than emitting
   ## potentially thousands of Z3 store calls (compile-time DoS prevention).
 
+var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bj. The definitions `r == rec(s)` of the `replace` values
+  ## lowered by a recursive function (`runtime_strings.regexReplaceRec`),
+  ## each over its own fresh `r`: definitional, asserted in every query
+  ## (`globalRoots`). `checkCapped` first tries a query WITHOUT them (the
+  ## value's facts, `regex_parser.replaceLemmas`, stay): its models are a
+  ## superset of the real ones, so its UNSAT is the query's own; Z3's
+  ## unfolding of the recursive term never reaches the facts' conflict
+  ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
+
 var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
   ## `iekStrStrip` lowering: for `strip(s, leading, trailing, chars)` with a
@@ -12191,6 +12201,19 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8bd: and with the exact link between the Int views of `x`
   # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
   let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
+  # RFC-0005 S8bj: the query without the recursive `replace` definitions
+  # (`regexRecDefConds`), under the small budget of step 0: a superset of
+  # the real models, so an UNSAT is the query's own.
+  if regexRecDefConds.len > 0:
+    var defIds = initHashSet[int]()
+    for d in regexRecDefConds: defIds.incl astId(ctx, d.raw)
+    var abstracted: seq[Z3Bool]
+    for r in rootsIn:
+      if astId(ctx, r.raw) notin defIds: abstracted.add r
+    if abstracted.len < rootsIn.len:
+      let pre = if rlimit == 0: factsFirstRLimit else: min(rlimit, factsFirstRLimit)
+      let sAbs = querySolver(ctx, abstracted, pre)
+      if sAbs.check() == zsUnsat: return (zsUnsat, sAbs, nil, "")
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()
@@ -12406,6 +12429,9 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   # into every check — definitional clauses over per-occurrence fresh
   # strings (see `stripDecompConds`' doc for the soundness argument).
   for c in stripDecompConds:
+    roots.add c
+  # RFC-0005 S8bj: the recursive `replace` values' definitions.
+  for c in regexRecDefConds:
     roots.add c
   # RFC-0005 S8f: every allocated table's / set's size is at least its
   # number of distinct present key terms (`ContainerCardRegistry`). True of
@@ -22796,6 +22822,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
+  regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag

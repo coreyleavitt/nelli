@@ -20,6 +20,13 @@ import z3
 import nelli/smt/regex_parser
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
+import pcre
+
+proc jitEngine(): bool =
+  ## RFC-0005 S8bj. std/re's unanchored calls run on PCRE's JIT.
+  var v: cint
+  discard pcre.config(pcre.CONFIG_JIT, addr v)
+  v == 1
 
 const widen = (when defined(nelliRegexExhaustive): 1 else: 0)
 
@@ -115,10 +122,15 @@ const readPatterns = [
   "(*BSR_UNICODE)a", "a(*F)|A", "(*FAIL)", "(*MARK:x)a", "a(*:y)A",
   "(*UCP)(*LF)\\w"]
 
-const stillUndecided = ["(?m)a", "(?X)a", "(*UTF8)a", "(*UTF)a",
-  "(*COMMIT)a", "(*PRUNE)a", "(*SKIP)a", "(*THEN)a", "(*PRUNE:n)a",
-  "(?<n>a)(?<n>A)", "\\p{Foo}", "(?i)*", "(*LIMIT_MATCH=9)a",
-  "(*LIMIT_RECURSION=9)a", "a(*ACCEPT)?", "\\R"]
+const stillUndecided = ["(?<n>a)(?<n>A)", "\\p{Foo}", "\\R"]
+
+const nowRejected = ["a(*ACCEPT)?"]
+  ## RFC-0005 S8bj: a quantified verb is "nothing to repeat" in PCRE 8.45.
+
+const nowRead = ["(?m)a", "(?X)a", "(*UTF8)a", "(*UTF)a", "(*COMMIT)a",
+  "(*PRUNE)a", "(*SKIP)a", "(*THEN)a", "(*PRUNE:n)a", "(*LIMIT_MATCH=9)a",
+  "(*LIMIT_RECURSION=9)a"]
+  ## RFC-0005 S8bj: read (`tsymex_rfc0005_s8bj_*`).
 
 suite "S8bb (5): the constructs S8ay left undecided, against std/re":
 
@@ -148,6 +160,13 @@ suite "S8bb (5): the constructs S8ay left undecided, against std/re":
     for p in stillUndecided:
       checkpoint escape(p)
       check parsePcre(p).status == psUnknown
+    for p in nowRead:
+      checkpoint escape(p)
+      check parsePcre(p).status == psOk
+    for p in nowRejected:
+      checkpoint escape(p)
+      check parsePcre(p).status == psRejected
+      expect RegexError: discard re(p)
 
 # ---- RFC-0005 S8bb item 5: the captures overloads ------------------------------
 #
@@ -239,8 +258,10 @@ suite "S8bb (5): the captures of PCRE's chosen match, against std/re":
 # each language, the search, the captures, the Z3 formulas) against
 # `std/re` over {a, b, CR, LF, FF}. With a CRLF convention and no explicit
 # CR or LF, whether PCRE tries a match at a CRLF's LF is its start-of-match
-# optimiser's call wherever a match can start at an LF (`crlfSkipSeen`):
-# the occurrence search declines there, and only there.
+# optimiser's call wherever a match can start at an LF: RFC-0005 S8bj
+# models the interpreter's scan and skip (S8bb declined), and the walker
+# declines those searches only when std/re's libpcre runs them on its JIT
+# (`pcre_select.jitDeclined`).
 
 const nlPatterns = ["(*CR)a$", "(*CR).", "(*CR).+", "(*CR)a\\Z", "(*CR)\\N",
   "(*CR)[^a]", "(*CR)(?s).", "(*CR).*$", "(*CRLF)a$", "(*CRLF).", "(*CRLF)..",
@@ -293,12 +314,20 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
         let none = selectionLang(n, p, lkNone, atStart)
         let mark = selectionLang(n, p, lkMark, atStart)
         let endsL = selectionLang(n, p, lkEnds, atStart, nonEmpty = true)
-        let noOcc = searchLang(n, p, skNoOcc, atStart)
-        let first = searchLang(n, p, skFirst, atStart)
-        let search = not crlfSkipSeen(n)
+        let search = not (jitEngine() and crlfSkipObservable(n))
+        # RFC-0005 S8bj: on a JIT engine the walker declines these searches
+        # (checked below), so their languages are not built there.
+        let noOcc = (if search: searchLang(n, p, skNoOcc, atStart)
+                     else: SelLang(ok: true))
+        let first = (if search: searchLang(n, p, skFirst, atStart)
+                     else: SelLang(ok: true))
         if not search and atStart: inc seen
         check none.ok and mark.ok and endsL.ok
-        check noOcc.ok == search and first.ok == search
+        # RFC-0005 S8bj: the languages are the interpreter's; on a JIT
+        # engine the walker declines the search (`jitDeclined`), so they are
+        # checked against std/re only off the JIT.
+        check noOcc.ok and first.ok
+        if not search: check jitDeclined(n).len > 0
         if not (none.ok and mark.ok and endsL.ok): continue
         for u in words(nlAlpha, 3):
           # Away from the subject start: `u` follows a `b`.
@@ -351,10 +380,12 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
     check runs > 100_000
     check searches > 5_000
 
-  test "the CRLF skip is PCRE's optimiser's call where a match starts at LF":
+  test "the CRLF skip and the start-of-match scan (RFC-0005 S8bj)":
     # The bumpalong skips a CRLF's LF after a failed attempt at its CR, but
     # `[\x09-\x0b]`'s start bits pass over the CR: PCRE tries the LF.
-    # Without start bits (an optional prefix before `.`) it does not.
+    # Without start bits (an optional prefix before `.`) it does not. S8bb
+    # declined these searches; S8bj models the scan (`pcre_startopt`) and
+    # the skip, and declines them only on a JIT engine.
     check "\r\n".find(re"(*CRLF)[\x09-\x0b]\z") == 1
     check "\r\n".find(re"(*CRLF)(?:[\x09-\x0b]\x00)?.") == -1
     check "\r\n".find(re"(*CRLF)(?:\n\x00)?.") == 1   # explicit LF: no skip
@@ -362,12 +393,17 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
               r"(*ANYCRLF)\s?$", r"(*ANY)\v\z"]:
       let n = buildNfa(parsePcre(p))
       checkpoint escape(p)
-      check crlfSkipSeen(n)
-      check not searchLang(n, p, skFirst, false).ok
+      check crlfSkipObservable(n)
+      check searchLang(n, p, skFirst, false).ok
+      check jitDeclined(n).len > 0
+    check pcreExec(buildNfa(parsePcre(r"(*CRLF)[\x09-\x0b]\z")), "\r\n", 0,
+                   false)[1] == 1
+    check pcreExec(buildNfa(parsePcre(r"(*CRLF)(?:[\x09-\x0b]\x00)?.")),
+                   "\r\n", 0, false)[0] == -1
     for p in [r"(*CRLF)(?:\n\x00)?.", "(*ANYCRLF).", "(*ANY)a$",
               "(*CRLF)\\Q\r\\E?."]:
       checkpoint escape(p)
-      check not crlfSkipSeen(buildNfa(parsePcre(p)))
+      check not crlfSkipObservable(buildNfa(parsePcre(p)))
 
   test "the Z3 formulas route every entry through the automaton":
     var ctr = 0
@@ -379,7 +415,7 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
     for p in ["(*CR)a$", "(*CRLF).", "(*ANYCRLF)a\\r?$", "(*ANY).*\\Z",
               "a(?:(*ACCEPT)|b)", "(*CRLF)\\n|.", "(*CRLF)\\Q\r\\E?."]:
       let rx = re(p)
-      let seen = crlfSkipSeen(buildNfa(parsePcre(p)))
+      let seen = jitDeclines(buildNfa(parsePcre(p))).len > 0
       for subj in words("a\r\n", 2):
         let ctx = newContext()
         setCurrentContext(ctx)
@@ -398,7 +434,7 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
           let r = lowerRegexEntry(sp, parseSpec(sp), mkString(subj),
                                   mkInt(st), fresh)
           if seen and name in ["find", "findBoundsLast"]:
-            # The occurrence search declines (`crlfSkipSeen`).
+            # The occurrence search declines on a JIT engine (`jitDeclines`).
             if r.outcome == roUnmodelled: inc declinedSeen
             else: inc declined
             continue
@@ -423,5 +459,7 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
     checkpoint $bad
     check bad.len == 0
     check declined == 0
-    check declinedSeen > 0
+    # RFC-0005 S8bj: the searches decline only on a JIT engine.
+    if jitEngine(): check declinedSeen > 0
+    else: check declinedSeen == 0
     check checked > 500

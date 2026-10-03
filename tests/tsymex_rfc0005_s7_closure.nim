@@ -435,6 +435,10 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## entry value, a fresh `__glEntry_<name>` symbol per run (`entryValueOf`).
     ## Each mentions only its own symbol and holds for every value of the
     ## type, so it is definitional and prunes no real input.
+    ## RFC-0005 S8bj adds `regexRecDefConds`, after `stripDecompConds`: each
+    ## is `r == regexReplaceRec(s, ..)` for one replace occurrence's own
+    ## fresh value `r` -- definitional, admits every channel. `checkCapped`
+    ## first tries the query without them (a weaker query: its UNSAT holds).
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
       for t in routineBody(smtDir / "runtime.nim", routine):
@@ -442,7 +446,7 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
           drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
                        "currentClosureCallAxioms", "globalEntryFacts",
-                       "stripDecompConds", "cardConds",
+                       "stripDecompConds", "regexRecDefConds", "cardConds",
                        "indexSplitRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
       routineBody(smtDir / "runtime.nim", "pathRoots")

@@ -200,11 +200,15 @@ suite "S8bb (6): the step table is Nim's replace":
     for p in repPatterns:
       let pr = parsePcre(p)
       check pr.status == psOk
-      let t = runTable(buildNfa(pr))
-      if not t.ok:
+      let n = buildNfa(pr)
+      if not legacyRun(n):
+        # RFC-0005 S8bj: an observable CRLF start skip is the agenda's
+        # step table's (`tsymex_rfc0005_s8bj_replace`).
         inc declined
-        check "CRLF" in t.why
+        check crlfSkipObservable(n)
         continue
+      let t = runTable(n)
+      check t.ok
       let rx = re(p)
       for subj in words("ab\n\r", 4 + widen):
         inc runs
@@ -229,10 +233,11 @@ suite "S8bb (6): the Z3 term is Nim's replace":
       tag & "#" & $ctr
     for p in repPatterns:
       let pr = parsePcre(p)
-      let t = runTable(buildNfa(pr))
-      if not t.ok:
+      let n = buildNfa(pr)
+      if not legacyRun(n):
         inc declined
         continue
+      let t = runTable(n)
       let t0 = epochTime()
       let rx = re(p)
       let ctx = newContext()

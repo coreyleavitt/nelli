@@ -412,6 +412,11 @@ title = "S8bb's remainder A: regex nodes as defect carriers, closure exit facts 
 state = "done"
 
 [[slice]]
+id = "S8bj"
+title = "S8bb's remainder B: PCRE backtracking verbs and start-optimiser parity, UTF mode, (?m) and (?X), CRLF newline skipping, undecided symbolic replace queries"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -11540,3 +11545,260 @@ In the verification pass, the c runs took 38 s (Z3 5.1) and 40 s
 - **PRECISION: `newSeqUninit` taints the whole path even when no element
   is read.** Whether an element is read is not tracked.
 - **PRECISION: set literals with non-constant elements still decline.**
+
+**As landed (S8bj, walker 211) — S8bb's remainder B.** All five items
+are done and nothing is deferred. The branch is `rfc-0005-s8bj`, on
+S8bb's `9e15103`. Ground truth is PCRE 8.45 as `std/re` calls it. Each
+modelled feature is checked against the real `std/re` on every enumerated
+input: the concrete model, every automaton language, and every Z3 entry
+formula.
+
+*Item 1: verbs, start options and the start optimiser.*
+- **The pattern reader.** `pcre_syntax` now reads the following, with
+  compile-time `RegexError` parity (message and offset) for each:
+  - (*COMMIT), (*PRUNE), (*SKIP), (*SKIP:NAME) and (*THEN);
+  - (*LIMIT_MATCH=) and (*LIMIT_RECURSION=), including PCRE's digit
+    overflow guard and the smallest-limit-wins rule;
+  - a quantified verb, which is "nothing to repeat" (so `a(*ACCEPT)?` is
+    now rejected, as PCRE rejects it).
+- **The start optimiser.** `pcre_startopt` ports PCRE's `is_anchored`,
+  `is_startline`, first char, required char, `set_start_bits` and
+  `find_minlength`. It is checked on 142108 cases against `pcre_fullinfo`
+  (`tsymex_rfc0005_s8bj_startopt`).
+- **The attempt as an ordered agenda.** `pcre_select` replaces S8bb's
+  thread list with an agenda:
+  - the items are threads (state, THEN frames, marks, newline
+    condition), ALTEND markers, THEN(target) jumps, terminal sentinels
+    (bump / COMMIT / SKIP with a landing tag) and MATCH;
+  - a verb's item is emitted after its continuation;
+  - a THEN is caught by the most recent frame whose alternative's end
+    address follows it. This is PCRE's frame semantics with PCRE's code
+    addresses, so a stale frame from an earlier loop iteration is modelled
+    rather than declined;
+  - normalisation decides the front, cuts after an unconditional decided
+    item up to the next marker, and drops items that an unconditional THEN
+    jumps over.
+- **The search.** The search follows `pcre_exec`'s loop:
+  - start filter: first char, then startline, then start bits;
+  - the minimum-length and required-char breaks;
+  - SKIP_ARG re-runs, SKIP jumps, bump on NOMATCH / PRUNE / THEN, and
+    COMMIT ends the search;
+  - the CRLF skip.
+- **The languages.** They are regular languages (DFA, then minimised, then
+  a regex): selection (`lkMark`, `lkNone`, `lkEnds`), captures, and the
+  search (`skNoOcc`, `skFirst`, `skSpan`). The search is built by
+  guess-and-verify over per-outcome verifier DFAs. A run is dropped once
+  its verifier accepts every continuation the search can still feed it,
+  which is a fixpoint over (state × final-newline state × UTF-8 state).
+- **LIMIT.**
+  - A limit of 0 is exact: `PCRE_ERROR_MATCHLIMIT` (-8), or
+    `PCRE_ERROR_RECURSIONLIMIT` (-21) for LIMIT_RECURSION=0, exactly when
+    an attempt is made, that is when the scan reaches a start position the
+    minimum-length and required-char checks pass.
+  - A limit at or above PCRE's default (10 000 000) has no effect.
+  - Any other limit declines with the named reason "a (*LIMIT_..) start
+    option below PCRE's default". `match()` counts calls per opcode-level
+    recursion, which is not modelled.
+- **The engine.** `pcre_engine` asks std/re's libpcre whether it uses the
+  JIT (`pcre_config(PCRE_CONFIG_JIT)`), with the wrapper's library names,
+  and the library's version (`pcre_version()`). The cache key records both
+  as `|pcre=<engine>-<version>`. On a JIT engine (or
+  one it cannot ask), unanchored calls decline where the JIT's semantics
+  differ (`jitDeclined`):
+  - an observable CRLF skip;
+  - a LIMIT below the default.
+- **The library version.** The model is 8.45's. The Windows legs' 8.37
+  differs on one start-of-match datum: it drops the caseless flag of a
+  required character after a `{0}` item, so `x{0}(?i)a` does not match
+  "A" on 8.37. The first Windows run of `tsymex_rfc0005_s8bj_startopt`
+  caught this (1 of 142108 patterns), and it was then probed on a local
+  8.37 build. Before 8.38, `parseSpec` declines patterns that have a
+  `{0}` item and a caseless character, with a named reason.
+
+*Item 2: UTF mode, byte-faithful.*
+- Characters are UTF-8 byte sequences. Code points up to 0xFF compare
+  equal to Nim bytes.
+- `callError` gives PCRE's error results:
+  - -24 for a start past the end;
+  - -10 for an invalid subject (whole-subject validity, as a regular
+    language);
+  - -11 for a start inside a character.
+- Each entry point surfaces these as std/re does, for example `match`
+  reads an error as true and `replace` returns the subject unchanged.
+- The languages are over valid UTF-8 only. The search definitions hold
+  only where the call does not error.
+
+*Item 3: (?m) and (?X).*
+- **(?m).** ^ and $ read the previous-byte class (start / CR / LF / other
+  newline / other) under each convention: LF, CR, CRLF, ANYCRLF and ANY.
+  Under CRLF, $ at a CR needs the LF that follows it (`cdNeedLF`), and a
+  CRLF-sensitive `.` that read the CR dies at the LF (`cdDieLF`).
+- **(?X).** Compile-time parity: "unrecognized character follows \\" at
+  the offending letter, scoped like the other options
+  (`tsymex_rfc0005_s8bj_syntax`).
+
+*Item 4: the CRLF start skip.* The skip is modelled on the interpreter
+(`crlfSkipObservable` says where it can change a result), and
+`crlfSkipSeen` is removed. Searches decline there only on a JIT engine.
+
+*Item 5: symbolic replace (Q2, Q7, Q8).*
+- **Lowering.**
+  - S8aw's shapes keep their lowering.
+  - Patterns S8bb's run table reads exactly (`legacyRun`) keep it.
+  - Everything else (verbs, (?m), UTF, an observable CRLF skip) uses a
+    new step table over the agenda. Its registers are resolved by
+    returned reference codes.
+- **Lemmas.** A recursively defined replace now has sound lemmas:
+  - a length relation `len(r) = len(s) - c + k·len(by)`, with
+    `k·mn <= c <= k·mx`, for a numeral `len(by)`;
+  - an image `r ∈ ([^S] | by)*`, for one-set patterns and a literal `by`;
+  - the same image as a containment fact per byte: `not contains(r, b)`
+    for each matched byte `b` that `by` does not contain, stated for at most
+    16 plain ASCII bytes. Z3 4.13.4 does not derive Q7 and Q8 from the
+    membership alone (the first Windows run caught this).
+- **Solving.** The value is a fresh variable, and its definition
+  `r == rec(s)` goes in `regexRecDefConds`. `checkCapped` first queries
+  without those definitions, under `factsFirstRLimit`. An UNSAT there is
+  sound, because dropping a definition only weakens the query.
+
+*Q2, Q7 and Q8 before and after* (`tsymex_rfc0005_s8bj_replace_lemmas`;
+before is the same test file run on `9e15103`; times are the walker's per
+query):
+
+| Query | 9e15103, Z3 5.1 | 9e15103, Z3 4.13.4 | S8bj, Z3 5.1 | S8bj, Z3 4.13.4 |
+|---|---|---|---|---|
+| Q2 `replace(s, re"[0-9]", "")` never grows | sxUnknown 74.8 s | sxUnknown 48.5 s | sxUnsat 0.0 s | sxUnsat 0.0 s |
+| Q7 `replace(s, re"f+", "x")` has no "ff" | sxUnknown 41.7 s | sxUnknown 26.8 s | sxUnsat 0.0 s | sxUnsat 0.0 s |
+| Q8 `replace(s, re"a", "")` has no "a" | sxUnknown 43.9 s | sxUnknown 36.9 s | sxUnsat 0.0 s | sxUnsat 0.0 s |
+| a two-byte `by` at most doubles the length | sxUnknown 75.4 s | sxUnknown 50.0 s | sxUnsat 0.0 s | sxUnsat 0.0 s |
+
+The reachable counterparts stay `sxSat` with std/re's witness on both
+versions, before and after. S8ay's exact replace pins (Q1, Q3 to Q6, Q9 in
+`tsymex_rfc0005_s8ay_remainder` and `tsymex_rfc0005_s8bb_replace`) pass
+unchanged on both versions.
+
+*Wrong verdicts and soundness bugs found.*
+- **At 9e15103 (S8bb):**
+  - every pattern using (*COMMIT), (*PRUNE), (*SKIP), (*THEN), LIMIT,
+    UTF, (?m) or (?X) was ⊤ or rejected wholesale (a precision gap, not a
+    wrong verdict);
+  - `a(*ACCEPT)?` was ⊤, where PCRE rejects it.
+- **Found and fixed during the slice by the differentials, all in the new
+  code:**
+  - a verifier "sink" flag leaked through minimisation, which gave a
+    false `sxUnsat` on `(*CRLF)[\x09-\x0b]\z`'s find (the walker pin
+    `bj_crlf_skip` was RED);
+  - the LAND event was fed to every run, not only the in-flight SKIP;
+  - an empty verifier crashed (`IndexDefect`);
+  - the 8-bit library sets no start bit for 0xFF;
+  - `(x){0}` is `OP_SKIPZERO`;
+  - `(*UCP)\d` is `OP_PROP`.
+- **On the Windows legs' PCRE 8.37 (SOUNDNESS there, now declined):** the
+  8.45 model accepted `x{0}(?i)a` on "A", which 8.37 does not match. A
+  target guarded by that match would have been a false `sxUnsat` on
+  Windows.
+
+*Suites.*
+
+Each suite is green on Linux under Z3 5.1 and Z3 4.13.4, and the s8bj and
+changed s8bb suites are also green against PCRE 8.37 with JIT (the Windows
+library, built locally; it is the third oracle). Times are wall seconds
+including the compile, from three-way-concurrent runs on a loaded host. One
+cpp run is green: `tsymex_rfc0005_s8bj_verbs`, 41 s. Windows wall times
+are in the slice report. On `3b97eda`'s symex-mingw run (37115466509), every
+s8bj suite takes under 60 s (the slowest is `s8bj_entries_multiline` at
+50.4 s), and `s8bb_constructs` takes 62.2 s (58.7 s when S8bb landed).
+
+| Suite | Z3 5.1 | Z3 4.13.4 | 8.37 JIT (Z3 5.1) |
+|---|---|---|---|
+| `phase15_CR10_regex_overflow` | PASS 21 | PASS 39 | - |
+| `phase15_CR2_cachekey` | PASS 9 | PASS 25 | - |
+| `phase15_S6a_regex_parser` | PASS 19 | PASS 37 | - |
+| `phase15_S6b_regex` | PASS 53 | PASS 93 | - |
+| `phase15_S7b_smoke` | PASS 55 | PASS 97 | - |
+| `rfc0005_s5_str` | PASS 109 | PASS 115 | - |
+| `rfc0005_s6b_ops` | PASS 77 | PASS 96 | - |
+| `rfc0005_s7_closure` | PASS 90 | PASS 99 | - |
+| `rfc0005_s8aw_remainder` | PASS 79 | PASS 134 | - |
+| `rfc0005_s8ay_remainder` | PASS 137 | PASS 186 | - |
+| `rfc0005_s8bb_captures` | PASS 118 | PASS 162 | PASS 88 |
+| `rfc0005_s8bb_capvalues` | PASS 49 | PASS 49 | - |
+| `rfc0005_s8bb_capvalues_lf` | PASS 40 | PASS 97 | - |
+| `rfc0005_s8bb_capvalues_plus` | PASS 51 | PASS 95 | - |
+| `rfc0005_s8bb_constructs` | PASS 85 | PASS 125 | PASS 106 |
+| `rfc0005_s8bb_exhaustive` | PASS 63 | PASS 47 | - |
+| `rfc0005_s8bb_remainder` | PASS 72 | PASS 88 | - |
+| `rfc0005_s8bb_replace` | PASS 84 | PASS 138 | PASS 83 |
+| `rfc0005_s8bb_selection` | PASS 75 | PASS 72 | - |
+| `rfc0005_s8bj_entries` | PASS 70 | PASS 139 | PASS 49 |
+| `rfc0005_s8bj_entries_multiline` | PASS 66 | PASS 88 | PASS 49 |
+| `rfc0005_s8bj_entries_utf` | PASS 81 | PASS 90 | PASS 78 (before the split) |
+| `rfc0005_s8bj_entries_utf_b` | PASS 80 | PASS 94 | PASS 78 |
+| `rfc0005_s8bj_entries_utf_c` | PASS 83 | PASS 110 | (in the first row) |
+| `rfc0005_s8bj_langs` | PASS 34 | PASS 27 | PASS 27 (before the split) |
+| `rfc0005_s8bj_langs_b` | PASS 34 | PASS 28 | (in the row above) |
+| `rfc0005_s8bj_replace` | PASS 42 | PASS 43 | PASS 11 |
+| `rfc0005_s8bj_replace_lemmas` | PASS 89 | PASS 88 | PASS 57 |
+| `rfc0005_s8bj_startopt` | PASS 30 | PASS 26 | PASS 17 |
+| `rfc0005_s8bj_syntax` | PASS 13 | PASS 11 | - |
+| `rfc0005_s8bj_verbs` | PASS 52 | PASS 65 | PASS 16 |
+| `rfc0005_s8bj_walker` | PASS 148 | PASS 117 | PASS 110 |
+
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "211"`. A `>= 211` floor is in
+  `tsymex_rfc0005_s8bj_walker`.
+- **`tsymex_rfc0005_s8bb_constructs`:**
+  - the verbs, LIMIT, UTF, (?m) and (?X) constructs are read;
+  - `a(*ACCEPT)?` is rejected;
+  - the CRLF-skip searches decline only on a JIT engine, and the
+    interpreter's result is checked through `pcreExec`.
+- **`tsymex_rfc0005_s8bb_captures`:** `bb_crlf_skip` is `sxUnsat` on the
+  interpreter and `sxUnknown` on a JIT engine.
+- **`tsymex_rfc0005_s7_closure`:** the audited drain list has
+  `regexRecDefConds` after `stripDecompConds`. Each entry is definitional
+  over one replace occurrence's own fresh value.
+- **`tsymex_rfc0005_s8bb_replace`:** declines are now gated on
+  `legacyRun`.
+- **`tsymex_rfc0005_s5_str`:** the declining regex replaces use
+  `(*LIMIT_MATCH=5)`, and the raise-site pin targets
+  `regexDecline(sp, n.why)`.
+
+*Different mechanisms, reported and not fixed here.*
+- **PCRE's JIT is not the interpreter (PRECISION).** A tri-oracle
+  (8.45 interpreter, 8.37 interpreter, 8.37 JIT) over 56764 verb patterns
+  found the two interpreters identical. The JIT differs on 212 patterns,
+  all under CRLF, ANY or ANYCRLF:
+  - its `scan_prefix` start filter tries different positions;
+  - it does not CRLF-skip a SKIP landing;
+  - it counts LIMIT its own way.
+
+  On a JIT engine (Windows CI), those unanchored calls decline. Modelling
+  the JIT would be a separate engine model. Note that the slice brief
+  expected only LIMIT and `(*CRLF)\s(*SKIP)b` to differ.
+- **A LIMIT between 0 and the default declines (PRECISION).** Exactness
+  needs `match()`'s per-opcode call accounting.
+- **Mixed (*SKIP) and (*SKIP:NAME) declines (PRECISION).** These are:
+  - a SKIP:NAME whose name is never set, together with a found one;
+  - such a SKIP:NAME together with a plain (*SKIP) where the CRLF skip is
+    observable.
+
+  The `ignore_skip_arg` re-run order across a SKIP jump is not
+  modelled.
+- **UTF with UCP or caseless matching declines (PRECISION).** This covers
+  `(*UCP)` with UTF `\d` / `\w`, and Unicode case folding (U+212A,
+  U+017F). (*ANY) under UTF (multi-byte newlines U+0085, U+2028 and
+  U+2029) is not modelled either and declines.
+- **The model is PCRE 8.45's, and other library versions are only
+  partly scoped (SOUNDNESS on other versions).** Two libraries have been
+  checked: 8.45, and 8.37 (Windows), where the interpreters are identical
+  on 56764 verb patterns and 142108 start-of-match patterns apart from the
+  declined `{0}` case. A libpcre of another version is not checked. The
+  cache key records the version, but the walker does not decline on an
+  unknown version.
+- **Size caps decline (PRECISION).** These are 4000 automaton states, 512
+  step-table states and 6 registers.
+- **Lemmas cover two shapes only (PRECISION).** The replace lemmas give
+  the length relation only for a numeral `len(by)`, and the image only for
+  one-set patterns. Other unbounded replace queries can still surface as
+  `beSolverUndef`.

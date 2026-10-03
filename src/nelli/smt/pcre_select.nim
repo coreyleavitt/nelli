@@ -1,82 +1,90 @@
-## RFC-0005 S8bb. PCRE's match SELECTION as finite automata.
+## RFC-0005 S8bb, S8bj. PCRE's match SELECTION as finite automata.
 ##
 ## `matchLen`, `endsWith` and `findBounds`'s `last` (and `replace`) depend
 ## on WHICH match PCRE returns at a position, not only on whether one
 ## exists. PCRE backtracks: it returns the first match in its priority
 ## order (an alternation tries its alternatives left to right, a greedy
 ## quantifier tries one more iteration before stopping, a lazy one the
-## reverse). S8ay modelled that only where it coincides with the longest
-## match (`regex_parser.selectionForm`); `a|ab`, `a*b` and `(ab)+` declined.
+## reverse).
 ##
-## Here the pattern is a priority NFA (Thompson's construction with ordered
-## epsilon splits), run as a Pike VM: at each position the live threads are
-## kept in priority order; the epsilon closure is walked depth-first in that
-## order; a thread reaching `Match` RECORDS a match at the position and cuts
-## every lower-priority thread. The last recorded position is the match
-## PCRE returns. (The VM visits each NFA state once per position: a lower-
-## priority thread in the same state has the same future and loses to the
-## first.) PCRE's empty-iteration rule is kept: an unbounded repetition of a
-## group whose iteration matched the empty string leaves the loop instead
-## of iterating again (pcre_exec's `OP_KETRMAX` on an `OP_SBRA`); bounded
-## repeats are PCRE's nested optional copies.
+## ## The attempt (one call of pcre_exec.c's `match()` at a start)
 ##
-## The run is a deterministic automaton over the subject's bytes (states:
-## the ordered thread lists), so each value is a regular language of the
-## subject, converted to a regex by state elimination:
+## The pattern is a priority NFA (Thompson's construction with ordered
+## epsilon splits) run as an ordered AGENDA: the backtracking order of the
+## live alternatives. Its items, in priority order:
+##   * threads: an NFA state waiting for the next byte;
+##   * MATCH: a match recorded at a position (RFC-0005 S8bb: it cuts every
+##     lower item);
+##   * RFC-0005 S8bj, the backtracking verbs, each emitted AFTER the
+##     continuation it guards (backtracking reaches the verb only once its
+##     continuation has failed): `(*COMMIT)` (the search ends with no
+##     match), `(*PRUNE)` and an uncaught `(*THEN)` (the attempt fails, the
+##     search bumps along), `(*SKIP)` / a found `(*SKIP:NAME)` (the search
+##     resumes where the verb, or the name's latest `(*MARK)`, was passed);
+##   * RFC-0005 S8bj, `(*THEN)`'s jump: `THEN(m)` skips every lower item up
+##     to the marker `m`, the end of the alternative that catches it. PCRE
+##     catches a THEN in the innermost group frame with two or more
+##     alternatives whose current branch ends after the THEN's code address
+##     (pcre_exec.c, OP_BRA's MATCH_THEN test). Frames outlive their group
+##     (the continuation runs inside them), so a frame left by an earlier
+##     loop iteration can catch a later THEN; every thread carries, per
+##     group instance, its latest frame (an older frame of the same group is
+##     never the catcher), and code addresses mirror pcre_compile.c's layout
+##     (a repeated group's copies, the last one looping), so that case is
+##     modelled, not declined;
+##   * markers: the ends of the alternatives a THEN can jump to.
+## The agenda is normalized lazily: the front decides the attempt once it
+## is a MATCH or a terminal verb; a front THEN jumps; an unconditional
+## decided item kills the items after it up to the next marker (a THEN
+## ahead of it can still jump past it to that marker, so nothing past a
+## marker is cut). A thread is dropped when a higher-priority one is in the
+## same NFA state with the same frames and marks (the same future).
+##
+## A `(*CRLF)` dot that reads a CR, and a `(?m)` `$` before a CR under
+## `(*CRLF)`, leave CONDITIONAL items, settled by the next byte (an LF
+## kills the first and is required by the second).
+##
+## ## The search (pcre_exec.c's bumpalong loop)
+##
+## RFC-0005 S8bj. Unanchored calls repeat the attempt: PCRE's start-of-match
+## optimiser (the first character, the line-start flag, the start bits;
+## `pcre_startopt.nim`) moves each start forward first; after a failed
+## attempt the start moves one character, or to a `(*SKIP)` landing, or the
+## search ends (`(*COMMIT)`); under a CRLF convention a CRLF's LF is never a
+## start after a failed attempt at its CR. An attempt's start depends on the
+## outcomes of the attempts before it, so the search languages guess each
+## attempt's outcome (and a SKIP's landing) and verify it with that
+## attempt's own automaton (`Verifier`), run in step.
+##
+## ## The languages
+##
+## The run is a deterministic automaton over the subject's bytes, so each
+## value is a regular language of the subject, converted to a regex by state
+## elimination:
 ##   * `lkMark`:  `u[0..k) # u[k..]` such that PCRE's match at the start of
 ##                `u` ends at `k` (`#` the marker byte of `regex_parser`);
 ##   * `lkNone`:  `u` with no match at its start;
-##   * `lkEnds`:  `u` whose match at its start ends at its end.
-## Assertions read the subject around the position: `^` / `\A` hold at
-## subject position 0 only (`atStart` says whether `u` starts there), `$` /
-## `\Z` at the end or before a final newline, `\z` at the end. A final
-## newline is its own input symbol so the automaton sees it: under the
-## pattern's newline convention (RFC-0005 S8bb, `pcre_syntax.NlConv`) a
-## final newline byte is `symFin + i` (`finBytes[i]`), and the CR of a
-## final CRLF is `symR2`; each is its byte in the language. The `nl` state
-## (`nlStep`) keeps the reading unique: a newline byte read as a plain
-## byte must be followed by another, and a final CRLF must be read as one.
-## A `(*CRLF)` dot that reads a CR leaves a FLAGGED thread (`flagCR`),
-## dropped when an LF follows (`resolve`).
+##   * `lkEnds`:  `u` whose match at its start ends at its end;
+##   * `skNoOcc`: `u` with no match found by the search;
+##   * `skFirst`: `u[0..q) # u[q..]`: the search finds its match at `q`;
+##   * the capture languages (`captureLang`).
+## A final newline is its own input symbol so the automaton sees `$` / `\Z`
+## (RFC-0005 S8bb, `nlStep`). RFC-0005 S8bj: the byte before the start
+## (`PrevClass`) decides `^` / `\A` and `(?m)^`.
 ##
-## Pure Nim (no Z3); `regex_parser.nim` turns the regex into Z3's. Every
-## language is pinned against the concrete `std/re` by the exhaustive
-## differential (`tests/tsymex_rfc0005_s8bb_selection.nim`), together
-## with the concrete reference run `chosenEnd`.
+## Pure Nim (no Z3, no libpcre); `regex_parser.nim` turns the regexes into
+## Z3's. Every language is pinned against the concrete `std/re` by the
+## exhaustive differentials (`tests/tsymex_rfc0005_s8bb_*`,
+## `tests/tsymex_rfc0005_s8bj_*`), together with the concrete reference runs
+## `runAttempt` / `runSearch`.
 
-import std/[tables, hashes, sets, algorithm]
+import std/[tables, hashes, sets, algorithm, sequtils]
 import ./pcre_syntax
+import ./pcre_startopt
 
-type
-  NKind = enum
-    nkByte    ## consume a byte of `bytes`, go to `out1`
-    nkSplit   ## try `out1`, then `out2`
-    nkBol     ## `^` / `\A`
-    nkEol     ## `$` / `\Z`
-    nkEolAbs  ## `\z`
-    nkEnter   ## enter an iteration of loop `loop` (nullable body only)
-    nkBack    ## end of an iteration: `out1` the loop head, `out2` the exit
-    nkSave    ## capture slot `slot` (2*group or 2*group+1)
-    nkMatch
+export pcre_startopt.StartOpt
 
-  NState = object
-    kind: NKind
-    bytes: set[char]
-    crlfDot: bool   ## RFC-0005 S8bb: nkByte of a `(*CRLF)` dot
-    out1, out2: int
-    loop: int
-    slot: int
-
-  Nfa* = object
-    states: seq[NState]
-    start*: int
-    loops: int
-    groups*: int     ## capturing groups
-    hasBol*: bool    ## a `^` / `\A` anywhere: `atStart` matters
-    nl*: NlConv      ## RFC-0005 S8bb: the newline convention
-    skipCrlf*: bool  ## RFC-0005 S8bb: the bumpalong skips a CRLF's LF
-    ok*: bool
-    why*: string
+# ---- symbols ----------------------------------------------------------------
 
 const
   maxNfaStates = 4000
@@ -87,12 +95,12 @@ const
   symR2 = 261        ## RFC-0005 S8bb: the CR of a final CRLF
   symMark = 262      ## the marker `#` (a capture's start, RFC-0005 S8bb)
   symMark2 = 263     ## RFC-0005 S8bb: a capture's end marker
-  nSyms = 264
+  symLand = 264      ## RFC-0005 S8bj: a `(*SKIP)` landing (verifiers only)
+  nSyms = 265
   finBytes = ['\n', '\r', '\v', '\f', '\x85']
-  flagCR = 1 shl 24  ## RFC-0005 S8bb: a thread past a `(*CRLF)` dot's CR
   nlMust = 1'i8      ## a newline byte read plain: another byte follows
   nlFinal = 2'i8     ## the final newline was read: only markers follow
-  nlCR = 4'i8        ## a CR read plain (CRLF a newline): no final LF next
+  nlCRb = 4'i8       ## a CR read plain (CRLF a newline): no final LF next
   nlR2 = 8'i8        ## `symR2` read: the final LF is next
 
 proc symByte(s: int): char =
@@ -100,34 +108,148 @@ proc symByte(s: int): char =
   elif s < symR2: finBytes[s - symFin]
   else: '\r'
 
-proc nlStep(n: Nfa; st: int8; s: int): int8 =
+proc nlStepFor(nl: NlConv; st: int8; s: int): int8 =
   ## RFC-0005 S8bb. The `nl` state after symbol `s` (not a marker), or -1
   ## when `s` cannot follow (the reading would not be unique).
   if (st and nlFinal) != 0: return -1
-  let nl1 = nlBytes(n.nl)
+  let nl1 = nlBytes(nl)
   let b = symByte(s)
   if s >= symFin and s < symR2:
     if b notin nl1: return -1
     if (st and nlR2) != 0: return (if b == '\n': nlFinal else: -1'i8)
-    if (st and nlCR) != 0 and b == '\n': return -1
+    if (st and nlCRb) != 0 and b == '\n': return -1
     return nlFinal
   if s == symR2:
-    if not nlPair(n.nl) or (st and nlR2) != 0: return -1
+    if not nlPair(nl) or (st and nlR2) != 0: return -1
     return nlR2
   if (st and nlR2) != 0:
     # `(*CRLF)`: the pair's LF is no newline on its own.
     return (if b == '\n' and '\n' notin nl1: nlFinal else: -1'i8)
   result = 0
   if b in nl1: result = result or nlMust
-  if (st and nlCR) != 0 and b == '\n': result = result or nlMust
-  if nlPair(n.nl) and b == '\r': result = result or nlCR
+  if (st and nlCRb) != 0 and b == '\n': result = result or nlMust
+  if nlPair(nl) and b == '\r': result = result or nlCRb
 
 proc nlCanEnd(st: int8): bool = (st and (nlMust or nlR2)) == 0
+
+type
+  Ctx* = enum
+    cxOther   ## the rest of the subject is not a newline (nor empty)
+    cxNll     ## the rest of the subject is a newline
+    cxEnd     ## the subject ends here
+
+proc symCtx(s: int): Ctx =
+  (if s < symFin: cxOther else: cxNll)
+
+# ---- the byte before a position -------------------------------------------------
+
+type
+  PrevClass* = enum
+    ## RFC-0005 S8bj. What precedes a position: what `(?m)^`, the line-start
+    ## filter and the CRLF skip read.
+    pcStart   ## nothing: subject position 0
+    pcOther   ## a byte that is no newline byte
+    pcLF      ## an LF not after a CR
+    pcCRLF    ## an LF after a CR
+    pcCR      ## a CR
+    pcNl      ## VT, FF or NEL (newlines under `(*ANY)` only)
+
+proc nextClass*(b: char; pc: PrevClass): PrevClass =
+  case b
+  of '\n': (if pc == pcCR: pcCRLF else: pcLF)
+  of '\r': pcCR
+  of '\v', '\f', '\x85': pcNl
+  else: pcOther
+
+proc classAt*(s: string; x: int): PrevClass =
+  ## The class of what precedes position `x` of `s`.
+  if x <= 0: return pcStart
+  nextClass(s[x - 1], (if x >= 2 and s[x - 2] == '\r': pcCR else: pcOther))
+
+proc wasNl*(nl: NlConv; pc: PrevClass): bool =
+  ## pcre_internal.h's WAS_NEWLINE: a newline ends just before.
+  case nl
+  of nlLF: pc in {pcLF, pcCRLF}
+  of nlCR: pc == pcCR
+  of nlCRLF: pc == pcCRLF
+  of nlANYCRLF: pc in {pcLF, pcCRLF, pcCR}
+  of nlANY: pc in {pcLF, pcCRLF, pcCR, pcNl}
+
+# ---- the NFA ------------------------------------------------------------------
+
+type
+  NKind = enum
+    nkByte    ## consume a byte of `bytes`, go to `out1`
+    nkSplit   ## try `out1`, then `out2`
+    nkBol     ## `^` / `\A`; `multi`: `(?m)^`
+    nkEol     ## `$` / `\Z`; `multi`: `(?m)$`
+    nkEolAbs  ## `\z`
+    nkEnter   ## enter an iteration of loop `loop` (nullable body only)
+    nkBack    ## end of an iteration: `out1` the loop head, `out2` the exit
+    nkSave    ## capture slot `slot` (2*group or 2*group+1)
+    nkMatch
+    nkVerb    ## RFC-0005 S8bj: a backtracking verb or a mark
+    nkAlt     ## RFC-0005 S8bj: entry to alternative `alt` of catcher `grp`
+
+  NState = object
+    kind: NKind
+    bytes: set[char]
+    crlfDot: bool   ## RFC-0005 S8bb: nkByte of a `(*CRLF)` dot
+    multi: bool
+    out1, out2: int
+    loop: int
+    slot: int
+    verb: VerbKind
+    name: int       ## nkVerb mark / SKIP:NAME: the name's index, -1 none
+    address: int    ## nkVerb THEN: its code address
+    grp, alt: int   ## nkAlt
+
+  FilterKind* = enum
+    ## RFC-0005 S8bj. The start-of-match optimisation of an unanchored call.
+    fkNone, fkFirst, fkStartline, fkBits
+
+  SkipNameMode* = enum
+    snFound   ## every path to the SKIP:NAME passes a MARK:NAME
+    snNever   ## no path does: PCRE re-runs the attempt ignoring it
+
+  Nfa* = object
+    states: seq[NState]
+    start*: int
+    loops: int
+    groups*: int     ## capturing groups
+    nl*: NlConv      ## RFC-0005 S8bb: the newline convention
+    utf*: bool       ## RFC-0005 S8bj: UTF mode (whole characters)
+    hasBol*: bool    ## a `^` / `\A`: subject position 0 matters
+    hasBolMulti*: bool  ## RFC-0005 S8bj: a `(?m)^`
+    hasEolMulti*: bool  ## RFC-0005 S8bj: a `(?m)$`
+    hasCrLf*: bool   ## PCRE_HASCRORLF
+    skipActive*: bool
+      ## RFC-0005 S8bj: the bumpalong never starts at a CRLF's LF after a
+      ## failed attempt (a CRLF-ish convention, no explicit CR or LF)
+    nameIdx: Table[string, int]   ## SKIP:NAME names
+    skipMode*: seq[SkipNameMode]  ## per name
+    hasCommit*, hasSkip*, hasThen*, hasPrune*: bool
+    hasNeverSkip*: bool   ## a never-found SKIP:NAME
+    altEnd: seq[seq[int]] ## per catcher group: each branch's end address
+    filter*: FilterKind
+    fc1, fc2: char
+    bits: set[char]
+    anchoredPat*: bool    ## pcre_compile.c's `is_anchored`
+    noStartOpt*: bool
+    so*: StartOpt
+    limitMatch*, limitRecursion*: int64
+    ok*: bool
+    why*: string
+
+proc needPc*(n: Nfa): bool =
+  ## RFC-0005 S8bj. The automata track the byte before each position.
+  n.hasBolMulti or n.filter == fkStartline or n.skipActive
 
 type Build = object
   n: Nfa
   overflow: bool
   match: int
+  catchers: bool   ## the pattern has a THEN: multi-alternative groups catch
 
 proc add(b: var Build; s: NState): int =
   if b.n.states.len >= maxNfaStates:
@@ -136,23 +258,149 @@ proc add(b: var Build; s: NState): int =
   b.n.states.add s
   b.n.states.high
 
-proc comp(b: var Build; x: Rx; next: int): int
+proc isGroup(x: Rx): bool = x.kind in {rxCat, rxAlt}
+proc groupAlts(x: Rx): seq[Rx] = (if x.kind == rxAlt: x.kids else: @[x])
+proc branchItems(x: Rx): seq[Rx] = (if x.kind == rxCat: x.kids else: @[x])
 
-proc compStar(b: var Build; sub: Rx; lazy: bool; next: int): int =
+proc codeSize(x: Rx): int
+proc branchSize(br: Rx): int =
+  for it in branchItems(br): result += codeSize(it)
+
+proc codeSize(x: Rx): int =
+  ## RFC-0005 S8bj. Code units in pcre_compile.c's layout (only the order
+  ## matters: THEN's catch test compares addresses).
+  case x.kind
+  of rxCat, rxAlt:
+    result = 1
+    for br in groupAlts(x): result += branchSize(br) + 1
+  of rxRep:
+    if x.sub.isGroup:
+      let copies = (if x.hi == 0: 1 elif x.hi < 0: max(x.lo, 1) else: x.hi)
+      result = 1 + copies * codeSize(x.sub)
+    else:
+      result = 1
+  else:
+    result = 1
+
+proc utf8Seqs(lo, hi: int32; acc: var seq[seq[(char, char)]]) =
+  ## RFC-0005 S8bj. The code points `lo .. hi` (surrogates left out: no
+  ## valid subject holds one) as UTF-8 byte-range sequences.
+  if lo > hi: return
+  if lo <= 0xDFFF and hi >= 0xD800:
+    utf8Seqs(lo, 0xD7FF, acc)
+    utf8Seqs(0xE000, hi, acc)
+    return
+  for b in [0x7F'i32, 0x7FF, 0xFFFF]:
+    if lo <= b and hi > b:
+      utf8Seqs(lo, b, acc)
+      utf8Seqs(b + 1, hi, acc)
+      return
+  if hi <= 0x7F:
+    acc.add @[(char(lo), char(hi))]
+    return
+  for i in 1 .. 3:
+    let m = (1'i32 shl (6 * i)) - 1
+    if (lo and not m) != (hi and not m):
+      if (lo and m) != 0:
+        utf8Seqs(lo, lo or m, acc)
+        utf8Seqs((lo or m) + 1, hi, acc)
+        return
+      if (hi and m) != m:
+        utf8Seqs(lo, (hi and not m) - 1, acc)
+        utf8Seqs(hi and not m, hi, acc)
+        return
+  let a = utf8Encode(lo)
+  let z = utf8Encode(hi)
+  var sq: seq[(char, char)]
+  for k in 0 ..< a.len: sq.add (a[k], z[k])
+  acc.add sq
+
+proc compChars(b: var Build; x: Rx; next: int): int =
+  ## RFC-0005 S8bj. One character of `x.cps` in UTF mode, as UTF-8 bytes.
+  var single: set[char]
+  var multi: seq[seq[(char, char)]]
+  for (lo, hi) in x.cps:
+    var acc: seq[seq[(char, char)]]
+    utf8Seqs(lo, hi, acc)
+    for sq in acc:
+      if sq.len == 1:
+        for c in sq[0][0] .. sq[0][1]: single.incl c
+      else:
+        multi.add sq
+  var e = -1
+  for sq in multi:
+    var t = next
+    for k in countdown(sq.high, 0):
+      var bs: set[char]
+      for c in sq[k][0] .. sq[k][1]: bs.incl c
+      t = b.add NState(kind: nkByte, bytes: bs, out1: t)
+    e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
+  if single.card > 0 or e < 0:
+    let t = b.add NState(kind: nkByte, bytes: single, crlfDot: x.crlfDot,
+                         out1: next)
+    e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
+  e
+
+proc compItem(b: var Build; x: Rx; next, base: int): int
+
+proc compBranch(b: var Build; items: seq[Rx]; next, base: int): int =
+  var bases = newSeq[int](items.len)
+  var a = base
+  for i, it in items:
+    bases[i] = a
+    a += codeSize(it)
+  result = next
+  for i in countdown(items.high, 0):
+    result = b.compItem(items[i], result, bases[i])
+
+proc compGroup(b: var Build; x: Rx; next, base: int): int =
+  ## A bracket: its alternatives in order. RFC-0005 S8bj: with a THEN in
+  ## the pattern, each alternative of a multi-alternative group enters
+  ## through `nkAlt` (a frame for THEN's catch test).
+  let alts = groupAlts(x)
+  var inner = next
+  if x.cap > 0:
+    inner = b.add NState(kind: nkSave, slot: 2 * x.cap + 1, out1: next)
+  var bases, ends: seq[int]
+  var a = base + 1
+  for br in alts:
+    bases.add a
+    a += branchSize(br)
+    ends.add a
+    a += 1
+  let catcher = b.catchers and alts.len >= 2
+  var gid = -1
+  if catcher:
+    gid = b.n.altEnd.len
+    b.n.altEnd.add ends
+  var e = -1
+  for k in countdown(alts.high, 0):
+    var entry = b.compBranch(branchItems(alts[k]), inner, bases[k])
+    if catcher:
+      entry = b.add NState(kind: nkAlt, grp: gid, alt: k, out1: entry)
+    e = (if e < 0: entry else: b.add NState(kind: nkSplit, out1: entry, out2: e))
+  if x.cap > 0:
+    e = b.add NState(kind: nkSave, slot: 2 * x.cap, out1: e)
+  e
+
+proc compLoop(b: var Build; sub: Rx; lazy, once: bool; next, base: int): int =
+  ## An unbounded loop of `sub` (`once`: at least one iteration, entered
+  ## directly). A body that can match the empty string leaves the loop
+  ## after an empty iteration (pcre_exec.c's OP_KETRMAX on an OP_SBRA),
+  ## the first iteration included.
   let head = b.add NState(kind: nkSplit)
   var bodyIn: int
   if lenRange(sub)[0] == 0:
-    # A body that can match the empty string: PCRE leaves the loop after
-    # an empty iteration (`nkEnter` / `nkBack`).
     if b.n.loops >= maxLoops:
       b.overflow = true
       return 0
     let id = b.n.loops
     inc b.n.loops
     let back = b.add NState(kind: nkBack, loop: id, out1: head, out2: next)
-    bodyIn = b.add NState(kind: nkEnter, loop: id, out1: b.comp(sub, back))
+    bodyIn = b.add NState(kind: nkEnter, loop: id,
+                          out1: b.compItem(sub, back, base))
   else:
-    bodyIn = b.comp(sub, head)
+    bodyIn = b.compItem(sub, head, base)
   if b.overflow: return 0
   if lazy:
     b.n.states[head].out1 = next
@@ -160,155 +408,540 @@ proc compStar(b: var Build; sub: Rx; lazy: bool; next: int): int =
   else:
     b.n.states[head].out1 = bodyIn
     b.n.states[head].out2 = next
-  head
+  (if once: bodyIn else: head)
 
 proc split(b: var Build; take, skip: int; lazy: bool): int =
   if lazy: b.add NState(kind: nkSplit, out1: skip, out2: take)
   else: b.add NState(kind: nkSplit, out1: take, out2: skip)
 
-proc comp(b: var Build; x: Rx; next: int): int =
+proc compRep(b: var Build; x: Rx; next, base: int): int =
+  ## pcre_compile.c's repeat layout: `x{lo,hi}` is `lo` copies then
+  ## `hi - lo` NESTED optional copies (skipping one skips the rest);
+  ## `x{lo,}` is `lo` copies, the last one looping (one optional looping
+  ## copy for `lo == 0`). RFC-0005 S8bj: each copy has its own code
+  ## addresses (a group's copies are distinct catchers for THEN).
+  let sub = x.sub
+  if x.hi == 0: return next
+  let sz = (if sub.isGroup: codeSize(sub) else: 0)
+  let b0 = base + 1
+  if x.hi < 0:
+    let copies = max(x.lo, 1)
+    result = b.compLoop(sub, x.lazy, x.lo >= 1, next, b0 + (copies - 1) * sz)
+    for i in countdown(copies - 2, 0):
+      result = b.compItem(sub, result, b0 + i * sz)
+  else:
+    var o = next
+    for i in countdown(x.hi - 1, x.lo):
+      o = b.split(b.compItem(sub, o, b0 + i * sz), next, x.lazy)
+    result = o
+    for i in countdown(x.lo - 1, 0):
+      result = b.compItem(sub, result, b0 + i * sz)
+
+proc nameIndex(b: var Build; name: string): int =
+  if name notin b.n.nameIdx:
+    b.n.nameIdx[name] = b.n.nameIdx.len
+  b.n.nameIdx[name]
+
+proc compItem(b: var Build; x: Rx; next, base: int): int =
   if b.overflow: return 0
-  var inner = next
-  if x.cap > 0:
-    inner = b.add NState(kind: nkSave, slot: 2 * x.cap + 1, out1: next)
-  var e: int
   case x.kind
   of rxSet:
-    e = b.add NState(kind: nkByte, bytes: x.bytes, crlfDot: x.crlfDot,
-                     out1: inner)
+    b.add NState(kind: nkByte, bytes: x.bytes, crlfDot: x.crlfDot, out1: next)
+  of rxChars:
+    b.compChars(x, next)
+  of rxCat, rxAlt:
+    b.compGroup(x, next, base)
+  of rxRep:
+    b.compRep(x, next, base)
+  of rxBol:
+    if x.multi: b.n.hasBolMulti = true
+    else: b.n.hasBol = true
+    b.add NState(kind: nkBol, multi: x.multi, out1: next)
+  of rxEol:
+    if x.multi: b.n.hasEolMulti = true
+    b.add NState(kind: nkEol, multi: x.multi, out1: next)
+  of rxEolAbs:
+    b.add NState(kind: nkEolAbs, out1: next)
   of rxAccept:
     # RFC-0005 S8bb: close the groups it is in, then Match.
-    e = b.match
+    var e = b.match
     for g in x.open:
       e = b.add NState(kind: nkSave, slot: 2 * g + 1, out1: e)
-  of rxCat:
-    e = inner
-    for i in countdown(x.kids.high, 0):
-      e = b.comp(x.kids[i], e)
-  of rxAlt:
-    e = b.comp(x.kids[^1], inner)
-    for i in countdown(x.kids.high - 1, 0):
-      let k = b.comp(x.kids[i], inner)
-      e = b.add NState(kind: nkSplit, out1: k, out2: e)
-  of rxBol:
-    b.n.hasBol = true
-    e = b.add NState(kind: nkBol, out1: inner)
-  of rxEol:
-    e = b.add NState(kind: nkEol, out1: inner)
-  of rxEolAbs:
-    e = b.add NState(kind: nkEolAbs, out1: inner)
-  of rxRep:
-    e = inner
-    if x.hi < 0:
-      e = b.compStar(x.sub, x.lazy, e)
-    else:
-      # PCRE's `x{lo,hi}`: `lo` copies, then `hi - lo` NESTED optional
-      # copies (skipping one skips the rest).
-      var o = e
-      for _ in 1 .. x.hi - x.lo:
-        o = b.split(b.comp(x.sub, o), e, x.lazy)
-      e = o
-    for _ in 1 .. x.lo:
-      e = b.comp(x.sub, e)
-  if x.cap > 0:
-    e = b.add NState(kind: nkSave, slot: 2 * x.cap, out1: e)
-  e
+    e
+  of rxVerb:
+    var st = NState(kind: nkVerb, verb: x.verb, name: -1, address: base,
+                    out1: next)
+    case x.verb
+    of vbCommit: b.n.hasCommit = true
+    of vbPrune: b.n.hasPrune = true
+    of vbSkip: b.n.hasSkip = true
+    of vbThen: b.n.hasThen = true
+    of vbSkipName: st.name = b.nameIndex(x.name)
+    of vbMark: st.name = b.n.nameIdx.getOrDefault(x.name, -1)
+    b.add st
 
-proc buildNfa*(root: Rx; groups = 0; nl = nlLF; hasCrLf = false): Nfa =
-  ## RFC-0005 S8bb. The priority NFA of a `psOk` tree; `ok == false` past
-  ## the size caps (`why` says which).
+proc hasThenVerb(x: Rx): bool =
+  case x.kind
+  of rxVerb: x.verb == vbThen
+  of rxCat, rxAlt:
+    for k in x.kids:
+      if hasThenVerb(k): return true
+    false
+  of rxRep: hasThenVerb(x.sub)
+  else: false
+
+proc classifySkipNames(n: var Nfa) =
+  ## RFC-0005 S8bj. Each SKIP:NAME's mode: whether the paths reaching it
+  ## pass a MARK of its name (all: snFound, none: snNever). A mixed one, or
+  ## both modes in one pattern, is declined: PCRE's re-run for a SKIP:NAME
+  ## with no mark ignores EVERY SKIP:NAME passed before it in the attempt
+  ## (pcre_exec.c's `ignore_skip_arg` count), found ones included.
+  let k = n.nameIdx.len
+  n.skipMode = newSeq[SkipNameMode](k)
+  if k == 0: return
+  var seenMode = newSeq[set[bool]](k)   # passed a mark on the way: false/true
+  for name in 0 ..< k:
+    var seen = initHashSet[(int, bool)]()
+    var work = @[(n.start, false)]
+    while work.len > 0:
+      let (s, passed) = work.pop()
+      if (s, passed) in seen: continue
+      seen.incl (s, passed)
+      let st = n.states[s]
+      var p2 = passed
+      if st.kind == nkVerb:
+        if st.verb == vbSkipName and st.name == name:
+          seenMode[name].incl passed
+        if st.verb == vbMark and st.name == name: p2 = true
+      case st.kind
+      of nkMatch: discard
+      of nkSplit, nkBack:
+        work.add (st.out1, p2)
+        work.add (st.out2, p2)
+      else:
+        work.add (st.out1, p2)
+  var found, never = false
+  for name in 0 ..< k:
+    if seenMode[name] == {true, false}:
+      n.ok = false
+      n.why = "a (*SKIP:NAME) whose (*MARK:NAME) only some paths pass " &
+              "(PCRE's re-run then ignores the SKIPs passed before it)"
+      return
+    if true in seenMode[name]:
+      n.skipMode[name] = snFound
+      found = true
+    else:
+      n.skipMode[name] = snNever
+      never = true
+  n.hasNeverSkip = never
+  if found: n.hasSkip = true
+  if never and n.hasSkip and n.skipActive:
+    # pcre_exec.c keeps `ignore_skip_arg` across a SKIP's jump: an attempt
+    # at a CRLF's LF reached by the optimiser after it ignores the first
+    # SKIP:NAMEs, where a fresh one would bump past the LF.
+    n.ok = false
+    n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside a (*SKIP) under a " &
+            "CRLF newline convention (pcre_exec.c's stale ignore_skip_arg)"
+  if found and never:
+    n.ok = false
+    n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside one with a mark " &
+            "(PCRE's re-run for the first ignores the second)"
+
+proc buildNfa*(pr: PcreParse): Nfa =
+  ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
+  ## start-of-match data; `ok == false` past the size caps or for a
+  ## declined construct (`why` says which).
   var b = Build()
-  b.n.groups = groups
-  b.n.nl = nl
-  b.n.skipCrlf = nlPair(nl) and not hasCrLf
+  b.n.groups = pr.groups
+  b.n.nl = pr.nl
+  b.n.utf = pr.utf
+  b.n.hasCrLf = pr.hasCrLf
+  b.n.skipActive = nlPair(pr.nl) and not pr.hasCrLf
+  b.n.noStartOpt = pr.noStartOpt
+  b.n.limitMatch = pr.limitMatch
+  b.n.limitRecursion = pr.limitRecursion
+  b.catchers = hasThenVerb(pr.root)
+  # SKIP:NAME names first, so a MARK knows whether it is tracked.
+  proc collect(b: var Build; x: Rx) =
+    case x.kind
+    of rxVerb:
+      if x.verb == vbSkipName: discard b.nameIndex(x.name)
+    of rxCat, rxAlt:
+      for k in x.kids: b.collect(k)
+    of rxRep: b.collect(x.sub)
+    else: discard
+  b.collect(pr.root)
   let m = b.add NState(kind: nkMatch)
   b.match = m
-  b.n.start = b.comp(root, m)
+  b.n.start = b.compGroup(pr.root, m, 0)
   result = b.n
   result.ok = not b.overflow
   if b.overflow:
     result.why = "the pattern's priority automaton is past its size cap (" &
                  $maxNfaStates & " states, " & $maxLoops & " nullable loops)"
+    return
+  result.classifySkipNames()
+  let so = startOpt(pr)
+  result.so = so
+  result.anchoredPat = so.anchored
+  if pr.noStartOpt or so.anchored: result.filter = fkNone
+  elif so.firstChar >= 0:
+    result.filter = fkFirst
+    result.fc1 = char(so.firstChar)
+    result.fc2 = result.fc1
+    if so.firstCaseless:
+      result.fc2 = (if result.fc1 in {'a'..'z'}: char(ord(result.fc1) - 32)
+                    else: char(ord(result.fc1) + 32))
+  elif so.startline: result.filter = fkStartline
+  elif so.hasBits:
+    result.filter = fkBits
+    result.bits = so.bits
+  else: result.filter = fkNone
 
-proc buildNfa*(pr: PcreParse): Nfa =
-  ## RFC-0005 S8bb. The priority NFA of a `psOk` reading.
-  buildNfa(pr.root, pr.groups, pr.nl, pr.hasCrLf)
+proc filterBytes*(n: Nfa): set[char] =
+  ## RFC-0005 S8bj. The bytes the start-of-match scan stops at (`fkFirst`,
+  ## `fkBits`).
+  case n.filter
+  of fkFirst: {n.fc1, n.fc2}
+  of fkBits: n.bits
+  else: {}
 
-# ---- the Pike step -------------------------------------------------------------
+proc buildNfa*(root: Rx; groups = 0; nl = nlLF; hasCrLf = false): Nfa =
+  ## RFC-0005 S8bb. The priority NFA of a tree (non-UTF, no start options).
+  buildNfa(PcreParse(status: psOk, root: root, groups: groups, nl: nl,
+                     hasCrLf: hasCrLf, limitMatch: -1, limitRecursion: -1))
+
+# ---- the agenda ------------------------------------------------------------------
 
 type
-  Ctx* = enum
-    cxOther   ## the rest of the subject is not a newline (nor empty)
-    cxNll     ## the rest of the subject is a newline
-    cxEnd     ## the subject ends here
+  ItemKind = enum ikThread, ikMarker, ikThen, ikTerm, ikMatch
+  TermKind = enum tmBump, tmCommit, tmSkip
+  Cond = enum
+    cdNone
+    cdDieLF   ## a `(*CRLF)` dot read a CR: dies if the next byte is LF
+    cdNeedLF  ## a `(?m)$` before a CR under `(*CRLF)`: needs an LF next
+  Frame = tuple[grp, alt, marker: int32]
 
-  Closure = object
-    consumers: seq[int]   ## byte states, in priority order
-    matched: bool         ## a thread reached Match (lower ones are cut)
-    matchSlots: seq[int]  ## captures of the matching thread (see `run`)
+  Item[T] = object
+    kind: ItemKind
+    cond: Cond
+    st: int32              ## ikThread: the NFA state
+    frames: seq[Frame]     ## ikThread: per catcher group, its latest frame
+    marks: seq[int32]      ## ikThread: per name, its latest MARK's tag
+    marker: int32          ## ikMarker: its id; ikThen: the target
+    term: TermKind         ## ikTerm
+    tag: int32             ## ikTerm tmSkip / ikMatch: where
+    cap: T
 
-proc closure(n: Nfa; threads: seq[int]; ctx: Ctx; bolOk, noEmpty: bool): Closure =
-  ## The epsilon closure of `threads` (in priority order) at one position.
-  ## `bolOk`: the position is subject position 0. `noEmpty`: a match here
-  ## is empty and NOTEMPTY_ATSTART forbids it (the thread fails, no cut).
-  var seenC = initHashSet[int]()
-  var visited = initHashSet[(int, uint64)]()
-  var stack: seq[(int, uint64)]
-  for i in countdown(threads.high, 0): stack.add (threads[i], 0'u64)
-  while stack.len > 0:
-    let (s, ent) = stack.pop()
-    if (s, ent) in visited: continue
-    visited.incl (s, ent)
-    let st = n.states[s]
-    case st.kind
-    of nkByte:
-      if s notin seenC:
-        seenC.incl s
-        result.consumers.add s
-    of nkSplit:
-      stack.add (st.out2, ent)
-      stack.add (st.out1, ent)
-    of nkBol:
-      if bolOk: stack.add (st.out1, ent)
-    of nkEol:
-      if ctx in {cxNll, cxEnd}: stack.add (st.out1, ent)
-    of nkEolAbs:
-      if ctx == cxEnd: stack.add (st.out1, ent)
-    of nkEnter:
-      stack.add (st.out1, ent or (1'u64 shl st.loop))
-    of nkBack:
-      if (ent and (1'u64 shl st.loop)) != 0:
-        stack.add (st.out2, ent)    # an empty iteration: leave the loop
-      else:
-        stack.add (st.out1, ent)
-    of nkSave:
-      stack.add (st.out1, ent)
-    of nkMatch:
-      if not noEmpty:
-        result.matched = true
-        return
+  StepCtx = object
+    ctx: Ctx          ## the rest of the subject
+    nb: int           ## the byte here, -1 at the end
+    finCRLF: bool     ## the bytes here are a final CRLF (symR2)
+    pc: PrevClass     ## what precedes this position
+    pos0: bool        ## subject position 0
+    atStart: bool     ## the attempt's start
+    noEmpty: bool     ## NOTEMPTY_ATSTART holds here
+    crlfElig: bool    ## the start is a CRLF's LF past the start offset
+    anchored: bool    ## the call is anchored (a SKIP:NAME without mark
+                      ## then fails the attempt)
+    tagNow: int32     ## the tag of an item created here
+    capStart, capEnd: bool   ## capture events here (`captureLang`)
 
-proc advance(n: Nfa; consumers: seq[int]; c: char): seq[int] =
-  var seen = initHashSet[int]()
-  for s in consumers:
-    if c in n.states[s].bytes:
-      var t = n.states[s].out1
-      if c == '\r' and n.states[s].crlfDot: t = t or flagCR
-      if t notin seen:
-        seen.incl t
+  OutcomeKind* = enum okUndecided, okNoMatch, okMatch, okBump, okCommit, okSkip
+
+proc decided[T](it: Item[T]): bool =
+  it.kind in {ikMatch, ikTerm} and it.cond == cdNone
+
+proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond) =
+  (it.st, it.frames, it.marks, it.cond)
+
+proc withFrame(fs: seq[Frame]; f: Frame): seq[Frame] =
+  for x in fs:
+    if x.grp != f.grp: result.add x
+  result.add f
+
+proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
+                markerCtr: var int32;
+                save: proc (t: T; slot: int; sc: StepCtx): T): seq[Item[T]] =
+  ## The epsilon closure of the agenda at one position (see the module
+  ## doc): threads become consumers (byte states) in priority order, with
+  ## the matches, verb items and markers their paths reach.
+  type Entry = object
+    kind: int8        ## 0 visit, 1 emit a marker, 2 emit `item`
+    st: int32
+    ent: uint64
+    frames: seq[Frame]
+    marks: seq[int32]
+    cond: Cond
+    cap: T
+    item: Item[T]
+  var visited = initHashSet[(int32, uint64, seq[Frame], seq[int32], Cond)]()
+  var seenC = initHashSet[(int32, seq[Frame], seq[int32], Cond)]()
+  var cutting = false
+  for it in items:
+    if it.kind != ikThread:
+      if it.kind == ikMarker:
+        cutting = false
+        result.add it
+      elif not cutting:
+        result.add it
+        if decided(it): cutting = true
+      continue
+    if cutting: continue
+    var stack = @[Entry(kind: 0, st: it.st, frames: it.frames,
+                        marks: it.marks, cond: it.cond, cap: it.cap)]
+    while stack.len > 0:
+      let e = stack.pop()
+      case e.kind
+      of 1:
+        result.add Item[T](kind: ikMarker, marker: e.st)
+        cutting = false
+        continue
+      of 2:
+        if not cutting:
+          result.add e.item
+          if decided(e.item): cutting = true
+        continue
+      else: discard
+      if cutting: continue
+      let vk = (e.st, e.ent, e.frames, e.marks, e.cond)
+      if vk in visited: continue
+      visited.incl vk
+      let s = n.states[e.st]
+      template go(target: int; c: Cond = e.cond) =
+        stack.add Entry(kind: 0, st: int32(target), ent: e.ent,
+                        frames: e.frames, marks: e.marks, cond: c, cap: e.cap)
+      template emitAfter(itm: Item[T]) =
+        # The item comes after everything the continuation reaches.
+        stack.add Entry(kind: 2, item: itm)
+      case s.kind
+      of nkByte:
+        let k = (e.st, e.frames, e.marks, e.cond)
+        if k notin seenC:
+          seenC.incl k
+          result.add Item[T](kind: ikThread, st: e.st, frames: e.frames,
+                             marks: e.marks, cond: e.cond, cap: e.cap)
+      of nkSplit:
+        go(s.out2)
+        go(s.out1)
+      of nkBol:
+        if not s.multi:
+          if sc.pos0: go(s.out1)
+        elif sc.pos0 or (sc.ctx != cxEnd and wasNl(n.nl, sc.pc)):
+          # OP_CIRCM: at the subject start, or after a newline that does
+          # not end the subject.
+          go(s.out1)
+      of nkEol:
+        if not s.multi:
+          if sc.ctx in {cxNll, cxEnd}: go(s.out1)
+        elif sc.ctx == cxEnd or (sc.nb >= 0 and char(sc.nb) in nlBytes(n.nl)):
+          go(s.out1)
+        elif n.nl == nlCRLF and sc.nb == ord('\r'):
+          # OP_DOLLM's IS_NEWLINE: a CR is one only with an LF after it.
+          if sc.finCRLF: go(s.out1)
+          elif e.cond != cdDieLF: go(s.out1, cdNeedLF)
+      of nkEolAbs:
+        if sc.ctx == cxEnd: go(s.out1)
+      of nkEnter:
+        stack.add Entry(kind: 0, st: int32(s.out1),
+                        ent: e.ent or (1'u64 shl s.loop), frames: e.frames,
+                        marks: e.marks, cond: e.cond, cap: e.cap)
+      of nkBack:
+        if (e.ent and (1'u64 shl s.loop)) != 0:
+          go(s.out2)    # an empty iteration: leave the loop
+        else:
+          go(s.out1)
+      of nkSave:
+        stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
+                        frames: e.frames, marks: e.marks, cond: e.cond,
+                        cap: save(e.cap, s.slot, sc))
+      of nkMatch:
+        if not sc.noEmpty:
+          let m = Item[T](kind: ikMatch, cond: e.cond, tag: sc.tagNow,
+                          cap: e.cap)
+          result.add m
+          if decided(m): cutting = true
+      of nkAlt:
+        let id = markerCtr
+        inc markerCtr
+        stack.add Entry(kind: 1, st: id)
+        stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
+                        frames: withFrame(e.frames,
+                                          (int32(s.grp), int32(s.alt), id)),
+                        marks: e.marks, cond: e.cond, cap: e.cap)
+      of nkVerb:
+        case s.verb
+        of vbMark:
+          var mk = e.marks
+          if s.name >= 0 and s.name < mk.len: mk[s.name] = sc.tagNow
+          stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
+                          frames: e.frames, marks: mk, cond: e.cond, cap: e.cap)
+        of vbCommit:
+          emitAfter(Item[T](kind: ikTerm, term: tmCommit, cond: e.cond))
+          go(s.out1)
+        of vbPrune:
+          emitAfter(Item[T](kind: ikTerm, term: tmBump, cond: e.cond))
+          go(s.out1)
+        of vbSkip:
+          emitAfter(Item[T](kind: ikTerm, term: tmSkip, tag: sc.tagNow,
+                            cond: e.cond))
+          go(s.out1)
+        of vbSkipName:
+          if n.skipMode[s.name] == snFound:
+            emitAfter(Item[T](kind: ikTerm, term: tmSkip,
+                              tag: e.marks[s.name], cond: e.cond))
+          elif sc.anchored or (sc.atStart and sc.crlfElig):
+            # No mark: an anchored call fails; an unanchored one re-runs the
+            # attempt -- past the LF when the start is a CRLF's LF.
+            emitAfter(Item[T](kind: ikTerm, term: tmBump, cond: e.cond))
+          go(s.out1)
+        of vbThen:
+          var target = -1'i32
+          for k in countdown(e.frames.high, 0):
+            let f = e.frames[k]
+            if s.address < n.altEnd[f.grp][f.alt]:
+              target = f.marker
+              break
+          if target >= 0:
+            emitAfter(Item[T](kind: ikThen, marker: target, cond: e.cond))
+          else:
+            emitAfter(Item[T](kind: ikTerm, term: tmBump, cond: e.cond))
+          go(s.out1)
+
+proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
+  ## The agenda after the byte `c`: each consumer that reads it moves on.
+  var seen = initHashSet[(int32, seq[Frame], seq[int32], Cond)]()
+  for it in items:
+    if it.kind != ikThread:
+      result.add it
+      continue
+    let s = n.states[it.st]
+    if c notin s.bytes: continue
+    var t = it
+    t.st = int32(s.out1)
+    if c == '\r' and s.crlfDot:
+      if t.cond == cdNeedLF: continue
+      t.cond = cdDieLF
+    let k = ckey(t)
+    if k in seen: continue
+    seen.incl k
+    result.add t
+
+proc resolve[T](items: seq[Item[T]]; nextLF: bool): seq[Item[T]] =
+  ## The conditional items once the next byte is known (`nextLF`: an LF).
+  for it in items:
+    case it.cond
+    of cdNone: result.add it
+    of cdDieLF:
+      if not nextLF:
+        var t = it
+        t.cond = cdNone
+        result.add t
+    of cdNeedLF:
+      if nextLF:
+        var t = it
+        t.cond = cdNone
         result.add t
 
-proc resolve(threads: seq[int]; nextLF: bool): seq[int] =
-  ## RFC-0005 S8bb. The threads at a position whose next byte is (`nextLF`)
-  ## or is not an LF: a flagged one (a `(*CRLF)` dot read a CR) dies before
-  ## an LF and is an ordinary thread otherwise.
-  for t in threads:
-    if (t and flagCR) != 0 and nextLF: continue
-    let u = t and not flagCR
-    if u notin result: result.add u
+proc dropThreads[T](items: seq[Item[T]]): seq[Item[T]] =
+  for it in items:
+    if it.kind != ikThread: result.add it
 
-proc symCtx(s: int): Ctx =
-  (if s < symFin: cxOther else: cxNll)
+proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
+  ## See the module doc: the front decides or jumps, an unconditional
+  ## decided item kills what follows it up to the next marker, and a marker
+  ## nothing refers to goes.
+  var cur = items
+  while true:
+    var changed = false
+    var i = 0
+    while i < cur.len:
+      let it = cur[i]
+      if it.kind == ikMarker:
+        inc i
+      elif it.kind == ikThen and it.cond == cdNone:
+        var j = i + 1
+        while j < cur.len and
+              not (cur[j].kind == ikMarker and cur[j].marker == it.marker):
+          inc j
+        i = j + 1
+      else:
+        break
+    if i > 0:
+      cur = (if i >= cur.len: @[] else: cur[i .. ^1])
+      changed = true
+    if cur.len > 0 and decided(cur[0]):
+      return @[cur[0]]
+    var nx: seq[Item[T]]
+    var cutting = false
+    for it in cur:
+      if it.kind == ikMarker:
+        cutting = false
+        nx.add it
+      elif cutting:
+        changed = true
+      else:
+        nx.add it
+        if decided(it): cutting = true
+    # An unconditional THEN jumps over everything up to its marker: those
+    # items never reach the front. A THEN right before its marker is a
+    # no-op.
+    block thens:
+      var i = 0
+      var pruned: seq[Item[T]]
+      while i < nx.len:
+        let it = nx[i]
+        if it.kind == ikThen and it.cond == cdNone:
+          var j = i + 1
+          while j < nx.len and
+                not (nx[j].kind == ikMarker and nx[j].marker == it.marker):
+            inc j
+          if j < nx.len:
+            # Markers in between stay (a thread above may still refer to
+            # one; an unreferenced one goes below).
+            var kept: seq[Item[T]]
+            for x in nx[i + 1 ..< j]:
+              if x.kind == ikMarker: kept.add x
+            if kept.len < j - i - 1: changed = true
+            if kept.len == 0:
+              changed = true      # THEN right before its marker: a no-op
+            else:
+              pruned.add it
+              pruned.add kept
+            i = j
+            continue
+        pruned.add it
+        inc i
+      nx = pruned
+    var refs = initHashSet[int32]()
+    for it in nx:
+      if it.kind == ikThread:
+        for f in it.frames: refs.incl f.marker
+      elif it.kind == ikThen:
+        refs.incl it.marker
+    cur = @[]
+    for it in nx:
+      if it.kind == ikMarker and it.marker notin refs:
+        changed = true
+      else:
+        cur.add it
+    if not changed: return cur
+
+proc outcome[T](items: seq[Item[T]]): OutcomeKind =
+  ## A normalized agenda's outcome, if decided.
+  if items.len == 0: return okNoMatch
+  let f = items[0]
+  if f.cond != cdNone: return okUndecided
+  case f.kind
+  of ikMatch: okMatch
+  of ikTerm:
+    case f.term
+    of tmBump: okBump
+    of tmCommit: okCommit
+    of tmSkip: okSkip
+  else: okUndecided
+
+# ---- the concrete runs -----------------------------------------------------------
 
 proc ctxAt(n: Nfa; u: string; j: int): Ctx =
   if j >= u.len: cxEnd
@@ -317,54 +950,273 @@ proc ctxAt(n: Nfa; u: string; j: int): Ctx =
        u[j + 1] == '\n': cxNll
   else: cxOther
 
+proc initMarks(n: Nfa): seq[int32] =
+  result = newSeq[int32](n.nameIdx.len)
+  for x in result.mitems: x = -1
+
+type AttemptResult*[T] = object
+  kind*: OutcomeKind
+  pos*: int        ## okMatch: the match's end; okSkip: the landing
+  cap*: T
+
+proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
+                    cap0: T;
+                    save: proc (t: T; slot: int; sc: StepCtx): T):
+                    AttemptResult[T] =
+  ## RFC-0005 S8bj. The concrete attempt at `x` of `s` (the search's start
+  ## offset `s0`): its outcome, with positions as tags.
+  var items = @[Item[T](kind: ikThread, st: int32(n.start),
+                        marks: initMarks(n), cap: cap0)]
+  var ctr = 0'i32
+  var pc = classAt(s, x)
+  let elig = (not anchored) and x > s0 and x < s.len and s[x - 1] == '\r' and
+             s[x] == '\n' and n.skipActive
+  for j in x .. s.len:
+    let atEnd = j >= s.len
+    let nextLF = (not atEnd) and s[j] == '\n'
+    items = resolve(items, nextLF)
+    let sc = StepCtx(ctx: ctxAt(n, s, j), nb: (if atEnd: -1 else: ord(s[j])),
+                     finCRLF: n.nl == nlCRLF and j == s.len - 2 and
+                              s[j] == '\r' and s[j + 1] == '\n',
+                     pc: pc, pos0: j == 0, atStart: j == x,
+                     noEmpty: ne and j == x, crlfElig: j == x and elig,
+                     anchored: anchored, tagNow: int32(j))
+    items = closure(n, items, sc, ctr, save)
+    if atEnd: items = dropThreads(items)
+    else: items = advance(n, items, s[j])
+    items = normalize(items)
+    let oc = outcome(items)
+    if oc != okUndecided or atEnd:
+      result.kind = oc
+      if oc in {okMatch, okSkip}:
+        result.pos = int(items[0].tag)
+        result.cap = items[0].cap
+      return
+    pc = nextClass(s[j], pc)
+
+proc noSave(t: int8; slot: int; sc: StepCtx): int8 = t
+
+proc runAttempt*(n: Nfa; s: string; x: int; s0 = -1; anchored = true;
+                 ne = false): (OutcomeKind, int) =
+  ## RFC-0005 S8bj. The concrete attempt at `x` of `s`: its outcome and
+  ## (a match's end / a SKIP's landing) position. `s0`: the call's start
+  ## offset (default `x`).
+  let r = runAttemptT[int8](n, s, x, (if s0 < 0: x else: s0), anchored, ne,
+                            0'i8, noSave)
+  (r.kind, r.pos)
+
 proc chosenEnd*(n: Nfa; u: string; atStart: bool; noEmpty = false): int =
-  ## RFC-0005 S8bb. The concrete run: the end offset in `u` of PCRE's match
-  ## at the start of `u`, or -1. `atStart`: `u` starts at subject position
-  ## 0. `noEmpty`: NOTEMPTY_ATSTART (an empty match is not one).
-  result = -1
-  var threads = @[n.start]
-  for j in 0 .. u.len:
-    threads = resolve(threads, j < u.len and u[j] == '\n')
-    let cl = closure(n, threads, ctxAt(n, u, j), atStart and j == 0,
-                     noEmpty and j == 0)
-    if cl.matched: result = j
-    if j == u.len or cl.consumers.len == 0: break
-    threads = advance(n, cl.consumers, u[j])
+  ## RFC-0005 S8bb. The end offset in `u` of PCRE's (anchored) match at the
+  ## start of `u`, or -1. `atStart`: `u` starts at subject position 0 (else
+  ## an ordinary byte precedes it).
+  let s = (if atStart: u else: "\x00" & u)
+  let x = (if atStart: 0 else: 1)
+  let r = runAttemptT[int8](n, s, x, x, true, noEmpty, 0'i8, noSave)
+  if r.kind == okMatch: r.pos - x else: -1
 
-# ---- the selection languages --------------------------------------------------
+proc created*(n: Nfa; s: string; x, s0: int): bool =
+  ## RFC-0005 S8bj. Whether an unanchored search scanning forward stops at
+  ## `x` (pcre_exec.c's start-of-match optimisation; the end always).
+  if x >= s.len: return true
+  case n.filter
+  of fkNone: true
+  of fkFirst: s[x] == n.fc1 or s[x] == n.fc2
+  of fkBits: s[x] in n.bits
+  of fkStartline:
+    if x == s0: true
+    else:
+      let pc = classAt(s, x)
+      wasNl(n.nl, pc) and
+        not (pc == pcCR and s[x] == '\n' and n.nl in {nlANY, nlANYCRLF})
 
-type
-  LangKind* = enum
-    lkMark   ## `u[0..k) # u[k..]`: the match at u's start ends at k
-    lkNone   ## no match at u's start
-    lkEnds   ## the match at u's start ends at u's end
+proc nextChar(n: Nfa; s: string; x: int): int =
+  result = x + 1
+  if n.utf:
+    while result < s.len and (ord(s[result]) and 0xC0) == 0x80: inc result
 
-  DKey = object
-    threads: seq[int]
-    pos0: bool
-    phase: int    ## lkMark: 0 before `#`, 1 just after it, 2 confirmed
-    nl: int8      ## `nlStep`'s state
+proc runSearch*(n: Nfa; s: string; s0: int; ne = false;
+                anchoredCall = false): (int, int) =
+  ## RFC-0005 S8bj. The concrete search from start offset `s0`
+  ## (pcre_exec.c's bumpalong loop): the found match's (start, end), or
+  ## (-1, -1). `ne`: NOTEMPTY_ATSTART.
+  let anchored = anchoredCall or n.anchoredPat
+  var x = s0
+  while true:
+    if not anchored:
+      while not created(n, s, x, s0): inc x
+    let r = runAttemptT[int8](n, s, x, s0, anchored, ne, 0'i8, noSave)
+    var next: int
+    case r.kind
+    of okMatch: return (x, r.pos)
+    of okCommit: return (-1, -1)
+    of okSkip:
+      next = (if r.pos > x: r.pos else: n.nextChar(s, x))
+    else:
+      next = n.nextChar(s, x)
+    if anchored or next > s.len: return (-1, -1)
+    x = next
+    if x > s0 and s[x - 1] == '\r' and x < s.len and s[x] == '\n' and
+       n.skipActive:
+      inc x
 
-proc hash(k: DKey): Hash =
-  var h: Hash = 0
-  h = h !& hash(k.threads) !& hash(k.pos0) !& hash(k.phase) !& hash(k.nl)
-  !$h
+proc capSave(t: seq[int32]; slot: int; sc: StepCtx): seq[int32] =
+  result = t
+  result[slot] = sc.tagNow
+
+proc chosenCapsAt*(n: Nfa; s: string; x: int; s0 = -1;
+                   anchored = true): (int, seq[(int, int)]) =
+  ## RFC-0005 S8bj. The concrete attempt at `x` with captures: the match's
+  ## end (-1: none) and each group's `(start, end)` in `s` (`(-1, -1)`:
+  ## unset).
+  var cap0 = newSeq[int32](2 * n.groups + 2)
+  for k in 0 ..< cap0.len: cap0[k] = -1
+  let r = runAttemptT[seq[int32]](n, s, x, (if s0 < 0: x else: s0), anchored,
+                                  false, cap0, capSave)
+  if r.kind != okMatch: return (-1, @[])
+  var caps: seq[(int, int)]
+  for g in 1 .. n.groups:
+    caps.add(if r.cap[2 * g + 1] < 0: (-1, -1)
+             else: (int(r.cap[2 * g]), int(r.cap[2 * g + 1])))
+  (r.pos, caps)
+
+proc chosenCaps*(n: Nfa; u: string; atStart: bool): (int, seq[(int, int)]) =
+  ## RFC-0005 S8bb. `chosenCapsAt` at the start of `u`, offsets in `u`.
+  let s = (if atStart: u else: "\x00" & u)
+  let x = (if atStart: 0 else: 1)
+  let (e, caps) = chosenCapsAt(n, s, x)
+  if e < 0: return (-1, @[])
+  var cs: seq[(int, int)]
+  for (a, b) in caps:
+    cs.add(if a < 0: (-1, -1) else: (a - x, b - x))
+  (e - x, cs)
+
+# ---- deterministic automata ---------------------------------------------------
 
 type Dfa = object
   trans: seq[array[nSyms, int32]]   ## -1: dead
   accept: seq[bool]
+  sink: seq[bool]    ## an outcome decided and accepted: every well-formed
+                     ## continuation is accepted
   ok: bool
 
-proc buildDfa(n: Nfa; lang: LangKind; atStart, noEmpty, nonEmpty: bool): Dfa =
-  ## `nonEmpty`: the empty word is not in the language (lkEnds only).
-  var ids = initTable[DKey, int]()
-  var keys: seq[DKey]
-  proc intern(k: DKey): int =
+proc hash(f: Frame): Hash = !$(hash(f.grp) !& hash(f.alt) !& hash(f.marker))
+
+proc hash[T](it: Item[T]): Hash =
+  var h: Hash = 0
+  h = h !& hash(ord(it.kind)) !& hash(ord(it.cond)) !& hash(it.st) !&
+      hash(it.marker) !& hash(ord(it.term)) !& hash(it.tag) !&
+      hash(it.cap)
+  for f in it.frames: h = h !& hash(f)
+  for m in it.marks: h = h !& hash(m)
+  !$h
+
+proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
+  ## Marker ids renumbered by first appearance.
+  var ren = initTable[int32, int32]()
+  proc idOf(m: int32): int32 =
+    if m notin ren: ren[m] = int32(ren.len)
+    ren[m]
+  result = items
+  for it in result.mitems:
+    case it.kind
+    of ikThread:
+      for f in it.frames.mitems: f.marker = idOf(f.marker)
+    of ikMarker, ikThen:
+      it.marker = idOf(it.marker)
+    else: discard
+
+type
+  AcceptKind = enum
+    acMarkT    ## a match tagged at the `#` event
+    acNone     ## no match
+    acEndsT    ## a match ending at the end
+    acBump     ## unanchored: the attempt fails, the start moves one char
+    acSkipT    ## unanchored: a SKIP landing at the LAND event
+    acCommit   ## unanchored: the search ends
+    acMatch    ## search: a match
+    acMatchT   ## search: a match ending at the LAND event
+    acCapSet   ## a match setting group `g`
+    acCapMark  ## a match whose group `g` spans `#` .. `%`
+
+  AttemptSpec = object
+    acc: AcceptKind
+    anchored: bool
+    noEmpty: bool
+    nonEmpty: bool     ## the empty word is not in the language
+    pc0: PrevClass
+    crlfElig: bool
+    group: int
+
+  AKey = object
+    items: seq[Item[int8]]
+    pc: PrevClass
+    nl: int8
+    ev: int8          ## events read: 1 `#`, 2 `%`, 4 LAND
+    just: int8        ## events read at this position
+    atStart: bool
+    sink: int8        ## 1: accepted outcome (items then empty)
+
+proc hash(k: AKey): Hash =
+  var h: Hash = 0
+  for it in k.items: h = h !& hash(it)
+  h = h !& hash(ord(k.pc)) !& hash(k.nl) !& hash(k.ev) !& hash(k.just) !&
+      hash(k.atStart) !& hash(k.sink)
+  !$h
+
+proc `==`(a, b: AKey): bool =
+  a.items == b.items and a.pc == b.pc and a.nl == b.nl and a.ev == b.ev and
+    a.just == b.just and a.atStart == b.atStart and a.sink == b.sink
+
+proc requiredEvents(acc: AcceptKind): int8 =
+  case acc
+  of acMarkT: 1
+  of acSkipT, acMatchT: 4
+  of acCapMark: 3
+  else: 0
+
+proc capSaveDfa(g: int): proc (t: int8; slot: int; sc: StepCtx): int8 =
+  ## RFC-0005 S8bb. Group `g`'s capture tag `3*s + e` (s / e: 0 unset, 1 at
+  ## the marker, 2 elsewhere).
+  result = proc (t: int8; slot: int; sc: StepCtx): int8 =
+    if slot == 2 * g: int8(3 * (if sc.capStart: 1 else: 2) + int(t) mod 3)
+    elif slot == 2 * g + 1: int8(3 * (int(t) div 3) + (if sc.capEnd: 1 else: 2))
+    else: t
+
+proc accepts(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8];
+             ev: int8; atStart: bool): bool =
+  if (ev and requiredEvents(spec.acc)) != requiredEvents(spec.acc):
+    return false
+  case spec.acc
+  of acMarkT: oc == okMatch and it.tag == 1
+  of acNone: oc != okMatch
+  of acEndsT: oc == okMatch and it.tag == 1 and not (spec.nonEmpty and atStart)
+  of acBump:
+    oc in {okNoMatch, okBump} or (oc == okSkip and it.tag == 0)
+  of acSkipT: oc == okSkip and it.tag == 1
+  of acCommit: oc == okCommit
+  of acMatch: oc == okMatch
+  of acMatchT: oc == okMatch and it.tag == 1
+  of acCapSet: oc == okMatch and int(it.cap) mod 3 != 0
+  of acCapMark: oc == okMatch and it.cap == 3 * 1 + 1
+
+proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
+  ## RFC-0005 S8bj. The deterministic attempt (the agenda machine) as a
+  ## DFA accepting the words whose outcome `spec` asks for.
+  var ids = initTable[AKey, int]()
+  var keys: seq[AKey]
+  proc intern(k: AKey): int =
     if k in ids: return ids[k]
     keys.add k
     ids[k] = keys.high
     keys.high
-  discard intern(DKey(threads: @[n.start], pos0: true))
+  var save: proc (t: int8; slot: int; sc: StepCtx): int8 = noSave
+  if spec.group > 0: save = capSaveDfa(spec.group)
+  let pc0 = (if n.needPc or spec.pc0 == pcStart: spec.pc0 else: pcOther)
+  discard intern(AKey(items: @[Item[int8](kind: ikThread, st: int32(n.start),
+                                          marks: initMarks(n))],
+                      pc: pc0, atStart: true))
+  let evSyms = [(symMark, 1'i8), (symMark2, 2'i8), (symLand, 4'i8)]
+  let need = requiredEvents(spec.acc)
   result.ok = true
   var i = 0
   while i < keys.len:
@@ -374,59 +1226,97 @@ proc buildDfa(n: Nfa; lang: LangKind; atStart, noEmpty, nonEmpty: bool): Dfa =
     let k = keys[i]
     var row: array[nSyms, int32]
     for s in 0 ..< nSyms: row[s] = -1
-    let bolOk = atStart and k.pos0
-    let ne = noEmpty and k.pos0
-    # The end of the subject.
     var acc = false
-    if nlCanEnd(k.nl):
-      let cl = closure(n, resolve(k.threads, false), cxEnd, bolOk, ne)
-      case lang
-      of lkNone: acc = not cl.matched
-      of lkEnds: acc = cl.matched and not (nonEmpty and k.pos0)
-      of lkMark: acc = (k.phase == 1 and cl.matched) or
-                       (k.phase == 2 and not cl.matched)
-    # The marker.
-    if lang == lkMark and k.phase == 0:
-      var k2 = k
-      k2.phase = 1
-      row[symMark] = int32 intern(k2)
-    # A byte, or a final newline's.
-    if (k.nl and nlFinal) == 0:
-      var cls: array[2, array[2, Closure]]   # [ctx is cxNll][next is LF]
-      var have: array[2, array[2, bool]]
+    var isSink = false
+    if k.sink == 1:
+      acc = nlCanEnd(k.nl)
+      isSink = true
       for s in 0 ..< symMark:
-        let nls = nlStep(n, k.nl, s)
+        let nls = nlStepFor(n.nl, k.nl, s)
         if nls < 0: continue
-        let c = symByte(s)
-        let ci = (if symCtx(s) == cxNll: 1 else: 0)
-        let li = (if c == '\n': 1 else: 0)
-        if not have[ci][li]:
-          cls[ci][li] = closure(n, resolve(k.threads, li == 1), symCtx(s),
-                                bolOk, ne)
-          have[ci][li] = true
-        let cl = cls[ci][li]
-        var phase = k.phase
-        case lang
-        of lkNone:
-          if cl.matched: continue
-        of lkEnds: discard
-        of lkMark:
-          if k.phase == 1:
-            if not cl.matched: continue
-            phase = 2
-          elif k.phase == 2 and cl.matched: continue
-        let nx = advance(n, cl.consumers, c)
-        row[s] = int32 intern(DKey(threads: nx, pos0: false, phase: phase,
-                                   nl: nls))
+        var k2 = k
+        k2.nl = nls
+        row[s] = int32 intern(k2)
+    else:
+      let tagNow = (proc (just: int8): int32 =
+        if (just and (1 or 4)) != 0: 1'i32
+        elif k.atStart: 0'i32
+        else: 2'i32)
+      proc mkCtx(ctx: Ctx; nb: int; finCRLF: bool; endEv: bool): StepCtx =
+        var just = k.just
+        if endEv: just = just or 1
+        StepCtx(ctx: ctx, nb: nb, finCRLF: finCRLF, pc: k.pc,
+                pos0: k.atStart and pc0 == pcStart, atStart: k.atStart,
+                noEmpty: k.atStart and spec.noEmpty,
+                crlfElig: k.atStart and spec.crlfElig,
+                anchored: spec.anchored, tagNow: tagNow(just),
+                capStart: (k.just and 1) != 0, capEnd: (k.just and 2) != 0)
+      # The end of the subject.
+      if nlCanEnd(k.nl):
+        var ctr = 1_000_000'i32
+        var items = resolve(k.items, false)
+        items = closure(n, items, mkCtx(cxEnd, -1, false,
+                                        spec.acc == acEndsT), ctr, save)
+        items = normalize(dropThreads(items))
+        let oc = outcome(items)
+        let it = (if items.len > 0: items[0] else: Item[int8]())
+        acc = accepts(spec, oc, it, k.ev, k.atStart)
+      # The events.
+      for (sym, bit) in evSyms:
+        if (need and bit) == 0 or (k.ev and bit) != 0: continue
+        # `%` only after `#`.
+        if bit == 2 and (k.ev and 1) == 0: continue
+        var k2 = k
+        k2.ev = k.ev or bit
+        k2.just = k.just or bit
+        row[sym] = int32 intern(k2)
+      # A byte, or a final newline's.
+      if (k.nl and nlFinal) == 0:
+        var cache = initTable[(Ctx, int, bool, bool), seq[Item[int8]]]()
+        for s in 0 ..< symMark:
+          let nls = nlStepFor(n.nl, k.nl, s)
+          if nls < 0: continue
+          let c = symByte(s)
+          let ctx = symCtx(s)
+          let fin = s == symR2
+          # The closure depends on the byte only through these.
+          let nbKey = (if c in nlBytes(n.nl): ord(c)
+                       elif c == '\r': ord(c)
+                       else: -2)
+          let ck = (ctx, nbKey * 2 + (if c == '\n': 1 else: 0), fin, false)
+          var cl: seq[Item[int8]]
+          if ck in cache:
+            cl = cache[ck]
+          else:
+            var ctr = 1_000_000'i32
+            cl = closure(n, resolve(k.items, c == '\n'),
+                         mkCtx(ctx, ord(c), fin, false), ctr, save)
+            cache[ck] = cl
+          var items = normalize(advance(n, cl, c))
+          let oc = outcome(items)
+          var k2 = AKey(nl: nls, ev: k.ev, just: 0, atStart: false)
+          if oc != okUndecided:
+            let it = (if items.len > 0: items[0] else: Item[int8]())
+            # Decided: accepted for good once the required events are read.
+            if (k.ev and need) == need and
+               accepts(spec, oc, it, k.ev, false):
+              k2.sink = 1
+            else:
+              continue
+          else:
+            k2.items = canon(items)
+            k2.pc = (if n.needPc: nextClass(c, k.pc) else: pcOther)
+          row[s] = int32 intern(k2)
     result.trans.add row
     result.accept.add acc
+    result.sink.add isSink
     inc i
 
-proc minimize(d: Dfa): (seq[array[nSyms, int32]], seq[bool]) =
+proc minimizeMap(d: Dfa): (seq[array[nSyms, int32]], seq[bool], seq[int]) =
   ## Moore's partition refinement, dead states (no path to acceptance)
-  ## removed: transitions into them become -1.
+  ## removed: transitions into them become -1. Also returns each state's
+  ## class (-1: dead).
   let n = d.trans.len
-  # Co-reachability.
   var rev = newSeq[seq[int]](n)
   for s in 0 ..< n:
     for t in d.trans[s]:
@@ -463,7 +1353,6 @@ proc minimize(d: Dfa): (seq[array[nSyms, int32]], seq[bool]) =
     nCls = sigIds.len
     cls = next
     if not changed: break
-  # State 0 is the start; renumber so its class is 0.
   var order = initTable[int, int]()
   var mapped = newSeq[int](n)
   proc idOf(c: int): int =
@@ -480,7 +1369,11 @@ proc minimize(d: Dfa): (seq[array[nSyms, int32]], seq[bool]) =
     for sym in 0 ..< nSyms:
       let t = d.trans[s][sym]
       trans[m][sym] = (if t < 0: -1'i32 else: int32 mapped[t])
-  (trans, acc)
+  (trans, acc, mapped)
+
+proc minimize(d: Dfa): (seq[array[nSyms, int32]], seq[bool]) =
+  let (t, a, _) = minimizeMap(d)
+  (t, a)
 
 # ---- regexes ------------------------------------------------------------------
 
@@ -491,27 +1384,36 @@ type
     bytes*: set[char]     ## rkSet
     kids*: seq[RNode]     ## rkCat, rkAlt, rkStar (one kid)
     size*: int
-    key: string
+    id: int               ## hash-consed: equal regexes, equal ids
 
-proc keyOf(r: RNode): string = r.key
+var rnIds {.threadvar.}: Table[string, int]
+  ## A regex's structure (its kind and its children's ids) to its id, per
+  ## thread (every language is built and cached per thread, `selCache`).
+  ## 0 and 1 are the empty language and the empty word on every thread.
 
 proc mk(kind: RKind; kids: seq[RNode] = @[]; bytes: set[char] = {}): RNode =
   result = RNode(kind: kind, kids: kids, bytes: bytes, size: 1)
   for k in kids: result.size += k.size
+  var key: string
   case kind
-  of rkEmpty: result.key = "0"
-  of rkEps: result.key = "e"
-  of rkMark: result.key = "#"
-  of rkMark2: result.key = "%"
+  of rkEmpty:
+    result.id = 0
+    return
+  of rkEps:
+    result.id = 1
+    return
+  of rkMark: key = "#"
+  of rkMark2: key = "%"
   of rkSet:
-    var s = "["
-    for c in bytes: s.add $ord(c) & ","
-    result.key = s & "]"
-  of rkStar: result.key = "(" & kids[0].key & ")*"
-  of rkCat, rkAlt:
-    var s = (if kind == rkCat: "C(" else: "A(")
-    for k in kids: s.add k.key & ";"
-    result.key = s & ")"
+    key = "["
+    for c in bytes: key.add $ord(c) & ","
+  of rkStar, rkCat, rkAlt:
+    key = $ord(kind) & ":"
+    for k in kids: key.add $k.id & ","
+  result.id = rnIds.getOrDefault(key, -1)
+  if result.id < 0:
+    result.id = rnIds.len + 2
+    rnIds[key] = result.id
 
 let rEmpty = mk(rkEmpty)
 let rEps = mk(rkEps)
@@ -531,14 +1433,14 @@ proc rAlt(a, b: RNode): RNode =
   var kids: seq[RNode]
   var bytes: set[char]
   var hasSet = false
-  var seen = initHashSet[string]()
+  var seen = initHashSet[int]()
   for x in [a, b]:
     for y in (if x.kind == rkAlt: x.kids else: @[x]):
       if y.kind == rkSet:
         bytes = bytes + y.bytes
         hasSet = true
-      elif y.key notin seen:
-        seen.incl y.key
+      elif y.id notin seen:
+        seen.incl y.id
         kids.add y
   if hasSet: kids.insert(mk(rkSet, bytes = bytes), 0)
   if kids.len == 1: kids[0] else: mk(rkAlt, kids)
@@ -552,11 +1454,10 @@ proc toRegex(trans: seq[array[nSyms, int32]]; acc: seq[bool]): (bool, RNode) =
   ## State elimination over the minimized automaton (start: state 0).
   let n = trans.len
   if n == 0: return (true, rEmpty)
-  # Nodes 0 ..< n are the states, n the final state.
   var edges = newSeq[Table[int, RNode]](n + 1)
   for s in 0 ..< n:
     var bySet = initTable[int, set[char]]()
-    for sym in 0 ..< nSyms:
+    for sym in 0 ..< symLand:
       let t = trans[s][sym]
       if t < 0: continue
       if sym in [symMark, symMark2]:
@@ -574,10 +1475,8 @@ proc toRegex(trans: seq[array[nSyms, int32]]; acc: seq[bool]): (bool, RNode) =
       edges[s][n] = (if n in edges[s]: rAlt(edges[s][n], rEps) else: rEps)
   var alive = newSeq[bool](n + 1)
   for s in 0 .. n: alive[s] = true
-  # Eliminate every state but the start (0) and the final (n).
   var remaining = n - 1
   while remaining > 0:
-    # The cheapest state: fewest in * out edges.
     var best = -1
     var bestCost = high(int)
     var ins = newSeq[int](n + 1)
@@ -622,52 +1521,296 @@ type SelLang* = object
 
 var selCache {.threadvar.}: Table[string, SelLang]
 
-# ---- occurrence search --------------------------------------------------------
-#
-# RFC-0005 S8bb. `contains`, `find` and `findBounds` ask for the LEFTMOST
-# position with a match. With an anchor away from a top-level edge
-# (`a(^|b)`) the edge-split reading of `regex_parser` cannot say whether a
-# match starts at a position, so the search is built here from the
-# minimized `lkNone` automata: one run per start position, all in step (a
-# subset of the deterministic runs). A run that dies has found a match
-# (every continuation matches).
-#   * `skNoOcc`:  `u` with no match at any position `0 .. u.len`;
-#   * `skFirst`:  `u[0..q) # u[q..]` such that a match starts at `q` and
-#                 none starts before it.
+proc utfStep(v: int8; b: char): int8 =
+  ## RFC-0005 S8bj. A UTF-8 validator (RFC 3629, PCRE's `valid_utf`): 0
+  ## at a character boundary, 1..3 continuation bytes left, 10..13 the
+  ## first continuation byte of E0 / ED / F0 / F4 (a narrower range); -1
+  ## invalid.
+  let c = ord(b)
+  case v
+  of 0:
+    if c < 0x80: 0
+    elif c in 0xC2 .. 0xDF: 1
+    elif c == 0xE0: 10
+    elif c == 0xED: 11
+    elif c in 0xE1 .. 0xEF: 2
+    elif c == 0xF0: 12
+    elif c == 0xF4: 13
+    elif c in 0xF1 .. 0xF3: 3
+    else: -1
+  of 1, 2, 3: (if c in 0x80 .. 0xBF: v - 1 else: -1)
+  of 10: (if c in 0xA0 .. 0xBF: 1 else: -1)
+  of 11: (if c in 0x80 .. 0x9F: 1 else: -1)
+  of 12: (if c in 0x90 .. 0xBF: 2 else: -1)
+  of 13: (if c in 0x80 .. 0x8F: 2 else: -1)
+  else: -1
+
+proc utfProduct(d: Dfa; invalidAccepts: bool): Dfa =
+  ## RFC-0005 S8bj. `d` on valid UTF-8 words; every invalid word accepted
+  ## or rejected (`invalidAccepts`). The lowering decides an invalid
+  ## subject by its error code (PCRE_ERROR_BADUTF8) before it reads a
+  ## language, so either choice is exact where the language is read; the
+  ## right one keeps the guarded definitions satisfiable (`lkNone`,
+  ## `skNoOcc`: an invalid subject has no match) and the automaton small.
+  if not d.ok or d.trans.len == 0: return d
+  var ids = initTable[(int, int8), int]()
+  var keys: seq[(int, int8)]
+  proc intern(k: (int, int8)): int =
+    if k in ids: return ids[k]
+    keys.add k
+    ids[k] = keys.high
+    keys.high
+  discard intern((0, 0'i8))
+  let bad = intern((-1, -1'i8))   # the invalid sink
+  result.ok = true
+  var i = 0
+  while i < keys.len:
+    let (q, v) = keys[i]
+    var row: array[nSyms, int32]
+    for sym in 0 ..< nSyms: row[sym] = -1
+    if q == -1:
+      if invalidAccepts:
+        for sym in 0 ..< symMark: row[sym] = int32 bad
+      result.trans.add row
+      result.accept.add invalidAccepts
+      result.sink.add invalidAccepts
+      inc i
+      continue
+    if q == -2:
+      # `d` rejects every continuation; an invalid word is still accepted.
+      for sym in 0 ..< symMark:
+        let v2 = utfStep(v, symByte(sym))
+        row[sym] = int32(if v2 < 0: bad else: intern((-2, v2)))
+      result.trans.add row
+      result.accept.add v != 0
+      result.sink.add false
+      inc i
+      continue
+    for sym in 0 ..< nSyms:
+      let t = d.trans[q][sym]
+      if sym >= symMark:
+        if t >= 0: row[sym] = int32 intern((int(t), v))
+        continue
+      let v2 = utfStep(v, symByte(sym))
+      if v2 < 0:
+        row[sym] = int32 bad
+      elif t >= 0:
+        row[sym] = int32 intern((int(t), v2))
+      elif invalidAccepts:
+        row[sym] = int32 intern((-2, v2))
+    result.trans.add row
+    result.accept.add(if v == 0: d.accept[q] else: invalidAccepts)
+    result.sink.add d.sink[q]
+    inc i
+
+proc langOf(d: Dfa; what: string): SelLang =
+  if not d.ok:
+    return SelLang(ok: false, why: "the pattern's " & what & " automaton " &
+                   "is past its size cap (" & $maxDfaStates & " states)")
+  let (trans, acc) = minimize(d)
+  let (fine, r) = toRegex(trans, acc)
+  if fine: SelLang(ok: true, re: r)
+  else: SelLang(ok: false, why: "the pattern's " & what & " regex is past " &
+                "its size cap (" & $maxRegexSize & " nodes)")
+
+proc langOfU(n: Nfa; invalidAccepts: bool; d: Dfa; what: string): SelLang =
+  ## `langOf`, on valid UTF-8 words in UTF mode (`utfProduct`).
+  langOf((if n.utf: utfProduct(d, invalidAccepts) else: d), what)
+
+# ---- start variants -----------------------------------------------------------
+
+proc canonPc0*(n: Nfa; pc: PrevClass): PrevClass =
+  ## RFC-0005 S8bj. The representative of what precedes a start, as far as
+  ## the pattern can tell: subject position 0 (for `^` / `\A` / `(?m)^`),
+  ## then whether a newline ends there (`(?m)^`), and a CR (a CRLF's halves
+  ## under `(*CRLF)`).
+  if pc == pcStart:
+    return (if n.hasBol or n.hasBolMulti: pcStart else: canonPc0(n, pcOther))
+  if not n.needPc: return pcOther
+  let w = wasNl(n.nl, pc)
+  if n.nl == nlCRLF:
+    (if pc == pcCR: pcCR elif w: pcCRLF else: pcOther)
+  elif not w: pcOther
+  else:
+    case n.nl
+    of nlCR: pcCR
+    else: pcLF
+
+proc startClasses*(n: Nfa): seq[PrevClass] =
+  ## RFC-0005 S8bj. The distinct representatives (`canonPc0`), the
+  ## `pcStart` one first when it is one.
+  for pc in PrevClass:
+    let c = canonPc0(n, pc)
+    if c notin result: result.add c
 
 type
-  SearchKind* = enum skNoOcc, skFirst
-  MinDfa = tuple[trans: seq[array[nSyms, int32]], acc: seq[bool]]
+  LangKind* = enum
+    lkMark   ## `u[0..k) # u[k..]`: the match at u's start ends at k
+    lkNone   ## no match at u's start
+    lkEnds   ## the match at u's start ends at u's end
+
+proc selectionLangV*(n: Nfa; cacheKey: string; lang: LangKind;
+                     pc0: PrevClass; anchored = true; crlfElig = false;
+                     noEmpty = false; nonEmpty = false): SelLang =
+  ## RFC-0005 S8bj. The language `lang` of the attempt at a start preceded
+  ## by `pc0` (`anchored`: an anchored call; `crlfElig`: an unanchored
+  ## attempt at a CRLF's LF past the start offset).
+  let pc = canonPc0(n, pc0)
+  let key = cacheKey & "|" & $lang & "|" & $pc & "|" & $anchored & "|" &
+            $crlfElig & "|" & $noEmpty & "|" & $nonEmpty
+  if key in selCache: return selCache[key]
+  if not n.ok:
+    result = SelLang(ok: false, why: n.why)
+  else:
+    let acc = (case lang
+               of lkMark: acMarkT
+               of lkNone: acNone
+               of lkEnds: acEndsT)
+    result = langOfU(n, false, buildAttempt(n, AttemptSpec(acc: acc, anchored: anchored,
+      noEmpty: noEmpty, nonEmpty: nonEmpty, pc0: pc, crlfElig: crlfElig)),
+      "selection")
+  selCache[key] = result
+
+proc selectionLang*(n: Nfa; cacheKey: string; lang: LangKind;
+                    atStart: bool; noEmpty = false;
+                    nonEmpty = false): SelLang =
+  ## RFC-0005 S8bb. `selectionLangV` at subject position 0 (`atStart`) or
+  ## after an ordinary byte.
+  selectionLangV(n, cacheKey, lang, (if atStart: pcStart else: pcOther),
+                 noEmpty = noEmpty, nonEmpty = nonEmpty)
+
+# ---- the search ------------------------------------------------------------------
+
+type
+  SearchKind* = enum
+    skNoOcc   ## `u` with no match found by the search
+    skFirst   ## `u[0..q) # u[q..]`: the search finds its match at `q`
+    skSpan    ## `u[0..q) # u[q..e) % u[e..]`: ... ending at `e`
+
+  Expect = enum exBump, exSkipFlight, exSkip, exCommit, exMatch, exMatchT,
+    exNoMatch
+  Verifier = object
+    trans: seq[array[nSyms, int32]]
+    acc: seq[bool]
+    univ: seq[set[0'u8 .. 127'u8]]
+      ## per state, the (final-newline state, UTF-8 validator state) pairs
+      ## (`univIdx`) from which it accepts every continuation the search
+      ## can feed (well-formed, valid UTF-8 in UTF mode): a run there is
+      ## decided for good and dropped
+
+  Cursor = enum cuScan, cuLanded, cuMid, cuInFlight, cuDone
+  SNode = object
+    cursor: Cursor
+    runs: seq[(int8, int8, int32)]   ## (expectation, variant, state)
+    want: bool                       ## the attempt here is the found one
+    wantEnd: bool                    ## ... and its match ends here
+
   SKey = object
-    pending: seq[int32]   ## sorted: (variant shl 20) or state
-    run: int32            ## the marked run: -2 none, -1 matched, else state
-    phase: int8           ## 0 before the marker, 1 after
-    nl: int8              ## as `DKey.nl`
-    pos0: bool
-    mark: int8            ## the marked run's variant
+    nodes: seq[SNode]
+    pc: PrevClass
+    nl: int8
+    atS0: bool
+    phase: int8      ## skFirst: `#` read
+    utf: int8        ## UTF mode: the validator state (`utfStep`); -1 the
+                     ## invalid sink
+
+proc hash(x: SNode): Hash =
+  var h: Hash = hash(ord(x.cursor)) !& hash(x.want) !& hash(x.wantEnd)
+  for r in x.runs: h = h !& hash(r)
+  !$h
+
+proc `<`(a, b: SNode): bool =
+  if a.cursor != b.cursor: return a.cursor < b.cursor
+  if a.want != b.want: return a.want < b.want
+  if a.wantEnd != b.wantEnd: return a.wantEnd < b.wantEnd
+  if a.runs.len != b.runs.len: return a.runs.len < b.runs.len
+  for i in 0 ..< a.runs.len:
+    if a.runs[i] != b.runs[i]: return a.runs[i] < b.runs[i]
+  false
 
 proc hash(k: SKey): Hash =
   var h: Hash = 0
-  for x in k.pending: h = h !& hash(x)
-  h = h !& hash(k.run) !& hash(k.phase) !& hash(k.nl) !& hash(k.pos0) !&
-      hash(k.mark)
+  for x in k.nodes: h = h !& hash(x)
+  h = h !& hash(ord(k.pc)) !& hash(k.nl) !& hash(k.atS0) !& hash(k.phase) !&
+      hash(k.utf)
   !$h
 
-proc minNone(n: Nfa; atStart: bool): (bool, MinDfa) =
-  let d = buildDfa(n, lkNone, atStart, false, false)
-  if not d.ok: return (false, (@[], @[]))
-  (true, minimize(d))
+proc univIdx(nl, u: int8): uint8 =
+  ## A (final-newline state, UTF-8 validator state) pair as one index.
+  uint8(int(nl) * 8 + (if u >= 10: int(u) - 6 else: int(u)))
 
-proc searchDfa(n: Nfa; kind: SearchKind; atStart: bool): Dfa =
-  let (okS, minS) = minNone(n, atStart)
-  let (okN, minN) = minNone(n, false)
-  if not (okS and okN):
-    result.ok = false
+proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
+                   ok: var bool): Verifier =
+  let acc = (case ex
+             of exBump: acBump
+             of exSkipFlight, exSkip: acSkipT
+             of exCommit: acCommit
+             of exMatch: acMatch
+             of exMatchT: acMatchT
+             of exNoMatch: acNone)
+  var d = buildAttempt(n, AttemptSpec(acc: acc, anchored: n.anchoredPat, pc0: pc,
+                                      crlfElig: elig))
+  if not d.ok:
+    ok = false
     return
-  let ds = [minN, minS]
-  proc startOf(v: int): int32 =
-    (if ds[v].trans.len == 0: -1'i32 else: 0'i32)
-  proc accepts(v: int; st: int32): bool = st >= 0 and ds[v].acc[st]
+  let (t, a, _) = minimizeMap(d)
+  result.trans = t
+  result.acc = a
+  # A state accepts every continuation the search can feed it from a
+  # (final-newline, UTF-8) state when no well-formed, valid path reaches a
+  # rejecting end or a missing transition: a fixpoint over the product.
+  # Minimization merges states that differ only in that bookkeeping, so
+  # this is computed on the minimized automaton, per bookkeeping state.
+  let uStates = (if n.utf: @[0'i8, 1, 2, 3, 10, 11, 12, 13] else: @[0'i8])
+  var bad = newSeq[set[0'u8 .. 127'u8]](t.len)
+  proc idx(sg: int; u: int8): uint8 = univIdx(int8(sg), u)
+  for c in 0 ..< t.len:
+    for sg in 0 .. 15:
+      for u in uStates:
+        var b = u == 0 and nlCanEnd(int8(sg)) and not a[c]
+        if not b:
+          for sym in 0 ..< symMark:
+            if nlStepFor(n.nl, int8(sg), sym) >= 0 and t[c][sym] < 0 and
+               (not n.utf or utfStep(u, symByte(sym)) >= 0):
+              b = true
+              break
+        if b: bad[c].incl idx(sg, u)
+  var changed = true
+  while changed:
+    changed = false
+    for c in 0 ..< t.len:
+      for sg in 0 .. 15:
+        for u in uStates:
+          if idx(sg, u) in bad[c]: continue
+          for sym in 0 ..< symMark:
+            let s2 = nlStepFor(n.nl, int8(sg), sym)
+            if s2 < 0: continue
+            let u2 = (if n.utf: utfStep(u, symByte(sym)) else: 0'i8)
+            if u2 < 0: continue
+            let c2 = t[c][sym]
+            if c2 >= 0 and idx(int(s2), u2) in bad[c2]:
+              bad[c].incl idx(sg, u)
+              changed = true
+              break
+  result.univ = newSeq[set[0'u8 .. 127'u8]](t.len)
+  for c in 0 ..< t.len:
+    for sg in 0 .. 15:
+      for u in uStates:
+        if idx(sg, u) notin bad[c]: result.univ[c].incl idx(sg, u)
+
+proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
+  ## RFC-0005 S8bj. The search as a guess-and-verify automaton (see the
+  ## module doc), determinized.
+  var vers = initTable[(Expect, PrevClass, bool), int]()
+  var vlist: seq[Verifier]
+  var vok = true
+  proc verifier(ex: Expect; pc: PrevClass; elig: bool): int =
+    let ex2 = (if ex == exSkip: exSkipFlight else: ex)
+    let key = (ex2, canonPc0(n, pc), elig and n.hasNeverSkip)
+    if key notin vers:
+      vers[key] = vlist.len
+      vlist.add buildVerifier(n, key[0], key[1], key[2], vok)
+    vers[key]
   var ids = initTable[SKey, int]()
   var keys: seq[SKey]
   proc intern(k: SKey): int =
@@ -675,96 +1818,282 @@ proc searchDfa(n: Nfa; kind: SearchKind; atStart: bool): Dfa =
     keys.add k
     ids[k] = keys.high
     keys.high
-  discard intern(SKey(run: -2, pos0: true))
+  let anchored = n.anchoredPat
+  discard intern(SKey(nodes: @[SNode(cursor: cuScan)], pc: pc0, atS0: true))
   result.ok = true
+
+  proc done(v: int8; t: int32; nl, u: int8): bool =
+    univIdx(nl, u) in vlist[v].univ[t]
+
+  proc feed(node: var SNode; sym: int; nl, u: int8): bool =
+    ## Every run reads `sym` (`nl`, `u` the newline and UTF-8 states after
+    ## it); false when one dies. Identical runs are one (the same
+    ## automaton in the same state accepts the same continuations).
+    var nr: seq[(int8, int8, int32)]
+    for (ex, v, st) in node.runs:
+      let t = vlist[v].trans[st][sym]
+      if t < 0: return false
+      if done(v, t, nl, u): continue
+      nr.add (ex, v, t)
+    nr.sort()
+    node.runs = deduplicate(nr, isSorted = true)
+    true
+
+  proc land(node: SNode; nl, u: int8): (bool, SNode) =
+    ## The in-flight SKIP lands here.
+    ## Only the in-flight run reads the landing event (an earlier attempt's
+    ## run, still undecided, read its own).
+    var x = node
+    var nr: seq[(int8, int8, int32)]
+    for (ex, v, st) in x.runs:
+      if Expect(ex) != exSkipFlight:
+        nr.add (ex, v, st)
+        continue
+      let t = vlist[v].trans[st][symLand]
+      if t < 0: return (false, x)
+      if not done(v, t, nl, u): nr.add (int8(ord(exSkip)), v, t)
+    nr.sort()
+    x.runs = deduplicate(nr, isSorted = true)
+    x.cursor = cuLanded
+    (true, x)
+
+  proc startHere(k: SKey; node: SNode; c: int): seq[SNode] =
+    ## The node's possible attempts at this position (byte `c`, -1 at the
+    ## end): the nodes after choosing whether / how an attempt starts.
+    var cur = node.cursor
+    if cur == cuMid:
+      if c >= 0 and (c and 0xC0) == 0x80:
+        return (if node.want: @[] else: @[node])
+      cur = cuLanded
+    if cur == cuLanded:
+      if c == ord('\n') and k.pc == pcCR and n.skipActive and not k.atS0:
+        var x = node
+        x.cursor = cuScan
+        if x.want: return @[]
+        return @[x]
+      cur = cuScan
+    if cur != cuScan:
+      if node.want: return @[]
+      return @[node]
+    # Scanning: does the filter stop here?
+    var here = true
+    if not anchored and c >= 0:
+      case n.filter
+      of fkNone: discard
+      of fkFirst: here = char(c) == n.fc1 or char(c) == n.fc2
+      of fkBits: here = char(c) in n.bits
+      of fkStartline:
+        if not k.atS0:
+          here = wasNl(n.nl, k.pc) and
+                 not (k.pc == pcCR and c == ord('\n') and
+                      n.nl in {nlANY, nlANYCRLF})
+    if not here:
+      if node.want: return @[]
+      var x = node
+      x.cursor = cuScan
+      return @[x]
+    let elig = (not k.atS0) and k.pc == pcCR and c == ord('\n') and
+               n.skipActive
+    var exs: seq[Expect]
+    if node.want: exs = @[(if kind == skSpan: exMatchT else: exMatch)]
+    elif anchored: exs = @[exNoMatch]
+    else: exs = @[exBump, exSkipFlight, exCommit]
+    for ex in exs:
+      var x = node
+      x.want = false
+      let v = verifier(ex, k.pc, elig)
+      # An empty verifier: no attempt here has that outcome.
+      if vlist[v].trans.len == 0: continue
+      var st0 = 0'i32
+      if ex == exMatchT and node.wantEnd:
+        # The match is empty: its end event comes first.
+        st0 = vlist[v].trans[0][symLand]
+        if st0 < 0: continue
+        x.wantEnd = false
+        if done(int8(v), st0, k.nl, max(k.utf, 0)):
+          x.cursor = cuDone
+          result.add x
+          continue
+      x.runs.add (int8(ord(ex)), int8(v), st0)
+      x.runs.sort()
+      x.runs = deduplicate(x.runs, isSorted = true)
+      x.cursor =
+        if anchored or ex in {exCommit, exMatch, exMatchT}: cuDone
+        elif ex == exSkipFlight: cuInFlight
+        elif n.utf: cuMid
+        else: cuLanded
+      result.add x
+
   var i = 0
   while i < keys.len:
-    if keys.len > maxDfaStates:
+    if keys.len > maxDfaStates or not vok:
       result.ok = false
       return
     let k = keys[i]
     var row: array[nSyms, int32]
     for s in 0 ..< nSyms: row[s] = -1
-    # A run starts here (before the marker for skFirst).
-    let v = (if atStart and k.pos0: 1 else: 0)
-    var pend = k.pending
-    var here = startOf(v)
-    let starts = kind == skNoOcc or k.phase == 0
+    if k.utf < 0:
+      # The invalid sink: no match is found (PCRE_ERROR_BADUTF8 decides).
+      for s in 0 ..< symMark: row[s] = int32 i
+      result.trans.add row
+      result.accept.add true
+      result.sink.add true
+      inc i
+      continue
+    # Landing options first: an in-flight node may land here.
+    var landed: seq[SNode]
+    for node in k.nodes:
+      landed.add node
+      if node.cursor == cuInFlight:
+        let (fine, x) = land(node, k.nl, max(k.utf, 0))
+        if fine: landed.add x
+    # The end of the subject.
     var acc = false
-    if nlCanEnd(k.nl):
-      acc = true
-      for x in pend:
-        if not accepts(int(x shr 20), x and 0xFFFFF): acc = false
-      if starts and not accepts(v, here): acc = false
-      if kind == skFirst:
-        acc = acc and k.phase == 1 and
-              (k.run == -1 or (k.run >= 0 and not accepts(int(k.mark), k.run)))
-    if starts and here >= 0:
-      pend.add((int32(v) shl 20) or here)
-    elif starts:
-      pend = @[]   # a match starts here: no word extends this state
-    if kind == skFirst and k.phase == 0:
-      var k2 = SKey(pending: k.pending, run: startOf(v), phase: 1, nl: k.nl,
-                    pos0: k.pos0, mark: int8 v)
-      row[symMark] = int32 intern(k2)
-    if (k.nl and nlFinal) == 0 and not (starts and here < 0):
-      for s in 0 ..< symMark:
-        let nls = nlStep(n, k.nl, s)
-        if nls < 0: continue
-        var nx: seq[int32]
-        var dead = false
-        for x in pend:
-          let vv = int(x shr 20)
-          let t = ds[vv].trans[x and 0xFFFFF][s]
-          if t < 0:
-            dead = true
+    if n.utf and k.utf != 0:
+      acc = false   # ends inside a character: invalid
+    elif nlCanEnd(k.nl) and (kind == skNoOcc or
+                           k.phase == (if kind == skFirst: 1 else: 2)):
+      for node in landed:
+        for x in startHere(k, node, -1):
+          if x.want or x.cursor == cuInFlight: continue
+          var good = true
+          for (ex, v, st) in x.runs:
+            if not vlist[v].acc[st]: good = false
+          if good:
+            acc = true
             break
-          let y = (int32(vv) shl 20) or t
-          if y notin nx: nx.add y
-        if dead: continue
-        nx.sort()
-        var run = k.run
-        if run >= 0:
-          let t = ds[k.mark].trans[run][s]
-          run = (if t < 0: -1'i32 else: t)
-        row[s] = int32 intern(SKey(pending: nx, run: run, phase: k.phase,
-                                   nl: nls, pos0: false, mark: k.mark))
+        if acc: break
+    # The marker `#`: the found attempt starts here.
+    if kind != skNoOcc and k.phase == 0:
+      var nodes: seq[SNode]
+      for node in landed:
+        if node.cursor in {cuDone, cuInFlight}: continue
+        var x = node
+        x.want = true
+        if x notin nodes: nodes.add x
+      if nodes.len > 0:
+        nodes.sort()
+        var k2 = k
+        k2.nodes = nodes
+        k2.phase = 1
+        row[symMark] = int32 intern(k2)
+    # The marker `%`: the found match ends here.
+    if kind == skSpan and k.phase == 1:
+      var nodes: seq[SNode]
+      for node in landed:
+        var x = node
+        if x.want:
+          x.wantEnd = true
+        else:
+          var nr: seq[(int8, int8, int32)]
+          var alive = true
+          for (ex, v, st) in x.runs:
+            if Expect(ex) != exMatchT:
+              nr.add (ex, v, st)
+              continue
+            let t = vlist[v].trans[st][symLand]
+            if t < 0:
+              alive = false
+              break
+            if not done(v, t, k.nl, max(k.utf, 0)): nr.add (ex, v, t)
+          if not alive: continue
+          nr.sort()
+          x.runs = nr
+        if x notin nodes: nodes.add x
+      if nodes.len > 0:
+        nodes.sort()
+        var k2 = k
+        k2.nodes = nodes
+        k2.phase = 2
+        row[symMark2] = int32 intern(k2)
+    # A byte, or a final newline's.
+    if (k.nl and nlFinal) == 0:
+      for s in 0 ..< symMark:
+        let nls = nlStepFor(n.nl, k.nl, s)
+        if nls < 0: continue
+        let c = ord(symByte(s))
+        var u2 = 0'i8
+        if n.utf:
+          u2 = utfStep(k.utf, char(c))
+          if u2 < 0:
+            continue
+        var nodes: seq[SNode]
+        for node in landed:
+          for x0 in startHere(k, node, c):
+            var x = x0
+            if not feed(x, s, nls, u2): continue
+            if x notin nodes: nodes.add x
+        if nodes.len == 0: continue
+        nodes.sort()
+        row[s] = int32 intern(SKey(nodes: nodes,
+          pc: (if n.needPc: nextClass(char(c), k.pc) else: pcOther),
+          nl: nls, atS0: false, phase: k.phase, utf: u2))
     result.trans.add row
     result.accept.add acc
+    result.sink.add false
     inc i
 
-proc crlfSkipSeen*(n: Nfa): bool =
-  ## RFC-0005 S8bb. Under a CRLF convention, with no explicit CR or LF in
-  ## the pattern, PCRE's bumpalong does not try the LF of a CRLF after a
-  ## failed attempt at its CR -- but its start-of-match optimisation (the
-  ## first code unit, `pcre_study`'s start bits) can pass over the CR and
-  ## try the LF after all (probed: `(*CRLF)[\x09-\x0b]\z` finds 1 in
-  ## "\r\n", `(*CRLF)(?:[\x09-\x0b]\x00)?.` finds -1). Whether the LF
-  ## is tried is then PCRE's optimiser's call. It matters only when a
-  ## match can start at an LF: the start closure matches, or reads an LF.
-  if not n.skipCrlf: return false
-  for ctx in [cxOther, cxNll]:
-    let cl = closure(n, @[n.start], ctx, false, false)
-    if cl.matched: return true
-    for s in cl.consumers:
-      if '\n' in n.states[s].bytes: return true
-  false
+proc searchLangV*(n: Nfa; cacheKey: string; kind: SearchKind;
+                  pc0: PrevClass): SelLang =
+  ## RFC-0005 S8bj. The occurrence-search language `kind` of an unanchored
+  ## call whose start offset is preceded by `pc0`.
+  let pc = canonPc0(n, pc0)
+  let key = cacheKey & "|search|" & $kind & "|" & $pc
+  if key in selCache: return selCache[key]
+  if not n.ok:
+    result = SelLang(ok: false, why: n.why)
+  else:
+    result = langOfU(n, false, searchDfa(n, kind, pc), "search")
+  selCache[key] = result
+
+proc searchLang*(n: Nfa; cacheKey: string; kind: SearchKind;
+                 atStart: bool): SelLang =
+  ## RFC-0005 S8bb. `searchLangV` at subject position 0 (`atStart`) or
+  ## after an ordinary byte.
+  searchLangV(n, cacheKey, kind, (if atStart: pcStart else: pcOther))
+
+# ---- captures -------------------------------------------------------------------
+
+proc captureLangV*(n: Nfa; cacheKey: string; g: int; pc0: PrevClass;
+                   marked: bool; anchored = true;
+                   crlfElig = false): SelLang =
+  ## RFC-0005 S8bb, S8bj. Group `g` of PCRE's chosen match at the start of
+  ## `u`: `marked`: `u` with `#` before and `%` after the group's span
+  ## (`#` first when the span is empty); otherwise `u` whose match sets it.
+  let pc = canonPc0(n, pc0)
+  let key = cacheKey & "|cap|" & $g & "|" & $pc & "|" & $marked & "|" &
+            $anchored & "|" & $crlfElig
+  if key in selCache: return selCache[key]
+  if not n.ok:
+    result = SelLang(ok: false, why: n.why)
+  else:
+    result = langOfU(n, false, buildAttempt(n, AttemptSpec(
+      acc: (if marked: acCapMark else: acCapSet), anchored: anchored,
+      pc0: pc, crlfElig: crlfElig, group: g)), "capture")
+  selCache[key] = result
+
+proc captureLang*(n: Nfa; cacheKey: string; g: int; atStart,
+                  marked: bool): SelLang =
+  ## RFC-0005 S8bb. `captureLangV` at subject position 0 (`atStart`) or
+  ## after an ordinary byte.
+  captureLangV(n, cacheKey, g, (if atStart: pcStart else: pcOther), marked)
 
 # ---- the run as a step table (replace) ----------------------------------------
 #
 # RFC-0005 S8bb (item 6). Nim's `replace(s, re, by)` calls PCRE once per
 # match, from the end of the previous one, with NOTEMPTY_ATSTART after an
 # empty match. Its value is not a language of the subject, so the walker
-# encodes the Pike run itself as a Z3 recursive function over the subject's
-# suffixes (`regex_parser.replaceRunZ3`), driven by this table: the
-# run's states are its ordered thread lists; at a position, the closure
-# depends on the state, the context (the rest is a final newline, or
-# empty) and whether the next byte is an LF (`resolve`). A start state
-# also says whether the position is subject position 0 (`^`) and whether
-# NOTEMPTY_ATSTART holds there; every other state is past the start.
+# encodes the run itself as a Z3 recursive function over the subject's
+# suffixes (`regex_parser.replaceRunZ3`), driven by a step table. The S8bb
+# table (`RunTable`) holds the priority run of a pattern with no
+# backtracking verb, no `(?m)` anchor and no UTF character, where the CRLF
+# start skip is unobservable (`legacyRun`); RFC-0005 S8bj: every other
+# pattern gets the agenda's table (`StepTable`), whose states hold the
+# pending verbs and matches with their positions as registers.
 
 const
   maxStepStates* = 512   ## the step table's state cap (the Z3 term's size)
+  maxRegs* = 6           ## RFC-0005 S8bj: the agenda table's register cap
   rcOther* = 0           ## `RunTable`'s context index
   rcNll* = 1
   rcEnd* = 2
@@ -780,17 +2109,41 @@ type
     next*: seq[array[2, array[256, int32]]]
       ## [state][context: other / nll][byte]: the next state, -1 dead
 
+proc startAgenda(n: Nfa): seq[Item[int8]] =
+  @[Item[int8](kind: ikThread, st: int32(n.start), marks: initMarks(n))]
+
+proc crlfSkipObservable*(n: Nfa): bool =
+  ## RFC-0005 S8bj. Whether the bumpalong's CRLF skip (pcre_exec.c: no start
+  ## at a CRLF's LF after a failed attempt at its CR) can change a result:
+  ## an attempt at that LF could match, read the LF, or end the search
+  ## (`(*COMMIT)`) or jump (`(*SKIP)`) instead of bumping along.
+  if not n.skipActive: return false
+  if n.hasCommit or n.hasSkip or n.hasNeverSkip: return true
+  for ctx in [cxOther, cxNll]:
+    var ctr = 0'i32
+    let sc = StepCtx(ctx: ctx, nb: ord('\n'), pc: pcCR, atStart: true,
+                     crlfElig: true, tagNow: 0)
+    let cl = closure(n, startAgenda(n), sc, ctr, noSave)
+    for it in cl:
+      if it.kind == ikMatch: return true
+      if it.kind == ikThread and '\n' in n.states[it.st].bytes: return true
+  false
+
+proc legacyRun*(n: Nfa): bool =
+  ## RFC-0005 S8bj. Whether the S8bb step table (`runTable`) reads the
+  ## pattern's `replace` exactly: no verb but MARK, no `(?m)` anchor, no UTF
+  ## character, and no observable CRLF start skip.
+  n.ok and not n.utf and not n.hasBolMulti and not n.hasEolMulti and
+    not (n.hasCommit or n.hasSkip or n.hasThen or n.hasPrune or
+         n.hasNeverSkip) and
+    not crlfSkipObservable(n)
+
 proc runTable*(n: Nfa): RunTable =
-  ## RFC-0005 S8bb. The step table of `n`'s Pike run (see above), or
-  ## `ok == false` past `maxStepStates` or where PCRE's CRLF bumpalong skip
-  ## decides an occurrence (`crlfSkipSeen`).
+  ## RFC-0005 S8bb. The step table of `n`'s priority run (see above), or
+  ## `ok == false` past `maxStepStates` (only for `legacyRun` patterns).
   if not n.ok: return RunTable(ok: false, why: n.why)
-  if crlfSkipSeen(n):
-    return RunTable(ok: false, why: "a CRLF newline convention whose " &
-                    "bumpalong skip over a CRLF's LF depends on PCRE's " &
-                    "start-of-match optimisation (a match can start at an " &
-                    "LF, and the pattern has no explicit CR or LF)")
-  # A key: the threads, NOTEMPTY_ATSTART, subject position 0.
+  doAssert legacyRun(n), "runTable: not a legacy-run pattern"
+  # A key: the threads (state, condition), NOTEMPTY_ATSTART, position 0.
   var ids = initTable[(seq[int], bool, bool), int]()
   var keys: seq[(seq[int], bool, bool)]
   proc intern(k: (seq[int], bool, bool)): int =
@@ -798,11 +2151,17 @@ proc runTable*(n: Nfa): RunTable =
     keys.add k
     ids[k] = keys.high
     keys.high
+  proc toKey(items: seq[Item[int8]]): seq[int] =
+    for it in items: result.add int(it.st) * 4 + ord(it.cond)
+  proc fromKey(k: seq[int]): seq[Item[int8]] =
+    for x in k:
+      result.add Item[int8](kind: ikThread, st: int32(x div 4),
+                            cond: Cond(x mod 4), marks: initMarks(n))
   result.ok = true
   for bol in [false, true]:
     for ne in [false, true]:
       result.start[ord(bol)][ord(ne)] =
-        intern((@[n.start], ne, bol and n.hasBol))
+        intern((toKey(startAgenda(n)), ne, bol and n.hasBol))
   var i = 0
   while i < keys.len:
     if keys.len > maxStepStates:
@@ -813,277 +2172,300 @@ proc runTable*(n: Nfa): RunTable =
     var nx: array[2, array[256, int32]]
     for ci, ctx in [cxOther, cxNll, cxEnd]:
       for lf in [false, true]:
-        let cl = closure(n, resolve(threads, lf), ctx, bol, ne)
-        m[ci][ord(lf)] = cl.matched
+        var ctr = 0'i32
+        let sc = StepCtx(ctx: ctx, nb: (if lf: ord('\n') else: -1),
+                         pc: pcOther, pos0: bol, atStart: ne or bol,
+                         noEmpty: ne)
+        let cl = closure(n, resolve(fromKey(threads), lf), sc, ctr, noSave)
+        var cons: seq[Item[int8]]
+        for it in cl:
+          if it.kind == ikMatch and it.cond == cdNone: m[ci][ord(lf)] = true
+          elif it.kind == ikThread: cons.add it
         if ctx == cxEnd: continue
         for b in 0 .. 255:
           if (char(b) == '\n') != lf: continue
-          let t = advance(n, cl.consumers, char(b))
+          let t = advance(n, cons, char(b))
           nx[ci][b] =
-            (if t.len == 0: -1'i32 else: int32 intern((t, false, false)))
+            (if t.len == 0: -1'i32 else: int32 intern((toKey(t), false, false)))
     result.matched.add m
     result.next.add nx
     inc i
 
-proc searchLang*(n: Nfa; cacheKey: string; kind: SearchKind;
-                 atStart: bool): SelLang =
-  ## RFC-0005 S8bb. The occurrence-search language `kind` of `n` (see
-  ## above), or `ok == false` past the size caps or where PCRE's CRLF
-  ## bumpalong decides the occurrence (`crlfSkipSeen`; elsewhere the skip
-  ## changes no result).
-  let key = cacheKey & "|search|" & $kind & "|" & $atStart
-  if key in selCache: return selCache[key]
-  if not n.ok:
-    result = SelLang(ok: false, why: n.why)
-  elif crlfSkipSeen(n):
-    result = SelLang(ok: false, why: "a CRLF newline convention whose " &
-                     "bumpalong skip over a CRLF's LF depends on PCRE's " &
-                     "start-of-match optimisation (a match can start at " &
-                     "an LF, and the pattern has no explicit CR or LF)")
-  else:
-    let d = searchDfa(n, kind, atStart)
-    if not d.ok:
-      result = SelLang(ok: false, why: "the pattern's search automaton " &
-                       "is past its size cap (" & $maxDfaStates & " states)")
-    else:
-      let (trans, acc) = minimize(d)
-      let (fine, r) = toRegex(trans, acc)
-      result =
-        if fine: SelLang(ok: true, re: r)
-        else: SelLang(ok: false, why: "the pattern's search regex is " &
-                      "past its size cap (" & $maxRegexSize & " nodes)")
-  selCache[key] = result
-
-
-proc selectionLang*(n: Nfa; cacheKey: string; lang: LangKind;
-                    atStart: bool; noEmpty = false;
-                    nonEmpty = false): SelLang =
-  ## RFC-0005 S8bb. The language `lang` of `n` (see the module doc), or
-  ## `ok == false` past the automaton / regex size caps. `cacheKey`
-  ## identifies `n` (its pattern and flag).
-  let key = cacheKey & "|" & $lang & "|" & $atStart & "|" & $noEmpty & "|" &
-            $nonEmpty
-  if key in selCache: return selCache[key]
-  if not n.ok:
-    result = SelLang(ok: false, why: n.why)
-  else:
-    let d = buildDfa(n, lang, atStart, noEmpty, nonEmpty)
-    if not d.ok:
-      result = SelLang(ok: false, why: "the pattern's selection automaton " &
-                       "is past its size cap (" & $maxDfaStates & " states)")
-    else:
-      let (trans, acc) = minimize(d)
-      let (fine, r) = toRegex(trans, acc)
-      result =
-        if fine: SelLang(ok: true, re: r)
-        else: SelLang(ok: false, why: "the pattern's selection regex is " &
-                      "past its size cap (" & $maxRegexSize & " nodes)")
-  selCache[key] = result
-
-# ---- captures -----------------------------------------------------------------
-#
-# RFC-0005 S8bb. The captures overloads (`match(s, re, matches)`, `=~`,
-# `find`, `contains`, `matchLen`, `findBounds`) write the capture groups of
-# PCRE's chosen match. In the Pike run a thread carries its own captures
-# (the last `nkSave` of each slot on its path); the chosen match's are the
-# captures of the thread that recorded it. A group is SET when its closing
-# slot was written on that path (a repeated group keeps its last
-# iteration's span; one not entered on the path is unset -- probed).
-
-proc closureT[T](n: Nfa; threads: seq[(int, T)]; ctx: Ctx; bolOk: bool;
-                 save: proc (t: T; slot: int): T):
-                 (seq[(int, T)], bool, T) =
-  ## `closure` with a tag per thread: `save` updates it at an `nkSave`.
-  ## Returns the byte-state threads in priority order, whether a thread
-  ## reached Match, and that thread's tag.
-  var seenC = initHashSet[int]()
-  var visited = initHashSet[(int, uint64)]()
-  var stack: seq[(int, uint64, T)]
-  var cons: seq[(int, T)]
-  for i in countdown(threads.high, 0): stack.add (threads[i][0], 0'u64, threads[i][1])
-  while stack.len > 0:
-    let (st0, ent, tag) = stack.pop()
-    if (st0, ent) in visited: continue
-    visited.incl (st0, ent)
-    let st = n.states[st0]
-    case st.kind
-    of nkByte:
-      if st0 notin seenC:
-        seenC.incl st0
-        cons.add (st0, tag)
-    of nkSplit:
-      stack.add (st.out2, ent, tag)
-      stack.add (st.out1, ent, tag)
-    of nkBol:
-      if bolOk: stack.add (st.out1, ent, tag)
-    of nkEol:
-      if ctx in {cxNll, cxEnd}: stack.add (st.out1, ent, tag)
-    of nkEolAbs:
-      if ctx == cxEnd: stack.add (st.out1, ent, tag)
-    of nkEnter:
-      stack.add (st.out1, ent or (1'u64 shl st.loop), tag)
-    of nkBack:
-      if (ent and (1'u64 shl st.loop)) != 0:
-        stack.add (st.out2, ent, tag)
-      else:
-        stack.add (st.out1, ent, tag)
-    of nkSave:
-      stack.add (st.out1, ent, save(tag, st.slot))
-    of nkMatch:
-      return (cons, true, tag)
-  (cons, false, default(T))
-
-proc advanceT[T](n: Nfa; consumers: seq[(int, T)]; c: char): seq[(int, T)] =
-  var seen = initHashSet[int]()
-  for (st, tag) in consumers:
-    if c in n.states[st].bytes:
-      var t = n.states[st].out1
-      if c == '\r' and n.states[st].crlfDot: t = t or flagCR
-      if t notin seen:
-        seen.incl t
-        result.add (t, tag)
-
-proc resolveT[T](threads: seq[(int, T)]; nextLF: bool): seq[(int, T)] =
-  ## `resolve` with a tag per thread.
-  var seen = initHashSet[int]()
-  for (t, tag) in threads:
-    if (t and flagCR) != 0 and nextLF: continue
-    let u = t and not flagCR
-    if u notin seen:
-      seen.incl u
-      result.add (u, tag)
-
-proc chosenCaps*(n: Nfa; u: string; atStart: bool): (int, seq[(int, int)]) =
-  ## RFC-0005 S8bb. The concrete run with captures: the end of PCRE's match
-  ## at the start of `u` (-1: none), and each group's `(start, end)` in it
-  ## (`(-1, -1)`: unset).
-  result = (-1, @[])
-  var threads = @[(n.start, newSeq[int](2 * n.groups + 2))]
-  for k in 0 ..< threads[0][1].len: threads[0][1][k] = -1
-  var j = 0
-  let save = proc (t: seq[int]; slot: int): seq[int] =
-    result = t
-    result[slot] = j
-  while true:
-    threads = resolveT(threads, j < u.len and u[j] == '\n')
-    let (cons, matched, tag) = closureT(n, threads, ctxAt(n, u, j),
-                                        atStart and j == 0, save)
-    if matched:
-      var caps: seq[(int, int)]
-      for g in 1 .. n.groups:
-        caps.add(if tag[2 * g + 1] < 0: (-1, -1) else: (tag[2 * g], tag[2 * g + 1]))
-      result = (j, caps)
-    if j == u.len or cons.len == 0: break
-    threads = advanceT(n, cons, u[j])
-    inc j
-
 type
-  CapKey = object
-    threads: seq[(int, int8)]   ## tag: 3*s + e, s/e: 0 unset, 1 at the
-                                ## marker, 2 elsewhere
-    pos0: bool
-    nl: int8
-    sPh, ePh: int8              ## markers: 0 unread, 1 read here, 2 earlier
-    best: int8                  ## the recorded match's tag, -1 none
+  LeafKind* = enum
+    lfNext    ## undecided: go on to `next`
+    lfMatch   ## a match ending at register `reg`
+    lfBump    ## no match here: the search moves on one character
+    lfCommit  ## the search ends with no match
+    lfSkip    ## a `(*SKIP)` landing at register `reg`
+  Leaf* = object
+    kind*: LeafKind
+    next*: int32
+    regMap*: seq[int8]  ## lfNext: register i of `next` is this state's
+                        ## register `regMap[i]` (-1: this position)
+    reg*: int8          ## lfMatch / lfSkip: the register (-1: here)
+  StepRow* = object
+    atEnd*: Leaf
+    other*, nll*: seq[Leaf]   ## per byte (256): the rest is not / is a
+                              ## final newline
+  StepTable* = object
+    ## RFC-0005 S8bj. The agenda's attempt as a step table: a state is a
+    ## normalized agenda whose positions are registers (the suffix where
+    ## each was recorded); a step reads one byte.
+    ok*: bool
+    why*: string
+    rows*: seq[StepRow]
+    start*: Table[(PrevClass, bool, bool), int]
+      ## [the canonical class before the start, NOTEMPTY_ATSTART, a
+      ## CRLF's LF past the start offset (`crlfElig`)]: the start state
 
-proc hash(k: CapKey): Hash =
-  var h: Hash = 0
-  for (a, b) in k.threads: h = h !& hash(a) !& hash(b)
-  h = h !& hash(k.pos0) !& hash(k.nl) !& hash(k.sPh) !& hash(k.ePh) !&
-      hash(k.best)
+  TKey = object
+    items: seq[Item[int8]]
+    pc: PrevClass
+    start: int8    ## 0 none; else 1 + 2*ne + 4*elig (+ 8 pos0)
+
+proc hash(k: TKey): Hash =
+  var h: Hash = hash(ord(k.pc)) !& hash(k.start)
+  for it in k.items: h = h !& hash(it)
   !$h
 
-proc buildCapDfa(n: Nfa; g: int; atStart, marked: bool): Dfa =
-  ## `marked`: `u` with `#` before and `%` after group `g`'s span in PCRE's
-  ## match at `u`'s start (`#` first when the span is empty); otherwise `u`
-  ## whose match sets group `g`.
-  var ids = initTable[CapKey, int]()
-  var keys: seq[CapKey]
-  proc intern(k: CapKey): int =
+proc `==`(a, b: TKey): bool =
+  a.items == b.items and a.pc == b.pc and a.start == b.start
+
+proc tagsOf(items: seq[Item[int8]]): seq[int32] =
+  ## The registers the agenda refers to, in order of first reference.
+  for it in items:
+    case it.kind
+    of ikMatch:
+      if it.tag notin result: result.add it.tag
+    of ikTerm:
+      if it.term == tmSkip and it.tag notin result: result.add it.tag
+    of ikThread:
+      for m in it.marks:
+        if m >= 0 and m notin result: result.add m
+    else: discard
+
+proc retag(items: seq[Item[int8]]; order: seq[int32]): seq[Item[int8]] =
+  result = items
+  proc idx(t: int32): int32 = int32(order.find(t))
+  for it in result.mitems:
+    case it.kind
+    of ikMatch: it.tag = idx(it.tag)
+    of ikTerm:
+      if it.term == tmSkip: it.tag = idx(it.tag)
+    of ikThread:
+      for m in it.marks.mitems:
+        if m >= 0: m = idx(m)
+    else: discard
+
+proc stepTable*(n: Nfa): StepTable =
+  ## RFC-0005 S8bj. The agenda table of `n` for unanchored attempts (see
+  ## above), or `ok == false` past the caps.
+  if not n.ok: return StepTable(ok: false, why: n.why)
+  var ids = initTable[TKey, int]()
+  var keys: seq[TKey]
+  proc intern(k: TKey): int =
     if k in ids: return ids[k]
     keys.add k
     ids[k] = keys.high
     keys.high
-  discard intern(CapKey(threads: @[(n.start, 0'i8)], pos0: true, best: -1))
   result.ok = true
+  let eligs = (if n.hasNeverSkip: @[false, true] else: @[false])
+  for pc in startClasses(n):
+    for ne in [false, true]:
+      for el in eligs:
+        let st = int8(1 + 2 * ord(ne) + 4 * ord(el) +
+                      8 * ord(pc == pcStart))
+        result.start[(pc, ne, el)] =
+          intern(TKey(items: startAgenda(n), pc: pc, start: st))
   var i = 0
   while i < keys.len:
-    if keys.len > maxDfaStates:
-      result.ok = false
-      return
+    if keys.len > maxStepStates:
+      return StepTable(ok: false, why: "the pattern's run is past its " &
+                       "step-table cap (" & $maxStepStates & " states)")
     let k = keys[i]
-    var row: array[nSyms, int32]
-    for x in 0 ..< nSyms: row[x] = -1
-    let justS = k.sPh == 1
-    let justE = k.ePh == 1
-    let save = proc (t: int8; slot: int): int8 =
-      if slot == 2 * g: int8(3 * (if justS: 1 else: 2) + int(t) mod 3)
-      elif slot == 2 * g + 1: int8(3 * (int(t) div 3) + (if justE: 1 else: 2))
-      else: t
-    let bolOk = atStart and k.pos0
-    proc bestAfter(matched: bool; tag: int8): int8 =
-      (if matched: tag else: k.best)
-    # The end of the subject.
-    var acc = false
-    if nlCanEnd(k.nl):
-      let (_, m, tag) = closureT(n, resolveT(k.threads, false), cxEnd, bolOk,
-                                 save)
-      let b = bestAfter(m, tag)
-      acc =
-        if marked: b == 3 * 1 + 1 and k.sPh >= 1 and k.ePh >= 1
-        else: b >= 0 and int(b) mod 3 != 0
-    if marked:
-      if k.sPh == 0:
-        var k2 = k
-        k2.sPh = 1
-        row[symMark] = int32 intern(k2)
-      if k.sPh >= 1 and k.ePh == 0:
-        var k2 = k
-        k2.ePh = 1
-        row[symMark2] = int32 intern(k2)
-    if (k.nl and nlFinal) == 0:
-      type Cl = (seq[(int, int8)], bool, int8)
-      var cls: array[2, array[2, Cl]]   # [ctx is cxNll][next is LF]
-      var have: array[2, array[2, bool]]
-      for x in 0 ..< symMark:
-        let nls = nlStep(n, k.nl, x)
-        if nls < 0: continue
-        let c = symByte(x)
-        let ci = (if symCtx(x) == cxNll: 1 else: 0)
-        let li = (if c == '\n': 1 else: 0)
-        if not have[ci][li]:
-          cls[ci][li] = closureT(n, resolveT(k.threads, li == 1), symCtx(x),
-                                 bolOk, save)
-          have[ci][li] = true
-        let (cons, m, tag) = cls[ci][li]
-        let nx = advanceT(n, cons, c)
-        let b = bestAfter(m, tag)
-        if nx.len == 0 and b < 0: continue   # no match can follow
-        row[x] = int32 intern(CapKey(threads: nx, pos0: false, nl: nls,
-          sPh: (if k.sPh == 1: 2'i8 else: k.sPh),
-          ePh: (if k.ePh == 1: 2'i8 else: k.ePh), best: b))
-    result.trans.add row
-    result.accept.add acc
+    let regs = int32(tagsOf(k.items).len)
+    let st = k.start
+    proc mkCtx(ctx: Ctx; nb: int; fin: bool): StepCtx =
+      StepCtx(ctx: ctx, nb: nb, finCRLF: fin, pc: k.pc,
+              pos0: (st and 8) != 0, atStart: st != 0,
+              noEmpty: (st and 2) != 0, crlfElig: (st and 4) != 0,
+              anchored: false, tagNow: regs)
+    proc leafOf(items0: seq[Item[int8]]; pcNext: PrevClass;
+                ok: var bool): Leaf =
+      let items = normalize(items0)
+      let oc = outcome(items)
+      proc reg(t: int32): int8 = (if t == regs: -1'i8 else: int8(t))
+      case oc
+      of okNoMatch, okBump: Leaf(kind: lfBump)
+      of okCommit: Leaf(kind: lfCommit)
+      of okMatch: Leaf(kind: lfMatch, reg: reg(items[0].tag))
+      of okSkip: Leaf(kind: lfSkip, reg: reg(items[0].tag))
+      of okUndecided:
+        let order = tagsOf(items)
+        if order.len > maxRegs:
+          ok = false
+          return Leaf(kind: lfBump)
+        var mp: seq[int8]
+        for t in order: mp.add reg(t)
+        let k2 = TKey(items: canon(retag(items, order)),
+                      pc: (if n.needPc: pcNext else: pcOther))
+        Leaf(kind: lfNext, next: int32 intern(k2), regMap: mp)
+    var row: StepRow
+    var fine = true
+    block:
+      var ctr = 1_000_000'i32
+      let cl = closure(n, resolve(k.items, false), mkCtx(cxEnd, -1, false),
+                       ctr, noSave)
+      row.atEnd = leafOf(dropThreads(cl), pcOther, fine)
+    row.other = newSeq[Leaf](256)
+    row.nll = newSeq[Leaf](256)
+    var cache = initTable[(int, int), seq[Item[int8]]]()
+    for ci, ctx in [cxOther, cxNll]:
+      for b in 0 .. 255:
+        let c = char(b)
+        if ctx == cxNll and c notin nlBytes(n.nl) and
+           not (nlPair(n.nl) and c == '\r'):
+          continue
+        let fin = ctx == cxNll and n.nl == nlCRLF and c == '\r'
+        # The closure depends on the byte only as a newline byte or a CR.
+        let ck = (ci, (if c in nlBytes(n.nl) or c in {'\r', '\n'}: b else: -1))
+        var cl: seq[Item[int8]]
+        if ck in cache: cl = cache[ck]
+        else:
+          var ctr = 1_000_000'i32
+          cl = closure(n, resolve(k.items, c == '\n'), mkCtx(ctx, b, fin),
+                       ctr, noSave)
+          cache[ck] = cl
+        let lf = leafOf(advance(n, cl, c), nextClass(c, k.pc), fine)
+        if ci == 0: row.other[b] = lf else: row.nll[b] = lf
+    if not fine:
+      return StepTable(ok: false, why: "the pattern's run holds more than " &
+                       $maxRegs & " pending positions")
+    result.rows.add row
     inc i
 
-proc captureLang*(n: Nfa; cacheKey: string; g: int; atStart,
-                  marked: bool): SelLang =
-  ## RFC-0005 S8bb. Group `g`'s capture language (see `buildCapDfa`), or
-  ## `ok == false` past the size caps.
-  let key = cacheKey & "|cap|" & $g & "|" & $atStart & "|" & $marked
-  if key in selCache: return selCache[key]
-  if not n.ok:
-    result = SelLang(ok: false, why: n.why)
-  else:
-    let d = buildCapDfa(n, g, atStart, marked)
-    if not d.ok:
-      result = SelLang(ok: false, why: "the pattern's capture automaton " &
-                       "is past its size cap (" & $maxDfaStates & " states)")
+# ---- the concrete call (the reference of every lowering) ----------------------
+
+const
+  pcreErrBadOffset* = -24
+  pcreErrBadUtf8* = -10
+  pcreErrBadUtf8Offset* = -11
+  pcreErrMatchLimit* = -8
+  pcreErrRecursionLimit* = -21
+  reqByteMax* = 1000   ## pcre_internal.h's REQ_BYTE_MAX
+
+type LimitEffect* = enum
+  leNone     ## no start-option limit below PCRE's default
+  leZero     ## a limit of 0: the first attempt made is an error
+  leUnknown  ## a limit between: its effect is not computed (a decline)
+
+proc limitEffect*(n: Nfa): (LimitEffect, int) =
+  ## RFC-0005 S8bj. What the `(*LIMIT_MATCH=)` / `(*LIMIT_RECURSION=)` start
+  ## options do to `pcre_exec` (pcre_exec.c applies one only below its
+  ## default, 10_000_000), with the error code of `leZero`.
+  ## `match()` counts a call against LIMIT_MATCH before it checks the depth
+  ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
+  let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
+  let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
+  if m and n.limitMatch == 0: return (leZero, pcreErrMatchLimit)
+  if m: return (leUnknown, 0)
+  if r and n.limitRecursion == 0: return (leZero, pcreErrRecursionLimit)
+  if r: return (leUnknown, 0)
+  (leNone, 0)
+
+proc otherCaseOf*(c: char): char =
+  if c in {'a'..'z'}: char(ord(c) - 32)
+  elif c in {'A'..'Z'}: char(ord(c) + 32)
+  else: c
+
+proc attemptMade*(n: Nfa; s: string; x: int; firstSet: bool): bool =
+  ## RFC-0005 S8bj. pcre_exec.c's minimum-length and required-character
+  ## checks at a start `x` the scan stopped at (`firstSet`: the first
+  ## character was used): false when they end the search before `match()`.
+  if n.noStartOpt: return true
+  let so = n.so
+  if so.minLength > 0 and s.len - x < so.minLength: return false
+  if so.reqChar >= 0 and s.len - x < reqByteMax:
+    let r1 = char(so.reqChar)
+    let r2 = (if so.reqCaseless: otherCaseOf(r1) else: r1)
+    var p = x + (if firstSet: 1 else: 0)
+    var found = false
+    while p < s.len:
+      if s[p] == r1 or s[p] == r2:
+        found = true
+        break
+      inc p
+    if not found: return false
+  true
+
+proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
+               ne = false): (int, int, int) =
+  ## RFC-0005 S8bj. The concrete `pcre_exec` (8.45, the interpreter) of the
+  ## pattern on `s` from `start`: `(1, first, end)` for a match, `(-1, ..)`
+  ## for none, `(code, ..)` for an error. `leUnknown` limits are asserted
+  ## away (the lowering declines them).
+  if start < 0 or start > s.len: return (pcreErrBadOffset, 0, 0)
+  if n.utf:
+    if utf8Error(s) >= 0: return (pcreErrBadUtf8, 0, 0)
+    if start > 0 and start < s.len and (ord(s[start]) and 0xC0) == 0x80:
+      return (pcreErrBadUtf8Offset, 0, 0)
+  let (le, code) = limitEffect(n)
+  doAssert le != leUnknown, "pcreExec: a limit whose effect is not computed"
+  let anchored = anchoredCall or n.anchoredPat
+  let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
+  var x = start
+  while true:
+    if filt != fkNone:
+      while not created(n, s, x, start): inc x
+    if not attemptMade(n, s, x, filt == fkFirst): return (-1, 0, 0)
+    if le == leZero: return (code, 0, 0)
+    let r = runAttemptT[int8](n, s, x, start, anchored, ne and x == start,
+                              0'i8, noSave)
+    var next: int
+    case r.kind
+    of okMatch: return (1, x, r.pos)
+    of okCommit: return (-1, 0, 0)
+    of okSkip:
+      next = (if r.pos > x: r.pos else: n.nextChar(s, x))
     else:
-      let (trans, acc) = minimize(d)
-      let (fine, r) = toRegex(trans, acc)
-      result =
-        if fine: SelLang(ok: true, re: r)
-        else: SelLang(ok: false, why: "the pattern's capture regex is " &
-                      "past its size cap (" & $maxRegexSize & " nodes)")
-  selCache[key] = result
+      next = n.nextChar(s, x)
+    if anchored or next > s.len: return (-1, 0, 0)
+    x = next
+    if x > start and s[x - 1] == '\r' and x < s.len and s[x] == '\n' and
+       n.skipActive:
+      inc x
+
+proc pcreReplace*(n: Nfa; s, by: string): string =
+  ## RFC-0005 S8bj. Nim's `replace(s, re, by)` over `pcreExec` (std/re's
+  ## loop: from the end of each match, NOTEMPTY_ATSTART after an empty one,
+  ## the rest kept on the first miss or error).
+  var prev = 0
+  var ne = false
+  while prev < s.len:
+    let (rc, a, b) = pcreExec(n, s, prev, false, ne)
+    ne = false
+    if rc < 0: break
+    result.add s[prev ..< a]
+    result.add by
+    if a == b: ne = true
+    prev = b
+  result.add s[min(prev, s.len) .. ^1]
+
+proc jitDeclined*(n: Nfa): string =
+  ## RFC-0005 S8bj. Why an unanchored call (`find`, `contains`,
+  ## `findBounds`, `replace`) of the pattern is declined when std/re's
+  ## libpcre runs it on its JIT (`pcre_engine`), "" when it is not: the JIT
+  ## (pcre_jit_compile.c) has its own start-of-match scan and does not skip
+  ## a CRLF's LF the way the interpreter's bumpalong does, and it counts
+  ## the match limit its own way and ignores the recursion limit (probed:
+  ## 8.37's JIT against 8.45's and 8.37's interpreters). Anchored calls
+  ## never run on the JIT (PCRE_ANCHORED is not a JIT option).
+  if crlfSkipObservable(n):
+    return "under a CRLF newline convention, whether a match starts at a " &
+           "CRLF's LF is the start-of-match scan's call, and std/re's " &
+           "libpcre runs this call on its JIT"
+  if limitEffect(n)[0] != leNone:
+    return "a (*LIMIT_..) start option below PCRE's default, which " &
+           "std/re's libpcre runs on its JIT, counting its own way"
+  ""

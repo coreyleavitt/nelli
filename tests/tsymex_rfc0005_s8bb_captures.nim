@@ -10,6 +10,7 @@
 import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/types
+import nelli/smt/pcre_engine
 
 proc show(errs: seq[SymexErrorInfo]): string =
   var parts: seq[string]
@@ -81,6 +82,8 @@ proc crlfSkip(s: string) =
   # CR (no explicit CR or LF in the pattern) -- unless PCRE's start-of-match
   # optimisation passed over the CR. A match can start at an LF here, so
   # the occurrence is the optimiser's call: undecided (std/re finds -1).
+  # RFC-0005 S8bj: the interpreter's scan and skip are modelled (sxUnsat);
+  # on a JIT engine the search declines (`pcre_select.jitDeclined`).
   if s == "\r\n" and s.find(re"(*CRLF).") != -1:
     symexTarget("bb_crlf_skip")
 
@@ -149,7 +152,8 @@ suite "S8bb (5): the constructs S8ay left undecided":
     check verdict(crDollar, "bb_cr_dollar").status == sxUnsat
     check verdict(crDollarLf, "bb_cr_dollar_lf").status == sxUnsat
     check verdict(crlfDot, "bb_crlf_dot").status == sxUnsat
-    check verdict(crlfSkip, "bb_crlf_skip").status == sxUnknown
+    check verdict(crlfSkip, "bb_crlf_skip").status ==
+      (if pcreRunsJit(): sxUnknown else: sxUnsat)
     check verdict(anycrlfFind, "bb_anycrlf_find").status == sxUnsat
     check verdict(crlfNoSkip, "bb_crlf_noskip").status == sxUnsat
     check verdict(anycrlfDollar, "bb_anycrlf_dollar").status == sxUnsat

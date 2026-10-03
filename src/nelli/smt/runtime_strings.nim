@@ -817,17 +817,35 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # RFC-0005 S8bb (item 6): every pattern the priority run reads. The
     # S8aw / S8ay shapes keep their lowering; any other (an alternation, an
     # anchor, a pattern that matches empty, a newline convention's dot) is
-    # the run's (`regex_parser.replaceRunZ3`). Under a CRLF convention whose
-    # bumpalong skip a match could observe, the occurrence is PCRE's
-    # optimiser's call (`pcre_select.crlfSkipSeen`): a decline.
+    # the run's (`regex_parser.replaceRunZ3`). RFC-0005 S8bj: a verb, a
+    # `(?m)` anchor, UTF mode or an observable CRLF start skip is the
+    # agenda's (`regex_parser.replaceStepZ3`); a `(*LIMIT_..=0)` makes every
+    # call an error or a miss (`replace` returns the receiver); a limit
+    # between is declined, and so is a pattern whose unanchored call the
+    # JIT reads differently when std/re's libpcre runs one
+    # (`regex_parser.jitDeclines`).
     let n = buildNfa(pr)
+    if not n.ok: regexDecline(sp, n.why)
+    case limitEffect(n)[0]
+    of leUnknown: regexDecline(sp, limitDecline)
+    of leZero:
+      if jitDeclines(n).len > 0: regexDecline(sp, jitDeclines(n))
+      return recv
+    of leNone: discard
+    if jitDeclines(n).len > 0: regexDecline(sp, jitDeclines(n))
     let (isShape, sh) = regexReplaceShape(pr)
-    if not isShape or crlfSkipSeen(n):
-      let t = runTable(n)
+    if not isShape or pr.utf or crlfSkipObservable(n):
+      if legacyRun(n):
+        let t = runTable(n)
+        if not t.ok: regexDecline(sp, t.why)
+        return SymVal(kind: svString,
+                      str: replaceRunZ3(recv.str, repl.str, t, pr.nl,
+                                        regexFreshName))
+      let t = stepTable(n)
       if not t.ok: regexDecline(sp, t.why)
       return SymVal(kind: svString,
-                    str: replaceRunZ3(recv.str, repl.str, t, pr.nl,
-                                      regexFreshName))
+                    str: replaceStepZ3(recv.str, repl.str, n, t,
+                                       regexFreshName))
     let lenS = simplify(len(recv.str))
     if isNumeralAst(lenS.ctx, lenS.raw):
       let n = parseInt(getNumeralString(lenS))
@@ -842,7 +860,17 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # there was possible. Measured on both pinned Z3 builds (the S8ay
     # "As landed" table); a query Z3 leaves undecided is `beSolverUndef`,
     # never a wrong verdict.
-    SymVal(kind: svString, str: regexReplaceRec(recv.str, repl.str, sh))
+    # RFC-0005 S8bj (item 5): the value's length relation and image
+    # (`regex_parser.replaceLemmas`), facts Z3's unfolding of the exact
+    # term does not reach (S8bb's Q2, Q7, Q8 stayed `unknown`).
+    # The value is a fresh `r` whose definition sits in its own sink, so a
+    # query can be tried without it (`regexRecDefConds`).
+    let r = mkStringVar(regexFreshName("__regexReplaceValue"))
+    regexRecDefConds.add r == regexReplaceRec(recv.str, repl.str, sh)
+    for d in replaceLemmas(recv.str, repl.str, r, sh.atoms, sh.plus,
+                           regexFreshName):
+      stripDecompConds.add d
+    SymVal(kind: svString, str: r)
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by
     # nim-z3 as `concat` on `Z3String`. Both operands lower to svString (a string

@@ -1,7 +1,7 @@
 # Job: S8br -- new slice (S8bk's remainder; all PRECISION)
 
-Create branch `rfc-0005-s8br` from origin/rfc-0005-s8bk at 9ce7fdb (based on 621af8f, walker 212).
-Provisional walker: **221**.
+Create branch `rfc-0005-s8br` from origin/rfc-0005-soundness-channels at **fa8edd8**: batch 5 has landed, and it contains S8bk 9ce7fdb plus the newSeq unification and the late-address rule on closureCallIR. Walker there is 223. (Rebased from the original S8bk base.)
+Provisional walker: **229** (must be above 223).
 
 Read WORKER-BRIEF.md and the "As landed (S8bk)" notes first.
 

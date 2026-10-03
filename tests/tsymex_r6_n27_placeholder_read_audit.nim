@@ -296,13 +296,21 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## mentions no base, so each answers "no unwritten element" and the
     ## caller's own placeholder handling is unchanged. 85 + 9 = 94.
     ## Batch 6 (S8bq on S8bl on batch 5): 101 + 9 = 110.
+    ##
+    ## RFC-0005 S8bw added `svAsts`'s svSeq arm (the Z3 terms a global's
+    ## value holds, scanned for its unwritten leaves): two lines collecting
+    ## `seqDataRaw`/`seqLen` as terms, lowering nothing -- a placeholder's
+    ## inert array and pinned length are terms like any other. 84 + 2 = 86.
+    ## Batch 6 (S8bw on S8bq): its `seqDataRaw` line collects every leaf
+    ## array through `seqArrs` (S8bc's audited helper) instead, so only the
+    ## `seqLen` line is new. 110 + 1 = 111.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 110
+    check runtimeCount == 111
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

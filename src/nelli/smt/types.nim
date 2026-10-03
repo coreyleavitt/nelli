@@ -799,6 +799,15 @@ type
       bval*: bool
     of iekVar:
       vname*: string
+      vGlobalTy*: IRType  ## RFC-0005 S8bw: a module-level global's declared
+                          ## type (`vname` is `__gl:`-named), set by the
+                          ## emitter; nil for every other name. A global
+                          ## read before any write is a value of this type,
+                          ## not an `int` stand-in.
+      vCopy*: bool        ## RFC-0005 S8bw: this read of a global only
+                          ## carries its old parts back into a write of the
+                          ## same global (a `valueFieldWrite` rebuild), so
+                          ## its unwritten parts are not observed here.
     of iekBinop:
       bop*: IRBinop
       lhs*, rhs*: IRExpr
@@ -1452,6 +1461,11 @@ type
                             ## other receiver, and for a positional index the
                             ## parser builds itself (the `for x in arr`
                             ## unroll).
+      ixCheckOnly*: bool    ## RFC-0005 S8bw. The read Nim's index check makes
+                            ## before an element write at a symbolic index
+                            ## (`valueFieldChecked`): its value is never
+                            ## used, so it observes no unwritten part of a
+                            ## global.
     of isIndexAssign:
       iaRecvName*: string  ## the seq-typed local/param NAME being rebound —
                             ## the parse site (dsl_parser.nim's `nnkAsgn` arm)
@@ -4001,6 +4015,11 @@ proc discTagLit*(e: IRExpr): IRExpr =
 proc mkVar*(name: string): IRExpr =
   IRExpr(kind: iekVar, vname: name)
 
+proc mkGlobalVar*(name: string; ty: IRType; copy = false): IRExpr =
+  ## RFC-0005 S8bw. A read of the module-level global `name` (`__gl:`-named)
+  ## whose declared type is `ty`; `copy` when it is a rebuild's copy.
+  IRExpr(kind: iekVar, vname: name, vGlobalTy: ty, vCopy: copy)
+
 proc mkBinop*(op: IRBinop, lhs, rhs: IRExpr): IRExpr =
   IRExpr(kind: iekBinop, bop: op, lhs: lhs, rhs: rhs)
 
@@ -5620,9 +5639,11 @@ proc mkVariantConstructSym*(resultVar: string, variantTy: IRType,
          vcsPlainFields: plainFields, vcsLoc: loc)
 
 proc mkIndexStmt*(retName: string, arr, idx: IRExpr, elemTy: IRType,
-                   loc: string = ""; lo: int64 = 0): IRStmt =
+                   loc: string = ""; lo: int64 = 0;
+                   checkOnly = false): IRStmt =
   IRStmt(kind: isIndex, ixRetName: retName, ixArr: arr,
-         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc, ixLo: lo)
+         ixIdx: idx, ixElemTy: elemTy, ixLoc: loc, ixLo: lo,
+         ixCheckOnly: checkOnly)
 
 proc mkIndexAssignStmt*(recvName: string, idx, val: IRExpr,
                          loc: string = ""; lo: int64 = 0): IRStmt =

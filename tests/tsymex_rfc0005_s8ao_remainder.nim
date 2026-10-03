@@ -174,7 +174,14 @@ suite "S8ao (1): add through a field path":
 type
   # RFC-0005 S8bn classifies a generic object instance (`G[int]`); a generic
   # CASE object is still unrecognised, so it stands in for the placeholder.
-  Weird[T] = object
+  # RFC-0005 S8bw classifies a generic case object; a generic case object
+  # below another (a case part at two levels) is still unrecognised.
+  WeirdK = enum wkA, wkB
+  WeirdBase[T] = object of RootObj
+    case wk: WeirdK
+    of wkA: wx: T
+    of wkB: discard
+  Weird[T] = object of WeirdBase[T]
     case k: bool
     of true: x: T
     of false: discard

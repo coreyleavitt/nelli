@@ -968,8 +968,8 @@ proc genericParamArg(n: NimNode): int =
 
 proc userGenericObjectImpl(head: NimNode): NimNode =
   ## RFC-0005 S8bn (item 8). The `TypeDef` of a user generic object type
-  ## (`type G[T] = object ...` / `ref object ...` / `ptr object ...`) with
-  ## no `case` part, or nil.
+  ## (`type G[T] = object ...` / `ref object ...` / `ptr object ...`), or
+  ## nil. RFC-0005 S8bw (item 3): one with a `case` part too.
   if head.kind != nnkSym or head.symKind != nskType or isStdlibDecl(head):
     return nil
   let impl = head.getImpl
@@ -980,7 +980,7 @@ proc userGenericObjectImpl(head: NimNode): NimNode =
   if u.kind != nnkObjectTy or u.len < 3: return nil
   if u[2].kind == nnkRecList:
     for d in u[2]:
-      if d.kind != nnkIdentDefs: return nil
+      if d.kind notin {nnkIdentDefs, nnkRecCase}: return nil
   impl
 
 proc genericParamNames(impl: NimNode): seq[string] =
@@ -1049,7 +1049,18 @@ proc classifyGenericInstance(head, impl: NimNode;
   genericFrames.add args
   var fields: seq[IRType]
   var names: seq[string]
+  # RFC-0005 S8bw (item 3): a generic case object is classified as a
+  # non-generic one is (`classifyObjectRecordFields`), its fields' types
+  # resolved in this instance's frame -- its monomorphization. It was
+  # `feUnsupportedParamType` (`userGenericObjectImpl` refused a `case`).
+  var variant: IRType = nil
   if u[2].kind == nnkRecList:
+    for d in u[2]:
+      if d.kind == nnkRecCase:
+        variant = classifyObjectRecordFields(head, u[2],
+                                             isRefWrapped = wrap != nnkEmpty)
+        break
+  if variant == nil and u[2].kind == nnkRecList:
     for d in u[2]:
       let tn = d[d.len - 2]
       let k = genericParamArg(tn)
@@ -1077,7 +1088,35 @@ proc classifyGenericInstance(head, impl: NimNode;
     if parTy != nil:
       if parTy.kind == itRef: parTy = parTy.refPointeeTy
       elif parTy.kind == itPtr: parTy = parTy.ptrPointeeTy
-      if parTy.kind != itTuple or parTy.inheritChain.len == 0:
+      if variant != nil:
+        # RFC-0005 S8bw (item 3): a generic case object below a plain
+        # parent holds the parent's fields first, among its plain ones (as
+        # S8bn's non-generic join does). A case part at two levels keeps
+        # the decline.
+        if parTy.kind != itTuple or parTy.inheritChain.len == 0 or
+           variant.kind != itVariant:
+          parentOk = false
+        else:
+          variant.vPlainFieldNames = parTy.fieldNames & variant.vPlainFieldNames
+          variant.vPlainFieldTypes = parTy.fields & variant.vPlainFieldTypes
+          chain = parTy.inheritChain
+          ownedNames = parTy.ownedFieldNames
+          ownedIds = parTy.ownedFieldIds
+      elif parTy.kind == itVariant and parTy.vInheritChain.len > 0:
+        # RFC-0005 S8bw (item 3): a generic object below a generic case
+        # object is a variant: the parent's discriminator and branches,
+        # its own fields added to the plain ones.
+        variant = tVariant(objectName = spelling,
+          discName = parTy.vDiscName, discTy = parTy.vDiscTy,
+          arms = parTy.vArms,
+          plainFieldNames = parTy.vPlainFieldNames & names,
+          plainFieldTypes = parTy.vPlainFieldTypes & fields,
+          discTags = parTy.vDiscTags, nominalId = id)
+        chain = parTy.vInheritChain
+        ownedNames = parTy.vOwnedFieldNames
+        ownedIds = parTy.vOwnedFieldIds
+        names = parTy.vPlainFieldNames & names
+      elif parTy.kind != itTuple or parTy.inheritChain.len == 0:
         parentOk = false
       else:
         fields = parTy.fields & fields
@@ -1087,13 +1126,36 @@ proc classifyGenericInstance(head, impl: NimNode;
         ownedIds = parTy.ownedFieldIds
     if parentOk:
       chain.add id
-      for nm in names[ownedNames.len .. ^1]:
+      let own = if variant != nil and variant.kind == itVariant:
+                  variant.vPlainFieldNames
+                else: names
+      for nm in own[min(ownedNames.len, own.len) .. ^1]:
         ownedNames.add nm
         ownedIds.add id
   discard genericFrames.pop()
   discard genericInProgress.pop()
   if not parentOk:
     return unranged(tUninterp("__unsupported:" & spelling))
+  if variant != nil:
+    # RFC-0005 S8bw (item 3): keyed on the instance and named as written.
+    var inst = nnkBracketExpr.newTree(head)
+    for a in args: inst.add a.node
+    witnessTypeSyms[id] = inst
+    variant.typeKey = id
+    if variant.kind == itVariant:
+      variant.vObjectName = spelling
+      variant.vNominalId = id
+      if chain.len > 0:
+        variant.vInheritChain = chain
+        variant.vOwnedFieldNames = ownedNames
+        variant.vOwnedFieldIds = ownedIds
+    else:
+      variant.mvObjectName = spelling
+      variant.mvNominalId = id
+    return unranged(case wrap
+      of nnkRefTy: tRef(variant)
+      of nnkPtrTy: tPtr(variant)
+      else: variant)
   var t = tTuple(fields, names, objectName = spelling, nominalId = id,
                  nameIsRefAlias = wrap != nnkEmpty)
   # The witness names the instance by its head symbol applied to the

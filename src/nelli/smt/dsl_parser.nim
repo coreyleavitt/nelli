@@ -349,6 +349,26 @@ proc emitIRType*(t: IRType): NimNode
 proc emitStmt*(s: IRStmt): NimNode
 proc emitParam(p: IRParam): NimNode     ## fwd: Phase 15 C1 (lambdaParams)
 
+var globalTyCache {.compileTime.}: Table[string, IRType]
+
+proc globalVarTy(name: string): IRType =
+  ## RFC-0005 S8bw. The declared type of the module-level global `name`
+  ## (`__gl:`-named), or nil for any other name or a global of a kind the
+  ## walk holds no value for (a proc, a ref or ptr, an opaque type): a read
+  ## of an unwritten global is a value of this type, where it was an `int`
+  ## stand-in whatever the type (`gArr[2] = k` then faulted reading
+  ## `gArr[2]`).
+  if not isGlobalEnvName(name): return nil
+  if globalTyCache.hasKey(name): return globalTyCache[name]
+  let sym = globalSymOf(name)
+  if sym != nil and sym.typeKind in {ntyBool, ntyChar, ntyEnum, ntyInt,
+       ntyInt8, ntyInt16, ntyInt32, ntyInt64, ntyUInt, ntyUInt8, ntyUInt16,
+       ntyUInt32, ntyUInt64, ntyFloat, ntyFloat32, ntyFloat64, ntyString,
+       ntyArray, ntyTuple, ntyObject, ntySequence, ntyDistinct, ntyRange,
+       ntyGenericInst}:
+    result = classifyType(sym).ty
+  globalTyCache[name] = result
+
 proc emitExpr*(e: IRExpr): NimNode =
   case e.kind
   of iekIntLit:
@@ -376,7 +396,12 @@ proc emitExpr*(e: IRExpr): NimNode =
   of iekBoolLit:
     newCall(bindSym"mkBoolLit", newLit(e.bval))
   of iekVar:
-    newCall(bindSym"mkVar", newLit(e.vname))
+    let gty = if e.vGlobalTy != nil: e.vGlobalTy else: globalVarTy(e.vname)
+    if gty != nil:   # RFC-0005 S8bw
+      newCall(bindSym"mkGlobalVar", newLit(e.vname), emitIRType(gty),
+              newLit(e.vCopy))
+    else:
+      newCall(bindSym"mkVar", newLit(e.vname))
   of iekBinop:
     newCall(bindSym"mkBinop", emitBinop(e.bop), emitExpr(e.lhs), emitExpr(e.rhs))
   of iekUnop:
@@ -846,7 +871,8 @@ proc emitStmt*(s: IRStmt): NimNode =
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
             emitExpr(s.ixIdx), emitIRType(s.ixElemTy), newLit(s.ixLoc),
-            newLit(s.ixLo))   # RFC-0005 S8z
+            newLit(s.ixLo),   # RFC-0005 S8z
+            newLit(s.ixCheckOnly))   # RFC-0005 S8bw
   of isIndexAssign:
     newCall(bindSym"mkIndexAssignStmt",
             newLit(s.iaRecvName), emitExpr(s.iaIdx),
@@ -13908,6 +13934,17 @@ proc stmtListItems(n: NimNode): seq[NimNode] =
   else:
     result.add n
 
+proc addrRootSym(t: NimNode): NimNode =
+  ## RFC-0005 S8bw (item 3), on S8an/S8ax/S8be. The variable an address
+  ## path is rooted at: a `var` symbol, or a `var` parameter (its implicit
+  ## dereference) -- either names one location for the routine's whole
+  ## activation. nil for any other root.
+  if t.kind == nnkSym and symKind(t) == nskVar: return t
+  if t.kind == nnkHiddenDeref and t.len == 1 and t[0].kind == nnkSym and
+     symKind(t[0]) == nskParam and t[0].getTypeInst.kind == nnkVarTy:
+    return t[0]
+  nil
+
 proc fixedAddrNode(e: NimNode): NimNode =
   ## RFC-0005 S8an/S8as. `e` (through conversions) when it is `addr lv` and
   ## `lv` names the same location for as long as a pointer to it lives: a
@@ -13932,7 +13969,7 @@ proc fixedAddrNode(e: NimNode): NimNode =
       if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: return nil
       t = t[0]
     else: break
-  if t.kind != nnkSym or symKind(t) != nskVar: return nil
+  if addrRootSym(t) == nil: return nil
   a
 
 proc addrAliasDecl(c: NimNode): tuple[p, addrNode: NimNode] =
@@ -14019,12 +14056,14 @@ proc elemAddrNode(e: NimNode; rest: openArray[NimNode]):
         seqStep = true
       t = t[0]
     else: break
-  if t.kind != nnkSym or symKind(t) != nskVar or isModuleGlobal(t): return
+  # RFC-0005 S8bw (item 3): a `var` parameter's arm field too.
+  let root = addrRootSym(t)
+  if root == nil or isModuleGlobal(root): return
   if not seqStep and not computed and not armStep: return
   # RFC-0005 S8be: one root at a time (an arm field under a seq element
   # is two ways to go stale).
   if seqStep and armStep: return
-  (a, (if seqStep: t else: nil), (if armStep: t else: nil))
+  (a, (if seqStep: root else: nil), (if armStep: root else: nil))
 
 proc mayRearm(n, o: NimNode): bool =
   ## RFC-0005 S8be. Statement `n` may change the arm of the case object
@@ -14594,6 +14633,14 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   var step: FieldStep
   discard fieldStep(lhs, step)
   let recvIR = parseExpr(step.recv, preamble, ctx)
+  # RFC-0005 S8bw (item 2): every use of `recvIR` below copies the old
+  # parts back into the same root, so a global root's unwritten parts are
+  # not observed by it.
+  block:
+    var root = recvIR
+    while root != nil and root.kind in {iekField, iekIndex}:
+      root = if root.kind == iekField: root.obj else: root.arr
+    if root != nil and root.kind == iekVar: root.vCopy = true
   let rebuilt =
     if step.recvTy.kind == itArray and step.idx != nil:
       # RFC-0005 S8z: a symbolic index. The old array is copied into a
@@ -15649,7 +15696,13 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
     # `FieldDefect` out of the arm, before it evaluates the value. The
     # read of `lhs` is that check (its `isVariantField` fork).
     if valueFieldChecked(lhs):
-      discard parseExpr(lhs, preamble, ctx)
+      let checkRead = parseExpr(lhs, preamble, ctx)
+      # RFC-0005 S8bw (item 2): the read only checks the index; its value
+      # is never used (`ixCheckOnly`).
+      if checkRead.kind == iekVar:
+        for st in preamble:
+          if st.kind == isIndex and st.ixRetName == checkRead.vname:
+            st.ixCheckOnly = true
     let val = asgnRhs()
     if not (fieldTy.kind == itInt and fieldTy.hasRange and
             not carriesRangeCheck(val, fieldTy)):

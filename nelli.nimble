@@ -1225,5 +1225,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bl_gaps",
             "tsymex_rfc0005_s8bl_borrow",
             "tsymex_rfc0005_s8bl_seqops",
-            "tsymex_rfc0005_s8bl_pairloop"]:
+            "tsymex_rfc0005_s8bl_pairloop",
+            # RFC-0005 S8bw: S8bn's remainder -- in-band receiver declines,
+            # aggregate globals, pointers into case objects and aggregate
+            # containers. Walker 227 (provisional).
+            "tsymex_rfc0005_s8bw_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

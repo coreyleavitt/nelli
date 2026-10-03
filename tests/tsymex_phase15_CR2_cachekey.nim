@@ -1017,6 +1017,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bq (S8bi's remainder: huge newSeq lengths declined, set
     ## values, `re"..."` literals, newSeqUninit read taint, set literals
     ## with non-constant elements). Provisional 220.
+    ## RFC-0005 S8bw (S8bn's remainder: typed global reads, in-band
+    ## receiver declines, aggregate globals, pointers into case objects and
+    ## aggregate containers). Provisional 227.
     check symexWalkerVersion == "223"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

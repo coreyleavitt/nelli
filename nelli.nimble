@@ -1165,5 +1165,8 @@ task test, "Run the test suite":
             # RFC-0005 S8bu -- S8bs's remainder: the signed bv2int bridge's
             # inverse facts and a finite default queryRLimit (no walk runs
             # forever); walker 225.
-            "tsymex_rfc0005_s8bu_term"]:
+            "tsymex_rfc0005_s8bu_term",
+            # items 2-3: closure and proc-value calls into an address-taken
+            # variable, and `addr` of a part of one.
+            "tsymex_rfc0005_s8bu_calls"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

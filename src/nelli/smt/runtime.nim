@@ -17246,9 +17246,16 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
+func addrPartName(formal: string): string =
+  ## RFC-0005 S8bu. The callee-frame local an `addr` actual into an
+  ## address-taken variable is bound through (`bindVarLocs`): it is kept
+  ## equal both to the variable's cell at the actual's path and to the cell
+  ## the call's pointer names.
+  "__addrPart#" & formal
+
 proc bindVarLocs(calleePath: Path; callerEnv: Env;
                  callerCells: seq[AddrCellEntry]; callerFrame: int;
-                 locs: seq[VarLoc]; varArgs: seq[(string, string)];
+                 locs: seq[VarLoc]; varArgs, argVars: seq[(string, string)];
                  params: seq[string];
                  cells: var seq[AddrCellEntry];
                  elemShares: var seq[(string, string)];
@@ -17276,12 +17283,23 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ## with element cells has them under the formal's name too (`elemShares`,
   ## for `inheritElemCells`).
   ##
+  ## RFC-0005 S8bu: an `addr lv` actual (`addr`: the cell for the call,
+  ## named `temp` in the caller, is the argument; `argVars` pairs each
+  ## formal with the caller variable its actual names) is a sub-cell of the
+  ## variable's cell at that path: a local of the callee's frame
+  ## (`addrPartName`) is bound both to the variable's cell at the path (a
+  ## `bound` entry) and to the call's cell (an entry like `addr x`'s), so
+  ## the frame keeps the two equal statement by statement
+  ## (`syncAddrCells`), and a write through the formal is seen through the
+  ## variable's pointer and the other way round. S8bs declined it: the
+  ## cell for the call was a second copy of a location the callee could
+  ## reach through the pointer, and its write-back after the call landed
+  ## over a write through the pointer.
+  ##
   ## Returns why the call declines, or "": a path the walk cannot follow,
-  ## a variable that has both a cell and element cells, an `addr` of a part
-  ## of an address-taken variable (the cell for the call is a second copy
-  ## of a location the callee can reach through the pointer), and a `copy`
-  ## of an address-taken variable (a write through the pointer to an
-  ## element is seen through the copy, an assignment of the whole is not).
+  ## a variable that has both a cell and element cells, and a `copy` of an
+  ## address-taken variable (a write through the pointer to an element is
+  ## seen through the copy, an assignment of the whole is not).
   let ctx = w.z3
   for loc in locs:
     var rootCells: seq[AddrCellEntry]
@@ -17295,12 +17313,15 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         elems.add e
     if rootCells.len == 0 and elems.len == 0: continue
     let what = "`" & displayName(loc.root) & "`"
-    if loc.mode == "addr":
-      return "an `addr` of a part of " & what & ", whose address is taken, " &
-             "is a cell for the call the callee may also reach through that " &
-             "pointer"
     var formal = ""
-    if loc.temp.startsWith("#"):
+    if loc.mode == "addr":
+      for (f, callerName) in argVars:
+        if callerName == loc.temp: formal = f
+      if formal.len == 0 or not callerEnv.hasKey(loc.temp) or
+         callerEnv[loc.temp].kind != svPtr:
+        return "an `addr` of a part of " & what & ", whose address is " &
+               "taken, is passed in a shape the walk does not bind to its cell"
+    elif loc.temp.startsWith("#"):
       let k = parseInt(loc.temp[1 .. ^1])
       if k < params.len: formal = params[k]
     else:
@@ -17336,22 +17357,45 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         ixs.add callerEnv[nm]
       else:
         path.add st
-    let cellName = varLocCellName(formal)
+    # RFC-0005 S8bu: an `addr` actual binds a local of its own, kept equal
+    # to the call's cell too (below).
+    let local = if loc.mode == "addr": addrPartName(formal) else: formal
+    let cellName = varLocCellName(local)
     var env2 = calleePath.env
+    template bindCallCell() =
+      if loc.mode == "addr":
+        # The call's cell holds the location's value; it is stored again
+        # here as the local's term, so both cells read back as one term.
+        let ptrV = callerEnv[loc.temp]
+        discard addrCellStore(ctx, calleePath, ptrV.ptrPointee, ptrV.ptrAst,
+                              env2[local])
+        env2[addrCellName(local)] = ptrV
+        cells.add (local: local, cell: addrCellName(local), ty: ptrV.ptrPointee,
+                   path: @[], ixs: @[], bound: false)
     if rootCells.len == 1:
       let c = rootCells[0]
-      let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
+      let e: AddrCellEntry = (local: local, cell: cellName, ty: c.ty,
                               path: c.path & path, ixs: c.ixs & ixs,
                               bound: true)
-      if addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst).isNone:
+      let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
+      if v.isNone:
         return "the `var` argument is a part of " & what & ", whose " &
                "address is taken, along a path the walk does not follow"
       env2[cellName] = callerEnv[c.cell]
-      calleePath.env = env2
+      if loc.mode == "addr": env2[local] = v.get
       cells.add e
+      bindCallCell()
+      calleePath.env = env2
       continue
     # The element of a seq with element cells.
-    if path != @["["] or not env2.hasKey(formal):
+    if loc.mode == "addr":
+      # RFC-0005 S8bu: the call's cell and the element's are in one heap,
+      # and the element's is addressed through an `ite` a read cannot see
+      # past a store to the other, so the frame cannot tell which of the
+      # two a statement wrote.
+      return "an `addr` of an element of " & what & ", which has element " &
+             "cells, is a cell for the call in the element's own heap"
+    if path != @["["] or not env2.hasKey(local):
       return "the `var` argument is a part of an element of " & what &
              ", which has element cells"
     let ty = elems[0].ty
@@ -19374,10 +19418,16 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           var entryCells = calleeAddrCells
           var elemShares: seq[(string, string)]
           var paramNames: seq[string]
-          for f in sig.params: paramNames.add f.name
+          # RFC-0005 S8bu: each formal with the caller variable its actual
+          # names (an `addr` actual's cell, `bindVarLocs`).
+          var argVars: seq[(string, string)]
+          for i, f in sig.params:
+            paramNames.add f.name
+            if i < stmt.cargs.len and stmt.cargs[i].kind == iekVar:
+              argVars.add (f.name, stmt.cargs[i].vname)
           let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
-            w.frame.frameId, stmt.cVarLocs, varArgs, paramNames, entryCells,
-            elemShares, w)
+            w.frame.frameId, stmt.cVarLocs, varArgs, argVars, paramNames,
+            entryCells, elemShares, w)
           if locWhy.len > 0:
             taintInPlace(calleePath, w.degrade(feUnsupportedOp,
               "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
@@ -20077,39 +20127,48 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## declined (`feUnsupportedOp`), the variable's value winning. So is a
   ## variable a closure also captures (its env cell is a third copy).
   let ctx = w.z3
+  # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
+  # `addrPartName`: a part of a variable's cell, and the call's cell) takes
+  # a second pass, so a write that reached one of its cells and was read
+  # into the local reaches the other in the same statement.
+  var passes = 1
+  for i, c in w.frame.addrCells:
+    for j in 0 ..< i:
+      if w.frame.addrCells[j].local == c.local: passes = 2
   for p in outs:
     var env2 = p.env
     var q: Path = nil
     var clash: seq[string]
     var lost: seq[string]   ## RFC-0005 S8bs
-    for c in w.frame.addrCells:
-      if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
-         env2[c.cell].kind != svPtr:
-        continue
-      for (cl, _) in w.frame.capCells:
-        if cl == c.local and displayName(cl) notin clash:
-          clash.add displayName(cl)
-      let refAst = env2[c.cell].ptrAst
-      # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
-      let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
-      if curO.isNone:
-        if displayName(c.local) notin lost: lost.add displayName(c.local)
-        continue
-      let cur = curO.get
-      let xv = env2[c.local]
-      if sameSymVal(xv, cur): continue
-      if q == nil: q = forkPath(p, p.pc, p.env)
-      let snap = addrSnapName(depth, c.local)
-      let hasSnap = env2.hasKey(snap)
-      if hasSnap and sameSymVal(xv, env2[snap]):
-        env2[c.local] = cur
-        continue
-      if not (hasSnap and sameSymVal(cur, env2[snap])) and
-         not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
-        clash.add displayName(c.local)
-      let st = addrEntryStore(ctx, q, c, refAst, xv)
-      if st.isSome: env2[c.local] = st.get
-      elif displayName(c.local) notin lost: lost.add displayName(c.local)
+    for pass in 0 ..< passes:
+      for c in w.frame.addrCells:
+        if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
+           env2[c.cell].kind != svPtr:
+          continue
+        for (cl, _) in w.frame.capCells:
+          if cl == c.local and displayName(cl) notin clash:
+            clash.add displayName(cl)
+        let refAst = env2[c.cell].ptrAst
+        # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
+        let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
+        if curO.isNone:
+          if displayName(c.local) notin lost: lost.add displayName(c.local)
+          continue
+        let cur = curO.get
+        let xv = env2[c.local]
+        if sameSymVal(xv, cur): continue
+        if q == nil: q = forkPath(p, p.pc, p.env)
+        let snap = addrSnapName(depth, c.local)
+        let hasSnap = env2.hasKey(snap)
+        if hasSnap and sameSymVal(xv, env2[snap]):
+          env2[c.local] = cur
+          continue
+        if not (hasSnap and sameSymVal(cur, env2[snap])) and
+           not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
+          clash.add displayName(c.local)
+        let st = addrEntryStore(ctx, q, c, refAst, xv)
+        if st.isSome: env2[c.local] = st.get
+        elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
     if q == nil and not dropped and clash.len == 0 and lost.len == 0:
       result.add p

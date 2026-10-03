@@ -31,6 +31,14 @@ proc limitCorpus*(): seq[string] =
             "(?:a+|b)*c", "(?:(a)|b)+", "x*", "\\s*\\s", "[^a]*a",
             "(*CRLF)\\s+a|b", "(*ANY).*b", "a(*ACCEPT)b|c"]:
     result.add p
+  # A SKIP:NAME without its MARK: the attempt re-runs from a fresh count,
+  # ignoring the SKIP:NAMEs it passed (no RMATCH, one frame higher).
+  for p in ["a(*SKIP:A)b|.", "a+(*SKIP:A)b|a", "(?:a(*SKIP:A)b|a)+c|.",
+            "a(*SKIP:B)(?:b|c)d|ab|.", "(*MARK:A)a(*SKIP:A)b|a(*SKIP:B)c|.",
+            "a(*SKIP:A)a(*SKIP:B)b|a+", "(?:a|b)(*SKIP:A)\\s|b",
+            "a(*SKIP:A)(?:b(*SKIP:B)c|b)|.", "(a)(*SKIP:A)b|(.)",
+            "a*(*SKIP:A)b|a*", "(?:a(*SKIP:A))*b|."]:
+    result.add p
 
 proc limitSubjects*(): seq[string] =
   ## Every word over `ab \r\n` up to length 3, and a few longer runs.

@@ -23,7 +23,7 @@ suite "S8bt: match()'s call accounting (part " & $s8btLimitPart & ")":
 
   test "the reference's counts are libpcre's":
     var bad: seq[string]
-    var pats, calls, unread = 0
+    var pats, calls, unread, unmodelled = 0
     for i, p in limitCorpus():
       if i mod limitParts != s8btLimitPart: continue
       let pr = parsePcre(p)
@@ -42,12 +42,15 @@ suite "S8bt: match()'s call accounting (part " & $s8btLimitPart & ")":
             let want = (o.threshold(s, st, false, anch),
                         o.threshold(s, st, true, anch))
             let got = pcreLimits(n, s, st, anch)
+            if got == (-1, -1):
+              inc unmodelled
+              continue
             if got != want and bad.len < 40:
               bad.add escape(p) & (if anch: " anchored(" else: " (") &
                       escape(s) & ", " & $st & ") = " & $got & ", pcre: " &
                       $want
     echo "  ", pats, " patterns, ", calls, " calls, ", unread, " unread, ",
-         bad.len, " differ, ", lap()
+         unmodelled, " unmodelled, ", bad.len, " differ, ", lap()
     checkpoint bad.join("\n")
     check bad.len == 0
 
@@ -56,7 +59,7 @@ suite "S8bt: match()'s call accounting (part " & $s8btLimitPart & ")":
     # Windows legs' std/re runs unanchored calls on the JIT, whose
     # accounting is not modelled (a decline).
     var bad: seq[string]
-    var calls, errs = 0
+    var calls, errs, unmodelled = 0
     for i, p in limitCorpus():
       if i mod (limitParts * 4) != s8btLimitPart: continue
       let pr0 = parsePcre(p)
@@ -74,6 +77,9 @@ suite "S8bt: match()'s call accounting (part " & $s8btLimitPart & ")":
                 inc calls
                 let got = pcreExec(n, s, st, anch)
                 let want = o.execInterp(s, st, anch)
+                if got[0] == pcreUnmodelled:
+                  inc unmodelled
+                  continue
                 if got[0] < -1: inc errs
                 if got != want and bad.len < 40:
                   bad.add escape(q) & (if anch: " anchored(" else: " (") &
@@ -82,8 +88,8 @@ suite "S8bt: match()'s call accounting (part " & $s8btLimitPart & ")":
             if o.replaceInterp(s, "-") != pcreReplace(n, s, "-") and
                bad.len < 40:
               bad.add escape(q) & " replace(" & escape(s) & ")"
-    echo "  ", calls, " calls (", errs, " limit errors), ", bad.len,
-         " differ, ", lap()
+    echo "  ", calls, " calls (", errs, " limit errors), ", unmodelled,
+         " unmodelled, ", bad.len, " differ, ", lap()
     checkpoint bad.join("\n")
     check bad.len == 0
     check errs > 1000

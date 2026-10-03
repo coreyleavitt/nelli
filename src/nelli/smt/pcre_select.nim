@@ -94,8 +94,8 @@ export pcre_engine.PcreEngine
 const
   maxNfaStates = 4000
   maxLoops = 63
-  maxDfaStates* = 4000
-  maxRegexSize* = 40000
+  maxDfaStates* {.intdefine: "nelliMaxDfaStates".} = 4000
+  maxRegexSize* {.intdefine: "nelliMaxRegexSize".} = 40000
   symFin = 256       ## 256 ..< 261: a final newline byte `finBytes[i]`
   symR2 = 261        ## RFC-0005 S8bb: the CR of a final CRLF
   # RFC-0005 S8bt: `(*ANY)` in UTF mode (`uAny`): the multi-byte newlines
@@ -923,10 +923,6 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
   if result.costs:
     # A SKIP:NAME without its MARK re-runs the attempt from a fresh count,
     # ignoring the SKIP:NAMEs it passed (no RMATCH for them).
-    var probe = result
-    probe.classifySkipNames()
-    if probe.hasNeverSkip:
-      b.costWhy = "a (*SKIP:NAME) that can run without its (*MARK:NAME)"
     if result.possess.unknown:
       b.costWhy = "auto-possessification next to a character property or " &
                   "an extended class"
@@ -942,7 +938,7 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
   # one when a SKIP:NAME without its MARK can re-run it and the attempt can
   # then end by a SKIP's jump or past a CRLF's LF.
   result.countArgs = engine == peInterp and result.hasNeverSkip and
-                     (result.hasSkip or result.skipActive)
+                     (result.hasSkip or result.skipActive or result.costs)
   let so = startOpt(pr)
   result.so = so
   result.anchoredPat = so.anchored
@@ -1011,6 +1007,8 @@ type
     md: int16    ## the deepest of those calls' depth, plus one (0: none)
     dv: int32    ## one plus the index among them of the first at or past
                  ## the recursion limit (0: none)
+    pk: int32    ## the calls of an earlier run of the attempt (a SKIP:NAME
+                 ## without its MARK re-runs it from a fresh count)
 
   Item[T] = object
     kind: ItemKind
@@ -1071,6 +1069,11 @@ type
 const argCap* = 7
   ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
 
+const costStaleWhy* = "match()'s call accounting where pcre_exec.c's " &
+  "ignore_skip_arg outlives an attempt (a SKIP:NAME's provisional run " &
+  "number decides whether it calls match()), or past " & $argCap &
+  " SKIP:NAME runs"
+
 const staleWhy* = "pcre_exec.c's ignore_skip_arg count past " & $argCap &
   " SKIP:NAME runs (an attempt re-run by a (*SKIP:NAME) without its " &
   "(*MARK:NAME) that ends by a SKIP's jump or past a CRLF's LF keeps it " &
@@ -1092,7 +1095,8 @@ proc sat(x: int): int8 = int8(min(x, argCap + 1))
 proc then(a, b: Cost): Cost =
   ## RFC-0005 S8bt. The calls of `a`, then those of `b`.
   Cost(cc: a.cc + b.cc, dp: b.dp, md: max(a.md, b.md),
-       dv: (if a.dv > 0: a.dv elif b.dv > 0: a.cc + b.dv else: 0))
+       dv: (if a.dv > 0: a.dv elif b.dv > 0: a.cc + b.dv else: 0),
+       pk: max(a.pk, b.pk))
 
 proc spent(c: Cost): bool = c.cc > 0
 
@@ -1402,7 +1406,45 @@ proc dropThreads[T](items: seq[Item[T]]): seq[Item[T]] =
     if it.kind != ikThread: result.add it
     elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
 
-proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
+proc rerunCosts[T](cur: var seq[Item[T]]; f: Item[T]; recLimit: int): bool =
+  ## RFC-0005 S8bt (`costs`). The re-run of a SKIP:NAME without its MARK
+  ## (`f`, at the front): pcre_exec.c calls match() afresh, so the run so
+  ## far is one of the call's runs (`pk`); the re-run takes the same paths
+  ## up to here with one call fewer per SKIP:NAME it now ignores (those
+  ## run since the last re-run: `f.ac - f.stl`), and every item after the
+  ## front runs one frame higher per such SKIP:NAME whose continuation
+  ## holds it (the chain's terminals after it). False when a depth past
+  ## the recursion limit can no longer be placed.
+  let c = f.co
+  var chain = initHashSet[int]()
+  var a = f.anc
+  for k in 0 ..< cur.len:
+    if a < 0: break
+    let x = cur[k]
+    if x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff} and
+       x.marker == a:
+      if x.ac > f.stl: chain.incl k
+      a = x.anc
+  var r = 0'i16
+  for k in countdown(cur.high, 0):
+    if r > 0:
+      var co = cur[k].co
+      co.dp -= r
+      if co.md > 0:
+        co.md = max(co.md - r, 1'i16)
+        if co.dv > 0:
+          if int(co.md) - 1 >= recLimit: return false
+          co.dv = 0
+      cur[k].co = co
+    if k in chain: inc r
+  let pre = Cost(cc: c.cc - int32(f.ac - f.stl), dp: c.dp, md: c.md,
+                 pk: max(c.pk, c.cc))
+  if cur.len > 0: cur[0].co = pre.then(cur[0].co)
+  else: cur = @[Item[T](kind: ikCost, co: pre)]
+  true
+
+proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
+                       recLimit = high(int)): bool =
   ## RFC-0005 S8bt. A SKIP:NAME at the front: every path before it failed,
   ## so its run number is final. One `ignore_skip_arg` covers (`ac <= stl`)
   ## is a no-op (left as a link). Otherwise one without its MARK re-runs
@@ -1424,7 +1466,8 @@ proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
     return true
   of tmArgSkip, tmBarrier:
     let counted = f.ac > 0     # 0: not counted, never ignored
-    if counted and f.ac > argCap and f.stl > argCap:
+    if counted and f.ac > argCap and f.stl > argCap or
+       costs and f.ac > argCap:
       cur = @[Item[T](kind: ikTerm, term: tmStale)]
       return true
     if counted and f.ac <= f.stl:
@@ -1432,10 +1475,14 @@ proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
       return true
     if f.term == tmArgSkip: return false
     if f.rerun:
-      cur = @[Item[T](kind: ikTerm, term: tmBump, rerun: true, stl: f.ac)]
+      cur = @[Item[T](kind: ikTerm, term: tmBump, rerun: true, stl: f.ac,
+                      co: f.co)]
       return true
     var a = f.anc
     cur = cur[1 .. ^1]
+    if costs and not rerunCosts(cur, f, recLimit):
+      cur = @[Item[T](kind: ikTerm, term: tmStale)]
+      return true
     for k in 0 ..< cur.len:
       if a < 0: break
       let x = cur[k]
@@ -1449,7 +1496,8 @@ proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
   else:
     return false
 
-proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
+proc normalize[T](items: seq[Item[T]]; costs = false;
+                  recLimit = high(int)): seq[Item[T]] =
   ## See the module doc: the front decides or jumps, an unconditional
   ## decided item kills what follows it up to the next marker, and a marker
   ## nothing refers to goes. RFC-0005 S8bt: a SKIP:NAME at the front
@@ -1484,7 +1532,7 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
       cur = cur[i .. ^1]
       if spent(carry): cur[0].co = carry.then(cur[0].co)
       changed = true
-    if resolveBarrier(cur): continue
+    if resolveBarrier(cur, costs, recLimit): continue
     if cur.len > 0 and decidesAtFront(cur[0]):
       return @[cur[0]]
     var nx: seq[Item[T]]
@@ -1628,6 +1676,10 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
                     ign0 = 0'i8): AttemptResult[T] =
   ## RFC-0005 S8bj. The concrete attempt at `x` of `s` (the search's start
   ## offset `s0`): its outcome, with positions as tags.
+  if n.costs and ign0 > 0:
+    # RFC-0005 S8bt: not modelled (`costStaleWhy`).
+    result.kind = okStale
+    return
   var items = @[Item[T](kind: ikThread, st: int32(n.start),
                         marks: initMarks(n), anc: -1, stl: ign0, cap: cap0)]
   var ctr = 0'i32
@@ -1649,14 +1701,14 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     items = closure(n, items, sc, ctr, save)
     if atEnd: items = dropThreads(items)
     else: items = advance(n, items, s[j])
-    items = normalize(items)
+    items = normalize(items, n.costs, n.recLimit)
     var oc = outcome(items)
     let lim = limitHit(n, items)
     if lim != okUndecided: oc = lim
     if oc != okUndecided or atEnd:
       result.kind = oc
       if items.len > 0:
-        result.calls = int(items[0].co.cc)
+        result.calls = int(max(items[0].co.cc, items[0].co.pk))
         result.depth = int(items[0].co.md)
       if oc in {okMatch, okSkip}:
         result.pos = int(items[0].tag)
@@ -1785,12 +1837,16 @@ proc capCosts[T](n: Nfa; items: seq[Item[T]]): seq[Item[T]] =
   let l = n.matchLimit
   let r = n.recLimit
   var pre = 0
+  # RFC-0005 S8bt: depths keep `argCap + 2` above the limit, so a re-run's
+  # lift (`rerunCosts`, at most one frame per counted SKIP:NAME) still
+  # tells them apart.
+  let top = int16(min(r, 30000) + argCap + 2)
   for it in items:
     var x = it
-    x.co.md = 0
+    x.co.pk = 0
     x.co.cc = (if l >= 0: min(x.co.cc, int32(l + 1)) else: 0'i32)
-    x.co.dp = (if r < high(int): min(x.co.dp, int16(min(r, 30000)))
-               else: 0'i16)
+    x.co.dp = (if r < high(int): min(x.co.dp, top) else: 0'i16)
+    x.co.md = (if r < high(int): min(x.co.md, top) else: 0'i16)
     if x.co.dv > 0:
       x.co.dv = (if l >= 0: min(x.co.dv, int32(l + 2)) else: 1'i32)
     result.add x
@@ -1903,13 +1959,19 @@ proc accepts(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8];
   of acErrM: oc == okLimitM
   of acErrR: oc == okLimitR
 
-proc staleOutcome(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8]): bool =
+proc staleOutcome(n: Nfa; spec: AttemptSpec; oc: OutcomeKind;
+                  it: Item[int8]): bool =
   ## RFC-0005 S8bt. An unanchored attempt's outcome that leaves
   ## `ignore_skip_arg` set for the next one where the consumer does not
-  ## follow it, or past `argCap` (`staleWhy`).
-  if spec.anchored: return false
+  ## follow it (or the calls count, `costStaleWhy`), or past `argCap`
+  ## (`staleWhy`).
+  if spec.anchored: return oc == okStale
   let ig = nextIgn(oc, it, oc == okSkip and it.tag != 0)
-  oc == okStale or ig > argCap or (ig != 0 and not spec.tracksIgn)
+  oc == okStale or ig > argCap or
+    (ig != 0 and (not spec.tracksIgn or n.costs))
+
+proc staleWhyOf(n: Nfa): string =
+  (if n.costs: costStaleWhy else: staleWhy)
 
 proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   ## RFC-0005 S8bj. The deterministic attempt (the agenda machine) as a
@@ -1972,13 +2034,13 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         var items = resolve(k.items, false)
         items = closure(n, items, mkCtx(cxEnd, -1, false,
                                         spec.acc == acEndsT), ctr, save)
-        items = normalize(dropThreads(items))
+        items = normalize(dropThreads(items), n.costs, n.recLimit)
         var oc = outcome(items)
         let lim = limitHit(n, items)
         if lim != okUndecided: oc = lim
         let it = (if items.len > 0: items[0] else: Item[int8]())
-        if staleOutcome(spec, oc, it):
-          return Dfa(ok: false, why: staleWhy)
+        if staleOutcome(n, spec, oc, it):
+          return Dfa(ok: false, why: staleWhyOf(n))
         result.igns.incl nextIgn(oc, it, oc == okSkip and it.tag != 0)
         acc = accepts(spec, oc, it, k.ev, k.atStart)
       # The events.
@@ -2014,15 +2076,16 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
             cl = closure(n, resolve(k.items, c == '\n'),
                          mkCtx(ctx, ord(c), fin, false, here), ctr, save)
             cache[ck] = cl
-          var items = capCosts(n, normalize(advance(n, cl, c)))
+          var items = capCosts(n, normalize(advance(n, cl, c), n.costs,
+                                            n.recLimit))
           var oc = outcome(items)
           let lim = limitHit(n, items)
           if lim != okUndecided: oc = lim
           var k2 = AKey(nl: nls, ev: k.ev, just: 0, atStart: false)
           if oc != okUndecided:
             let it = (if items.len > 0: items[0] else: Item[int8]())
-            if staleOutcome(spec, oc, it):
-              return Dfa(ok: false, why: staleWhy)
+            if staleOutcome(n, spec, oc, it):
+              return Dfa(ok: false, why: staleWhyOf(n))
             result.igns.incl nextIgn(oc, it, oc == okSkip and it.tag != 0)
             # Decided: accepted for good once the required events are read.
             if (k.ev and need) == need and
@@ -2245,6 +2308,9 @@ type SelLang* = object
   ok*: bool
   why*: string
   re*: RNode
+  states*, minStates*: int
+    ## RFC-0005 S8bt: the automaton's states, built and minimized (the
+    ## size caps' measure)
 
 var selCache {.threadvar.}: Table[string, SelLang]
 
@@ -2337,7 +2403,7 @@ proc langOf(d: Dfa; what: string): SelLang =
                    "is past its size cap (" & $maxDfaStates & " states)")
   let (trans, acc) = minimize(d)
   let (fine, r) = toRegex(trans, acc)
-  if fine: SelLang(ok: true, re: r)
+  if fine: SelLang(ok: true, re: r, states: d.trans.len, minStates: trans.len)
   else: SelLang(ok: false, why: "the pattern's " & what & " regex is past " &
                 "its size cap (" & $maxRegexSize & " nodes)")
 
@@ -3168,8 +3234,10 @@ proc captureLang*(n: Nfa; cacheKey: string; g: int; atStart,
 # pending verbs and matches with their positions as registers.
 
 const
-  maxStepStates* = 512   ## the step table's state cap (the Z3 term's size)
-  maxRegs* = 6           ## RFC-0005 S8bj: the agenda table's register cap
+  maxStepStates* {.intdefine: "nelliMaxStepStates".} = 512
+    ## the step table's state cap (the Z3 term's size)
+  maxRegs* {.intdefine: "nelliMaxRegs".} = 6
+    ## RFC-0005 S8bj: the agenda table's register cap
   rcOther* = 0           ## `RunTable`'s context index
   rcNll* = 1
   rcEnd* = 2
@@ -3400,7 +3468,7 @@ proc stepTable*(n: Nfa): StepTable =
               eligAll: k.elig, anchored: false, tagNow: regs)
     proc leafOf(items0: seq[Item[int8]]; pcNext: PrevClass;
                 ok: var bool): Leaf =
-      let items = capCosts(n, normalize(items0))
+      let items = capCosts(n, normalize(items0, n.costs, n.recLimit))
       var oc = outcome(items)
       let lim = limitHit(n, items)
       if lim != okUndecided: oc = lim
@@ -3412,7 +3480,7 @@ proc stepTable*(n: Nfa): StepTable =
       var ig = 0'i8
       if oc != okUndecided and items.len > 0:
         ig = nextIgn(oc, items[0], true)
-      if oc == okStale or ig > argCap:
+      if oc == okStale or ig > argCap or (n.costs and ig != 0):
         stale = true
         ok = false
         return Leaf(kind: lfBump)
@@ -3475,7 +3543,7 @@ proc stepTable*(n: Nfa): StepTable =
         of 1: row.nll[b] = lf
         else: row.nlsU[b] = lf
     if not fine:
-      if stale: return StepTable(ok: false, why: staleWhy)
+      if stale: return StepTable(ok: false, why: staleWhyOf(n))
       return StepTable(ok: false, why: "the pattern's run holds more than " &
                        $maxRegs & " pending positions")
     result.rows.add row
@@ -3632,9 +3700,11 @@ proc pcreLimits*(n: Nfa; s: string; start: int;
   ## under which the call is not a limit error (`n.costs`, no limit in the
   ## pattern): its attempts' most `match()` calls, and their deepest call's
   ## frame depth plus one (pcre_exec.c resets the count per attempt).
+  ## `(-1, -1)` where the model stops (`pcreUnmodelled`).
   doAssert n.costs
   var mc, md: int
-  discard execCore(n, s, start, anchoredCall, false, mc, md)
+  let r = execCore(n, s, start, anchoredCall, false, mc, md)
+  if r[0][0] == pcreUnmodelled: return (-1, -1)
   (mc, md)
 
 proc pcreReplace*(n: Nfa; s, by: string; unmodelled: var bool): string =

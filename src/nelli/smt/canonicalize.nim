@@ -5083,7 +5083,8 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
-      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
+      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") & ">"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5161,7 +5162,10 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
-      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") & ">"
+      (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      # RFC-0005 S8bn: whether a `var` actual may be a pointer's target
+      # changes the verdict (a deref in the callee declines or not).
+      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read

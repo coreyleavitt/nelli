@@ -362,6 +362,11 @@ title = "S8bf's remainder: var writes dropped through proc-variable calls; ptr p
 state = "done"
 
 [[slice]]
+id = "S8bn"
+title = "S8bh's remainder: ptr alias witnesses (parameter order, global/var-param targets), var-formal ptr declines, ptrs into heap-held containers and by-value aggregates, diverging void closures, proc fields and methods, unknown-target global havoc, `of` operator and nil literals, generic/inheritable/case-object hierarchies, run-time type tags tied to static types"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

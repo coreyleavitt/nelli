@@ -415,9 +415,12 @@ proc emitExpr*(e: IRExpr): NimNode =
     for a in e.ccAddrArgs: adLit.add newLit(a)
     var tcLit = newTree(nnkBracket)
     for t in e.ccTouch: tcLit.add newLit(t)
+    var vpLit = newTree(nnkBracket)        ## RFC-0005 S8bn
+    for v in e.ccVarPtrSafe: vpLit.add newLit(v)
     newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"),
             newCall(bindSym"@", vtLit), newCall(bindSym"@", alLit),
-            newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit))
+            newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit),
+            newCall(bindSym"@", vpLit))
   of iekSeqLit:           ## Phase 15 C4
     var elemsLit = newTree(nnkBracket)
     for c in e.seqLitElems: elemsLit.add emitExpr(c)
@@ -715,7 +718,8 @@ proc emitStmt*(s: IRStmt): NimNode =
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              prefix(posLit, "@"), newLit(s.cGuardRoots))
+              prefix(posLit, "@"), newLit(s.cGuardRoots),
+              newLit(s.cVarPtrSafe))   ## RFC-0005 S8bn
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -3745,7 +3749,7 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
       if typeReachesCell(a.getTypeInst, cells, seen): return true
   false
 
-proc calleeOuterSyms(calleeSym: NimNode): seq[NimNode] =
+proc calleeOuterSyms*(calleeSym: NimNode): seq[NimNode] =
   ## RFC-0005 S8au. The variables outside its own frame that a call of
   ## `calleeSym` can reach while it runs: every module-level global its
   ## body names, every enclosing variable it captures (a nested routine,
@@ -4124,6 +4128,48 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
+proc addrTakenIn(n, sym: NimNode): bool =
+  ## RFC-0005 S8bn (item 3). `n` takes the address of a location rooted at
+  ## the symbol `sym` (`addr x`, `addr x.f`, `unsafeAddr x`). A `var`
+  ## argument (`nnkHiddenAddr`) is not one: no pointer outlives that call.
+  if n == nil: return false
+  var operand: NimNode = nil
+  if n.kind == nnkAddr and n.len >= 1:
+    operand = n[^1]
+  elif n.kind in {nnkCall, nnkCommand} and n.len == 2 and
+       n[0].kind == nnkSym and macros.strVal(n[0]) in ["addr", "unsafeAddr"]:
+    operand = n[1]
+  if operand != nil:
+    var steps: seq[NimNode]
+    let r = lvalueRoot(operand, steps)
+    if r != nil and r.kind == nnkSym and containsSym(@[sym], r): return true
+  for c in n:
+    if addrTakenIn(c, sym): return true
+  false
+
+proc varActualPtrSafety(lv: NimNode): int =
+  ## RFC-0005 S8bn (item 3). What the location `lv`, passed to a `var`
+  ## formal, is to a `ptr` of unknown origin (`IRStmt.cVarPtrSafe`): 1 when
+  ## it is a part of a local of the routine that declares it (no
+  ## dereference on the way) whose address that routine never takes, so no
+  ## pointer can address it; 2 when it is that routine's own `var` formal,
+  ## passed on whole (its location is the formal's own actual); 0 for any
+  ## other location (a global, a heap cell, a taken address).
+  var steps: seq[NimNode]
+  let root = lvalueRoot(lv, steps)
+  if root.isNil or root.kind != nnkSym or steps.len > 0 or isModuleGlobal(root):
+    return 0
+  case root.symKind
+  of nskParam:
+    if lv.kind == nnkSym and root.getTypeInst.kind == nnkVarTy: 2 else: 0
+  of nskVar, nskLet, nskResult, nskForVar:
+    let o = root.owner
+    if o.isNil or o.kind != nnkSym: return 0
+    let impl = o.getImpl
+    if impl.isNil or impl.kind == nnkNilLit or addrTakenIn(impl, root): 0
+    else: 1
+  else: 0
+
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -4171,6 +4217,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
+  var varSafe = newSeq[int](max(n.len - 1, 0))   ## RFC-0005 S8bn: `cVarPtrSafe`
+  var anyVarActual = false
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
   # RFC-0005 S8au: what the callee reaches outside its arguments, computed
   # once per call and only when a heap actual asks.
@@ -4307,9 +4355,16 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         byRefTaken = true
     if byRefTaken: continue
     var ir = parseExpr(n[i], preamble, ctx)
+    if n[i].kind == nnkSym and varActualPtrSafety(n[i]) == 2:
+      # RFC-0005 S8bn: the caller's own `var` formal passed on to a `var`
+      # formal (Nim drops the `addr`); read only for a `var` formal.
+      varSafe[i - 1] = 2
+      anyVarActual = true
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
+      varSafe[i - 1] = varActualPtrSafety(lv)   ## RFC-0005 S8bn
+      anyVarActual = true
       block:
         var syms: seq[NimNode]
         lvalueVarSyms(lv, syms)
@@ -4364,7 +4419,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   # specialisation to them.
   let key = if byRefs.len == 0: callKey
             else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
-  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards)
+  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards,
+                    (if anyVarActual: varSafe else: @[]))
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -4590,13 +4646,21 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       "or different field paths)")
   let retTy = if retVoid: tBool() else: classifyType(n).ty
   let synth = freshSynth(ctx, "closureCall")
+  # RFC-0005 S8bn (item 3): what each `var` actual's location is to a
+  # pointer of unknown origin (`varActualPtrSafety`).
+  var varSafe = newSeq[int](nArgs)
+  for i in 1 ..< n.len:
+    if isVarFormal(i - 1) and not lvOf[i].isNil and
+       addrActualLvalue(n[i]) == nil:
+      varSafe[i - 1] = varActualPtrSafety(lvOf[i])
   proc callWith(al: seq[int]; touchV: seq[string]): IRExpr =
     var aliasV = al
     var identity = true
     for k, a in aliasV:
       if a != k: identity = false
     if identity: aliasV = @[]
-    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV)
+    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV,
+                  varSafe)
   proc wrap(call: IRExpr; wbs: seq[IRStmt]): IRStmt =
     let l = mkLet(synth, retTy, call)
     if wbs.len == 0: l else: mkTry(l, @[], mkBlock(wbs))

@@ -992,17 +992,13 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   # formal at once. With the formal standing for a location this model has
   # no cell for in the callee's frame, a formal that may be of type T
   # declines (every frame on the stack: an outer callee's formal is not in
-  # this frame's env either). A closure frame's formals are not in
-  # `w.procs`; one declines likewise.
+  # this frame's env either). RFC-0005 S8bn (item 3): only a formal whose
+  # actual a pointer may address (`ptrRiskFormals`); a local whose address
+  # is never taken is no pointer's target. A closure's formals are its
+  # lambda's, recorded at the call like a proc's.
   for cf in w.callStack:
-    if not w.procs.hasKey(cf.callee):
-      result.decline = "a `ptr " & $pointee & "` of unknown origin, " &
-        "dereferenced in the body of a closure, may address one of its " &
-        "`var` formals' locations, which the walk copies in and out -- not " &
-        "modelled (RFC-0005 S8bh; feUnsupportedOp)"
-      return
-    for formal in w.procs[cf.callee].params:
-      if formal.isVar and tyMayHold(formal.ty, pointee):
+    for formal in cf.ptrRiskFormals:
+      if tyMayHold(formal.ty, pointee):
         result.decline = "a `ptr " & $pointee & "` of unknown origin, " &
           "dereferenced while `" & cf.callee & "` runs, may address the " &
           "location of its `var` formal `" & formal.name & "`, which the " &
@@ -1099,6 +1095,17 @@ proc ptrSelIs(ctx: Z3Context; sel: Z3AnyAst; code: int64): Z3Bool =
   wrap[Z3Bool](ctx, checkedEq(ctx, sel.raw,
                               ctx.checkErr Z3_mk_int64(ctx.raw, code, s)))
 
+proc ptrIteSV(ctx: Z3Context; cond: Z3Bool; t, e: SymVal): SymVal =
+  ## RFC-0005 S8bn (item 2). `iteSV` over a pointer's candidate values: a
+  ## string target (a `ptr string` aimed at a string global or `var`
+  ## parameter) merges as one Z3 `ite` over the String sort, where `iteSV`
+  ## havocs every string merge (an index fold's hazard, not this one's: the
+  ## candidates here are whole values under disjoint `sel` guards).
+  if t.kind == svString and e.kind == svString:
+    return SymVal(kind: svString, str: wrap[Z3String](ctx,
+      checkedIte(ctx, cond.raw, t.str.raw, e.str.raw)))
+  iteSV(cond, t, e)
+
 proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                    pointee: IRType; refSort: RawZ3Sort; typeId: string;
                    own: SymVal): tuple[val: SymVal; decline: string] =
@@ -1114,7 +1121,7 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
     let tv =
       if t.famKey.len > 0: heapSelect(ctx, p.heaps[t.famKey], t.objAddr, pointee)
       else: p.env[t.envName]
-    result.val = iteSV(ptrSelIs(ctx, tg.sel, t.code), tv, result.val)
+    result.val = ptrIteSV(ctx, ptrSelIs(ctx, tg.sel, t.code), tv, result.val)
 
 proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                     pointee: IRType; refSort: RawZ3Sort; typeId: string;
@@ -1132,7 +1139,7 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
                                                           stored, arr.raw))
     else:
-      p.env[t.envName] = iteSV(guard, val, p.env[t.envName])
+      p.env[t.envName] = ptrIteSV(ctx, guard, val, p.env[t.envName])
   ""
 
 proc ptrSelOwnAtAlloc(ctx: Z3Context; p: Path; pointee: IRType;

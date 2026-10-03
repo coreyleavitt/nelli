@@ -925,6 +925,9 @@ type
                                      ## share. Selects `lambdaAliasBodies`.
       ccAddrArgs*: seq[int]          ## RFC-0005 S8bh: arguments that are an
                                      ## `addr lv` cell (`lambdaPtrLocal`).
+      ccVarPtrSafe*: seq[int]        ## RFC-0005 S8bn (item 3): per
+                                     ## argument, `IRStmt.cVarPtrSafe`'s
+                                     ## code for a `var` actual.
       ccTouch*:   seq[string]        ## RFC-0005 S8bh: the variables and
                                      ## heap object types the `var`/`addr`
                                      ## actuals' locations involve (as
@@ -1263,6 +1266,16 @@ type
                          ## the callee, is therefore withheld from the
                          ## callee, and a callee that touches it declines
                          ## (`isCall`). Empty for a call with neither.
+      cVarPtrSafe*: seq[int]
+                         ## RFC-0005 S8bn (item 3). Per argument, what a
+                         ## `var` actual's location is to a `ptr` of unknown
+                         ## origin (`varActualPtrSafety`): 0 a location one
+                         ## may address (a global, a heap cell, a local whose
+                         ## address is taken, any other shape), 1 a local
+                         ## whose address is never taken (no pointer's
+                         ## target), 2 the caller's own `var` formal passed
+                         ## on (whatever its own actual is). Empty when the
+                         ## call has no `var` actual.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -3697,14 +3710,15 @@ proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
 proc mkClosureCall*(callee: string, args: seq[IRExpr];
                     varTys: seq[IRType] = @[]; alias: seq[int] = @[];
                     addrArgs: seq[int] = @[];
-                    touch: seq[string] = @[]): IRExpr =
+                    touch: seq[string] = @[];
+                    varPtrSafe: seq[int] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
   ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
   ## (see `ccVarTys`).
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
          ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
-         ccTouch: touch)
+         ccTouch: touch, ccVarPtrSafe: varPtrSafe)
 
 proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
                         aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
@@ -4798,11 +4812,12 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             retIntOffsetPositions: seq[int] = @[],
-            guardRoots: seq[string] = @[]): IRStmt =
+            guardRoots: seq[string] = @[],
+            varPtrSafe: seq[int] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions,
-         cGuardRoots: guardRoots)
+         cGuardRoots: guardRoots, cVarPtrSafe: varPtrSafe)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false): IRStmt =

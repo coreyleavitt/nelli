@@ -1004,7 +1004,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
     ## `(?X)`; replace over the agenda's step table; the libpcre engine in
     ## the cache key). Provisional 211.
-    check symexWalkerVersion == "223"
+    ## RFC-0005 S8br (S8bk's remainder: a call in a by-address actual's
+    ## index is evaluated once, where the argument stands; a check no
+    ## snapshot carries declines only when a later argument may write what
+    ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
+    check symexWalkerVersion == "229"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

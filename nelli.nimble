@@ -1181,7 +1181,12 @@ task test, "Run the test suite":
             # element's byte test in character form; B1-1's tight unit
             # ceiling. Walker 209->214.
             "tsymex_rfc0005_s8bm_stability",
+            # RFC-0005 S8bk (address-of-argument timing), split by S8br
+            # into three files so each compiles and runs under 60 s per
+            # backend (fixture: tests/s8bk_argtiming_fixture.nim).
             "tsymex_rfc0005_s8bk_argtiming",
+            "tsymex_rfc0005_s8bk_argtiming_addr",
+            "tsymex_rfc0005_s8bk_argtiming_checks",
             # RFC-0005 S8bg -- S8bd's remainder: a by-reference lvalue
             # reached through a representation-preserving conversion
             # (distinct, range to base) is modelled through; one reached
@@ -1189,5 +1194,12 @@ task test, "Run the test suite":
             # of a crash; the distinct-bijectivity hint walks the whole
             # distinct chain before judging non-decidability. Walker
             # 209->218.
-            "tsymex_rfc0005_s8bg_remainder"]:
+            "tsymex_rfc0005_s8bg_remainder",
+            # RFC-0005 S8br -- S8bk's remainder: a call in a by-address
+            # actual's index is evaluated once, where the argument stands;
+            # a check no snapshot carries declines only when a later
+            # argument may write what the lvalue reads (`_framecond`).
+            # Walker 223->229.
+            "tsymex_rfc0005_s8br_remainder",
+            "tsymex_rfc0005_s8br_framecond"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

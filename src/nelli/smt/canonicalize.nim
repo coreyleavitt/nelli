@@ -203,7 +203,20 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "223"
+const symexWalkerVersion* = "229"
+  ## RFC-0005 S8br (provisional 229; 224-228 held by slices still running)
+  ## — S8bk's remainder. A call in a by-address actual's index
+  ## (`touch(gArr[nextI()], f())`) is evaluated once, where the argument
+  ## stands, into a `let` the lvalue then names (`hoistIndexCalls`): the
+  ## copy-in, the copy-out and S8an's cell reach the element through it.
+  ## Before, the copy-out re-parsed the call: an array element declined
+  ## (`unsupported nnkAsgn shape`), and a seq element called it twice (a
+  ## false `sxSat` and a false `sxUnsat`). A by-address argument whose index
+  ## check no snapshot carries (`gH.s[gi]`) declines only when a later
+  ## argument may write a location its lvalue reads (`laterLeavesLvalue`,
+  ## S8as/S8ax's write summary); S8bk declined it whenever a later argument
+  ## may write anything. 223 -> 229.
+  ##
   ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg, S8bi and S8bj land
   ## stacked on batch 4 as one integration branch under ONE walker number;
   ## their bullets follow, each naming its provisional number. The stack's own

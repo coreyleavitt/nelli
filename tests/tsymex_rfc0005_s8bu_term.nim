@@ -10,9 +10,16 @@
 ##   (1) the shapes decide: beside the query, each bit-vector whose signed
 ##       Int view it holds is asserted equal to `int2bv` of that view, a
 ##       theorem of two's complement (`bvIntInverseFacts`);
-##   (2) no query is unbounded under the defaults: `queryRLimit` defaults
-##       to a finite budget, and a query that exhausts it is `sxUnknown`
-##       with the decline named (`beSolverUndef`), never a hang.
+##   (2) arithmetic on an `int` read back out of an Int-sorted heap stays
+##       in the bit-vector it was stored from: a literal beside it lowers as
+##       that bit-vector (`probeProto`), so `v * 2` is `bvmul(2, k)`, not
+##       `2 * sbv2int(k)`, which met the caller's bit-vector across the
+##       bridge again in a query whose step count Z3 never advanced;
+##   (3) no query is unbounded under the defaults: `queryRLimit` defaults
+##       to a finite budget, and `queryTimeoutMs` bounds every solve by the
+##       clock (a step bound cannot end a search that takes no steps); a
+##       solve either cuts off is `sxUnknown` with the decline named
+##       (`beSolverUndef`), never a hang, and a clock cut-off is not cached.
 ##
 ## Every verdict expectation is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
@@ -79,12 +86,37 @@ proc sutSeqInt(k: int) =
   if r == k and k == 29: symexTarget("ts")
   if r != k: symexTarget("ts_dead")
 
+# ---- (2) arithmetic on an `int` read back out of an Int-sorted heap -------
+
+proc twice(v: var int, k: int): int =
+  v = k
+  gpi[] = v * 2
+  v
+
+proc sutHeapArith(k: int) =
+  if k < 0 or k > 1000: return
+  var x = 0
+  gpi = addr x
+  let r = twice(x, k)
+  if r == 2 * k and x == 2 * k and k == 5: symexTarget("ta")
+  if r != 2 * k or x != 2 * k: symexTarget("ta_dead")
+
+# ---- (3) a solve whose answer takes Z3 long ---------------------------------
+
+proc sutCubes(x, y, z: int) =
+  if x > 0 and y > 0 and z > 0 and x < 1000 and y < 1000 and z < 1000:
+    if x * x * x + y * y * y == z * z * z: symexTarget("tc")
+
+const clockOnly = SymexSettings(budget: ResourceBudget(queryRLimit: 0,
+                                                       queryTimeoutMs: 2000))
+
 suite "S8bu (1): the signed bv2int bridge decides":
 
   test "nim: the int forms":
     let ks = [-1, 0, 5, 29, 33]
-    let h = nativeHits(sutIntField, ks) + nativeHits(sutSeqInt, ks)
-    for l in ["tf", "ts"]:
+    let h = nativeHits(sutIntField, ks) + nativeHits(sutSeqInt, ks) +
+            nativeHits(sutHeapArith, ks)
+    for l in ["tf", "ts", "ta"]:
       checkpoint l & " " & $(l in h) & " " & $((l & "_dead") in h)
       check l in h
       check (l & "_dead") notin h
@@ -94,6 +126,10 @@ suite "S8bu (1): the signed bv2int bridge decides":
     clean(sutIntField, "tf_dead", sxUnsat)
     clean(sutSeqInt, "ts", sxSat)
     clean(sutSeqInt, "ts_dead", sxUnsat)
+
+  test "arithmetic on a value read back out of an Int heap":
+    clean(sutHeapArith, "ta", sxSat)
+    clean(sutHeapArith, "ta_dead", sxUnsat)
 
   test "the inverse facts are theorems":
     ## Every fact `bvIntInverseFacts` states, at width 8 over every `x`, is
@@ -134,9 +170,25 @@ suite "S8bu (1): the signed bv2int bridge decides":
 
 suite "S8bu (1): no query is unbounded under the defaults":
 
-  test "queryRLimit defaults to a finite budget":
+  test "queryRLimit and queryTimeoutMs default to finite budgets":
     check ResourceBudget().queryRLimit == 20_000_000'u
     check defaultSymexSettings().budget.queryRLimit != 0'u
+    check ResourceBudget().queryTimeoutMs == 600_000'u
+    check ";qto=" notin canonicalize(defaultSymexSettings())
+    check ";qto=2000" in canonicalize(clockOnly)
+
+  test "a solve the clock cuts off declines, named, and is not cached":
+    ## No step bound at all (`queryRLimit: 0`); the cubes query is one Z3
+    ## does not answer in 2 s.
+    let r = symexFind(sutCubes, tLabel("tc"), clockOnly)
+    checkpoint show(r.errors)
+    check r.status == sxUnknown
+    var named = false
+    for e in r.errors:
+      if e.kind == beSolverUndef and "queryTimeoutMs = 2000" in e.msg:
+        named = true
+    check named
+    check symexQueryTimedOut()
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

@@ -5736,6 +5736,9 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        a string / seq; a query it cuts off is
   ##                        sxUnknown. Rendered `;sqr=` only when not the
   ##                        default 20M (default keys unchanged).
+  ##   queryTimeoutMs     — RFC-0005 S8bu: the wall-clock bound of every
+  ##                        solve; one it cuts off is sxUnknown. Rendered
+  ##                        `;qto=` only when not the default 600000.
   ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
   ##                        depth extends to past `maxCallDepth`; a call
   ##                        past it declines, so it changes the verdict.
@@ -5801,6 +5804,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
     (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
+    (if s.budget.queryTimeoutMs == ResourceBudget().queryTimeoutMs: ""
+     else: ";qto=" & $s.budget.queryTimeoutMs) &   ## RFC-0005 S8bu, same rule
     (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
      else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
     (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""

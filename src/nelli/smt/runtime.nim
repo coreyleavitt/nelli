@@ -3779,11 +3779,24 @@ proc tyOf(sv: SymVal): IRType =
 # When no env-resident var is reachable (e.g. `5 + 6`), no prototype
 # exists and the caller defaults to BV[64] signed.
 
+proc bvOfInt(sv: SymVal): Option[SymVal]
+  ## RFC-0005 S8bu fwd decl (`probeProto`); defined below.
+
 proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   if e == nil: return none(SymVal)
   case e.kind
   of iekVar:
-    if env.hasKey(e.vname): some(env[e.vname]) else: none(SymVal)
+    if not env.hasKey(e.vname): return none(SymVal)
+    # RFC-0005 S8bu: an Int that is the conversion of a bit-vector
+    # (`intOfBV`: an `int` stored in an Int-sorted heap and read back)
+    # offers that bit-vector, so a literal beside it lowers as one and
+    # `reconcileInt` meets the bit-vector unconverted: `v * 2` stays
+    # `bvmul(2, k)`. Lowered at the Int, it was `2 * sbv2int(k)`, which
+    # crossed the bridge again where the result met a bit-vector, and Z3
+    # did not decide `sbv2int(r) == 2 * sbv2int(k) and r != 2 * k` (its
+    # step counter stopped advancing, so `queryRLimit` did not end it).
+    let back = bvOfInt(env[e.vname])
+    if back.isSome: back else: some(env[e.vname])
   of iekBinop:
     let l = probeProto(env, e.lhs)
     if l.isSome: l else: probeProto(env, e.rhs)
@@ -11680,6 +11693,35 @@ proc theoryFreeSimple(ctx: Z3Context): bool =
     theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
 
+var queryTimeoutMsCur {.threadvar.}: uint
+  ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
+  ## every solver `querySolver` builds runs under it. `0` (none) outside a
+  ## run.
+var queryTimedOutFlag {.threadvar.}: bool
+  ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
+  ## (`solveBounded`); reset by `resetSymexRunState`.
+
+proc symexQueryTimedOut*(): bool =
+  ## RFC-0005 S8bu. Whether a solve of the last run on this thread was cut
+  ## off by `queryTimeoutMs`. Its verdict is the machine's, not only the
+  ## program's, so `saveSymexVerdictImpl` does not cache it.
+  queryTimedOutFlag
+
+proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
+  ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
+  ## a solve the wall clock cut off (`queryTimeoutMs`).
+  result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
+  if result == zsUnknown and s.reasonUnknown() == "timeout":
+    queryTimedOutFlag = true
+
+proc undefReason(s: Z3Solver; timeoutMs: uint): string =
+  ## RFC-0005 S8bu. Z3's `reason_unknown`, naming `queryTimeoutMs` when
+  ## the clock ended the solve.
+  result = "Z3: " & s.reasonUnknown()
+  if result == "Z3: timeout":
+    result.add " (queryTimeoutMs = " & $timeoutMs & ": Z3 stopped " &
+      "advancing its step count, so no step bound ended the solve)"
+
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
   ## A fresh solver holding `roots`. Z3 bound: deterministic logical-step
@@ -11700,6 +11742,8 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
            else: newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
+  # RFC-0005 S8bu: and the run's wall-clock backstop (`queryTimeoutMs`).
+  if queryTimeoutMsCur > 0'u: solverParams.set("timeout", queryTimeoutMsCur)
   solverParams.set("random_seed", 0'u)
   if not seqTheory:
     solverParams.set("smt.string_solver", "none")
@@ -12147,11 +12191,12 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
   let rootsIn = @query & divRangeFacts(ctx, query) &
                 bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query)
+  let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
-    let r = s.check()
+    let r = solveBounded(s)
     return (r, s, (if r == zsSat: s.model() else: nil),
-            (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
+            (if r == zsUnknown: undefReason(s, qto) else: ""))
   let cap = settings.budget.maxSeqLen
   if cap <= 0: plain()
   let (caps, lastIndex, byteEqs, lens) = seqLenCaps(ctx, rootsIn, cap)
@@ -12182,7 +12227,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # `rl`, half each (`0`, unbounded, stays unbounded).
   let rlHalf = if rl == 0: 0'u else: max(1'u, rl div 2)
   proc z3Why(s: Z3Solver): string =
-    result = "Z3: " & s.reasonUnknown()
+    result = undefReason(s, qto)
     if seqBounded:
       result.add " (the query mentions a string / seq, so it ran under " &
         "seqQueryRLimit = " & $sq & ")"
@@ -12207,11 +12252,11 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = querySolver(ctx, roots, pre, seqTheory = false)
     for f in facts: sPre.add f
-    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
+    if solveBounded(sPre) == zsUnsat: return (zsUnsat, sPre, nil, "")
   # Step 1: the caps asserted, one-shot.
   let s1 = querySolver(ctx, roots, rlHalf)
   for c in caps: s1.add c
-  let r1 = s1.check()
+  let r1 = solveBounded(s1)
   if r1 == zsSat: return (zsSat, s1, s1.model(), "")
   # Step 1b: the query with no sequence theory. Its models include every
   # real one, so an UNSAT here is the query's own (the cap took no part);
@@ -12223,7 +12268,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # (1) it runs only once (3) has failed too (see the doc comment).
   template theoryFreeUnsat(): (bool, Z3Solver) =
     let sTf = querySolver(ctx, roots, rl, seqTheory = false)
-    (sTf.check() == zsUnsat, sTf)
+    (solveBounded(sTf) == zsUnsat, sTf)
   # RFC-0005 S8aq: (1b) and (1c) below no longer gate on `r1 == zsUnsat`
   # specifically. `r1` can only be `zsUnsat` or `zsUnknown` here (`zsSat`
   # already returned), and a `zsUnknown` -- step 1's capped, full-theory
@@ -12279,12 +12324,12 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f
-      if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
+      if solveBounded(sTr) == zsUnsat: return (zsUnsat, sTr, nil, "")
     if not lastIndex:
       let sTc = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTc.add f
       for c in caps: sTc.add c
-      if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
+      if solveBounded(sTc) == zsUnsat: return (zsUnknown, s1, nil, capText)
   if r1 == zsUnsat and not lastIndex:
     # Step 2: is the UNSAT the query's own?
     let s2 = querySolver(ctx, roots, rl)
@@ -12292,7 +12337,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     var all = caps[0]
     for i in 1 ..< caps.len: all = all and caps[i]
     s2.add implies(capLit, all)
-    let r2 = s2.checkWith([capLit])
+    let r2 = solveBounded(s2, [capLit])
     return case r2
       of zsUnsat:
         if s2.getUnsatCore().len == 0: (zsUnsat, s2, nil, "")
@@ -12308,7 +12353,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                              $cap)
   # Step 3: the uncapped one-shot query.
   let s3 = querySolver(ctx, roots, rl - rlHalf)
-  let r3 = s3.check()
+  let r3 = solveBounded(s3)
   case r3
   of zsSat: (zsSat, s3, s3.model(), "")
   of zsUnsat: (zsUnsat, s3, nil, "")
@@ -16078,22 +16123,27 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   let spTrue = newParams(ctx)
   spTrue.set("rlimit", rlimit)
   spTrue.set("random_seed", 0'u)
+  # RFC-0005 S8bu: and the wall-clock backstop (`queryTimeoutMs`).
+  if settings.budget.queryTimeoutMs > 0'u:
+    spTrue.set("timeout", settings.budget.queryTimeoutMs)
   sTrue.setParams(spTrue)
   for c in concreteEq: sTrue.add(c)
   for c in pools: sTrue.add(c)
   for c in facts: sTrue.add(c)
   sTrue.add(cond)
-  let rTrue = sTrue.check()
+  let rTrue = solveBounded(sTrue)
   let sFalse = newSolver(ctx)
   let spFalse = newParams(ctx)
   spFalse.set("rlimit", rlimit)
   spFalse.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    spFalse.set("timeout", settings.budget.queryTimeoutMs)
   sFalse.setParams(spFalse)
   for c in concreteEq: sFalse.add(c)
   for c in pools: sFalse.add(c)
   for c in facts: sFalse.add(c)
   sFalse.add(not cond)
-  let rFalse = sFalse.check()
+  let rFalse = solveBounded(sFalse)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
@@ -16110,11 +16160,13 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   let sp = newParams(ctx)
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    sp.set("timeout", settings.budget.queryTimeoutMs)
   sv.setParams(sp)
   for c in concreteEq: sv.add(c)
   for c in globalRoots(concreteEq & conds): sv.add(c)
   for c in conds: sv.add(c)
-  sv.check() == zsUnsat
+  solveBounded(sv) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -22863,6 +22915,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentWalkCtxPtr = nil
   let ctx = newContext()
   setCurrentContext(ctx)
+  queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
+  queryTimedOutFlag = false                            ## RFC-0005 S8bu
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
@@ -24330,6 +24384,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let sp = newParams(ctx)
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    sp.set("timeout", settings.budget.queryTimeoutMs)
   s.setParams(sp)
   var pinned = initialPC & concreteEq
   for p in resultPaths:
@@ -24337,7 +24393,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
   for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = s.check() == zsSat
+  result.pcSatByConcreteInputs = solveBounded(s) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars

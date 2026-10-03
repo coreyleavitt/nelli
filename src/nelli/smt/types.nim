@@ -3043,12 +3043,34 @@ type
       ## which decides both at once, but other string queries still cost
       ## that much, and unbounded (the default `queryRLimit`) nothing
       ## stopped a within-cap query that needed more.
+      ## RFC-0005 S8bu: `queryRLimit` now has the same 20M default.
       ## `20M` is the bound `concreteBranchRLimit` and the tainted target-hit
       ## solve already use by default (`defaultConcreteBranchRLimit`): a few
       ## minutes of sequence search at most. Deterministic (a step count,
       ## not a clock), so a query it cuts off is the same `beSolverUndef` on
       ## every machine, and cacheable. Ignored when `maxSeqLen == 0` (no
       ## cap, no bound: the caller opted out of both).
+    queryTimeoutMs*: uint = 600_000
+      ## RFC-0005 S8bu. A wall-clock bound, in milliseconds, on every solve
+      ## the walker issues (Z3's `timeout` solver parameter), beside the
+      ## step bounds above. `0` means none. A solve it cuts off is
+      ## `zsUnknown`: `sxUnknown` with `beSolverUndef` naming this field,
+      ## and the run's verdict is not written to the verdict cache (it is
+      ## the machine's, not the program's).
+      ##
+      ## Why a clock beside `rlimit`: Z3 can stop advancing its step
+      ## counter. A mixed Int / bit-vector query (`sbv2int(r) == 2 *
+      ## sbv2int(k) and r != 2 * k`, from an `int` read back out of an
+      ## Int-sorted heap) reached 12.4M units in 10 s and then stayed
+      ## there: at 60 s it had 12.47M, and under a 20M `rlimit` it ran past
+      ## 250 s without returning; Z3's `timeout` stopped it on time. A
+      ## step bound cannot end a search that takes no steps, so without a
+      ## clock no default bounded every query. `600_000` (10 minutes) is
+      ## past where `seqQueryRLimit` / `queryRLimit` end the slowest search
+      ## measured (the sequence solver spends 20M units in about 6-8
+      ## minutes at 40-55k units/s), so on a query whose counter advances
+      ## the step bound, which is deterministic, still answers first; the
+      ## clock is the backstop for one whose counter does not.
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path
@@ -5659,6 +5681,7 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
   if b.maxSeqLen != d.maxSeqLen: result.maxSeqLen = b.maxSeqLen   ## RFC-0005 S8k
   if b.seqQueryRLimit != d.seqQueryRLimit: result.seqQueryRLimit = b.seqQueryRLimit   ## RFC-0005 S8k
+  if b.queryTimeoutMs != d.queryTimeoutMs: result.queryTimeoutMs = b.queryTimeoutMs   ## RFC-0005 S8bu
   if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
   if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
   if b.maxRecursionDepth != d.maxRecursionDepth: result.maxRecursionDepth = b.maxRecursionDepth   ## RFC-0005 S8ax

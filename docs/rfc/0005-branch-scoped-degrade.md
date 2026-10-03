@@ -399,7 +399,7 @@ state = "done"
 [[slice]]
 id = "S8bu"
 title = "S8bs's remainder: non-terminating Int-heap/BV-local UNSAT queries under unlimited queryRLimit, closure/proc-value calls and addr of a field of an address-taken local, openArray/var openArray/mitems, array index on an address-taken path, whole-address-taken by-value seq/string"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -11023,3 +11023,144 @@ fuzzer-msvc 37119258201, symex-mingw 37119258226.
 - **PRECISION: a by-value seq or string whose whole address is taken
   declines** (an element write through the pointer is seen through the
   copy, an assignment of the whole is not).
+
+**As landed (S8bu, walker 225 provisional) — S8bs's remainder.** Base
+e7965d0 (S8bs, walker 222). Suites `tsymex_rfc0005_s8bu_term` (item 1),
+`_calls` (items 2 and 3), `_views`, `_varviews` and `_mitems` (item 4),
+`_paths` (items 5 and 6): every SUT has a live and a dead target and a
+native run confirming which one Nim hits. S8bs's `_iterparams` (`oa`,
+`or`, `mi`, which pinned declines) and `_byvalue` (`sw`) are repinned
+to the decided verdicts.
+
+*Item 1, root cause (verified).* An `int` read from an Int-sorted heap
+(an `int` field reached through a cell, a `seq[int]` element cell) is
+linked to a bit-vector return or local through the signed view
+`sbv2int`, which Z3 5.1 and 4.13.4 both expand to an `ite` over the
+unsigned one. The resulting UNSAT queries (`sbv2int(r) ==
+select(store(h, c, sbv2int(k)), c) and r != k`, or `r ==
+int2bv(sbv2int(k)) and r != k`) are refuted only through the
+injectivity of that `ite`, which neither version found within 3M units;
+under the then-unbounded default `queryRLimit` the walk never ended. A
+second shape, `v * 2` on a value read back out of the heap, lowered as
+`2 * sbv2int(k)` and met the caller's bit-vector across the bridge in a
+query whose step count Z3 stopped advancing (12.4M units at 10 s, 12.47M
+at 60 s), so no step bound could end it either.
+
+*Item 1, fix.* (a) `bvIntInverseFacts` asserts, beside every query, the
+inverse of each signed view the query holds: an `int2bv(t)` whose `t`
+is `sbv2int(x)` equals `x`, and an equality whose sides are `sbv2int(x)`
+and `sbv2int(y)` implies `x == y`, a side counting as a view once each
+`select(store(h, i, v), i)` in it is read as `v` (`peelSelect`). Each
+fact is a theorem of two's complement and of arrays (checked at width 8
+in the suite), so no model changes; each shape now decides in a few
+hundred units. Only terms the query holds are related: asserting
+`int2bv(sbv2int(x)) == x` for every view brought `int2bv` into queries
+that had none and made Z3 bit-blast S8ad's Int quotients
+(`tsymex_rfc0005_s8ad_remainder` was killed on Windows), and relating
+every pair of views took 4.13.4 to 11.8M steps on S8ad (pinned at 3M).
+(b) `probeProto` lowers a literal beside a value read back out of an
+Int heap as that value's bit-vector, so `v * 2` is `bvmul(2, k)`. (c)
+No query is unbounded under the defaults: `queryRLimit` defaults to
+250M (not 20M: Z3 4.13.4 needs 100M-150M units for
+`tsymex_augmented_assign`'s 64-bit `acc * x == 12`), and the new
+`queryTimeoutMs` (default 600 000) bounds every solve by the clock, the
+backstop for a search whose step count stops. Either cut-off is
+`sxUnknown` with `beSolverUndef` naming the budget; a clock cut-off is
+the machine's, not the program's, and is not written to the verdict
+cache. The concrete-branch and tainted target-hit solves keep
+`defaultConcreteBranchRLimit` (20M): `queryRLimit`'s default is not read
+as the caller's budget there.
+
+- *Item 2: closure and proc-value calls.* A closure or proc-value call
+  records where each copied argument came from (`ccVarLocs`, as S8bs's
+  `cVarLocs` for a direct call) and binds a formal whose actual is an
+  address-taken variable, or a path into one, to the variable's cell
+  (`bindVarLocs` in `applyClosureGround`): a `var` actual by name or by
+  path, and a by-value argument Nim passes by address. A formal bound to
+  the whole variable is not written back over it.
+- *Item 3: `addr b.x` of an address-taken `b`* is a sub-cell of `b`'s
+  cell at `.x` (a local named by the path with two cell entries kept
+  equal by `syncAddrCells`' second pass), for a direct and a proc-value
+  call, nested (`addr o.inner.x`) and whole (`addr x`) alike.
+- *Item 4: `openArray`.* An `openArray[T]` is the seq it views:
+  `classifyType` maps it to the seq sort; an array's elements are a seq
+  literal of its elements; `toOpenArray(x, first, last)` is a slice
+  flagged `ssView`, whose symbolic bounds take the signed Int bridge
+  (a plain slice keeps ADR-0027's decline). Nim's check is modelled as
+  it runs natively (probed): `IndexDefect` iff the view is not empty by
+  `last == first - 1` and a bound is out of range; a negative length
+  (`last < first - 1`, which Nim does not check) declines on its paths.
+  A `var openArray` of a whole seq is the seq passed by address; one of
+  an array or a slice is a temporary written back over what it views in
+  a `finally` (`iekSeqSplice`, a new IR kind lowered as an array lambda),
+  for a direct call, a closure call and an inlined iterator. `mitems` /
+  `mpairs` over a seq or an array substitute the element (`c[k]`, typed
+  from the instantiated iterator's `yield`) for the loop variable, as
+  Nim's inline expansion does; a seq resized in the body declines.
+- *Item 5: an array index on a path into an address-taken local*
+  (`b.v[i]`, `b.v[i].x`) is followed to the cell, by a constant index or
+  a symbolic one (an `ite` over the elements, as a read is): `varLocOf`
+  accepts array steps (less the array's low bound), `locGet` / `locSet`
+  handle array values.
+- *Item 6: a by-value seq whose whole address is taken* shares the
+  cell's memory (a `view` cell entry): it follows the cell while the
+  cell's elements are written in place (same length term, each data
+  array a store chain over the old one: `viewFollows`), and the path is
+  declined once the cell is assigned whole or resized, where Nim's copy
+  points at memory it may have freed. `p[][i] = v` through a pointer to a
+  seq, an "unsupported nnkAsgn shape" before, is modelled. A string
+  declines (a write to a character is not modelled).
+
+*Soundness bugs found.* (1) A by-value `Big` argument through a proc
+value was passed as a copy: the callee's write through the alias was
+lost (swapped verdicts, `pg` / `pg_dead`). (2) A string passed to an
+`openArray[char]` formal was an opaque value: `cnt(st) == 2`, reachable
+natively, was a false `sxUnsat`; it now declines. Both are pinned.
+
+*Suites* (`ok/failed`; c on Z3 5.1 and 4.13.4, cpp on 5.1): the six
+S8bu suites 10/0, 8/0, 5/0, 5/0, 5/0, 8/0 on all three; the four S8bs
+suites, `s8be`, `s8ax`, `s8bh`, `s8bc`, `s8ac`, `s8an`, `s8as`, `s8ba`,
+`s8bd`, `s8bf_alias`, `s8i_models`, `s7_closure`, `s8ab_letaudit`,
+`s8x_vm_alias`, `h_stepC_heapidentity`, H1, g4, g5 and CR2, with every
+suite naming `iterator`, `openArray`, `mitems` or `addr` and the
+corpus suites Windows caught (below): 62 suites, 1186/0 on c 5.1 and
+c 4.13.4, 1185/0 on cpp 5.1, where `tsymex_configdefaults` segfaults in
+its round-2 `maxCallDepth` crash pin exactly as at the base (cpp only).
+The skip list is empty. Compile CPU on a loaded host (load ~16 on 8
+cores): the S8bu suites 67-108 s user, against `s8i_models`' 111-124 s
+in the same run (54 s unloaded), so each is under the 60 s budget by
+that ratio.
+
+*Windows.* symex-mingw at 3c6a564 failed six corpus suites the slice
+had not run: `s8ad_remainder` killed at 240 s and `augmented_assign`
+`beSolverUndef` on 4.13.4 (item 1's facts and budget, above),
+`configdefaults` (the new budget field), `r6_r6_emit_roundtrip`
+(`iekSeqSplice`), `r6_n27_placeholder_read_audit` and `s8m_exits` (two
+unguarded reads and a raw `select`). Fixed in d875c95 and 8815a81; at
+8815a81 all three legs green: fuzzer-mingw 37147844319, fuzzer-msvc
+37147844268, symex-mingw 37147844306.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: `addr s[i]` of a seq with element cells passed to a
+  call declines** ("in the element's own heap"): the call's cell would
+  share the element's heap with the element cell.
+- **PRECISION: a closure capturing an address-taken variable declines**
+  (S8ax's capture cells and the address cell are two copies).
+- **PRECISION: a heap lvalue `pb[].x` reached by a closure body
+  declines** (S8bh's `touchMeetsOuter`; a direct call goes by reference
+  through `byRefSub`).
+- **PRECISION: a seq argument to a proc value declines**
+  (`seUnsupportedCompoundSortLeaf`), a `var openArray` through a proc
+  value included.
+- **PRECISION: a string viewed as `openArray[char]`, and a by-value
+  string of an address-taken string, decline** (a write to a character
+  is not modelled).
+- **PRECISION: `toOpenArray` of negative length declines on its paths;
+  a `mitems` body that resizes the seq declines.**
+- **PRECISION: `gps[].add` through a pointer to a seq is
+  `heUnsafeCast`** (present at the base).
+- **SOUNDNESS (latent, not reached by any pinned SUT): an assignment of
+  the whole over a constant-array base** whose new data array happens to
+  be a store chain over the old one would be read as an in-place write
+  by `viewFollows`; under ORC that copy is use-after-free, so no defined
+  program observes it, but the check is structural, not semantic.

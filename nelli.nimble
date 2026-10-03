@@ -1105,6 +1105,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_utf_any_c",
             "tsymex_rfc0005_s8bt_utf_any_d",
             "tsymex_rfc0005_s8bt_utf_any_e",
+            "tsymex_rfc0005_s8bt_caps",
+            "tsymex_rfc0005_s8bt_caps_b",
+            "tsymex_rfc0005_s8bt_caps_c",
 ||||||| fa21308
             "tsymex_rfc0005_s8bt_replace_lemmas",
             "tsymex_rfc0005_s8bt_replace_facts",

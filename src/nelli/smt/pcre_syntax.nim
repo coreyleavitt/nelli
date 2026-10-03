@@ -1452,10 +1452,11 @@ type Edge* = object
 proc hasAnchor(x: Rx): bool =
   ## (RFC-0005 S8bb: `(*ACCEPT)` too -- it ends the match away from the
   ## pattern's end, so only the priority automaton reads it. RFC-0005
-  ## S8bj: and a verb or a mark, and a UTF character, for the same reason.)
+  ## S8bj: and a verb or a mark, for the same reason. RFC-0005 S8bt: a UTF
+  ## character is plain -- `regex_parser.lazyUtf` decides the route.)
   case x.kind
-  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb, rxChars: true
-  of rxSet: false
+  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb: true
+  of rxSet, rxChars: false
   of rxCat, rxAlt:
     for k in x.kids:
       if hasAnchor(k): return true

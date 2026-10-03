@@ -104,10 +104,36 @@ proc atomRe(cs: set[char]; marked: bool): Z3Regex[Z3String] =
   if marked: concat(byteSetRe(cs), star(mkRegex(findMarker())))
   else: byteSetRe(cs)
 
+proc cpsRe(cps: CpSet; marked: bool): Z3Regex[Z3String] =
+  ## RFC-0005 S8bt. One character of `cps` as UTF-8 bytes (`utf8Leads`'
+  ## trie with shared tails), each byte an `atomRe`.
+  var memo = initTable[(int, Utf8Tail), Z3Regex[Z3String]]()
+  proc alts(xs: seq[Z3Regex[Z3String]]): Z3Regex[Z3String] =
+    if xs.len == 0: mkRegexEmpty[Z3String]()
+    elif xs.len == 1: xs[0]
+    else: union(xs)
+  proc node(rem: int; rs: Utf8Tail): Z3Regex[Z3String] =
+    let key = (rem, rs)
+    if key in memo: return memo[key]
+    var xs: seq[Z3Regex[Z3String]]
+    for (bs, sub) in utf8Conts(rem, rs):
+      xs.add(if rem == 1: atomRe(bs, marked)
+             else: concat(atomRe(bs, marked), node(rem - 1, sub)))
+    result = alts(xs)
+    memo[key] = result
+  let (single, leads) = utf8Leads(cps)
+  var xs: seq[Z3Regex[Z3String]]
+  if single.card > 0: xs.add atomRe(single, marked)
+  for (ls, rem, rs) in leads:
+    xs.add concat(atomRe(ls, marked), node(rem, rs))
+  alts(xs)
+
 proc rxToZ3*(x: Rx; marked = false): Z3Regex[Z3String] =
-  ## The language of an anchor-free tree.
+  ## The language of an anchor-free tree. RFC-0005 S8bt: a UTF character
+  ## (`rxChars`) is its UTF-8 encodings.
   case x.kind
   of rxSet: atomRe(x.bytes, marked)
+  of rxChars: cpsRe(x.cps, marked)
   of rxCat:
     if x.kids.len == 0: return epsRe()
     var parts: seq[Z3Regex[Z3String]]
@@ -126,11 +152,10 @@ proc rxToZ3*(x: Rx; marked = false): Z3Regex[Z3String] =
       else: concat(power(sub, x.lo), star(sub))
     elif x.lo == x.hi: power(sub, x.lo)
     else: loop(sub, x.lo, x.hi)
-  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb, rxChars:
-    # RFC-0005 S8bj: a verb or a UTF character routes the pattern to the
-    # priority automaton (`splitEdges`' `hasAnchor`).
-    raiseAssert "rxToZ3: anchors, (*ACCEPT), verbs and UTF characters " &
-                "are split off first"
+  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb:
+    # RFC-0005 S8bj: a verb routes the pattern to the priority automaton
+    # (`splitEdges`' `hasAnchor`).
+    raiseAssert "rxToZ3: anchors, (*ACCEPT) and verbs are split off first"
 
 proc tailRe(eol: RxKind; marked = false): Z3Regex[Z3String] =
   ## What may follow the match up to the subject's end: anything (no
@@ -149,6 +174,9 @@ proc parseNimRegexToZ3Regex*(pattern: string;
   let pr = parsePcre(pattern, extended)
   case pr.status
   of psOk:
+    if pr.utf:
+      # RFC-0005 S8bt: an invalid UTF-8 subject is an error, not a miss.
+      return err("UTF mode (seUnsupportedRegex: no full-string language)")
     if hasCrlfDot(pr.root):
       return err("a `(*CRLF)` dot, which depends on the byte after it " &
                  "(seUnsupportedRegex: no full-string language)")
@@ -342,6 +370,39 @@ proc selToZ3*(r: RNode): Z3Regex[Z3String] =
 const limitDecline* = "a (*LIMIT_MATCH=) / (*LIMIT_RECURSION=) start " &
   "option between 0 and PCRE's default, whose effect (a count of " &
   "pcre_exec.c's match() calls) is not computed"
+
+proc utfPlain(x: Rx): bool =
+  ## RFC-0005 S8bt. Every atom of `x` is whole UTF-8 characters: no byte
+  ## set past ASCII (`\C`), no `(*CRLF)` dot.
+  case x.kind
+  of rxSet: not x.crlfDot and x.bytes <= {'\x00'..'\x7F'}
+  of rxChars: not x.crlfDot
+  of rxCat, rxAlt:
+    for k in x.kids:
+      if not utfPlain(k): return false
+    true
+  of rxRep: utfPlain(x.sub)
+  else: true
+
+proc lazyUtf(pr: PcreParse; entry: string; edges: seq[Edge]): bool =
+  ## RFC-0005 S8bt (item 6). A UTF-mode call S8ay's edge-split reading
+  ## lowers (no limit option, LF newlines, anchors at the edges only --
+  ## checked by the caller): a plain pattern's languages as Z3 regexes over
+  ## the UTF-8 bytes, which Z3 explores lazily, in place of the priority
+  ## automaton's determinized regex (`tprobe_s8bt_caps`: past the walker's
+  ## budget at 50 states). Sound on a valid subject from a character
+  ## boundary (the call's errors are added after): every atom reads whole
+  ## characters, so no match starts inside one and the leftmost byte
+  ## offset is the leftmost character; PCRE's choice where it matters
+  ## (`selectionForm` `skNone`) stays the automaton's.
+  if not pr.utf or not utfPlain(pr.root): return false
+  if (pr.limitMatch >= 0 and pr.limitMatch < pcreDefaultLimit) or
+     (pr.limitRecursion >= 0 and pr.limitRecursion < pcreDefaultLimit):
+    return false
+  if entry in ["matchLen", "endsWith", "findBoundsLast"] and
+     selectionForm(edges).kind == skNone:
+    return false
+  true
 
 proc s8bjRoute(pr: PcreParse): bool =
   ## RFC-0005 S8bj. A pattern whose every entry is the priority automaton's
@@ -896,7 +957,8 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
   let bad = (start < mkInt(0)) or (start > lenS)
   let u = substr(s, start, lenS - start)
   let st0 = start == mkInt(0)
-  if not fine or pr.nl != nlLF or s8bjRoute(pr):
+  let lazyU = fine and pr.nl == nlLF and lazyUtf(pr, sp.entry, edges)
+  if not fine or pr.nl != nlLF or (s8bjRoute(pr) and not lazyU):
     # RFC-0005 S8bb: an anchor away from a top-level edge, `(*ACCEPT)`, a
     # verb, or a newline convention other than LF (whose `$` and bumpalong
     # the edge-split reading does not know); RFC-0005 S8bj: UTF mode or a
@@ -1001,6 +1063,21 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
       res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
   else:
     raiseAssert "lowerRegexEntry: entry `" & sp.entry & "`"
+  if lazyU:
+    # RFC-0005 S8bt: `pcre_exec`'s UTF errors, as `callError` reads them
+    # (a bad offset first: its code is already in place).
+    let invalid = (not bad) and not matches(s, utf8ValidRe())
+    let inside = (not bad) and (start > mkInt(0)) and (start < lenS) and
+                 inSet(toCode(at(s, start)), {'\x80'..'\xBF'})
+    let err = invalid or inside
+    case sp.entry
+    of "find", "findBoundsFirst", "matchLen":
+      res.i = ite(invalid, mkInt(pcreErrBadUtf8),
+                  ite(inside, mkInt(pcreErrBadUtf8Offset), res.i))
+    of "findBoundsFirstCap": res.i = ite(err, mkInt(-1), res.i)
+    of "findBoundsLast": res.i = ite(err, mkInt(0), res.i)
+    of "match": res.b = res.b or err
+    else: res.b = res.b and not err
   res
 
 # ---- RFC-0005 S8bb (item 6): `replace` by the priority run ----------------------

@@ -456,52 +456,24 @@ proc add(b: var Build; s: NState): int =
   b.n.states.add s
   b.n.states.high
 
-proc compChars(b: var Build; x: Rx; next: int): int =
-  ## RFC-0005 S8bj. One character of `x.cps` in UTF mode, as UTF-8 bytes.
-  ## RFC-0005 S8bt: as a byte trie with shared tails -- per lead byte, the
-  ## continuation bytes' value ranges, one node per distinct (length,
-  ## ranges) -- so a large property set stays small.
-  var memo = initTable[(int, seq[(int32, int32)]), int]()
-  proc node(b: var Build; rem: int; rs: seq[(int32, int32)]): int =
-    # The continuation bytes (`rem` of them) whose value lies in `rs`.
-    if rem == 0: return next
-    let key = (rem, rs)
-    if key in memo: return memo[key]
-    let span = 1'i32 shl (6 * (rem - 1))
-    # Per first byte (0..63), the remaining value's ranges.
-    var groups: seq[(seq[(int32, int32)], set[char])]
-    for k in 0'i32 .. 63'i32:
-      let lo0 = k * span
-      let hi0 = lo0 + span - 1
-      var sub: seq[(int32, int32)]
-      for (lo, hi) in rs:
-        if hi < lo0 or lo > hi0: continue
-        sub.add (max(lo, lo0) - lo0, min(hi, hi0) - lo0)
-      if sub.len == 0: continue
-      var found = false
-      for g in groups.mitems:
-        if g[0] == sub:
-          g[1].incl char(0x80 + k)
-          found = true
-          break
-      if not found: groups.add (sub, {char(0x80 + k)})
-    var e = -1
-    for gi in countdown(groups.high, 0):
-      let t = b.add NState(kind: nkByte, bytes: groups[gi][1],
-                           out1: b.node(rem - 1, groups[gi][0]))
-      e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
-    memo[key] = e
-    e
+type
+  Utf8Tail* = seq[(int32, int32)]
+    ## RFC-0005 S8bt: the value ranges of a character's continuation bytes
+    ## (their 6-bit payloads, read as one number)
+
+proc utf8Leads*(cps: CpSet): (set[char], seq[(set[char], int, Utf8Tail)]) =
+  ## RFC-0005 S8bt. The UTF-8 encodings of `cps` as a byte trie with shared
+  ## tails: the single bytes, then per group of lead bytes with the same
+  ## tail, the continuation count and its value ranges (`utf8Conts`).
   var single: set[char]
-  # (lead byte, its continuation length, the remaining value's ranges)
-  var leads: seq[(int, int, seq[(int32, int32)])]
+  var leads: seq[(int, int, Utf8Tail)]
   proc addLead(lead, rem: int; lo, hi: int32) =
     for l in leads.mitems:
       if l[0] == lead:
         l[2].add (lo, hi)
         return
     leads.add (lead, rem, @[(lo, hi)])
-  for (lo0, hi0) in x.cps:
+  for (lo0, hi0) in cps:
     for (lo, hi) in [(lo0, min(hi0, 0xD7FF'i32)), (max(lo0, 0xE000'i32), hi0)]:
       if lo > hi: continue
       var c = lo
@@ -521,21 +493,62 @@ proc compChars(b: var Build; x: Rx; next: int): int =
                       else: 0xF0) or int(c shr shift)
           addLead(lead, rem, c - blk, e - blk)
           c = e + 1
-  # Lead bytes with the same tail share one state.
-  var byTail: seq[(int, seq[(int32, int32)], set[char])]
+  var byTail: seq[(set[char], int, Utf8Tail)]
   for (lead, rem, rs) in leads:
     var found = false
     for t in byTail.mitems:
-      if t[0] == rem and t[1] == rs:
-        t[2].incl char(lead)
+      if t[1] == rem and t[2] == rs:
+        t[0].incl char(lead)
         found = true
         break
-    if not found: byTail.add (rem, rs, {char(lead)})
-  var e = -1
-  for ti in countdown(byTail.high, 0):
-    let (rem, rs, ls) = byTail[ti]
-    let t = b.add NState(kind: nkByte, bytes: ls, out1: b.node(rem, rs))
-    e = (if e < 0: t else: b.add NState(kind: nkSplit, out1: t, out2: e))
+    if not found: byTail.add ({char(lead)}, rem, rs)
+  (single, byTail)
+
+proc utf8Conts*(rem: int; rs: Utf8Tail): seq[(set[char], Utf8Tail)] =
+  ## RFC-0005 S8bt. `rem` (>= 1) continuation bytes whose value is in `rs`:
+  ## per group of first bytes with the same rest, the rest's ranges.
+  let span = 1'i32 shl (6 * (rem - 1))
+  for k in 0'i32 .. 63'i32:
+    let lo0 = k * span
+    let hi0 = lo0 + span - 1
+    var sub: Utf8Tail
+    for (lo, hi) in rs:
+      if hi < lo0 or lo > hi0: continue
+      sub.add (max(lo, lo0) - lo0, min(hi, hi0) - lo0)
+    if sub.len == 0: continue
+    var found = false
+    for g in result.mitems:
+      if g[1] == sub:
+        g[0].incl char(0x80 + k)
+        found = true
+        break
+    if not found: result.add ({char(0x80 + k)}, sub)
+
+proc compChars(b: var Build; x: Rx; next: int): int =
+  ## RFC-0005 S8bj. One character of `x.cps` in UTF mode, as UTF-8 bytes.
+  ## RFC-0005 S8bt: as a byte trie with shared tails (`utf8Leads`), one
+  ## state per distinct (length, ranges), so a large property set stays
+  ## small.
+  var memo = initTable[(int, Utf8Tail), int]()
+  proc alts(b: var Build; xs: seq[int]): int =
+    result = -1
+    for t in countdown(xs.high, 0):
+      result = (if result < 0: xs[t]
+                else: b.add NState(kind: nkSplit, out1: xs[t], out2: result))
+  proc node(b: var Build; rem: int; rs: Utf8Tail): int =
+    if rem == 0: return next
+    let key = (rem, rs)
+    if key in memo: return memo[key]
+    var xs: seq[int]
+    for (bs, sub) in utf8Conts(rem, rs):
+      xs.add b.add NState(kind: nkByte, bytes: bs, out1: b.node(rem - 1, sub))
+    result = b.alts(xs)
+    memo[key] = result
+  let (single, leads) = utf8Leads(x.cps)
+  var xs: seq[int]
+  for (ls, rem, rs) in leads:
+    xs.add b.add NState(kind: nkByte, bytes: ls, out1: b.node(rem, rs))
+  var e = b.alts(xs)
   if single.card > 0 or e < 0:
     let t = b.add NState(kind: nkByte, bytes: single, crlfDot: x.crlfDot,
                          out1: next)

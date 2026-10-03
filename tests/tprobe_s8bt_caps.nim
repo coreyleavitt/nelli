@@ -96,7 +96,10 @@ for (k, fam) in [(2, "(*UTF)(?:a|b)*a(?:a|b){K}c"), (3, "(*UTF)(?:a|b)*a(?:a|b){
     line.add " | skFirst " & $f.ok & " " & $f.states & "/" & $f.minStates &
              " " & formatFloat(tf, ffDecimal, 2) & " s"
     if not f.ok: line.add " (" & f.why & ")"
-    if m.ok and f.ok:
+    else: line.add " regex " & $f.re.size & " nodes"
+    # Past the default regex cap Z3 measured running past its `rlimit`
+    # (k = 4: killed after 2400 s under a 60M limit): not queried.
+    if m.ok and f.ok and f.re.size <= 40_000:
       line.add " | find " & entryQuery(p, "find", min(k, 6) + 4, 1)
     echo line
     flushFile(stdout)

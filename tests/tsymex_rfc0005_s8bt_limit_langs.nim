@@ -190,10 +190,14 @@ proc matchLenNeverTarget(s: string) =
     symexTarget("bt_limit_matchlen_never")
 
 proc replaceTarget(s: string) =
-  # A limit error ends `replace` as a miss does: the subject comes back.
-  if s.len == 2 and s.replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == s and
-     s.contains(re"c"):
+  if s.len == 1 and s.replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "-":
     symexTarget("bt_limit_replace")
+
+proc replaceErrTarget(s: string) =
+  # A limit error ends `replace` as a miss does: the subject comes back
+  # ("ac" is "-" without the limit).
+  if s == "ac" and s.replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") != "ac":
+    symexTarget("bt_limit_replace_err")
 
 suite "S8bt: a limit between, through the walker":
 
@@ -210,9 +214,19 @@ suite "S8bt: a limit between, through the walker":
 
   # An unanchored call on the JIT (the Windows legs) declines: its
   # accounting is not modelled.
-  test "unanchored calls on the interpreter: sxSat":
+  test "unanchored calls: sxSat on the interpreter, never sxUnsat on the JIT":
     if pcreSearchEngine() == peInterp:
       verdict(findErrTarget, "bt_limit_find_err")
       verdict(findOkTarget, "bt_limit_find_ok")
       verdict(findNeverTarget, "bt_limit_find_never", sxUnsat)
       verdict(replaceTarget, "bt_limit_replace")
+      verdict(replaceErrTarget, "bt_limit_replace_err", sxUnsat)
+    else:
+      # Declined: never a refutation (a replayed witness may still be
+      # found -- the JIT's `replace` of "ac" is "-").
+      template notRefuted(sut: untyped; label: string) =
+        let r = symexFind(sut, tLabel(label))
+        echo "  ", label, " (JIT): ", r.status
+        check r.status != sxUnsat
+      notRefuted(findErrTarget, "bt_limit_find_err")
+      notRefuted(replaceErrTarget, "bt_limit_replace_err")

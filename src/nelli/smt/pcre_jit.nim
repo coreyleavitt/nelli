@@ -28,14 +28,6 @@
 import ./pcre_syntax
 import ./pcre_code
 
-type
-  PcreEngine* = enum
-    ## RFC-0005 S8bt. The engine an unanchored call runs on: the
-    ## interpreter (pcre_exec.c, the model's reference), or PCRE 8.37's
-    ## JIT. Anchored calls always run on the interpreter (PCRE_ANCHORED is
-    ## not a JIT option).
-    peInterp, peJit837
-
 const
   maxNChars = 16
   maxNBytes = 8

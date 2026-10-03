@@ -146,3 +146,41 @@ const
   shortLen* = 3
   longAlpha* = "ab\r\n"
   longLen* = 5
+
+const
+  jitUtfConventions* = ["(*UTF)", "(*UTF)(*CRLF)", "(*UTF)(*ANY)"]
+  jitUtfHeads* = ["éa", "aé", "é.", ".é", "[éa]b", "a\\x{20ac}",
+    "\\x{20ac}a", "ab", "\\sé", "aéa", "(?i)éb", "[^a]é"]
+  jitUtfTails* = ["", "(*SKIP)", "(*COMMIT)", "(*SKIP:A)b|."]
+  utfChars* = ["a", "b", "é", "€", "\r", "\n"]
+  utfLen* = 3
+  utfInvalid* = ["\xC3", "a\xA9", "\xA9a", "é\xC3", "\xE2\x82a"]
+
+proc jitUtfCorpus*(): seq[string] =
+  ## UTF mode: the JIT's scan steps a byte at a time, and its bumpalong
+  ## adds the lead byte's length.
+  for cv in jitUtfConventions:
+    for h in jitUtfHeads:
+      for t in jitUtfTails:
+        result.add cv & h & t
+
+proc utfSubjects*(): seq[string] =
+  result = @[""]
+  var frontier = @[""]
+  for _ in 1 .. utfLen:
+    var next: seq[string]
+    for w in frontier:
+      for c in utfChars: next.add w & c
+    result.add next
+    frontier = next
+  for s in utfInvalid: result.add s
+
+const jitCapHeads* = ["(a)ba", "(a|ab)(b)?", "(\\s)(a)", "(?:(a)|b)a",
+  "(a)(*SKIP)b|(.)", "(a)(*MARK:A)(*SKIP:A)b|(.)", "(a)(*SKIP:A)b|(.)",
+  "(\\s)(*SKIP)(a)|(b)"]
+
+proc jitCapCorpus*(): seq[string] =
+  ## Groups: `findBounds`' captures of the attempt the search finds.
+  for cv in jitConventions:
+    for h in jitCapHeads:
+      result.add cv & h

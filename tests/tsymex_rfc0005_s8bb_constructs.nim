@@ -20,6 +20,7 @@ import z3
 import nelli/smt/regex_parser
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
+import nelli/smt/pcre_engine
 import pcre
 
 proc jitEngine(): bool =
@@ -259,9 +260,9 @@ suite "S8bb (5): the captures of PCRE's chosen match, against std/re":
 # `std/re` over {a, b, CR, LF, FF}. With a CRLF convention and no explicit
 # CR or LF, whether PCRE tries a match at a CRLF's LF is its start-of-match
 # optimiser's call wherever a match can start at an LF: RFC-0005 S8bj
-# models the interpreter's scan and skip (S8bb declined), and the walker
-# declines those searches only when std/re's libpcre runs them on its JIT
-# (`pcre_select.jitDeclined`).
+# models the interpreter's scan and skip (S8bb declined), and RFC-0005 S8bt
+# the JIT's (`buildNfa(.., pcreSearchEngine())`: the searches are the
+# engine's that std/re's libpcre runs them on).
 
 const nlPatterns = ["(*CR)a$", "(*CR).", "(*CR).+", "(*CR)a\\Z", "(*CR)\\N",
   "(*CR)[^a]", "(*CR)(?s).", "(*CR).*$", "(*CRLF)a$", "(*CRLF).", "(*CRLF)..",
@@ -284,7 +285,7 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
 
   test "each is read, and every model is std/re's":
     var bad: seq[string]
-    var runs, langs, searches, capsChecked, seen = 0
+    var runs, langs, searches, capsChecked = 0
     for p in @nlPatterns & @acceptPatterns:
       let pr = parsePcre(p)
       checkpoint escape(p) & " " & $pr.status & " " & pr.reason
@@ -314,20 +315,13 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
         let none = selectionLang(n, p, lkNone, atStart)
         let mark = selectionLang(n, p, lkMark, atStart)
         let endsL = selectionLang(n, p, lkEnds, atStart, nonEmpty = true)
-        let search = not (jitEngine() and crlfSkipObservable(n))
-        # RFC-0005 S8bj: on a JIT engine the walker declines these searches
-        # (checked below), so their languages are not built there.
-        let noOcc = (if search: searchLang(n, p, skNoOcc, atStart)
-                     else: SelLang(ok: true))
-        let first = (if search: searchLang(n, p, skFirst, atStart)
-                     else: SelLang(ok: true))
-        if not search and atStart: inc seen
+        # RFC-0005 S8bt: the search is the engine's std/re runs it on.
+        let ns = buildNfa(pr, pcreSearchEngine())
+        let search = true
+        let noOcc = searchLang(ns, p, skNoOcc, atStart)
+        let first = searchLang(ns, p, skFirst, atStart)
         check none.ok and mark.ok and endsL.ok
-        # RFC-0005 S8bj: the languages are the interpreter's; on a JIT
-        # engine the walker declines the search (`jitDeclined`), so they are
-        # checked against std/re only off the JIT.
         check noOcc.ok and first.ok
-        if not search: check jitDeclined(n).len > 0
         if not (none.ok and mark.ok and endsL.ok): continue
         for u in words(nlAlpha, 3):
           # Away from the subject start: `u` follows a `b`.
@@ -373,8 +367,7 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
                    bad.len < 10:
                   bad.add "cap " & where & " " & $a & ".." & $b
     echo "  conventions and (*ACCEPT): ", runs, " runs, ", capsChecked,
-         " capture runs, ", langs, " languages, ", searches, " searches (",
-         seen, " patterns' searches declined), ", lap()
+         " capture runs, ", langs, " languages, ", searches, " searches, ", lap()
     checkpoint $bad
     check bad.len == 0
     check runs > 100_000
@@ -395,7 +388,9 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
       checkpoint escape(p)
       check crlfSkipObservable(n)
       check searchLang(n, p, skFirst, false).ok
-      check jitDeclined(n).len > 0
+      # RFC-0005 S8bt: and on the JIT's automaton.
+      check searchLang(buildNfa(parsePcre(p), peJit837), p, skFirst,
+                       false).ok
     check pcreExec(buildNfa(parsePcre(r"(*CRLF)[\x09-\x0b]\z")), "\r\n", 0,
                    false)[1] == 1
     check pcreExec(buildNfa(parsePcre(r"(*CRLF)(?:[\x09-\x0b]\x00)?.")),
@@ -411,11 +406,10 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
       inc ctr
       tag & "#" & $ctr
     var bad: seq[string]
-    var checked, declined, declinedSeen = 0
+    var checked, declined = 0
     for p in ["(*CR)a$", "(*CRLF).", "(*ANYCRLF)a\\r?$", "(*ANY).*\\Z",
               "a(?:(*ACCEPT)|b)", "(*CRLF)\\n|.", "(*CRLF)\\Q\r\\E?."]:
       let rx = re(p)
-      let seen = jitDeclines(buildNfa(parsePcre(p))).len > 0
       for subj in words("a\r\n", 2):
         let ctx = newContext()
         setCurrentContext(ctx)
@@ -433,11 +427,6 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
           let sp = RegexSpec(entry: name, flag: "re", pattern: p)
           let r = lowerRegexEntry(sp, parseSpec(sp), mkString(subj),
                                   mkInt(st), fresh)
-          if seen and name in ["find", "findBoundsLast"]:
-            # The occurrence search declines on a JIT engine (`jitDeclines`).
-            if r.outcome == roUnmodelled: inc declinedSeen
-            else: inc declined
-            continue
           if r.outcome != roValue:
             inc declined
             continue
@@ -454,12 +443,8 @@ suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
           if $sol.check() != "zsUnsat" and bad.len < 10:
             bad.add escape(p) & " " & escape(subj) & " " & name & "(" & $st &
                     ") real " & $real
-    echo "  convention Z3 formulas: ", checked, " cases (", declinedSeen,
-         " searches declined), ", lap()
+    echo "  convention Z3 formulas: ", checked, " cases, ", lap()
     checkpoint $bad
     check bad.len == 0
     check declined == 0
-    # RFC-0005 S8bj: the searches decline only on a JIT engine.
-    if jitEngine(): check declinedSeen > 0
-    else: check declinedSeen == 0
     check checked > 500

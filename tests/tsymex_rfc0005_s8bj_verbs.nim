@@ -9,13 +9,14 @@
 ## `matchLen` and `findBounds`' `last` (and once per subject `replace`)
 ## must equal the reference's.
 ##
-## The engine matters (see `pcre_engine`): under a JIT-enabled libpcre the
-## unanchored entries of the patterns the walker declines there
-## (`jitDeclined`) are not compared; the anchored ones (never the JIT's,
-## std/re passes PCRE_ANCHORED) are.
+## The engine matters (see `pcre_engine`): RFC-0005 S8bt: the unanchored
+## entries are read on the engine std/re runs them on
+## (`pcre_engine.pcreSearchEngine`: 8.37's JIT on the Windows legs); the
+## anchored ones (never the JIT's, std/re passes PCRE_ANCHORED) on the
+## interpreter.
 import std/[unittest, strutils, re, times]
 import pcre
-import nelli/smt/[pcre_syntax, pcre_select]
+import nelli/smt/[pcre_syntax, pcre_select, pcre_engine]
 
 proc words(alpha: string; maxLen: int): seq[string] =
   result = @[""]
@@ -48,12 +49,13 @@ proc check1(p: string; subjects: seq[string]; jit: bool; t: var Tally) =
     return
   let rx = re(p)
   inc t.patterns
-  let unanch = not (jit and jitDeclined(n).len > 0)
+  let nu = buildNfa(pr, pcreSearchEngine())
+  let unanch = nu.ok
   if not unanch: inc t.skippedJit
   for s in subjects:
     for st in 0 .. s.len:
       inc t.calls
-      let (rc, a, b) = pcreExec(n, s, st, false)
+      let (rc, a, b) = pcreExec(nu, s, st, false)
       let (rcA, _, bA) = pcreExec(n, s, st, true)
       let wantLen = matchLen(s, rx, st)
       let gotLen = (if rcA == 1: bA - st else: rcA)
@@ -73,7 +75,7 @@ proc check1(p: string; subjects: seq[string]; jit: bool; t: var Tally) =
                   ").last = " & $gotLast & ", re: " & $wantLast
     if unanch:
       let want = replace(s, rx, "-")
-      let got = pcreReplace(n, s, "-")
+      let got = pcreReplace(nu, s, "-")
       if got != want:
         t.bad.add escape(p) & " replace(" & escape(s) & ") = " & escape(got) &
                   ", re: " & escape(want)
@@ -142,6 +144,7 @@ suite "S8bj: the concrete reference against std/re":
          " declined, ", t.bad.len, " differ, ", lap()
     checkpoint t.bad[0 ..< min(t.bad.len, 30)].join("\n")
     check t.bad.len == 0
+    check t.skippedJit == 0
     check t.patterns >= 600
 
   test "THEN's catcher, SKIP's landings, COMMIT, LIMIT=0, (?m)":
@@ -154,4 +157,5 @@ suite "S8bj: the concrete reference against std/re":
          " calls, ", t.skippedJit, " unanchored-skipped, ", t.bad.len, " differ, ", lap()
     checkpoint t.bad[0 ..< min(t.bad.len, 30)].join("\n")
     check t.bad.len == 0
+    check t.skippedJit == 0
     check t.patterns >= 250

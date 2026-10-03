@@ -343,11 +343,6 @@ const limitDecline* = "a (*LIMIT_MATCH=) / (*LIMIT_RECURSION=) start " &
   "option between 0 and PCRE's default, whose effect (a count of " &
   "pcre_exec.c's match() calls) is not computed"
 
-proc jitDeclines*(n: Nfa): string =
-  ## RFC-0005 S8bj. Why an unanchored call is declined on the engine std/re
-  ## runs it on (`pcre_engine`), "" when it is modelled.
-  if pcreRunsJit(): jitDeclined(n) else: ""
-
 proc s8bjRoute(pr: PcreParse): bool =
   ## RFC-0005 S8bj. A pattern whose every entry is the priority automaton's
   ## (with `pcre_exec`'s errors): UTF mode or a limit start option.
@@ -393,8 +388,13 @@ type PrioLangs = object
   mark, none, ends, noOcc, first, span: seq[Z3Regex[Z3String]]
 
 proc prioLangs(sp: RegexSpec; pr: PcreParse; wantAnch, wantEnds: bool;
-               wantSearch = false; wantSpan = false): PrioLangs =
-  let n = buildNfa(pr)
+               wantSearch = false; wantSpan = false;
+               engine = peInterp): PrioLangs =
+  ## RFC-0005 S8bt: `engine` is the one the call runs on -- an unanchored
+  ## call's is std/re's library's (`pcre_engine.pcreSearchEngine`), an
+  ## anchored call's the interpreter. Every language of an unanchored call
+  ## (its search, and the attempt the search finds) is that engine's.
+  let n = buildNfa(pr, engine)
   let key = sp.flag & ":" & sp.pattern
   result.n = n
   if not n.ok: return PrioLangs(ok: false, why: n.why)
@@ -610,11 +610,10 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
   let what = parts[1]
   let g = parseInt(parts[2])
   let search = what in ["find", "contains", "findBounds"]
-  let pl = prioLangs(sp, pr, not search, false, search)
+  let pl = prioLangs(sp, pr, not search, false, search,
+                     engine = (if search: pcreSearchEngine() else: peInterp))
   if not pl.ok: return unmodelled(sp.entry & ": " & pl.why)
   let n = pl.n
-  if search and jitDeclines(n).len > 0:
-    return unmodelled(sp.entry & ": " & jitDeclines(n))
   if limitEffect(n)[0] == leUnknown:
     return unmodelled(sp.entry & ": " & limitDecline)
   let key = sp.flag & ":" & sp.pattern
@@ -696,16 +695,15 @@ proc lowerPrio(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
   let search = sp.entry in ["contains", "find", "findBoundsFirst",
                             "findBoundsFirstCap", "findBoundsLast"]
   let last = sp.entry == "findBoundsLast"
+  let eng = (if search: pcreSearchEngine() else: peInterp)
   var pl = prioLangs(sp, pr, last or not search and sp.entry != "endsWith",
-                     sp.entry == "endsWith", search)
+                     sp.entry == "endsWith", search, engine = eng)
   if pl.ok and last and pl.n.hasNeverSkip:
-    pl = prioLangs(sp, pr, false, false, true, true)
+    pl = prioLangs(sp, pr, false, false, true, true, engine = eng)
   if not pl.ok: return unmodelled(sp.entry & ": " & why & pl.why)
   let n = pl.n
   if limitEffect(n)[0] == leUnknown:
     return unmodelled(sp.entry & ": " & limitDecline)
-  if search and jitDeclines(n).len > 0:
-    return unmodelled(sp.entry & ": " & jitDeclines(n))
   let lenS = len(s)
   let u = substr(s, start, lenS - start)
   var res = RxResult(outcome: roValue)
@@ -1096,13 +1094,18 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
                        (if nllLeaves == r.other: row(r.other)
                         else: ite(nll, row(nllLeaves), row(r.other))))
         result = ite(st == mkInt(k), body, result))
-  # The modes: cursor * 8 + the class before `u`.
+  # The modes: cursor * 8 + the class before `u`. RFC-0005 S8bt: under the
+  # JIT's prefix scan, `cuScan + 2 + p` (p >= 1) passes `p` more positions
+  # before the scan visits one (a skip-table jump).
   const cuS0 = 0
   const cuS0ne = 1
   const cuScan = 2
   const cuLanded = 3
   const cuMid = 4
+  proc cuPass(p: int): int = (if p == 0: cuScan else: 4 + p)
   let anchored = n.anchoredPat
+  let jitOn = jitScanObservable(n) and not anchored
+  let j = n.jit
   let pcs = (if n.needPc: @[pcStart, pcOther, pcLF, pcCRLF, pcCR, pcNl]
              else: @[pcStart, pcOther])
   proc modeNum(cur: int; pc: PrevClass): Z3Int = mkInt(cur * 8 + ord(pc))
@@ -1159,13 +1162,21 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
         let landing = substr(r, mkInt(1), lenR - mkInt(1))
         let bumped =
           if anchored: u
+          elif n.utf and n.engine == peJit837:
+            # RFC-0005 S8bt: the JIT bumps one byte from a continuation
+            # byte (its scan can stop there).
+            ite(lenU == mkInt(0), empty,
+                ite(b >= mkInt(0xC0), step(cuMid, pc), step(cuLanded, pc)))
           else: ite(lenU == mkInt(0), empty,
                     step((if n.utf: cuMid else: cuLanded), pc))
+        # RFC-0005 S8bt: the JIT resumes at a landing with its scan (no
+        # CRLF start skip).
+        let landCur = (if n.engine == peJit837: cuScan else: cuLanded)
         let skipped =
           if anchored: u
           else: ite(len(landing) < lenU,
                     concat(substr(u, mkInt(0), lenU - len(landing)),
-                           restAt(landing, cuLanded, pc)),
+                           restAt(landing, landCur, pc)),
                     bumped)
         let matched = concat(by, ite(lenR == mkInt(0), empty,
           ite(lenR == lenU, self(u, modeNum(cuS0ne, pc), f1),
@@ -1185,7 +1196,32 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
           elif pc == pcCR and n.nl in {nlANY, nlANYCRLF}:
             (lenU == mkInt(0)) or (b != mkInt(10))
           else: mkBool(true)
+      proc jitScanHere(go: Z3String; pc: PrevClass): Z3String =
+        # RFC-0005 S8bt: the JIT's prefix scan visits this position: it
+        # gives up (an attempt here) when at most `max - 1` bytes remain;
+        # else the range byte's skip moves on, then the offsets decide.
+        proc byteAt(k: int): Z3Int = toCode(at(u, mkInt(k)))
+        var miss = step(cuScan, pc)
+        var hit = go
+        for k in countdown(j.offs.high, 0):
+          var cs: set[char]
+          for x in 0 .. 255:
+            if (uint32(x) or j.cmp[k][1]) == j.cmp[k][0]: cs.incl char(x)
+          hit = ite(inSet(byteAt(j.offs[k]), cs), hit, miss)
+        var visit = hit
+        if j.rangeRight >= 0:
+          for t in 1 .. j.rangeLen:
+            var cs: set[char]
+            for x in 0 .. 255:
+              if j.table[x] == t: cs.incl char(x)
+            if cs.card == 0: continue
+            visit = ite(inSet(byteAt(j.rangeRight), cs),
+                        step(cuPass(t - 1), pc), visit)
+        ite(lenU <= mkInt(j.max - 1), go, visit)
       proc body(cur: int; pc: PrevClass): Z3String =
+        if cur > cuMid:
+          # Passing a position the JIT's scan jumped over.
+          return ite(lenU == mkInt(0), empty, step(cuPass(cur - 5), pc))
         case cur
         of cuMid:
           ite((lenU > mkInt(0)) and inSet(b, {'\x80'..'\xBF'}),
@@ -1202,14 +1238,21 @@ proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
               ite((lenU > mkInt(0)) and (b == mkInt(10)),
                   attempt(pc, false, true), attempt(pc, false, false))
             else: attempt(pc, false, false)
-          ite(created(pc, false), go,
-              ite(lenU == mkInt(0), empty, step(cuScan, pc)))
+          if jitOn: jitScanHere(go, pc)
+          else:
+            ite(created(pc, false), go,
+                ite(lenU == mkInt(0), empty, step(cuScan, pc)))
         else:
           let go = attempt(pc, cur == cuS0ne, false)
-          ite(created(pc, true), go,
-              ite(lenU == mkInt(0), empty, step(cuScan, pc)))
+          if jitOn: jitScanHere(go, pc)
+          else:
+            ite(created(pc, true), go,
+                ite(lenU == mkInt(0), empty, step(cuScan, pc)))
       result = empty
-      for cur in [cuS0, cuS0ne, cuScan, cuLanded, cuMid]:
+      var curs = @[cuS0, cuS0ne, cuScan, cuLanded, cuMid]
+      if jitOn:
+        for p in 1 ..< j.rangeLen: curs.add cuPass(p)
+      for cur in curs:
         if anchored and cur >= cuScan: continue
         if cur == cuMid and not n.utf: continue
         for pc in pcs:

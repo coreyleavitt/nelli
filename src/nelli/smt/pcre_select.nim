@@ -83,9 +83,10 @@ import ./pcre_syntax
 import ./pcre_startopt
 import ./pcre_code
 import ./pcre_jit
+import ./pcre_engine
 
 export pcre_startopt.StartOpt
-export pcre_jit.PcreEngine
+export pcre_engine.PcreEngine
 
 # ---- symbols ----------------------------------------------------------------
 
@@ -560,6 +561,24 @@ proc classifySkipNames(n: var Nfa) =
     n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside one with a mark " &
             "(PCRE's re-run for the first ignores the second)"
 
+proc firstBytes(n: Nfa): set[char] =
+  ## RFC-0005 S8bt. The bytes an attempt can read first (zero-width items
+  ## passed).
+  var seen = initHashSet[int]()
+  var work = @[n.start]
+  while work.len > 0:
+    let s = work.pop()
+    if s in seen: continue
+    seen.incl s
+    let st = n.states[s]
+    case st.kind
+    of nkByte: result = result + st.bytes
+    of nkMatch: discard
+    of nkSplit, nkBack:
+      work.add st.out1
+      work.add st.out2
+    else: work.add st.out1
+
 proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
@@ -615,6 +634,14 @@ proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
   if engine == peJit837 and not (pr.noStartOpt or so.anchored):
     # RFC-0005 S8bt: the JIT's own scan comes first.
     result.jit = jitScan(compileCode(pr), pr.utf)
+    if pr.utf and result.jit.on and result.firstBytes().contains('\xC2'):
+      # The scan steps a byte at a time and can stop inside a character,
+      # where the JIT reads a continuation byte as the code point of its
+      # value: modelled only where no first character is one of those.
+      result.ok = false
+      result.why = "UTF mode under the JIT's prefix scan, with a first " &
+        "character in U+0080..U+00BF (the JIT can start an attempt inside " &
+        "a character and read a continuation byte as that code point)"
 
 proc filterBytes*(n: Nfa): set[char] =
   ## RFC-0005 S8bj. The bytes the start-of-match scan stops at (`fkFirst`,
@@ -1053,9 +1080,19 @@ proc created*(n: Nfa; s: string; x, s0: int): bool =
       wasNl(n.nl, pc) and
         not (pc == pcCR and s[x] == '\n' and n.nl in {nlANY, nlANYCRLF})
 
-proc nextChar(n: Nfa; s: string; x: int): int =
+proc nextChar(n: Nfa; s: string; x: int; jit = false): int =
   result = x + 1
   if n.utf:
+    if jit:
+      # RFC-0005 S8bt: the JIT's bumpalong adds the lead byte's extra
+      # length (pcre_jit_compile.c's `utf8_table4`); one byte from a
+      # continuation byte, where its prefix scan can stop.
+      if x >= s.len: return
+      let c = ord(s[x])
+      if c >= 0xF0: result += 3
+      elif c >= 0xE0: result += 2
+      elif c >= 0xC0: result += 1
+      return min(result, s.len)
     while result < s.len and (ord(s[result]) and 0xC0) == 0x80: inc result
 
 proc runSearch*(n: Nfa; s: string; s0: int; ne = false;
@@ -1680,8 +1717,8 @@ proc selectionLangV*(n: Nfa; cacheKey: string; lang: LangKind;
   ## by `pc0` (`anchored`: an anchored call; `crlfElig`: an unanchored
   ## attempt at a CRLF's LF past the start offset).
   let pc = canonPc0(n, pc0)
-  let key = cacheKey & "|" & $lang & "|" & $pc & "|" & $anchored & "|" &
-            $crlfElig & "|" & $noEmpty & "|" & $nonEmpty
+  let key = cacheKey & "|" & $n.engine & "|" & $lang & "|" & $pc & "|" &
+            $anchored & "|" & $crlfElig & "|" & $noEmpty & "|" & $nonEmpty
   if key in selCache: return selCache[key]
   if not n.ok:
     result = SelLang(ok: false, why: n.why)
@@ -1728,6 +1765,13 @@ type
     runs: seq[(int8, int8, int32)]   ## (expectation, variant, state)
     want: bool                       ## the attempt here is the found one
     wantEnd: bool                    ## ... and its match ends here
+    pend: int8
+      ## RFC-0005 S8bt: cuScan under the JIT's prefix scan: positions to
+      ## pass before the next one the scan visits (a skip-table jump)
+    obl: seq[(int8, int16)]
+      ## RFC-0005 S8bt: what the scan's guesses require of the bytes ahead
+      ## (distance, set id): the byte at that distance is in the set; set
+      ## id -1: at most that many bytes remain
 
   SKey = object
     nodes: seq[SNode]
@@ -1739,8 +1783,10 @@ type
                      ## invalid sink
 
 proc hash(x: SNode): Hash =
-  var h: Hash = hash(ord(x.cursor)) !& hash(x.want) !& hash(x.wantEnd)
+  var h: Hash = hash(ord(x.cursor)) !& hash(x.want) !& hash(x.wantEnd) !&
+                hash(x.pend)
   for r in x.runs: h = h !& hash(r)
+  for o in x.obl: h = h !& hash(o)
   !$h
 
 proc `<`(a, b: SNode): bool =
@@ -1750,6 +1796,10 @@ proc `<`(a, b: SNode): bool =
   if a.runs.len != b.runs.len: return a.runs.len < b.runs.len
   for i in 0 ..< a.runs.len:
     if a.runs[i] != b.runs[i]: return a.runs[i] < b.runs[i]
+  if a.pend != b.pend: return a.pend < b.pend
+  if a.obl.len != b.obl.len: return a.obl.len < b.obl.len
+  for i in 0 ..< a.obl.len:
+    if a.obl[i] != b.obl[i]: return a.obl[i] < b.obl[i]
   false
 
 proc hash(k: SKey): Hash =
@@ -1762,6 +1812,43 @@ proc hash(k: SKey): Hash =
 proc univIdx(nl, u: int8): uint8 =
   ## A (final-newline state, UTF-8 validator state) pair as one index.
   uint8(int(nl) * 8 + (if u >= 10: int(u) - 6 else: int(u)))
+
+proc jitScanObservable*(n: Nfa): bool =
+  ## RFC-0005 S8bt. Whether PCRE 8.37's JIT prefix scan reads differently
+  ## from the interpreter's start-of-match filter. `scan_prefix` stops at a
+  ## verb, an assertion, (*ACCEPT) and every repeat it cannot count, so each
+  ## path reads the scanned positions before anything with an effect: an
+  ## attempt at a position either filter passes over fails, and the only
+  ## trace of where the scan stops is the bumpalong's CRLF start skip after
+  ## such an attempt (`skipActive`). The concrete reference (`pcreExec`)
+  ## runs the scan everywhere; the JIT tests compare the two.
+  n.engine == peJit837 and n.jit.on and n.skipActive
+
+proc byteReps(n: Nfa; extra: seq[set[char]]): array[256, int] =
+  ## RFC-0005 S8bt. Per byte, the least byte that every byte test of the
+  ## search's construction reads alike: the automaton's byte sets, the
+  ## newline bytes, CR and LF, `nextClass`'s classes, the UTF-8 ranges
+  ## `utfStep` tells apart, the start-of-match filter's and `extra` (the
+  ## JIT scan's sets). A row is computed once per class.
+  var sets = extra
+  for st in n.states:
+    if st.kind == nkByte: sets.add st.bytes
+  sets.add nlBytes(n.nl)
+  sets.add {'\r'}
+  sets.add {'\n'}
+  sets.add {'\v', '\f', '\x85'}
+  for (lo, hi) in [(0x80, 0x8F), (0x90, 0x9F), (0xA0, 0xBF), (0xC0, 0xC1),
+                   (0xC2, 0xDF), (0xE0, 0xE0), (0xE1, 0xEC), (0xED, 0xED),
+                   (0xEE, 0xEF), (0xF0, 0xF0), (0xF1, 0xF3), (0xF4, 0xF4),
+                   (0xF5, 0xFF)]:
+    sets.add {char(lo) .. char(hi)}
+  sets.add {n.fc1, n.fc2}
+  sets.add n.bits
+  var firstOf = initTable[seq[bool], int]()
+  for b in 0 .. 255:
+    var sig = newSeq[bool](sets.len)
+    for i, cs in sets: sig[i] = char(b) in cs
+    result[b] = firstOf.mgetOrPut(sig, b)
 
 proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
                    ok: var bool): Verifier =
@@ -1786,6 +1873,12 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
   # Minimization merges states that differ only in that bookkeeping, so
   # this is computed on the minimized automaton, per bookkeeping state.
   let uStates = (if n.utf: @[0'i8, 1, 2, 3, 10, 11, 12, 13] else: @[0'i8])
+  # RFC-0005 S8bt: one symbol per byte class (`byteReps`; the attempt's
+  # rows agree on a class).
+  let reps = byteReps(n, @[])
+  var syms: seq[int]
+  for sym in 0 ..< symMark:
+    if sym >= 256 or reps[sym] == sym: syms.add sym
   var bad = newSeq[set[0'u8 .. 127'u8]](t.len)
   proc idx(sg: int; u: int8): uint8 = univIdx(int8(sg), u)
   for c in 0 ..< t.len:
@@ -1793,7 +1886,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
       for u in uStates:
         var b = u == 0 and nlCanEnd(int8(sg)) and not a[c]
         if not b:
-          for sym in 0 ..< symMark:
+          for sym in syms:
             if nlStepFor(n.nl, int8(sg), sym) >= 0 and t[c][sym] < 0 and
                (not n.utf or utfStep(u, symByte(sym)) >= 0):
               b = true
@@ -1806,7 +1899,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
       for sg in 0 .. 15:
         for u in uStates:
           if idx(sg, u) in bad[c]: continue
-          for sym in 0 ..< symMark:
+          for sym in syms:
             let s2 = nlStepFor(n.nl, int8(sg), sym)
             if s2 < 0: continue
             let u2 = (if n.utf: utfStep(u, symByte(sym)) else: 0'i8)
@@ -1822,9 +1915,14 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
       for u in uStates:
         if idx(sg, u) notin bad[c]: result.univ[c].incl idx(sg, u)
 
-proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
+var verCache {.threadvar.}: Table[(string, Expect, PrevClass, bool),
+                                   (Verifier, bool)]
+
+proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
+               pc0: PrevClass): Dfa =
   ## RFC-0005 S8bj. The search as a guess-and-verify automaton (see the
-  ## module doc), determinized.
+  ## module doc), determinized. RFC-0005 S8bt: the verifiers are shared by
+  ## a pattern's searches (`cacheKey`: the pattern and engine).
   var vers = initTable[(Expect, PrevClass, bool), int]()
   var vlist: seq[Verifier]
   var vok = true
@@ -1833,7 +1931,14 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
     let key = (ex2, canonPc0(n, pc), elig and n.hasNeverSkip)
     if key notin vers:
       vers[key] = vlist.len
-      vlist.add buildVerifier(n, key[0], key[1], key[2], vok)
+      let gk = (cacheKey, key[0], key[1], key[2])
+      if gk notin verCache:
+        var fine = true
+        let v = buildVerifier(n, key[0], key[1], key[2], fine)
+        verCache[gk] = (v, fine)
+      let (v, fine) = verCache[gk]
+      if not fine: vok = false
+      vlist.add v
     vers[key]
   var ids = initTable[SKey, int]()
   var keys: seq[SKey]
@@ -1845,6 +1950,144 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
   let anchored = n.anchoredPat
   discard intern(SKey(nodes: @[SNode(cursor: cuScan)], pc: pc0, atS0: true))
   result.ok = true
+  # RFC-0005 S8bt: the JIT's prefix scan (`pcre_jit.nim`) decides a start
+  # from the bytes ahead of it: each guess records what it needs of them
+  # (`SNode.obl`), checked as they are read. Every path reads the scan's
+  # positions before any verb, so an attempt at a position the scan passes
+  # over fails without effect: the scan is observable only through the
+  # CRLF start skip after a bump (`jitScanObservable`).
+  let jitOn = jitScanObservable(n) and not anchored
+  var obSets: seq[set[char]]
+  var obIds = initTable[set[char], int16]()
+  proc sid(cs: set[char]): int16 =
+    if cs notin obIds:
+      obIds[cs] = int16(obSets.len)
+      obSets.add cs
+    obIds[cs]
+  var anySid, emptySid: int16
+  var tSid: seq[int16]
+  var mSid, nmSid: seq[int16]
+  if jitOn:
+    anySid = sid({'\x00'..'\xFF'})
+    emptySid = sid({})
+    if n.jit.rangeRight >= 0:
+      for t in 0 .. n.jit.rangeLen:
+        var cs: set[char]
+        for b in 0 .. 255:
+          if n.jit.table[b] == t: cs.incl char(b)
+        tSid.add sid(cs)
+    for k in 0 ..< n.jit.offs.len:
+      var cs: set[char]
+      for b in 0 .. 255:
+        if (uint32(b) or n.jit.cmp[k][1]) == n.jit.cmp[k][0]: cs.incl char(b)
+      mSid.add sid(cs)
+      nmSid.add sid({'\x00'..'\xFF'} - cs)
+  let reps = byteReps(n, obSets)
+
+  proc addObl(node: var SNode; d: int; sd: int16): bool =
+    ## Requires the byte at distance `d` to be in set `sd` (-1: at most `d`
+    ## bytes remain); false when that contradicts the node's requirements.
+    if sd >= 0 and sd == emptySid: return false
+    var o = node.obl
+    var endBy = -1
+    for (d2, s2) in o:
+      if s2 < 0: endBy = d2
+    if sd < 0:
+      if endBy >= 0 and endBy <= d: return true
+      endBy = d
+      var nx: seq[(int8, int16)]
+      for (d2, s2) in o:
+        if s2 >= 0:
+          if d2 >= endBy: return false
+          nx.add (d2, s2)
+      nx.add (int8(d), -1'i16)
+      o = nx
+    else:
+      if endBy >= 0 and d >= endBy: return false
+      var merged = false
+      for e in o.mitems:
+        if e[0] == int8(d) and e[1] >= 0:
+          let cs = obSets[e[1]] * obSets[sd]
+          if cs.card == 0: return false
+          e[1] = sid(cs)
+          merged = true
+      if not merged: o.add (int8(d), sd)
+    # Canonical: a byte at distance `d` exists when one at a further
+    # distance is required, so "any byte" there says nothing more.
+    var nx: seq[(int8, int16)]
+    for (d2, s2) in o:
+      if s2 == anySid:
+        var later = false
+        for (d3, s3) in o:
+          if s3 >= 0 and s3 != anySid and d3 >= d2: later = true
+          if s3 == anySid and d3 > d2: later = true
+        if later: continue
+      nx.add (d2, s2)
+    nx.sort()
+    node.obl = nx
+    true
+
+  proc discharge(node: var SNode; c: int): bool =
+    ## The byte `c` (-1: the end) is read: the requirements at distance 0
+    ## are checked, the others come one byte closer.
+    if node.obl.len == 0: return true
+    var nx: seq[(int8, int16)]
+    for (d, sd) in node.obl:
+      if c < 0:
+        if sd >= 0: return false
+      elif d == 0:
+        if sd >= 0:
+          if char(c) notin obSets[sd]: return false
+        else:
+          return false
+      else:
+        nx.add (d - 1, sd)
+    node.obl = nx
+    true
+
+  proc jitVisit(node: SNode; c: int): seq[(SNode, bool)] =
+    ## The JIT's scan at this position: (node, an attempt starts here).
+    if node.pend > 0:
+      var x = node
+      dec x.pend
+      return @[(x, false)]
+    let j = n.jit
+    # It gives up when at most `max - 1` bytes remain, and attempts here.
+    var q = node
+    if addObl(q, j.max - 1, -1): result.add (q, true)
+    if c < 0: return
+    var g = node
+    if not addObl(g, j.max - 1, anySid): return
+    if j.rangeRight >= 0:
+      for t in 1 .. j.rangeLen:
+        var x = g
+        if addObl(x, j.rangeRight, tSid[t]):
+          x.pend = int8(t - 1)
+          result.add (x, false)
+      if not addObl(g, j.rangeRight, tSid[0]): return
+    var st = g
+    var fine = true
+    for k in 0 ..< j.offs.len:
+      if not addObl(st, j.offs[k], mSid[k]):
+        fine = false
+        break
+    if fine: result.add (st, true)
+    # The generated code checks the offsets in order: the first that
+    # fails moves the scan on (the branches are exclusive).
+    var pre = g
+    for k in 0 ..< j.offs.len:
+      var x = pre
+      if addObl(x, j.offs[k], nmSid[k]): result.add (x, false)
+      if not addObl(pre, j.offs[k], mSid[k]): break
+
+  proc byteClass(c: int): int =
+    ## Under the JIT's scan: the byte as `startHere` reads it (a UTF-8
+    ## continuation byte, LF, a lead byte, any other); -1: read it whole.
+    if not jitOn: return -1
+    if n.utf and (c and 0xC0) == 0x80: 1
+    elif c == ord('\n'): 2
+    elif c >= 0xC0: 3
+    else: 0
 
   proc done(v: int8; t: int32; nl, u: int8): bool =
     univIdx(nl, u) in vlist[v].univ[t]
@@ -1878,7 +2121,9 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
       if not done(v, t, nl, u): nr.add (int8(ord(exSkip)), v, t)
     nr.sort()
     x.runs = deduplicate(nr, isSorted = true)
-    x.cursor = cuLanded
+    # RFC-0005 S8bt: the JIT resumes at the landing with its scan (no CRLF
+    # start skip).
+    x.cursor = (if n.engine == peJit837: cuScan else: cuLanded)
     (true, x)
 
   proc startHere(k: SKey; node: SNode; c: int): seq[SNode] =
@@ -1900,22 +2145,31 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
       if node.want: return @[]
       return @[node]
     # Scanning: does the filter stop here?
-    var here = true
-    if not anchored and c >= 0:
-      case n.filter
-      of fkNone: discard
-      of fkFirst: here = char(c) == n.fc1 or char(c) == n.fc2
-      of fkBits: here = char(c) in n.bits
-      of fkStartline:
-        if not k.atS0:
-          here = wasNl(n.nl, k.pc) and
-                 not (k.pc == pcCR and c == ord('\n') and
-                      n.nl in {nlANY, nlANYCRLF})
-    if not here:
-      if node.want: return @[]
-      var x = node
-      x.cursor = cuScan
-      return @[x]
+    var starts: seq[SNode]
+    if jitOn:
+      var y = node
+      y.cursor = cuScan
+      for (x, here) in jitVisit(y, c):
+        if here: starts.add x
+        elif not node.want: result.add x
+    else:
+      var here = true
+      if not anchored and c >= 0:
+        case n.filter
+        of fkNone: discard
+        of fkFirst: here = char(c) == n.fc1 or char(c) == n.fc2
+        of fkBits: here = char(c) in n.bits
+        of fkStartline:
+          if not k.atS0:
+            here = wasNl(n.nl, k.pc) and
+                   not (k.pc == pcCR and c == ord('\n') and
+                        n.nl in {nlANY, nlANYCRLF})
+      if not here:
+        if node.want: return @[]
+        var x = node
+        x.cursor = cuScan
+        return @[x]
+      starts.add node
     let elig = (not k.atS0) and k.pc == pcCR and c == ord('\n') and
                n.skipActive
     var exs: seq[Expect]
@@ -1923,7 +2177,8 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
     elif anchored: exs = @[exNoMatch]
     else: exs = @[exBump, exSkipFlight, exCommit]
     for ex in exs:
-      var x = node
+     for sn in starts:
+      var x = sn
       x.want = false
       let v = verifier(ex, k.pc, elig)
       # An empty verifier: no attempt here has that outcome.
@@ -1944,8 +2199,10 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
       x.cursor =
         if anchored or ex in {exCommit, exMatch, exMatchT}: cuDone
         elif ex == exSkipFlight: cuInFlight
-        elif n.utf: cuMid
+        elif n.utf and (n.engine == peInterp or c >= 0xC0): cuMid
         else: cuLanded
+      # RFC-0005 S8bt: the JIT bumps along by the lead byte's length (one
+      # byte from inside a character, where its scan can stop).
       result.add x
 
   var i = 0
@@ -1978,8 +2235,10 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
     elif nlCanEnd(k.nl) and (kind == skNoOcc or
                            k.phase == (if kind == skFirst: 1 else: 2)):
       for node in landed:
-        for x in startHere(k, node, -1):
+        for x0 in startHere(k, node, -1):
+          var x = x0
           if x.want or x.cursor == cuInFlight: continue
+          if not discharge(x, -1): continue
           var good = true
           for (ex, v, st) in x.runs:
             if not vlist[v].acc[st]: good = false
@@ -2031,8 +2290,13 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
         k2.phase = 2
         row[symMark2] = int32 intern(k2)
     # A byte, or a final newline's.
+    var starts = initTable[(int, int), seq[SNode]]()
+    var startsNow: seq[SNode]
     if (k.nl and nlFinal) == 0:
       for s in 0 ..< symMark:
+        if s < 256 and reps[s] != s:
+          row[s] = row[reps[s]]
+          continue
         let nls = nlStepFor(n.nl, k.nl, s)
         if nls < 0: continue
         let c = ord(symByte(s))
@@ -2042,11 +2306,21 @@ proc searchDfa(n: Nfa; kind: SearchKind; pc0: PrevClass): Dfa =
           if u2 < 0:
             continue
         var nodes: seq[SNode]
-        for node in landed:
-          for x0 in startHere(k, node, c):
+        var seen = initHashSet[SNode]()
+        let cls = byteClass(c)
+        for li, node in landed:
+          # RFC-0005 S8bt: under the JIT's scan the attempts at a position
+          # depend on the byte only through its class (`byteClass`).
+          let sk = (li, cls)
+          if cls < 0 or sk notin starts:
+            let r = startHere(k, node, c)
+            if cls < 0: startsNow = r
+            else: starts[sk] = r
+          for x0 in (if cls < 0: startsNow else: starts[sk]):
             var x = x0
+            if not discharge(x, c): continue
             if not feed(x, s, nls, u2): continue
-            if x notin nodes: nodes.add x
+            if not seen.containsOrIncl(x): nodes.add x
         if nodes.len == 0: continue
         nodes.sort()
         row[s] = int32 intern(SKey(nodes: nodes,
@@ -2062,12 +2336,13 @@ proc searchLangV*(n: Nfa; cacheKey: string; kind: SearchKind;
   ## RFC-0005 S8bj. The occurrence-search language `kind` of an unanchored
   ## call whose start offset is preceded by `pc0`.
   let pc = canonPc0(n, pc0)
-  let key = cacheKey & "|search|" & $kind & "|" & $pc
+  let key = cacheKey & "|" & $n.engine & "|search|" & $kind & "|" & $pc
   if key in selCache: return selCache[key]
   if not n.ok:
     result = SelLang(ok: false, why: n.why)
   else:
-    result = langOfU(n, false, searchDfa(n, kind, pc), "search")
+    result = langOfU(n, false, searchDfa(n, cacheKey & "|" & $n.engine,
+                                         kind, pc), "search")
   selCache[key] = result
 
 proc searchLang*(n: Nfa; cacheKey: string; kind: SearchKind;
@@ -2085,8 +2360,8 @@ proc captureLangV*(n: Nfa; cacheKey: string; g: int; pc0: PrevClass;
   ## `u`: `marked`: `u` with `#` before and `%` after the group's span
   ## (`#` first when the span is empty); otherwise `u` whose match sets it.
   let pc = canonPc0(n, pc0)
-  let key = cacheKey & "|cap|" & $g & "|" & $pc & "|" & $marked & "|" &
-            $anchored & "|" & $crlfElig
+  let key = cacheKey & "|" & $n.engine & "|cap|" & $g & "|" & $pc & "|" &
+            $marked & "|" & $anchored & "|" & $crlfElig
   if key in selCache: return selCache[key]
   if not n.ok:
     result = SelLang(ok: false, why: n.why)
@@ -2471,9 +2746,9 @@ proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
     of okCommit: return (-1, 0, 0)
     of okSkip:
       landed = r.pos > x
-      next = (if landed: r.pos else: n.nextChar(s, x))
+      next = (if landed: r.pos else: n.nextChar(s, x, jit))
     else:
-      next = n.nextChar(s, x)
+      next = n.nextChar(s, x, jit)
     if anchored or next > s.len: return (-1, 0, 0)
     x = next
     # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF
@@ -2499,20 +2774,3 @@ proc pcreReplace*(n: Nfa; s, by: string): string =
     prev = b
   result.add s[min(prev, s.len) .. ^1]
 
-proc jitDeclined*(n: Nfa): string =
-  ## RFC-0005 S8bj. Why an unanchored call (`find`, `contains`,
-  ## `findBounds`, `replace`) of the pattern is declined when std/re's
-  ## libpcre runs it on its JIT (`pcre_engine`), "" when it is not: the JIT
-  ## (pcre_jit_compile.c) has its own start-of-match scan and does not skip
-  ## a CRLF's LF the way the interpreter's bumpalong does, and it counts
-  ## the match limit its own way and ignores the recursion limit (probed:
-  ## 8.37's JIT against 8.45's and 8.37's interpreters). Anchored calls
-  ## never run on the JIT (PCRE_ANCHORED is not a JIT option).
-  if crlfSkipObservable(n):
-    return "under a CRLF newline convention, whether a match starts at a " &
-           "CRLF's LF is the start-of-match scan's call, and std/re's " &
-           "libpcre runs this call on its JIT"
-  if limitEffect(n)[0] != leNone:
-    return "a (*LIMIT_..) start option below PCRE's default, which " &
-           "std/re's libpcre runs on its JIT, counting its own way"
-  ""

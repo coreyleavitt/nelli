@@ -1,0 +1,27 @@
+time="2026-10-03T11:12:25-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T11:12:25-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T11:12:25-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T11:12:25-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+time="2026-10-03T11:12:26-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T11:12:26-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T11:12:26-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T11:12:26-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+/work/_deps/z3/src/z3/proof.nim(156, 3) Warning: unreachable else, all cases are already covered [UnreachableElse]
+
+[Suite] S8bb (5): the constructs S8ay left undecided, against std/re
+  read constructs: 63040 cases, 0.6 s
+  [OK] each is read, and PCRE's match is the concrete matchLen
+  [OK] what stays undecided
+
+[Suite] S8bb (5): the captures of PCRE's chosen match, against std/re
+  chosenCaps: 10940 cases, 0.2 s
+  [OK] the tagged run is std/re's groups at every start
+  capture languages: 7260 cases, 1.5 s
+  [OK] each capture language holds exactly the group's spans
+
+[Suite] S8bb (5): newline conventions and (*ACCEPT), against std/re
+  conventions and (*ACCEPT): 178128 runs, 13054 capture runs, 14976 languages, 14976 searches (0 patterns' searches declined), 14.1 s
+  [OK] each is read, and every model is std/re's
+  [OK] the CRLF skip and the start-of-match scan (RFC-0005 S8bj)
+  convention Z3 formulas: 1526 cases (0 searches declined), 9.9 s
+  [OK] the Z3 formulas route every entry through the automaton

@@ -287,13 +287,16 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## (two lines) before reading the base's data context and length and
     ## the part's length (three); `viewFollows` guards both sides (two)
     ## before comparing their length terms (two). 95 + 9 = 104.
+    ##
+    ## RFC-0005 S8ca: `viewFollows` is gone (a view follows logged in-place
+    ## steps, not the shape of its terms). 104 - 4 = 100.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 104
+    check runtimeCount == 100
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

@@ -1180,5 +1180,8 @@ task test, "Run the test suite":
             # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
             # declines in-band when the native stack left is under one more
             # level's need.
-            "tsymex_rfc0005_s8ca_stack"]:
+            "tsymex_rfc0005_s8ca_stack",
+            # item 2: a view follows logged in-place writes, not term
+            # shapes; `swap` is modelled.
+            "tsymex_rfc0005_s8ca_views"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

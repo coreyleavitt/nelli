@@ -853,25 +853,6 @@ proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast =
     if v.isNone: return
     result = v.get
 
-proc storeChainOver(ctx: Z3Context; arr, base: RawZ3Ast): bool =
-  ## RFC-0005 S8bu. `arr` is `base` under a chain of `store`s (`store(...
-  ## store(base, i1, v1)..., in, vn)`), `base` itself included, each read
-  ## back through a cell's `select` (`peelSelect`).
-  if storeDeclKind == 0:
-    discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
-  let base = peelSelect(ctx, base)
-  var t = arr
-  for _ in 0 ..< 100_000:
-    t = peelSelect(ctx, t)
-    if cast[pointer](t) == cast[pointer](base): return true
-    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
-    let app = Z3_to_app(ctx.raw, t)
-    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
-       storeDeclKind or Z3_get_app_num_args(ctx.raw, app) != 3:
-      return false
-    t = Z3_get_app_arg(ctx.raw, app, 0)
-  false
-
 var constArrayDeclKind {.threadvar.}: int
   ## RFC-0005 batch 4. The `Z3_decl_kind` ordinal (+ 1) of a constant array
   ## (`(as const ...)`), read off a probe term as `storeDeclKind` is.

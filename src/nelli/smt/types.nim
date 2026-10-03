@@ -1526,6 +1526,12 @@ type
                              ## value into its cell before the call -- not a
                              ## program dereference, so not counted by
                              ## `heapDepth`.
+      dwInPlace*:  bool      ## RFC-0005 S8ca: the write-back of a seq one of
+                             ## whose elements was just written (`p[][i] = v`,
+                             ## `p.s[i] = v`): Nim writes the element in the
+                             ## seq's memory, so the store is logged as an
+                             ## in-place step (`Path.inPlaceSteps`), which a
+                             ## by-value copy sharing that memory follows.
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -5591,23 +5597,27 @@ proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
          nAddrIdx: addrIdx)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
-                   ptrFamily = false, cell = false): IRStmt =
+                   ptrFamily = false, cell = false, inPlace = false): IRStmt =
   ## Phase 15 R3 (ADR-0010). `p[] = value` — a heap WRITE through a `ref T`/
   ## `ptr T` deref. Structural at R3 (walker no-ops it); the real `store` lands
   ## R4.
   ## RFC-0005 S8an: `cell` marks an `addr` cell's store (`dwCell`).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
-         dwPtrFamily: ptrFamily, dwCell: cell)
+         dwPtrFamily: ptrFamily, dwCell: cell, dwInPlace: inPlace)
 
 proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
                         objTy: IRType, field: string,
-                        ptrFamily = false; init = false): IRStmt =
+                        ptrFamily = false; init = false;
+                        inPlace = false): IRStmt =
   ## Phase 15 R6 (ADR-0010). `p.field = value` — a FIELD WRITE through a
   ## `ref object`/`ptr object`. Stores `value` into the per-(type,field) heap
   ## array `refPointeeTypeId(objTy) & "__" & field` at `p`'s address (only that
   ## field's array changes; an aliased read of the same field sees the write).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
-         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init)
+         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init,
+         dwInPlace: inPlace)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
                     marker: int): IRStmt =

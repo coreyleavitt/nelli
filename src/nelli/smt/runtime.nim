@@ -489,6 +489,29 @@ type
     idx:    Z3Int
     dead:   bool
 
+  HeapTerm = tuple[ast: Z3AnyAst; input: string]
+    ## RFC-0005 S8ca. A heap array's term on a path: the array the path
+    ## holds (`Path.heaps`), or, while it holds none, the name of the free
+    ## input constant it reads (`heapInputName`), which an opaque call's
+    ## havoc renames.
+
+  ViewMark = object
+    ## RFC-0005 S8ca. A by-value seq formal sharing the memory of an
+    ## address-taken variable (a `view` cell entry, `bindVarLocs`): the
+    ## heap arrays its value is read from (`keys`) and their terms when the
+    ## formal last took the cell's value (`at`). It follows the cell only
+    ## while every change of those arrays since is an in-place step
+    ## (`Path.inPlaceSteps`, `viewInPlace`).
+    local: string
+    frame: int
+    keys:  seq[string]
+    at:    seq[HeapTerm]
+
+  InPlaceStep = tuple[key: string; before, after: HeapTerm]
+    ## RFC-0005 S8ca. One store into the heap array `key` that wrote a
+    ## seq's element in its memory (`dwInPlace`, or a `view`'s sync of an
+    ## element written by name): the array's term before and after it.
+
   Path = ref object
     pc:        seq[Z3Bool]
     defectSurvivorPc: seq[Z3Bool]
@@ -571,6 +594,13 @@ type
       ## loop's forks (`atIteration`), inherited by every fork below.
       ## `solveTargetHit` compares it with the depth of a tainted hit that
       ## ran out of budget (`WalkCtx.budgetOutDepths`).
+    viewMarks: seq[ViewMark]
+      ## RFC-0005 S8ca. The by-value seq formals on this path that share an
+      ## address-taken variable's memory. Inherited by every fork, and by
+      ## the caller on a return; a returned frame's are dropped as read.
+    inPlaceSteps: seq[InPlaceStep]
+      ## RFC-0005 S8ca. The in-place element writes this path made while it
+      ## had a `viewMarks` entry, in order. Inherited as `viewMarks` is.
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
@@ -794,6 +824,13 @@ proc deepCopyHeapState(src: Path):
   # isolation that gives disjoint-path counter restart for free.
   result.liveRefs = src.liveRefs
 
+func sameHeapTerm(a, b: HeapTerm): bool =
+  ## RFC-0005 S8ca. The same array term (`HeapTerm`).
+  let x = cast[pointer](a.ast.raw)
+  let y = cast[pointer](b.ast.raw)
+  if x == nil or y == nil: x == nil and y == nil and a.input == b.input
+  else: x == y
+
 template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                                 taintExpr: Taint): Path =
   ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
@@ -820,7 +857,9 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
        addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
        elemCells: parent.elemCells,                      ## RFC-0005 S8be
-       loopIters: parent.loopIters)                      ## RFC-0005 S8y
+       loopIters: parent.loopIters,                      ## RFC-0005 S8y
+       viewMarks: parent.viewMarks,                      ## RFC-0005 S8ca
+       inPlaceSteps: parent.inPlaceSteps)                ## RFC-0005 S8ca
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
@@ -880,6 +919,20 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
            cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
           seen = true
       if not seen: merged.elemCells.add o
+    # RFC-0005 S8ca: and its views and in-place steps (a closure body's
+    # descent starts from a fresh root).
+    for o in caller.viewMarks:
+      var seen = false
+      for e in merged.viewMarks:
+        if e.frame == o.frame and e.local == o.local: seen = true
+      if not seen: merged.viewMarks.add o
+    for o in caller.inPlaceSteps:
+      var seen = false
+      for e in merged.inPlaceSteps:
+        if e.key == o.key and sameHeapTerm(e.before, o.before) and
+           sameHeapTerm(e.after, o.after):
+          seen = true
+      if not seen: merged.inPlaceSteps.add o
     merged
 
 proc atIteration(p: Path; loop, n: int) =
@@ -15295,6 +15348,13 @@ proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
     w.ifSites[site] = st
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc liveViewMarks(p: Path; w: WalkCtx)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
@@ -19665,6 +19725,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
           let calleeFrameId = w.frame.frameId
           w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
+          anchorViews(calleePath, entryCells, calleeFrameId)   ## RFC-0005 S8ca
           w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
           let guardMark = callGuardedNames.len   ## RFC-0005 S8an
           for g in guarded: callGuardedNames.add g
@@ -20216,7 +20277,24 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Stage 7 (CR-7) Cluster R: heap read, allocation, and heap write arms
     # extracted into `walkHeapArm` (defined above, before this proc body).
     # `isIndex` is left inline (handles Table/seq/array/ref — multi-theory).
-    walkHeapArm(stmt, paths, w)
+    # RFC-0005 S8ca: an element's write-back (`dwInPlace`) on a path with a
+    # live view is logged as in-place steps, path by path.
+    var viewed = false
+    if stmt.kind == isDerefWrite and stmt.dwInPlace:
+      for p in paths:
+        liveViewMarks(p, w)
+        if p.viewMarks.len > 0: viewed = true
+    if not viewed:
+      walkHeapArm(stmt, paths, w)
+    else:
+      var outs: seq[Path]
+      for p in paths:
+        if w.shouldStop: break
+        let heapsBefore = p.heaps
+        for q in walkHeapArm(stmt, @[p], w):
+          if q != p: logInPlace(p, heapsBefore, q)
+          outs.add q
+      outs
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -20340,29 +20418,104 @@ const viewFreedPrefix = "__viewFreed#"
   ## cell was assigned whole or resized while a raise unwound
   ## (`syncAddrCellsFromHeap`); the next `syncAddrCells` taints the path.
 
-proc viewFollows(ctx: Z3Context; old, cur: SymVal): bool =
-  ## RFC-0005 S8bu. A by-value seq formal sharing a cell's memory (`view`)
-  ## sees the cell's new value `cur` only when the old one's elements were
-  ## written in place: the same length term, and each data array the old
-  ## one's under a chain of stores. Any other change (an assignment of the
-  ## whole, a resize) gave the variable other memory; Nim's copy still
-  ## points at the old, which it may have freed. A cell's value read back
-  ## is a `select` over the `store` that wrote it (`peelSelect`); a term is
-  ## never simplified, which would fold an assignment of the whole that
-  ## agrees with a store chain into one.
-  if old.kind != svSeq or cur.kind != svSeq: return false
-  if old.isUnsupportedFieldPlaceholder or # [placeholder-audited]
-     cur.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-    return false
-  if cast[pointer](peelSelect(ctx, old.seqLen.raw)) != # [placeholder-audited]
-     cast[pointer](peelSelect(ctx, cur.seqLen.raw)): # [placeholder-audited]
-    return false
-  let a = seqArrs(old)
-  let b = seqArrs(cur)
-  if a.len != b.len: return false
-  for k in 0 ..< a.len:
-    if not storeChainOver(ctx, b[k].raw, a[k].raw): return false
-  true
+proc heapTermOf(p: Path; key: string): HeapTerm =
+  ## RFC-0005 S8ca. The term of heap array `key` on `p` (`HeapTerm`).
+  if p.heaps.hasKey(key): (ast: p.heaps[key], input: "")
+  else: (ast: Z3AnyAst(), input: heapInputName(p, key))
+
+proc viewHeapKeys(c: AddrCellEntry): Option[seq[string]] =
+  ## RFC-0005 S8ca. The heap arrays a `view` entry's value is read from
+  ## (`addrEntryValue`): the cell's own leaves, or, in an object held field
+  ## by field (`fieldSplitPointee`), the leaves of the field its path
+  ## starts with. none for a cell held another way (a case object's).
+  var keys: seq[string]
+  if c.path.len == 0 and c.ty.kind != itVariant and
+     not fieldSplitPointee(c.ty):
+    for suf in heapLeafSuffixes(c.ty): keys.add refPointeeTypeId(c.ty) & suf
+  elif c.path.len > 0 and fieldSplitPointee(c.ty):
+    let i = c.ty.fieldNames.find(c.path[0])
+    if i < 0: return none(seq[string])
+    for suf in heapLeafSuffixes(c.ty.fields[i]):
+      keys.add fieldHeapKey(c.ty, c.path[0]) & suf
+  else:
+    return none(seq[string])
+  some(keys)
+
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int) =
+  ## RFC-0005 S8ca. `p` enters `frame`, whose `view` entries (`bindVarLocs`)
+  ## take the cell's value now: each is marked with its heap arrays' terms
+  ## (`ViewMark`).
+  for c in cells:
+    if not c.view: continue
+    let keys = viewHeapKeys(c)
+    if keys.isNone: continue
+    var at: seq[HeapTerm]
+    for k in keys.get: at.add heapTermOf(p, k)
+    p.viewMarks.add ViewMark(local: c.local, frame: frame, keys: keys.get,
+                             at: at)
+
+proc liveViewMarks(p: Path; w: WalkCtx) =
+  ## RFC-0005 S8ca. Drop `p`'s marks of returned frames, and its in-place
+  ## steps once no mark is left.
+  var kept: seq[ViewMark]
+  for m in p.viewMarks:
+    if liveFrame(w, m.frame): kept.add m
+  if kept.len != p.viewMarks.len: p.viewMarks = kept
+  if p.viewMarks.len == 0 and p.inPlaceSteps.len > 0: p.inPlaceSteps = @[]
+
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path) =
+  ## RFC-0005 S8ca. Record on `after` each heap array an in-place element
+  ## write changed from `before` (whose arrays were `heapsBefore`) as an
+  ## in-place step. Only while a view is live: no one reads them otherwise.
+  if after.viewMarks.len == 0: return
+  for k, arr in after.heaps:
+    let was: HeapTerm =
+      if heapsBefore.hasKey(k): (ast: heapsBefore[k], input: "")
+      else: (ast: Z3AnyAst(), input: heapInputName(before, k))
+    let now: HeapTerm = (ast: arr, input: "")
+    if not sameHeapTerm(was, now):
+      after.inPlaceSteps.add (key: k, before: was, after: now)
+
+proc viewMarkOf(p: Path; local: string; w: WalkCtx): int =
+  ## RFC-0005 S8ca. The position in `p.viewMarks` of the `view` entry
+  ## `local` of the current frame (or of the live frame it was inherited
+  ## from: a capture), -1 when it has none.
+  result = -1
+  for i, m in p.viewMarks:
+    if m.local == local and m.frame == w.frame.frameId: return i
+  for i, m in p.viewMarks:
+    if m.local == local and liveFrame(w, m.frame): result = i
+
+proc viewInPlace(p: Path; mi: int): tuple[moved, inPlace: bool] =
+  ## RFC-0005 S8ca. Whether the heap arrays of mark `mi` changed since it
+  ## was taken, and whether every change is a chain of in-place steps
+  ## (`Path.inPlaceSteps`) from its terms to the current ones. Identity is
+  ## tracked by the write, not by the term's shape: an assignment of the
+  ## whole that rebuilds an equal term, or one whose data happens to be a
+  ## store chain over the old, is not an in-place step, so the copy no
+  ## longer follows (Nim gave the variable other memory).
+  let m = p.viewMarks[mi]
+  for i, k in m.keys:
+    var cur = m.at[i]
+    let now = heapTermOf(p, k)
+    var hops = 0
+    while not sameHeapTerm(cur, now):
+      result.moved = true
+      var found = false
+      for st in p.inPlaceSteps:
+        if st.key == k and sameHeapTerm(st.before, cur):
+          cur = st.after
+          found = true
+          break
+      inc hops
+      if not found or hops > p.inPlaceSteps.len: return (true, false)
+  result.inPlace = true
+
+proc reanchorView(p: Path; mi: int) =
+  ## RFC-0005 S8ca. Mark `mi` takes the current terms of its arrays.
+  for i, k in p.viewMarks[mi].keys:
+    p.viewMarks[mi].at[i] = heapTermOf(p, k)
 
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
@@ -20412,21 +20565,39 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           continue
         let cur = curO.get
         let xv = env2[c.local]
+        if c.view:
+          # RFC-0005 S8bu: a `view` follows only an in-place write. S8ca:
+          # an in-place write is a logged step (`viewInPlace`), not a term
+          # of the right shape; Nim's by-value formal is never written by
+          # name.
+          let mi = viewMarkOf((if q == nil: p else: q), c.local, w)
+          if mi < 0:
+            if not sameSymVal(xv, cur) and displayName(c.local) notin freed:
+              freed.add displayName(c.local)
+            continue
+          let (moved, inPlace) = viewInPlace((if q == nil: p else: q), mi)
+          if not moved: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          reanchorView(q, mi)
+          if inPlace: env2[c.local] = cur
+          elif displayName(c.local) notin freed: freed.add displayName(c.local)
+          continue
         if sameSymVal(xv, cur): continue
         if q == nil: q = forkPath(p, p.pc, p.env)
         let snap = addrSnapName(depth, c.local)
         let hasSnap = env2.hasKey(snap)
         if hasSnap and sameSymVal(xv, env2[snap]):
-          # RFC-0005 S8bu: a `view` follows only an in-place write.
-          if c.view and not viewFollows(ctx, xv, cur):
-            if displayName(c.local) notin freed: freed.add displayName(c.local)
-            continue
           env2[c.local] = cur
           continue
         if not (hasSnap and sameSymVal(cur, env2[snap])) and
            not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
           clash.add displayName(c.local)
+        # RFC-0005 S8ca: an element of the variable written by name is
+        # written in its memory; its store is an in-place step.
+        let heapsBefore = q.heaps
         let st = addrEntryStore(ctx, q, c, refAst, xv)
+        if stmt.kind == isIndexAssign and stmt.iaRecvName == c.local:
+          logInPlace(q, heapsBefore, q)
         if st.isSome: env2[c.local] = st.get
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
@@ -20467,20 +20638,32 @@ proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
   ## value.
   var env2 = p.env
   var changed = false
+  var reanchor: seq[int]   ## RFC-0005 S8ca
   for c in w.frame.addrCells:
     if env2.hasKey(c.local) and env2.hasKey(c.cell) and
        env2[c.cell].kind == svPtr:
       # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
       let cur = addrEntryValue(w.z3, p, c, env2[c.cell].ptrAst)
-      if cur.isSome and not sameSymVal(env2[c.local], cur.get):
-        # RFC-0005 S8bu: a `view` follows only an in-place write; any other
-        # is marked for the next statement's sync to taint.
-        if c.view and not viewFollows(w.z3, env2[c.local], cur.get):
-          env2[viewFreedPrefix & c.local] = cur.get
-        else:
-          env2[c.local] = cur.get
+      if cur.isNone: continue
+      if c.view:
+        # RFC-0005 S8bu: a `view` follows only an in-place write (S8ca:
+        # a logged step, `viewInPlace`); any other is marked for the next
+        # statement's sync to taint.
+        let mi = viewMarkOf(p, c.local, w)
+        let (moved, inPlace) =
+          if mi >= 0: viewInPlace(p, mi)
+          else: (not sameSymVal(env2[c.local], cur.get), false)
+        if not moved: continue
+        if mi >= 0: reanchor.add mi
+        if inPlace: env2[c.local] = cur.get
+        else: env2[viewFreedPrefix & c.local] = cur.get
         changed = true
-  if changed: forkPath(p, p.pc, env2) else: p
+      elif not sameSymVal(env2[c.local], cur.get):
+        env2[c.local] = cur.get
+        changed = true
+  if not changed: return p
+  result = forkPath(p, p.pc, env2)
+  for mi in reanchor: reanchorView(result, mi)
 
 const elemSnapPrefix = "__elemsnap#"
   ## RFC-0005 S8be. As `addrSnapPrefix`, for a seq with element cells as a
@@ -21633,6 +21816,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       inheritElemCells(descentBase, callerFrameId, w.frame.frameId,
                        elemShares, @[], @[])
     w.frame.addrCells = entryCells
+    anchorViews(descentBase, entryCells, w.frame.frameId)   ## RFC-0005 S8ca
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
                          @[descentBase], w)

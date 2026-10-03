@@ -5632,6 +5632,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
       ";fld=" & s.dwField & (if s.dwInit: ";init" else: "") &   # RFC-0005 S8l
       (if s.dwCell: ";cell" else: "") &                          # RFC-0005 S8an
+      (if s.dwInPlace: ";inplace" else: "") &                    # RFC-0005 S8ca
       ";ety=" & canonicalize(s.dwElemTy) &
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"

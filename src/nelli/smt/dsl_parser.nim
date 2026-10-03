@@ -827,11 +827,13 @@ proc emitStmt*(s: IRStmt): NimNode =
     if s.dwField.len > 0:       ## Phase 15 R6: `p.field = v` field write.
       newCall(bindSym"mkFieldDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
               emitIRType(s.dwElemTy), emitIRType(s.dwObjTy), newLit(s.dwField),
-              newLit(s.dwPtrFamily), newLit(s.dwInit))
+              newLit(s.dwPtrFamily), newLit(s.dwInit),
+              newLit(s.dwInPlace))   # RFC-0005 S8ca
     else:
       newCall(bindSym"mkDerefWrite", emitExpr(s.dwPtr), emitExpr(s.dwValue),
               emitIRType(s.dwElemTy), newLit(s.dwPtrFamily),
-              newLit(s.dwCell))   # RFC-0005 S8an
+              newLit(s.dwCell),      # RFC-0005 S8an
+              newLit(s.dwInPlace))   # RFC-0005 S8ca
   of isUnsupported:
     newCall(bindSym"mkUnsupported", newLit(s.unKind), newLit(s.reason),
             newLit(s.unMarker))
@@ -13705,6 +13707,51 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
   let newVal = mkBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR)
   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
 
+proc swapLvalue(n: NimNode): NimNode =
+  ## RFC-0005 S8ca. The lvalue `parseAsgn` writes for an operand of `swap`:
+  ## a variable, or the shapes `parseIncDecLvalue` writes (an array
+  ## element, a seq element with a pure index, a field path, a
+  ## dereference). nil for any other.
+  let lhs = unwrapHidden(n)
+  let fieldNode = if lhs.kind == nnkCheckedFieldExpr and lhs.len >= 1: lhs[0]
+                  else: lhs
+  if lhs.kind == nnkSym: lhs
+  elif arrayElemLvalue(n): elemLvalueBracket(n)
+  elif lhs.kind == nnkBracketExpr and lhs.len == 2 and
+       unwrapHidden(lhs[0]).kind == nnkSym and
+       classifyType(unwrapHidden(lhs[0])).ty.kind == itSeq and
+       pureIndexNode(lhs[1]): lhs
+  elif fieldNode.kind == nnkDotExpr and dottedFieldShape(fieldNode): lhs
+  elif lhs.kind == nnkDerefExpr and lhs.len == 1: lhs
+  else: nil
+
+proc parseSwap(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8ca. `swap(a, b)`, the system magic. SOUNDNESS: it reached
+  ## the user-call fallback, where its bodiless `{.magic.}` routine was
+  ## registered with an EMPTY body, so both writes were dropped without a
+  ## record: `swap(a, b); if a[1] == 3` was a clean, wrong sxUnsat. Now
+  ## both operands are read (in order, each with its own checks), then
+  ## each is written the other's value through the plain assignment's own
+  ## lvalue arm (`parseAsgn`). A seq written whole through a pointer is a
+  ## write of the whole (`dwInPlace` false): Nim swaps the memory, so a
+  ## by-value copy sharing it does not follow. Any other operand shape
+  ## declines on its path.
+  let a = swapLvalue(n[1])
+  let b = swapLvalue(n[2])
+  if a == nil or b == nil:
+    return ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "`swap` of `" & n[1].repr & "` and `" & n[2].repr &
+              "` is not modelled -- path degraded to sxUnknown"),
+      "`swap` of this operand shape is not modelled")
+  let ty = classifyType(n[1]).ty
+  let ta = freshSynth(ctx, "swapA")
+  preamble.add mkLet(ta, ty, parseExpr(n[1], preamble, ctx))
+  let tb = freshSynth(ctx, "swapB")
+  preamble.add mkLet(tb, ty, parseExpr(n[2], preamble, ctx))
+  preamble.add parseAsgn(nnkAsgn.newTree(a, newEmptyNode()), mkVar(tb),
+                         preamble, ctx)
+  parseAsgn(nnkAsgn.newTree(b, newEmptyNode()), mkVar(ta), preamble, ctx)
+
 proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
   ## or `values` (`for k, v in t` is `pairs(t)` after semcheck; `for (k, v)
@@ -13947,8 +13994,9 @@ proc dottedFieldIndexAssign(n, fieldNode, idxNode: NimNode, rhs: IRExpr,
     let idxIR = parseExpr(idxNode, preamble, ctx)
     let valIR = value()
     preamble.add mkIndexAssignStmt(synth, idxIR, valIR, siteLoc(n))
+    # RFC-0005 S8ca: the field's seq is written in place (`dwInPlace`).
     return mkFieldDerefWrite(ptrIR, mkVar(synth), fieldTy, pointeeTy,
-                             fieldName, isPtr)
+                             fieldName, isPtr, inPlace = true)
   let tmp = freshSynth(ctx, "fidx")
   let fieldIR = parseExpr(fieldNode, preamble, ctx)   ## RFC-0005 S8ax: first
   preamble.add mkLet(tmp, fieldTy, fieldIR)
@@ -14100,7 +14148,9 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
                                  pointeeTy.seqElemTy, siteLoc(n))
         let valIR = asgnRhs()
         preamble.add mkIndexAssignStmt(tmp, idxIR, valIR, siteLoc(n))
-        return mkDerefWrite(mkVar(pt), mkVar(tmp), pointeeTy, isPtr)
+        # RFC-0005 S8ca: logged as an in-place step (`dwInPlace`).
+        return mkDerefWrite(mkVar(pt), mkVar(tmp), pointeeTy, isPtr,
+                            inPlace = true)
   if lhs.kind == nnkBracketExpr and lhs.len == 2:
     let recv = unwrapHidden(lhs[0])
     if recv.kind == nnkSym:
@@ -15164,6 +15214,8 @@ proc parseStmtInner(n: NimNode,
          isBuiltinNamed(n[0], ["inc", "dec"]):
       # RFC-0005 S8bc (item 7): every other system `inc`/`dec`.
       parseIncDecLvalue(n, preamble, ctx)
+    elif n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["swap"]):
+      parseSwap(n, preamble, ctx)   # RFC-0005 S8ca
     else:
       # User-proc call as a statement (void-return). Only resolvable
       # against typed AST — isolation-mode falls to `isUnsupported`.

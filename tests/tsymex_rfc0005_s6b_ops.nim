@@ -700,10 +700,15 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## (`retBindKindsAgree`) through their existing site. RFC-0005 S8aa
     ## removed the first: an Int-sorted same-width reinterpret is modelled
     ## (`lowerConvIntReinterpret` reduces into the target window), so 13.
+    ## RFC-0005 S8bi added the fourteenth, fresh: `lower`'s `iekSeqNew` arm
+    ## for `newSeqUninit[T](n)`, whose element array is a fresh symbol per
+    ## evaluation (`freshDegradeName`), a superset of whatever Nim leaves in
+    ## the elements; `n` is lowered and its `RangeDefect` forked first, and
+    ## nothing else is dropped.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 13
+    check sites.len == 14
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

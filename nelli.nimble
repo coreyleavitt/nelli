@@ -1061,6 +1061,11 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bb_capvalues_plus",
             "tsymex_rfc0005_s8bb_capvalues_lf",
             "tsymex_rfc0005_s8bb_replace",
+            # RFC-0005 S8bi -- S8bb's remainder A: closure/HOF/borrow/regex
+            # nodes as raise sites, closure exit facts placed in evaluation
+            # order, newSeq / newSeqOfCap / newSeqUninit, set literals in
+            # `in`/`notin`, and the recursive-definition fuel scan. Walker 210.
+            "tsymex_rfc0005_s8bi_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

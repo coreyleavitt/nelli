@@ -710,11 +710,15 @@ type
                         ## local): the walker's `defaultZero`, an empty
                         ## container. A type with no modelled zero value
                         ## declines in-band at lowering.
-    iekSeqNewZero       ## RFC-0005 S8bc (item 5): `newSeq[T](n)`, a seq of
-                        ## `snzLen` elements, each `snzElemTy`'s zero. The
-                        ## parser guards `0 <= n <= maxModelledInitialSize`
-                        ## first (a negative `n` raises `RangeDefect`, a
-                        ## larger one declines, scoped).
+    iekSeqNew           ## RFC-0005 S8bc (item 5) and S8bi, unified in batch
+                        ## 5: `newSeq[T](n)` / `newSeq(s, n)` (`snZeroed`:
+                        ## every element `default(T)`), `newSeqUninit[T](n)`
+                        ## (elements a fresh value) and `newSeqOfCap[T](n)`
+                        ## (`snOfCap`: length 0, `n` only checked). Each
+                        ## takes `n: Natural`; the parser guards it first
+                        ## (`parseNewSeqLen`): a negative `n` raises
+                        ## `RangeDefect`, one above `maxModelledInitialSize`
+                        ## declines, scoped to its path.
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -986,9 +990,11 @@ type
                                      ## type when the other operand is `ptr T`)
     of iekZeroValue:                 ## RFC-0005 S8u
       zvTy*: IRType                  ## the type whose zero value this is
-    of iekSeqNewZero:                ## RFC-0005 S8bc
-      snzLen*: IRExpr                ## the length (already range-guarded)
-      snzElemTy*: IRType             ## the element type
+    of iekSeqNew:                    ## RFC-0005 S8bi
+      snArg*:    IRExpr              ## the `Natural` argument (already guarded)
+      snElemTy*: IRType              ## the element type
+      snZeroed*: bool                ## elements `default(T)`, else fresh
+      snOfCap*:  bool                ## `newSeqOfCap`: length 0, not `snArg`
 
   IRStmtKind* = enum
     isBlock
@@ -2414,7 +2420,9 @@ type
                           ## per-call `retSym` (a `synthZ3`-numbered name) is
                           ## left free (explicit `return`, implicit `result`
                           ## fallthrough, untouched result with no
-                          ## zero-default). `classOf` is `dcFreshSymbol`:
+                          ## zero-default). RFC-0005 S8bi: `newSeqUninit`'s
+                          ## element array (`lower`'s `iekSeqNew` arm).
+                          ## `classOf` is `dcFreshSymbol`:
                           ## `{scSpurious}` on both coordinates -- a hit through
                           ## it is a candidate, and it does not void `sxUnsat`.
                           ## A new site may reuse this kind ONLY if its operands
@@ -3965,9 +3973,13 @@ proc mkZeroValue*(ty: IRType): IRExpr =
   ## a `HashSet`). Lowers to the walker's `defaultZero`.
   IRExpr(kind: iekZeroValue, zvTy: ty)
 
-proc mkSeqNewZero*(len: IRExpr, elemTy: IRType): IRExpr =
-  ## RFC-0005 S8bc (item 5). `newSeq[T](len)`: `len` zero elements.
-  IRExpr(kind: iekSeqNewZero, snzLen: len, snzElemTy: elemTy)
+proc mkSeqNew*(arg: IRExpr; elemTy: IRType; zeroed, ofCap: bool): IRExpr =
+  ## RFC-0005 S8bc / S8bi. A seq of length `arg` (0 for `newSeqOfCap`,
+  ## `ofCap`), `arg` already guarded by the parser (`parseNewSeqLen`);
+  ## elements `default(elemTy)` when `zeroed`, else a fresh value
+  ## (`newSeqUninit`).
+  IRExpr(kind: iekSeqNew, snArg: arg, snElemTy: elemTy, snZeroed: zeroed,
+         snOfCap: ofCap)
 
 proc mkField*(obj: IRExpr, fieldIx: int, fieldName: string = ""): IRExpr =
   IRExpr(kind: iekField, obj: obj, fieldIx: fieldIx, fieldName: fieldName)
@@ -5947,8 +5959,9 @@ proc render*(e: IRExpr): string =
     "nil"
   of iekZeroValue:        ## RFC-0005 S8u
     "default(" & $e.zvTy & ")"
-  of iekSeqNewZero:       ## RFC-0005 S8bc
-    "newSeq[" & $e.snzElemTy & "](" & render(e.snzLen) & ")"
+  of iekSeqNew:           ## RFC-0005 S8bi
+    (if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
+     else: "newSeqUninit") & "[" & $e.snElemTy & "](" & render(e.snArg) & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

@@ -407,6 +407,11 @@ title = "S8bd's remainder: pass-by-reference through a representation-preserving
 state = "done"
 
 [[slice]]
+id = "S8bi"
+title = "S8bb's remainder A: regex nodes as defect carriers, closure exit facts on earlier raises, newSeq[T](n) and notin set-literal targets, recursive-function fuel audit"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -11313,3 +11318,176 @@ between Z3 versions anywhere in this set.
   conversion work and the scope decision that re-found it.
 - **PRECISION: a ref reached through a pointer dereference, with a
   trailing field (`pb[].x`).** See the note of the same name just above.
+
+**As landed (S8bi, walker 210) — S8bb's remainder A.** All five items
+are done, and nothing is deferred. The branch is `rfc-0005-s8bi`, on
+S8bb's `9e15103`. Items 1 to 4 are the soundness and crash items S8bb
+listed under "Different mechanisms, reported and not fixed here"; item 5
+turns S8bb's fuel finding into a guard over every recursive definition.
+
+*Wrong verdicts at 9e15103, each pinned RED first*
+(`tests/tsymex_rfc0005_s8bi_remainder.nim`).
+- **Raise sites lowered past a `while` guard's short circuit** (item 1).
+  A `while` guard is not A-normalised, so `rhsHasInlineDefectFork` is its
+  only protection, and it counted a closure call, a `map`/`filter` over a
+  closure, a borrowed `+ - * div mod` and a regex call as carriers only.
+  D1c's flat fast path then lowered them whether or not the short circuit
+  reached them:
+  - `while b >= 0 and f(b)`, with `f` raising for `x < 0`: a false
+    `sxSat` (the raise was forked for `b < 0`);
+  - a borrowed `div` behind `or`: a false `sxSat`;
+  - a `(*UTF8)` pattern behind `and`, in an `if` and in a `while` guard,
+    and `re(p)` behind `and`: `sxUnknown` for a reachable target, because
+    the undecided pattern's decline tainted a path that never ran it.
+- **Closure exit facts on raises evaluated before the call** (item 2).
+  `drainPendingLowerEffects` appended a closure call's exit facts (each
+  body exit did not raise, and the body left through a value-bearing exit)
+  to the drained path, so every raise of the expression was forked under
+  them, including the raises evaluated before the call. Each was a false
+  `sxUnsat`:
+  - `while ord(s[i]) + f(x) > 0` and `10 div i + f(x)`, with `f` raising
+    for `x > 5`: the `IndexDefect` / `DivByZeroDefect` was forked only
+    with `x <= 5`;
+  - the closure's own "did not trap" fact on an earlier raise;
+  - a raise before the call in a three-term expression.
+- **An inline `s[i]` evaluated after a later operand's hoisted `let`s**
+  (item 2, found here). `parseAtomicOperand` keeps `s[i]` inline for the
+  CR-17(a) check, so in `s[i] == chr(f(x))` the closure's `ValueError` was
+  raised on runs where Nim raises `IndexDefect` first: a false `sxUnsat`.
+- **`newSeq[T](n)` aborted the compile** (item 3): "node has no type" at
+  `dsl_typebridge.nim:838`, from `ensureProcRegistered`'s parameter walk
+  of the generic magic. Item 3's base RED was taken from a separate probe,
+  because the crash stops the whole suite from compiling at base.
+- **A set literal in `in`/`notin` declined** (item 4):
+  `feUnsupportedExprKind` (`nnkCurly`) on every pin.
+- **Fuel-less recursive definitions** (item 5). The source scan flags
+  `regex_parser.nim`'s `run` and both `regexReplaceRec` definitions in
+  `runtime_strings.nim`. No wrong verdict was found through them, but
+  S8bb item 6 showed that Z3 unfolds such a recursion without spending
+  `rlimit`.
+
+The controls guard against over-correction and are green on both trees.
+For example, a raise evaluated after the closure call still carries the
+call's facts (`sxUnsat`).
+
+*1. Raise sites (`dsl_parser.rhsHasInlineDefectFork`).* A closure call,
+a `map`/`filter` over a closure (the inline path applies the closure per
+element), a borrowed `+ - * div mod` (lowered as the base operator, with
+its forks), `newSeq` (the `Natural` conversion) and every regex call
+except a capture-group read are raise sites. Every non-capture regex call
+counts, not only patterns the reader finds rejected: a non-literal
+`Regex` is built by the call's own evaluation, and an undecided pattern
+declines. Which patterns raise is the lowering's decision; a valid
+pattern pays only the cost of the guarded form.
+
+*2. Closure exit facts in evaluation order (`runtime.nim`).*
+- `applyClosureGround` logs each exit fact in `w.raiseOrder` as an
+  `rskClosureExit` entry, after the call's own raise entries.
+- `drainScalarRaiseForks` strips the facts that
+  `drainPendingLowerEffects` appended (`lastDrainedClosureExitPc`, the
+  path's tail) and puts each back as a stage at its logged place, so a
+  raise evaluated before the call is forked without them and every
+  survivor after the call has them.
+- `drainClosureRaises` routes from that survivor as it is.
+  `ClosureRaise.priorExitPc` is removed: the earlier calls' facts are on
+  the path already.
+- If the tail is not those facts, the path keeps them, and a closure
+  raise drained there records `weInternalWalkerFault` ("closure raise
+  drained on a path ..."). The 86-suite verification never hit it.
+- For the inline operand, `keepInlineRaiseOrder` adds an evaluation-only
+  `let` of an inline raising operand before the second operand's hoisted
+  `let`s, at all six operand-pair sites. The operand stays inline in the
+  expression; its second lowering forks nothing on the first's survivors.
+  The two `parseAtomicOperand` calls stay on separate lines, because
+  `tsymex_phase15_A2a_chokepoint_audit` counts marker lines.
+
+*3. The `newSeq` family (`iekSeqNew`).* The parser intercepts
+`newSeq[T](n)`, `newSeqOfCap[T](n)` and `newSeqUninit[T](n)` before
+`ensureProcRegistered`; the statement `newSeq(s, n)` is `s = newSeq[T](n)`
+through the assignment's lvalue arms. The compiler's conversion to
+`Natural` is peeled and lowered as the check. The new IR kind is wired
+through every IR-kind site, including the emit-roundtrip gate (two new
+fixtures in `tsymex_r6_r6_emit_roundtrip`). Lowering:
+- every form raises `RangeDefect` when `n < 0`, before anything else;
+- `newSeq` is length `n` over a constant array of `default(T)`;
+- `newSeqOfCap` is length 0;
+- `newSeqUninit` is length `n` over a free array, with an
+  `feUnsupportedOpHavoc` degrade (a witness may depend on an element a
+  run does not reproduce);
+- an element type the walker cannot back declines as
+  `seNestedSeqUnsupported`, as `lowerSeqLit` does.
+
+*4. Set literals (`dsl_parser.parseSetLitMember`).* `contains(<literal>,
+k)`, the typed form of `k in {..}` (and of `notin` under `not`), is the
+disjunction of `k == e` per element and `k >= e1 and k <= e2` per range;
+the empty set is `false`. Elements are int, char, unsigned and bool
+literals and enum fields. The key is read once (a `let` outside a guard).
+Membership never range-checks the key: `70000 in {1, 3}` and
+`-1 in {1, 3}` are false in Nim, without a raise. A range over an inline
+`s[i]` is expanded into its members' equalities, because CR-17 declines
+an ordering comparison on `s[i]`; without this, the `while`-guard `notin`
+pin was `sxUnknown`. A literal with a non-constant element, and any
+set-typed value, still declines.
+
+*5. Fuel on every recursive definition.* In `runtime_strings.nim`,
+`regexReplaceRec` (both definitions), and in `regex_parser.nim`, `run`,
+each definition now takes `fuel: Z3Int`, has a `fuel <= mkInt(0)` base
+case, and passes `fuel - 1` on each recursive call, starting from
+`len + 1`. Each unfolding drops a byte, so a real run never exhausts the
+fuel. `rep` already had fuel (S8bb item 6). The suite scans
+`src/**/*.nim` code with comments stripped, checks every `defineRecFun[`
+for the parameter, the base case and the decrement, and forbids the raw
+API (`Z3_mk_rec_func_decl`, `Z3_add_rec_def`, `define-fun-rec`). Fixture
+self-tests prove that the scan rejects a fuel-less definition and
+accepts a fueled one.
+
+*Verification.* 86 suites (the S8bi list, `tsymex_rfc0005_s8bi_remainder`
+included) were run on the head and on `9e15103`, under Z3 5.1 and 4.13.4,
+c backend, 900 s bound each. They were compared per check, on the
+`[OK]`/`[FAILED]` lines by test name.
+
+| Tree | Z3 5.1 | Z3 4.13.4 |
+|---|---|---|
+| head | 86 suites, 1,495 / 1,495 checks | 86 suites, 1,495 / 1,495 checks |
+| `9e15103` | 85 suites, 1,448 / 1,448 checks | 85 suites, 1,448 / 1,448 checks |
+
+- Every suite exited 0, and none hung.
+- The only per-check differences are the new suite (45 checks) and the
+  two new `iekSeqNew` round-trip fixtures in `tsymex_r6_r6_emit_roundtrip`.
+- No check differs between the Z3 versions on either tree.
+- The walker-fault message "closure raise drained on a path" appears in
+  no log.
+
+`tsymex_rfc0005_s8bi_remainder`'s times are measured on a host shared
+with other agents (load average about 15):
+
+| Backend | Compile and run (wall) | Run only (real / user) |
+|---|---|---|
+| c, Z3 5.1 | 86.9 s | 13.7 / 8.3 s |
+| cpp, Z3 5.1 | 100.4 s | 10.2 / 7.0 s |
+
+In the verification pass, the c runs took 38 s (Z3 5.1) and 40 s
+(Z3 4.13.4) wall, compilation included.
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "210"`.
+- **`tsymex_r6_r6_emit_roundtrip`:** the IR-kind exhaustiveness gate
+  lists `iekSeqNew`, with two fixtures.
+- **`tsymex_rfc0005_s6b_ops`:** the structural count of
+  `feUnsupportedOpHavoc` sites is 14. The new site is `newSeqUninit`'s
+  element array, which is `dcFreshSymbol` by the kind's own rule: its
+  operands are lowered first, it is fresh per evaluation, and nothing is
+  dropped. The first symex-mingw run on this branch caught it
+  (37065686296).
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: a huge `n` in `newSeq` is modelled as succeeding.** Nim
+  runs out of memory or aborts. The walker has no allocation-size model.
+- **PRECISION: set-typed values, `set[T]` parameters and builtin-set
+  `incl`/`excl` are unclassified.** Only a literal of constants is
+  modelled (item 4).
+- **PRECISION: `let r = re"(ab"` declines as `feUnsupportedExprKind`
+  (`nnkCallStrLit`),** although Nim always raises `RegexError` there.
+- **PRECISION: `newSeqUninit` taints the whole path even when no element
+  is read.** Whether an element is read is not tracked.
+- **PRECISION: set literals with non-constant elements still decline.**

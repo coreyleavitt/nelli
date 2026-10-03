@@ -433,8 +433,9 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkNil", emitIRType(e.nilPointee))
   of iekZeroValue:        ## RFC-0005 S8u
     newCall(bindSym"mkZeroValue", emitIRType(e.zvTy))
-  of iekSeqNewZero:       ## RFC-0005 S8bc
-    newCall(bindSym"mkSeqNewZero", emitExpr(e.snzLen), emitIRType(e.snzElemTy))
+  of iekSeqNew:           ## RFC-0005 S8bi
+    newCall(bindSym"mkSeqNew", emitExpr(e.snArg), emitIRType(e.snElemTy),
+            newLit(e.snZeroed), newLit(e.snOfCap))
 
 proc emitIRType*(t: IRType): NimNode =
   # #163 review R27: `IRStmt.isAssign.aty` is nil at MOST call sites (the
@@ -1523,6 +1524,17 @@ proc regexCallForks(e: IRExpr): bool =
   ## RFC-0005 S8ay. A regex call forks a raise of its own: `RegexError` for
   ## a pattern PCRE rejects, `RangeDefect` for a `start` outside int32 (Nim
   ## passes `start.cint`).
+  ## RFC-0005 S8bi: every regex call is a raise site, not only the ones
+  ## the reader has already found raising. A `Regex` value that is not a
+  ## literal (`re(p)`) is built by the call's own evaluation and may raise
+  ## `RegexError`, as may a pattern the reader leaves undecided
+  ## (`psUnknown`); those lower to the `seUnsupportedRegex` decline, which
+  ## taints the path. Counted as a carrier, the call took D1c's flat fast
+  ## path and lowered whether or not the short circuit reached it, so a
+  ## path on which Nim never runs it (`s.len > 3 and
+  ## s.match(re"(*UTF8)a")` with a short `s`) was tainted too: `sxUnknown`
+  ## for a reachable target. Which patterns raise is the lowering's to
+  ## decide; the guard costs a valid one nothing but the guarded form.
   # RFC-0005 S8bb: a captures overload's group (`iekStrCaptureRe`) forks
   # nothing: it reads the call's own operands after the call.
   if e.kind notin {iekStrMatch, iekStrFindRe, iekStrReplaceRe,
@@ -1531,13 +1543,7 @@ proc regexCallForks(e: IRExpr): bool =
   var op = e.strOp
   if op.startsWith("regex:"): op = op[6 .. ^1]
   elif e.kind == iekStrUnsupported: return false
-  let sp = decodeRegexSpec(op)
-  if sp.entry.startsWith("capture"): return false   # RFC-0005 S8bb
-  if sp.flag in ["re", "rex"] and
-     parsePcre(sp.pattern, sp.flag == "rex").status == psRejected:
-    return true
-  e.kind in {iekStrMatch, iekStrFindRe} and e.strArgs.len >= 2 and
-    e.strArgs[1].kind != iekIntLit
+  not decodeRegexSpec(op).entry.startsWith("capture")   # RFC-0005 S8bb
 
 # ---- R16-2b: detect inline float→int conversions in RHS IR trees ------------
 
@@ -1604,8 +1610,6 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
              rhsHasInlineDefectFork(e.vfsVal)
   of iekSeqLen:
     result = rhsHasInlineDefectFork(e.lenObj)
-  of iekSeqNewZero:   ## RFC-0005 S8bc: its guard forks are preamble, not here
-    result = rhsHasInlineDefectFork(e.snzLen)
   of iekSeqSlice:
     # v67: a seq slice carries its own IndexDefect fork (the SND-4 OOB
     # deposit in its lowering; RFC-0005 S8g: and its RangeDefect) — always
@@ -1664,6 +1668,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
   of iekBorrowOp:
+    # RFC-0005 S8bi: a borrowed arithmetic operator is the base operator
+    # (`lowerArith`), with its DivByZeroDefect / OverflowDefect forks.
+    if e.borrowOp in {bAdd, bSub, bMul, bDiv, bMod}: return true
     result = rhsHasInlineDefectFork(e.borrowLhs) or
              rhsHasInlineDefectFork(e.borrowRhs)
   of iekClosureCall:
@@ -1679,6 +1686,10 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
   of iekHofCall:
     # RFC-0005 S8as: it applies a closure (see `iekClosureCall`).
     result = true
+  of iekSeqNew:
+    # RFC-0005 S8bc, S8bi: its length guard forks in the preamble
+    # (`parseNewSeqLen`), not here.
+    result = rhsHasInlineDefectFork(e.snArg)
   of iekLambda:
     discard  # lambdaBody is IRStmt; don't recurse into lambdas
   of iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
@@ -1749,7 +1760,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
   of iekClosureCall: e.ccArgs
   of iekSeqLit: e.seqLitElems
   of iekHofCall: @[e.hofSeq, e.hofClosure, e.hofInit]
-  of iekSeqNewZero: @[e.snzLen]   # RFC-0005 S8bc (batch 4)
+  of iekSeqNew: @[e.snArg]   # RFC-0005 S8bc, S8bi (batch 5: one kind)
   of iekLambda, iekIntLit, iekFloatLit, iekBoolLit, iekVar, iekStrLit,
      iekGetCurrentExn, iekGetCurrentExnMsg, iekNil, iekZeroValue:
     @[]
@@ -1815,7 +1826,7 @@ func isEagerIR(e: IRExpr): bool =
      iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
      iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
      iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp,
-     iekSeqNewZero:   # RFC-0005 S8bc (batch 4): `newSeq[T](n)`, a call
+     iekSeqNew:   # RFC-0005 S8bc, S8bi: `newSeq[T](n)` and kin, a call
     true
   else: false
 
@@ -4191,6 +4202,25 @@ proc parseAtomicOperand(n: NimNode, preamble: var seq[IRStmt],
   preamble.add mkLet(tmp, ty, ir)
   mkVar(tmp)
 
+proc keepInlineRaiseOrder(l: IRExpr; a: NimNode; mark: int;
+                          preamble: var seq[IRStmt]; ctx: ParseCtx) =
+  ## RFC-0005 S8bi. Called after a pair of `parseAtomicOperand` calls, with
+  ## `l` the first operand (from `a`) and `mark` the preamble length between
+  ## the two. `parseAtomicOperand`'s ordering argument (constraints 2+3
+  ## above) assumes an operand's raises are in `preamble` once it returns,
+  ## which does not hold for one left INLINE that raises when it lowers:
+  ## `s[i]` (`iekStrAt`, kept inline for CR-17(a)). When the second operand
+  ## then hoists anything, its `let`s ran first: in `s[i] == chr(f(x))` the
+  ## closure's `ValueError` was raised on runs where Nim raises
+  ## `IndexDefect` from `s[i]`, and a handler reached only that way was
+  ## `sxUnsat`. `l` is now also evaluated, for its raise, in a `let` placed
+  ## before the second operand's; it stays inline in the expression (its
+  ## second lowering forks nothing on the survivors of the first).
+  if preamble.len > mark and not ctx.inGuardCond and isAtomicIR(l) and
+     rhsHasInlineDefectFork(l) and a.typeKind != ntyNone:
+    let tmp = freshSynth(ctx, "evalOrder")
+    preamble.insert(mkLet(tmp, classifyType(a).ty, l), mark)
+
 proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
                       ctx: ParseCtx): (IRExpr, IRExpr) =
   ## RFC-0005 S8ax. `parseAtomicOperand` of a binary operator's two
@@ -4199,12 +4229,20 @@ proc parseOperandPair(a, b: NimNode; preamble: var seq[IRStmt];
   ## `while` guard too. S8ax left the guard in the parser's order and relied
   ## on the walk's read-before-write check (`lowerClosureCall`), which
   ## declines (`ceCaptureByRefUnmodelled`) what the order here decides.
+  ##
+  ## RFC-0005 batch 5: S8bi's `keepInlineRaiseOrder` first. An inline left
+  ## operand that raises when it lowers (`s[i]`) is also evaluated, for its
+  ## raise, in a `let` ending its own statements, ahead of the right one's;
+  ## the order below then treats that `let` as the left operand's own.
   let m0 = preamble.len
   let l = parseAtomicOperand(a, preamble, ctx)
   let m1 = preamble.len
   let r = parseAtomicOperand(b, preamble, ctx)
+  let before = preamble.len
+  keepInlineRaiseOrder(l, a, m1, preamble, ctx)
+  let m1k = m1 + (preamble.len - before)
   var ops = @[l, r]
-  orderOperands(preamble, @[m0, m1], ops, @[IRType(nil), nil], omOperands,
+  orderOperands(preamble, @[m0, m1k], ops, @[IRType(nil), nil], omOperands,
                 ctx)
   (ops[0], ops[1])
 
@@ -6132,21 +6170,6 @@ proc parseNewSeqLen(lenNode: NimNode; name: string;
                name & ": length above " & $maxModelledInitialSize))])
   lenIR
 
-proc parseNewSeqExpr(n, calleeSym: NimNode; preamble: var seq[IRStmt];
-                     ctx: ParseCtx): IRExpr =
-  ## RFC-0005 S8bc (item 5). The stdlib's `newSeq[T](n)` (and
-  ## `newSeq[T]()`, `n = 0`): a seq of `n` zero elements (`iekSeqNewZero`).
-  ## `nil` for any other call. It was walked as the generic stdlib body,
-  ## which reaches an unsupported `when` and the seq payload cast
-  ## (`heUnsafeCast`), so every call declined.
-  if calleeSym.kind != nnkSym or calleeSym.strVal != "newSeq" or
-     not isStdlibDecl(calleeSym) or n.len != 2:
-    return nil
-  let cls = classifyType(n)
-  if cls.ty.kind != itSeq: return nil
-  mkSeqNewZero(parseNewSeqLen(n[1], "newSeq", preamble, ctx),
-               cls.ty.seqElemTy)
-
 proc parseGetOrDefault(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                        ctx: ParseCtx): IRExpr =
   ## RFC-0005 S8bc. The stdlib's `getOrDefault(t, key)` /
@@ -6578,6 +6601,94 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   else:
     preamble.add wrap(callWith(alias, touch), backsFor(alias))
   (e: mkVar(synth), hoisted: true)
+
+const seqNewBuiltins = ["newSeq", "newSeqOfCap", "newSeqUninit"]
+  ## RFC-0005 S8bi. The seq constructors `parseSeqNew` models.
+
+proc parseSeqNew(op: string; argNode: NimNode; seqTy: IRType;
+                 preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bi. `newSeq[T](n)`, `newSeqOfCap[T](n)`, `newSeqUninit[T](n)`
+  ## (and the statement `newSeq(s, n)`, as `s = newSeq[T](n)`). Before S8bi
+  ## the call fell through to `ensureProcRegistered`, whose parameter walk
+  ## of the generic magic aborted the compile ("node has no type").
+  ##
+  ## RFC-0005 batch 5: one lowering with S8bc's `newSeq` (item 5). Each
+  ## takes `n: Natural`, guarded by `parseNewSeqLen` exactly as S8bc's was:
+  ## a negative `n` raises `RangeDefect` at the call, and one above
+  ## `maxModelledInitialSize` declines, scoped to its path -- allocating
+  ## (or reserving) that many elements raises `OutOfMemDefect` or not,
+  ## depending on the host, so it is never modelled as succeeding.
+  mkSeqNew(parseNewSeqLen(argNode, op, preamble, ctx), seqTy.seqElemTy,
+           zeroed = op != "newSeqUninit", ofCap = op == "newSeqOfCap")
+
+proc peelConstConv(n: NimNode): NimNode =
+  ## RFC-0005 S8bi. Strip the compiler's implicit conversions (`HiddenStdConv`
+  ## with an empty type slot) around a value.
+  result = n
+  while result.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and
+        result.len == 2 and result[0].kind == nnkEmpty:
+    result = result[1]
+
+proc isConstSetElem(n: NimNode): bool =
+  ## RFC-0005 S8bi. An ordinal constant a set literal may hold: an int /
+  ## char literal, an enum field (incl. `true` / `false`), or a range of two.
+  let e = peelConstConv(n)
+  case e.kind
+  of nnkCharLit .. nnkUInt64Lit: true
+  of nnkSym: e.symKind == nskEnumField
+  of nnkRange:
+    e.len == 2 and isConstSetElem(e[0]) and isConstSetElem(e[1])
+  else: false
+
+proc parseSetLitMember(setNode, keyNode: NimNode; preamble: var seq[IRStmt];
+                       ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bi. `contains(<set literal>, k)`, the typed form of `k in
+  ## {..}` (and, under `not`, of `k notin {..}`), as the disjunction of
+  ## `k == e` per element and `k >= e1 and k <= e2` per range; the empty set
+  ## is `false`. Nil when `setNode` is not a literal of constants, which
+  ## leaves the call to the paths below (a set-typed VALUE is not modelled).
+  ## The key's conversion to the set's base range is peeled, not checked:
+  ## membership never raises (probe: `70000 in {1, 3}` and `-1 in {1, 3}`
+  ## are false). Before S8bi the literal was `feUnsupportedExprKind`
+  ## (`nnkCurly`).
+  var lit = setNode
+  while lit.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkStmtListExpr} and
+        lit.len >= 1:
+    lit = lit[lit.len - 1]
+  if lit.kind != nnkCurly: return nil
+  for el in lit:
+    if not isConstSetElem(el): return nil
+  var key = parseExpr(peelConstConv(keyNode), preamble, ctx)
+  if not ctx.inGuardCond and not isAtomicIR(key) and
+     keyNode.typeKind != ntyNone:
+    # Read once: every disjunct compares the same value.
+    let tmp = freshSynth(ctx, "setKey")
+    preamble.add mkLet(tmp, classifyType(peelConstConv(keyNode)).ty, key)
+    key = mkVar(tmp)
+  result = mkBoolLit(false)
+  var first = true
+  template addTerm(t: IRExpr) =
+    result = if first: t else: mkBinop(bOr, result, t)
+    first = false
+  for el in lit:
+    let e = peelConstConv(el)
+    if e.kind == nnkRange and key.kind == iekStrAt and
+       peelConstConv(e[0]).kind in nnkCharLit .. nnkUInt64Lit and
+       peelConstConv(e[1]).kind in nnkCharLit .. nnkUInt64Lit:
+      # A byte read `s[i]` stays inline (CR-17(a)), which declines an
+      # ordering comparison on it: a range of bytes (at most 256) is its
+      # members' equalities instead.
+      for code in peelConstConv(e[0]).intVal .. peelConstConv(e[1]).intVal:
+        addTerm mkBinop(bEq, key, mkIntLit(code))
+      continue
+    let term =
+      if e.kind == nnkRange:
+        mkBinop(bAnd,
+          mkBinop(bGe, key, parseExpr(peelConstConv(e[0]), preamble, ctx)),
+          mkBinop(bLe, key, parseExpr(peelConstConv(e[1]), preamble, ctx)))
+      else:
+        mkBinop(bEq, key, parseExpr(e, preamble, ctx))
+    addTerm term
 
 proc parseRoutineCallExpr(n, calleeSym: NimNode, preamble: var seq[IRStmt],
                           ctx: ParseCtx): IRExpr =
@@ -8078,6 +8189,12 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `abs`/... is not that builtin; it is walked like any other user call.
     if isUserCallee(calleeSym):
       return parseRoutineCallExpr(n, calleeSym, preamble, ctx)
+    # RFC-0005 S8bi: the seq constructors, before `ensureProcRegistered`
+    # gets the generic magic (see `parseSeqNew`).
+    if n.len == 2 and isBuiltinNamed(calleeSym, seqNewBuiltins):
+      let seqTy = classifyType(n).ty
+      if seqTy.kind == itSeq:
+        return parseSeqNew(calleeSym.strVal, n[1], seqTy, preamble, ctx)
     # Phase 15 E8: the two no-arg exception-query magic intrinsics. Recognised
     # by callee symbol name and intercepted BEFORE the user-proc fall-through
     # (`ensureProcRegistered`), which would otherwise try to parse their stdlib
@@ -8840,6 +8957,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     # `itArray`, a SEPARATE receiver kind this fix does not touch (no crash
     # repro found for it — out of this slice's scope, left as a future
     # finding if one surfaces).
+    # RFC-0005 S8bi: `k in {..}` / `k notin {..}` over a set LITERAL of
+    # constants (`notin` is `not contains(..)`); see `parseSetLitMember`.
+    if n.len == 3 and isBuiltinNamed(calleeSym, ["contains"]):
+      let member = parseSetLitMember(n[1], n[2], preamble, ctx)
+      if member != nil: return member
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
        n.len == 3:
       var containsRecvNode = n[1]
@@ -8882,10 +9004,6 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           preamble.add mkSeqPopStmt(recv.strVal, synth, siteLoc(n),
                                     recvCls.ty.seqElemTy)   # RFC-0005 S8ba
           return mkVar(synth)
-    block:
-      # RFC-0005 S8bc (item 5): `newSeq[T](n)`.
-      let nsIR = parseNewSeqExpr(n, calleeSym, preamble, ctx)
-      if nsIR != nil: return nsIR
     # RFC-0005 S8bc: `getOrDefault(t, k[, d])` on a Table is the present
     # value, else `d` (or `default(V)`). It walked the stdlib body before,
     # whose `hashes.Hash` locals the model does not classify (a decline, and
@@ -9040,8 +9158,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
        n[1].typeKind != ntyNone and
        classifyType(n[1]).ty.kind == itInt:
       let base = parseAtomicOperand(n[1], preamble, ctx)  ## A2a chokepoint (pred/succ)
+      let mark = preamble.len
       let step = if n.len == 3: parseAtomicOperand(n[2], preamble, ctx)  ## A2a chokepoint (pred/succ)
                  else: mkIntLit(1)
+      keepInlineRaiseOrder(base, n[1], mark, preamble, ctx)
       return mkBinop(if calleeSym.strVal == "pred": bSub else: bAdd,
                      base, step)
     # A7 (ADR-0017 Path B): borrow comparison ops (==, !=, <, <=, >, >=) on
@@ -13989,9 +14109,9 @@ proc parseStmtInner(n: NimNode,
      n[0].kind == nnkSym and n[0].strVal == "newSeq" and
      isStdlibDecl(n[0]) and classifyType(n[1]).ty.kind == itSeq:
     let target = unwrapHidden(n[1])
-    let lenIR = parseNewSeqLen(n[2], "newSeq", preamble, ctx)
     return parseAsgn(nnkAsgn.newTree(target, newEmptyNode()),
-      mkSeqNewZero(lenIR, classifyType(n[1]).ty.seqElemTy), preamble, ctx)
+      parseSeqNew("newSeq", n[2], classifyType(n[1]).ty, preamble, ctx),
+      preamble, ctx)
   case n.kind
   # Phase 15 E6. A raw `assert cond, msg` / `doAssert cond` lowers (after
   # semcheck) to gensym scaffolding (`const loc…`, `bind`, `mixin`) plus a

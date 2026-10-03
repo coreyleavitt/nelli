@@ -718,9 +718,15 @@ proc replaceRunZ3*(s, by: Z3String; t: RunTable; nl: NlConv;
   let mark = findMarker()
   let nlSet = nlBytes(nl)
   let pair = nlPair(nl)
-  let run = defineRecFun[Z3String, Z3Int, Z3String](ctx, fresh("__regexRun"),
-    proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3String]; u: Z3String;
-          st: Z3Int): Z3String =
+  # RFC-0005 S8bi: `run` carries fuel too (`len(u) + 1` at each call from
+  # `rep`, one less per unfolding; each unfolding drops a byte, so a real
+  # run never exhausts it), so no unfolding of it is unbounded whatever Z3
+  # makes of `tl`.
+  let run = defineRecFun[Z3String, Z3Int, Z3Int, Z3String](ctx,
+    fresh("__regexRun"),
+    proc (self: Z3FuncDecl[(Z3String, Z3Int, Z3Int), Z3String]; u: Z3String;
+          st, fuel: Z3Int): Z3String =
+      let f1 = fuel - mkInt(1)
       let lenU = len(u)
       let atEnd = lenU == mkInt(0)
       let b = toCode(at(u, mkInt(0)))
@@ -731,7 +737,7 @@ proc replaceRunZ3*(s, by: Z3String; t: RunTable; nl: NlConv;
                       (toCode(at(u, mkInt(1))) == mkInt(10)))
       let tl = substr(u, mkInt(1), lenU - mkInt(1))
       proc call(tgt: int32): Z3String =
-        (if tgt < 0: mark else: self(tl, mkInt(int(tgt))))
+        (if tgt < 0: mark else: self(tl, mkInt(int(tgt)), f1))
       proc row(r: array[256, int32]): Z3String =
         # The byte partition by target, the largest part the default.
         var parts = initTable[int32, set[char]]()
@@ -762,7 +768,8 @@ proc replaceRunZ3*(s, by: Z3String; t: RunTable; nl: NlConv;
           else: ite(nll, row(nx[rcNll]), row(nx[rcOther]))
         let here = ite(mk, u, mark)
         let rk = ite(atEnd, here, ite(later != mark, later, here))
-        result = ite(st == mkInt(k), rk, result))
+        result = ite(st == mkInt(k), rk, result)
+      result = ite(fuel <= mkInt(0), mark, result))
   # `rep(u, flags, fuel)`: flags 1 = NOTEMPTY_ATSTART, 2 = subject
   # position 0 (numerals at every call). `fuel` counts the calls left: each
   # call drops at least one byte or is the one NOTEMPTY_ATSTART retry at
@@ -775,8 +782,8 @@ proc replaceRunZ3*(s, by: Z3String; t: RunTable; nl: NlConv;
       let ne = (flags == mkInt(1)) or (flags == mkInt(3))
       let st0 = flags >= mkInt(2)
       proc start(bol: int): Z3String =
-        ite(ne, run(u, mkInt(t.start[bol][1])),
-            run(u, mkInt(t.start[bol][0])))
+        ite(ne, run(u, mkInt(t.start[bol][1]), lenU + mkInt(1)),
+            run(u, mkInt(t.start[bol][0]), lenU + mkInt(1)))
       let r = (if t.start[1] == t.start[0]: start(0)
                else: ite(st0, start(1), start(0)))
       let f1 = fuel - mkInt(1)

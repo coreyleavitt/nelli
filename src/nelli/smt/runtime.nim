@@ -2373,9 +2373,10 @@ var currentClosureExitPc* {.threadvar.}: seq[Z3Bool]
 var lastDrainedClosureExitPc {.threadvar.}: seq[Z3Bool]
   ## RFC-0005 S7. The exit facts `drainPendingLowerEffects` appended to the
   ## drained path's `defectSurvivorPc` on its most recent call (at its END,
-  ## in order). `drainClosureRaises` -- which always runs on that drained
-  ## path -- strips them from a routed closure raise: they state that the
-  ## closure bodies did NOT raise.
+  ## in order). RFC-0005 S8bi: `drainScalarRaiseForks` -- which runs on that
+  ## drained path -- strips them and puts each fact back at its place in
+  ## evaluation order (`rskClosureExit`), so a raise evaluated before a
+  ## closure call does not carry the facts that the call completed.
 
 proc seedCallerHeapThreadvars*(p: Path) {.inline.} =
   ## Phase 15 R1b / CR-5. Mirror a path's logical-heap state (and liveRefs)
@@ -2535,8 +2536,8 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
 
-proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal
-  ## RFC-0005 S8bc fwd-decl. `newSeq[T](n)` → n zero elements.
+proc lowerSeqNew(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8bc / S8bi fwd-decl. `newSeq[T](n)` and kin (`iekSeqNew`).
 
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst
@@ -4012,8 +4013,8 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   of iekZeroValue:
     # RFC-0005 S8u. An empty container: no integer representation.
     none(SymVal)
-  of iekSeqNewZero:
-    # RFC-0005 S8bc. A seq: no integer representation.
+  of iekSeqNew:
+    # RFC-0005 S8bc, S8bi. A seq: no integer representation.
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -9150,8 +9151,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       lowerDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
-  of iekSeqNewZero:
-    lowerSeqNewZero(env, e)
+  of iekSeqNew:
+    lowerSeqNew(env, e)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -12706,19 +12707,22 @@ type
     ## `drainScalarRaiseForks`'s fixed fallback drains them (see
     ## `WalkCtx.raiseOrder`).
     rskClosure, rskConvBound, rskParseInt, rskDivByZero, rskOverflow,
-    rskArithTrap, rskStrIndex, rskSeqOob, rskRange, rskRegex
+    rskArithTrap, rskStrIndex, rskSeqOob, rskRange, rskRegex,
+    rskClosureExit
+      ## RFC-0005 S8bi. Not a raise: one closure exit fact
+      ## (`currentClosureExitPc`, one entry per fact), logged where the call
+      ## completed. A raise evaluated before the call is forked without it;
+      ## every survivor of the stages before it gains it.
 
   ClosureRaise = object
     ## RFC-0005 S7. A raise that escaped a closure body, awaiting routing from
-    ## the calling path (`drainClosureRaises`). `priorExitPc` is the closure
-    ## exit-fact channel (`currentClosureExitPc`) as it stood when THIS call
-    ## deposited the raise -- the exit facts of closure calls that completed
-    ## EARLIER in the same expression, which do hold on the raise path. The
-    ## calling path's own `defectSurvivorPc` by drain time also carries THIS
-    ## call's (and any later call's) exit facts, which assert the body did
-    ## NOT raise; the drain strips those (`lastDrainedClosureExitPc`).
+    ## the calling path (`drainClosureRaises`). RFC-0005 S8bi: the exit facts
+    ## of closure calls that completed EARLIER in the same expression (which
+    ## hold on the raise path) are on that path already, put there by their
+    ## `rskClosureExit` stage; this call's own facts, logged after its
+    ## raises, are not (they assert the body did NOT raise). S7 carried the
+    ## earlier facts here, as `priorExitPc`.
     raised:      EscapedRaise
-    priorExitPc: seq[Z3Bool]
     writes:      seq[(string, SymVal)]
                  ## RFC-0005 S8as. The by-reference names the call writes
                  ## back (`closureEnvWrites`), as THIS raising exit left
@@ -15529,7 +15533,8 @@ proc drainRegexRaises(p: Path, w: var WalkCtx): seq[Path] =
   discard routeRaise(rp, "RegexError", some(msgs[0]), w)
   @[]
 
-proc drainClosureRaises(p, orig: Path, w: var WalkCtx): seq[Path] =
+proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
+                        w: var WalkCtx): seq[Path] =
   ## RFC-0005 S7. Route the raises that escaped a closure body during the
   ## just-completed `lower`/`lowerBool` (deposited by `applyClosureGround`
   ## into `w.closureRaises`) from the CALLING path `p`, as the `isCall` arm
@@ -15541,36 +15546,23 @@ proc drainClosureRaises(p, orig: Path, w: var WalkCtx): seq[Path] =
   ## the call's exit-coverage fact (`applyClosureGround`) already confines the
   ## caller continuation to the body's value-bearing exits.
   ##
-  ## RFC-0005 S8bb: `orig` is the path `drainPendingLowerEffects` returned
-  ## and `p` a survivor of the stages that drained the raises evaluated
-  ## BEFORE this call (their survivor facts extend `orig`'s, and they hold
-  ## on the raise path too). The exit-fact tail is stripped from `orig`'s
-  ## facts; `p`'s extension is kept.
+  ## RFC-0005 S8bi: `p` is a survivor of the stages before this call's
+  ## raises, in evaluation order (`drainScalarRaiseForks`). It carries the
+  ## exit facts of the closure calls that completed earlier and none of this
+  ## call's or a later one's, which `drainScalarRaiseForks` stripped from
+  ## the drained path and puts back at their `rskClosureExit` stages
+  ## (`exitFactsPlaced`). S7 stripped them here instead, from the drained
+  ## path, and added the earlier calls' facts back from the raise.
   let raises = w.closureRaises
   w.closureRaises = @[]
   if raises.len == 0:
     return @[p]
-  # The caller's facts from BEFORE this expression's exit facts were
-  # appended (`lastDrainedClosureExitPc` is exactly that tail, in order).
-  let tail = lastDrainedClosureExitPc
-  var baseDsp = orig.defectSurvivorPc
-  var tailOk = baseDsp.len >= tail.len and
-               p.defectSurvivorPc.len >= orig.defectSurvivorPc.len
-  if tailOk:
-    let off = baseDsp.len - tail.len
-    for k in 0 ..< tail.len:
-      if baseDsp[off + k].raw != tail[k].raw:
-        tailOk = false
-        break
-    if tailOk:
-      baseDsp.setLen(off)
-      for k in orig.defectSurvivorPc.len ..< p.defectSurvivorPc.len:
-        baseDsp.add p.defectSurvivorPc[k]
-  if not tailOk:
+  if not exitFactsPlaced:
     # Not reachable by construction (every raise drain runs on the path
-    # `drainPendingLowerEffects` just returned); if it ever is, the raise
-    # would be forked under its own negation -- record the walker fault and
-    # route the raises anyway rather than drop them silently.
+    # `drainPendingLowerEffects` just returned, whose tail is exactly the
+    # facts it appended); if it ever is, the raise would be forked under its
+    # own negation -- record the walker fault and route the raises anyway
+    # rather than drop them silently.
     discard w.degrade(weInternalWalkerFault,
       "closure raise drained on a path whose defect-survivor tail is not " &
       "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)")
@@ -15583,7 +15575,7 @@ proc drainClosureRaises(p, orig: Path, w: var WalkCtx): seq[Path] =
     # RFC-0005 S8bh: the `var` actuals hold what the body had written to
     # them where it raised.
     for o in cr.varOuts: rp.env[o.name] = o.val
-    rp.defectSurvivorPc = baseDsp & cr.priorExitPc & er.path.defectSurvivorPc
+    rp.defectSurvivorPc = p.defectSurvivorPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
     discard routeRaise(rp, er.typeId, er.msg, w)
     if w.shouldStop: break
@@ -15613,6 +15605,18 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   ## A deposit the log does not cover (a sink a reset site cleared without
   ## the log) drains after the logged runs, in the fixed order.
   ##
+  ## RFC-0005 S8bi: the closure exit facts are a stage too. A closure call's
+  ## facts (that each body exit did not raise, and that the body left
+  ## through a value-bearing exit) hold only once the call completed, but
+  ## `drainPendingLowerEffects` appends them to the drained path, so every
+  ## raise this expression evaluated BEFORE the call was forked under them:
+  ## in `while ord(s[i]) + f(x) > 0` with `f` raising for `x > 5`, the
+  ## `IndexDefect` of `s[i]` was forked only with `x <= 5`, a false `sxUnsat`
+  ## for a handler reached with `x > 5`. They are now stripped from the
+  ## drained path (`lastDrainedClosureExitPc`, its tail) and put back one
+  ## `rskClosureExit` run at a time, at the place the order log gives them.
+  ## A path whose tail is not those facts keeps them as they are.
+  ##
   ## RFC-0005 S8g: each stage's sink is read ONCE here and reinstated before
   ## the stage runs on EACH survivor. The drains read-and-reset their sink,
   ## so before this a stage that returned two survivors (the parseInt lax
@@ -15631,6 +15635,23 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   let regexSnap = w.regexRaiseMsgs
   let order = w.raiseOrder
   w.raiseOrder = @[]
+  # RFC-0005 S8bi: the closure exit facts, placed by the order log when the
+  # drained path ends with exactly them (it does whenever this runs on the
+  # path `drainPendingLowerEffects` returned).
+  let exitSnap = lastDrainedClosureExitPc
+  lastDrainedClosureExitPc = @[]
+  var start = p
+  var exitFactsPlaced = currentClosureExitPc.len == 0 and
+                        p.defectSurvivorPc.len >= exitSnap.len
+  if exitFactsPlaced:
+    let off = p.defectSurvivorPc.len - exitSnap.len
+    for k in 0 ..< exitSnap.len:
+      if p.defectSurvivorPc[off + k].raw != exitSnap[k].raw:
+        exitFactsPlaced = false
+        break
+    if exitFactsPlaced and exitSnap.len > 0:
+      start = forkPath(p, p.pc, p.env)
+      start.defectSurvivorPc.setLen(off)
   # Every sink starts empty: a run reinstates only its own slice, and a
   # run the regex stage cuts off must not leave its deposits behind.
   w.closureRaises = @[]
@@ -15654,6 +15675,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
   total[rskSeqOob] = seqSnap.len
   total[rskRange] = rangeSnap.len
   total[rskRegex] = regexSnap.len
+  total[rskClosureExit] = (if exitFactsPlaced: exitSnap.len else: 0)
   var used: array[RaiseSinkKind, int]
   var runs: seq[tuple[k: RaiseSinkKind, lo, hi: int]]
   for k in order:
@@ -15672,7 +15694,7 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
       sinkT = snap[lo ..< hi]
       outp.add drain(s, w)
     outp
-  var cur = @[p]
+  var cur = @[start]
   for run in runs:
     if cur.len == 0: break
     let (lo, hi) = (run.lo, run.hi)
@@ -15681,7 +15703,16 @@ proc drainScalarRaiseForks(p: Path, w: var WalkCtx): seq[Path] =
       var outp: seq[Path]
       for s in cur:
         w.closureRaises = closureSnap[lo ..< hi]
-        outp.add drainClosureRaises(s, p, w)
+        outp.add drainClosureRaises(s, exitFactsPlaced, w)
+      cur = outp
+    of rskClosureExit:
+      # RFC-0005 S8bi: the call completed on every survivor; a fork, so a
+      # sibling's fact list is never aliased.
+      var outp: seq[Path]
+      for s in cur:
+        var q = forkPath(s, s.pc, s.env)
+        for k in lo ..< hi: q.defectSurvivorPc.add exitSnap[k]
+        outp.add q
       cur = outp
     of rskConvBound:
       cur = stage(cur, convFloatToIntBoundConds, convFloatToIntBoundConds,
@@ -20633,7 +20664,11 @@ proc havocUnknownClosureEffects(e: IRExpr) =
     if t.isNil or k >= e.ccArgs.len or e.ccArgs[k].kind != iekVar: continue
     var facts: seq[Z3Bool]
     let v = allocateSym(t, freshDegradeName("__closureUnknownVarOut"), facts)
-    for f in facts: currentClosureExitPc.add f
+    for f in facts:
+      currentClosureExitPc.add f
+      # RFC-0005 batch 5 (S8bi's `rskClosureExit` on S8bh's havoc): the
+      # fresh value's facts hold once the call completed, in order.
+      wp[].raiseOrder.add rskClosureExit
     wp[].closureVarOuts.add (name: e.ccArgs[k].vname, val: v)
   if wp[].callerHeaps.len > 0:
     var fresh = initTable[string, Z3AnyAst]()
@@ -21170,7 +21205,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     for o in varOuts:
       let pn = cb.params[o.param].name
       if er.path.env.hasKey(pn): ro.add (name: o.name, val: er.path.env[pn])
-    w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc,
+    w.closureRaises.add ClosureRaise(raised: er,
                                      writes: raiseWrites[ri],  ## RFC-0005 S8as
                                      varOuts: ro)
     w.raiseOrder.add rskClosure   # RFC-0005 S8bb
@@ -21331,7 +21366,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     addGuardedDefects(bc, cp.defectSurvivorPc)
   for cp in fallThrough:                                # implicit/void: all pc
     addGuardedDefects(cp.pc, cp.defectSurvivorPc)
-  for c in mergedDefectPc: currentClosureExitPc.add c
+  for c in mergedDefectPc:
+    currentClosureExitPc.add c
+    w.raiseOrder.add rskClosureExit   # RFC-0005 S8bi: logged after the raises
   # RFC-0005 S7: exit COVERAGE. The caller continues past the call only on
   # an execution that left the body through a value-bearing exit, so the
   # continuation is confined to the disjunction of the exits' branch
@@ -21357,6 +21394,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
       covered = arms[0]
       for k in 1 ..< arms.len: covered = covered or arms[k]
     currentClosureExitPc.add covered
+    w.raiseOrder.add rskClosureExit   # RFC-0005 S8bi
   # If the body produced NO value-bearing sub-path AND there are no output paths
   # at all (body diverged / was fully stubbed), mark uncertain so a target
   # reached through this result degrades to sxUnknown.
@@ -21748,24 +21786,46 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     arrs = stored.get
   mkSeqSV(mkInt(e.seqLitElems.len), arrs, elemTy)
 
-proc lowerSeqNewZero(env: Env, e: IRExpr): SymVal =
-  ## RFC-0005 S8bc (item 5). `newSeq[T](n)`: a seq of length `n` whose
-  ## every element is `T`'s zero -- the data array is the constant array
-  ## of that zero (`Z3_mk_const_array`), as an empty table's container
-  ## values are (`tabTreeDataZero`), so the element at any index below `n`
-  ## reads the zero. The parser has already forked a negative `n`
-  ## (`RangeDefect`) and declined one above `maxModelledInitialSize`. An
-  ## element type the seq does not back, or one with no modelled zero,
-  ## declines as a seq literal of it does.
-  let elemTy = e.snzElemTy
-  let lenSV = lower(env, e.snzLen)
-  if not isBackedSeqElemTy(elemTy) or not defaultZeroTotal(elemTy) or
+proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bc (item 5) and S8bi, one lowering since batch 5.
+  ## `newSeq[T](n)` / `newSeq(s, n)` (`snZeroed`): a seq of length `n` whose
+  ## every element is `T`'s zero -- each data array is the constant array
+  ## of that zero's leaf (`constSeqArrs`, S8bc's leaf split), as an empty
+  ## table's container values are (`tabTreeDataZero`), so the element at
+  ## any index below `n` reads the zero. `newSeqOfCap[T](n)` (`snOfCap`):
+  ## length 0, `n` only reserves. `newSeqUninit[T](n)`: length `n`, elements
+  ## Nim leaves unset -- free arrays (`allocateSeqArrs`), and the path is
+  ## tainted (`feUnsupportedOpHavoc`): a witness may depend on an element a
+  ## run does not reproduce, and whether one is read is not tracked.
+  ##
+  ## The parser has already forked a negative `n` (`RangeDefect`, the
+  ## `Natural` conversion) and declined one above `maxModelledInitialSize`
+  ## (`parseNewSeqLen`), so neither is checked again here. An element type
+  ## the seq does not back declines as a seq literal of it does, and so
+  ## does a zeroed one with no modelled zero.
+  let elemTy = e.snElemTy
+  let lenSV = lower(env, e.snArg)
+  let op = if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
+           else: "newSeqUninit"
+  let needZero = e.snZeroed and not e.snOfCap
+  if not isBackedSeqElemTy(elemTy) or
+     (needZero and not defaultZeroTotal(elemTy)) or
      lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
     lowerDegrade(seNestedSeqUnsupported,
-      "newSeq of a " & plainEnglishTypeKind(elemTy.kind) &
+      op & " of a " & plainEnglishTypeKind(elemTy.kind) &
         " element (or a non-integer length) not modelled")
     var fresh: seq[Z3Bool]
     return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
+  if e.snOfCap:
+    # Length 0: no element is ever read below the length, so the arrays
+    # are any arrays of the element's leaf sorts.
+    return mkSeqSV(mkInt(0), allocateSeqArrs(elemTy,
+                     freshDegradeName("__newSeqOfCap.data")), elemTy)
+  if not e.snZeroed:
+    lowerDegrade(feUnsupportedOpHavoc,
+      "newSeqUninit element values are unspecified — degraded to sxUnknown")
+    return mkSeqSV(toZ3Int(lenSV), allocateSeqArrs(elemTy,
+                     freshDegradeName("__newSeqUninit.data")), elemTy)
   let zero = defaultZero(elemTy, "__newSeqZero")
   # RFC-0005 S8bc: one constant array per leaf of a tree element.
   mkSeqSV(toZ3Int(lenSV), constSeqArrs(elemTy, zero), elemTy)

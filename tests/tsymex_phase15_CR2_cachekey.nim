@@ -994,6 +994,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## representation-preserving conversion, a scoped cast decline instead
     ## of a crash, the distinct-chain-aware bijectivity hint). Provisional
     ## 218 (210-217 held by slices still running). 209->218.
+    ## RFC-0005 S8bi (closure/HOF/borrow/regex/newSeq nodes as raise sites;
+    ## closure exit facts in evaluation order; newSeq and set literals
+    ## modelled; fueled replace recursions). Provisional 210 (batch 3 holds
+    ## 209, S8bh 208).
     check symexWalkerVersion == "218"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

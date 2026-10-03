@@ -349,7 +349,7 @@ state = "done"
 [[slice]]
 id = "S8bl"
 title = "S8bc's remainder: var-param magics beyond inc/dec (swap etc.), non-terminating unrecognized pair loop, unbacked-element add fault, type aliases, inc borrow arity, borrow-view coverage, for-in array literal, mpairs/mvalues, table length change during iteration, ref-part seq element witnesses, long nested seqs in witnesses"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -7603,6 +7603,189 @@ Pins that moved, because they pinned a gap S8bc closes:
 - **A seq element with a ref part is not witness-renderable**: no ref
   positions are collected inside seq elements.
 - **An element's nested seq longer than 1024** renders empty in a witness.
+
+**As landed (S8bl, walker 213, provisional) — S8bc's remainder.** Pins:
+`tests/tsymex_rfc0005_s8bl_{magics,setlen,seqops,magicscan,gaps,borrow,pairloop}.nim`,
+and the S8bc suite split in three
+(`tests/tsymex_rfc0005_s8bc_remainder_{a,b,c}.nim`). Every item was probed at
+the base (22b67c7) before it was changed. Wrong verdicts and crashes, each
+pinned RED first:
+- **SOUNDNESS: a system magic with a `var` parameter was a silent no-op.**
+  `ensureProcRegistered` registered a bodiless magic with an EMPTY body, so
+  its write was dropped: `swap(a[0], a[2])`, `swap(a, b)`, a string's
+  `setLen` and `t[0].add 'x'` on a `seq[string]` were each a false `sxSat`.
+  `wasMoved(a)` and `move(a)` crashed the compile: semcheck rewrites them to
+  a call of the compiler-generated `=wasMoved` hook, whose formal list holds
+  an `nnkArgList`. `reset` declined at its `when`, and a seq's `setLen`
+  walked into the `seqs_v2` payload cast.
+- **SOUNDNESS: two iterations of one input Table were a false `sxUnsat`**
+  on the C backend (a walker fault on C++). Each `isTabKeys` enumeration
+  registers its key terms with the run; a key term of ANOTHER path's
+  enumeration is free on this one, and unconstrained it took a codepoint
+  above 255 in the model. The table extractor renders every present key
+  term, so `evalStrBytes` raised inside the walk -- and the C backend lost
+  the exception (see below). Every string key term is now a byte string in
+  every query (`containerCardConds`), true of every real key.
+- `delete(s, i)` on a seq declined at its body's `high(x)` (an honest
+  decline, now modelled: `iekSeqDel` with `delShift`, each data array
+  `lambda j. ite(j < i, a[j], a[j + 1])`, `del`'s defects). `del`,
+  `insert`, `add` on a string, `inc`/`dec` by `n` and an explicit `=copy`
+  were already exact; `tsymex_rfc0005_s8bl_seqops` pins them.
+- `for x in [a, b]` was a walker fault (`lowerLeafInExpr` met an
+  `iekArrayLit`); a borrowed `find` whose base has a default-only formal
+  (`last = -1`) crashed the compile ("node has no type"); `add` to a local
+  seq of an unbacked element filed `weInternalWalkerFault`.
+
+*(1) The system magics with a `var` parameter* are classified in one table,
+`varParamMagics` (`dsl_parser.nim`), each modelled or declined:
+- modelled: `swap` (both operands read into lets, then both written back
+  through the assignment's lvalue arms), `wasMoved` / `reset` and the
+  generated `=wasMoved` hook (the type's zero), `move` (`let tmp = x; x =
+  zero; tmp`), `setLen` on a seq and a string (`isSetLen`), the
+  `add` family on an element lvalue (`s[0].add c`, `p[].add c`), `inc` /
+  `dec`, `new` on a field, `newSeq`, `=copy` / `=sink` (`Asgn`), and
+  `+=` / `-=` spelled as calls;
+- declined, naming the routine and the magic (`varMagicDecline`): `incl` /
+  `excl` (a builtin `set`), `=destroy`, `=trace`, `shallowCopy` (not
+  declared under ORC, the default memory manager), and any
+  shape of a modelled one the model does not reach (an impure index of
+  `swap`, `unsafeNew`'s size argument);
+- every other `var`-parameter magic declines the same way in
+  `ensureProcRegistered`, and a compiler-generated hook not modelled
+  declines as one; no magic is registered with an empty body.
+`tsymex_rfc0005_s8bl_magicscan` scans the toolchain's `system.nim` and
+`system/*.nim` for `var`-parameter magics and fails on one `varParamMagics`
+does not classify.
+
+`setLen(s, n)` (`isSetLen`): a negative `n` raises `RangeDefect`, a length
+above 2^20 declines (as `newSeq`'s), and the value is:
+- a seq: length `n`, each data array `lambda i. ite(i < len, a[i], zero)`
+  (Nim zero-fills, a shrink-then-grow included; probed);
+- a string: the prefix on a shrink, and on a grow the string followed by a
+  fresh pad of `n - len` bytes in `("\0")*` (Nim pads with NUL; probed),
+  the two on separate paths (a `str.at` over an `ite` of strings ran Z3 out
+  of `seqQueryRLimit`). The suite pins the kept prefix and the NUL pad on
+  ground strings: over a symbolic one, `t[n - 1]` is a `str.at` of a
+  concat (or `substr`) neither pinned Z3 decides within `seqQueryRLimit`
+  (PRECISION: an honest `sxUnknown`, `beSolverUndef`);
+- `setLenUninit`: a shrink is exact, a grow declines (the slots are
+  uninitialised).
+
+*(2) The non-recognised pair loop.* It did terminate, slowly: every
+iteration's infeasible loop exit was walked (its loop-arm prune ran out of
+`loopPruneRLimit`), and the target hit behind it was a clean query Z3 could
+not refute within `seqQueryRLimit` (20M units, about 100 s). The pinned
+string (`symexAssume(s == "...")`) was only an equation in the pc: each
+`readCString` read went through the S8ag index-split word equations, and
+each call's result through a fresh return symbol, so no term was ground.
+Measured on Z3 5.1: a 5-pair literal 640-750 s, the B6 9-iteration shape
+past 900 s. Now:
+- an assumed `s == "lit"` binds `s` to the literal on that path (the pc
+  keeps the equation);
+- a one-character `indexof` whose haystack and start fold to literals is
+  the folded numeral, not a split;
+- a clean callee result whose leaves Z3's rewriter folds to literals is
+  bound as them in the caller (the pc keeps `retSym == result`).
+- a loop path still active at the unroll bound whose pc is itself
+  contradictory is dropped, not recorded as `beBudgetExhausted`: with the
+  scan ground its guard folds to `true`, which `loopArmInfeasible` decides
+  without the solver, so a refuted path had run to the bound and turned
+  N21's and R5's `sxUnsat` into `sxUnknown`;
+- an `if` guard that folds to a literal takes one side only
+  (`guardLiteral`). With the scan ground, most guards in a loop body fold,
+  and walking the side a literal rules out kept both sides of each: five
+  folded guards in the pair loop's body were 32 copies of one path per
+  iteration, and a target inside that body ran past 900 s (the base
+  answered `sxUnknown` in 87 s). `rfc0005_s8bl_pairloop` pins it, exact
+  in 64-72 s.
+The same loops run in under a second, and `r6_b6_optionregion` in about
+50 s (it was 361 s in this tree before item 2, and 741 s at the base, both
+under a load average near 10 on 8 cores). B6-1-red and B6-6 return to the
+real `seq[(string, string)]` accumulator. A symbolic input (`s.len <= 40`,
+three pairs) runs in 3.5 s.
+
+*(3) `add` to a seq of an unbacked element* is the placeholder decline
+`seNestedSeqUnsupported`, the result a `tUnsupportedFieldSeq` placeholder.
+
+*(4) The smaller gaps.*
+- A plain alias (`Hash = int`, `Meters = int`) classifies as its target.
+- A borrow declaring fewer formals than its base (`proc inc(m: var M)
+  {.borrow.}`) is the base with the base's literal defaults appended. Nim
+  2.2.10's code generator crashes on a CALL of such a borrow (an
+  `IndexDefect` in the compiler; `nim check` passes), so no program running
+  one compiles; the parse is pinned at IR level.
+- Borrow views reach every type query of the parser: `dsl_typebridge`'s
+  `viewTypeKind` / `viewTypeInst` / `viewTypeImpl` read a viewed node at its
+  base type, and `dsl_parser` calls them as `typeKind` / `getTypeInst` /
+  `getTypeImpl`. A formal with only a default reads its symbol's type.
+- `for x in [a, b]` binds the literal once and indexes it.
+- `mpairs` / `mvalues` bind the loop variable to the value and store `t[k] =
+  v` right after every statement of the body that writes it
+  (`mutViewWriteBack`), so a read in the body, after a `break` or past a
+  raise sees the write. A receiver other than a variable or a field path
+  declines.
+- A Table length change while iterating raises `AssertionDefect` (the
+  iterator's `assert(len(t) == L)`) when assertions are on; with them off
+  it declines, as S8bc's did.
+- A seq element with a ref part is witness-renderable: its ref positions
+  are collected through the heap cell layout (`collectTreeRefPositions`),
+  and the reader resolves them (`readSeqAs[T](RefWitness, name)`).
+- A nested seq renders up to 2^20 elements (`maxWitnessSeqLen`), the walker's
+  own length bound, in `extractTreeValue` and `renderHeapValue`.
+
+*(5) Compile time.* The S8bc suite (82 s on symex-mingw, 77 s of it
+compile) is split into three files of 37-43 `symexFind` calls each.
+
+Pins that moved, because they pinned a gap S8bl closes:
+- **`r6_b6_optionregion` B6-1-red and B6-6**: the real accumulator again,
+  and `sxSat` where they were `sxUnknown` (the base reached the same
+  `sxSat` with that accumulator, in 741 s).
+- **`rfc0005_s8d_typeheads`**: a user alias `Natural = int` and a
+  `distinct` over `RuneImpl = int32` classify as their targets, so both
+  labels are exact `sxSat` (were the alias decline).
+- **`CR2c_witnessreader_catchall`, `tot1_totality_corpus`,
+  `r6_n43_parity`**: their unrenderable seq element (a ref part) renders
+  now; each holds a ref inside a Table instead (`treeRefPartInContainer`),
+  and CR-2c's untouched variant arm keeps the ref-part element.
+- **`r6_n27_placeholder_read_audit`**: 97 runtime markers (was 91), six
+  guarded reads in `isSetLen` and the ref-position collectors.
+- **`rfc0005_s8bc_remainder_c`'s length change** raises `AssertionDefect`
+  and the label is an exact `sxSat` at `a == 0`.
+- **`r6_r6_emit_roundtrip`** covers `isSetLen` and `iekSeqDel`'s
+  `delShift`.
+- **`rfc0005_s11_surface` walkthrough 3** reads its opaque sensor before
+  the loop: behind `i == 8 and`, it was reached only on paths whose `i` is
+  a literal other than 8, so its `dcSubstituted` decided nothing and the
+  run taint is `{scIncomplete}` alone (was ⊤ from a dead arm).
+- **`phase13_layer1_wire`'s cold UNSAT** guards its target with `x > 5`
+  then `x < 3`: `x != x` folds to `false`, its target is never reached, and
+  Z3 is never called.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: an exception raised by witness extraction inside the walk is
+  lost on the C backend.** Since S1c the target solve (`solveTargetHit`) and
+  so `extractWitness` run inside the walk, nested in loop and block frames;
+  `extractLeaf`'s raise sites still carry the pre-S1c audit note ("called
+  once after walk ... has fully returned"). A `ValueError` from
+  `evalStrBytes` there vanished on the C backend: the walk went on, the
+  clean SAT was never admitted, and the verdict was a false `sxUnsat`
+  (C++: `weInternalWalkerFault`). S8bl removed the one trigger it found
+  (the unconstrained table key); the mechanism stands for any other raise
+  in extraction.
+- **A variant arm's untouched seq of an element with a ref inside a Table
+  crashes the compile** ("seq witness reader ... not yet implemented"):
+  the witness reader is emitted for every arm, and the arm's placeholder
+  does not stop it; `isRenderableWitnessTy` and the reader drift there.
+- **PRECISION: `mpairs` aliasing.** A body statement that passes the loop
+  variable AND the table itself to one call sees the table without the
+  pending write.
+- **PRECISION: a length-preserving key change while iterating a Table** (a
+  `del` and an insert in one body) is not the slot walk Nim does: the
+  remaining iterations follow the enumeration taken when the loop began.
+  Only a table of two or more entries reaches a later iteration, and that
+  path is `feTableIterOrder`-tainted, so a candidate is replay-gated.
+- **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)** model the
+  same `newSeq` family; not reconciled here.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

@@ -202,7 +202,18 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "209"
+const symexWalkerVersion* = "212"
+  ## RFC-0005 S8bk (2026-10-02) — address-of-argument timing. Nim takes a
+  ## `var` / `addr` actual's address at the call, after every later
+  ## argument (`T1_ = moveP(); touch(&(*gP).x, T1_)`); the walk copied the
+  ## value in (and filled S8an's cell, and read S8bd's element base) where
+  ## the argument stood and wrote it back through the late address: a false
+  ## `sxSat` when a later argument's call rebinds the lvalue's ref, moves
+  ## its index or writes the cell. The lvalue is now read at the call
+  ## (`placeLateAddr`); an index check stays where it stands and a path on
+  ## which a later call changed what it read declines
+  ## (`feEvalOrderUnmodelled`). Provisional 212 (210, 211 held). 209 -> 212.
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker

@@ -374,7 +374,7 @@ state = "done"
 [[slice]]
 id = "S8bk"
 title = "Address-of-argument timing: var/by-ref actuals whose base ref is rebound by a later argument's call"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -10108,3 +10108,97 @@ has no suite: its row is pending.)
 - **PRECISION: a ref reached through a pointer dereference.** `pb[].x`
   still cannot be passed by reference (S8bd's reported item), so a pair
   holding it declines.
+
+**As landed (S8bk, walker 212) — address-of-argument timing.** Suite
+`tsymex_rfc0005_s8bk_argtiming` (9 tests; c on both Z3 versions, cpp 5.1; the binary runs in ~3 s, 57-103 s with its compile on a loaded host).
+The base is d42204d (batch 3, walker 209), rebased onto the channel at
+621af8f (batch 3's fixes; walker still 209). The job's premise was reversed
+(BLOCKER, then REVISION 1): Nim takes a `var` / `addr` actual's address
+AT THE CALL, after every later argument, not where the argument stands.
+Probed on c and cpp (`gP = Box(x: 10)`, `moveP()` rebinds `gP` to
+`Box(x: 100)`, `touch(v) = v = v + 5 + k`): `touch(gP.x, moveP())` leaves
+`old.x=10 gP.x=105`; `nim c` emits `T1_ = moveP(); touch(&(*gP).x, T1_);`.
+An index's bound check is a statement where the argument stands, so
+`touch(a[gi], incI())` checks `gi == 0` and writes `a[1]`, which it never
+checked (and with the moved index past the end, accesses out of bounds
+with no raise). A call in the lvalue is evaluated where it stands, once:
+`touchG(getB().x, moveP())` writes the OLD box.
+
+- *The bug.* SOUNDNESS. The walk read the value where the argument stood
+  and wrote it back through the late address: the copy-in of S8ac's
+  write-back (`p.x`, `a[i]`, `o.inner.x`), the store into S8an's `addr`
+  cell, and S8bd's by-reference element base (`gA[gi].x`, its index read
+  early). RED at the base: every dead label below `sxSat` (a false one)
+  and its reachable twin `sxUnsat`; the moved-index cases `sxUnsat`
+  (Nim reaches them) or `sxRaised` (a shortened seq). The by-reference
+  symbol base (`gP`, read at the call) and call base were already right.
+- *The model.* `userCallStmt` records, for each by-address argument, where
+  its lvalue was lowered and what binds it for the call (`LateAddr`: the
+  copy-in temporary, S8an's cell and its store, the by-reference base).
+  When a later argument's statements may write (`orderOperands`' `later`),
+  `placeLateAddr` moves the lvalue's trailing lazy reads and that binding
+  after the last argument, so the callee is passed the cell the lvalue
+  names at the call, and the copy-out writes back through that same
+  address. An eager part (a call in the lvalue) stays, evaluated once.
+- *Checks.* An index check moves with its read, and is exact only while
+  what it read is unchanged: its index, and the length of a container that
+  may change (anything but an array, `lvalueIndexGrowable`), are
+  snapshotted where the argument stands, and a path on which a later call
+  changed either declines before the access (`feEvalOrderUnmodelled`,
+  "never checked"): Nim then accesses through a value it never checked,
+  undefined behaviour that is never modelled. A check the snapshot cannot
+  carry (one whose index or container is itself a moved read, `gH.s[gi]`
+  with the seq reached through a ref; a variant arm's field) keeps the
+  lvalue where it stands and the call declines whenever a later argument
+  may write (pinned: `hx`).
+- *Pins.* Native semantics (the "nim" test); copy-in/out through a rebound
+  ref (`cp`, its witness `old.x == k, gP.x == 105` replays `roConfirmed`),
+  through a written-then-rebound one (`co`, `old.x == 50`) and as an `if`
+  condition (`gd`); a
+  field-of-field chain rebound partway (`ch`); an element the later call
+  writes, array and seq (`ar`, `sq`); a `var` formal forwarded on (`fw`,
+  right at the base: its address was taken by the outer call); `addr`
+  actuals, cell and by reference, plain and indexed (`ad`, `ar2`, `ai`);
+  by reference with a symbol base (`rs`), an element base whose element
+  the later call rebinds (`re`) and a call base (`rc`, called once); the
+  declines: an index the later call moves (`im`, `am`, `rm`), a seq it
+  shortens (`ss`) and a check no snapshot carries (`hx`); an index it
+  leaves alone stays exact (`ik`). RED at the base, per label: `cp`, `co`,
+  `ch`, `ar`, `sq`, `ad`, `ai`, `re`, `ik` `sxUnsat` and their dead twins
+  `sxSat`; `im`, `am`, `rm` `sxUnsat`; `ss` `sxRaised`; `fw`, `rs`, `ar2`,
+  `rc` and their twins already right.
+- *Audit.* Every user call reaches `userCallStmt` (expression position and
+  the three statement arms), so every by-address actual of a direct call
+  takes the late address. `parseOrderedArgs` (an opaque callee, a call
+  through a proc value) keeps a `var` actual as it is: a call through a
+  proc value has no write-back on this base (S8bh, not on it); the
+  coordinator adds its forms to S8bh's integration. Inside a guard
+  condition nothing is reordered (unchanged, as S8ax).
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4; on the channel at
+621af8f, batch 3 with its fixes): `s8bk_argtiming` 9/0 (cpp 9/0),
+`s8bf_alias` 13/0, `s8bd_remainder` 23/0, `s8ba_remainder` 32/0,
+`s8ax_remainder` 52/0, `s8au_remainder` 35/0, `s8an_remainder` 25/0,
+`s8ac_remainder` 19/0, `s8ar_remainder` 50/0, `s8at_remainder` 67/0,
+`s8i_models` 39/0, `s8_scope` 28/0, `phase15_CR2_cachekey` (212) 6/0,
+`phase14_var_param` 1/0, `phase14_var_param_downstream` 2/0; every
+`163rev` suite (28) 0 failed; closure: `a3_closure_iterators`,
+`phase12_phase_closure`, `C2a`, `C2b`, `C5`, `CR1_CR5_closure_heap`,
+`r13_closure_ref`, `R16_5_overflow_thru_closure`,
+`r6_n16_closure_zerodefault`, `s7_closure`,
+`snd1b_closure_uncertain_axiom`, 0 failed; heap: `h_stepC_heapidentity`,
+`h_verification`, `h_witness`, `H1_path_heap_fields`, `r10_budget`,
+`r11b_smoke`, `R1a_ir`, `r1b_callheap`, `r9_recursive`,
+`r6_heap_raise_totality`, 0 failed. 64 suites, 892/0 on each version.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: an index call in a `var` actual's lvalue.**
+  `touch(gArr[nextI()], f())` declines (`unsupported nnkAsgn shape`): the
+  copy-out would call `nextI` again. Present at the base.
+- **PRECISION: a check no snapshot carries.** `touch(gH.s[gi], f())`
+  declines whenever `f` may write, even when it leaves `gH` and `gi`
+  alone.
+- **Out of scope here: a call through a proc value.** `let f = touch;
+  f(gP.x, moveP())` (Nim: `old.x=10 gP.x=105`, as the direct call) has no
+  `var` write-back on this base; S8bh adds it, and its integration takes
+  these forms.

@@ -496,8 +496,9 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## body reaches outside its formals, as a capture or otherwise; an
     ## escaping `addr` pointer; more than two actuals on one location; no
     ## specialised body for an aliased pair; a var actual naming no
-    ## variable).
-    check degradeSites == 19
+    ## variable). RFC-0005 S8bs adds the decline of a capture whose address
+    ## is taken (a cell the body may also reach through the pointer).
+    check degradeSites == 20
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():

@@ -357,6 +357,11 @@ title = "S8bb's remainder B: PCRE backtracking verbs and start-optimiser parity,
 state = "done"
 
 [[slice]]
+id = "S8bt"
+title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interpreter CRLF/ANY start filter, LIMIT between 0 and default, mixed SKIP:NAME, UTF UCP/case folding and (*ANY) in UTF, automaton/step-table/register caps, replace lemmas beyond two shapes"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

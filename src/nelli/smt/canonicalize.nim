@@ -316,6 +316,21 @@ const symexWalkerVersion* = "217"
   ## up-conversion is the operand and a down-conversion checks the run-type
   ## tag (`ObjectConversionDefect`). Provisional 208; batch 4.
   ##
+  ## RFC-0005 S8bm (2026-10-02) — step 1's search no longer depends on the
+  ## walk's context. Z3's search on a walker query followed what the
+  ## walk's shared context already held: S8ay's facts-first check, run
+  ## before step 1, moved B1-1's target query from 172,215 units to
+  ## 3,365,417 (Z3 5.1), and one unrelated constant created before it
+  ## moved it to 5,280,185. `checkCapped`'s step 1 now searches in a fresh
+  ## context of its own (the query translated in, a model translated
+  ## back), so its cost is a function of the query alone; and a byte
+  ## test on an element of a `str.substr` of a byte leaf (a slice's
+  ## element) takes its character form, as one on the leaf does (B1-1:
+  ## 5,711,742 units lowered against 24,467). Both change which search
+  ## decides a query, and so the walk's outcomes under a budget.
+  ## Provisional 214 (210 to 213 are held by slices still running).
+  ## 209 -> 214.
+  ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional
   ## numbers and land stacked as one integration branch under ONE walker

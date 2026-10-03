@@ -1152,5 +1152,10 @@ task test, "Run the test suite":
             # call through a proc value; a ptr of unknown origin may address
             # a ref field, a global or a var parameter; ref conversions along
             # a hierarchy keep identity; walker 209->217 (batch 4).
-            "tsymex_rfc0005_s8bh_remainder"]:
+            "tsymex_rfc0005_s8bh_remainder",
+            # RFC-0005 S8bm: step 1 searches in a context of its own (the
+            # same with and without the facts-first check); a slice
+            # element's byte test in character form; B1-1's tight unit
+            # ceiling. Walker 209->214.
+            "tsymex_rfc0005_s8bm_stability"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -986,6 +986,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## keep identity). Provisional 208.
     ## RFC-0005 batch 4: S8bb, S8bc, S8be and S8bh stacked on batch 3.
     ## 209->217.
+    ## RFC-0005 S8bm (step 1 in a context of its own; a slice element's
+    ## byte test in character form). Provisional 214. 209->214.
     check symexWalkerVersion == "217"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

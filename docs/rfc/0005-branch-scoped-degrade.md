@@ -392,6 +392,11 @@ title = "S8bf's remainder: var writes dropped through proc-variable calls; ptr p
 state = "done"
 
 [[slice]]
+id = "S8bm"
+title = "Facts-first check perturbs the step-1 search: B1-1 q10 cost unstable (187k without facts-first vs 3.38M); restore tight unit ceilings"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -10908,3 +10913,120 @@ cells.
   stays per-type.
 - **PRECISION: a parameter's run-type tags are free**, unconstrained by
   its static type, so alias states may be over-approximated.
+**As landed (S8bm, walker 214) — facts-first perturbs step 1.** Suite
+`tsymex_rfc0005_s8bm_stability` (4 tests; c on both Z3 versions, cpp
+5.1; the binary runs in 2-4 s). Built on 2d47b32 and rebased onto the
+batch-3 head 621af8f.
+
+- *The mechanism.* Z3's search on a walker query follows what the walk's
+  shared context already holds, not only the query. B1-1's target query
+  (q10) is the same text at every head (`q10-chaind.txt` and
+  `q10-headd.txt`), and its step-1 cost on Z3 5.1 was:
+
+  | Variant (local `-d:zz*` toggles in `checkCapped`) | q10 units |
+  |---|---|
+  | as is (facts-first before step 1) | 3,365,417 |
+  | no facts-first, the process's first walk | 172,215 |
+  | no facts-first, the process's second walk | 11,771,578 |
+  | no facts-first, one unrelated Int constant made before each step 1 | 5,280,185 |
+  | no facts-first, fifty such constants | 5,728,300 |
+  | facts-first in a context of its own (translated), UNSAT returns | 1,223,059 |
+  | the same, never returning (the main context as a later walk's: the theory-free probe ran elsewhere) | 11,771,578 |
+  | step 1 in a fresh context (translated), with or without facts-first | 5,711,742 |
+
+  One constant that no query mentions moves the search 30x, so it is
+  the context's term order (AST ids, and with them the rewriter's
+  argument order and the solver's tie-breaks), not any assertion,
+  solver reuse or push/pop leaking: every step already built a fresh
+  solver with `random_seed = 0`, and no step reuses one. The facts-first
+  check is one perturbation among many: its solver and fact terms, the
+  earlier queries it decides before their step 1 runs (so their search
+  never happens in the context), and the per-thread kind probes that run
+  in a process's first walk all move it. Isolating the facts-first check
+  alone does not help, because short-circuiting earlier queries changes
+  the context's history too.
+- *Step 1 in a context of its own.* `checkCapped`'s step 1 (the capped
+  one-shot model search) translates the query into a fresh context
+  (`ownContextSolver`), and a model is translated back. Its cost is a
+  function of the query's text: B1-1's q10 runs 191 decisions with and
+  without facts-first, as a first, second or third walk. A fresh context
+  costs a few milliseconds per query (about 3 ms on 5.1 and 13 ms on
+  4.13.4, measured under load); the heaviest suites were not slower
+  (`r4_strip` 364 s at 621af8f against 280 s, wall time including
+  compile, under concurrent load). Query declarations translate by name
+  and sort, and the walker builds no recursive function definitions,
+  which is the one thing a translation would drop.
+- *Spend readings count it.* The walk context's `rlimit count` does not
+  see step 1's units, and `solveTargetHit` classifies a hit by that
+  reading (S8y's budget-out, S8ag's slow SAT). `ownContextUnits` keeps a
+  running total that `rlimitCountNow` adds. Without it, B1-1's hit read
+  20,237 units for a query that spent 5,719,478 (pinned RED first);
+  `symexQueryStats`' `rlimitDelta` counts it too, and `rlimit` stays
+  cumulative (S8ac's "per-query deltas sum to no more than the last"
+  failed on 4.13.4 until it did).
+- *Cheap.* B1-1's byte test reads an element of a slice
+  (`str.at(str.substr(data, 4, ..), 0)`), which `byteTestChar` did not
+  take to its character form: `int2bv(str.to_code(..)) == 42` cost
+  5,711,742 units in a fresh context, against 24,467 as `str.at(..) ==
+  "*"` (60,895 on 4.13.4). A substring of a byte leaf has byte
+  characters, and `str.at` past its end is `""`, as past the leaf's, so
+  `byteTestChar` now follows `str.substr` down to the leaf: the same
+  predicate under the leaf's byte-domain constraint.
+- *Facts-first budget.* S8ay's join walks stay under `factsFirstRLimit`
+  (its two 1M pins pass on both Z3 versions).
+
+*B1-1, units of the whole walk* (`symexQueryStats`, the probe as its
+process's first walk):
+
+| | Z3 5.1 | Z3 4.13.4 |
+|---|---|---|
+| before (2d47b32 / 621af8f) | 3,383,332 | 7,766,466 in the s8ba suite; 25,652,149 as a process's only walk (q10 out of budget) |
+| after, first walk | 46,533 | 79,494 |
+| after, second walk without facts-first | 40,250 | 78,667 |
+| after, third walk | 46,529 | 79,510 |
+
+The B1-1 ceilings (`s8ba_remainder`, `s8bm_stability`) are 100,000 on
+5.1 and 160,000 on 4.13.4, about 2x, where batch 3 had 7M and 16M (and
+S8ba 1M and 3M).
+
+*RED and GREEN.* (1) Same query with and without facts-first: 80,799
+against 32,250 decisions (RED), then equal. (2) B1-1 under the ceiling,
+its byte test in character form: 5,737,434 and 1,268,400 units with
+`str.to_code` in the query (RED), then 46,533 and 79,494. (3) A hit's
+spend counts step 1: 20,237 against 5,719,478 (RED at the commit without
+the accounting), then GREEN. The walker floor `>= 214`.
+
+*Other victims.* Every suite asserting units or an rlimit was run on both
+Z3 versions; none was loosened by this regression except B1-1's (restored
+above). S8ay's `endsWithRun` keeps its `s.len <= 8` bound: unbounded, it
+is still `sxUnknown` on 4.13.4 at S8bm (11.2M units in one query), a
+different mechanism (below).
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8bm_stability`
+4/0 (cpp 4/0), `phase15_CR2_cachekey` (214) 6/0, `s8ba_remainder` 32/0,
+`s8ay_remainder` 40/0, `s8aw_remainder` 31/0, `s8au_remainder` 35/0,
+`s8ag_indexsplit` 15/0, `s8aj_remainder` 21/0, `s1c_verdict` 24/0,
+`s8y_budget_decline` 8/0, `g1b_concolic` 15/0, `g2_flip` 8/0,
+`phase13_rlimit` 1/0, `r4_strip` 5/0, `r6_b5_chained` 9/0,
+`r6_n36_raise_degrade` 8/0, `s1b_kinds` 18/0, `s8ac_remainder` 19/0,
+`s8ad_remainder` 13/0, `s8ae_remainder` 16/0, `s8aq_remainder` 13/0,
+`s8av_remainder` 19/0, `s8ax_remainder` 52/0, `s8bd_remainder` 23/0,
+`s8k_bounds` 19/0, `s8o_termination` 14/0, `s8q_termination` 10/0,
+`s8r_theoryfree` 3/0, `s8t_termination` 20/0, `s8v_termination` 7/0,
+`snd3_6_equality_loop` 3/0, `snd3_loopdegrade` 7/0.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: the steps after step 1 still search in the walk's
+  context.** The facts-first check, (1b) and (1c) are theory-free and
+  small; (2), the uncapped (3) and a query with no string leaf
+  (`plain`) are full-theory searches whose cost can still move with
+  what the walk did before, so a query that reaches them near its budget
+  can decline in one walk and not another. Deterministic for a given SUT
+  and Z3 build, as before.
+- **PRECISION: the per-thread kind probes run in a process's first walk
+  context** (`seqCapKinds`, `byteDomainKinds`, `intDivDeclKinds`,
+  `theoryFreeSimple`'s check), so that walk's context differs from a
+  later one's. With step 1 isolated it reaches only the steps above.
+- **PRECISION: `s.endsWith(re"b+") and not s.contains(re"b")` with no
+  length bound is `sxUnknown` on Z3 4.13.4** (11,234,660 units in its
+  second query, `beSolverUndef`). S8ay's pin keeps `s.len <= 8`.

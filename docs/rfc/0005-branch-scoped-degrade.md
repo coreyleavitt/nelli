@@ -352,6 +352,11 @@ title = "S8bc's remainder: var-param magics beyond inc/dec (swap etc.), non-term
 state = "done"
 
 [[slice]]
+id = "S8bx"
+title = "S8bl's remainder: raise from in-walk witness extraction lost on the C backend, witness-render drift for a variant-arm seq of ref-holding elements in a Table, mpairs aliasing of loop var and table, key change during Table iteration, string setLen over a symbolic string"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

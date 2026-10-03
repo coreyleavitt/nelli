@@ -270,3 +270,19 @@ Per-suite table: 5.1 c / 4.13.4 c / cpp, shown as ok/failed.
 | tsymex_rfc0005_s8w_remainder | 23/0 | 23/0 |  |
 | tsymex_rfc0005_s9_vetoes | 19/0 | 19/0 |  |
 | tsymex_rfc0005_s8z_remainder | 37/0 | 37/0 |  |
+
+## Scratch-clobber incident (verdict: not affected)
+
+No S8bw script, runner, probe or result ever lived in the shared session scratchpad.
+
+- **Where everything lived:** in `/home/corey/tmp-usage/work/s8bw-work/`:
+  - the runner `run.sh`;
+  - the suite lists `verify.list`, `verify2.list` and `verifyall.list`;
+  - the probe, RED and GREEN logs;
+  - the `runs/` results;
+  - `win1.log` and the commit message files.
+
+  The probe sources lived in `wt/s8bw/probe/` and the RED copies in the `wt/s8bw-red` worktree; both have been removed.
+- **Search:** `grep -rln 'scratchpad\|/tmp/claude'` over `run.sh`, the suite lists, `dt413.sh` and the worktree's `scripts/dt-bounded.sh` matches nothing.
+- **Scratchpad contents:** files there named `red1`, `red2`, `red3` and `green4.log` are not S8bw's; `red1` holds S8bl suite logs.
+- **Verdict:** no S8bw run needs re-running.

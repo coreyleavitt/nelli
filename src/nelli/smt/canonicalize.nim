@@ -206,7 +206,14 @@ const symexWalkerVersion* = "220"
   ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
   ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
   ## to its path, as S8bc declines `newSeq`'s (it was modelled as an
-  ## allocation that succeeds: a false sxSat). Provisional 220.
+  ## allocation that succeeds: a false sxSat); a decline reached only on a
+  ## path no execution takes is dropped (S8bc's rule, ported). A `Regex`
+  ## built by `re`/`rex` outside a regex call is a constructor call (a
+  ## rejected pattern raises `RegexError`). Builtin `set[T]` values are one
+  ## bit-vector (`itBitSet` / `iekBitSet`): membership, `incl`, `excl`,
+  ## `+ - * <= < ==`, `card` and literals, the literals' elements
+  ## non-constant too. `newSeqUninit` taints only a read of an element no
+  ## write reached. Provisional 220.
   ## RFC-0005 S8bi (2026-10-02) — S8bb's remainder, part A. A call through
   ## a closure, a `map`/`filter` over one, a borrowed arithmetic operator,
   ## every regex call and `newSeq` are raise sites for the short-circuit

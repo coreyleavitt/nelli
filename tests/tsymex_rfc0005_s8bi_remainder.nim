@@ -205,11 +205,13 @@ proc exitIfGuard(s: string; i, x: int) =
 # ---- item 3: newSeq and friends ---------------------------------------------
 
 proc nsLen(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   let xs = newSeq[int](n)
   if xs.len == 3 and xs[1] == 0 and xs[2] == 0:
     symexTarget("bi_ns_len")
 
 proc nsNonZero(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   if n < 0: return
   let xs = newSeq[int](n)
   if xs.len > 2 and xs[2] != 0:
@@ -222,6 +224,7 @@ proc nsNeg(n: int) =
     if n == -4: symexTarget("bi_ns_neg")
 
 proc nsNonNegRaise(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   try:
     discard newSeq[int](n)
   except RangeDefect:
@@ -253,11 +256,13 @@ proc nsVarNeg(n: int) =
     if xs.len == 1 and n < 0: symexTarget("bi_ns_var_neg")
 
 proc nsOfCap(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   var xs = newSeqOfCap[int](n)
   xs.add 7
   if n == 50 and xs.len == 1 and xs[0] == 7: symexTarget("bi_ns_ofcap")
 
 proc nsOfCapLen(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   if n < 0: return
   let xs = newSeqOfCap[int](n)
   if xs.len != 0: symexTarget("bi_ns_ofcap_len")
@@ -277,6 +282,7 @@ proc nsTuple(n: int) =
   if xs.len == 1: symexTarget("bi_ns_tuple")
 
 proc nsShortCircuit(n: int) =
+  if n > 1_048_576: return   # RFC-0005 S8bq: a larger length declines
   # A raise site under a while guard's short circuit (item 1's predicate).
   var k = 0
   try:
@@ -509,7 +515,9 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
   test "newSeq has length n and zero elements":
     let r = verdict(nsLen, "bi_ns_len")
     check r.status == sxSat
-    check r.errors.len == 0
+    # RFC-0005 S8bq: the length guard's decline, never reached, stays as a
+    # hint (diagnostic only).
+    for e in r.errors: check e.severity != sevError
   test "a newSeq element is never nonzero":
     check verdict(nsNonZero, "bi_ns_nonzero").status == sxUnsat
   test "a negative length raises RangeDefect":
@@ -529,10 +537,12 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
     check verdict(nsOfCapLen, "bi_ns_ofcap_len").status == sxUnsat
   test "newSeqOfCap range-checks its capacity":
     check verdict(nsOfCapNeg, "bi_ns_ofcap_neg").status == sxSat
-  test "newSeqUninit has length n, elements unspecified (fresh-symbol taint)":
+  test "newSeqUninit has length n (RFC-0005 S8bq: no element read, no taint)":
+    # S8bi tainted the whole path at the call (`feUnsupportedOpHavoc`);
+    # S8bq taints only a read of an unwritten element, and this reads none.
     let r = verdict(nsUninit, "bi_ns_uninit")
-    check r.status != sxUnsat
-    check r.errors.hasKind(feUnsupportedOpHavoc)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedOpHavoc)
   test "an unbacked element type declines, classified":
     let r = verdict(nsTuple, "bi_ns_tuple")
     check r.status == sxUnknown
@@ -567,9 +577,11 @@ suite "S8bi (4): set literals in `in` / `notin`":
     check verdict(setKeyIdx, "bi_set_key_idx").status == sxSat
   test "notin in a while guard":
     check verdict(setWhile, "bi_set_while").status == sxSat
-  test "a set-typed value is not modelled (classified decline)":
+  test "a set-typed value (RFC-0005 S8bq: modelled)":
+    # S8bi declined it, classified; S8bq models builtin `set[T]` values.
     let r = verdict(setValue, "bi_set_value")
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
 
 suite "S8bi (5): recursive definitions carry fuel":
   test "the scan rejects a definition without fuel":

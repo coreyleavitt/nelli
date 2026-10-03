@@ -4025,6 +4025,13 @@ proc tBitSet*(elemTy: IRType): IRType =
   ## RFC-0005 S8bq. Nim's builtin `set[elemTy]`.
   IRType(kind: itBitSet, bsElemTy: elemTy)
 
+const boundsCheckSynthWord* = "ixck"
+  ## RFC-0005 S8bq. The `freshSynth` word of the `isIndex` statement a seq
+  ## element ASSIGNMENT emits for its bounds check (Nim checks the index
+  ## before evaluating the value): its bound value is never read, so it is
+  ## not an element read (`newSeqUninit`'s unwritten-element taint skips
+  ## it). Its name is `"__sym_" & boundsCheckSynthWord & "_" & n`.
+
 const maxBitSetDomain* = 1 shl 16
   ## RFC-0005 S8bq. Nim's own limit on a set's base type: at most 2^16
   ## values.

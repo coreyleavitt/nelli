@@ -85,6 +85,12 @@ proc hugeUninit(n: int) =
   if n > 1_048_576 and xs.len == n:
     symexTarget("bq_huge_uninit")
 
+proc hugeBoundedDead(n: int) =
+  # The guard's decline sits on an arm no execution takes here.
+  if n < 0 or n > 50: return
+  let xs = newSeqUninit[int](n)
+  if xs.len > 50: symexTarget("bq_huge_bounded_dead")
+
 proc hugeNegStill(n: int) =
   # The negative length still raises, unaffected by the decline.
   try:
@@ -358,6 +364,119 @@ proc nlWhile(s: string; a, b: char) =
   if s.len == 2 and i == 2 and s[0] != s[1]:
     symexTarget("bq_nl_while")
 
+# ---- item 4: newSeqUninit taints a read of an unwritten element ------------
+
+proc unNoRead(n: int) =
+  if n < 0: return
+  let xs = newSeqUninit[int](n)
+  if xs.len == 5: symexTarget("bq_un_no_read")
+
+proc unWrittenRead(k: int) =
+  var xs = newSeqUninit[int](3)
+  xs[0] = k
+  if xs[0] == 7: symexTarget("bq_un_written_read")
+
+proc unUnwrittenRead() =
+  var xs = newSeqUninit[int](3)
+  xs[0] = 1
+  if xs[1] == 42: symexTarget("bq_un_unwritten_read")
+
+proc unSymIndexDead(i: int) =
+  var xs = newSeqUninit[int](3)
+  xs[0] = 1
+  xs[1] = 2
+  if i >= 0 and i <= 1:
+    if xs[i] == 5: symexTarget("bq_un_sym_index_dead")
+
+proc unSymIndexLive(i: int) =
+  var xs = newSeqUninit[int](3)
+  xs[0] = 1
+  xs[1] = 2
+  if i >= 0 and i <= 2:
+    if xs[i] == 5: symexTarget("bq_un_sym_index_live")
+
+proc unMerge(c: bool) =
+  var xs = newSeqUninit[int](2)
+  if c: xs[0] = 1
+  else: xs[0] = 2
+  if xs[0] == 3: symexTarget("bq_un_merge")
+
+proc unMergeOneArm(c: bool) =
+  var xs = newSeqUninit[int](2)
+  if c: xs[0] = 1
+  if not c and xs[0] == 3: symexTarget("bq_un_merge_one_arm")
+
+proc unDelMoves() =
+  # `del` moves the last (unwritten) element into the deleted slot.
+  var xs = newSeqUninit[int](3)
+  xs[0] = 1
+  xs[1] = 2
+  xs.del(0)
+  if xs[0] == 9: symexTarget("bq_un_del_moves")
+
+proc unDelWritten() =
+  var xs = newSeqUninit[int](2)
+  xs[0] = 1
+  xs[1] = 2
+  xs.del(0)
+  if xs[0] == 9: symexTarget("bq_un_del_written")
+
+proc unAdd(k: int) =
+  var xs = newSeqUninit[int](1)
+  xs.add k
+  if xs[1] == 4: symexTarget("bq_un_add")
+
+proc unPop() =
+  var xs = newSeqUninit[int](2)
+  xs[1] = 5
+  let v = xs.pop()
+  if v == 6: symexTarget("bq_un_pop")
+
+proc unPopUnwritten() =
+  var xs = newSeqUninit[int](2)
+  xs[0] = 5
+  let v = xs.pop()
+  if v == 6: symexTarget("bq_un_pop_unwritten")
+
+proc mkUninit(k: int): seq[int] =
+  result = newSeqUninit[int](2)
+  result[0] = k
+
+proc unReturnWritten(k: int) =
+  let ys = mkUninit(k)
+  if ys[0] == 4: symexTarget("bq_un_return_written")
+
+proc unReturnUnwritten(k: int) =
+  let ys = mkUninit(k)
+  if ys[1] == 4: symexTarget("bq_un_return_unwritten")
+
+type UnHolder = object
+  s: seq[int]
+
+proc unField(k: int) =
+  var h: UnHolder
+  h.s = newSeqUninit[int](2)
+  h.s[0] = k
+  if h.s[0] == 3: symexTarget("bq_un_field")
+
+proc unAugUnwritten() =
+  # `xs[i] += v` reads the element.
+  var xs = newSeqUninit[int](2)
+  xs[0] += 1
+  if xs[0] == 8: symexTarget("bq_un_aug_unwritten")
+
+proc unAugWritten(k: int) =
+  var xs = newSeqUninit[int](2)
+  xs[0] = k
+  xs[0] += 1
+  if xs[0] == 8: symexTarget("bq_un_aug_written")
+
+proc unLoopFill(k: int) =
+  var xs = newSeqUninit[int](3)
+  for i in 0 ..< 3: xs[i] = k
+  if xs[2] != k: symexTarget("bq_un_loop_fill")
+
+
 suite "S8bq: walker version":
   test "the walker version floor":
     check parseInt(symexWalkerVersion) >= 220
@@ -386,6 +505,8 @@ suite "S8bq (1): a length above 2^20 is declined, not modelled as allocated":
     check r.status == sxUnknown
     check r.errors.hasMsg(feUnsupportedOp,
       "`newSeqUninit` with a length above 1048576 is not modelled")
+  test "a bounded length never reaches the decline (the arm is dropped)":
+    check verdict(hugeBoundedDead, "bq_huge_bounded_dead").status == sxUnsat
   test "a negative length still raises RangeDefect":
     check verdict(hugeNegStill, "bq_huge_neg_still").status == sxSat
   test "the decline is scoped to its path":
@@ -498,3 +619,55 @@ suite "S8bq (5): set literals with non-constant elements":
     check verdict(nlValueEmpty, "bq_nl_value_empty").status == sxSat
   test "in a while guard":
     check verdict(nlWhile, "bq_nl_while").status == sxSat
+
+suite "S8bq (4): newSeqUninit taints only a read of an unwritten element":
+  test "no element read: clean":
+    let r = verdict(unNoRead, "bq_un_no_read")
+    check r.status == sxSat
+    # (item 1's decline of a length above 2^20 is on its own path)
+    check not r.errors.hasKind(feUnsupportedOpHavoc)
+  test "a written element reads exactly":
+    let r = verdict(unWrittenRead, "bq_un_written_read")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "an unwritten element's read is tainted":
+    let r = verdict(unUnwrittenRead, "bq_un_unwritten_read")
+    check r.status == sxUnknown
+    check r.errors.hasMsg(feUnsupportedOpHavoc,
+      "newSeqUninit element read before it is written")
+  test "a symbolic index confined to written elements":
+    check verdict(unSymIndexDead, "bq_un_sym_index_dead").status == sxUnsat
+  test "a symbolic index that may reach an unwritten element":
+    check verdict(unSymIndexLive, "bq_un_sym_index_live").status == sxUnknown
+  test "written on both arms of a merge":
+    check verdict(unMerge, "bq_un_merge").status == sxUnsat
+  test "written on one arm of a merge, read on the other":
+    check verdict(unMergeOneArm, "bq_un_merge_one_arm").status == sxUnknown
+  test "del moves an unwritten element into a written slot":
+    check verdict(unDelMoves, "bq_un_del_moves").status == sxUnknown
+  test "del of fully written elements":
+    check verdict(unDelWritten, "bq_un_del_written").status == sxUnsat
+  test "an added element is written":
+    let r = verdict(unAdd, "bq_un_add")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "pop of a written element":
+    check verdict(unPop, "bq_un_pop").status == sxUnsat
+  test "pop of an unwritten element":
+    check verdict(unPopUnwritten, "bq_un_pop_unwritten").status == sxUnknown
+  test "a seq returned by a call keeps its unwritten elements":
+    let r = verdict(unReturnWritten, "bq_un_return_written")
+    check r.status == sxSat
+    check r.errors.len == 0
+    check verdict(unReturnUnwritten, "bq_un_return_unwritten").status == sxUnknown
+  test "a loop writes every element":
+    check verdict(unLoopFill, "bq_un_loop_fill").status == sxUnsat
+  test "an element assignment's index check is not a read":
+    let r = verdict(unField, "bq_un_field")
+    check r.status == sxSat
+    check r.errors.len == 0
+  test "an augmented assignment reads the element":
+    check verdict(unAugUnwritten, "bq_un_aug_unwritten").status == sxUnknown
+    let r = verdict(unAugWritten, "bq_un_aug_written")
+    check r.status == sxSat
+    check r.errors.len == 0

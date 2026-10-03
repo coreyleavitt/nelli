@@ -677,7 +677,11 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## for `newSeqUninit[T](n)`, whose element array is a fresh symbol per
     ## evaluation (`freshDegradeName`), a superset of whatever Nim leaves in
     ## the elements; `n` is lowered and its `RangeDefect` forked first, and
-    ## nothing else is dropped.
+    ## nothing else is dropped. RFC-0005 S8bq moved that site: the call no
+    ## longer taints, a READ of an element no write reached does (on its
+    ## own path, `isIndex` / `isSeqPop`), and every such read, the inline
+    ## higher-order calls' and the call-result declines included, records
+    ## the one kind constant `uninitReadKind` -- one site, fresh as before.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)

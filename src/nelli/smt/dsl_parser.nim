@@ -10584,7 +10584,7 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
         # double-evaluate an impure index), emitted before the RHS is
         # parsed.
         let idxIR = parseExpr(lhs[1], preamble, ctx)
-        let checkSynth = freshSynth(ctx, "awck")
+        let checkSynth = freshSynth(ctx, boundsCheckSynthWord)
         preamble.add mkIndexStmt(checkSynth, mkVar(recv.strVal), idxIR,
                                  recvCls.ty.seqElemTy, siteLoc(n))
         let valIR = asgnRhs()

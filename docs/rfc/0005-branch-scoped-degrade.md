@@ -382,6 +382,11 @@ title = "S8bm's remainder: isolate the post-step-1 solver steps from walk-contex
 state = "done"
 
 [[slice]]
+id = "S8by"
+title = "S8bp's remainder: isolate concolic scratch solves, skip redundant 1b/1c after a facts-first SAT, term-order-stable wall time in translated contexts, mergeMemberships under disjunction/ite"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

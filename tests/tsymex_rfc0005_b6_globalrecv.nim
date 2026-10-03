@@ -151,3 +151,5 @@ suite "batch 6: a statement on an unbound global receiver":
   test "a symbolic discriminator reassignment's FieldDefect":
     declinesGlobal(sutReassignSym, "grss_raise")
 
+  test "walker version floor":
+    check parseInt(symexWalkerVersion) >= 230

@@ -9072,6 +9072,91 @@ the walker-223 commit, keeping 223. Where slices met:
   100k) and 79,510 on 4.13.4 (ceiling 160k), with batch 4's `isTabKeys`
   facts in the translated query.
 
+**Batch 6 (2026-10-03) — one walker number for five slices.** S8bs, S8bn,
+S8bl, S8bq and S8bw (each provisional: 222, 215, 213, 220, 227) land
+stacked on batch 5, in that order: `symexWalkerVersion` 223 -> **230**, the
+CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
+`pending` (its two blocked bullets, as landed). Where slices met:
+- *Late addresses.* S8bn's `placeLateAddrs` duplicated S8bk's
+  `placeLateAddr`; S8bk's is kept, with its decline kind
+  `feEvalOrderUnmodelled`. S8bn's `lim` pin moved to that kind.
+- *Infeasible declines.* S8bn added `ifFeasible` to `mkUnsupported` so its
+  late-address and proc-field declines were dropped on a dead path. S8bc's
+  `isUnsupported` arm (batch 4) already drops every decline a path that no
+  execution takes reaches, so the flag and its `unIfFeasible` field are
+  removed; the arm's comment names S8bn's declines as relying on the rule.
+- *Element identity (S8bn item 4).* S8bn's `ptrTargets` covers a pointer
+  of unknown origin; a pointer the walk made (`addr s[i]`) is S8ax's
+  `elemAddrNode` and S8be's element cells. The origins are disjoint, so
+  each has one mechanism. Its element reads and writes convert to the
+  data array's sort (`elemTermIn`, `elemValueOf`): S8ax's int heaps are
+  Int-sorted, a by-value seq's data array is BV.
+- *Replay thread.* S8bn's `@aim:` pointer witnesses were refuted on
+  replay: S8be replays on another thread, where the threadvar holding the
+  aims is empty. `ptrAimsSnapshot` / `ptrAimsAdopt` carry it over.
+- *Discriminant tags.* S8bn folds a `bool`-typed 0/1 literal to
+  `iekBoolLit`; a static case-object tag is such a literal in the typed
+  AST, and S8bs's `va` / `van` regressed to an A3 decline. `discTagLit`
+  maps it back to an int at every tag site. S8bn's `vfh` gains a dead
+  label (`vfh_dead`, `sxUnsat`) beside S8bs's by-reference pin.
+- *Magics.* S8be's `routineMagic(sym)` and S8bl's `routineMagic(impl)`
+  are one reader, `implMagic`. S8bl's seq ops (`setLen`, the
+  unbacked-element `add`) use batch 5's `iekSeqNew` and its leaf-split
+  arrays (`seqNewZeroArrs`). S8bq's `parseBitSetInclExcl` models builtin
+  `incl` / `excl`, so S8bl's `varParamMagics` lists them `vmModelled`.
+- *S8bq on batch 5.* Its own `maxModelledInitialSize` and `parseSeqNew`
+  guard are dropped for `parseNewSeqLen`. Its `newSeqUninit` tracking runs
+  in `lowerSeqNew`: a single-leaf element registers its data array, so only
+  a read of an unwritten element taints; a tree element (one array per
+  leaf, which the tracking cannot follow) keeps S8bi's whole-path taint,
+  the fifteenth `feUnsupportedOpHavoc` site in S6b's audit. S8bq had
+  bounded S8bi's unbounded `newSeq` procs, which made them copies of batch
+  5's bounded controls; batch 5's unbounded programs and `sxUnknown` pins
+  are restored. N27: 110 marked `runtime.nim` lines.
+- *SOUNDNESS (found integrating, present on batch 5).* `isIndexAssign`,
+  `isSeqPop` and the two discriminator-reassignment arms read their
+  receiver from `Env`, where a global is only once written. `gS[1] = k` on
+  an unwritten global raised `KeyError` and dropped the path (a reachable
+  target was a false `sxUnsat`, no decline); `gS.pop()` was a walker
+  fault; `gV.kind = k` was skipped (a false `sxUnsat` on its
+  `FieldDefect`). `recvValue` reads an unbound receiver as `lower` reads
+  the name: S8as's entry value, or an in-band decline. Pinned with native
+  runs in `tsymex_rfc0005_b6_globalrecv`. S8bw found the same class on its
+  base (S8as not in it) and declined each unbound receiver; on this stack
+  `recvValue` is the one mechanism, and S8bw's `sqp` pin is a candidate.
+- *S8bw's globals on S8as.* S8bw gave a global read before any write an
+  INITIAL value whose observation declines (`globalInitValue`,
+  `glUnwritten`); S8as already gives it an ENTRY value, any of its type
+  (`entryValueOf`, `feGlobalHavoc` at every read). One store holds both
+  (`globalEntryVals`), and S8bw's observation tracking decides when the
+  path pays: a rebuild's copy (`vCopy`) or a receiver observes nothing; an
+  observing read of a part no write reached taints `feGlobalHavoc` when
+  S8as models the global's type and declines otherwise (`unwrittenKind`,
+  `unwrittenMsg`). S8as tainted the partial write's own rebuild, so
+  `g.a = v` then `g.a` is now exact (S8bw's `confirmed` pins hold); an
+  unwritten discriminator or a pointer's read of an S8as global's part is
+  modelled and tainted rather than declined. S8bw's unwritten-part pins
+  (`tf_unwritten`, `tw`, `nf_unwritten`, `ac_unwritten`, `as_unwritten`,
+  `vu`, `sc`, `pu`, and item 1's `sqw`, `sqp`, `sqd`, `sqa`, `map`, `join`,
+  `gb`) are S8as candidates: `feGlobalHavoc`, never `sxUnsat`, the replay
+  deciding a hit (`sqw` / `sqp` / `sqd` are `sxRaised`: Nim raises
+  `IndexDefect` on the empty seq the process holds, as the "nim" test
+  shows). `svAsts` covers the stack's values (S8bq's bit sets, S8bc's
+  leaf-split seqs through `seqArrs`, S8at's container table values); N27
+  counts 111.
+- *S8bw's `{.global.}` and branch-field addresses on S8be.* S8be's
+  `isRoutineGlobal` models a `{.global.}` local, so S8bw's parse-time
+  decline is dropped (S8be's `{.noinit.}` decline without an initialiser
+  stays); `lg` is a replay-confirmed hit. S8be's `elemAddrNode` arm root
+  with `mayRearm` is the branch-field mechanism, so S8bw's `checked` /
+  `rootMutatedIn` duplicate is dropped; its `var`-parameter root joins S8an's
+  alias and S8be's arm path (`addrRootSym`). `pab` / `pai` hold on it.
+- *S8bw's table cells on S8ax.* A table value through a `ptr` is S8bw's
+  64-bit cell, read and written in the data array's own sort
+  (`tabValueOf` / `tabTermIn` over `elemValueOf` / `elemTermIn`).
+  `ptrAimInto` stays S8bn's one replay aim, its `f<name>` step S8bw's
+  (`ptrAimByName`, `src/nelli/smt/ptraim.nim`).
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see

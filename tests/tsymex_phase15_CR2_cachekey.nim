@@ -1020,7 +1020,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bw (S8bn's remainder: typed global reads, in-band
     ## receiver declines, aggregate globals, pointers into case objects and
     ## aggregate containers). Provisional 227.
-    check symexWalkerVersion == "223"
+    ## RFC-0005 batch 6: S8bs, S8bn, S8bl, S8bq and S8bw stacked on batch
+    ## 5, and an unbound global receiver read as its entry value. 223->230.
+    check symexWalkerVersion == "230"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

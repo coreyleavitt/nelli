@@ -203,7 +203,37 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "223"
+const symexWalkerVersion* = "230"
+  ## RFC-0005 batch 6 (2026-10-03) — S8bs, S8bn, S8bl, S8bq and S8bw land
+  ## stacked on batch 5 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bn's `placeLateAddrs` is S8bk's `placeLateAddr`
+  ## (`feEvalOrderUnmodelled`), and S8bn's per-site `ifFeasible` is S8bc's
+  ## infeasible-path drop, which every decline already gets. A `ptr` into a
+  ## seq element reads and writes the data array in its own sort
+  ## (`elemTermIn` / `elemValueOf`: S8ax's Int-sorted int heaps beside the
+  ## by-value BV arrays). S8bn's `@aim:` targets reach the replay thread
+  ## (`ptrAimsSnapshot` / `ptrAimsAdopt`). A static discriminant tag that
+  ## S8bn's literal folding made `bool` is an int again (`discTagLit`).
+  ## S8bl's magic reader and S8be's are one (`implMagic`), its seq ops sit
+  ## on batch 5's `iekSeqNew`, and S8bq's `incl` / `excl` model the builtin
+  ## set magics S8bl declined. S8bq's length guard is batch 5's
+  ## (`parseNewSeqLen`); its `newSeqUninit` tracking runs in `lowerSeqNew`
+  ## for a single-leaf element (a tree element keeps the whole-path taint).
+  ## S8bw's initial value of a global and S8as's entry value are one store
+  ## (`globalEntryVals`): a read taints only when it OBSERVES a part no
+  ## write reached -- `feGlobalHavoc` for a global S8as models, a decline
+  ## otherwise (`unwrittenKind`) -- so `g.a = v` then `g.a` is exact. S8be's
+  ## `{.global.}` model, arm-field addresses and `elemAddrNode` stand over
+  ## S8bw's parse-time decline and `rootMutatedIn`; S8bw's `var`-parameter
+  ## root joins them (`addrRootSym`). A table value through a `ptr` is its
+  ## 64-bit cell in the data array's sort (`tabValueOf` / `tabTermIn`).
+  ## SOUNDNESS: an index assignment, pop or discriminator reassignment on a
+  ## global the walk has not written reads its entry value (`recvValue`);
+  ## it raised `KeyError` (a dropped path: a false `sxUnsat`) or skipped
+  ## the statement (no `FieldDefect` fork). S8bw declined the same
+  ## receivers on its own base. 223 -> 230.
+  ##
   ## RFC-0005 batch 5 (2026-10-03) — S8bm, S8bk, S8bg, S8bi and S8bj land
   ## stacked on batch 4 as one integration branch under ONE walker number;
   ## their bullets follow, each naming its provisional number. The stack's own

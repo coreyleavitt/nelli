@@ -13151,12 +13151,13 @@ type
     callerLiveRefs: Table[string, seq[Z3AnyAst]]
                       ## CR-9 Stage 6 Group-3 (currentCallerLiveRefs migration).
                       ## Companion to `callerHeaps` (CR-5 freshness seeding).
-    callerCellRoots: seq[string]
-                      ## RFC-0005 S8bs. The variables of the current frame
-                      ## that have an address cell or element cells on the
-                      ## seeded path (`seedCallerHeapInWalkCtx`): a closure
-                      ## call's copy-in/copy-out actual into one of them
-                      ## declines (`lowerClosureCall`).
+    callerElemCells: seq[ElemCell]
+                      ## RFC-0005 S8bu. The seeded path's element cells
+                      ## (`seedCallerHeapInWalkCtx`): a closure call binds a
+                      ## formal whose actual is an element of a seq with
+                      ## element cells to its cell (`bindVarLocs`, from
+                      ## `applyClosureGround`). Replaces S8bs's
+                      ## `callerCellRoots`, whose roots declined such a call.
     closureExitHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-4 (currentClosureExitHeaps
                       ## migration). LIVE exit-heap from the most recent
@@ -13656,16 +13657,9 @@ proc seedCallerHeapInWalkCtx*(p: Path) =
     wp[].callerHeapDepth = p.heapDepth
     wp[].callerAllocCounters = p.allocCounters
     wp[].callerLiveRefs = p.liveRefs
-    # RFC-0005 S8bs: the frame's variables with cells on this path.
-    wp[].callerCellRoots = @[]
-    for c in wp[].frame.addrCells:
-      if p.env.hasKey(c.cell) and p.env[c.cell].kind == svPtr and
-         c.local notin wp[].callerCellRoots:
-        wp[].callerCellRoots.add c.local
-    for e in p.elemCells:
-      if e.frame == wp[].frame.frameId and not e.dead and
-         e.root notin wp[].callerCellRoots:
-        wp[].callerCellRoots.add e.root
+    # RFC-0005 S8bu: the path's element cells, for a closure call's
+    # `bindVarLocs`.
+    wp[].callerElemCells = p.elemCells
     # Reset the closure-exit fields (NI-1 fix — mirror of threadvar reset
     # inside seedCallerHeapThreadvars): each lower() call starts clean so
     # a non-heap-writing closure doesn't carry the previous call's exit-heap
@@ -17411,9 +17405,9 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         checkedIte(ctx, same.raw, elems[k].refAst.raw, addrAst.raw))
     env2[cellName] = SymVal(kind: svPtr, ptrAst: addrAst, ptrFamily: true,
                             ptrPointee: ty)
-    calleePath.env = env2
-    cells.add (local: formal, cell: cellName, ty: ty, path: @[], ixs: @[],
+    cells.add (local: local, cell: cellName, ty: ty, path: @[], ixs: @[],
                bound: true)
+    calleePath.env = env2
   ""
 
 proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
@@ -20839,7 +20833,9 @@ proc sameSymVal(a, b: SymVal): bool =
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;
                         bodyOverride: IRStmt = nil;
-                        varOuts: seq[tuple[name: string, param: int]] = @[]):
+                        varOuts: seq[tuple[name: string, param: int]] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
                         SymVal   ## Phase 15 C4 fwd-decl.
 
 proc entryValueOf(name: string): SymVal =
@@ -20972,21 +20968,6 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
       else: currentClosureBodies
     if bodies.hasKey(siteKey):
       let cb = bodies[siteKey]
-      # RFC-0005 S8bs: a copy-in/copy-out actual into a variable whose
-      # address is taken (`c:`): the body may reach it through a pointer,
-      # and the closure descent binds no formal to the cell (`bindVarLocs`
-      # is the direct call's).
-      if currentWalkCtxPtr != nil:
-        let roots = cast[ptr WalkCtx](currentWalkCtxPtr)[].callerCellRoots
-        for t in e.ccTouch:
-          if t.startsWith("c:") and t[2 .. ^1] in roots:
-            closureDegrade(feUnsupportedOp,
-              "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
-                   "argument is a part of `" & displayName(t[2 .. ^1]) &
-                   "`, whose address is taken: the body may reach it " &
-                   "through that pointer too, and the copy written back " &
-                   "after the call would land over that write (RFC-0005 S8bs)")
-            break
       let met = touchMeetsOuter(e.ccTouch, cb.outer)
       if met.len > 0:
         let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
@@ -21046,8 +21027,12 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
         if src < cb.params.len:
           outs.add (name: e.ccArgs[k].vname, param: src)
   let nWrites = closureEnvWrites.len
+  # RFC-0005 S8bu: the caller variable each argument names, for an `addr`
+  # actual's cell (`bindVarLocs`).
+  var argNames: seq[string]
+  for a in e.ccArgs: argNames.add(if a.kind == iekVar: a.vname else: "")
   result = applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`", env,
-                              bodyOverride, outs)
+                              bodyOverride, outs, e.ccVarLocs, argNames)
   var clash: seq[string]
   for i in nWrites ..< closureEnvWrites.len:
     let nm = closureEnvWrites[i][0]
@@ -21062,7 +21047,9 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;
                         bodyOverride: IRStmt = nil;
-                        varOuts: seq[tuple[name: string, param: int]] = @[]):
+                        varOuts: seq[tuple[name: string, param: int]] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
                         SymVal =
   ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
   ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
@@ -21265,6 +21252,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # return` asserted `y > 0` as a ground axiom of the whole run.
     retTy: cb.retTy)
   let frameIx = w.callStack.high
+  # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
+  # to them below.
+  let callerCells = w.frame.addrCells
+  let callerFrameId = w.frame.frameId
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
@@ -21310,6 +21301,58 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                                          else: pending.callerAlloc),
                          liveRefs: (if chainHeap: pending.exitLiveRefs
                                     else: pending.callerLiveRefs))  ## Phase 15 CR-5
+  # RFC-0005 S8bu: a formal whose actual is an address-taken variable of the
+  # calling frame, or a path into one, is bound to the variable's cell, as
+  # a direct call's is (`inheritAddrCells`, `bindVarLocs`): the body keeps
+  # the two equal statement by statement, so its writes through the formal
+  # and through a pointer it holds land on one location in its order.
+  # Before S8bu such a call declined, and a by-value argument Nim passes by
+  # address (a large object) was passed as a copy, missing the body's
+  # writes through the pointer (swapped verdicts). The calling frame's
+  # element cells are read for `bindVarLocs` (an element `s[i]` of a seq
+  # with element cells). A whole variable's write-back by name is dropped:
+  # the cell carries the write, and the calling statement reads it back
+  # (`syncAddrCells`).
+  var boundOuts: seq[string]
+  block bindCells:
+    var varArgs: seq[(string, string)]
+    for o in varOuts:
+      let src = cb.params[o.param].name
+      varArgs.add (src, o.name)
+    var entryCells: seq[AddrCellEntry]
+    for c in callerCells:
+      if not callerEnv.hasKey(c.cell) or callerEnv[c.cell].kind != svPtr:
+        continue
+      for (formal, callerName) in varArgs:
+        if callerName == c.local:
+          let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
+          descentBase.env[cell] = callerEnv[c.cell]
+          entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
+                          ixs: c.ixs, bound: c.bound)
+          if callerName notin boundOuts: boundOuts.add callerName
+    if locs.len > 0:
+      descentBase.elemCells = w.callerElemCells
+      var paramNames: seq[string]
+      var argVars: seq[(string, string)]
+      for i, p in cb.params:
+        paramNames.add p.name
+        if i < argSyms.len and i < argNames.len and argNames[i].len > 0:
+          argVars.add (p.name, argNames[i])
+      var elemShares: seq[(string, string)]
+      let why = bindVarLocs(descentBase, callerEnv, callerCells, callerFrameId,
+                            locs, varArgs, argVars, paramNames, entryCells,
+                            elemShares, w)
+      if why.len > 0:
+        closureDegrade(feUnsupportedOp,
+          "closure call through " & label & ": " & why & "; the body's " &
+               "writes through the two are not modelled in its order " &
+               "(feUnsupportedOp, RFC-0005 S8bu)")
+      # A by-value seq sharing its caller's element cells has them under
+      # the formal's name in the body (`inheritElemCells`); the body cannot
+      # write the formal, so nothing is carried back.
+      inheritElemCells(descentBase, callerFrameId, w.frame.frameId,
+                       elemShares, @[], @[])
+    w.frame.addrCells = entryCells
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
                          @[descentBase], w)
@@ -21434,6 +21477,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for ri, er in escapedRaises:
     var ro: seq[tuple[name: string, val: SymVal]]
     for o in varOuts:
+      if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
       let pn = cb.params[o.param].name
       if er.path.env.hasKey(pn): ro.add (name: o.name, val: er.path.env[pn])
     w.closureRaises.add ClosureRaise(raised: er, priorExitPc: currentClosureExitPc,
@@ -21445,6 +21489,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # below), for its actual. The caller continues only on those exits (the
   # exit-coverage fact), so the first exit's value is the merge's default.
   for o in varOuts:
+    if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
     let pn = cb.params[o.param].name
     var merged: SymVal
     var have = false

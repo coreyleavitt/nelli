@@ -417,9 +417,11 @@ proc emitExpr*(e: IRExpr): NimNode =
     for a in e.ccAddrArgs: adLit.add newLit(a)
     var tcLit = newTree(nnkBracket)
     for t in e.ccTouch: tcLit.add newLit(t)
+    # RFC-0005 S8bu: and `ccVarLocs`.
     newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"),
             newCall(bindSym"@", vtLit), newCall(bindSym"@", alLit),
-            newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit))
+            newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit),
+            newLit(e.ccVarLocs))
   of iekSeqLit:           ## Phase 15 C4
     var elemsLit = newTree(nnkBracket)
     for c in e.seqLitElems: elemsLit.add emitExpr(c)
@@ -5629,6 +5631,21 @@ proc byValueShare(a: NimNode): string =
     if payload(ty, 0): "copy" else: ""
   else: ""
 
+proc byValueLoc(arg: NimNode; k: int; preamble: var seq[IRStmt];
+                ctx: ParseCtx; locs: var seq[VarLoc]) =
+  ## RFC-0005 S8bs. Record where the by-value argument `arg` (the `k`-th)
+  ## came from (`VarLoc` `#<k>`) when Nim passes it by address or shares its
+  ## memory (`byValueShare`): a path the walk may keep equal to a cell.
+  ## RFC-0005 S8bu: for a closure or proc-value call too (`ccVarLocs`).
+  if arg.kind == nnkHiddenAddr: return
+  var a = arg
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0 and
+        sameType(a.getTypeInst, a[^1].getTypeInst):
+    a = a[^1]
+  let share = byValueShare(a)
+  if share.len > 0:
+    varLocOf(a, "#" & $k, share, preamble, ctx, locs)
+
 proc armChecked(lv: NimNode; b: ByRefSub; preamble: var seq[IRStmt];
                 ctx: ParseCtx): bool =
   ## RFC-0005 S8bs. A by-reference lvalue through a variant arm's field
@@ -5883,16 +5900,9 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         byRefTaken = true
     if byRefTaken: continue
     var ir = parseExpr(n[i], preamble, ctx)
-    if n[i].kind != nnkHiddenAddr:
-      # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
-      # memory it shares, is a path the walk may keep equal to a cell.
-      var a = n[i]
-      while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0 and
-            sameType(a.getTypeInst, a[^1].getTypeInst):
-        a = a[^1]
-      let share = byValueShare(a)
-      if share.len > 0:
-        varLocOf(a, "#" & $(i - 1), share, preamble, ctx, locs)
+    # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
+    # memory it shares, is a path the walk may keep equal to a cell.
+    byValueLoc(n[i], i - 1, preamble, ctx, locs)
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
@@ -6237,14 +6247,23 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   var anyAddr = false
   for i in 1 ..< n.len:
     if addrActualLvalue(n[i]) != nil: anyAddr = true
+  # RFC-0005 S8bu: where each argument the walk passes as a value came from,
+  # when it is a path into a routine's variable Nim passes by address or
+  # shares (`ccVarLocs`, as `userCallStmt`'s `cVarLocs`): the walker binds
+  # the formal to the variable's cell when it has one (`bindVarLocs`).
+  var locs: seq[VarLoc]
   if not anyVar and not anyAddr:
-    if ordered:
-      return (e: mkClosureCall(calleeName, parseOrderedArgs(n, 1, preamble, ctx)),
-              hoisted: false)
     var argIRs: seq[IRExpr]
+    if ordered:
+      argIRs = parseOrderedArgs(n, 1, preamble, ctx)
+    else:
+      for i in 1 ..< n.len:
+        argIRs.add parseExpr(n[i], preamble, ctx)
+    # The index of a path is read without side effects (`stableIndex`), so
+    # reading it after the arguments reads the value the argument used.
     for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
-    return (e: mkClosureCall(calleeName, argIRs), hoisted: false)
+      byValueLoc(n[i], i - 1, preamble, ctx, locs)
+    return (e: mkClosureCall(calleeName, argIRs, locs = locs), hoisted: false)
   let nArgs = n.len - 1
   proc isVarFormal(k: int): bool = k < varTys.len and varTys[k] != nil
   proc declineHere(msg: string): IRStmt =
@@ -6318,19 +6337,12 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     let lv = lvOf[i]
     if lv.isNil:
       argIRs.add parseExpr(n[i], preamble, ctx)
+      byValueLoc(n[i], k, preamble, ctx, locs)   ## RFC-0005 S8bu
       continue
     let viaAddr = addrActualLvalue(n[i]) != nil
     var heapSteps: seq[NimNode]
     let root = lvalueRoot(lv, heapSteps)
     addTouch(lv, heapSteps)
-    # RFC-0005 S8bs: a path into a routine's variable, which may have an
-    # address cell the body reaches through a pointer (`c:`, checked by the
-    # walker, `lowerClosureCall`).
-    if lv.kind != nnkSym and heapSteps.len == 0 and root != nil and
-       root.kind == nnkSym and
-       symKind(root) in {nskVar, nskLet, nskParam, nskResult, nskForVar} and
-       not isModuleGlobal(root) and ("c:" & strVal(root)) notin touch:
-      touch.add "c:" & strVal(root)
     var skip = peers[i]
     for j in 1 ..< n.len:
       if j != i and same[j] == same[i]: skip.add j
@@ -6358,6 +6370,7 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       cellOfArg[i] = cell
       let ptrTy = classifyType(n[i]).ty
       let elemTy = classifyType(lv).ty
+      varLocOf(lv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bu
       let lvIR = parseExpr(lv, preamble, ctx)
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -6380,6 +6393,7 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     let t = freshSynth(ctx, "varArg")
     preamble.add mkLet(t, classifyType(lv).ty, ir)
     temps[i] = t
+    varLocOf(lv, t, "var", preamble, ctx, locs)   ## RFC-0005 S8bu
     backs.add (i: i, lv: lv)
     argIRs.add mkVar(t)
   # The peer pairs: each argument at most one, mutual, both `var` or both
@@ -6423,7 +6437,7 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     for k, a in aliasV:
       if a != k: identity = false
     if identity: aliasV = @[]
-    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV)
+    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV, locs)
   proc wrap(call: IRExpr; wbs: seq[IRStmt]): IRStmt =
     let l = mkLet(synth, retTy, call)
     if wbs.len == 0: l else: mkTry(l, @[], mkBlock(wbs))

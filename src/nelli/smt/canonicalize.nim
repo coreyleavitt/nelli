@@ -5201,6 +5201,19 @@ proc lookupLocal(env: LocalEnv, name: string): string =
   else:
     name  # free — encode by original name
 
+proc varLocKeys(locs: seq[VarLoc]; env: LocalEnv): seq[string] =
+  ## RFC-0005 S8bs. Where each copy-in/copy-out argument came from
+  ## (`IRStmt.cVarLocs`; RFC-0005 S8bu: `IRExpr.ccVarLocs` too) decides
+  ## whether the walk binds its formal to an address cell, so it keys the
+  ## call.
+  for l in locs:
+    var steps: seq[string]
+    for st in l.path:
+      steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                else: st)
+    result.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & ":" & l.mode
+
 # ---- IRExpr -----------------------------------------------------------------
 
 proc binopTag(op: IRBinop): string =
@@ -5377,9 +5390,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # RFC-0005 S8bh: the call's `var`/`addr` effects.
     var vts: seq[string]
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    # RFC-0005 S8bu: and where its arguments came from (`ccVarLocs`).
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
-      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]>"
+      ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
+      ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5459,14 +5474,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
     # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
     # whether the walk binds its formal to an address cell.
-    var locs: seq[string]
-    for l in s.cVarLocs:
-      var steps: seq[string]
-      for st in l.path:
-        steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
-                  else: st)
-      locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
-               "/" & steps.join("/") & ":" & l.mode
+    let locs = varLocKeys(s.cVarLocs, env)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &

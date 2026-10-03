@@ -962,6 +962,11 @@ type
                                      ## actuals' locations involve (as
                                      ## `lambdaOuter`; `t:?` for a type any
                                      ## ref may address).
+      ccVarLocs*: seq[VarLoc]        ## RFC-0005 S8bu: as `IRStmt.cVarLocs`,
+                                     ## for this call: the walker binds a
+                                     ## formal whose actual is a path into
+                                     ## an address-taken variable to its
+                                     ## cell (`bindVarLocs`).
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
@@ -3981,14 +3986,16 @@ proc mkLambda*(siteHash: int64, declOrder: int, params: seq[IRParam],
 proc mkClosureCall*(callee: string, args: seq[IRExpr];
                     varTys: seq[IRType] = @[]; alias: seq[int] = @[];
                     addrArgs: seq[int] = @[];
-                    touch: seq[string] = @[]): IRExpr =
+                    touch: seq[string] = @[];
+                    locs: seq[VarLoc] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
   ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
-  ## (see `ccVarTys`).
+  ## (see `ccVarTys`); RFC-0005 S8bu: `locs` where its arguments came from
+  ## (`ccVarLocs`).
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
          ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
-         ccTouch: touch)
+         ccTouch: touch, ccVarLocs: locs)
 
 proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
                         aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];

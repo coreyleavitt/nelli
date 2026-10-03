@@ -34,10 +34,10 @@ suite "S8bs: paths by name and by reference":
     clean(sutHeapFieldByName, "hfn_dead", sxUnsat)
     clean(sutCaptureByName, "cpn", sxSat)
     clean(sutCaptureByName, "cpn_dead", sxUnsat)
-    # A closure descent binds no formal to a cell (`bindVarLocs` is the
-    # direct call's): declined, where it was a swapped verdict.
-    declines(sutProcValueByName, "pvn", "whose address is taken")
-    declines(sutProcValueByName, "pvn_dead", "whose address is taken")
+    # RFC-0005 S8bu: a closure descent binds the formal to the cell too
+    # (`bindVarLocs`); S8bs declined it.
+    clean(sutProcValueByName, "pvn", sxSat)
+    clean(sutProcValueByName, "pvn_dead", sxUnsat)
     clean(sutNested, "ne", sxSat)
     clean(sutNested, "ne_dead", sxUnsat)
   test "an addr actual by name":

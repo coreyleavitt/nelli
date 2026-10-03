@@ -419,7 +419,7 @@ state = "done"
 [[slice]]
 id = "S8br"
 title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate once, read late), checks no snapshot carries (frame-condition the later call), S8bk suite compile time"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -11813,3 +11813,138 @@ s8bj suite takes under 60 s (the slowest is `s8bj_entries_multiline` at
   the length relation only for a numeral `len(by)`, and the image only for
   one-set patterns. Other unbounded replace queries can still surface as
   `beSolverUndef`.
+
+**As landed (S8br, walker 229) — S8bk's remainder.** Suites
+`tsymex_rfc0005_s8br_remainder` (item 1: 5 tests, 14 labels) and
+`tsymex_rfc0005_s8br_framecond` (item 2: 3 tests, 10 labels); c on Z3 5.1
+and 4.13.4, cpp on 5.1. The base is fa8edd8 (batch 5, walker 223); the
+walker is 223 -> 229 (224-228 held by slices still running), the CR2 `==`
+pin is 229, and the suite carries the `>= 229` floor. All three items are
+PRECISION in the job, but item 1 also fixes a SOUNDNESS bug found while
+pinning it (below).
+
+- *Item 1: a call in a by-address actual's index.* Nim evaluates the call
+  where the argument stands, into a temporary, and checks the index there;
+  the element is read and written at the call, through that temporary
+  (probed natively: `touch(gArr[nextI()], dblArr())` calls `nextI` once,
+  before `dblArr`, and the callee sees the element `dblArr` wrote).
+  `hoistIndexCalls` lowers each user routine's call in an index on the
+  lvalue path, root first, into a `let` named by a mark of the callee's own
+  `result` symbol (`indexCallResult`, as S8bd's `byRefSub` marks a call
+  base: `markByRef` of a symbol keeps its type, and `strVal` reads the
+  mark as the `let`'s name). The actual is rebuilt with the mark (the call
+  node is copied, never edited), so the copy-in, the copy-out and S8an's
+  cell all reach the element through one value, and S8bk's late address
+  keeps the `let` where it stands (it is not a lazy read) while the
+  element read moves to the call. Both call paths take it: `userCallStmt`
+  and S8bh's `closureCallIR` (a call through a proc value), where an
+  lvalue with an index call is never "the same location" as an earlier
+  actual spelled alike (`hasIndexCall`). A call the walk cannot name (one
+  through a proc value, `gs[fv()]`, or a generic's whose `result` has
+  another type) is left in place, and the write-back that would evaluate
+  it again declines (`indexCallLeft`, `indexCallDecline`, a scoped
+  `feUnsupportedOp`).
+- *The soundness bug.* At the base, an ARRAY element declined (`unsupported
+  nnkAsgn shape`: `fieldStep`'s `pureIndexExpr`), but a SEQ element's
+  copy-out took `parseAsgn`'s `itSeq` arm, which parses the index again:
+  `nextI` ran twice. `touch(gs[nextI()], dblS())` was `sxUnsat` where Nim
+  reaches the label and `sxSat` for its dead twin, on the direct path
+  (`iq`) and through a proc value (`ps`), and `touch(gs[fv()], dblS())` was
+  a false `sxSat` (`fs_dead`).
+- *Item 2: a check no snapshot carries.* `placeLateAddr` keeps such an
+  lvalue (`gH.s[gi]`: the seq is reached through a ref, itself a moved
+  read) where it stands. It now declines only when a later argument may
+  write a location the lvalue reads (`laterLeavesLvalue`): a variable it
+  names (its root, its indices' variables), or a heap its path
+  dereferences. The later arguments' writes are S8as/S8ax's summary
+  (`laterArgWrites`): per call, `scanOpaqueEffects` of the callee (the
+  globals it names, the captures it may write, the heaps it reaches,
+  transitively) and `opaqueArgEffects` of its by-address actuals; a
+  routine passed as a value is summarised as a callee. A call through a
+  proc value, an assignment, an inline routine, a path through a `ptr`, a
+  later argument that may write any heap or any global, or a heap reached
+  through a `ptr` or an inheritance hierarchy (`typeReachKeys`' `*` and
+  `t:?`) all meet everything. Where none is written, the address, its
+  checks and the value are the same at the call as where the argument
+  stands, so the lvalue is evaluated there, exactly. `LateAddr` carries
+  the lvalue and the later arguments (`lv`, `later`; produced at all six
+  of its constructions, both call paths). A call's head is a proc value
+  when its symbol is a variable, a parameter or a field
+  (`procValueSymKinds`), never a bare routine-kind gate (the N2 audit
+  caught one on the first Windows run).
+- *Item 3: the S8bk suite's compile time.* `tsymex_rfc0005_s8bk_argtiming`
+  is three files: `_argtiming` (copy-in/out, the chain, an element),
+  `_argtiming_addr` (the `addr` and by-reference actuals) and
+  `_argtiming_checks` (a forwarded `var` formal, the "never checked"
+  declines, calls through a proc value), each with the native assertions
+  for its forms. They `include` one fixture, `tests/s8bk_argtiming_fixture.nim`
+  (not `t*`, so the sweep does not run it alone), so every function under
+  test is the one the single file had. All three are registered in
+  `nelli.nimble`, as are the two S8br suites (item 2 is its own file for
+  the same reason). Windows
+  (symex-mingw, compile plus run per file, from the `==>`/`<==` stamps): the
+  single file took 57.8 s at fa8edd8 (run 37139806221); at d64b7ee
+  `_argtiming` 48.0 s, `_addr` 43.7 s, `_checks` 47.4 s, `s8br_remainder`
+  51.8 s and `s8br_framecond` 26.7 s, against 49.3 s for the light
+  `s8bm_stability` in the same run (each file sits at the per-suite floor;
+  run 37159927354). The combined S8br suite took 56.3 s at dc83791, hence
+  its own split. Locally the box carried a load of about 20 on 8 cores
+  from other sessions, so a local time is load, not compile: the
+  light `s8bm_stability` took 94.5 s (c) and 116.2 s (cpp) and
+  `_argtiming_checks` 111.4 s and 128.4 s, run side by side (the single
+  file took 57-103 s on c and 184 s on cpp for S8bk).
+- *Pins.* Item 1: native (`nim`); an array element whose later argument
+  writes it (`ic`), a seq element (`iq`), an index call whose result the
+  later call would change (`iv`: the temporary does not move), an `addr`
+  actual (`ia`), a seq the later call shortens (`is`, "never checked"),
+  through a proc value (`ps`, `pa`), and an index call through a proc
+  value (`fs_dead`, declines). Item 2: the later call leaves every
+  location alone (`hk`; `pk` through a proc value) or writes another heap
+  (`hb`): exact; it rebinds the ref (`hw`, `pw`), moves the index (`hi`) or
+  writes the seq (`he`): declines. RED at the base, per label: `ic`, `iv`,
+  `ia`, `pa` and their twins declined (`unsupported nnkAsgn shape`); `iq`,
+  `ps` `sxUnsat` and their twins a false `sxSat`; `fs_dead` a false
+  `sxSat`; `hk`, `hb`, `pk` and their twins declined (S8bk's "may change
+  what the check read"). Already right at the base: `is` and the writing
+  twins `hw`, `hi`, `he`, `pw` (they decline, as now).
+- *TDD caveat.* Item 1's first pin (`ic`) was RED at the unchanged head,
+  then GREEN. Every other label's RED was observed on a base worktree
+  (fa8edd8, the same code on those paths), item 2's and the proc-value
+  pins after their code was written, then GREEN at the head.
+
+*Suites* (`tests ok/failed`, c, identical on Z3 5.1 and 4.13.4, at the
+final code): `s8br_remainder` 5/0 (cpp 5/0), `s8br_framecond` 3/0 (cpp
+3/0), `s8bk_argtiming` 5/0 (cpp 5/0), `s8bk_argtiming_addr` 3/0 (cpp 3/0),
+`s8bk_argtiming_checks` 4/0 (cpp 4/0), `s8ax_remainder` 53/0,
+`s8ba_remainder` 32/0, `s8bd_remainder` 23/0, `s8bf_alias` 13/0,
+`s8as_remainder` 33/0, `s8be_remainder` 34/0, `s8ab_letaudit` 28/0,
+`phase15_CR2_cachekey` (229) 6/0, `phase15_N2_kindgate_audit` 5/0. The
+`feEvalOrderUnmodelled` grep (`command grep -l 'feEvalOrderUnmodelled'
+tests/tsymex_*.nim`) lists `s8ax_remainder`, `s8be_remainder`,
+`s8bk_argtiming_checks`, `s8br_remainder` and `s8br_framecond`. 14 suites,
+247/0 on each version; cpp 20/0.
+
+*Windows* (d64b7ee, the code of the final head): symex-mingw 37159927354,
+fuzzer-mingw 37159927358 and fuzzer-msvc 37159927403, all success. The
+first push's symex-mingw (58d0a08, 37154099381) failed one suite, the N2
+kind-gate audit (`laterArgWrites` tested `nskProc`-style kinds); fixed by
+`procValueSymKinds`. dc83791's runs (37156887549, 37156887544,
+37156887562) failed only in the Z3 download step (a GitHub 503), every
+corpus shard passing; d64b7ee superseded them.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: S8an's `addr` cell at a non-literal array index with an
+  input-dependent value is a slow query.** `var j = 1; touchP(addr
+  gArr[j], 0); if gArr[1] != k + 5: ...` did not finish in 420 s at the
+  base, nor in 300 s at the head (with `let j = nextI()` instead, the base
+  came back `beSolverUndef` after about 200 s). S8bk's `ai` and S8br's
+  `ia` keep the written value constant for that reason. It is not this
+  slice's mechanism.
+- **PRECISION: S8as's summary counts every global a later callee names as
+  written.** `scanOpaqueEffects` adds each module-level `var` the callee's
+  body names, read or written, so `touch(gH.s[gi], f())` still declines
+  when `f` only reads `gi` or `gH`.
+- **PRECISION: an index call the walk cannot name declines.** A call
+  through a proc value in a by-address actual's index (`gs[fv()]`), or a
+  generic's whose `result` has another type, has no typed symbol to mark;
+  its write-back declines rather than evaluate it again.

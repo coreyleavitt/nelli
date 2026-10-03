@@ -76,7 +76,7 @@
 ## Z3's. Every language is pinned against the concrete `std/re` by the
 ## exhaustive differentials (`tests/tsymex_rfc0005_s8bb_*`,
 ## `tests/tsymex_rfc0005_s8bj_*`), together with the concrete reference runs
-## `runAttempt` / `runSearch`.
+## `runAttempt` / `pcreExec`.
 
 import std/[tables, hashes, sets, algorithm, sequtils]
 import ./pcre_syntax
@@ -212,10 +212,6 @@ type
     ## RFC-0005 S8bj. The start-of-match optimisation of an unanchored call.
     fkNone, fkFirst, fkStartline, fkBits
 
-  SkipNameMode* = enum
-    snFound   ## every path to the SKIP:NAME passes a MARK:NAME
-    snNever   ## no path does: PCRE re-runs the attempt ignoring it
-
   Nfa* = object
     states: seq[NState]
     start*: int
@@ -231,9 +227,16 @@ type
       ## RFC-0005 S8bj: the bumpalong never starts at a CRLF's LF after a
       ## failed attempt (a CRLF-ish convention, no explicit CR or LF)
     nameIdx: Table[string, int]   ## SKIP:NAME names
-    skipMode*: seq[SkipNameMode]  ## per name
     hasCommit*, hasSkip*, hasThen*, hasPrune*: bool
-    hasNeverSkip*: bool   ## a never-found SKIP:NAME
+    hasNeverSkip*: bool
+      ## a SKIP:NAME some path reaches without its MARK (RFC-0005 S8bt: on
+      ## the interpreter; S8bj: no path passes it)
+    reachArg: seq[bool]
+      ## RFC-0005 S8bt: per state, a SKIP:NAME is reachable
+    countArgs*: bool
+      ## RFC-0005 S8bt: an attempt can end with `ignore_skip_arg` set for
+      ## the next one, so the agenda counts SKIP:NAME runs in pcre_exec.c's
+      ## order (`Item.ac`)
     altEnd: seq[seq[int]] ## per catcher group: each branch's end address
     filter*: FilterKind
     fc1, fc2: char
@@ -499,13 +502,12 @@ proc hasThenVerb(x: Rx): bool =
   else: false
 
 proc classifySkipNames(n: var Nfa) =
-  ## RFC-0005 S8bj. Each SKIP:NAME's mode: whether the paths reaching it
-  ## pass a MARK of its name (all: snFound, none: snNever). A mixed one, or
-  ## both modes in one pattern, is declined: PCRE's re-run for a SKIP:NAME
-  ## with no mark ignores EVERY SKIP:NAME passed before it in the attempt
-  ## (pcre_exec.c's `ignore_skip_arg` count), found ones included.
+  ## RFC-0005 S8bj, S8bt. Whether a SKIP:NAME can be reached with and
+  ## without a MARK of its name on the path: the interpreter reads the mark
+  ## per path (`closure`), a SKIP:NAME without one re-running the attempt
+  ## (pcre_exec.c's `ignore_skip_arg`).
   let k = n.nameIdx.len
-  n.skipMode = newSeq[SkipNameMode](k)
+  n.reachArg = newSeq[bool](n.states.len)
   if k == 0: return
   var seenMode = newSeq[set[bool]](k)   # passed a mark on the way: false/true
   for name in 0 ..< k:
@@ -528,38 +530,35 @@ proc classifySkipNames(n: var Nfa) =
         work.add (st.out2, p2)
       else:
         work.add (st.out1, p2)
+  # The states a SKIP:NAME is reachable from (backwards).
+  var preds = newSeq[seq[int]](n.states.len)
+  for i, st in n.states:
+    case st.kind
+    of nkMatch: discard
+    of nkSplit, nkBack:
+      preds[st.out1].add i
+      preds[st.out2].add i
+    else: preds[st.out1].add i
+  var work: seq[int]
+  for i, st in n.states:
+    if st.kind == nkVerb and st.verb == vbSkipName:
+      n.reachArg[i] = true
+      work.add i
+  while work.len > 0:
+    let i = work.pop()
+    for p in preds[i]:
+      if not n.reachArg[p]:
+        n.reachArg[p] = true
+        work.add p
   if n.engine == peJit837:
     # RFC-0005 S8bt: the JIT looks the name up on the current path
     # (`do_search_mark`) and ignores a SKIP:NAME it does not find there,
-    # in place: no re-run, so no mode and nothing declined.
+    # in place: no re-run.
     n.hasSkip = true
     return
-  var found, never = false
   for name in 0 ..< k:
-    if seenMode[name] == {true, false}:
-      n.ok = false
-      n.why = "a (*SKIP:NAME) whose (*MARK:NAME) only some paths pass " &
-              "(PCRE's re-run then ignores the SKIPs passed before it)"
-      return
-    if true in seenMode[name]:
-      n.skipMode[name] = snFound
-      found = true
-    else:
-      n.skipMode[name] = snNever
-      never = true
-  n.hasNeverSkip = never
-  if found: n.hasSkip = true
-  if never and n.hasSkip and n.skipActive:
-    # pcre_exec.c keeps `ignore_skip_arg` across a SKIP's jump: an attempt
-    # at a CRLF's LF reached by the optimiser after it ignores the first
-    # SKIP:NAMEs, where a fresh one would bump past the LF.
-    n.ok = false
-    n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside a (*SKIP) under a " &
-            "CRLF newline convention (pcre_exec.c's stale ignore_skip_arg)"
-  if found and never:
-    n.ok = false
-    n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside one with a mark " &
-            "(PCRE's re-run for the first ignores the second)"
+    if true in seenMode[name]: n.hasSkip = true
+    if false in seenMode[name]: n.hasNeverSkip = true
 
 proc firstBytes(n: Nfa): set[char] =
   ## RFC-0005 S8bt. The bytes an attempt can read first (zero-width items
@@ -615,6 +614,11 @@ proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
                  $maxNfaStates & " states, " & $maxLoops & " nullable loops)"
     return
   result.classifySkipNames()
+  # RFC-0005 S8bt: an attempt can leave `ignore_skip_arg` set for the next
+  # one when a SKIP:NAME without its MARK can re-run it and the attempt can
+  # then end by a SKIP's jump or past a CRLF's LF.
+  result.countArgs = engine == peInterp and result.hasNeverSkip and
+                     (result.hasSkip or result.skipActive)
   let so = startOpt(pr)
   result.so = so
   result.anchoredPat = so.anchored
@@ -660,7 +664,12 @@ proc buildNfa*(root: Rx; groups = 0; nl = nlLF; hasCrLf = false): Nfa =
 
 type
   ItemKind = enum ikThread, ikMarker, ikThen, ikTerm, ikMatch
-  TermKind = enum tmBump, tmCommit, tmSkip
+  TermKind = enum
+    tmBump, tmCommit, tmSkip
+    tmArgSkip   ## RFC-0005 S8bt: a SKIP:NAME with its MARK (id `marker`)
+    tmBarrier   ## RFC-0005 S8bt: a SKIP:NAME without one (id `marker`)
+    tmArgOff    ## RFC-0005 S8bt: a tmArgSkip a re-run ignores (a link)
+    tmStale     ## RFC-0005 S8bt: a SKIP:NAME under a stale ignore count
   Cond = enum
     cdNone
     cdDieLF   ## a `(*CRLF)` dot read a CR: dies if the next byte is LF
@@ -673,9 +682,28 @@ type
     st: int32              ## ikThread: the NFA state
     frames: seq[Frame]     ## ikThread: per catcher group, its latest frame
     marks: seq[int32]      ## ikThread: per name, its latest MARK's tag
-    marker: int32          ## ikMarker: its id; ikThen: the target
+    marker: int32          ## ikMarker: its id; ikThen: the target;
+                           ## a SKIP:NAME's terminal: its id
     term: TermKind         ## ikTerm
     tag: int32             ## ikTerm tmSkip / ikMatch: where
+    anc: int32
+      ## RFC-0005 S8bt: the latest SKIP:NAME terminal on the path whose
+      ## continuation this is (-1 none): a thread's, a SKIP:NAME terminal's
+      ## parent
+    ac: int8
+      ## RFC-0005 S8bt (`countArgs`): a thread's count of the SKIP:NAMEs
+      ## pcre_exec.c runs before its next one; a SKIP:NAME terminal's run
+      ## number (`skip_arg_count`), up to `argCap` (`argCap + 1`: more)
+    stl: int8
+      ## RFC-0005 S8bt: the attempt's `ignore_skip_arg`: the count it
+      ## started with, then the run number of the last SKIP:NAME without
+      ## its MARK that re-ran it
+    soft: bool
+      ## RFC-0005 S8bt: a tmArgSkip a re-run may still ignore (it decides
+      ## only at the front)
+    rerun: bool
+      ## RFC-0005 S8bt: a tmBarrier whose re-run takes the CRLF start skip;
+      ## a tmBump that is that re-run (`ignore_skip_arg` stays set)
     cap: T
 
   StepCtx = object
@@ -689,16 +717,44 @@ type
     crlfElig: bool    ## the start is a CRLF's LF past the start offset
     anchored: bool    ## the call is anchored (a SKIP:NAME without mark
                       ## then fails the attempt)
+    eligAll: bool     ## RFC-0005 S8bt: the attempt starts at a CRLF's LF
+                      ## past the start offset (a re-run moves past it)
     tagNow: int32     ## the tag of an item created here
     capStart, capEnd: bool   ## capture events here (`captureLang`)
 
-  OutcomeKind* = enum okUndecided, okNoMatch, okMatch, okBump, okCommit, okSkip
+  OutcomeKind* = enum
+    okUndecided, okNoMatch, okMatch, okBump, okCommit, okSkip
+    okStale   ## RFC-0005 S8bt: a stale `ignore_skip_arg` read: not modelled
+
+const staleWhy* = "an attempt after a (*SKIP:NAME) without its (*MARK:NAME) " &
+  "re-ran one and ended by a SKIP's jump or a CRLF's LF: pcre_exec.c's " &
+  "ignore_skip_arg then stays set, and which SKIP:NAMEs the next attempt " &
+  "ignores is not modelled"
 
 proc decided[T](it: Item[T]): bool =
-  it.kind in {ikMatch, ikTerm} and it.cond == cdNone
+  ## Decides when it reaches the front, so nothing after it matters.
+  it.kind == ikMatch and it.cond == cdNone or
+    it.kind == ikTerm and it.cond == cdNone and
+      (it.term in {tmBump, tmCommit, tmSkip, tmStale} or
+       it.term == tmArgSkip and not it.soft)
 
-proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond) =
-  (it.st, it.frames, it.marks, it.cond)
+proc decidesAtFront[T](it: Item[T]): bool =
+  decided(it) or
+    it.kind == ikTerm and it.cond == cdNone and it.term == tmArgSkip
+
+const argCap* = 7
+  ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
+
+proc sat(x: int): int8 = int8(min(x, argCap + 1))
+
+proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
+                            int8) =
+  (it.st, it.frames, it.marks, it.cond, it.anc, it.ac)
+
+proc exempt(n: Nfa; st: int32; ac: int8): bool =
+  ## RFC-0005 S8bt. A thread kept beside an identical one: pcre_exec.c runs
+  ## both, and the SKIP:NAMEs the second runs count (`countArgs`).
+  n.countArgs and n.reachArg[st] and ac <= argCap
 
 proc withFrame(fs: seq[Frame]; f: Frame): seq[Frame] =
   for x in fs:
@@ -718,12 +774,44 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
     frames: seq[Frame]
     marks: seq[int32]
     cond: Cond
+    anc: int32
+    ac: int8
+    stl: int8
     cap: T
     item: Item[T]
-  var visited = initHashSet[(int32, uint64, seq[Frame], seq[int32], Cond)]()
-  var seenC = initHashSet[(int32, seq[Frame], seq[int32], Cond)]()
+  var visited = initHashSet[(int32, uint64, seq[Frame], seq[int32], Cond,
+                             int32, int8)]()
+  var seenC = initHashSet[(int32, seq[Frame], seq[int32], Cond, int32,
+                           int8)]()
   var cutting = false
-  for it in items:
+  var work = items
+  var stack: seq[Entry]
+  proc isArg(x: Item[T]): bool =
+    x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff}
+  proc countRun(anc: int32; from0: int) =
+    ## RFC-0005 S8bt: a SKIP:NAME runs: pcre_exec.c runs it before every
+    ## path after this one, so their counts move on -- the threads after
+    ## it, and the SKIP:NAME terminals after it but those on its own path
+    ## (`anc`'s chain, which ran before it).
+    var chain = initHashSet[int32]()
+    var a = anc
+    while a >= 0:
+      chain.incl a
+      var nx = -1'i32
+      for x in stack:
+        if x.kind == 2 and isArg(x.item) and x.item.marker == a:
+          nx = x.item.anc
+      for k in from0 ..< work.len:
+        if isArg(work[k]) and work[k].marker == a: nx = work[k].anc
+      a = nx
+    for x in stack.mitems:
+      if x.kind == 0: x.ac = sat(int(x.ac) + 1)
+    for k in from0 ..< work.len:
+      if work[k].kind == ikThread or
+         isArg(work[k]) and work[k].marker notin chain:
+        work[k].ac = sat(int(work[k].ac) + 1)
+  for idx in 0 ..< work.len:
+    let it = work[idx]
     if it.kind != ikThread:
       if it.kind == ikMarker:
         cutting = false
@@ -733,8 +821,9 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         if decided(it): cutting = true
       continue
     if cutting: continue
-    var stack = @[Entry(kind: 0, st: it.st, frames: it.frames,
-                        marks: it.marks, cond: it.cond, cap: it.cap)]
+    stack = @[Entry(kind: 0, st: it.st, frames: it.frames, marks: it.marks,
+                    cond: it.cond, anc: it.anc, ac: it.ac, stl: it.stl,
+                    cap: it.cap)]
     while stack.len > 0:
       let e = stack.pop()
       case e.kind
@@ -749,23 +838,31 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         continue
       else: discard
       if cutting: continue
-      let vk = (e.st, e.ent, e.frames, e.marks, e.cond)
-      if vk in visited: continue
-      visited.incl vk
+      let vk = (e.st, e.ent, e.frames, e.marks, e.cond, e.anc, e.ac)
+      if not exempt(n, e.st, e.ac):
+        if vk in visited: continue
+        visited.incl vk
       let s = n.states[e.st]
+      template goWith(target: int; fs: seq[Frame]; mk: seq[int32]; c: Cond;
+                      a: int32; cnt: int8; cp: T; en: uint64) =
+        stack.add Entry(kind: 0, st: int32(target), ent: en, frames: fs,
+                        marks: mk, cond: c, anc: a, ac: cnt, stl: e.stl,
+                        cap: cp)
       template go(target: int; c: Cond = e.cond) =
-        stack.add Entry(kind: 0, st: int32(target), ent: e.ent,
-                        frames: e.frames, marks: e.marks, cond: c, cap: e.cap)
+        goWith(target, e.frames, e.marks, c, e.anc, e.ac, e.cap, e.ent)
       template emitAfter(itm: Item[T]) =
         # The item comes after everything the continuation reaches.
-        stack.add Entry(kind: 2, item: itm)
+        var x = itm
+        x.stl = e.stl
+        stack.add Entry(kind: 2, item: x)
       case s.kind
       of nkByte:
-        let k = (e.st, e.frames, e.marks, e.cond)
-        if k notin seenC:
+        let k = (e.st, e.frames, e.marks, e.cond, e.anc, e.ac)
+        if exempt(n, e.st, e.ac) or k notin seenC:
           seenC.incl k
           result.add Item[T](kind: ikThread, st: e.st, frames: e.frames,
-                             marks: e.marks, cond: e.cond, cap: e.cap)
+                             marks: e.marks, cond: e.cond, anc: e.anc,
+                             ac: e.ac, stl: e.stl, cap: e.cap)
       of nkSplit:
         go(s.out2)
         go(s.out1)
@@ -788,39 +885,34 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
       of nkEolAbs:
         if sc.ctx == cxEnd: go(s.out1)
       of nkEnter:
-        stack.add Entry(kind: 0, st: int32(s.out1),
-                        ent: e.ent or (1'u64 shl s.loop), frames: e.frames,
-                        marks: e.marks, cond: e.cond, cap: e.cap)
+        goWith(s.out1, e.frames, e.marks, e.cond, e.anc, e.ac, e.cap,
+               e.ent or (1'u64 shl s.loop))
       of nkBack:
         if (e.ent and (1'u64 shl s.loop)) != 0:
           go(s.out2)    # an empty iteration: leave the loop
         else:
           go(s.out1)
       of nkSave:
-        stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
-                        frames: e.frames, marks: e.marks, cond: e.cond,
-                        cap: save(e.cap, s.slot, sc))
+        goWith(s.out1, e.frames, e.marks, e.cond, e.anc, e.ac,
+               save(e.cap, s.slot, sc), e.ent)
       of nkMatch:
         if not sc.noEmpty:
           let m = Item[T](kind: ikMatch, cond: e.cond, tag: sc.tagNow,
-                          cap: e.cap)
+                          stl: e.stl, cap: e.cap)
           result.add m
           if decided(m): cutting = true
       of nkAlt:
         let id = markerCtr
         inc markerCtr
         stack.add Entry(kind: 1, st: id)
-        stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
-                        frames: withFrame(e.frames,
-                                          (int32(s.grp), int32(s.alt), id)),
-                        marks: e.marks, cond: e.cond, cap: e.cap)
+        goWith(s.out1, withFrame(e.frames, (int32(s.grp), int32(s.alt), id)),
+               e.marks, e.cond, e.anc, e.ac, e.cap, e.ent)
       of nkVerb:
         case s.verb
         of vbMark:
           var mk = e.marks
           if s.name >= 0 and s.name < mk.len: mk[s.name] = sc.tagNow
-          stack.add Entry(kind: 0, st: int32(s.out1), ent: e.ent,
-                          frames: e.frames, marks: mk, cond: e.cond, cap: e.cap)
+          goWith(s.out1, e.frames, mk, e.cond, e.anc, e.ac, e.cap, e.ent)
         of vbCommit:
           emitAfter(Item[T](kind: ikTerm, term: tmCommit, cond: e.cond))
           go(s.out1)
@@ -838,14 +930,36 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
             if e.marks[s.name] >= 0:
               emitAfter(Item[T](kind: ikTerm, term: tmSkip,
                                 tag: e.marks[s.name], cond: e.cond))
-          elif n.skipMode[s.name] == snFound:
-            emitAfter(Item[T](kind: ikTerm, term: tmSkip,
-                              tag: e.marks[s.name], cond: e.cond))
-          elif sc.anchored or (sc.atStart and sc.crlfElig):
-            # No mark: an anchored call fails; an unanchored one re-runs the
-            # attempt -- past the LF when the start is a CRLF's LF.
+            go(s.out1)
+          elif e.marks[s.name] < 0 and sc.anchored:
+            # No mark: an anchored call fails.
             emitAfter(Item[T](kind: ikTerm, term: tmBump, cond: e.cond))
-          go(s.out1)
+            go(s.out1)
+          else:
+            # RFC-0005 S8bt: pcre_exec.c's OP_SKIP_ARG. Its terminal comes
+            # after its continuation, linked to the SKIP:NAME terminal
+            # before it on the path (`anc`), with its run number (`ac`;
+            # whether `ignore_skip_arg` covers it is read at the front): a
+            # SKIP:NAME without its MARK (a barrier) re-runs the attempt
+            # ignoring every SKIP:NAME run so far -- itself and the ones
+            # whose continuation holds it.
+            let id = markerCtr
+            inc markerCtr
+            var run = 0'i8     # not counted (`countArgs` off): live
+            if n.countArgs:
+              run = sat(int(e.ac) + 1)
+              countRun(e.anc, idx + 1)
+            if e.marks[s.name] >= 0:
+              emitAfter(Item[T](kind: ikTerm, term: tmArgSkip,
+                                tag: e.marks[s.name], marker: id,
+                                anc: e.anc, ac: run, soft: n.hasNeverSkip,
+                                cond: e.cond))
+            else:
+              emitAfter(Item[T](kind: ikTerm, term: tmBarrier, marker: id,
+                                anc: e.anc, ac: run, rerun: sc.eligAll,
+                                cond: e.cond))
+            goWith(s.out1, e.frames, e.marks, e.cond, id,
+                   (if n.countArgs: run else: e.ac), e.cap, e.ent)
         of vbThen:
           var target = -1'i32
           for k in countdown(e.frames.high, 0):
@@ -861,7 +975,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
 
 proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
   ## The agenda after the byte `c`: each consumer that reads it moves on.
-  var seen = initHashSet[(int32, seq[Frame], seq[int32], Cond)]()
+  var seen = initHashSet[(int32, seq[Frame], seq[int32], Cond, int32, int8)]()
   for it in items:
     if it.kind != ikThread:
       result.add it
@@ -874,7 +988,7 @@ proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
       if t.cond == cdNeedLF: continue
       t.cond = cdDieLF
     let k = ckey(t)
-    if k in seen: continue
+    if k in seen and not exempt(n, t.st, t.ac): continue
     seen.incl k
     result.add t
 
@@ -898,10 +1012,58 @@ proc dropThreads[T](items: seq[Item[T]]): seq[Item[T]] =
   for it in items:
     if it.kind != ikThread: result.add it
 
+proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
+  ## RFC-0005 S8bt. A SKIP:NAME at the front: every path before it failed,
+  ## so its run number is final. One `ignore_skip_arg` covers (`ac <= stl`)
+  ## is a no-op (left as a link). Otherwise one without its MARK re-runs
+  ## the attempt with `ignore_skip_arg` set to its number: the re-run takes
+  ## the same paths up to here with it and the ones whose continuation
+  ## holds it (its `anc` chain) ignored -- a SKIP:NAME with its MARK there
+  ## no longer decides (tmArgOff) -- and the rest carries on with the count
+  ## set (`stl`). If the attempt starts at a CRLF's LF past the start
+  ## offset, the re-run's start moves past the LF instead: the attempt ends
+  ## as a bump that keeps the count. A SKIP:NAME with its MARK decides
+  ## (`decidesAtFront`). Past `argCap` the comparison is not modelled
+  ## (tmStale). True when the agenda changed.
+  if cur.len == 0 or cur[0].kind != ikTerm or cur[0].cond != cdNone:
+    return false
+  let f = cur[0]
+  case f.term
+  of tmArgOff:
+    cur = cur[1 .. ^1]
+    return true
+  of tmArgSkip, tmBarrier:
+    let counted = f.ac > 0     # 0: not counted, never ignored
+    if counted and f.ac > argCap and f.stl > argCap:
+      cur = @[Item[T](kind: ikTerm, term: tmStale)]
+      return true
+    if counted and f.ac <= f.stl:
+      cur[0].term = tmArgOff
+      return true
+    if f.term == tmArgSkip: return false
+    if f.rerun:
+      cur = @[Item[T](kind: ikTerm, term: tmBump, rerun: true, stl: f.ac)]
+      return true
+    var a = f.anc
+    cur = cur[1 .. ^1]
+    for k in 0 ..< cur.len:
+      if a < 0: break
+      let x = cur[k]
+      if x.kind == ikTerm and x.term in {tmArgSkip, tmBarrier, tmArgOff} and
+         x.marker == a:
+        if x.term == tmArgSkip: cur[k].term = tmArgOff
+        a = x.anc
+    if counted:
+      for x in cur.mitems: x.stl = f.ac
+    return true
+  else:
+    return false
+
 proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
   ## See the module doc: the front decides or jumps, an unconditional
   ## decided item kills what follows it up to the next marker, and a marker
-  ## nothing refers to goes.
+  ## nothing refers to goes. RFC-0005 S8bt: a SKIP:NAME at the front
+  ## re-runs the attempt (`resolveBarrier`).
   var cur = items
   while true:
     var changed = false
@@ -921,7 +1083,8 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
     if i > 0:
       cur = (if i >= cur.len: @[] else: cur[i .. ^1])
       changed = true
-    if cur.len > 0 and decided(cur[0]):
+    if resolveBarrier(cur): continue
+    if cur.len > 0 and decidesAtFront(cur[0]):
       return @[cur[0]]
     var nx: seq[Item[T]]
     var cutting = false
@@ -970,9 +1133,19 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
         for f in it.frames: refs.incl f.marker
       elif it.kind == ikThen:
         refs.incl it.marker
+    # RFC-0005 S8bt: an ignored SKIP:NAME's link no thread or SKIP:NAME
+    # terminal reaches goes too.
+    var links = initHashSet[int32]()
+    for it in nx:
+      if it.kind == ikThread or
+         it.kind == ikTerm and it.term in {tmArgSkip, tmBarrier, tmArgOff}:
+        if it.anc >= 0: links.incl it.anc
     cur = @[]
     for it in nx:
       if it.kind == ikMarker and it.marker notin refs:
+        changed = true
+      elif it.kind == ikTerm and it.term == tmArgOff and
+           it.marker notin links:
         changed = true
       else:
         cur.add it
@@ -989,7 +1162,9 @@ proc outcome[T](items: seq[Item[T]]): OutcomeKind =
     case f.term
     of tmBump: okBump
     of tmCommit: okCommit
-    of tmSkip: okSkip
+    of tmSkip, tmArgSkip: okSkip
+    of tmStale: okStale
+    of tmBarrier, tmArgOff: okUndecided
   else: okUndecided
 
 # ---- the concrete runs -----------------------------------------------------------
@@ -1008,16 +1183,25 @@ proc initMarks(n: Nfa): seq[int32] =
 type AttemptResult*[T] = object
   kind*: OutcomeKind
   pos*: int        ## okMatch: the match's end; okSkip: the landing
+  ign*: int8
+    ## RFC-0005 S8bt: `ignore_skip_arg` after the attempt (`nextIgn`)
   cap*: T
+
+proc nextIgn[T](oc: OutcomeKind; it: Item[T]; landed: bool): int8 =
+  ## RFC-0005 S8bt. pcre_exec.c's `ignore_skip_arg` for the next attempt:
+  ## kept by a SKIP's jump past the start and by a re-run past a CRLF's
+  ## LF, reset by every other way on.
+  if oc == okSkip and landed or oc == okBump and it.rerun: it.stl
+  else: 0
 
 proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
                     cap0: T;
-                    save: proc (t: T; slot: int; sc: StepCtx): T):
-                    AttemptResult[T] =
+                    save: proc (t: T; slot: int; sc: StepCtx): T;
+                    ign0 = 0'i8): AttemptResult[T] =
   ## RFC-0005 S8bj. The concrete attempt at `x` of `s` (the search's start
   ## offset `s0`): its outcome, with positions as tags.
   var items = @[Item[T](kind: ikThread, st: int32(n.start),
-                        marks: initMarks(n), cap: cap0)]
+                        marks: initMarks(n), anc: -1, stl: ign0, cap: cap0)]
   var ctr = 0'i32
   var pc = classAt(s, x)
   let elig = (not anchored) and x > s0 and x < s.len and s[x - 1] == '\r' and
@@ -1031,6 +1215,7 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
                               s[j] == '\r' and s[j + 1] == '\n',
                      pc: pc, pos0: j == 0, atStart: j == x,
                      noEmpty: ne and j == x, crlfElig: j == x and elig,
+                     eligAll: elig,
                      anchored: anchored, tagNow: int32(j))
     items = closure(n, items, sc, ctr, save)
     if atEnd: items = dropThreads(items)
@@ -1042,19 +1227,22 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
       if oc in {okMatch, okSkip}:
         result.pos = int(items[0].tag)
         result.cap = items[0].cap
+      if items.len > 0:
+        result.ign = nextIgn(oc, items[0], oc == okSkip and result.pos > x)
       return
     pc = nextClass(s[j], pc)
 
 proc noSave(t: int8; slot: int; sc: StepCtx): int8 = t
 
 proc runAttempt*(n: Nfa; s: string; x: int; s0 = -1; anchored = true;
-                 ne = false): (OutcomeKind, int) =
+                 ne = false; ign0 = 0'i8): (OutcomeKind, int, int8) =
   ## RFC-0005 S8bj. The concrete attempt at `x` of `s`: its outcome and
   ## (a match's end / a SKIP's landing) position. `s0`: the call's start
-  ## offset (default `x`).
+  ## offset (default `x`). RFC-0005 S8bt: `ign0` its `ignore_skip_arg`, and
+  ## the next attempt's.
   let r = runAttemptT[int8](n, s, x, (if s0 < 0: x else: s0), anchored, ne,
-                            0'i8, noSave)
-  (r.kind, r.pos)
+                            0'i8, noSave, ign0)
+  (r.kind, r.pos, r.ign)
 
 proc chosenEnd*(n: Nfa; u: string; atStart: bool; noEmpty = false): int =
   ## RFC-0005 S8bb. The end offset in `u` of PCRE's (anchored) match at the
@@ -1095,31 +1283,6 @@ proc nextChar(n: Nfa; s: string; x: int; jit = false): int =
       return min(result, s.len)
     while result < s.len and (ord(s[result]) and 0xC0) == 0x80: inc result
 
-proc runSearch*(n: Nfa; s: string; s0: int; ne = false;
-                anchoredCall = false): (int, int) =
-  ## RFC-0005 S8bj. The concrete search from start offset `s0`
-  ## (pcre_exec.c's bumpalong loop): the found match's (start, end), or
-  ## (-1, -1). `ne`: NOTEMPTY_ATSTART.
-  let anchored = anchoredCall or n.anchoredPat
-  var x = s0
-  while true:
-    if not anchored:
-      while not created(n, s, x, s0): inc x
-    let r = runAttemptT[int8](n, s, x, s0, anchored, ne, 0'i8, noSave)
-    var next: int
-    case r.kind
-    of okMatch: return (x, r.pos)
-    of okCommit: return (-1, -1)
-    of okSkip:
-      next = (if r.pos > x: r.pos else: n.nextChar(s, x))
-    else:
-      next = n.nextChar(s, x)
-    if anchored or next > s.len: return (-1, -1)
-    x = next
-    if x > s0 and s[x - 1] == '\r' and x < s.len and s[x] == '\n' and
-       n.skipActive:
-      inc x
-
 proc capSave(t: seq[int32]; slot: int; sc: StepCtx): seq[int32] =
   result = t
   result[slot] = sc.tagNow
@@ -1159,6 +1322,7 @@ type Dfa = object
   sink: seq[bool]    ## an outcome decided and accepted: every well-formed
                      ## continuation is accepted
   ok: bool
+  why: string        ## RFC-0005 S8bt: why not `ok` ("": the size cap)
 
 proc hash(f: Frame): Hash = !$(hash(f.grp) !& hash(f.alt) !& hash(f.marker))
 
@@ -1166,6 +1330,7 @@ proc hash[T](it: Item[T]): Hash =
   var h: Hash = 0
   h = h !& hash(ord(it.kind)) !& hash(ord(it.cond)) !& hash(it.st) !&
       hash(it.marker) !& hash(ord(it.term)) !& hash(it.tag) !&
+      hash(it.anc) !& hash(it.stl) !& hash(it.soft) !& hash(it.rerun) !&
       hash(it.cap)
   for f in it.frames: h = h !& hash(f)
   for m in it.marks: h = h !& hash(m)
@@ -1182,8 +1347,14 @@ proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
     case it.kind
     of ikThread:
       for f in it.frames.mitems: f.marker = idOf(f.marker)
+      if it.anc >= 0: it.anc = idOf(it.anc)
     of ikMarker, ikThen:
       it.marker = idOf(it.marker)
+    of ikTerm:
+      # RFC-0005 S8bt: SKIP:NAME terminals' ids and links.
+      if it.term in {tmArgSkip, tmBarrier, tmArgOff}:
+        it.marker = idOf(it.marker)
+        if it.anc >= 0: it.anc = idOf(it.anc)
     else: discard
 
 type
@@ -1207,6 +1378,7 @@ type
     pc0: PrevClass
     crlfElig: bool
     group: int
+    ign0: int8         ## RFC-0005 S8bt: the attempt's `ignore_skip_arg`
 
   AKey = object
     items: seq[Item[int8]]
@@ -1260,6 +1432,13 @@ proc accepts(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8];
   of acCapSet: oc == okMatch and int(it.cap) mod 3 != 0
   of acCapMark: oc == okMatch and it.cap == 3 * 1 + 1
 
+proc staleOutcome(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8]): bool =
+  ## RFC-0005 S8bt. An unanchored attempt's outcome that leaves
+  ## `ignore_skip_arg` set for the next one (`staleWhy`): a SKIP's jump
+  ## past the start, or a bump from a re-run past a CRLF's LF.
+  not spec.anchored and
+    (oc == okStale or nextIgn(oc, it, oc == okSkip and it.tag != 0) != 0)
+
 proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   ## RFC-0005 S8bj. The deterministic attempt (the agenda machine) as a
   ## DFA accepting the words whose outcome `spec` asks for.
@@ -1274,7 +1453,8 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
   if spec.group > 0: save = capSaveDfa(spec.group)
   let pc0 = (if n.needPc or spec.pc0 == pcStart: spec.pc0 else: pcOther)
   discard intern(AKey(items: @[Item[int8](kind: ikThread, st: int32(n.start),
-                                          marks: initMarks(n))],
+                                          marks: initMarks(n), anc: -1,
+                                          stl: spec.ign0)],
                       pc: pc0, atStart: true))
   let evSyms = [(symMark, 1'i8), (symMark2, 2'i8), (symLand, 4'i8)]
   let need = requiredEvents(spec.acc)
@@ -1310,6 +1490,7 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
                 pos0: k.atStart and pc0 == pcStart, atStart: k.atStart,
                 noEmpty: k.atStart and spec.noEmpty,
                 crlfElig: k.atStart and spec.crlfElig,
+                eligAll: spec.crlfElig,
                 anchored: spec.anchored, tagNow: tagNow(just),
                 capStart: (k.just and 1) != 0, capEnd: (k.just and 2) != 0)
       # The end of the subject.
@@ -1321,6 +1502,8 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         items = normalize(dropThreads(items))
         let oc = outcome(items)
         let it = (if items.len > 0: items[0] else: Item[int8]())
+        if staleOutcome(spec, oc, it):
+          return Dfa(ok: false, why: staleWhy)
         acc = accepts(spec, oc, it, k.ev, k.atStart)
       # The events.
       for (sym, bit) in evSyms:
@@ -1358,6 +1541,8 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
           var k2 = AKey(nl: nls, ev: k.ev, just: 0, atStart: false)
           if oc != okUndecided:
             let it = (if items.len > 0: items[0] else: Item[int8]())
+            if staleOutcome(spec, oc, it):
+              return Dfa(ok: false, why: staleWhy)
             # Decided: accepted for good once the required events are read.
             if (k.ev and need) == need and
                accepts(spec, oc, it, k.ev, false):
@@ -1666,6 +1851,7 @@ proc utfProduct(d: Dfa; invalidAccepts: bool): Dfa =
 
 proc langOf(d: Dfa; what: string): SelLang =
   if not d.ok:
+    if d.why.len > 0: return SelLang(ok: false, why: d.why)
     return SelLang(ok: false, why: "the pattern's " & what & " automaton " &
                    "is past its size cap (" & $maxDfaStates & " states)")
   let (trans, acc) = minimize(d)
@@ -1851,7 +2037,7 @@ proc byteReps(n: Nfa; extra: seq[set[char]]): array[256, int] =
     result[b] = firstOf.mgetOrPut(sig, b)
 
 proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
-                   ok: var bool): Verifier =
+                   ok: var bool; why: var string): Verifier =
   let acc = (case ex
              of exBump: acBump
              of exSkipFlight, exSkip: acSkipT
@@ -1863,6 +2049,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
                                       crlfElig: elig))
   if not d.ok:
     ok = false
+    why = d.why
     return
   let (t, a, _) = minimizeMap(d)
   result.trans = t
@@ -1916,7 +2103,7 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
         if idx(sg, u) notin bad[c]: result.univ[c].incl idx(sg, u)
 
 var verCache {.threadvar.}: Table[(string, Expect, PrevClass, bool),
-                                   (Verifier, bool)]
+                                   (Verifier, bool, string)]
 
 proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
                pc0: PrevClass): Dfa =
@@ -1926,6 +2113,7 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
   var vers = initTable[(Expect, PrevClass, bool), int]()
   var vlist: seq[Verifier]
   var vok = true
+  var vwhy = ""
   proc verifier(ex: Expect; pc: PrevClass; elig: bool): int =
     let ex2 = (if ex == exSkip: exSkipFlight else: ex)
     let key = (ex2, canonPc0(n, pc), elig and n.hasNeverSkip)
@@ -1934,10 +2122,13 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
       let gk = (cacheKey, key[0], key[1], key[2])
       if gk notin verCache:
         var fine = true
-        let v = buildVerifier(n, key[0], key[1], key[2], fine)
-        verCache[gk] = (v, fine)
-      let (v, fine) = verCache[gk]
-      if not fine: vok = false
+        var why = ""
+        let v = buildVerifier(n, key[0], key[1], key[2], fine, why)
+        verCache[gk] = (v, fine, why)
+      let (v, fine, why) = verCache[gk]
+      if not fine:
+        vok = false
+        if vwhy.len == 0: vwhy = why
       vlist.add v
     vers[key]
   var ids = initTable[SKey, int]()
@@ -2209,6 +2400,7 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
   while i < keys.len:
     if keys.len > maxDfaStates or not vok:
       result.ok = false
+      result.why = vwhy
       return
     let k = keys[i]
     var row: array[nSyms, int32]
@@ -2408,8 +2600,11 @@ type
     next*: seq[array[2, array[256, int32]]]
       ## [state][context: other / nll][byte]: the next state, -1 dead
 
-proc startAgenda(n: Nfa): seq[Item[int8]] =
-  @[Item[int8](kind: ikThread, st: int32(n.start), marks: initMarks(n))]
+proc startAgenda(n: Nfa; ign0 = 0'i8): seq[Item[int8]] =
+  ## The attempt's agenda before its first position; RFC-0005 S8bt: `ign0`
+  ## its `ignore_skip_arg`.
+  @[Item[int8](kind: ikThread, st: int32(n.start), marks: initMarks(n),
+               anc: -1, stl: ign0)]
 
 proc crlfSkipObservable*(n: Nfa): bool =
   ## RFC-0005 S8bj. Whether the bumpalong's CRLF skip (pcre_exec.c: no start
@@ -2455,7 +2650,8 @@ proc runTable*(n: Nfa): RunTable =
   proc fromKey(k: seq[int]): seq[Item[int8]] =
     for x in k:
       result.add Item[int8](kind: ikThread, st: int32(x div 4),
-                            cond: Cond(x mod 4), marks: initMarks(n))
+                            cond: Cond(x mod 4), marks: initMarks(n),
+                            anc: -1)
   result.ok = true
   for bol in [false, true]:
     for ne in [false, true]:
@@ -2522,14 +2718,17 @@ type
     items: seq[Item[int8]]
     pc: PrevClass
     start: int8    ## 0 none; else 1 + 2*ne + 4*elig (+ 8 pos0)
+    elig: bool     ## RFC-0005 S8bt: the attempt starts at a CRLF's LF (a
+                   ## SKIP:NAME's re-run moves past it)
 
 proc hash(k: TKey): Hash =
-  var h: Hash = hash(ord(k.pc)) !& hash(k.start)
+  var h: Hash = hash(ord(k.pc)) !& hash(k.start) !& hash(k.elig)
   for it in k.items: h = h !& hash(it)
   !$h
 
 proc `==`(a, b: TKey): bool =
-  a.items == b.items and a.pc == b.pc and a.start == b.start
+  a.items == b.items and a.pc == b.pc and a.start == b.start and
+    a.elig == b.elig
 
 proc tagsOf(items: seq[Item[int8]]): seq[int32] =
   ## The registers the agenda refers to, in order of first reference.
@@ -2561,6 +2760,7 @@ proc stepTable*(n: Nfa): StepTable =
   ## RFC-0005 S8bj. The agenda table of `n` for unanchored attempts (see
   ## above), or `ok == false` past the caps.
   if not n.ok: return StepTable(ok: false, why: n.why)
+  var stale = false
   var ids = initTable[TKey, int]()
   var keys: seq[TKey]
   proc intern(k: TKey): int =
@@ -2576,7 +2776,7 @@ proc stepTable*(n: Nfa): StepTable =
         let st = int8(1 + 2 * ord(ne) + 4 * ord(el) +
                       8 * ord(pc == pcStart))
         result.start[(pc, ne, el)] =
-          intern(TKey(items: startAgenda(n), pc: pc, start: st))
+          intern(TKey(items: startAgenda(n), pc: pc, start: st, elig: el))
   var i = 0
   while i < keys.len:
     if keys.len > maxStepStates:
@@ -2589,17 +2789,25 @@ proc stepTable*(n: Nfa): StepTable =
       StepCtx(ctx: ctx, nb: nb, finCRLF: fin, pc: k.pc,
               pos0: (st and 8) != 0, atStart: st != 0,
               noEmpty: (st and 2) != 0, crlfElig: (st and 4) != 0,
-              anchored: false, tagNow: regs)
+              eligAll: k.elig, anchored: false, tagNow: regs)
     proc leafOf(items0: seq[Item[int8]]; pcNext: PrevClass;
                 ok: var bool): Leaf =
       let items = normalize(items0)
       let oc = outcome(items)
       proc reg(t: int32): int8 = (if t == regs: -1'i8 else: int8(t))
+      # RFC-0005 S8bt: an outcome that leaves `ignore_skip_arg` set for the
+      # next attempt (a SKIP's jump, or a re-run past a CRLF's LF, after a
+      # SKIP:NAME without its MARK) is not modelled.
+      if oc == okStale or oc != okUndecided and
+         nextIgn(oc, items[0], true) != 0:
+        stale = true
+        ok = false
+        return Leaf(kind: lfBump)
       case oc
       of okNoMatch, okBump: Leaf(kind: lfBump)
       of okCommit: Leaf(kind: lfCommit)
       of okMatch: Leaf(kind: lfMatch, reg: reg(items[0].tag))
-      of okSkip: Leaf(kind: lfSkip, reg: reg(items[0].tag))
+      of okSkip, okStale: Leaf(kind: lfSkip, reg: reg(items[0].tag))
       of okUndecided:
         let order = tagsOf(items)
         if order.len > maxRegs:
@@ -2608,7 +2816,7 @@ proc stepTable*(n: Nfa): StepTable =
         var mp: seq[int8]
         for t in order: mp.add reg(t)
         let k2 = TKey(items: canon(retag(items, order)),
-                      pc: (if n.needPc: pcNext else: pcOther))
+                      pc: (if n.needPc: pcNext else: pcOther), elig: k.elig)
         Leaf(kind: lfNext, next: int32 intern(k2), regMap: mp)
     var row: StepRow
     var fine = true
@@ -2639,6 +2847,7 @@ proc stepTable*(n: Nfa): StepTable =
         let lf = leafOf(advance(n, cl, c), nextClass(c, k.pc), fine)
         if ci == 0: row.other[b] = lf else: row.nll[b] = lf
     if not fine:
+      if stale: return StepTable(ok: false, why: staleWhy)
       return StepTable(ok: false, why: "the pattern's run holds more than " &
                        $maxRegs & " pending positions")
     result.rows.add row
@@ -2647,6 +2856,9 @@ proc stepTable*(n: Nfa): StepTable =
 # ---- the concrete call (the reference of every lowering) ----------------------
 
 const
+  pcreUnmodelled* = -1000
+    ## RFC-0005 S8bt: `pcreExec`'s result where the model stops
+    ## (`staleWhy`); never a libpcre code
   pcreErrBadOffset* = -24
   pcreErrBadUtf8* = -10
   pcreErrBadUtf8Offset* = -11
@@ -2729,6 +2941,7 @@ proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
   let anchored = anchoredCall or n.anchoredPat
   let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
   var x = start
+  var ign = 0'i8
   while true:
     if jit and n.jit.on and not anchored:
       # RFC-0005 S8bt: the JIT's prefix scan.
@@ -2738,17 +2951,22 @@ proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
     if not attemptMade(n, s, x, filt == fkFirst, jit): return (-1, 0, 0)
     if le == leZero: return (code, 0, 0)
     let r = runAttemptT[int8](n, s, x, start, anchored, ne and x == start,
-                              0'i8, noSave)
+                              0'i8, noSave, ign)
     var next: int
     var landed = false
     case r.kind
     of okMatch: return (1, x, r.pos)
     of okCommit: return (-1, 0, 0)
+    of okStale: return (pcreUnmodelled, 0, 0)
     of okSkip:
       landed = r.pos > x
       next = (if landed: r.pos else: n.nextChar(s, x, jit))
     else:
       next = n.nextChar(s, x, jit)
+    # RFC-0005 S8bt: pcre_exec.c's `ignore_skip_arg` for the next attempt
+    # (`nextIgn`); past `argCap` it is not modelled.
+    ign = r.ign
+    if ign > argCap: return (pcreUnmodelled, 0, 0)
     if anchored or next > s.len: return (-1, 0, 0)
     x = next
     # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF
@@ -2758,15 +2976,17 @@ proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
        n.skipActive and not (jit and landed):
       inc x
 
-proc pcreReplace*(n: Nfa; s, by: string): string =
+proc pcreReplace*(n: Nfa; s, by: string; unmodelled: var bool): string =
   ## RFC-0005 S8bj. Nim's `replace(s, re, by)` over `pcreExec` (std/re's
   ## loop: from the end of each match, NOTEMPTY_ATSTART after an empty one,
-  ## the rest kept on the first miss or error).
+  ## the rest kept on the first miss or error). RFC-0005 S8bt:
+  ## `unmodelled` when a call is (`pcreUnmodelled`).
   var prev = 0
   var ne = false
   while prev < s.len:
     let (rc, a, b) = pcreExec(n, s, prev, false, ne)
     ne = false
+    if rc == pcreUnmodelled: unmodelled = true
     if rc < 0: break
     result.add s[prev ..< a]
     result.add by
@@ -2774,3 +2994,8 @@ proc pcreReplace*(n: Nfa; s, by: string): string =
     prev = b
   result.add s[min(prev, s.len) .. ^1]
 
+proc pcreReplace*(n: Nfa; s, by: string): string =
+  ## `pcreReplace` where every call is modelled.
+  var unmodelled = false
+  result = pcreReplace(n, s, by, unmodelled)
+  doAssert not unmodelled, "pcreReplace: a call the model does not read"

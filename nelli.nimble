@@ -1084,6 +1084,11 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bt_jit_replace",
             "tsymex_rfc0005_s8bt_jit_replace_b",
             "tsymex_rfc0005_s8bt_jit_replace_c",
+            "tsymex_rfc0005_s8bt_skipname",
+            "tsymex_rfc0005_s8bt_skipname_b",
+            "tsymex_rfc0005_s8bt_skipname_c",
+            "tsymex_rfc0005_s8bt_skipname_d",
+            "tsymex_rfc0005_s8bt_skipname_e",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

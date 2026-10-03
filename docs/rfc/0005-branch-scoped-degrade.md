@@ -8792,3 +8792,120 @@ hierarchy and 163-audit families, and every source-reading audit),
   array global) is `feGlobalReadUnmodelled` / a walker fault on this
   base, before any pointer is involved; item 4's global path is pinned
   through `var` parameters.
+
+**As landed (S8bw, walker 227 provisional) — S8bn's remainder.** Suite
+`tsymex_rfc0005_s8bw_remainder` (22 tests; c on both Z3 versions,
+cpp 5.1). The base is 22361d7 (S8bn, on a28c9c3). Neither batch 2
+(S8ar, S8at), batch 4 (S8bc, S8be) nor S8ax is in the base; item 3's
+seq-of-aggregates and non-integer table-value bullets name their
+substrate, and stay open (below).
+
+- *Item 1 (SOUNDNESS, crash class): a global's receiver never faults
+  the walker.* A module-level global read before any write lowered to an
+  `int` stand-in whatever its type, and the receiver checks it reached
+  were `doAssert`s or direct env lookups: `gArr[2] = k` then `gArr[2]`
+  (`iekIndex`), `gSeq.map(f)` (`lowerHofCall`), `gStrs.join(",")`
+  (`iekStrJoin`), `if gB` (`binBV`) were `weInternalWalkerFault`;
+  `gSeq.pop()` a `KeyError`; `gSeq[0] = k` leaked its lowering taint to
+  the walk end. A discriminator reassignment of an unbound object was
+  dropped with no decline (a clean false `sxSat` where Nim raises from
+  the zero value's branch). A local declared with a pragma
+  (`var a {.global.}`) failed the build. The emitter now gives each
+  global read its declared type (`iekVar.vGlobalTy`); the audit of every
+  receiver-kind assert a global, a capture or a heap read can reach:
+  `iekIndex`, `lowerHofCall` (receiver and closure) and `iekStrJoin`
+  decline in-band (`degradeAlloc`); `isIndexAssign` and `isSeqPop`
+  decline an unbound receiver; both reassignment arms decline an unbound
+  object, and a multi-variant (`doAssert`) goes to
+  `degradeUnmodelledReassign`; `lowerLeafInExpr` drains its taint onto
+  the path it returns. `joinStrSeq`, `seqElemAt`, `applyClosureGround`,
+  the three table key asserts and `svTupleEq` keep their asserts (every
+  caller checks the kind first); `binBV` / `cmpBV` / `eqBV`, and the
+  walker-fault-kinded `iekSeqAdd` / `iekSeqDel` / `uNot` declines, were
+  reached only through the untyped stand-in, now typed. A
+  pragma-declared local declines (`feUnsupportedStmtKind`).
+- *Item 2: tuple, object and array globals.* A global's read before any
+  write gives its INITIAL value: one constant per leaf of its declared
+  type, the same for every read of the run (`globalInitValue`), each an
+  UNWRITTEN leaf (`glUnwritten`). A partial write (`g.a = v`,
+  `g[i] = v`) rebuilds `g` from copies of its other parts
+  (`iekVar.vCopy`), which observe nothing; every other read -- the
+  outermost access of a chain over a global, an element read, a
+  pointer's dereference, a discriminator's reassignment, a `var` / `addr`
+  actual's copy-in -- declines (`feGlobalReadUnmodelled`, as a scalar
+  global's does) when its value mentions an unwritten leaf. A symbolic
+  element read declines only when the solver cannot show the index
+  misses every unwritten element (`unwrittenIndependent`); the index
+  check of a partial write reads nothing (`isIndex.ixCheckOnly`). Field
+  and element reads and writes, writes through a `var` parameter, through
+  `addr` and in a callee replay `roConfirmed`; S8bn item 4's pointer
+  targets are re-pinned on globals directly.
+- *Item 3: pointers into case objects.* A case object (a global, a `var`
+  parameter, `svVariant` / `svMultiVariant`) holds its plain fields and
+  each branch's fields as pointer targets (`ptrVarLeaves`; a branch field
+  is the step `ptrArmStep`, every tag's copy written at once); a heap
+  case object's `else` branch field (`<O>__@-1__<f>`) is a target too.
+  A branch field is a target only while its branch is active
+  (`svPathArmCond`, `ptrHeapArmCond` over the discriminator heap): a
+  dereference whose `sel` may name one whose branch is inactive declines
+  that sub-path (`feUnsupportedOp`, `ptrInactive`) and continues on the
+  rest. The replay aims such a pointer by the field's name
+  (`f<name>` steps, `ptrAimByName`, field checks off: the branch may
+  become active only when the SUT runs). `let q = addr v.b` of a branch
+  field over a variable or a `var` parameter is S8an's alias, after a
+  check read that raises `FieldDefect` out of the branch, while nothing
+  in its scope assigns the object or takes its address
+  (`rootMutatedIn`); it was `heUnsafeCast`.
+  **Deviation from the slice's wording, by probe:** Nim 2.2.10 raises no
+  `FieldDefect` at a pointer's dereference -- a `ptr` into an inactive
+  branch reads the active branch's bytes (probe: 2 printed). `FieldDefect`
+  is raised where Nim raises it, at the `addr`; the dereference declines.
+- *Item 3: generic case objects* are classified per instance as a
+  non-generic case object is (`classifyGenericInstance` calls
+  `classifyObjectRecordFields` in the instance's frame), keyed and named
+  as S8bn's generic objects; a plain parent's fields join the plain ones,
+  and a generic object below a generic case object is a variant. A ref
+  witness names the instance (`refWitnessTypeNode`).
+- *Item 3: table values.* A `ptr` target in a `Table[string, V]` is any
+  value type the base's table holds (`isContainerIntLeaf`: every integer
+  width, `char`, an enum, `bool`), read and written through its 64-bit
+  cell (`cellValue` / `cellOf`); was `int64` only.
+
+*Repins.* The CR2 walker pin; N27's marker inventory (84 to 86:
+`svAsts`'s two seq lines collect terms, lowering nothing); S8ao / S8ap's
+unrecognised-generic example (a generic case object is classified now, so
+the example is one below another, a case part at two levels). The S8bn
+section's "different mechanisms" (aggregate global reads, case-object
+pointers, generic case objects) are closed here except as listed below.
+
+*Sweep.* 119 suites (the suite, S8bn, S8bh, S8bf, S8bd, S7 closure, S8i,
+H step C, CR2, every `command grep -l '^var g\|case kind\|of RootObj'`
+hit, every S8 remainder and every source-reading audit; S8be and S8ax
+have no suite on this base), 1997 tests, 0 failed on Z3 5.1 and on
+4.13.4 (c); the first nine on cpp (5.1) 218/218. The suite runs in about
+1 s per backend and Z3 version (its build excluded).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION (blocked on substrate): a pointer into a seq of
+  aggregates.** The slice says to reuse S8be's per-element cells; S8be
+  (and S8bc's tree-seq backing, `isTreeSeqElemTy`) landed in batch 4,
+  which is not in this base: here a seq of tuples or objects is an
+  unbacked length-0 placeholder (`isBackedSeqElemTy`, types.nim), so it
+  has no element to address. Reported as a BLOCKER for that bullet.
+- **PRECISION (blocked on substrate): a pointer into a table of
+  `string`, `float` or aggregate values.** This base backs only
+  integer-leaf table values (`isBackedTableTy`); `string` / `float`
+  values are S8ar's and container values S8at's (batch 2, not in this
+  base), and an aggregate value is a scoped decline even there
+  (`isTableValTy`). Reported as a BLOCKER for that bullet.
+- **PRECISION: a partial write into an unwritten part.** A symbolic
+  index write into an array-of-aggregates global element with unwritten
+  parts, a partial write of a variant global, and a `var` / `addr`
+  actual whose part is unwritten decline (the scalar global's rule).
+- **PRECISION: `addr` of an array element in a `let`** (`addr gArr[1]`)
+  stays `heUnsafeCast` (S8an's alias takes no index).
+- **PRECISION: a dereference that may reach an inactive branch
+  declines** that sub-path (Nim reads the active branch's bytes there).
+- **PRECISION: `{.global.}` / `{.noinit.}` locals decline** (S8be
+  models `{.global.}` on its own base; the integration supersedes this
+  decline).

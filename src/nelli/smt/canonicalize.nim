@@ -5439,10 +5439,21 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # touches one declines), so they key the call.
     var guards: seq[string]
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
+    # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
+    # whether the walk binds its formal to an address cell.
+    var locs: seq[string]
+    for l in s.cVarLocs:
+      var steps: seq[string]
+      for st in l.path:
+        steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                  else: st)
+      locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & (if l.byAddr: "&" else: "")
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
       (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      (if locs.len > 0: ";locs=[" & locs.join(",") & "]" else: "") &
       # RFC-0005 S8as: an inert opaque call's effect summary rebinds the
       # names it lists, so it changes the verdict.
       (if s.opaqueHavoc.len > 0: ";havoc=[" & s.opaqueHavoc.join(",") & "]"

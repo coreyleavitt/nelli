@@ -1150,6 +1150,16 @@ type
     typeIds*: seq[string]  ## qualified Nim exception type names
     body*:    IRStmt
 
+  VarLoc* = tuple[temp, root: string; path: seq[string]; byAddr: bool]
+    ## RFC-0005 S8bs. Where a call's copy-in/copy-out argument came from
+    ## (`IRStmt.cVarLocs`): `temp` is the IR name the call is given -- the
+    ## temporary a `var` actual that is not a variable is passed through
+    ## (`byAddr` false), or the cell an `addr lv` actual is for the call
+    ## (`byAddr` true) -- and the location is the variable `root` along
+    ## `path`: a field step is the field's name, an index step `[` and the
+    ## IR name of a `let` holding the index, and `?` a step the walk cannot
+    ## follow.
+
   IRStmt* = ref object
     case kind*: IRStmtKind
     of isBlock:
@@ -1341,6 +1351,16 @@ type
                          ## the callee, is therefore withheld from the
                          ## callee, and a callee that touches it declines
                          ## (`isCall`). Empty for a call with neither.
+      cVarLocs*: seq[VarLoc]
+                         ## RFC-0005 S8bs. The location of each argument
+                         ## this call passes by copy-in/copy-out that is a
+                         ## path into a routine's variable (`VarLoc`). When
+                         ## that variable has an address cell in the walk
+                         ## (`addr b` taken), the callee can reach the
+                         ## location through a pointer too: the walk binds
+                         ## the `var` formal to the cell at that path, so
+                         ## the callee's writes through the two are one
+                         ## location in its order, or declines.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -4682,6 +4702,19 @@ func heapCompoundTy*(ty: IRType): bool =
                   heapCompoundTy(g))
   else: false
 
+func fieldSplitPointee*(ty: IRType): bool =
+  ## RFC-0005 S8ar (the parser's `wholeObjectPointee`, moved here by RFC-0005
+  ## S8bs so the walker shares it). A pointee that is an object or named
+  ## tuple with fields: `p[]` reads and `p[] = v` writes it field by field,
+  ## each field in its own heap (`fieldHeapKey`), the heaps `p.f` reads and
+  ## writes. A placeholder (a recursive field's pointee) has no field list,
+  ## and an anonymous tuple no field names: those are held whole.
+  if ty == nil or ty.kind != itTuple or ty.isPlaceholder or ty.fields.len == 0:
+    return false
+  for fname in ty.fieldNames:
+    if fname.len == 0: return false
+  true
+
 func heapPartLabel*(ty: IRType; i: int): string =
   ## RFC-0005 S8ar. The name of part `i` of a `heapTreeTy` tuple or array:
   ## a field's name, `Field<i>` for an anonymous tuple's (`fieldPairs`'
@@ -5297,11 +5330,12 @@ proc mkReturnVal*(e: IRExpr): IRStmt =
 
 proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             retIntOffsetPositions: seq[int] = @[],
-            guardRoots: seq[string] = @[]): IRStmt =
+            guardRoots: seq[string] = @[];
+            varLocs: seq[VarLoc] = @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions,
-         cGuardRoots: guardRoots)
+         cGuardRoots: guardRoots, cVarLocs: varLocs)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false, havoc: seq[string] = @[],

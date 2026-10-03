@@ -1451,11 +1451,46 @@ proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                            heapStoreValue(fv, proto, sl.ty), sl.ty):
       p.heaps[c.key] = c.arr
 
+proc objectCellValue(ctx: Z3Context; p: Path; ty: IRType;
+                     refAst: Z3AnyAst): SymVal =
+  ## RFC-0005 S8bs. The object (a `fieldSplitPointee` tuple) held at
+  ## `refAst` on `p`: each field the select of its own field heap
+  ## (`fieldHeapKey`), the heaps `p[].f` reads and writes.
+  let refSort = allocRefSort(ctx, ty)
+  var fields: seq[SymVal]
+  for i, fname in ty.fieldNames:
+    let cell = heapCellArrays(ctx, p, fieldHeapKey(ty, fname), refSort,
+                              ty.fields[i])
+    fields.add heapCellSelect(ctx, cell, refAst, ty.fields[i])
+  SymVal(kind: svTuple, fields: fields, fieldNames: ty.fieldNames)
+
+proc objectCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
+                     v: SymVal) =
+  ## RFC-0005 S8bs. Store the object `v` into its cell at `refAst` on `p`,
+  ## field by field (`objectCellValue`'s heaps).
+  let refSort = allocRefSort(ctx, ty)
+  for i, fname in ty.fieldNames:
+    if v.kind != svTuple or i >= v.fields.len: return
+    let cell = heapCellArrays(ctx, p, fieldHeapKey(ty, fname), refSort,
+                              ty.fields[i])
+    var scratchPC: seq[Z3Bool]
+    let proto = allocateSym(ty.fields[i], "__addrCellProto", scratchPC)
+    for c in heapCellStore(ctx, cell, refAst,
+                           heapStoreValue(v.fields[i], proto, ty.fields[i]),
+                           ty.fields[i]):
+      p.heaps[c.key] = c.arr
+
 proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                    refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8ax. The value of the address cell at `refAst` on `p`.
   ## RFC-0005 S8be: a case object's, from its field-split heaps.
+  ## RFC-0005 S8bs: and an object's (`objectCellValue`). It was read from
+  ## the whole-pointee heap (`<T>__@.f`), which no `p[].f` reads or writes:
+  ## a write through a pointer to the variable (`gpb[].x = 5`, in its own
+  ## frame or a callee's) never reached it, and a write to it by name never
+  ## reached the pointer.
   if ty.kind == itVariant: return variantCellValue(ctx, p, ty, refAst)
+  if fieldSplitPointee(ty): return objectCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   heapCellSelect(ctx, cell, refAst, ty)
@@ -1468,6 +1503,9 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   if ty.kind == itVariant:   # RFC-0005 S8be
     if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
     return variantCellValue(ctx, p, ty, refAst)
+  if fieldSplitPointee(ty):   # RFC-0005 S8bs
+    objectCellStore(ctx, p, ty, refAst, v)
+    return objectCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
   var scratchPC: seq[Z3Bool]
@@ -1475,6 +1513,96 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   let stored = heapCellStore(ctx, cell, refAst, heapStoreValue(v, proto, ty), ty)
   for c in stored: p.heaps[c.key] = c.arr
   heapCellSelect(ctx, stored, refAst, ty)
+
+proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
+            k = 0; j = 0): Option[SymVal] =
+  ## RFC-0005 S8bs. The part of `v` at `path` (`AddrCellEntry`): a field of
+  ## an object or tuple, a plain or arm field of a case object, an element
+  ## of a seq of scalars or strings (`[`, the next of `ixs`). none for a
+  ## step the walk does not follow.
+  if k >= path.len: return some(v)
+  let st = path[k]
+  if st.startsWith("["):
+    if j >= ixs.len or v.kind != svSeq or isTreeSeqElemTy(v.seqElemTy) or
+       not isBackedSeqElemTy(v.seqElemTy) or
+       v.seqElemTy.kind notin {itInt, itBool, itFloat32, itFloat64, itString}:
+      return none(SymVal)
+    return locGet(seqElemAt(v, toZ3Int(ixs[j])), path, ixs, k + 1, j + 1)
+  case v.kind
+  of svTuple:
+    let i = v.fieldNames.find(st)
+    if i >= 0 and i < v.fields.len:
+      return locGet(v.fields[i], path, ixs, k + 1, j)
+  of svVariant:
+    let i = v.vPlainFieldNames.find(st)
+    if i >= 0 and i < v.vPlainFields.len:
+      return locGet(v.vPlainFields[i], path, ixs, k + 1, j)
+    for o, names in v.vArmFieldNames.pairs:
+      let a = names.find(st)
+      if a >= 0 and v.vArmFields.hasKey(o) and a < v.vArmFields[o].len:
+        return locGet(v.vArmFields[o][a], path, ixs, k + 1, j)
+  else: discard
+  none(SymVal)
+
+proc locSet(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
+            k = 0; j = 0): Option[SymVal] =
+  ## RFC-0005 S8bs. `v` with its part at `path` (`locGet`) replaced by `x`.
+  if k >= path.len: return some(x)
+  let st = path[k]
+  if st.startsWith("["):
+    if locGet(v, path[k .. k], ixs[j .. ^1]).isNone: return none(SymVal)
+    let idx = toZ3Int(ixs[j])
+    let r = locSet(seqElemAt(v, idx), path, ixs, x, k + 1, j + 1)
+    if r.isNone: return none(SymVal)
+    var nv = v
+    nv.seqDataRaw = storeSeqElem(v.seqDataRaw, v.seqElemTy, idx, r.get) # [placeholder-audited]
+    return some(nv)
+  case v.kind
+  of svTuple:
+    let i = v.fieldNames.find(st)
+    if i >= 0 and i < v.fields.len:
+      let r = locSet(v.fields[i], path, ixs, x, k + 1, j)
+      if r.isNone: return none(SymVal)
+      var nv = v
+      nv.fields[i] = r.get
+      return some(nv)
+  of svVariant:
+    let i = v.vPlainFieldNames.find(st)
+    if i >= 0 and i < v.vPlainFields.len:
+      let r = locSet(v.vPlainFields[i], path, ixs, x, k + 1, j)
+      if r.isNone: return none(SymVal)
+      var nv = v
+      nv.vPlainFields[i] = r.get
+      return some(nv)
+    for o, names in v.vArmFieldNames.pairs:
+      let a = names.find(st)
+      if a >= 0 and v.vArmFields.hasKey(o) and a < v.vArmFields[o].len:
+        let r = locSet(v.vArmFields[o][a], path, ixs, x, k + 1, j)
+        if r.isNone: return none(SymVal)
+        var nv = v
+        var arm = v.vArmFields[o]
+        arm[a] = r.get
+        nv.vArmFields[o] = arm
+        return some(nv)
+  else: discard
+  none(SymVal)
+
+proc addrEntryValue(ctx: Z3Context; p: Path; c: AddrCellEntry;
+                    refAst: Z3AnyAst): Option[SymVal] =
+  ## RFC-0005 S8bs. The value of `c`'s location on `p`: its cell's
+  ## (`addrCellValue`), or, for a `bound` entry, the part of it at its path.
+  let whole = addrCellValue(ctx, p, c.ty, refAst)
+  if c.path.len == 0: return some(whole)
+  locGet(whole, c.path, c.ixs)
+
+proc addrEntryStore(ctx: Z3Context; p: Path; c: AddrCellEntry;
+                    refAst: Z3AnyAst; x: SymVal): Option[SymVal] =
+  ## RFC-0005 S8bs. `addrCellStore` for `c`'s location: a `bound` entry's
+  ## part is stored into the whole value its cell holds.
+  if c.path.len == 0: return some(addrCellStore(ctx, p, c.ty, refAst, x))
+  let nw = locSet(addrCellValue(ctx, p, c.ty, refAst), c.path, c.ixs, x)
+  if nw.isNone: return none(SymVal)
+  locGet(addrCellStore(ctx, p, c.ty, refAst, nw.get), c.path, c.ixs)
 
 proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. A `ptr` dereference on `p` that may reach the address
@@ -1570,9 +1698,10 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     block:
       var known = false
       for c in w.frame.addrCells:
-        if c.local == local: known = true
+        if c.local == local and not c.bound: known = true   # RFC-0005 S8bs
       if not known:
-        w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty)
+        w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
+                               path: @[], ixs: @[], bound: false)
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
     child.env = env2

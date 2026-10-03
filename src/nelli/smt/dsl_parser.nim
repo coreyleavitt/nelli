@@ -728,11 +728,13 @@ proc emitStmt*(s: IRStmt): NimNode =
       # `mkCall`'s `@[]` default regardless of what the parser computed).
       var posLit = newTree(nnkBracket)
       for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
-      # RFC-0005 S8an: `cGuardRoots` round-trips the same way.
+      # RFC-0005 S8an: `cGuardRoots` round-trips the same way; RFC-0005
+      # S8bs: and `cVarLocs`.
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              prefix(posLit, "@"), newLit(s.cGuardRoots))
+              prefix(posLit, "@"), newLit(s.cGuardRoots),
+              newLit(s.cVarLocs))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -1372,12 +1374,9 @@ proc wholeObjectPointee(pointeeTy: IRType): bool =
   ## with fields: `p[]` reads and `p[] = v` writes it field by field, the
   ## field heaps `p.f` uses. A placeholder (a recursive field's pointee) has
   ## no field list here, and an anonymous tuple no field names.
-  if pointeeTy == nil or pointeeTy.kind != itTuple or pointeeTy.isPlaceholder or
-     pointeeTy.fields.len == 0:
-    return false
-  for fname in pointeeTy.fieldNames:
-    if fname.len == 0: return false
-  true
+  ## RFC-0005 S8bs: the walker's address cells share the rule
+  ## (`fieldSplitPointee`).
+  fieldSplitPointee(pointeeTy)
 
 # ---- RFC-0005 S8m: break / continue targets -----------------------------------
 #
@@ -5473,6 +5472,71 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
+proc varLocOf(lv: NimNode; temp: string; byAddr: bool;
+              preamble: var seq[IRStmt]; ctx: ParseCtx;
+              locs: var seq[VarLoc]) =
+  ## RFC-0005 S8bs. Record where the copy-in/copy-out argument `temp` came
+  ## from (`IRStmt.cVarLocs`) when `lv` is a path into a routine's variable
+  ## (`b.x`, `o.inner.y`, `s[i]`, a variant arm's `o.a`), so the walk can
+  ## tell a callee that reaches the variable through its address cell (`gpb
+  ## = addr b`, then `setX(b.x)` writing `gpb[].x`). A field step is the
+  ## field's name; an index is read into a `let` the walker reads (it is
+  ## free of side effects, `stableIndex`, so that is the value the actual
+  ## used); any other step is `?`, which the walker declines if the
+  ## variable has a cell. A lvalue through a ref or ptr is a heap cell, not
+  ## the variable's: nothing is recorded.
+  var heapSteps: seq[NimNode]
+  let root = lvalueRoot(lv, heapSteps)
+  if root.isNil or root.kind != nnkSym or heapSteps.len > 0 or
+     symKind(root) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
+     isModuleGlobal(root):
+    return
+  var rev: seq[NimNode]
+  var t = lv
+  var ok = true
+  while t.kind != nnkSym:
+    case t.kind
+    of nnkCheckedFieldExpr:
+      if t.len < 1 or t[0].kind != nnkDotExpr:
+        ok = false
+        break
+      t = t[0]
+    of nnkDotExpr:
+      if t.len != 2 or t[1].kind != nnkSym:
+        ok = false
+        break
+      rev.add t
+      t = t[0]
+    of nnkBracketExpr:
+      if t.len != 2 or t[0].typeKind != ntySequence or
+         not stableIndex(t[1], []):
+        ok = false
+        break
+      rev.add t
+      t = t[0]
+    of nnkHiddenDeref:
+      if not isVarIndirection(t):
+        ok = false
+        break
+      t = t[0]
+    else:
+      ok = false
+      break
+  var path: seq[string]
+  if not ok:
+    path = @["?"]
+  else:
+    for k in countdown(rev.high, 0):
+      let st = rev[k]
+      if st.kind == nnkDotExpr:
+        path.add macros.strVal(st[1])
+      else:
+        let ix = freshSynth(ctx, "varLocIx")
+        preamble.add mkLet(ix, classifyType(st[1]).ty,
+                           parseExpr(st[1], preamble, ctx))
+        path.add "[" & ix
+  locs.add (temp: temp, root: strVal(root), path: path, byAddr: byAddr)
+
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -5521,6 +5585,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
+  var locs: seq[VarLoc]   ## RFC-0005 S8bs: `IRStmt.cVarLocs`
   # RFC-0005 S8au: what the callee reaches outside its arguments, computed
   # once per call and only when a heap actual asks.
   var outer: seq[NimNode]
@@ -5661,6 +5726,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   "for the call and the direct access are not one " &
                   "location in the walk (feUnsupportedOp)"),
           "addr argument reachable through a global (feUnsupportedOp)")
+      varLocOf(addrLv, cell, true, preamble, ctx, locs)   ## RFC-0005 S8bs
       let lvIR = parseExpr(addrLv, preamble, ctx)
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
@@ -5749,6 +5815,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
             let t = freshSynth(ctx, "varArg")
             preamble.add mkLet(t, classifyType(lv).ty, ir)
             ir = mkVar(t)
+          varLocOf(lv, ir.vname, false, preamble, ctx, locs)   ## RFC-0005 S8bs
           var wbPre: seq[IRStmt]
           let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), ir, wbPre, ctx)
           # An lvalue shape `parseAsgn` declines is its own scoped marker
@@ -5776,7 +5843,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   # specialisation to them.
   let key = if byRefs.len == 0: callKey
             else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
-  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards)
+  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards,
+                    locs)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -6127,6 +6195,14 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     var heapSteps: seq[NimNode]
     let root = lvalueRoot(lv, heapSteps)
     addTouch(lv, heapSteps)
+    # RFC-0005 S8bs: a path into a routine's variable, which may have an
+    # address cell the body reaches through a pointer (`c:`, checked by the
+    # walker, `lowerClosureCall`).
+    if lv.kind != nnkSym and heapSteps.len == 0 and root != nil and
+       root.kind == nnkSym and
+       symKind(root) in {nskVar, nskLet, nskParam, nskResult, nskForVar} and
+       not isModuleGlobal(root) and ("c:" & strVal(root)) notin touch:
+      touch.add "c:" & strVal(root)
     var skip = peers[i]
     for j in 1 ..< n.len:
       if j != i and same[j] == same[i]: skip.add j

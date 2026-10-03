@@ -29,6 +29,17 @@ template clean(fn: typed, lbl: string, want: SymexStatusKind): untyped =
     # A hint (`hePtrFamily` on a witness through a `ptr`) is not a decline.
     for e in r.errors: check e.severity == sevHint
 
+template declines(fn: typed, lbl, why: string): untyped =
+  ## A shape the walk does not model: `sxUnknown`, with the decline named.
+  block:
+    let r = symexFind(fn, tLabel(lbl))
+    checkpoint lbl & " " & $r.status & " " & show(r.errors)
+    check r.status == sxUnknown
+    var named = false
+    for e in r.errors:
+      if e.kind == feUnsupportedOp and why in e.msg: named = true
+    check named
+
 proc nativeHits(fn: proc (k: int) {.nimcall.}; ks: openArray[int]): HashSet[string] =
   symexCaptureBegin()
   for k in ks: fn(k)
@@ -290,6 +301,157 @@ proc sutNested(k: int) =
   if b.x == 5 and k == 16: symexTarget("ne")
   if b.x != 5: symexTarget("ne_dead")
 
+# ---- a heap lvalue goes by reference whatever else reaches it ---------------
+
+proc setPlain(v: var int, k: int) =
+  v = k
+
+proc sutDerefPlain(k: int) =
+  ## No alias at all: `pb[].x` is still passed by address.
+  var b: Box = Box(x: 0)
+  let pb = addr b
+  setPlain(pb[].x, k)
+  if b.x == k and k == 17: symexTarget("dp")
+  if b.x != k: symexTarget("dp_dead")
+
+type Outer = object
+  inner: Box
+  y: int
+
+var gpo: ptr Outer
+
+proc setIO(v: var int, k: int) =
+  v = k
+  gpo[].inner.x = 5
+
+proc sutDerefInner(k: int) =
+  var o: Outer = Outer(inner: Box(x: 0), y: 0)
+  gpo = addr o
+  let po = addr o
+  setIO(po[].inner.x, k)
+  if o.inner.x == 5 and k == 18: symexTarget("di")
+  if o.inner.x != 5: symexTarget("di_dead")
+
+proc sutRefDeref(k: int) =
+  let r = RBox(x: 0)
+  grb = r
+  setXR(r[].x, k)
+  if r.x == 5 and k == 19: symexTarget("rd")
+  if r.x != 5: symexTarget("rd_dead")
+
+proc sutPtrValueByName(k: int) =
+  ## The pointer passed by value beside a path into its pointee.
+  var b: Box = Box(x: 0)
+  let pb = addr b
+  setXP(b.x, pb, k)
+  if b.x == 5 and k == 20: symexTarget("pq")
+  if b.x != 5: symexTarget("pq_dead")
+
+# ---- inheritance conversions on a by-reference actual ------------------------
+
+type
+  BaseR = ref object of RootObj
+    x: int
+  DerR = ref object of BaseR
+    y: int
+
+var gbr: BaseR
+var gdr: DerR
+
+proc setXB(v: var int, k: int) =
+  v = k
+  gbr.x = 5
+
+proc sutUpcast(k: int) =
+  let d = DerR(x: 0, y: 0)
+  gbr = d
+  setXB(BaseR(d).x, k)
+  if d.x == 5 and k == 21: symexTarget("uc")
+  if d.x != 5: symexTarget("uc_dead")
+
+proc setYD(v: var int, k: int) =
+  v = k
+  gdr.y = 5
+
+proc sutDowncast(k: int) =
+  let d = DerR(x: 0, y: 0)
+  gdr = d
+  let b: BaseR = d
+  setYD(DerR(b).y, k)
+  if d.y == 5 and k == 22: symexTarget("dc")
+  if d.y != 5: symexTarget("dc_dead")
+
+proc sutDowncastBad(k: int) =
+  ## Not a `DerR`: the conversion raises before the call.
+  let b = BaseR(x: 0)
+  gdr = DerR(x: 0, y: 0)
+  var hit = false
+  try:
+    setYD(DerR(b).y, k)
+  except ObjectConversionDefect:
+    hit = true
+  if hit and k == 23: symexTarget("dx")
+  if not hit: symexTarget("dx_dead")
+
+# ---- other parameters Nim passes by address ---------------------------------
+
+proc setOA(a: var openArray[int], k: int) =
+  a[0] = k
+  gpi[] = 5
+
+proc sutVarOpenArray(k: int) =
+  var s = @[0, 0]
+  gpi = addr s[0]
+  setOA(s, k)
+  if s[0] == 5 and k == 24: symexTarget("oa")
+  if s[0] != 5: symexTarget("oa_dead")
+
+proc rdOA(a: openArray[int], k: int): int =
+  gpi[] = k
+  a[0]
+
+proc sutOpenArrayRead(k: int) =
+  ## Nim passes an `openArray` by address: the read after the write
+  ## through the alias sees it.
+  var s = @[0, 0]
+  gpi = addr s[0]
+  let r = rdOA(s, k)
+  if r == k and k == 25: symexTarget("or")
+  if r != k: symexTarget("or_dead")
+
+proc takeS(t: sink seq[int], k: int): int =
+  gpi[] = k
+  t[0]
+
+proc sutSink(k: int) =
+  var s = @[0, 0]
+  gpi = addr s[0]
+  let r = takeS(s, k)
+  if r == k and k == 26: symexTarget("sk")
+  if r != k: symexTarget("sk_dead")
+
+iterator itv(a: var seq[int]; k: int): int =
+  a[0] = k
+  gpi[] = 5
+  yield a[0]
+
+proc sutIterVar(k: int) =
+  var s = @[0, 0]
+  gpi = addr s[0]
+  var got = 0
+  for x in itv(s, k): got = x
+  if got == 5 and s[0] == 5 and k == 27: symexTarget("iv")
+  if got != 5 or s[0] != 5: symexTarget("iv_dead")
+
+proc sutMitems(k: int) =
+  var s = @[0, 0]
+  gpi = addr s[0]
+  for x in mitems(s):
+    x = k
+    gpi[] = 5
+  if s[0] == 5 and s[1] == k and k == 28: symexTarget("mi")
+  if s[0] != 5 or s[1] != k: symexTarget("mi_dead")
+
 suite "S8bs: an address cell reached through a global ptr":
 
   test "nim":
@@ -354,8 +516,9 @@ suite "S8bs: an address cell reached through a global ptr":
     clean(sutCapture, "cp", sxSat)
     clean(sutCapture, "cp_dead", sxUnsat)
   test "a proc-value call":
-    clean(sutProcValue, "pv", sxSat)
-    clean(sutProcValue, "pv_dead", sxUnsat)
+    # RFC-0005 S8bh's decline: the body reaches a heap cell of the type.
+    declines(sutProcValue, "pv", "can also be reached by the body")
+    declines(sutProcValue, "pv_dead", "can also be reached by the body")
   test "a global ref":
     clean(sutGlobalRef, "gr", sxSat)
     clean(sutGlobalRef, "gr_dead", sxUnsat)
@@ -374,10 +537,61 @@ suite "S8bs: an address cell reached through a global ptr":
     clean(sutHeapFieldByName, "hfn_dead", sxUnsat)
     clean(sutCaptureByName, "cpn", sxSat)
     clean(sutCaptureByName, "cpn_dead", sxUnsat)
-    clean(sutProcValueByName, "pvn", sxSat)
-    clean(sutProcValueByName, "pvn_dead", sxUnsat)
+    # A closure descent binds no formal to a cell (`bindVarLocs` is the
+    # direct call's): declined, where it was a swapped verdict.
+    declines(sutProcValueByName, "pvn", "whose address is taken")
+    declines(sutProcValueByName, "pvn_dead", "whose address is taken")
     clean(sutNested, "ne", sxSat)
     clean(sutNested, "ne_dead", sxUnsat)
   test "an addr actual by name":
-    clean(sutAddrActualByName, "aa", sxSat)
-    clean(sutAddrActualByName, "aa_dead", sxUnsat)
+    # `addr b.x` of an address-taken `b` is a cell for the call: declined,
+    # where it was a swapped verdict.
+    declines(sutAddrActualByName, "aa", "is a cell for the call")
+    declines(sutAddrActualByName, "aa_dead", "is a cell for the call")
+
+  test "nim: by reference, and through conversions":
+    let ks3 = [-1, 0, 5, 17, 18, 19, 20, 21, 22, 23]
+    let h = nativeHits(sutDerefPlain, ks3) + nativeHits(sutDerefInner, ks3) +
+            nativeHits(sutRefDeref, ks3) + nativeHits(sutPtrValueByName, ks3) +
+            nativeHits(sutUpcast, ks3) + nativeHits(sutDowncast, ks3) +
+            nativeHits(sutDowncastBad, ks3)
+    for l in ["dp", "di", "rd", "pq", "uc", "dc", "dx"]:
+      checkpoint l
+      check l in h
+      check (l & "_dead") notin h
+  test "a heap lvalue goes by reference":
+    clean(sutDerefPlain, "dp", sxSat)
+    clean(sutDerefPlain, "dp_dead", sxUnsat)
+    clean(sutDerefInner, "di", sxSat)
+    clean(sutDerefInner, "di_dead", sxUnsat)
+    clean(sutRefDeref, "rd", sxSat)
+    clean(sutRefDeref, "rd_dead", sxUnsat)
+    clean(sutPtrValueByName, "pq", sxSat)
+    clean(sutPtrValueByName, "pq_dead", sxUnsat)
+  test "an inheritance conversion on a by-reference actual":
+    clean(sutUpcast, "uc", sxSat)
+    clean(sutUpcast, "uc_dead", sxUnsat)
+    clean(sutDowncast, "dc", sxSat)
+    clean(sutDowncast, "dc_dead", sxUnsat)
+    clean(sutDowncastBad, "dx", sxSat)
+    clean(sutDowncastBad, "dx_dead", sxUnsat)
+  test "nim: other by-address parameters":
+    let ks4 = [-1, 0, 5, 24, 25, 26, 27, 28]
+    let h = nativeHits(sutVarOpenArray, ks4) +
+            nativeHits(sutOpenArrayRead, ks4) + nativeHits(sutSink, ks4) +
+            nativeHits(sutIterVar, ks4) + nativeHits(sutMitems, ks4)
+    for l in ["oa", "or", "sk", "iv", "mi"]:
+      checkpoint l & " " & $(l in h) & " " & $((l & "_dead") in h)
+      check l in h
+      check (l & "_dead") notin h
+  test "other by-address parameters":
+    clean(sutVarOpenArray, "oa", sxSat)
+    clean(sutVarOpenArray, "oa_dead", sxUnsat)
+    clean(sutOpenArrayRead, "or", sxSat)
+    clean(sutOpenArrayRead, "or_dead", sxUnsat)
+    clean(sutSink, "sk", sxSat)
+    clean(sutSink, "sk_dead", sxUnsat)
+    clean(sutIterVar, "iv", sxSat)
+    clean(sutIterVar, "iv_dead", sxUnsat)
+    clean(sutMitems, "mi", sxSat)
+    clean(sutMitems, "mi_dead", sxUnsat)

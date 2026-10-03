@@ -385,7 +385,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 75 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 77 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -437,11 +437,16 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## per bound. Its bounds moved to `arrayIndexConds` (the index range
     ## with its low bound), shared with `isIndexAssign`'s new array arm,
     ## which keeps one. No site was added.
-    check runtimeCount == 75
+    ## 75 -> 77 (RFC-0005 S8bx, walker 228). Two category-c
+    ## test-injection-only sites, compiled out of every normal build: the
+    ## witness-extraction raises `-d:symexTestInjectWalkerFault` injects
+    ## (`extractLeaf`'s `injectExtractionFault` and
+    ## `injectedExtractionFaultTerms`).
+    check runtimeCount == 77
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 78 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 80 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -469,7 +474,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## 81 -> 79: the same two sites removed above (RFC-0005 S8u).
     ## 79 -> 78: the same `isIndex` array-arm site removed above (RFC-0005
     ## S8z).
-    check cCount == 78
+    ## 78 -> 80: the same two S8bx test-injection-only sites added above.
+    check cCount == 80
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

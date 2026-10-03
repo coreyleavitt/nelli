@@ -1081,5 +1081,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bl_gaps",
             "tsymex_rfc0005_s8bl_borrow",
             "tsymex_rfc0005_s8bl_seqops",
-            "tsymex_rfc0005_s8bl_pairloop"]:
+            "tsymex_rfc0005_s8bl_pairloop",
+            # RFC-0005 S8bx -- S8bl's remainder: a raise inside in-walk
+            # witness extraction (lost on the C backend; fault injection
+            # through the file's .nim.cfg); walker 213->228 (provisional).
+            "tsymex_rfc0005_s8bx_extractraise"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

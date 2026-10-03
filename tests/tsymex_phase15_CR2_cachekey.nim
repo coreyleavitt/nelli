@@ -942,7 +942,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## unbacked-element add, type aliases, mpairs / mvalues, Table length
     ## change, seq-element ref parts and long nested seqs in witnesses).
     ## 203->213 (provisional).
-    check symexWalkerVersion == "213"
+    ## RFC-0005 S8bx (S8bl's remainder: the raise lost inside in-walk
+    ## witness extraction, witness-render drift, mpairs aliasing, a key
+    ## change while iterating a Table, string setLen over a symbolic
+    ## string). 213->228 (provisional).
+    check symexWalkerVersion == "228"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -1667,6 +1667,61 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
   if z3ApiErrorCount == 0: z3ApiFirstError = $e
   inc z3ApiErrorCount
 
+# ---- RFC-0005 S8bx: a raise inside witness extraction ----------------------
+#
+# Since S1c the target solve and its witness extraction (`trySolve` ->
+# `extractWitness`) run inside the walk. On the C backend a raise there could
+# be LOST, the mechanism behind every "goto-exception hazard" note in this
+# file (N31, N36, ADR-0023, S8m). Nim 2.2.10's C code generator (goto
+# exceptions) destroys a call's result temporary on the raise path --
+# `T = f(); if (*nimErr_) { =destroy(T); goto exit; }` -- WITHOUT first
+# saving and clearing the error flag, as it does for a scope's own exit
+# destructors. When `T` holds a Z3 term (`walk`'s `seq[Path]`, a `SymVal`, a
+# `Z3String`), nim-z3's `termDestroy` runs its `try: ... except
+# CatchableError: discard` with the flag still set: its first checked call
+# jumps to its handler, which takes the IN-FLIGHT exception as its own,
+# clears the flag and pops it. The frame returns as if nothing was raised.
+# Found by instrumenting every `popCurrentException` of a probe build: an
+# extraction raise was consumed by `Z3BitVec`'s `=destroy`, called from
+# `walkBlock`'s `result = walk(s, result, w)` destroying the returned paths.
+# The walk went on, and the verdict was a false `sxUnsat` (S8bl's two
+# iterations of one table) -- or, lost inside extraction itself, a winner
+# with a half-extracted witness. C++ exceptions are native and unaffected.
+#
+# A raise in extraction is never a decline the walker means (extraction has
+# no in-band channel for one), so whatever it is, it reaches the run
+# boundary as the walker fault it reports on C++: `extractionRaiseHook` sees
+# every raise while extraction runs (`localRaiseHook`, called by
+# `raiseExceptionAux` on both backends before the exception is thrown), and
+# `runSymex` turns a run that recorded one into `sxUnknown` +
+# `weInternalWalkerFault`, whether or not the raise survived. The walk stops
+# at the first such record (`shouldStop`), and the hit it struck is not
+# admitted (`trySolve`).
+
+var extractionFault* {.threadvar.}: string
+  ## RFC-0005 S8bx. `<name>: <msg>` of the first exception raised inside
+  ## witness extraction in this thread's current run (reset by
+  ## `resetSymexRunState`). Recorded by `extractionRaiseHook`.
+var extractionSavedRaiseHook {.threadvar.}:
+    proc (e: ref Exception): bool {.nimcall, gcsafe.}
+  ## RFC-0005 S8bx. The `localRaiseHook` extraction displaced.
+
+proc extractionRaiseHook(e: ref Exception): bool {.nimcall, gcsafe.} =
+  ## RFC-0005 S8bx. `localRaiseHook` while witness extraction runs. The one
+  ## raise extraction catches itself is nim-z3's `evalFloat64Opt` /
+  ## `evalFloat32Opt` reading a non-numeral (`Z3InvalidUsageError`, recorded
+  ## in-band as `feExtractionFailed`); a Z3 API error of that type is
+  ## counted by `nelliZ3ErrorHandler`. Every other raise is a fault.
+  if extractionFault.len == 0 and not (e of Z3InvalidUsageError):
+    extractionFault = $e.name & ": " & e.msg
+  true
+
+proc releaseExtractionHook() =
+  ## RFC-0005 S8bx. Restore the displaced hook when an extraction raise left
+  ## `extractionRaiseHook` installed (its `trySolve` frame never resumed).
+  if localRaiseHook == extractionRaiseHook:
+    localRaiseHook = extractionSavedRaiseHook
+
 proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
   ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
   ## `want`. Z3 hash-conses sorts, so pointer identity is sort equality (what
@@ -8713,6 +8768,14 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
         " outside nelli's byte-string invariant [0, 255]")
     result[i] = char(cp)
 
+when defined(symexTestInjectWalkerFault):
+  proc injectedExtractionFaultTerms(s: Z3String): seq[Z3String] =
+    ## RFC-0005 S8bx fault injection (see `extractLeaf`): raises with a Z3
+    ## term in its result, which the caller destroys on the raise path.
+    result = @[s]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+      "S8bx synthetic swallowed extraction fault (symexTestInjectWalkerFault)")
+
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
@@ -8777,12 +8840,28 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     # whichever reader path the emitter picks finds the value.
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
+    when defined(symexTestInjectWalkerFault):
+      # RFC-0005 S8bx fault injection (compiled out of every normal build;
+      # `-d:symexTestInjectWalkerFault` is set for its dedicated test files
+      # only, by their `.nim.cfg`): witness extraction fails on a string
+      # parameter named for the shape. `injectExtractionFault` raises
+      # straight out of extraction; `injectSwallowedExtractionFault` raises
+      # in a callee whose result -- holding a Z3 term -- the C backend
+      # destroys on the raise path, which loses the raise inside extraction
+      # itself (see `extractionRaiseHook`).
+      if path == "injectExtractionFault":
+        raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+          "S8bx synthetic extraction fault (symexTestInjectWalkerFault)")
+      if path == "injectSwallowedExtractionFault":
+        var held = @[sv.str]   # reassigned, as `walkBlock` reassigns
+        held = injectedExtractionFaultTerms(sv.str)
+        discard held
     w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
      svDistinct, svClosure, svRef, svPtr:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction -- runs inside the walk since S1c (trySolve), where the C backend can lose a raise; RFC-0005 S8bx records every raise inside extraction as it is raised (extractionRaiseHook), so it reaches runSymex as weInternalWalkerFault on both backends]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
 proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
@@ -9096,7 +9175,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
         if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
-      raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+      raise newException(ValueError,  # [raise-audited: category-c: witness extraction, recorded by extractionRaiseHook (RFC-0005 S8bx; see extractLeaf above)]
         "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -9136,7 +9215,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     # reader uses defaults so it never KeyErrors.
     discard
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction, recorded by extractionRaiseHook (RFC-0005 S8bx; see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
 
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
@@ -11699,8 +11778,21 @@ proc trySolve(ctx: Z3Context,
     # ADR-0013 D5 (Slice 2): snapshot the WINNING path's heaps so the witness
     # serializer can select a ref-to-variant pointee's active-arm field values.
     currentVariantHeaps = path.heaps
-    (status: sxSat,
-     witness: extractWitness(m, envForExtract, params), undefWhy: "")
+    # RFC-0005 S8bx: any raise inside extraction is recorded as it is raised
+    # (`extractionRaiseHook`). If one was lost inside extraction, this frame
+    # resumes with a partial witness: the hit is not admitted. If it escaped,
+    # the hook stays installed until `runSymex` releases it.
+    if localRaiseHook != extractionRaiseHook:
+      extractionSavedRaiseHook = localRaiseHook
+    localRaiseHook = extractionRaiseHook
+    let wit = extractWitness(m, envForExtract, params)
+    localRaiseHook = extractionSavedRaiseHook
+    if extractionFault.len > 0:
+      (status: sxUnknown, witness: RawWitness(),
+       undefWhy: "witness extraction raised " & extractionFault &
+         " (RFC-0005 S8bx)")
+    else:
+      (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
@@ -12880,6 +12972,9 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## sxRaised (defect found on a sibling path) must NOT stop exploration, or the
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
+  # RFC-0005 S8bx: a raise inside witness extraction ends the walk; the run
+  # has no verdict (`runSymex`).
+  if extractionFault.len > 0: return true
   for r in w.found:
     if r.status == sxSat: return true
     if r.status == sxRaised and w.target.kind != stkLabel: return true
@@ -20062,6 +20157,23 @@ proc runSymex*(prog: SymexProgram,
   ## verdict branch, including a boundary abort. Verdict-neutral: nothing
   ## reads them to decide `status`.
   result = runSymexCaught(prog, target, settings)
+  releaseExtractionHook()
+  # RFC-0005 S8bx: a run that raised inside witness extraction has no
+  # verdict, whether or not the raise reached `runSymexCaught`'s catch-all
+  # (the C backend can lose it on the way; see `extractionRaiseHook`).
+  if extractionFault.len > 0:
+    var recorded = false
+    for e in result.errors:
+      if e.kind == weInternalWalkerFault and e.msg == extractionFault:
+        recorded = true
+    if not recorded or result.status != sxUnknown:
+      result = RawResult(status: sxUnknown, errors: result.errors &
+        @[SymexErrorInfo(kind: weInternalWalkerFault, severity: sevError,
+          msg: extractionFault & " -- raised inside witness extraction at " &
+               "a target hit and lost on the way to the run boundary; no " &
+               "verdict stands behind the run (RFC-0005 S8bx; " &
+               "weInternalWalkerFault)",
+          scope: abortScope())])
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
   if z3ApiErrorCount > 0:
@@ -20158,6 +20270,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
   z3ApiFirstError = ""
+  releaseExtractionHook()  ## RFC-0005 S8bx: a prior run's leaked window
+  extractionFault = ""     ## RFC-0005 S8bx
   callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the

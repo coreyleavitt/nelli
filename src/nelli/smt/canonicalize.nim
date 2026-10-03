@@ -202,7 +202,17 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "213"
+const symexWalkerVersion* = "228"
+  ## RFC-0005 S8bx (2026-10-03) — S8bl's remainder; provisional number (the
+  ## channel assigns the final one at merge). 213->228. SOUNDNESS: a raise
+  ## inside witness extraction (which runs in the walk since S1c) was lost
+  ## on the C backend -- a call's result temporary destroyed on the raise
+  ## path without the error flag cleared ran nim-z3's `termDestroy`, whose
+  ## `try/except` consumed the in-flight exception -- and the walk went on
+  ## to a false `sxUnsat` (or a half-extracted winner). Every raise inside
+  ## extraction is now recorded as it is raised (`extractionRaiseHook`),
+  ## ends the walk, and makes the run `sxUnknown` + `weInternalWalkerFault`
+  ## on both backends.
   ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
   ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
   ## magic with a `var` parameter was registered with an empty body, so its

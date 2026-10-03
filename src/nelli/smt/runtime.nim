@@ -9862,10 +9862,11 @@ var symexTargetSolveStats* {.threadvar.}:
   ## `rlimit` it is read from.
 
 var ownContextUnits* {.threadvar.}: int
-  ## RFC-0005 S8bm. The Z3 units every step-1 search spent in a context of
-  ## its own (`ownContextSolver`), running total for the thread. A walk
-  ## context's `rlimit count` does not include them, so every reading of
-  ## a walk's spend adds them (`rlimitCountNow`, `recordQueryStat`).
+  ## RFC-0005 S8bm. The Z3 units every search spent in a context of its
+  ## own (`ownContextSolver`), running total for the thread. RFC-0005
+  ## S8bp: that is every `checkCapped` search, so a walker query's spend
+  ## (`solveTargetHit`, `recordQueryStat`) is what this total grew by; the
+  ## walk context's `rlimit count` sees none of it.
 
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
@@ -9896,16 +9897,15 @@ when defined(symexQueryStats):
   ## Wall time cannot separate those; this can.
   type SymexQueryStat* = object
     assertions*:   int     ## constraints handed to this solver instance
-    rlimit*:       int     ## Z3's step counter after the check. It is the
-                           ## CONTEXT's counter, cumulative over every
-                           ## check of the walk (RFC-0005 S8ac; S8bm:
-                           ## plus `ownContextUnits`, as `rlimitCountNow`
-                           ## reads it), not this query's cost -- that is
-                           ## `rlimitDelta`.
+    rlimit*:       int     ## Z3's step count after the check, cumulative
+                           ## over every walker query of the thread
+                           ## (RFC-0005 S8ac; S8bp: `ownContextUnits`,
+                           ## every query's searches being in contexts of
+                           ## their own), not this query's cost -- that
+                           ## is `rlimitDelta`.
     rlimitDelta*:  int     ## RFC-0005 S8ac: the steps THIS query spent,
                            ## every solver `checkCapped` ran for it
-                           ## included (deterministic), counted from its
-                           ## first solver's creation.
+                           ## included (deterministic).
     conflicts*:    int
     decisions*:    int
     propagations*: int
@@ -9929,6 +9929,23 @@ when defined(symexQueryStats):
     ## (RFC-0005 S8ay), so a suite can walk a program with and without it
     ## and pin that step 1's search does not depend on it
     ## (`tsymex_rfc0005_s8bm_stability`). Only in this instrumented build.
+  type SymexStepStat* = object
+    ## RFC-0005 S8bp. One `checkCapped` step's search: which step
+    ## (`"plain"`, `"factsFirst"`, `"1"`, `"1b"`, `"1c"`, `"1c-capped"`,
+    ## `"2"`, `"3"`), its answer, and the Z3 units its check spent.
+    step*:   string
+    status*: string
+    units*:  int
+  var symexStepStats* {.threadvar.}: seq[SymexStepStat]
+    ## RFC-0005 S8bp. Every `checkCapped` step's search, in call order.
+    ## Reset it yourself before a measured region.
+  var symexPerturbConsts* {.threadvar.}: int
+    ## RFC-0005 S8bp. While positive, `checkCapped` first makes that many
+    ## fresh Int constants, which no query mentions, in the walk's context:
+    ## unrelated walk state (S8bm's probe, which moved a step-1 search
+    ## 30x). A suite walks a program with and without it and pins that no
+    ## step's search moves (`tsymex_rfc0005_s8bp_isolation`).
+  var perturbSerial {.threadvar.}: int
 
   proc statInt(st: Z3Stats, key: string): int =
     ## Z3 omits keys it has nothing to say about (a trivially-unsat query
@@ -9937,50 +9954,21 @@ when defined(symexQueryStats):
       if st.isInt(key): st.getInt(key) else: int(st.getFloat(key))
     else: 0
 
-  var queryRLimitBefore {.threadvar.}: int
-  var queryRLimitPending {.threadvar.}: bool
-    ## RFC-0005 S8ac. `trySolve` arms `queryRLimitPending`; the first solver
-    ## `checkCapped` builds for that query (`querySolver`) reads the
-    ## context's step counter into `queryRLimitBefore` before it is checked.
-    ## Z3 reports the counter with any solver's statistics (it is the
-    ## context's resource limit, not the solver's), and it moves by about
-    ## one unit per solver CREATED. So the read is taken from a solver the
-    ## query builds anyway: a solver made only to read it shifted the
-    ## counter under every later check, and with it Z3's search (a
-    ## different model for one S8ac pin), so the instrumented build no
-    ## longer decided as the plain one does.
-  var queryRLimitSolver {.threadvar.}: Z3Solver
-    ## RFC-0005 S8bm. The solver `queryRLimitBefore` was read from: the
-    ## walk context's counter after the query is read from it too, since
-    ## the answering solver may be step 1's, in a context of its own.
-  var queryOwnContextBefore {.threadvar.}: int
-    ## RFC-0005 S8bm. `ownContextUnits` when `trySolve` armed
-    ## `queryRLimitPending`: the query's own-context units (step 1's) are
-    ## what it grew by, which the walk context's counter does not see.
-
-  proc noteQueryRLimitBefore(s: Z3Solver) =
-    if queryRLimitPending:
-      queryRLimitBefore = statInt(s.getStatistics(), "rlimit count")
-      queryRLimitSolver = s
-      queryRLimitPending = false
-
   proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string,
-                       rlimitBefore: int) =
+                       unitsBefore: int) =
     ## Called immediately after `check()`. Statistics are valid for
     ## sat/unsat/UNKNOWN alike -- the truncated-by-rlimit case is precisely
     ## the one N45 cares about (B5-4's trip-wire query), so it must not be
-    ## skipped.
+    ## skipped. RFC-0005 S8bp: every search `checkCapped` runs is in a
+    ## context of its own, its units added to `ownContextUnits`, so the
+    ## query's units are what that total grew by since `unitsBefore`, read
+    ## when `trySolve` began the query. (S8ac read the walk context's
+    ## counter from the query's first solver, built there; none is now.)
     let st = s.getStatistics()
-    # RFC-0005 S8bm: the walk context's steps (none when no solver was
-    # built there) plus those of step 1's own context.
-    let walkAfter = if queryRLimitSolver.isNil: rlimitBefore
-                    else: statInt(queryRLimitSolver.getStatistics(),
-                                  "rlimit count")
-    let own = ownContextUnits - queryOwnContextBefore
     symexQueryStats.add SymexQueryStat(
       assertions:   nAsserts,
-      rlimit:       walkAfter + ownContextUnits,   # as `rlimitCountNow`
-      rlimitDelta:  walkAfter - rlimitBefore + own,
+      rlimit:       ownContextUnits,
+      rlimitDelta:  ownContextUnits - unitsBefore,
       conflicts:    statInt(st, "conflicts"),
       decisions:    statInt(st, "decisions"),
       propagations: statInt(st, "propagations"),
@@ -10074,8 +10062,22 @@ var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
   ## are positional, so they are taken from the linked Z3 itself rather
   ## than restated here.
 
-proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
+proc probeContext(): Z3Context =
+  ## RFC-0005 S8bp. A fresh Z3 context for a per-thread kind probe's terms
+  ## (`seqCapKinds`, `byteDomainKinds`, `intDivDeclKinds`,
+  ## `heapChainKinds`, `theoryFreeSimple`). A decl kind is the linked Z3's,
+  ## the same in every context, so it is read where it changes nothing:
+  ## built in the walk's context, a probe's terms (and `theoryFreeSimple`'s
+  ## check) made a thread's first walk search differently from its later
+  ## ones (`tsymex_rfc0005_s8bp_isolation`). Not made the thread's current
+  ## context.
+  let prev = currentContext()
+  result = newContext()
+  setCurrentContext(prev)
+
+proc seqCapKinds(): SeqCapKinds =
   if not seqCapDeclKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
       ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
     let c = mkIntVar(ctx, "__s8k_kind_probe")
@@ -10167,7 +10169,7 @@ proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
   ## Every character of such a leaf has a code in 0..255 in every model of
   ## `roots`. Used by `seqLenCaps` (its byte tests) and, RFC-0005 S8ae, by
   ## `seqRangeFacts` (`str.to_code`'s upper bound).
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
   let byteReId = astId(ctx, byteRe.raw)
   for r in roots:
@@ -10223,7 +10225,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## facts (`nimLenFacts`). Only the terms: the facts are built where they
   ## are asserted, so they reach the walk's shared context only on that
   ## path (see `seqRangeFacts`' note on context cost).
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   let capInt = mkInt(ctx, cap)
   proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
     ## -1 for a non-application (a numeral, a variable, a quantifier).
@@ -10538,7 +10540,7 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ##     that part, with `L` at least the part's offset; a prefix of the
   ##     first part (a suffix of the last) is one of `h`; and for a needle of
   ##     length at most 1, `h` contains it only if some part does.
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   proc lenOf(ctx: Z3Context; a: Z3AnyAst): Z3Int =
@@ -11001,6 +11003,7 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## four-pairs-and-an-empty-key query that was the difference between
   ## running out of 10M units and SAT in 2.5M (fresh context, Z3 5.1).
   if not byteDomainKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     proc kindOf(a: RawZ3Ast): int =
       ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
     let s = mkStringVar(ctx, "__s8y_kind_probe_str")
@@ -11012,7 +11015,7 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
       andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
       eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw))
   let bk = byteDomainKinds
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   proc kindOf(a: Z3AnyAst): int =
     if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
     else: -1
@@ -11095,7 +11098,7 @@ var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## Z3's simple solver: probed once per thread against the linked Z3
   ## (`theoryFreeSimple`).
 
-proc theoryFreeSimple(ctx: Z3Context): bool =
+proc theoryFreeSimple(): bool =
   ## RFC-0005 S8r. True when the linked Z3's default solver ignores
   ## `smt.string_solver = none` set as a solver parameter. Z3 4.13.4 (the
   ## symex-mingw leg's build) does: its default (combined) solver keeps the
@@ -11107,6 +11110,7 @@ proc theoryFreeSimple(ctx: Z3Context): bool =
   ## `str.len(x) < 0` is UNSAT only under the sequence theory's length
   ## axiom, so a theory-free solver answers SAT.
   if not theoryFreeNeedsSimple.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     let x = mkStringVar(ctx, "__s8r_theory_free_probe")
     let lenX = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, x.raw))
     let s = newSolver(ctx)
@@ -11135,7 +11139,7 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   ## for a string at all. RFC-0005 S8r: on a Z3 whose default solver
   ## ignores that parameter (4.13.4, `theoryFreeSimple`) it runs on the
   ## simple solver, which honours it.
-  result = if not seqTheory and theoryFreeSimple(ctx): newSimpleSolver(ctx)
+  result = if not seqTheory and theoryFreeSimple(): newSimpleSolver(ctx)
            else: newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
@@ -11144,31 +11148,31 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
     solverParams.set("smt.string_solver", "none")
   result.setParams(solverParams)
   for c in roots: result.add(c)
-  when defined(symexQueryStats):
-    noteQueryRLimitBefore(result)   # RFC-0005 S8ac: before any check
 
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
-                      rlimit: uint): Z3Solver =
-  ## RFC-0005 S8bm. `querySolver`'s full-theory solver for `roots`, in a
-  ## fresh Z3 context of its own: `roots` are translated into it, so its
-  ## search starts from the query's text alone and not from what the
-  ## walk's shared context already holds (see `checkCapped`). A model is
-  ## translated back with `translate(m, ctx)`. `newContext` makes the new
-  ## context the thread's current one; the walk's is restored.
+                      rlimit: uint; seqTheory = true): Z3Solver =
+  ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
+  ## context of its own: `roots` (terms of the walk's context `ctx`) are
+  ## translated into it, so its search starts from the query's text alone
+  ## and not from what the walk's shared context already holds (see
+  ## `checkCapped`). A model is translated back with `translate(m, ctx)`.
+  ## `newContext` makes the new context the thread's current one; the
+  ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
+  ## the theory-free ones (`seqTheory = false`) included.
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
-  result = newSolver(own)
-  let solverParams = newParams(own)
-  solverParams.set("rlimit", rlimit)
-  solverParams.set("random_seed", 0'u)
-  result.setParams(solverParams)
-  for c in roots: result.add translate(c, own)
+  var inOwn = newSeq[Z3Bool](roots.len)
+  for i, c in roots: inOwn[i] = translate(c, own)
+  querySolver(own, inOwn, rlimit, seqTheory)
 
-proc ownContextCheck(s: Z3Solver): Z3Status =
-  ## RFC-0005 S8bm. `s.check()` for an `ownContextSolver`, its context's
-  ## whole step count (nothing else ran there) added to `ownContextUnits`.
-  result = s.check()
+proc ownContextCheck(s: Z3Solver;
+                     assumptions: openArray[Z3Bool] = []): Z3Status =
+  ## RFC-0005 S8bm. `s.check()` (RFC-0005 S8bp: under `assumptions`, terms
+  ## of `s`'s context, when there are any) for an `ownContextSolver`, its
+  ## context's whole step count (nothing else ran there) added to
+  ## `ownContextUnits`.
+  result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
   let st = s.getStatistics()
   if st.contains("rlimit count"):
     ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
@@ -11186,8 +11190,9 @@ var intDivDeclKinds {.threadvar.}:
   ## argument, which an `ite` never has, and meets the unsigned one inside.
   ## RFC-0005 S8bd: and `bvadd`, for `bvOffsetLinks`.
 
-proc ensureIntDivDeclKinds(ctx: Z3Context) =
+proc ensureIntDivDeclKinds() =
   if intDivDeclKinds.ready: return
+  let ctx = probeContext()   # RFC-0005 S8bp
   proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
     ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
   let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
@@ -11253,7 +11258,7 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## and made other queries dearer, so it is not asserted. (RFC-0005 S8bd:
   ## it is, for a `+`/`-` numeral, between two views the query already
   ## holds -- `bvOffsetLinks`.)
-  ensureIntDivDeclKinds(ctx)
+  ensureIntDivDeclKinds()
   let kinds = intDivDeclKinds
   let (idiv, imod) = (kinds.idiv, kinds.imod)
   let zero = mkInt(ctx, 0)
@@ -11394,7 +11399,7 @@ proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## bit-vector (`y > 1`), so its Int view is new to the query, and the
   ## link would bring it in; here both views are already terms Z3 must
   ## reconcile, and the link states how.
-  ensureIntDivDeclKinds(ctx)
+  ensureIntDivDeclKinds()
   let kinds = intDivDeclKinds
   let signedKind = kinds.sbv2int != kinds.bv2nat
   var viewed: HashSet[(int, bool)]
@@ -11547,14 +11552,19 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ## fresh context of its own (`ownContextSolver`): its cost is the
   ## query's (5,711,742 there, with and without the facts-first check),
   ## and nothing the walk did before -- a facts-first check, an earlier
-  ## query, a per-thread probe -- moves it.
-  ## The translation costs a few milliseconds per query. The other steps
-  ## still run in the walk's context: the facts-first check and (1b) and
-  ## (1c) are theory-free and small, and (2) and (3) run only after step
-  ## 1 failed. So the budget is still a bound, not a promise, for those:
-  ## the character form keeps the common byte tests far below it, and a
-  ## query that reaches (3) near it can decline in one walk and not in
-  ## another that asked something else first.
+  ## query -- moves it.
+  ## The translation costs a few milliseconds per query.
+  ## RFC-0005 S8bp: so does every other step, each in a fresh context of
+  ## its own (`ownContextSolver`, `ownContextCheck`): the facts-first
+  ## check, (1b), (1c), (2), (3), and the query with no string (`plain`).
+  ## They moved with the walk's context too: with thirty unrelated
+  ## constants made before each query, a factoring search in (1c) took
+  ## 350,726 units against 114,891, (2) 231,590 against 401,123, and the
+  ## no-string query 92,799 against 124,550 (Z3 5.1); (3) 464,636 against
+  ## 207,893 (4.13.4). The theory-free steps are not small when the query
+  ## holds such a search. So no step's cost depends on what the walk did
+  ## before it, and a query declines under its budget in every walk or in
+  ## none.
   ## Why two solver modes: Z3 answers a check under assumptions with its
   ## incremental core, not the one-shot preprocessing pipeline, and that
   ## core is both much slower on bit-vector-heavy queries (one the
@@ -11569,11 +11579,27 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # are the query's own.
   # RFC-0005 S8bd: and with the exact link between the Int views of `x`
   # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
+  when defined(symexQueryStats):
+    # RFC-0005 S8bp: unrelated walk state, for the isolation suite.
+    for k in 0 ..< symexPerturbConsts:
+      discard mkIntVar(ctx, "__s8bp_perturb_" & $perturbSerial)
+      inc perturbSerial
+  template counted(name: string; check: untyped): Z3Status =
+    ## `check` (an `ownContextCheck`), recorded as step `name` in the
+    ## instrumented build (RFC-0005 S8bp, `symexStepStats`).
+    when defined(symexQueryStats):
+      let before = ownContextUnits
+      let r = check
+      symexStepStats.add SymexStepStat(step: name, status: $r,
+                                       units: ownContextUnits - before)
+      r
+    else:
+      check
   let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
   template plain(): untyped =
-    let s = querySolver(ctx, rootsIn, rlimit)
-    let r = s.check()
-    return (r, s, (if r == zsSat: s.model() else: nil),
+    let s = ownContextSolver(ctx, rootsIn, rlimit)
+    let r = counted("plain", ownContextCheck(s))
+    return (r, s, (if r == zsSat: translate(s.model(), ctx) else: nil),
             (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
   let cap = settings.budget.maxSeqLen
   if cap <= 0: plain()
@@ -11630,15 +11656,15 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     when defined(symexQueryStats):
       if symexFactsFirstOff: break factsFirst   # RFC-0005 S8bm
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
-    let sPre = querySolver(ctx, roots, pre, seqTheory = false)
-    for f in facts: sPre.add f
-    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
+    let sPre = ownContextSolver(ctx, roots & facts, pre, seqTheory = false)
+    if counted("factsFirst", ownContextCheck(sPre)) == zsUnsat:
+      return (zsUnsat, sPre, nil, "")
   # Step 1: the caps asserted, one-shot, in a context of its own
   # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
   # same whether or not the facts-first check (or anything else) ran in
   # the walk's context before it.
   let s1 = ownContextSolver(ctx, roots & caps, rlHalf)
-  let r1 = ownContextCheck(s1)
+  let r1 = counted("1", ownContextCheck(s1))
   if r1 == zsSat: return (zsSat, s1, translate(s1.model(), ctx), "")
   # Step 1b: the query with no sequence theory. Its models include every
   # real one, so an UNSAT here is the query's own (the cap took no part);
@@ -11649,8 +11675,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # well as the query's own `len(s) <= 1000` does. After an unknown in
   # (1) it runs only once (3) has failed too (see the doc comment).
   template theoryFreeUnsat(): (bool, Z3Solver) =
-    let sTf = querySolver(ctx, roots, rl, seqTheory = false)
-    (sTf.check() == zsUnsat, sTf)
+    let sTf = ownContextSolver(ctx, roots, rl, seqTheory = false)
+    (counted("1b", ownContextCheck(sTf)) == zsUnsat, sTf)
   # RFC-0005 S8aq: (1b) and (1c) below no longer gate on `r1 == zsUnsat`
   # specifically. `r1` can only be `zsUnsat` or `zsUnknown` here (`zsSat`
   # already returned), and a `zsUnknown` -- step 1's capped, full-theory
@@ -11704,22 +11730,22 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
     # with each length at most `high(int)`, `nimLenFacts`.)
     if facts.len > 0:
-      let sTr = querySolver(ctx, roots, rl, seqTheory = false)
-      for f in facts: sTr.add f
-      if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
+      let sTr = ownContextSolver(ctx, roots & facts, rl, seqTheory = false)
+      if counted("1c", ownContextCheck(sTr)) == zsUnsat:
+        return (zsUnsat, sTr, nil, "")
     if not lastIndex:
-      let sTc = querySolver(ctx, roots, rl, seqTheory = false)
-      for f in facts: sTc.add f
-      for c in caps: sTc.add c
-      if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
+      let sTc = ownContextSolver(ctx, roots & facts & caps, rl,
+                                 seqTheory = false)
+      if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
+        return (zsUnknown, s1, nil, capText)
   if r1 == zsUnsat and not lastIndex:
     # Step 2: is the UNSAT the query's own?
-    let s2 = querySolver(ctx, roots, rl)
-    let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")
+    let s2 = ownContextSolver(ctx, roots, rl)
     var all = caps[0]
     for i in 1 ..< caps.len: all = all and caps[i]
-    s2.add implies(capLit, all)
-    let r2 = s2.checkWith([capLit])
+    let capLit = mkBoolVar(s2.ctx, "__s8k_seq_len_cap")
+    s2.add implies(capLit, translate(all, s2.ctx))
+    let r2 = counted("2", ownContextCheck(s2, [capLit]))
     return case r2
       of zsUnsat:
         if s2.getUnsatCore().len == 0: (zsUnsat, s2, nil, "")
@@ -11734,10 +11760,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                              "disagree on this query under maxSeqLen = " &
                              $cap)
   # Step 3: the uncapped one-shot query.
-  let s3 = querySolver(ctx, roots, rl - rlHalf)
-  let r3 = s3.check()
+  let s3 = ownContextSolver(ctx, roots, rl - rlHalf)
+  let r3 = counted("3", ownContextCheck(s3))
   case r3
-  of zsSat: (zsSat, s3, s3.model(), "")
+  of zsSat: (zsSat, s3, translate(s3.model(), ctx), "")
   of zsUnsat: (zsUnsat, s3, nil, "")
   of zsUnknown:
     if r1 == zsUnsat:
@@ -11837,9 +11863,7 @@ proc trySolve(ctx: Z3Context,
   let roots = pathRoots(path)
   inc symexZ3CallCount
   when defined(symexQueryStats):
-    queryRLimitPending = not symexQueryStatsPaused
-    queryRLimitSolver = nil          # RFC-0005 S8bm
-    queryOwnContextBefore = ownContextUnits
+    let unitsBefore = ownContextUnits   # RFC-0005 S8bp
   let (r, s, model, why) = checkCapped(ctx, roots, settings,
                                        settings.budget.queryRLimit)
   when defined(symexQueryStats):
@@ -11850,8 +11874,7 @@ proc trySolve(ctx: Z3Context,
         (case r
          of zsSat: "sat"
          of zsUnsat: "unsat"
-         else: "unknown"), queryRLimitBefore)
-      queryRLimitSolver = nil
+         else: "unknown"), unitsBefore)
   case r
   of zsSat:
     let m = model
@@ -13268,19 +13291,6 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
   if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
   else: defaultConcreteBranchRLimit
 
-proc rlimitCountNow(ctx: Z3Context): int =
-  ## RFC-0005 S8y. `ctx`'s `rlimit count` as it stands. Z3 reads the
-  ## context's counter when a solver's statistics are collected, so an
-  ## unchecked solver reports it without running a check (which would itself
-  ## advance the counter and leave state in the context).
-  ## RFC-0005 S8bm: plus `ownContextUnits`, the step-1 searches run in
-  ## contexts of their own, so a target-hit solve's spend is all of it.
-  let st = newSolver(ctx).getStatistics()
-  ownContextUnits +
-    (if not st.contains("rlimit count"): 0
-     elif st.isInt("rlimit count"): st.getInt("rlimit count")
-     else: int(st.getFloat("rlimit count")))
-
 func budgetOutFloor(settings: SymexSettings): int =
   ## RFC-0005 S8y. What a target-hit solve spends when it runs out: the
   ## smaller of its `queryRLimit` and `seqQueryRLimit` (`checkCapped`'s
@@ -13389,9 +13399,13 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
                   "RFC-0005 S8ag, found a model only after half of it), " &
                   "and this tainted path is at least as deep in each of " &
                   "those loops")
-  let spentBefore = rlimitCountNow(w.z3)
+  # RFC-0005 S8y: what the solve spent. RFC-0005 S8bp: every search it
+  # runs is in a context of its own (`checkCapped`), so that is what
+  # `ownContextUnits` grew by (S8y read the walk context's counter, and
+  # S8bm added step 1's own context to it).
+  let spentBefore = ownContextUnits
   let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
-  let spent = rlimitCountNow(w.z3) - spentBefore
+  let spent = ownContextUnits - spentBefore
   symexTargetSolveStats.units += spent
   case classifyTargetSolve(st, spent, budgetOutFloor(solveSettings))
   of tscBudgetOut:

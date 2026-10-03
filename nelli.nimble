@@ -1131,5 +1131,12 @@ task test, "Run the test suite":
             # same with and without the facts-first check); a slice
             # element's byte test in character form; B1-1's tight unit
             # ceiling. Walker 209->214.
-            "tsymex_rfc0005_s8bm_stability"]:
+            "tsymex_rfc0005_s8bm_stability",
+            # RFC-0005 S8bp: every checkCapped search and the per-thread
+            # kind probes in contexts of their own (no step's cost moves
+            # with the walk's state; a thread's first walk searches as its
+            # second); a membership and a negated one on one string
+            # decided as one (the unbounded endsWith run on Z3 4.13.4).
+            # Walker 214->219.
+            "tsymex_rfc0005_s8bp_isolation"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -1185,6 +1185,7 @@ proc heapChainDepth*(ctx: Z3Context; refAst: Z3AnyAst): int =
   ## backing (`select` at an Int index) is its container's depth. Every
   ## other term is a root.
   if not heapChainKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     let b = mkBoolVar(ctx, "__s8bd_kind_probe_b")
     let x = mkIntVar(ctx, "__s8bd_kind_probe_x")
     let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bd_kind_probe_arr")

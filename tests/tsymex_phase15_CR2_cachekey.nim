@@ -971,7 +971,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## number (205-208 are held by slices still running). 202->209.
     ## RFC-0005 S8bm (step 1 in a context of its own; a slice element's
     ## byte test in character form). Provisional 214. 209->214.
-    check symexWalkerVersion == "214"
+    ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
+    ## probes in contexts of their own; a regex membership and a negated
+    ## one on one string decided as one). Provisional 219. 214->219.
+    check symexWalkerVersion == "219"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

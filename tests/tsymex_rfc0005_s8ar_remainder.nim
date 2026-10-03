@@ -117,7 +117,11 @@ proc iMid(v: int, i: int) =
   if i < 0 or i > 3: return
   var s = @[10, 20, 30]
   s.insert(v, i)
-  if s.len == 4 and s[1] == v and s[2] == 20 and s[0] == 10 and s[3] == 30:
+  # `v` neither 10 nor 20: `i == 1` is then the only way in (RFC-0005 S8bp:
+  # `v = 10, i = 0` and `v = 20, i = 2` satisfy the rest too, and Z3 4.13.4
+  # returned the first once every search ran in a context of its own).
+  if v != 10 and v != 20 and s.len == 4 and s[1] == v and s[2] == 20 and
+     s[0] == 10 and s[3] == 30:
     symexTarget("i_mid")
   if s.len != 4: symexTarget("i_len_dead")
   if i == 1 and s[2] != 20: symexTarget("i_shift_dead")

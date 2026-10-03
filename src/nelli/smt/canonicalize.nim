@@ -202,7 +202,20 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "214"
+const symexWalkerVersion* = "219"
+  ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
+  ## walk, or an earlier walk on the thread, left in Z3's context. Every
+  ## `checkCapped` step (not only S8bm's step 1) searches in a fresh
+  ## context of its own: with thirty unrelated constants made before each
+  ## query, the theory-free steps, (2), (3) and the no-string query all
+  ## moved (Z3 5.1: (2) 401,123 units against 231,590). The per-thread
+  ## kind probes build their terms in a context of their own, so a
+  ## thread's first walk searches as its later ones do (Z3 5.1: a step-3
+  ## search took 482,126 units in the first walk and 85,882 in the
+  ## second). Both change which search decides a query under a budget.
+  ## Provisional 219 (215 to 218 are held by slices still running).
+  ## 214 -> 219.
+  ##
   ## RFC-0005 S8bm (2026-10-02) — step 1's search no longer depends on the
   ## walk's context. Z3's search on a walker query followed what the
   ## walk's shared context already held: S8ay's facts-first check, run

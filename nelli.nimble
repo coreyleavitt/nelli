@@ -1189,5 +1189,14 @@ task test, "Run the test suite":
             # of a crash; the distinct-bijectivity hint walks the whole
             # distinct chain before judging non-decidability. Walker
             # 209->218.
-            "tsymex_rfc0005_s8bg_remainder"]:
+            "tsymex_rfc0005_s8bg_remainder",
+            # RFC-0005 S8bs -- a var, addr or by-pointer actual whose
+            # variable is address-taken is bound to its cell; heap lvalues
+            # go by reference; by-value seqs share element cells; inlined
+            # iterator formals name the caller's locations; walker 222.
+            # Split in four by theme (shared SUTs in s8bs_suts.nim).
+            "tsymex_rfc0005_s8bs_addrglobal",
+            "tsymex_rfc0005_s8bs_byref",
+            "tsymex_rfc0005_s8bs_iterparams",
+            "tsymex_rfc0005_s8bs_byvalue"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -230,6 +230,17 @@ const symexWalkerVersion* = "223"
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
   ##
+  ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
+  ## variable has an address cell was copied in and written back, so a
+  ## callee's write through the pointer was clobbered; an object's address
+  ## cell lived in its whole-pointee heap, not the field heaps its writes
+  ## use. A call's `cVarLocs` (canonicalized) name where each copied,
+  ## `addr`, by-pointer or memory-sharing argument came from; the callee's
+  ## formal is bound to the variable's cell along that path, element cells
+  ## are shared with a by-value seq, and anything the walk cannot bind
+  ## declines. An inlined iterator's formals name the caller's locations as
+  ## Nim's expansion does (they were copies). 217 -> 222.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -5554,10 +5565,21 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # touches one declines), so they key the call.
     var guards: seq[string]
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
+    # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
+    # whether the walk binds its formal to an address cell.
+    var locs: seq[string]
+    for l in s.cVarLocs:
+      var steps: seq[string]
+      for st in l.path:
+        steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                  else: st)
+      locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & ":" & l.mode
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
       (if guards.len > 0: ";guard=[" & guards.join(",") & "]" else: "") &
+      (if locs.len > 0: ";locs=[" & locs.join(",") & "]" else: "") &
       # RFC-0005 S8as: an inert opaque call's effect summary rebinds the
       # names it lists, so it changes the verdict.
       (if s.opaqueHavoc.len > 0: ";havoc=[" & s.opaqueHavoc.join(",") & "]"

@@ -417,6 +417,11 @@ title = "S8bb's remainder B: PCRE backtracking verbs and start-optimiser parity,
 state = "done"
 
 [[slice]]
+id = "S8bs"
+title = "addr-of-local cell aliased through a global ptr across a frame boundary: var actual copy-in/out clobbers the callee's write through the alias (swapped verdicts)"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -11808,3 +11813,109 @@ s8bj suite takes under 60 s (the slowest is `s8bj_entries_multiline` at
   the length relation only for a numeral `len(by)`, and the image only for
   one-set patterns. Other unbounded replace queries can still surface as
   `beSolverUndef`.
+
+
+**As landed (S8bs, walker 222 provisional) — an address cell reached
+through a global `ptr` across a frame.** Base 8165899 (batch 4, walker
+217). Suites `tsymex_rfc0005_s8bs_addrglobal` (exhibit and family),
+`_byref` (paths by name, heap lvalues by reference, inheritance
+conversions), `_iterparams` (other by-address parameters, inlined
+iterators) and `_byvalue` (by-value parameters), sharing their SUTs
+through `tests/s8bs_suts.nim`: 98 verdict queries, each SUT with a live
+and a dead target and a native run confirming which one Nim hits. One
+file compiled in ~160 s; the four each compile in the CPU time of a
+typical slice suite (~56-59 s user, against `s8i_models`' 54 s).
+
+*Root cause (verified).* Two defects, not one. (1) An object local's
+address cell was stored and read in the whole-pointee heap
+(`<T>__@.f`), while every `p[].f` dereference uses the field heaps
+(`<T>__f`): a write through any pointer to the object, in its own frame
+too, never reached the variable. `gphb = addr h; gphb[].bg.x = k; h.bg.x`
+was swapped in one frame at the base. The cell now lives in the field
+heaps (`objectCellValue` / `objectCellStore`). (2) A `var` actual that is
+a path into an address-taken local was copied in and written back, so
+the stale copy landed over the callee's write through the alias (the
+S8bg exhibit: "ac" `sxUnsat`, "ac_dead" `sxSat`). The parser now records
+where each copied argument came from (`IRStmt.cVarLocs`, canonicalized);
+when the root has an address cell the walker binds the formal to the
+cell along that path (a bound `AddrCellEntry`, kept equal per statement
+by `syncAddrCells`, which reads the frames' cells through
+`addrEntryValue`), and an element of a seq with element cells to the
+`ite` over the cells its index may select (S8be's mechanism).
+
+- *The family* (each pinned live/dead with a native check): the write
+  through the alias before or after `v = k`, the actual by name and by
+  path, a scalar cell, a read-only callee, two levels deep, a separate
+  `ptr` parameter, the alias held in a global ref, a heap field or a
+  closure capture, an element address `addr s[i]`, a variant arm field,
+  nested `o.inner.x`. A closure call reaching a capture whose address is
+  taken declines (`closureDegrade`, S7's count 19 -> 20), as does a
+  proc-value call into one (S8bh's decline).
+- *Item A: heap lvalues by reference.* `pb[].x`, `pb[].inner.x`, `r[].x`
+  of a ref go by reference (S8ba's `byRefSub`) whatever else reaches
+  the cell; a pointer to it passed by value beside it no longer blocks
+  that. A variant arm on the way is checked where the caller takes the
+  address. S8ac's `setAl(h.n, h, v)` and S8an's `mixP(addr x, x)`,
+  pinned as declines, are now decided (repinned with native checks).
+- *Item B: inheritance conversions.* On S8bh's shared hierarchy sort the
+  up- and down-conversions of a by-reference actual are well-sorted with
+  no change to `byRefSub`; the downcast keeps its
+  `ObjectConversionDefect` (pinned natively in both directions, and a
+  bad downcast caught). Nothing here touches the conversion at the head
+  of the chain that S8bg's `convReprPreserving` / `reprBase` /
+  `lvalueCastBlocks` strip.
+- *Item 4: the audit beyond `var`.* A by-value argument Nim passes by
+  address (an inheritable object, one larger than three words, an
+  array: `VarLoc` mode `ptr`) is bound to the cell like a `var` formal;
+  one whose seq or string memory the copy shares (`copy`) shares the
+  caller's element cells, and declines when the whole is address-taken.
+  `sink` is the by-value case. An inlined iterator bound every formal
+  with a `let`: a `var` formal's writes were lost (`for x in itx(v, k)`
+  left `v` unchanged) and a by-value formal missed writes through other
+  names. Formals are now bound as Nim's `transformFor` binds them: a
+  `var` formal is the actual, re-read at each use; a by-value formal
+  whose actual is a location is that location, an element's index read
+  and checked once at loop entry (`bindIterArg`); an expression is still
+  a copy. `var openArray`, `openArray` and `mitems` decline (pinned).
+
+*Soundness bugs found:* the object address cell's heap (1), the copy-in/
+copy-out over an alias (2), by-pointer and payload-sharing by-value
+arguments, and inlined iterators' `var` and by-value formals: each
+swapped verdicts against native Nim.
+
+*Suites* (`ok/failed`, c, identical on Z3 5.1 and 4.13.4): the four S8bs
+suites 14/0, 7/0, 4/0, 3/0 (cpp 5.1 the same); `phase15_CR2_cachekey`
+6/0, `s7_closure` 37/0, `s8ab_letaudit` 28/0, `s8ac_remainder` 19/0,
+`s8an_remainder` 25/0, `s8as_remainder` 33/0, `s8ax_remainder` 53/0,
+`s8ba_remainder` 32/0, `s8bc_remainder` 74/0, `s8bd_remainder` 23/0,
+`s8be_remainder` 34/0, `s8bf_alias` 13/0, `s8bh_remainder` 35/0,
+`s8i_models` 39/0, `s8x_vm_alias` 7/0, `h_stepC_heapidentity` 10/0,
+`phase15_H1_path_heap_fields` 2/0, `phase15_g4_distinct_sort` 4/0,
+`phase15_g5_distinct_borrow` 3/0; with every `tsymex_rfc0005_*` suite
+naming `addr`/`ptr` and every suite defining an iterator, 41 suites
+green on both versions, and 18 more using stdlib iterators green on 5.1.
+The skip list is empty, so there is no skipped-suite diff.
+
+*Windows:* at 1b51ee4 all three legs green: fuzzer-mingw 37119258202,
+fuzzer-msvc 37119258201, symex-mingw 37119258226.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION (termination): an `int` read from an Int-sorted heap and
+  linked by `bv2int` to a bit-vector return or local** (`r = rdBigH(...)`
+  reading an `int` field through a cell; a `seq[int]` element cell read
+  in a callee) gives Z3 an unsatisfiable query it does not decide; with
+  the default unlimited `queryRLimit` the run does not terminate. Present
+  at the base (the `seq[int]` form hangs there). The suites use `bool`
+  fields and elements for those SUTs.
+- **PRECISION: a closure or proc-value call into a variable whose
+  address is taken declines** (`bindVarLocs` is the direct call's).
+- **PRECISION: `addr b.x` of an address-taken `b` declines** (the cell
+  for the call would be a second copy of a location the callee reaches
+  through the pointer).
+- **PRECISION: `openArray` and `var openArray` parameters are not
+  modelled; `mitems` expands to an unsupported pragma statement.**
+- **PRECISION: an array index on a path into an address-taken local is
+  `?`** and declines.
+- **PRECISION: a by-value seq or string whose whole address is taken
+  declines** (an element write through the pointer is seen through the
+  copy, an assignment of the whole is not).

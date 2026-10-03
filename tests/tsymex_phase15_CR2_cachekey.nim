@@ -1004,6 +1004,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
     ## `(?X)`; replace over the agenda's step table; the libpcre engine in
     ## the cache key). Provisional 211.
+    ## RFC-0005 S8bs (a var, addr or by-pointer actual whose variable has
+    ## an address cell is bound to that cell; by-value seqs share element
+    ## cells). 217->222.
     check symexWalkerVersion == "223"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

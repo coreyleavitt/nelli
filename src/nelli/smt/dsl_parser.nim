@@ -729,11 +729,13 @@ proc emitStmt*(s: IRStmt): NimNode =
       # `mkCall`'s `@[]` default regardless of what the parser computed).
       var posLit = newTree(nnkBracket)
       for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
-      # RFC-0005 S8an: `cGuardRoots` round-trips the same way.
+      # RFC-0005 S8an: `cGuardRoots` round-trips the same way; RFC-0005
+      # S8bs: and `cVarLocs`.
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
-              prefix(posLit, "@"), newLit(s.cGuardRoots))
+              prefix(posLit, "@"), newLit(s.cGuardRoots),
+              newLit(s.cVarLocs))
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -1373,12 +1375,9 @@ proc wholeObjectPointee(pointeeTy: IRType): bool =
   ## with fields: `p[]` reads and `p[] = v` writes it field by field, the
   ## field heaps `p.f` uses. A placeholder (a recursive field's pointee) has
   ## no field list here, and an anonymous tuple no field names.
-  if pointeeTy == nil or pointeeTy.kind != itTuple or pointeeTy.isPlaceholder or
-     pointeeTy.fields.len == 0:
-    return false
-  for fname in pointeeTy.fieldNames:
-    if fname.len == 0: return false
-  true
+  ## RFC-0005 S8bs: the walker's address cells share the rule
+  ## (`fieldSplitPointee`).
+  fieldSplitPointee(pointeeTy)
 
 # ---- RFC-0005 S8m: break / continue targets -----------------------------------
 #
@@ -3211,6 +3210,7 @@ proc opaqueWriteSummary(calleeSym: NimNode): OpaqueEffects =
 
 proc lvalueRoot(lv: NimNode; heapSteps: var seq[NimNode]): NimNode  ## RFC-0005 S8ax fwd decl
 proc addrActualLvalue(a: NimNode): NimNode  ## RFC-0005 S8ax fwd decl
+proc addrCellLocal(e: NimNode): NimNode  ## RFC-0005 S8bs fwd decl
 proc ptrFormalStaysLocal(callee: NimNode; idx: int;
                          seen: var seq[string]): bool  ## RFC-0005 S8ax fwd decl
 
@@ -5066,7 +5066,8 @@ proc actualCell(a: NimNode): NimNode =
 proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                        heapSteps: seq[NimNode];
                        conds: var seq[AliasIndexPairs];
-                       skip: seq[int] = @[]): bool =
+                       skip: seq[int] = @[]; cellsBound = false;
+                       byRef = false): bool =
   ## RFC-0005 S8ac. The write-back of a non-variable `var` actual
   ## (`userCallStmt`) copies the lvalue in, walks the callee on the copy and
   ## copies it out. Nim passes the lvalue's ADDRESS, so the two agree unless
@@ -5088,6 +5089,15 @@ proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
   ## argument order (a false `sxSat`). `skip` holds the arguments passed by
   ## reference with this one (`userCallStmt`), which are one cell in the
   ## walk too.
+  ##
+  ## RFC-0005 S8bs: `cellsBound` (a direct call, `userCallStmt`): an `addr
+  ## x` actual of the variable the lvalue is a path into is `x`'s address
+  ## cell, and the walker binds the `var` formal to that cell at the path
+  ## (`bindVarLocs`, `inheritAddrCells`), so the two are one location in the
+  ## walk. `byRef`: the lvalue is passed by reference (`byRefSub`), so only
+  ## another `var` or `addr` actual can be a second location for it; one
+  ## passed by value (a `ptr` to the cell, `setXP(pb[].x, pb)`) reads and
+  ## writes the same heap.
   var cells: seq[NimNode]
   for d in heapSteps: cells.add d.getTypeInst
   var syms: seq[NimNode]
@@ -5096,6 +5106,12 @@ proc varActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
   for j in 1 ..< n.len:
     if j == i or j in skip: continue
     let a = n[j]
+    if cellsBound and heapSteps.len == 0 and root != nil and
+       root.kind == nnkSym:
+      let x = addrCellLocal(a)
+      if x != nil and containsSym(@[x], root): continue
+    if byRef and a.kind != nnkHiddenAddr and addrActualLvalue(a) == nil:
+      continue
     # RFC-0005 S8bf: the same heap cell through a different ref.
     let oc = actualCell(a)
     if oc != nil and heapCellsMayMeet(lv, oc): return true
@@ -5304,7 +5320,7 @@ proc ptrFormalStaysLocal(callee: NimNode; idx: int;
 proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
                         heapSteps: seq[NimNode];
                         conds: var seq[AliasIndexPairs];
-                        skip: seq[int] = @[]): bool =
+                        skip: seq[int] = @[]; cellsBound = false): bool =
   ## RFC-0005 S8an. `varActualMayAlias` for an `addr lv` actual: another
   ## `addr` of the SAME lvalue is the same cell (`userCallStmt` shares it),
   ## so it does not alias; any other argument that names the root, or can
@@ -5316,13 +5332,25 @@ proc addrActualMayAlias(n: NimNode; i: int; lv, root: NimNode;
   var syms: seq[NimNode]
   lvalueVarSyms(lv, syms)
   if not containsSym(syms, root): syms.add root
+  ## RFC-0005 S8bs: `cellsBound` (a direct call), when this actual is `x`'s
+  ## address cell (`addrCellLocal`): a `var` actual that is `x` or a path
+  ## into it is bound to that cell by the walker (`bindVarLocs`).
   let key = scopedRepr(lv)
+  let cellX = if cellsBound: addrCellLocal(n[i]) else: nil
   for j in 1 ..< n.len:
     if j == i: continue
     let a = n[j]
     let olv = addrActualLvalue(a)
     if olv != nil and scopedRepr(olv) == key: continue
     if j in skip: continue
+    if cellX != nil and a.kind == nnkHiddenAddr and a.len == 1:
+      var hs: seq[NimNode]
+      var vl = a[0]
+      if isVarIndirection(vl): vl = vl[0]
+      let r = lvalueRoot(vl, hs)
+      if r != nil and r.kind == nnkSym and hs.len == 0 and
+         containsSym(@[cellX], r):
+        continue
     # RFC-0005 S8bf: the same heap cell through a different ref.
     let oc = actualCell(a)
     if oc != nil and heapCellsMayMeet(lv, oc): return true
@@ -5633,7 +5661,18 @@ proc substByRefImpl(impl: NimNode; subs: seq[ByRefSub]): NimNode =
     bd = substByRefBody(bd, formalInBody(impl, fs.f), b)
   result[6] = bd
 
-proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
+proc stripFieldChecks(n: NimNode): NimNode =
+  ## RFC-0005 S8bs. `n` with each variant arm field access
+  ## (`nnkCheckedFieldExpr`) replaced by its field access: the arm is
+  ## checked where the actual is evaluated (`byRefSub`), as Nim checks it
+  ## once, where it takes the field's address.
+  if n.kind == nnkCheckedFieldExpr and n.len > 0:
+    return stripFieldChecks(n[0])
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  for c in n: result.add stripFieldChecks(c)
+
+proc byRefSub(calleeSym: NimNode; idx: int; lv0, actual: NimNode;
               viaAddr: bool): ByRefSub =
   ## RFC-0005 S8ba. Pass the heap lvalue `lv` to `calleeSym`'s `idx`-th
   ## formal BY REFERENCE: Nim passes its address, so the callee's writes and
@@ -5655,8 +5694,13 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   ## read once, with the ref, before the call) or a user call's result
   ## (`getBox().x`, called once), and the callee may be generic: the
   ## specialisation is made of the instantiation (`ensureProcRegistered`).
+  ##
+  ## RFC-0005 S8bs: a variant arm's field on the way (`po[].a`) too; its
+  ## arm is checked where the caller evaluates the actual
+  ## (`stripFieldChecks`).
   result.idx = -1
   if calleeSym.kind != nnkSym: return
+  var lv = stripFieldChecks(lv0)
   let impl = resolveRoutineImpl(calleeSym)
   if impl == nil: return
   let fs = byRefFormalSym(impl, idx)
@@ -5673,7 +5717,6 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   # that one is NOT representation-preserving here (the heap model gives
   # every declared ref/ptr type its own Z3 sort; see `convReprPreserving`)
   # -- so there is no shape for a conversion to reach that position.
-  var lv = lv
   while lv.kind in {nnkConv, nnkHiddenStdConv, nnkHiddenSubConv} and
         lv.len > 0 and convReprPreserving(lv[^1], lv):
     lv = lv[^1]
@@ -5738,6 +5781,136 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
+proc varLocOf(lv: NimNode; temp, mode: string;
+              preamble: var seq[IRStmt]; ctx: ParseCtx;
+              locs: var seq[VarLoc]) =
+  ## RFC-0005 S8bs. Record where the copy-in/copy-out argument `temp` came
+  ## from (`IRStmt.cVarLocs`) when `lv` is a path into a routine's variable
+  ## (`b.x`, `o.inner.y`, `s[i]`, a variant arm's `o.a`), so the walk can
+  ## tell a callee that reaches the variable through its address cell (`gpb
+  ## = addr b`, then `setX(b.x)` writing `gpb[].x`). A field step is the
+  ## field's name; an index is read into a `let` the walker reads (it is
+  ## free of side effects, `stableIndex`, so that is the value the actual
+  ## used); any other step is `?`, which the walker declines if the
+  ## variable has a cell. A lvalue through a ref or ptr is a heap cell, not
+  ## the variable's: nothing is recorded. For a by-value argument (`mode`
+  ## `ptr` or `copy`) only a path is recorded: any other expression is a
+  ## new value.
+  var heapSteps: seq[NimNode]
+  let root = lvalueRoot(lv, heapSteps)
+  if root.isNil or root.kind != nnkSym or heapSteps.len > 0 or
+     symKind(root) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
+     isModuleGlobal(root):
+    return
+  var rev: seq[NimNode]
+  var t = lv
+  var ok = true
+  while t.kind != nnkSym:
+    case t.kind
+    of nnkCheckedFieldExpr:
+      if t.len < 1 or t[0].kind != nnkDotExpr:
+        ok = false
+        break
+      t = t[0]
+    of nnkDotExpr:
+      if t.len != 2 or t[1].kind != nnkSym:
+        ok = false
+        break
+      rev.add t
+      t = t[0]
+    of nnkBracketExpr:
+      if t.len != 2 or t[0].typeKind != ntySequence or
+         not stableIndex(t[1], []):
+        ok = false
+        break
+      rev.add t
+      t = t[0]
+    of nnkHiddenDeref:
+      if not isVarIndirection(t):
+        ok = false
+        break
+      t = t[0]
+    else:
+      ok = false
+      break
+  var path: seq[string]
+  if not ok:
+    if mode in ["ptr", "copy"]: return
+    path = @["?"]
+  else:
+    for k in countdown(rev.high, 0):
+      let st = rev[k]
+      if st.kind == nnkDotExpr:
+        path.add macros.strVal(st[1])
+      else:
+        let ix = freshSynth(ctx, "varLocIx")
+        preamble.add mkLet(ix, classifyType(st[1]).ty,
+                           parseExpr(st[1], preamble, ctx))
+        path.add "[" & ix
+  locs.add (temp: temp, root: strVal(root), path: path, mode: mode)
+
+proc byValueShare(a: NimNode): string =
+  ## RFC-0005 S8bs. How Nim passes the by-value argument `a` (`VarLoc`'s
+  ## `mode`): `ptr` by address -- an array; an object that is inheritable
+  ## or larger than three words, a tuple larger than three words (the C
+  ## code generator's `ccgIntroducedPtr`) -- or `copy`, a copy that shares
+  ## a seq's or string's memory with the original; "" for a copy that
+  ## shares nothing the walk keeps apart (a scalar, a ref, a small object of
+  ## scalars).
+  let ty = a.getTypeInst
+  proc payload(t: NimNode; depth: int): bool =
+    if depth > 8: return true
+    case t.typeKind
+    of ntySequence, ntyString, ntyOpenArray, ntyVarargs: true
+    of ntyObject, ntyTuple, ntyArray:
+      let impl = t.getTypeImpl
+      var found = false
+      proc scan(n: NimNode) =
+        if found: return
+        if n.kind == nnkIdentDefs and n.len >= 2:
+          if n[^2].kind != nnkEmpty and payload(n[^2], depth + 1):
+            found = true
+          return
+        if n.kind == nnkBracketExpr and t.typeKind == ntyArray and n.len == 3:
+          if payload(n[2], depth + 1): found = true
+          return
+        for c in n: scan(c)
+      scan(impl)
+      found
+    else: false
+  case ty.typeKind
+  of ntySequence, ntyString: "copy"
+  of ntyArray, ntyOpenArray, ntyVarargs: "ptr"
+  of ntyObject:
+    let impl = ty.getTypeImpl
+    if impl.kind == nnkObjectTy and impl.len > 1 and
+       impl[1].kind == nnkOfInherit:
+      return "ptr"
+    if getSize(ty) > 3 * sizeof(float): return "ptr"
+    if payload(ty, 0): "copy" else: ""
+  of ntyTuple:
+    if getSize(ty) > 3 * sizeof(float): return "ptr"
+    if payload(ty, 0): "copy" else: ""
+  else: ""
+
+proc armChecked(lv: NimNode; b: ByRefSub; preamble: var seq[IRStmt];
+                ctx: ParseCtx): bool =
+  ## RFC-0005 S8bs. A by-reference lvalue through a variant arm's field
+  ## (`po[].a`): Nim checks the arm where it takes the address, before the
+  ## call, so the lvalue is read there once (its `FieldDefect` fork) when
+  ## its ref is a variable, read again without effect. False for any other
+  ## ref (a call, an element): it cannot be read twice.
+  var has = false
+  proc scan(n: NimNode) =
+    if n.kind == nnkCheckedFieldExpr: has = true
+    for c in n: scan(c)
+  scan(lv)
+  if not has: return true
+  if b.base.kind != nnkSym: return false
+  preamble.add mkLet(freshSynth(ctx, "armCheck"), classifyType(lv).ty,
+                     parseExpr(lv, preamble, ctx))
+  true
+
 proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -5786,6 +5959,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var writeBacks: seq[IRStmt]
   var guards: seq[string]   ## RFC-0005 S8an: `IRStmt.cGuardRoots`
   var addrCells: seq[tuple[key, cell: string]]   ## RFC-0005 S8an
+  var locs: seq[VarLoc]   ## RFC-0005 S8bs: `IRStmt.cVarLocs`
   # RFC-0005 S8au: what the callee reaches outside its arguments, computed
   # once per call and only when a heap actual asks.
   var outer: seq[NimNode]
@@ -5857,6 +6031,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           break byRef
         let b = byRefSub(calleeSym, i - 1, addrLv, n[i], true)
         if b.idx < 0: break byRef
+        if not armChecked(addrLv, b, preamble, ctx): break byRef   ## RFC-0005 S8bs
         aliasConds.add brConds
         byRefs.add b
         let lo = preamble.len
@@ -5875,7 +6050,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       # keep the pointer, and the walker keeps `x` equal to the cell.
       let cellX = addrCellLocal(n[i])
       if cellX != nil:
-        if addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds):
+        if addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds,
+                              cellsBound = true):   ## RFC-0005 S8bs
           preamble.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`addr " & addrLv.repr & "` is passed to `" &
                     calleeSym.strVal & "` alongside another argument that " &
@@ -5934,6 +6110,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   "for the call and the direct access are not one " &
                   "location in the walk (feUnsupportedOp)"),
           "addr argument reachable through a global (feUnsupportedOp)")
+      varLocOf(addrLv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bs
       let lvLo = preamble.len
       let lvIR = parseExpr(addrLv, preamble, ctx)
       let lvHi = preamble.len
@@ -5981,15 +6158,22 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # (`peers`), every one of which is passed so too.
           # RFC-0005 S8ax: `aliasConds`, as for an `addr` actual above.
           var brConds: seq[AliasIndexPairs]
+          # RFC-0005 S8bs: whether or not the callee can reach the cell
+          # another way: Nim passes the lvalue's address, and the cell itself
+          # is that, where a copy written back is only while nothing else
+          # reaches it.
           if root.isNil or varActualMayAlias(n, i, lv, root, heapSteps,
-                                             brConds, peers[i]) or
-             (peers[i].len == 0 and outerReachesCell(outerOf(), heapSteps) == nil):
+                                             brConds, peers[i], byRef = true):
             break byRef
           let b = byRefSub(calleeSym, i - 1, lv, n[i], false)
           if b.idx < 0: break byRef
+          # RFC-0005 S8bs: the arm check is a read of the lvalue in the
+          # late range, so a later argument that may write declines the
+          # call (`placeLateAddr` cannot snapshot an arm).
+          let lo = preamble.len
+          if not armChecked(lv, b, preamble, ctx): break byRef
           aliasConds.add brConds
           byRefs.add b
-          let lo = preamble.len
           argIRs.add parseExpr(b.base, preamble, ctx)
           argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
                                  bindEnd: preamble.len,
@@ -6010,6 +6194,16 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
+    if n[i].kind != nnkHiddenAddr:
+      # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
+      # memory it shares, is a path the walk may keep equal to a cell.
+      var a = n[i]
+      while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0 and
+            sameType(a.getTypeInst, a[^1].getTypeInst):
+        a = a[^1]
+      let share = byValueShare(a)
+      if share.len > 0:
+        varLocOf(a, "#" & $(i - 1), share, preamble, ctx, locs)
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
@@ -6021,7 +6215,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
       if lv.kind == nnkSym:
         # RFC-0005 S8an: a plain variable named by another argument that
         # may pass it by address (`varActualMayAlias`) declines too.
-        if varActualMayAlias(n, i, lv, lv, @[], aliasConds):
+        if varActualMayAlias(n, i, lv, lv, @[], aliasConds,
+                             cellsBound = true):   ## RFC-0005 S8bs
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is also reached through another " &
@@ -6032,7 +6227,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         var heapSteps: seq[NimNode]
         let root = lvalueRoot(lv, heapSteps)
         if root.isNil or
-           varActualMayAlias(n, i, lv, root, heapSteps, aliasConds):
+           varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
+                             cellsBound = true):   ## RFC-0005 S8bs
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
                     calleeSym.strVal & "` is not a variable and the callee " &
@@ -6058,6 +6254,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
             let t = freshSynth(ctx, "varArg")
             preamble.add mkLet(t, classifyType(lv).ty, ir)
             ir = mkVar(t)
+          varLocOf(lv, ir.vname, "var", preamble, ctx, locs)   ## RFC-0005 S8bs
           var wbPre: seq[IRStmt]
           let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), ir, wbPre, ctx)
           # An lvalue shape `parseAsgn` declines is its own scoped marker
@@ -6090,7 +6287,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   # specialisation to them.
   let key = if byRefs.len == 0: callKey
             else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
-  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards)
+  let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards,
+                    locs)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -6467,6 +6665,14 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     var heapSteps: seq[NimNode]
     let root = lvalueRoot(lv, heapSteps)
     addTouch(lv, heapSteps)
+    # RFC-0005 S8bs: a path into a routine's variable, which may have an
+    # address cell the body reaches through a pointer (`c:`, checked by the
+    # walker, `lowerClosureCall`).
+    if lv.kind != nnkSym and heapSteps.len == 0 and root != nil and
+       root.kind == nnkSym and
+       symKind(root) in {nskVar, nskLet, nskParam, nskResult, nskForVar} and
+       not isModuleGlobal(root) and ("c:" & strVal(root)) notin touch:
+      touch.add "c:" & strVal(root)
     var skip = peers[i]
     for j in 1 ..< n.len:
       if j != i and same[j] == same[i]: skip.add j
@@ -12264,6 +12470,109 @@ proc mkShortCircuitWhile(guardNode: NimNode, rawBodyNode: NimNode,
   if result.kind == isWhile:
     result.wHasAssumedBound = collectAssumedLoopBound(guardNode, ctx)
 
+proc iterArgPath(a: NimNode; hasIx: var bool): bool =
+  ## RFC-0005 S8bs. `a` is a location Nim's inline iterator expansion maps
+  ## an iterator's by-value parameter to (`transf.putArgInto`): a variable,
+  ## parameter, `result` or constant, and fields, dereferences and elements
+  ## of one. `hasIx`: an element's index is not a literal.
+  case a.kind
+  of nnkSym:
+    symKind(a) in {nskVar, nskLet, nskParam, nskResult, nskForVar, nskConst}
+  of nnkDotExpr:
+    a.len == 2 and a[1].kind == nnkSym and iterArgPath(a[0], hasIx)
+  of nnkCheckedFieldExpr:
+    a.len >= 1 and a[0].kind == nnkDotExpr and iterArgPath(a[0], hasIx)
+  of nnkHiddenDeref, nnkDerefExpr:
+    a.len == 1 and iterArgPath(a[0], hasIx)
+  of nnkBracketExpr:
+    if a.len != 2 or a[0].typeKind notin {ntyArray, ntySequence, ntyVar}:
+      return false
+    var ix = a[1]
+    while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+      ix = ix[^1]
+    if ix.kind notin {nnkCharLit .. nnkUInt64Lit}: hasIx = true
+    iterArgPath(a[0], hasIx)
+  else: false
+
+proc hoistIterIndices(a: NimNode; preamble: var seq[IRStmt];
+                      ctx: ParseCtx; ok: var bool): NimNode =
+  ## RFC-0005 S8bs. `a` with each element's non-literal index read into a
+  ## `let` (`markByRef` names it): the location is fixed when the loop
+  ## starts. Indices are read in Nim's order, the root's first.
+  if a.len == 0: return a
+  result = copyNimNode(a)
+  for i, c in a:
+    if a.kind == nnkBracketExpr and i == 1:
+      var ix = c
+      while ix.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ix.len > 0:
+        ix = ix[^1]
+      if ix.kind in {nnkCharLit .. nnkUInt64Lit}:
+        result.add c
+      else:
+        let mk = markByRef(c)
+        if mk.isNil:
+          ok = false
+          result.add c
+        else:
+          preamble.add mkLet(byRefName(mk), classifyType(c).ty,
+                             parseExpr(c, preamble, ctx))
+          result.add mk
+    else:
+      result.add hoistIterIndices(c, preamble, ctx, ok)
+
+proc substIterArg(n, f, by: NimNode): NimNode =
+  ## RFC-0005 S8bs. `n` with each use of the by-value formal `f` spelled
+  ## `by`.
+  if n.kind == nnkSym and containsSym(@[f], n): return copyNimTree(by)
+  if n.len == 0: return n
+  result = copyNimNode(n)
+  for c in n: result.add substIterArg(c, f, by)
+
+proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
+                 body: var NimNode; preamble: var seq[IRStmt];
+                 ctx: ParseCtx): bool =
+  ## RFC-0005 S8bs. Bind an inlined iterator's formal as Nim's inline
+  ## expansion does (`transf.transformFor`), not as a copy: the iterator
+  ## runs in the caller's frame, and its parameters name the caller's
+  ## locations.
+  ##   * a `var` formal is the actual itself, re-read at each use (an
+  ##     element's index too: Nim maps the formal to the expression);
+  ##   * a by-value formal whose actual is a location (`iterArgPath`) is
+  ##     that location: a write to it through a pointer, a global or the
+  ##     loop body is seen through the formal. An element's location is
+  ##     fixed when the loop starts (Nim takes its address there): its
+  ##     index is read, and the element checked, once;
+  ##   * anything else (an expression, a conversion) is a copy: false, the
+  ##     caller's `let`.
+  ## Before, every formal was a copy: a `var` formal's writes were lost,
+  ## and a by-value one missed writes through other names.
+  let f = formalInBody(impl, formalSym)
+  if f.isNil: return false
+  if tyNode.kind == nnkVarTy:
+    var a = arg
+    if a.kind == nnkHiddenAddr and a.len == 1: a = a[0]
+    var b = ByRefSub(isPtr: false, tail: a)
+    b.addrNode = newNimNode(nnkHiddenAddr)
+    b.addrNode.add copyNimTree(a)
+    body = substByRefBody(body, f, b)
+    return true
+  var hasIx = false
+  if not iterArgPath(arg, hasIx): return false
+  if not hasIx:
+    body = substIterArg(body, f, arg)
+    return true
+  var ok = true
+  var pre: seq[IRStmt]
+  let fixed = hoistIterIndices(arg, pre, ctx, ok)
+  if not ok: return false
+  for st in pre: preamble.add st
+  # The element is read where the loop starts: its index (and a variant
+  # arm on the way) is checked there, as Nim's `addr` checks it.
+  preamble.add mkLet(freshSynth(ctx, "iterArgChk"), classifyType(arg).ty,
+                     parseExpr(fixed, preamble, ctx))
+  body = substIterArg(body, f, stripFieldChecks(fixed))
+  true
+
 proc parseIterBodyStmt(n: NimNode,
                        iterVarBindings: seq[(string, IRType)],
                        forBodyNode: NimNode,
@@ -14541,6 +14850,7 @@ proc parseStmtInner(n: NimNode,
         # name does not.
         ctx.activeIterators.incl itSymName
         var preambleStmts: seq[IRStmt]
+        var iterBody = implBody   ## RFC-0005 S8bs: formals bound by name
         var argIdx2 = 0
         for fi in 1 ..< formal.len:
           let paramDef = formal[fi]
@@ -14553,6 +14863,11 @@ proc parseStmtInner(n: NimNode,
             let argNode =
               if argIdx2 < iterExpr.len - 1: iterExpr[argIdx2 + 1]
               else: defaultNode  # use the pre-checked literal/const default
+            if argIdx2 < iterExpr.len - 1 and
+               bindIterArg(impl, paramDef[pj], tyNode, argNode, iterBody,
+                           preambleStmts, ctx):
+              inc argIdx2
+              continue
             var argPre: seq[IRStmt]
             let argIR = parseExpr(argNode, argPre, ctx)
             for s in argPre: preambleStmts.add s
@@ -14584,7 +14899,7 @@ proc parseStmtInner(n: NimNode,
               $loopVarNames.len & " vars (ADR-0014 S2, Invariant 3)")
           for k, name in loopVarNames:
             iterVarBindings.add (name, yieldElemTyTop.fields[k])
-        let bodyIR = parseIterBodyStmt(implBody, iterVarBindings, bodyNode, ctx)
+        let bodyIR = parseIterBodyStmt(iterBody, iterVarBindings, bodyNode, ctx)
         ctx.activeIterators.excl itSymName
         # Combine preamble + inlined body
         if preambleStmts.len > 0:

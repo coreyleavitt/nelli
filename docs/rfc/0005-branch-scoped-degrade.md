@@ -362,6 +362,11 @@ title = "S8bi's remainder: huge newSeq n modelled as succeeding, set-typed value
 state = "done"
 
 [[slice]]
+id = "S8bv"
+title = "S8bq's remainder: iterating a builtin set, set conversion across domains, pigeonhole-hard card queries, newSeqUninit taint precision (inline map/filter/fold, composite results, slices/heap cells/mapped arrays)"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

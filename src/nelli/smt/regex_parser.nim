@@ -386,16 +386,30 @@ type PrioLangs = object
   n: Nfa
   vars: seq[PrevClass]
   mark, none, ends, noOcc, first, span: seq[Z3Regex[Z3String]]
+  errM, errR, errMAt, errRAt: seq[Z3Regex[Z3String]]
+    ## RFC-0005 S8bt: the call ends in a limit error (`leCounted`), were
+    ## its attempts made: the anchored attempt's (`lkErrM`, `lkErrR`) or
+    ## the search's (`skErrM`, `skErrR`; `skErrMAt`, `skErrRAt`: marked at
+    ## the attempt)
+
+proc limitNfa*(pr: PcreParse; engine: PcreEngine; room = 0): Nfa =
+  ## RFC-0005 S8bt. The automaton of a call, counting `match()`'s calls
+  ## when the pattern sets a limit between 0 and the default (`room`: the
+  ## groups the call's ovector has room for).
+  result = buildNfa(pr, engine)
+  if result.ok and limitEffect(result)[0] == leUnknown:
+    result = buildNfa(pr, engine, limitRoom = room)
 
 proc prioLangs(sp: RegexSpec; pr: PcreParse; wantAnch, wantEnds: bool;
                wantSearch = false; wantSpan = false;
-               engine = peInterp): PrioLangs =
+               engine = peInterp; room = 0): PrioLangs =
   ## RFC-0005 S8bt: `engine` is the one the call runs on -- an unanchored
   ## call's is std/re's library's (`pcre_engine.pcreSearchEngine`), an
   ## anchored call's the interpreter. Every language of an unanchored call
   ## (its search, and the attempt the search finds) is that engine's.
-  let n = buildNfa(pr, engine)
-  let key = sp.flag & ":" & sp.pattern
+  ## `room`: the groups the call's ovector has room for (`limitNfa`).
+  let n = limitNfa(pr, engine, room)
+  let key = sp.flag & ":" & sp.pattern & "|room" & $room
   result.n = n
   if not n.ok: return PrioLangs(ok: false, why: n.why)
   result.ok = true
@@ -414,6 +428,15 @@ proc prioLangs(sp: RegexSpec; pr: PcreParse; wantAnch, wantEnds: bool;
       take(searchLangV(n, key, skFirst, pc), first)
     if wantSpan:
       take(searchLangV(n, key, skSpan, pc), span)
+    if limitEffect(n)[0] == leCounted:
+      if wantSearch:
+        take(searchLangV(n, key, skErrM, pc), errM)
+        take(searchLangV(n, key, skErrR, pc), errR)
+        take(searchLangV(n, key, skErrMAt, pc), errMAt)
+        take(searchLangV(n, key, skErrRAt, pc), errRAt)
+      else:
+        take(selectionLangV(n, key, lkErrM, pc), errM)
+        take(selectionLangV(n, key, lkErrR, pc), errR)
 
 proc classIs(n: Nfa; s: Z3String; p: Z3Int; rep: PrevClass): Z3Bool =
   var parts: seq[Z3Bool]
@@ -455,6 +478,25 @@ proc utf8ValidRe*(): Z3Regex[Z3String] =
     concat(@[b('\xF1', '\xF3'), t, t, t]),
     concat(@[b('\xF4', '\xF4'), b('\x80', '\x8F'), t, t])]))
 
+proc madeAtZ3(n: Nfa; v: Z3String; filt: FilterKind): Z3Bool =
+  ## RFC-0005 S8bj, S8bt. `pcre_select.attemptMade` at the start of `v` (a
+  ## start the scan `filt` stopped at): pcre_exec.c's minimum-length and
+  ## required-character checks.
+  if n.noStartOpt: return mkBool(true)
+  let so = n.so
+  var conds: seq[Z3Bool]
+  if so.minLength > 0: conds.add len(v) >= mkInt(so.minLength)
+  if so.reqChar >= 0:
+    let r1 = char(so.reqChar)
+    var rs = {r1}
+    if so.reqCaseless: rs.incl otherCaseOf(r1)
+    let skip = (if filt == fkFirst: 1 else: 0)
+    let tl = substr(v, mkInt(skip), len(v) - mkInt(skip))
+    conds.add (len(v) >= mkInt(reqByteMax)) or
+              matches(tl, concat(@[star(byteSetRe(pcreAnyByte)), byteSetRe(rs),
+                                   star(byteSetRe(pcreAnyByte))]))
+  andAll(conds)
+
 proc attemptMadeZ3(n: Nfa; u: Z3String; anchored: bool; fresh: FreshName;
                    defs: var seq[Z3Bool]): Z3Bool =
   ## RFC-0005 S8bj. A search on `u` (the subject from the start offset)
@@ -473,19 +515,7 @@ proc attemptMadeZ3(n: Nfa; u: Z3String; anchored: bool; fresh: FreshName;
     defs.add matches(pre, star(byteSetRe(pcreAnyByte - stop))) and
              ((len(rest) == mkInt(0)) or inSet(toCode(at(rest, mkInt(0))), stop))
     v = rest
-  if n.noStartOpt: return mkBool(true)
-  var conds: seq[Z3Bool]
-  if so.minLength > 0: conds.add len(v) >= mkInt(so.minLength)
-  if so.reqChar >= 0:
-    let r1 = char(so.reqChar)
-    var rs = {r1}
-    if so.reqCaseless: rs.incl otherCaseOf(r1)
-    let skip = (if filt == fkFirst: 1 else: 0)
-    let tl = substr(v, mkInt(skip), len(v) - mkInt(skip))
-    conds.add (len(v) >= mkInt(reqByteMax)) or
-              matches(tl, concat(@[star(byteSetRe(pcreAnyByte)), byteSetRe(rs),
-                                   star(byteSetRe(pcreAnyByte))]))
-  andAll(conds)
+  madeAtZ3(n, v, filt)
 
 proc callError(pl: PrioLangs; s: Z3String; start: Z3Int; anchored: bool;
                fresh: FreshName; defs: var seq[Z3Bool]): (Z3Bool, Z3Int) =
@@ -503,6 +533,29 @@ proc callError(pl: PrioLangs; s: Z3String; start: Z3Int; anchored: bool;
     let hit = attemptMadeZ3(n, u, anchored, fresh, defs)
     okParts.add not hit
     code = mkInt(lcode)
+  elif le == leCounted:
+    # RFC-0005 S8bt: the attempt that passes a limit (the anchored one, or
+    # the search's at a fresh `q`), if pcre_exec.c makes it.
+    let u = substr(s, start, lenS - start)
+    let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
+    proc hitOf(l, lAt: seq[Z3Regex[Z3String]]; tag: string): Z3Bool =
+      let has = variant(pl, s, start, proc (v: int): Z3Bool =
+        matches(u, l[v]))
+      if anchored: return has and madeAtZ3(n, u, filt)
+      let q = mkIntVar(fresh(tag))
+      let (pre, rest) = splitAt(u, q, fresh, tag, defs)
+      let marked = concat(pre, findMarker(), rest)
+      defs.add ite(has,
+        (q >= mkInt(0)) and (q <= len(u)) and
+          variant(pl, s, start, proc (v: int): Z3Bool =
+            matches(marked, lAt[v])),
+        q == mkInt(0))
+      has and madeAtZ3(n, rest, filt)
+    let hitM = hitOf(pl.errM, pl.errMAt, "__regexLimitM")
+    let hitR = hitOf(pl.errR, pl.errRAt, "__regexLimitR")
+    okParts.add not (hitM or hitR)
+    code = ite(hitM, mkInt(pcreErrMatchLimit),
+               ite(hitR, mkInt(pcreErrRecursionLimit), code))
   if n.utf:
     let invalid = not matches(s, utf8ValidRe())
     let inside = (start > mkInt(0)) and (start < lenS) and

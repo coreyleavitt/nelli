@@ -84,6 +84,7 @@ import ./pcre_startopt
 import ./pcre_code
 import ./pcre_jit
 import ./pcre_engine
+import ./pcre_possess
 
 export pcre_startopt.StartOpt
 export pcre_engine.PcreEngine
@@ -194,6 +195,11 @@ type
     nkMatch
     nkVerb    ## RFC-0005 S8bj: a backtracking verb or a mark
     nkAlt     ## RFC-0005 S8bj: entry to alternative `alt` of catcher `grp`
+    nkCost    ## RFC-0005 S8bt: a `match()` call (`Nfa.costs`): `multi`
+              ## one more frame deep (RMATCH), else the same frame
+              ## (TAIL_RECURSE)
+    nkPoss    ## RFC-0005 S8bt: a possessive repeat's exit: only where the
+              ## next byte is not one of `bytes` (or at the end)
 
   NState = object
     kind: NKind
@@ -207,6 +213,7 @@ type
     name: int       ## nkVerb mark / SKIP:NAME: the name's index, -1 none
     address: int    ## nkVerb THEN: its code address
     grp, alt: int   ## nkAlt
+    deep: bool      ## RFC-0005 S8bt: nkCost: RMATCH (one frame deeper)
 
   FilterKind* = enum
     ## RFC-0005 S8bj. The start-of-match optimisation of an unanchored call.
@@ -249,8 +256,33 @@ type
       ## RFC-0005 S8bt: the engine of an unanchored call (`buildNfa`)
     jit*: JitScan
       ## RFC-0005 S8bt: peJit837's prefix scan, when it applies
+    costs*: bool
+      ## RFC-0005 S8bt: the automaton counts pcre_exec.c's `match()` calls
+      ## (`nkCost`; `buildNfa`'s `limitRoom`), its threads are kept apart
+    capRoom*: int
+      ## RFC-0005 S8bt (`costs`): the groups the call's ovector has room
+      ## for (a capturing bracket without room runs as a plain one)
+    possess*: Possess
+      ## RFC-0005 S8bt (`costs`): pcre_compile.c's auto-possessification
     ok*: bool
     why*: string
+
+proc matchLimit*(n: Nfa): int =
+  ## RFC-0005 S8bt. The `(*LIMIT_MATCH=)` pcre_exec.c applies (below its
+  ## default), -1 none.
+  if n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit: int(n.limitMatch)
+  else: -1
+
+proc recLimit(n: Nfa): int =
+  ## RFC-0005 S8bt. The `(*LIMIT_RECURSION=)` pcre_exec.c applies.
+  if n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit:
+    int(n.limitRecursion)
+  else: high(int)
+
+proc countsLimits*(n: Nfa): bool =
+  ## RFC-0005 S8bt. A limit between 0 and the default, read off the
+  ## automaton's `match()` calls.
+  n.costs and (n.matchLimit >= 0 or n.recLimit < high(int))
 
 proc needPc*(n: Nfa): bool =
   ## RFC-0005 S8bj. The automata track the byte before each position.
@@ -261,6 +293,9 @@ type Build = object
   overflow: bool
   match: int
   catchers: bool   ## the pattern has a THEN: multi-alternative groups catch
+  costWhy: string  ## RFC-0005 S8bt: why the call accounting is not modelled
+
+proc cost(b: var Build; deep: bool; next: int): int
 
 proc add(b: var Build; s: NState): int =
   if b.n.states.len >= maxNfaStates:
@@ -268,30 +303,6 @@ proc add(b: var Build; s: NState): int =
     return 0
   b.n.states.add s
   b.n.states.high
-
-proc isGroup(x: Rx): bool = x.kind in {rxCat, rxAlt}
-proc groupAlts(x: Rx): seq[Rx] = (if x.kind == rxAlt: x.kids else: @[x])
-proc branchItems(x: Rx): seq[Rx] = (if x.kind == rxCat: x.kids else: @[x])
-
-proc codeSize(x: Rx): int
-proc branchSize(br: Rx): int =
-  for it in branchItems(br): result += codeSize(it)
-
-proc codeSize(x: Rx): int =
-  ## RFC-0005 S8bj. Code units in pcre_compile.c's layout (only the order
-  ## matters: THEN's catch test compares addresses).
-  case x.kind
-  of rxCat, rxAlt:
-    result = 1
-    for br in groupAlts(x): result += branchSize(br) + 1
-  of rxRep:
-    if x.sub.isGroup:
-      let copies = (if x.hi == 0: 1 elif x.hi < 0: max(x.lo, 1) else: x.hi)
-      result = 1 + copies * codeSize(x.sub)
-    else:
-      result = 1
-  else:
-    result = 1
 
 proc utf8Seqs(lo, hi: int32; acc: var seq[seq[(char, char)]]) =
   ## RFC-0005 S8bj. The code points `lo .. hi` (surrogates left out: no
@@ -364,10 +375,15 @@ proc compBranch(b: var Build; items: seq[Rx]; next, base: int): int =
   for i in countdown(items.high, 0):
     result = b.compItem(items[i], result, bases[i])
 
-proc compGroup(b: var Build; x: Rx; next, base: int): int =
+proc compGroup(b: var Build; x: Rx; next, base: int; sGroup = false): int =
   ## A bracket: its alternatives in order. RFC-0005 S8bj: with a THEN in
   ## the pattern, each alternative of a multi-alternative group enters
-  ## through `nkAlt` (a frame for THEN's catch test).
+  ## through `nkAlt` (a frame for THEN's catch test). RFC-0005 S8bt
+  ## (`costs`): each alternative is a `match()` call, RMATCH but for the
+  ## last one of a plain bracket (OP_BRA, or a capturing one without
+  ## ovector room) in a pattern without THEN, which pcre_exec.c enters by
+  ## TAIL_RECURSE; `sGroup`: an OP_SBRA / OP_SCBRA (a looping copy that
+  ## can match the empty string).
   let alts = groupAlts(x)
   var inner = next
   if x.cap > 0:
@@ -385,8 +401,13 @@ proc compGroup(b: var Build; x: Rx; next, base: int): int =
     gid = b.n.altEnd.len
     b.n.altEnd.add ends
   var e = -1
+  let capturing = x.cap > 0 and x.cap <= b.n.capRoom
   for k in countdown(alts.high, 0):
     var entry = b.compBranch(branchItems(alts[k]), inner, bases[k])
+    if b.n.costs:
+      let tail = k == alts.high and not capturing and not sGroup and
+                 not b.catchers
+      entry = b.cost(not tail, entry)
     if catcher:
       entry = b.add NState(kind: nkAlt, grp: gid, alt: k, out1: entry)
     e = (if e < 0: entry else: b.add NState(kind: nkSplit, out1: entry, out2: e))
@@ -448,10 +469,133 @@ proc compRep(b: var Build; x: Rx; next, base: int): int =
     for i in countdown(x.lo - 1, 0):
       result = b.compItem(sub, result, b0 + i * sz)
 
+proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
+                  next, base: int): int =
+  ## RFC-0005 S8bt. A group's looping copy with `match()`'s calls: entered
+  ## by OP_BRAZERO (an RMATCH into the group, or none past it) /
+  ## OP_BRAMINZERO (an RMATCH past it first, then the group in the same
+  ## frame), or directly (`once`); after a non-empty iteration OP_KETRMAX
+  ## re-enters the group by RMATCH, then goes on by TAIL_RECURSE; OP_KETRMIN
+  ## goes on by RMATCH, then re-enters by RMATCH (`sGrp`, an OP_SBRA) or
+  ## TAIL_RECURSE. An empty iteration of an OP_SBRA goes on in the same
+  ## frame.
+  let headK = b.add NState(kind: nkSplit)
+  var bodyEnd = headK
+  let nullable = lenRange(sub)[0] == 0
+  var id = -1
+  if nullable:
+    if b.n.loops >= maxLoops:
+      b.overflow = true
+      return 0
+    id = b.n.loops
+    inc b.n.loops
+    bodyEnd = b.add NState(kind: nkBack, loop: id, out1: headK, out2: next)
+  var bodyIn = b.compGroup(sub, bodyEnd, base, sGrp)
+  if b.overflow: return 0
+  if nullable: bodyIn = b.add NState(kind: nkEnter, loop: id, out1: bodyIn)
+  if lazy:
+    let o1 = b.cost(true, next)
+    let o2 = b.cost(sGrp, bodyIn)
+    b.n.states[headK].out1 = o1
+    b.n.states[headK].out2 = o2
+  else:
+    let o1 = b.cost(true, bodyIn)
+    let o2 = b.cost(false, next)
+    b.n.states[headK].out1 = o1
+    b.n.states[headK].out2 = o2
+  if once: return bodyIn
+  if lazy: b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: bodyIn)
+  else: b.add NState(kind: nkSplit, out1: b.cost(true, bodyIn), out2: next)
+
+proc compRepCost(b: var Build; x: Rx; next, base: int): int =
+  ## RFC-0005 S8bt. A repeat with pcre_exec.c's `match()` calls (`costs`).
+  ## A single-character repeat backs off one character at a time from its
+  ## longest run, each try of the rest an RMATCH but the last (at the
+  ## minimum: TAIL_RECURSE); a lazy one tries the rest by RMATCH before
+  ## each further character; a possessive one (`Nfa.possess`) goes on only
+  ## from its longest run, in the same frame. A group's copies follow
+  ## pcre_compile.c's layout (`compLoopCost`; an optional copy behind
+  ## OP_BRAZERO / OP_BRAMINZERO, nested ones inside a one-alternative
+  ## OP_BRA).
+  let sub = x.sub
+  if x.hi == 0: return next
+  if not sub.isGroup:
+    let poss = base in b.n.possess.addrs
+    let lazy = x.lazy and not poss
+    var guard: set[char]
+    if poss:
+      if sub.crlfDot:
+        b.costWhy = "a possessive (*CRLF) dot repeat"
+      if sub.kind == rxChars:
+        for (lo, hi) in sub.cps:
+          if hi >= 128:
+            b.costWhy = "a possessive repeat of a non-ASCII character class " &
+                        "in UTF mode"
+          for c in max(lo, 0) .. min(hi, 127): guard.incl char(c)
+      else:
+        guard = sub.bytes
+    proc atomTo(b: var Build; t: int): int = b.compItem(sub, t, base + 1)
+    proc exitAt(b: var Build; first: bool): int =
+      if poss: b.add NState(kind: nkPoss, bytes: guard, out1: next)
+      elif lazy: b.cost(true, next)
+      else: b.cost(not first, next)
+    if x.hi < 0:
+      if lazy:
+        let head = b.add NState(kind: nkSplit)
+        let o1 = b.exitAt(false)
+        let o2 = b.atomTo(head)
+        b.n.states[head].out1 = o1
+        b.n.states[head].out2 = o2
+        result = head
+      else:
+        let headK = b.add NState(kind: nkSplit)
+        let k1 = b.atomTo(headK)
+        let k2 = b.exitAt(false)
+        b.n.states[headK].out1 = k1
+        b.n.states[headK].out2 = k2
+        let f1 = b.atomTo(headK)
+        let f2 = b.exitAt(true)
+        result = b.add NState(kind: nkSplit, out1: f1, out2: f2)
+    else:
+      var o = next
+      if x.hi > x.lo and not poss: o = b.cost(true, next)
+      for i in countdown(x.hi - 1, x.lo):
+        let skip = b.exitAt(i == x.lo)
+        o = b.split(b.atomTo(o), skip, lazy)
+      result = o
+    for i in 0 ..< x.lo: result = b.atomTo(result)
+    return
+  let sz = codeSize(sub)
+  let b0 = base + 1
+  if x.hi < 0:
+    let copies = max(x.lo, 1)
+    result = b.compLoopCost(sub, x.lazy, x.lo >= 1, couldBeEmpty(sub), next,
+                            b0 + (copies - 1) * sz)
+    for i in countdown(copies - 2, 0):
+      result = b.compGroup(sub, result, b0 + i * sz)
+  else:
+    var o = next
+    for i in countdown(x.hi - 1, x.lo):
+      var take = b.compGroup(sub, o, b0 + i * sz)
+      if i != x.hi - 1: take = b.cost(b.catchers, take)   # the wrapper
+      if x.lazy:
+        o = b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: take)
+      else:
+        o = b.add NState(kind: nkSplit, out1: b.cost(true, take), out2: next)
+    result = o
+    for i in countdown(x.lo - 1, 0):
+      result = b.compGroup(sub, result, b0 + i * sz)
+
 proc nameIndex(b: var Build; name: string): int =
   if name notin b.n.nameIdx:
     b.n.nameIdx[name] = b.n.nameIdx.len
   b.n.nameIdx[name]
+
+proc cost(b: var Build; deep: bool; next: int): int =
+  ## RFC-0005 S8bt. A `match()` call before `next`.
+  b.add NState(kind: nkCost, deep: deep, out1: next)
+
+proc compRepCost(b: var Build; x: Rx; next, base: int): int
 
 proc compItem(b: var Build; x: Rx; next, base: int): int =
   if b.overflow: return 0
@@ -463,7 +607,8 @@ proc compItem(b: var Build; x: Rx; next, base: int): int =
   of rxCat, rxAlt:
     b.compGroup(x, next, base)
   of rxRep:
-    b.compRep(x, next, base)
+    if b.n.costs: b.compRepCost(x, next, base)
+    else: b.compRep(x, next, base)
   of rxBol:
     if x.multi: b.n.hasBolMulti = true
     else: b.n.hasBol = true
@@ -489,6 +634,8 @@ proc compItem(b: var Build; x: Rx; next, base: int): int =
     of vbThen: b.n.hasThen = true
     of vbSkipName: st.name = b.nameIndex(x.name)
     of vbMark: st.name = b.n.nameIdx.getOrDefault(x.name, -1)
+    # RFC-0005 S8bt: every verb runs its continuation by RMATCH.
+    if b.n.costs: st.out1 = b.cost(true, next)
     b.add st
 
 proc hasThenVerb(x: Rx): bool =
@@ -578,13 +725,19 @@ proc firstBytes(n: Nfa): set[char] =
       work.add st.out2
     else: work.add st.out1
 
-proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
+proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
   ## declined construct (`why` says which). RFC-0005 S8bt: `engine` is the
-  ## one an unanchored call runs on (anchored calls: always `peInterp`).
+  ## one an unanchored call runs on (anchored calls: always `peInterp`);
+  ## `limitRoom` >= 0: the automaton counts `match()`'s calls (`costs`) for
+  ## a call whose ovector has room for that many groups.
   var b = Build()
   b.n.engine = engine
+  if limitRoom >= 0:
+    b.n.costs = true
+    b.n.capRoom = limitRoom
+    b.n.possess = autoPossess(compileCode(pr), pr.utf)
   b.n.groups = pr.groups
   b.n.nl = pr.nl
   b.n.utf = pr.utf
@@ -607,12 +760,31 @@ proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
   let m = b.add NState(kind: nkMatch)
   b.match = m
   b.n.start = b.compGroup(pr.root, m, 0)
+  # RFC-0005 S8bt: the attempt's own `match()` call.
+  if b.n.costs: b.n.start = b.cost(false, b.n.start)
   result = b.n
   result.ok = not b.overflow
   if b.overflow:
     result.why = "the pattern's priority automaton is past its size cap (" &
                  $maxNfaStates & " states, " & $maxLoops & " nullable loops)"
     return
+  if result.costs:
+    # A SKIP:NAME without its MARK re-runs the attempt from a fresh count,
+    # ignoring the SKIP:NAMEs it passed (no RMATCH for them).
+    var probe = result
+    probe.classifySkipNames()
+    if probe.hasNeverSkip:
+      b.costWhy = "a (*SKIP:NAME) that can run without its (*MARK:NAME)"
+    if result.possess.unknown:
+      b.costWhy = "auto-possessification next to a character property or " &
+                  "an extended class"
+    if engine != peInterp:
+      b.costWhy = "the JIT's match limit accounting"
+    if b.costWhy.len > 0:
+      result.ok = false
+      result.why = "match()'s call accounting is not modelled for " &
+                   b.costWhy
+      return
   result.classifySkipNames()
   # RFC-0005 S8bt: an attempt can leave `ignore_skip_arg` set for the next
   # one when a SKIP:NAME without its MARK can re-run it and the attempt can
@@ -663,7 +835,9 @@ proc buildNfa*(root: Rx; groups = 0; nl = nlLF; hasCrLf = false): Nfa =
 # ---- the agenda ------------------------------------------------------------------
 
 type
-  ItemKind = enum ikThread, ikMarker, ikThen, ikTerm, ikMatch
+  ItemKind = enum
+    ikThread, ikMarker, ikThen, ikTerm, ikMatch
+    ikCost   ## RFC-0005 S8bt: the calls of a path that failed here (`co`)
   TermKind = enum
     tmBump, tmCommit, tmSkip
     tmArgSkip   ## RFC-0005 S8bt: a SKIP:NAME with its MARK (id `marker`)
@@ -675,6 +849,16 @@ type
     cdDieLF   ## a `(*CRLF)` dot read a CR: dies if the next byte is LF
     cdNeedLF  ## a `(?m)$` before a CR under `(*CRLF)`: needs an LF next
   Frame = tuple[grp, alt, marker: int32]
+
+  Cost = object
+    ## RFC-0005 S8bt (`Nfa.costs`). The `match()` calls pcre_exec.c makes
+    ## on an item's path past where the item before it branched off (the
+    ## shared part is the earlier item's: it is explored first).
+    cc: int32    ## the calls
+    dp: int16    ## a thread's frame depth (`rdepth`)
+    md: int16    ## the deepest of those calls' depth, plus one (0: none)
+    dv: int32    ## one plus the index among them of the first at or past
+                 ## the recursion limit (0: none)
 
   Item[T] = object
     kind: ItemKind
@@ -704,6 +888,8 @@ type
     rerun: bool
       ## RFC-0005 S8bt: a tmBarrier whose re-run takes the CRLF start skip;
       ## a tmBump that is that re-run (`ignore_skip_arg` stays set)
+    co: Cost
+      ## RFC-0005 S8bt: the item's `match()` calls (`Nfa.costs`)
     cap: T
 
   StepCtx = object
@@ -725,6 +911,8 @@ type
   OutcomeKind* = enum
     okUndecided, okNoMatch, okMatch, okBump, okCommit, okSkip
     okStale   ## RFC-0005 S8bt: a stale `ignore_skip_arg` read: not modelled
+    okLimitM  ## RFC-0005 S8bt: PCRE_ERROR_MATCHLIMIT
+    okLimitR  ## RFC-0005 S8bt: PCRE_ERROR_RECURSIONLIMIT
 
 const argCap* = 7
   ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
@@ -746,6 +934,13 @@ proc decidesAtFront[T](it: Item[T]): bool =
     it.kind == ikTerm and it.cond == cdNone and it.term == tmArgSkip
 
 proc sat(x: int): int8 = int8(min(x, argCap + 1))
+
+proc then(a, b: Cost): Cost =
+  ## RFC-0005 S8bt. The calls of `a`, then those of `b`.
+  Cost(cc: a.cc + b.cc, dp: b.dp, md: max(a.md, b.md),
+       dv: (if a.dv > 0: a.dv elif b.dv > 0: a.cc + b.dv else: 0))
+
+proc spent(c: Cost): bool = c.cc > 0
 
 proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
                             int8) =
@@ -777,6 +972,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
     anc: int32
     ac: int8
     stl: int8
+    co: Cost
     cap: T
     item: Item[T]
   var visited = initHashSet[(int32, uint64, seq[Frame], seq[int32], Cond,
@@ -823,7 +1019,7 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
     if cutting: continue
     stack = @[Entry(kind: 0, st: it.st, frames: it.frames, marks: it.marks,
                     cond: it.cond, anc: it.anc, ac: it.ac, stl: it.stl,
-                    cap: it.cap)]
+                    co: it.co, cap: it.cap)]
     while stack.len > 0:
       let e = stack.pop()
       case e.kind
@@ -838,16 +1034,24 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         continue
       else: discard
       if cutting: continue
-      let vk = (e.st, e.ent, e.frames, e.marks, e.cond, e.anc, e.ac)
-      if not exempt(n, e.st, e.ac):
-        if vk in visited: continue
-        visited.incl vk
+      # RFC-0005 S8bt: pcre_exec.c explores every path, the same ones
+      # again too (`costs`: their calls count).
+      if not n.costs:
+        let vk = (e.st, e.ent, e.frames, e.marks, e.cond, e.anc, e.ac)
+        if not exempt(n, e.st, e.ac):
+          if vk in visited: continue
+          visited.incl vk
       let s = n.states[e.st]
+      template dead() =
+        # RFC-0005 S8bt: the path fails here; its calls stay counted.
+        if n.costs and spent(e.co):
+          result.add Item[T](kind: ikCost, co: e.co)
+      var coNext = e.co
       template goWith(target: int; fs: seq[Frame]; mk: seq[int32]; c: Cond;
                       a: int32; cnt: int8; cp: T; en: uint64) =
         stack.add Entry(kind: 0, st: int32(target), ent: en, frames: fs,
                         marks: mk, cond: c, anc: a, ac: cnt, stl: e.stl,
-                        cap: cp)
+                        co: coNext, cap: cp)
       template go(target: int; c: Cond = e.cond) =
         goWith(target, e.frames, e.marks, c, e.anc, e.ac, e.cap, e.ent)
       template emitAfter(itm: Item[T]) =
@@ -858,32 +1062,54 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
       case s.kind
       of nkByte:
         let k = (e.st, e.frames, e.marks, e.cond, e.anc, e.ac)
-        if exempt(n, e.st, e.ac) or k notin seenC:
+        if n.costs or exempt(n, e.st, e.ac) or k notin seenC:
           seenC.incl k
           result.add Item[T](kind: ikThread, st: e.st, frames: e.frames,
                              marks: e.marks, cond: e.cond, anc: e.anc,
-                             ac: e.ac, stl: e.stl, cap: e.cap)
+                             ac: e.ac, stl: e.stl, co: e.co, cap: e.cap)
       of nkSplit:
+        # RFC-0005 S8bt: the first branch keeps the calls so far.
+        coNext = Cost(dp: e.co.dp)
         go(s.out2)
+        coNext = e.co
         go(s.out1)
+      of nkCost:
+        # RFC-0005 S8bt: a `match()` call: pcre_exec.c checks the call
+        # count, then the frame depth against the limits.
+        let d = e.co.dp + (if s.deep: 1'i16 else: 0'i16)
+        coNext.dp = d
+        coNext.md = max(e.co.md, d + 1)
+        if coNext.dv == 0 and int(d) >= n.recLimit():
+          coNext.dv = e.co.cc + 1
+        coNext.cc = e.co.cc + 1
+        go(s.out1)
+      of nkPoss:
+        if sc.nb < 0 or char(sc.nb) notin s.bytes: go(s.out1)
+        else: dead()
       of nkBol:
         if not s.multi:
           if sc.pos0: go(s.out1)
+          else: dead()
         elif sc.pos0 or (sc.ctx != cxEnd and wasNl(n.nl, sc.pc)):
           # OP_CIRCM: at the subject start, or after a newline that does
           # not end the subject.
           go(s.out1)
+        else: dead()
       of nkEol:
         if not s.multi:
           if sc.ctx in {cxNll, cxEnd}: go(s.out1)
+          else: dead()
         elif sc.ctx == cxEnd or (sc.nb >= 0 and char(sc.nb) in nlBytes(n.nl)):
           go(s.out1)
         elif n.nl == nlCRLF and sc.nb == ord('\r'):
           # OP_DOLLM's IS_NEWLINE: a CR is one only with an LF after it.
           if sc.finCRLF: go(s.out1)
           elif e.cond != cdDieLF: go(s.out1, cdNeedLF)
+          else: dead()
+        else: dead()
       of nkEolAbs:
         if sc.ctx == cxEnd: go(s.out1)
+        else: dead()
       of nkEnter:
         goWith(s.out1, e.frames, e.marks, e.cond, e.anc, e.ac, e.cap,
                e.ent or (1'u64 shl s.loop))
@@ -898,9 +1124,10 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
       of nkMatch:
         if not sc.noEmpty:
           let m = Item[T](kind: ikMatch, cond: e.cond, tag: sc.tagNow,
-                          stl: e.stl, cap: e.cap)
+                          stl: e.stl, co: e.co, cap: e.cap)
           result.add m
           if decided(m): cutting = true
+        else: dead()
       of nkAlt:
         let id = markerCtr
         inc markerCtr
@@ -981,19 +1208,23 @@ proc advance[T](n: Nfa; items: seq[Item[T]]; c: char): seq[Item[T]] =
       result.add it
       continue
     let s = n.states[it.st]
-    if c notin s.bytes: continue
+    # RFC-0005 S8bt: a path that fails leaves its calls (`costs`).
+    if c notin s.bytes or (c == '\r' and s.crlfDot and it.cond == cdNeedLF):
+      if spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
+      continue
     var t = it
     t.st = int32(s.out1)
     if c == '\r' and s.crlfDot:
-      if t.cond == cdNeedLF: continue
       t.cond = cdDieLF
     let k = ckey(t)
-    if k in seen and not exempt(n, t.st, t.ac): continue
-    seen.incl k
+    if not n.costs:
+      if k in seen and not exempt(n, t.st, t.ac): continue
+      seen.incl k
     result.add t
 
 proc resolve[T](items: seq[Item[T]]; nextLF: bool): seq[Item[T]] =
   ## The conditional items once the next byte is known (`nextLF`: an LF).
+  ## RFC-0005 S8bt: one that dies leaves its calls.
   for it in items:
     case it.cond
     of cdNone: result.add it
@@ -1002,15 +1233,20 @@ proc resolve[T](items: seq[Item[T]]; nextLF: bool): seq[Item[T]] =
         var t = it
         t.cond = cdNone
         result.add t
+      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
     of cdNeedLF:
       if nextLF:
         var t = it
         t.cond = cdNone
         result.add t
+      elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
 
 proc dropThreads[T](items: seq[Item[T]]): seq[Item[T]] =
+  ## The agenda at the end: no thread reads on (RFC-0005 S8bt: each leaves
+  ## its calls).
   for it in items:
     if it.kind != ikThread: result.add it
+    elif spent(it.co): result.add Item[T](kind: ikCost, co: it.co)
 
 proc resolveBarrier[T](cur: var seq[Item[T]]): bool =
   ## RFC-0005 S8bt. A SKIP:NAME at the front: every path before it failed,
@@ -1068,20 +1304,31 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
   while true:
     var changed = false
     var i = 0
+    # RFC-0005 S8bt: what the front passes over was explored (its calls
+    # go to the new front); what a THEN jumps over was not.
+    var carry: Cost
     while i < cur.len:
       let it = cur[i]
-      if it.kind == ikMarker:
+      if it.kind == ikMarker or it.kind == ikCost:
+        carry = carry.then(it.co)
         inc i
       elif it.kind == ikThen and it.cond == cdNone:
+        carry = carry.then(it.co)
         var j = i + 1
         while j < cur.len and
               not (cur[j].kind == ikMarker and cur[j].marker == it.marker):
           inc j
+        if j < cur.len: carry = carry.then(cur[j].co)
         i = j + 1
       else:
         break
     if i > 0:
-      cur = (if i >= cur.len: @[] else: cur[i .. ^1])
+      if i >= cur.len:
+        # Nothing left: no match, after these calls.
+        if spent(carry): return @[Item[T](kind: ikCost, co: carry)]
+        return @[]
+      cur = cur[i .. ^1]
+      if spent(carry): cur[0].co = carry.then(cur[0].co)
       changed = true
     if resolveBarrier(cur): continue
     if cur.len > 0 and decidesAtFront(cur[0]):
@@ -1143,9 +1390,14 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
     cur = @[]
     for it in nx:
       if it.kind == ikMarker and it.marker notin refs:
+        # RFC-0005 S8bt: its calls go to what follows it.
+        if spent(it.co): cur.add Item[T](kind: ikCost, co: it.co)
         changed = true
       elif it.kind == ikTerm and it.term == tmArgOff and
            it.marker notin links:
+        changed = true
+      elif it.kind == ikCost and cur.len > 0 and cur[^1].kind == ikCost:
+        cur[^1].co = cur[^1].co.then(it.co)
         changed = true
       else:
         cur.add it
@@ -1153,7 +1405,7 @@ proc normalize[T](items: seq[Item[T]]): seq[Item[T]] =
 
 proc outcome[T](items: seq[Item[T]]): OutcomeKind =
   ## A normalized agenda's outcome, if decided.
-  if items.len == 0: return okNoMatch
+  if items.len == 0 or items[0].kind == ikCost: return okNoMatch
   let f = items[0]
   if f.cond != cdNone: return okUndecided
   case f.kind
@@ -1185,7 +1437,25 @@ type AttemptResult*[T] = object
   pos*: int        ## okMatch: the match's end; okSkip: the landing
   ign*: int8
     ## RFC-0005 S8bt: `ignore_skip_arg` after the attempt (`nextIgn`)
+  calls*: int      ## RFC-0005 S8bt (`costs`): its `match()` calls
+  depth*: int      ## RFC-0005 S8bt (`costs`): its deepest call's frame
+                   ## depth, plus one
   cap*: T
+
+proc limitHit[T](n: Nfa; items: seq[Item[T]]): OutcomeKind =
+  ## RFC-0005 S8bt. Whether the calls before and on the front item pass a
+  ## limit (`costs`): the error of the first call that does (pcre_exec.c
+  ## checks the count before the depth), else okUndecided.
+  if not n.costs or items.len == 0: return okUndecided
+  let co = items[0].co
+  let l = n.matchLimit
+  let countHit = l >= 0 and co.cc > l
+  let depthHit = co.dv > 0
+  if countHit and depthHit:
+    return (if l + 1 <= co.dv: okLimitM else: okLimitR)
+  if countHit: return okLimitM
+  if depthHit: return okLimitR
+  okUndecided
 
 proc nextIgn[T](oc: OutcomeKind; it: Item[T]; landed: bool): int8 =
   ## RFC-0005 S8bt. pcre_exec.c's `ignore_skip_arg` for the next attempt:
@@ -1221,9 +1491,14 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     if atEnd: items = dropThreads(items)
     else: items = advance(n, items, s[j])
     items = normalize(items)
-    let oc = outcome(items)
+    var oc = outcome(items)
+    let lim = limitHit(n, items)
+    if lim != okUndecided: oc = lim
     if oc != okUndecided or atEnd:
       result.kind = oc
+      if items.len > 0:
+        result.calls = int(items[0].co.cc)
+        result.depth = int(items[0].co.md)
       if oc in {okMatch, okSkip}:
         result.pos = int(items[0].tag)
         result.cap = items[0].cap
@@ -1341,6 +1616,28 @@ proc hash[T](it: Item[T]): Hash =
   for m in it.marks: h = h !& hash(m)
   !$h
 
+proc capCosts[T](n: Nfa; items: seq[Item[T]]): seq[Item[T]] =
+  ## RFC-0005 S8bt. The calls as far as the limits tell them apart (the
+  ## automata's agendas are finitely many): counts past the match limit,
+  ## depths past the recursion limit are one. Without THEN nothing jumps
+  ## over an item, so what follows one whose calls already pass a limit is
+  ## never reached (it decides once at the front).
+  if not n.costs: return items
+  let l = n.matchLimit
+  let r = n.recLimit
+  var pre = 0
+  for it in items:
+    var x = it
+    x.co.md = 0
+    x.co.cc = (if l >= 0: min(x.co.cc, int32(l + 1)) else: 0'i32)
+    x.co.dp = (if r < high(int): min(x.co.dp, int16(min(r, 30000)))
+               else: 0'i16)
+    if x.co.dv > 0:
+      x.co.dv = (if l >= 0: min(x.co.dv, int32(l + 2)) else: 1'i32)
+    result.add x
+    pre += int(x.co.cc)
+    if not n.hasThen and ((l >= 0 and pre > l) or x.co.dv > 0): break
+
 proc canon[T](items: seq[Item[T]]): seq[Item[T]] =
   ## Marker ids renumbered by first appearance.
   var ren = initTable[int32, int32]()
@@ -1374,6 +1671,8 @@ type
     acMatchT   ## search: a match ending at the LAND event
     acCapSet   ## a match setting group `g`
     acCapMark  ## a match whose group `g` spans `#` .. `%`
+    acErrM     ## RFC-0005 S8bt: PCRE_ERROR_MATCHLIMIT
+    acErrR     ## RFC-0005 S8bt: PCRE_ERROR_RECURSIONLIMIT
 
   AttemptSpec = object
     acc: AcceptKind
@@ -1442,6 +1741,8 @@ proc accepts(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8];
   of acMatchT: oc == okMatch and it.tag == 1
   of acCapSet: oc == okMatch and int(it.cap) mod 3 != 0
   of acCapMark: oc == okMatch and it.cap == 3 * 1 + 1
+  of acErrM: oc == okLimitM
+  of acErrR: oc == okLimitR
 
 proc staleOutcome(spec: AttemptSpec; oc: OutcomeKind; it: Item[int8]): bool =
   ## RFC-0005 S8bt. An unanchored attempt's outcome that leaves
@@ -1512,7 +1813,9 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
         items = closure(n, items, mkCtx(cxEnd, -1, false,
                                         spec.acc == acEndsT), ctr, save)
         items = normalize(dropThreads(items))
-        let oc = outcome(items)
+        var oc = outcome(items)
+        let lim = limitHit(n, items)
+        if lim != okUndecided: oc = lim
         let it = (if items.len > 0: items[0] else: Item[int8]())
         if staleOutcome(spec, oc, it):
           return Dfa(ok: false, why: staleWhy)
@@ -1549,8 +1852,10 @@ proc buildAttempt(n: Nfa; spec: AttemptSpec): Dfa =
             cl = closure(n, resolve(k.items, c == '\n'),
                          mkCtx(ctx, ord(c), fin, false), ctr, save)
             cache[ck] = cl
-          var items = normalize(advance(n, cl, c))
-          let oc = outcome(items)
+          var items = capCosts(n, normalize(advance(n, cl, c)))
+          var oc = outcome(items)
+          let lim = limitHit(n, items)
+          if lim != okUndecided: oc = lim
           var k2 = AKey(nl: nls, ev: k.ev, just: 0, atStart: false)
           if oc != okUndecided:
             let it = (if items.len > 0: items[0] else: Item[int8]())
@@ -1909,6 +2214,8 @@ type
     lkMark   ## `u[0..k) # u[k..]`: the match at u's start ends at k
     lkNone   ## no match at u's start
     lkEnds   ## the match at u's start ends at u's end
+    lkErrM   ## RFC-0005 S8bt: the attempt is PCRE_ERROR_MATCHLIMIT
+    lkErrR   ## RFC-0005 S8bt: the attempt is PCRE_ERROR_RECURSIONLIMIT
 
 proc selectionLangV*(n: Nfa; cacheKey: string; lang: LangKind;
                      pc0: PrevClass; anchored = true; crlfElig = false;
@@ -1926,7 +2233,9 @@ proc selectionLangV*(n: Nfa; cacheKey: string; lang: LangKind;
     let acc = (case lang
                of lkMark: acMarkT
                of lkNone: acNone
-               of lkEnds: acEndsT)
+               of lkEnds: acEndsT
+               of lkErrM: acErrM
+               of lkErrR: acErrR)
     result = langOfU(n, false, buildAttempt(n, AttemptSpec(acc: acc, anchored: anchored,
       noEmpty: noEmpty, nonEmpty: nonEmpty, pc0: pc, crlfElig: crlfElig)),
       "selection")
@@ -1947,9 +2256,17 @@ type
     skNoOcc   ## `u` with no match found by the search
     skFirst   ## `u[0..q) # u[q..]`: the search finds its match at `q`
     skSpan    ## `u[0..q) # u[q..e) % u[e..]`: ... ending at `e`
+    skErrM    ## RFC-0005 S8bt: `u` whose search ends in
+              ## PCRE_ERROR_MATCHLIMIT (`Nfa.costs`), were every attempt
+              ## made (pcre_exec.c's minimum-length and required-character
+              ## checks are the caller's: `attemptMade`)
+    skErrR    ## RFC-0005 S8bt: ... in PCRE_ERROR_RECURSIONLIMIT
+    skErrMAt  ## RFC-0005 S8bt: `u[0..q) # u[q..]`: that error, in the
+              ## attempt at `q`
+    skErrRAt  ## RFC-0005 S8bt: ... PCRE_ERROR_RECURSIONLIMIT
 
   Expect = enum exBump, exSkipFlight, exSkip, exCommit, exMatch, exMatchT,
-    exNoMatch
+    exNoMatch, exErrM, exErrR
   Verifier = object
     trans: seq[array[nSyms, int32]]
     acc: seq[bool]
@@ -1975,6 +2292,9 @@ type
     ign: int8
       ## RFC-0005 S8bt: pcre_exec.c's `ignore_skip_arg` for the next
       ## attempt (`Nfa.countArgs`)
+    err: int8
+      ## RFC-0005 S8bt: the search ended in a limit error (1: the match
+      ## limit, 2: the recursion limit)
 
   SKey = object
     nodes: seq[SNode]
@@ -1987,7 +2307,7 @@ type
 
 proc hash(x: SNode): Hash =
   var h: Hash = hash(ord(x.cursor)) !& hash(x.want) !& hash(x.wantEnd) !&
-                hash(x.pend) !& hash(x.ign)
+                hash(x.pend) !& hash(x.ign) !& hash(x.err)
   for r in x.runs: h = h !& hash(r)
   for o in x.obl: h = h !& hash(o)
   !$h
@@ -2001,6 +2321,7 @@ proc `<`(a, b: SNode): bool =
     if a.runs[i] != b.runs[i]: return a.runs[i] < b.runs[i]
   if a.pend != b.pend: return a.pend < b.pend
   if a.ign != b.ign: return a.ign < b.ign
+  if a.err != b.err: return a.err < b.err
   if a.obl.len != b.obl.len: return a.obl.len < b.obl.len
   for i in 0 ..< a.obl.len:
     if a.obl[i] != b.obl[i]: return a.obl[i] < b.obl[i]
@@ -2066,7 +2387,9 @@ proc buildVerifier(n: Nfa; ex: Expect; pc: PrevClass; elig: bool;
              of exCommit: acCommit
              of exMatch: acMatch
              of exMatchT: acMatchT
-             of exNoMatch: acNone)
+             of exNoMatch: acNone
+             of exErrM: acErrM
+             of exErrR: acErrR)
   var d = buildAttempt(n, AttemptSpec(acc: acc, anchored: n.anchoredPat, pc0: pc,
                                       crlfElig: elig, ign0: ign0, ign1: ign1,
                                       tracksIgn: n.countArgs))
@@ -2403,9 +2726,17 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     let elig = (not k.atS0) and k.pc == pcCR and c == ord('\n') and
                n.skipActive
     var exs: seq[Expect]
-    if node.want: exs = @[(if kind == skSpan: exMatchT else: exMatch)]
+    if node.want:
+      exs = @[(case kind
+               of skSpan: exMatchT
+               of skErrMAt: exErrM
+               of skErrRAt: exErrR
+               else: exMatch)]
     elif anchored: exs = @[exNoMatch]
     else: exs = @[exBump, exSkipFlight, exCommit]
+    # RFC-0005 S8bt: an attempt can end the search in a limit error.
+    if not node.want and countsLimits(n):
+      exs.add [exErrM, exErrR]
     var plan: seq[(Expect, int8)]
     for ex in exs:
       if ex in {exBump, exSkipFlight}:
@@ -2433,8 +2764,11 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
       x.runs.add (int8(ord(ex)), int8(v), st0)
       x.runs.sort()
       x.runs = deduplicate(x.runs, isSorted = true)
+      if ex == exErrM: x.err = 1
+      if ex == exErrR: x.err = 2
       x.cursor =
-        if anchored or ex in {exCommit, exMatch, exMatchT}: cuDone
+        if anchored or ex in {exCommit, exMatch, exMatchT, exErrM, exErrR}:
+          cuDone
         elif ex == exSkipFlight: cuInFlight
         elif n.utf and (n.engine == peInterp or c >= 0xC0): cuMid
         else: cuLanded
@@ -2470,12 +2804,18 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
     var acc = false
     if n.utf and k.utf != 0:
       acc = false   # ends inside a character: invalid
-    elif nlCanEnd(k.nl) and (kind == skNoOcc or
-                           k.phase == (if kind == skFirst: 1 else: 2)):
+    elif nlCanEnd(k.nl) and (kind in {skNoOcc, skErrM, skErrR} or
+                           k.phase == (if kind == skSpan: 2 else: 1)):
+      # RFC-0005 S8bt: a search that ends in an error finds no match.
+      let wantErr = (case kind
+                     of skErrM: 1'i8
+                     of skErrR: 2'i8
+                     else: -1'i8)
       for node in landed:
         for x0 in startHere(k, node, -1):
           var x = x0
           if x.want or x.cursor == cuInFlight: continue
+          if wantErr >= 0 and x.err != wantErr: continue
           if not discharge(x, -1): continue
           var good = true
           for (ex, v, st) in x.runs:
@@ -2485,7 +2825,7 @@ proc searchDfa(n: Nfa; cacheKey: string; kind: SearchKind;
             break
         if acc: break
     # The marker `#`: the found attempt starts here.
-    if kind != skNoOcc and k.phase == 0:
+    if kind in {skFirst, skSpan, skErrMAt, skErrRAt} and k.phase == 0:
       var nodes: seq[SNode]
       for node in landed:
         if node.cursor in {cuDone, cuInFlight}: continue
@@ -2702,7 +3042,8 @@ proc legacyRun*(n: Nfa): bool =
   ## RFC-0005 S8bj. Whether the S8bb step table (`runTable`) reads the
   ## pattern's `replace` exactly: no verb but MARK, no `(?m)` anchor, no UTF
   ## character, and no observable CRLF start skip.
-  n.ok and not n.utf and not n.hasBolMulti and not n.hasEolMulti and
+  n.ok and not n.costs and not n.utf and not n.hasBolMulti and
+    not n.hasEolMulti and
     not (n.hasCommit or n.hasSkip or n.hasThen or n.hasPrune or
          n.hasNeverSkip) and
     not crlfSkipObservable(n)
@@ -2886,8 +3227,10 @@ proc stepTable*(n: Nfa): StepTable =
               eligAll: k.elig, anchored: false, tagNow: regs)
     proc leafOf(items0: seq[Item[int8]]; pcNext: PrevClass;
                 ok: var bool): Leaf =
-      let items = normalize(items0)
-      let oc = outcome(items)
+      let items = capCosts(n, normalize(items0))
+      var oc = outcome(items)
+      let lim = limitHit(n, items)
+      if lim != okUndecided: oc = lim
       proc reg(t: int32): int8 = (if t == regs: -1'i8 else: int8(t))
       # RFC-0005 S8bt: the `ignore_skip_arg` an outcome leaves for the next
       # attempt (a SKIP's jump, or a re-run past a CRLF's LF, after a
@@ -2903,7 +3246,8 @@ proc stepTable*(n: Nfa): StepTable =
       if ig != 0: addIgn(ig)
       case oc
       of okNoMatch, okBump: Leaf(kind: lfBump, ign: ig)
-      of okCommit: Leaf(kind: lfCommit)
+      # RFC-0005 S8bt: a limit error ends `replace` as a miss does.
+      of okCommit, okLimitM, okLimitR: Leaf(kind: lfCommit)
       of okMatch: Leaf(kind: lfMatch, reg: reg(items[0].tag))
       of okSkip, okStale: Leaf(kind: lfSkip, reg: reg(items[0].tag), ign: ig)
       of okUndecided:
@@ -2970,6 +3314,8 @@ type LimitEffect* = enum
   leNone     ## no start-option limit below PCRE's default
   leZero     ## a limit of 0: the first attempt made is an error
   leUnknown  ## a limit between: its effect is not computed (a decline)
+  leCounted  ## RFC-0005 S8bt: a limit between, read off the automaton's
+             ## `match()` calls (`Nfa.costs`)
 
 proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## RFC-0005 S8bj. What the `(*LIMIT_MATCH=)` / `(*LIMIT_RECURSION=)` start
@@ -2979,6 +3325,7 @@ proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
   let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
   let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
+  if countsLimits(n): return (leCounted, 0)
   if n.engine == peJit837:
     # RFC-0005 S8bt: the JIT ignores LIMIT_RECURSION, and counts
     # LIMIT_MATCH down from the limit, failing when the count reaches 0:
@@ -3020,13 +3367,10 @@ proc attemptMade*(n: Nfa; s: string; x: int; firstSet: bool;
     if not found: return false
   true
 
-proc pcreExecIgn*(n: Nfa; s: string; start: int; anchoredCall: bool;
-                  ne = false): ((int, int, int), int8) =
-  ## RFC-0005 S8bj. The concrete `pcre_exec` (8.45, the interpreter) of the
-  ## pattern on `s` from `start`: `(1, first, end)` for a match, `(-1, ..)`
-  ## for none, `(code, ..)` for an error. `leUnknown` limits are asserted
-  ## away (the lowering declines them). RFC-0005 S8bt: with the found
-  ## attempt's `ignore_skip_arg`.
+proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
+              ne: bool; maxCalls, maxDepth: var int): ((int, int, int), int8) =
+  ## `pcreExecIgn`, with the most `match()` calls of an attempt it made and
+  ## its deepest frame (`pcreLimits`).
   if start < 0 or start > s.len: return ((pcreErrBadOffset, 0, 0), 0)
   if n.utf:
     if utf8Error(s) >= 0: return ((pcreErrBadUtf8, 0, 0), 0)
@@ -3053,9 +3397,13 @@ proc pcreExecIgn*(n: Nfa; s: string; start: int; anchoredCall: bool;
     if le == leZero: return ((code, 0, 0), 0)
     let r = runAttemptT[int8](n, s, x, start, anchored, ne and x == start,
                               0'i8, noSave, ign)
+    maxCalls = max(maxCalls, r.calls)
+    maxDepth = max(maxDepth, r.depth)
     var next: int
     var landed = false
     case r.kind
+    of okLimitM: return ((pcreErrMatchLimit, 0, 0), 0)
+    of okLimitR: return ((pcreErrRecursionLimit, 0, 0), 0)
     of okMatch: return ((1, x, r.pos), ign)
     of okCommit: return ((-1, 0, 0), 0)
     of okStale: return ((pcreUnmodelled, 0, 0), 0)
@@ -3077,10 +3425,31 @@ proc pcreExecIgn*(n: Nfa; s: string; start: int; anchoredCall: bool;
        n.skipActive and not (jit and landed):
       inc x
 
+proc pcreExecIgn*(n: Nfa; s: string; start: int; anchoredCall: bool;
+                  ne = false): ((int, int, int), int8) =
+  ## RFC-0005 S8bj. The concrete `pcre_exec` (8.45, the interpreter) of the
+  ## pattern on `s` from `start`: `(1, first, end)` for a match, `(-1, ..)`
+  ## for none, `(code, ..)` for an error. `leUnknown` limits are asserted
+  ## away (the lowering declines them). RFC-0005 S8bt: with the found
+  ## attempt's `ignore_skip_arg`.
+  var mc, md: int
+  execCore(n, s, start, anchoredCall, ne, mc, md)
+
 proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
                ne = false): (int, int, int) =
   ## `pcreExecIgn`'s call result.
   pcreExecIgn(n, s, start, anchoredCall, ne)[0]
+
+proc pcreLimits*(n: Nfa; s: string; start: int;
+                 anchoredCall: bool): (int, int) =
+  ## RFC-0005 S8bt. The least `match_limit` and `match_limit_recursion`
+  ## under which the call is not a limit error (`n.costs`, no limit in the
+  ## pattern): its attempts' most `match()` calls, and their deepest call's
+  ## frame depth plus one (pcre_exec.c resets the count per attempt).
+  doAssert n.costs
+  var mc, md: int
+  discard execCore(n, s, start, anchoredCall, false, mc, md)
+  (mc, md)
 
 proc pcreReplace*(n: Nfa; s, by: string; unmodelled: var bool): string =
   ## RFC-0005 S8bj. Nim's `replace(s, re, by)` over `pcreExec` (std/re's

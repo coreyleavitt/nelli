@@ -48,6 +48,10 @@ type
     lazy*: bool       ## coKetRmin, coBraMinZero
     verb*: VerbKind   ## coVerb
     name*: string     ## coVerb
+    address*: int
+      ## RFC-0005 S8bt: coRep / coCrRep and a repeated class's coAtom: the
+      ## repeat's code address in `codeSize`'s layout (`pcre_select`'s
+      ## automaton reads the same address for that repeat)
 
   AtomFam* = enum
     afChar, afNot, afType, afClass
@@ -62,9 +66,30 @@ proc fam*(x: Rx): AtomFam =
   of aoClass, aoNClass, aoXClass: afClass
   else: afType
 
-proc isGroup(x: Rx): bool = x.kind in {rxCat, rxAlt}
-proc groupAlts(x: Rx): seq[Rx] = (if x.kind == rxAlt: x.kids else: @[x])
-proc branchItems(x: Rx): seq[Rx] = (if x.kind == rxCat: x.kids else: @[x])
+proc isGroup*(x: Rx): bool = x.kind in {rxCat, rxAlt}
+proc groupAlts*(x: Rx): seq[Rx] = (if x.kind == rxAlt: x.kids else: @[x])
+proc branchItems*(x: Rx): seq[Rx] = (if x.kind == rxCat: x.kids else: @[x])
+
+proc codeSize*(x: Rx): int
+proc branchSize*(br: Rx): int =
+  for it in branchItems(br): result += codeSize(it)
+
+proc codeSize*(x: Rx): int =
+  ## RFC-0005 S8bj. Code units in pcre_compile.c's layout, as addresses:
+  ## only the order matters (THEN's catch test compares addresses;
+  ## RFC-0005 S8bt: a repeat's address names it, `Code.address`).
+  case x.kind
+  of rxCat, rxAlt:
+    result = 1
+    for br in groupAlts(x): result += branchSize(br) + 1
+  of rxRep:
+    if x.sub.isGroup:
+      let copies = (if x.hi == 0: 1 elif x.hi < 0: max(x.lo, 1) else: x.hi)
+      result = 1 + copies * codeSize(x.sub)
+    else:
+      result = 1
+  else:
+    result = 1
 
 proc couldBeEmpty*(x: Rx): bool
 proc branchCouldBeEmpty(items: seq[Rx]): bool =
@@ -94,19 +119,21 @@ proc emit(e: var Emitter; c: Code): int =
   e.code.add c
   e.code.high
 
-proc emitGroup(e: var Emitter; x: Rx; s: bool)
-proc emitItem(e: var Emitter; x: Rx)
+proc emitGroup(e: var Emitter; x: Rx; s: bool; base: int)
+proc emitItem(e: var Emitter; x: Rx; base: int)
 
-proc emitAtom(e: var Emitter; x: Rx) =
-  discard e.emit Code(op: coAtom, atom: x)
+proc emitAtom(e: var Emitter; x: Rx; address = -1) =
+  discard e.emit Code(op: coAtom, atom: x, address: address)
 
-proc emitRepAtom(e: var Emitter; x: Rx; lo, hi: int; lazy: bool) =
+proc emitRepAtom(e: var Emitter; x: Rx; lo, hi: int; lazy: bool;
+                 address: int) =
   ## A repeated one-character item (pcre_compile.c's OUTPUT_SINGLE_REPEAT,
   ## or the OP_CR* opcode after a class).
   if hi == 0: return
   if fam(x) == afClass:
-    e.emitAtom(x)
-    var c = Code(op: coCrRep, atom: x, count: lo, count2: hi)
+    e.emitAtom(x, address)
+    var c = Code(op: coCrRep, atom: x, count: lo, count2: hi,
+                 address: address)
     c.rep =
       if lo == 0 and hi < 0: (if lazy: rpMinStar else: rpStar)
       elif lo == 1 and hi < 0: (if lazy: rpMinPlus else: rpPlus)
@@ -116,7 +143,7 @@ proc emitRepAtom(e: var Emitter; x: Rx; lo, hi: int; lazy: bool) =
     return
   template rep(r, rl: RepOp; n = 0) =
     discard e.emit Code(op: coRep, atom: x, rep: (if lazy: rl else: r),
-                        count: n)
+                        count: n, address: address)
   if lo == 0:
     if hi < 0: rep(rpStar, rpMinStar)
     elif hi == 1: rep(rpQuery, rpMinQuery)
@@ -127,26 +154,29 @@ proc emitRepAtom(e: var Emitter; x: Rx; lo, hi: int; lazy: bool) =
       e.emitAtom(x)
       if hi > 1: rep(rpUpto, rpMinUpto, hi - 1)
   else:
-    discard e.emit Code(op: coRep, atom: x, rep: rpExact, count: lo)
+    discard e.emit Code(op: coRep, atom: x, rep: rpExact, count: lo,
+                        address: address)
     if hi < 0: rep(rpStar, rpMinStar)
     elif hi != lo:
       if hi - lo == 1: rep(rpQuery, rpMinQuery)
       else: rep(rpUpto, rpMinUpto, hi - lo)
 
-proc emitGroupRep(e: var Emitter; x: Rx) =
+proc emitGroupRep(e: var Emitter; x: Rx; base: int) =
   ## A repeated group, replicated as pcre_compile.c does.
   let sub = x.sub
   let lo = x.lo
   var hi = x.hi
+  let sz = codeSize(sub)
+  let b0 = base + 1
   if lo == 0:
     if hi == 0:
       discard e.emit Code(op: coSkipZero)
-      e.emitGroup(sub, false)
+      e.emitGroup(sub, false, b0)
       return
     if hi == 1 or hi < 0:
       discard e.emit Code(op: (if x.lazy: coBraMinZero else: coBraZero),
                           lazy: x.lazy)
-      e.emitGroup(sub, hi < 0 and couldBeEmpty(sub))
+      e.emitGroup(sub, hi < 0 and couldBeEmpty(sub), b0)
       if hi < 0:
         e.code[^1].op = (if x.lazy: coKetRmin else: coKetRmax)
         e.code[^1].lazy = x.lazy
@@ -158,14 +188,15 @@ proc emitGroupRep(e: var Emitter; x: Rx) =
                           lazy: x.lazy)
       if i != hi - 1:
         opens.add e.emit Code(op: coBra)
-      e.emitGroup(sub, false)
+      e.emitGroup(sub, false, b0 + i * sz)
     for k in countdown(opens.high, 0):
       let ket = e.emit Code(op: coKet)
       e.code[opens[k]].link = ket
       e.code[ket].link = opens[k]
     return
   for i in 0 ..< lo:
-    e.emitGroup(sub, hi < 0 and i == lo - 1 and couldBeEmpty(sub))
+    e.emitGroup(sub, hi < 0 and i == lo - 1 and couldBeEmpty(sub),
+                b0 + i * sz)
   if hi < 0:
     e.code[^1].op = (if x.lazy: coKetRmin else: coKetRmax)
     e.code[^1].lazy = x.lazy
@@ -177,19 +208,19 @@ proc emitGroupRep(e: var Emitter; x: Rx) =
                         lazy: x.lazy)
     if i != extra - 1:
       opens.add e.emit Code(op: coBra)
-    e.emitGroup(sub, false)
+    e.emitGroup(sub, false, b0 + (lo + i) * sz)
   for k in countdown(opens.high, 0):
     let ket = e.emit Code(op: coKet)
     e.code[opens[k]].link = ket
     e.code[ket].link = opens[k]
 
-proc emitItem(e: var Emitter; x: Rx) =
+proc emitItem(e: var Emitter; x: Rx; base: int) =
   case x.kind
   of rxSet, rxChars: e.emitAtom(x)
-  of rxCat, rxAlt: e.emitGroup(x, false)
+  of rxCat, rxAlt: e.emitGroup(x, false, base)
   of rxRep:
-    if x.sub.isGroup: e.emitGroupRep(x)
-    else: e.emitRepAtom(x.sub, x.lo, x.hi, x.lazy)
+    if x.sub.isGroup: e.emitGroupRep(x, base)
+    else: e.emitRepAtom(x.sub, x.lo, x.hi, x.lazy, base)
   of rxBol:
     discard e.emit Code(op: (if x.multi: coCircm else: coCirc))
   of rxEol:
@@ -198,7 +229,7 @@ proc emitItem(e: var Emitter; x: Rx) =
   of rxAccept: discard e.emit Code(op: coAccept)
   of rxVerb: discard e.emit Code(op: coVerb, verb: x.verb, name: x.name)
 
-proc emitGroup(e: var Emitter; x: Rx; s: bool) =
+proc emitGroup(e: var Emitter; x: Rx; s: bool; base: int) =
   ## A bracket: OP_BRA / OP_CBRA (OP_SBRA / OP_SCBRA when `s`), its
   ## alternatives separated by OP_ALT, then OP_KET.
   let op =
@@ -207,12 +238,17 @@ proc emitGroup(e: var Emitter; x: Rx; s: bool) =
   var prev = e.emit Code(op: op, cap: x.cap)
   let start = prev
   let alts = groupAlts(x)
+  var a0 = base + 1
   for i, br in alts:
     if i > 0:
       let a = e.emit Code(op: coAlt)
       e.code[prev].link = a
       prev = a
-    for it in branchItems(br): e.emitItem(it)
+    var ab = a0
+    for it in branchItems(br):
+      e.emitItem(it, ab)
+      ab += codeSize(it)
+    a0 += branchSize(br) + 1
   let ket = e.emit Code(op: coKet)
   e.code[prev].link = ket
   e.code[ket].link = start
@@ -223,6 +259,6 @@ proc compileCode*(pr: PcreParse): seq[Code] =
   var e = Emitter()
   # The top-level bracket is never a repeated one, and a reader's root
   # group carries no capture of its own.
-  e.emitGroup(Rx(kind: rxAlt, kids: groupAlts(pr.root)), false)
+  e.emitGroup(Rx(kind: rxAlt, kids: groupAlts(pr.root)), false, 0)
   discard e.emit Code(op: coEnd)
   e.code

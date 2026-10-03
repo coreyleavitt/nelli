@@ -803,14 +803,17 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # (`pcre_engine.pcreSearchEngine`): under 8.37's JIT, its prefix scan,
     # SKIP landing and SKIP:NAME (a legacy-run pattern -- no verb, no
     # observable CRLF start skip, no UTF -- reads the same on both).
-    let n = buildNfa(pr, pcreSearchEngine())
+    # RFC-0005 S8bt: a limit between 0 and the default is read off the
+    # automaton's `match()` calls (`limitNfa`; the calls' ovector has no
+    # room for a group); an error ends `replace` as a miss does.
+    let n = limitNfa(pr, pcreSearchEngine())
     if not n.ok: regexDecline(sp, n.why)
     case limitEffect(n)[0]
     of leUnknown: regexDecline(sp, limitDecline)
     of leZero: return recv
-    of leNone: discard
+    of leNone, leCounted: discard
     let (isShape, sh) = regexReplaceShape(pr)
-    if not isShape or pr.utf or crlfSkipObservable(n):
+    if not isShape or pr.utf or crlfSkipObservable(n) or n.costs:
       if legacyRun(n):
         let t = runTable(n)
         if not t.ok: regexDecline(sp, t.why)

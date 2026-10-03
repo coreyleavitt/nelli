@@ -202,7 +202,21 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "201"
+const symexWalkerVersion* = "210"
+  ## RFC-0005 S8bi (2026-10-02) — S8bb's remainder, part A. A call through
+  ## a closure, a `map`/`filter` over one, a borrowed arithmetic operator,
+  ## every regex call and `newSeq` are raise sites for the short-circuit
+  ## guard (`rhsHasInlineDefectFork`): in a `while` guard they were lowered
+  ## whether or not the short circuit reached them (a false sxSat; an
+  ## undecided pattern tainted a path that never ran it). A closure call's
+  ## exit facts are placed in evaluation order (`rskClosureExit`), not on
+  ## every raise of the expression: a raise evaluated before the call was
+  ## forked under them (a false sxUnsat), and an inline `s[i]` is
+  ## evaluated before a later operand's hoisted `let`s. `newSeq[T](n)`,
+  ## `newSeq(s, n)`, `newSeqOfCap` and `newSeqUninit` are modelled (they
+  ## aborted the compile); `k in {..}` / `notin` over a set literal of
+  ## constants is the disjunction of its elements (it declined). The regex
+  ## replace recursions carry fuel. Batch 3 is 209, S8bh 208.
   ## RFC-0005 S8bb (2026-10-02) — S8ay's remainder. An expression's raises
   ## drain in evaluation order (`WalkCtx.raiseOrder`), not a fixed sink
   ## order, and an `if` guard that raised on every path (a rejected
@@ -5085,6 +5099,10 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<Nil:" & canonicalize(e.nilPointee) & ">"
   of iekZeroValue:                       ## RFC-0005 S8u
     "Ex<Zero:" & canonicalize(e.zvTy) & ">"
+  of iekSeqNew:                          ## RFC-0005 S8bi
+    "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
+      (if e.snZeroed: "zero" else: "uninit") &
+      (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 

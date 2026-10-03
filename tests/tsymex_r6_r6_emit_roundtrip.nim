@@ -312,6 +312,10 @@ proc fieldwiseEq(a, b: IRExpr): bool =
   of iekZeroValue:
     ## RFC-0005 S8u.
     fieldwiseEq(a.zvTy, b.zvTy)
+  of iekSeqNew:
+    ## RFC-0005 S8bi.
+    fieldwiseEq(a.snArg, b.snArg) and fieldwiseEq(a.snElemTy, b.snElemTy) and
+      a.snZeroed == b.snZeroed and a.snOfCap == b.snOfCap
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -610,6 +614,12 @@ proc sZeroValueTable(): IRExpr =
 proc sZeroValueSet(): IRExpr =
   ## RFC-0005 S8u. An uninitialised local `HashSet[int]`.
   mkZeroValue(tSet(tInt(64, true)))
+proc sSeqNew(): IRExpr =
+  ## RFC-0005 S8bi. `newSeqOfCap[int](n)`: length 0, `n` range-checked.
+  mkSeqNew(mkVar("n"), tInt(64, true), zeroed = true, ofCap = true)
+proc sSeqNewUninit(): IRExpr =
+  ## RFC-0005 S8bi. `newSeqUninit[int](n)`.
+  mkSeqNew(mkVar("n"), tInt(64, true), zeroed = false, ofCap = false)
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -693,6 +703,10 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sZeroValueTable(), roundtripExpr(sZeroValueTable()))
   test "iekZeroValue (HashSet[int])":
     check fieldwiseEq(sZeroValueSet(), roundtripExpr(sZeroValueSet()))
+  test "iekSeqNew (newSeqOfCap)":
+    check fieldwiseEq(sSeqNew(), roundtripExpr(sSeqNew()))
+  test "iekSeqNew (newSeqUninit)":
+    check fieldwiseEq(sSeqNewUninit(), roundtripExpr(sSeqNewUninit()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -772,6 +786,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
       of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
       of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
+      of iekSeqNew: discard                      ## "iekSeqNew" (RFC-0005 S8bi)
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"

@@ -265,32 +265,45 @@ proc regexReplaceRec(s, by: Z3String; sh: RegexReplaceShape): Z3String =
   ## run emits `by` once at its first byte. Measured against index
   ## recursion, a hybrid with the 16-byte unroll and `seq.foldli` (which
   ## crashes Z3 5.1 in `Z3_mk_seq_foldli`); this decided the most.
+  ## RFC-0005 S8bi: each definition carries a `fuel` argument, `len(s) + 1`
+  ## at the call and one less per unfolding, which a real run never
+  ## exhausts (every call drops at least one byte). Z3 unfolds a recursive
+  ## definition without spending `rlimit` (S8bb item 6), so a recursion
+  ## Z3 cannot see shrinking must not depend on the argument alone;
+  ## `tests/tsymex_rfc0005_s8bi_remainder.nim` scans the source for a
+  ## recursive definition without one.
   let ctx = s.ctx
   let empty = mkString("")
   if sh.plus:
     let cs = sh.atoms[0]
-    let f = defineRecFun[Z3String, Z3Bool, Z3String](ctx,
+    let f = defineRecFun[Z3String, Z3Bool, Z3Int, Z3String](ctx,
       regexFreshName("__regexReplaceRun"),
-      proc (self: Z3FuncDecl[(Z3String, Z3Bool), Z3String]; u: Z3String;
-            prevIn: Z3Bool): Z3String =
+      proc (self: Z3FuncDecl[(Z3String, Z3Bool, Z3Int), Z3String];
+            u: Z3String; prevIn: Z3Bool; fuel: Z3Int): Z3String =
         let h = at(u, mkInt(0))
         let inH = inByteSet(toCode(h), cs)
         let rest = substr(u, mkInt(1), len(u) - mkInt(1))
-        ite(len(u) == mkInt(0), empty,
-            concat(ite(inH, ite(prevIn, empty, by), h), self(rest, inH))))
-    return f(s, mkBool(false))
+        let f1 = fuel - mkInt(1)
+        ite(fuel <= mkInt(0), empty,
+          ite(len(u) == mkInt(0), empty,
+              concat(ite(inH, ite(prevIn, empty, by), h),
+                     self(rest, inH, f1)))))
+    return f(s, mkBool(false), len(s) + mkInt(1))
   let atoms = sh.atoms
   let m = atoms.len
-  let f = defineRecFun[Z3String, Z3String](ctx,
+  let f = defineRecFun[Z3String, Z3Int, Z3String](ctx,
     regexFreshName("__regexReplaceFixed"),
-    proc (self: Z3FuncDecl[(Z3String,), Z3String]; u: Z3String): Z3String =
+    proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3String]; u: Z3String;
+          fuel: Z3Int): Z3String =
       var win = len(u) >= mkInt(m)
       for j in 0 ..< m: win = win and inByteSet(toCode(at(u, mkInt(j))), atoms[j])
-      ite(len(u) == mkInt(0), empty,
-        ite(win, concat(by, self(substr(u, mkInt(m), len(u) - mkInt(m)))),
-                 concat(at(u, mkInt(0)),
-                        self(substr(u, mkInt(1), len(u) - mkInt(1)))))))
-  f(s)
+      let f1 = fuel - mkInt(1)
+      ite(fuel <= mkInt(0), empty,
+        ite(len(u) == mkInt(0), empty,
+          ite(win, concat(by, self(substr(u, mkInt(m), len(u) - mkInt(m)), f1)),
+                   concat(at(u, mkInt(0)),
+                          self(substr(u, mkInt(1), len(u) - mkInt(1)), f1))))))
+  f(s, len(s) + mkInt(1))
 
 # ---- RFC-0005 S8ay: the `std/re` entry points --------------------------------
 

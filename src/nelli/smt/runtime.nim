@@ -4406,7 +4406,13 @@ proc lowerIndexSplit*(s, c: Z3String; start: Z3Int; last = false): Z3Int =
   # their numeral -- Z3's rewriter evaluates `str.indexof` of literals. The
   # split's word equations over a literal took Z3 up to the whole
   # `seqQueryRLimit` to refute an infeasible loop exit (B6-1-red, B6-6).
-  let folded = ctx.checkErr Z3_simplify(ctx.raw, indexOf(s, c, start).raw)
+  # The folded term is the one the split stands for: `seq.last_indexof`
+  # for `last` (`rfind`, which takes no start). Folding `str.indexof` there
+  # turned `s.rfind("")` into `0` for ANY `s` (Z3 rewrites an empty needle
+  # from offset 0 to 0): a false `sxUnsat` on `s.rfind("") == 2` and a
+  # false hit on `s.rfind("") != s.len` (batch 6).
+  let term = if last: lastIndexOf(s, c) else: indexOf(s, c, start)
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, term.raw)
   if Z3_is_numeral_ast(ctx.raw, folded):
     return wrap[Z3Int](ctx, folded)
   inc indexSplitCounter

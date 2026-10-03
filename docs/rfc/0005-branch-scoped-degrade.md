@@ -9156,6 +9156,16 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   (`tabValueOf` / `tabTermIn` over `elemValueOf` / `elemTermIn`).
   `ptrAimInto` stays S8bn's one replay aim, its `f<name>` step S8bw's
   (`ptrAimByName`, `src/nelli/smt/ptraim.nim`).
+- *S8bl's ground fold on S8au's `rfind`.* S8bl folds a split whose term
+  Z3 rewrites to a numeral (`lowerIndexSplit`), but folded `str.indexof`
+  for every split, `rfind`'s (`last`) included: `s.rfind("")` became `0`
+  for any `s`, a false `sxUnsat` on `s.rfind("") == 2` (S8au's `re`, red
+  on the S8bl merge). The fold now takes the split's own term
+  (`seq.last_indexof` for `last`). SOUNDNESS, caught by S8au's pins.
+- *S8bn's typed `nil`.* `touchPtr(nil)` (a `ptr int` formal) no longer
+  declines its argument, so #163's ptr-argument pin decides the raise
+  after the summarised call (`sxRaised`, as Nim raises); the untyped
+  `pointer` `nil` still declines.
 
 ## §8 — Consumer surface and migration
 

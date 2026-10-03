@@ -202,7 +202,14 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "222"
+const symexWalkerVersion* = "225"
+  ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
+  ## query is decided beside each signed Int view's inverse (`x ==
+  ## int2bv(sbv2int(x))`, `bvIntInverseFacts`): an `int` read across the
+  ## Int-heap / bit-vector bridge gave Z3 UNSAT queries it never decided,
+  ## and `queryRLimit` now defaults to 20M, so no query is unbounded under
+  ## the defaults (an exhausted one declines). 222 -> 225.
+  ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
   ## callee's write through the pointer was clobbered; an object's address

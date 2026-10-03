@@ -11996,6 +11996,59 @@ proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add tInt == ite(sum >= span, sum - span,
                              ite(sum < zero, sum + span, sum))
 
+proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bu. For every bit-vector `x` (width W) whose signed Int view
+  ## `sbv2int(x)` is in `roots`, the view's inverse:
+  ##   x == int2bv_W(sbv2int(x))
+  ## A theorem of two's complement (`int2bv` takes its argument mod 2^W),
+  ## so asserting it beside the query leaves its models as they were.
+  ## `tests/tsymex_rfc0005_s8bu_term.nim` checks it at width 8 for every
+  ## `x`. The view is found as the term `Z3_mk_bv2int(x, true)` builds:
+  ## Z3 shares equal terms, so the view the walker built (`bvTermToZ3Int`)
+  ## and the one built here are the same AST, whether the linked Z3 keeps
+  ## the signed `bv2int` as one operator or expands it (to an `ite` over the
+  ## unsigned one, as Z3 5.1 and 4.13.4 do).
+  ##
+  ## Why: an `int` stored in an Int-sorted heap (`intHeapCell`) crosses the
+  ## sort boundary through the signed view, and a callee's result read back
+  ## from it is linked to a bit-vector either by `sbv2int(r) == sbv2int(k)`
+  ## or by `r == int2bv(sbv2int(k))`. With `r != k` both are UNSAT, but Z3
+  ## refutes them only through the injectivity of the expanded `ite`, which
+  ## neither 5.1 nor 4.13.4 found within 3M units; with these facts each
+  ## decides in a few hundred (the unsigned view needs none: Z3 asserts
+  ## `int2bv(ubv2int(x)) == x` itself). Under the then-unbounded default
+  ## `queryRLimit` the walk never terminated (S8bs's int-field and
+  ## `seq[int]` SUTs). Only a view the query holds is inverted, as
+  ## `bvOffsetLinks` links only views the query holds: a new view would
+  ## bring the bridge into a query that had none.
+  ensureIntDivDeclKinds(ctx)
+  let bv2nat = intDivDeclKinds.bv2nat
+  var seen: HashSet[int]
+  var args1: seq[Z3AnyAst]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    if args.len == 1 and ord(Z3_get_decl_kind(ctx.raw, decl)) == bv2nat and
+       not isNumeralAst(ctx, args[0].raw):
+      args1.add args[0]
+  var done: HashSet[int]
+  for x in args1:
+    let xid = astId(ctx, x.raw)
+    if xid in done: continue
+    done.incl xid
+    let sv = ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true)
+    if astId(ctx, sv) notin seen: continue
+    let w = Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, x.raw))
+    let back = ctx.checkErr Z3_mk_int2bv(ctx.raw, w, sv)
+    result.add wrap[Z3Bool](ctx, checkedEq(ctx, x.raw, back))
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -12090,7 +12143,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # are the query's own.
   # RFC-0005 S8bd: and with the exact link between the Int views of `x`
   # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
-  let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
+  # RFC-0005 S8bu: and with each signed Int view's inverse,
+  # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
+  let rootsIn = @query & divRangeFacts(ctx, query) &
+                bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query)
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()

@@ -989,7 +989,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bs (a var, addr or by-pointer actual whose variable has
     ## an address cell is bound to that cell; by-value seqs share element
     ## cells). 217->222.
-    check symexWalkerVersion == "222"
+    ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
+    ## default queryRLimit). 222->225.
+    check symexWalkerVersion == "225"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

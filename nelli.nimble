@@ -1161,5 +1161,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bs_addrglobal",
             "tsymex_rfc0005_s8bs_byref",
             "tsymex_rfc0005_s8bs_iterparams",
-            "tsymex_rfc0005_s8bs_byvalue"]:
+            "tsymex_rfc0005_s8bs_byvalue",
+            # RFC-0005 S8bu -- S8bs's remainder: the signed bv2int bridge's
+            # inverse facts and a finite default queryRLimit (no walk runs
+            # forever); walker 225.
+            "tsymex_rfc0005_s8bu_term"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

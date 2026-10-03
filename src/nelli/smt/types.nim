@@ -2987,10 +2987,25 @@ type
     ## two equally-sound modeling strategies rather than gating an exhaustion
     ## decline, so `0` means the SEMANTIC OPPOSITE of unlimited: "always
     ## axiomatize, never inline."
-    queryRLimit*: uint
-      ## Z3 logical step count bound. `0` (default) is unbounded.
+    queryRLimit*: uint = 20_000_000
+      ## Z3 logical step count bound. `0` is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
+      ##
+      ## RFC-0005 S8bu: the default is `20_000_000`, no longer `0`. Every
+      ## other solve the walker issues was already bounded under the
+      ## defaults (the loop and path feasibility checks, the tainted
+      ## target-hit solve, the concrete-branch solves, and every query
+      ## naming a string / seq through `seqQueryRLimit`); a target-hit
+      ## query over plain arithmetic was not, and one Z3 does not decide
+      ## (S8bs's int-field read across the signed `bv2int` bridge) left the
+      ## walk running forever. Now such a query runs out of the budget and
+      ## is `sxUnknown` with `beSolverUndef` naming it: a decline, never a
+      ## hang. `20M` is the bound `seqQueryRLimit`, the tainted target-hit
+      ## solve and `concreteBranchRLimit` already use by default
+      ## (`defaultConcreteBranchRLimit`), so no query that finished under
+      ## one of them is cut shorter. An explicit `0` still means unbounded
+      ## (this type's `0 = unlimited` contract, RFC-0010).
     maxSeqLen*: int = 128
       ## RFC-0005 S8k. The longest string / seq (in elements -- bytes for a
       ## `string`) any solver query may choose for one term. Default `128`.

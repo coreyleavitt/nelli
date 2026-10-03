@@ -1158,5 +1158,13 @@ task test, "Run the test suite":
             # element's byte test in character form; B1-1's tight unit
             # ceiling. Walker 209->214.
             "tsymex_rfc0005_s8bm_stability",
-            "tsymex_rfc0005_s8bk_argtiming"]:
+            "tsymex_rfc0005_s8bk_argtiming",
+            # RFC-0005 S8bg -- S8bd's remainder: a by-reference lvalue
+            # reached through a representation-preserving conversion
+            # (distinct, range to base) is modelled through; one reached
+            # through a cast gets a scoped decline naming the cast instead
+            # of a crash; the distinct-bijectivity hint walks the whole
+            # distinct chain before judging non-decidability. Walker
+            # 209->218.
+            "tsymex_rfc0005_s8bg_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -1904,6 +1904,17 @@ proc runReplayBounded*(body: proc () {.closure, gcsafe.};
     if timeoutMs <= 0:
       body()
       return true
+    # RFC-0005 batch 5: the other direction of `replayThreadMain`'s
+    # collection. A ref the calling thread holds may sit in ITS root list
+    # (a cyclic-capable object -- `ref object of RootObj` -- whose count
+    # dropped above zero here: a `var fb = FarmBox(f: Farm(..)); gFB = fb`
+    # left at a block's end). The replay's own final decrement of it
+    # (the SUT overwriting `gFB`) would unregister it from the replay
+    # thread's list instead (a SIGSEGV in `unregisterCycle`,
+    # `tsymex_rfc0005_s8bg_remainder` once S8bg landed on S8be). A
+    # collection here empties the calling thread's list first; the calling
+    # thread only polls until the replay ends.
+    when defined(gcOrc): GC_runOrc()
     let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
     job.body = body
     let th = cast[ptr Thread[ptr ReplayJob]](

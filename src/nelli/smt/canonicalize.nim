@@ -202,7 +202,7 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "217"
+const symexWalkerVersion* = "218"
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -341,6 +341,26 @@ const symexWalkerVersion* = "217"
   ## (`placeLateAddr`); an index check stays where it stands and a path on
   ## which a later call changed what it read declines
   ## (`feEvalOrderUnmodelled`). Provisional 212 (210, 211 held). 209 -> 212.
+  ##
+  ## RFC-0005 S8bg (2026-10-02) — S8bd's remainder. (1) `byRefSub` accepts
+  ## a representation-preserving conversion (`distinct` unwrap/rewrap,
+  ## `range` to base) wrapping a by-reference lvalue as a whole
+  ## (`int(b.m)`) -- modeled through, not declined; a `ref`/`ptr`
+  ## inheritance up/downcast is deliberately left declining (the heap model gives
+  ## every declared ref/ptr type its own Z3 sort, so substituting through
+  ## one is a sort mismatch at walk time, a safe `weInternalWalkerFault`
+  ## taint, not a working case). (2) A `var`/`addr` actual reached through
+  ## a `cast` (`cast[ptr T](p)[]`) gets its own scoped decline naming the
+  ## cast, in place of a crash the generic read machinery hit for it
+  ## (`lowerLeafInExpr`'s container-kind assert, given a declined cast's
+  ## dummy value). (3) `geDistinctBijectivitySkipped` walks the whole
+  ## `distinct` chain (`baseIsDecidable`, already recursive) before judging
+  ## non-decidability, instead of `isBijectivityBaseSym` on the immediate
+  ## base's own representative (a nested `svDistinct` for a distinct of a
+  ## distinct, never a bijectivity-primitive kind regardless of the real
+  ## base): a `seq[Km]` (`Km = distinct Meters`, `Meters = distinct int`)
+  ## no longer wrongly claims a non-decidable base. Provisional 218 (base
+  ## walker 209; 210-217 held by slices still running).
   ##
   ## RFC-0005 batch 3 (2026-10-02) — S8ax (on S8as), and S8ba, S8bd and
   ## S8bf (one chain on S8au) were built on the channel with provisional

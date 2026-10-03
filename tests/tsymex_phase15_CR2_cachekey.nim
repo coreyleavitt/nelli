@@ -990,7 +990,11 @@ suite "Phase 15 CR-2 — version bumps":
     ## byte test in character form). Provisional 214. 209->214.
     ## RFC-0005 S8bk (a by-address argument's address is taken at the
     ## call, after every later argument). 209->212 (210, 211 held).
-    check symexWalkerVersion == "217"
+    ## RFC-0005 S8bg (S8bd's remainder: by-reference through a
+    ## representation-preserving conversion, a scoped cast decline instead
+    ## of a crash, the distinct-chain-aware bijectivity hint). Provisional
+    ## 218 (210-217 held by slices still running). 209->218.
+    check symexWalkerVersion == "218"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -2712,6 +2712,17 @@ proc baseIsDecidable(base: IRType): bool =
   of itDistinct: baseIsDecidable(base.distinctBase)
   else: false
 
+proc realBaseKind(base: IRType): IRTypeKind =
+  ## RFC-0005 S8bg. `base`'s kind, walked through every `distinct` wrapper
+  ## to the first non-`itDistinct` kind: for `Km = distinct Meters`,
+  ## `Meters = distinct int` (so `Km`'s own `distinctBase` is `itDistinct`
+  ## itself), this is `itInt`, not `itDistinct` -- the kind the
+  ## `geDistinctBijectivitySkipped` hint names, and the one
+  ## `baseIsDecidable` actually judges.
+  case base.kind
+  of itDistinct: realBaseKind(base.distinctBase)
+  else: base.kind
+
 proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast =
   ## Fresh named const of a (possibly uninterpreted) sort.
   let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, name.cstring)
@@ -2999,14 +3010,27 @@ proc ensureDistinctSort(ty: IRType): DistinctSortEntry =
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
       syncDistinctSortEntry(name, dentry)
-      let bijHint = SymexErrorInfo(
-        kind: geDistinctBijectivitySkipped, severity: sevHint,
-        msg: "bijectivity axiom skipped for distinct `" & name &
-             "` over non-decidable base " & $ty.distinctBase.kind &
-             " (FP/String): the distinct sort is modeled without the " &
-             "inject/eject round-trip guarantee")
-      distinctBijectivityHints.add bijHint      # threadvar: fallback
-      syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
+      # RFC-0005 S8bg: this branch is also reached for a distinct-of-a-
+      # distinct whose REAL base is decidable (`Km = distinct Meters`,
+      # `Meters = distinct int`): `ty.distinctBase` is itself `itDistinct`,
+      # so `isBijectivityBaseSym(baseRep)` above is false (`baseRep` is a
+      # nested `svDistinct`, not a primitive) even though
+      # `baseIsDecidable` (which recurses) says the chain's true base is
+      # fine. No axiom is asserted either way here (the ground eject pin
+      # above needs a primitive `baseRep`, which a nested distinct is
+      # not -- a precision gap, not fixed by this hint), but the hint
+      # claiming a non-decidable base is wrong for that case and is
+      # skipped; it still fires for a genuinely non-decidable real base
+      # (FP/string) and for a composite one (S8at).
+      if not baseIsDecidable(ty.distinctBase):
+        let bijHint = SymexErrorInfo(
+          kind: geDistinctBijectivitySkipped, severity: sevHint,
+          msg: "bijectivity axiom skipped for distinct `" & name &
+               "` over non-decidable base " & $realBaseKind(ty.distinctBase) &
+               " (FP/String): the distinct sort is modeled without the " &
+               "inject/eject round-trip guarantee")
+        distinctBijectivityHints.add bijHint      # threadvar: fallback
+        syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
   currentDistinctSorts[name]
 
 proc allocDistinctSym(ty: IRType, baseName: string,

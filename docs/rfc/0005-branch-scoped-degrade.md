@@ -402,6 +402,11 @@ title = "Address-of-argument timing: var/by-ref actuals whose base ref is reboun
 state = "done"
 
 [[slice]]
+id = "S8bg"
+title = "S8bd's remainder: pass-by-reference through a representation-preserving conversion or a cast; the distinct-bijectivity hint walks the whole chain"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -10497,8 +10502,8 @@ has no suite: its row is pending.)
   it with `pi = addr q.x`. The heap keeps `ptr int` cells apart from
   `Box.x` fields, with or without a call (`setBoth(pi[], q.x)` is the same
   `sxUnsat`, at the base by write-back and now by reference).
-- **SOUNDNESS (to confirm): an inheritance ref conversion is
-  ill-sorted.** `Base(d) == b` (`d: Derived`, `b: Base`) is
+- **PRECISION (confirmed, RFC-0005 S8bg): an inheritance ref conversion is
+  ill-sorted, safely.** `Base(d) == b` (`d: Derived`, `b: Base`) is
   `weInternalWalkerFault` ("Z3 sort mismatch at equality"), and with
   `setBoth(Base(d).x, b.x)` the dead label reports `sxRaised` beside the
   faults. Identical at the base.
@@ -11128,3 +11133,183 @@ with no raise). A call in the lvalue is evaluated where it stands, once:
   f(gP.x, moveP())` (Nim: `old.x=10 gP.x=105`, as the direct call) has no
   `var` write-back on this base; S8bh adds it, and its integration takes
   these forms.
+  faults. Identical at the base. S8bg re-confirmed this directly: every
+  declared `ref`/`ptr` type gets its own Z3 sort (inheritance
+  notwithstanding), so a conversion that substitutes one type's term for
+  another's anywhere a sort is expected -- `byRefSub`'s substitution, or
+  (as here) `parseExpr`'s own `nnkConv` arm reading the conversion as a
+  plain value -- is an ill-sorted term, caught and tainted
+  (`weInternalWalkerFault`, S8m) rather than asserted: both labels above
+  come back `sxRaised` with identical fault sets, never a wrong `sxSat`/
+  `sxUnsat`. Not a soundness bug (no verdict is wrong; the path abstains),
+  but not a working case either -- `byRefSub`'s own conversion-transparency
+  (S8bg item 1) deliberately excludes a `ref`/`ptr` conversion for exactly
+  this reason (`convReprPreserving`'s doc comment). Fixing it for real
+  needs one shared Z3 sort per inheritance family, not a per-declared-type
+  one -- out of scope here.
+- **PRECISION: a ref reached through a pointer dereference, with a
+  trailing field.** `pb[].x` still cannot be passed by reference (S8bd's
+  reported item; S8bg did not touch it), so a pair holding it declines.
+  (S8bg's own "known heap cell" pin is the narrower, already-working case
+  with NO trailing field -- `pb[]` itself, `pb: ptr int`, passed on as a
+  whole `var` actual -- which was always the bare-symbol-after-deref shape
+  `byRefSub`'s dispatch already names; see S8bg's note below.)
+
+**As landed (S8bg, walker 218) — S8bd's remainder.** Suite
+`tsymex_rfc0005_s8bg_remainder` (13 tests; c on Z3 5.1, cpp 5.1; the
+binary runs in a few seconds). The base is the S8bf/S11 tip.
+
+- *Item 1, conversion.* `byRefSub` now strips a representation-preserving
+  conversion (`distinct` unwrap/rewrap, `range` to base) wrapping a
+  by-reference lvalue as a whole (`int(b.m)`) before its field/deref walk,
+  via `convReprPreserving` (`dsl_parser.nim`): same type, or the same
+  `reprBase` (a new helper peeling every `distinct` and `range` wrapper to
+  its representation base, recursively -- a `distinct` of a `distinct`
+  included). The conversion cannot sit any deeper in the by-reference
+  chain (at the operand of the chain's mandatory deref): to be
+  dereferenced at all there, it would have to convert TO a ref/ptr, which
+  only an inheritance up/downcast does, and that one is deliberately
+  EXCLUDED from `convReprPreserving` (see the PRECISION note above) -- so
+  there is no shape for a non-whole-lvalue conversion to reach that
+  position, and no branch was added for it. Pinned: a `distinct` unwrap
+  (`cvd`), a `range` to its base (`cvr`, with the written value ALSO typed
+  as the range to avoid a confound: an unconstrained wider actual
+  legitimately raises `RangeDefect` once the conversion is faithfully
+  modelled, which is correct Nim semantics, not a bug), and the same
+  `distinct` unwrap through a deeper ref chain (`cvm`, `fb.f.m`) as a
+  regression pin on `heapSteps` bookkeeping. Each has a dead label
+  (`sxUnsat`) and a reachable twin (`sxSat`, witness replays
+  `roConfirmed`).
+- *Item 2, cast.* `lvalueRoot`/`byRefRoot` have no case for `nnkCast`, so a
+  `var`/`addr` actual reached through one (`cast[ptr T](addr p.x)[]`) used
+  to fall through to `parseExpr`'s unconditional plain-value read, which
+  crashed (`weInternalWalkerFault: AssertionDefect` out of
+  `lowerLeafInExpr`'s container-kind assert, given the declined cast's
+  dummy placeholder reaching a deref it did not expect). A new
+  `lvalueCastBlocks` (mirrors `lvalueRoot`'s own traversal, returning true
+  the moment it hits an `nnkCast`) is checked in `userCallStmt` before
+  either the by-reference attempt or the plain read runs; when it fires,
+  a scoped `feUnsupportedOp` decline names the cast directly, and a zero
+  value for the formal's type stands in, instead of the crash. Pinned: a
+  cast-reached actual on both a reachable and a dead label, each
+  decidable (`sxUnknown`) with the cast named in the message, not a
+  crash.
+- *Item 3, the bijectivity hint.* `geDistinctBijectivitySkipped` used to
+  fire whenever `isBijectivityBaseSym` on the distinct's IMMEDIATE base's
+  own representative value failed to recognise a bijectivity-primitive
+  `SymVal` kind (`svBool`/`svInt`/`svBV8`/`16`/`32`/`64`) -- which a nested
+  distinct's representative (`svDistinct`) never is, regardless of what
+  its OWN base turns out to be. `baseIsDecidable` already recurses
+  correctly through nested distincts; the hint now gates on it alone (a
+  new `realBaseKind` walks the same chain to report the real leaf kind in
+  the message, instead of the generic immediate wrapper kind). So
+  `seq[Km]` (`Km = distinct Meters`, `Meters = distinct int`) no longer
+  wrongly claims a non-decidable base. The underlying ground-eject-pin
+  axiom logic (gated on `isBijectivityBaseSym` too) is UNCHANGED -- a
+  nested distinct still does not get the round-trip axiom asserted, only
+  the wrong HINT claiming why is gone; a genuinely non-decidable real base
+  (FP/string) still carries it, correctly. Pinned: one level of distinct
+  (no hint), two levels over a decidable base (no hint, was the bug),
+  and a genuinely non-decidable base (hint fires, names the real leaf
+  kind). S8bd (2)'s own existing `dParamNested` test (`Km`, pinned before
+  this slice with the EXPECTATION of a hint that was actually wrong) is
+  updated in place to assert zero errors now, with its comment corrected.
+- *Item 4, the "known heap cell" shape.* A `ptr T` formal bound directly
+  to `addr lv` (S8an's own mechanism) and dereferenced with NO trailing
+  field, then passed on as a whole `var`/`addr` actual to a further
+  callee, was never `byRefSub`'s gap: the formal is a bare symbol after
+  the deref, the shape its existing dispatch (`t[0].kind == nnkSym`)
+  already names. No code change; pinned here as the regression S8bd's own
+  note flagged ("by the code path; not pinned"). The STILL-open gap this
+  is not to be confused with -- a trailing field after the deref,
+  `pb[].x` -- is unchanged and remains the PRECISION item above.
+- *Scope decisions, made and then undone.* An earlier pass of item 1
+  additionally treated a `ref`/`ptr` inheritance up/downcast as
+  representation-preserving (`objectInherits`, as `typeReachesCell`
+  already treats it for aliasing). Testing it
+  (`setXG2(Animal(d).x, k)`) showed `byRefSub` successfully took the
+  by-reference path, then hit the SAME Z3 sort mismatch the PRECISION
+  note above describes (two distinct Ref sorts for `Animal` and `Dog`) --
+  proven, by simplifying away the conversion, to originate OUTSIDE
+  `byRefSub` entirely, in `parseExpr`'s own `nnkConv` handling for
+  ref-to-ref conversions (a pre-existing gap, independent of this slice).
+  The inheritance branch was removed from `convReprPreserving` again,
+  restoring the original clean decline for it (confirmed: `cvB`/`cvB_dead`
+  both come back `sxRaised` with the conversion's own global-aliasing
+  decline plus three tainted `weInternalWalkerFault`s, identical on both
+  labels -- a safe abstention, not a wrong verdict).
+
+*Suites* (`ok/failed`, c on Z3 5.1 AND Z3 4.13.4 -- identical pass counts
+on both, via the session scratchpad's `dt413.sh`, the symex-mingw leg's
+own Z3 build, run against this worktree; cpp 5.1 for the new suite only,
+once): `s8bg_remainder` 13/0 (cpp 13/0, 4.13.4 13/0), `s8bd_remainder`
+23/0 (the `dParamNested` comment/assert update included; 4.13.4 23/0),
+`s8ax_remainder` 52/0 (4.13.4 52/0), `s8ba_remainder` 32/0 (4.13.4 32/0),
+`s8au_remainder` 35/0 (4.13.4 35/0), `s8an_remainder` 25/0 (4.13.4 25/0),
+`s8i_models` 39/0 (4.13.4 39/0), `phase15_CR2_cachekey` (218) 6/0 (4.13.4
+6/0), `phase15_g4_distinct_sort` 4/0 (4.13.4 4/0), `phase15_g5_distinct_borrow`
+3/0 (4.13.4 3/0), `h_stepC_heapidentity` 10/0 (4.13.4 10/0). No divergence
+between Z3 versions anywhere in this set.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: an `addr`-of-local cell aliased through a global `ptr`
+  gives swapped verdicts across a frame boundary.** Minimal reproducer:
+
+  ```nim
+  type Box = object
+    x: int
+  var gpb: ptr Box
+
+  proc setXG(v: var int, k: int) =
+    v = k
+    gpb[].x = 5
+
+  proc sutAddrCellByRef(k: int) =
+    var b: Box = Box(x: 0)
+    let pb = addr b
+    gpb = pb
+    setXG(pb[].x, k)
+    if b.x == 5 and gpb[].x == 5 and k == 1: symexTarget("ac")
+    if b.x == k and k != 5: symexTarget("ac_dead")
+  ```
+
+  Native truth: real Nim passes `var` parameters by address, so the
+  callee's `v = k` and `gpb[].x = 5` both land on `b.x` in program order
+  (`gpb` aliases `b` through `pb`), leaving `b.x == 5` after the call
+  regardless of `k` -- target `"ac"` (`b.x == 5 and gpb[].x == 5 and
+  k == 1`) is REACHABLE, and `"ac_dead"` (`b.x == k and k != 5`) is DEAD.
+  Engine verdict: the OPPOSITE of native truth on both --
+  `symexFind(sutAddrCellByRef, tLabel("ac"))` returns `sxUnsat` (wrongly
+  refuting a reachable target) and `tLabel("ac_dead")` returns `sxSat`
+  (wrongly finding a dead target reachable), each with only
+  `hePtrFamily`'s hint (`sevHint`, "witness involves unmanaged ptr") and
+  no decline -- a silent wrong verdict, not a safe abstention. The engine
+  falls back to copy-in/copy-out for this `var` actual because S8ax's
+  address-cell tracking (`addrCellLocal`) syncs `pb`'s target to `b`'s
+  cell only within `b`'s OWNING frame, so `varActualMayAlias`/
+  `outerReachesCell`, asked from INSIDE `setXG`'s frame whether `pb[].x`
+  is reachable through the global `gpb`, do not recognise the two as one
+  cell -- the alias is real, but invisible across the frame boundary this
+  way, and `byRefSub` is never tried; copy-in/copy-out then lets the
+  callee's final write to `v` (`k`) clobber, on return, the write `gpb[].x
+  = 5` already made to the same memory during the call, which is not what
+  real by-address `var` passing does.
+
+  Reproduced identically on this branch's own base (pre-S8bg) and
+  unchanged after it (S8bg touches conversions, casts and the distinct
+  hint, none of this mechanism); also reproduced, byte-for-byte identical
+  verdicts and errors, on `origin/rfc-0005-batch4` at `8165899` (checked
+  directly, in an isolated worktree pinned to that sha, not the live
+  checkout) -- batch 4's S8be reworked address cells but did not touch
+  this cross-frame gap: `ac: sxUnsat [hePtrFamily/sevHint: witness
+  involves unmanaged ptr]`, `ac_dead: sxSat [hePtrFamily/sevHint: witness
+  involves unmanaged ptr]`, on both. The mechanism is S8ax's
+  address-cell model and `outerReachesCell`'s cell typing, not anything
+  S8bg or S8be touched. Out of scope for S8bg; reported for a future
+  slice on S8ax's remainder.
+- **PRECISION (confirmed, RFC-0005 S8bg): an inheritance ref conversion is
+  ill-sorted, safely.** See the note of the same name just above S8bg's
+  own entry -- moved there since it sits directly beside S8bg's own
+  conversion work and the scope decision that re-found it.
+- **PRECISION: a ref reached through a pointer dereference, with a
+  trailing field (`pb[].x`).** See the note of the same name just above.

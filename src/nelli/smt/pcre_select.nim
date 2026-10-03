@@ -81,8 +81,11 @@
 import std/[tables, hashes, sets, algorithm, sequtils]
 import ./pcre_syntax
 import ./pcre_startopt
+import ./pcre_code
+import ./pcre_jit
 
 export pcre_startopt.StartOpt
+export pcre_jit.PcreEngine
 
 # ---- symbols ----------------------------------------------------------------
 
@@ -238,6 +241,10 @@ type
     noStartOpt*: bool
     so*: StartOpt
     limitMatch*, limitRecursion*: int64
+    engine*: PcreEngine
+      ## RFC-0005 S8bt: the engine of an unanchored call (`buildNfa`)
+    jit*: JitScan
+      ## RFC-0005 S8bt: peJit837's prefix scan, when it applies
     ok*: bool
     why*: string
 
@@ -520,6 +527,12 @@ proc classifySkipNames(n: var Nfa) =
         work.add (st.out2, p2)
       else:
         work.add (st.out1, p2)
+  if n.engine == peJit837:
+    # RFC-0005 S8bt: the JIT looks the name up on the current path
+    # (`do_search_mark`) and ignores a SKIP:NAME it does not find there,
+    # in place: no re-run, so no mode and nothing declined.
+    n.hasSkip = true
+    return
   var found, never = false
   for name in 0 ..< k:
     if seenMode[name] == {true, false}:
@@ -547,11 +560,13 @@ proc classifySkipNames(n: var Nfa) =
     n.why = "a (*SKIP:NAME) with no (*MARK:NAME) beside one with a mark " &
             "(PCRE's re-run for the first ignores the second)"
 
-proc buildNfa*(pr: PcreParse): Nfa =
+proc buildNfa*(pr: PcreParse; engine = peInterp): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
-  ## declined construct (`why` says which).
+  ## declined construct (`why` says which). RFC-0005 S8bt: `engine` is the
+  ## one an unanchored call runs on (anchored calls: always `peInterp`).
   var b = Build()
+  b.n.engine = engine
   b.n.groups = pr.groups
   b.n.nl = pr.nl
   b.n.utf = pr.utf
@@ -597,6 +612,9 @@ proc buildNfa*(pr: PcreParse): Nfa =
     result.filter = fkBits
     result.bits = so.bits
   else: result.filter = fkNone
+  if engine == peJit837 and not (pr.noStartOpt or so.anchored):
+    # RFC-0005 S8bt: the JIT's own scan comes first.
+    result.jit = jitScan(compileCode(pr), pr.utf)
 
 proc filterBytes*(n: Nfa): set[char] =
   ## RFC-0005 S8bj. The bytes the start-of-match scan stops at (`fkFirst`,
@@ -787,7 +805,13 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
                             cond: e.cond))
           go(s.out1)
         of vbSkipName:
-          if n.skipMode[s.name] == snFound:
+          if n.engine == peJit837:
+            # RFC-0005 S8bt: the latest MARK of the name on this path, or
+            # no effect.
+            if e.marks[s.name] >= 0:
+              emitAfter(Item[T](kind: ikTerm, term: tmSkip,
+                                tag: e.marks[s.name], cond: e.cond))
+          elif n.skipMode[s.name] == snFound:
             emitAfter(Item[T](kind: ikTerm, term: tmSkip,
                               tag: e.marks[s.name], cond: e.cond))
           elif sc.anchored or (sc.atStart and sc.crlfElig):
@@ -2368,6 +2392,12 @@ proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
   let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
   let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
+  if n.engine == peJit837:
+    # RFC-0005 S8bt: the JIT ignores LIMIT_RECURSION, and counts
+    # LIMIT_MATCH down from the limit, failing when the count reaches 0:
+    # from 0 it never does (probed: `(*LIMIT_MATCH=0)a` matches "a").
+    if m and n.limitMatch > 0: return (leUnknown, 0)
+    return (leNone, 0)
   if m and n.limitMatch == 0: return (leZero, pcreErrMatchLimit)
   if m: return (leUnknown, 0)
   if r and n.limitRecursion == 0: return (leZero, pcreErrRecursionLimit)
@@ -2379,14 +2409,18 @@ proc otherCaseOf*(c: char): char =
   elif c in {'A'..'Z'}: char(ord(c) + 32)
   else: c
 
-proc attemptMade*(n: Nfa; s: string; x: int; firstSet: bool): bool =
+proc attemptMade*(n: Nfa; s: string; x: int; firstSet: bool;
+                  jit = false): bool =
   ## RFC-0005 S8bj. pcre_exec.c's minimum-length and required-character
   ## checks at a start `x` the scan stopped at (`firstSet`: the first
   ## character was used): false when they end the search before `match()`.
+  ## RFC-0005 S8bt: the JIT (`jit`) searches for the required character
+  ## also when exactly REQ_BYTE_MAX bytes remain.
   if n.noStartOpt: return true
   let so = n.so
   if so.minLength > 0 and s.len - x < so.minLength: return false
-  if so.reqChar >= 0 and s.len - x < reqByteMax:
+  if so.reqChar >= 0 and (s.len - x < reqByteMax or
+                          (jit and s.len - x == reqByteMax)):
     let r1 = char(so.reqChar)
     let r2 = (if so.reqCaseless: otherCaseOf(r1) else: r1)
     var p = x + (if firstSet: 1 else: 0)
@@ -2410,30 +2444,43 @@ proc pcreExec*(n: Nfa; s: string; start: int; anchoredCall: bool;
     if utf8Error(s) >= 0: return (pcreErrBadUtf8, 0, 0)
     if start > 0 and start < s.len and (ord(s[start]) and 0xC0) == 0x80:
       return (pcreErrBadUtf8Offset, 0, 0)
+  # RFC-0005 S8bt: an anchored call runs on the interpreter (its
+  # automaton is `buildNfa(.., peInterp)`'s).
+  doAssert not (anchoredCall and n.engine != peInterp),
+    "pcreExec: an anchored call on a JIT automaton"
+  let jit = n.engine == peJit837
   let (le, code) = limitEffect(n)
   doAssert le != leUnknown, "pcreExec: a limit whose effect is not computed"
   let anchored = anchoredCall or n.anchoredPat
   let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
   var x = start
   while true:
-    if filt != fkNone:
+    if jit and n.jit.on and not anchored:
+      # RFC-0005 S8bt: the JIT's prefix scan.
+      x = n.jit.scanFrom(s, x)
+    elif filt != fkNone:
       while not created(n, s, x, start): inc x
-    if not attemptMade(n, s, x, filt == fkFirst): return (-1, 0, 0)
+    if not attemptMade(n, s, x, filt == fkFirst, jit): return (-1, 0, 0)
     if le == leZero: return (code, 0, 0)
     let r = runAttemptT[int8](n, s, x, start, anchored, ne and x == start,
                               0'i8, noSave)
     var next: int
+    var landed = false
     case r.kind
     of okMatch: return (1, x, r.pos)
     of okCommit: return (-1, 0, 0)
     of okSkip:
-      next = (if r.pos > x: r.pos else: n.nextChar(s, x))
+      landed = r.pos > x
+      next = (if landed: r.pos else: n.nextChar(s, x))
     else:
       next = n.nextChar(s, x)
     if anchored or next > s.len: return (-1, 0, 0)
     x = next
+    # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF
+    # start skip (pcre_jit_compile.c's `reset_match` jumps past the
+    # bumpalong's newline check).
     if x > start and s[x - 1] == '\r' and x < s.len and s[x] == '\n' and
-       n.skipActive:
+       n.skipActive and not (jit and landed):
       inc x
 
 proc pcreReplace*(n: Nfa; s, by: string): string =

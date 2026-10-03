@@ -1,0 +1,4 @@
+backend=c jobs=4 timeout=900s
+pass=574 fail=0 (of which timeout-killed=0) skip=0 total=574
+unregistered=0 missing=0 stale_skiplist=0  (see /home/corey/tmp-usage/work/b4-gate.log.drift)
+warn_tests=542 warn_total=10902  (see /home/corey/tmp-usage/work/b4-gate.log.warnings) -- trend only, never zero; the gate is scripts/sweep-diff.sh's warnings delta against a baseline, not this total

@@ -213,8 +213,13 @@ const symexWalkerVersion* = "219"
   ## thread's first walk searches as its later ones do (Z3 5.1: a step-3
   ## search took 482,126 units in the first walk and 85,882 in the
   ## second). Both change which search decides a query under a budget.
-  ## Provisional 219 (215 to 218 are held by slices still running).
-  ## 214 -> 219.
+  ## And a string's regex memberships, one of them negated, are decided as
+  ## one membership of the intersection with the complement
+  ## (`mergeMemberships`), with `contains` / `match` from a literal 0
+  ## reading the string itself: S8ay's unbounded `s.endsWith(re"b+") and
+  ## not s.contains(re"b")` was `sxUnknown` on Z3 4.13.4 (11.2M units) and
+  ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
+  ## still running). 214 -> 219.
   ##
   ## RFC-0005 S8bm (2026-10-02) — step 1's search no longer depends on the
   ## walk's context. Z3's search on a walker query followed what the

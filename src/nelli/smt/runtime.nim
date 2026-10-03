@@ -10979,9 +10979,25 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
         result.add guarded(g, v.v == ite(f.n >= zero, f.n, minusOne))
 
 var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
-                                         eq: int]
+                                         eq, notK: int]
   ## RFC-0005 S8y. The decl kinds `dropImpliedByteDomains` matches, read off
   ## terms built once per thread (as `seqCapKinds`: by kind, never by name).
+  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`.
+
+proc ensureByteDomainKinds() =
+  if byteDomainKinds.ready: return
+  let ctx = probeContext()   # RFC-0005 S8bp
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let s = mkStringVar(ctx, "__s8y_kind_probe_str")
+  let b = mkBoolVar(ctx, "__s8y_kind_probe_b")
+  byteDomainKinds = (ready: true,
+    concat: kindOf((s & mkStringVar(ctx, "__s8y_kind_probe_t")).raw),
+    extract: kindOf(substr(s, mkIntVar(ctx, "__s8y_kind_probe_i"),
+                           mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
+    andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
+    eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw),
+    notK: kindOf((not b).raw))
 
 proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -11002,18 +11018,7 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## each such membership on its own. In `tsymex_r6_n36_raise_degrade`'s
   ## four-pairs-and-an-empty-key query that was the difference between
   ## running out of 10M units and SAT in 2.5M (fresh context, Z3 5.1).
-  if not byteDomainKinds.ready:
-    let ctx = probeContext()   # RFC-0005 S8bp
-    proc kindOf(a: RawZ3Ast): int =
-      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
-    let s = mkStringVar(ctx, "__s8y_kind_probe_str")
-    let b = mkBoolVar(ctx, "__s8y_kind_probe_b")
-    byteDomainKinds = (ready: true,
-      concat: kindOf((s & mkStringVar(ctx, "__s8y_kind_probe_t")).raw),
-      extract: kindOf(substr(s, mkIntVar(ctx, "__s8y_kind_probe_i"),
-                             mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
-      andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
-      eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw))
+  ensureByteDomainKinds()
   let bk = byteDomainKinds
   let kinds = seqCapKinds()
   proc kindOf(a: Z3AnyAst): int =
@@ -11092,6 +11097,70 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
         break
   for i, r in roots:
     if i notin dropRoot: result.add r
+
+proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3Bool] =
+  ## RFC-0005 S8bp. `roots` with the regex memberships of one string term
+  ## `x` among the roots' top-level conjuncts -- two or more, one of them
+  ## negated: `x in R1`, `not (x in R2)`, .. -- replaced by the one
+  ## membership `x in (R1 & comp(R2) & ..)`. `not (x in R)` is `x in
+  ## comp(R)` and the conjuncts are removed from their roots, so the
+  ## result has the same models. A byte-domain constraint `x in
+  ## (\x00..\xff)*` stays as it is, as do roots holding no such group.
+  ##
+  ## Why: Z3 decides each membership on its own. S8ay's `s.endsWith(re"b+")
+  ## and not s.contains(re"b")` (empty: a string ending in `b` contains
+  ## one) ran out of 20M units with no length bound on Z3 4.13.4, and took
+  ## 6.7M to refute under the length cap, with the cap in step 2's core
+  ## (`sxUnknown`); as one membership of the intersection it is UNSAT in
+  ## 1,392 units (a fresh context; 5.1 as well).
+  ensureByteDomainKinds()
+  let bk = byteDomainKinds
+  let kinds = seqCapKinds()
+  proc kindOf(a: Z3AnyAst): int =
+    if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
+    else: -1
+  let byteReId = astId(ctx, star(range(mkString(ctx, "\x00"),
+                                       mkString(ctx, "\xff"))).raw)
+  type Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
+  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
+  proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
+    ## `r`'s top-level conjuncts, in order.
+    if kindOf(r) == bk.andK:
+      for a in unpackApp(r).args: result.add conjuncts(a)
+    else: result.add r
+  for i, r in roots:
+    for t in conjuncts(toAnyAst(r)):
+      let neg = kindOf(t) == bk.notK
+      let m = if neg: unpackApp(t).args[0] else: t
+      if kindOf(m) != kinds.inRe: continue
+      let args = unpackApp(m).args
+      if not neg and astId(ctx, args[1].raw) == byteReId: continue
+      groups.mgetOrPut(astId(ctx, args[0].raw), (x: args[0], lits: @[])).lits.add(
+        (root: i, id: astId(ctx, t.raw), re: args[1], neg: neg))
+  var merged: seq[Z3Bool]
+  var gone, touched: HashSet[int]
+  for g in groups.values:
+    var anyNeg = false
+    for l in g.lits: anyNeg = anyNeg or l.neg
+    if g.lits.len < 2 or not anyNeg: continue
+    var res = newSeq[RawZ3Ast](g.lits.len)
+    for i, l in g.lits:
+      res[i] = if l.neg: ctx.checkErr Z3_mk_re_complement(ctx.raw, l.re.raw)
+               else: l.re.raw
+      gone.incl l.id
+      touched.incl l.root
+    let inter = ctx.checkErr Z3_mk_re_intersect(ctx.raw, cuint(res.len),
+      cast[ptr UncheckedArray[RawZ3Ast]](res[0].addr))
+    merged.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_seq_in_re(ctx.raw,
+                                                              g.x.raw, inter))
+  if merged.len == 0: return @roots
+  for i, r in roots:
+    if i notin touched: result.add r
+    else:
+      for t in conjuncts(toAnyAst(r)):
+        if astId(ctx, t.raw) notin gone: result.add wrap[Z3Bool](ctx, t.raw)
+  result.add merged
 
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
@@ -11595,7 +11664,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       r
     else:
       check
-  let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
+  # RFC-0005 S8bp: and with a string's regex memberships, one of them
+  # negated, as one (`mergeMemberships`; the same models).
+  let rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
+                                      bvOffsetLinks(ctx, query))
   template plain(): untyped =
     let s = ownContextSolver(ctx, rootsIn, rlimit)
     let r = counted("plain", ownContextCheck(s))

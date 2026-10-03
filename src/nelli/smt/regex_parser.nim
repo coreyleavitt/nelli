@@ -317,15 +317,24 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
               elif nb.len == 1: nb[0] else: union(nb))
   let blRe = (if bl.len == 0: mkRegexEmpty[Z3String]()
               elif bl.len == 1: bl[0] else: union(bl))
+  # RFC-0005 S8bp: from a literal 0 (`contains(s, re)` and `match(s, re)`
+  # without a start), the subject is `s` itself and the start is in range,
+  # so neither the `str.substr` nor the range test is built. The query
+  # then reads `s`'s own membership, which `checkCapped` merges with the
+  # others on `s` (`mergeMemberships`).
+  let from0 = isNumeralAst(start.ctx, start.raw) and
+              getNumeralString(start) == "0"
   let bad = (start < mkInt(0)) or (start > lenS)
-  let u = substr(s, start, lenS - start)
+  let u = if from0: s else: substr(s, start, lenS - start)
   let st0 = start == mkInt(0)
   proc inNb(x: Z3String): Z3Bool =
     (if nb.len > 0: matches(x, nbRe) else: mkBool(false))
   proc inBl(x: Z3String): Z3Bool =
     (if bl.len > 0: matches(x, blRe) else: mkBool(false))
-  let occurs = (if nb.len > 0: matches(u, concat(star(anyByte), nbRe))
-                else: mkBool(false)) or (st0 and inBl(u))
+  var occ: seq[Z3Bool]
+  if nb.len > 0: occ.add matches(u, concat(star(anyByte), nbRe))
+  if bl.len > 0: occ.add (if from0: inBl(u) else: st0 and inBl(u))
+  let occurs = orAll(occ)
   var res = RxResult(outcome: roValue)
   proc leftmost(res: var RxResult): Z3Int =
     # The leftmost occurrence offset `q` in `u` (when `occurs`): a match
@@ -351,11 +360,13 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     q
   case sp.entry
   of "match":
-    res.b = bad or inNb(u) or (st0 and inBl(u))
+    res.b = if from0: orAll((if nb.len > 0: @[inNb(u)] else: @[]) &
+                            (if bl.len > 0: @[inBl(u)] else: @[]))
+            else: bad or inNb(u) or (st0 and inBl(u))
   of "startsWith":
     res.b = inNb(s) or inBl(s)
   of "contains":
-    res.b = (not bad) and occurs
+    res.b = if from0: occurs else: (not bad) and occurs
   of "find", "findBoundsFirst":
     let q = leftmost(res)
     res.i = ite(bad, mkInt(-24), ite(occurs, start + q, mkInt(-1)))

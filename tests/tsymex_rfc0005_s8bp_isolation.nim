@@ -12,8 +12,14 @@
 ##   (2) the per-thread kind probes (`seqCapKinds`, `byteDomainKinds`,
 ##       `intDivDeclKinds`, `heapChainKinds`, `theoryFreeSimple`'s check)
 ##       build their terms in a context of their own, so a thread's first
-##       walk searches as its second does.
-import std/[unittest, strutils, sets]
+##       walk searches as its second does;
+##   (3) a regex membership and a negated one on the same string are
+##       decided as one membership of the intersection with the
+##       complement, and `contains(s, re)` from 0 reads `s` itself: S8ay's
+##       unbounded `s.endsWith(re"b+") and not s.contains(re"b")` was
+##       `sxUnknown` on Z3 4.13.4 (11.2M units, its cap named in step 2's
+##       core); it is UNSAT on both Z3 versions within the default budget.
+import std/[unittest, strutils, sets, re]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -40,6 +46,12 @@ proc plainNl(x, y: int) =
   ## No string: the `plain` query.
   if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117:
     symexTarget("s8bp_plain")
+
+proc endsWithRun(s: string) =
+  ## S8ay's pin with no length bound: a string ending in a run of `b`
+  ## contains a `b`.
+  if s.endsWith(re"b+") and not s.contains(re"b"):
+    symexTarget("s8bp_ends_run")
 
 const smallCap = SymexSettings(budget: ResourceBudget(maxSeqLen: 8))
 
@@ -146,6 +158,22 @@ suite "S8bp (2): a thread's first walk searches as its second does":
     # S8bp (Z3 5.1) the step-3 search of the target query took 482,126
     # units in the first walk and 85,882 in a later one.
     check walks[0].steps == walks[1].steps
+
+suite "S8bp (3): the unbounded endsWith run is decided on both Z3 versions":
+
+  test "s.endsWith(re\"b+\") and not s.contains(re\"b\"), unbounded":
+    symexQueryStats = @[]
+    let r = symexFind(endsWithRun, tLabel("s8bp_ends_run"))
+    var units = 0
+    for q in symexQueryStats: units += q.rlimitDelta
+    checkpoint $r.status & " units=" & $units & "\n" & symexQueryStatsSummary()
+    for e in r.errors: checkpoint $e.kind & ": " & e.msg
+    symexQueryStats = @[]
+    check r.status == sxUnsat
+    ## Before S8bp: `sxUnknown` on 4.13.4, 11,234,660 units (step 1
+    ## 6,693,540 and step 2 4,538,815, the cap in its core); UNSAT in
+    ## 5,758 on 5.1. Now 4,733 (4.13.4) and 4,785 (5.1): about 4x below.
+    check units <= 20_000
 
 suite "S8bp: walker version floor":
 

@@ -4806,8 +4806,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     if isUserCallee(n[0]):
       return parseRoutineCallExpr(n, n[0], preamble, ctx)
     # RFC-0005 S8bq (item 2): `+ - * <= < ==` on builtin sets (`>=`, `>`
-    # and `!=` reach here as `<=`, `<` and `not ==`).
-    if n.len == 3 and isBuiltinNamed(n[0], ["+", "-", "*", "<=", "<", "=="]) and
+    # and `!=` reach here as `<=`, `<` and `not ==`). Typed operators only:
+    # an untyped operand (the isolation entry point) has no type to read.
+    if n.len == 3 and n[0].kind == nnkSym and
+       isBuiltinNamed(n[0], ["+", "-", "*", "<=", "<", "=="]) and
        n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itBitSet:
       let setTy = classifyType(n[1]).ty
       let op = case n[0].strVal
@@ -6231,7 +6233,8 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       # conversion to `T` is parsed with it, so it is range-checked (probe:
       # `x in rs` for `rs: set[range[0..9]]` and `x = 20` raises
       # `RangeDefect`; only a literal's key is not checked).
-      if n[1].typeKind != ntyNone and classifyType(n[1]).ty.kind == itBitSet:
+      if calleeSym.kind == nnkSym and n[1].typeKind != ntyNone and
+         classifyType(n[1]).ty.kind == itBitSet:
         let setTy = classifyType(n[1]).ty
         let sIR = parseAtomicOperand(n[1], preamble, ctx)
         let mark = preamble.len

@@ -9205,6 +9205,13 @@ each, at most three at a time:
   Both were rerun green on 5.1. The 4.13.4 pass ran with the repins.
 - Nothing hung.
 - `tsymex_rfc0005_s8bq_remainder` was also run on cpp (Z3 5.1): 62 / 62.
+- The first symex-mingw run on the final head (37120766220) failed
+  `tsymex_phase1_dsl`, which is outside the grep list: an untyped
+  `x + y * 2` (the parser's isolation entry point) reached the set-operator
+  intercept, and `classifyType` aborted the compile ("node has no type").
+  The infix and `contains` intercepts now require a typed (symbol) operator.
+  `tsymex_phase1_dsl` (18 / 18) and the S8bq suite (62 / 62) were rerun on
+  both Z3 versions.
 
 Its run times, without compilation, on a shared host:
 

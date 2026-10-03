@@ -397,6 +397,11 @@ title = "addr-of-local cell aliased through a global ptr across a frame boundary
 state = "done"
 
 [[slice]]
+id = "S8bu"
+title = "S8bs's remainder: non-terminating Int-heap/BV-local UNSAT queries under unlimited queryRLimit, closure/proc-value calls and addr of a field of an address-taken local, openArray/var openArray/mitems, array index on an address-taken path, whole-address-taken by-value seq/string"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

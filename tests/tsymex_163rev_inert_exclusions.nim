@@ -141,12 +141,13 @@ suite "#163 review R14b -- inert-allowlist exclusions still degrade":
     # RFC-0005 S8ax item 5: the opaque call is summarised, not declined --
     # every cell its argument reaches holds fresh contents afterwards, and
     # a hit reached through one is replayed. Not inert: the havoc is named.
-    # The verdict stays sxUnknown for another reason: the `nil` literal
-    # argument is itself unsupported (CR-2a, `feUnsupportedExprKind`).
-    check r.status == sxUnknown
+    # RFC-0005 batch 6: S8bn models a typed `nil` literal (`ptr int`), so
+    # the raise after the call is decided -- `sxRaised`, as the oracle test
+    # shows Nim raising on `Magic`. (An untyped `pointer` nil, below, is
+    # still unsupported.)
+    check r.status == sxRaised
     check not classified
     check r.errors.anyIt(it.kind == feOpaqueEffectHavoc and "touchPtr" in it.msg)
-    check r.errors.anyIt(it.kind == feUnsupportedExprKind and "nil" in it.msg)
 
   test "a pointer argument is summarised, never treated as inert":
     let r = symexFind(withTouchPointer, tRaisedExn("ValueError"))

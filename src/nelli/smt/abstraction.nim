@@ -201,7 +201,9 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekVariantFieldSet,                      ## RFC-0005 S8s: likewise.
      iekNil,                                  ## Phase 15 R5: a ref/ptr nil literal
      iekZeroValue,                            ## RFC-0005 S8u: a container zero
-     iekSeqNew:                               ## RFC-0005 S8bc/S8bi: a seq, not an int
+     iekSeqNew,                               ## RFC-0005 S8bc/S8bi: a seq, not an int
+     iekBitSet:                               ## RFC-0005 S8bq: a builtin set,
+                                              ## or a bool / card of sets
     # Phase 15 Cluster S: string ops are not integer-interval shaped. (iekStrLen
     # / iekStrToInt do produce a Z3Int, but S1 does not yet model them; their
     # interval is unknown → none, keeping the var in BV.)
@@ -346,6 +348,8 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
     discard
   of iekSeqNew:        ## RFC-0005 S8bc, S8bi: the length references vars.
     collectVarRefs(e.snArg, into)
+  of iekBitSet:        ## RFC-0005 S8bq: so do the operands.
+    for a in e.bsArgs: collectVarRefs(a, into)
 
 type
   BanPolicy* = object

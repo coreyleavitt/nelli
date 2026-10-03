@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 98 marked lines (95 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 113 marked lines (110 runtime.nim + 3 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -287,13 +287,22 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## guard and length (2), and `collectRefPositions`' tree-element arm's
     ## guard and length (2). 91 + 6 = 97.
     ## Batch 6 (S8bl on batch 5): 95 + 6 = 101.
+    ##
+    ## RFC-0005 S8bq added nine lines that read `seqDataRaw` only to ask
+    ## whether its term mentions a `newSeqUninit` base: `uninitReadCond`
+    ## (three; reached from `isIndex` / `isSeqPop` / `hofElemAt` after their
+    ## placeholder guards), `noteUninitReturn` (five) and `svMentionsUninit`
+    ## (one). None lowers or binds the data: a placeholder's inert array
+    ## mentions no base, so each answers "no unwritten element" and the
+    ## caller's own placeholder handling is unchanged. 85 + 9 = 94.
+    ## Batch 6 (S8bq on S8bl on batch 5): 101 + 9 = 110.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 101
+    check runtimeCount == 110
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

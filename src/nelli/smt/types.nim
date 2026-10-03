@@ -87,6 +87,11 @@ type
                ## functions + (decidable-base-only) bijectivity axioms model the
                ## round-trip. Nesting (`distinct (distinct U)`) recurses through
                ## `distinctBase`.
+    itBitSet   ## RFC-0005 S8bq (item 2): Nim's builtin `set[T]` over a small
+               ## ordinal `T` (`bool`, `char`, an enum, an 8- or 16-bit int,
+               ## a range): one Z3 bit-vector with a bit per value of `T`
+               ## (`bitSetDomain`). Carries `bsElemTy`. Not `itSet`, which is
+               ## `HashSet[T]`.
 
   VariantArm* = object
     ## One arm of an `itVariant`. The tag ordinal is the
@@ -371,6 +376,8 @@ type
       tabValTy*: IRType
     of itSet:
       setElemTy*: IRType
+    of itBitSet:
+      bsElemTy*: IRType   ## RFC-0005 S8bq: the base type `T` of `set[T]`
     of itVariant:
       vDiscName*:        string    # discriminator field name (any name, not just "kind")
       vDiscTy*:          IRType    # must be itInt (the enum's int representation)
@@ -730,6 +737,24 @@ type
                         ## (`parseNewSeqLen`): a negative `n` raises
                         ## `RangeDefect`, one above `maxModelledInitialSize`
                         ## declines, scoped to its path.
+    iekBitSet           ## RFC-0005 S8bq (item 2): an operation on builtin
+                        ## `set[T]` values (`bsOp`): a literal, `contains`,
+                        ## `incl` / `excl` (the new value), `+`, `-`, `*`,
+                        ## `<=`, `<`, `==` and `card`.
+
+  BitSetOp* = enum
+    ## RFC-0005 S8bq (item 2). An `iekBitSet` operation, and its `bsArgs`:
+    bsoLit       ## `{..}`: pairs `lo, hi` (an element `e` is `e, e`)
+    bsoContains  ## `contains(s, k)`: `s, k`; `k` already converted to `T`
+    bsoIncl      ## `incl(s, k)`'s new value: `s, k`
+    bsoExcl      ## `excl(s, k)`'s new value: `s, k`
+    bsoUnion     ## `a + b`
+    bsoDiff      ## `a - b`
+    bsoInter     ## `a * b`
+    bsoLe        ## `a <= b`: `a` is a subset of `b`
+    bsoLt        ## `a < b`: a proper subset
+    bsoEq        ## `a == b`
+    bsoCard      ## `card(s)` / `len(s)`: `s`
 
   IRExpr* = ref object
     case kind*: IRExprKind
@@ -1012,6 +1037,10 @@ type
       snElemTy*: IRType              ## the element type
       snZeroed*: bool                ## elements `default(T)`, else fresh
       snOfCap*:  bool                ## `newSeqOfCap`: length 0, not `snArg`
+    of iekBitSet:                    ## RFC-0005 S8bq
+      bsOp*:    BitSetOp
+      bsArgs*:  seq[IRExpr]          ## see `BitSetOp`
+      bsSetTy*: IRType               ## the `itBitSet` of the set operand(s)
 
   IRStmtKind* = enum
     isBlock
@@ -4372,6 +4401,46 @@ proc tTable*(keyTy, valTy: IRType): IRType =
 proc tSet*(elemTy: IRType): IRType =
   IRType(kind: itSet, setElemTy: elemTy)
 
+proc tBitSet*(elemTy: IRType): IRType =
+  ## RFC-0005 S8bq. Nim's builtin `set[elemTy]`.
+  IRType(kind: itBitSet, bsElemTy: elemTy)
+
+const boundsCheckSynthWord* = "ixck"
+  ## RFC-0005 S8bq. The `freshSynth` word of the `isIndex` statement a seq
+  ## element ASSIGNMENT emits for its bounds check (Nim checks the index
+  ## before evaluating the value): its bound value is never read, so it is
+  ## not an element read (`newSeqUninit`'s unwritten-element taint skips
+  ## it). Its name is `"__sym_" & boundsCheckSynthWord & "_" & n`.
+
+const maxBitSetDomain* = 1 shl 16
+  ## RFC-0005 S8bq. Nim's own limit on a set's base type: at most 2^16
+  ## values.
+
+proc bitSetDomain*(elemTy: IRType): tuple[ok: bool, lo: int64, size: int] =
+  ## RFC-0005 S8bq. The values of a `set[elemTy]` base type: `lo` and the
+  ## count, bit `i` of the set standing for value `lo + i`. A `bool`
+  ## (`false`, `true`), a range or enum (its declared bounds), else an 8-
+  ## or 16-bit int's whole width (`char` is `uint8`). Not `ok` for any other
+  ## type, or one with more than `maxBitSetDomain` values.
+  if elemTy == nil: return (false, 0'i64, 0)
+  case elemTy.kind
+  of itBool: (true, 0'i64, 2)
+  of itInt:
+    if elemTy.hasRange:
+      if elemTy.rangeHi < elemTy.rangeLo or
+         elemTy.rangeHi - elemTy.rangeLo >= int64(maxBitSetDomain):
+        return (false, 0'i64, 0)
+      (true, elemTy.rangeLo, int(elemTy.rangeHi - elemTy.rangeLo + 1))
+    elif elemTy.width in [8, 16]:
+      let n = 1 shl elemTy.width
+      (true, (if elemTy.signed: -int64(n div 2) else: 0'i64), n)
+    else: (false, 0'i64, 0)
+  else: (false, 0'i64, 0)
+
+proc mkBitSet*(op: BitSetOp; args: seq[IRExpr]; setTy: IRType): IRExpr =
+  ## RFC-0005 S8bq. An operation on builtin `set[T]` values (`BitSetOp`).
+  IRExpr(kind: iekBitSet, bsOp: op, bsArgs: args, bsSetTy: setTy)
+
 proc satAdd64*(a, b: int64): int64 =
   ## D2 (round-6 review remediation, N9 companion). Saturating add: caps at
   ## `high(int64)` instead of wrapping. Shared by `allocCostOf` (below) and
@@ -4456,6 +4525,8 @@ proc allocCostOf*(t: IRType): int64 =
     else: 3'i64
   of itSet:
     2'i64
+  of itBitSet:
+    1'i64   ## RFC-0005 S8bq: one bit-vector const
   of itVariant:
     var total = allocCostOf(t.vDiscTy)
     for pf in t.vPlainFieldTypes:
@@ -5010,6 +5081,8 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
     isRenderableTableTy(ty.tabKeyTy, ty.tabValTy)   ## leaf-only (no recursion)
   of itSet:
     isRenderableSetElemTy(ty.setElemTy)             ## leaf-only (no recursion)
+  of itBitSet:
+    bitSetDomain(ty.bsElemTy).ok                     ## RFC-0005 S8bq
   of itVariant:
     # `emitTyAndReader`'s `itVariant` arm recurses into: the discriminator,
     # every plain (shared) field, and every arm's fields (including the else
@@ -5156,6 +5229,8 @@ proc `==`*(a, b: IRType): bool =
   of itSeq:   a.seqElemTy == b.seqElemTy
   of itTable: a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
   of itSet:   a.setElemTy == b.setElemTy
+  of itBitSet: a.bsElemTy == b.bsElemTy and                ## RFC-0005 S8bq
+    bitSetDomain(a.bsElemTy) == bitSetDomain(b.bsElemTy)
   of itVariant:
     if a.vObjectName != b.vObjectName: return false
     if a.vDiscName != b.vDiscName: return false
@@ -5232,6 +5307,8 @@ proc `$`*(t: IRType): string =
     "Table[" & $t.tabKeyTy & ", " & $t.tabValTy & "]"
   of itSet:
     "HashSet[" & $t.setElemTy & "]"
+  of itBitSet:
+    "set[" & $t.bsElemTy & "]"
   of itVariant:
     var plainStr = ""
     for i, fn in t.vPlainFieldNames:
@@ -5285,6 +5362,7 @@ proc plainEnglishTypeKind*(k: IRTypeKind): string =
   of itSeq: "seq type"
   of itTable: "table type"
   of itSet: "set type"
+  of itBitSet: "builtin set type"
   of itVariant: "variant type"
   of itMultiVariant: "multi-axis variant type"
   of itUninterp: "unmodeled type"
@@ -6105,6 +6183,27 @@ proc render*(e: IRExpr): string =
   of iekSeqNew:           ## RFC-0005 S8bi
     (if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
      else: "newSeqUninit") & "[" & $e.snElemTy & "](" & render(e.snArg) & ")"
+  of iekBitSet:           ## RFC-0005 S8bq
+    var es: seq[string]
+    for a in e.bsArgs: es.add render(a)
+    case e.bsOp
+    of bsoLit:
+      var parts: seq[string]
+      var i = 0
+      while i + 1 < es.len:
+        parts.add(if es[i] == es[i + 1]: es[i] else: es[i] & ".." & es[i + 1])
+        i += 2
+      "{" & parts.join(",") & "}"
+    of bsoContains: "contains(" & es.join(",") & ")"
+    of bsoIncl: "incl(" & es.join(",") & ")"
+    of bsoExcl: "excl(" & es.join(",") & ")"
+    of bsoUnion: "(" & es.join(" + ") & ")"
+    of bsoDiff: "(" & es.join(" - ") & ")"
+    of bsoInter: "(" & es.join(" * ") & ")"
+    of bsoLe: "(" & es.join(" <= ") & ")"
+    of bsoLt: "(" & es.join(" < ") & ")"
+    of bsoEq: "(" & es.join(" == ") & ")"
+    of bsoCard: "card(" & es.join(",") & ")"
 
 proc render*(s: IRStmt): string =
   if s == nil: return "nil"

@@ -718,6 +718,8 @@ proc liftHeapValue(ctx: Z3Context, valRaw: RawZ3Ast, pointeeTy: IRType): SymVal 
       degradeAlloc(pointeeTy, heUnsupportedPointeeRead,
         "deref of `ref/ptr " & $pointeeTy & "` (a distinct over a " &
         "composite base) not modeled", "__liftHeapValueUnsupported")
+  of itBitSet:   ## RFC-0005 S8bq: a builtin set field is one bit-vector
+    bitSetSV(wrap[Z3AnyAst](ctx, valRaw), pointeeTy.bsElemTy)
   of itUninterp:
     # N42 SPOT-PROBE FINDING (temporary — see N42 slice commit for the
     # permanent version of this comment): `itUninterp` had NO arm here,

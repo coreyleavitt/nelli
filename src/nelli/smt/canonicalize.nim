@@ -282,6 +282,18 @@ const symexWalkerVersion* = "223"
   ## shifts the tail down; `for x in [a, b]` binds the literal; borrow
   ## views reach every parser type query.
   ##
+  ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
+  ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
+  ## to its path, as S8bc declines `newSeq`'s (it was modelled as an
+  ## allocation that succeeds: a false sxSat); a decline reached only on a
+  ## path no execution takes is dropped (S8bc's rule, ported). A `Regex`
+  ## built by `re`/`rex` outside a regex call is a constructor call (a
+  ## rejected pattern raises `RegexError`). Builtin `set[T]` values are one
+  ## bit-vector (`itBitSet` / `iekBitSet`): membership, `incl`, `excl`,
+  ## `+ - * <= < ==`, `card` and literals, the literals' elements
+  ## non-constant too. `newSeqUninit` taints only a read of an element no
+  ## write reached. Provisional 220.
+  ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with
   ## provisional numbers and land stacked on batch 3 as one integration
@@ -5272,6 +5284,8 @@ proc canonicalize*(t: IRType): string =
     "Ty<Tb:" & canonicalize(t.tabKeyTy) & ";" & canonicalize(t.tabValTy) & ">"
   of itSet:
     "Ty<Se:" & canonicalize(t.setElemTy) & ">"
+  of itBitSet:   ## RFC-0005 S8bq: Nim's builtin `set[T]`
+    "Ty<BS:" & canonicalize(t.bsElemTy) & ">"
   of itVariant:
     var plainParts: seq[string]
     for i in 0 ..< t.vPlainFieldNames.len:
@@ -5553,6 +5567,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     "Ex<SeqNew:" & canonicalize(e.snElemTy) & ":" &
       (if e.snZeroed: "zero" else: "uninit") &
       (if e.snOfCap: ":cap:" else: ":len:") & canonicalize(e.snArg, env) & ">"
+  of iekBitSet:                          ## RFC-0005 S8bq
+    var parts: seq[string]
+    for a in e.bsArgs: parts.add canonicalize(a, env)
+    "Ex<BitSet:" & $e.bsOp & ":" & canonicalize(e.bsSetTy) & ":" &
+      parts.join(",") & ">"
 
 # ---- IRStmt -----------------------------------------------------------------
 

@@ -1014,6 +1014,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## unbacked-element add, type aliases, mpairs / mvalues, Table length
     ## change, seq-element ref parts and long nested seqs in witnesses).
     ## 203->213 (provisional).
+    ## RFC-0005 S8bq (S8bi's remainder: huge newSeq lengths declined, set
+    ## values, `re"..."` literals, newSeqUninit read taint, set literals
+    ## with non-constant elements). Provisional 220.
     check symexWalkerVersion == "223"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

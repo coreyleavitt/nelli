@@ -631,10 +631,12 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
     check verdict(nsOfCapLenB, "bi_ns_ofcap_len_b").status == sxUnsat
   test "newSeqOfCap range-checks its capacity":
     check verdict(nsOfCapNeg, "bi_ns_ofcap_neg").status == sxSat
-  test "newSeqUninit has length n, elements unspecified (fresh-symbol taint)":
+  test "newSeqUninit has length n (RFC-0005 S8bq: no element read, no taint)":
+    # S8bi tainted the whole path at the call (`feUnsupportedOpHavoc`);
+    # S8bq taints only a read of an unwritten element, and this reads none.
     let r = verdict(nsUninit, "bi_ns_uninit")
-    check r.status != sxUnsat
-    check r.errors.hasKind(feUnsupportedOpHavoc)
+    check r.status == sxSat
+    check not r.errors.hasKind(feUnsupportedOpHavoc)
   test "a tuple element is backed (batch 5: S8bc's leaf split)":
     # S8bi pinned this as an unbacked-element decline; the unified lowering
     # builds one constant array per leaf (S8bc). Native: a newSeq of tuples
@@ -699,9 +701,11 @@ suite "S8bi (4): set literals in `in` / `notin`":
     check verdict(setKeyIdx, "bi_set_key_idx").status == sxSat
   test "notin in a while guard":
     check verdict(setWhile, "bi_set_while").status == sxSat
-  test "a set-typed value is not modelled (classified decline)":
+  test "a set-typed value (RFC-0005 S8bq: modelled)":
+    # S8bi declined it, classified; S8bq models builtin `set[T]` values.
     let r = verdict(setValue, "bi_set_value")
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
 
 suite "S8bi (5): recursive definitions carry fuel":
   test "the scan rejects a definition without fuel":

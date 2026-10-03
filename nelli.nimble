@@ -1084,6 +1084,11 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bj_replace",
             "tsymex_rfc0005_s8bj_replace_lemmas",
             "tsymex_rfc0005_s8bj_walker",
+            # RFC-0005 S8bq -- S8bi's remainder: a length above 2^20
+            # declines, Regex constructor calls, builtin set[T] values,
+            # non-constant set literals, newSeqUninit's unwritten reads.
+            # Walker 220.
+            "tsymex_rfc0005_s8bq_remainder",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

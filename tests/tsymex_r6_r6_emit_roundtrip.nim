@@ -236,6 +236,9 @@ proc fieldwiseEq(a, b: IRType): bool =
       a.seqUnsupportedFieldKind == b.seqUnsupportedFieldKind
   of itTable: fieldwiseEq(a.tabKeyTy, b.tabKeyTy) and fieldwiseEq(a.tabValTy, b.tabValTy)
   of itSet: fieldwiseEq(a.setElemTy, b.setElemTy)
+  of itBitSet:   ## RFC-0005 S8bq: the base type's domain (its range) too
+    fieldwiseEq(a.bsElemTy, b.bsElemTy) and
+      bitSetDomain(a.bsElemTy) == bitSetDomain(b.bsElemTy)
   of itTuple:
     a.objectName == b.objectName and a.nominalId == b.nominalId and
       a.isPlaceholder == b.isPlaceholder and a.nameIsRefAlias == b.nameIsRefAlias and
@@ -316,6 +319,10 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     ## RFC-0005 S8bc, S8bi (one kind since batch 5).
     fieldwiseEq(a.snArg, b.snArg) and fieldwiseEq(a.snElemTy, b.snElemTy) and
       a.snZeroed == b.snZeroed and a.snOfCap == b.snOfCap
+  of iekBitSet:
+    ## RFC-0005 S8bq.
+    a.bsOp == b.bsOp and fieldwiseEqExprSeq(a.bsArgs, b.bsArgs) and
+      fieldwiseEq(a.bsSetTy, b.bsSetTy)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
     fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
@@ -480,6 +487,9 @@ proc sSetType(): IRType = tSet(tInt(64, true))
 proc sTupleType(): IRType =
   tTuple(@[tInt(64, true), tString()], @["fa", "fb"], "SentObj", "sentNomId",
          isPlaceholder = true)
+proc sBitSetType(): IRType =
+  ## RFC-0005 S8bq. `set[E]` for a five-value enum `E`.
+  tBitSet(tInt(8, false).withRange(0, 4))
 proc sVariantType(): IRType =
   tVariant("SentShape", "kind", tInt(64, true),
     @[VariantArm(tagOrdinal: 0, tagName: "skCircle",
@@ -551,6 +561,8 @@ suite "R6 emit round-trip -- IRType kinds":
     check reconstructed.nameIsRefAlias == false
     check reconstructed.isPlaceholder == true       ## DOES round-trip (H_witness fix)
     check reconstructed.nominalId == "nomid"         ## DOES round-trip (Cluster H Step C fix)
+  test "itBitSet (an enum base keeps its range)":
+    check fieldwiseEq(sBitSetType(), roundtripType(sBitSetType()))
   test "itVariant (discriminator, arms incl. else-arm, discTags, plain fields)":
     check fieldwiseEq(sVariantType(), roundtripType(sVariantType()))
   test "itMultiVariant (multiple axes, each with its own arms/discTags)":
@@ -571,6 +583,7 @@ suite "R6 emit round-trip -- IRType kinds":
       of itSeq: discard                 ## "itSeq" + scoped-decline test
       of itTable: discard               ## "itTable"
       of itSet: discard                 ## "itSet"
+      of itBitSet: discard              ## "itBitSet" (RFC-0005 S8bq)
       of itTuple: discard               ## "itTuple" + nameIsRefAlias pin
       of itVariant: discard             ## "itVariant"
       of itMultiVariant: discard        ## "itMultiVariant"
@@ -634,6 +647,15 @@ proc sSeqNewZero(): IRExpr =
   ## RFC-0005 S8bc. `newSeq[(int, bool)](n)`: a tree element, leaf-split.
   mkSeqNew(mkVar("n"), tTuple(@[tInt(64, true), tBool()], @["", ""]),
            zeroed = true, ofCap = false)
+proc sBitSetLit(): IRExpr =
+  ## RFC-0005 S8bq. `{c, 3..d}` as a `set[range[0..9]]` value.
+  let c = mkVar("c")
+  mkBitSet(bsoLit, @[c, c, mkIntLit(3), mkVar("d")],
+           tBitSet(tInt(64, true).withRange(0, 9)))
+proc sBitSetContains(): IRExpr =
+  ## RFC-0005 S8bq. `k in s` on a `set[char]`.
+  mkBitSet(bsoContains, @[mkVar("s"), mkVar("k")],
+           tBitSet(tInt(8, false, isChar = true)))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
@@ -724,6 +746,10 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqNewUninit(), roundtripExpr(sSeqNewUninit()))
   test "iekSeqNew (newSeq of a tuple)":
     check fieldwiseEq(sSeqNewZero(), roundtripExpr(sSeqNewZero()))
+  test "iekBitSet (a literal over a range)":
+    check fieldwiseEq(sBitSetLit(), roundtripExpr(sBitSetLit()))
+  test "iekBitSet (contains on set[char])":
+    check fieldwiseEq(sBitSetContains(), roundtripExpr(sBitSetContains()))
   test "iekSeqLen":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
@@ -806,6 +832,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
       of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
       of iekSeqNew: discard                      ## "iekSeqNew" (RFC-0005 S8bc, S8bi)
+      of iekBitSet: discard                      ## "iekBitSet" (RFC-0005 S8bq)
       of iekSeqLen: discard                      ## "iekSeqLen"
       of iekSeqSlice: discard                    ## "iekSeqSlice"
       of iekStrLit: discard                      ## "iekStrLit"

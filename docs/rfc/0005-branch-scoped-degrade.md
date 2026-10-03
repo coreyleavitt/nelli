@@ -432,6 +432,11 @@ title = "S8bc's remainder: var-param magics beyond inc/dec (swap etc.), non-term
 state = "done"
 
 [[slice]]
+id = "S8bq"
+title = "S8bi's remainder: huge newSeq n modelled as succeeding, set-typed values/params and builtin incl/excl, re\"(ab\" literal raise, newSeqUninit path taint, set literals with non-constant elements"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -12223,3 +12228,196 @@ hierarchy and 163-audit families, and every source-reading audit),
   array global) is `feGlobalReadUnmodelled` / a walker fault on this
   base, before any pointer is involved; item 4's global path is pinned
   through `var` parameters.
+
+**As landed (S8bq, walker 220 provisional) — S8bi's remainder.** All five
+items are done, and nothing is deferred. The branch is `rfc-0005-s8bq`, on
+S8bi's `e5df207`. The items are the soundness item and the four precision
+items that S8bi listed under "Different mechanisms, reported and not fixed
+here".
+
+*Wrong or degraded verdicts at e5df207, each pinned RED first*
+(`tests/tsymex_rfc0005_s8bq_remainder.nim`; at base the suite was run with
+the fixtures that stop it compiling removed, as noted).
+- **A length above 2^20 was an allocation that succeeds** (item 1,
+  SOUNDNESS). `newSeq[int](n)` with `n > 2_000_000 and xs.len == n`
+  reached the target as a clean `sxSat`, in five forms: `newSeq` (symbolic
+  and literal length), the statement `newSeq(s, n)`, `newSeqOfCap` and
+  `newSeqUninit`. A real run raises `OutOfMemDefect`, or not, depending on
+  the host.
+- **`re"(ab"` outside a regex call** (item 3). `let r = re"(ab"` was
+  `feUnsupportedExprKind` (`nnkCallStrLit`), and the call forms
+  (`re("(ab")`, `re(p)`, `rex"..."`) aborted the compile ("node has no
+  type", `dsl_typebridge.nim:838`). The RED was taken from a probe,
+  because the crash stops the suite compiling at base.
+- **Builtin `set[T]` values** (item 2). Every set-typed parameter, local,
+  field, result and array element was unclassified: 20 pins (members,
+  `incl`, `excl`, `+ - *`, `<= <`, `card`/`len`, enum / bool / `int8` /
+  `uint8` sets, range checks, merges, a call result, an array element) were
+  `sxUnknown`. An object parameter with a `set[char]` field did not compile
+  its witness at base, so that pin was removed from the base run.
+- **Set literals with non-constant elements** (item 5). All six pins
+  declined (`feUnsupportedExprKind`).
+- **`newSeqUninit` tainted the whole path** (item 4). A program reading no
+  element, or only written ones, was tainted (`feUnsupportedOpHavoc` at
+  the call). Seven pins were RED. Six of them were tainted where they
+  should be clean. The seventh, an unwritten read, was already
+  `sxUnknown`, but carried the whole-path message.
+
+*1. A length above 2^20 (`dsl_parser.parseSeqNew`).* The three
+constructors and the statement form put a guard in the preamble after the
+length is evaluated: `if n > maxModelledInitialSize:` a scoped Class-A
+decline (`feUnsupportedOp`), with S8bc's message and reason text and its
+constant (`maxModelledInitialSize = 1 shl 20`, the same name and value). A
+literal length within the bound needs no guard. The negative-length
+`RangeDefect` is unchanged and comes first. The `isUnsupported` walk arm
+now drops a path that reaches a decline but that no execution can take
+(`pathInfeasible`). This is S8bc's item 5 rule, ported verbatim: without
+it the guard was reached on every path, because `if` arms are forked
+without a feasibility check, and every bounded-length dead label became
+`sxUnknown` (S8bi's newSeq pins went RED on this). The S0 exhibit's pin 2
+takes S8bc's repin: its decline sits on an infeasible branch, so the run
+drains no `sevError`.
+
+*3. Regex constructor calls (`dsl_parser.parseRegexCtor`).* `re`/`rex` in
+both the call and the call-string-literal form, typed `Regex`, outside a
+regex call, are constructor calls:
+- a pattern PCRE rejects raises `RegexError`, so nothing after it runs;
+- an accepted pattern is a fresh non-nil `Regex`;
+- an undecided pattern, or one that is not a literal, declines
+  (`seUnsupportedRegex`), scoped.
+A `let r = re"lit"` is recorded (`regexLetLiterals`), so a regex call
+through `r` reads the literal as if it were written in place.
+
+*2. Builtin `set[T]` (`itBitSet`, `iekBitSet`, `svBitSet`).* A set is one
+Z3 bit-vector with a bit per value of `T`'s domain (`bitSetDomain`: `bool`,
+a ranged int or enum, or an 8- or 16-bit integer; at most `2^16` bits).
+Bit `i` is the value `lo + i`.
+- Exact: membership, `incl`, `excl`, `+`, `-`, `*`, `<=`, `<`, `==` (and
+  `>=`, `>`, `!=`), `card`/`len`, constant and non-constant literals.
+- Nim's checks are kept: `x in s` on a set value, `incl` and `excl`
+  range-check the element (`RangeDefect`); membership in a literal does
+  not check the key; `{lo..hi}` with `hi < lo` is empty.
+- `incl`/`excl` on a variable, a field or an array element with a stable
+  index store back through the lvalue; any other location declines
+  (`feUnsupportedOp`).
+- Sets are classified everywhere a type is: parameters (a fresh
+  bit-vector), fields, results, merges, call-result binding, the zero
+  value and the witness (`readBitSetAs`, read off the model in 64-bit
+  chunks).
+- The IR kind is wired through every IR-kind site, the emit round-trip
+  gate included (two fixtures and a type round-trip in
+  `tsymex_r6_r6_emit_roundtrip`).
+- A query that mentions a `card` term runs under `seqQueryRLimit` (20M by
+  default). `queryRLimit` is unbounded by default, and a 256-bit
+  pigeonhole card query ran for more than 280 s; bounded, it is
+  `sxUnknown` in about 20 s.
+- **For the integrator:** this supersedes S8bl's `Incl`/`Excl`
+  `vmDeclined` entries ("a built-in `set[T]` is not a modelled type"). On
+  a builtin set, `incl`/`excl` are intercepted before the var-param magic
+  table.
+
+*5. Non-constant set literals (`parseSetLitMember`, `nnkCurly`).* In
+membership, the key is read first, then every element or range bound is
+evaluated in order through `parseAtomicOperand` and converted
+(range-checked) to the base type, with no short circuit after a match. The
+membership is the disjunction of the element equalities and range tests.
+As a value, the literal is the bit-vector with each element's bit set (a
+range sets bits `lo..hi`, so an empty range adds nothing). It works in a
+`while` guard too.
+
+*4. `newSeqUninit`'s unwritten elements (`runtime.nim`).* The call no
+longer taints. Its data array is registered as a `newSeqUninit` base.
+- **Reads.** A read (`isIndex`, `isSeqPop`) of element `k` asks whether
+  `k` is unwritten (`uninitAt`). The answer is read off the data term: the
+  base itself, a `store` (the slot written, or a value moved verbatim from
+  an unwritten slot, as `del`'s swap does), or an `ite` (a merge). Any
+  other term that mentions a base counts as unwritten, conservatively (a
+  slice's lambda, a heap cell, a mapped array).
+- **Forking a read.** The read forks in two. Where the element was
+  written, the path is clean and exact. Where it was not, the path is
+  tainted `feUnsupportedOpHavoc` (`uninitReadKind`, a fresh value per
+  evaluation, `dcFreshSymbol`). The facts ride in `defectSurvivorPc`, as
+  `drainConvFloatToIntFresh`'s do. A read that is unwritten everywhere does
+  not fork a written half.
+- **Bounds checks.** An element assignment's bounds check (the discarded
+  `isIndex` S8am emits before the value, now named with
+  `boundsCheckSynthWord`) reads nothing. `s[i] += v` does read.
+- **Call results.** A seq returned by a call is bound with an alias
+  (`noteUninitReturn`): `retSym`'s data is unwritten at `k` where the
+  returned data is, under the return path's branch conditions. A seq
+  nested in a composite result declines (`feUnsupportedOpHavoc`, the
+  result left free). A closure's result holding one is treated as
+  uncertain.
+- **Inline `map`/`filter`/`fold`.** A read that may be unwritten taints
+  the path in-band.
+
+*Verification.* 145 suites were run on the head, c backend, 900 s bound
+each, at most three at a time:
+- the 142 files that `command grep -l 'set\[\|incl\|excl\|newSeq\|re"'
+  tests/tsymex_*.nim` lists (they include `s8bq`, `s8bi`, `s6b_ops`,
+  `emit_roundtrip`, `CR2`, `letaudit` and both `n27` files);
+- every `tsymex_rfc0005_s8bb_*` file.
+
+| Z3 | Suites | Checks |
+|---|---|---|
+| 5.1 | 145 / 145 | 2,087 / 2,087 |
+| 4.13.4 | 145 / 145 | 2,087 / 2,087 |
+
+- Two suites failed on the first Z3 5.1 pass and are repinned (below):
+  `tsymex_r6_n27_placeholder_read_audit` and `tsymex_rfc0005_s0_exhibit`.
+  Both were rerun green on 5.1. The 4.13.4 pass ran with the repins.
+- Nothing hung.
+- `tsymex_rfc0005_s8bq_remainder` was also run on cpp (Z3 5.1): 62 / 62.
+- The first symex-mingw run on the final head (37120766220) failed
+  `tsymex_phase1_dsl`, which is outside the grep list: an untyped
+  `x + y * 2` (the parser's isolation entry point) reached the set-operator
+  intercept, and `classifyType` aborted the compile ("node has no type").
+  The infix and `contains` intercepts now require a typed (symbol) operator.
+  `tsymex_phase1_dsl` (18 / 18) and the S8bq suite (62 / 62) were rerun on
+  both Z3 versions.
+
+Its run times, without compilation, on a shared host:
+
+| Backend | Real | User |
+|---|---|---|
+| c | 3.9 s | 3.7 s |
+| cpp | 11.9 s | 5.4 s |
+
+The compile-and-run wall times were 140 s (c) and 176 s (cpp).
+
+*Re-pinned elsewhere.*
+- **`tsymex_phase15_CR2_cachekey`:** `== "220"`.
+- **`tsymex_rfc0005_s8bi_remainder`:**
+  - `nsUninit` reads no element, so it is a clean `sxSat`;
+  - a set-typed value is modelled (`sxSat`, no errors);
+  - six `newSeq` fixtures bound `n` to at most 2^20, because a larger
+    length now declines on its own path;
+  - `nsLen` checks for no `sevError`, since the guard's never-reached
+    decline remains as a hint.
+- **`tsymex_rfc0005_s6b_ops`:** the `feUnsupportedOpHavoc` site count stays
+  14. S8bi's `newSeqUninit` site moved to the one `uninitReadKind`
+  constant that every unwritten read records.
+- **`tsymex_r6_n27_placeholder_read_audit`:** 94 runtime markers (85 + 9).
+  The nine new lines read `seqDataRaw` only to ask whether its term
+  mentions a base. A placeholder's inert array mentions none.
+- **`tsymex_rfc0005_s0_exhibit`:** pin 2's drained `sevError` set is empty
+  (S8bc's repin).
+- **`tsymex_r6_r6_emit_roundtrip`:** `itBitSet` and `iekBitSet` in the
+  gates.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: iterating a builtin set (`for x in s`) declines,**
+  classified.
+- **PRECISION: a set conversion between two different domains** (a
+  hidden conversion such as `set[range[0..3]]` to `set[int8]`) declines
+  (`feUnsupportedExprKind`).
+- **PRECISION: a `card` query can be `sxUnknown`.** A pigeonhole-hard one
+  (comparing the cardinalities of two large symbolic sets) does not finish
+  within `seqQueryRLimit`.
+- **PRECISION: some `newSeqUninit` reads taint more than the elements
+  they read:**
+  - inline `map`/`filter`/`fold` over a seq with a possibly unwritten
+    element taint the whole path;
+  - a seq nested in a composite call result declines its binding;
+  - a slice, a heap cell or a mapped array that mentions a base counts as
+    unwritten everywhere.

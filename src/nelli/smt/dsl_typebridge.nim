@@ -1286,6 +1286,14 @@ proc classifyType*(ty: NimNode): ClassifiedType =
           fields.add fty
           names.add id[j].strVal
       return unranged(tTuple(fields, names))
+    # RFC-0005 S8bq: a set type alias (`type CharSet = set[char]`) is the
+    # set, as an array alias is the array.
+    if impl.kind == nnkTypeDef and impl.len >= 3 and
+       impl[2].kind == nnkBracketExpr and impl[2].len == 2 and
+       isBuiltinTypeHead(impl[2][0], ["set"]):
+      let ety = classifyType(impl[2][1]).ty
+      if bitSetDomain(ety).ok:
+        return unranged(tBitSet(ety))
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind == nnkDistinctTy and impl[2].len == 1:
       # A7 (ADR-0017 Path B): `Rune` from std/unicode → svInt pinned [0, 0x10FFFF].
@@ -1567,6 +1575,17 @@ proc classifyType*(ty: NimNode): ClassifiedType =
                          else: tRef(pointee))
       # A non-ref object (plain or variant).
       return unranged(pointee)
+  # ---- structural match: Nim's builtin set[T] ----
+  # RFC-0005 S8bq (item 2). `set[T]` over a base type with at most 2^16
+  # values (`bitSetDomain`: `bool`, `char`, an enum, an 8- or 16-bit int, a
+  # range) is one bit-vector. It reached the `__unsupported:` catch-all
+  # below, so every set-typed parameter or value declined. Nim rejects any
+  # other base type, so the fall-through is a defensive one.
+  if resolved.kind == nnkBracketExpr and resolved.len == 2 and
+     isBuiltinTypeHead(resolved[0], ["set"]):
+    let ety = classifyType(resolved[1]).ty
+    if bitSetDomain(ety).ok:
+      return unranged(tBitSet(ety))
   # ---- structural match: seq[T] / Table[K, V] / HashSet[T] ----
   # RFC-0005 S8d: the container models apply only to the STDLIB head
   # (`system.seq`, `tables.Table`, `sets.HashSet`, ...). A user generic of the

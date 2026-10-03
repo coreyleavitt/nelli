@@ -241,6 +241,8 @@ type
     svPtr      ## Phase 15 Cluster R (R1a, ADR-0010): same heap model as `svRef`
                ## for `ptr T`. `ptrFamily` marks the pointer family (R8 pointer
                ## arithmetic). STUB in R1a.
+    svBitSet   ## RFC-0005 S8bq: a builtin `set[T]`, one bit-vector with bit
+               ## `i` for the value `lo + i` of `T` (`bitSetDomain`).
 
   SymVal* = object
     ## `signed` is only meaningful when `kind in {svBV8,svBV16,svBV32,svBV64}`.
@@ -465,6 +467,11 @@ type
       ptrFamily*:  bool
       ptrPointee*: IRType   ## Phase 15 R1: the `ptr T` pointee type.
       ptrSteps*:   int      ## RFC-0005 S8ar. As `refSteps`.
+    of svBitSet:
+      ## RFC-0005 S8bq. `bsRaw` is a bit-vector of `bitSetDomain(bsElemTy)
+      ## .size` bits.
+      bsRaw*:    Z3AnyAst
+      bsElemTy*: IRType
 
   VariantAxisSym* = object
     discName*:      string
@@ -781,6 +788,7 @@ proc plainEnglishSymValKind*(k: SVKind): string =
   of svClosure: "closure value"
   of svRef: "ref value"
   of svPtr: "ptr value"
+  of svBitSet: "builtin set value"
 
 proc deepCopyHeapState(src: Path):
     tuple[heaps: Table[string, Z3AnyAst],
@@ -2843,6 +2851,7 @@ proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   of svDistinct: sv.distinctAst.raw   ## nested distinct base
   of svRef:     sv.refAst.raw         ## Phase 15 R9: ref-typed heap field value
   of svPtr:     sv.ptrAst.raw         ## Phase 15 R9: ptr-typed heap field value
+  of svBitSet:  sv.bsRaw.raw          ## RFC-0005 S8bq: one bit-vector
   of svTable, svSet, svSeq, svArray, svTuple, svVariant, svMultiVariant,
      svClosure, svUninterpRef:
     # Round-6 N41: `svTable`/`svSet` are COMPOUND values (a data `Z3Array`
@@ -3712,6 +3721,16 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
           mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
         SymVal(kind: svTable, tabDataRaw: dataAst, tabPresentRaw: presentAst,
                tabSize: lenSym, tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+  of itBitSet:
+    # RFC-0005 S8bq: a builtin `set[T]` is one fresh bit-vector with a bit
+    # per value of `T`; every value of it is a legal set. Allocation cost
+    # mirrored in allocCostOf (types.nim).
+    let ctx = requireCurrentContext()
+    let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw,
+                                         cuint(bitSetDomain(ty.bsElemTy).size))
+    SymVal(kind: svBitSet,
+           bsRaw: wrap[Z3AnyAst](ctx, rawConstOf(ctx, srt, baseName)),
+           bsElemTy: ty.bsElemTy)
   of itSet:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # RFC-0005 S8z: any fixed-width int element type (`isBackedSetElemTy`),
@@ -3765,6 +3784,7 @@ proc tyOf(sv: SymVal): IRType =
     if sv.refPointee != nil: tRef(sv.refPointee) else: tRef(tBool())
   of svPtr:
     if sv.ptrPointee != nil: tPtr(sv.ptrPointee) else: tPtr(tBool())
+  of svBitSet: tBitSet(sv.bsElemTy)   ## RFC-0005 S8bq
   of svBV8:  tInt(8,  sv.signed)
   of svBV16: tInt(16, sv.signed)
   of svBV32: tInt(32, sv.signed)
@@ -4065,6 +4085,9 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     none(SymVal)
   of iekSeqNew:
     # RFC-0005 S8bc, S8bi. A seq: no integer representation.
+    none(SymVal)
+  of iekBitSet:
+    # RFC-0005 S8bq. A set, or a bool / card computed from sets.
     none(SymVal)
 
 # ---- IR-expr → SymVal -------------------------------------------------------
@@ -5299,6 +5322,434 @@ proc tabValTerms(v: SymVal; valTy: IRType): Option[seq[Z3AnyAst]] =
     let c = cellOf(v, valTy)
     if c.isNone: none(seq[Z3AnyAst]) else: some(@[toAnyAst(c.get)])
 
+# ---- RFC-0005 S8bq: Nim's builtin `set[T]` as one bit-vector -----------------
+#
+# A `set[T]` value (`svBitSet`) is a bit-vector of `n = bitSetDomain(T).size`
+# bits, bit `i` standing for the value `lo + i` of `T`. Every operation Nim
+# defines on it is a bit-vector term: membership a shifted bit, `incl` /
+# `excl` an `or` / `and not` of one bit, `+ - *` the bitwise `or` / `and
+# not` / `and`, `<=` an empty difference, `==` equality, `card` the bit
+# count. It is exact: `n` is the whole domain, and Z3 decides it without
+# quantifiers or arrays. Before S8bq every set-typed value declined.
+
+proc bsRawNum(ctx: Z3Context; n: int; v: string): Z3AnyAst =
+  ## The `n`-bit numeral `v` (decimal).
+  let srt = ctx.checkErr Z3_mk_bv_sort(ctx.raw, cuint(n))
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, v.cstring, srt))
+
+proc bsZero(ctx: Z3Context; n: int): Z3AnyAst = bsRawNum(ctx, n, "0")
+
+template bsBin(f: untyped; a, b: Z3AnyAst): Z3AnyAst =
+  let c = a.ctx
+  wrap[Z3AnyAst](c, c.checkErr f(c.raw, a.raw, b.raw))
+
+proc bsNot(a: Z3AnyAst): Z3AnyAst =
+  let c = a.ctx
+  wrap[Z3AnyAst](c, c.checkErr Z3_mk_bvnot(c.raw, a.raw))
+
+proc bsIte(cond: Z3Bool; t, e: Z3AnyAst): Z3AnyAst =
+  let c = t.ctx
+  wrap[Z3AnyAst](c, checkedIte(c, cond.raw, t.raw, e.raw))
+
+proc bsEqZ(a, b: Z3AnyAst): Z3Bool =
+  let c = a.ctx
+  wrap[Z3Bool](c, checkedEq(c, a.raw, b.raw))
+
+proc bsKeyCell(v: SymVal): Option[Z3BitVec[64]] =
+  ## A set element's value as a 64-bit cell, extended by its own
+  ## signedness (a `bool` is 0 / 1), so it compares with the domain's bounds
+  ## as a signed 64-bit value. `none` for a value that is not an ordinal.
+  var v = v
+  while v.kind == svDistinct and v.distinctBaseSym != nil:
+    v = v.distinctBaseSym[]
+  case v.kind
+  of svBool: some(ite(v.bo, mkBitVec[64](1'i64), mkBitVec[64](0'i64)))
+  of svBV8, svBV16, svBV32: some(lowerConvIntWidth(v, 64, v.signed).bv64)
+  of svBV64, svInt: bv64Operand(v)
+  else: none(Z3BitVec[64])
+
+proc bsIndex(cell: Z3BitVec[64]; elemTy: IRType):
+    tuple[inDom: Z3Bool, amt: Z3AnyAst] =
+  ## The bit of the set a 64-bit `cell` names: whether it is in the
+  ## domain, and its index `cell - lo` as an `n`-bit shift amount (the low
+  ## `n` bits, or zero-extended to `n`). The amount is meaningful only
+  ## in the domain.
+  let dom = bitSetDomain(elemTy)
+  let n = dom.size
+  let lo = mkBitVec[64](dom.lo)
+  let hi = mkBitVec[64](dom.lo + int64(n) - 1)
+  let inDom = bvsle(lo, cell) and bvsle(cell, hi)
+  let idx = cell - lo
+  let c = idx.ctx
+  let amt =
+    if n == 64: toAnyAst(idx)
+    elif n < 64:
+      wrap[Z3AnyAst](c, c.checkErr Z3_mk_extract(c.raw, cuint(n - 1), 0, idx.raw))
+    else:
+      wrap[Z3AnyAst](c, c.checkErr Z3_mk_zero_ext(c.raw, cuint(n - 64), idx.raw))
+  (inDom, amt)
+
+proc bsBit(s: Z3AnyAst; amt: Z3AnyAst): Z3Bool =
+  ## Bit `amt` of `s` is set.
+  let c = s.ctx
+  let shifted = bsBin(Z3_mk_bvlshr, s, amt)
+  let low = wrap[Z3AnyAst](c, c.checkErr Z3_mk_extract(c.raw, 0, 0, shifted.raw))
+  bsEqZ(low, bsRawNum(c, 1, "1"))
+
+proc bsSingle(ctx: Z3Context; n: int; amt: Z3AnyAst): Z3AnyAst =
+  ## The set holding only bit `amt`.
+  bsBin(Z3_mk_bvshl, bsRawNum(ctx, n, "1"), amt)
+
+var bitSetCardTerms {.threadvar.}: seq[Z3BitVec[64]]
+  ## RFC-0005 S8bq. Every `card` term lowered in the running walk (held, so
+  ## each keeps its id), and their ids. A query that mentions one may be a
+  ## pigeonhole-hard bit count (`card(s + {c}) > card(s) + 1` ran past 280
+  ## s), so `checkCapped` bounds it (`queryMentionsBitSetCard`). Reset at
+  ## `runSymexImpl` entry.
+var bitSetCardIds {.threadvar.}: HashSet[int]
+
+proc queryMentionsBitSetCard(ctx: Z3Context; roots: openArray[Z3Bool]): bool =
+  ## RFC-0005 S8bq. Some term of `roots` is a builtin set's `card`.
+  if bitSetCardIds.len == 0: return false
+  var seen: HashSet[int]
+  var stack: seq[RawZ3Ast]
+  for r in roots: stack.add r.raw
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    if id in bitSetCardIds: return true
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: continue
+    let app = Z3_to_app(ctx.raw, t)
+    for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+      stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+  false
+
+proc bsCard(s: Z3AnyAst; n: int): Z3BitVec[64] =
+  ## The number of set bits of the `n`-bit `s`, zero-extended to 64 bits: a
+  ## balanced adder tree whose width grows by one bit per level (a sum of
+  ## `2^k` bits fits in `k + 1`), so a 256-bit set costs a few hundred
+  ## narrow adders, not 255 64-bit ones.
+  let c = s.ctx
+  var terms: seq[Z3AnyAst]
+  for i in 0 ..< n:
+    terms.add wrap[Z3AnyAst](c, c.checkErr Z3_mk_extract(
+      c.raw, cuint(i), cuint(i), s.raw))
+  var w = 1
+  while terms.len > 1:
+    var next: seq[Z3AnyAst]
+    var i = 0
+    while i < terms.len:
+      let a = wrap[Z3AnyAst](c, c.checkErr Z3_mk_zero_ext(c.raw, 1, terms[i].raw))
+      if i + 1 < terms.len:
+        let b = wrap[Z3AnyAst](c, c.checkErr Z3_mk_zero_ext(
+          c.raw, 1, terms[i + 1].raw))
+        next.add bsBin(Z3_mk_bvadd, a, b)
+      else:
+        next.add a
+      i += 2
+    terms = next
+    inc w
+  result =
+    if terms.len == 0: mkBitVec[64](0'i64)
+    elif w >= 64: wrap[Z3BitVec[64]](c, terms[0].raw)
+    else: wrap[Z3BitVec[64]](c, c.checkErr Z3_mk_zero_ext(c.raw, cuint(64 - w),
+                                                          terms[0].raw))
+  bitSetCardTerms.add result
+  bitSetCardIds.incl astId(c, result.raw)
+
+proc bitSetSV(raw: Z3AnyAst; elemTy: IRType): SymVal =
+  SymVal(kind: svBitSet, bsRaw: raw, bsElemTy: elemTy)
+
+proc lowerBitSet(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bq (item 2). An `iekBitSet` operation. The arguments are
+  ## lowered in order; an element is already converted to `T` (its range
+  ## check is its own node). A set operand that did not lower to a builtin
+  ## set (the stand-in of an earlier in-band decline) declines in-band.
+  let elemTy = e.bsSetTy.bsElemTy
+  let n = bitSetDomain(elemTy).size
+  let ctx = requireCurrentContext()
+  template fault(what: string): SymVal =
+    lowerDegrade(weInternalWalkerFault,
+      "builtin set " & $e.bsOp & ": " & what & " (weInternalWalkerFault)")
+    var fresh: seq[Z3Bool]
+    let rty = case e.bsOp
+              of bsoContains, bsoLe, bsoLt, bsoEq: tBool()
+              of bsoCard: tInt()
+              else: e.bsSetTy
+    allocateSym(rty, freshDegradeName("__bitSetDegrade"), fresh)
+  var sets: seq[Z3AnyAst]
+  case e.bsOp
+  of bsoLit:
+    var acc = bsZero(ctx, n)
+    var i = 0
+    while i + 1 < e.bsArgs.len:
+      let loCell = bsKeyCell(lower(env, e.bsArgs[i]))
+      let hiCell =
+        if e.bsArgs[i + 1] == e.bsArgs[i]: loCell
+        else: bsKeyCell(lower(env, e.bsArgs[i + 1]))
+      if loCell.isNone or hiCell.isNone:
+        return fault("an element is not an ordinal")
+      let (loIn, loAmt) = bsIndex(loCell.get, elemTy)
+      if e.bsArgs[i + 1] == e.bsArgs[i]:
+        acc = bsBin(Z3_mk_bvor, acc,
+                    bsIte(loIn, bsSingle(ctx, n, loAmt), bsZero(ctx, n)))
+      else:
+        # `lo..hi`: the bits from `lo` up to `hi`, none when `hi < lo`.
+        let (hiIn, hiAmt) = bsIndex(hiCell.get, elemTy)
+        let ones = bsNot(bsZero(ctx, n))
+        let fromLo = bsBin(Z3_mk_bvshl, ones, loAmt)
+        let top = bsBin(Z3_mk_bvsub, bsRawNum(ctx, n, $(n - 1)), hiAmt)
+        let toHi = bsBin(Z3_mk_bvlshr, ones, top)
+        let nonEmpty = loIn and hiIn and bvsle(loCell.get, hiCell.get)
+        acc = bsBin(Z3_mk_bvor, acc,
+                    bsIte(nonEmpty, bsBin(Z3_mk_bvand, fromLo, toHi),
+                          bsZero(ctx, n)))
+      i += 2
+    return bitSetSV(acc, elemTy)
+  of bsoContains, bsoIncl, bsoExcl:
+    let s = lower(env, e.bsArgs[0])
+    let k = bsKeyCell(lower(env, e.bsArgs[1]))
+    if s.kind != svBitSet: return fault("the set lowered to a " &
+                                        plainEnglishSymValKind(s.kind))
+    if k.isNone: return fault("the element is not an ordinal")
+    let (inDom, amt) = bsIndex(k.get, elemTy)
+    case e.bsOp
+    of bsoContains:
+      # Out of the domain a value is not a member (the key of a literal
+      # set is not range-checked: `70000 in {1, 3}` is false).
+      return SymVal(kind: svBool, bo: inDom and bsBit(s.bsRaw, amt))
+    of bsoIncl:
+      return bitSetSV(bsIte(inDom, bsBin(Z3_mk_bvor, s.bsRaw,
+                                         bsSingle(ctx, n, amt)), s.bsRaw),
+                      elemTy)
+    else:
+      return bitSetSV(bsIte(inDom, bsBin(Z3_mk_bvand, s.bsRaw,
+                                         bsNot(bsSingle(ctx, n, amt))),
+                            s.bsRaw), elemTy)
+  else: discard
+  for a in e.bsArgs:
+    let sv = lower(env, a)
+    if sv.kind != svBitSet:
+      return fault("an operand lowered to a " & plainEnglishSymValKind(sv.kind))
+    sets.add sv.bsRaw
+  case e.bsOp
+  of bsoUnion: bitSetSV(bsBin(Z3_mk_bvor, sets[0], sets[1]), elemTy)
+  of bsoDiff:
+    bitSetSV(bsBin(Z3_mk_bvand, sets[0], bsNot(sets[1])), elemTy)
+  of bsoInter: bitSetSV(bsBin(Z3_mk_bvand, sets[0], sets[1]), elemTy)
+  of bsoLe:
+    SymVal(kind: svBool, bo: bsEqZ(bsBin(Z3_mk_bvand, sets[0], bsNot(sets[1])),
+                                   bsZero(ctx, n)))
+  of bsoLt:
+    SymVal(kind: svBool,
+           bo: bsEqZ(bsBin(Z3_mk_bvand, sets[0], bsNot(sets[1])),
+                     bsZero(ctx, n)) and not bsEqZ(sets[0], sets[1]))
+  of bsoEq: SymVal(kind: svBool, bo: bsEqZ(sets[0], sets[1]))
+  of bsoCard: SymVal(kind: svBV64, signed: true, bv64: bsCard(sets[0], n))
+  of bsoLit, bsoContains, bsoIncl, bsoExcl: fault("unreachable")
+
+# ---- RFC-0005 S8bq (item 4): newSeqUninit's unwritten elements -------------
+#
+# `newSeqUninit[T](n)`'s elements are whatever the allocation held: a fresh
+# data array (a base registered here) stands for them. Until S8bq the whole
+# path was tainted at the call. Now a READ of an element is tainted, on the
+# path where that element was never written: whether element `k` of a data
+# array is an unwritten one is read off the array's term (`uninitAt`) --
+# the base itself, a `store` (the slot written, holding a value that may
+# itself be an unwritten element moved there, as `del`'s swap does) or an
+# `ite` (a merge); any other term that mentions a base (a slice's lambda, a
+# mapped array, a heap select) counts as unwritten, conservatively. Every
+# element read goes through `isIndex`, `isSeqPop` (a path fork each) or
+# `seqElemAt` (the inline HOFs, an in-band taint); a value bound by
+# equality instead (`retBindEq`) declines.
+
+var uninitSeqBases {.threadvar.}: seq[Z3AnyAst]
+  ## RFC-0005 S8bq. The data arrays `newSeqUninit` allocated in the running
+  ## walk (held, so each keeps its id), and their ids. Reset at
+  ## `runSymexImpl` entry.
+var uninitSeqBaseIds {.threadvar.}: HashSet[int]
+var uninitSeqAliases {.threadvar.}: Table[int, seq[tuple[guard: Z3Bool, data: Z3AnyAst]]]
+  ## RFC-0005 S8bq. A call's result seq whose returned data mentions a base:
+  ## the per-call `retSym` data symbol's id, and per return path the
+  ## returned data with a fact that path's caller continuation implies (its
+  ## branch conditions). `retBindEq` makes the two equal there, so element
+  ## `k` of `retSym` is unwritten exactly where it is in the data returned.
+var uninitAliasHeld {.threadvar.}: seq[Z3AnyAst]
+var uninitArrKinds {.threadvar.}: tuple[ready: bool, store, ite, select: int]
+  ## The linked Z3's decl kinds of `store`, `ite` and `select` (probed once
+  ## per thread, as `seqCapKinds` does: the wrapper's enum binds only a
+  ## subset).
+
+const uninitReadKind = feUnsupportedOpHavoc
+  ## RFC-0005 S8bq. A read of an unwritten `newSeqUninit` element: a fresh
+  ## value per evaluation (the base is fresh per call), a superset of what
+  ## the allocation held; nothing is dropped (`dcFreshSymbol`).
+const uninitReadMsg = "newSeqUninit element read before it is written: " &
+  "its value is unspecified — degraded to sxUnknown on that path"
+const uninitReturnMsg = "a call result holding a newSeqUninit seq inside a composite is not " &
+  "bound (its unwritten elements would read as written) — path degraded " &
+  "to sxUnknown"
+
+proc noteUninitSeqBase(a: Z3AnyAst) =
+  uninitSeqBases.add a
+  uninitSeqBaseIds.incl astId(a.ctx, a.raw)
+
+proc uninitKinds(ctx: Z3Context): tuple[store, ite, select: int] =
+  if not uninitArrKinds.ready:
+    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+    let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bq_kind_probe_arr")
+    let i = mkIntVar(ctx, "__s8bq_kind_probe_i")
+    let b = mkBoolVar(ctx, "__s8bq_kind_probe_b")
+    let st = store(arr, i, i)
+    let sel = select(arr, i)
+    let it = ite(b, i, i)
+    uninitArrKinds = (true, kindOf(ctx, st.raw), kindOf(ctx, it.raw),
+                      kindOf(ctx, sel.raw))
+  (uninitArrKinds.store, uninitArrKinds.ite, uninitArrKinds.select)
+
+type UninitScan = object
+  ## One `uninitReadCond` query's memo: whether a term mentions a base, and
+  ## the condition already built per (array, index) pair (a loop's merges
+  ## share their store chains, which a plain recursion would revisit once
+  ## per path through the `ite`s).
+  ctx: Z3Context
+  mentions: Table[int, bool]
+  at: Table[(int, int), Z3Bool]
+
+proc mentionsUninitBase(sc: var UninitScan; root: RawZ3Ast): bool =
+  ## Some subterm of `root` (a quantifier's body included: a slice is a
+  ## lambda over its base) is a `newSeqUninit` base.
+  if uninitSeqBaseIds.len == 0: return false
+  let ctx = sc.ctx
+  let rootId = astId(ctx, root)
+  if rootId in sc.mentions: return sc.mentions[rootId]
+  var seen: HashSet[int]
+  var stack = @[root]
+  result = false
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    if id in uninitSeqBaseIds or id in uninitSeqAliases or
+       sc.mentions.getOrDefault(id, false):
+      result = true
+      break
+    case Z3_get_ast_kind(ctx.raw, t)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    of Z3_QUANTIFIER_AST:
+      stack.add Z3_get_quantifier_body(ctx.raw, t)
+    else: discard
+  sc.mentions[rootId] = result
+
+proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool
+
+proc uninitVal(sc: var UninitScan; v: RawZ3Ast): Z3Bool =
+  ## The stored value `v` is an unwritten element moved verbatim (a select
+  ## of one, as `del`'s swap stores). A value computed from elements was
+  ## computed by reads, each tainted where it read an unwritten one.
+  let ctx = sc.ctx
+  if Z3_get_ast_kind(ctx.raw, v) == Z3_APP_AST:
+    let app = Z3_to_app(ctx.raw, v)
+    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) ==
+         uninitKinds(ctx).select and
+       Z3_get_app_num_args(ctx.raw, app) == 2 and
+       sc.mentionsUninitBase(Z3_get_app_arg(ctx.raw, app, 0)):
+      let ix = wrap[Z3Int](ctx, Z3_get_app_arg(ctx.raw, app, 1))
+      return sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 0), ix)
+  mkBool(ctx, false)
+
+proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool =
+  ## Element `k` of the data array `arr` is an unwritten `newSeqUninit`
+  ## element.
+  let ctx = sc.ctx
+  if not sc.mentionsUninitBase(arr): return mkBool(ctx, false)
+  let key = (astId(ctx, arr), astId(ctx, k.raw))
+  if key in sc.at: return sc.at[key]
+  result = mkBool(ctx, true)
+  if key[0] in uninitSeqAliases:
+    var acc = mkBool(ctx, false)
+    for (g, d) in uninitSeqAliases[key[0]]:
+      acc = acc or (g and sc.uninitAt(d.raw, k))
+    result = acc
+  elif key[0] notin uninitSeqBaseIds and
+     Z3_get_ast_kind(ctx.raw, arr) == Z3_APP_AST:
+    let app = Z3_to_app(ctx.raw, arr)
+    let kind = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
+    let kinds = uninitKinds(ctx)
+    if Z3_get_app_num_args(ctx.raw, app) == 3:
+      if kind == kinds.store:
+        let j = wrap[Z3Int](ctx, Z3_get_app_arg(ctx.raw, app, 1))
+        result = ite(k == j, sc.uninitVal(Z3_get_app_arg(ctx.raw, app, 2)),
+                     sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 0), k))
+      elif kind == kinds.ite:
+        let c = wrap[Z3Bool](ctx, Z3_get_app_arg(ctx.raw, app, 0))
+        result = ite(c, sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 1), k),
+                     sc.uninitAt(Z3_get_app_arg(ctx.raw, app, 2), k))
+  sc.at[key] = result
+
+proc uninitReadCond(seqSV: SymVal; idx: Z3Int): Option[Z3Bool] =
+  ## RFC-0005 S8bq. When reading element `idx` of `seqSV` may read an
+  ## unwritten `newSeqUninit` element: the condition under which it does.
+  ## `none` when it certainly does not.
+  if uninitSeqBaseIds.len == 0: return none(Z3Bool)
+  var sc = UninitScan(ctx: seqSV.seqDataRaw.ctx) # [placeholder-audited]
+  if not sc.mentionsUninitBase(seqSV.seqDataRaw.raw): # [placeholder-audited]
+    return none(Z3Bool)
+  let u = sc.uninitAt(seqSV.seqDataRaw.raw, idx) # [placeholder-audited]
+  if $simplify(u) == "false": none(Z3Bool) else: some(u)
+
+proc noteUninitReturn(retSym, retVal: SymVal; pc: seq[Z3Bool]): bool =
+  ## RFC-0005 S8bq. Binding the call result `retSym` to the returned
+  ## `retVal` by equality: when `retVal` is a seq whose data mentions a
+  ## `newSeqUninit` base, record `retSym`'s data as its alias on this return
+  ## path (`uninitSeqAliases`) and return true. False (nothing recorded)
+  ## for any other value.
+  if uninitSeqBaseIds.len == 0 or retSym.kind != svSeq or
+     retVal.kind != svSeq:
+    return false
+  var sc = UninitScan(ctx: retVal.seqDataRaw.ctx) # [placeholder-audited]
+  if not sc.mentionsUninitBase(retVal.seqDataRaw.raw): return false # [placeholder-audited]
+  let ctx = sc.ctx
+  var g = mkBool(ctx, true)
+  for c in pc: g = g and c
+  let id = astId(ctx, retSym.seqDataRaw.raw) # [placeholder-audited]
+  uninitAliasHeld.add retSym.seqDataRaw # [placeholder-audited]
+  uninitSeqAliases.mgetOrPut(id, @[]).add (g, retVal.seqDataRaw) # [placeholder-audited]
+  true
+
+proc svMentionsUninit(sv: SymVal): bool =
+  ## RFC-0005 S8bq. Some data array of `sv` (a seq, or one inside a
+  ## composite) mentions a `newSeqUninit` base. A call result bound to such
+  ## a value by equality (`retBindEq`) would lose the base, so its reads
+  ## would no longer see the unwritten elements: those bindings decline.
+  if uninitSeqBaseIds.len == 0: return false
+  var sc = UninitScan(ctx: requireCurrentContext())
+  var stack = @[sv]
+  while stack.len > 0:
+    let v = stack.pop()
+    case v.kind
+    of svSeq:
+      if sc.mentionsUninitBase(v.seqDataRaw.raw): return true # [placeholder-audited]
+    of svTuple: stack.add v.fields
+    of svArray: stack.add v.arrElems
+    of svVariant:
+      for fs in v.vArmFields.values: stack.add fs
+      stack.add v.vPlainFields
+    of svMultiVariant:
+      for ax in v.mvAxes:
+        for fs in ax.armFields.values: stack.add fs
+      stack.add v.mvPlainFields
+    of svDistinct: stack.add v.distinctBaseSym[]
+    else: discard
+  false
+
 proc shiftCountBV(r: SymVal, lhsKind: SVKind): SymVal =
   ## RFC-0005 S8ac. The count of a Nim `shl`/`shr` as the C backend really
   ## applies it. Nim 2.2.10's codegen masks the count with the operand
@@ -5464,12 +5915,13 @@ func closureValueBuilt(v: SymVal; t: IRType): bool =
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
                            svMultiVariant, svSeq, svDistinct, svArray,
-                           svRef, svPtr, svTable, svSet}
+                           svRef, svPtr, svTable, svSet, svBitSet}
   ## The value kinds `retBindEq` binds structurally; the two call-return
   ## drains (`completeReturn`, the `isCall` fall-through) decline any other
   ## (`feUnsupportedOpHavoc`). RFC-0005 S8p added `svMultiVariant`, `svSeq`
   ## and `svDistinct`, and made it one set (each drain had its own copy).
-  ## RFC-0005 S8s added `svArray`; S8u `svRef`, `svPtr`, `svTable`, `svSet`.
+  ## RFC-0005 S8s added `svArray`; S8u `svRef`, `svPtr`, `svTable`, `svSet`;
+  ## S8bq `svBitSet`.
 
 proc armSelected(disc: SymVal; tagOrd: int;
                  arms: OrderedTable[int, seq[SymVal]]): Z3Bool =
@@ -5724,6 +6176,9 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabDataRaw.raw,
                                   retVal.tabDataRaw.raw)) and
       tabMoreEq(ctx, retSym, retVal)   ## RFC-0005 S8at
+  of svBitSet:
+    ## RFC-0005 S8bq: a builtin set binds its bit-vector.
+    bsEqZ(retSym.bsRaw, retVal.bsRaw)
   of svSet:
     ## RFC-0005 S8u: a `HashSet[int]` binds its member array and size.
     let ctx = retSym.setSize.ctx
@@ -5786,6 +6241,9 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
   of itFloat32: SymVal(kind: svFloat32, fp32: mkFloat32(0'f32))
   of itFloat64: SymVal(kind: svFloat64, fp64: mkFloat64(0.0))
   of itBool: SymVal(kind: svBool, bo: mkBool(false))
+  of itBitSet:   ## RFC-0005 S8bq: `{}`
+    bitSetSV(bsZero(requireCurrentContext(), bitSetDomain(t.bsElemTy).size),
+             t.bsElemTy)
   of itInt:
     case t.width
     of 8:  liftBV(mkBitVec[8](0),  t.signed)
@@ -6088,6 +6546,7 @@ func defaultZeroTotal(t: IRType): bool =
   of itVariant: variantZeroTotal(t)   # RFC-0005 S8n
   of itMultiVariant: multiVariantZeroTotal(t)   # RFC-0005 S8p
   of itTable, itSet: containerZeroBacked(t)     # RFC-0005 S8u
+  of itBitSet: true                             # RFC-0005 S8bq: `{}`
   of itDistinct: defaultZeroTotal(t.distinctBase)   # RFC-0005 S8u
   of itRef, itPtr: true                         # RFC-0005 S8u: nil
   else: false
@@ -6257,6 +6716,8 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
   of svFloat64:
     SymVal(kind: svFloat64, fp64: ite(cond, t.fp64, e.fp64))
   of svBool: ofBool(ite(cond, t.bo, e.bo))
+  of svBitSet:   ## RFC-0005 S8bq: `ite` of the two bit-vectors
+    bitSetSV(bsIte(cond, t.bsRaw, e.bsRaw), t.bsElemTy)
   of svInt:
     ## R3 (S2): propagate width metadata through the merge when both
     ## branches agree (the expected case — a single ternary/if-expression
@@ -6593,7 +7054,7 @@ proc coerceIntLit(proto: SymVal, ival: int64): SymVal =
   of svDistinct:   ## Phase 15 G4: coerce against the distinct's ejected base.
     coerceIntLit(proto.distinctBaseSym[], ival)
   of svTuple, svArray, svString, svSeq, svTable, svSet, svVariant,
-     svMultiVariant, svClosure, svRef, svPtr:
+     svMultiVariant, svClosure, svRef, svPtr, svBitSet:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (never an int proto)
     raise newException(ValueError,  # [raise-audited: category-c: verified-unreachable: typed-macro invariant (see coerceIntLit's first site above)]
       "coerceIntLit: composite prototype for integer literal kind=" & $proto.kind)
@@ -9252,6 +9713,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       lowerDegrade(feUnsupportedOpHavoc,
         "zero value of " & $e.zvTy & " not modelled — degraded to sxUnknown")
       sv
+  of iekBitSet:
+    # RFC-0005 S8bq (item 2). A builtin `set[T]` operation.
+    lowerBitSet(env, e)
   of iekSeqNew:
     lowerSeqNew(env, e)
 
@@ -9404,7 +9868,7 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   of svString:
     w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
-     svDistinct, svClosure, svRef, svPtr:
+     svDistinct, svClosure, svRef, svPtr, svBitSet:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
@@ -9768,6 +10232,24 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
+proc bitSetModelMembers(m: Z3Model; sv: SymVal): seq[int64] =
+  ## RFC-0005 S8bq. The members of a builtin set under `m`, ascending: the
+  ## value `lo + i` of each set bit `i`. The bit-vector is read 64 bits at a
+  ## time (a numeral of at most 2^64 per chunk).
+  let dom = bitSetDomain(sv.bsElemTy)
+  let ctx = sv.bsRaw.ctx
+  var lo = 0
+  while lo < dom.size:
+    let hi = min(lo + 63, dom.size - 1)
+    let chunk = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_extract(
+      ctx.raw, cuint(hi), cuint(lo), sv.bsRaw.raw))
+    let v = m.eval(chunk)
+    let bits = parseBiggestUInt($Z3_get_numeral_string(ctx.raw, v.raw))
+    for i in 0 .. hi - lo:
+      if ((bits shr uint64(i)) and 1'u64) == 1'u64:
+        result.add dom.lo + int64(lo + i)
+    lo += 64
+
 proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal) =
   ## RFC-0005 S8f (was: literal candidates, a harvest of the model array's
@@ -9851,6 +10333,9 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
     extractTableEntries(m, w, path, sv)
   of svSet:
     extractSetMembers(m, w, path, sv)
+  of svBitSet:
+    # RFC-0005 S8bq: the members are the set bits, as values of `T`.
+    w.setMembers[path] = bitSetModelMembers(m, sv)
   of svVariant:
     # Discriminator goes under the standard `.kind` path; arm
     # fields land under `.@<armTag>.<fieldName>`. Cycle 7's
@@ -12469,6 +12954,13 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8bd: and with the exact link between the Int views of `x`
   # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
   let rootsIn = @query & divRangeFacts(ctx, query) & bvOffsetLinks(ctx, query)
+  # RFC-0005 S8bq: a query that counts a builtin set's members runs under
+  # `seqQueryRLimit` too, when that is the smaller bound: its bit count can
+  # be pigeonhole-hard, and an unbounded check of one did not return.
+  let cardBounded = settings.budget.seqQueryRLimit != 0 and
+    (rlimit == 0 or settings.budget.seqQueryRLimit < rlimit) and
+    queryMentionsBitSetCard(ctx, rootsIn)
+  let rlimit = if cardBounded: settings.budget.seqQueryRLimit else: rlimit
   # RFC-0005 S8bj: the query without the recursive `replace` definitions
   # (`regexRecDefConds`), under the small budget of step 0: a superset of
   # the real models, so an UNSAT is the query's own.
@@ -12486,7 +12978,12 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     let s = querySolver(ctx, rootsIn, rlimit)
     let r = s.check()
     return (r, s, (if r == zsSat: s.model() else: nil),
-            (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
+            (if r == zsUnknown:
+               "Z3: " & s.reasonUnknown() &
+                 (if cardBounded: " (the query counts a builtin set's " &
+                    "members, so it ran under seqQueryRLimit = " &
+                    $settings.budget.seqQueryRLimit & ")" else: "")
+             else: ""))
   let cap = settings.budget.maxSeqLen
   if cap <= 0: plain()
   let (caps, lastIndex, byteEqs, lens) = seqLenCaps(ctx, rootsIn, cap)
@@ -14606,6 +15103,7 @@ proc symValHash(sv: SymVal): uint =
     astHash(sv.refAst)
   of svPtr:   ## Phase 15 R1a: the ptr const ast.
     astHash(sv.ptrAst) xor (if sv.ptrFamily: 1'u else: 0'u)
+  of svBitSet: astHash(sv.bsRaw)   ## RFC-0005 S8bq
   of svBool: astHash(sv.bo)
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
@@ -16864,6 +17362,16 @@ proc completeReturn(p: Path, w: var WalkCtx) =
   # of #135 range propagation while retSym was allocated svBV*).
   # CR-9(c) D5: reconcileInt handles the cross-rep case; retBindEq
   # then works on same-kind operands (bv2int was applied if needed).
+  if not noteUninitReturn(retSym, retVal, p.pc) and svMentionsUninit(retVal):
+    # RFC-0005 S8bq: a seq result is bound with its alias recorded
+    # (`noteUninitReturn`). One nested in a composite is not: bound by
+    # equality, `retSym` would carry its elements without the
+    # `newSeqUninit` base, so a caller's read of an unwritten one would
+    # come back clean. `retSym` is left free (a superset of the value),
+    # nothing is dropped.
+    let d = w.degrade(uninitReadKind, uninitReturnMsg)
+    w.callStack[frameIx].returnedPaths.add forkPathTainted(p, p.pc, p.env, d)
+    return
   let (rSym, rVal) = reconcileInt(retSym, retVal)
   # Phase 15 G3: same-kind structural binding (BV-wrap semantics
   # preserved; Z3Int = Z3Int when both are Int after reconcileInt;
@@ -17018,6 +17526,8 @@ proc sameSV(a, b: SymVal): bool =
   of svPtr:
     a.ptrAst.raw == b.ptrAst.raw and a.ptrFamily == b.ptrFamily and
       a.ptrPointee == b.ptrPointee
+  of svBitSet:   ## RFC-0005 S8bq
+    a.bsRaw.raw == b.bsRaw.raw and a.bsElemTy == b.bsElemTy
   of svMultiVariant, svClosure:
     false
 
@@ -17142,6 +17652,9 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
   of svPtr:
     if t.ptrPointee != e.ptrPointee or t.ptrFamily != e.ptrFamily:
       none(SymVal)
+    else: some(iteSV(sel, t, e))
+  of svBitSet:   ## RFC-0005 S8bq: one bit-vector, of one domain
+    if bitSetDomain(t.bsElemTy) != bitSetDomain(e.bsElemTy): none(SymVal)
     else: some(iteSV(sel, t, e))
   of svTuple:
     if t.fields.len != e.fields.len or t.fieldNames != e.fieldNames:
@@ -18391,8 +18904,29 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # RFC-0005 S8ba: a distinct element is re-boxed (its cell holds
           # the base, `seqCellTy`).
           newEnv[stmt.ixRetName] = reboxSeqCell(stmt.ixElemTy, indexed)
-          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond] & rangeConds,
-                                 newEnv)
+          let inPc = cp.pc & @[inLoCond, inHiCond] & rangeConds
+          # RFC-0005 S8bq: an element assignment's bounds check reads
+          # nothing (`boundsCheckSynthWord`).
+          let unwritten =
+            if stmt.ixRetName.startsWith("__sym_" & boundsCheckSynthWord & "_"):
+              none(Z3Bool)
+            else: uninitReadCond(arrSV, idxZi)
+          if unwritten.isSome:
+            # RFC-0005 S8bq: the read is exact where the element was
+            # written, and a fresh value (tainted) where it was not. The
+            # facts select between two models of ONE execution, as
+            # `drainConvFloatToIntFresh`'s do, so they ride in
+            # `defectSurvivorPc`.
+            if $simplify(unwritten.get) != "true":
+              let written = forkPath(cp, inPc, newEnv)
+              written.defectSurvivorPc.add not unwritten.get
+              survivors.add written
+            let d = w.degrade(uninitReadKind, uninitReadMsg)
+            let fresh = forkPathTainted(cp, inPc, newEnv, d)
+            fresh.defectSurvivorPc.add unwritten.get
+            survivors.add fresh
+          else:
+            survivors.add forkPath(cp, inPc, newEnv)
         continue
       # ---- Round-6 B1 (ADR-0028 Leg 1): string-backed seq[byte] index READ.
       # A `data[i]` reaching here with an `svString` receiver means the
@@ -18665,7 +19199,19 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       newEnv[stmt.spRecvName] = mkSeqSV(newLenZi, seqArrs(recvSV), # [placeholder-audited]
         recvSV.seqElemTy)
       newEnv[stmt.spRetName] = reboxSeqCell(stmt.spElemTy, popped)   # RFC-0005 S8ba
-      survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
+      let unwritten = uninitReadCond(recvSV, newLenZi)
+      if unwritten.isSome:
+        # RFC-0005 S8bq: as `isIndex`'s element read.
+        if $simplify(unwritten.get) != "true":
+          let written = forkPath(p, p.pc & @[not emptyCond], newEnv)
+          written.defectSurvivorPc.add not unwritten.get
+          survivors.add written
+        let d = w.degrade(uninitReadKind, uninitReadMsg)
+        let fresh = forkPathTainted(p, p.pc & @[not emptyCond], newEnv, d)
+        fresh.defectSurvivorPc.add unwritten.get
+        survivors.add fresh
+      else:
+        survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
     survivors
   of isTabKeys:
     # RFC-0005 S8bc (item 6). `tkRetName := the keys of tkRecv`, the key
@@ -19973,6 +20519,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                          plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
                          "to sxUnknown (feUnsupportedOp)")
                   fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+                elif not noteUninitReturn(retSym, retVal, cp.pc) and
+                     svMentionsUninit(retVal):
+                  # RFC-0005 S8bq: as `completeReturn`'s.
+                  let d = w.degrade(uninitReadKind, uninitReturnMsg)
+                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
                 else:
                   let (rSym, rVal) = reconcileInt(retSym, retVal)
                   fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
@@ -21237,6 +21788,8 @@ proc symValFromRawAst(raw: RawZ3Ast, ty: IRType): SymVal =
     SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw))
   of itFloat64:
     SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw))
+  of itBitSet:   ## RFC-0005 S8bq: one bit-vector
+    bitSetSV(wrap[Z3AnyAst](ctx, raw), ty.bsElemTy)
   else:
     raise newException(ValueError,  # [raise-audited: category-c: caught immediately at its sole call site (see above)]
       "symValFromRawAst: unsupported closure return type kind " & $ty.kind)
@@ -21301,6 +21854,7 @@ proc sameSymVal(a, b: SymVal): bool =
       sameSymVal(a.distinctBaseSym[], b.distinctBaseSym[])
   of svRef:         same(a.refAst, b.refAst)
   of svPtr:         same(a.ptrAst, b.ptrAst) and a.ptrFamily == b.ptrFamily
+  of svBitSet:      same(a.bsRaw, b.bsRaw)   ## RFC-0005 S8bq
   of svUninterpRef: same(a.uninterpAst, b.uninterpAst)
   of svClosure:
     a.closureSite == b.closureSite and a.closureEnv != nil and
@@ -22035,7 +22589,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for cp in fallThrough:                                # (b) implicit result
     if cp.env.hasKey("result"):
       sawValue = true
-      if cp.taint != {}:
+      if cp.taint != {} or svMentionsUninit(cp.env["result"]):
+        # RFC-0005 S8bq: a result holding a `newSeqUninit` seq is not bound
+        # (as `completeReturn` declines one): the closure veto taints.
         uncertainDrop = true
         continue
       assertArm(cp.pc, retBindEq(funcApp, cp.env["result"]))
@@ -22568,10 +23124,19 @@ proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
     return mkSeqSV(mkInt(0), allocateSeqArrs(elemTy,
                      freshDegradeName("__newSeqOfCap.data")), elemTy)
   if not e.snZeroed:
-    lowerDegrade(feUnsupportedOpHavoc,
-      "newSeqUninit element values are unspecified — degraded to sxUnknown")
-    return mkSeqSV(toZ3Int(lenSV), allocateSeqArrs(elemTy,
-                     freshDegradeName("__newSeqUninit.data")), elemTy)
+    let arrs = allocateSeqArrs(elemTy, freshDegradeName("__newSeqUninit.data"))
+    if arrs.len == 1:
+      # RFC-0005 S8bq: registered as a `newSeqUninit` base, so only a READ
+      # of an element no write has reached is tainted (`uninitReadCond`).
+      noteUninitSeqBase(arrs[0])
+    else:
+      # Batch 6: S8bq tracks one data array (`seqDataRaw`). A tree element
+      # (S8bc's leaf split) has one array per leaf, and a write of one
+      # leaf would read as a write of the element, so the whole path stays
+      # tainted, as before S8bq.
+      lowerDegrade(feUnsupportedOpHavoc,
+        "newSeqUninit element values are unspecified — degraded to sxUnknown")
+    return mkSeqSV(toZ3Int(lenSV), arrs, elemTy)
   mkSeqSV(toZ3Int(lenSV), seqNewZeroArrs(elemTy), elemTy)
 
 proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst] =
@@ -22801,6 +23366,16 @@ proc concreteSeqLen(seqSV: SymVal): Option[int] =
   else:
     none(int)
 
+proc hofElemAt(seqSV: SymVal; i: int): SymVal =
+  ## RFC-0005 S8bq. An inline higher-order call's read of element `i`: a
+  ## read that may see an unwritten `newSeqUninit` element taints the path
+  ## (in-band: `lower` has no path to fork, so the taint is not confined to
+  ## the executions that read one -- a precision loss, never a wrong
+  ## verdict).
+  if uninitReadCond(seqSV, mkInt(i)).isSome:
+    lowerDegrade(uninitReadKind, uninitReadMsg)
+  seqElemAt(seqSV, mkInt(i))
+
 proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C4 (ADR-0009). DSL higher-order call `filter`/`map`/`fold` over a
   ## `seq[T]` with a closure arg. INLINE path (concrete length ≤
@@ -22926,7 +23501,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       # RFC-0005 S8bc: one array per leaf of a tree element (either side).
       var arrs = allocateSeqArrs(e.hofRetElemTy, "__hofmap.data")
       for i in 0 ..< n:
-        let elemSV = seqElemAt(seqSV, mkInt(i))
+        let elemSV = hofElemAt(seqSV, i)
         let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i, env)
         if not seqElemFits(mapped, e.hofRetElemTy):
           return seqStoreDecline("map", e.hofRetElemTy, mapped)
@@ -22954,7 +23529,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       var arrs = allocateSeqArrs(elemTy, "__hoffilter.data")
       var keptLen: Z3Int = mkInt(0)
       for i in 0 ..< n:
-        let elemSV = seqElemAt(seqSV, mkInt(i))
+        let elemSV = hofElemAt(seqSV, i)
         let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i, env)
         doAssert predSV.kind == svBool, "filter predicate did not return Bool"
         # Store elem_i at the CURRENT kept index. Stores past the final kept
@@ -22970,7 +23545,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       doAssert e.hofInit != nil, "fold inline path requires an init accumulator"
       var acc = lower(env, e.hofInit)
       for i in 0 ..< n:
-        let elemSV = seqElemAt(seqSV, mkInt(i))
+        let elemSV = hofElemAt(seqSV, i)
         acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i, env)
       acc
     else:
@@ -23552,6 +24127,12 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
+  bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
+  bitSetCardIds.clear()
+  uninitSeqBases = @[]                   ## RFC-0005 S8bq: newSeqUninit bases
+  uninitSeqBaseIds.clear()
+  uninitSeqAliases.clear()
+  uninitAliasHeld = @[]
   indexSplitOf = (ctx: Z3Context(nil), ids: initTable[int, int]())  ## RFC-0005 S8ag
   indexSplitCounter = 0                  ## RFC-0005 S8ag: reset split fresh-name counter
   sliceViewCounter = 0                   ## v67: reset slice-view bound-var counter
@@ -23784,7 +24365,7 @@ proc runSymexImpl(prog: SymexProgram,
       raiseParamAllocIssue(paramAllocIssue.get)
   for p in prog.params:
     case p.ty.kind
-    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr:
+    of itTuple, itArray, itString, itSeq, itTable, itSet, itMultiVariant, itUninterp, itFloat32, itFloat64, itDistinct, itRef, itPtr, itBitSet:
       # itMultiVariant included here as Phase 14 cycle A1a stub; the
       # `allocateSym` for itMultiVariant raises a clear ValueError
       # (see runtime.nim allocateSym stub). Falling through to the
@@ -25833,6 +26414,12 @@ proc witnessTabKey*[K](k: string): K =
   elif K is float32: cast[float32](uint32(parseBiggestInt(k) and 0xFFFF_FFFF'i64))
   elif K is SomeFloat: K(cast[float64](parseBiggestInt(k)))
   else: witnessIntAs[K](parseBiggestInt(k))
+
+proc readBitSetAs*[T](w: RawWitness, name: string): set[T] =
+  ## RFC-0005 S8bq. A builtin `set[T]` from its collected members.
+  if not w.setMembers.hasKey(name): return
+  for v in w.setMembers[name]:
+    result.incl witnessIntAs[T](v)
 
 proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
   ## RFC-0005 S8z. `readSetInt` for any fixed-width int element type.

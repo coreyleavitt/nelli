@@ -9161,7 +9161,11 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   for every split, `rfind`'s (`last`) included: `s.rfind("")` became `0`
   for any `s`, a false `sxUnsat` on `s.rfind("") == 2` (S8au's `re`, red
   on the S8bl merge). The fold now takes the split's own term
-  (`seq.last_indexof` for `last`). SOUNDNESS, caught by S8au's pins.
+  (`seq.last_indexof` for `last`). SOUNDNESS, caught by S8au's pins. The
+  fold also leaves S8o (4)'s literal-haystack `rfind` with no split, so its
+  query is an ordinary capped one and declines on the cap (`t.len > 10`
+  under 8); S8o (4)'s `lastIndex` pin moves to a non-literal haystack
+  (`lastIdxFree`, `sxSat`; probed: `sxUnknown` without the split's mark).
 - *S8bn's typed `nil`.* `touchPtr(nil)` (a `ptr int` formal) no longer
   declines its argument, so #163's ptr-argument pin decides the raise
   after the summarised call (`sxRaised`, as Nim raises); the untyped

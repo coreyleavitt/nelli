@@ -379,7 +379,7 @@ state = "done"
 [[slice]]
 id = "S8bp"
 title = "S8bm's remainder: isolate the post-step-1 solver steps from walk-context state, move per-thread kind probes out of the first walk's context, unbounded endsWith/contains regex query on Z3 4.13.4"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -10231,3 +10231,142 @@ different mechanism (below).
 - **PRECISION: `s.endsWith(re"b+") and not s.contains(re"b")` with no
   length bound is `sxUnknown` on Z3 4.13.4** (11,234,660 units in its
   second query, `beSolverUndef`). S8ay's pin keeps `s.len <= 8`.
+
+**As landed (S8bp, walker 219) — every search in a context of its own.**
+Suite `tsymex_rfc0005_s8bp_isolation` (8 tests; c on both Z3 versions,
+cpp 5.1). Built on S8bm (14d7e81, based on 621af8f).
+
+- *The theory-free steps were not small.* S8bm left the facts-first
+  check, (1b) and (1c) in the walk's context as "theory-free and small",
+  and (2), (3) and the no-string query (`plain`) because they run less
+  often. All of them moved with the walk's context. With thirty Int
+  constants that no query mentions made before each query
+  (`symexPerturbConsts`, S8bm's probe), a walk whose query holds a
+  factoring search (`x * y == 1022117` beside its strings) cost:
+
+  | Step (query) | Z3 5.1 as is / perturbed | Z3 4.13.4 as is / perturbed |
+  |---|---|---|
+  | facts-first (`preSufNl`) | 369,908 / 327,761 | 242,158 / 202,281 |
+  | (1b) (`preSufNl`) | 191,428 / 43,221 | 397,981 / 221,844 |
+  | (1c) (`preSufNl`) | 114,891 / 350,726 | 398,245 / 202,116 |
+  | (1c) capped (`preSufNl`) | 412,527 / 199,445 | 398,240 / 202,103 |
+  | (2) (`preSufNl`) | 401,123 / 231,590 | 238,219 / 327,223 |
+  | (3) (`lastNl`, cap 8) | 85,882 / 322,405 | 207,893 / 464,636 |
+  | `plain` (`plainNl`) | 124,550 / 92,799 | 74,780 / 94,956 |
+  | step 1 (S8bm) | 372,262 / 372,262 | 250,672 / 250,672 |
+
+  A theory-free step holds the query's arithmetic, so it is as large as
+  that search. `x * x * x == 1030301 * s.len` under a cap of 8 took
+  4,712,338 units in (1b) as is, and ran out of 20M perturbed (4.13.4):
+  a verdict, not only a cost.
+- *Every step in a context of its own.* `ownContextSolver` now builds
+  every `checkCapped` solver: `querySolver`'s solver (theory-free ones on
+  the simple solver where `theoryFreeSimple` says so) over the query
+  translated into a fresh context. Step 2's assumption literal is made in
+  its solver's context and the caps translated there; a model is
+  translated back. Each step's cost is a function of the query alone:
+  every step above is identical with and without the perturbation, on
+  both Z3 versions, as is every step of a thread's first and second walk.
+- *Spend is the own contexts' units.* `ownContextCheck` adds each
+  context's whole count to `ownContextUnits`, and no search is left in the
+  walk's context, so a target hit's spend (`solveTargetHit`) is what that
+  total grew by. S8y's `rlimitCountNow` (the walk context's counter, read
+  through a solver it built there, plus `ownContextUnits`) is gone, as is
+  S8ac's first-solver read in the instrumented build (`queryRLimitBefore`).
+  Pinned: a walk's per-step units, per-query `rlimitDelta`s and target-hit
+  units are equal (5.1: 1,106,184 each). Before, with only step 1 isolated,
+  they were 839,015, 840,025 and 840,388.
+- *The per-thread kind probes in a context of their own.* `seqCapKinds`,
+  `byteDomainKinds`, `intDivDeclKinds`, `heapChainKinds` (S8bd; the job
+  named four, this is a fifth) and `theoryFreeSimple`'s check build their
+  terms in `probeContext()`: a decl kind is the linked Z3's, the same in
+  every context. Before, on Z3 5.1, `lastNl`'s step 3 took 482,126 units in
+  a thread's first walk and 85,882 in its second (facts-first 146,229
+  against 222,919); now the two walks are identical (4.13.4 was equal
+  before too). Pinned on a fresh thread.
+- *The unbounded endsWith run.* Z3 decides each regex membership on its
+  own. `s.endsWith(re"b+") and not s.contains(re"b")` is empty (a string
+  ending in `b` contains one), but on Z3 4.13.4 its query ran out of 20M
+  units with no length cap and took 6.7M to refute under the 128 cap, with
+  the cap in step 2's core (`sxUnknown`, 11,234,660 units in all). The same
+  query as one membership of the intersection with the complement, `s in
+  (B*(b+ & B+)) & comp(B* b B*)`, is UNSAT in 1,392 units (a fresh
+  context). Two changes give the walker that form:
+  - `lowerRegexEntry` reads `s` itself from a literal start 0 (`contains`
+    and `match` without a start): no `str.substr(s, 0, len(s) - 0)` and no
+    range test, so the negated `contains` is a membership of `s`;
+  - `mergeMemberships` (every query, in `checkCapped`'s `rootsIn`) replaces
+    a string term's memberships among the roots' top-level conjuncts, two
+    or more with one negated, by the one membership of the intersection
+    (`not (x in R)` is `x in comp(R)`; the same models). Byte-domain
+    constraints are left as they are.
+
+  The pin is UNSAT in 4,733 units on 4.13.4 and 4,785 on 5.1 (ceiling
+  20,000 on both). S8ay's `endsWithRun` pin drops its `s.len <= 8` bound.
+
+*RED and GREEN.* (1) Per step with and without the perturbation, three
+walks covering all eight steps: RED on both versions (table above), then
+identical. Spend: RED at the commit with step 1 alone isolated (839,015 /
+840,025 / 840,388), then equal. (2) A thread's first and second walk:
+RED on 5.1 (482,126 against 85,882 in step 3), then identical. (3) The
+unbounded endsWith run: RED on 4.13.4 (`sxUnknown`, 11,234,812 units), then
+UNSAT in 4,733. The walker floor `>= 219`.
+
+*Cost.* A fresh context, its solver and the translation take about
+8-10 ms under load (300-iteration probe, both Z3 versions); most walker
+queries open two (facts-first, then step 1). Wall time, the test binary
+alone, side by side with the S8bm head (14d7e81) under the same load:
+`r4_strip` (5.1) 190 and 193 s at S8bm against 244 and 247 s, and
+`s8ae_remainder` (4.13.4, compile included) 229 against 225 s. `r4_strip`
+is one 20M-unit budget-out (strip idempotence; every other walk is under
+0.3 s), and its units are the same (20,031,338 against 20,031,194): Z3's
+wall time per unit follows term order as its units do. Its step 3 (10M
+units) took 135 s in its own context and 58.5 s with a local toggle that
+ran it in the (now otherwise unsearched) walk context; the walk alone ran
+177 and 152 s at S8bm against 168 and 143 s. The suite's binary runs in
+4.5 s (5.1 c), 6.4 s (4.13.4 c) and 4.7 s (cpp).
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8bp_isolation`
+8/0 (cpp 8/0), `phase15_CR2_cachekey` (219) 6/0, `s8bm_stability` 4/0,
+`s8ba_remainder` 32/0, `s8ay_remainder` 40/0 (its `endsWithRun` unbounded),
+`s8aw_remainder` 31/0, `s8au_remainder` 35/0, `s8ag_indexsplit` 15/0,
+`s8aj_remainder` 21/0, `s1c_verdict` 24/0, `s8y_budget_decline` 8/0, and
+every other suite asserting units or an rlimit: `g1b_concolic` 15/0,
+`g2_flip` 8/0, `phase13_rlimit` 1/0, `r4_strip` 5/0, `r6_b5_chained` 9/0,
+`r6_n36_raise_degrade` 8/0, `s1b_kinds` 18/0, `s8ac_remainder` 19/0,
+`s8ad_remainder` 13/0, `s8ae_remainder` 16/0, `s8aq_remainder` 13/0,
+`s8av_remainder` 19/0, `s8ax_remainder` 52/0, `s8bd_remainder` 23/0,
+`s8k_bounds` 19/0, `s8o_termination` 14/0, `s8q_termination` 10/0,
+`s8r_theoryfree` 3/0, `s8t_termination` 20/0, `s8v_termination` 7/0,
+`snd3_6_equality_loop` 3/0, `snd3_loopdegrade` 7/0; and, for the regex
+lowering and the query shapes, `phase15_S6b_regex` 5/0,
+`phase15_S7b_smoke` 8/0, `s5_str` 35/0, `s8w2_hotfix` 4/0. Every query's
+model may move, so the other 392 `tsymex_*` suites were run on 5.1 too
+(all pass, 3,676 tests); Windows `symex-mingw` runs them all on 4.13.4.
+One pin moved there: `s8ar_remainder`'s `iMid` read the witness's index
+as 1, but `v = 10` at index 0 and `v = 20` at index 2 reach its label as
+well, and Z3 4.13.4 now returns the first (a genuine witness). The SUT
+excludes those two values, so the middle insertion is the only way in
+(50/0 on both versions).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: the concolic scratch solves still check in the walk's
+  context** (`concreteBranchOutcome`, `concretelyInfeasible`,
+  `runConcolicCollectImpl`'s concrete-inputs check). They are concolic
+  collection's, not the walker's search, and run under
+  `concreteBranchRLimit`; one that runs out degrades to "not determined",
+  and how much it spends can follow what the context holds.
+- **PRECISION: after a facts-first SAT, steps (1b) and (1c) repeat a
+  decided check.** (1c) is the facts-first query under a larger budget,
+  so in a fresh context it is the same search to the same SAT; (1b) has a
+  subset of its assertions, so it is SAT too. When step 1 then fails they
+  cost as much again: `lastNl` (5.1) spends 295,900 + 311,463 of its
+  1,106,184 units there.
+- **PRECISION: Z3's wall time per unit follows term order.** Units are
+  now a function of the query; wall time per unit is too, but a
+  translated context's order is not the walk's: `r4_strip`'s budget-out
+  step 3 took 135 s here and 58.5 s in the walk's context, for the same
+  10M units (the binary 190-193 s at S8bm against 244-247 s).
+- **PRECISION: `mergeMemberships` reads top-level conjuncts only.** A
+  negated membership under a disjunction or an `ite` (`a or not
+  s.contains(re"b")`) is still decided one membership at a time.

@@ -17565,21 +17565,6 @@ proc unwrittenDisc(sv: SymVal): string =
     ""
   else: ""
 
-proc unboundRecvMsg(name, op: string): string =
-  ## RFC-0005 S8bw (item 1). The decline of a statement whose receiver
-  ## `name` the path has not bound: a module-level global read before any
-  ## write (`lower`'s `iekVar` arm words it the same), or a name the walk
-  ## does not bind where it is used. The statement read it from the env
-  ## directly, and an unbound name was a `KeyError` (`weInternalWalkerFault`):
-  ## `gSeq[0] = k`, `gSeq.pop()`.
-  if isGlobalEnvName(name):
-    op & ": module-level global '" & displayName(name) & "' is read " &
-      "before any write in the walk, so its value is not modelled " &
-      "(feGlobalReadUnmodelled)"
-  else:
-    op & ": '" & name & "' is read where the symbolic walker has not " &
-      "bound it (feGlobalReadUnmodelled)"
-
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -18436,6 +18421,19 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
     for p in active:
       survivors.add forkPathTainted(p, p.pc, p.env, d)
   survivors
+
+proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
+  ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
+  ## updates in place (`xs[i] = v`, `xs.pop()`, `o.kind = k`), and the path
+  ## to continue on. A bound name is read from `Env`. An unbound one is read
+  ## as `lower` reads the name (`iekVar`): a module-level variable the walk
+  ## has not written yet is its ENTRY value (S8as `entryValueOf`, the path
+  ## tainted `feGlobalHavoc`), and anything else declines in-band. The arms
+  ## read `Env` directly before, so a global receiver not yet written
+  ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
+  ## the statement (its `FieldDefect` was never forked).
+  if p.env.hasKey(name): return (p.env[name], p)
+  lowerInExpr(p, mkVar(name), w)
 
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
@@ -19351,19 +19349,14 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # via `storeSeqElem` — the SAME helper `lowerSeqLit`/HOF `.map` already
     # use for construction) instead of binding a fresh read result.
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return
       # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
-      # statement for a bare `nnkSym` receiver already classified `itSeq`, so
-      # `p.env[stmt.iaRecvName]` is a direct, side-effect-free lookup — the
-      # exact shape `lowerLeafInExpr`'s own `iekVar` admission covers, just
-      # read straight from `Env` (no `IRExpr` wrapper needed for a bare name).
-      if not p.env.hasKey(stmt.iaRecvName):
-        let d = w.degrade(feGlobalReadUnmodelled,
-          unboundRecvMsg(stmt.iaRecvName, "element write"))
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let recvSV = p.env[stmt.iaRecvName]
+      # statement for a bare `nnkSym` receiver already classified `itSeq`.
+      # RFC-0005 batch 6: read through `recvValue`, so a global the walk
+      # has not written is its entry value (was a `KeyError`: the path was
+      # dropped, a false `sxUnsat`).
+      let (recvSV, p) = recvValue(p0, stmt.iaRecvName, w)
       if recvSV.kind == svArray and recvSV.arrElems.len > 0:
         # RFC-0005 S8z: `a[i] = v` on an array at a symbolic index (it was
         # `feUnsupportedStmtKind`). The same `IndexDefect` fork as `isIndex`,
@@ -19511,14 +19504,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # own doc comment makes for its post-shrink slot, one level simpler here
     # (no swap-in needed at all).
     var survivors: seq[Path]
-    for p in paths:
+    for p0 in paths:
       if w.shouldStop: return
-      if not p.env.hasKey(stmt.spRecvName):
-        let d = w.degrade(feGlobalReadUnmodelled,
-          unboundRecvMsg(stmt.spRecvName, "pop"))
-        survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
-        continue
-      let recvSV = p.env[stmt.spRecvName]
+      # RFC-0005 batch 6: an unbound global receiver is its entry value
+      # (`recvValue`; was a `KeyError`, reported as a walker fault).
+      let (recvSV, p) = recvValue(p0, stmt.spRecvName, w)
       if recvSV.kind != svSeq:
         let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
         let d = w.degrade(feUnsupportedExprKind,
@@ -19781,18 +19771,11 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # the target. Now: fork the defect on "different branch" and continue
     # on "same branch" with the branch's fields carried over.
     var out2: seq[Path]
-    for p in paths:
-      if not p.env.hasKey(stmt.vrObjName):
-        # RFC-0005 S8bw (item 1): the old discriminator decides Nim's
-        # branch-change `FieldDefect`. An unbound object (a global before
-        # any write) was skipped: the write was dropped with no decline and
-        # `gV.kind = vkB` was a clean `sxSat` past a reassignment Nim makes
-        # raise from the zero value's branch.
-        let d = w.degrade(feGlobalReadUnmodelled,
-          unboundRecvMsg(stmt.vrObjName, "discriminator reassignment"))
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let oldSV = p.env[stmt.vrObjName]
+    for p0 in paths:
+      # RFC-0005 batch 6: an unbound global receiver is its entry value
+      # (`recvValue`). The arm skipped it, so its `FieldDefect` was never
+      # forked (a false `sxUnsat` on the raise).
+      let (oldSV, p) = recvValue(p0, stmt.vrObjName, w)
       if unwrittenDisc(oldSV).len > 0:
         # RFC-0005 S8bw (item 2): a global whose discriminator no write
         # reached (another field was written first).
@@ -19874,14 +19857,9 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # check -- see `isVariantReassign` above), and continue on the same
     # branch with that branch's fields carried (`carryBranchFields`).
     var out2: seq[Path]
-    for p in paths:
-      if not p.env.hasKey(stmt.vrsObjName):
-        # RFC-0005 S8bw (item 1): as `isVariantReassign` above.
-        let d = w.degrade(feGlobalReadUnmodelled,
-          unboundRecvMsg(stmt.vrsObjName, "discriminator reassignment"))
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let oldSV = p.env[stmt.vrsObjName]
+    for p0 in paths:
+      # RFC-0005 batch 6: as `isVariantReassign`'s receiver (`recvValue`).
+      let (oldSV, p) = recvValue(p0, stmt.vrsObjName, w)
       if unwrittenDisc(oldSV).len > 0:
         # RFC-0005 S8bw (item 2): as `isVariantReassign` above.
         # RFC-0005 batch 6: an S8as global's discriminator is its entry

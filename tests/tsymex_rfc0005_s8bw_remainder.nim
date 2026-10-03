@@ -173,9 +173,9 @@ suite "S8bw (1): a global's receiver never faults the walker":
     ## (`weInternalWalkerFault`); `sqp` was a `KeyError`.
     ## RFC-0005 batch 6: an observed read of these globals is S8as's entry
     ## value (`candidate`); Nim raises `IndexDefect` on the empty seq the
-    ## process holds (`sqw`, `sqd`: the replay's verdict).
+    ## process holds (`sqw`, `sqp`, `sqd`: the replay's verdict).
     candidate(sutSeqWrite, "sqw", {sxRaised})
-    inBand(sutSeqPop, "sqp", feGlobalReadUnmodelled, "gSeqPop1")
+    candidate(sutSeqPop, "sqp", {sxRaised})
     candidate(sutSeqDel, "sqd", {sxRaised})
     candidate(sutSeqAdd, "sqa")
 

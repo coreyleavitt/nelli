@@ -1089,6 +1089,10 @@ task test, "Run the test suite":
             # non-constant set literals, newSeqUninit's unwritten reads.
             # Walker 220.
             "tsymex_rfc0005_s8bq_remainder",
+            # RFC-0005 batch 6 -- an index assignment, pop or discriminator
+            # reassignment on a global the walk has not written reads its
+            # entry value (was a false sxUnsat). Walker 230.
+            "tsymex_rfc0005_b6_globalrecv",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

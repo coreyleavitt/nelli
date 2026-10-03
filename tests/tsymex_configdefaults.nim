@@ -444,16 +444,14 @@ suite "RFC-0010 B4 — the default budget actually bounds a runaway search":
     # bound -- the honest way to ask for deeper analysis -- still completes
     # cleanly (no hang, no crash).
     #
-    # The bound deliberately is NOT a "large-looking" round number. A direct
-    # probe (throwaway, deleted after use) against this exact SUT found
-    # unconstrained linear recursion safe through a cap of 85 and SIGSEGV by
-    # 88 on this engine's Linux/podman debug build (8MB `ulimit -s`) -- i.e.
-    # `maxCallDepth: 1000` ITSELF crashes here, because the cap bounds NATIVE
-    # recursion depth and this walker's per-level native stack cost is large.
-    # 50 sits with a wide, verified margin below that ceiling. Deliberately
-    # never pass `maxCallDepth: 0` (or a naively "large" bound) in this
-    # suite: that is the crash, and it would take this entire test binary
-    # down with it, not just this one query.
+    # The bound was sized by a probe on the c backend (safe through 85
+    # levels on an 8 MB stack, SIGSEGV by 88), and on cpp, whose levels
+    # cost more, these same 50 levels ran off the 8 MB stack: the binary
+    # died with rc=139 here. RFC-0005 S8ca: a call is no longer inlined
+    # when the native stack left is under one more level's need, so this
+    # declines in-band on both backends, and so does any larger bound
+    # (`tsymex_rfc0005_s8ca_stack`). `maxCallDepth: 0` still exhausts on
+    # the first call, by design (above).
     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
     check r.status == sxUnknown

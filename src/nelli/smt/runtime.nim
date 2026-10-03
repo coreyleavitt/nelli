@@ -35,6 +35,7 @@ import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
+import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
@@ -11750,6 +11751,18 @@ var queryTimeoutMsCur {.threadvar.}: uint
   ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
   ## every solver `querySolver` builds runs under it. `0` (none) outside a
   ## run.
+var nativeStackCutFlag {.threadvar.}: bool
+  ## RFC-0005 S8ca. Some call of the current run declined because the
+  ## native stack left was under the walk's reserve (`nativeStackShort`);
+  ## reset by `resetSymexRunState`.
+
+proc symexNativeStackCut*(): bool =
+  ## RFC-0005 S8ca. Whether a call of the last run on this thread declined
+  ## for want of native stack. Like a clock cut-off its verdict is the
+  ## machine's (the thread's stack), not only the program's, so
+  ## `saveSymexVerdictImpl` does not cache it.
+  nativeStackCutFlag
+
 var queryTimedOutFlag {.threadvar.}: bool
   ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
   ## (`solveBounded`); reset by `resetSymexRunState`.
@@ -12707,6 +12720,10 @@ type
       ## descent carries its lambda's `retTy` too (a void lambda's is the
       ## `bool` placeholder its unread `funcApp` is sorted by).
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
+    sp:            uint
+      ## RFC-0005 S8ca. The native stack pointer when the frame was pushed:
+      ## the next call's depth check reads one level's stack cost from it
+      ## (`nativeStackShort`).
 
   HandlerFrame = object
     ## Phase 15 E1. One active `try`'s except-arms + finally, pushed onto the
@@ -13066,6 +13083,8 @@ type
                        ## RFC-0005 S8ax: declines at the hard call-depth
                        ## budget so far; an extension that sees this move
                        ## is abandoned at its root (`depthBail`).
+    levelStack: int    ## RFC-0005 S8ca: the most native stack one call
+                       ## level has cost so far (`nativeStackShort`).
     extHardMark: int   ## RFC-0005 S8ax: `depthHardHits` when the current
                        ## extension's root began, -1 outside one; once it
                        ## moves, no call under the root extends again.
@@ -15119,12 +15138,55 @@ proc freshCallRet(stmt: IRStmt; env: Env; z3Name: string;
       return
   freshRetSym(ty, z3Name, pcOut)
 
+const
+  nativeStackReserve = 256 * 1024
+    ## RFC-0005 S8ca. The native stack a call keeps below it beyond two
+    ## levels' cost (`nativeStackShort`): the solves, the lowering and the
+    ## bail of the deepest level, and C++ unwinding.
+  nativeLevelFloor = 192 * 1024
+    ## RFC-0005 S8ca. The least one level is taken to cost, before (or
+    ## while) the walk has measured less. Measured on the Linux/podman
+    ## debug build (`tsymex_rfc0005_s8ca_stack`): one level of linear
+    ## recursion costs about 158 KB on c and 186 KB on cpp, so the first
+    ## call, with nothing measured, is covered too.
+
+proc levelNeed(w: WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack a call needs left to be inlined.
+  nativeStackReserve + 2 * max(w.levelStack, nativeLevelFloor)
+
+proc nativeStackShort(w: var WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack left below this call when it is under
+  ## what inlining one more level needs, else -1. `walk` recurses natively
+  ## once per inlined call, and `maxCallDepth` counts levels, not bytes: a
+  ## cpp level costs more than a c one, and a thread may hold 8 MB (a Linux
+  ## main thread), 2 MB (a Nim thread) or 1 MB (a Windows main thread).
+  ## `tsymex_configdefaults`' crash pin, 50 levels sized on c, ran off an
+  ## 8 MB stack on cpp (SIGSEGV), and the default budget's adaptive depth
+  ## (`maxRecursionDepth`, 24) ran off a 2 MB thread's on both. One
+  ## level's cost is read from the frame pushed one level up (`CallFrame.sp`),
+  ## the most so far kept in `WalkCtx.levelStack`; the need is twice that
+  ## (at least `nativeLevelFloor`) plus `nativeStackReserve` (`levelNeed`):
+  ## about 3 levels on a 1 MB stack, 45 (c) or 39 (cpp) on 8 MB.
+  let left = nativeStackLeft()
+  if left == high(int): return -1   # not measured on this platform
+  if w.callStack.len > 0:
+    let top = w.callStack[^1].sp
+    let here = nativeStackPointer()
+    if top > here: w.levelStack = max(w.levelStack, int(top - here))
+  if left < levelNeed(w): left else: -1
+
+type DepthCut = enum
+  ## RFC-0005 S8ca. Why `depthBail` declines a call.
+  dcutFrontier   ## the frontier was growing: the budget was not extended
+  dcutHard       ## the hard budget was reached (here or under an abandoned
+                 ## extension)
+  dcutStack      ## the native stack left is under the walk's reserve
+
 proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
-               atHard: bool): seq[Path] =
+               cut: DepthCut; stackLeft = 0): seq[Path] =
   ## RFC-0005 S8ax. The call-depth decline: each live path continues past
-  ## the call with a fresh return value, tainted. `atHard`: the hard budget
-  ## was reached (here or under an abandoned extension); otherwise the
-  ## frontier was growing and the budget was not extended.
+  ## the call with a fresh return value, tainted. `cut` says why (S8ca:
+  ## `dcutStack`, with the `stackLeft` bytes it measured).
   ##
   ## (Before S8ax, inline in `walk`'s `isCall` arm.) Bail: continue with a
   ## fresh unconstrained retSym; flag unknown. The surviving paths are marked
@@ -15152,15 +15214,26 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
   ## take is dropped (by the caller), not bailed: it has no behaviour to
   ## lose.
   let why =
-    if atHard:
+    case cut
+    of dcutHard:
       "the call stack reached the hard budget (maxRecursionDepth=" &
         $w.settings.budget.maxRecursionDepth & ")"
-    else:
+    of dcutFrontier:
       "the walks at the next depth would outnumber those at this " &
         "one, so the budget was not extended (maxRecursionDepth=" &
         $w.settings.budget.maxRecursionDepth & " bounds an extension)"
+    of dcutStack:
+      "the native stack left (" & $(stackLeft div 1024) & " KB at depth " &
+        $w.callStack.len & ") is under what one more level needs (" &
+        $(levelNeed(w) div 1024) &
+        " KB), so the call is not inlined whatever the depth budget"
   let d = w.degrade(beBudgetExhaustedUnmodelled,
-    "call-inlining depth budget exhausted (maxCallDepth=" &
+    if cut == dcutStack:
+      "call-inlining stopped by the native stack while inlining `" &
+        stmt.callee & "` — " & why & "; run the analysis on a thread " &
+        "with a larger stack to reach deeper (beBudgetExhaustedUnmodelled)"
+    else:
+      "call-inlining depth budget exhausted (maxCallDepth=" &
          $w.settings.budget.maxCallDepth & ") while inlining `" &
          stmt.callee & "` — " & why & "; raise " &
          "settings.budget.maxCallDepth or maxRecursionDepth if " &
@@ -19313,27 +19386,37 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
     # on the very first call, by design; a caller wanting deep analysis
     # writes an explicit bound sized to the SUT's real max call depth
-    # instead. Do not assume a "large-looking" round number is automatically
-    # safe -- measured directly (this engine's Linux/podman debug build, 8MB
-    # `ulimit -s`) unconstrained linear recursion is safe through a cap of
-    # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
-    # the safe ceiling is build/platform-dependent, not a fixed constant.
+    # instead. RFC-0005 S8ca: a count cannot know what a level costs (more
+    # on cpp than on c) or what the thread's stack holds, so a call is also
+    # not inlined when the native stack left is under one more level's need
+    # (`nativeStackShort`, below).
     # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
     # while the frontier is not growing (`depthMayExtend`) and the stack is
     # under the hard budget (`maxRecursionDepth`). A path no execution can
     # take is dropped first either way (S8an, below).
-    let overDepth = w.callStack.len >= w.settings.budget.maxCallDepth
+    # RFC-0005 S8ca: and, whatever the depth budget, not past the native
+    # stack the walk needs (`nativeStackShort`); the decline is in-band, a
+    # hard-budget decline the extension's root reads as one.
+    let stackLeft = nativeStackShort(w)
+    let overDepth = stackLeft >= 0 or
+      w.callStack.len >= w.settings.budget.maxCallDepth
     var depthLive: seq[Path]
     var extendDepth = false
     if overDepth:
       for p in paths:
         if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
       if depthLive.len == 0: return depthLive
-      extendDepth = depthMayExtend(w, depthLive.len)
+      extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
     if overDepth and not extendDepth:
       # The decline, and its history: `depthBail`.
-      if w.callStack.len >= hardCallDepth(w.settings): inc w.depthHardHits
-      depthBail(w, stmt, depthLive, w.callStack.len >= hardCallDepth(w.settings))
+      let atHard = stackLeft >= 0 or
+        w.callStack.len >= hardCallDepth(w.settings)
+      if atHard: inc w.depthHardHits
+      if stackLeft >= 0: nativeStackCutFlag = true
+      depthBail(w, stmt, depthLive,
+        (if stackLeft >= 0: dcutStack
+         elif atHard: dcutHard
+         else: dcutFrontier), stackLeft)
     else:
       let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
       # RFC-0005 S8ax: the first extended level is the extension's root. A
@@ -19538,7 +19621,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             callee: stmt.callee, retSym: retSym,
             retName: stmt.retName,
             retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
-            returnedPaths: @[])
+            returnedPaths: @[], sp: nativeStackPointer())   # S8ca
           w.callStats[stmt.callee] = CallStat(
             name: stmt.callee,
             walked: w.callStats[stmt.callee].walked + 1,
@@ -19835,7 +19918,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
             survivors.add merged
       w.extHardMark = outerExtMark
       if extRoot and w.depthHardHits > hardMark:
-        return depthBail(w, stmt, paths, true)
+        return depthBail(w, stmt, paths, dcutHard)
       survivors
   of isAssert:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -21446,7 +21529,8 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # path joined `returnedPaths` unbound, and the explicit-return loop
     # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
     # return` asserted `y > 0` as a ground axiom of the whole run.
-    retTy: cb.retTy)
+    retTy: cb.retTy,
+    sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
   let frameIx = w.callStack.high
   # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
   # to them below.
@@ -23217,6 +23301,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   setCurrentContext(ctx)
   queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
   queryTimedOutFlag = false                            ## RFC-0005 S8bu
+  nativeStackCutFlag = false                           ## RFC-0005 S8ca
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0

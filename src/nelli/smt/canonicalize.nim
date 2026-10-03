@@ -202,7 +202,13 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "225"
+const symexWalkerVersion* = "233"
+  ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
+  ## not inlined when the native stack left below it is under what one more
+  ## level needs (`nativeStackShort`): it declines in-band
+  ## (`beBudgetExhaustedUnmodelled`, naming the native stack) whatever
+  ## `maxCallDepth` says, where the walk overflowed the stack (SIGSEGV) on
+  ## cpp and on a small thread stack. 225 -> 233.
   ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
   ## query is decided beside the inverse of each signed Int view it holds
   ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==

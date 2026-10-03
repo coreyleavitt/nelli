@@ -1176,5 +1176,9 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bu_mitems",
             # items 5-6: an array element on a path into an address-taken
             # variable; a by-value seq whose whole address is taken.
-            "tsymex_rfc0005_s8bu_paths"]:
+            "tsymex_rfc0005_s8bu_paths",
+            # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
+            # declines in-band when the native stack left is under one more
+            # level's need.
+            "tsymex_rfc0005_s8ca_stack"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

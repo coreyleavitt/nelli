@@ -3155,14 +3155,15 @@ type
       ## here exhausts on the very first call, same as any other
       ## implausibly-tight budget. A caller who wants deep analysis should
       ## write an explicit bound sized to the SUT's real maximum call depth
-      ## instead. Do not assume a "large-looking" round number is
-      ## automatically safe: this cap bounds NATIVE recursion depth, and
-      ## measured directly (this engine's Linux/podman debug build, 8MB
-      ## `ulimit -s`) unconstrained linear recursion is safe through a cap
-      ## of 85 and SIGSEGVs by 88 — `maxCallDepth: 1000` itself crashes.
-      ## Pick a bound close to the depth actually needed and verify
-      ## empirically before raising it substantially; the exact ceiling is
-      ## build/platform-dependent, not a fixed constant.
+      ## instead. This cap bounds NATIVE recursion depth, and what one
+      ## level costs is build- and backend-dependent; RFC-0005 S8ca: the
+      ## walk no longer trusts the count alone. A call is not inlined when
+      ## the native stack left below it is under what one more level needs
+      ## (`nativeStackShort` in `runtime.nim`): it declines in-band
+      ## (`beBudgetExhaustedUnmodelled`, naming the native stack) at any
+      ## `maxCallDepth`, about 48 levels on an 8 MB stack on c, 40 on cpp,
+      ## 3 on 1 MB. Before S8ca a large cap overflowed the stack (SIGSEGV):
+      ## 50 levels on cpp, 88 on c.
     maxRecursionDepth*: int = 24
       ## RFC-0005 S8ax. The hard budget on the call-inlining depth. Past
       ## `maxCallDepth` the walk keeps inlining while the frontier is not
@@ -3172,8 +3173,9 @@ type
       ## arguments decide is then followed to its base case; one that fans
       ## out declines at `maxCallDepth` as before. Default `24`. Past it the
       ## call declines (`beBudgetExhaustedUnmodelled`), naming both budgets.
-      ## `0` turns the extension off. The same native-stack ceiling as
-      ## `maxCallDepth` applies (safe through 85 on the Linux debug build).
+      ## `0` turns the extension off. The same native-stack check as
+      ## `maxCallDepth`'s applies (RFC-0005 S8ca): on a 2 MB thread the
+      ## extension's 24 levels overflowed the stack before it.
     maxLoopUnwind*: int = 5
       ## Phase-6 loop unrolling cap; >= 1 — one of the ResourceBudget fields
       ## `0` does NOT mean unlimited for (RFC-0010 B4; see the type's own

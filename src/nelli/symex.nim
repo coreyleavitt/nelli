@@ -504,7 +504,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   # RFC-0005 S8bu: an `sxUnknown` some solve of whose run the wall clock
   # cut off (`queryTimeoutMs`) is the machine's, not only the program's:
   # another machine may decide it. Not cached.
-  if status == sfUnknown and symexQueryTimedOut(): return
+  # RFC-0005 S8ca: likewise one a call declined for want of native stack
+  # (`symexNativeStackCut`): a thread with a larger stack goes deeper.
+  if status == sfUnknown and (symexQueryTimedOut() or symexNativeStackCut()):
+    return
   if not metaReady(db, "saveSymexVerdictImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),

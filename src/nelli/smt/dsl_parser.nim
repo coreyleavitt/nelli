@@ -5665,7 +5665,8 @@ proc varLocOf(lv: NimNode; temp, mode: string;
       rev.add t
       t = t[0]
     of nnkBracketExpr:
-      if t.len != 2 or t[0].typeKind != ntySequence or
+      # RFC-0005 S8bu: an array's element too (`locGet`).
+      if t.len != 2 or t[0].typeKind notin {ntySequence, ntyArray} or
          not stableIndex(t[1], []):
         ok = false
         break
@@ -5690,8 +5691,13 @@ proc varLocOf(lv: NimNode; temp, mode: string;
         path.add macros.strVal(st[1])
       else:
         let ix = freshSynth(ctx, "varLocIx")
-        preamble.add mkLet(ix, classifyType(st[1]).ty,
-                           parseExpr(st[1], preamble, ctx))
+        var ixIR = parseExpr(st[1], preamble, ctx)
+        # RFC-0005 S8bu: an array's step is its position (the index less
+        # the array's first index).
+        if st[0].typeKind == ntyArray:
+          let lo = arrayIndexLow(st[0])
+          if lo != 0: ixIR = mkBinop(bSub, ixIR, mkIntLit(lo))
+        preamble.add mkLet(ix, classifyType(st[1]).ty, ixIR)
         path.add "[" & ix
   locs.add (temp: temp, root: strVal(root), path: path, mode: mode)
 

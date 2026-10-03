@@ -1514,6 +1514,18 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   for c in stored: p.heaps[c.key] = c.arr
   heapCellSelect(ctx, stored, refAst, ty)
 
+proc arrayLocIx(ix: SymVal; n: int): Option[int] =
+  ## RFC-0005 S8bu. The position an array step's index (`locGet`) names,
+  ## when its term folds to a numeral in `0 ..< n`.
+  if ix.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}: return none(int)
+  let folded = simplify(toZ3Int(ix))
+  if getAstKind(folded) != akNumeral: return none(int)
+  try:
+    let k = parseInt(getNumeralString(folded))
+    if k >= 0 and k < n: return some(k)
+  except CatchableError: discard
+  none(int)
+
 proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
             k = 0; j = 0): Option[SymVal] =
   ## RFC-0005 S8bs. The part of `v` at `path` (`AddrCellEntry`): a field of
@@ -1522,6 +1534,23 @@ proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
   ## step the walk does not follow.
   if k >= path.len: return some(v)
   let st = path[k]
+  if st.startsWith("[") and v.kind == svArray:
+    # RFC-0005 S8bu: an array's element; a symbolic index selects through
+    # an `ite` over the elements, as a read `a[i]` does (`iekIndex`). The
+    # caller checked the index in bounds where it evaluated the actual.
+    if j >= ixs.len or v.arrElems.len == 0: return none(SymVal)
+    let at = arrayLocIx(ixs[j], v.arrElems.len)
+    if at.isSome:
+      return locGet(v.arrElems[at.get], path, ixs, k + 1, j + 1)
+    var parts: seq[SymVal]
+    for e in v.arrElems:
+      let r = locGet(e, path, ixs, k + 1, j + 1)
+      if r.isNone: return none(SymVal)
+      parts.add r.get
+    var res = parts[0]
+    for q in 1 ..< parts.len:
+      res = iteSV(symEq(ixs[j], coerceIntLit(ixs[j], int64(q))), parts[q], res)
+    return some(res)
   if st.startsWith("["):
     if j >= ixs.len or v.kind != svSeq or isTreeSeqElemTy(v.seqElemTy) or
        not isBackedSeqElemTy(v.seqElemTy) or
@@ -1549,6 +1578,21 @@ proc locSet(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
   ## RFC-0005 S8bs. `v` with its part at `path` (`locGet`) replaced by `x`.
   if k >= path.len: return some(x)
   let st = path[k]
+  if st.startsWith("[") and v.kind == svArray:
+    # RFC-0005 S8bu: an array's element (`locGet`): the named one, or each
+    # one under its index's `ite`.
+    if j >= ixs.len or v.arrElems.len == 0: return none(SymVal)
+    let at = arrayLocIx(ixs[j], v.arrElems.len)
+    var nv = v
+    for q in 0 ..< v.arrElems.len:
+      if at.isSome and at.get != q: continue
+      let r = locSet(v.arrElems[q], path, ixs, x, k + 1, j + 1)
+      if r.isNone: return none(SymVal)
+      nv.arrElems[q] =
+        if at.isSome: r.get
+        else: iteSV(symEq(ixs[j], coerceIntLit(ixs[j], int64(q))), r.get,
+                    v.arrElems[q])
+    return some(nv)
   if st.startsWith("["):
     if locGet(v, path[k .. k], ixs[j .. ^1]).isNone: return none(SymVal)
     let idx = toZ3Int(ixs[j])

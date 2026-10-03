@@ -214,6 +214,8 @@ const symexWalkerVersion* = "225"
   ## signed Int bridge); a `var` one is written back over what it views
   ## (`iekSeqSplice`).
   ## `mitems` / `mpairs` make the loop variable the element itself.
+  ## A path into an address-taken variable steps through an array element,
+  ## at a constant or a symbolic index.
   ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a

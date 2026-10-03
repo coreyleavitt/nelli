@@ -1173,5 +1173,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bu_views",
             "tsymex_rfc0005_s8bu_varviews",
             # item 4: mitems / mpairs.
-            "tsymex_rfc0005_s8bu_mitems"]:
+            "tsymex_rfc0005_s8bu_mitems",
+            # items 5-6: an array element on a path into an address-taken
+            # variable; a by-value seq whose whole address is taken.
+            "tsymex_rfc0005_s8bu_paths"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

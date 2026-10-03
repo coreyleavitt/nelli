@@ -1936,10 +1936,136 @@ proc splitIndexChecks(seg: seq[IRStmt]; cut: int; ir: IRExpr;
     "an unchecked read, undefined in Nim (feEvalOrderUnmodelled)")]))])
   for i in cut ..< seg.len: tail.add seg[i]
   true
+type LateAddr = object
+  ## RFC-0005 S8bk. Where a by-address argument's lvalue was lowered
+  ## (`userCallStmt`): its address and value reads are
+  ## `preamble[lo ..< hi]`, and the statements that bind them for the call
+  ## (a copy-in temporary, S8an's cell) `preamble[hi ..< bindEnd]`.
+  ## `growable[j]` is true when the container of the `j`-th index on the
+  ## lvalue's path (root first) is not an array, so that its length may
+  ## change (`lvalueIndexGrowable`). `ok` is false for an argument without
+  ## one (a variable, a cell shared with an earlier `addr`).
+  ok: bool
+  lo, hi, bindEnd: int
+  growable: seq[bool]
+
+proc lvalueIndexGrowable(lv: NimNode): seq[bool] =
+  ## RFC-0005 S8bk. For each index on the lvalue path `lv`, root first:
+  ## whether its container is anything but an array (a seq, a string),
+  ## whose length a later call may change.
+  var t = lv
+  var rev: seq[bool]
+  while true:
+    if t.kind != nnkSym and t.len == 0 and byRefName(t).len > 0: break
+    case t.kind
+    of nnkBracketExpr:
+      if t.len == 0: break
+      rev.add(t[0].typeKind != ntyArray)
+      t = t[0]
+    of nnkDotExpr, nnkCheckedFieldExpr, nnkHiddenAddr, nnkAddr,
+       nnkDerefExpr, nnkHiddenDeref:
+      if t.len == 0: break
+      t = t[0]
+    of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+      if t.len == 0: break
+      t = t[^1]
+    else: break
+  for k in countdown(rev.high, 0): result.add rev[k]
+
+proc stmtDefines(s: IRStmt): string =
+  ## RFC-0005 S8bk. The name a lazy read statement binds.
+  case s.kind
+  of isLet: s.lname
+  of isIndex: s.ixRetName
+  of isVariantField: s.vfRetName
+  of isDeref: s.dRetName
+  else: ""
+
+proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
+                   outPre, tail: var seq[IRStmt]; ctx: ParseCtx) =
+  ## RFC-0005 S8bk. A by-address argument (`var` / `addr` / by reference)
+  ## that a later argument's call may write past. Nim takes its address AT
+  ## THE CALL, after every later argument (`T1_ = moveP(); touch(&(*gP).x,
+  ## T1_)`): the callee reads and writes the cell the lvalue names then.
+  ## Only the address's checks -- an index's bound -- run where the
+  ## argument stands. So the lvalue's trailing lazy reads (`lazyStmt`), and
+  ## what binds them for the call, move after the last argument; its eager
+  ## part (a call it makes, `getB().x`'s `getB()`) stays, evaluated once.
+  ## Each moved index check is exact only while the values it reads are
+  ## those it read where it stood: its index, and the length of a container
+  ## that may change (`growable`) are snapshotted there, and a path on which
+  ## a later call changed either declines before the access
+  ## (`feEvalOrderUnmodelled`: Nim accesses through a value it never
+  ## checked, undefined behaviour). A check this cannot snapshot (one that
+  ## reads a moved read, a variant arm's discriminant, a checked
+  ## arithmetic) keeps the lvalue where it stands and the call declines
+  ## whenever a later argument may write.
+  let lo = la.lo - base
+  let hi = la.hi - base
+  let be = la.bindEnd - base
+  outPre.add seg[0 ..< lo]
+  var cut = hi
+  while cut > lo and lazyStmt(seg[cut - 1]): dec cut
+  outPre.add seg[lo ..< cut]
+  var defined: seq[string]
+  for i in cut ..< hi: defined.add stmtDefines(seg[i])
+  var nIndex = 0
+  for i in lo ..< hi:
+    if seg[i].kind == isIndex: inc nIndex
+  proc readsMoved(e: IRExpr): bool =
+    var vs: seq[string]
+    irVars(e, vs)
+    for v in vs:
+      if v in defined: return true
+    false
+  var guards = newSeq[IRExpr](hi - cut)
+  var snaps: seq[IRStmt]
+  var exact = true
+  var ord = 0
+  for i in lo ..< hi:
+    let s = seg[i]
+    let j = ord
+    if s.kind == isIndex: inc ord
+    if i < cut or not lazyChecked(s): continue
+    if s.kind != isIndex or nIndex != la.growable.len or
+       readsMoved(s.ixIdx) or (la.growable[j] and readsMoved(s.ixArr)):
+      exact = false
+      break
+    var differs: IRExpr = nil
+    if not isLiteralIR(s.ixIdx):
+      let snap = freshSynth(ctx, "addrsnap")
+      snaps.add mkLet(snap, nil, s.ixIdx)
+      differs = mkBinop(bNe, s.ixIdx, mkVar(snap))
+    if la.growable[j]:
+      let snap = freshSynth(ctx, "addrsnap")
+      snaps.add mkLet(snap, nil, mkSeqLen(s.ixArr))
+      let d = mkBinop(bNe, mkSeqLen(s.ixArr), mkVar(snap))
+      differs = if differs == nil: d else: mkBinop(bOr, differs, d)
+    guards[i - cut] = differs
+  if not exact:
+    outPre.add seg[cut ..< seg.len]
+    tail.add ctx.declineMarker(feEvalOrderUnmodelled,
+      "a by-address argument whose address Nim checks where it stands " &
+      "and takes at the call, after a later argument's call that may " &
+      "change what the check read (feEvalOrderUnmodelled)")
+    return
+  outPre.add snaps
+  let why = "a by-address argument's address is checked where it stands " &
+            "and taken at the call, after a later argument's call changed " &
+            "what the check read: Nim accesses through a value it never " &
+            "checked (feEvalOrderUnmodelled)"
+  for i in cut ..< hi:
+    if guards[i - cut] != nil:
+      tail.add mkIf(@[mkBranch(guards[i - cut],
+                      mkBlock(@[ctx.declineMarker(feEvalOrderUnmodelled, why)]))])
+    tail.add seg[i]
+  tail.add seg[hi ..< be]
+  tail.add seg[be ..< seg.len]
 
 proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
                    irs: var seq[IRExpr]; tys: seq[IRType]; mode: OrderMode;
-                   ctx: ParseCtx; fixed: seq[bool] = @[]) =
+                   ctx: ParseCtx; fixed: seq[bool] = @[];
+                   late: seq[LateAddr] = @[]) =
   ## RFC-0005 S8ax. Operand `k` of an expression was parsed into
   ## `irs[k]`, its statements into `preamble[marks[k] ..< marks[k+1]]` (the
   ## last up to the end). Where a later operand's statements may write
@@ -1959,7 +2085,9 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
   ##   operand may write: its container has no comparison to snapshot.
   ##
   ## An operand `fixed[k]` marks (a `var` or `addr` argument, passed by
-  ## address) is left as it is.
+  ## address) is left as it is, unless `late[k]` says where its lvalue was
+  ## lowered: RFC-0005 S8bk, its address is taken at the call
+  ## (`placeLateAddr`).
   let n = irs.len
   if n < 2: return
   var segs = newSeq[seq[IRStmt]](n)
@@ -1981,7 +2109,14 @@ proc orderOperands(preamble: var seq[IRStmt]; marks: seq[int];
   var tail: seq[IRStmt]
   for k in 0 ..< n:
     if not later[k] or (k < fixed.len and fixed[k]):
-      outPre.add segs[k]
+      # RFC-0005 S8bk: a by-address argument a later argument's call may
+      # write past has its address taken at the call (`placeLateAddr`).
+      # Only `fixed` operands carry a `late` entry, so this never meets
+      # S8be's `splitIndexChecks` below, which handles the by-value ones.
+      if later[k] and k < late.len and late[k].ok:
+        placeLateAddr(segs[k], late[k], marks[k], outPre, tail, ctx)
+      else:
+        outPre.add segs[k]
       # RFC-0005 S8be: a call left inline in a later operand (a closure
       # call in a `while` guard, which hoists nothing, or in a call's
       # argument) runs where it stands, before the earlier operands' inline
@@ -5535,6 +5670,9 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   var argMarks: seq[int]
   var argTys: seq[IRType]
   var argFixed: seq[bool]
+  # RFC-0005 S8bk: where each by-address argument's lvalue was lowered, so
+  # that its address is taken at the call (`placeLateAddr`).
+  var argLate: seq[LateAddr]
   # RFC-0005 S8ax: index pairs under which two by-address arguments are
   # one location (`aliasPath`); the call declines on the paths where they
   # all may be equal.
@@ -5562,6 +5700,7 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     argMarks.add preamble.len
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(n[i].kind == nnkHiddenAddr or addrActualLvalue(n[i]) != nil)
+    argLate.add LateAddr()
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
       var heapSteps: seq[NimNode]
@@ -5590,7 +5729,11 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         if b.idx < 0: break byRef
         aliasConds.add brConds
         byRefs.add b
+        let lo = preamble.len
         argIRs.add parseExpr(b.base, preamble, ctx)
+        argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
+                               bindEnd: preamble.len,
+                               growable: lvalueIndexGrowable(b.base))
         continue
       block:
         var syms: seq[NimNode]
@@ -5661,10 +5804,15 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                   "for the call and the direct access are not one " &
                   "location in the walk (feUnsupportedOp)"),
           "addr argument reachable through a global (feUnsupportedOp)")
+      let lvLo = preamble.len
       let lvIR = parseExpr(addrLv, preamble, ctx)
+      let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
                                 cell = true)
+      argLate[^1] = LateAddr(ok: true, lo: lvLo, hi: lvHi,
+                             bindEnd: preamble.len,
+                             growable: lvalueIndexGrowable(addrLv))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(addrLv, newEmptyNode()), mkVar(back),
@@ -5697,10 +5845,16 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         if b.idx < 0: break byRef
         aliasConds.add brConds
         byRefs.add b
+        let lo = preamble.len
         argIRs.add parseExpr(b.base, preamble, ctx)
+        argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
+                               bindEnd: preamble.len,
+                               growable: lvalueIndexGrowable(b.base))
         byRefTaken = true
     if byRefTaken: continue
+    let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
+    let irHi = preamble.len
     if n[i].kind == nnkHiddenAddr and n[i].len == 1:
       var lv = n[i][0]
       if isVarIndirection(lv): lv = lv[0]
@@ -5754,9 +5908,14 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # An lvalue shape `parseAsgn` declines is its own scoped marker
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
+          # RFC-0005 S8bk: copied in at the call, through the address the
+          # copy-out writes (`placeLateAddr`).
+          argLate[^1] = LateAddr(ok: true, lo: irLo, hi: irHi,
+                                 bindEnd: preamble.len,
+                                 growable: lvalueIndexGrowable(lv))
     argIRs.add ir
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
-                argFixed)   ## RFC-0005 S8ax; S8be: in a `while` guard too
+                argFixed, argLate)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
   # RFC-0005 S8ax: the indices are free of side effects (`stableIndex`), so
   # reading them again after the arguments is reading the same values.
   for pairs in aliasConds:
@@ -6117,9 +6276,19 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       let k = if derefIsPtr(d) or objectInherits(d.getTypeInst): "t:?"
               else: cellTypeKey(d.getTypeInst)
       if k notin touch: touch.add k
+  # RFC-0005 batch 5 (S8bk): where each argument's statements start, its
+  # type, whether it is passed by address, and where a by-address lvalue
+  # was lowered (`orderOperands`, `placeLateAddr`), as `userCallStmt` keeps.
+  var argMarks: seq[int]
+  var argTys: seq[IRType]
+  var argFixed: seq[bool]
+  var argLate = newSeq[LateAddr](nArgs)
   for i in 1 ..< n.len:
     let k = i - 1
     let lv = lvOf[i]
+    argMarks.add preamble.len
+    argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
+    argFixed.add(not lv.isNil)
     if lv.isNil:
       argIRs.add parseExpr(n[i], preamble, ctx)
       continue
@@ -6154,10 +6323,14 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       cellOfArg[i] = cell
       let ptrTy = classifyType(n[i]).ty
       let elemTy = classifyType(lv).ty
+      let lvLo = preamble.len
       let lvIR = parseExpr(lv, preamble, ctx)
+      let lvHi = preamble.len
       preamble.add mkNewT(cell, ptrTy)
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
                                 cell = true)
+      argLate[k] = LateAddr(ok: true, lo: lvLo, hi: lvHi, bindEnd: preamble.len,
+                            growable: lvalueIndexGrowable(lv))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), mkVar(back),
@@ -6166,7 +6339,9 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       argIRs.add mkVar(cell)
       addrArgs.add k
       continue
+    let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
+    let irHi = preamble.len
     if lv.kind == nnkSym:
       if ir.kind != iekVar:
         declines.add declineHere("`var` argument `" & lv.repr & "` names no " &
@@ -6175,9 +6350,21 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       continue
     let t = freshSynth(ctx, "varArg")
     preamble.add mkLet(t, classifyType(lv).ty, ir)
+    # RFC-0005 batch 5 (S8bk): copied in at the call, through the address
+    # the write-back writes.
+    argLate[k] = LateAddr(ok: true, lo: irLo, hi: irHi, bindEnd: preamble.len,
+                          growable: lvalueIndexGrowable(lv))
     temps[i] = t
     backs.add (i: i, lv: lv)
     argIRs.add mkVar(t)
+  # RFC-0005 batch 5 (S8bk on S8bh's path): Nim takes a `var` / `addr`
+  # actual's address at the call, after every later argument -- `let f =
+  # touch; f(gP.x, moveP())` writes the object `moveP` installed, as
+  # `touch(gP.x, moveP())` does -- and reads a by-value argument where
+  # S8ax's order puts it. The lvalues read late (`placeLateAddr`); before,
+  # the copy-in read the old object and the write-back wrote the new.
+  orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
+                argFixed, argLate)
   # The peer pairs: each argument at most one, mutual, both `var` or both
   # `addr`, through refs read without effect, along one field path.
   var pair: tuple[a, b: int] = (0, 0)

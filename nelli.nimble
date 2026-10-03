@@ -1157,5 +1157,6 @@ task test, "Run the test suite":
             # same with and without the facts-first check); a slice
             # element's byte test in character form; B1-1's tight unit
             # ceiling. Walker 209->214.
-            "tsymex_rfc0005_s8bm_stability"]:
+            "tsymex_rfc0005_s8bm_stability",
+            "tsymex_rfc0005_s8bk_argtiming"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

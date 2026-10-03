@@ -8839,6 +8839,16 @@ closed and is not in it. Where slices met:
 - *Threaded replay.* S8be's `runReplayBounded` collects the calling
   thread's ORC cycle roots before it hands the job to the replay thread.
   The merged S8bg suite crashed with a SIGSEGV in `unregisterCycle`.
+- *A size argument is evaluated once* (found integrating, present since
+  S8at / S8bc). `parseNewSeqLen` and `parseInitContainer` read their
+  argument in both guard branches and in the result. A closure call left
+  inline there (`parseExpr` keeps one inline, and `parseAtomicOperand`
+  hoists nothing in a `while` guard) was applied each time: `while
+  newSeq[int](f(x)).len > 2 and it < 1`, with `f` counting its calls,
+  reached `cnt > 2` (`sxSat`; Nim's count is at most 2) and missed
+  `cnt == 2` (`sxUnsat`), and `initTable[int, int](f(x))` counted 2. The
+  argument is now bound to a `let` unless it is an atom
+  (`sizeOperandOnce`). It is pinned in the S8bi suite with native checks.
 - *B1-1 under S8bm's own context* uses 46,529 units on Z3 5.1 (ceiling
   100k) and 79,510 on 4.13.4 (ceiling 160k), with batch 4's `isTabKeys`
   facts in the translated query.

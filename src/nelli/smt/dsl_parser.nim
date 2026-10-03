@@ -6096,7 +6096,25 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
 
 const maxModelledInitialSize = 1'i64 shl 20
   ## RFC-0005 S8at. The largest `initialSize` an `initTable`/`initHashSet`
-  ## call is modelled at (see `parseInitContainer`).
+  ## call is modelled at (see `parseInitContainer`). RFC-0005 S8bc / batch
+  ## 5: the largest length every seq constructor is (`parseNewSeqLen`).
+
+proc sizeOperandOnce(ir: IRExpr; n: NimNode; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): IRExpr =
+  ## RFC-0005 batch 5. A size or length argument read by its guard's
+  ## branches and by the result: bound to a `let` unless it is already an
+  ## atom, so it is evaluated once, as Nim evaluates it. `parseExpr` leaves
+  ## a closure call inline, and `parseAtomicOperand` hoists nothing in a
+  ## `while` guard: `while newSeq[int](f(x)).len > 2` applied `f` three
+  ## times per test (each guard branch and the length), and
+  ## `initTable[int, int](f(x))` twice -- a write `f` makes landed twice (a
+  ## false `sxSat`, and a false `sxUnsat` for the count Nim makes). The
+  ## guard already gives the `while` guard a preamble, so binding adds
+  ## none.
+  if isAtomicIR(ir) or n.typeKind == ntyNone: return ir
+  let tmp = freshSynth(ctx, "sizeArg")
+  preamble.add mkLet(tmp, classifyType(n).ty, ir)
+  mkVar(tmp)
 
 proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
                         ctx: ParseCtx): IRExpr =
@@ -6127,7 +6145,8 @@ proc parseInitContainer(n, calleeSym: NimNode; preamble: var seq[IRStmt];
     let literalOk = lit.kind in nnkCharLit..nnkUInt64Lit and
       lit.intVal >= 0 and lit.intVal <= maxModelledInitialSize
     if not literalOk:
-      let sizeIR = parseExpr(n[1], preamble, ctx)
+      let sizeIR = sizeOperandOnce(parseExpr(n[1], preamble, ctx), n[1],
+                                   preamble, ctx)
       let name = calleeSym.strVal
       preamble.add mkIf(@[
         mkBranch(mkBinop(bLt, sizeIR, mkIntLit(0)),
@@ -6158,7 +6177,8 @@ proc parseNewSeqLen(lenNode: NimNode; name: string;
   if lit.kind in nnkCharLit..nnkUInt64Lit and lit.intVal >= 0 and
      lit.intVal <= maxModelledInitialSize:
     return mkIntLit(lit.intVal)
-  let lenIR = parseAtomicOperand(lit, preamble, ctx)
+  let lenIR = sizeOperandOnce(parseAtomicOperand(lit, preamble, ctx), lit,
+                              preamble, ctx)
   preamble.add mkIf(@[
     mkBranch(mkBinop(bLt, lenIR, mkIntLit(0)), mkRaise("RangeDefect", nil)),
     mkBranch(mkBinop(bGt, lenIR, mkIntLit(maxModelledInitialSize)),

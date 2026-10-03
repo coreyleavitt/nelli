@@ -222,7 +222,11 @@ const symexWalkerVersion* = "223"
   ## `keepInlineRaiseOrder` runs inside S8ax's `parseOperandPair`. S8bh's
   ## unknown-callee `var` havoc logs its facts as `rskClosureExit`. The
   ## threaded replay (S8be) collects the calling thread's ORC cycle roots
-  ## first (a SIGSEGV in `unregisterCycle`). 217 -> 223.
+  ## first (a SIGSEGV in `unregisterCycle`). A size or length argument
+  ## (`parseNewSeqLen`, `parseInitContainer`) is bound once
+  ## (`sizeOperandOnce`): in a `while` guard, or as `initTable`'s size, a
+  ## closure call in it was applied by each guard branch and by the result
+  ## (a false `sxSat` and a false `sxUnsat` on what it writes). 217 -> 223.
   ##
   ## RFC-0005 batch 4 (2026-10-02) — S8bb (on S8ay), S8bc (on S8at), S8be
   ## (on S8ax) and S8bh (on S8bf) were built on the channel with

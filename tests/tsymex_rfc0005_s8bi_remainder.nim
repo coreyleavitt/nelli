@@ -25,7 +25,7 @@
 ##
 ## Item 5: every recursive Z3 definition carries a decreasing fuel bound
 ## (Z3 unfolds one without spending `rlimit`); a source scan pins it.
-import std/[unittest, strutils, re, sequtils, os]
+import std/[unittest, strutils, re, sequtils, os, tables]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -318,6 +318,42 @@ proc nsOfCapLenB(n: int) =
   let xs = newSeqOfCap[int](n)
   if xs.len != 0: symexTarget("bi_ns_ofcap_len_b")
 
+# RFC-0005 batch 5: a size argument is evaluated once. In a `while` guard
+# `parseAtomicOperand` hoists nothing, and `parseExpr` leaves a closure
+# call inline: the length guard's two branches and the length itself each
+# applied `f` (and `initTable`'s size guard, twice, anywhere).
+
+proc nsGuardOnce(x: int) =
+  if x < 0 or x > 1000: return
+  var cnt = 0
+  let f = proc (k: int): int =
+    inc cnt
+    k
+  var it = 0
+  while newSeq[int](f(x)).len > 2 and it < 1:
+    inc it
+  if cnt > 2: symexTarget("bi_ns_guard_once")
+
+proc nsGuardTwo(x: int) =
+  if x < 0 or x > 1000: return
+  var cnt = 0
+  let f = proc (k: int): int =
+    inc cnt
+    k
+  var it = 0
+  while newSeq[int](f(x)).len > 2 and it < 1:
+    inc it
+  if cnt == 2: symexTarget("bi_ns_guard_two")
+
+proc initSizeOnce(x: int) =
+  if x < 0 or x > 1000: return
+  var cnt = 0
+  let f = proc (k: int): int =
+    inc cnt
+    k
+  let t = initTable[int, int](f(x))
+  if cnt != 1 or t.len != 0: symexTarget("bi_init_size_once")
+
 proc nsShortCircuitB(n: int) =
   var k = 0
   try:
@@ -609,6 +645,30 @@ suite "S8bi (3): newSeq, newSeqOfCap, newSeqUninit":
     check not r.errors.hasKind(seNestedSeqUnsupported)
     check verdict(nsTupleZero, "bi_ns_tuple_zero").status == sxSat
     check verdict(nsTupleNonZero, "bi_ns_tuple_nonzero").status == sxUnsat
+
+suite "batch 5: a size argument is evaluated once":
+  test "native: the guard applies f once per test":
+    var cnt = 0
+    let f = proc (k: int): int =
+      inc cnt
+      k
+    var it = 0
+    while newSeq[int](f(5)).len > 2 and it < 1:
+      inc it
+    check cnt == 2
+    var c2 = 0
+    let g = proc (k: int): int =
+      inc c2
+      k
+    let t = initTable[int, int](g(5))
+    check c2 == 1 and t.len == 0
+  test "newSeq's length in a while guard":
+    # Before: f applied three times per test, so cnt > 2 was sxSat and the
+    # count Nim makes (2, at x = 5) sxUnsat.
+    check verdict(nsGuardOnce, "bi_ns_guard_once").status == sxUnsat
+    check verdict(nsGuardTwo, "bi_ns_guard_two").status == sxSat
+  test "initTable's size":
+    check verdict(initSizeOnce, "bi_init_size_once").status == sxUnsat
 
 suite "S8bi (4): set literals in `in` / `notin`":
   test "notin over a char range and a char":

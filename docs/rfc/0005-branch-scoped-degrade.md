@@ -417,6 +417,11 @@ title = "S8bb's remainder B: PCRE backtracking verbs and start-optimiser parity,
 state = "done"
 
 [[slice]]
+id = "S8br"
+title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate once, read late), checks no snapshot carries (frame-condition the later call), S8bk suite compile time"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

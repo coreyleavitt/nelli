@@ -147,7 +147,11 @@ suite "S8ca (2): a 2 MB thread":
     createThread(t, onThread, 0)
     joinThread(t)
     check outs[0].left > 0
-    check outs[0].left < 2 * 1024 * 1024
+    when not defined(windows):
+      # Windows reserves a thread's stack at the image's reserve when that
+      # is larger (the 2 MB Nim asks for is the commit; CI links 8 MB), so
+      # only Linux and macOS hold 2 MB exactly.
+      check outs[0].left < 2 * 1024 * 1024
     check outs[0].status == sxUnknown
 
   test "an explicit deep budget declines in-band, named":
@@ -162,7 +166,8 @@ suite "S8ca (2): a 2 MB thread":
     var t: Thread[int]
     createThread(t, onThread, 2)
     joinThread(t)
-    check outs[2].left < 1024 * 1024
+    when not defined(windows):   # as above: the reserve is the image's
+      check outs[2].left < 1024 * 1024
     check outs[2].status == sxUnknown
 
   test "with about 1 MB left, a shallow call is still inlined and decides":

@@ -1171,8 +1171,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   of iekStrSetAt:
     # RFC-0005 S8ca. `s[i] = c`: `s[0, i) & c & s[i + 1, len)`. The parser
     # reads `s[i]` first where it can (its IndexDefect fork, before the value
-    # is evaluated, as Nim checks), and the write forks it too. Nim makes the write in the string's own memory
-    # (a literal's is copied first, `prepareMutation`): the result owns it.
+    # is evaluated, as Nim checks), and the write forks it too. Nim makes
+    # the write in the string's own memory (a literal's is copied first,
+    # `prepareMutation`): the result owns it.
     let recv = lowerStrOperand(env, e.strArgs[0])
     requireStr(recv, "iekStrSetAt")
     let i = toZ3Int(lowerStrOperand(env, e.strArgs[1]))
@@ -1201,8 +1202,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
           let w = concat(concat(substr(s, mkInt(0), mkInt(j)), c),
                          substr(s, mkInt(j + 1), mkInt(n - j - 1)))
           let pick = i == mkInt(j)
-          acc = wrap[Z3String](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, pick.raw,
-                                                          w.raw, acc.raw))
+          acc = wrap[Z3String](ctx, checkedIte(ctx, pick.raw, w.raw, acc.raw))
         return SymVal(kind: svString, strBuf: sbOwned, str: acc)
     if cv.kind == svBV8:
       # `seq.mapi` over `s`: char `j` is `c` where `j == i`, else `s`'s
@@ -1216,8 +1216,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
       let ch = wrap[Z3AnyAst](ctx,
         ctx.checkErr Z3_mk_char_from_bv(ctx.raw, wide.raw))
       let hit = jVar == i
-      let body = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, hit.raw,
-        ch.raw, xVar.raw))
+      let body = wrap[Z3AnyAst](ctx, checkedIte(ctx, hit.raw, ch.raw,
+                                                 xVar.raw))
       var apps = [ctx.checkErr Z3_to_app(ctx.raw, jVar.raw),
                   ctx.checkErr Z3_to_app(ctx.raw, xVar.raw)]
       let lam = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw,

@@ -6961,7 +6961,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
     let bn = byRefName(n)
     if bn.len > 0:
       for g in countdown(miElemGuards.high, 0):
-        let gd = miElemGuards[g]
+        var gd = miElemGuards[g]   # a copy: parseExpr below may push guards (VM let-aliasing, S8ab)
         if gd.mark == bn:
           var lp: seq[IRStmt]
           let lenNow = mkSeqLen(parseExpr(gd.loc, lp, ctx))

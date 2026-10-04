@@ -178,8 +178,9 @@ proc sutMaybeEmptyAdd(k: int) =
   if r != 'z': symexTarget("be_dead")
 
 proc sutUnknownView(k: int) =
-  ## A string of unknown provenance: declined.
-  var st = $k
+  ## A string of unknown provenance (`newString`, an opaque call): declined.
+  ## (`$k` declined alike, after 26 s of modelling the conversion.)
+  var st = newString(2)
   gpstr = addr st
   let r = rdStr(st)
   if r == 'z' and k == 3: symexTarget("bu")

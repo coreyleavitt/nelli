@@ -1233,5 +1233,12 @@ task test, "Run the test suite":
             # RFC-0005 S8bw: S8bn's remainder -- in-band receiver declines,
             # aggregate globals, pointers into case objects and aggregate
             # containers. Walker 227 (provisional).
-            "tsymex_rfc0005_s8bw_remainder"]:
+            "tsymex_rfc0005_s8bw_remainder",
+            # RFC-0005 S8bp: every checkCapped search and the per-thread
+            # kind probes in contexts of their own (no step's cost moves
+            # with the walk's state; a thread's first walk searches as its
+            # second); a membership and a negated one on one string
+            # decided as one (the unbounded endsWith run on Z3 4.13.4).
+            # Walker 214->219.
+            "tsymex_rfc0005_s8bp_isolation"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

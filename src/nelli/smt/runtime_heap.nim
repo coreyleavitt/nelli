@@ -818,11 +818,12 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
   ## RFC-0005 S8ax. The value `arr` holds at `idx` when `arr` is a store at
   ## that same term (`store(h, idx, v)`), or `none`.
   if storeDeclKind == 0:
-    let probe = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_store_probe")
-    let st = checkedStore(ctx, probe.raw, mkInt(ctx, 0).raw,
-                          mkInt(ctx, 0).raw)
-    storeDeclKind = ord(Z3_get_decl_kind(ctx.raw,
-      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, st)))) + 1
+    let pc = probeContext()   # RFC-0005 S8bp (batch 7)
+    let probe = mkArrayVar[Z3Int, Z3Int](pc, "__s8ax_store_probe")
+    let st = checkedStore(pc, probe.raw, mkInt(pc, 0).raw,
+                          mkInt(pc, 0).raw)
+    storeDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, st)))) + 1
   if Z3_get_ast_kind(ctx.raw, arr) != Z3_APP_AST: return none(RawZ3Ast)
   let app = Z3_to_app(ctx.raw, arr)
   if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
@@ -888,15 +889,16 @@ proc intCellRangeFacts(ctx: Z3Context; arr, idx: RawZ3Ast; ty: IRType) =
   ## real heap at every address, so asserting it anywhere prunes no real
   ## execution.
   if storeDeclKind == 0 or iteDeclKind == 0:
-    let a = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_chain_probe_a")
-    let b = mkArrayVar[Z3Int, Z3Int](ctx, "__s8ax_chain_probe_b")
-    let st = checkedStore(ctx, a.raw, mkInt(ctx, 0).raw, mkInt(ctx, 0).raw)
-    storeDeclKind = ord(Z3_get_decl_kind(ctx.raw,
-      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, st)))) + 1
-    let it = checkedIte(ctx, mkBoolVar(ctx, "__s8ax_chain_probe_c").raw,
+    let pc = probeContext()   # RFC-0005 S8bp (batch 7)
+    let a = mkArrayVar[Z3Int, Z3Int](pc, "__s8ax_chain_probe_a")
+    let b = mkArrayVar[Z3Int, Z3Int](pc, "__s8ax_chain_probe_b")
+    let st = checkedStore(pc, a.raw, mkInt(pc, 0).raw, mkInt(pc, 0).raw)
+    storeDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, st)))) + 1
+    let it = checkedIte(pc, mkBoolVar(pc, "__s8ax_chain_probe_c").raw,
                         a.raw, b.raw)
-    iteDeclKind = ord(Z3_get_decl_kind(ctx.raw,
-      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, it)))) + 1
+    iteDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, it)))) + 1
   var lo, hi: int64
   if ty.hasRange:
     lo = ty.rangeLo
@@ -1241,6 +1243,7 @@ proc heapChainDepth*(ctx: Z3Context; refAst: Z3AnyAst): int =
   ## backing (`select` at an Int index) is its container's depth. Every
   ## other term is a root.
   if not heapChainKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     let b = mkBoolVar(ctx, "__s8bd_kind_probe_b")
     let x = mkIntVar(ctx, "__s8bd_kind_probe_x")
     let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bd_kind_probe_arr")

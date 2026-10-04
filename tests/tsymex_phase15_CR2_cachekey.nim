@@ -1022,6 +1022,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## aggregate containers). Provisional 227.
     ## RFC-0005 batch 6: S8bs, S8bn, S8bl, S8bq and S8bw stacked on batch
     ## 5, and an unbound global receiver read as its entry value. 223->230.
+    ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
+    ## probes in contexts of their own; a regex membership and a negated
+    ## one on one string decided as one). Provisional 219. 214->219.
     check symexWalkerVersion == "230"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

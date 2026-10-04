@@ -260,6 +260,24 @@ const symexWalkerVersion* = "230"
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
   ##
+  ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
+  ## walk, or an earlier walk on the thread, left in Z3's context. Every
+  ## `checkCapped` step (not only S8bm's step 1) searches in a fresh
+  ## context of its own: with thirty unrelated constants made before each
+  ## query, the theory-free steps, (2), (3) and the no-string query all
+  ## moved (Z3 5.1: (2) 401,123 units against 231,590). The per-thread
+  ## kind probes build their terms in a context of their own, so a
+  ## thread's first walk searches as its later ones do (Z3 5.1: a step-3
+  ## search took 482,126 units in the first walk and 85,882 in the
+  ## second). Both change which search decides a query under a budget.
+  ## And a string's regex memberships, one of them negated, are decided as
+  ## one membership of the intersection with the complement
+  ## (`mergeMemberships`), with `contains` / `match` from a literal 0
+  ## reading the string itself: S8ay's unbounded `s.endsWith(re"b+") and
+  ## not s.contains(re"b")` was `sxUnknown` on Z3 4.13.4 (11.2M units) and
+  ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
+  ## still running). 214 -> 219.
+  ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
   ## callee's write through the pointer was clobbered; an object's address

@@ -203,9 +203,19 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "226"
-  ## RFC-0005 S8bv (2026-10-03) — S8bq's remainder, all precision. `for x
-  ## in s` over a builtin set is unrolled over the base type's domain in
-  ## ascending order (it declined). Provisional 226.
+  ## RFC-0005 S8bv (2026-10-03) — S8bq's remainder. `for x in s` over a
+  ## builtin set is unrolled over the base type's domain in ascending order
+  ## (it declined). An enum subrange (`range[a1..a2]`) is the enum narrowed
+  ## to its bounds (`IRType.enumRange`): as a parameter, field or set base it
+  ## was unsupported, and an assignment / conversion / argument out of the
+  ## subrange went unchecked (a false sxSat and false sxUnsats). The
+  ## unreachable cross-domain set conversion arm is gone (Nim has none). A
+  ## query relating two `card` terms carries their part identities, so a
+  ## pigeonhole count decides; a signed bit-vector overflow obligation its
+  ## operands' structural intervals rule out is not forked. `newSeqUninit`:
+  ## an inline map/filter forks on its unwritten reads, a composite call
+  ## result keeps its seqs' written-ness, and a slice, heap cell or mapped
+  ## array reads its base's. Provisional 226.
   ## RFC-0005 S8bq (2026-10-03) — S8bi's remainder. A `newSeq` /
   ## `newSeqOfCap` / `newSeqUninit` length above 2^20 is declined, scoped
   ## to its path, as S8bc declines `newSeq`'s (it was modelled as an

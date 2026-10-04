@@ -16,7 +16,7 @@
 ## field and a set's base type it is the enum narrowed to its bounds, and
 ## Nim's range checks (assignment, conversion, argument, set element) raise
 ## `RangeDefect`.
-import std/[unittest, strutils, sets, monotimes, times, macros]
+import std/[unittest, strutils, sets, macros]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/canonicalize
@@ -38,9 +38,7 @@ proc hasMsg(errs: seq[SymexErrorInfo]; k: SymexErrorKind; sub: string): bool =
   false
 
 template verdict(sut: untyped; label: string): SymexResult =
-  let t0 = getMonoTime()
   let r = symexFind(sut, tLabel(label))
-  echo "TIMING ", label, " ", (getMonoTime() - t0).inMilliseconds
   checkpoint label & ": " & $r.status & " " & show(r.errors) & " witness=" &
              (if r.status == sxSat: $r.witness else: "-")
   r
@@ -413,3 +411,4 @@ suite "S8bv (2): enum subranges":
     check verdict(subSetIncl, "bv_sub_set_incl_raise").status == sxSat
     check verdict(subSetIncl, "bv_sub_set_incl_bad").status == sxUnsat
     check "bv_sub_set_incl_raise" in nativeHits(subSetIncl(e0))
+

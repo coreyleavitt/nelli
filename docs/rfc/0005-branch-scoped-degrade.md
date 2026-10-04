@@ -354,7 +354,7 @@ state = "done"
 [[slice]]
 id = "S8bx"
 title = "S8bl's remainder: raise from in-walk witness extraction lost on the C backend, witness-render drift for a variant-arm seq of ref-holding elements in a Table, mpairs aliasing of loop var and table, key change during Table iteration, string setLen over a symbolic string"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -7791,6 +7791,190 @@ Pins that moved, because they pinned a gap S8bl closes:
   path is `feTableIterOrder`-tainted, so a candidate is replay-gated.
 - **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)** model the
   same `newSeq` family; not reconciled here.
+
+**As landed (S8bx, walker 228, provisional) — S8bl's remainder.** Pins:
+`tests/tsymex_rfc0005_s8bx_{extractraise,witnessdrift,mpairs,iterchange,setlenstr}.nim`
+(`extractraise` with a companion `.nim.cfg` setting
+`-d:symexTestInjectWalkerFault`). Every item was pinned RED at the base
+(1f38a13) before it was changed. Three of the five were wrong verdicts,
+two of them reported by S8bl as PRECISION:
+- **SOUNDNESS: a raise inside in-walk witness extraction was lost on the C
+  backend** (a false `sxUnsat` with no error at all, or a false `sxSat`
+  from a half-extracted witness).
+- **SOUNDNESS: an `mpairs` / `mvalues` view passed to a call with its
+  Table** was two copies of one location: the verdicts were swapped
+  against native runs (a live label `sxUnsat`, a dead one `sxSat`).
+- **SOUNDNESS: a key removed from a Table while iterating it, with its
+  length kept,** followed the enumeration taken at loop entry, and that
+  path is untainted for a table of one entry: a false `sxUnsat` for a
+  label only the new key's visit reaches, and a false `sxSat` (the witness
+  did not replay) for one only the initial enumeration reaches.
+
+*(1) The lost raise.* The mechanism, located by instrumenting every
+`popCurrentException` of a probe build's generated C:
+- Nim 2.2.10's C backend (goto exceptions) destroys a call's result
+  temporary on the raise path without saving or clearing the error flag
+  (`T = f(); if (*nimErr_) { eqdestroy(T); goto LA_; }`). A scope exit's
+  destroys do save it (`oldNimErrFin`). The unsaved shape arises when an
+  existing variable is reassigned from a call (`result = walk(s, result,
+  w)`), not for an initialisation or a `discard`.
+- When the temporary holds a Z3 term (a `seq[Path]`, a `SymVal`, a
+  `Z3String`), its destructor is nim-z3's `termDestroy`
+  (`_deps/z3/src/z3/lifecycle.nim`), whose body is a `try` with `except
+  CatchableError: discard` and `except Exception: discard`. Entered with
+  the flag still set, its first checked call (a Nim proc) jumps to that
+  handler, which takes the IN-FLIGHT exception as its own, clears the flag
+  and pops it. The frame then returns as if nothing had been raised.
+- The extraction raise of S8bl's trigger was consumed by a `Z3BitVec`
+  `=destroy` called from `walkBlock`'s raise path, destroying `walk`'s
+  returned `seq[Path]`. C++ exceptions are native and the destructor's
+  `try` does not see the in-flight one, so the same raise reached
+  `runSymex` as `weInternalWalkerFault`. This is the mechanism behind the
+  project's earlier "C-backend goto-exception hazard" notes (N31, N36,
+  ADR-0023, S8m, CR-1c): none had named it.
+
+The fix makes every raise inside extraction observed AS IT IS RAISED,
+whatever unwinding later does to it: `trySolve` installs
+`extractionRaiseHook` as `system.localRaiseHook` (called by
+`raiseExceptionAux` on both backends, before any unwinding) for the span of
+`extractWitness` and restores the previous hook after. The hook records the
+first raise's name and message (`extractionFault`; a nim-z3
+`Z3InvalidUsageError` is the solver's own and is excluded) and lets the
+raise proceed. Then:
+- `trySolve` answers `sxUnknown` with no witness when a fault was recorded,
+  even if extraction returned normally (the raise swallowed inside it);
+- `shouldStop` is true once a fault is recorded, so the walk ends at its
+  next check;
+- `runSymex` makes the run `sxUnknown` and appends `weInternalWalkerFault`
+  naming the raise ("... raised inside witness extraction at a target hit
+  and lost on the way to the run boundary"), unless the raise did reach it
+  and was recorded with the same message;
+- `resetSymexRunState` clears the fault and releases the hook, so a later
+  run is not declined by an earlier one's fault.
+The pin injects the raise (`-d:symexTestInjectWalkerFault`): extracting a
+string parameter named `injectExtractionFault` raises out of extraction
+(after a loop, two iterations of one Table, and flat), and one named
+`injectSwallowedExtractionFault` raises in a callee whose Z3-term result is
+reassigned, which the C backend loses INSIDE extraction. On C at the base:
+`afterLoop` and `twoIters` were a false `sxUnsat` with no error,
+`swallowedInside` a false `sxSat`; C++ named each. All seven tests pass on
+C and C++ (Z3 5.1) and on C (Z3 4.13.4). S8bl's natural trigger (its
+key-byte constraint disabled in a probe build) is now a named decline on C.
+
+In-walk callbacks audited for the same pattern:
+- witness extraction (`trySolve` -> `extractWitness` /
+  `buildHeapSnapshot` / `extractTableEntries`' `emit` closure), reached from
+  a target label and from `routeRaise` through `solveTargetHit`: fixed here;
+- `nelliZ3ErrorHandler` (the `cdecl` Z3 error callback): counted at its
+  source since S8m (`ekZ3Error`), never relies on a raise;
+- `lowerClosureCall`'s re-entry into `walk`: the walk's in-band discipline
+  and the N36 raise-class audit;
+- the walker's same-frame `try` sites (`defaultZero` x4, `symValFromRawAst`,
+  `concreteSeqLen`'s `parseInt`): their generated C returns through an
+  out-pointer and the exits are shielded;
+- the concolic `concreteBranchOutcome` / `loopArmInfeasible` /
+  `checkCapped`: Z3 calls only (S8m); the concolic entry never extracts (its
+  sentinel label is never hit);
+- the Windows fiber trampoline is top level; the `tagGuard` closure makes Z3
+  calls only.
+
+*(2) The witness-render drift.* `isRenderableWitnessTy` called a
+placeholder seq renderable whatever its element (it renders as an empty
+literal), but the reader recursed into the element for its TYPE, and an
+element no reader reads (an object holding `Table[string, ref int]`) hit
+the reader's invariant guard at macro time: the whole file failed to
+compile. The seq reader and the predicate now share one classifier,
+`seqWitnessReader` (`types.nim`, `SeqWitnessReader`: placeholder, the
+scalar readers, tree, ref, none), and `emitTyAndReader` always renders the
+type: an unreadable element's reader is `unrenderedReader`, a
+`{.error.}` that fires only if the reader is EMITTED, which the predicate
+rules out. The same holds for the Table and Set else-arms. Pinned on a
+variant arm, a plain field, and the classifier itself; `CR2c` returns to
+its original `Widget` element.
+
+*(3) `mpairs` aliasing.* The parser marks a call in an `mpairs` /
+`mvalues` body whose arguments include both the view and its table's
+location (`IRStmt.cViewAliases`: the two argument positions and the key's
+name; `markViewAliases` in `parseTableForLoop`). An argument that HOLDS the
+table (a prefix of its path) or is part of the view declines
+(`feUnsupportedOp`). The walker binds the pair in the callee's frame
+(`CallFrameCtx.viewAliases`, `bindViewAliases`), and after every statement
+of the callee's body (`walkBlock`) syncs them (`syncViewAliases`): a
+changed view is stored into the table at the key; a changed table is read
+back into the view when the key's presence is a literal `true`, and
+declines otherwise; both changed in one statement declines. The pair is
+passed on into a callee given both formals. A by-value view is a copy (a
+scalar is skipped; anything else declines). Every live / dead pair was
+checked against a native run. This is the local model of what S8bs's
+address cells do for `addr`-taken variables (`bindVarLocs`,
+`syncAddrCells`), which the S8bx base does not have. *Reconciliation:* when
+S8bs and S8bx meet, a view should become an address cell bound to the
+table slot, and `cViewAliases` / `bindViewAliases` / `syncViewAliases`
+should be removed in favour of `bindVarLocs` / `syncAddrCells`; the S8bx
+`mpairs` suite is the acceptance test for that merge.
+
+*(4) A key change while iterating.* Nim's Table iterators walk the hash
+slots, `for h in 0 .. high(t.data): if isFilled(...): yield`, with
+`assert(len(t) == L)` after each yield. A `del` and an insert in one
+iteration keep the length, so no assertion fires, and what the rest of the
+loop visits depends on the slots: the new key's slot against the current
+one, and `del`'s backshift of a later entry into the hole. Native runs
+(pinned in the suite, tables built as a witness is, `initTable` then
+`[]=`): from `{"a"}`, deleting `a` and inserting `c` visits `c`; from
+`{"f"}` it does not; from `{"k308", "k321"}`, deleting and re-inserting
+`k308` at its own visit visits it twice and skips `k321` (of the
+del-and-re-insert shapes tried over 2-7 keys, 622 changed the visit
+sequence). The slots
+are a function of the keys' hashes and the capacity, which the walker does
+not model (a key is a symbolic string), so the slot walk is not decided and
+is not modelled: each iteration snapshots the table, and a removal since
+the snapshot (`iekTabRemovedSince`: the presence array is not the
+snapshot's under `true` stores and `ite` merges alone) declines the path
+(`feUnsupportedOp`). A value write keeps every slot and stays exact. The
+`feTableIterOrder` taint for two or more entries is unchanged.
+
+*(5) `setLen` over a symbolic string.* A byte read of the result was a
+code test on a `str.at` of the concat (grow) or `substr` (shrink), which
+both pinned Z3s left undecided within `seqQueryRLimit` (the dead and the
+live label both `sxUnknown`). The result is now a fresh string LEAF with
+the byte-domain fact every string input carries (`allocateSym`), equal to
+the prefix, or to the string followed by its NUL pad. A byte read is then
+a byte test on a byte leaf, which `seqLenCaps` rewrites to the character
+form, and Z3 decides it: on Z3 5.1 and 4.13.4 the grown byte, the kept
+prefix after a grow and after a shrink are each `sxUnsat` dead and `sxSat`
+live with a witness that replays.
+
+Pins that moved:
+- **`phase15_CR2_cachekey`**: `symexWalkerVersion == "228"`.
+- **`r6_n36_raise_class_audit`**: 77 pattern-B runtime raises (was 75) and
+  80 category-(c) sites (was 78), the two injection raises.
+- **`CR2c_witnessreader_catchall`**: `ShapeBad`'s arm is `seq[seq[Widget]]`
+  again (S8bl had replaced it with `WidgetR` to keep the file compiling).
+- **`r6_r6_emit_roundtrip`**: `cViewAliases` and `iekTabRemovedSince`.
+- **`rfc0005_s8bl_setlen`**'s note points at the symbolic pins.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: any raise inside the walk can be lost on the C backend** by
+  the same mechanism as (1). A scan of the generated `runtime.nim.c` finds
+  about 290 raise-path destroys that do not save the error flag, many of a
+  type holding a Z3 term (`seq[Path]`, `SymVal`, the context). S8bx makes
+  extraction's raises observed at the raise; any other raise in the walk
+  (a walker fault, a lowering raise not caught in its own frame) relies on
+  the walk's in-band discipline and the N36 audit, and is lost on C if it
+  is not caught before such a destroy. The root fix is outside nelli: in
+  nim-z3's `termDestroy` (save and restore the error state around its
+  `try`, or not catch at all) or in the Nim compiler's raise-path destroy.
+- **PRECISION: an aliased callee writing the table at a key whose presence
+  is not a literal**, or writing both the view and the table in one
+  statement, declines; and the object HOLDING the table passed with the
+  view declines.
+- **PRECISION: a key removed while iterating** declines rather than
+  modelling the slot walk; the walk is decidable only with ground keys
+  (their hashes and the capacity are concrete), which the walker could
+  model as a later refinement. A callee that havocs the table during the
+  loop is read as a removal.
+- **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)**: not
+  reconciled here (batch 5, per the job).
 
 ### §2.6 The raise-routing recovery — *corrected*
 

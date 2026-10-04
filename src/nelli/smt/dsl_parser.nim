@@ -6948,10 +6948,20 @@ proc parseBorrowViewedExpr(rw: NimNode,
   result = parseExpr(rw, preamble, ctx)
   borrowBaseViews.setLen mark
 
+var miElemGuards {.compileTime.}: seq[tuple[mark: string; guard: IRStmt]]
+  ## RFC-0005 S8ca. While a `mitems` / `mpairs` body is parsed
+  ## (`parseMutIter`): the position mark of the element it yields by
+  ## address, and the check each use of the element is preceded by.
+
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
+    # RFC-0005 S8ca: the element a `mitems` body uses (`miElemGuards`).
+    for g in countdown(miElemGuards.high, 0):
+      if miElemGuards[g].mark == byRefName(n):
+        preamble.add miElemGuards[g].guard
+        break
     return mkVar(byRefName(n))
   # RFC-0005 S8bu: an `openArray` actual is the seq it views.
   if isToOpenArray(n) or
@@ -14480,7 +14490,9 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   ## `c` is a location (`iterArgPath`); its indices are read once, when the
   ## loop starts. A seq is walked as Nim's `while k < L` with `L` its length
   ## when the loop starts; a length that changed by the end of an iteration
-  ## (Nim's `assert`) is declined on its paths. An array is unrolled. Before,
+  ## is Nim's `assert` (RFC-0005 S8ca: an `AssertionDefect`; S8bu declined
+  ## it), and a use of the element after the body resized the seq declines
+  ## on its paths (`miElemGuards`). An array is unrolled. Before,
   ## the stdlib body was inlined and declined at `unCheckedInc`'s pragma (a
   ## seq) or at `low(IX)` (an array).
   let isPairs = iterExpr[0].strVal == "mpairs"
@@ -14523,9 +14535,30 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   let body0 = substByRefBody(bodyNode, xSym, sub)
   let k = strVal(mark)
   let kTy = classifyType(ybr[1]).ty
+  var stmts = pre
+  var lenName = ""
+  let intTy = tInt(64, signed = true)
+  if cls.kind != itArray:
+    let seqIR = parseExpr(fixed, stmts, ctx)
+    lenName = freshSynth(ctx, "miLen")
+    stmts.add mkLet(lenName, intTy, mkSeqLen(seqIR))
+  # RFC-0005 S8ca: a use of the element after the body resized the seq is
+  # a use of the address Nim yielded, which may now be past the seq or in
+  # freed memory: declined on its paths. A use before is the element.
+  if cls.kind != itArray:
+    var lp: seq[IRStmt]
+    let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
+    miElemGuards.add (mark: k, guard: mkBlock(lp & @[mkIf(@[mkBranch(
+      mkBinop(bNe, lenNow, mkVar(lenName)),
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "RFC-0005 S8ca: the element `" & iterExpr[0].strVal &
+                "` yielded by address is used after the body resized `" &
+                c.repr & "`: the address may be past the seq or in freed " &
+                "memory, which the walk does not model (feUnsupportedOp)"),
+        "mitems element used after a resize (feUnsupportedOp)"))])]))
   let (body, unrollBrk) = parseLoopBody(body0, ctx,
                                         unrolled = cls.kind == itArray)
-  var stmts = pre
+  if cls.kind != itArray: miElemGuards.setLen(miElemGuards.len - 1)
   if cls.kind == itArray:
     let lo = arrayIndexLow(c)
     var iters: seq[IRStmt]
@@ -14537,10 +14570,6 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
     if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
     else: stmts.add iters
     return mkBlock(stmts)
-  let seqIR = parseExpr(fixed, stmts, ctx)
-  let lenName = freshSynth(ctx, "miLen")
-  let intTy = tInt(64, signed = true)
-  stmts.add mkLet(lenName, intTy, mkSeqLen(seqIR))
   let iv = freshSynth(ctx, "miIv")
   stmts.add mkLet(iv, intTy, mkIntLit(0))
   var loopStmts = @[mkLet(k, kTy, mkVar(iv))]
@@ -14551,13 +14580,19 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
   var lp: seq[IRStmt]
   let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
   for st in lp: loopStmts.add st
+  # RFC-0005 S8ca: Nim's `assert(len(a) == L)` at the end of the iteration
+  # (`system.mitems`): an `AssertionDefect` (S8bu declined it). Compiled
+  # out under `--assertions:off`, where the loop goes on to the old length
+  # and `yield a[i]` checks the index: still declined there.
   loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
-    ctx.declineAtSite(feUnsupportedOp,
-      siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
-              "during an iteration of `" & iterExpr[0].strVal & "`: Nim's " &
-              "`assert` there, and the element it yielded by address, are " &
-              "not modelled (feUnsupportedOp)"),
-      "mitems over a seq whose length changed (feUnsupportedOp)"))])
+    (if compileOption("assertions"): mkRaise("AssertionDefect", nil)
+     else:
+       ctx.declineAtSite(feUnsupportedOp,
+         siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
+                 "during an iteration of `" & iterExpr[0].strVal & "` under " &
+                 "`--assertions:off`: the iteration goes on to the old " &
+                 "length, which is not modelled (feUnsupportedOp)"),
+         "mitems over a seq whose length changed (feUnsupportedOp)")))])
   stmts.add mkWhile(mkBinop(bLt, mkVar(iv), mkVar(lenName)), mkBlock(loopStmts))
   mkBlock(stmts)
 

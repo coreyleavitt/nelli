@@ -15233,8 +15233,9 @@ proc nativeStackShort(w: var WalkCtx): int =
   ## RFC-0005 S8ca. The native stack left below this call when it is under
   ## what inlining one more level needs, else -1. `walk` recurses natively
   ## once per inlined call, and `maxCallDepth` counts levels, not bytes: a
-  ## cpp level costs more than a c one, and a thread may hold 8 MB (a Linux
-  ## main thread), 2 MB (a Nim thread) or 1 MB (a Windows main thread).
+  ## cpp level costs more than a c one, and the stack may hold 8 MB (a Linux
+  ## main thread), 2 MB (a Nim thread) or 16 MB (a Windows solve's fiber,
+  ## `runSymexWithBigStack`), or what is left below a caller's frames.
   ## `tsymex_configdefaults`' crash pin, 50 levels sized on c, ran off an
   ## 8 MB stack on cpp (SIGSEGV), and the default budget's adaptive depth
   ## (`maxRecursionDepth`, 24) ran off a 2 MB thread's on both. One

@@ -7,8 +7,12 @@
 ## round-2 crash pin (`maxCallDepth: 50`, a linear recursion with `n` free)
 ## was sized by a probe on the c backend (safe through 85 levels on an 8 MB
 ## stack), and on cpp the same 50 levels ran off the 8 MB stack (SIGSEGV,
-## rc=139, the whole test binary). A Windows main thread has 1 MB unless
-## the link raises it; a Nim `createThread` thread has 2 MB everywhere.
+## rc=139, the whole test binary). A Nim `createThread` thread has 2 MB
+## everywhere; on Windows each solve runs on a fiber of its own 16 MB
+## (`runSymexWithBigStack`), whose bounds the OS reports while the thread
+## is on it (the walk's first Windows run read a stale main-thread cache
+## and declined every call: `nativeStackLeft` re-reads the bounds when the
+## stack pointer leaves them).
 ##
 ## Pinned here (the RFC's "As landed (S8ca)" note has the design):
 ##   (1) a call is not inlined when the stack left below it is under the
@@ -16,8 +20,8 @@
 ##       in-band, `beBudgetExhaustedUnmodelled` naming the native stack, at
 ##       any `maxCallDepth`;
 ##   (2) on a 2 MB thread, the default budget and an explicit deep one both
-##       decline in-band; with about 1 MB left (a Windows main thread's
-##       whole stack) a shallow call is still inlined and decides;
+##       decline in-band; with about 1 MB left a shallow call is still
+##       inlined and decides;
 ##   (3) a decline the stack forced is the machine's, not the program's,
 ##       and is not cached (`symexNativeStackCut`).
 import std/[unittest, strutils]
@@ -77,13 +81,22 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     checkpoint show(r.errors)
     check r.status == sxUnknown
 
+  test "solves in a row each measure the stack they run on":
+    # On Windows each solve has a fiber of its own; a bound cached from
+    # the first (or from the main thread, above) declined every call.
+    for i in 0 ..< 3:
+      let r = symexFind(s8caShallow, tLabel("s8ca_shallow"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      check not symexNativeStackCut()
+
   test "a run the stack does not cut is not flagged":
     let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"))
     check r.status == sxUnknown
     check not symexNativeStackCut()
 
-# (2) A 2 MB stack: a Nim thread's on every platform, twice a Windows main
-# thread's.
+# (2) A 2 MB stack: a Nim thread's on every platform (on Windows the solve
+# itself runs on its own fiber, and these hold there too).
 type ThreadOut = object
   status: SymexStatusKind
   named: bool
@@ -104,7 +117,7 @@ proc analyse(which: int) =
 
 proc underFiller(which: int) {.noinline.} =
   ## About 1 MB of this 2 MB thread's stack held by this frame: the walk
-  ## below it has what a 1 MB Windows main thread has, less its own start.
+  ## below it has about 1 MB, less its own start.
   var filler: array[1024 * 1024, byte]
   filler[0] = 1
   analyse(which)

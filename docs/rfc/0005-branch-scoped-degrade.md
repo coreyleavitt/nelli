@@ -357,6 +357,11 @@ title = "S8bl's remainder: raise from in-walk witness extraction lost on the C b
 state = "done"
 
 [[slice]]
+id = "S8ce"
+title = "Destructor-swallowed exceptions: nim-z3's lifecycle hooks catch an in-flight raise on the C backend; root fix in nim-z3, lock bump, every destroy site covered"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

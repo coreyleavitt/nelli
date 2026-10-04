@@ -15390,6 +15390,24 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
   else: defaultConcreteBranchRLimit
 
+proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
+                          settings: SymexSettings): Z3Status =
+  ## RFC-0005 S8by. One of concolic collection's scratch solves
+  ## (`concreteBranchOutcome`, `concretelyInfeasible`,
+  ## `runConcolicCollectImpl`'s concrete-inputs check): `roots` under
+  ## `concreteBranchRLimit(settings)` and `random_seed = 0`, in a context
+  ## of its own (`ownContextSolver`, RFC-0005 S8bm), its units added to
+  ## `ownContextUnits`. They checked in the walk's context, where what the
+  ## context already held moved their search, as S8bm and S8bp measured
+  ## for the walker's own: with 300 unrelated Int constants live in it, a
+  ## factoring branch condition took 72,126 units against 72,162 as is
+  ## (Z3 5.1; 26,695 against 26,726 on 4.13.4), and under a bound between
+  ## such spends it was decided in one context and not in the other
+  ## (`tsymex_rfc0005_s8by_remainder`).
+  ## Now a solve's spend, and so whether it decides within its bound, is
+  ## a function of its query alone.
+  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
                            facts: seq[Z3Bool] = @[]): Option[bool] =
@@ -15433,31 +15451,15 @@ proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## under the pins, and an `if` on a closure that returned normally was
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
-  let rlimit = concreteBranchRLimit(settings)
   var reach = concreteEq
   reach.add facts
   reach.add cond
   let pools = globalRoots(reach)
-  let sTrue = newSolver(ctx)
-  let spTrue = newParams(ctx)
-  spTrue.set("rlimit", rlimit)
-  spTrue.set("random_seed", 0'u)
-  sTrue.setParams(spTrue)
-  for c in concreteEq: sTrue.add(c)
-  for c in pools: sTrue.add(c)
-  for c in facts: sTrue.add(c)
-  sTrue.add(cond)
-  let rTrue = sTrue.check()
-  let sFalse = newSolver(ctx)
-  let spFalse = newParams(ctx)
-  spFalse.set("rlimit", rlimit)
-  spFalse.set("random_seed", 0'u)
-  sFalse.setParams(spFalse)
-  for c in concreteEq: sFalse.add(c)
-  for c in pools: sFalse.add(c)
-  for c in facts: sFalse.add(c)
-  sFalse.add(not cond)
-  let rFalse = sFalse.check()
+  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
+  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
+                                   settings)
+  let rFalse = concreteScratchCheck(ctx,
+    concreteEq & pools & facts & @[not cond], settings)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
@@ -15470,15 +15472,9 @@ proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
   ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
   ## RFC-0005 S8n: with the same `globalRoots()` pools.
-  let sv = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  sv.setParams(sp)
-  for c in concreteEq: sv.add(c)
-  for c in globalRoots(concreteEq & conds): sv.add(c)
-  for c in conds: sv.add(c)
-  sv.check() == zsUnsat
+  ## RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
+  concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
+                            conds, settings) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -22920,18 +22916,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # (`concreteBranchRLimit`), with their `random_seed`. It had no bound at
   # all. An exhausted bound is `zsUnknown`, reported `false`: not proven,
   # never a claim.
-  let s = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  s.setParams(sp)
+  # RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
   var pinned = initialPC & concreteEq
   for p in resultPaths:
     for c in p.pc: pinned.add c
-  for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
-  for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = s.check() == zsSat
+  result.pcSatByConcreteInputs = concreteScratchCheck(ctx,
+    pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars

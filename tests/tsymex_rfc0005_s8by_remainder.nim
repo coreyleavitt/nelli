@@ -3,6 +3,13 @@
 ##
 ## Pinned here (the RFC's "As landed (S8by)" note has the mechanism and
 ## the measurements):
+##   (1) concolic collection's scratch solves (`concreteBranchOutcome`,
+##       `concretelyInfeasible`, the concrete-inputs check) check in
+##       contexts of their own: with 300 unrelated Int constants live in
+##       the context, a factoring branch condition took 72,126 units
+##       against 72,162 (Z3 5.1; 26,695 against 26,726 on 4.13.4), and
+##       under a bound between such spends one context decided it and the
+##       other did not. Now its spend, so its outcome, is the query's;
 ##   (2) after a facts-first SAT, `checkCapped` runs neither (1b) nor
 ##       (1c)'s uncapped half: the facts-first check is (1c)'s query under
 ##       a smaller budget, and (1b)'s is a subset of it, so both are known
@@ -16,7 +23,7 @@
 ##       `s.endsWith(re"b+") and not s.contains(re"b")` with the negated
 ##       membership inside a disjunction was `sxUnknown` on Z3 4.13.4.
 ##       Pinned against native Nim.
-import std/[unittest, strutils, re]
+import std/[unittest, strutils, re, options]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -68,6 +75,75 @@ template walk(sut: untyped; lbl: string; settings: SymexSettings):
   (r.status, st, u)
 
 let z351 = z3FullVersion().startsWith("5.")
+
+# ---- (1) the concolic scratch solves -----------------------------------------
+
+var scratch: array[2, tuple[outcome: Option[bool], infeasible: bool,
+                            units, infeasibleUnits: int]]
+
+proc ctxCount(ctx: Z3Context): int =
+  ## The step count of `ctx` itself (an empty check there reads it).
+  let s = newSolver(ctx)
+  discard s.check()
+  let st = s.getStatistics()
+  if st.contains("rlimit count"): st.getInt("rlimit count") else: 0
+
+proc scratchSolves(arg: tuple[slot, unrelated: int; bound: uint]) {.thread.} =
+  ## On a fresh thread (no walk's state in its threadvars): a branch
+  ## condition `x > 1` beside a factoring search, decided by
+  ## `concreteBranchOutcome` under `bound`, and the same facts with `x <=
+  ## 1` by `concretelyInfeasible`, in a context holding `unrelated` Int
+  ## constants no query mentions. `units` and `infeasibleUnits` are what
+  ## each spent, in contexts of their own or in this one.
+  {.cast(gcsafe).}:
+    let ctx = newContext()
+    var keep: seq[Z3Int]
+    for k in 0 ..< arg.unrelated:
+      keep.add mkIntVar(ctx, "s8by_unrelated_" & $k)
+    let x = mkIntVar(ctx, "x")
+    let y = mkIntVar(ctx, "y")
+    let one = mkInt(ctx, 1)
+    let lim = mkInt(ctx, 2000)
+    let facts = @[x > one, y > one, x < lim, y < lim,
+                  x * y == mkInt(ctx, 1_022_117)]
+    let settings = SymexSettings(budget: ResourceBudget(queryRLimit: arg.bound))
+    var own = ownContextUnits
+    var here = ctxCount(ctx)
+    let o = concreteBranchOutcome(ctx, @[], x > one, settings, facts)
+    let units = ownContextUnits - own + ctxCount(ctx) - here
+    own = ownContextUnits
+    here = ctxCount(ctx)
+    let inf = concretelyInfeasible(ctx, @[], facts & @[x <= one], settings)
+    scratch[arg.slot] = (o, inf, units,
+                         ownContextUnits - own + ctxCount(ctx) - here)
+
+proc solveBoth(bound: uint) =
+  ## The scratch solves as is (`scratch[0]`) and with 300 unrelated
+  ## constants in the context (`scratch[1]`).
+  for slot in 0 .. 1:
+    var th: Thread[tuple[slot, unrelated: int; bound: uint]]
+    createThread(th, scratchSolves, (slot, slot * 300, bound))
+    joinThread(th)
+  checkpoint "bound " & $bound & ": as is " & $scratch[0] & ", perturbed " &
+    $scratch[1]
+
+suite "S8by (1): a concolic scratch solve is the same in any context":
+
+  test "unrelated constants in the context move no scratch solve":
+    # Bounded loosely enough to finish: what each spends.
+    solveBoth(50_000_000'u)
+    let spent = (scratch[0].units, scratch[1].units)
+    let finished = scratch[0].outcome
+    check scratch[0].infeasibleUnits > 0
+    check scratch[0].infeasibleUnits == scratch[1].infeasibleUnits
+    # Under a bound between the two spends (or at the one spend).
+    solveBoth(uint((spent[0] + spent[1]) div 2))
+    check finished == some(true)
+    check spent[0] > 0
+    # The same spend, so both contexts decide alike under any bound.
+    check spent[0] == spent[1]
+    check scratch[0].outcome == scratch[1].outcome
+    check scratch[0].infeasible and scratch[1].infeasible
 
 suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
 

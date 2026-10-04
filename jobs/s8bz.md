@@ -1,6 +1,6 @@
 # Job: S8bz -- new slice (S8bw's blocked bullets and remainder)
 
-**HOLD:** do not start until the coordinator says that batch 6 (which will include S8bw) is pushed, and gives you its sha. Base will be **origin/rfc-0005-batch6 at that sha**.
+**HOLD RELEASED** -- base is batch 6 at 80c2904 (walker 230).
 - That base includes S8bs, S8bn, S8bl, S8bq and S8bw, plus everything up to batch 5: S8ar/S8at (Table values), S8bc (tree-seq backing) and S8be (element cells, `isRoutineGlobal`).
 - Provisional walker: **232**.
 

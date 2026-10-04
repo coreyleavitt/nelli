@@ -1,6 +1,6 @@
 # Job: S8cb -- new slice (bring S8bo up to date + S8bo's remainder)
 
-**HOLD.** Do not start until the coordinator sends the batch-6 head sha. The base is **origin/rfc-0005-batch6 at that sha**.
+**HOLD RELEASED** -- base is batch 6 at 80c2904 (walker 230).
 
 S8bo was built on ef08ada, which predates batch 4. Basing its remainder on S8bo itself would repeat S8bw's stale-base block, so this slice has two steps:
 1. Bring S8bo onto the current code.

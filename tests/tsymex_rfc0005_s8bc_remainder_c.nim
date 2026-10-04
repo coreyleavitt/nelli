@@ -78,6 +78,12 @@ proc tiValues(a: int) =
     s += v
   if s == 10: symexTarget("ti_values")
 
+const tupleBudget = SymexSettings(budget: ResourceBudget(
+  queryRLimit: 300_000_000'u))
+  ## RFC-0005 batch 7: past `tiTuple`'s label search on both pinned Z3s
+  ## (see its test), and not the 250M default, which a tainted path does
+  ## not take as the caller's.
+
 proc tiTuple(a: int) =
   # Bounded: `s += k * v` overflows for a huge `a`, a real `OverflowDefect`
   # that wins over the label (seen on Windows, RFC-0005 S8bc).
@@ -165,7 +171,22 @@ suite "S8bc (6): Table iteration":
       check reproduces(tiValues(r.witness[0]), "ti_values")
 
   test "for (k, v) in t.pairs, and for kv in t.pairs":
-    let r = symexFind(tiTuple, tLabel("ti_tuple"))
+    ## RFC-0005 batch 7 (S8bp on this pin): the label query multiplies a
+    ## key by its value, two symbolic 64-bit terms, and Nim's overflow
+    ## checks on that product (`bvsmul_noovfl` / `noudfl`) are a hard
+    ## bit-vector search from the query's own text: 120,971,633 units on
+    ## Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, against
+    ## 40,490 in the walk's context before S8bp (the same 57 assertions;
+    ## without the four overflow checks the text alone takes 632,702).
+    ## The path is tainted (`feTableIterOrder`), so its solve runs under
+    ## `taintedSolveRLimit`'s 20M: under the defaults it declines
+    ## (`beSolverUndef`), never `sxUnsat`; with a budget past the search it
+    ## finds Nim's own witness (`a == 6`, replayed natively).
+    let d = symexFind(tiTuple, tLabel("ti_tuple"))
+    checkpoint "default " & $d.status & " " & show(d.errors)
+    check d.status in {sxSat, sxUnknown}
+    if d.status == sxUnknown: check d.errors.hasKind(beSolverUndef)
+    let r = symexFind(tiTuple, tLabel("ti_tuple"), tupleBudget)
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
     if r.status == sxSat:

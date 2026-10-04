@@ -9214,6 +9214,19 @@ slice's `>=` floor unchanged. Where slices met:
   shadowed batch 6's exported `dsl_typebridge.procValueSymKinds` (the
   routines a proc value names) inside `dsl_parser`, where S8bn's
   `pfProcSym` reads it; S8br's is renamed `procValueHeadKinds`.
+- *S8bp's isolation on S8bc's `ti_tuple`.* S8bp's base predates batches
+  5 and 6; their suites first ran under it here. `ti_tuple`'s label query
+  (`for (k, v) in t.pairs: s += k * v`) carries Nim's overflow checks on a
+  product of two symbolic 64-bit terms (`bvsmul_noovfl` / `noudfl`), a
+  hard bit-vector search from the query's own text: 120,971,633 units on
+  Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, against 40,490
+  in the walk's context at batch 6 (the same 57 assertions; without the
+  four overflow checks the text alone takes 632,702). The path is tainted
+  (`feTableIterOrder`), so its solve has `taintedSolveRLimit`'s 20M and
+  declines (`beSolverUndef`). The pin keeps `sxSat` and Nim's witness under
+  an explicit 300M budget and admits that decline, never `sxUnsat`, under
+  the defaults. PRECISION candidate: a product whose operand has a small
+  literal domain (a table's keys) split on it before the overflow check.
 - *One size bound.* `maxModelledInitialSize` moved to `types`;
   `runtime.maxWitnessSeqLen`, defined by S8bl as that bound, is it rather
   than a second `1 shl 20`.

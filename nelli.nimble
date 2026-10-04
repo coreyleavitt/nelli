@@ -1138,5 +1138,10 @@ task test, "Run the test suite":
             # second); a membership and a negated one on one string
             # decided as one (the unbounded endsWith run on Z3 4.13.4).
             # Walker 214->219.
-            "tsymex_rfc0005_s8bp_isolation"]:
+            "tsymex_rfc0005_s8bp_isolation",
+            # RFC-0005 S8by: no (1b)/(1c) after a facts-first SAT; concolic
+            # scratch solves in contexts of their own; a regex membership
+            # under a disjunction or an ite merged with those that hold
+            # where it is read. Walker 219->231.
+            "tsymex_rfc0005_s8by_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

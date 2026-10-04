@@ -974,7 +974,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
     ## probes in contexts of their own; a regex membership and a negated
     ## one on one string decided as one). Provisional 219. 214->219.
-    check symexWalkerVersion == "219"
+    ## RFC-0005 S8by (no (1b)/(1c) after a facts-first SAT; concolic
+    ## scratch solves in contexts of their own; a membership below the top
+    ## level merged). Provisional 231. 219->231.
+    check symexWalkerVersion == "231"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -202,7 +202,21 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "219"
+const symexWalkerVersion* = "231"
+  ## RFC-0005 S8by (2026-10-03) — S8bp's remainder. After a facts-first
+  ## SAT, `checkCapped` no longer repeats (1b) and (1c)'s uncapped half
+  ## (known SAT), nor (1c)'s capped half when the facts-first model makes
+  ## the caps true: `lastNl` spends 607,363 units less (Z3 5.1), so a query
+  ## near its budget can decide where it declined. Concolic collection's
+  ## scratch solves check in contexts of their own, so their spend and
+  ## outcome follow their query alone. `mergeMemberships` merges a
+  ## membership below the top level (under a disjunction, an `ite`, a
+  ## `not`) with those of the same string that hold where it is read: `a
+  ## or not s.contains(re"b")` beside `s.endsWith(re"b+")` was `sxUnknown`
+  ## on Z3 4.13.4 (8.5M units). And the translated contexts' term order
+  ## (wall time only). Provisional 231 (220 to 230 are held by slices
+  ## still running). 219 -> 231.
+  ##
   ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
   ## walk, or an earlier walk on the thread, left in Z3's context. Every
   ## `checkCapped` step (not only S8bm's step 1) searches in a fresh

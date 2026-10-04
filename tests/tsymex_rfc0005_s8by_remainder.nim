@@ -9,7 +9,14 @@
 ##       SAT. Where the facts-first model also satisfies the caps, (1c)'s
 ##       capped half is known SAT too and is skipped. Verdicts are
 ##       unchanged; `lastNl` spends about 607k units less (Z3 5.1).
-import std/[unittest, strutils]
+##   (4) a regex membership below the top level -- under a disjunction
+##       (`a or not s.contains(re"b")`), in an `ite` branch, under a `not`
+##       -- is merged with the memberships of the same string that hold
+##       where it is read, as S8bp merges top-level ones: S8bp's empty
+##       `s.endsWith(re"b+") and not s.contains(re"b")` with the negated
+##       membership inside a disjunction was `sxUnknown` on Z3 4.13.4.
+##       Pinned against native Nim.
+import std/[unittest, strutils, re]
 import nelli/symex
 import nelli/smt/canonicalize
 import nelli/smt/runtime
@@ -93,3 +100,111 @@ suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
     check "1c-capped" in n
     check "1b" notin n
     check "1c" notin n
+
+# ---- (4) memberships below the top level -------------------------------------
+
+proc orRun(s: string; a: bool) =
+  ## Empty: with `a` false the disjunction needs `s` to hold no `b`, but
+  ## it ends in a run of them.
+  if s.endsWith(re"b+") and not a and (a or not s.contains(re"b")):
+    symexTarget("s8by_or")
+
+proc orSat(s: string; a: bool) =
+  ## SAT, with `a` true or with no `b` at all -- not both.
+  if s.endsWith(re"b+") and (a or not s.contains(re"b")):
+    symexTarget("s8by_or_sat")
+
+proc iteRun(s: string; i: int) =
+  ## Empty: `flags[i]` is an `ite` on `i`; index 1 is never false, and at
+  ## index 0 `s` holds no `b` but ends in a run of them.
+  let flags = [s.contains(re"b"), true]
+  if i >= 0 and i <= 1 and s.endsWith(re"b+") and not flags[i]:
+    symexTarget("s8by_ite")
+
+proc iteSat(s: string; i: int) =
+  ## SAT only at index 1, with a string of at most three characters.
+  let flags = [s.contains(re"b"), s.len > 3]
+  if i >= 0 and i <= 1 and s.endsWith(re"b+") and not flags[i]:
+    symexTarget("s8by_ite_sat")
+
+proc twoNeg(s: string) =
+  ## Empty, at the top level: two negated memberships and a plain one on
+  ## one string. `mergeMemberships` complements both negated ones into one
+  ## intersection (each complement is now referenced as it is made).
+  if s.endsWith(re"b+") and not s.contains(re"a") and not s.contains(re"b"):
+    symexTarget("s8by_twoneg")
+
+template reproduces(call: untyped; label: string): bool =
+  ## Runs the SUT natively in a capture frame.
+  block:
+    symexCaptureBegin()
+    call
+    let hits = symexCaptureEnd()
+    label in hits
+
+proc words(n: int): seq[string] =
+  ## Every string over `a`, `b` and `c` of at most `n` characters.
+  result = @[""]
+  var last = @[""]
+  for k in 1 .. n:
+    var next: seq[string]
+    for w in last:
+      for c in "abc": next.add w & c
+    result.add next
+    last = next
+
+template verdict4(sut: untyped; lbl: string): untyped =
+  ## `sut`'s walk to `lbl`, with the units its queries spent.
+  block:
+    symexQueryStats = @[]
+    let r = symexFind(sut, tLabel(lbl))
+    var u = 0
+    for q in symexQueryStats: u += q.rlimitDelta
+    checkpoint $r.status & " units=" & $u & "\n" & symexQueryStatsSummary()
+    for e in r.errors: checkpoint $e.kind & ": " & e.msg
+    symexQueryStats = @[]
+    (status: r.status, units: u, r: r)
+
+suite "S8by (4): a membership under a disjunction or an ite is merged":
+
+  test "native: the empty ones reach their label on no short string":
+    for w in words(6):
+      for a in [false, true]:
+        check not reproduces(orRun(w, a), "s8by_or")
+      for i in -1 .. 2:
+        check not reproduces(iteRun(w, i), "s8by_ite")
+      check not reproduces(twoNeg(w), "s8by_twoneg")
+
+  test "a or not s.contains(re\"b\"), beside s.endsWith(re\"b+\"): UNSAT":
+    ## Before S8by: `sxUnknown` on Z3 4.13.4, 8,524,640 units (step 1
+    ## 5,139,708, step 2 3,383,088, the cap in its core).
+    let v = verdict4(orRun, "s8by_or")
+    check v.status == sxUnsat
+    check v.units <= 20_000
+
+  test "the same disjunction, SAT: the witness reaches the label natively":
+    let v = verdict4(orSat, "s8by_or_sat")
+    check v.status == sxSat
+    if v.status == sxSat:
+      check reproduces(orSat(v.r.witness[0], v.r.witness[1]), "s8by_or_sat")
+
+  test "not flags[i], an ite over a membership: UNSAT":
+    let v = verdict4(iteRun, "s8by_ite")
+    check v.status == sxUnsat
+    check v.units <= 20_000
+
+  test "two negated memberships and a plain one at the top level: UNSAT":
+    let v = verdict4(twoNeg, "s8by_twoneg")
+    check v.status == sxUnsat
+    check v.units <= 20_000
+
+  test "the same ite, SAT: the witness reaches the label natively":
+    let v = verdict4(iteSat, "s8by_ite_sat")
+    check v.status == sxSat
+    if v.status == sxSat:
+      check reproduces(iteSat(v.r.witness[0], v.r.witness[1]), "s8by_ite_sat")
+
+suite "S8by: walker version floor":
+
+  test "symexWalkerVersion >= 231":
+    check parseInt(symexWalkerVersion) >= 231

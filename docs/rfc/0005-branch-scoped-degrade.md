@@ -359,7 +359,7 @@ state = "done"
 [[slice]]
 id = "S8bt"
 title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interpreter CRLF/ANY start filter, LIMIT between 0 and default, mixed SKIP:NAME, UTF UCP/case folding and (*ANY) in UTF, automaton/step-table/register caps, replace lemmas beyond two shapes"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -9148,3 +9148,330 @@ s8bj suite takes under 60 s (the slowest is `s8bj_entries_multiline` at
   the length relation only for a numeral `len(by)`, and the image only for
   one-set patterns. Other unbounded replace queries can still surface as
   `beSolverUndef`.
+
+**As landed (S8bt, walker 224) — S8bj's remainder.** All seven items are
+done. The branch is `rfc-0005-s8bt`, on S8bj's `2899d26`. Ground truth is
+the libpcre `std/re` loads: PCRE 8.45's interpreter on Linux, and 8.37
+with its JIT on the Windows legs (built locally as the third oracle).
+Each modelled feature is checked against the real `std/re` on every
+enumerated input: the concrete model, every automaton language, the step
+table, and every Z3 formula.
+
+*Item 1: only verified libraries are read (SOUNDNESS).*
+- **The fix.** `pcre_engine.verifiedLibs` lists the builds the model is
+  checked against, each with its `pcre_version()` string, its engine and
+  the model its unanchored calls are read with:
+  - 8.45, interpreter (the model's reference);
+  - 8.37, JIT (the Windows legs; `peJit837`);
+  - 8.37, interpreter.
+- **Any other library.** With any other library, `parseSpec` returns
+  `psUnknown` for every pattern, and the reason names the library and the
+  list (`unverifiedLibReason`). S8bj recorded the version in the cache key
+  but still read every library with 8.45's model.
+- **RED / GREEN.** Under a stand-in 8.44 (`overridePcreLib`), a reachable
+  target gave `sxSat` (RED). It now gives `sxUnknown` with the named
+  reason (GREEN; `tsymex_rfc0005_s8bt_libversion`).
+- **Other builds, measured and not listed.** With evaluation entries in a
+  throwaway build, 31 regex suites ran on locally built libraries:
+  - 8.44 and 8.39 interpreters: 0 differ;
+  - 8.39 JIT: 80 cells differ in `tsymex_rfc0005_s8bt_jit` and 33 in
+    `s8bj_verbs`, e.g. `(*CRLF).[ab]` on "\r\na" (its scan is not
+    8.37's).
+
+  The list stays at the builds CI runs. Adding an interpreter build is a
+  one-line entry once a leg runs it.
+
+*Item 2: the JIT is its own engine model.*
+- **What is modelled.** `pcre_code` lays the pattern out as pcre_compile.c
+  does, and `pcre_jit` ports 8.37's `scan_prefix` and
+  `fast_forward_first_n_chars`: up to 16 known positions, the range skip
+  table, and up to three offset compares, with the give-up when at most
+  `max - 1` bytes remain. `pcre_select`'s engine `peJit837` then models:
+  - a SKIP landing past the start resumes with the scan, without the
+    CRLF skip;
+  - a SKIP:NAME that is not found is ignored in place, with no re-run;
+  - the required-character check searches when `len - x <= 1000`;
+  - in UTF mode, the bumpalong steps by the lead byte's length.
+- **Where the engine is used.** The search languages carry the scan's
+  look-ahead as obligations on the bytes still to be read (`SNode.obl`).
+  The step table and `replaceStepZ3` have the scan's modes.
+  `pcreSearchEngine()` picks the verified build's model, and S8bj's
+  `jitDeclined` is removed.
+- **What stays declined on the JIT.**
+  - In UTF mode, a scan whose first characters include U+0080..U+00BF.
+    The scan can stop inside a character, and the JIT then reads a
+    continuation byte as that code point.
+  - In UTF mode with (*ANY), the search languages under the scan. An
+    attempt can start inside a multi-byte newline. The concrete reading is
+    modelled.
+  - A LIMIT between 0 and the default, because `count_match` is the JIT's
+    own accounting.
+- **RED / GREEN.**
+  - Concrete, with the JIT behaviour disabled: 484 cells differ (RED).
+    The differential is `tsymex_rfc0005_s8bt_jit`, over a corpus from a
+    tri-oracle delta of 239 patterns.
+  - Languages with the scan disabled: 21 differ (RED).
+  - The Z3 replace with the JIT branch disabled: 4 wrong `zsSat` (RED).
+  - GREEN: 0 differ on both the delta and the live 8.37 JIT.
+
+*Item 3: a LIMIT between 0 and the default.*
+- **The model.** `match()`'s calls (pcre_exec.c 8.45) are counted on the
+  automaton: `buildNfa(limitRoom)` adds `nkCost` and `nkPoss` states, and
+  each agenda item carries `Cost{cc, dp, md}`.
+  - Every `match()` entry is one call. RMATCH goes one frame deeper;
+    TAIL_RECURSE stays in the same frame.
+  - Repeats of a single character or character type: a greedy exit from
+    the maximum down costs an RMATCH, and the exit at the minimum is a
+    TAIL. Class repeats (OP_CLASS, OP_NCLASS, OP_XCLASS) RMATCH at the
+    minimum too.
+  - A lazy exit is always an RMATCH. EXACT is free.
+  - A possessive or auto-possessified repeat (a port of
+    `auto_possessify`, `pcre_possess`) has one free exit.
+  - Groups, verbs and BRAZERO follow their opcodes.
+  - The count resets per attempt.
+- **SKIP:NAME re-runs.** A SKIP:NAME re-run calls `match()` afresh, so
+  the first run is one of the call's runs (`Cost.pk`). The re-run's
+  prefix makes one call fewer for each SKIP:NAME it now ignores. Each
+  item after the front runs one frame higher for each counted
+  chain-ancestor terminal after it.
+- **The errors.**
+  - Anchored: `lkErrM` / `lkErrR`.
+  - Search: `skErrM` / `skErrR`, marked at the attempt.
+  - Replace: an error ends `replace` as a miss does.
+  - LIMIT_MATCH is checked before LIMIT_RECURSION, as in `match()`.
+- **The oracle.** The least `match_limit` and `match_limit_recursion` at
+  which each call succeeds, found by binary search through `pcre_extra`
+  (`s8bt_harness/limit_oracle`, interpreter), on 1023 patterns over 366k
+  calls (`tsymex_rfc0005_s8bt_limit` .. `_d`).
+- **RED / GREEN.**
+  - At `2899d26` every such pattern declined, and the oracle tests read 0
+    patterns (RED).
+  - During the slice, class repeats counted as TAIL at the minimum: 40
+    depths differed, e.g. `[ab]*(?:a|b)` at 2 instead of 3 (RED).
+  - SKIP:NAME re-runs uncounted: 17 + 13 differed (RED).
+  - GREEN: 0 differ. 8 of the 366k calls are unmodelled; they are named
+    below.
+
+*Item 4: mixed (*SKIP:NAME).*
+- **What `pcre_exec`'s 8.45 loop does.**
+  - `skip_arg_count` counts every SKIP_ARG executed, ignored ones
+    included, and one is ignored while the count is at most
+    `ignore_skip_arg`.
+  - A live SKIP:NAME that is not found, and whose continuation fails,
+    re-runs the attempt at the same start with `ignore_skip_arg` set to
+    the count. After that re-run, the CRLF check moves the start past an
+    LF from any barrier position.
+  - A SKIP that jumps past the start keeps the count for the next
+    attempt. NOMATCH, PRUNE, THEN and a SKIP at or before the start reset
+    it.
+- **The model.**
+  - Within an attempt, a virtual DFS: a barrier neutralises its found
+    SKIP_ARG ancestors, which are found by a depth scan.
+  - Each item carries its DFS index (`Item.ac`), so the count is exact,
+    and duplicates are kept apart where their ancestor sets differ.
+  - Across attempts, the kept count is an attempt parameter (`ign0`) in
+    the verifiers, the search's nodes, the step table's start key and
+    leaves, `replaceStepZ3`'s modes, and the found attempt's captures.
+  - A count past `argCap` (7) declines by name (`staleWhy`).
+- **RED / GREEN.**
+  - Item 4's first differential found a latent S8bj wrong answer: 19
+    cells under (*CRLF), where a barrier past the start must move the
+    re-run past the LF (RED).
+  - With the kept count reset per attempt, the stale-count family gives
+    367 differ concretely, and the symbolic suite 21 searches and 12
+    captures (RED).
+  - GREEN: 1810 patterns, 618k calls, 0 declined, 0 differ. The search
+    languages, the step table, the captures per kept count and the Z3
+    replace all give 0 differ (`tsymex_rfc0005_s8bt_skipname*`).
+
+*Item 5: UTF with (*UCP), Unicode case folding and (*ANY).*
+- **Generated tables.** `scripts/gen-pcre-ucd.py` generates
+  `pcre_ucd.nim` from 8.45's `pcre_ucd.c`, `pcre_tables.c` and `ucp.h`:
+  - the code points of all 169 `\p` names, by pcre_exec.c's per-type
+    semantics;
+  - (*UCP)'s graph, print and punct specials;
+  - UCD_OTHERCASE runs and the caseless sets.
+
+  Generated from 8.37's sources, the tables are identical.
+- **What the reader models.**
+  - `\p` / `\P` in UTF mode.
+  - (*UCP)'s `\d \s \w` and the POSIX substitutes. The bitmap classes
+    (ascii, cntrl, xdigit) stay bitmaps.
+  - A caseless OP_CHARI through UCD_OTHERCASE.
+  - A character with a caseless set as OP_PROP / OP_NOTPROP PT_CLIST.
+  - A caseless class range by a port of `add_to_class`, including its
+    extend quirks; an other case above 0xFF makes an XCLASS.
+- **Start-of-match data.** `set_table_bit`'s other-case lead byte and the
+  PT_CLIST start bits (a PT_CLIST repeat that may be absent fails
+  `set_start_bits`). The JIT scan and the possessifier read the same
+  other cases.
+- **(*ANY) in UTF mode.** U+0085 (C2 85) and U+2028 / U+2029
+  (E2 80 A8 / A9) are newlines; a lone 0x85 inside another character is
+  not. This needs:
+  - new final-newline symbols, and `nlStepU`'s sub-states;
+  - the classes `pcU1`..`pcU3` before a newline's later bytes;
+  - a step-table row for a newline with more after it;
+  - `replaceStepZ3`'s three-byte look-back;
+  - `.` excluding U+2028 and U+2029.
+- **A character class in UTF mode.** It compiles to a UTF-8 byte trie
+  with shared tails (`utf8Leads`), so `\P{Lu}\p{Ll}?` fits the caps.
+- **8.37 (the Windows legs).** 8.37 compiles some UTF classes differently
+  (pcre_compile.c and pcre_xclass.c, read for both versions; first caught
+  on Windows):
+  - its `[:punct:]` takes symbols below 256, not 128;
+  - a negated ascii, cntrl or xdigit lists no wide characters;
+  - `should_flip_negation` handles wide characters differently.
+
+  Before 8.45, a UTF class with a (*UCP) POSIX class or a negated escape
+  declines by name (`PcreParse.classPre845`).
+- **RED / GREEN.**
+  - With ASCII-only folding: 42 folding probes and 40 pattern calls
+    differ (RED).
+  - GREEN: 169 properties (598k code points), (*UCP) (255k), 2246 cased
+    characters (4.69M code points) and 1216 caseless ranges (3.62M) all
+    match libpcre. The concrete patterns, (*ANY)'s languages in every
+    start variant, the step table, the Z3 replace and the entries' Z3
+    formulas give 0 differ (`tsymex_rfc0005_s8bt_utf*`). They are green
+    on the local 8.37 JIT too, where 84 classes decline.
+
+*Item 6: the size caps' real cost, and a lazy encoding.*
+- **Measured** (`tests/s8bt_harness/caps_probe.nim`, with the caps raised by
+  `-d:`; the walker's budget is `seqQueryRLimit` = 20M).
+  - **The automaton.** With the family `(*UTF)(?:a|b)*a(?:a|b){k}c` on
+    the priority route, `find == 1` costs:
+    - k = 2: 34 minimised states, 16.7M rlimit;
+    - k = 3: 50 states, 20.3M, past the budget.
+
+    The determinised regex has 11k nodes at k = 3 and 269k at k = 4 (past
+    the 40k default). At k = 4 Z3 ran past a 60M rlimit and was killed
+    after 2400 s. From k = 5 the regex is past 2M nodes, and the
+    4000-state cap is never the one reached.
+
+    A recursive function over the minimised automaton's states (one
+    numeral per state) measured worse: `zsUnknown` at 60M where the regex
+    took 3.6M.
+  - **The step table.** A symbolic-receiver replace query (`r == "x-"`,
+    `len(s) <= 4`) is `zsUnknown` at 20M at every size measured, from 7
+    to 3072 rows, and so are 2899d26's own UTF and `(?m)` tables. Building
+    the term takes 41 s at 1026 rows and 170 s at 3072.
+  - **Registers.** No suite pattern and no constructed family (ladders,
+    THEN, SKIP, CRLF families up to k = 10) needs more than 1 register.
+- **So the caps stay** (4000 / 512 / 6, now `-d:nelliMaxDfaStates`,
+  `nelliMaxRegexSize`, `nelliMaxStepStates`, `nelliMaxRegs`). Raising
+  them buys no decided query.
+- **The lazy encoding.** A UTF-mode pattern with nothing PCRE's priority
+  decides takes S8ay's edge-split reading (`regex_parser.lazyUtf`) in
+  place of the determinised automaton. "Nothing PCRE's priority decides"
+  means no verb, no limit, LF newlines, anchors only at the edges, every
+  atom whole UTF-8 characters, and for matchLen, endsWith and findBounds'
+  end an S8ay selection form.
+  - Its languages are Z3 regexes over the UTF-8 bytes (`cpsRe`, the same
+    trie), and Z3's derivatives build their states lazily.
+  - pcre_exec's UTF errors (-10, -11, after -24) are added as
+    `callError` reads them.
+  - It is sound on a valid subject from a character boundary: no match
+    starts inside a character, so the leftmost byte offset is the leftmost
+    character.
+  - Under 8.37's JIT, a search whose scan can stop inside a character is
+    not lazy.
+- **Item 6 RED / GREEN.**
+  - RED: k = 6 is past the regex cap, and the four walker pins are
+    `sxUnknown`.
+  - GREEN: `find == 1` costs 0.20M at k = 3, 0.68M at k = 5 and 6.5M at
+    k = 6. The pins are `sxSat` with std/re's witness, or `sxUnsat`. The
+    entries' formulas give 6760 cases, 0 differ
+    (`tsymex_rfc0005_s8bt_caps*`).
+
+*Item 7: replace facts for every pattern and `by`.* (A fork.)
+- **The facts.** `pcre_select.replaceFacts` reads:
+  - the match lengths from the tree (`(*ACCEPT)` makes the shortest 0);
+  - the sure bytes, from which an attempt always matches. These come from
+    the attempt's no-match automaton in every start class, with and
+    without NOTEMPTY_ATSTART. There are none under COMMIT, PRUNE, SKIP,
+    THEN, UTF or a limit, and none for LF where the CRLF skip passes it;
+  - the first bytes, from the no-match verifier.
+- **The lemmas.** `replaceLemmas` states:
+  - the length relation, with a fresh `kb` for `k·len(by)`, and a match
+    that can be empty bounded by `k <= 2·len(s) + 1`;
+  - no match implies no change;
+  - `k >= 1` implies a first byte;
+  - per sure byte, containment in `r` implies containment in `by`;
+  - the image for a literal `by`.
+- **Where they go.** Every recursively lowered replace is a fresh value,
+  and its facts go in the new sink `regexRecFactConds`, drained after the
+  definitions. `checkCapped` runs the facts-first check in a translated
+  context of its own, under `recFactsRLimit` = 100k (the slowest
+  refutation takes 2060). Every later step substitutes the terms back.
+- **RED / GREEN.**
+  - RED: 10 undecided pins on Z3 5.1 and 14 on 4.13.4, at `fa21308`.
+  - GREEN: every pin decided on both versions, in 0.0 to 0.2 s.
+  - The facts differential: 168060 std/re replaces, 0 differ.
+  - Removing the verb, UTF and LF exclusions gives 3099 differ.
+
+*Soundness bugs found.*
+- **Before this slice:**
+  - **Item 1:** any libpcre was read with 8.45's model, including
+    versions the model was never checked against.
+  - **S8bj's barrier re-run:** under (*CRLF), a SKIP:NAME barrier
+    executed past the start of an attempt that began at a CRLF's LF
+    re-ran without moving past the LF. This gave a wrong find on
+    `(*CRLF)[\x09-\x0b](*SKIP:B)a|[\x09-\x0b]` (19 cells). It is fixed in
+    item 4.
+- **On the Windows legs, caught by CI and declined or modelled before
+  landing:**
+  - 8.37's class compilation (above);
+  - JIT + (*ANY) UTF search languages (21 wrong `skNoOcc` cells).
+- **In the slice's own new code, found by the differentials:**
+  - class-repeat RMATCH, and SKIP:NAME re-run costs (item 3);
+  - an `IndexDefect` in `stepTable`'s leaf lookup on the JIT;
+  - `auto_possessify`'s other-case test;
+  - PT_CLIST start bits;
+  - the XCLASS for folded wide characters.
+
+*Different mechanisms, reported and not fixed here.*
+- **PCRE's default match and recursion limits are not modelled
+  (SOUNDNESS).** PCRE's default `match_limit` and `match_limit_recursion`
+  are 10 000 000. A pattern that backtracks heavily on a subject of
+  millions of bytes can return -8 or -21, where the model answers with a
+  match or a miss. Walker subjects are bounded far below this.
+- **The JIT's machine stack (SOUNDNESS, Windows legs).** 8.37's JIT runs
+  on a 32K default stack, and deep backtracking on a long subject returns
+  `PCRE_ERROR_JIT_STACKLIMIT` (-27). This is not modelled; it belongs to
+  the same class as the default limits.
+- **The JIT's own limit accounting (PRECISION).** A LIMIT between 0 and
+  the default declines on the JIT. Its `count_match` sites are not
+  `match()`'s, and it ignores LIMIT_RECURSION.
+- **Limit accounting gaps (PRECISION).** Under a limit between, these
+  decline:
+  - auto-possessification next to a property or an extended class;
+  - a possessive repeat of a non-ASCII UTF class (e.g. `\x{e9}*` at the
+    end);
+  - a possessive (*CRLF) dot repeat;
+  - an attempt that starts with a kept `ignore_skip_arg`.
+
+  In the oracle corpus that is 8 of 366k calls.
+- **A SKIP:NAME count past 7 (PRECISION).** A repeat that runs a
+  SKIP:NAME per iteration keeps a count that grows with the subject, so
+  no finite automaton holds it. It declines by name.
+- **The JIT in UTF mode (PRECISION).** These decline: a scan whose first
+  characters include U+0080..U+00BF, and (*ANY)'s search languages under
+  the scan.
+- **8.37's UTF classes (PRECISION, Windows).** A (*UCP) POSIX class or a
+  negated escape in a UTF class declines there.
+- **A symbolic receiver through the step table (PRECISION).** These
+  queries stay `beSolverUndef` at every table size: 7 to 3072 rows,
+  `zsUnknown` at 20M, 2899d26's own tables included. Item 7's facts
+  refute what they state. A SAT search for a value needs a different
+  encoding of `replace`.
+- **Z3 past its rlimit (PRECISION, liveness).** On a 269k-node regex,
+  Z3 ran past a 60M rlimit for 2400 s. The regex cap (40k nodes) keeps
+  the walker away from this.
+- **The priority route in UTF mode (PRECISION).** matchLen, endsWith and
+  findBounds' end over a (*UCP) or property pattern without a selection
+  form still use the automaton. A concrete check there takes Z3 seconds.
+- **Item 7's residuals (PRECISION).** These stay undecided:
+  - two-byte containment (`a+b` never leaves "ab");
+  - UTF patterns, which have no sure or first bytes, because an invalid
+    subject is returned whole;
+  - verbs, LIMIT and an unmarked SKIP:NAME, which have no sure bytes;
+  - `count` over a replace value.

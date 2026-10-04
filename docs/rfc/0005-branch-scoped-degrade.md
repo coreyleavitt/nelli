@@ -9227,6 +9227,11 @@ slice's `>=` floor unchanged. Where slices met:
   an explicit 300M budget and admits that decline, never `sxUnsat`, under
   the defaults. PRECISION candidate: a product whose operand has a small
   literal domain (a table's keys) split on it before the overflow check.
+  S8bb's `bb_rep_sym_empty_hit` (`s.replace(re"$", "-") == "q-"`) is the
+  same shape on Z3 4.13.4 alone: 18,801,883 units in its own context
+  (12,755,004 in the walk's at batch 6; 198,718 on Z3 5.1), past step 1's
+  half of `seqQueryRLimit`. Pinned the same way, under a 100M sequence
+  budget for the witness.
 - *One size bound.* `maxModelledInitialSize` moved to `types`;
   `runtime.maxWitnessSeqLen`, defined by S8bl as that bound, is it rather
   than a second `1 shl 20`.

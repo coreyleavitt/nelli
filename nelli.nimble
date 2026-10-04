@@ -1093,6 +1093,10 @@ task test, "Run the test suite":
             # reassignment on a global the walk has not written reads its
             # entry value (was a false sxUnsat). Walker 230.
             "tsymex_rfc0005_b6_globalrecv",
+            # RFC-0005 batch 7 -- a var openArray view a later argument
+            # writes declines (was a false sxUnsat); a global seq indexed by
+            # a call; S8br's slow addr cell terminates. Walker 237.
+            "tsymex_rfc0005_b7_integration",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

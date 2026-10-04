@@ -6913,7 +6913,19 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           if s.strVal notin guards: guards.add s.strVal
       var heapSteps: seq[NimNode]
       let root = if lv.kind == nnkSym: lv else: lvalueRoot(lv, heapSteps)
-      if root.isNil or
+      if not laterLeavesLvalue(lv, laterActuals(n, i)):
+        # RFC-0005 batch 7: the temporary is the view's elements where the
+        # argument stands; Nim passes the storage's address, so the callee
+        # sees what a later argument's call wrote there, and the write-back
+        # would overwrite that write with the stale copy (a false `sxUnsat`
+        # before batch 7). S8br's frame condition decides it.
+        writeBacks.add ctx.declineAtSite(feEvalOrderUnmodelled,
+          siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
+                  calleeSym.strVal & "` is copied where it stands, and a " &
+                  "later argument's call may write its storage before the " &
+                  "call (feEvalOrderUnmodelled)"),
+          "var openArray view written by a later argument (feEvalOrderUnmodelled)")
+      elif root.isNil or
          varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
                            cellsBound = true):
         writeBacks.add ctx.declineAtSite(feUnsupportedOp,
@@ -7486,6 +7498,15 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       var heapSteps: seq[NimNode]
       let root = if vlv.kind == nnkSym: vlv else: lvalueRoot(vlv, heapSteps)
       addTouch(vlv, heapSteps)
+      if not laterLeavesLvalue(vlv, laterActuals(n, i)):
+        # RFC-0005 batch 7: as `userCallStmt`'s view, copied where it
+        # stands, while Nim passes the storage a later argument may write.
+        declines.add ctx.declineAtSite(feEvalOrderUnmodelled,
+          siteMsg(n, "call through `" & calleeName & "`: `var openArray` " &
+                  "argument `" & view.repr & "` is copied where it stands, " &
+                  "and a later argument's call may write its storage before " &
+                  "the call (feEvalOrderUnmodelled)"),
+          "var openArray view written by a later argument (feEvalOrderUnmodelled)")
       if root.isNil or
          varActualMayAlias(n, i, vlv, root, heapSteps, aliasConds, peers[i]):
         declines.add declineHere("`var openArray` argument `" & view.repr &

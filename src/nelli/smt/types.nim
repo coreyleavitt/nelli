@@ -645,6 +645,11 @@ type
                      ## follow ADR-0027: svInt proto, BV-sorted bound
                      ## declines classified. Fields: `ssBase`/`ssLo`/`ssHi`
                      ## (hi already ..<-adjusted by the parser).
+    iekSeqSplice     ## RFC-0005 S8bu: the seq `spBase` with its elements
+                     ## `spAt ..< spAt + spPart.len` replaced by `spPart`'s
+                     ## (the same length): a `var openArray` view of a
+                     ## `toOpenArray` slice written back to its storage.
+                     ## Lowered as an array-lambda like `iekSeqSlice`.
     iekStrStrip      ## Round-4 Slice B (ADR-0026): `strutils.strip(s,
                      ## leading, trailing, chars)` with COMPILE-TIME-literal
                      ## flags and char set → quantifier-free DECOMPOSITION
@@ -869,6 +874,12 @@ type
       ssBase*: IRExpr
       ssLo*:   IRExpr
       ssHi*:   IRExpr
+      ssView*: bool    ## RFC-0005 S8bu: a `toOpenArray` view, whose
+                       ## bit-vector bounds take the signed Int bridge
+    of iekSeqSplice:   ## RFC-0005 S8bu
+      spBase*: IRExpr
+      spAt*:   IRExpr
+      spPart*: IRExpr
     of iekStrLit:
       sval*: string
     of iekContains:
@@ -1017,6 +1028,11 @@ type
                                      ## actuals' locations involve (as
                                      ## `lambdaOuter`; `t:?` for a type any
                                      ## ref may address).
+      ccVarLocs*: seq[VarLoc]        ## RFC-0005 S8bu: as `IRStmt.cVarLocs`,
+                                     ## for this call: the walker binds a
+                                     ## formal whose actual is a path into
+                                     ## an address-taken variable to its
+                                     ## cell (`bindVarLocs`).
     of iekSeqLit:                    ## Phase 15 C4: `@[a, b, c]`
       seqLitElems*:  seq[IRExpr]     ## the literal elements (concrete length)
       seqLitElemTy*: IRType          ## the element IRType
@@ -3078,10 +3094,30 @@ type
     ## two equally-sound modeling strategies rather than gating an exhaustion
     ## decline, so `0` means the SEMANTIC OPPOSITE of unlimited: "always
     ## axiomatize, never inline."
-    queryRLimit*: uint
-      ## Z3 logical step count bound. `0` (default) is unbounded.
+    queryRLimit*: uint = 250_000_000
+      ## Z3 logical step count bound. `0` is unbounded.
       ## Wired into `runtime.nim:trySolve` via `Z3_solver_set_params`.
       ## Phase 13.
+      ##
+      ## RFC-0005 S8bu: the default is `250_000_000`, no longer `0`. Every
+      ## other solve the walker issues was already bounded under the
+      ## defaults (the loop and path feasibility checks, the tainted
+      ## target-hit solve, the concrete-branch solves, and every query
+      ## naming a string / seq through `seqQueryRLimit`); a target-hit
+      ## query over plain arithmetic was not, and one Z3 does not decide
+      ## (S8bs's int-field read across the signed `bv2int` bridge) left the
+      ## walk running forever. Now such a query runs out of the budget and
+      ## is `sxUnknown` with `beSolverUndef` naming it: a decline, never a
+      ## hang. Not the `20M` the other bounds use: a target-hit query that
+      ## decides without one can need more (`tsymex_augmented_assign`'s
+      ## 64-bit `acc * x == 12` needs between 100M and 150M units on Z3
+      ## 4.13.4, about 55 s, and 20M made it `beSolverUndef`); `250M` is past
+      ## that with room, and at ~2M units/s about two minutes of search.
+      ## The default does not raise the solves bounded by
+      ## `defaultConcreteBranchRLimit` (`concreteBranchRLimit`,
+      ## `taintedSolveRLimit`), which take a `queryRLimit` other than this
+      ## default as the caller's. An explicit `0` still means unbounded
+      ## (this type's `0 = unlimited` contract, RFC-0010).
     maxSeqLen*: int = 128
       ## RFC-0005 S8k. The longest string / seq (in elements -- bytes for a
       ## `string`) any solver query may choose for one term. Default `128`.
@@ -3125,6 +3161,27 @@ type
       ## not a clock), so a query it cuts off is the same `beSolverUndef` on
       ## every machine, and cacheable. Ignored when `maxSeqLen == 0` (no
       ## cap, no bound: the caller opted out of both).
+    queryTimeoutMs*: uint = 600_000
+      ## RFC-0005 S8bu. A wall-clock bound, in milliseconds, on every solve
+      ## the walker issues (Z3's `timeout` solver parameter), beside the
+      ## step bounds above. `0` means none. A solve it cuts off is
+      ## `zsUnknown`: `sxUnknown` with `beSolverUndef` naming this field,
+      ## and the run's verdict is not written to the verdict cache (it is
+      ## the machine's, not the program's).
+      ##
+      ## Why a clock beside `rlimit`: Z3 can stop advancing its step
+      ## counter. A mixed Int / bit-vector query (`sbv2int(r) == 2 *
+      ## sbv2int(k) and r != 2 * k`, from an `int` read back out of an
+      ## Int-sorted heap) reached 12.4M units in 10 s and then stayed
+      ## there: at 60 s it had 12.47M, and under a 20M `rlimit` it ran past
+      ## 250 s without returning; Z3's `timeout` stopped it on time. A
+      ## step bound cannot end a search that takes no steps, so without a
+      ## clock no default bounded every query. `600_000` (10 minutes) is
+      ## past where `seqQueryRLimit` / `queryRLimit` end the slowest search
+      ## measured (the sequence solver spends 20M units in about 6-8
+      ## minutes at 40-55k units/s), so on a query whose counter advances
+      ## the step bound, which is deterministic, still answers first; the
+      ## clock is the backstop for one whose counter does not.
     maxFrontierSize*: int = 0
       ## Issue #163 item 3 (rev). The one INCREMENTAL per-statement frontier
       ## cap — `walkBlock` (`runtime.nim`) prunes the post-step path
@@ -4051,14 +4108,16 @@ proc mkClosureCall*(callee: string, args: seq[IRExpr];
                     varTys: seq[IRType] = @[]; alias: seq[int] = @[];
                     addrArgs: seq[int] = @[];
                     touch: seq[string] = @[];
+                    locs: seq[VarLoc] = @[];
                     varPtrSafe: seq[int] = @[]): IRExpr =
   ## Phase 15 Cluster C (C1, ADR-0009 D6). A call through a proc-valued
   ## variable. A-normalised like `isCall`. RFC-0005 S8bh: `varTys`,
   ## `alias`, `addrArgs` and `touch` carry the call's `var`/`addr` effects
-  ## (see `ccVarTys`).
+  ## (see `ccVarTys`); RFC-0005 S8bu: `locs` where its arguments came from
+  ## (`ccVarLocs`).
   IRExpr(kind: iekClosureCall, ccCallee: callee, ccArgs: args,
          ccVarTys: varTys, ccAlias: alias, ccAddrArgs: addrArgs,
-         ccTouch: touch, ccVarPtrSafe: varPtrSafe)
+         ccTouch: touch, ccVarLocs: locs, ccVarPtrSafe: varPtrSafe)
 
 proc withLambdaEffects*(e: IRExpr; aliasPairs: seq[tuple[keep, gone: int]];
                         aliasBodies: seq[IRStmt]; ptrLocal: seq[bool];
@@ -4171,10 +4230,16 @@ proc mkVariantFieldSet*(recv: IRExpr, fieldName: string, tags: seq[int],
 proc mkSeqLen*(obj: IRExpr, loc: string = ""): IRExpr =
   IRExpr(kind: iekSeqLen, lenObj: obj, lenLoc: loc)
 
-proc mkSeqSlice*(base, lo, hi: IRExpr): IRExpr =
+proc mkSeqSlice*(base, lo, hi: IRExpr; view = false): IRExpr =
   ## v67: seq-slice VALUE (array-lambda view — see `iekSeqSlice`). `hi` is
   ## INCLUSIVE; the parser pre-adjusts `..<` to `hi - 1`.
-  IRExpr(kind: iekSeqSlice, ssBase: base, ssLo: lo, ssHi: hi)
+  ## RFC-0005 S8bu: `view`, a `toOpenArray` view (`ssView`).
+  IRExpr(kind: iekSeqSlice, ssBase: base, ssLo: lo, ssHi: hi, ssView: view)
+
+proc mkSeqSplice*(base, at, part: IRExpr): IRExpr =
+  ## RFC-0005 S8bu. `base` with `part` written over it from position `at`
+  ## (see `iekSeqSplice`).
+  IRExpr(kind: iekSeqSplice, spBase: base, spAt: at, spPart: part)
 
 proc mkStrLit*(s: string): IRExpr =
   IRExpr(kind: iekStrLit, sval: s)
@@ -5856,6 +5921,7 @@ proc `+`*(a, b: ResourceBudget): ResourceBudget {.deprecated:
   if b.queryRLimit != d.queryRLimit: result.queryRLimit = b.queryRLimit
   if b.maxSeqLen != d.maxSeqLen: result.maxSeqLen = b.maxSeqLen   ## RFC-0005 S8k
   if b.seqQueryRLimit != d.seqQueryRLimit: result.seqQueryRLimit = b.seqQueryRLimit   ## RFC-0005 S8k
+  if b.queryTimeoutMs != d.queryTimeoutMs: result.queryTimeoutMs = b.queryTimeoutMs   ## RFC-0005 S8bu
   if b.maxFrontierSize != d.maxFrontierSize: result.maxFrontierSize = b.maxFrontierSize
   if b.maxCallDepth != d.maxCallDepth: result.maxCallDepth = b.maxCallDepth
   if b.maxRecursionDepth != d.maxRecursionDepth: result.maxRecursionDepth = b.maxRecursionDepth   ## RFC-0005 S8ax
@@ -6117,6 +6183,9 @@ proc render*(e: IRExpr): string =
   of iekIndex:   render(e.arr) & "[" & render(e.idx) & "]"
   of iekSeqSlice:
     render(e.ssBase) & "[" & render(e.ssLo) & ".." & render(e.ssHi) & "]"
+  of iekSeqSplice:
+    "splice(" & render(e.spBase) & ", " & render(e.spAt) & ", " &
+      render(e.spPart) & ")"
   of iekArrayLit:
     var inner = ""
     for i, c in e.lelems:

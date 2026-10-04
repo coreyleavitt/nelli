@@ -502,6 +502,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
       # Phase 15 E2a. An `sfRaised` finding carries a per-type id and is
       # persisted by `saveSymexRaisedImpl` (multi-finding protocol), not by
       # this single-sentinel verdict path. No-op here.
+  # RFC-0005 S8bu: an `sxUnknown` some solve of whose run the wall clock
+  # cut off (`queryTimeoutMs`) is the machine's, not only the program's:
+  # another machine may decide it. Not cached.
+  if status == sfUnknown and symexQueryTimedOut(): return
   if not metaReady(db, "saveSymexVerdictImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),

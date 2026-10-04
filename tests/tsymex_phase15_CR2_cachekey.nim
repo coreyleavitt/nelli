@@ -1025,6 +1025,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
     ## probes in contexts of their own; a regex membership and a negated
     ## one on one string decided as one). Provisional 219. 214->219.
+    ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
+    ## default queryRLimit). 222->225.
     check symexWalkerVersion == "230"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

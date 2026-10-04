@@ -34,17 +34,17 @@ suite "S8bs: paths by name and by reference":
     clean(sutHeapFieldByName, "hfn_dead", sxUnsat)
     clean(sutCaptureByName, "cpn", sxSat)
     clean(sutCaptureByName, "cpn_dead", sxUnsat)
-    # A closure descent binds no formal to a cell (`bindVarLocs` is the
-    # direct call's): declined, where it was a swapped verdict.
-    declines(sutProcValueByName, "pvn", "whose address is taken")
-    declines(sutProcValueByName, "pvn_dead", "whose address is taken")
+    # RFC-0005 S8bu: a closure descent binds the formal to the cell too
+    # (`bindVarLocs`); S8bs declined it.
+    clean(sutProcValueByName, "pvn", sxSat)
+    clean(sutProcValueByName, "pvn_dead", sxUnsat)
     clean(sutNested, "ne", sxSat)
     clean(sutNested, "ne_dead", sxUnsat)
   test "an addr actual by name":
-    # `addr b.x` of an address-taken `b` is a cell for the call: declined,
-    # where it was a swapped verdict.
-    declines(sutAddrActualByName, "aa", "is a cell for the call")
-    declines(sutAddrActualByName, "aa_dead", "is a cell for the call")
+    # RFC-0005 S8bu: `addr b.x` of an address-taken `b` is a sub-cell of
+    # `b`'s cell (`bindVarLocs`); S8bs declined it (it was a swapped verdict).
+    clean(sutAddrActualByName, "aa", sxSat)
+    clean(sutAddrActualByName, "aa_dead", sxUnsat)
 
   test "nim: by reference, and through conversions":
     let ks3 = [-1, 0, 5, 17, 18, 19, 20, 21, 22, 23]

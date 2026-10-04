@@ -278,6 +278,25 @@ const symexWalkerVersion* = "230"
   ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
   ## still running). 214 -> 219.
   ##
+  ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
+  ## query is decided beside the inverse of each signed Int view it holds
+  ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==
+  ## sbv2int(y)` implies `x == y`; `bvIntInverseFacts`): an `int` read
+  ## across the Int-heap / bit-vector bridge gave Z3 UNSAT queries it never
+  ## decided, and `queryRLimit` now defaults to 250M and `queryTimeoutMs`
+  ## to 10 minutes, so no query is unbounded under the defaults (an
+  ## exhausted one declines). 222 -> 225.
+  ## An `openArray[T]` is the seq it views (a seq, an array's elements, a
+  ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
+  ## signed Int bridge); a `var` one is written back over what it views
+  ## (`iekSeqSplice`).
+  ## `mitems` / `mpairs` make the loop variable the element itself.
+  ## A path into an address-taken variable steps through an array element,
+  ## at a constant or a symbolic index.
+  ## A by-value seq of an address-taken seq is a `view` of its cell, which
+  ## declines once the cell is assigned whole or resized; `p[][i] = v` is
+  ## modelled.
+  ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
   ## callee's write through the pointer was clobbered; an object's address
@@ -5426,6 +5445,19 @@ proc lookupLocal(env: LocalEnv, name: string): string =
   else:
     name  # free — encode by original name
 
+proc varLocKeys(locs: seq[VarLoc]; env: LocalEnv): seq[string] =
+  ## RFC-0005 S8bs. Where each copy-in/copy-out argument came from
+  ## (`IRStmt.cVarLocs`; RFC-0005 S8bu: `IRExpr.ccVarLocs` too) decides
+  ## whether the walk binds its formal to an address cell, so it keys the
+  ## call.
+  for l in locs:
+    var steps: seq[string]
+    for st in l.path:
+      steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                else: st)
+    result.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & ":" & l.mode
+
 # ---- IRExpr -----------------------------------------------------------------
 
 proc binopTag(op: IRBinop): string =
@@ -5551,7 +5583,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
-                   canonicalize(e.ssHi, env) & ">"   ## v67: seq-slice view
+                   canonicalize(e.ssHi, env) &
+                   (if e.ssView: ":view" else: "") & ">"   ## v67; S8bu
+  of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
+                   canonicalize(e.spAt, env) & ":" &
+                   canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
@@ -5608,10 +5644,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # RFC-0005 S8bh: the call's `var`/`addr` effects.
     var vts: seq[string]
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    # RFC-0005 S8bu: and where its arguments came from (`ccVarLocs`).
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
       ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
-      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") & ">"
+      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") &
+      ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5697,14 +5735,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
     # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
     # whether the walk binds its formal to an address cell.
-    var locs: seq[string]
-    for l in s.cVarLocs:
-      var steps: seq[string]
-      for st in l.path:
-        steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
-                  else: st)
-      locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
-               "/" & steps.join("/") & ":" & l.mode
+    let locs = varLocKeys(s.cVarLocs, env)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
@@ -5984,6 +6015,9 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        a string / seq; a query it cuts off is
   ##                        sxUnknown. Rendered `;sqr=` only when not the
   ##                        default 20M (default keys unchanged).
+  ##   queryTimeoutMs     — RFC-0005 S8bu: the wall-clock bound of every
+  ##                        solve; one it cuts off is sxUnknown. Rendered
+  ##                        `;qto=` only when not the default 600000.
   ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
   ##                        depth extends to past `maxCallDepth`; a call
   ##                        past it declines, so it changes the verdict.
@@ -6049,6 +6083,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
     (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
+    (if s.budget.queryTimeoutMs == ResourceBudget().queryTimeoutMs: ""
+     else: ";qto=" & $s.budget.queryTimeoutMs) &   ## RFC-0005 S8bu, same rule
     (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
      else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
     (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""

@@ -3867,11 +3867,24 @@ proc tyOf(sv: SymVal): IRType =
 # When no env-resident var is reachable (e.g. `5 + 6`), no prototype
 # exists and the caller defaults to BV[64] signed.
 
+proc bvOfInt(sv: SymVal): Option[SymVal]
+  ## RFC-0005 S8bu fwd decl (`probeProto`); defined below.
+
 proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   if e == nil: return none(SymVal)
   case e.kind
   of iekVar:
-    if env.hasKey(e.vname): some(env[e.vname]) else: none(SymVal)
+    if not env.hasKey(e.vname): return none(SymVal)
+    # RFC-0005 S8bu: an Int that is the conversion of a bit-vector
+    # (`intOfBV`: an `int` stored in an Int-sorted heap and read back)
+    # offers that bit-vector, so a literal beside it lowers as one and
+    # `reconcileInt` meets the bit-vector unconverted: `v * 2` stays
+    # `bvmul(2, k)`. Lowered at the Int, it was `2 * sbv2int(k)`, which
+    # crossed the bridge again where the result met a bit-vector, and Z3
+    # did not decide `sbv2int(r) == 2 * sbv2int(k) and r != 2 * k` (its
+    # step counter stopped advancing, so `queryRLimit` did not end it).
+    let back = bvOfInt(env[e.vname])
+    if back.isSome: back else: some(env[e.vname])
   of iekBinop:
     let l = probeProto(env, e.lhs)
     if l.isSome: l else: probeProto(env, e.rhs)
@@ -3912,7 +3925,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # surrounding op (comparison, arithmetic) lowers literals at the
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekSeqSlice:
+  of iekSeqSlice, iekSeqSplice:
     # v67: a slice VALUE is a seq — no scalar prototype to offer.
     none(SymVal)
   of iekStrLit:
@@ -5579,8 +5592,9 @@ var uninitAliasHeld {.threadvar.}: seq[Z3AnyAst]
 proc probeContext(): Z3Context =
   ## RFC-0005 S8bp. A fresh Z3 context for a per-thread kind probe's terms
   ## (`seqCapKinds`, `byteDomainKinds`, `intDivDeclKinds`,
-  ## `heapChainKinds`, `theoryFreeSimple`; batch 7: S8bq's `uninitKinds`
-  ## and S8ax's `storeDeclKind` / `iteDeclKind`). A decl kind is the linked Z3's,
+  ## `heapChainKinds`, `theoryFreeSimple`; batch 7: S8bq's `uninitKinds`,
+  ## S8ax's `storeDeclKind` / `iteDeclKind`, batch 4's `constArrayDeclKind`,
+  ## and S8bu's `int2bvDeclKind` / `eqDeclKind` / `selectDeclKind`). A decl kind is the linked Z3's,
   ## the same in every context, so it is read where it changes nothing:
   ## built in the walk's context, a probe's terms (and `theoryFreeSimple`'s
   ## check) made a thread's first walk search differently from its later
@@ -8978,7 +8992,15 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.ssLo, intProto)
     let hiSV = lower(env, e.ssHi, intProto)
-    if loSV.kind != svInt or hiSV.kind != svInt:
+    # RFC-0005 S8bu: a `toOpenArray` view's bounds are the caller's own
+    # `int`s, almost always bit-vectors; they take the signed Int bridge,
+    # which S8bu's inverse facts (`bvIntInverseFacts`) let Z3 decide and
+    # the query bounds (`queryRLimit`, `queryTimeoutMs`) end either way.
+    # A slice's keep ADR-0027's decline.
+    let bridged = e.ssView and
+      loSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+      hiSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64}
+    if not bridged and (loSV.kind != svInt or hiSV.kind != svInt):
       # Round-6 N37: was a raw `raise (ref SymexClassifiedDegradeError)` --
       # reached from inside nested `walkBlock` frames via the SAME two-hop
       # literal-seeded-local trick N36 section 1 demonstrated for
@@ -9000,8 +9022,8 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
              "(→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBoundDegrade"), fresh)
-    let lo = loSV.zi
-    let hi = hiSV.zi
+    let lo = if bridged: toZ3Int(loSV) else: loSV.zi
+    let hi = if bridged: toZ3Int(hiSV) else: hiSV.zi
     # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
     # lo <= hi + 1` (the last conjunct admits the empty slice). Deposit the
     # OOB predicate into the SND-4 sink — `drainStrIndexRaises` routes an
@@ -9045,6 +9067,51 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
         checkedSelect(zctx, arr.raw, shifted.raw))
       lams.add lambdaOver(zctx, iVar, sel)
     mkSeqSV((hi - lo) + mkInt(1), lams, recv.seqElemTy)
+  of iekSeqSplice:
+    # RFC-0005 S8bu: `base` with `part` written over it from `at` (a `var
+    # openArray` view of a `toOpenArray` slice, written back). The parser
+    # builds it only after the slice was taken in bounds, of the length
+    # `part` has (an openArray's length never changes): an array-lambda
+    # `ite(at <= i < at + part.len, part[i - at], base[i])`.
+    let base = lower(env, e.spBase)
+    let part = lower(env, e.spPart)
+    let atSV = lower(env, e.spAt, some(SymVal(kind: svInt, zi: mkInt(0))))
+    if base.kind != svSeq or part.kind != svSeq or
+       atSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64} or
+       base.isUnsupportedFieldPlaceholder or # [placeholder-audited]
+       part.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage, the view or the offset lowered as " &
+             plainEnglishSymValKind(base.kind) & "/" &
+             plainEnglishSymValKind(part.kind) & "/" &
+             plainEnglishSymValKind(atSV.kind) &
+             " — expected a seq, a seq and an Int (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    let at = toZ3Int(atSV)   # the view's bridge (`ssView`)
+    inc sliceViewCounter
+    let zctx = base.seqDataRaw.ctx # [placeholder-audited]
+    let iVar = mkIntVar("__spliceview_i" & $sliceViewCounter)
+    let inPart = (iVar >= at) and (iVar < at + part.seqLen) # [placeholder-audited]
+    let shifted = iVar - at
+    let bArrs = seqArrs(base)
+    let pArrs = seqArrs(part)
+    if bArrs.len != pArrs.len:
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage and the view have different element " &
+             "shapes (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< bArrs.len:
+      let fromPart = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, pArrs[k].raw, shifted.raw))
+      let fromBase = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, bArrs[k].raw, iVar.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, inPart.raw, fromPart.raw, fromBase.raw))
+      lams.add lambdaOver(zctx, iVar, body)
+    mkSeqSV(base.seqLen, lams, base.seqElemTy) # [placeholder-audited]
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).
@@ -12828,6 +12895,35 @@ proc theoryFreeSimple(): bool =
     theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
 
+var queryTimeoutMsCur {.threadvar.}: uint
+  ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
+  ## every solver `querySolver` builds runs under it. `0` (none) outside a
+  ## run.
+var queryTimedOutFlag {.threadvar.}: bool
+  ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
+  ## (`solveBounded`); reset by `resetSymexRunState`.
+
+proc symexQueryTimedOut*(): bool =
+  ## RFC-0005 S8bu. Whether a solve of the last run on this thread was cut
+  ## off by `queryTimeoutMs`. Its verdict is the machine's, not only the
+  ## program's, so `saveSymexVerdictImpl` does not cache it.
+  queryTimedOutFlag
+
+proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
+  ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
+  ## a solve the wall clock cut off (`queryTimeoutMs`).
+  result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
+  if result == zsUnknown and s.reasonUnknown() == "timeout":
+    queryTimedOutFlag = true
+
+proc undefReason(s: Z3Solver; timeoutMs: uint): string =
+  ## RFC-0005 S8bu. Z3's `reason_unknown`, naming `queryTimeoutMs` when
+  ## the clock ended the solve.
+  result = "Z3: " & s.reasonUnknown()
+  if result == "Z3: timeout":
+    result.add " (queryTimeoutMs = " & $timeoutMs & ": Z3 stopped " &
+      "advancing its step count, so no step bound ended the solve)"
+
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
   ## A fresh solver holding `roots`. Z3 bound: deterministic logical-step
@@ -12848,6 +12944,8 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
            else: newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
+  # RFC-0005 S8bu: and the run's wall-clock backstop (`queryTimeoutMs`).
+  if queryTimeoutMsCur > 0'u: solverParams.set("timeout", queryTimeoutMsCur)
   solverParams.set("random_seed", 0'u)
   if not seqTheory:
     solverParams.set("smt.string_solver", "none")
@@ -12876,8 +12974,9 @@ proc ownContextCheck(s: Z3Solver;
   ## RFC-0005 S8bm. `s.check()` (RFC-0005 S8bp: under `assumptions`, terms
   ## of `s`'s context, when there are any) for an `ownContextSolver`, its
   ## context's whole step count (nothing else ran there) added to
-  ## `ownContextUnits`.
-  result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
+  ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
+  ## `solveBounded`, so a solve the clock cut off is noted here too.
+  result = solveBounded(s, assumptions)
   let st = s.getStatistics()
   if st.contains("rlimit count"):
     ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
@@ -13172,6 +13271,119 @@ proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       result.add tInt == ite(sum >= span, sum - span,
                              ite(sum < zero, sum + span, sum))
 
+var int2bvDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The `Z3_decl_kind` ordinal (+ 1) of `int2bv`, read off a
+  ## probe term as `intDivDeclKinds` are.
+var eqDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The same, of `=`.
+
+proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast
+  ## RFC-0005 S8bu. Defined in `runtime_heap.nim`.
+
+proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bu. Facts that let Z3 invert the signed Int view `sbv2int`
+  ## of the bit-vectors in `roots`, each a theorem of two's complement (the
+  ## view is injective, and `int2bv` takes its argument mod 2^W), so
+  ## asserting them beside the query leaves its models as they were:
+  ##   * for every `int2bv_W(t)` term in `roots` whose `t` is `sbv2int(x)`,
+  ##     with `x` of width W:  int2bv_W(t) == x;
+  ##   * for every equality `a == b` in `roots` whose `a` is `sbv2int(x)`
+  ##     and `b` is `sbv2int(y)`, `x` and `y` of one width:
+  ##     a == b  implies  x == y;
+  ## where a term "is" a view when it is one once each `select(store(h, i,
+  ## v), i)` in it is read as `v` (`peelSelect`; a theorem of arrays, so
+  ## each fact stays one): an `int` stored into a heap cell and read back
+  ## out of it is that store's view.
+  ## Neither brings a term the query does not hold: an `int2bv` of every
+  ## view (the first form for every view, before) made Z3 bit-blast Int
+  ## arithmetic, and `tsymex_rfc0005_s8ad_remainder`'s quotient queries
+  ## stopped advancing Z3's step counter; the second form for every pair of
+  ## views took 4.13.4 past those queries' step pins. `tests/tsymex_rfc0005_s8bu_term.nim`
+  ## checks both forms valid at width 8. A view is found as the term
+  ## `Z3_mk_bv2int(x, true)` builds: Z3 shares equal terms, so the view the
+  ## walker built (`bvTermToZ3Int`) and the one built here are the same AST,
+  ## whether the linked Z3 keeps the signed `bv2int` as one operator or
+  ## expands it (to an `ite` over the unsigned one, as Z3 5.1 and 4.13.4 do).
+  ##
+  ## Why: an `int` stored in an Int-sorted heap (`intHeapCell`) crosses the
+  ## sort boundary through the signed view, and a callee's result read back
+  ## from it is linked to a bit-vector either by `sbv2int(r) == sbv2int(k)`
+  ## or by `r == int2bv(sbv2int(k))`. With `r != k` both are UNSAT, but Z3
+  ## refutes them only through the injectivity of the expanded `ite`, which
+  ## neither 5.1 nor 4.13.4 found within 3M units; with these facts each
+  ## decides in a few hundred (the unsigned view needs none: Z3 asserts
+  ## `int2bv(ubv2int(x)) == x` itself). Under the then-unbounded default
+  ## `queryRLimit` the walk never terminated (S8bs's int-field and
+  ## `seq[int]` SUTs).
+  ensureIntDivDeclKinds()
+  if int2bvDeclKind == 0 or eqDeclKind == 0:
+    # RFC-0005 batch 7: probed in a context of its own (S8bp's
+    # `probeContext`), not the walk's.
+    let pc = probeContext()
+    let probe = mkIntVar(pc, "__s8bu_int2bv_probe")
+    let t = pc.checkErr Z3_mk_int2bv(pc.raw, 8, probe.raw)
+    int2bvDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, t)))) + 1
+    let pa = mkIntVar(pc, "__s8bu_eq_probe_a")
+    let pb = mkIntVar(pc, "__s8bu_eq_probe_b")
+    let e = checkedEq(pc, pa.raw, pb.raw)
+    eqDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, e)))) + 1
+  let bv2nat = intDivDeclKinds.bv2nat
+  var seen: HashSet[int]
+  var args1: seq[Z3AnyAst]
+  var backs: seq[Z3AnyAst]   ## the `int2bv` terms
+  var eqs: seq[Z3AnyAst]     ## the equalities
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and k == bv2nat and not isNumeralAst(ctx, args[0].raw):
+      args1.add args[0]
+    elif args.len == 1 and k + 1 == int2bvDeclKind:
+      backs.add t
+    elif args.len == 2 and k + 1 == eqDeclKind:
+      eqs.add t
+  var done: HashSet[int]
+  var views: seq[tuple[x, sv: Z3AnyAst; w: cuint]]
+  for x in args1:
+    let xid = astId(ctx, x.raw)
+    if xid in done: continue
+    done.incl xid
+    let sv = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true))
+    if astId(ctx, sv.raw) notin seen: continue
+    views.add (x: x, sv: sv,
+               w: Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+  if views.len == 0: return
+  var viewIx: Table[int, int]   ## a view's AST id -> its index in `views`
+  for i, v in views: viewIx[astId(ctx, v.sv.raw)] = i
+  template viewOf(t: Z3AnyAst): int =
+    ## The index in `views` of the view `t` is (`peelSelect`), else -1.
+    viewIx.getOrDefault(astId(ctx, peelSelect(ctx, t.raw)), -1)
+  for t in backs:
+    let (_, args) = unpackApp(t)
+    let w = Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, t.raw))
+    let i = viewOf(args[0])
+    if i >= 0 and views[i].w == w:
+      result.add wrap[Z3Bool](ctx, checkedEq(ctx, t.raw, views[i].x.raw))
+  var paired: HashSet[(int, int)]
+  for t in eqs:
+    let (_, args) = unpackApp(t)
+    let i = viewOf(args[0])
+    let j = viewOf(args[1])
+    if i < 0 or j < 0 or i == j or views[i].w != views[j].w: continue
+    if (i, j) in paired: continue
+    paired.incl (i, j)
+    let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
+    result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -13303,8 +13515,11 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
       check
   # RFC-0005 S8bp: and with a string's regex memberships, one of them
   # negated, as one (`mergeMemberships`; the same models).
+  # RFC-0005 S8bu: and with each signed Int view's inverse,
+  # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
   let rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
-                                      bvOffsetLinks(ctx, query))
+    bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query))
+  let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
   # `seqQueryRLimit` too, when that is the smaller bound: its bit count can
   # be pigeonhole-hard, and an unbounded check of one did not return.
@@ -13331,7 +13546,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     let r = counted("plain", ownContextCheck(s))
     return (r, s, (if r == zsSat: translate(s.model(), ctx) else: nil),
             (if r == zsUnknown:
-               "Z3: " & s.reasonUnknown() &
+               undefReason(s, qto) &
                  (if cardBounded: " (the query counts a builtin set's " &
                     "members, so it ran under seqQueryRLimit = " &
                     $settings.budget.seqQueryRLimit & ")" else: "")
@@ -13366,7 +13581,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # `rl`, half each (`0`, unbounded, stays unbounded).
   let rlHalf = if rl == 0: 0'u else: max(1'u, rl div 2)
   proc z3Why(s: Z3Solver): string =
-    result = "Z3: " & s.reasonUnknown()
+    result = undefReason(s, qto)
     if seqBounded:
       result.add " (the query mentions a string / seq, so it ran under " &
         "seqQueryRLimit = " & $sq & ")"
@@ -13938,7 +14153,8 @@ type
                  ## raised).
 
   AddrCellEntry = tuple[local, cell: string; ty: IRType;
-                        path: seq[string]; ixs: seq[SymVal]; bound: bool]
+                        path: seq[string]; ixs: seq[SymVal]; bound: bool;
+                        view: bool]
     ## RFC-0005 S8ax. An address-taken variable of a frame
     ## (`CallFrameCtx.addrCells`): `local`, the env name of its pointer
     ## (`cell`) and the pointee type `ty`. RFC-0005 S8bs: a `bound` entry is
@@ -13947,6 +14163,11 @@ type
     ## is the part at `path` (a field name, or `[` for an index, the next of
     ## `ixs`). Its pointer is under `varLocCellName`, never the formal's own
     ## `addr` cell, and it never leaves the call (`carryAddrCells`).
+  ## RFC-0005 S8bu: a `view` entry is a by-value seq formal sharing the
+  ## memory of a caller variable whose address is taken (`bindVarLocs`):
+  ## it follows the cell while the cell's elements are written in place, and
+  ## its path is tainted once the cell's seq is assigned whole or resized
+  ## (`syncAddrCells`).
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -14364,12 +14585,13 @@ type
     callerLiveRefs: Table[string, seq[Z3AnyAst]]
                       ## CR-9 Stage 6 Group-3 (currentCallerLiveRefs migration).
                       ## Companion to `callerHeaps` (CR-5 freshness seeding).
-    callerCellRoots: seq[string]
-                      ## RFC-0005 S8bs. The variables of the current frame
-                      ## that have an address cell or element cells on the
-                      ## seeded path (`seedCallerHeapInWalkCtx`): a closure
-                      ## call's copy-in/copy-out actual into one of them
-                      ## declines (`lowerClosureCall`).
+    callerElemCells: seq[ElemCell]
+                      ## RFC-0005 S8bu. The seeded path's element cells
+                      ## (`seedCallerHeapInWalkCtx`): a closure call binds a
+                      ## formal whose actual is an element of a seq with
+                      ## element cells to its cell (`bindVarLocs`, from
+                      ## `applyClosureGround`). Replaces S8bs's
+                      ## `callerCellRoots`, whose roots declined such a call.
     closureExitHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-4 (currentClosureExitHeaps
                       ## migration). LIVE exit-heap from the most recent
@@ -14869,16 +15091,9 @@ proc seedCallerHeapInWalkCtx*(p: Path) =
     wp[].callerHeapDepth = p.heapDepth
     wp[].callerAllocCounters = p.allocCounters
     wp[].callerLiveRefs = p.liveRefs
-    # RFC-0005 S8bs: the frame's variables with cells on this path.
-    wp[].callerCellRoots = @[]
-    for c in wp[].frame.addrCells:
-      if p.env.hasKey(c.cell) and p.env[c.cell].kind == svPtr and
-         c.local notin wp[].callerCellRoots:
-        wp[].callerCellRoots.add c.local
-    for e in p.elemCells:
-      if e.frame == wp[].frame.frameId and not e.dead and
-         e.root notin wp[].callerCellRoots:
-        wp[].callerCellRoots.add e.root
+    # RFC-0005 S8bu: the path's element cells, for a closure call's
+    # `bindVarLocs`.
+    wp[].callerElemCells = p.elemCells
     # Reset the closure-exit fields (NI-1 fix — mirror of threadvar reset
     # inside seedCallerHeapThreadvars): each lower() call starts clean so
     # a non-heap-writing closure doesn't carry the previous call's exit-heap
@@ -15190,8 +15405,10 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
   ## same validated finite backstop, for the same mixed-theory divergence
   ## class, that R7's `concreteBranchRLimit` applies. Pure, so the "never
   ## unbounded under default settings" contract is unit-testable without
-  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`).
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`). RFC-0005
+  ## S8bu: `queryRLimit`'s own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
 func budgetOutFloor(settings: SymexSettings): int =
@@ -15709,7 +15926,7 @@ proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
         let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
         calleeEnv[cell] = callerEnv[c.cell]
         result.add (local: formal, cell: cell, ty: c.ty, path: c.path,
-                    ixs: c.ixs, bound: c.bound)
+                    ixs: c.ixs, bound: c.bound, view: c.view)
 
 proc inheritElemCells(calleePath: Path; callerFrame, calleeFrame: int;
                       varArgs: seq[(string, string)];
@@ -15812,7 +16029,7 @@ proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
         if k.local == to and not k.bound: known = true
       if not known:
         w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty,
-                               path: @[], ixs: @[], bound: false)
+                               path: @[], ixs: @[], bound: false, view: false)
       result.moved.add exitEnv[c.cell].ptrAst
     elif isVarFormal or to.len > 0:
       result.lost.add displayName(c.local)
@@ -17365,8 +17582,10 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   ## `defaultConcreteBranchRLimit`. Split out as its own pure function so
   ## the "under default settings this site is genuinely bounded, not
   ## silently 0/unlimited" contract is directly unit-testable without
-  ## needing to provoke a real Z3 divergence.
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## needing to provoke a real Z3 divergence. RFC-0005 S8bu: `queryRLimit`'s
+  ## own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
 proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
@@ -17421,22 +17640,27 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   let spTrue = newParams(ctx)
   spTrue.set("rlimit", rlimit)
   spTrue.set("random_seed", 0'u)
+  # RFC-0005 S8bu: and the wall-clock backstop (`queryTimeoutMs`).
+  if settings.budget.queryTimeoutMs > 0'u:
+    spTrue.set("timeout", settings.budget.queryTimeoutMs)
   sTrue.setParams(spTrue)
   for c in concreteEq: sTrue.add(c)
   for c in pools: sTrue.add(c)
   for c in facts: sTrue.add(c)
   sTrue.add(cond)
-  let rTrue = sTrue.check()
+  let rTrue = solveBounded(sTrue)
   let sFalse = newSolver(ctx)
   let spFalse = newParams(ctx)
   spFalse.set("rlimit", rlimit)
   spFalse.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    spFalse.set("timeout", settings.budget.queryTimeoutMs)
   sFalse.setParams(spFalse)
   for c in concreteEq: sFalse.add(c)
   for c in pools: sFalse.add(c)
   for c in facts: sFalse.add(c)
   sFalse.add(not cond)
-  let rFalse = sFalse.check()
+  let rFalse = solveBounded(sFalse)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
@@ -17453,11 +17677,13 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   let sp = newParams(ctx)
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    sp.set("timeout", settings.budget.queryTimeoutMs)
   sv.setParams(sp)
   for c in concreteEq: sv.add(c)
   for c in globalRoots(concreteEq & conds): sv.add(c)
   for c in conds: sv.add(c)
-  sv.check() == zsUnsat
+  solveBounded(sv) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -18578,9 +18804,16 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
+func addrPartName(formal: string): string =
+  ## RFC-0005 S8bu. The callee-frame local an `addr` actual into an
+  ## address-taken variable is bound through (`bindVarLocs`): it is kept
+  ## equal both to the variable's cell at the actual's path and to the cell
+  ## the call's pointer names.
+  "__addrPart#" & formal
+
 proc bindVarLocs(calleePath: Path; callerEnv: Env;
                  callerCells: seq[AddrCellEntry]; callerFrame: int;
-                 locs: seq[VarLoc]; varArgs: seq[(string, string)];
+                 locs: seq[VarLoc]; varArgs, argVars: seq[(string, string)];
                  params: seq[string];
                  cells: var seq[AddrCellEntry];
                  elemShares: var seq[(string, string)];
@@ -18608,12 +18841,23 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
   ## with element cells has them under the formal's name too (`elemShares`,
   ## for `inheritElemCells`).
   ##
+  ## RFC-0005 S8bu: an `addr lv` actual (`addr`: the cell for the call,
+  ## named `temp` in the caller, is the argument; `argVars` pairs each
+  ## formal with the caller variable its actual names) is a sub-cell of the
+  ## variable's cell at that path: a local of the callee's frame
+  ## (`addrPartName`) is bound both to the variable's cell at the path (a
+  ## `bound` entry) and to the call's cell (an entry like `addr x`'s), so
+  ## the frame keeps the two equal statement by statement
+  ## (`syncAddrCells`), and a write through the formal is seen through the
+  ## variable's pointer and the other way round. S8bs declined it: the
+  ## cell for the call was a second copy of a location the callee could
+  ## reach through the pointer, and its write-back after the call landed
+  ## over a write through the pointer.
+  ##
   ## Returns why the call declines, or "": a path the walk cannot follow,
-  ## a variable that has both a cell and element cells, an `addr` of a part
-  ## of an address-taken variable (the cell for the call is a second copy
-  ## of a location the callee can reach through the pointer), and a `copy`
-  ## of an address-taken variable (a write through the pointer to an
-  ## element is seen through the copy, an assignment of the whole is not).
+  ## a variable that has both a cell and element cells, and a `copy` of an
+  ## address-taken variable (a write through the pointer to an element is
+  ## seen through the copy, an assignment of the whole is not).
   let ctx = w.z3
   for loc in locs:
     var rootCells: seq[AddrCellEntry]
@@ -18627,12 +18871,15 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         elems.add e
     if rootCells.len == 0 and elems.len == 0: continue
     let what = "`" & displayName(loc.root) & "`"
-    if loc.mode == "addr":
-      return "an `addr` of a part of " & what & ", whose address is taken, " &
-             "is a cell for the call the callee may also reach through that " &
-             "pointer"
     var formal = ""
-    if loc.temp.startsWith("#"):
+    if loc.mode == "addr":
+      for (f, callerName) in argVars:
+        if callerName == loc.temp: formal = f
+      if formal.len == 0 or not callerEnv.hasKey(loc.temp) or
+         callerEnv[loc.temp].kind != svPtr:
+        return "an `addr` of a part of " & what & ", whose address is " &
+               "taken, is passed in a shape the walk does not bind to its cell"
+    elif loc.temp.startsWith("#"):
       let k = parseInt(loc.temp[1 .. ^1])
       if k < params.len: formal = params[k]
     else:
@@ -18640,6 +18887,29 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         if callerName == loc.temp: formal = f
     if formal.len == 0: continue
     if loc.mode == "copy":
+      if rootCells.len == 1 and elems.len == 0 and "?" notin loc.path and
+         "[" notin loc.path:
+        # RFC-0005 S8bu: a seq whose address is taken, or a seq field of
+        # such a variable, passed by value: the formal shares its memory.
+        # It is bound to the cell as a `view` entry (`syncAddrCells`).
+        let c = rootCells[0]
+        let cellName = varLocCellName(formal)
+        let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
+                                path: c.path & loc.path, ixs: c.ixs,
+                                bound: true, view: true)
+        let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
+        if v.isSome and v.get.kind == svSeq:
+          var env2 = calleePath.env
+          env2[cellName] = callerEnv[c.cell]
+          calleePath.env = env2
+          cells.add e
+          continue
+        if v.isSome and v.get.kind == svString:
+          return "a by-value string shares the memory of " & what &
+                 ", whose address is taken: a write through the pointer " &
+                 "to a character, which Nim makes in place unless the " &
+                 "memory is a literal's, is not modelled (the walk's " &
+                 "strings are immutable values)"
       if rootCells.len > 0:
         return "a by-value argument shares the memory of " & what &
                ", whose address is taken: a write through the pointer to " &
@@ -18668,22 +18938,45 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         ixs.add callerEnv[nm]
       else:
         path.add st
-    let cellName = varLocCellName(formal)
+    # RFC-0005 S8bu: an `addr` actual binds a local of its own, kept equal
+    # to the call's cell too (below).
+    let local = if loc.mode == "addr": addrPartName(formal) else: formal
+    let cellName = varLocCellName(local)
     var env2 = calleePath.env
+    template bindCallCell() =
+      if loc.mode == "addr":
+        # The call's cell holds the location's value; it is stored again
+        # here as the local's term, so both cells read back as one term.
+        let ptrV = callerEnv[loc.temp]
+        discard addrCellStore(ctx, calleePath, ptrV.ptrPointee, ptrV.ptrAst,
+                              env2[local])
+        env2[addrCellName(local)] = ptrV
+        cells.add (local: local, cell: addrCellName(local), ty: ptrV.ptrPointee,
+                   path: @[], ixs: @[], bound: false, view: false)
     if rootCells.len == 1:
       let c = rootCells[0]
-      let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
+      let e: AddrCellEntry = (local: local, cell: cellName, ty: c.ty,
                               path: c.path & path, ixs: c.ixs & ixs,
-                              bound: true)
-      if addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst).isNone:
+                              bound: true, view: false)
+      let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
+      if v.isNone:
         return "the `var` argument is a part of " & what & ", whose " &
                "address is taken, along a path the walk does not follow"
       env2[cellName] = callerEnv[c.cell]
-      calleePath.env = env2
+      if loc.mode == "addr": env2[local] = v.get
       cells.add e
+      bindCallCell()
+      calleePath.env = env2
       continue
     # The element of a seq with element cells.
-    if path != @["["] or not env2.hasKey(formal):
+    if loc.mode == "addr":
+      # RFC-0005 S8bu: the call's cell and the element's are in one heap,
+      # and the element's is addressed through an `ite` a read cannot see
+      # past a store to the other, so the frame cannot tell which of the
+      # two a statement wrote.
+      return "an `addr` of an element of " & what & ", which has element " &
+             "cells, is a cell for the call in the element's own heap"
+    if path != @["["] or not env2.hasKey(local):
       return "the `var` argument is a part of an element of " & what &
              ", which has element cells"
     let ty = elems[0].ty
@@ -18699,9 +18992,9 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
         checkedIte(ctx, same.raw, elems[k].refAst.raw, addrAst.raw))
     env2[cellName] = SymVal(kind: svPtr, ptrAst: addrAst, ptrFamily: true,
                             ptrPointee: ty)
+    cells.add (local: local, cell: cellName, ty: ty, path: @[], ixs: @[],
+               bound: true, view: false)
     calleePath.env = env2
-    cells.add (local: formal, cell: cellName, ty: ty, path: @[], ixs: @[],
-               bound: true)
   ""
 
 proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
@@ -20553,10 +20846,16 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         var entryCells = calleeAddrCells
         var elemShares: seq[(string, string)]
         var paramNames: seq[string]
-        for f in sig.params: paramNames.add f.name
+        # RFC-0005 S8bu: each formal with the caller variable its actual
+        # names (an `addr` actual's cell, `bindVarLocs`).
+        var argVars: seq[(string, string)]
+        for i, f in sig.params:
+          paramNames.add f.name
+          if i < stmt.cargs.len and stmt.cargs[i].kind == iekVar:
+            argVars.add (f.name, stmt.cargs[i].vname)
         let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
-          w.frame.frameId, stmt.cVarLocs, varArgs, paramNames, entryCells,
-          elemShares, w)
+          w.frame.frameId, stmt.cVarLocs, varArgs, argVars, paramNames,
+          entryCells, elemShares, w)
         if locWhy.len > 0:
           taintInPlace(calleePath, w.degrade(feUnsupportedOp,
             "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
@@ -21697,6 +21996,35 @@ proc dropSnapshots(env: var Env; prefix: string; depth: int): bool =
   for k in stale: env.del k
   stale.len > 0
 
+const viewFreedPrefix = "__viewFreed#"
+  ## RFC-0005 S8bu. Set (to any value) on a path where a `view` entry's
+  ## cell was assigned whole or resized while a raise unwound
+  ## (`syncAddrCellsFromHeap`); the next `syncAddrCells` taints the path.
+
+proc viewFollows(ctx: Z3Context; old, cur: SymVal): bool =
+  ## RFC-0005 S8bu. A by-value seq formal sharing a cell's memory (`view`)
+  ## sees the cell's new value `cur` only when the old one's elements were
+  ## written in place: the same length term, and each data array the old
+  ## one's under a chain of stores. Any other change (an assignment of the
+  ## whole, a resize) gave the variable other memory; Nim's copy still
+  ## points at the old, which it may have freed. A cell's value read back
+  ## is a `select` over the `store` that wrote it (`peelSelect`); a term is
+  ## never simplified, which would fold an assignment of the whole that
+  ## agrees with a store chain into one.
+  if old.kind != svSeq or cur.kind != svSeq: return false
+  if old.isUnsupportedFieldPlaceholder or # [placeholder-audited]
+     cur.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+    return false
+  if cast[pointer](peelSelect(ctx, old.seqLen.raw)) != # [placeholder-audited]
+     cast[pointer](peelSelect(ctx, cur.seqLen.raw)): # [placeholder-audited]
+    return false
+  let a = seqArrs(old)
+  let b = seqArrs(cur)
+  if a.len != b.len: return false
+  for k in 0 ..< a.len:
+    if not storeChainOver(ctx, b[k].raw, a[k].raw): return false
+  true
+
 proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
                    w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
@@ -21710,41 +22038,61 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## declined (`feUnsupportedOp`), the variable's value winning. So is a
   ## variable a closure also captures (its env cell is a third copy).
   let ctx = w.z3
+  # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
+  # `addrPartName`: a part of a variable's cell, and the call's cell) takes
+  # a second pass, so a write that reached one of its cells and was read
+  # into the local reaches the other in the same statement.
+  var passes = 1
+  for i, c in w.frame.addrCells:
+    for j in 0 ..< i:
+      if w.frame.addrCells[j].local == c.local: passes = 2
   for p in outs:
     var env2 = p.env
     var q: Path = nil
     var clash: seq[string]
     var lost: seq[string]   ## RFC-0005 S8bs
+    var freed: seq[string]   ## RFC-0005 S8bu
     for c in w.frame.addrCells:
-      if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
-         env2[c.cell].kind != svPtr:
-        continue
-      for (cl, _) in w.frame.capCells:
-        if cl == c.local and displayName(cl) notin clash:
-          clash.add displayName(cl)
-      let refAst = env2[c.cell].ptrAst
-      # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
-      let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
-      if curO.isNone:
-        if displayName(c.local) notin lost: lost.add displayName(c.local)
-        continue
-      let cur = curO.get
-      let xv = env2[c.local]
-      if sameSymVal(xv, cur): continue
-      if q == nil: q = forkPath(p, p.pc, p.env)
-      let snap = addrSnapName(depth, c.local)
-      let hasSnap = env2.hasKey(snap)
-      if hasSnap and sameSymVal(xv, env2[snap]):
-        env2[c.local] = cur
-        continue
-      if not (hasSnap and sameSymVal(cur, env2[snap])) and
-         not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
-        clash.add displayName(c.local)
-      let st = addrEntryStore(ctx, q, c, refAst, xv)
-      if st.isSome: env2[c.local] = st.get
-      elif displayName(c.local) notin lost: lost.add displayName(c.local)
+      if c.view and env2.hasKey(viewFreedPrefix & c.local):
+        env2.del(viewFreedPrefix & c.local)
+        if q == nil: q = forkPath(p, p.pc, p.env)
+        freed.add displayName(c.local)
+    for pass in 0 ..< passes:
+      for c in w.frame.addrCells:
+        if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
+           env2[c.cell].kind != svPtr:
+          continue
+        for (cl, _) in w.frame.capCells:
+          if cl == c.local and displayName(cl) notin clash:
+            clash.add displayName(cl)
+        let refAst = env2[c.cell].ptrAst
+        # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
+        let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
+        if curO.isNone:
+          if displayName(c.local) notin lost: lost.add displayName(c.local)
+          continue
+        let cur = curO.get
+        let xv = env2[c.local]
+        if sameSymVal(xv, cur): continue
+        if q == nil: q = forkPath(p, p.pc, p.env)
+        let snap = addrSnapName(depth, c.local)
+        let hasSnap = env2.hasKey(snap)
+        if hasSnap and sameSymVal(xv, env2[snap]):
+          # RFC-0005 S8bu: a `view` follows only an in-place write.
+          if c.view and not viewFollows(ctx, xv, cur):
+            if displayName(c.local) notin freed: freed.add displayName(c.local)
+            continue
+          env2[c.local] = cur
+          continue
+        if not (hasSnap and sameSymVal(cur, env2[snap])) and
+           not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
+          clash.add displayName(c.local)
+        let st = addrEntryStore(ctx, q, c, refAst, xv)
+        if st.isSome: env2[c.local] = st.get
+        elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
-    if q == nil and not dropped and clash.len == 0 and lost.len == 0:
+    if q == nil and not dropped and clash.len == 0 and lost.len == 0 and
+       freed.len == 0:
       result.add p
       continue
     if q == nil: q = forkPath(p, p.pc, env2)
@@ -21760,6 +22108,13 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         "RFC-0005 S8bs: the `var` formal(s) " & lost.join(", ") & " are " &
              "bound to a part of an address-taken variable that the walk " &
              "no longer finds in its cell (feUnsupportedOp)"))
+    if freed.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bu: the by-value seq formal(s) " & freed.join(", ") &
+             " share the memory of an address-taken variable that was " &
+             "assigned whole or resized through a pointer: Nim's copy still " &
+             "points at the old memory, which it may have freed; the walk " &
+             "does not model freed memory (feUnsupportedOp)"))
     result.add drainPendingLowerEffects(q)
 
 proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
@@ -21779,7 +22134,12 @@ proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
       # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
       let cur = addrEntryValue(w.z3, p, c, env2[c.cell].ptrAst)
       if cur.isSome and not sameSymVal(env2[c.local], cur.get):
-        env2[c.local] = cur.get
+        # RFC-0005 S8bu: a `view` follows only an in-place write; any other
+        # is marked for the next statement's sync to taint.
+        if c.view and not viewFollows(w.z3, env2[c.local], cur.get):
+          env2[viewFreedPrefix & c.local] = cur.get
+        else:
+          env2[c.local] = cur.get
         changed = true
   if changed: forkPath(p, p.pc, env2) else: p
 
@@ -22417,7 +22777,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;
                         bodyOverride: IRStmt = nil;
                         varOuts: seq[tuple[name: string, param: int]] = @[];
-                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[]):
+                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
                         SymVal   ## Phase 15 C4 fwd-decl.
 
 proc entryValueOf(name: string): SymVal =
@@ -22579,21 +22941,6 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
       else: currentClosureBodies
     if bodies.hasKey(siteKey):
       let cb = bodies[siteKey]
-      # RFC-0005 S8bs: a copy-in/copy-out actual into a variable whose
-      # address is taken (`c:`): the body may reach it through a pointer,
-      # and the closure descent binds no formal to the cell (`bindVarLocs`
-      # is the direct call's).
-      if currentWalkCtxPtr != nil:
-        let roots = cast[ptr WalkCtx](currentWalkCtxPtr)[].callerCellRoots
-        for t in e.ccTouch:
-          if t.startsWith("c:") and t[2 .. ^1] in roots:
-            closureDegrade(feUnsupportedOp,
-              "closure call through `" & e.ccCallee & "`: a `var`/`addr` " &
-                   "argument is a part of `" & displayName(t[2 .. ^1]) &
-                   "`, whose address is taken: the body may reach it " &
-                   "through that pointer too, and the copy written back " &
-                   "after the call would land over that write (RFC-0005 S8bs)")
-            break
       let met = touchMeetsOuter(e.ccTouch, cb.outer)
       if met.len > 0:
         let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
@@ -22653,8 +23000,13 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
         if src < cb.params.len:
           outs.add (name: e.ccArgs[k].vname, param: src)
   let nWrites = closureEnvWrites.len
+  # RFC-0005 S8bu: the caller variable each argument names, for an `addr`
+  # actual's cell (`bindVarLocs`).
+  var argNames: seq[string]
+  for a in e.ccArgs: argNames.add(if a.kind == iekVar: a.vname else: "")
   result = applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`", env,
-                              bodyOverride, outs, e.ccArgs, e.ccVarPtrSafe)
+                              bodyOverride, outs, e.ccArgs, e.ccVarPtrSafe,
+                              e.ccVarLocs, argNames)
   var clash: seq[string]
   for i in nWrites ..< closureEnvWrites.len:
     let nm = closureEnvWrites[i][0]
@@ -22670,7 +23022,9 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;
                         bodyOverride: IRStmt = nil;
                         varOuts: seq[tuple[name: string, param: int]] = @[];
-                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[]):
+                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
                         SymVal =
   ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
   ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
@@ -22877,6 +23231,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # address (all of them for a call that carries no codes).
     ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe)
   let frameIx = w.callStack.high
+  # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
+  # to them below.
+  let callerCells = w.frame.addrCells
+  let callerFrameId = w.frame.frameId
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
@@ -22922,6 +23280,58 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                                          else: pending.callerAlloc),
                          liveRefs: (if chainHeap: pending.exitLiveRefs
                                     else: pending.callerLiveRefs))  ## Phase 15 CR-5
+  # RFC-0005 S8bu: a formal whose actual is an address-taken variable of the
+  # calling frame, or a path into one, is bound to the variable's cell, as
+  # a direct call's is (`inheritAddrCells`, `bindVarLocs`): the body keeps
+  # the two equal statement by statement, so its writes through the formal
+  # and through a pointer it holds land on one location in its order.
+  # Before S8bu such a call declined, and a by-value argument Nim passes by
+  # address (a large object) was passed as a copy, missing the body's
+  # writes through the pointer (swapped verdicts). The calling frame's
+  # element cells are read for `bindVarLocs` (an element `s[i]` of a seq
+  # with element cells). A whole variable's write-back by name is dropped:
+  # the cell carries the write, and the calling statement reads it back
+  # (`syncAddrCells`).
+  var boundOuts: seq[string]
+  block bindCells:
+    var varArgs: seq[(string, string)]
+    for o in varOuts:
+      let src = cb.params[o.param].name
+      varArgs.add (src, o.name)
+    var entryCells: seq[AddrCellEntry]
+    for c in callerCells:
+      if not callerEnv.hasKey(c.cell) or callerEnv[c.cell].kind != svPtr:
+        continue
+      for (formal, callerName) in varArgs:
+        if callerName == c.local:
+          let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
+          descentBase.env[cell] = callerEnv[c.cell]
+          entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
+                          ixs: c.ixs, bound: c.bound, view: c.view)
+          if callerName notin boundOuts: boundOuts.add callerName
+    if locs.len > 0:
+      descentBase.elemCells = w.callerElemCells
+      var paramNames: seq[string]
+      var argVars: seq[(string, string)]
+      for i, p in cb.params:
+        paramNames.add p.name
+        if i < argSyms.len and i < argNames.len and argNames[i].len > 0:
+          argVars.add (p.name, argNames[i])
+      var elemShares: seq[(string, string)]
+      let why = bindVarLocs(descentBase, callerEnv, callerCells, callerFrameId,
+                            locs, varArgs, argVars, paramNames, entryCells,
+                            elemShares, w)
+      if why.len > 0:
+        closureDegrade(feUnsupportedOp,
+          "closure call through " & label & ": " & why & "; the body's " &
+               "writes through the two are not modelled in its order " &
+               "(feUnsupportedOp, RFC-0005 S8bu)")
+      # A by-value seq sharing its caller's element cells has them under
+      # the formal's name in the body (`inheritElemCells`); the body cannot
+      # write the formal, so nothing is carried back.
+      inheritElemCells(descentBase, callerFrameId, w.frame.frameId,
+                       elemShares, @[], @[])
+    w.frame.addrCells = entryCells
   # RFC-0005 S8bh: the body specialised to the call's shared locations.
   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
                          @[descentBase], w)
@@ -23046,6 +23456,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   for ri, er in escapedRaises:
     var ro: seq[tuple[name: string, val: SymVal]]
     for o in varOuts:
+      if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
       let pn = cb.params[o.param].name
       if er.path.env.hasKey(pn): ro.add (name: o.name, val: er.path.env[pn])
     w.closureRaises.add ClosureRaise(raised: er,
@@ -23057,6 +23468,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # below), for its actual. The caller continues only on those exits (the
   # exit-coverage fact), so the first exit's value is the merge's default.
   for o in varOuts:
+    if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
     let pn = cb.params[o.param].name
     var merged: SymVal
     var have = false
@@ -24659,6 +25071,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentWalkCtxPtr = nil
   let ctx = newContext()
   setCurrentContext(ctx)
+  queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
+  queryTimedOutFlag = false                            ## RFC-0005 S8bu
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
@@ -26138,6 +26552,8 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   let sp = newParams(ctx)
   sp.set("rlimit", concreteBranchRLimit(settings))
   sp.set("random_seed", 0'u)
+  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
+    sp.set("timeout", settings.budget.queryTimeoutMs)
   s.setParams(sp)
   var pinned = initialPC & concreteEq
   for p in resultPaths:
@@ -26145,7 +26561,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
   for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = s.check() == zsSat
+  result.pcSatByConcreteInputs = solveBounded(s) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars

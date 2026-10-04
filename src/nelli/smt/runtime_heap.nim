@@ -833,6 +833,52 @@ proc storedAt(ctx: Z3Context; arr, idx: RawZ3Ast): Option[RawZ3Ast] =
     return none(RawZ3Ast)
   some(Z3_get_app_arg(ctx.raw, app, 2))
 
+var selectDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The `Z3_decl_kind` ordinal (+ 1) of an array `select`,
+  ## read off a probe term as `storeDeclKind` is.
+
+proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast =
+  ## RFC-0005 S8bu. `t` with each `select(store(a, i, v), i)` (the same
+  ## index term) read as `v`: a cell's value read back after it was stored.
+  if storeDeclKind == 0:
+    discard storedAt(ctx, t, t)   # reads `storeDeclKind`
+  if selectDeclKind == 0:
+    let pc = probeContext()   # RFC-0005 S8bp (batch 7)
+    let probe = mkArrayVar[Z3Int, Z3Int](pc, "__s8bu_select_probe")
+    let sel = checkedSelect(pc, probe.raw, mkInt(pc, 0).raw)
+    selectDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, sel)))) + 1
+  result = t
+  for _ in 0 ..< 100_000:
+    if Z3_get_ast_kind(ctx.raw, result) != Z3_APP_AST: return
+    let app = Z3_to_app(ctx.raw, result)
+    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
+       selectDeclKind or Z3_get_app_num_args(ctx.raw, app) != 2:
+      return
+    let v = storedAt(ctx, Z3_get_app_arg(ctx.raw, app, 0),
+                     Z3_get_app_arg(ctx.raw, app, 1))
+    if v.isNone: return
+    result = v.get
+
+proc storeChainOver(ctx: Z3Context; arr, base: RawZ3Ast): bool =
+  ## RFC-0005 S8bu. `arr` is `base` under a chain of `store`s (`store(...
+  ## store(base, i1, v1)..., in, vn)`), `base` itself included, each read
+  ## back through a cell's `select` (`peelSelect`).
+  if storeDeclKind == 0:
+    discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
+  let base = peelSelect(ctx, base)
+  var t = arr
+  for _ in 0 ..< 100_000:
+    t = peelSelect(ctx, t)
+    if cast[pointer](t) == cast[pointer](base): return true
+    if Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST: return false
+    let app = Z3_to_app(ctx.raw, t)
+    if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) + 1 !=
+       storeDeclKind or Z3_get_app_num_args(ctx.raw, app) != 3:
+      return false
+    t = Z3_get_app_arg(ctx.raw, app, 0)
+  false
+
 var constArrayDeclKind {.threadvar.}: int
   ## RFC-0005 batch 4. The `Z3_decl_kind` ordinal (+ 1) of a constant array
   ## (`(as const ...)`), read off a probe term as `storeDeclKind` is.
@@ -847,10 +893,11 @@ proc constFalseStoreKeys(ctx: Z3Context; arr: RawZ3Ast): Option[seq[RawZ3Ast]] =
   if storeDeclKind == 0:
     discard storedAt(ctx, arr, arr)   # reads `storeDeclKind`
   if constArrayDeclKind == 0:
-    let s = ctx.checkErr Z3_get_sort(ctx.raw, mkInt(ctx, 0).raw)
-    let probe = ctx.checkErr Z3_mk_const_array(ctx.raw, s, mkBool(ctx, false).raw)
-    constArrayDeclKind = ord(Z3_get_decl_kind(ctx.raw,
-      Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, probe)))) + 1
+    let pc = probeContext()   # RFC-0005 S8bp (batch 7)
+    let s = pc.checkErr Z3_get_sort(pc.raw, mkInt(pc, 0).raw)
+    let probe = pc.checkErr Z3_mk_const_array(pc.raw, s, mkBool(pc, false).raw)
+    constArrayDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, probe)))) + 1
   var keys: seq[RawZ3Ast]
   var a = arr
   while true:
@@ -1527,6 +1574,18 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   for c in stored: p.heaps[c.key] = c.arr
   heapCellSelect(ctx, stored, refAst, ty)
 
+proc arrayLocIx(ix: SymVal; n: int): Option[int] =
+  ## RFC-0005 S8bu. The position an array step's index (`locGet`) names,
+  ## when its term folds to a numeral in `0 ..< n`.
+  if ix.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}: return none(int)
+  let folded = simplify(toZ3Int(ix))
+  if getAstKind(folded) != akNumeral: return none(int)
+  try:
+    let k = parseInt(getNumeralString(folded))
+    if k >= 0 and k < n: return some(k)
+  except CatchableError: discard
+  none(int)
+
 proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
             k = 0; j = 0): Option[SymVal] =
   ## RFC-0005 S8bs. The part of `v` at `path` (`AddrCellEntry`): a field of
@@ -1535,6 +1594,23 @@ proc locGet(v: SymVal; path: seq[string]; ixs: seq[SymVal];
   ## step the walk does not follow.
   if k >= path.len: return some(v)
   let st = path[k]
+  if st.startsWith("[") and v.kind == svArray:
+    # RFC-0005 S8bu: an array's element; a symbolic index selects through
+    # an `ite` over the elements, as a read `a[i]` does (`iekIndex`). The
+    # caller checked the index in bounds where it evaluated the actual.
+    if j >= ixs.len or v.arrElems.len == 0: return none(SymVal)
+    let at = arrayLocIx(ixs[j], v.arrElems.len)
+    if at.isSome:
+      return locGet(v.arrElems[at.get], path, ixs, k + 1, j + 1)
+    var parts: seq[SymVal]
+    for e in v.arrElems:
+      let r = locGet(e, path, ixs, k + 1, j + 1)
+      if r.isNone: return none(SymVal)
+      parts.add r.get
+    var res = parts[0]
+    for q in 1 ..< parts.len:
+      res = iteSV(symEq(ixs[j], coerceIntLit(ixs[j], int64(q))), parts[q], res)
+    return some(res)
   if st.startsWith("["):
     if j >= ixs.len or v.kind != svSeq or isTreeSeqElemTy(v.seqElemTy) or
        not isBackedSeqElemTy(v.seqElemTy) or
@@ -1562,6 +1638,21 @@ proc locSet(v: SymVal; path: seq[string]; ixs: seq[SymVal]; x: SymVal;
   ## RFC-0005 S8bs. `v` with its part at `path` (`locGet`) replaced by `x`.
   if k >= path.len: return some(x)
   let st = path[k]
+  if st.startsWith("[") and v.kind == svArray:
+    # RFC-0005 S8bu: an array's element (`locGet`): the named one, or each
+    # one under its index's `ite`.
+    if j >= ixs.len or v.arrElems.len == 0: return none(SymVal)
+    let at = arrayLocIx(ixs[j], v.arrElems.len)
+    var nv = v
+    for q in 0 ..< v.arrElems.len:
+      if at.isSome and at.get != q: continue
+      let r = locSet(v.arrElems[q], path, ixs, x, k + 1, j + 1)
+      if r.isNone: return none(SymVal)
+      nv.arrElems[q] =
+        if at.isSome: r.get
+        else: iteSV(symEq(ixs[j], coerceIntLit(ixs[j], int64(q))), r.get,
+                    v.arrElems[q])
+    return some(nv)
   if st.startsWith("["):
     if locGet(v, path[k .. k], ixs[j .. ^1]).isNone: return none(SymVal)
     let idx = toZ3Int(ixs[j])
@@ -1714,7 +1805,7 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         if c.local == local and not c.bound: known = true   # RFC-0005 S8bs
       if not known:
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
-                               path: @[], ixs: @[], bound: false)
+                               path: @[], ixs: @[], bound: false, view: false)
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
     env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
     child.env = env2

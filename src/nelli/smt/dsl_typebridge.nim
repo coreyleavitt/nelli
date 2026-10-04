@@ -1656,10 +1656,13 @@ proc classifyType*(ty: NimNode): ClassifiedType =
   # (a recorded `feUnsupportedParamType`), never the hash-table model.
   if resolved.kind == nnkBracketExpr and
      isBuiltinTypeHead(resolved[0],
-                       ["seq", "Table", "HashSet", "Atomic"]):
+                       ["seq", "Table", "HashSet", "Atomic", "openArray"]):
     let head = resolved[0].strVal
     case head
-    of "seq":
+    of "seq", "openArray":
+      # RFC-0005 S8bu: an `openArray[T]` is a view of a seq, an array or a
+      # `toOpenArray` slice; the walk holds it as the `seq[T]` the view
+      # reads (the call site builds it, `openArrayView` in the parser).
       if resolved.len != 2:
         error("symex (Phase 5): seq type must be `seq[T]`", resolved)
       let elem = classifyType(resolved[1]).ty

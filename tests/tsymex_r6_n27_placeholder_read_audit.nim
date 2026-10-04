@@ -304,13 +304,19 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## Batch 6 (S8bw on S8bq): its `seqDataRaw` line collects every leaf
     ## array through `seqArrs` (S8bc's audited helper) instead, so only the
     ## `seqLen` line is new. 110 + 1 = 111.
+    ##
+    ## RFC-0005 S8bu: `iekSeqSplice`'s lowering guards both operands
+    ## (two lines) before reading the base's data context and length and
+    ## the part's length (three); `viewFollows` guards both sides (two)
+    ## before comparing their length terms (two). 95 + 9 = 104.
+    ## Batch 7 (S8bu on batch 6): 111 + 9 = 120.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 111
+    check runtimeCount == 120
     check runtimeStringsCount == 3
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":

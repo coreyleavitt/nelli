@@ -1240,5 +1240,20 @@ task test, "Run the test suite":
             # second); a membership and a negated one on one string
             # decided as one (the unbounded endsWith run on Z3 4.13.4).
             # Walker 214->219.
-            "tsymex_rfc0005_s8bp_isolation"]:
+            "tsymex_rfc0005_s8bp_isolation",
+            # RFC-0005 S8bu -- S8bs's remainder: the signed bv2int bridge's
+            # inverse facts and a finite default queryRLimit (no walk runs
+            # forever); walker 225.
+            "tsymex_rfc0005_s8bu_term",
+            # items 2-3: closure and proc-value calls into an address-taken
+            # variable, and `addr` of a part of one.
+            "tsymex_rfc0005_s8bu_calls",
+            # item 4: openArray views (read, `var`).
+            "tsymex_rfc0005_s8bu_views",
+            "tsymex_rfc0005_s8bu_varviews",
+            # item 4: mitems / mpairs.
+            "tsymex_rfc0005_s8bu_mitems",
+            # items 5-6: an array element on a path into an address-taken
+            # variable; a by-value seq whose whole address is taken.
+            "tsymex_rfc0005_s8bu_paths"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

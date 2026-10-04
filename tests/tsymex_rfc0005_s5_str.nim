@@ -91,8 +91,10 @@ proc s5DeadReplaceRe(s: string, n: int) =
   # match empty under a CRLF convention, where PCRE's bumpalong skip over a
   # CRLF's LF is its optimiser's call, still declined. RFC-0005 S8bj: that
   # is modelled too; a match-limit start option between 0 and PCRE's
-  # default (whose effect counts `match()` calls) declines.
-  let t = s.replace(re"(*LIMIT_MATCH=5)a*", "b")
+  # default (whose effect counts `match()` calls) declines. RFC-0005 S8bt:
+  # that count is modelled too, but not for a possessive `(*CRLF)` dot
+  # repeat (`.*` at the end is auto-possessified), which declines.
+  let t = s.replace(re"(*LIMIT_MATCH=5)(*CRLF).*", "b")
   discard t
   if n == 5 and n == 6:
     symexTarget("s5_dead_replace_re")
@@ -127,9 +129,10 @@ proc s5TwoCellsReplaceRe(a, b: string) =
   # RFC-0005 S8bb: an alternation is exact now (PCRE's priority run); a
   # pattern that can match empty under a CRLF convention still declines.
   # RFC-0005 S8bj: that is modelled too; a match-limit start option between
-  # 0 and PCRE's default declines.
-  if a.replace(re"(*LIMIT_MATCH=5)x*", "y") !=
-     b.replace(re"(*LIMIT_MATCH=5)x*", "y"):
+  # 0 and PCRE's default declines. RFC-0005 S8bt: modelled too, but not for
+  # a possessive `(*CRLF)` dot repeat, which declines.
+  if a.replace(re"(*LIMIT_MATCH=5)(*CRLF).*", "y") !=
+     b.replace(re"(*LIMIT_MATCH=5)(*CRLF).*", "y"):
     symexTarget("s5_two_cells_replace_re")
 
 proc s5TwoCellsSplit(a, b: string) =

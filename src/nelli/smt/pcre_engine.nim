@@ -4,18 +4,30 @@
 ## the linked libpcre reports `PCRE_CONFIG_JIT` (Windows builds and most
 ## Linux distributions' do), and `pcre_exec` then runs the JIT for every
 ## call without PCRE_ANCHORED. The JIT's start-of-match scan and its match
-## limit differ from the interpreter's (`pcre_select.jitDeclined`), which
-## is the semantics the walker models. So the walker asks, at walk time,
+## limit differ from the interpreter's. So the walker asks, at walk time,
 ## the library std/re would load: the same names as Nim's `pcre` wrapper,
-## `pcre_config(PCRE_CONFIG_JIT)`. A library it cannot load or ask counts as
-## a JIT one (the declines then stand: sound).
+## `pcre_config(PCRE_CONFIG_JIT)`. A library it cannot load or ask is not a
+## verified one (below).
 ##
 ## RFC-0005 S8bt (SOUNDNESS). The model is PCRE 8.45's interpreter, checked
 ## against other builds; the walker reads a regex only when std/re's library
 ## is one of them (`verifiedLibs`), and declines every regex call otherwise
 ## (`unverifiedLibReason`, read by `pcre_syntax.parseSpec`). S8bj recorded
 ## the library in the cache key but read every one with 8.45's model.
+## RFC-0005 S8bt: a verified build names the engine model its unanchored
+## calls are read with (`VerifiedLib.model`, `pcreSearchEngine`): 8.37's
+## JIT is modelled (`pcre_jit.nim`, `pcre_select`'s `peJit837`), so its
+## searches are decided rather than declined.
 import std/[dynlib, strutils]
+
+type
+  PcreEngine* = enum
+    ## RFC-0005 S8bt. The engine an unanchored call runs on: the
+    ## interpreter (pcre_exec.c, the model's reference), or PCRE 8.37's
+    ## JIT. Anchored calls always run on the interpreter (PCRE_ANCHORED is
+    ## not a JIT option).
+    peInterp, peJit837
+
 
 const pcreConfigJit = 9'i32   ## pcre.h's PCRE_CONFIG_JIT
 
@@ -91,23 +103,28 @@ proc pcreVersion*(): string =
       if f != nil: versionStr = $f()
   versionStr
 
+proc pcreOlderThan*(major, minor: int): bool =
+  ## RFC-0005 S8bt. Whether std/re's libpcre is older than `major.minor`
+  ## (true when it cannot be asked).
+  let v = pcreVersion()
+  var ma, mi = 0
+  var i = 0
+  while i < v.len and v[i] in {'0'..'9'}:
+    ma = ma * 10 + ord(v[i]) - ord('0')
+    inc i
+  if i >= v.len or v[i] != '.': return true
+  inc i
+  while i < v.len and v[i] in {'0'..'9'}:
+    mi = mi * 10 + ord(v[i]) - ord('0')
+    inc i
+  ma < major or (ma == major and mi < minor)
+
 proc pcreBefore838*(): bool =
   ## RFC-0005 S8bj. Whether std/re's libpcre is older than 8.38 (true when
   ## it cannot be asked). PCRE 8.37 (the Windows legs') drops the caseless
   ## flag of a required character after a `{0}` item: `x{0}(?i)a` does not
   ## match "A" there, and does in 8.45 (probed).
-  let v = pcreVersion()
-  var major, minor = 0
-  var i = 0
-  while i < v.len and v[i] in {'0'..'9'}:
-    major = major * 10 + ord(v[i]) - ord('0')
-    inc i
-  if i >= v.len or v[i] != '.': return true
-  inc i
-  while i < v.len and v[i] in {'0'..'9'}:
-    minor = minor * 10 + ord(v[i]) - ord('0')
-    inc i
-  major < 8 or (major == 8 and minor < 38)
+  pcreOlderThan(8, 38)
 
 proc pcreEngineName*(): string =
   ## The engine as the symex cache key records it (with the version).
@@ -116,18 +133,20 @@ proc pcreEngineName*(): string =
 
 type VerifiedLib* = object
   ## RFC-0005 S8bt. A libpcre build the model has been checked against: its
-  ## `pcre_version()` string and engine, and the evidence.
+  ## `pcre_version()` string and engine, the engine model its unanchored
+  ## calls are read with, and the evidence.
   version*: string
   jit*: bool
+  model*: PcreEngine
   evidence*: string
 
 const verifiedLibs* = [
-  VerifiedLib(version: "8.45 2021-06-15", jit: false, evidence:
+  VerifiedLib(version: "8.45 2021-06-15", jit: false, model: peInterp, evidence:
     "the model's own reference: every regex suite (Linux test image)"),
-  VerifiedLib(version: "8.37 2015-04-28", jit: true, evidence:
+  VerifiedLib(version: "8.37 2015-04-28", jit: true, model: peJit837, evidence:
     "every regex suite on the Windows legs (Nim's pcre64.dll, JIT), the " &
     "S8bj tri-oracle and the S8bj suites against a local JIT build"),
-  VerifiedLib(version: "8.37 2015-04-28", jit: false, evidence:
+  VerifiedLib(version: "8.37 2015-04-28", jit: false, model: peInterp, evidence:
     "the S8bj tri-oracle: identical to 8.45's interpreter on 56764 verb " &
     "patterns, and the start-of-match data on 142108 patterns but the " &
     "declined `{0}` case")]
@@ -155,3 +174,11 @@ proc unverifiedLibReason*(): string =
     (if pcreRunsJit(): ", JIT" else: ", interpreter") &
     ") is not a build the regex model is verified against (" &
     known.join(", ") & "): psUnverifiedLib"
+
+proc pcreSearchEngine*(): PcreEngine =
+  ## RFC-0005 S8bt. The engine model of std/re's unanchored calls (`find`,
+  ## `contains`, `findBounds`, `replace`): the verified build's. (An
+  ## unverified library declines every call before this is asked.)
+  for v in verifiedLibs:
+    if v.version == pcreVersion() and v.jit == pcreRunsJit(): return v.model
+  peInterp

@@ -5481,10 +5481,15 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                    el.fields.len == 2 and el.fields[0].kind == itInt and
                    el.fields[1].kind == itInt)):
                 capTy = t
+            let capPr = parsePcre(rePat, flag == "rex")
             if capTy == nil or flag == "?" or
                entry notin ["match", "matchLen", "find", "contains",
                             "findBounds"] or
-               parsePcre(rePat, flag == "rex").status != psOk:
+               capPr.status != psOk or
+               # RFC-0005 S8bt: a recursion limit's depth count reads the
+               # ovector's room for the groups (the `matches` length).
+               (capPr.groups > 0 and capPr.limitRecursion >= 0 and
+                capPr.limitRecursion < pcreDefaultLimit):
               return decline(classifyType(n).ty, entry & "Captures")
           proc plainCall(): IRExpr =
             case entry

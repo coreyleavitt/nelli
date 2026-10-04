@@ -5,10 +5,9 @@
 ## invalid UTF-8 included) at every start (-1 and one past the end too),
 ## std/re's value is the formula's only value.
 ##
-## Under a JIT-enabled libpcre the unanchored entries of the patterns the
-## walker declines there (`jitDeclined`) must decline (`roUnmodelled`).
+## RFC-0005 S8bt: under a JIT-enabled libpcre (8.37) the unanchored
+## entries are the JIT's (`pcre_engine.pcreSearchEngine`), compared alike.
 import std/[unittest, strutils, re, times]
-import pcre
 import z3
 import nelli/smt/[pcre_syntax, pcre_select, regex_parser]
 
@@ -17,11 +16,6 @@ proc lap(): string =
   let t = epochTime()
   result = formatFloat(t - t0, ffDecimal, 1) & " s"
   t0 = t
-
-proc jitEngine(): bool =
-  var v: cint
-  discard pcre.config(pcre.CONFIG_JIT, addr v)
-  v == 1
 
 proc words(alpha: string; maxLen: int): seq[string] =
   result = @[""]
@@ -33,11 +27,8 @@ proc words(alpha: string; maxLen: int): seq[string] =
     result.add next
     frontier = next
 
-const unanchoredEntries = ["find", "contains", "findBoundsFirst",
-                           "findBoundsFirstCap", "findBoundsLast"]
-
 type Tally = object
-  checked, declinedJit: int
+  checked: int
   bad: seq[string]
 
 proc checkPattern(p, alpha: string; maxLen: int; t: var Tally) =
@@ -46,8 +37,6 @@ proc checkPattern(p, alpha: string; maxLen: int; t: var Tally) =
     inc ctr
     tag & "#" & $ctr
   let rx = re(p)
-  let n = buildNfa(parsePcre(p))
-  let jitOut = jitEngine() and jitDeclined(n).len > 0
   for subj in words(alpha, maxLen):
     let ctx = newContext()
     setCurrentContext(ctx)
@@ -69,10 +58,6 @@ proc checkPattern(p, alpha: string; maxLen: int; t: var Tally) =
                               fresh)
       let where = escape(p) & " " & escape(subj) & " " & name & "(" & $st &
                   ") real " & $real
-      if jitOut and name in unanchoredEntries:
-        inc t.declinedJit
-        if r.outcome != roUnmodelled: t.bad.add "not declined: " & where
-        continue
       if r.outcome != roValue:
         t.bad.add $r.outcome & " " & r.msg & ": " & where
         continue
@@ -98,8 +83,7 @@ suite "S8bj: the entry points' formulas against std/re":
               "a(*MARK:A)a(*SKIP:A)b|.", "(*CRLF)\\s(*SKIP)b",
               "(*LIMIT_MATCH=0)a", "(*LIMIT_RECURSION=0)[ab]b"]:
       checkPattern(p, "ab\r\n", 2, t)
-    echo "  verbs and limits: ", t.checked, " cases, ", t.declinedJit,
-         " JIT-declined, ", lap()
+    echo "  verbs and limits: ", t.checked, " cases, ", lap()
     checkpoint t.bad.join("\n")
     check t.bad.len == 0
     check t.checked > 1_000

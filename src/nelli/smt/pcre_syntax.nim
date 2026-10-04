@@ -105,6 +105,7 @@
 import std/[strutils, algorithm]
 import ./pcre_props
 import ./pcre_engine
+import ./pcre_ucd
 
 type
   RxKind* = enum
@@ -154,6 +155,11 @@ type
     op*: AtomOp        ## RFC-0005 S8bj: rxSet / rxChars: the opcode
     ch*: int32         ## RFC-0005 S8bj: aoChar: the character
     ci*: bool          ## RFC-0005 S8bj: aoChar / aoNot: caseless
+    clist*: bool       ## RFC-0005 S8bt: aoProp of a caseless character
+                       ## with a caseless set in UTF mode (PT_CLIST): a
+                       ## literal (OP_PROP), or (`clistNot`) a negated
+                       ## class of it (OP_NOTPROP)
+    clistNot*: bool
     negType*: bool     ## RFC-0005 S8bj: aoType: `\D \S \W`
     xNot*, xMap*, xProp*: bool
       ## RFC-0005 S8bj: aoXClass: negated, with a bitmap, with a property
@@ -197,6 +203,15 @@ type
       ## only below its default `pcreDefaultLimit`.
     errMsg*: string    ## psRejected: Nim's exact `RegexError.msg`
     reason*: string    ## psUnmodelled / psUnknown: the construct
+    classPre845*: bool
+      ## psOk: RFC-0005 S8bt: a UTF-mode class whose compilation PCRE
+      ## changed after 8.37 (pcre_compile.c, pcre_xclass.c, read on both):
+      ## a POSIX class under `(*UCP)` (8.37's `[:punct:]` takes symbols
+      ## below 256, not 128; a negated ascii / cntrl / xdigit lists no wide
+      ## characters; a class with one and a listed wide character reads
+      ## differently -- probed on the Windows legs), or a negated escape
+      ## (`\S \D \W \H \V`, PCRE's `should_flip_negation`), whose wide
+      ## characters 8.37 neither adds nor flips the same way
 
 const
   pcreDigit* = {'0'..'9'}
@@ -272,6 +287,93 @@ proc cpHas*(s: CpSet; c: int32): bool =
   for r in s:
     if c >= r.lo and c <= r.hi: return true
   false
+
+proc ucdSet*(name: string): (bool, CpSet) =
+  ## RFC-0005 S8bt. The code points of `\p{name}` in UTF mode (PCRE 8.45's
+  ## tables, `pcre_ucd.nim`), or `(false, @[])` for a name not read.
+  for (n, rs) in ucdProps:
+    if n == name:
+      var cs: CpSet
+      for (a, b) in rs: cs.add (a, b)
+      return (true, cs)
+  (false, @[])
+
+proc ucdOther*(c: int32): int32 =
+  ## RFC-0005 S8bt. UCD_OTHERCASE (PCRE 8.45's tables): `c` when none.
+  var lo = 0
+  var hi = ucdOtherCase.len - 1
+  while lo <= hi:
+    let m = (lo + hi) div 2
+    let r = ucdOtherCase[m]
+    if c < r[0]: hi = m - 1
+    elif c > r[1]: lo = m + 1
+    else: return c + r[2]
+  c
+
+proc ucdCaseSet*(c: int32): int =
+  ## RFC-0005 S8bt. UCD_CASESET: the index of `c`'s caseless set in
+  ## `ucdCaseSets`, -1 when it has none.
+  for (x, i) in ucdCaseSetOf:
+    if x == c: return int(i)
+  -1
+
+proc ucdFoldChar*(c: int32): CpSet =
+  ## RFC-0005 S8bt. What a caseless `c` matches in UTF mode: its caseless
+  ## set (OP_PROP PT_CLIST), else `c` and its other case (OP_CHARI).
+  let k = ucdCaseSet(c)
+  if k >= 0:
+    for x in ucdCaseSets[k]: result.add (x, x)
+  else:
+    result = @[(c, c), (ucdOther(c), ucdOther(c))]
+  result = cpNorm(result)
+
+proc otherCaseRange(c: var int32; d: int32; oc, od: var int32): int =
+  ## RFC-0005 S8bt. pcre_compile.c's `get_othercase_range`: -1 at the end
+  ## of the range, a caseless set's index + 1 (`oc` its character), or 0
+  ## with `oc .. od` the other cases of a run.
+  var x = c
+  var other = 0'i32
+  while x <= d:
+    let k = ucdCaseSet(x)
+    if k >= 0:
+      oc = x
+      c = x + 1
+      return k + 1
+    other = ucdOther(x)
+    if other != x: break
+    inc x
+  if x > d: return -1
+  oc = other
+  var next = other + 1
+  inc x
+  while x <= d:
+    if ucdCaseSet(x) >= 0 or ucdOther(x) != next: break
+    inc next
+    inc x
+  od = next - 1
+  c = x
+  0
+
+proc ucdFoldRange*(lo, hi: int32): CpSet =
+  ## RFC-0005 S8bt. pcre_compile.c's `add_to_class` for a caseless range in
+  ## UTF mode: each run's other cases (extending the range where they
+  ## overlap it, as the C code does), each caseless set's members, and the
+  ## range itself.
+  var start = lo
+  var stop = hi
+  var c = lo
+  var oc, od: int32
+  while true:
+    let rc = otherCaseRange(c, stop, oc, od)
+    if rc < 0: break
+    if rc > 0:
+      for x in ucdCaseSets[rc - 1]: result.add (x, x)
+    elif oc >= start and od <= stop: discard
+    elif oc < start and od >= start - 1: start = oc
+    elif od > stop and oc <= stop + 1: stop = od
+    else: result.add (oc, od)
+  result.add (start, stop)
+  result = cpNorm(result)
 
 proc utf8Len*(c: int32): int =
   if c < 0x80: 1 elif c < 0x800: 2 elif c < 0x10000: 3 else: 4
@@ -376,6 +478,7 @@ type
     utf: bool            ## UTF mode
     multiline: bool      ## `(?m)`
     extra: bool          ## `(?X)` (PCRE_EXTRA)
+    classPre845: bool    ## RFC-0005 S8bt: see `PcreParse.classPre845`
 
 proc reject(r: var Reader; msg: string; offset: int) {.noreturn.} =
   r.status = psRejected
@@ -423,7 +526,11 @@ proc mkDot(r: Reader; dotall: bool): Rx =
   ## RFC-0005 S8bb. `.` (`dotall`: under `(?s)`) or `\N` (never dotall).
   ## RFC-0005 S8bj: every code point in UTF mode.
   if dotall: return r.mkAtom(@[(0'i32, r.topCp)], aoAny)
-  result = r.mkAtom(cpComplement(cpOfBytes(nlBytes(r.nl)), r.topCp), aoAny)
+  var nls = cpOfBytes(nlBytes(r.nl))
+  if r.utf and r.nl == nlANY:
+    # RFC-0005 S8bt: and U+2028, U+2029 (U+0085 is the code point 0x85).
+    nls = cpUnion(nls, @[(0x2028'i32, 0x2029'i32)])
+  result = r.mkAtom(cpComplement(nls, r.topCp), aoAny)
   result.crlfDot = r.nl == nlCRLF
 
 proc noteChar(r: var Reader; c: int32) =
@@ -440,24 +547,29 @@ proc fold(s: set[char]): set[char] =
 
 proc foldCps(r: var Reader; s: CpSet): CpSet =
   ## RFC-0005 S8bj. Caseless: `s` with the other case of each ASCII
-  ## letter. In UTF mode PCRE folds through Unicode's case sets (`k` and
-  ## `K` also match U+212A, `s` and `S` U+017F, a non-ASCII letter its
-  ## other cases), which are not modelled.
+  ## letter. RFC-0005 S8bt: in UTF mode PCRE folds through Unicode's case
+  ## sets (`k` and `K` also match U+212A, `s` and `S` U+017F, a non-ASCII
+  ## letter its other cases): PCRE 8.45's own tables (`ucdFoldChar`,
+  ## `ucdFoldRange`).
   if not r.caseless: return s
   if r.utf:
+    var u: CpSet
     for x in s:
-      if x.hi >= 128 or cpHas(@[x], int32('k')) or cpHas(@[x], int32('K')) or
-         cpHas(@[x], int32('s')) or cpHas(@[x], int32('S')):
-        r.unmodelled("caseless matching of `k`, `s` or a non-ASCII " &
-                     "character in UTF mode (Unicode case folding)")
-        return s
+      u = cpUnion(u, (if x.lo == x.hi: ucdFoldChar(x.lo)
+                      else: ucdFoldRange(x.lo, x.hi)))
+    return u
   cpUnion(s, cpOfBytes(fold(cpBytes(s))))
 
 proc mkChar(r: var Reader; c: int32): Rx =
-  ## RFC-0005 S8bj. A literal character (OP_CHAR / OP_CHARI).
+  ## RFC-0005 S8bj. A literal character (OP_CHAR / OP_CHARI). RFC-0005
+  ## S8bt: a caseless one with a caseless set in UTF mode is OP_PROP
+  ## PT_CLIST (compile_branch's ONE_CHAR).
   result = r.mkAtom(r.foldCps(@[(c, c)]), aoChar)
   result.ch = c
   result.ci = r.caseless
+  if r.utf and r.caseless and ucdCaseSet(c) >= 0:
+    result.op = aoProp
+    result.clist = true
 
 proc mkCat(kids: seq[Rx]): Rx = Rx(kind: rxCat, kids: kids)
 
@@ -516,8 +628,15 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
   of 'd', 'D', 'w', 'W', 's', 'S':
     # RFC-0005 S8bb: `(*UCP)` reads them as Unicode properties.
     if r.ucp and r.utf:
-      r.unmodelled("the escape \\" & c & " under (*UCP) in UTF mode")
-      return Esc(kind: ekSet, op: aoProp)
+      # RFC-0005 S8bt: `\p{Nd}`, `\p{Xsp}`, `\p{Xwd}` (pcre_compile.c's
+      # `substitutes`), over PCRE 8.45's tables.
+      let name = (case c
+                  of 'd', 'D': "Nd"
+                  of 's', 'S': "Xsp"
+                  else: "Xwd")
+      let us = ucdSet(name)[1]
+      return Esc(kind: ekSet, op: aoProp,
+                 s: (if c in {'D', 'S', 'W'}: cpComplement(us, maxCp) else: us))
     let (u, us) = (if r.ucp: pcreUcpSet("\\" & c) else: (false, {}))
     if u: Esc(kind: ekSet, s: cpOfBytes(us), op: aoProp)
     elif r.ucp and c in {'d', 'D'}:
@@ -554,9 +673,10 @@ proc readEscape(r: var Reader; inClass: bool): Esc =
     let (known, ps) = pcrePropSet(name)
     if not known: r.unknown("the property \\" & c & "{" & name & "}")
     if r.utf:
-      # RFC-0005 S8bj: a property of every code point, not of a byte.
-      r.unmodelled("the property \\" & c & "{" & name & "} in UTF mode")
-      return Esc(kind: ekSet, op: aoProp)
+      # RFC-0005 S8bt: a property of every code point (PCRE 8.45's tables).
+      let (_, us) = ucdSet(name)
+      return Esc(kind: ekSet, op: aoProp,
+                 s: (if neg: cpComplement(us, maxCp) else: us))
     Esc(kind: ekSet, s: cpOfBytes(if neg: pcreAnyByte - ps else: ps),
         op: aoProp)
   of 'h', 'H', 'v', 'V':
@@ -791,19 +911,41 @@ proc readClass(r: var Reader): Rx =
         if r.caseless and name in ["upper", "lower"]:
           name = "alpha"
           ps = posixSet(name)[1]
+        var uset: CpSet
+        var useU = false
         if r.ucp:
           if r.utf:
-            r.unmodelled("the POSIX class [:" & name & ":] under (*UCP) " &
-                         "in UTF mode")
-          let (u, us) = pcreUcpSet("[[:" & name & ":]]")
-          if u: ps = us
+            # RFC-0005 S8bt: pcre_compile.c's `posix_substitutes` (a
+            # property, or `\h`), or the special properties of graph,
+            # print and punct, over PCRE 8.45's tables; ascii, cntrl and
+            # xdigit keep their bitmap.
+            let sub = (case name
+                       of "alpha": "L"
+                       of "lower": "Ll"
+                       of "upper": "Lu"
+                       of "alnum": "Xan"
+                       of "digit": "Nd"
+                       of "space": "Xps"
+                       of "word": "Xwd"
+                       of "graph", "print", "punct": "[:" & name & ":]"
+                       else: "")
+            if sub.len > 0:
+              uset = ucdSet(sub)[1]
+              useU = true
+            elif name == "blank":
+              uset = uHSpace
+              useU = true
+          else:
+            let (u, us) = pcreUcpSet("[[:" & name & ":]]")
+            if u: ps = us
           # RFC-0005 S8bj: `(*UCP)` substitutes a property for these.
           if name notin ["ascii", "cntrl", "xdigit", "blank"]: hasProp = true
         has8 = true
+        if r.utf and r.ucp: r.classPre845 = true
         r.i = t + 2
         isChar = false
-        itemSet = (if neg: cpComplement(cpOfBytes(ps), r.topCp)
-                   else: cpOfBytes(ps))
+        let base = (if useU: uset else: cpOfBytes(ps))
+        itemSet = (if neg: cpComplement(base, r.topCp) else: base)
         if r.cur == '-' and r.at(1) != ']':
           r.unknown("a range after a POSIX class")
       else:
@@ -857,14 +999,24 @@ proc readClass(r: var Reader): Rx =
       oneCh = lo
     if lo < 256: has8 = true
     if hi > 255: xclass = true
-    cs = cpUnion(cs, r.foldCps(@[(lo, hi)]))
+    let folded = r.foldCps(@[(lo, hi)])
+    # RFC-0005 S8bt: `add_to_class` lists every caseless other case above
+    # 0xFF in the class's extra data (an OP_XCLASS).
+    if r.utf and folded.len > 0 and folded[^1].hi > 255: xclass = true
+    cs = cpUnion(cs, folded)
   if hasProp: xclass = true
+  if r.utf and flip: r.classPre845 = true
   let members = (if negated: cpComplement(cs, r.topCp) else: cs)
   if items == 1 and single and not hasProp:
     # PCRE's one-character optimisation: OP_CHAR[I] / OP_NOT[I].
     result = r.mkAtom(members, (if negated: aoNot else: aoChar))
     result.ch = oneCh
     result.ci = r.caseless
+    if r.utf and r.caseless and ucdCaseSet(oneCh) >= 0:
+      # RFC-0005 S8bt: OP_PROP / OP_NOTPROP PT_CLIST.
+      result.op = aoProp
+      result.clist = true
+      result.clistNot = negated
   elif xclass and (hasProp or not flip or r.ucp):
     result = r.mkAtom(members, aoXClass)
     result.xNot = negated
@@ -1293,14 +1445,12 @@ proc parsePcre*(pattern: string; extended = false): PcreParse =
     let root = r.readAlt(0)
     if r.maxBackref > r.groups:
       r.reject("reference to non-existent subpattern", pattern.len)
-    if r.utf and r.nl == nlANY:
-      r.unmodelled("the (*ANY) newline convention in UTF mode (U+0085, " &
-                   "U+2028 and U+2029 are multi-byte newlines)")
     if r.unmodelled.len > 0:
       return PcreParse(status: psUnmodelled, reason: r.unmodelled)
     PcreParse(status: psOk, root: root, groups: r.groups, nl: r.nl,
               hasCrLf: r.hasCrLf, utf: r.utf, noStartOpt: noStartOpt,
-              limitMatch: limitMatch, limitRecursion: limitRecursion)
+              limitMatch: limitMatch, limitRecursion: limitRecursion,
+              classPre845: r.classPre845)
   except Stop:
     case r.status
     of psRejected: PcreParse(status: psRejected, errMsg: r.errMsg)
@@ -1315,10 +1465,11 @@ type Edge* = object
 proc hasAnchor(x: Rx): bool =
   ## (RFC-0005 S8bb: `(*ACCEPT)` too -- it ends the match away from the
   ## pattern's end, so only the priority automaton reads it. RFC-0005
-  ## S8bj: and a verb or a mark, and a UTF character, for the same reason.)
+  ## S8bj: and a verb or a mark, for the same reason. RFC-0005 S8bt: a UTF
+  ## character is plain -- `regex_parser.lazyUtf` decides the route.)
   case x.kind
-  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb, rxChars: true
-  of rxSet: false
+  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb: true
+  of rxSet, rxChars: false
   of rxCat, rxAlt:
     for k in x.kids:
       if hasAnchor(k): return true
@@ -1478,4 +1629,9 @@ proc parseSpec*(sp: RegexSpec): PcreParse =
         reason: "a `{0}` item in a pattern with caseless characters, and " &
                 "std/re's libpcre predates 8.38 (its required-character " &
                 "data drops the caseless flag there)")
+    if result.classPre845 and pcreOlderThan(8, 45):
+      return PcreParse(status: psUnmodelled,
+        reason: "a UTF-mode class with a (*UCP) POSIX class or a negated " &
+                "escape, and std/re's libpcre predates 8.45 (its class " &
+                "compilation differs there)")
 

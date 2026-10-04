@@ -6,17 +6,13 @@
 ##     is Nim's `replace` on every subject up to 4 bytes over a, b, CR, LF;
 ##   * the Z3 term (`regex_parser.replaceStepZ3`) has std/re's value as its
 ##     only value on every subject up to 3 bytes.
-## Under a JIT-enabled libpcre the patterns the walker declines there
-## (`jitDeclined`) are not compared.
+## RFC-0005 S8bt: the automaton is the engine's std/re runs `replace`'s
+## calls on (`pcre_engine.pcreSearchEngine`), the table read in that
+## engine's loop (`s8bt_harness/stepref`).
 import std/[unittest, strutils, re, times, tables]
-import pcre
 import z3
-import nelli/smt/[pcre_syntax, pcre_select, regex_parser]
-
-proc jitEngine(): bool =
-  var v: cint
-  discard pcre.config(pcre.CONFIG_JIT, addr v)
-  v == 1
+import nelli/smt/[pcre_syntax, pcre_select, regex_parser, pcre_engine]
+import ./s8bt_harness/stepref
 
 proc words(alpha: string; maxLen: int): seq[string] =
   result = @[""]
@@ -27,69 +23,6 @@ proc words(alpha: string; maxLen: int): seq[string] =
       for c in alpha: next.add w & c
     result.add next
     frontier = next
-
-proc finalNl(n: Nfa; s: string; j: int): bool =
-  let rest = s.len - j
-  (rest == 1 and s[j] in nlBytes(n.nl)) or
-    (nlPair(n.nl) and rest == 2 and s[j] == '\r' and s[j + 1] == '\n')
-
-proc runRef(n: Nfa; t: StepTable; s: string; x, st0: int): (LeafKind, int) =
-  ## The table's attempt at `x`: its outcome and position.
-  var st = st0
-  var regs: seq[int]
-  for j in x .. s.len:
-    let row = t.rows[st]
-    let lf =
-      if j == s.len: row.atEnd
-      elif finalNl(n, s, j): row.nll[ord(s[j])]
-      else: row.other[ord(s[j])]
-    case lf.kind
-    of lfNext:
-      var nr: seq[int]
-      for m in lf.regMap: nr.add(if m < 0: j else: regs[m])
-      regs = nr
-      st = lf.next
-    of lfMatch, lfSkip:
-      return (lf.kind, (if lf.reg < 0: j else: regs[lf.reg]))
-    else:
-      return (lf.kind, 0)
-  raiseAssert "runRef: no leaf at the end"
-
-proc execRef(n: Nfa; t: StepTable; s: string; start: int; ne: bool): (int, int) =
-  ## pcre_exec.c's loop over the table's attempts.
-  var x = start
-  while true:
-    while not created(n, s, x, start): inc x
-    let pc = canonPc0(n, classAt(s, x))
-    let elig = n.hasNeverSkip and x > start and x < s.len and
-               s[x - 1] == '\r' and s[x] == '\n' and n.skipActive
-    let (k, pos) = runRef(n, t, s, x, t.start[(pc, ne and x == start, elig)])
-    var next: int
-    case k
-    of lfMatch: return (x, pos)
-    of lfCommit: return (-1, 0)
-    of lfSkip: next = (if pos > x: pos else: x + 1)
-    else: next = x + 1
-    if n.utf:
-      while next < s.len and (ord(s[next]) and 0xC0) == 0x80: inc next
-    if n.anchoredPat or next > s.len: return (-1, 0)
-    x = next
-    if x > start and s[x - 1] == '\r' and x < s.len and s[x] == '\n' and
-       n.skipActive:
-      inc x
-
-proc replaceRef(n: Nfa; t: StepTable; s, by: string): string =
-  var prev = 0
-  var ne = false
-  while prev < s.len:
-    let (a, b) = execRef(n, t, s, prev, ne)
-    ne = false
-    if a < 0: break
-    result.add s[prev ..< a]
-    result.add by
-    if a == b: ne = true
-    prev = b
-  result.add s[min(prev, s.len) .. ^1]
 
 const repPatterns = [
   "a(*COMMIT)b|.", "(*COMMIT)a|b", "a+(*COMMIT)b|a", "a(*PRUNE)b|.",
@@ -105,17 +38,13 @@ const repPatterns = [
 suite "S8bj: replace by the agenda's step table, against std/re":
 
   test "the table, read directly, is Nim's replace":
-    let jit = jitEngine()
-    var runs, skipped = 0
+    var runs = 0
     var bad: seq[string]
     for p in repPatterns:
       let pr = parsePcre(p)
       check pr.status == psOk
-      let n = buildNfa(pr)
+      let n = buildNfa(pr, pcreSearchEngine())
       check n.ok
-      if jit and jitDeclined(n).len > 0:
-        inc skipped
-        continue
       if limitEffect(n)[0] != leNone: continue   # the walker's own rule
       let t = stepTable(n)
       checkpoint escape(p) & " " & t.why
@@ -129,13 +58,12 @@ suite "S8bj: replace by the agenda's step table, against std/re":
         if got != want and bad.len < 20:
           bad.add escape(p) & " " & escape(subj) & " got " & escape(got) &
                   " want " & escape(want)
-    echo "  step-table replace runs: ", runs, " (", skipped, " JIT-declined)"
+    echo "  step-table replace runs: ", runs
     checkpoint bad.join("\n")
     check bad.len == 0
     check runs > 5_000
 
   test "the Z3 term's only value is Nim's replace":
-    let jit = jitEngine()
     var checked = 0
     var bad: seq[string]
     var ctr = 0
@@ -144,9 +72,8 @@ suite "S8bj: replace by the agenda's step table, against std/re":
       tag & "#" & $ctr
     for p in repPatterns:
       let pr = parsePcre(p)
-      let n = buildNfa(pr)
-      if (jit and jitDeclined(n).len > 0) or limitEffect(n)[0] != leNone:
-        continue
+      let n = buildNfa(pr, pcreSearchEngine())
+      if limitEffect(n)[0] != leNone: continue
       let t = stepTable(n)
       if not t.ok: continue
       let t0 = epochTime()

@@ -7109,11 +7109,6 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
-const maxModelledInitialSize = 1'i64 shl 20
-  ## RFC-0005 S8at. The largest `initialSize` an `initTable`/`initHashSet`
-  ## call is modelled at (see `parseInitContainer`). RFC-0005 S8bc / batch
-  ## 5: the largest length every seq constructor is (`parseNewSeqLen`).
-
 proc sizeOperandOnce(ir: IRExpr; n: NimNode; preamble: var seq[IRStmt];
                      ctx: ParseCtx): IRExpr =
   ## RFC-0005 batch 5. A size or length argument read by its guard's

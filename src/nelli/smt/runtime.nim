@@ -10369,11 +10369,12 @@ proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
 proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64
   ## RFC-0005 S8bc fwd-decls, for `extractTreeValue`.
 
-const maxWitnessSeqLen* = 1 shl 20
+const maxWitnessSeqLen* = int(maxModelledInitialSize)
   ## RFC-0005 S8bl (item 4). The longest nested seq (a seq inside a seq
   ## element or a heap cell, which has no allocation bound) a witness
   ## renders at its model length -- `newSeq`'s modelled size bound
-  ## (`maxModelledInitialSize`). Was 1024.
+  ## (`types.maxModelledInitialSize`; batch 7 made it that constant rather
+  ## than a second `1 shl 20`). Was 1024.
 
 proc witnessSeqLen(raw: int64): int =
   ## RFC-0005 S8bl (item 4). A nested seq's rendered length: its model

@@ -4496,6 +4496,13 @@ const boundsCheckSynthWord* = "ixck"
   ## not an element read (`newSeqUninit`'s unwritten-element taint skips
   ## it). Its name is `"__sym_" & boundsCheckSynthWord & "_" & n`.
 
+const maxModelledInitialSize* = 1'i64 shl 20
+  ## RFC-0005 S8at. The largest `initialSize` an `initTable`/`initHashSet`
+  ## call is modelled at (`dsl_parser.parseInitContainer`). RFC-0005 S8bc /
+  ## batch 5: the largest length every seq constructor is
+  ## (`parseNewSeqLen`). Batch 7: moved here from `dsl_parser` so that
+  ## `runtime.maxWitnessSeqLen`, which S8bl defined as this bound, is it.
+
 const maxBitSetDomain* = 1 shl 16
   ## RFC-0005 S8bq. Nim's own limit on a set's base type: at most 2^16
   ## values.

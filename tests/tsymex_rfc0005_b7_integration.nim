@@ -208,3 +208,6 @@ suite "RFC-0005 batch 7: integration":
     check r.status in {sxUnsat, sxUnknown}
     check not r.errors.hasKind(weInternalWalkerFault)
     check el < 300.0
+
+  test "walker version floor":
+    check symexWalkerVersion.parseInt >= 237

@@ -203,7 +203,25 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "230"
+const symexWalkerVersion* = "237"
+  ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
+  ## batch 6 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bp's own-context search is the one `checkCapped` solve
+  ## (`ownContextCheck`), and S8bu's bounded solve (`solveBounded`, the
+  ## timeout reason) runs inside it, so every step -- S8bj's step 0, the
+  ## facts-first steps, (1) to (3) and the plain query -- is isolated and
+  ## bounded; S8bu's inverse facts join S8bp's merged memberships. Every
+  ## per-thread kind probe (batch 4's const-array, S8ax's store / ite,
+  ## S8bq's uninitialized kinds, S8bu's select / int2bv / eq) builds in
+  ## S8bp's `probeContext`. S8bu's openArray view and S8br's index-call
+  ## hoist share one normalised call (`varSeqViews`, then
+  ## `hoistIndexCalls`). SOUNDNESS: a `var openArray` view of an array or
+  ## a slice is copied where the argument stands, while Nim passes the
+  ## storage; a later argument's call that wrote it (`fill(a, bump())`) was
+  ## overwritten by the write-back -- a false `sxUnsat` at S8bu's tip. It
+  ## declines on S8br's frame condition (`laterLeavesLvalue`). 230 -> 237.
+  ##
   ## RFC-0005 batch 6 (2026-10-03) — S8bs, S8bn, S8bl, S8bq and S8bw land
   ## stacked on batch 5 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own

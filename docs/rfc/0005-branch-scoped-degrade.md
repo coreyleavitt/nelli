@@ -9186,6 +9186,55 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
 
+**Batch 7 (2026-10-04) — one walker number for three slices.** S8bp, S8bu
+and S8br (each provisional: 219, 225, 229) land stacked on batch 6, in
+that order: `symexWalkerVersion` 230 -> **237**, the CR2 `==` pin 237, each
+slice's `>=` floor unchanged. Where slices met:
+- *One isolated, bounded solve.* S8bp's `ownContextCheck` (a fresh
+  context per `checkCapped` step) and S8bu's `solveBounded` (the
+  wall-clock bound and its `undefReason`) were two wrappers round one
+  check; `ownContextCheck` calls `solveBounded`, so every step is both.
+  S8bj's step 0 (`regexDefsFree`), which batch 5 added after S8bp's base,
+  takes `ownContextSolver` too, as does the plain query; S8bq's seq
+  `queryRLimit` note and S8bu's timeout reason join on the plain query's
+  decline. S8bu's `bvIntInverseFacts` are part of the query S8bp's
+  `mergeMemberships` rewrites.
+- *Kind probes.* S8bp moved the per-thread kind probes into a context of
+  their own (`probeContext`). Batch 6 and S8bu added more (S8bq's
+  `uninitKinds`, S8ax's `storeDeclKind` / `iteDeclKind`, batch 4's
+  `constArrayDeclKind`, S8bu's `selectDeclKind` and its `int2bv` / `eq`
+  probes); each builds in `probeContext`, so no probe's terms depend on
+  the walk's context.
+- *Calls.* S8bu's `varSeqViews` and S8br's hoisted index calls normalise
+  one call node (views first, then `hoistIndexCalls`) in `userCallStmt`
+  and `closureCallIR`; S8br's `actualLv` keeps S8bu's rule that a view is
+  no lvalue. S8bn's `varPtrSafe` and S8bu's `ccVarLocs` both ride
+  `mkClosureCall` (`locs` before `varPtrSafe`) and the closure key. S8br's
+  module-level `procValueSymKinds` (a call head that is a proc value)
+  shadowed batch 6's exported `dsl_typebridge.procValueSymKinds` (the
+  routines a proc value names) inside `dsl_parser`, where S8bn's
+  `pfProcSym` reads it; S8br's is renamed `procValueHeadKinds`.
+- *One size bound.* `maxModelledInitialSize` moved to `types`;
+  `runtime.maxWitnessSeqLen`, defined by S8bl as that bound, is it rather
+  than a second `1 shl 20`.
+- *SOUNDNESS (found integrating, present at S8bu's tip).* A `var
+  openArray` view of an array or a slice is copied into a temporary where
+  the argument stands, but Nim passes the storage's address, so the callee
+  sees a later argument's call's writes, and the walk's write-back
+  overwrote them with the stale copy: `fill(gArr, bump())` with `bump`
+  writing `gArr[0]` was a false `sxUnsat` (and a refuted `sxSat` on its
+  dead twin), direct, through a slice and through a proc value. The view
+  now declines (`feEvalOrderUnmodelled`) unless S8br's frame condition
+  shows no later argument may write its storage (`laterLeavesLvalue`).
+  Moving the copy-in to the call, as S8bk's `placeLateAddr` does for an
+  lvalue, is the precision candidate. Pinned with native runs in
+  `tsymex_rfc0005_b7_integration`, beside a module-level seq indexed by a
+  call (S8br's hoist with batch 6's entry values and S8bl's guard fold; a
+  false `sxUnsat` at S8bu's tip, fixed by S8br) and S8br's slow `addr` cell
+  at a non-literal index, which on this stack terminates (an exact
+  `sxUnsat` in well under a second on Z3 5.1); its pin allows a bounded
+  decline, never `sxSat`. S8cc owns its cost.
+
 ## §8 — Consumer surface and migration
 
 ### §8.1 What consumers see

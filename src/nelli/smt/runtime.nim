@@ -11555,7 +11555,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
   ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
   ##      An UNSAT is the query's own and returns at once; anything else
-  ##      goes on to (1), with (1b) and (1c) below unchanged.
+  ##      goes on to (1). After a SAT here (RFC-0005 S8by), (1b) and (1c)'s
+  ##      uncapped half are known SAT and do not run, nor does (1c)'s
+  ##      capped half when the model makes the caps true as well.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -11724,13 +11726,33 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
   # true of every real input, so an UNSAT is still the query's own.
   let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)
+  # RFC-0005 S8by: a facts-first SAT is (1c)'s uncapped answer, and so
+  # (1b)'s: (1c) is the same query under a larger budget, (1b) a subset of
+  # it, and a budget never turns a SAT into an UNSAT. Neither is run after
+  # one (in a context of its own each is the same search to the same SAT:
+  # 295,900 + 311,463 of `lastNl`'s 1,106,184 units on Z3 5.1). Where the
+  # facts-first model makes every cap true as well (`capsHold`), it is a
+  # model of (1c)'s capped half too, which is then not run either.
+  var factsSat, capsHold = false
   block factsFirst:
     when defined(symexQueryStats):
       if symexFactsFirstOff: break factsFirst   # RFC-0005 S8bm
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = ownContextSolver(ctx, roots & facts, pre, seqTheory = false)
-    if counted("factsFirst", ownContextCheck(sPre)) == zsUnsat:
+    let rPre = counted("factsFirst", ownContextCheck(sPre))
+    if rPre == zsUnsat:
       return (zsUnsat, sPre, nil, "")
+    if rPre == zsSat:
+      factsSat = true
+      # Every assertion of the capped half, evaluated under the model in
+      # its own context: all true, whichever way the evaluator reads a
+      # string operation, means that query has a model.
+      let m = sPre.model()
+      capsHold = true
+      for c in roots & facts & caps:
+        if m.eval(translate(c, sPre.ctx)).toBoolOpt != some(true):
+          capsHold = false
+          break
   # Step 1: the caps asserted, one-shot, in a context of its own
   # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
   # same whether or not the facts-first check (or anything else) ran in
@@ -11763,7 +11785,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # decide. (`tsymex_rfc0005_s8aq_remainder.nim`, S8ai's own two
   # not-pinned-end-to-end cases: `s[7] == ':' and rfind < 7` and `':' in s
   # and rfind == -1`, both cancelled at step 1 under the tight budget.)
-  if r1 != zsSat:
+  if r1 != zsSat and not factsSat:   # RFC-0005 S8by: else known SAT
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
   if r1 != zsSat:
@@ -11801,11 +11823,13 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
     # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
     # with each length at most `high(int)`, `nimLenFacts`.)
-    if facts.len > 0:
+    # (RFC-0005 S8by: neither half after a facts-first SAT whose model
+    # satisfies the caps, nor the uncapped half after any facts-first SAT.)
+    if facts.len > 0 and not factsSat:
       let sTr = ownContextSolver(ctx, roots & facts, rl, seqTheory = false)
       if counted("1c", ownContextCheck(sTr)) == zsUnsat:
         return (zsUnsat, sTr, nil, "")
-    if not lastIndex:
+    if not lastIndex and not capsHold:
       let sTc = ownContextSolver(ctx, roots & facts & caps, rl,
                                  seqTheory = false)
       if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
@@ -11841,6 +11865,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if r1 == zsUnsat:
       (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
                            "seq.last_indexof) was not decided: " & z3Why(s3))
+    elif factsSat:
+      (zsUnknown, s3, nil, z3Why(s3))   # RFC-0005 S8by: (1b) known SAT
     else:
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")

@@ -56,6 +56,7 @@ var gpstr: ptr string
 proc push(k: int) = gps[].add k
 
 proc sutPtrAdd(k: int) =
+  if k < -1000 or k > 1000: return
   var s = @[1]
   gps = addr s
   gps[].add k
@@ -72,6 +73,8 @@ proc sutRefAdd(k: int) =
   if r[].len != 2 or r[][0] != k: symexTarget("dr_dead")
 
 proc sutPtrDel(k: int) =
+  ## `del`'s index is a `Natural`: a negative one is a RangeDefect.
+  if k < 0: return
   var s = @[1, 2, 3]
   gps = addr s
   var hit = false
@@ -91,8 +94,11 @@ proc sutPtrInsert(k: int) =
     gps[].insert(k, 1)
   except IndexDefect:
     hit = true
-  if not hit and s == @[1, k, 2] and k == 3: symexTarget("di")
-  if hit or s.len != 3 or s[1] != k: symexTarget("di_dead")
+  if not hit and s.len == 3 and s[0] == 1 and s[1] == k and s[2] == 2 and
+     k == 3:
+    symexTarget("di")
+  if hit or s.len != 3 or s[0] != 1 or s[1] != k or s[2] != 2:
+    symexTarget("di_dead")
 
 proc sutPtrStrAdd(k: int) =
   var st = "ab"

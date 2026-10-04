@@ -1183,5 +1183,17 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ca_stack",
             # item 2: a view follows logged in-place writes, not term
             # shapes; `swap` is modelled.
-            "tsymex_rfc0005_s8ca_views"]:
+            "tsymex_rfc0005_s8ca_views",
+            # item 3: an `addr s[i]` actual of a seq with element cells.
+            "tsymex_rfc0005_s8ca_calls",
+            # item 4: closures over address-taken variables and heap lvalues.
+            "tsymex_rfc0005_s8ca_closures",
+            # item 5: a seq argument of a proc value or a closure.
+            "tsymex_rfc0005_s8ca_procvals",
+            # item 6: strings (character writes, openArray[char], views).
+            "tsymex_rfc0005_s8ca_strings",
+            # item 7: a negative-length toOpenArray; a resizing mitems body.
+            "tsymex_rfc0005_s8ca_resize",
+            # item 8: a mutation through a pointer to the whole value.
+            "tsymex_rfc0005_s8ca_derefmut"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -819,7 +819,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
          iekStrReplaceRe, iekStrCaptureRe, iekStrConcat, iekIntToStr,
          iekStrToInt,
          iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
-         iekRuneToStr, iekStrStrip, iekStrInOptionRegion:
+         iekRuneToStr, iekStrStrip, iekStrInOptionRegion,
+         iekStrSetAt, iekStrChars, iekStrFromChars:   # RFC-0005 S8ca
         discard  ## "StrOpKinds shared arm" (2 tests: plain + strOp payload)
       of iekGetCurrentExn: discard               ## "iekGetCurrentExn"
       of iekGetCurrentExnMsg: discard            ## "iekGetCurrentExnMsg"

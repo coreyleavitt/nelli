@@ -2935,7 +2935,7 @@ proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   ## as a single leaf (the degenerate one-element env).
   ## RFC-0005 S8ca: a seq, table or set (a capture, or a parameter of a
   ## proc value, `paramSorts`) contributes the sort of each of its leaves
-  ## (`svLeafAsts`), as a nested tuple does. It had no single-leaf sort, and
+  ## (`svLeafAsts`), as a nested tuple does, and an array its elements'. It had no single-leaf sort, and
   ## a proc value taking a seq declined (`seUnsupportedCompoundSortLeaf`).
   let ctx = requireCurrentContext()
   case sv.kind
@@ -2945,6 +2945,9 @@ proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   of svSeq, svTable, svSet:
     for leaf in svLeafAsts(sv):
       result.add ctx.checkErr Z3_get_sort(ctx.raw, leaf)
+  of svArray:   # RFC-0005 S8ca: its elements, as a tuple's fields
+    for e in sv.arrElems:
+      for s in sortOfTuple(e): result.add s
   else:
     result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
 
@@ -8326,15 +8329,28 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # slice (`L == 0`, `d[3 .. ^1]`, `d[5 .. 4]`) never raises. Every one
     # of those was an `IndexDefect` (`not (lo >= 0 and hi < len and
     # lo <= hi + 1)`), including the empty slice past the end.
+    #
+    # RFC-0005 S8ca: a `toOpenArray` view (`ssView`) is checked otherwise
+    # (probed on the pinned toolchain, a 4-element seq): `IndexDefect` iff
+    # its length is not 0 and either bound is outside `0 ..< len` -- (2, -1),
+    # (4, 1), (1, -2) raise; (2, 0) and (3, 0) do not, and make a view of
+    # negative length (-1, -2) that no index reaches (every `a[i]` raises,
+    # as the walk's index check does for a negative length) and no loop
+    # enters. Nothing raises `RangeDefect`. S8bu declined a negative length.
     let lenZ = recv.seqLen # [placeholder-audited]
     let sliceLen = (hi - lo) + mkInt(1)
-    let idxOob = (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
+    let idxOob =
+      if e.ssView:
+        (sliceLen != mkInt(0)) and
+          ((lo < mkInt(0)) or (lo >= lenZ) or (hi < mkInt(0)) or (hi >= lenZ))
+      else: (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
     let negLen = sliceLen < mkInt(0)
     when not defined(symexSliceNoOobFork):
       strIndexOobConds.add idxOob
       syncStrIndexOobCond(idxOob)
-      rangeDefectConds.add negLen
-      syncRangeDefectCond(negLen)
+      if not e.ssView:
+        rangeDefectConds.add negLen
+        syncRangeDefectCond(negLen)
     inc sliceViewCounter
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
     let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
@@ -20717,7 +20733,7 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
            (stmt.kind == isAssign and stmt.aname == c.local and
             stmt.avalue.kind == iekStrSetAt):   # a character, by name
           logInPlace(q, heapsBefore, q)
-        if st.isSome: env2[c.local] = st.get
+        if st.isSome: env2[c.local] = keepStrBuf(st.get, xv)   # S8ca
         elif displayName(c.local) notin lost: lost.add displayName(c.local)
     let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
     if q == nil and not dropped and clash.len == 0 and lost.len == 0 and

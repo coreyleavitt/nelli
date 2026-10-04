@@ -17,6 +17,9 @@
 ## S11 also performs the Cluster-S walker version bump `"5"` → `"6"`, single-
 ## sourced in `canonicalize.nim:symexWalkerVersion` (re-exported via symex.nim).
 ##
+## UPDATE (RFC-0005 S8ca, walker 233): `s[i] = c` is modelled, the string
+## with that byte replaced (`iekStrSetAt`); `indexAssign` is `sxSat`.
+##
 ## UPDATE (Phase 16 M4, RFC-chapulin-hardening): `s.add(otherStr)` — a
 ## STRING-arg append on a string receiver — is no longer in the unsupported
 ## class. M4 models it as the in-place concat-assign `s := s & otherStr`
@@ -29,6 +32,7 @@
 ## string, so `addChar` is `sxSat`.
 import std/[unittest, strutils]
 import nelli/symex
+import nelli/smt/types
 
 # --- `s[i] = c` index-assign: classified seUnsupportedStringOp -------------
 # A SUT with a local `var s: string`; assigning to a string index is the
@@ -60,11 +64,14 @@ proc plainRead(s: string) =
     symexTarget("plain")
 
 suite "symex Phase 15 S11 — string mutation classified + walker version 6":
-  test "s[i] = c index-assign → sxUnknown + seUnsupportedStringOp (no crash/UNSAT)":
+  test "s[i] = c index-assign → now MODELED (RFC-0005 S8ca): real sxSat":
+    ## Real Nim: indexAssign('x') makes s == "xbc". The write is the string
+    ## with that byte replaced (`iekStrSetAt`, walker 233).
     let r = symexFind(indexAssign, tLabel("idxAsg"))
-    check r.status == sxUnknown
-    check r.errors.len >= 1
-    check r.errors[0].kind == seUnsupportedStringOp
+    check r.status == sxSat
+    for e in r.errors: check e.severity == sevHint
+    if r.status == sxSat:
+      check r.witness[0] == 'x'
 
   test "s.add(c) char append → now MODELED (RFC-0005 S8p): real sxSat":
     ## Real Nim: addChar('c') makes s == "abc" and reaches the label. The

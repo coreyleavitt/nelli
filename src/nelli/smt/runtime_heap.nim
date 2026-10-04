@@ -1521,6 +1521,14 @@ proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
                             ty)
   heapCellSelect(ctx, cell, refAst, ty)
 
+func keepStrBuf*(stored, v: SymVal): SymVal =
+  ## RFC-0005 S8ca. `stored`, the value of a cell `v` was just stored into
+  ## and read back from, with `v`'s `StrBuf`: the heap holds the string's
+  ## bytes, not whose memory they are, and the variable is still `v`.
+  result = stored
+  if result.kind == svString and v.kind == svString:
+    result.strBuf = v.strBuf
+
 proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                    v: SymVal): SymVal =
   ## RFC-0005 S8ax. Store `v` into the address cell at `refAst` on `p` (a
@@ -1773,7 +1781,8 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
         w.frame.addrCells.add (local: local, cell: stmt.nRetName, ty: ty,
                                path: @[], ixs: @[], bound: false, view: false)
     child.addrOwners.add (refAst: newRef, frame: w.frame.frameId)
-    env2[local] = addrCellStore(ctx, child, ty, newRef, env2[local])
+    env2[local] = keepStrBuf(addrCellStore(ctx, child, ty, newRef,
+                                           env2[local]), env2[local])
     child.env = env2
     result.add drainPendingLowerEffects(child)
 

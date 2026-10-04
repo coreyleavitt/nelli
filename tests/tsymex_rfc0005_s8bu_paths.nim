@@ -14,7 +14,8 @@
 ##       "unsupported nnkAsgn shape", or `p.s[i] = v`), and the path is
 ##       declined once the cell is assigned whole or resized (Nim's copy
 ##       then points at memory it may have freed). A string's declines: a
-##       write to a character is not modelled.
+##       write to a character is not modelled (RFC-0005 S8ca: modelled,
+##       `ss` repinned; `tsymex_rfc0005_s8ca_strings`).
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
@@ -277,8 +278,10 @@ suite "S8bu (6): a by-value seq whose whole address is taken":
     declines(sutSeqWhole, "sa", "assigned whole or resized")
     declines(sutSeqGrow, "sg", "assigned whole or resized")
 
-  test "a string declines":
-    declines(sutStrView, "ss", "a by-value string shares the memory of")
+  test "a string (RFC-0005 S8ca)":
+    # S8bu declined it. RFC-0005 S8ca: the string owns its memory
+    # (`st.add`), so the copy is a view and sees the character write.
+    clean(sutStrView, "ss", sxSat)
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

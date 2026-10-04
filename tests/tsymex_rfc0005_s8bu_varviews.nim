@@ -150,9 +150,11 @@ suite "S8bu (4b): a var openArray writes through to its storage":
     clean(sutIterView, "wh", sxSat)
     clean(sutIterView, "wh_dead", sxUnsat)
 
-  test "through a proc value: declined":
-    declines(sutProcValueView, "wf", "no single-leaf Z3 sort")
-    declines(sutProcValueView, "wf_dead", "no single-leaf Z3 sort")
+  test "through a proc value (RFC-0005 S8ca)":
+    # S8bu declined it (`seUnsupportedCompoundSortLeaf`). RFC-0005 S8ca: a
+    # seq contributes the sorts of its leaves (`sortOfTuple`).
+    clean(sutProcValueView, "wf", sxSat)
+    clean(sutProcValueView, "wf_dead", sxUnsat)
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

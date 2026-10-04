@@ -576,8 +576,15 @@ proc isExemptedLine(fname, trimmed: string): bool =
   ## robust-marker convention `isGenericParamsNodeBodyLine` uses in the N2
   ## audit (never a line number, which rots the moment the file is edited
   ## above it).
+  ##
+  ## RFC-0005 S8ca: `syncAddrCells`' in-place check on a character write by
+  ## name (`s[i] = c`, an `isAssign` of `iekStrSetAt`). The parser emits
+  ## that value directly as the assignment's (never through
+  ## `parseAtomicOperand`), and a hoisted one would only make the view
+  ## decline (no step logged), never a wrong verdict.
   fname == "src/nelli/smt/runtime.nim" and
-    trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:"
+    (trimmed == "if formal.isVar and stmt.cargs[i].kind == iekVar:" or
+     trimmed == "stmt.avalue.kind == iekStrSetAt):   # a character, by name")
 
 proc scanForSubfieldIekShapePeeks(fname, contents: string,
                                    violations: var seq[KindViolation]) =

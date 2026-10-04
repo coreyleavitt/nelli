@@ -149,8 +149,10 @@ proc rdStr(t: string): char =
   t[0]
 
 proc sutOwnedView(k: int) =
-  ## The string's memory is its own (`&`): the copy sees the write.
-  var st = "a" & "b"
+  ## The string's memory is its own (`add` copied the literal's): the copy
+  ## sees the write. (`"a" & "b"` would be folded to a literal.)
+  var st = "a"
+  st.add 'b'
   gpstr = addr st
   let r = rdStr(st)
   if r == 'z' and k == 3: symexTarget("bo")
@@ -163,6 +165,17 @@ proc sutLiteralView(k: int) =
   let r = rdStr(st)
   if r == 'a' and st[0] == 'z' and k == 3: symexTarget("bl")
   if r != 'a' or st[0] != 'z': symexTarget("bl_dead")
+
+proc sutMaybeEmptyAdd(k: int) =
+  ## Appending a string, even an empty one, makes a literal's memory the
+  ## string's own (Nim copies it first): the copy sees the write.
+  var st = "ab"
+  let e = if k == 3: "" else: "c"
+  st.add e
+  gpstr = addr st
+  let r = rdStr(st)
+  if r == 'z' and k == 3: symexTarget("be")
+  if r != 'z': symexTarget("be_dead")
 
 proc sutUnknownView(k: int) =
   ## A string of unknown provenance: declined.
@@ -179,12 +192,12 @@ suite "S8ca (6): strings":
             nativeHits(sutStrOpenArray, ks) + nativeHits(sutStrSlice, ks) +
             nativeHits(sutVarOA, ks) + nativeHits(sutVarOASlice, ks) +
             nativeHits(sutOwnedView, ks) + nativeHits(sutLiteralView, ks) +
-            nativeHits(sutUnknownView, ks)
+            nativeHits(sutUnknownView, ks) + nativeHits(sutMaybeEmptyAdd, ks)
     for l in ["cw", "cw_raise", "co", "co_value", "cf", "cp", "oa", "os",
-              "os_raise", "ov", "ow", "bo", "bl", "bu"]:
+              "os_raise", "ov", "ow", "bo", "bl", "bu", "be"]:
       checkpoint l
       check l in h
-    for l in ["cw", "co", "cf", "cp", "oa", "os", "ov", "ow", "bo", "bl"]:
+    for l in ["cw", "co", "cf", "cp", "oa", "os", "ov", "ow", "bo", "bl", "be"]:
       checkpoint l & "_dead"
       check (l & "_dead") notin h
 
@@ -217,6 +230,8 @@ suite "S8ca (6): strings":
     clean(sutLiteralView, "bl", sxSat)
     clean(sutLiteralView, "bl_dead", sxUnsat)
     declines(sutUnknownView, "bu", "does not know whether that memory")
+    clean(sutMaybeEmptyAdd, "be", sxSat)
+    clean(sutMaybeEmptyAdd, "be_dead", sxUnsat)
 
 suite "S8ca: walker version":
   test "symexWalkerVersion >= 233":

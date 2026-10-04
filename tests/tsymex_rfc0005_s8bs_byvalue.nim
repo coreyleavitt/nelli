@@ -26,13 +26,12 @@ suite "S8bs: by-value parameters":
     clean(sutSeqByValue, "sv", sxSat)
     clean(sutSeqByValue, "sv_dead", sxUnsat)
     # A copy of a seq whose address is taken shares its elements (RFC-0005
-    # S8bu: a `view` of the cell). A string's declines (reported in the
-    # RFC): a write to a character is not modelled.
+    # S8bu: a `view` of the cell). RFC-0005 S8ca: a string's too, when it
+    # owns its memory (`st.add`), a character write being modelled.
     clean(sutSeqWholeByValue, "sw", sxSat)
     clean(sutSeqWholeByValue, "sw_dead", sxUnsat)
-    declines(sutStrByValue, "sr", "a by-value string shares the memory of")
-    declines(sutStrByValue, "sr_dead",
-             "a by-value string shares the memory of")
+    clean(sutStrByValue, "sr", sxSat)
+    clean(sutStrByValue, "sr_dead", sxUnsat)
     clean(sutBigByValue, "bg", sxSat)
     clean(sutBigByValue, "bg_dead", sxUnsat)
     clean(sutBigFieldByValue, "bh", sxSat)

@@ -52,6 +52,18 @@ proc s8caRunawaySut(n: int) =
   if s8caRunaway(n) > 1_000_000:
     symexTarget("s8ca_runaway_never")
 
+proc s8caForever(n: uint): uint =
+  ## No branch and nothing to raise (an unsigned `+` wraps): each level is
+  ## only the call, on a new argument (a repeated one is a cycle the walk
+  ## cuts), so a walk that inlines it as deep as the stack allows is quick
+  ## (on Windows the solve's fiber holds 16 MB, about twice Linux's
+  ## levels). Never run natively.
+  result = s8caForever(n + 1)
+
+proc s8caForeverSut(n: uint) =
+  if s8caForever(n) > 1_000_000'u:
+    symexTarget("s8ca_forever_never")
+
 proc s8caHelper(x: int): int = x + 1
 
 proc s8caShallow(x: int) =
@@ -69,7 +81,7 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     check left < high(int)
 
   test "maxCallDepth past what the stack holds declines in-band, named":
-    let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"), deep)
+    let r = symexFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep)
     checkpoint show(r.errors)
     check r.status == sxUnknown
     check stackNamed(r.errors)
@@ -106,14 +118,15 @@ type ThreadOut = object
 var outs: array[4, ThreadOut]
 
 proc analyse(which: int) =
-  let r =
-    case which
-    of 0, 2: symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"))
-    of 1: symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"), deep)
-    else: symexFind(s8caShallow, tLabel("s8ca_shallow"))
-  outs[which] = ThreadOut(status: r.status, named: stackNamed(r.errors),
-                          cut: symexNativeStackCut(),
-                          left: nativeStackLeft())
+  template take(call: untyped) =
+    let r = call
+    outs[which] = ThreadOut(status: r.status, named: stackNamed(r.errors),
+                            cut: symexNativeStackCut(),
+                            left: nativeStackLeft())
+  case which
+  of 0, 2: take(symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never")))
+  of 1: take(symexFind(s8caForeverSut, tLabel("s8ca_forever_never"), deep))
+  else: take(symexFind(s8caShallow, tLabel("s8ca_shallow")))
 
 proc underFiller(which: int) {.noinline.} =
   ## About 1 MB of this 2 MB thread's stack held by this frame: the walk

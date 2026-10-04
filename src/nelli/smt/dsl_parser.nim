@@ -5595,10 +5595,12 @@ proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
   ## fixed `let`s (`lo` names the first, for a write-back). Nim checks the
   ## bounds unless the view is empty by `last == first - 1` (probe on the
   ## pinned toolchain: `(5, 4)` and `(-1, -2)` of a 4-element seq are empty,
-  ## `(5, 3)` raises `IndexDefect`), which is the slice's own check whenever
-  ## `last >= first - 1`. Below that Nim raises nothing and makes a view of
-  ## negative length (`(2, 0)` has `len == -1`) whose reads are past the
-  ## storage: declined on its paths. The bounds are the program's `int`s
+  ## `(5, 3)` raises `IndexDefect`), which is the slice's own check
+  ## (`iekSeqSlice`'s `ssView` arm). RFC-0005 S8ca: below `last == first -
+  ## 1` Nim makes a view of negative length (`(2, 0)` has `len == -1`) when
+  ## both bounds are in range, and raises otherwise; every index of such a
+  ## view raises (probed), so it is modelled as the slice of that length.
+  ## S8bu declined it on its paths. The bounds are the program's `int`s
   ## (bit-vectors, compared as such here); the slice takes them across the
   ## signed Int bridge (`ssView`).
   let src = x[1]
@@ -5633,14 +5635,6 @@ proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
     let t = freshSynth(ctx, "oaBound")
     preamble.add mkLet(t, intTy, e)
     bounds.add mkVar(t)
-  preamble.add mkIf(@[mkBranch(
-    mkBinop(bLt, bounds[1], mkBinop(bSub, bounds[0], mkIntLit(1))),
-    ctx.declineAtSite(feUnsupportedOp,
-      siteMsg(x, "RFC-0005 S8bu: `" & x.repr & "` may have `last < first " &
-              "- 1`, which Nim does not check: the view has a negative " &
-              "length and its reads are past the storage, which the walk " &
-              "does not model (feUnsupportedOp)"),
-      "toOpenArray of negative length (feUnsupportedOp)"))])
   lo = bounds[0]
   mkSeqSlice(mkVar(b), bounds[0], bounds[1], view = true)
 
@@ -6948,20 +6942,40 @@ proc parseBorrowViewedExpr(rw: NimNode,
   result = parseExpr(rw, preamble, ctx)
   borrowBaseViews.setLen mark
 
-var miElemGuards {.compileTime.}: seq[tuple[mark: string; guard: IRStmt]]
+var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
+                                           lenName, iter: string]]
   ## RFC-0005 S8ca. While a `mitems` / `mpairs` body is parsed
   ## (`parseMutIter`): the position mark of the element it yields by
-  ## address, and the check each use of the element is preceded by.
+  ## address, the seq's location, the loop and its length `L`; each use of
+  ## the element is preceded by a check that the length is still `L`
+  ## (`miElemGuard`).
 
 proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # RFC-0005 S8bd: a by-reference base marked from an element or a call
   # result (`markByRef`) is its parameter, as a marked symbol is.
+  # RFC-0005 S8ca: the element a `mitems` body uses (`miElemGuards`; its
+  # position mark is a marked symbol): a use after the body resized the
+  # seq is a use of the address Nim yielded, which may now be past the seq
+  # or in freed memory: declined on its paths. A use before is the element.
+  if miElemGuards.len > 0 and (n.kind == nnkSym or n.len == 0):
+    let bn = byRefName(n)
+    if bn.len > 0:
+      for g in countdown(miElemGuards.high, 0):
+        let gd = miElemGuards[g]
+        if gd.mark == bn:
+          var lp: seq[IRStmt]
+          let lenNow = mkSeqLen(parseExpr(gd.loc, lp, ctx))
+          preamble.add lp
+          preamble.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(gd.lenName)),
+            ctx.declineAtSite(feUnsupportedOp,
+              siteMsg(gd.site, "RFC-0005 S8ca: the element `" & gd.iter &
+                      "` yielded by address is used after the body resized `" &
+                      gd.loc.repr & "`: the address may be past the seq or in " &
+                      "freed memory, which the walk does not model " &
+                      "(feUnsupportedOp)"),
+              "mitems element used after a resize (feUnsupportedOp)"))])
+          break
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
-    # RFC-0005 S8ca: the element a `mitems` body uses (`miElemGuards`).
-    for g in countdown(miElemGuards.high, 0):
-      if miElemGuards[g].mark == byRefName(n):
-        preamble.add miElemGuards[g].guard
-        break
     return mkVar(byRefName(n))
   # RFC-0005 S8bu: an `openArray` actual is the seq it views.
   if isToOpenArray(n) or
@@ -14542,20 +14556,11 @@ proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
     let seqIR = parseExpr(fixed, stmts, ctx)
     lenName = freshSynth(ctx, "miLen")
     stmts.add mkLet(lenName, intTy, mkSeqLen(seqIR))
-  # RFC-0005 S8ca: a use of the element after the body resized the seq is
-  # a use of the address Nim yielded, which may now be past the seq or in
-  # freed memory: declined on its paths. A use before is the element.
+  # RFC-0005 S8ca: each use of the element checks the length first
+  # (`miElemGuards`, read in `parseExpr`).
   if cls.kind != itArray:
-    var lp: seq[IRStmt]
-    let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
-    miElemGuards.add (mark: k, guard: mkBlock(lp & @[mkIf(@[mkBranch(
-      mkBinop(bNe, lenNow, mkVar(lenName)),
-      ctx.declineAtSite(feUnsupportedOp,
-        siteMsg(n, "RFC-0005 S8ca: the element `" & iterExpr[0].strVal &
-                "` yielded by address is used after the body resized `" &
-                c.repr & "`: the address may be past the seq or in freed " &
-                "memory, which the walk does not model (feUnsupportedOp)"),
-        "mitems element used after a resize (feUnsupportedOp)"))])]))
+    miElemGuards.add (mark: k, loc: fixed, site: n, lenName: lenName,
+                      iter: iterExpr[0].strVal)
   let (body, unrollBrk) = parseLoopBody(body0, ctx,
                                         unrolled = cls.kind == itArray)
   if cls.kind != itArray: miElemGuards.setLen(miElemGuards.len - 1)

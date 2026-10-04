@@ -422,6 +422,11 @@ title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate onc
 state = "done"
 
 [[slice]]
+id = "S8cc"
+title = "S8br's remainder: address cell at a non-literal array index with an input-dependent value runs past 420s, write summary over-approximates a global a later callee names, unnameable index call declines"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

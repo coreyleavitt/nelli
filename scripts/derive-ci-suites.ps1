@@ -232,7 +232,12 @@ if ($accountedFor -ne $allTsymex.Count) {
 # (a8f0970) failed the 40-min check: 40.1, 41.4, 41.6, 43.7 and 44.8 min,
 # every suite run. 10 shards take that to about 47 suites
 # each, ~33-36 min on those times, below the check again.
-$shardCount = 10
+#
+# RFC-0005 batch 7: 12 shards, was 10. symex-mingw run 37179549697
+# (5019bfa) ran 476 suites in 332.2 shard-minutes (batch 6: 295.6), and
+# shard 5 failed the 40-min check at 40.5 min, every suite run. 12 shards
+# take that to about 40 suites each, ~28 min on average.
+$shardCount = 12
 $shards = @()
 for ($i = 0; $i -lt $shardCount; $i++) {
   $shards += ,(New-Object 'System.Collections.Generic.List[string]')

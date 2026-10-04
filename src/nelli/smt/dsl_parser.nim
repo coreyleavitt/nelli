@@ -2131,6 +2131,14 @@ proc splitIndexChecks(seg: seq[IRStmt]; cut: int; ir: IRExpr;
     "an unchecked read, undefined in Nim (feEvalOrderUnmodelled)")]))])
   for i in cut ..< seg.len: tail.add seg[i]
   true
+const procValueHeadKinds = {nskVar, nskLet, nskParam, nskForVar, nskTemp,
+                           nskResult, nskField}
+  ## RFC-0005 S8br. The symbol kinds a call's head has when the call goes
+  ## through a proc value (a variable, a parameter, a field), not to a
+  ## routine. (S8br named it `procValueSymKinds`; batch 7 renamed it: S8bn's
+  ## exported `dsl_typebridge.procValueSymKinds` is the routines a proc
+  ## value can name, which this module-level constant shadowed.)
+
 type LateAddr = object
   ## RFC-0005 S8bk. Where a by-address argument's lvalue was lowered
   ## (`userCallStmt`): its address and value reads are
@@ -2139,10 +2147,20 @@ type LateAddr = object
   ## `growable[j]` is true when the container of the `j`-th index on the
   ## lvalue's path (root first) is not an array, so that its length may
   ## change (`lvalueIndexGrowable`). `ok` is false for an argument without
-  ## one (a variable, a cell shared with an earlier `addr`).
+  ## one (a variable, a cell shared with an earlier `addr`). RFC-0005 S8br:
+  ## `lv` is the lvalue and `later` the arguments after it, for the frame
+  ## condition a check no snapshot carries takes (`laterLeavesLvalue`).
   ok: bool
   lo, hi, bindEnd: int
   growable: seq[bool]
+  lv: NimNode
+  later: seq[NimNode]
+
+proc laterLeavesLvalue(lv: NimNode; later: seq[NimNode]): bool  ## RFC-0005 S8br fwd decl
+
+proc laterActuals(n: NimNode; i: int): seq[NimNode] =
+  ## RFC-0005 S8br. The arguments of the call `n` after its `i`-th.
+  for k in i + 1 ..< n.len: result.add n[k]
 
 proc lvalueIndexGrowable(lv: NimNode): seq[bool] =
   ## RFC-0005 S8bk. For each index on the lvalue path `lv`, root first:
@@ -2193,8 +2211,11 @@ proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
   ## (`feEvalOrderUnmodelled`: Nim accesses through a value it never
   ## checked, undefined behaviour). A check this cannot snapshot (one that
   ## reads a moved read, a variant arm's discriminant, a checked
-  ## arithmetic) keeps the lvalue where it stands and the call declines
-  ## whenever a later argument may write.
+  ## arithmetic) keeps the lvalue where it stands. RFC-0005 S8br: the call
+  ## then declines only when a later argument may write a location the
+  ## lvalue reads (`laterLeavesLvalue`); where none does, the address, its
+  ## checks and the value are the same at the call as where the argument
+  ## stands. S8bk declined whenever a later argument may write anything.
   let lo = la.lo - base
   let hi = la.hi - base
   let be = la.bindEnd - base
@@ -2239,6 +2260,7 @@ proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
     guards[i - cut] = differs
   if not exact:
     outPre.add seg[cut ..< seg.len]
+    if laterLeavesLvalue(la.lv, la.later): return
     tail.add ctx.declineMarker(feEvalOrderUnmodelled,
       "a by-address argument whose address Nim checks where it stands " &
       "and takes at the call, after a later argument's call that may " &
@@ -5778,6 +5800,81 @@ proc typeReachKeys(t: NimNode; into: var seq[string]; seen: var seq[string]) =
   else:
     add "*"
 
+proc laterArgWrites(a: NimNode; acc: var OpaqueEffects;
+                    seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8br. What evaluating the argument `a` may write, into `acc`:
+  ## for each call in it, S8as's summary of the callee's body
+  ## (`scanOpaqueEffects`: the globals it names, the captures it may write,
+  ## the heaps it reaches) and S8ax's of its by-address actuals
+  ## (`opaqueArgEffects`); a routine passed as a value is summarised as a
+  ## callee. Not inert for anything else that may write (a call through a
+  ## proc value, an assignment, a routine built inline): S8as's summary
+  ## cannot bound it.
+  if not acc.inert: return
+  case a.kind
+  of nnkEmpty, nnkCharLit .. nnkNilLit:
+    discard
+  of nnkSym:
+    if symKind(a) in procValueHeadKinds:
+      if a.typeKind in {ntyProc, ntyPointer}:
+        acc.notInert("`" & a.repr & "` may be a routine with unknown effects")
+    else:
+      # A routine passed as a value (`scanOpaqueEffects` reads a user
+      # routine's body; any other symbol it meets is a no-op).
+      scanOpaqueEffects(a, acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    if a.len == 0 or a[0].kind != nnkSym or
+       symKind(a[0]) in procValueHeadKinds:
+      acc.notInert("`" & a.repr & "` calls through a proc value")
+      return
+    scanOpaqueEffects(a[0], acc, seen, stack)
+    opaqueArgEffects(a, a[0], acc)
+    for k in 1 ..< a.len: laterArgWrites(a[k], acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkHiddenDeref,
+     nnkDerefExpr, nnkHiddenAddr, nnkAddr, nnkDotExpr, nnkBracketExpr,
+     nnkCheckedFieldExpr, nnkPar, nnkTupleConstr, nnkBracket, nnkCurly,
+     nnkObjConstr, nnkExprColonExpr, nnkIfExpr, nnkElifExpr, nnkElseExpr:
+    for c in a: laterArgWrites(c, acc, seen, stack)
+  else:
+    acc.notInert("`" & a.repr & "` may write")
+
+proc laterLeavesLvalue(lv: NimNode; later: seq[NimNode]): bool =
+  ## RFC-0005 S8br. The frame condition of a by-address argument's lvalue
+  ## `lv` over the arguments after it (`later`): true when none of them may
+  ## write a location `lv` reads -- a variable it names (its root and its
+  ## indices' variables), or a heap its path dereferences -- by S8as/S8ax's
+  ## write summary (`laterArgWrites`). A path through a `ptr`, or a later
+  ## argument that may write any heap (or through a `ptr`, into any
+  ## variable), meets everything. Then the lvalue names the same cell, with
+  ## the same value, at the call as where the argument stands, so a check no
+  ## snapshot carries need not decline (`placeLateAddr`).
+  if lv.isNil: return false
+  var acc = OpaqueEffects(inert: true)
+  var seen, stack: seq[NimNode]
+  for a in later: laterArgWrites(a, acc, seen, stack)
+  if not acc.inert or acc.heapAll or havocAllGlobals in acc.havoc:
+    return false
+  var heapSteps: seq[NimNode]
+  let root = lvalueRoot(lv, heapSteps)
+  if root.isNil or root.kind != nnkSym: return false
+  var keys: seq[string]
+  var seenT: seq[string]
+  for t in acc.heapTys: typeReachKeys(t, keys, seenT)
+  if "*" in keys or "t:?" in keys: return false
+  for d in heapSteps:
+    if derefIsPtr(d) or objectInherits(d.getTypeInst): return false
+    if cellTypeKey(d.getTypeInst) in keys: return false
+  var syms: seq[NimNode]
+  lvalueVarSyms(lv, syms)
+  if not containsSym(syms, root): syms.add root
+  for s in syms:
+    let nm = if byRefName(s).len > 0: byRefName(s)
+             elif isModuleGlobal(s): globalIRName(s)
+             else: s.strVal
+    if nm in acc.havoc: return false
+  true
+
 proc substFormal(n, gone, keep: NimNode): NimNode =
   ## RFC-0005 S8bh. `n` with every use of the formal `gone` spelled as the
   ## formal `keep` (symbol identity; a lambda nested in `n` included, as it
@@ -6082,6 +6179,110 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv0, actual: NimNode;
   let f = formalInBody(impl, fs.f)
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
+
+proc indexCallResult(ix: NimNode): NimNode =
+  ## RFC-0005 S8br. When `ix`, inside an index, is a user routine's call
+  ## (Nim evaluates it where the argument stands, into a temporary): the
+  ## callee's own `result` symbol, which has the type the call returns, to
+  ## mark (as S8bd's `byRefSub` marks a call base). nil otherwise: a
+  ## builtin (`len`, `+`) is read inline, with the index.
+  if ix.kind notin {nnkCall, nnkCommand} or ix.len == 0 or
+     ix[0].kind != nnkSym or not isUserCallee(ix[0]):
+    return nil
+  let ci = resolveRoutineImpl(ix[0])
+  if ci != nil and ci.len > 7 and ci[7].kind == nnkSym and
+     sameType(ci[7].getTypeInst, ix.getTypeInst):
+    ci[7]
+  else: nil
+
+proc lvalueStepKid(a: NimNode; k: int): bool =
+  ## RFC-0005 S8br. Child `k` of the lvalue path step `a` is itself on the
+  ## path (an index is not: `hoistIndexCalls` treats it as one).
+  case a.kind
+  of nnkHiddenAddr, nnkAddr, nnkHiddenDeref, nnkDerefExpr, nnkDotExpr,
+     nnkCheckedFieldExpr, nnkBracketExpr:
+    k == 0
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    k == a.len - 1
+  else: false
+
+proc hasIndexCall(a: NimNode; inIndex: bool): bool =
+  ## RFC-0005 S8br. Whether `hoistIndexCalls` would evaluate a call in an
+  ## index of the by-address actual `a`.
+  if inIndex and indexCallResult(a) != nil: return true
+  for k in 0 ..< a.len:
+    if inIndex or lvalueStepKid(a, k):
+      if hasIndexCall(a[k], inIndex): return true
+    elif a.kind == nnkBracketExpr and k > 0:
+      if hasIndexCall(a[k], true): return true
+  false
+
+proc indexCallLeft(a: NimNode; inIndex: bool): NimNode =
+  ## RFC-0005 S8br. A call left in an index of the lvalue path `a` after
+  ## `hoistIndexCalls` that Nim evaluates once and a write-back, which
+  ## re-parses the lvalue, would evaluate again: one through a proc value,
+  ## or a user routine's with no `result` symbol to mark (a generic's whose
+  ## `result` has another type). nil when none is left. The seq write-back
+  ## called it a second time (a false verdict); the array one declined.
+  if inIndex and a.kind in {nnkCall, nnkCommand} and a.len > 0 and
+     (a[0].kind != nnkSym or isUserCallee(a[0]) or
+      symKind(a[0]) in procValueHeadKinds):
+    return a
+  for k in 0 ..< a.len:
+    let sub =
+      if inIndex or lvalueStepKid(a, k): indexCallLeft(a[k], inIndex)
+      elif a.kind == nnkBracketExpr and k > 0: indexCallLeft(a[k], true)
+      else: nil
+    if sub != nil: return sub
+  nil
+
+proc indexCallDecline(lv, n, calleeSym: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8br. The scoped decline of a write-back through `lv` that
+  ## would evaluate a call in its index again (`indexCallLeft`), or nil.
+  let c = indexCallLeft(lv, false)
+  if c.isNil: return nil
+  ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "the index of by-address argument `" & lv.repr & "` of `" &
+            macros.strVal(calleeSym) & "` calls `" & c.repr & "`, which Nim " &
+            "evaluates once, where the argument stands; the write-back " &
+            "after the call would evaluate it again (feUnsupportedOp)"),
+    "index call in a by-address argument (feUnsupportedOp)")
+
+proc hoistIndexCalls(a: NimNode; inIndex: bool; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): NimNode =
+  ## RFC-0005 S8br. A by-address actual `a` (`gArr[nextI()]`, `addr
+  ## gs[nextI()]`) with each call in an index on its lvalue path evaluated
+  ## once, here, root first, and replaced by a mark (`markByRef` of the
+  ## callee's `result`, `indexCallResult`) naming the `let` that holds its
+  ## result. Nim evaluates the call where the
+  ## argument stands (`T1_ = nextI(); chk(T1_); T2_ = f(); touch(&gArr[T1_],
+  ## T2_)`), so the copy-in, the copy-out and S8an's cell all reach the
+  ## element through that one value, and S8bk's late address
+  ## (`placeLateAddr`) keeps the `let` where it stands (it is not a lazy
+  ## read). The copy-out re-parsed the call and declined (`unsupported
+  ## nnkAsgn shape`, `pureIndexExpr`). `a` itself when nothing changed.
+  let res = if inIndex: indexCallResult(a) else: nil
+  if res != nil:
+    let mk = markByRef(res)
+    if mk.isNil: return a
+    let v = parseExpr(a, preamble, ctx)
+    preamble.add mkLet(byRefName(mk), classifyType(a).ty, v)
+    return mk
+  var kids: seq[NimNode]
+  var changed = false
+  for k in 0 ..< a.len:
+    let c = a[k]
+    let sub =
+      if inIndex: hoistIndexCalls(c, true, preamble, ctx)
+      elif lvalueStepKid(a, k): hoistIndexCalls(c, false, preamble, ctx)
+      elif a.kind == nnkBracketExpr and k > 0:
+        hoistIndexCalls(c, true, preamble, ctx)
+      else: c
+    if sub != c: changed = true
+    kids.add sub
+  if not changed: return a
+  result = copyNimNode(a)
+  for c in kids: result.add c
 
 proc isToOpenArray(n: NimNode): bool =
   ## RFC-0005 S8bu. `n` is system's `toOpenArray(x, first, last)`.
@@ -6511,7 +6712,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   ## written back over the viewed elements of the storage in the same
   ## `finally` (an openArray's length never changes), under the gates of a
   ## `var` actual's write-back.
-  let n = varSeqViews(n0)
+  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
   var argIRs: seq[IRExpr]
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
@@ -6565,6 +6766,13 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(n[i].kind == nnkHiddenAddr or addrActualLvalue(n[i]) != nil)
     argLate.add LateAddr()
+    if argFixed[^1] and hasIndexCall(n[i], false):
+      # RFC-0005 S8br: a call in the lvalue's index is evaluated once,
+      # here (`hoistIndexCalls`). The call node is copied, not edited.
+      let h = hoistIndexCalls(n[i], false, preamble, ctx)
+      let nn = copyNimNode(n)
+      for k in 0 ..< n.len: nn.add(if k == i: h else: n[k])
+      n = nn
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
       var heapSteps: seq[NimNode]
@@ -6598,7 +6806,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         argIRs.add parseExpr(b.base, preamble, ctx)
         argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
                                bindEnd: preamble.len,
-                               growable: lvalueIndexGrowable(b.base))
+                               growable: lvalueIndexGrowable(b.base),
+                               lv: addrLv, later: laterActuals(n, i))
         continue
       block:
         var syms: seq[NimNode]
@@ -6679,12 +6888,15 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                                 cell = true)
       argLate[^1] = LateAddr(ok: true, lo: lvLo, hi: lvHi,
                              bindEnd: preamble.len,
-                             growable: lvalueIndexGrowable(addrLv))
+                             growable: lvalueIndexGrowable(addrLv),
+                             lv: addrLv, later: laterActuals(n, i))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(addrLv, newEmptyNode()), mkVar(back),
                         wbPre, ctx)
       writeBacks.add mkBlock(wbPre & @[w])
+      let icd = indexCallDecline(addrLv, n, calleeSym, ctx)   ## RFC-0005 S8br
+      if icd != nil: writeBacks.add icd
       argIRs.add mkVar(cell)
       continue
     # RFC-0005 S8bu: a `var openArray` view of an array or a slice.
@@ -6778,7 +6990,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           argIRs.add parseExpr(b.base, preamble, ctx)
           argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
                                  bindEnd: preamble.len,
-                                 growable: lvalueIndexGrowable(b.base))
+                                 growable: lvalueIndexGrowable(b.base),
+                                 lv: lv, later: laterActuals(n, i))
           byRefTaken = true
     if byRefTaken: continue
     if castBlocked:
@@ -6861,11 +7074,14 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
           # An lvalue shape `parseAsgn` declines is its own scoped marker
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
+          let icd = indexCallDecline(lv, n, calleeSym, ctx)   ## RFC-0005 S8br
+          if icd != nil: writeBacks.add icd
           # RFC-0005 S8bk: copied in at the call, through the address the
           # copy-out writes (`placeLateAddr`).
           argLate[^1] = LateAddr(ok: true, lo: irLo, hi: irHi,
                                  bindEnd: preamble.len,
-                                 growable: lvalueIndexGrowable(lv))
+                                 growable: lvalueIndexGrowable(lv),
+                                 lv: lv, later: laterActuals(n, i))
     argIRs.add ir
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
                 argFixed, argLate)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
@@ -7145,7 +7361,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   ## RFC-0005 S8bu: a `var openArray` actual as `userCallStmt` passes one:
   ## a whole seq's view is the seq (`varSeqViews`), an array's or a slice's
   ## a temporary written back over the elements it views.
-  let n = varSeqViews(n0)
+  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
   let ti = calleeSym.getTypeInst
   var varTys: seq[IRType]
   var anyVar = false
@@ -7189,18 +7405,18 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
               " (feUnsupportedOp, RFC-0005 S8bh)"),
       "closure call var/addr effect not modelled (feUnsupportedOp)")
   # The location each `var`/`addr` actual hands the callee.
+  proc actualLv(a: NimNode; k: int): NimNode =
+    let al = addrActualLvalue(a)
+    if al != nil:
+      result = al
+    elif isVarFormal(k) and varViewSource(a) == nil:   # RFC-0005 S8bu
+      if a.kind == nnkHiddenAddr and a.len == 1:
+        result = a[0]
+        if isVarIndirection(result): result = result[0]
+      elif a.kind == nnkSym:
+        result = a   ## a `var` formal passed on (Nim drops the addr)
   var lvOf = newSeq[NimNode](nArgs + 1)
-  for i in 1 ..< n.len:
-    let a = addrActualLvalue(n[i])
-    if a != nil:
-      lvOf[i] = a
-    elif isVarFormal(i - 1) and varViewSource(n[i]) == nil:
-      if n[i].kind == nnkHiddenAddr and n[i].len == 1:
-        var lv = n[i][0]
-        if isVarIndirection(lv): lv = lv[0]
-        lvOf[i] = lv
-      elif n[i].kind == nnkSym:
-        lvOf[i] = n[i]   ## a `var` formal passed on (Nim drops the addr)
+  for i in 1 ..< n.len: lvOf[i] = actualLv(n[i], i - 1)
   # S8bf's peers: two heap lvalues that may be one cell through different
   # refs. Two `addr`s, or two `var`s, of one lvalue are one location
   # already (`same`), not a pair.
@@ -7208,9 +7424,12 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   for i in 1 ..< n.len: same[i] = i
   var peers = newSeq[seq[int]](nArgs + 1)
   for i in 1 ..< n.len:
-    if lvOf[i].isNil: continue
+    # RFC-0005 S8br: a call in an index names a location each time it is
+    # evaluated (`hoistIndexCalls`), never one an earlier actual spells
+    # alike.
+    if lvOf[i].isNil or hasIndexCall(n[i], false): continue
     for j in 1 ..< i:
-      if lvOf[j].isNil: continue
+      if lvOf[j].isNil or hasIndexCall(n[j], false): continue
       if (addrActualLvalue(n[i]) != nil) != (addrActualLvalue(n[j]) != nil):
         continue
       if scopedRepr(lvOf[i]) == scopedRepr(lvOf[j]):
@@ -7258,7 +7477,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
   var argLate = newSeq[LateAddr](nArgs)
   for i in 1 ..< n.len:
     let k = i - 1
-    let lv = lvOf[i]
+    var lv = lvOf[i]
     argMarks.add preamble.len
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(not lv.isNil)
@@ -7288,6 +7507,19 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       argIRs.add parseExpr(n[i], preamble, ctx)
       byValueLoc(n[i], k, preamble, ctx, locs)   ## RFC-0005 S8bu
       continue
+    # RFC-0005 S8br: a call in the lvalue's index is evaluated once, here,
+    # as for a direct call (`hoistIndexCalls`).
+    if hasIndexCall(n[i], false):
+      let h = hoistIndexCalls(n[i], false, preamble, ctx)
+      let nn = copyNimNode(n)
+      for j in 0 ..< n.len: nn.add(if j == i: h else: n[j])
+      n = nn
+      lv = actualLv(h, k)
+      lvOf[i] = lv
+    if (let c = indexCallLeft(lv, false); c != nil):
+      declines.add declineHere("the index of `" & lv.repr & "` calls `" &
+        c.repr & "`, which Nim evaluates once, where the argument stands; " &
+        "the write-back after the call would evaluate it again")
     if lv.kind != nnkSym and lvalueCastBlocks(lv):
       # RFC-0005 batch 5 (S8bg on S8bh's path): a `var` / `addr` actual
       # reached through a `cast` declines naming the cast, as a direct
@@ -7338,7 +7570,8 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
                                 cell = true)
       argLate[k] = LateAddr(ok: true, lo: lvLo, hi: lvHi, bindEnd: preamble.len,
-                            growable: lvalueIndexGrowable(lv))
+                            growable: lvalueIndexGrowable(lv), lv: lv,
+                            later: laterActuals(n, i))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), mkVar(back),
@@ -7361,7 +7594,8 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
     # RFC-0005 batch 5 (S8bk): copied in at the call, through the address
     # the write-back writes.
     argLate[k] = LateAddr(ok: true, lo: irLo, hi: irHi, bindEnd: preamble.len,
-                          growable: lvalueIndexGrowable(lv))
+                          growable: lvalueIndexGrowable(lv), lv: lv,
+                          later: laterActuals(n, i))
     temps[i] = t
     varLocOf(lv, t, "var", preamble, ctx, locs)   ## RFC-0005 S8bu
     backs.add (i: i, lv: lv)
@@ -14774,7 +15008,9 @@ proc pureIndexExpr(n: NimNode): bool =
   ## literals, conversions, field and index reads, and builtin operators. A
   ## write's chain is parsed more than once (the read `op=` and a variant
   ## check make, then each rebuilt level), so an index that called a routine
-  ## would call it more than once; such an index declines.
+  ## would call it more than once; such an index declines. RFC-0005 S8br: a
+  ## call's mark (`hoistIndexCalls`) is a symbol, the `let` holding its
+  ## result.
   case n.kind
   of nnkSym, nnkCharLit..nnkUInt64Lit: true
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkHiddenDeref, nnkPar,

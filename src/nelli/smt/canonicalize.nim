@@ -297,6 +297,19 @@ const symexWalkerVersion* = "230"
   ## declines once the cell is assigned whole or resized; `p[][i] = v` is
   ## modelled.
   ##
+  ## RFC-0005 S8br (provisional 229; 224-228 held by slices still running)
+  ## — S8bk's remainder. A call in a by-address actual's index
+  ## (`touch(gArr[nextI()], f())`) is evaluated once, where the argument
+  ## stands, into a `let` the lvalue then names (`hoistIndexCalls`): the
+  ## copy-in, the copy-out and S8an's cell reach the element through it.
+  ## Before, the copy-out re-parsed the call: an array element declined
+  ## (`unsupported nnkAsgn shape`), and a seq element called it twice (a
+  ## false `sxSat` and a false `sxUnsat`). A by-address argument whose index
+  ## check no snapshot carries (`gH.s[gi]`) declines only when a later
+  ## argument may write a location its lvalue reads (`laterLeavesLvalue`,
+  ## S8as/S8ax's write summary); S8bk declined it whenever a later argument
+  ## may write anything. 223 -> 229.
+  ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
   ## callee's write through the pointer was clobbered; an object's address

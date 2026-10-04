@@ -1027,6 +1027,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## one on one string decided as one). Provisional 219. 214->219.
     ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
     ## default queryRLimit). 222->225.
+    ## RFC-0005 S8br (S8bk's remainder: a call in a by-address actual's
+    ## index is evaluated once, where the argument stands; a check no
+    ## snapshot carries declines only when a later argument may write what
+    ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
     check symexWalkerVersion == "230"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

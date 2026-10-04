@@ -11383,6 +11383,33 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
+proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3AnyAst] =
+  ## RFC-0005 S8by. Every term of `roots`, each once, children before
+  ## parents: the roots in order, each term's arguments last to first.
+  ## `ownContextSolver` makes a query's terms in its context in this
+  ## order. Z3's units on a query were a function of the query alone
+  ## since S8bp, but not the wall time a unit costs: the search a unit
+  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
+  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
+  ## walk's, S8bp). Measured on that walk (Z3 5.1, CPU seconds side by
+  ## side under one load): Z3's own translation order, root by root,
+  ## spent 195 (step 1) and 318 (step 3), the walk's context 152 in step
+  ## 3, and this order 128 and 205; the walk 478 s against 712 s.
+  var done: HashSet[int]
+  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
+  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  while stack.len > 0:
+    let (t, expanded) = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in done: continue
+    if expanded or getAstKind(t) != akApp:
+      done.incl id
+      result.add t
+      continue
+    stack.add (t, true)
+    for a in unpackApp(t).args: stack.add (a, false)
+
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
   ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
@@ -11393,11 +11420,25 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## `newContext` makes the new context the thread's current one; the
   ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
   ## the theory-free ones (`seqTheory = false`) included.
+  ##
+  ## RFC-0005 S8by: the query's terms are made in the new context in one
+  ## order, a function of the query alone (`queryTermOrder`), and so are
+  ## their ids, which Z3's search reads. Its units were already the
+  ## query's (S8bp); the wall time a unit costs follows the order too.
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
+  let order = queryTermOrder(ctx, roots)
+  var at: Table[int, int]
+  let terms = newAstVector(ctx)
+  for i, t in order:
+    at[astId(ctx, t.raw)] = i
+    terms.add t
+  # One translation (one cache), in that order: each term made once, its
+  # arguments before it.
+  let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
-  for i, c in roots: inOwn[i] = translate(c, own)
+  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
   querySolver(own, inOwn, rlimit, seqTheory)
 
 proc ownContextCheck(s: Z3Solver;

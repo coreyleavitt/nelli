@@ -16,6 +16,11 @@
 ##       SAT. Where the facts-first model also satisfies the caps, (1c)'s
 ##       capped half is known SAT too and is skipped. Verdicts are
 ##       unchanged; `lastNl` spends about 607k units less (Z3 5.1).
+##   (3) a query's terms are made in its own context in one order, a
+##       function of the query alone (`queryTermOrder`: the roots in
+##       order, each term's arguments last to first, children first); Z3's
+##       wall time per unit follows that order (`r4_strip`'s budget-out
+##       walk 478 s against 712 s side by side, Z3 5.1, loaded box);
 ##   (4) a regex membership below the top level -- under a disjunction
 ##       (`a or not s.contains(re"b")`), in an `ite` branch, under a `not`
 ##       -- is merged with the memberships of the same string that hold
@@ -154,9 +159,15 @@ suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
     check "factsFirst" in n
     check "1b" notin n
     check "1c" notin n
+    # The walk spends exactly the steps it ran.
+    var steps = 0
+    for x in w.steps: steps += parseInt(x.split('=')[1])
+    check w.units == steps
     ## Before S8by (S8bp): 1,106,184 units on Z3 5.1, of which (1b)
-    ## 295,900 and (1c) 311,463; 1,499,189 on 4.13.4.
-    if z351: check w.units <= 1_106_184 - 600_000
+    ## 295,900 and (1c) 311,463 (498,821 without them in S8bp's term
+    ## order); 1,499,189 on 4.13.4. (1c) is the facts-first query again,
+    ## so it cost what that check did.
+    if z351: check w.units < 1_106_184
     else: check w.units < 1_499_189
 
   test "preSufNl: still UNSAT by step 2, with no 1b, 1c or 1c-capped":
@@ -176,6 +187,28 @@ suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
     check "1c-capped" in n
     check "1b" notin n
     check "1c" notin n
+
+# ---- (3) the order a query's terms are made in --------------------------------
+
+suite "S8by (3): a query's terms in one order, the query's own":
+
+  test "queryTermOrder: roots in order, arguments last to first, each once":
+    let ctx = newContext()
+    let x = mkIntVar(ctx, "x")
+    let y = mkIntVar(ctx, "y")
+    let zero = mkInt(ctx, 0)
+    let two = mkInt(ctx, 2)
+    let sum = x + y
+    let prod = y * two
+    let r0 = sum > zero
+    let r1 = prod == x
+    var got: seq[int]
+    for t in queryTermOrder(ctx, [r0, r1]): got.add astId(ctx, t.raw)
+    var want: seq[int]
+    for t in [toAnyAst(zero), toAnyAst(y), toAnyAst(x), toAnyAst(sum),
+              toAnyAst(r0), toAnyAst(two), toAnyAst(prod), toAnyAst(r1)]:
+      want.add astId(ctx, t.raw)
+    check got == want
 
 # ---- (4) memberships below the top level -------------------------------------
 

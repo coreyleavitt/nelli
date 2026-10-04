@@ -11181,7 +11181,8 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   proc member(x, re: Z3AnyAst): Z3AnyAst =
     mk Z3_mk_seq_in_re(ctx.raw, x.raw, re.raw)
   proc held(re: Z3AnyAst; neg: bool): tuple[re: Z3AnyAst, neg: bool] =
-    (if neg: comp(re) else: re, neg)
+    result = (re: re, neg: neg)
+    if neg: result.re = comp(re)
   proc andOf(outs: seq[Z3AnyAst]): Z3AnyAst =
     if outs.len == 1: return outs[0]
     var rs = newSeq[RawZ3Ast](outs.len)
@@ -11268,8 +11269,8 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
         raws[i] = b.raw
         changed = changed or b.raw != a.raw
       result = if not changed: t
-               else: mk Z3_mk_app(ctx.raw, decl, cuint(raws.len),
-                               cast[ptr UncheckedArray[RawZ3Ast]](raws[0].addr))
+               else: mk(Z3_mk_app(ctx.raw, decl, cuint(raws.len),
+                                  cast[ptr UncheckedArray[RawZ3Ast]](raws[0].addr)))
       memo[key] = result
       return
     let cs = conjuncts(t)
@@ -11303,8 +11304,8 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
       for id in g.ids: drop.incl id
       add.add(
         if pol == polPos: member(g.x, inter(a & i))
-        else: mk Z3_mk_not(ctx.raw,
-                           member(g.x, inter(@[comp(inter(a))] & i)).raw))
+        else: mk(Z3_mk_not(ctx.raw,
+                           member(g.x, inter(@[comp(inter(a))] & i)).raw)))
     var outs: seq[Z3AnyAst]
     var changed = add.len > 0
     for c in cs:

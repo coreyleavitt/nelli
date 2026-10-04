@@ -1,0 +1,48 @@
+time="2026-10-03T21:33:25-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T21:33:25-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T21:33:25-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T21:33:25-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+time="2026-10-03T21:33:29-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T21:33:29-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T21:33:29-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T21:33:29-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+/work/_deps/z3/src/z3/proof.nim(156, 3) Warning: unreachable else, all cases are already covered [UnreachableElse]
+/work/src/nelli/smt/scoped_names.nim(86, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(108, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(118, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(121, 61) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(2805, 44) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(5899, 16) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(6242, 18) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(9530, 31) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(9659, 33) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(16053, 43) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/runtime.nim(7479, 40) template/generic instantiation of `toFp` from here
+/work/_deps/z3/src/z3/fp.nim(602, 10) Warning: a new symbol 'Z3Fp' has been injected during template or generic instantiation, however fp.Z3Fp [type declared in /work/_deps/z3/src/z3/fp.nim(64, 3)] captured at the proc declaration will be used instead; either enable --experimental:openSym to use the injected symbol, or `bind` this captured symbol explicitly [IgnoredSymbolInjection]
+/work/src/nelli/engine/targeting.nim(25, 21) Warning: imported and not used: 'datasource' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(28, 34) Warning: imported and not used: 'render' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(28, 17) Warning: imported and not used: 'frame' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(25, 55) Warning: imported and not used: 'shrinker' [UnusedImport]
+/work/src/nelli/engine/phases.nim(18, 48) Warning: imported and not used: 'hashes' [UnusedImport]
+/work/src/nelli/engine.nim(28, 20) Warning: imported and not used: 'datasource' [UnusedImport]
+/work/src/nelli/engine.nim(28, 51) Warning: imported and not used: 'shrinker' [UnusedImport]
+/work/src/nelli/engine.nim(26, 68) Warning: imported and not used: 'algorithm' [UnusedImport]
+/work/src/nelli/engine.nim(28, 34) Warning: imported and not used: 'rng' [UnusedImport]
+/work/src/nelli/smt/canonicalize.nim(19, 11) Warning: use command `nimble install checksums` and import `checksums/sha1` instead; sha1 is deprecated [Deprecated]
+/work/src/nelli/symex.nim(2349, 55) Warning: owner is deprecated [Deprecated]
+
+[Suite] N45 probe — per-query stats
+STATUS=sxSat
+  q0 sat asserts=1 rlimit=7363 drlimit=7308 conflicts=0 decisions=0 props=0 memMB=17.42
+  q1 sat asserts=2 rlimit=9386 drlimit=1938 conflicts=0 decisions=0 props=0 memMB=17.42
+  TOTAL queries=2 asserts=3 rlimit=16749 drlimit=9246
+
+  [OK] sat query records nonzero rlimit
+STATUS=sxUnsat
+  q0 unsat asserts=2 rlimit=59 drlimit=31 conflicts=0 decisions=0 props=0 memMB=17.25
+  TOTAL queries=1 asserts=2 rlimit=59 drlimit=31
+
+  [OK] unsat query records stats too
+ASSERTS small=1 big=6
+  [OK] assertion count tracks path-condition growth
+N45STATS queries=3 asserts=15 rlimit=259010 drlimit=144511

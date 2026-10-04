@@ -1,0 +1,50 @@
+time="2026-10-03T21:31:07-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T21:31:07-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T21:31:07-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T21:31:07-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+time="2026-10-03T21:31:09-06:00" level=warning msg="The cgroupv2 manager is set to systemd but there is no systemd user session available"
+time="2026-10-03T21:31:09-06:00" level=warning msg="For using systemd, you may need to log in using a user session"
+time="2026-10-03T21:31:09-06:00" level=warning msg="Alternatively, you can enable lingering with: `loginctl enable-linger 1000` (possibly as root)"
+time="2026-10-03T21:31:09-06:00" level=warning msg="Falling back to --cgroup-manager=cgroupfs"
+/work/_deps/z3/src/z3/proof.nim(156, 3) Warning: unreachable else, all cases are already covered [UnreachableElse]
+/work/src/nelli/smt/scoped_names.nim(86, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(108, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(118, 11) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/scoped_names.nim(121, 61) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(2805, 44) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(5899, 16) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(6242, 18) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(9530, 31) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(9659, 33) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/dsl_parser.nim(16053, 43) Warning: owner is deprecated [Deprecated]
+/work/src/nelli/smt/runtime.nim(7479, 40) template/generic instantiation of `toFp` from here
+/work/_deps/z3/src/z3/fp.nim(602, 10) Warning: a new symbol 'Z3Fp' has been injected during template or generic instantiation, however fp.Z3Fp [type declared in /work/_deps/z3/src/z3/fp.nim(64, 3)] captured at the proc declaration will be used instead; either enable --experimental:openSym to use the injected symbol, or `bind` this captured symbol explicitly [IgnoredSymbolInjection]
+/work/src/nelli/engine/targeting.nim(25, 21) Warning: imported and not used: 'datasource' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(28, 34) Warning: imported and not used: 'render' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(28, 17) Warning: imported and not used: 'frame' [UnusedImport]
+/work/src/nelli/engine/targeting.nim(25, 55) Warning: imported and not used: 'shrinker' [UnusedImport]
+/work/src/nelli/engine/phases.nim(18, 48) Warning: imported and not used: 'hashes' [UnusedImport]
+/work/src/nelli/engine.nim(28, 20) Warning: imported and not used: 'datasource' [UnusedImport]
+/work/src/nelli/engine.nim(28, 51) Warning: imported and not used: 'shrinker' [UnusedImport]
+/work/src/nelli/engine.nim(26, 68) Warning: imported and not used: 'algorithm' [UnusedImport]
+/work/src/nelli/engine.nim(28, 34) Warning: imported and not used: 'rng' [UnusedImport]
+/work/src/nelli/smt/canonicalize.nim(19, 11) Warning: use command `nimble install checksums` and import `checksums/sha1` instead; sha1 is deprecated [Deprecated]
+/work/src/nelli/symex.nim(2349, 55) Warning: owner is deprecated [Deprecated]
+
+[Suite] symex round-6 B6 -- main option-region defect proof
+  [OK] B6-1: four-pair option region (5 real outer iterations) -> sxSat via the region-membership fast path
+  [OK] B6-1-red: the SAME property, RECOGNIZER SHAPE BROKEN (non-.len bound), k-unrolls -- sxSat (was sxUnknown)
+
+[Suite] symex round-6 B6 -- star-segment pins
+  [OK] B6-2 empty-key pin: the region's own terminator is a zero-length key segment, past the unroll horizon
+  [OK] B6-3 empty-value pin: a genuinely empty VALUE segment mid-region, past the unroll horizon
+  [OK] B6-4 double-NUL-terminator pin: the last value's terminator immediately followed by the empty-key terminator
+
+[Suite] symex round-6 B6 -- truncated-region fallback
+  [OK] B6-5: one valid pair then an unterminated key -> the modeled ScanError raise is reachable (sxRaised)
+
+[Suite] symex round-6 B6 -- trip wire (recognizer stays narrow)
+  [OK] B6-6: non-.len outer bound is NOT recognized -> k-unroll, sxSat (was sxUnknown)
+
+[Suite] symex round-6 B6 -- walker version pin
+  [OK] walker version floor >= 84 (option-region star-segment membership for the readOptions pair-loop)

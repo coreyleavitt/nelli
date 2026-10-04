@@ -1,0 +1,7 @@
+backend=c jobs=4 timeout=900s
+pass=607 fail=1 (of which timeout-killed=0) skip=0 total=608
+unregistered=0 missing=0 stale_skiplist=0  (see /home/corey/tmp-usage/work/b6-gate.log.drift)
+warn_tests=565 warn_total=12303  (see /home/corey/tmp-usage/work/b6-gate.log.warnings) -- trend only, never zero; the gate is scripts/sweep-diff.sh's warnings delta against a baseline, not this total
+
+## failing
+1 c tests/tprobe_n45stats.nim 21

@@ -661,6 +661,18 @@ type
                      ## `tryRecognizePairLoopIdiom`'s closed-form replacement
                      ## of the `readOptions` pair-loop shape; never reachable
                      ## from ordinary Nim surface syntax.
+    iekStrSetAt      ## RFC-0005 S8ca: `s[i] = c`, the string `s` with byte
+                     ## `i` replaced by the char `c` (`strArgs = [s, i, c]`):
+                     ## `s[0, i) & c & s[i + 1, len)`. The index is checked
+                     ## by a read before (`s[i]`, its IndexDefect fork), so
+                     ## this forks nothing. S11 declined every character
+                     ## write (`iekStrUnsupported`).
+    iekStrChars      ## RFC-0005 S8ca: the `openArray[char]` view of a string
+                     ## (`strArgs = [s]`): the walk's openArray is a seq, of
+                     ## `s.len` chars, element `i` the byte `s[i]`.
+    iekStrFromChars  ## RFC-0005 S8ca: the string `s` (`strArgs = [s, a]`)
+                     ## after its `var openArray[char]` view `a` (a seq of
+                     ## the same length) was written: byte `i` is `a[i]`.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -867,7 +879,7 @@ type
        iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
        iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-       iekStrInOptionRegion:
+       iekStrInOptionRegion, iekStrSetAt, iekStrChars, iekStrFromChars:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1177,7 +1189,11 @@ type
     ##     passes by address (an array, an inheritable object, an object or
     ##     tuple larger than three words);
     ##   * `copy`: likewise, one Nim copies but whose seq or string memory
-    ##     the copy shares (a seq, a string, an object or tuple holding one).
+    ##     the copy shares (a seq, a string, an object or tuple holding one);
+    ##   * `ref` (RFC-0005 S8ca): `temp` is the copy-in/copy-out temporary of
+    ##     a `var` actual in a field of an object behind a ref (`grb.x`), and
+    ##     `root` the temporary holding that ref (read once, at the call):
+    ##     the formal is bound to the object's cell along `path`.
     ## The location is the variable `root` along `path`: a field step is
     ## the field's name, an index step `[` and the IR name of a `let`
     ## holding the index, and `?` a step the walk cannot follow.
@@ -4182,7 +4198,8 @@ const StrOpKinds* = {
   iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-  iekStrInOptionRegion}
+  iekStrInOptionRegion,
+  iekStrSetAt, iekStrChars, iekStrFromChars}   ## RFC-0005 S8ca
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[],
@@ -5931,6 +5948,21 @@ func capCellName*(frame: int; local: string): string =
   ## call threads it as it threads a global, under no module (`@cap<frame>`
   ## is not a Nim identifier). `displayName` gives back `local`.
   globalEnvPrefix & "@cap" & $frame & "." & local
+
+func capAddrName*(cell: string): string =
+  ## RFC-0005 S8ca. Beside the env cell `cell` (`capCellName`) of a
+  ## by-reference capture whose variable's address is taken: the pointer to
+  ## the variable's address cell, threaded as the env cell is, so a closure
+  ## applied in any frame binds the capture to that cell
+  ## (`applyClosureGround`).
+  cell & "#addr"
+
+func capBoundName*(cell: string): string =
+  ## RFC-0005 S8ca. Set on the calling path when a closure body ran with
+  ## the capture of `cell` bound to its address cell: the body kept the
+  ## two equal, so the frame owning the variable reads the cell's value
+  ## (`syncAddrCells`).
+  cell & "#bound"
 
 func addrCellName*(local: string): string =
   ## RFC-0005 S8ax. The env name of the address cell of the variable

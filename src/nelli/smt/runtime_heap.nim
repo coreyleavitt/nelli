@@ -1777,6 +1777,14 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
+proc foldedBool(ctx: Z3Context; b: Z3Bool): Option[bool] =
+  ## RFC-0005 S8ca. `b` simplified, when that is `true` or `false`.
+  let s = simplify(b)
+  case Z3_get_bool_value(ctx.raw, s.raw)
+  of Z3_L_TRUE: some(true)
+  of Z3_L_FALSE: some(false)
+  else: none(bool)
+
 proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8be. `addr s[i]` (`isNew` with `nAddrOf = s`, `nAddrIdx = i`;
   ## the parser checked `i` against `s.len` just before): bind
@@ -1826,6 +1834,13 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
       let e = child.elemCells[k]
       if e.frame != w.frame.frameId or e.root != root or e.dead: continue
       let same = idx == e.idx
+      # RFC-0005 S8ca: an index equal (or unequal) by its terms picks the
+      # older cell (or not) outright: the pointer is then the cell's own
+      # ref, which `ptrTargets` knows, and no store builds an `ite` address.
+      let f = foldedBool(ctx, same)
+      if f.isSome:
+        if f.get: addrAst = e.refAst
+        continue
       addrAst = wrap[Z3AnyAst](ctx,
         checkedIte(ctx, same.raw, e.refAst.raw, addrAst.raw))
     child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,

@@ -182,6 +182,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
      iekStrStrip,                             ## ADR-0026: svString result, not int.
+     iekStrSetAt, iekStrChars, iekStrFromChars, ## RFC-0005 S8ca: not int.
      iekSeqSlice,                             ## v67: seq-view result, not int.
      iekSeqSplice,                            ## RFC-0005 S8bu: a seq, not int.
      iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.

@@ -462,6 +462,11 @@ title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interprete
 state = "done"
 
 [[slice]]
+id = "S8cf"
+title = "S8bt's remainder: PCRE match/recursion limits and the JIT stack limit, JIT LIMIT accounting, limit-accounting gaps, SKIP:NAME past 7, UTF JIT scan residuals, symbolic step-table receiver, UTF priority-route cost, replace-lemma residuals, 8.44/8.39 allowlist"
+state = "pending"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"

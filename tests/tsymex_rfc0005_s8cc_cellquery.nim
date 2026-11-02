@@ -4,7 +4,10 @@
 ##    input-dependent value (`var j = 1; touchP(addr gArr[j], 0)` with
 ##    `gArr[1] == k`): the query never finished (past 420 s at S8br's base
 ##    and head). Every query here runs under an explicit `queryRLimit`, and
-##    must DECIDE within it: a bounded decline is not the goal.
+##    must DECIDE within it: a bounded decline is not the goal. At the job's
+##    base (a25229d) each dead label was `sxUnknown` here (20M units,
+##    `beSolverUndef`); batch 7 decides them, S8bu's arithmetic. The RFC's
+##    "As landed (S8cc)" note has the measurements.
 ##
 ## Items 2 and 3 are `tsymex_rfc0005_s8cc_remainder`.
 import std/[unittest, strutils]
@@ -38,6 +41,8 @@ template replays(fn: typed, lbl: string) =
       check replayWitness(fn, r.witness, tLabel(lbl), {}) == roConfirmed
 
 var gArr: array[3, int]
+var gArr32: array[3, int32]
+var gs: seq[int]
 var gCalls: int
 
 proc nextI(): int =
@@ -51,6 +56,8 @@ proc dblArr(): int =
 proc touchP(v: ptr int; k: int) = v[] = v[] + 5 + k
 
 proc scaleP(v: ptr int; k: int) = v[] = v[] * 3 - k
+
+proc touchP32(v: ptr int32; k: int32) = v[] = v[] + 5 + k
 
 # ---- 1. an address cell at a non-literal index, input-dependent value -------
 
@@ -92,6 +99,52 @@ proc sutCellLater(k: int) =
   if gArr[1] == 2 * k + 5 and gCalls == 1 and k == 6: symexTarget("cl")
   if gArr[1] != 2 * k + 5 or gCalls != 1: symexTarget("cl_dead")
 
+proc sutCellPick(k: int) =
+  ## The index itself depends on the input: a store over a symbolic index.
+  if k < 0 or k > 1000: return
+  gArr = [10, k, k + 1]
+  let j = if k > 500: 1 else: 2
+  touchP(addr gArr[j], 0)
+  if k > 500 and gArr[1] == k + 5 and gArr[2] == k + 1 and k == 600:
+    symexTarget("cp")
+  if (k > 500 and gArr[1] != k + 5) or (k <= 500 and gArr[2] != k + 6):
+    symexTarget("cp_dead")
+
+proc sutCellInput(k: int) =
+  ## The index is the input.
+  if k < 0 or k > 2: return
+  gArr = [k, k + 1, k + 2]
+  touchP(addr gArr[k], 0)
+  if gArr[k] == 2 * k + 5 and k == 2: symexTarget("ci")
+  if gArr[k] != 2 * k + 5: symexTarget("ci_dead")
+
+proc sutCell32(k: int32) =
+  ## A narrower element: its heap is not the Int-sorted `int` one's width.
+  if k < 0 or k > 1000: return
+  gArr32 = [10'i32, k, 30'i32]
+  var j = 1
+  touchP32(addr gArr32[j], 0'i32)
+  if gArr32[1] == k + 5 and k == 8: symexTarget("c3")
+  if gArr32[1] != k + 5: symexTarget("c3_dead")
+
+proc sutCellSeq(k: int) =
+  ## A module-level seq's element.
+  if k < 0 or k > 1000: return
+  gs = @[10, k, 30]
+  var j = 1
+  touchP(addr gs[j], 0)
+  if gs[1] == k + 5 and k == 12: symexTarget("cs")
+  if gs[1] != k + 5: symexTarget("cs_dead")
+
+proc sutCellLocal(k: int) =
+  ## A local array's element.
+  if k < 0 or k > 1000: return
+  var a = [10, k, 30]
+  var j = 1
+  touchP(addr a[j], 0)
+  if a[1] == k + 5 and a[0] == 10 and k == 13: symexTarget("co")
+  if a[1] != k + 5 or a[0] != 10: symexTarget("co_dead")
+
 suite "S8cc: an address cell at a non-literal index decides":
 
   test "nim":
@@ -114,8 +167,8 @@ suite "S8cc: an address cell at a non-literal index decides":
     check gArr == [10, 45, 30] and gCalls == 1
 
   test "an address cell at a non-literal index, input-dependent value":
-    ## RED: `cv_dead`'s query never finished (the run was killed by the
-    ## bound; `queryRLimit` did not end it).
+    ## RED at the job's base: each `_dead` label `sxUnknown`
+    ## (`beSolverUndef`, 20M units), and without a bound past 420 s.
     replays(sutCellVar, "cv")
     discard verdict(sutCellVar, "cv_dead", sxUnsat)
     replays(sutCellCall, "cc")
@@ -124,6 +177,18 @@ suite "S8cc: an address cell at a non-literal index decides":
     discard verdict(sutCellMul, "cm_dead", sxUnsat)
     replays(sutCellLater, "cl")
     discard verdict(sutCellLater, "cl_dead", sxUnsat)
+
+  test "the index, the element's width and the storage vary":
+    replays(sutCellPick, "cp")
+    discard verdict(sutCellPick, "cp_dead", sxUnsat)
+    replays(sutCellInput, "ci")
+    discard verdict(sutCellInput, "ci_dead", sxUnsat)
+    replays(sutCell32, "c3")
+    discard verdict(sutCell32, "c3_dead", sxUnsat)
+    replays(sutCellSeq, "cs")
+    discard verdict(sutCellSeq, "cs_dead", sxUnsat)
+    replays(sutCellLocal, "co")
+    discard verdict(sutCellLocal, "co_dead", sxUnsat)
 
   test "walker version floor":
     check symexWalkerVersion.parseInt >= 235

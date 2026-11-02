@@ -1153,6 +1153,10 @@ type
 const argCap* = 7
   ## RFC-0005 S8bt: the SKIP:NAME run count the agenda keeps exactly
 
+const execArgCap = 100
+  ## RFC-0005 S8cf (item 5): the run count a concrete call keeps (`int8`); the
+  ## languages and tables hold `argCap`, and past it the call is read at points
+
 const costStaleWhy* = "match()'s call accounting where pcre_exec.c's " &
   "ignore_skip_arg outlives an attempt (a SKIP:NAME's provisional run " &
   "number decides whether it calls match()), or past " & $argCap &
@@ -1174,7 +1178,12 @@ proc decidesAtFront[T](it: Item[T]): bool =
   decided(it) or
     it.kind == ikTerm and it.cond == cdNone and it.term == tmArgSkip
 
-proc sat(x: int): int8 = int8(min(x, argCap + 1))
+var concreteCall {.threadvar.}: bool
+  ## RFC-0005 S8cf: `execCore` holds the SKIP:NAME count exactly (`execArgCap`)
+
+proc curArgCap(): int = (if concreteCall: execArgCap else: argCap)
+
+proc sat(x: int): int8 = int8(min(x, curArgCap() + 1))
 
 proc then(a, b: Cost): Cost =
   ## RFC-0005 S8bt. The calls of `a`, then those of `b`.
@@ -1191,7 +1200,7 @@ proc ckey[T](it: Item[T]): (int32, seq[Frame], seq[int32], Cond, int32,
 proc exempt(n: Nfa; st: int32; ac: int8): bool =
   ## RFC-0005 S8bt. A thread kept beside an identical one: pcre_exec.c runs
   ## both, and the SKIP:NAMEs the second runs count (`countArgs`).
-  n.countArgs and n.reachArg[st] and ac <= argCap
+  n.countArgs and n.reachArg[st] and ac <= curArgCap()
 
 proc withFrame(fs: seq[Frame]; f: Frame): seq[Frame] =
   for x in fs:
@@ -1555,8 +1564,8 @@ proc resolveBarrier[T](cur: var seq[Item[T]]; costs = false;
     return true
   of tmArgSkip, tmBarrier:
     let counted = f.ac > 0     # 0: not counted, never ignored
-    if counted and f.ac > argCap and f.stl > argCap or
-       costs and f.ac > argCap:
+    if counted and f.ac > curArgCap() and f.stl > curArgCap() or
+       costs and f.ac > curArgCap():
       cur = @[Item[T](kind: ikTerm, term: tmStale)]
       return true
     if counted and f.ac <= f.stl:
@@ -3737,6 +3746,8 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
   # automaton is `buildNfa(.., peInterp)`'s).
   doAssert not (anchoredCall and n.engine != peInterp),
     "pcreExec: an anchored call on a JIT automaton"
+  concreteCall = true
+  defer: concreteCall = false
   let jit = n.engine == peJit837
   let (le, code) = limitEffect(n)
   doAssert le != leUnknown, "pcreExec: a limit whose effect is not computed"
@@ -3770,9 +3781,10 @@ proc execCore(n: Nfa; s: string; start: int; anchoredCall: bool;
     else:
       next = n.nextChar(s, x, jit)
     # RFC-0005 S8bt: pcre_exec.c's `ignore_skip_arg` for the next attempt
-    # (`nextIgn`); past `argCap` it is not modelled.
+    # (`nextIgn`). RFC-0005 S8cf: `argCap` bounds the automata; a concrete
+    # call keeps counting, to `execArgCap`.
     ign = r.ign
-    if ign > argCap: return ((pcreUnmodelled, 0, 0), 0)
+    if ign > execArgCap: return ((pcreUnmodelled, 0, 0), 0)
     if anchored or next > s.len: return ((-1, 0, 0), 0)
     x = next
     # RFC-0005 S8bt: the JIT resumes at a SKIP's landing without the CRLF

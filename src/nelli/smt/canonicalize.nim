@@ -248,6 +248,44 @@ const symexWalkerVersion* = "249"
   ## only where the callee may write it, and an index call with no `result`
   ## symbol is bound once. Verdicts change from a decline to exact.
   ##
+  ## RFC-0005 S8cb (2026-11-02) — S8bo onto batch 7, and S8bo's remainder.
+  ## Provisional (S8bz holds 241, S8cf 242). S8bo's items, each as landed on
+  ## this base: S8bs's `objectCellValue` is the object's cell (S8bo's second
+  ## copy dropped) and S8ar's parse of `p[]` its whole read and write; S8bl
+  ## models `swap`, `wasMoved` and `move`, S8bo's guard declines every other
+  ## bodiless magic; `addr s[i]` of a seq of objects is a live element cell
+  ## over S8bc's leaf-split element (`withElem` stores every leaf). 237 -> 243.
+  ## S8bo's remainder. (1), (4) `newSeq[T](n)` in a callee and a whole `p[]`
+  ## read were already exact on this base, and are pinned. (2) `addr t[i]` of a
+  ## positional tuple, and a field of a tuple or plain object, is a field cell
+  ## (`fieldCellOf`, it was `heUnsafeCast`). (3) So is an arm field of a
+  ## multi-axis case object, which dies only when the axis declaring it changes
+  ## arm (`fieldMemorySame`); `addr o` of one is a cell, and `sameSymVal` has
+  ## its arm. (5) The magics a walk can reach, each checked against native Nim:
+  ## `$` of bool, char, enum and int (a false `sxUnsat` on `$char`, `$enum` and
+  ## a negative `$x`), `ensureMove` (a false `sxUnsat` and `sxRaised`), unsigned
+  ## operators by name, `ashr`, `ord(bool)`, `chr`, `=dup` of a plain value,
+  ## `quit` in an expression, order on bool (a fresh symbol) and on string,
+  ## `@` of an open array, `high`/`low` of a value. (6) A replay's stack is the
+  ## calling thread's on any thread of Linux, macOS, FreeBSD, NetBSD and
+  ## DragonFly. (7) An abandoned replay contends only a replay whose footprint
+  ## meets its own (`replayFootprint`). `threadvarsReached` read only the first
+  ## routine of each signature (`routineKey`).
+  ## RFC-0005 S8bo (2026-10-02) — S8be's remainder. Provisional 216.
+  ## (1) `isNil(x)` lowers to `x == nil`; a nil comparison sees through a
+  ## conversion or cast to `pointer`. A `{.magic.}` routine with no
+  ## executable body that reaches the user-call fall-through declines (it
+  ## was walked as an empty body: a constant result).
+  ## (3) Any write of a seq by name kills its element cells, whatever it
+  ## writes (an equal value kept them live).
+  ## (4) `addr o.a` of a case object's arm field whose pointer may escape is
+  ## a field cell (`isNew.nAddrField`, `walkFieldCell`), kept equal to the
+  ## field until the object may change arm (it was `heUnsafeCast`).
+  ## (6) A replay started while an abandoned one still runs is neither
+  ## confirmed nor refuted (`roContended`). (7) A replay runs on a stack the
+  ## calling thread's size, with the calling thread's values of the
+  ## `{.threadvar.}`s the routine reaches, handed back after. A record with
+  ## a `when` classifies as an uninterpreted type (it failed the compile).
   ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
@@ -2785,7 +2823,7 @@ const symexWalkerVersion* = "249"
   ##   - `refEq` (1): the ordering-op (`</<=/>/>=`) mismatch arm on ref/ptr
   ##     operands.
   ##   - `lowerCmp`'s bool-ordering else (1): `flag1 < flag2` (Nim defines
-  ##     bool ordering).
+  ##     bool ordering). RFC-0005 S8cb modelled the order.
   ##   - `svLeafEq` (1): a composite (seq/table/set/variant/ref/etc.)
   ##     closure-environment field reached via `closureEq`'s structural
   ##     comparison.
@@ -6035,8 +6073,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # RFC-0005 S8be: an element cell's index.
     let ofIdx = if s.nAddrIdx != nil: ";ix=" & canonicalize(s.nAddrIdx, env)
                 else: ""
+    # RFC-0005 S8bo: a field cell's arm field.
+    let ofFld = if s.nAddrField.len > 0: ";fld=" & s.nAddrField else: ""
     let slot = bindLocal(env, s.nRetName)
-    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx & ">"
+    "St<Nw:$" & $slot & ";ty=" & canonicalize(s.nRefTy) & ofLocal & ofIdx &
+      ofFld & ">"
   of isDerefWrite:
     # Phase 15 R3. Content-address by family + pointee type + ptr expr + RHS.
     # No fresh let-name is bound (a write, not a read).

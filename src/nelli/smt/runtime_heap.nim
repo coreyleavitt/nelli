@@ -1492,6 +1492,67 @@ proc variantCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
                            heapStoreValue(fv, proto, sl.ty), sl.ty):
       p.heaps[c.key] = c.arr
 
+proc multiVariantCellValue(ctx: Z3Context; p: Path; ty: IRType;
+                           refAst: Z3AnyAst): SymVal =
+  ## RFC-0005 S8cb (item 3). The multi-axis case object held at `refAst` on
+  ## `p`: the union of its axis views' heaps (`mvAxisView`), which `p[].f` reads
+  ## and writes.
+  var scratchPC: seq[Z3Bool]
+  result = allocateSym(ty, "__addrCellProto", scratchPC)
+  let refSort = allocRefSort(ctx, ty)
+  for xi in 0 ..< ty.mvAxes.len:
+    let view = mvAxisView(ty, xi)
+    for sl in variantSlots(view):
+      let cell = heapCellArrays(ctx, p, sl.key, refSort, sl.ty, sl.variantTy)
+      let v = heapCellSelect(ctx, cell, refAst, sl.ty)
+      case sl.kind
+      of 'd':
+        var d = new SymVal
+        d[] = v
+        result.mvAxes[xi].disc = d
+      of 'p':
+        let i = result.mvPlainFieldNames.find(sl.name)
+        if i >= 0: result.mvPlainFields[i] = v
+      else:
+        if result.mvAxes[xi].armFieldNames.hasKey(sl.ord):
+          let i = result.mvAxes[xi].armFieldNames[sl.ord].find(sl.name)
+          if i >= 0: result.mvAxes[xi].armFields[sl.ord][i] = v
+
+proc multiVariantCellStore(ctx: Z3Context; p: Path; ty: IRType;
+                           refAst: Z3AnyAst; v: SymVal) =
+  ## RFC-0005 S8cb (item 3). Store the multi-axis case object `v` into its cell
+  ## at `refAst` on `p`, heap by heap (`multiVariantCellValue`'s).
+  let refSort = allocRefSort(ctx, ty)
+  for xi in 0 ..< ty.mvAxes.len:
+    let view = mvAxisView(ty, xi)
+    for sl in variantSlots(view):
+      var fv: SymVal
+      var have = false
+      case sl.kind
+      of 'd':
+        if v.mvAxes[xi].disc != nil:
+          fv = v.mvAxes[xi].disc[]
+          have = true
+      of 'p':
+        let i = v.mvPlainFieldNames.find(sl.name)
+        if i >= 0 and i < v.mvPlainFields.len:
+          fv = v.mvPlainFields[i]
+          have = true
+      else:
+        if v.mvAxes[xi].armFieldNames.hasKey(sl.ord):
+          let i = v.mvAxes[xi].armFieldNames[sl.ord].find(sl.name)
+          if i >= 0 and v.mvAxes[xi].armFields.hasKey(sl.ord) and
+             i < v.mvAxes[xi].armFields[sl.ord].len:
+            fv = v.mvAxes[xi].armFields[sl.ord][i]
+            have = true
+      if not have: continue
+      let cell = heapCellArrays(ctx, p, sl.key, refSort, sl.ty, sl.variantTy)
+      var scratchPC: seq[Z3Bool]
+      let proto = allocateSym(sl.ty, "__addrCellProto", scratchPC)
+      for c in heapCellStore(ctx, cell, refAst,
+                             heapStoreValue(fv, proto, sl.ty), sl.ty):
+        p.heaps[c.key] = c.arr
+
 proc objectCellValue(ctx: Z3Context; p: Path; ty: IRType;
                      refAst: Z3AnyAst): SymVal =
   ## RFC-0005 S8bs. The object (a `fieldSplitPointee` tuple) held at
@@ -1531,6 +1592,7 @@ proc addrCellValue(ctx: Z3Context; p: Path; ty: IRType;
   ## frame or a callee's) never reached it, and a write to it by name never
   ## reached the pointer.
   if ty.kind == itVariant: return variantCellValue(ctx, p, ty, refAst)
+  if ty.kind == itMultiVariant: return multiVariantCellValue(ctx, p, ty, refAst)
   if fieldSplitPointee(ty): return objectCellValue(ctx, p, ty, refAst)
   let cell = heapCellArrays(ctx, p, refPointeeTypeId(ty), allocRefSort(ctx, ty),
                             ty)
@@ -1552,6 +1614,9 @@ proc addrCellStore(ctx: Z3Context; p: Path; ty: IRType; refAst: Z3AnyAst;
   if ty.kind == itVariant:   # RFC-0005 S8be
     if v.kind == svVariant: variantCellStore(ctx, p, ty, refAst, v)
     return variantCellValue(ctx, p, ty, refAst)
+  if ty.kind == itMultiVariant:   # RFC-0005 S8cb
+    if v.kind == svMultiVariant: multiVariantCellStore(ctx, p, ty, refAst, v)
+    return multiVariantCellValue(ctx, p, ty, refAst)
   if fieldSplitPointee(ty):   # RFC-0005 S8bs
     objectCellStore(ctx, p, ty, refAst, v)
     return objectCellValue(ctx, p, ty, refAst)
@@ -1733,8 +1798,10 @@ proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
           "RFC-0005 S8be: a pointer dereferenced here may hold the address " &
                "of a seq element whose memory Nim may have freed (the seq " &
                "was resized or assigned whole since `addr` took it, or its " &
-               "routine returned), or of a returned routine's variable; the " &
-               "walk does not model freed memory (feUnsupportedOp)")
+               "routine returned), of an arm field of a case object that " &
+               "may have changed arm since (RFC-0005 S8bo), or of a " &
+               "returned routine's variable; the walk does not model freed " &
+               "memory (feUnsupportedOp)")
     result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
   result.add forkPath(p, p.pc & @[not anyHit], p.env)
 
@@ -1764,7 +1831,7 @@ proc walkAddrCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     # RFC-0005 S8be: a case object's cell is its field-split heaps
     # (`variantSlots`), as a `ref` to one is.
     if ty.kind notin {itInt, itBool, itFloat32, itFloat64, itString, itTuple,
-                      itSeq, itVariant}:
+                      itSeq, itVariant, itMultiVariant}:
       why = "of a variable of type " & $ty
     elif local in w.frame.outerNames or isGlobalEnvName(local):
       why = "of a variable an enclosing routine owns"
@@ -1856,7 +1923,9 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     var addrAst = newRef
     for k in countdown(child.elemCells.high, 0):
       let e = child.elemCells[k]
-      if e.frame != w.frame.frameId or e.root != root or e.dead: continue
+      if e.frame != w.frame.frameId or e.root != root or e.dead or
+         e.field.len > 0:
+        continue
       let same = idx == e.idx
       # RFC-0005 S8ca: an index equal (or unequal) by its terms picks the
       # older cell (or not) outright: the pointer is then the cell's own
@@ -1872,6 +1941,165 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     discard addrCellStore(ctx, child, ty, newRef, seqElemAt(env2[root], idx))
     env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: addrAst,
                                  ptrFamily: true, ptrPointee: ty)
+    child.env = env2
+    result.add drainPendingLowerEffects(child)
+
+proc tupleFieldIx(v: SymVal; field: string): int =
+  ## RFC-0005 S8cb. The index of field `field` of the tuple `v`: `#i` is the
+  ## positional `t[i]`. -1 for none.
+  if field.len > 1 and field[0] == '#':
+    let i = parseInt(field[1 .. ^1])
+    return (if i < v.fields.len: i else: -1)
+  v.fieldNames.find(field)
+
+proc armFieldTags(v: SymVal; field: string): seq[int] =
+  ## RFC-0005 S8cb. The arms of the case object `v` declaring `field`.
+  if v.kind == svVariant:
+    for t, names in v.vArmFieldNames:
+      if field in names: result.add t
+  elif v.kind == svMultiVariant:
+    for ax in v.mvAxes:
+      for t, names in ax.armFieldNames:
+        if field in names: result.add t
+
+proc armFieldValue(v: SymVal; field: string; tags: seq[int]): SymVal =
+  ## RFC-0005 S8bo. Arm field `field` of the case object `v`, declared by
+  ## the arms `tags`: the slot of the arm `v`'s discriminator selects (an
+  ## `ite` over them; one arm, its slot). RFC-0005 S8cb: of a multi-axis one,
+  ## over the discriminator of the axis declaring it; of a tuple, its field.
+  if v.kind == svTuple:
+    return v.fields[tupleFieldIx(v, field)]
+  var vals: seq[(int, SymVal)]
+  var disc: SymVal
+  if v.kind == svMultiVariant:
+    for ax in v.mvAxes:
+      var inAxis = false
+      for t in tags:
+        if ax.armFieldNames.hasKey(t):
+          let i = ax.armFieldNames[t].find(field)
+          if i >= 0:
+            vals.add (t, ax.armFields[t][i])
+            inAxis = true
+      if inAxis:
+        disc = ax.disc[]
+        break
+  else:
+    disc = v.vDisc[]
+    for t in tags:
+      if v.vArmFieldNames.hasKey(t):
+        let i = v.vArmFieldNames[t].find(field)
+        if i >= 0: vals.add (t, v.vArmFields[t][i])
+  result = vals[^1][1]
+  for k in countdown(vals.len - 2, 0):
+    result = iteSV(variantDiscEq(disc, int64(vals[k][0])), vals[k][1], result)
+
+proc withArmField(v: SymVal; field: string; tags: seq[int];
+                  x: SymVal): SymVal =
+  ## RFC-0005 S8bo. The case object `v` with arm field `field` set to `x` in
+  ## every arm of `tags` (as `lowerVariantFieldSet` writes it). RFC-0005 S8cb:
+  ## as `armFieldValue`.
+  result = v
+  if v.kind == svTuple:
+    result.fields[tupleFieldIx(v, field)] = x
+  elif v.kind == svMultiVariant:
+    for xi in 0 ..< result.mvAxes.len:
+      for t in tags:
+        if result.mvAxes[xi].armFieldNames.hasKey(t):
+          let i = result.mvAxes[xi].armFieldNames[t].find(field)
+          if i >= 0: result.mvAxes[xi].armFields[t][i] = x
+  else:
+    for t in tags:
+      if result.vArmFieldNames.hasKey(t):
+        let i = result.vArmFieldNames[t].find(field)
+        if i >= 0: result.vArmFields[t][i] = x
+
+proc fieldMemorySame(a, b: SymVal; field: string): bool =
+  ## RFC-0005 S8cb. A field cell of `field` still names the same memory from
+  ## the object `b` to the object `a`: its discriminator is the same term (the
+  ## arm's memory is reused), the discriminator of the axis declaring it for a
+  ## multi-axis object (the other axes' are independent, ADR-0003 D1). A
+  ## tuple's fields never move.
+  if a.kind != b.kind: return false
+  case a.kind
+  of svTuple: true
+  of svVariant:
+    a.vDisc != nil and b.vDisc != nil and sameSymVal(a.vDisc[], b.vDisc[])
+  of svMultiVariant:
+    if a.mvAxes.len != b.mvAxes.len: return false
+    for xi in 0 ..< a.mvAxes.len:
+      var inAxis = false
+      for _, names in a.mvAxes[xi].armFieldNames:
+        if field in names: inAxis = true
+      if inAxis:
+        return a.mvAxes[xi].disc != nil and b.mvAxes[xi].disc != nil and
+               sameSymVal(a.mvAxes[xi].disc[], b.mvAxes[xi].disc[])
+    false
+  else: false
+
+proc walkFieldCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bo. `addr o.a` of an arm field (`isNew` with `nAddrOf = o`,
+  ## `nAddrField = a`; the parser checked the arm just before): bind
+  ## `stmt.nRetName` to the field's cell -- the one it already has in this
+  ## frame (`Path.elemCells`), else a fresh `ptr`, distinct from every other
+  ## address and from nil, holding the field. The walk then keeps the field
+  ## and the heap at the cell equal (`syncElemCells`) until the object may
+  ## change arm, when the pointer names another arm's memory and the cell
+  ## dies (a dereference that may reach it declines). Declined
+  ## (`feUnsupportedOp`) as `walkElemCell` declines: an object an enclosing
+  ## routine owns, or one a closure captures. Before S8bo such a pointer
+  ## that could escape was `heUnsafeCast`.
+  let ctx = w.z3
+  let ty = stmt.nRefTy.ptrPointeeTy
+  let root = stmt.nAddrOf
+  let field = stmt.nAddrField
+  let typeId = refPointeeTypeId(ty)
+  for p in paths:
+    if w.shouldStop: return
+    var why = ""
+    var tags: seq[int]
+    if root in w.frame.outerNames or isGlobalEnvName(root):
+      why = "of a field of an object an enclosing routine owns"
+    elif not p.env.hasKey(root) or
+         p.env[root].kind notin {svVariant, svMultiVariant, svTuple}:
+      why = "of a field of an object this frame does not hold"
+    else:
+      for (cl, _) in w.frame.capCells:
+        if cl == root: why = "of a field of an object a closure captures"
+      tags = armFieldTags(p.env[root], field)
+      if why.len == 0 and tags.len == 0 and
+         (p.env[root].kind != svTuple or tupleFieldIx(p.env[root], field) < 0):
+        why = "of a field no arm of the object holds"
+    var known = -1
+    if why.len == 0:
+      for k, e in p.elemCells:
+        if e.frame == w.frame.frameId and e.root == root and
+           e.field == field and not e.dead:
+          known = k
+    if known >= 0:
+      var env1 = p.env
+      env1[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: p.elemCells[known].refAst,
+                                   ptrFamily: true, ptrPointee: ty)
+      result.add forkPath(p, p.pc, env1)
+      continue
+    let refSort = allocRefSort(ctx, ty)
+    var child = forkPath(p, p.pc, p.env)
+    let newRef = freshRef(ctx, refSort, typeId, child)
+    assertFreshness(ctx, child, typeId, newRef, w.settings)
+    var env2 = child.env
+    env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
+                                 ptrFamily: true, ptrPointee: ty)
+    if why.len > 0:
+      child.env = env2
+      let d = w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bo: `addr " & displayName(root) & "." & field & "` " &
+             why & " is not modelled: the pointer is not kept equal to the " &
+             "field (feUnsupportedOp)")
+      result.add forkPathTainted(child, child.pc, child.env, d)
+      continue
+    child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,
+                                 root: root, ty: ty, field: field, tags: tags)
+    discard addrCellStore(ctx, child, ty, newRef,
+                          armFieldValue(env2[root], field, tags))
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
@@ -3596,6 +3824,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isNew:
     if stmt.nAddrIdx != nil:
       return walkElemCell(stmt, paths, w)   # RFC-0005 S8be
+    if stmt.nAddrField.len > 0:
+      return walkFieldCell(stmt, paths, w)  # RFC-0005 S8bo
     if stmt.nAddrOf.len > 0:
       return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:

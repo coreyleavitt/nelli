@@ -14,7 +14,7 @@
 ##       never a clean `sxSat` for an S7 SUT;
 ##   (e) structural -- the solver-sink drain list, the closure-sink funnel,
 ##       the error-sink -> run-channel map, and the walker version floor.
-import std/[unittest, sequtils, macros, strutils, os]
+import std/[unittest, sequtils, macros, strutils, os, sets]
 import nelli/symex
 import nelli/smt/types
 import nelli/smt/runtime
@@ -100,11 +100,25 @@ proc s7InlineLive(x: int) =
   if r != x + 2:
     symexTarget("s7_inline_live")
 
+# RFC-0005 S8cb: an untouched multi-axis result with no modelled zero is a
+# fresh symbol per call (this was bool ordering until the walker modelled it).
+type
+  S7FreshKind = enum s7fkA, s7fkB
+  S7FreshResult = object
+    case k: S7FreshKind
+    of s7fkB: b: int
+    else: a: HashSet[string]
+    case j: S7FreshKind
+    of s7fkA: c: int
+    of s7fkB: d: int
+
+proc s7FreshResult(a: bool): S7FreshResult = discard a
+
 proc s7UncertainLive(a, b: bool) =
-  ## The closure body's only arm is spurious-tainted (bool ordering is a
-  ## fresh symbol), so it is dropped from the ground axioms
-  ## (`ceClosureBodyUncertain`): the call's result is free on that arm.
-  let f = proc(p, q: bool): bool = p < q
+  ## The closure body's only arm is spurious-tainted (a fresh symbol), so it
+  ## is dropped from the ground axioms (`ceClosureBodyUncertain`): the call's
+  ## result is free on that arm.
+  let f = proc(p, q: bool): bool = s7FreshResult(p).k == s7fkB and q
   if f(a, b):
     symexTarget("s7_uncertain_live")
 

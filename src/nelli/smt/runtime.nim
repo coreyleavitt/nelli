@@ -22262,27 +22262,30 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         if env2.hasKey(cKey) and
            not sameSymVal(addrCellValue(ctx, q, e.ty, e.refAst), env2[cKey]):
           written.add k
-      if sNow.kind == svVariant:
+      if sNow.kind in {svVariant, svMultiVariant, svTuple}:
         # RFC-0005 S8bo: a case object's field cells. A statement that may
         # have changed its arm (the discriminator is another term) kills
         # them: the pointer names another arm's memory. Otherwise the side
         # that changed wins, as for an element: a write by name (of the
         # field, or of the whole object in the same arm, whose memory Nim
         # reuses) reaches the cell, a write through the pointer the field.
+        # RFC-0005 S8cb: per cell, as a multi-axis object's other axes keep
+        # their memory (`fieldMemorySame`); a tuple's never moves.
         let snapV = if env2.hasKey(sKey): env2[sKey] else: sNow
-        if seqCh and (snapV.kind != svVariant or snapV.vDisc == nil or
-                      sNow.vDisc == nil or
-                      not sameSymVal(sNow.vDisc[], snapV.vDisc[])):
-          for k in ks:
-            if q.elemCells[k].root == root: q.elemCells[k].dead = true
-          continue
+        var live: seq[int]
+        for k in ks:
+          if q.elemCells[k].root != root: continue
+          if seqCh and not fieldMemorySame(sNow, snapV, q.elemCells[k].field):
+            q.elemCells[k].dead = true
+          else:
+            live.add k
         if seqCh:
-          if written.len > 0 and stmt.kind != isCall and
-             displayName(root) notin clash:
-            clash.add displayName(root)
-          for k in ks:
+          for k in written:
+            if k in live and stmt.kind != isCall and
+               displayName(root) notin clash:
+              clash.add displayName(root)
+          for k in live:
             let e = q.elemCells[k]
-            if e.root != root: continue
             discard addrCellStore(ctx, q, e.ty, e.refAst,
                                   armFieldValue(sNow, e.field, e.tags))
         else:
@@ -22349,7 +22352,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
   for k in ks:
     let e = q.elemCells[k]
     if e.field.len > 0 and env2.hasKey(e.root) and
-       env2[e.root].kind == svVariant:
+       env2[e.root].kind in {svVariant, svMultiVariant, svTuple}:
       # RFC-0005 S8bo: a field cell. The object changed arm since the
       # raising statement began (its innermost snapshot): the cell dies;
       # else the field takes the cell's value.
@@ -22363,8 +22366,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
             bestV = d
             snapV = v
       let cur = env2[e.root]
-      if snapV.kind != svVariant or snapV.vDisc == nil or cur.vDisc == nil or
-         not sameSymVal(cur.vDisc[], snapV.vDisc[]):
+      if not fieldMemorySame(cur, snapV, e.field):
         q.elemCells[k].dead = true
         continue
       env2[e.root] = withArmField(cur, e.field, e.tags,
@@ -22853,8 +22855,20 @@ proc sameSymVal(a, b: SymVal): bool =
       if not b.vArmFields.hasKey(tag) or not allSame(fs, b.vArmFields[tag]):
         return false
     true
-  of svMultiVariant:
-    false   # no identity arm: conservatively "changed"
+  of svMultiVariant:   ## RFC-0005 S8cb
+    if not allSame(a.mvPlainFields, b.mvPlainFields) or
+       a.mvAxes.len != b.mvAxes.len:
+      return false
+    for xi in 0 ..< a.mvAxes.len:
+      if a.mvAxes[xi].disc == nil or b.mvAxes[xi].disc == nil or
+         not sameSymVal(a.mvAxes[xi].disc[], b.mvAxes[xi].disc[]) or
+         a.mvAxes[xi].armFields.len != b.mvAxes[xi].armFields.len:
+        return false
+      for tag, fs in a.mvAxes[xi].armFields.pairs:
+        if not b.mvAxes[xi].armFields.hasKey(tag) or
+           not allSame(fs, b.mvAxes[xi].armFields[tag]):
+          return false
+    true
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;

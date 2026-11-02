@@ -5537,7 +5537,7 @@ proc lowerElemCell(e, root, idx: NimNode; preamble: var seq[IRStmt];
                       addrIdx = mkVar(ix))
   mkVar(cell)
 
-proc armFieldCellOf(e: NimNode): tuple[root, lv: NimNode; field: string] =
+proc fieldCellOf(e: NimNode): tuple[root, lv: NimNode; field: string] =
   ## RFC-0005 S8bo. `e` spelled `addr o.a` (through conversions, and through
   ## a `var` formal's hidden indirection) where `o` is a variable, parameter
   ## or `result` of a routine of a case-object type and `a` a field of one
@@ -5546,31 +5546,62 @@ proc armFieldCellOf(e: NimNode): tuple[root, lv: NimNode; field: string] =
   ## and the walker keeps the field and the cell equal until the object may
   ## change arm. A pointer that stays local is the S8be alias instead
   ## (`elemAddrNode`'s arm step).
+  ## RFC-0005 S8cb (items 2, 3): or an arm field of a multi-axis case object,
+  ## or a field of a tuple or a plain object: `addr o.a`, and `addr t[1]` of a
+  ## positional tuple (field `#1`), whose memory never moves.
   let lv = addrActualLvalue(e)
-  if lv == nil or lv.kind != nnkCheckedFieldExpr or lv.len < 1 or
-     lv[0].kind != nnkDotExpr or lv[0].len != 2 or
-     lv[0][1].kind notin {nnkSym, nnkIdent}:
+  if lv == nil: return
+  var t: NimNode
+  var field = ""
+  case lv.kind
+  of nnkCheckedFieldExpr:
+    if lv.len < 1 or lv[0].kind != nnkDotExpr or lv[0].len != 2 or
+       lv[0][1].kind notin {nnkSym, nnkIdent}:
+      return
+    t = lv[0][0]
+    field = strVal(lv[0][1])
+  of nnkDotExpr:
+    if lv.len != 2 or lv[1].kind notin {nnkSym, nnkIdent}: return
+    t = lv[0]
+    field = strVal(lv[1])
+  of nnkBracketExpr:
+    if lv.len != 2 or lv[1].kind notin {nnkIntLit .. nnkInt64Lit}: return
+    t = lv[0]
+    if isVarIndirection(t): t = t[0]
+    if t.getTypeImpl.kind != nnkTupleConstr and t.getTypeImpl.kind != nnkTupleTy:
+      return
+    field = "#" & $lv[1].intVal
+  else:
     return
-  var t = lv[0][0]
   if isVarIndirection(t): t = t[0]
   if t.kind != nnkSym or
      symKind(t) notin {nskVar, nskLet, nskParam, nskResult, nskForVar} or
      isModuleGlobal(t):
     return
   let oty = classifyType(t).ty
-  let field = strVal(lv[0][1])
-  if oty.kind != itVariant or field == oty.vDiscName or
-     field in oty.vPlainFieldNames:
+  case oty.kind
+  of itVariant:
+    if lv.kind != nnkCheckedFieldExpr or field == oty.vDiscName or
+       field in oty.vPlainFieldNames:
+      return
+  of itMultiVariant:
+    if lv.kind != nnkCheckedFieldExpr or field in oty.mvPlainFieldNames: return
+    for ax in oty.mvAxes:
+      if field == ax.discName: return
+  of itTuple:
+    if lv.kind == nnkCheckedFieldExpr: return
+  else:
     return
   (t, lv, field)
 
 proc lowerArmFieldCell(e, root, lv: NimNode; field: string;
                        preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
-  ## RFC-0005 S8bo. `addr o.a` (`armFieldCellOf`): the arm is checked where
+  ## RFC-0005 S8bo. `addr o.a` (`fieldCellOf`): the arm is checked where
   ## `addr` takes the field (a `FieldDefect` there, as Nim checks it), and
   ## the cell is the field's.
-  preamble.add mkLet(freshSynth(ctx, "armChk"), classifyType(lv).ty,
-                     parseExpr(lv, preamble, ctx))
+  if lv.kind == nnkCheckedFieldExpr:
+    preamble.add mkLet(freshSynth(ctx, "armChk"), classifyType(lv).ty,
+                       parseExpr(lv, preamble, ctx))
   let cell = freshSynth(ctx, "fieldCell")
   preamble.add mkNewT(cell, classifyType(e).ty, addrOf = strVal(root),
                       addrField = field)
@@ -7052,8 +7083,8 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         argIRs.add lowerElemCell(n[i], elc.root, elc.idx, preamble, ctx)
         continue
       # RFC-0005 S8bo: likewise an arm field of a routine's case object
-      # (its field cell, `armFieldCellOf`).
-      let fcl = armFieldCellOf(n[i])
+      # (its field cell, `fieldCellOf`).
+      let fcl = fieldCellOf(n[i])
       if escapes and fcl.root != nil and
          not addrActualMayAlias(n, i, addrLv, root, heapSteps, aliasConds):
         addrCells.setLen(addrCells.len - 1)
@@ -9417,7 +9448,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       return lowerElemCell(n, el.root, el.idx, preamble, ctx)
     # RFC-0005 S8bo: `addr o.a` of a routine's case object's arm field is
     # its field cell.
-    let fc = armFieldCellOf(n)
+    let fc = fieldCellOf(n)
     if fc.root != nil:
       return lowerArmFieldCell(n, fc.root, fc.lv, fc.field, preamble, ctx)
     let dummyTy = classifyType(n).ty
@@ -17303,10 +17334,10 @@ proc parseStmtInner(n: NimNode,
         # RFC-0005 S8be: so is `addr s[i]` of a routine's seq (its
         # element cell, `elemCellOf`).
         # RFC-0005 S8bo: and `addr o.a` of a case object's arm field (its
-        # field cell, `armFieldCellOf`).
+        # field cell, `fieldCellOf`).
         let ucReason = if addrCellLocal(valNode) != nil or
                           elemCellOf(valNode).root != nil or
-                          armFieldCellOf(valNode).root != nil: ""
+                          fieldCellOf(valNode).root != nil: ""
                        else: unsafeCastReason(valNode)
         if ucReason.len > 0:
           stmts.add ctx.declineUnsafeCast(

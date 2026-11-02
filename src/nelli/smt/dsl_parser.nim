@@ -546,7 +546,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"),
             newCall(bindSym"@", vtLit), newCall(bindSym"@", alLit),
             newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit),
-            newLit(e.ccVarLocs), newCall(bindSym"@", vpLit))
+            newLit(e.ccVarLocs), newCall(bindSym"@", vpLit),
+            # RFC-0005 S8cd: the declared result type.
+            (if e.ccRetTy.isNil: newCall(bindSym"IRType", newNilLit())
+             else: emitIRType(e.ccRetTy)))
   of iekSeqLit:           ## Phase 15 C4
     var elemsLit = newTree(nnkBracket)
     for c in e.seqLitElems: elemsLit.add emitExpr(c)
@@ -2016,6 +2019,10 @@ proc stmtMayWrite(s: IRStmt): bool =
     stmtMayWrite(s.elseBody)
   else: true
 
+func isLiteralIR(e: IRExpr): bool =
+  e == nil or e.kind in {iekIntLit, iekFloatLit, iekBoolLit, iekStrLit,
+                         iekNil, iekZeroValue, iekLambda}
+
 func isEagerIR(e: IRExpr): bool =
   ## RFC-0005 S8ax. Nim evaluates `e` where it stands, into a temporary: a
   ## closure application, or an overflow-checked `+`/`-`/`*` (`succ`/`pred`
@@ -2037,11 +2044,24 @@ func isEagerIR(e: IRExpr): bool =
      iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp,
      iekSeqNew:   # RFC-0005 S8bc, S8bi: `newSeq[T](n)` and kin, a call
     true
+  of iekBitSet:
+    # RFC-0005 S8cd. Measured on the C backend (`tsymex_rfc0005_s8cd_setorder_*`
+    # pins each against a run): a `{..}` naming a variable is built where
+    # it stands, whatever the domain. A set of at most 64 values is a C
+    # integer, so `+ - *`, `<=` and `<` are inline expressions; a larger
+    # one is an array, and those five run loops into a temporary. `==` and
+    # `in` stay inline at every size (a `memcmp`, a bit test), as `card`
+    # does, over an operand which may itself have been built eagerly.
+    case e.bsOp
+    of bsoLit:
+      for a in e.bsArgs:
+        if not isLiteralIR(a): return true
+      false
+    of bsoUnion, bsoDiff, bsoInter, bsoLe, bsoLt:
+      bitSetDomain(e.bsSetTy.bsElemTy).size > 64
+    of bsoCard: isEagerIR(e.bsArgs[0])
+    else: false
   else: false
-
-func isLiteralIR(e: IRExpr): bool =
-  e == nil or e.kind in {iekIntLit, iekFloatLit, iekBoolLit, iekStrLit,
-                         iekNil, iekZeroValue, iekLambda}
 
 proc lazyStmt(s: IRStmt): bool =
   ## RFC-0005 S8ax. `s` is part of an inline (lazy) operand: a read
@@ -7864,7 +7884,8 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
     for i in 1 ..< n.len:
       byValueLoc(n[i], i - 1, preamble, ctx, locs)
       byValueTouch(n[i], byValTouch)
-    return (e: mkClosureCall(calleeName, argIRs, touch = byValTouch, locs = locs),
+    return (e: mkClosureCall(calleeName, argIRs, touch = byValTouch, locs = locs,
+                             retTy = (if retVoid: nil else: classifyType(n).ty)),
             hoisted: false)
   let nArgs = n.len - 1
   proc isVarFormal(k: int): bool = k < varTys.len and varTys[k] != nil
@@ -8171,7 +8192,7 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       if a != k: identity = false
     if identity: aliasV = @[]
     mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV, locs,
-                  varSafe)
+                  varSafe, if retVoid: nil else: retTy)
   proc wrap(call: IRExpr; wbs: seq[IRStmt]): IRStmt =
     let l = mkLet(synth, retTy, call)
     if wbs.len == 0: l else: mkTry(l, @[], mkBlock(wbs))
@@ -9831,10 +9852,10 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
                of "<=": bsoLe
                of "<": bsoLt
                else: bsoEq
-      let l = parseAtomicOperand(n[1], preamble, ctx)
-      let mark = preamble.len
-      let r = parseAtomicOperand(n[2], preamble, ctx)
-      keepInlineRaiseOrder(l, n[1], mark, preamble, ctx)
+      # RFC-0005 S8cd: each operand read where Nim reads it, as a builtin
+      # binary operator's are: `(s + {x}) + f()` over a small set reads `s`
+      # after `f`'s write (see `isEagerIR`).
+      let (l, r) = parseOperandPair(n[1], n[2], preamble, ctx)
       return mkBitSet(op, @[l, r], setTy)
     # Phase 15 S8: `&` string concatenation. Intercept BEFORE binopForInfix
     # (which has no `&` case and would error). Only fire when BOTH operands
@@ -11337,10 +11358,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
       if calleeSym.kind == nnkSym and n[1].typeKind != ntyNone and
          classifyType(n[1]).ty.kind == itBitSet:
         let setTy = classifyType(n[1]).ty
-        let sIR = parseAtomicOperand(n[1], preamble, ctx)
-        let mark = preamble.len
-        let kIR = parseAtomicOperand(n[2], preamble, ctx)
-        keepInlineRaiseOrder(sIR, n[1], mark, preamble, ctx)
+        let (sIR, kIR) = parseOperandPair(n[1], n[2], preamble, ctx)   # RFC-0005 S8cd
         return mkBitSet(bsoContains, @[sIR, kIR], setTy)
     if (calleeSym.strVal == "contains" or calleeSym.strVal == "hasKey") and
        n.len == 3:
@@ -17598,7 +17616,14 @@ proc parseStmtInner(n: NimNode,
       of itSeq:
         # Desugar: var __iv = 0; while __iv < s.len: let x = s[__iv]; body; __iv += 1
         var preamble3: seq[IRStmt]
-        let seqIR = parseExpr(container, preamble3, ctx)
+        var seqIR = parseExpr(container, preamble3, ctx)
+        # RFC-0005 S8cd: a call's result is computed once, where the loop
+        # starts; the loop's reads are of the temporary, which `lower` can
+        # read as a container. The call is not re-run per iteration.
+        if irHasCall(seqIR):
+          let seqTmp = freshSynth(ctx, "fseq")
+          preamble3.add mkLet(seqTmp, recvCls.ty, seqIR)
+          seqIR = mkVar(seqTmp)
         let ivName = freshSynth(ctx, "iv")
         let initStmt = mkLet(ivName, intTy, mkIntLit(0))
         let lenExpr = mkSeqLen(seqIR)

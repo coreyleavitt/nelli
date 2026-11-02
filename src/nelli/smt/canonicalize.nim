@@ -214,6 +214,20 @@ const symexWalkerVersion* = "252"
   ## past the regex cap are read at points (`pointCheck`), `replace`'s facts
   ## cover verbs, limits, UTF and two bytes, and `strutils.count` lowers
   ## (`iekStrCount`). Provisional 242.
+  ## RFC-0005 S8cd (249; batch 9's 245 before it) -- precision over proc-value results and
+  ## globals, and one soundness fix. A call through a proc value with no
+  ## resolved target carries its return type (`ccRetTy`, in the key as
+  ## `;ret=`), so `f(k).len` lowers over a stand-in of that type and the path
+  ## declines on the unknown callee rather than on the receiver's kind; a
+  ## `for` over a call binds it once. A `Table`, `HashSet` or `set` result is
+  ## structured. A variable of a case-object type is entry-modelled
+  ## (`irTypeRefFree`). SOUNDNESS: `ptrTargets` binds a global the path has
+  ## only read to its entry value, so `let a = g; p[] = 7; if g != a` is no
+  ## longer a false `sxUnsat`. `isEagerIR` covers `iekBitSet`, by size as
+  ## measured, and a set operator's operands are ordered (`parseOperandPair`).
+  ## `recvValue` reads a receiver as one; each arm observes what it reads.
+  ## `seqLenCaps` leaves a leaf equated to a literal uncapped.
+  ##
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce
@@ -5838,6 +5852,7 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
       ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
       (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") &
+      (if e.ccRetTy.isNil: "" else: ";ret=" & canonicalize(e.ccRetTy)) &
       ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]

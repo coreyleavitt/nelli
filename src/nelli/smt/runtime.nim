@@ -2611,9 +2611,11 @@ func closureRetStructured(t: IRType): bool =
   ## `applyClosureGround` never reads it. RFC-0005 S8p widens it to every
   ## return type the funcSym range cannot carry or `symValFromRawAst` cannot
   ## wrap: a multi-variant, a tuple/object, a `string` and a `seq`. RFC-0005
-  ## S8s adds an `array` (`retBindEq` binds it element-wise).
+  ## S8s adds an `array` (`retBindEq` binds it element-wise). RFC-0005 S8cd
+  ## adds a `Table`, `HashSet` and `set` (`retBindEq`'s arms), so `f(k).len`
+  ## over a proc value of each resolves as a seq result's does.
   t != nil and t.kind in {itVariant, itMultiVariant, itTuple, itString, itSeq,
-                          itArray}
+                          itArray, itTable, itSet, itBitSet}
 
 var currentClosureBodies* {.threadvar.}: Table[
     tuple[siteHash: int64, declOrder: int], ClosureBody]
@@ -12209,6 +12211,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## facts (`nimLenFacts`). Only the terms: the facts are built where they
   ## are asserted, so they reach the walk's shared context only on that
   ## path (see `seqRangeFacts`' note on context cost).
+  ##
+  ## RFC-0005 S8cd: a leaf a root conjunct equates to a string literal
+  ## (`symexAssume(s == "abcdefghijkl")`) takes no cap. The cap bounds a
+  ## search, and that leaf has one value: every model holds it at the
+  ## literal's length, so its cap could only refute the query, reading as
+  ## a cap decline however the literal compares with `maxSeqLen`.
   let kinds = seqCapKinds()
   let capInt = mkInt(ctx, cap)
   proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
@@ -12236,6 +12244,23 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     while kindOf(ctx, src) == kinds.strExtract: src = unpackApp(src).args[0]
     if astId(ctx, src.raw) notin byteLeaves: return
     (true, ch)
+  var literalLeaves: HashSet[int]   # RFC-0005 S8cd
+  block:
+    var conjuncts: seq[Z3AnyAst]
+    for r in roots: conjuncts.add toAnyAst(r)
+    while conjuncts.len > 0:
+      let c = conjuncts.pop()
+      if getAstKind(c) != akApp: continue
+      let (decl, args) = unpackApp(c)
+      let name = declName(ctx, decl)
+      if name == "and":
+        for a in args: conjuncts.add a
+      elif name == "=" and args.len == 2:
+        for (leaf, other) in [(args[0], args[1]), (args[1], args[0])]:
+          if getSortKind(leaf) == skSeq and
+             Z3_is_string(ctx.raw, other.raw) and
+             kindOf(ctx, leaf) in [kinds.uninterp, kinds.select]:
+            literalLeaves.incl astId(ctx, leaf.raw)
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in roots: stack.add toAnyAst(r)
@@ -12251,7 +12276,8 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
       result.lens.add wrap[Z3Int](ctx, t.raw)
     if getSortKind(t) == skSeq and (k == kinds.uninterp or k == kinds.select):
       let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
-      result.caps.add lenT <= capInt
+      if id notin literalLeaves:   # RFC-0005 S8cd
+        result.caps.add lenT <= capInt
       result.lens.add lenT   # RFC-0005 S8ba
     elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
       let empty = mkString(ctx, "")
@@ -19051,6 +19077,24 @@ proc unwrittenDisc(sv: SymVal): string =
     ""
   else: ""
 
+proc observeRecvPart(p: Path; part: SymVal; w: var WalkCtx): Option[Degrade] =
+  ## RFC-0005 S8cd. A receiver arm reads `part` of its receiver (`recvValue`
+  ## observes none of it). An unwritten part taints `p` when its global's
+  ## entry value is modelled (`feGlobalHavoc`); any other is returned for the
+  ## arm to decline on.
+  let unwritten = unwrittenIn(part, simplified = true)
+  if unwritten.len == 0: return none(Degrade)
+  let d = w.degrade(unwrittenKind(unwritten), unwrittenMsg(unwritten))
+  if unwrittenKind(unwritten) != feGlobalHavoc: return some(d)
+  taintInPlace(p, d)
+  none(Degrade)
+
+func reassignReadsDisc(sv: SymVal; branches: seq[seq[int]]): bool =
+  ## RFC-0005 S8cd. Whether a discriminator assignment's branch-change check
+  ## depends on the old discriminator: not when one branch holds every tag
+  ## (one explicit group and no `else`), which no assignment can leave.
+  sv.kind != svVariant or branches.len != 1 or sv.vArmFields.hasKey(-1)
+
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -19918,8 +19962,18 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   ## read `Env` directly before, so a global receiver not yet written
   ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
   ## the statement (its `FieldDefect` was never forked).
+  ##
+  ## RFC-0005 S8cd: the receiver is read as one, not observed. An untouched
+  ## unwritten part (a field the statement does not reach, an element it
+  ## overwrites) does not taint the path; each arm observes the parts it
+  ## reads (`observeRecvPart`, `unwrittenDisc`). And a global of a known type
+  ## is read at that type (`vGlobalTy`, as a parsed read carries).
   if p.env.hasKey(name): return (p.env[name], p)
-  lowerInExpr(p, mkVar(name), w)
+  let recv = mkVar(name)
+  if w.statics.globals.hasKey(name):
+    recv.vGlobalTy = w.statics.globals[name].ty
+  lowerAsReceiver = true
+  lowerInExpr(p, recv, w)
 
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                      w: var WalkCtx): string =
@@ -20724,6 +20778,12 @@ proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
         placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
       survivors.add forkPathTainted(p, p.pc, p.env, d)
       continue
+    # RFC-0005 S8cd: the bounds check reads the length; the elements are
+    # untouched (`recvValue`).
+    let lenDecline = observeRecvPart(p, SymVal(kind: svInt, zi: recvSV.seqLen), w) # [placeholder-audited]
+    if lenDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc, p.env, lenDecline.get)
+      continue
     let intProto = SymVal(kind: svInt, zi: mkInt(0))
     let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
     for cp in drainScalarRaiseForks(idxP, w):
@@ -20823,10 +20883,22 @@ proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
       survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
       continue
     let lenZi = recvSV.seqLen # [placeholder-audited]
+    # RFC-0005 S8cd: `pop` reads the length and the last element, no other
+    # (`recvValue`).
+    let lenDecline = observeRecvPart(p, SymVal(kind: svInt, zi: lenZi), w)
+    if lenDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt),
+                                    lenDecline.get)
+      continue
     let emptyCond = not (lenZi > mkInt(0))
     discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
     let newLenZi = lenZi - mkInt(1)
     let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
+    let elemDecline = observeRecvPart(p, popped, w)
+    if elemDecline.isSome:
+      survivors.add forkPathTainted(p, p.pc & @[not emptyCond],
+                                    declinedPopEnv(p.env, stmt), elemDecline.get)
+      continue
     # N27 audit (item 1, round-6 fix round 3): rebinding the receiver after
     # a successful pop. `recvSV` was already declined above (this arm's own
     # `isUnsupportedFieldPlaceholder` check at the top of the `for p in
@@ -21110,7 +21182,8 @@ proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
     # (`recvValue`). The arm skipped it, so its `FieldDefect` was never
     # forked (a false `sxUnsat` on the raise).
     let (oldSV, p) = recvValue(p0, stmt.vrObjName, w)
-    if unwrittenDisc(oldSV).len > 0:
+    if unwrittenDisc(oldSV).len > 0 and   # RFC-0005 S8cd
+       reassignReadsDisc(oldSV, stmt.vrBranches):
       # RFC-0005 S8bw (item 2): a global whose discriminator no write
       # reached (another field was written first).
       # RFC-0005 batch 6: an S8as global's discriminator is its entry
@@ -21200,7 +21273,8 @@ proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
   for p0 in paths:
     # RFC-0005 batch 6: as `isVariantReassign`'s receiver (`recvValue`).
     let (oldSV, p) = recvValue(p0, stmt.vrsObjName, w)
-    if unwrittenDisc(oldSV).len > 0:
+    if unwrittenDisc(oldSV).len > 0 and   # RFC-0005 S8cd
+       reassignReadsDisc(oldSV, stmt.vrsBranches):
       # RFC-0005 S8bw (item 2): as `isVariantReassign` above.
       # RFC-0005 batch 6: an S8as global's discriminator is its entry
       # value, any of its type: the path is tainted and the reassignment
@@ -24542,18 +24616,26 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   let ctx = requireCurrentContext()
   # ---- 1. Resolve the callee to an svClosure (Invariant 3 on failure). ----
   if not env.hasKey(e.ccCallee) or env[e.ccCallee].kind != svClosure:
-    # RFC-0005 S7: `dcSubstituted` -- a fixed-name `int64` stand-in whatever
-    # the closure's return type, returned before the call's arguments are
-    # lowered (their raises are dropped). `closureDegrade` puts ⊤ on the
-    # consuming path, not only in the closure sink.
+    # RFC-0005 S7: `dcSubstituted` -- a stand-in returned before the call's
+    # arguments are lowered (their raises are dropped). `closureDegrade` puts
+    # ⊤ on the consuming path, not only in the closure sink.
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
     havocUnknownClosureEffects(e, env)   ## RFC-0005 S8bh, S8bn
-    # No semantics: a well-sorted-for-int stand-in so a downstream read does
-    # not crash.
-    var fresh: seq[Z3Bool]
-    return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
+    # No semantics: a stand-in of the declared result type (RFC-0005 S8cd; it
+    # was an `int64` whatever that type was, so `f(k).len` over a proc value
+    # with no target declined as `iekSeqLen: unsupported receiver kind` and
+    # `for x in f(k)` leaked its taint). Its allocation facts hold of every
+    # value of the type, so they join the closure axioms, which constrain
+    # nothing but this occurrence's own leaves.
+    var facts: seq[Z3Bool]
+    result = allocateSym((if e.ccRetTy.isNil: tInt(64, true) else: e.ccRetTy),
+                         freshDegradeName("__closureUnknownCallee"), facts)
+    for f in facts:
+      currentClosureCallAxioms.add f
+      currentClosureCallAxiomStrs.add $f
+    return result
   # RFC-0005 S9: the by-reference captures as they stand at THIS call.
   let clo = refreshByRefCaptures(env[e.ccCallee], env)
   # RFC-0005 S8as: the names this expression read before the call (its own

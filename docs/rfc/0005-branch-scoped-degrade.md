@@ -464,7 +464,7 @@ state = "done"
 [[slice]]
 id = "S8cb"
 title = "S8bo onto batch 6 (item 5 on the leaf-split base) and S8bo's remainder: newSeq[T](n) in a callee, positional-tuple address cells, multi-variant arm field cells, p[] field range facts, unmodelled magics, replay stack fidelity on non-main threads/other OSes, a hung replay poisoning later ones"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -13295,3 +13295,91 @@ corpus shard passing; d64b7ee superseded them.
   through a proc value in a by-address actual's index (`gs[fv()]`), or a
   generic's whose `result` has another type, has no typed symbol to mark;
   its write-back declines rather than evaluate it again.
+
+**As landed (S8cb, walker 243 provisional) — S8bo onto batch 7, and S8bo's
+remainder.** Suites `tsymex_rfc0005_s8cb_magics`, `_tostr`, `_cells`, `_replay`.
+Every pin was run RED on the merge of S8bo first, except where noted.
+
+*Wrong verdicts found and fixed.*
+- **`$c` of a `char` and `$e` of an enum were the decimal of the ordinal**: a
+  false `sxUnsat`, `errors` empty, on `$c == "a"`.
+- **`$x` of a negative `int` had no sign**: a false `sxUnsat` on `$x == "-1"`,
+  and `$x == ""` a false `sxSat`.
+- **`ensureMove(x)` had the constant zero result**: a false `sxUnsat` and a
+  false `sxRaised`.
+- **`threadvarsReached` read only the first routine of each signature**:
+  `signatureHash` is the same for every routine of a module with the same
+  parameter types, so a thread variable named behind one was not carried in, and
+  the replay refuted a real hit (`routineKey`).
+
+*Items.*
+1. `newSeq[T](n)` in a callee was already exact on this base; pinned (no RED).
+2. `addr t[i]` of a positional tuple, and `addr o.a` of a tuple or plain object,
+   is a field cell (`fieldCellOf`, `walkFieldCell`). It was `heUnsafeCast` or
+   `nnkAddr` when the pointer could escape.
+3. S8bo's field cell takes a multi-axis case object's arm field too. The cell
+   dies only when the discriminator of the axis declaring the field changes
+   (`fieldMemorySame`); the other axes' arms are independent memory (ADR-0003
+   D1). `addr o` of the whole object is a cell, `multiVariantCellValue` and
+   `multiVariantCellStore` over the axis views. `sameSymVal` has an arm for it
+   (it was "changed", always, so every statement looked like a rearm).
+4. A whole `p[]` read's range facts were already asserted on this base; pinned
+   for a nested object, an array field, an enum range, a named tuple, `ref` and
+   `ptr` (no RED).
+5. The magics a walk can reach, each checked against native Nim: `$`/`repr` of
+   bool, char, enum, `int`, `int64` (`parseToStr`); `ensureMove`; `+%`-style and
+   by-name unsigned operators; `ashr`; `ord(bool)`; `chr`; `=dup` of a plain
+   value; `=sink` as a statement; `quit` in an expression, ending the path;
+   `@` of an open array; `high`/`low` of a value; order on `bool` (a fresh symbol
+   since S6b) and on `string`; `debugEcho`. The stale fresh-symbol fixtures of S2,
+   S6b, S7 and S10 moved to other vehicles (an unwritten global; a result with no
+   modelled zero).
+   Remainder, declined, each with its reason: `=destroy`, `=trace` and
+   `shallowCopy` (S8bl's table); `deepCopy` (needs `--deepcopy:on`); `<` and `<=`
+   of `pointer` (no address order, and they arrive through a `cast`); `finished`
+   (an iterator value, ADR-0014 D6); `GC_ref`/`GC_unref` under ORC (not magics:
+   casts in their bodies); a `cstring` (`isNil`, `$`, no model of the type);
+   compile-time magics (folded before the walk); `=dup` of an object or tuple (a
+   user hook may run); `repr` of anything but the above (the stdlib's body does
+   not end in budget); `$` of a float (`iekStrUnsupported`), and of a holey
+   enum's invalid value; `math.toInt` is not a magic and is not modelled.
+6. `callerStackSize` reads the thread's real stack on every thread:
+   `pthread_getattr_np` on Linux, `pthread_get_stacksize_np` on macOS,
+   `pthread_attr_get_np` on FreeBSD, NetBSD and DragonFly; the main thread keeps
+   `RLIMIT_STACK`. `runOnStack`'s `makecontext` path covers all of them. Pinned on
+   Linux with a raw 16 MiB `pthread_create` running a 3 MiB frame (a SIGSEGV
+   before). The others were only semantically checked (`--os:<x> --compileOnly`):
+   no host for them, and their C has never been compiled. OpenBSD has no
+   `makecontext` and stays on Nim's 2 MiB thread stack.
+7. An abandoned replay contends a later one only when they may share state. Each
+   replay carries a `ReplayFootprint`, read at macro time (`replayFootprint`): the
+   module-level variables, `{.global.}`s and program thread variables (copied in,
+   so shared by what they refer to), and the stdlib's C routines by name, named in
+   code it may run, transitively through the stdlib. It is open, and contends
+   everything, on a method, a proc value the program holds, a foreign routine or
+   `emit` of the program, a routine capturing a caller's variables. The scan stops
+   at Nim's runtime (`lib/system*`, its atomics) and nelli's markers. A direct
+   caller of `runReplayBounded` is open by default. The abandoned thread cannot be
+   stopped: it runs until the process exits.
+   The scan cannot see (residual, SOUNDNESS): a hook the compiler inserts
+   (a program's `=destroy` naming a variable); state shared behind two different
+   C routines (`srand`, `rand`); a hook variable of Nim's runtime the program sets
+   and the runtime reads.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: `{.cast(uncheckedAssign).}: o.k = v` is a false `sxRaised`.** The
+  block's pragma is dropped, so the walker forks the `FieldDefect` a checked
+  discriminator assignment raises; the native run does not raise.
+- **SOUNDNESS: a replay of an unmodelled path calling the real `quit` ends the
+  process.** It was so before this slice; item 5's model covers the modelled path.
+- **PRECISION: `s[1].b = 7` and `s[1][0] = x`, a field of a seq's element by
+  name, is "unsupported nnkAsgn shape".** S8bz owns pointers into a seq of
+  aggregates.
+- **PRECISION: `t == (a, b)` of a whole tuple declines** (`eqBV` on a tuple value);
+  field by field is exact.
+- **PRECISION: a local `let b = addr o.y` (S8be's alias path) declines on any
+  whole assignment of `o`**, even in the same arm of the axis; the field cell of
+  an escaping pointer is exact there.
+- **PRECISION: a `type` section in a routine's body declines.**
+- **PRECISION: a parameter pragma (`x {.inject.}: int`) fails the compile** in
+  `collectStringBackedByteSeqParamsImpl`.

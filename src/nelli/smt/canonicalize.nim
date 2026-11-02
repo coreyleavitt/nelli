@@ -211,6 +211,22 @@ const symexWalkerVersion* = "243"
   ## models `swap`, `wasMoved` and `move`, S8bo's guard declines every other
   ## bodiless magic; `addr s[i]` of a seq of objects is a live element cell
   ## over S8bc's leaf-split element (`withElem` stores every leaf). 237 -> 243.
+  ## S8bo's remainder. (1), (4) `newSeq[T](n)` in a callee and a whole `p[]`
+  ## read were already exact on this base, and are pinned. (2) `addr t[i]` of a
+  ## positional tuple, and a field of a tuple or plain object, is a field cell
+  ## (`fieldCellOf`, it was `heUnsafeCast`). (3) So is an arm field of a
+  ## multi-axis case object, which dies only when the axis declaring it changes
+  ## arm (`fieldMemorySame`); `addr o` of one is a cell, and `sameSymVal` has
+  ## its arm. (5) The magics a walk can reach, each checked against native Nim:
+  ## `$` of bool, char, enum and int (a false `sxUnsat` on `$char`, `$enum` and
+  ## a negative `$x`), `ensureMove` (a false `sxUnsat` and `sxRaised`), unsigned
+  ## operators by name, `ashr`, `ord(bool)`, `chr`, `=dup` of a plain value,
+  ## `quit` in an expression, order on bool (a fresh symbol) and on string,
+  ## `@` of an open array, `high`/`low` of a value. (6) A replay's stack is the
+  ## calling thread's on any thread of Linux, macOS, FreeBSD, NetBSD and
+  ## DragonFly. (7) An abandoned replay contends only a replay whose footprint
+  ## meets its own (`replayFootprint`). `threadvarsReached` read only the first
+  ## routine of each signature (`routineKey`).
   ## RFC-0005 S8bo (2026-10-02) — S8be's remainder. Provisional 216.
   ## (1) `isNil(x)` lowers to `x == nil`; a nil comparison sees through a
   ## conversion or cast to `pointer`. A `{.magic.}` routine with no
@@ -2687,7 +2703,7 @@ const symexWalkerVersion* = "243"
   ##   - `refEq` (1): the ordering-op (`</<=/>/>=`) mismatch arm on ref/ptr
   ##     operands.
   ##   - `lowerCmp`'s bool-ordering else (1): `flag1 < flag2` (Nim defines
-  ##     bool ordering).
+  ##     bool ordering). RFC-0005 S8cb modelled the order.
   ##   - `svLeafEq` (1): a composite (seq/table/set/variant/ref/etc.)
   ##     closure-environment field reached via `closureEq`'s structural
   ##     comparison.

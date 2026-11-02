@@ -61,7 +61,7 @@ proc isStdlibDecl*(sym: NimNode): bool =
   impl.lineInfoObj.filename.replace('\\', '/').toLowerAscii.startsWith(
     nimLibDirForCmp)
 
-const userRoutineSymKinds = {nskProc, nskFunc, nskMethod, nskConverter,
+const userRoutineSymKinds* = {nskProc, nskFunc, nskMethod, nskConverter,
                              nskIterator}
 
 const procValueSymKinds* = {nskProc, nskFunc}

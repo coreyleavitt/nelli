@@ -2745,9 +2745,8 @@ proc scanFootprint(n: NimNode; user: bool; owner: string;
       if user and n.typeKind == ntyProc: acc.open = true
     of nskMethod:
       acc.open = true   # dynamic dispatch: any override may run
-    of nskProc, nskFunc, nskConverter, nskIterator:
-      acc.callees.add n
-    else: discard
+    else:
+      if symKind(n) in userRoutineSymKinds: acc.callees.add n
   of nnkCall, nnkCommand:
     if n.len > 0:
       # A proc value: code this scan does not see. The stdlib's generic bodies
@@ -2831,7 +2830,8 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   ## inserts (a `=destroy` of the program's that names a variable), nor state
   ## behind two different C routines; `docs/rfc/0005-branch-scoped-degrade.md`
   ## records both.
-  if fn.kind != nnkSym or symKind(fn) notin {nskProc, nskFunc, nskConverter}:
+  if fn.kind != nnkSym or symKind(fn) notin userRoutineSymKinds or
+     symKind(fn) == nskMethod:
     return ReplayFootprint(open: true)
   var seen: seq[string]
   var routines: seq[NimNode]
@@ -2850,7 +2850,7 @@ proc replayFootprint(fn: NimNode): ReplayFootprint =
   for r in routines:
     let o = owner(r)
     if o.kind == nnkSym and
-       symKind(o) in {nskProc, nskFunc, nskConverter, nskMethod, nskIterator} and
+       symKind(o) in userRoutineSymKinds and
        routineKey(o) notin seen:
       result.open = true
 

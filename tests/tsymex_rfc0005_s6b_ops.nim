@@ -82,7 +82,7 @@ const depthOne = block:
 # SUTs
 # =============================================================================
 
-# ---- fresh: bool ordering -----------------------------------------------------
+# ---- bool ordering: exact since RFC-0005 S8cb (a fresh bool before) -----------
 
 proc s6bBoolOrderDead(a, b: bool; n: int) =
   if a < b:
@@ -95,9 +95,7 @@ proc s6bBoolOrderLive(a, b: bool) =
     symexTarget("s6b_bool_order_live")
 
 proc s6bBoolOrderFresh(a: bool) =
-  ## Two orderings over the same operand get two INDEPENDENT fresh symbols,
-  ## so the walk knows nothing about their correlation (reality reaches the
-  ## target at a=false). It must report a candidate, never a verdict.
+  ## Reality reaches the target at a=false, as the walk now knows.
   let x = a < true
   let y = a < false
   if x and not y:
@@ -467,12 +465,11 @@ suite "RFC-0005 S6b (a) -- classOf rows":
 
 suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
 
-  test "bool ordering: dead target is sxUnsat (feUnsupportedOpHavoc)":
+  test "bool ordering: dead target is sxUnsat, exactly (RFC-0005 S8cb)":
     let r = symexFind(s6bBoolOrderDead, tLabel("s6b_bool_order_dead"))
     show r
-    check r.errors.hasKind(feUnsupportedOpHavoc)
-    check not r.errors.hasKind(feUnsupportedOp)
-    checkUnsatOverTaintOnly(r)
+    check r.status == sxUnsat
+    check r.errors.len == 0
 
   test "composite result (implicit-result fallthrough): a Table result is bound, the dead target exactly sxUnsat (RFC-0005 S8u)":
     let r = symexFind(s6bTabResultDead, tLabel("s6b_seq_result_dead"))
@@ -528,21 +525,18 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
 
 suite "RFC-0005 S6b (c) -- guards":
 
-  test "a live target through a fresh bool ordering is a candidate: sxUnknown, never sxSat":
+  test "a live target through a bool ordering is sxSat, exactly (RFC-0005 S8cb)":
     let r = symexFind(s6bBoolOrderLive, tLabel("s6b_bool_order_live"))
     show r
-    check r.status == sxUnknown
+    check r.status == sxSat
+    check r.errors.len == 0
 
-  test "two independent fresh orderings: a candidate, never sxUnsat (the introduction invariant)":
-    ## RFC-0005 S10: the candidate is now REPLAYED (rule 3), and reality
-    ## reaches the target (a=false: `false < true` and not `false < false`),
-    ## so it reports sxSat -- never sxUnsat, and only via a confirmed replay
-    ## (the path is tainted, so rules 1-2 decided sxUnknown).
+  test "two orderings over one operand: sxSat, exactly (RFC-0005 S8cb)":
     let r = symexFind(s6bBoolOrderFresh, tLabel("s6b_bool_order_fresh"))
     show r
     check r.status == sxSat
-    check rfc0005RawStatus == sxUnknown
-    check r.errors.hasKind(feUnsupportedOpHavoc)
+    check rfc0005RawStatus == sxSat
+    check r.errors.len == 0
 
   test "a target decided only by the havoc retSym is a candidate: sxUnknown, never sxSat":
     ## RFC-0005 S8u: over the untouched result with no modelled zero (a
@@ -708,8 +702,9 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## the element). Its element arrays are fresh symbols, as before.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
+    ## RFC-0005 S8cb removed bool ordering's: the walker models the order.
     checkpoint($sites)
-    check sites.len == 15
+    check sites.len == 14
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

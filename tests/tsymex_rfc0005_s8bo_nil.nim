@@ -103,6 +103,10 @@ proc sutCastRef(r: ref int) =
 proc sutAshr(v: int) =
   if ashr(v, 1) == -1 and v == -1: symexTarget("a")
 
+proc sutCStrNil(v: int) =
+  var c: cstring = "a"
+  if v == 1 and isNil(c): symexTarget("a")
+
 proc sutSwap(v: int) =
   var a = v
   var b = 3
@@ -148,7 +152,9 @@ suite "RFC-0005 S8bo (1): a conversion or cast to `pointer`":
 
 suite "RFC-0005 S8bo (1): an unlowered magic declines":
   test "a value magic with a doc-only body":
-    declines(sutAshr, tLabel("a"), feUnsupportedOp, "compiler magic `ashr`")
+    # RFC-0005 S8cb models `ashr`; a `cstring` has no model at all.
+    verdict(sutAshr, tLabel("a"), sxSat)
+    declines(sutCStrNil, tLabel("a"), feUnsupportedOp, "compiler magic `isNil`")
   # `swap` and `wasMoved` are S8bl's var-parameter magics now, modelled.
   test "a statement magic S8bl models":
     verdict(sutSwap, tLabel("a"), sxSat)

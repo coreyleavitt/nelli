@@ -14173,7 +14173,7 @@ pin is 238, and both suites carry the `>= 238` floor.
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
 
-**As landed (S8cn, walker 249 provisional) — batch 8's remainder.** The branch is
+**As landed (S8cn, walker 250 provisional) — batch 8's remainder.** The branch is
 `rfc-0005-s8cn`, on `afce42a`, merged with batch 9 (`e497dcf`). Every label is run natively as well as walked.
 
 *Wrong verdicts found and fixed here.* A view passed to a callee taking its
@@ -14252,16 +14252,41 @@ held also declines, since what it does to the memory is not tracked here.
 *Item 6.* S8bw's row is done. Every other row on this base is too; S8by to S8cl
 have no row here.
 
+*Lent loops, `let` over a container, a by-value actual (required for batch 10,
+all in-band declines; the exact model is for RFC-0016).* Clean false verdicts on
+the channel, each pinned with its native run (`tsymex_rfc0005_s8cn_lent`, RED on
+`e497dcf`; `tsymex_rfc0005_s8cn_lentnative`, no walker, run on nine settings:
+default, orc, arc, refc, each of default, orc and refc with `-d:release`, orc and
+refc with `-d:danger`).
+
+- `items` over a seq or an openArray, and a Table's `values` and `keys`, yield the
+  slot's memory, on every setting. A body that may write it (by name, as a `var`
+  actual, by a callee reaching it, through a pointer or a global alias) with the
+  variable used declines (`lentLoopDecline`, `mayWriteRoot`). So do `pairs` and an
+  array's `items` over anything but a scalar. A scalar through `pairs`, an array's
+  `items` and a Table's `pairs` copies on every setting and stays decided, as do
+  `mitems` and `mpairs`, whose variable is the element by substitution.
+- `let c = s` over a seq, string, Table, set or a holder of one, with `c` read and
+  `s` possibly written after it: refc shares; orc and arc share over a by-value
+  formal and copy a global, or a local written in the routine. No verdict holds on
+  all of them, so it declines (`letCursorDecline`). `var c = s` copies on every
+  setting and an array `let` too; both stay decided.
+- `f(gs)` with a body writing `gs`, a seq or a Table: Nim passes the memory. A
+  clean false verdict on the channel, and a walker fault on `6cbfe8f`. It declines
+  when the callee reaches the variable by name at all (`byValueTouch`, shared with
+  batch 9's closure form), a read too. A call returning `var T` as a `var` actual
+  (`rab(t["a"], t, "a")`) lost the callee's write, on main too; it declines.
+
+`feTableIterOrder` does not protect these, by observation at `e497dcf`: a one-entry
+table is clean (`rsNotNeeded`, no path taint) and gave `one_copy` `sxSat` and
+`one_shared` `sxUnsat`, both false; a two-entry table replays a witness
+(`rsConfirmed`), but no replay can correct an `sxUnsat`. The annotation's claim,
+that every real order is a model, needs the loop's reads to be the walk's, which
+the decline above now secures. `isTabKeys` is its only site and `parseTableForLoop`
+the only producer of that statement, so no other user rests on it.
+
 *Different mechanisms, reported and not fixed here.*
 
-- SOUNDNESS: `for x in s: s[0] = 5; r = x`, and `for x in t.values`, with no
-  callee at all. `items` and `values` yield `lent`, so `x` reads the live element;
-  the lowering binds a copy. A false `sxSat` (`it_copy`, `ic_copy`, `tv_copy`) and
-  a false `sxUnsat` (`it_shared`, `ic_shared`, `tv_shared`). `pairs` copies, and
-  so does an array's `items`, natively.
-- SOUNDNESS: `proc f(s: seq[int]): int = (let c = s; gseq[0] = 5; c[0])` called as
-  `f(gseq)`: the same cursor, over a by-value formal and a global written by name.
-  False verdicts (`gc_copy`, `gc_shared`).
 - PRECISION: a proc value that is a `var`, a parameter, or a computed `let`,
   handed a view and its Table: batch 9's `closureTakesView` declines it.
 - PRECISION: a key added under a view with a pointer to it declines where the key

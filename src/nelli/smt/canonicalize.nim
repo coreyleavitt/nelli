@@ -204,7 +204,7 @@ const renderAsChoicesVersion* = "12"
   ##   witness's own declared array type's index origin was wrong.
 
 const symexWalkerVersion* = "250"
-  ## RFC-0005 S8cn (2026-11-02), 245->249 (provisional), past the numbers
+  ## RFC-0005 S8cn (2026-11-02), 245->250 (provisional), past the numbers
   ## queued slices hold. Verdicts change: step 1e (a bounded concrete search
   ## after 1b, `checkCappedSteps`) answers `sxSat` on queries both searches ran
   ## out on; an `mpairs` view and its Table in a callee decide a non-literal
@@ -215,6 +215,12 @@ const symexWalkerVersion* = "250"
   ## before: a pointer to the view with a call receiving the Table; a callee
   ## holding the container in a local or a loop (`bindsViewWhole`); a write to
   ## the view past a key added (a rehash the walk cannot see).
+  ## Also newly declined, clean false verdicts on the channel: a `lent` loop
+  ## (`items`, `values`, `keys`) whose body may write the container
+  ## (`lentLoopDecline`); `let` over a seq, string or Table written during its
+  ## life, which varies with the memory manager (`letCursorDecline`); a by-value
+  ## actual the callee reaches by name (`byValueTouch`); a call returning `var T`
+  ## as a `var` actual.
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce

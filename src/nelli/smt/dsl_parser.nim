@@ -2045,7 +2045,7 @@ func isEagerIR(e: IRExpr): bool =
      iekSeqNew:   # RFC-0005 S8bc, S8bi: `newSeq[T](n)` and kin, a call
     true
   of iekBitSet:
-    # RFC-0005 S8cd. Measured on the C backend (`tsymex_rfc0005_s8cd_ops`
+    # RFC-0005 S8cd. Measured on the C backend (`tsymex_rfc0005_s8cd_setorder_*`
     # pins each against a run): a `{..}` naming a variable is built where
     # it stands, whatever the domain. A set of at most 64 values is a C
     # integer, so `+ - *`, `<=` and `<` are inline expressions; a larger

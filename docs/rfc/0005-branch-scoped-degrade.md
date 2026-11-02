@@ -359,7 +359,7 @@ state = "done"
 [[slice]]
 id = "S8ce"
 title = "Destructor-swallowed exceptions: nim-z3's lifecycle hooks catch an in-flight raise on the C backend; root fix in nim-z3, lock bump, every destroy site covered"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -7980,6 +7980,84 @@ Pins that moved:
   loop is read as a removal.
 - **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)**: not
   reconciled here (batch 5, per the job).
+
+**As landed (S8ce, walker 238, provisional) — S8bx's remainder.** Pins:
+`tests/tsymex_rfc0005_s8ce_{hookraise,raiseshapes}.nim` (`raiseshapes` with a
+companion `.nim.cfg` setting `-d:symexTestInjectWalkerFault`), and nim-z3's
+`tests/thook_raise_path.nim`. nim-z3 branch `rfc-0005-s8ce`; `milpa.lock`'s z3
+entry moves to it (the S8at lock shape: identity and `commit_sha`, `ref "main"`
+kept; the coordinator fast-forwards nim-z3 main at integration).
+- **SOUNDNESS: any raise crossing the destroy of a live Z3 value on the C
+  backend was lost**, not only an extraction raise: the walk went on to a false
+  `sxUnsat` (or to an unrelated `sxUnknown`) with the raise unreported.
+
+*The mechanism.* Nim 2.2.10's C backend (goto exceptions) runs a destructor on
+the raise path with the error flag set unless it takes the destructor as able
+to raise, in which case it saves and clears the flag around it (`oldNimErrFin`).
+A `{.raises: [].}` hook, and a generated `seq` / `ref` hook over one, is taken
+as unable to raise. So a hook runs with an exception IN FLIGHT for a reassigned
+call result (`T = f(); if (*nimErr_) { eqdestroy(T); goto LA_; }`; S8bx named
+this one) AND for a local destroyed at its scope's merge label (S8bx took those
+as saved; a group holding only generated hooks is not). nim-z3's hooks wrapped
+their bodies in `try: ... except CatchableError: discard` (`except Exception`
+for the context release). The generated C of the `try` tests the flag after its
+first checked call, jumps to the handler, matches the in-flight exception,
+clears the flag and calls `popCurrentException`. A pure-Nim reduction (no Z3)
+loses the raise on C and not on C++, and with no `try` in the hook it is not
+lost: `{.raises: [].}` plus `try` in a destructor is the whole trigger. The
+compiler's unsaved raise-path destroy is the enabling behaviour; the swallow is
+the `try`.
+
+*The root fix (nim-z3).* Every `=destroy` / `=copy` / `=dup`, and the refcount
+helpers they call, is raise-free by construction: no `try`; the raw C entry
+point through softlink's `<sym>Ptr()` accessor (`{.cdecl, raises: [].}`, nil when
+libz3 is not loaded), never the wrapper that raises `SoftlinkError`; nil handles
+checked first; `{.raises: [], quirky.}`, so the compiler proves it. `quirky` is
+required as well as the removal: without `--panics:on` the compiler checks the
+flag after every call and leaves the routine when it is set, so a try-free hook
+entered on the raise path would stop at its first call and leak its dec_ref and
+context release (pinned under `-d:z3CtxDestroyCount`). A source audit in
+`thook_raise_path` pins every hook's pragma and the absence of a `try`.
+
+*Nelli's own sites.* `src/nelli` declares no lifecycle hook (`command grep`:
+the `=destroy` / `=copy` / `=sink` / `=dup` hits are comments and the DSL parser's
+model of those operations), and softlink declares none. S8bx's
+`extractionRaiseHook` is **removed**, with `extractionFault`, its `shouldStop`
+arm and `runSymex`'s fallback: with the hooks fixed, a raise inside extraction
+reaches `runSymexCaught` on both backends, and the walker's `try` sites do not
+enclose `trySolve` (they guard `defaultZero`, `symValFromRawAst`, `lowerStrArm`
+and a numeral's `parseInt`). S8bx's seven pins stay green unchanged; with the
+hook removed and nim-z3 at ae509f0, `afterLoop` and `twoIters` are a false
+`sxUnsat` and `swallowedInside` a false `sxSat` again, which is what the pins
+catch.
+
+*The ~290 sites, by class.* A site loses a raise only when the value destroyed
+is non-empty, so the shapes are raises with a Z3 value live, not raises near a
+destroy site: a raise out of a walk with nothing yet in its result crosses no
+term destroy and was never lost. `raiseshapes` raises from a term construction,
+a statement dispatch, a solver call, query assembly (`pathRoots`' roots held), a
+range conversion (its bounds held), a callee's frame, an `if` condition, a model
+evaluation in extraction, an `mpairs` view's `syncViewAliases(walk(...))`, and the
+concolic walk (`concolicCollect`). Each is a named `weInternalWalkerFault` (the
+concolic entry: the raise reaches its caller). The class argument is the
+generated C: no hook in a walker build pops an exception any more, so no site
+can lose one, whichever shape reaches it.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: the "a lowering-time degrade must never raise" rule** (ADR-0023 /
+  SND-3, `degradeStrArm`, `allocDegrade`, N31 / N36 / N40) was written for this
+  hazard. Its in-band sinks stay as the walker's reporting channel and nothing
+  here moves them, but a `try` around a `walkBlock`-reachable call is no longer
+  unsound for this reason. A later slice could simplify them.
+- **PRECISION: S8m's `z3ApiErrorCount` fallback in `runSymex`** was justified by
+  the lost raise. It stays: it also counts an API error caught inside the walk
+  (`concreteSeqLen`'s `except CatchableError`), and it never fires falsely.
+- **PRECISION: nim-z3 leaks, no verdict affected.** `Z3FuncDeclOwn`,
+  `Z3FuncInterpOwn` and `Z3RcfNum`'s hooks never release their `ctx` reference;
+  each predates this slice and its behaviour is unchanged.
+- **Compiler: a `try` in any other destructor loses a raise the same way.** Nothing
+  in nelli or its deps has one now (the audit pins nim-z3); the reduction is in the
+  S8ce report for an upstream Nim issue.
 
 ### §2.6 The raise-routing recovery — *corrected*
 

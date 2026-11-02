@@ -5,11 +5,11 @@
 ## the measurements):
 ##   (1) concolic collection's scratch solves (`concreteBranchOutcome`,
 ##       `concretelyInfeasible`, the concrete-inputs check) check in
-##       contexts of their own: with 300 unrelated Int constants live in
-##       the context, a factoring branch condition took 72,126 units
-##       against 72,162 (Z3 5.1; 26,695 against 26,726 on 4.13.4), and
-##       under a bound between such spends one context decided it and the
-##       other did not. Now its spend, so its outcome, is the query's;
+##       contexts of their own: a factoring branch condition took 876,296
+##       units in one context and 5,854,996 in one that made the query's
+##       constants the other way round (Z3 5.1; 23,956 and 911,593 on
+##       4.13.4), and under a bound between them one decided it and the
+##       other did not. Now what its context holds moves neither;
 ##   (2) after a facts-first SAT, `checkCapped` runs neither (1b) nor
 ##       (1c)'s uncapped half: the facts-first check is (1c)'s query under
 ##       a smaller budget, and (1b)'s is a subset of it, so both are known
@@ -83,8 +83,10 @@ let z351 = z3FullVersion().startsWith("5.")
 
 # ---- (1) the concolic scratch solves -----------------------------------------
 
-var scratch: array[2, tuple[outcome: Option[bool], infeasible: bool,
-                            units, infeasibleUnits: int]]
+type ScratchRun = tuple[outcome: Option[bool], infeasible: bool,
+                        units, infeasibleUnits: int]
+
+var scratchOut: ScratchRun
 
 proc ctxCount(ctx: Z3Context): int =
   ## The step count of `ctx` itself (an empty check there reads it).
@@ -93,20 +95,33 @@ proc ctxCount(ctx: Z3Context): int =
   let st = s.getStatistics()
   if st.contains("rlimit count"): st.getInt("rlimit count") else: 0
 
-proc scratchSolves(arg: tuple[slot, unrelated: int; bound: uint]) {.thread.} =
-  ## On a fresh thread (no walk's state in its threadvars): a branch
-  ## condition `x > 1` beside a factoring search, decided by
-  ## `concreteBranchOutcome` under `bound`, and the same facts with `x <=
-  ## 1` by `concretelyInfeasible`, in a context holding `unrelated` Int
-  ## constants no query mentions. `units` and `infeasibleUnits` are what
-  ## each spent, in contexts of their own or in this one.
+proc scratchSolves(arg: tuple[holds: int; bound: uint]) {.thread.} =
+  ## On a fresh thread and in a fresh context: a branch condition `x > 1`
+  ## beside a factoring search, decided by `concreteBranchOutcome` under
+  ## `bound`, and the same facts with `x <= 1` by `concretelyInfeasible`.
+  ## `holds` is what the context holds before the query is made; no query
+  ## mentions it. `units` and `infeasibleUnits` are what each spent, in
+  ## contexts of their own or in this one.
   {.cast(gcsafe).}:
     let ctx = newContext()
     var keep: seq[Z3Int]
-    for k in 0 ..< arg.unrelated:
-      keep.add mkIntVar(ctx, "s8by_unrelated_" & $k)
-    let x = mkIntVar(ctx, "x")
-    let y = mkIntVar(ctx, "y")
+    var x, y: Z3Int
+    case arg.holds
+    of 1:   # the query's constants made the other way round
+      y = mkIntVar(ctx, "y")
+      x = mkIntVar(ctx, "x")
+    of 2:   # 300 unrelated constants between them
+      x = mkIntVar(ctx, "x")
+      for k in 0 ..< 300: keep.add mkIntVar(ctx, "s8by_unrelated_" & $k)
+      y = mkIntVar(ctx, "y")
+    of 3:   # terms over them that the query does not hold
+      x = mkIntVar(ctx, "x")
+      y = mkIntVar(ctx, "y")
+      keep.add y * x
+      keep.add x + y
+    else:
+      x = mkIntVar(ctx, "x")
+      y = mkIntVar(ctx, "y")
     let one = mkInt(ctx, 1)
     let lim = mkInt(ctx, 2000)
     let facts = @[x > one, y > one, x < lim, y < lim,
@@ -119,36 +134,60 @@ proc scratchSolves(arg: tuple[slot, unrelated: int; bound: uint]) {.thread.} =
     own = ownContextUnits
     here = ctxCount(ctx)
     let inf = concretelyInfeasible(ctx, @[], facts & @[x <= one], settings)
-    scratch[arg.slot] = (o, inf, units,
-                         ownContextUnits - own + ctxCount(ctx) - here)
+    scratchOut = (o, inf, units, ownContextUnits - own + ctxCount(ctx) - here)
 
-proc solveBoth(bound: uint) =
-  ## The scratch solves as is (`scratch[0]`) and with 300 unrelated
-  ## constants in the context (`scratch[1]`).
-  for slot in 0 .. 1:
-    var th: Thread[tuple[slot, unrelated: int; bound: uint]]
-    createThread(th, scratchSolves, (slot, slot * 300, bound))
-    joinThread(th)
-  checkpoint "bound " & $bound & ": as is " & $scratch[0] & ", perturbed " &
-    $scratch[1]
+proc settleProcess() {.thread.} =
+  ## A factoring search over other constants, in the walk's kind of
+  ## context. Z3's spend on one query also moves with what the process has
+  ## run before (the RFC's "As landed (S8by)", a different mechanism), so
+  ## the comparison below is made after that has settled.
+  {.cast(gcsafe).}:
+    let ctx = newContext()
+    let p = mkIntVar(ctx, "p")
+    let q = mkIntVar(ctx, "q")
+    let x = mkIntVar(ctx, "x")
+    let s = newSolver(ctx)
+    let sp = newParams(ctx)
+    sp.set("rlimit", 2_000_000'u)
+    s.setParams(sp)
+    s.add p > mkInt(ctx, 1)
+    s.add q > mkInt(ctx, 1)
+    s.add p * q == mkInt(ctx, 4093 * 4099)
+    s.add p < x
+    discard s.check()
+
+proc scratchIn(holds: int; bound: uint): ScratchRun =
+  var th: Thread[tuple[holds: int; bound: uint]]
+  createThread(th, scratchSolves, (holds, bound))
+  joinThread(th)
+  checkpoint "holds " & $holds & ", bound " & $bound & ": " & $scratchOut
+  scratchOut
 
 suite "S8by (1): a concolic scratch solve is the same in any context":
 
-  test "unrelated constants in the context move no scratch solve":
-    # Bounded loosely enough to finish: what each spends.
-    solveBoth(50_000_000'u)
-    let spent = (scratch[0].units, scratch[1].units)
-    let finished = scratch[0].outcome
-    check scratch[0].infeasibleUnits > 0
-    check scratch[0].infeasibleUnits == scratch[1].infeasibleUnits
-    # Under a bound between the two spends (or at the one spend).
-    solveBoth(uint((spent[0] + spent[1]) div 2))
-    check finished == some(true)
-    check spent[0] > 0
-    # The same spend, so both contexts decide alike under any bound.
-    check spent[0] == spent[1]
-    check scratch[0].outcome == scratch[1].outcome
-    check scratch[0].infeasible and scratch[1].infeasible
+  test "what the context holds moves neither a scratch solve's spend nor its outcome":
+    ## Before S8by, in the context itself: 876,296 units as is and
+    ## 5,854,996 with the constants made the other way round (Z3 5.1);
+    ## 23,956 and 911,593 (4.13.4). Under a bound between them the one
+    ## was decided and the other was not.
+    var settle: Thread[void]
+    createThread(settle, settleProcess)
+    joinThread(settle)
+    # Each once to settle, as the process's first solves of this query.
+    for holds in 0 .. 3: discard scratchIn(holds, 50_000_000'u)
+    let base = scratchIn(0, 50_000_000'u)
+    check base.outcome == some(true)
+    check base.infeasible
+    check base.units > 0
+    check base.infeasibleUnits > 0
+    let between = if z351: 3_000_000'u else: 400_000'u
+    let bounded = scratchIn(0, between)
+    for holds in 1 .. 3:
+      let r = scratchIn(holds, 50_000_000'u)
+      check r.units == base.units
+      check r.infeasibleUnits == base.infeasibleUnits
+      check r.outcome == base.outcome
+      check scratchIn(holds, between).outcome == bounded.outcome
 
 suite "S8by (2): no (1b) or (1c) after a facts-first SAT":
 

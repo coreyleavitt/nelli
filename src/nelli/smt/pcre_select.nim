@@ -382,6 +382,9 @@ type
     jit*: JitScan
       ## RFC-0005 S8bt: peJit837's prefix scan, when it applies
     costs*: bool
+    jitCountUnread*: bool
+      ## RFC-0005 S8cf: a repeat whose `count_match` calls 8.37's JIT folds
+      ## (`detect_repeat`)
       ## RFC-0005 S8bt: the automaton counts pcre_exec.c's `match()` calls
       ## (`nkCost`; `buildNfa`'s `limitRoom`), its threads are kept apart
     capRoom*: int
@@ -395,11 +398,17 @@ type
 proc matchLimit*(n: Nfa): int =
   ## RFC-0005 S8bt. The `(*LIMIT_MATCH=)` pcre_exec.c applies (below its
   ## default), -1 none.
-  if n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit: int(n.limitMatch)
-  else: -1
+  ## RFC-0005 S8cf: on 8.37's JIT the count runs down from the limit and fails
+  ## on reaching 0, one call earlier than `match()`'s test, and from 0 never.
+  if n.limitMatch < 0 or n.limitMatch >= pcreDefaultLimit: return -1
+  if n.engine == peJit837:
+    return (if n.limitMatch == 0: -1 else: int(n.limitMatch) - 1)
+  int(n.limitMatch)
 
 proc recLimit(n: Nfa): int =
-  ## RFC-0005 S8bt. The `(*LIMIT_RECURSION=)` pcre_exec.c applies.
+  ## RFC-0005 S8bt. The `(*LIMIT_RECURSION=)` pcre_exec.c applies (the JIT
+  ## ignores it).
+  if n.engine == peJit837: return high(int)
   if n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit:
     int(n.limitRecursion)
   else: high(int)
@@ -448,6 +457,7 @@ type Build = object
   costWhy: string  ## RFC-0005 S8bt: why the call accounting is not modelled
 
 proc cost(b: var Build; deep: bool; next: int): int
+proc jitCost(b: var Build; next: int): int
 
 proc add(b: var Build; s: NState): int =
   if b.n.states.len >= maxNfaStates:
@@ -681,7 +691,10 @@ proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
       return 0
     id = b.n.loops
     inc b.n.loops
-    bodyEnd = b.add NState(kind: nkBack, loop: id, out1: headK, out2: next)
+    bodyEnd = b.add NState(kind: nkBack, loop: id, out1: headK, 
+                        out2: (if lazy: next else: b.jitCost(next)))
+  # RFC-0005 S8cf: OP_KETRMIN counts on the JIT, unless OP_BRAMINZERO opens it.
+  if lazy and once: bodyEnd = b.jitCost(bodyEnd)
   var bodyIn = b.compGroup(sub, bodyEnd, base, sGrp)
   if b.overflow: return 0
   if nullable: bodyIn = b.add NState(kind: nkEnter, loop: id, out1: bodyIn)
@@ -691,13 +704,16 @@ proc compLoopCost(b: var Build; sub: Rx; lazy, once, sGrp: bool;
     b.n.states[headK].out1 = o1
     b.n.states[headK].out2 = o2
   else:
+    # RFC-0005 S8cf: on the JIT OP_KETRMAX's `count_match` is where a failed
+    # iteration resumes: every try of the rest counts, no iteration does.
     let o1 = b.cost(true, bodyIn)
-    let o2 = b.cost(false, next)
+    let o2 = b.jitCost(b.cost(false, next))
     b.n.states[headK].out1 = o1
     b.n.states[headK].out2 = o2
   if once: return bodyIn
   if lazy: b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: bodyIn)
-  else: b.add NState(kind: nkSplit, out1: b.cost(true, bodyIn), out2: next)
+  else: b.add NState(kind: nkSplit, out1: b.cost(true, bodyIn),
+                     out2: b.jitCost(next))   # OP_BRAZERO's way past counts too
 
 proc compRepCost(b: var Build; x: Rx; next, base: int): int =
   ## RFC-0005 S8bt. A repeat with pcre_exec.c's `match()` calls (`costs`).
@@ -731,7 +747,10 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     # by RMATCH at its minimum too.
     let cls = sub.op in {aoClass, aoNClass, aoXClass}
     proc exitAt(b: var Build; first: bool): int =
-      if poss: b.add NState(kind: nkPoss, bytes: guard, out1: next)
+      # RFC-0005 S8cf: on the JIT the iterator's backtrack re-enters at its
+      # `count_match`: every try of the rest counts.
+      if poss: b.add NState(kind: nkPoss, bytes: guard, out1: b.jitCost(next))
+      elif b.n.engine == peJit837: b.jitCost(next)
       elif lazy: b.cost(true, next)
       else: b.cost(cls or not first, next)
     if x.hi < 0:
@@ -754,14 +773,22 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     else:
       var o = next
       if x.hi > x.lo and not poss: o = b.cost(true, next)
+      if b.n.engine == peJit837: o = b.jitCost(next)   # OP_EXACT, or the longest
       for i in countdown(x.hi - 1, x.lo):
         let skip = b.exitAt(i == x.lo)
         o = b.split(b.atomTo(o), skip, lazy)
       result = o
+    # RFC-0005 S8cf: `a{2,}` compiles to OP_EXACT and a repeat: its own count.
+    if x.lo >= 2 and x.hi != x.lo and not cls: result = b.jitCost(result)
     for i in 0 ..< x.lo: result = b.atomTo(result)
     return
   let sz = codeSize(sub)
   let b0 = base + 1
+  if b.n.engine == peJit837 and x.hi >= 0 and
+     (x.lo >= 3 or x.hi - x.lo >= 2):
+    # RFC-0005 S8cf: detect_repeat folds these copies into OP_EXACT / OP_UPTO
+    # loops with counts of their own: not read (`limitEffect`).
+    b.n.jitCountUnread = true
   if x.hi < 0:
     let copies = max(x.lo, 1)
     result = b.compLoopCost(sub, x.lazy, x.lo >= 1, couldBeEmpty(sub), next,
@@ -771,12 +798,15 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
   else:
     var o = next
     for i in countdown(x.hi - 1, x.lo):
-      var take = b.compGroup(sub, o, b0 + i * sz)
+      # RFC-0005 S8cf: the JIT counts at the end of a copy behind OP_BRAZERO.
+      var take = b.compGroup(sub, (if x.lazy: o else: b.jitCost(o)),
+                             b0 + i * sz)
       if i != x.hi - 1: take = b.cost(b.catchers, take)   # the wrapper
       if x.lazy:
         o = b.add NState(kind: nkSplit, out1: b.cost(true, next), out2: take)
       else:
-        o = b.add NState(kind: nkSplit, out1: b.cost(true, take), out2: next)
+        o = b.add NState(kind: nkSplit, out1: b.cost(true, take),
+                         out2: b.jitCost(next))
     result = o
     for i in countdown(x.lo - 1, 0):
       result = b.compGroup(sub, result, b0 + i * sz)
@@ -786,8 +816,19 @@ proc nameIndex(b: var Build; name: string): int =
     b.n.nameIdx[name] = b.n.nameIdx.len
   b.n.nameIdx[name]
 
+proc jitCost(b: var Build; next: int): int =
+  ## RFC-0005 S8cf (item 3). One `count_match` of 8.37's JIT before `next`,
+  ## when the automaton counts them (pcre_jit_compile.c: at the end of every
+  ## single-character iterator, of every group copy OP_BRAZERO enters or a
+  ## repeating ket closes, and at OP_BRAMINZERO).
+  if b.n.costs and b.n.engine == peJit837:
+    b.add NState(kind: nkCost, out1: next)
+  else: next
+
 proc cost(b: var Build; deep: bool; next: int): int =
   ## RFC-0005 S8bt. A `match()` call before `next`.
+  if b.n.engine == peJit837:
+    return next   # RFC-0005 S8cf: `match()`'s calls are not the JIT's (`jitCost`)
   b.add NState(kind: nkCost, deep: deep, out1: next)
 
 proc compItem(b: var Build; x: Rx; next, base: int): int =
@@ -968,11 +1009,9 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
   if result.costs:
     # A SKIP:NAME without its MARK re-runs the attempt from a fresh count,
     # ignoring the SKIP:NAMEs it passed (no RMATCH for them).
-    if result.possess.unknown:
+    if result.possess.unknown and engine == peInterp:
       b.costWhy = "auto-possessification next to a character property or " &
                   "an extended class"
-    if engine != peInterp:
-      b.costWhy = "the JIT's match limit accounting"
     if b.costWhy.len > 0 and not boundOnly:
       result.ok = false
       result.why = "match()'s call accounting is not modelled for " &
@@ -3642,6 +3681,7 @@ proc limitEffect*(n: Nfa): (LimitEffect, int) =
   ## against LIMIT_RECURSION, so LIMIT_MATCH=0 wins over LIMIT_RECURSION=0.
   let m = n.limitMatch >= 0 and n.limitMatch < pcreDefaultLimit
   let r = n.limitRecursion >= 0 and n.limitRecursion < pcreDefaultLimit
+  if n.jitCountUnread: return (leUnknown, 0)
   if countsLimits(n): return (leCounted, 0)
   if n.engine == peJit837:
     # RFC-0005 S8bt: the JIT ignores LIMIT_RECURSION, and counts

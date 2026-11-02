@@ -1,7 +1,7 @@
 # Job: S8cg -- new slice (batch-7 integration findings; 1 SOUNDNESS + precision)
 
 ## Setup
-- **HOLD until batch 7 lands.** Base: `origin/rfc-0005-soundness-channels` at the batch-7 landing sha. The coordinator will send it. It is expected to be 136ad60.
+- **HOLD RELEASED.** Base: `origin/rfc-0005-soundness-channels` at **136ad60** (walker 237).
 - Provisional walker: **240**.
 - Read WORKER-BRIEF.md, WORKER-LOCAL.md, and the RFC's batch-7 note first.
 - In your first commit, add this row before the S11 row. Flip it to `done` at the end.

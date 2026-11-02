@@ -202,7 +202,18 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "228"
+const symexWalkerVersion* = "238"
+  ## RFC-0005 S8ce (2026-11-02) — S8bx's remainder; provisional number (the
+  ## channel assigns the final one at merge). 228->238. SOUNDNESS: nim-z3's
+  ## lifecycle hooks wrapped their bodies in `try/except`, and a hook run on
+  ## the raise path with the error flag set (C backend, goto exceptions)
+  ## took the in-flight exception as its own and cleared it, so ANY raise
+  ## crossing a live Z3 term's destroy was lost and the walk went on to a
+  ## false verdict. S8bx had closed extraction alone. The hooks are now
+  ## raise-free by construction (nim-z3 `rfc-0005-s8ce`, milpa.lock), so every
+  ## raise reaches `runSymexCaught`: a run that was silently decided on C is
+  ## `sxUnknown` + `weInternalWalkerFault`, as on C++. S8bx's raise hook
+  ## (`extractionRaiseHook`) is removed; its pins stay green.
   ## RFC-0005 S8bx (2026-10-03) — S8bl's remainder; provisional number (the
   ## channel assigns the final one at merge). 213->228. SOUNDNESS: a raise
   ## inside witness extraction (which runs in the walk since S1c) was lost

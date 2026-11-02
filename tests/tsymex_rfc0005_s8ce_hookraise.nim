@@ -18,7 +18,8 @@
 ## when it takes the destroy as able to raise. A `{.raises: [].}` hook, or a
 ## generated seq hook over one, runs with the flag set, unsaved.
 ##
-## Each test raises out of an expression whose result holds a nim-z3 value,
+## nim-z3's hooks are now raise-free by construction (`rfc-0005-s8ce`, the
+## identity in milpa.lock), so the raise survives. Each test raises out of an expression whose result holds a nim-z3 value,
 ## and asserts the raise reaches the outer `except`. Each family of hook is
 ## covered: a value term (`termDestroy`, through a seq), a ref handle
 ## (`emitRefcountLifecycle`: a solver, a model), and the context's own

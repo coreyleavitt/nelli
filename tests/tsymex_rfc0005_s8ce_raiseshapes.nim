@@ -15,19 +15,23 @@
 ##
 ## The companion `.nim.cfg` sets `-d:symexTestInjectWalkerFault`, under
 ## which dispatch reaching `symexTarget("__inject_s8ce_<shape>__")` arms one
-## shape and the SECOND operation of that shape raises out of the walker's
-## own code with its Z3 temporaries live (`injectShapeFault`), the first
-## operation's path already built, so its terms are on the unwind:
-## - `solver`: a query's `check()` (the target hit's solve);
+## shape and the shape's next operation raises out of the walker's own code
+## with its Z3 temporaries live (`injectShapeFault`):
 ## - `term`: arithmetic lowering, both operand terms built;
-## - `eval`: a model evaluation in witness extraction;
-## - `dispatch`: the sentinel statement itself, in the walked proc or in a
-##   callee.
-## Each sits after a branch, so two paths reach it, and after a loop, so the
-## raise unwinds through `walkBlock`'s reassignment of the loop's paths.
-## Each must be a named decline (`sxUnknown` + `weInternalWalkerFault`),
-## never a verdict.
-import std/[unittest, strutils]
+## - `solver`: a query's `check()`, the solver live;
+## - `roots`: query assembly, the local `seq[Z3Bool]` of roots held;
+## - `conds`: a range conversion, the local `seq[Z3Bool]` of bounds held;
+## - `eval`: a model evaluation in witness extraction, the evaluated term
+##   live;
+## - `dispatch`: the sentinel statement itself.
+## Which destroy the raise crosses first depends on the statement around it,
+## so a shape is the operation AND its setting: in a loop body (`walkBlock`'s
+## `result = walk(s, result, w)` with the iteration's paths in the temporary),
+## in an `if` condition (`walk`'s `states` / `next`), in a callee's loop, with
+## an `mpairs` view live (`syncViewAliases(walk(...))`), and in the concolic
+## walk (`walkIfFollowConcrete`'s `states`). Each must be a named decline
+## (`sxUnknown` + `weInternalWalkerFault`), never a verdict.
+import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
 
@@ -45,127 +49,152 @@ proc namedFault[T](r: SymexResult[T]; text: string): bool =
       return true
   false
 
-# Each shape: bounded inputs, a loop, the sentinel, then the shape's
-# operation in BOTH arms of a branch, so the first arm's paths are built and
-# held when the second arm's operation raises.
+# Each shape arms its fault in a loop's last iteration or just before an
+# `if`, so the raise crosses the destroy its comment names.
 
-proc solverShape(n: int) =
+# `walkBlock`'s `result = walk(s, result, w)`, the paths held.
+proc termInLoop(n: int) =
   if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
-  symexTarget("__inject_s8ce_solver__")
-  if i == 3:
-    if n > 5: symexTarget("solver_hit")
-  else:
-    if n == 2: symexTarget("solver_hit")
-
-proc termShape(n: int) =
-  if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
-  symexTarget("__inject_s8ce_term__")
   var k = 0
-  if n > 5:
-    k = i + n
-  else:
-    k = i + 2 * n
-  if k == 7:
-    symexTarget("term_hit")
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_term__")
+    k = k + j + n
+  if k == 12: symexTarget("hit")
 
-proc evalShape(s, t: string, n: int) =
+proc dispatchInLoop(n: int) =
   if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
-  symexTarget("__inject_s8ce_eval__")
-  if i == 3 and s.len == 2 and t.len == 1:
-    symexTarget("eval_hit")
+  var k = 0
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_dispatch__")
+    k = k + j
+  if k == 3 and n > 2: symexTarget("hit")
 
-proc dispatchShape(n: int) =
+proc solverInLoop(n: int) =
   if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
-  if i == 3:
-    symexTarget("__inject_s8ce_dispatch__")
-  else:
-    symexTarget("__inject_s8ce_dispatch__")
-  if n > 1:
-    symexTarget("dispatch_hit")
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_solver__")
+    if n == j + 100: symexTarget("miss")
+  if n == 7: symexTarget("hit")
 
-proc injectingCallee(x: int): int =
-  symexTarget("__inject_s8ce_dispatch__")
+proc rootsInLoop(n: int) =
+  if n < 0 or n > 10: return
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_roots__")
+    if n == j + 100: symexTarget("miss")
+  if n == 7: symexTarget("hit")
+
+proc condsInLoop(n: int) =
+  if n < 0 or n > 10: return
+  var k = 0
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_conds__")
+    k = k + int(Natural(n))
+  if k == 21: symexTarget("hit")
+
+# A call's frame between the raise and the loop.
+proc faultingCallee(x: int): int =
+  symexTarget("__inject_s8ce_term__")
   x + 1
 
-proc calleeShape(n: int) =
+proc termInCallee(n: int) =
   if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
   var k = 0
-  if n > 5:
-    k = injectingCallee(i)
-  else:
-    k = injectingCallee(n)
-  if k == 4:
-    symexTarget("callee_hit")
+  for j in 0 ..< 3:
+    if j == 2: k = faultingCallee(k)
+    else: k = k + n
+  if k == 15: symexTarget("hit")
+
+# `lowerBoolInExpr` over a path that has a live arm beside it.
+proc termInCond(n: int) =
+  if n < 0 or n > 10: return
+  var k = 0
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_term__")
+    if k + n == 100: symexTarget("miss")
+    k = k + 1
+  if n == 1: symexTarget("hit")
+
+# Witness extraction, at a target hit in a loop's walk.
+proc evalInLoop(s: string, n: int) =
+  if n < 0 or n > 10: return
+  var k = 0
+  for j in 0 ..< 3:
+    k = k + j
+    if j == 2:
+      symexTarget("__inject_s8ce_eval__")
+      if n == 7 and s.len == 2: symexTarget("hit")
+  if k == 100: symexTarget("miss")
+
+# `syncViewAliases(walk(...))`: an `mpairs` view passed with its Table.
+proc viewCallee(v: var int; t: var Table[string, int]; k: string): int =
+  symexTarget("__inject_s8ce_term__")
+  v = v + 1
+  t[k]
+
+proc termUnderView(t0: Table[string, int]) =
+  if t0.len != 1 or "a" notin t0: return
+  var t = t0
+  for k, v in t.mpairs:
+    if v > 1000 or v < -1000: return
+    discard viewCallee(v, t, k)
+  if t["a"] == 3: symexTarget("hit")
+
+# The concolic walk: `walkIfFollowConcrete`'s own `states` and facts.
+proc followShape(x: int) =
+  var k = 0
+  for j in 0 ..< 3:
+    if j == 2: symexTarget("__inject_s8ce_term__")
+    if k + x > 3: k = k + 1
+    else: k = k + 2
+  if k > 100: symexTarget("hit")
 
 proc cleanShape(n: int) =
   if n < 0 or n > 10: return
-  var i = 0
-  while i < n and i < 4:
-    inc i
   var k = 0
-  if n > 5:
-    k = i + n
-  else:
-    k = i + 2 * n
-  if k == 7:
-    symexTarget("clean_hit")
+  for j in 0 ..< 3:
+    k = k + j + n
+  if k == 12: symexTarget("hit")
 
 proc fault(shape: string): string = "S8ce synthetic " & shape & " fault"
 
+template faultCase(name, fn, shape: untyped) =
+  test name:
+    let r = symexFind(fn, tLabel("hit"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status notin {sxSat, sxUnsat}
+    check namedFault(r, fault(shape))
+
 suite "S8ce (5): each raise shape reaches the run boundary":
 
-  test "a raise after a query's check() (solver call)":
-    let r = symexFind(solverShape, tLabel("solver_hit"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status != sxUnsat
-    check namedFault(r, fault("solver"))
+  faultCase("term construction in a loop body", termInLoop, "term")
+  faultCase("statement dispatch in a loop body", dispatchInLoop, "dispatch")
+  faultCase("a solver call in a loop body", solverInLoop, "solver")
+  faultCase("query assembly, its roots held", rootsInLoop, "roots")
+  faultCase("a range conversion, its bounds held", condsInLoop, "conds")
+  faultCase("term construction in a callee", termInCallee, "term")
+  faultCase("an `if` condition beside a live arm", termInCond, "term")
+  faultCase("a model evaluation in extraction", evalInLoop, "eval")
+  faultCase("term construction with an `mpairs` view live", termUnderView,
+            "term")
 
-  test "a raise in arithmetic lowering with both operands built (term)":
-    let r = symexFind(termShape, tLabel("term_hit"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status != sxUnsat
-    check namedFault(r, fault("term"))
-
-  test "a raise after a model evaluation in extraction (eval)":
-    let r = symexFind(evalShape, tLabel("eval_hit"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status != sxSat
-    check namedFault(r, fault("eval"))
-
-  test "a raise at statement dispatch after a loop (dispatch)":
-    let r = symexFind(dispatchShape, tLabel("dispatch_hit"))
-    checkpoint $r.status & " " & show(r.errors)
-    check namedFault(r, fault("dispatch"))
-
-  test "a raise at statement dispatch in a callee (callee frame)":
-    let r = symexFind(calleeShape, tLabel("callee_hit"))
-    checkpoint $r.status & " " & show(r.errors)
-    check r.status != sxUnsat
-    check namedFault(r, fault("dispatch"))
+  test "term construction in the concolic walk":
+    let trace = @[integerChoice(7, 0, 100, 0)]
+    let bindings = @[ConcolicParamBinding(kind: cbDrawLinked, drawIndex: 0)]
+    var reached = false
+    try:
+      discard concolicCollect(followShape, trace, bindings)
+    except ValueError as e:
+      reached = fault("term") in e.msg
+    check reached
 
   test "control: the same shape with no sentinel decides":
-    let r = symexFind(cleanShape, tLabel("clean_hit"))
+    let r = symexFind(cleanShape, tLabel("hit"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
 
   test "a later run is not declined by an earlier run's armed shape":
-    discard symexFind(dispatchShape, tLabel("dispatch_hit"))
-    let r = symexFind(cleanShape, tLabel("clean_hit"))
+    discard symexFind(dispatchInLoop, tLabel("hit"))
+    let r = symexFind(cleanShape, tLabel("hit"))
     checkpoint $r.status & " " & show(r.errors)
     check r.status == sxSat
 

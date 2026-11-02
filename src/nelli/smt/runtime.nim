@@ -1724,33 +1724,20 @@ proc releaseExtractionHook() =
 
 when defined(symexTestInjectWalkerFault):
   # RFC-0005 S8ce fault injection (compiled out of every normal build;
-  # `-d:symexTestInjectWalkerFault` is set for its dedicated test files
-  # only, by their `.nim.cfg`). A raise unwinding through the walk crosses
-  # destroys of Z3-term-holding temporaries on the way (a reassigned
-  # `seq[Path]`, an operand `SymVal`, a solver, a model); on the C backend
-  # nim-z3's hooks used to swallow it there. Dispatch reaching the sentinel
-  # label `__inject_s8ce_<shape>__` arms one shape; the SECOND operation of
-  # that shape after arming raises out of the walker's own code, with that
-  # operation's Z3 temporaries live and the first one's path already built
-  # (so a finished path's terms are on the unwind): `solver` after a
-  # query's `check()`, `term` in arithmetic lowering with both operands
-  # built, `eval` after a model evaluation in witness extraction.
-  # `dispatch` counts sentinel statements themselves (in a callee too).
+  # `-d:symexTestInjectWalkerFault` is set for its dedicated test files only,
+  # by their `.nim.cfg`). A raise unwinding through the walk crosses destroys
+  # of Z3-term-holding temporaries (`walkBlock`'s reassigned `seq[Path]`,
+  # `walk`'s `states` / `next`, a term-building helper's local `seq[Z3Bool]`);
+  # on the C backend nim-z3's hooks used to swallow it there. Dispatch
+  # reaching the sentinel label `__inject_s8ce_<shape>__` arms one shape; the
+  # next operation of that shape raises out of the walker's own code with
+  # that operation's Z3 temporaries live (`injectShapeFault`'s call sites
+  # name them). The `dispatch` shape fires at the sentinel statement itself.
   var injectedShape {.threadvar.}: string
     ## The armed shape; cleared when it fires and by `resetSymexRunState`.
-  var injectedSkip {.threadvar.}: int
-    ## Operations of the armed shape still to let through before raising.
-
-  proc armShapeFault(shape: string) =
-    if injectedShape.len == 0:
-      injectedShape = shape
-      injectedSkip = 1
 
   proc injectShapeFault(shape: string) =
     if injectedShape == shape:
-      if injectedSkip > 0:
-        dec injectedSkip
-        return
       injectedShape = ""
       raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8ce raise-shape test)]
         "S8ce synthetic " & shape & " fault (symexTestInjectWalkerFault)")
@@ -4969,6 +4956,8 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
     # value, so `rangeCondsIfNeeded` is not the applicable helper]
     conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
   if conds.len > 0:
+    when defined(symexTestInjectWalkerFault):
+      injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
     var inRange = conds[0]
     for i in 1 ..< conds.len: inRange = inRange and conds[i]
     rangeDefectConds.add(not inRange)              # threadvar fallback
@@ -11833,6 +11822,8 @@ proc pathRoots(path: Path; extra: openArray[Z3Bool] = []): seq[Z3Bool] =
     roots.add c
   roots.add extra
   roots.add globalRoots(roots)
+  when defined(symexTestInjectWalkerFault):
+    injectShapeFault("roots")  # RFC-0005 S8ce: the query's roots held
   roots
 
 proc trySolve(ctx: Z3Context,
@@ -18039,7 +18030,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       # fires here and now.
       const s8cePrefix = "__inject_s8ce_"
       if stmt.tname.startsWith(s8cePrefix) and stmt.tname.endsWith("__"):
-        armShapeFault(stmt.tname[s8cePrefix.len ..< stmt.tname.len - 2])
+        injectedShape = stmt.tname[s8cePrefix.len ..< stmt.tname.len - 2]
         injectShapeFault("dispatch")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:

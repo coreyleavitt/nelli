@@ -9518,6 +9518,14 @@ Where slices met:
     body that only reads declines too (PRECISION, as at batch 8);
   - a call returning `var T` as a `var` actual, `f(t["a"], t, "a")`: a false
     `sxSat`, the callee's write landing in a temporary. It declines.
+- *S8ca's stack check and Nim's call depth limit.* The first Windows run at this
+  stack died in `tsymex_rfc0005_s8ca_stack`: `maxCallDepth: 100_000` on a 16 MB
+  fiber reached Nim's limit of 2000 frames (9 a level, so 222 levels) before the
+  stack ran short, and a build with stack traces ends the process there.
+  `nativeStackShort` now also reads `nimFramesLeft`, keeping `nimFrameReserve`, and the call declines
+  in-band as a stack cut. Linux's stack still runs out first: `s8ca_stack`'s 45
+  levels are about 400 frames. `tsymex_rfc0005_b9_calldepth` pins it under a lower
+  limit (`-d:nimCallDepthLimit` in its `.nim.cfg`), so it runs on every platform.
 - *S8by's skip and step 1d.* S8by skips (1b) and (1c) after a facts-first SAT and
   leaves step 1d, which runs on step 1's UNSAT. Step 1d now decides `preSufNl`
   before step 2, so S8by's pin names 1d. The S8bp isolation suite still reaches

@@ -70,6 +70,20 @@ proc nativeStackPointer*(): uint {.noinline.} =
   result = cast[uint](addr marker)
   # Keep `marker` on the stack: an address taken and returned is enough.
 
+const nimCallDepthLimit {.intdefine.} = 2000
+  ## The limit in Nim's `nimFrame` (`system/excpt.nim`, the same define): a
+  ## build with stack traces ends the process at this many nested frames.
+
+proc nimFramesLeft*(): int =
+  ## RFC-0005 batch 9. The frames Nim's call depth check leaves below the
+  ## current one, `high(int)` in a build with no stack traces (no check).
+  when compileOption("stacktrace"):
+    let f = getFrame()
+    if f == nil: nimCallDepthLimit
+    else: nimCallDepthLimit - int(f.calldepth)
+  else:
+    high(int)
+
 proc nativeStackLeft*(): int =
   ## Bytes of native stack below the current frame on this thread;
   ## `high(int)` where the stack is not measured.

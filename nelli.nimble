@@ -1370,5 +1370,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cc_remainder",
             # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
             # A proc value's aliasing shapes decline; walker 241->245.
-            "tsymex_rfc0005_b9_integration"]:
+            "tsymex_rfc0005_b9_integration",
+            # A call declines before Nim's call depth limit ends the process.
+            "tsymex_rfc0005_b9_calldepth"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

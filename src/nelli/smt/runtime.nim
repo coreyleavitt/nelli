@@ -17064,6 +17064,12 @@ const
     ## recursion costs about 158 KB on c and 186 KB on cpp, so the first
     ## call, with nothing measured, is covered too.
 
+  nimFrameReserve = 400
+    ## RFC-0005 batch 9. The Nim frames a call keeps below it
+    ## (`nativeStackShort`): one level is 9 (`walk`, `walkStmt`, `walkBlock`
+    ## twice over, `walkCallArm`), and the lowering and the solves of the
+    ## deepest level take the rest.
+
 proc levelNeed(w: WalkCtx): int =
   ## RFC-0005 S8ca. The native stack a call needs left to be inlined.
   nativeStackReserve + 2 * max(w.levelStack, nativeLevelFloor)
@@ -17082,7 +17088,12 @@ proc nativeStackShort(w: var WalkCtx): int =
   ## the most so far kept in `WalkCtx.levelStack`; the need is twice that
   ## (at least `nativeLevelFloor`) plus `nativeStackReserve` (`levelNeed`):
   ## about 3 levels on a 1 MB stack, 45 (c) or 39 (cpp) on 8 MB.
+  ## RFC-0005 batch 9: a build with stack traces also ends the process at
+  ## Nim's call depth limit (`nimFramesLeft`), which a level costing under
+  ## 16 MB / 222 reaches before a Windows fiber's stack runs out. That is a
+  ## shortage of the same recursion, so the call declines the same way.
   let left = nativeStackLeft()
+  if nimFramesLeft() < nimFrameReserve: return left
   if left == high(int): return -1   # not measured on this platform
   if w.callStack.len > 0:
     let top = w.callStack[^1].sp
@@ -17128,6 +17139,7 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
   ## RFC-0005 S8an: a path that reaches the bail but that no execution can
   ## take is dropped (by the caller), not bailed: it has no behaviour to
   ## lose.
+  let framesShort = cut == dcutStack and nimFramesLeft() < nimFrameReserve
   let why =
     case cut
     of dcutHard:
@@ -17138,15 +17150,25 @@ proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
         "one, so the budget was not extended (maxRecursionDepth=" &
         $w.settings.budget.maxRecursionDepth & " bounds an extension)"
     of dcutStack:
-      "the native stack left (" & $(stackLeft div 1024) & " KB at depth " &
-        $w.callStack.len & ") is under what one more level needs (" &
-        $(levelNeed(w) div 1024) &
-        " KB), so the call is not inlined whatever the depth budget"
+      if framesShort:
+        "the " & $nimFramesLeft() & " frames left at depth " &
+          $w.callStack.len & " before Nim's call depth limit are under the " &
+          $nimFrameReserve & " the walk keeps, so the call is not inlined " &
+          "whatever the depth budget"
+      else:
+        "the native stack left (" & $(stackLeft div 1024) & " KB at depth " &
+          $w.callStack.len & ") is under what one more level needs (" &
+          $(levelNeed(w) div 1024) &
+          " KB), so the call is not inlined whatever the depth budget"
   let d = w.degrade(beBudgetExhaustedUnmodelled,
     if cut == dcutStack:
       "call-inlining stopped by the native stack while inlining `" &
-        stmt.callee & "` — " & why & "; run the analysis on a thread " &
-        "with a larger stack to reach deeper (beBudgetExhaustedUnmodelled)"
+        stmt.callee & "` — " & why & "; " &
+        (if framesShort:
+           "raise -d:nimCallDepthLimit or build without stack traces"
+         else:
+           "run the analysis on a thread with a larger stack") &
+        " to reach deeper (beBudgetExhaustedUnmodelled)"
     else:
       "call-inlining depth budget exhausted (maxCallDepth=" &
          $w.settings.budget.maxCallDepth & ") while inlining `" &

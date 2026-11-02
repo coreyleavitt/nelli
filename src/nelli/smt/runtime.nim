@@ -7732,10 +7732,14 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
   else:
-    lowerDegrade(seUnsupportedStringOp,
-      "string ordering `" & $op & "` is not modeled until S3")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), freshDegradeName("__strOrderingDegrade"), fresh)
+    # RFC-0005 S8cb (item 5): Z3's `str.<` is the lexicographic order of the
+    # code points, and under ADR-0006 a code point is the byte `cmpStrings`
+    # compares, a prefix ordered first.
+    case op
+    of bLt: ofBool(a.str < b.str)
+    of bLe: ofBool(a.str <= b.str)
+    of bGt: ofBool(b.str < a.str)
+    else: ofBool(b.str <= a.str)    # bGe
 
 proc svLeafEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5. Structural equality of two SAME-kind LEAF SymVals as a Z3Bool.
@@ -8263,18 +8267,15 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
     of bEq: ofBool(lb.bo == rb.bo)
     of bNe: ofBool(lb.bo != rb.bo)
     else:
-      # N46 (round-6 re-review): was a raw `raise newException`. Reached,
-      # unguarded, for an ordering comparator (bLt/bLe/bGt/bGe) on bool
-      # operands -- Nim's `system.nim` defines `<`/`<=` for `bool`
-      # (`false < true`), so `flag1 < flag2` in a loop guard is valid Nim
-      # reaching this arm. In-band degrade: a fresh unconstrained bool is
-      # sound. RFC-0005 S6b: `feUnsupportedOpHavoc` -- system's `<`/`<=`
-      # on `bool` is a magic (a same-signature user overload is ambiguous,
-      # so no user code can hide behind it), both operands are lowered, and
-      # the bool is fresh per evaluation.
-      degradeAlloc(tBool(), feUnsupportedOpHavoc,
-        "comparison op " & $op & " not valid on bool operands",
-        "__boolOrderDegrade")
+      # RFC-0005 S8cb (item 5): system's order on bool, `false < true` (it
+      # was a fresh bool, `feUnsupportedOpHavoc`, since RFC-0005 S6b).
+      # (`lowerCmp` is reached with comparison operators only, and raises
+      # nothing: see `loweringDidDegrade`.)
+      case op
+      of bLt: ofBool((not lb.bo) and rb.bo)
+      of bLe: ofBool((not lb.bo) or rb.bo)
+      of bGt: ofBool(lb.bo and (not rb.bo))
+      else: ofBool(lb.bo or (not rb.bo))    # bGe
   elif a.kind in {svFloat32, svFloat64}:
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
@@ -21597,6 +21598,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     ## DivByZeroDefect) and are not assert-specific. The ONE thing omitted is
     ## step (3): `forkDefect(... "AssertionDefect" ...)` — a violatable
     ## `symexAssume` must NEVER itself produce a false sxRaised(AssertionDefect).
+    ##
+    ## RFC-0005 S8cb: a literal `false` (`quit`, `parseExitCall`) ends every
+    ## path here. Carried on with a false pc, the path would lower what follows
+    ## the `quit`, which an arm's stand-in value does not type.
+    if stmt.acond.kind == iekBoolLit and not stmt.acond.bval:
+      return @[]
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return

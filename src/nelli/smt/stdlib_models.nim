@@ -83,7 +83,7 @@ const mathFpDeferredOps* = [
 ]
 
 const OpaqueEffectfulProcs* = [
-  "echo", "print", "write", "writeLine", "writeFile", "readFile",
+  "echo", "debugEcho", "print", "write", "writeLine", "writeFile", "readFile",
   "stdout", "stderr", "readLine", "readAll", "openFileStream",
   "sleep", "send", "recv", "open", "close",
 ]

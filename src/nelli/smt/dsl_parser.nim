@@ -7134,6 +7134,23 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(n[i].kind == nnkHiddenAddr or addrActualLvalue(n[i]) != nil)
     argLate.add LateAddr()
+    # RFC-0005 S8cn: one the callee also reaches by name: `gWrite(gs)` with
+    # `gs[0] = 50; a[0]` is 50 natively, and the walk binds the formal to a
+    # copy. A false `sxUnsat`, clean, on the channel (batch 9's `byValueTouch`
+    # declines the closure call's form).
+    block:
+      var touch: seq[string]
+      byValueTouch(n[i], touch)
+      if touch.len > 0:
+        for g in outerOf():
+          if ("n:" & g.strVal) in touch:
+            writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+              siteMsg(n, "by-value argument `" & n[i].repr & "` of `" &
+                      calleeSym.strVal & "` shares its memory with `" &
+                      g.strVal & "`, which the callee also reaches by name: " &
+                      "the walk binds the formal to a copy (feUnsupportedOp)"),
+              "by-value argument the callee also reaches (feUnsupportedOp)")
+            break
     if argFixed[^1] and hasIndexCall(n[i], false):
       # RFC-0005 S8br: a call in the lvalue's index is evaluated once,
       # here (`hoistIndexCalls`). The call node is copied, not edited.
@@ -7402,23 +7419,6 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         siteMsg(n, "`var` argument `" & n[i].repr & "` of `" & calleeSym.strVal &
                 "` is not a location the walk can write back to (feUnsupportedOp)"),
         "var argument write-back not modelled (feUnsupportedOp)")
-    # RFC-0005 S8cn: one the callee also reaches by name: `gWrite(gs)` with
-    # `gs[0] = 50; a[0]` is 50 natively, and the walk binds the formal to a
-    # copy. A false `sxUnsat`, clean, on the channel (batch 9's `byValueTouch`
-    # declines the closure call's form).
-    block:
-      var touch: seq[string]
-      byValueTouch(n[i], touch)
-      if touch.len > 0:
-        for g in outerOf():
-          if ("n:" & g.strVal) in touch:
-            writeBacks.add ctx.declineAtSite(feUnsupportedOp,
-              siteMsg(n, "by-value argument `" & n[i].repr & "` of `" &
-                      calleeSym.strVal & "` shares its memory with `" &
-                      g.strVal & "`, which the callee also reaches by name: " &
-                      "the walk binds the formal to a copy (feUnsupportedOp)"),
-              "by-value argument the callee also reaches (feUnsupportedOp)")
-            break
     if n[i].kind == nnkSym and varActualPtrSafety(n[i]) == 2:
       # RFC-0005 S8bn: the caller's own `var` formal passed on to a `var`
       # formal (Nim drops the `addr`); read only for a `var` formal.

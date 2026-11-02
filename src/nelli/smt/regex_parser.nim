@@ -1690,17 +1690,32 @@ proc replaceLemmas*(s, by, r: Z3String; f: ReplaceFacts;
       let anyB = star(byteSetRe(pcreAnyByte))
       result.add implies(k >= mkInt(1),
                          matches(s, concat(@[anyB, byteSetRe(f.first), anyB])))
-  if f.sure.card == 0: return
+  ##   * RFC-0005 S8cf (item 11): the two-byte form (`pairs`) for a literal,
+  ##     non-empty `by`: its bytes cannot put the two next to each other. In
+  ##     UTF mode both forms hold of a valid `s`.
+  if f.sure.card == 0 and f.pairs.len == 0: return
+  template holds(b: Z3Bool): Z3Bool =
+    (if f.utf: implies(matches(s, utf8ValidRe()), b) else: b)
   let byS = simplify(by)
   let literal = Z3_is_string(byS.ctx.raw, byS.raw)
   if literal:
-    result.add matches(r, star(union(byteSetRe(pcreAnyByte - f.sure),
-                                     mkRegex(byS))))
+    if f.sure.card > 0:
+      result.add holds(matches(r, star(union(byteSetRe(pcreAnyByte - f.sure),
+                                             mkRegex(byS)))))
     let byCodes = getStringContents(byS)
     for b in f.sure:
       if ord(b) notin byCodes:
-        result.add not contains(r, codeStr(ord(b)))
+        result.add holds(not contains(r, codeStr(ord(b))))
+    if byCodes.len > 0:
+      for (x, y) in f.pairs:
+        if byCodes[^1] == ord(x) or byCodes[0] == ord(y): continue
+        var inBy = false
+        for i in 0 ..< byCodes.high:
+          if byCodes[i] == ord(x) and byCodes[i + 1] == ord(y): inBy = true
+        if not inBy:
+          result.add holds(not contains(r, concat(@[codeStr(ord(x)),
+                                                    codeStr(ord(y))])))
   else:
     for b in f.sure:
       let u = codeStr(ord(b))
-      result.add implies(contains(r, u), contains(by, u))
+      result.add holds(implies(contains(r, u), contains(by, u)))

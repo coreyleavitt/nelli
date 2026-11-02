@@ -842,6 +842,28 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # included (`len(s)`, probed on both Z3 versions).
     SymVal(kind: svInt, zi: lowerIndexSplit(recv.str, splitNeedle(sub),
                                             mkInt(0), last = true))
+  of iekStrCount:
+    # RFC-0005 S8cf (item 11). `strutils.count(s, sub)`, non-overlapping: a
+    # recursive definition (`fuel` as S8bi's) with the facts Z3's unfolding
+    # does not reach.
+    let recv = lowerStrOperand(env, e.strArgs[0])
+    requireStr(recv, "iekStrCount")
+    let sub = needleAsStr(lowerStrOperand(env, e.strArgs[1]), "iekStrCount")
+    let ctx = recv.str.ctx
+    let f = defineRecFun[Z3String, Z3Int, Z3Int](ctx,
+      regexFreshName("__strCount"),
+      proc (self: Z3FuncDecl[(Z3String, Z3Int), Z3Int]; u: Z3String;
+            fuel: Z3Int): Z3Int =
+        let at0 = indexOf(u, sub, mkInt(0))
+        let past = at0 + len(sub)
+        ite(fuel <= mkInt(0), mkInt(0),
+          ite(at0 < mkInt(0), mkInt(0),
+              mkInt(1) + self(substr(u, past, len(u) - past), fuel - mkInt(1)))))
+    let v = f(recv.str, len(recv.str) + mkInt(1))
+    regexRecFactConds.add (v >= mkInt(0)) and (v * len(sub) <= len(recv.str)) and
+      implies(contains(recv.str, sub), v >= mkInt(1)) and
+      implies(v >= mkInt(1), contains(recv.str, sub))
+    SymVal(kind: svInt, zi: v)
   of iekStrReplaceAll:
     # Phase 15 S5 / RFC-0005 S8c. `strutils.replace(s, sub, by)` replaces
     # EVERY occurrence (both overloads: `string` and `char` sub/by), so it is
@@ -1406,7 +1428,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
            bo: (startSV.zi >= mkInt(0)) and matches(tail, region))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrRfind, iekStrReplaceAll,
+                   iekStrFind, iekStrRfind, iekStrCount, iekStrReplaceAll,
                    iekStrSplit, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrCaptureRe,
                    iekStrConcat,

@@ -173,7 +173,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
-     iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+     iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrCaptureRe,

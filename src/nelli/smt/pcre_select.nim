@@ -3988,6 +3988,13 @@ type ReplaceFacts* = object
     ## an attempt at a position holding one matches, whatever follows it
   first*: set[char]
     ## every match's first byte is one of these (all 256 when not computed)
+  pairs*: seq[(char, char)]
+    ## RFC-0005 S8cf (item 11): two bytes, neither `sure`, an attempt at which
+    ## matches whatever follows them: never next to each other between two
+    ## matches (`maxPairs` at most, else none)
+  utf*: bool
+    ## RFC-0005 S8cf: `sure` and `pairs` hold of a valid subject: an invalid one
+    ## is an error and kept whole
 
 proc hasAcceptRx(x: Rx): bool =
   case x.kind
@@ -3998,6 +4005,34 @@ proc hasAcceptRx(x: Rx): bool =
     false
   of rxRep: hasAcceptRx(x.sub)
   else: false
+
+const maxPairs = 64
+
+proc nonEmptyAttempt(n: Nfa; spec: AttemptSpec): bool =
+  let d = buildAttempt(n, spec)
+  if not d.ok: return true
+  minimizeMap(d)[2][0] >= 0
+
+proc searchMoves(n: Nfa): bool =
+  ## RFC-0005 S8cf (item 11). Whether some attempt ends the search or moves it
+  ## past positions: a COMMIT, a SKIP past its start, or a limit stops it.
+  case limitEffect(n)[0]
+  of leNone: discard
+  of leUnknown, leZero: return true
+  of leCounted:
+    for pc in startClasses(n):
+      for acc in [acErrM, acErrR]:
+        if nonEmptyAttempt(n, AttemptSpec(acc: acc, anchored: true, pc0: pc)):
+          return true
+  if not (n.hasCommit or n.hasSkip): return false
+  for pc in startClasses(n):
+    for ne in [false, true]:
+      if n.hasCommit and
+         nonEmptyAttempt(n, AttemptSpec(acc: acCommit, noEmpty: ne, pc0: pc)):
+        return true
+      if n.hasSkip and
+         nonEmptyAttempt(n, AttemptSpec(acc: acSkipT, noEmpty: ne, pc0: pc)):
+        return true
 
 proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
   ## RFC-0005 S8bt. The facts of `n` (read from `root`).
@@ -4012,11 +4047,13 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
   ##     and the search attempts there -- the start-of-match scan and the
   ##     minimum-length and required-character checks skip only positions
   ##     where no match starts. Stated only where nothing else moves the
-  ##     search: no COMMIT, PRUNE, SKIP or THEN (a SKIP jumps past
-  ##     positions, a COMMIT ends the search), no UTF mode (an invalid
-  ##     subject is an error and kept whole) and no limit below PCRE's
-  ##     default (an error keeps the rest); an LF is not sure where the
-  ##     bumpalong's CRLF skip can pass over it (`skipActive`).
+  ##     search. RFC-0005 S8cf (item 11): no attempt on any subject ends in a
+  ##     COMMIT or a SKIP past its start, or at a limit below PCRE's default
+  ##     (`searchMoves`; each keeps the rest, and PRUNE and THEN do not move
+  ##     the search); a continuation byte is not sure in UTF mode and the fact
+  ##     holds of a valid subject (`utf`). A SKIP:NAME without a MARK keeps a
+  ##     count across attempts, whose runs differ: not computed. An LF is not
+  ##     sure where the bumpalong's CRLF skip can pass over it (`skipActive`).
   ##   * A byte is outside `first` when no attempt at a position holding
   ##     it matches, whatever follows: for every class of what precedes the
   ##     start, the no-match verifier (`buildVerifier`, the attempt as the
@@ -4042,10 +4079,10 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
         if t < 0 or univIdx(nls, 0) notin v.univ[t]:
           first.incl symByte(sym)
     if fine: result.first = first
-  if not n.ok or n.utf or limitEffect(n)[0] != leNone or n.hasCommit or
-     n.hasSkip or n.hasThen or n.hasPrune or n.hasNeverSkip:
-    return
+  result.utf = n.utf
+  if not n.ok or n.hasNeverSkip or searchMoves(n): return
   var sure: set[char] = {'\x00' .. '\xFF'}
+  var alive: array[256, set[char]]
   for pc in startClasses(n):
     for ne in [false, true]:
       let d = buildAttempt(n, AttemptSpec(acc: acNone, anchored: true,
@@ -4055,6 +4092,24 @@ proc replaceFacts*(n: Nfa; root: Rx): ReplaceFacts =
       let st = mapped[0]
       if st < 0: continue          # no subject fails the attempt
       for sym in 0 ..< symMark:
-        if trans[st][sym] >= 0: sure.excl symByte(sym)
+        let t = trans[st][sym]
+        if t < 0: continue
+        sure.excl symByte(sym)
+        # RFC-0005 S8cf: `sure`'s reading one byte further.
+        for sym2 in 0 ..< symMark:
+          if trans[t][sym2] >= 0:
+            alive[ord(symByte(sym))].incl symByte(sym2)
   if n.skipActive: sure.excl '\n'
+  if n.utf: sure = sure - {'\x80' .. '\xBF'}
   result.sure = sure
+  # RFC-0005 S8cf: a byte of a gap is one Nim's loop searched from only when
+  # no match is empty (an empty match's next byte is copied, not searched).
+  if result.mn >= 1:
+    for x in '\x00' .. '\xFF':
+      if x in sure or (x == '\n' and n.skipActive) or
+         (n.utf and x in {'\x80' .. '\xBF'}):
+        continue
+      for y in '\x00' .. '\xFF':
+        if y in sure or y in alive[ord(x)]: continue
+        result.pairs.add (x, y)
+    if result.pairs.len > maxPairs: result.pairs = @[]

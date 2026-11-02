@@ -575,6 +575,7 @@ type
     iekStrFind       ## `s.find(sub[,start])` → Z3 `indexOf[, start]`, −1 absent
                      ## strArgs = [recv,sub] or [recv,sub,start] (S4; RFC Q1 ADR-0025)
     iekStrRfind      ## `s.rfind(sub)`     → Z3 `lastIndexOf`, −1 absent (RFC M3)
+    iekStrCount      ## RFC-0005 S8cf: `s.count(sub)`, non-overlapping
     iekStrContains   ## `sub in s`         → Z3 `(seq.contains s sub)`  (S4)
     iekStrStartsWith ## `s.startsWith(p)`  → Z3 `(seq.prefixof p s)`    (S4)
     iekStrEndsWith   ## `s.endsWith(q)`    → Z3 `(seq.suffixof q s)`    (S4)
@@ -912,7 +913,7 @@ type
       tabRecv*: IRExpr
       tabKey*:  IRExpr
       tabVal*:  IRExpr
-    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+    of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
        iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
        iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
        iekStrCaptureRe,
@@ -4278,7 +4279,7 @@ proc zeroIRExprForType*(ty: IRType): IRExpr =
                ## zero this cycle; caller degrades (SND-1), never guesses.
 
 const StrOpKinds* = {
-  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
+  iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
   iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
   iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
   iekStrCaptureRe,

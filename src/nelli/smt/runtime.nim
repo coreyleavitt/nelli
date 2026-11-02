@@ -3948,7 +3948,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # (`s.match(re"…")`/`s.contains(re"…")`) produce a Z3Bool. svBool sentinel so
     # a surrounding boolean context is lowered correctly.
     some(SymVal(kind: svBool, bo: mkBool(true)))
-  of iekStrFind, iekStrRfind, iekStrFindRe, iekStrToInt:
+  of iekStrFind, iekStrRfind, iekStrCount, iekStrFindRe, iekStrToInt:
     # Phase 15 S4/S6b/S10a: `s.find(sub)` / `s.find(re"…")` / `parseInt(s)` → Z3Int.
     # RFC M3: `s.rfind(sub)` → Z3Int too (same shape, `lastIndexOf` instead of
     # `indexOf`). svInt sentinel so a surrounding comparison (e.g.
@@ -3978,7 +3978,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svString, str: mkString("")))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
-                   iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
+                   iekStrFind, iekStrRfind, iekStrCount, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
                    iekStrCaptureRe,
                    iekIntToStr, iekStrToInt,
@@ -8382,7 +8382,7 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
   lowerDegrade(kind, msg)
   var fresh: seq[Z3Bool]
   case e.kind
-  of iekStrLen, iekStrFind, iekStrRfind, iekStrToInt, iekStrFindRe:
+  of iekStrLen, iekStrFind, iekStrRfind, iekStrCount, iekStrToInt, iekStrFindRe:
     # Successful-path result is svInt (Z3Int) — e.g. `s.len`/`s.find(...)`
     # build `SymVal(kind: svInt, ...)` directly. Force `allocateSym(itInt)`'s
     # bare (non-tuple) svInt allocation via `intOffsetPositions = @[0]`

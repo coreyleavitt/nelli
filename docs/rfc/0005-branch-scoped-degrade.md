@@ -14174,8 +14174,8 @@ pin is 238, and both suites carry the `>= 238` floor.
   `wb_dead`).
 
 **As landed (S8cd, walker 249) — batch 6's integration findings.** Suites
-`tsymex_rfc0005_s8cd_globals` (items 2, 3, 5) and `tsymex_rfc0005_s8cd_ops`
-(items 1, 4, 6). The base is 136ad60 (batch 7, walker 237), with batch 9 (e497dcf, walker
+`tsymex_rfc0005_s8cd_globals` (items 2, 3, 5), `tsymex_rfc0005_s8cd_ops`
+(items 1, 6) and `tsymex_rfc0005_s8cd_setorder_small` / `_large` (item 4). The base is 136ad60 (batch 7, walker 237), with batch 9 (e497dcf, walker
 245) merged; 249 is the next number free. The job names all
 six items PRECISION; pinning items 2 and 4 found SOUNDNESS bugs (below), and
 items 1, 4, 5 and 6 did not hold as the job stated them.

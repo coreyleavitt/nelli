@@ -1288,6 +1288,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bw_remainder",
             "tsymex_rfc0005_s8cd_globals",
             "tsymex_rfc0005_s8cd_ops",
+            "tsymex_rfc0005_s8cd_setorder_small",
+            "tsymex_rfc0005_s8cd_setorder_large",
             # RFC-0005 S8bp: every checkCapped search and the per-thread
             # kind probes in contexts of their own (no step's cost moves
             # with the walk's state; a thread's first walk searches as its

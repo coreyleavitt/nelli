@@ -34,3 +34,21 @@ suite "S8cf: limitReach":
       for n in [r.safe, max(r.safe - 1, 0)]:
         let got = find('a'.repeat(n), rx)
         check got >= -1
+
+  test "native: stacks at the bound, on mixed subjects":
+    # RFC-0005 S8cf (item 2): a group's frames, and the JIT's own stack (-27).
+    # Past the frame budget the interpreter's stack ends in SIGSEGV, so a bound
+    # past it stops this test.
+    for p in ["(a|b)*c", "(a)*c", "(?:a|b)*c", "(?:ab)*c", "(?:ab)+c", "(a|b)+c",
+              "(ab|a)*c", "(?:ab|a)+c", "(?:a|b)*?c", "(a|b){2,}c"]:
+      let r = reach(p)
+      let rx = re(p)
+      checkpoint p & " safe " & $r.safe & " never " & $r.never
+      if r.never: continue
+      check r.safe >= 8
+      let n = r.safe
+      for s in ['a'.repeat(n), "ab".repeat(n div 2), "aab".repeat(n div 3),
+                'a'.repeat(n - 1) & 'c', 'b'.repeat(n)]:
+        check s.len <= n
+        check find(s, rx) >= -1
+        check matchLen(s, rx) >= -1

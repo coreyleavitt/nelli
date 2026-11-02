@@ -1,5 +1,5 @@
 ## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, items 3
-## and 4 (items 1 and 2 are in `tsymex_rfc0005_s8bv_remainder`).
+## and 4 (items 1 and 2 are in `tsymex_rfc0005_s8bv_iter_*` and `_subrange*`).
 ##
 ## Item 3: a pigeonhole-hard `card` comparison (`card(s + {c}) > card(s) +
 ## 1` over `set[char]`) ran out of `seqQueryRLimit` (`sxUnknown`). Each

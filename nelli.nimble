@@ -1065,11 +1065,13 @@ task test, "Run the test suite":
             # non-constant set literals, newSeqUninit's unwritten reads.
             # Walker 220.
             "tsymex_rfc0005_s8bq_remainder",
-            # RFC-0005 S8bv -- S8bq's remainder: iterating a builtin set and
-            # enum subranges (no set conversion across domains exists);
-            # pigeonhole-hard card queries and newSeqUninit taint precision
-            # in the second file. Walker 226.
-            "tsymex_rfc0005_s8bv_remainder",
+            # RFC-0005 S8bv -- S8bq's remainder: iterating a builtin set, enum
+            # subranges (no set conversion across domains exists), pigeonhole-
+            # hard card queries and newSeqUninit taint precision. Walker 226.
+            "tsymex_rfc0005_s8bv_iter_order",
+            "tsymex_rfc0005_s8bv_iter_forms",
+            "tsymex_rfc0005_s8bv_subrange",
+            "tsymex_rfc0005_s8bv_subrange_sets",
             "tsymex_rfc0005_s8bv_card_uninit",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound

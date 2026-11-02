@@ -4719,7 +4719,7 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           # RFC-0005 S8bv: no arm for a builtin set between two base
           # domains. Nim has no such conversion: every one is a type
           # mismatch, and a set literal is typed as its target, converting
-          # each ELEMENT (pinned natively in tsymex_rfc0005_s8bv_remainder).
+          # each ELEMENT (pinned natively in tsymex_rfc0005_s8bv_subrange).
           parseExpr(wrapped, preamble, ctx)
   of nnkHiddenCallConv:
     # Issue #163 review (rev item 1). The compiler inserts `nnkHiddenCallConv`

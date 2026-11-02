@@ -33,3 +33,12 @@ state = "pending"
 - nelli: yours, s8ce (2), s8bx (5), CR2, s8m_exits, r4_strip, s8bb_constructs, s8s_precision. Run on Z3 5.1 and 4.13.4, plus cpp for the new suite. If the hooks change again, also run full `tsymex_*` on c on both Z3 versions.
 - All three Windows legs green.
 - Report DONE to `worker-reports/s8ck.md`, with per-file Windows times.
+
+## Added after item 1 (worker-reports/s8ck-item1.md)
+Item 1 is closed: cc5ffc9 is accepted, and the coordinator read all 17 changed src files and found the refcount conditions preserved. nim-z3 main fast-forwards to cc5ffc9, so everything here stacks on it as later nim-z3 commits.
+
+8. **examples/properties.nim:30** uses `.toInt` on a `Z3Int`, and does not compile. Commit the tested `toInt64` fix. CI only runs `test`, which is how this went unnoticed: add the examples to nim-z3's CI, on c and cpp.
+9. **The leak gate cannot fail on an invalid access.** It uses `--error-exitcode=0` and only greps "definitely lost: 0 bytes". Make invalid reads, invalid writes and invalid frees fail it. Add a narrow suppression for the spacer read below, naming the defect. Then show the gate going RED on a planted bad dec_ref.
+10. **The Z3 invalid read in spacer::pob_queue::reset().** It is accepted as an upstream Z3 defect; nelli does not reach fixedpoint. Record it in nim-z3's docs, and reduce it to the smallest input you can, with the Z3 versions, for an upstream report. Do not file it.
+11. **Generated seq and ref hooks on the raise path.** The hook discipline covers declared hooks, but `seq[Z3Bool]`-style generated hooks are not `quirky`. Pin that a seq of several hook-owning values, destroyed with an exception in flight, releases every element. Fix it if it does not.
+12. **Unfreed contexts.** Item 2's fix must separate real leaks from live globals, under `-d:z3CtxDestroyCount`, including `trcf`'s 26 `Z3ContextOwn` blocks and about 430 MB possibly lost.

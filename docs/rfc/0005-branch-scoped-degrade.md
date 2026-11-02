@@ -14175,8 +14175,8 @@ pin is 238, and both suites carry the `>= 238` floor.
 **As landed (S8cl, walker 248 provisional) — S8ca's remainder.** Built on batch
 9 (e497dcf, walker 245, which carries S8ca); 246 and 247 are taken. Started on
 batch 8 (afce42a) merged with S8ca 8cef160 (f7779d5, walker 246). Suites
-`tsymex_rfc0005_s8cl_magics` (items 1-3) and
-`tsymex_rfc0005_s8cl_strings` (item 4): every SUT that can run natively has a
+`tsymex_rfc0005_s8cl_magics` (items 1a, 1b), `_lifetime` (items 1c, 2, 3) and
+`_strings` (item 4): every SUT that can run natively has a
 native run confirming which labels Nim hits.
 
 S8bl, in the base, had already modelled `wasMoved`, `reset`, `setLen`, `move`

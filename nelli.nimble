@@ -1375,5 +1375,6 @@ task test, "Run the test suite":
             "tsymex_rfc0005_b9_calldepth",
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
+            "tsymex_rfc0005_s8cl_lifetime",
             "tsymex_rfc0005_s8cl_strings"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

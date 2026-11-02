@@ -42,16 +42,6 @@ template candidate(fn: typed, lbl: string) =
     check r.errors.hasKind(feGlobalHavoc)
     check not r.errors.hasKind(weInternalWalkerFault)
 
-template declinesGlobal(fn: typed, lbl: string) =
-  ## The global's type has no entry-value model (`programGlobal` holds
-  ## none for a case object): the walk declines, never `sxUnsat`.
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feGlobalReadUnmodelled)
-    check not r.errors.hasKind(weInternalWalkerFault)
-
 template dead(fn: typed, lbl: string) =
   ## Unreachable for every entry value.
   block:
@@ -143,13 +133,13 @@ suite "batch 6: a statement on an unbound global receiver":
   test "an empty pop's IndexDefect":
     candidate(sutPopEmpty, "gpop_empty")
   test "a discriminator reassignment's FieldDefect (was a false sxUnsat)":
-    # A case-object global is not modelled (`feGlobalReadUnmodelled`); the
-    # arm skipped the statement, so the raise was `sxUnsat` with no error
+    # The arm skipped the statement, so the raise was `sxUnsat` with no error
     # and the label after it a clean `sxSat` over a write it never made.
-    declinesGlobal(sutReassign, "grs_raise")
-    declinesGlobal(sutReassign, "grs_after")
+    # RFC-0005 S8bz (item 3): the discriminator is a part at its entry value.
+    candidate(sutReassign, "grs_raise")
+    candidate(sutReassign, "grs_after")
   test "a symbolic discriminator reassignment's FieldDefect":
-    declinesGlobal(sutReassignSym, "grss_raise")
+    candidate(sutReassignSym, "grss_raise")
 
   test "walker version floor":
     check parseInt(symexWalkerVersion) >= 230

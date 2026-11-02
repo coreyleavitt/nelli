@@ -114,7 +114,8 @@ proc sutSeqSeqInt(ws: seq[seq[int]], y: int) =
 # emitTyAndReader's itTable catch-all ("only Table[string, int] supported").
 # RFC-0005 S8ar renders a string value, and S8at a `seq[int]` value; the
 # value is now a tuple, which no Table backs.
-proc sutTableStrStr(t: Table[string, (int, int)], y: int) =
+type S8bzDistinctTup = distinct (int, int)  ## RFC-0005 S8bz backs a tuple value; a `distinct` one is unbacked.
+proc sutTableStrStr(t: Table[string, S8bzDistinctTup], y: int) =
   if y == 42:
     symexTarget("table_strstr_target")
 
@@ -225,7 +226,7 @@ suite "symex RFC-chapulin-hardening CR-2c — witness-reader catch-all degrade":
         sawKind = true
     check sawKind
 
-  test "CR-2c-3: Table[string, string] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
+  test "CR-2c-3: Table[string, distinct tuple] compiles and degrades to whole-run sxUnknown + feUnsupportedWitnessType":
     let r = symexFind(sutTableStrStr, tLabel("table_strstr_target"))
     check r.status == sxUnknown
     check r.status != sxSat

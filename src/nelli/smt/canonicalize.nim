@@ -216,7 +216,9 @@ const symexWalkerVersion* = "241"
   ## overlaps under both layouts (item 6). SOUNDNESS: a `ptr` of a whole
   ## aggregate, and a `ptr` into a by-value part of a `ref object`, addressed
   ## nothing the walk held, a clean false `sxUnsat`: the first now declines,
-  ## the second is a target. Verdicts move, so cached entries rotate.
+  ## the second is a target. A store through a pointer before the path holds
+  ## its location reaches it (`ptrApplyMissed`; was a false `sxSat`). Verdicts
+  ## move, so cached entries rotate.
   ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their

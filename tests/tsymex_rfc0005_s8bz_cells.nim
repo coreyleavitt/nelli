@@ -332,7 +332,7 @@ proc h3r(h: H3; p: ptr int) =
     if p[] == 4: symexTarget("h3r")
 
 proc h3late(h: H3; p: ptr int) =
-  # The store came before this path held the part, so it did not reach it. Nim
+  # The store came before this path held the part; it still reached it. Nim
   # cannot hit this target: never the false `sxSat`.
   if p != nil and h != nil:
     p[] = 1
@@ -343,12 +343,29 @@ proc h3lateN(h: H3; p: ptr int) =
     p[] = 1
     let k = h.n
     if p[] != 1 and k == k: symexTarget("h3lateN")
-proc h3lateOk(h: H3; p: ptr int) =
-  # One pointer's store reaches what another's dereference names only if it
-  # names it too: with none before, the read is free.
+proc h3lateHit(h: H3; p: ptr int) =
   if p != nil and h != nil:
+    p[] = 1
+    h.n = 4
+    if p[] == 4: symexTarget("h3lateHit")
+proc h3lateTwo(h: H3; p, q: ptr int) =
+  # Another pointer's store, in order under the field's later write.
+  if p != nil and q != nil and h != nil:
+    q[] = 2
+    p[] = 1
     let k = h.n
-    if p[] == k + 1: symexTarget("h3lateOk")
+    if q[] == 1 and k == k: symexTarget("h3lateTwo")
+proc h3lateDead(h: H3; p, q: ptr int) =
+  if p != nil and q != nil and h != nil:
+    q[] = 2
+    p[] = 1
+    let k = h.n
+    if q[] != 1 and q[] != 2 and k == k: symexTarget("h3lateDead")
+proc h1late(h: H1; p: ptr int) =
+  # A seq's element has no such store: a stated decline.
+  if p != nil and h != nil:
+    p[] = 1
+    if h.xs.len > 0 and p[] != 1: symexTarget("h1late")
 
 suite "S8bz: a by-value part of a heap object":
   test "nim":
@@ -358,11 +375,16 @@ suite "S8bz: a by-value part of a heap object":
   test "a target of the pointer":
     confirmed(h3w, "h3w")
     confirmed(h3r, "h3r")
-  test "a store before the path held the part: a stated decline":
-    inBand(h3late, "h3late", "which that store did not reach")
-    inBand(h3lateN, "h3lateN", "which that store did not reach")
-  test "no store before it: no decline":
-    confirmed(h3lateOk, "h3lateOk")
+  test "a store before the path held the part reaches it":
+    discard clean(h3late, "h3late", sxUnsat)
+    discard clean(h3lateN, "h3lateN", sxUnsat)
+    confirmed(h3lateHit, "h3lateHit")
+    # Both pointers at one object no parameter reaches, which a witness does
+    # not hold (RFC-0005, "As landed (S8bz)"): no replay.
+    discard clean(h3lateTwo, "h3lateTwo", sxSat)
+    discard clean(h3lateDead, "h3lateDead", sxUnsat)
+  test "where it cannot: a stated decline":
+    inBand(h1late, "h1late", "which that store did not reach")
 
 # ---- a whole aggregate's pointer ----------------------------------------------
 #

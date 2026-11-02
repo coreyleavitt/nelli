@@ -496,7 +496,16 @@ type
     idx:    Z3Int
     dead:   bool
 
+  PtrStore = object
+    ## RFC-0005 S8bz. A store through a pointer: what later candidates of the
+    ## pointer, unknown to it then, must still see (`ptrApplyMissed`).
+    typeId: string
+    ptrAst, val: Z3AnyAst
+    reached: seq[int64]   ## the candidates' codes it has been applied to
+
   Path = ref object
+    ptrStores: seq[PtrStore]
+      ## RFC-0005 S8bz. Every store through a pointer on this path, in order.
     pc:        seq[Z3Bool]
     defectSurvivorPc: seq[Z3Bool]
       ## Phase 16 ADR-0012. HARD path constraints that are NOT branch selectors:
@@ -828,6 +837,7 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
        addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
        elemCells: parent.elemCells,                      ## RFC-0005 S8be
+       ptrStores: parent.ptrStores,                      ## RFC-0005 S8bz
        loopIters: parent.loopIters)                      ## RFC-0005 S8y
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =

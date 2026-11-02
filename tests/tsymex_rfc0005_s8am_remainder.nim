@@ -372,7 +372,8 @@ suite "S8am (6b) char/byte/uint8 Table values and HashSet elements are reachable
 proc intKeyTable(t: Table[(int, int), int]) =
   if t.len > 0: symexTarget("s8am_ikt")
 
-proc floatValTable(t: Table[string, (int, int)]) =
+type S8bzDistinctTup = distinct (int, int)  ## RFC-0005 S8bz backs a tuple value; a `distinct` one is unbacked.
+proc floatValTable(t: Table[string, S8bzDistinctTup]) =
   if t.len > 0: symexTarget("s8am_fvt")
 
 proc stringSet(s: HashSet[string]) =
@@ -383,7 +384,7 @@ suite "S8am (6c) non-string Table keys and non-int-family values/elements stay s
     let r = intKeyTable.symexFind(tLabel("s8am_ikt"))
     expectUnknown(r, feUnsupportedWitnessType)
 
-  test "Table[string, (int, int)] param -- tuple value -- feUnsupportedWitnessType":
+  test "Table[string, distinct tuple] param -- `distinct` value -- feUnsupportedWitnessType":
     let r = floatValTable.symexFind(tLabel("s8am_fvt"))
     expectUnknown(r, feUnsupportedWitnessType)
 

@@ -3315,36 +3315,66 @@ proc ptrInactiveMsg(pointee: IRType): string =
     "address it, which that store did not reach -- not modelled (RFC-0005 " &
     "S8bw, S8bz; feUnsupportedOp)"
 
-proc ptrStoreKey(typeId: string; code = ""): string =
-  ## RFC-0005 S8bz. The `liveRefs` key (threaded and union-merged with the
-  ## path's heaps) of the pointers stored through at type `typeId`, or with
-  ## `code` of those whose store reached that candidate: `ptrTargets` lists
-  ## what the path holds so far, so a later candidate missed the store.
-  typeId & "__@ptrstore" & code
+proc ptrMissedBy(p: Path; typeId: string; code: int64): seq[int] =
+  ## RFC-0005 S8bz. The stores through a pointer on this path, at `typeId`,
+  ## that have not reached the candidate `code`: `ptrTargets` lists what the
+  ## path holds so far, so a location it holds later missed them.
+  for i, st in p.ptrStores:
+    if st.typeId == typeId and code notin st.reached: result.add i
+
+proc ptrApplyMissed(ctx: Z3Context; p: Path; typeId: string;
+                    targets: seq[PtrTarget]) =
+  ## RFC-0005 S8bz. A scalar field family the path holds only now takes the
+  ## earlier stores into its initial constant, under every later write of the
+  ## family. Without them a dereference naming it was a false `sxSat`
+  ## (`p[] = 1; h.n = 4; if p[] != 1 and p[] != 4`). A read of the family before
+  ## this saw the constant: free, which admits what the store wrote.
+  for t in targets:
+    if t.famKey.len == 0 or t.seqIdx or t.tabKey or t.aggregate or t.hasArm:
+      continue
+    let missed = ptrMissedBy(p, typeId, t.code)
+    if missed.len == 0: continue
+    let cur = p.heaps[t.famKey]
+    let arrSort = sortOfRaw(ctx, cur.raw)
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+                                               ("heap_" & t.famKey).cstring)
+    # Each term wrapped: a raw one has no reference, and the next call may free it.
+    let init = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+    var arr = init
+    for i in missed:
+      let st = p.ptrStores[i]
+      let selE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+        p.heaps[ptrSelKey(typeId)].raw, st.ptrAst.raw))
+      let objE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+        p.heaps[ptrObjKey(typeId, t.famKey)].raw, st.ptrAst.raw))
+      let old = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, objE.raw))
+      let elem = wrap[Z3AnyAst](ctx, checkedIte(ctx,
+        ptrSelIs(ctx, selE, t.code).raw, st.val.raw, old.raw))
+      arr = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw, objE.raw, elem.raw))
+      p.ptrStores[i].reached.add t.code
+    var frm = [init.raw]
+    var to = [arr.raw]
+    p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw,
+      cur.raw, cuint(1), cast[ptr UncheckedArray[RawZ3Ast]](frm[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](to[0].addr)))
 
 proc ptrInactive(ctx: Z3Context; p: Path; typeId: string; sel: Z3AnyAst;
                  targets: seq[PtrTarget]): Option[Z3Bool] =
   ## RFC-0005 S8bw (item 3). `sel` names a case object's branch field whose
   ## branch is not active: Nim's dereference reads (or writes) whatever the
   ## active branch holds there, which this model does not lay out. RFC-0005
-  ## S8bz: or a candidate an earlier store through a pointer naming it did not
-  ## reach, so its value here is not Nim's (a false `sxSat`).
+  ## S8bz: or a candidate `ptrApplyMissed` could not give an earlier store, so
+  ## its value here is not Nim's (a false `sxSat`).
   var c: Z3Bool
   var any = false
   template add(bad: Z3Bool) =
     c = if any: c or bad else: bad
     any = true
   for t in targets:
-    let stored = p.liveRefs.getOrDefault(ptrStoreKey(typeId))
-    let reached = p.liveRefs.getOrDefault(ptrStoreKey(typeId, $t.code))
-    for e in stored:
-      var hit = false
-      for r in reached:
-        if r.raw == e.raw: hit = true
-      if not hit:
-        let selE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
-          p.heaps[ptrSelKey(typeId)].raw, e.raw))
-        add(ptrSelIs(ctx, sel, t.code) and ptrSelIs(ctx, selE, t.code))
+    for i in ptrMissedBy(p, typeId, t.code):
+      let selE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+        p.heaps[ptrSelKey(typeId)].raw, p.ptrStores[i].ptrAst.raw))
+      add(ptrSelIs(ctx, sel, t.code) and ptrSelIs(ctx, selE, t.code))
     if not t.hasArm: continue
     # RFC-0005 S8bz (item 6): an inactive branch's overlapping field reads
     # the active field's bytes (`ptrOverlapRead`).
@@ -3431,6 +3461,7 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   if tg.decline.len > 0:
     result.decline = tg.decline
     return
+  ptrApplyMissed(ctx, p, typeId, tg.targets)
   result.inactive = ptrInactive(ctx, p, typeId, tg.sel, tg.targets)
   for i in countdown(tg.targets.high, 0):
     let t = tg.targets[i]
@@ -3499,18 +3530,15 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   var scratch: seq[Z3Bool]
   let proto = allocateSym(pointee, "__ptrTargetStoreProto", scratch)
   let famVal = heapStoreValue(val, proto, pointee)
+  ptrApplyMissed(ctx, p, typeId, tg.targets)
   inactive = ptrInactive(ctx, p, typeId, tg.sel, tg.targets)
-  template logStore(key: string) =
-    var log = p.liveRefs.getOrDefault(key)
-    var seen = false
-    for r in log:
-      if r.raw == ptrAst.raw: seen = true
-    if not seen:
-      log.add ptrAst
-      p.liveRefs[key] = log
-  logStore(ptrStoreKey(typeId))
+  # RFC-0005 S8bz: for the candidates a later dereference finds. Only a store
+  # of the family heaps' sort can be applied there (`ptrApplyMissed`).
+  var logged = PtrStore(typeId: typeId, ptrAst: ptrAst,
+                        val: wrap[Z3AnyAst](ctx, rawAnyAstOf(famVal)))
+  for t in tg.targets: logged.reached.add t.code
+  p.ptrStores.add logged
   for t in tg.targets:
-    logStore(ptrStoreKey(typeId, $t.code))
     let guard = ptrSelIs(ctx, tg.sel, t.code)
     # RFC-0005 S8bz (item 6): while another branch is active, its bytes.
     for ov in t.overlaps:

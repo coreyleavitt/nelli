@@ -163,8 +163,9 @@ proc cappedS8(a: int8, b: int16, c: int32) =
     symexTarget("s8_capped")
 
 ## RFC-0005 S8at backs a container value (this was
-## `Table[string, seq[int]]`); the bad value is a tuple now.
-proc signatureS8(t: Table[string, (int, int)], y: int) =
+## `Table[string, seq[int]]`), and S8bz a tuple; the bad value is a `distinct` one.
+type S8bzDistinctTup = distinct (int, int)  ## RFC-0005 S8bz backs a tuple value; a `distinct` one is unbacked.
+proc signatureS8(t: Table[string, S8bzDistinctTup], y: int) =
   ## Signature: the parameter type itself cannot be allocated. RFC-0005
   ## S8ar backs a `string` value (this was `Table[string, string]`); a
   ## container value is still unbacked.

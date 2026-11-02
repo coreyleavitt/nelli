@@ -1,5 +1,7 @@
 # Job: S8cf -- new slice (S8bt's remainder; 2 SOUNDNESS + precision)
 
+**BASE UPDATE (supersedes the base below):** create the branch from origin/rfc-0005-soundness-channels at 136ad60, then merge origin/rfc-0005-s8bt a0c5a7f onto it, because S8bt is not landed yet. If batch 8 has landed by then, base on its head instead and skip the merge; the coordinator will say.
+
 **MODEL: use opus for this job's agent.** It models PCRE resource limits.
 
 ## Setup

@@ -1,5 +1,7 @@
 # Job: S8bz -- new slice (S8bw's blocked bullets and remainder)
 
+**BASE UPDATE (supersedes the base below):** create the branch from origin/rfc-0005-soundness-channels at 136ad60 (batch 7, walker 237). Walker number is assigned at integration; use the next free one above 240 locally, and update the CR2 pin to match.
+
 **HOLD RELEASED** -- base is batch 6 at 80c2904 (walker 230).
 - That base includes S8bs, S8bn, S8bl, S8bq and S8bw, plus everything up to batch 5: S8ar/S8at (Table values), S8bc (tree-seq backing) and S8be (element cells, `isRoutineGlobal`).
 - Provisional walker: **232**.

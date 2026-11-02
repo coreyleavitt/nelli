@@ -1,5 +1,7 @@
 # Job: S8cd -- new slice (batch-6 integration findings; all PRECISION)
 
+**BASE UPDATE (supersedes the base below):** create the branch from origin/rfc-0005-soundness-channels at 136ad60 (batch 7, walker 237).
+
 **Setup.**
 - Branch: create `rfc-0005-s8cd` from origin/rfc-0005-batch6 at **80c2904** (walker 230).
 - Provisional walker: **236**.

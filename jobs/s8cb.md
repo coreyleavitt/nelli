@@ -1,5 +1,7 @@
 # Job: S8cb -- new slice (bring S8bo up to date + S8bo's remainder)
 
+**BASE UPDATE (supersedes the base below):** create the branch from origin/rfc-0005-soundness-channels at 136ad60 (batch 7, walker 237), then merge S8bo 10262dd onto it as the job describes.
+
 **HOLD RELEASED** -- base is batch 6 at 80c2904 (walker 230).
 
 S8bo was built on ef08ada, which predates batch 4. Basing its remainder on S8bo itself would repeat S8bw's stale-base block, so this slice has two steps:

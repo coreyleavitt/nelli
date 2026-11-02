@@ -861,7 +861,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekTableDel: discard                    ## "iekTableDel"
       of iekSetIncl: discard                     ## "iekSetIncl"
       of iekSetExcl: discard                     ## "iekSetExcl"
-      of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind,
+      of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount,
          iekStrContains, iekStrStartsWith, iekStrEndsWith,
          iekStrReplaceAll, iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe,
          iekStrReplaceRe, iekStrCaptureRe, iekStrConcat, iekIntToStr,

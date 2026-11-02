@@ -477,6 +477,8 @@ proc emitExpr*(e: IRExpr): NimNode =
             emitExpr(e.tabKey), emitExpr(e.tabVal))
   of iekTableDel:
     newCall(bindSym"mkTableDel", emitExpr(e.mutRecv), emitExpr(e.mutArg))
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    newCall(bindSym"mkTabRemovedSince", emitExpr(e.trCur), emitExpr(e.trBase))
   of iekSetIncl:
     newCall(bindSym"mkSetIncl", emitExpr(e.mutRecv), emitExpr(e.mutArg))
   of iekSetExcl:
@@ -865,12 +867,13 @@ proc emitStmt*(s: IRStmt): NimNode =
       var posLit = newTree(nnkBracket)
       for pos in s.retIntOffsetPositions: posLit.add newLit(pos)
       # RFC-0005 S8an: `cGuardRoots` round-trips the same way; RFC-0005
-      # S8bs: and `cVarLocs`.
+      # S8bs: and `cVarLocs`; RFC-0005 S8bx: and `cViewAliases`.
       newCall(bindSym"mkCall",
               newLit(s.callee), newLit(s.retName),
               emitExprSeq(s.cargs), emitIRType(s.retTy),
               prefix(posLit, "@"), newLit(s.cGuardRoots),
-              newLit(s.cVarLocs), newLit(s.cVarPtrSafe))   ## RFC-0005 S8bs, S8bn
+              newLit(s.cVarLocs), newLit(s.cVarPtrSafe),   ## RFC-0005 S8bs, S8bn
+              newLit(s.cViewAliases))                      ## RFC-0005 S8bx
   of isIndex:
     newCall(bindSym"mkIndexStmt",
             newLit(s.ixRetName), emitExpr(s.ixArr),
@@ -1793,6 +1796,8 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
              rhsHasInlineDefectFork(e.spAt) or rhsHasInlineDefectFork(e.spPart)
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4): two variables
+    result = false
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     result = rhsHasInlineDefectFork(e.mutRecv) or rhsHasInlineDefectFork(e.mutArg)
   of iekSeqDel:
@@ -1926,6 +1931,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
   of iekSeqSlice: @[e.ssBase, e.ssLo, e.ssHi]
   of iekSeqSplice: @[e.spBase, e.spAt, e.spPart]   ## RFC-0005 S8bu
   of iekContains: @[e.container, e.key]
+  of iekTabRemovedSince: @[e.trCur, e.trBase]   ## RFC-0005 S8bx
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel: @[e.mutRecv, e.mutArg]
   of iekSeqDel: @[e.delSeq, e.delIdx]
   of iekSeqInsert: @[e.insSeq, e.insVal, e.insIdx]
@@ -15643,6 +15649,76 @@ proc mutViewWriteBack(s: IRStmt; name: string;
   else:
     result = if writesName(s, name): mkBlock(@[s, writeBack()]) else: s
 
+func irLocPath(e: IRExpr): string =
+  ## RFC-0005 S8bx (item 3). `e` as a location path (`t`, `o.tab`), or ""
+  ## for any other expression.
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField:
+    let r = irLocPath(e.obj)
+    if r.len == 0: "" else: r & "." & e.fieldName
+  else: ""
+
+proc markViewAliases(s: IRStmt; vName, tabPath, keyName: string;
+                     n: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bx (item 3). In an `mpairs` / `mvalues` body, a call that
+  ## receives the loop variable `vName` and the table (the location
+  ## `tabPath`) gets one `cViewAliases` entry: in Nim the two formals are
+  ## one location (the slot `v` views), so a write through either is seen
+  ## through the other inside the callee. Copy-in/copy-out of the two
+  ## separately had the callee read the table without the view's write
+  ## (and the view without the table's): verdicts swapped against native
+  ## runs. A call that also receives a location HOLDING the table (`o` for
+  ## `o.tab`), or a part of the view, declines: the two formals are not
+  ## one location there, and no entry relates them.
+  if s == nil: return nil
+  case s.kind
+  of isBlock:
+    for i in 0 ..< s.stmts.len:
+      s.stmts[i] = markViewAliases(s.stmts[i], vName, tabPath, keyName, n, ctx)
+    s
+  of isIf:
+    for i in 0 ..< s.branches.len:
+      s.branches[i].body =
+        markViewAliases(s.branches[i].body, vName, tabPath, keyName, n, ctx)
+    s.elseBody = markViewAliases(s.elseBody, vName, tabPath, keyName, n, ctx)
+    s
+  of isWhile:
+    s.wbody = markViewAliases(s.wbody, vName, tabPath, keyName, n, ctx)
+    s
+  of isTry:
+    s.tryBody = markViewAliases(s.tryBody, vName, tabPath, keyName, n, ctx)
+    for i in 0 ..< s.tryHandlers.len:
+      s.tryHandlers[i].body =
+        markViewAliases(s.tryHandlers[i].body, vName, tabPath, keyName, n, ctx)
+    s.tryFinally = markViewAliases(s.tryFinally, vName, tabPath, keyName, n,
+                                   ctx)
+    s
+  of isCall:
+    if s.opaque: return s
+    var viewIx, tabIx = -1
+    var partial = false
+    for i, a in s.cargs:
+      let lp = irLocPath(a)
+      if lp == vName: viewIx = i
+      elif lp == tabPath: tabIx = i
+      elif lp.len > 0 and (lp.startsWith(vName & ".") or
+                           tabPath.startsWith(lp & ".")):
+        partial = true
+    if viewIx < 0 or (tabIx < 0 and not partial): return s
+    if partial:
+      return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a call in the body of this `for` receives the loop " &
+                "variable and a location holding the Table, or a part of " &
+                "the loop variable: the two are one location in Nim, which " &
+                "is not modelled -- path degraded to sxUnknown"),
+        "a call receives an `mpairs` view and a location holding its " &
+        "Table"), s])
+    s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName)
+    s
+  else: s
+
 proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
   ## or `values` (`for k, v in t` is `pairs(t)` after semcheck; `for (k, v)
@@ -15734,6 +15810,14 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
   let ivName = freshSynth(ctx, "iv")
   pre.add mkLet(ivName, intTy, mkIntLit(0))
   var loopStmts: seq[IRStmt]
+  # RFC-0005 S8bx (item 4): the table as this iteration begins, against
+  # which a removal in the body is read (`iekTabRemovedSince`).
+  let snapIter = freshSynth(ctx, "tki")
+  if live:
+    var snapPre: seq[IRStmt]
+    let nowIR = parseExpr(container, snapPre, ctx)
+    loopStmts.add snapPre
+    loopStmts.add mkLet(snapIter, tabCls.ty, nowIR)
   let kSynth = freshSynth(ctx, "tkk")
   loopStmts.add mkIndexStmt(kSynth, mkVar(ksName), mkVar(ivName), keyTy)
   var vIR: IRExpr = nil
@@ -15770,6 +15854,11 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
           dottedFieldMutate(bare, doTabSet, @[mkVar(kSynth), mkVar(vName)],
                             wbPre, ctx)
       if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
+    # RFC-0005 S8bx (item 3): a call receiving both the view and the table.
+    var scratch: seq[IRStmt]
+    body = markViewAliases(body, vName,
+                           irLocPath(parseExpr(container, scratch, ctx)),
+                           kSynth, n, ctx)
     body = mutViewWriteBack(body, vName, writeBack)
   case iterName
   of "mpairs", "mvalues": discard
@@ -15803,6 +15892,24 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
           "the Table's length changed while iterating over it")
     loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
                                   lenChanged)])
+    # RFC-0005 S8bx (item 4): a key removed in this iteration with the
+    # length kept (another key, or the same one, inserted): Nim's slot walk
+    # goes on over slots that depend on the keys' hashes and the capacity --
+    # the new key's slot against the current one, and `del`'s backshift of a
+    # later entry into the hole (a key visited twice, another skipped;
+    # native runs in `tsymex_rfc0005_s8bx_iterchange`). Not modelled: the
+    # path declines (it followed the enumeration taken at loop entry, which
+    # was a false `sxUnsat` / `sxSat` for a one-entry table).
+    var inner3: seq[IRStmt]
+    let tabNow = parseExpr(container, inner3, ctx)
+    loopStmts.add inner3
+    loopStmts.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
+      ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a key was removed from the Table while iterating over " &
+                "it, and its length kept: the rest of Nim's walk over the " &
+                "hash slots depends on the keys' hashes, which are not " &
+                "modelled -- path degraded to sxUnknown"),
+        "a key removed from the Table while iterating over it"))])
   loopStmts.add mkAssign(ivName, mkBinop(bAdd, mkVar(ivName), mkIntLit(1)))
   pre.add mkWhile(mkBinop(bLt, mkVar(ivName), mkVar(lenName)),
                   mkBlock(loopStmts))

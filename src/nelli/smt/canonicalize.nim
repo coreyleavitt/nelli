@@ -367,6 +367,29 @@ const symexWalkerVersion* = "237"
   ## `ccVarPtrSafe`, the variant hierarchy fields), so
   ## cached entries rotate.
   ##
+  ## RFC-0005 S8bx (2026-10-03) — S8bl's remainder; provisional number (the
+  ## channel assigns the final one at merge). 213->228. SOUNDNESS: a raise
+  ## inside witness extraction (which runs in the walk since S1c) was lost
+  ## on the C backend -- a call's result temporary destroyed on the raise
+  ## path without the error flag cleared ran nim-z3's `termDestroy`, whose
+  ## `try/except` consumed the in-flight exception -- and the walk went on
+  ## to a false `sxUnsat` (or a half-extracted winner). Every raise inside
+  ## extraction is now recorded as it is raised (`extractionRaiseHook`),
+  ## ends the walk, and makes the run `sxUnknown` + `weInternalWalkerFault`
+  ## on both backends.
+  ## The seq witness reader and the renderability predicate share one
+  ## classifier (`seqWitnessReader`): a placeholder seq of an element no
+  ## reader reads crashed the compile. SOUNDNESS: an `mpairs` / `mvalues`
+  ## view passed to a call with its Table was two copies of one location
+  ## (swapped verdicts); the walker keeps the two formals equal in the
+  ## callee (`cViewAliases`, `syncViewAliases`). SOUNDNESS: a key removed
+  ## from a Table while iterating it, the length kept, followed the
+  ## enumeration taken at loop entry (a false sxUnsat / sxSat for one entry;
+  ## Nim's slot walk depends on the hashes): the path declines
+  ## (`iekTabRemovedSince`). A string's `setLen` binds a fresh byte leaf
+  ## equal to the prefix / extension, so a byte read of a symbolic string's
+  ## result decides on both pinned Z3s (was `sxUnknown`).
+  ##
   ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
   ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
   ## magic with a `var` parameter was registered with an empty body, so its
@@ -5623,6 +5646,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
       canonicalize(e.key, env) & ">"
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    "Ex<TRm:" & canonicalize(e.trCur, env) & ";" &
+      canonicalize(e.trBase, env) & ">"
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     "Ex<" & $e.kind & ":" & canonicalize(e.mutRecv, env) & ";" &
       canonicalize(e.mutArg, env) & ">"
@@ -5767,6 +5793,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
     # whether the walk binds its formal to an address cell.
     let locs = varLocKeys(s.cVarLocs, env)
+    # RFC-0005 S8bx (item 3): an mpairs view aliased to its table in the
+    # callee changes what the callee reads, so it keys the call.
+    var views: seq[string]
+    for a in s.cViewAliases:
+      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
@@ -5793,7 +5824,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") &
       # RFC-0005 S8bn: whether a `var` actual may be a pointer's target
       # changes the verdict (a deref in the callee declines or not).
-      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") & ">"
+      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") &
+      (if views.len > 0: ";view=[" & views.join(",") & "]" else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read

@@ -1271,5 +1271,21 @@ task test, "Run the test suite":
             # argument may write what the lvalue reads (`_framecond`).
             # Walker 223->229.
             "tsymex_rfc0005_s8br_remainder",
-            "tsymex_rfc0005_s8br_framecond"]:
+            "tsymex_rfc0005_s8br_framecond",
+            # RFC-0005 S8bx -- S8bl's remainder: a raise inside in-walk
+            # witness extraction (lost on the C backend; fault injection
+            # through the file's .nim.cfg); walker 213->228 (provisional).
+            "tsymex_rfc0005_s8bx_extractraise",
+            # S8bx item 2: one classifier for the seq witness reader and
+            # the renderability predicate; a type is always rendered.
+            "tsymex_rfc0005_s8bx_witnessdrift",
+            # S8bx item 3: an mpairs view passed to one call with its
+            # Table is one location (IRStmt.cViewAliases, syncViewAliases).
+            "tsymex_rfc0005_s8bx_mpairs",
+            # S8bx item 4: a key removed while iterating a Table, the
+            # length kept, declines (native runs prove the slot walk
+            # depends on the hashes).
+            "tsymex_rfc0005_s8bx_iterchange",
+            # S8bx item 5: a string's setLen over a symbolic string decides.
+            "tsymex_rfc0005_s8bx_setlenstr"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

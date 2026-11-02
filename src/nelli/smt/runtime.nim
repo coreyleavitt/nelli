@@ -1747,6 +1747,61 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
   if z3ApiErrorCount == 0: z3ApiFirstError = $e
   inc z3ApiErrorCount
 
+# ---- RFC-0005 S8bx: a raise inside witness extraction ----------------------
+#
+# Since S1c the target solve and its witness extraction (`trySolve` ->
+# `extractWitness`) run inside the walk. On the C backend a raise there could
+# be LOST, the mechanism behind every "goto-exception hazard" note in this
+# file (N31, N36, ADR-0023, S8m). Nim 2.2.10's C code generator (goto
+# exceptions) destroys a call's result temporary on the raise path --
+# `T = f(); if (*nimErr_) { =destroy(T); goto exit; }` -- WITHOUT first
+# saving and clearing the error flag, as it does for a scope's own exit
+# destructors. When `T` holds a Z3 term (`walk`'s `seq[Path]`, a `SymVal`, a
+# `Z3String`), nim-z3's `termDestroy` runs its `try: ... except
+# CatchableError: discard` with the flag still set: its first checked call
+# jumps to its handler, which takes the IN-FLIGHT exception as its own,
+# clears the flag and pops it. The frame returns as if nothing was raised.
+# Found by instrumenting every `popCurrentException` of a probe build: an
+# extraction raise was consumed by `Z3BitVec`'s `=destroy`, called from
+# `walkBlock`'s `result = walk(s, result, w)` destroying the returned paths.
+# The walk went on, and the verdict was a false `sxUnsat` (S8bl's two
+# iterations of one table) -- or, lost inside extraction itself, a winner
+# with a half-extracted witness. C++ exceptions are native and unaffected.
+#
+# A raise in extraction is never a decline the walker means (extraction has
+# no in-band channel for one), so whatever it is, it reaches the run
+# boundary as the walker fault it reports on C++: `extractionRaiseHook` sees
+# every raise while extraction runs (`localRaiseHook`, called by
+# `raiseExceptionAux` on both backends before the exception is thrown), and
+# `runSymex` turns a run that recorded one into `sxUnknown` +
+# `weInternalWalkerFault`, whether or not the raise survived. The walk stops
+# at the first such record (`shouldStop`), and the hit it struck is not
+# admitted (`trySolve`).
+
+var extractionFault* {.threadvar.}: string
+  ## RFC-0005 S8bx. `<name>: <msg>` of the first exception raised inside
+  ## witness extraction in this thread's current run (reset by
+  ## `resetSymexRunState`). Recorded by `extractionRaiseHook`.
+var extractionSavedRaiseHook {.threadvar.}:
+    proc (e: ref Exception): bool {.nimcall, gcsafe.}
+  ## RFC-0005 S8bx. The `localRaiseHook` extraction displaced.
+
+proc extractionRaiseHook(e: ref Exception): bool {.nimcall, gcsafe.} =
+  ## RFC-0005 S8bx. `localRaiseHook` while witness extraction runs. The one
+  ## raise extraction catches itself is nim-z3's `evalFloat64Opt` /
+  ## `evalFloat32Opt` reading a non-numeral (`Z3InvalidUsageError`, recorded
+  ## in-band as `feExtractionFailed`); a Z3 API error of that type is
+  ## counted by `nelliZ3ErrorHandler`. Every other raise is a fault.
+  if extractionFault.len == 0 and not (e of Z3InvalidUsageError):
+    extractionFault = $e.name & ": " & e.msg
+  true
+
+proc releaseExtractionHook() =
+  ## RFC-0005 S8bx. Restore the displaced hook when an extraction raise left
+  ## `extractionRaiseHook` installed (its `trySolve` frame never resumed).
+  if localRaiseHook == extractionRaiseHook:
+    localRaiseHook = extractionSavedRaiseHook
+
 proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
   ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
   ## `want`. Z3 hash-conses sorts, so pointer identity is sort equality (what
@@ -3987,7 +4042,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # consumed only via `.len`/index — never a direct `==` — so it needs no
     # comparison proto here.)
     none(SymVal)
-  of iekContains:
+  of iekContains, iekTabRemovedSince:   # S8bx: a Bool
     none(SymVal)
   of iekGetCurrentExnMsg:
     # Phase 15 E8: `getCurrentExceptionMsg()` → Z3String. svString sentinel so a
@@ -6432,6 +6487,46 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+proc presenceRemoved(cur, base: Z3AnyAst): bool =
+  ## RFC-0005 S8bx (item 4). The presence array `cur` is NOT `base` under
+  ## stores of `true` alone (through `ite` merges): some store between them
+  ## writes `false` (a removal), or `cur` is reached otherwise (a fresh
+  ## array, a callee's havoc). Conservative: only `true` stores down to
+  ## `base` on every branch is "no removal".
+  let ctx = cur.ctx
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  # The decl kinds of a store and an `ite`, read off well-sorted probes (as
+  # `seqCapKinds` reads its kinds).
+  let probeArr = mkArrayVar[Z3Bool, Z3Bool](ctx, "__s8bx_kind_probe_arr")
+  let probeC = mkBoolVar(ctx, "__s8bx_kind_probe_c")
+  let probeStore = wrap[Z3AnyAst](ctx, checkedStore(ctx, probeArr.raw,
+    probeC.raw, probeC.raw))
+  let probeIte = wrap[Z3AnyAst](ctx, checkedIte(ctx, probeC.raw,
+    probeArr.raw, probeStore.raw))
+  let storeKind = kindOf(probeStore.raw)
+  let iteKind = kindOf(probeIte.raw)
+  var stack = @[cur.raw]
+  var steps = 0
+  while stack.len > 0:
+    let t = stack.pop()
+    if t == base.raw: continue
+    inc steps
+    if steps > 100_000 or Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST:
+      return true
+    let app = Z3_to_app(ctx.raw, t)
+    let k = kindOf(t)
+    if k == storeKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      let v = Z3_get_app_arg(ctx.raw, app, 2)
+      if $wrap[Z3Bool](ctx, v) != "true": return true
+      stack.add Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == iteKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      stack.add Z3_get_app_arg(ctx.raw, app, 1)
+      stack.add Z3_get_app_arg(ctx.raw, app, 2)
+    else:
+      return true
+  false
 
 proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
   ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
@@ -9555,6 +9650,18 @@ proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
     return recv
+  of iekTabRemovedSince:
+    # RFC-0005 S8bx (item 4). Whether a key was removed from the table since
+    # it was `trBase`, read off the term: the presence array is `trBase`'s
+    # under a chain of stores (`[]=` stores `true`, `del` / `pop` / `take`
+    # store `false`, `clear` is a fresh array), so a `false` store, or any
+    # other shape between the two, is a removal -- or one this cannot rule
+    # out, which is the same answer (the slot walk is then declined).
+    let cur = lower(env, e.trCur)
+    let base = lower(env, e.trBase)
+    SymVal(kind: svBool, bo: mkBool(
+      cur.kind != svTable or base.kind != svTable or
+      presenceRemoved(cur.tabPresentRaw, base.tabPresentRaw)))
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -10111,6 +10218,14 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
         " outside nelli's byte-string invariant [0, 255]")
     result[i] = char(cp)
 
+when defined(symexTestInjectWalkerFault):
+  proc injectedExtractionFaultTerms(s: Z3String): seq[Z3String] =
+    ## RFC-0005 S8bx fault injection (see `extractLeaf`): raises with a Z3
+    ## term in its result, which the caller destroys on the raise path.
+    result = @[s]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+      "S8bx synthetic swallowed extraction fault (symexTestInjectWalkerFault)")
+
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
   ## given path. Tuple/array roots recurse via `extractFromSymVal`.
@@ -10189,12 +10304,28 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     # whichever reader path the emitter picks finds the value.
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
+    when defined(symexTestInjectWalkerFault):
+      # RFC-0005 S8bx fault injection (compiled out of every normal build;
+      # `-d:symexTestInjectWalkerFault` is set for its dedicated test files
+      # only, by their `.nim.cfg`): witness extraction fails on a string
+      # parameter named for the shape. `injectExtractionFault` raises
+      # straight out of extraction; `injectSwallowedExtractionFault` raises
+      # in a callee whose result -- holding a Z3 term -- the C backend
+      # destroys on the raise path, which loses the raise inside extraction
+      # itself (see `extractionRaiseHook`).
+      if path == "injectExtractionFault":
+        raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+          "S8bx synthetic extraction fault (symexTestInjectWalkerFault)")
+      if path == "injectSwallowedExtractionFault":
+        var held = @[sv.str]   # reassigned, as `walkBlock` reassigns
+        held = injectedExtractionFaultTerms(sv.str)
+        discard held
     w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
      svDistinct, svClosure, svRef, svPtr, svBitSet:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction -- runs inside the walk since S1c (trySolve), where the C backend can lose a raise; RFC-0005 S8bx records every raise inside extraction as it is raised (extractionRaiseHook), so it reaches runSymex as weInternalWalkerFault on both backends]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
 proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
@@ -10513,7 +10644,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
         if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
-      raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+      raise newException(ValueError,  # [raise-audited: category-c: witness extraction, recorded by extractionRaiseHook (RFC-0005 S8bx; see extractLeaf above)]
         "extractSeqElements: unsupported int width " & $cellTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
@@ -10553,7 +10684,7 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     # reader uses defaults so it never KeyErrors.
     discard
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction, recorded by extractionRaiseHook (RFC-0005 S8bx; see extractLeaf above)]
       "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
 proc bitSetModelMembers(m: Z3Model; sv: SymVal): seq[int64] =
@@ -13841,8 +13972,21 @@ proc trySolve(ctx: Z3Context,
     currentWinningGlobals = @[]                     ## RFC-0005 S8bn
     for k in path.env.keys:
       if isGlobalEnvName(k): currentWinningGlobals.add k
-    (status: sxSat,
-     witness: extractWitness(m, envForExtract, params), undefWhy: "")
+    # RFC-0005 S8bx: any raise inside extraction is recorded as it is raised
+    # (`extractionRaiseHook`). If one was lost inside extraction, this frame
+    # resumes with a partial witness: the hit is not admitted. If it escaped,
+    # the hook stays installed until `runSymex` releases it.
+    if localRaiseHook != extractionRaiseHook:
+      extractionSavedRaiseHook = localRaiseHook
+    localRaiseHook = extractionRaiseHook
+    let wit = extractWitness(m, envForExtract, params)
+    localRaiseHook = extractionSavedRaiseHook
+    if extractionFault.len > 0:
+      (status: sxUnknown, witness: RawWitness(),
+       undefWhy: "witness extraction raised " & extractionFault &
+         " (RFC-0005 S8bx)")
+    else:
+      (status: sxSat, witness: wit, undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
@@ -14263,6 +14407,13 @@ type
                                       ## walking its body, runs the finally on each,
                                       ## and sends the fall-through on (`exitJump`):
                                       ## the jump twin of `pendingReturn`.
+    viewAliases: seq[tuple[view, tab: string; key: SymVal]]
+                                      ## RFC-0005 S8bx (item 3): this callee's
+                                      ## formal `view` is the slot of its formal
+                                      ## `tab` at `key` (an `mpairs` view passed
+                                      ## with its table, `IRStmt.cViewAliases`).
+                                      ## `walkBlock` keeps the two equal after
+                                      ## every statement (`syncViewAliases`).
 
   WalkMode = enum
     ## RFC-fuzzer-nextgen G1a: the concolic-bridge mode discriminant, threaded
@@ -15331,6 +15482,9 @@ proc shouldStop(w: WalkCtx): bool {.inline.} =
   ## sxRaised (defect found on a sibling path) must NOT stop exploration, or the
   ## label's sxSat is never computed. All raise-flavoured targets: an sxRaised IS
   ## the terminal answer (unchanged).
+  # RFC-0005 S8bx: a raise inside witness extraction ends the walk; the run
+  # has no verdict (`runSymex`).
+  if extractionFault.len > 0: return true
   for r in w.found:
     if r.status == sxSat: return true
     if r.status == sxRaised and w.target.kind != stkLabel: return true
@@ -18758,11 +18912,121 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   if p.env.hasKey(name): return (p.env[name], p)
   lowerInExpr(p, mkVar(name), w)
 
+const viewSnapPrefix = "__s8bx_viewsnap#"
+  ## RFC-0005 S8bx (item 3). The env names holding a view-aliased formal's
+  ## value as the statement began (`snapViewAliases`).
+
+proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
+                     w: var WalkCtx): string =
+  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
+  ## frame (just pushed). Returns why the call declines, or "": the view's
+  ## formal is by value and not a scalar (Nim may pass it by address, so it
+  ## would see the table's writes: not modelled), or the key is unbound.
+  ## A by-value scalar view is a copy, and nothing relates it to the table.
+  ## A call made inside such a callee that passes both formals on carries
+  ## the pair into its own callee (Nim passes the one location on).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal]]
+  for a in stmt.cViewAliases:
+    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
+       not callerEnv.hasKey(a.keyName):
+      return "and the walk does not bind the two"
+    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
+               key: callerEnv[a.keyName])
+  if w.frameStack.len > 0:
+    for a in w.frameStack[^1].viewAliases:
+      var vi, ti = -1
+      for i, arg in stmt.cargs:
+        if arg.kind == iekVar:
+          if arg.vname == a.view: vi = i
+          elif arg.vname == a.tab: ti = i
+      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
+        pairs.add (viewArg: vi, tabArg: ti, key: a.key)
+  for a in pairs:
+    let vf = sig.params[a.viewArg]
+    if not vf.isVar:
+      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
+      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    w.frame.viewAliases.add (view: vf.name, tab: sig.params[a.tabArg].name,
+                             key: a.key)
+  ""
+
+proc snapViewAliases(paths: seq[Path]; w: WalkCtx): seq[Path] =
+  ## RFC-0005 S8bx (item 3). Each path with each view-aliased formal's value
+  ## (and its table's) recorded as the statement begins.
+  for p in paths:
+    var env2 = p.env
+    for a in w.frame.viewAliases:
+      if env2.hasKey(a.view) and env2.hasKey(a.tab):
+        env2[viewSnapPrefix & a.view] = env2[a.view]
+        env2[viewSnapPrefix & a.tab] = env2[a.tab]
+    result.add forkPath(p, p.pc, env2)
+
+proc syncViewAliases(outs: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bx (item 3). After a statement of a callee whose formal
+  ## `view` is the slot of its formal `tab` at `key`: the side the
+  ## statement wrote is carried to the other -- the view's value stored
+  ## into the table at the key, or the table's value at the key read into
+  ## the view. Both written to different values is two writes the walk
+  ## cannot order, and a table write that may have removed the key leaves
+  ## the view on a slot Nim's `del` refills from another entry: both
+  ## decline (`feUnsupportedOp`). A statement nested in this one has
+  ## already synced and dropped the snapshot, which then leaves the pair
+  ## alone.
+  let ctx = w.z3
+  for p in outs:
+    var env2 = p.env
+    var why = ""
+    var changed = false
+    for a in w.frame.viewAliases:
+      let sv = viewSnapPrefix & a.view
+      let st = viewSnapPrefix & a.tab
+      if not (env2.hasKey(sv) and env2.hasKey(st) and env2.hasKey(a.view) and
+              env2.hasKey(a.tab)):
+        continue
+      let tabV = env2[a.tab]
+      let keyO = if tabV.kind == svTable: tabKeyTerm(a.key, tabV.tabKeyTy)
+                 else: none(Z3AnyAst)
+      if keyO.isNone:
+        why = "the table is not a modelled Table value"
+        continue
+      let k = keyO.get
+      let vCh = not sameSymVal(env2[a.view], env2[sv])
+      let tCh = not sameSymVal(tabV, env2[st])
+      if vCh and tCh:
+        why = "the view and the table were both written in one statement"
+      elif vCh:
+        var e2 = env2
+        e2[viewSnapPrefix & "key"] = a.key
+        env2[a.tab] = lower(e2, mkTableSet(mkVar(a.tab),
+          mkVar(viewSnapPrefix & "key"), mkVar(a.view)))
+        changed = true
+      elif tCh:
+        let present = wrap[Z3Bool](ctx,
+          checkedSelect(ctx, tabV.tabPresentRaw.raw, k.raw))
+        if guardLiteral(present) != glTrue:
+          why = "the table write may have removed the view's key"
+        else:
+          env2[a.view] = tabValAt(ctx, tabV, k.raw)
+          changed = true
+    for a in w.frame.viewAliases:
+      env2.del(viewSnapPrefix & a.view)
+      env2.del(viewSnapPrefix & a.tab)
+    var q = forkPath(p, p.pc, env2)
+    if why.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & why &
+             "; the two are one location in Nim, and the order of the " &
+             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
+    result.add(if changed: drainPendingLowerEffects(q) else: q)
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
     if w.shouldStop: return
-    result = walk(s, result, w)
+    if w.frame.viewAliases.len > 0:   # RFC-0005 S8bx (item 3)
+      result = syncViewAliases(walk(s, snapViewAliases(result, w), w), w)
+    else:
+      result = walk(s, result, w)
     if result.len == 0: return
     # Phase 14 cycle C3 (ADR-0004). Post-step frontier prune. A
     # `maxFrontierSize` of 0 keeps the unbounded baseline; any
@@ -19785,16 +20049,32 @@ proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
       # plain term (a `str.at` over an `ite` of strings ran Z3 out of
       # `seqQueryRLimit`). The grow appends a fresh pad of the added
       # length in `("\0")*`, a fact of the path (no quantifier).
+      #
+      # RFC-0005 S8bx (item 5): the result is a fresh string LEAF `r`
+      # with the byte-domain fact every string input carries
+      # (`allocateSym`), bound to the prefix / extension by an equation.
+      # A byte read of the result, `int2bv[8](str.to_code(str.at(r, i)))
+      # == n`, is then a byte test on a byte leaf, which `seqLenCaps`
+      # rewrites to the character form `str.at(r, i) == "\xNN"`: Z3
+      # decides that, where the code form over a `str.at` of the concat
+      # (or substr) was left undecided by both pinned Z3s within
+      # `seqQueryRLimit`.
+      var leafShrink: seq[Z3Bool]
+      let rShrink = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafShrink)
       var envShrink = env2
-      envShrink[stmt.slRetName] = SymVal(kind: svString,
-        str: substr(baseSV.str, mkInt(0), newLen))
-      survivors.add forkPath(p, p.pc & @[not grows], envShrink)
+      envShrink[stmt.slRetName] = rShrink
+      survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
+        rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
+      var leafGrow: seq[Z3Bool]
+      let rGrow = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafGrow)
       let pad = mkStringVar(freshDegradeName("__setLenPad"))
-      env2[stmt.slRetName] = SymVal(kind: svString,
-        str: concat(baseSV.str, pad))
-      survivors.add forkPath(p, p.pc & @[grows,
+      env2[stmt.slRetName] = rGrow
+      survivors.add forkPath(p, p.pc & leafGrow & @[grows,
         len(pad) == newLen - oldLen,
-        matches(pad, star(mkRegex(mkString("\x00"))))], env2)
+        matches(pad, star(mkRegex(mkString("\x00")))),
+        rGrow.str == concat(baseSV.str, pad)], env2)
     else:
       let d = w.degrade(feUnsupportedOp,
         locPrefix & "setLen: the argument lowered to " &
@@ -20874,9 +21154,18 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
         let calleeFrameId = w.frame.frameId
         w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
         w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+        # RFC-0005 S8bx (item 3): an `mpairs` view passed with its table.
+        let viewWhy = bindViewAliases(stmt, sig, p.env, w)
+        let calleeIn =
+          if viewWhy.len == 0: calleePath
+          else:
+            forkPathTainted(calleePath, calleePath.pc, calleePath.env,
+              w.degrade(feUnsupportedOp,
+                "`" & stmt.callee & "` receives an `mpairs` view and its " &
+                "Table, " & viewWhy & " (RFC-0005 S8bx; feUnsupportedOp)"))
         let guardMark = callGuardedNames.len   ## RFC-0005 S8an
         for g in guarded: callGuardedNames.add g
-        let fallThroughRaw = walk(sig.body, @[calleePath], w)
+        let fallThroughRaw = walk(sig.body, @[calleeIn], w)
         callGuardedNames.setLen(guardMark)
         # Round-6 A6-rider (walker v86): a callee whose body reaches the end
         # via IMPLICIT fallthrough (no explicit `return`) after a
@@ -24980,6 +25269,23 @@ proc runSymex*(prog: SymexProgram,
   ## verdict branch, including a boundary abort. Verdict-neutral: nothing
   ## reads them to decide `status`.
   result = runSymexCaught(prog, target, settings)
+  releaseExtractionHook()
+  # RFC-0005 S8bx: a run that raised inside witness extraction has no
+  # verdict, whether or not the raise reached `runSymexCaught`'s catch-all
+  # (the C backend can lose it on the way; see `extractionRaiseHook`).
+  if extractionFault.len > 0:
+    var recorded = false
+    for e in result.errors:
+      if e.kind == weInternalWalkerFault and e.msg == extractionFault:
+        recorded = true
+    if not recorded or result.status != sxUnknown:
+      result = RawResult(status: sxUnknown, errors: result.errors &
+        @[SymexErrorInfo(kind: weInternalWalkerFault, severity: sevError,
+          msg: extractionFault & " -- raised inside witness extraction at " &
+               "a target hit and lost on the way to the run boundary; no " &
+               "verdict stands behind the run (RFC-0005 S8bx; " &
+               "weInternalWalkerFault)",
+          scope: abortScope())])
   # RFC-0005 S8m: a run whose Z3 API error never reached the `Z3Error` arm
   # (the C backend loses a raise unwinding through the walk) has no verdict.
   if z3ApiErrorCount > 0:
@@ -25078,6 +25384,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
   z3ApiFirstError = ""
+  releaseExtractionHook()  ## RFC-0005 S8bx: a prior run's leaked window
+  extractionFault = ""     ## RFC-0005 S8bx
   callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the

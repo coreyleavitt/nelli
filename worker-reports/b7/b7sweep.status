@@ -1,0 +1,9 @@
+start 2026-10-04T01:23:58-06:00
+sweep rc=0 wall=9186s
+r6b6_51 rc=0 ok=8 failed=0 wall=55.3s
+r6b6_413 rc=0 ok=8 failed=0 wall=42.4s
+s8bb_constructs_51 rc=0 ok=7 failed=0 wall=53.5s
+s8bb_constructs_413 rc=0 ok=7 failed=0 wall=56.0s
+done
+cmp_r6b6_51_at_8a2eb51 rc=0 ok=8 failed=0 wall=59.5s
+cmpdone

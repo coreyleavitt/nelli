@@ -1050,6 +1050,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8by (no (1b)/(1c) after a facts-first SAT; concolic
     ## scratch solves in contexts of their own; a membership below the top
     ## level merged). Provisional 231. 219->231.
+    ## RFC-0005 S8cc (a callee's global counts as written only where it
+    ## may be; an index call with no symbol is bound once). 237->238.
     check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

@@ -482,6 +482,11 @@ title = "S8bp's remainder: isolate concolic scratch solves, skip redundant 1b/1c
 state = "done"
 
 [[slice]]
+id = "S8cc"
+title = "S8br's remainder: address cell at a non-literal array index with an input-dependent value runs past 420s, write summary over-approximates a global a later callee names, unnameable index call declines"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -14033,3 +14038,75 @@ the scratch solves keep S8bu's clock through `ownContextCheck`.
   the slice in that pair, so the rise comes after the skip. Not attributed
   further. `s8ai_semantic` is the other file past 60 s (94 s at S8bp, 82 s and
   60 s here).
+
+**As landed (S8cc, walker 238 provisional) — S8br's remainder.** Base
+136ad60 (batch 7, walker 237; the job's base was a25229d, and the branch
+merges batch 7). Suites `tsymex_rfc0005_s8cc_cellquery` (item 1) and
+`tsymex_rfc0005_s8cc_remainder` (items 2 and 3), both registered. CR2's `==`
+pin is 238, and both suites carry the `>= 238` floor.
+
+- *Item 1: no code here; batch 7 fixed it.* The query was
+  `int2bv(sbv2int(k) + 5 + 0) != k + 5`: the cell's Int arithmetic met the
+  element's bit-vector across the bridge. At a25229d each dead label
+  (`cv_dead`, `cc_dead`, `cm_dead`, `cl_dead`) spent its 20M units and came
+  back `sxUnknown` (`beSolverUndef`). Replayed offline on the 4.13.4 CLI, the
+  dumped query had no result in 120 s; a hand-reduced form with the term
+  spelled `bvadd(k, 5)` and the Int overflow obligation kept was `unsat` in
+  48 units. The query holds no array term, so the cause is not array theory
+  or a missing frame fact. S8bu fixed it, in two parts, each shown by a
+  one-change run:
+  * `probeProto` offering the bit-vector (1c56690). Removed at 136ad60, all
+    four dead labels return to `sxUnknown` at 20M. Added alone at a25229d,
+    `cv_dead`, `cc_dead` and `cl_dead` decide.
+  * `bvIntInverseFacts` (0c4c19e, narrowed by 8815a81). `cm_dead`
+    (`v[] * 3 - k`) still spent 20M at a25229d with `probeProto` alone, and
+    with the facts removed at 136ad60 it spends the suite's 2M.
+  S8cc pins this with a 2M step budget (a tenth of what the base spent) over
+  18 labels, adding a store over a symbolic index (`cp`), the input as the
+  index (`ci`), an `int32` element (`c3`), a module-level seq's element
+  (`cs`) and a local array's (`co`). No label takes over 417 ms on Z3 5.1 or
+  393 ms on 4.13.4 (walk included, the box at a load of about 21-24 on 12
+  cores). The earlier claim that `queryRLimit` did not end this query did
+  not reproduce: 420 s was the then-unbounded default.
+- *Item 2: the write summary.* `scanOpaqueEffects` counted every
+  module-level `var` a body names as written. A global now counts only where
+  the body may write it. The read positions are listed (`scanRead`): the
+  right side of an assignment, a declaration's value, a condition, a `case`
+  selector, a by-value argument, and an index on the left of an assignment
+  (`scanWrite`). A symbol anywhere else still counts, so an unlisted shape
+  stays conservative. A `var` formal counts by its declared type, since a
+  magic's (`inc gi`) has no `nnkHiddenAddr`. A read whose value holds refs
+  still reaches its heaps (`let h = gH; h.s = ...`); a path whose value is
+  ref-free reaches none (`gH.s[0]`). `result = gi` in a routine returning
+  `var` counts. Both consumers gain: `laterLeavesLvalue` (S8br's frame
+  condition) and an opaque call's rebinding (`opaqueWriteSummary`).
+- *A false verdict the precision would have opened (fixed before landing).*
+  A by-value formal may be the caller's storage: Nim passes a large one by
+  address, so `unsafeAddr x` writes the caller's variable. Once such an
+  argument reads as no write, an opaque `wrByVal(gBig)` was a false `sxUnsat`
+  (`ob`, observed with the arm removed). `addr` of a by-value formal now
+  summarises as every global and heap.
+- *Item 3: an index call with no symbol.* `hoistIndexCalls` now binds every
+  index call that is not a builtin, under a mark of the symbol of the call's
+  type (`int` for an anonymous `range`, where only the mark's name is read;
+  the `let` carries the type). S8br's `result` lookup is gone. The call node
+  cannot be marked as itself: compiling such a mark aborted the compiler
+  with an `IndexDefect`, while every macro operation tried on the node alone
+  (`repr` included) was fine, so the failing operation was not isolated.
+  `indexCallDecline` remains for a spent mark counter. S8br's `fs_dead` pin
+  moves from a decline to `sxUnsat`. The S8br note's generic case did not
+  reproduce: `idOf(1)` and `oneOf("x")` were already exact at the base, and
+  stay pinned.
+- *Pins and RED.* Observed at 136ad60: `ri`, `rs`, `rd`, `ra` and their twins
+  declined (`feEvalOrderUnmodelled`); `or` and its twin were `sxUnknown`
+  (`feGlobalHavoc`); `fs`, `fa`, `fp`, `fc`, `fr`, `ft` and their twins
+  declined (`feUnsupportedOp`). Already right at the base and kept: the
+  writers (`wa` ... `wb` still decline) and the generics (`gi`, `go`, `gn`).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: `addr` of a global in a walked callee halts the path.**
+  `let p = addr gi; p[] = 1` as a later argument is `sxUnknown`
+  (`heUnsafeCast`, `wp_dead`).
+- **PRECISION: `unsafeAddr` of a by-value array formal in a walked callee
+  declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
+  `wb_dead`).

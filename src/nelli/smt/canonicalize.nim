@@ -219,6 +219,10 @@ const symexWalkerVersion* = "241"
   ## `var` formal no longer aborts the compile. `checkCapped` step 1d: caps the
   ## query itself implies do not leave step 1's UNSAT to step 2's core, which
   ## is not minimal (Z3 4.13.4). 237 -> 241.
+  ## RFC-0005 S8cc (237->238): S8as's write summary counts a callee's global
+  ## only where the callee may write it, and an index call with no `result`
+  ## symbol is bound once. Verdicts change from a decline to exact.
+  ##
   ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their

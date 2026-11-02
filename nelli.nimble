@@ -1361,5 +1361,11 @@ task test, "Run the test suite":
             # scratch solves in contexts of their own; a regex membership
             # under a disjunction or an ite merged with those that hold
             # where it is read. Walker 219->231.
-            "tsymex_rfc0005_s8by_remainder"]:
+            "tsymex_rfc0005_s8by_remainder",
+            # RFC-0005 S8cc -- S8br's remainder: the address cell's query at
+            # a non-literal index is pinned to a step budget; a callee's
+            # global counts as written only where it may be; an index call
+            # with no symbol is bound once. Walker 237->238.
+            "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -4,7 +4,7 @@
 ## characters read as any other. Under (*ANY) a concrete call reads an attempt
 ## that starts inside a multi-byte newline; the search's languages decline it
 ## and the walker reads the call at points. Each is compared with the library,
-## and each language with the concrete reference. Parts 1 to 4 (the `_b` to `_e`
+## and each language with the concrete reference. Parts 1 to 5 (the `_b` to `_f`
 ## files) split both comparisons by head so each file runs under 60 s on the
 ## Windows legs; part 0 holds the walker.
 when not declared(s8cfJuPart):
@@ -64,7 +64,7 @@ when s8cfJuPart != 0:
         let ws = words(3)
         for cv in conventions:
           for hi, h in heads:
-            if hi mod 4 != s8cfJuPart - 1: continue
+            if hi mod 5 != s8cfJuPart - 1: continue
             for t in tails:
               let p = cv & h & t
               let pr = parsePcre(p)
@@ -96,7 +96,7 @@ when s8cfJuPart != 0:
       let ws = words(2)
       for cv in ["(*UTF)", "(*UTF)(*CRLF)"]:
         for hi, h in heads:
-          if hi mod 4 != s8cfJuPart - 1: continue
+          if hi mod 5 != s8cfJuPart - 1: continue
           for t in ["", "(*SKIP)"]:
             let p = cv & h & t
             let pr = parsePcre(p)

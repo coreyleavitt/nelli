@@ -224,18 +224,9 @@ suite "S8bt: a limit between, through the walker":
       verdict(findErrTarget, "bt_limit_find_err")
       verdict(findOkTarget, "bt_limit_find_ok")
       verdict(findNeverTarget, "bt_limit_find_never", sxUnsat)
-      # A subject that is free but for its length: Z3 5.1 finds "c". Z3 4.13.4
-      # in the query's own context (S8bp) spends the sequence budget, and 100M
-      # units as well, so it declines there: a precision loss, never a
-      # refutation. The fixed subject keeps the exact verdict on both.
-      if z3FullVersion().startsWith("4."):
-        let free = symexFind(replaceTarget, tLabel("bt_limit_replace"))
-        echo "  bt_limit_replace (Z3 4): ", free.status
-        check free.status in {sxSat, sxUnknown}
-        if free.status == sxSat:
-          check free.witness[0].replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "-"
-      else:
-        verdict(replaceTarget, "bt_limit_replace")
+      # A subject that is free but for its length: Z3 5.1 finds "c", Z3 4.13.4
+      # in the query's own context (S8bp) through step 1e (RFC-0005 S8cn).
+      verdict(replaceTarget, "bt_limit_replace")
       verdict(replaceConcreteTarget, "bt_limit_replace_c")
       check "c".replace(re"(*LIMIT_MATCH=6)(?:a|b)*c", "-") == "-"
       verdict(replaceErrTarget, "bt_limit_replace_err", sxUnsat)

@@ -13570,6 +13570,113 @@ const recFactsRLimit* = 100_000'u
   ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
   ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
 
+proc byteDomainLeaves(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3String] =
+  ## RFC-0005 S8cn. The string constants with a byte-domain constraint `x in
+  ## (\x00..\xff)*` among `roots` (`allocateSym`'s `itString` arm).
+  let kinds = seqCapKinds()
+  let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
+  let byteReId = astId(ctx, byteRe.raw)
+  for r in roots:
+    let ra = toAnyAst(r)
+    if getAstKind(ra) == akApp and
+       ord(Z3_get_decl_kind(ctx.raw, unpackApp(ra).decl)) == kinds.inRe:
+      let args = unpackApp(ra).args
+      if astId(ctx, args[1].raw) == byteReId and getAstKind(args[0]) == akApp and
+         ord(Z3_get_decl_kind(ctx.raw, unpackApp(args[0]).decl)) == kinds.uninterp and
+         unpackApp(args[0]).args.len == 0:
+        result.add wrap[Z3String](ctx, args[0].raw)
+
+proc queryBytes(text: string): seq[char] =
+  ## RFC-0005 S8cn. The bytes a query's SMT-LIB text names: each integer a
+  ## `str.to_code` term is compared to (a regex's class boundaries live in
+  ## `define-funs-rec` bodies, which the AST API does not open), then each
+  ## string literal's. Candidates only: what step 1e does with them is
+  ## checked against the whole query.
+  var seen: set[char]
+  template add(c: int) =
+    let b = c
+    if b in 0 .. 255 and chr(b) notin seen:
+      seen.incl chr(b)
+      result.add chr(b)
+  const toCode = "str.to_code"
+  var i = text.find(toCode)
+  while i >= 0:
+    var k = i + toCode.len
+    var depth = 0
+    while k < text.len:
+      if text[k] == '(': inc depth
+      elif text[k] == ')':
+        if depth == 0: break
+        dec depth
+        if depth == 0:
+          inc k
+          break
+      inc k
+    # `k` is at the `)` that closes the `str.to_code`.
+    inc k
+    while k < text.len and text[k] in Whitespace: inc k
+    var v = 0
+    var digits = 0
+    while k < text.len and text[k] in Digits and digits < 4:
+      v = v * 10 + ord(text[k]) - ord('0')
+      inc digits
+      inc k
+    if digits > 0: add(v)
+    i = text.find(toCode, k)
+  i = 0
+  while i < text.len:
+    if text[i] == '"':
+      inc i
+      while i < text.len and text[i] != '"':
+        if text.continuesWith("\\u{", i):
+          let close = text.find('}', i)
+          if close < 0: return
+          var v = 0
+          for d in text[i + 3 ..< close]:
+            if d in HexDigits: v = v * 16 + parseHexInt($d)
+          add(v)
+          i = close + 1
+        else:
+          add(ord(text[i]))
+          inc i
+    inc i
+
+const probeCandidates = 1024
+  ## RFC-0005 S8cn. Step 1e's bound on the assignments it tries.
+const probeRLimit = 200_000'u
+  ## RFC-0005 S8cn. Step 1e's budget for one assignment. With every string
+  ## fixed the query is evaluation, not search (S8bt's `s == "c"`: instant on
+  ## both Z3s, against past 20M units free).
+
+proc probeAssignments(lens: seq[seq[int]]; alphabet: seq[char]):
+    seq[seq[string]] =
+  ## RFC-0005 S8cn. Up to `probeCandidates` assignments of strings to the
+  ## leaves. A leaf takes each length in its `lens` in turn, up to 256 strings
+  ## of that length over `alphabet`, then the other single bytes.
+  var perLeaf: seq[seq[string]]
+  for ls in lens:
+    var cands: seq[string]
+    for l in ls:
+      var layer = @[""]
+      for _ in 1 .. l:
+        var next: seq[string]
+        for w in layer:
+          for c in alphabet:
+            if next.len < 256: next.add w & c
+        layer = next
+      cands.add layer
+    if 1 in ls:
+      for b in 0 .. 255:
+        if chr(b) notin alphabet: cands.add $chr(b)
+    perLeaf.add cands
+  result = @[newSeq[string]()]
+  for cands in perLeaf:
+    var next: seq[seq[string]]
+    for a in result:
+      for w in cands:
+        if next.len < probeCandidates: next.add a & w
+    result = next
+
 proc checkCappedSteps(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -13626,6 +13733,12 @@ proc checkCappedSteps(ctx: Z3Context; query: openArray[Z3Bool];
   ##      Z3 answers quickly without them -- and, in place of (2), for a
   ##      query holding a `seq.last_indexof` that (1c) did not decide
   ##      (below).
+  ##   1e. (RFC-0005 S8cn) after an unknown in both (1) and (3) and no
+  ##      refutation in (1b): the whole query with each byte-domain string
+  ##      pinned, for a bounded set of candidate strings. Only a model of
+  ##      the whole query answers, so this moves a decline to SAT and nothing
+  ##      else. A query that finds no model can so spend half its budget
+  ##      again.
   ## Z3's cost on a string query is not a function of the query alone: it
   ## also follows what its CONTEXT already holds, and every query of one
   ## walk shares one context. The same lowered `s[0..2] == "aaa"` label
@@ -13957,7 +14070,58 @@ proc checkCappedSteps(ctx: Z3Context; query: openArray[Z3Bool];
     else:
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
-      else: (zsUnknown, s3, nil, z3Why(s3))
+      else:
+        # Step 1e (RFC-0005 S8cn): both searches ran out, on a query that may
+        # have a model a search does not find and an evaluation does. S8bt's
+        # `bt_limit_replace` on Z3 4.13.4, in its own context (S8bp), spends
+        # the budget on one free byte over a regex's recursive step function,
+        # with or without the byte-domain membership, while `s == "c"` is
+        # instant. So try a bounded number of concrete strings: each length
+        # the theory-free query gives a leaf (its models hold every real one),
+        # plus 0..3 for a lone leaf, over the bytes the query's text names.
+        # Each is the whole query plus the pins, so an answer is a model of
+        # the query; this moves a decline to SAT and nothing else. A leaf
+        # with no byte domain, or the budget (`rlHalf div 2` in all), ends it.
+        let leaves = byteDomainLeaves(ctx, roots)
+        var found: Z3Model = nil
+        var sPin: Z3Solver = s3
+        if leaves.len > 0:
+          let sLen = ownContextSolver(ctx, roots & facts & caps, rlHalf div 2,
+                                      seqTheory = false)
+          if counted("1e-len", ownContextCheck(sLen)) == zsSat:
+            let m = translate(sLen.model(), ctx)
+            var lens: seq[seq[int]]
+            for x in leaves:
+              # A theory-free model's length may be an `ite` over its opaque
+              # string values, which names no length.
+              let lt = m.eval(x.len)
+              var ls: seq[int]
+              if Z3_is_numeral_ast(ctx.raw, lt.raw): ls.add int(lt.toInt64)
+              if leaves.len == 1 or ls.len == 0:
+                for extra in (if leaves.len == 1: 0 else: 1) .. (if leaves.len == 1: 3 else: 1):
+                  if extra notin ls: ls.add extra
+              lens.add ls
+            var alphabet = queryBytes($s3)
+            for b in 0 .. 255:
+              if alphabet.len >= 12: break
+              if chr(b) notin alphabet: alphabet.add chr(b)
+            var left = int64(rlHalf div 2)
+            for pins in probeAssignments(lens, alphabet):
+              if rl != 0 and left <= 0: break
+              var pinned = @roots
+              for k, x in leaves: pinned.add(x == mkString(ctx, pins[k]))
+              let sC = ownContextSolver(ctx, pinned, probeRLimit)
+              let rC = counted("1e", ownContextCheck(sC))
+              let st = sC.getStatistics()
+              if st.contains("rlimit count"):
+                left -= (if st.isInt("rlimit count"): int64(st.getInt("rlimit count"))
+                         else: int64(st.getFloat("rlimit count")))
+              if rC == zsSat:
+                found = translate(sC.model(), ctx)
+                sPin = sC
+                break
+        if found != nil: (zsSat, sPin, found, "")
+        else: (zsUnknown, s3, nil, z3Why(s3))
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):

@@ -1,0 +1,2010 @@
+diff --git a/docs/rfc/0005-branch-scoped-degrade.md b/docs/rfc/0005-branch-scoped-degrade.md
+remerge CONFLICT (content): Merge conflict in docs/rfc/0005-branch-scoped-degrade.md
+index 7b1d859..c96d99d 100755
+--- a/docs/rfc/0005-branch-scoped-degrade.md
++++ b/docs/rfc/0005-branch-scoped-degrade.md
+@@ -452,7 +452,6 @@ title = "S8bs's remainder: non-terminating Int-heap/BV-local UNSAT queries under
+ state = "done"
+ 
+ [[slice]]
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+ id = "S8br"
+ title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate once, read late), checks no snapshot carries (frame-condition the later call), S8bk suite compile time"
+ state = "done"
+@@ -465,11 +464,11 @@ state = "done"
+ [[slice]]
+ id = "S8bt"
+ title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interpreter CRLF/ANY start filter, LIMIT between 0 and default, mixed SKIP:NAME, UTF UCP/case folding and (*ANY) in UTF, automaton/step-table/register caps, replace lemmas beyond two shapes"
+-||||||| 5729b1a
+-=======
++state = "done"
++
++[[slice]]
+ id = "S8ca"
+ title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pin, structural viewFollows in-place check, addr s[i] of element-cell seqs to calls, closures over address-taken vars and heap lvalues, seq args to proc values, string as openArray[char], negative toOpenArray and resizing mitems, gps[].add through ptr-to-seq, S8bu suite compile time"
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ state = "done"
+ 
+ [[slice]]
+@@ -13254,7 +13253,6 @@ unguarded reads and a raw `select`). Fixed in d875c95 and 8815a81; at
+   by `viewFollows`; under ORC that copy is use-after-free, so no defined
+   program observes it, but the check is structural, not semantic.
+ 
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+ **As landed (S8br, walker 229) — S8bk's remainder.** Suites
+ `tsymex_rfc0005_s8br_remainder` (item 1: 5 tests, 14 labels) and
+ `tsymex_rfc0005_s8br_framecond` (item 2: 3 tests, 10 labels); c on Z3 5.1
+@@ -13716,8 +13714,7 @@ table, and every Z3 formula.
+     subject is returned whole;
+   - verbs, LIMIT and an unmarked SKIP:NAME, which have no sure bytes;
+   - `count` over a replace value.
+-||||||| 5729b1a
+-=======
++
+ **As landed (S8ca, walker 233 provisional) — S8bu's remainder.** Base
+ 5729b1a (S8bu, walker 225). Suites `tsymex_rfc0005_s8ca_stack` (item 1),
+ `_views` (item 2), `_calls` (item 3), `_closures` (item 4), `_procvals`
+@@ -13844,4 +13841,3 @@ over at 8815a81 (S8bu), and `s8ab_letaudit` (55.6 to 63.5 s) and
+ - **PRECISION: `tsymex_r6_n43_parity` does not compile on cpp.** `Atomic[T]`
+   in the walker's generated allocator assigns a `std::atomic` (a deleted
+   operator); the same error at the base 5729b1a. It passes 25/0 on c.
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+diff --git a/nelli.nimble b/nelli.nimble
+remerge CONFLICT (content): Merge conflict in nelli.nimble
+index 5a682a0..eda55b4 100644
+--- a/nelli.nimble
++++ b/nelli.nimble
+@@ -1308,7 +1308,6 @@ task test, "Run the test suite":
+             # items 5-6: an array element on a path into an address-taken
+             # variable; a by-value seq whose whole address is taken.
+             "tsymex_rfc0005_s8bu_paths",
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+             # RFC-0005 S8br -- S8bk's remainder: a call in a by-address
+             # actual's index is evaluated once, where the argument stands;
+             # a check no snapshot carries declines only when a later
+@@ -1331,10 +1330,7 @@ task test, "Run the test suite":
+             # depends on the hashes).
+             "tsymex_rfc0005_s8bx_iterchange",
+             # S8bx item 5: a string's setLen over a symbolic string decides.
+-            "tsymex_rfc0005_s8bx_setlenstr"]:
+-||||||| 5729b1a
+-            "tsymex_rfc0005_s8bu_paths"]:
+-=======
++            "tsymex_rfc0005_s8bx_setlenstr",
+             # item 6, split out by RFC-0005 S8ca item 9.
+             "tsymex_rfc0005_s8bu_byvalseq",
+             # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
+@@ -1358,5 +1354,4 @@ task test, "Run the test suite":
+             "tsymex_rfc0005_s8ca_resize",
+             # item 8: a mutation through a pointer to the whole value.
+             "tsymex_rfc0005_s8ca_derefmut"]:
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"
+diff --git a/src/nelli/smt/canonicalize.nim b/src/nelli/smt/canonicalize.nim
+remerge CONFLICT (content): Merge conflict in src/nelli/smt/canonicalize.nim
+index 5f49088..7639209 100644
+--- a/src/nelli/smt/canonicalize.nim
++++ b/src/nelli/smt/canonicalize.nim
+@@ -203,8 +203,14 @@ const renderAsChoicesVersion* = "12"
+   ##   element VALUES were already positionally correct (S8z); only the
+   ##   witness's own declared array type's index origin was wrong.
+ 
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+-const symexWalkerVersion* = "241"
++const symexWalkerVersion* = "246"
++  ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
++  ## not inlined when the native stack left below it is under what one more
++  ## level needs (`nativeStackShort`): it declines in-band
++  ## (`beBudgetExhaustedUnmodelled`, naming the native stack) whatever
++  ## `maxCallDepth` says, where the walk overflowed the stack (SIGSEGV) on
++  ## cpp and on a small thread stack. 225 -> 233.
++  ##
+   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
+   ## one integration branch under ONE walker number; their bullets follow the
+   ## batch 7 block, each naming its provisional number. The stack's own
+@@ -313,17 +319,6 @@ const symexWalkerVersion* = "241"
+   ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
+   ## still running). 214 -> 219.
+   ##
+-||||||| 5729b1a
+-const symexWalkerVersion* = "225"
+-=======
+-const symexWalkerVersion* = "233"
+-  ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
+-  ## not inlined when the native stack left below it is under what one more
+-  ## level needs (`nativeStackShort`): it declines in-band
+-  ## (`beBudgetExhaustedUnmodelled`, naming the native stack) whatever
+-  ## `maxCallDepth` says, where the walk overflowed the stack (SIGSEGV) on
+-  ## cpp and on a small thread stack. 225 -> 233.
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+   ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
+   ## query is decided beside the inverse of each signed Int view it holds
+   ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==
+diff --git a/src/nelli/smt/dsl_parser.nim b/src/nelli/smt/dsl_parser.nim
+remerge CONFLICT (content): Merge conflict in src/nelli/smt/dsl_parser.nim
+index db95312..350f81c 100644
+--- a/src/nelli/smt/dsl_parser.nim
++++ b/src/nelli/smt/dsl_parser.nim
+@@ -8325,7 +8325,6 @@ proc parseBorrowViewedExpr(rw: NimNode,
+   result = parseExpr(rw, preamble, ctx)
+   borrowBaseViews.setLen mark
+ 
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+ proc methodOverrides(sym: NimNode): seq[NimNode] =
+   ## RFC-0005 S8bn (item 6). Every method named as `sym` that is visible
+   ## where the entry macro was called (`methodRegistry`): the base method
+@@ -8510,8 +8509,7 @@ proc parseOfTest(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+   reads.add mkAssign(res, ok)
+   preamble.add mkIf(@[mkBranch(nonNil, mkBlock(reads))])
+   mkVar(res)
+-||||||| 5729b1a
+-=======
++
+ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
+                                            lenName, iter: string]]
+   ## RFC-0005 S8ca. While a `mitems` / `mpairs` body is parsed
+@@ -8519,7 +8517,6 @@ var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
+   ## address, the seq's location, the loop and its length `L`; each use of
+   ## the element is preceded by a check that the length is still `L`
+   ## (`miElemGuard`).
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ 
+ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
+   # RFC-0005 S8bd: a by-reference base marked from an element or a call
+@@ -15569,7 +15566,6 @@ proc parseIncDecLvalue(n: NimNode; preamble: var seq[IRStmt];
+   let newVal = mkBinop(if isInc: bAdd else: bSub, mkVar(oldTmp), stepIR)
+   parseAsgn(nnkAsgn.newTree(target, newEmptyNode()), newVal, preamble, ctx)
+ 
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+ proc callMagic(n: NimNode): string =
+   ## RFC-0005 S8bl. The magic of the system routine call `n` resolves to, or
+   ## "" (a user routine, an unresolved head, a routine with no magic).
+@@ -15880,53 +15876,6 @@ proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
+     s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName)
+     s
+   else: s
+-||||||| 5729b1a
+-=======
+-proc swapLvalue(n: NimNode): NimNode =
+-  ## RFC-0005 S8ca. The lvalue `parseAsgn` writes for an operand of `swap`:
+-  ## a variable, or the shapes `parseIncDecLvalue` writes (an array
+-  ## element, a seq element with a pure index, a field path, a
+-  ## dereference). nil for any other.
+-  let lhs = unwrapHidden(n)
+-  let fieldNode = if lhs.kind == nnkCheckedFieldExpr and lhs.len >= 1: lhs[0]
+-                  else: lhs
+-  if lhs.kind == nnkSym: lhs
+-  elif arrayElemLvalue(n): elemLvalueBracket(n)
+-  elif lhs.kind == nnkBracketExpr and lhs.len == 2 and
+-       unwrapHidden(lhs[0]).kind == nnkSym and
+-       classifyType(unwrapHidden(lhs[0])).ty.kind == itSeq and
+-       pureIndexNode(lhs[1]): lhs
+-  elif fieldNode.kind == nnkDotExpr and dottedFieldShape(fieldNode): lhs
+-  elif lhs.kind == nnkDerefExpr and lhs.len == 1: lhs
+-  else: nil
+-
+-proc parseSwap(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
+-  ## RFC-0005 S8ca. `swap(a, b)`, the system magic. SOUNDNESS: it reached
+-  ## the user-call fallback, where its bodiless `{.magic.}` routine was
+-  ## registered with an EMPTY body, so both writes were dropped without a
+-  ## record: `swap(a, b); if a[1] == 3` was a clean, wrong sxUnsat. Now
+-  ## both operands are read (in order, each with its own checks), then
+-  ## each is written the other's value through the plain assignment's own
+-  ## lvalue arm (`parseAsgn`). A seq written whole through a pointer is a
+-  ## write of the whole (`dwInPlace` false): Nim swaps the memory, so a
+-  ## by-value copy sharing it does not follow. Any other operand shape
+-  ## declines on its path.
+-  let a = swapLvalue(n[1])
+-  let b = swapLvalue(n[2])
+-  if a == nil or b == nil:
+-    return ctx.declineAtSite(feUnsupportedOp,
+-      siteMsg(n, "`swap` of `" & n[1].repr & "` and `" & n[2].repr &
+-              "` is not modelled -- path degraded to sxUnknown"),
+-      "`swap` of this operand shape is not modelled")
+-  let ty = classifyType(n[1]).ty
+-  let ta = freshSynth(ctx, "swapA")
+-  preamble.add mkLet(ta, ty, parseExpr(n[1], preamble, ctx))
+-  let tb = freshSynth(ctx, "swapB")
+-  preamble.add mkLet(tb, ty, parseExpr(n[2], preamble, ctx))
+-  preamble.add parseAsgn(nnkAsgn.newTree(a, newEmptyNode()), mkVar(tb),
+-                         preamble, ctx)
+-  parseAsgn(nnkAsgn.newTree(b, newEmptyNode()), mkVar(ta), preamble, ctx)
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ 
+ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
+   ## RFC-0005 S8bc (item 6). A `for` over a `Table`'s stdlib `pairs`, `keys`
+@@ -17577,8 +17526,6 @@ proc parseStmtInner(n: NimNode,
+          isBuiltinNamed(n[0], ["inc", "dec"]):
+       # RFC-0005 S8bc (item 7): every other system `inc`/`dec`.
+       parseIncDecLvalue(n, preamble, ctx)
+-    elif n.len == 3 and n[0].kind == nnkSym and isBuiltinNamed(n[0], ["swap"]):
+-      parseSwap(n, preamble, ctx)   # RFC-0005 S8ca
+     else:
+       # User-proc call as a statement (void-return). Only resolvable
+       # against typed AST — isolation-mode falls to `isUnsupported`.
+@@ -17795,11 +17742,6 @@ proc parseStmtInner(n: NimNode,
+                                 "(...)` unsupported (feUnsupportedOp)"),
+               "N49: dotted-field lvalue mutation `" & calleeName &
+                             "` unsupported (feUnsupportedOp)")
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+-        elif recv1 != nil and pureLvalueTarget(recv1) != nil and
+-||||||| 5729b1a
+-        elif recv1 != nil and arrayElemLvalue(recv1) and
+-=======
+         elif recv1 != nil and recv1.kind == nnkDerefExpr and recv1.len == 1 and
+              classifyType(recv1[0]).ty.kind in {itRef, itPtr} and
+              isKnownMutatingReceiverCall(calleeName, recv1, n.len):
+@@ -17837,8 +17779,7 @@ proc parseStmtInner(n: NimNode,
+             cur = readThrough()
+           mkDerefWrite(mkVar(pt), dottedOpExpr(op, mkVar(cur), args),
+                        pointeeTy, isPtr)
+-        elif recv1 != nil and arrayElemLvalue(recv1) and
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
++        elif recv1 != nil and pureLvalueTarget(recv1) != nil and
+              isKnownMutatingReceiverCall(calleeName, recv1, n.len):
+           # RFC-0005 S8at: a mutation of an ARRAY ELEMENT (`a[1].add x`,
+           # `p.a[i].del j`, a Table/HashSet element likewise), or of a
+diff --git a/src/nelli/smt/runtime.nim b/src/nelli/smt/runtime.nim
+remerge CONFLICT (content): Merge conflict in src/nelli/smt/runtime.nim
+index b5a40e0..77cc445 100644
+--- a/src/nelli/smt/runtime.nim
++++ b/src/nelli/smt/runtime.nim
+@@ -36,12 +36,8 @@ import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
+ import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
+ import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
+ import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+ import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
+-||||||| 5729b1a
+-=======
+ import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
+   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
+   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
+@@ -14391,7 +14387,6 @@ type
+       ## descent carries its lambda's `retTy` too (a void lambda's is the
+       ## `bool` placeholder its unread `funcApp` is sorted by).
+     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+     ptrRiskFormals: seq[IRParam]
+       ## RFC-0005 S8bn (item 3). The `var` formals whose actual a `ptr` of
+       ## unknown origin may address (`IRStmt.cVarPtrSafe` code 0, or a
+@@ -14402,13 +14397,10 @@ type
+       ## RFC-0005 S8bn (item 3). The other `var` formals: their actual is
+       ## no pointer's target. A call in the body passing one on whole
+       ## (code 2) inherits that.
+-||||||| 5729b1a
+-=======
+     sp:            uint
+       ## RFC-0005 S8ca. The native stack pointer when the frame was pushed:
+       ## the next call's depth check reads one level's stack cost from it
+       ## (`nativeStackShort`).
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ 
+   HandlerFrame = object
+     ## Phase 15 E1. One active `try`'s except-arms + finally, pushed onto the
+@@ -19378,7 +19370,7 @@ proc bindVarLocs(calleePath: Path; callerEnv: Env;
+       let cellName = varLocCellName(formal)
+       let e: AddrCellEntry = (local: formal, cell: cellName, ty: pointee,
+                               path: loc.path, ixs: @[], bound: true,
+-                              view: false)
++                              view: false, slot: "")
+       if addrEntryValue(ctx, calleePath, e, refAst).isNone:
+         return "a `var` argument in an object behind a ref is a part of " &
+                "it the walk does not follow"
+@@ -21166,27 +21158,37 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
+   # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
+   # on the very first call, by design; a caller wanting deep analysis
+   # writes an explicit bound sized to the SUT's real max call depth
+-  # instead. Do not assume a "large-looking" round number is automatically
+-  # safe -- measured directly (this engine's Linux/podman debug build, 8MB
+-  # `ulimit -s`) unconstrained linear recursion is safe through a cap of
+-  # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
+-  # the safe ceiling is build/platform-dependent, not a fixed constant.
++  # instead. RFC-0005 S8ca: a count cannot know what a level costs (more
++  # on cpp than on c) or what the thread's stack holds, so a call is also
++  # not inlined when the native stack left is under one more level's need
++  # (`nativeStackShort`, below).
+   # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
+   # while the frontier is not growing (`depthMayExtend`) and the stack is
+   # under the hard budget (`maxRecursionDepth`). A path no execution can
+   # take is dropped first either way (S8an, below).
+-  let overDepth = w.callStack.len >= w.settings.budget.maxCallDepth
++  # RFC-0005 S8ca: and, whatever the depth budget, not past the native
++  # stack the walk needs (`nativeStackShort`); the decline is in-band, a
++  # hard-budget decline the extension's root reads as one.
++  let stackLeft = nativeStackShort(w)
++  let overDepth = stackLeft >= 0 or
++    w.callStack.len >= w.settings.budget.maxCallDepth
+   var depthLive: seq[Path]
+   var extendDepth = false
+   if overDepth:
+     for p in paths:
+       if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
+     if depthLive.len == 0: return depthLive
+-    extendDepth = depthMayExtend(w, depthLive.len)
++    extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
+   if overDepth and not extendDepth:
+     # The decline, and its history: `depthBail`.
+-    if w.callStack.len >= hardCallDepth(w.settings): inc w.depthHardHits
+-    depthBail(w, stmt, depthLive, w.callStack.len >= hardCallDepth(w.settings))
++    let atHard = stackLeft >= 0 or
++      w.callStack.len >= hardCallDepth(w.settings)
++    if atHard: inc w.depthHardHits
++    if stackLeft >= 0: nativeStackCutFlag = true
++    depthBail(w, stmt, depthLive,
++      (if stackLeft >= 0: dcutStack
++       elif atHard: dcutHard
++       else: dcutFrontier), stackLeft)
+   else:
+     let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
+     # RFC-0005 S8ax: the first extended level is the extension's root. A
+@@ -21394,7 +21396,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
+           retName: stmt.retName,
+           retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+           returnedPaths: @[], ptrRiskFormals: ptrRisk.risk,
+-          ptrSafeFormals: ptrRisk.safe)
++          ptrSafeFormals: ptrRisk.safe, sp: nativeStackPointer())   # S8ca
+         w.callStats[stmt.callee] = CallStat(
+           name: stmt.callee,
+           walked: w.callStats[stmt.callee].walked + 1,
+@@ -21438,6 +21440,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
+           w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
+         let calleeFrameId = w.frame.frameId
+         w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
++        anchorViews(calleePath, entryCells, calleeFrameId)   ## RFC-0005 S8ca
+         w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+         # RFC-0005 S8bx (item 3): an `mpairs` view passed with its table.
+         let viewWhy = bindViewAliases(stmt, sig, p.env, w)
+@@ -21714,7 +21717,7 @@ proc walkCallArm(stmt: IRStmt, paths: seq[Path],
+           survivors.add merged
+     w.extHardMark = outerExtMark
+     if extRoot and w.depthHardHits > hardMark:
+-      return depthBail(w, stmt, paths, true)
++      return depthBail(w, stmt, paths, dcutHard)
+     survivors
+ 
+ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+@@ -22136,1458 +22139,7 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+         exitReturn(forkPath(cp, cp.pc, newEnv), w)
+     @[]
+   of isCall:
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+     walkCallArm(stmt, paths, w)
+-||||||| 5729b1a
+-    # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
+-    # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
+-    # opaque/uncached/uninstantiated/depth-capped early-outs below all
+-    # produce exactly one path per input path too, via a fresh havoc'd
+-    # retSym; only the raise-escape channel can add more, orthogonal to
+-    # `w.mode`). The callee body is walked with `walk(sig.body, ...)` —
+-    # THIS SAME `w` (mode/concreteEq carried by reference) — so any
+-    # `if`/`while`/etc. INSIDE the callee already follows the concrete
+-    # trace correctly once THEIR OWN dispatch arms do (isIf per G1b;
+-    # isWhile/isVariantReassignSymbolic per this R14 pass). There is no
+-    # separate "which arm of this call" decision for follow-concrete to
+-    # narrow at the call site itself — the discard below is correct BY
+-    # CONSTRUCTION, not an oversight.
+-    case w.mode
+-    of wmExplore: discard
+-    of wmFollowConcrete: discard
+-    # ---- #137: opaque effectful call ----
+-    if stmt.opaque:
+-      # Issue #163 slice 4: an opaque call the parser proved INERT
+-      # (`isInertOpaqueCall`, dsl_parser.nim — statement position, every
+-      # argument plainly value-typed) is a no-op here: no taint, no
+-      # `w.sawUnknown`, no classified error. Returning the input paths
+-      # unchanged is exactly what an empty block does, and is identical to
+-      # the treatment `{.symexTransparent.}`'s parse-time drop (slice 1)
+-      # produces for the same shape of call.
+-      #
+-      # Soundness: with no bound result and nothing writable passed in, the
+-      # only channel left for such a callee to affect the SUT is a
+-      # module-level global — and the walker does not model globals AT ALL,
+-      # so a SUT that could observe one already degrades to sxUnknown (an
+-      # unclassified KeyError) at its OWN read site, independently of this
+-      # call. Dropping the taint here cannot introduce a false verdict. What
+-      # it forgoes is a callee that never returns or raises (`echo` can
+-      # raise IOError) reached out of the intended order — a pre-existing,
+-      # symmetric gap: an opaque call placed AFTER the target was already
+-      # invisible to it before this change. Ordering, not soundness, moves.
+-      if stmt.opaqueInert:
+-        # #163 review R1: inert means a no-op for CONTROL FLOW and RESULT
+-        # BINDING (there is no bound result — `isInertOpaqueCall` only ever
+-        # fires in statement position), NOT a no-op for the ARGUMENT
+-        # EXPRESSIONS themselves. Those are real Nim expressions the caller
+-        # evaluates before the call runs, and `isInertArg` (dsl_parser.nim)
+-        # checks only the argument's STATIC RESULT TYPE — never its
+-        # expression shape — so an inline defect-fork shape among them
+-        # (div/mod by zero, signed overflow, `parseInt`, `s[i]`, a seq
+-        # slice — `rhsHasInlineDefectFork`'s class) is admitted here too,
+-        # and can raise on its own. Raise obligations are a RUNTIME side
+-        # effect of `lower()` (it populates sinks like `divByZeroConds`),
+-        # never a static IR artifact, so skipping the lowering — as the
+-        # fast path used to — makes the obligation never exist at all.
+-        #
+-        # Mirror the ordinary resolved-callee arm a few hundred lines
+-        # below (`argVals.add lower(p.env, stmt.cargs[i], argProto)`
+-        # followed by `drainScalarRaiseForks`): lower each argument for
+-        # its SIDE EFFECTS ONLY (the value itself is discarded — there is
+-        # nothing to bind on the inert path) and drain the raise-fork
+-        # sinks it populates before returning the survivors. The call
+-        # itself is still never walked and never taints — only the
+-        # arguments' own defect obligations become live.
+-        var out1: seq[Path]
+-        for p in paths:
+-          if w.shouldStop: return
+-          seedCallerHeapThreadvars(p)
+-          convFloatToIntBoundConds = @[]
+-          w.convFloatToIntBoundConds = @[]
+-          rangeDefectConds = @[]
+-          w.rangeDefectConds = @[]
+-          parseIntRaiseConds = @[]
+-          w.parseIntRaiseConds = @[]
+-          divByZeroConds = @[]
+-          w.divByZeroConds = @[]
+-          overflowConds = @[]
+-          w.overflowConds = @[]
+-          strIndexOobConds = @[]
+-          w.strIndexOobConds = @[]
+-          seqOobConds = @[]
+-          w.seqOobConds = @[]
+-          arithTrapConds = @[]
+-          w.arithTrapConds = @[]
+-          regexRaiseMsgs = @[]
+-          w.regexRaiseMsgs = @[]
+-          w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
+-          for arg in stmt.cargs:
+-            discard lower(p.env, arg)
+-          let pd = drainPendingLowerEffects(p)
+-          for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
+-            out1.add sp
+-        # RFC-0005 S8as: the call ran (on the survivors of its arguments'
+-        # raise forks), so each name its effect summary lists
+-        # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
+-        # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+-        for sp in out1: havocOpaqueWrites(w, sp, stmt)
+-        return opaqueRaiseForks(w, out1, stmt)
+-      # Don't resolve a body; allocate fresh retSym; mark path
+-      # uncertain so any target reached on this path degrades to
+-      # sxUnknown rather than emitting an unsound witness.
+-      #
+-      # Issue #163: say WHY, and name the call. This arm used to set
+-      # `w.sawUnknown` bare, which is what the Invariant-7 backstop in
+-      # `runSymexImpl` reports as `weInternalWalkerFault` ("the walker itself
+-      # hit a bug here") — a misdiagnosis for an ordinary unmodelled call, and
+-      # the one an `echo` ahead of the interesting branch produced. The drain
+-      # dedups by message, so N calls to the same callee collapse to one
+-      # entry while two different callees each get named.
+-      # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
+-      # RFC-0005 S8ax: a summary the parser could not bound says why.
+-      let d = w.degrade(feOpaqueCallUnmodelled,
+-        "opaque call `" & stmt.callee & "` is not modeled — " &
+-             (if stmt.opaqueWhy.len > 0: stmt.opaqueWhy & "; " else: "") &
+-             "its result " &
+-             "and any state it touches are unknown, so every path through it " &
+-             "is tainted. If the call cannot affect the code under test " &
+-             "(void, value arguments, nothing read back), mark it " &
+-             "`{.symexTransparent.}` and symex will drop it instead")
+-      var out2: seq[Path]
+-      for p in paths:
+-        var newEnv = p.env
+-        var pcInit: seq[Z3Bool]
+-        if stmt.retName.len > 0:
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_op" & $w.synthZ3
+-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-      return out2
+-    if not w.procs.hasKey(stmt.callee):
+-      # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
+-      # (the parser rejected unresolved callees at compile time); G1c adds a
+-      # legitimate cause — a generic instantiation OVER the per-proc cap is
+-      # intentionally NOT registered (`maxInstantiationsPerProc`), so its
+-      # `mkCall` key has no `ProcSig`. Treat it exactly like the depth-bail
+-      # arm: continue with a FRESH unconstrained retSym (so a downstream read
+-      # of `stmt.retName` does not KeyError) and mark the surviving paths
+-      # uncertain so any target reached on them degrades to sxUnknown — never
+-      # an unsound witness. `geInstantiationCapped` is surfaced from
+-      # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
+-      # RFC-0005 S1b (§2.2 table, §2.5 point 3): the decline's kind now rides
+-      # the never-registered callee KEY (`unregisteredCalleeKey`, minted by
+-      # `ensureProcRegistered` for the over-cap / distinct-barrier /
+-      # unresolvable-`getImpl` declines), so this arm records it at the walk
+-      # site through `degrade` — the recorded error is the run act and its
+-      # token the path act (was a kindless run mark + kindless ⊤ token). A
+-      # missing callee with NO parse-time decline behind it has no modelled
+-      # cause at all: that is a walker/parser bug, recorded as such.
+-      var declineKind: SymexErrorKind
+-      let d =
+-        if unregisteredCalleeKind(stmt.callee, declineKind):
+-          w.degrade(declineKind,
+-            "call to unregistered callee `" & stmt.callee & "` reached at " &
+-                 "walk time — declined at parse time (" & $declineKind &
+-                 "); the call returns a fresh unconstrained value and the " &
+-                 "callee's effects are not modelled",
+-            scope = calleeKeyed(stmt.callee))   # RFC-0005 S8 (§2.5 point 3)
+-        else:
+-          w.degrade(weInternalWalkerFault,
+-            "call to callee `" & stmt.callee & "` reached at walk time with " &
+-                 "no registered ProcSig and no parse-time decline behind it " &
+-                 "(weInternalWalkerFault)")
+-      var out2: seq[Path]
+-      for p in paths:
+-        var newEnv = p.env
+-        var pcInit: seq[Z3Bool]
+-        if stmt.retName.len > 0:
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_cap" & $w.synthZ3
+-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-      return out2
+-    let sig = w.procs[stmt.callee]
+-    # Statistics
+-    if not w.callStats.hasKey(stmt.callee):
+-      w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
+-    # Depth check. RFC-0010 B4 round 2 (REVERTED): a `cap > 0 and` guard was
+-    # added here so `maxCallDepth = 0` would mean unlimited, matching
+-    # `maxFrontierSize`/`maxSplitParts`'s house style. Two independent
+-    # reviewers reproduced a SIGSEGV under `maxCallDepth: 0` against ordinary
+-    # linear recursion (e.g. `f(n) = if n > 0: f(n-1) + 1 else: 0`): with the
+-    # cap disabled, `walk` recurses NATIVELY once per SUT call-stack level,
+-    # and `w.activeCalls`'s cycle-breaking only fires for recursion with
+-    # IDENTICAL argument shapes (`argShapeKey`/`symValHash` hash the Z3 AST,
+-    # which differs at every level of `f(n-1)`) -- so it never catches this,
+-    # the ordinary case, not a pathological one. A native-stack-exhaustion
+-    # SIGSEGV takes the whole test BINARY down (every other suite sharing
+-    # it), which is worse than the `sxUnknown` this guard was meant to avoid
+-    # and a more severe Invariant-3 violation than the bug it fixed. Unlike
+-    # `maxClosureInlineCount` (`applyClosureGround` below, guard correctly
+-    # kept -- the walker declines a forward-declared self-referencing closure
+-    # with `ceClosureUnknownCallee` before it can recurse) there is no
+-    # equivalent decline here: EVERY recursive call reaches this depth check.
+-    # `maxCallDepth` is therefore a THIRD documented "0 does not mean
+-    # unlimited" exception alongside `maxLoopUnwind`/`seqInlineThreshold` --
+-    # see `ResourceBudget`'s umbrella doc comment and this field's own doc,
+-    # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
+-    # on the very first call, by design; a caller wanting deep analysis
+-    # writes an explicit bound sized to the SUT's real max call depth
+-    # instead. Do not assume a "large-looking" round number is automatically
+-    # safe -- measured directly (this engine's Linux/podman debug build, 8MB
+-    # `ulimit -s`) unconstrained linear recursion is safe through a cap of
+-    # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
+-    # the safe ceiling is build/platform-dependent, not a fixed constant.
+-    # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
+-    # while the frontier is not growing (`depthMayExtend`) and the stack is
+-    # under the hard budget (`maxRecursionDepth`). A path no execution can
+-    # take is dropped first either way (S8an, below).
+-    let overDepth = w.callStack.len >= w.settings.budget.maxCallDepth
+-    var depthLive: seq[Path]
+-    var extendDepth = false
+-    if overDepth:
+-      for p in paths:
+-        if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
+-      if depthLive.len == 0: return depthLive
+-      extendDepth = depthMayExtend(w, depthLive.len)
+-    if overDepth and not extendDepth:
+-      # The decline, and its history: `depthBail`.
+-      if w.callStack.len >= hardCallDepth(w.settings): inc w.depthHardHits
+-      depthBail(w, stmt, depthLive, w.callStack.len >= hardCallDepth(w.settings))
+-    else:
+-      let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
+-      # RFC-0005 S8ax: the first extended level is the extension's root. A
+-      # recursion that reaches the hard budget below it is unbounded on
+-      # some path; every path it returns then carries a chain of returns as
+-      # long as the extension, and each later query pays for it. Measured
+-      # (Linux, Z3 5.1, loaded host) on `sumTo(n) == 465` with `n >= 0`
+-      # unconstrained: 44.5 s declining at `maxCallDepth = 3` without the
+-      # extension, 393 s with a hard budget of 4 when the paths that
+-      # bottomed out within it were kept, killed at 900 s past 5. So the
+-      # root drops everything the extension walked and declines here, at
+-      # `maxCallDepth`, exactly as before S8ax: an unbounded recursion costs
+-      # what it did, and only one its arguments bound is followed.
+-      let extRoot = extendDepth and
+-        w.callStack.len == w.settings.budget.maxCallDepth
+-      let hardMark = w.depthHardHits
+-      let outerExtMark = w.extHardMark
+-      if extRoot: w.extHardMark = hardMark
+-      var survivors: seq[Path]
+-      for p in paths:
+-        if w.shouldStop:
+-          w.extHardMark = outerExtMark
+-          return
+-        # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
+-        if extRoot and w.depthHardHits > hardMark: break
+-        # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
+-        # CLOSURE call lowered out of `p.env` below (a closure passed as an
+-        # argument, or invoked while lowering an actual) descends with this
+-        # path's threaded heap (ADR-0010 R1b — the closure-arm companion to the
+-        # structural `isCall` forkPath threading).
+-        seedCallerHeapThreadvars(p)
+-        # Lower actuals in the caller env once; reused for cache key
+-        # and for callee env construction.
+-        var argVals: seq[SymVal]
+-        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
+-        w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+-        rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
+-        w.rangeDefectConds = @[] ## R16-2: WalkCtx field
+-        parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
+-        w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
+-        divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
+-        w.divByZeroConds = @[]            ## R16-3: WalkCtx field
+-        overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
+-        w.overflowConds = @[]             ## R16-4: WalkCtx field
+-        strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
+-        w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
+-        seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
+-        w.seqOobConds = @[]                ## N14: WalkCtx field
+-        arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
+-        w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+-        regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
+-        w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
+-        w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
+-        for i, formal in sig.params:
+-          ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
+-          ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
+-          ## always shapes a plain `itInt` formal's literal actual as BV — the
+-          ## type-driven default. A formal `collectIntOffsetParams` traced
+-          ## (`IRParam.isIntOffset`, now also set for CALLEES via
+-          ## `parseCalleeImpl`, not just top-level entry procs) instead needs
+-          ## an svInt proto, so a LITERAL offset argument (e.g. the corpus's
+-          ## own `readCStringHelper(s, 0)` first hop) arrives Int-sorted
+-          ## exactly like a traced VARIABLE argument already does (a
+-          ## non-literal lowers untouched regardless of proto — this only
+-          ## ever affects literal shaping).
+-          ## R3 (S2): stamp the proto's width metadata from the formal's own
+-          ## static type so a LITERAL offset argument keeps its overflow
+-          ## fork (`coerceIntLit` propagates it through onto the literal).
+-          let argProto = if formal.isIntOffset:
+-                           some(SymVal(kind: svInt, zi: mkInt(0),
+-                                       ziWidth: formal.ty.width,
+-                                       ziSigned: formal.ty.signed))
+-                         else: intLitProto(formal.ty)
+-          argVals.add lower(p.env, stmt.cargs[i], argProto)
+-        let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
+-        # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
+-        # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
+-        # the surviving non-raise continuations. The callee dispatch below runs once
+-        # per continuation (typically 1 path, so zero overhead on the common case).
+-        for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
+-          if w.shouldStop: break
+-          # Cache lookup — pure procs with deterministic-arg-shape hits
+-          # are served without re-walking. The cache entry's `pcDelta`
+-          # carries the returning-path constraints; we extend the
+-          # current path with them.
+-          let key = argShapeKey(stmt.callee, argVals)
+-          if key in w.activeCalls:
+-            # Mutual / direct recursion with identical args — the call
+-            # is already being walked further up the stack. Break the
+-            # cycle: return a fresh symbolic retval, mark uncertain.
+-            w.callStats[stmt.callee] = CallStat(
+-              name: stmt.callee,
+-              walked: w.callStats[stmt.callee].walked,
+-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+-            var newEnv = p.env
+-            var pcInit: seq[Z3Bool]
+-            if stmt.retName.len > 0:
+-              inc w.synthZ3
+-              let z3Name = stmt.retName & "_cyc" & $w.synthZ3
+-              newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
+-            # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
+-            # `weRecursionCycleCut` through `degrade` (was a path-only
+-            # kindless ⊤ token that recorded nothing and marked the run only
+-            # if a later target hit on this path did). The callee's body —
+-            # its var-param/heap effects and raises — is not walked for this
+-            # occurrence, so the degrade is run-relevant even when the cut
+-            # path never reaches a finding.
+-            let d = w.degrade(weRecursionCycleCut,
+-              "recursive call to `" & stmt.callee & "` with an argument " &
+-                   "shape already being walked up the stack — cycle cut " &
+-                   "with a fresh unconstrained return value; the callee's " &
+-                   "effects are not modelled for this call " &
+-                   "(weRecursionCycleCut)")
+-            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-            continue
+-          # RFC-0005 S8ax: a hit needs the same actuals (the key is a hash)
+-          # and, for a summary whose walk dropped an arm or path against its
+-          # context, the same drops under this caller's facts.
+-          var hit = -1
+-          let outerIn = outerState(p.env, sig.captures)   # RFC-0005 S8be
+-          if w.callCache.hasKey(key):
+-            let bucket = w.callCache[key]
+-            for ei in 0 ..< bucket.len:
+-              if cacheArgsSame(bucket[ei].args, argVals) and
+-                 cacheOuterSame(bucket[ei].outer, outerIn) and
+-                 pruneFactsHold(w.z3, p, bucket[ei].pruneFacts, w.settings):
+-                hit = ei
+-                break
+-          if hit >= 0:
+-            let entry = w.callCache[key][hit]
+-            w.callStats[stmt.callee] = CallStat(
+-              name: stmt.callee,
+-              walked: w.callStats[stmt.callee].walked,
+-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+-            var newEnv = p.env
+-            if stmt.retName.len > 0:
+-              newEnv[stmt.retName] = entry.retSym
+-            for ex in entry.exits:
+-              survivors.add forkPath(p, p.pc & ex, newEnv)
+-            continue
+-          # Build callee env
+-          var calleeEnv: Env
+-          # #140: track var-param formal→actual binding for write-back.
+-          var varArgs: seq[(string, string)]   # (formalName, callerVarName)
+-          for i, formal in sig.params:
+-            calleeEnv[formal.name] = argVals[i]
+-            if formal.isVar and stmt.cargs[i].kind == iekVar:
+-              varArgs.add (formal.name, stmt.cargs[i].vname)
+-          # RFC-0005 S8an: the callee also reaches every module-level global
+-          # and, for a routine declared inside another, the enclosing
+-          # variables it captures. Nim shares those locations with the
+-          # caller; the walk copies each binding in here and carries the
+-          # callee's value back out on every exit (`carryOuterBindings`),
+-          # which is the same thing for one call running at a time. A root
+-          # of a `var`/`addr` actual that is one of them is WITHHELD
+-          # (`guarded`): it would reach the callee twice, and copy-in/
+-          # copy-out of the argument would then not be Nim's semantics. A
+-          # callee that touches a withheld name declines.
+-          let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
+-          discard threadOuterBindings(calleeEnv, p.env,
+-                                                 sig.captures, guarded)
+-          # RFC-0005 S8ax: an address-taken variable the callee reaches by
+-          # name -- a capture, or the caller variable a `var` formal is --
+-          # keeps its address cell there (`inheritAddrCells`).
+-          let calleeAddrCells = inheritAddrCells(calleeEnv, p.env,
+-            w.frame.addrCells, varArgs, sig.captures, guarded)
+-          # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
+-          # non-bool, non-void return type (float/string/composite as well as
+-          # int) routes through `freshRetSym` so a value-returning generic
+-          # instantiated at e.g. `float64` gets a correctly-typed placeholder.
+-          # Any init-side constraints (string byte-range floor, …) are threaded
+-          # onto the post-call survivor paths below (where `retSym` flows out).
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_c" & $w.synthZ3
+-          var retInit: seq[Z3Bool]
+-          # RFC-0005 S8z: a closure-returning callee's value is the
+-          # `svClosure` its body builds, handed to the caller per returned
+-          # path below; there is no symbol to allocate (it was
+-          # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
+-          let closureRet = not sig.isVoid and
+-                           retCarriesClosure(stmt.retTy)   # S8be: tuples too
+-          let retSym = if sig.isVoid or closureRet:
+-                         SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
+-                       else:
+-                         # Round-6 B5: thread the parse-time-traced offset
+-                         # positions so a chained scan's second-hop offset
+-                         # allocates svInt instead of the type-driven BV
+-                         # default (see `IRStmt.isCall.retIntOffsetPositions`).
+-                         # RFC-0005 S8be: otherwise in the sort of its
+-                         # actuals, bounded by its type (`freshCallRet`).
+-                         if stmt.retIntOffsetPositions.len > 0:
+-                           freshRetSym(stmt.retTy, z3Name, retInit,
+-                                       stmt.retIntOffsetPositions)
+-                         else:
+-                           freshCallRet(stmt, p.env, z3Name, retInit)
+-          let pruneMark = ctxPruneLog.len   # RFC-0005 S8as/S8ax
+-          # RFC-0005 S8ax: the walks entered at each call depth, the
+-          # frontier the adaptive depth reads (`depthMayExtend`).
+-          while w.depthWalks.len <= w.callStack.len: w.depthWalks.add 0
+-          inc w.depthWalks[w.callStack.len]
+-          w.callStack.add CallFrame(
+-            callee: stmt.callee, retSym: retSym,
+-            retName: stmt.retName,
+-            retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+-            returnedPaths: @[])
+-          w.callStats[stmt.callee] = CallStat(
+-            name: stmt.callee,
+-            walked: w.callStats[stmt.callee].walked + 1,
+-            cacheHits: w.callStats[stmt.callee].cacheHits)
+-          w.activeCalls.incl key
+-          # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
+-          # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
+-          # as its starting heap, instead of R1's fresh-empty default. `forkPath`
+-          # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
+-          # a deref in the callee reads the SAME heap array the caller already
+-          # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
+-          let calleePath = forkPath(p, p.pc, calleeEnv)
+-          # RFC-0005 S8bs: a `var` actual that is a part of an address-taken
+-          # variable is bound to its cell (`bindVarLocs`).
+-          var entryCells = calleeAddrCells
+-          var elemShares: seq[(string, string)]
+-          var paramNames: seq[string]
+-          # RFC-0005 S8bu: each formal with the caller variable its actual
+-          # names (an `addr` actual's cell, `bindVarLocs`).
+-          var argVars: seq[(string, string)]
+-          for i, f in sig.params:
+-            paramNames.add f.name
+-            if i < stmt.cargs.len and stmt.cargs[i].kind == iekVar:
+-              argVars.add (f.name, stmt.cargs[i].vname)
+-          let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
+-            w.frame.frameId, stmt.cVarLocs, varArgs, argVars, paramNames,
+-            entryCells, elemShares, w)
+-          if locWhy.len > 0:
+-            taintInPlace(calleePath, w.degrade(feUnsupportedOp,
+-              "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
+-                   "; the callee's writes through the two are not modelled " &
+-                   "in its order (feUnsupportedOp)"))
+-          # Phase 15 E1: per-frame exception context. Save the caller's frame
+-          # (handler stack + in-flight exn) and install a fresh one before walking
+-          # the callee body — a `try` opened inside the callee must not leak to
+-          # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
+-          # so E3/E5 raise-flow threading is correct by construction.
+-          pushFrame(w)
+-          # RFC-0005 S8be: and an element cell, likewise.
+-          inheritElemCells(calleePath, w.frameStack[^1].frameId,
+-            w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
+-          let calleeFrameId = w.frame.frameId
+-          w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
+-          w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+-          let guardMark = callGuardedNames.len   ## RFC-0005 S8an
+-          for g in guarded: callGuardedNames.add g
+-          let fallThroughRaw = walk(sig.body, @[calleePath], w)
+-          callGuardedNames.setLen(guardMark)
+-          # Round-6 A6-rider (walker v86): a callee whose body reaches the end
+-          # via IMPLICIT fallthrough (no explicit `return`) after a
+-          # CONDITIONAL, multi-statement `result = expr` assignment —
+-          # `parseCalleeImpl`'s own documented "general parser path" for
+-          # procs that aren't a single bare `result = expr` body (its
+-          # comment: "Procs with conditional / multi-step result-assignment
+-          # land via the general parser path ... need cycle-2 work to model
+-          # `result` as a mutable binding") — used to leave `retSym`
+-          # COMPLETELY UNCONSTRAINED: nothing tied the caller-visible return
+-          # value to the callee's actual computed `result`. Confirmed via
+-          # isolated bisection (`tests/tsymex_r6_a6r_callwitness.nim`) to be
+-          # a genuine SOUNDNESS gap, not merely a witness-extraction cosmetic
+-          # issue — a deliberately-unreachable target (whose impossibility
+-          # depends on the callee's read of its `seq[byte]` argument) proved
+-          # a FALSE `sxSat` pre-fix, with the reported witness floating free
+-          # of the solver's actual (nonexistent) justification — chapulin's
+-          # BLOCKER #12 "all-zero witness on an otherwise sxSat target" is
+-          # the visible symptom of this cause: `retSym` was free, so Z3 chose
+-          # a satisfying `retSym` directly and left every `data` cell
+-          # unconstrained (defaulting to 0), independent of whether the
+-          # target was genuinely reachable at all. The closure-call path
+-          # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
+-          # below) was ASSUMED at the time to already handle this exact shape
+-          # correctly -- that assumption was FALSE (confirmed N16, walker
+-          # v96): `applyClosureGround`'s fallThrough loop had no `else` twin
+-          # at all until N16 added one, mirroring this arm's idiom. As of
+-          # v96 both paths carry the identical else-twin; mirror that idiom
+-          # here for the ordinary call-inlining path. Composite
+-          # (non-scalar-wired) return kinds fall through to the SAME
+-          # in-band-degrade net `isReturn`'s explicit-return arm already
+-          # uses (never raise — Invariant 3), so an implicit-result
+-          # fallthrough of an unsupported composite kind stays a classified
+-          # `sxUnknown`, not a crash.
+-          var fallThrough: seq[Path]
+-          if sig.isVoid:
+-            fallThrough = fallThroughRaw
+-          elif closureRet:
+-            # RFC-0005 S8z: as `completeReturn`'s closure arm.
+-            for cp in fallThroughRaw:
+-              if cp.env.hasKey("result") and
+-                 closureValueBuilt(cp.env["result"], stmt.retTy):
+-                fallThrough.add cp
+-              else:
+-                let d = w.degrade(ceUnsupportedHof,
+-                  "a closure-returning callee returns no lambda the walker " &
+-                  "built (an untouched nil proc, or a proc value from elsewhere)")
+-                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-          else:
+-            for cp in fallThroughRaw:
+-              if cp.env.hasKey("result"):
+-                let retVal = cp.env["result"]
+-                if retVal.kind notin retBindWiredKinds or
+-                    not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
+-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
+-                  # composite arm: the per-call `retSym` is left free, the
+-                  # callee's effects ride `cp`, nothing is dropped.
+-                  let d = w.degrade(feUnsupportedOpHavoc,
+-                    "composite-typed implicit-result fallthrough (kind " &
+-                         plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
+-                         "to sxUnknown (feUnsupportedOp)")
+-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-                else:
+-                  let (rSym, rVal) = reconcileInt(retSym, retVal)
+-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+-                                           cp.env)
+-              else:
+-                # R2 (walker v90): a fallthrough path that never touched
+-                # `result` at all — legal Nim, and DISTINCT from the
+-                # `cp.env.hasKey("result")` branch above (v86's original
+-                # fix). `result` still holds the return type's ZERO VALUE on
+-                # such a path (Nim zero-initializes every `result` slot
+-                # before the body runs); pre-fix, `cp` was forwarded here
+-                # totally UNCHANGED — `retSym` stayed exactly as free as it
+-                # was before v86, reintroducing v86's own false-`sxSat` shape
+-                # for the never-assigned case (confirmed RED in
+-                # `tests/tsymex_r6_r2_zerodefault_result.nim`). Bind `retSym`
+-                # to `defaultZero(stmt.retTy, ...)` via the SAME `retBindEq`
+-                # the assigned branch above uses, instead of leaving it free.
+-                # `defaultZero`/`retBindEq` both still raise `ValueError` (or
+-                # `SymexRefUnresolvedError`) for a handful of composite kinds
+-                # neither is wired for (float, nested variant, distinct,
+-                # ref/ptr, non-string-keyed table, non-int64 hash set) — for
+-                # those, fall through to the SAME classified `sxUnknown`
+-                # decline the `retVal.kind notin {...}` branch above uses,
+-                # never bind a value the walker cannot back soundly.
+-                try:
+-                  let zeroVal = defaultZero(stmt.retTy, stmt.retName & ".zerodefault")
+-                  let (rSym, rVal) = reconcileInt(retSym, zeroVal)
+-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+-                                           cp.env)
+-                except ValueError, SymexRefUnresolvedError:
+-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
+-                  # `retSym` ranges over the whole type, zero included.
+-                  let d = w.degrade(feUnsupportedOpHavoc,
+-                    "composite-typed implicit-result fallthrough " &
+-                         "(untouched-result path, kind " & $stmt.retTy.kind &
+-                         ") has no sound zero-default (" &
+-                         getCurrentExceptionMsg() &
+-                         ") — path degraded to sxUnknown (feUnsupportedOp)")
+-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-          # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
+-          # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
+-          # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
+-          # pop, re-route each through the CALLER's handler stack: a `try` around
+-          # this call site catches the helper's raise. Heap/pc state at the raise
+-          # point is preserved on `er.path` (R1b merge — structural now, inert until
+-          # Cluster R). The handler-body continuations join the call's survivors.
+-          let calleeEscaped = w.frame.escaped
+-          let calleeCells = w.frame.addrCells   ## RFC-0005 S8ax
+-          popFrame(w)
+-          for er in calleeEscaped:
+-            var rEnv = p.env
+-            # RFC-0005 S8an: the callee's writes to globals and captures
+-            # (before the `var` write-back, which is the later store).
+-            carryOuterBindings(rEnv, er.path.env, sig.captures, guarded)
+-            # RFC-0005 S8ac: the callee wrote its `var` formals through the
+-            # caller's variables before it raised; the handler sees those
+-            # writes (#140's write-back ran on the returning paths only).
+-            for (formalName, callerName) in varArgs:
+-              if er.path.env.hasKey(formalName):
+-                rEnv[callerName] = er.path.env[formalName]
+-            let carried = carryAddrCells(rEnv, er.path.env, calleeCells,
+-              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+-            var raisePath = forkPath(er.path, er.path.pc, rEnv)
+-            carryElemCells(raisePath, w.frame.frameId, calleeFrameId,
+-              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+-            raisePath = settleAddrCells(raisePath, carried, w)
+-            let touched = touchedGuard(er.path.env, guarded)
+-            if touched.len > 0:
+-              raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
+-                                          guardDegrade(w, stmt.callee, touched))
+-            survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+-            if w.shouldStop:
+-              w.extHardMark = outerExtMark   # RFC-0005 S8ax
+-              return survivors
+-          let frame = w.callStack[w.callStack.high]
+-          w.callStack.setLen(w.callStack.high)
+-          w.activeCalls.excl key
+-          # Cache: single-return, single-fall-through-free, non-uncertain
+-          # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
+-          # escaped a raise is NOT cached — its summary is incomplete (a cache hit
+-          # would replay the normal return but silently drop the escaped raise).
+-          # ADR-0012: the cache replays only `pcDelta` (branch + retInit), NOT the
+-          # callee's `defectSurvivorPc`. An arith-defect callee normally ESCAPES
+-          # (calleeEscaped != [] ⇒ already not cached); but a callee that CATCHES
+-          # its own defect (try/except) could add a defect-survivor fact without
+-          # escaping. Conservatively skip caching when the callee added any such
+-          # fact, so a cache hit can never silently drop a `not overflow`/`not
+-          # divByZero` feasibility constraint. (Sound; merely less reuse.)
+-          # RFC-0005 S8u: nor when the callee allocated or wrote the heap
+-          # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
+-          # `new(result)` callee with the same argument shape would return
+-          # the first call's address, and a heap write would be lost.
+-          # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
+-          # variable. A hit replays only `pcDelta`, never the #140
+-          # write-back, so the second call's writes would be lost.
+-          # RFC-0005 S8an: nor when the callee reached a global or a
+-          # capture. A hit replays only `pcDelta`: a read would return the
+-          # first call's value across a write in between, and a write would
+-          # be lost.
+-          # RFC-0005 S8as/S8ax: a callee whose walk dropped a path or arm as
+-          # infeasible in this caller's context is cached with those drops
+-          # (`pruneFactsSince`): a hit re-checks them (`pruneFactsHold`).
+-          # S8as left such a call uncached, which cost `fib` every reuse.
+-          var pruneFacts: seq[seq[Z3Bool]]
+-          let exitPaths = frame.returnedPaths & fallThrough
+-          # RFC-0005 S8be: a callee threading globals, capture cells or
+-          # captures is cached keyed by their values, when no exit wrote
+-          # one (`exitKeepsOuter`); a withheld one still is not.
+-          var cacheable = calleeEscaped.len == 0 and not closureRet and
+-            varArgs.len == 0 and guarded.len == 0 and exitPaths.len > 0 and
+-            exitPaths.len <= callCacheExitsMax
+-          if cacheable:
+-            for cp in exitPaths:
+-              if not exitKeepsOuter(cp.env, outerIn, sig.captures) or
+-                 cp.taint != {} or
+-                 cp.defectSurvivorPc.len != p.defectSurvivorPc.len or
+-                 not heapUnchanged(cp, p) or
+-                 not factsPrefixSame(cp.pc, p.pc):
+-                cacheable = false
+-                break
+-          if cacheable and pruneFactsSince(pruneMark, p, pruneFacts):
+-            # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+-            # string byte-range floor) must ride in each exit's delta so a
+-            # cache REPLAY re-asserts them on the cached retSym.
+-            var exits: seq[seq[Z3Bool]]
+-            for cp in exitPaths:
+-              exits.add retInit & cp.pc[p.pc.len ..< cp.pc.len]
+-            let entry = CallCacheEntry(retSym: retSym, exits: exits,
+-                                       args: argVals, outer: outerIn,
+-                                       pruneFacts: pruneFacts)
+-            # A bucket holds one entry per distinct context it was walked
+-            # in, up to `callCacheBucketMax`; past it the call is walked.
+-            if not w.callCache.hasKey(key): w.callCache[key] = @[]
+-            if w.callCache[key].len < callCacheBucketMax:
+-              w.callCache[key].add entry
+-          for cp in frame.returnedPaths & fallThrough:
+-            var newEnv = p.env
+-            if stmt.retName.len > 0:
+-              newEnv[stmt.retName] =
+-                if closureRet and cp.env.hasKey("result") and
+-                    closureValueBuilt(cp.env["result"], stmt.retTy):
+-                  cp.env["result"]    # RFC-0005 S8z
+-                else: retSym
+-            # RFC-0005 S8an: the callee's globals and captures, as it left
+-            # them (before the `var` write-back, which is the later store).
+-            carryOuterBindings(newEnv, cp.env, sig.captures, guarded)
+-            # #140: propagate var-param mutations back to caller's env.
+-            for (formalName, callerName) in varArgs:
+-              if cp.env.hasKey(formalName):
+-                newEnv[callerName] = cp.env[formalName]
+-            let carried = carryAddrCells(newEnv, cp.env, calleeCells,
+-              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+-            # Phase 15 R1b return-MERGE: the post-call caller path carries the
+-            # callee's exit heap state back out (ADR-0010 R1b).
+-            # `forkPathMerged(cp, ...)` forks from `cp` (the returned
+-            # CALLEE path), so:
+-            #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
+-            #     caller's, so callee heap modifications are observed downstream.
+-            #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
+-            # `allocCounters`, however, must NOT be a plain replacement: we take
+-            # `max(caller[T], callee[T])` per type key so the freshness invariant
+-            # holds — a post-call caller `new T` uses a counter strictly above any
+-            # callee allocation and cannot collide with a callee-allocated ref on
+-            # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
+-            # the merge is correct by construction now.)
+-            # Phase 15 G3: `retInit` threads the retSym init constraints onto the
+-            # surviving caller path (where `retSym` becomes visible).
+-            # R3 hardening / RFC-0005 S1: taint is neither a bare propagate
+-            # nor a token join here — a post-call path is tainted by anything
+-            # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
+-            # site uses the dedicated `forkPathMerged` (the union
+-            # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
+-            let merged = settleAddrCells(
+-              forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
+-            carryElemCells(merged, w.frame.frameId, calleeFrameId,
+-              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+-            # RFC-0005 S8an: the callee wrote a withheld root directly.
+-            let touched = touchedGuard(cp.env, guarded)
+-            if touched.len > 0:
+-              taintInPlace(merged, guardDegrade(w, stmt.callee, touched))
+-            for tkey, callerCount in p.allocCounters:
+-              let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
+-              if callerCount > calleeCount:
+-                merged.allocCounters[tkey] = callerCount
+-            survivors.add merged
+-      w.extHardMark = outerExtMark
+-      if extRoot and w.depthHardHits > hardMark:
+-        return depthBail(w, stmt, paths, true)
+-      survivors
+-=======
+-    # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
+-    # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
+-    # opaque/uncached/uninstantiated/depth-capped early-outs below all
+-    # produce exactly one path per input path too, via a fresh havoc'd
+-    # retSym; only the raise-escape channel can add more, orthogonal to
+-    # `w.mode`). The callee body is walked with `walk(sig.body, ...)` —
+-    # THIS SAME `w` (mode/concreteEq carried by reference) — so any
+-    # `if`/`while`/etc. INSIDE the callee already follows the concrete
+-    # trace correctly once THEIR OWN dispatch arms do (isIf per G1b;
+-    # isWhile/isVariantReassignSymbolic per this R14 pass). There is no
+-    # separate "which arm of this call" decision for follow-concrete to
+-    # narrow at the call site itself — the discard below is correct BY
+-    # CONSTRUCTION, not an oversight.
+-    case w.mode
+-    of wmExplore: discard
+-    of wmFollowConcrete: discard
+-    # ---- #137: opaque effectful call ----
+-    if stmt.opaque:
+-      # Issue #163 slice 4: an opaque call the parser proved INERT
+-      # (`isInertOpaqueCall`, dsl_parser.nim — statement position, every
+-      # argument plainly value-typed) is a no-op here: no taint, no
+-      # `w.sawUnknown`, no classified error. Returning the input paths
+-      # unchanged is exactly what an empty block does, and is identical to
+-      # the treatment `{.symexTransparent.}`'s parse-time drop (slice 1)
+-      # produces for the same shape of call.
+-      #
+-      # Soundness: with no bound result and nothing writable passed in, the
+-      # only channel left for such a callee to affect the SUT is a
+-      # module-level global — and the walker does not model globals AT ALL,
+-      # so a SUT that could observe one already degrades to sxUnknown (an
+-      # unclassified KeyError) at its OWN read site, independently of this
+-      # call. Dropping the taint here cannot introduce a false verdict. What
+-      # it forgoes is a callee that never returns or raises (`echo` can
+-      # raise IOError) reached out of the intended order — a pre-existing,
+-      # symmetric gap: an opaque call placed AFTER the target was already
+-      # invisible to it before this change. Ordering, not soundness, moves.
+-      if stmt.opaqueInert:
+-        # #163 review R1: inert means a no-op for CONTROL FLOW and RESULT
+-        # BINDING (there is no bound result — `isInertOpaqueCall` only ever
+-        # fires in statement position), NOT a no-op for the ARGUMENT
+-        # EXPRESSIONS themselves. Those are real Nim expressions the caller
+-        # evaluates before the call runs, and `isInertArg` (dsl_parser.nim)
+-        # checks only the argument's STATIC RESULT TYPE — never its
+-        # expression shape — so an inline defect-fork shape among them
+-        # (div/mod by zero, signed overflow, `parseInt`, `s[i]`, a seq
+-        # slice — `rhsHasInlineDefectFork`'s class) is admitted here too,
+-        # and can raise on its own. Raise obligations are a RUNTIME side
+-        # effect of `lower()` (it populates sinks like `divByZeroConds`),
+-        # never a static IR artifact, so skipping the lowering — as the
+-        # fast path used to — makes the obligation never exist at all.
+-        #
+-        # Mirror the ordinary resolved-callee arm a few hundred lines
+-        # below (`argVals.add lower(p.env, stmt.cargs[i], argProto)`
+-        # followed by `drainScalarRaiseForks`): lower each argument for
+-        # its SIDE EFFECTS ONLY (the value itself is discarded — there is
+-        # nothing to bind on the inert path) and drain the raise-fork
+-        # sinks it populates before returning the survivors. The call
+-        # itself is still never walked and never taints — only the
+-        # arguments' own defect obligations become live.
+-        var out1: seq[Path]
+-        for p in paths:
+-          if w.shouldStop: return
+-          seedCallerHeapThreadvars(p)
+-          convFloatToIntBoundConds = @[]
+-          w.convFloatToIntBoundConds = @[]
+-          rangeDefectConds = @[]
+-          w.rangeDefectConds = @[]
+-          parseIntRaiseConds = @[]
+-          w.parseIntRaiseConds = @[]
+-          divByZeroConds = @[]
+-          w.divByZeroConds = @[]
+-          overflowConds = @[]
+-          w.overflowConds = @[]
+-          strIndexOobConds = @[]
+-          w.strIndexOobConds = @[]
+-          seqOobConds = @[]
+-          w.seqOobConds = @[]
+-          arithTrapConds = @[]
+-          w.arithTrapConds = @[]
+-          regexRaiseMsgs = @[]
+-          w.regexRaiseMsgs = @[]
+-          w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
+-          for arg in stmt.cargs:
+-            discard lower(p.env, arg)
+-          let pd = drainPendingLowerEffects(p)
+-          for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
+-            out1.add sp
+-        # RFC-0005 S8as: the call ran (on the survivors of its arguments'
+-        # raise forks), so each name its effect summary lists
+-        # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
+-        # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+-        for sp in out1: havocOpaqueWrites(w, sp, stmt)
+-        return opaqueRaiseForks(w, out1, stmt)
+-      # Don't resolve a body; allocate fresh retSym; mark path
+-      # uncertain so any target reached on this path degrades to
+-      # sxUnknown rather than emitting an unsound witness.
+-      #
+-      # Issue #163: say WHY, and name the call. This arm used to set
+-      # `w.sawUnknown` bare, which is what the Invariant-7 backstop in
+-      # `runSymexImpl` reports as `weInternalWalkerFault` ("the walker itself
+-      # hit a bug here") — a misdiagnosis for an ordinary unmodelled call, and
+-      # the one an `echo` ahead of the interesting branch produced. The drain
+-      # dedups by message, so N calls to the same callee collapse to one
+-      # entry while two different callees each get named.
+-      # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
+-      # RFC-0005 S8ax: a summary the parser could not bound says why.
+-      let d = w.degrade(feOpaqueCallUnmodelled,
+-        "opaque call `" & stmt.callee & "` is not modeled — " &
+-             (if stmt.opaqueWhy.len > 0: stmt.opaqueWhy & "; " else: "") &
+-             "its result " &
+-             "and any state it touches are unknown, so every path through it " &
+-             "is tainted. If the call cannot affect the code under test " &
+-             "(void, value arguments, nothing read back), mark it " &
+-             "`{.symexTransparent.}` and symex will drop it instead")
+-      var out2: seq[Path]
+-      for p in paths:
+-        var newEnv = p.env
+-        var pcInit: seq[Z3Bool]
+-        if stmt.retName.len > 0:
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_op" & $w.synthZ3
+-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-      return out2
+-    if not w.procs.hasKey(stmt.callee):
+-      # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
+-      # (the parser rejected unresolved callees at compile time); G1c adds a
+-      # legitimate cause — a generic instantiation OVER the per-proc cap is
+-      # intentionally NOT registered (`maxInstantiationsPerProc`), so its
+-      # `mkCall` key has no `ProcSig`. Treat it exactly like the depth-bail
+-      # arm: continue with a FRESH unconstrained retSym (so a downstream read
+-      # of `stmt.retName` does not KeyError) and mark the surviving paths
+-      # uncertain so any target reached on them degrades to sxUnknown — never
+-      # an unsound witness. `geInstantiationCapped` is surfaced from
+-      # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
+-      # RFC-0005 S1b (§2.2 table, §2.5 point 3): the decline's kind now rides
+-      # the never-registered callee KEY (`unregisteredCalleeKey`, minted by
+-      # `ensureProcRegistered` for the over-cap / distinct-barrier /
+-      # unresolvable-`getImpl` declines), so this arm records it at the walk
+-      # site through `degrade` — the recorded error is the run act and its
+-      # token the path act (was a kindless run mark + kindless ⊤ token). A
+-      # missing callee with NO parse-time decline behind it has no modelled
+-      # cause at all: that is a walker/parser bug, recorded as such.
+-      var declineKind: SymexErrorKind
+-      let d =
+-        if unregisteredCalleeKind(stmt.callee, declineKind):
+-          w.degrade(declineKind,
+-            "call to unregistered callee `" & stmt.callee & "` reached at " &
+-                 "walk time — declined at parse time (" & $declineKind &
+-                 "); the call returns a fresh unconstrained value and the " &
+-                 "callee's effects are not modelled",
+-            scope = calleeKeyed(stmt.callee))   # RFC-0005 S8 (§2.5 point 3)
+-        else:
+-          w.degrade(weInternalWalkerFault,
+-            "call to callee `" & stmt.callee & "` reached at walk time with " &
+-                 "no registered ProcSig and no parse-time decline behind it " &
+-                 "(weInternalWalkerFault)")
+-      var out2: seq[Path]
+-      for p in paths:
+-        var newEnv = p.env
+-        var pcInit: seq[Z3Bool]
+-        if stmt.retName.len > 0:
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_cap" & $w.synthZ3
+-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-      return out2
+-    let sig = w.procs[stmt.callee]
+-    # Statistics
+-    if not w.callStats.hasKey(stmt.callee):
+-      w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
+-    # Depth check. RFC-0010 B4 round 2 (REVERTED): a `cap > 0 and` guard was
+-    # added here so `maxCallDepth = 0` would mean unlimited, matching
+-    # `maxFrontierSize`/`maxSplitParts`'s house style. Two independent
+-    # reviewers reproduced a SIGSEGV under `maxCallDepth: 0` against ordinary
+-    # linear recursion (e.g. `f(n) = if n > 0: f(n-1) + 1 else: 0`): with the
+-    # cap disabled, `walk` recurses NATIVELY once per SUT call-stack level,
+-    # and `w.activeCalls`'s cycle-breaking only fires for recursion with
+-    # IDENTICAL argument shapes (`argShapeKey`/`symValHash` hash the Z3 AST,
+-    # which differs at every level of `f(n-1)`) -- so it never catches this,
+-    # the ordinary case, not a pathological one. A native-stack-exhaustion
+-    # SIGSEGV takes the whole test BINARY down (every other suite sharing
+-    # it), which is worse than the `sxUnknown` this guard was meant to avoid
+-    # and a more severe Invariant-3 violation than the bug it fixed. Unlike
+-    # `maxClosureInlineCount` (`applyClosureGround` below, guard correctly
+-    # kept -- the walker declines a forward-declared self-referencing closure
+-    # with `ceClosureUnknownCallee` before it can recurse) there is no
+-    # equivalent decline here: EVERY recursive call reaches this depth check.
+-    # `maxCallDepth` is therefore a THIRD documented "0 does not mean
+-    # unlimited" exception alongside `maxLoopUnwind`/`seqInlineThreshold` --
+-    # see `ResourceBudget`'s umbrella doc comment and this field's own doc,
+-    # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
+-    # on the very first call, by design; a caller wanting deep analysis
+-    # writes an explicit bound sized to the SUT's real max call depth
+-    # instead. RFC-0005 S8ca: a count cannot know what a level costs (more
+-    # on cpp than on c) or what the thread's stack holds, so a call is also
+-    # not inlined when the native stack left is under one more level's need
+-    # (`nativeStackShort`, below).
+-    # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
+-    # while the frontier is not growing (`depthMayExtend`) and the stack is
+-    # under the hard budget (`maxRecursionDepth`). A path no execution can
+-    # take is dropped first either way (S8an, below).
+-    # RFC-0005 S8ca: and, whatever the depth budget, not past the native
+-    # stack the walk needs (`nativeStackShort`); the decline is in-band, a
+-    # hard-budget decline the extension's root reads as one.
+-    let stackLeft = nativeStackShort(w)
+-    let overDepth = stackLeft >= 0 or
+-      w.callStack.len >= w.settings.budget.maxCallDepth
+-    var depthLive: seq[Path]
+-    var extendDepth = false
+-    if overDepth:
+-      for p in paths:
+-        if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
+-      if depthLive.len == 0: return depthLive
+-      extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
+-    if overDepth and not extendDepth:
+-      # The decline, and its history: `depthBail`.
+-      let atHard = stackLeft >= 0 or
+-        w.callStack.len >= hardCallDepth(w.settings)
+-      if atHard: inc w.depthHardHits
+-      if stackLeft >= 0: nativeStackCutFlag = true
+-      depthBail(w, stmt, depthLive,
+-        (if stackLeft >= 0: dcutStack
+-         elif atHard: dcutHard
+-         else: dcutFrontier), stackLeft)
+-    else:
+-      let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
+-      # RFC-0005 S8ax: the first extended level is the extension's root. A
+-      # recursion that reaches the hard budget below it is unbounded on
+-      # some path; every path it returns then carries a chain of returns as
+-      # long as the extension, and each later query pays for it. Measured
+-      # (Linux, Z3 5.1, loaded host) on `sumTo(n) == 465` with `n >= 0`
+-      # unconstrained: 44.5 s declining at `maxCallDepth = 3` without the
+-      # extension, 393 s with a hard budget of 4 when the paths that
+-      # bottomed out within it were kept, killed at 900 s past 5. So the
+-      # root drops everything the extension walked and declines here, at
+-      # `maxCallDepth`, exactly as before S8ax: an unbounded recursion costs
+-      # what it did, and only one its arguments bound is followed.
+-      let extRoot = extendDepth and
+-        w.callStack.len == w.settings.budget.maxCallDepth
+-      let hardMark = w.depthHardHits
+-      let outerExtMark = w.extHardMark
+-      if extRoot: w.extHardMark = hardMark
+-      var survivors: seq[Path]
+-      for p in paths:
+-        if w.shouldStop:
+-          w.extHardMark = outerExtMark
+-          return
+-        # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
+-        if extRoot and w.depthHardHits > hardMark: break
+-        # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
+-        # CLOSURE call lowered out of `p.env` below (a closure passed as an
+-        # argument, or invoked while lowering an actual) descends with this
+-        # path's threaded heap (ADR-0010 R1b — the closure-arm companion to the
+-        # structural `isCall` forkPath threading).
+-        seedCallerHeapThreadvars(p)
+-        # Lower actuals in the caller env once; reused for cache key
+-        # and for callee env construction.
+-        var argVals: seq[SymVal]
+-        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
+-        w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+-        rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
+-        w.rangeDefectConds = @[] ## R16-2: WalkCtx field
+-        parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
+-        w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
+-        divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
+-        w.divByZeroConds = @[]            ## R16-3: WalkCtx field
+-        overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
+-        w.overflowConds = @[]             ## R16-4: WalkCtx field
+-        strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
+-        w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
+-        seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
+-        w.seqOobConds = @[]                ## N14: WalkCtx field
+-        arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
+-        w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+-        regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
+-        w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
+-        w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
+-        for i, formal in sig.params:
+-          ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
+-          ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
+-          ## always shapes a plain `itInt` formal's literal actual as BV — the
+-          ## type-driven default. A formal `collectIntOffsetParams` traced
+-          ## (`IRParam.isIntOffset`, now also set for CALLEES via
+-          ## `parseCalleeImpl`, not just top-level entry procs) instead needs
+-          ## an svInt proto, so a LITERAL offset argument (e.g. the corpus's
+-          ## own `readCStringHelper(s, 0)` first hop) arrives Int-sorted
+-          ## exactly like a traced VARIABLE argument already does (a
+-          ## non-literal lowers untouched regardless of proto — this only
+-          ## ever affects literal shaping).
+-          ## R3 (S2): stamp the proto's width metadata from the formal's own
+-          ## static type so a LITERAL offset argument keeps its overflow
+-          ## fork (`coerceIntLit` propagates it through onto the literal).
+-          let argProto = if formal.isIntOffset:
+-                           some(SymVal(kind: svInt, zi: mkInt(0),
+-                                       ziWidth: formal.ty.width,
+-                                       ziSigned: formal.ty.signed))
+-                         else: intLitProto(formal.ty)
+-          argVals.add lower(p.env, stmt.cargs[i], argProto)
+-        let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
+-        # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
+-        # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
+-        # the surviving non-raise continuations. The callee dispatch below runs once
+-        # per continuation (typically 1 path, so zero overhead on the common case).
+-        for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
+-          if w.shouldStop: break
+-          # Cache lookup — pure procs with deterministic-arg-shape hits
+-          # are served without re-walking. The cache entry's `pcDelta`
+-          # carries the returning-path constraints; we extend the
+-          # current path with them.
+-          let key = argShapeKey(stmt.callee, argVals)
+-          if key in w.activeCalls:
+-            # Mutual / direct recursion with identical args — the call
+-            # is already being walked further up the stack. Break the
+-            # cycle: return a fresh symbolic retval, mark uncertain.
+-            w.callStats[stmt.callee] = CallStat(
+-              name: stmt.callee,
+-              walked: w.callStats[stmt.callee].walked,
+-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+-            var newEnv = p.env
+-            var pcInit: seq[Z3Bool]
+-            if stmt.retName.len > 0:
+-              inc w.synthZ3
+-              let z3Name = stmt.retName & "_cyc" & $w.synthZ3
+-              newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
+-            # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
+-            # `weRecursionCycleCut` through `degrade` (was a path-only
+-            # kindless ⊤ token that recorded nothing and marked the run only
+-            # if a later target hit on this path did). The callee's body —
+-            # its var-param/heap effects and raises — is not walked for this
+-            # occurrence, so the degrade is run-relevant even when the cut
+-            # path never reaches a finding.
+-            let d = w.degrade(weRecursionCycleCut,
+-              "recursive call to `" & stmt.callee & "` with an argument " &
+-                   "shape already being walked up the stack — cycle cut " &
+-                   "with a fresh unconstrained return value; the callee's " &
+-                   "effects are not modelled for this call " &
+-                   "(weRecursionCycleCut)")
+-            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+-            continue
+-          # RFC-0005 S8ax: a hit needs the same actuals (the key is a hash)
+-          # and, for a summary whose walk dropped an arm or path against its
+-          # context, the same drops under this caller's facts.
+-          var hit = -1
+-          let outerIn = outerState(p.env, sig.captures)   # RFC-0005 S8be
+-          if w.callCache.hasKey(key):
+-            let bucket = w.callCache[key]
+-            for ei in 0 ..< bucket.len:
+-              if cacheArgsSame(bucket[ei].args, argVals) and
+-                 cacheOuterSame(bucket[ei].outer, outerIn) and
+-                 pruneFactsHold(w.z3, p, bucket[ei].pruneFacts, w.settings):
+-                hit = ei
+-                break
+-          if hit >= 0:
+-            let entry = w.callCache[key][hit]
+-            w.callStats[stmt.callee] = CallStat(
+-              name: stmt.callee,
+-              walked: w.callStats[stmt.callee].walked,
+-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+-            var newEnv = p.env
+-            if stmt.retName.len > 0:
+-              newEnv[stmt.retName] = entry.retSym
+-            for ex in entry.exits:
+-              survivors.add forkPath(p, p.pc & ex, newEnv)
+-            continue
+-          # Build callee env
+-          var calleeEnv: Env
+-          # #140: track var-param formal→actual binding for write-back.
+-          var varArgs: seq[(string, string)]   # (formalName, callerVarName)
+-          for i, formal in sig.params:
+-            calleeEnv[formal.name] = argVals[i]
+-            if formal.isVar and stmt.cargs[i].kind == iekVar:
+-              varArgs.add (formal.name, stmt.cargs[i].vname)
+-          # RFC-0005 S8an: the callee also reaches every module-level global
+-          # and, for a routine declared inside another, the enclosing
+-          # variables it captures. Nim shares those locations with the
+-          # caller; the walk copies each binding in here and carries the
+-          # callee's value back out on every exit (`carryOuterBindings`),
+-          # which is the same thing for one call running at a time. A root
+-          # of a `var`/`addr` actual that is one of them is WITHHELD
+-          # (`guarded`): it would reach the callee twice, and copy-in/
+-          # copy-out of the argument would then not be Nim's semantics. A
+-          # callee that touches a withheld name declines.
+-          let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
+-          discard threadOuterBindings(calleeEnv, p.env,
+-                                                 sig.captures, guarded)
+-          # RFC-0005 S8ax: an address-taken variable the callee reaches by
+-          # name -- a capture, or the caller variable a `var` formal is --
+-          # keeps its address cell there (`inheritAddrCells`).
+-          let calleeAddrCells = inheritAddrCells(calleeEnv, p.env,
+-            w.frame.addrCells, varArgs, sig.captures, guarded)
+-          # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
+-          # non-bool, non-void return type (float/string/composite as well as
+-          # int) routes through `freshRetSym` so a value-returning generic
+-          # instantiated at e.g. `float64` gets a correctly-typed placeholder.
+-          # Any init-side constraints (string byte-range floor, …) are threaded
+-          # onto the post-call survivor paths below (where `retSym` flows out).
+-          inc w.synthZ3
+-          let z3Name = stmt.retName & "_c" & $w.synthZ3
+-          var retInit: seq[Z3Bool]
+-          # RFC-0005 S8z: a closure-returning callee's value is the
+-          # `svClosure` its body builds, handed to the caller per returned
+-          # path below; there is no symbol to allocate (it was
+-          # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
+-          let closureRet = not sig.isVoid and
+-                           retCarriesClosure(stmt.retTy)   # S8be: tuples too
+-          let retSym = if sig.isVoid or closureRet:
+-                         SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
+-                       else:
+-                         # Round-6 B5: thread the parse-time-traced offset
+-                         # positions so a chained scan's second-hop offset
+-                         # allocates svInt instead of the type-driven BV
+-                         # default (see `IRStmt.isCall.retIntOffsetPositions`).
+-                         # RFC-0005 S8be: otherwise in the sort of its
+-                         # actuals, bounded by its type (`freshCallRet`).
+-                         if stmt.retIntOffsetPositions.len > 0:
+-                           freshRetSym(stmt.retTy, z3Name, retInit,
+-                                       stmt.retIntOffsetPositions)
+-                         else:
+-                           freshCallRet(stmt, p.env, z3Name, retInit)
+-          let pruneMark = ctxPruneLog.len   # RFC-0005 S8as/S8ax
+-          # RFC-0005 S8ax: the walks entered at each call depth, the
+-          # frontier the adaptive depth reads (`depthMayExtend`).
+-          while w.depthWalks.len <= w.callStack.len: w.depthWalks.add 0
+-          inc w.depthWalks[w.callStack.len]
+-          w.callStack.add CallFrame(
+-            callee: stmt.callee, retSym: retSym,
+-            retName: stmt.retName,
+-            retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+-            returnedPaths: @[], sp: nativeStackPointer())   # S8ca
+-          w.callStats[stmt.callee] = CallStat(
+-            name: stmt.callee,
+-            walked: w.callStats[stmt.callee].walked + 1,
+-            cacheHits: w.callStats[stmt.callee].cacheHits)
+-          w.activeCalls.incl key
+-          # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
+-          # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
+-          # as its starting heap, instead of R1's fresh-empty default. `forkPath`
+-          # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
+-          # a deref in the callee reads the SAME heap array the caller already
+-          # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
+-          let calleePath = forkPath(p, p.pc, calleeEnv)
+-          # RFC-0005 S8bs: a `var` actual that is a part of an address-taken
+-          # variable is bound to its cell (`bindVarLocs`).
+-          var entryCells = calleeAddrCells
+-          var elemShares: seq[(string, string)]
+-          var paramNames: seq[string]
+-          # RFC-0005 S8bu: each formal with the caller variable its actual
+-          # names (an `addr` actual's cell, `bindVarLocs`).
+-          var argVars: seq[(string, string)]
+-          for i, f in sig.params:
+-            paramNames.add f.name
+-            if i < stmt.cargs.len and stmt.cargs[i].kind == iekVar:
+-              argVars.add (f.name, stmt.cargs[i].vname)
+-          let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
+-            w.frame.frameId, stmt.cVarLocs, varArgs, argVars, paramNames,
+-            entryCells, elemShares, w)
+-          if locWhy.len > 0:
+-            taintInPlace(calleePath, w.degrade(feUnsupportedOp,
+-              "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
+-                   "; the callee's writes through the two are not modelled " &
+-                   "in its order (feUnsupportedOp)"))
+-          # Phase 15 E1: per-frame exception context. Save the caller's frame
+-          # (handler stack + in-flight exn) and install a fresh one before walking
+-          # the callee body — a `try` opened inside the callee must not leak to
+-          # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
+-          # so E3/E5 raise-flow threading is correct by construction.
+-          pushFrame(w)
+-          # RFC-0005 S8be: and an element cell, likewise.
+-          inheritElemCells(calleePath, w.frameStack[^1].frameId,
+-            w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
+-          let calleeFrameId = w.frame.frameId
+-          w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
+-          anchorViews(calleePath, entryCells, calleeFrameId)   ## RFC-0005 S8ca
+-          w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+-          let guardMark = callGuardedNames.len   ## RFC-0005 S8an
+-          for g in guarded: callGuardedNames.add g
+-          let fallThroughRaw = walk(sig.body, @[calleePath], w)
+-          callGuardedNames.setLen(guardMark)
+-          # Round-6 A6-rider (walker v86): a callee whose body reaches the end
+-          # via IMPLICIT fallthrough (no explicit `return`) after a
+-          # CONDITIONAL, multi-statement `result = expr` assignment —
+-          # `parseCalleeImpl`'s own documented "general parser path" for
+-          # procs that aren't a single bare `result = expr` body (its
+-          # comment: "Procs with conditional / multi-step result-assignment
+-          # land via the general parser path ... need cycle-2 work to model
+-          # `result` as a mutable binding") — used to leave `retSym`
+-          # COMPLETELY UNCONSTRAINED: nothing tied the caller-visible return
+-          # value to the callee's actual computed `result`. Confirmed via
+-          # isolated bisection (`tests/tsymex_r6_a6r_callwitness.nim`) to be
+-          # a genuine SOUNDNESS gap, not merely a witness-extraction cosmetic
+-          # issue — a deliberately-unreachable target (whose impossibility
+-          # depends on the callee's read of its `seq[byte]` argument) proved
+-          # a FALSE `sxSat` pre-fix, with the reported witness floating free
+-          # of the solver's actual (nonexistent) justification — chapulin's
+-          # BLOCKER #12 "all-zero witness on an otherwise sxSat target" is
+-          # the visible symptom of this cause: `retSym` was free, so Z3 chose
+-          # a satisfying `retSym` directly and left every `data` cell
+-          # unconstrained (defaulting to 0), independent of whether the
+-          # target was genuinely reachable at all. The closure-call path
+-          # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
+-          # below) was ASSUMED at the time to already handle this exact shape
+-          # correctly -- that assumption was FALSE (confirmed N16, walker
+-          # v96): `applyClosureGround`'s fallThrough loop had no `else` twin
+-          # at all until N16 added one, mirroring this arm's idiom. As of
+-          # v96 both paths carry the identical else-twin; mirror that idiom
+-          # here for the ordinary call-inlining path. Composite
+-          # (non-scalar-wired) return kinds fall through to the SAME
+-          # in-band-degrade net `isReturn`'s explicit-return arm already
+-          # uses (never raise — Invariant 3), so an implicit-result
+-          # fallthrough of an unsupported composite kind stays a classified
+-          # `sxUnknown`, not a crash.
+-          var fallThrough: seq[Path]
+-          if sig.isVoid:
+-            fallThrough = fallThroughRaw
+-          elif closureRet:
+-            # RFC-0005 S8z: as `completeReturn`'s closure arm.
+-            for cp in fallThroughRaw:
+-              if cp.env.hasKey("result") and
+-                 closureValueBuilt(cp.env["result"], stmt.retTy):
+-                fallThrough.add cp
+-              else:
+-                let d = w.degrade(ceUnsupportedHof,
+-                  "a closure-returning callee returns no lambda the walker " &
+-                  "built (an untouched nil proc, or a proc value from elsewhere)")
+-                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-          else:
+-            for cp in fallThroughRaw:
+-              if cp.env.hasKey("result"):
+-                let retVal = cp.env["result"]
+-                if retVal.kind notin retBindWiredKinds or
+-                    not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
+-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
+-                  # composite arm: the per-call `retSym` is left free, the
+-                  # callee's effects ride `cp`, nothing is dropped.
+-                  let d = w.degrade(feUnsupportedOpHavoc,
+-                    "composite-typed implicit-result fallthrough (kind " &
+-                         plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
+-                         "to sxUnknown (feUnsupportedOp)")
+-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-                else:
+-                  let (rSym, rVal) = reconcileInt(retSym, retVal)
+-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+-                                           cp.env)
+-              else:
+-                # R2 (walker v90): a fallthrough path that never touched
+-                # `result` at all — legal Nim, and DISTINCT from the
+-                # `cp.env.hasKey("result")` branch above (v86's original
+-                # fix). `result` still holds the return type's ZERO VALUE on
+-                # such a path (Nim zero-initializes every `result` slot
+-                # before the body runs); pre-fix, `cp` was forwarded here
+-                # totally UNCHANGED — `retSym` stayed exactly as free as it
+-                # was before v86, reintroducing v86's own false-`sxSat` shape
+-                # for the never-assigned case (confirmed RED in
+-                # `tests/tsymex_r6_r2_zerodefault_result.nim`). Bind `retSym`
+-                # to `defaultZero(stmt.retTy, ...)` via the SAME `retBindEq`
+-                # the assigned branch above uses, instead of leaving it free.
+-                # `defaultZero`/`retBindEq` both still raise `ValueError` (or
+-                # `SymexRefUnresolvedError`) for a handful of composite kinds
+-                # neither is wired for (float, nested variant, distinct,
+-                # ref/ptr, non-string-keyed table, non-int64 hash set) — for
+-                # those, fall through to the SAME classified `sxUnknown`
+-                # decline the `retVal.kind notin {...}` branch above uses,
+-                # never bind a value the walker cannot back soundly.
+-                try:
+-                  let zeroVal = defaultZero(stmt.retTy, stmt.retName & ".zerodefault")
+-                  let (rSym, rVal) = reconcileInt(retSym, zeroVal)
+-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+-                                           cp.env)
+-                except ValueError, SymexRefUnresolvedError:
+-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
+-                  # `retSym` ranges over the whole type, zero included.
+-                  let d = w.degrade(feUnsupportedOpHavoc,
+-                    "composite-typed implicit-result fallthrough " &
+-                         "(untouched-result path, kind " & $stmt.retTy.kind &
+-                         ") has no sound zero-default (" &
+-                         getCurrentExceptionMsg() &
+-                         ") — path degraded to sxUnknown (feUnsupportedOp)")
+-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+-          # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
+-          # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
+-          # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
+-          # pop, re-route each through the CALLER's handler stack: a `try` around
+-          # this call site catches the helper's raise. Heap/pc state at the raise
+-          # point is preserved on `er.path` (R1b merge — structural now, inert until
+-          # Cluster R). The handler-body continuations join the call's survivors.
+-          let calleeEscaped = w.frame.escaped
+-          let calleeCells = w.frame.addrCells   ## RFC-0005 S8ax
+-          popFrame(w)
+-          for er in calleeEscaped:
+-            var rEnv = p.env
+-            # RFC-0005 S8an: the callee's writes to globals and captures
+-            # (before the `var` write-back, which is the later store).
+-            carryOuterBindings(rEnv, er.path.env, sig.captures, guarded)
+-            # RFC-0005 S8ac: the callee wrote its `var` formals through the
+-            # caller's variables before it raised; the handler sees those
+-            # writes (#140's write-back ran on the returning paths only).
+-            for (formalName, callerName) in varArgs:
+-              if er.path.env.hasKey(formalName):
+-                rEnv[callerName] = er.path.env[formalName]
+-            let carried = carryAddrCells(rEnv, er.path.env, calleeCells,
+-              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+-            var raisePath = forkPath(er.path, er.path.pc, rEnv)
+-            carryElemCells(raisePath, w.frame.frameId, calleeFrameId,
+-              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+-            raisePath = settleAddrCells(raisePath, carried, w)
+-            let touched = touchedGuard(er.path.env, guarded)
+-            if touched.len > 0:
+-              raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
+-                                          guardDegrade(w, stmt.callee, touched))
+-            survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+-            if w.shouldStop:
+-              w.extHardMark = outerExtMark   # RFC-0005 S8ax
+-              return survivors
+-          let frame = w.callStack[w.callStack.high]
+-          w.callStack.setLen(w.callStack.high)
+-          w.activeCalls.excl key
+-          # Cache: single-return, single-fall-through-free, non-uncertain
+-          # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
+-          # escaped a raise is NOT cached — its summary is incomplete (a cache hit
+-          # would replay the normal return but silently drop the escaped raise).
+-          # ADR-0012: the cache replays only `pcDelta` (branch + retInit), NOT the
+-          # callee's `defectSurvivorPc`. An arith-defect callee normally ESCAPES
+-          # (calleeEscaped != [] ⇒ already not cached); but a callee that CATCHES
+-          # its own defect (try/except) could add a defect-survivor fact without
+-          # escaping. Conservatively skip caching when the callee added any such
+-          # fact, so a cache hit can never silently drop a `not overflow`/`not
+-          # divByZero` feasibility constraint. (Sound; merely less reuse.)
+-          # RFC-0005 S8u: nor when the callee allocated or wrote the heap
+-          # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
+-          # `new(result)` callee with the same argument shape would return
+-          # the first call's address, and a heap write would be lost.
+-          # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
+-          # variable. A hit replays only `pcDelta`, never the #140
+-          # write-back, so the second call's writes would be lost.
+-          # RFC-0005 S8an: nor when the callee reached a global or a
+-          # capture. A hit replays only `pcDelta`: a read would return the
+-          # first call's value across a write in between, and a write would
+-          # be lost.
+-          # RFC-0005 S8as/S8ax: a callee whose walk dropped a path or arm as
+-          # infeasible in this caller's context is cached with those drops
+-          # (`pruneFactsSince`): a hit re-checks them (`pruneFactsHold`).
+-          # S8as left such a call uncached, which cost `fib` every reuse.
+-          var pruneFacts: seq[seq[Z3Bool]]
+-          let exitPaths = frame.returnedPaths & fallThrough
+-          # RFC-0005 S8be: a callee threading globals, capture cells or
+-          # captures is cached keyed by their values, when no exit wrote
+-          # one (`exitKeepsOuter`); a withheld one still is not.
+-          var cacheable = calleeEscaped.len == 0 and not closureRet and
+-            varArgs.len == 0 and guarded.len == 0 and exitPaths.len > 0 and
+-            exitPaths.len <= callCacheExitsMax
+-          if cacheable:
+-            for cp in exitPaths:
+-              if not exitKeepsOuter(cp.env, outerIn, sig.captures) or
+-                 cp.taint != {} or
+-                 cp.defectSurvivorPc.len != p.defectSurvivorPc.len or
+-                 not heapUnchanged(cp, p) or
+-                 not factsPrefixSame(cp.pc, p.pc):
+-                cacheable = false
+-                break
+-          if cacheable and pruneFactsSince(pruneMark, p, pruneFacts):
+-            # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+-            # string byte-range floor) must ride in each exit's delta so a
+-            # cache REPLAY re-asserts them on the cached retSym.
+-            var exits: seq[seq[Z3Bool]]
+-            for cp in exitPaths:
+-              exits.add retInit & cp.pc[p.pc.len ..< cp.pc.len]
+-            let entry = CallCacheEntry(retSym: retSym, exits: exits,
+-                                       args: argVals, outer: outerIn,
+-                                       pruneFacts: pruneFacts)
+-            # A bucket holds one entry per distinct context it was walked
+-            # in, up to `callCacheBucketMax`; past it the call is walked.
+-            if not w.callCache.hasKey(key): w.callCache[key] = @[]
+-            if w.callCache[key].len < callCacheBucketMax:
+-              w.callCache[key].add entry
+-          for cp in frame.returnedPaths & fallThrough:
+-            var newEnv = p.env
+-            if stmt.retName.len > 0:
+-              newEnv[stmt.retName] =
+-                if closureRet and cp.env.hasKey("result") and
+-                    closureValueBuilt(cp.env["result"], stmt.retTy):
+-                  cp.env["result"]    # RFC-0005 S8z
+-                else: retSym
+-            # RFC-0005 S8an: the callee's globals and captures, as it left
+-            # them (before the `var` write-back, which is the later store).
+-            carryOuterBindings(newEnv, cp.env, sig.captures, guarded)
+-            # #140: propagate var-param mutations back to caller's env.
+-            for (formalName, callerName) in varArgs:
+-              if cp.env.hasKey(formalName):
+-                newEnv[callerName] = cp.env[formalName]
+-            let carried = carryAddrCells(newEnv, cp.env, calleeCells,
+-              varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+-            # Phase 15 R1b return-MERGE: the post-call caller path carries the
+-            # callee's exit heap state back out (ADR-0010 R1b).
+-            # `forkPathMerged(cp, ...)` forks from `cp` (the returned
+-            # CALLEE path), so:
+-            #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
+-            #     caller's, so callee heap modifications are observed downstream.
+-            #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
+-            # `allocCounters`, however, must NOT be a plain replacement: we take
+-            # `max(caller[T], callee[T])` per type key so the freshness invariant
+-            # holds — a post-call caller `new T` uses a counter strictly above any
+-            # callee allocation and cannot collide with a callee-allocated ref on
+-            # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
+-            # the merge is correct by construction now.)
+-            # Phase 15 G3: `retInit` threads the retSym init constraints onto the
+-            # surviving caller path (where `retSym` becomes visible).
+-            # R3 hardening / RFC-0005 S1: taint is neither a bare propagate
+-            # nor a token join here — a post-call path is tainted by anything
+-            # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
+-            # site uses the dedicated `forkPathMerged` (the union
+-            # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
+-            let merged = settleAddrCells(
+-              forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
+-            carryElemCells(merged, w.frame.frameId, calleeFrameId,
+-              varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+-            # RFC-0005 S8an: the callee wrote a withheld root directly.
+-            let touched = touchedGuard(cp.env, guarded)
+-            if touched.len > 0:
+-              taintInPlace(merged, guardDegrade(w, stmt.callee, touched))
+-            for tkey, callerCount in p.allocCounters:
+-              let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
+-              if callerCount > calleeCount:
+-                merged.allocCounters[tkey] = callerCount
+-            survivors.add merged
+-      w.extHardMark = outerExtMark
+-      if extRoot and w.depthHardHits > hardMark:
+-        return depthBail(w, stmt, paths, dcutHard)
+-      survivors
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+   of isAssert:
+     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
+     of wmExplore: discard
+@@ -25505,15 +24057,10 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
+     # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
+     # return` asserted `y > 0` as a ground axiom of the whole run.
+     retTy: cb.retTy,
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+     # RFC-0005 S8bn (item 3): the lambda's `var` formals a pointer may
+     # address (all of them for a call that carries no codes).
+-    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe)
+-||||||| 5729b1a
+-    retTy: cb.retTy)
+-=======
++    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe,
+     sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+   let frameIx = w.callStack.high
+   # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
+   # to them below.
+@@ -25629,7 +24176,7 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
+       continue
+     w.frame.addrCells.add (local: nm, cell: an,
+                            ty: descentBase.env[an].ptrPointee, path: @[],
+-                           ixs: @[], bound: false, view: false)
++                           ixs: @[], bound: false, view: false, slot: "")
+     boundCaps.add (cell: cell, p: descentBase.env[an])
+   # RFC-0005 S8bh: the body specialised to the call's shared locations.
+   let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
+diff --git a/tests/tsymex_configdefaults.nim b/tests/tsymex_configdefaults.nim
+remerge CONFLICT (content): Merge conflict in tests/tsymex_configdefaults.nim
+index b8608cc..376bafe 100644
+--- a/tests/tsymex_configdefaults.nim
++++ b/tests/tsymex_configdefaults.nim
+@@ -434,53 +434,5 @@ suite "RFC-0010 B4 — the default budget actually bounds a runaway search":
+     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"))
+     check r.status == sxUnknown
+ 
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+   # The explicit finite `maxCallDepth` pin, the one test of this file that
+   # takes a minute, is `tsymex_configdefaults_depth`.
+-||||||| 5729b1a
+-  test "an explicit finite maxCallDepth also completes cleanly (round 2 crash pin)":
+-    # Round 2: two independent reviewers reproduced a SIGSEGV (native stack
+-    # exhausted in under a second) against this EXACT SUT -- ordinary linear
+-    # countdown recursion, unconstrained `n` -- under `maxCallDepth: 0`.
+-    # Disabling the cap let the walker recurse natively without bound;
+-    # `w.activeCalls` does not cycle-break this shape because `f(n-1)` hashes
+-    # to a distinct Z3 AST at every level. This pins that an explicit FINITE
+-    # bound -- the honest way to ask for deeper analysis -- still completes
+-    # cleanly (no hang, no crash).
+-    #
+-    # The bound deliberately is NOT a "large-looking" round number. A direct
+-    # probe (throwaway, deleted after use) against this exact SUT found
+-    # unconstrained linear recursion safe through a cap of 85 and SIGSEGV by
+-    # 88 on this engine's Linux/podman debug build (8MB `ulimit -s`) -- i.e.
+-    # `maxCallDepth: 1000` ITSELF crashes here, because the cap bounds NATIVE
+-    # recursion depth and this walker's per-level native stack cost is large.
+-    # 50 sits with a wide, verified margin below that ceiling. Deliberately
+-    # never pass `maxCallDepth: 0` (or a naively "large" bound) in this
+-    # suite: that is the crash, and it would take this entire test binary
+-    # down with it, not just this one query.
+-    let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
+-        SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
+-    check r.status == sxUnknown
+-=======
+-  test "an explicit finite maxCallDepth also completes cleanly (round 2 crash pin)":
+-    # Round 2: two independent reviewers reproduced a SIGSEGV (native stack
+-    # exhausted in under a second) against this EXACT SUT -- ordinary linear
+-    # countdown recursion, unconstrained `n` -- under `maxCallDepth: 0`.
+-    # Disabling the cap let the walker recurse natively without bound;
+-    # `w.activeCalls` does not cycle-break this shape because `f(n-1)` hashes
+-    # to a distinct Z3 AST at every level. This pins that an explicit FINITE
+-    # bound -- the honest way to ask for deeper analysis -- still completes
+-    # cleanly (no hang, no crash).
+-    #
+-    # The bound was sized by a probe on the c backend (safe through 85
+-    # levels on an 8 MB stack, SIGSEGV by 88), and on cpp, whose levels
+-    # cost more, these same 50 levels ran off the 8 MB stack: the binary
+-    # died with rc=139 here. RFC-0005 S8ca: a call is no longer inlined
+-    # when the native stack left is under one more level's need, so this
+-    # declines in-band on both backends, and so does any larger bound
+-    # (`tsymex_rfc0005_s8ca_stack`). `maxCallDepth: 0` still exhausts on
+-    # the first call, by design (above).
+-    let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
+-        SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
+-    check r.status == sxUnknown
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+diff --git a/tests/tsymex_configdefaults_depth.nim b/tests/tsymex_configdefaults_depth.nim
+index 70bfd74..af7c567 100644
+--- a/tests/tsymex_configdefaults_depth.nim
++++ b/tests/tsymex_configdefaults_depth.nim
+@@ -26,16 +26,14 @@ suite "RFC-0010 B4 -- the default budget actually bounds a runaway search":
+     # bound -- the honest way to ask for deeper analysis -- still completes
+     # cleanly (no hang, no crash).
+     #
+-    # The bound deliberately is NOT a "large-looking" round number. A direct
+-    # probe (throwaway, deleted after use) against this exact SUT found
+-    # unconstrained linear recursion safe through a cap of 85 and SIGSEGV by
+-    # 88 on this engine's Linux/podman debug build (8MB `ulimit -s`) -- i.e.
+-    # `maxCallDepth: 1000` ITSELF crashes here, because the cap bounds NATIVE
+-    # recursion depth and this walker's per-level native stack cost is large.
+-    # 50 sits with a wide, verified margin below that ceiling. Deliberately
+-    # never pass `maxCallDepth: 0` (or a naively "large" bound) in this
+-    # suite: that is the crash, and it would take this entire test binary
+-    # down with it, not just this one query.
++    # The bound was sized by a probe on the c backend (safe through 85
++    # levels on an 8 MB stack, SIGSEGV by 88), and on cpp, whose levels
++    # cost more, these same 50 levels ran off the 8 MB stack: the binary
++    # died with rc=139 here. RFC-0005 S8ca: a call is no longer inlined
++    # when the native stack left is under one more level's need, so this
++    # declines in-band on both backends, and so does any larger bound
++    # (`tsymex_rfc0005_s8ca_stack`). `maxCallDepth: 0` still exhausts on
++    # the first call, by design (above).
+     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
+         SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
+     check r.status == sxUnknown
+diff --git a/tests/tsymex_phase15_CR2_cachekey.nim b/tests/tsymex_phase15_CR2_cachekey.nim
+remerge CONFLICT (content): Merge conflict in tests/tsymex_phase15_CR2_cachekey.nim
+index f655eba..d588467 100644
+--- a/tests/tsymex_phase15_CR2_cachekey.nim
++++ b/tests/tsymex_phase15_CR2_cachekey.nim
+@@ -1027,7 +1027,6 @@ suite "Phase 15 CR-2 — version bumps":
+     ## one on one string decided as one). Provisional 219. 214->219.
+     ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
+     ## default queryRLimit). 222->225.
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+     ## RFC-0005 S8br (S8bk's remainder: a call in a by-address actual's
+     ## index is evaluated once, where the argument stands; a check no
+     ## snapshot carries declines only when a later argument may write what
+@@ -1043,14 +1042,9 @@ suite "Phase 15 CR-2 — version bumps":
+     ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
+     ## an `mpairs` view, a table write seen through it, a raise in an
+     ## own-context solve a fault. 237->241.
+-    check symexWalkerVersion == "241"
+-||||||| 5729b1a
+-    check symexWalkerVersion == "225"
+-=======
+     ## RFC-0005 S8ca (a call declines in-band when the native stack left
+     ## is under one more level's need). 225->233.
+-    check symexWalkerVersion == "233"
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
++    check symexWalkerVersion == "246"
+ 
+   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
+     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,
+diff --git a/tests/tsymex_r6_n27_placeholder_read_audit.nim b/tests/tsymex_r6_n27_placeholder_read_audit.nim
+remerge CONFLICT (content): Merge conflict in tests/tsymex_r6_n27_placeholder_read_audit.nim
+index a8b7264..57c06a5 100644
+--- a/tests/tsymex_r6_n27_placeholder_read_audit.nim
++++ b/tests/tsymex_r6_n27_placeholder_read_audit.nim
+@@ -309,32 +309,20 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
+     ## (two lines) before reading the base's data context and length and
+     ## the part's length (three); `viewFollows` guards both sides (two)
+     ## before comparing their length terms (two). 95 + 9 = 104.
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+     ## Batch 7 (S8bu on batch 6): 111 + 9 = 120.
+-||||||| 5729b1a
+-=======
+     ##
+     ## RFC-0005 S8ca: `viewFollows` is gone (a view follows logged in-place
+-    ## steps, not the shape of its terms). 104 - 4 = 100. In
++    ## steps, not the shape of its terms). 120 - 4 = 116. In
+     ## runtime_strings.nim, `iekStrFromChars` guards its view (one line):
+     ## 3 + 1 = 4.
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+     let runtimeSrc = readFile(runtimeNimPath)
+     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
+     let runtimeCount = countMarkers(runtimeSrc)
+     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
+     checkpoint("runtime.nim marker count: " & $runtimeCount &
+                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
+-<<<<<<< afce42a (test(symex): split tsymex_rfc0005_s8ai_semantic for the per-file budget)
+-    check runtimeCount == 120
+-    check runtimeStringsCount == 3
+-||||||| 5729b1a
+-    check runtimeCount == 104
+-    check runtimeStringsCount == 3
+-=======
+-    check runtimeCount == 100
++    check runtimeCount == 116
+     check runtimeStringsCount == 4
+->>>>>>> 8cef160 (docs(rfc): RFC-0005 S8ca -- as landed; flip the row to done)
+ 
+   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":
+     ## The marker-count pin above (49 + 3) closes the ADDITIVE half of the

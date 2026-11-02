@@ -4539,6 +4539,10 @@ proc tBitSet*(elemTy: IRType): IRType =
   ## RFC-0005 S8bq. Nim's builtin `set[elemTy]`.
   IRType(kind: itBitSet, bsElemTy: elemTy)
 
+const sharedTouch* = "s:shared"
+  ## RFC-0005 S8cq. In `ccTouch`: a by-value actual whose memory the formal may
+  ## share, so a body reaching anything outside its formals may write it.
+
 const boundsCheckSynthWord* = "ixck"
   ## RFC-0005 S8bq. The `freshSynth` word of the `isIndex` statement a seq
   ## element ASSIGNMENT emits for its bounds check (Nim checks the index

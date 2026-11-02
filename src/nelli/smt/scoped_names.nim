@@ -153,6 +153,8 @@ proc strVal*(n: NimNode): string =
   ## `__gl:<module>.<name>` (RFC-0005 S8an) and is recorded as reached
   ## (`seenModuleGlobals`, RFC-0005 S8as). A by-reference base reads as its
   ## parameter's name (RFC-0005 S8ba, `markByRef`).
+  # RFC-0005 S8cq: a formal with a pragma (`a {.byref.}: int`) reads as its name.
+  if n.kind == nnkPragmaExpr: return strVal(n[0])
   let br = byRefName(n)
   if br.len > 0: return br
   result = macros.strVal(n)

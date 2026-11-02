@@ -1753,7 +1753,13 @@ proc classifyType*(ty: NimNode): ClassifiedType =
       let aliasImpl = resolved.getImpl
       if aliasImpl.kind == nnkTypeDef and aliasImpl.len >= 3 and
          aliasImpl[2].kind in {nnkSym, nnkBracketExpr} and
-         aliasImpl[2] != resolved:
+         aliasImpl[2] != resolved and
+         # RFC-0005 S8cq: `type A = O` gives `O`'s symbol `A`'s type back, and
+         # this arm would classify the two in turn until the VM's depth limit
+         # stopped the compile. The catch-all below declines it.
+         not (aliasImpl[2].kind == nnkSym and
+              aliasImpl[2].getTypeInst.kind == nnkSym and
+              aliasImpl[2].getTypeInst == resolved):
         return classifyType(aliasImpl[2])
     # RFC-chapulin-hardening CR-2b (Cluster 2 — Crash-totality, round-2
     # Option 2). This text-match catch-all used to `error()` at MACRO-

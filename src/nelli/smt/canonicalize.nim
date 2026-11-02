@@ -203,7 +203,12 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "251"
+const symexWalkerVersion* = "252"
+  ## RFC-0005 S8cq (2026-11-02), 251->252: a by-value call is decided only when
+  ## the type is on an allowlist Nim copies or the callee is proved to write
+  ## nothing the actual could be; a lowering that evaluates a target twice
+  ## declines unless the target is proved free of a call. The walk of a shape
+  ## that declined is unchanged, and a shape that was decided may decline.
   ## RFC-0005 S8cn (2026-11-02), 245->251 (provisional), past the numbers
   ## queued slices hold. Verdicts change: step 1e (a bounded concrete search
   ## after 1b, `checkCappedSteps`) answers `sxSat` on queries both searches ran

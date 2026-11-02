@@ -439,6 +439,11 @@ state = "done"
 [[slice]]
 id = "S8bw"
 title = "S8bn's remainder: walker fault reading an array-global element, aggregate global reads (tuple/object/array globals), pointers into case objects / seqs of aggregates / tables of non-int values, generic case objects"
+state = "done"
+
+[[slice]]
+id = "S8bz"
+title = "S8bw's remainder: pointer into a seq of aggregates, pointer into a Table of string/float/aggregate values (and aggregate Table values themselves), partial writes into unwritten parts, deref onto unwritten candidates, addr of an array element alias, inactive-branch deref, {.global.}/{.noinit.} locals"
 state = "pending"
 
 [[slice]]

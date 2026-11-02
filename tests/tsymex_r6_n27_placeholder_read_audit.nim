@@ -202,7 +202,7 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
       checkpoint(report)
     check violations.len == 0
 
-  test "the N27 site inventory carries exactly 96 marked lines (93 runtime.nim + 3 runtime_strings.nim)":
+  test "the N27 site inventory carries exactly 119 marked lines (115 runtime.nim + 4 runtime_strings.nim)":
     ## A count drift means a site was added, removed, or silently
     ## duplicated/split since this audit was written -- re-examine by hand
     ## (bump this count deliberately, in the same commit as the review).
@@ -257,6 +257,36 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## `sv.isUnsupportedFieldPlaceholder` itself, then three lines reading
     ## `seqLen`/`seqDataRaw` that only run once that guard has returned on
     ## a placeholder. 81 + 4 = 85.
+    ## RFC-0005 S8ar: `iekSeqAdd`'s per-kind store copies (two marked reads)
+    ## became one `storeSeqElem` call (one, after the arm's placeholder
+    ## guard); `iekSeqInsert` adds its guard and five reads behind it; and
+    ## `extractSeqElements` gains a `seq[string]` arm (one read, beside the
+    ## other element kinds'). 85 - 2 + 1 + 6 + 1 = 91.
+    ## RFC-0005 S8at: `iteSV`'s svSeq arm merges two genuine seqs exactly
+    ## (an array of seqs at a symbolic index): six lines reading
+    ## `seqDataRaw`/`seqLen` in the `else` of the arm's own
+    ## `isUnsupportedFieldPlaceholder` guard. 91 + 6 = 97.
+    ## RFC-0005 S8bc: a seq of a tree element holds one data array per
+    ## leaf, so the seq sites build through `seqArrs` / `withSeqArrsOf` /
+    ## `mkSeqSV` / `seqStoreArrs` (seven marked reads: the two helpers'
+    ## own, `conformSV`'s guard pair, truncation length and rebuild,
+    ## `seqStoreArrs`' scalar store). Twenty marked reads at the sites
+    ## (`retBindEq` 3, `iteSV` 4, slice 1, add 1, del 1, insert 3, `astHash`
+    ## 1, `joinSV` 3, `isIndexAssign` 2, `isSeqPop` 1) became seven
+    ## (`retBindEq`, `extractTreeValue`'s guard and length, `astHash`,
+    ## `joinSV`, `isIndexAssign`, `isSeqPop`). 97 + 7 + 7 - 20 = 91.
+    ##
+    ## RFC-0005 S8be added two element-cell helpers: `withElem` writes an
+    ## element of a seq the parser gave cells to, only a seq of scalars or
+    ## strings (always backed); `sameSeqLen` guards both sides'
+    ## `isUnsupportedFieldPlaceholder` (two lines) before comparing the
+    ## length handles. 85 + 4 = 89.
+    ## Batch 4 (S8bc then S8be): 91 + 4 = 95.
+    ## RFC-0005 S8bl: six more, each behind its own guard -- `isSetLen`'s
+    ## placeholder guard and old length (2), `collectTreeRefPositions`'
+    ## guard and length (2), and `collectRefPositions`' tree-element arm's
+    ## guard and length (2). 91 + 6 = 97.
+    ## Batch 6 (S8bl on batch 5): 95 + 6 = 101.
     ##
     ## RFC-0005 S8bq added nine lines that read `seqDataRaw` only to ask
     ## whether its term mentions a `newSeqUninit` base: `uninitReadCond`
@@ -265,19 +295,38 @@ suite "symex N27 — permanent placeholder-field-read regression audit":
     ## (one). None lowers or binds the data: a placeholder's inert array
     ## mentions no base, so each answers "no unwritten element" and the
     ## caller's own placeholder handling is unchanged. 85 + 9 = 94.
+    ## Batch 6 (S8bq on S8bl on batch 5): 101 + 9 = 110.
+    ##
+    ## RFC-0005 S8bw added `svAsts`'s svSeq arm (the Z3 terms a global's
+    ## value holds, scanned for its unwritten leaves): two lines collecting
+    ## `seqDataRaw`/`seqLen` as terms, lowering nothing -- a placeholder's
+    ## inert array and pinned length are terms like any other. 84 + 2 = 86.
+    ## Batch 6 (S8bw on S8bq): its `seqDataRaw` line collects every leaf
+    ## array through `seqArrs` (S8bc's audited helper) instead, so only the
+    ## `seqLen` line is new. 110 + 1 = 111.
+    ##
+    ## RFC-0005 S8bu: `iekSeqSplice`'s lowering guards both operands
+    ## (two lines) before reading the base's data context and length and
+    ## the part's length (three); `viewFollows` guards both sides (two)
+    ## before comparing their length terms (two). 95 + 9 = 104.
+    ## Batch 7 (S8bu on batch 6): 111 + 9 = 120.
+    ## RFC-0005 S8ca: `viewFollows` is gone (a view follows logged in-place
+    ## steps, not the shape of its terms). 120 - 4 = 116. In
+    ## runtime_strings.nim, `iekStrFromChars` guards its view (one line):
+    ## 3 + 1 = 4.
     ##
     ## RFC-0005 S8bv rewrote `noteUninitReturn` to pair the seqs of a
     ## composite result: its five lines are four (the `mentionsUninitBase`
     ## test, the alias id, the held handle, the alias itself), still only
-    ## asking whether a term mentions a base. 94 - 5 + 4 = 93.
+    ## asking whether a term mentions a base. 116 - 5 + 4 = 115.
     let runtimeSrc = readFile(runtimeNimPath)
     let runtimeStringsSrc = readFile(runtimeStringsNimPath)
     let runtimeCount = countMarkers(runtimeSrc)
     let runtimeStringsCount = countMarkers(runtimeStringsSrc)
     checkpoint("runtime.nim marker count: " & $runtimeCount &
                "; runtime_strings.nim marker count: " & $runtimeStringsCount)
-    check runtimeCount == 93
-    check runtimeStringsCount == 3
+    check runtimeCount == 115
+    check runtimeStringsCount == 4
 
   test "scanner escape-hatch (round-6 review Low, mini re-review): a bogus marker on a genuinely unguarded read trips the audit, then reverts clean":
     ## The marker-count pin above (49 + 3) closes the ADDITIVE half of the

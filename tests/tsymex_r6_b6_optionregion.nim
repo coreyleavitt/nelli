@@ -156,7 +156,7 @@ suite "symex round-6 B6 -- main option-region defect proof":
     let r = symexFind(sut, tLabel("done"))
     check r.status == sxSat
 
-  test "B6-1-red: the SAME property, RECOGNIZER SHAPE BROKEN (non-.len bound), stays sxUnknown -- the RED baseline this pin retires":
+  test "B6-1-red: the SAME property, RECOGNIZER SHAPE BROKEN (non-.len bound), k-unrolls -- sxSat (was sxUnknown)":
     ## Structural trip-wire mirroring B6-1's exact literal/iteration count,
     ## but with a `let n = s.len` local-alias bound (same device as B6-6) so
     ## the recognizer does NOT fire and the loop takes the plain k-unroll
@@ -166,6 +166,14 @@ suite "symex round-6 B6 -- main option-region defect proof":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00dd\x00ee\x00ff\x00gg\x00hh\x00\x00")
       let n = s.len
+      # RFC-0005 S8bl (item 2): the real accumulator again (S8bc had put
+      # an unbacked seq of seqs here, whose `add` decline cut the walk
+      # short, because with every `add` modelled this k-unroll ran past
+      # the 900 s bound). The cost was Z3 refuting each infeasible loop
+      # exit over the pinned string through the S8ag index-split word
+      # equations, up to the whole `seqQueryRLimit` (20M) per exit. The
+      # pinned string is now read as its literal and a call result that
+      # folds to literals is bound as them, so the scan chain is ground.
       var pairs: seq[(string, string)] = @[]
       var i = 0
       while i < n:
@@ -176,8 +184,15 @@ suite "symex round-6 B6 -- main option-region defect proof":
         pairs.add((key, val))
         i = p2
       symexTarget("done")
+    # RFC-0005 S8bl moved this pin: with the real accumulator the label is
+    # found (`sxSat`; the program does reach it). At the S8bl base the same
+    # verdict took 741 s of the 900 s bound under load, with a
+    # `beBudgetExhausted` survivor; the pinned string is now ground, the
+    # survivor's path is refuted and dropped, and the walk is under a
+    # second.
     let r = symexFind(sut, tLabel("done"))
-    check r.status == sxUnknown
+    checkpoint $r.status & " " & $r.soundness & " " & $r.errors
+    check r.status == sxSat
 
 # ---------------------------------------------------------------------------
 # 2. Star-segment pins (RFC Done-when: empty-key / empty-value / double-NUL
@@ -254,10 +269,18 @@ suite "symex round-6 B6 -- truncated-region fallback":
 
 suite "symex round-6 B6 -- trip wire (recognizer stays narrow)":
 
-  test "B6-6: non-.len outer bound is NOT recognized -> sxUnknown (unchanged, real trip-wire)":
+  test "B6-6: non-.len outer bound is NOT recognized -> k-unroll, sxSat (was sxUnknown)":
     proc sut(s: string) =
       symexAssume(s == "aa\x00bb\x00cc\x00dd\x00ee\x00ff\x00gg\x00hh\x00\x00")
       let n = s.len
+      # RFC-0005 S8bl (item 2): the real accumulator again (S8bc had put
+      # an unbacked seq of seqs here, whose `add` decline cut the walk
+      # short, because with every `add` modelled this k-unroll ran past
+      # the 900 s bound). The cost was Z3 refuting each infeasible loop
+      # exit over the pinned string through the S8ag index-split word
+      # equations, up to the whole `seqQueryRLimit` (20M) per exit. The
+      # pinned string is now read as its literal and a call result that
+      # folds to literals is bound as them, so the scan chain is ground.
       var pairs: seq[(string, string)] = @[]
       var i = 0
       while i < n:
@@ -268,8 +291,10 @@ suite "symex round-6 B6 -- trip wire (recognizer stays narrow)":
         pairs.add((key, val))
         i = p2
       symexTarget("done")
+    # RFC-0005 S8bl moved this pin (see B6-1-red).
     let r = symexFind(sut, tLabel("done"))
-    check r.status == sxUnknown
+    checkpoint $r.status & " " & $r.soundness & " " & $r.errors
+    check r.status == sxSat
 
 suite "symex round-6 B6 -- walker version pin":
 

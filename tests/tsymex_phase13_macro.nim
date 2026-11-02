@@ -4,10 +4,14 @@
 ## Mirror `saveSymexWitness` / `loadSymexWitnesses` (Phase 10) but
 ## for non-SAT verdicts. The `status: SymexFindingStatus` param is
 ## a runtime value (not `static`) — the suffix selection is
-## runtime-dispatched. Error accumulation is internal and
-## discarded, matching the existing witness macros; callers
-## wanting error reporting use `saveSymexVerdictImpl` /
-## `loadSymexVerdictImpl` directly with their own `errors` seq.
+## runtime-dispatched. RFC-0005 S8av: error accumulation routes
+## through `recordSymexDbError`/`consumeSymexDbErrors` (the same
+## thread-local sink `symexFindAllWitnesses` drains into
+## `Report.dbErrors`), so a caller of this standalone macro form
+## sees a save/load failure there (see
+## `tests/tsymex_rfc0005_s8av_remainder.nim`); callers wanting a
+## locally-scoped `errors` seq instead use `saveSymexVerdictImpl` /
+## `loadSymexVerdictImpl` directly.
 import std/[unittest, options]
 import nelli/symex
 import nelli/db

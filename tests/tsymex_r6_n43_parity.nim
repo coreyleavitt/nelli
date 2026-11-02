@@ -99,6 +99,11 @@
 ## No engine code changes in this slice — test-only. Walker version:
 ## unchanged (`symexWalkerVersion` stays "108"; the floor pin below matches
 ## house convention).
+## ---- RFC-0005 S8ar -----------------------------------------------------------
+## S8ar backs every integer-like Table key and every integer-like, string or
+## float value, so this file's poison tables (`Table[int, string]`,
+## `Table[string, string]`) became modelled. Each was swapped for a shape
+## still unbacked: a `float` key and a `seq[int]` value.
 import std/[unittest, strutils, tables, sets, options, atomics]
 import nelli/symex
 import nelli/smt/canonicalize
@@ -115,8 +120,9 @@ proc errorKinds(r: SymexResult): seq[SymexErrorKind] =
 
 suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 
-  let badTable = tTable(tInt(64, signed = true), tInt(64, signed = true))
-    ## bad KEY (non-string) -- the exact N40 false-negative shape.
+  let badTable = tTable(tTuple(@[tInt(), tInt()]), tInt(64, signed = true))
+    ## bad KEY -- the N40 false-negative shape. RFC-0005 S8at backs a float
+    ## key (the original `float` here), so the bad key is a tuple now.
 
   test "itBool: always allocatable":
     check unallocatableFieldIssue(tBool()).isNone
@@ -154,12 +160,13 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 
   test "itSeq: deliberately EXCLUDED -- always allocatable per the predicate's own documented contract, backed or not (allocateSym's itSeq arm self-guards and never raises/degrades either way for this kind -- see the header note; the allocator-side half of this exact contract is pinned by the Bug #2/B7r2/N13 suites, not re-duplicated here)":
     check unallocatableFieldIssue(tSeq(tInt())).isNone                       ## backed elem
-    check unallocatableFieldIssue(tSeq(tTuple(@[tString(), tString()]))).isNone  ## unbacked elem -- STILL none
+    check unallocatableFieldIssue(tSeq(tSeq(tString()))).isNone  ## unbacked elem (RFC-0005 S8bc: a seq of seqs) -- STILL none
+    check unallocatableFieldIssue(tSeq(tTuple(@[tString(), tString()]))).isNone  ## RFC-0005 S8bc: a leaf-split tree elem
 
   test "itTable: good key+val allocatable; bad key / bad val not":
     check unallocatableFieldIssue(tTable(tString(), tInt(64, signed = true))).isNone
     check unallocatableFieldIssue(badTable).isSome                                 ## bad key
-    check unallocatableFieldIssue(tTable(tString(), tString())).isSome  ## bad val
+    check unallocatableFieldIssue(tTable(tString(), tTuple(@[tInt(), tInt()]))).isSome  ## bad val (RFC-0005 S8at backs seq[int])
     ## RFC-0005 S8z: a narrower int value is backed (was the bad-val cell).
     check unallocatableFieldIssue(tTable(tString(), tInt(32, signed = true))).isNone
 
@@ -210,8 +217,8 @@ suite "symex N43 -- predicate matrix (unallocatableFieldIssue)":
 type
   N43BadHeap = object
     good:        int
-    tableKeyBad: Table[int, string]
-    tableValBad: Table[string, string]   ## RFC-0005 S8z: was `int32`, now backed
+    tableKeyBad: Table[(int, int), string]  ## RFC-0005 S8at: was `float`, now backed
+    tableValBad: Table[string, (int, int)]  ## RFC-0005 S8z: was `int32`; S8at: was `seq[int]`
     setBad:      HashSet[string]         ## RFC-0005 S8z: was `int32`, now backed
     ownBad:      Atomic[bool]
       ## The REAL `std/atomics.Atomic[T]` (`__ownership:Atomic`). RFC-0005
@@ -284,14 +291,14 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     check r.errors.len == 0
 
   test "N43-H1: Table bad-KEY field -- predicted unallocatable (Part 1), allocator confirms: sxUnknown, seUnsupportedTableKeyType, no crash":
-    check unallocatableFieldIssue(tTable(tInt(64, true), tString())).isSome
+    check unallocatableFieldIssue(tTable(tTuple(@[tInt(), tInt()]), tString())).isSome
     let r = symexFind(n43HeapTableKeyBlock, tLabel("n43_heap_table_key"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
     check seUnsupportedTableKeyType in errorKinds(r)
 
-  test "N43-H2: Table bad-VAL field (Table[string, string]; was Table[string, int32] until RFC-0005 S8z backed it) -- predicate and allocateSym's itTable arm now AGREE (N48, walker v109)":
+  test "N43-H2: Table bad-VAL field (Table[string, (int, int)]; was Table[string, int32] until RFC-0005 S8z backed it, then seq[int] until S8at did) -- predicate and allocateSym's itTable arm now AGREE (N48, walker v109)":
     ## Was a KNOWN-DISPARITY: `unallocatableFieldIssue` correctly flagged
     ## `Table[string, int32]` (val kind is itInt, but width 32 != 64) as
     ## unallocatable with `seUnsupportedTableValType`, but `allocateSym`'s
@@ -305,7 +312,7 @@ suite "symex N43 -- allocator confirmation via heap-deref (genuinely unguarded a
     ## already combine kind+shape into one condition), so a non-canonical
     ## itInt value type now reaches the SAME `allocDegrade` path as every
     ## other unsupported value type. Predicate and allocator agree.
-    check unallocatableFieldIssue(tTable(tString(), tString())).isSome
+    check unallocatableFieldIssue(tTable(tString(), tTuple(@[tInt(), tInt()]))).isSome
     let r = symexFind(n43HeapTableValBlock, tLabel("n43_heap_table_val"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
@@ -344,13 +351,13 @@ proc n43ClosureGoodBlock(n: int) =
 proc n43ClosureNestedTupleBlock(n: int) =
   for i in 0 ..< 1:
     block:
-      let f = proc(t: (int, Table[int, string])): int = n
+      let f = proc(t: (int, Table[(int, int), string])): int = n
       symexTarget("n43_closure_nested_tuple")
 
 proc n43ClosureNestedArrayBlock(n: int) =
   for i in 0 ..< 1:
     block:
-      let f = proc(t: array[2, Table[int, string]]): int = n
+      let f = proc(t: array[2, Table[(int, int), string]]): int = n
       symexTarget("n43_closure_nested_array")
 
 suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nesting recursion parity)":
@@ -360,14 +367,14 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
     check r.status == sxSat
 
   test "N43-C1: tuple nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itTuple recursion), allocator confirms honest sxUnknown, no crash":
-    check unallocatableFieldIssue(tTuple(@[tInt(), tTable(tInt(64, true), tString())])).isSome
+    check unallocatableFieldIssue(tTuple(@[tInt(), tTable(tTuple(@[tInt(), tInt()]), tString())])).isSome
     let r = symexFind(n43ClosureNestedTupleBlock, tLabel("n43_closure_nested_tuple"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
     check r.status == sxUnknown
 
   test "N43-C2: array nesting a bad-key Table field, as a lambda param -- predicted unallocatable (Part 1's itArray recursion), allocator confirms honest sxUnknown, no crash":
-    check unallocatableFieldIssue(tArray(tTable(tInt(64, true), tString()), 2)).isSome
+    check unallocatableFieldIssue(tArray(tTable(tTuple(@[tInt(), tInt()]), tString()), 2)).isSome
     let r = symexFind(n43ClosureNestedArrayBlock, tLabel("n43_closure_nested_array"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
@@ -382,7 +389,11 @@ suite "symex N43 -- allocator confirmation via lambda param sorts (composite-nes
 
 type
   N43WitnessObj = object
-    a: int
+    # RFC-0005 S8bc: a ref part. A seq of a plain object is a leaf-split,
+    # renderable seq since S8bc. RFC-0005 S8bl: a seq element holding a ref
+    # is renderable too (its positions are collected through the heap cell
+    # layout); one holding a ref inside a Table is not.
+    a: Table[string, ref int]
 
 proc n43ParamUnsupported(x: cstring, y: int) =
   if y == 42:

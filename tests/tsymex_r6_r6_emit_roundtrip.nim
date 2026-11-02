@@ -316,7 +316,7 @@ proc fieldwiseEq(a, b: IRExpr): bool =
     ## RFC-0005 S8u.
     fieldwiseEq(a.zvTy, b.zvTy)
   of iekSeqNew:
-    ## RFC-0005 S8bi.
+    ## RFC-0005 S8bc, S8bi (one kind since batch 5).
     fieldwiseEq(a.snArg, b.snArg) and fieldwiseEq(a.snElemTy, b.snElemTy) and
       a.snZeroed == b.snZeroed and a.snOfCap == b.snOfCap
   of iekBitSet:
@@ -325,12 +325,19 @@ proc fieldwiseEq(a, b: IRExpr): bool =
       fieldwiseEq(a.bsSetTy, b.bsSetTy)
   of iekSeqLen: fieldwiseEq(a.lenObj, b.lenObj) and a.lenLoc == b.lenLoc
   of iekSeqSlice:
-    fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and fieldwiseEq(a.ssHi, b.ssHi)
+    fieldwiseEq(a.ssBase, b.ssBase) and fieldwiseEq(a.ssLo, b.ssLo) and
+      fieldwiseEq(a.ssHi, b.ssHi) and a.ssView == b.ssView   # RFC-0005 S8bu
+  of iekSeqSplice:   # RFC-0005 S8bu
+    fieldwiseEq(a.spBase, b.spBase) and fieldwiseEq(a.spAt, b.spAt) and
+      fieldwiseEq(a.spPart, b.spPart)
   of iekStrLit: a.sval == b.sval
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
+  of iekTabRemovedSince:   # RFC-0005 S8bx
+    fieldwiseEq(a.trCur, b.trCur) and fieldwiseEq(a.trBase, b.trBase)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     fieldwiseEq(a.mutRecv, b.mutRecv) and fieldwiseEq(a.mutArg, b.mutArg)
-  of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx)
+  of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx) and
+                  a.delShift == b.delShift   # RFC-0005 S8bl
   of iekSeqInsert:
     fieldwiseEq(a.insSeq, b.insSeq) and fieldwiseEq(a.insVal, b.insVal) and
       fieldwiseEq(a.insIdx, b.insIdx)
@@ -397,7 +404,8 @@ proc fieldwiseEq(a, b: IRStmt): bool =
   of isCall:
     a.callee == b.callee and fieldwiseEqExprSeq(a.cargs, b.cargs) and a.retName == b.retName and
       fieldwiseEq(a.retTy, b.retTy) and a.opaque == b.opaque and
-      a.retIntOffsetPositions == b.retIntOffsetPositions
+      a.retIntOffsetPositions == b.retIntOffsetPositions and
+      a.cViewAliases == b.cViewAliases   # RFC-0005 S8bx
   of isIndex:
     a.ixRetName == b.ixRetName and fieldwiseEq(a.ixArr, b.ixArr) and fieldwiseEq(a.ixIdx, b.ixIdx) and
       fieldwiseEq(a.ixElemTy, b.ixElemTy) and a.ixLoc == b.ixLoc
@@ -409,6 +417,15 @@ proc fieldwiseEq(a, b: IRStmt): bool =
     # precedent above).
     a.iaRecvName == b.iaRecvName and fieldwiseEq(a.iaIdx, b.iaIdx) and
       fieldwiseEq(a.iaVal, b.iaVal) and a.iaLoc == b.iaLoc
+  of isTabKeys:
+    # RFC-0005 S8bc (item 6).
+    a.tkRetName == b.tkRetName and fieldwiseEq(a.tkRecv, b.tkRecv) and
+      fieldwiseEq(a.tkKeyTy, b.tkKeyTy) and a.tkLoc == b.tkLoc
+  of isSetLen:
+    # RFC-0005 S8bl (item 1).
+    a.slRetName == b.slRetName and fieldwiseEq(a.slBase, b.slBase) and
+      fieldwiseEq(a.slLen, b.slLen) and fieldwiseEq(a.slTy, b.slTy) and
+      a.slLoc == b.slLoc
   of isSeqPop:
     # Item 2 (round-6 fix round 3): see isIndexAssign's comment immediately
     # above -- same missing-arm gap, same N14 (9dbc3df) origin.
@@ -633,6 +650,10 @@ proc sSeqNew(): IRExpr =
 proc sSeqNewUninit(): IRExpr =
   ## RFC-0005 S8bi. `newSeqUninit[int](n)`.
   mkSeqNew(mkVar("n"), tInt(64, true), zeroed = false, ofCap = false)
+proc sSeqNewZero(): IRExpr =
+  ## RFC-0005 S8bc. `newSeq[(int, bool)](n)`: a tree element, leaf-split.
+  mkSeqNew(mkVar("n"), tTuple(@[tInt(64, true), tBool()], @["", ""]),
+           zeroed = true, ofCap = false)
 proc sBitSetLit(): IRExpr =
   ## RFC-0005 S8bq. `{c, 3..d}` as a `set[range[0..9]]` value.
   let c = mkVar("c")
@@ -644,14 +665,22 @@ proc sBitSetContains(): IRExpr =
            tBitSet(tInt(8, false, isChar = true)))
 proc sSeqLen(): IRExpr = mkSeqLen(mkVar("s"), "sentinel.nim:1:2: s.len")
 proc sSeqSlice(): IRExpr = mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4))
+proc sSeqSliceView(): IRExpr =
+  ## RFC-0005 S8bu: `ssView` is `true` here (it defaults to `false`).
+  mkSeqSlice(mkVar("data"), mkIntLit(1), mkIntLit(4), view = true)
+proc sSeqSplice(): IRExpr =
+  mkSeqSplice(mkVar("data"), mkIntLit(2), mkVar("part"))
 proc sStrLit(): IRExpr = mkStrLit("sentinelString")
 proc sContains(): IRExpr = mkContains(mkVar("s"), mkVar("k"))
 proc sSeqAdd(): IRExpr = mkSeqAdd(mkVar("s"), mkIntLit(9))
 proc sSeqDel(): IRExpr = mkSeqDel(mkVar("s"), mkIntLit(2))
+proc sSeqDelete(): IRExpr = mkSeqDel(mkVar("s"), mkIntLit(2), shift = true)
 proc sSeqInsert(): IRExpr = mkSeqInsert(mkVar("s"), mkIntLit(7), mkIntLit(1))
 proc sSeqPop(): IRExpr = mkSeqPop(mkVar("s"))
 proc sTableSet(): IRExpr = mkTableSet(mkVar("t"), mkStrLit("k"), mkIntLit(1))
 proc sTableDel(): IRExpr = mkTableDel(mkVar("t"), mkStrLit("k"))
+proc sTabRemovedSince(): IRExpr =   ## RFC-0005 S8bx
+  mkTabRemovedSince(mkVar("tabNow"), mkVar("tabSnap"))
 proc sSetIncl(): IRExpr = mkSetIncl(mkVar("st"), mkIntLit(4))
 proc sSetExcl(): IRExpr = mkSetExcl(mkVar("st"), mkIntLit(4))
 proc sStrOpPlain(): IRExpr = mkStrOp(iekStrLen, "len", @[mkVar("s")])
@@ -729,6 +758,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqNew(), roundtripExpr(sSeqNew()))
   test "iekSeqNew (newSeqUninit)":
     check fieldwiseEq(sSeqNewUninit(), roundtripExpr(sSeqNewUninit()))
+  test "iekSeqNew (newSeq of a tuple)":
+    check fieldwiseEq(sSeqNewZero(), roundtripExpr(sSeqNewZero()))
   test "iekBitSet (a literal over a range)":
     check fieldwiseEq(sBitSetLit(), roundtripExpr(sBitSetLit()))
   test "iekBitSet (contains on set[char])":
@@ -737,6 +768,12 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqLen(), roundtripExpr(sSeqLen()))
   test "iekSeqSlice":
     check fieldwiseEq(sSeqSlice(), roundtripExpr(sSeqSlice()))
+  test "iekSeqSlice (a view, RFC-0005 S8bu)":
+    let reconstructed = roundtripExpr(sSeqSliceView())
+    check fieldwiseEq(sSeqSliceView(), reconstructed)
+    check reconstructed.ssView
+  test "iekSeqSplice":
+    check fieldwiseEq(sSeqSplice(), roundtripExpr(sSeqSplice()))
   test "iekStrLit":
     check fieldwiseEq(sStrLit(), roundtripExpr(sStrLit()))
   test "iekContains":
@@ -745,6 +782,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sSeqAdd(), roundtripExpr(sSeqAdd()))
   test "iekSeqDel":
     check fieldwiseEq(sSeqDel(), roundtripExpr(sSeqDel()))
+  test "iekSeqDel (delete, RFC-0005 S8bl)":
+    check fieldwiseEq(sSeqDelete(), roundtripExpr(sSeqDelete()))
   test "iekSeqInsert":
     check fieldwiseEq(sSeqInsert(), roundtripExpr(sSeqInsert()))
   test "iekSeqPop":
@@ -753,6 +792,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sTableSet(), roundtripExpr(sTableSet()))
   test "iekTableDel":
     check fieldwiseEq(sTableDel(), roundtripExpr(sTableDel()))
+  test "iekTabRemovedSince (RFC-0005 S8bx)":
+    check fieldwiseEq(sTabRemovedSince(), roundtripExpr(sTabRemovedSince()))
   test "iekSetIncl":
     check fieldwiseEq(sSetIncl(), roundtripExpr(sSetIncl()))
   test "iekSetExcl":
@@ -812,12 +853,14 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekMultiVariantLit: discard             ## "iekMultiVariantLit"
       of iekVariantFieldSet: discard             ## "iekVariantFieldSet"
       of iekZeroValue: discard                   ## "iekZeroValue" (RFC-0005 S8u)
-      of iekSeqNew: discard                      ## "iekSeqNew" (RFC-0005 S8bi)
+      of iekSeqNew: discard                      ## "iekSeqNew" (RFC-0005 S8bc, S8bi)
       of iekBitSet: discard                      ## "iekBitSet" (RFC-0005 S8bq)
       of iekSeqLen: discard                      ## "iekSeqLen"
-      of iekSeqSlice: discard                    ## "iekSeqSlice"
+      of iekSeqSlice: discard                    ## "iekSeqSlice" (2 tests: plain + view)
+      of iekSeqSplice: discard                   ## "iekSeqSplice" (RFC-0005 S8bu)
       of iekStrLit: discard                      ## "iekStrLit"
       of iekContains: discard                    ## "iekContains"
+      of iekTabRemovedSince: discard             ## "iekTabRemovedSince (RFC-0005 S8bx)"
       of iekSeqAdd: discard                      ## "iekSeqAdd"
       of iekSeqDel: discard                      ## "iekSeqDel"
       of iekSeqInsert: discard                   ## "iekSeqInsert"
@@ -832,7 +875,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
          iekStrReplaceRe, iekStrCaptureRe, iekStrConcat, iekIntToStr,
          iekStrToInt,
          iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
-         iekRuneToStr, iekStrStrip, iekStrInOptionRegion:
+         iekRuneToStr, iekStrStrip, iekStrInOptionRegion,
+         iekStrSetAt, iekStrChars, iekStrFromChars:   # RFC-0005 S8ca
         discard  ## "StrOpKinds shared arm" (2 tests: plain + strOp payload)
       of iekGetCurrentExn: discard               ## "iekGetCurrentExn"
       of iekGetCurrentExnMsg: discard            ## "iekGetCurrentExnMsg"
@@ -869,8 +913,10 @@ proc sAssert(): IRStmt = mkAssert(mkBinop(bLt, mkVar("x"), mkIntLit(10)))
 proc sAssume(): IRStmt = mkAssume(mkBinop(bGe, mkVar("y"), mkIntLit(3)))
 proc sCallWithOffsets(): IRStmt =
   ## The historically-dropped B5 field: `retIntOffsetPositions`.
+  ## RFC-0005 S8bx: and `cViewAliases`.
   mkCall("sentinelCallee", "sentinelRet", @[mkIntLit(1), mkVar("arg2")],
-         tInt(64, true), retIntOffsetPositions = @[0, 2])
+         tInt(64, true), retIntOffsetPositions = @[0, 2],
+         viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey")])
 proc sOpaqueCall(): IRStmt =
   mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
 proc sVariantFieldStmt(): IRStmt =
@@ -901,6 +947,15 @@ proc sSeqPopStmt(): IRStmt =
   ## `spRetName` set to distinct sentinel names (a swapped-argument emit bug
   ## would otherwise be invisible to `fieldwiseEq`), `spLoc` non-empty.
   mkSeqPopStmt("sentSpRecv", "sentSpRet", "sentinel.nim:11:11: sentSpRet := sentSpRecv.pop()")
+proc sTabKeysStmt(): IRStmt =
+  ## RFC-0005 S8bc (item 6): every field a sentinel.
+  mkTabKeysStmt("sentTkRet", mkVar("sentTkRecv"), tString(),
+                "sentinel.nim:12:12: for k in sentTkRecv.keys")
+proc sSetLenStmt(): IRStmt =
+  ## RFC-0005 S8bl (item 1): every field a sentinel.
+  mkSetLenStmt("sentSlRet", mkVar("sentSlBase"), mkVar("sentSlLen"),
+               tSeq(tInt(64, signed = true)),
+               "sentinel.nim:13:13: setLen(sentSlBase, sentSlLen)")
 proc sTargetLabel(): IRStmt = mkTargetLabel("sentLabel")
 proc sRaiseWithMsg(): IRStmt = mkRaise("ValueError", mkStrLit("boom"))
 proc sReraise(): IRStmt = mkReraise()
@@ -978,6 +1033,10 @@ suite "R6 emit round-trip -- IRStmt kinds":
     check fieldwiseEq(sIndexAssignStmt(), roundtripStmt(sIndexAssignStmt()))
   test "isSeqPop (N14, item 2 -- was entirely missing from this audit)":
     check fieldwiseEq(sSeqPopStmt(), roundtripStmt(sSeqPopStmt()))
+  test "isTabKeys (RFC-0005 S8bc)":
+    check fieldwiseEq(sTabKeysStmt(), roundtripStmt(sTabKeysStmt()))
+  test "isSetLen (RFC-0005 S8bl)":
+    check fieldwiseEq(sSetLenStmt(), roundtripStmt(sSetLenStmt()))
   test "isTargetLabel":
     check fieldwiseEq(sTargetLabel(), roundtripStmt(sTargetLabel()))
   test "isRaise (with message)":
@@ -1031,6 +1090,8 @@ suite "R6 emit round-trip -- IRStmt kinds":
       of isIndex: discard                         ## "isIndex"
       of isIndexAssign: discard                   ## "isIndexAssign" (item 2, N14)
       of isSeqPop: discard                        ## "isSeqPop" (item 2, N14)
+      of isTabKeys: discard                       ## "isTabKeys" (RFC-0005 S8bc)
+      of isSetLen: discard                        ## "isSetLen" (RFC-0005 S8bl)
       of isTargetLabel: discard                   ## "isTargetLabel"
       of isRaise: discard                         ## "isRaise" (2 tests: msg + bare re-raise)
       of isTry: discard                           ## "isTry" (2 tests: with/without finally)

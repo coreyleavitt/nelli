@@ -343,14 +343,18 @@ proc setCharParam(s: HashSet[char]) =
   if 'a' in s: symexTarget("s8z_scp")
 
 proc tabIntKey(x: int) =
-  var t: Table[int, int]
-  t[x] = 1
-  if t[x] == 1: symexTarget("s8z_tik")
+  # RFC-0005 S8ar backs an integer-like key, and S8at a float one; a tuple
+  # key is still unbacked.
+  var t: Table[(int, int), int]
+  t[(x, x)] = 1
+  if t[(x, x)] == 1: symexTarget("s8z_tik")
 
 proc tabStrVal(x: int) =
-  var t: Table[string, string]
-  t["a"] = "b"
-  if x > 0 and t["a"] == "b": symexTarget("s8z_tsv")
+  # RFC-0005 S8ar backs a string value, and S8at a container one; a tuple
+  # value is still unbacked.
+  var t: Table[string, (int, int)]
+  t["a"] = (1, 1)
+  if x > 0 and t["a"][0] == 1: symexTarget("s8z_tsv")
 
 proc setStr(x: int) =
   var s: HashSet[string]

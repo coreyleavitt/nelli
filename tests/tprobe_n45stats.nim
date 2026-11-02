@@ -37,9 +37,14 @@ else:
 
    test "unsat query records stats too":
      symexQueryStats = @[]
+     # RFC-0005 S8bl: was `a != a`, which folds to `false`; a guard that
+     # folds to a literal no longer walks the side it rules out, so Z3 was
+     # never called and nothing was recorded. No int is both above 5 and
+     # below 3, but the walker has to ask Z3 to find that out.
      proc sut2(a: int) =
-       if a != a:
-         symexTarget("impossible")
+       if a > 5:
+         if a < 3:
+           symexTarget("impossible")
      let r = symexFind(sut2, tLabel("impossible"))
      echo "STATUS=", r.status
      echo symexQueryStatsSummary()

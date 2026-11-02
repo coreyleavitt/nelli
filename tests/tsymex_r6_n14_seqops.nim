@@ -45,6 +45,10 @@
 ##    data-dependent one). Adjudicated: stays classified-declined
 ##    (`feUnsupportedOp`, pre-existing, unchanged by this slice) — pinned
 ##    below to prove it stays classified rather than regressing to a crash.
+##    SUPERSEDED by RFC-0005 S8ar: the shift is the array lambda
+##    `iekSeqSlice` already builds (a `Z3_mk_lambda_const` view Z3
+##    beta-reduces at every select, no universal quantifier), so `insert`
+##    is modelled; the pin below now asserts the target is reached.
 ## 5. `in` / `.contains()` on a seq — genuinely modelable in principle as a
 ##    k-bounded existential (`OR_{j<k} (j<len and data[j]==needle)`, gated
 ##    by a structural fork on `len <= k` vs. the N20 k-unroll route for
@@ -350,12 +354,11 @@ proc insertUnbounded(xs: seq[int], v: int, i: int) =
   ys.insert(v, i)
   symexTarget("insert_reached")
 
-suite "N14 — seq `.insert(v, i)` (decline-with-doctrine)":
-  test "decline stays CLASSIFIED (feUnsupportedOp), never a crash":
+suite "N14 — seq `.insert(v, i)` (modelled since RFC-0005 S8ar)":
+  test "a symbolic-index insert reaches the target, never a crash":
     let r = symexFind(insertUnbounded, tLabel("insert_reached"))
-    check r.status == sxUnknown
-    check r.errors.len > 0
-    check r.errors[0].kind == feUnsupportedOp
+    check r.status == sxSat
+    for e in r.errors: check e.kind != weInternalWalkerFault
 
 # =============================================================================
 # 5. `in` / `.contains()` on a seq — DECLINED WITH DOCTRINE, crash fixed
@@ -418,7 +421,7 @@ type
     case kind: MKind
     of mkA: a: int
     of mkB:
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc mkPlaceholderRec(v: var MRec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -432,7 +435,7 @@ proc mutIndexAssignOnPlaceholder(v: var MRec, i: int) =
   mkPlaceholderRec(v)
   if v.kind == mkB:
     var o = v.opts
-    o[i] = ("k", "v")
+    o[i] = @["k", "v"]   # RFC-0005 S8bc: a seq stand-in element
     symexTarget("mut_indexassign_placeholder")
 
 proc mutPopOnPlaceholder(v: var MRec) =

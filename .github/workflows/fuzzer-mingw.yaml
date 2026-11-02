@@ -55,6 +55,10 @@ on:
     # a docs-only PR still runs the full leg.
     paths-ignore: *docs-only
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/rfc-') }}
+
 jobs:
   fuzzer-mingw:
     runs-on: windows-2025

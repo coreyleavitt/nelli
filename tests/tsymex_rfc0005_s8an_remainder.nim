@@ -292,8 +292,10 @@ suite "S8an (1): a routine declared inside the code under test":
   test "a nested routine used as a value is a closure":
     verdict(sutCapValue, "cv", sxSat)
     verdict(sutCapValue, "cv_dead", sxUnsat)
-    # A closure value's write to its capture is the existing scoped decline.
-    declines(sutCapValueWrite, "cvw", ceCaptureByRefUnmodelled, "capture(s) c")
+    # A closure value's write to its capture, applied in the frame that
+    # built it, is written back since RFC-0005 S8as (was the scoped
+    # `ceCaptureByRefUnmodelled` decline).
+    verdict(sutCapValueWrite, "cvw", sxSat)
 
   test "a var actual that is also a capture of the callee declines, scoped":
     ## Probe: `sutCapVarAlias(1)` leaves `c == 12`; copy-in/copy-out
@@ -315,11 +317,13 @@ suite "S8an (1): a routine declared inside the code under test":
     verdict(sutOverload, "ov", sxSat)
     verdict(sutOverload, "ov_dead", sxUnsat)
 
-  test "a lambda reaching a capture through a nested routine declines a write":
+  test "a lambda reaching a capture through a nested routine writes it":
     ## RED: `sxUnsat`, `errors` empty -- the lambda captured nothing, the
     ## nested routine's write to `c` landed in the closure's own env and
-    ## was dropped. Probe: `sutLambdaViaNested(0)` reaches `lvn`.
-    declines(sutLambdaViaNested, "lvn", ceCaptureByRefUnmodelled, "c")
+    ## was dropped. Probe: `sutLambdaViaNested(0)` reaches `lvn`. S8an
+    ## declined it (`ceCaptureByRefUnmodelled`); RFC-0005 S8as writes the
+    ## capture back to the frame that built the lambda.
+    verdict(sutLambdaViaNested, "lvn", sxSat)
 
   test "a closure value reads its capture as it stands at the call":
     ## Probe: `sutCapValueLater(5)` reaches `cvl`.
@@ -341,9 +345,17 @@ suite "S8an (1): a routine declared inside the code under test":
 
   test "recursion past the call-depth budget declines, and decides with room":
     ## On a symbolic argument every level's `k <= 1` is open, so the walk
-    ## unrolls to `maxCallDepth` (3 by default) and the deepest path
-    ## declines; the satisfiable `fact(4) == 24` is found with room.
-    declines(sutRecDeep, "rd", beBudgetExhaustedUnmodelled, "maxCallDepth=3")
+    ## unrolled to `maxCallDepth` (3 by default) and the deepest path
+    ## declined. RFC-0005 S8ax: `n <= 5` bounds the recursion, so the
+    ## adaptive depth follows it past `maxCallDepth` and the default
+    ## settings now decide; the unbounded shape's decline is pinned in
+    ## tsymex_rfc0005_s8ax_remainder. The satisfiable `fact(4) == 24` is
+    ## found with room either way.
+    block:
+      let r0 = symexFind(sutRecDeep, tLabel("rd"))
+      checkpoint show(r0.errors)
+      check r0.status == sxSat
+      if r0.status == sxSat: check r0.witness[0] == 4
     let r = symexFind(sutRecDeep, tLabel("rd"),
       SymexSettings(budget: ResourceBudget(maxCallDepth: 8)))
     checkpoint show(r.errors)
@@ -386,11 +398,10 @@ proc sutAddrRead(v: int) =
   if getP(addr x) != v: symexTarget("ar_dead")
 
 proc sutAddrInc(v: int) =
-  # No overflow path. The range is narrow because a `ptr int` cell lives in
-  # the BV-sorted `int` heap, and an Int-to-BV round trip over a wide range
-  # costs Z3 ~40 s per UNSAT query here -- as it does for a plain `new int`
-  # (pre-existing; RFC-0005 S8an "Different mechanisms").
-  symexAssume(v >= 0 and v < 16)
+  # No overflow path. S8an kept the range narrow (`[0, 16)`): the `int`
+  # heap was BV-sorted and the Int-to-BV round trip cost Z3 ~40 s per UNSAT
+  # query over a wide one. RFC-0005 S8as made that heap Int-sorted.
+  symexAssume(v > -1000 and v < 1000)
   var x = v
   incP(addr x)
   incP(addr x)
@@ -423,11 +434,10 @@ proc sutAddrSame(v: int) =
   if same(addr x, addr y): symexTarget("as_dead")
 
 proc sutAddrLet(v: int) =
-  # No overflow path. The range is narrow because a `ptr int` cell lives in
-  # the BV-sorted `int` heap, and an Int-to-BV round trip over a wide range
-  # costs Z3 ~40 s per UNSAT query here -- as it does for a plain `new int`
-  # (pre-existing; RFC-0005 S8an "Different mechanisms").
-  symexAssume(v >= 0 and v < 16)
+  # No overflow path. S8an kept the range narrow (`[0, 16)`): the `int`
+  # heap was BV-sorted and the Int-to-BV round trip cost Z3 ~40 s per UNSAT
+  # query over a wide one. RFC-0005 S8as made that heap Int-sorted.
+  symexAssume(v > -1000 and v < 1000)
   var x = 1
   let p = addr x
   setP(p, v)
@@ -458,6 +468,7 @@ proc sutAddrMix(v: int) =
   var x = v
   mixP(addr x, x)
   if x == 2: symexTarget("amix")
+  if x != 2: symexTarget("amix_dead")
 
 suite "S8an (2): the address of a local passed as a ptr":
 
@@ -496,12 +507,23 @@ suite "S8an (2): the address of a local passed as a ptr":
     verdict(sutAddrRaise, "ae", sxSat)
     verdict(sutAddrRaise, "ae_dead", sxUnsat)
 
-  test "a callee that may let the pointer escape declines, scoped":
-    declines(sutAddrEscape, "aesc", heUnsafeCast, "escape")
+  test "a callee that keeps the pointer is decided":
+    ## RFC-0005 S8ax: `addr x` of a routine variable is its address cell,
+    ## which outlives the call, so the escape no longer declines.
+    verdict(sutAddrEscape, "aesc", sxSat)
+    let r = symexFind(sutAddrEscape, tLabel("aesc"))
+    if r.status == sxSat: check r.witness[0] == 2
 
-  test "an addr actual the callee also reaches as a var declines, scoped":
-    ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write).
-    declines(sutAddrMix, "amix", feUnsupportedOp, "addr")
+  test "an addr actual the callee also reaches as a var is one location":
+    ## Probe: `mixP(addr x, x)` leaves `x == 2` (the later write). S8an
+    ## declined it; RFC-0005 S8bs binds the `var` formal to the cell the
+    ## `addr` actual is for the call, so both writes land on `x` in the
+    ## callee's order.
+    var x = 7
+    mixP(addr x, x)
+    check x == 2
+    verdict(sutAddrMix, "amix", sxSat)
+    verdict(sutAddrMix, "amix_dead", sxUnsat)
 
 # ---- (3) a module-level var reached from a callee ----------------------------
 
@@ -667,9 +689,16 @@ suite "S8an (3): a module-level var reached from a callee":
     verdict(sutGlobalLocalAlias, "gla", sxSat)
     verdict(sutGlobalLocalAlias, "gla_dead", sxUnsat)
 
-  test "a global read before any write in the walk stays a decline":
-    ## Its value at entry is whatever the program left there.
-    declines(sutGlobalFirstRead, "gfr", feGlobalReadUnmodelled, "'gCount'")
+  test "a global read before any write in the walk holds its entry value":
+    ## Its value at entry is whatever the program left there: since
+    ## RFC-0005 S8as a fresh value of its type (`feGlobalHavoc`, a replay-
+    ## gated SAT), where S8an declined (`feGlobalReadUnmodelled`).
+    block:
+      let r = symexFind(sutGlobalFirstRead, tLabel("gfr"))
+      checkpoint show(r.errors)
+      check r.status in {sxSat, sxUnknown}
+      check r.errors.hasKind(feGlobalHavoc)
+      check not r.errors.hasKind(feGlobalReadUnmodelled)
     verdict(sutGlobalUnset, "gu", sxSat)
 
   test "a var or addr actual that is a global the callee reaches declines":
@@ -693,9 +722,11 @@ suite "S8an (3): a module-level var reached from a callee":
     verdict(sutLambdaGlobalRead, "lgr", sxSat)
     verdict(sutLambdaGlobalRead, "lgr_dead", sxUnsat)
 
-  test "a closure body's write to a global declines":
-    declines(sutGlobalClosure, "gcl", ceCaptureByRefUnmodelled, "gCount")
-    declines(sutGlobalLambda, "glam", ceCaptureByRefUnmodelled, "gCount")
+  test "a closure body's write to a global reaches the caller":
+    ## S8an declined both (`ceCaptureByRefUnmodelled`); RFC-0005 S8as
+    ## writes the global back.
+    verdict(sutGlobalClosure, "gcl", sxSat)
+    verdict(sutGlobalLambda, "glam", sxSat)
 
 suite "S8an: walker version":
   test "symexWalkerVersion >= 183":

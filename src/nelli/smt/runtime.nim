@@ -18,6 +18,7 @@
 
 import std/tables
 import std/options
+from std/typetraits import nil   ## RFC-0005 S8ar: `readCellField`'s distinct arm
 import std/sets
 import std/hashes
 import std/algorithm   ## N46 audit (RFC-chapulin-hardening bucket-2): sort() for
@@ -31,9 +32,12 @@ import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
+import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
+import ./ptraim   ## RFC-0005 S8bw (item 3): ptrAimByName
+import ./nativestack   ## RFC-0005 S8ca: `nativeStackShort`
 import ./concolictaxonomy   ## RFC-fuzzer-nextgen G2/R28/R29b: the concolic
   ## yield taxonomy (`ConcolicFlipOutcome`/`ConcolicYieldCounters`/etc.) now
   ## lives in this Z3-free leaf module so `fuzz.nim` can share it directly
@@ -199,6 +203,16 @@ type
     ## + ADR-0020). This carrier exists for the pre-classified-degrade case.
     kind*: SymexErrorKind
 
+  StrBuf* = enum
+    ## RFC-0005 S8ca. Whose memory a string value holds, as Nim's strings
+    ## have it: a literal's (shared, read-only: the first write copies it,
+    ## `prepareMutation`), or its own (written in place). A by-value copy
+    ## of an address-taken string shares that memory, so a write through
+    ## the pointer is seen through the copy only in the second case
+    ## (`bindVarLocs`). A value of unknown provenance (a parameter, a heap
+    ## read, a merge) is `sbUnknown`.
+    sbUnknown, sbLiteral, sbOwned
+
   SVKind* = enum
     svBV8, svBV16, svBV32, svBV64
     svInt
@@ -315,6 +329,7 @@ type
       arrElemTy*: IRType
     of svString:
       str*: Z3String
+      strBuf*: StrBuf   ## RFC-0005 S8ca: whose memory it is (Nim's)
     of svSeq:
       seqLen*:     Z3Int
       seqDataRaw*: Z3AnyAst       ## erased Z3Array[Z3Int, sortOf(T)]
@@ -344,8 +359,25 @@ type
         ## N47-followup (walker v110). Mirrors `IRType.seqUnsupportedFieldKind`
         ## alongside the reason above; meaningful only when
         ## `seqUnsupportedFieldReason.len > 0`.
+      seqSteps*: int
+        ## RFC-0005 S8ar. The heap steps (`refSteps`) of the cell this seq
+        ## was read from; an element ref read out of it is that many steps
+        ## from a root. 0 for a seq that is not a heap read.
+      seqDataMore*: seq[Z3AnyAst]
+        ## RFC-0005 S8bc (item 3). A seq whose element is a tree value
+        ## (`isTreeSeqElemTy`: a tuple, object, array, case object or
+        ## distinct of one) is held LEAF-SPLIT: one `Int -> leaf` data array
+        ## per leaf of the element (`heapLeafSuffixes(seqElemTy)`), leaf 0 in
+        ## `seqDataRaw` and the rest here, in order. Empty for a scalar
+        ## element. Every site that builds a seq from another carries these
+        ## (`seqArrs` / `withSeqArrsOf` / `mkSeqSV`); a read rebuilds the
+        ## element from the selects of every array (`seqElemAt`), a store
+        ## writes every array (`seqStoreArrs`).
     of svTable:
       tabDataRaw*:    Z3AnyAst
+      tabDataMore*:   seq[Z3AnyAst]
+        ## RFC-0005 S8at. A container value's leaves after the first, one
+        ## data array each (`tabValLeaves`); empty for a scalar value.
       tabPresentRaw*: Z3AnyAst
       tabSize*:       Z3Int       ## #144: cardinality counter; mutations
                                   ## update this alongside the present
@@ -437,12 +469,18 @@ type
       refAst*:     Z3AnyAst
       refPointee*: IRType   ## Phase 15 R1: the `ref T` pointee type (IRType is
                             ## itself a `ref object`, so no extra boxing).
+      refSteps*:   int      ## RFC-0005 S8ar. Heap steps from a root: 0 for a
+                            ## parameter, a `new` or `nil`; `k + 1` for a ref
+                            ## read out of a cell reached through a `k`-step
+                            ## ref. `maxHeapDepth` bounds a deref's step
+                            ## (`heapStepOf`), not the number of derefs.
     of svPtr:
       ## Phase 15 Cluster R (R1, ADR-0010). Same model as `svRef` for `ptr T`.
       ## `ptrFamily` marks the pointer family (R8).
       ptrAst*:     Z3AnyAst
       ptrFamily*:  bool
       ptrPointee*: IRType   ## Phase 15 R1: the `ptr T` pointee type.
+      ptrSteps*:   int      ## RFC-0005 S8ar. As `refSteps`.
     of svBitSet:
       ## RFC-0005 S8bq. `bsRaw` is a bit-vector of `bitSetDomain(bsElemTy)
       ## .size` bits.
@@ -456,6 +494,43 @@ type
     armFieldNames*: OrderedTable[int, seq[string]]
 
   Env = OrderedTable[string, SymVal]
+
+  ElemCell = object
+    ## RFC-0005 S8be. The address cell of element `idx` of the seq variable
+    ## `root` of frame `frame` (`addr root[idx]`, the index as `addr`
+    ## evaluated it): the walk keeps the heap at `refAst` and the element
+    ## equal statement by statement (`syncElemCells`) until the seq is
+    ## resized or assigned whole, when Nim may free its elements' memory
+    ## and the cell is `dead` (a dereference that may reach it declines).
+    refAst: Z3AnyAst
+    frame:  int
+    root:   string
+    ty:     IRType
+    idx:    Z3Int
+    dead:   bool
+
+  HeapTerm = tuple[ast: Z3AnyAst; input: string]
+    ## RFC-0005 S8ca. A heap array's term on a path: the array the path
+    ## holds (`Path.heaps`), or, while it holds none, the name of the free
+    ## input constant it reads (`heapInputName`), which an opaque call's
+    ## havoc renames.
+
+  ViewMark = object
+    ## RFC-0005 S8ca. A by-value seq formal sharing the memory of an
+    ## address-taken variable (a `view` cell entry, `bindVarLocs`): the
+    ## heap arrays its value is read from (`keys`) and their terms when the
+    ## formal last took the cell's value (`at`). It follows the cell only
+    ## while every change of those arrays since is an in-place step
+    ## (`Path.inPlaceSteps`, `viewInPlace`).
+    local: string
+    frame: int
+    keys:  seq[string]
+    at:    seq[HeapTerm]
+
+  InPlaceStep = tuple[key: string; before, after: HeapTerm]
+    ## RFC-0005 S8ca. One store into the heap array `key` that wrote a
+    ## seq's element in its memory (`dwInPlace`, or a `view`'s sync of an
+    ## element written by name): the array's term before and after it.
 
   Path = ref object
     pc:        seq[Z3Bool]
@@ -521,6 +596,17 @@ type
       ## by every fork below it, and carried to the finding
       ## (`RawResult.nilDerefOnPath`), so replay never executes a witness
       ## whose real run would dereference nil and kill the host process.
+    addrOwners: seq[tuple[refAst: Z3AnyAst; frame: int]]
+      ## RFC-0005 S8ax. Each address cell this path allocated
+      ## (`CallFrameCtx.addrCells`) and the frame whose variable it holds.
+      ## Once that frame has returned, the pointer dangles: a dereference
+      ## that may reach it declines (`danglingFork`). Inherited by every
+      ## fork, and by the caller on a return.
+    elemCells: seq[ElemCell]
+      ## RFC-0005 S8be. The element cells this path allocated (`addr s[i]`,
+      ## `walkElemCell`), each a frame's view of one: the caller's entry and
+      ## a callee's (a `var` formal, a capture) share the cell. Inherited by
+      ## every fork, and by the caller on a return.
     loopIters: seq[tuple[loop: int, iters: int]]
       ## RFC-0005 S8y. For each `while` this path has run through (`loop`,
       ## the statement's identity within the walk), how many times its body
@@ -528,6 +614,13 @@ type
       ## loop's forks (`atIteration`), inherited by every fork below.
       ## `solveTargetHit` compares it with the depth of a tainted hit that
       ## ran out of budget (`WalkCtx.budgetOutDepths`).
+    viewMarks: seq[ViewMark]
+      ## RFC-0005 S8ca. The by-value seq formals on this path that share an
+      ## address-taken variable's memory. Inherited by every fork, and by
+      ## the caller on a return; a returned frame's are dropped as read.
+    inPlaceSteps: seq[InPlaceStep]
+      ## RFC-0005 S8ca. The in-place element writes this path made while it
+      ## had a `viewMarks` entry, in order. Inherited as `viewMarks` is.
 
   Degrade = object
     ## RFC-0005 S1 (§2.2 "One funnel performs all three acts"). The token a
@@ -752,6 +845,13 @@ proc deepCopyHeapState(src: Path):
   # isolation that gives disjoint-path counter restart for free.
   result.liveRefs = src.liveRefs
 
+func sameHeapTerm(a, b: HeapTerm): bool =
+  ## RFC-0005 S8ca. The same array term (`HeapTerm`).
+  let x = cast[pointer](a.ast.raw)
+  let y = cast[pointer](b.ast.raw)
+  if x == nil or y == nil: x == nil and y == nil and a.input == b.input
+  else: x == y
+
 template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
                                 taintExpr: Taint): Path =
   ## Phase 15 H1 / R3 hardening / RFC-0005 S1: construct a CHILD `Path` from
@@ -776,7 +876,11 @@ template forkPathTaintPrimitive(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
        liveRefs: hs.liveRefs,                            ## Phase 15 R2
        freshnessAssertCount: parent.freshnessAssertCount,  ## Phase 15 R2
        nilDeref: parent.nilDeref,                        ## RFC-0005 S8k
-       loopIters: parent.loopIters)                      ## RFC-0005 S8y
+       addrOwners: parent.addrOwners,                    ## RFC-0005 S8ax
+       elemCells: parent.elemCells,                      ## RFC-0005 S8be
+       loopIters: parent.loopIters,                      ## RFC-0005 S8y
+       viewMarks: parent.viewMarks,                      ## RFC-0005 S8ca
+       inPlaceSteps: parent.inPlaceSteps)                ## RFC-0005 S8ca
 
 template forkPath(parent: Path; pcExpr: seq[Z3Bool]; envExpr: Env): Path =
   ## R3 hardening: the ONLY spelling ordinary fork sites use to derive a
@@ -821,6 +925,35 @@ template forkPathMerged(callee: Path; pcExpr: seq[Z3Bool]; envExpr: Env;
           e.iters = max(e.iters, n)
           seen = true
       if not seen: merged.loopIters.add (loop: loop, iters: n)
+    # RFC-0005 S8ax: likewise the caller's address cells.
+    for o in caller.addrOwners:
+      var seen = false
+      for e in merged.addrOwners:
+        if cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
+          seen = true
+      if not seen: merged.addrOwners.add o
+    # RFC-0005 S8be: and its element cells.
+    for o in caller.elemCells:
+      var seen = false
+      for e in merged.elemCells:
+        if e.frame == o.frame and
+           cast[pointer](e.refAst.raw) == cast[pointer](o.refAst.raw):
+          seen = true
+      if not seen: merged.elemCells.add o
+    # RFC-0005 S8ca: and its views and in-place steps (a closure body's
+    # descent starts from a fresh root).
+    for o in caller.viewMarks:
+      var seen = false
+      for e in merged.viewMarks:
+        if e.frame == o.frame and e.local == o.local: seen = true
+      if not seen: merged.viewMarks.add o
+    for o in caller.inPlaceSteps:
+      var seen = false
+      for e in merged.inPlaceSteps:
+        if e.key == o.key and sameHeapTerm(e.before, o.before) and
+           sameHeapTerm(e.after, o.after):
+          seen = true
+      if not seen: merged.inPlaceSteps.add o
     merged
 
 proc atIteration(p: Path; loop, n: int) =
@@ -1070,6 +1203,15 @@ proc rangeCondsIfNeeded(v: SymVal, ty: IRType): seq[Z3Bool] =
   else:
     @[]
 
+proc seqStrElemConds(v: SymVal): seq[Z3Bool] =
+  ## RFC-0005 S8ar. The well-formedness of a string read out of a backing
+  ## store (a `seq[string]` element): it is a string of bytes, the fact
+  ## `allocateSym` gives a free `string` and `heapCellWfConds` a string
+  ## heap cell. Empty for any other kind.
+  if v.kind == svString:
+    @[matches(v.str, star(range(mkString("\x00"), mkString("\xff"))))]
+  else: @[]
+
 proc allocRefSort*(ctx: Z3Context, pointeeTy: IRType): RawZ3Sort
   ## Phase 15 R3 fwd-decl (defined below) — `allocateSeqDataRaw` needs the
   ## per-walker `Ref_T` sort to build a `seq[ref T]` backing array before the
@@ -1081,6 +1223,13 @@ proc heapSelect(ctx: Z3Context, heap: Z3AnyAst, refAst: Z3AnyAst,
   ## ADR-0013 Slice 2 fwd-decl (defined in runtime_heap.nim, included below).
   ## `extractFromSymVal` (D5 witness serialization) selects the active arm's
   ## fields out of `currentVariantHeaps` before the heap cluster is included.
+proc inheritTagKey*(objTy: IRType, level: int): string
+  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
+  ## `allocateSym` ties a hierarchy ref's run-type tags to its static type.
+proc mkHeapArrayVar(ctx: Z3Context, refSort: RawZ3Sort,
+                    pointeeTy: IRType, name: string,
+                    variantTy: IRType = nil, leaf = 0): Z3AnyAst
+  ## RFC-0005 S8bn fwd-decl (defined in runtime_heap.nim, included below).
 proc fieldHeapKey*(objTy: IRType, field: string): string
   ## Cluster H H_witness fwd-decl (defined in runtime_heap.nim, included
   ## below). `buildHeapSnapshot`'s recursive descent needs the field-split
@@ -1090,17 +1239,26 @@ proc variantDiscHeapKey(objTy: IRType): string
   ## `renderCell` names each axis's discriminator heap.
 proc mvAxisView(mv: IRType; axisIx: int): IRType
   ## RFC-0005 S8l fwd-decl (defined in runtime_heap.nim, included below).
-proc heapCompoundTy(ty: IRType): bool
-  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
-  ## `renderCellField` renders a leaf-split compound cell.
 proc heapLeafSuffixes(ty: IRType): seq[string]
   ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
-proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst]): SymVal
-  ## RFC-0005 S8ap fwd-decl (defined in runtime_heap.nim, included below).
+proc svFitsHeapTy(sv: SymVal; ty: IRType): bool
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
+  ## `renderHeapValue` renders a case object cell.
+proc svWithLeaves(ctx: Z3Context; proto: SymVal; leaves: seq[Z3AnyAst];
+                  ty: IRType = nil): SymVal
+proc svLeafAsts(sv: SymVal; ty: IRType = nil): seq[RawZ3Ast]
+proc svLeafTerms(sv: SymVal; ty: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8bc fwd-decl (defined in runtime_heap.nim, included below).
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
+  ## A container `Table` value is held leaf-split (`tabValLeaves`).
+proc svCellWf(sv: SymVal; ty: IRType; nested: bool; bounded = true): seq[Z3Bool]
+  ## RFC-0005 S8at fwd-decl (defined in runtime_heap.nim, included below).
 proc allocateSeqDataRaw(elemTy: IRType, name: string): Z3AnyAst =
   ## Dispatch on the element type to instantiate `Z3Array[Z3Int, V]`
   ## with the right typed V, then erase via `toAnyAst`. Cycle 1
-  ## supports int/bool elements; more arrive incrementally.
+  ## supports int/bool elements; more arrive incrementally. RFC-0005 S8ba:
+  ## a distinct element is backed by its base (`seqCellTy`).
+  let elemTy = seqCellTy(elemTy)
   case elemTy.kind
   of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] backing.
     # The element value sort is the per-walker uninterpreted `Ref_T` address
@@ -1281,7 +1439,12 @@ func cellDomain(ty: IRType): tuple[bounded: bool, lo, hi: int64] =
   ## interval of the cell read with `ty`'s signedness: the declared range,
   ## else the width's. `bounded` is false for a full 64-bit type, whose every
   ## cell is a value.
-  if ty.kind == itBool: (true, 0'i64, 1'i64)
+  ## RFC-0005 S8at: a float `Table` key's cell is its IEEE bit pattern
+  ## (`floatKeyCell`): every 64-bit cell for a `float64`, the low 32 bits for
+  ## a `float32`.
+  if ty.kind == itFloat64: (false, 0'i64, 0'i64)
+  elif ty.kind == itFloat32: (true, 0'i64, 0xFFFF_FFFF'i64)
+  elif ty.kind == itBool: (true, 0'i64, 1'i64)
   elif ty.hasRange: (true, ty.rangeLo, ty.rangeHi)
   elif ty.width == 64: (false, 0'i64, 0'i64)
   elif ty.signed:
@@ -1355,6 +1518,10 @@ type ContainerCardRegistry* = object
     ## RFC-0005 S8z: `elemTy` bounds the cells a member can occupy
     ## (`cellDomain`) for a narrower element type.
   setKeys*:  seq[Z3BitVec[64]]
+  tabTreeBases*: seq[SymVal]
+    ## RFC-0005 S8at. Every INPUT table whose value is a container
+    ## (`tvTree`): the facts a free value of its value type has
+    ## (`svCellWf`) hold at every key, and are stated at every key term.
   seen:      HashSet[pointer]
 
 var containerCard* {.threadvar.}: ContainerCardRegistry
@@ -1368,16 +1535,32 @@ proc firstSighting(raw: pointer): bool =
   containerCard.seen.incl raw
   true
 
-proc registerTableBase(present: Z3AnyAst; size: Z3Int) =
+proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType)
+
+proc registerTableBase(present: Z3AnyAst; size: Z3Int; keyTy: IRType) =
   ## RFC-0005 S8f. An allocated `Table[string, int]`: its present array and
-  ## size (see `ContainerCardRegistry`).
-  if firstSighting(cast[pointer](present.raw)):
+  ## size (see `ContainerCardRegistry`). RFC-0005 S8ar: a table keyed by a
+  ## 64-bit cell (`isTableKeyTy`) has the present array a `HashSet` of its
+  ## key type has, and the same facts: it is registered as one.
+  if keyTy.kind != itString:
+    registerSetBase(present, size, keyTy)
+  elif firstSighting(cast[pointer](present.raw)):
     containerCard.tabBases.add (present: present, size: size)
 
 proc registerSetBase(members: Z3AnyAst; size: Z3Int; elemTy: IRType) =
   ## RFC-0005 S8f. An allocated `HashSet[T]`: its member array and size.
   if firstSighting(cast[pointer](members.raw)):
     containerCard.setBases.add (members: members, size: size, elemTy: elemTy)
+
+proc registerTabTreeBase(sv: SymVal) =
+  ## RFC-0005 S8at. An input table holding container values (see
+  ## `ContainerCardRegistry.tabTreeBases`); any other value is ignored.
+  if sv.kind == svTable and isTableContainerValTy(sv.tabValTy) and
+     firstSighting(cast[pointer](sv.tabDataRaw.raw)):
+    containerCard.tabTreeBases.add sv
+
+proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
 
 proc noteTableKey(k: Z3String) =
   ## RFC-0005 S8f. A key term some table array is selected or stored at.
@@ -1388,6 +1571,80 @@ proc noteSetKey(k: Z3BitVec[64]) =
   ## RFC-0005 S8f. A key term some set array is selected or stored at.
   if firstSighting(cast[pointer](k.raw)):
     containerCard.setKeys.add k
+
+type TabValLeaf = enum
+  ## RFC-0005 S8ar. The Z3 term a backed `Table` value is held as
+  ## (`isTableValTy`): an integer-like value's 64-bit cell, or a term of the
+  ## value's own sort.
+  ## RFC-0005 S8at: `tvTree`, a container value held leaf-split, one data
+  ## array per leaf (`tabValLeaves`).
+  tvCell, tvStr, tvF32, tvF64, tvTree
+
+func tabValLeaf(valTy: IRType): TabValLeaf =
+  if isTableContainerValTy(valTy): return tvTree   ## RFC-0005 S8at
+  case valTy.kind
+  of itString: tvStr
+  of itFloat32: tvF32
+  of itFloat64: tvF64
+  else: tvCell
+
+proc tabTreeDataVars(name: string; keyTy, valTy: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc tabTreeDataZero(keyTy, valTy: IRType): seq[Z3AnyAst]
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool
+  ## RFC-0005 S8at fwd-decl (defined after `defaultZero`).
+
+proc tabDataVarOf[K](name: string; valTy: IRType): Z3AnyAst =
+  # RFC-0005 S8at: the live key / value terms that held both sorts across
+  # `Z3_mk_array_sort` are gone -- nim-z3's `sortOf(Z3Array[K, V])` now
+  # holds them itself (nim-z3 ae509f0, `holdSort`).
+  case tabValLeaf(valTy)
+  of tvTree: tabTreeDataVars(name, (when K is Z3String: tString() else: tInt()),
+                             valTy)[0]
+  of tvCell: toAnyAst(mkArrayVar[K, Z3BitVec[64]](name))
+  of tvStr:  toAnyAst(mkArrayVar[K, Z3String](name))
+  of tvF32:  toAnyAst(mkArrayVar[K, Z3Float32](name))
+  of tvF64:  toAnyAst(mkArrayVar[K, Z3Float64](name))
+
+proc tabDataVar(name: string; keyTy, valTy: IRType): Z3AnyAst =
+  ## RFC-0005 S8ar. The free data array of a backed `Table[K, V]`, keyed by
+  ## the key's term (a string, or a 64-bit cell) and valued by the value's
+  ## (`TabValLeaf`). Was `Z3Array[Z3String, Z3BitVec[64]]` for every table.
+  if keyTy.kind == itString: tabDataVarOf[Z3String](name, valTy)
+  else: tabDataVarOf[Z3BitVec[64]](name, valTy)
+
+proc tabPresentVar(name: string; keyTy: IRType): Z3AnyAst =
+  ## RFC-0005 S8ar. The free present array of a backed `Table[K, V]`.
+  if keyTy.kind == itString: toAnyAst(mkArrayVar[Z3String, Z3Bool](name))
+  else: toAnyAst(mkArrayVar[Z3BitVec[64], Z3Bool](name))
+
+proc tabDataZeroOf[K](valTy: IRType): Z3AnyAst =
+  case tabValLeaf(valTy)
+  of tvTree: tabTreeDataZero((when K is Z3String: tString() else: tInt()),
+                             valTy)[0]
+  of tvCell: toAnyAst(mkConstArray[K, Z3BitVec[64]](mkBitVec[64](0'i64)))
+  of tvStr:  toAnyAst(mkConstArray[K, Z3String](mkString("")))
+  of tvF32:  toAnyAst(mkConstArray[K, Z3Float32](mkFloat32(0'f32)))
+  of tvF64:  toAnyAst(mkConstArray[K, Z3Float64](mkFloat64(0.0)))
+
+proc emptyTable(keyTy, valTy: IRType): SymVal =
+  ## RFC-0005 S8u (was inline in `defaultZero`); S8ar: of every backed
+  ## shape. No key present (a constant `false` array), size 0; the data
+  ## array is a constant too, read only at a present key.
+  let (data, present) =
+    if keyTy.kind == itString:
+      (tabDataZeroOf[Z3String](valTy),
+       toAnyAst(mkConstArray[Z3String, Z3Bool](mkBool(false))))
+    else:
+      (tabDataZeroOf[Z3BitVec[64]](valTy),
+       toAnyAst(mkConstArray[Z3BitVec[64], Z3Bool](mkBool(false))))
+  # RFC-0005 S8at: a container value's further leaves, constant too.
+  let more = if tabValLeaf(valTy) == tvTree: tabTreeDataZero(keyTy, valTy)[1 .. ^1]
+             else: @[]
+  SymVal(kind: svTable, tabDataRaw: data, tabDataMore: more,
+         tabPresentRaw: present,
+         tabSize: mkInt(0), tabKeyTy: keyTy, tabValTy: valTy)
 
 proc distinctPresentCount[K](arr: Z3Array[K, Z3Bool]; keys: seq[K]): Z3Int =
   ## RFC-0005 S8f. The number of DISTINCT values among `keys` at which `arr`
@@ -1406,6 +1663,32 @@ proc containerCardConds(): seq[Z3Bool] =
   ## allocated table and set: see `ContainerCardRegistry` for why this is
   ## both sound (true of every real table) and sufficient (every model
   ## satisfying it is realized by the extractors).
+  ## RFC-0005 S8at: first, the facts of every input table's container value
+  ## at every key term, `svCellWf`'s (a length and a size in range, a nested
+  ## table's and set's size tied to its keys, which registers it, and a
+  ## nested container-valued table, appended and so visited too). True of
+  ## a real table at every key, present or not.
+  var ti = 0
+  while ti < containerCard.tabTreeBases.len:
+    let b = containerCard.tabTreeBases[ti]
+    inc ti
+    let ctx = b.tabSize.ctx
+    var keys: seq[RawZ3Ast]
+    if b.tabKeyTy.kind == itString:
+      for k in containerCard.tabKeys: keys.add k.raw
+    else:
+      for k in containerCard.setKeys: keys.add k.raw
+    for k in keys:
+      result.add svCellWf(tabValAt(ctx, b, k), b.tabValTy, true)
+  # RFC-0005 S8bl: every string key term is a string of bytes. True of
+  # every real key, so it prunes no real input; it binds a term recorded on
+  # ANOTHER path too, whose symbols are free on this one (a key of another
+  # path's `isTabKeys` enumeration). The table extractor renders each present
+  # key term (`extractTableEntries`), and such a term, unconstrained, took a
+  # codepoint above 255: `evalStrBytes` raised inside the walk, a walker
+  # fault (C++) or, lost on the C backend's unwind, a false sxUnsat.
+  for k in containerCard.tabKeys:
+    result.add seqStrElemConds(SymVal(kind: svString, str: k))
   for b in containerCard.tabBases:
     let present = wrap[Z3Array[Z3String, Z3Bool]](b.present.ctx, b.present.raw)
     result.add (b.size >= distinctPresentCount(present, containerCard.tabKeys))
@@ -1433,7 +1716,26 @@ proc containerCardConds(): seq[Z3Bool] =
     result.add (b.size >= present)
     let dsize = cellDomainSize(b.elemTy)
     if dsize < high(int64):
-      result.add (b.size + absent <= mkInt(dsize))
+      # RFC-0005 S8at: `mkZ3IntLit`, not `mkInt` (a `cint`): a 32-bit
+      # unsigned or `float32` domain has 2^32 cells, which `mkInt` faulted
+      # on (`RangeDefect`, every `HashSet[uint32]` / `Table[uint32, V]`).
+      result.add (b.size + absent <= mkZ3IntLit(dsize))
+
+var closureEnvWrites {.threadvar.}: seq[(string, SymVal)]
+  ## RFC-0005 S8as. The by-reference writes of the closure calls lowered in
+  ## the expression in progress -- a module-level variable, or a capture of
+  ## a closure applied in the frame that built it -- each as the fresh value
+  ## the call's exit axioms define (`applyClosureGround`). In call order; a
+  ## later entry for a name supersedes an earlier one. `lower` cannot write
+  ## the env it reads, so `drainPendingLowerEffects` binds them on the
+  ## calling path, which is where Nim's write lands: the parser hoists every
+  ## call operand into a statement of its own ahead of its expression
+  ## (`parseAtomicOperand`), so the write precedes the reads that follow.
+var loweringReadNames {.threadvar.}: seq[string]
+  ## RFC-0005 S8as. The names `lower`'s `iekVar` arm read in the expression
+  ## in progress, in order. A closure call that writes a name already read
+  ## there (not as its own argument) declines: which value Nim reads then
+  ## depends on an evaluation order the walk does not model.
 
 var loweringPendingTaint* {.threadvar.}: Taint
   ## RFC-0005 S1 (was RFC-chapulin-hardening SND-3's `loweringDidDegrade:
@@ -1510,6 +1812,47 @@ proc nelliZ3ErrorHandler(c: RawZ3Context, e: Z3ErrorCode) {.cdecl.} =
   ## so a raise the C backend loses still reaches `runSymex`.
   if z3ApiErrorCount == 0: z3ApiFirstError = $e
   inc z3ApiErrorCount
+
+# ---- RFC-0005 S8ce: a raise survives every destroy on its way out -----------
+#
+# The mechanism behind every "goto-exception hazard" note in this file (N31,
+# N36, ADR-0023, S8m). Nim 2.2.10's C code generator (goto exceptions) runs a
+# destructor on the raise path with the error flag still set, unless it takes
+# that destructor as able to raise: a call's result temporary (`T = f(); if
+# (*nimErr_) { =destroy(T); goto exit; }`, `walkBlock`'s `seq[Path]`) and a
+# local at its scope's merge label alike. nim-z3's hooks wrapped their bodies
+# in `try: ... except CatchableError: discard`, and a `try` entered with the
+# flag set takes the IN-FLIGHT exception as its own: its first checked call
+# jumps to its handler, which clears the flag and pops it. The frame returned
+# as if nothing was raised, and the walk went on to a false verdict. C++
+# exceptions are native and were unaffected.
+#
+# S8ce fixes the hooks at the root (nim-z3 `rfc-0005-s8ce`: raise-free by
+# construction, no `try`, `quirky`), so every raise in the walk, witness
+# extraction's and an own-context solve's among them, reaches
+# `runSymexCaught` on both backends. This module has no lifecycle hook of its
+# own. The in-band sinks those notes describe predate the fix and remain the
+# walker's way to report a decline; they are no longer the only sound one.
+
+when defined(symexTestInjectWalkerFault):
+  # RFC-0005 S8ce fault injection (compiled out of every normal build;
+  # `-d:symexTestInjectWalkerFault` is set for its dedicated test files only,
+  # by their `.nim.cfg`). A raise unwinding through the walk crosses destroys
+  # of Z3-term-holding temporaries (`walkBlock`'s reassigned `seq[Path]`,
+  # `walk`'s `states` / `next`, a term-building helper's local `seq[Z3Bool]`);
+  # on the C backend nim-z3's hooks used to swallow it there. Dispatch
+  # reaching the sentinel label `__inject_s8ce_<shape>__` arms one shape; the
+  # next operation of that shape raises out of the walker's own code with
+  # that operation's Z3 temporaries live (`injectShapeFault`'s call sites
+  # name them). The `dispatch` shape fires at the sentinel statement itself.
+  var injectedShape {.threadvar.}: string
+    ## The armed shape; cleared when it fires and by `resetSymexRunState`.
+
+  proc injectShapeFault(shape: string) =
+    if injectedShape == shape:
+      injectedShape = ""
+      raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8ce raise-shape test)]
+        "S8ce synthetic " & shape & " fault (symexTestInjectWalkerFault)")
 
 proc sortFault(ctx: Z3Context; op: string; want, got: RawZ3Sort): bool =
   ## RFC-0005 S8m. True, after recording the walker fault, when `got` is not
@@ -2009,6 +2352,15 @@ proc isFollowConcreteWalk*(): bool
   ## `WalkCtx` parameter — mirrors the `syncXxx`/`currentWalkCtxPtr` idiom
   ## above. Defined after `WalkCtx` (needs the cast).
 
+proc programGlobal(name: string): Option[IRGlobal]  ## RFC-0005 S8as fwd decl
+proc entryValueOf(name: string): SymVal  ## RFC-0005 S8as fwd decl
+
+proc pendingEnvWriteIx(name: string): int =
+  ## RFC-0005 S8as. The index of the latest pending closure write of `name`
+  ## (`closureEnvWrites`), or -1.
+  result = -1
+  for i in countdown(closureEnvWrites.high, 0):
+    if closureEnvWrites[i][0] == name: return i
 proc unwrittenResultZero(): Option[SymVal]
   ## RFC-0005 S8n fwd-decl. The value of a callee's `result` read before
   ## anything wrote it: the innermost call frame's return type's zero value
@@ -2028,6 +2380,13 @@ var currentVariantHeaps* {.threadvar.}: Table[string, Z3AnyAst]
   ## WHICH heaps the winning path materialised; it reads their input
   ## constants (`heap_<key>`), not these end-of-path terms.
 
+var currentWinningGlobals {.threadvar.}: seq[string]
+  ## RFC-0005 S8bn (item 2). The globals bound in the WINNING path's env,
+  ## snapshotted beside `currentVariantHeaps`: the witness is extracted from
+  ## the initial env, which holds none, and `buildHeapSnapshot` matches a
+  ## pointer's `sel` against each (`ptrTargets`' variable candidates).
+  ## Reset at `runSymexImpl` entry.
+
 type
   HeapKeyShape = object
     ## RFC-0005 S8h. What `mkHeapArrayVar` knew about a heap it introduced.
@@ -2035,6 +2394,29 @@ type
                        ## or a whole scalar pointee's
     variantTy: IRType  ## the variant object, for its `__@disc` and
                        ## `__@<ord>__<field>` heaps; nil otherwise
+
+var intHeapIsInt {.threadvar.}: bool
+  ## RFC-0005 S8as. A heap of plain `int` (`intHeapCell`) is Int-sorted:
+  ## the run's `integerSemantics` is not `isExact` and every signed 64-bit
+  ## int parameter is bound to an Int. Cleared by `resetSymexRunState`, set
+  ## by `runSymexImpl` once the parameters are bound.
+
+func intHeapCell(ty: IRType): bool =
+  ## RFC-0005 S8as. `ty` is Nim's `int` (64-bit, signed, no declared range)
+  ## and the run's ints are Int-sorted (`intHeapIsInt`): its heap -- a
+  ## `ref int` / `ptr int` cell, an `int` field -- is `(Array Ref Int)`.
+  ## It was `(Array Ref (_ BitVec 64))`, and under `isOptimised` a param
+  ## with an asserted range is an Int (`promoteSound`), so storing it went
+  ## through `int2bv` and reading it back through `bv2int`: with `v` in
+  ## `(-1000, 1000)`, `let r = new int; r[] = v; r[] += 1; r[] != v + 1`
+  ## took Z3 55 s for its UNSAT. A width-stamped Int (`ziWidth = 64`) keeps
+  ## every overflow obligation (`overflowCondInt`), so the values and the
+  ## defects are the bit-vector's. A BV value is stored through `bv2int`
+  ## (`heapStoreValue`). Otherwise the heap stays a bit-vector: a BV value
+  ## stored through `bv2int` and read back into a BV comparison is the F5
+  ## `int2bv(bv2int(v))` shape, which is the slow direction the other way.
+  {.cast(noSideEffect).}:
+    intHeapIsInt and ty != nil and ty.kind == itInt and ty.signed
 
 var heapKeyShapes {.threadvar.}: Table[string, HeapKeyShape]
   ## RFC-0005 S8h. Heap key -> `HeapKeyShape`, written by `mkHeapArrayVar`.
@@ -2225,6 +2607,10 @@ type ClosureBody* = object  ## Phase 15 C2b. The descent payload for a lambda
   params*:   seq[IRParam]
   captures*: seq[string]
   retTy*:    IRType
+  aliasPairs*:  seq[tuple[keep, gone: int]]   ## RFC-0005 S8bh (`lambdaAliasPairs`)
+  aliasBodies*: seq[IRStmt]                   ## RFC-0005 S8bh
+  ptrLocal*:    seq[bool]                     ## RFC-0005 S8bh (`lambdaPtrLocal`)
+  outer*:       seq[string]                   ## RFC-0005 S8bh (`lambdaOuter`)
 
 func closureRetStructured(t: IRType): bool =
   ## RFC-0005 S8n. A closure return type whose per-occurrence result is a
@@ -2249,6 +2635,7 @@ proc syncClosureBodyEntry*(siteKey: tuple[siteHash: int64, declOrder: int],
   ## CR-9 Stage 4 fwd-decl. If `currentWalkCtxPtr != nil`, copies `cb`
   ## into `WalkCtx.statics.closureBodies[siteKey]`. No-op when no active
   ## walk (probe paths). Defined after `WalkCtx` type.
+
 
 var currentClosureCallAxioms* {.threadvar.}: seq[Z3Bool]
   ## Phase 15 C2b (ADR-0009 D6). The GROUND per-call-site closure axioms
@@ -2295,6 +2682,13 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal
 proc lowerSeqLit(env: Env, e: IRExpr): SymVal
   ## Phase 15 C4 fwd-decl. Concrete seq-literal `@[..]` → concrete-length svSeq.
 
+proc lowerSeqNew(env: Env, e: IRExpr): SymVal
+  ## RFC-0005 S8bc / S8bi fwd-decl. `newSeq[T](n)` and kin (`iekSeqNew`).
+
+proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst]
+  ## RFC-0005 batch 6 fwd-decl. The data arrays of a zeroed `newSeq` of
+  ## `elemTy` (`lowerSeqNew`), which S8bl's `setLen` grows into.
+
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst
   ## N14 fwd-decl (RFC-chapulin-hardening bucket-2). Defined AFTER `walk`
@@ -2303,6 +2697,34 @@ proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
   ## ASSIGNMENT `xs[i] = v`, the same store this proc already backs for
   ## `lowerSeqLit`'s per-element construction and the HOF `.map`/`.filter`
   ## rebuild.
+
+proc seqElemFits(val: SymVal, elemTy: IRType): bool =
+  ## RFC-0005 S8ar. True iff `storeSeqElem` can store `val` into a seq of
+  ## `elemTy` as it is: the element's own kind, or (for an integer element)
+  ## an Int-promoted value, which `storeSeqElem` converts at the width.
+  ## RFC-0005 batch 4: on the element's cell type (`seqCellTy`, S8ba) and
+  ## the value's base, as `storeSeqElem` / `seqStoreArrs` store them.
+  let elemTy = seqCellTy(elemTy)
+  var val = val
+  while val.kind == svDistinct: val = val.distinctBaseSym[]
+  case elemTy.kind
+  of itInt:
+    val.kind == svInt or
+      (case elemTy.width
+       of 8: val.kind == svBV8
+       of 16: val.kind == svBV16
+       of 32: val.kind == svBV32
+       else: val.kind == svBV64)
+  of itBool: val.kind == svBool
+  of itFloat32: val.kind == svFloat32
+  of itFloat64: val.kind == svFloat64
+  of itString: val.kind == svString
+  of itRef: val.kind == svRef
+  of itPtr: val.kind == svPtr
+  else:
+    # RFC-0005 S8bc: a tree element's store checks the value itself
+    # (`seqStoreArrs`, which declines a value that does not fit).
+    isTreeSeqElemTy(elemTy)
 
 proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal
   ## N14 fwd-decl. Defined AFTER `walk`. `lower`'s `iekSeqDel` arm (defined
@@ -2348,6 +2770,90 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
   ## Every OTHER caller passes `@[]` (identity — the pre-existing default
   ## allocation, unchanged).
 
+# ---- RFC-0005 S8bc (item 3): a seq of a tree element, held leaf-split ------
+#
+# A seq whose element is a by-value tuple, object, array, case object or
+# distinct of one (`isTreeSeqElemTy`) holds one `Int -> leaf` data array per
+# leaf of the element (`heapLeafSuffixes(elemTy)`, the heap's own cell
+# layout): leaf 0 in `seqDataRaw`, the rest in `seqDataMore`. A read selects
+# every array at the index and rebuilds the element from a prototype
+# (`seqElemAt`); a store writes each leaf of the value into its array
+# (`seqStoreArrs`). Every operation that builds a seq from another (slice,
+# insert, a merge, ...) does to each array what it did to the one. Before
+# S8bc a seq of such an element was the inert placeholder in every position
+# (`seNestedSeqUnsupported`), and any read of it declined.
+
+proc seqArrs(sv: SymVal): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. Every data array of a seq, in leaf order: `seqDataRaw`,
+  ## then `seqDataMore` (empty for a scalar element).
+  result = @[sv.seqDataRaw] # [placeholder-audited]
+  for m in sv.seqDataMore: result.add m
+
+proc withSeqArrsOf(sv: SymVal; arrs: seq[Z3AnyAst]): SymVal =
+  ## RFC-0005 S8bc. `sv` with its data arrays replaced (`seqArrs`' order).
+  result = sv
+  result.seqDataRaw = arrs[0] # [placeholder-audited]
+  result.seqDataMore = arrs[1 .. ^1]
+
+proc mkSeqSV(len: Z3Int; arrs: seq[Z3AnyAst]; elemTy: IRType): SymVal =
+  ## RFC-0005 S8bc. A backed seq value of `elemTy` from its length and its
+  ## data arrays (`seqArrs`' order).
+  ## RFC-0005 batch 4: the value's element type is the CELL type
+  ## (`seqCellTy`, S8ba): a `distinct` element is held as its base, and a
+  ## read at the distinct static type re-boxes.
+  SymVal(kind: svSeq, seqLen: len, seqDataRaw: arrs[0],
+         seqDataMore: arrs[1 .. ^1], seqElemTy: seqCellTy(elemTy))
+
+proc seqElemProto(elemTy: IRType): SymVal =
+  ## RFC-0005 S8bc. A value of a tree element type: the shape (kinds, element
+  ## types, a placeholder seq's flag) a read rebuilds from the selects of the
+  ## data arrays (`svWithLeaves`), and the leaf sorts the arrays are built
+  ## at. Its constants and init facts are discarded, as `heapCellSelect`'s
+  ## prototype's are. `allocateSym`, not `defaultZero`: it is total (a case
+  ## object whose zero is no legal value has no `defaultZero`).
+  var scratch: seq[Z3Bool]
+  allocateSym(elemTy, "__seqElemProto", scratch)
+
+proc allocateSeqArrs(elemTy: IRType; name: string): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. The free data arrays of a seq of `elemTy`: one
+  ## (`allocateSeqDataRaw`) for a scalar element; one per leaf for a tree
+  ## element, `Int -> <the leaf's sort>`, leaf 0 named `name` and leaf `i`
+  ## `name.@d<i>`. The sorts are runtime (a seq leaf is itself an array), so
+  ## the arrays are built raw, as `tabTreeDataVars`' are; the prototype and
+  ## `idxHold` keep the sorts alive across `Z3_mk_array_sort`.
+  ## RFC-0005 batch 4: built at the element's cell type (`seqCellTy`).
+  let elemTy = seqCellTy(elemTy)
+  if not isTreeSeqElemTy(elemTy): return @[allocateSeqDataRaw(elemTy, name)]
+  let ctx = requireCurrentContext()
+  let proto = seqElemProto(elemTy)
+  let idxHold = mkZ3IntLit(0)
+  let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
+  let leaves = svLeafTerms(proto, elemTy)
+  for i, leaf in leaves:
+    let valSort = ctx.checkErr Z3_get_sort(ctx.raw, leaf.raw)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, idxSort, valSort)
+    let nm = if i == 0: name else: name & ".@d" & $i
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, nm.cstring)
+    result.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc constSeqArrs(elemTy: IRType; elem: SymVal): seq[Z3AnyAst] =
+  ## RFC-0005 S8bc. Data arrays holding `elem` at every index (one constant
+  ## array per leaf): `newSeq[T](n)`'s zero elements.
+  ## RFC-0005 batch 4: at the element's cell type (`seqCellTy`), a
+  ## `distinct` zero stored as its base.
+  let elemTy = seqCellTy(elemTy)
+  var elem = elem
+  while elem.kind == svDistinct: elem = elem.distinctBaseSym[]
+  let ctx = requireCurrentContext()
+  let idxHold = mkZ3IntLit(0)
+  let idxSort = ctx.checkErr Z3_get_sort(ctx.raw, idxHold.raw)
+  let leaves =
+    if isTreeSeqElemTy(elemTy): svLeafTerms(elem, elemTy)
+    else: @[wrap[Z3AnyAst](ctx, svLeafAsts(elem, elemTy)[0])]
+  for leaf in leaves:
+    result.add wrap[Z3AnyAst](ctx,
+      ctx.checkErr Z3_mk_const_array(ctx.raw, idxSort, leaf.raw))
+
 proc baseIsDecidable(base: IRType): bool =
   ## Phase 15 G4. The bijectivity-axiom fragment: int / BV / bool. Anything
   ## else (FP, string, and — conservatively — composite bases) is skipped.
@@ -2356,6 +2862,17 @@ proc baseIsDecidable(base: IRType): bool =
   of itInt, itBool: true
   of itDistinct: baseIsDecidable(base.distinctBase)
   else: false
+
+proc realBaseKind(base: IRType): IRTypeKind =
+  ## RFC-0005 S8bg. `base`'s kind, walked through every `distinct` wrapper
+  ## to the first non-`itDistinct` kind: for `Km = distinct Meters`,
+  ## `Meters = distinct int` (so `Km`'s own `distinctBase` is `itDistinct`
+  ## itself), this is `itInt`, not `itDistinct` -- the kind the
+  ## `geDistinctBijectivitySkipped` hint names, and the one
+  ## `baseIsDecidable` actually judges.
+  case base.kind
+  of itDistinct: realBaseKind(base.distinctBase)
+  else: base.kind
 
 proc rawConstOf(ctx: Z3Context, sort: RawZ3Sort, name: string): RawZ3Ast =
   ## Fresh named const of a (possibly uninterpreted) sort.
@@ -2398,6 +2915,39 @@ proc rawSortOf(sv: SymVal): RawZ3Sort =
   ## the inject/eject domains/ranges and bind the base-side quantified variable.
   let ctx = requireCurrentContext()
   ctx.checkErr Z3_get_sort(ctx.raw, rawAstOf(sv))
+
+proc heapStepsOf(sv: SymVal): int =
+  ## RFC-0005 S8ar. A ref's or ptr's heap steps from a root (`refSteps`);
+  ## 0 for any other value.
+  case sv.kind
+  of svRef: sv.refSteps
+  of svPtr: sv.ptrSteps
+  else: 0
+
+proc stampHeapSteps(sv: var SymVal; steps: int) =
+  ## RFC-0005 S8ar. Mark every ref a heap read produced (`sv`, or a ref inside
+  ## it) as `steps` heap steps from a root. A seq records `steps` for the
+  ## element refs an index read takes out of it (`seqSteps`).
+  case sv.kind
+  of svRef: sv.refSteps = max(sv.refSteps, steps)
+  of svPtr: sv.ptrSteps = max(sv.ptrSteps, steps)
+  of svSeq: sv.seqSteps = max(sv.seqSteps, steps)
+  of svTuple:
+    for f in sv.fields.mitems: stampHeapSteps(f, steps)
+  of svArray:
+    for f in sv.arrElems.mitems: stampHeapSteps(f, steps)
+  of svVariant:
+    # RFC-0005 S8at: a case object is a cell value; a ref in any field is a
+    # heap step from the cell.
+    for f in sv.vPlainFields.mitems: stampHeapSteps(f, steps)
+    for _, fs in sv.vArmFields.mpairs:
+      for f in fs.mitems: stampHeapSteps(f, steps)
+  of svMultiVariant:
+    for f in sv.mvPlainFields.mitems: stampHeapSteps(f, steps)
+    for ax in sv.mvAxes.mitems:
+      for _, fs in ax.armFields.mpairs:
+        for f in fs.mitems: stampHeapSteps(f, steps)
+  else: discard
 
 proc rawAnyAstOf(sv: SymVal): RawZ3Ast =
   ## The raw ast of ANY base SymVal that may underlie a distinct type — used
@@ -2481,11 +3031,21 @@ proc sortOfTuple*(sv: SymVal): seq[RawZ3Sort] =
   ## contributes one sort via `Z3_get_sort`. Consumed by the C2b application
   ## path (raw `Z3_mk_func_decl` / `Z3_mk_app`, D4). Non-tuple input is treated
   ## as a single leaf (the degenerate one-element env).
+  ## RFC-0005 S8ca: a seq, table or set (a capture, or a parameter of a
+  ## proc value, `paramSorts`) contributes the sort of each of its leaves
+  ## (`svLeafAsts`), as a nested tuple does, and an array its elements'. It had no single-leaf sort, and
+  ## a proc value taking a seq declined (`seUnsupportedCompoundSortLeaf`).
   let ctx = requireCurrentContext()
   case sv.kind
   of svTuple:
     for f in sv.fields:
       for s in sortOfTuple(f): result.add s
+  of svSeq, svTable, svSet:
+    for leaf in svLeafAsts(sv):
+      result.add ctx.checkErr Z3_get_sort(ctx.raw, leaf)
+  of svArray:   # RFC-0005 S8ca: its elements, as a tuple's fields
+    for e in sv.arrElems:
+      for s in sortOfTuple(e): result.add s
   else:
     result.add ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(sv))
 
@@ -2582,31 +3142,57 @@ proc ensureDistinctSort(ty: IRType): DistinctSortEntry =
       # FP / String / composite base → bijectivity SKIPPED (hang risk). Still
       # declare inject/eject so explicit conversions have func-decls, but assert
       # NO quantified axioms. Emit the classified sevHint (Invariant 3).
-      let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
-      var injDom = @[baseSort]
-      let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("inject_" & name).cstring)
-      let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
-      var ejDom = @[sort.raw]
-      let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
-        ("eject_" & name).cstring)
-      let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
-        cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
-      incRefFD(ctx, inject)
-      incRefFD(ctx, eject)
-      let dentry = DistinctSortEntry(sort: sort, inject: inject, eject: eject)
+      #
+      # RFC-0005 S8at: a COMPOSITE base (`distinct seq[int]`, `distinct
+      # (int, bool)`, a distinct object) has no single Z3 sort, so no
+      # inject/eject decl can be declared over it; deriving one recorded
+      # `seUnsupportedCompoundSortLeaf` and declined every such parameter.
+      # Neither decl is ever APPLIED for a non-decidable base (only the
+      # decidable branch's ground eject pin applies `eject`), so a
+      # composite base simply has none: the distinct value is its boxed base
+      # (`distinctBaseSym`), which every read ejects to (`ejectBase`).
+      var dentry = DistinctSortEntry(sort: sort)
+      if baseRep.kind notin {svTable, svSet, svSeq, svArray, svTuple,
+                             svVariant, svMultiVariant}:
+        let baseSort = ctx.checkErr Z3_get_sort(ctx.raw, rawAnyAstOf(baseRep))
+        var injDom = @[baseSort]
+        let injSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+          ("inject_" & name).cstring)
+        let inject = ctx.checkErr Z3_mk_func_decl(ctx.raw, injSym, 1,
+          cast[ptr UncheckedArray[RawZ3Sort]](addr injDom[0]), sort.raw)
+        var ejDom = @[sort.raw]
+        let ejSym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+          ("eject_" & name).cstring)
+        let eject = ctx.checkErr Z3_mk_func_decl(ctx.raw, ejSym, 1,
+          cast[ptr UncheckedArray[RawZ3Sort]](addr ejDom[0]), baseSort)
+        incRefFD(ctx, inject)
+        incRefFD(ctx, eject)
+        dentry.inject = inject
+        dentry.eject = eject
       currentDistinctSorts[name] = dentry
       # CR-9 Stage 4: also populate WalkerStatics when a walk is active.
       syncDistinctSortEntry(name, dentry)
-      let bijHint = SymexErrorInfo(
-        kind: geDistinctBijectivitySkipped, severity: sevHint,
-        msg: "bijectivity axiom skipped for distinct `" & name &
-             "` over non-decidable base " & $ty.distinctBase.kind &
-             " (FP/String): the distinct sort is modeled without the " &
-             "inject/eject round-trip guarantee")
-      distinctBijectivityHints.add bijHint      # threadvar: fallback
-      syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
+      # RFC-0005 S8bg: this branch is also reached for a distinct-of-a-
+      # distinct whose REAL base is decidable (`Km = distinct Meters`,
+      # `Meters = distinct int`): `ty.distinctBase` is itself `itDistinct`,
+      # so `isBijectivityBaseSym(baseRep)` above is false (`baseRep` is a
+      # nested `svDistinct`, not a primitive) even though
+      # `baseIsDecidable` (which recurses) says the chain's true base is
+      # fine. No axiom is asserted either way here (the ground eject pin
+      # above needs a primitive `baseRep`, which a nested distinct is
+      # not -- a precision gap, not fixed by this hint), but the hint
+      # claiming a non-decidable base is wrong for that case and is
+      # skipped; it still fires for a genuinely non-decidable real base
+      # (FP/string) and for a composite one (S8at).
+      if not baseIsDecidable(ty.distinctBase):
+        let bijHint = SymexErrorInfo(
+          kind: geDistinctBijectivitySkipped, severity: sevHint,
+          msg: "bijectivity axiom skipped for distinct `" & name &
+               "` over non-decidable base " & $realBaseKind(ty.distinctBase) &
+               " (FP/String): the distinct sort is modeled without the " &
+               "inject/eject round-trip guarantee")
+        distinctBijectivityHints.add bijHint      # threadvar: fallback
+        syncDistinctBijectivityHint(bijHint)      # CR-9 Stage 5: also WalkCtx
   currentDistinctSorts[name]
 
 proc allocDistinctSym(ty: IRType, baseName: string,
@@ -2855,13 +3441,8 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     if ty.uninterpName.startsWith("__unsupported_witness:"):
       # N40: was `raise (ref SymexClassifiedDegradeError)` -- see
       # `allocDegrade`'s own doc comment for the totality design writeup.
-      allocDegrade(feUnsupportedWitnessType,
-        "unsupported witness shape `" &
-        ty.uninterpName.substr(len("__unsupported_witness:")) &
-        "`; the supported fragment is {seq[int64], seq[float64], " &
-        "seq[float32], seq[ref T], Table[string, int64], " &
-        "HashSet[int64]} plus scalar/tuple/array/object element or " &
-        "value types therein")
+      allocDegrade(feUnsupportedWitnessType, unsupportedWitnessMsg(
+        ty.uninterpName.substr(len("__unsupported_witness:"))))
       return SymVal(kind: svBool, bo: mkBoolVar(baseName & ".unalloc"))
     # RFC-0005 S8z: a proc-valued (`__closure`) slot the walker has no
     # `svClosure` for -- a closure-typed object field, a recursion-cut
@@ -2892,6 +3473,29 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, baseName.cstring)
     let refRaw = ctx.checkErr Z3_mk_const(ctx.raw, sym, refSort)
     let refAny = wrap[Z3AnyAst](ctx, refRaw)
+    if hierChain(pointee).len > 1:
+      # RFC-0005 S8bn (item 9). A non-nil ref of a hierarchy type S (depth
+      # `s`) addresses an object whose dynamic type is S or one of its
+      # descendants: its run-type tags at depths `1..s` are S's own chain
+      # (`inheritTagKey`). They were free, so a parameter of static type
+      # `Mid` aliasing one of static type `Base` could fail `Mid(b)` (a
+      # false `sxSat`, a witness no Nim value realises). The facts are on the
+      # INPUT tag heaps (`heap_<key>`), which an allocation never changes
+      # (it stores into the path's heap); the depths below `s` stay free:
+      # any descendant.
+      let tagTy = tInt(64, signed = true)
+      let nilAst = currentNilConsts[refPointeeTypeId(pointee)]
+      let isNil = wrap[Z3Bool](ctx, checkedEq(ctx, refAny.raw, nilAst.raw))
+      let chain = hierChain(pointee)   ## RFC-0005 S8bn: a case object's too
+      for lvl in 1 ..< chain.len:
+        let key = inheritTagKey(pointee, lvl)
+        let arr = mkHeapArrayVar(ctx, refSort, tagTy, "heap_" & key)
+        # Each raw term is wrapped (ref-counted) before the next Z3 call:
+        # an unwrapped one may be collected under it.
+        let tag = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, refRaw))
+        let code = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_int64(ctx.raw,
+          inheritTagCode(chain[lvl]), sortOfRaw(ctx, tag.raw)))
+        pcOut.add(isNil or wrap[Z3Bool](ctx, checkedEq(ctx, tag.raw, code.raw)))
     if ty.kind == itRef:
       SymVal(kind: svRef, refAst: refAny, refPointee: pointee)
     else:
@@ -3152,15 +3756,16 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # values that overflow `cint` during witness extraction.
       pcOut.add (lenSym >= mkInt(0))
       pcOut.add (lenSym <= mkInt(1024))
-      let dataRaw = allocateSeqDataRaw(ty.seqElemTy, baseName & ".data")
-      SymVal(kind: svSeq, seqLen: lenSym,
-             seqDataRaw: dataRaw, seqElemTy: ty.seqElemTy)
+      # RFC-0005 S8bc: one array per leaf of a tree element; S8ba: of the
+      # element's cell type (`seqCellTy`, normalised by both helpers).
+      mkSeqSV(lenSym, allocateSeqArrs(ty.seqElemTy, baseName & ".data"),
+              ty.seqElemTy)
   of itTable:
     # Allocation cost mirrored in allocCostOf (types.nim) -- update both together.
     # Phase 5 cycle 5 narrow scope: Table[string, int]. Other (K, V)
     # pairs land incrementally — the wrap[Z3Array[K, V]] machinery
     # supports them with a per-pair dispatch.
-    if ty.tabKeyTy.kind != itString:
+    if not isTableKeyTy(ty.tabKeyTy):   # RFC-0005 S8ar: was `!= itString`
       # N40: was `raise newException(ValueError, ...)` -- an UNTAGGED crash
       # (not even a classified carrier) on ORDINARY user syntax
       # (`Table[int, string]` is unrestricted Nim; `unallocatableFieldIssue`
@@ -3203,18 +3808,28 @@ proc allocateSym(ty: IRType, baseName: string, pcOut: var seq[Z3Bool],
       # RFC-0005 S8z: any fixed-width int value type (`isBackedTableTy`),
       # held in the 64-bit cell (`cellOf` / `cellValue`).
       if isBackedTableTy(ty.tabKeyTy, ty.tabValTy):
-        let dataAst = toAnyAst(
-          mkArrayVar[Z3String, Z3BitVec[64]](baseName & ".data"))
-        let presentAst = toAnyAst(
-          mkArrayVar[Z3String, Z3Bool](baseName & ".present"))
+        # RFC-0005 S8ar: the arrays' sorts follow the key and value types
+        # (`tabDataVar`); a narrower key type also bounds the size by its
+        # domain, as a `HashSet`'s element type does.
+        let dataAst = tabDataVar(baseName & ".data", ty.tabKeyTy, ty.tabValTy)
+        # RFC-0005 S8at: a container value's further leaves.
+        let moreAsts =
+          if tabValLeaf(ty.tabValTy) == tvTree:
+            tabTreeDataVars(baseName & ".data", ty.tabKeyTy, ty.tabValTy)[1 .. ^1]
+          else: @[]
+        let presentAst = tabPresentVar(baseName & ".present", ty.tabKeyTy)
         let sizeSym = mkIntVar(baseName & ".len")
         pcOut.add (sizeSym >= mkInt(0))
-        pcOut.add (sizeSym <= mkInt(1024))   ## same ceiling as seqs
+        let ceiling = if ty.tabKeyTy.kind == itString: 1024'i64
+                      else: min(1024'i64, cellDomainSize(ty.tabKeyTy))
+        pcOut.add (sizeSym <= mkInt(ceiling))   ## same ceiling as seqs
         # RFC-0005 S8f: tie `sizeSym` to the present array at every check.
-        registerTableBase(presentAst, sizeSym)
-        SymVal(kind: svTable, tabDataRaw: dataAst,
-               tabPresentRaw: presentAst, tabSize: sizeSym,
-               tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+        registerTableBase(presentAst, sizeSym, ty.tabKeyTy)
+        let tsv = SymVal(kind: svTable, tabDataRaw: dataAst, tabDataMore: moreAsts,
+                         tabPresentRaw: presentAst, tabSize: sizeSym,
+                         tabKeyTy: ty.tabKeyTy, tabValTy: ty.tabValTy)
+        registerTabTreeBase(tsv)   ## RFC-0005 S8at
+        tsv
       else:
         # N40: was `raise (ref SymexUnsupportedTableValTypeError)` -- see
         # `allocDegrade`'s own doc comment for the totality design writeup.
@@ -3384,11 +3999,24 @@ proc tyOf(sv: SymVal): IRType =
 # When no env-resident var is reachable (e.g. `5 + 6`), no prototype
 # exists and the caller defaults to BV[64] signed.
 
+proc bvOfInt(sv: SymVal): Option[SymVal]
+  ## RFC-0005 S8bu fwd decl (`probeProto`); defined below.
+
 proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
   if e == nil: return none(SymVal)
   case e.kind
   of iekVar:
-    if env.hasKey(e.vname): some(env[e.vname]) else: none(SymVal)
+    if not env.hasKey(e.vname): return none(SymVal)
+    # RFC-0005 S8bu: an Int that is the conversion of a bit-vector
+    # (`intOfBV`: an `int` stored in an Int-sorted heap and read back)
+    # offers that bit-vector, so a literal beside it lowers as one and
+    # `reconcileInt` meets the bit-vector unconverted: `v * 2` stays
+    # `bvmul(2, k)`. Lowered at the Int, it was `2 * sbv2int(k)`, which
+    # crossed the bridge again where the result met a bit-vector, and Z3
+    # did not decide `sbv2int(r) == 2 * sbv2int(k) and r != 2 * k` (its
+    # step counter stopped advancing, so `queryRLimit` did not end it).
+    let back = bvOfInt(env[e.vname])
+    if back.isSome: back else: some(env[e.vname])
   of iekBinop:
     let l = probeProto(env, e.lhs)
     if l.isSome: l else: probeProto(env, e.rhs)
@@ -3429,7 +4057,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # surrounding op (comparison, arithmetic) lowers literals at the
     # right representation.
     some(SymVal(kind: svInt, zi: mkInt(0)))
-  of iekSeqSlice:
+  of iekSeqSlice, iekSeqSplice:
     # v67: a slice VALUE is a seq — no scalar prototype to offer.
     none(SymVal)
   of iekStrLit:
@@ -3461,6 +4089,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     some(SymVal(kind: svInt, zi: mkInt(0)))
   of iekIntToStr, iekStrReplaceAll, iekStrReplaceRe, iekStrJoin, iekStrConcat,
      iekStrCaptureRe,   # RFC-0005 S8bb: a capture group, a string
+     iekStrSetAt, iekStrFromChars,   # RFC-0005 S8ca
      iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr:
     # Phase 15 S5/S8/S10a: replace/join/concat/`$int` all produce a
     # Z3String. svString sentinel so `s.replace(...) == "lit"` / `xs.join(sep) ==
@@ -3483,7 +4112,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll, iekStrJoin,
                    iekStrMatch, iekStrFindRe, iekStrReplaceRe, iekStrConcat,
-                   iekStrCaptureRe,
+                   iekStrCaptureRe, iekStrSetAt, iekStrFromChars,
                    iekIntToStr, iekStrToInt,
                    iekStrToLower, iekStrToUpper, iekRadixFmt, iekRuneToStr}:
     # Phase 15: string ops not modeled in this cycle have no proto. lower()
@@ -3491,7 +4120,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # consumed only via `.len`/index — never a direct `==` — so it needs no
     # comparison proto here.)
     none(SymVal)
-  of iekContains:
+  of iekContains, iekTabRemovedSince:   # S8bx: a Bool
     none(SymVal)
   of iekGetCurrentExnMsg:
     # Phase 15 E8: `getCurrentExceptionMsg()` → Z3String. svString sentinel so a
@@ -3594,7 +4223,7 @@ proc probeProto(env: Env, e: IRExpr): Option[SymVal] =
     # RFC-0005 S8u. An empty container: no integer representation.
     none(SymVal)
   of iekSeqNew:
-    # RFC-0005 S8bi. A container (svSeq): no integer representation.
+    # RFC-0005 S8bc, S8bi. A seq: no integer representation.
     none(SymVal)
   of iekBitSet:
     # RFC-0005 S8bq. A set, or a bool / card computed from sets.
@@ -3612,6 +4241,25 @@ var currentMaxSplitParts* {.threadvar.}: int
   ## SymexZ3StringIncompleteError (seZ3StringIncomplete) — the same error
   ## kind used by the general symbolic split path — rather than emitting
   ## potentially thousands of Z3 store calls (compile-time DoS prevention).
+
+var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bj. The definitions `r == rec(s)` of the `replace` values
+  ## lowered by a recursive function (`runtime_strings.regexReplaceRec`),
+  ## each over its own fresh `r`: definitional, asserted in every query
+  ## (`globalRoots`). `checkCapped` first tries a query WITHOUT them (the
+  ## value's facts, `regex_parser.replaceLemmas`, stay): its models are a
+  ## superset of the real ones, so its UNSAT is the query's own; Z3's
+  ## unfolding of the recursive term never reaches the facts' conflict
+  ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
+
+var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
+  ## (`regex_parser.replaceLemmas`): each over one occurrence's own `r`,
+  ## its receiver and `by`, and fresh Ints (the match count, the bytes
+  ## removed), and true of every receiver, so they prune no real model.
+  ## `checkCapped` asserts them where it leaves the definitions out, and
+  ## leaves both out of the steps after it (each `r` replaced by its term).
+  ## S8bj put them in `stripDecompConds`.
 
 var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
@@ -3637,13 +4285,23 @@ var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## (the CR-17 hang shape). Reset at `runSymexImpl` entry.
 
 type IndexSplit* = object
-  ## RFC-0005 S8ag. One `str.indexof(s, c, start)` whose needle `c` is a
-  ## one-character literal, lowered (`iekStrFind`) to the fresh Int `ix`
-  ## and the split `s = pre ++ x ++ c ++ post` (`indexSplitAxioms`).
+  ## RFC-0005 S8ag. One `str.indexof(s, c, start)`, lowered (`iekStrFind`)
+  ## to the fresh Int `ix` and the split `s = pre ++ x ++ c ++ post`
+  ## (`indexSplitAxioms`). S8ag split a one-character literal needle only;
+  ## RFC-0005 S8au splits every needle: a literal of any length, a
+  ## computed (symbolic) one, and `seq.last_indexof(s, c)` (`rfind`,
+  ## `last`: the split `s = pre ++ c ++ post`, `x` and `start` unused).
   ix*: Z3Int
   s*, c*: Z3String
   start*: Z3Int
   pre*, x*, post*: Z3String
+  last*: bool
+    ## RFC-0005 S8au: `ix` stands for `seq.last_indexof(s, c)` (`rfind`),
+    ## not `str.indexof(s, c, start)`.
+  found*, notFound*: Z3Bool
+  built*: bool
+    ## RFC-0005 S8ba: the split's axioms (`indexSplitAxioms`), built once,
+    ## by the first query that reaches the split (`indexSplitRoots`).
 
 var indexSplits* {.threadvar.}: seq[IndexSplit]
   ## RFC-0005 S8ag. Every split lowered in the running walk, in lowering
@@ -3661,21 +4319,119 @@ var indexSplitCounter* {.threadvar.}: int
   ## constants (the `stripSynthCounter` precedent: two occurrences must not
   ## share a constant). Reset at `runSymexImpl` entry.
 
-proc oneCharLiteral*(needle: Z3String): Option[Z3String] =
-  ## RFC-0005 S8ag. `needle` as a one-character string literal when it is
-  ## one: a literal, or a char needle (`needleAsStr`'s
-  ## `str.from_code(bv2nat(#x3a))`) that Z3's rewriter folds to one.
+proc splitNeedle*(needle: Z3String): Z3String =
+  ## RFC-0005 S8au. The needle a split is built over: the literal `needle`
+  ## folds to (a char needle's `str.from_code(bv2nat(#x3a))` is ":"), or
+  ## `needle` itself when it is computed. Folding keeps a literal's
+  ## axioms in the literal forms (`NotIn`) Z3 decides fastest.
   let ctx = needle.ctx
   let f = ctx.checkErr Z3_simplify(ctx.raw, needle.raw)
-  if Z3_is_string(ctx.raw, f) and Z3_get_string_length(ctx.raw, f) == 1:
-    some(wrap[Z3String](ctx, f))
-  else:
-    none(Z3String)
+  if Z3_is_string(ctx.raw, f): wrap[Z3String](ctx, f) else: needle
+
+proc literalLen(c: Z3String): int =
+  ## RFC-0005 S8au. The length of `c` when it is a string literal, else -1.
+  if Z3_is_string(c.ctx.raw, c.raw): int(Z3_get_string_length(c.ctx.raw, c.raw))
+  else: -1
+
+type NotInForm* = enum
+  ## RFC-0005 S8au. How a split states "`c` occurs nowhere in `t`" for a
+  ## literal needle `c`. The two are the same predicate; Z3 costs them
+  ## differently, and the two Z3 versions nelli runs on disagree on which
+  ## is cheaper (`notInFormFor`).
+  nfRegex        ## `t in (allchar & ~c)*` (one character), else
+                 ## `t in ~(all* ++ c ++ all*)`
+  nfNotContains  ## `not str.contains(t, c)`
+
+var notInFormOverride* {.threadvar.}: Option[NotInForm]
+  ## RFC-0005 S8au. Test hook: when set, every literal split takes this
+  ## form instead of `notInFormFor`'s per-version choice, so a suite can
+  ## measure or differential-check either form on either Z3.
+
+proc notInFormFor*(major, minor: int): NotInForm =
+  ## RFC-0005 S8au. The form of "`c` notin `t`" for a literal needle, per
+  ## the linked Z3 (S8ag's finding: the regex is far cheaper on 5.1, and
+  ## required for round-6 B1-3 there; 4.13.4, the symex-mingw leg's Z3,
+  ## pays more for it on the deepest pair-loop hits). Measured in-process
+  ## on N36 and s1c, both Z3 versions (the RFC's S8au note): 5.x keeps the
+  ## regex; 4.x takes `not contains`.
+  if major >= 5: nfRegex else: nfNotContains
+
+var linkedNotInForm {.threadvar.}: Option[NotInForm]
+  ## RFC-0005 S8au: `notInFormFor` of the linked Z3, read once per thread.
+
+proc notInForm*(): NotInForm =
+  ## RFC-0005 S8au. The form a literal split takes in this process.
+  if notInFormOverride.isSome: return notInFormOverride.get
+  if linkedNotInForm.isNone:
+    let v = z3Version()
+    linkedNotInForm = some(notInFormFor(int(v.major), int(v.minor)))
+  linkedNotInForm.get
+
+type NotIn* = object
+  ## RFC-0005 S8au. "`c` occurs nowhere in `t`" for one needle `c`, with
+  ## its regex (a literal `c` under `nfRegex`) built once, up front: the
+  ## order a query's terms are created in moves Z3's cost (`checkCapped`),
+  ## and S8ag's one-character split built its regex before the split's
+  ## other terms. Keeping that order keeps S8ag's measured costs.
+  c: Z3String
+  re: Option[Z3Regex[Z3String]]
+
+proc notInOf*(c: Z3String): NotIn =
+  ## RFC-0005 S8au. `NotIn` for the needle `c`. A literal `c` takes
+  ## `notInForm`'s form: under `nfRegex` a one-character `c` is `t in
+  ## (allchar & ~c)*` (S8ag's form, unchanged) and a longer one `t in
+  ## ~(all* ++ c ++ all*)`, each exactly the strings without `c` as a
+  ## substring; under `nfNotContains`, and for a computed `c` (a regex
+  ## needs a literal), `not str.contains(t, c)`.
+  let ctx = c.ctx
+  let n = literalLen(c)
+  result.c = c
+  if n >= 1 and notInForm() == nfRegex:
+    if n == 1:
+      result.re = some(star(intersect(mkRegexAllChar[Z3String](ctx),
+                                      complement(mkRegex(ctx, c)))))
+    else:
+      let anyS = star(mkRegexAllChar[Z3String](ctx))
+      result.re = some(complement(concat(anyS, mkRegex(ctx, c), anyS)))
+
+proc holds*(ni: NotIn; t: Z3String): Z3Bool =
+  ## RFC-0005 S8au. `ni.c` occurs nowhere in `t` (for a non-empty `ni.c`).
+  if ni.re.isSome: matches(t, ni.re.get) else: not contains(t, ni.c)
+
+proc foldLit(ctx: Z3Context; t: Z3String): Z3String =
+  ## RFC-0005 S8au. `t` simplified when it folds to a literal (a slice of
+  ## a literal needle), else `t`.
+  let f = ctx.checkErr Z3_simplify(ctx.raw, t.raw)
+  if Z3_is_string(ctx.raw, f): wrap[Z3String](ctx, f) else: t
+
+proc matchChars(ctx: Z3Context; s: Z3String; ix: Z3Int; c: Z3String;
+                n: int): Z3Bool =
+  ## RFC-0005 S8au. `s[ix + k] == c[k]` for each `k < n`, as `str.at`
+  ## terms (the form a byte read `s[i + 1]` lowers to), for a literal
+  ## needle of `2 <= n <= maxMatchChars` characters, else `true`. Implied
+  ## by the found arm's `s = pre ++ x ++ c ++ post` (or `pre ++ c ++ post`)
+  ## with `ix = len(pre ++ x)`: a restatement, so exact. Z3 4.13.4 does not
+  ## relate a read past the match's first character to that word equation
+  ## (`s.find("\r\n") = i, i >= 0, s[i + 1] != '\n'` ran out at 20M units
+  ## on it, either `c notin t` form), and decides it with these. A
+  ## one-character needle takes none: S8ag's split is kept term for term.
+  const maxMatchChars = 16
+  if n < 2 or n > maxMatchChars: return mkBool(ctx, true)
+  # Each `c[k]` is read by folding `str.at` of the literal (not
+  # `Z3_get_string`, which spells an escaped byte as its escape text; see
+  # `evalStrBytes`).
+  result = mkBool(ctx, true)
+  for k in 0 ..< n:
+    let at = wrap[Z3String](ctx, ctx.checkErr Z3_mk_seq_at(ctx.raw, s.raw,
+                                                (ix + mkInt(ctx, k)).raw))
+    let ck = foldLit(ctx, wrap[Z3String](ctx, ctx.checkErr Z3_mk_seq_at(
+                                ctx.raw, c.raw, mkInt(ctx, k).raw)))
+    result = result and (at == ck)
 
 proc indexSplitAxioms*(sp: IndexSplit):
     tuple[found, notFound: Z3Bool] =
   ## RFC-0005 S8ag. The two axioms that make `sp.ix` equal to Z3's
-  ## `str.indexof(sp.s, sp.c, sp.start)` for a one-character `sp.c`:
+  ## `str.indexof(sp.s, sp.c, sp.start)`. For a one-character `sp.c`:
   ##   found:    ix = -1, or ix >= 0 and s = pre ++ x ++ c ++ post and
   ##             len(pre) = start and ix = start + len(x) and c notin x
   ##   notFound: ix = -1 implies start < 0, or start > len(s), or c notin
@@ -3688,25 +4444,76 @@ proc indexSplitAxioms*(sp: IndexSplit):
   ## impossible, so `ix = -1`, which `notFound` allows. So every `(s,
   ## start)` has a model, and in every model `ix` is `str.indexof`'s value
   ## (including `start = len(s)`: `s[start ..]` is "", so -1).
+  ##
+  ## RFC-0005 S8au: any needle. For `n = len(c) >= 1` the gap condition
+  ## is `c notin x ++ c[0 ..< n - 1]`: an earlier occurrence starting in
+  ## `x` ends at most `n - 2` past it, inside `x` and the match's first
+  ## `n - 1` characters (for `n = 1`, S8ag's `c notin x`). Conversely the
+  ## first occurrence `r` gives `x = s[start ..< r]`, and `x ++ c[0 ..< n
+  ## - 1] = s[start ..< r + n - 1]` holds no occurrence, since one would
+  ## start before `r`. An empty `c` is found at `start` exactly when `0
+  ## <= start <= len(s)` (SMT-LIB, and Nim's `find`); a computed needle
+  ## takes that arm when its length is 0 and the split otherwise.
+  ##
+  ## `last` (`seq.last_indexof(s, c)`, Nim's `rfind`, which agree, empty
+  ## needle included: `len(s)`):
+  ##   found:    ix = -1, or ix >= 0 and s = pre ++ c ++ post and
+  ##             len(pre) = ix and c notin c[1 ..] ++ post
+  ##   notFound: ix = -1 implies c notin s
+  ## A later occurrence starts past `ix`, inside `s[ix + 1 ..] = c[1 ..]
+  ## ++ post`; the last one `r` gives `pre = s[0 ..< r]`, `post = s[r + n
+  ## ..]`, and `s[r + 1 ..]` holds none.
+  # The terms are created in S8ag's order for its one-character needle
+  # (`NotIn`), and the empty-needle ones only for a needle that may be
+  # empty: Z3's cost follows what the context holds and in what order
+  # (`checkCapped`). Unused or reordered terms moved round-6 B1-1's SAT
+  # hit, an S8ag split query unchanged in text, from 0.37M units to 7.7M
+  # (Z3 5.1).
   let ctx = sp.s.ctx
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   let lenS = len(sp.s)
-  # "c notin t" is stated as `t in (allchar & ~c)*`, which for a
-  # one-character `c` holds exactly when `not contains(t, c)` does. The
-  # choice is measured, not derived: as `not contains`, round-6 B1-3's
-  # `data.len == 37` hit runs out at 20M on Z3 5.1; as the regex it is SAT
-  # in 122k (4.13.4: 549k against 224k). The RFC's S8ag note has the rest.
-  let noC = star(intersect(mkRegexAllChar[Z3String](ctx),
-                           complement(mkRegex(ctx, sp.c))))
-  let found = (sp.ix >= zero) and
+  let n = literalLen(sp.c)
+  let absent = notInOf(sp.c)
+  proc lenC(): Z3Int =
+    if n >= 0: mkInt(ctx, n) else: len(sp.c)
+  var found, notFound: Z3Bool
+  if sp.last:
+    let rest = if n == 1: sp.post
+               else: concat(foldLit(ctx, substr(sp.c, mkInt(ctx, 1),
+                                               lenC() - mkInt(ctx, 1))),
+                            sp.post)
+    found = (sp.ix >= zero) and
+      (sp.s == concat(sp.pre, concat(sp.c, sp.post))) and
+      (len(sp.pre) == sp.ix) and absent.holds(rest) and
+      matchChars(ctx, sp.s, sp.ix, sp.c, n)
+    found = (sp.ix == minusOne) or found
+    notFound = implies(sp.ix == minusOne, absent.holds(sp.s))
+    if n >= 1: return (found: found, notFound: notFound)
+    let emptyIx = sp.ix == lenS
+    if n == 0: return (found: emptyIx, notFound: mkBool(ctx, true))
+    let isEmpty = lenC() == zero
+    return (found: (isEmpty and emptyIx) or ((not isEmpty) and found),
+            notFound: isEmpty or notFound)
+  let gap = if n == 1: sp.x
+            else: concat(sp.x, foldLit(ctx, substr(sp.c, zero,
+                                                   lenC() - mkInt(ctx, 1))))
+  found = (sp.ix >= zero) and
     (sp.s == concat(sp.pre, concat(sp.x, concat(sp.c, sp.post)))) and
     (len(sp.pre) == sp.start) and (sp.ix == sp.start + len(sp.x)) and
-    matches(sp.x, noC)
-  (found: (sp.ix == minusOne) or found,
-   notFound: implies(sp.ix == minusOne,
-     (sp.start < zero) or (sp.start > lenS) or
-     matches(substr(sp.s, sp.start, lenS - sp.start), noC)))
+    absent.holds(gap)
+  if n >= 2: found = found and matchChars(ctx, sp.s, sp.ix, sp.c, n)
+  found = (sp.ix == minusOne) or found
+  notFound = implies(sp.ix == minusOne,
+    (sp.start < zero) or (sp.start > lenS) or
+    absent.holds(substr(sp.s, sp.start, lenS - sp.start)))
+  if n >= 1: return (found: found, notFound: notFound)
+  let emptyIx = sp.ix == ite((zero <= sp.start) and (sp.start <= lenS),
+                             sp.start, minusOne)
+  if n == 0: return (found: emptyIx, notFound: mkBool(ctx, true))
+  let isEmpty = lenC() == zero
+  (found: (isEmpty and emptyIx) or ((not isEmpty) and found),
+   notFound: isEmpty or notFound)
 
 proc indexSplitChain*(a, b: IndexSplit): Z3Bool =
   ## RFC-0005 S8ag. The chain fact between two splits of one haystack: when
@@ -3716,23 +4523,60 @@ proc indexSplitChain*(a, b: IndexSplit): Z3Bool =
   ## `s` of the same length. A scan chain (`readCString`'s next key starts
   ## at `p + 1`) needs it to be found quickly: without it Z3 relates the
   ## two decompositions of `s` only through a word equation.
+  ## RFC-0005 S8au: "just past the match" is `a.ix + len(a.c)` (1 for
+  ## S8ag's one-character needle). A computed needle may be empty, whose
+  ## found arm does not decompose `s`; the fact is then guarded by both
+  ## needles being non-empty, where (F) gives each decomposition.
   let ctx = a.s.ctx
   let zero = mkInt(ctx, 0)
-  implies((a.ix >= zero) and (b.ix >= zero) and
-          (b.start == a.ix + mkInt(ctx, 1)),
+  let na = literalLen(a.c)
+  let lenA = if na >= 0: mkInt(ctx, na) else: len(a.c)
+  var premise = (a.ix >= zero) and (b.ix >= zero) and
+                (b.start == a.ix + lenA)
+  if na < 0: premise = premise and (lenA > zero)
+  if literalLen(b.c) < 0: premise = premise and (len(b.c) > zero)
+  implies(premise,
           (b.pre == concat(a.pre, concat(a.x, a.c))) and
           (a.post == concat(b.x, concat(b.c, b.post))))
 
-proc lowerIndexSplit*(s, c: Z3String; start: Z3Int): Z3Int =
-  ## RFC-0005 S8ag. A fresh Int standing for `str.indexof(s, c, start)`,
-  ## `c` a one-character literal, registered for `indexSplitRoots`.
+proc indexSplitLastLink*(a, b: IndexSplit): Z3Bool =
+  ## RFC-0005 S8au. The link between an `rfind` split `a` (`a.last`) and a
+  ## `find` split `b` of the same haystack and needle: a found `b` is an
+  ## occurrence, so the last one is at or after it (`b.ix >= 0` implies
+  ## `a.ix >= b.ix`; with an empty needle `b.ix` is `b.start <= len(s) =
+  ## a.ix`). Valid, by the two splits' axioms (pinned on random instances
+  ## in `tsymex_rfc0005_s8au_remainder` (4)). Without it Z3 relates the
+  ## two decompositions of `s` only through a word equation: `i =
+  ## s.rfind("ab"); i >= 0 and s.find("ab", i + 1) >= 0` took 10M units
+  ## (485 s wall under load) to refute, and is linear with it.
+  implies(b.ix >= mkInt(a.s.ctx, 0), a.ix >= b.ix)
+
+proc lowerIndexSplit*(s, c: Z3String; start: Z3Int; last = false): Z3Int =
+  ## RFC-0005 S8ag. A fresh Int standing for `str.indexof(s, c, start)`
+  ## (RFC-0005 S8au: or, `last`, for `seq.last_indexof(s, c)`; any needle,
+  ## `splitNeedle`'d by the caller), registered for `indexSplitRoots`.
   let ctx = s.ctx
+  # RFC-0005 S8bl (item 2): a ground haystack and start (a string pinned
+  # by `symexAssume(s == "lit")`, scanned from a ground offset) fold to
+  # their numeral -- Z3's rewriter evaluates `str.indexof` of literals. The
+  # split's word equations over a literal took Z3 up to the whole
+  # `seqQueryRLimit` to refute an infeasible loop exit (B6-1-red, B6-6).
+  # The folded term is the one the split stands for: `seq.last_indexof`
+  # for `last` (`rfind`, which takes no start). Folding `str.indexof` there
+  # turned `s.rfind("")` into `0` for ANY `s` (Z3 rewrites an empty needle
+  # from offset 0 to 0): a false `sxUnsat` on `s.rfind("") == 2` and a
+  # false hit on `s.rfind("") != s.len` (batch 6).
+  let term = if last: lastIndexOf(s, c) else: indexOf(s, c, start)
+  let folded = ctx.checkErr Z3_simplify(ctx.raw, term.raw)
+  if Z3_is_numeral_ast(ctx.raw, folded):
+    return wrap[Z3Int](ctx, folded)
   inc indexSplitCounter
   let tag = "__s8ag_ix" & $indexSplitCounter
   let sp = IndexSplit(ix: mkIntVar(ctx, tag), s: s, c: c, start: start,
                       pre: mkStringVar(ctx, tag & "_pre"),
                       x: mkStringVar(ctx, tag & "_x"),
-                      post: mkStringVar(ctx, tag & "_post"))
+                      post: mkStringVar(ctx, tag & "_post"),
+                      last: last)
   if indexSplitOf.ctx != ctx:
     indexSplitOf = (ctx: ctx, ids: initTable[int, int]())
   indexSplitOf.ids[astId(ctx, sp.ix.raw)] = indexSplits.len
@@ -3747,12 +4591,22 @@ proc registeredIndexSplit*(ctx: Z3Context; a: RawZ3Ast): int =
 
 proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8ag. The axioms of every split `base` reaches -- its `ix`
-  ## occurs in `base`, or in the haystack or start of a split already
-  ## reached -- and the chain facts (`indexSplitChain`) between reached
-  ## splits of one haystack. A split not reached is left out: its axioms
-  ## mention only its own fresh constants beside terms the reached ones
-  ## fix, and every value of those has an extension satisfying them, so
-  ## leaving them out prunes no model and adds none of the query's.
+  ## occurs in `base`, or in the haystack, needle or start of a split
+  ## already reached -- and the chain facts (`indexSplitChain`) between
+  ## reached splits of one haystack. A split not reached is left out: its
+  ## axioms mention only its own fresh constants beside terms the reached
+  ## ones fix, and every value of those has an extension satisfying them,
+  ## so leaving them out prunes no model and adds none of the query's.
+  ##
+  ## RFC-0005 S8au: the chain facts are between CONSECUTIVE reached
+  ## `str.indexof` splits of one haystack (in lowering order), not every
+  ## ordered pair: `n - 1` facts for `n` splits, where S8ag asserted
+  ## `n (n - 1)`. Each fact is valid (implied by the two splits' axioms),
+  ## so asserting any subset of them is exact; consecutive is the subset a
+  ## scan chain needs. A query holds the splits of one path (the ones its
+  ## own terms reach), lowered in program order, and a chained scan's
+  ## next split starts at its predecessor's match: the one lowered just
+  ## before it on that haystack.
   if indexSplitOf.ctx != ctx or indexSplits.len == 0: return
   var reached: seq[int]
   var isReached: HashSet[int]
@@ -3773,24 +4627,56 @@ proc indexSplitRoots*(ctx: Z3Context; base: openArray[Z3Bool]): seq[Z3Bool] =
       let app = Z3_to_app(ctx.raw, t)
       for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
         stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
-    # A reached split's haystack and start may hold further splits.
+    # A reached split's haystack, needle and start may hold further
+    # splits (RFC-0005 S8au: a computed needle may be another find's
+    # slice).
     var grew = false
     for k in reached:
-      for t in [indexSplits[k].s.raw, indexSplits[k].start.raw]:
+      for t in [indexSplits[k].s.raw, indexSplits[k].c.raw,
+                indexSplits[k].start.raw]:
         if astId(ctx, t) notin seen:
           stack.add t
           grew = true
     if not grew: break
   reached.sort()
+  # RFC-0005 S8ba: the order a split's terms reach the context is fixed
+  # here, once. The first query that reaches a split builds its axioms,
+  # every newly reached split in lowering order and each in
+  # `indexSplitAxioms`' fixed term order, before any chain or link fact;
+  # later queries reuse them (`built`) and create none of its terms again.
+  # Built eagerly at lowering instead, the axioms of splits no query
+  # reaches sit in the context too, and Z3's cost follows what the context
+  # holds (`checkCapped`): measured on Z3 5.1, that cost 4.6x the target
+  # units on `r6_n36_raise_degrade`, 5.3x on `s1c_verdict` and 11x on
+  # `s8au_remainder`, and turned one more S8ag (5) hit into a slow SAT.
   for k in reached:
-    let ax = indexSplitAxioms(indexSplits[k])
-    result.add ax.found
-    result.add ax.notFound
-  for i in reached:
-    for j in reached:
-      if i != j and astId(ctx, indexSplits[i].s.raw) ==
-                    astId(ctx, indexSplits[j].s.raw):
-        result.add indexSplitChain(indexSplits[i], indexSplits[j])
+    if not indexSplits[k].built:
+      let ax = indexSplitAxioms(indexSplits[k])
+      indexSplits[k].found = ax.found
+      indexSplits[k].notFound = ax.notFound
+      indexSplits[k].built = true
+    result.add indexSplits[k].found
+    result.add indexSplits[k].notFound
+  var lastOn: Table[int, int]   ## haystack AST id -> latest reached split
+  for k in reached:
+    if indexSplits[k].last: continue
+    let h = astId(ctx, indexSplits[k].s.raw)
+    let prev = lastOn.getOrDefault(h, -1)
+    if prev >= 0:
+      result.add indexSplitChain(indexSplits[prev], indexSplits[k])
+    lastOn[h] = k
+  # RFC-0005 S8au: each reached `rfind` split with each reached `find`
+  # split of the same haystack and needle (`indexSplitLastLink`; one fact
+  # per such pair, and a query rarely holds more than one or two rfinds).
+  for a in reached:
+    if not indexSplits[a].last: continue
+    let h = astId(ctx, indexSplits[a].s.raw)
+    let n = astId(ctx, indexSplits[a].c.raw)
+    for b in reached:
+      if indexSplits[b].last: continue
+      if astId(ctx, indexSplits[b].s.raw) == h and
+         astId(ctx, indexSplits[b].c.raw) == n:
+        result.add indexSplitLastLink(indexSplits[a], indexSplits[b])
 
 var sliceViewCounter* {.threadvar.}: int
   ## v67 (dev item 1). Per-run unique-name counter for `iekSeqSlice`'s
@@ -3983,6 +4869,201 @@ proc reboxDistinct(distinctTy: IRType, base: SymVal): SymVal =
   SymVal(kind: svDistinct, distinctAst: dAny, distinctName: distinctName,
          distinctBaseSym: boxed)
 
+proc reboxSeqCell(elemTy: IRType, cell: SymVal): SymVal =
+  ## RFC-0005 S8ba. A seq element read at static type `elemTy`: a `distinct`
+  ## element's cell holds its base (`seqCellTy`), re-boxed here as a fresh
+  ## `svDistinct` over it (each level of a nested chain). Any other type
+  ## (or a nil type from a pre-S8ba IR) is the cell itself.
+  if elemTy == nil or elemTy.kind != itDistinct: return cell
+  reboxDistinct(elemTy, reboxSeqCell(elemTy.distinctBase, cell))
+proc svPartsOf(sv: SymVal; ty: IRType): seq[SymVal]
+proc svWithParts(proto: SymVal; ty: IRType; parts: seq[SymVal]): SymVal
+  ## RFC-0005 S8bc fwd-decls (defined in runtime_heap.nim, included below).
+
+func hasDepthBound(ty: IRType): bool =
+  ## RFC-0005 S8bc. `ty` holds, at some depth, the placeholder seq at a
+  ## recursive value object's depth bound (`seRecursiveValueDepth`).
+  if ty == nil: return false
+  case ty.kind
+  of itSeq:
+    (ty.seqUnsupportedFieldReason.len > 0 and
+     ty.seqUnsupportedFieldKind == seRecursiveValueDepth) or
+      hasDepthBound(ty.seqElemTy)
+  of itTuple:
+    for f in ty.fields:
+      if hasDepthBound(f): return true
+    false
+  of itArray: hasDepthBound(ty.elemTy)
+  of itDistinct: hasDepthBound(ty.distinctBase)
+  of itTable: hasDepthBound(ty.tabValTy)
+  of itVariant, itMultiVariant:
+    for part in heapParts(ty):
+      if hasDepthBound(part.ty): return true
+    false
+  else: false
+
+var seqConformCounter {.threadvar.}: int
+  ## RFC-0005 S8bc. Names the bound variable of each `conformSV` lambda.
+
+proc lambdaOver(ctx: Z3Context; iVar: Z3Int; body: Z3AnyAst): Z3AnyAst =
+  ## RFC-0005 S8bc. `lambda iVar. body`, as `iekSeqSlice` builds its view
+  ## (beta-reduced by Z3 at every select; no quantifier). Wrapped at once.
+  var iApp = ctx.checkErr Z3_to_app(ctx.raw, iVar.raw)
+  wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw, 1'u32,
+    cast[ptr UncheckedArray[RawZ3App]](addr iApp), body.raw))
+
+proc variantShapeOk(sv: SymVal; ty: IRType): bool =
+  ## RFC-0005 S8bc. `sv` has every slot of case object `ty` (the precheck of
+  ## `svFitsHeapTy`'s variant arms, without the parts' own fit).
+  if ty.kind == itVariant:
+    if sv.kind != svVariant or sv.vDisc == nil or
+       sv.vPlainFields.len != ty.vPlainFieldTypes.len:
+      return false
+    for arm in ty.vArms:
+      if not sv.vArmFields.hasKey(arm.tagOrdinal) or
+         sv.vArmFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+        return false
+    return true
+  if sv.kind != svMultiVariant or sv.mvAxes.len != ty.mvAxes.len or
+     sv.mvPlainFields.len != ty.mvPlainFieldTypes.len:
+    return false
+  for xi, ax in ty.mvAxes:
+    if sv.mvAxes[xi].disc == nil: return false
+    for arm in ax.arms:
+      if not sv.mvAxes[xi].armFields.hasKey(arm.tagOrdinal) or
+         sv.mvAxes[xi].armFields[arm.tagOrdinal].len != arm.fieldTypes.len:
+        return false
+  true
+
+proc conformSV(sv: SymVal; ty: IRType): Option[SymVal] =
+  ## RFC-0005 S8bc. `sv` in the layout of a slot of type `ty`, or none.
+  ##
+  ## A recursive value object is unrolled to a bounded depth (`typebridge`'s
+  ## `maxRecursiveValueDepth`), so one Nim type has an IR type per depth: a
+  ## value built in the body has the outermost depth's layout, and a slot one
+  ## level down a shallower one (`root.kids.add(leaf)`: `leaf.kids` holds the
+  ## next depth's elements, the slot's `kids` the one after). The conversion
+  ## TRUNCATES: a part the slot holds as the depth-bound placeholder becomes
+  ## that placeholder (keeping the length), every other leaf is kept. That is
+  ## sound, since every read of a placeholder declines. A seq of tree
+  ## elements converts element-wise under a lambda (no quantifier). The
+  ## reverse -- a shallower value into a deeper slot, which needs leaves the
+  ## value never had -- is none, and the caller declines
+  ## (`seRecursiveValueDepth`). Any other value is returned as it is (a
+  ## scalar's width is the store's own reconciliation).
+  if ty == nil: return some(sv)
+  case ty.kind
+  of itTuple:
+    if sv.kind != svTuple or sv.fields.len != ty.fields.len: return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var r = sv
+    for i, f in ty.fields:
+      let c = conformSV(sv.fields[i], f)
+      if c.isNone: return none(SymVal)
+      r.fields[i] = c.get
+    some(r)
+  of itArray:
+    if sv.kind != svArray or sv.arrElems.len != ty.size: return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var r = sv
+    for i in 0 ..< r.arrElems.len:
+      let c = conformSV(sv.arrElems[i], ty.elemTy)
+      if c.isNone: return none(SymVal)
+      r.arrElems[i] = c.get
+    some(r)
+  of itVariant, itMultiVariant:
+    if not variantShapeOk(sv, ty): return none(SymVal)
+    if not hasDepthBound(ty): return some(sv)
+    var parts: seq[SymVal]
+    let ps = svPartsOf(sv, ty)
+    for i, part in heapParts(ty):
+      let c = conformSV(ps[i], part.ty)
+      if c.isNone: return none(SymVal)
+      parts.add c.get
+    some(svWithParts(sv, ty, parts))
+  of itDistinct:
+    if not hasDepthBound(ty): return some(sv)
+    let c = conformSV(ejectBase(sv), ty.distinctBase)
+    if c.isNone: return none(SymVal)
+    some(reboxDistinct(ty, c.get))
+  of itSeq:
+    if sv.kind != svSeq: return none(SymVal)
+    if not seqBackedTy(ty):
+      if sv.isUnsupportedFieldPlaceholder: return some(sv) # [placeholder-audited]
+      # Truncated to the slot's placeholder; the length is kept.
+      var scratch: seq[Z3Bool]
+      var r = allocateSym(ty, freshDegradeName("__seqConformTrunc"), scratch)
+      r.seqLen = sv.seqLen # [placeholder-audited]
+      return some(r)
+    if sv.isUnsupportedFieldPlaceholder: return none(SymVal) # [placeholder-audited]
+    # RFC-0005 batch 4: a seq value's element type is its cell type
+    # (`seqCellTy`, S8ba), so the slot's is compared and conformed as one.
+    let cellTy = seqCellTy(ty.seqElemTy)
+    if not isTreeSeqElemTy(cellTy) or sv.seqElemTy == cellTy:
+      return some(sv)
+    if not isTreeSeqElemTy(sv.seqElemTy): return none(SymVal)
+    let ctx = requireCurrentContext()
+    inc seqConformCounter
+    let iVar = mkIntVar("__seqconform_i" & $seqConformCounter)
+    let c = conformSV(seqElemAt(sv, iVar), cellTy)
+    if c.isNone or not svFitsHeapTy(c.get, cellTy): return none(SymVal)
+    var arrs: seq[Z3AnyAst]
+    for leaf in svLeafTerms(c.get, cellTy):
+      arrs.add lambdaOver(ctx, iVar, leaf)
+    var r = mkSeqSV(sv.seqLen, arrs, cellTy) # [placeholder-audited]
+    r.seqSteps = sv.seqSteps
+    some(r)
+  else: some(sv)
+
+proc seqStoreArrs(seqSV: SymVal; idx: Z3Int; val: SymVal): Option[seq[Z3AnyAst]] =
+  ## RFC-0005 S8bc. The data arrays of `seqSV` with `val` stored at `idx`:
+  ## `storeSeqElem` for a scalar element (its callers check
+  ## `seqElemFits` first); for a tree element each leaf of `val`, conformed
+  ## to the element type (`conformSV`), into its own array. none when the
+  ## value does not fit -- a value of another depth's layout, or of a shape
+  ## some upstream degrade produced -- and the caller declines
+  ## (`seqStoreDecline`). Every leaf's sort is checked against its array's
+  ## range first, so no ill-sorted store is ever built.
+  let elemTy = seqSV.seqElemTy
+  if not isTreeSeqElemTy(elemTy):
+    return some(@[storeSeqElem(seqSV.seqDataRaw, elemTy, idx, val)]) # [placeholder-audited]
+  # RFC-0005 batch 4: a `distinct` value is stored as its base (the seq's
+  # element type is the cell type, `seqCellTy`).
+  let c = conformSV(ejectBase(val), elemTy)
+  if c.isNone or not svFitsHeapTy(c.get, elemTy): return none(seq[Z3AnyAst])
+  let ctx = requireCurrentContext()
+  let arrs = seqArrs(seqSV)
+  let leaves = svLeafTerms(c.get, elemTy)
+  if leaves.len != arrs.len: return none(seq[Z3AnyAst])
+  for i in 0 ..< arrs.len:
+    let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, arrs[i].raw)
+    if ctx.checkErr(Z3_get_array_sort_range(ctx.raw, arrSort)) !=
+       ctx.checkErr(Z3_get_sort(ctx.raw, leaves[i].raw)):
+      return none(seq[Z3AnyAst])
+  var outArrs: seq[Z3AnyAst]
+  for i in 0 ..< arrs.len:
+    outArrs.add wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, arrs[i].raw, idx.raw, leaves[i].raw))
+  some(outArrs)
+
+proc seqStoreDecline(op: string; elemTy: IRType; val: SymVal): SymVal =
+  ## RFC-0005 S8bc. The in-band decline of a tree element store that does not
+  ## fit (`seqStoreArrs` none): `seRecursiveValueDepth` when the element type
+  ## holds a depth bound (a value of another depth's layout), else
+  ## `feUnsupportedOp`. Returns a fresh placeholder seq of the declined
+  ## kind, so every later read of it declines too.
+  let kind = if hasDepthBound(elemTy): seRecursiveValueDepth else: feUnsupportedOp
+  let msg = op & ": a " & plainEnglishSymValKind(val.kind) &
+    " that does not fit an element of the seq (" & $elemTy & ")" &
+    (if kind == seRecursiveValueDepth:
+       " -- a recursive value object is unrolled to a bounded depth, and " &
+       "this value reaches past it (seRecursiveValueDepth)"
+     else: " (feUnsupportedOp)")
+  lowerDegrade(kind, msg)
+  var fresh: seq[Z3Bool]
+  allocateSym(tUnsupportedFieldSeq(elemTy, msg, kind = kind),
+              freshDegradeName("__seqStoreDecline"), fresh)
+
 proc bvTermToZ3Int*[W: static int](bv: Z3BitVec[W], signed: bool): Z3Int =
   ## `bv` as a Z3 Int, read as signed or unsigned. RFC-0005 S8o: a NUMERAL
   ## is folded here, to the Int numeral of its Nim value. Z3 builds a signed
@@ -4022,6 +5103,11 @@ proc toZ3Int(sv: SymVal): Z3Int =
   case sv.kind
   of svInt: sv.zi
   of svBV8, svBV16, svBV32, svBV64: bvToZ3Int(sv)
+  of svDistinct:
+    # RFC-0005 S8bc (item 2): a `distinct` int used at its base (a borrowed
+    # `$`/`abs` lowered as the base routine on the unwrapped argument). The
+    # ejected base is the value Nim's `T(d)` gives (`ejectBase`).
+    toZ3Int(ejectBase(sv))
   else:
     raise newException(ValueError,  # [raise-audited: category-c: int-family-only reachability (every call site pre-guards to svInt/BV kinds)]
       "toZ3Int: not an int-typed SymVal — got " & $sv.kind)
@@ -4070,17 +5156,51 @@ proc containerRecvDeclined(recv: SymVal; want: SVKind; op: string): bool =
   ## A table receiver whose key type is not `string` (`allocateSym`'s
   ## declined, inert placeholder) is declined here too, before its key is
   ## lowered against a string prototype (`coerceIntLit` raised on it).
+  ## RFC-0005 S8ar: any unbacked table (`isBackedTableTy`), key or value;
+  ## each op had its own value-type `else` arm.
   if recv.kind == want:
-    if want == svTable and recv.tabKeyTy.kind != itString:
-      lowerDegrade(seUnsupportedTableKeyType,
-        op & ": Table key type not modeled: " & $recv.tabKeyTy &
-        " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
+    if want == svTable and not isBackedTableTy(recv.tabKeyTy, recv.tabValTy):
+      if not isTableKeyTy(recv.tabKeyTy):
+        lowerDegrade(seUnsupportedTableKeyType,
+          op & ": " & tableKeyDeclineMsg(recv.tabKeyTy))
+      else:
+        lowerDegrade(seUnsupportedTableValType,
+          op & ": " & tableValDeclineMsg(recv.tabValTy))
       return true
     return false
   lowerDegrade(feUnsupportedOp,
     op & ": receiver lowered to " & plainEnglishSymValKind(recv.kind) &
     ", not a " & plainEnglishSymValKind(want) & " (feUnsupportedOp)")
   true
+
+var intOfBV {.threadvar.}: Table[uint, tuple[zi: Z3Int, bv: SymVal]]
+  ## RFC-0005 S8ax. Each Int a bit-vector was converted to at a sort
+  ## boundary (`toSvIntPreserving`), keyed by the Int term's address, with
+  ## the bit-vector it came from. The entry holds the term, so the address
+  ## is not reused for another term while it is listed. `reconcileInt` and
+  ## `stampedIntToBV` take the bit-vector back instead of converting the
+  ## Int again: `int2bv(bv2int(v))` and `bv2int(r) == bv2int(v)` are exact
+  ## but cost Z3 minutes, and since S8ax every signed `int` heap is
+  ## Int-sorted (`intHeapCell`), so a bit-vector `int` stored and read back
+  ## crosses the boundary twice. Cleared by `resetSymexRunState`.
+
+proc bvOfInt(sv: SymVal): Option[SymVal] =
+  ## RFC-0005 S8ax. The bit-vector `sv` (an `svInt`) is the conversion of,
+  ## if `intOfBV` lists it and its width and signedness agree.
+  if sv.kind != svInt: return none(SymVal)
+  let k = cast[uint](cast[pointer](sv.zi.raw))
+  if k notin intOfBV: return none(SymVal)
+  let e = intOfBV[k]
+  if cast[pointer](e.zi.raw) != cast[pointer](sv.zi.raw): return none(SymVal)
+  let w = case e.bv.kind
+          of svBV8: 8
+          of svBV16: 16
+          of svBV32: 32
+          else: 64
+  if sv.ziWidth != 0 and (sv.ziWidth != w or
+                          sv.ziSigned != e.bv.signed):
+    return none(SymVal)
+  some(e.bv)
 
 proc stampedIntToBV(sv: SymVal): SymVal =
   ## RFC-0005 S8w: a WIDTH-STAMPED `svInt` (`ziWidth` in 8/16/32/64) is a
@@ -4092,6 +5212,8 @@ proc stampedIntToBV(sv: SymVal): SymVal =
   ## right for the unstamped `.len`/`find` sentinels it was built for and
   ## wrong for a signed param: `(x and -1) < 0` compared unsigned.
   doAssert sv.kind == svInt and sv.ziWidth in [8, 16, 32, 64]
+  let back = bvOfInt(sv)          # RFC-0005 S8ax: a converted bit-vector
+  if back.isSome: return back.get
   let k = case sv.ziWidth
           of 8: svBV8
           of 16: svBV16
@@ -4099,6 +5221,9 @@ proc stampedIntToBV(sv: SymVal): SymVal =
           else: svBV64
   result = svIntToBV(sv, k)
   result.signed = sv.ziSigned
+
+proc truncBV(v: SymVal, tgtWidth: int, tgtSigned: bool): SymVal
+  ## RFC-0005 S8be fwd decl (`lowerConvIntWidth`); defined below.
 
 proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVal =
   ## Round-6 B2: WIDENING-only int-family width conversion. Every fixed-width
@@ -4114,6 +5239,34 @@ proc lowerConvIntWidth(operandSV: SymVal, tgtWidth: int, tgtSigned: bool): SymVa
   ## each (srcWidth, tgtWidth) pair needs its OWN literal call site — the
   ## same reason `toBv64ForFp` (runtime_floats.nim) enumerates per-width
   ## arms instead of computing `extra` as a runtime value.
+  if operandSV.kind == svInt:
+    # RFC-0005 S8ax: a narrow cell of an Int-sorted heap (`intHeapCell`)
+    # reads as a width-stamped Int. Widening keeps its value, so it is
+    # restamped; only a signed source widened to an unsigned target wraps,
+    # and that goes through the bit-vector of the source's width.
+    if operandSV.ziWidth > 0 and operandSV.ziSigned and not tgtSigned:
+      return lowerConvIntWidth(stampedIntToBV(operandSV), tgtWidth, tgtSigned)
+    return SymVal(kind: svInt, zi: operandSV.zi, ziWidth: tgtWidth,
+                  ziSigned: tgtSigned, ziIvl: operandSV.ziIvl)
+  # RFC-0005 S8be. An operand at least as wide as the target is a literal
+  # of the narrow source type: `int(high(int32))`'s `high(int32)` lowers
+  # through `mkIntLit`, which carries no width, to a 64-bit bit-vector
+  # holding 2147483647. The parse widens only from the declared source
+  # type, so the value lies in its window, which the target's holds: the
+  # target-width low bits are the value. Every form faulted here
+  # (`weInternalWalkerFault`, "unsupported operand kind for widening").
+  let opWidth =
+    case operandSV.kind
+    of svBV8: 8
+    of svBV16: 16
+    of svBV32: 32
+    of svBV64: 64
+    else: 0
+  if opWidth >= tgtWidth:
+    if opWidth > tgtWidth: return truncBV(operandSV, tgtWidth, tgtSigned)
+    var same = operandSV
+    same.signed = tgtSigned
+    return same
   let srcSigned = operandSV.signed
   case operandSV.kind
   of svBV8:
@@ -4252,6 +5405,76 @@ proc cellValue(c: Z3BitVec[64]; ty: IRType): SymVal =
     return SymVal(kind: svBool, bo: not (c == mkBitVec[64](0'i64)))
   let whole = SymVal(kind: svBV64, signed: ty.signed, bv64: c)
   if ty.width == 64: whole else: truncBV(whole, ty.width, ty.signed)
+
+proc floatKeyCell(k: SymVal; keyTy: IRType): Option[Z3BitVec[64]] =
+  ## RFC-0005 S8at. The 64-bit cell of a float `Table` key: the IEEE bit
+  ## pattern of the key Nim's table finds it by. `hash(float)` adds `0.0`,
+  ## so `-0.0` and `0.0` hash alike, and `==` makes them one key: both are
+  ## the cell of `+0.0`. A NaN is never `==` to itself, so a NaN key is
+  ## never found (`tabKeyNaN`); its cell is the canonical quiet NaN's, which
+  ## a lookup never consults. A `float32` key's 32 bits are zero-extended.
+  case keyTy.kind
+  of itFloat64:
+    if k.kind != svFloat64: return none(Z3BitVec[64])
+    let canon = ite(isZero(k.fp64), mkFloat64(0.0), k.fp64)
+    some(ite(isNaN(k.fp64), mkBitVec[64](0x7FF8_0000_0000_0000'i64),
+             toIeeeBv(canon)))
+  of itFloat32:
+    if k.kind != svFloat32: return none(Z3BitVec[64])
+    let canon = ite(isZero(k.fp32), mkFloat32(0'f32), k.fp32)
+    let bits = zeroExtend(toIeeeBv(canon), 32)
+    some(ite(isNaN(k.fp32), mkBitVec[64](0x7FC0_0000'i64), bits))
+  else: none(Z3BitVec[64])
+
+proc tabKeyNaN(k: SymVal; keyTy: IRType): Option[Z3Bool] =
+  ## RFC-0005 S8at. For a float key, whether it is a NaN: a NaN key is never
+  ## found, `t[NaN] = v` adds an entry no lookup reaches (the size grows,
+  ## nothing is stored), and `t.del(NaN)` removes nothing. `none` for every
+  ## other key type.
+  case keyTy.kind
+  of itFloat64: (if k.kind == svFloat64: some(isNaN(k.fp64)) else: none(Z3Bool))
+  of itFloat32: (if k.kind == svFloat32: some(isNaN(k.fp32)) else: none(Z3Bool))
+  else: none(Z3Bool)
+
+proc tabKeyTerm(k: SymVal; keyTy: IRType): Option[Z3AnyAst] =
+  ## RFC-0005 S8ar. The term a backed table holds key `k` at: the string
+  ## itself, or its 64-bit cell (`cellOf`); recorded in the run's key terms
+  ## (`ContainerCardRegistry`: a cell key among the set keys, the encoding
+  ## it shares). `none` for a value that is not of the key type.
+  ## RFC-0005 S8at: a float key's cell is `floatKeyCell`'s.
+  if keyTy.kind in {itFloat32, itFloat64}:
+    let fc = floatKeyCell(k, keyTy)
+    if fc.isNone: return none(Z3AnyAst)
+    noteSetKey(fc.get)
+    return some(toAnyAst(fc.get))
+  if keyTy.kind == itString:
+    if k.kind != svString: return none(Z3AnyAst)
+    noteTableKey(k.str)
+    return some(toAnyAst(k.str))
+  let c = cellOf(k, keyTy)
+  if c.isNone: return none(Z3AnyAst)
+  noteSetKey(c.get)
+  some(toAnyAst(c.get))
+
+proc tabValTerms(v: SymVal; valTy: IRType): Option[seq[Z3AnyAst]] =
+  ## RFC-0005 S8ar (`tabValTerm`). The terms a backed table stores value
+  ## `v` as, one per data array (`TabValLeaf`); `none` for a value that is
+  ## not of the value type.
+  ## RFC-0005 S8at: a container value is its leaves (`svLeafAsts`), one per
+  ## data array; one that does not have its type's shape is `none`.
+  case tabValLeaf(valTy)
+  of tvTree:
+    if not svFitsHeapTy(v, valTy): return none(seq[Z3AnyAst])
+    let ctx = requireCurrentContext()
+    var r: seq[Z3AnyAst]
+    for raw in svLeafAsts(v, valTy): r.add wrap[Z3AnyAst](ctx, raw)
+    some(r)
+  of tvStr: (if v.kind == svString: some(@[toAnyAst(v.str)]) else: none(seq[Z3AnyAst]))
+  of tvF32: (if v.kind == svFloat32: some(@[toAnyAst(v.fp32)]) else: none(seq[Z3AnyAst]))
+  of tvF64: (if v.kind == svFloat64: some(@[toAnyAst(v.fp64)]) else: none(seq[Z3AnyAst]))
+  of tvCell:
+    let c = cellOf(v, valTy)
+    if c.isNone: none(seq[Z3AnyAst]) else: some(@[toAnyAst(c.get)])
 
 # ---- RFC-0005 S8bq: Nim's builtin `set[T]` as one bit-vector -----------------
 #
@@ -4561,6 +5784,21 @@ var uninitSeqAliases {.threadvar.}: Table[int, seq[tuple[guard: Z3Bool, data: Z3
   ## branch conditions). `retBindEq` makes the two equal there, so element
   ## `k` of `retSym` is unwritten exactly where it is in the data returned.
 var uninitAliasHeld {.threadvar.}: seq[Z3AnyAst]
+proc probeContext(): Z3Context =
+  ## RFC-0005 S8bp. A fresh Z3 context for a per-thread kind probe's terms
+  ## (`seqCapKinds`, `byteDomainKinds`, `intDivDeclKinds`,
+  ## `heapChainKinds`, `theoryFreeSimple`; batch 7: S8bq's `uninitKinds`,
+  ## S8ax's `storeDeclKind` / `iteDeclKind`, batch 4's `constArrayDeclKind`,
+  ## and S8bu's `int2bvDeclKind` / `eqDeclKind` / `selectDeclKind`). A decl kind is the linked Z3's,
+  ## the same in every context, so it is read where it changes nothing:
+  ## built in the walk's context, a probe's terms (and `theoryFreeSimple`'s
+  ## check) made a thread's first walk search differently from its later
+  ## ones (`tsymex_rfc0005_s8bp_isolation`). Not made the thread's current
+  ## context.
+  let prev = currentContext()
+  result = newContext()
+  setCurrentContext(prev)
+
 var uninitArrKinds {.threadvar.}: tuple[ready: bool, store, ite, select, map: int]
   ## The linked Z3's decl kinds of `store`, `ite` and `select` (probed once
   ## per thread, as `seqCapKinds` does: the wrapper's enum binds only a
@@ -4580,8 +5818,9 @@ proc noteUninitSeqBase(a: Z3AnyAst) =
   uninitSeqBases.add a
   uninitSeqBaseIds.incl astId(a.ctx, a.raw)
 
-proc uninitKinds(ctx: Z3Context): tuple[store, ite, select, map: int] =
+proc uninitKinds(): tuple[store, ite, select, map: int] =
   if not uninitArrKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp (batch 7)
     proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
       ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
     let arr = mkArrayVar[Z3Int, Z3Int](ctx, "__s8bq_kind_probe_arr")
@@ -4653,7 +5892,7 @@ proc uninitVal(sc: var UninitScan; v: RawZ3Ast): Z3Bool =
   if Z3_get_ast_kind(ctx.raw, v) == Z3_APP_AST:
     let app = Z3_to_app(ctx.raw, v)
     if ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app))) ==
-         uninitKinds(ctx).select and
+         uninitKinds().select and
        Z3_get_app_num_args(ctx.raw, app) == 2 and
        sc.mentionsUninitBase(Z3_get_app_arg(ctx.raw, app, 0)):
       let ix = wrap[Z3Int](ctx, Z3_get_app_arg(ctx.raw, app, 1))
@@ -4677,7 +5916,7 @@ proc uninitAt(sc: var UninitScan; arr: RawZ3Ast; k: Z3Int): Z3Bool =
      Z3_get_ast_kind(ctx.raw, arr) == Z3_APP_AST:
     let app = Z3_to_app(ctx.raw, arr)
     let kind = ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, app)))
-    let kinds = uninitKinds(ctx)
+    let kinds = uninitKinds()
     if Z3_get_app_num_args(ctx.raw, app) == 3:
       if kind == kinds.store:
         let j = wrap[Z3Int](ctx, Z3_get_app_arg(ctx.raw, app, 1))
@@ -4926,6 +6165,8 @@ proc lowerConvIntRange(sv: SymVal, e: IRExpr): SymVal =
     # value, so `rangeCondsIfNeeded` is not the applicable helper]
     conds = bvRangeConds(sv, lo, hi, sgn)  # [range-invariant: range-defect-check]
   if conds.len > 0:
+    when defined(symexTestInjectWalkerFault):
+      injectShapeFault("conds")  # RFC-0005 S8ce: a local seq[Z3Bool] held
     var inRange = conds[0]
     for i in 1 ..< conds.len: inRange = inRange and conds[i]
     rangeDefectConds.add(not inRange)              # threadvar fallback
@@ -4966,6 +6207,28 @@ func isClosureTy(t: IRType): bool =
   ## RFC-0005 S8z. The proc-valued type `classifyType` maps to the
   ## `__closure` placeholder.
   t != nil and t.kind == itUninterp and t.uninterpName == "__closure"
+
+func retCarriesClosure(t: IRType): bool =
+  ## RFC-0005 S8be. A return type holding a closure: the closure itself
+  ## (S8z) or a tuple with one in some element. The call hands the
+  ## returned value itself to the caller, per returned path; there is no
+  ## symbol to bind it to (a closure has none).
+  if isClosureTy(t): return true
+  if t != nil and t.kind == itTuple:
+    for f in t.fields:
+      if retCarriesClosure(f): return true
+  false
+
+func closureValueBuilt(v: SymVal; t: IRType): bool =
+  ## RFC-0005 S8be. `v`, a value of the closure-carrying type `t`, holds a
+  ## closure the walker built in every closure slot.
+  if isClosureTy(t): return v.kind == svClosure
+  if t != nil and t.kind == itTuple:
+    if v.kind != svTuple or v.fields.len != t.fields.len: return false
+    for i, f in t.fields:
+      if retCarriesClosure(f) and not closureValueBuilt(v.fields[i], f):
+        return false
+  true
 
 const retBindWiredKinds = {svBool, svInt, svBV8, svBV16, svBV32, svBV64,
                            svFloat32, svFloat64, svString, svTuple, svVariant,
@@ -5099,10 +6362,22 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       # leaves; the elements past the length are never read. Before S8p
       # this was an in-band `feUnsupportedOp` decline (N46): a seq-returning
       # callee, or a closure returning a seq, could not return a value.
+      # RFC-0005 S8bc: every data array of a tree element, pairwise (a
+      # value of another depth's layout is conformed first, `conformSV`).
       let ctx = retSym.seqLen.ctx # [placeholder-audited]
-      (retSym.seqLen == retVal.seqLen) and # [placeholder-audited]
-        wrap[Z3Bool](ctx, checkedEq(ctx, retSym.seqDataRaw.raw, # [placeholder-audited]
-                                    retVal.seqDataRaw.raw)) # [placeholder-audited]
+      let rv = conformSV(retVal, tSeq(retSym.seqElemTy))
+      let ra = seqArrs(retSym)
+      if rv.isNone or seqArrs(rv.get).len != ra.len:
+        degradeAlloc(tBool(), seRecursiveValueDepth,
+          "retBindEq: a seq value of another layout than the result's (" &
+          $retSym.seqElemTy & ") -- seRecursiveValueDepth",
+          "__retBindSeqLayout").bo
+      else:
+        let va = seqArrs(rv.get)
+        var acc = (retSym.seqLen == retVal.seqLen) # [placeholder-audited]
+        for i in 0 ..< ra.len:
+          acc = acc and wrap[Z3Bool](ctx, checkedEq(ctx, ra[i].raw, va[i].raw))
+        acc
   of svTuple:
     ## v69 (sello #2): structural per-field binding for a tuple-returning
     ## callee — the capability the v64 catalog-#6 degrade preserved as
@@ -5217,7 +6492,8 @@ proc retBindEq(retSym, retVal: SymVal): Z3Bool =
       wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabPresentRaw.raw,
                                   retVal.tabPresentRaw.raw)) and
       wrap[Z3Bool](ctx, checkedEq(ctx, retSym.tabDataRaw.raw,
-                                  retVal.tabDataRaw.raw))
+                                  retVal.tabDataRaw.raw)) and
+      tabMoreEq(ctx, retSym, retVal)   ## RFC-0005 S8at
   of svBitSet:
     ## RFC-0005 S8bq: a builtin set binds its bit-vector.
     bsEqZ(retSym.bsRaw, retVal.bsRaw)
@@ -5349,9 +6625,10 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       # Empty seq: len pinned to 0; the data array is allocated
       # so the SymVal shape is well-formed, but never read past
       # len. Mirrors Nim's `default(seq[T]) == @[]`.
-      let dataRaw = allocateSeqDataRaw(t.seqElemTy, baseName & ".data")
-      SymVal(kind: svSeq, seqLen: mkInt(0),
-             seqDataRaw: dataRaw, seqElemTy: t.seqElemTy)
+      # RFC-0005 S8bc: one array per leaf of a tree element; S8ba: of the
+      # element's cell type (`seqCellTy`, normalised by both helpers).
+      mkSeqSV(mkInt(0), allocateSeqArrs(t.seqElemTy, baseName & ".data"),
+              t.seqElemTy)
   of itSet, itTable:
     # RFC-0005 S8u: the empty container, for the shapes `allocateSym` backs
     # (`Table[string, int]`, `HashSet[int]`): no key present (a constant
@@ -5362,11 +6639,7 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
     # `defaultZeroTotal` caller never reaches it).
     if containerZeroBacked(t):
       if t.kind == itTable:
-        let present = mkConstArray[Z3String, Z3Bool](mkBool(false))
-        let data = mkConstArray[Z3String, Z3BitVec[64]](mkBitVec[64](0'i64))
-        return SymVal(kind: svTable, tabDataRaw: toAnyAst(data),
-                      tabPresentRaw: toAnyAst(present), tabSize: mkInt(0),
-                      tabKeyTy: t.tabKeyTy, tabValTy: t.tabValTy)
+        return emptyTable(t.tabKeyTy, t.tabValTy)   # RFC-0005 S8ar
       let members = mkConstArray[Z3BitVec[64], Z3Bool](mkBool(false))
       return SymVal(kind: svSet, setMembersRaw: toAnyAst(members),
                     setSize: mkInt(0), setElemTy: t.setElemTy)
@@ -5449,6 +6722,111 @@ proc defaultZero(t: IRType, baseName: string): SymVal =
       SymVal(kind: svRef, refAst: nilAst, refPointee: pointee)
 
 func defaultZeroTotal(t: IRType): bool
+
+proc presenceRemoved(cur, base: Z3AnyAst): bool =
+  ## RFC-0005 S8bx (item 4). The presence array `cur` is NOT `base` under
+  ## stores of `true` alone (through `ite` merges): some store between them
+  ## writes `false` (a removal), or `cur` is reached otherwise (a fresh
+  ## array, a callee's havoc). Conservative: only `true` stores down to
+  ## `base` on every branch is "no removal".
+  let ctx = cur.ctx
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  # The decl kinds of a store and an `ite`, read off well-sorted probes (as
+  # `seqCapKinds` reads its kinds).
+  let probeArr = mkArrayVar[Z3Bool, Z3Bool](ctx, "__s8bx_kind_probe_arr")
+  let probeC = mkBoolVar(ctx, "__s8bx_kind_probe_c")
+  let probeStore = wrap[Z3AnyAst](ctx, checkedStore(ctx, probeArr.raw,
+    probeC.raw, probeC.raw))
+  let probeIte = wrap[Z3AnyAst](ctx, checkedIte(ctx, probeC.raw,
+    probeArr.raw, probeStore.raw))
+  let storeKind = kindOf(probeStore.raw)
+  let iteKind = kindOf(probeIte.raw)
+  var stack = @[cur.raw]
+  var steps = 0
+  while stack.len > 0:
+    let t = stack.pop()
+    if t == base.raw: continue
+    inc steps
+    if steps > 100_000 or Z3_get_ast_kind(ctx.raw, t) != Z3_APP_AST:
+      return true
+    let app = Z3_to_app(ctx.raw, t)
+    let k = kindOf(t)
+    if k == storeKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      let v = Z3_get_app_arg(ctx.raw, app, 2)
+      if $wrap[Z3Bool](ctx, v) != "true": return true
+      stack.add Z3_get_app_arg(ctx.raw, app, 0)
+    elif k == iteKind and Z3_get_app_num_args(ctx.raw, app) == 3:
+      stack.add Z3_get_app_arg(ctx.raw, app, 1)
+      stack.add Z3_get_app_arg(ctx.raw, app, 2)
+    else:
+      return true
+  false
+
+proc tabValAt(ctx: Z3Context; sv: SymVal; keyRaw: RawZ3Ast): SymVal =
+  ## RFC-0005 S8ar (was `tabValOf`). The value table `sv` holds at key term
+  ## `keyRaw`: the select of each data array, read back as the value type
+  ## (`tabValTerms`' inverse).
+  ## RFC-0005 S8at: a container value is rebuilt from its leaves' selects
+  ## (`svWithLeaves` over its type's zero, whose leaves are all replaced).
+  let valTy = sv.tabValTy
+  let raw0 = checkedSelect(ctx, sv.tabDataRaw.raw, keyRaw)
+  case tabValLeaf(valTy)
+  of tvStr: SymVal(kind: svString, str: wrap[Z3String](ctx, raw0))
+  of tvF32: SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw0))
+  of tvF64: SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw0))
+  of tvCell: cellValue(wrap[Z3BitVec[64]](ctx, raw0), valTy)
+  of tvTree:
+    var leaves = @[wrap[Z3AnyAst](ctx, raw0)]
+    for m in sv.tabDataMore:
+      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, m.raw, keyRaw))
+    svWithLeaves(ctx, defaultZero(valTy, "__tabValProto"), leaves, valTy)
+
+proc tabKeySortHold(keyTy: IRType): Z3AnyAst =
+  ## RFC-0005 S8at. A live term of the key sort a table of `keyTy` is keyed
+  ## by (a string, or a 64-bit cell): its sort is read off it, and it keeps
+  ## that sort alive across the array-sort construction.
+  if keyTy.kind == itString: toAnyAst(mkString(""))
+  else: toAnyAst(mkBitVec[64](0'i64))
+
+proc tabTreeDataVars(name: string; keyTy, valTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 S8at. The free data arrays of a table holding container
+  ## values, one per leaf of the value type (`heapLeafSuffixes`), each from
+  ## the key sort to the leaf's sort. The sorts are runtime (a seq leaf is
+  ## itself an array), so the arrays are built raw, as `mkHeapArrayVar`'s;
+  ## the prototype value and the key term hold both sorts alive across
+  ## `Z3_mk_array_sort`. Leaf 0 is named `name`, leaf i `name.@v<i>`.
+  let ctx = requireCurrentContext()
+  let proto = defaultZero(valTy, "__tabValSort")
+  let keyHold = tabKeySortHold(keyTy)
+  let keySort = ctx.checkErr Z3_get_sort(ctx.raw, keyHold.raw)
+  let leaves = svLeafAsts(proto, valTy)
+  for i, leaf in leaves:
+    let valSort = ctx.checkErr Z3_get_sort(ctx.raw, leaf)
+    let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, keySort, valSort)
+    let nm = if i == 0: name else: name & ".@v" & $i
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw, nm.cstring)
+    result.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
+
+proc tabTreeDataZero(keyTy, valTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 S8at. The data arrays of an empty table holding container
+  ## values: each leaf of the value type's zero, at every key (read only at
+  ## a present key).
+  let ctx = requireCurrentContext()
+  let proto = defaultZero(valTy, "__tabValZero")
+  let keyHold = tabKeySortHold(keyTy)
+  let keySort = ctx.checkErr Z3_get_sort(ctx.raw, keyHold.raw)
+  for leaf in svLeafAsts(proto, valTy):
+    result.add wrap[Z3AnyAst](ctx,
+      ctx.checkErr Z3_mk_const_array(ctx.raw, keySort, leaf))
+
+proc tabMoreEq(ctx: Z3Context; a, b: SymVal): Z3Bool =
+  ## RFC-0005 S8at. A container value's further data arrays equal, pairwise
+  ## (`retBindEq`'s table arm); `true` for a scalar value.
+  result = mkBool(true)
+  for i in 0 ..< min(a.tabDataMore.len, b.tabDataMore.len):
+    result = result and wrap[Z3Bool](ctx,
+      checkedEq(ctx, a.tabDataMore[i].raw, b.tabDataMore[i].raw))
 
 func containerZeroBacked(t: IRType): bool =
   ## RFC-0005 S8u. A `Table` / `HashSet` shape whose empty value `defaultZero`
@@ -5774,6 +7152,32 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
       # raise here regardless of what `seqElemTy` holds.
       # RFC-0005 S6b: `feUnsupportedOpHavoc` -- a lossless `tyOf`, a fresh
       # per-merge name, init facts discarded, both operands already built.
+      # RFC-0005 S8at: two seqs whose element arrays share a sort (the
+      # same backed element type) merge exactly: an `ite` of the element
+      # arrays and of the lengths. A symbolic index into an array of seqs
+      # (`a[i].len`, `p.a[i][1]`) is this merge folded over the elements;
+      # it was the havoc below for every such read.
+      # RFC-0005 S8bc: every data array of a tree element, each an `ite`;
+      # the arrays must agree in number and sort.
+      let ctx = t.seqDataRaw.ctx # [placeholder-audited]
+      let ta = seqArrs(t)
+      let ea = seqArrs(e)
+      var sameSorts = ta.len == ea.len
+      if sameSorts:
+        for i in 0 ..< ta.len:
+          # hash-consed: identity is equality (`sortFault`)
+          if ctx.checkErr(Z3_get_sort(ctx.raw, ta[i].raw)) !=
+             ctx.checkErr(Z3_get_sort(ctx.raw, ea[i].raw)):
+            sameSorts = false
+      if sameSorts:
+        var arrs: seq[Z3AnyAst]
+        for i in 0 ..< ta.len:
+          arrs.add wrap[Z3AnyAst](ctx, checkedIte(ctx, cond.raw,
+            ta[i].raw, ea[i].raw))
+        var r = withSeqArrsOf(t, arrs)
+        r.seqLen = ite(cond, t.seqLen, e.seqLen) # [placeholder-audited]
+        r.seqSteps = max(t.seqSteps, e.seqSteps)
+        return r
       degradeAlloc(tyOf(t), feUnsupportedOpHavoc,
         "iteSV: not supported for seq value (Phase 5+)", "__iteSVMergeDegrade")
   of svString:
@@ -5910,10 +7314,15 @@ proc iteSV(cond: Z3Bool, t, e: SymVal): SymVal =
     let ctx = refT.ctx
     let mergedRaw = checkedIte(ctx, cond.raw, refT.raw, refE.raw)
     let merged = wrap[Z3AnyAst](ctx, mergedRaw)
+    # RFC-0005 S8ar: the merged ref is as many steps from a root as the
+    # deeper of the two.
+    let steps = max(heapStepsOf(t), heapStepsOf(e))
     if t.kind == svPtr:
-      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee)
+      SymVal(kind: svPtr, ptrAst: merged, ptrFamily: t.ptrFamily, ptrPointee: t.ptrPointee,
+             ptrSteps: steps)
     else:
-      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee)
+      SymVal(kind: svRef, refAst: merged, refPointee: t.refPointee,
+             refSteps: steps)
 
 proc freshRetSym(ty: IRType, name: string, pcOut: var seq[Z3Bool],
                  intOffsetPositions: seq[int] = @[]): SymVal =
@@ -6079,9 +7488,19 @@ proc arraySelect(elems: seq[SymVal]; idx: SymVal; lo: int64): SymVal =
   ## an ite chain over the positions (element `k` is Nim's index `lo + k`),
   ## under the caller's in-bounds conditions. A position whose index the
   ## index's type cannot hold is never selected.
+  ##
+  ## RFC-0005 S8ar: an index that folds to a position (a literal, `a[1]`)
+  ## selects that element with no merge. The ite chain merged every
+  ## element, and a merge of two seq values is `iteSV`'s havoc
+  ## (`feUnsupportedOpHavoc`), so `a[1].len` of an `array[N, seq[T]]` read
+  ## a fresh seq even at a constant index.
   let (mn, mx) = if idx.kind in {svBV8, svBV16, svBV32, svBV64}:
                    bvIndexWindow(idx)
                  else: (low(int64), high(int64))
+  for k in 0 ..< elems.len:
+    let v = lo + int64(k)
+    if v < mn or v > mx: continue
+    if $simplify(symEq(idx, coerceIntLit(idx, v))) == "true": return elems[k]
   result = elems[0]
   for k in 1 ..< elems.len:
     let v = lo + int64(k)
@@ -6099,7 +7518,14 @@ proc arrayStore(elems: seq[SymVal]; idx: SymVal; lo: int64;
   for k in 0 ..< elems.len:
     let v = lo + int64(k)
     if v < mn or v > mx: result.add elems[k]
-    else: result.add iteSV(symEq(idx, coerceIntLit(idx, v)), val, elems[k])
+    else:
+      # RFC-0005 S8ar: a position the index folds to (or away from) takes
+      # the value (or keeps its own) with no merge -- see `arraySelect`.
+      let eq = symEq(idx, coerceIntLit(idx, v))
+      case $simplify(eq)
+      of "true": result.add val
+      of "false": result.add elems[k]
+      else: result.add iteSV(eq, val, elems[k])
 
 # Width-uniform BV arithmetic. Both operands must be the same width.
 template binBV(a, b: SymVal, op: untyped): SymVal =
@@ -6328,6 +7754,11 @@ template neBV(a, b: SymVal): SymVal =
         "neBV on non-BV SymVal (kind=" & plainEnglishSymValKind(a.kind) & ")",
         "__neBVDegrade")
 
+var pendingPtrCompares {.threadvar.}: seq[Z3AnyAst]
+  ## RFC-0005 S8ax. The `ptr` operands `refEq` compared since the last
+  ## `drainPendingLowerEffects`, which declines the path when one may be a
+  ## dead frame's address cell (`danglingCompareTaint`).
+
 proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## Phase 15 R2 (ADR-0010). `==`/`!=` over two ref/ptr SymVals — a GROUND
   ## equality of the two `Ref_T`-sorted address consts (`Z3_mk_eq`, negated for
@@ -6336,6 +7767,8 @@ proc refEq(a, b: SymVal, op: IRBinop): SymVal =
   ## fresh allocations is an unreachable branch). No heap read happens here.
   let aAst = (if a.kind == svRef: a.refAst else: a.ptrAst)
   let bAst = (if b.kind == svRef: b.refAst else: b.ptrAst)
+  if a.kind == svPtr: pendingPtrCompares.add aAst   # RFC-0005 S8ax
+  if b.kind == svPtr: pendingPtrCompares.add bAst
   let ctx = requireCurrentContext()
   let eq = wrap[Z3Bool](ctx, checkedEq(ctx, aAst.raw, bAst.raw))
   case op
@@ -6369,6 +7802,24 @@ proc refMixedCmpDecline(a, b: SymVal, op: IRBinop): SymVal =
       (if a.kind in {svRef, svPtr}: b.kind else: a.kind)) &
       " operand the model did not resolve to an address (heUnresolvedRef)",
     "__refMixedCmpDegrade")
+
+proc mixedBitwiseDecline(a, b: SymVal, op: IRBinop): SymVal =
+  ## RFC-0005 S8bc. An `and`/`or`/`xor` with a bool on ONE side only. Nim
+  ## types both operands alike (both `bool`, or both one integer type), so
+  ## one side lowered to a bool only because something upstream already
+  ## declined it: a value of a type the model does not classify (a plain
+  ## alias such as `hashes.Hash = int`) is `allocDegrade`'s tainted bool
+  ## placeholder. The arm asserted `r.kind == svBool` and aborted the run as
+  ## `weInternalWalkerFault` (`hc and maxHash(t)` inside the stdlib
+  ## `getOrDefault`'s walked body). Record the unresolved operand and hand
+  ## back a fresh value of the integer side's type: the path is tainted,
+  ## never a verdict.
+  let intSide = if a.kind == svBool: b else: a
+  degradeAlloc(tyOf(intSide), feUnsupportedOp,
+    "`" & $op & "` of a bool and a " & plainEnglishSymValKind(intSide.kind) &
+    " operand: one side is a value the model did not resolve to its " &
+    "declared type (feUnsupportedOp)",
+    "__mixedBitwiseDegrade")
 
 # ---- Lowering ---------------------------------------------------------------
 
@@ -6414,7 +7865,9 @@ proc toSvIntPreserving(sv: SymVal): SymVal =
   if sv.kind == svInt:
     sv
   else:
-    SymVal(kind: svInt, zi: toZ3Int(sv),
+    let zi = toZ3Int(sv)
+    intOfBV[cast[uint](cast[pointer](zi.raw))] = (zi: zi, bv: sv)   # RFC-0005 S8ax
+    SymVal(kind: svInt, zi: zi,
            ziWidth: bvKindWidth(sv.kind), ziSigned: sv.signed)
 
 proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
@@ -6437,6 +7890,17 @@ proc reconcileInt*(a, b: SymVal): (SymVal, SymVal) =
   if a.kind != b.kind and
      a.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
      b.kind in {svInt, svBV8, svBV16, svBV32, svBV64}:
+    # RFC-0005 S8ax: an Int that is the conversion of a bit-vector of the
+    # other operand's kind and signedness (`intOfBV`) meets it as that
+    # bit-vector, unconverted.
+    if a.kind == svInt:
+      let bv = bvOfInt(a)
+      if bv.isSome and bv.get.kind == b.kind and bv.get.signed == b.signed:
+        return (bv.get, b)
+    if b.kind == svInt:
+      let bv = bvOfInt(b)
+      if bv.isSome and bv.get.kind == a.kind and bv.get.signed == a.signed:
+        return (a, bv.get)
     (toSvIntPreserving(a), toSvIntPreserving(b))
   else:
     (a, b)  ## same kind (or non-int) — identity
@@ -7316,6 +8780,9 @@ proc degradeStrArm(e: IRExpr, kind: SymexErrorKind, msg: string): SymVal =
     allocateSym(tBool(), freshDegradeName("__strArmDegrade"), fresh)
   of iekStrSplit:
     allocateSym(tSeq(tString()), freshDegradeName("__strArmDegrade"), fresh)
+  of iekStrChars:   # RFC-0005 S8ca: a seq of chars
+    allocateSym(tSeq(tInt(8, signed = false)),
+                freshDegradeName("__strArmDegrade"), fresh)
   of iekStrUnsupported:
     # S10b adjudication (walker v116) + fix-slice item 5 (round-6 re-review):
     # `iekStrUnsupported`'s callers span string/int/float/bool-ish contexts
@@ -7378,6 +8845,213 @@ include "runtime_exceptions.nim"  # Stage 8 CR-7 Cluster E: lowerExnArm
 
 include "runtime_closures.nim"  # Stage 8 CR-7 Cluster C: lowerClosureArm
 
+# ---- RFC-0005 S8bw (item 2): a global's unwritten parts ---------------------
+#
+# A module-level global is bound in the walk's env at its first write (S8an).
+# A tuple, object or array global is written a part at a time: `g.a = v`
+# rebuilds `g` from `v` and copies of its other parts (`valueFieldWrite`).
+# Before any write those parts hold whatever the program left there, which
+# the walk does not know. The value a read of an unbound global gives is its
+# INITIAL value: one constant per leaf of its declared type, the same for
+# every read in the run (`globalInitValue`). Each such constant is an
+# UNWRITTEN leaf (`glUnwritten`). Copying one is no observation: a rebuild's
+# copies (`iekVar.vCopy`) carry the leaves back into `g`, and a later write
+# replaces them. Every other read -- the outermost access of a chain over a
+# global (`g`, `g.b`, `g.arr[i]`), an element read, a pointer's dereference,
+# a discriminator's reassignment -- declines (`feGlobalReadUnmodelled`, as a
+# scalar global read before any write does) when its value mentions one.
+
+var glUnwrittenCtx {.threadvar.}: RawZ3Context
+var glUnwritten {.threadvar.}: Table[int, string]
+  ## Ast id of each unwritten leaf -> the part it stands for (`gArr[2]`).
+var glPartHavoc {.threadvar.}: Table[string, bool]
+  ## RFC-0005 batch 6. Each unwritten part -> whether its global's entry
+  ## value is modelled (S8as, `programGlobal`): observing it then taints
+  ## the path `feGlobalHavoc` (a SAT is replayed, an UNSAT stands); any
+  ## other global's part declines (`feGlobalReadUnmodelled`, S8bw).
+var glUnwrittenAsts {.threadvar.}: seq[Z3AnyAst]
+  ## The unwritten leaves themselves (`unwrittenIndependent` renames them).
+var lowerAsReceiver {.threadvar.}: bool
+  ## Set by an access arm (`iekField`, `iekIndex`, `isIndex`) right before
+  ## it lowers its receiver; consumed at `lower`'s entry. A receiver's value
+  ## is not observed by itself: the access's result is.
+
+proc glUnwrittenFresh(ctx: Z3Context) =
+  ## A new context is a new run: no unwritten leaf is live.
+  if glUnwrittenCtx != ctx.raw:
+    glUnwrittenCtx = ctx.raw
+    glUnwritten = initTable[int, string]()
+    glPartHavoc = initTable[string, bool]()
+    glUnwrittenAsts = @[]
+
+proc svAsts(sv: SymVal; acc: var seq[RawZ3Ast]) =
+  ## Every Z3 term a value holds, compound or not.
+  case sv.kind
+  of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
+     svString, svRef, svPtr, svBitSet:
+    acc.add rawAnyAstOf(sv)
+  of svTuple:
+    for f in sv.fields: svAsts(f, acc)
+  of svArray:
+    for f in sv.arrElems: svAsts(f, acc)
+  of svSeq:
+    # RFC-0005 batch 6: every leaf array of a leaf-split seq (S8bc), not
+    # only the first -- an unwritten leaf held in a later one is seen.
+    for a in seqArrs(sv): acc.add a.raw
+    acc.add sv.seqLen.raw # [placeholder-audited]
+  of svTable:
+    acc.add sv.tabDataRaw.raw
+    for m in sv.tabDataMore: acc.add m.raw   ## RFC-0005 batch 6 (S8at)
+    acc.add sv.tabPresentRaw.raw
+    acc.add sv.tabSize.raw
+  of svSet:
+    acc.add sv.setMembersRaw.raw
+    acc.add sv.setSize.raw
+  of svVariant:
+    svAsts(sv.vDisc[], acc)
+    for fs in sv.vArmFields.values:
+      for f in fs: svAsts(f, acc)
+    for f in sv.vPlainFields: svAsts(f, acc)
+  of svMultiVariant:
+    for ax in sv.mvAxes:
+      svAsts(ax.disc[], acc)
+      for fs in ax.armFields.values:
+        for f in fs: svAsts(f, acc)
+    for f in sv.mvPlainFields: svAsts(f, acc)
+  of svDistinct:
+    acc.add sv.distinctAst.raw
+    if sv.distinctBaseSym != nil: svAsts(sv.distinctBaseSym[], acc)
+  of svUninterpRef:
+    acc.add sv.uninterpAst.raw
+  of svClosure:
+    if sv.closureEnv != nil: svAsts(sv.closureEnv[], acc)
+
+proc registerUnwritten(ctx: Z3Context; sv: SymVal; part: string;
+                        havoc: bool) =
+  ## Record each leaf of the initial value `sv` of `part` as unwritten.
+  ## `havoc`: the global's entry value is modelled (`glPartHavoc`).
+  case sv.kind
+  of svTuple:
+    for i, f in sv.fields:
+      registerUnwritten(ctx, f, part & "." &
+        (if i < sv.fieldNames.len: sv.fieldNames[i] else: $i), havoc)
+  of svArray:
+    for i, f in sv.arrElems:
+      registerUnwritten(ctx, f, part & "[" & $i & "]", havoc)
+  else:
+    glPartHavoc[part] = havoc
+    var acc: seq[RawZ3Ast]
+    svAsts(sv, acc)
+    for a in acc:
+      glUnwritten[astId(ctx, a)] = part
+      glUnwrittenAsts.add wrap[Z3AnyAst](ctx, a)
+
+var globalEntryVals {.threadvar.}: Table[string, SymVal]
+  ## RFC-0005 S8as. The entry value of each `var` global (or computed `let`)
+  ## read before the walk wrote it: one fresh value per run, shared by every
+  ## path and frame (`entryValueOf`). Reset per run. RFC-0005 batch 6: also
+  ## S8bw's initial value of a global whose entry value is not modelled
+  ## (`globalInitValue`); one store, one set of unwritten leaves.
+var globalEntryFacts {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8as. The allocation facts of those values (a seq's length is
+  ## at least 0, a range's bounds): true of every value of the type, so
+  ## asserted into every check (`globalRoots`), as the values are run-wide.
+
+proc globalInitValue(name: string; ty: IRType): SymVal =
+  ## The value the global `name` of declared type `ty` holds before its
+  ## first write in the walk: its unwritten leaves. RFC-0005 batch 6: a
+  ## global whose entry value S8as does not model (`programGlobal` is
+  ## none); an observation of one of its leaves declines.
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  if globalEntryVals.hasKey(name): return globalEntryVals[name]
+  var facts: seq[Z3Bool]
+  result = allocateSym(ty, "__glInit_" & displayName(name), facts)
+  globalEntryVals[name] = result
+  registerUnwritten(ctx, result, displayName(name), havoc = false)
+
+proc unwrittenIn(sv: SymVal; simplified = false): string =
+  ## The part an unwritten leaf `sv` mentions stands for, or "" when it
+  ## mentions none. `simplified`: an element read's `ite` over every
+  ## element is simplified first, so a constant index picks its element.
+  if glUnwritten.len == 0: return ""
+  let ctx = currentContext()
+  if ctx == nil or glUnwrittenCtx != ctx.raw: return ""
+  var roots: seq[RawZ3Ast]
+  svAsts(sv, roots)
+  var keep: seq[Z3AnyAst]
+  if simplified:
+    for i in 0 ..< roots.len:
+      keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_simplify(ctx.raw, roots[i]))
+      roots[i] = keep[^1].raw
+  var seen: HashSet[int]
+  var stack = roots
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t)
+    if id in seen: continue
+    seen.incl id
+    let part = glUnwritten.getOrDefault(id, "")
+    if part.len > 0: return part
+    case Z3_get_ast_kind(ctx.raw, t)
+    of Z3_APP_AST:
+      let app = Z3_to_app(ctx.raw, t)
+      for i in 0 ..< int(Z3_get_app_num_args(ctx.raw, app)):
+        stack.add Z3_get_app_arg(ctx.raw, app, cuint(i))
+    of Z3_QUANTIFIER_AST:
+      stack.add Z3_get_quantifier_body(ctx.raw, t)
+    else: discard
+  ""
+
+proc unwrittenReadMsg(part: string): string =
+  ## The decline of a read that observes the unwritten part `part` (a
+  ## global, or a part of one, before any write in the walk).
+  "module-level global '" & part & "' is read but not modelled by the " &
+    "symbolic walker -- remove it from the reachable computation or pass " &
+    "it as an explicit parameter (feGlobalReadUnmodelled)"
+
+proc unwrittenKind(part: string): SymexErrorKind =
+  ## RFC-0005 batch 6. What observing the unwritten part `part` costs the
+  ## path: `feGlobalHavoc` when its global's entry value is modelled
+  ## (S8as: any value of its type, so a SAT is replayed and an UNSAT
+  ## stands), else a decline (S8bw).
+  if glPartHavoc.getOrDefault(part, false): feGlobalHavoc
+  else: feGlobalReadUnmodelled
+
+proc unwrittenMsg(part: string): string =
+  ## RFC-0005 batch 6. `unwrittenKind`'s message.
+  if glPartHavoc.getOrDefault(part, false):
+    "module-level variable '" & part & "' is read before the walk writes " &
+      "it: it may hold any value of its type when the property runs, so a " &
+      "hit through it is replayed (feGlobalHavoc)"
+  else: unwrittenReadMsg(part)
+
+proc globalChainRoot(e: IRExpr): IRExpr =
+  ## The `iekVar` an access chain (`g.a.b`, `g.arr[i]`) is rooted at, or nil.
+  var cur = e
+  while cur != nil:
+    case cur.kind
+    of iekVar: return cur
+    of iekField: cur = cur.obj
+    of iekIndex: cur = cur.arr
+    else: return nil
+  nil
+
+proc globalReadPart(e: IRExpr; v: SymVal; simplified = false): string =
+  ## The unwritten part `v`, the value of the outermost access `e` of a
+  ## chain over a global (not a rebuild's copy), mentions, or "".
+  if glUnwritten.len == 0: return ""
+  let root = globalChainRoot(e)
+  if root == nil or root.vCopy or not isGlobalEnvName(root.vname): return ""
+  unwrittenIn(v, simplified)
+
+proc observeGlobalRead(e: IRExpr; v: SymVal; simplified = false) =
+  ## `lower`'s observation: decline in-band when the read `e` of a global
+  ## mentions an unwritten part.
+  let part = globalReadPart(e, v, simplified)
+  if part.len > 0:
+    lowerDegrade(unwrittenKind(part), unwrittenMsg(part))
+
 var callGuardedNames {.threadvar.}: seq[string]
   ## RFC-0005 S8an. The globals and captures that an ACTIVE walked call
   ## withholds from its callee because they are also the root of one of its
@@ -7386,7 +9060,9 @@ var callGuardedNames {.threadvar.}: seq[string]
   ## as aliasing instead of as an unmodelled global. Pushed and popped
   ## around each callee walk.
 
-proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+proc lowerExpr(env: Env, e: IRExpr, proto: Option[SymVal]): SymVal =
+  ## `lower`'s body: `lower` itself observes a global read's value
+  ## (RFC-0005 S8bw).
   if e == nil:
     raise newException(ValueError, "lower: nil expression")  # [raise-audited: category-c: documented defensive invariant (nil-expression entry guard; moderate confidence, no specific unreachability argument beyond the general defensive pattern)]
   case e.kind
@@ -7413,7 +9089,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekBoolLit:
     ofBool(mkBool(e.bval))
   of iekVar:
-    if env.hasKey(e.vname):
+    loweringReadNames.add e.vname      ## RFC-0005 S8as
+    if pendingEnvWriteIx(e.vname) >= 0:
+      # RFC-0005 S8as: a closure call earlier in this same expression wrote
+      # the name. Nim reads the variable after every call of the
+      # expression has run; the walk reads it here, in operand order, and
+      # the two differ when a later call writes it again. Read the latest
+      # write and decline.
+      lowerDegrade(ceCaptureByRefUnmodelled,
+        "`" & displayName(e.vname) & "` is read in the same expression as " &
+             "a closure call that writes it; the order of that read and " &
+             "the write is not modelled (ceCaptureByRefUnmodelled)")
+      closureEnvWrites[pendingEnvWriteIx(e.vname)][1]
+    elif env.hasKey(e.vname):
       # RFC-0005 S9: a closure read here carries its by-reference captures
       # as they stand now (a no-op for every other value).
       refreshByRefCaptures(env[e.vname], env)
@@ -7421,6 +9109,20 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # RFC-0005 S8n: a callee's `result` read before its first write is
       # the zero value Nim initialised it to (was `feGlobalReadUnmodelled`).
       unwrittenResultZero().get
+    elif not isFollowConcreteWalk() and e.vname notin callGuardedNames and
+         isGlobalEnvName(e.vname) and programGlobal(e.vname).isSome:
+      # RFC-0005 S8as: a global read before the walk wrote it holds its
+      # ENTRY value -- what it holds when the property runs. An immutable
+      # `let` initialised by a literal holds that literal, always: read
+      # exactly. Anything else may hold any value of its type by then (a
+      # `var` that other code, or an earlier test, assigned): one fresh
+      # value per run (`globalEntryVals`), shared by every read, so two
+      # reads before any write agree. A hit through it may need a value
+      # the property never meets, so the path carries `feGlobalHavoc`
+      # (`dcFreshSymbol`): a SAT is replayed, and an UNSAT holds for every
+      # entry value, so it stands. Before S8as the read declined
+      # (`feGlobalReadUnmodelled`).
+      entryValueOf(e.vname)
     elif not isFollowConcreteWalk():
       # Issues #161/#163 handoff: `wmExplore` (the default whole-proc
       # symbolic walker) reaching a name absent from `env` is NEVER a
@@ -7474,12 +9176,26 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "through a `var`/`addr` argument and directly; the walk " &
                "passes the argument by copy-in/copy-out, so the direct " &
                "access is not modelled (feUnsupportedOp)")
+      elif isGlobalEnvName(e.vname) and e.vGlobalTy != nil:
+        # RFC-0005 S8bw (item 2): a global of a known type, read before
+        # its first write in the walk, holds its initial value -- one
+        # unwritten constant per leaf. `lower` declines an observation of
+        # one (a read of `g` or of an unwritten part); a rebuild's copy or
+        # a receiver is no observation, so `g.a = v` binds `g` with its
+        # other parts unwritten, and a later read of `g.a` decides.
+        return globalInitValue(e.vname, e.vGlobalTy)
       elif isGlobalEnvName(e.vname):
-        lowerDegrade(feGlobalReadUnmodelled,
-          "module-level global '" & displayName(e.vname) & "' is read " &
-               "but not modelled by the symbolic walker -- remove it " &
-               "from the reachable computation or pass it as an " &
-               "explicit parameter (feGlobalReadUnmodelled)")
+        lowerDegrade(feGlobalReadUnmodelled, unwrittenReadMsg(displayName(e.vname)))
+      elif e.vname.startsWith("__sym_"):
+        # RFC-0005 S8ba: a parser temporary (`freshSynth`; no Nim
+        # identifier starts with `_`) is bound by the statement the parser
+        # emitted before its read, so reaching it unbound is a walker
+        # inconsistency (a declining arm that dropped its result), never a
+        # global. It was reported as `feGlobalReadUnmodelled` naming the
+        # temporary.
+        lowerDegrade(weInternalWalkerFault,
+          "parser temporary '" & e.vname & "' is read but no statement " &
+               "bound it (weInternalWalkerFault)")
       else:
         # RFC-0005 S8an: module-level globals are `__gl:`-named; any other
         # unbound name is a variable the walk does not bind where it is
@@ -7490,7 +9206,13 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
                "bound it (not a parameter or a local of the walked " &
                "routines it reaches) (feGlobalReadUnmodelled)")
       var fresh: seq[Z3Bool]
-      let ty = if proto.isSome: tyOf(proto.get) else: tInt(64, true)
+      # RFC-0005 S8bw (item 1): a global's stand-in is a value of its
+      # declared type (`vGlobalTy`). It was `tInt(64)` when no prototype was
+      # in scope, whatever the type, and a later array, seq or tuple
+      # operation on it faulted (`gArr[2] = k`, `gSeq.map(f)`).
+      let ty = if e.vGlobalTy != nil: e.vGlobalTy
+               elif proto.isSome: tyOf(proto.get)
+               else: tInt(64, true)
       allocateSym(ty, "__globalReadHavoc_" & e.vname, fresh)
     else:
       # RFC-fuzzer-nextgen G3fix safety net (only reached in
@@ -7512,7 +9234,10 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
   of iekField:
     # Lower the receiver, then pick the field by index (tuple) or
     # by name (variant — Phase 11).
-    let recv = lower(env, e.obj)
+    # RFC-0005 S8at: a distinct over a tuple / object is read through its
+    # base (`(int, bool)(d)[0]`; the conversion is the parser's identity).
+    lowerAsReceiver = true   ## RFC-0005 S8bw: the field is the read
+    let recv = ejectBase(lower(env, e.obj))
     case recv.kind
     of svTuple:
       recv.fields[e.fieldIx]
@@ -7589,7 +9314,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         " (expected tuple/variant/multi-variant) — degraded to sxUnknown " &
         "(feUnsupportedExprKind)", "__iekFieldUnsupportedDegrade")
   of iekSeqLen:
-    let recv = lower(env, e.lenObj)
+    # RFC-0005 S8at: a distinct over a container's `len` is its base's.
+    let recv = ejectBase(lower(env, e.lenObj))
     case recv.kind
     of svSeq:
       if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
@@ -7707,7 +9433,15 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     let intProto = some(SymVal(kind: svInt, zi: mkInt(0)))
     let loSV = lower(env, e.ssLo, intProto)
     let hiSV = lower(env, e.ssHi, intProto)
-    if loSV.kind != svInt or hiSV.kind != svInt:
+    # RFC-0005 S8bu: a `toOpenArray` view's bounds are the caller's own
+    # `int`s, almost always bit-vectors; they take the signed Int bridge,
+    # which S8bu's inverse facts (`bvIntInverseFacts`) let Z3 decide and
+    # the query bounds (`queryRLimit`, `queryTimeoutMs`) end either way.
+    # A slice's keep ADR-0027's decline.
+    let bridged = e.ssView and
+      loSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64} and
+      hiSV.kind in {svInt, svBV8, svBV16, svBV32, svBV64}
+    if not bridged and (loSV.kind != svInt or hiSV.kind != svInt):
       # Round-6 N37: was a raw `raise (ref SymexClassifiedDegradeError)` --
       # reached from inside nested `walkBlock` frames via the SAME two-hop
       # literal-seeded-local trick N36 section 1 demonstrated for
@@ -7729,8 +9463,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
              "(→ sxUnknown, Invariant 3)")
       var fresh: seq[Z3Bool]
       return allocateSym(tSeq(tInt()), freshDegradeName("__seqSliceBoundDegrade"), fresh)
-    let lo = loSV.zi
-    let hi = hiSV.zi
+    let lo = if bridged: toZ3Int(loSV) else: loSV.zi
+    let hi = if bridged: toZ3Int(hiSV) else: hiSV.zi
     # A real Nim slice raises IndexDefect outside `lo >= 0 ∧ hi < len ∧
     # lo <= hi + 1` (the last conjunct admits the empty slice). Deposit the
     # OOB predicate into the SND-4 sink — `drainStrIndexRaises` routes an
@@ -7746,15 +9480,28 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # slice (`L == 0`, `d[3 .. ^1]`, `d[5 .. 4]`) never raises. Every one
     # of those was an `IndexDefect` (`not (lo >= 0 and hi < len and
     # lo <= hi + 1)`), including the empty slice past the end.
+    #
+    # RFC-0005 S8ca: a `toOpenArray` view (`ssView`) is checked otherwise
+    # (probed on the pinned toolchain, a 4-element seq): `IndexDefect` iff
+    # its length is not 0 and either bound is outside `0 ..< len` -- (2, -1),
+    # (4, 1), (1, -2) raise; (2, 0) and (3, 0) do not, and make a view of
+    # negative length (-1, -2) that no index reaches (every `a[i]` raises,
+    # as the walk's index check does for a negative length) and no loop
+    # enters. Nothing raises `RangeDefect`. S8bu declined a negative length.
     let lenZ = recv.seqLen # [placeholder-audited]
     let sliceLen = (hi - lo) + mkInt(1)
-    let idxOob = (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
+    let idxOob =
+      if e.ssView:
+        (sliceLen != mkInt(0)) and
+          ((lo < mkInt(0)) or (lo >= lenZ) or (hi < mkInt(0)) or (hi >= lenZ))
+      else: (sliceLen > mkInt(0)) and ((lo < mkInt(0)) or (hi >= lenZ))
     let negLen = sliceLen < mkInt(0)
     when not defined(symexSliceNoOobFork):
       strIndexOobConds.add idxOob
       syncStrIndexOobCond(idxOob)
-      rangeDefectConds.add negLen
-      syncRangeDefectCond(negLen)
+      if not e.ssView:
+        rangeDefectConds.add negLen
+        syncRangeDefectCond(negLen)
     inc sliceViewCounter
     let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
     let iVar = mkIntVar("__sliceview_i" & $sliceViewCounter)
@@ -7767,16 +9514,58 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # teardown, memory-timing-dependent (the SAT path happened to
     # survive; the first non-SAT query died). Every intermediate is now
     # wrapped (inc_ref'd) IMMEDIATELY on creation.
-    let sel = wrap[Z3AnyAst](zctx,
-      checkedSelect(zctx, recv.seqDataRaw.raw, shifted.raw)) # [placeholder-audited]
-    var iApp = zctx.checkErr Z3_to_app(zctx.raw, iVar.raw)
-    let lam = wrap[Z3AnyAst](zctx,
-      zctx.checkErr Z3_mk_lambda_const(zctx.raw, 1'u32,
-        cast[ptr UncheckedArray[RawZ3App]](addr iApp), sel.raw))
-    SymVal(kind: svSeq,
-           seqLen: (hi - lo) + mkInt(1),
-           seqDataRaw: lam,
-           seqElemTy: recv.seqElemTy)
+    # RFC-0005 S8bc: one view per data array of a tree element.
+    var lams: seq[Z3AnyAst]
+    for arr in seqArrs(recv):
+      let sel = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, arr.raw, shifted.raw))
+      lams.add lambdaOver(zctx, iVar, sel)
+    mkSeqSV((hi - lo) + mkInt(1), lams, recv.seqElemTy)
+  of iekSeqSplice:
+    # RFC-0005 S8bu: `base` with `part` written over it from `at` (a `var
+    # openArray` view of a `toOpenArray` slice, written back). The parser
+    # builds it only after the slice was taken in bounds, of the length
+    # `part` has (an openArray's length never changes): an array-lambda
+    # `ite(at <= i < at + part.len, part[i - at], base[i])`.
+    let base = lower(env, e.spBase)
+    let part = lower(env, e.spPart)
+    let atSV = lower(env, e.spAt, some(SymVal(kind: svInt, zi: mkInt(0))))
+    if base.kind != svSeq or part.kind != svSeq or
+       atSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64} or
+       base.isUnsupportedFieldPlaceholder or # [placeholder-audited]
+       part.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage, the view or the offset lowered as " &
+             plainEnglishSymValKind(base.kind) & "/" &
+             plainEnglishSymValKind(part.kind) & "/" &
+             plainEnglishSymValKind(atSV.kind) &
+             " — expected a seq, a seq and an Int (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    let at = toZ3Int(atSV)   # the view's bridge (`ssView`)
+    inc sliceViewCounter
+    let zctx = base.seqDataRaw.ctx # [placeholder-audited]
+    let iVar = mkIntVar("__spliceview_i" & $sliceViewCounter)
+    let inPart = (iVar >= at) and (iVar < at + part.seqLen) # [placeholder-audited]
+    let shifted = iVar - at
+    let bArrs = seqArrs(base)
+    let pArrs = seqArrs(part)
+    if bArrs.len != pArrs.len:
+      lowerDegrade(feUnsupportedOp,
+        "iekSeqSplice: the storage and the view have different element " &
+             "shapes (→ sxUnknown, Invariant 3)")
+      var fresh: seq[Z3Bool]
+      return allocateSym(tSeq(tInt()), freshDegradeName("__seqSpliceDegrade"), fresh)
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< bArrs.len:
+      let fromPart = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, pArrs[k].raw, shifted.raw))
+      let fromBase = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, bArrs[k].raw, iVar.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, inPart.raw, fromPart.raw, fromBase.raw))
+      lams.add lambdaOver(zctx, iVar, body)
+    mkSeqSV(base.seqLen, lams, base.seqElemTy) # [placeholder-audited]
   of iekStrLit, StrOpKinds:
     # Stage 7 (CR-7) Cluster S: all string literal and string-op arms are
     # extracted into `lowerStrArm` (defined above, before this proc body).
@@ -7867,141 +9656,146 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # N1 fix: a mutation of untrusted content is itself untrusted).
       declinePlaceholderInLower(recv, "", "mutation (.add)")
       return recv
-    let val = lower(env, e.mutArg)
-    # New seq: data = store(old.data, old.len, val); len = old.len + 1
+    # RFC-0005 S8ar: the element is lowered at the element type's width (a
+    # literal into a `seq[int8]` is an 8-bit value) and stored through
+    # `storeSeqElem`, the store every other seq write uses, which backs
+    # every element kind `isBackedSeqElemTy` admits. This arm had its own
+    # copy of the store covering only `int` and `bool`: any other element
+    # (`string`, `float`, a narrower int, a ref) was "iekSeqAdd: unsupported
+    # elem/width" (`weInternalWalkerFault`), and an Int-promoted `int`
+    # stored the constant 0 in its place (RFC-0005 S8ba fixed the same arm:
+    # `var s: seq[int]; s.add(x); s[0] == 7` with `x: range[0..10]` was a
+    # false `sxUnsat`). RFC-0005 S8ba: a distinct element is stored as its
+    # base (`seqCellTy`, `ejectBase`).
+    let val = lower(env, e.mutArg, intLitProto(recv.seqElemTy))
     let oldLen = recv.seqLen # [placeholder-audited]
     let newLen = oldLen + mkInt(1)
-    var newDataRaw: Z3AnyAst
-    case recv.seqElemTy.kind
-    of itInt:
-      case recv.seqElemTy.width
-      of 64:
-        let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-          recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
-        let vbv = case val.kind
-          of svBV64: val.bv64
-          of svInt:  mkBitVec[64](0'i64)  ## fallback (shouldn't happen)
-          else: mkBitVec[64](0'i64)
-        let stored = store(typed, oldLen, vbv)
-        newDataRaw = toAnyAst(stored)
-      else:
-        # Round-6 N47 (walker v109): was a raw `raise newException(
-        # ValueError, ...)` — an UNCLASSIFIED-carrier raise that sat OUTSIDE
-        # N36's (walker v101) own audit scope (`tsymex_r6_n36_raise_class_
-        # audit.nim` greps only for `raise (ref Symex*)`, never a bare
-        # `newException(ValueError, ...)`), but reachable from inside
-        # nested `walkBlock` frames via the EXACT SAME C-backend
-        # goto-exception hazard (ADR-0023/SND-3) N36 closed for the
-        # classified-carrier sites: unwinding this raise through two or
-        # more stacked recursive `walk` frames (e.g. a `.add` mutation
-        # inside a one-level-call-trace callee's inlined block, R4-W2b's
-        # two-hop shape) silently lost the raise, and the walk fell back to
-        # exhausting the enclosing loop's unroll budget instead of ever
-        # reaching this decline (confirmed empirically: N36's unrelated
-        # `isVariantReassign` try/except, added elsewhere in this SAME
-        # recursively-invoked `walk` proc, was sufficient by itself to flip
-        # this latent hazard from benign to live — R4-W2b regressed at
-        # c50b50f with no change to this arm's own code). In-band degrade
-        # via the chokepoint instead, mirroring this SAME arm's
-        # kind-mismatch decline above (and N36's own established idiom).
-        # N47-followup (walker v110): `declineMsg` reused verbatim as the
-        # placeholder's reason below — see the kind-mismatch arm's own note
-        # a few lines up for the full mechanism.
-        let declineMsg = "iekSeqAdd: unsupported width " & $recv.seqElemTy.width &
-             " (weInternalWalkerFault)"
-        lowerDegrade(weInternalWalkerFault, declineMsg)
-        var fresh: seq[Z3Bool]
-        return allocateSym(
-          tUnsupportedFieldSeq(tInt(8, false), declineMsg,
-            kind = weInternalWalkerFault),
-          "__seqAddWidthUnsupported", fresh)
-    of itBool:
-      let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-        recv.seqDataRaw.ctx, recv.seqDataRaw.raw) # [placeholder-audited]
-      doAssert val.kind == svBool
-      newDataRaw = toAnyAst(store(typed, oldLen, val.bo))
-    else:
-      # Round-6 N47 (walker v109): same conversion, same reachability
-      # argument, as the sibling unsupported-width decline immediately
-      # above — see its comment for the full evidence chain.
-      # N47-followup (walker v110): `declineMsg` reused verbatim as the
-      # placeholder's reason below — see the kind-mismatch arm's own note
-      # (above) for the full mechanism.
-      let declineMsg = "iekSeqAdd: unsupported elem " & plainEnglishTypeKind(recv.seqElemTy.kind) &
-             " (weInternalWalkerFault)"
+    if not isBackedSeqElemTy(recv.seqElemTy):
+      # RFC-0005 S8bl (item 3). A seq of an element the model does not back
+      # (`seq[seq[T]]`) that is not a placeholder: a local built from an
+      # empty literal (`var p: seq[seq[T]] = @[]`), whose length is exact
+      # but whose elements have no arrays to store into. The add declines
+      # as such a seq does everywhere else (`seNestedSeqUnsupported`, a
+      # placeholder decline); it was the in-band element mismatch below,
+      # filed as `weInternalWalkerFault`. The argument is lowered first, so
+      # its raises are kept (S5).
+      let declineMsg = "iekSeqAdd: an element added to a seq of " &
+        $recv.seqElemTy & ", an element type the model does not back " &
+        "(seNestedSeqUnsupported)"
+      lowerDegrade(seNestedSeqUnsupported, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(tUnsupportedFieldSeq(recv.seqElemTy, declineMsg),
+                         freshDegradeName("__seqAddUnbacked"), fresh)
+    if not seqElemFits(ejectBase(val), seqCellTy(recv.seqElemTy)):
+      # Unreachable for a typed Nim `add` (its argument has the element
+      # type); a value some upstream degrade produced keeps the in-band
+      # decline this arm always had for a representation mismatch.
+      let declineMsg = "iekSeqAdd: element lowered to " &
+        plainEnglishSymValKind(val.kind) & " for a seq[" &
+        plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
       lowerDegrade(weInternalWalkerFault, declineMsg)
       var fresh: seq[Z3Bool]
       return allocateSym(
         tUnsupportedFieldSeq(tInt(8, false), declineMsg,
           kind = weInternalWalkerFault),
-        "__seqAddElemUnsupported", fresh)
-    SymVal(kind: svSeq, seqLen: newLen,
-           seqDataRaw: newDataRaw, seqElemTy: recv.seqElemTy)
+        freshDegradeName("__seqAddElemMismatch"), fresh)
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+    let stored = seqStoreArrs(recv, oldLen, val)
+    if stored.isNone: return seqStoreDecline("iekSeqAdd", recv.seqElemTy, val)
+    mkSeqSV(newLen, stored.get, recv.seqElemTy)
   of iekTableSet:
     let recv = lower(env, e.tabRecv)
     if containerRecvDeclined(recv, svTable, "`t[k] = v`"): return recv
-    let keyProto = SymVal(kind: svString, str: mkString(""))
-    let keySV = lower(env, e.tabKey, some(keyProto))
-    doAssert keySV.kind == svString
     # RFC-0005 S8z: a literal value is shaped at the value type's width.
-    let val = lower(env, e.tabVal, intLitProto(recv.tabValTy))
-    # New table: data = store(old.data, k, v); present = store(old.present, k, true).
-    # Size: increment if !present[k] before.
-    case recv.tabValTy.kind
-    of itInt, itBool:   # RFC-0005 S8z: + bool
-      let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
-        recv.tabDataRaw.ctx, recv.tabDataRaw.raw)
-      let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
-        recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
-      # RFC-0005 S8u: an Int-promoted value converts (`bv64Operand`); any
-      # other kind declines. The `else` arm stored 0 in its place.
-      # RFC-0005 S8z: at the value type's width, into its 64-bit cell.
-      let vOpt = cellOf(val, recv.tabValTy)
-      if vOpt.isNone:
-        lowerDegrade(feUnsupportedOp,
-          "iekTableSet: value lowered to " & plainEnglishSymValKind(val.kind) &
-          " — expected a " & $recv.tabValTy & " (feUnsupportedOp)")
-        return recv
-      let vbv = vOpt.get
-      noteTableKey(keySV.str)   ## RFC-0005 S8f
-      let newData = store(typedData, keySV.str, vbv)
-      let newPresent = store(typedPresent, keySV.str, mkBool(true))
-      let wasPresent = select(typedPresent, keySV.str)
-      # size += 1 if !wasPresent
-      let newSize = SymVal(kind: svInt,
-        zi: ite(wasPresent, recv.tabSize, recv.tabSize + mkInt(1)))
-      SymVal(kind: svTable,
-        tabDataRaw: toAnyAst(newData),
-        tabPresentRaw: toAnyAst(newPresent),
-        tabSize: newSize.zi,
-        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
-    else:
-      # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-      # `raise newException`. Reached, unguarded, inside `lower`'s own
-      # dispatch for any `Table[string, V]` write where `V != int` (e.g.
-      # `t["k"] = "v"` on a `Table[string, string]`) -- an ordinary,
-      # walk-reachable Nim mutation. In-band degrade: return `recv`
-      # unchanged (an inert no-op write is a sound over-approximation once
-      # the run is forced to `sxUnknown`).
+    # RFC-0005 S8ar: the key and value as the terms the table holds
+    # (`tabKeyTerm` / `tabValTerm`), for every backed key and value type
+    # (was a string key and a 64-bit cell value, every other value an
+    # in-band decline).
+    let keySV = lower(env, e.tabKey, seqElemLitProto(recv.tabKeyTy))
+    let val = lower(env, e.tabVal, seqElemLitProto(recv.tabValTy))
+    let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)
+    let vOpt = tabValTerms(val, recv.tabValTy)   ## RFC-0005 S8at: per leaf
+    if kOpt.isNone or vOpt.isNone:
+      # Unreachable for a typed Nim `[]=`; a value some upstream degrade
+      # produced keeps the in-band decline this arm always had.
       lowerDegrade(feUnsupportedOp,
-        "iekTableSet: unsupported val " & $recv.tabValTy.kind &
-             " (feUnsupportedOp)")
+        "iekTableSet: key lowered to " & plainEnglishSymValKind(keySV.kind) &
+        " and value to " & plainEnglishSymValKind(val.kind) & " — expected a " &
+        $recv.tabKeyTy & " key and a " & $recv.tabValTy & " value " &
+        "(feUnsupportedOp)")
       return recv
+    let ctx = recv.tabSize.ctx
+    let k = kOpt.get
+    let tru = mkBool(true)
+    let wasPresent = wrap[Z3Bool](ctx,
+      checkedSelect(ctx, recv.tabPresentRaw.raw, k.raw))
+    let vs = vOpt.get
+    let newData = wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, recv.tabDataRaw.raw, k.raw, vs[0].raw))
+    # RFC-0005 S8at: a container value's further leaves, each in its array.
+    var newMore: seq[Z3AnyAst]
+    for i, m in recv.tabDataMore:
+      newMore.add wrap[Z3AnyAst](ctx, checkedStore(ctx, m.raw, k.raw, vs[i + 1].raw))
+    let newPresent = wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, recv.tabPresentRaw.raw, k.raw, tru.raw))
+    # size += 1 if !wasPresent
+    let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)
+    if nanOpt.isSome:
+      # RFC-0005 S8at: a NaN key adds an entry no lookup finds.
+      let nan = nanOpt.get
+      var keptMore: seq[Z3AnyAst]
+      for i, m in recv.tabDataMore:
+        keptMore.add wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw, m.raw,
+                                                     newMore[i].raw))
+      return SymVal(kind: svTable,
+        tabDataRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabDataRaw.raw, newData.raw)),
+        tabDataMore: keptMore,
+        tabPresentRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabPresentRaw.raw, newPresent.raw)),
+        tabSize: ite(nan or not wasPresent, recv.tabSize + mkInt(1),
+                     recv.tabSize),
+        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
+    SymVal(kind: svTable,
+      tabDataRaw: newData,
+      tabDataMore: newMore,
+      tabPresentRaw: newPresent,
+      tabSize: ite(wasPresent, recv.tabSize, recv.tabSize + mkInt(1)),
+      tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
   of iekTableDel:
     let recv = lower(env, e.mutRecv)
     if containerRecvDeclined(recv, svTable, "`t.del(k)`"): return recv
-    let keyProto = SymVal(kind: svString, str: mkString(""))
-    let keySV = lower(env, e.mutArg, some(keyProto))
-    let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
-      recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
-    noteTableKey(keySV.str)   ## RFC-0005 S8f
-    let wasPresent = select(typedPresent, keySV.str)
-    let newPresent = store(typedPresent, keySV.str, mkBool(false))
-    let newSize = ite(wasPresent, recv.tabSize - mkInt(1), recv.tabSize)
+    let keySV = lower(env, e.mutArg, seqElemLitProto(recv.tabKeyTy))
+    let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)   ## RFC-0005 S8ar
+    if kOpt.isNone:
+      lowerDegrade(feUnsupportedOp,
+        "iekTableDel: key lowered to " & plainEnglishSymValKind(keySV.kind) &
+        " — expected a " & $recv.tabKeyTy & " (feUnsupportedOp)")
+      return recv
+    let ctx = recv.tabSize.ctx
+    let k = kOpt.get
+    let fls = mkBool(false)
+    let wasPresent = wrap[Z3Bool](ctx,
+      checkedSelect(ctx, recv.tabPresentRaw.raw, k.raw))
+    let newPresent = wrap[Z3AnyAst](ctx,
+      checkedStore(ctx, recv.tabPresentRaw.raw, k.raw, fls.raw))
+    let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)
+    if nanOpt.isSome:
+      # RFC-0005 S8at: `t.del(NaN)` finds nothing to remove.
+      let nan = nanOpt.get
+      return SymVal(kind: svTable,
+        tabDataRaw: recv.tabDataRaw,
+        tabDataMore: recv.tabDataMore,   ## RFC-0005 S8at
+        tabPresentRaw: wrap[Z3AnyAst](ctx, checkedIte(ctx, nan.raw,
+          recv.tabPresentRaw.raw, newPresent.raw)),
+        tabSize: ite(wasPresent and not nan, recv.tabSize - mkInt(1),
+                     recv.tabSize),
+        tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
     SymVal(kind: svTable,
       tabDataRaw: recv.tabDataRaw,
-      tabPresentRaw: toAnyAst(newPresent),
-      tabSize: newSize,
+      tabDataMore: recv.tabDataMore,   ## RFC-0005 S8at
+      tabPresentRaw: newPresent,
+      tabSize: ite(wasPresent, recv.tabSize - mkInt(1), recv.tabSize),
       tabKeyTy: recv.tabKeyTy, tabValTy: recv.tabValTy)
   of iekSetIncl:
     let recv = lower(env, e.mutRecv)
@@ -8095,32 +9889,138 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # raise BEFORE any consumer observes this result (mirrors `iekStrAt`'s
     # own "value computed unconditionally, only ever OBSERVED on the
     # in-bounds survivor" doc precedent).
+    if e.delShift:
+      # RFC-0005 S8bl: `delete(s, i)` -- every element after `i` moves down
+      # one (`movingCopy(x[j], x[j+1])`, then `setLen(len - 1)`): each data
+      # array is `lambda j. ite(j < i, a[j], a[j + 1])`. The defects are
+      # `del`'s (a `Natural` index; `i > high(x)` raises IndexDefect).
+      let ctx = requireCurrentContext()
+      inc sliceViewCounter
+      let jVar = mkIntVar("__delete_j" & $sliceViewCounter)
+      let below = jVar < idxZi
+      let next = jVar + mkInt(1)
+      var arrs: seq[Z3AnyAst]
+      for arr in seqArrs(recv):
+        let here = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, jVar.raw))
+        let after = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, next.raw))
+        arrs.add lambdaOver(ctx, jVar, wrap[Z3AnyAst](ctx,
+          checkedIte(ctx, below.raw, here.raw, after.raw)))
+      return mkSeqSV(lenZi - mkInt(1), arrs, recv.seqElemTy)
     let lastVal = seqElemAt(recv, lenZi - mkInt(1)) # [placeholder-audited]
-    let newData = storeSeqElem(recv.seqDataRaw, recv.seqElemTy, idxZi, lastVal) # [placeholder-audited]
-    SymVal(kind: svSeq, seqLen: lenZi - mkInt(1),
-           seqDataRaw: newData, seqElemTy: recv.seqElemTy)
-  of iekSeqInsert, iekSeqPop:
-    # N46 (round-6 re-review, ADR-0023/SND-3 class widening): was a raw
-    # `raise newException`. `iekSeqInsert` (N14 item 4, decline-with-doctrine:
-    # a general symbolic-length shift needs either a quantifier or an
-    # unbounded per-index unroll, both outside this engine's quantifier-free
-    # doctrine — see the N14 test suite's own doc comment for the full
-    # adjudication) stays classified here, unchanged from its pre-N14 shape.
-    # `iekSeqPop` is now DEAD CODE: no parse site ever constructs it (grep
-    # confirms zero `"pop"` recognition sites pre-N14), and N14 modeled
-    # `.pop()` via a NEW dedicated statement (`isSeqPop`, mirroring `isIndex`)
-    # instead of this expression kind — `.pop()` needs a FRESH return-value
-    # bind alongside the receiver rebind, a shape this single-result
-    # expression arm cannot carry. Left in place (both the IR kind and this
-    # arm) rather than deleted: removing an IR kind mid-round is out of this
-    # slice's scope, and an unreachable exhaustive-match arm costs nothing.
-    let recv = case e.kind
-      of iekSeqInsert: lower(env, e.insSeq)
-      else:            lower(env, e.popSeq)
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+    let stored = seqStoreArrs(recv, idxZi, lastVal)
+    if stored.isNone: return seqStoreDecline("iekSeqDel", recv.seqElemTy, lastVal)
+    mkSeqSV(lenZi - mkInt(1), stored.get, recv.seqElemTy)
+  of iekSeqInsert:
+    # RFC-0005 S8ar. `insert(x, item, i)` (system.nim): `i` is a `Natural`
+    # (a negative `i` raises RangeDefect at the call, before any change);
+    # then `setLen(x, len + 1)` (the new last element is T's zero), the
+    # elements at `i ..< len` move up one, and `x[i] = item` -- which raises
+    # IndexDefect for `i > len`, AFTER the seq has grown (probed:
+    # `@[1,2,3].insert(9, 5)` caught leaves `@[1, 2, 3, 0]`). The parser
+    # emits the call as two assignments to the receiver, the grow phase
+    # (`insGrow`) and then the place phase, so each phase's defect forks
+    # with the state Nim raises it in. N14 had declined `insert` as needing
+    # a quantifier; the shift is the array lambda `iekSeqSlice` already
+    # builds (beta-reduced by Z3 at every select).
+    let recv = lower(env, e.insSeq)
+    if recv.kind != svSeq:
+      # Defense in depth (W2b precedent): the parser emits `insert` only for
+      # an itSeq receiver.
+      let declineMsg = "iekSeqInsert: receiver lowered to " &
+        plainEnglishSymValKind(recv.kind) & " — expected svSeq (weInternalWalkerFault)"
+      lowerDegrade(weInternalWalkerFault, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
+        freshDegradeName("__seqInsertKindMismatch"), fresh)
+    if recv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      declinePlaceholderInLower(recv, "", "mutation (.insert)")
+      return recv
+    let idxZi = toZ3Int(lower(env, e.insIdx, some(SymVal(kind: svInt, zi: mkInt(0)))))
+    let lenZi = recv.seqLen # [placeholder-audited]
+    if e.insGrow:
+      let negIdx = idxZi < mkInt(0)
+      rangeDefectConds.add negIdx
+      syncRangeDefectCond(negIdx)
+      if not defaultZeroTotal(recv.seqElemTy):
+        # A backed element type whose all-zero memory is not a value of
+        # the type (a variant whose ordinal-0 tag is illegal) has no
+        # `setLen` element to model.
+        let declineMsg = "iekSeqInsert: the element type " &
+          plainEnglishTypeKind(recv.seqElemTy.kind) &
+          " has no zero value for insert's setLen (feUnsupportedOp)"
+        lowerDegrade(feUnsupportedOp, declineMsg)
+        var fresh: seq[Z3Bool]
+        return allocateSym(
+          tUnsupportedFieldSeq(recv.seqElemTy, declineMsg, kind = feUnsupportedOp),
+          freshDegradeName("__seqInsertNoZero"), fresh)
+      let zero = defaultZero(recv.seqElemTy, freshDegradeName("__seqInsertZero"))
+      # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`).
+      let grown = seqStoreArrs(recv, lenZi, zero)
+      if grown.isNone: return seqStoreDecline("iekSeqInsert", recv.seqElemTy, zero)
+      return mkSeqSV(lenZi + mkInt(1), grown.get, recv.seqElemTy)
+    let val = lower(env, e.insVal, intLitProto(recv.seqElemTy))
+    if not seqElemFits(val, recv.seqElemTy):
+      let declineMsg = "iekSeqInsert: element lowered to " &
+        plainEnglishSymValKind(val.kind) & " for a seq[" &
+        plainEnglishTypeKind(recv.seqElemTy.kind) & "] (weInternalWalkerFault)"
+      lowerDegrade(weInternalWalkerFault, declineMsg)
+      var fresh: seq[Z3Bool]
+      return allocateSym(
+        tUnsupportedFieldSeq(tInt(8, false), declineMsg, kind = weInternalWalkerFault),
+        freshDegradeName("__seqInsertElemMismatch"), fresh)
+    # The grow phase made `lenZi` the new length, so `x[i]` is out of
+    # bounds exactly when `i >= lenZi` (`i > ` the length at the call).
+    let oob = idxZi >= lenZi
+    seqOobConds.add oob
+    syncSeqOobCond(oob)
+    # data'[j] = (j <= i ? store(data, i, item)[j] : data[j - 1]).
+    let zctx = recv.seqDataRaw.ctx # [placeholder-audited]
+    # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`), and one
+    # shift lambda per data array.
+    let storedOpt = seqStoreArrs(recv, idxZi, val)
+    if storedOpt.isNone: return seqStoreDecline("iekSeqInsert", recv.seqElemTy, val)
+    let stored = storedOpt.get
+    let orig = seqArrs(recv)
+    inc sliceViewCounter
+    let jVar = mkIntVar("__insertview_j" & $sliceViewCounter)
+    let below = jVar <= idxZi
+    let jPrev = jVar - mkInt(1)
+    # OWNERSHIP DISCIPLINE: every intermediate wrapped on creation (see
+    # `iekSeqSlice`).
+    var lams: seq[Z3AnyAst]
+    for k in 0 ..< stored.len:
+      let selStored = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, stored[k].raw, jVar.raw))
+      let selPrev = wrap[Z3AnyAst](zctx,
+        checkedSelect(zctx, orig[k].raw, jPrev.raw))
+      let body = wrap[Z3AnyAst](zctx,
+        checkedIte(zctx, below.raw, selStored.raw, selPrev.raw))
+      lams.add lambdaOver(zctx, jVar, body)
+    mkSeqSV(lenZi, lams, recv.seqElemTy)
+  of iekSeqPop:
+    # `iekSeqPop` is DEAD CODE: no parse site constructs it. N14 modeled
+    # `.pop()` via a dedicated statement (`isSeqPop`, mirroring `isIndex`),
+    # since `.pop()` needs a FRESH return-value bind alongside the receiver
+    # rebind, a shape this single-result expression arm cannot carry.
+    let recv = lower(env, e.popSeq)
     lowerDegrade(feUnsupportedOp,
       "Phase 5+: " & $e.kind & " lowering arrives with #143 " &
            "follow-up (feUnsupportedOp)")
     return recv
+  of iekTabRemovedSince:
+    # RFC-0005 S8bx (item 4). Whether a key was removed from the table since
+    # it was `trBase`, read off the term: the presence array is `trBase`'s
+    # under a chain of stores (`[]=` stores `true`, `del` / `pop` / `take`
+    # store `false`, `clear` is a fresh array), so a `false` store, or any
+    # other shape between the two, is a removal -- or one this cannot rule
+    # out, which is the same answer (the slot walk is then declined).
+    let cur = lower(env, e.trCur)
+    let base = lower(env, e.trBase)
+    SymVal(kind: svBool, bo: mkBool(
+      cur.kind != svTable or base.kind != svTable or
+      presenceRemoved(cur.tabPresentRaw, base.tabPresentRaw)))
   of iekContains:
     let recv = lower(env, e.container)
     case recv.kind
@@ -8129,13 +10029,20 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
         # RFC-0005 S8u: a non-string-keyed table (declined at allocation).
         var fresh: seq[Z3Bool]
         return allocateSym(tBool(), freshDegradeName("__tabKeyDegrade"), fresh)
-      let keyProto = SymVal(kind: svString, str: mkString(""))
-      let keySV = lower(env, e.key, some(keyProto))
-      doAssert keySV.kind == svString
-      let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
-        recv.tabPresentRaw.ctx, recv.tabPresentRaw.raw)
-      noteTableKey(keySV.str)   ## RFC-0005 S8f
-      ofBool(select(typedPresent, keySV.str))
+      # RFC-0005 S8ar: every backed key type (`tabKeyTerm`).
+      let keySV = lower(env, e.key, seqElemLitProto(recv.tabKeyTy))
+      let kOpt = tabKeyTerm(keySV, recv.tabKeyTy)   ## RFC-0005 S8f: noted
+      if kOpt.isNone:
+        lowerDegrade(feUnsupportedOp,
+          "`k in t`: key lowered to " & plainEnglishSymValKind(keySV.kind) &
+          " — expected a " & $recv.tabKeyTy & " (feUnsupportedOp)")
+        var fresh: seq[Z3Bool]
+        return allocateSym(tBool(), freshDegradeName("__tabKeyDegrade"), fresh)
+      let ctx = recv.tabSize.ctx
+      let found = wrap[Z3Bool](ctx,
+        checkedSelect(ctx, recv.tabPresentRaw.raw, kOpt.get.raw))
+      let nanOpt = tabKeyNaN(keySV, recv.tabKeyTy)   ## RFC-0005 S8at
+      ofBool(if nanOpt.isSome: found and not nanOpt.get else: found)
     of svSet:
       # For HashSet[int]: key is BV[64]; select(members, key) → Bool.
       # Phase 16 INV: non-int64 element types (e.g. set[char] / HashSet[uint8])
@@ -8209,9 +10116,20 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       elems.add lower(env, c, protoSV)
     SymVal(kind: svArray, arrElems: elems, arrElemTy: e.lelemTy)
   of iekIndex:
+    lowerAsReceiver = true   ## RFC-0005 S8bw: the element is the read
     let recv = lower(env, e.arr)
-    doAssert recv.kind == svArray,
-      "iekIndex on non-array kind=" & $recv.kind
+    if recv.kind != svArray or recv.arrElems.len == 0:
+      # RFC-0005 S8bw (item 1): a receiver that did not lower to an array
+      # (the stand-in of an earlier in-band decline: a global read before
+      # any write was an int) declines in-band. This was a `doAssert`, a
+      # `weInternalWalkerFault` (`gArr[2] = k` then `gArr[2]`).
+      return degradeAlloc(
+        (if proto.isSome: tyOf(proto.get) else: tInt(64, true)),
+        feUnsupportedExprKind,
+        "iekIndex: receiver lowered to " & plainEnglishSymValKind(recv.kind) &
+          (if recv.kind == svArray: " of no elements" else: "") &
+          ", not an array -- degraded to sxUnknown (feUnsupportedExprKind)",
+        "__indexRecvDegrade")
     if e.idx.kind == iekIntLit:
       # Fast path: concrete index. No fork; direct element lookup.
       let ix = int(e.idx.ival)
@@ -8226,7 +10144,6 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       # element[0] — for OOB-handling cycle 8, the OOB path forks
       # before this point and adds the OOB constraint to its pc.
       let idxSV = lower(env, e.idx)
-      doAssert recv.arrElems.len > 0
       var res = recv.arrElems[0]
       for k in 1 ..< recv.arrElems.len:
         let kSV = coerceIntLit(idxSV, int64(k))
@@ -8360,8 +10277,9 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let pp = probeProto(env, e)
       let l = lower(env, e.lhs, pp)
       let r = lower(env, e.rhs, pp)
+      if (l.kind == svBool) != (r.kind == svBool):
+        return mixedBitwiseDecline(l, r, e.bop)   ## RFC-0005 S8bc
       if l.kind == svBool:
-        doAssert r.kind == svBool
         case e.bop
         of bAnd: ofBool(l.bo and r.bo)
         of bOr:  ofBool(l.bo or  r.bo)
@@ -8470,6 +10388,8 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
       let pp = probeProto(env, e)
       let l = ejectBase(lower(env, e.lhs, pp))   ## Phase 15 G4: distinct→base
       let r = ejectBase(lower(env, e.rhs, pp))
+      when defined(symexTestInjectWalkerFault):
+        injectShapeFault("term")   # RFC-0005 S8ce: both operands built
       lowerArith(l, r, e.bop)
   of iekBorrowOp:
     # Phase 15 G5. A `{.borrow.}` operator on a `distinct T`: EJECT both operands
@@ -8576,44 +10496,19 @@ proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
     # RFC-0005 S8bq (item 2). A builtin `set[T]` operation.
     lowerBitSet(env, e)
   of iekSeqNew:
-    # RFC-0005 S8bi. `newSeq[T](n)` (and `newSeq(s, n)`): length `n`, every
-    # element `default(T)`; `newSeqOfCap[T](n)`: length 0; `newSeqUninit[T]
-    # (n)`: length `n`, elements unspecified. All three take `n: Natural`,
-    # so a negative `n` raises `RangeDefect` before anything is allocated
-    # (probe: "value out of range: -1 notin 0 .. 9223372036854775807").
-    let n = toZ3Int(lower(env, e.snArg))
-    let neg = n < mkInt(0)
-    rangeDefectConds.add neg
-    syncRangeDefectCond(neg)
-    let elemTy = e.snElemTy
-    let len = if e.snOfCap: mkInt(0) else: n
-    if not isBackedSeqElemTy(elemTy):
-      # As `lowerSeqLit`'s unbacked arm: no array to build the elements in.
-      lowerDegrade(seNestedSeqUnsupported,
-        "seq[seq[T]] / seq[complex] not modeled — element kind " &
-             plainEnglishTypeKind(elemTy.kind) &
-             " (nested seq element type is not supported)")
-      var fresh: seq[Z3Bool]
-      return allocateSym(tSeq(elemTy),
-                         freshDegradeName("__newSeqUnsupportedDegrade"), fresh)
-    let dataRaw =
-      if e.snZeroed:
-        # The constant array of `default(T)`: every index reads the zero.
-        let ctx = requireCurrentContext()
-        let zero = defaultZero(elemTy, "__newSeq.zero")
-        let idxSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
-        wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const_array(ctx.raw, idxSort,
-                                                           rawAnyAstOf(zero)))
-      else:
-        # Nim leaves them unset: any value. RFC-0005 S8bq: registered as a
-        # `newSeqUninit` base, so only a READ of an element no write has
-        # reached is tainted (`uninitReadCond`); S8bi tainted the whole
-        # path here.
-        let base = allocateSeqDataRaw(elemTy,
-                                      freshDegradeName("__newSeqUninit.data"))
-        noteUninitSeqBase(base)
-        base
-    SymVal(kind: svSeq, seqLen: len, seqDataRaw: dataRaw, seqElemTy: elemTy)
+    lowerSeqNew(env, e)
+
+proc lower(env: Env, e: IRExpr, proto: Option[SymVal] = none(SymVal)): SymVal =
+  ## Lower `e` under `env` (`lowerExpr`). RFC-0005 S8bw (item 2): the value
+  ## of a read of a global -- the outermost access of a chain over it, not
+  ## a receiver of one -- declines in-band when it mentions an unwritten
+  ## part (`observeGlobalRead`); an element read is simplified first, so a
+  ## constant index picks its element.
+  let asReceiver = lowerAsReceiver
+  lowerAsReceiver = false
+  result = lowerExpr(env, e, proto)
+  if not asReceiver and e != nil and e.kind in {iekVar, iekField, iekIndex}:
+    observeGlobalRead(e, result, simplified = e.kind == iekIndex)
 
 proc lowerBool(env: Env, e: IRExpr): Z3Bool =
   let sv = lower(env, e, some(ofBool(mkBool(true))))
@@ -8675,6 +10570,8 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
   ## Nim byte — the `raise` below is an assertion on that standing
   ## invariant, not a real runtime path.
   let ev = m.eval(a, modelCompletion = true)
+  when defined(symexTestInjectWalkerFault):
+    injectShapeFault("eval")   # RFC-0005 S8ce: the evaluated term live
   let codepoints = getStringContents(ev)
   result = newString(codepoints.len)
   for i, cp in codepoints:
@@ -8683,6 +10580,14 @@ proc evalStrBytes(m: Z3Model, a: Z3String): string =
         "evalStrBytes: model codepoint " & $cp & " at index " & $i &
         " outside nelli's byte-string invariant [0, 255]")
     result[i] = char(cp)
+
+when defined(symexTestInjectWalkerFault):
+  proc injectedExtractionFaultTerms(s: Z3String): seq[Z3String] =
+    ## RFC-0005 S8bx fault injection (see `extractLeaf`): raises with a Z3
+    ## term in its result, which the caller destroys on the raise path.
+    result = @[s]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+      "S8bx synthetic swallowed extraction fault (symexTestInjectWalkerFault)")
 
 proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
   ## Populate the flat witness tables for a primitive SymVal at the
@@ -8740,7 +10645,21 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     if sv.signed: w.intVals[path] = int64(m.evalInt(sv.bv64))
     else:         w.uintVals[path] = m.evalUint(sv.bv64)
   of svInt:
-    let v = int64(m.evalInt(sv.zi))
+    # RFC-0005 S8ax: `evalInt` raises on a value outside `int64`, and a
+    # raise out of the walk ends it with nothing recorded (a false
+    # `sxUnsat`). Every cell an Int-sorted heap read is bounded
+    # (`intCellRangeFacts`); one the query never read is only the model's,
+    # and is recorded as not extracted instead.
+    let ev = m.eval(sv.zi, modelCompletion = true)
+    var v: int64
+    if not Z3_get_numeral_int64(ev.ctx.raw, ev.raw, addr v):
+      let exErrI = SymexErrorInfo(kind: feExtractionFailed, severity: sevError,
+        msg: "integer witness at '" & path & "' is not an int64 numeral (" &
+             $ev & ")",
+        scope: walkSite())
+      extractionErrors.add exErrI     # threadvar: fallback
+      syncExtractionError(exErrI)     # CR-9 Stage 5: LIVE WalkCtx field
+      v = 0
     w.intVals[path] = v
     # Phase 14 A6: a promoted variant discriminator lands in svInt
     # but the witness reader for its underlying `itInt(unsigned)`
@@ -8748,12 +10667,28 @@ proc extractLeaf(m: Z3Model, w: var RawWitness, path: string, sv: SymVal) =
     # whichever reader path the emitter picks finds the value.
     if v >= 0: w.uintVals[path] = uint64(v)
   of svString:
+    when defined(symexTestInjectWalkerFault):
+      # RFC-0005 S8bx fault injection (compiled out of every normal build;
+      # `-d:symexTestInjectWalkerFault` is set for its dedicated test files
+      # only, by their `.nim.cfg`): witness extraction fails on a string
+      # parameter named for the shape. `injectExtractionFault` raises
+      # straight out of extraction; `injectSwallowedExtractionFault` raises
+      # in a callee whose result -- holding a Z3 term -- the C backend
+      # destroys on the raise path, which loses the raise inside extraction
+      # itself at base (S8ce's nim-z3 fix keeps it).
+      if path == "injectExtractionFault":
+        raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the S8bx extraction-raise test)]
+          "S8bx synthetic extraction fault (symexTestInjectWalkerFault)")
+      if path == "injectSwallowedExtractionFault":
+        var held = @[sv.str]   # reassigned, as `walkBlock` reassigns
+        held = injectedExtractionFaultTerms(sv.str)
+        discard held
     w.strVals[path] = m.evalStrBytes(sv.str)
   of svTuple, svArray, svSeq, svTable, svSet, svVariant, svMultiVariant,
      svDistinct, svClosure, svRef, svPtr, svBitSet:
     ## svClosure: Phase 15 C1; svRef/svPtr: Phase 15 R1a (no witness leaf yet —
     ## the heap-snapshot witness format lands R11b/R12).
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction -- reached only from extractWitness, called once after walk/walkBlock has fully returned a SAT path's frontier (per-path Z3 check happens outside walk's own recursive call stack, not nested inside any walkBlock/loop frame)]
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction -- runs inside the walk since S1c (trySolve); it reaches runSymexCaught as weInternalWalkerFault on both backends (RFC-0005 S8ce)]
       "extractLeaf called on non-primitive kind=" & $sv.kind)
 
 proc clampToDeclaredRange(v: int64, ty: IRType): int64 =
@@ -8825,6 +10760,14 @@ func cellInDomain(c: int64; ty: IRType): bool =
   else: cast[uint64](c) >= cast[uint64](d.lo) and
         cast[uint64](c) <= cast[uint64](d.hi)
 
+proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string]
+  ## RFC-0005 S8ar fwd-decl (defined below, by `renderHeapCompound`).
+  ## `extractSeqElements` renders a `seq[string]` element with it.
+
+proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal)
+  ## RFC-0005 S8at fwd-decl: a container `Table` value is extracted as one.
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -8836,82 +10779,236 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
   ## value names until there are `len` entries. A select at any term sees
   ## exactly the model's answer, and no select can see a fresh key, so the
   ## real table behaves as the model on the winning path.
-  case sv.tabValTy.kind
-  of itInt, itBool:   # RFC-0005 S8z: + bool
-    let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
-      sv.tabDataRaw.ctx, sv.tabDataRaw.raw)
-    let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
-      sv.tabPresentRaw.ctx, sv.tabPresentRaw.raw)
-    template emit(k: string; v0: int64) =
-      var v = cellModelValue(v0, sv.tabValTy)   # RFC-0005 S8z
+  ## RFC-0005 S8ar: every backed key and value type. A cell key renders as
+  ## the decimal of its cell (`witnessIntAs` reads it back), from the run's
+  ## set keys in the key type's domain, filled from the domain's low end as
+  ## `extractSetMembers` fills; a value as the leaf its type has (a cell in
+  ## `intVals`, a string in `strVals`, a float through `extractLeaf`). Was
+  ## string keys and integer values only: any other value rendered no
+  ## entry at all.
+  let ctx = sv.tabSize.ctx
+  let kty = sv.tabKeyTy
+  let vty = sv.tabValTy
+  var keyList: seq[string]
+  proc emit(w: var RawWitness; k: string; keyRaw: RawZ3Ast) =
+    let vpath = path & "." & k
+    let v = tabValAt(ctx, sv, keyRaw)
+    case tabValLeaf(vty)
+    of tvCell:
+      let c = case v.kind
+              of svBool: (if m.evalBool(v.bo): 1'i64 else: 0'i64)
+              else: int64(m.evalInt(cellOf(v, vty).get))
+      var x = cellModelValue(c, vty)   # RFC-0005 S8z
       # Issue #163 review R4: a value no read on the winning path
       # range-constrained (a key read on an untaken branch, or a fresh fill
       # key) is the model's free choice and may fall outside a
       # `range[lo..hi]` value type -- see `clampToDeclaredRange`.
-      if sv.tabValTy.kind == itInt and sv.tabValTy.hasRange:   # S8z: bool
-        v = clampToDeclaredRange(v, sv.tabValTy)
-      keyList.add k
-      w.intVals[path & "." & k] = v
-    var keyList: seq[string]
+      if vty.kind == itInt and vty.hasRange:   # S8z: bool
+        x = clampToDeclaredRange(x, vty)
+      w.intVals[vpath] = x
+    of tvStr:
+      w.strVals[vpath] = evalStrBytesOrEmpty(m, v.str).get("")
+    of tvF32, tvF64:
+      extractLeaf(m, w, vpath, v)
+    of tvTree:
+      # RFC-0005 S8at: a container value is written as a by-value param of
+      # its type is (`seqLens` + elements, `setMembers`, `tabKeys`).
+      extractFromSymVal(m, w, vpath, v)
+  let present = sv.tabPresentRaw
+  if kty.kind == itString:
     var named: HashSet[string]   ## every term's value, present or not
     for t in containerCard.tabKeys:
       let k = m.evalStrBytes(t)
       if k in named: continue
       named.incl k
-      if m.evalBool(select(typedPresent, t)):
-        emit(k, int64(m.evalInt(select(typedData, t))))
+      if m.evalBool(wrap[Z3Bool](ctx, checkedSelect(ctx, present.raw, t.raw))):
+        keyList.add k
+        emit(w, k, t.raw)
     let n = renderedSize(m, sv.tabSize)
     var fill = 0
     while keyList.len < n:
       let k = "k" & $fill
       inc fill
       if k notin named:
-        emit(k, int64(m.evalInt(select(typedData, mkString(k)))))
-    w.tabKeys[path] = keyList
+        keyList.add k
+        let ks = mkString(k)
+        emit(w, k, ks.raw)
+  else:
+    var named: HashSet[int64]
+    for t in containerCard.setKeys:
+      let c = int64(m.evalInt(t))
+      if c in named: continue
+      named.incl c
+      if cellInDomain(c, kty) and
+         m.evalBool(wrap[Z3Bool](ctx, checkedSelect(ctx, present.raw, t.raw))):
+        keyList.add $c
+        emit(w, $c, t.raw)
+    let n = renderedSize(m, sv.tabSize)
+    let d = cellDomain(kty)
+    var fill = if d.bounded: d.lo else: 0'i64
+    while keyList.len < n:
+      if not cellInDomain(fill, kty): break   # unreachable: the size bound
+      if fill notin named:
+        keyList.add $fill
+        let kc = mkBitVec[64](fill)
+        emit(w, $fill, kc.raw)
+      if d.bounded and fill == d.hi: break
+      inc fill
+  w.tabKeys[path] = keyList
+
+proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
+                        sv: SymVal, n: int)
+proc extractSetMembers(m: Z3Model, w: var RawWitness, path: string,
+                       sv: SymVal)
+proc evalDiscOrdinal(m: Z3Model, disc: SymVal): int64
+  ## RFC-0005 S8bc fwd-decls, for `extractTreeValue`.
+
+const maxWitnessSeqLen* = int(maxModelledInitialSize)
+  ## RFC-0005 S8bl (item 4). The longest nested seq (a seq inside a seq
+  ## element or a heap cell, which has no allocation bound) a witness
+  ## renders at its model length -- `newSeq`'s modelled size bound
+  ## (`types.maxModelledInitialSize`; batch 7 made it that constant rather
+  ## than a second `1 shl 20`). Was 1024.
+
+proc witnessSeqLen(raw: int64): int =
+  ## RFC-0005 S8bl (item 4). A nested seq's rendered length: its model
+  ## length within `[0, maxWitnessSeqLen]`, else 0 (an unread length is
+  ## free, and the path does not depend on it).
+  if raw >= 0 and raw <= maxWitnessSeqLen: int(raw) else: 0
+
+proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
+                      sv: SymVal, ty: IRType) =
+  ## RFC-0005 S8bc (item 3). Write the tree value `sv` of type `ty` -- an
+  ## element of a leaf-split seq -- under `path`, in the layout the heap's
+  ## cell values have (`renderHeapValue`): each part at `<path>.<label>`
+  ## (`heapPartLabel`: a field's name, an anonymous tuple's `Field<i>`, an
+  ## array's position), a case object's discriminator and the fields of the
+  ## arm it selects (and the plain fields) at `<path>.<name>`. That is the
+  ## layout `readCellField`'s `fieldPairs` walk reads, which the witness
+  ## reader of a seq of such elements uses (`readSeqAs`). A ref or ptr part
+  ## writes nothing (no position is collected for it, and a parameter whose
+  ## seq element holds one is not renderable, `isRenderableWitnessTy`). A
+  ## scalar part no path read is free in the model and is clamped into its
+  ## range, as a cell's is (`clampWitnessField`).
+  if ty == nil: return
+  case ty.kind
+  of itDistinct:
+    extractTreeValue(m, w, path, ejectBase(sv), distinctGround(ty))
+  of itInt, itBool, itFloat32, itFloat64:
+    extractLeaf(m, w, path, sv)
+    clampWitnessField(w, path, ty)
+  of itString:
+    if sv.kind == svString:
+      w.strVals[path] = evalStrBytesOrEmpty(m, sv.str).get("")
+  of itTuple, itArray:
+    for i, part in heapParts(ty):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      extractTreeValue(m, w, path & "." & part.label, psv, part.ty)
+  of itVariant, itMultiVariant:
+    if not svFitsHeapTy(sv, ty): return
+    template axis(discName: string; discTy: IRType; disc: SymVal;
+                  arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let dp = path & "." & discName
+      extractLeaf(m, w, dp, disc)
+      clampWitnessField(w, dp, discTy)
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          extractTreeValue(m, w, path & "." & fname,
+            armFields[arm.tagOrdinal][j], arm.fieldTypes[j])
+    if ty.kind == itVariant:
+      axis(ty.vDiscName, ty.vDiscTy, sv.vDisc[], ty.vArms, sv.vArmFields)
+      for i, fname in ty.vPlainFieldNames:
+        extractTreeValue(m, w, path & "." & fname, sv.vPlainFields[i],
+                         ty.vPlainFieldTypes[i])
+    else:
+      for xi, ax in ty.mvAxes:
+        axis(ax.discName, ax.discTy, sv.mvAxes[xi].disc[], ax.arms,
+             sv.mvAxes[xi].armFields)
+      for i, fname in ty.mvPlainFieldNames:
+        extractTreeValue(m, w, path & "." & fname, sv.mvPlainFields[i],
+                         ty.mvPlainFieldTypes[i])
+  of itSeq:
+    if sv.kind != svSeq: return
+    if sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # A placeholder's content is never modelled (a read of it declines).
+      w.seqLens[path] = 0
+      return
+    # An element's nested length has no `1024` bound (`svCellWf`'s
+    # `bounded = false`). RFC-0005 S8bl (item 4): it renders at its model
+    # length up to `maxWitnessSeqLen` (was 1024: a path that needs a longer
+    # nested seq rendered it empty, and the replay refuted the witness);
+    # past that -- an unread length is free -- it renders empty.
+    let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
+    w.seqLens[path] = n
+    extractSeqElements(m, w, path, sv, n)
+  of itTable:
+    if sv.kind == svTable: extractTableEntries(m, w, path, sv)
+  of itSet:
+    if sv.kind == svSet: extractSetMembers(m, w, path, sv)
   else: discard
 
 proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
                         sv: SymVal, n: int) =
   ## Read elements 0..<n from the seq's Z3Array, dispatching on the
   ## element type to wrap/select with the right typed handle.
-  case sv.seqElemTy.kind
+  ## RFC-0005 S8bd: on the CELL type (`seqCellTy`): a `seq[distinct T]`
+  ## holds `T`'s sort and renders as `T`'s leaves, converted back by the
+  ## reader (`emitTyAndReader`).
+  let cellTy = seqCellTy(sv.seqElemTy)
+  if isTreeSeqElemTy(cellTy):
+    # RFC-0005 S8bc: a tree element, rebuilt from every data array
+    # (`seqElemAt`) and written in the heap's cell layout.
+    for i in 0 ..< n:
+      extractTreeValue(m, w, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                       cellTy)
+    return
+  case cellTy.kind
   of itInt:
-    case sv.seqElemTy.width
+    case cellTy.width
     of 8:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 16:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 32:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     of 64:
       let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
         sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
       for i in 0 ..< n:
         var v = m.evalInt(select(typed, mkInt(i)))
-        if sv.seqElemTy.hasRange: v = clampToDeclaredRange(v, sv.seqElemTy)
-        if sv.seqElemTy.signed: w.intVals[path & "." & $i] = int64(v)
+        if cellTy.hasRange: v = clampToDeclaredRange(v, cellTy)
+        if cellTy.signed: w.intVals[path & "." & $i] = int64(v)
         else: w.uintVals[path & "." & $i] = uint64(v)
     else:
-      raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-        "extractSeqElements: unsupported int width " & $sv.seqElemTy.width)
+      raise newException(ValueError,  # [raise-audited: category-c: witness extraction (RFC-0005 S8ce; see extractLeaf above)]
+        "extractSeqElements: unsupported int width " & $cellTy.width)
   of itBool:
     let typed = wrap[Z3Array[Z3Int, Z3Bool]](
       sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
@@ -8929,6 +11026,16 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     for i in 0 ..< n:
       let elem = SymVal(kind: svFloat64, fp64: select(typed, mkInt(i)))
       extractLeaf(m, w, path & "." & $i, elem)
+  of itString:
+    # RFC-0005 S8ar: a `seq[string]` witness. An element no path read is
+    # unconstrained in the model (the byte facts are its reads',
+    # `seqStrElemConds`), so a non-byte value renders "" -- any byte string
+    # is a correct rendering of an element nothing observed.
+    let typed = wrap[Z3Array[Z3Int, Z3String]](
+      sv.seqDataRaw.ctx, sv.seqDataRaw.raw) # [placeholder-audited]
+    for i in 0 ..< n:
+      w.strVals[path & "." & $i] =
+        evalStrBytesOrEmpty(m, select(typed, mkInt(i))).get("")
   of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elements.
     # The per-element pointee VALUES of a `seq[ref T]` were observed only
     # through the heap (`select(path.heaps[T], elem)`); the full per-element
@@ -8940,8 +11047,8 @@ proc extractSeqElements(m: Z3Model, w: var RawWitness, path: string,
     # reader uses defaults so it never KeyErrors.
     discard
   else:
-    raise newException(ValueError,  # [raise-audited: category-c: post-walk witness extraction (see extractLeaf above)]
-      "extractSeqElements: unsupported element kind " & $sv.seqElemTy.kind)
+    raise newException(ValueError,  # [raise-audited: category-c: witness extraction (RFC-0005 S8ce; see extractLeaf above)]
+      "extractSeqElements: unsupported element kind " & $cellTy.kind)
 
 proc bitSetModelMembers(m: Z3Model; sv: SymVal): seq[int64] =
   ## RFC-0005 S8bq. The members of a builtin set under `m`, ascending: the
@@ -9195,6 +11302,69 @@ proc registerNominalIfFull(ty: IRType) =
     heapWitnessNominalRegistry[ty.nominalId] = ty
 
 proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
+                         acc: var seq[RefPos])
+  ## RFC-0005 S8bl fwd decl (defined below `collectTreeRefPositions`).
+
+proc collectTreeRefPositions(m: Z3Model, path: string, sv: SymVal,
+                             ty: IRType, acc: var seq[RefPos]) =
+  ## RFC-0005 S8bl (item 4). The `ref`/`ptr` positions inside the tree value
+  ## `sv` of type `ty` -- an element of a leaf-split seq -- named in the
+  ## heap's cell layout (`extractTreeValue`, `heapPartLabel`), which is the
+  ## layout the witness reader resolves them in (`readSeqAs` ->
+  ## `readCellField`: a part at `<path>.<label>`, a seq's ref element at
+  ## `<path>[<i>]` and its tree element at `<path>.<i>`). Before S8bl no
+  ## position was collected inside a seq element, and a parameter whose
+  ## element held a ref was not witness-renderable. A ref inside a Table or
+  ## HashSet stays unrenderable (`treeRefPartInContainer`).
+  if ty == nil: return
+  case ty.kind
+  of itDistinct:
+    collectTreeRefPositions(m, path, ejectBase(sv), distinctGround(ty), acc)
+  of itRef, itPtr:
+    collectRefPositions(m, path, sv, acc)
+  of itTuple, itArray:
+    for i, part in heapParts(ty):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      collectTreeRefPositions(m, path & "." & part.label, psv, part.ty, acc)
+  of itVariant, itMultiVariant:
+    if not svFitsHeapTy(sv, ty): return
+    template axis(disc: SymVal; arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          collectTreeRefPositions(m, path & "." & fname,
+            armFields[arm.tagOrdinal][j], arm.fieldTypes[j], acc)
+    if ty.kind == itVariant:
+      axis(sv.vDisc[], ty.vArms, sv.vArmFields)
+      for i, fname in ty.vPlainFieldNames:
+        collectTreeRefPositions(m, path & "." & fname, sv.vPlainFields[i],
+                                ty.vPlainFieldTypes[i], acc)
+    else:
+      for xi, ax in ty.mvAxes:
+        axis(sv.mvAxes[xi].disc[], ax.arms, sv.mvAxes[xi].armFields)
+      for i, fname in ty.mvPlainFieldNames:
+        collectTreeRefPositions(m, path & "." & fname, sv.mvPlainFields[i],
+                                ty.mvPlainFieldTypes[i], acc)
+  of itSeq:
+    if sv.kind != svSeq or sv.isUnsupportedFieldPlaceholder: return # [placeholder-audited]
+    if sv.seqElemTy.kind in {itRef, itPtr}:
+      collectRefPositions(m, path, sv, acc)
+    elif isTreeSeqElemTy(sv.seqElemTy):
+      let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
+      for i in 0 ..< n:
+        collectTreeRefPositions(m, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                                sv.seqElemTy, acc)
+  else: discard
+
+proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                          acc: var seq[RefPos]) =
   ## RFC-0005 S8h. The `ref`/`ptr` positions inside the input value `sv` at
   ## `path`, named as `emitTyAndReader` names them (`.<field>`/`.<i>` for a
@@ -9219,7 +11389,14 @@ proc collectRefPositions(m: Z3Model, path: string, sv: SymVal,
                 else: path & "." & $i
       collectRefPositions(m, sub, e, acc)
   of svSeq:
-    if sv.seqElemTy.kind in {itRef, itPtr} and
+    if isTreeSeqElemTy(sv.seqElemTy) and treeHasRefPart(sv.seqElemTy) and
+       not sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # RFC-0005 S8bl (item 4): a tree element's ref parts.
+      let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
+      for i in 0 ..< n:
+        collectTreeRefPositions(m, path & "." & $i, seqElemAt(sv, mkInt(i)),
+                                sv.seqElemTy, acc)
+    elif sv.seqElemTy.kind in {itRef, itPtr} and
        not sv.isUnsupportedFieldPlaceholder: # [placeholder-audited]
       let ctx = sv.seqDataRaw.ctx # [placeholder-audited]
       # Allocation bounds `seqLen` to `[0, 1024]`.
@@ -9279,6 +11456,78 @@ proc inputHeap(key: string): Z3AnyAst =
 proc heapKeyValTy(key: string): IRType =
   ## The value type `mkHeapArrayVar` recorded for `key`, or nil.
   if heapKeyShapes.hasKey(key): heapKeyShapes[key].valTy else: nil
+
+# RFC-0005 S8bh (item 2): the key and code helpers of the ptr target model
+# (`ptrTargets`, runtime_heap.nim), here for `buildHeapSnapshot`.
+
+proc ptrTargetCode*(id: string): int64 =
+  ## RFC-0005 S8bh. The `sel` code of the target named `id` (a heap key, or
+  ## an env name); never 0, the own cell's code.
+  inheritTagCode("ptr:" & id)
+
+proc ptrSelMatches(selV: string; code: int64): bool =
+  ## RFC-0005 S8bh. The model's rendering of a `sel` value (`selV`, decimal
+  ## or a 64-bit `#x` literal) is `code`.
+  selV == $code or selV == "#x" & toHex(code, 16).toLowerAscii
+
+const ptrAimPrefix* = "@aim:"
+  ## RFC-0005 S8bn (item 2). The `aliasRef` of a `ptr` position whose input
+  ## target is a variable (a global, a `var` parameter): `@aim:<IR name>`.
+
+proc ptrSelKey(typeId: string): string = typeId & "__@ptrsel"
+proc ptrIdxKey(typeId: string): string = typeId & "__@ptridx"
+proc ptrKeyKey(typeId: string): string = typeId & "__@ptrkey"
+  ## RFC-0005 S8bn (item 4). The input array `Ref_T -> String` naming the
+  ## key of a pointer whose target is a `Table[string, V]` value.
+  ## RFC-0005 S8bn (item 4). The input array `Ref_T -> Int` naming the
+  ## element a `ptr T` of unknown origin addresses when its target is an
+  ## element of a seq (`ptrTargets`): the snapshot index of the element
+  ## identity (root, path, index).
+
+type PtrLeafAim = object
+  ## RFC-0005 S8bn (item 4). What a `sel` code names, for the snapshot: a
+  ## part of a variable (`name`, the field / element `path` below it, and
+  ## whether the last step is the pointer's seq index), or an element of a
+  ## seq held in a heap field family (`fam`).
+  name: string
+  path: seq[int]
+  steps: seq[string]   ## RFC-0005 S8bw (item 3): `path` as the witness
+                       ## names it (`ptrAimInto`)
+  seqIdx: bool
+  tabKey: bool
+  fam: string
+  typeId: string
+
+var ptrLeafAims {.threadvar.}: Table[int64, PtrLeafAim]
+  ## RFC-0005 S8bn (item 4). Every `sel` code `ptrTargets` gave a part of a
+  ## variable or a heap-held seq element this run; reset at run entry.
+
+proc ptrLeafPathStr(path: seq[int]; seqIdx: bool): string =
+  for i in path: result.add "/" & $i
+  if seqIdx: result.add "/*"
+proc ptrLeafPathStr(steps: seq[string]; seqIdx: bool): string =
+  ## RFC-0005 S8bw (item 3). The steps as the witness names them.
+  for s in steps: result.add "/" & s
+  if seqIdx: result.add "/*"
+proc ptrObjKey(typeId, famKey: string): string = typeId & "__@ptrobj__" & famKey
+
+proc ptrScalarPointee(t: IRType): bool =
+  ## RFC-0005 S8bh. The pointees whose `ptr` this model retargets: a scalar
+  ## or a string (held in one whole-pointee heap cell).
+  t != nil and t.kind in {itInt, itBool, itFloat32, itFloat64, itString}
+
+proc ptrFamilyKey(key: string): bool =
+  ## RFC-0005 S8bh. `key` is a field-split heap of a field (a plain field,
+  ## `<O>__<f>`, or a variant branch field, `<O>__@<ord>__<f>`), not an
+  ## internal one (a discriminator, a compound leaf, a tag level, this
+  ## model's own arrays).
+  let at = key.find("__@")
+  if at < 0: return "__" in key
+  let rest = key[at + 3 .. ^1]
+  # RFC-0005 S8bw (item 3): an `else` branch's field (`__@-1__<f>`) too; it
+  # was no target, so a pointer to one was never seen to write it.
+  rest.len > 0 and (rest[0] in {'0'..'9'} or rest.startsWith("-1__")) and
+    "__" in rest
 
 proc refAddrOf(m: Z3Model, addrAst: Z3AnyAst, pointee: IRType): string =
   ## RFC-0005 S8h. The model address of a ref, "" for nil. Prefixed with the
@@ -9350,6 +11599,10 @@ proc evalStrBytesOrEmpty(m: Z3Model, a: Z3String): Option[string] =
     r[i] = char(cp)
   some(r)
 
+proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     ctx: Z3Context; leafPath: string, sv: SymVal,
+                     valTy: IRType): string
+
 proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                         key, leafPath: string, addrAst: Z3AnyAst,
                         valTy: IRType): string =
@@ -9378,13 +11631,91 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
       checkedSelect(ctx, inputHeap(key & suffix).raw, addrAst.raw))
   var scratchPC: seq[Z3Bool]
   let proto = allocateSym(valTy, "__heapRenderProto", scratchPC)
-  let sv = svWithLeaves(ctx, proto, leaves)
+  let sv = svWithLeaves(ctx, proto, leaves, valTy)
+  renderHeapValue(b, m, w, ctx, leafPath, sv, valTy)
+
+proc renderHeapValue(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
+                     ctx: Z3Context; leafPath: string, sv: SymVal,
+                     valTy: IRType): string =
+  ## RFC-0005 S8ap (was `renderHeapCompound`'s tail); S8ar: recursive over a
+  ## tree value (`heapCompoundTy`'s tuple / object, array, `distinct`), each
+  ## part written at `<leafPath>.<label>` (`heapPartLabel`, the name
+  ## `readCellField`'s `fieldPairs` walk reads) and a scalar part as a
+  ## scalar field is (`extractLeaf`, clamped -- an unread part is free).
+  case valTy.kind
+  of itDistinct:
+    return renderHeapValue(b, m, w, ctx, leafPath, ejectBase(sv), distinctGround(valTy))
+  of itInt, itBool, itFloat32, itFloat64:
+    extractLeaf(m, w, leafPath, sv)
+    clampWitnessField(w, leafPath, valTy)
+    return pointeeRendering(w, leafPath).get("<unobserved>")
+  of itString:
+    if sv.kind != svString: return "<unsupported>"
+    let s = evalStrBytesOrEmpty(m, sv.str).get("")
+    w.strVals[leafPath] = s
+    return s.escape
+  of itRef, itPtr:
+    let (childAddr, childPointee) =
+      if sv.kind == svRef: (sv.refAst, sv.refPointee)
+      else: (sv.ptrAst, sv.ptrPointee)
+    return addPosition(b, m, RefPos(name: leafPath, addrAst: childAddr,
+                                    pointee: childPointee), inlineNil = true)
+  of itTuple, itArray:
+    var parts: seq[string]
+    for i, part in heapParts(valTy):
+      let psv = if sv.kind == svTuple: sv.fields[i] else: sv.arrElems[i]
+      let r = renderHeapValue(b, m, w, ctx, leafPath & "." & part.label, psv,
+                              part.ty)
+      parts.add(if valTy.kind == itTuple: part.label & ": " & r else: r)
+    return (if valTy.kind == itTuple: "(" else: "[") & parts.join(", ") &
+           (if valTy.kind == itTuple: ")" else: "]")
+  of itVariant, itMultiVariant:
+    # RFC-0005 S8at. A case object cell: each discriminator at
+    # `<leafPath>.<disc>` and the fields of the arm it selects (an `else`
+    # arm when no explicit one does) and the plain fields at
+    # `<leafPath>.<field>`, the paths `readCellField`'s `fieldPairs` walk
+    # reads (discriminator first). The other arms' slots are not rendered:
+    # Nim holds no value for them.
+    if not svFitsHeapTy(sv, valTy): return "<unsupported>"
+    var parts: seq[string]
+    template axis(discName: string; discTy: IRType; disc: SymVal;
+                  arms: seq[VariantArm];
+                  armFields: OrderedTable[int, seq[SymVal]]) =
+      let dp = leafPath & "." & discName
+      extractLeaf(m, w, dp, disc)
+      clampWitnessField(w, dp, discTy)
+      parts.add discName & ": " & pointeeRendering(w, dp).get("?")
+      let ord = evalDiscOrdinal(m, disc)
+      var active = -1
+      for i, arm in arms:
+        if not arm.isElse and int64(arm.tagOrdinal) == ord: active = i
+      if active < 0:
+        for i, arm in arms:
+          if arm.isElse: active = i
+      if active >= 0:
+        let arm = arms[active]
+        for j, fname in arm.fieldNames:
+          parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+            leafPath & "." & fname, armFields[arm.tagOrdinal][j], arm.fieldTypes[j])
+    if valTy.kind == itVariant:
+      axis(valTy.vDiscName, valTy.vDiscTy, sv.vDisc[], valTy.vArms, sv.vArmFields)
+      for i, fname in valTy.vPlainFieldNames:
+        parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+          leafPath & "." & fname, sv.vPlainFields[i], valTy.vPlainFieldTypes[i])
+    else:
+      for xi, ax in valTy.mvAxes:
+        axis(ax.discName, ax.discTy, sv.mvAxes[xi].disc[], ax.arms,
+             sv.mvAxes[xi].armFields)
+      for i, fname in valTy.mvPlainFieldNames:
+        parts.add fname & ": " & renderHeapValue(b, m, w, ctx,
+          leafPath & "." & fname, sv.mvPlainFields[i], valTy.mvPlainFieldTypes[i])
+    return "(" & parts.join(", ") & ")"
+  else: discard
   # RFC-0005 S8ap: the svSeq reads below run only past this guard (N27).
   if sv.kind == svSeq and sv.isUnsupportedFieldPlaceholder: return "<unsupported>" # [placeholder-audited]
   case sv.kind
   of svSeq:
-    let raw = m.evalInt(sv.seqLen) # [placeholder-audited]
-    let n = if raw >= 0 and raw <= 1024: int(raw) else: 0
+    let n = witnessSeqLen(m.evalInt(sv.seqLen)) # [placeholder-audited]
     w.seqLens[leafPath] = n
     var parts: seq[string]
     case sv.seqElemTy.kind
@@ -9406,9 +11737,16 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
         w.strVals[leafPath & "." & $i] = e
         parts.add e.escape
     else:
-      extractSeqElements(m, w, leafPath, sv, n)
-      for i in 0 ..< n:
-        parts.add pointeeRendering(w, leafPath & "." & $i).get("?")
+      if isTreeSeqElemTy(sv.seqElemTy):
+        # RFC-0005 S8bc: a tree element, rebuilt from every data array and
+        # rendered as a tree cell value is (a ref part is a position).
+        for i in 0 ..< n:
+          parts.add renderHeapValue(b, m, w, ctx, leafPath & "." & $i,
+                                    seqElemAt(sv, mkInt(i)), sv.seqElemTy)
+      else:
+        extractSeqElements(m, w, leafPath, sv, n)
+        for i in 0 ..< n:
+          parts.add pointeeRendering(w, leafPath & "." & $i).get("?")
     "@[" & parts.join(", ") & "]"
   of svTable:
     extractTableEntries(m, w, leafPath, sv)
@@ -9427,11 +11765,14 @@ proc renderHeapCompound(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
 proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                      cell: RefPos, key, fname: string, declTy: IRType): string =
   ## RFC-0005 S8h. One field of `cell`, from its input heap `key`.
-  if not currentVariantHeaps.hasKey(key): return "<unobserved>"
+  ## RFC-0005 S8ar: a tree value's first leaf is not at `key` itself
+  ## (`heapLeafSuffixes`), so the observed test is of that leaf.
   let valTy = block:
     let t = heapKeyValTy(key)
     if t != nil: t else: declTy
   if valTy == nil: return "<unobserved>"
+  if not currentVariantHeaps.hasKey(key & heapLeafSuffixes(valTy)[0]):
+    return "<unobserved>"
   case valTy.kind
   of itInt, itBool, itFloat32, itFloat64:
     renderHeapLeaf(m, w, key, cell.name & "." & fname, cell.addrAst, valTy)
@@ -9443,9 +11784,11 @@ proc renderCellField(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     addPosition(b, m, RefPos(name: cell.name & "." & fname,
                              addrAst: childAddr, pointee: childPointee),
                 inlineNil = true)
-  of itString, itSeq, itTable, itSet:
+  of itString, itSeq, itTable, itSet, itTuple, itArray, itDistinct,
+     itVariant, itMultiVariant:   ## RFC-0005 S8at: + a by-value case object
     # RFC-0005 S8ap: a string field, and a leaf-split compound field
-    # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`.
+    # (`heapCompoundTy`); an unbacked one keeps `<unsupported>`. RFC-0005
+    # S8ar: a by-value tuple / object, array and `distinct` too.
     if valTy.kind == itString or heapCompoundTy(valTy):
       renderHeapCompound(b, m, w, key, cell.name & "." & fname, cell.addrAst,
                          valTy)
@@ -9459,12 +11802,21 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
                 cell: RefPos): Option[string] =
   ## RFC-0005 S8h. Write `cell`'s leaves and return its `pointsTo`.
   let typeId = refPointeeTypeId(cell.pointee)
-  if cell.pointee.kind notin {itTuple, itVariant, itMultiVariant}:   # RFC-0005 S8l: + MV
+  # RFC-0005 S8at: an anonymous tuple pointee is held whole (`isNew`'s
+  # `anonTuple`), its elements the leaves `<cell>.Field<i>`.
+  var anonTuple = false
+  if cell.pointee.kind == itTuple and not cell.pointee.isPlaceholder:
+    for fname in cell.pointee.fieldNames:
+      if fname.len == 0: anonTuple = true
+  if cell.pointee.kind notin {itTuple, itVariant, itMultiVariant} or anonTuple:   # RFC-0005 S8l: + MV
     # A scalar pointee (`ref int`) lives in the whole-pointee heap `<typeId>`.
-    if not currentVariantHeaps.hasKey(typeId): return none(string)
     let valTy = block:
       let t = heapKeyValTy(typeId)
       if t != nil: t else: cell.pointee
+    # RFC-0005 S8at: a tree pointee's first leaf is not at `<typeId>` itself
+    # (`heapLeafSuffixes`); the observed test is of that leaf.
+    if not currentVariantHeaps.hasKey(typeId & heapLeafSuffixes(valTy)[0]):
+      return none(string)
     # RFC-0005 S8ap: a string or leaf-split compound pointee (`ref seq[int]`)
     # too, written at `<cell>` itself.
     if valTy.kind == itString or heapCompoundTy(valTy):
@@ -9480,8 +11832,13 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
     if key.len > prefix.len and key.startsWith(prefix):
       let suffix = key[prefix.len .. ^1]
       # A Nim identifier never contains `__`; a suffix that does belongs to
-      # a different type whose id extends this one's.
-      if suffix[0] != '@' and "__" notin suffix: observed.add suffix
+      # a different type whose id extends this one's. RFC-0005 S8ar: or is a
+      # leaf of a tree-valued field, `<field>__@.<part>...`.
+      let fieldPart = block:
+        let at = suffix.find("__@.")
+        if at > 0: suffix[0 ..< at] else: suffix
+      if fieldPart[0] != '@' and "__" notin fieldPart and fieldPart notin observed:
+        observed.add fieldPart
   sort(observed)
   var parts: seq[string]
   var done: seq[string]
@@ -9541,7 +11898,10 @@ proc renderCell(b: var SnapshotBuild, m: Z3Model, w: var RawWitness,
   if declared != nil:
     for i, fname in declared.fieldNames:
       if fname.len == 0 or fname in done: continue
-      parts.add fname & "=" & renderCellField(b, m, w, cell, prefix & fname,
+      # RFC-0005 S8bh: an inherited field lives in its declaring type's
+      # heap (`fieldHeapKey`), not under this cell's root-keyed prefix.
+      parts.add fname & "=" & renderCellField(b, m, w, cell,
+                                              fieldHeapKey(declared, fname),
                                               fname, declared.fields[i])
       done.add fname
   elif cell.pointee.kind == itVariant:
@@ -9592,6 +11952,101 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     let pointsTo = renderCell(b, m, w, cell)
     b.entries[b.entryOf[cell.name]].pointsTo = pointsTo
     inc i
+  # RFC-0005 S8bh (item 2). A `ptr` cell whose input target (`sel`, see
+  # `ptrTargets`) is a field of an object the snapshot holds as a cell
+  # aliases that field: `aliasRef = "&<cell>.<field>"`, which the typed
+  # witness resolves to the field's address (`resolveRef`). A target the
+  # snapshot holds no cell for (a global, a `var` parameter, an object no
+  # position reaches) keeps the pointer's own cell; the replay of such a
+  # witness may then refute it (the pointer is not handed the location).
+  for pos in b.queue:
+    if not ptrScalarPointee(pos.pointee): continue
+    let typeId = refPointeeTypeId(pos.pointee)
+    let sk = ptrSelKey(typeId)
+    if not currentVariantHeaps.hasKey(sk): continue
+    let ctx = pos.addrAst.ctx
+    let selV = $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx, inputHeap(sk).raw,
+                                                         pos.addrAst.raw)))
+    let prefix = ptrObjKey(typeId, "")
+    var fams: seq[string]
+    for key in currentVariantHeaps.keys:
+      if key.startsWith(prefix): fams.add key[prefix.len .. ^1]
+    sort(fams)
+    var aimed = false
+    for fam in fams:
+      if not currentVariantHeaps.hasKey(fam): continue
+      # RFC-0005 S8bn (item 4): an element of a seq held in the family.
+      let seqCode = ptrTargetCode(fam & "/*")
+      let isSeqFam = ptrSelMatches(selV, seqCode) and
+                     ptrLeafAims.hasKey(seqCode)
+      let tabCode = ptrTargetCode(fam & "/#")
+      let isTabFam = ptrSelMatches(selV, tabCode) and
+                     ptrLeafAims.hasKey(tabCode)
+      if not isSeqFam and not isTabFam and
+         not ptrSelMatches(selV, ptrTargetCode(fam)): continue
+      let objMap = inputHeap(ptrObjKey(typeId, fam))
+      let objAddr = wrap[Z3AnyAst](ctx, checkedSelect(ctx, objMap.raw,
+                                                      pos.addrAst.raw))
+      let objSort = ctx.checkErr Z3_get_sort(ctx.raw, objAddr.raw)
+      var oid = ""
+      for tid, srt in currentRefSorts:
+        if srt == objSort: oid = tid
+      let address = oid & "|" & $m.eval(objAddr)
+      let fsep = fam.rfind("__")
+      if oid.len > 0 and fsep >= 0 and b.cellOf.hasKey(address):
+        var aim = "&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1]
+        if isSeqFam:
+          let ik = ptrIdxKey(typeId)
+          if currentVariantHeaps.hasKey(ik):
+            aim.add "." & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+              inputHeap(ik).raw, pos.addrAst.raw)))
+          else: aim = ""
+        elif isTabFam:
+          let kk = ptrKeyKey(typeId)
+          if currentVariantHeaps.hasKey(kk):
+            aim.add "." & m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(ctx,
+              inputHeap(kk).raw, pos.addrAst.raw)))
+          else: aim = ""
+        if aim.len > 0:
+          b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
+      aimed = true
+      break
+    if aimed: continue
+    # RFC-0005 S8bn (item 2). A target that is a variable -- a global, or a
+    # `var` parameter of the SUT (`ptrTargets`' env candidates) -- has no
+    # cell in the snapshot: the position is aimed at the variable by name
+    # (`aliasRef = "@aim:<name>"`), and the replay's splat hands the
+    # pointer that variable's address (`ptrAimsAt`, `emitWitnessSplat`).
+    var names: seq[string]
+    for p in params:
+      if p.isVar: names.add p.name
+    for k in currentWinningGlobals: names.add k
+    sort(names)
+    for nm in names:
+      if ptrSelMatches(selV, ptrTargetCode(nm)):
+        b.entries[b.entryOf[pos.name]].aliasRef = some(ptrAimPrefix & nm)
+        aimed = true
+        break
+    if aimed: continue
+    # RFC-0005 S8bn (item 4): a part of a variable -- a field, an array
+    # element, a seq element (`@aim:<name>/<step>/.../<index>`).
+    for code, la in ptrLeafAims:
+      if la.fam.len > 0 or la.typeId != typeId: continue
+      if la.name notin names or not ptrSelMatches(selV, code): continue
+      var aim = ptrAimPrefix & la.name & ptrLeafPathStr(la.steps, false)
+      if la.seqIdx:
+        let ik = ptrIdxKey(typeId)
+        if not currentVariantHeaps.hasKey(ik): break
+        aim.add "/" & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
+          inputHeap(ik).raw, pos.addrAst.raw)))
+      elif la.tabKey:
+        # A table key: `k` and its bytes in hex (a key may hold a `/`).
+        let kk = ptrKeyKey(typeId)
+        if not currentVariantHeaps.hasKey(kk): break
+        aim.add "/k" & toHex(m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(
+          ctx, inputHeap(kk).raw, pos.addrAst.raw))))
+      b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
+      break
   b.entries
 
 proc extractWitness(m: Z3Model, env: Env, params: seq[IRParam]): RawWitness =
@@ -9616,6 +12071,13 @@ var symexTargetSolveStats* {.threadvar.}:
   ## found one), which bound later hits as a budget-out does; `units` is
   ## the `rlimit` every target-hit solve spent. Deterministic, like the
   ## `rlimit` it is read from.
+
+var ownContextUnits* {.threadvar.}: int
+  ## RFC-0005 S8bm. The Z3 units every search spent in a context of its
+  ## own (`ownContextSolver`), running total for the thread. RFC-0005
+  ## S8bp: that is every `checkCapped` search, so a walker query's spend
+  ## (`solveTargetHit`, `recordQueryStat`) is what this total grew by; the
+  ## walk context's `rlimit count` sees none of it.
 
 var symexZ3CallCount* {.threadvar.}: int
   ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
@@ -9646,14 +12108,15 @@ when defined(symexQueryStats):
   ## Wall time cannot separate those; this can.
   type SymexQueryStat* = object
     assertions*:   int     ## constraints handed to this solver instance
-    rlimit*:       int     ## Z3's step counter after the check. It is the
-                           ## CONTEXT's counter, cumulative over every
-                           ## check of the walk (RFC-0005 S8ac), not this
-                           ## query's cost -- that is `rlimitDelta`.
+    rlimit*:       int     ## Z3's step count after the check, cumulative
+                           ## over every walker query of the thread
+                           ## (RFC-0005 S8ac; S8bp: `ownContextUnits`,
+                           ## every query's searches being in contexts of
+                           ## their own), not this query's cost -- that
+                           ## is `rlimitDelta`.
     rlimitDelta*:  int     ## RFC-0005 S8ac: the steps THIS query spent,
                            ## every solver `checkCapped` ran for it
-                           ## included (deterministic), counted from its
-                           ## first solver's creation.
+                           ## included (deterministic).
     conflicts*:    int
     decisions*:    int
     propagations*: int
@@ -9672,6 +12135,28 @@ when defined(symexQueryStats):
     ## search alone.
     ## One entry per `check()`, in call order. Reset it yourself before a
     ## measured region -- nothing clears it implicitly.
+  var symexFactsFirstOff* {.threadvar.}: bool
+    ## RFC-0005 S8bm. While set, `checkCapped` skips its facts-first check
+    ## (RFC-0005 S8ay), so a suite can walk a program with and without it
+    ## and pin that step 1's search does not depend on it
+    ## (`tsymex_rfc0005_s8bm_stability`). Only in this instrumented build.
+  type SymexStepStat* = object
+    ## RFC-0005 S8bp. One `checkCapped` step's search: which step
+    ## (`"plain"`, `"factsFirst"`, `"1"`, `"1b"`, `"1c"`, `"1c-capped"`,
+    ## `"2"`, `"3"`), its answer, and the Z3 units its check spent.
+    step*:   string
+    status*: string
+    units*:  int
+  var symexStepStats* {.threadvar.}: seq[SymexStepStat]
+    ## RFC-0005 S8bp. Every `checkCapped` step's search, in call order.
+    ## Reset it yourself before a measured region.
+  var symexPerturbConsts* {.threadvar.}: int
+    ## RFC-0005 S8bp. While positive, `checkCapped` first makes that many
+    ## fresh Int constants, which no query mentions, in the walk's context:
+    ## unrelated walk state (S8bm's probe, which moved a step-1 search
+    ## 30x). A suite walks a program with and without it and pins that no
+    ## step's search moves (`tsymex_rfc0005_s8bp_isolation`).
+  var perturbSerial {.threadvar.}: int
 
   proc statInt(st: Z3Stats, key: string): int =
     ## Z3 omits keys it has nothing to say about (a trivially-unsat query
@@ -9680,35 +12165,21 @@ when defined(symexQueryStats):
       if st.isInt(key): st.getInt(key) else: int(st.getFloat(key))
     else: 0
 
-  var queryRLimitBefore {.threadvar.}: int
-  var queryRLimitPending {.threadvar.}: bool
-    ## RFC-0005 S8ac. `trySolve` arms `queryRLimitPending`; the first solver
-    ## `checkCapped` builds for that query (`querySolver`) reads the
-    ## context's step counter into `queryRLimitBefore` before it is checked.
-    ## Z3 reports the counter with any solver's statistics (it is the
-    ## context's resource limit, not the solver's), and it moves by about
-    ## one unit per solver CREATED. So the read is taken from a solver the
-    ## query builds anyway: a solver made only to read it shifted the
-    ## counter under every later check, and with it Z3's search (a
-    ## different model for one S8ac pin), so the instrumented build no
-    ## longer decided as the plain one does.
-
-  proc noteQueryRLimitBefore(s: Z3Solver) =
-    if queryRLimitPending:
-      queryRLimitBefore = statInt(s.getStatistics(), "rlimit count")
-      queryRLimitPending = false
-
   proc recordQueryStat(s: Z3Solver, nAsserts: int, status: string,
-                       rlimitBefore: int) =
+                       unitsBefore: int) =
     ## Called immediately after `check()`. Statistics are valid for
     ## sat/unsat/UNKNOWN alike -- the truncated-by-rlimit case is precisely
     ## the one N45 cares about (B5-4's trip-wire query), so it must not be
-    ## skipped.
+    ## skipped. RFC-0005 S8bp: every search `checkCapped` runs is in a
+    ## context of its own, its units added to `ownContextUnits`, so the
+    ## query's units are what that total grew by since `unitsBefore`, read
+    ## when `trySolve` began the query. (S8ac read the walk context's
+    ## counter from the query's first solver, built there; none is now.)
     let st = s.getStatistics()
     symexQueryStats.add SymexQueryStat(
       assertions:   nAsserts,
-      rlimit:       statInt(st, "rlimit count"),
-      rlimitDelta:  statInt(st, "rlimit count") - rlimitBefore,
+      rlimit:       ownContextUnits,
+      rlimitDelta:  ownContextUnits - unitsBefore,
       conflicts:    statInt(st, "conflicts"),
       decisions:    statInt(st, "decisions"),
       propagations: statInt(st, "propagations"),
@@ -9802,8 +12273,9 @@ var seqCapDeclKinds {.threadvar.}: tuple[ready: bool, k: SeqCapKinds]
   ## are positional, so they are taken from the linked Z3 itself rather
   ## than restated here.
 
-proc seqCapKinds(ctx: Z3Context): SeqCapKinds =
+proc seqCapKinds(): SeqCapKinds =
   if not seqCapDeclKinds.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
       ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
     let c = mkIntVar(ctx, "__s8k_kind_probe")
@@ -9895,7 +12367,7 @@ proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
   ## Every character of such a leaf has a code in 0..255 in every model of
   ## `roots`. Used by `seqLenCaps` (its byte tests) and, RFC-0005 S8ae, by
   ## `seqRangeFacts` (`str.to_code`'s upper bound).
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   let byteRe = star(range(mkString(ctx, "\x00"), mkString(ctx, "\xff")))
   let byteReId = astId(ctx, byteRe.raw)
   for r in roots:
@@ -9909,7 +12381,7 @@ proc byteLeafIds(ctx: Z3Context; roots: openArray[Z3Bool]): HashSet[int] =
 
 proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     tuple[caps: seq[Z3Bool], lastIndex: bool,
-          byteEqs: seq[tuple[old, new: Z3Bool]]] =
+          byteEqs: seq[tuple[old, new: Z3Bool]], lens: seq[Z3Int]] =
   ## RFC-0005 S8k. `len(t) <= cap` for every seq-sorted (string or seq)
   ## term `t` in `roots` that is an uninterpreted constant or application
   ## (an input, a fresh return, a closure/UF result) or an array `select`
@@ -9928,7 +12400,7 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## `byteEqs` pairs each byte test `int2bv[8](str.to_code(c)) == n`
   ## (either operand order, `n` a numeral, `c = str.at(s, i)`), where `s`
   ## is a string leaf whose byte-domain constraint `s in (\x00..\xff)*`
-  ## is itself one of `roots`, with `c == "\xNN"` (for `n = 255`, also
+  ## is itself one of `roots` (RFC-0005 S8bm: or a `str.substr` of one), with `c == "\xNN"` (for `n = 255`, also
   ## `c == ""`: `str.at` past the end is `""`, whose code -1 wraps to
   ## 0xFF). Under that constraint every character of `s` has a code in
   ## 0..255, so the two agree in every model of `roots`. The same holds
@@ -9945,7 +12417,13 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   ## on the pinned Z3, each in a fresh context). The other exact
   ## rewrite, `x mod 256 == n`, fixed the first and made the second
   ## 110M.
-  let kinds = seqCapKinds(ctx)
+  ##
+  ## RFC-0005 S8ba: `lens` holds the length of each leaf above and each
+  ## `str.len` term in `roots`, for `checkCapped`'s `len <= high(int)`
+  ## facts (`nimLenFacts`). Only the terms: the facts are built where they
+  ## are asserted, so they reach the walk's shared context only on that
+  ## path (see `seqRangeFacts`' note on context cost).
+  let kinds = seqCapKinds()
   let capInt = mkInt(ctx, cap)
   proc kindOf(ctx: Z3Context; a: Z3AnyAst): int =
     ## -1 for a non-application (a numeral, a variable, a quantifier).
@@ -9955,7 +12433,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
   proc byteTestChar(ctx: Z3Context; conv: Z3AnyAst):
       tuple[ok: bool, ch: Z3AnyAst] =
     ## `str.at(s, i)` when `conv` is `int2bv[8](str.to_code(str.at(s, i)))`
-    ## over a byte leaf `s`.
+    ## over a byte leaf `s`, or (RFC-0005 S8bm) over a `str.substr` of one,
+    ## at any depth: every character of a substring of `s` is one of `s`'s,
+    ## so its code is in 0..255 too (and `str.at` past its end is `""`, as
+    ## past `s`'s). A slice's element (`data[4 .. ^1][0]`, B1-1's byte
+    ## test) lowers to that form: 5,711,742 units lowered against 24,467
+    ## in character form (Z3 5.1, step 1 in a fresh context).
     if kindOf(ctx, conv) != kinds.int2bv or
        Z3_get_bv_sort_size(ctx.raw, Z3_get_sort(ctx.raw, conv.raw)) != 8:
       return
@@ -9963,7 +12446,9 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     if kindOf(ctx, code) != kinds.toCode: return
     let ch = unpackApp(code).args[0]
     if kindOf(ctx, ch) != kinds.strAt: return
-    if astId(ctx, unpackApp(ch).args[0].raw) notin byteLeaves: return
+    var src = unpackApp(ch).args[0]
+    while kindOf(ctx, src) == kinds.strExtract: src = unpackApp(src).args[0]
+    if astId(ctx, src.raw) notin byteLeaves: return
     (true, ch)
   var seen: HashSet[int]
   var stack: seq[Z3AnyAst]
@@ -9976,9 +12461,12 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
     if getAstKind(t) != akApp: continue
     let (decl, args) = unpackApp(t)
     let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if k == kinds.strLen:   # RFC-0005 S8ba
+      result.lens.add wrap[Z3Int](ctx, t.raw)
     if getSortKind(t) == skSeq and (k == kinds.uninterp or k == kinds.select):
       let lenT = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, t.raw))
       result.caps.add lenT <= capInt
+      result.lens.add lenT   # RFC-0005 S8ba
     elif byteLeaves.len > 0 and args.len == 2 and declName(ctx, decl) == "=":
       let empty = mkString(ctx, "")
       let ff = mkString(ctx, "\xff")
@@ -10012,7 +12500,33 @@ proc seqLenCaps(ctx: Z3Context; roots: openArray[Z3Bool]; cap: int):
         result.byteEqs.add (old: wrap[Z3Bool](ctx, t.raw), new: eqv)
     elif not result.lastIndex and declName(ctx, decl) == "seq.last_indexof":
       result.lastIndex = true
+    elif not result.lastIndex and args.len == 0 and k == kinds.uninterp:
+      # RFC-0005 S8au: an `rfind` split stands for `seq.last_indexof`, and
+      # its query keeps that term's regime (no capped verdict; the uncapped
+      # one-shot step 3 after a capped UNSAT), so the split changes the
+      # cost of a verdict and never which verdict is reached
+      # (`tsymex_rfc0005_s8o_termination` (4): without this, its capped-out
+      # rfind query is a cap decline instead of `sxSat`).
+      let sp = registeredIndexSplit(ctx, t.raw)
+      if sp >= 0 and indexSplits[sp].last: result.lastIndex = true
     for a in args: stack.add a
+
+proc nimLenFacts(ctx: Z3Context; lens: openArray[Z3Int]): seq[Z3Bool] =
+  ## RFC-0005 S8ba. `len <= high(int)` for each length term `seqLenCaps`
+  ## collected (`lens`). Nim's `len` is an `int`, so every real string and
+  ## seq satisfies it; the sequence theory alone admits longer ones, and an
+  ## index bounded by a length (`i < len(s)`, then `i + 1`) could overflow
+  ## in a model no real input has: S8au's `readCStr` raise query and its
+  ## unbounded `rfind` label declined on the cap for exactly that. True of
+  ## every real input rather than of the theory, so not in `seqRangeFacts`
+  ## (whose facts are pinned valid in the theory); asserted beside them in
+  ## `checkCapped`'s step 1c, where an UNSAT is still the query's own. The
+  ## bit-vector encoding reads a length through these Int terms
+  ## (`int2bv`), so one fact covers both.
+  if lens.len == 0: return
+  let highInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw,
+    cstring($high(int64)), Z3_get_sort(ctx.raw, lens[0].raw)))
+  for l in lens: result.add l <= highInt
 
 type LitRel = enum
   ## RFC-0005 S8ai: the relation `seqRangeFacts`' `litHolds` folds.
@@ -10224,7 +12738,7 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ##     that part, with `L` at least the part's offset; a prefix of the
   ##     first part (a suffix of the last) is one of `h`; and for a needle of
   ##     length at most 1, `h` contains it only if some part does.
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   let zero = mkInt(ctx, 0)
   let minusOne = mkInt(ctx, -1)
   proc lenOf(ctx: Z3Context; a: Z3AnyAst): Z3Int =
@@ -10325,11 +12839,20 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
       # model of a query that holds it (`indexSplitRoots` asserts its axioms
       # wherever it is reached), so it takes that term's range and links.
       let sp = indexSplits[split]
-      result.add (sp.ix == minusOne) or
-        ((zero <= sp.ix) and (sp.start <= sp.ix) and
-         (sp.ix + mkInt(ctx, 1) <= len(sp.s)))
-      indexOfs.add (s: toAnyAst(sp.s), t: toAnyAst(sp.c), i: sp.start,
-                    r: sp.ix)
+      # RFC-0005 S8au: any needle (its length, not 1), and a `last` split
+      # is `seq.last_indexof`'s term, with that term's range and links.
+      let nc = literalLen(sp.c)
+      let lc = if nc >= 0: mkInt(ctx, nc) else: lenOf(ctx, toAnyAst(sp.c))
+      if sp.last:
+        result.add (sp.ix == minusOne) or
+          ((zero <= sp.ix) and (sp.ix + lc <= len(sp.s)))
+        lastIdxs.add (s: toAnyAst(sp.s), t: toAnyAst(sp.c), r: sp.ix)
+      else:
+        result.add (sp.ix == minusOne) or
+          ((zero <= sp.ix) and (sp.start <= sp.ix) and
+           (sp.ix + lc <= len(sp.s)))
+        indexOfs.add (s: toAnyAst(sp.s), t: toAnyAst(sp.c), i: sp.start,
+                      r: sp.ix)
     elif k == kinds.strLen:
       result.add wrap[Z3Int](ctx, t.raw) >= zero
     elif k == kinds.strIndex and args.len == 3:
@@ -10654,9 +13177,31 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
         result.add guarded(g, v.v == ite(f.n >= zero, f.n, minusOne))
 
 var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
-                                         eq: int]
+                                         eq, notK, orK, impliesK, iteK: int]
   ## RFC-0005 S8y. The decl kinds `dropImpliedByteDomains` matches, read off
   ## terms built once per thread (as `seqCapKinds`: by kind, never by name).
+  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`. RFC-0005 S8by: and
+  ## `or`, `=>` and `ite`, the polarity `mergeMemberships` reads below the
+  ## top level.
+
+proc ensureByteDomainKinds() =
+  if byteDomainKinds.ready: return
+  let ctx = probeContext()   # RFC-0005 S8bp
+  proc kindOf(a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let s = mkStringVar(ctx, "__s8y_kind_probe_str")
+  let b = mkBoolVar(ctx, "__s8y_kind_probe_b")
+  byteDomainKinds = (ready: true,
+    concat: kindOf((s & mkStringVar(ctx, "__s8y_kind_probe_t")).raw),
+    extract: kindOf(substr(s, mkIntVar(ctx, "__s8y_kind_probe_i"),
+                           mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
+    andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
+    eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw),
+    notK: kindOf((not b).raw),
+    orK: kindOf((b or mkBoolVar(ctx, "__s8by_kind_probe_d")).raw),
+    impliesK: kindOf(implies(b, mkBoolVar(ctx, "__s8by_kind_probe_e")).raw),
+    iteK: kindOf(ite(b, mkBoolVar(ctx, "__s8by_kind_probe_f"),
+                     mkBoolVar(ctx, "__s8by_kind_probe_g")).raw))
 
 proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -10677,19 +13222,9 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## each such membership on its own. In `tsymex_r6_n36_raise_degrade`'s
   ## four-pairs-and-an-empty-key query that was the difference between
   ## running out of 10M units and SAT in 2.5M (fresh context, Z3 5.1).
-  if not byteDomainKinds.ready:
-    proc kindOf(a: RawZ3Ast): int =
-      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
-    let s = mkStringVar(ctx, "__s8y_kind_probe_str")
-    let b = mkBoolVar(ctx, "__s8y_kind_probe_b")
-    byteDomainKinds = (ready: true,
-      concat: kindOf((s & mkStringVar(ctx, "__s8y_kind_probe_t")).raw),
-      extract: kindOf(substr(s, mkIntVar(ctx, "__s8y_kind_probe_i"),
-                             mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
-      andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
-      eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw))
+  ensureByteDomainKinds()
   let bk = byteDomainKinds
-  let kinds = seqCapKinds(ctx)
+  let kinds = seqCapKinds()
   proc kindOf(a: Z3AnyAst): int =
     if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
     else: -1
@@ -10767,12 +13302,235 @@ proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
   for i, r in roots:
     if i notin dropRoot: result.add r
 
+proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3Bool] =
+  ## RFC-0005 S8bp. `roots` with the regex memberships of one string term
+  ## `x` among the roots' top-level conjuncts -- two or more, one of them
+  ## negated: `x in R1`, `not (x in R2)`, .. -- replaced by the one
+  ## membership `x in (R1 & comp(R2) & ..)`. `not (x in R)` is `x in
+  ## comp(R)` and the conjuncts are removed from their roots, so the
+  ## result has the same models. A byte-domain constraint `x in
+  ## (\x00..\xff)*` stays as it is, as do roots holding no such group.
+  ##
+  ## Why: Z3 decides each membership on its own. S8ay's `s.endsWith(re"b+")
+  ## and not s.contains(re"b")` (empty: a string ending in `b` contains
+  ## one) ran out of 20M units with no length bound on Z3 4.13.4, and took
+  ## 6.7M to refute under the length cap, with the cap in step 2's core
+  ## (`sxUnknown`); as one membership of the intersection it is UNSAT in
+  ## 1,392 units (a fresh context; 5.1 as well).
+  ##
+  ## RFC-0005 S8by: and below the top level, where a membership sits under
+  ## a disjunction, an `ite`, a negation or an implication (`a or not
+  ## s.contains(re"b")`). There a membership literal of `x` is merged with
+  ## those of the same `x` that hold wherever it is evaluated: the other
+  ## conjuncts of each `and` above it, the roots' top-level ones included
+  ## (their intersection `I`). Where those and the literals of `x` in its
+  ## own conjunction number two or more, one of them negated as it is
+  ## read, the conjunction's literals (their intersection `A`) become one:
+  ## `x in (A & I)` where they are asserted, `not (x in (comp(A) & I))`
+  ## where they are denied (under a `not`, or left of a `=>`), so that
+  ## either way Z3 meets one membership of an intersection. Where `x` lies
+  ## in `I`, both terms are true exactly when the literals are, and each
+  ## `and` above is false wherever a conjunct of it is: every root keeps
+  ## its value under every assignment, so the models are the same. A
+  ## literal read both ways (an `ite` condition, an argument of `=`) is
+  ## left as it is.
+  ensureByteDomainKinds()
+  let bk = byteDomainKinds
+  let kinds = seqCapKinds()
+  proc kindOf(a: Z3AnyAst): int =
+    if getAstKind(a) == akApp: ord(Z3_get_decl_kind(ctx.raw, unpackApp(a).decl))
+    else: -1
+  let byteReId = astId(ctx, star(range(mkString(ctx, "\x00"),
+                                       mkString(ctx, "\xff"))).raw)
+  type
+    Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
+    Held = seq[tuple[re: Z3AnyAst, neg: bool]]
+      ## RFC-0005 S8by. The membership literals of one `x` that hold in a
+      ## context: `re` the set they put `x` in (complemented for a negated
+      ## one), `neg` whether the literal was negated.
+    Pol = enum polPos, polNeg, polBoth
+      ## RFC-0005 S8by. How a term is read: asserted, denied, or both.
+  proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
+    ## `r`'s top-level conjuncts, in order.
+    if kindOf(r) == bk.andK:
+      for a in unpackApp(r).args: result.add conjuncts(a)
+    else: result.add r
+  proc literal(t: Z3AnyAst): tuple[ok: bool, x, re: Z3AnyAst, neg: bool] =
+    ## `t` as a membership literal `x in re` or `not (x in re)`; a
+    ## byte-domain constraint is none.
+    let neg = kindOf(t) == bk.notK
+    let m = if neg: unpackApp(t).args[0] else: t
+    if kindOf(m) != kinds.inRe: return
+    let args = unpackApp(m).args
+    if not neg and astId(ctx, args[1].raw) == byteReId: return
+    (true, args[0], args[1], neg)
+  # Every term made here is wrapped (and so referenced) at once: Z3 keeps
+  # an unreferenced result only until its next call.
+  proc mk(raw: RawZ3Ast): Z3AnyAst = wrap[Z3AnyAst](ctx, ctx.checkErr raw)
+  proc comp(re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_re_complement(ctx.raw, re.raw)
+  proc inter(res: seq[Z3AnyAst]): Z3AnyAst =
+    if res.len == 1: return res[0]
+    var rs = newSeq[RawZ3Ast](res.len)
+    for i, r in res: rs[i] = r.raw
+    mk Z3_mk_re_intersect(ctx.raw, cuint(rs.len),
+                          cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  proc member(x, re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_seq_in_re(ctx.raw, x.raw, re.raw)
+  proc held(re: Z3AnyAst; neg: bool): tuple[re: Z3AnyAst, neg: bool] =
+    result = (re: re, neg: neg)
+    if neg: result.re = comp(re)
+  proc andOf(outs: seq[Z3AnyAst]): Z3AnyAst =
+    if outs.len == 1: return outs[0]
+    var rs = newSeq[RawZ3Ast](outs.len)
+    for i, r in outs: rs[i] = r.raw
+    mk Z3_mk_and(ctx.raw, cuint(rs.len),
+                 cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
+  for i, r in roots:
+    for t in conjuncts(toAnyAst(r)):
+      let l = literal(t)
+      if not l.ok: continue
+      groups.mgetOrPut(astId(ctx, l.x.raw), (x: l.x, lits: @[])).lits.add(
+        (root: i, id: astId(ctx, t.raw), re: l.re, neg: l.neg))
+  var merged: seq[Z3Bool]
+  var gone, touched: HashSet[int]
+  var top: Table[int, Held]   # RFC-0005 S8by: what holds everywhere
+  for xId, g in groups:
+    var anyNeg = false
+    for l in g.lits: anyNeg = anyNeg or l.neg
+    if g.lits.len < 2 or not anyNeg:
+      for l in g.lits: top.mgetOrPut(xId, @[]).add held(l.re, l.neg)
+      continue
+    var res = newSeq[Z3AnyAst](g.lits.len)
+    for i, l in g.lits:
+      res[i] = held(l.re, l.neg).re
+      gone.incl l.id
+      touched.incl l.root
+    let one = inter(res)
+    top[xId] = @[(re: one, neg: true)]
+    merged.add wrap[Z3Bool](ctx, member(g.x, one).raw)
+  var flat: seq[Z3Bool]
+  if merged.len == 0: flat = @roots
+  else:
+    for i, r in roots:
+      if i notin touched: flat.add r
+      else:
+        for t in conjuncts(toAnyAst(r)):
+          if astId(ctx, t.raw) notin gone: flat.add wrap[Z3Bool](ctx, t.raw)
+    flat.add merged
+  # RFC-0005 S8by: below the top level. Only a term holding a membership
+  # literal is rebuilt (`holds`), each once per context and reading.
+  var hasLit: Table[int, bool]
+  proc holds(t: Z3AnyAst): bool =
+    let id = astId(ctx, t.raw)
+    if id in hasLit: return hasLit[id]
+    result = literal(t).ok
+    if not result and getAstKind(t) == akApp:
+      for a in unpackApp(t).args:
+        if holds(a):
+          result = true
+          break
+    hasLit[id] = result
+  var memo: Table[(int, int, Pol, bool), Z3AnyAst]
+  var serial = 0
+  proc flip(p: Pol): Pol =
+    case p
+    of polPos: polNeg
+    of polNeg: polPos
+    of polBoth: polBoth
+  proc rewrite(t: Z3AnyAst; env: Table[int, Held]; envId: int; pol: Pol;
+               conj: bool): Z3AnyAst =
+    ## `t` read as `pol` where `env` holds. `conj`: `t` (a Bool term) as a
+    ## conjunction -- its own membership literals merged with `env`, the
+    ## rest rewritten with those literals held too; otherwise each of its
+    ## arguments rewritten, read as its operator reads it.
+    if pol == polBoth or getAstKind(t) != akApp or not holds(t): return t
+    let key = (astId(ctx, t.raw), envId, pol, conj)
+    if key in memo: return memo[key]
+    if not conj:
+      let (decl, args) = unpackApp(t)
+      let k = kindOf(t)
+      var raws = newSeq[RawZ3Ast](args.len)
+      var keep = newSeq[Z3AnyAst](args.len)
+      var changed = false
+      for i, a in args:
+        let p =
+          if k == bk.notK: flip(pol)
+          elif k == bk.andK or k == bk.orK: pol
+          elif k == bk.impliesK: (if i == 0: flip(pol) else: pol)
+          elif k == bk.iteK: (if i == 0: polBoth else: pol)
+          else: polBoth
+        let b = rewrite(a, env, envId, p, getSortKind(a) == skBool)
+        keep[i] = b
+        raws[i] = b.raw
+        changed = changed or b.raw != a.raw
+      result = if not changed: t
+               else: mk(Z3_mk_app(ctx.raw, decl, cuint(raws.len),
+                                  cast[ptr UncheckedArray[RawZ3Ast]](raws[0].addr)))
+      memo[key] = result
+      return
+    let cs = conjuncts(t)
+    var own: OrderedTable[int, tuple[x: Z3AnyAst, lits: Held, ids: seq[int]]]
+    for c in cs:
+      let l = literal(c)
+      if l.ok:
+        let xId = astId(ctx, l.x.raw)
+        if xId notin own: own[xId] = (x: l.x, lits: @[], ids: @[])
+        own[xId].lits.add held(l.re, l.neg)
+        own[xId].ids.add astId(ctx, c.raw)
+    var inner = env
+    var innerId = envId
+    if own.len > 0:
+      inc serial
+      innerId = serial
+      for xId, g in own:
+        for h in g.lits: inner.mgetOrPut(xId, @[]).add h
+    var drop: HashSet[int]
+    var add: seq[Z3AnyAst]
+    for xId, g in own:
+      let above = env.getOrDefault(xId)
+      # Negated as read: a negated literal asserted, or a plain one denied.
+      var anyNeg = false
+      for h in above: anyNeg = anyNeg or h.neg
+      for h in g.lits: anyNeg = anyNeg or (h.neg != (pol == polNeg))
+      if above.len + g.lits.len < 2 or not anyNeg: continue
+      var a, i: seq[Z3AnyAst]
+      for h in g.lits: a.add h.re
+      for h in above: i.add h.re
+      for id in g.ids: drop.incl id
+      add.add(
+        if pol == polPos: member(g.x, inter(a & i))
+        else: mk(Z3_mk_not(ctx.raw,
+                           member(g.x, inter(@[comp(inter(a))] & i)).raw)))
+    var outs: seq[Z3AnyAst]
+    var changed = add.len > 0
+    for c in cs:
+      if astId(ctx, c.raw) in drop: continue
+      let b = if literal(c).ok: c else: rewrite(c, inner, innerId, pol, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    outs.add add
+    result = if not changed: t else: andOf(outs)
+    memo[key] = result
+  for r in flat:
+    # A root's top-level literals are the top level's (above); the rest of
+    # it is rewritten with them held.
+    var outs: seq[Z3AnyAst]
+    var changed = false
+    for c in conjuncts(toAnyAst(r)):
+      let b = if literal(c).ok: c else: rewrite(c, top, 0, polPos, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    result.add(if not changed: r else: wrap[Z3Bool](ctx, andOf(outs).raw))
+
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
   ## Z3's simple solver: probed once per thread against the linked Z3
   ## (`theoryFreeSimple`).
 
-proc theoryFreeSimple(ctx: Z3Context): bool =
+proc theoryFreeSimple(): bool =
   ## RFC-0005 S8r. True when the linked Z3's default solver ignores
   ## `smt.string_solver = none` set as a solver parameter. Z3 4.13.4 (the
   ## symex-mingw leg's build) does: its default (combined) solver keeps the
@@ -10784,6 +13542,7 @@ proc theoryFreeSimple(ctx: Z3Context): bool =
   ## `str.len(x) < 0` is UNSAT only under the sequence theory's length
   ## axiom, so a theory-free solver answers SAT.
   if not theoryFreeNeedsSimple.ready:
+    let ctx = probeContext()   # RFC-0005 S8bp
     let x = mkStringVar(ctx, "__s8r_theory_free_probe")
     let lenX = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_seq_length(ctx.raw, x.raw))
     let s = newSolver(ctx)
@@ -10795,6 +13554,47 @@ proc theoryFreeSimple(ctx: Z3Context): bool =
     s.add lenX < mkInt(ctx, 0)
     theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
+
+var queryTimeoutMsCur {.threadvar.}: uint
+  ## RFC-0005 S8bu. The run's `queryTimeoutMs`, set by `resetSymexRunState`:
+  ## every solver `querySolver` builds runs under it. `0` (none) outside a
+  ## run.
+var nativeStackCutFlag {.threadvar.}: bool
+  ## RFC-0005 S8ca. Some call of the current run declined because the
+  ## native stack left was under the walk's reserve (`nativeStackShort`);
+  ## reset by `resetSymexRunState`.
+
+proc symexNativeStackCut*(): bool =
+  ## RFC-0005 S8ca. Whether a call of the last run on this thread declined
+  ## for want of native stack. Like a clock cut-off its verdict is the
+  ## machine's (the thread's stack), not only the program's, so
+  ## `saveSymexVerdictImpl` does not cache it.
+  nativeStackCutFlag
+
+var queryTimedOutFlag {.threadvar.}: bool
+  ## RFC-0005 S8bu. Some solve of the current run was cut off by the clock
+  ## (`solveBounded`); reset by `resetSymexRunState`.
+
+proc symexQueryTimedOut*(): bool =
+  ## RFC-0005 S8bu. Whether a solve of the last run on this thread was cut
+  ## off by `queryTimeoutMs`. Its verdict is the machine's, not only the
+  ## program's, so `saveSymexVerdictImpl` does not cache it.
+  queryTimedOutFlag
+
+proc solveBounded(s: Z3Solver; assumptions: openArray[Z3Bool] = []): Z3Status =
+  ## RFC-0005 S8bu. `s.check()` (under `assumptions`, `checkWith`), noting
+  ## a solve the wall clock cut off (`queryTimeoutMs`).
+  result = if assumptions.len == 0: s.check() else: s.checkWith(assumptions)
+  if result == zsUnknown and s.reasonUnknown() == "timeout":
+    queryTimedOutFlag = true
+
+proc undefReason(s: Z3Solver; timeoutMs: uint): string =
+  ## RFC-0005 S8bu. Z3's `reason_unknown`, naming `queryTimeoutMs` when
+  ## the clock ended the solve.
+  result = "Z3: " & s.reasonUnknown()
+  if result == "Z3: timeout":
+    result.add " (queryTimeoutMs = " & $timeoutMs & ": Z3 stopped " &
+      "advancing its step count, so no step bound ended the solve)"
 
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
                  rlimit: uint; seqTheory = true): Z3Solver =
@@ -10812,20 +13612,112 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   ## for a string at all. RFC-0005 S8r: on a Z3 whose default solver
   ## ignores that parameter (4.13.4, `theoryFreeSimple`) it runs on the
   ## simple solver, which honours it.
-  result = if not seqTheory and theoryFreeSimple(ctx): newSimpleSolver(ctx)
+  result = if not seqTheory and theoryFreeSimple(): newSimpleSolver(ctx)
            else: newSolver(ctx)
   let solverParams = newParams(ctx)
   solverParams.set("rlimit", rlimit)
+  # RFC-0005 S8bu: and the run's wall-clock backstop (`queryTimeoutMs`).
+  if queryTimeoutMsCur > 0'u: solverParams.set("timeout", queryTimeoutMsCur)
   solverParams.set("random_seed", 0'u)
   if not seqTheory:
     solverParams.set("smt.string_solver", "none")
   result.setParams(solverParams)
   for c in roots: result.add(c)
-  when defined(symexQueryStats):
-    noteQueryRLimitBefore(result)   # RFC-0005 S8ac: before any check
+
+proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3AnyAst] =
+  ## RFC-0005 S8by. Every term of `roots`, each once, children before
+  ## parents: the roots in order, each term's arguments last to first.
+  ## `ownContextSolver` makes a query's terms in its context in this
+  ## order. Z3's units on a query were a function of the query alone
+  ## since S8bp, but not the wall time a unit costs: the search a unit
+  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
+  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
+  ## walk's, S8bp). The order moves the search, so units as well as wall
+  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
+  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
+  ## order, root by root.
+  var done: HashSet[int]
+  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
+  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  while stack.len > 0:
+    let (t, expanded) = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in done: continue
+    if expanded or getAstKind(t) != akApp:
+      done.incl id
+      result.add t
+      continue
+    stack.add (t, true)
+    for a in unpackApp(t).args: stack.add (a, false)
+
+proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
+                      rlimit: uint; seqTheory = true): Z3Solver =
+  ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
+  ## context of its own: `roots` (terms of the walk's context `ctx`) are
+  ## translated into it, so its search starts from the query's text alone
+  ## and not from what the walk's shared context already holds (see
+  ## `checkCapped`). A model is translated back with `translate(m, ctx)`.
+  ## `newContext` makes the new context the thread's current one; the
+  ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
+  ## the theory-free ones (`seqTheory = false`) included.
+  ##
+  ## RFC-0005 S8by: the query's terms are made in the new context in one
+  ## order, a function of the query alone (`queryTermOrder`), and so are
+  ## their ids, which Z3's search reads. Its units were already the
+  ## query's (S8bp); the wall time a unit costs follows the order too.
+  let prev = currentContext()
+  let own = newContext()
+  setCurrentContext(prev)
+  let order = queryTermOrder(ctx, roots)
+  var at: Table[int, int]
+  let terms = newAstVector(ctx)
+  for i, t in order:
+    at[astId(ctx, t.raw)] = i
+    terms.add t
+  # One translation (one cache), in that order: each term made once, its
+  # arguments before it.
+  let made = translate(terms, own)
+  var inOwn = newSeq[Z3Bool](roots.len)
+  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
+  querySolver(own, inOwn, rlimit, seqTheory)
+
+when defined(symexTestInjectWalkerFault):
+  proc injectedSolveFaultTerms(s: Z3Solver): seq[Z3Bool] =
+    ## RFC-0005 batch 8 fault injection (see `ownContextCheck`): raises with a
+    ## Z3 term in its result, which the caller destroys on the raise path.
+    result = @[mkBool(s.ctx, true)]
+    raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+      "batch 8 synthetic swallowed solve fault (symexTestInjectWalkerFault)")
+
+proc ownContextCheck(s: Z3Solver;
+                     assumptions: openArray[Z3Bool] = []): Z3Status =
+  ## RFC-0005 S8bm. `s.check()` (RFC-0005 S8bp: under `assumptions`, terms
+  ## of `s`'s context, when there are any) for an `ownContextSolver`, its
+  ## context's whole step count (nothing else ran there) added to
+  ## `ownContextUnits`. RFC-0005 batch 7: the check is S8bu's
+  ## `solveBounded`, so a solve the clock cut off is noted here too.
+  when defined(symexTestInjectWalkerFault):
+    # RFC-0005 batch 8 fault injection (compiled out of every normal build):
+    # a query over a parameter named for the shape raises, as `extractLeaf`'s
+    # for extraction: straight out of the solve, or in a callee whose result
+    # the C backend destroys on the raise path, which loses it here.
+    let shown = $s
+    if "injectSolveFault" in shown:
+      raise newException(ValueError,  # [raise-audited: category-c: test-injection-only (compiled out of every normal build; only present under -d:symexTestInjectWalkerFault, wired for the batch 8 own-context solve test)]
+        "batch 8 synthetic solve fault (symexTestInjectWalkerFault)")
+    if "injectSwallowedSolveFault" in shown:
+      var held = @[mkBool(s.ctx, false)]
+      held = injectedSolveFaultTerms(s)
+      discard held
+  result = solveBounded(s, assumptions)
+  let st = s.getStatistics()
+  if st.contains("rlimit count"):
+    ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
+                        else: int(st.getFloat("rlimit count")))
 
 var intDivDeclKinds {.threadvar.}:
-    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub: int]
+    tuple[ready: bool, idiv, imod, bv2nat, sbv2int, bvneg, bvsub, bvadd: int]
   ## RFC-0005 S8ad. The `Z3_decl_kind` ordinals `divRangeFacts` matches on
   ## (Int `div` and `mod`, unsigned and signed `bv2int`, `bvneg`, `bvsub`),
   ## read off
@@ -10834,6 +13726,22 @@ var intDivDeclKinds {.threadvar.}:
   ## `bv2int` that Z3 expands (to an `ite` over the unsigned one, as Z3 5.1
   ## does) has the `ite`'s kind; `divRangeFacts` only matches it with one
   ## argument, which an `ite` never has, and meets the unsigned one inside.
+  ## RFC-0005 S8bd: and `bvadd`, for `bvOffsetLinks`.
+
+proc ensureIntDivDeclKinds() =
+  if intDivDeclKinds.ready: return
+  let ctx = probeContext()   # RFC-0005 S8bp
+  proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
+    ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
+  let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
+  let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
+  let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
+  intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
+    imod: kindOf(ctx, (x mod y).raw),
+    bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
+    sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
+    bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw),
+    bvadd: kindOf(ctx, (v + v).raw))
 
 proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## RFC-0005 S8ad. Linear bounds on every Int quotient `e = a div b` and
@@ -10885,18 +13793,10 @@ proc divRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
   ## start`, UNSAT) neither 5.1 nor 4.13.4 refuted it within 40M steps;
   ## with this pair it is 0.45M offline. Linking `bv2int(y + 1)` to
   ## `bv2int(y)` (and likewise for `-`, `*`, shifts) did not decide it
-  ## and made other queries dearer, so it is not asserted.
-  if not intDivDeclKinds.ready:
-    proc kindOf(ctx: Z3Context; a: RawZ3Ast): int =
-      ord(Z3_get_decl_kind(ctx.raw, Z3_get_app_decl(ctx.raw, Z3_to_app(ctx.raw, a))))
-    let x = mkIntVar(ctx, "__s8ad_kind_probe_a")
-    let y = mkIntVar(ctx, "__s8ad_kind_probe_b")
-    let v = mkBitVecVar[8](ctx, "__s8ad_kind_probe_v")
-    intDivDeclKinds = (ready: true, idiv: kindOf(ctx, (x div y).raw),
-      imod: kindOf(ctx, (x mod y).raw),
-      bv2nat: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, false)),
-      sbv2int: kindOf(ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, v.raw, true)),
-      bvneg: kindOf(ctx, (-v).raw), bvsub: kindOf(ctx, (v - v).raw))
+  ## and made other queries dearer, so it is not asserted. (RFC-0005 S8bd:
+  ## it is, for a `+`/`-` numeral, between two views the query already
+  ## holds -- `bvOffsetLinks`.)
+  ensureIntDivDeclKinds()
   let kinds = intDivDeclKinds
   let (idiv, imod) = (kinds.idiv, kinds.imod)
   let zero = mkInt(ctx, 0)
@@ -10999,6 +13899,231 @@ const factsFirstRLimit* = 1_000_000'u
   ## the full-theory search; one it cannot finish here is still tried
   ## with the whole budget after step 1. S8aw's join refutations took a
   ## few thousand units on Z3 5.1 and 4.13.4.
+proc bvOffsetLinks*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bd. For every Int view `bv2int(x + c)` or `bv2int(x - c)`
+  ## in `roots` (`c` a bit-vector numeral, `bvadd` in either operand
+  ## order) whose operand's own view `bv2int(x)` is in `roots` too, read
+  ## the same way (unsigned, or Z3's one-argument signed `bv2int` where it
+  ## has one), the exact two's-complement link between the two views, at
+  ## width W:
+  ##   unsigned:  ubv2int(x + c) == (let v = ubv2int(x) + c;
+  ##                                 if v >= 2^W: v - 2^W else: v)
+  ##              ubv2int(x - c) == (let v = ubv2int(x) - c;
+  ##                                 if v < 0: v + 2^W else: v)
+  ##   signed:    sbv2int(x +- c) == (let v = sbv2int(x) +- c;
+  ##                                  if v > high: v - 2^W
+  ##                                  elif v < low: v + 2^W else: v)
+  ## with `c` read the same way as `x`. Each is a theorem of bit-vector
+  ## arithmetic (a definition of the wrap, not a constraint on the input),
+  ## so asserting them beside the query leaves its models as they were.
+  ## `tests/tsymex_rfc0005_s8bd_remainder.nim` checks every one against
+  ## Z3's own `bv2int` on a grid of numerals.
+  ##
+  ## Why: a string index `i` that is a bit-vector (an `int` parameter whose
+  ## `i + 1` can overflow) meets `s.len` through two Int views, `bv2int(i)`
+  ## (`i < s.len`) and `bv2int(i + 1)` (`i + 1 > s.len`), and Z3 relates
+  ## the two only by bit-blasting the conversion. `i >= 0 and i < s.len and
+  ## s[i] == 'a' and i + 1 > s.len` ran ~41M units to `sxUnknown`
+  ## (`beSolverUndef`) on both Z3 versions, in both integer encodings; the
+  ## character read was not the cost (without it, the same). The label
+  ## query replayed offline from its SMT-LIB text decides in 0.77M units
+  ## on 5.1 and 2.77M on 4.13.4, but in the walker's context it ran past
+  ## the whole budget; with this link, 2.8k and 4.0k offline.
+  ##
+  ## Only a pair whose both views are in the query is linked. RFC-0005 S8aj
+  ## measured the general link (`bv2int(y + 1)` to a `bv2int(y)` the query
+  ## did not hold) and rejected it: `(start + y) div (y + 1) > start` went
+  ## from 6.6M to 31.6M units on 5.1. There `y` is only compared as a
+  ## bit-vector (`y > 1`), so its Int view is new to the query, and the
+  ## link would bring it in; here both views are already terms Z3 must
+  ## reconcile, and the link states how.
+  ensureIntDivDeclKinds()
+  let kinds = intDivDeclKinds
+  let signedKind = kinds.sbv2int != kinds.bv2nat
+  var viewed: HashSet[(int, bool)]
+  var views: seq[tuple[t, arg: Z3AnyAst, signed: bool]]
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and (k == kinds.bv2nat or (signedKind and k == kinds.sbv2int)):
+      let signed = signedKind and k == kinds.sbv2int
+      viewed.incl (astId(ctx, args[0].raw), signed)
+      views.add (t: t, arg: args[0], signed: signed)
+  if views.len < 2: return
+  let intSort = ctx.checkErr Z3_mk_int_sort(ctx.raw)
+  proc intText(text: string): Z3Int =
+    wrap[Z3Int](ctx, ctx.checkErr Z3_mk_numeral(ctx.raw, text.cstring, intSort))
+  proc pow2(e: int): string =
+    ## 2^e as decimal text, 1 <= e <= 64.
+    if e >= 64: "18446744073709551616" else: $(1'u64 shl e)
+  for v in views:
+    if getAstKind(v.arg) != akApp: continue
+    let (d, xs) = unpackApp(v.arg)
+    if xs.len != 2: continue
+    let ak = ord(Z3_get_decl_kind(ctx.raw, d))
+    var x, c: Z3AnyAst
+    var plus: bool
+    if ak == kinds.bvadd and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], true)
+    elif ak == kinds.bvadd and isNumeralAst(ctx, xs[0].raw):
+      (x, c, plus) = (xs[1], xs[0], true)
+    elif ak == kinds.bvsub and isNumeralAst(ctx, xs[1].raw):
+      (x, c, plus) = (xs[0], xs[1], false)
+    else: continue
+    if isNumeralAst(ctx, x.raw): continue
+    if (astId(ctx, x.raw), v.signed) notin viewed: continue
+    let w = int(Z3_get_bv_sort_size(ctx.raw,
+                  ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+    if w < 1 or w > 64: continue
+    let cu = parseBiggestUInt($Z3_get_numeral_string(ctx.raw, c.raw))
+    let cText =
+      if v.signed and cu >= (1'u64 shl (w - 1)):
+        "-" & (if w == 64: $((not cu) + 1) else: $((1'u64 shl w) - cu))
+      else: $cu
+    let xInt = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw,
+                                                         v.signed))
+    let tInt = wrap[Z3Int](ctx, v.t.raw)
+    let cInt = intText(cText)
+    let span = intText(pow2(w))
+    let sum = if plus: xInt + cInt else: xInt - cInt
+    if v.signed:
+      let hi = intText($((1'u64 shl (w - 1)) - 1))
+      let lo = intText("-" & pow2(w - 1))
+      result.add tInt == ite(sum > hi, sum - span,
+                             ite(sum < lo, sum + span, sum))
+    else:
+      let zero = intText("0")
+      result.add tInt == ite(sum >= span, sum - span,
+                             ite(sum < zero, sum + span, sum))
+
+var int2bvDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The `Z3_decl_kind` ordinal (+ 1) of `int2bv`, read off a
+  ## probe term as `intDivDeclKinds` are.
+var eqDeclKind {.threadvar.}: int
+  ## RFC-0005 S8bu. The same, of `=`.
+
+proc peelSelect(ctx: Z3Context; t: RawZ3Ast): RawZ3Ast
+  ## RFC-0005 S8bu. Defined in `runtime_heap.nim`.
+
+proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
+  ## RFC-0005 S8bu. Facts that let Z3 invert the signed Int view `sbv2int`
+  ## of the bit-vectors in `roots`, each a theorem of two's complement (the
+  ## view is injective, and `int2bv` takes its argument mod 2^W), so
+  ## asserting them beside the query leaves its models as they were:
+  ##   * for every `int2bv_W(t)` term in `roots` whose `t` is `sbv2int(x)`,
+  ##     with `x` of width W:  int2bv_W(t) == x;
+  ##   * for every equality `a == b` in `roots` whose `a` is `sbv2int(x)`
+  ##     and `b` is `sbv2int(y)`, `x` and `y` of one width:
+  ##     a == b  implies  x == y;
+  ## where a term "is" a view when it is one once each `select(store(h, i,
+  ## v), i)` in it is read as `v` (`peelSelect`; a theorem of arrays, so
+  ## each fact stays one): an `int` stored into a heap cell and read back
+  ## out of it is that store's view.
+  ## Neither brings a term the query does not hold: an `int2bv` of every
+  ## view (the first form for every view, before) made Z3 bit-blast Int
+  ## arithmetic, and `tsymex_rfc0005_s8ad_remainder`'s quotient queries
+  ## stopped advancing Z3's step counter; the second form for every pair of
+  ## views took 4.13.4 past those queries' step pins. `tests/tsymex_rfc0005_s8bu_term.nim`
+  ## checks both forms valid at width 8. A view is found as the term
+  ## `Z3_mk_bv2int(x, true)` builds: Z3 shares equal terms, so the view the
+  ## walker built (`bvTermToZ3Int`) and the one built here are the same AST,
+  ## whether the linked Z3 keeps the signed `bv2int` as one operator or
+  ## expands it (to an `ite` over the unsigned one, as Z3 5.1 and 4.13.4 do).
+  ##
+  ## Why: an `int` stored in an Int-sorted heap (`intHeapCell`) crosses the
+  ## sort boundary through the signed view, and a callee's result read back
+  ## from it is linked to a bit-vector either by `sbv2int(r) == sbv2int(k)`
+  ## or by `r == int2bv(sbv2int(k))`. With `r != k` both are UNSAT, but Z3
+  ## refutes them only through the injectivity of the expanded `ite`, which
+  ## neither 5.1 nor 4.13.4 found within 3M units; with these facts each
+  ## decides in a few hundred (the unsigned view needs none: Z3 asserts
+  ## `int2bv(ubv2int(x)) == x` itself). Under the then-unbounded default
+  ## `queryRLimit` the walk never terminated (S8bs's int-field and
+  ## `seq[int]` SUTs).
+  ensureIntDivDeclKinds()
+  if int2bvDeclKind == 0 or eqDeclKind == 0:
+    # RFC-0005 batch 7: probed in a context of its own (S8bp's
+    # `probeContext`), not the walk's.
+    let pc = probeContext()
+    let probe = mkIntVar(pc, "__s8bu_int2bv_probe")
+    let t = pc.checkErr Z3_mk_int2bv(pc.raw, 8, probe.raw)
+    int2bvDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, t)))) + 1
+    let pa = mkIntVar(pc, "__s8bu_eq_probe_a")
+    let pb = mkIntVar(pc, "__s8bu_eq_probe_b")
+    let e = checkedEq(pc, pa.raw, pb.raw)
+    eqDeclKind = ord(Z3_get_decl_kind(pc.raw,
+      Z3_get_app_decl(pc.raw, Z3_to_app(pc.raw, e)))) + 1
+  let bv2nat = intDivDeclKinds.bv2nat
+  var seen: HashSet[int]
+  var args1: seq[Z3AnyAst]
+  var backs: seq[Z3AnyAst]   ## the `int2bv` terms
+  var eqs: seq[Z3AnyAst]     ## the equalities
+  var stack: seq[Z3AnyAst]
+  for r in roots: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if getAstKind(t) != akApp: continue
+    let (decl, args) = unpackApp(t)
+    for a in args: stack.add a
+    let k = ord(Z3_get_decl_kind(ctx.raw, decl))
+    if args.len == 1 and k == bv2nat and not isNumeralAst(ctx, args[0].raw):
+      args1.add args[0]
+    elif args.len == 1 and k + 1 == int2bvDeclKind:
+      backs.add t
+    elif args.len == 2 and k + 1 == eqDeclKind:
+      eqs.add t
+  var done: HashSet[int]
+  var views: seq[tuple[x, sv: Z3AnyAst; w: cuint]]
+  for x in args1:
+    let xid = astId(ctx, x.raw)
+    if xid in done: continue
+    done.incl xid
+    let sv = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, x.raw, true))
+    if astId(ctx, sv.raw) notin seen: continue
+    views.add (x: x, sv: sv,
+               w: Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, x.raw)))
+  if views.len == 0: return
+  var viewIx: Table[int, int]   ## a view's AST id -> its index in `views`
+  for i, v in views: viewIx[astId(ctx, v.sv.raw)] = i
+  template viewOf(t: Z3AnyAst): int =
+    ## The index in `views` of the view `t` is (`peelSelect`), else -1.
+    viewIx.getOrDefault(astId(ctx, peelSelect(ctx, t.raw)), -1)
+  for t in backs:
+    let (_, args) = unpackApp(t)
+    let w = Z3_get_bv_sort_size(ctx.raw, ctx.checkErr Z3_get_sort(ctx.raw, t.raw))
+    let i = viewOf(args[0])
+    if i >= 0 and views[i].w == w:
+      result.add wrap[Z3Bool](ctx, checkedEq(ctx, t.raw, views[i].x.raw))
+  var paired: HashSet[(int, int)]
+  for t in eqs:
+    let (_, args) = unpackApp(t)
+    let i = viewOf(args[0])
+    let j = viewOf(args[1])
+    if i < 0 or j < 0 or i == j or views[i].w != views[j].w: continue
+    if (i, j) in paired: continue
+    paired.incl (i, j)
+    let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
+    result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
+
+const recFactsRLimit* = 100_000'u
+  ## RFC-0005 S8bt. The budget of `checkCapped`'s check without the
+  ## recursive `replace` definitions (S8bj ran it under `factsFirstRLimit`).
+  ## The facts' refutations take at most a few thousand units (2,060 for the
+  ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
+  ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
@@ -11019,7 +14144,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
   ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
   ##      An UNSAT is the query's own and returns at once; anything else
-  ##      goes on to (1), with (1b) and (1c) below unchanged.
+  ##      goes on to (1). After a SAT here (RFC-0005 S8by), (1b) and (1c)'s
+  ##      uncapped half are known SAT and do not run, nor does (1c)'s
+  ##      capped half when the model makes the caps true as well.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -11074,12 +14201,31 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ## (and in another case to SAT in 31.7M). Z3 keeps what a check built
   ## -- terms, skolems, rewriter caches -- in the context, and later
   ## checks there start from it. That is Z3's, and deterministic for a
-  ## given SUT and Z3 build; deciding each query in a context of its own
-  ## would trade it for a translation per query, and is not done here.
-  ## So the budget is a bound, not a promise: the character form keeps
-  ## the common byte tests far below it, and a query that lands near it
-  ## can decline in one walk and not in another that asked something
-  ## else first.
+  ## given SUT and Z3 build.
+  ## RFC-0005 S8bm measured how far it reaches: B1-1's target query (the
+  ## same text in every run) took 172,215 units in step 1 as one walk
+  ## ran, 3,365,417 with S8ay's facts-first check before it, 11,771,578
+  ## without it as the process's second walk, and 5,280,185 with one
+  ## unrelated Int constant created before each step 1 -- Z3's search
+  ## follows the context's term order, not only its query (Z3 5.1). So
+  ## step 1, the model search nearly every SAT query ends in, runs in a
+  ## fresh context of its own (`ownContextSolver`): its cost is the
+  ## query's (5,711,742 there, with and without the facts-first check),
+  ## and nothing the walk did before -- a facts-first check, an earlier
+  ## query -- moves it.
+  ## The translation costs a few milliseconds per query.
+  ## RFC-0005 S8bp: so does every other step, each in a fresh context of
+  ## its own (`ownContextSolver`, `ownContextCheck`): the facts-first
+  ## check, (1b), (1c), (2), (3), and the query with no string (`plain`);
+  ## batch 7: S8bj's query without the `replace` definitions too.
+  ## They moved with the walk's context too: with thirty unrelated
+  ## constants made before each query, a factoring search in (1c) took
+  ## 350,726 units against 114,891, (2) 231,590 against 401,123, and the
+  ## no-string query 92,799 against 124,550 (Z3 5.1); (3) 464,636 against
+  ## 207,893 (4.13.4). The theory-free steps are not small when the query
+  ## holds such a search. So no step's cost depends on what the walk did
+  ## before it, and a query declines under its budget in every walk or in
+  ## none.
   ## Why two solver modes: Z3 answers a check under assumptions with its
   ## incremental core, not the one-shot preprocessing pipeline, and that
   ## core is both much slower on bit-vector-heavy queries (one the
@@ -11092,10 +14238,34 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8ad: every step decides the query with the linear bounds of
   # its Int quotients beside it (`divRangeFacts`): theorems, so the models
   # are the query's own.
+  # RFC-0005 S8bd: and with the exact link between the Int views of `x`
+  # and `x +- c` where the query holds both (`bvOffsetLinks`): theorems too.
+  when defined(symexQueryStats):
+    # RFC-0005 S8bp: unrelated walk state, for the isolation suite.
+    for k in 0 ..< symexPerturbConsts:
+      discard mkIntVar(ctx, "__s8bp_perturb_" & $perturbSerial)
+      inc perturbSerial
+  template counted(name: string; check: untyped): Z3Status =
+    ## `check` (an `ownContextCheck`), recorded as step `name` in the
+    ## instrumented build (RFC-0005 S8bp, `symexStepStats`).
+    when defined(symexQueryStats):
+      let before = ownContextUnits
+      let r = check
+      symexStepStats.add SymexStepStat(step: name, status: $r,
+                                       units: ownContextUnits - before)
+      r
+    else:
+      check
+  # RFC-0005 S8bp: and with a string's regex memberships, one of them
+  # negated, as one (`mergeMemberships`; the same models).
+  # RFC-0005 S8bu: and with each signed Int view's inverse,
+  # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
   # RFC-0005 S8bv: and the part identities of its `card` terms
   # (`bitSetCardFacts`), theorems too.
-  let rootsIn = @query & divRangeFacts(ctx, query) &
-                bitSetCardFacts(ctx, query)
+  var rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
+    bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query) &
+    bitSetCardFacts(ctx, query))
+  let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
   # `seqQueryRLimit` too, when that is the smaller bound: its bit count can
   # be pigeonhole-hard, and an unbounded check of one did not return.
@@ -11103,19 +14273,72 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     (rlimit == 0 or settings.budget.seqQueryRLimit < rlimit) and
     queryMentionsBitSetCard(ctx, rootsIn)
   let rlimit = if cardBounded: settings.budget.seqQueryRLimit else: rlimit
+  # RFC-0005 S8bj: the query without the recursive `replace` definitions
+  # (`regexRecDefConds`), under the small budget of step 0: a superset of
+  # the real models, so an UNSAT is the query's own.
+  # RFC-0005 S8bt: the values' facts (`regexRecFactConds`) are asserted
+  # there only. Every step after it decides the query with each value `r`
+  # replaced by its term (`r == term` read off its definition) and the
+  # definitions and facts left out: the same models (the facts are true of
+  # every term's value), and exactly the query S8bb / S8bj's run and step
+  # tables put to Z3, whose model search the indirection through `r` and
+  # the facts slowed (`tsymex_rfc0005_s8bb_replace`'s symbolic receivers:
+  # 1.3 s became 11 s).
+  if regexRecDefConds.len > 0:
+    var defIds = initHashSet[int]()
+    for d in regexRecDefConds: defIds.incl astId(ctx, d.raw)
+    var factIds = initHashSet[int]()
+    for f in regexRecFactConds: factIds.incl astId(ctx, f.raw)
+    var abstracted, rest: seq[Z3Bool]
+    for r in rootsIn:
+      let id = astId(ctx, r.raw)
+      if id notin defIds:
+        abstracted.add r
+        if id notin factIds: rest.add r
+    if abstracted.len < rootsIn.len:
+      let pre = if rlimit == 0: recFactsRLimit else: min(rlimit, recFactsRLimit)
+      # RFC-0005 S8bp, S8bt: in a context of its own, as every step: a check
+      # leaves state in its context that changes how later checks there
+      # search (this one, however short, took `s8bb_replace`'s `x*` pin from
+      # 4 s to 20 s in the walk's). A translated query keeps its recursive
+      # functions' definitions (probed on both pinned Z3s).
+      let sAbs = ownContextSolver(ctx, abstracted, pre)
+      if counted("regexDefsFree", ownContextCheck(sAbs)) == zsUnsat:
+        return (zsUnsat, sAbs, nil, "")
+      # A nested replace's term mentions the inner value: definitions are
+      # added inner first, so each term is resolved against the earlier
+      # ones before it stands in.
+      var froms, tos: seq[RawZ3Ast]
+      for d in regexRecDefConds:
+        let app = Z3_to_app(ctx.raw, d.raw)
+        var t = Z3_get_app_arg(ctx.raw, app, 1)
+        if froms.len > 0:
+          t = ctx.checkErr Z3_substitute(ctx.raw, t, cuint(froms.len),
+            cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+            cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr))
+        froms.add Z3_get_app_arg(ctx.raw, app, 0)
+        tos.add t
+      rootsIn = @[]
+      for r in rest:
+        rootsIn.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw,
+          r.raw, cuint(froms.len),
+          cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+          cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
   template plain(): untyped =
-    let s = querySolver(ctx, rootsIn, rlimit)
-    let r = s.check()
-    return (r, s, (if r == zsSat: s.model() else: nil),
+    let s = ownContextSolver(ctx, rootsIn, rlimit)
+    let r = counted("plain", ownContextCheck(s))
+    when defined(symexTestInjectWalkerFault):
+      injectShapeFault("solver")   # RFC-0005 S8ce: the solver live
+    return (r, s, (if r == zsSat: translate(s.model(), ctx) else: nil),
             (if r == zsUnknown:
-               "Z3: " & s.reasonUnknown() &
+               undefReason(s, qto) &
                  (if cardBounded: " (the query counts a builtin set's " &
                     "members, so it ran under seqQueryRLimit = " &
                     $settings.budget.seqQueryRLimit & ")" else: "")
              else: ""))
   let cap = settings.budget.maxSeqLen
   if cap <= 0: plain()
-  let (caps, lastIndex, byteEqs) = seqLenCaps(ctx, rootsIn, cap)
+  let (caps, lastIndex, byteEqs, lens) = seqLenCaps(ctx, rootsIn, cap)
   if caps.len == 0: plain()
   # Every step below decides the query with each byte equality in its
   # character form (`seqLenCaps`): the same predicate, so the same models.
@@ -11143,7 +14366,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # `rl`, half each (`0`, unbounded, stays unbounded).
   let rlHalf = if rl == 0: 0'u else: max(1'u, rl div 2)
   proc z3Why(s: Z3Solver): string =
-    result = "Z3: " & s.reasonUnknown()
+    result = undefReason(s, qto)
     if seqBounded:
       result.add " (the query mentions a string / seq, so it ran under " &
         "seqQueryRLimit = " & $sq & ")"
@@ -11159,19 +14382,46 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # 1's full-theory search to its half budget first: S8aw's join walks
   # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
   # in a few thousand. Anything else (SAT, or unknown in the small budget)
-  # falls through to the unchanged order below, (1b) and (1c) included
-  # with their full budget, so no verdict is lost.
-  let facts = seqRangeFacts(ctx, roots)
+  # falls through to the unchanged order below; unknown runs (1b) and (1c)
+  # with their full budget, so no verdict is lost, and SAT skips what it
+  # already answers (RFC-0005 S8by, below).
+  # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
+  # true of every real input, so an UNSAT is still the query's own.
+  let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)
+  # RFC-0005 S8by: a facts-first SAT is (1c)'s uncapped answer, and so
+  # (1b)'s: (1c) is the same query under a larger budget, (1b) a subset of
+  # it, and a budget never turns a SAT into an UNSAT. Neither is run after
+  # one (in a context of its own each is the same search to the same SAT:
+  # 295,900 + 311,463 of `lastNl`'s 1,106,184 units on Z3 5.1). Where the
+  # facts-first model makes every cap true as well (`capsHold`), it is a
+  # model of (1c)'s capped half too, which is then not run either.
+  var factsSat, capsHold = false
   block factsFirst:
+    when defined(symexQueryStats):
+      if symexFactsFirstOff: break factsFirst   # RFC-0005 S8bm
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
-    let sPre = querySolver(ctx, roots, pre, seqTheory = false)
-    for f in facts: sPre.add f
-    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
-  # Step 1: the caps asserted, one-shot.
-  let s1 = querySolver(ctx, roots, rlHalf)
-  for c in caps: s1.add c
-  let r1 = s1.check()
-  if r1 == zsSat: return (zsSat, s1, s1.model(), "")
+    let sPre = ownContextSolver(ctx, roots & facts, pre, seqTheory = false)
+    let rPre = counted("factsFirst", ownContextCheck(sPre))
+    if rPre == zsUnsat:
+      return (zsUnsat, sPre, nil, "")
+    if rPre == zsSat:
+      factsSat = true
+      # Every assertion of the capped half, evaluated under the model in
+      # its own context: all true, whichever way the evaluator reads a
+      # string operation, means that query has a model.
+      let m = sPre.model()
+      capsHold = true
+      for c in roots & facts & caps:
+        if m.eval(translate(c, sPre.ctx)).toBoolOpt != some(true):
+          capsHold = false
+          break
+  # Step 1: the caps asserted, one-shot, in a context of its own
+  # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
+  # same whether or not the facts-first check (or anything else) ran in
+  # the walk's context before it.
+  let s1 = ownContextSolver(ctx, roots & caps, rlHalf)
+  let r1 = counted("1", ownContextCheck(s1))
+  if r1 == zsSat: return (zsSat, s1, translate(s1.model(), ctx), "")
   # Step 1b: the query with no sequence theory. Its models include every
   # real one, so an UNSAT here is the query's own (the cap took no part);
   # it cannot run into a long-string search, having none. It decides the
@@ -11181,8 +14431,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # well as the query's own `len(s) <= 1000` does. After an unknown in
   # (1) it runs only once (3) has failed too (see the doc comment).
   template theoryFreeUnsat(): (bool, Z3Solver) =
-    let sTf = querySolver(ctx, roots, rl, seqTheory = false)
-    (sTf.check() == zsUnsat, sTf)
+    let sTf = ownContextSolver(ctx, roots, rl, seqTheory = false)
+    (counted("1b", ownContextCheck(sTf)) == zsUnsat, sTf)
   # RFC-0005 S8aq: (1b) and (1c) below no longer gate on `r1 == zsUnsat`
   # specifically. `r1` can only be `zsUnsat` or `zsUnknown` here (`zsSat`
   # already returned), and a `zsUnknown` -- step 1's capped, full-theory
@@ -11197,7 +14447,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # decide. (`tsymex_rfc0005_s8aq_remainder.nim`, S8ai's own two
   # not-pinned-end-to-end cases: `s[7] == ':' and rfind < 7` and `':' in s
   # and rfind == -1`, both cancelled at step 1 under the tight budget.)
-  if r1 != zsSat:
+  if r1 != zsSat and not factsSat:   # RFC-0005 S8by: else known SAT
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
   if r1 != zsSat:
@@ -11233,24 +14483,39 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # half (an UNSAT that is its own): the capped half would decline one
     # that is SAT only past the cap, which step 3 decides
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
-    # (`facts` is computed above, for the facts-first check.)
-    if facts.len > 0:
-      let sTr = querySolver(ctx, roots, rl, seqTheory = false)
-      for f in facts: sTr.add f
-      if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
-    if not lastIndex:
-      let sTc = querySolver(ctx, roots, rl, seqTheory = false)
-      for f in facts: sTc.add f
-      for c in caps: sTc.add c
-      if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
+    # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
+    # with each length at most `high(int)`, `nimLenFacts`.)
+    # (RFC-0005 S8by: neither half after a facts-first SAT whose model
+    # satisfies the caps, nor the uncapped half after any facts-first SAT.)
+    if facts.len > 0 and not factsSat:
+      let sTr = ownContextSolver(ctx, roots & facts, rl, seqTheory = false)
+      if counted("1c", ownContextCheck(sTr)) == zsUnsat:
+        return (zsUnsat, sTr, nil, "")
+    if not lastIndex and not capsHold:
+      let sTc = ownContextSolver(ctx, roots & facts & caps, rl,
+                                 seqTheory = false)
+      if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
+        return (zsUnknown, s1, nil, capText)
+  var all = caps[0]
+  for i in 1 ..< caps.len: all = all and caps[i]
   if r1 == zsUnsat and not lastIndex:
+    # Step 1d (RFC-0005 batch 8): the caps are implied. If the query with no
+    # sequence theory, plus the facts (a superset of the real models), has no
+    # model breaking a cap, every real model keeps to the caps, so step 1's
+    # UNSAT is the query's own. Step 2 cannot say so: its core is not minimal,
+    # and may name the cap though the query bounds every length itself (S8bx's
+    # `setLen` pin, `len(s) <= 8` and `n <= 12`, on Z3 4.13.4 in S8bp's own
+    # context).
+    let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
+    let sIm = ownContextSolver(ctx, roots & facts & @[not all], pre,
+                               seqTheory = false)
+    if counted("1d", ownContextCheck(sIm)) == zsUnsat:
+      return (zsUnsat, s1, nil, "")
     # Step 2: is the UNSAT the query's own?
-    let s2 = querySolver(ctx, roots, rl)
-    let capLit = mkBoolVar(ctx, "__s8k_seq_len_cap")
-    var all = caps[0]
-    for i in 1 ..< caps.len: all = all and caps[i]
-    s2.add implies(capLit, all)
-    let r2 = s2.checkWith([capLit])
+    let s2 = ownContextSolver(ctx, roots, rl)
+    let capLit = mkBoolVar(s2.ctx, "__s8k_seq_len_cap")
+    s2.add implies(capLit, translate(all, s2.ctx))
+    let r2 = counted("2", ownContextCheck(s2, [capLit]))
     return case r2
       of zsUnsat:
         if s2.getUnsatCore().len == 0: (zsUnsat, s2, nil, "")
@@ -11265,15 +14530,17 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                              "disagree on this query under maxSeqLen = " &
                              $cap)
   # Step 3: the uncapped one-shot query.
-  let s3 = querySolver(ctx, roots, rl - rlHalf)
-  let r3 = s3.check()
+  let s3 = ownContextSolver(ctx, roots, rl - rlHalf)
+  let r3 = counted("3", ownContextCheck(s3))
   case r3
-  of zsSat: (zsSat, s3, s3.model(), "")
+  of zsSat: (zsSat, s3, translate(s3.model(), ctx), "")
   of zsUnsat: (zsUnsat, s3, nil, "")
   of zsUnknown:
     if r1 == zsUnsat:
       (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
                            "seq.last_indexof) was not decided: " & z3Why(s3))
+    elif factsSat:
+      (zsUnknown, s3, nil, z3Why(s3))   # RFC-0005 S8by: (1b) known SAT
     else:
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
@@ -11309,10 +14576,19 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
   # recorded, `ceClosureBodyUncertain`).
   for c in currentClosureCallAxioms:
     roots.add c
+  # RFC-0005 S8as: the entry values' type facts (`globalEntryFacts`).
+  for c in globalEntryFacts:
+    roots.add c
   # Round-4 Slice B (ADR-0026): drain the strip decomposition constraints
   # into every check — definitional clauses over per-occurrence fresh
   # strings (see `stripDecompConds`' doc for the soundness argument).
   for c in stripDecompConds:
+    roots.add c
+  # RFC-0005 S8bj: the recursive `replace` values' definitions.
+  for c in regexRecDefConds:
+    roots.add c
+  # RFC-0005 S8bt: and their facts.
+  for c in regexRecFactConds:
     roots.add c
   # RFC-0005 S8f: every allocated table's / set's size is at least its
   # number of distinct present key terms (`ContainerCardRegistry`). True of
@@ -11350,6 +14626,8 @@ proc pathRoots(path: Path; extra: openArray[Z3Bool] = []): seq[Z3Bool] =
     roots.add c
   roots.add extra
   roots.add globalRoots(roots)
+  when defined(symexTestInjectWalkerFault):
+    injectShapeFault("roots")  # RFC-0005 S8ce: the query's roots held
   roots
 
 proc trySolve(ctx: Z3Context,
@@ -11365,7 +14643,7 @@ proc trySolve(ctx: Z3Context,
   let roots = pathRoots(path)
   inc symexZ3CallCount
   when defined(symexQueryStats):
-    queryRLimitPending = not symexQueryStatsPaused
+    let unitsBefore = ownContextUnits   # RFC-0005 S8bp
   let (r, s, model, why) = checkCapped(ctx, roots, settings,
                                        settings.budget.queryRLimit)
   when defined(symexQueryStats):
@@ -11376,7 +14654,7 @@ proc trySolve(ctx: Z3Context,
         (case r
          of zsSat: "sat"
          of zsUnsat: "unsat"
-         else: "unknown"), queryRLimitBefore)
+         else: "unknown"), unitsBefore)
   case r
   of zsSat:
     let m = model
@@ -11386,8 +14664,11 @@ proc trySolve(ctx: Z3Context,
     # ADR-0013 D5 (Slice 2): snapshot the WINNING path's heaps so the witness
     # serializer can select a ref-to-variant pointee's active-arm field values.
     currentVariantHeaps = path.heaps
-    (status: sxSat,
-     witness: extractWitness(m, envForExtract, params), undefWhy: "")
+    currentWinningGlobals = @[]                     ## RFC-0005 S8bn
+    for k in path.env.keys:
+      if isGlobalEnvName(k): currentWinningGlobals.add k
+    (status: sxSat, witness: extractWitness(m, envForExtract, params),
+     undefWhy: "")
   of zsUnsat:
     (status: sxUnsat, witness: RawWitness(), undefWhy: "")
   of zsUnknown:
@@ -11402,11 +14683,55 @@ const defaultLoopPruneRLimit* = 250_000'u
   ## unrolled iteration per path, and a concretely-decided guard never
   ## reaches the solver at all (it simplifies to a literal first).
 
+type PruneFact = object
+  ## RFC-0005 S8ax. One feasibility check against a path's own facts that
+  ## dropped an arm or a path (`loopArmInfeasible`, `pathInfeasible`): the
+  ## path's facts as they stood (`pc`, `dsp` = its `defectSurvivorPc`) and
+  ## the arm's own conjuncts (`extra`). Their conjunction (with
+  ## `globalRoots`) was UNSAT.
+  pc, dsp, extra: seq[Z3Bool]
+
+var ctxPruneLog {.threadvar.}: seq[PruneFact]
+  ## RFC-0005 S8as/S8ax. Every drop a feasibility check against the path's
+  ## own facts decided (`loopArmInfeasible`, `pathInfeasible`, and a cache
+  ## hit's re-check, `pruneFactsHold`), in walk order. Such a drop depends on
+  ## the caller's context, not only on the arguments, so a call whose walk
+  ## dropped one returned a summary true only where the dropped facts are
+  ## still infeasible. S8as made such a call uncacheable (it counted the
+  ## drops); S8ax keys its summary on them instead: the call cache stores,
+  ## per drop, the facts the callee's walk added beyond the caller's
+  ## (`CallCacheEntry.pruneFacts`), and a hit replays the summary only where
+  ## each is still UNSAT under the replaying caller's facts. `fib(n)` under
+  ## `n in 3..4` cached `fib(n - 2)`'s one returned path from inside
+  ## `fib(n - 1)`'s frame (where `n - 2 < 2` had been dropped): replayed at
+  ## the outer call without the check it was a false `sxUnsat` (S8as).
+  ## Reset per run.
+
+proc logPrune(path: Path; extra: openArray[Z3Bool]) =
+  ## RFC-0005 S8ax. Record a context-dependent drop (`ctxPruneLog`).
+  ctxPruneLog.add PruneFact(pc: path.pc, dsp: path.defectSurvivorPc,
+                            extra: @extra)
+
 func loopPruneRLimit*(settings: SymexSettings): uint =
   ## RFC-0005 S8k. `defaultLoopPruneRLimit`, or the caller's `queryRLimit`
   ## when that is set and smaller (a caller's budget is never exceeded).
   let q = settings.budget.queryRLimit
   if q != 0 and q < defaultLoopPruneRLimit: q else: defaultLoopPruneRLimit
+
+type GuardLiteral = enum glOpen, glTrue, glFalse
+
+proc guardLiteral(cond: Z3Bool): GuardLiteral =
+  ## RFC-0005 S8bl. `cond` simplified to a literal, decided without the
+  ## solver as `loopArmInfeasible` decides a loop guard. With a ground scan
+  ## (a pinned input, a callee's ground result) most `if` guards fold, and
+  ## walking the side a literal rules out forked every `if` in two: five
+  ## folded guards in a loop body were 32 copies of one path per iteration.
+  ## Sound: the side dropped carries a `false` conjunct, so no query on it
+  ## is satisfiable.
+  let lit = $simplify(cond)
+  if lit == "true": glTrue
+  elif lit == "false": glFalse
+  else: glOpen
 
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
                        settings: SymexSettings): bool =
@@ -11421,16 +14746,63 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   let lit = $simplify(arm)
   if lit == "false": return true
   if lit == "true": return false
-  checkCapped(ctx, pathRoots(path, [arm]), settings,
-              loopPruneRLimit(settings)).status == zsUnsat
+  result = checkCapped(ctx, pathRoots(path, [arm]), settings,
+                       loopPruneRLimit(settings)).status == zsUnsat
+  if result: logPrune(path, [arm])   # RFC-0005 S8as/S8ax
 
 proc pathInfeasible(ctx: Z3Context; path: Path;
                     settings: SymexSettings): bool =
   ## RFC-0005 S8an. True only when `path`'s full query (`pathRoots`) is
   ## UNSAT: no real execution reaches it. Bounded and sound for pruning
   ## exactly as `loopArmInfeasible` is (an undecided query keeps the path).
-  checkCapped(ctx, pathRoots(path), settings,
-              loopPruneRLimit(settings)).status == zsUnsat
+  result = checkCapped(ctx, pathRoots(path), settings,
+                       loopPruneRLimit(settings)).status == zsUnsat
+  if result: logPrune(path, [])   # RFC-0005 S8as/S8ax
+
+var symexIfArmsPruned* {.threadvar.}: int
+  ## RFC-0005 S8as. Counts the `if` arms (and else paths) the `wmExplore`
+  ## walk dropped as infeasible inside a recursive frame (`ifArmInfeasible`).
+  ## Always on, like `symexLoopIterations`; tests reset it and read it.
+
+var symexIfArmsChecked* {.threadvar.}: int
+  ## RFC-0005 S8ax. Counts the `if` arms (and else paths) `ifArmInfeasible`
+  ## sent to the solver. Always on; tests reset it and read it.
+
+proc unwrittenIndependent(ctx: Z3Context; path: Path; v: SymVal;
+                          extra: openArray[Z3Bool];
+                          settings: SymexSettings): bool =
+  ## RFC-0005 S8bw (item 2). True when `v`, an element read at a symbolic
+  ## index, is the same whatever the unwritten parts it mentions hold, on
+  ## every execution of `path` under `extra`: the query with `v` differing
+  ## from its copy over fresh stand-ins of those parts is UNSAT
+  ## (`gArr[k] = 5` then `gArr[k]` reads an `ite` over every element, the
+  ## unwritten ones included, and is 5 on every path). Bounded as the loop
+  ## pruning check is; an undecided query is a dependence.
+  var froms, tos: seq[RawZ3Ast]
+  var keep: seq[Z3AnyAst]
+  for a in glUnwrittenAsts:
+    froms.add a.raw
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_fresh_const(ctx.raw,
+      "__glUnwrittenAlt", ctx.checkErr Z3_get_sort(ctx.raw, a.raw)))
+    tos.add keep[^1].raw
+  if froms.len == 0: return true
+  var leaves: seq[RawZ3Ast]
+  svAsts(v, leaves)
+  var diffs: seq[RawZ3Ast]
+  for l in leaves:
+    let alt = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw, l,
+      cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+    keep.add alt
+    keep.add wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_not(ctx.raw,
+      checkedEq(ctx, l, alt.raw)))
+    diffs.add keep[^1].raw
+  if diffs.len == 0: return true
+  let differs = wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_or(ctx.raw,
+    cuint(diffs.len), cast[ptr UncheckedArray[RawZ3Ast]](diffs[0].addr)))
+  var arm = differs
+  for c in extra: arm = arm and c
+  loopArmInfeasible(ctx, path, arm, settings)
 
 var symexLoopIterations* {.threadvar.}: int
   ## RFC-0005 S8k. Counts the loop bodies the `wmExplore` k-unroll walks
@@ -11466,6 +14838,20 @@ type
       ## descent carries its lambda's `retTy` too (a void lambda's is the
       ## `bool` placeholder its unread `funcApp` is sorted by).
     returnedPaths: seq[Path]        ## paths that hit `return` inside this call
+    ptrRiskFormals: seq[IRParam]
+      ## RFC-0005 S8bn (item 3). The `var` formals whose actual a `ptr` of
+      ## unknown origin may address (`IRStmt.cVarPtrSafe` code 0, or a
+      ## caller's formal passed on that is itself one). A deref of such a
+      ## pointer while this call runs declines when one may hold its
+      ## pointee (`ptrTargets`): the walk copies the formal in and out.
+    ptrSafeFormals: seq[string]
+      ## RFC-0005 S8bn (item 3). The other `var` formals: their actual is
+      ## no pointer's target. A call in the body passing one on whole
+      ## (code 2) inherits that.
+    sp:            uint
+      ## RFC-0005 S8ca. The native stack pointer when the frame was pushed:
+      ## the next call's depth check reads one level's stack cost from it
+      ## (`nativeStackShort`).
 
   HandlerFrame = object
     ## Phase 15 E1. One active `try`'s except-arms + finally, pushed onto the
@@ -11498,6 +14884,11 @@ type
                         ## Phase 15 E1: user-exn `child -> parent` map.
                         ## Populated E4a (`getImpl` walk); empty until then.
     sutRetTy: IRType
+    globals: Table[string, IRGlobal]
+                        ## RFC-0005 S8as: the program's module-level variables
+                        ## by IR name (`SymexProgram.globals`): a read before
+                        ## any write takes the entry value (`entryValueOf`),
+                        ## and an opaque call rebinds those it may write.
                         ## RFC-0005 S8p: the SUT's own return type (nil for a
                         ## void SUT), from `SymexProgram.retTy`. The SUT frame
                         ## has no `CallFrame`, so `unwrittenResultZero` reads
@@ -11583,6 +14974,37 @@ type
     ## raises, are not (they assert the body did NOT raise). S7 carried the
     ## earlier facts here, as `priorExitPc`.
     raised:      EscapedRaise
+    writes:      seq[(string, SymVal)]
+                 ## RFC-0005 S8as. The by-reference names the call writes
+                 ## back (`closureEnvWrites`), as THIS raising exit left
+                 ## them: the raise leaves from the call with them.
+    varOuts:     seq[tuple[name: string, val: SymVal]]
+                 ## RFC-0005 S8bh: the `var` formals' values where the body
+                 ## raised, written to the caller's actuals on the raise path
+                 ## (the callee wrote through their addresses before it
+                 ## raised).
+
+  AddrCellEntry = tuple[local, cell: string; ty: IRType;
+                        path: seq[string]; ixs: seq[SymVal]; bound: bool;
+                        view: bool; slot: string]
+    ## RFC-0005 S8ax. An address-taken variable of a frame
+    ## (`CallFrameCtx.addrCells`): `local`, the env name of its pointer
+    ## (`cell`) and the pointee type `ty`. RFC-0005 S8bs: a `bound` entry is
+    ## a `var` formal bound to a location INSIDE a caller variable's cell
+    ## (`bindVarLocs`): the cell holds the whole `ty` value, and the formal
+    ## is the part at `path` (a field name, or `[` for an index, the next of
+    ## `ixs`). Its pointer is under `varLocCellName`, never the formal's own
+    ## `addr` cell, and it never leaves the call (`carryAddrCells`).
+  ## RFC-0005 S8bu: a `view` entry is a by-value seq formal sharing the
+  ## memory of a caller variable whose address is taken (`bindVarLocs`):
+  ## it follows the cell while the cell's elements are written in place, and
+  ## its path is tainted once the cell's seq is assigned whole or resized
+  ## (`syncAddrCells`).
+  ## RFC-0005 S8bx (item 3): a `slot` entry is a `var` formal that IS the slot
+  ## of the callee's Table formal `slot` at the key `ixs[0]` (an `mpairs` view
+  ## passed with its Table, `bindViewAliases`). A Table has no heap cell (`addr
+  ## t` declines), so it has no `cell`: the location is the Table's value in
+  ## `Env`, and it never leaves the call.
 
   CallFrameCtx = object  ## Phase 15 Z4: state pushed/popped per call descent;
                          ## E1 fills handlerStack/inFlightExn, C2b closureInlineCount.
@@ -11601,6 +15023,27 @@ type
                                       ## is refused (`ceInlineBudgetExceeded`). C2a
                                       ## deferred this field (no descent until C2b).
     handlerStack: seq[HandlerFrame]   ## Phase 15 E1: per-frame active tries.
+    capCells: seq[tuple[local, cell: string]]
+                                      ## RFC-0005 S8ax: the by-reference
+                                      ## captures a closure built (or applied)
+                                      ## in this frame holds, each with its env
+                                      ## cell (`capCellName`), kept equal to the
+                                      ## local statement by statement
+                                      ## (`syncCapCells`).
+    addrCells: seq[AddrCellEntry]
+                                      ## RFC-0005 S8ax: the variables of this
+                                      ## frame whose address was taken
+                                      ## (`isNew.nAddrOf`), each with the env
+                                      ## name of its pointer (`cell`) and its
+                                      ## type; the variable and the heap at
+                                      ## the pointer are kept equal statement
+                                      ## by statement (`walk`). A path that
+                                      ## has no `cell` binding never took it.
+    outerNames: seq[string]           ## RFC-0005 S8ax: the enclosing
+                                      ## routines' variables this frame
+                                      ## reaches by name (a nested routine's
+                                      ## captures; a closure body's
+                                      ## captures and globals).
     inFlightExn:  Option[ExnRecord]   ## Phase 15 E1: the exn being propagated.
     escaped:      seq[EscapedRaise]   ## Phase 15 E3: raises that escaped THIS
                                       ## frame's handlers; drained by the caller's
@@ -11697,6 +15140,11 @@ type
       ## actually changed the outcome AT THIS decision (the intended-vs-
       ## unrelated coverage split).
 
+  IfSiteStat = object
+    ## RFC-0005 S8ax. How often one `if` arm (or else path) outside a
+    ## recursion was checked, and how often the check dropped it.
+    checks, prunes: int
+
   WalkCtx = object
     z3:        Z3Context
     target:    SymexTarget
@@ -11731,6 +15179,8 @@ type
                                 ## (saves `frame`, installs a fresh empty one)
                                 ## before walking the callee body and `popFrame`s
                                 ## on return. See pushFrame/popFrame below.
+    capSyncDepth: int           ## RFC-0005 S8ax: the statement nesting depth
+                                ## `walk` snapshots capture cells at
     frameIdCounter: int         ## RFC-0005 S9: the last `CallFrameCtx.frameId`
                                 ## `pushFrame` minted (ids are never reused
                                 ## within a walk).
@@ -11758,8 +15208,27 @@ type
     budgetOutDepths: seq[seq[tuple[loop: int, iters: int]]]
       ## RFC-0005 S8y. The loop depths (`Path.loopIters`) of each tainted
       ## target hit whose solve ran out of budget (`solveTargetHit`).
-    callCache: Table[string, CallCacheEntry]
+    callCache: Table[string, seq[CallCacheEntry]]
+                       ## RFC-0005 S8ax: a bucket per `argShapeKey`; each
+                       ## entry carries its exact arguments and the facts its
+                       ## walk dropped (`CallCacheEntry`).
     activeCalls: HashSet[string]
+    depthWalks: seq[int]
+                       ## RFC-0005 S8ax: callee walks entered at each call
+                       ## depth (`depthMayExtend`).
+    depthHardHits: int
+                       ## RFC-0005 S8ax: declines at the hard call-depth
+                       ## budget so far; an extension that sees this move
+                       ## is abandoned at its root (`depthBail`).
+    levelStack: int    ## RFC-0005 S8ca: the most native stack one call
+                       ## level has cost so far (`nativeStackShort`).
+    extHardMark: int   ## RFC-0005 S8ax: `depthHardHits` when the current
+                       ## extension's root began, -1 outside one; once it
+                       ## moves, no call under the root extends again.
+    ifSites: Table[pointer, IfSiteStat]
+                       ## RFC-0005 S8ax: per-`if`-arm feasibility-check
+                       ## record, keyed by the arm's IR node
+                       ## (`ifArmInfeasible`).
     synthZ3:   int
     initialEnv: Env   ## snapshot before walking, used so witness
                       ## extraction reads the INITIAL param SymVals
@@ -11926,6 +15395,12 @@ type
                       ## without the earlier one's survivor fact, and forked
                       ## raises after a `RegexError` Nim never reaches). Saved
                       ## and reset with the sinks.
+    closureVarOuts: seq[tuple[name: string, val: SymVal]]
+                      ## RFC-0005 S8bh. The `var` formals' exit values of the
+                      ## closure calls lowered in the current expression,
+                      ## each for the caller variable its actual names
+                      ## (`applyClosureGround`); `drainPendingLowerEffects`
+                      ## writes them onto the consuming path, in call order.
     closureRaises: seq[ClosureRaise]
                       ## RFC-0005 S7. Raises that escaped a closure body's own
                       ## handlers during `applyClosureGround`'s descent (the
@@ -11954,6 +15429,13 @@ type
     callerLiveRefs: Table[string, seq[Z3AnyAst]]
                       ## CR-9 Stage 6 Group-3 (currentCallerLiveRefs migration).
                       ## Companion to `callerHeaps` (CR-5 freshness seeding).
+    callerElemCells: seq[ElemCell]
+                      ## RFC-0005 S8bu. The seeded path's element cells
+                      ## (`seedCallerHeapInWalkCtx`): a closure call binds a
+                      ## formal whose actual is an element of a seq with
+                      ## element cells to its cell (`bindVarLocs`, from
+                      ## `applyClosureGround`). Replaces S8bs's
+                      ## `callerCellRoots`, whose roots declined such a call.
     closureExitHeaps: Table[string, Z3AnyAst]
                       ## CR-9 Stage 6 Group-4 (currentClosureExitHeaps
                       ## migration). LIVE exit-heap from the most recent
@@ -12020,7 +15502,33 @@ type
     ## retSym binds to the caller's retName and the pcDelta extends
     ## the current path's pc — no re-walking required.
     retSym:  SymVal
-    pcDelta: seq[Z3Bool]
+    exits:   seq[seq[Z3Bool]]
+      ## The constraint delta of each exit, `retInit` first. RFC-0005 S8ax:
+      ## one per exit path (explicit returns and fall-through alike), each
+      ## replayed as its own path. Before S8ax only a callee with exactly
+      ## one explicit-return path and no fall-through was cached, so an
+      ## expression-bodied routine (`if k < 2: k else: ...`) never was.
+    args:    seq[SymVal]
+      ## RFC-0005 S8ax. The actuals the summary was walked with. The bucket
+      ## key (`argShapeKey`) is a hash of their Z3 ASTs, and Z3's AST hash is
+      ## 32 bits and not injective: the BV64 literals 8472 and 45048 share
+      ## one. A hit replayed the other literal's summary -- `id(45048)`
+      ## returned 8472, a false verdict either way with `errors` empty. A hit
+      ## now needs the same actuals, handle for handle (`cacheArgsSame`).
+    outer: seq[tuple[name: string, val: SymVal]]
+      ## RFC-0005 S8be. The caller state outside the actuals the summary was
+      ## walked with: every global and capture cell (`capCellName`) the
+      ## call threads in (`threadOuterBindings`), and the captures it
+      ## reaches. A hit needs the same values (`cacheOuterSame`), and only
+      ## a summary none of whose exits wrote one is kept. S8an left any call
+      ## that threaded such state uncached, which is every call in a frame
+      ## holding a capture cell.
+    pruneFacts: seq[seq[Z3Bool]]
+      ## RFC-0005 S8ax. Per drop the walk decided against its context
+      ## (`ctxPruneLog`), the facts the callee's walk added beyond the
+      ## caller's (path facts, defect-survivor facts, the arm). Each was
+      ## UNSAT with the caller's facts; the summary is replayed only where
+      ## each still is (`pruneFactsHold`).
 
 proc degrade(w: var WalkCtx; kind: SymexErrorKind; msg: string;
              sink = dsWalk; scope = walkSite()): Degrade =
@@ -12435,6 +15943,9 @@ proc seedCallerHeapInWalkCtx*(p: Path) =
     wp[].callerHeapDepth = p.heapDepth
     wp[].callerAllocCounters = p.allocCounters
     wp[].callerLiveRefs = p.liveRefs
+    # RFC-0005 S8bu: the path's element cells, for a closure call's
+    # `bindVarLocs`.
+    wp[].callerElemCells = p.elemCells
     # Reset the closure-exit fields (NI-1 fix — mirror of threadvar reset
     # inside seedCallerHeapThreadvars): each lower() call starts clean so
     # a non-heap-writing closure doesn't carry the previous call's exit-heap
@@ -12467,6 +15978,7 @@ type
     regexRaise: seq[string]                   ## RFC-0005 S8ay
     raiseOrder: seq[RaiseSinkKind]            ## RFC-0005 S8bb
     closureRaises: seq[ClosureRaise]
+    closureVarOuts: seq[tuple[name: string, val: SymVal]]   ## RFC-0005 S8bh
     exitPc: seq[Z3Bool]
     didMutate: bool
     exitHeaps: Table[string, Z3AnyAst]
@@ -12476,6 +15988,8 @@ type
     callerHeapDepth: int
     callerAlloc: Table[string, int]
     callerLiveRefs: Table[string, seq[Z3AnyAst]]
+    envWrites: seq[(string, SymVal)]          ## RFC-0005 S8as
+    readNames: seq[string]                    ## RFC-0005 S8as
 
 proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   ## RFC-0005 S7. See `PendingLowerEffects`. The WalkCtx fields are the LIVE
@@ -12490,12 +16004,15 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
     rangeDefect: w.rangeDefectConds, arithTrap: w.arithTrapConds,
     uninitRead: w.uninitReadConds,
     regexRaise: w.regexRaiseMsgs, raiseOrder: w.raiseOrder,
-    closureRaises: w.closureRaises,
+    closureRaises: w.closureRaises, closureVarOuts: w.closureVarOuts,
     exitPc: currentClosureExitPc, didMutate: w.closureDidMutateHeap,
     exitHeaps: w.closureExitHeaps, exitAlloc: w.closureExitAllocCounters,
     exitLiveRefs: w.closureExitLiveRefs, callerHeaps: w.callerHeaps,
     callerHeapDepth: w.callerHeapDepth, callerAlloc: w.callerAllocCounters,
-    callerLiveRefs: w.callerLiveRefs)
+    callerLiveRefs: w.callerLiveRefs,
+    envWrites: closureEnvWrites, readNames: loweringReadNames)
+  closureEnvWrites = @[]
+  loweringReadNames = @[]
   loweringPendingTaint = {}
   w.parseIntRaiseConds = @[]; parseIntRaiseConds = @[]
   w.divByZeroConds = @[]; divByZeroConds = @[]
@@ -12509,6 +16026,7 @@ proc takePendingLowerEffects(w: var WalkCtx): PendingLowerEffects =
   w.regexRaiseMsgs = @[]; regexRaiseMsgs = @[]
   w.raiseOrder = @[]
   w.closureRaises = @[]
+  w.closureVarOuts = @[]        ## RFC-0005 S8bh
   currentClosureExitPc = @[]
   w.closureDidMutateHeap = false; currentClosureDidMutateHeap = false
 
@@ -12530,6 +16048,7 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.regexRaiseMsgs = s.regexRaise; regexRaiseMsgs = s.regexRaise
   w.raiseOrder = s.raiseOrder
   w.closureRaises = s.closureRaises
+  w.closureVarOuts = s.closureVarOuts   ## RFC-0005 S8bh
   currentClosureExitPc = s.exitPc
   w.closureDidMutateHeap = s.didMutate; currentClosureDidMutateHeap = s.didMutate
   w.closureExitHeaps = s.exitHeaps; currentClosureExitHeaps = s.exitHeaps
@@ -12540,6 +16059,8 @@ proc restorePendingLowerEffects(w: var WalkCtx; s: PendingLowerEffects) =
   w.callerHeapDepth = s.callerHeapDepth; currentCallerHeapDepth = s.callerHeapDepth
   w.callerAllocCounters = s.callerAlloc; currentCallerAllocCounters = s.callerAlloc
   w.callerLiveRefs = s.callerLiveRefs; currentCallerLiveRefs = s.callerLiveRefs
+  closureEnvWrites = s.envWrites       ## RFC-0005 S8as
+  loweringReadNames = s.readNames      ## RFC-0005 S8as
 
 proc isFollowConcreteWalk*(): bool =
   ## RFC-fuzzer-nextgen G3fix. See fwd-decl above. `wp.mode` only exists once
@@ -12551,6 +16072,22 @@ proc isFollowConcreteWalk*(): bool =
     wp.mode == wmFollowConcrete
   else:
     false
+
+func globalsTable(gs: seq[IRGlobal]): Table[string, IRGlobal] =
+  ## RFC-0005 S8as.
+  for g in gs: result[g.name] = g
+
+proc programGlobal(name: string): Option[IRGlobal] =
+  ## RFC-0005 S8as. The module-level variable `name` of the program being
+  ## walked, when its entry value is modelled: its type reaches no heap cell
+  ## (`irTypeRefFree`), so a fresh value of the type is every value it can
+  ## hold. none() outside a walk or for any other global.
+  if currentWalkCtxPtr == nil: return none(IRGlobal)
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  if not wp.statics.globals.hasKey(name): return none(IRGlobal)
+  let g = wp.statics.globals[name]
+  if not irTypeRefFree(g.ty): return none(IRGlobal)
+  some(g)
 
 proc unwrittenResultZero(): Option[SymVal] =
   ## RFC-0005 S8n. See fwd-decl above. `lower`'s `iekVar` arm asks this when
@@ -12592,6 +16129,39 @@ proc currentFrameId(): int =
   ## ever equals.
   if currentWalkCtxPtr == nil: -1
   else: cast[ptr WalkCtx](currentWalkCtxPtr)[].frame.frameId
+
+proc registerCapCell(local: string; v: SymVal) =
+  ## RFC-0005 S8ax (fwd-declared in `runtime_closures.nim`). A closure built
+  ## in the current frame captures the local `local` by reference: from now
+  ## on the frame keeps it in its env cell too (`capCellName`, bound to `v`,
+  ## the local's value, through `closureEnvWrites`). Outside a walk (a
+  ## probe) nothing is kept, and an application elsewhere declines.
+  if currentWalkCtxPtr == nil: return
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  let cell = capCellName(wp[].frame.frameId, local)
+  if (local: local, cell: cell) notin wp[].frame.capCells:
+    wp[].frame.capCells.add (local: local, cell: cell)
+  closureEnvWrites.add (cell, v)
+
+proc varFormalPtrRisk(w: WalkCtx; formals: seq[IRParam]; args: seq[IRExpr];
+                      codes: seq[int]):
+    tuple[risk: seq[IRParam]; safe: seq[string]] =
+  ## RFC-0005 S8bn (item 3). The call's `var` formals split by whether a
+  ## `ptr` of unknown origin may address their actual (`CallFrame.
+  ## ptrRiskFormals`): an actual coded 1 (`IRStmt.cVarPtrSafe`) may not, nor
+  ## one coded 2 (the caller's own formal passed on) that is safe in the
+  ## caller's frame (the top of `callStack`; at the SUT's own frame it is a
+  ## `var` parameter of the SUT, which may be one). Any other actual, and
+  ## every formal of a call carrying no codes, may.
+  for i, f in formals:
+    if not f.isVar: continue
+    let c = if i < codes.len: codes[i] else: 0
+    var safe = c == 1
+    if c == 2 and i < args.len and args[i].kind == iekVar and
+       w.callStack.len > 0:
+      safe = args[i].vname in w.callStack[^1].ptrSafeFormals
+    if safe: result.safe.add f.name
+    else: result.risk.add f
 
 proc pushFrame(w: var WalkCtx) {.inline.} =
   ## Phase 15 E1. Save the current call frame's exception context and install a
@@ -12691,19 +16261,11 @@ func taintedSolveRLimit*(settings: SymexSettings): uint =
   ## same validated finite backstop, for the same mixed-theory divergence
   ## class, that R7's `concreteBranchRLimit` applies. Pure, so the "never
   ## unbounded under default settings" contract is unit-testable without
-  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`).
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## provoking a real divergence (`tsymex_rfc0005_s1c_verdict`). RFC-0005
+  ## S8bu: `queryRLimit`'s own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
-
-proc rlimitCountNow(ctx: Z3Context): int =
-  ## RFC-0005 S8y. `ctx`'s `rlimit count` as it stands. Z3 reads the
-  ## context's counter when a solver's statistics are collected, so an
-  ## unchecked solver reports it without running a check (which would itself
-  ## advance the counter and leave state in the context).
-  let st = newSolver(ctx).getStatistics()
-  if not st.contains("rlimit count"): 0
-  elif st.isInt("rlimit count"): st.getInt("rlimit count")
-  else: int(st.getFloat("rlimit count"))
 
 func budgetOutFloor(settings: SymexSettings): int =
   ## RFC-0005 S8y. What a target-hit solve spends when it runs out: the
@@ -12715,6 +16277,41 @@ func budgetOutFloor(settings: SymexSettings): int =
   if q == 0: int(sq)
   elif sq == 0: int(q)
   else: int(min(q, sq))
+
+proc groundedLike(sym, val: SymVal): SymVal =
+  ## RFC-0005 S8bl (item 2). `sym` with each scalar leaf replaced by `val`'s
+  ## when Z3's rewriter folds that to a literal of the same kind (an Int or
+  ## 64-bit numeral, a string literal), through tuples; `sym`'s own leaf
+  ## otherwise. Sound wherever the path asserts `sym == val`.
+  result = sym
+  if sym.kind != val.kind: return
+  case sym.kind
+  of svInt:
+    let ctx = sym.zi.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.zi.raw)
+    if Z3_is_numeral_ast(ctx.raw, f): result.zi = wrap[Z3Int](ctx, f)
+  of svBV64:
+    let ctx = sym.bv64.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.bv64.raw)
+    if Z3_is_numeral_ast(ctx.raw, f): result.bv64 = wrap[Z3BitVec[64]](ctx, f)
+  of svString:
+    let ctx = sym.str.ctx
+    let f = ctx.checkErr Z3_simplify(ctx.raw, val.str.raw)
+    if Z3_is_string(ctx.raw, f): result.str = wrap[Z3String](ctx, f)
+  of svTuple:
+    if sym.fields.len != val.fields.len: return
+    for i in 0 ..< sym.fields.len:
+      result.fields[i] = groundedLike(sym.fields[i], val.fields[i])
+  else: discard
+
+func assumedStringPin(e: IRExpr): tuple[name, lit: string] =
+  ## RFC-0005 S8bl (item 2). `(s, lit)` for an assumed `s == lit` (or
+  ## `lit == s`) of a variable and a string literal; `("", "")` otherwise.
+  if e == nil or e.kind != iekBinop or e.bop != bEq: return
+  if e.lhs.kind == iekVar and e.rhs.kind == iekStrLit:
+    return (e.lhs.vname, e.rhs.sval)
+  if e.rhs.kind == iekVar and e.lhs.kind == iekStrLit:
+    return (e.rhs.vname, e.lhs.sval)
 
 type TargetSolveCost* = enum
   ## RFC-0005 S8ag. What a target-hit solve's spend says about it.
@@ -12813,9 +16410,13 @@ proc solveTargetHit(w: var WalkCtx; p: Path):
                   "RFC-0005 S8ag, found a model only after half of it), " &
                   "and this tainted path is at least as deep in each of " &
                   "those loops")
-  let spentBefore = rlimitCountNow(w.z3)
+  # RFC-0005 S8y: what the solve spent. RFC-0005 S8bp: every search it
+  # runs is in a context of its own (`checkCapped`), so that is what
+  # `ownContextUnits` grew by (S8y read the walk context's counter, and
+  # S8bm added step 1's own context to it).
+  let spentBefore = ownContextUnits
   let (st, wit, why) = trySolve(w.z3, p, w.params, solveSettings, w.initialEnv)
-  let spent = rlimitCountNow(w.z3) - spentBefore
+  let spent = ownContextUnits - spentBefore
   symexTargetSolveStats.units += spent
   case classifyTargetSolve(st, spent, budgetOutFloor(solveSettings))
   of tscBudgetOut:
@@ -12956,9 +16557,13 @@ proc symValHash(sv: SymVal): uint =
   of svInt:  astHash(sv.zi)
   of svString: astHash(sv.str)
   of svSeq:
-    astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
+    var h = astHash(sv.seqLen) xor astHash(sv.seqDataRaw) # [placeholder-audited]
+    for m in sv.seqDataMore: h = h xor astHash(m)   ## RFC-0005 S8bc
+    h
   of svTable:
-    astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
+    var h = astHash(sv.tabDataRaw) xor astHash(sv.tabPresentRaw)
+    for m in sv.tabDataMore: h = h xor astHash(m)   ## RFC-0005 S8at
+    h
   of svSet:
     astHash(sv.setMembersRaw)
   of svTuple:
@@ -13003,11 +16608,120 @@ proc heapUnchanged(a, b: Path): bool =
     if not b.heaps.hasKey(k) or b.heaps[k].raw != h.raw: return false
   true
 
-func envHasGlobal(env: Env): bool =
-  ## RFC-0005 S8an. True when `env` binds a module-level global.
-  for k in env.keys:
-    if isGlobalEnvName(k): return true
-  false
+const heapEpochPrefix = "@hv:"
+  ## RFC-0005 S8ax. An `allocCounters` key `@hv:<typeId>` (or `@hv:*`) counts
+  ## the opaque calls on the path that havocked that pointee's heaps (every
+  ## heap). `@` begins no type id, so it never collides with a `new` counter.
+
+func heapKeyOfId(k, id: string): bool =
+  ## RFC-0005 S8ax. Heap key `k` belongs to pointee type id `id`: the
+  ## scalar heap itself, or one of its field / discriminator / leaf heaps
+  ## (`<id>__...`).
+  k == id or k.startsWith(id & "__")
+
+proc heapInputName(p: Path; k: string): string =
+  ## RFC-0005 S8ax. The name of the heap array `k` is read from when `p`
+  ## has not touched it: the free input constant `heap_<k>`, or, once an
+  ## opaque call on `p` havocked `k`'s pointee (`heapEpochPrefix`), a
+  ## constant of its own for that havoc, so the read no longer sees the
+  ## input heap. One name per havoc count, so every read between two havocs
+  ## agrees. The `@` keeps it out of `heapKeyShapes` (`mkHeapArrayVar`).
+  var n = 0
+  for ck, c in p.allocCounters:
+    if ck.startsWith(heapEpochPrefix):
+      let id = ck[heapEpochPrefix.len .. ^1]
+      if id == "*" or heapKeyOfId(k, id): n += c
+  if n == 0: "heap_" & k else: "heap_" & k & "@ep" & $n
+
+proc havocOpaqueHeaps(w: var WalkCtx; p: Path; stmt: IRStmt): bool =
+  ## RFC-0005 S8ax. An inert opaque call returned on `p`: every heap cell
+  ## its summary reaches (`IRStmt.opaqueHeapTys`, or every heap for
+  ## `opaqueHeapAll`) holds fresh contents. A heap the path holds is
+  ## replaced by a fresh constant of its sort; one it has not touched yet is
+  ## read from a constant of its own from here on (`heapInputName`). True
+  ## when anything was havocked.
+  var ids: seq[string]
+  for t in stmt.opaqueHeapTys:
+    let pointee = if t.kind == itRef: t.refPointeeTy else: t.ptrPointeeTy
+    let id = refPointeeTypeId(pointee)
+    if id notin ids: ids.add id
+  if not stmt.opaqueHeapAll and ids.len == 0: return false
+  let ctx = requireCurrentContext()
+  var keys: seq[string]
+  for k in p.heaps.keys: keys.add k
+  for k in keys:
+    var hit = stmt.opaqueHeapAll
+    for id in ids:
+      if heapKeyOfId(k, id): hit = true
+    if not hit: continue
+    let old = p.heaps[k]
+    let arrSort = ctx.checkErr Z3_get_sort(ctx.raw, old.raw)
+    inc w.synthZ3
+    let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+      ("heap_" & k & "@hv" & $w.synthZ3).cstring)
+    p.heaps[k] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                                              arrSort))
+  if stmt.opaqueHeapAll: ids = @["*"]
+  for id in ids:
+    let ck = heapEpochPrefix & id
+    p.allocCounters[ck] = p.allocCounters.getOrDefault(ck, 0) + 1
+  true
+
+proc havocOpaqueWrites(w: var WalkCtx; p: Path; stmt: IRStmt) =
+  ## RFC-0005 S8as. An inert opaque call returned on `p`: rebind every name
+  ## its effect summary lists (`IRStmt.opaqueHavoc`; `havocAllGlobals` is
+  ## every writable global of the program) to a fresh value of its type.
+  ## The call may or may not have written each one, and a fresh value is
+  ## every value it can hold either way, so nothing real is excluded and the
+  ## path carries `feGlobalHavoc` (`dcFreshSymbol`): an UNSAT stands, a SAT
+  ## is replayed. A global the walk has not bound yet is bound here too: its
+  ## entry value (`entryValueOf`) is what it held BEFORE the call.
+  ##
+  ## RFC-0005 S8ax: a name whose type reaches heap cells is rebound too (a
+  ## fresh `ref` is any address, nil included), and the cells it reaches
+  ## take fresh contents (`havocOpaqueHeaps`, `feOpaqueEffectHavoc`). S8as
+  ## kept such a call non-inert, and declined one under `havocAllGlobals`.
+  var names: seq[string]
+  for nm in stmt.opaqueHavoc:
+    if nm == "*":
+      for g in w.statics.globals.values:
+        if g.isVar and g.name notin names: names.add g.name
+    elif nm notin names:
+      names.add nm
+  # RFC-0005 S8be: a call that may run a closure (`opaqueHeapAll`: a
+  # routine reaches it through an argument, a global or a capture) may
+  # write every variable a live closure captures by reference, which lives
+  # in its env cell (`capCellName`); the frame's own copy takes the cell's
+  # value after the call (`walk`). Before S8be the cells kept their values:
+  # a target after the closure ran was a false `sxUnsat`, nothing recorded.
+  if stmt.opaqueHeapAll:
+    for k in p.env.keys:
+      if k.startsWith(globalEnvPrefix & "@cap") and k notin names:
+        names.add k
+  var rebound: seq[string]
+  for nm in names:
+    var ty: IRType = nil
+    if p.env.hasKey(nm): ty = tyOf(p.env[nm])
+    elif w.statics.globals.hasKey(nm): ty = w.statics.globals[nm].ty
+    else: continue        # never read by the walked code
+    var facts: seq[Z3Bool]
+    p.env[nm] = allocateSym(ty, freshDegradeName("__opaqueHavoc_" &
+                                                 displayName(nm)), facts)
+    for f in facts: p.pc.add f
+    rebound.add displayName(nm)
+  if rebound.len > 0:
+    taintInPlace(p, w.degrade(feGlobalHavoc,
+      "opaque call `" & stmt.callee & "` may write " & rebound.join(", ") &
+           " (its effect summary): each holds a fresh value of its type " &
+           "after the call, so a hit through it is replayed (feGlobalHavoc)"))
+  if havocOpaqueHeaps(w, p, stmt):
+    taintInPlace(p, w.degrade(feOpaqueEffectHavoc,
+      "opaque call `" & stmt.callee & "` may write the heap cells its " &
+           "arguments, globals and captures reach" &
+           (if stmt.opaqueHeapAll: " (any cell: it may cast, run inline " &
+              "assembly, dispatch or call foreign code)" else: "") &
+           ": each holds fresh contents after the call, so a hit through " &
+           "one is replayed (feOpaqueEffectHavoc)"))
 
 func guardedOuterNames(roots, captures: seq[string]): seq[string] =
   ## RFC-0005 S8an. The roots of a call's `var`/`addr` actuals that the
@@ -13040,6 +16754,159 @@ proc carryOuterBindings(dst: var Env; exitEnv: Env;
   for c in captures:
     if c notin guarded and exitEnv.hasKey(c): dst[c] = exitEnv[c]
 
+func varLocCellName(formal: string): string =
+  ## RFC-0005 S8bs. The env name of a `bound` entry's pointer
+  ## (`AddrCellEntry`): not `addrCellName(formal)`, which `addr formal`
+  ## allocates as the formal's own cell.
+  addrCellName(formal) & "#loc"
+
+proc inheritAddrCells(calleeEnv: var Env; callerEnv: Env;
+                      callerCells: seq[AddrCellEntry];
+                      varArgs: seq[(string, string)];
+                      captures, guarded: seq[string]): seq[AddrCellEntry] =
+  ## RFC-0005 S8ax. The address cells a callee frame starts with: each
+  ## address-taken caller variable it reaches by name -- a capture it is
+  ## threaded (`threadOuterBindings`), or the caller variable a `var` formal
+  ## is (#140's `varArgs`, under the formal's name) -- with the pointer
+  ## bound in `calleeEnv`. The callee's statements then keep that name and
+  ## the cell equal, so a write through the formal is seen through a
+  ## pointer the callee also holds, in program order.
+  for c in callerCells:
+    if not callerEnv.hasKey(c.cell): continue
+    if c.local in captures and c.local notin guarded:
+      calleeEnv[c.cell] = callerEnv[c.cell]
+      result.add c
+    for (formal, callerName) in varArgs:
+      if callerName == c.local:
+        # RFC-0005 S8bs: a formal bound into a cell passes the binding on.
+        let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
+        calleeEnv[cell] = callerEnv[c.cell]
+        result.add (local: formal, cell: cell, ty: c.ty, path: c.path,
+                    ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
+
+proc inheritElemCells(calleePath: Path; callerFrame, calleeFrame: int;
+                      varArgs: seq[(string, string)];
+                      captures, guarded: seq[string]) =
+  ## RFC-0005 S8be. As `inheritAddrCells`, for element cells: a seq of the
+  ## caller with element cells that the callee reaches by name -- a
+  ## capture, or the caller variable a `var` formal is -- has them in the
+  ## callee's frame too, under the name the callee knows it by, so the
+  ## callee's statements keep its elements and their cells equal.
+  let n = calleePath.elemCells.len
+  for k in 0 ..< n:
+    let e = calleePath.elemCells[k]
+    if e.frame != callerFrame or e.dead: continue
+    if e.root in captures and e.root notin guarded:
+      var c = e
+      c.frame = calleeFrame
+      calleePath.elemCells.add c
+    for (formal, callerName) in varArgs:
+      if callerName == e.root:
+        var c = e
+        c.frame = calleeFrame
+        c.root = formal
+        calleePath.elemCells.add c
+
+proc carryElemCells(p: Path; callerFrame, calleeFrame: int;
+                    varArgs: seq[(string, string)];
+                    captures, guarded: seq[string]) =
+  ## RFC-0005 S8be. On a callee exit, its view of each element cell of a
+  ## seq the caller owns (a `var` formal's caller variable, a capture)
+  ## becomes the caller's: a cell the caller already had takes the
+  ## callee's `dead`; one the callee took (`addr s[i]` of its `var`
+  ## formal) is the caller's from now on. Its view of a seq of its own
+  ## stays, owned by a returned frame (`deadElemRefs`).
+  var kept: seq[ElemCell]
+  for e in p.elemCells:
+    if e.frame != calleeFrame:
+      kept.add e
+      continue
+    var to = ""
+    if e.root in captures and e.root notin guarded: to = e.root
+    for (formal, callerName) in varArgs:
+      if formal == e.root: to = callerName
+    if to.len == 0:
+      kept.add e
+      continue
+    var had = false
+    for c in kept.mitems:
+      if c.frame == callerFrame and c.root == to and
+         cast[pointer](c.refAst.raw) == cast[pointer](e.refAst.raw):
+        had = true
+        if e.dead: c.dead = true
+    if not had:
+      var c = e
+      c.frame = callerFrame
+      c.root = to
+      kept.add c
+  # A caller cell the callee's view saw die, listed after it.
+  for c in kept.mitems:
+    if c.frame != callerFrame or c.dead: continue
+    for e in p.elemCells:
+      if e.frame == calleeFrame and e.dead and
+         cast[pointer](c.refAst.raw) == cast[pointer](e.refAst.raw):
+        c.dead = true
+  p.elemCells = kept
+
+type AddrCarry = tuple[moved: seq[Z3AnyAst]; lost: seq[string]]
+
+proc carryAddrCells(dst: var Env; exitEnv: Env; calleeCells: seq[AddrCellEntry];
+                    varArgs: seq[(string, string)]; sig: ProcSig;
+                    guarded: seq[string]; w: var WalkCtx): AddrCarry =
+  ## RFC-0005 S8ax. On a callee exit (`w.frame` is the caller's again), each
+  ## address cell of a variable the caller owns -- a `var` formal's caller
+  ## variable, a capture -- becomes (or stays) the caller's cell for it:
+  ## `getP(x: var int): ptr int = addr x` returns the address of the
+  ## caller's `x`. `moved` are those cells (`settleAddrCells` gives them to
+  ## the caller's frame); `lost` are cells of a `var` formal bound to
+  ## something with no cell (a field, an element, a module-level variable).
+  ## A cell of the callee's own variable stays the callee's: it dangles now
+  ## (`danglingFork`).
+  for c in calleeCells:
+    if not exitEnv.hasKey(c.cell) or exitEnv[c.cell].kind != svPtr: continue
+    # RFC-0005 S8bs: a `bound` entry is the caller's own cell, at a path:
+    # the caller keeps it, and the formal's `#140` write-back carries the
+    # value.
+    if c.bound: continue
+    var to = ""
+    for (formal, callerName) in varArgs:
+      if formal == c.local: to = callerName
+    if to.len == 0 and c.local in sig.captures and c.local notin guarded:
+      to = c.local
+    var isVarFormal = false
+    for f in sig.params:
+      if f.name == c.local and f.isVar: isVarFormal = true
+    # A parser temporary (`__sym_varArg_<n>`, the copy a field or element
+    # actual is passed through) is not the location: the cell is lost.
+    if to.len > 0 and not isGlobalEnvName(to) and not to.startsWith("__"):
+      dst[addrCellName(to)] = exitEnv[c.cell]
+      var known = false
+      for k in w.frame.addrCells:
+        if k.local == to and not k.bound: known = true
+      if not known:
+        w.frame.addrCells.add (local: to, cell: addrCellName(to), ty: c.ty,
+                               path: @[], ixs: @[], bound: false, view: false, slot: "")
+      result.moved.add exitEnv[c.cell].ptrAst
+    elif isVarFormal or to.len > 0:
+      result.lost.add displayName(c.local)
+
+proc settleAddrCells(p: Path; carried: AddrCarry; w: var WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` (a callee exit's caller path) with the moved cells
+  ## owned by the caller's frame, and tainted for any lost one
+  ## (`feUnsupportedOp`: the pointer outlives the call, but nothing keeps
+  ## the location it names equal to it).
+  for r in carried.moved:
+    for o in p.addrOwners.mitems:
+      if cast[pointer](o.refAst.raw) == cast[pointer](r.raw):
+        o.frame = w.frame.frameId
+  if carried.lost.len > 0:
+    taintInPlace(p, w.degrade(feUnsupportedOp,
+      "RFC-0005 S8ax: the address of the `var` formal(s) " &
+           carried.lost.join(", ") & " was taken, and the formal is bound " &
+           "to a field, an element or a module-level variable, which has no " &
+           "address cell the walk keeps equal to it (feUnsupportedOp)"))
+  p
+
 func touchedGuard(exitEnv: Env; guarded: seq[string]): string =
   ## RFC-0005 S8an. The first withheld name the callee bound (wrote), or "".
   for g in guarded:
@@ -13065,6 +16932,100 @@ proc argShapeKey(callee: string, args: seq[SymVal]): string =
   for a in args:
     h = (h shl 1) xor symValHash(a)
   callee & "#" & $h
+
+proc sameSymVal(a, b: SymVal): bool   ## RFC-0005 S8ax fwd decl (RFC-0005 S9)
+
+const callCacheBucketMax = 8
+  ## RFC-0005 S8ax. The summaries kept per `argShapeKey`: one per distinct
+  ## actual list or pruned context a call was walked in. A bound on the
+  ## re-checks a lookup can cost, not on soundness (a full bucket walks).
+const callCacheExitsMax = 16
+  ## RFC-0005 S8ax. The exit paths a cached summary may replay.
+
+proc cacheArgsSame(a, b: seq[SymVal]): bool =
+  ## RFC-0005 S8ax. The two actual lists are the same terms, handle for
+  ## handle (`sameSymVal`), with an Int's signedness stamp too (it decides
+  ## the callee's overflow obligations). `false` on any doubt: a miss.
+  if a.len != b.len: return false
+  for i in 0 ..< a.len:
+    if not sameSymVal(a[i], b[i]): return false
+    if a[i].kind == svInt and a[i].ziSigned != b[i].ziSigned: return false
+  true
+
+proc outerState(env: Env; captures: seq[string]):
+    seq[tuple[name: string, val: SymVal]] =
+  ## RFC-0005 S8be. The globals and capture cells bound in `env`, and the
+  ## `captures` it binds, in the env's order (`CallCacheEntry.outer`).
+  for k, v in env:
+    if isGlobalEnvName(k) or k in captures: result.add (k, v)
+
+proc cacheOuterSame(a, b: seq[tuple[name: string, val: SymVal]]): bool =
+  ## RFC-0005 S8be. The same names bound to the same terms, handle for
+  ## handle. Order is not assumed.
+  if a.len != b.len: return false
+  for (nm, v) in a:
+    var found = false
+    for (nm2, v2) in b:
+      if nm2 == nm:
+        found = sameSymVal(v, v2)
+        break
+    if not found: return false
+  true
+
+proc exitKeepsOuter(exitEnv: Env; outerIn: seq[tuple[name: string,
+                    val: SymVal]]; captures: seq[string]): bool =
+  ## RFC-0005 S8be. A callee exit left every global, capture cell and
+  ## capture as it was entered with, and bound no global it was not (a
+  ## first read binds its entry value, which the caller must see).
+  for (nm, v) in outerIn:
+    if not exitEnv.hasKey(nm) or not sameSymVal(exitEnv[nm], v): return false
+  for k in exitEnv.keys:
+    if isGlobalEnvName(k) or k in captures:
+      var known = false
+      for (nm, _) in outerIn:
+        if nm == k:
+          known = true
+          break
+      if not known: return false
+  true
+
+proc factsPrefixSame(full, prefix: seq[Z3Bool]): bool =
+  ## RFC-0005 S8ax. `prefix` is a prefix of `full`, handle for handle.
+  if full.len < prefix.len: return false
+  for i in 0 ..< prefix.len:
+    if cast[pointer](full[i].raw) != cast[pointer](prefix[i].raw): return false
+  true
+
+proc pruneFactsSince(mark: int; p: Path; facts: var seq[seq[Z3Bool]]): bool =
+  ## RFC-0005 S8ax. The drops logged since `mark` (`ctxPruneLog`), each as
+  ## the facts it added beyond `p`'s (the caller's path at the call): the
+  ## callee's own path facts and defect-survivor facts, then the arm. False
+  ## when a drop's path does not extend `p` (a merge rebuilt its facts):
+  ## its dependence on the context is then not separable, and the call is
+  ## not cached.
+  for i in mark ..< ctxPruneLog.len:
+    let f = ctxPruneLog[i]
+    if not factsPrefixSame(f.pc, p.pc) or
+       not factsPrefixSame(f.dsp, p.defectSurvivorPc):
+      return false
+    facts.add f.pc[p.pc.len ..< f.pc.len] &
+              f.dsp[p.defectSurvivorPc.len ..< f.dsp.len] & f.extra
+  true
+
+proc pruneFactsHold(ctx: Z3Context; p: Path; facts: seq[seq[Z3Bool]];
+                    settings: SymexSettings): bool =
+  ## RFC-0005 S8ax. Every drop a cached summary's walk decided is decided
+  ## the same way under `p`, the replaying caller's path: its facts are
+  ## UNSAT with `p`'s (the same bounded check, `loopPruneRLimit`). An
+  ## undecided check is `false` (the call is walked). Each check that holds
+  ## is itself a drop decided against `p`'s context, logged for an
+  ## enclosing call's summary (`logPrune`).
+  for d in facts:
+    if checkCapped(ctx, pathRoots(p, d), settings,
+                   loopPruneRLimit(settings)).status != zsUnsat:
+      return false
+  for d in facts: logPrune(p, d)
+  true
 
 # ============================================================================
 # Fork-site registry (Phase 15 H1 deep-copy contract — ADR-0010)
@@ -13227,10 +17188,433 @@ proc effectiveHeapDepthLimit(settings: SymexSettings): int =
 
 # heapDepthExhausted moved to runtime_heap.nim (CR-7-deeper Stage 8+).
 
+proc inRecursiveFrame(w: WalkCtx): bool =
+  ## RFC-0005 S8as. True when the innermost inlined call's callee is also an
+  ## outer frame's: the walk is inside a recursion.
+  if w.callStack.len < 2: return false
+  let top = w.callStack[^1].callee
+  for k in 0 ..< w.callStack.high:
+    if w.callStack[k].callee == top: return true
+  false
+
+const ifSiteProbeMax = 3
+  ## RFC-0005 S8ax. How many times an `if` arm outside a recursion is
+  ## checked without the check ever dropping it before the walk stops
+  ## checking it (`ifArmInfeasible`).
+
+proc armHeavy(body: IRStmt): bool =
+  ## RFC-0005 S8ax. `body` holds a loop or a call: walking it when no
+  ## execution reaches it costs more than the solver call that would have
+  ## dropped it. A straight-line arm (assignments, a return, a raise, a
+  ## label) is walked in about the time a check takes, so outside a
+  ## recursion it is not checked (`ifArmInfeasible`).
+  if body == nil: return false
+  case body.kind
+  of isWhile, isCall: return true
+  of isBlock:
+    for c in body.stmts:
+      if armHeavy(c): return true
+  of isIf:
+    for b in body.branches:
+      if armHeavy(b.body): return true
+    return armHeavy(body.elseBody)
+  of isTry:
+    for h in body.tryHandlers:
+      if armHeavy(h.body): return true
+    return armHeavy(body.tryBody) or armHeavy(body.tryFinally)
+  else: discard
+  false
+
+proc armDeclines(body: IRStmt): bool =
+  ## RFC-0005 S8ax. `body` is a block of nothing but a decline marker
+  ## (`isUnsupported`), the shape `orderOperands` guards with the condition
+  ## under which it applies: walking it records a decline whether or not
+  ## any execution reaches it, so the arm is always checked
+  ## (`ifArmInfeasible`).
+  if body == nil: return false
+  case body.kind
+  of isUnsupported: true
+  of isBlock: body.stmts.len == 1 and armDeclines(body.stmts[0])
+  else: false
+
+func hardCallDepth(settings: SymexSettings): int =
+  ## RFC-0005 S8ax. The deepest call stack the walk inlines into:
+  ## `maxRecursionDepth`, or `maxCallDepth` when that is set higher (a
+  ## caller's explicit depth is never cut).
+  max(settings.budget.maxCallDepth, settings.budget.maxRecursionDepth)
+
+proc recursiveCallsOnAPath(body: IRStmt; names: seq[string]): int =
+  ## RFC-0005 S8ax. The most calls to a routine of `names` one execution of
+  ## `body` may make: summed along a sequence, the largest over the arms of
+  ## an `if` or a `try`, and two (many) for one inside a loop.
+  if body == nil: return 0
+  case body.kind
+  of isCall:
+    if body.callee in names: 1 else: 0
+  of isBlock:
+    var n = 0
+    for c in body.stmts: n += recursiveCallsOnAPath(c, names)
+    n
+  of isIf:
+    var n = recursiveCallsOnAPath(body.elseBody, names)
+    for b in body.branches: n = max(n, recursiveCallsOnAPath(b.body, names))
+    n
+  of isTry:
+    var h = 0
+    for x in body.tryHandlers: h = max(h, recursiveCallsOnAPath(x.body, names))
+    recursiveCallsOnAPath(body.tryBody, names) + h +
+      recursiveCallsOnAPath(body.tryFinally, names)
+  of isWhile:
+    if recursiveCallsOnAPath(body.wbody, names) > 0: 2 else: 0
+  else: 0
+
+proc depthMayExtend(w: WalkCtx; live: int): bool =
+  ## RFC-0005 S8ax. At or past `maxCallDepth`, inline this call anyway when
+  ## the stack is under the hard budget (`hardCallDepth`) and the frontier
+  ## is not growing: the walks entered at this depth, these `live` paths
+  ## included, number no more than those entered one level up. A recursion
+  ## whose arguments decide its depth (`sumTo(n)` with `n` in `0..5`) walks
+  ## one feasible path per level and is followed to its base case; one that
+  ## fans out (`fib`: a body that may recurse twice on one execution,
+  ## `recursiveCallsOnAPath`) declines at `maxCallDepth` as before. So does
+  ## every call under an extension that has already reached the hard budget
+  ## (`WalkCtx.extHardMark`): its root drops all it walked. Measured (Linux,
+  ## Z3 5.1) on `fib(x) == 13`, `x` free: the depth-first frontier test
+  ## alone admitted the leftmost chain to the hard budget and walked every
+  ## frame on the way back again, 6.1 s at a hard budget of 5, 17.7 s at 8,
+  ## killed at 600 s at 24. Every extended level is still bounded by the
+  ## hard budget, which bounds the native recursion of `walk` (see the
+  ## depth check in `walk`'s `isCall` arm for the measured stack ceiling).
+  let d = w.callStack.len
+  if d < 1 or d >= hardCallDepth(w.settings): return false
+  # Abandoned: a path under this extension's root reached the hard budget,
+  # and the root drops all it walked. Walking on would only cost: a fan-out
+  # (`fib`) explored depth first enters one walk per level before its
+  # siblings, so the frontier test admits its leftmost chain to the hard
+  # budget, and every frame on the way back would extend again.
+  if w.extHardMark >= 0 and w.depthHardHits > w.extHardMark: return false
+  # A body that may recurse twice on one execution (`fib`) fans out: the
+  # frontier test, explored depth first, sees one walk per level before the
+  # siblings, so it is not extended at all.
+  let top = w.callStack[^1].callee
+  if top in w.procs:
+    var names: seq[string]
+    for f in w.callStack: names.add f.callee
+    if recursiveCallsOnAPath(w.procs[top].body, names) > 1: return false
+  let here = (if d < w.depthWalks.len: w.depthWalks[d] else: 0)
+  let above = (if d - 1 < w.depthWalks.len: w.depthWalks[d - 1] else: 0)
+  here + live <= above
+
+proc freshCallRet(stmt: IRStmt; env: Env; z3Name: string;
+                  pcOut: var seq[Z3Bool]): SymVal =
+  ## RFC-0005 S8be. The fresh return value of a call: one the walk follows
+  ## (its `retSym`, bound to the callee's result on each exit) or does not
+  ## (`depthBail`, the cycle cut), bounded by the callee's declared type. A
+  ## fixed-width `int` was allocated as a bit-vector even where the actuals
+  ## are abstracted to the integer sort (`symexAssume` bounds), so the
+  ## caller's `k + <fresh>` and its overflow check mixed the sorts
+  ## (`bv2int`): `sumTo(n)` under `n in 0..5`, declined at depth 3, took
+  ## 146 s (Linux, Z3 5.1); it takes 0.9 s. When an actual reads an
+  ## integer-sorted variable, a signed or narrower-than-64-bit `int` return
+  ## is allocated in that sort, with the declared type's bounds; otherwise
+  ## as before.
+  let ty = stmt.retTy
+  if ty != nil and ty.kind == itInt and (ty.signed or ty.width < 64):
+    var refs: HashSet[string]
+    for a in stmt.cargs: collectVarRefs(a, refs)
+    var intSorted = false
+    for r in refs:
+      if env.hasKey(r) and env[r].kind == svInt:
+        intSorted = true
+        break
+    if intSorted:
+      result = freshRetSym(ty, z3Name, pcOut, intOffsetPositions = @[0])
+      if not ty.hasRange:
+        let w = if ty.width in [8, 16, 32, 64]: ty.width else: 64
+        let lo = if not ty.signed: 0'i64
+                 elif w == 64: low(int64)
+                 else: -(1'i64 shl (w - 1))
+        let hi = if w == 64: high(int64)
+                 elif ty.signed: (1'i64 shl (w - 1)) - 1
+                 else: (1'i64 shl w) - 1
+        pcOut.add(result.zi >= mkZ3IntLit(lo))
+        pcOut.add(result.zi <= mkZ3IntLit(hi))
+      return
+  freshRetSym(ty, z3Name, pcOut)
+
+const
+  nativeStackReserve = 256 * 1024
+    ## RFC-0005 S8ca. The native stack a call keeps below it beyond two
+    ## levels' cost (`nativeStackShort`): the solves, the lowering and the
+    ## bail of the deepest level, and C++ unwinding.
+  nativeLevelFloor = 192 * 1024
+    ## RFC-0005 S8ca. The least one level is taken to cost, before (or
+    ## while) the walk has measured less. Measured on the Linux/podman
+    ## debug build (`tsymex_rfc0005_s8ca_stack`): one level of linear
+    ## recursion costs about 158 KB on c and 186 KB on cpp, so the first
+    ## call, with nothing measured, is covered too.
+
+  nimFrameReserve = 400
+    ## RFC-0005 batch 9. The Nim frames a call keeps below it
+    ## (`nativeStackShort`): one level is 9 (`walk`, `walkStmt`, `walkBlock`
+    ## twice over, `walkCallArm`), and the lowering and the solves of the
+    ## deepest level take the rest.
+
+proc levelNeed(w: WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack a call needs left to be inlined.
+  nativeStackReserve + 2 * max(w.levelStack, nativeLevelFloor)
+
+proc nativeStackShort(w: var WalkCtx): int =
+  ## RFC-0005 S8ca. The native stack left below this call when it is under
+  ## what inlining one more level needs, else -1. `walk` recurses natively
+  ## once per inlined call, and `maxCallDepth` counts levels, not bytes: a
+  ## cpp level costs more than a c one, and the stack may hold 8 MB (a Linux
+  ## main thread), 2 MB (a Nim thread) or 16 MB (a Windows solve's fiber,
+  ## `runSymexWithBigStack`), or what is left below a caller's frames.
+  ## `tsymex_configdefaults`' crash pin, 50 levels sized on c, ran off an
+  ## 8 MB stack on cpp (SIGSEGV), and the default budget's adaptive depth
+  ## (`maxRecursionDepth`, 24) ran off a 2 MB thread's on both. One
+  ## level's cost is read from the frame pushed one level up (`CallFrame.sp`),
+  ## the most so far kept in `WalkCtx.levelStack`; the need is twice that
+  ## (at least `nativeLevelFloor`) plus `nativeStackReserve` (`levelNeed`):
+  ## about 3 levels on a 1 MB stack, 45 (c) or 39 (cpp) on 8 MB.
+  ## RFC-0005 batch 9: a build with stack traces also ends the process at
+  ## Nim's call depth limit (`nimFramesLeft`), which a level costing under
+  ## 16 MB / 222 reaches before a Windows fiber's stack runs out. That is a
+  ## shortage of the same recursion, so the call declines the same way.
+  let left = nativeStackLeft()
+  if nimFramesLeft() < nimFrameReserve: return left
+  if left == high(int): return -1   # not measured on this platform
+  if w.callStack.len > 0:
+    let top = w.callStack[^1].sp
+    let here = nativeStackPointer()
+    if top > here: w.levelStack = max(w.levelStack, int(top - here))
+  if left < levelNeed(w): left else: -1
+
+type DepthCut = enum
+  ## RFC-0005 S8ca. Why `depthBail` declines a call.
+  dcutFrontier   ## the frontier was growing: the budget was not extended
+  dcutHard       ## the hard budget was reached (here or under an abandoned
+                 ## extension)
+  dcutStack      ## the native stack left is under the walk's reserve
+
+proc depthBail(w: var WalkCtx; stmt: IRStmt; live: seq[Path];
+               cut: DepthCut; stackLeft = 0): seq[Path] =
+  ## RFC-0005 S8ax. The call-depth decline: each live path continues past
+  ## the call with a fresh return value, tainted. `cut` says why (S8ca:
+  ## `dcutStack`, with the `stackLeft` bytes it measured).
+  ##
+  ## (Before S8ax, inline in `walk`'s `isCall` arm.) Bail: continue with a
+  ## fresh unconstrained retSym; flag unknown. The surviving paths are marked
+  ## uncertain so any target hit on them degrades to sxUnknown (the witness
+  ## would otherwise be an unsoundly-Z3-defaulted value).
+  ## #161/#163 handoff follow-up: this used to set `sawUnknown` bare — the
+  ## run-level Invariant-7 backstop (`runSymexImpl`) then reported an
+  ## unclassified `weInternalWalkerFault`, indistinguishable from a real
+  ## walker bug. `beBudgetExhausted` (chapulin catalog #5(b)) already names
+  ## exactly this shape — "a walk budget ran out with paths still live" —
+  ## for `maxLoopUnwind`/`maxFrontierSize`; this call-inlining depth cap is
+  ## a sibling of the SAME budget family, so it reuses the kind rather than
+  ## adding a near-duplicate. The message names the exhausted budget and its
+  ## current value so "raise maxCallDepth" reads as actionable configuration
+  ## advice, not a shrug.
+  ## RFC-0005 S6a: that reuse is exactly what §3.2's standing rule forbids
+  ## once `classOf` reads one word per kind — this bail is not a k-unroll
+  ## survivor. It continues with a fresh havoc `retSym` but DROPS the
+  ## callee's var-param writes, heap writes and raises (and never lowers the
+  ## actuals): a stale env, `dcSubstituted`. Split off as
+  ## `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
+  ## frontier prune (`dcOmitted`) would have stripped these survivors' path
+  ## taint — a witness through the havoc retSym reported clean sxSat.
+  ## RFC-0005 S8an: a path that reaches the bail but that no execution can
+  ## take is dropped (by the caller), not bailed: it has no behaviour to
+  ## lose.
+  let framesShort = cut == dcutStack and nimFramesLeft() < nimFrameReserve
+  let why =
+    case cut
+    of dcutHard:
+      "the call stack reached the hard budget (maxRecursionDepth=" &
+        $w.settings.budget.maxRecursionDepth & ")"
+    of dcutFrontier:
+      "the walks at the next depth would outnumber those at this " &
+        "one, so the budget was not extended (maxRecursionDepth=" &
+        $w.settings.budget.maxRecursionDepth & " bounds an extension)"
+    of dcutStack:
+      if framesShort:
+        "the " & $nimFramesLeft() & " frames left at depth " &
+          $w.callStack.len & " before Nim's call depth limit are under the " &
+          $nimFrameReserve & " the walk keeps, so the call is not inlined " &
+          "whatever the depth budget"
+      else:
+        "the native stack left (" & $(stackLeft div 1024) & " KB at depth " &
+          $w.callStack.len & ") is under what one more level needs (" &
+          $(levelNeed(w) div 1024) &
+          " KB), so the call is not inlined whatever the depth budget"
+  let d = w.degrade(beBudgetExhaustedUnmodelled,
+    if cut == dcutStack:
+      "call-inlining stopped by the native stack while inlining `" &
+        stmt.callee & "` — " & why & "; " &
+        (if framesShort:
+           "raise -d:nimCallDepthLimit or build without stack traces"
+         else:
+           "run the analysis on a thread with a larger stack") &
+        " to reach deeper (beBudgetExhaustedUnmodelled)"
+    else:
+      "call-inlining depth budget exhausted (maxCallDepth=" &
+         $w.settings.budget.maxCallDepth & ") while inlining `" &
+         stmt.callee & "` — " & why & "; raise " &
+         "settings.budget.maxCallDepth or maxRecursionDepth if " &
+         "this SUT's real call nesting is deeper than the current " &
+         "bound (beBudgetExhaustedUnmodelled)")
+  for p in live:
+    var newEnv = p.env
+    var pcInit: seq[Z3Bool]
+    if stmt.retName.len > 0:
+      inc w.synthZ3
+      let z3Name = stmt.retName & "_d" & $w.synthZ3
+      newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
+    result.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+
+proc ifArmInfeasible(w: var WalkCtx; armPath: Path; last: Z3Bool;
+                     site: pointer; body: IRStmt): bool =
+  ## RFC-0005 S8as. The `wmExplore` walk forked every `if` arm without a
+  ## feasibility check, so a recursion on a symbolic argument walked arms no
+  ## execution takes (`fact(1)`'s `k > 1`) down to `maxCallDepth` -- where
+  ## S8an's bail dropped them -- and one with two recursive calls (`fib`)
+  ## multiplied them at each level: `fib(n)` under `n in 0..5` did not end
+  ## in 13 minutes at `maxCallDepth = 4`. Inside a recursive frame an arm
+  ## (or else path) whose query is UNSAT is now dropped before it is walked.
+  ## `last` is the arm's own conjunct, decided without the solver when it is
+  ## a literal. Sound exactly as `loopArmInfeasible` is: an undecided query
+  ## keeps the arm.
+  ##
+  ## RFC-0005 S8ax: outside a recursion the check is ADAPTIVE. Only an arm
+  ## that holds a loop or a call is checked (`armHeavy`): a solver call is
+  ## dearer than walking a few straight-line statements. And per site
+  ## (`site`, the arm's IR node), once a site has been checked
+  ## `ifSiteProbeMax` times, it is checked again only while at least one in
+  ## four of its checks dropped the arm. Measured (Linux, Z3 5.1, paired
+  ## runs, minimum of two; off / this policy / every arm checked):
+  ## s8k_bounds 29.4 / 29.6 / 55.7 s, s8p_precision 5.4 / 3.7 / 2.5 s,
+  ## s8as_remainder 37.4 / 26.8 / 47.2 s, s8an_remainder 11.7 / 13.9 /
+  ## 19.8 s, phase3_recursion 5.1 / 6.0 / 6.9 s. Checking every arm doubled
+  ## the string-heavy suites; checking only heavy arms keeps most of the
+  ## win where dead arms guard real work. Dropping is sound whichever way
+  ## the policy goes (the arm is UNSAT); the policy only decides where the
+  ## solver call is spent.
+  ##
+  ## An arm that only declines (`armDeclines`) is always checked: walked
+  ## where no execution reaches it, it voids the verdict for nothing.
+  let recursive = inRecursiveFrame(w) or armDeclines(body)
+  if not recursive:
+    if not armHeavy(body): return false
+    let st = w.ifSites.getOrDefault(site)
+    if st.checks >= ifSiteProbeMax and st.prunes * 4 < st.checks:
+      return false
+  inc symexIfArmsChecked
+  result = $simplify(last) == "false" or
+           pathInfeasible(w.z3, armPath, w.settings)
+  if result: inc symexIfArmsPruned
+  if not recursive:
+    var st = w.ifSites.getOrDefault(site)
+    inc st.checks
+    if result: inc st.prunes
+    w.ifSites[site] = st
+
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path]
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc liveViewMarks(p: Path; w: WalkCtx)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path)
+  ## RFC-0005 S8ca fwd decl (defined beside `syncAddrCells`).
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path]
+
+proc raiseSplit(w: WalkCtx; typeId: string): tuple[types: seq[string],
+                                                   unknown: seq[string]] =
+  ## RFC-0005 S8be. The types an abstract raise of `typeId` (one an opaque
+  ## call may raise, known only by its declared or scanned type) is split
+  ## into: `typeId` itself, every strict subtype of it that a `try` arm
+  ## around the current point names (in this frame or a caller's), and the
+  ## search's own `tRaisedExn` filter when it is one. The object raised may
+  ## be of any subtype; only those named somewhere can be told apart, and
+  ## each is raised on its own fork. `unknown`: arm types the hierarchy does
+  ## not know, which may be subtypes too.
+  result.types = @[typeId]
+  let known = isKnownExnType(typeId, w.statics.exnTable,
+                             w.statics.userExnHierarchy)
+  template consider(ht: string) =
+    if ht != typeId and ht notin result.types:
+      if not isKnownExnType(ht, w.statics.exnTable,
+                            w.statics.userExnHierarchy):
+        if ht notin result.unknown: result.unknown.add ht
+      elif known and isSubtypeOf(ht, typeId, w.statics.exnTable,
+                                 w.statics.userExnHierarchy):
+        result.types.add ht
+  template scan(hs: seq[HandlerFrame]) =
+    for hf in hs:
+      for h in hf.handlers:
+        for ht in h.typeIds: consider(ht)
+  scan(w.frame.handlerStack)
+  for f in w.frameStack: scan(f.handlerStack)
+  if w.target.kind == stkRaisedExn and w.target.typeFilter.len > 0:
+    consider(w.target.typeFilter)
+
+proc opaqueRaiseForks(w: var WalkCtx; paths: seq[Path];
+                      stmt: IRStmt): seq[Path] =
+  ## RFC-0005 S8ax. The raises of an inert opaque call that returned on
+  ## `paths` (its writes already havocked). Before S8ax the call never
+  ## raised: `try: boom(v) except ValueError: ...` was a false `sxUnsat`,
+  ## and a target after a call that always raises a false `sxSat`, both
+  ## with nothing recorded.
+  ##
+  ## * Each type its `raises` list names (`IRStmt.opaqueRaises`) is raised
+  ##   on a fork of every path, routed like any raise (`routeRaise`). The
+  ##   fork does not know WHEN the call raises, so it is a superset:
+  ##   `feOpaqueEffectHavoc` (`dcFreshSymbol`), replayed on a hit. The path
+  ##   that returns assumes the call did not raise, a superset too, and
+  ##   carries the same kind.
+  ## * RFC-0005 S8be: so is each `Defect` type its body may raise
+  ##   (`IRStmt.opaqueDefects`, scanned by the parser), which no `raises`
+  ##   list names. Before S8be the walk raised none: `IndexDefect` out of an
+  ##   opaque call was a false `sxUnsat`, and a `finally` reached only
+  ##   through it was never walked (S8ax tainted the path where an arm
+  ##   caught Defects, and dropped the rest).
+  ## * RFC-0005 S8be: the object raised may be of a subtype of the type
+  ##   named. Each strict subtype a `try` arm around the call names, or the
+  ##   search's `tRaisedExn` filter names, is raised on a fork of its own
+  ##   (`raiseSplit`), so `except SubErr:` sees the raise it catches. Before
+  ##   S8be such an arm declined the call (`feOpaqueCallUnmodelled`). An arm
+  ##   naming a type the hierarchy does not know still does: it may be a
+  ##   subtype the split cannot see.
+  let raised = stmt.opaqueRaises & stmt.opaqueDefects
+  if raised.len == 0: return paths
+  let dRet = w.degrade(feOpaqueEffectHavoc,
+    "opaque call `" & stmt.callee & "` may raise " &
+         raised.join(", ") & ": a path through it is forked for " &
+         "each, and the path past it assumes it returned, so a hit on " &
+         "either is replayed (feOpaqueEffectHavoc)")
+  for p in paths:
+    for t in raised:
+      let split = raiseSplit(w, t)
+      for st in split.types:
+        if w.shouldStop: return
+        var rp = forkPathTainted(p, p.pc, p.env, dRet)
+        if split.unknown.len > 0:
+          rp = forkPathTainted(rp, rp.pc, rp.env, w.degrade(
+            feOpaqueCallUnmodelled,
+            "opaque call `" & stmt.callee & "` may raise " & t &
+                 ", and a `try` arm around it names " &
+                 split.unknown.join(", ") & ", which the exception " &
+                 "hierarchy does not know: it may be a subtype the " &
+                 "raise is not split into (feOpaqueCallUnmodelled)"))
+        result.add routeRaise(rp, st, none(string), w)
+    result.add forkPathTainted(p, p.pc, p.env, dRet)
+
+
 
 proc degradeUnmodelledReassign(p: Path, objName: string, kind: SVKind,
                                w: var WalkCtx): Path =
@@ -13663,7 +18047,13 @@ proc drainClosureRaises(p: Path; exitFactsPlaced: bool;
       "the last drained closure exit facts (RFC-0005 S7 drainClosureRaises)")
   for cr in raises:
     let er = cr.raised
-    var rp = forkPathMerged(er.path, p.pc & er.path.pc, p.env, p)
+    # RFC-0005 S8as: the raising exit's own by-reference writes.
+    var renv = p.env
+    for (k, v) in cr.writes: renv[k] = v
+    var rp = forkPathMerged(er.path, p.pc & er.path.pc, renv, p)
+    # RFC-0005 S8bh: the `var` actuals hold what the body had written to
+    # them where it raised.
+    for o in cr.varOuts: rp.env[o.name] = o.val
     rp.defectSurvivorPc = p.defectSurvivorPc & er.path.defectSurvivorPc
     rp.heapDepth = p.heapDepth
     discard routeRaise(rp, er.typeId, er.msg, w)
@@ -13895,6 +18285,61 @@ proc drainClosureExitHeap(p: Path): Path =
     merged.liveRefs[tkey] = refs
   merged
 
+proc liveFrame(w: WalkCtx; frame: int): bool =
+  ## RFC-0005 S8ax. `frame` has not returned: it is the current frame or
+  ## one below it.
+  if w.frame.frameId == frame: return true
+  for f in w.frameStack:
+    if f.frameId == frame: return true
+  false
+
+proc deadElemRefs(p: Path; w: WalkCtx): seq[Z3AnyAst] =
+  ## RFC-0005 S8be. The element cells (`Path.elemCells`) whose memory Nim
+  ## may have freed: one some frame saw its seq resized or assigned whole
+  ## (`dead`), or one only returned frames held.
+  for e in p.elemCells:
+    let r = cast[pointer](e.refAst.raw)
+    var dead = false
+    var held = false
+    for f in p.elemCells:
+      if cast[pointer](f.refAst.raw) != r: continue
+      if f.dead: dead = true
+      elif liveFrame(w, f.frame): held = true
+    if dead or not held:
+      var seen = false
+      for d in result:
+        if cast[pointer](d.raw) == r: seen = true
+      if not seen: result.add e.refAst
+
+proc danglingCompareTaint(p: Path; operands: seq[Z3AnyAst]): Path =
+  ## RFC-0005 S8ax. `p` after an expression compared the `ptr` values
+  ## `operands`: tainted (`feUnsupportedOp`) when one may be the address
+  ## cell of a variable whose frame has returned (`Path.addrOwners`). Nim
+  ## compares a dead stack slot's address there, which a later frame may
+  ## reuse; the walk's cells stay distinct, so the outcome is not Nim's.
+  if currentWalkCtxPtr == nil or operands.len == 0: return p
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  var dead: seq[Z3AnyAst]
+  for o in p.addrOwners:
+    if not liveFrame(wp[], o.frame): dead.add o.refAst
+  # RFC-0005 S8be: an element's address whose memory Nim may have freed
+  # (`deadElemRefs`) is likewise one a later allocation may reuse.
+  dead.add deadElemRefs(p, wp[])
+  if dead.len == 0: return p
+  let ctx = wp[].z3
+  var hits: seq[Z3Bool]
+  for a in operands:
+    for d in dead:
+      hits.add wrap[Z3Bool](ctx, checkedEq(ctx, a.raw, d.raw))
+  var anyHit = hits[0]
+  for i in 1 ..< hits.len: anyHit = anyHit or hits[i]
+  if pathInfeasible(ctx, forkPath(p, p.pc & @[anyHit], p.env), wp[].settings):
+    return p
+  forkPathTainted(p, p.pc, p.env, wp[].degrade(feUnsupportedOp,
+    "RFC-0005 S8ax: a pointer compared here may hold the address of a " &
+         "variable whose routine has returned; Nim compares a dead stack " &
+         "slot's address, which a later call may reuse (feUnsupportedOp)"))
+
 proc drainPendingLowerEffects(p: Path): Path =
   ## Phase 15 re-review (S-1/S-2/S-3/S-4/NI-1/NI-2 drain consolidation).
   ## Single choke-point that drains ALL out-of-band `lower()`/`lowerBool()`
@@ -13950,6 +18395,31 @@ proc drainPendingLowerEffects(p: Path): Path =
   # very `loweringDegradeErrors` entries `lowerDegrade` recorded.
   if loweringPendingTaint != {}:
     p2 = forkPathTainted(p2, p2.pc, p2.env, takeLoweringPendingDegrade())
+  # (e) RFC-0005 S8as: the by-reference writes of the expression's closure
+  # calls land on the calling path (`closureEnvWrites`), in call order.
+  if closureEnvWrites.len > 0:
+    var env2 = p2.env
+    for (k, v) in closureEnvWrites: env2[k] = v
+    p2 = forkPath(p2, p2.pc, env2)
+    closureEnvWrites = @[]
+  # (e') RFC-0005 S8bh: the `var` formals' exit values of the closure calls
+  # this lower() made, written to the caller variables their actuals name
+  # (`applyClosureGround`), in call order. Before S8bh they were dropped: a
+  # call through a proc value (`let f = setBoth; f(x, y)`) left `x` and `y`
+  # as they were (a false `sxSat`). Fork before mutating, as above.
+  if currentWalkCtxPtr != nil:
+    let wo = cast[ptr WalkCtx](currentWalkCtxPtr)
+    if wo[].closureVarOuts.len > 0:
+      var env2 = p2.env
+      for o in wo[].closureVarOuts: env2[o.name] = o.val
+      p2 = forkPath(p2, p2.pc, env2)
+      wo[].closureVarOuts = @[]
+  # (f) RFC-0005 S8ax: a `ptr` comparison against a dead frame's cell.
+  if pendingPtrCompares.len > 0:
+    let operands = pendingPtrCompares
+    pendingPtrCompares = @[]
+    p2 = danglingCompareTaint(p2, operands)
+  loweringReadNames = @[]
   # Reset exit-heap threadvars so a subsequent lower() that contains no closure
   # call does not see the prior call's heaps, and so drainPendingLowerEffects
   # is idempotent (safe to call again without an intervening seed).
@@ -14053,7 +18523,7 @@ proc lowerBoolInExpr(p: Path, e: IRExpr, w: var WalkCtx): (Z3Bool, Path) =
   let p2 = drainPendingLowerEffects(p)
   (b, p2)
 
-proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
+proc lowerLeafInExpr(p: Path, e: IRExpr): (SymVal, Path) =
   ## Phase 15 CR-9 Stage 3. A container/pointer operand of a deref/index/field
   ## arm that is side-effect-free — no closure call, no float→int conversion —
   ## so no seed/drain is needed. The assert makes any violation loud.
@@ -14063,10 +18533,18 @@ proc lowerLeafInExpr(p: Path, e: IRExpr): SymVal =
   ##   iekField    — struct field projection, pure.
   ## (RFC-0005 S8c deleted the third admitted kind, `iekStrBytes`, with the
   ## name-only `bytes(s)` model that produced it.)
+  ##
+  ## RFC-0005 S8bw (item 1): pure, but not decline-free -- a global read
+  ## before any write declines in-band (`lowerDegrade`). That pending taint
+  ## lands on the returned path, `p` forked tainted; it was left for some
+  ## later drain, and on the arms that fork no further it leaked to the
+  ## walk end (`weInternalWalkerFault`, `gSeq[0] = k`).
   doAssert e.kind in {iekVar, iekField},
     "lowerLeafInExpr: expected side-effect-free container expr; got " & $e.kind &
     " — add seed+drain if parser changes"
-  lower(p.env, e)
+  let sv = lower(p.env, e)
+  if loweringPendingTaint == {}: return (sv, p)
+  (sv, forkPathTainted(p, p.pc, p.env, takeLoweringPendingDegrade()))
 
 # nilDerefFork moved to runtime_heap.nim (CR-7-deeper Stage 8+).
 
@@ -14086,11 +18564,30 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   ## `defaultConcreteBranchRLimit`. Split out as its own pure function so
   ## the "under default settings this site is genuinely bounded, not
   ## silently 0/unlimited" contract is directly unit-testable without
-  ## needing to provoke a real Z3 divergence.
-  if settings.budget.queryRLimit != 0: settings.budget.queryRLimit
+  ## needing to provoke a real Z3 divergence. RFC-0005 S8bu: `queryRLimit`'s
+  ## own default (no longer `0`) is not the caller's.
+  let q = settings.budget.queryRLimit
+  if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
-proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
+                          settings: SymexSettings): Z3Status =
+  ## RFC-0005 S8by. One of concolic collection's scratch solves
+  ## (`concreteBranchOutcome`, `concretelyInfeasible`,
+  ## `runConcolicCollectImpl`'s concrete-inputs check): `roots` under
+  ## `concreteBranchRLimit(settings)` and `random_seed = 0`, in a context
+  ## of its own (`ownContextSolver`, RFC-0005 S8bm), its units added to
+  ## `ownContextUnits`. They checked in the walk's context, where what the
+  ## context already held moved their search, as S8bm and S8bp measured
+  ## for the walker's own: a factoring branch condition took 876,296 units
+  ## in one context and 5,854,996 in one that made the query's constants
+  ## the other way round (Z3 5.1; 23,956 and 911,593 on 4.13.4), and under
+  ## a bound between them it was decided in the first and not in the second
+  ## (`tsymex_rfc0005_s8by_remainder`). Now what the context holds moves
+  ## neither its spend nor whether it decides within its bound.
+  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+
+proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
                            facts: seq[Z3Bool] = @[]): Option[bool] =
   ## Determine whether `cond` (a branch predicate, already lowered against
@@ -14133,36 +18630,20 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## under the pins, and an `if` on a closure that returned normally was
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
-  let rlimit = concreteBranchRLimit(settings)
   var reach = concreteEq
   reach.add facts
   reach.add cond
   let pools = globalRoots(reach)
-  let sTrue = newSolver(ctx)
-  let spTrue = newParams(ctx)
-  spTrue.set("rlimit", rlimit)
-  spTrue.set("random_seed", 0'u)
-  sTrue.setParams(spTrue)
-  for c in concreteEq: sTrue.add(c)
-  for c in pools: sTrue.add(c)
-  for c in facts: sTrue.add(c)
-  sTrue.add(cond)
-  let rTrue = sTrue.check()
-  let sFalse = newSolver(ctx)
-  let spFalse = newParams(ctx)
-  spFalse.set("rlimit", rlimit)
-  spFalse.set("random_seed", 0'u)
-  sFalse.setParams(spFalse)
-  for c in concreteEq: sFalse.add(c)
-  for c in pools: sFalse.add(c)
-  for c in facts: sFalse.add(c)
-  sFalse.add(not cond)
-  let rFalse = sFalse.check()
+  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
+  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
+                                   settings)
+  let rFalse = concreteScratchCheck(ctx,
+    concreteEq & pools & facts & @[not cond], settings)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
 
-proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                           conds: seq[Z3Bool], settings: SymexSettings): bool =
   ## RFC-0005 S8i. True iff `conds` (a path's `pc` and defect-survivor
   ## facts) is UNSAT under the concrete pins: the replayed execution cannot
@@ -14170,15 +18651,9 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
   ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
   ## RFC-0005 S8n: with the same `globalRoots()` pools.
-  let sv = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  sv.setParams(sp)
-  for c in concreteEq: sv.add(c)
-  for c in globalRoots(concreteEq & conds): sv.add(c)
-  for c in conds: sv.add(c)
-  sv.check() == zsUnsat
+  ## RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
+  concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
+                            conds, settings) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -14350,6 +18825,38 @@ proc declinedIndexEnv(env: Env; stmt: IRStmt; valTy: IRType): Env =
   result[stmt.ixRetName] = allocateSym(valTy,
     freshDegradeName("__declinedIndexRead"), scratch)
 
+proc declinedVariantEnv(env: Env; stmt: IRStmt): Env =
+  ## RFC-0005 S8ba. `declinedIndexEnv` for a declined symbolic variant
+  ## construction: its temporary bound to a fresh value of the variant type.
+  result = env
+  var scratch: seq[Z3Bool]
+  result[stmt.vcsResultVar] = allocateSym(stmt.vcsVariantTy,
+    freshDegradeName("__declinedVariant"), scratch)
+
+proc declinedPopEnv(env: Env; stmt: IRStmt): Env =
+  ## RFC-0005 S8ba. `declinedIndexEnv` for a declined `v = s.pop()`: `v`
+  ## bound to a fresh value of the element type on the tainted path. Left
+  ## unbound, its next read was recorded as an unmodelled global
+  ## (`'__sym_pop_N' is read where ...`).
+  result = env
+  if stmt.spElemTy.isNil: return
+  var scratch: seq[Z3Bool]
+  result[stmt.spRetName] = allocateSym(stmt.spElemTy,
+    freshDegradeName("__declinedPop"), scratch)
+
+proc unwrittenDisc(sv: SymVal): string =
+  ## RFC-0005 S8bw (item 2). The unwritten part a variant's discriminator
+  ## (each axis's, for a multi-variant) mentions, or "": a reassignment
+  ## reads it for Nim's branch-change check.
+  case sv.kind
+  of svVariant: unwrittenIn(sv.vDisc[])
+  of svMultiVariant:
+    for ax in sv.mvAxes:
+      let part = unwrittenIn(ax.disc[])
+      if part.len > 0: return part
+    ""
+  else: ""
+
 proc completeReturn(p: Path, w: var WalkCtx) =
   ## RFC-0005 S8l. Complete a `return` exit once every `finally` of its frame
   ## has run (`exitReturn`). `result` on `p.env` is the returned value: the
@@ -14369,11 +18876,13 @@ proc completeReturn(p: Path, w: var WalkCtx) =
     return
   let frameIx = w.callStack.high
   let retSym = w.callStack[frameIx].retSym
-  if isClosureTy(w.callStack[frameIx].retTy):
+  if retCarriesClosure(w.callStack[frameIx].retTy):
     # RFC-0005 S8z: a closure-returning callee has no `retSym` to bind; the
     # path carries its `svClosure` on `result`, which the `isCall` arm hands
-    # to the caller as the call's value.
-    if p.env.hasKey("result") and p.env["result"].kind == svClosure:
+    # to the caller as the call's value. RFC-0005 S8be: a tuple holding a
+    # closure too (it was `ceUnsupportedHof`).
+    if p.env.hasKey("result") and
+       closureValueBuilt(p.env["result"], w.callStack[frameIx].retTy):
       w.callStack[frameIx].returnedPaths.add p
     else:
       let d = w.degrade(ceUnsupportedHof,
@@ -14556,12 +19065,24 @@ proc sameSV(a, b: SymVal): bool =
     # read as a value, and the placeholder flag is itself compared, so a
     # placeholder never matches a backed seq (N27 audit, RFC-0005 S8w).
     a.seqLen.raw == b.seqLen.raw and a.seqDataRaw.raw == b.seqDataRaw.raw and  # [placeholder-audited]
+      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
+      (block:
+        var r = true
+        for i in 0 ..< a.seqDataMore.len:
+          if a.seqDataMore[i].raw != b.seqDataMore[i].raw: r = false
+        r) and
       a.seqElemTy == b.seqElemTy and
       a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder and  # [placeholder-audited]
       a.seqUnsupportedFieldReason == b.seqUnsupportedFieldReason and
       a.seqUnsupportedFieldKind == b.seqUnsupportedFieldKind
   of svTable:
     a.tabDataRaw.raw == b.tabDataRaw.raw and
+      a.tabDataMore.len == b.tabDataMore.len and
+      (block:
+        var same = true
+        for i in 0 ..< a.tabDataMore.len:
+          if a.tabDataMore[i].raw != b.tabDataMore[i].raw: same = false
+        same) and
       a.tabPresentRaw.raw == b.tabPresentRaw.raw and
       a.tabSize.raw == b.tabSize.raw and
       a.tabKeyTy == b.tabKeyTy and a.tabValTy == b.tabValTy
@@ -14709,11 +19230,15 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
       return none(SymVal)
     let ctx = t.seqDataRaw.ctx  # [placeholder-audited]
     # Wrapped (inc_ref'd) at once: a raw handle is not owned, and the next
-    # API call may reclaim it.
-    let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,  # [placeholder-audited]
-                              t.seqDataRaw.raw, e.seqDataRaw.raw))  # [placeholder-audited]
-    some(SymVal(kind: svSeq, seqLen: ite(sel, t.seqLen, e.seqLen),  # [placeholder-audited]
-                seqDataRaw: data, seqElemTy: t.seqElemTy))
+    # API call may reclaim it. RFC-0005 S8bc: every data array of a tree
+    # element (the element types are equal, so the arrays agree).
+    let ta = seqArrs(t)
+    let ea = seqArrs(e)
+    if ta.len != ea.len: return none(SymVal)
+    var arrs: seq[Z3AnyAst]
+    for i in 0 ..< ta.len:
+      arrs.add wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw, ta[i].raw, ea[i].raw))
+    some(mkSeqSV(ite(sel, t.seqLen, e.seqLen), arrs, t.seqElemTy))  # [placeholder-audited]
   of svRef:
     if t.refPointee != e.refPointee: none(SymVal)
     else: some(iteSV(sel, t, e))
@@ -14746,14 +19271,20 @@ proc joinSV(sel: Z3Bool, t, e: SymVal): Option[SymVal] =
     # RFC-0005 S8ac. A table IS its data and presence arrays and its
     # cardinality counter (#144), so the `ite` of the three is the `ite` of
     # the table.
-    if t.tabKeyTy != e.tabKeyTy or t.tabValTy != e.tabValTy:
+    if t.tabKeyTy != e.tabKeyTy or t.tabValTy != e.tabValTy or
+       t.tabDataMore.len != e.tabDataMore.len:   ## RFC-0005 S8at
       return none(SymVal)
     let ctx = t.tabDataRaw.ctx
     let data = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
                               t.tabDataRaw.raw, e.tabDataRaw.raw))
     let present = wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
                                  t.tabPresentRaw.raw, e.tabPresentRaw.raw))
-    some(SymVal(kind: svTable, tabDataRaw: data, tabPresentRaw: present,
+    var more: seq[Z3AnyAst]   ## RFC-0005 S8at
+    for i in 0 ..< t.tabDataMore.len:
+      more.add wrap[Z3AnyAst](ctx, checkedIte(ctx, sel.raw,
+                              t.tabDataMore[i].raw, e.tabDataMore[i].raw))
+    some(SymVal(kind: svTable, tabDataRaw: data, tabDataMore: more,
+                tabPresentRaw: present,
                 tabSize: ite(sel, t.tabSize, e.tabSize),
                 tabKeyTy: t.tabKeyTy, tabValTy: t.tabValTy))
   of svSet:
@@ -15183,6 +19714,56 @@ proc walkWhileFollowConcrete(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): se
       survivors.add forkPathTainted(p, p.pc, p.env, d)
   survivors
 
+proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
+  ## RFC-0005 batch 6. The value of the receiver `name` a statement arm
+  ## updates in place (`xs[i] = v`, `xs.pop()`, `o.kind = k`), and the path
+  ## to continue on. A bound name is read from `Env`. An unbound one is read
+  ## as `lower` reads the name (`iekVar`): a module-level variable the walk
+  ## has not written yet is its ENTRY value (S8as `entryValueOf`, the path
+  ## tainted `feGlobalHavoc`), and anything else declines in-band. The arms
+  ## read `Env` directly before, so a global receiver not yet written
+  ## raised `KeyError` (the path was dropped: a false `sxUnsat`) or skipped
+  ## the statement (its `FieldDefect` was never forked).
+  if p.env.hasKey(name): return (p.env[name], p)
+  lowerInExpr(p, mkVar(name), w)
+
+proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
+                     w: var WalkCtx): string =
+  ## RFC-0005 S8bx (item 3). Record the call's `cViewAliases` in the callee's
+  ## frame (just pushed), as `slot` address entries (`AddrCellEntry`,
+  ## `syncAddrCells`). Returns why the call declines, or "": the view's
+  ## formal is by value and not a scalar (Nim may pass it by address, so it
+  ## would see the table's writes: not modelled), or the key is unbound.
+  ## A by-value scalar view is a copy, and nothing relates it to the table.
+  ## A call made inside such a callee that passes both formals on carries
+  ## the pair into its own callee (Nim passes the one location on).
+  var pairs: seq[tuple[viewArg, tabArg: int; key: SymVal]]
+  for a in stmt.cViewAliases:
+    if a.viewArg >= sig.params.len or a.tabArg >= sig.params.len or
+       not callerEnv.hasKey(a.keyName):
+      return "and the walk does not bind the two"
+    pairs.add (viewArg: a.viewArg, tabArg: a.tabArg,
+               key: callerEnv[a.keyName])
+  if w.frameStack.len > 0:
+    for a in w.frameStack[^1].addrCells:
+      if a.slot.len == 0: continue
+      var vi, ti = -1
+      for i, arg in stmt.cargs:
+        if arg.kind == iekVar:
+          if arg.vname == a.local: vi = i
+          elif arg.vname == a.slot: ti = i
+      if vi >= 0 and ti >= 0 and vi < sig.params.len and ti < sig.params.len:
+        pairs.add (viewArg: vi, tabArg: ti, key: a.ixs[0])
+  for a in pairs:
+    let vf = sig.params[a.viewArg]
+    if not vf.isVar:
+      if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
+      return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: @[],
+                           ixs: @[a.key], bound: true, view: false,
+                           slot: sig.params[a.tabArg].name)
+  ""
+
 proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] =
   result = paths
   for s in stmts:
@@ -15230,7 +19811,2439 @@ proc walkBlock(stmts: seq[IRStmt], paths: seq[Path], w: var WalkCtx): seq[Path] 
 
 include "runtime_heap.nim"  # Stage 8 CR-7 Cluster R: walkHeapArm
 
-proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+func addrPartName(formal: string): string =
+  ## RFC-0005 S8bu. The callee-frame local an `addr` actual into an
+  ## address-taken variable is bound through (`bindVarLocs`): it is kept
+  ## equal both to the variable's cell at the actual's path and to the cell
+  ## the call's pointer names.
+  "__addrPart#" & formal
+
+proc bindVarLocs(calleePath: Path; callerEnv: Env;
+                 callerCells: seq[AddrCellEntry]; callerFrame: int;
+                 locs: seq[VarLoc]; varArgs, argVars: seq[(string, string)];
+                 params: seq[string];
+                 cells: var seq[AddrCellEntry];
+                 elemShares: var seq[(string, string)];
+                 w: var WalkCtx): string =
+  ## RFC-0005 S8bs. A `var` actual that is a path into a routine's variable
+  ## (`b.x`, `IRStmt.cVarLocs`) is passed by copy-in/copy-out, through a
+  ## temporary written back after the call. That is Nim's semantics only
+  ## while the callee cannot reach the location another way; once `addr b`
+  ## is taken, a pointer it holds (a global, a capture, a heap field, a
+  ## parameter) reaches it, and the write-back landed over the callee's
+  ## write through the pointer (the S8bg exhibit's swapped verdicts). So,
+  ## when the variable has a cell in the caller's frame, the formal is bound
+  ## to the cell at that path (a `bound` entry, `AddrCellEntry`) and the
+  ## callee's statements keep the two equal in its order, as for a `var`
+  ## formal bound to a whole address-taken variable (`inheritAddrCells`).
+  ## An element `s[i]` of a seq with element cells (S8be's `addr s[i]`) is
+  ## bound to the cell `s[i]` has when `i` equals its index, else to a fresh
+  ## one holding the element, as `walkElemCell` takes it.
+  ##
+  ## A by-value argument Nim passes by address (`VarLoc`'s `ptr`: a large
+  ## or inheritable object, an array) reads the location as the callee's
+  ## writes through a pointer leave it: its formal is bound the same way (it
+  ## is never written by name). One Nim copies but whose seq or string
+  ## memory the copy shares (`copy`) sees the writes to its elements: a seq
+  ## with element cells has them under the formal's name too (`elemShares`,
+  ## for `inheritElemCells`).
+  ##
+  ## RFC-0005 S8bu: an `addr lv` actual (`addr`: the cell for the call,
+  ## named `temp` in the caller, is the argument; `argVars` pairs each
+  ## formal with the caller variable its actual names) is a sub-cell of the
+  ## variable's cell at that path: a local of the callee's frame
+  ## (`addrPartName`) is bound both to the variable's cell at the path (a
+  ## `bound` entry) and to the call's cell (an entry like `addr x`'s), so
+  ## the frame keeps the two equal statement by statement
+  ## (`syncAddrCells`), and a write through the formal is seen through the
+  ## variable's pointer and the other way round. S8bs declined it: the
+  ## cell for the call was a second copy of a location the callee could
+  ## reach through the pointer, and its write-back after the call landed
+  ## over a write through the pointer.
+  ##
+  ## Returns why the call declines, or "": a path the walk cannot follow,
+  ## a variable that has both a cell and element cells, and a `copy` of an
+  ## address-taken variable (a write through the pointer to an element is
+  ## seen through the copy, an assignment of the whole is not).
+  let ctx = w.z3
+  for loc in locs:
+    if loc.mode == "ref":
+      # RFC-0005 S8ca: a `var` actual in a field of an object behind a ref
+      # (`grb.x`, the ref read into `root` at the call) is passed by
+      # reference: the formal is a `bound` entry on the object's cell at
+      # the field path, the heaps `grb.x` reads and writes (`addrCellValue`),
+      # so the body's direct access to the object and its writes through the
+      # formal are one location. S8bh declined it (`touchMeetsOuter`).
+      var formal = ""
+      for (f, callerName) in varArgs:
+        if callerName == loc.temp: formal = f
+      if formal.len == 0 or not callerEnv.hasKey(loc.root) or
+         callerEnv[loc.root].kind notin {svRef, svPtr}:
+        return "a `var` argument in an object behind a ref is passed in a " &
+               "shape the walk does not bind to the object's cell"
+      let rv = callerEnv[loc.root]
+      let (refAst, pointee) =
+        if rv.kind == svRef: (rv.refAst, rv.refPointee)
+        else: (rv.ptrAst, rv.ptrPointee)
+      let cellName = varLocCellName(formal)
+      let e: AddrCellEntry = (local: formal, cell: cellName, ty: pointee,
+                              path: loc.path, ixs: @[], bound: true,
+                              view: false, slot: "")
+      if addrEntryValue(ctx, calleePath, e, refAst).isNone:
+        return "a `var` argument in an object behind a ref is a part of " &
+               "it the walk does not follow"
+      var env2 = calleePath.env
+      env2[cellName] = SymVal(kind: svPtr, ptrAst: refAst, ptrFamily: false,
+                              ptrPointee: pointee)
+      calleePath.env = env2
+      cells.add e
+      continue
+    var rootCells: seq[AddrCellEntry]
+    for c in callerCells:
+      if c.local == loc.root and callerEnv.hasKey(c.cell) and
+         callerEnv[c.cell].kind == svPtr:
+        rootCells.add c
+    var elems: seq[ElemCell]
+    for e in calleePath.elemCells:
+      if e.frame == callerFrame and e.root == loc.root and not e.dead:
+        elems.add e
+    if rootCells.len == 0 and elems.len == 0: continue
+    let what = "`" & displayName(loc.root) & "`"
+    var formal = ""
+    if loc.mode == "addr":
+      for (f, callerName) in argVars:
+        if callerName == loc.temp: formal = f
+      if formal.len == 0 or not callerEnv.hasKey(loc.temp) or
+         callerEnv[loc.temp].kind != svPtr:
+        return "an `addr` of a part of " & what & ", whose address is " &
+               "taken, is passed in a shape the walk does not bind to its cell"
+    elif loc.temp.startsWith("#"):
+      let k = parseInt(loc.temp[1 .. ^1])
+      if k < params.len: formal = params[k]
+    else:
+      for (f, callerName) in varArgs:
+        if callerName == loc.temp: formal = f
+    if formal.len == 0: continue
+    if loc.mode == "copy":
+      if rootCells.len == 1 and elems.len == 0 and "?" notin loc.path and
+         "[" notin loc.path:
+        # RFC-0005 S8bu: a seq whose address is taken, or a seq field of
+        # such a variable, passed by value: the formal shares its memory.
+        # It is bound to the cell as a `view` entry (`syncAddrCells`).
+        let c = rootCells[0]
+        let cellName = varLocCellName(formal)
+        let e: AddrCellEntry = (local: formal, cell: cellName, ty: c.ty,
+                                path: c.path & loc.path, ixs: c.ixs,
+                                bound: true, view: true, slot: "")
+        let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
+        if v.isSome and v.get.kind == svSeq:
+          var env2 = calleePath.env
+          env2[cellName] = callerEnv[c.cell]
+          calleePath.env = env2
+          cells.add e
+          continue
+        if v.isSome and v.get.kind == svString:
+          # RFC-0005 S8ca: a by-value string shares the memory of the
+          # variable. Nim writes a character in place unless that memory
+          # is a literal's, which the first write copies (`StrBuf`): of a
+          # literal's, the formal is a plain copy (no write through the
+          # pointer reaches it); of the string's own, it is a `view` (an
+          # in-place character write is seen, any other declines). S8bu
+          # declined both, character writes being unmodelled.
+          let byName =
+            if c.path.len == 0 and loc.path.len == 0 and
+               callerEnv.hasKey(c.local) and
+               callerEnv[c.local].kind == svString and
+               sameSymVal(callerEnv[c.local], v.get):
+              callerEnv[c.local].strBuf
+            else: sbUnknown
+          if byName == sbLiteral: continue
+          if byName == sbOwned and calleePath.env.hasKey(formal) and
+             calleePath.env[formal].kind == svString:
+            var env2 = calleePath.env
+            env2[cellName] = callerEnv[c.cell]
+            calleePath.env = env2
+            cells.add e
+            continue
+          return "a by-value string shares the memory of " & what &
+                 ", whose address is taken, and the walk does not know " &
+                 "whether that memory is a literal's (which a write " &
+                 "through the pointer copies first) or the string's own " &
+                 "(which it writes in place)"
+      if rootCells.len > 0:
+        return "a by-value argument shares the memory of " & what &
+               ", whose address is taken: a write through the pointer to " &
+               "an element is seen through it, and an assignment of the " &
+               "whole is not"
+      if loc.path.len > 0:
+        return "a by-value argument shares the memory of a part of " & what &
+               ", which has element cells"
+      elemShares.add (formal, loc.root)
+      continue
+    if "?" in loc.path:
+      return "the `var` argument is a part of " & what & ", whose address " &
+             "is taken, along a path the walk does not follow"
+    if rootCells.len > 0 and elems.len > 0 or rootCells.len > 1:
+      return "the `var` argument is a part of " & what & ", which has an " &
+             "address cell and element cells, or two cells"
+    var path: seq[string]
+    var ixs: seq[SymVal]
+    for st in loc.path:
+      if st.startsWith("["):
+        let nm = st[1 .. ^1]
+        if not callerEnv.hasKey(nm):
+          return "the index of the `var` argument into " & what &
+                 " is not bound"
+        path.add "["
+        ixs.add callerEnv[nm]
+      else:
+        path.add st
+    # RFC-0005 S8bu: an `addr` actual binds a local of its own, kept equal
+    # to the call's cell too (below).
+    let local = if loc.mode == "addr": addrPartName(formal) else: formal
+    let cellName = varLocCellName(local)
+    var env2 = calleePath.env
+    template bindCallCell() =
+      if loc.mode == "addr":
+        # The call's cell holds the location's value; it is stored again
+        # here as the local's term, so both cells read back as one term.
+        let ptrV = callerEnv[loc.temp]
+        discard addrCellStore(ctx, calleePath, ptrV.ptrPointee, ptrV.ptrAst,
+                              env2[local])
+        env2[addrCellName(local)] = ptrV
+        cells.add (local: local, cell: addrCellName(local), ty: ptrV.ptrPointee,
+                   path: @[], ixs: @[], bound: false, view: false, slot: "")
+    if rootCells.len == 1:
+      let c = rootCells[0]
+      let e: AddrCellEntry = (local: local, cell: cellName, ty: c.ty,
+                              path: c.path & path, ixs: c.ixs & ixs,
+                              bound: true, view: false, slot: "")
+      let v = addrEntryValue(ctx, calleePath, e, callerEnv[c.cell].ptrAst)
+      if v.isNone:
+        return "the `var` argument is a part of " & what & ", whose " &
+               "address is taken, along a path the walk does not follow"
+      env2[cellName] = callerEnv[c.cell]
+      if loc.mode == "addr": env2[local] = v.get
+      cells.add e
+      bindCallCell()
+      calleePath.env = env2
+      continue
+    # The element of a seq with element cells.
+    if loc.mode == "addr":
+      # RFC-0005 S8bu: the call's cell and the element's are in one heap,
+      # and the element's is addressed through an `ite` a read cannot see
+      # past a store to the other, so the frame cannot tell which of the
+      # two a statement wrote.
+      return "an `addr` of an element of " & what & ", which has element " &
+             "cells, is a cell for the call in the element's own heap"
+    if path != @["["] or not env2.hasKey(local):
+      return "the `var` argument is a part of an element of " & what &
+             ", which has element cells"
+    let ty = elems[0].ty
+    let idx = toZ3Int(ixs[0])
+    let typeId = refPointeeTypeId(ty)
+    let newRef = freshRef(ctx, allocRefSort(ctx, ty), typeId, calleePath)
+    assertFreshness(ctx, calleePath, typeId, newRef, w.settings)
+    discard addrCellStore(ctx, calleePath, ty, newRef, env2[formal])
+    var addrAst = newRef
+    for k in countdown(elems.high, 0):
+      let same = idx == elems[k].idx
+      addrAst = wrap[Z3AnyAst](ctx,
+        checkedIte(ctx, same.raw, elems[k].refAst.raw, addrAst.raw))
+    env2[cellName] = SymVal(kind: svPtr, ptrAst: addrAst, ptrFamily: true,
+                            ptrPointee: ty)
+    cells.add (local: local, cell: cellName, ty: ty, path: @[], ixs: @[],
+               bound: true, view: false, slot: "")
+    calleePath.env = env2
+  ""
+
+proc walkIndexArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isIndex` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # R14: `isIndex` is not a fork-every-arm construct the way `isIf`/
+  # `isWhile` are — the in-bounds/present path is the ONLY continuation
+  # `survivors` ever gets; the OOB/absent case is a discarded-result
+  # `forkDefect` side channel (try/except routing + target-witness
+  # search), narrowed per-mode inside `maybeForkDefect` rather than here.
+  # Both arms below stay `discard`: there is no separate per-construct
+  # behavior to select at THIS dispatch point.
+  case w.mode
+  of wmExplore: discard
+  of wmFollowConcrete: discard
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return
+    ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
+    ## expression. The parser A-normalises most container expressions to named
+    ## bindings (iekVar) or field projections (iekField); both are pure (no
+    ## closure/float→int sinks), so lowerLeafInExpr handles them without
+    ## seed+drain.
+    # RFC-0005 S8at: a `distinct` over a seq/array/Table is read through
+    # its base (`seq[int](d)[i]` is the parser's identity, S8p), as every
+    # scalar distinct already is (`ejectBase`).
+    lowerAsReceiver = true   ## RFC-0005 S8bw: the element is the read
+    let (arrSV0, p1) = lowerLeafInExpr(p0, stmt.ixArr)
+    let arrSV = ejectBase(arrSV0)
+    # RFC-0005 S8bw (item 2): an array global's element read observes the
+    # one element (below); a seq, table or string global's read observes
+    # its length or key set, so the whole receiver.
+    let p =
+      if arrSV.kind != svArray and
+         globalReadPart(stmt.ixArr, arrSV).len > 0:
+        forkPathTainted(p1, p1.pc, p1.env, w.degrade(
+          unwrittenKind(globalReadPart(stmt.ixArr, arrSV)),
+          unwrittenMsg(globalReadPart(stmt.ixArr, arrSV))))
+      else: p1
+    # ---- Phase 5: Table[K, V] indexing ----
+    if arrSV.kind == svTable:
+      ## Table key: always a string expression — no float→int conv or closure
+      ## can appear in a string sub-expression, so no seed+drain needed here.
+      ## If the parser ever emits non-string keyed tables, add the uniform
+      ## seed/drain wrapper before the lower call.
+      if not isBackedTableTy(arrSV.tabKeyTy, arrSV.tabValTy):
+        # RFC-0005 S8u: an unbacked table is `allocateSym`'s declined,
+        # inert placeholder; its key must not be lowered against the key
+        # prototype below (`coerceIntLit` raised on an int literal, a
+        # `weInternalWalkerFault`). RFC-0005 S8ar: any unbacked key or
+        # value type (`isBackedTableTy`; was a non-string key, and a
+        # second arm for the value).
+        let d =
+          if not isTableKeyTy(arrSV.tabKeyTy):
+            w.degrade(seUnsupportedTableKeyType,
+              "at index: " & tableKeyDeclineMsg(arrSV.tabKeyTy))
+          else:
+            w.degrade(seUnsupportedTableValType,
+              "at index: " & tableValDeclineMsg(arrSV.tabValTy))
+        survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
+        continue
+      # RFC-0005 S8ar: every backed key and value type (`tabKeyTerm` /
+      # `tabValOf`); was a string key and a 64-bit cell value.
+      let keySV = lower(p.env, stmt.ixIdx, seqElemLitProto(arrSV.tabKeyTy))
+      let kOpt = tabKeyTerm(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8f: noted
+      if kOpt.isNone:
+        let d = w.degrade(feUnsupportedOp,
+          "Table index: key lowered to " & plainEnglishSymValKind(keySV.kind) &
+          " — expected a " & $arrSV.tabKeyTy & " (feUnsupportedOp)")
+        survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
+        continue
+      let ctx = arrSV.tabSize.ctx
+      let k = kOpt.get
+      # Nim's `Table[K, V].[]` raises `KeyError` when the key is
+      # absent. To preserve that semantics in symex we add a
+      # presence constraint to the surviving path.
+      var presentCond = wrap[Z3Bool](ctx,
+        checkedSelect(ctx, arrSV.tabPresentRaw.raw, k.raw))
+      let nanOpt = tabKeyNaN(keySV, arrSV.tabKeyTy)   ## RFC-0005 S8at
+      if nanOpt.isSome: presentCond = presentCond and not nanOpt.get
+      # RFC-0005 S8at: the absent key RAISES (`KeyError`), routed to a
+      # handler as any raise is. It only narrowed the surviving path, so
+      # `try: t[k] except KeyError: ...` never ran its handler: a false
+      # `sxUnsat` for a target in it, and no `sxRaised` at the boundary.
+      maybeForkDefect(p, not presentCond, "KeyError", none(string), w)
+      # RFC-0005 S8z: read back at the value type's width.
+      let tableVal = tabValAt(ctx, arrSV, k.raw)
+      var newEnv = p.env
+      newEnv[stmt.ixRetName] = tableVal
+      # Issue #163 wiring-audit W2 (Table-value sibling): a
+      # `Table[string, range[lo..hi]]` value read here has the exact
+      # same reach gap as a seq element — see the `isIndex`/svSeq arm's
+      # own comment just above for the full rationale. Review R11: routed
+      # through `rangeCondsIfNeeded`. RFC-0005 S8ar: a string value is a
+      # string of bytes (`seqStrElemConds`, a free string's fact).
+      let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy) &
+                          seqStrElemConds(tableVal)
+      survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
+      continue
+    # ---- Phase 5: dynamic seq[T] indexing ----
+    if arrSV.kind == svSeq:
+      if arrSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+        # RFC-chapulin-hardening B7r2 (walker v88): a bare local/param/
+        # call-return `seq[T]` (T structurally unbacked, e.g. itTuple)
+        # allocated via the GENERALIZED Bug-#2 placeholder
+        # (`allocateSym`'s `itSeq` arm) is indexed here — an ACTUAL READ
+        # of its content. `dsl_parser.nim`'s `nnkDotExpr` field-read
+        # arms intercept a declared-FIELD placeholder read at PARSE time
+        # (before an `isIndex` node can even be built over it); a bare
+        # value has no such static field-access site, so this is the
+        # analogous WALK-TIME interception (SND-1 taint-and-continue)
+        # for that case — never `select()` from the placeholder's
+        # arbitrary-sort (`Z3Int -> Z3Bool`) inert backing array, which
+        # would misrepresent (or, for a non-bool real element type,
+        # `wrap[]`-crash on) content that was never truly modeled.
+        # R1 (walker v89) Q2 fix: this decline previously omitted
+        # `stmt.ixLoc` even though the parser already populates it
+        # (`parseSeqBracketAccess`'s index arm passes `siteLoc(n)` into
+        # `mkIndexStmt`) — the `<loc>: ` prefix idiom exists 60 lines below
+        # in this SAME handler (the non-seq receiver-kind decline). Now
+        # shares `placeholderReadDeclineMsg` with the in-`lower()` half
+        # (`iekSeqLen`/`iekSeqSlice`) so every placeholder-read decline
+        # reports the identical message shape. N47-followup (walker v110):
+        # kind now derives from `arrSV` too (`placeholderReadDeclineKind`)
+        # — a bare-value placeholder still reports `seNestedSeqUnsupported`
+        # unchanged, but a receiver rebound by an OPERATION-level decline
+        # (e.g. `iekSeqAdd`'s width/elem-support gap) reports THAT decline's
+        # own kind instead of the misleading nested-seq claim.
+        let d = w.degrade(placeholderReadDeclineKind(arrSV),
+          placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
+        # RFC-0005 S8ba: the read's temporary is bound on the tainted
+        # path. Left unbound, its next read was recorded as an unmodelled
+        # global (`'__sym_idx_N' is read where ...`).
+        survivors.add forkPathTainted(p, p.pc,
+          declinedIndexEnv(p.env, stmt, stmt.ixElemTy), d)
+        continue
+      # Seq index is Z3Int. Lower with an svInt proto for literals;
+      # for env-resident BV-typed Nim ints we coerce via bv2int.
+      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+      # CR-9(c) D5 note: reconcileInt is NOT applied here — the intProto
+      # already steers index literals to svInt, and toZ3Int(idxSV) handles
+      # the BV-typed env var → Z3Int coercion (bv2int). No cross-rep issue.
+      let intProto = SymVal(kind: svInt, zi: mkInt(0))
+      let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
+      ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
+      ## scalar-raise-fork predicates (e.g. a `div`/`parseInt` sub-expr).
+      ## Undrained, those were silently discarded — no raise fork, no
+      ## bounds narrowing. Drain and thread the survivor(s) forward
+      ## through the seq-bounds check below, mirroring `isLet`/`isAssign`.
+      for cp in drainScalarRaiseForks(idxP, w):
+        let lenZi = arrSV.seqLen # [placeholder-audited]
+        let idxZi = toZ3Int(idxSV)
+        let inLoCond = idxZi >= mkInt(0)
+        let inHiCond = idxZi <  lenZi
+        ## Phase 16 D1a unconditional under `wmExplore`; R14 narrows the
+        ## `wmFollowConcrete` case — see `maybeForkDefect`'s doc comment.
+        maybeForkDefect(cp, not (inLoCond and inHiCond),
+                        "IndexDefect", none(string), w)
+        # Bind retName = select(seqData, idx) at element type
+        var indexed: SymVal
+        # Issue #163 wiring-audit W2: a `seq[range[lo..hi]]` element read
+        # here NEVER passed through `allocateSym`'s `itInt` arm (the ONE
+        # `ty.hasRange` consumer in the runtime) — the backing store is a
+        # raw Z3 array (`allocateSeqDataRaw`), not a per-element
+        # allocation. Assert the SAME two bounds `bvRangeConds` deposits
+        # at allocation time here instead, at the READ site, into THIS
+        # survivor's own pc (mirroring `inLoCond`/`inHiCond` below).
+        # Design choice (not re-derived, see the #163 wiring-audit
+        # handoff): assert on READ, not by universally quantifying the
+        # backing array — a `forall` over the array would be exact but
+        # drags a quantifier into every seq query, against this engine's
+        # lazy-materialisation style. Consequence, documented rather than
+        # silently accepted: an element that is never read stays
+        # unconstrained in-solver. Sound for VERDICTS (an unread element
+        # cannot affect one), but NOT for witnesses — `extractSeqElements`
+        # below clamps the reported value for exactly that reason.
+        var rangeConds: seq[Z3Bool]
+        if isTreeSeqElemTy(arrSV.seqElemTy):
+          # RFC-0005 S8bc: a tree element, rebuilt from every data array
+          # (`seqElemAt`). Its well-formedness is asserted at the read, as
+          # W2 asserts a scalar element's range: a string part is bytes, a
+          # nested seq's length and a table's size are not negative (and a
+          # table's size is tied to its keys), a nested scalar part is in
+          # its declared range, a case object's discriminator in its
+          # domain. Not the `[0, 1024]` bound of an INPUT seq (`allocateSym`):
+          # an element the body stored may hold a longer seq.
+          indexed = seqElemAt(arrSV, idxZi)
+          rangeConds = svCellWf(indexed, arrSV.seqElemTy, true, bounded = false)
+          var newEnv = cp.env
+          newEnv[stmt.ixRetName] = indexed
+          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond] & rangeConds,
+                                 newEnv)
+          continue
+        case arrSV.seqElemTy.kind
+        of itInt:
+          case arrSV.seqElemTy.width
+          of 8:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 16:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 32:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          of 64:
+            let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
+              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+            indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
+          else:
+            raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
+              "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
+          # Review R11: routed through `rangeCondsIfNeeded`.
+          rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)
+        of itBool:
+          let typed = wrap[Z3Array[Z3Int, Z3Bool]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+          indexed = ofBool(select(typed, idxZi))
+        of itFloat32:   ## Phase 15 F9b
+          let typed = wrap[Z3Array[Z3Int, Z3Float32]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+          indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
+        of itFloat64:   ## Phase 15 F9b
+          let typed = wrap[Z3Array[Z3Int, Z3Float64]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+          indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
+        of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
+          let typed = wrap[Z3Array[Z3Int, Z3String]](
+            arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
+          indexed = SymVal(kind: svString, str: select(typed, idxZi))
+          # RFC-0005 S8ar: an element of a free `seq[string]` is a Nim
+          # string -- bytes (ADR-0006). Asserted at the read, as W2 does
+          # an element's range: a free backing array holds any Z3 string.
+          rangeConds = seqStrElemConds(indexed)
+        of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
+          # The element is an abstract `Ref_T` address (the backing array is a
+          # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
+          # (`Z3_mk_select` over `seqDataRaw` at the index) because `Ref_T` is a
+          # RUNTIME uninterpreted sort the typed `select` can't express. The
+          # result is an svRef/svPtr — a later `[]` (isDeref) derefs it through
+          # `path.heaps[T]`. GROUND select; NO quantifier (the G4 hang lesson).
+          let ctx = w.z3
+          let isPtr = arrSV.seqElemTy.kind == itPtr
+          let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
+                        else: arrSV.seqElemTy.refPointeeTy
+          let elemRaw = checkedSelect(ctx, arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
+          let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
+          # RFC-0005 S8ar: the element is as many heap steps from a root
+          # as the cell the seq was read from (`seqSteps`).
+          if isPtr:
+            indexed = SymVal(kind: svPtr, ptrAst: elemAny,
+                             ptrFamily: true, ptrPointee: pointee,
+                             ptrSteps: arrSV.seqSteps)
+          else:
+            indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee,
+                             refSteps: arrSV.seqSteps)
+        else:
+          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see isVariantReassign above)]
+            "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
+        var newEnv = cp.env
+        # RFC-0005 S8ba: a distinct element is re-boxed (its cell holds
+        # the base, `seqCellTy`).
+        newEnv[stmt.ixRetName] = reboxSeqCell(stmt.ixElemTy, indexed)
+        let inPc = cp.pc & @[inLoCond, inHiCond] & rangeConds
+        # RFC-0005 S8bq: an element assignment's bounds check reads
+        # nothing (`boundsCheckSynthWord`).
+        let unwritten =
+          if stmt.ixRetName.startsWith("__sym_" & boundsCheckSynthWord & "_"):
+            none(Z3Bool)
+          else: uninitReadCond(arrSV, idxZi)
+        if unwritten.isSome:
+          # RFC-0005 S8bq: the read is exact where the element was
+          # written, and a fresh value (tainted) where it was not. The
+          # facts select between two models of ONE execution, as
+          # `drainConvFloatToIntFresh`'s do, so they ride in
+          # `defectSurvivorPc`.
+          if $simplify(unwritten.get) != "true":
+            let written = forkPath(cp, inPc, newEnv)
+            written.defectSurvivorPc.add not unwritten.get
+            survivors.add written
+          let d = w.degrade(uninitReadKind, uninitReadMsg)
+          let fresh = forkPathTainted(cp, inPc, newEnv, d)
+          fresh.defectSurvivorPc.add unwritten.get
+          survivors.add fresh
+        else:
+          survivors.add forkPath(cp, inPc, newEnv)
+      continue
+    # ---- Round-6 B1 (ADR-0028 Leg 1): string-backed seq[byte] index READ.
+    # A `data[i]` reaching here with an `svString` receiver means the
+    # receiver was allocated string-backed (B1a) but the CONSUMING op's
+    # IR is the ordinary `isIndex` node — e.g. a call-chain hop whose OWN
+    # parse never routed the dispatch through `iekStrAt` (no qualifying
+    # scan loop over ITS OWN same-named parameter), yet the VALUE flowing
+    # in at THIS point is the caller's string-backed allocation. Route
+    # through the SAME OOB-probe + read logic `iekStrAt`'s lowering uses
+    # (SND-4 mirror, `runtime_strings.nim`) so the read stays TOTAL and
+    # actually decides — not merely declines.
+    if arrSV.kind == svString:
+      let intProto = SymVal(kind: svInt, zi: mkInt(0))
+      let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
+      for cp in drainScalarRaiseForks(idxP, w):
+        let idxZi = toZ3Int(idxSV)
+        let strLenZi = len(arrSV.str)
+        let inLoCond = idxZi >= mkInt(0)
+        let inHiCond = idxZi <  strLenZi
+        discard forkDefect(cp, not (inLoCond and inHiCond),
+                           "IndexDefect", none(string), w)
+        let code = toCode(at(arrSV.str, idxZi))
+        var newEnv = cp.env
+        newEnv[stmt.ixRetName] = liftBV(intToBv[8](code, Z3BitVec[8]), false)
+        survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
+      continue
+    # ---- Phase 4: static array (the existing path) ----
+    if arrSV.kind != svArray:
+      # Round-6 B1 backstop: was a hard `doAssert` (a live crash gap),
+      # then Round-6 SND-4 mirror: a raw `raise (ref
+      # SymexClassifiedDegradeError)`. Round-6 N36 (walker v101): THAT
+      # raise was itself still the ADR-0023/SND-3 C-backend goto-exception
+      # hazard — reached from inside this `walkBlock`-reachable `for p in
+      # paths` loop, identical shape to N31's `iekStrSubstr` fix. In-band
+      # walk-level degrade instead, matching this SAME `isIndex` arm's
+      # `isUnsupportedFieldPlaceholder`/Table-value-type siblings above.
+      let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
+      let d = w.degrade(feUnsupportedExprKind,
+        locPrefix & "isIndex: unsupported receiver kind " &
+             plainEnglishSymValKind(arrSV.kind) & " (expected array/seq/table/string) — " &
+             "degraded to sxUnknown (feUnsupportedExprKind)")
+      survivors.add forkPathTainted(p, p.pc,   # RFC-0005 S8ba: bound
+        declinedIndexEnv(p.env, stmt, stmt.ixElemTy), d)
+      continue
+    let n = arrSV.arrElems.len
+    ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+    let (idxSVraw, idxP) = lowerInExpr(p, stmt.ixIdx, w)
+    # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
+    # `coerceArrayBoolIndex`'s own doc.
+    let idxSV = coerceArrayBoolIndex(idxSVraw)
+    ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
+    ## scalar-raise-fork predicates. Undrained, those were silently
+    ## discarded — no raise fork, no bounds narrowing. Drain and thread
+    ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
+    for cp in drainScalarRaiseForks(idxP, w):
+      # Build the in-bounds & OOB Z3 conditions. RFC-0005 S8z: over the
+      # array's index range `ixLo .. ixLo + n - 1` (`array[1..3, T]`), not
+      # `0 ..< n`; element `k` is Nim's index `ixLo + k`.
+      let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.ixLo, n)
+      # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
+      # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
+      maybeForkDefect(cp, not (inLoCond and inHiCond),
+                      "IndexDefect", none(string), w)
+      # In-bounds path continues with binding; build the value via ite.
+      let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
+      let unwrittenPart =
+        if stmt.ixCheckOnly: ""
+        else: globalReadPart(stmt.ixArr, indexed, simplified = true)
+      # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
+      # wrapper), so a merge degrade's pending taint (`allocDegrade` /
+      # `degradeAlloc`) would otherwise be drained by whatever `lower()`
+      # runs NEXT -- on this path in practice, on a sibling in principle
+      # (the race `iteSV`'s group-arm note describes). Its fresh-symbol
+      # sites are `dcFreshSymbol` now, so the taint must land on the path
+      # that binds the merged value: drain it here, by construction.
+      let cpM = drainPendingLowerEffects(cp)
+      var newEnv = cpM.env
+      newEnv[stmt.ixRetName] = indexed
+      if unwrittenPart.len > 0 and
+         (stmt.ixIdx.kind == iekIntLit or
+          not unwrittenIndependent(w.z3, cpM, indexed,
+                                   [inLoCond, inHiCond], w.settings)):
+        survivors.add forkPathTainted(cpM, cpM.pc & @[inLoCond, inHiCond],
+          newEnv, w.degrade(unwrittenKind(unwrittenPart),
+                            unwrittenMsg(unwrittenPart)))
+      else:
+        survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
+  survivors
+
+proc walkIndexAssignArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isIndexAssign` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # N14 (RFC-chapulin-hardening bucket-2): `xs[idx] = v` element ASSIGNMENT.
+  # Mirrors `isIndex`'s own OOB fork exactly (same `0 <= idx < len`
+  # predicate, same unconditional `IndexDefect` fork per Phase 16 D1a) but
+  # REBINDS `stmt.iaRecvName` to a new `svSeq` (`store(old.data, idx, v)`,
+  # via `storeSeqElem` — the SAME helper `lowerSeqLit`/HOF `.map` already
+  # use for construction) instead of binding a fresh read result.
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return
+    # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
+    # statement for a bare `nnkSym` receiver already classified `itSeq`.
+    # RFC-0005 batch 6: read through `recvValue`, so a global the walk
+    # has not written is its entry value (was a `KeyError`: the path was
+    # dropped, a false `sxUnsat`).
+    let (recvSV, p) = recvValue(p0, stmt.iaRecvName, w)
+    if recvSV.kind == svArray and recvSV.arrElems.len > 0:
+      # RFC-0005 S8z: `a[i] = v` on an array at a symbolic index (it was
+      # `feUnsupportedStmtKind`). The same `IndexDefect` fork as `isIndex`,
+      # over the array's own index range (`iaLo`), then the receiver is
+      # rebound to the array with every position `k` replaced by
+      # `ite(i == iaLo + k, v, old[k])` (`arrayStore`) -- the per-element
+      # form of a Z3 `store`, since `svArray` keeps one value per element.
+      let n = recvSV.arrElems.len
+      let (idxSVraw, idxP) = lowerInExpr(p, stmt.iaIdx, w)
+      # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
+      # `coerceArrayBoolIndex`'s own doc.
+      let idxSV = coerceArrayBoolIndex(idxSVraw)
+      for cp in drainScalarRaiseForks(idxP, w):
+        let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
+        maybeForkDefect(cp, not (inLoCond and inHiCond),
+                        "IndexDefect", none(string), w)
+        let elemTy = recvSV.arrElemTy
+        let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w,
+                                        seqElemLitProto(elemTy))
+        for vp in drainScalarRaiseForks(valP, w):
+          let aligned = alignIntKind(valSV, recvSV.arrElems[0].kind)
+          if aligned.isNone:
+            # The write is dropped (the array keeps its old element): a
+            # stale env, so `feUnsupportedStmtKind` (dcSubstituted), which
+            # licenses no sxUnsat -- never the fresh class.
+            let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+            let d = w.degrade(feUnsupportedStmtKind,
+              locPrefix & "isIndexAssign: array element write of " &
+                   plainEnglishSymValKind(valSV.kind) & " over " &
+                   plainEnglishSymValKind(recvSV.arrElems[0].kind) &
+                   " not modelled; the write is dropped")
+            survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
+                                          vp.env, d)
+            continue
+          # A `range[lo..hi]` element type forks its RangeDefect exactly as
+          # the seq arm below does (#163 review R22 site 3).
+          let vpRanged =
+            if elemTy != nil and elemTy.kind == itInt and elemTy.hasRange and
+               not carriesRangeCheck(stmt.iaVal, elemTy):
+              forkAssignRangeCheck(vp, valSV, elemTy, w)
+            else: vp
+          let vpM = drainPendingLowerEffects(vpRanged)
+          var newEnv = vpM.env
+          newEnv[stmt.iaRecvName] = SymVal(kind: svArray,
+            arrElems: arrayStore(recvSV.arrElems, idxSV, stmt.iaLo, aligned.get),
+            arrElemTy: elemTy)
+          survivors.add forkPath(vpM, vpM.pc & @[inLoCond, inHiCond], newEnv)
+      continue
+    if recvSV.kind != svSeq:
+      # Defense in depth (W2b precedent, `iekSeqAdd`'s own kind-mismatch
+      # arm): SHOULD be unreachable given the parse-time itSeq gate, but a
+      # representation-mismatch route (e.g. a string-backed receiver, per
+      # the B1a classifier) is not machine-checked closed. Decline in-band
+      # rather than a raw `doAssert` crash — same idiom as `isIndex`'s own
+      # non-array/seq/table/string receiver-kind decline immediately above.
+      let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+      let d = w.degrade(feUnsupportedExprKind,
+        locPrefix & "isIndexAssign: receiver lowered to " &
+             plainEnglishSymValKind(recvSV.kind) &
+             " — expected svSeq (feUnsupportedExprKind)")
+      survivors.add forkPathTainted(p, p.pc, p.env, d)
+      continue
+    if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      # A bare/field-sourced placeholder seq (structurally-unbacked elem
+      # type, Bug #2/B7r2 machinery) is being written through. Mirrors the
+      # `isIndex` read-side placeholder decline immediately above (same
+      # shared `placeholderReadDeclineKind`/`placeholderReadDeclineMsg`
+      # chokepoint) — never `storeSeqElem` into the placeholder's inert
+      # arbitrary-sort backing array.
+      let d = w.degrade(placeholderReadDeclineKind(recvSV),
+        placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
+      survivors.add forkPathTainted(p, p.pc, p.env, d)
+      continue
+    let intProto = SymVal(kind: svInt, zi: mkInt(0))
+    let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
+    for cp in drainScalarRaiseForks(idxP, w):
+      let lenZi = recvSV.seqLen # [placeholder-audited]
+      let idxZi = toZ3Int(idxSV)
+      let inLoCond = idxZi >= mkInt(0)
+      let inHiCond = idxZi <  lenZi
+      discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
+                         "IndexDefect", none(string), w)
+      # In-bounds survivor: lower the RHS with a proto matching the
+      # declared element type (`seqElemLitProto`), then `storeSeqElem` —
+      # `isBackedSeqElemTy` (checked by construction: any placeholder
+      # receiver already declined above) guarantees `recvSV.seqElemTy` is
+      # one of `storeSeqElem`'s own covered kinds.
+      let valProto = seqElemLitProto(recvSV.seqElemTy)
+      let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w, valProto)
+      for vp in drainScalarRaiseForks(valP, w):
+        # #163 review R22 site 3: a seq element write whose declared
+        # element type is `range[lo..hi]` forks exactly like the plain
+        # field write (site 1) and `isAssign`'s own local-variable case --
+        # see `forkAssignRangeCheck`'s doc comment. The declared type is
+        # already live on `recvSV.seqElemTy` (the SAME field
+        # `seqElemLitProto` above already reads), so no new IR field is
+        # needed. Checked BEFORE `storeSeqElem` (whose own internal
+        # svInt->BV reconciliation is independent of this) so the
+        # discharge can still see `valSV`'s `ziIvl`.
+        let vpRanged =
+          if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange and
+             not carriesRangeCheck(stmt.iaVal, recvSV.seqElemTy):   # RFC-0005 S8j
+            forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
+          else: vp
+        # RFC-0005 S8bc: every leaf of a tree element (`seqStoreArrs`); a
+        # value that does not fit declines on this path.
+        let storedOpt = seqStoreArrs(recvSV, idxZi, valSV)
+        if storedOpt.isNone:
+          let kind = if hasDepthBound(recvSV.seqElemTy): seRecursiveValueDepth
+                     else: feUnsupportedOp
+          let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
+          let d = w.degrade(kind, locPrefix &
+            "isIndexAssign: a " & plainEnglishSymValKind(valSV.kind) &
+            " that does not fit an element of the seq (" &
+            $recvSV.seqElemTy & ") (" & $kind & ")")
+          var envD = vpRanged.env
+          var scratch: seq[Z3Bool]
+          envD[stmt.iaRecvName] = allocateSym(
+            tUnsupportedFieldSeq(recvSV.seqElemTy, "a store that does not " &
+              "fit the element type", kind = kind),
+            freshDegradeName("__seqAssignDecline"), scratch)
+          survivors.add forkPathTainted(vpRanged,
+            vpRanged.pc & @[inLoCond, inHiCond], envD, d)
+          continue
+        # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
+        # after a successful store. `recvSV` was already declined above
+        # (this arm's own `isUnsupportedFieldPlaceholder` check at the top
+        # of the `for p in paths` loop, `continue`d on the placeholder
+        # branch) and is never reassigned before this point — the
+        # `.seqLen` read below is reached only on the non-placeholder path.
+        var newEnv = vpRanged.env
+        newEnv[stmt.iaRecvName] = mkSeqSV(recvSV.seqLen, storedOpt.get, # [placeholder-audited]
+          recvSV.seqElemTy)
+        survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
+  survivors
+
+proc walkSeqPopArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isSeqPop` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # N14 (RFC-chapulin-hardening bucket-2): `retName := recvName.pop()`.
+  # `result = data[len-1]; len' = len-1` — Nim's real `pop()` semantics
+  # (verified against the stdlib doc: "Returns the last item of `s` and
+  # removes it from `s`. Raises IndexDefect if `s` is empty."). The
+  # backing DATA array is left UNCHANGED (no store): every read of the
+  # shrunk seq goes through a bound check against the NEW (smaller)
+  # `seqLen`, so the stale value at the old last slot is permanently
+  # unreachable — the exact same "leave it, it's inert" argument `del`'s
+  # own doc comment makes for its post-shrink slot, one level simpler here
+  # (no swap-in needed at all).
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return
+    # RFC-0005 batch 6: an unbound global receiver is its entry value
+    # (`recvValue`; was a `KeyError`, reported as a walker fault).
+    let (recvSV, p) = recvValue(p0, stmt.spRecvName, w)
+    if recvSV.kind != svSeq:
+      let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
+      let d = w.degrade(feUnsupportedExprKind,
+        locPrefix & "isSeqPop: receiver lowered to " &
+             plainEnglishSymValKind(recvSV.kind) &
+             " — expected svSeq (feUnsupportedExprKind)")
+      survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
+      continue
+    if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      let d = w.degrade(placeholderReadDeclineKind(recvSV),
+        placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
+      survivors.add forkPathTainted(p, p.pc, declinedPopEnv(p.env, stmt), d)
+      continue
+    let lenZi = recvSV.seqLen # [placeholder-audited]
+    let emptyCond = not (lenZi > mkInt(0))
+    discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
+    let newLenZi = lenZi - mkInt(1)
+    let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
+    # N27 audit (item 1, round-6 fix round 3): rebinding the receiver after
+    # a successful pop. `recvSV` was already declined above (this arm's own
+    # `isUnsupportedFieldPlaceholder` check at the top of the `for p in
+    # paths` loop, `continue`d on the placeholder branch) and is never
+    # reassigned before this point — the `.seqDataRaw` read below is
+    # reached only on the non-placeholder path.
+    var newEnv = p.env
+    # RFC-0005 S8bc: every data array of a tree element, unchanged.
+    newEnv[stmt.spRecvName] = mkSeqSV(newLenZi, seqArrs(recvSV), # [placeholder-audited]
+      recvSV.seqElemTy)
+    newEnv[stmt.spRetName] = reboxSeqCell(stmt.spElemTy, popped)   # RFC-0005 S8ba
+    let unwritten = uninitReadCond(recvSV, newLenZi)
+    if unwritten.isSome:
+      # RFC-0005 S8bq: as `isIndex`'s element read.
+      if $simplify(unwritten.get) != "true":
+        let written = forkPath(p, p.pc & @[not emptyCond], newEnv)
+        written.defectSurvivorPc.add not unwritten.get
+        survivors.add written
+      let d = w.degrade(uninitReadKind, uninitReadMsg)
+      let fresh = forkPathTainted(p, p.pc & @[not emptyCond], newEnv, d)
+      fresh.defectSurvivorPc.add unwritten.get
+      survivors.add fresh
+    else:
+      survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
+  survivors
+
+proc walkTabKeysArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isTabKeys` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # RFC-0005 S8bc (item 6). `tkRetName := the keys of tkRecv`, the key
+  # sequence a `for` over a Table's `pairs` / `keys` / `values` walks
+  # (`parseTableForLoop`). Bound to a FRESH `seq[K]` `ks` whose length is
+  # the table's size; for every position `j` a loop can reach
+  # (`j < maxLoopUnwind`: the k-unroll walks no further, and declines past
+  # it), `j < size` implies
+  #
+  #   * `ks[j]` is present in the table, and
+  #   * `pos[ks[j]] == j` for one fresh array `pos` from keys to positions,
+  #     so the elements are pairwise distinct (O(n) facts, not O(n^2)).
+  #
+  # Each `ks[j]` is a key term of the run (`tabKeyTerm` registers it), so
+  # the S8f realizability facts (`containerCardConds`: a table's size is
+  # at least the number of distinct present key terms) make the `size`
+  # distinct present keys ALL the table's keys: one more would exceed the
+  # size, and an unnamed key would too. The sequence is therefore an
+  # enumeration of the table, in a FREE order. Nim's order is the hash
+  # order, one of the models: nothing is forked away and nothing dropped,
+  # so an sxUnsat holds; a candidate may depend on the order, so a path
+  # where the table can have two or more entries is tainted
+  # `feTableIterOrder` (`dcFreshSymbol`: replay-gated, S10), and one where
+  # it has at most one is exact and clean. A string key is a string of
+  # bytes (`seqStrElemConds`). The parser declines a float key (a NaN
+  # entry counts in the size but is never present).
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return survivors
+    let (tsv, p) = lowerInExpr(p0, stmt.tkRecv, w)
+    let locPrefix = if stmt.tkLoc.len > 0: stmt.tkLoc & ": " else: ""
+    if tsv.kind != svTable or
+       tsv.tabKeyTy.kind notin {itString, itInt, itBool}:
+      let d = w.degrade(feUnsupportedOp,
+        locPrefix & "isTabKeys: receiver lowered to " &
+        plainEnglishSymValKind(tsv.kind) &
+        " -- expected a Table with a string, integer or bool key " &
+        "(feUnsupportedOp)")
+      var fresh: seq[Z3Bool]
+      var env2 = p.env
+      env2[stmt.tkRetName] = allocateSym(tSeq(stmt.tkKeyTy),
+        freshDegradeName("__tabKeysDegrade"), fresh)
+      survivors.add forkPathTainted(p, p.pc, env2, d)
+      continue
+    let ctx = requireCurrentContext()
+    let keyTy = tsv.tabKeyTy
+    let ks = SymVal(kind: svSeq, seqLen: tsv.tabSize,
+      seqDataRaw: allocateSeqDataRaw(keyTy, freshDegradeName("__tabKeys")),
+      seqElemTy: keyTy)
+    var facts: seq[Z3Bool]
+    # The position array, built raw (its key sort is runtime, as
+    # `tabTreeDataVars`'s arrays are) and wrapped at once so its reference
+    # is held; `intHold` keeps the Int sort's witness term alive across
+    # `Z3_mk_array_sort`.
+    var posArr = none(Z3AnyAst)
+    let intHold = mkZ3IntLit(0)
+    var keyed = true
+    for j in 0 ..< w.settings.budget.maxLoopUnwind:
+      let kj = seqElemAt(ks, mkZ3IntLit(int64(j)))
+      facts.add seqStrElemConds(kj)
+      let term = tabKeyTerm(kj, keyTy)
+      if term.isNone:
+        keyed = false
+        break
+      if posArr.isNone:
+        let keySort = ctx.checkErr Z3_get_sort(ctx.raw, term.get.raw)
+        let intSort = ctx.checkErr Z3_get_sort(ctx.raw, intHold.raw)
+        let arrSort = ctx.checkErr Z3_mk_array_sort(ctx.raw, keySort, intSort)
+        let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
+          freshDegradeName("__tabKeyPos").cstring)
+        posArr = some(wrap[Z3AnyAst](ctx,
+          ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort)))
+      let present = wrap[Z3Bool](ctx,
+        checkedSelect(ctx, tsv.tabPresentRaw.raw, term.get.raw))
+      let pos = wrap[Z3Int](ctx,
+        checkedSelect(ctx, posArr.get.raw, term.get.raw))
+      let jz = mkZ3IntLit(int64(j))
+      facts.add ((not (jz < tsv.tabSize)) or (present and pos == jz))
+      # RFC-0005 batch 4: a table the SUT built from the empty one is
+      # present only at the keys it stored (`constFalseStoreKeys`), so
+      # `ks[j]` is one of them: the same fact as `present` in a form Z3
+      # can case-split on. `s += k * v` over `pairs` multiplied two free
+      # 64-bit terms, whose key was bounded only through the presence
+      # array: Z3 4.13.4 ran out of its 20M budget on that query from a
+      # fresh context (SAT in about 40K units with the keys spelled).
+      let dom = constFalseStoreKeys(ctx, tsv.tabPresentRaw.raw)
+      if dom.isSome and dom.get.len > 0:
+        var anyKey = wrap[Z3Bool](ctx, checkedEq(ctx, term.get.raw, dom.get[0]))
+        for i in 1 ..< dom.get.len:
+          anyKey = anyKey or
+            wrap[Z3Bool](ctx, checkedEq(ctx, term.get.raw, dom.get[i]))
+        facts.add ((not (jz < tsv.tabSize)) or anyKey)
+    if not keyed:
+      # Unreachable for a key type the guard above admits; kept in band.
+      let d = w.degrade(feUnsupportedOp,
+        locPrefix & "isTabKeys: a key of type " & $keyTy &
+        " has no table key term (feUnsupportedOp)")
+      var env2 = p.env
+      env2[stmt.tkRetName] = ks
+      survivors.add forkPathTainted(p, p.pc, env2, d)
+      continue
+    var env2 = p.env
+    env2[stmt.tkRetName] = ks
+    let atMostOne = tsv.tabSize <= mkZ3IntLit(1)
+    let lit = $simplify(atMostOne)
+    if lit != "false":
+      survivors.add forkPath(p, p.pc & facts & @[atMostOne], env2)
+    if lit != "true":
+      let d = w.degrade(feTableIterOrder,
+        locPrefix & "iteration over a Table with two or more entries: " &
+        "Nim visits the keys in hash order, the model in any order -- a " &
+        "witness is replayed against the real order (feTableIterOrder)")
+      survivors.add forkPathTainted(p, p.pc & facts & @[not atMostOne],
+                                    env2, d)
+  survivors
+
+proc walkSetLenArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isSetLen` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # RFC-0005 S8bl (item 1). `slRetName := setLen(slBase, slLen)`, the value
+  # system's `setLen` magic leaves in its `var` argument (`parseSetLen`
+  # guards the length and writes the result back). A magic has no body:
+  # before S8bl the call was registered with an EMPTY one and the argument
+  # kept its old value (a string's: a false sxSat; a seq's walked into the
+  # `seqs_v2` payload cast).
+  #
+  #   * a seq: the length is `slLen`; each data array is the view
+  #     `lambda i. ite(i < oldLen, arr[i], zero)`, so a grown slot reads
+  #     the element's zero and a kept one its value (a shrunk-then-grown
+  #     seq reads zeros: the second call's `oldLen` is the shrunk length);
+  #   * a string (or a string-backed `seq[byte]`): the first `slLen` bytes
+  #     when it shrinks, else the string followed by a pad of
+  #     `slLen - len` NUL bytes -- a fresh string, whose length and
+  #     all-NUL content are facts of the path (no quantifier).
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return survivors
+    let (baseSV, p1) = lowerInExpr(p0, stmt.slBase, w)
+    let (lenSV0, p) = lowerInExpr(p1, stmt.slLen, w)
+    let locPrefix = if stmt.slLoc.len > 0: stmt.slLoc & ": " else: ""
+    let lenOk = lenSV0.kind in {svInt, svBV8, svBV16, svBV32, svBV64}
+    var env2 = p.env
+    if baseSV.kind == svSeq and baseSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      let d = w.degrade(placeholderReadDeclineKind(baseSV),
+        placeholderReadDeclineMsg(baseSV, stmt.slLoc, "mutation (setLen)"))
+      env2[stmt.slRetName] = baseSV
+      survivors.add forkPathTainted(p, p.pc, env2, d)
+      continue
+    if baseSV.kind == svSeq and lenOk and
+       isBackedSeqElemTy(baseSV.seqElemTy) and
+       defaultZeroTotal(baseSV.seqElemTy):
+      let ctx = requireCurrentContext()
+      let newLen = toZ3Int(lenSV0)
+      let oldLen = baseSV.seqLen # [placeholder-audited]
+      # A grown slot is a `newSeq` element (batch 6: one zeroing with
+      # `lowerSeqNew`).
+      let zeroArrs = seqNewZeroArrs(baseSV.seqElemTy)
+      inc sliceViewCounter
+      let iVar = mkIntVar("__setlen_i" & $sliceViewCounter)
+      let kept = iVar < oldLen
+      var arrs: seq[Z3AnyAst]
+      for k, arr in seqArrs(baseSV):
+        let old = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, iVar.raw))
+        let z = wrap[Z3AnyAst](ctx,
+          checkedSelect(ctx, zeroArrs[k].raw, iVar.raw))
+        let body = wrap[Z3AnyAst](ctx,
+          checkedIte(ctx, kept.raw, old.raw, z.raw))
+        arrs.add lambdaOver(ctx, iVar, body)
+      env2[stmt.slRetName] = mkSeqSV(newLen, arrs, baseSV.seqElemTy)
+      survivors.add forkPath(p, p.pc, env2)
+    elif baseSV.kind == svString and lenOk:
+      let newLen = toZ3Int(lenSV0)
+      let oldLen = len(baseSV.str)
+      let grows = newLen > oldLen
+      # Two paths, the shrink (or no change) and the grow, so each binds a
+      # plain term (a `str.at` over an `ite` of strings ran Z3 out of
+      # `seqQueryRLimit`). The grow appends a fresh pad of the added
+      # length in `("\0")*`, a fact of the path (no quantifier).
+      #
+      # RFC-0005 S8bx (item 5): the result is a fresh string LEAF `r`
+      # with the byte-domain fact every string input carries
+      # (`allocateSym`), bound to the prefix / extension by an equation.
+      # A byte read of the result, `int2bv[8](str.to_code(str.at(r, i)))
+      # == n`, is then a byte test on a byte leaf, which `seqLenCaps`
+      # rewrites to the character form `str.at(r, i) == "\xNN"`: Z3
+      # decides that, where the code form over a `str.at` of the concat
+      # (or substr) was left undecided by both pinned Z3s within
+      # `seqQueryRLimit`.
+      var leafShrink: seq[Z3Bool]
+      let rShrink = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafShrink)
+      var envShrink = env2
+      envShrink[stmt.slRetName] = rShrink
+      survivors.add forkPath(p, p.pc & leafShrink & @[not grows,
+        rShrink.str == substr(baseSV.str, mkInt(0), newLen)], envShrink)
+      var leafGrow: seq[Z3Bool]
+      let rGrow = allocateSym(tString(),
+        freshDegradeName("__setLenStr"), leafGrow)
+      let pad = mkStringVar(freshDegradeName("__setLenPad"))
+      env2[stmt.slRetName] = rGrow
+      survivors.add forkPath(p, p.pc & leafGrow & @[grows,
+        len(pad) == newLen - oldLen,
+        matches(pad, star(mkRegex(mkString("\x00")))),
+        rGrow.str == concat(baseSV.str, pad)], env2)
+    else:
+      let d = w.degrade(feUnsupportedOp,
+        locPrefix & "setLen: the argument lowered to " &
+        plainEnglishSymValKind(baseSV.kind) & " and the length to " &
+        plainEnglishSymValKind(lenSV0.kind) & " -- expected a seq of " &
+        "a backed element with a zero, or a string, and an integer " &
+        "(feUnsupportedOp)")
+      var fresh: seq[Z3Bool]
+      env2[stmt.slRetName] = allocateSym(stmt.slTy,
+        freshDegradeName("__setLenDegrade"), fresh)
+      survivors.add forkPathTainted(p, p.pc, env2, d)
+  survivors
+
+proc walkVariantReassignArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassign` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
+  # the RFC-0005 S8f branch-change `FieldDefect` below, routed through
+  # `maybeForkDefect` (which narrows it under `wmFollowConcrete`, exactly
+  # as `isVariantField`'s out-of-arm fork is narrowed).
+  case w.mode
+  of wmExplore: discard
+  of wmFollowConcrete: discard
+  # Phase 11 cycle 6 — `obj.kind = tagLiteral`: the discriminator becomes
+  # the literal tag.
+  #
+  # RFC-0005 S8f (walker 154). Nim raises `FieldDefect` ("assignment to
+  # discriminant changes object branch") when the old discriminator selects
+  # a DIFFERENT source branch than the new one, and keeps the fields when
+  # it selects the same branch (probed on the pinned toolchain: a `var`
+  # param, a local, and a default-initialised object all behave so). The
+  # walker used to model the transition as legal with the new arm's fields
+  # zero-initialised (ADR-0003 D5, the pre-2.0 `nimOldCaseObjects`
+  # behaviour) -- so `x.kind = pfB` on a `var` param was a clean `sxSat`
+  # whose witness (`kind: pfA`) raised `FieldDefect` instead of reaching
+  # the target. Now: fork the defect on "different branch" and continue
+  # on "same branch" with the branch's fields carried over.
+  var out2: seq[Path]
+  for p0 in paths:
+    # RFC-0005 batch 6: an unbound global receiver is its entry value
+    # (`recvValue`). The arm skipped it, so its `FieldDefect` was never
+    # forked (a false `sxUnsat` on the raise).
+    let (oldSV, p) = recvValue(p0, stmt.vrObjName, w)
+    if unwrittenDisc(oldSV).len > 0:
+      # RFC-0005 S8bw (item 2): a global whose discriminator no write
+      # reached (another field was written first).
+      # RFC-0005 batch 6: an S8as global's discriminator is its entry
+      # value, any of its type: the path is tainted and the reassignment
+      # modelled on it (`unwrittenKind`); any other declines.
+      let part = unwrittenDisc(oldSV)
+      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part))
+      if unwrittenKind(part) != feGlobalHavoc:
+        out2.add forkPathTainted(p, p.pc, p.env, d)
+        continue
+      taintInPlace(p, d)
+    if oldSV.kind notin {svVariant, svMultiVariant}:
+      # RFC-0005 S8i: a declined construction's placeholder.
+      out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
+      continue
+    if oldSV.kind == svMultiVariant:
+      # RFC-0005 S8bw (item 1): the parser emits this statement for a
+      # single-axis variant only (a multi-axis one takes the symbolic
+      # form); a multi-variant here declines as an unmodelled reassignment.
+      # This was a `doAssert`.
+      out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
+      continue
+    let oldDisc = oldSV.vDisc[]
+    let tagOrd = int64(stmt.vrNewTag)
+    let newDiscInner: SymVal =
+      case oldDisc.kind
+      of svBV8:  liftBV(mkBitVec[8](tagOrd),  oldDisc.signed)
+      of svBV16: liftBV(mkBitVec[16](tagOrd), oldDisc.signed)
+      of svBV32: liftBV(mkBitVec[32](tagOrd), oldDisc.signed)
+      of svBV64: liftBV(mkBitVec[64](tagOrd), oldDisc.signed)
+      of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(tagOrd))  # A6
+      else:
+        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassignSymbolic's discriminator is always BV/Z3Int-allocated)]
+          "isVariantReassign: disc must be BV or Z3Int kind")
+    let same = sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches)
+    maybeForkDefect(p, not same, "FieldDefect", none(string), w)
+    if w.shouldStop: return out2
+    let newDiscBoxed = new(SymVal)
+    newDiscBoxed[] = newDiscInner
+    let carried = carryBranchFields(oldSV.vArmFields, oldDisc,
+                                    stmt.vrNewTag, stmt.vrBranches)
+    let pM = drainPendingLowerEffects(p)
+    let newSV = SymVal(kind: svVariant,
+                       vDisc: newDiscBoxed,
+                       vDiscName: oldSV.vDiscName,
+                       vObjectName: oldSV.vObjectName,
+                       vArmFields: carried,
+                       vArmFieldNames: oldSV.vArmFieldNames,
+                       vPlainFields: oldSV.vPlainFields,       # shared:
+                       vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
+    var newEnv = pM.env
+    newEnv[stmt.vrObjName] = newSV
+    out2.add forkPath(pM, pM.pc & @[same], newEnv)
+  return out2
+
+proc walkVariantReassignSymbolicArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isVariantReassignSymbolic` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # R14: unlike `isVariantReassign` (above), the RHS here IS symbolic —
+  # this construct genuinely forks one path per tag in the discriminator's
+  # domain, the same "fork every arm" shape `isIf`/`isWhile` have (though
+  # bounded by the variant's own arity, not an iteration count, so it
+  # cannot blow up the way an unbounded `while` unroll can). `wmExplore`
+  # below is unchanged; `wmFollowConcrete` narrows to the ONE concretely-
+  # matching tag via `followConcreteTag` (defined per `oldSV`/`oldAxis`
+  # case below, right before each's own tag-fork loop) — same
+  # `concreteBranchOutcome` mechanism `walkIfFollowConcrete`/
+  # `walkWhileFollowConcrete` use, with the same sound "fork everything"
+  # fallback when the concrete draws don't determine a unique match.
+  case w.mode
+  of wmExplore: discard
+  of wmFollowConcrete: discard
+  # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
+  # fork one path per arm-ordinal in the disc's domain. Each path
+  # is constrained `rhsSV == k_ord` AND the variant SymVal in env
+  # is rebuilt with the new disc SET TO THAT TAG'S CONSTANT.
+  # For itMultiVariant: only the named axis's disc is updated; other
+  # axes are preserved as-is.
+  # RFC-0005 S8f (walker 154): per tag, fork `FieldDefect` when the old
+  # discriminator's source branch differs from the tag's (Nim's runtime
+  # check -- see `isVariantReassign` above), and continue on the same
+  # branch with that branch's fields carried (`carryBranchFields`).
+  var out2: seq[Path]
+  for p0 in paths:
+    # RFC-0005 batch 6: as `isVariantReassign`'s receiver (`recvValue`).
+    let (oldSV, p) = recvValue(p0, stmt.vrsObjName, w)
+    if unwrittenDisc(oldSV).len > 0:
+      # RFC-0005 S8bw (item 2): as `isVariantReassign` above.
+      # RFC-0005 batch 6: an S8as global's discriminator is its entry
+      # value, any of its type: the path is tainted and the reassignment
+      # modelled on it (`unwrittenKind`); any other declines.
+      let part = unwrittenDisc(oldSV)
+      let d = w.degrade(unwrittenKind(part), unwrittenMsg(part))
+      if unwrittenKind(part) != feGlobalHavoc:
+        out2.add forkPathTainted(p, p.pc, p.env, d)
+        continue
+      taintInPlace(p, d)
+    ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
+    let (rhsSV, pr) = lowerInExpr(p, stmt.vrsRhs, w)
+    proc rhsEq(tagOrd: int64): Z3Bool =
+      case rhsSV.kind
+      of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)
+      of svBV16: rhsSV.bv16 == mkBitVec[16](tagOrd)
+      of svBV32: rhsSV.bv32 == mkBitVec[32](tagOrd)
+      of svBV64: rhsSV.bv64 == mkBitVec[64](tagOrd)
+      of svInt:  rhsSV.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
+      of svBool: rhsSV.bo   == mkBool(tagOrd != 0)  ## RFC-0005 S8u: bool disc
+      else:
+        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
+          "isVariantReassignSymbolic: RHS must lower to a BV, " &
+          "Z3Int or Bool kind (got " & $rhsSV.kind & ")")
+    ## R1 (Invariant-3 soundness fix): `stmt.vrsRhs` may itself deposit
+    ## scalar-raise-fork predicates. Undrained, those were silently
+    ## discarded — no raise fork, no bounds narrowing. Drain and thread
+    ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
+    ## RFC-0005 S8g (walker 155): the `else:` arm (key -1) is a candidate
+    ## too. Its guard is "the RHS equals no explicit tag" (the same
+    ## membership `isVariantField` uses), and its new discriminator is the
+    ## symbolic RHS itself, not a constant: every else value shares the
+    ## one else branch, so a `kC -> kD` reassignment keeps `c`.
+    proc tagGuard(explicit: seq[int]): proc (tagOrd: int64): Z3Bool =
+      result = proc (tagOrd: int64): Z3Bool =
+        if tagOrd >= 0: return rhsEq(tagOrd)
+        result = mkBool(true)
+        for t in explicit:
+          result = result and not rhsEq(int64(t))
+    for cp in drainScalarRaiseForks(pr, w):
+      case oldSV.kind
+      of svVariant:
+        var candidateTags, explicitTags: seq[int]
+        for tag in oldSV.vArmFields.keys:
+          candidateTags.add tag
+          if tag >= 0: explicitTags.add tag
+        let guard = tagGuard(explicitTags)
+        let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
+                                          guard, candidateTags)
+        for tag in candidateTags:
+          if followTag.isSome and tag != followTag.get(): continue
+          let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
+          let same = sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches)
+          maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
+          if w.shouldStop: return out2
+          let carried = carryBranchFields(oldSV.vArmFields, oldSV.vDisc[],
+                                          tag, stmt.vrsBranches)
+          let chosenM = drainPendingLowerEffects(chosen)
+          let newDiscConst: SymVal =
+            case oldSV.vDisc[].kind
+            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
+            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
+            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
+            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
+            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+            of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool disc
+            else:
+              raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
+                "isVariantReassignSymbolic: old disc must be BV, Z3Int or Bool")
+          let newDiscInner =
+            if tag < 0: discFromRhs(rhsSV, oldSV.vDisc[]) else: newDiscConst
+          let newDiscBoxed = new(SymVal)
+          newDiscBoxed[] = newDiscInner
+          let newSV = SymVal(kind: svVariant,
+                             vDisc: newDiscBoxed,
+                             vDiscName: oldSV.vDiscName,
+                             vObjectName: oldSV.vObjectName,
+                             vArmFields: carried,
+                             vArmFieldNames: oldSV.vArmFieldNames,
+                             vPlainFields: oldSV.vPlainFields,
+                             vPlainFieldNames: oldSV.vPlainFieldNames)
+          var newEnv = chosenM.env
+          newEnv[stmt.vrsObjName] = newSV
+          out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
+      of svMultiVariant:
+        # Locate the named axis (vrsDiscName); other axes preserve
+        # their disc + arm state.
+        var axisIx = -1
+        for i, ax in oldSV.mvAxes:
+          if ax.discName == stmt.vrsDiscName:
+            axisIx = i; break
+        doAssert axisIx >= 0,
+          "isVariantReassignSymbolic on svMultiVariant: no axis named " &
+          stmt.vrsDiscName
+        let oldAxis = oldSV.mvAxes[axisIx]
+        var candidateTags, explicitTags: seq[int]
+        for tag in oldAxis.armFields.keys:
+          candidateTags.add tag
+          if tag >= 0: explicitTags.add tag
+        let guard = tagGuard(explicitTags)
+        let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
+                                          guard, candidateTags)
+        for tag in candidateTags:
+          if followTag.isSome and tag != followTag.get(): continue
+          let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
+          let same = sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches)
+          maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
+          if w.shouldStop: return out2
+          let carried = carryBranchFields(oldAxis.armFields, oldAxis.disc[],
+                                          tag, stmt.vrsBranches)
+          let chosenM = drainPendingLowerEffects(chosen)
+          let newDiscConst: SymVal =
+            case oldAxis.disc[].kind
+            of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
+            of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
+            of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
+            of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
+            of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
+            of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool axis
+            else:
+              raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
+                "isVariantReassignSymbolic: axis disc must be a BV or bool kind")
+          let newDiscInner =
+            if tag < 0: discFromRhs(rhsSV, oldAxis.disc[]) else: newDiscConst
+          let newDiscBoxed = new(SymVal)
+          newDiscBoxed[] = newDiscInner
+          var newAxes = oldSV.mvAxes
+          newAxes[axisIx] = VariantAxisSym(
+            discName: oldAxis.discName, disc: newDiscBoxed,
+            armFields: carried,
+            armFieldNames: oldAxis.armFieldNames)
+          let newSV = SymVal(kind: svMultiVariant,
+                             mvObjectName: oldSV.mvObjectName,
+                             mvAxes: newAxes,
+                             mvPlainFields: oldSV.mvPlainFields,
+                             mvPlainFieldNames: oldSV.mvPlainFieldNames)
+          var newEnv = chosenM.env
+          newEnv[stmt.vrsObjName] = newSV
+          out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
+      else:
+        # RFC-0005 S8i: a declined construction's placeholder (this was a
+        # `doAssert false`, surfacing the decline as an internal fault).
+        out2.add degradeUnmodelledReassign(cp, stmt.vrsObjName, oldSV.kind, w)
+  return out2
+
+proc walkVariantConstructSymArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isVariantConstructSym` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # Round-6 A3 (ADR-0029). Fork-per-tag SYMBOLIC-discriminant variant
+  # CONSTRUCTION — clones `isVariantReassignSymbolic`'s fork-per-tag shape
+  # (same tag loop, same `disc == tag` pc append) with the deliberate
+  # divergence: construction has no "active arm" data to preserve (Nim
+  # itself only accepts a non-constant discriminant in constructor syntax
+  # when no arm-specific field is set — the parser's `of itVariant:` arm
+  # enforces this), so EVERY declared arm's fields are that field type's
+  # `default(T)` in each fork. (Walker <= 153 allocated them FRESH, which
+  # let a witness claim an arm-field value real Nim never holds; RFC-0005
+  # S8f.)
+  #
+  # The `maxVariantConstructorForks` budget is a STRUCTURAL check against
+  # `stmt.vcsTagSet.len` — before any solver work, uniform across every
+  # input path (the tag SET is fixed at parse time; only which tags are
+  # ultimately SAT-feasible depends on the path). Reuses the existing
+  # `beBudgetExhausted` classified-decline kind (SND-4 "mirror, don't
+  # reinvent" — this IS a walk budget running out with paths still live,
+  # exactly that kind's own doc comment). No `NimNode` exists here to
+  # build a `siteMsg`-shaped message from, so `stmt.vcsLoc` (the
+  # PARSE-TIME-captured file:line:col + `n.repr`) is glued in VERBATIM.
+  var out2: seq[Path]
+  let vcsTy = stmt.vcsVariantTy
+  let vcsBudget = w.settings.budget.maxVariantConstructorForks
+  if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
+    # RFC-0005 S6a: `beBudgetExhaustedUnmodelled` (`dcSubstituted`), not
+    # the k-unroll's `beBudgetExhausted` — the construction is skipped,
+    # the destination bound to a fresh value (RFC-0005 S8ba; it was left
+    # unbound) and `vcsDiscExpr`/`vcsPlainFields` are
+    # never lowered, so their raise forks are dropped: a stale env.
+    let d = w.degrade(beBudgetExhaustedUnmodelled,
+      stmt.vcsLoc & ": variant constructor fork budget exhausted " &
+           "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
+           "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
+           "(beBudgetExhaustedUnmodelled)")
+    for p in paths:
+      # RFC-0005 S8ba: `stmt.vcsResultVar` is bound to a fresh value of
+      # the variant type on the tainted path (`declinedVariantEnv`). It
+      # was left UNBOUND, and the parser's A-normalised `let p = <temp>`
+      # then read it at once and declined a second time as an unmodelled
+      # global (`feGlobalReadUnmodelled`, RFC-0005 S6a's pin). SND-1's
+      # per-path taint is forced via `forkPathTainted` so the verdict
+      # never rides a bare `w.sawUnknown` alone. RFC-0005 S1: one token
+      # `d`, forked onto every path.
+      out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
+    return out2
+  # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
+  # remediation). `maxVariantConstructorForks` above only bounds the OUTER
+  # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
+  # walks EVERY declared arm of `vcsTy` (construction has no "active arm"
+  # to narrow to — see this stmt kind's own doc comment), so the real
+  # per-construct allocation cost is `vcsTagSet.len` (bounded above) TIMES
+  # the total LEAF-ALLOCATION cost across ALL arms' fields (previously
+  # bounded only by a FLAT field COUNT, which undercounted any composite
+  # field type — `array[N, T]`/nested tuple/nested variant — whose own
+  # allocation recurses; see `allocCostOf`'s doc comment, `smt/types.nim`,
+  # for the full gap writeup and the recursion it mirrors from
+  # `allocateSym`). A second STRUCTURAL check — same before-any-solver-
+  # work timing as the fork-count check, same `beBudgetExhausted` decline
+  # kind (SND-4 "mirror, don't reinvent") — catches a wide- or deeply-
+  # fielded variant whose fork count alone sits comfortably under budget.
+  var vcsArmFieldCost = 0'i64
+  for arm in vcsTy.vArms:
+    for ft in arm.fieldTypes:
+      vcsArmFieldCost = satAdd64(vcsArmFieldCost, allocCostOf(ft))
+  let vcsFieldAllocs = satMul64(int64(stmt.vcsTagSet.len), vcsArmFieldCost)
+  let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
+  if vcsFieldBudget > 0 and vcsFieldAllocs > int64(vcsFieldBudget):
+    # RFC-0005 S6a: same substitution as the fork-count budget above.
+    let d = w.degrade(beBudgetExhaustedUnmodelled,
+      stmt.vcsLoc & ": variant constructor field-allocation budget " &
+           "exhausted (maxVariantConstructorFieldAllocs=" &
+           $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
+           " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
+           $vcsFieldAllocs & ") — construction unmodeled " &
+           "(beBudgetExhaustedUnmodelled)")
+    for p in paths:
+      # Same safe-degrade idiom as the fork-count budget above.
+      out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
+    return out2
+  # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
+  # `paths`/`tag` fork loops (mirrors the two budget checks immediately
+  # above — a STRUCTURAL check against `vcsTy` itself, uniform across
+  # every input path, before any solver work): every declared arm's
+  # fields allocate FRESH in EVERY fork regardless of `tag` (this stmt
+  # kind's own doc comment above), so if ANY arm anywhere carries a field
+  # type `allocateSym` cannot back (an `itUninterp`
+  # `__ownership:`/`__unsupported:`/`__unsupported_witness:` placeholder,
+  # or an unsupported `itTable`/`itSet` shape — `classifyFieldType`
+  # legitimately produces these for a variant arm field;
+  # `scopedDeclineFieldTy`'s Bug #2 scoped decline only special-cases
+  # `itSeq`), EVERY fork would hit the SAME raw
+  # `raise (ref Symex*Error)` from inside this `for p in paths: for tag
+  # in stmt.vcsTagSet: ... allocateSym(...)` nest — the exact C-backend
+  # goto-exception hazard ADR-0023/SND-3 exists to ban (N36/N37
+  # precedent: `isIndex`'s Table[K,V]-indexing decline, `isVariantReassign`'s
+  # `defaultZero`-wrap). Caught EMPIRICALLY this slice via the stash
+  # method: an unguarded reach under block-nesting silently produced
+  # `sxUnsat` (0 errors) instead of the honest `sxUnknown` below — see
+  # `tests/tsymex_r6_n39_variant_field_alloc.nim`. Degrades the WHOLE
+  # construction (not per-tag: since every fork allocates every arm, a
+  # per-tag distinction would be a false precision this stmt kind
+  # structurally cannot offer) via the identical safe-degrade idiom the
+  # two budget checks above already use.
+  var vcsFieldIssue: Option[FieldAllocIssue] = none(FieldAllocIssue)
+  block findVcsFieldIssue:
+    for arm in vcsTy.vArms:
+      for ft in arm.fieldTypes:
+        vcsFieldIssue = unallocatableFieldIssue(ft)
+        if vcsFieldIssue.isSome: break findVcsFieldIssue
+  if vcsFieldIssue.isSome:
+    let d = w.degrade(vcsFieldIssue.get.kind,
+      stmt.vcsLoc & ": variant constructor field allocation " &
+           "unmodeled — " & vcsFieldIssue.get.msg &
+           " (arm-field allocation, not param-entry)")
+    for p in paths:
+      # Same safe-degrade idiom as the two budget checks above.
+      out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
+    return out2
+  # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
+  # syntax only when no arm field is set, so every arm field is its
+  # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
+  # target on `p.rq == 777` was a clean `sxSat` whose witness could never
+  # reach it. A field type `defaultZero` cannot build declines the whole
+  # construction, the same safe-degrade idiom as the checks above.
+  block findVcsZeroIssue:
+    for arm in vcsTy.vArms:
+      for j, ft in arm.fieldTypes:
+        if not defaultZeroTotal(ft):
+          let d = w.degrade(feUnsupportedOp,
+            stmt.vcsLoc & ": variant constructor arm field `" &
+                 vcsTy.vObjectName & "." & arm.fieldNames[j] &
+                 "` has no modelled default value (" & $ft & ")")
+          for p in paths:
+            out2.add forkPathTainted(p, p.pc, declinedVariantEnv(p.env, stmt), d)
+          return out2
+  for p in paths:
+    let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
+    proc vcsDiscEq(tagOrd: int64): Z3Bool =
+      case discSV.kind
+      of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
+      of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
+      of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
+      of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
+      of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
+      else:
+        raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantConstructSym's discriminator is always BV/Z3Int-allocated)]
+          "isVariantConstructSym: disc must lower to a BV or Z3Int " &
+          "kind (got " & $discSV.kind & ")")
+    ## R1-style Invariant-3 soundness: `stmt.vcsDiscExpr` may itself
+    ## deposit scalar-raise-fork predicates. Drain and thread the
+    ## survivor(s) forward, mirroring `isVariantReassignSymbolic`.
+    for cp in drainScalarRaiseForks(pr, w):
+      var plainFields: seq[SymVal]
+      for fe in stmt.vcsPlainFields:
+        plainFields.add lower(cp.env, fe)
+      for tag in stmt.vcsTagSet:
+        var armFields = initOrderedTable[int, seq[SymVal]]()
+        var armNames  = initOrderedTable[int, seq[string]]()
+        for arm in vcsTy.vArms:
+          armNames[arm.tagOrdinal] = arm.fieldNames
+          var fields: seq[SymVal]
+          for j, ft in arm.fieldTypes:
+            inc variantConstructSymFreshCounter
+            let path = "__variantConstructSym." & vcsTy.vObjectName & ".@" &
+                       arm.tagName & "." & arm.fieldNames[j] & ".fork" &
+                       $tag & "." & $variantConstructSymFreshCounter
+            # RFC-0005 S8f: Nim sets no arm field in a runtime-
+            # discriminator constructor, so every arm field is its
+            # type's `default(T)` (`findVcsZeroIssue` above guarantees
+            # `defaultZeroTotal` for every one).
+            fields.add defaultZero(ft, path)
+          armFields[arm.tagOrdinal] = fields
+        let discBoxed = new(SymVal)
+        discBoxed[] = discConst(vcsTy.vDiscTy, int64(tag))
+        let newSV = SymVal(kind: svVariant, vDisc: discBoxed,
+                           vDiscName: vcsTy.vDiscName,
+                           vObjectName: vcsTy.vObjectName,
+                           vArmFields: armFields, vArmFieldNames: armNames,
+                           vPlainFields: plainFields,
+                           vPlainFieldNames: vcsTy.vPlainFieldNames)
+        var newEnv = cp.env
+        newEnv[stmt.vcsResultVar] = newSV
+        out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
+  return out2
+
+proc walkVariantFieldArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isVariantField` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # R14: same shape as `isIndex` (not named in the finding, but identical
+  # in structure) — the in-arm path is the only continuation `survivors`
+  # gets; out-of-arm is a discarded-result `forkDefect` side channel,
+  # narrowed per-mode inside `maybeForkDefect`. Nothing separate to
+  # select here.
+  case w.mode
+  of wmExplore: discard
+  of wmFollowConcrete: discard
+  # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
+  # in-arm path adds `disc IN matchingTags` to pc and binds
+  # `retName` to an ite-chain over the matching arms' field
+  # SymVals; the out-of-arm path adds `disc NOT IN matchingTags`
+  # and (under `tFieldDefect`) is solved for a witness.
+  var survivors: seq[Path]
+  for p0 in paths:
+    if w.shouldStop: return
+    ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
+    ## the parser A-normalises so variant object accesses are through named
+    ## bindings (no complex expression as receiver). A violation here means
+    ## the parser emitted a non-var receiver and drains would be needed.
+    let (recv, p) = lowerLeafInExpr(p0, stmt.vfRecv)
+    # Phase 14 cycle A1c: select the axis-local disc + arm tables
+    # by SymVal kind. For svMultiVariant, locate the axis whose
+    # arm field-name lists include vfFieldName — the parser
+    # selected the same axis via the same membership test.
+    var disc: SymVal
+    var armFieldsTbl: OrderedTable[int, seq[SymVal]]
+    var armFieldNamesTbl: OrderedTable[int, seq[string]]
+    case recv.kind
+    of svVariant:
+      disc            = recv.vDisc[]
+      armFieldsTbl    = recv.vArmFields
+      armFieldNamesTbl = recv.vArmFieldNames
+    of svMultiVariant:
+      var found = false
+      for ax in recv.mvAxes:
+        for _, names in ax.armFieldNames.pairs:
+          if stmt.vfFieldName in names:
+            disc             = ax.disc[]
+            armFieldsTbl     = ax.armFields
+            armFieldNamesTbl = ax.armFieldNames
+            found = true
+            break
+        if found: break
+      doAssert found,
+        "isVariantField on svMultiVariant: no axis owns field " &
+        stmt.vfFieldName
+    else:
+      # #163 regression fix (post-round-9 gate). A receiver that is
+      # NEITHER `svVariant` NOR `svMultiVariant` here is reachable ONLY
+      # when the receiver's own CONSTRUCTION already declined --
+      # `dsl_parser.nim`'s `itVariant`/`itMultiVariant` object-constructor
+      # edge-case arms bind a type-correct but non-variant-shaped
+      # placeholder (`unsupportedFieldPlaceholder`: no literal IR
+      # constructor exists for a variant-shaped value, so the placeholder
+      # is a plain `mkIntLit(0)`, deliberately not variant-shaped) --
+      # never a fresh walker bug. This used to be a bare `doAssert false`
+      # (an uncatchable `AssertionDefect`, reported at the `runSymex`
+      # boundary as `weInternalWalkerFault` -- an internal-bug
+      # attribution for an ordinary, everywhere-applicable consequence of
+      # an existing, honestly-classified construction gap). Degrade this
+      # ONE path in-band instead: record the classified decline and drop
+      # the path (mirrors `isUnsafeCast`'s "halt this path" idiom) rather
+      # than fabricate arm data for a receiver that was never a real
+      # variant to begin with. RFC-0005 S1: HALT site — token discarded.
+      discard w.degrade(seVariantFieldOnDeclinedCtor,
+        "variant field '" & stmt.vfFieldName & "' read on a " &
+             "receiver whose construction was already declined " &
+             "(non-variant SymVal kind=" & $recv.kind & ") " &
+             "(seVariantFieldOnDeclinedCtor)")
+      continue
+    # Build the matching-arm equalities + collect each arm's SymVal
+    # for the requested field.
+    var armEqs: seq[Z3Bool]
+    var armBindings: seq[(int, SymVal)]
+    for tag in stmt.vfMatchingTags:
+      let armNames  = armFieldNamesTbl[tag]
+      let fieldIx   = armNames.find(stmt.vfFieldName)
+      if fieldIx < 0: continue
+      let armEq =
+        if tag == -1:
+          # Phase 14 cycle A2: else-arm membership is the
+          # conjunction of negations against all non-else arms on
+          # the same axis (ADR-0003 D2).
+          var conj: Z3Bool
+          var seeded = false
+          for otherTag in armFieldsTbl.keys:
+            if otherTag == -1: continue
+            let neg = not variantDiscEq(disc, int64(otherTag))
+            if not seeded: conj = neg; seeded = true
+            else:          conj = conj and neg
+          if not seeded:
+            raise newException(ValueError,  # [raise-audited: category-c: documented parser-invariant (own comment family: parser should not have emitted such an IR)]
+              "isVariantField: else-only variant has no non-else " &
+              "arms to negate against (degenerate; the parser " &
+              "should not have emitted such an IR)")
+          conj
+        else:
+          variantDiscEq(disc, int64(tag))
+      armEqs.add armEq
+      armBindings.add (tag, armFieldsTbl[tag][fieldIx])
+    doAssert armEqs.len > 0,
+      "isVariantField: parser produced an empty matchingTags list"
+    var inArmCond = armEqs[0]
+    for k in 1 ..< armEqs.len:
+      inArmCond = inArmCond or armEqs[k]
+    let outOfArmCond = not inArmCond
+    # FieldDefect fork — Phase 16 D1a unconditional under `wmExplore`;
+    # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`'s
+    # doc comment (same shape as `isIndex`'s OOB fork: a discarded-result
+    # side channel for try/except routing + target-witness search, not a
+    # fork-every-arm construct).
+    maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
+    if w.shouldStop: return
+    # In-arm path — bind retName to the ite-chain over arms.
+    var bound = armBindings[armBindings.len - 1][1]
+    for k in countdown(armBindings.len - 2, 0):
+      let eqB = variantDiscEq(disc, int64(armBindings[k][0]))
+      bound = iteSV(eqB, armBindings[k][1], bound)
+    # RFC-0005 S6b: drain the arm fold's merge-degrade taint onto THIS
+    # path (see `isIndex`'s array arm: a direct `iteSV` call).
+    let pM = drainPendingLowerEffects(p)
+    var newEnv = pM.env
+    newEnv[stmt.vfRetName] = bound
+    survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
+  survivors
+
+proc walkCallArm(stmt: IRStmt, paths: seq[Path],
+    w: var WalkCtx): seq[Path] {.noinline.} =
+  ## RFC-0005 batch 6. `walkStmt`'s `isCall` arm, in a proc of its
+  ## own: `walkStmt` recurses once per statement nesting level and per
+  ## call level, and a debug build gives every arm's locals their own
+  ## stack slots in its one frame.
+  # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
+  # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
+  # opaque/uncached/uninstantiated/depth-capped early-outs below all
+  # produce exactly one path per input path too, via a fresh havoc'd
+  # retSym; only the raise-escape channel can add more, orthogonal to
+  # `w.mode`). The callee body is walked with `walk(sig.body, ...)` —
+  # THIS SAME `w` (mode/concreteEq carried by reference) — so any
+  # `if`/`while`/etc. INSIDE the callee already follows the concrete
+  # trace correctly once THEIR OWN dispatch arms do (isIf per G1b;
+  # isWhile/isVariantReassignSymbolic per this R14 pass). There is no
+  # separate "which arm of this call" decision for follow-concrete to
+  # narrow at the call site itself — the discard below is correct BY
+  # CONSTRUCTION, not an oversight.
+  case w.mode
+  of wmExplore: discard
+  of wmFollowConcrete: discard
+  # ---- #137: opaque effectful call ----
+  if stmt.opaque:
+    # Issue #163 slice 4: an opaque call the parser proved INERT
+    # (`isInertOpaqueCall`, dsl_parser.nim — statement position, every
+    # argument plainly value-typed) is a no-op here: no taint, no
+    # `w.sawUnknown`, no classified error. Returning the input paths
+    # unchanged is exactly what an empty block does, and is identical to
+    # the treatment `{.symexTransparent.}`'s parse-time drop (slice 1)
+    # produces for the same shape of call.
+    #
+    # Soundness: with no bound result and nothing writable passed in, the
+    # only channel left for such a callee to affect the SUT is a
+    # module-level global — and the walker does not model globals AT ALL,
+    # so a SUT that could observe one already degrades to sxUnknown (an
+    # unclassified KeyError) at its OWN read site, independently of this
+    # call. Dropping the taint here cannot introduce a false verdict. What
+    # it forgoes is a callee that never returns or raises (`echo` can
+    # raise IOError) reached out of the intended order — a pre-existing,
+    # symmetric gap: an opaque call placed AFTER the target was already
+    # invisible to it before this change. Ordering, not soundness, moves.
+    if stmt.opaqueInert:
+      # #163 review R1: inert means a no-op for CONTROL FLOW and RESULT
+      # BINDING (there is no bound result — `isInertOpaqueCall` only ever
+      # fires in statement position), NOT a no-op for the ARGUMENT
+      # EXPRESSIONS themselves. Those are real Nim expressions the caller
+      # evaluates before the call runs, and `isInertArg` (dsl_parser.nim)
+      # checks only the argument's STATIC RESULT TYPE — never its
+      # expression shape — so an inline defect-fork shape among them
+      # (div/mod by zero, signed overflow, `parseInt`, `s[i]`, a seq
+      # slice — `rhsHasInlineDefectFork`'s class) is admitted here too,
+      # and can raise on its own. Raise obligations are a RUNTIME side
+      # effect of `lower()` (it populates sinks like `divByZeroConds`),
+      # never a static IR artifact, so skipping the lowering — as the
+      # fast path used to — makes the obligation never exist at all.
+      #
+      # Mirror the ordinary resolved-callee arm a few hundred lines
+      # below (`argVals.add lower(p.env, stmt.cargs[i], argProto)`
+      # followed by `drainScalarRaiseForks`): lower each argument for
+      # its SIDE EFFECTS ONLY (the value itself is discarded — there is
+      # nothing to bind on the inert path) and drain the raise-fork
+      # sinks it populates before returning the survivors. The call
+      # itself is still never walked and never taints — only the
+      # arguments' own defect obligations become live.
+      var out1: seq[Path]
+      for p in paths:
+        if w.shouldStop: return
+        seedCallerHeapThreadvars(p)
+        convFloatToIntBoundConds = @[]
+        w.convFloatToIntBoundConds = @[]
+        rangeDefectConds = @[]
+        w.rangeDefectConds = @[]
+        parseIntRaiseConds = @[]
+        w.parseIntRaiseConds = @[]
+        divByZeroConds = @[]
+        w.divByZeroConds = @[]
+        overflowConds = @[]
+        w.overflowConds = @[]
+        strIndexOobConds = @[]
+        w.strIndexOobConds = @[]
+        seqOobConds = @[]
+        w.seqOobConds = @[]
+        arithTrapConds = @[]
+        uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
+        w.arithTrapConds = @[]
+        w.uninitReadConds = @[]                ## RFC-0005 S8bv
+        regexRaiseMsgs = @[]
+        w.regexRaiseMsgs = @[]
+        w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
+        for arg in stmt.cargs:
+          discard lower(p.env, arg)
+        let pd = drainPendingLowerEffects(p)
+        for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
+          out1.add sp
+      # RFC-0005 S8as: the call ran (on the survivors of its arguments'
+      # raise forks), so each name its effect summary lists
+      # (`IRStmt.opaqueHavoc`) may hold anything of its type now.
+      # RFC-0005 S8ax: and each heap cell it reaches; and it may raise.
+      for sp in out1: havocOpaqueWrites(w, sp, stmt)
+      return opaqueRaiseForks(w, out1, stmt)
+    # Don't resolve a body; allocate fresh retSym; mark path
+    # uncertain so any target reached on this path degrades to
+    # sxUnknown rather than emitting an unsound witness.
+    #
+    # Issue #163: say WHY, and name the call. This arm used to set
+    # `w.sawUnknown` bare, which is what the Invariant-7 backstop in
+    # `runSymexImpl` reports as `weInternalWalkerFault` ("the walker itself
+    # hit a bug here") — a misdiagnosis for an ordinary unmodelled call, and
+    # the one an `echo` ahead of the interesting branch produced. The drain
+    # dedups by message, so N calls to the same callee collapse to one
+    # entry while two different callees each get named.
+    # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
+    # RFC-0005 S8ax: a summary the parser could not bound says why.
+    let d = w.degrade(feOpaqueCallUnmodelled,
+      "opaque call `" & stmt.callee & "` is not modeled — " &
+           (if stmt.opaqueWhy.len > 0: stmt.opaqueWhy & "; " else: "") &
+           "its result " &
+           "and any state it touches are unknown, so every path through it " &
+           "is tainted. If the call cannot affect the code under test " &
+           "(void, value arguments, nothing read back), mark it " &
+           "`{.symexTransparent.}` and symex will drop it instead")
+    var out2: seq[Path]
+    for p in paths:
+      var newEnv = p.env
+      var pcInit: seq[Z3Bool]
+      if stmt.retName.len > 0:
+        inc w.synthZ3
+        let z3Name = stmt.retName & "_op" & $w.synthZ3
+        newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+      out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+    return out2
+  if not w.procs.hasKey(stmt.callee):
+    # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
+    # (the parser rejected unresolved callees at compile time); G1c adds a
+    # legitimate cause — a generic instantiation OVER the per-proc cap is
+    # intentionally NOT registered (`maxInstantiationsPerProc`), so its
+    # `mkCall` key has no `ProcSig`. Treat it exactly like the depth-bail
+    # arm: continue with a FRESH unconstrained retSym (so a downstream read
+    # of `stmt.retName` does not KeyError) and mark the surviving paths
+    # uncertain so any target reached on them degrades to sxUnknown — never
+    # an unsound witness. `geInstantiationCapped` is surfaced from
+    # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
+    # RFC-0005 S1b (§2.2 table, §2.5 point 3): the decline's kind now rides
+    # the never-registered callee KEY (`unregisteredCalleeKey`, minted by
+    # `ensureProcRegistered` for the over-cap / distinct-barrier /
+    # unresolvable-`getImpl` declines), so this arm records it at the walk
+    # site through `degrade` — the recorded error is the run act and its
+    # token the path act (was a kindless run mark + kindless ⊤ token). A
+    # missing callee with NO parse-time decline behind it has no modelled
+    # cause at all: that is a walker/parser bug, recorded as such.
+    var declineKind: SymexErrorKind
+    let d =
+      if unregisteredCalleeKind(stmt.callee, declineKind):
+        w.degrade(declineKind,
+          "call to unregistered callee `" & stmt.callee & "` reached at " &
+               "walk time — declined at parse time (" & $declineKind &
+               "); the call returns a fresh unconstrained value and the " &
+               "callee's effects are not modelled",
+          scope = calleeKeyed(stmt.callee))   # RFC-0005 S8 (§2.5 point 3)
+      else:
+        w.degrade(weInternalWalkerFault,
+          "call to callee `" & stmt.callee & "` reached at walk time with " &
+               "no registered ProcSig and no parse-time decline behind it " &
+               "(weInternalWalkerFault)")
+    var out2: seq[Path]
+    for p in paths:
+      var newEnv = p.env
+      var pcInit: seq[Z3Bool]
+      if stmt.retName.len > 0:
+        inc w.synthZ3
+        let z3Name = stmt.retName & "_cap" & $w.synthZ3
+        newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
+      out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+    return out2
+  let sig = w.procs[stmt.callee]
+  # Statistics
+  if not w.callStats.hasKey(stmt.callee):
+    w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
+  # Depth check. RFC-0010 B4 round 2 (REVERTED): a `cap > 0 and` guard was
+  # added here so `maxCallDepth = 0` would mean unlimited, matching
+  # `maxFrontierSize`/`maxSplitParts`'s house style. Two independent
+  # reviewers reproduced a SIGSEGV under `maxCallDepth: 0` against ordinary
+  # linear recursion (e.g. `f(n) = if n > 0: f(n-1) + 1 else: 0`): with the
+  # cap disabled, `walk` recurses NATIVELY once per SUT call-stack level,
+  # and `w.activeCalls`'s cycle-breaking only fires for recursion with
+  # IDENTICAL argument shapes (`argShapeKey`/`symValHash` hash the Z3 AST,
+  # which differs at every level of `f(n-1)`) -- so it never catches this,
+  # the ordinary case, not a pathological one. A native-stack-exhaustion
+  # SIGSEGV takes the whole test BINARY down (every other suite sharing
+  # it), which is worse than the `sxUnknown` this guard was meant to avoid
+  # and a more severe Invariant-3 violation than the bug it fixed. Unlike
+  # `maxClosureInlineCount` (`applyClosureGround` below, guard correctly
+  # kept -- the walker declines a forward-declared self-referencing closure
+  # with `ceClosureUnknownCallee` before it can recurse) there is no
+  # equivalent decline here: EVERY recursive call reaches this depth check.
+  # `maxCallDepth` is therefore a THIRD documented "0 does not mean
+  # unlimited" exception alongside `maxLoopUnwind`/`seqInlineThreshold` --
+  # see `ResourceBudget`'s umbrella doc comment and this field's own doc,
+  # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
+  # on the very first call, by design; a caller wanting deep analysis
+  # writes an explicit bound sized to the SUT's real max call depth
+  # instead. RFC-0005 S8ca: a count cannot know what a level costs (more
+  # on cpp than on c) or what the thread's stack holds, so a call is also
+  # not inlined when the native stack left is under one more level's need
+  # (`nativeStackShort`, below).
+  # RFC-0005 S8ax: past `maxCallDepth` the walk goes one level deeper
+  # while the frontier is not growing (`depthMayExtend`) and the stack is
+  # under the hard budget (`maxRecursionDepth`). A path no execution can
+  # take is dropped first either way (S8an, below).
+  # RFC-0005 S8ca: and, whatever the depth budget, not past the native
+  # stack the walk needs (`nativeStackShort`); the decline is in-band, a
+  # hard-budget decline the extension's root reads as one.
+  let stackLeft = nativeStackShort(w)
+  let overDepth = stackLeft >= 0 or
+    w.callStack.len >= w.settings.budget.maxCallDepth
+  var depthLive: seq[Path]
+  var extendDepth = false
+  if overDepth:
+    for p in paths:
+      if not pathInfeasible(w.z3, p, w.settings): depthLive.add p
+    if depthLive.len == 0: return depthLive
+    extendDepth = stackLeft < 0 and depthMayExtend(w, depthLive.len)
+  if overDepth and not extendDepth:
+    # The decline, and its history: `depthBail`.
+    let atHard = stackLeft >= 0 or
+      w.callStack.len >= hardCallDepth(w.settings)
+    if atHard: inc w.depthHardHits
+    if stackLeft >= 0: nativeStackCutFlag = true
+    depthBail(w, stmt, depthLive,
+      (if stackLeft >= 0: dcutStack
+       elif atHard: dcutHard
+       else: dcutFrontier), stackLeft)
+  else:
+    let paths = (if extendDepth: depthLive else: paths)  # RFC-0005 S8ax
+    # RFC-0005 S8ax: the first extended level is the extension's root. A
+    # recursion that reaches the hard budget below it is unbounded on
+    # some path; every path it returns then carries a chain of returns as
+    # long as the extension, and each later query pays for it. Measured
+    # (Linux, Z3 5.1, loaded host) on `sumTo(n) == 465` with `n >= 0`
+    # unconstrained: 44.5 s declining at `maxCallDepth = 3` without the
+    # extension, 393 s with a hard budget of 4 when the paths that
+    # bottomed out within it were kept, killed at 900 s past 5. So the
+    # root drops everything the extension walked and declines here, at
+    # `maxCallDepth`, exactly as before S8ax: an unbounded recursion costs
+    # what it did, and only one its arguments bound is followed.
+    let extRoot = extendDepth and
+      w.callStack.len == w.settings.budget.maxCallDepth
+    let hardMark = w.depthHardHits
+    let outerExtMark = w.extHardMark
+    if extRoot: w.extHardMark = hardMark
+    var survivors: seq[Path]
+    for p in paths:
+      if w.shouldStop:
+        w.extHardMark = outerExtMark
+        return
+      # RFC-0005 S8ax: abandoned (`depthMayExtend`); the root declines.
+      if extRoot and w.depthHardHits > hardMark: break
+      # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
+      # CLOSURE call lowered out of `p.env` below (a closure passed as an
+      # argument, or invoked while lowering an actual) descends with this
+      # path's threaded heap (ADR-0010 R1b — the closure-arm companion to the
+      # structural `isCall` forkPath threading).
+      seedCallerHeapThreadvars(p)
+      # Lower actuals in the caller env once; reused for cache key
+      # and for callee env construction.
+      var argVals: seq[SymVal]
+      convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
+      w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
+      rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
+      w.rangeDefectConds = @[] ## R16-2: WalkCtx field
+      parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
+      w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
+      divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
+      w.divByZeroConds = @[]            ## R16-3: WalkCtx field
+      overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
+      w.overflowConds = @[]             ## R16-4: WalkCtx field
+      strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
+      w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
+      seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
+      w.seqOobConds = @[]                ## N14: WalkCtx field
+      arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
+      uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
+      w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
+      w.uninitReadConds = @[]                ## RFC-0005 S8bv
+      regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
+      w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
+      w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
+      for i, formal in sig.params:
+        ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
+        ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
+        ## always shapes a plain `itInt` formal's literal actual as BV — the
+        ## type-driven default. A formal `collectIntOffsetParams` traced
+        ## (`IRParam.isIntOffset`, now also set for CALLEES via
+        ## `parseCalleeImpl`, not just top-level entry procs) instead needs
+        ## an svInt proto, so a LITERAL offset argument (e.g. the corpus's
+        ## own `readCStringHelper(s, 0)` first hop) arrives Int-sorted
+        ## exactly like a traced VARIABLE argument already does (a
+        ## non-literal lowers untouched regardless of proto — this only
+        ## ever affects literal shaping).
+        ## R3 (S2): stamp the proto's width metadata from the formal's own
+        ## static type so a LITERAL offset argument keeps its overflow
+        ## fork (`coerceIntLit` propagates it through onto the literal).
+        let argProto = if formal.isIntOffset:
+                         some(SymVal(kind: svInt, zi: mkInt(0),
+                                     ziWidth: formal.ty.width,
+                                     ziSigned: formal.ty.signed))
+                       else: intLitProto(formal.ty)
+        argVals.add lower(p.env, stmt.cargs[i], argProto)
+      let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
+      # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
+      # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
+      # the surviving non-raise continuations. The callee dispatch below runs once
+      # per continuation (typically 1 path, so zero overhead on the common case).
+      for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
+        if w.shouldStop: break
+        # Cache lookup — pure procs with deterministic-arg-shape hits
+        # are served without re-walking. The cache entry's `pcDelta`
+        # carries the returning-path constraints; we extend the
+        # current path with them.
+        let key = argShapeKey(stmt.callee, argVals)
+        if key in w.activeCalls:
+          # Mutual / direct recursion with identical args — the call
+          # is already being walked further up the stack. Break the
+          # cycle: return a fresh symbolic retval, mark uncertain.
+          w.callStats[stmt.callee] = CallStat(
+            name: stmt.callee,
+            walked: w.callStats[stmt.callee].walked,
+            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+          var newEnv = p.env
+          var pcInit: seq[Z3Bool]
+          if stmt.retName.len > 0:
+            inc w.synthZ3
+            let z3Name = stmt.retName & "_cyc" & $w.synthZ3
+            newEnv[stmt.retName] = freshCallRet(stmt, p.env, z3Name, pcInit)   # S8be
+          # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
+          # `weRecursionCycleCut` through `degrade` (was a path-only
+          # kindless ⊤ token that recorded nothing and marked the run only
+          # if a later target hit on this path did). The callee's body —
+          # its var-param/heap effects and raises — is not walked for this
+          # occurrence, so the degrade is run-relevant even when the cut
+          # path never reaches a finding.
+          let d = w.degrade(weRecursionCycleCut,
+            "recursive call to `" & stmt.callee & "` with an argument " &
+                 "shape already being walked up the stack — cycle cut " &
+                 "with a fresh unconstrained return value; the callee's " &
+                 "effects are not modelled for this call " &
+                 "(weRecursionCycleCut)")
+          survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
+          continue
+        # RFC-0005 S8ax: a hit needs the same actuals (the key is a hash)
+        # and, for a summary whose walk dropped an arm or path against its
+        # context, the same drops under this caller's facts.
+        var hit = -1
+        let outerIn = outerState(p.env, sig.captures)   # RFC-0005 S8be
+        if w.callCache.hasKey(key):
+          let bucket = w.callCache[key]
+          for ei in 0 ..< bucket.len:
+            if cacheArgsSame(bucket[ei].args, argVals) and
+               cacheOuterSame(bucket[ei].outer, outerIn) and
+               pruneFactsHold(w.z3, p, bucket[ei].pruneFacts, w.settings):
+              hit = ei
+              break
+        if hit >= 0:
+          let entry = w.callCache[key][hit]
+          w.callStats[stmt.callee] = CallStat(
+            name: stmt.callee,
+            walked: w.callStats[stmt.callee].walked,
+            cacheHits: w.callStats[stmt.callee].cacheHits + 1)
+          var newEnv = p.env
+          if stmt.retName.len > 0:
+            newEnv[stmt.retName] = entry.retSym
+          for ex in entry.exits:
+            survivors.add forkPath(p, p.pc & ex, newEnv)
+          continue
+        # Build callee env
+        var calleeEnv: Env
+        # #140: track var-param formal→actual binding for write-back.
+        var varArgs: seq[(string, string)]   # (formalName, callerVarName)
+        for i, formal in sig.params:
+          calleeEnv[formal.name] = argVals[i]
+          if formal.isVar and stmt.cargs[i].kind == iekVar:
+            varArgs.add (formal.name, stmt.cargs[i].vname)
+        # RFC-0005 S8an: the callee also reaches every module-level global
+        # and, for a routine declared inside another, the enclosing
+        # variables it captures. Nim shares those locations with the
+        # caller; the walk copies each binding in here and carries the
+        # callee's value back out on every exit (`carryOuterBindings`),
+        # which is the same thing for one call running at a time. A root
+        # of a `var`/`addr` actual that is one of them is WITHHELD
+        # (`guarded`): it would reach the callee twice, and copy-in/
+        # copy-out of the argument would then not be Nim's semantics. A
+        # callee that touches a withheld name declines.
+        let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
+        discard threadOuterBindings(calleeEnv, p.env,
+                                               sig.captures, guarded)
+        # RFC-0005 S8ax: an address-taken variable the callee reaches by
+        # name -- a capture, or the caller variable a `var` formal is --
+        # keeps its address cell there (`inheritAddrCells`).
+        let calleeAddrCells = inheritAddrCells(calleeEnv, p.env,
+          w.frame.addrCells, varArgs, sig.captures, guarded)
+        # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
+        # non-bool, non-void return type (float/string/composite as well as
+        # int) routes through `freshRetSym` so a value-returning generic
+        # instantiated at e.g. `float64` gets a correctly-typed placeholder.
+        # Any init-side constraints (string byte-range floor, …) are threaded
+        # onto the post-call survivor paths below (where `retSym` flows out).
+        inc w.synthZ3
+        let z3Name = stmt.retName & "_c" & $w.synthZ3
+        var retInit: seq[Z3Bool]
+        # RFC-0005 S8z: a closure-returning callee's value is the
+        # `svClosure` its body builds, handed to the caller per returned
+        # path below; there is no symbol to allocate (it was
+        # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
+        let closureRet = not sig.isVoid and
+                         retCarriesClosure(stmt.retTy)   # S8be: tuples too
+        let retSym = if sig.isVoid or closureRet:
+                       SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
+                     else:
+                       # Round-6 B5: thread the parse-time-traced offset
+                       # positions so a chained scan's second-hop offset
+                       # allocates svInt instead of the type-driven BV
+                       # default (see `IRStmt.isCall.retIntOffsetPositions`).
+                       # RFC-0005 S8be: otherwise in the sort of its
+                       # actuals, bounded by its type (`freshCallRet`).
+                       if stmt.retIntOffsetPositions.len > 0:
+                         freshRetSym(stmt.retTy, z3Name, retInit,
+                                     stmt.retIntOffsetPositions)
+                       else:
+                         freshCallRet(stmt, p.env, z3Name, retInit)
+        let pruneMark = ctxPruneLog.len   # RFC-0005 S8as/S8ax
+        # RFC-0005 S8ax: the walks entered at each call depth, the
+        # frontier the adaptive depth reads (`depthMayExtend`).
+        while w.depthWalks.len <= w.callStack.len: w.depthWalks.add 0
+        inc w.depthWalks[w.callStack.len]
+        let ptrRisk = varFormalPtrRisk(w, sig.params, stmt.cargs,
+                                       stmt.cVarPtrSafe)   ## RFC-0005 S8bn
+        w.callStack.add CallFrame(
+          callee: stmt.callee, retSym: retSym,
+          retName: stmt.retName,
+          retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
+          returnedPaths: @[], ptrRiskFormals: ptrRisk.risk,
+          ptrSafeFormals: ptrRisk.safe,
+          sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
+        w.callStats[stmt.callee] = CallStat(
+          name: stmt.callee,
+          walked: w.callStats[stmt.callee].walked + 1,
+          cacheHits: w.callStats[stmt.callee].cacheHits)
+        w.activeCalls.incl key
+        # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
+        # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
+        # as its starting heap, instead of R1's fresh-empty default. `forkPath`
+        # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
+        # a deref in the callee reads the SAME heap array the caller already
+        # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
+        let calleePath = forkPath(p, p.pc, calleeEnv)
+        # RFC-0005 S8bs: a `var` actual that is a part of an address-taken
+        # variable is bound to its cell (`bindVarLocs`).
+        var entryCells = calleeAddrCells
+        var elemShares: seq[(string, string)]
+        var paramNames: seq[string]
+        # RFC-0005 S8bu: each formal with the caller variable its actual
+        # names (an `addr` actual's cell, `bindVarLocs`).
+        var argVars: seq[(string, string)]
+        for i, f in sig.params:
+          paramNames.add f.name
+          if i < stmt.cargs.len and stmt.cargs[i].kind == iekVar:
+            argVars.add (f.name, stmt.cargs[i].vname)
+        let locWhy = bindVarLocs(calleePath, p.env, w.frame.addrCells,
+          w.frame.frameId, stmt.cVarLocs, varArgs, argVars, paramNames,
+          entryCells, elemShares, w)
+        if locWhy.len > 0:
+          taintInPlace(calleePath, w.degrade(feUnsupportedOp,
+            "RFC-0005 S8bs: call to `" & stmt.callee & "`: " & locWhy &
+                 "; the callee's writes through the two are not modelled " &
+                 "in its order (feUnsupportedOp)"))
+        # Phase 15 E1: per-frame exception context. Save the caller's frame
+        # (handler stack + in-flight exn) and install a fresh one before walking
+        # the callee body — a `try` opened inside the callee must not leak to
+        # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
+        # so E3/E5 raise-flow threading is correct by construction.
+        pushFrame(w)
+        # RFC-0005 S8be: and an element cell, likewise.
+        inheritElemCells(calleePath, w.frameStack[^1].frameId,
+          w.frame.frameId, varArgs & elemShares, sig.captures, guarded)
+        let calleeFrameId = w.frame.frameId
+        w.frame.addrCells = entryCells    ## RFC-0005 S8ax; S8bs
+        anchorViews(calleePath, entryCells, calleeFrameId)   ## RFC-0005 S8ca
+        w.frame.outerNames = sig.captures      ## RFC-0005 S8ax
+        # RFC-0005 S8bx (item 3): an `mpairs` view passed with its table.
+        let viewWhy = bindViewAliases(stmt, sig, p.env, w)
+        let calleeIn =
+          if viewWhy.len == 0: calleePath
+          else:
+            forkPathTainted(calleePath, calleePath.pc, calleePath.env,
+              w.degrade(feUnsupportedOp,
+                "`" & stmt.callee & "` receives an `mpairs` view and its " &
+                "Table, " & viewWhy & " (RFC-0005 S8bx; feUnsupportedOp)"))
+        let guardMark = callGuardedNames.len   ## RFC-0005 S8an
+        for g in guarded: callGuardedNames.add g
+        let fallThroughRaw = walk(sig.body, @[calleeIn], w)
+        callGuardedNames.setLen(guardMark)
+        # Round-6 A6-rider (walker v86): a callee whose body reaches the end
+        # via IMPLICIT fallthrough (no explicit `return`) after a
+        # CONDITIONAL, multi-statement `result = expr` assignment —
+        # `parseCalleeImpl`'s own documented "general parser path" for
+        # procs that aren't a single bare `result = expr` body (its
+        # comment: "Procs with conditional / multi-step result-assignment
+        # land via the general parser path ... need cycle-2 work to model
+        # `result` as a mutable binding") — used to leave `retSym`
+        # COMPLETELY UNCONSTRAINED: nothing tied the caller-visible return
+        # value to the callee's actual computed `result`. Confirmed via
+        # isolated bisection (`tests/tsymex_r6_a6r_callwitness.nim`) to be
+        # a genuine SOUNDNESS gap, not merely a witness-extraction cosmetic
+        # issue — a deliberately-unreachable target (whose impossibility
+        # depends on the callee's read of its `seq[byte]` argument) proved
+        # a FALSE `sxSat` pre-fix, with the reported witness floating free
+        # of the solver's actual (nonexistent) justification — chapulin's
+        # BLOCKER #12 "all-zero witness on an otherwise sxSat target" is
+        # the visible symptom of this cause: `retSym` was free, so Z3 chose
+        # a satisfying `retSym` directly and left every `data` cell
+        # unconstrained (defaulting to 0), independent of whether the
+        # target was genuinely reachable at all. The closure-call path
+        # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
+        # below) was ASSUMED at the time to already handle this exact shape
+        # correctly -- that assumption was FALSE (confirmed N16, walker
+        # v96): `applyClosureGround`'s fallThrough loop had no `else` twin
+        # at all until N16 added one, mirroring this arm's idiom. As of
+        # v96 both paths carry the identical else-twin; mirror that idiom
+        # here for the ordinary call-inlining path. Composite
+        # (non-scalar-wired) return kinds fall through to the SAME
+        # in-band-degrade net `isReturn`'s explicit-return arm already
+        # uses (never raise — Invariant 3), so an implicit-result
+        # fallthrough of an unsupported composite kind stays a classified
+        # `sxUnknown`, not a crash.
+        var fallThrough: seq[Path]
+        if sig.isVoid:
+          fallThrough = fallThroughRaw
+        elif closureRet:
+          # RFC-0005 S8z: as `completeReturn`'s closure arm.
+          for cp in fallThroughRaw:
+            if cp.env.hasKey("result") and
+               closureValueBuilt(cp.env["result"], stmt.retTy):
+              fallThrough.add cp
+            else:
+              let d = w.degrade(ceUnsupportedHof,
+                "a closure-returning callee returns no lambda the walker " &
+                "built (an untouched nil proc, or a proc value from elsewhere)")
+              fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+        else:
+          for cp in fallThroughRaw:
+            if cp.env.hasKey("result"):
+              let retVal = cp.env["result"]
+              if retVal.kind notin retBindWiredKinds or
+                  not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
+                # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
+                # composite arm: the per-call `retSym` is left free, the
+                # callee's effects ride `cp`, nothing is dropped.
+                let d = w.degrade(feUnsupportedOpHavoc,
+                  "composite-typed implicit-result fallthrough (kind " &
+                       plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
+                       "to sxUnknown (feUnsupportedOp)")
+                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+              elif not noteUninitReturn(retSym, retVal, cp.pc) and
+                   svMentionsUninit(retVal):
+                # RFC-0005 S8bq: as `completeReturn`'s.
+                let d = w.degrade(uninitReadKind, uninitReturnMsg)
+                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+              else:
+                let (rSym, rVal) = reconcileInt(retSym, retVal)
+                fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+                                         cp.env)
+            else:
+              # R2 (walker v90): a fallthrough path that never touched
+              # `result` at all — legal Nim, and DISTINCT from the
+              # `cp.env.hasKey("result")` branch above (v86's original
+              # fix). `result` still holds the return type's ZERO VALUE on
+              # such a path (Nim zero-initializes every `result` slot
+              # before the body runs); pre-fix, `cp` was forwarded here
+              # totally UNCHANGED — `retSym` stayed exactly as free as it
+              # was before v86, reintroducing v86's own false-`sxSat` shape
+              # for the never-assigned case (confirmed RED in
+              # `tests/tsymex_r6_r2_zerodefault_result.nim`). Bind `retSym`
+              # to `defaultZero(stmt.retTy, ...)` via the SAME `retBindEq`
+              # the assigned branch above uses, instead of leaving it free.
+              # `defaultZero`/`retBindEq` both still raise `ValueError` (or
+              # `SymexRefUnresolvedError`) for a handful of composite kinds
+              # neither is wired for (float, nested variant, distinct,
+              # ref/ptr, non-string-keyed table, non-int64 hash set) — for
+              # those, fall through to the SAME classified `sxUnknown`
+              # decline the `retVal.kind notin {...}` branch above uses,
+              # never bind a value the walker cannot back soundly.
+              try:
+                let zeroVal = defaultZero(stmt.retTy, stmt.retName & ".zerodefault")
+                let (rSym, rVal) = reconcileInt(retSym, zeroVal)
+                fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
+                                         cp.env)
+              except ValueError, SymexRefUnresolvedError:
+                # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
+                # `retSym` ranges over the whole type, zero included.
+                let d = w.degrade(feUnsupportedOpHavoc,
+                  "composite-typed implicit-result fallthrough " &
+                       "(untouched-result path, kind " & $stmt.retTy.kind &
+                       ") has no sound zero-default (" &
+                       getCurrentExceptionMsg() &
+                       ") — path degraded to sxUnknown (feUnsupportedOp)")
+                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
+        # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
+        # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
+        # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
+        # pop, re-route each through the CALLER's handler stack: a `try` around
+        # this call site catches the helper's raise. Heap/pc state at the raise
+        # point is preserved on `er.path` (R1b merge — structural now, inert until
+        # Cluster R). The handler-body continuations join the call's survivors.
+        let calleeEscaped = w.frame.escaped
+        let calleeCells = w.frame.addrCells   ## RFC-0005 S8ax
+        popFrame(w)
+        for er in calleeEscaped:
+          var rEnv = p.env
+          # RFC-0005 S8an: the callee's writes to globals and captures
+          # (before the `var` write-back, which is the later store).
+          carryOuterBindings(rEnv, er.path.env, sig.captures, guarded)
+          # RFC-0005 S8ac: the callee wrote its `var` formals through the
+          # caller's variables before it raised; the handler sees those
+          # writes (#140's write-back ran on the returning paths only).
+          for (formalName, callerName) in varArgs:
+            if er.path.env.hasKey(formalName):
+              rEnv[callerName] = er.path.env[formalName]
+          let carried = carryAddrCells(rEnv, er.path.env, calleeCells,
+            varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+          var raisePath = forkPath(er.path, er.path.pc, rEnv)
+          carryElemCells(raisePath, w.frame.frameId, calleeFrameId,
+            varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+          raisePath = settleAddrCells(raisePath, carried, w)
+          let touched = touchedGuard(er.path.env, guarded)
+          if touched.len > 0:
+            raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
+                                        guardDegrade(w, stmt.callee, touched))
+          survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
+          if w.shouldStop:
+            w.extHardMark = outerExtMark   # RFC-0005 S8ax
+            return survivors
+        let frame = w.callStack[w.callStack.high]
+        w.callStack.setLen(w.callStack.high)
+        w.activeCalls.excl key
+        # Cache: single-return, single-fall-through-free, non-uncertain
+        # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
+        # escaped a raise is NOT cached — its summary is incomplete (a cache hit
+        # would replay the normal return but silently drop the escaped raise).
+        # ADR-0012: the cache replays only `pcDelta` (branch + retInit), NOT the
+        # callee's `defectSurvivorPc`. An arith-defect callee normally ESCAPES
+        # (calleeEscaped != [] ⇒ already not cached); but a callee that CATCHES
+        # its own defect (try/except) could add a defect-survivor fact without
+        # escaping. Conservatively skip caching when the callee added any such
+        # fact, so a cache hit can never silently drop a `not overflow`/`not
+        # divByZero` feasibility constraint. (Sound; merely less reuse.)
+        # RFC-0005 S8u: nor when the callee allocated or wrote the heap
+        # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
+        # `new(result)` callee with the same argument shape would return
+        # the first call's address, and a heap write would be lost.
+        # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
+        # variable. A hit replays only `pcDelta`, never the #140
+        # write-back, so the second call's writes would be lost.
+        # RFC-0005 S8an: nor when the callee reached a global or a
+        # capture. A hit replays only `pcDelta`: a read would return the
+        # first call's value across a write in between, and a write would
+        # be lost.
+        # RFC-0005 S8as/S8ax: a callee whose walk dropped a path or arm as
+        # infeasible in this caller's context is cached with those drops
+        # (`pruneFactsSince`): a hit re-checks them (`pruneFactsHold`).
+        # S8as left such a call uncached, which cost `fib` every reuse.
+        var pruneFacts: seq[seq[Z3Bool]]
+        let exitPaths = frame.returnedPaths & fallThrough
+        # RFC-0005 S8be: a callee threading globals, capture cells or
+        # captures is cached keyed by their values, when no exit wrote
+        # one (`exitKeepsOuter`); a withheld one still is not.
+        var cacheable = calleeEscaped.len == 0 and not closureRet and
+          varArgs.len == 0 and guarded.len == 0 and exitPaths.len > 0 and
+          exitPaths.len <= callCacheExitsMax
+        if cacheable:
+          for cp in exitPaths:
+            if not exitKeepsOuter(cp.env, outerIn, sig.captures) or
+               cp.taint != {} or
+               cp.defectSurvivorPc.len != p.defectSurvivorPc.len or
+               not heapUnchanged(cp, p) or
+               not factsPrefixSame(cp.pc, p.pc):
+              cacheable = false
+              break
+        if cacheable and pruneFactsSince(pruneMark, p, pruneFacts):
+          # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
+          # string byte-range floor) must ride in each exit's delta so a
+          # cache REPLAY re-asserts them on the cached retSym.
+          var exits: seq[seq[Z3Bool]]
+          for cp in exitPaths:
+            exits.add retInit & cp.pc[p.pc.len ..< cp.pc.len]
+          let entry = CallCacheEntry(retSym: retSym, exits: exits,
+                                     args: argVals, outer: outerIn,
+                                     pruneFacts: pruneFacts)
+          # A bucket holds one entry per distinct context it was walked
+          # in, up to `callCacheBucketMax`; past it the call is walked.
+          if not w.callCache.hasKey(key): w.callCache[key] = @[]
+          if w.callCache[key].len < callCacheBucketMax:
+            w.callCache[key].add entry
+        for cp in frame.returnedPaths & fallThrough:
+          var newEnv = p.env
+          if stmt.retName.len > 0:
+            newEnv[stmt.retName] =
+              if closureRet and cp.env.hasKey("result") and
+                  closureValueBuilt(cp.env["result"], stmt.retTy):
+                cp.env["result"]    # RFC-0005 S8z
+              elif cp.taint == {} and cp.env.hasKey("result"):
+                # RFC-0005 S8bl (item 2): a result Z3's rewriter folds to
+                # literals is bound AS them (the pc keeps `retSym ==
+                # result`, so nothing else changes): the caller's later
+                # terms over it stay ground. A scan chain over a pinned
+                # string otherwise re-entered the S8ag split with a fresh
+                # start symbol each iteration, and Z3 spent its whole
+                # `seqQueryRLimit` refuting each infeasible loop exit.
+                groundedLike(retSym, cp.env["result"])
+              else: retSym
+          # RFC-0005 S8an: the callee's globals and captures, as it left
+          # them (before the `var` write-back, which is the later store).
+          carryOuterBindings(newEnv, cp.env, sig.captures, guarded)
+          # #140: propagate var-param mutations back to caller's env.
+          for (formalName, callerName) in varArgs:
+            if cp.env.hasKey(formalName):
+              newEnv[callerName] = cp.env[formalName]
+          let carried = carryAddrCells(newEnv, cp.env, calleeCells,
+            varArgs, sig, guarded, w)   ## RFC-0005 S8ax
+          # Phase 15 R1b return-MERGE: the post-call caller path carries the
+          # callee's exit heap state back out (ADR-0010 R1b).
+          # `forkPathMerged(cp, ...)` forks from `cp` (the returned
+          # CALLEE path), so:
+          #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
+          #     caller's, so callee heap modifications are observed downstream.
+          #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
+          # `allocCounters`, however, must NOT be a plain replacement: we take
+          # `max(caller[T], callee[T])` per type key so the freshness invariant
+          # holds — a post-call caller `new T` uses a counter strictly above any
+          # callee allocation and cannot collide with a callee-allocated ref on
+          # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
+          # the merge is correct by construction now.)
+          # Phase 15 G3: `retInit` threads the retSym init constraints onto the
+          # surviving caller path (where `retSym` becomes visible).
+          # R3 hardening / RFC-0005 S1: taint is neither a bare propagate
+          # nor a token join here — a post-call path is tainted by anything
+          # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
+          # site uses the dedicated `forkPathMerged` (the union
+          # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
+          let merged = settleAddrCells(
+            forkPathMerged(cp, cp.pc & retInit, newEnv, p), carried, w)
+          carryElemCells(merged, w.frame.frameId, calleeFrameId,
+            varArgs & elemShares, sig.captures, guarded)   ## RFC-0005 S8be; S8bs
+          # RFC-0005 S8an: the callee wrote a withheld root directly.
+          let touched = touchedGuard(cp.env, guarded)
+          if touched.len > 0:
+            taintInPlace(merged, guardDegrade(w, stmt.callee, touched))
+          for tkey, callerCount in p.allocCounters:
+            let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
+            if callerCount > calleeCount:
+              merged.allocCounters[tkey] = callerCount
+          survivors.add merged
+    w.extHardMark = outerExtMark
+    if extRoot and w.depthHardHits > hardMark:
+      return depthBail(w, stmt, paths, dcutHard)
+    survivors
+
+proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   if w.shouldStop or stmt == nil or paths.len == 0:
     return paths
   case stmt.kind
@@ -15273,10 +22286,19 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # RFC-0005 S8bb: no continuation (the guard raised on every path,
         # a rejected pattern) walks no arm and no skip path.
         let cont = drainScalarRaiseForks(cp2, w)
+        # RFC-0005 S8bl: a guard that folds to a literal takes one side
+        # only (`guardLiteral`).
+        let lit = guardLiteral(condBool)
         for cp in cont:
+          if lit == glFalse:
+            survivors.add forkPath(cp, cp.pc, cp.env)
+            continue
           let armPath = forkPath(cp, cp.pc & @[condBool], cp.env)
           let armOut = walk(br.body, @[armPath], w)
           if w.shouldStop: return
+          if lit == glTrue:
+            survivors.add armOut
+            continue
           let skipPath = forkPath(cp, cp.pc & @[not condBool], cp.env)
           survivors.add mergeJoinPaths(cp, condBool, armOut, skipPath)
       return survivors
@@ -15310,15 +22332,26 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # else is walked. This re-added the pre-drain path as a
           # continuation, so code after a `RegexError` in a guard ran on
           # the call's placeholder value.
+          # RFC-0005 S8bl: a guard that folds to a literal takes one side
+          # only (`guardLiteral`).
+          let lit = guardLiteral(condBool)
           for cp in cont:
-            let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
-                                   cp.env)
-            survivors.add walk(br.body, @[armPath], w)
-            if w.shouldStop: return
-            next.add (cp, accumNegated & @[not condBool])
+            if lit != glFalse:
+              let armPath = forkPath(cp, cp.pc & accumNegated & @[condBool],
+                                     cp.env)
+              if not ifArmInfeasible(w, armPath, condBool,
+                                     cast[pointer](br.body), br.body):
+                survivors.add walk(br.body, @[armPath], w)
+              if w.shouldStop: return
+            if lit != glTrue:
+              next.add (cp, accumNegated & @[not condBool])
         states = next
       for (cp, accumNegated) in states:
         let elsePath = forkPath(cp, cp.pc & accumNegated, cp.env)
+        if accumNegated.len > 0 and
+           ifArmInfeasible(w, elsePath, accumNegated[^1],
+                           cast[pointer](stmt), stmt.elseBody):
+          continue
         if stmt.elseBody != nil:
           survivors.add walk(stmt.elseBody, @[elsePath], w)
         else:
@@ -15473,7 +22506,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         for dp in drainScalarRaiseForks(pb, w):
           if loopArmInfeasible(w.z3, dp, cond, w.settings):
             survivors.add forkPath(dp, dp.pc & @[not cond], dp.env)
-          else:
+          elif not pathInfeasible(w.z3, dp, w.settings):
+            # RFC-0005 S8bl: a guard that folds to a literal `true` is
+            # walked without the solver (`loopArmInfeasible`), so a path
+            # whose pc is itself contradictory -- its every term ground, as
+            # a scan over a pinned string now is -- ran to the bound and
+            # recorded `beBudgetExhausted`. No execution takes it: dropped.
             undecided.add dp
       active = undecided
     # Break-paths exit the loop directly (with their accumulated pc/env).
@@ -15566,1050 +22604,23 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       exitJump(p, target, isCont = true, w)
     @[]
   of isIndex:
-    # R14: `isIndex` is not a fork-every-arm construct the way `isIf`/
-    # `isWhile` are — the in-bounds/present path is the ONLY continuation
-    # `survivors` ever gets; the OOB/absent case is a discarded-result
-    # `forkDefect` side channel (try/except routing + target-witness
-    # search), narrowed per-mode inside `maybeForkDefect` rather than here.
-    # Both arms below stay `discard`: there is no separate per-construct
-    # behavior to select at THIS dispatch point.
-    case w.mode
-    of wmExplore: discard
-    of wmFollowConcrete: discard
-    var survivors: seq[Path]
-    for p in paths:
-      if w.shouldStop: return
-      ## Drain-coverage audit: `stmt.ixArr` is a side-effect-free container
-      ## expression. The parser A-normalises most container expressions to named
-      ## bindings (iekVar) or field projections (iekField); both are pure (no
-      ## closure/float→int sinks), so lowerLeafInExpr handles them without
-      ## seed+drain.
-      let arrSV = lowerLeafInExpr(p, stmt.ixArr)
-      # ---- Phase 5: Table[K, V] indexing ----
-      if arrSV.kind == svTable:
-        ## Table key: always a string expression — no float→int conv or closure
-        ## can appear in a string sub-expression, so no seed+drain needed here.
-        ## If the parser ever emits non-string keyed tables, add the uniform
-        ## seed/drain wrapper before the lower call.
-        if arrSV.tabKeyTy.kind != itString:
-          # RFC-0005 S8u: a non-string-keyed table is `allocateSym`'s
-          # declined, inert placeholder; its key must not be lowered against
-          # the string prototype below (`coerceIntLit` raised on an int
-          # literal, a `weInternalWalkerFault`).
-          let d = w.degrade(seUnsupportedTableKeyType,
-            "Table key type not modeled at index: " & $arrSV.tabKeyTy &
-                 " — only Table[string, V] is supported (seUnsupportedTableKeyType)")
-          survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
-          continue
-        let keyProto = SymVal(kind: svString, str: mkString(""))
-        let keySV = lower(p.env, stmt.ixIdx, some(keyProto))
-        doAssert keySV.kind == svString
-        # Nim's `Table[K, V].[]` raises `KeyError` when the key is
-        # absent. To preserve that semantics in symex we add a
-        # presence constraint to the surviving path.
-        let typedPresent = wrap[Z3Array[Z3String, Z3Bool]](
-          arrSV.tabPresentRaw.ctx, arrSV.tabPresentRaw.raw)
-        noteTableKey(keySV.str)   ## RFC-0005 S8f
-        let presentCond = select(typedPresent, keySV.str)
-        case arrSV.tabValTy.kind
-        of itInt, itBool:   # RFC-0005 S8z: + bool
-          let typedData = wrap[Z3Array[Z3String, Z3BitVec[64]]](
-            arrSV.tabDataRaw.ctx, arrSV.tabDataRaw.raw)
-          let v = select(typedData, keySV.str)
-          # RFC-0005 S8z: read back at the value type's width.
-          let tableVal = cellValue(v, arrSV.tabValTy)
-          var newEnv = p.env
-          newEnv[stmt.ixRetName] = tableVal
-          # Issue #163 wiring-audit W2 (Table-value sibling): a
-          # `Table[string, range[lo..hi]]` value read here has the exact
-          # same reach gap as a seq element — see the `isIndex`/svSeq arm's
-          # own comment just above for the full rationale. Review R11: routed
-          # through `rangeCondsIfNeeded`.
-          let tblRangeConds = rangeCondsIfNeeded(tableVal, arrSV.tabValTy)
-          survivors.add forkPath(p, p.pc & @[presentCond] & tblRangeConds, newEnv)
-        else:
-          # Round-6 N36 (walker v101): was a raw `raise (ref
-          # SymexUnsupportedTableValTypeError)` reached from inside this
-          # `walkBlock`-reachable `for p in paths` loop — the exact
-          # C-backend goto-exception hazard ADR-0023/SND-3 exists to ban
-          # (identical shape to N31's `iekStrSubstr` fix). In-band walk-level
-          # degrade instead, matching the `isUnsupportedFieldPlaceholder`
-          # sibling decline a few lines below in this SAME `isIndex` arm.
-          let d = w.degrade(seUnsupportedTableValType,
-            "Table value type not modeled at index: " & $arrSV.tabValTy &
-                 " — only Table[string, V] with V a fixed-width integer, " &
-                 "char, enum or range is supported (seUnsupportedTableValType)")
-          survivors.add forkPathTainted(p, p.pc, declinedIndexEnv(p.env, stmt, arrSV.tabValTy), d)
-        continue
-      # ---- Phase 5: dynamic seq[T] indexing ----
-      if arrSV.kind == svSeq:
-        if arrSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-          # RFC-chapulin-hardening B7r2 (walker v88): a bare local/param/
-          # call-return `seq[T]` (T structurally unbacked, e.g. itTuple)
-          # allocated via the GENERALIZED Bug-#2 placeholder
-          # (`allocateSym`'s `itSeq` arm) is indexed here — an ACTUAL READ
-          # of its content. `dsl_parser.nim`'s `nnkDotExpr` field-read
-          # arms intercept a declared-FIELD placeholder read at PARSE time
-          # (before an `isIndex` node can even be built over it); a bare
-          # value has no such static field-access site, so this is the
-          # analogous WALK-TIME interception (SND-1 taint-and-continue)
-          # for that case — never `select()` from the placeholder's
-          # arbitrary-sort (`Z3Int -> Z3Bool`) inert backing array, which
-          # would misrepresent (or, for a non-bool real element type,
-          # `wrap[]`-crash on) content that was never truly modeled.
-          # R1 (walker v89) Q2 fix: this decline previously omitted
-          # `stmt.ixLoc` even though the parser already populates it
-          # (`parseSeqBracketAccess`'s index arm passes `siteLoc(n)` into
-          # `mkIndexStmt`) — the `<loc>: ` prefix idiom exists 60 lines below
-          # in this SAME handler (the non-seq receiver-kind decline). Now
-          # shares `placeholderReadDeclineMsg` with the in-`lower()` half
-          # (`iekSeqLen`/`iekSeqSlice`) so every placeholder-read decline
-          # reports the identical message shape. N47-followup (walker v110):
-          # kind now derives from `arrSV` too (`placeholderReadDeclineKind`)
-          # — a bare-value placeholder still reports `seNestedSeqUnsupported`
-          # unchanged, but a receiver rebound by an OPERATION-level decline
-          # (e.g. `iekSeqAdd`'s width/elem-support gap) reports THAT decline's
-          # own kind instead of the misleading nested-seq claim.
-          let d = w.degrade(placeholderReadDeclineKind(arrSV),
-            placeholderReadDeclineMsg(arrSV, stmt.ixLoc, "index read"))
-          survivors.add forkPathTainted(p, p.pc, p.env, d)
-          continue
-        # Seq index is Z3Int. Lower with an svInt proto for literals;
-        # for env-resident BV-typed Nim ints we coerce via bv2int.
-        ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-        # CR-9(c) D5 note: reconcileInt is NOT applied here — the intProto
-        # already steers index literals to svInt, and toZ3Int(idxSV) handles
-        # the BV-typed env var → Z3Int coercion (bv2int). No cross-rep issue.
-        let intProto = SymVal(kind: svInt, zi: mkInt(0))
-        let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
-        ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
-        ## scalar-raise-fork predicates (e.g. a `div`/`parseInt` sub-expr).
-        ## Undrained, those were silently discarded — no raise fork, no
-        ## bounds narrowing. Drain and thread the survivor(s) forward
-        ## through the seq-bounds check below, mirroring `isLet`/`isAssign`.
-        for cp in drainScalarRaiseForks(idxP, w):
-          let lenZi = arrSV.seqLen # [placeholder-audited]
-          let idxZi = toZ3Int(idxSV)
-          let inLoCond = idxZi >= mkInt(0)
-          let inHiCond = idxZi <  lenZi
-          ## Phase 16 D1a unconditional under `wmExplore`; R14 narrows the
-          ## `wmFollowConcrete` case — see `maybeForkDefect`'s doc comment.
-          maybeForkDefect(cp, not (inLoCond and inHiCond),
-                          "IndexDefect", none(string), w)
-          # Bind retName = select(seqData, idx) at element type
-          var indexed: SymVal
-          # Issue #163 wiring-audit W2: a `seq[range[lo..hi]]` element read
-          # here NEVER passed through `allocateSym`'s `itInt` arm (the ONE
-          # `ty.hasRange` consumer in the runtime) — the backing store is a
-          # raw Z3 array (`allocateSeqDataRaw`), not a per-element
-          # allocation. Assert the SAME two bounds `bvRangeConds` deposits
-          # at allocation time here instead, at the READ site, into THIS
-          # survivor's own pc (mirroring `inLoCond`/`inHiCond` below).
-          # Design choice (not re-derived, see the #163 wiring-audit
-          # handoff): assert on READ, not by universally quantifying the
-          # backing array — a `forall` over the array would be exact but
-          # drags a quantifier into every seq query, against this engine's
-          # lazy-materialisation style. Consequence, documented rather than
-          # silently accepted: an element that is never read stays
-          # unconstrained in-solver. Sound for VERDICTS (an unread element
-          # cannot affect one), but NOT for witnesses — `extractSeqElements`
-          # below clamps the reported value for exactly that reason.
-          var rangeConds: seq[Z3Bool]
-          case arrSV.seqElemTy.kind
-          of itInt:
-            case arrSV.seqElemTy.width
-            of 8:
-              let typed = wrap[Z3Array[Z3Int, Z3BitVec[8]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-            of 16:
-              let typed = wrap[Z3Array[Z3Int, Z3BitVec[16]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-            of 32:
-              let typed = wrap[Z3Array[Z3Int, Z3BitVec[32]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-            of 64:
-              let typed = wrap[Z3Array[Z3Int, Z3BitVec[64]]](
-                arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-              indexed = liftBV(select(typed, idxZi), arrSV.seqElemTy.signed)
-            else:
-              raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassign's discriminator is always BV/Z3Int-allocated)]
-                "isIndex/seq: unsupported elem width " & $arrSV.seqElemTy.width)
-            # Review R11: routed through `rangeCondsIfNeeded`.
-            rangeConds = rangeCondsIfNeeded(indexed, arrSV.seqElemTy)
-          of itBool:
-            let typed = wrap[Z3Array[Z3Int, Z3Bool]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-            indexed = ofBool(select(typed, idxZi))
-          of itFloat32:   ## Phase 15 F9b
-            let typed = wrap[Z3Array[Z3Int, Z3Float32]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-            indexed = SymVal(kind: svFloat32, fp32: select(typed, idxZi))
-          of itFloat64:   ## Phase 15 F9b
-            let typed = wrap[Z3Array[Z3Int, Z3Float64]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-            indexed = SymVal(kind: svFloat64, fp64: select(typed, idxZi))
-          of itString:   ## Phase 15 S5: seq[string] element (e.g. split result)
-            let typed = wrap[Z3Array[Z3Int, Z3String]](
-              arrSV.seqDataRaw.ctx, arrSV.seqDataRaw.raw) # [placeholder-audited]
-            indexed = SymVal(kind: svString, str: select(typed, idxZi))
-          of itRef, itPtr:   ## Phase 15 R3 (ADR-0010): seq[ref T] / seq[ptr T] elem.
-            # The element is an abstract `Ref_T` address (the backing array is a
-            # raw `Z3Array[Z3Int, Ref_T]`). The select goes through raw FFI
-            # (`Z3_mk_select` over `seqDataRaw` at the index) because `Ref_T` is a
-            # RUNTIME uninterpreted sort the typed `select` can't express. The
-            # result is an svRef/svPtr — a later `[]` (isDeref) derefs it through
-            # `path.heaps[T]`. GROUND select; NO quantifier (the G4 hang lesson).
-            let ctx = w.z3
-            let isPtr = arrSV.seqElemTy.kind == itPtr
-            let pointee = if isPtr: arrSV.seqElemTy.ptrPointeeTy
-                          else: arrSV.seqElemTy.refPointeeTy
-            let elemRaw = checkedSelect(ctx, arrSV.seqDataRaw.raw, idxZi.raw) # [placeholder-audited]
-            let elemAny = wrap[Z3AnyAst](ctx, elemRaw)
-            if isPtr:
-              indexed = SymVal(kind: svPtr, ptrAst: elemAny,
-                               ptrFamily: true, ptrPointee: pointee)
-            else:
-              indexed = SymVal(kind: svRef, refAst: elemAny, refPointee: pointee)
-          else:
-            raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see isVariantReassign above)]
-              "isIndex/seq: unsupported elem kind " & $arrSV.seqElemTy.kind)
-          var newEnv = cp.env
-          newEnv[stmt.ixRetName] = indexed
-          let inPc = cp.pc & @[inLoCond, inHiCond] & rangeConds
-          # RFC-0005 S8bq: an element assignment's bounds check reads
-          # nothing (`boundsCheckSynthWord`).
-          let unwritten =
-            if stmt.ixRetName.startsWith("__sym_" & boundsCheckSynthWord & "_"):
-              none(Z3Bool)
-            else: uninitReadCond(arrSV, idxZi)
-          if unwritten.isSome:
-            # RFC-0005 S8bq: the read is exact where the element was
-            # written, and a fresh value (tainted) where it was not. The
-            # facts select between two models of ONE execution, as
-            # `drainConvFloatToIntFresh`'s do, so they ride in
-            # `defectSurvivorPc`.
-            if $simplify(unwritten.get) != "true":
-              let written = forkPath(cp, inPc, newEnv)
-              written.defectSurvivorPc.add not unwritten.get
-              survivors.add written
-            let d = w.degrade(uninitReadKind, uninitReadMsg)
-            let fresh = forkPathTainted(cp, inPc, newEnv, d)
-            fresh.defectSurvivorPc.add unwritten.get
-            survivors.add fresh
-          else:
-            survivors.add forkPath(cp, inPc, newEnv)
-        continue
-      # ---- Round-6 B1 (ADR-0028 Leg 1): string-backed seq[byte] index READ.
-      # A `data[i]` reaching here with an `svString` receiver means the
-      # receiver was allocated string-backed (B1a) but the CONSUMING op's
-      # IR is the ordinary `isIndex` node — e.g. a call-chain hop whose OWN
-      # parse never routed the dispatch through `iekStrAt` (no qualifying
-      # scan loop over ITS OWN same-named parameter), yet the VALUE flowing
-      # in at THIS point is the caller's string-backed allocation. Route
-      # through the SAME OOB-probe + read logic `iekStrAt`'s lowering uses
-      # (SND-4 mirror, `runtime_strings.nim`) so the read stays TOTAL and
-      # actually decides — not merely declines.
-      if arrSV.kind == svString:
-        let intProto = SymVal(kind: svInt, zi: mkInt(0))
-        let (idxSV, idxP) = lowerInExpr(p, stmt.ixIdx, w, some(intProto))
-        for cp in drainScalarRaiseForks(idxP, w):
-          let idxZi = toZ3Int(idxSV)
-          let strLenZi = len(arrSV.str)
-          let inLoCond = idxZi >= mkInt(0)
-          let inHiCond = idxZi <  strLenZi
-          discard forkDefect(cp, not (inLoCond and inHiCond),
-                             "IndexDefect", none(string), w)
-          let code = toCode(at(arrSV.str, idxZi))
-          var newEnv = cp.env
-          newEnv[stmt.ixRetName] = liftBV(intToBv[8](code, Z3BitVec[8]), false)
-          survivors.add forkPath(cp, cp.pc & @[inLoCond, inHiCond], newEnv)
-        continue
-      # ---- Phase 4: static array (the existing path) ----
-      if arrSV.kind != svArray:
-        # Round-6 B1 backstop: was a hard `doAssert` (a live crash gap),
-        # then Round-6 SND-4 mirror: a raw `raise (ref
-        # SymexClassifiedDegradeError)`. Round-6 N36 (walker v101): THAT
-        # raise was itself still the ADR-0023/SND-3 C-backend goto-exception
-        # hazard — reached from inside this `walkBlock`-reachable `for p in
-        # paths` loop, identical shape to N31's `iekStrSubstr` fix. In-band
-        # walk-level degrade instead, matching this SAME `isIndex` arm's
-        # `isUnsupportedFieldPlaceholder`/Table-value-type siblings above.
-        let locPrefix = if stmt.ixLoc.len > 0: stmt.ixLoc & ": " else: ""
-        let d = w.degrade(feUnsupportedExprKind,
-          locPrefix & "isIndex: unsupported receiver kind " &
-               plainEnglishSymValKind(arrSV.kind) & " (expected array/seq/table/string) — " &
-               "degraded to sxUnknown (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let n = arrSV.arrElems.len
-      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (idxSVraw, idxP) = lowerInExpr(p, stmt.ixIdx, w)
-      # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
-      # `coerceArrayBoolIndex`'s own doc.
-      let idxSV = coerceArrayBoolIndex(idxSVraw)
-      ## R1 (Invariant-3 soundness fix): `stmt.ixIdx` may itself deposit
-      ## scalar-raise-fork predicates. Undrained, those were silently
-      ## discarded — no raise fork, no bounds narrowing. Drain and thread
-      ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
-      for cp in drainScalarRaiseForks(idxP, w):
-        # Build the in-bounds & OOB Z3 conditions. RFC-0005 S8z: over the
-        # array's index range `ixLo .. ixLo + n - 1` (`array[1..3, T]`), not
-        # `0 ..< n`; element `k` is Nim's index `ixLo + k`.
-        let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.ixLo, n)
-        # OOB defect fork — Phase 16 D1a unconditional under `wmExplore`;
-        # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`.
-        maybeForkDefect(cp, not (inLoCond and inHiCond),
-                        "IndexDefect", none(string), w)
-        # In-bounds path continues with binding; build the value via ite.
-        let indexed = arraySelect(arrSV.arrElems, idxSV, stmt.ixLo)
-        # RFC-0005 S6b: `iteSV` is called here DIRECTLY (no `lower()`
-        # wrapper), so a merge degrade's pending taint (`allocDegrade` /
-        # `degradeAlloc`) would otherwise be drained by whatever `lower()`
-        # runs NEXT -- on this path in practice, on a sibling in principle
-        # (the race `iteSV`'s group-arm note describes). Its fresh-symbol
-        # sites are `dcFreshSymbol` now, so the taint must land on the path
-        # that binds the merged value: drain it here, by construction.
-        let cpM = drainPendingLowerEffects(cp)
-        var newEnv = cpM.env
-        newEnv[stmt.ixRetName] = indexed
-        survivors.add forkPath(cpM, cpM.pc & @[inLoCond, inHiCond], newEnv)
-    survivors
+    walkIndexArm(stmt, paths, w)
   of isIndexAssign:
-    # N14 (RFC-chapulin-hardening bucket-2): `xs[idx] = v` element ASSIGNMENT.
-    # Mirrors `isIndex`'s own OOB fork exactly (same `0 <= idx < len`
-    # predicate, same unconditional `IndexDefect` fork per Phase 16 D1a) but
-    # REBINDS `stmt.iaRecvName` to a new `svSeq` (`store(old.data, idx, v)`,
-    # via `storeSeqElem` — the SAME helper `lowerSeqLit`/HOF `.map` already
-    # use for construction) instead of binding a fresh read result.
-    var survivors: seq[Path]
-    for p in paths:
-      if w.shouldStop: return
-      # The parse site (dsl_parser.nim's `nnkAsgn` arm) only ever emits this
-      # statement for a bare `nnkSym` receiver already classified `itSeq`, so
-      # `p.env[stmt.iaRecvName]` is a direct, side-effect-free lookup — the
-      # exact shape `lowerLeafInExpr`'s own `iekVar` admission covers, just
-      # read straight from `Env` (no `IRExpr` wrapper needed for a bare name).
-      let recvSV = p.env[stmt.iaRecvName]
-      if recvSV.kind == svArray and recvSV.arrElems.len > 0:
-        # RFC-0005 S8z: `a[i] = v` on an array at a symbolic index (it was
-        # `feUnsupportedStmtKind`). The same `IndexDefect` fork as `isIndex`,
-        # over the array's own index range (`iaLo`), then the receiver is
-        # rebound to the array with every position `k` replaced by
-        # `ite(i == iaLo + k, v, old[k])` (`arrayStore`) -- the per-element
-        # form of a Z3 `store`, since `svArray` keeps one value per element.
-        let n = recvSV.arrElems.len
-        let (idxSVraw, idxP) = lowerInExpr(p, stmt.iaIdx, w)
-        # RFC-0005 S8am: `array[bool, T]`'s index (item 6) -- see
-        # `coerceArrayBoolIndex`'s own doc.
-        let idxSV = coerceArrayBoolIndex(idxSVraw)
-        for cp in drainScalarRaiseForks(idxP, w):
-          let (inLoCond, inHiCond) = arrayIndexConds(idxSV, stmt.iaLo, n)
-          maybeForkDefect(cp, not (inLoCond and inHiCond),
-                          "IndexDefect", none(string), w)
-          let elemTy = recvSV.arrElemTy
-          let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w,
-                                          seqElemLitProto(elemTy))
-          for vp in drainScalarRaiseForks(valP, w):
-            let aligned = alignIntKind(valSV, recvSV.arrElems[0].kind)
-            if aligned.isNone:
-              # The write is dropped (the array keeps its old element): a
-              # stale env, so `feUnsupportedStmtKind` (dcSubstituted), which
-              # licenses no sxUnsat -- never the fresh class.
-              let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
-              let d = w.degrade(feUnsupportedStmtKind,
-                locPrefix & "isIndexAssign: array element write of " &
-                     plainEnglishSymValKind(valSV.kind) & " over " &
-                     plainEnglishSymValKind(recvSV.arrElems[0].kind) &
-                     " not modelled; the write is dropped")
-              survivors.add forkPathTainted(vp, vp.pc & @[inLoCond, inHiCond],
-                                            vp.env, d)
-              continue
-            # A `range[lo..hi]` element type forks its RangeDefect exactly as
-            # the seq arm below does (#163 review R22 site 3).
-            let vpRanged =
-              if elemTy != nil and elemTy.kind == itInt and elemTy.hasRange and
-                 not carriesRangeCheck(stmt.iaVal, elemTy):
-                forkAssignRangeCheck(vp, valSV, elemTy, w)
-              else: vp
-            let vpM = drainPendingLowerEffects(vpRanged)
-            var newEnv = vpM.env
-            newEnv[stmt.iaRecvName] = SymVal(kind: svArray,
-              arrElems: arrayStore(recvSV.arrElems, idxSV, stmt.iaLo, aligned.get),
-              arrElemTy: elemTy)
-            survivors.add forkPath(vpM, vpM.pc & @[inLoCond, inHiCond], newEnv)
-        continue
-      if recvSV.kind != svSeq:
-        # Defense in depth (W2b precedent, `iekSeqAdd`'s own kind-mismatch
-        # arm): SHOULD be unreachable given the parse-time itSeq gate, but a
-        # representation-mismatch route (e.g. a string-backed receiver, per
-        # the B1a classifier) is not machine-checked closed. Decline in-band
-        # rather than a raw `doAssert` crash — same idiom as `isIndex`'s own
-        # non-array/seq/table/string receiver-kind decline immediately above.
-        let locPrefix = if stmt.iaLoc.len > 0: stmt.iaLoc & ": " else: ""
-        let d = w.degrade(feUnsupportedExprKind,
-          locPrefix & "isIndexAssign: receiver lowered to " &
-               plainEnglishSymValKind(recvSV.kind) &
-               " — expected svSeq (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-        # A bare/field-sourced placeholder seq (structurally-unbacked elem
-        # type, Bug #2/B7r2 machinery) is being written through. Mirrors the
-        # `isIndex` read-side placeholder decline immediately above (same
-        # shared `placeholderReadDeclineKind`/`placeholderReadDeclineMsg`
-        # chokepoint) — never `storeSeqElem` into the placeholder's inert
-        # arbitrary-sort backing array.
-        let d = w.degrade(placeholderReadDeclineKind(recvSV),
-          placeholderReadDeclineMsg(recvSV, stmt.iaLoc, "mutation (index assign)"))
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let intProto = SymVal(kind: svInt, zi: mkInt(0))
-      let (idxSV, idxP) = lowerInExpr(p, stmt.iaIdx, w, some(intProto))
-      for cp in drainScalarRaiseForks(idxP, w):
-        let lenZi = recvSV.seqLen # [placeholder-audited]
-        let idxZi = toZ3Int(idxSV)
-        let inLoCond = idxZi >= mkInt(0)
-        let inHiCond = idxZi <  lenZi
-        discard forkDefect(cp, not (inLoCond and inHiCond),   ## Phase 16 D1a
-                           "IndexDefect", none(string), w)
-        # In-bounds survivor: lower the RHS with a proto matching the
-        # declared element type (`seqElemLitProto`), then `storeSeqElem` —
-        # `isBackedSeqElemTy` (checked by construction: any placeholder
-        # receiver already declined above) guarantees `recvSV.seqElemTy` is
-        # one of `storeSeqElem`'s own covered kinds.
-        let valProto = seqElemLitProto(recvSV.seqElemTy)
-        let (valSV, valP) = lowerInExpr(cp, stmt.iaVal, w, valProto)
-        for vp in drainScalarRaiseForks(valP, w):
-          # #163 review R22 site 3: a seq element write whose declared
-          # element type is `range[lo..hi]` forks exactly like the plain
-          # field write (site 1) and `isAssign`'s own local-variable case --
-          # see `forkAssignRangeCheck`'s doc comment. The declared type is
-          # already live on `recvSV.seqElemTy` (the SAME field
-          # `seqElemLitProto` above already reads), so no new IR field is
-          # needed. Checked BEFORE `storeSeqElem` (whose own internal
-          # svInt->BV reconciliation is independent of this) so the
-          # discharge can still see `valSV`'s `ziIvl`.
-          let vpRanged =
-            if recvSV.seqElemTy.kind == itInt and recvSV.seqElemTy.hasRange and
-               not carriesRangeCheck(stmt.iaVal, recvSV.seqElemTy):   # RFC-0005 S8j
-              forkAssignRangeCheck(vp, valSV, recvSV.seqElemTy, w)
-            else: vp
-          let newDataRaw = storeSeqElem(
-            recvSV.seqDataRaw, recvSV.seqElemTy, idxZi, valSV) # [placeholder-audited]
-          # N27 audit (item 1, round-6 fix round 3): rebinding the receiver
-          # after a successful store. `recvSV` was already declined above
-          # (this arm's own `isUnsupportedFieldPlaceholder` check at the top
-          # of the `for p in paths` loop, `continue`d on the placeholder
-          # branch) and is never reassigned before this point — the
-          # `.seqLen` read below is reached only on the non-placeholder path.
-          var newEnv = vpRanged.env
-          newEnv[stmt.iaRecvName] = SymVal(kind: svSeq, seqLen: recvSV.seqLen, # [placeholder-audited]
-            seqDataRaw: newDataRaw, seqElemTy: recvSV.seqElemTy)
-          survivors.add forkPath(vpRanged, vpRanged.pc & @[inLoCond, inHiCond], newEnv)
-    survivors
+    walkIndexAssignArm(stmt, paths, w)
   of isSeqPop:
-    # N14 (RFC-chapulin-hardening bucket-2): `retName := recvName.pop()`.
-    # `result = data[len-1]; len' = len-1` — Nim's real `pop()` semantics
-    # (verified against the stdlib doc: "Returns the last item of `s` and
-    # removes it from `s`. Raises IndexDefect if `s` is empty."). The
-    # backing DATA array is left UNCHANGED (no store): every read of the
-    # shrunk seq goes through a bound check against the NEW (smaller)
-    # `seqLen`, so the stale value at the old last slot is permanently
-    # unreachable — the exact same "leave it, it's inert" argument `del`'s
-    # own doc comment makes for its post-shrink slot, one level simpler here
-    # (no swap-in needed at all).
-    var survivors: seq[Path]
-    for p in paths:
-      if w.shouldStop: return
-      let recvSV = p.env[stmt.spRecvName]
-      if recvSV.kind != svSeq:
-        let locPrefix = if stmt.spLoc.len > 0: stmt.spLoc & ": " else: ""
-        let d = w.degrade(feUnsupportedExprKind,
-          locPrefix & "isSeqPop: receiver lowered to " &
-               plainEnglishSymValKind(recvSV.kind) &
-               " — expected svSeq (feUnsupportedExprKind)")
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      if recvSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
-        let d = w.degrade(placeholderReadDeclineKind(recvSV),
-          placeholderReadDeclineMsg(recvSV, stmt.spLoc, "mutation (.pop)"))
-        survivors.add forkPathTainted(p, p.pc, p.env, d)
-        continue
-      let lenZi = recvSV.seqLen # [placeholder-audited]
-      let emptyCond = not (lenZi > mkInt(0))
-      discard forkDefect(p, emptyCond, "IndexDefect", none(string), w) ## Phase 16 D1a parity
-      let newLenZi = lenZi - mkInt(1)
-      let popped = seqElemAt(recvSV, newLenZi) # [placeholder-audited]
-      # N27 audit (item 1, round-6 fix round 3): rebinding the receiver after
-      # a successful pop. `recvSV` was already declined above (this arm's own
-      # `isUnsupportedFieldPlaceholder` check at the top of the `for p in
-      # paths` loop, `continue`d on the placeholder branch) and is never
-      # reassigned before this point — the `.seqDataRaw` read below is
-      # reached only on the non-placeholder path.
-      var newEnv = p.env
-      newEnv[stmt.spRecvName] = SymVal(kind: svSeq, seqLen: newLenZi,
-        seqDataRaw: recvSV.seqDataRaw, seqElemTy: recvSV.seqElemTy) # [placeholder-audited]
-      newEnv[stmt.spRetName] = popped
-      let unwritten = uninitReadCond(recvSV, newLenZi)
-      if unwritten.isSome:
-        # RFC-0005 S8bq: as `isIndex`'s element read.
-        if $simplify(unwritten.get) != "true":
-          let written = forkPath(p, p.pc & @[not emptyCond], newEnv)
-          written.defectSurvivorPc.add not unwritten.get
-          survivors.add written
-        let d = w.degrade(uninitReadKind, uninitReadMsg)
-        let fresh = forkPathTainted(p, p.pc & @[not emptyCond], newEnv, d)
-        fresh.defectSurvivorPc.add unwritten.get
-        survivors.add fresh
-      else:
-        survivors.add forkPath(p, p.pc & @[not emptyCond], newEnv)
-    survivors
+    walkSeqPopArm(stmt, paths, w)
+  of isTabKeys:
+    walkTabKeysArm(stmt, paths, w)
+  of isSetLen:
+    walkSetLenArm(stmt, paths, w)
   of isVariantReassign:
-    # R14: `obj.kind = tagLiteral` — the RHS is a LITERAL. The only fork is
-    # the RFC-0005 S8f branch-change `FieldDefect` below, routed through
-    # `maybeForkDefect` (which narrows it under `wmFollowConcrete`, exactly
-    # as `isVariantField`'s out-of-arm fork is narrowed).
-    case w.mode
-    of wmExplore: discard
-    of wmFollowConcrete: discard
-    # Phase 11 cycle 6 — `obj.kind = tagLiteral`: the discriminator becomes
-    # the literal tag.
-    #
-    # RFC-0005 S8f (walker 154). Nim raises `FieldDefect` ("assignment to
-    # discriminant changes object branch") when the old discriminator selects
-    # a DIFFERENT source branch than the new one, and keeps the fields when
-    # it selects the same branch (probed on the pinned toolchain: a `var`
-    # param, a local, and a default-initialised object all behave so). The
-    # walker used to model the transition as legal with the new arm's fields
-    # zero-initialised (ADR-0003 D5, the pre-2.0 `nimOldCaseObjects`
-    # behaviour) -- so `x.kind = pfB` on a `var` param was a clean `sxSat`
-    # whose witness (`kind: pfA`) raised `FieldDefect` instead of reaching
-    # the target. Now: fork the defect on "different branch" and continue
-    # on "same branch" with the branch's fields carried over.
-    var out2: seq[Path]
-    for p in paths:
-      if not p.env.hasKey(stmt.vrObjName):
-        out2.add p
-        continue
-      let oldSV = p.env[stmt.vrObjName]
-      if oldSV.kind notin {svVariant, svMultiVariant}:
-        # RFC-0005 S8i: a declined construction's placeholder.
-        out2.add degradeUnmodelledReassign(p, stmt.vrObjName, oldSV.kind, w)
-        continue
-      doAssert oldSV.kind == svVariant,
-        "isVariantReassign on non-variant kind=" & $oldSV.kind
-      let oldDisc = oldSV.vDisc[]
-      let tagOrd = int64(stmt.vrNewTag)
-      let newDiscInner: SymVal =
-        case oldDisc.kind
-        of svBV8:  liftBV(mkBitVec[8](tagOrd),  oldDisc.signed)
-        of svBV16: liftBV(mkBitVec[16](tagOrd), oldDisc.signed)
-        of svBV32: liftBV(mkBitVec[32](tagOrd), oldDisc.signed)
-        of svBV64: liftBV(mkBitVec[64](tagOrd), oldDisc.signed)
-        of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(tagOrd))  # A6
-        else:
-          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantReassignSymbolic's discriminator is always BV/Z3Int-allocated)]
-            "isVariantReassign: disc must be BV or Z3Int kind")
-      let same = sameBranchCond(oldDisc, stmt.vrNewTag, stmt.vrBranches)
-      maybeForkDefect(p, not same, "FieldDefect", none(string), w)
-      if w.shouldStop: return out2
-      let newDiscBoxed = new(SymVal)
-      newDiscBoxed[] = newDiscInner
-      let carried = carryBranchFields(oldSV.vArmFields, oldDisc,
-                                      stmt.vrNewTag, stmt.vrBranches)
-      let pM = drainPendingLowerEffects(p)
-      let newSV = SymVal(kind: svVariant,
-                         vDisc: newDiscBoxed,
-                         vDiscName: oldSV.vDiscName,
-                         vObjectName: oldSV.vObjectName,
-                         vArmFields: carried,
-                         vArmFieldNames: oldSV.vArmFieldNames,
-                         vPlainFields: oldSV.vPlainFields,       # shared:
-                         vPlainFieldNames: oldSV.vPlainFieldNames) # preserved.
-      var newEnv = pM.env
-      newEnv[stmt.vrObjName] = newSV
-      out2.add forkPath(pM, pM.pc & @[same], newEnv)
-    return out2
+    walkVariantReassignArm(stmt, paths, w)
   of isVariantReassignSymbolic:
-    # R14: unlike `isVariantReassign` (above), the RHS here IS symbolic —
-    # this construct genuinely forks one path per tag in the discriminator's
-    # domain, the same "fork every arm" shape `isIf`/`isWhile` have (though
-    # bounded by the variant's own arity, not an iteration count, so it
-    # cannot blow up the way an unbounded `while` unroll can). `wmExplore`
-    # below is unchanged; `wmFollowConcrete` narrows to the ONE concretely-
-    # matching tag via `followConcreteTag` (defined per `oldSV`/`oldAxis`
-    # case below, right before each's own tag-fork loop) — same
-    # `concreteBranchOutcome` mechanism `walkIfFollowConcrete`/
-    # `walkWhileFollowConcrete` use, with the same sound "fork everything"
-    # fallback when the concrete draws don't determine a unique match.
-    case w.mode
-    of wmExplore: discard
-    of wmFollowConcrete: discard
-    # Phase 14 cycle A4b (ADR-0003 D4). Symbolic-RHS disc reassign:
-    # fork one path per arm-ordinal in the disc's domain. Each path
-    # is constrained `rhsSV == k_ord` AND the variant SymVal in env
-    # is rebuilt with the new disc SET TO THAT TAG'S CONSTANT.
-    # For itMultiVariant: only the named axis's disc is updated; other
-    # axes are preserved as-is.
-    # RFC-0005 S8f (walker 154): per tag, fork `FieldDefect` when the old
-    # discriminator's source branch differs from the tag's (Nim's runtime
-    # check -- see `isVariantReassign` above), and continue on the same
-    # branch with that branch's fields carried (`carryBranchFields`).
-    var out2: seq[Path]
-    for p in paths:
-      if not p.env.hasKey(stmt.vrsObjName):
-        out2.add p
-        continue
-      let oldSV = p.env[stmt.vrsObjName]
-      ## CR-9 Stage 2: encapsulate seed→reset→lower→drain via wrapper.
-      let (rhsSV, pr) = lowerInExpr(p, stmt.vrsRhs, w)
-      proc rhsEq(tagOrd: int64): Z3Bool =
-        case rhsSV.kind
-        of svBV8:  rhsSV.bv8  == mkBitVec[8](tagOrd)
-        of svBV16: rhsSV.bv16 == mkBitVec[16](tagOrd)
-        of svBV32: rhsSV.bv32 == mkBitVec[32](tagOrd)
-        of svBV64: rhsSV.bv64 == mkBitVec[64](tagOrd)
-        of svInt:  rhsSV.zi   == mkZ3IntLit(tagOrd)  ## Phase 14 A6
-        of svBool: rhsSV.bo   == mkBool(tagOrd != 0)  ## RFC-0005 S8u: bool disc
-        else:
-          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-            "isVariantReassignSymbolic: RHS must lower to a BV, " &
-            "Z3Int or Bool kind (got " & $rhsSV.kind & ")")
-      ## R1 (Invariant-3 soundness fix): `stmt.vrsRhs` may itself deposit
-      ## scalar-raise-fork predicates. Undrained, those were silently
-      ## discarded — no raise fork, no bounds narrowing. Drain and thread
-      ## the survivor(s) forward, mirroring `isLet`/`isAssign`.
-      ## RFC-0005 S8g (walker 155): the `else:` arm (key -1) is a candidate
-      ## too. Its guard is "the RHS equals no explicit tag" (the same
-      ## membership `isVariantField` uses), and its new discriminator is the
-      ## symbolic RHS itself, not a constant: every else value shares the
-      ## one else branch, so a `kC -> kD` reassignment keeps `c`.
-      proc tagGuard(explicit: seq[int]): proc (tagOrd: int64): Z3Bool =
-        result = proc (tagOrd: int64): Z3Bool =
-          if tagOrd >= 0: return rhsEq(tagOrd)
-          result = mkBool(true)
-          for t in explicit:
-            result = result and not rhsEq(int64(t))
-      for cp in drainScalarRaiseForks(pr, w):
-        case oldSV.kind
-        of svVariant:
-          var candidateTags, explicitTags: seq[int]
-          for tag in oldSV.vArmFields.keys:
-            candidateTags.add tag
-            if tag >= 0: explicitTags.add tag
-          let guard = tagGuard(explicitTags)
-          let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
-                                            guard, candidateTags)
-          for tag in candidateTags:
-            if followTag.isSome and tag != followTag.get(): continue
-            let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
-            let same = sameBranchCond(oldSV.vDisc[], tag, stmt.vrsBranches)
-            maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
-            let carried = carryBranchFields(oldSV.vArmFields, oldSV.vDisc[],
-                                            tag, stmt.vrsBranches)
-            let chosenM = drainPendingLowerEffects(chosen)
-            let newDiscConst: SymVal =
-              case oldSV.vDisc[].kind
-              of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldSV.vDisc[].signed)
-              of svBV16: liftBV(mkBitVec[16](int64(tag)), oldSV.vDisc[].signed)
-              of svBV32: liftBV(mkBitVec[32](int64(tag)), oldSV.vDisc[].signed)
-              of svBV64: liftBV(mkBitVec[64](int64(tag)), oldSV.vDisc[].signed)
-              of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
-              of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool disc
-              else:
-                raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-                  "isVariantReassignSymbolic: old disc must be BV, Z3Int or Bool")
-            let newDiscInner =
-              if tag < 0: discFromRhs(rhsSV, oldSV.vDisc[]) else: newDiscConst
-            let newDiscBoxed = new(SymVal)
-            newDiscBoxed[] = newDiscInner
-            let newSV = SymVal(kind: svVariant,
-                               vDisc: newDiscBoxed,
-                               vDiscName: oldSV.vDiscName,
-                               vObjectName: oldSV.vObjectName,
-                               vArmFields: carried,
-                               vArmFieldNames: oldSV.vArmFieldNames,
-                               vPlainFields: oldSV.vPlainFields,
-                               vPlainFieldNames: oldSV.vPlainFieldNames)
-            var newEnv = chosenM.env
-            newEnv[stmt.vrsObjName] = newSV
-            out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
-        of svMultiVariant:
-          # Locate the named axis (vrsDiscName); other axes preserve
-          # their disc + arm state.
-          var axisIx = -1
-          for i, ax in oldSV.mvAxes:
-            if ax.discName == stmt.vrsDiscName:
-              axisIx = i; break
-          doAssert axisIx >= 0,
-            "isVariantReassignSymbolic on svMultiVariant: no axis named " &
-            stmt.vrsDiscName
-          let oldAxis = oldSV.mvAxes[axisIx]
-          var candidateTags, explicitTags: seq[int]
-          for tag in oldAxis.armFields.keys:
-            candidateTags.add tag
-            if tag >= 0: explicitTags.add tag
-          let guard = tagGuard(explicitTags)
-          let followTag = followConcreteTag(w.mode, w.z3, w.concreteEq, w.settings,
-                                            guard, candidateTags)
-          for tag in candidateTags:
-            if followTag.isSome and tag != followTag.get(): continue
-            let chosen = forkPath(cp, cp.pc & @[guard(int64(tag))], cp.env)
-            let same = sameBranchCond(oldAxis.disc[], tag, stmt.vrsBranches)
-            maybeForkDefect(chosen, not same, "FieldDefect", none(string), w)
-            if w.shouldStop: return out2
-            let carried = carryBranchFields(oldAxis.armFields, oldAxis.disc[],
-                                            tag, stmt.vrsBranches)
-            let chosenM = drainPendingLowerEffects(chosen)
-            let newDiscConst: SymVal =
-              case oldAxis.disc[].kind
-              of svBV8:  liftBV(mkBitVec[8](int64(tag)),  oldAxis.disc[].signed)
-              of svBV16: liftBV(mkBitVec[16](int64(tag)), oldAxis.disc[].signed)
-              of svBV32: liftBV(mkBitVec[32](int64(tag)), oldAxis.disc[].signed)
-              of svBV64: liftBV(mkBitVec[64](int64(tag)), oldAxis.disc[].signed)
-              of svInt:  SymVal(kind: svInt, zi: mkZ3IntLit(int64(tag)))  # A6
-              of svBool: ofBool(mkBool(tag != 0))   ## RFC-0005 S8u: bool axis
-              else:
-                raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (see above)]
-                  "isVariantReassignSymbolic: axis disc must be a BV or bool kind")
-            let newDiscInner =
-              if tag < 0: discFromRhs(rhsSV, oldAxis.disc[]) else: newDiscConst
-            let newDiscBoxed = new(SymVal)
-            newDiscBoxed[] = newDiscInner
-            var newAxes = oldSV.mvAxes
-            newAxes[axisIx] = VariantAxisSym(
-              discName: oldAxis.discName, disc: newDiscBoxed,
-              armFields: carried,
-              armFieldNames: oldAxis.armFieldNames)
-            let newSV = SymVal(kind: svMultiVariant,
-                               mvObjectName: oldSV.mvObjectName,
-                               mvAxes: newAxes,
-                               mvPlainFields: oldSV.mvPlainFields,
-                               mvPlainFieldNames: oldSV.mvPlainFieldNames)
-            var newEnv = chosenM.env
-            newEnv[stmt.vrsObjName] = newSV
-            out2.add forkPath(chosenM, chosenM.pc & @[same], newEnv)
-        else:
-          # RFC-0005 S8i: a declined construction's placeholder (this was a
-          # `doAssert false`, surfacing the decline as an internal fault).
-          out2.add degradeUnmodelledReassign(cp, stmt.vrsObjName, oldSV.kind, w)
-    return out2
+    walkVariantReassignSymbolicArm(stmt, paths, w)
   of isVariantConstructSym:
-    # Round-6 A3 (ADR-0029). Fork-per-tag SYMBOLIC-discriminant variant
-    # CONSTRUCTION — clones `isVariantReassignSymbolic`'s fork-per-tag shape
-    # (same tag loop, same `disc == tag` pc append) with the deliberate
-    # divergence: construction has no "active arm" data to preserve (Nim
-    # itself only accepts a non-constant discriminant in constructor syntax
-    # when no arm-specific field is set — the parser's `of itVariant:` arm
-    # enforces this), so EVERY declared arm's fields are that field type's
-    # `default(T)` in each fork. (Walker <= 153 allocated them FRESH, which
-    # let a witness claim an arm-field value real Nim never holds; RFC-0005
-    # S8f.)
-    #
-    # The `maxVariantConstructorForks` budget is a STRUCTURAL check against
-    # `stmt.vcsTagSet.len` — before any solver work, uniform across every
-    # input path (the tag SET is fixed at parse time; only which tags are
-    # ultimately SAT-feasible depends on the path). Reuses the existing
-    # `beBudgetExhausted` classified-decline kind (SND-4 "mirror, don't
-    # reinvent" — this IS a walk budget running out with paths still live,
-    # exactly that kind's own doc comment). No `NimNode` exists here to
-    # build a `siteMsg`-shaped message from, so `stmt.vcsLoc` (the
-    # PARSE-TIME-captured file:line:col + `n.repr`) is glued in VERBATIM.
-    var out2: seq[Path]
-    let vcsTy = stmt.vcsVariantTy
-    let vcsBudget = w.settings.budget.maxVariantConstructorForks
-    if vcsBudget > 0 and stmt.vcsTagSet.len > vcsBudget:
-      # RFC-0005 S6a: `beBudgetExhaustedUnmodelled` (`dcSubstituted`), not
-      # the k-unroll's `beBudgetExhausted` — the construction is skipped,
-      # the destination left UNBOUND (a later read declines as
-      # `feGlobalReadUnmodelled`) and `vcsDiscExpr`/`vcsPlainFields` are
-      # never lowered, so their raise forks are dropped: a stale env.
-      let d = w.degrade(beBudgetExhaustedUnmodelled,
-        stmt.vcsLoc & ": variant constructor fork budget exhausted " &
-             "(maxVariantConstructorForks=" & $vcsBudget & ", feasible " &
-             "tags=" & $stmt.vcsTagSet.len & ") — construction unmodeled " &
-             "(beBudgetExhaustedUnmodelled)")
-      for p in paths:
-        # `stmt.vcsResultVar` is deliberately left UNBOUND in `p.env` — the
-        # same safe-degrade idiom the P2b ref-variant decline uses (any
-        # later read misses the env and declines — observed in RFC-0005
-        # S6a as `feGlobalReadUnmodelled`'s havoc, ⊤ → sxUnknown, and the
-        # parser's A-normalised `let p = <temp>` makes that read immediate;
-        # SND-1's per-path taint is ALSO forced via `forkPathTainted` so the verdict never rides a
-        # bare `w.sawUnknown` alone). RFC-0005 S1: one token `d`, forked
-        # onto every path.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-      return out2
-    # N9 (round-6 review remediation), made RECURSIVE by D2 (round-6 review
-    # remediation). `maxVariantConstructorForks` above only bounds the OUTER
-    # fork count (`vcsTagSet.len`); the per-fork field-allocation loop below
-    # walks EVERY declared arm of `vcsTy` (construction has no "active arm"
-    # to narrow to — see this stmt kind's own doc comment), so the real
-    # per-construct allocation cost is `vcsTagSet.len` (bounded above) TIMES
-    # the total LEAF-ALLOCATION cost across ALL arms' fields (previously
-    # bounded only by a FLAT field COUNT, which undercounted any composite
-    # field type — `array[N, T]`/nested tuple/nested variant — whose own
-    # allocation recurses; see `allocCostOf`'s doc comment, `smt/types.nim`,
-    # for the full gap writeup and the recursion it mirrors from
-    # `allocateSym`). A second STRUCTURAL check — same before-any-solver-
-    # work timing as the fork-count check, same `beBudgetExhausted` decline
-    # kind (SND-4 "mirror, don't reinvent") — catches a wide- or deeply-
-    # fielded variant whose fork count alone sits comfortably under budget.
-    var vcsArmFieldCost = 0'i64
-    for arm in vcsTy.vArms:
-      for ft in arm.fieldTypes:
-        vcsArmFieldCost = satAdd64(vcsArmFieldCost, allocCostOf(ft))
-    let vcsFieldAllocs = satMul64(int64(stmt.vcsTagSet.len), vcsArmFieldCost)
-    let vcsFieldBudget = w.settings.budget.maxVariantConstructorFieldAllocs
-    if vcsFieldBudget > 0 and vcsFieldAllocs > int64(vcsFieldBudget):
-      # RFC-0005 S6a: same substitution as the fork-count budget above.
-      let d = w.degrade(beBudgetExhaustedUnmodelled,
-        stmt.vcsLoc & ": variant constructor field-allocation budget " &
-             "exhausted (maxVariantConstructorFieldAllocs=" &
-             $vcsFieldBudget & ", forks=" & $stmt.vcsTagSet.len &
-             " x leaf-allocs-per-fork=" & $vcsArmFieldCost & " = " &
-             $vcsFieldAllocs & ") — construction unmodeled " &
-             "(beBudgetExhaustedUnmodelled)")
-      for p in paths:
-        # Same safe-degrade idiom as the fork-count budget above.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-      return out2
-    # N39 (round-6 fix round 5). GUARD-BEFORE-CALL, hoisted above the
-    # `paths`/`tag` fork loops (mirrors the two budget checks immediately
-    # above — a STRUCTURAL check against `vcsTy` itself, uniform across
-    # every input path, before any solver work): every declared arm's
-    # fields allocate FRESH in EVERY fork regardless of `tag` (this stmt
-    # kind's own doc comment above), so if ANY arm anywhere carries a field
-    # type `allocateSym` cannot back (an `itUninterp`
-    # `__ownership:`/`__unsupported:`/`__unsupported_witness:` placeholder,
-    # or an unsupported `itTable`/`itSet` shape — `classifyFieldType`
-    # legitimately produces these for a variant arm field;
-    # `scopedDeclineFieldTy`'s Bug #2 scoped decline only special-cases
-    # `itSeq`), EVERY fork would hit the SAME raw
-    # `raise (ref Symex*Error)` from inside this `for p in paths: for tag
-    # in stmt.vcsTagSet: ... allocateSym(...)` nest — the exact C-backend
-    # goto-exception hazard ADR-0023/SND-3 exists to ban (N36/N37
-    # precedent: `isIndex`'s Table[K,V]-indexing decline, `isVariantReassign`'s
-    # `defaultZero`-wrap). Caught EMPIRICALLY this slice via the stash
-    # method: an unguarded reach under block-nesting silently produced
-    # `sxUnsat` (0 errors) instead of the honest `sxUnknown` below — see
-    # `tests/tsymex_r6_n39_variant_field_alloc.nim`. Degrades the WHOLE
-    # construction (not per-tag: since every fork allocates every arm, a
-    # per-tag distinction would be a false precision this stmt kind
-    # structurally cannot offer) via the identical safe-degrade idiom the
-    # two budget checks above already use.
-    var vcsFieldIssue: Option[FieldAllocIssue] = none(FieldAllocIssue)
-    block findVcsFieldIssue:
-      for arm in vcsTy.vArms:
-        for ft in arm.fieldTypes:
-          vcsFieldIssue = unallocatableFieldIssue(ft)
-          if vcsFieldIssue.isSome: break findVcsFieldIssue
-    if vcsFieldIssue.isSome:
-      let d = w.degrade(vcsFieldIssue.get.kind,
-        stmt.vcsLoc & ": variant constructor field allocation " &
-             "unmodeled — " & vcsFieldIssue.get.msg &
-             " (arm-field allocation, not param-entry)")
-      for p in paths:
-        # Same safe-degrade idiom as the two budget checks above.
-        out2.add forkPathTainted(p, p.pc, p.env, d)
-      return out2
-    # RFC-0005 S8f: Nim accepts a runtime discriminator in constructor
-    # syntax only when no arm field is set, so every arm field is its
-    # type's `default(T)` -- walker <= 153 allocated each one FRESH, and a
-    # target on `p.rq == 777` was a clean `sxSat` whose witness could never
-    # reach it. A field type `defaultZero` cannot build declines the whole
-    # construction, the same safe-degrade idiom as the checks above.
-    block findVcsZeroIssue:
-      for arm in vcsTy.vArms:
-        for j, ft in arm.fieldTypes:
-          if not defaultZeroTotal(ft):
-            let d = w.degrade(feUnsupportedOp,
-              stmt.vcsLoc & ": variant constructor arm field `" &
-                   vcsTy.vObjectName & "." & arm.fieldNames[j] &
-                   "` has no modelled default value (" & $ft & ")")
-            for p in paths:
-              out2.add forkPathTainted(p, p.pc, p.env, d)
-            return out2
-    for p in paths:
-      let (discSV, pr) = lowerInExpr(p, stmt.vcsDiscExpr, w)
-      proc vcsDiscEq(tagOrd: int64): Z3Bool =
-        case discSV.kind
-        of svBV8:  discSV.bv8  == mkBitVec[8](tagOrd)
-        of svBV16: discSV.bv16 == mkBitVec[16](tagOrd)
-        of svBV32: discSV.bv32 == mkBitVec[32](tagOrd)
-        of svBV64: discSV.bv64 == mkBitVec[64](tagOrd)
-        of svInt:  discSV.zi   == mkZ3IntLit(tagOrd)
-        else:
-          raise newException(ValueError,  # [raise-audited: category-c: discriminator-kind invariant (isVariantConstructSym's discriminator is always BV/Z3Int-allocated)]
-            "isVariantConstructSym: disc must lower to a BV or Z3Int " &
-            "kind (got " & $discSV.kind & ")")
-      ## R1-style Invariant-3 soundness: `stmt.vcsDiscExpr` may itself
-      ## deposit scalar-raise-fork predicates. Drain and thread the
-      ## survivor(s) forward, mirroring `isVariantReassignSymbolic`.
-      for cp in drainScalarRaiseForks(pr, w):
-        var plainFields: seq[SymVal]
-        for fe in stmt.vcsPlainFields:
-          plainFields.add lower(cp.env, fe)
-        for tag in stmt.vcsTagSet:
-          var armFields = initOrderedTable[int, seq[SymVal]]()
-          var armNames  = initOrderedTable[int, seq[string]]()
-          for arm in vcsTy.vArms:
-            armNames[arm.tagOrdinal] = arm.fieldNames
-            var fields: seq[SymVal]
-            for j, ft in arm.fieldTypes:
-              inc variantConstructSymFreshCounter
-              let path = "__variantConstructSym." & vcsTy.vObjectName & ".@" &
-                         arm.tagName & "." & arm.fieldNames[j] & ".fork" &
-                         $tag & "." & $variantConstructSymFreshCounter
-              # RFC-0005 S8f: Nim sets no arm field in a runtime-
-              # discriminator constructor, so every arm field is its
-              # type's `default(T)` (`findVcsZeroIssue` above guarantees
-              # `defaultZeroTotal` for every one).
-              fields.add defaultZero(ft, path)
-            armFields[arm.tagOrdinal] = fields
-          let discBoxed = new(SymVal)
-          discBoxed[] = discConst(vcsTy.vDiscTy, int64(tag))
-          let newSV = SymVal(kind: svVariant, vDisc: discBoxed,
-                             vDiscName: vcsTy.vDiscName,
-                             vObjectName: vcsTy.vObjectName,
-                             vArmFields: armFields, vArmFieldNames: armNames,
-                             vPlainFields: plainFields,
-                             vPlainFieldNames: vcsTy.vPlainFieldNames)
-          var newEnv = cp.env
-          newEnv[stmt.vcsResultVar] = newSV
-          out2.add forkPath(cp, cp.pc & @[vcsDiscEq(int64(tag))], newEnv)
-    return out2
+    walkVariantConstructSymArm(stmt, paths, w)
   of isVariantField:
-    # R14: same shape as `isIndex` (not named in the finding, but identical
-    # in structure) — the in-arm path is the only continuation `survivors`
-    # gets; out-of-arm is a discarded-result `forkDefect` side channel,
-    # narrowed per-mode inside `maybeForkDefect`. Nothing separate to
-    # select here.
-    case w.mode
-    of wmExplore: discard
-    of wmFollowConcrete: discard
-    # Phase 11 cycle 5 — A-normalised arm-field access. Forks: the
-    # in-arm path adds `disc IN matchingTags` to pc and binds
-    # `retName` to an ite-chain over the matching arms' field
-    # SymVals; the out-of-arm path adds `disc NOT IN matchingTags`
-    # and (under `tFieldDefect`) is solved for a witness.
-    var survivors: seq[Path]
-    for p in paths:
-      if w.shouldStop: return
-      ## Drain-coverage audit: `stmt.vfRecv` is always an env-resident var —
-      ## the parser A-normalises so variant object accesses are through named
-      ## bindings (no complex expression as receiver). A violation here means
-      ## the parser emitted a non-var receiver and drains would be needed.
-      let recv = lowerLeafInExpr(p, stmt.vfRecv)
-      # Phase 14 cycle A1c: select the axis-local disc + arm tables
-      # by SymVal kind. For svMultiVariant, locate the axis whose
-      # arm field-name lists include vfFieldName — the parser
-      # selected the same axis via the same membership test.
-      var disc: SymVal
-      var armFieldsTbl: OrderedTable[int, seq[SymVal]]
-      var armFieldNamesTbl: OrderedTable[int, seq[string]]
-      case recv.kind
-      of svVariant:
-        disc            = recv.vDisc[]
-        armFieldsTbl    = recv.vArmFields
-        armFieldNamesTbl = recv.vArmFieldNames
-      of svMultiVariant:
-        var found = false
-        for ax in recv.mvAxes:
-          for _, names in ax.armFieldNames.pairs:
-            if stmt.vfFieldName in names:
-              disc             = ax.disc[]
-              armFieldsTbl     = ax.armFields
-              armFieldNamesTbl = ax.armFieldNames
-              found = true
-              break
-          if found: break
-        doAssert found,
-          "isVariantField on svMultiVariant: no axis owns field " &
-          stmt.vfFieldName
-      else:
-        # #163 regression fix (post-round-9 gate). A receiver that is
-        # NEITHER `svVariant` NOR `svMultiVariant` here is reachable ONLY
-        # when the receiver's own CONSTRUCTION already declined --
-        # `dsl_parser.nim`'s `itVariant`/`itMultiVariant` object-constructor
-        # edge-case arms bind a type-correct but non-variant-shaped
-        # placeholder (`unsupportedFieldPlaceholder`: no literal IR
-        # constructor exists for a variant-shaped value, so the placeholder
-        # is a plain `mkIntLit(0)`, deliberately not variant-shaped) --
-        # never a fresh walker bug. This used to be a bare `doAssert false`
-        # (an uncatchable `AssertionDefect`, reported at the `runSymex`
-        # boundary as `weInternalWalkerFault` -- an internal-bug
-        # attribution for an ordinary, everywhere-applicable consequence of
-        # an existing, honestly-classified construction gap). Degrade this
-        # ONE path in-band instead: record the classified decline and drop
-        # the path (mirrors `isUnsafeCast`'s "halt this path" idiom) rather
-        # than fabricate arm data for a receiver that was never a real
-        # variant to begin with. RFC-0005 S1: HALT site — token discarded.
-        discard w.degrade(seVariantFieldOnDeclinedCtor,
-          "variant field '" & stmt.vfFieldName & "' read on a " &
-               "receiver whose construction was already declined " &
-               "(non-variant SymVal kind=" & $recv.kind & ") " &
-               "(seVariantFieldOnDeclinedCtor)")
-        continue
-      # Build the matching-arm equalities + collect each arm's SymVal
-      # for the requested field.
-      var armEqs: seq[Z3Bool]
-      var armBindings: seq[(int, SymVal)]
-      for tag in stmt.vfMatchingTags:
-        let armNames  = armFieldNamesTbl[tag]
-        let fieldIx   = armNames.find(stmt.vfFieldName)
-        if fieldIx < 0: continue
-        let armEq =
-          if tag == -1:
-            # Phase 14 cycle A2: else-arm membership is the
-            # conjunction of negations against all non-else arms on
-            # the same axis (ADR-0003 D2).
-            var conj: Z3Bool
-            var seeded = false
-            for otherTag in armFieldsTbl.keys:
-              if otherTag == -1: continue
-              let neg = not variantDiscEq(disc, int64(otherTag))
-              if not seeded: conj = neg; seeded = true
-              else:          conj = conj and neg
-            if not seeded:
-              raise newException(ValueError,  # [raise-audited: category-c: documented parser-invariant (own comment family: parser should not have emitted such an IR)]
-                "isVariantField: else-only variant has no non-else " &
-                "arms to negate against (degenerate; the parser " &
-                "should not have emitted such an IR)")
-            conj
-          else:
-            variantDiscEq(disc, int64(tag))
-        armEqs.add armEq
-        armBindings.add (tag, armFieldsTbl[tag][fieldIx])
-      doAssert armEqs.len > 0,
-        "isVariantField: parser produced an empty matchingTags list"
-      var inArmCond = armEqs[0]
-      for k in 1 ..< armEqs.len:
-        inArmCond = inArmCond or armEqs[k]
-      let outOfArmCond = not inArmCond
-      # FieldDefect fork — Phase 16 D1a unconditional under `wmExplore`;
-      # R14 narrows the `wmFollowConcrete` case — see `maybeForkDefect`'s
-      # doc comment (same shape as `isIndex`'s OOB fork: a discarded-result
-      # side channel for try/except routing + target-witness search, not a
-      # fork-every-arm construct).
-      maybeForkDefect(p, outOfArmCond, "FieldDefect", none(string), w)
-      if w.shouldStop: return
-      # In-arm path — bind retName to the ite-chain over arms.
-      var bound = armBindings[armBindings.len - 1][1]
-      for k in countdown(armBindings.len - 2, 0):
-        let eqB = variantDiscEq(disc, int64(armBindings[k][0]))
-        bound = iteSV(eqB, armBindings[k][1], bound)
-      # RFC-0005 S6b: drain the arm fold's merge-degrade taint onto THIS
-      # path (see `isIndex`'s array arm: a direct `iteSV` call).
-      let pM = drainPendingLowerEffects(p)
-      var newEnv = pM.env
-      newEnv[stmt.vfRetName] = bound
-      survivors.add forkPath(pM, pM.pc & @[inArmCond], newEnv)
-    survivors
+    walkVariantFieldArm(stmt, paths, w)
   of isReturn:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -16651,645 +22662,7 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         exitReturn(forkPath(cp, cp.pc, newEnv), w)
     @[]
   of isCall:
-    # R14: a resolved `isCall` is NOT itself a fork-every-arm construct —
-    # `stmt.callee` names exactly ONE statically-resolved `ProcSig` (the
-    # opaque/uncached/uninstantiated/depth-capped early-outs below all
-    # produce exactly one path per input path too, via a fresh havoc'd
-    # retSym; only the raise-escape channel can add more, orthogonal to
-    # `w.mode`). The callee body is walked with `walk(sig.body, ...)` —
-    # THIS SAME `w` (mode/concreteEq carried by reference) — so any
-    # `if`/`while`/etc. INSIDE the callee already follows the concrete
-    # trace correctly once THEIR OWN dispatch arms do (isIf per G1b;
-    # isWhile/isVariantReassignSymbolic per this R14 pass). There is no
-    # separate "which arm of this call" decision for follow-concrete to
-    # narrow at the call site itself — the discard below is correct BY
-    # CONSTRUCTION, not an oversight.
-    case w.mode
-    of wmExplore: discard
-    of wmFollowConcrete: discard
-    # ---- #137: opaque effectful call ----
-    if stmt.opaque:
-      # Issue #163 slice 4: an opaque call the parser proved INERT
-      # (`isInertOpaqueCall`, dsl_parser.nim — statement position, every
-      # argument plainly value-typed) is a no-op here: no taint, no
-      # `w.sawUnknown`, no classified error. Returning the input paths
-      # unchanged is exactly what an empty block does, and is identical to
-      # the treatment `{.symexTransparent.}`'s parse-time drop (slice 1)
-      # produces for the same shape of call.
-      #
-      # Soundness: with no bound result and nothing writable passed in, the
-      # only channel left for such a callee to affect the SUT is a
-      # module-level global — and the walker does not model globals AT ALL,
-      # so a SUT that could observe one already degrades to sxUnknown (an
-      # unclassified KeyError) at its OWN read site, independently of this
-      # call. Dropping the taint here cannot introduce a false verdict. What
-      # it forgoes is a callee that never returns or raises (`echo` can
-      # raise IOError) reached out of the intended order — a pre-existing,
-      # symmetric gap: an opaque call placed AFTER the target was already
-      # invisible to it before this change. Ordering, not soundness, moves.
-      if stmt.opaqueInert:
-        # #163 review R1: inert means a no-op for CONTROL FLOW and RESULT
-        # BINDING (there is no bound result — `isInertOpaqueCall` only ever
-        # fires in statement position), NOT a no-op for the ARGUMENT
-        # EXPRESSIONS themselves. Those are real Nim expressions the caller
-        # evaluates before the call runs, and `isInertArg` (dsl_parser.nim)
-        # checks only the argument's STATIC RESULT TYPE — never its
-        # expression shape — so an inline defect-fork shape among them
-        # (div/mod by zero, signed overflow, `parseInt`, `s[i]`, a seq
-        # slice — `rhsHasInlineDefectFork`'s class) is admitted here too,
-        # and can raise on its own. Raise obligations are a RUNTIME side
-        # effect of `lower()` (it populates sinks like `divByZeroConds`),
-        # never a static IR artifact, so skipping the lowering — as the
-        # fast path used to — makes the obligation never exist at all.
-        #
-        # Mirror the ordinary resolved-callee arm a few hundred lines
-        # below (`argVals.add lower(p.env, stmt.cargs[i], argProto)`
-        # followed by `drainScalarRaiseForks`): lower each argument for
-        # its SIDE EFFECTS ONLY (the value itself is discarded — there is
-        # nothing to bind on the inert path) and drain the raise-fork
-        # sinks it populates before returning the survivors. The call
-        # itself is still never walked and never taints — only the
-        # arguments' own defect obligations become live.
-        var out1: seq[Path]
-        for p in paths:
-          if w.shouldStop: return
-          seedCallerHeapThreadvars(p)
-          convFloatToIntBoundConds = @[]
-          w.convFloatToIntBoundConds = @[]
-          rangeDefectConds = @[]
-          w.rangeDefectConds = @[]
-          parseIntRaiseConds = @[]
-          w.parseIntRaiseConds = @[]
-          divByZeroConds = @[]
-          w.divByZeroConds = @[]
-          overflowConds = @[]
-          w.overflowConds = @[]
-          strIndexOobConds = @[]
-          w.strIndexOobConds = @[]
-          seqOobConds = @[]
-          w.seqOobConds = @[]
-          arithTrapConds = @[]
-          uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-          w.arithTrapConds = @[]
-          w.uninitReadConds = @[]                ## RFC-0005 S8bv
-          regexRaiseMsgs = @[]
-          w.regexRaiseMsgs = @[]
-          w.raiseOrder = @[]              ## RFC-0005 S8bb: the order log
-          for arg in stmt.cargs:
-            discard lower(p.env, arg)
-          let pd = drainPendingLowerEffects(p)
-          for sp in drainScalarRaiseForks(pd, w):  ## parseInt/div-mod/overflow/index raise forks
-            out1.add sp
-        return out1
-      # Don't resolve a body; allocate fresh retSym; mark path
-      # uncertain so any target reached on this path degrades to
-      # sxUnknown rather than emitting an unsound witness.
-      #
-      # Issue #163: say WHY, and name the call. This arm used to set
-      # `w.sawUnknown` bare, which is what the Invariant-7 backstop in
-      # `runSymexImpl` reports as `weInternalWalkerFault` ("the walker itself
-      # hit a bug here") — a misdiagnosis for an ordinary unmodelled call, and
-      # the one an `echo` ahead of the interesting branch produced. The drain
-      # dedups by message, so N calls to the same callee collapse to one
-      # entry while two different callees each get named.
-      # RFC-0005 S1: one `degrade` (record + token), forked onto every path.
-      let d = w.degrade(feOpaqueCallUnmodelled,
-        "opaque call `" & stmt.callee & "` is not modeled — its result " &
-             "and any state it touches are unknown, so every path through it " &
-             "is tainted. If the call cannot affect the code under test " &
-             "(void, value arguments, nothing read back), mark it " &
-             "`{.symexTransparent.}` and symex will drop it instead")
-      var out2: seq[Path]
-      for p in paths:
-        var newEnv = p.env
-        var pcInit: seq[Z3Bool]
-        if stmt.retName.len > 0:
-          inc w.synthZ3
-          let z3Name = stmt.retName & "_op" & $w.synthZ3
-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-      return out2
-    if not w.procs.hasKey(stmt.callee):
-      # The callee's `ProcSig` is absent. Pre-G1c this "should not happen"
-      # (the parser rejected unresolved callees at compile time); G1c adds a
-      # legitimate cause — a generic instantiation OVER the per-proc cap is
-      # intentionally NOT registered (`maxInstantiationsPerProc`), so its
-      # `mkCall` key has no `ProcSig`. Treat it exactly like the depth-bail
-      # arm: continue with a FRESH unconstrained retSym (so a downstream read
-      # of `stmt.retName` does not KeyError) and mark the surviving paths
-      # uncertain so any target reached on them degrades to sxUnknown — never
-      # an unsound witness. `geInstantiationCapped` is surfaced from
-      # `prog.parseErrors` (see `runSymexImpl`), so the unknown is never silent.
-      # RFC-0005 S1b (§2.2 table, §2.5 point 3): the decline's kind now rides
-      # the never-registered callee KEY (`unregisteredCalleeKey`, minted by
-      # `ensureProcRegistered` for the over-cap / distinct-barrier /
-      # unresolvable-`getImpl` declines), so this arm records it at the walk
-      # site through `degrade` — the recorded error is the run act and its
-      # token the path act (was a kindless run mark + kindless ⊤ token). A
-      # missing callee with NO parse-time decline behind it has no modelled
-      # cause at all: that is a walker/parser bug, recorded as such.
-      var declineKind: SymexErrorKind
-      let d =
-        if unregisteredCalleeKind(stmt.callee, declineKind):
-          w.degrade(declineKind,
-            "call to unregistered callee `" & stmt.callee & "` reached at " &
-                 "walk time — declined at parse time (" & $declineKind &
-                 "); the call returns a fresh unconstrained value and the " &
-                 "callee's effects are not modelled",
-            scope = calleeKeyed(stmt.callee))   # RFC-0005 S8 (§2.5 point 3)
-        else:
-          w.degrade(weInternalWalkerFault,
-            "call to callee `" & stmt.callee & "` reached at walk time with " &
-                 "no registered ProcSig and no parse-time decline behind it " &
-                 "(weInternalWalkerFault)")
-      var out2: seq[Path]
-      for p in paths:
-        var newEnv = p.env
-        var pcInit: seq[Z3Bool]
-        if stmt.retName.len > 0:
-          inc w.synthZ3
-          let z3Name = stmt.retName & "_cap" & $w.synthZ3
-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-      return out2
-    let sig = w.procs[stmt.callee]
-    # Statistics
-    if not w.callStats.hasKey(stmt.callee):
-      w.callStats[stmt.callee] = CallStat(name: stmt.callee, walked: 0, cacheHits: 0)
-    # Depth check. RFC-0010 B4 round 2 (REVERTED): a `cap > 0 and` guard was
-    # added here so `maxCallDepth = 0` would mean unlimited, matching
-    # `maxFrontierSize`/`maxSplitParts`'s house style. Two independent
-    # reviewers reproduced a SIGSEGV under `maxCallDepth: 0` against ordinary
-    # linear recursion (e.g. `f(n) = if n > 0: f(n-1) + 1 else: 0`): with the
-    # cap disabled, `walk` recurses NATIVELY once per SUT call-stack level,
-    # and `w.activeCalls`'s cycle-breaking only fires for recursion with
-    # IDENTICAL argument shapes (`argShapeKey`/`symValHash` hash the Z3 AST,
-    # which differs at every level of `f(n-1)`) -- so it never catches this,
-    # the ordinary case, not a pathological one. A native-stack-exhaustion
-    # SIGSEGV takes the whole test BINARY down (every other suite sharing
-    # it), which is worse than the `sxUnknown` this guard was meant to avoid
-    # and a more severe Invariant-3 violation than the bug it fixed. Unlike
-    # `maxClosureInlineCount` (`applyClosureGround` below, guard correctly
-    # kept -- the walker declines a forward-declared self-referencing closure
-    # with `ceClosureUnknownCallee` before it can recurse) there is no
-    # equivalent decline here: EVERY recursive call reaches this depth check.
-    # `maxCallDepth` is therefore a THIRD documented "0 does not mean
-    # unlimited" exception alongside `maxLoopUnwind`/`seqInlineThreshold` --
-    # see `ResourceBudget`'s umbrella doc comment and this field's own doc,
-    # both in smt/types.nim, for the full rationale. An explicit 0 exhausts
-    # on the very first call, by design; a caller wanting deep analysis
-    # writes an explicit bound sized to the SUT's real max call depth
-    # instead. Do not assume a "large-looking" round number is automatically
-    # safe -- measured directly (this engine's Linux/podman debug build, 8MB
-    # `ulimit -s`) unconstrained linear recursion is safe through a cap of
-    # 85 and SIGSEGVs by 88, so even `maxCallDepth: 1000` itself crashes;
-    # the safe ceiling is build/platform-dependent, not a fixed constant.
-    if w.callStack.len >= w.settings.budget.maxCallDepth:
-      # Bail: continue with a fresh unconstrained retSym; flag unknown.
-      # The surviving paths are marked uncertain so any target hit on
-      # them degrades to sxUnknown (the witness would otherwise be
-      # an unsoundly-Z3-defaulted value).
-      # #161/#163 handoff follow-up: this used to set `sawUnknown` bare —
-      # the run-level Invariant-7 backstop (`runSymexImpl`) then reported an
-      # unclassified `weInternalWalkerFault`, indistinguishable from a real
-      # walker bug. `beBudgetExhausted` (chapulin catalog #5(b)) already
-      # names exactly this shape — "a walk budget ran out with paths still
-      # live" — for `maxLoopUnwind`/`maxFrontierSize`; this call-inlining
-      # depth cap is a sibling of the SAME budget family, so it reuses the
-      # kind rather than adding a near-duplicate. The message names the
-      # exhausted budget and its current value so "raise maxCallDepth" reads
-      # as actionable configuration advice, not a shrug.
-      # RFC-0005 S6a: that reuse is exactly what §3.2's standing rule
-      # forbids once `classOf` reads one word per kind — this bail is not a
-      # k-unroll survivor. It continues with a fresh havoc `retSym` but
-      # DROPS the callee's var-param writes, heap writes and raises (and
-      # never lowers the actuals): a stale env, `dcSubstituted`. Split off
-      # as `beBudgetExhaustedUnmodelled`. Classifying the merged kind by the
-      # frontier prune (`dcOmitted`) would have stripped these survivors'
-      # path taint — a witness through the havoc retSym reported clean sxSat.
-      # RFC-0005 S8an: a path that reaches the bail but that no execution
-      # can take (the `if` arms of a recursion are forked without a
-      # feasibility check, so `fact(1)`'s `k > 1` arm reaches the next
-      # level) is dropped, not bailed: it has no behaviour to lose. A
-      # recursion whose depth the arguments decide is then walked exactly
-      # within the budget.
-      var live: seq[Path]
-      for p in paths:
-        if not pathInfeasible(w.z3, p, w.settings): live.add p
-      if live.len == 0: return live
-      let d = w.degrade(beBudgetExhaustedUnmodelled,
-        "call-inlining depth budget exhausted (maxCallDepth=" &
-             $w.settings.budget.maxCallDepth & ") while inlining `" &
-             stmt.callee & "` — the call stack is at least as deep as the " &
-             "configured budget; raise settings.budget.maxCallDepth if " &
-             "this SUT's real call nesting is deeper than the current " &
-             "bound (beBudgetExhaustedUnmodelled)")
-      var out2: seq[Path]
-      for p in live:
-        var newEnv = p.env
-        var pcInit: seq[Z3Bool]
-        if stmt.retName.len > 0:
-          inc w.synthZ3
-          let z3Name = stmt.retName & "_d" & $w.synthZ3
-          newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-        out2.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-      out2
-    else:
-      var survivors: seq[Path]
-      for p in paths:
-        if w.shouldStop: return
-        # Phase 15 R1b: seed the caller-heap threadvars from THIS path so a
-        # CLOSURE call lowered out of `p.env` below (a closure passed as an
-        # argument, or invoked while lowering an actual) descends with this
-        # path's threaded heap (ADR-0010 R1b — the closure-arm companion to the
-        # structural `isCall` forkPath threading).
-        seedCallerHeapThreadvars(p)
-        # Lower actuals in the caller env once; reused for cache key
-        # and for callee env construction.
-        var argVals: seq[SymVal]
-        convFloatToIntBoundConds = @[]    ## Phase 15 CR-3/CR-4: these args' bounds
-        w.convFloatToIntBoundConds = @[]  ## CR-9 Stage 6 Group-1: WalkCtx field
-        rangeDefectConds = @[]   ## RFC-0005 S8g: RangeDefect raise sink reset
-        w.rangeDefectConds = @[] ## R16-2: WalkCtx field
-        parseIntRaiseConds = @[]          ## CR-21: also reset threadvar (was only w.field)
-        w.parseIntRaiseConds = @[]        ## CR-9 Stage 6 Group-2: WalkCtx field
-        divByZeroConds = @[]              ## R16-3: div/mod-by-zero raise sink reset
-        w.divByZeroConds = @[]            ## R16-3: WalkCtx field
-        overflowConds = @[]               ## R16-4: signed-integer overflow raise sink reset
-        w.overflowConds = @[]             ## R16-4: WalkCtx field
-        strIndexOobConds = @[]            ## SND-4: string-index OOB raise sink reset
-        w.strIndexOobConds = @[]          ## SND-4: WalkCtx field
-        seqOobConds = @[]                 ## N14: seq del-OOB raise sink reset
-        w.seqOobConds = @[]                ## N14: WalkCtx field
-        arithTrapConds = @[]              ## RFC-0005 S8i: arithmetic-trap sink reset
-        uninitReadConds = @[]                  ## RFC-0005 S8bv: newSeqUninit HOF read sink
-        w.arithTrapConds = @[]            ## RFC-0005 S8i: WalkCtx field
-        w.uninitReadConds = @[]                ## RFC-0005 S8bv
-        regexRaiseMsgs = @[]              ## RFC-0005 S8ay: RegexError sink reset
-        w.regexRaiseMsgs = @[]            ## RFC-0005 S8ay: WalkCtx field
-        w.raiseOrder = @[]                ## RFC-0005 S8bb: the order log
-        for i, formal in sig.params:
-          ## v69 (sello #1): shape a bare-literal actual at the FORMAL's width.
-          ## Round-6 B5 (ADR-0028 Leg 1, chained composition): `intLitProto`
-          ## always shapes a plain `itInt` formal's literal actual as BV — the
-          ## type-driven default. A formal `collectIntOffsetParams` traced
-          ## (`IRParam.isIntOffset`, now also set for CALLEES via
-          ## `parseCalleeImpl`, not just top-level entry procs) instead needs
-          ## an svInt proto, so a LITERAL offset argument (e.g. the corpus's
-          ## own `readCStringHelper(s, 0)` first hop) arrives Int-sorted
-          ## exactly like a traced VARIABLE argument already does (a
-          ## non-literal lowers untouched regardless of proto — this only
-          ## ever affects literal shaping).
-          ## R3 (S2): stamp the proto's width metadata from the formal's own
-          ## static type so a LITERAL offset argument keeps its overflow
-          ## fork (`coerceIntLit` propagates it through onto the literal).
-          let argProto = if formal.isIntOffset:
-                           some(SymVal(kind: svInt, zi: mkInt(0),
-                                       ziWidth: formal.ty.width,
-                                       ziSigned: formal.ty.signed))
-                         else: intLitProto(formal.ty)
-          argVals.add lower(p.env, stmt.cargs[i], argProto)
-        let pd = drainPendingLowerEffects(p)  ## re-review S-3: drain float bounds + closure-arg heap
-        # CR-21/R16-3: drain parseInt and div/mod-by-zero raise conditions accumulated
-        # during arg-lowering. `drainScalarRaiseForks` chains both drains and returns
-        # the surviving non-raise continuations. The callee dispatch below runs once
-        # per continuation (typically 1 path, so zero overhead on the common case).
-        for p in drainScalarRaiseForks(pd, w):  ## R16-3: parseInt + div/mod-by-zero raise forks
-          if w.shouldStop: break
-          # Cache lookup — pure procs with deterministic-arg-shape hits
-          # are served without re-walking. The cache entry's `pcDelta`
-          # carries the returning-path constraints; we extend the
-          # current path with them.
-          let key = argShapeKey(stmt.callee, argVals)
-          if key in w.activeCalls:
-            # Mutual / direct recursion with identical args — the call
-            # is already being walked further up the stack. Break the
-            # cycle: return a fresh symbolic retval, mark uncertain.
-            w.callStats[stmt.callee] = CallStat(
-              name: stmt.callee,
-              walked: w.callStats[stmt.callee].walked,
-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
-            var newEnv = p.env
-            var pcInit: seq[Z3Bool]
-            if stmt.retName.len > 0:
-              inc w.synthZ3
-              let z3Name = stmt.retName & "_cyc" & $w.synthZ3
-              newEnv[stmt.retName] = freshRetSym(stmt.retTy, z3Name, pcInit)
-            # RFC-0005 S1b (§2.2 table): the cycle cut now records its own
-            # `weRecursionCycleCut` through `degrade` (was a path-only
-            # kindless ⊤ token that recorded nothing and marked the run only
-            # if a later target hit on this path did). The callee's body —
-            # its var-param/heap effects and raises — is not walked for this
-            # occurrence, so the degrade is run-relevant even when the cut
-            # path never reaches a finding.
-            let d = w.degrade(weRecursionCycleCut,
-              "recursive call to `" & stmt.callee & "` with an argument " &
-                   "shape already being walked up the stack — cycle cut " &
-                   "with a fresh unconstrained return value; the callee's " &
-                   "effects are not modelled for this call " &
-                   "(weRecursionCycleCut)")
-            survivors.add forkPathTainted(p, p.pc & pcInit, newEnv, d)
-            continue
-          if w.callCache.hasKey(key):
-            let entry = w.callCache[key]
-            w.callStats[stmt.callee] = CallStat(
-              name: stmt.callee,
-              walked: w.callStats[stmt.callee].walked,
-              cacheHits: w.callStats[stmt.callee].cacheHits + 1)
-            var newEnv = p.env
-            if stmt.retName.len > 0:
-              newEnv[stmt.retName] = entry.retSym
-            survivors.add forkPath(p, p.pc & entry.pcDelta, newEnv)
-            continue
-          # Build callee env
-          var calleeEnv: Env
-          # #140: track var-param formal→actual binding for write-back.
-          var varArgs: seq[(string, string)]   # (formalName, callerVarName)
-          for i, formal in sig.params:
-            calleeEnv[formal.name] = argVals[i]
-            if formal.isVar and stmt.cargs[i].kind == iekVar:
-              varArgs.add (formal.name, stmt.cargs[i].vname)
-          # RFC-0005 S8an: the callee also reaches every module-level global
-          # and, for a routine declared inside another, the enclosing
-          # variables it captures. Nim shares those locations with the
-          # caller; the walk copies each binding in here and carries the
-          # callee's value back out on every exit (`carryOuterBindings`),
-          # which is the same thing for one call running at a time. A root
-          # of a `var`/`addr` actual that is one of them is WITHHELD
-          # (`guarded`): it would reach the callee twice, and copy-in/
-          # copy-out of the argument would then not be Nim's semantics. A
-          # callee that touches a withheld name declines.
-          let guarded = guardedOuterNames(stmt.cGuardRoots, sig.captures)
-          let threadsOuter = threadOuterBindings(calleeEnv, p.env,
-                                                 sig.captures, guarded)
-          # Allocate retSym with a *runtime-fresh* Z3 name. Phase 15 G3: a
-          # non-bool, non-void return type (float/string/composite as well as
-          # int) routes through `freshRetSym` so a value-returning generic
-          # instantiated at e.g. `float64` gets a correctly-typed placeholder.
-          # Any init-side constraints (string byte-range floor, …) are threaded
-          # onto the post-call survivor paths below (where `retSym` flows out).
-          inc w.synthZ3
-          let z3Name = stmt.retName & "_c" & $w.synthZ3
-          var retInit: seq[Z3Bool]
-          # RFC-0005 S8z: a closure-returning callee's value is the
-          # `svClosure` its body builds, handed to the caller per returned
-          # path below; there is no symbol to allocate (it was
-          # `allocateSym(itUninterp)`, a `weInternalWalkerFault`).
-          let closureRet = not sig.isVoid and isClosureTy(stmt.retTy)
-          let retSym = if sig.isVoid or closureRet:
-                         SymVal(kind: svBool, bo: mkBool(true))  ## placeholder
-                       else:
-                         # Round-6 B5: thread the parse-time-traced offset
-                         # positions so a chained scan's second-hop offset
-                         # allocates svInt instead of the type-driven BV
-                         # default (see `IRStmt.isCall.retIntOffsetPositions`).
-                         freshRetSym(stmt.retTy, z3Name, retInit,
-                                     stmt.retIntOffsetPositions)
-          w.callStack.add CallFrame(
-            callee: stmt.callee, retSym: retSym,
-            retName: stmt.retName,
-            retTy: (if sig.isVoid: nil else: stmt.retTy),   # RFC-0005 S8l
-            returnedPaths: @[])
-          w.callStats[stmt.callee] = CallStat(
-            name: stmt.callee,
-            walked: w.callStats[stmt.callee].walked + 1,
-            cacheHits: w.callStats[stmt.callee].cacheHits)
-          w.activeCalls.incl key
-          # Phase 15 R1b call-ENTRY heap threading: the callee inherits the
-          # CALLER's logical-heap state (`heaps` / `heapDepth` / `allocCounters`)
-          # as its starting heap, instead of R1's fresh-empty default. `forkPath`
-          # deep-copies all three (`deepCopyHeapState` + by-value `heapDepth`), so
-          # a deref in the callee reads the SAME heap array the caller already
-          # constrained (ADR-0010 R1b). Live as of R1 (heaps are no longer empty).
-          let calleePath = forkPath(p, p.pc, calleeEnv)
-          # Phase 15 E1: per-frame exception context. Save the caller's frame
-          # (handler stack + in-flight exn) and install a fresh one before walking
-          # the callee body — a `try` opened inside the callee must not leak to
-          # the caller. Inert in E1 (handlerStack/inFlightExn always empty), wired
-          # so E3/E5 raise-flow threading is correct by construction.
-          pushFrame(w)
-          let guardMark = callGuardedNames.len   ## RFC-0005 S8an
-          for g in guarded: callGuardedNames.add g
-          let fallThroughRaw = walk(sig.body, @[calleePath], w)
-          callGuardedNames.setLen(guardMark)
-          # Round-6 A6-rider (walker v86): a callee whose body reaches the end
-          # via IMPLICIT fallthrough (no explicit `return`) after a
-          # CONDITIONAL, multi-statement `result = expr` assignment —
-          # `parseCalleeImpl`'s own documented "general parser path" for
-          # procs that aren't a single bare `result = expr` body (its
-          # comment: "Procs with conditional / multi-step result-assignment
-          # land via the general parser path ... need cycle-2 work to model
-          # `result` as a mutable binding") — used to leave `retSym`
-          # COMPLETELY UNCONSTRAINED: nothing tied the caller-visible return
-          # value to the callee's actual computed `result`. Confirmed via
-          # isolated bisection (`tests/tsymex_r6_a6r_callwitness.nim`) to be
-          # a genuine SOUNDNESS gap, not merely a witness-extraction cosmetic
-          # issue — a deliberately-unreachable target (whose impossibility
-          # depends on the callee's read of its `seq[byte]` argument) proved
-          # a FALSE `sxSat` pre-fix, with the reported witness floating free
-          # of the solver's actual (nonexistent) justification — chapulin's
-          # BLOCKER #12 "all-zero witness on an otherwise sxSat target" is
-          # the visible symptom of this cause: `retSym` was free, so Z3 chose
-          # a satisfying `retSym` directly and left every `data` cell
-          # unconstrained (defaulting to 0), independent of whether the
-          # target was genuinely reachable at all. The closure-call path
-          # (`applyClosureGround`, see `retBindEq(funcApp, cp.env["result"])`
-          # below) was ASSUMED at the time to already handle this exact shape
-          # correctly -- that assumption was FALSE (confirmed N16, walker
-          # v96): `applyClosureGround`'s fallThrough loop had no `else` twin
-          # at all until N16 added one, mirroring this arm's idiom. As of
-          # v96 both paths carry the identical else-twin; mirror that idiom
-          # here for the ordinary call-inlining path. Composite
-          # (non-scalar-wired) return kinds fall through to the SAME
-          # in-band-degrade net `isReturn`'s explicit-return arm already
-          # uses (never raise — Invariant 3), so an implicit-result
-          # fallthrough of an unsupported composite kind stays a classified
-          # `sxUnknown`, not a crash.
-          var fallThrough: seq[Path]
-          if sig.isVoid:
-            fallThrough = fallThroughRaw
-          elif closureRet:
-            # RFC-0005 S8z: as `completeReturn`'s closure arm.
-            for cp in fallThroughRaw:
-              if cp.env.hasKey("result") and cp.env["result"].kind == svClosure:
-                fallThrough.add cp
-              else:
-                let d = w.degrade(ceUnsupportedHof,
-                  "a closure-returning callee returns no lambda the walker " &
-                  "built (an untouched nil proc, or a proc value from elsewhere)")
-                fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
-          else:
-            for cp in fallThroughRaw:
-              if cp.env.hasKey("result"):
-                let retVal = cp.env["result"]
-                if retVal.kind notin retBindWiredKinds or
-                    not retBindKindsAgree(retSym, retVal):  # RFC-0005 S8u
-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- as `isReturn`'s
-                  # composite arm: the per-call `retSym` is left free, the
-                  # callee's effects ride `cp`, nothing is dropped.
-                  let d = w.degrade(feUnsupportedOpHavoc,
-                    "composite-typed implicit-result fallthrough (kind " &
-                         plainEnglishSymValKind(retVal.kind) & ") is not yet wired — path degraded " &
-                         "to sxUnknown (feUnsupportedOp)")
-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
-                elif not noteUninitReturn(retSym, retVal, cp.pc) and
-                     svMentionsUninit(retVal):
-                  # RFC-0005 S8bq: as `completeReturn`'s.
-                  let d = w.degrade(uninitReadKind, uninitReturnMsg)
-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
-                else:
-                  let (rSym, rVal) = reconcileInt(retSym, retVal)
-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
-                                           cp.env)
-              else:
-                # R2 (walker v90): a fallthrough path that never touched
-                # `result` at all — legal Nim, and DISTINCT from the
-                # `cp.env.hasKey("result")` branch above (v86's original
-                # fix). `result` still holds the return type's ZERO VALUE on
-                # such a path (Nim zero-initializes every `result` slot
-                # before the body runs); pre-fix, `cp` was forwarded here
-                # totally UNCHANGED — `retSym` stayed exactly as free as it
-                # was before v86, reintroducing v86's own false-`sxSat` shape
-                # for the never-assigned case (confirmed RED in
-                # `tests/tsymex_r6_r2_zerodefault_result.nim`). Bind `retSym`
-                # to `defaultZero(stmt.retTy, ...)` via the SAME `retBindEq`
-                # the assigned branch above uses, instead of leaving it free.
-                # `defaultZero`/`retBindEq` both still raise `ValueError` (or
-                # `SymexRefUnresolvedError`) for a handful of composite kinds
-                # neither is wired for (float, nested variant, distinct,
-                # ref/ptr, non-string-keyed table, non-int64 hash set) — for
-                # those, fall through to the SAME classified `sxUnknown`
-                # decline the `retVal.kind notin {...}` branch above uses,
-                # never bind a value the walker cannot back soundly.
-                try:
-                  let zeroVal = defaultZero(stmt.retTy, stmt.retName & ".zerodefault")
-                  let (rSym, rVal) = reconcileInt(retSym, zeroVal)
-                  fallThrough.add forkPath(cp, cp.pc & @[retBindEq(rSym, rVal)],
-                                           cp.env)
-                except ValueError, SymexRefUnresolvedError:
-                  # RFC-0005 S6b: `feUnsupportedOpHavoc` -- the free per-call
-                  # `retSym` ranges over the whole type, zero included.
-                  let d = w.degrade(feUnsupportedOpHavoc,
-                    "composite-typed implicit-result fallthrough " &
-                         "(untouched-result path, kind " & $stmt.retTy.kind &
-                         ") has no sound zero-default (" &
-                         getCurrentExceptionMsg() &
-                         ") — path degraded to sxUnknown (feUnsupportedOp)")
-                  fallThrough.add forkPathTainted(cp, cp.pc, cp.env, d)
-          # Phase 15 E3 inter-proc propagation. Capture any raises that escaped the
-          # CALLEE's own handlers (recorded on the callee frame's `escaped` channel
-          # by `routeRaise`) BEFORE popFrame restores the caller frame. After the
-          # pop, re-route each through the CALLER's handler stack: a `try` around
-          # this call site catches the helper's raise. Heap/pc state at the raise
-          # point is preserved on `er.path` (R1b merge — structural now, inert until
-          # Cluster R). The handler-body continuations join the call's survivors.
-          let calleeEscaped = w.frame.escaped
-          popFrame(w)
-          for er in calleeEscaped:
-            var rEnv = p.env
-            # RFC-0005 S8an: the callee's writes to globals and captures
-            # (before the `var` write-back, which is the later store).
-            carryOuterBindings(rEnv, er.path.env, sig.captures, guarded)
-            # RFC-0005 S8ac: the callee wrote its `var` formals through the
-            # caller's variables before it raised; the handler sees those
-            # writes (#140's write-back ran on the returning paths only).
-            for (formalName, callerName) in varArgs:
-              if er.path.env.hasKey(formalName):
-                rEnv[callerName] = er.path.env[formalName]
-            var raisePath = forkPath(er.path, er.path.pc, rEnv)
-            let touched = touchedGuard(er.path.env, guarded)
-            if touched.len > 0:
-              raisePath = forkPathTainted(raisePath, raisePath.pc, rEnv,
-                                          guardDegrade(w, stmt.callee, touched))
-            survivors.add routeRaise(raisePath, er.typeId, er.msg, w)
-            if w.shouldStop: return survivors
-          let frame = w.callStack[w.callStack.high]
-          w.callStack.setLen(w.callStack.high)
-          w.activeCalls.excl key
-          # Cache: single-return, single-fall-through-free, non-uncertain
-          # calls cache for argShape-keyed reuse. Phase 15 E3: a callee that
-          # escaped a raise is NOT cached — its summary is incomplete (a cache hit
-          # would replay the normal return but silently drop the escaped raise).
-          # ADR-0012: the cache replays only `pcDelta` (branch + retInit), NOT the
-          # callee's `defectSurvivorPc`. An arith-defect callee normally ESCAPES
-          # (calleeEscaped != [] ⇒ already not cached); but a callee that CATCHES
-          # its own defect (try/except) could add a defect-survivor fact without
-          # escaping. Conservatively skip caching when the callee added any such
-          # fact, so a cache hit can never silently drop a `not overflow`/`not
-          # divByZero` feasibility constraint. (Sound; merely less reuse.)
-          # RFC-0005 S8u: nor when the callee allocated or wrote the heap
-          # (`heapUnchanged`). A hit replays only `pcDelta`, so a second
-          # `new(result)` callee with the same argument shape would return
-          # the first call's address, and a heap write would be lost.
-          # RFC-0005 S8ac: nor when a `var` formal is bound to a caller
-          # variable. A hit replays only `pcDelta`, never the #140
-          # write-back, so the second call's writes would be lost.
-          # RFC-0005 S8an: nor when the callee reached a global or a
-          # capture. A hit replays only `pcDelta`: a read would return the
-          # first call's value across a write in between, and a write would
-          # be lost.
-          if calleeEscaped.len == 0 and not closureRet and varArgs.len == 0 and
-             not threadsOuter and
-             frame.returnedPaths.len == 1 and fallThrough.len == 0 and
-             not envHasGlobal(frame.returnedPaths[0].env) and
-             frame.returnedPaths[0].taint == {} and
-             frame.returnedPaths[0].defectSurvivorPc.len == p.defectSurvivorPc.len and
-             heapUnchanged(frame.returnedPaths[0], p):
-            let cp = frame.returnedPaths[0]
-            let prefixLen = p.pc.len
-            if cp.pc.len >= prefixLen:
-              # Phase 15 G3: `retInit` (retSym init-side constraints, e.g. the
-              # string byte-range floor) must ride in `pcDelta` so a cache REPLAY
-              # re-asserts them on the cached retSym.
-              w.callCache[key] = CallCacheEntry(
-                retSym: retSym,
-                pcDelta: retInit & cp.pc[prefixLen ..< cp.pc.len])
-          for cp in frame.returnedPaths & fallThrough:
-            var newEnv = p.env
-            if stmt.retName.len > 0:
-              newEnv[stmt.retName] =
-                if closureRet and cp.env.hasKey("result") and
-                    cp.env["result"].kind == svClosure:
-                  cp.env["result"]    # RFC-0005 S8z
-                else: retSym
-            # RFC-0005 S8an: the callee's globals and captures, as it left
-            # them (before the `var` write-back, which is the later store).
-            carryOuterBindings(newEnv, cp.env, sig.captures, guarded)
-            # #140: propagate var-param mutations back to caller's env.
-            for (formalName, callerName) in varArgs:
-              if cp.env.hasKey(formalName):
-                newEnv[callerName] = cp.env[formalName]
-            # Phase 15 R1b return-MERGE: the post-call caller path carries the
-            # callee's exit heap state back out (ADR-0010 R1b).
-            # `forkPathMerged(cp, ...)` forks from `cp` (the returned
-            # CALLEE path), so:
-            #   * `heaps`: REPLACEMENT — the callee's final `heaps` become the
-            #     caller's, so callee heap modifications are observed downstream.
-            #   * `heapDepth`: threaded from `cp` (the callee's exit depth).
-            # `allocCounters`, however, must NOT be a plain replacement: we take
-            # `max(caller[T], callee[T])` per type key so the freshness invariant
-            # holds — a post-call caller `new T` uses a counter strictly above any
-            # callee allocation and cannot collide with a callee-allocated ref on
-            # this path. (Inert until R2 wires `isNew`/`allocCounters` increments;
-            # the merge is correct by construction now.)
-            # Phase 15 G3: `retInit` threads the retSym init constraints onto the
-            # surviving caller path (where `retSym` becomes visible).
-            # R3 hardening / RFC-0005 S1: taint is neither a bare propagate
-            # nor a token join here — a post-call path is tainted by anything
-            # EITHER the caller (`p`) or the callee (`cp`) picked up, so this
-            # site uses the dedicated `forkPathMerged` (the union
-            # `cp.taint + p.taint`; was `p.uncertain or cp.uncertain`).
-            let merged = forkPathMerged(cp, cp.pc & retInit, newEnv, p)
-            # RFC-0005 S8an: the callee wrote a withheld root directly.
-            let touched = touchedGuard(cp.env, guarded)
-            if touched.len > 0:
-              taintInPlace(merged, guardDegrade(w, stmt.callee, touched))
-            for tkey, callerCount in p.allocCounters:
-              let calleeCount = merged.allocCounters.getOrDefault(tkey, 0)
-              if callerCount > calleeCount:
-                merged.allocCounters[tkey] = callerCount
-            survivors.add merged
-      survivors
+    walkCallArm(stmt, paths, w)
   of isAssert:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -17322,8 +22695,25 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     for p0 in paths:
       if w.shouldStop: return
       let (cond, pb0) = lowerBoolInExpr(p0, stmt.acond, w)
+      let pin = assumedStringPin(stmt.acond)
       for p in drainScalarRaiseForks(pb0, w):   ## RFC-0005 S8g: every continuation
-        out2.add forkPath(p, p.pc & @[cond], p.env)
+        var env2 = p.env
+        if pin.name.len > 0 and env2.hasKey(pin.name) and
+           env2[pin.name].kind == svString:
+          # RFC-0005 S8bl (item 2): `symexAssume(s == "lit")` pins `s` to
+          # the literal on this path, so the path reads it AS the literal
+          # from here on. The pc carries the equality, so every query is
+          # unchanged up to it; what changes is that every later term over
+          # `s` is ground, and Z3's rewriter evaluates it (`str.indexof`,
+          # `str.substr`, `str.at` of a literal). Before, each read went
+          # through the S8ag index-split word equations, and refuting an
+          # infeasible loop exit over the pinned string took Z3 the whole
+          # `seqQueryRLimit` (20M, ~100 s) per exit: an unrecognised pair
+          # loop over a 9-pair literal (B6-1-red, B6-6) spent 200-750 s.
+          # The parameter's model value is read from the solver's model,
+          # which satisfies the same equality (`initialEnv` is untouched).
+          env2[pin.name] = SymVal(kind: svString, str: mkString(pin.lit))
+        out2.add forkPath(p, p.pc & @[cond], env2)
     out2
   of isTargetLabel:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
@@ -17352,6 +22742,12 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       if stmt.tname == "__inject_walker_defect__":
         raise newException(AssertionDefect,  # [raise-audited: category-c: test-injection-only (see above)]
           "round-3 synthetic defect (symexTestInjectWalkerFault)")
+      # RFC-0005 S8ce: arm a raise shape (`injectShapeFault`); `dispatch`
+      # fires here and now.
+      const s8cePrefix = "__inject_s8ce_"
+      if stmt.tname.startsWith(s8cePrefix) and stmt.tname.endsWith("__"):
+        injectedShape = stmt.tname[s8cePrefix.len ..< stmt.tname.len - 2]
+        injectShapeFault("dispatch")
     if w.target.kind == stkLabel and w.target.label == stmt.tname:
       for p in paths:
         if w.shouldStop: return
@@ -17586,7 +22982,24 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # Stage 7 (CR-7) Cluster R: heap read, allocation, and heap write arms
     # extracted into `walkHeapArm` (defined above, before this proc body).
     # `isIndex` is left inline (handles Table/seq/array/ref — multi-theory).
-    walkHeapArm(stmt, paths, w)
+    # RFC-0005 S8ca: an element's write-back (`dwInPlace`) on a path with a
+    # live view is logged as in-place steps, path by path.
+    var viewed = false
+    if stmt.kind == isDerefWrite and stmt.dwInPlace:
+      for p in paths:
+        liveViewMarks(p, w)
+        if p.viewMarks.len > 0: viewed = true
+    if not viewed:
+      walkHeapArm(stmt, paths, w)
+    else:
+      var outs: seq[Path]
+      for p in paths:
+        if w.shouldStop: break
+        let heapsBefore = p.heaps
+        for q in walkHeapArm(stmt, @[p], w):
+          if q != p: logInPlace(p, heapsBefore, q)
+          outs.add q
+      outs
   of isUnsupported:
     case w.mode  ## RFC-fuzzer-nextgen G1a seam — inert until G1b/G2.
     of wmExplore: discard
@@ -17617,6 +23030,8 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     # turned every dead label into sxUnknown. A dropped path has no
     # behaviour to lose (its every later query carries the same UNSAT
     # constraints); an undecided query keeps the path, tainted as before.
+    # RFC-0005 S8bn's late-address and proc-field declines rely on this:
+    # they sit under forks the walk makes without a feasibility check.
     var live: seq[Path]
     for p in paths:
       if not pathInfeasible(w.z3, p, w.settings): live.add p
@@ -17654,6 +23069,713 @@ proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
       "unsafe pointer materialisation (" & stmt.ucReason & ") reached at " &
       "walk time -- path halted", scope = siteAnchored(stmt.ucMarker))
     @[]
+
+const capSnapPrefix = "__capsnap#"
+  ## RFC-0005 S8ax. A frame-local name (no `__gl:` prefix, so no call
+  ## threads it) holding a cell's value as a statement began, at one
+  ## statement nesting depth: `__capsnap#<depth>#<cell>`.
+
+func capSnapName(depth: int; cell: string): string =
+  capSnapPrefix & $depth & "#" & cell
+
+proc syncCapCellsFromCells(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` resumes in the current frame after a raise (a
+  ## handler, a `finally`): a capture whose cell differs from its local was
+  ## written through the cell by the call that raised, and the local takes
+  ## it. (Every other write the raise carries reaches both: a closure
+  ## applied here writes the local and the cell to one value.)
+  if w.frame.capCells.len == 0: return p
+  var env2 = p.env
+  var changed = false
+  for (local, cell) in w.frame.capCells:
+    if env2.hasKey(local) and env2.hasKey(cell) and
+       not sameSymVal(env2[local], env2[cell]):
+      env2[local] = env2[cell]
+      changed = true
+  if changed: forkPath(p, p.pc, env2) else: p
+
+const addrSnapPrefix = "__addrsnap#"
+  ## RFC-0005 S8ax. As `capSnapPrefix`, for an address-taken variable's
+  ## value as a statement began: `__addrsnap#<depth>#<local>`.
+
+func addrSnapName(depth: int; local: string): string =
+  addrSnapPrefix & $depth & "#" & local
+
+func lastWriteTo(stmt: IRStmt; local: string): bool =
+  ## RFC-0005 S8ax. The statement's last effect is the write of `local` by
+  ## name (an assignment or declaration of it): its value is the later one.
+  stmt.kind == isAssign and stmt.aname == local or
+    stmt.kind == isLet and stmt.lname == local
+
+proc dropSnapshots(env: var Env; prefix: string; depth: int): bool =
+  ## RFC-0005 S8ax. Delete `env`'s snapshots under `prefix` taken at `depth`
+  ## or deeper (a path that left a nested statement early, a `break`, still
+  ## carries its). True when any was deleted.
+  var stale: seq[string]
+  for k in env.keys:
+    if k.startsWith(prefix):
+      let rest = k[prefix.len .. ^1]
+      let hash = rest.find('#')
+      if hash > 0 and parseInt(rest[0 ..< hash]) >= depth: stale.add k
+  for k in stale: env.del k
+  stale.len > 0
+
+const viewFreedPrefix = "__viewFreed#"
+  ## RFC-0005 S8bu. Set (to any value) on a path where a `view` entry's
+  ## cell was assigned whole or resized while a raise unwound
+  ## (`syncAddrCellsFromHeap`); the next `syncAddrCells` taints the path.
+
+proc heapTermOf(p: Path; key: string): HeapTerm =
+  ## RFC-0005 S8ca. The term of heap array `key` on `p` (`HeapTerm`).
+  if p.heaps.hasKey(key): (ast: p.heaps[key], input: "")
+  else: (ast: Z3AnyAst(), input: heapInputName(p, key))
+
+proc viewHeapKeys(c: AddrCellEntry): Option[seq[string]] =
+  ## RFC-0005 S8ca. The heap arrays a `view` entry's value is read from
+  ## (`addrEntryValue`): the cell's own leaves, or, in an object held field
+  ## by field (`fieldSplitPointee`), the leaves of the field its path
+  ## starts with. none for a cell held another way (a case object's).
+  var keys: seq[string]
+  if c.path.len == 0 and c.ty.kind != itVariant and
+     not fieldSplitPointee(c.ty):
+    for suf in heapLeafSuffixes(c.ty): keys.add refPointeeTypeId(c.ty) & suf
+  elif c.path.len > 0 and fieldSplitPointee(c.ty):
+    let i = c.ty.fieldNames.find(c.path[0])
+    if i < 0: return none(seq[string])
+    for suf in heapLeafSuffixes(c.ty.fields[i]):
+      keys.add fieldHeapKey(c.ty, c.path[0]) & suf
+  else:
+    return none(seq[string])
+  some(keys)
+
+proc anchorViews(p: Path; cells: seq[AddrCellEntry]; frame: int) =
+  ## RFC-0005 S8ca. `p` enters `frame`, whose `view` entries (`bindVarLocs`)
+  ## take the cell's value now: each is marked with its heap arrays' terms
+  ## (`ViewMark`).
+  for c in cells:
+    if not c.view: continue
+    let keys = viewHeapKeys(c)
+    if keys.isNone: continue
+    var at: seq[HeapTerm]
+    for k in keys.get: at.add heapTermOf(p, k)
+    p.viewMarks.add ViewMark(local: c.local, frame: frame, keys: keys.get,
+                             at: at)
+
+proc liveViewMarks(p: Path; w: WalkCtx) =
+  ## RFC-0005 S8ca. Drop `p`'s marks of returned frames, and its in-place
+  ## steps once no mark is left.
+  var kept: seq[ViewMark]
+  for m in p.viewMarks:
+    if liveFrame(w, m.frame): kept.add m
+  if kept.len != p.viewMarks.len: p.viewMarks = kept
+  if p.viewMarks.len == 0 and p.inPlaceSteps.len > 0: p.inPlaceSteps = @[]
+
+proc logInPlace(before: Path; heapsBefore: Table[string, Z3AnyAst];
+                after: Path) =
+  ## RFC-0005 S8ca. Record on `after` each heap array an in-place element
+  ## write changed from `before` (whose arrays were `heapsBefore`) as an
+  ## in-place step. Only while a view is live: no one reads them otherwise.
+  if after.viewMarks.len == 0: return
+  for k, arr in after.heaps:
+    let was: HeapTerm =
+      if heapsBefore.hasKey(k): (ast: heapsBefore[k], input: "")
+      else: (ast: Z3AnyAst(), input: heapInputName(before, k))
+    let now: HeapTerm = (ast: arr, input: "")
+    if not sameHeapTerm(was, now):
+      after.inPlaceSteps.add (key: k, before: was, after: now)
+
+proc viewMarkOf(p: Path; local: string; w: WalkCtx): int =
+  ## RFC-0005 S8ca. The position in `p.viewMarks` of the `view` entry
+  ## `local` of the current frame (or of the live frame it was inherited
+  ## from: a capture), -1 when it has none.
+  result = -1
+  for i, m in p.viewMarks:
+    if m.local == local and m.frame == w.frame.frameId: return i
+  for i, m in p.viewMarks:
+    if m.local == local and liveFrame(w, m.frame): result = i
+
+proc viewInPlace(p: Path; mi: int): tuple[moved, inPlace: bool] =
+  ## RFC-0005 S8ca. Whether the heap arrays of mark `mi` changed since it
+  ## was taken, and whether every change is a chain of in-place steps
+  ## (`Path.inPlaceSteps`) from its terms to the current ones. Identity is
+  ## tracked by the write, not by the term's shape: an assignment of the
+  ## whole that rebuilds an equal term, or one whose data happens to be a
+  ## store chain over the old, is not an in-place step, so the copy no
+  ## longer follows (Nim gave the variable other memory).
+  let m = p.viewMarks[mi]
+  for i, k in m.keys:
+    var cur = m.at[i]
+    let now = heapTermOf(p, k)
+    var hops = 0
+    while not sameHeapTerm(cur, now):
+      result.moved = true
+      var found = false
+      for st in p.inPlaceSteps:
+        if st.key == k and sameHeapTerm(st.before, cur):
+          cur = st.after
+          found = true
+          break
+      inc hops
+      if not found or hops > p.inPlaceSteps.len: return (true, false)
+  result.inPlace = true
+
+proc reanchorView(p: Path; mi: int) =
+  ## RFC-0005 S8ca. Mark `mi` takes the current terms of its arrays.
+  for i, k in p.viewMarks[mi].keys:
+    p.viewMarks[mi].at[i] = heapTermOf(p, k)
+
+func capCellOf(w: WalkCtx; local: string): string =
+  ## RFC-0005 S8ca. The env cell of `local` when the current frame keeps
+  ## one (`CallFrameCtx.capCells`), else "".
+  for (cl, cell) in w.frame.capCells:
+    if cl == local: return cell
+  ""
+
+proc linkCapAddrCells(paths: seq[Path]; w: WalkCtx): seq[Path] =
+  ## RFC-0005 S8ca. After a statement, each by-reference capture of the
+  ## frame whose variable's address is taken: its address cell's pointer
+  ## is threaded beside its env cell (`capAddrName`), the env cell takes
+  ## the variable's value (`syncAddrCells` may just have read it from the
+  ## cell), and the closure-body mark (`capBoundName`) is spent. Before
+  ## S8ca the three copies (the local, the env cell, the address cell)
+  ## declined every statement of the frame.
+  for p in paths:
+    var env2 = p.env
+    var changed = false
+    for (local, cell) in w.frame.capCells:
+      if env2.hasKey(capBoundName(cell)):
+        env2.del capBoundName(cell)
+        changed = true
+      for c in w.frame.addrCells:
+        if c.local != local or c.bound or c.view or not env2.hasKey(c.cell) or
+           env2[c.cell].kind != svPtr or not env2.hasKey(local):
+          continue
+        let an = capAddrName(cell)
+        if not env2.hasKey(an) or not sameSymVal(env2[an], env2[c.cell]):
+          env2[an] = env2[c.cell]
+          changed = true
+        if env2.hasKey(cell) and not sameSymVal(env2[cell], env2[local]):
+          env2[cell] = env2[local]
+          changed = true
+    result.add(if changed: forkPath(p, p.pc, env2) else: p)
+
+proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+                   w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. After `stmt`, each address-taken variable of the
+  ## current frame (`CallFrameCtx.addrCells`) and the heap at its cell are
+  ## made equal again. The side that changed since the statement began wins
+  ## (`addrSnapName` holds the variable's value then, which was the cell's):
+  ## memory written through a pointer is read into the variable; the
+  ## variable written by name is stored into the cell. Both written within
+  ## one statement is two writes the walk cannot order, unless the
+  ## statement's last effect is the write by name (`lastWriteTo`):
+  ## declined (`feUnsupportedOp`), the variable's value winning. So is a
+  ## variable a closure also captures (its env cell is a third copy).
+  ## RFC-0005 S8bx (item 3): a `slot` entry the same, with the Table's value
+  ## at the key for the heap at the cell; a table write that may have removed
+  ## the key leaves the view on a slot Nim's `del` refills from another
+  ## entry, and declines too.
+  let ctx = w.z3
+  # RFC-0005 S8bu: a local with two entries (an `addr` actual's local,
+  # `addrPartName`: a part of a variable's cell, and the call's cell) takes
+  # a second pass, so a write that reached one of its cells and was read
+  # into the local reaches the other in the same statement.
+  var passes = 1
+  for i, c in w.frame.addrCells:
+    for j in 0 ..< i:
+      if w.frame.addrCells[j].local == c.local: passes = 2
+  for p in outs:
+    var env2 = p.env
+    var q: Path = nil
+    var clash: seq[string]
+    var lost: seq[string]   ## RFC-0005 S8bs
+    var freed: seq[string]   ## RFC-0005 S8bu
+    var viewWhy = ""         ## RFC-0005 S8bx
+    for c in w.frame.addrCells:
+      if c.view and env2.hasKey(viewFreedPrefix & c.local):
+        env2.del(viewFreedPrefix & c.local)
+        if q == nil: q = forkPath(p, p.pc, p.env)
+        freed.add displayName(c.local)
+    for pass in 0 ..< passes:
+      for c in w.frame.addrCells:
+        if c.slot.len > 0:
+          # RFC-0005 S8bx (item 3): the location is the Table's value at the
+          # key. A statement nested in this one has synced already, and left
+          # the view the same term as the table's value at the key.
+          if not env2.hasKey(c.local) or not env2.hasKey(c.slot): continue
+          let tabV = env2[c.slot]
+          let keyO = if tabV.kind == svTable: tabKeyTerm(c.ixs[0], tabV.tabKeyTy)
+                     else: none(Z3AnyAst)
+          if keyO.isNone:
+            viewWhy = "the table is not a modelled Table value"
+            continue
+          let xv = env2[c.local]
+          if sameSymVal(xv, tabValAt(ctx, tabV, keyO.get.raw)): continue
+          let snapV = addrSnapName(depth, c.local)
+          let snapT = addrSnapName(depth, c.slot)
+          let vCh = env2.hasKey(snapV) and not sameSymVal(xv, env2[snapV])
+          let tCh = env2.hasKey(snapT) and not sameSymVal(tabV, env2[snapT])
+          if not vCh and not tCh: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          if vCh and tCh and not lastWriteTo(stmt, c.local):
+            viewWhy = "the view and the table were both written in one statement"
+          elif vCh:
+            var e2 = env2
+            e2[addrSnapPrefix & "key"] = c.ixs[0]
+            let t2 = lower(e2, mkTableSet(mkVar(c.slot),
+              mkVar(addrSnapPrefix & "key"), mkVar(c.local)))
+            env2[c.slot] = t2
+            env2[c.local] = tabValAt(ctx, t2, keyO.get.raw)
+          else:
+            let present = wrap[Z3Bool](ctx,
+              checkedSelect(ctx, tabV.tabPresentRaw.raw, keyO.get.raw))
+            if guardLiteral(present) != glTrue:
+              viewWhy = "the table write may have removed the view's key"
+            else:
+              env2[c.local] = tabValAt(ctx, tabV, keyO.get.raw)
+          continue
+        if not env2.hasKey(c.local) or not env2.hasKey(c.cell) or
+           env2[c.cell].kind != svPtr:
+          continue
+        let refAst = env2[c.cell].ptrAst
+        # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
+        let curO = addrEntryValue(ctx, (if q == nil: p else: q), c, refAst)
+        if curO.isNone:
+          if displayName(c.local) notin lost: lost.add displayName(c.local)
+          continue
+        let cur = curO.get
+        let xv = env2[c.local]
+        if c.view:
+          # RFC-0005 S8bu: a `view` follows only an in-place write. S8ca:
+          # an in-place write is a logged step (`viewInPlace`), not a term
+          # of the right shape; Nim's by-value formal is never written by
+          # name.
+          let mi = viewMarkOf((if q == nil: p else: q), c.local, w)
+          if mi < 0:
+            if not sameSymVal(xv, cur) and displayName(c.local) notin freed:
+              freed.add displayName(c.local)
+            continue
+          let (moved, inPlace) = viewInPlace((if q == nil: p else: q), mi)
+          if not moved: continue
+          if q == nil: q = forkPath(p, p.pc, p.env)
+          reanchorView(q, mi)
+          if inPlace: env2[c.local] = cur
+          elif displayName(c.local) notin freed: freed.add displayName(c.local)
+          continue
+        if sameSymVal(xv, cur): continue
+        if q == nil: q = forkPath(p, p.pc, p.env)
+        let snap = addrSnapName(depth, c.local)
+        let hasSnap = env2.hasKey(snap)
+        if hasSnap and sameSymVal(xv, env2[snap]):
+          env2[c.local] = cur
+          continue
+        # RFC-0005 S8ca: a closure body that ran with this capture bound to
+        # the cell (`capBoundName`) kept the two equal at each exit, so the
+        # write it carried back by name is the cell's value.
+        let capCell = capCellOf(w, c.local)
+        if capCell.len > 0 and env2.hasKey(capBoundName(capCell)) and
+           hasSnap and not sameSymVal(cur, env2[snap]) and
+           not lastWriteTo(stmt, c.local):
+          env2[c.local] = cur
+          continue
+        if not (hasSnap and sameSymVal(cur, env2[snap])) and
+           not lastWriteTo(stmt, c.local) and displayName(c.local) notin clash:
+          clash.add displayName(c.local)
+        # RFC-0005 S8ca: an element of the variable written by name is
+        # written in its memory; its store is an in-place step.
+        let heapsBefore = q.heaps
+        let st = addrEntryStore(ctx, q, c, refAst, xv)
+        if (stmt.kind == isIndexAssign and stmt.iaRecvName == c.local) or
+           (stmt.kind == isAssign and stmt.aname == c.local and
+            stmt.avalue.kind == iekStrSetAt):   # a character, by name
+          logInPlace(q, heapsBefore, q)
+        if st.isSome: env2[c.local] = keepStrBuf(st.get, xv)   # S8ca
+        elif displayName(c.local) notin lost: lost.add displayName(c.local)
+    let dropped = dropSnapshots(env2, addrSnapPrefix, depth)
+    if q == nil and not dropped and clash.len == 0 and lost.len == 0 and
+       freed.len == 0 and viewWhy.len == 0:
+      result.add p
+      continue
+    if q == nil: q = forkPath(p, p.pc, env2)
+    else: q.env = env2
+    if viewWhy.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "an `mpairs` view and its Table passed to one call: " & viewWhy &
+             "; the two are one location in Nim, and the order of the " &
+             "writes is not modelled (RFC-0005 S8bx; feUnsupportedOp)"))
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8ax: the address-taken variable(s) " & clash.join(", ") &
+             " were written by name and through a pointer within one " &
+             "statement, or are also captured by a closure; the order of " &
+             "the writes is not modelled (feUnsupportedOp)"))
+    if lost.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bs: the `var` formal(s) " & lost.join(", ") & " are " &
+             "bound to a part of an address-taken variable that the walk " &
+             "no longer finds in its cell (feUnsupportedOp)"))
+    if freed.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bu: the by-value seq formal(s) " & freed.join(", ") &
+             " share the memory of an address-taken variable that was " &
+             "assigned whole or resized through a pointer: Nim's copy still " &
+             "points at the old memory, which it may have freed; the walk " &
+             "does not model freed memory (feUnsupportedOp)"))
+    result.add drainPendingLowerEffects(q)
+
+proc syncAddrCellsFromHeap(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8ax. `p` resumes in the current frame after a raise (a
+  ## handler, a `finally`): an address-taken variable out of step with its
+  ## cell was written through a pointer by the call that raised (every
+  ## statement before the raising one left the two equal, and a write by
+  ## name in the raising statement -- an assignment of the call's value,
+  ## a `var` actual's copy-out -- never happens on its raise, or reaches
+  ## the cell too, `inheritAddrCells`), so the variable takes the cell's
+  ## value.
+  var env2 = p.env
+  var changed = false
+  var reanchor: seq[int]   ## RFC-0005 S8ca
+  for c in w.frame.addrCells:
+    if env2.hasKey(c.local) and env2.hasKey(c.cell) and
+       env2[c.cell].kind == svPtr:
+      # RFC-0005 S8bs: a `bound` entry's location is a part of its cell.
+      let cur = addrEntryValue(w.z3, p, c, env2[c.cell].ptrAst)
+      if cur.isNone: continue
+      if c.view:
+        # RFC-0005 S8bu: a `view` follows only an in-place write (S8ca:
+        # a logged step, `viewInPlace`); any other is marked for the next
+        # statement's sync to taint.
+        let mi = viewMarkOf(p, c.local, w)
+        let (moved, inPlace) =
+          if mi >= 0: viewInPlace(p, mi)
+          else: (not sameSymVal(env2[c.local], cur.get), false)
+        if not moved: continue
+        if mi >= 0: reanchor.add mi
+        if inPlace: env2[c.local] = cur.get
+        else: env2[viewFreedPrefix & c.local] = cur.get
+        changed = true
+      elif not sameSymVal(env2[c.local], cur.get):
+        env2[c.local] = cur.get
+        changed = true
+  if not changed: return p
+  result = forkPath(p, p.pc, env2)
+  for mi in reanchor: reanchorView(result, mi)
+
+const elemSnapPrefix = "__elemsnap#"
+  ## RFC-0005 S8be. As `addrSnapPrefix`, for a seq with element cells as a
+  ## statement began (`__elemsnap#<depth>#s#<root>`) and the value of each
+  ## of the frame's element cells then (`__elemsnap#<depth>#c#<k>`, `k` its
+  ## position in `Path.elemCells`).
+
+func elemSnapName(depth: int; what: string): string =
+  elemSnapPrefix & $depth & "#" & what
+
+proc frameElemCells(p: Path; frame: int): seq[int] =
+  ## RFC-0005 S8be. The positions in `p.elemCells` of `frame`'s live cells.
+  for k, e in p.elemCells:
+    if e.frame == frame and not e.dead: result.add k
+
+proc withElem(sv: SymVal; idx: Z3Int; v: SymVal): SymVal =
+  ## RFC-0005 S8be. The `svSeq` `sv` with element `idx` set to `v`. Only a
+  ## seq with element cells reaches here, and the parser gives cells only to
+  ## a seq of scalars or strings (`elemCellOf`), whose data is always backed.
+  result = sv
+  result.seqDataRaw = storeSeqElem(sv.seqDataRaw, sv.seqElemTy, idx, v) # [placeholder-audited]
+
+proc snapElemCells(p: Path; depth: int; w: WalkCtx): Path =
+  ## RFC-0005 S8be. `p` with this frame's seqs with element cells, and the
+  ## cells' values, recorded as the statement at `depth` begins.
+  let ks = frameElemCells(p, w.frame.frameId)
+  if ks.len == 0: return p
+  var env2 = p.env
+  for k in ks:
+    let e = p.elemCells[k]
+    env2[elemSnapName(depth, "c#" & $k)] =
+      addrCellValue(w.z3, p, e.ty, e.refAst)
+    if p.env.hasKey(e.root):
+      env2[elemSnapName(depth, "s#" & e.root)] = p.env[e.root]
+  forkPath(p, p.pc, env2)
+
+proc sameSeqLen(a, b: SymVal): bool =
+  ## RFC-0005 S8be. `a` and `b` are seqs of one length term. A placeholder
+  ## is never the same (its cells then die: the conservative side).
+  a.kind == svSeq and b.kind == svSeq and
+    not a.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+    not b.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+    cast[pointer](a.seqLen.raw) == cast[pointer](b.seqLen.raw) # [placeholder-audited]
+
+proc shadowedElem(p: Path; ks: seq[int]; k: int): Option[Z3Bool] =
+  ## RFC-0005 S8ca. When element cell `k` (of `ks`, the frame's live cells)
+  ## is shadowed: an older live cell of its seq has an equal index, and
+  ## `walkElemCell` handed that one out, so no pointer writes `k`'s. A
+  ## store at an address `walkElemCell` built (`ite(i == j, old, new)`)
+  ## leaves `k`'s heap read a different term though its value is
+  ## unchanged; read back after the older cell's, it clobbered the
+  ## element (an `addr s[i]` actual of a seq with element cells, S8bu's
+  ## "in the element's own heap"). none when no older cell may shadow it.
+  let e = p.elemCells[k]
+  var conds: seq[Z3Bool]
+  for j in ks:
+    if j >= k: break
+    let o = p.elemCells[j]
+    if o.root == e.root and not o.dead:
+      let c = o.idx == e.idx
+      let f = foldedBool(e.idx.ctx, c)
+      if f.isNone: conds.add c
+      elif f.get: return some(c)   # shadowed outright
+  if conds.len == 0: return none(Z3Bool)
+  var c = conds[0]
+  for i in 1 ..< conds.len: c = c or conds[i]
+  some(c)
+
+proc withCellElem(p: Path; ks: seq[int]; k: int; sv: SymVal;
+                  cur: SymVal): SymVal =
+  ## RFC-0005 S8ca. `sv` with element cell `k`'s value `cur` read into its
+  ## element, unless an older cell shadows it (`shadowedElem`).
+  let e = p.elemCells[k]
+  let sh = shadowedElem(p, ks, k)
+  if sh.isNone: return withElem(sv, e.idx, cur)
+  let f = foldedBool(e.idx.ctx, sh.get)
+  if f.isSome and f.get: return sv
+  withElem(sv, e.idx, iteSV(sh.get, seqElemAt(sv, e.idx), cur))
+
+proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
+                   w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8be. After `stmt`, each seq of the current frame with element
+  ## cells and the heap at those cells are made equal again, the side that
+  ## changed since the statement began winning (`elemSnapName`):
+  ##
+  ## * the seq resized or assigned whole (its length is another term, or
+  ##   the statement's last effect is its write by name, `lastWriteTo`):
+  ##   Nim may have moved its elements, so its cells die (a dereference
+  ##   that may reach one declines, `danglingFork`);
+  ## * the seq's elements written: each cell takes its element's value;
+  ## * a cell written through a pointer: its element takes the value.
+  ##
+  ## Both written within one statement is two writes the walk cannot
+  ## order: declined (`feUnsupportedOp`), the seq winning -- except in a
+  ## call, whose callee kept the two equal itself (`inheritElemCells`). So
+  ## is a seq a closure also captures (its env cell is a third copy).
+  ##
+  ## A statement with statements inside (a block, `if`, `while`, `try`) is
+  ## not synced as a whole: each statement inside was, and the two sides it
+  ## leaves are equal in value though not in term.
+  let ctx = w.z3
+  let compound = stmt.kind in {isBlock, isIf, isWhile, isTry}
+  for p in outs:
+    let ks = if compound: @[] else: frameElemCells(p, w.frame.frameId)
+    if ks.len == 0:
+      var env0 = p.env
+      if dropSnapshots(env0, elemSnapPrefix, depth):
+        result.add forkPath(p, p.pc, env0)
+      else:
+        result.add p
+      continue
+    var q = forkPath(p, p.pc, p.env)
+    var env2 = q.env
+    var clash: seq[string]
+    var roots: seq[string]
+    for k in ks:
+      if q.elemCells[k].root notin roots: roots.add q.elemCells[k].root
+    for root in roots:
+      if not env2.hasKey(root): continue
+      for (cl, _) in w.frame.capCells:
+        if cl == root and displayName(root) notin clash:
+          clash.add displayName(root)
+      let sNow = env2[root]
+      let sKey = elemSnapName(depth, "s#" & root)
+      let seqCh = env2.hasKey(sKey) and not sameSymVal(sNow, env2[sKey])
+      var written: seq[int]
+      for k in ks:
+        let e = q.elemCells[k]
+        if e.root != root: continue
+        let cKey = elemSnapName(depth, "c#" & $k)
+        if env2.hasKey(cKey) and
+           not sameSymVal(addrCellValue(ctx, q, e.ty, e.refAst), env2[cKey]):
+          written.add k
+      if seqCh and (lastWriteTo(stmt, root) or
+                    not sameSeqLen(sNow, env2[sKey])):
+        for k in ks:
+          if q.elemCells[k].root == root: q.elemCells[k].dead = true
+        continue
+      if sNow.kind != svSeq: continue
+      var sNew = sNow
+      if seqCh:
+        if written.len > 0 and stmt.kind != isCall and
+           displayName(root) notin clash:
+          clash.add displayName(root)
+      else:
+        for k in written:
+          let e = q.elemCells[k]
+          sNew = withCellElem(q, ks, k, sNew,
+                              addrCellValue(ctx, q, e.ty, e.refAst))   # S8ca
+        env2[root] = sNew
+      # Only the side that changed is copied: a cell another cell of the
+      # same index shadows is never one a pointer holds (`walkElemCell`
+      # hands out the older one).
+      if seqCh:
+        for k in ks:
+          let e = q.elemCells[k]
+          if e.root != root: continue
+          discard addrCellStore(ctx, q, e.ty, e.refAst, seqElemAt(sNew, e.idx))
+    discard dropSnapshots(env2, elemSnapPrefix, depth)
+    q.env = env2
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(feUnsupportedOp,
+        "RFC-0005 S8be: the seq(s) " & clash.join(", ") & " were written " &
+             "by name and through a pointer to an element within one " &
+             "statement, or are also captured by a closure; the order of " &
+             "the writes is not modelled (feUnsupportedOp)"))
+    result.add drainPendingLowerEffects(q)
+
+proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
+  ## RFC-0005 S8be. As `syncAddrCellsFromHeap`, for element cells: `p`
+  ## resumes in the current frame after a raise, and an element out of
+  ## step with its cell was written through a pointer by the call that
+  ## raised, so the element takes the cell's value -- unless the seq was
+  ## resized since the raising statement began (its innermost snapshot),
+  ## when its cells die.
+  let ks = frameElemCells(p, w.frame.frameId)
+  if ks.len == 0: return p
+  var q = forkPath(p, p.pc, p.env)
+  var env2 = q.env
+  for k in ks:
+    let e = q.elemCells[k]
+    if not env2.hasKey(e.root) or env2[e.root].kind != svSeq: continue
+    var snap = SymVal(kind: svBool)
+    var best = -1
+    for key, v in env2:
+      if key.startsWith(elemSnapPrefix) and key.endsWith("#s#" & e.root):
+        let rest = key[elemSnapPrefix.len .. ^1]
+        let d = parseInt(rest[0 ..< rest.find('#')])
+        if d > best:
+          best = d
+          snap = v
+    if best >= 0 and not sameSeqLen(env2[e.root], snap):
+      q.elemCells[k].dead = true
+      continue
+    let cur = addrCellValue(w.z3, q, e.ty, e.refAst)
+    if not sameSymVal(seqElemAt(env2[e.root], e.idx), cur):
+      env2[e.root] = withCellElem(q, ks, k, env2[e.root], cur)   # S8ca
+  q.env = env2
+  q
+
+proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
+  ## current frame (`CallFrameCtx.capCells`) equal to its env cell.
+  ##
+  ## Nim keeps a variable a closure captures by reference in a heap env the
+  ## closure shares with its frame: a write through either is seen by the
+  ## other, wherever the closure is applied. The walk keeps the local as
+  ## the frame's own binding and the cell (`capCellName`, a `__gl:` name, so
+  ## every call threads it as it threads a global) as the one the closure
+  ## reads and writes away from the frame. After each statement the side
+  ## that changed since it began wins: a write to the local is copied to
+  ## the cell; a write to the cell (a call applied the closure) is copied
+  ## to the local. Declined (`ceCaptureByRefUnmodelled`), the local's value
+  ## winning:
+  ##
+  ## * both written, to different values: two writes the walk cannot order;
+  ## * the cell written by anything but a call statement (an expression's
+  ##   closure call applied the closure away from here): the statement may
+  ##   have read the local before the write;
+  ## * a call statement passing a capture by address (`var`, `addr`): Nim's
+  ##   parameter IS the cell, which the callee's copy is not.
+  ##
+  ## A raise resuming here takes the cell's value (`syncCapCellsFromCells`).
+  ##
+  ## Likewise each address-taken variable and its heap cell
+  ## (`syncAddrCells`), and each element cell and its element
+  ## (`syncElemCells`, RFC-0005 S8be).
+  if stmt == nil or paths.len == 0:
+    return walkStmt(stmt, paths, w)
+  var elems = false
+  for p in paths:
+    for e in p.elemCells:
+      if e.frame == w.frame.frameId and not e.dead: elems = true
+  if w.frame.capCells.len == 0 and w.frame.addrCells.len == 0 and
+     not elems:
+    return walkStmt(stmt, paths, w)
+  inc w.capSyncDepth
+  let depth = w.capSyncDepth
+  var ins: seq[Path]
+  for p0 in paths:
+    let p = if stmt.kind in {isBlock, isIf, isWhile, isTry}: p0
+            else: snapElemCells(p0, depth, w)   # RFC-0005 S8be
+    var env2 = p.env
+    var changed = false
+    for (local, cell) in w.frame.capCells:
+      if env2.hasKey(local) and env2.hasKey(cell):
+        env2[capSnapName(depth, cell)] = env2[local]
+        changed = true
+    for c in w.frame.addrCells:
+      if env2.hasKey(c.local) and env2.hasKey(c.cell):
+        env2[addrSnapName(depth, c.local)] = env2[c.local]
+        changed = true
+      elif c.slot.len > 0 and env2.hasKey(c.local) and env2.hasKey(c.slot):
+        env2[addrSnapName(depth, c.local)] = env2[c.local]   # RFC-0005 S8bx
+        env2[addrSnapName(depth, c.slot)] = env2[c.slot]
+        changed = true
+    ins.add(if changed: forkPath(p, p.pc, env2) else: p)
+  let outs0 = walkStmt(stmt, ins, w)
+  dec w.capSyncDepth
+  let outs = syncElemCells(stmt, outs0, depth, w)   # RFC-0005 S8be
+  if w.frame.capCells.len == 0:
+    return syncAddrCells(stmt, outs, depth, w)
+  var byAddr: seq[string]
+  if stmt.kind == isCall:
+    for (local, _) in w.frame.capCells:
+      if local in stmt.cGuardRoots: byAddr.add displayName(local)
+  for p in outs:
+    var env2 = p.env
+    var touched = false
+    var clash = byAddr
+    for (local, cell) in w.frame.capCells:
+      let snap = capSnapName(depth, cell)
+      if not env2.hasKey(local) or not env2.hasKey(cell): continue
+      if not env2.hasKey(snap):
+        # Registered by this statement: `registerCapCell` bound both.
+        if not sameSymVal(env2[local], env2[cell]):
+          env2[cell] = env2[local]
+          touched = true
+        continue
+      let lCh = not sameSymVal(env2[local], env2[snap])
+      let cCh = not sameSymVal(env2[cell], env2[snap])
+      # Both written to one value is a closure applied here carrying its
+      # write to both (`applyClosureGround`).
+      let agree = sameSymVal(env2[local], env2[cell])
+      if lCh and cCh and not agree or
+         cCh and not lCh and stmt.kind != isCall:
+        if displayName(local) notin clash: clash.add displayName(local)
+      if lCh:
+        env2[cell] = env2[local]
+      elif cCh:
+        env2[local] = env2[cell]
+      touched = true
+    # This depth's snapshots, and any a path that left a nested statement
+    # early (a `break`) still carries.
+    var stale: seq[string]
+    for k in env2.keys:
+      if k.startsWith(capSnapPrefix):
+        let rest = k[capSnapPrefix.len .. ^1]
+        let hash = rest.find('#')
+        if hash > 0 and parseInt(rest[0 ..< hash]) >= depth: stale.add k
+    for k in stale: env2.del k
+    if not touched and stale.len == 0 and clash.len == 0:
+      result.add p
+      continue
+    var q = forkPath(p, p.pc, env2)
+    if clash.len > 0:
+      taintInPlace(q, w.degrade(ceCaptureByRefUnmodelled,
+        "the by-reference capture(s) " & clash.join(", ") & " of a " &
+             "closure were written through the closure's env and in the " &
+             "frame within one statement, or passed by address while the " &
+             "closure may run; the order of the two is not modelled " &
+             "(ceCaptureByRefUnmodelled)"))
+    result.add q
+  if w.frame.addrCells.len > 0:
+    result = syncAddrCells(stmt, result, depth, w)   # RFC-0005 S8ax
+    result = linkCapAddrCells(result, w)             # RFC-0005 S8ca
 
 proc routeRaise(p: Path, typeId: string, msg: Option[string],
                 w: var WalkCtx): seq[Path] =
@@ -17727,7 +23849,14 @@ proc routeRaise(p: Path, typeId: string, msg: Option[string],
   var unknownTok: Degrade
   if not raisedKnown:
     unknownTok = w.degrade(eeUnknownExnType, typeId, dsUnknownExn)
-  var rp = p
+  # RFC-0005 S8ax: a capture the raising call wrote through its cell is
+  # the local's value wherever the raise resumes in this frame.
+  var rp = syncCapCellsFromCells(p, w)
+  # RFC-0005 S8ax: likewise an address-taken variable whose cell the
+  # raising call wrote through a pointer takes the cell's value.
+  rp = syncAddrCellsFromHeap(rp, w)
+  # RFC-0005 S8be: and an element a pointer to it wrote.
+  rp = syncElemCellsFromHeap(rp, w)
   var unknownJoined = false
   # 1. Search the handler stack top-down for the first matching arm.
   for i in countdown(w.frame.handlerStack.high, 0):
@@ -17961,9 +24090,21 @@ proc sameSymVal(a, b: SymVal): bool =
     # placeholder flag is itself compared, so a placeholder never matches a
     # backed seq (N27 audit, RFC-0005 S9).
     same(a.seqLen, b.seqLen) and same(a.seqDataRaw, b.seqDataRaw) and  # [placeholder-audited]
+      a.seqDataMore.len == b.seqDataMore.len and   ## RFC-0005 S8bc
+      (block:
+        var r = true
+        for i in 0 ..< a.seqDataMore.len:
+          if not same(a.seqDataMore[i], b.seqDataMore[i]): r = false
+        r) and
       a.isUnsupportedFieldPlaceholder == b.isUnsupportedFieldPlaceholder  # [placeholder-audited]
   of svTable:
     same(a.tabDataRaw, b.tabDataRaw) and
+      a.tabDataMore.len == b.tabDataMore.len and
+      (block:
+        var r = true
+        for i in 0 ..< a.tabDataMore.len:
+          if not same(a.tabDataMore[i], b.tabDataMore[i]): r = false
+        r) and
       same(a.tabPresentRaw, b.tabPresentRaw) and same(a.tabSize, b.tabSize)
   of svSet:
     same(a.setMembersRaw, b.setMembersRaw) and same(a.setSize, b.setSize)
@@ -17992,7 +24133,118 @@ proc sameSymVal(a, b: SymVal): bool =
     false   # no identity arm: conservatively "changed"
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal   ## Phase 15 C4 fwd-decl.
+                        label: string; callerEnv: Env;
+                        bodyOverride: IRStmt = nil;
+                        varOuts: seq[tuple[name: string, param: int]] = @[];
+                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
+                        SymVal   ## Phase 15 C4 fwd-decl.
+
+proc entryValueOf(name: string): SymVal =
+  ## RFC-0005 S8as. The entry value of the module-level variable `name`
+  ## (`programGlobal(name)` is some): what it holds when the property runs.
+  ## An immutable `let` initialised by a literal holds that literal, always:
+  ## read exactly. Anything else may hold any value of its type by then (a
+  ## `var` that other code, or an earlier test, assigned): one fresh value
+  ## per run (`globalEntryVals`), shared by every read, so two reads before
+  ## any write agree. A hit through it may need a value the property never
+  ## meets, so the reading path carries `feGlobalHavoc` (`dcFreshSymbol`):
+  ## a SAT is replayed, and an UNSAT holds for every entry value, so it
+  ## stands.
+  ##
+  ## RFC-0005 batch 6 (S8bw on S8as): the taint is the OBSERVATION's, not
+  ## the read's. Each leaf of the value is an unwritten part
+  ## (`registerUnwritten`); a rebuild's copy (`g.a = v` carries `g.b`) or a
+  ## receiver observes nothing, and every read that does observe one
+  ## (`observeGlobalRead`, an element read, a pointer's dereference, a
+  ## discriminator's reassignment) taints the path `feGlobalHavoc`
+  ## (`unwrittenKind`). `g.a = v` then `g.a` is exact, as S8bw made it.
+  let g = programGlobal(name).get
+  if g.init != nil:
+    return lower(initOrderedTable[string, SymVal](), g.init,
+                 (if g.ty.kind == itInt: some(bvConst(g.ty, 0))
+                  else: none(SymVal)))
+  let ctx = requireCurrentContext()
+  glUnwrittenFresh(ctx)
+  if not globalEntryVals.hasKey(name):
+    var facts: seq[Z3Bool]
+    globalEntryVals[name] =
+      allocateSym(g.ty, "__glEntry_" & displayName(name), facts)
+    for f in facts: globalEntryFacts.add f
+    registerUnwritten(ctx, globalEntryVals[name], displayName(name),
+                      havoc = true)
+  globalEntryVals[name]
+
+proc havocUnknownClosureEffects(e: IRExpr; env: Env) =
+  ## RFC-0005 S8bh. A call through a proc value the walk cannot resolve
+  ## (`ceClosureUnknownCallee`) may write every `var` actual and every heap
+  ## cell (its arguments', and whatever its own captures reach). The call
+  ## declines; its effects are havocked rather than dropped, so a fact the
+  ## call may have changed is not kept past it: each `var` actual gets a
+  ## fresh value of its formal's type, and each heap a fresh array of its
+  ## sort. RFC-0005 S8bn (item 6): and each module-level global bound on
+  ## the calling path (`env`), which any routine may write; before S8bn only
+  ## the path's taint stood for that, and the global kept its value past
+  ## the call.
+  if currentWalkCtxPtr == nil: return
+  let ctx = requireCurrentContext()
+  let wp = cast[ptr WalkCtx](currentWalkCtxPtr)
+  var gnames: seq[string]
+  for k in env.keys:
+    if isGlobalEnvName(k): gnames.add k
+  sort(gnames)
+  for g in gnames:
+    let sv = env[g]
+    if sv.kind notin {svInt, svBV8, svBV16, svBV32, svBV64, svBool, svFloat32,
+                      svFloat64, svString, svRef, svTuple, svArray, svSeq}:
+      continue
+    var facts: seq[Z3Bool]
+    let v = allocateSym(tyOf(sv), freshDegradeName("__closureUnknownGlobal"),
+                        facts)
+    for f in facts: currentClosureExitPc.add f
+    wp[].closureVarOuts.add (name: g, val: v)
+  for k, t in e.ccVarTys:
+    if t.isNil or k >= e.ccArgs.len or e.ccArgs[k].kind != iekVar: continue
+    var facts: seq[Z3Bool]
+    let v = allocateSym(t, freshDegradeName("__closureUnknownVarOut"), facts)
+    for f in facts:
+      currentClosureExitPc.add f
+      # RFC-0005 batch 5 (S8bi's `rskClosureExit` on S8bh's havoc): the
+      # fresh value's facts hold once the call completed, in order.
+      wp[].raiseOrder.add rskClosureExit
+    wp[].closureVarOuts.add (name: e.ccArgs[k].vname, val: v)
+  if wp[].callerHeaps.len > 0:
+    var fresh = initTable[string, Z3AnyAst]()
+    var keys: seq[string]
+    for k in wp[].callerHeaps.keys: keys.add k
+    sort(keys)
+    for k in keys:
+      let h = wp[].callerHeaps[k]
+      let srt = Z3_get_sort(ctx.raw, h.raw)
+      fresh[k] = wrap[Z3AnyAst](ctx, freshOfSort(ctx, srt))
+    wp[].closureDidMutateHeap = true; currentClosureDidMutateHeap = true
+    wp[].closureExitHeaps = fresh; currentClosureExitHeaps = fresh
+    wp[].closureExitAllocCounters = wp[].callerAllocCounters
+    currentClosureExitAllocCounters = wp[].callerAllocCounters
+    wp[].closureExitLiveRefs = wp[].callerLiveRefs
+    currentClosureExitLiveRefs = wp[].callerLiveRefs
+
+proc touchMeetsOuter(touch, outer: seq[string]): string =
+  ## RFC-0005 S8bh. The first location a call's `var`/`addr` actuals involve
+  ## (`ccTouch`) that the closure body can also reach outside its formals
+  ## (`lambdaOuter`), or "" when none. `*` in `outer` reaches everything; a
+  ## `t:?` on either side meets every object type on the other.
+  if touch.len == 0: return ""
+  if "*" in outer: return touch[0]
+  var anyOuterT = false
+  for o in outer:
+    if o.startsWith("t:"): anyOuterT = true
+  for t in touch:
+    if t in outer: return t
+    if t == "t:?" and anyOuterT: return t
+    if t.startsWith("t:") and "t:?" in outer: return t
+  ""
 
 proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
   ## Phase 15 C2b (ADR-0009 D6). Closure APPLICATION. Resolve `e.ccCallee` to an
@@ -18018,18 +24270,122 @@ proc lowerClosureCall(env: Env, e: IRExpr): SymVal =
     closureDegrade(ceClosureUnknownCallee,
       "closure call through `" & e.ccCallee &
            "` does not resolve to a closure value in scope")
+    havocUnknownClosureEffects(e, env)   ## RFC-0005 S8bh, S8bn
     # No semantics: a well-sorted-for-int stand-in so a downstream read does
     # not crash.
     var fresh: seq[Z3Bool]
     return allocateSym(tInt(64, true), "__closureUnknownCallee", fresh)
   # RFC-0005 S9: the by-reference captures as they stand at THIS call.
   let clo = refreshByRefCaptures(env[e.ccCallee], env)
+  # RFC-0005 S8as: the names this expression read before the call (its own
+  # arguments' reads come after the mark: Nim reads them before the call).
+  let readBefore = loweringReadNames
   var argSyms: seq[SymVal]
   for a in e.ccArgs: argSyms.add lower(env, a)
-  return applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`")
+  # RFC-0005 S8bh: the call's `var`/`addr` effects. Each `var` formal's
+  # exit value is written to its actual (an `iekVar`: the variable, or the
+  # temporary the parser writes back to a non-variable lvalue), as the
+  # `isCall` arm's #140 write-back does for a direct call. Actuals that
+  # share one location (`ccAlias`) run the body specialised to it
+  # (`aliasBodies`). The model holds only while the body cannot reach those
+  # locations another way (`touchMeetsOuter`) and an `addr` cell's pointer
+  # cannot outlive the call (`ptrLocal`); otherwise the call declines.
+  var bodyOverride: IRStmt = nil
+  var outs: seq[tuple[name: string, param: int]]
+  # RFC-0005 batch 9: and a by-value seq, table, set or array (`byValueTouch`).
+  if e.ccVarTys.len > 0 or e.ccAddrArgs.len > 0 or e.ccTouch.len > 0:
+    let siteKey = (clo.closureSite.siteHash, clo.closureSite.declOrder)
+    let bodies =
+      if currentWalkCtxPtr != nil:
+        cast[ptr WalkCtx](currentWalkCtxPtr)[].statics.closureBodies
+      else: currentClosureBodies
+    if bodies.hasKey(siteKey):
+      let cb = bodies[siteKey]
+      let met = touchMeetsOuter(e.ccTouch, cb.outer)
+      if met.len > 0:
+        let what = if met.startsWith("n:"): "`" & displayName(met[2 .. ^1]) & "`"
+                   elif met == "*": "a location"
+                   else: "a heap cell of that type"
+        let msg = "closure call through `" & e.ccCallee & "`: an argument's " &
+               "location, " & what & ", can also be reached by " &
+               "the body outside its formals (a capture, a global or a proc " &
+               "value it calls): the body's accesses through the two are " &
+               "not one location in the walk (RFC-0005 S8bh)"
+        # One call per kind, each spelled on its own line: the S7 source pins
+        # (`tsymex_rfc0005_s7_closure`) read a site's kind off that line.
+        if met.startsWith("n:"):
+          closureDegrade(ceCaptureByRefUnmodelled, msg)
+        else:
+          closureDegrade(feUnsupportedOp, msg)
+      for k in e.ccAddrArgs:
+        if k >= cb.ptrLocal.len or not cb.ptrLocal[k]:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: argument " & $(k + 1) &
+                 " is `addr` of a location, and the body may let the pointer " &
+                 "escape the call (it is stored, returned, captured or passed " &
+                 "on): the pointee is modelled as a cell for the call only " &
+                 "(RFC-0005 S8bh)")
+      var gone = -1
+      var keep = -1
+      for k, a in e.ccAlias:
+        if a != k:
+          if gone >= 0:
+            gone = -2
+            break
+          gone = k
+          keep = a
+      if gone == -2:
+        closureDegrade(feUnsupportedOp,
+          "closure call through `" & e.ccCallee & "`: more than two `var` " &
+               "arguments share one location (RFC-0005 S8bh)")
+      elif gone >= 0:
+        var found = false
+        for ix, pr in cb.aliasPairs:
+          if pr.keep == keep and pr.gone == gone:
+            bodyOverride = cb.aliasBodies[ix]
+            found = true
+        if not found:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: `var` arguments " &
+                 $(keep + 1) & " and " & $(gone + 1) & " are one location, " &
+                 "and the body has no form specialised to that (RFC-0005 S8bh)")
+      for k, t in e.ccVarTys:
+        if t.isNil or k >= e.ccArgs.len: continue
+        if e.ccArgs[k].kind != iekVar:
+          closureDegrade(feUnsupportedOp,
+            "closure call through `" & e.ccCallee & "`: `var` argument " &
+                 $(k + 1) & " names no variable to write back (RFC-0005 S8bh)")
+          continue
+        let src = if e.ccAlias.len > k: e.ccAlias[k] else: k
+        if src < cb.params.len:
+          outs.add (name: e.ccArgs[k].vname, param: src)
+  let nWrites = closureEnvWrites.len
+  # RFC-0005 S8bu: the caller variable each argument names, for an `addr`
+  # actual's cell (`bindVarLocs`).
+  var argNames: seq[string]
+  for a in e.ccArgs: argNames.add(if a.kind == iekVar: a.vname else: "")
+  result = applyClosureGround(clo, argSyms, "`" & e.ccCallee & "`", env,
+                              bodyOverride, outs, e.ccArgs, e.ccVarPtrSafe,
+                              e.ccVarLocs, argNames)
+  var clash: seq[string]
+  for i in nWrites ..< closureEnvWrites.len:
+    let nm = closureEnvWrites[i][0]
+    if nm in readBefore and displayName(nm) notin clash:
+      clash.add displayName(nm)
+  if clash.len > 0:
+    lowerDegrade(ceCaptureByRefUnmodelled,
+      "closure call through `" & e.ccCallee & "` writes " & clash.join(", ") &
+           ", which the same expression reads; the order of that read and " &
+           "the write is not modelled (ceCaptureByRefUnmodelled)")
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
-                        label: string): SymVal =
+                        label: string; callerEnv: Env;
+                        bodyOverride: IRStmt = nil;
+                        varOuts: seq[tuple[name: string, param: int]] = @[];
+                        ptrArgs: seq[IRExpr] = @[]; ptrCodes: seq[int] = @[];
+                        locs: seq[VarLoc] = @[];
+                        argNames: seq[string] = @[]):
+                        SymVal =
   ## Phase 15 C4 (factored from C2b `lowerClosureCall`). Apply an `svClosure`
   ## to a vector of already-lowered argument SymVals at the GROUND occurrence:
   ## build the per-site funcSym application (raw `Z3_mk_app` over flattened
@@ -18171,10 +24527,22 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # (`refreshByRefCaptures`). Anywhere else the env does not bind their
   # names, so the body reads the construction-time snapshot -- a value the
   # variable may no longer hold: decline (`dcSubstituted`) and descend on it.
-  if clo.closureMutCaptures.len > 0 and clo.closureFrame != w.frame.frameId:
+  #
+  # RFC-0005 S8ax: the env cell of each one (`capCellName`), threaded to
+  # every frame as a global is, holds the variable as it stands now: the
+  # body reads that, wherever it is applied. Only a capture with no cell
+  # (built where no walk kept one) still declines.
+  var cellOf = initTable[string, string]()
+  for nm in clo.closureMutCaptures:
+    let cell = capCellName(clo.closureFrame, nm)
+    if callerEnv.hasKey(cell): cellOf[nm] = cell
+  var uncelled: seq[string]
+  for nm in clo.closureMutCaptures:
+    if not cellOf.hasKey(nm): uncelled.add nm
+  if uncelled.len > 0 and clo.closureFrame != w.frame.frameId:
     closureDegrade(ceCaptureByRefUnmodelled,
       "closure call through " & label & " outside the frame that built it: " &
-           "its by-reference capture(s) " & displayNames(clo.closureMutCaptures).join(", ") &
+           "its by-reference capture(s) " & displayNames(uncelled).join(", ") &
            " are read as they stood at construction, not as they stand now " &
            "(ceCaptureByRefUnmodelled)")
   # ---- 4. Descend the lambda body ONCE; collect return sub-paths. ----
@@ -18185,11 +24553,30 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     let envRec = clo.closureEnv[]
     for i, nm in envRec.fieldNames:
       descentEnv[nm] = envRec.fields[i]
+  # RFC-0005 S8as: the module-level variables as the caller holds them.
+  # They are one location in every frame, so the body reads what the caller
+  # wrote (an unbound one reads its entry value, `entryValueOf`). Before
+  # S8as the body met none of them, and a read declined.
+  for k, v in callerEnv:
+    if isGlobalEnvName(k) and not descentEnv.hasKey(k): descentEnv[k] = v
+  # RFC-0005 S8as: a closure call earlier in the same expression may have
+  # written one of them, or (applied in the frame that built this closure)
+  # one of its captures: the body meets that write (`closureEnvWrites`).
+  let inFrame = clo.closureFrame == w.frame.frameId
+  for (k, v) in closureEnvWrites:
+    if isGlobalEnvName(k) or (inFrame and k in clo.closureMutCaptures and
+                              descentEnv.hasKey(k)):
+      descentEnv[k] = v
+  # RFC-0005 S8ax: away from its frame a capture is its cell's value.
+  if not inFrame:
+    for nm, cell in cellOf:
+      if descentEnv.hasKey(cell): descentEnv[nm] = descentEnv[cell]
   let byRefEntry = descentEnv  ## RFC-0005 S9: the captures as the body met them
   for i, p in cb.params:
     if i < argSyms.len: descentEnv[p.name] = argSyms[i]
   # Push a call frame whose retSym IS the funcApp: `walk(isReturn)` binds each
   # returning path's value to it as `funcApp == v_i` on that path's pc delta.
+  let ptrRisk = varFormalPtrRisk(w, cb.params, ptrArgs, ptrCodes)
   w.callStack.add CallFrame(
     callee: "closure@" & $clo.closureSite.siteHash & "/" &
             $clo.closureSite.declOrder,
@@ -18199,11 +24586,27 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
     # path joined `returnedPaths` unbound, and the explicit-return loop
     # below took its LAST BRANCH CONDITION for the value binding: `if y > 0:
     # return` asserted `y > 0` as a ground axiom of the whole run.
-    retTy: cb.retTy)
+    retTy: cb.retTy,
+    # RFC-0005 S8bn (item 3): the lambda's `var` formals a pointer may
+    # address (all of them for a call that carries no codes).
+    ptrRiskFormals: ptrRisk.risk, ptrSafeFormals: ptrRisk.safe,
+        sp: nativeStackPointer())   # RFC-0005 S8ca: `nativeStackShort`
   let frameIx = w.callStack.high
+  # RFC-0005 S8bu: the calling frame's address cells, for the formals bound
+  # to them below.
+  let callerCells = w.frame.addrCells
+  let callerFrameId = w.frame.frameId
   # Per-frame exception context for the body, and bump the inline budget.
   pushFrame(w)
   w.frame.closureInlineCount = w.frameStack[^1].closureInlineCount + 1
+  # RFC-0005 S8ax: the captures (and globals) the body reaches by name are
+  # not its own variables: `walkAddrCell` gives none of them a cell.
+  for k in byRefEntry.keys: w.frame.outerNames.add k
+  # RFC-0005 S8ax: the body keeps each celled capture equal to its cell
+  # statement by statement, as the building frame does (`walk`), so a call
+  # in the body that applies the closure again meets the body's writes.
+  for nm, cell in cellOf:
+    w.frame.capCells.add (local: nm, cell: cell)
   # Phase 15 R1b call-ENTRY heap threading for the CLOSURE arm: the closure
   # body descends with the CALLER's threaded heap (seeded into the caller-heap
   # threadvars by the walk arm before this expression was lowered), instead of
@@ -18238,7 +24641,76 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                                          else: pending.callerAlloc),
                          liveRefs: (if chainHeap: pending.exitLiveRefs
                                     else: pending.callerLiveRefs))  ## Phase 15 CR-5
-  let fallThrough = walk(cb.body, @[descentBase], w)
+  # RFC-0005 S8bu: a formal whose actual is an address-taken variable of the
+  # calling frame, or a path into one, is bound to the variable's cell, as
+  # a direct call's is (`inheritAddrCells`, `bindVarLocs`): the body keeps
+  # the two equal statement by statement, so its writes through the formal
+  # and through a pointer it holds land on one location in its order.
+  # Before S8bu such a call declined, and a by-value argument Nim passes by
+  # address (a large object) was passed as a copy, missing the body's
+  # writes through the pointer (swapped verdicts). The calling frame's
+  # element cells are read for `bindVarLocs` (an element `s[i]` of a seq
+  # with element cells). A whole variable's write-back by name is dropped:
+  # the cell carries the write, and the calling statement reads it back
+  # (`syncAddrCells`).
+  var boundOuts: seq[string]
+  block bindCells:
+    var varArgs: seq[(string, string)]
+    for o in varOuts:
+      let src = cb.params[o.param].name
+      varArgs.add (src, o.name)
+    var entryCells: seq[AddrCellEntry]
+    for c in callerCells:
+      if not callerEnv.hasKey(c.cell) or callerEnv[c.cell].kind != svPtr:
+        continue
+      for (formal, callerName) in varArgs:
+        if callerName == c.local:
+          let cell = if c.bound: varLocCellName(formal) else: addrCellName(formal)
+          descentBase.env[cell] = callerEnv[c.cell]
+          entryCells.add (local: formal, cell: cell, ty: c.ty, path: c.path,
+                          ixs: c.ixs, bound: c.bound, view: c.view, slot: "")
+          if callerName notin boundOuts: boundOuts.add callerName
+    if locs.len > 0:
+      descentBase.elemCells = w.callerElemCells
+      var paramNames: seq[string]
+      var argVars: seq[(string, string)]
+      for i, p in cb.params:
+        paramNames.add p.name
+        if i < argSyms.len and i < argNames.len and argNames[i].len > 0:
+          argVars.add (p.name, argNames[i])
+      var elemShares: seq[(string, string)]
+      let why = bindVarLocs(descentBase, callerEnv, callerCells, callerFrameId,
+                            locs, varArgs, argVars, paramNames, entryCells,
+                            elemShares, w)
+      if why.len > 0:
+        closureDegrade(feUnsupportedOp,
+          "closure call through " & label & ": " & why & "; the body's " &
+               "writes through the two are not modelled in its order " &
+               "(feUnsupportedOp, RFC-0005 S8bu)")
+      # A by-value seq sharing its caller's element cells has them under
+      # the formal's name in the body (`inheritElemCells`); the body cannot
+      # write the formal, so nothing is carried back.
+      inheritElemCells(descentBase, callerFrameId, w.frame.frameId,
+                       elemShares, @[], @[])
+    w.frame.addrCells = entryCells
+    anchorViews(descentBase, entryCells, w.frame.frameId)   ## RFC-0005 S8ca
+  # RFC-0005 S8ca: a by-reference capture whose variable's address is taken
+  # (its pointer threaded beside its env cell, `capAddrName`) is bound to
+  # the address cell, as a named callee's capture is (`inheritAddrCells`):
+  # the body keeps the two equal, and the calling path is marked
+  # (`capBoundName`) so the owning frame reads the cell's value.
+  var boundCaps: seq[tuple[cell: string; p: SymVal]]
+  for nm, cell in cellOf:
+    let an = capAddrName(cell)
+    if not descentBase.env.hasKey(an) or descentBase.env[an].kind != svPtr:
+      continue
+    w.frame.addrCells.add (local: nm, cell: an,
+                           ty: descentBase.env[an].ptrPointee, path: @[],
+                           ixs: @[], bound: false, view: false, slot: "")
+    boundCaps.add (cell: cell, p: descentBase.env[an])
+  # RFC-0005 S8bh: the body specialised to the call's shared locations.
+  let fallThrough = walk((if bodyOverride != nil: bodyOverride else: cb.body),
+                         @[descentBase], w)
   let frame = w.callStack[frameIx]
   # RFC-0005 S7: capture the raises that escaped the body's own handlers
   # BEFORE `popFrame` discards the closure frame (as the `isCall` arm does);
@@ -18247,47 +24719,153 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   popFrame(w)
   w.callStack.setLen(frameIx)
   restorePendingLowerEffects(w, pending)
+  for b in boundCaps:   # RFC-0005 S8ca: the mark (`capBoundName`)
+    closureEnvWrites.add (capBoundName(b.cell), b.p)
   # RFC-0005 S9 (capture by reference). A body that WRITES a by-reference
   # capture writes the caller's variable; the descent env is the body's own,
   # and nothing carries the write back. Any exit -- a value exit or an
   # escaping raise -- whose capture is not the one the body met declines
   # the call (`dcSubstituted`: the write is dropped).
-  block byRefWrites:
-    var written: seq[string]
-    for nm in clo.closureMutCaptures:
-      if not byRefEntry.hasKey(nm): continue
-      let entry = byRefEntry[nm]
-      var changed = false
-      for cp in fallThrough:
-        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
-      for cp in frame.returnedPaths:
-        if cp.env.hasKey(nm) and not sameSymVal(cp.env[nm], entry): changed = true
-      for er in escapedRaises:
-        if er.path.env.hasKey(nm) and not sameSymVal(er.path.env[nm], entry):
-          changed = true
-      if changed: written.add displayName(nm)
-    # RFC-0005 S8an: a module-level global is a by-reference location too,
-    # whether or not the lambda captured it lexically (a module-level proc
-    # used as a value captures nothing). A body exit whose binding of one is
-    # not the one the body met wrote it, and nothing carries it back.
+  # RFC-0005 S9 / S8an / S8as (capture by reference). A body that WRITES a
+  # by-reference location -- a mutable capture, or a module-level variable,
+  # whether or not the lambda captured it lexically -- writes the caller's
+  # variable; the descent env is the body's own. A name is written when an
+  # exit (a value exit or an escaping raise) binds it to anything but the
+  # value the body met.
+  var written: seq[string]
+  block collectWritten:
     var exitEnvs: seq[Env]
     for cp in fallThrough: exitEnvs.add cp.env
     for cp in frame.returnedPaths: exitEnvs.add cp.env
     for er in escapedRaises: exitEnvs.add er.path.env
+    var ownCells: seq[string]   ## RFC-0005 S8ax: carried with their capture
+    for _, cell in cellOf: ownCells.add cell
     for ee in exitEnvs:
       for nm, v in ee:
-        if isGlobalEnvName(nm) and displayName(nm) notin written and
+        if nm in ownCells: continue
+        let byRef = isGlobalEnvName(nm) or
+          (nm in clo.closureMutCaptures and byRefEntry.hasKey(nm))
+        if byRef and nm notin written and
            (not byRefEntry.hasKey(nm) or not sameSymVal(v, byRefEntry[nm])):
-          written.add displayName(nm)
-    if written.len > 0:
+          written.add nm
+  # RFC-0005 S8as: the write is carried back. Each written name gets one
+  # fresh value per call occurrence, defined by one GROUND axiom per value
+  # exit -- `exitPc_i ⇒ w == v_i`, v_i the name as exit i left it -- the
+  # shape of the call result's own axioms (`assertArm` below): definitional,
+  # so the global pool prunes no model of any other symbol, and an exit
+  # whose arm was dropped (a tainted sub-path) leaves `w` free. The calling
+  # path binds the name to `w` (`closureEnvWrites`, drained by
+  # `drainPendingLowerEffects`); a raising exit carries its own values out
+  # with the raise (`ClosureRaise.writes`). Before S8as every such call
+  # declined (`ceCaptureByRefUnmodelled`). Still declined, scoped: a
+  # capture written by a closure applied outside the frame that built it
+  # (the env there does not hold the variable), and a name whose value
+  # reaches heap cells (`irTypeRefFree`).
+  var carried: seq[(string, SymVal)]
+  var raiseWrites = newSeq[seq[(string, SymVal)]](escapedRaises.len)
+  block writeBack:
+    var declined: seq[string]
+    for nm in written:
+      template exitVal(ee: Env): SymVal =
+        if ee.hasKey(nm): ee[nm]
+        elif byRefEntry.hasKey(nm): byRefEntry[nm]
+        else: entryValueOf(nm)   # an unbound global this exit left alone
+      var ty: IRType = nil
+      for cp in fallThrough:
+        if cp.env.hasKey(nm): ty = tyOf(cp.env[nm])
+      for cp in frame.returnedPaths:
+        if ty == nil and cp.env.hasKey(nm): ty = tyOf(cp.env[nm])
+      for er in escapedRaises:
+        if ty == nil and er.path.env.hasKey(nm): ty = tyOf(er.path.env[nm])
+      if not isGlobalEnvName(nm) and not inFrame and not cellOf.hasKey(nm):
+        declined.add displayName(nm) & " (applied outside the frame that " &
+                     "built the closure)"
+        continue
+      if ty == nil or not irTypeRefFree(ty) or
+         (not byRefEntry.hasKey(nm) and programGlobal(nm).isNone):
+        declined.add displayName(nm) & " (its value reaches heap cells)"
+        continue
+      var facts: seq[Z3Bool]
+      let wv = allocateSym(ty, freshDegradeName("__closureWrite_" &
+                                                displayName(nm)), facts)
+      var ok = wv.kind in retBindWiredKinds
+      var exits: seq[(seq[Z3Bool], SymVal)]
+      for cp in frame.returnedPaths:
+        if cp.taint == {}: exits.add (cp.pc, exitVal(cp.env))
+      for cp in fallThrough:
+        if cp.taint == {}: exits.add (cp.pc, exitVal(cp.env))
+      for (_, ev) in exits:
+        if not retBindKindsAgree(wv, ev): ok = false
+      if not ok:
+        declined.add displayName(nm) & " (no value binding for its type)"
+        continue
+      for f in facts:
+        currentClosureCallAxioms.add f
+        currentClosureCallAxiomStrs.add $f
+      for (pc, ev) in exits:
+        let eq = retBindEq(wv, ev)
+        var ax = eq
+        if pc.len > 0:
+          var guard = pc[0]
+          for k in 1 ..< pc.len: guard = guard and pc[k]
+          ax = guard.implies(eq)
+        currentClosureCallAxioms.add ax
+        currentClosureCallAxiomStrs.add $ax
+      # RFC-0005 S8ax: a celled capture's write lands in its cell; in the
+      # building frame in the local too (the frame's `walk` sees both
+      # written to one value).
+      let cellDst = cellOf.getOrDefault(nm, "")
+      if inFrame or cellDst.len == 0: carried.add (nm, wv)
+      if cellDst.len > 0: carried.add (cellDst, wv)
+      for ri, er in escapedRaises:
+        if inFrame or cellDst.len == 0:
+          raiseWrites[ri].add (nm, exitVal(er.path.env))
+        if cellDst.len > 0:
+          raiseWrites[ri].add (cellDst, exitVal(er.path.env))
+    if declined.len > 0:
       closureDegrade(ceCaptureByRefUnmodelled,
-        "closure call through " & label & ": the body writes its " &
-             "by-reference capture(s) " & written.join(", ") & "; the " &
+        "closure call through " & label & ": the body writes the " &
+             "by-reference location(s) " & declined.join(", ") & "; the " &
              "write is not carried back to the caller " &
              "(ceCaptureByRefUnmodelled)")
-  for er in escapedRaises:
-    w.closureRaises.add ClosureRaise(raised: er)
+  for (k, v) in carried: closureEnvWrites.add (k, v)
+  # RFC-0005 S8bh: each `var` formal's value where the body raised rides
+  # the raise to its actual (beside S8as's by-reference writes).
+  for ri, er in escapedRaises:
+    var ro: seq[tuple[name: string, val: SymVal]]
+    for o in varOuts:
+      if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
+      let pn = cb.params[o.param].name
+      if er.path.env.hasKey(pn): ro.add (name: o.name, val: er.path.env[pn])
+    w.closureRaises.add ClosureRaise(raised: er,
+                                     writes: raiseWrites[ri],  ## RFC-0005 S8as
+                                     varOuts: ro)
     w.raiseOrder.add rskClosure   # RFC-0005 S8bb
+  # RFC-0005 S8bh: each `var` formal's exit value, merged over the
+  # value-bearing exits by their branch conditions (as the exit heaps are,
+  # below), for its actual. The caller continues only on those exits (the
+  # exit-coverage fact), so the first exit's value is the merge's default.
+  for o in varOuts:
+    if o.name in boundOuts: continue   # RFC-0005 S8bu: the cell carries it
+    let pn = cb.params[o.param].name
+    var merged: SymVal
+    var have = false
+    var exits: seq[tuple[bc: seq[Z3Bool], env: Env]]
+    for cp in fallThrough: exits.add (bc: cp.pc, env: cp.env)
+    for cp in frame.returnedPaths:
+      exits.add (bc: (if cp.pc.len > 0: cp.pc[0 ..< cp.pc.high] else: cp.pc),
+                 env: cp.env)
+    for ex in exits:
+      if not ex.env.hasKey(pn): continue
+      let v = ex.env[pn]
+      if not have or ex.bc.len == 0:
+        merged = v
+        have = true
+      else:
+        var guard = ex.bc[0]
+        for k in 1 ..< ex.bc.len: guard = guard and ex.bc[k]
+        merged = iteSV(guard, v, merged)
+    if have: w.closureVarOuts.add (name: o.name, val: merged)
   # RFC-0005 S7 (closure-descent taint): the descent started from a clean
   # root, so whatever its exit paths picked up (a degrade inside the body)
   # must join the CALLING path -- through the pending-taint drain, the one
@@ -18461,7 +25039,13 @@ proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
   # The original `if not sawValue: sawUnknown = true` incorrectly caught all
   # void closures, collaterally degrading any UNSAT target after a void closure
   # call (see CR-1 companion fix for the sawUnknown/UNSAT interaction).
-  if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0:
+  # RFC-0005 S8bn (item 5): a body whose every path RAISED did not
+  # diverge: each raise is routed to the caller (`w.closureRaises`,
+  # `drainClosureRaises`), which is the call's whole behaviour, and the
+  # exit-coverage fact (`false`) leaves no continuation. Only a body with no
+  # exit at all, raised or not, is a divergence.
+  if not sawValue and fallThrough.len == 0 and frame.returnedPaths.len == 0 and
+     escapedRaises.len == 0:
     # RFC-0005 S1b: record the kind (was a kindless run mark). WALK sink, not
     # the closure sink (through S8 `closureForcedUnknown` vetoed a winner on
     # any closure-sink sevError, which this site never did; S9 deleted it).
@@ -18570,6 +25154,20 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
   ## Read element `idx` of a `svSeq` as a SymVal (dispatch on element type).
   ## Mirrors the `isIndex`/seq walker arm. Caller guarantees `idx` in bounds.
   doAssert seqSV.kind == svSeq, "seqElemAt: not an svSeq"
+  if isTreeSeqElemTy(seqSV.seqElemTy):
+    # RFC-0005 S8bc: a tree element, from the select of every data array at
+    # `idx` (each wrapped at once), rebuilt over a prototype of the type.
+    let ctx = requireCurrentContext()
+    let arrs = seqArrs(seqSV)
+    if arrs.len != heapLeafSuffixes(seqSV.seqElemTy).len:
+      return degradeAlloc(seqSV.seqElemTy, weInternalWalkerFault,
+        "seqElemAt: a seq of " & $seqSV.seqElemTy & " holds " & $arrs.len &
+        " data arrays (weInternalWalkerFault)", "__seqElemAtLayout")
+    var leaves: seq[Z3AnyAst]
+    for a in arrs:
+      leaves.add wrap[Z3AnyAst](ctx, checkedSelect(ctx, a.raw, idx.raw))
+    return svWithLeaves(ctx, seqElemProto(seqSV.seqElemTy), leaves,
+                        seqSV.seqElemTy)
   case seqSV.seqElemTy.kind
   of itInt:
     case seqSV.seqElemTy.width
@@ -18629,7 +25227,11 @@ proc seqElemAt(seqSV: SymVal, idx: Z3Int): SymVal =
 proc storeSeqElem(dataRaw: Z3AnyAst, elemTy: IRType, idx: Z3Int,
                   val: SymVal): Z3AnyAst =
   ## Store `val` at index `idx` in the (erased) seq data array, returning the
-  ## new erased array. Mirrors the `iekSeqAdd` store dispatch.
+  ## new erased array. RFC-0005 S8ba: `iekSeqAdd` stores through here too
+  ## (it had its own int64/bool-only dispatch), and a distinct element is
+  ## stored as its base (`seqCellTy`, `ejectBase`).
+  let elemTy = seqCellTy(elemTy)
+  let val = ejectBase(val)
   case elemTy.kind
   of itInt:
     # #163 review R22 site 3 prerequisite: reconcile an `svInt`-shaped RHS
@@ -18752,7 +25354,7 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   ## genuinely-reachable index needs REAL element content) — declining
   ## classified there is unchanged; only the ALREADY-KNOWN-EMPTY literal
   ## case is affected, and only its BACKED-elemTy half changed behaviour.
-  let elemTy = e.seqLitElemTy
+  let elemTy = seqCellTy(e.seqLitElemTy)   # RFC-0005 S8ba: a distinct elem's base
   if e.seqLitElems.len > 0 and not isBackedSeqElemTy(elemTy):
     # Round-6 N37: a NON-EMPTY literal (the B6 rider above only widened the
     # EMPTY case) whose element type `allocateSeqDataRaw` cannot back --
@@ -18799,14 +25401,15 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
   # already declines classified via `iekSeqAdd`'s own unbacked-elem `else`
   # arm rather than reaching the unchecked-wrap fast path, so this widening
   # introduces no new unsoundness there.
-  var dataRaw =
+  # RFC-0005 S8bc: one array per leaf of a tree element.
+  var arrs =
     if e.seqLitElems.len == 0:
       if isBackedSeqElemTy(elemTy):
-        allocateSeqDataRaw(elemTy, "__seqlit.data")
+        allocateSeqArrs(elemTy, "__seqlit.data")
       else:
-        toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))
+        @[toAnyAst(mkArrayVar[Z3Int, Z3Bool]("__seqlit.emptyPlaceholder"))]
     else:
-      allocateSeqDataRaw(elemTy, "__seqlit.data")
+      allocateSeqArrs(elemTy, "__seqlit.data")
   # RFC-0005 S8s. Each element lowers against the element type's prototype,
   # as `lowerTupleLit`'s fields do: an int literal with no prototype lowers
   # to a signed 64-bit value, and `storeSeqElem` then read the `bv8` of that
@@ -18818,9 +25421,71 @@ proc lowerSeqLit(env: Env, e: IRExpr): SymVal =
     else: none(SymVal)
   for i, ce in e.seqLitElems:
     let elemSV = lower(env, ce, elemProto)
-    dataRaw = storeSeqElem(dataRaw, elemTy, mkInt(i), elemSV)
-  SymVal(kind: svSeq, seqLen: mkInt(e.seqLitElems.len),
-         seqDataRaw: dataRaw, seqElemTy: elemTy)
+    let cur = mkSeqSV(mkInt(i), arrs, elemTy)
+    let stored = seqStoreArrs(cur, mkInt(i), elemSV)
+    if stored.isNone: return seqStoreDecline("seq literal", elemTy, elemSV)
+    arrs = stored.get
+  mkSeqSV(mkInt(e.seqLitElems.len), arrs, elemTy)
+
+proc lowerSeqNew(env: Env, e: IRExpr): SymVal =
+  ## RFC-0005 S8bc (item 5) and S8bi, one lowering since batch 5.
+  ## `newSeq[T](n)` / `newSeq(s, n)` (`snZeroed`): a seq of length `n` whose
+  ## every element is `T`'s zero -- each data array is the constant array
+  ## of that zero's leaf (`constSeqArrs`, S8bc's leaf split), as an empty
+  ## table's container values are (`tabTreeDataZero`), so the element at
+  ## any index below `n` reads the zero. `newSeqOfCap[T](n)` (`snOfCap`):
+  ## length 0, `n` only reserves. `newSeqUninit[T](n)`: length `n`, elements
+  ## Nim leaves unset -- free arrays (`allocateSeqArrs`), and the path is
+  ## tainted (`feUnsupportedOpHavoc`): a witness may depend on an element a
+  ## run does not reproduce, and whether one is read is not tracked.
+  ##
+  ## The parser has already forked a negative `n` (`RangeDefect`, the
+  ## `Natural` conversion) and declined one above `maxModelledInitialSize`
+  ## (`parseNewSeqLen`), so neither is checked again here. An element type
+  ## the seq does not back declines as a seq literal of it does, and so
+  ## does a zeroed one with no modelled zero.
+  let elemTy = e.snElemTy
+  let lenSV = lower(env, e.snArg)
+  let op = if e.snOfCap: "newSeqOfCap" elif e.snZeroed: "newSeq"
+           else: "newSeqUninit"
+  let needZero = e.snZeroed and not e.snOfCap
+  if not isBackedSeqElemTy(elemTy) or
+     (needZero and not defaultZeroTotal(elemTy)) or
+     lenSV.kind notin {svInt, svBV8, svBV16, svBV32, svBV64}:
+    lowerDegrade(seNestedSeqUnsupported,
+      op & " of a " & plainEnglishTypeKind(elemTy.kind) &
+        " element (or a non-integer length) not modelled")
+    var fresh: seq[Z3Bool]
+    return allocateSym(tSeq(elemTy), freshDegradeName("__newSeqDegrade"), fresh)
+  if e.snOfCap:
+    # Length 0: no element is ever read below the length, so the arrays
+    # are any arrays of the element's leaf sorts.
+    return mkSeqSV(mkInt(0), allocateSeqArrs(elemTy,
+                     freshDegradeName("__newSeqOfCap.data")), elemTy)
+  if not e.snZeroed:
+    let arrs = allocateSeqArrs(elemTy, freshDegradeName("__newSeqUninit.data"))
+    if arrs.len == 1:
+      # RFC-0005 S8bq: registered as a `newSeqUninit` base, so only a READ
+      # of an element no write has reached is tainted (`uninitReadCond`).
+      noteUninitSeqBase(arrs[0])
+    else:
+      # Batch 6: S8bq tracks one data array (`seqDataRaw`). A tree element
+      # (S8bc's leaf split) has one array per leaf, and a write of one
+      # leaf would read as a write of the element, so the whole path stays
+      # tainted, as before S8bq.
+      lowerDegrade(feUnsupportedOpHavoc,
+        "newSeqUninit element values are unspecified — degraded to sxUnknown")
+    return mkSeqSV(toZ3Int(lenSV), arrs, elemTy)
+  mkSeqSV(toZ3Int(lenSV), seqNewZeroArrs(elemTy), elemTy)
+
+proc seqNewZeroArrs(elemTy: IRType): seq[Z3AnyAst] =
+  ## RFC-0005 batch 6. The data arrays of a zeroed `newSeq` of `elemTy`:
+  ## one constant array per leaf of the element's zero (S8bc's leaf split),
+  ## so the element at any index reads the zero. `lowerSeqNew` builds a
+  ## `newSeq` from them and S8bl's `setLen` (`isSetLen`) reads a grown
+  ## slot from them: one notion of a fresh element. The caller has checked
+  ## `isBackedSeqElemTy` and `defaultZeroTotal`.
+  constSeqArrs(elemTy, defaultZero(elemTy, "__newSeqZero"))
 
 proc lowerTupleLit(env: Env, e: IRExpr): SymVal =
   ## RFC-chapulin-hardening P1. `(a, b, c)` → svTuple. Unlike `lowerSeqLit`
@@ -19062,7 +25727,15 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   ## seqInlineThreshold (≤ 8) — no combinatorial fan-out.
   let ctx = requireCurrentContext()
   let seqSV = lower(env, e.hofSeq)
-  doAssert seqSV.kind == svSeq, "lowerHofCall: receiver is not an svSeq"
+  let hofResTy = if e.hofOp == "fold": e.hofRetElemTy else: tSeq(e.hofRetElemTy)
+  if seqSV.kind != svSeq:
+    # RFC-0005 S8bw (item 1): a receiver that did not lower to a seq (the
+    # stand-in of an earlier in-band decline) declines in-band. This was a
+    # `doAssert`, a `weInternalWalkerFault` (`gSeq.map(f)`).
+    return degradeAlloc(hofResTy, feUnsupportedExprKind,
+      "higher-order call (." & e.hofOp & "): receiver lowered to " &
+        plainEnglishSymValKind(seqSV.kind) & ", not a seq -- degraded to " &
+        "sxUnknown (feUnsupportedExprKind)", "__hofRecvDegrade")
   if seqSV.isUnsupportedFieldPlaceholder: # [placeholder-audited]
     # N27 (walker v97, D1 verifier finding): decline through the R1
     # chokepoint BEFORE touching `concreteSeqLen`/`seqElemAt`/`seqDataRaw` or
@@ -19121,7 +25794,13 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
   # Build the closure value (svClosure) from the lambda arg (C2a construction:
   # snapshots captures, stashes the body, declares the per-site funcSym).
   let cloSV = lower(env, e.hofClosure)
-  doAssert cloSV.kind == svClosure, "lowerHofCall: closure arg is not an svClosure"
+  if cloSV.kind != svClosure:
+    # RFC-0005 S8bw (item 1): as the receiver above (a proc-typed global
+    # read before any write); was a `doAssert`.
+    return degradeAlloc(hofResTy, feUnsupportedExprKind,
+      "higher-order call (." & e.hofOp & "): its proc argument lowered to " &
+        plainEnglishSymValKind(cloSV.kind) & ", not a closure -- degraded " &
+        "to sxUnknown (feUnsupportedExprKind)", "__hofClosureDegrade")
 
   # Settings (via the live WalkCtx, mirroring lowerClosureCall).
   var policy = ipHybrid
@@ -19174,18 +25853,23 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
                " (nested seq element type is not supported)")
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(e.hofRetElemTy), "__hofMapUnsupportedInline", fresh)
-      var dataRaw = allocateSeqDataRaw(e.hofRetElemTy, "__hofmap.data")
+      # RFC-0005 S8bc: one array per leaf of a tree element (either side).
+      var arrs = allocateSeqArrs(e.hofRetElemTy, "__hofmap.data")
       for i in 0 ..< n:
         let elemSV = hofElemAt(seqSV, i)
-        let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i)
-        dataRaw = storeSeqElem(dataRaw, e.hofRetElemTy, mkInt(i), mapped)
-      SymVal(kind: svSeq, seqLen: mkInt(n),
-             seqDataRaw: dataRaw, seqElemTy: e.hofRetElemTy)
+        let mapped = applyClosureGround(cloSV, @[elemSV], "map@" & $i, env)
+        if not seqElemFits(mapped, e.hofRetElemTy):
+          return seqStoreDecline("map", e.hofRetElemTy, mapped)
+        let stored = seqStoreArrs(mkSeqSV(mkInt(i), arrs, e.hofRetElemTy),
+                                  mkInt(i), mapped)
+        if stored.isNone: return seqStoreDecline("map", e.hofRetElemTy, mapped)
+        arrs = stored.get
+      mkSeqSV(mkInt(n), arrs, e.hofRetElemTy)
     of "filter":
       # Result svSeq: pack kept elements (predicate true) into running compacted
       # indices. result length = sum ite(pred_i, 1, 0); for each i, if pred_i,
       # store elem_i at the current kept count. Bounded, quantifier-free.
-      let elemTy = e.hofRetElemTy   ## filter preserves element type
+      let elemTy = seqCellTy(e.hofRetElemTy)   ## filter preserves element type (RFC-0005 S8ba: its cell)
       # Round-6 N37: same unguarded-`allocateSeqDataRaw` conversion as the
       # `map` arm immediately above -- see its own comment for the full
       # rationale (identical hazard, identical fix).
@@ -19196,26 +25880,28 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
                " (nested seq element type is not supported)")
         var fresh: seq[Z3Bool]
         return allocateSym(tSeq(elemTy), "__hofFilterUnsupportedInline", fresh)
-      var dataRaw = allocateSeqDataRaw(elemTy, "__hoffilter.data")
+      # RFC-0005 S8bc: one array per leaf of a tree element.
+      var arrs = allocateSeqArrs(elemTy, "__hoffilter.data")
       var keptLen: Z3Int = mkInt(0)
       for i in 0 ..< n:
         let elemSV = hofElemAt(seqSV, i)
-        let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i)
+        let predSV = applyClosureGround(cloSV, @[elemSV], "filter@" & $i, env)
         doAssert predSV.kind == svBool, "filter predicate did not return Bool"
         # Store elem_i at the CURRENT kept index. Stores past the final kept
         # length are never observed (reads are len-bounded), so an
         # unconditional store at `keptLen` is sound.
-        dataRaw = storeSeqElem(dataRaw, elemTy, keptLen, elemSV)
+        let stored = seqStoreArrs(mkSeqSV(keptLen, arrs, elemTy), keptLen, elemSV)
+        if stored.isNone: return seqStoreDecline("filter", elemTy, elemSV)
+        arrs = stored.get
         keptLen = keptLen + ite(predSV.bo, mkInt(1), mkInt(0))
-      SymVal(kind: svSeq, seqLen: simplify(keptLen),
-             seqDataRaw: dataRaw, seqElemTy: elemTy)
+      mkSeqSV(simplify(keptLen), arrs, elemTy)
     of "fold":
       # Left-fold: acc = folder(acc, elem_i), from the init accumulator.
       doAssert e.hofInit != nil, "fold inline path requires an init accumulator"
       var acc = lower(env, e.hofInit)
       for i in 0 ..< n:
         let elemSV = hofElemAt(seqSV, i)
-        acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i)
+        acc = applyClosureGround(cloSV, @[acc, elemSV], "fold@" & $i, env)
       acc
     else:
       raise newException(ValueError, "lowerHofCall: unknown HOF op " & e.hofOp)  # [raise-audited: category-c: parser-controlled op-string invariant (e.hofOp is restricted to map/filter/fold by the parser)]
@@ -19296,7 +25982,7 @@ proc lowerHofCall(env: Env, e: IRExpr): SymVal =
       let mappedArr = mapArray[Z3Int, Z3BitVec[64], Z3BitVec[64]](fd, srcArr)
       discard cb   ## body stashed but not descended on this path (see above)
       SymVal(kind: svSeq, seqLen: seqSV.seqLen, # [placeholder-audited]
-             seqDataRaw: toAnyAst(mappedArr), seqElemTy: e.hofRetElemTy)
+             seqDataRaw: toAnyAst(mappedArr), seqElemTy: seqCellTy(e.hofRetElemTy))   # RFC-0005 S8ba
     of "fold":
       # Axiom path: a raw `Z3_mk_app` of an uninterpreted fold result over the
       # seq's length + data + init (ground, C2b discipline — never a ∀ axiom).
@@ -19765,10 +26451,15 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentWalkCtxPtr = nil
   let ctx = newContext()
   setCurrentContext(ctx)
+  queryTimeoutMsCur = settings.budget.queryTimeoutMs   ## RFC-0005 S8bu
+  queryTimedOutFlag = false                            ## RFC-0005 S8bu
+  nativeStackCutFlag = false                           ## RFC-0005 S8ca
   # RFC-0005 S8m: count every Z3 API error of the run (`nelliZ3ErrorHandler`).
   Z3_set_error_handler(ctx.raw, nelliZ3ErrorHandler)
   z3ApiErrorCount = 0
   z3ApiFirstError = ""
+  when defined(symexTestInjectWalkerFault):
+    injectedShape = ""     ## RFC-0005 S8ce: a prior run's unfired shape
   callGuardedNames = @[]   ## RFC-0005 S8an: a run that raised mid-callee
   extractionErrors = @[]   ## Phase 15 F7: reset per-run float-extraction error sink
   obligationLog = @[]      ## #161 slice 2: PER-RUN, not per-lower — see the
@@ -19793,6 +26484,8 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   loweringPendingTaint = {}              ## SND-3 (ADR-0023) / RFC-0005 S1: reset per-call pending taint
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
+  regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
+  regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms
@@ -19820,6 +26513,12 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentClosureBodies = initTable[      ## Phase 15 C2b: reset site→body map
     tuple[siteHash: int64, declOrder: int], ClosureBody]()
   currentClosureCallAxioms = @[]         ## Phase 15 C2b: reset ground-axiom sink
+  globalEntryVals = initTable[string, SymVal]()  ## RFC-0005 S8as
+  glUnwritten = initTable[int, string]()   ## RFC-0005 batch 6: their
+  glPartHavoc = initTable[string, bool]()  ## unwritten leaves with them
+  glUnwrittenAsts = @[]
+  globalEntryFacts = @[]                         ## RFC-0005 S8as
+  ctxPruneLog = @[]                              ## RFC-0005 S8ax
   currentClosureExitPc = @[]             ## Phase 16 ADR-0012: reset exit-pc channel
   currentClosureCallAxiomStrs = @[]      ## Phase 15 C2b: reset axiom-string hook
   currentClosureCallErrors = @[]         ## Phase 15 C2b: reset closure-call errors
@@ -19829,7 +26528,12 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   currentRefSorts = initTable[string, RawZ3Sort]()    ## Phase 15 R1
   currentNilConsts = initTable[string, Z3AnyAst]()    ## Phase 15 R1
   heapKeyShapes = initTable[string, HeapKeyShape]()  ## RFC-0005 S8h
+  intHeapIsInt = false   ## RFC-0005 S8as: set by runSymexImpl before any param is allocated
+  intOfBV = initTable[uint, tuple[zi: Z3Int, bv: SymVal]]()  ## RFC-0005 S8ax
+  intCellFactSeen = initHashSet[uint]()  ## RFC-0005 S8ax
   currentVariantHeaps = initTable[string, Z3AnyAst]() ## ADR-0013 D5 (Slice 2)
+  currentWinningGlobals = @[]                         ## RFC-0005 S8bn
+  ptrLeafAims = initTable[int64, PtrLeafAim]()        ## RFC-0005 S8bn
   heapWitnessNominalRegistry = initTable[string, IRType]()  ## Cluster H H_witness
   currentCallerHeaps = initTable[string, Z3AnyAst]()  ## Phase 15 R1b
   currentCallerHeapDepth = 0                          ## Phase 15 R1b
@@ -19949,6 +26653,21 @@ proc runSymexImpl(prog: SymexProgram,
                   target: SymexTarget,
                   settings: SymexSettings): RawResult =
   let ctx = resetSymexRunState(settings)
+  # RFC-0005 S8as/S8ax: the signed `int` heaps are Int-sorted whenever the
+  # run's ints are not exact (`intHeapIsInt`). S8as also required every
+  # plain `int` parameter to be an Int: a bit-vector stored into an Int heap
+  # and compared with itself after a read is `int2bv(bv2int(v)) != v`, the
+  # F5 shape Z3 does not finish. S8ax meets that bit-vector unconverted
+  # (`intOfBV`, `storedAt`) and bounds every cell an Int heap is read at by
+  # its type (`intCellRangeFacts`).
+  # RFC-0005 batch 4: decided here, before any parameter is allocated, not
+  # once they are bound. A parameter's leaf-split arrays -- a seq of tuples
+  # (S8bc), a table's container values (S8at) -- are built at allocation
+  # from `heapLeafTerm` / `heapLeafRaw`, which consult this flag, while
+  # every read lifts its select by the flag as it stands then
+  # (`liftHeapValue`). Set after binding, the arrays were bit-vector sorted
+  # and their reads Int: an ill-sorted term at the first comparison.
+  intHeapIsInt = settings.integerSemantics != isExact
   var env: Env
   var initialPC: seq[Z3Bool]
   var log: AbstractionLog
@@ -20276,6 +26995,7 @@ proc runSymexImpl(prog: SymexProgram,
       env[p.name] = SymVal(kind: svBool, bo: mkBoolVar(p.name))
   let initial = Path(pc: initialPC, env: env)
   var w = WalkCtx(
+    extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx, target: target, params: prog.params,
     mode: wmExplore,   ## RFC-fuzzer-nextgen G1a: explicit for clarity — this
                        ## is also the zero-value, so pre-G1a callers already
@@ -20283,12 +27003,13 @@ proc runSymexImpl(prog: SymexProgram,
     found: @[],
     settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
-    callCache: initTable[string, CallCacheEntry](),
+    callCache: initTable[string, seq[CallCacheEntry]](),
     activeCalls: initHashSet[string](),
     initialEnv: env,
     statics: WalkerStatics(exnTable: exnTypeTable,   ## Phase 15 E4
                            userExnHierarchy: prog.userExnHierarchy,  ## E4a
-                           sutRetTy: prog.retTy),  ## RFC-0005 S8p
+                           sutRetTy: prog.retTy,  ## RFC-0005 S8p
+                           globals: globalsTable(prog.globals)),  ## S8as
   )
   # Phase 15 C2b: publish a pointer to the live WalkCtx so `lowerClosureCall`
   # (running in the `lower` evaluator, no `WalkCtx` parameter) can drive the
@@ -21135,17 +27856,19 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
 
   # ---- Step 3: follow the concrete trace, collecting modelable constraints
   var w = WalkCtx(
+    extHardMark: -1,   ## RFC-0005 S8ax: no depth extension under way
     z3: ctx,
     target: SymexTarget(kind: stkLabel, label: "__nelli_concolic_unreached__"),
     params: prog.params, mode: wmFollowConcrete,
     found: @[], settings: settings, procs: prog.procs,
     callStack: @[], callStats: initTable[string, CallStat](),
-    callCache: initTable[string, CallCacheEntry](),
+    callCache: initTable[string, seq[CallCacheEntry]](),
     activeCalls: initHashSet[string](), initialEnv: env,
     concreteEq: concreteEq,
     statics: WalkerStatics(exnTable: exnTypeTable,
                            userExnHierarchy: prog.userExnHierarchy,
-                           sutRetTy: prog.retTy),
+                           sutRetTy: prog.retTy,
+                           globals: globalsTable(prog.globals)),  ## S8as
   )
   currentWalkCtxPtr = addr w
   let initial = Path(pc: initialPC, env: env)
@@ -21211,18 +27934,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # (`concreteBranchRLimit`), with their `random_seed`. It had no bound at
   # all. An exhausted bound is `zsUnknown`, reported `false`: not proven,
   # never a claim.
-  let s = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  s.setParams(sp)
+  # RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
   var pinned = initialPC & concreteEq
   for p in resultPaths:
     for c in p.pc: pinned.add c
-  for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
-  for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = s.check() == zsSat
+  result.pcSatByConcreteInputs = concreteScratchCheck(ctx,
+    pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars
@@ -21573,6 +28291,17 @@ proc newRefWitness*(w: RawWitness): RefWitness =
       if e.value == "nil": ""
       elif e.aliasRef.isSome: e.aliasRef.get
       else: e.name
+  # RFC-0005 S8bh (item 2). A position aliasing a `ptr` cell that is itself
+  # a field's address (`"&<cell>.<field>"`) aliases that address; S8bn
+  # (item 2): likewise one aimed at a variable (`"@aim:<name>"`).
+  var positions: seq[string]
+  for pos in result.cellOf.keys: positions.add pos
+  for pos in positions:
+    let cell = result.cellOf[pos]
+    if cell.len > 0 and cell != pos and result.cellOf.hasKey(cell) and
+       (result.cellOf[cell].startsWith("&") or
+        result.cellOf[cell].startsWith(ptrAimPrefix)):
+      result.cellOf[pos] = result.cellOf[cell]
 
 proc refElemPos*(container: string; i: int): string =
   ## RFC-0005 S8h. The position of element `i` of a `seq`/`array` of refs.
@@ -21606,6 +28335,90 @@ proc cellSetMembers(c: RefWitness; path: string): seq[int64] =
   c.w.setMembers.getOrDefault(path)
 proc cellBuilt(c: RefWitness; cell: string): pointer = c.cells.getOrDefault(cell, nil)
 proc cellRecord(c: RefWitness; cell: string; p: pointer) = c.cells[cell] = p
+
+var ptrAims {.threadvar.}: Table[pointer, string]
+  ## RFC-0005 S8bn (item 2). Each `ptr` witness cell built for a position
+  ## aimed at a variable (`"@aim:<name>"`), and that variable's IR name. A
+  ## cell is unmanaged memory never freed, so its address names it for the
+  ## rest of the process.
+
+proc ptrAimRecord(cell: string; p: pointer) =
+  if cell.startsWith(ptrAimPrefix): ptrAims[p] = cell[ptrAimPrefix.len .. ^1]
+
+proc ptrAimsSnapshot*(): Table[pointer, string] =
+  ## RFC-0005 batch 6 (S8bn on S8be). The calling thread's aimed cells. The
+  ## witness is built on the calling thread, and S8be's bounded replay runs
+  ## the splat on a thread of its own, whose `ptrAims` starts empty: every
+  ## aimed pointer then missed its variable (`ptrAimsAt` false) and the
+  ## replay was refuted. The replay hands this copy to its thread
+  ## (`ptrAimsAdopt`).
+  ptrAims
+
+proc ptrAimsAdopt*(aims: Table[pointer, string]) =
+  ## RFC-0005 batch 6. See `ptrAimsSnapshot`.
+  for p, name in aims: ptrAims[p] = name
+
+proc ptrAimsAt*(p: pointer; name: string): bool =
+  ## RFC-0005 S8bn (item 2). The witness pointer `p` was aimed at the
+  ## variable `name` (a global, or a `var` parameter of the SUT): the
+  ## replay's splat (`emitWitnessSplat`) then hands it the address of the
+  ## variable itself, which no witness cell can be.
+  p != nil and ptrAims.getOrDefault(p, "") == name
+
+proc ptrAimPath*(p: pointer; name: string): tuple[hit: bool; path: seq[string]] =
+  ## RFC-0005 S8bn (item 4). The witness pointer `p` was aimed at a part of
+  ## the variable `name` (`@aim:<name>/<step>/...`): the steps, each a field
+  ## position, an element index, or a table key (`k<hex>`), for
+  ## `ptrAimInto`.
+  if p == nil: return
+  let a = ptrAims.getOrDefault(p, "")
+  if not a.startsWith(name & "/"): return
+  result.path = a[name.len + 1 .. ^1].split('/')
+  result.hit = true
+
+{.push fieldChecks: off.}   # RFC-0005 S8bw (item 3): see `ptrAimByName`
+proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
+  ## RFC-0005 S8bn (item 4). The address of the part of `x` the steps
+  ## `path[i ..]` name (a field's position, an element's index, a table
+  ## key), or nil.
+  when T is U:
+    if i == path.len: return addr x
+  if i >= path.len: return nil
+  when T is Table:
+    if path[i].len >= 1 and path[i][0] == 'k':
+      let key = try: parseHexStr(path[i][1 .. ^1]) except ValueError: ""
+      when compiles(x.hasKey(key)):
+        if x.hasKey(key):
+          return ptrAimInto[typeof(x[key]), U](x[key], path, i + 1)
+    return nil
+  else:
+    let n = try: parseInt(path[i]) except ValueError: -1
+    when T is tuple or (T is object and not (T is ref)):
+      # RFC-0005 S8bw (item 3): a case object's step names its field
+      # (`f<name>`): `fieldPairs` walks only the active branch, so a
+      # position is not one field (`ptrAimByName`). A discriminator is not
+      # addressable (`when compiles`).
+      if path[i].len >= 1 and path[i][0] == 'f':
+        when T is object:
+          let fname = path[i][1 .. ^1]
+          ptrAimByName(x, fname):
+            when compiles(ptrAimInto[typeof(it), U](it, path, i + 1)):
+              return ptrAimInto[typeof(it), U](it, path, i + 1)
+        return nil
+      var k = 0
+      for _, f in fieldPairs(x):
+        when compiles(ptrAimInto[typeof(f), U](f, path, i + 1)):
+          if k == n:
+            return ptrAimInto[typeof(f), U](f, path, i + 1)
+        inc k
+    elif T is array or T is seq:
+      var k = 0
+      for e in x.mitems:
+        if k == n:
+          return ptrAimInto[typeof(e), U](e, path, i + 1)
+        inc k
+    nil
+{.pop.}
 
 proc readCellField[F](c: RefWitness; path: string; f: var F)
 
@@ -21646,25 +28459,44 @@ proc validDefault[F](f: var F) =
 
 proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
   ## RFC-0005 S8h. The witness value of the `ref`/`ptr` position `pos`.
-  let cell = cellNameOf(c, pos)
+  var cell = cellNameOf(c, pos)
   if cell.len == 0: return nil
   let built = cellBuilt(c, cell)
   if built != nil: return cast[T](built)
+  # RFC-0005 S8bh (item 2). A pointer to a field (`"&<cell>.<field>"`) is
+  # that field's address, recorded when its object was built. The typed
+  # witness builds every pointer position after the others (S8bn, item 1:
+  # `emitWitnessTuple`), so its object is built first; one that is still not
+  # (a pointer in a cell's field) leaves the pointer its own cell, read from
+  # the leaves the snapshot wrote under the position's name.
+  # RFC-0005 S8bn (item 2): a pointer aimed at a variable (`"@aim:<name>"`)
+  # is a cell of its own, recorded for the splat (`ptrAimsAt`), and shared by
+  # every position aimed alike.
+  var leaves = cell
+  if cell.startsWith("&"):
+    cell = pos
+    leaves = pos
+  elif cell.startsWith(ptrAimPrefix):
+    leaves = pos
   when T is ref:
     new(result)
   else:
     # A `ptr` witness cell is unmanaged memory the witness owns for the rest
     # of the process: nothing frees what a SUT is handed as a raw pointer.
     result = cast[T](alloc0(sizeof(result[])))
+    ptrAimRecord(cell, cast[pointer](result))
   cellRecord(c, cell, cast[pointer](result))
   when result[] is object:
     # A case object's discriminator is assigned in field order, before the
     # branch fields `fieldPairs` then yields for the branch it selected.
     {.cast(uncheckedAssign).}:
       for fname, fv in fieldPairs(result[]):
-        readCellField(c, cell & "." & fname, fv)
+        readCellField(c, leaves & "." & fname, fv)
+        # RFC-0005 S8bh (item 2): the field's address, for a pointer the
+        # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
+        cellRecord(c, "&" & leaves & "." & fname, cast[pointer](addr fv))
   else:
-    readCellField(c, cell, result[])
+    readCellField(c, leaves, result[])
 
 proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
   ## RFC-0005 S8ap. A seq cell field: `seqLens[path]` elements, each the leaf
@@ -21678,20 +28510,34 @@ proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
       f[i] = resolveRef[E](c, refElemPos(path, i))
     else:
       readCellField(c, path & "." & $i, f[i])
+      # RFC-0005 S8bn (item 4): the element's address, for a pointer the
+      # snapshot aims at it (`aliasRef = "&<cell>.<field>.<index>"`).
+      if path.len > 0 and path[0] != '&':
+        cellRecord(c, "&" & path & "." & $i, cast[pointer](addr f[i]))
 
-proc readCellTable[V](c: RefWitness; path: string; f: var Table[string, V]) =
+proc readCellTable[K, V](c: RefWitness; path: string; f: var Table[K, V]) =
   ## RFC-0005 S8ap. A `Table[string, V]` cell field: the keys of
   ## `tabKeys[path]`, each value the leaf `<path>.<key>` (`intVals`, a bool
-  ## value as 0/1 -- `extractTableEntries`'s layout).
+  ## value as 0/1 -- `extractTableEntries`'s layout). RFC-0005 S8ar: every
+  ## backed key and value type (`witnessTabKey` / `witnessTabVal`); a value
+  ## type the model does not back keeps its zero, and `witnessFidelity`
+  ## classifies such a pointee lossy.
   if not cellHasTab(c, path): return
-  f = initTable[string, V]()
+  f = initTable[K, V]()
   for k in cellTabKeys(c, path):
     var v: V
-    var i: int64
-    if cellInt(c, path & "." & k, i):
-      when V is bool: v = i != 0
-      elif V is SomeInteger or V is enum or V is char: v = V(i)
-    f[k] = v
+    when compiles(witnessTabVal(c.w, "", v)):
+      discard witnessTabVal(c.w, path & "." & k, v)
+    when compiles(witnessTabKey[K](k)):
+      f[witnessTabKey[K](k)] = v
+  # RFC-0005 S8bn (item 4): each value's address, once every key is in (a
+  # later insertion may move them), for a pointer the snapshot aims at it
+  # (`aliasRef = "&<cell>.<field>.<key>"`).
+  if path.len > 0 and path[0] != '&':
+    for k in cellTabKeys(c, path):
+      when compiles(witnessTabKey[K](k)):
+        cellRecord(c, "&" & path & "." & k,
+                   cast[pointer](addr f[witnessTabKey[K](k)]))
 
 proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
   ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`, whose
@@ -21713,12 +28559,18 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   ## rests on it, and `witnessFidelity` classifies such a pointee lossy.
   when F isnot ref and F isnot ptr:
     validDefault(f)
-  when F is ref:
+  when F is distinct:
+    # RFC-0005 S8ar: a `distinct` cell value is its base's leaf.
+    var b: typetraits.distinctBase(F)
+    readCellField(c, path, b)
+    when compiles(F(b)): f = F(b)
+  elif F is ref:
     f = resolveRef[F](c, path)
   elif F is ptr:
     when typeof(f[]) is object or typeof(f[]) is SomeNumber or
          typeof(f[]) is bool or typeof(f[]) is enum or typeof(f[]) is char or
-         typeof(f[]) is ref or typeof(f[]) is ptr:
+         typeof(f[]) is ref or typeof(f[]) is ptr or
+         typeof(f[]) is string:   ## RFC-0005 S8bn
       f = resolveRef[F](c, path)
   elif F is bool:
     var b: bool
@@ -21749,6 +28601,18 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
     when compiles(readCellTable(c, path, f)): readCellTable(c, path, f)
   elif F is HashSet:
     readCellSet(c, path, f)
+  elif F is object or F is tuple:
+    # RFC-0005 S8ar: a by-value object / tuple field, each part the leaf
+    # `<path>.<name>` (`renderHeapValue`; an anonymous tuple's `FieldN`).
+    {.cast(uncheckedAssign).}:
+      for fname, fv in fieldPairs(f):
+        readCellField(c, path & "." & fname, fv)
+  elif F is array:
+    # RFC-0005 S8ar: an array field, element `i` (from 0) the leaf `<path>.<i>`.
+    var i = 0
+    for x in f.mitems:
+      readCellField(c, path & "." & $i, x)
+      inc i
   else:
     discard
 
@@ -21878,6 +28742,21 @@ proc readSeqFloat32*(w: RawWitness, name: string): seq[float32] =
     if w.float32Vals.hasKey(path):
       result[i] = w.float32Vals[path]
 
+proc readSeqBool*(w: RawWitness, name: string): seq[bool] =
+  ## RFC-0005 S8ar: a `seq[bool]` witness, from `boolVals` (an element absent
+  ## from the model is `false`, Nim's zero).
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[bool](n)
+  for i in 0 ..< n:
+    result[i] = w.boolVals.getOrDefault(name & "." & $i, false)
+
+proc readSeqString*(w: RawWitness, name: string): seq[string] =
+  ## RFC-0005 S8ar: a `seq[string]` witness, from `strVals`.
+  let n = if w.seqLens.hasKey(name): w.seqLens[name] else: 0
+  result = newSeq[string](n)
+  for i in 0 ..< n:
+    result[i] = w.strVals.getOrDefault(name & "." & $i, "")
+
 proc readTableStrInt*(w: RawWitness, name: string): Table[string, int] =
   ## Phase 5 cycle 5: build a `Table[string, int]` populated with the
   ## key-value pairs the SUT accessed (static string literals).
@@ -21902,15 +28781,14 @@ proc witnessIntAs*[T](v: int64): T =
   when T is uint64 or T is uint: cast[T](v)
   else: T(v)
 
-proc readTableStrIntAs*[T](w: RawWitness, name: string): Table[string, T] =
-  ## RFC-0005 S8z. `readTableStrInt` for any fixed-width int value type.
-  result = initTable[string, T]()
-  if not w.tabKeys.hasKey(name):
-    return
-  for k in w.tabKeys[name]:
-    let p = name & "." & k
-    if w.intVals.hasKey(p):
-      result[k] = witnessIntAs[T](w.intVals[p])
+proc witnessTabKey*[K](k: string): K =
+  ## RFC-0005 S8ar. A rendered table key (`extractTableEntries`) as `K`: a
+  ## string as itself, a cell key from its decimal.
+  ## RFC-0005 S8at: a float key from its IEEE bit pattern (`floatKeyCell`).
+  when K is string: k
+  elif K is float32: cast[float32](uint32(parseBiggestInt(k) and 0xFFFF_FFFF'i64))
+  elif K is SomeFloat: K(cast[float64](parseBiggestInt(k)))
+  else: witnessIntAs[K](parseBiggestInt(k))
 
 proc readBitSetAs*[T](w: RawWitness, name: string): set[T] =
   ## RFC-0005 S8bq. A builtin `set[T]` from its collected members.
@@ -21924,6 +28802,90 @@ proc readSetIntAs*[T](w: RawWitness, name: string): HashSet[T] =
   if not w.setMembers.hasKey(name): return
   for v in w.setMembers[name]:
     result.incl witnessIntAs[T](v)
+
+proc readSeqAs*[T](c: RefWitness, name: string): seq[T] =
+  ## RFC-0005 S8bl (item 4). A witness `seq[T]` of a tree element holding a
+  ## ref part, read through the witness tuple's ONE `RefWitness` (its
+  ## positions, `collectTreeRefPositions`), so a cell two positions share --
+  ## two elements, an element and a param -- is one object.
+  let n = c.w.seqLens.getOrDefault(name, 0)
+  result = newSeq[T](n)
+  for i in 0 ..< n:
+    readCellField(c, name & "." & $i, result[i])
+
+proc readSeqAs*[T](w: RawWitness, name: string): seq[T] =
+  ## RFC-0005 S8at. A witness `seq[T]` of any renderable element type, at
+  ## `name` (`extractFromSymVal`'s `seqLens` + `.<i>` element leaves): a
+  ## `Table`'s seq value, which the table reader reaches generically.
+  ## RFC-0005 S8bc: also a by-value `seq[char]` / `seq[Enum]` (the fixed
+  ## width readers return `seq[uint8]`, not the declared type). A `char` or
+  ## enum element converts by value (`cast` from the 64-bit leaf is a
+  ## byte-order-dependent reinterpretation), and a string-backed `seq[char]`
+  ## (one whole-string leaf, as `readSeqUInt8` reads it) is read per byte.
+  when T is char:
+    if w.strVals.hasKey(name):
+      let s = w.strVals[name]
+      result = newSeq[T](s.len)
+      for i in 0 ..< s.len: result[i] = s[i]
+      return
+  let n = w.seqLens.getOrDefault(name, 0)
+  result = newSeq[T](n)
+  for i in 0 ..< n:
+    let p = name & "." & $i
+    when T is string: result[i] = w.strVals.getOrDefault(p, "")
+    elif T is bool: result[i] = w.boolVals.getOrDefault(p, false)
+    elif T is float32:
+      if w.float32Vals.hasKey(p): result[i] = w.float32Vals[p]
+    elif T is SomeFloat:
+      if w.float64Vals.hasKey(p): result[i] = T(w.float64Vals[p])
+    elif T is char or T is enum:
+      if w.uintVals.hasKey(p): result[i] = T(w.uintVals[p])
+      elif w.intVals.hasKey(p): result[i] = T(w.intVals[p])
+    elif T is object or T is tuple or T is array or T is distinct:
+      # RFC-0005 S8bc (item 3): a tree element, written in the heap's cell
+      # layout (`extractTreeValue`), read as a by-value cell field is.
+      readCellField(newRefWitness(w), p, result[i])
+    else:
+      if w.uintVals.hasKey(p): result[i] = cast[T](w.uintVals[p])
+      elif w.intVals.hasKey(p): result[i] = witnessIntAs[T](w.intVals[p])
+
+proc readTableAs*[K, V](w: RawWitness, name: string): Table[K, V]
+
+proc witnessTabVal*[V](w: RawWitness; p: string; v: var V): bool =
+  ## RFC-0005 S8ar. The rendered table value at leaf `p`, as `V`.
+  ## RFC-0005 S8at: a container value (`isTableContainerValTy`), read as a
+  ## by-value param of its type is; every rendered key has one.
+  when V is seq:
+    v = readSeqAs[typeof(items(default(V)))](w, p)
+    return true
+  elif V is HashSet:
+    v = readSetIntAs[typeof(items(default(V)))](w, p)
+    return true
+  elif V is Table:
+    v = readTableAs[typeof(keys(default(V))), typeof(values(default(V)))](w, p)
+    return true
+  elif V is string:
+    if w.strVals.hasKey(p): (v = w.strVals[p]; return true)
+  elif V is float32:
+    if w.float32Vals.hasKey(p): (v = w.float32Vals[p]; return true)
+  elif V is SomeFloat:
+    if w.float64Vals.hasKey(p): (v = V(w.float64Vals[p]); return true)
+  elif V is bool:
+    if w.intVals.hasKey(p): (v = w.intVals[p] != 0; return true)
+  else:
+    if w.intVals.hasKey(p): (v = witnessIntAs[V](w.intVals[p]); return true)
+  false
+
+proc readTableAs*[K, V](w: RawWitness, name: string): Table[K, V] =
+  ## RFC-0005 S8ar. A witness `Table[K, V]` of any backed key and value type
+  ## (`isRenderableTableTy`).
+  result = initTable[K, V]()
+  if not w.tabKeys.hasKey(name):
+    return
+  for k in w.tabKeys[name]:
+    var v: V
+    if witnessTabVal(w, name & "." & k, v):
+      result[witnessTabKey[K](k)] = v
 
 # ---- Phase 15 Cluster C (C2a): closure-construction test hooks ---------------
 #

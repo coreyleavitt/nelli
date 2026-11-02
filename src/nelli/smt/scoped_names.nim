@@ -57,31 +57,125 @@ type
 
 var nameScope {.compileTime.}: NameScope
 var nameCounter {.compileTime.}: int
+var seenGlobals {.compileTime.}: seq[NimNode]
+  ## RFC-0005 S8as. The module-level variable symbols the parse has named
+  ## (through `strVal`), in first-seen order: the globals the walked code
+  ## reaches, whose entry value the walk models (`SymexProgram.globals`).
+var byRefCounter {.compileTime.}: int
+var moduleGlobalSyms {.compileTime.}: Table[string, NimNode]
+  ## RFC-0005 S8bw. The symbol of every module-level global `strVal` named,
+  ## by its `__gl:` name, so the emitter can give a read its declared type
+  ## (`globalSymOf`).
+
+const byRefMarkColumn = -32123
+  ## RFC-0005 S8ba. The column a by-reference base carries (`markByRef`):
+  ## no source position has a negative column.
 
 const claimableSymKinds = {nskVar, nskLet, nskForVar, nskParam, nskTemp}
   ## The runtime value bindings an env slot holds. A local `const` is folded
   ## by the compiler at every use, and `result` is never declared by an
   ## `IdentDefs` (each routine's `result` is its own frame's slot).
 
-proc isModuleGlobal*(n: NimNode): bool =
-  ## RFC-0005 S8an. True when `n` is the symbol of a module-level `var` or
-  ## `let` (its owner is the module itself).
+proc isRoutineGlobal*(n: NimNode): bool =
+  ## RFC-0005 S8be. True when `n` is a routine's `{.global.}` variable
+  ## (`proc f() = var c {.global.} = 0`). Nim gives it static storage and
+  ## runs its initialiser once, at program start, so it is a module-level
+  ## variable under a name its routine scopes. Its declaration keeps the
+  ## pragma (`getImpl` is the `IdentDefs`, the name a `PragmaExpr`).
   if n.kind != nnkSym or symKind(n) notin {nskVar, nskLet}: return false
   let o = owner(n)
-  o.kind == nnkSym and symKind(o) == nskModule
+  if o.kind != nnkSym or symKind(o) == nskModule: return false
+  let impl = n.getImpl
+  if impl.kind != nnkIdentDefs or impl.len < 3 or
+     impl[0].kind != nnkPragmaExpr or impl[0].len < 2:
+    return false
+  for p in impl[0][1]:
+    let nm =
+      case p.kind
+      of nnkIdent, nnkSym: macros.strVal(p)
+      of nnkExprColonExpr:
+        if p[0].kind in {nnkIdent, nnkSym}: macros.strVal(p[0]) else: ""
+      else: ""
+    if nm == "global": return true
+  false
+
+proc isModuleGlobal*(n: NimNode): bool =
+  ## RFC-0005 S8an. True when `n` is the symbol of a module-level `var` or
+  ## `let` (its owner is the module itself). RFC-0005 S8be: or a routine's
+  ## `{.global.}` variable (`isRoutineGlobal`), which is one in all but
+  ## scope.
+  if n.kind != nnkSym or symKind(n) notin {nskVar, nskLet}: return false
+  let o = owner(n)
+  (o.kind == nnkSym and symKind(o) == nskModule) or isRoutineGlobal(n)
+
+proc globalIRName*(n: NimNode): string =
+  ## RFC-0005 S8an/S8as. The IR name of the module-level variable `n`
+  ## (`isModuleGlobal`): `__gl:<module>.<name>`. Does not record `n` as
+  ## reached (`strVal` does). RFC-0005 S8be: a routine's `{.global.}`
+  ## variable is `__gl:<module>@<routine>@<signature hash>.<name>`: one per
+  ## routine (and per generic instance, as Nim keeps one per instance), and
+  ## never a module-level name (`@` is in no Nim identifier).
+  let o = owner(n)
+  if symKind(o) != nskModule:
+    var m = o
+    while m.kind == nnkSym and symKind(m) != nskModule: m = owner(m)
+    return globalEnvPrefix & macros.strVal(m) & "@" & macros.strVal(o) &
+           "@" & signatureHash(o) & "." & macros.strVal(n)
+  globalEnvPrefix & macros.strVal(o) & "." & macros.strVal(n)
+
+proc byRefName*(n: NimNode): string =
+  ## RFC-0005 S8ba. The IR name of a by-reference base (`markByRef`), or ""
+  ## when `n` is not one. RFC-0005 S8bd: a mark is a symbol, or a node with
+  ## no children (`markByRef` of an element or a call result).
+  if n.kind != nnkSym and n.len != 0: return ""
+  let li = n.lineInfoObj
+  if li.column != byRefMarkColumn or li.line <= 0: return ""
+  "__byref_" & $li.line
+
+proc markByRef*(base: NimNode): NimNode =
+  ## RFC-0005 S8ba. A copy of the symbol `base` (it keeps its symbol and
+  ## type) that names a fresh by-reference parameter: `strVal` reads it as
+  ## `__byref_<N>`, so a callee specialised to a heap lvalue (`p.x` for its
+  ## `var` formal) reads and writes that cell through the ref the caller
+  ## evaluated at the call. nil when the counter is spent (the line field
+  ## holds the number).
+  ## RFC-0005 S8bd: a base that is not a symbol (`a[i]`, `getBox()`) is
+  ## marked as a copy of its own node without its children: it keeps the
+  ## node's type, and names nothing of the caller's.
+  if byRefCounter >= 65000: return nil
+  inc byRefCounter
+  result = copyNimNode(base)
+  result.setLineInfo(base.lineInfoObj.filename, byRefCounter, byRefMarkColumn)
 
 proc strVal*(n: NimNode): string =
   ## `std/macros.strVal`, except that a symbol renamed by a claim reads as
   ## its scoped name (RFC-0005 S8e), and a module-level variable reads as
-  ## `__gl:<module>.<name>` (RFC-0005 S8an).
+  ## `__gl:<module>.<name>` (RFC-0005 S8an) and is recorded as reached
+  ## (`seenModuleGlobals`, RFC-0005 S8as). A by-reference base reads as its
+  ## parameter's name (RFC-0005 S8ba, `markByRef`).
+  let br = byRefName(n)
+  if br.len > 0: return br
   result = macros.strVal(n)
   if isModuleGlobal(n):
-    return globalEnvPrefix & macros.strVal(owner(n)) & "." & result
+    var seen = false
+    for g in seenGlobals:
+      if g == n:
+        seen = true
+        break
+    if not seen: seenGlobals.add n
+    result = globalIRName(n)
+    moduleGlobalSyms[result] = n   ## RFC-0005 S8bw
+    return
   if n.kind == nnkSym and nameScope.renames.len > 0:
     let cands = nameScope.renames.getOrDefault(result)
     for c in cands:
       if c.sym == n:
         return c.name
+
+proc globalSymOf*(name: string): NimNode =
+  ## RFC-0005 S8bw. The symbol of the module-level global `name` (an
+  ## `__gl:` name `strVal` produced), or nil.
+  moduleGlobalSyms.getOrDefault(name, nil)
 
 proc resetNameScopes*() =
   ## Start a top-level parse: no renames, no claims, counter at zero (so a
@@ -89,6 +183,13 @@ proc resetNameScopes*() =
   ## key).
   nameScope = NameScope()
   nameCounter = 0
+  seenGlobals = @[]   ## RFC-0005 S8as
+  byRefCounter = 0    ## RFC-0005 S8ba
+
+proc seenModuleGlobals*(): seq[NimNode] =
+  ## RFC-0005 S8as. The module-level variables named since the last
+  ## `resetNameScopes`.
+  seenGlobals
 
 proc enterNameScope*(): NameScope =
   ## Open a nested naming scope (a callee's own env). Keeps the enclosing

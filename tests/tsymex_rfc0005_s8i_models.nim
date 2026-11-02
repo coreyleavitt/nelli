@@ -478,18 +478,26 @@ proc declinedReassignLit(t: S8iK) =
 
 suite "S8i (4) reassigning a declined construction degrades, never faults":
   test "symbolic reassignment: a classified decline, not weInternalWalkerFault":
+    ## RFC-0005 S8ba: the declined construction binds its value
+    ## (`declinedVariantEnv`), so the kind write is the ordinary one on a
+    ## free variant and no longer declines on its own (`feUnsupportedOp`);
+    ## the construction's classified decline keeps the run sxUnknown.
     let r = symexFind(declinedReassign, tLabel("s8i_declined_reassign"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check not r.errors.hasKind(weInternalWalkerFault)
-    check r.errors.hasKind(feUnsupportedOp)
+    check r.errors.hasKind(seUnsupportedSetCharInterop)
 
   test "literal reassignment: a classified decline, not weInternalWalkerFault":
+    ## RFC-0005 S8ba: the declined construction binds its value
+    ## (`declinedVariantEnv`), so the kind write is the ordinary one on a
+    ## free variant and no longer declines on its own (`feUnsupportedOp`);
+    ## the construction's classified decline keeps the run sxUnknown.
     let r = symexFind(declinedReassignLit, tLabel("s8i_declined_reassign_lit"))
     checkpoint($r.status & " " & show(r.errors))
     check r.status == sxUnknown
     check not r.errors.hasKind(weInternalWalkerFault)
-    check r.errors.hasKind(feUnsupportedOp)
+    check r.errors.hasKind(seUnsupportedSetCharInterop)
 
   test "a ref arm field's construction is modelled, and its reassignment (RFC-0005 S8u)":
     let r = symexFind(refArmReassign, tLabel("s8i_ref_reassign"))

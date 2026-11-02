@@ -67,6 +67,8 @@ suite "RFC-0010 B2 — ResourceBudget: the empty literal IS the default":
           want.maxVariantConstructorFieldAllocs
     check lit.maxSeqLen == want.maxSeqLen             # RFC-0005 S8k
     check lit.seqQueryRLimit == want.seqQueryRLimit   # RFC-0005 S8k
+    check lit.maxRecursionDepth == want.maxRecursionDepth   # RFC-0005 S8ax
+    check lit.queryTimeoutMs == want.queryTimeoutMs         # RFC-0005 S8bu
 
   test "an explicitly-written zero still means unlimited":
     # `0 = unlimited` is this type's documented contract for 10 of its 13
@@ -174,7 +176,7 @@ proc fieldCount[T](): int =
 suite "RFC-0010 B3 — the deprecated merge still covers every field":
 
   test "a fully-overriding merge reproduces the override exactly":
-    # Every one of ResourceBudget's 14 fields and SymexSettings' 6 non-budget
+    # Every one of ResourceBudget's 14 fields and SymexSettings' 7 non-budget
     # fields set away from its default, so a `+` body missing a line drops that
     # field back and this fails naming it.
     let b = SymexSettings(
@@ -184,6 +186,7 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
       arithChecks: {acDivByZero},
       inlinePolicy: ipAlwaysAxiomatize,
       replay: false,                     # RFC-0005 S10
+      replayTimeoutMs: 1234,             # RFC-0005 S8be
       budget: ResourceBudget(
         queryRLimit: 111'u, maxFrontierSize: 222, maxCallDepth: 33,
         maxLoopUnwind: 44, maxHeapDepth: 55, maxFreshnessAssertions: 666,
@@ -191,7 +194,9 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
         maxSplitParts: 99,
         seqInlineThreshold: 131, maxVariantConstructorForks: 141,
         maxVariantConstructorFieldAllocs: 151,
-        maxSeqLen: 161, seqQueryRLimit: 171'u))   # RFC-0005 S8k
+        maxSeqLen: 161, seqQueryRLimit: 171'u,   # RFC-0005 S8k
+        maxRecursionDepth: 181,                   # RFC-0005 S8ax
+        queryTimeoutMs: 191'u))                   # RFC-0005 S8bu
     check defaultSymexSettings() + b == b
 
   test "the field counts the merge was written against have not changed":
@@ -200,12 +205,15 @@ suite "RFC-0010 B3 — the deprecated merge still covers every field":
     # and the pin passes while `+` silently ignores it. Pinning the counts is
     # what forces the next person who adds a field to come here, and from here
     # to both `+` bodies.
-    check fieldCount[ResourceBudget]() == 14   # RFC-0005 S8c deleted
+    check fieldCount[ResourceBudget]() == 16   # RFC-0005 S8c deleted
                                                # `maxBytesEncodingLen`;
                                                # S8k added `maxSeqLen` and
-                                               # `seqQueryRLimit`
-    check fieldCount[SymexSettings]() == 7   # 6 scalars plus `budget`
-                                             # (RFC-0005 S10 added `replay`)
+                                               # `seqQueryRLimit`; S8ax
+                                               # `maxRecursionDepth`; S8bu
+                                               # `queryTimeoutMs`
+    check fieldCount[SymexSettings]() == 8   # 7 scalars plus `budget`
+                                             # (RFC-0005 S10 added `replay`,
+                                             # S8be `replayTimeoutMs`)
 
   test "composing two different nested budget overrides keeps both":
     # `a` and `b` each change ONE, different, budget subfield. A whole-object
@@ -323,10 +331,12 @@ suite "RFC-0010 B4 round 2 — maxCallDepth is a documented exception, not unlim
 
   test "an explicit large bound genuinely reaches deeper recursion":
     # The default cap (3) is too shallow for this SUT's needed depth (up to
-    # 9) and declines; an explicit large bound must actually let the walker
-    # descend that far and find the real witness.
+    # 9) and declined; an explicit large bound must actually let the walker
+    # descend that far and find the real witness. RFC-0005 S8ax: `n < 10`
+    # bounds the recursion, so the adaptive depth follows it past the
+    # default cap and the default now finds the witness too (`n == 7`).
     let viaDefault = symexFind(boundedRecursionSut, tLabel("bounded_recursion_hit"))
-    check viaDefault.status == sxUnknown
+    check viaDefault.status == sxSat
     let viaLargeBound = symexFind(boundedRecursionSut,
         tLabel("bounded_recursion_hit"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 20)))
@@ -424,26 +434,5 @@ suite "RFC-0010 B4 — the default budget actually bounds a runaway search":
     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"))
     check r.status == sxUnknown
 
-  test "an explicit finite maxCallDepth also completes cleanly (round 2 crash pin)":
-    # Round 2: two independent reviewers reproduced a SIGSEGV (native stack
-    # exhausted in under a second) against this EXACT SUT -- ordinary linear
-    # countdown recursion, unconstrained `n` -- under `maxCallDepth: 0`.
-    # Disabling the cap let the walker recurse natively without bound;
-    # `w.activeCalls` does not cycle-break this shape because `f(n-1)` hashes
-    # to a distinct Z3 AST at every level. This pins that an explicit FINITE
-    # bound -- the honest way to ask for deeper analysis -- still completes
-    # cleanly (no hang, no crash).
-    #
-    # The bound deliberately is NOT a "large-looking" round number. A direct
-    # probe (throwaway, deleted after use) against this exact SUT found
-    # unconstrained linear recursion safe through a cap of 85 and SIGSEGV by
-    # 88 on this engine's Linux/podman debug build (8MB `ulimit -s`) -- i.e.
-    # `maxCallDepth: 1000` ITSELF crashes here, because the cap bounds NATIVE
-    # recursion depth and this walker's per-level native stack cost is large.
-    # 50 sits with a wide, verified margin below that ceiling. Deliberately
-    # never pass `maxCallDepth: 0` (or a naively "large" bound) in this
-    # suite: that is the crash, and it would take this entire test binary
-    # down with it, not just this one query.
-    let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
-        SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
-    check r.status == sxUnknown
+  # The explicit finite `maxCallDepth` pin, the one test of this file that
+  # takes a minute, is `tsymex_configdefaults_depth`.

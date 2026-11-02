@@ -74,10 +74,15 @@ proc s11Deep(n: int) =
 proc s11Both(n: int) =
   ## Both levers at once: the RFC's "one `echo` and one deep loop" SUT, whose
   ## run coordinate is ⊤ and whose `gaps()` names each cause separately.
+  ## RFC-0005 S8bl: the sensor is read before the loop. Read behind
+  ## `i == 8 and`, it is reached only on a path whose `i` is a literal
+  ## other than 8 (every exit within the bound), and a guard that folds to
+  ## `false` no longer walks its arm: the substitution decided nothing.
+  let k = s11Sensor()
   var i = 0
   while i < n:
     i = i + 1
-  if i == 8 and s11Sensor() == 7:
+  if i == 8 and k == 7:
     symexTarget("s11_both")
 
 var s11ProbeState = 11
@@ -305,7 +310,13 @@ suite "RFC-0005 S11 (e) -- SymexFinding carries soundness, gaps, violations; the
     check warm.fromCache
     check sideEffects == before                 # a served entry never replays
     check warm.soundness == cold.soundness      # served unchanged
-    check warm.gaps.len == 0                    # errors are not cached
+    # RFC-0005 S8az: the `:sat` witness cache slot now carries gaps() too --
+    # `s11Confirm`'s winning path goes through a `dcFreshSymbol` decline
+    # (`a < a`), so even this confirmed-SAT cold run has a non-empty view,
+    # and the warm hit reports the SAME one (was: always `@[]`, "errors are
+    # not cached").
+    check cold.gaps.len > 0
+    check warm.gaps == cold.gaps
     check trusted(warm)
 
   test "an unknown and an unsat verdict serve their stored soundness":

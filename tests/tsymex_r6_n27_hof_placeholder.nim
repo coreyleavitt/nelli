@@ -136,18 +136,18 @@ import nelli/smt/canonicalize
 # against; call-return avoids it.)
 # =============================================================================
 
-proc makePairsN27(n: int): seq[(string, string)] =
+proc makePairsN27(n: int): seq[seq[string]] =  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   discard
 
 proc sutMapPlaceholder(n: int) =
   let ps = makePairsN27(n)
-  let mapped = ps.map(proc(p: (string, string)): bool = true)
+  let mapped = ps.map(proc(p: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if mapped.len > 0:
     symexTarget("map_placeholder")
 
 proc sutFilterPlaceholder(n: int) =
   let ps = makePairsN27(n)
-  let kept = ps.filter(proc(p: (string, string)): bool = true)
+  let kept = ps.filter(proc(p: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   if kept.len > 0:
     symexTarget("filter_placeholder")
 
@@ -161,12 +161,12 @@ type
   RecN27 = object
     tag: int
     case kind: bool
-    of true: options: seq[(string, string)]
+    of true: options: seq[seq[string]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
     of false: plain: int
 
 proc sutFieldMapPlaceholder(p: RecN27) =
   if p.kind:
-    let mapped = p.options.map(proc(x: (string, string)): bool = true)
+    let mapped = p.options.map(proc(x: seq[string]): bool = true)  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
     if mapped.len > 0:
       symexTarget("field_map_placeholder")
 

@@ -93,16 +93,18 @@ proc callSet(n: int) =
   if 3 in s: symexTarget("s8u_set")
   if s.len != 1: symexTarget("s8u_set_dead")
 
-proc mkIntTable(n: int): Table[int, int] =
-  ## A shape the table theory does not back (`Table[int, int]`): still
-  ## declined, now in-band -- the RFC-0005 S8u scoped decline.
-  var t: Table[int, int]
-  t[1] = n
+proc mkIntTable(n: int): Table[(int, int), int] =
+  ## A shape the table theory does not back: still declined, now in-band --
+  ## the RFC-0005 S8u scoped decline. RFC-0005 S8ar backs an integer key
+  ## (this was `Table[int, int]`) and S8at a float one (then
+  ## `Table[float, int]`); a tuple key is still unbacked.
+  var t: Table[(int, int), int]
+  t[(1, 1)] = n
   result = t
 
 proc callIntTable(n: int) =
   let t = mkIntTable(n)
-  if t[1] == 5: symexTarget("s8u_itbl")
+  if t[(1, 1)] == 5: symexTarget("s8u_itbl")
 
 suite "S8u (2) a callee building a local Table / HashSet":
   test "oracle":
@@ -125,7 +127,7 @@ suite "S8u (2) a callee building a local Table / HashSet":
     if r.status == sxSat: check r.witness[0] == 3
     expectUnsat(symexFind(callSet, tLabel("s8u_set_dead")))
 
-  test "an unbacked Table[int, int] declines in-band, never a walker fault":
+  test "an unbacked Table[(int, int), int] declines in-band, never a walker fault":
     let r = symexFind(callIntTable, tLabel("s8u_itbl"))
     checkpoint($r.status & " " & show(r.errors))
     for e in r.errors: check e.kind != weInternalWalkerFault

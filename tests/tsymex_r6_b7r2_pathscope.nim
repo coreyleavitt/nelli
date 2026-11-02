@@ -368,15 +368,17 @@ suite "symex round-6 B7r2 -- BLOCKER B7-2 (case/else-raise sibling poisoning): C
 
 suite "symex round-6 B7r2 -- regression: a genuinely-unmodeled whole-proc shape still declines (never a crash), unaffected by this slice":
 
-  test "B7r2-regress: Table[string, seq[int]] (unsupported value type) still classifies cleanly":
+  test "B7r2-regress: Table[string, (int, int)] (unsupported value type) still classifies cleanly":
     ## Unrelated to either fix landed this slice (int-offset locals /
     ## generalized seq placeholder) -- a live control confirming the
     ## standing "walker never crashes" invariant still holds after this
     ## slice's two changes.
     proc sut(x: int): bool =
-      var t: Table[string, seq[int]]
-      t["k"] = @[x]
-      result = t["k"].len > 0
+      # RFC-0005 S8at backs a container value (this was `seq[int]`, and
+      # with it the run is an exact sxUnsat); a tuple value is unbacked.
+      var t: Table[string, (int, int)]
+      t["k"] = (x, x)
+      result = t["k"][0] > 0
     let r = symexFind(sut, tIndexError())
     check r.status == sxUnknown
     check r.errors.len > 0

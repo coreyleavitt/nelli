@@ -122,7 +122,8 @@ proc withEcho(x: int) =
   symexTarget("t_echo")
 
 # The predicate is NOT "void means inert": a `var`-param opaque callee still
-# writes through, so it still taints even though it too returns nothing.
+# writes through, so it is not inert even though it too returns nothing
+# (RFC-0005 S8ax: summarised, not declined).
 
 proc mutate(x: var int) {.symexOpaque.} =
   x.inc
@@ -133,7 +134,7 @@ proc withMutate(x: int) =
   if x == Magic: raise newException(ValueError, "magic")
 
 # Nor is it "no `var` formal means inert": a copied `ref` ARGUMENT still lets
-# the callee write through the pointee, so it still taints too.
+# the callee write through the pointee, so it is not inert either.
 
 type
   Box = ref object
@@ -172,25 +173,39 @@ suite "issue 163 slice 4 -- an inert opaque call does not taint the walk":
       checkpoint($e.kind & ": " & e.msg)
     check r.status == sxSat
 
-  test "a var-param opaque callee still degrades -- void is not the whole test":
+  test "a var-param opaque callee is summarised -- void is not the whole test":
     let r = symexFind(withMutate, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "mutate" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: not inert -- the call is summarised, what it may
+    # write holding a fresh value afterwards (feGlobalHavoc names it), and a hit
+    # reached through that value is replayed. The raise is decided.
+    check r.status == sxRaised
+    check not classified
+    var havoc = false
+    for e in r.errors:
+      if e.kind == feGlobalHavoc and "mutate" in e.msg: havoc = true
+    check havoc
 
-  test "a ref-arg opaque callee still degrades -- a copied ref can be written through":
+  test "a ref-arg opaque callee is summarised -- a copied ref can be written through":
     let r = symexFind(withTouch, tRaisedExn("ValueError"))
     var classified = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
       if e.kind == feOpaqueCallUnmodelled and "touch" in e.msg:
         classified = true
-    check r.status == sxUnknown
-    check classified
+    # RFC-0005 S8ax item 5: not inert -- the call is summarised, what it may
+    # write holding a fresh value afterwards (feOpaqueEffectHavoc names it), and a hit
+    # reached through that value is replayed. The raise is decided.
+    check r.status == sxRaised
+    check not classified
+    var havoc = false
+    for e in r.errors:
+      if e.kind == feOpaqueEffectHavoc and "touch" in e.msg: havoc = true
+    check havoc
 
 # --- W5: the PUBLIC {.symexTransparent.} pragma, and its expression-position
 # fallback -------------------------------------------------------------------

@@ -52,6 +52,7 @@ import std/[strutils, tables]
 import z3
 import ./pcre_syntax
 import ./pcre_select
+import ./pcre_engine
 export pcre_syntax
 
 type
@@ -103,10 +104,36 @@ proc atomRe(cs: set[char]; marked: bool): Z3Regex[Z3String] =
   if marked: concat(byteSetRe(cs), star(mkRegex(findMarker())))
   else: byteSetRe(cs)
 
+proc cpsRe(cps: CpSet; marked: bool): Z3Regex[Z3String] =
+  ## RFC-0005 S8bt. One character of `cps` as UTF-8 bytes (`utf8Leads`'
+  ## trie with shared tails), each byte an `atomRe`.
+  var memo = initTable[(int, Utf8Tail), Z3Regex[Z3String]]()
+  proc alts(xs: seq[Z3Regex[Z3String]]): Z3Regex[Z3String] =
+    if xs.len == 0: mkRegexEmpty[Z3String]()
+    elif xs.len == 1: xs[0]
+    else: union(xs)
+  proc node(rem: int; rs: Utf8Tail): Z3Regex[Z3String] =
+    let key = (rem, rs)
+    if key in memo: return memo[key]
+    var xs: seq[Z3Regex[Z3String]]
+    for (bs, sub) in utf8Conts(rem, rs):
+      xs.add(if rem == 1: atomRe(bs, marked)
+             else: concat(atomRe(bs, marked), node(rem - 1, sub)))
+    result = alts(xs)
+    memo[key] = result
+  let (single, leads) = utf8Leads(cps)
+  var xs: seq[Z3Regex[Z3String]]
+  if single.card > 0: xs.add atomRe(single, marked)
+  for (ls, rem, rs) in leads:
+    xs.add concat(atomRe(ls, marked), node(rem, rs))
+  alts(xs)
+
 proc rxToZ3*(x: Rx; marked = false): Z3Regex[Z3String] =
-  ## The language of an anchor-free tree.
+  ## The language of an anchor-free tree. RFC-0005 S8bt: a UTF character
+  ## (`rxChars`) is its UTF-8 encodings.
   case x.kind
   of rxSet: atomRe(x.bytes, marked)
+  of rxChars: cpsRe(x.cps, marked)
   of rxCat:
     if x.kids.len == 0: return epsRe()
     var parts: seq[Z3Regex[Z3String]]
@@ -125,8 +152,10 @@ proc rxToZ3*(x: Rx; marked = false): Z3Regex[Z3String] =
       else: concat(power(sub, x.lo), star(sub))
     elif x.lo == x.hi: power(sub, x.lo)
     else: loop(sub, x.lo, x.hi)
-  of rxBol, rxEol, rxEolAbs, rxAccept:
-    raiseAssert "rxToZ3: anchors and (*ACCEPT) are split off first"
+  of rxBol, rxEol, rxEolAbs, rxAccept, rxVerb:
+    # RFC-0005 S8bj: a verb routes the pattern to the priority automaton
+    # (`splitEdges`' `hasAnchor`).
+    raiseAssert "rxToZ3: anchors, (*ACCEPT) and verbs are split off first"
 
 proc tailRe(eol: RxKind; marked = false): Z3Regex[Z3String] =
   ## What may follow the match up to the subject's end: anything (no
@@ -145,6 +174,9 @@ proc parseNimRegexToZ3Regex*(pattern: string;
   let pr = parsePcre(pattern, extended)
   case pr.status
   of psOk:
+    if pr.utf:
+      # RFC-0005 S8bt: an invalid UTF-8 subject is an error, not a miss.
+      return err("UTF mode (seUnsupportedRegex: no full-string language)")
     if hasCrlfDot(pr.root):
       return err("a `(*CRLF)` dot, which depends on the byte after it " &
                  "(seUnsupportedRegex: no full-string language)")
@@ -309,63 +341,222 @@ proc chosenLen(s: Z3String; p: Z3Int; f: SelForm; fresh: FreshName;
   of skNone:
     raiseAssert "chosenLen: no selection form"
 
+proc selToZ3Memo(r: RNode; memo: var Table[pointer, Z3Regex[Z3String]]):
+                 Z3Regex[Z3String] =
+  let key = cast[pointer](r)
+  if key in memo: return memo[key]
+  result =
+    case r.kind
+    of rkEmpty: mkRegexEmpty[Z3String]()
+    of rkEps: epsRe()
+    of rkSet: byteSetRe(r.bytes)
+    of rkMark: mkRegex(findMarker())
+    of rkMark2: mkRegex(findMarker2())
+    of rkStar: star(selToZ3Memo(r.kids[0], memo))
+    of rkCat, rkAlt:
+      var parts: seq[Z3Regex[Z3String]]
+      for k in r.kids: parts.add selToZ3Memo(k, memo)
+      if parts.len == 1: parts[0]
+      elif r.kind == rkCat: concat(parts)
+      else: union(parts)
+  memo[key] = result
+
 proc selToZ3*(r: RNode): Z3Regex[Z3String] =
-  ## RFC-0005 S8bb. A `pcre_select` regex as Z3's.
-  case r.kind
-  of rkEmpty: mkRegexEmpty[Z3String]()
-  of rkEps: epsRe()
-  of rkSet: byteSetRe(r.bytes)
-  of rkMark: mkRegex(findMarker())
-  of rkMark2: mkRegex(findMarker2())
-  of rkStar: star(selToZ3(r.kids[0]))
-  of rkCat, rkAlt:
-    var parts: seq[Z3Regex[Z3String]]
-    for k in r.kids: parts.add selToZ3(k)
-    if parts.len == 1: parts[0]
-    elif r.kind == rkCat: concat(parts)
-    else: union(parts)
+  ## RFC-0005 S8bb. A `pcre_select` regex as Z3's. RFC-0005 S8bj: once per
+  ## shared subterm (state elimination shares them).
+  var memo = initTable[pointer, Z3Regex[Z3String]]()
+  selToZ3Memo(r, memo)
+
+const limitDecline* = "a (*LIMIT_MATCH=) / (*LIMIT_RECURSION=) start " &
+  "option between 0 and PCRE's default, whose effect (a count of " &
+  "pcre_exec.c's match() calls) is not computed"
+
+proc utfPlain(x: Rx): bool =
+  ## RFC-0005 S8bt. Every atom of `x` is whole UTF-8 characters: no byte
+  ## set past ASCII (`\C`), no `(*CRLF)` dot.
+  case x.kind
+  of rxSet: not x.crlfDot and x.bytes <= {'\x00'..'\x7F'}
+  of rxChars: not x.crlfDot
+  of rxCat, rxAlt:
+    for k in x.kids:
+      if not utfPlain(k): return false
+    true
+  of rxRep: utfPlain(x.sub)
+  else: true
+
+proc lazyUtf(pr: PcreParse; entry: string; edges: seq[Edge]): bool =
+  ## RFC-0005 S8bt (item 6). A UTF-mode call S8ay's edge-split reading
+  ## lowers (no limit option, LF newlines, anchors at the edges only --
+  ## checked by the caller): a plain pattern's languages as Z3 regexes over
+  ## the UTF-8 bytes, which Z3 explores lazily, in place of the priority
+  ## automaton's determinized regex (`tests/s8bt_harness/caps_probe`:
+  ## past the walker's budget at 50 states). Sound on a valid subject from a character
+  ## boundary (the call's errors are added after): every atom reads whole
+  ## characters, so no match starts inside one and the leftmost byte
+  ## offset is the leftmost character; PCRE's choice where it matters
+  ## (`selectionForm` `skNone`) stays the automaton's.
+  if not pr.utf or not utfPlain(pr.root): return false
+  if (pr.limitMatch >= 0 and pr.limitMatch < pcreDefaultLimit) or
+     (pr.limitRecursion >= 0 and pr.limitRecursion < pcreDefaultLimit):
+    return false
+  if entry in ["matchLen", "endsWith", "findBoundsLast"] and
+     selectionForm(edges).kind == skNone:
+    return false
+  if entry notin ["match", "matchLen", "startsWith", "endsWith"] and
+     pcreSearchEngine() == peJit837 and not buildNfa(pr, peJit837).ok:
+    # Under 8.37's JIT a search whose prefix scan can stop inside a
+    # character reads a continuation byte as a code point
+    # (`pcre_select.buildNfa`'s decline): not plain there.
+    return false
+  true
+
+proc s8bjRoute(pr: PcreParse): bool =
+  ## RFC-0005 S8bj. A pattern whose every entry is the priority automaton's
+  ## (with `pcre_exec`'s errors): UTF mode or a limit start option.
+  pr.utf or (pr.limitMatch >= 0 and pr.limitMatch < pcreDefaultLimit) or
+    (pr.limitRecursion >= 0 and pr.limitRecursion < pcreDefaultLimit)
+
+# ---- RFC-0005 S8bb, S8bj: the priority automaton's languages ------------------
+
+proc rawClassIs(s: Z3String; p: Z3Int; c: PrevClass; u = false): Z3Bool =
+  ## RFC-0005 S8bj. What precedes position `p` of `s` is of class `c`.
+  ## RFC-0005 S8bt: `u`, `(*ANY)` in UTF mode (`nextClass`).
+  let b1 = toCode(at(s, p - mkInt(1)))
+  let b2 = toCode(at(s, p - mkInt(2)))
+  let b3 = toCode(at(s, p - mkInt(3)))
+  let nel = (b1 == mkInt(0x85)) and (b2 == mkInt(0xC2))
+  let lsps = inSet(b1, {'\xA8', '\xA9'}) and (b2 == mkInt(0x80)) and
+             (b3 == mkInt(0xE2))
+  let u3 = (b1 == mkInt(0x80)) and (b2 == mkInt(0xE2))
+  case c
+  of pcStart: p == mkInt(0)
+  of pcOther:
+    if u:
+      (p > mkInt(0)) and not inSet(b1, {'\n', '\r', '\v', '\f', '\xC2', '\xE2'}) and
+        not nel and not lsps and not u3
+    else:
+      (p > mkInt(0)) and not inSet(b1, {'\n', '\r', '\v', '\f', '\x85'})
+  of pcLF: (p > mkInt(0)) and (b1 == mkInt(10)) and
+           ((p == mkInt(1)) or (b2 != mkInt(13)))
+  of pcCRLF: (p >= mkInt(2)) and (b1 == mkInt(10)) and (b2 == mkInt(13))
+  of pcCR: (p > mkInt(0)) and (b1 == mkInt(13))
+  of pcNl:
+    if u: (p > mkInt(0)) and (inSet(b1, {'\v', '\f'}) or nel or lsps)
+    else: (p > mkInt(0)) and inSet(b1, {'\v', '\f', '\x85'})
+  of pcU1: mkBool(u) and (p > mkInt(0)) and (b1 == mkInt(0xC2))
+  of pcU2: mkBool(u) and (p > mkInt(0)) and (b1 == mkInt(0xE2))
+  of pcU3: mkBool(u) and (p > mkInt(1)) and u3
+
+proc rawClassRe(c: PrevClass; u = false): Z3Regex[Z3String] =
+  ## RFC-0005 S8bj. The words after which a position is of class `c`.
+  ## RFC-0005 S8bt: `u` as in `rawClassIs`.
+  let anyB = star(byteSetRe(pcreAnyByte))
+  proc after(prefix: Z3Regex[Z3String]; bs: set[char]): Z3Regex[Z3String] =
+    concat(prefix, byteSetRe(bs))
+  # Words not ending in `x` (the empty one too).
+  proc notEnding(x: char): Z3Regex[Z3String] =
+    union(epsRe(), after(anyB, pcreAnyByte - {x}))
+  case c
+  of pcStart: epsRe()
+  of pcOther:
+    if u:
+      let plain = after(anyB, pcreAnyByte -
+                        {'\n', '\r', '\v', '\f', '\xC2', '\xE2', '\x80',
+                         '\x85', '\xA8', '\xA9'})
+      # 0x85 not after C2; 0x80 not after E2; A8 / A9 not after E2 80.
+      let notE280 = union(notEnding('\x80'), after(notEnding('\xE2'), {'\x80'}))
+      union(@[plain, after(notEnding('\xC2'), {'\x85'}),
+              after(notEnding('\xE2'), {'\x80'}),
+              after(notE280, {'\xA8', '\xA9'})])
+    else:
+      concat(anyB, byteSetRe(pcreAnyByte - {'\n', '\r', '\v', '\f', '\x85'}))
+  of pcLF: concat(union(epsRe(), concat(anyB, byteSetRe(pcreAnyByte - {'\r'}))),
+                  byteSetRe({'\n'}))
+  of pcCRLF: concat(anyB, mkRegex(mkString("\r\n")))
+  of pcCR: concat(anyB, byteSetRe({'\r'}))
+  of pcNl:
+    if u:
+      union(@[after(anyB, {'\v', '\f'}), concat(anyB, mkRegex(mkString("\xC2\x85"))),
+              concat(anyB, concat(mkRegex(mkString("\xE2\x80")),
+                                  byteSetRe({'\xA8', '\xA9'})))])
+    else: concat(anyB, byteSetRe({'\v', '\f', '\x85'}))
+  of pcU1: (if u: after(anyB, {'\xC2'}) else: mkRegexEmpty[Z3String]())
+  of pcU2: (if u: after(anyB, {'\xE2'}) else: mkRegexEmpty[Z3String]())
+  of pcU3: (if u: concat(anyB, mkRegex(mkString("\xE2\x80"))) else: mkRegexEmpty[Z3String]())
 
 type PrioLangs = object
-  ## RFC-0005 S8bb. A pattern's selection languages, per `atStart` variant
-  ## (index 1: the subject position is 0; one variant when the pattern has
-  ## no `^` / `\A`, where it does not matter).
+  ## RFC-0005 S8bb, S8bj. A pattern's selection languages, per variant: the
+  ## canonical class of what precedes the start (`pcre_select.canonPc0`;
+  ## one variant when the pattern cannot tell them apart).
   ok: bool
   why: string
-  hasBol: bool
-  mark, none, ends, noOcc, first: array[2, Z3Regex[Z3String]]
+  n: Nfa
+  vars: seq[PrevClass]
+  mark, none, ends, noOcc, first, span: seq[Z3Regex[Z3String]]
+  errM, errR, errMAt, errRAt: seq[Z3Regex[Z3String]]
+    ## RFC-0005 S8bt: the call ends in a limit error (`leCounted`), were
+    ## its attempts made: the anchored attempt's (`lkErrM`, `lkErrR`) or
+    ## the search's (`skErrM`, `skErrR`; `skErrMAt`, `skErrRAt`: marked at
+    ## the attempt)
 
-proc prioLangs(sp: RegexSpec; pr: PcreParse; wantEnds: bool;
-               wantSearch = false): PrioLangs =
-  let n = buildNfa(pr)
-  let key = sp.flag & ":" & sp.pattern
-  result.hasBol = n.hasBol
+proc limitNfa*(pr: PcreParse; engine: PcreEngine; room = 0): Nfa =
+  ## RFC-0005 S8bt. The automaton of a call, counting `match()`'s calls
+  ## when the pattern sets a limit between 0 and the default (`room`: the
+  ## groups the call's ovector has room for).
+  result = buildNfa(pr, engine)
+  if result.ok and limitEffect(result)[0] == leUnknown:
+    result = buildNfa(pr, engine, limitRoom = room)
+
+proc prioLangs(sp: RegexSpec; pr: PcreParse; wantAnch, wantEnds: bool;
+               wantSearch = false; wantSpan = false;
+               engine = peInterp; room = 0): PrioLangs =
+  ## RFC-0005 S8bt: `engine` is the one the call runs on -- an unanchored
+  ## call's is std/re's library's (`pcre_engine.pcreSearchEngine`), an
+  ## anchored call's the interpreter. Every language of an unanchored call
+  ## (its search, and the attempt the search finds) is that engine's.
+  ## `room`: the groups the call's ovector has room for (`limitNfa`).
+  let n = limitNfa(pr, engine, room)
+  let key = sp.flag & ":" & sp.pattern & "|room" & $room
+  result.n = n
+  if not n.ok: return PrioLangs(ok: false, why: n.why)
   result.ok = true
-  for v in 0 .. 1:
-    if v == 1 and not n.hasBol: break
-    let atStart = v == 1
-    var langs: seq[(LangKind, bool)] = @[(lkMark, false), (lkNone, false)]
-    if wantEnds: langs.add (lkEnds, true)
-    for (lk, nonEmpty) in langs:
-      # `lkEnds` serves `endsWith`'s suffixes, never empty.
-      let l = selectionLang(n, key, lk, atStart, nonEmpty = nonEmpty)
-      if not l.ok:
-        return PrioLangs(ok: false, why: l.why)
-      let z = selToZ3(l.re)
-      case lk
-      of lkMark: result.mark[v] = z
-      of lkNone: result.none[v] = z
-      of lkEnds: result.ends[v] = z
+  result.vars = startClasses(n)
+  for pc in result.vars:
+    template take(l: SelLang; dst: untyped) =
+      if not l.ok: return PrioLangs(ok: false, why: l.why)
+      result.dst.add selToZ3(l.re)
+    if wantAnch:
+      take(selectionLangV(n, key, lkMark, pc), mark)
+      take(selectionLangV(n, key, lkNone, pc), none)
+    if wantEnds:
+      take(selectionLangV(n, key, lkEnds, pc, nonEmpty = true), ends)
     if wantSearch:
-      for sk in [skNoOcc, skFirst]:
-        let l = searchLang(n, key, sk, atStart)
-        if not l.ok:
-          return PrioLangs(ok: false, why: l.why)
-        if sk == skNoOcc: result.noOcc[v] = selToZ3(l.re)
-        else: result.first[v] = selToZ3(l.re)
+      take(searchLangV(n, key, skNoOcc, pc), noOcc)
+      take(searchLangV(n, key, skFirst, pc), first)
+    if wantSpan:
+      take(searchLangV(n, key, skSpan, pc), span)
+    if limitEffect(n)[0] == leCounted:
+      if wantSearch:
+        take(searchLangV(n, key, skErrM, pc), errM)
+        take(searchLangV(n, key, skErrR, pc), errR)
+        take(searchLangV(n, key, skErrMAt, pc), errMAt)
+        take(searchLangV(n, key, skErrRAt, pc), errRAt)
+      else:
+        take(selectionLangV(n, key, lkErrM, pc), errM)
+        take(selectionLangV(n, key, lkErrR, pc), errR)
 
-proc variant(pl: PrioLangs; atStart: Z3Bool;
+proc classIs(n: Nfa; s: Z3String; p: Z3Int; rep: PrevClass): Z3Bool =
+  var parts: seq[Z3Bool]
+  for c in PrevClass:
+    if canonPc0(n, c) == rep: parts.add rawClassIs(s, p, c, uAny(n))
+  orAll(parts)
+
+proc variant(pl: PrioLangs; s: Z3String; p: Z3Int;
              f: proc (v: int): Z3Bool): Z3Bool =
-  if pl.hasBol: ite(atStart, f(1), f(0)) else: f(0)
+  ## `f` of the variant of position `p` of `s`.
+  result = f(pl.vars.high)
+  for v in countdown(pl.vars.high - 1, 0):
+    result = ite(classIs(pl.n, s, p, pl.vars[v]), f(v), result)
 
 proc splitAt(u: Z3String; k: Z3Int; fresh: FreshName; tag: string;
              defs: var seq[Z3Bool]): (Z3String, Z3String) =
@@ -380,49 +571,185 @@ proc splitAt(u: Z3String; k: Z3Int; fresh: FreshName; tag: string;
   defs.add (u == concat(x, y)) and (len(x) == k)
   (x, y)
 
+proc utf8ValidRe*(): Z3Regex[Z3String] =
+  ## RFC-0005 S8bj. The valid UTF-8 strings (RFC 3629, PCRE's `valid_utf`).
+  let t = byteSetRe({'\x80'..'\xBF'})
+  proc b(lo, hi: char): Z3Regex[Z3String] = byteSetRe({lo..hi})
+  star(union(@[
+    b('\x00', '\x7F'),
+    concat(b('\xC2', '\xDF'), t),
+    concat(@[b('\xE0', '\xE0'), b('\xA0', '\xBF'), t]),
+    concat(@[byteSetRe({'\xE1'..'\xEC', '\xEE', '\xEF'}), t, t]),
+    concat(@[b('\xED', '\xED'), b('\x80', '\x9F'), t]),
+    concat(@[b('\xF0', '\xF0'), b('\x90', '\xBF'), t, t]),
+    concat(@[b('\xF1', '\xF3'), t, t, t]),
+    concat(@[b('\xF4', '\xF4'), b('\x80', '\x8F'), t, t])]))
+
+proc madeAtZ3(n: Nfa; v: Z3String; filt: FilterKind): Z3Bool =
+  ## RFC-0005 S8bj, S8bt. `pcre_select.attemptMade` at the start of `v` (a
+  ## start the scan `filt` stopped at): pcre_exec.c's minimum-length and
+  ## required-character checks.
+  if n.noStartOpt: return mkBool(true)
+  let so = n.so
+  var conds: seq[Z3Bool]
+  if so.minLength > 0: conds.add len(v) >= mkInt(so.minLength)
+  if so.reqChar >= 0:
+    let r1 = char(so.reqChar)
+    var rs = {r1}
+    if so.reqCaseless: rs.incl otherCaseOf(r1)
+    let skip = (if filt == fkFirst: 1 else: 0)
+    let tl = substr(v, mkInt(skip), len(v) - mkInt(skip))
+    conds.add (len(v) >= mkInt(reqByteMax)) or
+              matches(tl, concat(@[star(byteSetRe(pcreAnyByte)), byteSetRe(rs),
+                                   star(byteSetRe(pcreAnyByte))]))
+  andAll(conds)
+
+proc attemptMadeZ3(n: Nfa; u: Z3String; anchored: bool; fresh: FreshName;
+                   defs: var seq[Z3Bool]): Z3Bool =
+  ## RFC-0005 S8bj. A search on `u` (the subject from the start offset)
+  ## calls `match()` at least once (`pcre_select.attemptMade` after the
+  ## start-of-match scan): what a `(*LIMIT_..=0)` turns into an error.
+  let so = n.so
+  let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
+  var v = u
+  if filt in {fkFirst, fkBits}:
+    let stop = (if filt == fkFirst:
+                  {char(so.firstChar)} + (if so.firstCaseless:
+                    {otherCaseOf(char(so.firstChar))} else: {})
+                else: so.bits)
+    let q = mkIntVar(fresh("__regexScan"))
+    let (pre, rest) = splitAt(u, q, fresh, "__regexScan", defs)
+    defs.add matches(pre, star(byteSetRe(pcreAnyByte - stop))) and
+             ((len(rest) == mkInt(0)) or inSet(toCode(at(rest, mkInt(0))), stop))
+    v = rest
+  madeAtZ3(n, v, filt)
+
+proc callError(pl: PrioLangs; s: Z3String; start: Z3Int; anchored: bool;
+               fresh: FreshName; defs: var seq[Z3Bool]): (Z3Bool, Z3Int) =
+  ## RFC-0005 S8bj. Whether `pcre_exec` runs the call without an error, and
+  ## the error code otherwise: a bad offset, an invalid UTF-8 subject, a
+  ## start inside a character, a `(*LIMIT_..=0)` reached.
+  let n = pl.n
+  let lenS = len(s)
+  let bad = (start < mkInt(0)) or (start > lenS)
+  var okParts = @[not bad]
+  var code = mkInt(0)
+  let (le, lcode) = limitEffect(n)
+  if le == leZero:
+    let u = substr(s, start, lenS - start)
+    let hit = attemptMadeZ3(n, u, anchored, fresh, defs)
+    okParts.add not hit
+    code = mkInt(lcode)
+  elif le == leCounted:
+    # RFC-0005 S8bt: the attempt that passes a limit (the anchored one, or
+    # the search's at a fresh `q`), if pcre_exec.c makes it.
+    let u = substr(s, start, lenS - start)
+    let filt = (if anchored or n.noStartOpt: fkNone else: n.filter)
+    var hits: array[2, Z3Bool]
+    for i in 0 .. 1:
+      let l = (if i == 0: pl.errM else: pl.errR)
+      let lAt = (if i == 0: pl.errMAt else: pl.errRAt)
+      let tag = (if i == 0: "__regexLimitM" else: "__regexLimitR")
+      let has = variant(pl, s, start, proc (v: int): Z3Bool =
+        matches(u, l[v]))
+      if anchored:
+        hits[i] = has and madeAtZ3(n, u, filt)
+        continue
+      let q = mkIntVar(fresh(tag))
+      let (pre, rest) = splitAt(u, q, fresh, tag, defs)
+      let marked = concat(pre, findMarker(), rest)
+      defs.add ite(has,
+        (q >= mkInt(0)) and (q <= len(u)) and
+          variant(pl, s, start, proc (v: int): Z3Bool =
+            matches(marked, lAt[v])),
+        q == mkInt(0))
+      hits[i] = has and madeAtZ3(n, rest, filt)
+    let hitM = hits[0]
+    let hitR = hits[1]
+    okParts.add not (hitM or hitR)
+    code = ite(hitM, mkInt(pcreErrMatchLimit),
+               ite(hitR, mkInt(pcreErrRecursionLimit), code))
+  if n.utf:
+    let invalid = not matches(s, utf8ValidRe())
+    let inside = (start > mkInt(0)) and (start < lenS) and
+                 inSet(toCode(at(s, start)), {'\x80'..'\xBF'})
+    okParts.add (not invalid) and not inside
+    code = ite(invalid, mkInt(pcreErrBadUtf8),
+               ite(inside, mkInt(pcreErrBadUtf8Offset), code))
+  (andAll(okParts), ite(bad, mkInt(pcreErrBadOffset), code))
+
 proc prioChosenLen(s: Z3String; p: Z3Int; pl: PrioLangs; fresh: FreshName;
                    defs: var seq[Z3Bool]; valid: Z3Bool): Z3Int =
-  ## RFC-0005 S8bb. PCRE's match length at absolute position `p` of `s`
-  ## (`0 <= p <= s.len` where `valid`), or -1: a fresh Int fixed by a
-  ## definitional constraint over the marked suffix (`lkMark`) and the
+  ## RFC-0005 S8bb. PCRE's (anchored) match length at absolute position `p`
+  ## of `s` (`0 <= p <= s.len` where `valid`), or -1: a fresh Int fixed by
+  ## a definitional constraint over the marked suffix (`lkMark`) and the
   ## no-match language (`lkNone`). Where not `valid` it is -1.
   let u = substr(s, p, len(s) - p)
   let k = mkIntVar(fresh("__regexLen"))
   let marked = concat(substr(u, mkInt(0), k), findMarker(),
                       substr(u, k, len(u) - k))
-  let def = variant(pl, p == mkInt(0), proc (v: int): Z3Bool =
+  let def = variant(pl, s, p, proc (v: int): Z3Bool =
     ((k == mkInt(-1)) and matches(u, pl.none[v])) or
     ((k >= mkInt(0)) and (k <= len(u)) and matches(marked, pl.mark[v])))
   defs.add ite(valid, def, k == mkInt(-1))
   k
 
 proc prioEndsWith(s: Z3String; pl: PrioLangs): Z3Bool =
-  ## RFC-0005 S8bb. `endsWith(s, R)`: some `i < s.len` whose match ends at
-  ## the end -- `s[i..]` (non-empty) in `lkEnds` of the variant of `i == 0`.
-  let anyByte = byteSetRe(pcreAnyByte)
-  if pl.hasBol:
-    (len(s) >= mkInt(1) and matches(s, pl.ends[1])) or
-      matches(s, concat(plus(anyByte), pl.ends[0]))
-  else:
-    matches(s, concat(star(anyByte), pl.ends[0]))
+  ## RFC-0005 S8bb, S8bj. `endsWith(s, R)`: some `i < s.len` whose
+  ## (anchored) match ends at the end -- `s[i..]` (non-empty) in `lkEnds`
+  ## of the variant of `i`. Under UTF the subject must be valid (`matchLen`
+  ## is an error code otherwise, and inside a character).
+  var parts: seq[Z3Regex[Z3String]]
+  for v, rep in pl.vars:
+    var pre: seq[Z3Regex[Z3String]]
+    for c in PrevClass:
+      if canonPc0(pl.n, c) == rep: pre.add rawClassRe(c, uAny(pl.n))
+    parts.add concat((if pre.len == 1: pre[0] else: union(pre)), pl.ends[v])
+  result = matches(s, (if parts.len == 1: parts[0] else: union(parts)))
+  if pl.n.utf: result = result and matches(s, utf8ValidRe())
+  if limitEffect(pl.n)[0] == leZero: result = mkBool(false)
 
-proc prioLeftmost(pl: PrioLangs; u: Z3String; st0: Z3Bool; fresh: FreshName;
-                  defs: var seq[Z3Bool]): (Z3Bool, Z3Int, Z3String) =
-  ## RFC-0005 S8bb. The leftmost match in `u` (the subject from `start`;
-  ## `st0`: `start == 0`), from the search languages: whether one occurs,
-  ## its offset `q` in `u` (0 when none) -- a fresh Int fixed by a
-  ## definitional constraint over the marked `u` (`skFirst`) -- and
-  ## `u[q ..]`.
-  let occurs = not variant(pl, st0, proc (v: int): Z3Bool =
+proc prioLeftmost(pl: PrioLangs; s, u: Z3String; start: Z3Int;
+                  fresh: FreshName; defs: var seq[Z3Bool];
+                  callOk = mkBool(true)): (Z3Bool, Z3Int) =
+  ## RFC-0005 S8bb. The match the search from `start` finds in `u` (the
+  ## subject from `start`), from the search languages: whether there is
+  ## one, and its offset `q` in `u` (0 when none) -- a fresh Int fixed by a
+  ## definitional constraint over the marked `u` (`skFirst`).
+  let occurs = not variant(pl, s, start, proc (v: int): Z3Bool =
     matches(u, pl.noOcc[v]))
   let q = mkIntVar(fresh("__regexFind"))
   let (pre, rest) = splitAt(u, q, fresh, "__regexFind", defs)
   let marked = concat(pre, findMarker(), rest)
-  defs.add ite(occurs,
+  # RFC-0005 S8bj: only where the call runs without an error (in UTF mode
+  # the languages say nothing of an invalid subject).
+  defs.add ite((if pl.n.utf: callOk and occurs else: occurs),
     (q >= mkInt(0)) and (q <= len(u)) and
-      variant(pl, st0, proc (v: int): Z3Bool = matches(marked, pl.first[v])),
+      variant(pl, s, start, proc (v: int): Z3Bool =
+        matches(marked, pl.first[v])),
     q == mkInt(0))
-  (occurs, q, rest)
+  (occurs, q)
+
+proc prioSpan(pl: PrioLangs; s, u: Z3String; start: Z3Int;
+              fresh: FreshName; defs: var seq[Z3Bool];
+              callOk = mkBool(true)): (Z3Bool, Z3Int) =
+  ## RFC-0005 S8bj. The end `e` in `u` of the match the search finds (0
+  ## when none), from `u` marked at its start and end (`skSpan`): for a
+  ## pattern whose found attempt is not the anchored one (a SKIP:NAME
+  ## without its MARK reads differently there).
+  let occurs = not variant(pl, s, start, proc (v: int): Z3Bool =
+    matches(u, pl.noOcc[v]))
+  let q = mkIntVar(fresh("__regexFind"))
+  let e = mkIntVar(fresh("__regexFindEnd"))
+  let (pre, rest) = splitAt(u, q, fresh, "__regexFind", defs)
+  let (mid, post) = splitAt(rest, e - q, fresh, "__regexFindEnd", defs)
+  let marked = concat(@[pre, findMarker(), mid, findMarker2(), post])
+  defs.add ite((if pl.n.utf: callOk and occurs else: occurs),
+    (q >= mkInt(0)) and (q <= e) and (e <= len(u)) and
+      variant(pl, s, start, proc (v: int): Z3Bool =
+        matches(marked, pl.span[v])),
+    (q == mkInt(0)) and (e == mkInt(0)))
+  (occurs, e)
 
 proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
                   fresh: FreshName; arrLen: Z3Int; old: Z3String;
@@ -440,53 +767,94 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
   ## 1]` for `i` in `1 ..< result` -- the group's span, or `""` when it is
   ## unset. So `matches[g - 1]` is written iff the call matched, no group
   ## past `arrLen` is set, and some group `>= g` is (and `g <= arrLen`).
-  ## Nothing is written on a miss or a bad offset. The match is PCRE's
-  ## chosen one: at `start` (`match`, `matchLen`) or at the leftmost
-  ## occurrence (`find`, `contains`, `findBounds`); its groups come from
-  ## `pcre_select.captureLang`.
+  ## Nothing is written on a miss or an error. The match is PCRE's chosen
+  ## one: the anchored attempt at `start` (`match`, `matchLen`) or the
+  ## attempt the search finds (`find`, `contains`, `findBounds`; RFC-0005
+  ## S8bj: an unanchored attempt, whose verbs read differently); its groups
+  ## come from `pcre_select.captureLangV`.
   let parts = sp.entry.split('|')
   let what = parts[1]
   let g = parseInt(parts[2])
   let search = what in ["find", "contains", "findBounds"]
-  let pl = prioLangs(sp, pr, false, search)
+  let pl = prioLangs(sp, pr, not search, false, search,
+                     engine = (if search: pcreSearchEngine() else: peInterp))
   if not pl.ok: return unmodelled(sp.entry & ": " & pl.why)
-  let n = buildNfa(pr)
+  let n = pl.n
+  if limitEffect(n)[0] == leUnknown:
+    return unmodelled(sp.entry & ": " & limitDecline)
   let key = sp.flag & ":" & sp.pattern
-  var setRe, capRe: seq[array[2, Z3Regex[Z3String]]]
+  # RFC-0005 S8bj: an unanchored attempt also reads whether it starts at a
+  # CRLF's LF past the start offset (a SKIP:NAME without its MARK).
+  let eligs = (if search and n.hasNeverSkip: @[false, true] else: @[false])
+  # RFC-0005 S8bt: the found attempt's `ignore_skip_arg` (a mixed
+  # SKIP:NAME's count kept from the attempt before), read off the search
+  # (`foundIgn`).
+  let igs = (if search: attemptIgns(n) else: @[0'i8])
+  var firstIg: seq[seq[Z3Regex[Z3String]]]       # [ign][variant]
+  if igs.len > 1:
+    for ig in igs:
+      var f: seq[Z3Regex[Z3String]]
+      for pc in pl.vars:
+        let l = searchLangV(n, key, skFirst, pc, foundIgn = ig)
+        if not l.ok: return unmodelled(sp.entry & ": " & l.why)
+        f.add selToZ3(l.re)
+      firstIg.add f
+  # [group][(ign * variants + variant) * 2 + elig]
+  var setRe, capRe: seq[seq[Z3Regex[Z3String]]]
   for h in 1 .. pr.groups:
-    var a, c: array[2, Z3Regex[Z3String]]
-    for v in 0 .. 1:
-      if v == 1 and not n.hasBol: break
-      let ls = captureLang(n, key, h, v == 1, marked = false)
-      if not ls.ok: return unmodelled(sp.entry & ": " & ls.why)
-      a[v] = selToZ3(ls.re)
-      if h == g:
-        let lc = captureLang(n, key, h, v == 1, marked = true)
-        if not lc.ok: return unmodelled(sp.entry & ": " & lc.why)
-        c[v] = selToZ3(lc.re)
+    var a, c: seq[Z3Regex[Z3String]]
+    for ig in igs:
+      for pc in pl.vars:
+        for el in [false, true]:
+          if el and el notin eligs:
+            a.add a[^1]
+            if h == g: c.add c[^1]
+            continue
+          let ls = captureLangV(n, key, h, pc, false, not search, el, ig)
+          if not ls.ok: return unmodelled(sp.entry & ": " & ls.why)
+          a.add selToZ3(ls.re)
+          if h == g:
+            let lc = captureLangV(n, key, h, pc, true, not search, el, ig)
+            if not lc.ok: return unmodelled(sp.entry & ": " & lc.why)
+            c.add selToZ3(lc.re)
     setRe.add a
     capRe.add c
   let lenS = len(s)
-  let bad = (start < mkInt(0)) or (start > lenS)
   let u = substr(s, start, lenS - start)
-  let st0 = start == mkInt(0)
   var res = RxResult(outcome: roValue)
+  let (callOk, _) = callError(pl, s, start, not search, fresh, res.defs)
   var found: Z3Bool
   var p = start
-  # The subject from the chosen match's start; `^` holds there iff it is
-  # subject position 0.
-  var w = u
   if search:
-    let (occurs, q, rest) = prioLeftmost(pl, u, st0, fresh, res.defs)
-    found = (not bad) and occurs
+    let (occurs, q) = prioLeftmost(pl, s, u, start, fresh, res.defs, callOk)
+    found = callOk and occurs
     p = start + q
-    w = rest
   else:
-    found = (not bad) and not variant(pl, st0, proc (v: int): Z3Bool =
-      matches(u, pl.none[v]))
-  let atP = p == mkInt(0)
+    found = callOk and not variant(pl, s, start,
+      proc (v: int): Z3Bool = matches(u, pl.none[v]))
+  let w = substr(s, p, lenS - p)
+  let elig = (if eligs.len == 2:
+                (p > start) and rawClassIs(s, p, pcCR, uAny(pl.n)) and
+                (toCode(at(s, p)) == mkInt(10))
+              else: mkBool(false))
+  let nv = pl.vars.len
+  proc atVariant(f: proc (i: int): Z3Bool): Z3Bool =
+    proc atIgn(gi: int): Z3Bool =
+      variant(pl, s, p, proc (v: int): Z3Bool =
+        ite(elig, f(2 * (gi * nv + v) + 1), f(2 * (gi * nv + v))))
+    result = atIgn(igs.high)
+    if igs.len > 1:
+      # The found attempt's count: the `skFirst` language of that count
+      # holds of `u` marked at `q`.
+      let lenU = len(u)
+      let markedQ = concat(substr(u, mkInt(0), p - start), findMarker(),
+                           substr(u, p - start, lenU - (p - start)))
+      for gi in countdown(igs.high - 1, 0):
+        let isIg = variant(pl, s, start, proc (v: int): Z3Bool =
+          matches(markedQ, firstIg[gi][v]))
+        result = ite(isIg, atIgn(gi), result)
   proc isSet(h: int): Z3Bool =
-    variant(pl, atP, proc (v: int): Z3Bool = matches(w, setRe[h - 1][v]))
+    atVariant(proc (i: int): Z3Bool = matches(w, setRe[h - 1][i]))
   var fits, higher: seq[Z3Bool]
   for h in 1 .. pr.groups:
     fits.add (mkInt(h) <= arrLen) or not isSet(h)
@@ -501,7 +869,7 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
   let on = found and isSet(g)
   res.defs.add ite(on,
     (a >= mkInt(0)) and (a <= b) and (b <= len(w)) and
-      variant(pl, atP, proc (v: int): Z3Bool = matches(marked, capRe[g - 1][v])),
+      atVariant(proc (i: int): Z3Bool = matches(marked, capRe[g - 1][i])),
     (a == mkInt(0)) and (b == mkInt(0)))
   case parts[0]
   of "captureFirst":
@@ -510,6 +878,67 @@ proc lowerCapture(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
     res.i = ite(written, ite(on, p + b - mkInt(1), mkInt(0)), oldI)
   else:
     res.s = ite(written, ite(on, span, mkString("")), old)
+  res
+
+proc lowerPrio(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
+               fresh: FreshName; why: string): RxResult =
+  ## RFC-0005 S8bb, S8bj. Every entry from the priority automaton: the
+  ## anchored attempt (`match`, `matchLen`, `startsWith`, `endsWith`) or
+  ## the search (`find`, `contains`, `findBounds`), with `pcre_exec`'s
+  ## errors (`callError`).
+  let search = sp.entry in ["contains", "find", "findBoundsFirst",
+                            "findBoundsFirstCap", "findBoundsLast"]
+  let last = sp.entry == "findBoundsLast"
+  let eng = (if search: pcreSearchEngine() else: peInterp)
+  var pl = prioLangs(sp, pr, last or not search and sp.entry != "endsWith",
+                     sp.entry == "endsWith", search, engine = eng)
+  if pl.ok and last and pl.n.hasNeverSkip:
+    pl = prioLangs(sp, pr, false, false, true, true, engine = eng)
+  if not pl.ok: return unmodelled(sp.entry & ": " & why & pl.why)
+  let n = pl.n
+  if limitEffect(n)[0] == leUnknown:
+    return unmodelled(sp.entry & ": " & limitDecline)
+  let lenS = len(s)
+  let u = substr(s, start, lenS - start)
+  var res = RxResult(outcome: roValue)
+  if sp.entry == "endsWith":
+    res.b = prioEndsWith(s, pl)
+    return res
+  if sp.entry == "startsWith":
+    # `matchLen(s, R, 0) >= 0`.
+    let (ok0, _) = callError(pl, s, mkInt(0), true, fresh, res.defs)
+    res.b = ok0 and not matches(s, pl.none[pl.vars.find(canonPc0(n, pcStart))])
+    return res
+  let (ok, err) = callError(pl, s, start, not search, fresh, res.defs)
+  if search:
+    let (occurs, q) = prioLeftmost(pl, s, u, start, fresh, res.defs, ok)
+    case sp.entry
+    of "contains":
+      res.b = ok and occurs
+    of "find", "findBoundsFirst":
+      res.i = ite(ok, ite(occurs, start + q, mkInt(-1)), err)
+    of "findBoundsFirstCap":
+      res.i = ite(ok and occurs, start + q, mkInt(-1))
+    else:
+      # The found match's end: the anchored attempt's at `q` (the same
+      # match), or the span language's.
+      var e: Z3Int
+      if pl.span.len > 0:
+        e = start + prioSpan(pl, s, u, start, fresh, res.defs, ok)[1]
+      else:
+        let first = start + q
+        e = first + prioChosenLen(s, first, pl, fresh, res.defs, ok and occurs)
+      res.i = ite(ok and occurs, e - mkInt(1), mkInt(0))
+    return res
+  case sp.entry
+  of "match":
+    # `matchLen != -1`: an error code reads as a match.
+    res.b = (not ok) or not variant(pl, s, start, proc (v: int): Z3Bool =
+      matches(u, pl.none[v]))
+  of "matchLen":
+    res.i = ite(ok, prioChosenLen(s, start, pl, fresh, res.defs, ok), err)
+  else:
+    raiseAssert "lowerPrio: entry `" & sp.entry & "`"
   res
 
 proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
@@ -531,48 +960,24 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     return lowerCapture(sp, pr, s, start, fresh, arrLen, old, oldI)
   let (fine, edges, why) = splitEdges(pr.root)
   let lenS = len(s)
+  # RFC-0005 S8bp: from a literal 0 (`contains(s, re)` and `match(s, re)`
+  # without a start), the subject is `s` itself and the start is in range,
+  # so neither the `str.substr` nor the range test is built. The query
+  # then reads `s`'s own membership, which `checkCapped` merges with the
+  # others on `s` (`mergeMemberships`).
+  let from0 = isNumeralAst(start.ctx, start.raw) and
+              getNumeralString(start) == "0"
   let bad = (start < mkInt(0)) or (start > lenS)
-  let u = substr(s, start, lenS - start)
+  let u = if from0: s else: substr(s, start, lenS - start)
   let st0 = start == mkInt(0)
-  if not fine or pr.nl != nlLF:
-    # RFC-0005 S8bb: an anchor away from a top-level edge, `(*ACCEPT)`, or
-    # a newline convention other than LF (whose `$` and bumpalong the
-    # edge-split reading does not know): every entry is the priority
-    # automaton's.
-    let search = sp.entry in ["contains", "find", "findBoundsFirst",
-                              "findBoundsFirstCap",
-                              "findBoundsLast"]
-    let pl = prioLangs(sp, pr, sp.entry == "endsWith", search)
-    if not pl.ok: return unmodelled(sp.entry & ": " & why & "; " & pl.why)
-    var res = RxResult(outcome: roValue)
-    if search:
-      # The leftmost match from `start` (`prioLeftmost`).
-      let (occurs, q, _) = prioLeftmost(pl, u, st0, fresh, res.defs)
-      case sp.entry
-      of "contains":
-        res.b = (not bad) and occurs
-      of "find", "findBoundsFirst":
-        res.i = ite(bad, mkInt(-24), ite(occurs, start + q, mkInt(-1)))
-      of "findBoundsFirstCap":
-        res.i = ite((not bad) and occurs, start + q, mkInt(-1))
-      else:
-        let first = start + q
-        let ml = prioChosenLen(s, first, pl, fresh, res.defs,
-                               (not bad) and occurs)
-        res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
-      return res
-    case sp.entry
-    of "match":
-      res.b = bad or not variant(pl, st0, proc (v: int): Z3Bool =
-        matches(u, pl.none[v]))
-    of "startsWith":
-      res.b = not matches(s, pl.none[(if pl.hasBol: 1 else: 0)])
-    of "matchLen":
-      res.i = ite(bad, mkInt(-24),
-                  prioChosenLen(s, start, pl, fresh, res.defs, not bad))
-    else:
-      res.b = prioEndsWith(s, pl)
-    return res
+  let lazyU = fine and pr.nl == nlLF and lazyUtf(pr, sp.entry, edges)
+  if not fine or pr.nl != nlLF or (s8bjRoute(pr) and not lazyU):
+    # RFC-0005 S8bb: an anchor away from a top-level edge, `(*ACCEPT)`, a
+    # verb, or a newline convention other than LF (whose `$` and bumpalong
+    # the edge-split reading does not know); RFC-0005 S8bj: UTF mode or a
+    # limit start option: every entry is the priority automaton's.
+    return lowerPrio(sp, pr, s, start, fresh,
+                     (if fine: "" else: why & "; "))
   let anyByte = byteSetRe(pcreAnyByte)
   var nb, bl: seq[Z3Regex[Z3String]]
   var nbM: seq[Z3Regex[Z3String]]
@@ -590,8 +995,10 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     (if nb.len > 0: matches(x, nbRe) else: mkBool(false))
   proc inBl(x: Z3String): Z3Bool =
     (if bl.len > 0: matches(x, blRe) else: mkBool(false))
-  let occurs = (if nb.len > 0: matches(u, concat(star(anyByte), nbRe))
-                else: mkBool(false)) or (st0 and inBl(u))
+  var occ: seq[Z3Bool]
+  if nb.len > 0: occ.add matches(u, concat(star(anyByte), nbRe))
+  if bl.len > 0: occ.add (if from0: inBl(u) else: st0 and inBl(u))
+  let occurs = orAll(occ)
   var res = RxResult(outcome: roValue)
   proc leftmost(res: var RxResult): Z3Int =
     # The leftmost occurrence offset `q` in `u` (when `occurs`): a match
@@ -617,11 +1024,13 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     q
   case sp.entry
   of "match":
-    res.b = bad or inNb(u) or (st0 and inBl(u))
+    res.b = if from0: orAll((if nb.len > 0: @[inNb(u)] else: @[]) &
+                            (if bl.len > 0: @[inBl(u)] else: @[]))
+            else: bad or inNb(u) or (st0 and inBl(u))
   of "startsWith":
     res.b = inNb(s) or inBl(s)
   of "contains":
-    res.b = (not bad) and occurs
+    res.b = if from0: occurs else: (not bad) and occurs
   of "find", "findBoundsFirst":
     let q = leftmost(res)
     res.i = ite(bad, mkInt(-24), ite(occurs, start + q, mkInt(-1)))
@@ -635,7 +1044,8 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     let f = selectionForm(edges)
     if f.kind == skNone:
       # RFC-0005 S8bb: PCRE's priority order (`pcre_select`).
-      let pl = prioLangs(sp, pr, sp.entry == "endsWith")
+      let pl = prioLangs(sp, pr, sp.entry != "endsWith",
+                         sp.entry == "endsWith")
       if not pl.ok:
         return unmodelled(sp.entry & " depends on which match PCRE picks: " &
                           f.why & "; " & pl.why)
@@ -670,6 +1080,21 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
       res.i = ite(bad or not occurs, mkInt(0), first + ml - mkInt(1))
   else:
     raiseAssert "lowerRegexEntry: entry `" & sp.entry & "`"
+  if lazyU:
+    # RFC-0005 S8bt: `pcre_exec`'s UTF errors, as `callError` reads them
+    # (a bad offset first: its code is already in place).
+    let invalid = (not bad) and not matches(s, utf8ValidRe())
+    let inside = (not bad) and (start > mkInt(0)) and (start < lenS) and
+                 inSet(toCode(at(s, start)), {'\x80'..'\xBF'})
+    let err = invalid or inside
+    case sp.entry
+    of "find", "findBoundsFirst", "matchLen":
+      res.i = ite(invalid, mkInt(pcreErrBadUtf8),
+                  ite(inside, mkInt(pcreErrBadUtf8Offset), res.i))
+    of "findBoundsFirstCap": res.i = ite(err, mkInt(-1), res.i)
+    of "findBoundsLast": res.i = ite(err, mkInt(0), res.i)
+    of "match": res.b = res.b or err
+    else: res.b = res.b and not err
   res
 
 # ---- RFC-0005 S8bb (item 6): `replace` by the priority run ----------------------
@@ -799,3 +1224,413 @@ proc replaceRunZ3*(s, by: Z3String; t: RunTable; nl: NlConv;
                               mkInt(0), f1))))))
   ite(len(s) == mkInt(0), empty,
       rep(s, mkInt(2), mkInt(2) * len(s) + mkInt(2)))
+
+# ---- RFC-0005 S8bj: `replace` by the agenda's step table ---------------------
+
+proc codeStr(c: int): Z3String = simplify(fromCode(mkInt(c)))
+
+proc replaceStepZ3*(s, by: Z3String; n: Nfa; t: StepTable;
+                    fresh: FreshName): Z3String =
+  ## RFC-0005 S8bj. Nim's `replace(s, re, by)` for every pattern the S8bb
+  ## run does not read (a verb, a `(?m)` anchor, UTF mode, an observable
+  ## CRLF start skip): `replaceRunZ3`'s two recursive functions over the
+  ## subject's suffixes, generalized.
+  ##   * `run(u, st)`: the outcome of the attempt (`pcre_select.stepTable`)
+  ##     in state `st` at `u`'s start: the rest after its match; code 256
+  ##     (no match: bump along); code 257 (`(*COMMIT)`); code 258 then the
+  ##     rest at a `(*SKIP)` landing. A match or landing recorded at an
+  ##     earlier position (a register of `st`) is returned as the one
+  ##     character `300 + 2 * register + skip` and resolved by the call
+  ##     that recorded it (where the position is its own `u`): the
+  ##     registers never become arguments.
+  ##   * `rep(u, mode, fuel)`: the output from `u`, `mode` the numeral of
+  ##     the search cursor (at the call's start offset, with or without
+  ##     NOTEMPTY_ATSTART; scanning; just bumped or landed, where the CRLF
+  ##     skip applies; inside a UTF-8 character) and the class of the byte
+  ##     before `u` (`pcre_select.PrevClass`). It follows pcre_exec.c's
+  ##     loop: the start-of-match scan, the attempt, the bump by one
+  ##     character, the SKIP's jump, the COMMIT's end; on a miss the rest
+  ##     is kept (std/re's loop ends), after a match it emits `by` and calls
+  ##     PCRE again from the match's end.
+  ## An invalid UTF-8 subject is returned as is (every call is an error).
+  ## Pinned against `std/re` (`tests/tsymex_rfc0005_s8bj_replace.nim`).
+  ## RFC-0005 S8bt: an attempt that leaves pcre_exec.c's `ignore_skip_arg`
+  ## set for the next one (`Leaf.ign`, `ig > 0`) returns code `260 + ig`
+  ## for a bump, `270 + ig` for the SKIP mark, `320 + 8 * register + ig`
+  ## for a SKIP landing at a register; the next attempt starts in that
+  ## value's start state (`mode` carries it).
+  let ctx = s.ctx
+  let empty = mkString("")
+  let commit = codeStr(257)
+  let nlSet = nlBytesOf(n)
+  let pair = nlPair(n.nl)
+  let ua = uAny(n)
+  let igns = t.igns
+  proc bumpOf(ig: int8): Z3String =
+    codeStr(if ig == 0: 256 else: 260 + int(ig))
+  proc skipMarkOf(ig: int8): Z3String =
+    codeStr(if ig == 0: 258 else: 270 + int(ig))
+  let bump = bumpOf(0)
+  proc refStr(reg: int; skip: bool; ig = 0'i8): Z3String =
+    if skip and ig != 0: codeStr(320 + 8 * reg + int(ig))
+    else: codeStr(300 + 2 * reg + ord(skip))
+  # RFC-0005 batch 5 (S8bi's fuel on S8bj's `run`): `fuel` is `len(u) + 1`
+  # at each call from `rep`, one less per unfolding; each unfolding drops a
+  # byte, so a real run never exhausts it, and no unfolding is unbounded
+  # whatever Z3 makes of `tl`.
+  let run = defineRecFun[Z3String, Z3Int, Z3Int, Z3String](ctx,
+    fresh("__regexStep"),
+    proc (self: Z3FuncDecl[(Z3String, Z3Int, Z3Int), Z3String]; u: Z3String;
+          st, fuel: Z3Int): Z3String =
+      let f1 = fuel - mkInt(1)
+      let lenU = len(u)
+      let atEnd = lenU == mkInt(0)
+      let b = toCode(at(u, mkInt(0)))
+      var nll = (lenU == mkInt(1)) and inSet(b, nlSet)
+      if pair:
+        nll = nll or ((lenU == mkInt(2)) and (b == mkInt(13)) and
+                      (toCode(at(u, mkInt(1))) == mkInt(10)))
+      # RFC-0005 S8bt: under `uAny`, a multi-byte newline starts here:
+      # final (`nll`), or with more after it (`nlsU`).
+      var nlsU = mkBool(false)
+      if ua:
+        let b1 = toCode(at(u, mkInt(1)))
+        let b2 = toCode(at(u, mkInt(2)))
+        let nel = (b == mkInt(0xC2)) and (b1 == mkInt(0x85))
+        let lsps = (b == mkInt(0xE2)) and (b1 == mkInt(0x80)) and
+                   inSet(b2, {'\xA8', '\xA9'})
+        nll = nll or (nel and (lenU == mkInt(2))) or (lsps and (lenU == mkInt(3)))
+        nlsU = (nel and (lenU > mkInt(2))) or (lsps and (lenU > mkInt(3)))
+      let tl = substr(u, mkInt(1), lenU - mkInt(1))
+      proc leafVal(lf: Leaf): Z3String =
+        case lf.kind
+        of lfBump: result = bumpOf(lf.ign)
+        of lfCommit: result = commit
+        of lfMatch: result = (if lf.reg < 0: u else: refStr(lf.reg, false))
+        of lfSkip:
+          result = (if lf.reg < 0: concat(skipMarkOf(lf.ign), u)
+                    else: refStr(lf.reg, true, lf.ign))
+        of lfNext:
+          let later = self(tl, mkInt(int(lf.next)), f1)
+          result = later
+          for i in countdown(lf.regMap.high, 0):
+            let m = lf.regMap[i]
+            var vs = @[(false, 0'i8)]
+            for ig in igns: vs.add (true, ig)
+            for (skip, ig) in vs:
+              let here =
+                if m >= 0: refStr(m, skip, ig)
+                elif skip: concat(skipMarkOf(ig), u)
+                else: u
+              result = ite(later == refStr(i, skip, ig), here, result)
+      proc row(leaves: seq[Leaf]): Z3String =
+        # The bytes grouped by leaf, the largest group the default.
+        var groups: seq[(Leaf, set[char])]
+        for x in 0 .. 255:
+          var found = false
+          for g in groups.mitems:
+            if g[0] == leaves[x]:
+              g[1].incl char(x)
+              found = true
+              break
+          if not found: groups.add (leaves[x], {char(x)})
+        var dflt = 0
+        for gi, g in groups:
+          if card(g[1]) > card(groups[dflt][1]): dflt = gi
+        result = leafVal(groups[dflt][0])
+        for gi, g in groups:
+          if gi != dflt:
+            result = ite(inSet(b, g[1]), leafVal(g[0]), result)
+      result = bump
+      for k in countdown(t.rows.high, 0):
+        let r = t.rows[k]
+        var nllLeaves = r.nll
+        for x in 0 .. 255:
+          if char(x) notin nlSet and not (pair and x == 13) and
+             not (ua and x in [0xC2, 0xE2]):
+            nllLeaves[x] = r.other[x]
+        var rest = row(r.other)
+        if ua and r.nlsU != r.other: rest = ite(nlsU, row(r.nlsU), rest)
+        let body = ite(atEnd, leafVal(r.atEnd),
+                       (if nllLeaves == r.other: rest
+                        else: ite(nll, row(nllLeaves), rest)))
+        result = ite(st == mkInt(k), body, result)
+      result = ite(fuel <= mkInt(0), bump, result))
+  # The modes: cursor * 16 + the class before `u`. RFC-0005 S8bt: under the
+  # JIT's prefix scan, `cuScan + 2 + p` (p >= 1) passes `p` more positions
+  # before the scan visits one (a skip-table jump).
+  const cuS0 = 0
+  const cuS0ne = 1
+  const cuScan = 2
+  const cuLanded = 3
+  const cuMid = 4
+  proc cuPass(p: int): int = (if p == 0: cuScan else: 4 + p)
+  let anchored = n.anchoredPat
+  let jitOn = jitScanObservable(n) and not anchored
+  let j = n.jit
+  var pcs = (if n.needPc: @[pcStart, pcOther, pcLF, pcCRLF, pcCR, pcNl]
+             else: @[pcStart, pcOther])
+  if n.needPc and ua: pcs.add [pcU1, pcU2, pcU3]
+  proc modeNum(cur: int; pc: PrevClass; ig = 0'i8): Z3Int =
+    # RFC-0005 S8bt: plus 1000 * the next attempt's `ignore_skip_arg`.
+    mkInt(1000 * int(ig) + cur * 16 + ord(pc))
+  let rep = defineRecFun[Z3String, Z3Int, Z3Int, Z3String](ctx,
+    fresh("__regexStepReplace"),
+    proc (self: Z3FuncDecl[(Z3String, Z3Int, Z3Int), Z3String];
+          u: Z3String; mode, fuel: Z3Int): Z3String =
+      let lenU = len(u)
+      let b = toCode(at(u, mkInt(0)))
+      let tl = substr(u, mkInt(1), lenU - mkInt(1))
+      let f1 = fuel - mkInt(1)
+      proc next(c: char; pc: PrevClass): PrevClass =
+        (if n.needPc: nextClass(c, pc, ua) else: pcOther)
+      proc callAfter(v: Z3String; cur: int; pcOf: proc (c: char): PrevClass;
+                     lastByte: Z3Int; ig = 0'i8): Z3String =
+        # `self(v, cur, class)`, the class read off the byte before `v`
+        # (`lastByte`) as numerals.
+        var byClass: seq[(PrevClass, set[char])]
+        for x in 0 .. 255:
+          let c = pcOf(char(x))
+          var found = false
+          for g in byClass.mitems:
+            if g[0] == c:
+              g[1].incl char(x)
+              found = true
+          if not found: byClass.add (c, {char(x)})
+        result = self(v, modeNum(cur, byClass[0][0], ig), f1)
+        for gi in 1 ..< byClass.len:
+          result = ite(inSet(lastByte, byClass[gi][1]),
+                       self(v, modeNum(cur, byClass[gi][0], ig), f1), result)
+      proc step(cur: int; pc: PrevClass; ig = 0'i8): Z3String =
+        # Keep `u[0]`, go on from the next byte.
+        concat(at(u, mkInt(0)),
+               callAfter(tl, cur, proc (c: char): PrevClass = next(c, pc), b,
+                         ig))
+      proc restAt(v: Z3String; cur: int; pc: PrevClass;
+                  ig = 0'i8): Z3String =
+        # Go on from the suffix `v` of `u` (shorter than `u`).
+        let d = lenU - len(v)
+        let b1 = toCode(at(u, d - mkInt(1)))
+        if not n.needPc:
+          return self(v, modeNum(cur, pcOther, ig), f1)
+        # The class before `v`: its last byte, and a CR before an LF.
+        let prevCR = ite(d >= mkInt(2), toCode(at(u, d - mkInt(2))) == mkInt(13),
+                         mkBool(pc == pcCR))
+        var res = ite(b1 == mkInt(10),
+            ite(prevCR, self(v, modeNum(cur, pcCRLF, ig), f1),
+                self(v, modeNum(cur, pcLF, ig), f1)),
+            callAfter(v, cur, proc (c: char): PrevClass = next(c, pcOther), b1,
+                      ig))
+        if ua:
+          # RFC-0005 S8bt: the multi-byte newlines' bytes read the one or
+          # two before (from `pc` where they precede `u`).
+          let b2 = toCode(at(u, d - mkInt(2)))
+          let b3 = toCode(at(u, d - mkInt(3)))
+          let afterC2 = ite(d >= mkInt(2), b2 == mkInt(0xC2), mkBool(pc == pcU1))
+          let afterE2 = ite(d >= mkInt(2), b2 == mkInt(0xE2), mkBool(pc == pcU2))
+          let afterE280 = ite(d >= mkInt(3),
+                              (b2 == mkInt(0x80)) and (b3 == mkInt(0xE2)),
+                              ite(d == mkInt(2),
+                                  (b2 == mkInt(0x80)) and mkBool(pc == pcU2),
+                                  mkBool(pc == pcU3)))
+          let nlHere = self(v, modeNum(cur, pcNl, ig), f1)
+          res = ite((b1 == mkInt(0x85)) and afterC2, nlHere,
+                ite(inSet(b1, {'\xA8', '\xA9'}) and afterE280, nlHere,
+                ite((b1 == mkInt(0x80)) and afterE2,
+                    self(v, modeNum(cur, pcU3, ig), f1), res)))
+        res
+      proc attempt(pc: PrevClass; ne, elig: bool; ig = 0'i8): Z3String =
+        let st = t.start[(canonPc0(n, pc), ne, elig, ig)]
+        let r = run(u, mkInt(st), lenU + mkInt(1))
+        let lenR = len(r)
+        let head = substr(r, mkInt(0), mkInt(1))
+        let landing = substr(r, mkInt(1), lenR - mkInt(1))
+        proc bumped(ig1: int8): Z3String =
+          if anchored: u
+          elif n.utf and n.engine == peJit837:
+            # RFC-0005 S8bt: the JIT bumps one byte from a continuation
+            # byte (its scan can stop there).
+            ite(lenU == mkInt(0), empty,
+                ite(b >= mkInt(0xC0), step(cuMid, pc), step(cuLanded, pc)))
+          else: ite(lenU == mkInt(0), empty,
+                    step((if n.utf: cuMid else: cuLanded), pc, ig1))
+        # RFC-0005 S8bt: the JIT resumes at a landing with its scan (no
+        # CRLF start skip).
+        let landCur = (if n.engine == peJit837: cuScan else: cuLanded)
+        proc skipped(ig1: int8): Z3String =
+          # A jump past the start keeps `ignore_skip_arg`; one that does
+          # not is a bump, which resets it.
+          if anchored: u
+          else: ite(len(landing) < lenU,
+                    concat(substr(u, mkInt(0), lenU - len(landing)),
+                           restAt(landing, landCur, pc, ig1)),
+                    bumped(0))
+        let matched = concat(by, ite(lenR == mkInt(0), empty,
+          ite(lenR == lenU, self(u, modeNum(cuS0ne, pc), f1),
+              restAt(r, cuS0, pc))))
+        result = matched
+        for ig1 in igns:
+          result = ite((lenR >= mkInt(1)) and (head == skipMarkOf(ig1)),
+                       skipped(ig1), result)
+        result = ite(r == commit, u, result)
+        for ig1 in igns:
+          result = ite(r == bumpOf(ig1), bumped(ig1), result)
+      proc created(pc: PrevClass; atS0: bool): Z3Bool =
+        # The start-of-match scan stops here.
+        if anchored: return mkBool(true)
+        case n.filter
+        of fkNone: mkBool(true)
+        of fkFirst, fkBits:
+          (lenU == mkInt(0)) or inSet(b, n.filterBytes)
+        of fkStartline:
+          if atS0: mkBool(true)
+          elif not wasNl(n.nl, pc): lenU == mkInt(0)
+          elif pc == pcCR and n.nl in {nlANY, nlANYCRLF}:
+            (lenU == mkInt(0)) or (b != mkInt(10))
+          else: mkBool(true)
+      proc jitScanHere(go: Z3String; pc: PrevClass): Z3String =
+        # RFC-0005 S8bt: the JIT's prefix scan visits this position: it
+        # gives up (an attempt here) when at most `max - 1` bytes remain;
+        # else the range byte's skip moves on, then the offsets decide.
+        proc byteAt(k: int): Z3Int = toCode(at(u, mkInt(k)))
+        var miss = step(cuScan, pc)
+        var hit = go
+        for k in countdown(j.offs.high, 0):
+          var cs: set[char]
+          for x in 0 .. 255:
+            if (uint32(x) or j.cmp[k][1]) == j.cmp[k][0]: cs.incl char(x)
+          hit = ite(inSet(byteAt(j.offs[k]), cs), hit, miss)
+        var visit = hit
+        if j.rangeRight >= 0:
+          for t in 1 .. j.rangeLen:
+            var cs: set[char]
+            for x in 0 .. 255:
+              if j.table[x] == t: cs.incl char(x)
+            if cs.card == 0: continue
+            visit = ite(inSet(byteAt(j.rangeRight), cs),
+                        step(cuPass(t - 1), pc), visit)
+        ite(lenU <= mkInt(j.max - 1), go, visit)
+      proc body(cur: int; pc: PrevClass; ig = 0'i8): Z3String =
+        # RFC-0005 S8bt: `ig` the next attempt's `ignore_skip_arg`; the
+        # start-of-match scan and the CRLF start skip keep it.
+        if cur > cuMid:
+          # Passing a position the JIT's scan jumped over.
+          return ite(lenU == mkInt(0), empty, step(cuPass(cur - 5), pc))
+        case cur
+        of cuMid:
+          ite((lenU > mkInt(0)) and inSet(b, {'\x80'..'\xBF'}),
+              step(cuMid, pc, ig), body(cuLanded, pc, ig))
+        of cuLanded:
+          if n.skipActive and pc == pcCR:
+            ite((lenU > mkInt(0)) and (b == mkInt(10)), step(cuScan, pc, ig),
+                body(cuScan, pc, ig))
+          else: body(cuScan, pc, ig)
+        of cuScan:
+          let elig = n.hasNeverSkip and n.skipActive and pc == pcCR
+          let go =
+            if elig:
+              ite((lenU > mkInt(0)) and (b == mkInt(10)),
+                  attempt(pc, false, true, ig), attempt(pc, false, false, ig))
+            else: attempt(pc, false, false, ig)
+          if jitOn: jitScanHere(go, pc)
+          else:
+            ite(created(pc, false), go,
+                ite(lenU == mkInt(0), empty, step(cuScan, pc, ig)))
+        else:
+          let go = attempt(pc, cur == cuS0ne, false)
+          if jitOn: jitScanHere(go, pc)
+          else:
+            ite(created(pc, true), go,
+                ite(lenU == mkInt(0), empty, step(cuScan, pc)))
+      result = empty
+      var curs = @[cuS0, cuS0ne, cuScan, cuLanded, cuMid]
+      if jitOn:
+        for p in 1 ..< j.rangeLen: curs.add cuPass(p)
+      for ig in igns:
+        for cur in curs:
+          if anchored and cur >= cuScan: continue
+          if cur == cuMid and not n.utf: continue
+          if ig != 0 and cur in {cuS0, cuS0ne}: continue
+          for pc in pcs:
+            if pc == pcStart and cur >= cuScan: continue
+            result = ite(mode == modeNum(cur, pc, ig), body(cur, pc, ig),
+                         result)
+      result = ite(fuel <= mkInt(0), empty, result))
+  result = ite(len(s) == mkInt(0), empty,
+               rep(s, modeNum(cuS0, pcStart), mkInt(2) * len(s) + mkInt(2)))
+  if n.utf: result = ite(matches(s, utf8ValidRe()), result, s)
+
+# ---- RFC-0005 S8bj (item 5), S8bt (item 7): facts of a `replace` value -------
+
+proc replaceLemmas*(s, by, r: Z3String; f: ReplaceFacts;
+                    fresh: FreshName): seq[Z3Bool] =
+  ## RFC-0005 S8bj, S8bt. Facts of `r = replace(s, re, by)`, true of every
+  ## receiver; Z3's unfolding of the exact recursive term does not reach
+  ## them (S8bb's Q2, Q7, Q8 stayed `unknown`). Nim's loop writes `s` as
+  ## `g0 m1 g1 .. mk gk` (the matches `mi`, left to right and disjoint) and
+  ## `r` as `g0 by g1 .. by gk`; `f` bounds the matches
+  ## (`pcre_select.replaceFacts`):
+  ##   * the lengths: `k` matches removing `c` bytes, `len(r) = len(s) - c
+  ##     + kb` with `kb = k * len(by)`, `k * mn <= c <= k * mx`, `c <=
+  ##     len(s)`, and at most `2 * len(s) + 1` matches when one can be
+  ##     empty (at most one empty match per position, `len(s) + 1` of them,
+  ##     and a non-empty one per byte). RFC-0005 S8bt: for a `by` of
+  ##     unknown length `kb` is a fresh Int with the product's linear
+  ##     consequences (S8bj stated the relation for a numeral only);
+  ##   * RFC-0005 S8bt: no match (`k == 0`) leaves `r == s`, and when no
+  ##     match is empty one starts at a byte of `first`, so `k >= 1` needs
+  ##     such a byte in `s`;
+  ##   * the image: every `sure` byte of `s` is inside a match, so a byte of
+  ##     `r` outside `by` is not sure: `r in ([^sure] | by)*` for a literal
+  ##     `by`; and per sure byte `b`, `contains(r, b)` only when
+  ##     `contains(by, b)` -- for any `by` (RFC-0005 S8bt; S8bj: a one-set
+  ##     pattern, a literal `by` and at most 16 plain ASCII bytes). The
+  ##     byte is a one-character term (`fromCode`), so any byte is stated.
+  ##     Z3 4.13.4 does not derive `not contains(r, "ff")` from the
+  ##     membership alone (S8bj's first Windows run), hence both forms.
+  let k = mkIntVar(fresh("__regexReplaceK"))
+  let c = mkIntVar(fresh("__regexReplaceC"))
+  let kb = mkIntVar(fresh("__regexReplaceKB"))
+  result.add (k >= mkInt(0)) and (c >= mkInt(0)) and (c <= len(s)) and
+             (len(r) == len(s) - c + kb)
+  result.add c >= k * mkInt(f.mn)
+  if f.mx >= 0: result.add c <= k * mkInt(f.mx)
+  if f.mn == 0: result.add k <= mkInt(2) * len(s) + mkInt(1)
+  let lenBy = simplify(len(by))
+  if isNumeralAst(lenBy.ctx, lenBy.raw):
+    result.add kb == k * mkInt(parseInt(getNumeralString(lenBy)))
+  else:
+    result.add (kb >= mkInt(0)) and
+               implies(len(by) == mkInt(0), kb == mkInt(0)) and
+               implies(k == mkInt(0), kb == mkInt(0)) and
+               implies(len(by) >= mkInt(1), kb >= k) and
+               implies(k >= mkInt(1), kb >= len(by))
+  # No match leaves the receiver as it is; a match (never empty when
+  # `mn >= 1`) starts at a byte of `first`.
+  result.add implies(k == mkInt(0), r == s)
+  if f.mn >= 1 and f.first.card < 256:
+    # As `contains` facts for a small set (Z3 relates them to the query's
+    # own `contains` at once; it did not reach the membership's conflict
+    # under `recFactsRLimit`), else as a membership.
+    if f.first.card <= 32:
+      var some: seq[Z3Bool]
+      for b in f.first: some.add contains(s, codeStr(ord(b)))
+      result.add implies(k >= mkInt(1), orAll(some))
+    else:
+      let anyB = star(byteSetRe(pcreAnyByte))
+      result.add implies(k >= mkInt(1),
+                         matches(s, concat(@[anyB, byteSetRe(f.first), anyB])))
+  if f.sure.card == 0: return
+  let byS = simplify(by)
+  let literal = Z3_is_string(byS.ctx.raw, byS.raw)
+  if literal:
+    result.add matches(r, star(union(byteSetRe(pcreAnyByte - f.sure),
+                                     mkRegex(byS))))
+    let byCodes = getStringContents(byS)
+    for b in f.sure:
+      if ord(b) notin byCodes:
+        result.add not contains(r, codeStr(ord(b)))
+  else:
+    for b in f.sure:
+      let u = codeStr(ord(b))
+      result.add implies(contains(r, u), contains(by, u))

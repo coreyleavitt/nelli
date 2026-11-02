@@ -68,6 +68,8 @@
 import std/[unittest, strutils, tables]
 import nelli/symex
 import nelli/smt/canonicalize
+import nelli/smt/types
+import nelli/smt/runtime
 
 # =============================================================================
 # N15 -- field-sourced placeholder: index vs .len must report the SAME kind.
@@ -80,7 +82,7 @@ type
     of n15rkA: a: int
     of n15rkB:
       count: int
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc n15ReassignToB(v: var N15Rec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -194,11 +196,18 @@ suite "symex round-6 N30 -- closure string-return type: classified decline (feUn
 # =============================================================================
 
 type
+  N41Case = object
+    ## RFC-0005 S8ar: a by-value case object; a tuple holding one was a
+    ## pointee kind with no leaf representation (S8ar's stated decline).
+    ## RFC-0005 S8at: a case object is a heap cell value now; a seq of
+    ## tuples (backed nowhere) is the part that keeps the tuple a stand-in.
+    ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
   N41Heap = object
     t: Table[string, int]   ## a VALID Table shape -- the gap is independent
                              ## of key/value-type support (N40 already covers
                              ## the unsupported-shape case).
-    tp: (int, int)          ## RFC-0005 S8ap: a `Table[string, int]` field
+    tp: (int, N41Case)      ## RFC-0005 S8ar: was `(int, int)`, a cell
+                             ## value since S8ar. RFC-0005 S8ap: a `Table[string, int]` field
                              ## is a leaf-split heap cell now (read and
                              ## written through the heap), so N41-2/N41-3
                              ## read this tuple field instead -- a pointee
@@ -214,6 +223,15 @@ proc n41ClosureValidTableParamBlock(n: int) =
       let f = proc(t: Table[string, int]): int = n
       symexTarget("n41_closure_validtable_param_block")
 
+proc n41ClosureProcParam(n: int) =
+  ## RFC-0005 S8ca: a closure parameter of a proc type still has no
+  ## single-leaf sort (a seq, table, set or array has its leaves', and a
+  ## case object is held otherwise).
+  for i in 0 ..< 1:
+    block:
+      let f = proc(g: proc(x: int): int {.nimcall.}): int = n
+      symexTarget("n41_closure_proc_param")
+
 proc n41HeapReadBlock() =
   let p = n41MkHeap()
   if p != nil:
@@ -222,20 +240,21 @@ proc n41HeapReadBlock() =
 
 suite "symex round-6 N41 -- compound-value sort derivation: classified decline, not a whole-run crash":
 
-  test "N41-1 RED->GREEN: a VALID Table[string,int] closure PARAM reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault)":
+  test "N41-1 RED->GREEN: a VALID Table[string,int] closure PARAM is not a whole-run crash (RFC-0005 S8ca: modelled, sxSat)":
+    # RFC-0005 S8ca: a table contributes the sort of each of its leaves
+    # (`sortOfTuple`); the closure is built and the target, reached
+    # unconditionally, is sxSat. It was `seUnsupportedCompoundSortLeaf`.
     let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
-    var sawFault = false
-    var sawClassified = false
-    for e in r.errors:
-      if e.kind == weInternalWalkerFault: sawFault = true
-      if e.kind == seUnsupportedCompoundSortLeaf: sawClassified = true
-    check not sawFault
-    check sawClassified
+    check r.status == sxSat
+    for e in r.errors: check e.kind != weInternalWalkerFault
 
-  test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) reports seUnsupportedCompoundSortLeaf (not weInternalWalkerFault) -- the family N40 flagged and masked":
+  test "N41-2 RED->GREEN: a heap-deref READ of a tuple field (a Table[string,int] one until RFC-0005 S8ap) is a classified decline (not weInternalWalkerFault) -- the family N40 flagged and masked":
+    # RFC-0005 S8ar: a tuple with a part that is not a heap cell value has a
+    # stand-in cell sort, so the sort derivation no longer reaches
+    # `seUnsupportedCompoundSortLeaf`; the read is the stated, scoped
+    # `heUnsupportedPointeeRead`.
     let r = symexFind(n41HeapReadBlock, tLabel("n41_heap_read_block"))
     checkpoint("status: " & $r.status)
     for e in r.errors: checkpoint($e.kind & ": " & e.msg)
@@ -244,20 +263,25 @@ suite "symex round-6 N41 -- compound-value sort derivation: classified decline, 
     var sawClassified = false
     for e in r.errors:
       if e.kind == weInternalWalkerFault: sawFault = true
-      if e.kind == seUnsupportedCompoundSortLeaf: sawClassified = true
+      if e.kind == heUnsupportedPointeeRead and
+         "a part of it is not a heap cell value" in e.msg:
+        sawClassified = true
     check not sawFault
     check sawClassified
 
-  test "N41-6: the compound-sort-leaf message renders plain language, not the bare SymValKind identifier \"svTable\" (N12 SymValKind follow-up, plainEnglishSymValKind)":
-    let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
+  test "N41-6: the compound-sort-leaf message renders plain language, not a bare SymValKind identifier (N12 SymValKind follow-up, plainEnglishSymValKind)":
+    # RFC-0005 S8ca: a closure's table parameter is modelled (N41-1), and
+    # no walked shape is known to reach `seUnsupportedCompoundSortLeaf` any
+    # more (a proc-typed parameter declines another way, N41-4); the
+    # message's kind goes through `plainEnglishSymValKind`, pinned here.
+    check plainEnglishSymValKind(svTable) == "table value"
+    check plainEnglishSymValKind(svClosure) == "closure value"
+    let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status == sxUnknown
-    var sawKind = false
     for e in r.errors:
-      if e.kind == seUnsupportedCompoundSortLeaf:
-        sawKind = true
-        check "svTable" notin e.msg
-        check "table value" in e.msg   ## the plain-language replacement
-    check sawKind
+      checkpoint $e.kind & ": " & e.msg
+      check "svClosure" notin e.msg
+      check "svTable" notin e.msg
 
 suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets a tainted path report sxSat":
 
@@ -266,8 +290,11 @@ suite "symex round-6 N41 -- SOUNDNESS: unmasking the compound family never lets 
     check r.status != sxSat
     check r.status == sxUnknown
 
-  test "N41-4 SOUNDNESS: closure construction over a compound VALID Table param, target reached UNCONDITIONALLY, is NEVER sxSat":
-    let r = symexFind(n41ClosureValidTableParamBlock, tLabel("n41_closure_validtable_param_block"))
+  test "N41-4 SOUNDNESS: a compound VALID Table param whose sort is not derived, target reached UNCONDITIONALLY, is NEVER sxSat":
+    # RFC-0005 S8ca: the closure's table parameter is modelled now (N41-1,
+    # sxSat, which Nim reaches); a proc-typed parameter is the shape that
+    # still has no single-leaf sort.
+    let r = symexFind(n41ClosureProcParam, tLabel("n41_closure_proc_param"))
     check r.status != sxSat
     check r.status == sxUnknown
 
@@ -294,7 +321,7 @@ type
     of n12rkA: a: int
     of n12rkB:
       count: int
-      opts: seq[(string, string)]   ## unbacked elem (itTuple) -> placeholder
+      opts: seq[seq[string]]   ## unbacked elem (a seq; a tuple is backed since RFC-0005 S8bc) -> placeholder
 
 proc n12ReassignToB(v: var N12Rec) =
   ## RFC-0005 S8f (walker 154): a branch-changing discriminator assignment
@@ -329,7 +356,10 @@ suite "symex round-6 N12 -- decline messages render plain language, not internal
         sawKind = true
         check "itTuple" notin e.msg
         check "(seNestedSeqUnsupported)" notin e.msg
-        check "tuple type" in e.msg   ## the plain-language replacement
+        # RFC-0005 S8bc: the stand-in element is a seq now (a tuple element
+        # is backed), so the plain-language spelling is "seq type".
+        check "itSeq" notin e.msg
+        check "seq type" in e.msg   ## the plain-language replacement
     check sawKind
 
   test "N12-2 RED->GREEN: the declared-unsupported-FIELD chokepoint (a bare field read) does not leak \"itTuple\"/\"(seNestedSeqUnsupported)\" into the message either -- same funnel, same fix":
@@ -341,7 +371,8 @@ suite "symex round-6 N12 -- decline messages render plain language, not internal
         sawKind = true
         check "itTuple" notin e.msg
         check "(seNestedSeqUnsupported)" notin e.msg
-        check "tuple type" in e.msg
+        check "itSeq" notin e.msg   ## RFC-0005 S8bc: a seq stand-in
+        check "seq type" in e.msg
     check sawKind
 
   test "N12-3: the structured .kind field is UNCHANGED by the message-text fix -- callers matching on .kind (not text) see no behavior change":

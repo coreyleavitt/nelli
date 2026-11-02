@@ -37,6 +37,7 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
+from ./smt/scoped_names import isModuleGlobal   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
@@ -261,12 +262,27 @@ const soundnessMetaVersion = "1"
   ## `ReplayStatus` ordinal. Anything else decodes as a miss.
 
 type
-  CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness]
-    ## RFC-0005 S11. One `:sat` cache entry: the witness's choice sequence
-    ## and the soundness of the verdict that produced it.
-  CachedVerdict* = tuple[status: SymexFindingStatus, soundness: Soundness]
-    ## RFC-0005 S11. A `:unsat` / `:unk` cache hit: the status and the
-    ## soundness it was persisted with.
+  CachedWitness* = tuple[choices: seq[ChoiceNode], soundness: Soundness,
+                        gaps: seq[FindingGap]]
+    ## RFC-0005 S11/S8az. One `:sat` cache entry: the witness's choice
+    ## sequence, the soundness of the verdict that produced it, and (S8az)
+    ## the per-cause `gaps()` view from the run that produced it. `gaps` is
+    ## `@[]` on an entry written before S8az or by a writer that never
+    ## recorded it — see `storedGaps`.
+  CachedVerdict* = tuple[status: SymexFindingStatus, soundness: Soundness,
+                        gaps: seq[FindingGap]]
+    ## RFC-0005 S11/S8av. A `:unsat` / `:unk` cache hit: the status, the
+    ## soundness it was persisted with, and (S8av) the per-cause `gaps()`
+    ## view from the run that produced it. `gaps` is `@[]` on an entry
+    ## written before S8av or by a writer that never recorded it — see
+    ## `storedGaps`.
+  CachedRaised* = tuple[raw: RawResult, gaps: seq[FindingGap]]
+    ## RFC-0005 S11/S8az. A `:raised:<type>` cache hit: the reconstructed
+    ## `RawResult` (status `sxRaised`, `raisedTypeId` and `soundness` only —
+    ## E2a's STRUCTURAL protocol carries no witness) and (S8az) the
+    ## per-cause `gaps()` view of the run that produced it. `gaps` is `@[]`
+    ## on an entry written before S8az or by a writer that never recorded
+    ## it — see `storedGaps`.
 
 func taintBits(t: Taint): int =
   for c in t: result = result or (1 shl ord(c))
@@ -297,6 +313,65 @@ proc decodeSoundness(v: string): Option[Soundness] =
 proc soundnessMeta(s: Soundness): Table[string, string] =
   result = initTable[string, string]()
   result[soundnessMetaKey] = encodeSoundness(s)
+
+# ---- RFC-0005 S8av/S8az: every verdict/witness/raised cache value also -----
+# ---- carries `gaps()` ------------------------------------------------------
+#
+# S11's remainder (§8.1's "Different mechanisms" list): a served cache hit
+# returned `gaps: @[]` even when the run that produced it had a non-empty
+# per-cause view, because only `Soundness` rode the entry metadata. S8av
+# widened the `:unsat`/`:unk` verdict slot only (`CachedVerdict`); S8az
+# widens the two remaining slots the SAME way: the `:sat` witness entry
+# (`CachedWitness`, via `saveSymexWitnessImpl`/`loadSymexWitnessesImpl`) and
+# each `:raised:<type>` sentinel (`CachedRaised`, via
+# `saveSymexRaisedImpl`/`loadSymexRaisedImpl`). All three share this ONE
+# encode/decode pair rather than each growing its own — `gapsMeta`/
+# `storedGaps` take and return a plain `Table[string, string]`, so any
+# metadata-carrying entry can fold them into its own `meta` table alongside
+# `soundnessMeta`. `FindingGap` is already Z3-free (`class`, `kind`, `msg` —
+# see `findingGaps`), so it is stored the same way: each gap gets its OWN
+# set of metadata keys (`gapsc<i>`/`gapsk<i>`/`gapsm<i>`), sidestepping any
+# need to escape `msg` (an arbitrary, user-influenced string) inside a
+# single delimited value the way `encodeSoundness` can for its
+# always-one-digit fields. A `gapsnMetaKey`/`gapsVersionMetaKey` pair marks
+# how many entries to read back and which encoding wrote them, mirroring
+# `soundnessMetaVersion`. Missing/malformed metadata degrades to `@[]`
+# rather than a miss — `gaps` is best-effort detail on top of the
+# load-bearing `Soundness` (symexWalkerVersion's S8av/S8az bullets).
+
+const gapsVersionMetaKey = "gapsv"
+const gapsVersion = "1"
+const gapsCountMetaKey = "gapsn"
+
+proc gapsMeta(gaps: seq[FindingGap]): Table[string, string] =
+  result = initTable[string, string]()
+  result[gapsVersionMetaKey] = gapsVersion
+  result[gapsCountMetaKey] = $gaps.len
+  for i, g in gaps:
+    result["gapsc" & $i] = $ord(g.class)
+    result["gapsk" & $i] = g.kind
+    result["gapsm" & $i] = g.msg
+
+proc storedGaps(meta: Table[string, string]): seq[FindingGap] =
+  ## The inverse of `gapsMeta`; `@[]` for anything it did not write
+  ## (absent, wrong version, or malformed — never raises).
+  if meta.getOrDefault(gapsVersionMetaKey, "") != gapsVersion: return @[]
+  var n: int
+  try: n = parseInt(meta.getOrDefault(gapsCountMetaKey, ""))
+  except ValueError: return @[]
+  if n < 0: return @[]
+  for i in 0 ..< n:
+    let cKey = "gapsc" & $i
+    let kKey = "gapsk" & $i
+    let mKey = "gapsm" & $i
+    if cKey notin meta or kKey notin meta: return result   ## stop at the break
+    var classOrd: int
+    try: classOrd = parseInt(meta[cKey])
+    except ValueError: return result
+    if classOrd < ord(low(DegradeClass)) or classOrd > ord(high(DegradeClass)):
+      return result
+    result.add FindingGap(class: DegradeClass(classOrd), kind: meta[kKey],
+                          msg: meta.getOrDefault(mKey, ""))
 
 proc storedSoundness(meta: Table[string, string]): Option[Soundness] =
   if soundnessMetaKey notin meta: return none(Soundness)
@@ -330,7 +405,10 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## Runtime body of `saveSymexWitness`. Skips non-Sat findings (no
   ## witness to persist), otherwise saves the choice array under the
   ## content-addressed key with `:sat` suffix, with `finding.soundness` in
-  ## the entry's metadata (RFC-0005 S11).
+  ## the entry's metadata (RFC-0005 S11). RFC-0005 S8az: also carries
+  ## `finding.gaps` (the run's per-cause view) via the shared
+  ## `gapsMeta`/`storedGaps` encoding `CachedVerdict` already uses, so a
+  ## `:sat` cache hit can report the same `gaps()` a cold run would.
   ##
   ## DB save errors are appended to `errors` and the call returns
   ## normally — symmetric with `saveSymexVerdictImpl`. Closes a
@@ -345,9 +423,10 @@ proc saveSymexWitnessImpl*(db: ExampleDatabase, prog: SymexProgram,
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
     renderingVersion = renderAsChoicesVersion) & cacheKeySat
+  var meta = soundnessMeta(finding.soundness)
+  for k, v in gapsMeta(finding.gaps): meta[k] = v   ## RFC-0005 S8az
   try:
-    db.save(key, finding.witnessChoices, soundnessMeta(finding.soundness),
-            maxEntries)
+    db.save(key, finding.witnessChoices, meta, maxEntries)
   except CatchableError as e:
     errors.add "saveSymexWitnessImpl: " & $e.name & ": " & e.msg
 
@@ -358,9 +437,11 @@ proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
                             ): seq[CachedWitness] =
   ## Runtime body of `loadSymexWitnesses`. Returns the persisted
   ## witnesses for *exactly* this SUT/target/settings/Z3/Nim/walker
-  ## combination, each with its stored `Soundness` (RFC-0005 S11).
-  ## Mismatched key → empty seq. An entry without soundness metadata is
-  ## skipped (a miss, with a note in `errors`).
+  ## combination, each with its stored `Soundness` (RFC-0005 S11) and
+  ## (RFC-0005 S8az) `gaps` (`@[]` for a pre-S8az entry or a writer that
+  ## never recorded it — see `storedGaps`). Mismatched key → empty seq. An
+  ## entry without soundness metadata is skipped (a miss, with a note in
+  ## `errors`) — soundness stays load-bearing; gaps stays best-effort.
   ##
   ## Load errors append to `errors` and the call degrades to an
   ## empty seq (treated as "miss") — symmetric with
@@ -375,7 +456,8 @@ proc loadSymexWitnessesImpl*(db: ExampleDatabase, prog: SymexProgram,
     for e in db.loadPrimaryWithMeta(key):
       let s = storedSoundness(e.meta)
       if s.isSome:
-        result.add (choices: e.choices, soundness: s.get)
+        result.add (choices: e.choices, soundness: s.get,
+                    gaps: storedGaps(e.meta))   ## RFC-0005 S8az
       else:
         errors.add "loadSymexWitnessesImpl: an entry without soundness " &
           "metadata (pre-RFC-0005-S11 format) is treated as a miss"
@@ -387,7 +469,8 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
                             target: SymexTarget, settings: SymexSettings,
                             status: SymexFindingStatus,
                             soundness: Soundness,
-                            errors: var seq[string]) =
+                            errors: var seq[string],
+                            gaps: seq[FindingGap] = @[]) =
   ## Phase 13 cycle 3. Persist a non-SAT verdict (sfUnsat /
   ## sfUnknown) under the content-addressed key with the
   ## appropriate suffix. The stored value is the sentinel empty
@@ -395,6 +478,10 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## slot to a single entry so the positional load invariant
   ## `result[0] == @[]` cannot break. RFC-0005 S11: the sentinel
   ## carries `soundness` in its metadata, and a load serves it back.
+  ## RFC-0005 S8av: it also carries `gaps` (the run's per-cause
+  ## view, `@[]` by default for callers that have none to offer),
+  ## so a verdict cache hit can report the same `gaps()` a cold run
+  ## would (see `gapsMeta`/`storedGaps`).
   ##
   ## No-op for `sfSat` (use `saveSymexWitnessImpl`) and for
   ## `sfNotApplicable` (verdict is local context, not a Z3 outcome
@@ -415,14 +502,23 @@ proc saveSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
       # Phase 15 E2a. An `sfRaised` finding carries a per-type id and is
       # persisted by `saveSymexRaisedImpl` (multi-finding protocol), not by
       # this single-sentinel verdict path. No-op here.
+  # RFC-0005 S8bu: an `sxUnknown` some solve of whose run the wall clock
+  # cut off (`queryTimeoutMs`) is the machine's, not only the program's:
+  # another machine may decide it. Not cached.
+  # RFC-0005 S8ca: likewise one a call declined for want of native stack
+  # (`symexNativeStackCut`): a thread with a larger stack goes deeper.
+  if status == sfUnknown and (symexQueryTimedOut() or symexNativeStackCut()):
+    return
   if not metaReady(db, "saveSymexVerdictImpl", errors): return
   let key = symexCacheKey(prog, target, settings,
     z3Version        = z3FullVersion(),
     nimVersion       = NimVersion,
     walkerVersion    = symexWalkerVersion,
     renderingVersion = renderAsChoicesVersion) & suffix
+  var meta = soundnessMeta(soundness)
+  for k, v in gapsMeta(gaps): meta[k] = v
   try:
-    db.save(key, @[], soundnessMeta(soundness), verdictCacheMaxEntries)
+    db.save(key, @[], meta, verdictCacheMaxEntries)
   except CatchableError as e:
     errors.add "saveSymexVerdictImpl: " & $e.name & ": " & e.msg
 
@@ -438,10 +534,15 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## verdict wins regardless of save order.
   ##
   ## Returns the status (`sfUnsat` / `sfUnknown`) with its stored
-  ## `Soundness` on hit (RFC-0005 S11); `none` on full miss. A
-  ## sentinel without soundness metadata is a miss. Never exposes the raw `seq[seq[ChoiceNode]]`
-  ## to callers — the sentinel must not leak into any code path
-  ## that might pass it to `db.removeMany`.
+  ## `Soundness` and (RFC-0005 S8av) `gaps` on hit; `none` on full
+  ## miss. A sentinel without soundness metadata is a miss (S11) —
+  ## soundness is load-bearing. A sentinel WITH soundness but
+  ## without gaps metadata (pre-S8av, or a third-party writer) is
+  ## still a HIT, served with `gaps: @[]` (`storedGaps` degrades
+  ## rather than misses — see its own doc comment). Never exposes
+  ## the raw `seq[seq[ChoiceNode]]` to callers — the sentinel must
+  ## not leak into any code path that might pass it to
+  ## `db.removeMany`.
   ##
   ## Load errors are appended to `errors` and the call degrades
   ## to a miss so the analysis can re-derive cold.
@@ -458,7 +559,8 @@ proc loadSymexVerdictImpl*(db: ExampleDatabase, prog: SymexProgram,
       if entries.len == 1 and entries[0].choices.len == 0:
         let s = storedSoundness(entries[0].meta)
         if s.isSome:
-          return some((status: verdict, soundness: s.get))
+          return some((status: verdict, soundness: s.get,
+                       gaps: storedGaps(entries[0].meta)))
         errors.add "loadSymexVerdictImpl: a sentinel without soundness " &
           "metadata (pre-RFC-0005-S11 format) is treated as a miss"
     except CatchableError as e:
@@ -477,7 +579,8 @@ const cacheKeyRaisedIndex = ":raised"
 proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                           target: SymexTarget, settings: SymexSettings,
                           found: seq[RawResult],
-                          errors: var seq[string]) =
+                          errors: var seq[string],
+                          gaps: seq[seq[FindingGap]] = @[]) =
   ## Phase 15 E2a. Persist every `sxRaised` finding in `found` under the
   ## content-addressed key. STRUCTURAL multi-finding protocol: each distinct
   ## raised type id is written
@@ -488,6 +591,12 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   ## A SUT with two distinct raise paths (e.g. ValueError, IOError) round-trips
   ## both findings through save/load. No witness is stored in E2a (the structural
   ## walker emits no witness); E2b populates witnesses.
+  ##
+  ## RFC-0005 S8az: `gaps[i]` is `found[i]`'s per-cause view (default `@[]`
+  ## for a caller that has none to offer, e.g. the hand-built multi-finding
+  ## tests that construct `found` directly) — paired by INDEX into `found`,
+  ## the same way `RawResult.soundness` already is, and persisted onto the
+  ## same per-type sentinel the soundness rides, via `gapsMeta`/`storedGaps`.
   ##
   ## DB save errors are appended to `errors` and the call returns normally — the
   ## cache is best-effort (symmetric with `saveSymexVerdictImpl`).
@@ -501,17 +610,21 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
   # type collapse to a single DB slot — the per-type key is the unit of record).
   var typeIds: seq[string] = @[]
   var sounds: seq[Soundness] = @[]   ## RFC-0005 S11: the first finding's, per type
-  for raw in found:
+  var gapsByType: seq[seq[FindingGap]] = @[]   ## RFC-0005 S8az: ditto
+  for i, raw in found:
     if raw.status != sxRaised: continue
     if raw.raisedTypeId notin typeIds:
       typeIds.add raw.raisedTypeId
       sounds.add raw.soundness
+      gapsByType.add (if i < gaps.len: gaps[i] else: @[])
   if typeIds.len == 0: return
   try:
     for i, tid in typeIds:
-      # (a) per-type sentinel slot, carrying the finding's soundness.
-      db.save(baseKey & cacheKeyRaised(tid), @[], soundnessMeta(sounds[i]),
-              verdictCacheMaxEntries)
+      # (a) per-type sentinel slot, carrying the finding's soundness and
+      # (RFC-0005 S8az) its gaps.
+      var meta = soundnessMeta(sounds[i])
+      for k, v in gapsMeta(gapsByType[i]): meta[k] = v
+      db.save(baseKey & cacheKeyRaised(tid), @[], meta, verdictCacheMaxEntries)
       # (b) index entry: the type id encoded as its raw bytes.
       db.save(baseKey & cacheKeyRaisedIndex,
               @[bytesChoice(cast[seq[byte]](tid), 0, tid.len)],
@@ -521,15 +634,20 @@ proc saveSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
 
 proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
                           target: SymexTarget, settings: SymexSettings,
-                          errors: var seq[string]): seq[RawResult] =
-  ## Phase 15 E2a. Reconstruct the full `seq[RawResult]` of `sxRaised` findings
-  ## from the DB without re-invoking Z3. Reads the index slot
-  ## (`cacheKeyRaisedIndex`) to enumerate the persisted type ids and rebuilds one
-  ## `RawResult{status: sxRaised, raisedTypeId, soundness}` per entry. The
-  ## index is the enumeration source; RFC-0005 S11: the per-type sentinel
-  ## (`cacheKeyRaised(typeId)`) carries the finding's `Soundness`, and a type
-  ## whose sentinel is missing or has no soundness metadata is a miss.
-  ## Returns `@[]` on a full miss.
+                          errors: var seq[string]): seq[CachedRaised] =
+  ## Phase 15 E2a / RFC-0005 S8az. Reconstruct the full set of `sxRaised`
+  ## findings from the DB without re-invoking Z3, each paired with its
+  ## stored `gaps()` view. Reads the index slot (`cacheKeyRaisedIndex`) to
+  ## enumerate the persisted type ids and rebuilds one
+  ## `(raw: RawResult{status: sxRaised, raisedTypeId, soundness}, gaps)`
+  ## per entry. The index is the enumeration source; RFC-0005 S11: the
+  ## per-type sentinel (`cacheKeyRaised(typeId)`) carries the finding's
+  ## `Soundness`, and a type whose sentinel is missing or has no soundness
+  ## metadata is a miss. RFC-0005 S8az: the SAME sentinel also carries
+  ## `gaps` metadata (`gapsMeta`/`storedGaps`); missing/pre-S8az gaps
+  ## metadata degrades to `@[]` rather than a miss — gaps stays
+  ## best-effort on top of the load-bearing soundness. Returns `@[]` on a
+  ## full miss.
   ##
   ## Load errors are appended to `errors` and the call degrades to a miss
   ## (symmetric with `loadSymexVerdictImpl`). Best-effort.
@@ -550,8 +668,10 @@ proc loadSymexRaisedImpl*(db: ExampleDatabase, prog: SymexProgram,
             storedSoundness(sentinel[0].meta)
           else: none(Soundness)
         if s.isSome:
-          result.add RawResult(status: sxRaised, raisedTypeId: tid,
-                               soundness: s.get)
+          let g =
+            if sentinel.len == 1: storedGaps(sentinel[0].meta) else: @[]
+          result.add (raw: RawResult(status: sxRaised, raisedTypeId: tid,
+                                     soundness: s.get), gaps: g)
         else:
           errors.add "loadSymexRaisedImpl: raised(" & tid & ") has no " &
             "soundness-carrying sentinel (pre-RFC-0005-S11 format); a miss"
@@ -798,10 +918,13 @@ proc stdName(name: string): NimNode =
   of "readSeqUInt64": bindSym"readSeqUInt64"
   of "readSeqFloat64": bindSym"readSeqFloat64"
   of "readSeqFloat32": bindSym"readSeqFloat32"
+  of "readSeqBool": bindSym"readSeqBool"          # RFC-0005 S8ar
+  of "readSeqString": bindSym"readSeqString"      # RFC-0005 S8ar
   of "readTableStrInt": bindSym"readTableStrInt"
   of "readSetInt": bindSym"readSetInt"
-  of "readTableStrIntAs": bindSym"readTableStrIntAs"   # RFC-0005 S8z
+  of "readTableAs": bindSym"readTableAs"   # RFC-0005 S8ar
   of "readSetIntAs": bindSym"readSetIntAs"             # RFC-0005 S8z
+  of "readSeqAs": bindSym"readSeqAs"                   # RFC-0005 S8bc
   of "set": bindSym"set"                               # RFC-0005 S8bq
   of "readBitSetAs": bindSym"readBitSetAs"             # RFC-0005 S8bq
   of "range": bindSym"range"                           # RFC-0005 S8bv
@@ -821,7 +944,9 @@ proc userTypeName(ty: IRType, spelling: string): NimNode =
   ## from something other than a symbol), which is all the emitter wrote
   ## before.
   let sym = witnessTypeSym(ty)
-  if sym != nil: copyNimNode(sym) else: ident(spelling)
+  if sym == nil: ident(spelling)
+  elif sym.kind == nnkSym: copyNimNode(sym)
+  else: copyNimTree(sym)   ## RFC-0005 S8bn: a generic instance `G[int]`
 
 proc defaultValueOf(tyNode: NimNode): NimNode =
   ## RFC-0005 S8e. The default value of the type `tyNode` names, as
@@ -889,9 +1014,11 @@ proc resolvesByRef(ty: IRType): bool =
   let pointee = refPointeeOf(ty)
   if isRecursionPlaceholder(pointee) and witnessTypeSym(pointee) == nil:
     return false
+  # RFC-0005 S8bn: a `ptr string` too (S8bh retargets one like a scalar);
+  # `alloc0` holds an empty string.
   ty.kind == itRef or
     pointee.kind in {itTuple, itVariant, itMultiVariant, itInt, itBool,
-                     itFloat32, itFloat64}
+                     itFloat32, itFloat64, itString}
 
 proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   ## RFC-0005 S8h. The Nim type of the `ref`/`ptr` position `ty`. A named ref
@@ -905,6 +1032,13 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   if isRecursionPlaceholder(pointee):
     let sym = witnessTypeSym(pointee)
     if sym == nil: return wrapped(ident(pointee.objectName))
+    if sym.kind == nnkBracketExpr:
+      # RFC-0005 S8bn: a generic instance; its head's declaration tells.
+      let gi = sym[0].getImpl
+      if gi.kind == nnkTypeDef and gi.len >= 3 and
+         gi[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimTree(sym)
+      return wrapped(copyNimTree(sym))
     let impl = sym.getImpl
     if impl.kind == nnkTypeDef and impl.len >= 3 and
        impl[2].kind in {nnkRefTy, nnkPtrTy}:
@@ -916,14 +1050,45 @@ proc refWitnessTypeNode(ty: IRType; path: string; witId: NimNode): NimNode =
   # tells (a `ref VObj` alias's pointee symbol is the value object `VObj`).
   if pointee.kind in {itVariant, itMultiVariant}:
     let sym = witnessTypeSym(pointee)
+    if sym != nil and sym.kind == nnkBracketExpr:
+      # RFC-0005 S8bw (item 3): a generic case object instance; its head's
+      # declaration tells, as for a generic placeholder above.
+      let gi = sym[0].getImpl
+      if gi.kind == nnkTypeDef and gi.len >= 3 and
+         gi[2].kind in {nnkRefTy, nnkPtrTy}:
+        return copyNimTree(sym)
+      return wrapped(copyNimTree(sym))
     if sym != nil:
       let impl = sym.getImpl
       if impl.kind == nnkTypeDef and impl.len >= 3 and
          impl[2].kind in {nnkRefTy, nnkPtrTy}:
         return copyNimNode(sym)
-  let (innerTy, _) = emitTyAndReader(pointee, path, witId)
+  # RFC-0005 S8ar: a named object or case object is spelled by its name
+  # alone. `resolveRef` fills its cell generically over the Nim type
+  # (`readCellField`), so its fields need no reader here; building one
+  # reached `emitTyAndReader`'s unrenderable-container arms, which is why
+  # `isRenderableWitnessTy` demoted a param whose pointee held one.
+  let innerTy =
+    if pointee.kind == itTuple and pointee.objectName.len > 0:
+      userTypeName(pointee, pointee.objectName)
+    elif pointee.kind == itVariant:
+      userTypeName(pointee, pointee.vObjectName)
+    elif pointee.kind == itMultiVariant:
+      userTypeName(pointee, pointee.mvObjectName)
+    else:
+      emitTyAndReader(pointee, path, witId)[0]
   if pointee.kind == itTuple and pointee.nameIsRefAlias: innerTy
   else: wrapped(innerTy)
+
+proc unrenderedReader(msg: string): NimNode =
+  ## RFC-0005 S8bx (item 2). The reader of a container no witness reader
+  ## reads: CR-2c's invariant guard, which fails the compile with `msg` when
+  ## it is EMITTED -- a parameter whose witness reads the container (the
+  ## predicate and the reader drifted). A caller that needs the container's
+  ## TYPE only (a placeholder seq's element) discards it, and compiles.
+  let m = newLit(msg)
+  quote do:
+    {.error: `m`.}
 
 proc emitTyAndReaderShared(ty: IRType, path: string,
                            witId: NimNode): (NimNode, NimNode) =
@@ -992,6 +1157,15 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       # `sxUnknown`). This placeholder therefore only needs to TYPECHECK,
       # never to be evaluated. Emit an `int` placeholder + a compile-time
       # `{.warning.}`, mirroring the `__closure` precedent above.
+      # RFC-0005 S8ar: a recursive VALUE object met again inside its own
+      # fields (`type O = object; kids: seq[O]`) declines as `__unsupported:`
+      # but is keyed on its symbol: it only ever sits as the element type of
+      # a scoped-decline field placeholder (an empty `seq[O]`), whose reader
+      # needs the type's spelling and never its value.
+      let recSym = witnessTypeSym(ty)
+      if recSym != nil:
+        let tyNode = copyNimNode(recSym)
+        return (tyNode, defaultValueOf(tyNode))
       let placeholder = quote do:
         block:
           {.warning: "symex: an unsupported parameter/witness type degrades " &
@@ -1117,7 +1291,10 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
   of itString:
     (stdName("string"), newCall(stdName("readString"), witId, newLit(path)))
   of itSeq:
-    if isUnsupportedFieldPlaceholder(ty):
+    # RFC-0005 S8bx (item 2): one classifier, shared with
+    # `isRenderableWitnessTy`, picks the reader (`seqWitnessReader`).
+    case seqWitnessReader(ty)
+    of swrPlaceholder:
       # Round-6 Bug #2 (scoped decline, ADR/RFC fork-resolution
       # 2026-08-15): a declared field whose element kind is unbacked (e.g.
       # `seq[(string,string)]`) — `runtime.nim`'s `allocateSym` never
@@ -1134,12 +1311,57 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
       let seqTy = newTree(nnkBracketExpr, stdName("seq"), elemTyNode)
       (seqTy, newCall(newTree(nnkBracketExpr, stdName("newSeq"), elemTyNode), newLit(0)))
-    # Phase 5 cycle 1: only seq[int] tested; specialised reader.
-    elif ty.seqElemTy.kind == itInt and ty.seqElemTy.signed and
-       ty.seqElemTy.width == 64:
+    of swrDistinct:
+      # RFC-0005 S8bd. A `seq[D]`, `D` a chain of `distinct` over an int or
+      # float (`seqWitnessReader`): the cells hold the base
+      # (`seqCellTy`, S8ba), so they are read as the base seq, and each
+      # element is converted back through the chain, innermost first
+      # (`Km(Meters(int(x)))`). Every conversion keeps the value.
+      let cell = seqCellTy(ty.seqElemTy)
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      let (_, baseReader) = emitTyAndReader(tSeq(cell), path, witId)
+      let (cellTyNode, _) = emitTyAndReader(cell, path & ".0", witId)
+      let raw = genSym(nskLet, "rawSeq")
+      let res = genSym(nskVar, "distinctSeq")
+      let k = genSym(nskForVar, "k")
+      proc conv(t: IRType; x: NimNode): NimNode =
+        if t.kind == itDistinct:
+          newCall(userTypeName(t, t.distinctName), conv(t.distinctBase, x))
+        else:
+          newCall(cellTyNode, x)
+      let elemConv = conv(ty.seqElemTy, newTree(nnkBracketExpr, raw, k))
+      # System's `len` and `..<`, bound here (RFC-0005 S8e: the caller's
+      # scope may shadow either).
+      let lenCall = newCall(bindSym"len", raw)
+      let upTo = bindSym"..<"
+      let newSeqCall = newCall(newTree(nnkBracketExpr, stdName("newSeq"),
+                                       elemTyNode), copyNimTree(lenCall))
+      let reader = quote do:
+        block:
+          let `raw` = `baseReader`
+          var `res` = `newSeqCall`
+          for `k` in `upTo`(0, `lenCall`):
+            `res`[`k`] = `elemConv`
+          `res`
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode), reader)
+    of swrInt64:
+      # Phase 5 cycle 1: only seq[int] tested; specialised reader.
       (newTree(nnkBracketExpr, stdName("seq"), stdName("int")),
        newCall(stdName("readSeqInt"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itInt:
+    of swrScalarAs:
+      # RFC-0005 S8bc: a `char` or enum element. The fixed-width arm below
+      # keys on width and signedness only, so `seq[char]` and `seq[Col]`
+      # were spelled `seq[uint8]`: a top-level witness did not replay at
+      # the parameter's type, and an object field of either type failed
+      # the compile (`seq[uint8]` assigned to a `seq[char]` slot). The
+      # element type is rendered as a scalar of it is (`char`, the enum),
+      # and read through `readSeqAs[T]`.
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
+                       copyNimTree(elemTyNode)),
+               witId, newLit(path)))
+    of swrFixedInt:
       # RFC-chapulin-hardening M1: fixed-width-int seq elements
       # (`byte`/`uint8..uint64`, `int8..int32` — `int64` is the arm above).
       # `extractSeqElements`/`allocateSeqDataRaw`/`seqElemAt` (runtime.nim)
@@ -1165,13 +1387,35 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
           else:  ("uint64", "readSeqUInt64")
       (newTree(nnkBracketExpr, stdName("seq"), stdName(elemTyName)),
        newCall(stdName(readerName), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itFloat64:   ## Phase 15 F9b
+    of swrBool:   ## RFC-0005 S8ar
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("bool")),
+       newCall(stdName("readSeqBool"), witId, newLit(path)))
+    of swrString:   ## RFC-0005 S8ar
+      (newTree(nnkBracketExpr, stdName("seq"), stdName("string")),
+       newCall(stdName("readSeqString"), witId, newLit(path)))
+    of swrFloat64:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float")),
        newCall(stdName("readSeqFloat64"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itFloat32:   ## Phase 15 F9b
+    of swrFloat32:   ## Phase 15 F9b
       (newTree(nnkBracketExpr, stdName("seq"), stdName("float32")),
        newCall(stdName("readSeqFloat32"), witId, newLit(path)))
-    elif ty.seqElemTy.kind == itRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
+    of swrTree:
+      # RFC-0005 S8bc (item 3): a seq of a by-value tuple, object, array or
+      # case object, held leaf-split. Each element is written in the heap's
+      # cell layout (`extractTreeValue`) and read as a cell field is
+      # (`readSeqAs` -> `readCellField`); only the element's TYPE comes from
+      # the recursion.
+      # RFC-0005 S8bl (item 4): an element with a ref part reads through
+      # the witness tuple's `RefWitness`, whose positions the element's
+      # refs are (`collectTreeRefPositions`).
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      let src = if treeHasRefPart(ty.seqElemTy): refWitnessCtx(witId)
+                else: witId
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       newCall(newTree(nnkBracketExpr, stdName("readSeqAs"),
+                       copyNimTree(elemTyNode)),
+               src, newLit(path)))
+    of swrRef:   ## Phase 15 R3 (ADR-0010): seq[ref T]
       # RFC-0005 S8f/S8h: element `i` is the position `path[i]` -- nil, the
       # same object as any other position holding its address (an earlier
       # element, a param), or its own cell. (R3 rendered each element a
@@ -1182,29 +1426,24 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
       let reader = emitRefElemsReader(elemTy, path, witId, lenCall,
         newCall(nnkBracketExpr.newTree(stdName("newSeq"), elemTy), lenCall))
       (newTree(nnkBracketExpr, stdName("seq"), elemTy), reader)
-    else:
-      # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality). This
-      # `else` used to `error()` at macro-expansion time, aborting
-      # compilation of the whole test file — a THIRD macro-`error()` site
-      # class, distinct from CR-2a/CR-2b. It is now unreachable for ANY SUT
-      # PARAMETER witness type, top-level OR nested: `parseProc*`'s
-      # parameter-classification loop (`dsl_parser.nim`), via
-      # `demoteUnrenderableWitnessTy`, runs each parameter through the
-      # RECURSIVE `isRenderableWitnessTy` predicate (`smt/types.nim`), which
-      # mirrors EXACTLY this reader's type-tree walk (tuple/object fields,
-      # array elems, variant arms, distinct bases, ref pointees) reusing the
-      # `isRenderableSeqElemTy` leaf check. Any parameter whose witness tree
-      # contains a non-renderable seq element — at any depth — is routed to
-      # an `itUninterp("__unsupported_witness:" & s)` placeholder BEFORE this
-      # `itSeq` is ever built, so the whole run degrades to a classified
-      # `sxUnknown` at parameter-allocation time instead. Retained as a
-      # defensive internal-invariant guard (should never fire) in case the
-      # predicate and this reader ever drift apart.
-      error("symex Phase 5: seq witness reader for " & $ty &
-            " not yet implemented")
+    of swrNone:
+      # RFC-chapulin-hardening CR-2c (Cluster 2 — Crash-totality): no
+      # parameter whose witness READS this seq reaches here --
+      # `demoteUnrenderableWitnessTy` (`dsl_parser.nim`) routes any parameter
+      # `isRenderableWitnessTy` rejects to an `__unsupported_witness:`
+      # placeholder, and that predicate judges a seq on this same
+      # classifier. RFC-0005 S8bx (item 2): a seq whose TYPE alone is
+      # needed does reach here -- the element of a placeholder seq of seqs,
+      # whose reader is discarded -- so the type is rendered, and the guard
+      # rides the reader: it fails the compile only where it is emitted
+      # (was a macro-time `error()`, which failed every such type).
+      let (elemTyNode, _) = emitTyAndReader(ty.seqElemTy, path & ".0", witId)
+      (newTree(nnkBracketExpr, stdName("seq"), elemTyNode),
+       unrenderedReader("seq witness reader for " & $ty &
+                        " not yet implemented"))
   of itTable:
     # Phase 5 cycle 5: Table[string, int]. RFC-0005 S8z: and every other
-    # renderable value type, read through `readTableStrIntAs[T]`.
+    # renderable value type, read through `readTableAs[K, V]` (S8ar).
     if ty.tabKeyTy.kind == itString and
        ty.tabValTy.kind == itInt and ty.tabValTy.signed and
        ty.tabValTy.width == 64 and ty.tabValTy.enumName.len == 0:
@@ -1212,21 +1451,26 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
         stdName("Table"), stdName("string"), stdName("int"))
       (tabTy, newCall(stdName("readTableStrInt"), witId, newLit(path)))
     elif isRenderableTableTy(ty.tabKeyTy, ty.tabValTy):
+      # RFC-0005 S8ar: every backed key and value type, `readTableAs[K, V]`
+      # (was `readTableStrIntAs[V]`: a string key and an integer value).
+      let (keyTyNode, _) = emitTyAndReader(ty.tabKeyTy, path, witId)
       let (valTyNode, _) = emitTyAndReader(ty.tabValTy, path, witId)
       let tabTy = newTree(nnkBracketExpr,
-        stdName("Table"), stdName("string"), valTyNode)
-      (tabTy, newCall(newTree(nnkBracketExpr, stdName("readTableStrIntAs"),
-                              copyNimTree(valTyNode)),
+        stdName("Table"), keyTyNode, valTyNode)
+      (tabTy, newCall(newTree(nnkBracketExpr, stdName("readTableAs"),
+                              copyNimTree(keyTyNode), copyNimTree(valTyNode)),
                       witId, newLit(path)))
     else:
-      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
-      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
-      # `isRenderableWitnessTy` predicate applies `isRenderableTableTy` at
-      # every Table leaf and routes any non-`Table[string, int]` parameter
-      # shape to the `__unsupported_witness:` placeholder before this
-      # `itTable` is built.
-      error("symex Phase 5: only Table[string, int] supported (got " &
-            $ty & ")")
+      # CR-2c: no parameter whose witness READS this Table reaches here --
+      # see the `itSeq` arm's `swrNone`. `isRenderableWitnessTy` applies
+      # `isRenderableTableTy` at every Table leaf. RFC-0005 S8bx (item 2):
+      # the type alone is rendered (a field of a placeholder seq's element),
+      # and the guard rides the reader.
+      let (keyTyNode, _) = emitTyAndReader(ty.tabKeyTy, path, witId)
+      let (valTyNode, _) = emitTyAndReader(ty.tabValTy, path, witId)
+      (newTree(nnkBracketExpr, stdName("Table"), keyTyNode, valTyNode),
+       unrenderedReader("symex Phase 5: only Table[string, int] supported " &
+                        "(got " & $ty & ")"))
   of itSet:
     if ty.setElemTy.kind == itInt and ty.setElemTy.signed and
        ty.setElemTy.width == 64 and ty.setElemTy.enumName.len == 0:
@@ -1239,13 +1483,13 @@ proc emitTyAndReaderShared(ty: IRType, path: string,
                               copyNimTree(elemTyNode)),
                       witId, newLit(path)))
     else:
-      # CR-2c: unreachable for any SUT parameter (top-level OR nested) — see
-      # the `itSeq` else-arm comment above. `parseProc*`'s recursive
-      # `isRenderableWitnessTy` predicate applies `isRenderableSetElemTy` at
-      # every HashSet leaf and routes any non-`HashSet[int]` parameter shape
-      # to the `__unsupported_witness:` placeholder before this `itSet` is
-      # built.
-      error("symex Phase 5: only HashSet[int] supported")
+      # CR-2c: no parameter whose witness READS this HashSet reaches here --
+      # see the `itSeq` arm's `swrNone`. `isRenderableWitnessTy` applies
+      # `isRenderableSetElemTy` at every HashSet leaf. RFC-0005 S8bx (item
+      # 2): the type alone is rendered, and the guard rides the reader.
+      let (elemTyNode, _) = emitTyAndReader(ty.setElemTy, path, witId)
+      (newTree(nnkBracketExpr, stdName("HashSet"), elemTyNode),
+       unrenderedReader("symex Phase 5: only HashSet[int] supported"))
   of itBitSet:
     # RFC-0005 S8bq: a builtin `set[T]`, from the members the runtime
     # extracted (`bitSetModelMembers`); `T`'s own reader names the type.
@@ -1564,6 +1808,23 @@ proc emitTyAndReader*(ty: IRType, path: string, witId: NimNode): (NimNode, NimNo
   let (t, r) = emitTyAndReaderShared(ty, path, witId)
   (copyNimTree(t), copyNimTree(r))
 
+proc irTypeHoldsPtr(t: IRType; depth = 0): bool =
+  ## RFC-0005 S8bn (item 1). A value of type `t` holds a `ptr` somewhere
+  ## (conservative past a depth bound).
+  if t == nil: return false
+  if depth > 8: return true
+  case t.kind
+  of itPtr: true
+  of itRef: irTypeHoldsPtr(t.refPointeeTy, depth + 1)
+  of itTuple:
+    for f in t.fields:
+      if irTypeHoldsPtr(f, depth + 1): return true
+    false
+  of itArray: irTypeHoldsPtr(t.elemTy, depth + 1)
+  of itSeq: irTypeHoldsPtr(t.seqElemTy, depth + 1)
+  of itDistinct: irTypeHoldsPtr(t.distinctBase, depth + 1)
+  else: false
+
 proc emitWitnessTuple(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) =
   ## The witness tuple of `params` over the `RawWitness` `witId`: (its type,
   ## its value). RFC-0005 S8h: every `ref`/`ptr` position in it resolves
@@ -1575,17 +1836,39 @@ proc emitWitnessTuple(params: seq[IRParam]; witId: NimNode): (NimNode, NimNode) 
   witnessRefCtxUsed = false
   var tupleTy = newTree(nnkTupleConstr)
   var tup = newTree(nnkTupleConstr)
+  var vals: seq[NimNode]
   for p in params:
     let (pTy, pVal) = emitTyAndReader(p.ty, p.name, witId)
     tupleTy.add pTy
     tup.add pVal
+    vals.add pVal
   let used = witnessRefCtxUsed
   (witnessRefCtx, witnessRefCtxUsed) = (savedCtx, savedUsed)
   if not used:
     return (tupleTy, tup)
   let ctxInit = newCall(stdName("newRefWitness"), witId)
-  (tupleTy, nnkBlockExpr.newTree(newEmptyNode(),
-     newStmtList(newLetStmt(ctxId, ctxInit), tup)))
+  # RFC-0005 S8bn (item 1). Every position is built before any `ptr` that
+  # may address it: a parameter holding no pointer first, then one holding
+  # a pointer inside it, then a `ptr` parameter, each group in parameter
+  # order. A pointer aimed at a field (`"&<cell>.<field>"`) then finds its
+  # object built whichever parameter comes first; in parameter order,
+  # `(pi: ptr int; q: Q)` built `pi` first and left it its own cell, so the
+  # replay refuted a sound `sxSat`. The tuple keeps parameter order.
+  var stmts = newStmtList(newLetStmt(ctxId, ctxInit))
+  var ids = newSeq[NimNode](params.len)
+  for rank in 0 .. 2:
+    for i, p in params:
+      let r = if p.ty != nil and p.ty.kind == itPtr: 2
+              elif irTypeHoldsPtr(p.ty): 1
+              else: 0
+      if r != rank: continue
+      ids[i] = genSym(nskLet, "witPos")
+      stmts.add newTree(nnkLetSection,
+        newIdentDefs(ids[i], copyNimTree(tupleTy[i]), vals[i]))
+  var ordered = newTree(nnkTupleConstr)
+  for id in ids: ordered.add id
+  stmts.add ordered
+  (tupleTy, nnkBlockExpr.newTree(newEmptyNode(), stmts))
 
 # ---- Body markers -----------------------------------------------------------
 
@@ -1688,13 +1971,80 @@ template symexTransparent*() {.pragma.}
 # the caller's process -- and a `scSpurious` path is tainted precisely because
 # it ran through an unmodelled (often effectful: `echo`/`writeFile`, #137) call.
 #
-# NON-TERMINATION (§4.2). There is deliberately no watchdog: an in-process one
-# is not safely buildable under §1.5's no-nested-try constraint, and Invariant
-# 3 is instead preserved by the ELIGIBILITY GATE -- a `dcFabricated`
-# (k-unroll survivor) witness is by §0.3 an input on which the real program
-# may still be looping, and the gate declines it without running it. What
-# remains is the ordinary risk any PBT library takes calling a user proc,
-# which nelli already takes in `forAll`/`fuzz`.
+# NON-TERMINATION (§4.2). Invariant 3 is preserved first by the ELIGIBILITY
+# GATE -- a `dcFabricated` (k-unroll survivor) witness is by §0.3 an input on
+# which the real program may still be looping, and the gate declines it
+# without running it. RFC-0005 S8be: an eligible witness may still drive a
+# routine the model never walked (a foreign or opaque body) into a loop, and
+# the replay then never returned. Each replay now runs on a thread of its own
+# and is abandoned past `SymexSettings.replayTimeoutMs` (`roTimedOut`,
+# `runReplayBounded`). Abandoned, not stopped: no thread can be stopped
+# safely in-process, so it keeps running (and keeps whatever it holds) until
+# it ends or the process does.
+
+when compileOption("threads"):
+  import std/[typedthreads, atomics, monotimes, times, os]
+
+  type ReplayJob = object
+    ## RFC-0005 S8be. One bounded replay, in shared memory: the body and its
+    ## completion flag. Leaked, with its `Thread`, when the replay is
+    ## abandoned -- the thread still reads both.
+    body: proc () {.closure, gcsafe.}
+    done: Atomic[bool]
+
+  proc replayThreadMain(job: ptr ReplayJob) {.thread.} =
+    job.body()
+    # The body hands refs back to the calling thread (the escaped
+    # exception, in the closure's environment). ORC registers a ref whose
+    # count drops above zero as a cycle root in THIS thread's root list;
+    # the calling thread's final decrement would then unregister it from
+    # its own list (a SIGSEGV in `unregisterCycle`). A collection here
+    # empties this thread's list and clears each survivor's root index.
+    when defined(gcOrc): GC_runOrc()
+    job.done.store(true)
+
+proc runReplayBounded*(body: proc () {.closure, gcsafe.};
+                       timeoutMs: int): bool =
+  ## RFC-0005 S8be. Run one replay `body`; false when it did not end within
+  ## `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build without
+  ## threads, runs it on the calling thread with no bound (true). The
+  ## thread has Nim's thread stack (2 MiB on 64-bit), not the calling
+  ## thread's; a `{.threadvar.}` of the SUT starts at its default there.
+  when compileOption("threads"):
+    if timeoutMs <= 0:
+      body()
+      return true
+    # RFC-0005 batch 5: the other direction of `replayThreadMain`'s
+    # collection. A ref the calling thread holds may sit in ITS root list
+    # (a cyclic-capable object -- `ref object of RootObj` -- whose count
+    # dropped above zero here: a `var fb = FarmBox(f: Farm(..)); gFB = fb`
+    # left at a block's end). The replay's own final decrement of it
+    # (the SUT overwriting `gFB`) would unregister it from the replay
+    # thread's list instead (a SIGSEGV in `unregisterCycle`,
+    # `tsymex_rfc0005_s8bg_remainder` once S8bg landed on S8be). A
+    # collection here empties the calling thread's list first; the calling
+    # thread only polls until the replay ends.
+    when defined(gcOrc): GC_runOrc()
+    let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
+    job.body = body
+    let th = cast[ptr Thread[ptr ReplayJob]](
+      allocShared0(sizeof(Thread[ptr ReplayJob])))
+    createThread(th[], replayThreadMain, job)
+    let deadline = getMonoTime() + initDuration(milliseconds = timeoutMs)
+    var pause = 1
+    while not job.done.load:
+      if getMonoTime() >= deadline:
+        return false            # abandoned: `job` and `th` stay allocated
+      sleep(pause)
+      pause = min(pause * 2, 20)
+    joinThread(th[])
+    `=destroy`(job[])
+    deallocShared(job)
+    deallocShared(th)
+    true
+  else:
+    body()
+    true
 
 type ReplayOutcome* = enum
   ## RFC-0005 §4.2. The result of executing a witness against the real `fn`.
@@ -1723,6 +2073,11 @@ type ReplayOutcome* = enum
                   ## fragment, a target kind outside replay scope, or a lossy
                   ## witness that did not reach the target. The candidate
                   ## stays sxUnknown
+  roTimedOut      ## RFC-0005 S8be: the real fn ran past
+                  ## `SymexSettings.replayTimeoutMs` on this witness and the
+                  ## replay was abandoned -- it may be looping, or only slow.
+                  ## Neither confirmed nor refuted: the candidate stays
+                  ## sxUnknown, with a `feReplayTimedOut` hint
 
 func replayEligible*(pathTaint: Taint): bool =
   ## RFC-0005 §4.2 eligibility gate: replay is attempted only for a candidate
@@ -1866,18 +2221,38 @@ proc refCellFidelity(ty: IRType; noms: Table[string, IRType];
       else:
         case f.seqElemTy.kind
         of itBool, itInt, itFloat32, itFloat64: wfFaithful
+        of itString: wfFaithful   ## RFC-0005 S8ar: `renderHeapCompound`'s string arm
         of itRef, itPtr: refCellFidelity(f.seqElemTy, noms, inProgress)
         else: wfLossy
     of itTable:
-      if f.tabKeyTy.kind == itString and f.tabValTy.kind in {itInt, itBool} and
-         isBackedTableTy(f.tabKeyTy, f.tabValTy): wfFaithful
+      # RFC-0005 S8ar: every backed shape (`readCellTable` reads the real
+      # key and value types, so a `char` key or value is faithful here).
+      if isBackedTableTy(f.tabKeyTy, f.tabValTy): wfFaithful
       else: wfLossy
     of itSet:
       if isBackedSetElemTy(f.setElemTy): wfFaithful else: wfLossy
-    else: wfLossy   ## RFC-0005 S8bq: a builtin set field keeps its zero
+    # RFC-0005 S8ar: a by-value object / tuple, array and `distinct` field,
+    # held leaf-split (`heapCompoundTy`), written part by part by
+    # `renderHeapValue` and read by `readCellField`'s `fieldPairs` / array /
+    # distinct arms. A part the heap does not model makes it lossy (its
+    # read degrades); so does a by-value case object.
+    of itTuple:
+      if f.isPlaceholder or f.fields.len == 0: wfLossy
+      else:
+        var r = wfFaithful
+        for g in f.fields: r = max(r, fieldFidelity(g, inProgress))
+        r
+    of itArray:
+      if f.size == 0: wfLossy else: fieldFidelity(f.elemTy, inProgress)
+    of itDistinct:
+      var g = f.distinctBase
+      while g.kind == itDistinct: g = g.distinctBase
+      if g.kind in {itInt, itBool, itFloat32, itFloat64, itString}: wfFaithful
+      else: wfLossy
+    else: wfLossy
   case pointee.kind
   of itBool, itInt, itFloat32, itFloat64: wfFaithful
-  of itString, itSeq, itTable, itSet:   # RFC-0005 S8ap: `ref seq[int]` etc.
+  of itString, itSeq, itTable, itSet, itArray, itDistinct:   # RFC-0005 S8ap: `ref seq[int]` etc.; S8ar: + array, distinct
     fieldFidelity(pointee, inProgress)
   of itTuple:
     if pointee.objectName.len == 0: return wfLossy   ## `fieldPairs` names differ
@@ -1920,7 +2295,11 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
     else:
       case ty.seqElemTy.kind
       of itInt, itFloat32, itFloat64: wfFaithful
+      of itBool, itString: wfFaithful   ## RFC-0005 S8ar
       of itRef: wf(ty.seqElemTy)   ## RFC-0005 S8h
+      of itDistinct:   ## RFC-0005 S8bd: the base seq, converted back
+        if seqWitnessReader(ty) == swrDistinct: wfFaithful
+        else: wfUnexecutable
       else: wfUnexecutable   ## the reader's defensive `error()` arm
   of itTable:   # RFC-0005 S8z: every renderable shape
     if isRenderableTableTy(ty.tabKeyTy, ty.tabValTy): wfFaithful
@@ -1946,7 +2325,9 @@ proc witnessFidelity(ty: IRType; noms: Table[string, IRType]): WitnessFidelity =
 
 proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
                       paramTys: seq[NimNode] = @[];
-                      afterBind: NimNode = nil): NimNode =
+                      afterBind: NimNode = nil;
+                      params: seq[IRParam] = @[];
+                      globals: seq[NimNode] = @[]): NimNode =
   ## `callee(wit[0], wit[1], …)` with each argument first bound to a fresh
   ## `var` local, so `var T` parameters receive an addressable lvalue (Phase
   ## 14 A7b). Zero-cost for non-var params. Shared by `assertCoveredBy` and
@@ -1961,10 +2342,19 @@ proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
   ## as `int`, a `distinct` as its base) -- and a non-void `callee` has its
   ## result discarded. `afterBind` is spliced between the bindings and the
   ## call, so a caller can tell a conversion that raised from a `fn` that did.
+  ##
+  ## RFC-0005 S8bn (item 2): with `params` (`fn`'s IR parameters) and
+  ## `globals` (the module-level `var`s `fn` can reach), a `ptr` parameter
+  ## the witness aimed at a variable (`ptrAimsAt`) is handed that variable's
+  ## address once the arguments are bound: a `var` parameter's own local
+  ## (the one `fn` receives), or the global itself. No witness cell can be
+  ## either location.
   var preamble = newStmtList()
   var call = newCall(callee)
+  var pvars: seq[NimNode]
   for i in 0 ..< nParams:
     let pvar = genSym(nskVar, "pvar" & $i)
+    pvars.add pvar
     let elem = nnkBracketExpr.newTree(witId, newLit(i))
     let init =
       if paramTys.len == 0: elem
@@ -1975,6 +2365,33 @@ proc emitWitnessSplat(callee: NimNode; nParams: int; witId: NimNode;
     preamble.add newTree(nnkVarSection,
       newIdentDefs(pvar, newEmptyNode(), init))
     call.add pvar
+  for j in 0 ..< min(nParams, params.len):
+    if params[j].ty == nil or params[j].ty.kind != itPtr: continue
+    let pj = pvars[j]
+    for i in 0 ..< min(nParams, params.len):
+      if i == j or not params[i].isVar: continue
+      let pi = pvars[i]
+      let nm = newLit(params[i].name)
+      preamble.add quote do:
+        when typeof(addr `pi`) is typeof(`pj`):
+          if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `pi`
+        # RFC-0005 S8bn (item 4): or a part of it (`ptrAimPath`).
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`pi`), typeof(`pj`[])](`pi`, pa.path, 0)
+    for g in globals:
+      let nm = newLit(globalEnvPrefix & macros.strVal(owner(g)) & "." &
+                      macros.strVal(g))
+      preamble.add quote do:
+        when typeof(addr `g`) is typeof(`pj`):
+          if ptrAimsAt(cast[pointer](`pj`), `nm`): `pj` = addr `g`
+        when typeof(`pj`) is ptr:
+          block:
+            let pa = ptrAimPath(cast[pointer](`pj`), `nm`)
+            if pa.hit:
+              `pj` = ptrAimInto[typeof(`g`), typeof(`pj`[])](`g`, pa.path, 0)
   if afterBind != nil: preamble.add afterBind
   if paramTys.len == 0:
     return newStmtList(preamble, call)
@@ -2000,7 +2417,9 @@ proc formalParamTypes(fn: NimNode): seq[NimNode] =
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
                         extraLossy: NimNode = newLit(false);
-                        nilDeref: NimNode = newLit(false)): NimNode =
+                        nilDeref: NimNode = newLit(false);
+                        timeoutMs: NimNode = newLit(
+                          SymexSettings().replayTimeoutMs)): NimNode =
   ## RFC-0005 S2: the macro-time half of `replayWitness`, spliced by S10 into
   ## the entry macros' shared replay emitter (`emitRunSymexReplayed`). Emits
   ## an expression of type `ReplayOutcome`. `witness` is the typed witness
@@ -2017,6 +2436,8 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   ## kill the process -- declined, never executed. Order of refusal, each
   ## one WITHOUT executing `fn`: ineligible taint, unexecutable witness
   ## shape, out-of-scope target kind, a nil-dereference path.
+  ## `timeoutMs` (RFC-0005 S8be) is an `int` expression bounding the run
+  ## (`runReplayBounded`); past it the outcome is `roTimedOut`.
   var noms: Table[string, IRType]
   var seenNoms: HashSet[string]
   for p in params: collectNominals(p.ty, noms, seenNoms)
@@ -2033,8 +2454,17 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let tgtId = genSym(nskLet, "replayTarget")
   let escId = genSym(nskVar, "replayEscaped")
   let boundId = genSym(nskVar, "replayArgsBound")
+  let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
+  let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
+  let aimsId = genSym(nskLet, "replayAims")       # RFC-0005 batch 6
+  # RFC-0005 S8bn (item 2): the module-level `var`s `fn` can reach, which a
+  # `ptr` parameter's witness may be aimed at.
+  var globals: seq[NimNode]
+  for g in calleeOuterSyms(fn):
+    if isModuleGlobal(g) and g.symKind == nskVar: globals.add g
   let splat = emitWitnessSplat(fn, params.len, witId, paramTys,
-                               newAssignment(boundId, newLit(true)))
+                               newAssignment(boundId, newLit(true)),
+                               params, globals)
   let lossy = newLit(fidelity == wfLossy)
   # RFC-0005 S10. The rendered witness type is not always the parameter
   # type (a `Rune` renders as `int`, a `distinct` as its base, a table as
@@ -2066,16 +2496,27 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
         else:
           var `escId`: ref Exception = nil
           var `boundId` = false
-          # §4.2 "Capture reentrancy": a nested frame, so an enclosing user
-          # capture (`assertCoveredBy`) keeps its hits and does not see ours.
-          symexCaptureBegin()
-          try:
-            `splat`
-          except Exception as e:
-            `escId` = e
-          let hits = symexCaptureEnd()
-          if not `boundId`: roInconclusive   # a conversion raised: fn never ran
-          elif replayReached(`tgtId`, hits, `escId`): roConfirmed
+          var `hitsId`: HashSet[string]
+          # RFC-0005 batch 6: the pointers the witness aimed at a variable
+          # (S8bn), recorded on this thread, for the replay's thread.
+          let `aimsId` = ptrAimsSnapshot()
+          # RFC-0005 S8be: the run is bounded (`runReplayBounded`); it may
+          # run on a thread of its own, which owns the capture frame.
+          let `endedId` = runReplayBounded(proc () {.closure, gcsafe.} =
+            {.cast(gcsafe).}:
+              ptrAimsAdopt(`aimsId`)
+              # §4.2 "Capture reentrancy": a nested frame, so an enclosing
+              # user capture (`assertCoveredBy`) keeps its hits and does not
+              # see ours.
+              symexCaptureBegin()
+              try:
+                `splat`
+              except Exception as e:
+                `escId` = e
+              `hitsId` = symexCaptureEnd(), `timeoutMs`)
+          if not `endedId`: roTimedOut
+          elif not `boundId`: roInconclusive   # a conversion raised: fn never ran
+          elif replayReached(`tgtId`, `hitsId`, `escId`): roConfirmed
           elif `lossy` or `extraLossy` or `converted`: roInconclusive
           else: roRefuted
 
@@ -2136,10 +2577,13 @@ macro replayWitness*(fn: typed; witness: typed; target: SymexTarget;
 #     `dynlib` such as `std/re`'s PCRE, now fails the build or start-up).
 #     Not containable at runtime; `SymexSettings.replay = false` (static)
 #     emits no reference to `fn` at all -- the pre-S10 verdict.
-#   * Non-termination -- no watchdog (§1.5: not safely buildable in-process);
-#     bounded by the eligibility gate, which never runs a `dcFabricated`
-#     (k-unroll survivor) witness. What remains is the risk `forAll`/`fuzz`
-#     already take calling a user proc.
+#   * Non-termination -- bounded by the eligibility gate, which never runs a
+#     `dcFabricated` (k-unroll survivor) witness, and (RFC-0005 S8be) by
+#     `replayTimeoutMs`: a replay runs on its own thread and is abandoned
+#     past it (`roTimedOut`). The abandoned thread is not stopped -- nothing
+#     can stop it safely -- so a replay that loops forever keeps a core and
+#     its memory, and runs concurrently with the caller, until the process
+#     ends.
 #   * Defects -- caught by the replay frame and classified; under
 #     `--panics:on` nothing is replayed (`replayInScope`); a raw-`ptr`
 #     witness is never executed (`witnessFidelity`); a candidate whose path
@@ -2195,11 +2639,22 @@ proc settleCandidate(raw: RawResult; c: SatCandidate;
   ##     reaches the target; never `sxUnsat`), plus a `feReplayRefuted`
   ##     `sevHint` naming the witness's confirmed model gap (§4.2).
   ##   * `roInconclusive` -- unchanged.
+  ##   * `roTimedOut` (RFC-0005 S8be) -- stays `sxUnknown`, plus a
+  ##     `feReplayTimedOut` `sevHint`: the replay was abandoned, so the
+  ##     witness is neither confirmed nor refuted.
   ## Private (the only candidate -> verdict constructor); see the section
   ## comment.
   result = raw
   case outcome
   of roInconclusive: discard
+  of roTimedOut:
+    result.errors.add SymexErrorInfo(kind: feReplayTimedOut, severity: sevHint,
+      msg: "replay of a " & $c.status & " candidate (" &
+           (if c.status == sxRaised: "raise " & c.raisedTypeId
+            else: "target hit") &
+           ") was abandoned: the real fn ran past replayTimeoutMs on the " &
+           "solver's witness -- it may not terminate there, or is only " &
+           "slow; neither confirmed nor refuted (feReplayTimedOut)")
   of roRefuted:
     result.errors.add SymexErrorInfo(kind: feReplayRefuted, severity: sevHint,
       msg: "replay refuted a " & $c.status & " candidate (" &
@@ -2285,7 +2740,8 @@ proc emitRunSymexReplayed(fn: NimNode; params: seq[IRParam];
   let replay = emitReplayWitness(fn, params, typedId, replayTgt,
     newDotExpr(candId, ident"pathTaint"),
     newCall(bindSym"candidateLossy", candId),
-    newDotExpr(candId, ident"nilDerefOnPath"))
+    newDotExpr(candId, ident"nilDerefOnPath"),
+    newDotExpr(settings, ident"replayTimeoutMs"))   # RFC-0005 S8be
   result = quote do:
     block:
       let `rawId` = `runCall`
@@ -2382,6 +2838,34 @@ proc parseEntryImplWarned(fn: NimNode, apiName: string,
   warnIncoherentSettings(settings, apiName)
   parseEntryImpl(fn, apiName, settings.budget.maxInstantiationsPerProc)
 
+proc methodPrelude(fn: NimNode): NimNode =
+  ## RFC-0005 S8bn (item 6). nil when every method `fn` calls (transitively)
+  ## is registered (`dsl_parser.methodRegistry`); otherwise the statements
+  ## that register them, emitted into the CALLER's scope, where each name
+  ## resolves to every overload visible there. The entry macro then expands
+  ## again after them, and its parse dispatches each method call over the
+  ## overrides (`methodDispatchStmt`). A name not visible at the caller is
+  ## recorded as such, and its calls stay declined.
+  let names = unregisteredMethodNames(fn)
+  if names.len == 0: return nil
+  result = newStmtList()
+  for nm in names:
+    let id = ident(nm)
+    let reg = newCall(bindSym"symexRegisterMethods", newLit(nm), id)
+    let none = newCall(bindSym"symexRegisterNoMethods", newLit(nm))
+    result.add quote do:
+      when declared(`id`): `reg`
+      else: `none`
+
+proc targetLit(t: SymexTarget): NimNode =
+  ## RFC-0005 S8bn. A static `SymexTarget` as an expression, for an entry
+  ## macro's re-expansion (`methodPrelude`).
+  case t.kind
+  of stkLabel: newCall(bindSym"tLabel", newLit(t.label))
+  of stkRaisedExn: newCall(bindSym"tRaisedExn", newLit(t.typeFilter))
+  else: nnkObjConstr.newTree(bindSym"SymexTarget",
+                             newColonExpr(ident"kind", newLit(t.kind)))
+
 macro symexFind*(fn: typed,
                  target: static SymexTarget,
                  settings: static SymexSettings = defaultSymexSettings()
@@ -2396,6 +2880,11 @@ macro symexFind*(fn: typed,
   # (below `warnIncoherentSettings`), which warns on an incoherent
   # `settings` and THEN calls `parseEntryImpl` — a single call site both
   # entries share.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFind", fn,
+      targetLit(target), newLit(settings)))
   let parsed = parseEntryImplWarned(fn, "symexFind", settings)
 
   # Build the tuple type and witness-construction tuple. We genSym a
@@ -2416,6 +2905,7 @@ macro symexFind*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode  ## Phase 15 E4a
   let peExpr     = parsed.parseErrorsNimNode       ## Phase 15 G1c
@@ -2433,7 +2923,7 @@ macro symexFind*(fn: typed,
     block:
       let `progId` = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`,
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
                               userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
@@ -2526,10 +3016,16 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   ## sequence (`seq[ChoiceNode]`) the corpus entry replays; `bindings` says,
   ## per `fn` parameter, whether it's a direct (symbolic) draw or a
   ## concretized (opaque-combinator) value — see `ConcolicParamBinding`.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicCollect",
+      fn, trace, bindings, newLit(settings), newLit(maxDraws)))
   let parsed = parseEntryImplWarned(fn, "concolicCollect", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
@@ -2537,7 +3033,7 @@ macro concolicCollect*(fn: typed, trace, bindings: typed,
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       runConcolicCollectImpl(prog, `trace`, `bindings`, `settings`, `maxDraws`)
@@ -2559,10 +3055,17 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   ## along the concrete replay, i.e. an index into the collected
   ## `branchTrace`) to flip — a caller-supplied designator at G2; G3 wires
   ## frontier-stall selection on top of this later.
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"concolicFlip",
+      fn, trace, bindings, targetBranchIndex, newLit(settings),
+      newLit(maxDraws), newLit(maxRelaxationAttempts), newLit(z3TimeoutMs)))
   let parsed = parseEntryImplWarned(fn, "concolicFlip", settings)
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let uxhExpr    = parsed.userExnHierarchyNimNode
   let peExpr     = parsed.parseErrorsNimNode
@@ -2570,7 +3073,7 @@ macro concolicFlip*(fn: typed, trace, bindings: typed,
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`, body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`, userExnHierarchy: `uxhExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       runConcolicFlipImpl(prog, `trace`, `bindings`, `targetBranchIndex`,
@@ -2914,13 +3417,14 @@ macro symexCacheKeyForFn*(fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
       symexCacheKey(prog, `targetExpr`, `settings`,
                     z3Version        = z3FullVersion(),
                     nimVersion       = NimVersion,
@@ -2942,21 +3446,26 @@ macro saveSymexWitness*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+      var dbErrors: seq[string] = @[]
       saveSymexWitnessImpl(`db`, prog, `targetExpr`, `settings`,
                             `finding`, dbErrors, `maxEntries`)
-      # `dbErrors` is captured in this scope so the macro emission
-      # type-checks; Phase 13 cycle 7 wires the engine flow that
-      # threads these errors into Report.dbErrors. Until then the
-      # public macro form discards them — matching the pre-RFC
-      # behavior of silently swallowing rare DB failures.
+      # RFC-0005 S8av: route through the SAME thread-local sink
+      # `symexFindAllWitnesses` drains into `Report.dbErrors` (Phase 14
+      # cycle C2), so a caller of this standalone macro sees a save
+      # failure via `consumeSymexDbErrors()` instead of it being
+      # silently swallowed (was: declared `{.used.}` and discarded —
+      # S11's own note on `db.nim`'s "errors flow to Report.dbErrors"
+      # promise, left unwired since Phase 13 cycle 7).
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
 
 macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
                           target: static SymexTarget,
@@ -2972,25 +3481,34 @@ macro loadSymexWitnesses*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
-      loadSymexWitnessesImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+      var dbErrors: seq[string] = @[]
+      let witnesses = loadSymexWitnessesImpl(`db`, prog, `targetExpr`,
+                                              `settings`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
+      witnesses
 
 # ---- Verdict macro forms (Phase 13 cycle 10) -------------------------------
 #
 # Mirror `saveSymexWitness` / `loadSymexWitnesses` for non-SAT
 # verdicts. `status: SymexFindingStatus` is a runtime value, not
 # static — the suffix (`:unsat` vs `:unk`) is dispatched at
-# runtime inside `saveSymexVerdictImpl`. Error accumulation is
-# internal and discarded (the user-facing macro doesn't carry a
-# Report); callers wanting error reporting use the `*Impl` procs
-# directly with their own `errors` seq.
+# runtime inside `saveSymexVerdictImpl`. RFC-0005 S8av: error
+# accumulation routes through `recordSymexDbError`/
+# `consumeSymexDbErrors` (the same sink `symexFindAllWitnesses`
+# drains into `Report.dbErrors`), so a caller of the standalone
+# macro form sees a save/load failure there instead of it being
+# silently swallowed; callers wanting a locally-scoped `errors` seq
+# instead use the `*Impl` procs directly.
 
 macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -3007,16 +3525,20 @@ macro saveSymexVerdict*(db: ExampleDatabase, fn: typed,
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+      var dbErrors: seq[string] = @[]
       saveSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`,
                             `status`, `soundness`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
 
 macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
                         target: static SymexTarget,
@@ -3025,23 +3547,29 @@ macro loadSymexVerdict*(db: ExampleDatabase, fn: typed,
   ## Load a previously-persisted non-SAT verdict for `fn`'s
   ## content-addressed key. Checks `:unsat` then `:unk`
   ## (UNSAT-first load-order tie-break). Returns
-  ## `Option[CachedVerdict]`: the status and its stored `Soundness`
-  ## (RFC-0005 S11).
+  ## `Option[CachedVerdict]`: the status, its stored `Soundness`
+  ## (RFC-0005 S11) and `gaps` (RFC-0005 S8av).
   # RFC-parser-normalization N1: collapses getImpl -> gate -> parseProc.
   let parsed = parseEntryImpl(fn, "loadSymexVerdict",
                                settings.budget.maxInstantiationsPerProc)
   let paramsExpr = parsed.paramsNimNode
   let bodyExpr   = parsed.bodyNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let targetExpr = rebuildTargetNode(target)
   result = quote do:
     block:
       let prog = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`)
-      var dbErrors {.used.}: seq[string] = @[]
-      loadSymexVerdictImpl(`db`, prog, `targetExpr`, `settings`, dbErrors)
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`)
+      var dbErrors: seq[string] = @[]
+      let verdict = loadSymexVerdictImpl(`db`, prog, `targetExpr`,
+                                          `settings`, dbErrors)
+      # RFC-0005 S8av: see `saveSymexWitness`'s identical comment.
+      for dbErr in dbErrors:
+        recordSymexDbError(dbErr)
+      verdict
 
 # ---- Layer 1 — symexFindAllWitnesses ---------------------------------------
 #
@@ -3086,6 +3614,11 @@ macro symexFindAllWitnesses*(fn: typed,
   # `symexForAll`, which emits a call to this macro rather than routing
   # through `symexFind`/`assertCoveredBy` (its own settings never touched
   # `warnIncoherentSettings` before this).
+  # RFC-0005 S8bn (item 6): register the methods `fn` calls, then again.
+  let pre = methodPrelude(fn)
+  if pre != nil:
+    return newTree(nnkStmtListExpr, pre, newCall(bindSym"symexFindAllWitnesses",
+      fn, db, newLit(symexSettings), excludeTargets))
   let parsed = parseEntryImplWarned(fn, "symexFindAllWitnesses", symexSettings)
 
   let labels = irCollectLabels(parsed.body, parsed.procs)
@@ -3141,6 +3674,7 @@ macro symexFindAllWitnesses*(fn: typed,
   let bodyExpr   = parsed.bodyNimNode
   let paramsExpr = parsed.paramsNimNode
   let procsExpr  = parsed.procsNimNode
+  let glExpr     = parsed.globalsNimNode   ## RFC-0005 S8as
   let rtExpr     = parsed.retTyNimNode   ## RFC-0005 S8p
   let peExpr     = parsed.parseErrorsNimNode   ## Phase 15 G1c
   let avExpr     = parsed.annotationViolationsNimNode  ## RFC-0005 S8
@@ -3246,6 +3780,7 @@ macro symexFindAllWitnesses*(fn: typed,
             f.status = sfSat
             f.witnessChoices = cached[0].choices
             f.soundness = cached[0].soundness   ## RFC-0005 S11: served unchanged
+            f.gaps = cached[0].gaps             ## RFC-0005 S8az
             f.fromCache = true
           else:
             let cachedVerdict = loadSymexVerdictImpl(`db`, `progId`, `loopTarget`,
@@ -3257,13 +3792,15 @@ macro symexFindAllWitnesses*(fn: typed,
             if cachedVerdict.isSome:
               f.status = cachedVerdict.get.status
               f.soundness = cachedVerdict.get.soundness   ## RFC-0005 S11
+              f.gaps = cachedVerdict.get.gaps             ## RFC-0005 S8av
               f.fromCache = true
             elif cachedRaised.len > 0:
               # Phase 15 E2a (STRUCTURAL). A reachable raise was persisted for
               # this target; serve it from cache without Z3. (E2b carries the
               # witness; E2a has none, so only the status is reloaded here.)
               f.status = sfRaised
-              f.soundness = cachedRaised[0].soundness   ## RFC-0005 S11
+              f.soundness = cachedRaised[0].raw.soundness   ## RFC-0005 S11
+              f.gaps = cachedRaised[0].gaps                 ## RFC-0005 S8az
               f.fromCache = true
             else:
               # RFC-0005 S10: run + rule-3 replay settle; persisted below
@@ -3283,7 +3820,8 @@ macro symexFindAllWitnesses*(fn: typed,
                                       f, `dbErrorsId`)
               of sxUnsat, sxUnknown:
                 saveSymexVerdictImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
-                                      f.status, f.soundness, `dbErrorsId`)
+                                      f.status, f.soundness, `dbErrorsId`,
+                                      f.gaps)   ## RFC-0005 S8av
               of sxRaised:
                 # Phase 16 D1a. The defect fork is now unconditional;
                 # `routeRaise` populates `raisedWitness`. Carry it as
@@ -3300,7 +3838,7 @@ macro symexFindAllWitnesses*(fn: typed,
                 if raw.isDefect:
                   f.defectTypeId = raw.raisedTypeId
                 saveSymexRaisedImpl(`db`, `progId`, `loopTarget`, `symexSettings`,
-                                    @[raw], `dbErrorsId`)
+                                    @[raw], `dbErrorsId`, @[f.gaps])  ## RFC-0005 S8az
           recordSymexFinding(f)
           `findingsId`.add f
 
@@ -3308,7 +3846,7 @@ macro symexFindAllWitnesses*(fn: typed,
     block:
       let `progId` {.used.} = SymexProgram(params: `paramsExpr`,
                               body: `bodyExpr`,
-                              procs: `procsExpr`, retTy: `rtExpr`,
+                              procs: `procsExpr`, globals: `glExpr`, retTy: `rtExpr`,
                               parseErrors: `peExpr`,
                               annotationViolations: `avExpr`)
       `targetsBuild`

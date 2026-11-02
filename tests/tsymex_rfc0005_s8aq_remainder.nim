@@ -234,10 +234,22 @@ suite "S8aq (2): the dropped link -- emitted since RFC-0005 S8aw":
     checkpoint $mutant & " -> " & flaw
     check flaw.len > 0
 
-  test "end to end: decided sxUnsat (S8aw; was sxUnknown + beSolverUndef)":
+  test "end to end: decided sxUnsat (S8au split link; was sxUnknown + beSolverUndef)":
+    # The one SUT shape engineered to need exactly this link. With it
+    # declined, the full (uncapped) sequence theory at default settings
+    # did not decide it within budget: `sxUnknown`, `beSolverUndef` (S8aq).
+    # RFC-0005 S8au and S8aw both close it, through different terms; in the
+    # batch-2 stack the SUT takes S8au's. S8au lowers both `find` and
+    # `rfind` to index splits and links an rfind split to a find split of
+    # the same haystack and needle (`indexSplitLastLink`: a found index is
+    # at most the last one), stated over the splits' own Ints. S8aw emits
+    # the same link for the native `str.indexof` / `seq.last_indexof` terms
+    # that remain (a query built directly, as the stepOneC test above does);
+    # a SUT's find/rfind no longer produces those terms.
     let r = symexFind(foundExceedsLast, tLabel("s8aq_found_exceeds_last"))
     checkpoint show(r.errors)
     check r.status == sxUnsat
+    check r.errors.len == 0
 
   test "companion: a found index at or before L is reachable":
     let r = symexFind(foundAtOrBeforeLast, tLabel("s8aq_found_at_or_before_last"))

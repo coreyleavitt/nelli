@@ -55,7 +55,10 @@ import nelli/smt/canonicalize
 type
   Widget = object
     a: int
-    b: int
+    b: Table[string, ref int]
+      # RFC-0005 S8bc: a seq of a plain object is renderable since S8bc.
+      # RFC-0005 S8bl: so is a seq element holding a ref; one holding a
+      # ref inside a Table is not (`treeRefPartInContainer`).
 
   ShapeKind = enum skWidgets, skCount
 
@@ -65,7 +68,13 @@ type
   ShapeBad = object
     case kind: ShapeKind
     of skWidgets:
-      widgets: seq[Widget]
+      widgets: seq[seq[Widget]]   # RFC-0005 S8bc: a seq of seqs stays the
+                                  # unbacked scoped-decline placeholder (a
+                                  # seq of objects is backed since S8bc).
+                                  # RFC-0005 S8bx: its element TYPE renders
+                                  # even when no reader reads the element
+                                  # (S8bl's `WidgetR` worked around the
+                                  # compile crash).
     of skCount:
       count: int
 
@@ -99,12 +108,16 @@ proc sutSeqSeqInt(ws: seq[seq[int]], y: int) =
 
 # SUT 3: Table[string, string] — value type is not itInt(64, signed), hits
 # emitTyAndReader's itTable catch-all ("only Table[string, int] supported").
-proc sutTableStrStr(t: Table[string, string], y: int) =
+# RFC-0005 S8ar renders a string value, and S8at a `seq[int]` value; the
+# value is now a tuple, which no Table backs.
+proc sutTableStrStr(t: Table[string, (int, int)], y: int) =
   if y == 42:
     symexTarget("table_strstr_target")
 
-# SUT 4: Table[int, int] — key type is not itString.
-proc sutTableIntInt(t: Table[int, int], y: int) =
+# SUT 4: Table[int, int] — key type is not itString. RFC-0005 S8ar backs an
+# integer-like key, and S8at a `float` key; the key is now a tuple, which
+# no Table backs.
+proc sutTableIntInt(t: Table[(int, int), int], y: int) =
   if y == 42:
     symexTarget("table_intint_target")
 

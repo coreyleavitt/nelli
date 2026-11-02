@@ -430,14 +430,29 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## definitional over the split's own fresh constants. `globalRoots` takes
     ## the rest of the query to find them, and `loopArmInfeasible`'s arm
     ## joins it through `pathRoots`' `extra`.
+    ##
+    ## RFC-0005 S8as added `globalEntryFacts`: the type facts of a global's
+    ## entry value, a fresh `__glEntry_<name>` symbol per run (`entryValueOf`).
+    ## Each mentions only its own symbol and holds for every value of the
+    ## type, so it is definitional and prunes no real input.
+    ## RFC-0005 S8bj adds `regexRecDefConds`, after `stripDecompConds`: each
+    ## is `r == regexReplaceRec(s, ..)` for one replace occurrence's own
+    ## fresh value `r` -- definitional, admits every channel. `checkCapped`
+    ## first tries the query without them (a weaker query: its UNSAT holds).
+    ##
+    ## RFC-0005 S8bt adds `regexRecFactConds`, after `regexRecDefConds`: the
+    ## facts of those values (`regex_parser.replaceLemmas`), each over one
+    ## occurrence's own `r` and fresh Ints, true of every receiver.
     var drained: seq[string]
     for routine in ["pathRoots", "globalRoots"]:
       for t in routineBody(smtDir / "runtime.nim", routine):
         if t.startsWith("for c in ") and t.endsWith(":"):
           drained.add t["for c in ".len ..< t.len - 1]
     check drained == @["path.pc", "path.defectSurvivorPc",
-                       "currentClosureCallAxioms", "stripDecompConds",
-                       "cardConds", "indexSplitRoots(currentContext(), reach)"]
+                       "currentClosureCallAxioms", "globalEntryFacts",
+                       "stripDecompConds", "regexRecDefConds",
+                       "regexRecFactConds", "cardConds",
+                       "indexSplitRoots(currentContext(), reach)"]
     check "roots.add globalRoots(roots)" in
       routineBody(smtDir / "runtime.nim", "pathRoots")
     for caller in ["trySolve", "loopArmInfeasible"]:
@@ -454,8 +469,13 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
 
   test "the call cache admits only a clean callee path":
     var gated = false
-    for t in routineBody(smtDir / "runtime.nim", "walk"):
-      if "frame.returnedPaths[0].taint == {}" in t: gated = true
+    # RFC-0005 S8ax: the statement dispatcher is `walkStmt`; `walk` is the
+    # capture-cell sync wrapper around it. RFC-0005 batch 6: its `isCall`
+    # arm is `walkCallArm`, which `walkStmt` calls.
+    check "walkCallArm(stmt, paths, w)" in
+      routineBody(smtDir / "runtime.nim", "walkStmt").join("\n")
+    for t in routineBody(smtDir / "runtime.nim", "walkCallArm"):
+      if "cp.taint != {}" in t: gated = true  # RFC-0005 S8ax: every exit
     check gated
 
   test "the closure descent root is clean and the only fresh Path root in applyClosureGround":
@@ -483,8 +503,16 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## unresolved callee x2, raw-wrap fallback, no-walk and over-budget
     ## guards, uncertain arm, zero-default havoc, HOF filter / capturing map /
     ## mapArray / fold; RFC-0005 S9 adds the two by-reference capture sites
-    ## (applied out of frame, body writes a capture).
-    check degradeSites == 13
+    ## (applied out of frame, body writes a capture). RFC-0005 S8bh adds the
+    ## six declines of a closure call's `var`/`addr` effects (an actual the
+    ## body reaches outside its formals, as a capture or otherwise; an
+    ## escaping `addr` pointer; more than two actuals on one location; no
+    ## specialised body for an aliased pair; a var actual naming no
+    ## variable). RFC-0005 S8bs adds the decline of a capture whose address
+    ## is taken (a cell the body may also reach through the pointer);
+    ## RFC-0005 S8bu replaces it with the decline of an actual the closure
+    ## descent cannot bind to such a cell (`bindVarLocs`).
+    check degradeSites == 20
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":
     for f in runtimeFiles():

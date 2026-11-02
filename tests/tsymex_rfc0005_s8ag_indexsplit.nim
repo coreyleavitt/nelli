@@ -245,10 +245,12 @@ suite "S8ag (3): step 1c links a split's Int as its str.indexof":
     ## link (`indexof >= 0` implies `contains`) refutes it.
     let ctx = newContext()
     let s = mkStringVar(ctx, "s")
-    let colon = oneCharLiteral(fromCode(ctx, mkInt(ctx, 58)))
-    check colon.isSome
-    let ix = lowerIndexSplit(s, colon.get, mkInt(ctx, 0))
-    var roots = @[ix > mkInt(ctx, 200), not contains(s, colon.get)]
+    # RFC-0005 S8au: `splitNeedle` (was S8ag's `oneCharLiteral`) folds the
+    # char needle to its literal.
+    let colon = splitNeedle(fromCode(ctx, mkInt(ctx, 58)))
+    check Z3_is_string(ctx.raw, colon.raw)
+    let ix = lowerIndexSplit(s, colon, mkInt(ctx, 0))
+    var roots = @[ix > mkInt(ctx, 200), not contains(s, colon)]
     roots.add indexSplitRoots(ctx, roots)
     check roots.len > 2
     let tf = querySolver(ctx, roots, 1_000_000'u, seqTheory = false)
@@ -265,12 +267,17 @@ suite "S8ag (3): step 1c links a split's Int as its str.indexof":
     check indexSplitRoots(ctx, @[mkBool(ctx, true)]).len == 0
     check registeredIndexSplit(ctx, mkIntVar(ctx, "__s8ag_ix1").raw) == -1
 
-  test "a needle of two characters, or a computed one, is not split":
+  test "splitNeedle folds a literal needle and keeps a computed one":
+    ## RFC-0005 S8au replaced S8ag's "a needle of two characters, or a
+    ## computed one, is not split": every needle now splits
+    ## (`tsymex_rfc0005_s8au_remainder` (4) checks the axioms for them);
+    ## `splitNeedle` folds a char needle to the literal the literal forms
+    ## of `NotIn` need, and leaves a computed needle as it is.
     let ctx = newContext()
-    check oneCharLiteral(mkString(ctx, "ab")).isNone
-    check oneCharLiteral(mkString(ctx, "")).isNone
-    check oneCharLiteral(mkStringVar(ctx, "t")).isNone
-    check oneCharLiteral(mkString(ctx, "\xff")).isSome
+    let t = mkStringVar(ctx, "t")
+    check Z3_is_string(ctx.raw, splitNeedle(fromCode(ctx, mkInt(ctx, 255))).raw)
+    check Z3_is_string(ctx.raw, splitNeedle(mkString(ctx, "ab")).raw)
+    check not Z3_is_string(ctx.raw, splitNeedle(t).raw)
 
 proc pairLoopS8ag(s: string) =
   ## N36-1's shape (as `tsymex_rfc0005_s8y_budget_decline`'s pair loop):
@@ -323,7 +330,14 @@ suite "S8ag (5): a tainted SAT after half its budget bounds later hits":
     # gives one (Z3 5.1 at this budget).
     if st.budgetOut == 0:
       check st.slowSat >= 1
-    check st.slowSat <= 1
+    # RFC-0005 S8bc: until S8bc `pairs.add((key, val))` was an in-band
+    # walker-fault decline (`iekSeqAdd: element lowered to tuple value`),
+    # which made every hit after it cheap. S8bc models the add, and on Z3
+    # 5.1 two hits are slow SATs (3 declined). The second was solved, so
+    # it is not at least as deep as the first in every loop (S8y's rule;
+    # the inner `b4ReadCString` loops count too). The bound still holds
+    # the walk to a handful of costly solves.
+    check st.slowSat + st.budgetOut <= 2
     # Each target-hit solve is bounded by the budget, so the walk's total
     # is too, and in practice far below (solved hits) x 400k.
     check st.units < 8 * 400_000

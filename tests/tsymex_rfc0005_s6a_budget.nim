@@ -414,12 +414,11 @@ suite "RFC-0005 S6a (c) -- the maxCallDepth / variant-ctor bail substitutes":
                       tLabel("s6a_variant_dropped_operand"))
     checkpoint($r.status & " " & $kindNames(r.errors))
     ## The parser A-normalises the construction into a temp
-    ## (`__sym_<proc>VariantConstruct_N`) and binds `p` from it, so the
-    ## decline's UNBOUND destination is always read at once and declines as
-    ## `feGlobalReadUnmodelled` (⊤). This site's runs therefore never carry
-    ## the budget kind alone; its own class is pinned in suite (a).
-    check r.errors.sevErrorKinds ==
-      @[beBudgetExhaustedUnmodelled, feGlobalReadUnmodelled]
+    ## (`__sym_<proc>VariantConstruct_N`) and binds `p` from it. Before
+    ## RFC-0005 S8ba the decline left that temp UNBOUND, and its read at once
+    ## declined again as `feGlobalReadUnmodelled`; the decline now binds it
+    ## (`declinedVariantEnv`), so the run carries the budget kind alone.
+    check r.errors.sevErrorKinds == @[beBudgetExhaustedUnmodelled]
     check r.status != sxUnsat
 
 # =============================================================================

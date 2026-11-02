@@ -193,15 +193,18 @@ proc s6bFloatZeroDead(n: int) =
   if n == 5 and n == 6:
     symexTarget("s6b_float_zero_dead")
 
-# ---- fresh: iteSV seq merge ---------------------------------------------------
+# ---- fresh: iteSV set merge ---------------------------------------------------
 #
 # RFC-0005 S8bb: these were string merges, the fresh-symbol class's carrier;
-# a string merge is now Z3's exact `ite` (no taint), so the carrier is a seq
-# merge, still the fresh-symbol split. The string twins below pin the exact
-# merge.
+# a string merge is now Z3's exact `ite` (no taint), so S8bb moved the
+# carrier to a seq merge. RFC-0005 batch 4: on the stack a seq merge is
+# exact too (S8at, batch 2: two seqs whose element arrays share a sort merge
+# as an `ite`), so the carrier is a `HashSet` merge, still `iteSV`'s
+# fresh-symbol arm. The string twins below pin the exact merge.
 
 proc s6bStrIndexDead(i, n: int) =
-  let arr = [@[1], @[2], @[3]]
+  var arr: array[3, HashSet[int]]
+  arr[1].incl 4
   if i >= 0 and i < 3:
     let s = arr[i]
     discard s
@@ -209,7 +212,10 @@ proc s6bStrIndexDead(i, n: int) =
     symexTarget("s6b_str_index_dead")
 
 proc s6bStrIndexLive(i: int) =
-  let arr = [@[1], @[2], @[3]]
+  ## Real Nim: every element's `len` is 0 or 1, so the target is never
+  ## reached; only the merge's fresh set separates them.
+  var arr: array[3, HashSet[int]]
+  arr[1].incl 4
   if i >= 0 and i < 3:
     if arr[i].len == 7:
       symexTarget("s6b_str_index_live")
@@ -244,10 +250,18 @@ proc s6bLn(x: float) =
 
 # ---- heNewFieldZeroUnsupported --------------------------------------------------
 
-type S6bDist = distinct int
+type S6bDist = object
+  ## RFC-0005 S8at: an object with a `seq[(int, int)]` part, which no
+  ## heap cell holds (a seq of tuples is backed nowhere, a stated
+  ## decline). The by-value case object this was (S8ar) is a cell
+  ## value since S8at. RFC-0005 S8bc: a seq of tuples is backed now, so
+  ## the part is a `seq[seq[int]]`.
+  x: int
+  ys: seq[seq[int]]  # RFC-0005 S8bc: a seq of seqs (a seq of tuples is backed since S8bc)
 type S6bBox = ref object
   ## RFC-0005 S8ap: `items` was a `seq[int]`, which a constructor now
-  ## zero-writes (a leaf-split heap cell); a `distinct` field still has no
+  ## zero-writes (a leaf-split heap cell). RFC-0005 S8at zeroes a by-value
+  ## case object too; an object with a seq-of-tuples part has no
   ## construction-time zero (`zeroIRExprForType`), so it keeps these pins on
   ## `heNewFieldZeroUnsupported`.
   items: S6bDist
@@ -261,7 +275,7 @@ proc s6bNewSeqFieldDead(n: int) =
 
 proc s6bNewSeqFieldLive(n: int) =
   let b = S6bBox(v: n)
-  if int(b.items) > 0:
+  if b.items.x > 0:
     symexTarget("s6b_new_seq_field_live")
 
 # ---- halts --------------------------------------------------------------------
@@ -278,9 +292,22 @@ proc s6bDeepDead(n: int) =
   if n == 5 and n == 6:
     symexTarget("s6b_deep_dead")
 
+type
+  S6bArmK = enum s6bKa, s6bKb
+  S6bArmV = object
+    case k: S6bArmK
+    of s6bKa: a: int
+    of s6bKb: b: int
+
+proc s6bKeepPtr(p: ptr int): ptr int = p
+
 proc s6bUnsafeCastDead(n: int) =
-  var x = n
-  let q = addr x
+  # RFC-0005 S8ax: `addr x` of a local is an address cell now. RFC-0005
+  # S8be: so is `addr s[i]` of a seq element, used as a value. The halt is
+  # reached through a variant arm field's pointer passed where it may
+  # escape the call.
+  var o = S6bArmV(k: s6bKa, a: n)
+  let q = s6bKeepPtr(addr o.a)
   discard q
   if n == 5 and n == 6:
     symexTarget("s6b_unsafe_cast_dead")
@@ -339,7 +366,7 @@ suite "RFC-0005 S6b -- oracles":
       check s6bRetTab(t).len != s6bMkTab(t).len + 1
 
   test "oracle: an object-constructed ref's untouched distinct field is zero":
-    check int(S6bBox(v: 3).items) == 0
+    check S6bBox(v: 3).items.x == 0
 
   test "oracle: a ValueError returned by a helper IS caught by except ValueError":
     var caught = false
@@ -481,7 +508,7 @@ suite "RFC-0005 S6b (b) -- fresh-symbol sites license sxUnsat":
     check r.errors.hasKind(seUnsupportedSetCharInterop)
     check r.status == sxUnknown
 
-  test "iteSV seq merge (array index fold): dead target is sxUnsat":
+  test "iteSV set merge (array index fold): dead target is sxUnsat":
     let r = symexFind(s6bStrIndexDead, tLabel("s6b_str_index_dead"))
     show r
     check r.errors.hasKind(feUnsupportedOpHavoc)
@@ -566,7 +593,7 @@ suite "RFC-0005 S6b (c) -- guards":
     check rfc0005RawStatus == sxSat
     check r.errors.len == 0
 
-  test "a target decided only by the merged seq is a candidate: sxUnknown":
+  test "a target decided only by the merged set is a candidate: sxUnknown":
     let r = symexFind(s6bStrIndexLive, tLabel("s6b_str_index_live"))
     show r
     check r.status == sxUnknown
@@ -682,10 +709,15 @@ suite "RFC-0005 S6b (d) -- structural: the audited emission sites":
     ## own path, `isIndex` / `isSeqPop`), and every such read, the inline
     ## higher-order calls' and the call-result declines included, records
     ## the one kind constant `uninitReadKind` -- one site, fresh as before.
+    ## Batch 6 (S8bq on batch 5's `lowerSeqNew`): the fifteenth, fresh. S8bq
+    ## tracks one data array per seq, and S8bc splits a tree element into
+    ## one array per leaf, so `newSeqUninit` of a tree element keeps S8bi's
+    ## whole-path taint at the call (a write of one leaf is not a write of
+    ## the element). Its element arrays are fresh symbols, as before.
     var sites: seq[string]
     for f in runtimeFiles(): sites.add codeLinesWith(f, $feUnsupportedOpHavoc)
     checkpoint($sites)
-    check sites.len == 14
+    check sites.len == 15
 
   test "feUnsupportedOpAborted is emitted only at the runSymex boundary":
     var sites: seq[string]

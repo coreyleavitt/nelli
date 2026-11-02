@@ -179,7 +179,7 @@ proc sutW2aVarAliasedMutation(data: var seq[byte]) =
 
 suite "symex round-6 R4 -- W2a var-aliased mutation veto widened":
 
-  test "R4-W2a: a var-aliased helper-call mutation excludes the receiver from string-backing -> honest classified decline, no crash":
+  test "R4-W2a: a var-aliased helper-call mutation excludes the receiver from string-backing -> array-modelled, no crash":
     let r = symexFind(sutW2aVarAliasedMutation, tLabel("w2a_honest_verdict"))
     # The receiver correctly stays ARRAY-modeled (not string-backed) post-fix
     # -- reaching `iekSeqAdd`'s PRE-EXISTING, width-8-unsupported degrade
@@ -189,12 +189,17 @@ suite "symex round-6 R4 -- W2a var-aliased mutation veto widened":
     # kind-mismatch route W2b's decline targets), not this one. No crash
     # either way -- an honest classified decline, exactly what W2a's DoD
     # allows ("falls to honest array modeling or classified decline").
-    check r.status == sxUnknown
-    var sawWidthDecline = false
+    # RFC-0005 S8ar: `.add` stores at every backed element width
+    # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
+    # receiver staying ARRAY-modelled is now shown by the add succeeding: a
+    # receiver wrongly string-backed reaches `iekSeqAdd`'s receiver-kind
+    # decline ("expected svSeq", a `weInternalWalkerFault`) and is never
+    # sxSat.
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check e.kind != weInternalWalkerFault
+      check "nested seq element type is not supported" notin e.msg
+      check "expected svSeq" notin e.msg
 
 # =============================================================================
 # 4. W2b -- kind-mismatch decline reachability. TWO-HOP construction: the
@@ -227,16 +232,21 @@ proc sutW2bTwoHopClosure(data: var seq[byte]) =
 
 suite "symex round-6 R4 -- W2b two-hop mutation closure":
 
-  test "R4-W2b: a two-hop var-aliased mutation (through an intermediate proc) is still excluded -> honest classified decline, no crash":
+  test "R4-W2b: a two-hop var-aliased mutation (through an intermediate proc) is still excluded -> array-modelled, no crash":
     let r = symexFind(sutW2bTwoHopClosure, tLabel("w2b_two_hop_closure"))
     # Same reasoning as R4-W2a: the width-8 decline (not a kind-mismatch
     # decline) is itself the proof `s` stayed array-modeled two hops out.
-    check r.status == sxUnknown
-    var sawWidthDecline = false
+    # RFC-0005 S8ar: `.add` stores at every backed element width
+    # (`storeSeqElem`), so the width-8 decline this pinned is gone. The
+    # receiver staying ARRAY-modelled is now shown by the add succeeding: a
+    # receiver wrongly string-backed reaches `iekSeqAdd`'s receiver-kind
+    # decline ("expected svSeq", a `weInternalWalkerFault`) and is never
+    # sxSat.
+    check r.status == sxSat
     for e in r.errors:
-      if e.kind == weInternalWalkerFault and "unsupported width" in e.msg:
-        sawWidthDecline = true
-    check sawWidthDecline
+      check e.kind != weInternalWalkerFault
+      check "nested seq element type is not supported" notin e.msg
+      check "expected svSeq" notin e.msg
 
 # =============================================================================
 # 5. W3 -- considerCandidate's classifyType hits a monomorphized/generic

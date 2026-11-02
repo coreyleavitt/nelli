@@ -926,26 +926,139 @@ suite "Phase 15 CR-2 — version bumps":
     ## Provisional 188.
     ## RFC-0005 batch 1 lands S8ag, S8am, S8an, S8ap, S8aq and S11 as one
     ## walker number. 182->190.
+    ## RFC-0005 S8ar (tree-valued heap cells; every backed Table key and
+    ## value type; insert; seq[string]; dotted chains rooted at a ref
+    ## field; heap-step depth budget). Provisional 191.
+    ## RFC-0005 S8at (S8ar's remainder: case-object and tuple heap cells,
+    ## array-of-seq merges, distinct-over-composite, in-place element and
+    ## Table-value mutation, KeyError, float keys, container Table values).
+    ## Provisional 193.
+    ## RFC-0005 S8as (if-arm pruning in a recursion; opaque-call write
+    ## summaries; a global's entry value; closure write-back; more
+    ## `addr` forms; a path-based alias check; an Int-sorted `int`
+    ## heap). Provisional 192.
+    ## RFC-0005 S8au (copy-in/copy-out through a global or capture
+    ## declines; var ptr modelled; every find / rfind needle splits;
+    ## consecutive chain facts; the c-notin-t form per Z3 version).
+    ## Provisional 194.
+    ## RFC-0005 S8av (the cache value carries gaps() on a verdict-cache hit,
+    ## closing S11's own "cache hit returns empty gaps" remainder).
+    ## Provisional 195.
+    ## RFC-0005 S8az (S8av's own remainder: the :sat witness and
+    ## :raised:<type> cache slots also carry gaps() on a hit now).
+    ## Provisional 199.
     ## RFC-0005 S8aw (regex replace lowered by the walker for a literal, a
     ## one-byte class and a class under `+`; the last_indexof/indexof join
     ## emitted). Provisional 196.
     ## RFC-0005 S8ay (the std/re entry points' own formulas over a
     ## PCRE-faithful reader; re vs rex in the IR; a rejected pattern raises
-    ## RegexError). Provisional 198 (S8ax holds 197).
+    ## RegexError). Provisional 198.
+    ## RFC-0005 batch 2 lands S8ar, S8at, S8as, S8au, S8av, S8az, S8aw and
+    ## S8ay as one walker number. 190->202.
+    ## RFC-0005 S8ax (S8as's remainder: a fact-keyed call cache, adaptive
+    ## arm checks and call depth, per-cell Int heaps, opaque summaries,
+    ## closure environments, evaluation order, address cells, alias
+    ## precision). Provisional 197.
+    ## RFC-0005 S8ba (temporaries bound, seq[distinct], len <= high(int),
+    ## by-reference heap actuals, split axioms built once). Provisional
+    ## 200.
+    ## RFC-0005 S8bd (bit-vector offset links, seq[distinct] witnesses,
+    ## the heap budget bounds a chain, by-reference elements, call results
+    ## and generic callees). Provisional 204.
+    ## RFC-0005 S8bf (two var / addr heap actuals that may be one cell
+    ## through different refs are passed by reference). Provisional 206.
+    ## RFC-0005 batch 3 lands S8ax, S8ba, S8bd and S8bf as one walker
+    ## number (205-208 are held by slices still running). 202->209.
     ## RFC-0005 S8bb (raises drain in evaluation order; findBounds binds a
     ## compound operand; PCRE leftmost-first selection, captures, replace
     ## over the priority automaton). Provisional 201 (S8ba holds 200).
+    ## RFC-0005 S8bc (S8at's remainder: getOrDefault, borrow routines,
+    ## leaf-split seq elements, array-element insert, newSeq, Table
+    ## iteration, mgetOrPut, inlined-iterator parameter conversions,
+    ## seq[char] / seq[enum] witnesses). 193->203 (provisional; batch 2
+    ## takes 202).
+    ## RFC-0005 S8be (S8ax's remainder: opaque implicit Defects and raise
+    ## subtypes, a bounded replay, `{.global.}`, int32 widening, Int-sorted
+    ## call returns, tuples of closures, a capture-keyed call cache, element
+    ## and case-object address cells). Provisional 205.
+    ## RFC-0005 S8bh (var / addr effects of a call through a proc value;
+    ## ptr parameters may address a ref object's field; ref conversions
+    ## keep identity). Provisional 208.
+    ## RFC-0005 batch 4: S8bb, S8bc, S8be and S8bh stacked on batch 3.
+    ## 209->217.
+    ## RFC-0005 S8bm (step 1 in a context of its own; a slice element's
+    ## byte test in character form). Provisional 214. 209->214.
+    ## RFC-0005 S8bk (a by-address argument's address is taken at the
+    ## call, after every later argument). 209->212 (210, 211 held).
+    ## RFC-0005 S8bg (S8bd's remainder: by-reference through a
+    ## representation-preserving conversion, a scoped cast decline instead
+    ## of a crash, the distinct-chain-aware bijectivity hint). Provisional
+    ## 218 (210-217 held by slices still running). 209->218.
     ## RFC-0005 S8bi (closure/HOF/borrow/regex/newSeq nodes as raise sites;
     ## closure exit facts in evaluation order; newSeq and set literals
     ## modelled; fueled replace recursions). Provisional 210 (batch 3 holds
     ## 209, S8bh 208).
+    ## RFC-0005 batch 5: S8bm, S8bk, S8bg, S8bi and S8bj stacked on batch 4
+    ## (one newSeq lowering; late addresses through a proc value). 217->223.
+    ## RFC-0005 S8bj (the backtracking verbs, PCRE's start-of-match scan
+    ## and CRLF start skip, the limit start options, UTF mode, `(?m)` and
+    ## `(?X)`; replace over the agenda's step table; the libpcre engine in
+    ## the cache key). Provisional 211.
+    ## RFC-0005 S8bs (a var, addr or by-pointer actual whose variable has
+    ## an address cell is bound to that cell; by-value seqs share element
+    ## cells). 217->222.
+    ## RFC-0005 S8bn (S8bh's remainder: ptr witnesses and targets, proc
+    ## fields and methods, `of` / `nil`, hierarchies, parameter tags).
+    ## Provisional 215.
+    ## RFC-0005 S8bl (S8bc's remainder: var-parameter system magics, the
+    ## unbacked-element add, type aliases, mpairs / mvalues, Table length
+    ## change, seq-element ref parts and long nested seqs in witnesses).
+    ## 203->213 (provisional).
     ## RFC-0005 S8bq (S8bi's remainder: huge newSeq lengths declined, set
     ## values, `re"..."` literals, newSeqUninit read taint, set literals
     ## with non-constant elements). Provisional 220.
-    ## RFC-0005 S8bv (S8bq's remainder: iterating a builtin set, set
-    ## conversion across domains, card queries, newSeqUninit taint
-    ## precision). Provisional 226.
-    check symexWalkerVersion == "226"
+    ## RFC-0005 S8bw (S8bn's remainder: typed global reads, in-band
+    ## receiver declines, aggregate globals, pointers into case objects and
+    ## aggregate containers). Provisional 227.
+    ## RFC-0005 batch 6: S8bs, S8bn, S8bl, S8bq and S8bw stacked on batch
+    ## 5, and an unbound global receiver read as its entry value. 223->230.
+    ## RFC-0005 S8bp (every checkCapped search and the per-thread kind
+    ## probes in contexts of their own; a regex membership and a negated
+    ## one on one string decided as one). Provisional 219. 214->219.
+    ## RFC-0005 S8bu (the signed bv2int bridge's inverse facts and a finite
+    ## default queryRLimit). 222->225.
+    ## RFC-0005 S8br (S8bk's remainder: a call in a by-address actual's
+    ## index is evaluated once, where the argument stands; a check no
+    ## snapshot carries declines only when a later argument may write what
+    ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
+    ## RFC-0005 batch 7: S8bp, S8bu and S8br stacked on batch 6, and a
+    ## `var openArray` view a later argument writes declined. 230->237.
+    ## RFC-0005 S8bx (S8bl's remainder: the raise lost inside in-walk
+    ## witness extraction, witness-render drift, mpairs aliasing, a key
+    ## change while iterating a Table, string setLen over a symbolic
+    ## string). 213->228 (provisional).
+    ## RFC-0005 S8bt (an unverified libpcre declines every regex call; the
+    ## rest of S8bj's remainder). Provisional 224.
+    ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
+    ## an `mpairs` view, a table write seen through it, a raise in an
+    ## own-context solve a fault. 237->241.
+    ## RFC-0005 S8ce (S8bx's remainder: nim-z3's lifecycle hooks swallowed an
+    ## in-flight raise on the C backend, fixed in nim-z3; S8bx's raise hook
+    ## removed). 228->238 (provisional).
+    ## RFC-0005 S8ca (a call declines in-band when the native stack left
+    ## is under one more level's need). 225->233.
+    ## RFC-0005 S8by (no (1b)/(1c) after a facts-first SAT; concolic
+    ## scratch solves in contexts of their own; a membership below the top
+    ## level merged). Provisional 231. 219->231.
+    ## RFC-0005 S8cc (a callee's global counts as written only where it
+    ## may be; an index call with no symbol is bound once). 237->238.
+    ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
+    ## proc-value call's aliasing shapes decline where S8ca's sort lifted
+    ## their decline. 241->245.
+    ## RFC-0005 S8bv (S8bq's remainder: iterating a builtin set, enum
+    ## subranges, card queries, newSeqUninit taint precision). Provisional
+    ## 250. 245->250.
+    check symexWalkerVersion == "250"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

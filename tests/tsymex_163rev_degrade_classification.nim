@@ -171,6 +171,13 @@ proc readsGlobal163(x: int) =
   ## No opaque call anywhere -- purely a global READ. The ONLY way to reach
   ## the target is a witness with `x > gLimit163rev`; the walker cannot
   ## soundly decide this without modelling the global.
+  ##
+  ## RFC-0005 S8as: it is modelled now. `gLimit163rev` is a `var`, so code
+  ## that ran before the property may have changed it: its entry value is a
+  ## fresh value of its type (`feGlobalHavoc`, `dcFreshSymbol`). A SAT is a
+  ## candidate replayed against the real global (10 here), and an UNSAT
+  ## would hold for every entry value. Before S8as: `feGlobalReadUnmodelled`,
+  ## an `sxUnknown` decline.
   if x > gLimit163rev:
     symexTarget("overLimit")
 
@@ -178,28 +185,34 @@ suite "#161/#163 handoff -- module-level global read names itself, not weInterna
 
   test "oracle: gLimit163rev genuinely gates the target's condition in real Nim":
     ## Pairs with the house rule: the global is not incidental -- it really
-    ## changes the answer, so declining is necessary, not pessimism.
+    ## changes the answer, so a witness must be replayed against it.
     check gLimit163rev == 10
     check 11 > gLimit163rev
     check not (5 > gLimit163rev)
 
-  test "a module-level global read degrades to sxUnknown, never a silent wrong verdict":
+  test "a module-level global read is never a silent wrong verdict":
+    ## RFC-0005 S8as: a replay-confirmed sxSat (the witness clears the REAL
+    ## limit) or, when the model's entry value does not replay, sxUnknown;
+    ## never sxUnsat (the label is reachable, `x = 11`).
     let r = symexFind(readsGlobal163, tLabel("overLimit"))
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-    check r.status == sxUnknown
+    check r.status in {sxSat, sxUnknown}
+    if r.status == sxSat:
+      check r.witness[0] > gLimit163rev
 
-  test "the global-read decline is classified feGlobalReadUnmodelled, names the global, and is never weInternalWalkerFault":
+  test "the global read is classified feGlobalHavoc, names the global, and is never weInternalWalkerFault":
+    ## RFC-0005 S8as: was `feGlobalReadUnmodelled` (a decline).
     let r = symexFind(readsGlobal163, tLabel("overLimit"))
     var classified = false
     var internalFault = false
     for e in r.errors:
       checkpoint($e.kind & ": " & e.msg)
-      if e.kind == feGlobalReadUnmodelled and "gLimit163rev" in e.msg:
+      if e.kind == feGlobalHavoc and "gLimit163rev" in e.msg:
         classified = true
       if e.kind == weInternalWalkerFault:
         internalFault = true
-    check r.status == sxUnknown
+    check r.status in {sxSat, sxUnknown}
     check classified
     check not internalFault
 

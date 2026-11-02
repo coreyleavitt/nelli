@@ -590,6 +590,16 @@ proc replaceAtPoints(sp: RegexSpec; pr: PcreParse; recv, by: Z3String;
   regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
   SymVal(kind: svString, str: r)
 
+proc replaceAtPointsPlain(sp: RegexSpec; pr: PcreParse;
+                          recv, by: Z3String): SymVal =
+  ## RFC-0005 S8cf (item 4). `replaceAtPoints` where the automaton's facts are
+  ## not read: a fresh value alone.
+  let r = mkStringVar(regexFreshName("__regexReplaceValue"))
+  regexLimitSite(sp, pr, recv, r,
+                 mkStringVar(regexFreshName("__regexLimitValue")))
+  regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
+  SymVal(kind: svString, str: r)
+
 proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
   ## `iekStrLit` and `StrOpKinds`. Params: `env` and `e` are the same as
@@ -981,7 +991,14 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # automaton's `match()` calls (`limitNfa`; the calls' ovector has no
     # room for a group); an error ends `replace` as a miss does.
     let n = limitNfa(pr, pcreSearchEngine())
-    if not n.ok: regexDecline(sp, n.why)
+    if not n.ok:
+      # RFC-0005 S8cf (item 4): the concrete automaton may still read the call.
+      if concreteEntry(sp, pr, "", 0).ok:
+        let litPast = literalCall(sp, pr, recv.str, repl.str, mkInt(0))
+        if litPast.ok:
+          return SymVal(kind: svString, str: mkString(litPast.s))
+        return replaceAtPointsPlain(sp, pr, recv.str, repl.str)
+      regexDecline(sp, n.why)
     case limitEffect(n)[0]
     of leUnknown: regexDecline(sp, limitDecline)
     of leZero: return recv

@@ -1143,6 +1143,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cf_point",
             "tsymex_rfc0005_s8cf_jitlimit",
             "tsymex_rfc0005_s8cf_skipcount",
+            "tsymex_rfc0005_s8cf_limitgaps",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound
             # echo, cached results carrying their stored Soundness, and the

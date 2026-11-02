@@ -957,6 +957,10 @@ proc pointNfa(sp: RegexSpec; pr: PcreParse; engine: PcreEngine): Nfa =
   let key = $engine & ":" & sp.flag & ":" & sp.pattern
   if key in pointNfas: return pointNfas[key]
   result = limitNfa(pr, engine)
+  if not result.ok:
+    # RFC-0005 S8cf (item 4): what no language holds, a concrete call reads.
+    let c = buildNfa(pr, engine, limitRoom = 0, concrete = true)
+    if c.ok: result = c
   pointNfas[key] = result
 
 proc concreteEntry*(sp: RegexSpec; pr: PcreParse; s: string; start: int;

@@ -339,6 +339,9 @@ type
     address: int    ## nkVerb THEN: its code address
     grp, alt: int   ## nkAlt
     deep: bool      ## RFC-0005 S8bt: nkCost: RMATCH (one frame deeper)
+    possCps: CpSet  ## RFC-0005 S8cf: nkPoss of a concrete call: the run's set
+    possWhole: bool ## nkPoss reads `possCps` (a whole next character)
+    possCrlf: bool  ## nkPoss goes on only before a CRLF: a (*CRLF) dot's run
 
   FilterKind* = enum
     ## RFC-0005 S8bj. The start-of-match optimisation of an unanchored call.
@@ -382,6 +385,9 @@ type
     jit*: JitScan
       ## RFC-0005 S8bt: peJit837's prefix scan, when it applies
     costs*: bool
+    concrete*: bool
+      ## RFC-0005 S8cf: built for `pcreExec` alone (`regex_parser.concreteEntry`):
+      ## its automaton reads what no language holds, a whole next character
     jitCountUnread*: bool
       ## RFC-0005 S8cf: a repeat whose `count_match` calls 8.37's JIT folds
       ## (`detect_repeat`)
@@ -731,12 +737,14 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     let poss = base in b.n.possess.addrs
     let lazy = x.lazy and not poss
     var guard: set[char]
+    var wideRun = false
     if poss:
       if sub.crlfDot:
         b.costWhy = "a possessive (*CRLF) dot repeat"
       if sub.kind == rxChars:
         for (lo, hi) in sub.cps:
           if hi >= 128:
+            wideRun = true
             b.costWhy = "a possessive repeat of a non-ASCII character class " &
                         "in UTF mode"
           for c in max(lo, 0) .. min(hi, 127): guard.incl char(c)
@@ -749,7 +757,12 @@ proc compRepCost(b: var Build; x: Rx; next, base: int): int =
     proc exitAt(b: var Build; first: bool): int =
       # RFC-0005 S8cf: on the JIT the iterator's backtrack re-enters at its
       # `count_match`: every try of the rest counts.
-      if poss: b.add NState(kind: nkPoss, bytes: guard, out1: b.jitCost(next))
+      if poss and b.n.concrete and sub.crlfDot:
+        b.add NState(kind: nkPoss, possCrlf: true, out1: next)
+      elif poss and b.n.concrete and wideRun:
+        b.add NState(kind: nkPoss, possWhole: true, possCps: sub.cps,
+                     out1: next)
+      elif poss: b.add NState(kind: nkPoss, bytes: guard, out1: b.jitCost(next))
       elif b.n.engine == peJit837: b.jitCost(next)
       elif lazy: b.cost(true, next)
       else: b.cost(cls or not first, next)
@@ -960,7 +973,7 @@ proc firstBytes(n: Nfa): set[char] =
     else: work.add st.out1
 
 proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
-               boundOnly = false): Nfa =
+               boundOnly = false; concrete = false): Nfa =
   ## RFC-0005 S8bb, S8bj. The priority NFA of a `psOk` reading, with PCRE's
   ## start-of-match data; `ok == false` past the size caps or for a
   ## declined construct (`why` says which). RFC-0005 S8bt: `engine` is the
@@ -972,6 +985,7 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
   ## a repeat it reads as not possessive only costs more.
   var b = Build()
   b.n.engine = engine
+  b.n.concrete = concrete
   if limitRoom >= 0:
     b.n.costs = true
     b.n.capRoom = limitRoom
@@ -1012,7 +1026,8 @@ proc buildNfa*(pr: PcreParse; engine = peInterp; limitRoom = -1;
     if result.possess.unknown and engine == peInterp:
       b.costWhy = "auto-possessification next to a character property or " &
                   "an extended class"
-    if b.costWhy.len > 0 and not boundOnly:
+    if b.costWhy.len > 0 and not boundOnly and
+       not (concrete and not result.possess.unknown):
       result.ok = false
       result.why = "match()'s call accounting is not modelled for " &
                    b.costWhy
@@ -1129,6 +1144,8 @@ type
   StepCtx = object
     ctx: Ctx          ## the rest of the subject
     nb: int           ## the byte here, -1 at the end
+    nextCp: int32     ## RFC-0005 S8cf: a concrete call's whole next character
+    nb2: int          ## RFC-0005 S8cf: a concrete call's byte after `nb`
     nls: bool         ## RFC-0005 S8bt: a newline starts here (`(?m)$`;
                       ## `nlStartsAt`)
     finCRLF: bool     ## the bytes here are a final CRLF (symR2)
@@ -1177,6 +1194,19 @@ proc decided[T](it: Item[T]): bool =
 proc decidesAtFront[T](it: Item[T]): bool =
   decided(it) or
     it.kind == ikTerm and it.cond == cdNone and it.term == tmArgSkip
+
+proc cpIn(cs: CpSet; c: int32): bool =
+  for (lo, hi) in cs:
+    if c >= lo and c <= hi: return true
+
+proc cpAt(s: string; j: int; utf: bool): int32 =
+  ## RFC-0005 S8cf. The character at `j` of a subject PCRE has validated.
+  let b0 = int32(ord(s[j]))
+  if not utf or b0 < 0xC0: return b0
+  let extra = (if b0 >= 0xF0: 3 elif b0 >= 0xE0: 2 else: 1)
+  result = b0 and (0x3F'i32 shr extra)
+  for k in 1 .. extra:
+    if j + k < s.len: result = (result shl 6) or (int32(ord(s[j + k])) and 0x3F)
 
 var concreteCall {.threadvar.}: bool
   ## RFC-0005 S8cf: `execCore` holds the SKIP:NAME count exactly (`execArgCap`)
@@ -1335,7 +1365,14 @@ proc closure[T](n: Nfa; items: seq[Item[T]]; sc: StepCtx;
         coNext.cc = e.co.cc + 1
         go(s.out1)
       of nkPoss:
-        if sc.nb < 0 or char(sc.nb) notin s.bytes: go(s.out1)
+        if s.possCrlf:
+          if sc.nb < 0 or (sc.nb == ord('\r') and sc.nb2 == ord('\n')):
+            go(s.out1)
+          else: dead()
+        elif s.possWhole:
+          if sc.nb < 0 or not cpIn(s.possCps, sc.nextCp): go(s.out1)
+          else: dead()
+        elif sc.nb < 0 or char(sc.nb) notin s.bytes: go(s.out1)
         else: dead()
       of nkBol:
         if not s.multi:
@@ -1789,6 +1826,8 @@ proc runAttemptT[T](n: Nfa; s: string; x, s0: int; anchored, ne: bool;
     let nextLF = (not atEnd) and s[j] == '\n'
     items = resolve(items, nextLF)
     let sc = StepCtx(ctx: ctxAt(n, s, j), nb: (if atEnd: -1 else: ord(s[j])),
+                     nb2: (if j + 1 < s.len: ord(s[j + 1]) else: -1),
+                     nextCp: (if atEnd: -1'i32 else: cpAt(s, j, n.utf)),
                      nls: nlStartsAt(n, s, j),
                      finCRLF: n.nl == nlCRLF and j == s.len - 2 and
                               s[j] == '\r' and s[j + 1] == '\n',

@@ -1133,13 +1133,28 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
     # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
     # decimal-string svString. (Z3's `int.to.str` is the empty string for a
-    # negative `n`; the digits-path SUTs use non-negative `n`.) strArgs = [n].
+    # negative `n`.) strArgs = [n].
     let operand = lowerStrOperand(env, e.strArgs[0])
     # An int param is a BV under the abstraction layer (ADR-0001), so coerce to
     # Z3Int via `toZ3Int` (svInt passes through; a BV lifts via bv2int). The
     # surrounding `$n == "lit"` is an equality goal (low F5 mixed-theory hang
     # risk — F5's pathology was ORDERING goals over int2bv(bv2int(x))).
-    SymVal(kind: svString, str: toStr(toZ3Int(operand)))
+    #
+    # RFC-0005 S8cb (item 5). SOUNDNESS: a value that may be negative is
+    # `"-"` and the digits of its magnitude, computed in Int (exact at
+    # `low(int)`). Z3's empty string made `$x == "-5"` a false `sxUnsat` and
+    # `$x == ""` a false `sxSat`.
+    let v = toZ3Int(operand)
+    let mayBeNegative =
+      case operand.kind
+      of svInt: true
+      of svBV8, svBV16, svBV32, svBV64: operand.signed
+      else: true
+    if mayBeNegative:
+      SymVal(kind: svString, str: ite(v < mkInt(0),
+        concat(mkString("-"), toStr(mkInt(0) - v)), toStr(v)))
+    else:
+      SymVal(kind: svString, str: toStr(v))
   of iekStrToInt:
     # Phase 15 S10a + S10b. `parseInt(s)` — both the DIGITS-PATH (S10a) and the
     # RAISES-PATH (S10b, now that E1–E6 shipped the exception walker).

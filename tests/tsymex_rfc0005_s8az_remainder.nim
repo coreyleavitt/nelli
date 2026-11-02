@@ -36,6 +36,11 @@ import nelli/engine/types
 let s8azWitnessProg = SymexProgram(body: mkBlock(@[]))
 let s8azWitnessTarget = tLabel("s8az_witness")
 
+# RFC-0005 S8cb: `a < a` was a fresh symbol until the walker modelled the order
+# on bool. A module-level `var` no one writes is one at its read (`feGlobalHavoc`,
+# `dcFreshSymbol`), and really holds false.
+var s8azFresh = false
+
 suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
   test "saveSymexWitnessImpl/loadSymexWitnessesImpl round-trip non-empty gaps":
     let db = inMemoryDatabase()
@@ -72,12 +77,12 @@ suite "RFC-0005 S8az (1) -- :sat witness cache hit also serves gaps()":
 
   test "end-to-end: a warm sfSat finding serves the same gaps as the cold one":
     proc s8azSatConfirm(a: bool; x: int) =
-      ## `a < a` on a bool is modelled as a FRESH symbol (`dcFreshSymbol`), so
+      ## `s8azFresh` is a FRESH symbol to the walker (`dcFreshSymbol`), so
       ## the only path to the target is `scSpurious`-tainted and replay
-      ## decides. Reality: `a < a` is false, so `not o` holds and the replay
+      ## decides. Reality: it is false, so `not o` holds and the replay
       ## confirms -- a genuine `sfSat` whose run still carries the
       ## fresh-symbol decline in its `gaps()`.
-      let o = a < a
+      let o = s8azFresh and (a or not a)
       if not o:
         if x == 42:
           symexTarget("s8az_sat_confirm")
@@ -152,11 +157,11 @@ suite "RFC-0005 S8az (2) -- :raised:<type> cache hit also serves gaps()":
   test "end-to-end: a warm sfRaised finding serves the same gaps as the cold one":
     proc s8azRaisedConfirm(a: bool) =
       ## Mirrors `s8azSatConfirm`'s shape (and RFC-0005 S10's
-      ## `s10AllAssertConfirm`): `a < a` is false for real, so the raw
+      ## `s10AllAssertConfirm`): `s8azFresh` is false for real, so the raw
       ## `assert o` fails on every input -- a genuine `sfRaised`
       ## (AssertionDefect) replay-confirmed off an `scSpurious`-tainted
       ## candidate, whose run still carries the fresh-symbol decline.
-      let o = a < a
+      let o = s8azFresh and (a or not a)
       assert o, "s8az raised"
     let db = inMemoryDatabase()
     var cold, warm: SymexFinding

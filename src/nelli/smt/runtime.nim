@@ -508,6 +508,12 @@ type
     ty:     IRType
     idx:    Z3Int
     dead:   bool
+    field:  string
+      ## RFC-0005 S8bo. Non-empty for a field cell (`walkFieldCell`): the
+      ## cell of arm field `field` of the case-object variable `root`
+      ## (`addr root.field`), declared by the arms `tags`; `idx` is unused.
+      ## It dies when the object may have changed arm.
+    tags:   seq[int]
 
   HeapTerm = tuple[ast: Z3AnyAst; input: string]
     ## RFC-0005 S8ca. A heap array's term on a path: the array the path
@@ -7943,10 +7949,14 @@ proc cmpString(a, b: SymVal, op: IRBinop): SymVal =
   of bEq: ofBool(a.str == b.str)
   of bNe: ofBool(a.str != b.str)
   else:
-    lowerDegrade(seUnsupportedStringOp,
-      "string ordering `" & $op & "` is not modeled until S3")
-    var fresh: seq[Z3Bool]
-    allocateSym(tBool(), freshDegradeName("__strOrderingDegrade"), fresh)
+    # RFC-0005 S8cb (item 5): Z3's `str.<` is the lexicographic order of the
+    # code points, and under ADR-0006 a code point is the byte `cmpStrings`
+    # compares, a prefix ordered first.
+    case op
+    of bLt: ofBool(a.str < b.str)
+    of bLe: ofBool(a.str <= b.str)
+    of bGt: ofBool(b.str < a.str)
+    else: ofBool(b.str <= a.str)    # bGe
 
 proc svLeafEq(a, b: SymVal): Z3Bool =
   ## Phase 15 C5. Structural equality of two SAME-kind LEAF SymVals as a Z3Bool.
@@ -8474,18 +8484,15 @@ proc lowerCmp(a, b: SymVal, op: IRBinop): SymVal =
     of bEq: ofBool(lb.bo == rb.bo)
     of bNe: ofBool(lb.bo != rb.bo)
     else:
-      # N46 (round-6 re-review): was a raw `raise newException`. Reached,
-      # unguarded, for an ordering comparator (bLt/bLe/bGt/bGe) on bool
-      # operands -- Nim's `system.nim` defines `<`/`<=` for `bool`
-      # (`false < true`), so `flag1 < flag2` in a loop guard is valid Nim
-      # reaching this arm. In-band degrade: a fresh unconstrained bool is
-      # sound. RFC-0005 S6b: `feUnsupportedOpHavoc` -- system's `<`/`<=`
-      # on `bool` is a magic (a same-signature user overload is ambiguous,
-      # so no user code can hide behind it), both operands are lowered, and
-      # the bool is fresh per evaluation.
-      degradeAlloc(tBool(), feUnsupportedOpHavoc,
-        "comparison op " & $op & " not valid on bool operands",
-        "__boolOrderDegrade")
+      # RFC-0005 S8cb (item 5): system's order on bool, `false < true` (it
+      # was a fresh bool, `feUnsupportedOpHavoc`, since RFC-0005 S6b).
+      # (`lowerCmp` is reached with comparison operators only, and raises
+      # nothing: see `loweringDidDegrade`.)
+      case op
+      of bLt: ofBool((not lb.bo) and rb.bo)
+      of bLe: ofBool((not lb.bo) or rb.bo)
+      of bGt: ofBool(lb.bo and (not rb.bo))
+      else: ofBool(lb.bo or (not rb.bo))    # bGe
   elif a.kind in {svFloat32, svFloat64}:
     cmpFloat(a, b, op)        # Phase 15 F2: IEEE ==/!=; F4 adds ordering
   elif a.kind == svString:
@@ -22874,6 +22881,12 @@ proc walkStmt(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
     ## DivByZeroDefect) and are not assert-specific. The ONE thing omitted is
     ## step (3): `forkDefect(... "AssertionDefect" ...)` — a violatable
     ## `symexAssume` must NEVER itself produce a false sxRaised(AssertionDefect).
+    ##
+    ## RFC-0005 S8cb: a literal `false` (`quit`, `parseExitCall`) ends every
+    ## path here. Carried on with a false pc, the path would lower what follows
+    ## the `quit`, which an arm's stand-in value does not type.
+    if stmt.acond.kind == iekBoolLit and not stmt.acond.bval:
+      return @[]
     var out2: seq[Path]
     for p0 in paths:
       if w.shouldStop: return
@@ -23661,9 +23674,16 @@ proc frameElemCells(p: Path; frame: int): seq[int] =
 proc withElem(sv: SymVal; idx: Z3Int; v: SymVal): SymVal =
   ## RFC-0005 S8be. The `svSeq` `sv` with element `idx` set to `v`. Only a
   ## seq with element cells reaches here, and the parser gives cells only to
-  ## a seq of scalars or strings (`elemCellOf`), whose data is always backed.
-  result = sv
-  result.seqDataRaw = storeSeqElem(sv.seqDataRaw, sv.seqElemTy, idx, v) # [placeholder-audited]
+  ## a backed seq of scalars, strings or objects (`elemCellOf`). RFC-0005
+  ## S8bo: an object element is leaf-split (S8bc), every leaf stored
+  ## (`seqStoreArrs`). A value that does not fit declines in-band and leaves
+  ## the element (`seqStoreDecline`; a caller drains the pending decline).
+  let arrs = seqStoreArrs(sv, idx, v)
+  if arrs.isNone:
+    discard seqStoreDecline("a write through a pointer to an element",
+                            sv.seqElemTy, v)
+    return sv
+  withSeqArrsOf(sv, arrs.get)
 
 proc snapElemCells(p: Path; depth: int; w: WalkCtx): Path =
   ## RFC-0005 S8be. `p` with this frame's seqs with element cells, and the
@@ -23729,7 +23749,8 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## changed since the statement began winning (`elemSnapName`):
   ##
   ## * the seq resized or assigned whole (its length is another term, or
-  ##   the statement's last effect is its write by name, `lastWriteTo`):
+  ##   the statement's last effect is its write by name, `lastWriteTo`,
+  ##   whatever value it writes -- RFC-0005 S8bo):
   ##   Nim may have moved its elements, so its cells die (a dereference
   ##   that may reach one declines, `danglingFork`);
   ## * the seq's elements written: each cell takes its element's value;
@@ -23776,8 +23797,50 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         if env2.hasKey(cKey) and
            not sameSymVal(addrCellValue(ctx, q, e.ty, e.refAst), env2[cKey]):
           written.add k
-      if seqCh and (lastWriteTo(stmt, root) or
-                    not sameSeqLen(sNow, env2[sKey])):
+      if sNow.kind in {svVariant, svMultiVariant, svTuple}:
+        # RFC-0005 S8bo: a case object's field cells. A statement that may
+        # have changed its arm (the discriminator is another term) kills
+        # them: the pointer names another arm's memory. Otherwise the side
+        # that changed wins, as for an element: a write by name (of the
+        # field, or of the whole object in the same arm, whose memory Nim
+        # reuses) reaches the cell, a write through the pointer the field.
+        # RFC-0005 S8cb: per cell, as a multi-axis object's other axes keep
+        # their memory (`fieldMemorySame`); a tuple's never moves.
+        let snapV = if env2.hasKey(sKey): env2[sKey] else: sNow
+        var live: seq[int]
+        for k in ks:
+          if q.elemCells[k].root != root: continue
+          if seqCh and not fieldMemorySame(sNow, snapV, q.elemCells[k].field):
+            q.elemCells[k].dead = true
+          else:
+            live.add k
+        if seqCh:
+          for k in written:
+            if k in live and stmt.kind != isCall and
+               displayName(root) notin clash:
+              clash.add displayName(root)
+          for k in live:
+            let e = q.elemCells[k]
+            discard addrCellStore(ctx, q, e.ty, e.refAst,
+                                  armFieldValue(sNow, e.field, e.tags))
+        else:
+          var vNew = sNow
+          for k in written:
+            let e = q.elemCells[k]
+            vNew = withArmField(vNew, e.field, e.tags,
+                                addrCellValue(ctx, q, e.ty, e.refAst))
+          env2[root] = vNew
+        continue
+      # RFC-0005 S8bo: a write of the seq by name kills its cells whatever
+      # it assigns: Nim's `=copy`/`=sink` frees the old data and points the
+      # seq at another block, even of the same length, and even of the same
+      # elements (`s = t` after `let t = s`, a callee's `s = t` repeating
+      # the caller's value). Before S8bo it had to change the seq's term
+      # too, so a whole assignment of an equal value (or a cached callee's)
+      # left the cells live: a read through one was a confirmed `sxSat` on
+      # memory Nim had freed.
+      if lastWriteTo(stmt, root) or
+         seqCh and not sameSeqLen(sNow, env2[sKey]):
         for k in ks:
           if q.elemCells[k].root == root: q.elemCells[k].dead = true
         continue
@@ -23824,6 +23887,27 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
   var env2 = q.env
   for k in ks:
     let e = q.elemCells[k]
+    if e.field.len > 0 and env2.hasKey(e.root) and
+       env2[e.root].kind in {svVariant, svMultiVariant, svTuple}:
+      # RFC-0005 S8bo: a field cell. The object changed arm since the
+      # raising statement began (its innermost snapshot): the cell dies;
+      # else the field takes the cell's value.
+      var snapV = env2[e.root]
+      var bestV = -1
+      for key, v in env2:
+        if key.startsWith(elemSnapPrefix) and key.endsWith("#s#" & e.root):
+          let rest = key[elemSnapPrefix.len .. ^1]
+          let d = parseInt(rest[0 ..< rest.find('#')])
+          if d > bestV:
+            bestV = d
+            snapV = v
+      let cur = env2[e.root]
+      if not fieldMemorySame(cur, snapV, e.field):
+        q.elemCells[k].dead = true
+        continue
+      env2[e.root] = withArmField(cur, e.field, e.tags,
+                                  addrCellValue(w.z3, q, e.ty, e.refAst))
+      continue
     if not env2.hasKey(e.root) or env2[e.root].kind != svSeq: continue
     var snap = SymVal(kind: svBool)
     var best = -1
@@ -23841,7 +23925,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
     if not sameSymVal(seqElemAt(env2[e.root], e.idx), cur):
       env2[e.root] = withCellElem(q, ks, k, env2[e.root], cur)   # S8ca
   q.env = env2
-  q
+  drainPendingLowerEffects(q)
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the
@@ -24312,8 +24396,20 @@ proc sameSymVal(a, b: SymVal): bool =
       if not b.vArmFields.hasKey(tag) or not allSame(fs, b.vArmFields[tag]):
         return false
     true
-  of svMultiVariant:
-    false   # no identity arm: conservatively "changed"
+  of svMultiVariant:   ## RFC-0005 S8cb
+    if not allSame(a.mvPlainFields, b.mvPlainFields) or
+       a.mvAxes.len != b.mvAxes.len:
+      return false
+    for xi in 0 ..< a.mvAxes.len:
+      if a.mvAxes[xi].disc == nil or b.mvAxes[xi].disc == nil or
+         not sameSymVal(a.mvAxes[xi].disc[], b.mvAxes[xi].disc[]) or
+         a.mvAxes[xi].armFields.len != b.mvAxes[xi].armFields.len:
+        return false
+      for tag, fs in a.mvAxes[xi].armFields.pairs:
+        if not b.mvAxes[xi].armFields.hasKey(tag) or
+           not allSame(fs, b.mvAxes[xi].armFields[tag]):
+          return false
+    true
 
 proc applyClosureGround(clo: SymVal, argSyms: seq[SymVal],
                         label: string; callerEnv: Env;

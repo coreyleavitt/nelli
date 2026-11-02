@@ -57,37 +57,44 @@ proc tick() {.symexTransparent.} =
   ## position, void), so the SUTs stay modelled and replay is countable.
   inc sideEffects
 
+
+# RFC-0005 S8cb: this was `a < a`, a fresh symbol until the walker modelled the
+# order on bool. A module-level `var` no one writes is a fresh symbol at its
+# read (`feGlobalHavoc`, `dcFreshSymbol`), and really holds false.
+var freshGlobal = false
+
+proc freshFalse(a: bool): bool {.inline.} = freshGlobal and (a or not a)
+
 # =============================================================================
-# SUTs. `a < a` on a bool is system's magic `<`, which the walker models as a
-# FRESH symbol (`feUnsupportedOpHavoc`, `dcFreshSymbol`): every path past it
-# carries exactly `{scSpurious}` -- replay-eligible. Reality: `a < a` is
-# always false, so `not o` always holds and `o` never does. That makes each
-# replay outcome deterministic whatever witness the solver picks.
+# SUTs. `freshFalse(a)` is a FRESH symbol to the walker: every path past it
+# carries exactly `{scSpurious}` -- replay-eligible. Reality: it is always
+# false, so `not o` always holds and `o` never does. That makes each replay
+# outcome deterministic whatever witness the solver picks.
 # =============================================================================
 
 proc s10Confirm(a: bool; x: int) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o:
     if x == 42:
       symexTarget("s10_confirm")
 
 proc s10Refute(a: bool; x: int) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if o:
     if x == 42:
       symexTarget("s10_refute")
 
 proc s10RaiseConfirm(a: bool; x: int) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o and x == 7:
     raise newException(ValueError, "s10 confirm")
 
 proc s10RaiseRefute(a: bool; x: int) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if o and x == 7:
     raise newException(ValueError, "s10 refute")
 
@@ -136,24 +143,24 @@ proc s10ParseAlpha(s: string) =
 
 proc s10AllConfirm(a: bool) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o:
     symexTarget("s10_all_confirm")
 
 proc s10AllRefute(a: bool) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if o:
     symexTarget("s10_all_refute")
 
 proc s10AllAssertConfirm(a: bool) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   assert o, "s10 assert"     ## fails for real on every input
 
 proc s10AllAssertRefute(a: bool) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   assert not o, "s10 assert" ## holds for real on every input
 
 # ---- replay's splat: rendered witness type != parameter type; non-void fn ---
@@ -161,19 +168,19 @@ proc s10AllAssertRefute(a: bool) =
 proc s10RuneConfirm(a: bool; r: Rune) =
   ## The witness reader renders a `Rune` as `int`; replay converts it back.
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o and r == Rune(0x41):
     symexTarget("s10_rune_confirm")
 
 proc s10RuneRefute(a: bool; r: Rune) =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if o and r == Rune(0x41):
     symexTarget("s10_rune_refute")
 
 proc s10NonVoid(a: bool; x: int): int =
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o and x == 42:
     symexTarget("s10_nonvoid")
   x
@@ -194,7 +201,7 @@ proc s10Unlinkable(a: bool; x: int) =
   ## `sxUnsat` when its result guards a target -- reported with S10, not
   ## pinned here). The guard is the replay-eligible fresh-symbol shape.
   discard s10NoSuchSymbol(x)
-  let o = a < a
+  let o = freshFalse(a)
   if not o and x == 42:
     symexTarget("s10_unlinkable")
 
@@ -216,8 +223,8 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     ## The path is tainted -- by a dcFreshSymbol kind only -- so rules 1-2
     ## could not have produced this: `runSymex` itself decided sxUnknown
     ## (the unvetoed verdict of the same pools) ...
-    check r.errors.hasKind(feUnsupportedOpHavoc)
-    check classOf(feUnsupportedOpHavoc) == dcFreshSymbol
+    check r.errors.hasKind(feGlobalHavoc)
+    check classOf(feGlobalHavoc) == dcFreshSymbol
     check rfc0005RawStatus == sxUnknown
     ## ... and the reporting path ran the real fn on the witness, exactly once.
     check sideEffects == 1
@@ -230,7 +237,7 @@ suite "RFC-0005 S10 (a) -- symexFind: rule 3, the replay-gated SAT relaxation":
     check sideEffects == 1                       ## replay RAN ...
     check r.errors.hasKind(feReplayRefuted)      ## ... and refuted it
     check r.errors.severityOf(feReplayRefuted) == sevHint
-    check r.errors.hasKind(feUnsupportedOpHavoc)
+    check r.errors.hasKind(feGlobalHavoc)
 
   test "an scSpurious-tainted raise is routed and replay-gated: confirmed -> sxRaised":
     sideEffects = 0
@@ -429,7 +436,7 @@ suite "RFC-0005 S10 (e) -- the opt-out: SymexSettings.replay = false":
     sideEffects = 0
     let r = symexFind(s10Confirm, tLabel("s10_confirm"), s10NoReplay)
     check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOpHavoc)
+    check r.errors.hasKind(feGlobalHavoc)
     check not r.errors.hasKind(feReplayRefuted)
     check sideEffects == 0
     let f = symexFindAllWitnesses(s10AllConfirm, inMemoryDatabase(),

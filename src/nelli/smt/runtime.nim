@@ -14728,9 +14728,13 @@ proc guardLiteral(cond: Z3Bool): GuardLiteral =
   ## folded guards in a loop body were 32 copies of one path per iteration.
   ## Sound: the side dropped carries a `false` conjunct, so no query on it
   ## is satisfiable.
-  let lit = $simplify(cond)
-  if lit == "true": glTrue
-  elif lit == "false": glFalse
+  ## RFC-0005 S8bv: read off the term, not its printed form: printing a guard
+  ## over a builtin set's unrolled counter (an `ite` chain sharing each step
+  ## twice) did not finish in 400 s.
+  let s = simplify(cond)
+  case Z3_get_bool_value(s.ctx.raw, s.raw)
+  of Z3_L_TRUE: glTrue
+  of Z3_L_FALSE: glFalse
   else: glOpen
 
 proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
@@ -14743,9 +14747,10 @@ proc loopArmInfeasible(ctx: Z3Context; path: Path; arm: Z3Bool;
   ## arm's every later query would carry the same UNSAT constraints, so no
   ## finding and no model is lost; what is lost are declines an infeasible
   ## arm would have recorded, which is the precision S8k is after.
-  let lit = $simplify(arm)
-  if lit == "false": return true
-  if lit == "true": return false
+  case guardLiteral(arm)   # RFC-0005 S8bv: not its printed form
+  of glFalse: return true
+  of glTrue: return false
+  of glOpen: discard
   result = checkCapped(ctx, pathRoots(path, [arm]), settings,
                        loopPruneRLimit(settings)).status == zsUnsat
   if result: logPrune(path, [arm])   # RFC-0005 S8as/S8ax

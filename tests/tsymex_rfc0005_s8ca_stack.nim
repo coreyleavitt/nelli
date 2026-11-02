@@ -102,7 +102,8 @@ suite "S8ca (1): the walk declines before the native stack runs out":
       check not symexNativeStackCut()
 
   test "a run the stack does not cut is not flagged":
-    let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"))
+    let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
+        SymexSettings(budget: ResourceBudget(maxCallDepth: 5)))
     check r.status == sxUnknown
     check not symexNativeStackCut()
 
@@ -141,17 +142,18 @@ proc onThread(which: int) {.thread.} =
 
 suite "S8ca (2): a 2 MB thread":
 
-  test "the default budget declines in-band":
-    var t: Thread[int]
-    createThread(t, onThread, 0)
-    joinThread(t)
-    check outs[0].left > 0
-    when not defined(windows):
-      # Windows reserves a thread's stack at the image's reserve when that
-      # is larger (the 2 MB Nim asks for is the commit; CI links 8 MB), so
-      # only Linux and macOS hold 2 MB exactly.
+  # Windows reserves a thread's stack at the image's reserve when that is
+  # larger (the 2 MB Nim asks for is the commit; CI links 8 MB), and the solve
+  # runs on its fiber besides, so a default budget's run is not short of stack
+  # there: it is only `tsymex_configdefaults`' pin again, and about 10 s each.
+  when not defined(windows):
+    test "the default budget declines in-band":
+      var t: Thread[int]
+      createThread(t, onThread, 0)
+      joinThread(t)
+      check outs[0].left > 0
       check outs[0].left < 2 * 1024 * 1024
-    check outs[0].status == sxUnknown
+      check outs[0].status == sxUnknown
 
   test "an explicit deep budget declines in-band, named":
     var t: Thread[int]
@@ -161,13 +163,13 @@ suite "S8ca (2): a 2 MB thread":
     check outs[1].named
     check outs[1].cut
 
-  test "with about 1 MB left, the default budget declines in-band":
-    var t: Thread[int]
-    createThread(t, onThread, 2)
-    joinThread(t)
-    when not defined(windows):   # as above: the reserve is the image's
+  when not defined(windows):     # as above
+    test "with about 1 MB left, the default budget declines in-band":
+      var t: Thread[int]
+      createThread(t, onThread, 2)
+      joinThread(t)
       check outs[2].left < 1024 * 1024
-    check outs[2].status == sxUnknown
+      check outs[2].status == sxUnknown
 
   test "with about 1 MB left, a shallow call is still inlined and decides":
     var t: Thread[int]

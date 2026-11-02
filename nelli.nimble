@@ -1372,5 +1372,13 @@ task test, "Run the test suite":
             # A proc value's aliasing shapes decline; walker 241->245.
             "tsymex_rfc0005_b9_integration",
             # A call declines before Nim's call depth limit ends the process.
-            "tsymex_rfc0005_b9_calldepth"]:
+            "tsymex_rfc0005_b9_calldepth",
+            # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
+            # unpinned fresh-symbol kinds and the coverage invariant; a live
+            # sevError beside a clean witness and symexForAll's own pins; a
+            # helper check for each to-unsat flip. No bump.
+            "tsymex_rfc0005_s8cr_intro",
+            "tsymex_rfc0005_s8cr_pins",
+            "tsymex_rfc0005_s8cr_flips",
+            "tsymex_rfc0005_s8cr_flips_str"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

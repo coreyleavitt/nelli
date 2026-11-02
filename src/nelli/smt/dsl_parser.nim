@@ -6385,8 +6385,8 @@ proc hoistIndexCalls(a: NimNode; inIndex: bool; preamble: var seq[IRStmt];
   ## once, here, root first, and replaced by a mark naming the `let` that
   ## holds its result. RFC-0005 S8cc: the mark is of the symbol of the call's
   ## type, so a call with no typed `result` symbol (through a proc value) is
-  ## named too. The call node cannot be marked as itself: `repr` of a path
-  ## holding a childless call crashes the compiler. An anonymous type (a
+  ## named too. The call node cannot be marked as itself: a childless call
+  ## in an index aborts the compiler (`IndexDefect`). An anonymous type (a
   ## `range[..]`) has no symbol: the `let` carries the type, and only the
   ## mark's name is read, so `int` stands in.
   ## Nim evaluates the call where the

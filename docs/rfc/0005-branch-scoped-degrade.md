@@ -13156,12 +13156,14 @@ pin is 238, and both suites carry the `>= 238` floor.
   element's bit-vector across the bridge. At a25229d each dead label
   (`cv_dead`, `cc_dead`, `cm_dead`, `cl_dead`) spent its 20M units and came
   back `sxUnknown` (`beSolverUndef`). Replayed offline on the 4.13.4 CLI, the
-  dumped query had no result in 120 s; with the term spelled `bvadd(k, 5)`
-  it was `unsat` in 48 units. The cause is not array theory or a missing
-  frame fact. S8bu fixed it, in two parts, each shown by a one-change run:
+  dumped query had no result in 120 s; a hand-reduced form with the term
+  spelled `bvadd(k, 5)` and the Int overflow obligation kept was `unsat` in
+  48 units. The query holds no array term, so the cause is not array theory
+  or a missing frame fact. S8bu fixed it, in two parts, each shown by a
+  one-change run:
   * `probeProto` offering the bit-vector (1c56690). Removed at 136ad60, all
     four dead labels return to `sxUnknown` at 20M. Added alone at a25229d,
-    `cv_dead` and `cc_dead` decide.
+    `cv_dead`, `cc_dead` and `cl_dead` decide.
   * `bvIntInverseFacts` (0c4c19e, narrowed by 8815a81). `cm_dead`
     (`v[] * 3 - k`) still spent 20M at a25229d with `probeProto` alone, and
     with the facts removed at 136ad60 it spends the suite's 2M.
@@ -13194,19 +13196,18 @@ pin is 238, and both suites carry the `>= 238` floor.
   index call that is not a builtin, under a mark of the symbol of the call's
   type (`int` for an anonymous `range`, where only the mark's name is read;
   the `let` carries the type). S8br's `result` lookup is gone. The call node
-  cannot be marked as itself: the compiler aborted with an `IndexDefect` on
-  a call with a childless call in its index, while `repr` of such a node
-  alone was fine (the operation inside the compiler was not isolated).
+  cannot be marked as itself: compiling such a mark aborted the compiler
+  with an `IndexDefect`, while every macro operation tried on the node alone
+  (`repr` included) was fine, so the failing operation was not isolated.
   `indexCallDecline` remains for a spent mark counter. S8br's `fs_dead` pin
   moves from a decline to `sxUnsat`. The S8br note's generic case did not
   reproduce: `idOf(1)` and `oneOf("x")` were already exact at the base, and
   stay pinned.
 - *Pins and RED.* Observed at 136ad60: `ri`, `rs`, `rd`, `ra` and their twins
   declined (`feEvalOrderUnmodelled`); `or` and its twin were `sxUnknown`
-  (`feGlobalHavoc`); `fs`, `fa`, `fp`, `fc`, `ft` and their twins declined
-  (`feUnsupportedOp`). The `fr` label was added after that RED and is GREEN
-  only. Already right at the base and kept: the writers (`wa` ... `wb` still
-  decline) and the generics (`gi`, `go`; `gn`, added later, is GREEN only).
+  (`feGlobalHavoc`); `fs`, `fa`, `fp`, `fc`, `fr`, `ft` and their twins
+  declined (`feUnsupportedOp`). Already right at the base and kept: the
+  writers (`wa` ... `wb` still decline) and the generics (`gi`, `go`, `gn`).
 
 *Different mechanisms, reported and not fixed here.*
 - **PRECISION: `addr` of a global in a walked callee halts the path.**

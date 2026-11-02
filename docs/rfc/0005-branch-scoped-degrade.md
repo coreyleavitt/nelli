@@ -13383,3 +13383,7 @@ Every pin was run RED on the merge of S8bo first, except where noted.
 - **PRECISION: a `type` section in a routine's body declines.**
 - **PRECISION: a parameter pragma (`x {.inject.}: int`) fails the compile** in
   `collectStringBackedByteSeqParamsImpl`.
+- **PRECISION: `tsymex_r6_n42_deref_taint` and `tsymex_r6_n43_parity` do not
+  compile on cpp** (`readCellField`'s `f = F(i)` on `Atomic[T]`'s
+  `std::atomic<NI8>`, whose assignment is deleted). They fail the same way at
+  136ad60, before this slice. S8s fixed the same shape in `validDefault`.

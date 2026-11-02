@@ -1146,6 +1146,10 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cf_limitgaps",
             "tsymex_rfc0005_s8cf_classes",
             "tsymex_rfc0005_s8cf_jitutf",
+            "tsymex_rfc0005_s8cf_jitutf_b",
+            "tsymex_rfc0005_s8cf_jitutf_c",
+            "tsymex_rfc0005_s8cf_jitutf_d",
+            "tsymex_rfc0005_s8cf_jitutf_e",
             "tsymex_rfc0005_s8cf_replace",
             # RFC-0005 S11 -- the public surface: Soundness / ReplayStatus /
             # trusted() / gaps() on SymexResult and SymexFinding, the bound

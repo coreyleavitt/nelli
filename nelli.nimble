@@ -1356,5 +1356,10 @@ task test, "Run the test suite":
             # item 7: a negative-length toOpenArray; a resizing mitems body.
             "tsymex_rfc0005_s8ca_resize",
             # item 8: a mutation through a pointer to the whole value.
-            "tsymex_rfc0005_s8ca_derefmut"]:
+            "tsymex_rfc0005_s8ca_derefmut",
+            # RFC-0005 S8by: no (1b)/(1c) after a facts-first SAT; concolic
+            # scratch solves in contexts of their own; a regex membership
+            # under a disjunction or an ite merged with those that hold
+            # where it is read. Walker 219->231.
+            "tsymex_rfc0005_s8by_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

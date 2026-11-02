@@ -293,6 +293,23 @@ const symexWalkerVersion* = "241"
   ## closure call in it was applied by each guard branch and by the result
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
+  ## RFC-0005 S8by (2026-10-03) — S8bp's remainder. After a facts-first
+  ## SAT, `checkCapped` no longer repeats (1b) and (1c)'s uncapped half
+  ## (known SAT), nor (1c)'s capped half when the facts-first model makes
+  ## the caps true: 607,363 units of `lastNl`'s 1,106,184 (Z3 5.1), so a
+  ## query near its budget can decide where it declined. Concolic
+  ## collection's scratch solves check in contexts of their own, so what the
+  ## walk's context holds moves neither their spend nor their outcome.
+  ## `mergeMemberships` merges a
+  ## membership below the top level (under a disjunction, an `ite`, a
+  ## `not`) with those of the same string that hold where it is read: `a
+  ## or not s.contains(re"b")` beside `s.endsWith(re"b+")` was `sxUnknown`
+  ## on Z3 4.13.4 (8.5M units). And a query's terms are made in its own
+  ## context in one order, the query's: that moves wall time and units
+  ## (`lastNl` 498,821 to 1,026,624 on 5.1, 1,106,184 before the slice).
+  ## Provisional 231 (220 to 230 are held by slices still running). 219 ->
+  ## 231.
+  ##
   ##
   ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
   ## walk, or an earlier walk on the thread, left in Z3's context. Every

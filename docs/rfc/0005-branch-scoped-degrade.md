@@ -477,6 +477,11 @@ title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pi
 state = "done"
 
 [[slice]]
+id = "S8by"
+title = "S8bp's remainder: isolate concolic scratch solves, skip redundant 1b/1c after a facts-first SAT, term-order-stable wall time in translated contexts, mergeMemberships under disjunction/ite"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -13934,3 +13939,97 @@ over at 8815a81 (S8bu), and `s8ab_letaudit` (55.6 to 63.5 s) and
 - **PRECISION: `tsymex_r6_n43_parity` does not compile on cpp.** `Atomic[T]`
   in the walker's generated allocator assigns a `std::atomic` (a deleted
   operator); the same error at the base 5729b1a. It passes 25/0 on c.
+
+**As landed (S8by, walker 231, provisional) — S8bp's remainder.** Suite
+`tsymex_rfc0005_s8by_remainder` (12 tests; c on both Z3 versions, cpp 5.1).
+Built on S8bp (79037e4).
+
+- *The concolic scratch solves in contexts of their own.*
+  `concreteBranchOutcome`, `concretelyInfeasible` and
+  `runConcolicCollectImpl`'s concrete-inputs check run through
+  `concreteScratchCheck`: `ownContextSolver` under `concreteBranchRLimit`,
+  the units added to `ownContextUnits`. In the context, a factoring branch
+  condition took 876,296 units or 5,854,996 by the order the query's
+  constants were made in (5.1; 23,956 and 911,593 on 4.13.4), and under a
+  bound between them was decided or not. Pinned: that bound (3M, 400k) and
+  three context shapes, RED with the solves put back in the context.
+  This slice's first pin compared a context with 300 unrelated constants
+  against one without. That difference (72,162 against 72,126) was the
+  process's first solve of the query: the two are equal when alternated.
+- *No (1b) or (1c) after a facts-first SAT.* (1c) is the facts-first query
+  under a larger budget and (1b) a subset of it, so both are known SAT.
+  (1c)'s capped half is skipped too where the facts-first model makes every
+  cap true; it can only decline, so a wrong evaluation there costs a
+  decline, not a verdict. Verdicts are unchanged. S8bp's `every step` pin
+  reaches the three steps with the facts-first check switched off.
+- *One term order per query.* `ownContextSolver` translates the query's
+  terms as one vector in `queryTermOrder`: the roots in order, each term's
+  arguments last to first, children first. The order moves the search, so
+  units as well as wall time, not wall time alone.
+- *`mergeMemberships` below the top level.* A membership under a
+  disjunction, an `ite` branch, a `not` or an implication is merged with
+  those of the same string that hold where it is read: `x in (A & I)` where
+  asserted, `not (x in (comp(A) & I))` where denied. A literal read both
+  ways (an `ite` condition, an argument of `=`) is left as it is. `a or not
+  s.contains(re"b")` beside `s.endsWith(re"b+")` was `sxUnknown` on 4.13.4
+  (8.5M units) and is UNSAT within 20,000. Pinned against native Nim.
+
+*Units, whole walks.*
+
+| Build | `lastNl` 5.1 | `lastNl` 4.13.4 | B1-1 5.1 | B1-1 4.13.4 |
+|---|---|---|---|---|
+| S8bp (79037e4) | 1,106,184 | 1,499,189 | 47,637 | 80,626 |
+| skip only, S8bp's order (cbfef23) | 498,821 | 786,466 | 47,637 | 80,626 |
+| slice, skip off | 2,433,310 | 2,356,421 | 47,601 | 80,546 |
+| slice | 1,026,624 | 1,219,607 | 47,601 | 80,546 |
+
+The skip's 607,363 units (5.1) are the row S8bp to the row below it. In the
+slice's term order it saves more, 1,406,686, but that order's own search
+costs `lastNl` more than S8bp's did, so against S8bp the walk is 79,560 lower.
+
+*Wall time, `r4_strip`'s binary on Z3 5.1* (12 cores, load 21 to 28, pairs
+side by side; wall s, CPU s in brackets):
+
+| Pair | S8bm (14d7e81) | S8bp (79037e4) | slice |
+|---|---|---|---|
+| a | 125.8 (111.6) | | 146.4 (131.1) |
+| b | | 154.7 (143.0) | 143.7 (133.2) |
+| c | 113.7 (103.3) | | 141.2 (128.0) |
+| d | | 146.5 (129.2) | 140.0 (121.5) |
+
+The ceiling of 190 s is met, but it was set on the 8-core host, and S8bp
+meets it here too. Against S8bp the order saves 4 to 7%; the slice stays 16 to
+24% above S8bm. B1-1 and `lastNl` are under 1 s in S8bp and in the slice, on
+both versions.
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8by_remainder` 12/0
+(cpp 12/0), `s8bp_isolation` 9/0 (cpp 9/0), `phase15_CR2_cachekey` (231) 6/0
+(cpp 6/0), `s8bm_stability` 4/0 (cpp 4/0), and the slice's list of 48 suites, 697
+tests in all, among them `s8ba_remainder`, `r4_strip`, `s8ay_remainder`,
+`s8ar_remainder`, `phase13_rlimit` and every suite naming concolic.
+`s8bj_*` and `s8bb_*` are not on this base: their 22 suites pass on both
+versions on a trial merge with `rfc-0005-soundness-channels` (136ad60), where
+the scratch solves keep S8bu's clock through `ownContextCheck`.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a fresh thread's spend on a query follows what earlier threads
+  of the process ran**, in a context of its own as well. On non-main threads
+  (Z3 5.1), one factoring branch solve took 72,124 units until a thread ran it
+  beside 3,000 unrelated constants, then 5,854,994 on that thread and every
+  later one, whatever its context held. The main thread stayed at 72,124
+  through the same sequence, and `lastNl`'s walk there at 1,026,624. 4.13.4
+  moves alike (26,695 to 911,593). The cause is not identified. A walker query
+  is a function of its query only within one such history.
+- **PRECISION: Z3 5.1 prints an internal check on wide factoring.** `Failed to
+  verify: m_cache.mk_unique(p) == p`, with its request to file an issue, on `x
+  * y` with `x`, `y` below 200000. The solve goes on and runs out of its bound
+  (50M units); 4.13.4 decides the same query in 191,361.
+- **PRECISION: `r4_strip` stays above S8bm** (the table above): the order
+  closes about a quarter of S8bp's gap.
+- **PRECISION: `tsymex_configdefaults` runs longer, past the 60 s convention
+  already.** Windows `symex-mingw`, the test's own run: 98 s at S8bp, 127 s and
+  153 s on this slice's code. Side by side on Linux (4.13.4, CPU s): 31 and 32
+  at S8bp, 38 and 40 at the slice; 25 and 29 with the skip alone, 32 and 36 at
+  the slice in that pair, so the rise comes after the skip. Not attributed
+  further. `s8ai_semantic` is the other file past 60 s (94 s at S8bp, 82 s and
+  60 s here).

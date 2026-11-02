@@ -1047,6 +1047,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## removed). 228->238 (provisional).
     ## RFC-0005 S8ca (a call declines in-band when the native stack left
     ## is under one more level's need). 225->233.
+    ## RFC-0005 S8by (no (1b)/(1c) after a facts-first SAT; concolic
+    ## scratch solves in contexts of their own; a membership below the top
+    ## level merged). Provisional 231. 219->231.
     check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

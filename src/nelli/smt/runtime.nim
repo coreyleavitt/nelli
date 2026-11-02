@@ -12908,10 +12908,12 @@ proc seqRangeFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
         result.add guarded(g, v.v == ite(f.n >= zero, f.n, minusOne))
 
 var byteDomainKinds {.threadvar.}: tuple[ready: bool, concat, extract, andK,
-                                         eq, notK: int]
+                                         eq, notK, orK, impliesK, iteK: int]
   ## RFC-0005 S8y. The decl kinds `dropImpliedByteDomains` matches, read off
   ## terms built once per thread (as `seqCapKinds`: by kind, never by name).
-  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`.
+  ## RFC-0005 S8bp: and `not`, for `mergeMemberships`. RFC-0005 S8by: and
+  ## `or`, `=>` and `ite`, the polarity `mergeMemberships` reads below the
+  ## top level.
 
 proc ensureByteDomainKinds() =
   if byteDomainKinds.ready: return
@@ -12926,7 +12928,11 @@ proc ensureByteDomainKinds() =
                            mkIntVar(ctx, "__s8y_kind_probe_n")).raw),
     andK: kindOf((b and mkBoolVar(ctx, "__s8y_kind_probe_c")).raw),
     eq: kindOf((s == mkStringVar(ctx, "__s8y_kind_probe_u")).raw),
-    notK: kindOf((not b).raw))
+    notK: kindOf((not b).raw),
+    orK: kindOf((b or mkBoolVar(ctx, "__s8by_kind_probe_d")).raw),
+    impliesK: kindOf(implies(b, mkBoolVar(ctx, "__s8by_kind_probe_e")).raw),
+    iteK: kindOf(ite(b, mkBoolVar(ctx, "__s8by_kind_probe_f"),
+                     mkBoolVar(ctx, "__s8by_kind_probe_g")).raw))
 
 proc dropImpliedByteDomains*(ctx: Z3Context; roots: openArray[Z3Bool]):
     seq[Z3Bool] =
@@ -13043,6 +13049,23 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## 6.7M to refute under the length cap, with the cap in step 2's core
   ## (`sxUnknown`); as one membership of the intersection it is UNSAT in
   ## 1,392 units (a fresh context; 5.1 as well).
+  ##
+  ## RFC-0005 S8by: and below the top level, where a membership sits under
+  ## a disjunction, an `ite`, a negation or an implication (`a or not
+  ## s.contains(re"b")`). There a membership literal of `x` is merged with
+  ## those of the same `x` that hold wherever it is evaluated: the other
+  ## conjuncts of each `and` above it, the roots' top-level ones included
+  ## (their intersection `I`). Where those and the literals of `x` in its
+  ## own conjunction number two or more, one of them negated as it is
+  ## read, the conjunction's literals (their intersection `A`) become one:
+  ## `x in (A & I)` where they are asserted, `not (x in (comp(A) & I))`
+  ## where they are denied (under a `not`, or left of a `=>`), so that
+  ## either way Z3 meets one membership of an intersection. Where `x` lies
+  ## in `I`, both terms are true exactly when the literals are, and each
+  ## `and` above is false wherever a conjunct of it is: every root keeps
+  ## its value under every assignment, so the models are the same. A
+  ## literal read both ways (an `ite` condition, an argument of `=`) is
+  ## left as it is.
   ensureByteDomainKinds()
   let bk = byteDomainKinds
   let kinds = seqCapKinds()
@@ -13051,45 +13074,187 @@ proc mergeMemberships*(ctx: Z3Context; roots: openArray[Z3Bool]):
     else: -1
   let byteReId = astId(ctx, star(range(mkString(ctx, "\x00"),
                                        mkString(ctx, "\xff"))).raw)
-  type Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
-  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
+  type
+    Lit = tuple[root, id: int, re: Z3AnyAst, neg: bool]
+    Held = seq[tuple[re: Z3AnyAst, neg: bool]]
+      ## RFC-0005 S8by. The membership literals of one `x` that hold in a
+      ## context: `re` the set they put `x` in (complemented for a negated
+      ## one), `neg` whether the literal was negated.
+    Pol = enum polPos, polNeg, polBoth
+      ## RFC-0005 S8by. How a term is read: asserted, denied, or both.
   proc conjuncts(r: Z3AnyAst): seq[Z3AnyAst] =
     ## `r`'s top-level conjuncts, in order.
     if kindOf(r) == bk.andK:
       for a in unpackApp(r).args: result.add conjuncts(a)
     else: result.add r
+  proc literal(t: Z3AnyAst): tuple[ok: bool, x, re: Z3AnyAst, neg: bool] =
+    ## `t` as a membership literal `x in re` or `not (x in re)`; a
+    ## byte-domain constraint is none.
+    let neg = kindOf(t) == bk.notK
+    let m = if neg: unpackApp(t).args[0] else: t
+    if kindOf(m) != kinds.inRe: return
+    let args = unpackApp(m).args
+    if not neg and astId(ctx, args[1].raw) == byteReId: return
+    (true, args[0], args[1], neg)
+  # Every term made here is wrapped (and so referenced) at once: Z3 keeps
+  # an unreferenced result only until its next call.
+  proc mk(raw: RawZ3Ast): Z3AnyAst = wrap[Z3AnyAst](ctx, ctx.checkErr raw)
+  proc comp(re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_re_complement(ctx.raw, re.raw)
+  proc inter(res: seq[Z3AnyAst]): Z3AnyAst =
+    if res.len == 1: return res[0]
+    var rs = newSeq[RawZ3Ast](res.len)
+    for i, r in res: rs[i] = r.raw
+    mk Z3_mk_re_intersect(ctx.raw, cuint(rs.len),
+                          cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  proc member(x, re: Z3AnyAst): Z3AnyAst =
+    mk Z3_mk_seq_in_re(ctx.raw, x.raw, re.raw)
+  proc held(re: Z3AnyAst; neg: bool): tuple[re: Z3AnyAst, neg: bool] =
+    result = (re: re, neg: neg)
+    if neg: result.re = comp(re)
+  proc andOf(outs: seq[Z3AnyAst]): Z3AnyAst =
+    if outs.len == 1: return outs[0]
+    var rs = newSeq[RawZ3Ast](outs.len)
+    for i, r in outs: rs[i] = r.raw
+    mk Z3_mk_and(ctx.raw, cuint(rs.len),
+                 cast[ptr UncheckedArray[RawZ3Ast]](rs[0].addr))
+  var groups: OrderedTable[int, tuple[x: Z3AnyAst, lits: seq[Lit]]]
   for i, r in roots:
     for t in conjuncts(toAnyAst(r)):
-      let neg = kindOf(t) == bk.notK
-      let m = if neg: unpackApp(t).args[0] else: t
-      if kindOf(m) != kinds.inRe: continue
-      let args = unpackApp(m).args
-      if not neg and astId(ctx, args[1].raw) == byteReId: continue
-      groups.mgetOrPut(astId(ctx, args[0].raw), (x: args[0], lits: @[])).lits.add(
-        (root: i, id: astId(ctx, t.raw), re: args[1], neg: neg))
+      let l = literal(t)
+      if not l.ok: continue
+      groups.mgetOrPut(astId(ctx, l.x.raw), (x: l.x, lits: @[])).lits.add(
+        (root: i, id: astId(ctx, t.raw), re: l.re, neg: l.neg))
   var merged: seq[Z3Bool]
   var gone, touched: HashSet[int]
-  for g in groups.values:
+  var top: Table[int, Held]   # RFC-0005 S8by: what holds everywhere
+  for xId, g in groups:
     var anyNeg = false
     for l in g.lits: anyNeg = anyNeg or l.neg
-    if g.lits.len < 2 or not anyNeg: continue
-    var res = newSeq[RawZ3Ast](g.lits.len)
+    if g.lits.len < 2 or not anyNeg:
+      for l in g.lits: top.mgetOrPut(xId, @[]).add held(l.re, l.neg)
+      continue
+    var res = newSeq[Z3AnyAst](g.lits.len)
     for i, l in g.lits:
-      res[i] = if l.neg: ctx.checkErr Z3_mk_re_complement(ctx.raw, l.re.raw)
-               else: l.re.raw
+      res[i] = held(l.re, l.neg).re
       gone.incl l.id
       touched.incl l.root
-    let inter = ctx.checkErr Z3_mk_re_intersect(ctx.raw, cuint(res.len),
-      cast[ptr UncheckedArray[RawZ3Ast]](res[0].addr))
-    merged.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_seq_in_re(ctx.raw,
-                                                              g.x.raw, inter))
-  if merged.len == 0: return @roots
-  for i, r in roots:
-    if i notin touched: result.add r
-    else:
-      for t in conjuncts(toAnyAst(r)):
-        if astId(ctx, t.raw) notin gone: result.add wrap[Z3Bool](ctx, t.raw)
-  result.add merged
+    let one = inter(res)
+    top[xId] = @[(re: one, neg: true)]
+    merged.add wrap[Z3Bool](ctx, member(g.x, one).raw)
+  var flat: seq[Z3Bool]
+  if merged.len == 0: flat = @roots
+  else:
+    for i, r in roots:
+      if i notin touched: flat.add r
+      else:
+        for t in conjuncts(toAnyAst(r)):
+          if astId(ctx, t.raw) notin gone: flat.add wrap[Z3Bool](ctx, t.raw)
+    flat.add merged
+  # RFC-0005 S8by: below the top level. Only a term holding a membership
+  # literal is rebuilt (`holds`), each once per context and reading.
+  var hasLit: Table[int, bool]
+  proc holds(t: Z3AnyAst): bool =
+    let id = astId(ctx, t.raw)
+    if id in hasLit: return hasLit[id]
+    result = literal(t).ok
+    if not result and getAstKind(t) == akApp:
+      for a in unpackApp(t).args:
+        if holds(a):
+          result = true
+          break
+    hasLit[id] = result
+  var memo: Table[(int, int, Pol, bool), Z3AnyAst]
+  var serial = 0
+  proc flip(p: Pol): Pol =
+    case p
+    of polPos: polNeg
+    of polNeg: polPos
+    of polBoth: polBoth
+  proc rewrite(t: Z3AnyAst; env: Table[int, Held]; envId: int; pol: Pol;
+               conj: bool): Z3AnyAst =
+    ## `t` read as `pol` where `env` holds. `conj`: `t` (a Bool term) as a
+    ## conjunction -- its own membership literals merged with `env`, the
+    ## rest rewritten with those literals held too; otherwise each of its
+    ## arguments rewritten, read as its operator reads it.
+    if pol == polBoth or getAstKind(t) != akApp or not holds(t): return t
+    let key = (astId(ctx, t.raw), envId, pol, conj)
+    if key in memo: return memo[key]
+    if not conj:
+      let (decl, args) = unpackApp(t)
+      let k = kindOf(t)
+      var raws = newSeq[RawZ3Ast](args.len)
+      var keep = newSeq[Z3AnyAst](args.len)
+      var changed = false
+      for i, a in args:
+        let p =
+          if k == bk.notK: flip(pol)
+          elif k == bk.andK or k == bk.orK: pol
+          elif k == bk.impliesK: (if i == 0: flip(pol) else: pol)
+          elif k == bk.iteK: (if i == 0: polBoth else: pol)
+          else: polBoth
+        let b = rewrite(a, env, envId, p, getSortKind(a) == skBool)
+        keep[i] = b
+        raws[i] = b.raw
+        changed = changed or b.raw != a.raw
+      result = if not changed: t
+               else: mk(Z3_mk_app(ctx.raw, decl, cuint(raws.len),
+                                  cast[ptr UncheckedArray[RawZ3Ast]](raws[0].addr)))
+      memo[key] = result
+      return
+    let cs = conjuncts(t)
+    var own: OrderedTable[int, tuple[x: Z3AnyAst, lits: Held, ids: seq[int]]]
+    for c in cs:
+      let l = literal(c)
+      if l.ok:
+        let xId = astId(ctx, l.x.raw)
+        if xId notin own: own[xId] = (x: l.x, lits: @[], ids: @[])
+        own[xId].lits.add held(l.re, l.neg)
+        own[xId].ids.add astId(ctx, c.raw)
+    var inner = env
+    var innerId = envId
+    if own.len > 0:
+      inc serial
+      innerId = serial
+      for xId, g in own:
+        for h in g.lits: inner.mgetOrPut(xId, @[]).add h
+    var drop: HashSet[int]
+    var add: seq[Z3AnyAst]
+    for xId, g in own:
+      let above = env.getOrDefault(xId)
+      # Negated as read: a negated literal asserted, or a plain one denied.
+      var anyNeg = false
+      for h in above: anyNeg = anyNeg or h.neg
+      for h in g.lits: anyNeg = anyNeg or (h.neg != (pol == polNeg))
+      if above.len + g.lits.len < 2 or not anyNeg: continue
+      var a, i: seq[Z3AnyAst]
+      for h in g.lits: a.add h.re
+      for h in above: i.add h.re
+      for id in g.ids: drop.incl id
+      add.add(
+        if pol == polPos: member(g.x, inter(a & i))
+        else: mk(Z3_mk_not(ctx.raw,
+                           member(g.x, inter(@[comp(inter(a))] & i)).raw)))
+    var outs: seq[Z3AnyAst]
+    var changed = add.len > 0
+    for c in cs:
+      if astId(ctx, c.raw) in drop: continue
+      let b = if literal(c).ok: c else: rewrite(c, inner, innerId, pol, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    outs.add add
+    result = if not changed: t else: andOf(outs)
+    memo[key] = result
+  for r in flat:
+    # A root's top-level literals are the top level's (above); the rest of
+    # it is rewritten with them held.
+    var outs: seq[Z3AnyAst]
+    var changed = false
+    for c in conjuncts(toAnyAst(r)):
+      let b = if literal(c).ok: c else: rewrite(c, top, 0, polPos, false)
+      changed = changed or b.raw != c.raw
+      outs.add b
+    result.add(if not changed: r else: wrap[Z3Bool](ctx, andOf(outs).raw))
 
 var theoryFreeNeedsSimple {.threadvar.}: tuple[ready: bool, simple: bool]
   ## RFC-0005 S8r. Whether `querySolver`'s `seqTheory = false` must use
@@ -13190,6 +13355,33 @@ proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
   result.setParams(solverParams)
   for c in roots: result.add(c)
 
+proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
+    seq[Z3AnyAst] =
+  ## RFC-0005 S8by. Every term of `roots`, each once, children before
+  ## parents: the roots in order, each term's arguments last to first.
+  ## `ownContextSolver` makes a query's terms in its context in this
+  ## order. Z3's units on a query were a function of the query alone
+  ## since S8bp, but not the wall time a unit costs: the search a unit
+  ## pays for follows the context's term ids (`r4_strip`'s budget-out step
+  ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
+  ## walk's, S8bp). The order moves the search, so units as well as wall
+  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
+  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
+  ## order, root by root.
+  var done: HashSet[int]
+  var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
+  for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
+  while stack.len > 0:
+    let (t, expanded) = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in done: continue
+    if expanded or getAstKind(t) != akApp:
+      done.incl id
+      result.add t
+      continue
+    stack.add (t, true)
+    for a in unpackApp(t).args: stack.add (a, false)
+
 proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
                       rlimit: uint; seqTheory = true): Z3Solver =
   ## RFC-0005 S8bm. `querySolver`'s solver for `roots`, in a fresh Z3
@@ -13200,11 +13392,25 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   ## `newContext` makes the new context the thread's current one; the
   ## walk's is restored. RFC-0005 S8bp: every `checkCapped` step's solver,
   ## the theory-free ones (`seqTheory = false`) included.
+  ##
+  ## RFC-0005 S8by: the query's terms are made in the new context in one
+  ## order, a function of the query alone (`queryTermOrder`), and so are
+  ## their ids, which Z3's search reads. Its units were already the
+  ## query's (S8bp); the wall time a unit costs follows the order too.
   let prev = currentContext()
   let own = newContext()
   setCurrentContext(prev)
+  let order = queryTermOrder(ctx, roots)
+  var at: Table[int, int]
+  let terms = newAstVector(ctx)
+  for i, t in order:
+    at[astId(ctx, t.raw)] = i
+    terms.add t
+  # One translation (one cache), in that order: each term made once, its
+  # arguments before it.
+  let made = translate(terms, own)
   var inOwn = newSeq[Z3Bool](roots.len)
-  for i, c in roots: inOwn[i] = translate(c, own)
+  for i, c in roots: inOwn[i] = wrap[Z3Bool](own, made[at[astId(ctx, c.raw)]])
   querySolver(own, inOwn, rlimit, seqTheory)
 
 when defined(symexTestInjectWalkerFault):
@@ -13669,7 +13875,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##   0. (RFC-0005 S8ay) step 1c's uncapped half -- the query with no
   ##      sequence theory plus `seqRangeFacts` -- under `factsFirstRLimit`.
   ##      An UNSAT is the query's own and returns at once; anything else
-  ##      goes on to (1), with (1b) and (1c) below unchanged.
+  ##      goes on to (1). After a SAT here (RFC-0005 S8by), (1b) and (1c)'s
+  ##      uncapped half are known SAT and do not run, nor does (1c)'s
+  ##      capped half when the model makes the caps true as well.
   ##   1. a fresh one-shot `check()` with every cap ASSERTED. A model is a
   ##      model of the uncapped query.
   ##   1b. after (1) is NOT `zsSat` (`zsUnsat`, or `zsUnknown` -- RFC-0005
@@ -13902,18 +14110,39 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # 1's full-theory search to its half budget first: S8aw's join walks
   # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
   # in a few thousand. Anything else (SAT, or unknown in the small budget)
-  # falls through to the unchanged order below, (1b) and (1c) included
-  # with their full budget, so no verdict is lost.
+  # falls through to the unchanged order below; unknown runs (1b) and (1c)
+  # with their full budget, so no verdict is lost, and SAT skips what it
+  # already answers (RFC-0005 S8by, below).
   # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
   # true of every real input, so an UNSAT is still the query's own.
   let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)
+  # RFC-0005 S8by: a facts-first SAT is (1c)'s uncapped answer, and so
+  # (1b)'s: (1c) is the same query under a larger budget, (1b) a subset of
+  # it, and a budget never turns a SAT into an UNSAT. Neither is run after
+  # one (in a context of its own each is the same search to the same SAT:
+  # 295,900 + 311,463 of `lastNl`'s 1,106,184 units on Z3 5.1). Where the
+  # facts-first model makes every cap true as well (`capsHold`), it is a
+  # model of (1c)'s capped half too, which is then not run either.
+  var factsSat, capsHold = false
   block factsFirst:
     when defined(symexQueryStats):
       if symexFactsFirstOff: break factsFirst   # RFC-0005 S8bm
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = ownContextSolver(ctx, roots & facts, pre, seqTheory = false)
-    if counted("factsFirst", ownContextCheck(sPre)) == zsUnsat:
+    let rPre = counted("factsFirst", ownContextCheck(sPre))
+    if rPre == zsUnsat:
       return (zsUnsat, sPre, nil, "")
+    if rPre == zsSat:
+      factsSat = true
+      # Every assertion of the capped half, evaluated under the model in
+      # its own context: all true, whichever way the evaluator reads a
+      # string operation, means that query has a model.
+      let m = sPre.model()
+      capsHold = true
+      for c in roots & facts & caps:
+        if m.eval(translate(c, sPre.ctx)).toBoolOpt != some(true):
+          capsHold = false
+          break
   # Step 1: the caps asserted, one-shot, in a context of its own
   # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
   # same whether or not the facts-first check (or anything else) ran in
@@ -13946,7 +14175,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # decide. (`tsymex_rfc0005_s8aq_remainder.nim`, S8ai's own two
   # not-pinned-end-to-end cases: `s[7] == ':' and rfind < 7` and `':' in s
   # and rfind == -1`, both cancelled at step 1 under the tight budget.)
-  if r1 != zsSat:
+  if r1 != zsSat and not factsSat:   # RFC-0005 S8by: else known SAT
     let (tfUnsat, s1b) = theoryFreeUnsat()
     if tfUnsat: return (zsUnsat, s1b, nil, "")
   if r1 != zsSat:
@@ -13984,11 +14213,13 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     # (`tsymex_rfc0005_s8o_termination` (4), `t.len > 10` under a cap of 8).
     # (`facts` is computed above, for the facts-first check; RFC-0005 S8ba:
     # with each length at most `high(int)`, `nimLenFacts`.)
-    if facts.len > 0:
+    # (RFC-0005 S8by: neither half after a facts-first SAT whose model
+    # satisfies the caps, nor the uncapped half after any facts-first SAT.)
+    if facts.len > 0 and not factsSat:
       let sTr = ownContextSolver(ctx, roots & facts, rl, seqTheory = false)
       if counted("1c", ownContextCheck(sTr)) == zsUnsat:
         return (zsUnsat, sTr, nil, "")
-    if not lastIndex:
+    if not lastIndex and not capsHold:
       let sTc = ownContextSolver(ctx, roots & facts & caps, rl,
                                  seqTheory = false)
       if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
@@ -14036,6 +14267,8 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if r1 == zsUnsat:
       (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
                            "seq.last_indexof) was not decided: " & z3Why(s3))
+    elif factsSat:
+      (zsUnknown, s3, nil, z3Why(s3))   # RFC-0005 S8by: (1b) known SAT
     else:
       let (tfUnsat, s1b) = theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
@@ -17983,7 +18216,24 @@ func concreteBranchRLimit*(settings: SymexSettings): uint =
   if q != 0 and q != ResourceBudget().queryRLimit: q
   else: defaultConcreteBranchRLimit
 
-proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
+                          settings: SymexSettings): Z3Status =
+  ## RFC-0005 S8by. One of concolic collection's scratch solves
+  ## (`concreteBranchOutcome`, `concretelyInfeasible`,
+  ## `runConcolicCollectImpl`'s concrete-inputs check): `roots` under
+  ## `concreteBranchRLimit(settings)` and `random_seed = 0`, in a context
+  ## of its own (`ownContextSolver`, RFC-0005 S8bm), its units added to
+  ## `ownContextUnits`. They checked in the walk's context, where what the
+  ## context already held moved their search, as S8bm and S8bp measured
+  ## for the walker's own: a factoring branch condition took 876,296 units
+  ## in one context and 5,854,996 in one that made the query's constants
+  ## the other way round (Z3 5.1; 23,956 and 911,593 on 4.13.4), and under
+  ## a bound between them it was decided in the first and not in the second
+  ## (`tsymex_rfc0005_s8by_remainder`). Now what the context holds moves
+  ## neither its spend nor whether it decides within its bound.
+  ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
+
+proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                            cond: Z3Bool, settings: SymexSettings,
                            facts: seq[Z3Bool] = @[]): Option[bool] =
   ## Determine whether `cond` (a branch predicate, already lowered against
@@ -18026,41 +18276,20 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## under the pins, and an `if` on a closure that returned normally was
   ## always ambiguous. The pools are definitional (or true of every real
   ## input), so they prune no execution the draws describe.
-  let rlimit = concreteBranchRLimit(settings)
   var reach = concreteEq
   reach.add facts
   reach.add cond
   let pools = globalRoots(reach)
-  let sTrue = newSolver(ctx)
-  let spTrue = newParams(ctx)
-  spTrue.set("rlimit", rlimit)
-  spTrue.set("random_seed", 0'u)
-  # RFC-0005 S8bu: and the wall-clock backstop (`queryTimeoutMs`).
-  if settings.budget.queryTimeoutMs > 0'u:
-    spTrue.set("timeout", settings.budget.queryTimeoutMs)
-  sTrue.setParams(spTrue)
-  for c in concreteEq: sTrue.add(c)
-  for c in pools: sTrue.add(c)
-  for c in facts: sTrue.add(c)
-  sTrue.add(cond)
-  let rTrue = solveBounded(sTrue)
-  let sFalse = newSolver(ctx)
-  let spFalse = newParams(ctx)
-  spFalse.set("rlimit", rlimit)
-  spFalse.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    spFalse.set("timeout", settings.budget.queryTimeoutMs)
-  sFalse.setParams(spFalse)
-  for c in concreteEq: sFalse.add(c)
-  for c in pools: sFalse.add(c)
-  for c in facts: sFalse.add(c)
-  sFalse.add(not cond)
-  let rFalse = solveBounded(sFalse)
+  # RFC-0005 S8by: each in a context of its own (`concreteScratchCheck`).
+  let rTrue = concreteScratchCheck(ctx, concreteEq & pools & facts & @[cond],
+                                   settings)
+  let rFalse = concreteScratchCheck(ctx,
+    concreteEq & pools & facts & @[not cond], settings)
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
 
-proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
+proc concretelyInfeasible*(ctx: Z3Context, concreteEq: seq[Z3Bool],
                           conds: seq[Z3Bool], settings: SymexSettings): bool =
   ## RFC-0005 S8i. True iff `conds` (a path's `pc` and defect-survivor
   ## facts) is UNSAT under the concrete pins: the replayed execution cannot
@@ -18068,17 +18297,9 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   ## `concreteBranchOutcome`'s; an exhausted bound is `zsUnknown`, never
   ## `zsUnsat`, so it can only keep a path, never drop one wrongly.
   ## RFC-0005 S8n: with the same `globalRoots()` pools.
-  let sv = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    sp.set("timeout", settings.budget.queryTimeoutMs)
-  sv.setParams(sp)
-  for c in concreteEq: sv.add(c)
-  for c in globalRoots(concreteEq & conds): sv.add(c)
-  for c in conds: sv.add(c)
-  solveBounded(sv) == zsUnsat
+  ## RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
+  concreteScratchCheck(ctx, concreteEq & globalRoots(concreteEq & conds) &
+                            conds, settings) == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -27351,20 +27572,13 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   # (`concreteBranchRLimit`), with their `random_seed`. It had no bound at
   # all. An exhausted bound is `zsUnknown`, reported `false`: not proven,
   # never a claim.
-  let s = newSolver(ctx)
-  let sp = newParams(ctx)
-  sp.set("rlimit", concreteBranchRLimit(settings))
-  sp.set("random_seed", 0'u)
-  if settings.budget.queryTimeoutMs > 0'u:   # RFC-0005 S8bu
-    sp.set("timeout", settings.budget.queryTimeoutMs)
-  s.setParams(sp)
+  # RFC-0005 S8by: in a context of its own (`concreteScratchCheck`).
   var pinned = initialPC & concreteEq
   for p in resultPaths:
     for c in p.pc: pinned.add c
-  for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
-  for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = solveBounded(s) == zsSat
+  result.pcSatByConcreteInputs = concreteScratchCheck(ctx,
+    pinned & indexSplitRoots(ctx, pinned), settings) == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars

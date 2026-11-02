@@ -33,21 +33,27 @@ proc magicSut(x: int) =
   if x == 42:
     symexTarget("magic")
 
+# RFC-0005 S8cb: this was `a < a`, a fresh symbol until the walker modelled the
+# order on bool. A module-level `var` no one writes is a fresh symbol at its
+# read (`feGlobalHavoc`, `dcFreshSymbol`), and really holds false.
+var freshGlobal = false
+
+proc freshFalse(a: bool): bool {.inline.} = freshGlobal and (a or not a)
+
 proc freshSut(a: bool; x: int) =
-  ## `a < a` on a bool is system's magic `<`, which the walker models as a
-  ## FRESH symbol (`feUnsupportedOpHavoc`, `dcFreshSymbol`): the label's path
-  ## carries exactly `{scSpurious}` -- replay-eligible. Reality: `a < a` is
-  ## always false, so the label is unreachable and every candidate the solver
-  ## picks for it is refuted.
+  ## `freshFalse(a)` is a FRESH symbol to the walker: the label's path carries
+  ## exactly `{scSpurious}` -- replay-eligible. Reality: it is always false,
+  ## so the label is unreachable and every candidate the solver picks for it
+  ## is refuted.
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if o and x == 100:
     symexTarget("fresh")
 
 proc freshTwinSut(a: bool; x: int) =
   ## The confirming twin: the same fresh symbol, negated guard.
   tick()
-  let o = a < a
+  let o = freshFalse(a)
   if not o and x == 100:
     symexTarget("freshTwin")
 
@@ -122,7 +128,7 @@ suite "RFC-0005 S2 -- replayWitness":
     check sideEffects == 1
 
   test "roRefuted: a real fresh-symbol candidate the real fn does not reach":
-    ## The model of `freshSut` havocs `a < a`, so it solves the label's path
+    ## The model of `freshSut` havocs `freshFalse(a)`, so it solves the label's path
     ## into a CANDIDATE (x = 100, the havoc true). Since S10 that candidate is
     ## replayed by `symexFind` itself -- the typed witness never reaches this
     ## module (`SatCandidate` exposes none) -- and reality refutes it: the

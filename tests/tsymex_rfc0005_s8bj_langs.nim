@@ -10,22 +10,17 @@
 ##   * `skNoOcc` / `skFirst` / `skSpan`: the search (`find`, `findBounds`);
 ##   * the capture languages, anchored (`matchLen`'s captures) and
 ##     unanchored (`findBounds`' captures).
-## Under a JIT-enabled libpcre the search languages of the patterns the
-## walker declines there (`jitDeclined`) are not compared.
+## RFC-0005 S8bt: the unanchored languages (the search, the unanchored
+## captures) are those of the engine std/re runs the call on
+## (`pcre_engine.pcreSearchEngine`: 8.37's JIT on the Windows legs).
 import std/[unittest, strutils, re, times, tables]
-import pcre
-import nelli/smt/[pcre_syntax, pcre_select]
+import nelli/smt/[pcre_syntax, pcre_select, pcre_engine]
 
 var t0 = epochTime()
 proc lap(): string =
   let t = epochTime()
   result = formatFloat(t - t0, ffDecimal, 1) & " s"
   t0 = t
-
-proc jitEngine(): bool =
-  var v: cint
-  discard pcre.config(pcre.CONFIG_JIT, addr v)
-  v == 1
 
 proc words(alpha: string; maxLen: int): seq[string] =
   result = @[""]
@@ -98,6 +93,10 @@ proc prefixOf(pc: PrevClass): string =
   of pcCRLF: "\r\n"
   of pcCR: "\r"
   of pcNl: "\x0c"
+  # RFC-0005 S8bt: inside a character (no start variant).
+  of pcU1: "\xC2"
+  of pcU2: "\xE2"
+  of pcU3: "\xE2\x80"
 
 const patterns = [
   # verbs
@@ -129,7 +128,6 @@ proc inPart(i: int): bool = i mod 2 == s8bjPart
 suite "S8bj: the agenda's languages against std/re (part " & $s8bjPart & ")":
 
   test "every pattern, every variant, every language":
-    let jit = jitEngine()
     var bad: seq[string]
     var att, srch, caps = 0
     for i, p in patterns:
@@ -146,15 +144,17 @@ suite "S8bj: the agenda's languages against std/re (part " & $s8bjPart & ")":
       let n = buildNfa(pr)
       check n.ok
       if not n.ok: continue
-      let search = not (jit and jitDeclined(n).len > 0)
+      let ns = buildNfa(pr, pcreSearchEngine())
+      check ns.ok
+      let search = ns.ok
       for pc in startClasses(n):
         let pre = prefixOf(pc)
         let none = selectionLangV(n, p, lkNone, pc)
         let mark = selectionLangV(n, p, lkMark, pc)
         let endsL = selectionLangV(n, p, lkEnds, pc, nonEmpty = true)
-        let noOcc = searchLangV(n, p, skNoOcc, pc)
-        let first = searchLangV(n, p, skFirst, pc)
-        let span = searchLangV(n, p, skSpan, pc)
+        let noOcc = searchLangV(ns, p, skNoOcc, pc)
+        let first = searchLangV(ns, p, skFirst, pc)
+        let span = searchLangV(ns, p, skSpan, pc)
         check none.ok and mark.ok and endsL.ok and noOcc.ok and first.ok and
               span.ok
         if not (none.ok and mark.ok and endsL.ok and noOcc.ok and first.ok and
@@ -201,8 +201,9 @@ suite "S8bj: the agenda's languages against std/re (part " & $s8bjPart & ")":
           let pre = prefixOf(pc)
           for anch in [true, false]:
             if not anch and not search: continue
-            let setL = captureLangV(n, p, g, pc, false, anch)
-            let capL = captureLangV(n, p, g, pc, true, anch)
+            let na = (if anch: n else: ns)
+            let setL = captureLangV(na, p, g, pc, false, anch)
+            let capL = captureLangV(na, p, g, pc, true, anch)
             check setL.ok and capL.ok
             if not (setL.ok and capL.ok): continue
             for u in words("ab\r\n", 3):
@@ -210,7 +211,7 @@ suite "S8bj: the agenda's languages against std/re (part " & $s8bjPart & ")":
               # below), anchored or not.
               let subj = pre & u
               let st = pre.len
-              let (e, cs) = chosenCapsAt(n, subj, st, st, anch)
+              let (e, cs) = chosenCapsAt(na, subj, st, st, anch)
               let isSet = e >= 0 and cs[g - 1][0] >= 0
               inc caps
               let where = escape(p) & " g" & $g & " " & escape(u) & " after " &
@@ -265,12 +266,12 @@ suite "S8bj: the agenda's languages against std/re (part " & $s8bjPart & ")":
             if m[g - 1] != want:
               bad.add escape(p) & " " & escape(subj) & " " & $st & " g" & $g
           # The unanchored attempt the search finds: findBounds' groups.
-          if jitEngine() and jitDeclined(n).len > 0: continue
           var b = newSeq[tuple[first, last: int]](pr.groups)
           for i in 0 ..< b.len: b[i] = (first: -1, last: 0)
           let r = subj.findBounds(rx, b, st)
           if r.first < 0: continue
-          let (e2, cs2) = chosenCapsAt(n, subj, r.first, st, false)
+          let (e2, cs2) = chosenCapsAt(buildNfa(pr, pcreSearchEngine()), subj,
+                                       r.first, st, false)
           if e2 != r.last + 1:
             bad.add escape(p) & " " & escape(subj) & " " & $st & " unanch len"
             continue

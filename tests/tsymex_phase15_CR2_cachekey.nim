@@ -1037,6 +1037,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## witness extraction, witness-render drift, mpairs aliasing, a key
     ## change while iterating a Table, string setLen over a symbolic
     ## string). 213->228 (provisional).
+    ## RFC-0005 S8bt (an unverified libpcre declines every regex call; the
+    ## rest of S8bj's remainder). Provisional 224.
     check symexWalkerVersion == "237"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

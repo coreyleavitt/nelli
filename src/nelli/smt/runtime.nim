@@ -14424,10 +14424,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if r1 == zsUnsat:
       (zsUnknown, s3, nil, capText & "; the uncapped query (it holds a " &
                            "seq.last_indexof) was not decided: " & z3Why(s3))
-    elif factsSat:
-      (zsUnknown, s3, nil, z3Why(s3))   # RFC-0005 S8by: (1b) known SAT
     else:
-      let (tfUnsat, s1b) = theoryFreeUnsat()
+      # RFC-0005 S8by: a facts-first SAT means (1b) cannot refute, so it is not
+      # run; RFC-0005 S8cn: step 1e still may find the model.
+      let (tfUnsat, s1b) = if factsSat: (false, s3) else: theoryFreeUnsat()
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else:
         # Step 1e (RFC-0005 S8cn): both searches ran out, on a query that may

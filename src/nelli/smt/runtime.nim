@@ -495,6 +495,12 @@ type
     ty:     IRType
     idx:    Z3Int
     dead:   bool
+    field:  string
+      ## RFC-0005 S8bo. Non-empty for a field cell (`walkFieldCell`): the
+      ## cell of arm field `field` of the case-object variable `root`
+      ## (`addr root.field`), declared by the arms `tags`; `idx` is unused.
+      ## It dies when the object may have changed arm.
+    tags:   seq[int]
 
   Path = ref object
     pc:        seq[Z3Bool]
@@ -22161,9 +22167,16 @@ proc frameElemCells(p: Path; frame: int): seq[int] =
 proc withElem(sv: SymVal; idx: Z3Int; v: SymVal): SymVal =
   ## RFC-0005 S8be. The `svSeq` `sv` with element `idx` set to `v`. Only a
   ## seq with element cells reaches here, and the parser gives cells only to
-  ## a seq of scalars or strings (`elemCellOf`), whose data is always backed.
-  result = sv
-  result.seqDataRaw = storeSeqElem(sv.seqDataRaw, sv.seqElemTy, idx, v) # [placeholder-audited]
+  ## a backed seq of scalars, strings or objects (`elemCellOf`). RFC-0005
+  ## S8bo: an object element is leaf-split (S8bc), every leaf stored
+  ## (`seqStoreArrs`). A value that does not fit declines in-band and leaves
+  ## the element (`seqStoreDecline`; a caller drains the pending decline).
+  let arrs = seqStoreArrs(sv, idx, v)
+  if arrs.isNone:
+    discard seqStoreDecline("a write through a pointer to an element",
+                            sv.seqElemTy, v)
+    return sv
+  withSeqArrsOf(sv, arrs.get)
 
 proc snapElemCells(p: Path; depth: int; w: WalkCtx): Path =
   ## RFC-0005 S8be. `p` with this frame's seqs with element cells, and the
@@ -22194,7 +22207,8 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
   ## changed since the statement began winning (`elemSnapName`):
   ##
   ## * the seq resized or assigned whole (its length is another term, or
-  ##   the statement's last effect is its write by name, `lastWriteTo`):
+  ##   the statement's last effect is its write by name, `lastWriteTo`,
+  ##   whatever value it writes -- RFC-0005 S8bo):
   ##   Nim may have moved its elements, so its cells die (a dereference
   ##   that may reach one declines, `danglingFork`);
   ## * the seq's elements written: each cell takes its element's value;
@@ -22241,8 +22255,47 @@ proc syncElemCells(stmt: IRStmt; outs: seq[Path]; depth: int;
         if env2.hasKey(cKey) and
            not sameSymVal(addrCellValue(ctx, q, e.ty, e.refAst), env2[cKey]):
           written.add k
-      if seqCh and (lastWriteTo(stmt, root) or
-                    not sameSeqLen(sNow, env2[sKey])):
+      if sNow.kind == svVariant:
+        # RFC-0005 S8bo: a case object's field cells. A statement that may
+        # have changed its arm (the discriminator is another term) kills
+        # them: the pointer names another arm's memory. Otherwise the side
+        # that changed wins, as for an element: a write by name (of the
+        # field, or of the whole object in the same arm, whose memory Nim
+        # reuses) reaches the cell, a write through the pointer the field.
+        let snapV = if env2.hasKey(sKey): env2[sKey] else: sNow
+        if seqCh and (snapV.kind != svVariant or snapV.vDisc == nil or
+                      sNow.vDisc == nil or
+                      not sameSymVal(sNow.vDisc[], snapV.vDisc[])):
+          for k in ks:
+            if q.elemCells[k].root == root: q.elemCells[k].dead = true
+          continue
+        if seqCh:
+          if written.len > 0 and stmt.kind != isCall and
+             displayName(root) notin clash:
+            clash.add displayName(root)
+          for k in ks:
+            let e = q.elemCells[k]
+            if e.root != root: continue
+            discard addrCellStore(ctx, q, e.ty, e.refAst,
+                                  armFieldValue(sNow, e.field, e.tags))
+        else:
+          var vNew = sNow
+          for k in written:
+            let e = q.elemCells[k]
+            vNew = withArmField(vNew, e.field, e.tags,
+                                addrCellValue(ctx, q, e.ty, e.refAst))
+          env2[root] = vNew
+        continue
+      # RFC-0005 S8bo: a write of the seq by name kills its cells whatever
+      # it assigns: Nim's `=copy`/`=sink` frees the old data and points the
+      # seq at another block, even of the same length, and even of the same
+      # elements (`s = t` after `let t = s`, a callee's `s = t` repeating
+      # the caller's value). Before S8bo it had to change the seq's term
+      # too, so a whole assignment of an equal value (or a cached callee's)
+      # left the cells live: a read through one was a confirmed `sxSat` on
+      # memory Nim had freed.
+      if lastWriteTo(stmt, root) or
+         seqCh and not sameSeqLen(sNow, env2[sKey]):
         for k in ks:
           if q.elemCells[k].root == root: q.elemCells[k].dead = true
         continue
@@ -22288,6 +22341,28 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
   var env2 = q.env
   for k in ks:
     let e = q.elemCells[k]
+    if e.field.len > 0 and env2.hasKey(e.root) and
+       env2[e.root].kind == svVariant:
+      # RFC-0005 S8bo: a field cell. The object changed arm since the
+      # raising statement began (its innermost snapshot): the cell dies;
+      # else the field takes the cell's value.
+      var snapV = env2[e.root]
+      var bestV = -1
+      for key, v in env2:
+        if key.startsWith(elemSnapPrefix) and key.endsWith("#s#" & e.root):
+          let rest = key[elemSnapPrefix.len .. ^1]
+          let d = parseInt(rest[0 ..< rest.find('#')])
+          if d > bestV:
+            bestV = d
+            snapV = v
+      let cur = env2[e.root]
+      if snapV.kind != svVariant or snapV.vDisc == nil or cur.vDisc == nil or
+         not sameSymVal(cur.vDisc[], snapV.vDisc[]):
+        q.elemCells[k].dead = true
+        continue
+      env2[e.root] = withArmField(cur, e.field, e.tags,
+                                  addrCellValue(w.z3, q, e.ty, e.refAst))
+      continue
     if not env2.hasKey(e.root) or env2[e.root].kind != svSeq: continue
     var snap = SymVal(kind: svBool)
     var best = -1
@@ -22305,7 +22380,7 @@ proc syncElemCellsFromHeap(p: Path; w: WalkCtx): Path =
     if not sameSymVal(seqElemAt(env2[e.root], e.idx), cur):
       env2[e.root] = withElem(env2[e.root], e.idx, cur)
   q.env = env2
-  q
+  drainPendingLowerEffects(q)
 
 proc walk(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   ## RFC-0005 S8ax. `walkStmt`, keeping each by-reference capture of the

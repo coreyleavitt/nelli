@@ -1744,8 +1744,10 @@ proc danglingFork(p: Path; refAst: Z3AnyAst; w: var WalkCtx): seq[Path] =
           "RFC-0005 S8be: a pointer dereferenced here may hold the address " &
                "of a seq element whose memory Nim may have freed (the seq " &
                "was resized or assigned whole since `addr` took it, or its " &
-               "routine returned), or of a returned routine's variable; the " &
-               "walk does not model freed memory (feUnsupportedOp)")
+               "routine returned), of an arm field of a case object that " &
+               "may have changed arm since (RFC-0005 S8bo), or of a " &
+               "returned routine's variable; the walk does not model freed " &
+               "memory (feUnsupportedOp)")
     result.add forkPathTainted(p, p.pc & @[anyHit], p.env, d)
   result.add forkPath(p, p.pc & @[not anyHit], p.env)
 
@@ -1858,7 +1860,9 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     var addrAst = newRef
     for k in countdown(child.elemCells.high, 0):
       let e = child.elemCells[k]
-      if e.frame != w.frame.frameId or e.root != root or e.dead: continue
+      if e.frame != w.frame.frameId or e.root != root or e.dead or
+         e.field.len > 0:
+        continue
       let same = idx == e.idx
       addrAst = wrap[Z3AnyAst](ctx,
         checkedIte(ctx, same.raw, e.refAst.raw, addrAst.raw))
@@ -1867,6 +1871,96 @@ proc walkElemCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
     discard addrCellStore(ctx, child, ty, newRef, seqElemAt(env2[root], idx))
     env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: addrAst,
                                  ptrFamily: true, ptrPointee: ty)
+    child.env = env2
+    result.add drainPendingLowerEffects(child)
+
+proc armFieldValue(v: SymVal; field: string; tags: seq[int]): SymVal =
+  ## RFC-0005 S8bo. Arm field `field` of the case object `v`, declared by
+  ## the arms `tags`: the slot of the arm `v`'s discriminator selects (an
+  ## `ite` over them; one arm, its slot).
+  var vals: seq[(int, SymVal)]
+  for t in tags:
+    if v.vArmFieldNames.hasKey(t):
+      let i = v.vArmFieldNames[t].find(field)
+      if i >= 0: vals.add (t, v.vArmFields[t][i])
+  result = vals[^1][1]
+  for k in countdown(vals.len - 2, 0):
+    result = iteSV(variantDiscEq(v.vDisc[], int64(vals[k][0])), vals[k][1],
+                   result)
+
+proc withArmField(v: SymVal; field: string; tags: seq[int];
+                  x: SymVal): SymVal =
+  ## RFC-0005 S8bo. The case object `v` with arm field `field` set to `x` in
+  ## every arm of `tags` (as `lowerVariantFieldSet` writes it).
+  result = v
+  for t in tags:
+    if result.vArmFieldNames.hasKey(t):
+      let i = result.vArmFieldNames[t].find(field)
+      if i >= 0: result.vArmFields[t][i] = x
+
+proc walkFieldCell(stmt: IRStmt; paths: seq[Path]; w: var WalkCtx): seq[Path] =
+  ## RFC-0005 S8bo. `addr o.a` of an arm field (`isNew` with `nAddrOf = o`,
+  ## `nAddrField = a`; the parser checked the arm just before): bind
+  ## `stmt.nRetName` to the field's cell -- the one it already has in this
+  ## frame (`Path.elemCells`), else a fresh `ptr`, distinct from every other
+  ## address and from nil, holding the field. The walk then keeps the field
+  ## and the heap at the cell equal (`syncElemCells`) until the object may
+  ## change arm, when the pointer names another arm's memory and the cell
+  ## dies (a dereference that may reach it declines). Declined
+  ## (`feUnsupportedOp`) as `walkElemCell` declines: an object an enclosing
+  ## routine owns, or one a closure captures. Before S8bo such a pointer
+  ## that could escape was `heUnsafeCast`.
+  let ctx = w.z3
+  let ty = stmt.nRefTy.ptrPointeeTy
+  let root = stmt.nAddrOf
+  let field = stmt.nAddrField
+  let typeId = refPointeeTypeId(ty)
+  for p in paths:
+    if w.shouldStop: return
+    var why = ""
+    var tags: seq[int]
+    if root in w.frame.outerNames or isGlobalEnvName(root):
+      why = "of a field of an object an enclosing routine owns"
+    elif not p.env.hasKey(root) or p.env[root].kind != svVariant:
+      why = "of a field of an object this frame does not hold"
+    else:
+      for (cl, _) in w.frame.capCells:
+        if cl == root: why = "of a field of an object a closure captures"
+      for t, names in p.env[root].vArmFieldNames:
+        if field in names: tags.add t
+      if why.len == 0 and tags.len == 0:
+        why = "of a field no arm of the object holds"
+    var known = -1
+    if why.len == 0:
+      for k, e in p.elemCells:
+        if e.frame == w.frame.frameId and e.root == root and
+           e.field == field and not e.dead:
+          known = k
+    if known >= 0:
+      var env1 = p.env
+      env1[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: p.elemCells[known].refAst,
+                                   ptrFamily: true, ptrPointee: ty)
+      result.add forkPath(p, p.pc, env1)
+      continue
+    let refSort = allocRefSort(ctx, ty)
+    var child = forkPath(p, p.pc, p.env)
+    let newRef = freshRef(ctx, refSort, typeId, child)
+    assertFreshness(ctx, child, typeId, newRef, w.settings)
+    var env2 = child.env
+    env2[stmt.nRetName] = SymVal(kind: svPtr, ptrAst: newRef,
+                                 ptrFamily: true, ptrPointee: ty)
+    if why.len > 0:
+      child.env = env2
+      let d = w.degrade(feUnsupportedOp,
+        "RFC-0005 S8bo: `addr " & displayName(root) & "." & field & "` " &
+             why & " is not modelled: the pointer is not kept equal to the " &
+             "field (feUnsupportedOp)")
+      result.add forkPathTainted(child, child.pc, child.env, d)
+      continue
+    child.elemCells.add ElemCell(refAst: newRef, frame: w.frame.frameId,
+                                 root: root, ty: ty, field: field, tags: tags)
+    discard addrCellStore(ctx, child, ty, newRef,
+                          armFieldValue(env2[root], field, tags))
     child.env = env2
     result.add drainPendingLowerEffects(child)
 
@@ -3569,6 +3663,8 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
   of isNew:
     if stmt.nAddrIdx != nil:
       return walkElemCell(stmt, paths, w)   # RFC-0005 S8be
+    if stmt.nAddrField.len > 0:
+      return walkFieldCell(stmt, paths, w)  # RFC-0005 S8bo
     if stmt.nAddrOf.len > 0:
       return walkAddrCell(stmt, paths, w)   # RFC-0005 S8ax
     # Phase 15 R2 (ADR-0010). `new T` allocation semantics. Per surviving path:

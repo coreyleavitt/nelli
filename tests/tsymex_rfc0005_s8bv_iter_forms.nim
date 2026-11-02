@@ -1,4 +1,4 @@
-## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (re-reads, ranges, bool, empty, literals, the cap).
+## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (re-reads, signed order, ranges, bool, empty, literals, the cap).
 ##
 ## `for x in s` over a builtin `set[T]` declined. It is unrolled over `T`'s
 ## domain in ascending order, exactly as `system.items` iterates (`T(i) in a`
@@ -37,6 +37,16 @@ template nativeHits(body: untyped): HashSet[string] =
   body
   symexCaptureEnd()
 type E4 = enum e0, e1, e2, e3
+
+proc itInt8First(s: set[int8]) =
+  var first = 0'i8
+  var seen = false
+  for v in s:
+    if not seen:
+      first = v
+      seen = true
+  if seen and first > 0 and -5'i8 in s: symexTarget("bv_it_int8_first")
+  if seen and first == -128'i8: symexTarget("bv_it_int8_min")
 
 proc itMutateSym() =
   # The container is a symbol: `items` re-reads it at every step, so an
@@ -100,6 +110,8 @@ suite "S8bv: walker version":
     check parseInt(symexWalkerVersion) >= 226
 
 suite "S8bv (1): for x in a builtin set":
+  test "no member of a signed set precedes a negative one":
+    check verdict(itInt8First, "bv_it_int8_first").status == sxUnsat
   test "a set variable is re-read at every step, as items does":
     check "bv_it_mutate_sym" in nativeHits(itMutateSym())
     let r = verdict(itMutateSym, "bv_it_mutate_sym")

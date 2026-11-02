@@ -1069,6 +1069,8 @@ task test, "Run the test suite":
             # subranges (no set conversion across domains exists), pigeonhole-
             # hard card queries and newSeqUninit taint precision. Walker 226.
             "tsymex_rfc0005_s8bv_iter_order",
+            "tsymex_rfc0005_s8bv_iter_char",
+            "tsymex_rfc0005_s8bv_iter_int8",
             "tsymex_rfc0005_s8bv_iter_forms",
             "tsymex_rfc0005_s8bv_subrange",
             "tsymex_rfc0005_s8bv_subrange_sets",

@@ -1,4 +1,4 @@
-## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (order, char and signed domains, break, continue).
+## RFC-0005 (soundness channels) slice S8bv -- S8bq's remainder, item 1 (order, set[char] members and counts, break, continue).
 ##
 ## `for x in s` over a builtin `set[T]` declined. It is unrolled over `T`'s
 ## domain in ascending order, exactly as `system.items` iterates (`T(i) in a`
@@ -65,16 +65,6 @@ proc itCharCount(s: set[char]) =
   for c in s: inc k
   if k == 2: symexTarget("bv_it_char_count")
 
-proc itInt8First(s: set[int8]) =
-  var first = 0'i8
-  var seen = false
-  for v in s:
-    if not seen:
-      first = v
-      seen = true
-  if seen and first > 0 and -5'i8 in s: symexTarget("bv_it_int8_first")
-  if seen and first == -128'i8: symexTarget("bv_it_int8_min")
-
 proc itBreak(s: set[E4]) =
   var k = 0
   for x in s:
@@ -105,17 +95,12 @@ suite "S8bv (1): for x in a builtin set":
     check "bv_it_order" in h and "bv_it_order_rev" notin h
   test "every member is visited once":
     check verdict(itCount, "bv_it_count").status == sxUnsat
-  test "a set[char]":
-    check verdict(itCharFirst, "bv_it_char_first").status == sxUnsat
+  test "a set[char]: its only member, and a count":
     let r = verdict(itCharFirst, "bv_it_char_one")
     check r.status == sxSat
     check r.errors.len == 0
     check "bv_it_char_one" in nativeHits(itCharFirst({'q'}))
     check verdict(itCharCount, "bv_it_char_count").status == sxSat
-  test "a signed set starts at its low bound":
-    check verdict(itInt8First, "bv_it_int8_first").status == sxUnsat
-    check verdict(itInt8First, "bv_it_int8_min").status == sxSat
-    check "bv_it_int8_min" in nativeHits(itInt8First({-128'i8, 3}))
   test "break leaves the loop":
     check verdict(itBreak, "bv_it_break").status == sxUnsat
     check verdict(itBreak, "bv_it_break_three").status == sxUnsat

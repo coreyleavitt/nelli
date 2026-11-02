@@ -13860,11 +13860,13 @@ the first three items were pins, not gaps; their RED is at 8cef160, where
 false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
 `wasMoved` stopped the compile (nnkSym for nnkIdentDefs).
 
-- *Item 1: a magic with no body is modelled or declines.* `unsafeNew(p, n)` is
+- *Item 1: a magic with no body is modelled or declines.* `unsafeNew(p, n)`, a
+  decline at the merged tree (all its labels sxUnknown, no live false verdict), is
   now modelled: a fresh zeroed cell written back through a pure lvalue,
   `RangeDefect` on a negative size, a decline when the size is under the
   pointee's or above `maxModelledInitialSize`. A size whose call writes what the
-  place reads declines (`feEvalOrderUnmodelled`). The audit found two more
+  place reads declines (`feEvalOrderUnmodelled`). This improves a decline. The
+  false verdicts above exist only at 8cef160. The audit found two
   SOUNDNESS bugs at the merged tree: `ensureMove(a)` and `procCall(f(k))`,
   whose bodies are empty, returned the zero value (`b.len == 1` a false sxUnsat,
   `b.len == 0` and `r == 4 and k != 3` false sxSat). Any magic with no statement

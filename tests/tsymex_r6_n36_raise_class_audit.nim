@@ -465,7 +465,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `injectedExtractionFaultTerms`).
     ## 77 -> 79 (RFC-0005 batch 8, walker 241). The same for an own-context
     ## solve (`ownContextCheck`, `injectedSolveFaultTerms`).
-    check runtimeCount == 79
+    ## 79 -> 80 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
+    ## made implicitly: category-c.
+    check runtimeCount == 80
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
@@ -499,7 +501,8 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## S8z).
     ## 78 -> 80: the same two S8bx test-injection-only sites added above.
     ## 80 -> 82: the same two batch 8 test-injection-only sites added above.
-    check cCount == 82
+    ## 82 -> 83: the same `storeOrdinal` site added above (RFC-0005 S8cl).
+    check cCount == 83
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

@@ -27923,7 +27923,7 @@ proc storeOrdinal[F](f: var F; v: int64) =
   ## cpp compile error in every SUT whose cell holds an `Atomic`,
   ## `tsymex_r6_n43_parity`).
   if v < int64(ord(low(F))) or v > int64(ord(high(F))):
-    raise newException(RangeDefect, "value out of range: " & $v)
+    raise newException(RangeDefect, "value out of range: " & $v)  # [raise-audited: category-c: the check `F(v)` made implicitly, in reading a witness back, outside the walk]
   when sizeof(F) == 1:
     var lo = int8(v)
   elif sizeof(F) == 2:

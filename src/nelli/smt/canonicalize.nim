@@ -203,7 +203,18 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "241"
+const symexWalkerVersion* = "245"
+  ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
+  ## batch 8 as one integration branch under ONE walker number; their bullets
+  ## follow, each naming its provisional number. The stack's own changes: S8ce
+  ## removes batch 8's `solveRaiseHook` with S8bx's hook (`checkCappedSteps` is
+  ## `checkCapped` again; a lifecycle hook no longer loses a raise). S8ca's
+  ## `parseSwap` is dropped for S8bl's `parseVarMagicStmt`. SOUNDNESS: S8ca item
+  ## 5 gives a proc value's domain a sort for a seq, table, set or array, which
+  ## lifted the only decline in front of three aliasing shapes: a view and its
+  ## Table in one call (`closureTakesView`, a false sxSat), a by-value location
+  ## the body also reaches (`byValueTouch`, a false sxUnsat), a call returning
+  ## `var T` as a `var` actual (a false sxSat). Each declines. 241 -> 245.
   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
   ## one integration branch under ONE walker number; their bullets follow the
   ## batch 7 block, each naming its provisional number. The stack's own

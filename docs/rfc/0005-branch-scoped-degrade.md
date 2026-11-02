@@ -9488,6 +9488,48 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
 
+**Batch 9 (2026-11-02) — one walker number for four slices.** S8ce, S8ca, S8by
+and S8cc (each provisional: 238, 233, 231, 238) land stacked on batch 8, in that
+order: `symexWalkerVersion` 241 -> **245**, the CR2 `==` pin 245, each slice's
+`>=` floor unchanged, the batch's floor in `tsymex_rfc0005_b9_integration`.
+Where slices met:
+- *One fallback for a lost raise.* S8ce's root fix makes nim-z3's hooks raise-free,
+  so batch 8's `solveRaiseHook` and S8bx's extraction hook had nothing left to
+  catch. Both are gone, with `extractionFault`: no walker `try` encloses a solve,
+  and S8ce's fallback answers for a raise that would have reached `checkCapped`.
+  S8bx's pins in `tsymex_rfc0005_s8bx_extractraise` are unchanged and green.
+- *One `swap`.* S8ca's `parseSwap` was unreachable behind S8bl's
+  `parseVarMagicStmt`, which dispatches first, so it is dropped. S8ca's deref
+  arm for `p[].add` stands before S8bl's `pureLvalueTarget` arm: it reads the
+  pointer once and the value after the arguments.
+- *S8ca's write log and batch 7's and 8's views.* `aaf8749`'s two declines (a
+  `var openArray` view a later argument writes) survive as `laterLeavesLvalue`.
+  Batch 8's `slot` entries have no cell, so `anchorViews`, `inheritAddrCells` and
+  the capture links skip them, and `syncAddrCells` handles them first.
+- *S8ca item 5 lifted a decline that was doing three jobs.* A proc value's domain
+  now has a sort for a seq, table, set or array. Each of these was a false
+  verdict once that decline lifted; each native run reaches the live label:
+  - a view and its Table in one call, `let r = f(v, t, k)`: a false `sxSat`,
+    which batch 8's `pv_dead` pin caught. `markViewAliases` declines the call when
+    it has a `var` or `addr` actual (`closureTakesView`);
+  - a by-value seq or table whose variable the body also reaches, `f(gs)` with
+    `gs[0] = 50; a[0]`: a false `sxUnsat`. The actual reports its location in
+    `ccTouch` (`byValueTouch`), and `touchMeetsOuter` declines the meeting. A
+    body that only reads declines too (PRECISION, as at batch 8);
+  - a call returning `var T` as a `var` actual, `f(t["a"], t, "a")`: a false
+    `sxSat`, the callee's write landing in a temporary. It declines.
+- *S8by's skip and step 1d.* S8by skips (1b) and (1c) after a facts-first SAT and
+  leaves step 1d, which runs on step 1's UNSAT. Step 1d now decides `preSufNl`
+  before step 2, so S8by's pin names 1d. The S8bp isolation suite still reaches
+  every step: `ownCoreNl` reaches step 2 and `preSufNl` with the facts-first check
+  off reaches (1b), (1c) and (1c)'s capped half.
+- *S8by's timeout.* `concreteScratchCheck` reads `queryTimeoutMsCur`. It equals
+  `settings.budget.queryTimeoutMs` at every concolic site, since
+  `runConcolicCollectImpl` resets the run state with the settings it passes down,
+  on the thread that solves.
+- *S8cc and S8ca.* The parser merged clean. S8cc's index mark holds through S8ca's
+  closure call (`f(gs[nextI()], @[3])` evaluates the call once, exact).
+
 **Batch 8 (2026-11-02) — one walker number for two slices.** S8bx and S8bt
 (each provisional: 228, 224) land stacked on batch 7, in that order:
 `symexWalkerVersion` 237 -> **241**, the CR2 `==` pin 241, each slice's `>=`

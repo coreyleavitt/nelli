@@ -1052,7 +1052,10 @@ suite "Phase 15 CR-2 — version bumps":
     ## level merged). Provisional 231. 219->231.
     ## RFC-0005 S8cc (a callee's global counts as written only where it
     ## may be; an index call with no symbol is bound once). 237->238.
-    check symexWalkerVersion == "241"
+    ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
+    ## proc-value call's aliasing shapes decline where S8ca's sort lifted
+    ## their decline. 241->245.
+    check symexWalkerVersion == "245"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

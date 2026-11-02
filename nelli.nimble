@@ -1367,5 +1367,8 @@ task test, "Run the test suite":
             # global counts as written only where it may be; an index call
             # with no symbol is bound once. Walker 237->238.
             "tsymex_rfc0005_s8cc_cellquery",
-            "tsymex_rfc0005_s8cc_remainder"]:
+            "tsymex_rfc0005_s8cc_remainder",
+            # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
+            # A proc value's aliasing shapes decline; walker 241->245.
+            "tsymex_rfc0005_b9_integration"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

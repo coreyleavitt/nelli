@@ -439,7 +439,7 @@ state = "done"
 [[slice]]
 id = "S8bw"
 title = "S8bn's remainder: walker fault reading an array-global element, aggregate global reads (tuple/object/array globals), pointers into case objects / seqs of aggregates / tables of non-int values, generic case objects"
-state = "pending"
+state = "done"
 
 [[slice]]
 id = "S8bp"
@@ -465,6 +465,11 @@ state = "done"
 id = "S8bt"
 title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interpreter CRLF/ANY start filter, LIMIT between 0 and default, mixed SKIP:NAME, UTF UCP/case folding and (*ANY) in UTF, automaton/step-table/register caps, replace lemmas beyond two shapes"
 state = "done"
+
+[[slice]]
+id = "S8cn"
+title = "Batch 8's remainder: step 1d's adversarial pins, bt_limit_replace on Z3 4.13.4, the declines left on aliased mpairs views and seq elements passed with their seq"
+state = "pending"
 
 [[slice]]
 id    = "S11"

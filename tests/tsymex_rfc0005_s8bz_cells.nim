@@ -325,12 +325,30 @@ proc h3w(h: H3; p: ptr int) =
     p[] = 3
     if h.o.y == 3: symexTarget("h3w")
 proc h3r(h: H3; p: ptr int) =
-  # The part is read first: a store through the pointer before its family
-  # exists is reported in RFC-0005, "As landed (S8bz)".
+  # The part is read first: the store below reaches it (`h3late`).
   if p != nil and h != nil and h.o.y >= 0:
     p[] = 1
     h.o.y = 4
     if p[] == 4: symexTarget("h3r")
+
+proc h3late(h: H3; p: ptr int) =
+  # The store came before this path held the part, so it did not reach it. Nim
+  # cannot hit this target: never the false `sxSat`.
+  if p != nil and h != nil:
+    p[] = 1
+    h.o.y = 4
+    if p[] != 1 and p[] != 4: symexTarget("h3late")
+proc h3lateN(h: H3; p: ptr int) =
+  if p != nil and h != nil:
+    p[] = 1
+    let k = h.n
+    if p[] != 1 and k == k: symexTarget("h3lateN")
+proc h3lateOk(h: H3; p: ptr int) =
+  # One pointer's store reaches what another's dereference names only if it
+  # names it too: with none before, the read is free.
+  if p != nil and h != nil:
+    let k = h.n
+    if p[] == k + 1: symexTarget("h3lateOk")
 
 suite "S8bz: a by-value part of a heap object":
   test "nim":
@@ -340,6 +358,11 @@ suite "S8bz: a by-value part of a heap object":
   test "a target of the pointer":
     confirmed(h3w, "h3w")
     confirmed(h3r, "h3r")
+  test "a store before the path held the part: a stated decline":
+    inBand(h3late, "h3late", "which that store did not reach")
+    inBand(h3lateN, "h3lateN", "which that store did not reach")
+  test "no store before it: no decline":
+    confirmed(h3lateOk, "h3lateOk")
 
 # ---- a whole aggregate's pointer ----------------------------------------------
 #

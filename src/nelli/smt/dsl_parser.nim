@@ -3316,10 +3316,149 @@ proc isNoReturnRoutine(sym: NimNode): bool =
   false
 
 proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
+                       seen, stack: var seq[NimNode])  ## RFC-0005 S8cc fwd decl
+
+proc scanRead(e: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode])
+
+proc scanReadPath(e: NimNode; acc: var OpaqueEffects;
+                  seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The lvalue path `e`, whose value reaches no heap cell,
+  ## read: its root is neither rebound nor does its value escape, and its
+  ## indices are read.
+  case e.kind
+  of nnkSym:
+    if not (symKind(e) in {nskVar, nskLet} and isModuleGlobal(e)):
+      scanOpaqueEffects(e, acc, seen, stack)
+  of nnkDotExpr, nnkHiddenDeref, nnkDerefExpr:
+    scanReadPath(e[0], acc, seen, stack)
+  of nnkBracketExpr, nnkCheckedFieldExpr:
+    scanReadPath(e[0], acc, seen, stack)
+    for i in 1 ..< e.len: scanRead(e[i], acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar:
+    scanReadPath(e[^1], acc, seen, stack)
+  else:
+    scanRead(e, acc, seen, stack)
+
+proc scanCall(n: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. A call in a summarised body: the routine, then each
+  ## argument, read when its formal is by value. A `var` formal or an
+  ## address taken counts as a write (a magic's `var` formal, `inc gi`, has
+  ## no `nnkHiddenAddr`, hence the formal's type), as does any argument when
+  ## the formals cannot be listed.
+  if n.len == 0 or n[0].kind != nnkSym:
+    for c in n: scanOpaqueEffects(c, acc, seen, stack)
+    return
+  scanOpaqueEffects(n[0], acc, seen, stack)
+  var byValue: seq[bool]
+  # A routine's declared formals (a magic's `var` is on its declaration); a
+  # proc value's from its type.
+  let fp =
+    if symKind(n[0]) in procValueHeadKinds:
+      let ty = n[0].getTypeImpl
+      if ty.kind == nnkProcTy and ty.len > 0: ty[0] else: nil
+    else:
+      let impl = n[0].getImpl
+      if impl.kind in RoutineNodes: impl[3] else: nil
+  if fp != nil and fp.kind == nnkFormalParams:
+    for i in 1 ..< fp.len:
+      let d = fp[i]
+      if d.kind != nnkIdentDefs: continue
+      for _ in 0 ..< d.len - 2:
+        byValue.add d[^2].kind notin {nnkVarTy, nnkOutTy}
+  for i in 1 ..< n.len:
+    if byValue.len == n.len - 1 and byValue[i - 1] and
+       n[i].kind notin {nnkHiddenAddr, nnkAddr}:
+      scanRead(n[i], acc, seen, stack)
+    else:
+      scanOpaqueEffects(n[i], acc, seen, stack)
+
+proc scanRead(e: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The expression `e` read by value. A module-level
+  ## variable is not rebound by a read (S8as counted every one a body names
+  ## as written), but a value holding refs escapes: every cell its type
+  ## reaches may be written through it. A proc-typed one, or any other
+  ## shape of expression, is summarised as S8as does.
+  if e == nil or not acc.inert: return
+  case e.kind
+  of nnkSym:
+    if symKind(e) in {nskVar, nskLet} and isModuleGlobal(e) and
+       e.typeKind notin {ntyProc, ntyPointer}:
+      if not irTypeRefFree(classifyType(e.getTypeInst).ty):
+        var rs: seq[string]
+        reachPointees(e.getTypeInst, acc, rs)
+    else:
+      scanOpaqueEffects(e, acc, seen, stack)
+  of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenDeref,
+     nnkDerefExpr:
+    if irTypeRefFree(classifyType(e.getTypeInst).ty):
+      scanReadPath(e, acc, seen, stack)
+    else:
+      for c in e: scanRead(c, acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar, nnkBracket,
+     nnkTupleConstr, nnkCurly, nnkObjConstr, nnkExprColonExpr:
+    for c in e: scanRead(c, acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    scanCall(e, acc, seen, stack)
+  else:
+    scanOpaqueEffects(e, acc, seen, stack)
+
+proc scanWrite(lhs: NimNode; acc: var OpaqueEffects;
+               seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The left side of an assignment: its root is written, its
+  ## indices are read.
+  case lhs.kind
+  of nnkBracketExpr:
+    scanWrite(lhs[0], acc, seen, stack)
+    for i in 1 ..< lhs.len: scanRead(lhs[i], acc, seen, stack)
+  of nnkDotExpr:
+    scanWrite(lhs[0], acc, seen, stack)
+  else:
+    scanOpaqueEffects(lhs, acc, seen, stack)
+
+proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
                        seen, stack: var seq[NimNode]) =
-  ## RFC-0005 S8as. See `opaqueWriteSummary`.
+  ## RFC-0005 S8as. See `opaqueWriteSummary`. RFC-0005 S8cc: a module-level
+  ## variable counts where the body may write it. The positions that only
+  ## read are listed here (`scanRead`); a symbol met anywhere else counts.
   if n == nil or not acc.inert: return
   case n.kind
+  of nnkAsgn, nnkFastAsgn:
+    scanWrite(n[0], acc, seen, stack)
+    if n[0].kind == nnkSym and n[0].typeKind == ntyVar:
+      # `result = gi` of a routine returning `var`: the address escapes.
+      scanOpaqueEffects(n[1], acc, seen, stack)
+    else:
+      scanRead(n[1], acc, seen, stack)
+  of nnkIdentDefs, nnkVarTuple:
+    for i in 0 ..< n.len - 1: scanOpaqueEffects(n[i], acc, seen, stack)
+    scanRead(n[^1], acc, seen, stack)
+  of nnkElifBranch, nnkElifExpr:
+    scanRead(n[0], acc, seen, stack)
+    scanOpaqueEffects(n[1], acc, seen, stack)
+  of nnkCaseStmt:
+    scanRead(n[0], acc, seen, stack)
+    for i in 1 ..< n.len: scanOpaqueEffects(n[i], acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    scanCall(n, acc, seen, stack)
+  of nnkAddr:
+    # A by-value formal may be the caller's own storage (Nim passes a large
+    # one by address), read above as no write: its address (`unsafeAddr`)
+    # may write any variable a caller passed.
+    var r = n[0]
+    while r.kind in {nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr} and
+          r.len > 0:
+      r = r[0]
+    if r.kind == nnkSym and symKind(r) == nskParam and
+       r.typeKind notin {ntyVar, ntyPtr, ntyRef}:
+      if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
+      acc.heapAll = true
+    else:
+      for c in n: scanOpaqueEffects(c, acc, seen, stack)
   of nnkSym:
     let k = symKind(n)
     if k in {nskVar, nskLet} and isModuleGlobal(n):
@@ -5804,7 +5943,7 @@ proc laterArgWrites(a: NimNode; acc: var OpaqueEffects;
                     seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8br. What evaluating the argument `a` may write, into `acc`:
   ## for each call in it, S8as's summary of the callee's body
-  ## (`scanOpaqueEffects`: the globals it names, the captures it may write,
+  ## (`scanOpaqueEffects`: the globals it may write, the captures it may write,
   ## the heaps it reaches) and S8ax's of its by-address actuals
   ## (`opaqueArgEffects`); a routine passed as a value is summarised as a
   ## callee. Not inert for anything else that may write (a call through a
@@ -6180,20 +6319,14 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv0, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
-proc indexCallResult(ix: NimNode): NimNode =
-  ## RFC-0005 S8br. When `ix`, inside an index, is a user routine's call
-  ## (Nim evaluates it where the argument stands, into a temporary): the
-  ## callee's own `result` symbol, which has the type the call returns, to
-  ## mark (as S8bd's `byRefSub` marks a call base). nil otherwise: a
-  ## builtin (`len`, `+`) is read inline, with the index.
-  if ix.kind notin {nnkCall, nnkCommand} or ix.len == 0 or
-     ix[0].kind != nnkSym or not isUserCallee(ix[0]):
-    return nil
-  let ci = resolveRoutineImpl(ix[0])
-  if ci != nil and ci.len > 7 and ci[7].kind == nnkSym and
-     sameType(ci[7].getTypeInst, ix.getTypeInst):
-    ci[7]
-  else: nil
+proc indexCallToBind(ix: NimNode): bool =
+  ## RFC-0005 S8br. `ix`, inside an index, is a call of a user routine, or
+  ## (RFC-0005 S8cc) one through a proc value or any other head: Nim
+  ## evaluates it where the argument stands, into a temporary. False for a
+  ## builtin (`len`, `+`), which is read inline with the index.
+  ix.kind in {nnkCall, nnkCommand} and ix.len > 0 and
+    (ix[0].kind != nnkSym or isUserCallee(ix[0]) or
+     symKind(ix[0]) in procValueHeadKinds)
 
 proc lvalueStepKid(a: NimNode; k: int): bool =
   ## RFC-0005 S8br. Child `k` of the lvalue path step `a` is itself on the
@@ -6209,7 +6342,7 @@ proc lvalueStepKid(a: NimNode; k: int): bool =
 proc hasIndexCall(a: NimNode; inIndex: bool): bool =
   ## RFC-0005 S8br. Whether `hoistIndexCalls` would evaluate a call in an
   ## index of the by-address actual `a`.
-  if inIndex and indexCallResult(a) != nil: return true
+  if inIndex and indexCallToBind(a): return true
   for k in 0 ..< a.len:
     if inIndex or lvalueStepKid(a, k):
       if hasIndexCall(a[k], inIndex): return true
@@ -6220,13 +6353,10 @@ proc hasIndexCall(a: NimNode; inIndex: bool): bool =
 proc indexCallLeft(a: NimNode; inIndex: bool): NimNode =
   ## RFC-0005 S8br. A call left in an index of the lvalue path `a` after
   ## `hoistIndexCalls` that Nim evaluates once and a write-back, which
-  ## re-parses the lvalue, would evaluate again: one through a proc value,
-  ## or a user routine's with no `result` symbol to mark (a generic's whose
-  ## `result` has another type). nil when none is left. The seq write-back
-  ## called it a second time (a false verdict); the array one declined.
-  if inIndex and a.kind in {nnkCall, nnkCommand} and a.len > 0 and
-     (a[0].kind != nnkSym or isUserCallee(a[0]) or
-      symKind(a[0]) in procValueHeadKinds):
+  ## re-parses the lvalue, would evaluate again: the mark counter was spent
+  ## (`markByRef`). nil when none is left. The seq write-back called it a
+  ## second time (a false verdict); the array one declined.
+  if inIndex and indexCallToBind(a):
     return a
   for k in 0 ..< a.len:
     let sub =
@@ -6252,18 +6382,23 @@ proc hoistIndexCalls(a: NimNode; inIndex: bool; preamble: var seq[IRStmt];
                      ctx: ParseCtx): NimNode =
   ## RFC-0005 S8br. A by-address actual `a` (`gArr[nextI()]`, `addr
   ## gs[nextI()]`) with each call in an index on its lvalue path evaluated
-  ## once, here, root first, and replaced by a mark (`markByRef` of the
-  ## callee's `result`, `indexCallResult`) naming the `let` that holds its
-  ## result. Nim evaluates the call where the
+  ## once, here, root first, and replaced by a mark naming the `let` that
+  ## holds its result. RFC-0005 S8cc: the mark is of the symbol of the call's
+  ## type, so a call with no typed `result` symbol (through a proc value) is
+  ## named too. The call node cannot be marked as itself: `repr` of a path
+  ## holding a childless call crashes the compiler. An anonymous type (a
+  ## `range[..]`) has no symbol: the `let` carries the type, and only the
+  ## mark's name is read, so `int` stands in.
+  ## Nim evaluates the call where the
   ## argument stands (`T1_ = nextI(); chk(T1_); T2_ = f(); touch(&gArr[T1_],
   ## T2_)`), so the copy-in, the copy-out and S8an's cell all reach the
   ## element through that one value, and S8bk's late address
   ## (`placeLateAddr`) keeps the `let` where it stands (it is not a lazy
   ## read). The copy-out re-parsed the call and declined (`unsupported
   ## nnkAsgn shape`, `pureIndexExpr`). `a` itself when nothing changed.
-  let res = if inIndex: indexCallResult(a) else: nil
-  if res != nil:
-    let mk = markByRef(res)
+  if inIndex and indexCallToBind(a):
+    let ty = a.getTypeInst
+    let mk = markByRef(if ty.kind == nnkSym: ty else: bindSym"int")
     if mk.isNil: return a
     let v = parseExpr(a, preamble, ctx)
     preamble.add mkLet(byRefName(mk), classifyType(a).ty, v)

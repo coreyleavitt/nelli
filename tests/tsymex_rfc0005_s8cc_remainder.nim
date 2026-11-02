@@ -193,7 +193,7 @@ proc wrByVal(x: array[8, int]): int =
   ## Nim passes this array by address, so writing through the by-value
   ## formal's `unsafeAddr` lands in the caller's storage.
   let p = unsafeAddr x
-  cast[ptr array[8, int]](p)[][1] = 1
+  p[][1] = 1
   0
 
 proc wrThrough(): int =
@@ -269,6 +269,29 @@ proc sutValArr(k: int) =
     symexTarget("fa")
   if gArr[1] != 2 * k + 5 or gCalls != 1 or gOrder != 12: symexTarget("fa_dead")
 
+proc sutGenericNarrow(k: int) =
+  ## The index is narrower than `int`.
+  if k < 0 or k > 1000: return
+  gs = @[10, k, 30]
+  gCalls = 0
+  touch(gs[idOf(1'i8)], 0)
+  if gs[1] == k + 5 and gCalls == 1 and k == 2: symexTarget("gn")
+  if gs[1] != k + 5 or gCalls != 1: symexTarget("gn_dead")
+
+proc rangedI(): range[0 .. 2] =
+  inc gCalls
+  1
+
+proc sutValRange(k: int) =
+  ## The call's type has no symbol.
+  if k < 0 or k > 1000: return
+  gs = @[10, k, 30]
+  gCalls = 0
+  let fr = rangedI
+  touch(gs[fr()], 0)
+  if gs[1] == k + 5 and gCalls == 1 and k == 1: symexTarget("fr")
+  if gs[1] != k + 5 or gCalls != 1: symexTarget("fr_dead")
+
 proc sutValAddr(k: int) =
   ## An `addr` actual, the callee writing through the cell.
   if k < 0 or k > 1000: return
@@ -315,6 +338,7 @@ proc sutValThrough(k: int) =
   if k < 0 or k > 1000: return
   gs = @[10, k, 30]
   gCalls = 0
+  gOrder = 0
   let fv = nextI
   let t = touch
   t(gs[fv()], 0)
@@ -369,7 +393,12 @@ suite "S8cc: a later argument that only reads":
     declines(sutWrAsg, "wa_dead")
     declines(sutWrInc, "wi_dead")
     declines(sutWrVar, "wv_dead")
-    declines(sutWrAddr, "wp_dead")
+    block:
+      # `addr` of a global in a callee halts the path (`heUnsafeCast`).
+      let r = symexFind(sutWrAddr, tLabel("wp_dead"))
+      checkpoint "wp_dead " & $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check not r.errors.hasKind(weInternalWalkerFault)
     declines(sutWrRet, "wr_dead")
     declines(sutWrSwap, "ws_dead")
     declines(sutWrDeep, "wd_dead")
@@ -415,14 +444,21 @@ suite "S8cc: an index call with no symbol to mark":
     discard verdict(sutValAddr, "fp_dead", sxUnsat)
     replays(sutValClosure, "fc")
     discard verdict(sutValClosure, "fc_dead", sxUnsat)
+    replays(sutValRange, "fr")
+    discard verdict(sutValRange, "fr_dead", sxUnsat)
     replays(sutValThrough, "ft")
     discard verdict(sutValThrough, "ft_dead", sxUnsat)
 
   test "a generic's":
+    ## Already right at the base: the instantiation's `result` has the
+    ## call's type, so S8br named these. Kept as pins: S8cc binds them by the
+    ## same mark as a call through a proc value.
     replays(sutGeneric, "gi")
     discard verdict(sutGeneric, "gi_dead", sxUnsat)
     replays(sutGenericOther, "go")
     discard verdict(sutGenericOther, "go_dead", sxUnsat)
+    replays(sutGenericNarrow, "gn")
+    discard verdict(sutGenericNarrow, "gn_dead", sxUnsat)
 
   test "walker version floor":
-    check symexWalkerVersion.parseInt >= 240
+    check symexWalkerVersion.parseInt >= 238

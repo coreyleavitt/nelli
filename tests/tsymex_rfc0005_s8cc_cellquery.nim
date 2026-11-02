@@ -20,10 +20,11 @@ proc show(errs: seq[SymexErrorInfo]): string =
   for e in errs: parts.add $e.kind & "/" & $e.severity & ": " & e.msg
   "[" & parts.join(", ") & "]"
 
-const cellBudget = SymexSettings(budget: ResourceBudget(queryRLimit: 20_000_000'u))
+const cellBudget = SymexSettings(budget: ResourceBudget(queryRLimit: 2_000_000'u))
   ## The decision is pinned by a step budget, not a clock: every query of
-  ## these walks decides within 20M Z3 units (the tainted target-hit
-  ## budget), on both pinned Z3 versions.
+  ## these walks decides within 2M Z3 units (at the job's base a dead
+  ## label's query spent the 20M it was given and came back `sxUnknown`),
+  ## on both pinned Z3 versions.
 
 template verdict(fn: typed, lbl: string, want: SymexStatusKind): untyped =
   ## `want`, with no decline (`hePtrFamily`, a hint, may accompany a `ptr`).
@@ -191,4 +192,4 @@ suite "S8cc: an address cell at a non-literal index decides":
     discard verdict(sutCellLocal, "co_dead", sxUnsat)
 
   test "walker version floor":
-    check symexWalkerVersion.parseInt >= 235
+    check symexWalkerVersion.parseInt >= 238

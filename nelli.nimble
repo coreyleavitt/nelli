@@ -1271,5 +1271,11 @@ task test, "Run the test suite":
             # argument may write what the lvalue reads (`_framecond`).
             # Walker 223->229.
             "tsymex_rfc0005_s8br_remainder",
-            "tsymex_rfc0005_s8br_framecond"]:
+            "tsymex_rfc0005_s8br_framecond",
+            # RFC-0005 S8cc -- S8br's remainder: the address cell's query at
+            # a non-literal index is pinned to a step budget; a callee's
+            # global counts as written only where it may be; an index call
+            # with no symbol is bound once. Walker 237->238.
+            "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_remainder"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

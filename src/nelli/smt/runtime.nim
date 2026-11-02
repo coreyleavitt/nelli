@@ -45,19 +45,6 @@ export concolictaxonomy
 
 export tables, sets   ## for `Table` / `HashSet` in witness types
 
-import std/[monotimes, times, os]
-var s8ccN {.threadvar.}: int
-proc dbgCheck(s: Z3Solver): Z3Status =
-  if not dirExists("/work/s8ccdump"): return check(s)
-  inc s8ccN
-  let n = s8ccN
-  writeFile("/work/s8ccdump/q" & $n & ".smt2", $s)
-  let t0 = getMonoTime()
-  result = check(s)
-  let f = open("/work/s8ccdump/times.txt", fmAppend)
-  f.writeLine $n & " " & $result & " " & $((getMonoTime() - t0).inMilliseconds) & "ms"
-  f.close()
-
 # Once-per-process banner for `isLoose` mode. ADR-0001 calls this out
 # as a deliberate footgun; the banner is the documented warning.
 var isLooseBannerEmitted = false
@@ -10512,7 +10499,7 @@ var ownContextUnits* {.threadvar.}: int
   ## a walk's spend adds them (`rlimitCountNow`, `recordQueryStat`).
 
 var symexZ3CallCount* {.threadvar.}: int
-  ## Phase 13 cycle 1. Increments on every Z3 `s.dbgCheck()` invocation
+  ## Phase 13 cycle 1. Increments on every Z3 `s.check()` invocation
   ## inside symex. Always-on (no compile-time gate) — the increment
   ## cost is negligible against a Z3 query and tests observe it to
   ## assert "cache hit, Z3 not called" contracts. Re-exported by
@@ -11760,7 +11747,7 @@ proc theoryFreeSimple(ctx: Z3Context): bool =
     p.set("smt.string_solver", "none")
     s.setParams(p)
     s.add lenX < mkInt(ctx, 0)
-    theoryFreeNeedsSimple = (ready: true, simple: s.dbgCheck() != zsSat)
+    theoryFreeNeedsSimple = (ready: true, simple: s.check() != zsSat)
   theoryFreeNeedsSimple.simple
 
 proc querySolver*(ctx: Z3Context; roots: openArray[Z3Bool];
@@ -11810,9 +11797,9 @@ proc ownContextSolver(ctx: Z3Context; roots: openArray[Z3Bool];
   for c in roots: result.add translate(c, own)
 
 proc ownContextCheck(s: Z3Solver): Z3Status =
-  ## RFC-0005 S8bm. `s.dbgCheck()` for an `ownContextSolver`, its context's
+  ## RFC-0005 S8bm. `s.check()` for an `ownContextSolver`, its context's
   ## whole step count (nothing else ran there) added to `ownContextUnits`.
-  result = s.dbgCheck()
+  result = s.check()
   let st = s.getStatistics()
   if st.contains("rlimit count"):
     ownContextUnits += (if st.isInt("rlimit count"): st.getInt("rlimit count")
@@ -12226,10 +12213,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if abstracted.len < rootsIn.len:
       let pre = if rlimit == 0: factsFirstRLimit else: min(rlimit, factsFirstRLimit)
       let sAbs = querySolver(ctx, abstracted, pre)
-      if sAbs.dbgCheck() == zsUnsat: return (zsUnsat, sAbs, nil, "")
+      if sAbs.check() == zsUnsat: return (zsUnsat, sAbs, nil, "")
   template plain(): untyped =
     let s = querySolver(ctx, rootsIn, rlimit)
-    let r = s.dbgCheck()
+    let r = s.check()
     return (r, s, (if r == zsSat: s.model() else: nil),
             (if r == zsUnknown: "Z3: " & s.reasonUnknown() else: ""))
   let cap = settings.budget.maxSeqLen
@@ -12289,7 +12276,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
     let sPre = querySolver(ctx, roots, pre, seqTheory = false)
     for f in facts: sPre.add f
-    if sPre.dbgCheck() == zsUnsat: return (zsUnsat, sPre, nil, "")
+    if sPre.check() == zsUnsat: return (zsUnsat, sPre, nil, "")
   # Step 1: the caps asserted, one-shot, in a context of its own
   # (RFC-0005 S8bm, `ownContextSolver`): its search is the query's, the
   # same whether or not the facts-first check (or anything else) ran in
@@ -12307,7 +12294,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # (1) it runs only once (3) has failed too (see the doc comment).
   template theoryFreeUnsat(): (bool, Z3Solver) =
     let sTf = querySolver(ctx, roots, rl, seqTheory = false)
-    (sTf.dbgCheck() == zsUnsat, sTf)
+    (sTf.check() == zsUnsat, sTf)
   # RFC-0005 S8aq: (1b) and (1c) below no longer gate on `r1 == zsUnsat`
   # specifically. `r1` can only be `zsUnsat` or `zsUnknown` here (`zsSat`
   # already returned), and a `zsUnknown` -- step 1's capped, full-theory
@@ -12363,12 +12350,12 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
     if facts.len > 0:
       let sTr = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTr.add f
-      if sTr.dbgCheck() == zsUnsat: return (zsUnsat, sTr, nil, "")
+      if sTr.check() == zsUnsat: return (zsUnsat, sTr, nil, "")
     if not lastIndex:
       let sTc = querySolver(ctx, roots, rl, seqTheory = false)
       for f in facts: sTc.add f
       for c in caps: sTc.add c
-      if sTc.dbgCheck() == zsUnsat: return (zsUnknown, s1, nil, capText)
+      if sTc.check() == zsUnsat: return (zsUnknown, s1, nil, capText)
   if r1 == zsUnsat and not lastIndex:
     # Step 2: is the UNSAT the query's own?
     let s2 = querySolver(ctx, roots, rl)
@@ -12392,7 +12379,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                              $cap)
   # Step 3: the uncapped one-shot query.
   let s3 = querySolver(ctx, roots, rl - rlHalf)
-  let r3 = s3.dbgCheck()
+  let r3 = s3.check()
   case r3
   of zsSat: (zsSat, s3, s3.model(), "")
   of zsUnsat: (zsUnsat, s3, nil, "")
@@ -16167,7 +16154,7 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   for c in pools: sTrue.add(c)
   for c in facts: sTrue.add(c)
   sTrue.add(cond)
-  let rTrue = sTrue.dbgCheck()
+  let rTrue = sTrue.check()
   let sFalse = newSolver(ctx)
   let spFalse = newParams(ctx)
   spFalse.set("rlimit", rlimit)
@@ -16177,7 +16164,7 @@ proc concreteBranchOutcome(ctx: Z3Context, concreteEq: seq[Z3Bool],
   for c in pools: sFalse.add(c)
   for c in facts: sFalse.add(c)
   sFalse.add(not cond)
-  let rFalse = sFalse.dbgCheck()
+  let rFalse = sFalse.check()
   if rTrue == zsSat and rFalse == zsUnsat: some(true)
   elif rTrue == zsUnsat and rFalse == zsSat: some(false)
   else: none(bool)
@@ -16198,7 +16185,7 @@ proc concretelyInfeasible(ctx: Z3Context, concreteEq: seq[Z3Bool],
   for c in concreteEq: sv.add(c)
   for c in globalRoots(concreteEq & conds): sv.add(c)
   for c in conds: sv.add(c)
-  sv.dbgCheck() == zsUnsat
+  sv.check() == zsUnsat
 
 proc maybeForkDefect(p: Path, defectCond: Z3Bool, typeId: string,
                      msg: Option[string], w: var WalkCtx) =
@@ -24282,7 +24269,7 @@ proc runConcolicCollectImpl*(prog: SymexProgram, trace: seq[ChoiceNode],
   for c in pinned: s.add(c)
   # RFC-0005 S8ag: a split's Int is free without its axioms.
   for c in indexSplitRoots(ctx, pinned): s.add(c)
-  result.pcSatByConcreteInputs = s.dbgCheck() == zsSat
+  result.pcSatByConcreteInputs = s.check() == zsSat
   result.counters = counters
   result.branchTrace = w.branchTrace
   result.drawVars = drawVars
@@ -24391,7 +24378,7 @@ proc z3CheckBounded(ctx: Z3Context, conjuncts: seq[Z3Bool], target: Z3Bool,
   # the formula reaches (definitional, so a relaxed prefix keeps them).
   for c in indexSplitRoots(ctx, conjuncts & @[target]): s.add(c)
   inc symexZ3CallCount
-  (s.dbgCheck(), s)
+  (s.check(), s)
 
 proc evalConcolicDrawInt64(m: Z3Model, sv: SymVal): int64 =
   ## Issue #163 review R24/R25. Evaluate a concolic draw's ACTUAL Z3

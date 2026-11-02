@@ -1336,6 +1336,8 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8cn_probe",
             # S8cn items 3 and 4: an mpairs view and its Table.
             "tsymex_rfc0005_s8cn_views",
+            "tsymex_rfc0005_s8cn_views_b",
+            "tsymex_rfc0005_s8cn_views_c",
             "tsymex_rfc0005_s8cn_seqview",
             "tsymex_rfc0005_s8cn_lent",
             "tsymex_rfc0005_s8cn_lentnative",

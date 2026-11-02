@@ -11,6 +11,9 @@
 ## A one-entry table's only entry is in its home slot: `delImplIdx` empties it
 ## and backshifts the cluster, and an insert probes from the home slot.
 import std/[unittest, strutils, tables]
+when not declared(s8cnViewsPart):
+  const s8cnViewsPart = 0
+
 import nelli/symex
 
 proc show(errs: seq[SymexErrorInfo]): string =
@@ -400,127 +403,133 @@ proc sRemTwo(t0: Table[string, int]) =
     if v == 0: symexTarget("r2_zero")
     break
 
-suite "S8cn (3): the callee's table write at a non-literal key":
-  test "the view reads the write at its own key, and only there":
-    let r = symexFind(sOther, tLabel("nl_same_live"))
-    checkpoint show(r.errors)
-    check r.status == sxSat
-    let o = symexFind(sOther, tLabel("nl_other_live"))
-    checkpoint show(o.errors)
-    check o.status == sxSat
-    check symexFind(sOther, tLabel("nl_same_dead")).status == sxUnsat
-    check symexFind(sOther, tLabel("nl_other_dead")).status == sxUnsat
-    check "nl_same_live" in hits(sOther({"a": 5}.toTable, "a"))
-    check "nl_other_live" in hits(sOther({"a": 5}.toTable, "q"))
-    check "nl_same_dead" notin hits(sOther({"a": 5}.toTable, "a"))
-    check "nl_other_dead" notin hits(sOther({"a": 5}.toTable, "q"))
+when s8cnViewsPart == 0:
+  suite "S8cn (3): the callee's table write at a non-literal key":
+    test "the view reads the write at its own key, and only there":
+      let r = symexFind(sOther, tLabel("nl_same_live"))
+      checkpoint show(r.errors)
+      check r.status == sxSat
+      let o = symexFind(sOther, tLabel("nl_other_live"))
+      checkpoint show(o.errors)
+      check o.status == sxSat
+      check symexFind(sOther, tLabel("nl_same_dead")).status == sxUnsat
+      check symexFind(sOther, tLabel("nl_other_dead")).status == sxUnsat
+      check "nl_same_live" in hits(sOther({"a": 5}.toTable, "a"))
+      check "nl_other_live" in hits(sOther({"a": 5}.toTable, "q"))
+      check "nl_same_dead" notin hits(sOther({"a": 5}.toTable, "a"))
+      check "nl_other_dead" notin hits(sOther({"a": 5}.toTable, "q"))
 
-  test "writes both ways":
-    check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
-    # A new key, and the view written past it: a rehash may lose the write.
-    check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
-    # The other arm's decline covers the query too.
-    check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
-    check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
-    check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
-    check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))
+    test "writes both ways":
+      check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
+      # A new key, and the view written past it: a rehash may lose the write.
+      check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
+      # The other arm's decline covers the query too.
+      check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
+      check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
+      check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
+      check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))
 
-suite "S8cn (3): both written in one statement":
-  test "the table's store is the statement's last effect":
-    decided(sTabLast, "tl_live", sxSat)
-    decided(sTabLast, "tl_dead", sxUnsat)
-  test "the view's assignment is":
-    decided(sViewLast, "vl_live", sxSat)
-    decided(sViewLast, "vl_dead", sxUnsat)
-  test "two calls in one expression":
-    decided(sTwoCalls, "two_live", sxSat)
-    decided(sTwoCalls, "two_dead", sxUnsat)
+  suite "S8cn (3): both written in one statement":
+    test "the table's store is the statement's last effect":
+      decided(sTabLast, "tl_live", sxSat)
+      decided(sTabLast, "tl_dead", sxUnsat)
+    test "the view's assignment is":
+      decided(sViewLast, "vl_live", sxSat)
+      decided(sViewLast, "vl_dead", sxUnsat)
+    test "two calls in one expression":
+      decided(sTwoCalls, "two_live", sxSat)
+      decided(sTwoCalls, "two_dead", sxUnsat)
 
-suite "S8cn (3): the object holding the Table":
-  test "a read through the holder":
-    decided(sReadBox, "hr_live", sxSat)
-    decided(sReadBox, "hr_dead", sxUnsat)
-  test "a write through the holder":
-    decided(sWriteBox, "hw_live", sxSat)
-    decided(sWriteBox, "hw_dead", sxUnsat)
-  test "the holder passed on":
-    decided(sPassOn, "ho_live", sxSat)
-    decided(sPassOn, "ho_dead", sxUnsat)
-  test "the holder's Table passed on":
-    decided(sPassOnTab, "ht_live", sxSat)
-    decided(sPassOnTab, "ht_dead", sxUnsat)
+  suite "S8cn (3): the object holding the Table":
+    test "a read through the holder":
+      decided(sReadBox, "hr_live", sxSat)
+      decided(sReadBox, "hr_dead", sxUnsat)
+    test "a write through the holder":
+      decided(sWriteBox, "hw_live", sxSat)
+      decided(sWriteBox, "hw_dead", sxUnsat)
+    test "the holder passed on":
+      decided(sPassOn, "ho_live", sxSat)
+      decided(sPassOn, "ho_dead", sxUnsat)
+    test "the holder's Table passed on":
+      decided(sPassOnTab, "ht_live", sxSat)
+      decided(sPassOnTab, "ht_dead", sxUnsat)
 
-suite "S8cn (3): a pointer to the view (was a false verdict both ways)":
-  test "in the body":
-    decided(sBodyPtr, "bp_live", sxSat)
-    decided(sBodyPtr, "bp_dead", sxUnsat)
-    decided(sBodyPtr, "bq_live", sxSat)
-    decided(sBodyPtr, "bq_dead", sxUnsat)
-  test "carried into a callee that reaches the Table":
-    check "hp_live" in hits(sHoldPtr({"a": 5}.toTable))
-    check "hp_dead" notin hits(sHoldPtr({"a": 5}.toTable))
-    declined(sHoldPtr, "hp_live", "pointer")
-    declined(sHoldPtr, "hp_dead", "pointer")
+  suite "S8cn (3): a pointer to the view (was a false verdict both ways)":
+    test "in the body":
+      decided(sBodyPtr, "bp_live", sxSat)
+      decided(sBodyPtr, "bp_dead", sxUnsat)
+      decided(sBodyPtr, "bq_live", sxSat)
+      decided(sBodyPtr, "bq_dead", sxUnsat)
+    test "carried into a callee that reaches the Table":
+      check "hp_live" in hits(sHoldPtr({"a": 5}.toTable))
+      check "hp_dead" notin hits(sHoldPtr({"a": 5}.toTable))
+      declined(sHoldPtr, "hp_live", "pointer")
+      declined(sHoldPtr, "hp_dead", "pointer")
 
-suite "S8cn (4): a key removed under a live view":
-  test "its own key, from a one-entry table: the slot reads zero":
-    decided(sRemOwn, "ro_live", sxSat)
-    decided(sRemOwn, "ro_empty", sxSat)
-    decided(sRemOwn, "ro_assert", sxSat)
-    decided(sRemOwn, "ro_dead", sxUnsat)
-  test "its own key put back: the same slot":
-    decided(sRemOwnReadd, "rr_live", sxSat)
-    decided(sRemOwnReadd, "rr_once", sxSat)
-    decided(sRemOwnReadd, "rr_dead", sxUnsat)
-    decided(sRemOwnReadd, "rr_dead2", sxUnsat)
-    decided(sRemOwnReadd, "rr_twice_dead", sxUnsat)
-  test "an absent key: nothing happens":
-    decided(sRemAbsent, "ra_live", sxSat)
-    decided(sRemAbsent, "ra_dead", sxUnsat)
-  test "a symbolic key: either":
-    check symexFind(sRemSym, tLabel("rs_absent_live")).status == sxSat
-    check symexFind(sRemSym, tLabel("rs_own_live")).status == sxSat
-    check symexFind(sRemSym, tLabel("rs_absent_dead")).status == sxUnsat
-    check symexFind(sRemSym, tLabel("rs_own_dead")).status == sxUnsat
-    check "rs_absent_live" in hits(sRemSym({"a": 5}.toTable, "q"))
-    check "rs_own_live" in hits(sRemSym({"a": 5}.toTable, "a"))
-    check "rs_absent_dead" notin hits(sRemSym({"a": 5}.toTable, "q"))
-    check "rs_own_dead" notin hits(sRemSym({"a": 5}.toTable, "a"))
-  test "a write to the emptied slot does not put the key back":
-    decided(sWriteAfterDel, "wd_live", sxSat)
-    decided(sWriteAfterDel, "wd2_live", sxSat)
-    decided(sWriteAfterDel, "wd_dead", sxUnsat)
-    decided(sWriteAfterDel, "wd2_dead", sxUnsat)
-  test "removed by the callee, seen in the body":
-    decided(sRemCallee, "rc_live", sxSat)
-    decided(sRemCallee, "rc_dead", sxUnsat)
-    decided(sRemCallee, "rc_dead2", sxUnsat)
-  test "removed by the callee, seen in the callee":
-    decided(sRemCallee2, "rd_live", sxSat)
-    decided(sRemCallee2, "rd_dead", sxUnsat)
-  test "the callee writes the emptied slot":
-    decided(sRemCallee3, "rw_live", sxSat)
-    decided(sRemCallee3, "rw_dead", sxUnsat)
-    decided(sRemCallee3, "rw_dead2", sxUnsat)
-  test "the callee puts it back":
-    decided(sRemCallee4, "ra2_live", sxSat)
-    decided(sRemCallee4, "ra2_dead", sxUnsat)
-  test "the callee removes a symbolic key":
-    check symexFind(sRemCalleeSym, tLabel("rj_absent_live")).status == sxSat
-    check symexFind(sRemCalleeSym, tLabel("rj_own_live")).status == sxSat
-    check symexFind(sRemCalleeSym, tLabel("rj_absent_dead")).status == sxUnsat
-    check symexFind(sRemCalleeSym, tLabel("rj_own_dead")).status == sxUnsat
 
-  test "another key after it: the slot depends on the hash, so it declines":
-    var zero, one = false
-    for c in 'a' .. 'z':
-      for d in 'a' .. 'z':
-        let r = viewAfterOtherKey($c & $d)
-        if r == 0: zero = true
-        if r == 1: one = true
-    # Both happen among two-letter keys: the view reads the new value, or 0.
-    check zero and one
-    declined(sRemAdd, "rb_hash", "del")
-    declined(sRemAddCallee, "rb2_hash", "removed")
-  test "two entries: `del`'s backshift depends on the hashes, so it declines":
-    declined(sRemTwo, "r2_zero", "del")
+when s8cnViewsPart == 1:
+  suite "S8cn (4): a key removed under a live view":
+    test "its own key, from a one-entry table: the slot reads zero":
+      decided(sRemOwn, "ro_live", sxSat)
+      decided(sRemOwn, "ro_empty", sxSat)
+      decided(sRemOwn, "ro_assert", sxSat)
+      decided(sRemOwn, "ro_dead", sxUnsat)
+    test "its own key put back: the same slot":
+      decided(sRemOwnReadd, "rr_live", sxSat)
+      decided(sRemOwnReadd, "rr_once", sxSat)
+      decided(sRemOwnReadd, "rr_dead", sxUnsat)
+      decided(sRemOwnReadd, "rr_dead2", sxUnsat)
+      decided(sRemOwnReadd, "rr_twice_dead", sxUnsat)
+    test "an absent key: nothing happens":
+      decided(sRemAbsent, "ra_live", sxSat)
+      decided(sRemAbsent, "ra_dead", sxUnsat)
+    test "a symbolic key: either":
+      check symexFind(sRemSym, tLabel("rs_absent_live")).status == sxSat
+      check symexFind(sRemSym, tLabel("rs_own_live")).status == sxSat
+      check symexFind(sRemSym, tLabel("rs_absent_dead")).status == sxUnsat
+      check symexFind(sRemSym, tLabel("rs_own_dead")).status == sxUnsat
+      check "rs_absent_live" in hits(sRemSym({"a": 5}.toTable, "q"))
+      check "rs_own_live" in hits(sRemSym({"a": 5}.toTable, "a"))
+      check "rs_absent_dead" notin hits(sRemSym({"a": 5}.toTable, "q"))
+      check "rs_own_dead" notin hits(sRemSym({"a": 5}.toTable, "a"))
+    test "a write to the emptied slot does not put the key back":
+      decided(sWriteAfterDel, "wd_live", sxSat)
+      decided(sWriteAfterDel, "wd2_live", sxSat)
+      decided(sWriteAfterDel, "wd_dead", sxUnsat)
+      decided(sWriteAfterDel, "wd2_dead", sxUnsat)
+    test "removed by the callee, seen in the body":
+      decided(sRemCallee, "rc_live", sxSat)
+      decided(sRemCallee, "rc_dead", sxUnsat)
+      decided(sRemCallee, "rc_dead2", sxUnsat)
+    test "removed by the callee, seen in the callee":
+      decided(sRemCallee2, "rd_live", sxSat)
+      decided(sRemCallee2, "rd_dead", sxUnsat)
+    test "the callee writes the emptied slot":
+      decided(sRemCallee3, "rw_live", sxSat)
+      decided(sRemCallee3, "rw_dead", sxUnsat)
+      decided(sRemCallee3, "rw_dead2", sxUnsat)
+    test "the callee puts it back":
+      decided(sRemCallee4, "ra2_live", sxSat)
+      decided(sRemCallee4, "ra2_dead", sxUnsat)
+
+when s8cnViewsPart == 2:
+  suite "S8cn (4): a key removed under a live view":
+    test "the callee removes a symbolic key":
+      check symexFind(sRemCalleeSym, tLabel("rj_absent_live")).status == sxSat
+      check symexFind(sRemCalleeSym, tLabel("rj_own_live")).status == sxSat
+      check symexFind(sRemCalleeSym, tLabel("rj_absent_dead")).status == sxUnsat
+      check symexFind(sRemCalleeSym, tLabel("rj_own_dead")).status == sxUnsat
+
+    test "another key after it: the slot depends on the hash, so it declines":
+      var zero, one = false
+      for c in 'a' .. 'z':
+        for d in 'a' .. 'z':
+          let r = viewAfterOtherKey($c & $d)
+          if r == 0: zero = true
+          if r == 1: one = true
+      # Both happen among two-letter keys: the view reads the new value, or 0.
+      check zero and one
+      declined(sRemAdd, "rb_hash", "del")
+      declined(sRemAddCallee, "rb2_hash", "removed")
+    test "two entries: `del`'s backshift depends on the hashes, so it declines":
+      declined(sRemTwo, "r2_zero", "del")

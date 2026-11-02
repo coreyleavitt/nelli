@@ -1,24 +1,18 @@
-## RFC-0005 (soundness channels) slice S8ca -- S8bu's remainder, item 4:
-## closures over address-taken variables and heap lvalues.
+## RFC-0005 (soundness channels) slice S8ca -- S8bu's remainder, item 4a: a
+## closure capturing an address-taken variable. Item 4b is
+## `tsymex_rfc0005_s8ca_closures_heap` (split by item 9).
 ##
-## (4a) A closure capturing a variable whose address is taken held two
-## copies of it: S8ax's capture cell (an env cell the closure reads and
-## writes) and the address cell (the heap a pointer reads and writes).
-## `syncAddrCells` declined any statement of such a frame ("also captured
-## by a closure").
-## (4b) A `var` actual that is a heap lvalue (`grb.x`) passed to a closure
-## or a proc value whose body also reaches that object (a global, a
-## capture) declined (S8bh's `touchMeetsOuter`): the body's write through
-## the formal and its direct access were two copies.
+## A closure capturing a variable whose address is taken held two copies of
+## it: S8ax's capture cell (an env cell the closure reads and writes) and
+## the address cell (the heap a pointer reads and writes). `syncAddrCells`
+## declined any statement of such a frame ("also captured by a closure").
 ##
 ## Pinned here (the RFC's "As landed (S8ca)" note has the design):
 ##   (4a) the closure's frame binds a by-reference capture that is an
 ##        address-taken variable of the frame applying it to the variable's
 ##        cell, as a named callee's capture is (`inheritAddrCells`); the
 ##        applying frame keeps the local, the cell and the env cell one
-##        value;
-##   (4b) such a heap lvalue is passed by reference: the body is
-##        specialised to the lvalue (`byRefSub`, as for a direct call).
+##        value.
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
@@ -85,33 +79,6 @@ proc sutCapMixed(k: int) =
 
 # ---- (4b) a heap lvalue a closure's body also reaches --------------------
 
-type RB = ref object
-  x, y: int
-
-var grb: RB
-
-proc sutHeapClosure(k: int) =
-  if k < 0 or k > 1000: return
-  grb = RB()
-  let f = proc (v: var int) =
-    v = k
-    grb.y = grb.x + 1
-  f(grb.x)
-  if grb.y == k + 1 and k == 3: symexTarget("hc")
-  if grb.y != k + 1: symexTarget("hc_dead")
-
-proc setThenBump(v: var int, k: int) =
-  v = k
-  grb.y = grb.x + 1
-
-proc sutHeapProcValue(k: int) =
-  if k < 0 or k > 1000: return
-  grb = RB()
-  let g = setThenBump
-  g(grb.x, k)
-  if grb.y == k + 1 and k == 3: symexTarget("hp")
-  if grb.y != k + 1: symexTarget("hp_dead")
-
 suite "S8ca (4a): a closure capturing an address-taken variable":
 
   test "nim":
@@ -129,21 +96,6 @@ suite "S8ca (4a): a closure capturing an address-taken variable":
     clean(sutCapRead, "cr_dead", sxUnsat)
     clean(sutCapMixed, "cm", sxSat)
     clean(sutCapMixed, "cm_dead", sxUnsat)
-
-suite "S8ca (4b): a heap lvalue a closure's body also reaches":
-
-  test "nim":
-    let h = nativeHits(sutHeapClosure, ks) + nativeHits(sutHeapProcValue, ks)
-    for l in ["hc", "hp"]:
-      checkpoint l
-      check l in h
-      check (l & "_dead") notin h
-
-  test "passed by reference":
-    clean(sutHeapClosure, "hc", sxSat)
-    clean(sutHeapClosure, "hc_dead", sxUnsat)
-    clean(sutHeapProcValue, "hp", sxSat)
-    clean(sutHeapProcValue, "hp_dead", sxUnsat)
 
 suite "S8ca (4): walker version":
   test "symexWalkerVersion >= 233":

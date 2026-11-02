@@ -1190,6 +1190,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ca_calls",
             # item 4: closures over address-taken variables and heap lvalues.
             "tsymex_rfc0005_s8ca_closures",
+            "tsymex_rfc0005_s8ca_closures_heap",
             # item 5: a seq argument of a proc value or a closure.
             "tsymex_rfc0005_s8ca_procvals",
             # item 6: strings (character writes, openArray[char], views).

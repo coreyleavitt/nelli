@@ -14173,7 +14173,7 @@ pin is 238, and both suites carry the `>= 238` floor.
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
 
-**As landed (S8cn, walker 250 provisional) — batch 8's remainder.** The branch is
+**As landed (S8cn, walker 251 provisional) — batch 8's remainder.** The branch is
 `rfc-0005-s8cn`, on `afce42a`, merged with batch 9 (`e497dcf`). Every label is run natively as well as walked.
 
 *Wrong verdicts found and fixed here.* A view passed to a callee taking its

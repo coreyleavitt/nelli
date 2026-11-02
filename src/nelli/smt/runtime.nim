@@ -19217,6 +19217,10 @@ proc recvValue(p: Path; name: string; w: var WalkCtx): (SymVal, Path) =
   if p.env.hasKey(name): return (p.env[name], p)
   lowerInExpr(p, mkVar(name), w)
 
+const viewGrownPrefix = "__viewGrown#"
+  ## RFC-0005 S8cn. On a callee's path, the condition that a key was added to
+  ## the Table of a `slot` entry: a write to the view past it may be lost to a
+  ## rehash, by a capacity that is not modelled.
 const viewGonePrefix = "__viewGone#"
   ## RFC-0005 S8cn. Set on a callee's path where the key of a `slot` entry was
   ## removed and the slot is empty (`syncAddrCells`).
@@ -19230,6 +19234,55 @@ func irFieldPath(e: IRExpr): string =
     let r = irFieldPath(e.obj)
     if r.len == 0: "" else: r & "." & e.fieldName
   else: ""
+
+func exprLocRoot(e: IRExpr): string =
+  ## RFC-0005 S8cn. The variable the location `e` is a path into, or "".
+  if e == nil: return ""
+  case e.kind
+  of iekVar: e.vname
+  of iekField: exprLocRoot(e.obj)
+  of iekIndex: exprLocRoot(e.arr)
+  else: ""
+
+proc bindsViewWhole(s: IRStmt; names: var seq[string]): bool =
+  ## RFC-0005 S8cn. `s` holds the memory of one of `names` in a way the walk
+  ## takes for a copy. A local bound to a whole seq, Table or string: Nim's
+  ## cursor inference (ARC/ORC) shares the memory when the local is never
+  ## mutated (`let c = t`), and copies when it is, so whether a write through
+  ## the other formal is seen through the local depends on what the compiler
+  ## proved. A loop over one: `items` and `values` yield `lent`, so the loop
+  ## variable reads the element live.
+  if s == nil: return false
+  case s.kind
+  of isBlock:
+    for c in s.stmts:
+      if bindsViewWhole(c, names): return true
+  of isIf:
+    for b in s.branches:
+      if bindsViewWhole(b.body, names): return true
+    return bindsViewWhole(s.elseBody, names)
+  of isWhile:
+    return bindsViewWhole(s.wbody, names)
+  of isTry:
+    if bindsViewWhole(s.tryBody, names): return true
+    for h in s.tryHandlers:
+      if bindsViewWhole(h.body, names): return true
+    return bindsViewWhole(s.tryFinally, names)
+  of isLet:
+    # A synthetic `let` is the walk's own (a `var` actual's temporary).
+    return s.lty != nil and not s.lname.startsWith("__sym_") and
+      s.lty.kind notin {itInt, itBool, itFloat32, itFloat64} and
+      exprLocRoot(s.lvalue) in names
+  of isIndex:
+    if exprLocRoot(s.ixArr) in names:
+      if s.ixRetName.startsWith("__sym_fs_"): return true   # the `for` lowering
+      if s.ixElemTy != nil and
+         s.ixElemTy.kind notin {itInt, itBool, itFloat32, itFloat64}:
+        names.add s.ixRetName
+  of isTabKeys:
+    return exprLocRoot(s.tkRecv) in names
+  else: discard
+  false
 
 proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
                      w: var WalkCtx): string =
@@ -19283,6 +19336,10 @@ proc bindViewAliases(stmt: IRStmt; sig: ProcSig; callerEnv: Env;
     if not vf.isVar:
       if vf.ty.kind in {itInt, itBool, itFloat32, itFloat64}: continue
       return "the view by value (not modelled for a " & $vf.ty.kind & ")"
+    var held = @[vf.name, sig.params[a.tabArg].name]
+    if bindsViewWhole(sig.body, held):
+      return "a local or a `for` holding the whole of one (Nim may share its " &
+             "memory or copy it, by what its cursor inference proved)"
     w.frame.addrCells.add (local: vf.name, cell: "", ty: vf.ty, path: a.path,
                            ixs: @[a.key], bound: true, view: false,
                            slot: sig.params[a.tabArg].name)
@@ -22641,6 +22698,46 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
             if pending: continue
           let tabO = locGet(env2[c.slot], c.path, @[])
           let tabV = if tabO.isSome: tabO.get else: env2[c.slot]
+          if tabV.kind == svSeq:
+            # RFC-0005 S8cn (item 5): `f(s[i], s)`, one location as the
+            # Table's slot is. A resize or an assignment of the whole gave the
+            # seq other memory, and the formal still points at the old
+            # (`viewFollows`): not modelled.
+            let snapS = addrSnapName(depth, c.slot)
+            let snapQ = if env2.hasKey(snapS): locGet(env2[snapS], c.path, @[])
+                        else: none(SymVal)
+            if snapQ.isSome and not viewFollows(ctx, snapQ.get, tabV):
+              if q == nil: q = forkPath(p, p.pc, p.env)
+              viewWhy = "the seq was resized or assigned whole while its " &
+                        "element was held"
+              continue
+            let elemO = locGet(tabV, @["["], c.ixs)
+            if elemO.isNone:
+              viewWhy = "the walk does not follow an element of this seq"
+              continue
+            let xv = env2[c.local]
+            if sameSymVal(xv, elemO.get): continue
+            let snapX = addrSnapName(depth, c.local)
+            let vCh = env2.hasKey(snapX) and not sameSymVal(xv, env2[snapX])
+            let tCh = snapQ.isSome and not sameSymVal(tabV, snapQ.get)
+            if not vCh and not tCh: continue
+            if q == nil: q = forkPath(p, p.pc, p.env)
+            let tabLast = lastWriteTo(stmt, c.slot) or
+              stmt.kind == isIndexAssign and stmt.iaRecvName == c.slot
+            if vCh and tCh and not lastWriteTo(stmt, c.local) and not tabLast:
+              viewWhy = "the view and the seq were both written in one statement"
+            elif vCh and not tabLast:
+              let nv = locSet(tabV, @["["], c.ixs, xv)
+              let holder = if nv.isSome: locSet(env2[c.slot], c.path, @[], nv.get)
+                           else: none(SymVal)
+              if holder.isNone:
+                viewWhy = "the walk does not find the seq in its holder"
+                continue
+              env2[c.slot] = holder.get
+              env2[c.local] = locGet(nv.get, @["["], c.ixs).get
+            else:
+              env2[c.local] = elemO.get
+            continue
           let keyO = if tabV.kind == svTable: tabKeyTerm(c.ixs[0], tabV.tabKeyTy)
                      else: none(Z3AnyAst)
           if keyO.isNone:
@@ -22664,6 +22761,24 @@ proc syncAddrCells(stmt: IRStmt; outs: seq[Path]; depth: int;
           let tCh = snapO.isSome and not sameSymVal(tabV, snapO.get)
           if not vCh and not tCh: continue
           if q == nil: q = forkPath(p, p.pc, p.env)
+          let grownName = viewGrownPrefix & c.local
+          if tCh:
+            let g = tabV.tabSize > snapO.get.tabSize
+            env2[grownName] = SymVal(kind: svBool,
+              bo: if env2.hasKey(grownName): env2[grownName].bo or g else: g)
+          if vCh and env2.hasKey(grownName):
+            # The edge where a key was added declines; the walk goes on where
+            # none was.
+            let g = env2[grownName].bo
+            if not loopArmInfeasible(ctx, q, g, w.settings):
+              let dq = forkPath(q, q.pc & @[g], env2)
+              taintInPlace(dq, w.degrade(feUnsupportedOp,
+                "the `mpairs` view of a Table a callee holds was written after " &
+                     "a key was added: Nim may have rehashed the Table, by a " &
+                     "capacity not modelled (RFC-0005 S8cn; feUnsupportedOp)"))
+              result.add drainPendingLowerEffects(dq)
+              q = forkPath(q, q.pc & @[not g], q.env)
+            env2.del(grownName)
           # RFC-0005 S8cn: the statement's last effect orders the two: `v =
           # f(t)` the view's write, `t[k] = f(v)` the table's store (a call's
           # argument is evaluated first). Two calls in one expression are not

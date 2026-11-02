@@ -417,8 +417,10 @@ suite "S8cn (3): the callee's table write at a non-literal key":
 
   test "writes both ways":
     check symexFind(sOther2, tLabel("nl2_same_live")).status == sxSat
-    check symexFind(sOther2, tLabel("nl2_other_live")).status == sxSat
-    check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnsat
+    # A new key, and the view written past it: a rehash may lose the write.
+    check symexFind(sOther2, tLabel("nl2_other_live")).status == sxUnknown
+    # The other arm's decline covers the query too.
+    check symexFind(sOther2, tLabel("nl2_same_dead")).status == sxUnknown
     check "nl2_same_live" in hits(sOther2({"a": 5}.toTable, "a"))
     check "nl2_other_live" in hits(sOther2({"a": 5}.toTable, "q"))
     check "nl2_same_dead" notin hits(sOther2({"a": 5}.toTable, "a"))

@@ -203,7 +203,18 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "241"
+const symexWalkerVersion* = "247"
+  ## RFC-0005 S8cn (2026-11-02), 241->247, stacked past the provisional numbers
+  ## queued slices hold. Verdicts change: step 1e (a bounded concrete search
+  ## after 1b, `checkCappedSteps`) answers `sxSat` on queries both searches ran
+  ## out on; an `mpairs` view and its Table in a callee decide a non-literal
+  ## key's presence, a removed key on a one-entry table, and a holder object;
+  ## the view's write past a raise reaches the Table; `let f = proc` is the
+  ## direct call (`devirtProcLets`); `f(s[i], s)` has one location
+  ## (`seqViewPeer`, `cViewAliases`). Newly declined, each a wrong verdict
+  ## before: a pointer to the view with a call receiving the Table; a callee
+  ## holding the container in a local or a loop (`bindsViewWhole`); a write to
+  ## the view past a key added (a rehash the walk cannot see).
   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
   ## one integration branch under ONE walker number; their bullets follow the
   ## batch 7 block, each naming its provisional number. The stack's own

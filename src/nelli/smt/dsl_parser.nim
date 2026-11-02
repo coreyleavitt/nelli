@@ -2841,6 +2841,72 @@ proc isNestedRoutine(sym: NimNode): bool =
     return false
   namesRoutineDef(sym) and namesRoutineDef(owner(sym))
 
+proc procLetTarget(callee: NimNode): NimNode =
+  ## RFC-0005 S8cn. The top-level routine a `let` proc value can only name
+  ## (`let f = rab`, `let g = f`), nil otherwise. A `let` is written once,
+  ## so `f(a)` is `rab(a)`. A `var`, a parameter, a lambda or a nested routine
+  ## (which captures) stays a closure call.
+  var cur = callee
+  for _ in 0 .. 16:
+    if cur.kind != nnkSym: return nil
+    case symKind(cur)
+    of nskProc, nskFunc:
+      if namesRoutineDef(cur) and not isNestedRoutine(cur): return cur
+      return nil
+    of nskLet:
+      let impl = cur.getImpl
+      if impl.kind != nnkIdentDefs or impl.len != 3: return nil
+      cur = impl[2]
+      while cur.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and cur.len > 0:
+        cur = cur[^1]
+    else:
+      return nil
+  nil
+
+proc rewriteProcLetCalls(n: NimNode): bool =
+  ## RFC-0005 S8cn. Respell in place (`procLetTarget`); true if any.
+  if n.kind in {nnkCall, nnkCommand} and n.len > 0:
+    let target = procLetTarget(n[0])
+    if target != nil:
+      n[0] = target
+      result = true
+  for c in n:
+    if rewriteProcLetCalls(c): result = true
+
+proc countSymUses(n, sym: NimNode): int =
+  ## RFC-0005 S8cn. The occurrences of `sym` in `n`, its declaration included.
+  if n.kind == nnkSym and n == sym: return 1
+  for c in n: result += countSymUses(c, sym)
+
+proc dropDeadProcLets(n, root: NimNode): bool =
+  ## RFC-0005 S8cn. Remove from `n` each `let` of a proc value
+  ## (`procLetTarget`) that `root` names nowhere else; true if any went.
+  if n.kind == nnkLetSection:
+    var i = n.len - 1
+    while i >= 0:
+      let d = n[i]
+      if d.kind == nnkIdentDefs and d.len == 3 and d[0].kind == nnkSym and
+         procLetTarget(d[0]) != nil and countSymUses(root, d[0]) == 1:
+        n.del(i)
+        result = true
+      dec i
+  for c in n:
+    if dropDeadProcLets(c, root): result = true
+
+proc devirtProcLets(n: NimNode): NimNode =
+  ## RFC-0005 S8cn. `n` with each call through a `let` proc value spelled as
+  ## the direct call it is (`procLetTarget`), so a call handing over an
+  ## `mpairs` view and its Table, or a Table at all, is the direct call the
+  ## rest of the parser models. Before, it was a closure call, and a proc
+  ## with a Table formal has no closure sort
+  ## (`seUnsupportedCompoundSortLeaf`). A `let` no call needs any more goes
+  ## too, since lowering it would decline the same way; one still used as a
+  ## value stays, and declines as it did.
+  let copy = copyNimTree(n)
+  if not rewriteProcLetCalls(copy): return n
+  while dropDeadProcLets(copy, copy): discard
+  copy
+
 proc collectDeclaredSyms(n: NimNode; into: var seq[NimNode]) =
   ## RFC-0005 S8an. Every value symbol DECLARED anywhere in `n`: `let`/`var`
   ## names (tuple unpacking included), for-variables, and the formal
@@ -2972,7 +3038,7 @@ proc parseRoutineToLambda(n: NimNode, ctx: ParseCtx,
     retTy = classifyType(formal[0]).ty
   # The body of a routine def (lambda/proc/func) is at the fixed routine-body
   # index (`body(n)`); n.len-1 can be a trailing synthetic `result` symbol.
-  let bodyNode = body(n)
+  let bodyNode = devirtProcLets(body(n))   # RFC-0005 S8cn
   # Free variables = value-symbol refs not bound by the lambda. A top-level proc
   # (C3) has none by construction; skip the scan.
   var captures, mutCaptures: seq[string]
@@ -6668,6 +6734,67 @@ proc viewWriteBack(view, actual: NimNode; t: string; lo: IRExpr;
   let w = parseAsgn(nnkAsgn.newTree(storage, newEmptyNode()), back, wbPre, ctx)
   mkBlock(wbPre & @[w])
 
+proc plainActual(a: NimNode): bool =
+  ## RFC-0005 S8cn. `a` evaluates with no effect: a variable, a literal, or a
+  ## path over them.
+  case a.kind
+  of nnkSym, nnkCharLit .. nnkUInt64Lit, nnkFloatLit .. nnkFloat64Lit,
+     nnkStrLit .. nnkTripleStrLit, nnkEmpty, nnkType:
+    true
+  of nnkDotExpr, nnkBracketExpr, nnkHiddenDeref, nnkHiddenAddr,
+     nnkHiddenStdConv, nnkHiddenSubConv:
+    for c in a:
+      if not plainActual(c): return false
+    true
+  else: false
+
+proc seqViewPeer(n: NimNode; i: int; lv: NimNode;
+                 heapSteps: seq[NimNode]): tuple[arg: int; field: string] =
+  ## RFC-0005 S8cn (item 5). The actual that hands the callee the seq whose
+  ## element `lv` is, in a call with `f(s[i], s, ...)`'s shape: its position,
+  ## and the field path from it to the seq (`o` for `o.s[i]`, as `cViewAliases`
+  ## takes a holder's Table). `(0, "")` when there is not exactly one, or the
+  ## seq is reached through the heap, or an actual has an effect that could
+  ## move the index (the location is fixed where the actual stands).
+  if lv.kind != nnkBracketExpr or lv.len != 2 or heapSteps.len > 0: return
+  let base = lv[0]
+  if classifyType(base).ty.kind != itSeq: return
+  for j in 1 ..< n.len:
+    if not plainActual(n[j]): return
+  var found = 0
+  var field = ""
+  for j in 1 ..< n.len:
+    if j == i: continue
+    var a = n[j]
+    while a.kind in {nnkHiddenAddr, nnkHiddenDeref, nnkHiddenStdConv,
+                     nnkHiddenSubConv} and a.len > 0:
+      a = a[^1]
+    if a.kind notin {nnkSym, nnkDotExpr}: continue
+    var cur = base
+    var path = ""
+    while true:
+      while cur.kind == nnkHiddenDeref and cur.len == 1: cur = cur[0]
+      if scopedRepr(cur) == scopedRepr(a):
+        if found != 0: return (0, "")
+        found = j
+        field = path
+        break
+      if cur.kind != nnkDotExpr or cur.len != 2 or cur[1].kind != nnkSym: break
+      path = (if path.len == 0: strVal(cur[1]) else: strVal(cur[1]) & "." & path)
+      cur = cur[0]
+  (found, field)
+
+proc seqViewElems(n: NimNode; i: int): seq[int] =
+  ## RFC-0005 S8cn. The actuals of `n` that are elements of the seq the actual
+  ## `i` hands over (`seqViewPeer`): `f(s[0], s)` seen from `s`.
+  for j in 1 ..< n.len:
+    if j == i or n[j].kind != nnkHiddenAddr or n[j].len != 1: continue
+    var lv = n[j][0]
+    if isVarIndirection(lv): lv = lv[0]
+    var hs: seq[NimNode]
+    if lvalueRoot(lv, hs) != nil and seqViewPeer(n, j, lv, hs).arg == i:
+      result.add j
+
 proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
@@ -6748,6 +6875,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
   # one location (`aliasPath`); the call declines on the paths where they
   # all may be equal.
   var aliasConds: seq[AliasIndexPairs]
+  var seqViews: seq[tuple[viewArg, tabArg: int; ix: NimNode; tabField: string]]
   # RFC-0005 S8bf: for each argument, the other `var`/`addr` heap actuals
   # whose cell may be its own (`heapCellsMayMeet`). Two `addr`s of one
   # lvalue are one cell already (`addrCells`), not a pair.
@@ -7048,6 +7176,7 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
         # RFC-0005 S8an: a plain variable named by another argument that
         # may pass it by address (`varActualMayAlias`) declines too.
         if varActualMayAlias(n, i, lv, lv, @[], aliasConds,
+                             seqViewElems(n, i),   ## RFC-0005 S8cn
                              cellsBound = true):   ## RFC-0005 S8bs
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
@@ -7058,8 +7187,14 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
       else:
         var heapSteps: seq[NimNode]
         let root = lvalueRoot(lv, heapSteps)
+        # RFC-0005 S8cn (item 5): `f(s[i], s)`. The formal and the element are
+        # one location through the seq's own formal: the walker keeps them
+        # equal in the callee (`seqViews`, `cViewAliases`).
+        let peer = seqViewPeer(n, i, lv, heapSteps)
+        let peerSkip = (if peer.arg > 0: @[peer.arg] else: newSeq[int]()) &
+                       seqViewElems(n, i)
         if root.isNil or
-           varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
+           varActualMayAlias(n, i, lv, root, heapSteps, aliasConds, peerSkip,
                              cellsBound = true):   ## RFC-0005 S8bs
           writeBacks.add ctx.declineAtSite(feUnsupportedOp,
             siteMsg(n, "`var` argument `" & lv.repr & "` of `" &
@@ -7087,6 +7222,9 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
             preamble.add mkLet(t, classifyType(lv).ty, ir)
             ir = mkVar(t)
           varLocOf(lv, ir.vname, "var", preamble, ctx, locs)   ## RFC-0005 S8bs
+          if peer.arg > 0:   # RFC-0005 S8cn
+            seqViews.add (viewArg: i - 1, tabArg: peer.arg - 1, ix: lv[1],
+                          tabField: peer.field)
           var wbPre: seq[IRStmt]
           let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), ir, wbPre, ctx)
           # An lvalue shape `parseAsgn` declines is its own scoped marker
@@ -7124,6 +7262,14 @@ proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
             else: ensureProcRegistered(ctx, calleeSym, n, byRefs)
   let call = mkCall(key, retName, argIRs, retTy, offsetPositions, guards,
                     locs, (if anyVarActual: varSafe else: @[]))
+  # RFC-0005 S8cn: the actuals are plain (`seqViewPeer`), so the index read
+  # here is the one the element was taken at.
+  for v in seqViews:
+    let ixName = freshSynth(ctx, "seqViewIx")
+    preamble.add mkLet(ixName, tInt(64, signed = true),
+                       parseExpr(v.ix, preamble, ctx))
+    call.cViewAliases.add (viewArg: v.viewArg, tabArg: v.tabArg, keyName: ixName,
+                           tabField: v.tabField)
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
 
@@ -15682,9 +15828,14 @@ proc mutViewWriteBack(s: IRStmt; name, tabRoot: string; viewAddr: bool;
       result.tryHandlers[i].body = onEntry(result.tryHandlers[i].body)
     result.tryFinally = onEntry(s.tryFinally)
   else:
-    var seqOut = @[s]
     let byName = writesName(s, name)
-    if byName: seqOut.add writeBack()
+    # RFC-0005 S8cn: a call's write to the view reaches the Table when the call
+    # raises too (Nim wrote the slot), and only the view's formal carries it
+    # when the Table went by value.
+    var seqOut = if byName and s.kind == isCall:
+                   @[mkTry(s, @[], mkBlock(@[writeBack()]))]
+                 else: @[s]
+    if byName and s.kind != isCall: seqOut.add writeBack()
     let closureCall =
       (s.kind == isLet and hasClosureCall(s.lvalue)) or
       (s.kind == isAssign and hasClosureCall(s.avalue))
@@ -15933,6 +16084,10 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
     # what was last written there, and a write leaves the table alone.
     let goneName = freshSynth(ctx, "tkg")
     loopStmts.add mkLet(goneName, tBool(), mkBoolLit(false))
+    # With a pointer to the view every statement is followed by a write-back
+    # (`mutViewWriteBack`), and the check on each is a query per statement:
+    # there, adding a key declines where it is added (`reload`).
+    let viewAddr = addrTakenIn(n[^1], vars[^1])
     proc writeBack(): IRStmt =
       var wbPre: seq[IRStmt]
       let st =
@@ -15945,14 +16100,39 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
       let store = if wbPre.len == 0: st else: mkBlock(wbPre & @[st])
       var guardPre: seq[IRStmt]
       let tabNow = parseExpr(container, guardPre, ctx)
+      # RFC-0005 S8cn: a key added under the view may have rehashed the Table
+      # (it depends on the capacity, which is not modelled). Nim then keeps
+      # the view on the old slots, and this write is lost (`r9_lost`). Writing
+      # the value the slot holds changes nothing either way.
+      if viewAddr:
+        guardPre.add mkIf(@[mkBranch(mkBinop(bAnd,
+          mkTabRemovedSince(tabNow, mkVar(snapIter)),
+          mkUnop(uNot, mkContains(tabNow, mkVar(kSynth)))), mkBlock(@[]))], store)
+        return mkBlock(guardPre)
+      let grownBad = ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "the loop variable was written after a key was added to " &
+                "the Table: Nim may have rehashed it, leaving the view on " &
+                "the old slots, by its capacity, which is not modelled -- " &
+                "path degraded to sxUnknown"),
+        "an `mpairs` view written after a key was added")
+      let grownArm =
+        if valTy.kind in {itInt, itBool, itFloat32, itFloat64, itString}:
+          let rl = freshSynth(ctx, "tkc")
+          let recv = liftIndexContainer(parseExpr(container, guardPre, ctx),
+                                        tabCls.ty, guardPre, ctx)
+          mkBlock(@[mkIndexStmt(rl, recv, mkVar(kSynth), valTy),
+                    mkIf(@[mkBranch(mkBinop(bNe, mkVar(rl), mkVar(vName)),
+                                    grownBad)])])
+        else: grownBad
+      let grown = mkBinop(bGt, mkSeqLen(tabNow), mkVar(lenName))
       guardPre.add mkIf(@[mkBranch(mkBinop(bAnd,
         mkTabRemovedSince(tabNow, mkVar(snapIter)),
-        mkUnop(uNot, mkContains(tabNow, mkVar(kSynth)))), mkBlock(@[]))], store)
+        mkUnop(uNot, mkContains(tabNow, mkVar(kSynth)))), mkBlock(@[]))],
+        mkBlock(@[mkIf(@[mkBranch(grown, grownArm)]), store]))
       mkBlock(guardPre)
     # RFC-0005 S8bx (item 3): a call receiving both the view and the table.
     var scratch: seq[IRStmt]
     let tabLoc = parseExpr(container, scratch, ctx)
-    let viewAddr = addrTakenIn(n[^1], vars[^1])
     body = markViewAliases(body, vName, irLocPath(tabLoc), irLocRoot(tabLoc),
                            kSynth, viewAddr, n, ctx)
     # RFC-0005 batch 8: a key removed declines where it is removed, as a read
@@ -15990,6 +16170,15 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
       arms.add mkBranch(putBack, again)
       rlPre.add mkIf(@[mkBranch(mkTabRemovedSince(tabNow, mkVar(snapIter)),
                                 mkIf(arms, declined))], readNow)
+      if viewAddr:
+        rlPre.add mkIf(@[mkBranch(
+          mkBinop(bGt, mkSeqLen(tabNow), mkVar(lenName)),
+          ctx.declineAtSite(feUnsupportedOp,
+            siteMsg(n, "a key was added to the Table while a pointer to the " &
+                    "loop variable is held: Nim may have rehashed it, by its " &
+                    "capacity, which is not modelled -- path degraded to " &
+                    "sxUnknown"),
+            "a key added under an `mpairs` view with a pointer to it"))])
       mkBlock(rlPre)
     body = mutViewWriteBack(body, vName, irLocRoot(tabLoc), viewAddr, writeBack,
                             reload)
@@ -18887,7 +19076,7 @@ proc parseCalleeImpl(impl: NimNode, ctx: ParseCtx,
   # Procs with conditional / multi-step result-assignment land via
   # the general parser path (parseStmt below) — those cases need
   # cycle-2 work to model `result` as a mutable binding.
-  let bodyNode = monoImpl[6]
+  let bodyNode = devirtProcLets(monoImpl[6])   # RFC-0005 S8cn
   proc resultRhs(n: NimNode): NimNode =
     ## If `n` is a single `result = expr` assignment (possibly wrapped
     ## in a one-element nnkStmtList), return the expr; else nil.
@@ -19314,7 +19503,7 @@ proc parseProc*(procDef: NimNode, maxInstantiationsPerProc = 0): ParseResult =
   # top-level statement stream. Without this, single-statement
   # bodies (e.g. one outer `if`) dispatch straight to `walk(isIf)`
   # and bypass the prune entirely.
-  let parsed = parseStmt(procDef[6], ctx)
+  let parsed = parseStmt(devirtProcLets(procDef[6]), ctx)   # RFC-0005 S8cn
   let bodyIR = if parsed != nil and parsed.kind == isBlock: parsed
                else: mkBlock(@[parsed])
   # RFC-0005 S8p: the SUT's return type, so a read of `result` before the

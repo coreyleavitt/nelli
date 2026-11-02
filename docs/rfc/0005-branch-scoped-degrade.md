@@ -469,7 +469,7 @@ state = "done"
 [[slice]]
 id = "S8cn"
 title = "Batch 8's remainder: step 1d's adversarial pins, bt_limit_replace on Z3 4.13.4, the declines left on aliased mpairs views and seq elements passed with their seq"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -13714,3 +13714,102 @@ table, and every Z3 formula.
     subject is returned whole;
   - verbs, LIMIT and an unmarked SKIP:NAME, which have no sure bytes;
   - `count` over a replace value.
+
+**As landed (S8cn, walker 247) — batch 8's remainder.** The branch is
+`rfc-0005-s8cn`, on `afce42a`. Every label is run natively as well as walked.
+
+*Wrong verdicts found and fixed here.* A view passed to a callee taking its
+Table:
+
+- A pointer to the view (`viaPtr(Hold(w: addr v), t, k)`, `h.w[] += 1; t[k]`):
+  a false `sxUnsat` and a false `sxSat`. It now declines, naming the pointer.
+  A body's own `let p = addr v` is decided.
+- A raise out of the callee with the Table passed by value lost the view's
+  write: a false `sxUnsat` on the handler reading it (`wr_live`). The write-back
+  is now the call's `finally`.
+- A callee holding the memory: `let c = t` (a cursor, under Nim's inference) and
+  `for x in t.values` (`lent`) read live, where the walk copied. Both verdicts
+  were wrong (`tc1_shared`, `tc1_copy`). They decline (`bindsViewWhole`), for a
+  local bound to the whole, whether it would be a cursor or not, since that is
+  what the compiler proved. A mutated local (`tc2`) copies, and declines too.
+- A key added under a live view, then a write to it: Nim may rehash and leave
+  the view on the old slots, so the write is lost (`rh_lost`, natively; a false
+  `sxUnsat` here). The capacity is not modelled, so the write declines. A write
+  of the value the slot already holds does not, nor does a key added with no
+  write past it.
+
+*Item 1, step 1d.* `tests/tsymex_rfc0005_s8cn_step1d.nim`, 20 tests. The pins
+were green at the base, so what they show is that they bite: replacing `not all`
+by `not caps[0]` gives a false `sxUnsat` on "one leaf bounded"; asserting the
+caps beside `not all` fails 9 of them. `grow_pad_dead` was searched natively to
+exhaustion within its shape with no hit, its stale-capacity variant is dead too,
+and at the default cap it is `sxUnsat`; a cap of 8 is correctly `sxUnknown`. Each
+family of `seqRangeFacts` was read against Z3's semantics and checked by
+`invalidFacts` (validity with the sequence theory, and on small ground instances):
+length bounds; `indexof` and `last_indexof` with an empty needle; contains, prefix
+and suffix lengths; `str.at`; `substr` length; `to_code` (`>= -1`, `>= 0` iff
+length 1, `<= 255` on a byte leaf, where `byteLeafIds` requires root membership on
+an uninterpreted leaf); `to_int`; seq equality implying equal lengths; `replace_all`
+relation and growth; `in_re` bounds; `from_int` digit count; `to_int(from_int)`;
+the word-equation and piece links; the split Ints; `nimLenFacts`. None was wrong.
+Z3's literal escapes were probed byte-faithful.
+
+*Item 2, `bt_limit_replace` on 4.13.4.* Step 1e runs when steps 1 and 3 are
+unknown and 1b refutes nothing: the byte-domain leaves of the query, their bytes
+taken from its own `str.to_code` comparisons and literals, a theory-free capped
+model for the lengths, and at most 1024 candidates (256 per length, 200k units
+each, half of the half-budget overall), each asked of the whole query in its own
+context. Only a model of the whole query answers. The verdict is the exact
+`sxSat` (3.8 s). The numbers it came from: 4.13.4 with isolation is unknown at
+10M + 10M; with isolation off, step 1 is sat at 3.83M; 5.1 with isolation is sat
+at 2.38M; the host's text without the domain is sat at 4.24M; relaxing the domain
+in its own context stays unknown at 5M and 10M (the rejected design); the subject
+pinned to `"c"` takes about 508 units. This replaces batch 8's PRECISION note,
+"on 4.13.4 `sxSat` or that decline", for this query. It also lifted `two_bytes` on
+5.1.
+
+*Items 3 and 4.* `presenceRemoved` returns a term: a `false` store removes only
+if the key was held, and an all-`true` chain is literally false. So a non-literal
+key's presence decides, by the fork in `syncAddrCells`. A holder object is an
+entry with a field path (`AddrCellEntry.path`), `b.tab[k] = v` through a `var`
+formal parses (it was N49). Both written in one statement is ordered by the
+statement's last effect, and no shape we could build reaches the remaining
+decline: `t[k] = wv(v)`, `v = wrTab(t, k)` and two calls in one expression
+(hoisted) decide. A removal: a one-entry table's only entry is at its home slot,
+so removing it empties the slot the view is on (it reads zero, then what was
+last written), and its key put back lands there again. Past that the slot depends
+on the hashes, natively (`rb_hash`, `r2_zero`), and it declines.
+
+*Item 5.* `let f = rab; f(v, t, k)` is the direct call, since a `let` is written
+once (`devirtProcLets`, which also drops a `let` nothing else uses: lowering one
+with a Table formal declined by itself). `f(s[i], s)`, directly or through
+`mitems`/`mpairs`, on a local or a global, or `f(o.s[i], o)`: one location, as a
+view and its Table are (`seqViewPeer`, an entry in `cViewAliases` with the index
+as its key, `syncAddrCells`' seq arm). A resize or an assignment of the whole gave
+the seq other memory and the formal points at the old (`viewFollows`): declines.
+
+*Item 6.* S8bw's row is done. Every other row on this base is too; S8by to S8cl
+have no row here.
+
+*Different mechanisms, reported and not fixed here.*
+
+- SOUNDNESS: `for x in s: s[0] = 5; r = x`, and `for x in t.values`, with no
+  callee at all. `items` and `values` yield `lent`, so `x` reads the live element;
+  the lowering binds a copy. A false `sxSat` (`it_copy`, `ic_copy`, `tv_copy`) and
+  a false `sxUnsat` (`it_shared`, `ic_shared`, `tv_shared`). `pairs` copies, and
+  so does an array's `items`, natively.
+- SOUNDNESS: `proc f(s: seq[int]): int = (let c = s; gseq[0] = 5; c[0])` called as
+  `f(gseq)`: the same cursor, over a by-value formal and a global written by name.
+  False verdicts (`gc_copy`, `gc_shared`).
+- PRECISION: a proc value that is a `var`, a parameter, or a computed `let`, with
+  a Table formal: the closure path has no sort for one
+  (`seUnsupportedCompoundSortLeaf`).
+- PRECISION: a callee with the element that reaches the seq by a global's name
+  (`sqG`, `seqReadG`, `gw`): the name is withheld, and it declines.
+- PRECISION: `f(s[i], s[0], s)`, two elements where one index is computed, declines.
+- PRECISION: a pointer to the view with a call receiving the Table declines.
+- PRECISION: a call with a mutated local copy of the container declines with the
+  cursor (above), though it is decided in Nim.
+- PRECISION: `t.clear()` and `t.pop` under a view, pre-existing Table-op declines;
+  `Table[string, VObj]`'s value type (`seUnsupportedTableValType`), with no view.
+- PRECISION: the view by value when not a scalar stays declined.

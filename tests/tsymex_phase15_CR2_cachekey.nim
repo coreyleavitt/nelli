@@ -1042,7 +1042,9 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
     ## an `mpairs` view, a table write seen through it, a raise in an
     ## own-context solve a fault. 237->241.
-    check symexWalkerVersion == "241"
+    ## RFC-0005 S8cn: step 1e, an `mpairs` view and its Table, a seq's element
+    ## with its seq, a `let` proc value. 241->247.
+    check symexWalkerVersion == "247"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

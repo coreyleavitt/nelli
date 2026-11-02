@@ -9419,6 +9419,15 @@ slices met:
   Passing the element with its seq declines, on a local seq and a global.
 - *`seqWitnessReader`.* S8bd's `distinct` seq elements (batch 5's) are one more
   arm of S8bx's classifier, `swrDistinct`, rather than the predicate S8bx removed.
+- *S8bp's context, on Z3 4.13.4.* Two pins green at each slice's tip moved on
+  the older Z3 once their queries ran in a context of their own. S8bx's
+  `grow_pad_dead`: step 1 is UNSAT, and step 2's core is not minimal, so it named
+  a cap the query's own bounds imply. Step 1d asks that directly, the query
+  without the sequence theory, plus the facts, against the caps' negation: no
+  model means every real model keeps to the caps, so step 1's UNSAT is the
+  query's. `bt_limit_replace` (a free one-byte subject): 4.13.4 spends the budget
+  and 100M units more, and declines. PRECISION: exact on 5.1; on 4.13.4 `sxSat`
+  or that decline, never `sxUnsat`; the fixed subject keeps `sxSat` on both.
 
 **Batch 7 (2026-10-04) — one walker number for three slices.** S8bp, S8bu
 and S8br (each provisional: 219, 225, 229) land stacked on batch 6, in

@@ -13911,11 +13911,23 @@ proc checkCappedSteps(ctx: Z3Context; query: openArray[Z3Bool];
                                  seqTheory = false)
       if counted("1c-capped", ownContextCheck(sTc)) == zsUnsat:
         return (zsUnknown, s1, nil, capText)
+  var all = caps[0]
+  for i in 1 ..< caps.len: all = all and caps[i]
   if r1 == zsUnsat and not lastIndex:
+    # Step 1d (RFC-0005 batch 8): the caps are implied. If the query with no
+    # sequence theory, plus the facts (a superset of the real models), has no
+    # model breaking a cap, every real model keeps to the caps, so step 1's
+    # UNSAT is the query's own. Step 2 cannot say so: its core is not minimal,
+    # and may name the cap though the query bounds every length itself (S8bx's
+    # `setLen` pin, `len(s) <= 8` and `n <= 12`, on Z3 4.13.4 in S8bp's own
+    # context).
+    let pre = if rl == 0: factsFirstRLimit else: min(rl, factsFirstRLimit)
+    let sIm = ownContextSolver(ctx, roots & facts & @[not all], pre,
+                               seqTheory = false)
+    if counted("1d", ownContextCheck(sIm)) == zsUnsat:
+      return (zsUnsat, s1, nil, "")
     # Step 2: is the UNSAT the query's own?
     let s2 = ownContextSolver(ctx, roots, rl)
-    var all = caps[0]
-    for i in 1 ..< caps.len: all = all and caps[i]
     let capLit = mkBoolVar(s2.ctx, "__s8k_seq_len_cap")
     s2.add implies(capLit, translate(all, s2.ctx))
     let r2 = counted("2", ownContextCheck(s2, [capLit]))

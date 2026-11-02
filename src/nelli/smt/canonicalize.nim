@@ -216,7 +216,9 @@ const symexWalkerVersion* = "241"
   ## the view and reaching the Table by a global's name or a capture had two
   ## copies (`cGuardRoots`); a raise in an own-context solve was lost on C, a
   ## false sxUnsat (`solveRaiseHook`). An element of `mitems` passed on to a
-  ## `var` formal no longer aborts the compile. 237 -> 241.
+  ## `var` formal no longer aborts the compile. `checkCapped` step 1d: caps the
+  ## query itself implies do not leave step 1's UNSAT to step 2's core, which
+  ## is not minimal (Z3 4.13.4). 237 -> 241.
   ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their

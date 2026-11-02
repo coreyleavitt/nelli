@@ -132,6 +132,10 @@ on:
     # a docs-only PR still runs the full leg.
     paths-ignore: *docs-only
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/rfc-') }}
+
 jobs:
   derive-suites:
     runs-on: ubuntu-latest

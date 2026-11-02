@@ -79,6 +79,10 @@ on:
       - 'CLAUDE.md'
       - 'LICENSE'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/heads/rfc-') }}
+
 jobs:
   fuzzer-msvc:
     runs-on: windows-2025

@@ -272,6 +272,9 @@ type
     s*: Z3String
     defs*: seq[Z3Bool]  ## definitional constraints on fresh constants
     msg*: string
+    heavy*: bool
+      ## RFC-0005 S8cf: the value is the priority automaton's, which Z3 takes
+      ## seconds over even at a concrete subject (`regexPointSites`)
 
 
 proc inSet(code: Z3Int; cs: set[char]): Z3Bool =
@@ -941,6 +944,66 @@ proc lowerPrio(sp: RegexSpec; pr: PcreParse; s: Z3String; start: Z3Int;
     raiseAssert "lowerPrio: entry `" & sp.entry & "`"
   res
 
+type RegexPoint* = object
+  ## RFC-0005 S8cf. A call's value at one concrete subject (`concreteEntry`).
+  ok*: bool      ## false: the automaton does not read this call
+  b*: bool
+  i*: int
+  s*: string
+
+var pointNfas {.threadvar.}: Table[string, Nfa]
+
+proc pointNfa(sp: RegexSpec; pr: PcreParse; engine: PcreEngine): Nfa =
+  let key = $engine & ":" & sp.flag & ":" & sp.pattern
+  if key in pointNfas: return pointNfas[key]
+  result = limitNfa(pr, engine)
+  pointNfas[key] = result
+
+proc concreteEntry*(sp: RegexSpec; pr: PcreParse; s: string; start: int;
+                    by = ""): RegexPoint =
+  ## RFC-0005 S8cf. `sp.entry` on `s` from `start` by the automaton the Z3
+  ## formulas are verified against, with std/re's reading of the result
+  ## (lib/impure/re.nim, Nim 2.2.10). `replace` is the same loop
+  ## (`pcre_select.pcreReplace`, `by` literal). A captures overload, a start
+  ## option's limit that makes every call an error, or a call the automaton
+  ## stops at is not `ok`. The caller keeps `s` within `limitReach`'s safe
+  ## length: past it the real call can stop at one of PCRE's limits.
+  if pr.status != psOk or sp.entry.startsWith("capture"): return
+  let anch = sp.entry in ["match", "matchLen", "startsWith", "endsWith"]
+  let n = pointNfa(sp, pr, (if anch: peInterp else: pcreSearchEngine()))
+  if not n.ok: return
+  case limitEffect(n)[0]
+  of leUnknown, leZero: return
+  of leNone, leCounted: discard
+  if sp.entry == "replace":
+    var stopped = false
+    let v = pcreReplace(n, s, by, stopped)
+    return RegexPoint(ok: not stopped, s: v)
+  proc exec(st: int): tuple[rc, a, b: int] =
+    if st < 0 or st > s.len: return (pcreErrBadOffset, 0, 0)
+    let r = pcreExec(n, s, st, anch)
+    (r[0], r[1], r[2])
+  if sp.entry == "endsWith":
+    for i in 0 ..< s.len:
+      let r = exec(i)
+      if r.rc == pcreUnmodelled: return
+      if r.rc >= 0 and r.b - r.a == s.len - i:
+        return RegexPoint(ok: true, b: true)
+    return RegexPoint(ok: true)
+  let r = exec(start)
+  if r.rc == pcreUnmodelled: return
+  let hit = r.rc >= 0
+  case sp.entry
+  of "match": RegexPoint(ok: true, b: (if hit: true else: r.rc != -1))
+  of "startsWith": RegexPoint(ok: true, b: hit)
+  of "contains": RegexPoint(ok: true, b: hit)
+  of "matchLen": RegexPoint(ok: true, i: (if hit: r.b - r.a else: r.rc))
+  of "find", "findBoundsFirst":
+    RegexPoint(ok: true, i: (if hit: r.a else: r.rc))
+  of "findBoundsFirstCap": RegexPoint(ok: true, i: (if hit: r.a else: -1))
+  of "findBoundsLast": RegexPoint(ok: true, i: (if hit: r.b - 1 else: 0))
+  else: RegexPoint()
+
 proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
                       start: Z3Int; fresh: FreshName;
                       arrLen = mkInt(0); old = mkString("");
@@ -976,8 +1039,10 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
     # verb, or a newline convention other than LF (whose `$` and bumpalong
     # the edge-split reading does not know); RFC-0005 S8bj: UTF mode or a
     # limit start option: every entry is the priority automaton's.
-    return lowerPrio(sp, pr, s, start, fresh,
-                     (if fine: "" else: why & "; "))
+    result = lowerPrio(sp, pr, s, start, fresh,
+                       (if fine: "" else: why & "; "))
+    result.heavy = true
+    return
   let anyByte = byteSetRe(pcreAnyByte)
   var nb, bl: seq[Z3Regex[Z3String]]
   var nbM: seq[Z3Regex[Z3String]]
@@ -1049,6 +1114,7 @@ proc lowerRegexEntry*(sp: RegexSpec; pr: PcreParse; s: Z3String;
       if not pl.ok:
         return unmodelled(sp.entry & " depends on which match PCRE picks: " &
                           f.why & "; " & pl.why)
+      res.heavy = true
       case sp.entry
       of "matchLen":
         res.i = ite(bad, mkInt(-24),

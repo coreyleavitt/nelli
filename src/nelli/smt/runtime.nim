@@ -4120,6 +4120,33 @@ var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## unfolding of the recursive term never reaches the facts' conflict
   ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
 
+proc literalStringBytes*(z: Z3String): tuple[ok: bool, s: string] =
+  ## RFC-0005 S8cf. `z`'s bytes when it folds to a literal.
+  let v = simplify(z)
+  if not Z3_is_string(v.ctx.raw, v.raw): return
+  for cp in getStringContents(v):
+    if cp notin 0 .. 255: return
+    result.s.add char(cp)
+  result.ok = true
+
+type RegexPointSite* = object
+  ## RFC-0005 S8cf. A `std/re` call `checkCapped` reads at the points the
+  ## search proposes before it tries Z3's encoding (`pointCheck`): its value
+  ## as the query reads it (`exact`), the assertions that only define it
+  ## (`defs`, their ids) and its operands. `declined`: the encoding is past
+  ## its size cap, so `exact` is a fresh value with nothing else defining it.
+  exact*: Z3AnyAst
+  defs*: seq[int]
+  subject*, by*: Z3String
+  start*: Z3Int
+  sp*: RegexSpec
+  pr*: PcreParse
+  safe*: int       ## `limitReach`'s safe length (`high(int)`: no limit)
+  declined*: bool
+
+var regexPointSites* {.threadvar.}: seq[RegexPointSite]
+  ## RFC-0005 S8cf. Every such call of the walk. Reset per run.
+
 type RegexLimitSite* = object
   ## RFC-0005 S8cf. One `std/re` call whose subject can be long enough to
   ## reach one of PCRE's own limits (`pcre_select.LimitReach`): its value as
@@ -13812,6 +13839,216 @@ const
     ## RFC-0005 S8cf. The most calls `limitWorldRefuted` splits on, one check
     ## each; a query reading more is `zsUnknown` past their safe lengths.
 
+const
+  pointRounds = 8
+    ## RFC-0005 S8cf. The candidates `pointCheck` tries one at a time.
+  pointRLimit = 2_000_000'u
+    ## RFC-0005 S8cf. One round's budget: its query holds no automaton, so a
+    ## round that needs more is one the exact encoding should have a go at.
+  pointTimeoutMs = 5000'u
+  pointTableLen = 4
+    ## RFC-0005 S8cf. The longest subject of `pointTable`'s candidates.
+  pointTableBytes = 5
+    ## RFC-0005 S8cf. Its alphabet's size: at most 781 subjects.
+
+proc stringConstants(ctx: Z3Context; query: openArray[Z3Bool]): seq[string] =
+  ## RFC-0005 S8cf. The string literals `query` holds.
+  var seen: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if Z3_is_string(ctx.raw, t.raw):
+      var b = ""
+      for cp in getStringContents(wrap[Z3String](ctx, t.raw)):
+        if cp in 0 .. 255: b.add char(cp)
+      result.add b
+    elif getAstKind(t) == akApp:
+      let (_, args) = unpackApp(t)
+      for a in args: stack.add a
+
+proc holdsIn(m: Z3Model; b: Z3Bool): bool =
+  ## RFC-0005 S8cf. `b` is true in `m`.
+  let ev = m.eval(b, modelCompletion = true)
+  Z3_get_bool_value(ev.ctx.raw, ev.raw) == Z3_L_TRUE
+
+proc pointValue(st: RegexPointSite; subject, by: string; start: int): RegexPoint =
+  ## RFC-0005 S8cf. `concreteEntry`, within the safe length: past it the real
+  ## call can stop at a limit, and the point has no value of its own.
+  if subject.len > st.safe: return RegexPoint()
+  concreteEntry(st.sp, st.pr, subject, start, by)
+
+proc pointEq(st: RegexPointSite; v: Z3AnyAst; p: RegexPoint): Z3Bool =
+  ## RFC-0005 S8cf. `v` is the value `p`.
+  let ctx = v.ctx
+  let want =
+    if st.sp.entry == "replace": toAnyAst(mkString(p.s))
+    elif st.sp.entry in ["match", "contains", "startsWith", "endsWith"]:
+      toAnyAst(mkBool(p.b))
+    else: toAnyAst(mkInt(p.i))
+  wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, v.raw, want.raw))
+
+proc pointSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
+  ## RFC-0005 S8cf. The `regexPointSites` whose value `query` reads.
+  if regexPointSites.len == 0: return
+  var byId = initTable[int, seq[int]]()
+  for i, st in regexPointSites:
+    byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
+  var seen, hit: HashSet[int]
+  var stack: seq[Z3AnyAst]
+  for r in query: stack.add toAnyAst(r)
+  while stack.len > 0:
+    let t = stack.pop()
+    let id = astId(ctx, t.raw)
+    if id in seen: continue
+    seen.incl id
+    if id in byId:
+      for i in byId[id]: hit.incl i
+    if getAstKind(t) != akApp: continue
+    let (_, args) = unpackApp(t)
+    for a in args: stack.add a
+  for i in 0 ..< regexPointSites.len:
+    if i in hit: result.add i
+
+proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
+                sites: seq[int]; decided: var bool):
+                tuple[status: Z3Status, s: Z3Solver, m: Z3Model, why: string] =
+  ## RFC-0005 S8cf (items 8, 9, 10). `query` with each call's value a fresh
+  ## `v` and its definition gone: a superset of the real runs. So:
+  ##   * UNSAT is the query's own;
+  ##   * a model whose every call's `v` is what `concreteEntry` computes at
+  ##     the model's operands is a model of the query;
+  ##   * otherwise the point is a valid lemma, `operands == c -> v == value`,
+  ##     and the search goes on, `pointRounds` times.
+  ## Past those rounds `pointTable` asks once for a subject among short
+  ## strings over the query's and the pattern's own bytes, all their values
+  ## stated at once: a search for a value (`r == "x-"`) has no other way to
+  ## one. Not `decided` leaves the query to `checkExact`, unless a call's
+  ## encoding was declined: then the verdict is `zsUnknown`.
+  decided = false
+  var vs: seq[Z3AnyAst]
+  var froms, tos: seq[RawZ3Ast]
+  var dropped: HashSet[int]
+  var declined = false
+  for i in sites:
+    let st = regexPointSites[i]
+    declined = declined or st.declined
+    for d in st.defs: dropped.incl d
+    let sort = Z3_get_sort(ctx.raw, st.exact.raw)
+    let name = regexFreshName("__regexPointValue")
+    let sym = Z3_mk_string_symbol(ctx.raw, name.cstring)
+    let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, sort))
+    vs.add v
+    froms.add st.exact.raw
+    tos.add v.raw
+  var roots: seq[Z3Bool]
+  for r in query:
+    if astId(ctx, r.raw) in dropped: continue
+    roots.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw,
+      cuint(froms.len), cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  let savedTimeout = queryTimeoutMsCur
+  defer: queryTimeoutMsCur = savedTimeout
+  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > pointTimeoutMs:
+    queryTimeoutMsCur = pointTimeoutMs
+  var stopWhy = "the search found no point whose value the query accepts"
+  proc operands(st: RegexPointSite; m: Z3Model):
+      tuple[ok: bool, s, by: string, start: int] =
+    result.s = evalStrBytes(m, st.subject)
+    if st.sp.entry == "replace": result.by = evalStrBytes(m, st.by)
+    let ev = m.eval(st.start, modelCompletion = true)
+    if not isNumeralAst(ctx, ev.raw): return
+    result.start = int(parseBiggestInt(getNumeralString(ev)))
+    result.ok = true
+  proc atPoint(st: RegexPointSite; s, by: string; start: int): Z3Bool =
+    result = st.subject == mkString(s) and st.start == mkInt(start)
+    if st.sp.entry == "replace": result = result and st.by == mkString(by)
+  block rounds:
+    for round in 0 ..< pointRounds:
+      let sv = ownContextSolver(ctx, roots, pointRLimit)
+      case ownContextCheck(sv)
+      of zsUnsat:
+        decided = true
+        return (zsUnsat, sv, nil, "")
+      of zsUnknown:
+        stopWhy = "Z3: " & sv.reasonUnknown()
+        break rounds
+      of zsSat: discard
+      let m = translate(sv.model(), ctx)
+      var all = true
+      for k, i in sites:
+        let st = regexPointSites[i]
+        let o = operands(st, m)
+        if not o.ok: break rounds
+        let p = pointValue(st, o.s, o.by, o.start)
+        if not p.ok:
+          stopWhy = "the automaton does not read the point"
+          break rounds
+        let want = pointEq(st, vs[k], p)
+        if not holdsIn(m, want):
+          all = false
+          roots.add implies(atPoint(st, o.s, o.by, o.start), want)
+      if all:
+        decided = true
+        return (zsSat, sv, m, "")
+  # The table: one call's subject over short strings.
+  let k0 = 0
+  let st0 = regexPointSites[sites[k0]]
+  var bytes: seq[char]
+  proc addByte(c: char) =
+    if c notin bytes and bytes.len < pointTableBytes: bytes.add c
+  for lit in stringConstants(ctx, query):
+    for c in lit: addByte(c)
+  var body = st0.sp.pattern          # past its start options: `(*UTF8)`
+  while body.startsWith("(*") and ')' in body:
+    body = body[body.find(')') + 1 .. ^1]
+  for c in body:
+    if c in {'a'..'z', 'A'..'Z', '0'..'9'}: addByte(c)
+  addByte('a')
+  var words = @[""]
+  var at = 0
+  while at < words.len:
+    let w = words[at]
+    inc at
+    if w.len < pointTableLen:
+      for c in bytes: words.add w & c
+  var opts: seq[Z3Bool]
+  let isReplace = st0.sp.entry == "replace"
+  let byLit = literalStringBytes(st0.by)
+  let startSimp = simplify(st0.start)
+  if isNumeralAst(ctx, startSimp.raw) and (byLit.ok or not isReplace):
+    let start = int(parseBiggestInt(getNumeralString(startSimp)))
+    for w in words:
+      let p = pointValue(st0, w, byLit.s, start)
+      if p.ok:
+        opts.add st0.subject == mkString(w) and pointEq(st0, vs[k0], p)
+  if opts.len > 0:
+    var any = opts[0]
+    for i in 1 ..< opts.len: any = any or opts[i]
+    let sv = ownContextSolver(ctx, roots & @[any], pointRLimit * 2)
+    if ownContextCheck(sv) == zsSat:
+      let m = translate(sv.model(), ctx)
+      var all = true
+      for k, i in sites:
+        let st = regexPointSites[i]
+        let o = operands(st, m)
+        if not o.ok: all = false; break
+        let p = pointValue(st, o.s, o.by, o.start)
+        if not p.ok or not holdsIn(m, pointEq(st, vs[k], p)):
+          all = false
+          break
+      if all:
+        decided = true
+        return (zsSat, sv, m, "")
+  if declined:
+    decided = true
+    result.status = zsUnknown
+    result.why = "a regex call whose encoding is past its size cap, read at " &
+      "points: " & stopWhy
+
 proc limitSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
   ## RFC-0005 S8cf. The `regexLimitSites` whose value `query` reads.
   if regexLimitSites.len == 0: return
@@ -13901,7 +14138,10 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   ##     stopped at a limit (`limitWorldRefuted`), else `zsUnknown`.
   ## A query with no such call is `checkExact` alone.
   let sites = limitSitesIn(ctx, query)
-  result = checkExact(ctx, query, settings, rlimit)
+  let points = pointSitesIn(ctx, query)
+  var decided = false
+  if points.len > 0: result = pointCheck(ctx, query, points, decided)
+  if not decided: result = checkExact(ctx, query, settings, rlimit)
   if sites.len == 0: return
   case result.status
   of zsSat:
@@ -25312,6 +25552,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
   regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
   regexLimitSites = @[]                  ## RFC-0005 S8cf: calls past PCRE's limits
+  regexPointSites = @[]                  ## RFC-0005 S8cf: calls read at points
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms

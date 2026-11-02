@@ -356,6 +356,14 @@ proc regexOutcomeGate(sp: RegexSpec; pr: PcreParse) =
            "value is a fresh one, replay-gated)")
   else: discard
 
+proc foldedLiteral[T](t: T): bool =
+  ## RFC-0005 S8cf. `t` is a constant: a site's substitution would hit every
+  ## other occurrence of it, and its value does not read the subject.
+  let v = toAnyAst(t)
+  getAstKind(v) == akNumeral or isNumeralAst(v.ctx, v.raw) or
+    Z3_get_bool_value(v.ctx.raw, v.raw) != Z3_L_UNDEF or
+    Z3_is_string(v.ctx.raw, v.raw)
+
 var regexReachCache {.threadvar.}: Table[string, LimitReach]
 
 proc regexReach(sp: RegexSpec; pr: PcreParse): LimitReach =
@@ -369,6 +377,7 @@ proc regexLimitSite[T](sp: RegexSpec; pr: PcreParse; subject: Z3String;
                        exact, err: T; errConds: seq[Z3Bool] = @[];
                        guarded: seq[int] = @[]) =
   ## RFC-0005 S8cf. Records a call that can reach a limit (`checkCapped`).
+  if foldedLiteral(exact): return
   let reach = regexReach(sp, pr)
   if reach.never: return
   let lenS = simplify(len(subject))
@@ -378,6 +387,30 @@ proc regexLimitSite[T](sp: RegexSpec; pr: PcreParse; subject: Z3String;
   regexLimitSites.add RegexLimitSite(exact: toAnyAst(exact), err: toAnyAst(err),
     errConds: errConds, subject: subject, safe: reach.safe, guarded: guarded,
     what: sp.entry & "(s, " & sp.flag & "\"" & sp.pattern & "\")")
+
+proc regexPointSite[T](sp: RegexSpec; pr: PcreParse; subject, by: Z3String;
+                       start: Z3Int; exact: T; defs: seq[int];
+                       declined = false) =
+  ## RFC-0005 S8cf. Records a call `checkCapped` reads at points first.
+  if foldedLiteral(exact): return
+  let reach = regexReach(sp, pr)
+  regexPointSites.add RegexPointSite(exact: toAnyAst(exact), defs: defs,
+    subject: subject, by: by, start: start, sp: sp, pr: pr,
+    safe: (if reach.never: high(int) else: reach.safe), declined: declined)
+
+proc literalCall(sp: RegexSpec; pr: PcreParse; subject, by: Z3String;
+                 start: Z3Int): RegexPoint =
+  ## RFC-0005 S8cf (item 10). The call's value at walk time, when its operands
+  ## are literals within the safe length: a concrete subject costs Z3 nothing.
+  let s = literalStringBytes(subject)
+  if not s.ok: return
+  let reach = regexReach(sp, pr)
+  if not reach.never and s.s.len > reach.safe: return
+  let st = simplify(start)
+  if not isNumeralAst(st.ctx, st.raw): return
+  let b = literalStringBytes(by)
+  if sp.entry == "replace" and not b.ok: return
+  concreteEntry(sp, pr, s.s, int(parseBiggestInt(getNumeralString(st))), b.s)
 
 proc regexLimitInt(): tuple[v: Z3Int; c: seq[Z3Bool]] =
   ## RFC-0005 S8cf. The `int` result a call stopped at a limit returns:
@@ -468,11 +501,38 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
       old = o.str
     else:
       oldI = toZ3Int(o)
-  let r = lowerRegexEntry(sp, pr, recv.str, start, regexFreshName, arrLen,
+  if not capture:
+    let lit = literalCall(sp, pr, recv.str, mkString(""), start)
+    if lit.ok:
+      return case kind
+             of svBool: SymVal(kind: svBool, bo: mkBool(lit.b))
+             else: SymVal(kind: svInt, zi: mkInt(lit.i))
+  var r = lowerRegexEntry(sp, pr, recv.str, start, regexFreshName, arrLen,
                           old, oldI)
+  if r.outcome == roUnmodelled and not capture and
+     concreteEntry(sp, pr, "", 0).ok:
+    # RFC-0005 S8cf (item 9): the encoding is past its size cap, the automaton
+    # is not: a fresh value, read at the points the search proposes.
+    r = RxResult(outcome: roValue)
+    if kind == svBool:
+      r.b = mkBoolVar(regexFreshName("__regexPointCall"))
+      regexPointSite(sp, pr, recv.str, mkString(""), start, r.b, @[],
+                     declined = true)
+    else:
+      r.i = mkIntVar(regexFreshName("__regexPointCall"))
+      regexPointSite(sp, pr, recv.str, mkString(""), start, r.i, @[],
+                     declined = true)
   case r.outcome
   of roValue:
-    for d in r.defs: stripDecompConds.add d
+    var defIds: seq[int]
+    for d in r.defs:
+      stripDecompConds.add d
+      defIds.add astId(d.ctx, d.raw)
+    if r.heavy and not capture:
+      if kind == svBool:
+        regexPointSite(sp, pr, recv.str, mkString(""), start, r.b, defIds)
+      else:
+        regexPointSite(sp, pr, recv.str, mkString(""), start, r.i, defIds)
     regexLimitOfCall(sp, pr, recv.str, r, kind, old, oldI)
     case kind
     of svBool: SymVal(kind: svBool, bo: r.b)
@@ -514,6 +574,21 @@ proc lowerRegexDecline(env: Env, e: IRExpr): SymVal =
   raise (ref SymexUnsupportedRegexError)(  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
     msg: what & " with a captures array is not modeled: the call writes " &
          "its `matches` argument (RFC-0005 S8ay, seUnsupportedRegex)")
+
+proc replaceAtPoints(sp: RegexSpec; pr: PcreParse; recv, by: Z3String;
+                     n: Nfa): SymVal =
+  ## RFC-0005 S8cf (item 9). A `replace` whose table is past its size cap: a
+  ## fresh value with its valid facts, read at the points the search proposes.
+  let r = mkStringVar(regexFreshName("__regexReplaceValue"))
+  var guarded: seq[int]
+  for d in replaceLemmas(recv, by, r, replaceFacts(n, pr.root), regexFreshName):
+    regexRecFactConds.add d
+    guarded.add astId(d.ctx, d.raw)
+  regexLimitSite(sp, pr, recv, r,
+                 mkStringVar(regexFreshName("__regexLimitValue")),
+                 guarded = guarded)
+  regexPointSite(sp, pr, recv, by, mkInt(0), r, @[], declined = true)
+  SymVal(kind: svString, str: r)
 
 proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ## Stage 7 (CR-7) Cluster S extraction. Called from `lower`'s case arm for
@@ -911,22 +986,35 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     of leUnknown: regexDecline(sp, limitDecline)
     of leZero: return recv
     of leNone, leCounted: discard
+    # RFC-0005 S8cf (item 10): literal operands, at walk time.
+    let litCall = literalCall(sp, pr, recv.str, repl.str, mkInt(0))
+    if litCall.ok: return SymVal(kind: svString, str: mkString(litCall.s))
     let (isShape, sh) = regexReplaceShape(pr)
     let lenS = simplify(len(recv.str))
     let known = isNumeralAst(lenS.ctx, lenS.raw)
     var term: Z3String
+    var viaStep = false   # RFC-0005 S8cf (item 8): read at points first
     if not isShape or pr.utf or crlfSkipObservable(n) or n.costs:
       if legacyRun(n):
         let t = runTable(n)
-        if not t.ok: regexDecline(sp, t.why)
+        if not t.ok:
+          if concreteEntry(sp, pr, "", 0).ok:
+            return replaceAtPoints(sp, pr, recv.str, repl.str, n)
+          regexDecline(sp, t.why)
         term = replaceRunZ3(recv.str, repl.str, t, pr.nl, regexFreshName)
       else:
         let t = stepTable(n)
-        if not t.ok: regexDecline(sp, t.why)
+        if not t.ok:
+          if concreteEntry(sp, pr, "", 0).ok:
+            return replaceAtPoints(sp, pr, recv.str, repl.str, n)
+          regexDecline(sp, t.why)
         term = replaceStepZ3(recv.str, repl.str, n, t, regexFreshName)
+        viaStep = true
       # A receiver of known length: the term alone (Z3 unfolds it to the
       # end; RFC-0005 S8bt keeps these as S8bb / S8bj lowered them).
       if known:
+        if viaStep:
+          regexPointSite(sp, pr, recv.str, repl.str, mkInt(0), term, @[])
         regexLimitSite(sp, pr, recv.str, term,
                        mkStringVar(regexFreshName("__regexLimitValue")))
         return SymVal(kind: svString, str: term)
@@ -970,6 +1058,9 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     regexLimitSite(sp, pr, recv.str, r,
                    mkStringVar(regexFreshName("__regexLimitValue")),
                    guarded = guarded)
+    if viaStep:
+      regexPointSite(sp, pr, recv.str, repl.str, mkInt(0), r,
+                     @[astId(rDef.ctx, rDef.raw)])
     SymVal(kind: svString, str: r)
   of iekStrConcat:
     # Phase 15 S8. `a & b` → Z3 `(seq.++ a b)` (`Z3_mk_seq_concat`), exposed by

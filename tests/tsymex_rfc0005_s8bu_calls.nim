@@ -277,8 +277,9 @@ suite "S8bu (3): addr of a part of an address-taken variable":
     clean(sutDirectAddrWhole, "dx_dead", sxUnsat)
     # An element of a seq with element cells: declined (reported in the
     # RFC): the call's cell shares the element's heap.
-    declines(sutDirectAddrElem, "de", "in the element's own heap")
-    declines(sutDirectAddrElem, "de_dead", "in the element's own heap")
+    # RFC-0005 S8ca: the actual is the element's cell (`sharesElemCell`).
+    clean(sutDirectAddrElem, "de", sxSat)
+    clean(sutDirectAddrElem, "de_dead", sxUnsat)
 
   test "a proc-value call":
     clean(sutPvAddrPart, "pa", sxSat)

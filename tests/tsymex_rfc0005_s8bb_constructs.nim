@@ -20,6 +20,7 @@ import z3
 import nelli/smt/regex_parser
 import nelli/smt/pcre_syntax
 import nelli/smt/pcre_select
+import nelli/smt/pcre_engine
 import pcre
 
 proc jitEngine(): bool =
@@ -29,6 +30,14 @@ proc jitEngine(): bool =
   v == 1
 
 const widen = (when defined(nelliRegexExhaustive): 1 else: 0)
+
+# RFC-0005 S8bt: split three ways between this file and its `_b` / `_c`
+# twins (which include it with `s8bbConsPart` = 1 / 2), so each runs under
+# 60 s on the Windows legs, where the unanchored models are now the JIT's:
+# part 0 the constructs, the captures and half the conventions' models,
+# part 1 the other half and the CRLF skip, part 2 the Z3 formulas.
+when not declared(s8bbConsPart):
+  const s8bbConsPart = 0
 
 var t0 = epochTime()
 proc lap(): string =
@@ -134,39 +143,41 @@ const nowRead = ["(?m)a", "(?X)a", "(*UTF8)a", "(*UTF)a", "(*COMMIT)a",
 
 suite "S8bb (5): the constructs S8ay left undecided, against std/re":
 
-  test "each is read, and PCRE's match is the concrete matchLen":
-    var bad: seq[string]
-    var checked = 0
-    for p in readPatterns:
-      let pr = parsePcre(p)
-      checkpoint escape(p) & " " & $pr.status & " " & pr.reason
-      check pr.status == psOk
-      if pr.status != psOk: continue
-      let rx = re(p)
-      let n = buildNfa(pr.root, pr.groups)
-      for s in words("aA\xE9_ \n", 3 + widen):
-        for st in 0 .. s.len:
-          let real = s.matchLen(rx, st)
-          inc checked
-          if chosenEnd(n, s[st .. ^1], st == 0) != real and bad.len < 10:
-            bad.add escape(p) & " " & escape(s) & " start " & $st &
-                    " real " & $real
-    echo "  read constructs: ", checked, " cases, ", lap()
-    checkpoint $bad
-    check bad.len == 0
-    check checked > 50_000
+  when s8bbConsPart == 0:
+    test "each is read, and PCRE's match is the concrete matchLen":
+      var bad: seq[string]
+      var checked = 0
+      for p in readPatterns:
+        let pr = parsePcre(p)
+        checkpoint escape(p) & " " & $pr.status & " " & pr.reason
+        check pr.status == psOk
+        if pr.status != psOk: continue
+        let rx = re(p)
+        let n = buildNfa(pr.root, pr.groups)
+        for s in words("aA\xE9_ \n", 3 + widen):
+          for st in 0 .. s.len:
+            let real = s.matchLen(rx, st)
+            inc checked
+            if chosenEnd(n, s[st .. ^1], st == 0) != real and bad.len < 10:
+              bad.add escape(p) & " " & escape(s) & " start " & $st &
+                      " real " & $real
+      echo "  read constructs: ", checked, " cases, ", lap()
+      checkpoint $bad
+      check bad.len == 0
+      check checked > 50_000
 
-  test "what stays undecided":
-    for p in stillUndecided:
-      checkpoint escape(p)
-      check parsePcre(p).status == psUnknown
-    for p in nowRead:
-      checkpoint escape(p)
-      check parsePcre(p).status == psOk
-    for p in nowRejected:
-      checkpoint escape(p)
-      check parsePcre(p).status == psRejected
-      expect RegexError: discard re(p)
+  when s8bbConsPart == 0:
+    test "what stays undecided":
+      for p in stillUndecided:
+        checkpoint escape(p)
+        check parsePcre(p).status == psUnknown
+      for p in nowRead:
+        checkpoint escape(p)
+        check parsePcre(p).status == psOk
+      for p in nowRejected:
+        checkpoint escape(p)
+        check parsePcre(p).status == psRejected
+        expect RegexError: discard re(p)
 
 # ---- RFC-0005 S8bb item 5: the captures overloads ------------------------------
 #
@@ -181,70 +192,72 @@ const capPatterns = ["(a)|(b)", "(?:(a)|b)*", "((a)|b)+", "(a*)+", "(a*)*",
 
 suite "S8bb (5): the captures of PCRE's chosen match, against std/re":
 
-  test "the tagged run is std/re's groups at every start":
-    var bad: seq[string]
-    var checked = 0
-    for p in capPatterns:
-      let pr = parsePcre(p)
-      check pr.status == psOk
-      let rx = re(p)
-      let n = buildNfa(pr.root, pr.groups)
-      for s in words("ab\n", 4 + widen):
-        for st in 0 .. s.len:
-          inc checked
-          let real = s.matchLen(rx, st)
-          let (e, caps) = chosenCaps(n, s[st .. ^1], st == 0)
-          var ok = e == real
-          if ok and real >= 0:
-            # A match at `st` is the leftmost from `st`: findBounds' groups.
-            # (An unset group above the highest set one is not written:
-            # starting every element at (-1, 0) makes that invisible.)
-            var b = newSeq[tuple[first, last: int]](pr.groups)
-            for x in b.mitems: x = (first: -1, last: 0)
-            discard s.findBounds(rx, b, st)
-            for g in 0 ..< pr.groups:
-              let want =
-                if caps[g][0] < 0: (first: -1, last: 0)
-                else: (first: st + caps[g][0], last: st + caps[g][1] - 1)
-              if b[g] != want: ok = false
-          if not ok and bad.len < 10:
-            bad.add escape(p) & " " & escape(s) & " start " & $st
-    echo "  chosenCaps: ", checked, " cases, ", lap()
-    checkpoint $bad
-    check bad.len == 0
-    check checked > 10_000
-
-  test "each capture language holds exactly the group's spans":
-    var bad: seq[string]
-    var checked = 0
-    for p in capPatterns:
-      let pr = parsePcre(p)
-      let n = buildNfa(pr.root, pr.groups)
-      for g in 1 .. pr.groups:
-        for atStart in [true, false]:
-          let setL = captureLang(n, p, g, atStart, marked = false)
-          let capL = captureLang(n, p, g, atStart, marked = true)
-          check setL.ok and capL.ok
-          if not (setL.ok and capL.ok): continue
-          for u in words("ab\n", 4 + widen):
+  when s8bbConsPart == 0:
+    test "the tagged run is std/re's groups at every start":
+      var bad: seq[string]
+      var checked = 0
+      for p in capPatterns:
+        let pr = parsePcre(p)
+        check pr.status == psOk
+        let rx = re(p)
+        let n = buildNfa(pr.root, pr.groups)
+        for s in words("ab\n", 4 + widen):
+          for st in 0 .. s.len:
             inc checked
-            let (e, caps) = chosenCaps(n, u, atStart)
-            let isSet = e >= 0 and caps[g - 1][0] >= 0
-            let where = escape(p) & " g" & $g & " " & escape(u) &
-                        " atStart " & $atStart
-            if member(setL.re, toSyms(u)) != isSet and bad.len < 10:
-              bad.add "set " & where
-            for a in 0 .. u.len:
-              for b in a .. u.len:
-                let w = toSyms(u[0 ..< a]) & @[markSym] & toSyms(u[a ..< b]) &
-                        @[markSym2] & toSyms(u[b .. ^1])
-                let want = isSet and caps[g - 1] == (a, b)
-                if member(capL.re, w) != want and bad.len < 10:
-                  bad.add "cap " & where & " " & $a & ".." & $b
-    echo "  capture languages: ", checked, " cases, ", lap()
-    checkpoint $bad
-    check bad.len == 0
-    check checked > 5_000
+            let real = s.matchLen(rx, st)
+            let (e, caps) = chosenCaps(n, s[st .. ^1], st == 0)
+            var ok = e == real
+            if ok and real >= 0:
+              # A match at `st` is the leftmost from `st`: findBounds' groups.
+              # (An unset group above the highest set one is not written:
+              # starting every element at (-1, 0) makes that invisible.)
+              var b = newSeq[tuple[first, last: int]](pr.groups)
+              for x in b.mitems: x = (first: -1, last: 0)
+              discard s.findBounds(rx, b, st)
+              for g in 0 ..< pr.groups:
+                let want =
+                  if caps[g][0] < 0: (first: -1, last: 0)
+                  else: (first: st + caps[g][0], last: st + caps[g][1] - 1)
+                if b[g] != want: ok = false
+            if not ok and bad.len < 10:
+              bad.add escape(p) & " " & escape(s) & " start " & $st
+      echo "  chosenCaps: ", checked, " cases, ", lap()
+      checkpoint $bad
+      check bad.len == 0
+      check checked > 10_000
+
+  when s8bbConsPart == 0:
+    test "each capture language holds exactly the group's spans":
+      var bad: seq[string]
+      var checked = 0
+      for p in capPatterns:
+        let pr = parsePcre(p)
+        let n = buildNfa(pr.root, pr.groups)
+        for g in 1 .. pr.groups:
+          for atStart in [true, false]:
+            let setL = captureLang(n, p, g, atStart, marked = false)
+            let capL = captureLang(n, p, g, atStart, marked = true)
+            check setL.ok and capL.ok
+            if not (setL.ok and capL.ok): continue
+            for u in words("ab\n", 4 + widen):
+              inc checked
+              let (e, caps) = chosenCaps(n, u, atStart)
+              let isSet = e >= 0 and caps[g - 1][0] >= 0
+              let where = escape(p) & " g" & $g & " " & escape(u) &
+                          " atStart " & $atStart
+              if member(setL.re, toSyms(u)) != isSet and bad.len < 10:
+                bad.add "set " & where
+              for a in 0 .. u.len:
+                for b in a .. u.len:
+                  let w = toSyms(u[0 ..< a]) & @[markSym] & toSyms(u[a ..< b]) &
+                          @[markSym2] & toSyms(u[b .. ^1])
+                  let want = isSet and caps[g - 1] == (a, b)
+                  if member(capL.re, w) != want and bad.len < 10:
+                    bad.add "cap " & where & " " & $a & ".." & $b
+      echo "  capture languages: ", checked, " cases, ", lap()
+      checkpoint $bad
+      check bad.len == 0
+      check checked > 5_000
 
   # The Z3 value of each written element: `tsymex_rfc0005_s8bb_capvalues`
   # (split out for the per-backend runtime budget, RFC-0005 S8bb item 8).
@@ -259,9 +272,9 @@ suite "S8bb (5): the captures of PCRE's chosen match, against std/re":
 # `std/re` over {a, b, CR, LF, FF}. With a CRLF convention and no explicit
 # CR or LF, whether PCRE tries a match at a CRLF's LF is its start-of-match
 # optimiser's call wherever a match can start at an LF: RFC-0005 S8bj
-# models the interpreter's scan and skip (S8bb declined), and the walker
-# declines those searches only when std/re's libpcre runs them on its JIT
-# (`pcre_select.jitDeclined`).
+# models the interpreter's scan and skip (S8bb declined), and RFC-0005 S8bt
+# the JIT's (`buildNfa(.., pcreSearchEngine())`: the searches are the
+# engine's that std/re's libpcre runs them on).
 
 const nlPatterns = ["(*CR)a$", "(*CR).", "(*CR).+", "(*CR)a\\Z", "(*CR)\\N",
   "(*CR)[^a]", "(*CR)(?s).", "(*CR).*$", "(*CRLF)a$", "(*CRLF).", "(*CRLF)..",
@@ -282,184 +295,172 @@ const nlAlpha = "ab\r\n\x0c"
 
 suite "S8bb (5): newline conventions and (*ACCEPT), against std/re":
 
-  test "each is read, and every model is std/re's":
-    var bad: seq[string]
-    var runs, langs, searches, capsChecked, seen = 0
-    for p in @nlPatterns & @acceptPatterns:
-      let pr = parsePcre(p)
-      checkpoint escape(p) & " " & $pr.status & " " & pr.reason
-      check pr.status == psOk
-      if pr.status != psOk: continue
-      let rx = re(p)
-      let n = buildNfa(pr)
-      for s in words(nlAlpha, 4):
-        for st in 0 .. s.len:
-          inc runs
-          let real = s.matchLen(rx, st)
-          let (e, caps) = chosenCaps(n, s[st .. ^1], st == 0)
-          var ok = chosenEnd(n, s[st .. ^1], st == 0) == real and e == real
-          if ok and real >= 0 and pr.groups > 0:
-            inc capsChecked
-            var b = newSeq[tuple[first, last: int]](pr.groups)
-            for x in b.mitems: x = (first: -1, last: 0)
-            discard s.findBounds(rx, b, st)
-            for g in 0 ..< pr.groups:
-              let want =
-                if caps[g][0] < 0: (first: -1, last: 0)
-                else: (first: st + caps[g][0], last: st + caps[g][1] - 1)
-              if b[g] != want: ok = false
-          if not ok and bad.len < 10:
-            bad.add "run " & escape(p) & " " & escape(s) & " start " & $st
-      for atStart in [true, false]:
-        let none = selectionLang(n, p, lkNone, atStart)
-        let mark = selectionLang(n, p, lkMark, atStart)
-        let endsL = selectionLang(n, p, lkEnds, atStart, nonEmpty = true)
-        let search = not (jitEngine() and crlfSkipObservable(n))
-        # RFC-0005 S8bj: on a JIT engine the walker declines these searches
-        # (checked below), so their languages are not built there.
-        let noOcc = (if search: searchLang(n, p, skNoOcc, atStart)
-                     else: SelLang(ok: true))
-        let first = (if search: searchLang(n, p, skFirst, atStart)
-                     else: SelLang(ok: true))
-        if not search and atStart: inc seen
-        check none.ok and mark.ok and endsL.ok
-        # RFC-0005 S8bj: the languages are the interpreter's; on a JIT
-        # engine the walker declines the search (`jitDeclined`), so they are
-        # checked against std/re only off the JIT.
-        check noOcc.ok and first.ok
-        if not search: check jitDeclined(n).len > 0
-        if not (none.ok and mark.ok and endsL.ok): continue
-        for u in words(nlAlpha, 3):
-          # Away from the subject start: `u` follows a `b`.
-          let real = (if atStart: u.matchLen(rx, 0)
-                      else: ("b" & u).matchLen(rx, 1))
-          let f = (if atStart: u.find(rx, 0) else: ("b" & u).find(rx, 1))
-          let realF = (if atStart or f < 0: f else: f - 1)
-          inc langs
-          if search: inc searches
-          let where = escape(p) & " " & escape(u) & " atStart " & $atStart
-          if member(none.re, toSyms(u)) != (real == -1) and bad.len < 10:
-            bad.add "lkNone " & where
-          if member(endsL.re, toSyms(u)) != (u.len >= 1 and real == u.len) and
-             bad.len < 10:
-            bad.add "lkEnds " & where
-          if search and member(noOcc.re, toSyms(u)) != (realF == -1) and
-             bad.len < 10:
-            bad.add "skNoOcc " & where
-          for k in 0 .. u.len:
-            let w = toSyms(u[0 ..< k]) & @[markSym] & toSyms(u[k .. ^1])
-            if member(mark.re, w) != (real == k) and bad.len < 10:
-              bad.add "lkMark " & where & " k " & $k
-            if search and member(first.re, w) != (realF == k) and
-               bad.len < 10:
-              bad.add "skFirst " & where & " q " & $k
-      for g in 1 .. pr.groups:
+  when s8bbConsPart in 0 .. 1:
+    test "each is read, and every model is std/re's":
+      var bad: seq[string]
+      var runs, langs, searches, capsChecked = 0
+      for pi, p in @nlPatterns & @acceptPatterns:
+        if pi mod 2 != s8bbConsPart: continue
+        let pr = parsePcre(p)
+        checkpoint escape(p) & " " & $pr.status & " " & pr.reason
+        check pr.status == psOk
+        if pr.status != psOk: continue
+        let rx = re(p)
+        let n = buildNfa(pr)
+        for s in words(nlAlpha, 4):
+          for st in 0 .. s.len:
+            inc runs
+            let real = s.matchLen(rx, st)
+            let (e, caps) = chosenCaps(n, s[st .. ^1], st == 0)
+            var ok = chosenEnd(n, s[st .. ^1], st == 0) == real and e == real
+            if ok and real >= 0 and pr.groups > 0:
+              inc capsChecked
+              var b = newSeq[tuple[first, last: int]](pr.groups)
+              for x in b.mitems: x = (first: -1, last: 0)
+              discard s.findBounds(rx, b, st)
+              for g in 0 ..< pr.groups:
+                let want =
+                  if caps[g][0] < 0: (first: -1, last: 0)
+                  else: (first: st + caps[g][0], last: st + caps[g][1] - 1)
+                if b[g] != want: ok = false
+            if not ok and bad.len < 10:
+              bad.add "run " & escape(p) & " " & escape(s) & " start " & $st
         for atStart in [true, false]:
-          let setL = captureLang(n, p, g, atStart, marked = false)
-          let capL = captureLang(n, p, g, atStart, marked = true)
-          check setL.ok and capL.ok
-          if not (setL.ok and capL.ok): continue
+          let none = selectionLang(n, p, lkNone, atStart)
+          let mark = selectionLang(n, p, lkMark, atStart)
+          let endsL = selectionLang(n, p, lkEnds, atStart, nonEmpty = true)
+          # RFC-0005 S8bt: the search is the engine's std/re runs it on.
+          let ns = buildNfa(pr, pcreSearchEngine())
+          let search = true
+          let noOcc = searchLang(ns, p, skNoOcc, atStart)
+          let first = searchLang(ns, p, skFirst, atStart)
+          check none.ok and mark.ok and endsL.ok
+          check noOcc.ok and first.ok
+          if not (none.ok and mark.ok and endsL.ok): continue
           for u in words(nlAlpha, 3):
-            let (e, caps) = chosenCaps(n, u, atStart)
-            let isSet = e >= 0 and caps[g - 1][0] >= 0
-            let where = escape(p) & " g" & $g & " " & escape(u)
-            if member(setL.re, toSyms(u)) != isSet and bad.len < 10:
-              bad.add "set " & where
-            for a in 0 .. u.len:
-              for b in a .. u.len:
-                let w = toSyms(u[0 ..< a]) & @[markSym] & toSyms(u[a ..< b]) &
-                        @[markSym2] & toSyms(u[b .. ^1])
-                if member(capL.re, w) != (isSet and caps[g - 1] == (a, b)) and
-                   bad.len < 10:
-                  bad.add "cap " & where & " " & $a & ".." & $b
-    echo "  conventions and (*ACCEPT): ", runs, " runs, ", capsChecked,
-         " capture runs, ", langs, " languages, ", searches, " searches (",
-         seen, " patterns' searches declined), ", lap()
-    checkpoint $bad
-    check bad.len == 0
-    check runs > 100_000
-    check searches > 5_000
+            # Away from the subject start: `u` follows a `b`.
+            let real = (if atStart: u.matchLen(rx, 0)
+                        else: ("b" & u).matchLen(rx, 1))
+            let f = (if atStart: u.find(rx, 0) else: ("b" & u).find(rx, 1))
+            let realF = (if atStart or f < 0: f else: f - 1)
+            inc langs
+            if search: inc searches
+            let where = escape(p) & " " & escape(u) & " atStart " & $atStart
+            if member(none.re, toSyms(u)) != (real == -1) and bad.len < 10:
+              bad.add "lkNone " & where
+            if member(endsL.re, toSyms(u)) != (u.len >= 1 and real == u.len) and
+               bad.len < 10:
+              bad.add "lkEnds " & where
+            if search and member(noOcc.re, toSyms(u)) != (realF == -1) and
+               bad.len < 10:
+              bad.add "skNoOcc " & where
+            for k in 0 .. u.len:
+              let w = toSyms(u[0 ..< k]) & @[markSym] & toSyms(u[k .. ^1])
+              if member(mark.re, w) != (real == k) and bad.len < 10:
+                bad.add "lkMark " & where & " k " & $k
+              if search and member(first.re, w) != (realF == k) and
+                 bad.len < 10:
+                bad.add "skFirst " & where & " q " & $k
+        for g in 1 .. pr.groups:
+          for atStart in [true, false]:
+            let setL = captureLang(n, p, g, atStart, marked = false)
+            let capL = captureLang(n, p, g, atStart, marked = true)
+            check setL.ok and capL.ok
+            if not (setL.ok and capL.ok): continue
+            for u in words(nlAlpha, 3):
+              let (e, caps) = chosenCaps(n, u, atStart)
+              let isSet = e >= 0 and caps[g - 1][0] >= 0
+              let where = escape(p) & " g" & $g & " " & escape(u)
+              if member(setL.re, toSyms(u)) != isSet and bad.len < 10:
+                bad.add "set " & where
+              for a in 0 .. u.len:
+                for b in a .. u.len:
+                  let w = toSyms(u[0 ..< a]) & @[markSym] & toSyms(u[a ..< b]) &
+                          @[markSym2] & toSyms(u[b .. ^1])
+                  if member(capL.re, w) != (isSet and caps[g - 1] == (a, b)) and
+                     bad.len < 10:
+                    bad.add "cap " & where & " " & $a & ".." & $b
+      echo "  conventions and (*ACCEPT): ", runs, " runs, ", capsChecked,
+           " capture runs, ", langs, " languages, ", searches, " searches, ", lap()
+      checkpoint $bad
+      check bad.len == 0
+      check runs > 40_000
+      check searches > 2_000
 
-  test "the CRLF skip and the start-of-match scan (RFC-0005 S8bj)":
-    # The bumpalong skips a CRLF's LF after a failed attempt at its CR, but
-    # `[\x09-\x0b]`'s start bits pass over the CR: PCRE tries the LF.
-    # Without start bits (an optional prefix before `.`) it does not. S8bb
-    # declined these searches; S8bj models the scan (`pcre_startopt`) and
-    # the skip, and declines them only on a JIT engine.
-    check "\r\n".find(re"(*CRLF)[\x09-\x0b]\z") == 1
-    check "\r\n".find(re"(*CRLF)(?:[\x09-\x0b]\x00)?.") == -1
-    check "\r\n".find(re"(*CRLF)(?:\n\x00)?.") == 1   # explicit LF: no skip
-    for p in [r"(*CRLF)[\x09-\x0b]\z", r"(*CRLF)(?:[\x09-\x0b]\x00)?.",
-              r"(*ANYCRLF)\s?$", r"(*ANY)\v\z"]:
-      let n = buildNfa(parsePcre(p))
-      checkpoint escape(p)
-      check crlfSkipObservable(n)
-      check searchLang(n, p, skFirst, false).ok
-      check jitDeclined(n).len > 0
-    check pcreExec(buildNfa(parsePcre(r"(*CRLF)[\x09-\x0b]\z")), "\r\n", 0,
-                   false)[1] == 1
-    check pcreExec(buildNfa(parsePcre(r"(*CRLF)(?:[\x09-\x0b]\x00)?.")),
-                   "\r\n", 0, false)[0] == -1
-    for p in [r"(*CRLF)(?:\n\x00)?.", "(*ANYCRLF).", "(*ANY)a$",
-              "(*CRLF)\\Q\r\\E?."]:
-      checkpoint escape(p)
-      check not crlfSkipObservable(buildNfa(parsePcre(p)))
+  when s8bbConsPart == 1:
+    test "the CRLF skip and the start-of-match scan (RFC-0005 S8bj)":
+      # The bumpalong skips a CRLF's LF after a failed attempt at its CR, but
+      # `[\x09-\x0b]`'s start bits pass over the CR: PCRE tries the LF.
+      # Without start bits (an optional prefix before `.`) it does not. S8bb
+      # declined these searches; S8bj models the scan (`pcre_startopt`) and
+      # the skip, and declines them only on a JIT engine.
+      check "\r\n".find(re"(*CRLF)[\x09-\x0b]\z") == 1
+      check "\r\n".find(re"(*CRLF)(?:[\x09-\x0b]\x00)?.") == -1
+      check "\r\n".find(re"(*CRLF)(?:\n\x00)?.") == 1   # explicit LF: no skip
+      for p in [r"(*CRLF)[\x09-\x0b]\z", r"(*CRLF)(?:[\x09-\x0b]\x00)?.",
+                r"(*ANYCRLF)\s?$", r"(*ANY)\v\z"]:
+        let n = buildNfa(parsePcre(p))
+        checkpoint escape(p)
+        check crlfSkipObservable(n)
+        check searchLang(n, p, skFirst, false).ok
+        # RFC-0005 S8bt: and on the JIT's automaton.
+        check searchLang(buildNfa(parsePcre(p), peJit837), p, skFirst,
+                         false).ok
+      check pcreExec(buildNfa(parsePcre(r"(*CRLF)[\x09-\x0b]\z")), "\r\n", 0,
+                     false)[1] == 1
+      check pcreExec(buildNfa(parsePcre(r"(*CRLF)(?:[\x09-\x0b]\x00)?.")),
+                     "\r\n", 0, false)[0] == -1
+      for p in [r"(*CRLF)(?:\n\x00)?.", "(*ANYCRLF).", "(*ANY)a$",
+                "(*CRLF)\\Q\r\\E?."]:
+        checkpoint escape(p)
+        check not crlfSkipObservable(buildNfa(parsePcre(p)))
 
-  test "the Z3 formulas route every entry through the automaton":
-    var ctr = 0
-    proc fresh(tag: string): string =
-      inc ctr
-      tag & "#" & $ctr
-    var bad: seq[string]
-    var checked, declined, declinedSeen = 0
-    for p in ["(*CR)a$", "(*CRLF).", "(*ANYCRLF)a\\r?$", "(*ANY).*\\Z",
-              "a(?:(*ACCEPT)|b)", "(*CRLF)\\n|.", "(*CRLF)\\Q\r\\E?."]:
-      let rx = re(p)
-      let seen = jitDeclines(buildNfa(parsePcre(p))).len > 0
-      for subj in words("a\r\n", 2):
-        let ctx = newContext()
-        setCurrentContext(ctx)
-        var cases: seq[(string, int, int)]
-        # Each in-range start and -1 (and len + 1 for the empty subject).
-        for st in -1 .. subj.len + 1:
-          if st == subj.len + 1 and subj.len > 0: continue
-          cases.add ("matchLen", st, subj.matchLen(rx, st))
-          cases.add ("findBoundsLast", st, subj.findBounds(rx, st).last)
-          cases.add ("find", st, subj.find(rx, st))
-          cases.add ("match", st, int(subj.match(rx, st)))
-        cases.add ("endsWith", 0, int(subj.endsWith(rx)))
-        cases.add ("startsWith", 0, int(subj.startsWith(rx)))
-        for (name, st, real) in cases:
-          let sp = RegexSpec(entry: name, flag: "re", pattern: p)
-          let r = lowerRegexEntry(sp, parseSpec(sp), mkString(subj),
-                                  mkInt(st), fresh)
-          if seen and name in ["find", "findBoundsLast"]:
-            # The occurrence search declines on a JIT engine (`jitDeclines`).
-            if r.outcome == roUnmodelled: inc declinedSeen
-            else: inc declined
-            continue
-          if r.outcome != roValue:
-            inc declined
-            continue
-          inc checked
-          let sol = newSolver(ctx)
-          let prm = newParams(ctx)
-          prm.set("timeout", 10000)
-          sol.setParams(prm)
-          for d in r.defs: sol.add d
-          if name in ["endsWith", "match", "startsWith"]:
-            sol.add(if real == 1: not r.b else: r.b)
-          else:
-            sol.add r.i != mkInt(real)
-          if $sol.check() != "zsUnsat" and bad.len < 10:
-            bad.add escape(p) & " " & escape(subj) & " " & name & "(" & $st &
-                    ") real " & $real
-    echo "  convention Z3 formulas: ", checked, " cases (", declinedSeen,
-         " searches declined), ", lap()
-    checkpoint $bad
-    check bad.len == 0
-    check declined == 0
-    # RFC-0005 S8bj: the searches decline only on a JIT engine.
-    if jitEngine(): check declinedSeen > 0
-    else: check declinedSeen == 0
-    check checked > 500
+  when s8bbConsPart == 2:
+    test "the Z3 formulas route every entry through the automaton":
+      var ctr = 0
+      proc fresh(tag: string): string =
+        inc ctr
+        tag & "#" & $ctr
+      var bad: seq[string]
+      var checked, declined = 0
+      for p in ["(*CR)a$", "(*CRLF).", "(*ANYCRLF)a\\r?$", "(*ANY).*\\Z",
+                "a(?:(*ACCEPT)|b)", "(*CRLF)\\n|.", "(*CRLF)\\Q\r\\E?."]:
+        let rx = re(p)
+        for subj in words("a\r\n", 2):
+          let ctx = newContext()
+          setCurrentContext(ctx)
+          var cases: seq[(string, int, int)]
+          # Each in-range start and -1 (and len + 1 for the empty subject).
+          for st in -1 .. subj.len + 1:
+            if st == subj.len + 1 and subj.len > 0: continue
+            cases.add ("matchLen", st, subj.matchLen(rx, st))
+            cases.add ("findBoundsLast", st, subj.findBounds(rx, st).last)
+            cases.add ("find", st, subj.find(rx, st))
+            cases.add ("match", st, int(subj.match(rx, st)))
+          cases.add ("endsWith", 0, int(subj.endsWith(rx)))
+          cases.add ("startsWith", 0, int(subj.startsWith(rx)))
+          for (name, st, real) in cases:
+            let sp = RegexSpec(entry: name, flag: "re", pattern: p)
+            let r = lowerRegexEntry(sp, parseSpec(sp), mkString(subj),
+                                    mkInt(st), fresh)
+            if r.outcome != roValue:
+              inc declined
+              continue
+            inc checked
+            let sol = newSolver(ctx)
+            let prm = newParams(ctx)
+            prm.set("timeout", 10000)
+            sol.setParams(prm)
+            for d in r.defs: sol.add d
+            if name in ["endsWith", "match", "startsWith"]:
+              sol.add(if real == 1: not r.b else: r.b)
+            else:
+              sol.add r.i != mkInt(real)
+            if $sol.check() != "zsUnsat" and bad.len < 10:
+              bad.add escape(p) & " " & escape(subj) & " " & name & "(" & $st &
+                      ") real " & $real
+      echo "  convention Z3 formulas: ", checked, " cases, ", lap()
+      checkpoint $bad
+      check bad.len == 0
+      check declined == 0
+      check checked > 500

@@ -560,6 +560,12 @@ type
     iekSeqPop    ## #143: `s.pop()` — returns the popped value;
                  ## a separate isAssign updates the seq.
     iekTableSet  ## #145: returns new svTable with `[k]=v`.
+    iekTabRemovedSince
+                 ## RFC-0005 S8bx (item 4). Whether a key was removed from
+                 ## the table `trCur` since it was the value `trBase` (a
+                 ## `del`, `pop`, `take` or `clear` in between): Nim's slot
+                 ## walk over a table that lost a key and kept its length
+                 ## depends on the keys' hashes (`parseTableForLoop`).
     iekTableDel  ## #145: returns new svTable with k absent.
     iekSetIncl   ## #145: returns new svSet with elem included.
     iekSetExcl   ## #145: returns new svSet with elem excluded.
@@ -679,6 +685,18 @@ type
                      ## `tryRecognizePairLoopIdiom`'s closed-form replacement
                      ## of the `readOptions` pair-loop shape; never reachable
                      ## from ordinary Nim surface syntax.
+    iekStrSetAt      ## RFC-0005 S8ca: `s[i] = c`, the string `s` with byte
+                     ## `i` replaced by the char `c` (`strArgs = [s, i, c]`):
+                     ## `s[0, i) & c & s[i + 1, len)`. The index is checked
+                     ## by a read before (`s[i]`, its IndexDefect fork), so
+                     ## this forks nothing. S11 declined every character
+                     ## write (`iekStrUnsupported`).
+    iekStrChars      ## RFC-0005 S8ca: the `openArray[char]` view of a string
+                     ## (`strArgs = [s]`): the walk's openArray is a seq, of
+                     ## `s.len` chars, element `i` the byte `s[i]`.
+    iekStrFromChars  ## RFC-0005 S8ca: the string `s` (`strArgs = [s, a]`)
+                     ## after its `var openArray[char]` view `a` (a seq of
+                     ## the same length) was written: byte `i` is `a[i]`.
     iekGetCurrentExn    ## Phase 15 E8: `getCurrentException()`. No-arg magic
                         ## intrinsic; the walker reads `w.frame.inFlightExn` at
                         ## lower time. Returns an opaque `svUninterpRef` keyed by
@@ -885,6 +903,9 @@ type
     of iekContains:
       container*: IRExpr
       key*: IRExpr
+    of iekTabRemovedSince:   ## RFC-0005 S8bx (item 4)
+      trCur*:  IRExpr
+      trBase*: IRExpr
     of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
       mutRecv*: IRExpr
       mutArg*:  IRExpr
@@ -919,7 +940,7 @@ type
        iekStrConcat,
        iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
        iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-       iekStrInOptionRegion:
+       iekStrInOptionRegion, iekStrSetAt, iekStrChars, iekStrFromChars:
       ## Phase 15 Cluster S (S1 scaffolding). Uniform payload: operands in
       ## `strArgs`; `strOp` names the surface op (for the unsupported
       ## diagnostic). S2–S11 read these; they are otherwise inert in S1.
@@ -1247,7 +1268,11 @@ type
     ##     passes by address (an array, an inheritable object, an object or
     ##     tuple larger than three words);
     ##   * `copy`: likewise, one Nim copies but whose seq or string memory
-    ##     the copy shares (a seq, a string, an object or tuple holding one).
+    ##     the copy shares (a seq, a string, an object or tuple holding one);
+    ##   * `ref` (RFC-0005 S8ca): `temp` is the copy-in/copy-out temporary of
+    ##     a `var` actual in a field of an object behind a ref (`grb.x`), and
+    ##     `root` the temporary holding that ref (read once, at the call):
+    ##     the formal is bound to the object's cell along `path`.
     ## The location is the variable `root` along `path`: a field step is
     ## the field's name, an index step `[` and the IR name of a `let`
     ## holding the index, and `?` a step the walk cannot follow.
@@ -1463,6 +1488,17 @@ type
                          ## target), 2 the caller's own `var` formal passed
                          ## on (whatever its own actual is). Empty when the
                          ## call has no `var` actual.
+      cViewAliases*: seq[tuple[viewArg, tabArg: int; keyName: string]]
+                         ## RFC-0005 S8bx (item 3). In the body of a `for`
+                         ## over a Table's `mpairs` / `mvalues`, a call that
+                         ## receives both the loop variable (`viewArg`, a
+                         ## `var` formal: Nim's `var V` view of the slot) and
+                         ## the table itself (`tabArg`): one location under
+                         ## two formals. `keyName` names the loop's key in the
+                         ## caller. The walker keeps the two formals equal
+                         ## statement by statement in the callee
+                         ## (`AddrCellEntry.slot`, `syncAddrCells`). Empty for
+                         ## every other call.
     of isIndex:
       ixRetName*: string
       ixArr*:     IRExpr
@@ -1611,6 +1647,12 @@ type
                              ## value into its cell before the call -- not a
                              ## program dereference, so not counted by
                              ## `heapDepth`.
+      dwInPlace*:  bool      ## RFC-0005 S8ca: the write-back of a seq one of
+                             ## whose elements was just written (`p[][i] = v`,
+                             ## `p.s[i] = v`): Nim writes the element in the
+                             ## seq's memory, so the store is logged as an
+                             ## in-place step (`Path.inPlaceSteps`), which a
+                             ## by-value copy sharing that memory follows.
     of isUnsupported:
       unKind*: SymexErrorKind    ## RFC-0005 S1b: the classified kind the
                                  ## walker's `isUnsupported` arm records via
@@ -3249,14 +3291,15 @@ type
       ## here exhausts on the very first call, same as any other
       ## implausibly-tight budget. A caller who wants deep analysis should
       ## write an explicit bound sized to the SUT's real maximum call depth
-      ## instead. Do not assume a "large-looking" round number is
-      ## automatically safe: this cap bounds NATIVE recursion depth, and
-      ## measured directly (this engine's Linux/podman debug build, 8MB
-      ## `ulimit -s`) unconstrained linear recursion is safe through a cap
-      ## of 85 and SIGSEGVs by 88 — `maxCallDepth: 1000` itself crashes.
-      ## Pick a bound close to the depth actually needed and verify
-      ## empirically before raising it substantially; the exact ceiling is
-      ## build/platform-dependent, not a fixed constant.
+      ## instead. This cap bounds NATIVE recursion depth, and what one
+      ## level costs is build- and backend-dependent; RFC-0005 S8ca: the
+      ## walk no longer trusts the count alone. A call is not inlined when
+      ## the native stack left below it is under what one more level needs
+      ## (`nativeStackShort` in `runtime.nim`): it declines in-band
+      ## (`beBudgetExhaustedUnmodelled`, naming the native stack) at any
+      ## `maxCallDepth`, about 48 levels on an 8 MB stack on c, 40 on cpp,
+      ## 3 on 1 MB. Before S8ca a large cap overflowed the stack (SIGSEGV):
+      ## 50 levels on cpp, 88 on c.
     maxRecursionDepth*: int = 24
       ## RFC-0005 S8ax. The hard budget on the call-inlining depth. Past
       ## `maxCallDepth` the walk keeps inlining while the frontier is not
@@ -3266,8 +3309,9 @@ type
       ## arguments decide is then followed to its base case; one that fans
       ## out declines at `maxCallDepth` as before. Default `24`. Past it the
       ## call declines (`beBudgetExhaustedUnmodelled`), naming both budgets.
-      ## `0` turns the extension off. The same native-stack ceiling as
-      ## `maxCallDepth` applies (safe through 85 on the Linux debug build).
+      ## `0` turns the extension off. The same native-stack check as
+      ## `maxCallDepth`'s applies (RFC-0005 S8ca): on a 2 MB thread the
+      ## extension's 24 levels overflowed the stack before it.
     maxLoopUnwind*: int = 5
       ## Phase-6 loop unrolling cap; >= 1 — one of the ResourceBudget fields
       ## `0` does NOT mean unlimited for (RFC-0010 B4; see the type's own
@@ -4290,7 +4334,8 @@ const StrOpKinds* = {
   iekStrConcat,
   iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
   iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-  iekStrInOptionRegion}
+  iekStrInOptionRegion,
+  iekStrSetAt, iekStrChars, iekStrFromChars}   ## RFC-0005 S8ca
   ## Phase 15 Cluster S: the uniform-payload string-op expression kinds.
 
 proc mkStrOp*(kind: IRExprKind, op: string, args: seq[IRExpr] = @[],
@@ -4331,6 +4376,9 @@ proc mkTableSet*(recv, key, val: IRExpr): IRExpr =
   IRExpr(kind: iekTableSet, tabRecv: recv, tabKey: key, tabVal: val)
 proc mkTableDel*(recv, key: IRExpr): IRExpr =
   IRExpr(kind: iekTableDel, mutRecv: recv, mutArg: key)
+proc mkTabRemovedSince*(cur, base: IRExpr): IRExpr =
+  ## RFC-0005 S8bx (item 4).
+  IRExpr(kind: iekTabRemovedSince, trCur: cur, trBase: base)
 proc mkSetIncl*(recv, elem: IRExpr): IRExpr =
   IRExpr(kind: iekSetIncl, mutRecv: recv, mutArg: elem)
 proc mkSetExcl*(recv, elem: IRExpr): IRExpr =
@@ -4762,39 +4810,60 @@ func isBackedSeqElemTy*(elemTy: IRType): bool =
 # ONE shared helper per container kind — never duplicate the match between
 # the classify site and the codegen site, or the two can silently drift
 # apart (over- or under-triggering the degrade).
-proc isRenderableSeqElemTy*(elemTy: IRType): bool =
-  ## Mirrors exactly the shapes `emitTyAndReader`'s `itSeq` arm can render:
-  ## any fixed-width int (`int8/16/32/64`, `uint8/16/32/64` — `byte` is the
-  ## `uint8` alias), `float64`, `float32`, or a `ref` element (rendered via
-  ## `new(T)` defaults, R3).
-  ##
-  ## RFC-chapulin-hardening M1 widened this from int64-only to the full
-  ## fixed-width-int family: `extractSeqElements`/`allocateSeqDataRaw`/
-  ## `seqElemAt` (`smt/runtime.nim`) already dispatched on every `(signed,
-  ## width)` combination below (Phase 15 C4's seq-index/HOF plumbing) — only
-  ## the witness READER (`emitTyAndReader`'s `itSeq` arm) was missing cases,
-  ## so this predicate is widened in lockstep with that reader per this
-  ## proc's own contract (see module doc comment above).
-  ##
-  ## RFC-0005 S8bd: a `distinct` element (any chain of them) whose cell
-  ## (`seqCellTy`) is a renderable int or float, not an enum: the reader
-  ## reads the cells as the base seq and converts each element back
-  ## through the chain (`emitTyAndReader`'s `itSeq` arm). S8ba backed such
-  ## a seq; only its witness was missing.
-  if elemTy.kind == itDistinct:
-    let cell = seqCellTy(elemTy)
-    if cell == nil: return false
-    if cell.kind == itInt: return cell.enumName.len == 0 and
-                                  isRenderableSeqElemTy(cell)
-    return cell.kind in {itFloat32, itFloat64}
-  (elemTy.kind == itInt and
-   (elemTy.width == 8 or elemTy.width == 16 or
-    elemTy.width == 32 or elemTy.width == 64)) or
-  elemTy.kind == itFloat64 or
-  elemTy.kind == itFloat32 or
-  elemTy.kind == itRef or
-  # RFC-0005 S8ar: `readSeqBool` / `readSeqString`.
-  elemTy.kind in {itBool, itString}
+type
+  SeqWitnessReader* = enum
+    ## RFC-0005 S8bx (item 2). The reader `emitTyAndReader`'s `itSeq` arm
+    ## builds for a seq type, chosen by `seqWitnessReader` -- the ONE
+    ## classifier the arm dispatches on and `isRenderableWitnessTy` judges,
+    ## so the reader and the predicate cannot drift apart. (They did: the
+    ## predicate called a placeholder seq renderable whatever its element,
+    ## while the reader recursed into the element and could hit its guard.)
+    swrPlaceholder  ## the unbacked scoped-decline placeholder: an empty literal
+    swrInt64        ## `readSeqInt`
+    swrScalarAs     ## a `char` or enum element: `readSeqAs[T]`
+    swrFixedInt     ## any other fixed-width int: `readSeqInt8` .. `readSeqUInt64`
+    swrBool         ## `readSeqBool` (RFC-0005 S8ar)
+    swrString       ## `readSeqString` (RFC-0005 S8ar)
+    swrFloat64      ## `readSeqFloat64` (Phase 15 F9b)
+    swrFloat32      ## `readSeqFloat32` (Phase 15 F9b)
+    swrTree         ## a by-value tree element: `readSeqAs[T]` (RFC-0005 S8bc)
+    swrRef          ## a `ref` element: each element a position (R3, S8f/S8h)
+    swrDistinct     ## a `distinct` element: the base seq, converted back (RFC-0005 S8bd)
+    swrNone         ## no reader
+
+proc seqWitnessReader*(ty: IRType): SeqWitnessReader =
+  ## RFC-0005 S8bx (item 2). The reader of the seq type `ty` (was
+  ## `isRenderableSeqElemTy`, a second copy of the arm's element dispatch).
+  ## RFC-chapulin-hardening M1: every fixed-width int; RFC-0005 S8ar: `bool`
+  ## and `string`; S8bc: a `char` or enum element, and a tree element;
+  ## S8bd: a `distinct` element (any chain of them) whose cell (`seqCellTy`)
+  ## is a renderable int or float, not an enum: S8ba backs such a seq, and
+  ## the reader reads the cells as the base seq and converts each element
+  ## back through the chain.
+  if isUnsupportedFieldPlaceholder(ty): return swrPlaceholder
+  let e = ty.seqElemTy
+  case e.kind
+  of itInt:
+    if e.width notin {8, 16, 32, 64}: swrNone
+    elif e.signed and e.width == 64 and not e.isChar and e.enumName.len == 0:
+      swrInt64
+    elif e.isChar or e.enumName.len > 0: swrScalarAs
+    else: swrFixedInt
+  of itBool: swrBool
+  of itString: swrString
+  of itFloat64: swrFloat64
+  of itFloat32: swrFloat32
+  of itRef: swrRef
+  of itDistinct:
+    let cell = seqCellTy(e)
+    if cell == nil: swrNone
+    elif cell.kind == itInt:
+      if cell.enumName.len == 0 and cell.width in {8, 16, 32, 64}: swrDistinct
+      else: swrNone
+    elif cell.kind in {itFloat32, itFloat64}: swrDistinct
+    else: swrNone
+  else:
+    if isTreeSeqElemTy(e): swrTree else: swrNone
 
 func isContainerIntLeaf*(t: IRType): bool =
   ## RFC-0005 S8z. A `Table` value / `HashSet` element type the container
@@ -5151,18 +5220,18 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
     # an unbacked element kind (the very reason this placeholder exists)
     # would demote the WHOLE parameter to `__unsupported_witness:` — a
     # different route back to Bug #2's whole-run poisoning.
-    if isUnsupportedFieldPlaceholder(ty):
-      true
-    # `emitTyAndReader`'s `itSeq` arm: int64/float64/float32 are leaf readers;
-    # a `ref` element renders `new(T)` defaults but STILL builds the pointee
-    # TYPE by recursing `emitTyAndReader(refPointeeTy)` — so a `seq[ref P]` is
-    # renderable iff `P` is. Every other element kind hits the `error()` site.
-    elif isRenderableSeqElemTy(ty.seqElemTy):
-      if ty.seqElemTy.kind == itRef:
-        isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
-      else:
-        true
-    elif isTreeSeqElemTy(ty.seqElemTy):
+    # RFC-0005 S8bx (item 2): judged on the reader `emitTyAndReader`'s
+    # `itSeq` arm dispatches on (`seqWitnessReader`). A placeholder reads no
+    # content, and its element TYPE is always rendered (a reader no witness
+    # reaches is never emitted), so it is renderable whatever its element.
+    case seqWitnessReader(ty)
+    of swrPlaceholder: true
+    # A `ref` element is a position, and the reader builds its pointee's
+    # type: a `seq[ref P]` is renderable iff `P` is.
+    of swrRef: isRenderableWitnessTy(ty.seqElemTy.refPointeeTy)
+    of swrInt64, swrScalarAs, swrFixedInt, swrBool, swrString, swrFloat64,
+       swrFloat32, swrDistinct: true
+    of swrTree:
       # RFC-0005 S8bc (item 3): a tree element, read through `readSeqAs`
       # (`readCellField`), its type rendered by recursion. A ref or ptr
       # part is not: no position is collected for it inside a seq element.
@@ -5171,8 +5240,7 @@ proc isRenderableWitnessTy*(ty: IRType): bool =
       # Table or HashSet is not.
       isRenderableWitnessTy(ty.seqElemTy) and
         not treeRefPartInContainer(ty.seqElemTy)
-    else:
-      false
+    of swrNone: false
   of itTable:
     isRenderableTableTy(ty.tabKeyTy, ty.tabValTy)   ## leaf-only (no recursion)
   of itSet:
@@ -5617,12 +5685,14 @@ proc mkCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
             retIntOffsetPositions: seq[int] = @[],
             guardRoots: seq[string] = @[];
             varLocs: seq[VarLoc] = @[];
-            varPtrSafe: seq[int] = @[]): IRStmt =
+            varPtrSafe: seq[int] = @[];
+            viewAliases: seq[tuple[viewArg, tabArg: int; keyName: string]] =
+              @[]): IRStmt =
   IRStmt(kind: isCall, callee: callee, cargs: args,
          retName: retName, retTy: retTy, opaque: false,
          retIntOffsetPositions: retIntOffsetPositions,
          cGuardRoots: guardRoots, cVarLocs: varLocs,
-         cVarPtrSafe: varPtrSafe)
+         cVarPtrSafe: varPtrSafe, cViewAliases: viewAliases)
 
 proc mkOpaqueCall*(callee, retName: string, args: seq[IRExpr], retTy: IRType,
                    inert = false, havoc: seq[string] = @[],
@@ -5829,23 +5899,27 @@ proc mkNewT*(retName: string, refTy: IRType, addrOf = "";
          nAddrIdx: addrIdx)
 
 proc mkDerefWrite*(p: IRExpr, value: IRExpr, elemTy: IRType,
-                   ptrFamily = false, cell = false): IRStmt =
+                   ptrFamily = false, cell = false, inPlace = false): IRStmt =
   ## Phase 15 R3 (ADR-0010). `p[] = value` — a heap WRITE through a `ref T`/
   ## `ptr T` deref. Structural at R3 (walker no-ops it); the real `store` lands
   ## R4.
   ## RFC-0005 S8an: `cell` marks an `addr` cell's store (`dwCell`).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: elemTy,
-         dwPtrFamily: ptrFamily, dwCell: cell)
+         dwPtrFamily: ptrFamily, dwCell: cell, dwInPlace: inPlace)
 
 proc mkFieldDerefWrite*(p: IRExpr, value: IRExpr, fieldTy: IRType,
                         objTy: IRType, field: string,
-                        ptrFamily = false; init = false): IRStmt =
+                        ptrFamily = false; init = false;
+                        inPlace = false): IRStmt =
   ## Phase 15 R6 (ADR-0010). `p.field = value` — a FIELD WRITE through a
   ## `ref object`/`ptr object`. Stores `value` into the per-(type,field) heap
   ## array `refPointeeTypeId(objTy) & "__" & field` at `p`'s address (only that
   ## field's array changes; an aliased read of the same field sees the write).
+  ## RFC-0005 S8ca: `inPlace` an element's write-back (`dwInPlace`).
   IRStmt(kind: isDerefWrite, dwPtr: p, dwValue: value, dwElemTy: fieldTy,
-         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init)
+         dwPtrFamily: ptrFamily, dwField: field, dwObjTy: objTy, dwInit: init,
+         dwInPlace: inPlace)
 
 proc mkUnsupported*(kind: SymexErrorKind; reason: string;
                     marker: int): IRStmt =
@@ -6160,6 +6234,21 @@ func capCellName*(frame: int; local: string): string =
   ## is not a Nim identifier). `displayName` gives back `local`.
   globalEnvPrefix & "@cap" & $frame & "." & local
 
+func capAddrName*(cell: string): string =
+  ## RFC-0005 S8ca. Beside the env cell `cell` (`capCellName`) of a
+  ## by-reference capture whose variable's address is taken: the pointer to
+  ## the variable's address cell, threaded as the env cell is, so a closure
+  ## applied in any frame binds the capture to that cell
+  ## (`applyClosureGround`).
+  cell & "#addr"
+
+func capBoundName*(cell: string): string =
+  ## RFC-0005 S8ca. Set on the calling path when a closure body ran with
+  ## the capture of `cell` bound to its address cell: the body kept the
+  ## two equal, so the frame owning the variable reads the cell's value
+  ## (`syncAddrCells`).
+  cell & "#bound"
+
 func addrCellName*(local: string): string =
   ## RFC-0005 S8ax. The env name of the address cell of the variable
   ## `local` (`addr local`): frame local (no `__gl:` prefix), never a Nim
@@ -6264,6 +6353,8 @@ proc render*(e: IRExpr): string =
   of iekTableSet:  render(e.tabRecv) & "[" & render(e.tabKey) & "]:=" &
                    render(e.tabVal)
   of iekTableDel:  render(e.mutRecv) & ".del(" & render(e.mutArg) & ")"
+  of iekTabRemovedSince:
+    "removedSince(" & render(e.trCur) & ", " & render(e.trBase) & ")"
   of iekSetIncl:   render(e.mutRecv) & ".incl(" & render(e.mutArg) & ")"
   of iekSetExcl:   render(e.mutRecv) & ".excl(" & render(e.mutArg) & ")"
   of StrOpKinds:

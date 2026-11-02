@@ -24,6 +24,7 @@
 ## Pure Nim: the walker reads it at walk time, with no libpcre.
 
 import ./pcre_syntax
+import ./pcre_ucd
 
 type
   StartOpt* = object
@@ -141,6 +142,14 @@ proc item(c: var Comp; b: var Br; x: Rx) =
     case x.op
     of aoChar: c.oneChar(b, x.ch, x.ci)
     of aoFail: discard   # OP_FAIL sets nothing
+    of aoProp:
+      if x.clist and not x.clistNot:
+        # RFC-0005 S8bt: ONE_CHAR's OP_PROP PT_CLIST: no first character
+        # from here on, and nothing else changes.
+        if b.fcf == reqUnset:
+          b.fcf = reqNone
+          b.zfcf = reqNone
+      else: b.noFirst()
     else: b.noFirst()
   of rxCat, rxAlt: c.group(b, x)
   of rxRep:
@@ -280,7 +289,10 @@ proc tableBit(bits: var set[char]; utf: bool; ch: int32; ci: bool) =
   ## letter when caseless.
   let b = (if utf: ord(utf8Encode(ch)[0]) else: int(ch))
   bits.incl char(b)
-  if utf and ch > 127: return
+  if utf and ch > 127:
+    # RFC-0005 S8bt: caseless, the lead byte of UCD_OTHERCASE too.
+    if ci: bits.incl utf8Encode(ucdOther(ch))[0]
+    return
   if ci and isLetter(b): bits.incl char(otherCase(b))
 
 proc mapBits(bits: var set[char]; x: Rx; utf: bool) =
@@ -303,7 +315,13 @@ proc atomBits(bits: var set[char]; x: Rx; utf: bool): bool =
   ## on it.
   case x.op
   of aoChar: tableBit(bits, utf, x.ch, x.ci)
-  of aoNot, aoNotSpace, aoAny, aoProp, aoFail: return false
+  of aoProp:
+    # RFC-0005 S8bt: PT_CLIST lists its characters (OP_PROP only).
+    if not x.clist or x.clistNot: return false
+    for c in ucdCaseSets[ucdCaseSet(x.ch)]:
+      if utf: bits.incl utf8Encode(c)[0]
+      else: bits.incl char(min(c, 0xFF))
+  of aoNot, aoNotSpace, aoAny, aoFail: return false
   of aoClass: mapBits(bits, x, utf)
   of aoNClass, aoXClass:
     if x.op == aoXClass:
@@ -361,6 +379,9 @@ proc startBits(bits: var set[char]; x: Rx; utf: bool): Ssb =
           # OP_BRAZERO carries on; a first copy that is DONE stops.
           if it.lo >= 1 and r == ssbDone: stop = true
         else:
+          # RFC-0005 S8bt: a PT_CLIST repeat that may be absent is an
+          # OP_TYPESTAR / OP_TYPEQUERY / OP_TYPEUPTO, which fails.
+          if s.clist and it.lo == 0: return ssbFail
           if not atomBits(bits, s, utf): return ssbFail
           if it.lo >= 1: stop = true
       of rxBol, rxEol, rxEolAbs, rxVerb, rxAccept:

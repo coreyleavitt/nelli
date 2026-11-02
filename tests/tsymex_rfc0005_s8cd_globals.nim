@@ -450,4 +450,4 @@ suite "S8cd item 5: a receiver is not observed whole":
 
 suite "S8cd":
   test "walker floor":
-    check parseInt(symexWalkerVersion) >= 244
+    check parseInt(symexWalkerVersion) >= 249

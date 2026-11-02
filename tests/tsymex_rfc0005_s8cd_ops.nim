@@ -387,4 +387,4 @@ suite "S8cd item 6: a string pinned to a literal under a cap":
 
 suite "S8cd":
   test "walker floor":
-    check parseInt(symexWalkerVersion) >= 244
+    check parseInt(symexWalkerVersion) >= 249

@@ -332,6 +332,8 @@ proc fieldwiseEq(a, b: IRExpr): bool =
       fieldwiseEq(a.spPart, b.spPart)
   of iekStrLit: a.sval == b.sval
   of iekContains: fieldwiseEq(a.container, b.container) and fieldwiseEq(a.key, b.key)
+  of iekTabRemovedSince:   # RFC-0005 S8bx
+    fieldwiseEq(a.trCur, b.trCur) and fieldwiseEq(a.trBase, b.trBase)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     fieldwiseEq(a.mutRecv, b.mutRecv) and fieldwiseEq(a.mutArg, b.mutArg)
   of iekSeqDel: fieldwiseEq(a.delSeq, b.delSeq) and fieldwiseEq(a.delIdx, b.delIdx) and
@@ -402,7 +404,8 @@ proc fieldwiseEq(a, b: IRStmt): bool =
   of isCall:
     a.callee == b.callee and fieldwiseEqExprSeq(a.cargs, b.cargs) and a.retName == b.retName and
       fieldwiseEq(a.retTy, b.retTy) and a.opaque == b.opaque and
-      a.retIntOffsetPositions == b.retIntOffsetPositions
+      a.retIntOffsetPositions == b.retIntOffsetPositions and
+      a.cViewAliases == b.cViewAliases   # RFC-0005 S8bx
   of isIndex:
     a.ixRetName == b.ixRetName and fieldwiseEq(a.ixArr, b.ixArr) and fieldwiseEq(a.ixIdx, b.ixIdx) and
       fieldwiseEq(a.ixElemTy, b.ixElemTy) and a.ixLoc == b.ixLoc
@@ -676,6 +679,8 @@ proc sSeqInsert(): IRExpr = mkSeqInsert(mkVar("s"), mkIntLit(7), mkIntLit(1))
 proc sSeqPop(): IRExpr = mkSeqPop(mkVar("s"))
 proc sTableSet(): IRExpr = mkTableSet(mkVar("t"), mkStrLit("k"), mkIntLit(1))
 proc sTableDel(): IRExpr = mkTableDel(mkVar("t"), mkStrLit("k"))
+proc sTabRemovedSince(): IRExpr =   ## RFC-0005 S8bx
+  mkTabRemovedSince(mkVar("tabNow"), mkVar("tabSnap"))
 proc sSetIncl(): IRExpr = mkSetIncl(mkVar("st"), mkIntLit(4))
 proc sSetExcl(): IRExpr = mkSetExcl(mkVar("st"), mkIntLit(4))
 proc sStrOpPlain(): IRExpr = mkStrOp(iekStrLen, "len", @[mkVar("s")])
@@ -787,6 +792,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
     check fieldwiseEq(sTableSet(), roundtripExpr(sTableSet()))
   test "iekTableDel":
     check fieldwiseEq(sTableDel(), roundtripExpr(sTableDel()))
+  test "iekTabRemovedSince (RFC-0005 S8bx)":
+    check fieldwiseEq(sTabRemovedSince(), roundtripExpr(sTabRemovedSince()))
   test "iekSetIncl":
     check fieldwiseEq(sSetIncl(), roundtripExpr(sSetIncl()))
   test "iekSetExcl":
@@ -853,6 +860,7 @@ suite "R6 emit round-trip -- IRExpr kinds":
       of iekSeqSplice: discard                   ## "iekSeqSplice" (RFC-0005 S8bu)
       of iekStrLit: discard                      ## "iekStrLit"
       of iekContains: discard                    ## "iekContains"
+      of iekTabRemovedSince: discard             ## "iekTabRemovedSince (RFC-0005 S8bx)"
       of iekSeqAdd: discard                      ## "iekSeqAdd"
       of iekSeqDel: discard                      ## "iekSeqDel"
       of iekSeqInsert: discard                   ## "iekSeqInsert"
@@ -867,7 +875,8 @@ suite "R6 emit round-trip -- IRExpr kinds":
          iekStrReplaceRe, iekStrCaptureRe, iekStrConcat, iekIntToStr,
          iekStrToInt,
          iekRadixFmt, iekStrUnsupported, iekStrToLower, iekStrToUpper,
-         iekRuneToStr, iekStrStrip, iekStrInOptionRegion:
+         iekRuneToStr, iekStrStrip, iekStrInOptionRegion,
+         iekStrSetAt, iekStrChars, iekStrFromChars:   # RFC-0005 S8ca
         discard  ## "StrOpKinds shared arm" (2 tests: plain + strOp payload)
       of iekGetCurrentExn: discard               ## "iekGetCurrentExn"
       of iekGetCurrentExnMsg: discard            ## "iekGetCurrentExnMsg"
@@ -904,8 +913,10 @@ proc sAssert(): IRStmt = mkAssert(mkBinop(bLt, mkVar("x"), mkIntLit(10)))
 proc sAssume(): IRStmt = mkAssume(mkBinop(bGe, mkVar("y"), mkIntLit(3)))
 proc sCallWithOffsets(): IRStmt =
   ## The historically-dropped B5 field: `retIntOffsetPositions`.
+  ## RFC-0005 S8bx: and `cViewAliases`.
   mkCall("sentinelCallee", "sentinelRet", @[mkIntLit(1), mkVar("arg2")],
-         tInt(64, true), retIntOffsetPositions = @[0, 2])
+         tInt(64, true), retIntOffsetPositions = @[0, 2],
+         viewAliases = @[(viewArg: 1, tabArg: 0, keyName: "sentKey")])
 proc sOpaqueCall(): IRStmt =
   mkOpaqueCall("sentinelOpaque", "retOp", @[mkStrLit("s")], tString())
 proc sVariantFieldStmt(): IRStmt =

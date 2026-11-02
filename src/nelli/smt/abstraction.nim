@@ -171,6 +171,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekConvIntReinterpret,
      iekMathCall,
      iekField, iekIndex, iekArrayLit, iekSeqLen, iekStrLit, iekContains,
+     iekTabRemovedSince,
      iekSeqAdd, iekSeqDel, iekSeqInsert, iekSeqPop,
      iekTableSet, iekTableDel, iekSetIncl, iekSetExcl,
      iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains,
@@ -182,6 +183,7 @@ proc tryEvalInterval*(e: IRExpr, ranges: RangeMap): Option[Interval] =
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, ## Phase 16 A9/A7-S2: svString result, not int.
      iekStrStrip,                             ## ADR-0026: svString result, not int.
+     iekStrSetAt, iekStrChars, iekStrFromChars, ## RFC-0005 S8ca: not int.
      iekSeqSlice,                             ## v67: seq-view result, not int.
      iekSeqSplice,                            ## RFC-0005 S8bu: a seq, not int.
      iekGetCurrentExn, iekGetCurrentExnMsg,   ## Phase 15 E8: no integer interval.
@@ -288,6 +290,9 @@ proc collectVarRefs*(e: IRExpr, into: var HashSet[string]) =
   of iekContains:
     collectVarRefs(e.container, into)
     collectVarRefs(e.key, into)
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    collectVarRefs(e.trCur, into)
+    collectVarRefs(e.trBase, into)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     collectVarRefs(e.mutRecv, into)
     collectVarRefs(e.mutArg, into)

@@ -175,8 +175,11 @@ suite "S8bu (4c): mitems and mpairs yield each element by address":
     clean(sutMitemsView, "mv", sxSat)
     clean(sutMitemsView, "mv_dead", sxUnsat)
 
-  test "a resize in the body declines":
-    declines(sutMitemsGrow, "mg", "mitems over a seq whose length changed")
+  test "a resize in the body is Nim's assert (RFC-0005 S8ca)":
+    # S8bu declined it. RFC-0005 S8ca: the iteration that grew the seq
+    # ends in Nim's `AssertionDefect`, which leaves the routine before `mg`
+    # (`sxRaised`; `tsymex_rfc0005_s8ca_resize` pins the shape natively).
+    clean(sutMitemsGrow, "mg", sxRaised)
 
 suite "S8bu: walker version":
   test "symexWalkerVersion >= 225":

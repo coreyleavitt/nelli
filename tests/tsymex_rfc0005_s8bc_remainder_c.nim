@@ -79,10 +79,10 @@ proc tiValues(a: int) =
   if s == 10: symexTarget("ti_values")
 
 const tupleBudget = SymexSettings(budget: ResourceBudget(
-  queryRLimit: 300_000_000'u))
+  queryRLimit: 600_000_000'u))
   ## RFC-0005 batch 7: past `tiTuple`'s label search on both pinned Z3s
   ## (see its test), and not the 250M default, which a tainted path does
-  ## not take as the caller's.
+  ## not take as the caller's. Batch 9: 300M before S8by's term order.
 
 proc tiTuple(a: int) =
   # Bounded: `s += k * v` overflows for a huge `a`, a real `OverflowDefect`
@@ -178,6 +178,8 @@ suite "S8bc (6): Table iteration":
     ## Z3 5.1 and 79,811,624 on 4.13.4 in a context of its own, against
     ## 40,490 in the walk's context before S8bp (the same 57 assertions;
     ## without the four overflow checks the text alone takes 632,702).
+    ## RFC-0005 batch 9: S8by's `queryTermOrder` takes the 4.13.4 search to
+    ## 411,783,288 units; the query, the witness and the verdict are the same.
     ## The path is tainted (`feTableIterOrder`), so its solve runs under
     ## `taintedSolveRLimit`'s 20M: under the defaults it declines
     ## (`beSolverUndef`), never `sxUnsat`; with a budget past the search it

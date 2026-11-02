@@ -457,6 +457,36 @@ title = "S8bk's remainder: index call inside a var actual's lvalue (evaluate onc
 state = "done"
 
 [[slice]]
+id = "S8bx"
+title = "S8bl's remainder: raise from in-walk witness extraction lost on the C backend, witness-render drift for a variant-arm seq of ref-holding elements in a Table, mpairs aliasing of loop var and table, key change during Table iteration, string setLen over a symbolic string"
+state = "done"
+
+[[slice]]
+id = "S8bt"
+title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interpreter CRLF/ANY start filter, LIMIT between 0 and default, mixed SKIP:NAME, UTF UCP/case folding and (*ANY) in UTF, automaton/step-table/register caps, replace lemmas beyond two shapes"
+state = "done"
+
+[[slice]]
+id = "S8ce"
+title = "Destructor-swallowed exceptions: nim-z3's lifecycle hooks catch an in-flight raise on the C backend; root fix in nim-z3, lock bump, every destroy site covered"
+state = "done"
+
+[[slice]]
+id = "S8ca"
+title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pin, structural viewFollows in-place check, addr s[i] of element-cell seqs to calls, closures over address-taken vars and heap lvalues, seq args to proc values, string as openArray[char], negative toOpenArray and resizing mitems, gps[].add through ptr-to-seq, S8bu suite compile time"
+state = "done"
+
+[[slice]]
+id = "S8by"
+title = "S8bp's remainder: isolate concolic scratch solves, skip redundant 1b/1c after a facts-first SAT, term-order-stable wall time in translated contexts, mergeMemberships under disjunction/ite"
+state = "done"
+
+[[slice]]
+id = "S8cc"
+title = "S8br's remainder: address cell at a non-literal array index with an input-dependent value runs past 420s, write summary over-approximates a global a later callee names, unnameable index call declines"
+state = "done"
+
+[[slice]]
 id = "S8cd"
 title = "Batch-6 integration findings: iekSeqLen on unsupported receiver kinds, ptrTargets on the global entry fallback, case-object globals, isEagerIR bit sets, recvValue observing only the touched part, literal-haystack rfind under a tight cap"
 state = "pending"
@@ -8420,6 +8450,278 @@ Pins that moved, because they pinned a gap S8bl closes:
 - **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)** model the
   same `newSeq` family; not reconciled here.
 
+**As landed (S8bx, walker 228, provisional) — S8bl's remainder.** Pins:
+`tests/tsymex_rfc0005_s8bx_{extractraise,witnessdrift,mpairs,iterchange,setlenstr}.nim`
+(`extractraise` with a companion `.nim.cfg` setting
+`-d:symexTestInjectWalkerFault`). Every item was pinned RED at the base
+(1f38a13) before it was changed. Three of the five were wrong verdicts,
+two of them reported by S8bl as PRECISION:
+- **SOUNDNESS: a raise inside in-walk witness extraction was lost on the C
+  backend** (a false `sxUnsat` with no error at all, or a false `sxSat`
+  from a half-extracted witness).
+- **SOUNDNESS: an `mpairs` / `mvalues` view passed to a call with its
+  Table** was two copies of one location: the verdicts were swapped
+  against native runs (a live label `sxUnsat`, a dead one `sxSat`).
+- **SOUNDNESS: a key removed from a Table while iterating it, with its
+  length kept,** followed the enumeration taken at loop entry, and that
+  path is untainted for a table of one entry: a false `sxUnsat` for a
+  label only the new key's visit reaches, and a false `sxSat` (the witness
+  did not replay) for one only the initial enumeration reaches.
+
+*(1) The lost raise.* The mechanism, located by instrumenting every
+`popCurrentException` of a probe build's generated C:
+- Nim 2.2.10's C backend (goto exceptions) destroys a call's result
+  temporary on the raise path without saving or clearing the error flag
+  (`T = f(); if (*nimErr_) { eqdestroy(T); goto LA_; }`). A scope exit's
+  destroys do save it (`oldNimErrFin`). The unsaved shape arises when an
+  existing variable is reassigned from a call (`result = walk(s, result,
+  w)`), not for an initialisation or a `discard`.
+- When the temporary holds a Z3 term (a `seq[Path]`, a `SymVal`, a
+  `Z3String`), its destructor is nim-z3's `termDestroy`
+  (`_deps/z3/src/z3/lifecycle.nim`), whose body is a `try` with `except
+  CatchableError: discard` and `except Exception: discard`. Entered with
+  the flag still set, its first checked call (a Nim proc) jumps to that
+  handler, which takes the IN-FLIGHT exception as its own, clears the flag
+  and pops it. The frame then returns as if nothing had been raised.
+- The extraction raise of S8bl's trigger was consumed by a `Z3BitVec`
+  `=destroy` called from `walkBlock`'s raise path, destroying `walk`'s
+  returned `seq[Path]`. C++ exceptions are native and the destructor's
+  `try` does not see the in-flight one, so the same raise reached
+  `runSymex` as `weInternalWalkerFault`. This is the mechanism behind the
+  project's earlier "C-backend goto-exception hazard" notes (N31, N36,
+  ADR-0023, S8m, CR-1c): none had named it.
+
+The fix makes every raise inside extraction observed AS IT IS RAISED,
+whatever unwinding later does to it: `trySolve` installs
+`extractionRaiseHook` as `system.localRaiseHook` (called by
+`raiseExceptionAux` on both backends, before any unwinding) for the span of
+`extractWitness` and restores the previous hook after. The hook records the
+first raise's name and message (`extractionFault`; a nim-z3
+`Z3InvalidUsageError` is the solver's own and is excluded) and lets the
+raise proceed. Then:
+- `trySolve` answers `sxUnknown` with no witness when a fault was recorded,
+  even if extraction returned normally (the raise swallowed inside it);
+- `shouldStop` is true once a fault is recorded, so the walk ends at its
+  next check;
+- `runSymex` makes the run `sxUnknown` and appends `weInternalWalkerFault`
+  naming the raise ("... raised inside witness extraction at a target hit
+  and lost on the way to the run boundary"), unless the raise did reach it
+  and was recorded with the same message;
+- `resetSymexRunState` clears the fault and releases the hook, so a later
+  run is not declined by an earlier one's fault.
+The pin injects the raise (`-d:symexTestInjectWalkerFault`): extracting a
+string parameter named `injectExtractionFault` raises out of extraction
+(after a loop, two iterations of one Table, and flat), and one named
+`injectSwallowedExtractionFault` raises in a callee whose Z3-term result is
+reassigned, which the C backend loses INSIDE extraction. On C at the base:
+`afterLoop` and `twoIters` were a false `sxUnsat` with no error,
+`swallowedInside` a false `sxSat`; C++ named each. All seven tests pass on
+C and C++ (Z3 5.1) and on C (Z3 4.13.4). S8bl's natural trigger (its
+key-byte constraint disabled in a probe build) is now a named decline on C.
+
+In-walk callbacks audited for the same pattern:
+- witness extraction (`trySolve` -> `extractWitness` /
+  `buildHeapSnapshot` / `extractTableEntries`' `emit` closure), reached from
+  a target label and from `routeRaise` through `solveTargetHit`: fixed here;
+- `nelliZ3ErrorHandler` (the `cdecl` Z3 error callback): counted at its
+  source since S8m (`ekZ3Error`), never relies on a raise;
+- `lowerClosureCall`'s re-entry into `walk`: the walk's in-band discipline
+  and the N36 raise-class audit;
+- the walker's same-frame `try` sites (`defaultZero` x4, `symValFromRawAst`,
+  `concreteSeqLen`'s `parseInt`): their generated C returns through an
+  out-pointer and the exits are shielded;
+- the concolic `concreteBranchOutcome` / `loopArmInfeasible` /
+  `checkCapped`: Z3 calls only (S8m); the concolic entry never extracts (its
+  sentinel label is never hit);
+- the Windows fiber trampoline is top level; the `tagGuard` closure makes Z3
+  calls only.
+
+*(2) The witness-render drift.* `isRenderableWitnessTy` called a
+placeholder seq renderable whatever its element (it renders as an empty
+literal), but the reader recursed into the element for its TYPE, and an
+element no reader reads (an object holding `Table[string, ref int]`) hit
+the reader's invariant guard at macro time: the whole file failed to
+compile. The seq reader and the predicate now share one classifier,
+`seqWitnessReader` (`types.nim`, `SeqWitnessReader`: placeholder, the
+scalar readers, tree, ref, none), and `emitTyAndReader` always renders the
+type: an unreadable element's reader is `unrenderedReader`, a
+`{.error.}` that fires only if the reader is EMITTED, which the predicate
+rules out. The same holds for the Table and Set else-arms. Pinned on a
+variant arm, a plain field, and the classifier itself; `CR2c` returns to
+its original `Widget` element.
+
+*(3) `mpairs` aliasing.* The parser marks a call in an `mpairs` /
+`mvalues` body whose arguments include both the view and its table's
+location (`IRStmt.cViewAliases`: the two argument positions and the key's
+name; `markViewAliases` in `parseTableForLoop`). An argument that HOLDS the
+table (a prefix of its path) or is part of the view declines
+(`feUnsupportedOp`). The walker binds the pair in the callee's frame
+(`CallFrameCtx.viewAliases`, `bindViewAliases`), and after every statement
+of the callee's body (`walkBlock`) syncs them (`syncViewAliases`): a
+changed view is stored into the table at the key; a changed table is read
+back into the view when the key's presence is a literal `true`, and
+declines otherwise; both changed in one statement declines. The pair is
+passed on into a callee given both formals. A by-value view is a copy (a
+scalar is skipped; anything else declines). Every live / dead pair was
+checked against a native run. This is the local model of what S8bs's
+address cells do for `addr`-taken variables (`bindVarLocs`,
+`syncAddrCells`), which the S8bx base does not have. *Reconciliation:* when
+S8bs and S8bx meet, a view should become an address cell bound to the
+table slot, and `cViewAliases` / `bindViewAliases` / `syncViewAliases`
+should be removed in favour of `bindVarLocs` / `syncAddrCells`; the S8bx
+`mpairs` suite is the acceptance test for that merge.
+
+*(4) A key change while iterating.* Nim's Table iterators walk the hash
+slots, `for h in 0 .. high(t.data): if isFilled(...): yield`, with
+`assert(len(t) == L)` after each yield. A `del` and an insert in one
+iteration keep the length, so no assertion fires, and what the rest of the
+loop visits depends on the slots: the new key's slot against the current
+one, and `del`'s backshift of a later entry into the hole. Native runs
+(pinned in the suite, tables built as a witness is, `initTable` then
+`[]=`): from `{"a"}`, deleting `a` and inserting `c` visits `c`; from
+`{"f"}` it does not; from `{"k308", "k321"}`, deleting and re-inserting
+`k308` at its own visit visits it twice and skips `k321` (of the
+del-and-re-insert shapes tried over 2-7 keys, 622 changed the visit
+sequence). The slots
+are a function of the keys' hashes and the capacity, which the walker does
+not model (a key is a symbolic string), so the slot walk is not decided and
+is not modelled: each iteration snapshots the table, and a removal since
+the snapshot (`iekTabRemovedSince`: the presence array is not the
+snapshot's under `true` stores and `ite` merges alone) declines the path
+(`feUnsupportedOp`). A value write keeps every slot and stays exact. The
+`feTableIterOrder` taint for two or more entries is unchanged.
+
+*(5) `setLen` over a symbolic string.* A byte read of the result was a
+code test on a `str.at` of the concat (grow) or `substr` (shrink), which
+both pinned Z3s left undecided within `seqQueryRLimit` (the dead and the
+live label both `sxUnknown`). The result is now a fresh string LEAF with
+the byte-domain fact every string input carries (`allocateSym`), equal to
+the prefix, or to the string followed by its NUL pad. A byte read is then
+a byte test on a byte leaf, which `seqLenCaps` rewrites to the character
+form, and Z3 decides it: on Z3 5.1 and 4.13.4 the grown byte, the kept
+prefix after a grow and after a shrink are each `sxUnsat` dead and `sxSat`
+live with a witness that replays.
+
+Pins that moved:
+- **`phase15_CR2_cachekey`**: `symexWalkerVersion == "228"`.
+- **`r6_n36_raise_class_audit`**: 77 pattern-B runtime raises (was 75) and
+  80 category-(c) sites (was 78), the two injection raises.
+- **`CR2c_witnessreader_catchall`**: `ShapeBad`'s arm is `seq[seq[Widget]]`
+  again (S8bl had replaced it with `WidgetR` to keep the file compiling).
+- **`r6_r6_emit_roundtrip`**: `cViewAliases` and `iekTabRemovedSince`.
+- **`rfc0005_s8bl_setlen`**'s note points at the symbolic pins.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: any raise inside the walk can be lost on the C backend** by
+  the same mechanism as (1). A scan of the generated `runtime.nim.c` finds
+  about 290 raise-path destroys that do not save the error flag, many of a
+  type holding a Z3 term (`seq[Path]`, `SymVal`, the context). S8bx makes
+  extraction's raises observed at the raise; any other raise in the walk
+  (a walker fault, a lowering raise not caught in its own frame) relies on
+  the walk's in-band discipline and the N36 audit, and is lost on C if it
+  is not caught before such a destroy. The root fix is outside nelli: in
+  nim-z3's `termDestroy` (save and restore the error state around its
+  `try`, or not catch at all) or in the Nim compiler's raise-path destroy.
+- **PRECISION: an aliased callee writing the table at a key whose presence
+  is not a literal**, or writing both the view and the table in one
+  statement, declines; and the object HOLDING the table passed with the
+  view declines.
+- **PRECISION: a key removed while iterating** declines rather than
+  modelling the slot walk; the walk is decidable only with ground keys
+  (their hashes and the capacity are concrete), which the walker could
+  model as a later refinement. A callee that havocs the table during the
+  loop is read as a removal.
+- **Integration: `iekSeqNewZero` (S8bc) and `iekSeqNew` (S8bi)**: not
+  reconciled here (batch 5, per the job).
+
+**As landed (S8ce, walker 238, provisional) — S8bx's remainder.** Pins:
+`tests/tsymex_rfc0005_s8ce_{hookraise,raiseshapes}.nim` (`raiseshapes` with a
+companion `.nim.cfg` setting `-d:symexTestInjectWalkerFault`), and nim-z3's
+`tests/thook_raise_path.nim`. nim-z3 branch `rfc-0005-s8ce`; `milpa.lock`'s z3
+entry moves to it (the S8at lock shape: identity and `commit_sha`, `ref "main"`
+kept; the coordinator fast-forwards nim-z3 main at integration).
+- **SOUNDNESS: any raise crossing the destroy of a live Z3 value on the C
+  backend was lost**, not only an extraction raise: the walk went on to a false
+  `sxUnsat` (or to an unrelated `sxUnknown`) with the raise unreported.
+
+*The mechanism.* Nim 2.2.10's C backend (goto exceptions) runs a destructor on
+the raise path with the error flag set unless it takes the destructor as able
+to raise, in which case it saves and clears the flag around it (`oldNimErrFin`).
+A `{.raises: [].}` hook, and a generated `seq` / `ref` hook over one, is taken
+as unable to raise. So a hook runs with an exception IN FLIGHT for a reassigned
+call result (`T = f(); if (*nimErr_) { eqdestroy(T); goto LA_; }`; S8bx named
+this one) AND for a local destroyed at its scope's merge label (S8bx took those
+as saved; a group holding only generated hooks is not). nim-z3's hooks wrapped
+their bodies in `try: ... except CatchableError: discard` (`except Exception`
+for the context release). The generated C of the `try` tests the flag after its
+first checked call, jumps to the handler, matches the in-flight exception,
+clears the flag and calls `popCurrentException`. A pure-Nim reduction (no Z3)
+loses the raise on C and not on C++, and with no `try` in the hook it is not
+lost: `{.raises: [].}` plus `try` in a destructor is the whole trigger. The
+compiler's unsaved raise-path destroy is the enabling behaviour; the swallow is
+the `try`.
+
+*The root fix (nim-z3).* Every `=destroy` / `=copy` / `=dup`, and the refcount
+helpers they call, is raise-free by construction: no `try`; the raw C entry
+point through softlink's `<sym>Ptr()` accessor (`{.cdecl, raises: [].}`, nil when
+libz3 is not loaded), never the wrapper that raises `SoftlinkError`; nil handles
+checked first; `{.raises: [], quirky.}`, so the compiler proves it. `quirky` is
+required as well as the removal: without `--panics:on` the compiler checks the
+flag after every call and leaves the routine when it is set, so a try-free hook
+entered on the raise path would stop at its first call and leak its dec_ref and
+context release (pinned under `-d:z3CtxDestroyCount`). A source audit in
+`thook_raise_path` pins every hook's pragma and the absence of a `try`.
+
+*Nelli's own sites.* `src/nelli` declares no lifecycle hook (`command grep`:
+the `=destroy` / `=copy` / `=sink` / `=dup` hits are comments and the DSL parser's
+model of those operations), and softlink declares none. S8bx's
+`extractionRaiseHook` is **removed**, with `extractionFault`, its `shouldStop`
+arm and `runSymex`'s fallback: with the hooks fixed, a raise inside extraction
+reaches `runSymexCaught` on both backends, and the walker's `try` sites do not
+enclose `trySolve` (they guard `defaultZero`, `symValFromRawAst`, `lowerStrArm`
+and a numeral's `parseInt`). S8bx's seven pins stay green unchanged; with the
+hook removed and nim-z3 at ae509f0, `afterLoop` and `twoIters` are a false
+`sxUnsat` and `swallowedInside` a false `sxSat` again, which is what the pins
+catch.
+
+*The ~290 sites, by class.* A site loses a raise only when the value destroyed
+is non-empty, so the shapes are raises with a Z3 value live, not raises near a
+destroy site: a raise out of a walk with nothing yet in its result crosses no
+term destroy and was never lost. `raiseshapes` raises from a term construction,
+a statement dispatch, a solver call, query assembly (`pathRoots`' roots held), a
+range conversion (its bounds held), a callee's frame, an `if` condition, a model
+evaluation in extraction, an `mpairs` view's `syncViewAliases(walk(...))`, and the
+concolic walk (`concolicCollect`). Each is a named `weInternalWalkerFault` (the
+concolic entry: the raise reaches its caller). The class argument is the
+generated C: no hook in a walker build pops an exception any more, so no site
+can lose one, whichever shape reaches it.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: the "a lowering-time degrade must never raise" rule** (ADR-0023 /
+  SND-3, `degradeStrArm`, `allocDegrade`, N31 / N36 / N40) was written for this
+  hazard. Its in-band sinks stay as the walker's reporting channel and nothing
+  here moves them, but a `try` around a `walkBlock`-reachable call is no longer
+  unsound for this reason. A later slice could simplify them.
+- **PRECISION: S8m's `z3ApiErrorCount` fallback in `runSymex`** was justified by
+  the lost raise. It stays: it also counts an API error caught inside the walk
+  (`concreteSeqLen`'s `except CatchableError`), and it never fires falsely.
+- **PRECISION: nim-z3 leaks, no verdict affected.** `Z3FuncDeclOwn`,
+  `Z3FuncInterpOwn` and `Z3RcfNum`'s hooks never release their `ctx` reference;
+  each predates this slice and its behaviour is unchanged.
+- **PRECISION: `Z3Ast[S: static SortTag]`'s hooks are not the ones a `Z3Int` /
+  `Z3Bool` uses:** the generated C of a walker build has no hook attributed to
+  `ast.nim`, so those values take the field-wise destroy. They release `ctx` and
+  no raw reference: a leak until the context goes. It also means they never ran
+  the `try`, which is why the lost raises above are all carried by bit-vector,
+  array, sequence and regex terms, or a solver or model.
+- **PRECISION: nim-z3's own suite on the image's Z3 5.1.** `tffi`, `tversion` and
+  `tmultiversion` assert a 4.x runtime (they pass on 4.13.4), and `tregex_index`
+  stalls in one Z3 query at the same test at ae509f0 and with the fix (killed at
+  1300 s each; it passes in 2 s on 4.13.4). Not caused here.
+- **Compiler: a `try` in any other destructor loses a raise the same way.** Nothing
+  in nelli or its deps has one now (the audit pins nim-z3); the reduction is in the
+  S8ce report for an upstream Nim issue.
+
 ### §2.6 The raise-routing recovery — *corrected*
 
 `routeRaise` (`runtime.nim:11380-11384`) kills any tainted path
@@ -9190,6 +9492,112 @@ CR2 `==` pin 230, each slice's `>=` floor unchanged. S8bw's row stays
   declines its argument, so #163's ptr-argument pin decides the raise
   after the summarised call (`sxRaised`, as Nim raises); the untyped
   `pointer` `nil` still declines.
+
+**Batch 9 (2026-11-02) — one walker number for four slices.** S8ce, S8ca, S8by
+and S8cc (each provisional: 238, 233, 231, 238) land stacked on batch 8, in that
+order: `symexWalkerVersion` 241 -> **245**, the CR2 `==` pin 245, each slice's
+`>=` floor unchanged, the batch's floor in `tsymex_rfc0005_b9_integration`.
+Where slices met:
+- *One fallback for a lost raise.* S8ce's root fix makes nim-z3's hooks raise-free,
+  so batch 8's `solveRaiseHook` and S8bx's extraction hook had nothing left to
+  catch. Both are gone, with `extractionFault`: no walker `try` encloses a solve,
+  and S8ce's fallback answers for a raise that would have reached `checkCapped`.
+  S8bx's pins in `tsymex_rfc0005_s8bx_extractraise` are unchanged and green.
+- *One `swap`.* S8ca's `parseSwap` was unreachable behind S8bl's
+  `parseVarMagicStmt`, which dispatches first, so it is dropped. S8ca's deref
+  arm for `p[].add` stands before S8bl's `pureLvalueTarget` arm: it reads the
+  pointer once and the value after the arguments.
+- *S8ca's write log and batch 7's and 8's views.* `aaf8749`'s two declines (a
+  `var openArray` view a later argument writes) survive as `laterLeavesLvalue`.
+  Batch 8's `slot` entries have no cell, so `anchorViews`, `inheritAddrCells` and
+  the capture links skip them, and `syncAddrCells` handles them first.
+- *S8ca item 5 lifted a decline that was doing three jobs.* A proc value's domain
+  now has a sort for a seq, table, set or array. Each of these was a false
+  verdict once that decline lifted; each native run reaches the live label:
+  - a view and its Table in one call, `let r = f(v, t, k)`: a false `sxSat`,
+    which batch 8's `pv_dead` pin caught. `markViewAliases` declines the call when
+    it has a `var` or `addr` actual (`closureTakesView`);
+  - a by-value seq or table whose variable the body also reaches, `f(gs)` with
+    `gs[0] = 50; a[0]`: a false `sxUnsat`. The actual reports its location in
+    `ccTouch` (`byValueTouch`), and `touchMeetsOuter` declines the meeting. A
+    body that only reads declines too (PRECISION, as at batch 8);
+  - a call returning `var T` as a `var` actual, `f(t["a"], t, "a")`: a false
+    `sxSat`, the callee's write landing in a temporary. It declines.
+- *S8ca's stack check and Nim's call depth limit.* The first Windows run at this
+  stack died in `tsymex_rfc0005_s8ca_stack`: `maxCallDepth: 100_000` on a 16 MB
+  fiber reached Nim's limit of 2000 frames (9 a level, so 222 levels) before the
+  stack ran short, and a build with stack traces ends the process there.
+  `nativeStackShort` now also reads `nimFramesLeft`, keeping `nimFrameReserve`, and the call declines
+  in-band as a stack cut. Linux's stack still runs out first: `s8ca_stack`'s 45
+  levels are about 400 frames. `tsymex_rfc0005_b9_calldepth` pins it under a lower
+  limit (`-d:nimCallDepthLimit` in its `.nim.cfg`), so it runs on every platform.
+- *S8by's skip and step 1d.* S8by skips (1b) and (1c) after a facts-first SAT and
+  leaves step 1d, which runs on step 1's UNSAT. Step 1d now decides `preSufNl`
+  before step 2, so S8by's pin names 1d. The S8bp isolation suite still reaches
+  every step: `ownCoreNl` reaches step 2 and `preSufNl` with the facts-first check
+  off reaches (1b), (1c) and (1c)'s capped half.
+- *S8by's term order on Z3 4.13.4.* `queryTermOrder` moved `tiTuple`'s SAT search
+  in `tsymex_rfc0005_s8bc_remainder_c` from 79,811,644 units to 411,783,288, past
+  the pin's 300M budget, so it declined. The walk's UNSAT queries fell (142,112 to
+  68,137; 521,055 to 315,601). The pin's budget is now 600M, with the same exact
+  `sxSat` and `a == 6` replayed natively, at about 100 s more on Linux. The default
+  budget's answer does not move: a tainted path's 20M declined before and after.
+  S8ci owns term order.
+- *S8by's timeout.* `concreteScratchCheck` reads `queryTimeoutMsCur`. It equals
+  `settings.budget.queryTimeoutMs` at every concolic site, since
+  `runConcolicCollectImpl` resets the run state with the settings it passes down,
+  on the thread that solves.
+- *S8cc and S8ca.* The parser merged clean. S8cc's index mark holds through S8ca's
+  closure call (`f(gs[nextI()], @[3])` evaluates the call once, exact).
+
+**Batch 8 (2026-11-02) — one walker number for two slices.** S8bx and S8bt
+(each provisional: 228, 224) land stacked on batch 7, in that order:
+`symexWalkerVersion` 237 -> **241**, the CR2 `==` pin 241, each slice's `>=`
+floor unchanged, the batch's floor in `tsymex_rfc0005_b8_integration`. Where
+slices met:
+- *One location mechanism.* S8bx's `cViewAliases` was the local model of S8bs's
+  address cells, with the reconciliation left for this meeting. A view is a
+  `slot` entry of `CallFrameCtx.addrCells` (the callee's Table formal and the
+  key), synced by `syncAddrCells` with snapshots from the `walk` wrapper; a
+  Table has no heap cell (`addr t` declines), so the location is its value in
+  `Env`. `snapViewAliases`, `syncViewAliases`, `viewSnapPrefix` and
+  `CallFrameCtx.viewAliases` are gone, `cViewAliases` and `bindViewAliases`
+  stay as the binding. S8bx's sync ran between a block's statements, so a callee of
+  one statement was never synced: SOUNDNESS, `only_dead` a false `sxSat`.
+- *The view after a Table write.* S8bl stored view writes into the table and
+  nothing carried the reverse: `t[k] = 50; if v == 50` read the head-of-loop
+  value by name, through a `var` formal, a capture or a global's name (a false
+  `sxSat` on the negation in all four, native 50). `mutViewWriteBack` now
+  places a reload after each such statement and on entry to a handler, and a
+  removed key declines there.
+- *A global or captured Table.* A callee holding the view that reaches the
+  Table by name was a false `sxUnsat` (S8an's guard looked at the actual's root,
+  `v`). The Table's root joins `cGuardRoots` and the access declines.
+- *One isolated, bounded solve.* S8bt's step 0 built a second isolated context
+  for queries without a recursive application and ran in place for the others,
+  on the reasoning that a translated query loses the definition. A probe on
+  both pinned Z3s refutes that: a translated query keeps it. Step 0 is one
+  `ownContextSolver` / `ownContextCheck` under S8bt's `recFactsRLimit`, and
+  `hasRecursiveApp` is gone.
+- *A raise in a solve.* S8bx's hook covered extraction. A raise from
+  `ownContextCheck` at the target's solve, past a loop, was the same loss on C:
+  a false `sxUnsat` with no error. `solveRaiseHook` spans `checkCapped`; a lost
+  raise answers `zsUnknown`, so nothing prunes on it; `Z3Error`s keep S8m's
+  kinds. The root (`termDestroy`) is S8ce's.
+- *S8bu's elements.* An `mitems` / `mpairs` element passed on to a `var` formal
+  aborted the compile (`classifyType` of S8ba's untyped `nnkHiddenAddr`).
+  Passing the element with its seq declines, on a local seq and a global.
+- *`seqWitnessReader`.* S8bd's `distinct` seq elements (batch 5's) are one more
+  arm of S8bx's classifier, `swrDistinct`, rather than the predicate S8bx removed.
+- *S8bp's context, on Z3 4.13.4.* Two pins green at each slice's tip moved on
+  the older Z3 once their queries ran in a context of their own. S8bx's
+  `grow_pad_dead`: step 1 is UNSAT, and step 2's core is not minimal, so it named
+  a cap the query's own bounds imply. Step 1d asks that directly, the query
+  without the sequence theory, plus the facts, against the caps' negation: no
+  model means every real model keeps to the caps, so step 1's UNSAT is the
+  query's. `bt_limit_replace` (a free one-byte subject): 4.13.4 spends the budget
+  and 100M units more, and declines. PRECISION: exact on 5.1; on 4.13.4 `sxSat`
+  or that decline, never `sxUnsat`; the fixed subject keeps `sxSat` on both.
 
 **Batch 7 (2026-10-04) — one walker number for three slices.** S8bp, S8bu
 and S8br (each provisional: 219, 225, 229) land stacked on batch 6, in
@@ -13144,3 +13552,623 @@ corpus shard passing; d64b7ee superseded them.
   through a proc value in a by-address actual's index (`gs[fv()]`), or a
   generic's whose `result` has another type, has no typed symbol to mark;
   its write-back declines rather than evaluate it again.
+
+**As landed (S8bt, walker 224) — S8bj's remainder.** All seven items are
+done. The branch is `rfc-0005-s8bt`, on S8bj's `2899d26`. Ground truth is
+the libpcre `std/re` loads: PCRE 8.45's interpreter on Linux, and 8.37
+with its JIT on the Windows legs (built locally as the third oracle).
+Each modelled feature is checked against the real `std/re` on every
+enumerated input: the concrete model, every automaton language, the step
+table, and every Z3 formula.
+
+*Item 1: only verified libraries are read (SOUNDNESS).*
+- **The fix.** `pcre_engine.verifiedLibs` lists the builds the model is
+  checked against, each with its `pcre_version()` string, its engine and
+  the model its unanchored calls are read with:
+  - 8.45, interpreter (the model's reference);
+  - 8.37, JIT (the Windows legs; `peJit837`);
+  - 8.37, interpreter.
+- **Any other library.** With any other library, `parseSpec` returns
+  `psUnknown` for every pattern, and the reason names the library and the
+  list (`unverifiedLibReason`). S8bj recorded the version in the cache key
+  but still read every library with 8.45's model.
+- **RED / GREEN.** Under a stand-in 8.44 (`overridePcreLib`), a reachable
+  target gave `sxSat` (RED). It now gives `sxUnknown` with the named
+  reason (GREEN; `tsymex_rfc0005_s8bt_libversion`).
+- **Other builds, measured and not listed.** With evaluation entries in a
+  throwaway build, 31 regex suites ran on locally built libraries:
+  - 8.44 and 8.39 interpreters: 0 differ;
+  - 8.39 JIT: 80 cells differ in `tsymex_rfc0005_s8bt_jit` and 33 in
+    `s8bj_verbs`, e.g. `(*CRLF).[ab]` on "\r\na" (its scan is not
+    8.37's).
+
+  The list stays at the builds CI runs. Adding an interpreter build is a
+  one-line entry once a leg runs it.
+
+*Item 2: the JIT is its own engine model.*
+- **What is modelled.** `pcre_code` lays the pattern out as pcre_compile.c
+  does, and `pcre_jit` ports 8.37's `scan_prefix` and
+  `fast_forward_first_n_chars`: up to 16 known positions, the range skip
+  table, and up to three offset compares, with the give-up when at most
+  `max - 1` bytes remain. `pcre_select`'s engine `peJit837` then models:
+  - a SKIP landing past the start resumes with the scan, without the
+    CRLF skip;
+  - a SKIP:NAME that is not found is ignored in place, with no re-run;
+  - the required-character check searches when `len - x <= 1000`;
+  - in UTF mode, the bumpalong steps by the lead byte's length.
+- **Where the engine is used.** The search languages carry the scan's
+  look-ahead as obligations on the bytes still to be read (`SNode.obl`).
+  The step table and `replaceStepZ3` have the scan's modes.
+  `pcreSearchEngine()` picks the verified build's model, and S8bj's
+  `jitDeclined` is removed.
+- **What stays declined on the JIT.**
+  - In UTF mode, a scan whose first characters include U+0080..U+00BF.
+    The scan can stop inside a character, and the JIT then reads a
+    continuation byte as that code point.
+  - In UTF mode with (*ANY), the search languages under the scan. An
+    attempt can start inside a multi-byte newline. The concrete reading is
+    modelled.
+  - A LIMIT between 0 and the default, because `count_match` is the JIT's
+    own accounting.
+- **RED / GREEN.**
+  - Concrete, with the JIT behaviour disabled: 484 cells differ (RED).
+    The differential is `tsymex_rfc0005_s8bt_jit`, over a corpus from a
+    tri-oracle delta of 239 patterns.
+  - Languages with the scan disabled: 21 differ (RED).
+  - The Z3 replace with the JIT branch disabled: 4 wrong `zsSat` (RED).
+  - GREEN: 0 differ on both the delta and the live 8.37 JIT.
+
+*Item 3: a LIMIT between 0 and the default.*
+- **The model.** `match()`'s calls (pcre_exec.c 8.45) are counted on the
+  automaton: `buildNfa(limitRoom)` adds `nkCost` and `nkPoss` states, and
+  each agenda item carries `Cost{cc, dp, md}`.
+  - Every `match()` entry is one call. RMATCH goes one frame deeper;
+    TAIL_RECURSE stays in the same frame.
+  - Repeats of a single character or character type: a greedy exit from
+    the maximum down costs an RMATCH, and the exit at the minimum is a
+    TAIL. Class repeats (OP_CLASS, OP_NCLASS, OP_XCLASS) RMATCH at the
+    minimum too.
+  - A lazy exit is always an RMATCH. EXACT is free.
+  - A possessive or auto-possessified repeat (a port of
+    `auto_possessify`, `pcre_possess`) has one free exit.
+  - Groups, verbs and BRAZERO follow their opcodes.
+  - The count resets per attempt.
+- **SKIP:NAME re-runs.** A SKIP:NAME re-run calls `match()` afresh, so
+  the first run is one of the call's runs (`Cost.pk`). The re-run's
+  prefix makes one call fewer for each SKIP:NAME it now ignores. Each
+  item after the front runs one frame higher for each counted
+  chain-ancestor terminal after it.
+- **The errors.**
+  - Anchored: `lkErrM` / `lkErrR`.
+  - Search: `skErrM` / `skErrR`, marked at the attempt.
+  - Replace: an error ends `replace` as a miss does.
+  - LIMIT_MATCH is checked before LIMIT_RECURSION, as in `match()`.
+- **The oracle.** The least `match_limit` and `match_limit_recursion` at
+  which each call succeeds, found by binary search through `pcre_extra`
+  (`s8bt_harness/limit_oracle`, interpreter), on 1023 patterns over 366k
+  calls (`tsymex_rfc0005_s8bt_limit` .. `_d`).
+- **RED / GREEN.**
+  - At `2899d26` every such pattern declined, and the oracle tests read 0
+    patterns (RED).
+  - During the slice, class repeats counted as TAIL at the minimum: 40
+    depths differed, e.g. `[ab]*(?:a|b)` at 2 instead of 3 (RED).
+  - SKIP:NAME re-runs uncounted: 17 + 13 differed (RED).
+  - GREEN: 0 differ. 8 of the 366k calls are unmodelled; they are named
+    below.
+
+*Item 4: mixed (*SKIP:NAME).*
+- **What `pcre_exec`'s 8.45 loop does.**
+  - `skip_arg_count` counts every SKIP_ARG executed, ignored ones
+    included, and one is ignored while the count is at most
+    `ignore_skip_arg`.
+  - A live SKIP:NAME that is not found, and whose continuation fails,
+    re-runs the attempt at the same start with `ignore_skip_arg` set to
+    the count. After that re-run, the CRLF check moves the start past an
+    LF from any barrier position.
+  - A SKIP that jumps past the start keeps the count for the next
+    attempt. NOMATCH, PRUNE, THEN and a SKIP at or before the start reset
+    it.
+- **The model.**
+  - Within an attempt, a virtual DFS: a barrier neutralises its found
+    SKIP_ARG ancestors, which are found by a depth scan.
+  - Each item carries its DFS index (`Item.ac`), so the count is exact,
+    and duplicates are kept apart where their ancestor sets differ.
+  - Across attempts, the kept count is an attempt parameter (`ign0`) in
+    the verifiers, the search's nodes, the step table's start key and
+    leaves, `replaceStepZ3`'s modes, and the found attempt's captures.
+  - A count past `argCap` (7) declines by name (`staleWhy`).
+- **RED / GREEN.**
+  - Item 4's first differential found a latent S8bj wrong answer: 19
+    cells under (*CRLF), where a barrier past the start must move the
+    re-run past the LF (RED).
+  - With the kept count reset per attempt, the stale-count family gives
+    367 differ concretely, and the symbolic suite 21 searches and 12
+    captures (RED).
+  - GREEN: 1810 patterns, 618k calls, 0 declined, 0 differ. The search
+    languages, the step table, the captures per kept count and the Z3
+    replace all give 0 differ (`tsymex_rfc0005_s8bt_skipname*`).
+
+*Item 5: UTF with (*UCP), Unicode case folding and (*ANY).*
+- **Generated tables.** `scripts/gen-pcre-ucd.py` generates
+  `pcre_ucd.nim` from 8.45's `pcre_ucd.c`, `pcre_tables.c` and `ucp.h`:
+  - the code points of all 169 `\p` names, by pcre_exec.c's per-type
+    semantics;
+  - (*UCP)'s graph, print and punct specials;
+  - UCD_OTHERCASE runs and the caseless sets.
+
+  Generated from 8.37's sources, the tables are identical.
+- **What the reader models.**
+  - `\p` / `\P` in UTF mode.
+  - (*UCP)'s `\d \s \w` and the POSIX substitutes. The bitmap classes
+    (ascii, cntrl, xdigit) stay bitmaps.
+  - A caseless OP_CHARI through UCD_OTHERCASE.
+  - A character with a caseless set as OP_PROP / OP_NOTPROP PT_CLIST.
+  - A caseless class range by a port of `add_to_class`, including its
+    extend quirks; an other case above 0xFF makes an XCLASS.
+- **Start-of-match data.** `set_table_bit`'s other-case lead byte and the
+  PT_CLIST start bits (a PT_CLIST repeat that may be absent fails
+  `set_start_bits`). The JIT scan and the possessifier read the same
+  other cases.
+- **(*ANY) in UTF mode.** U+0085 (C2 85) and U+2028 / U+2029
+  (E2 80 A8 / A9) are newlines; a lone 0x85 inside another character is
+  not. This needs:
+  - new final-newline symbols, and `nlStepU`'s sub-states;
+  - the classes `pcU1`..`pcU3` before a newline's later bytes;
+  - a step-table row for a newline with more after it;
+  - `replaceStepZ3`'s three-byte look-back;
+  - `.` excluding U+2028 and U+2029.
+- **A character class in UTF mode.** It compiles to a UTF-8 byte trie
+  with shared tails (`utf8Leads`), so `\P{Lu}\p{Ll}?` fits the caps.
+- **8.37 (the Windows legs).** 8.37 compiles some UTF classes differently
+  (pcre_compile.c and pcre_xclass.c, read for both versions; first caught
+  on Windows):
+  - its `[:punct:]` takes symbols below 256, not 128;
+  - a negated ascii, cntrl or xdigit lists no wide characters;
+  - `should_flip_negation` handles wide characters differently.
+
+  Before 8.45, a UTF class with a (*UCP) POSIX class or a negated escape
+  declines by name (`PcreParse.classPre845`).
+- **RED / GREEN.**
+  - With ASCII-only folding: 42 folding probes and 40 pattern calls
+    differ (RED).
+  - GREEN: 169 properties (598k code points), (*UCP) (255k), 2246 cased
+    characters (4.69M code points) and 1216 caseless ranges (3.62M) all
+    match libpcre. The concrete patterns, (*ANY)'s languages in every
+    start variant, the step table, the Z3 replace and the entries' Z3
+    formulas give 0 differ (`tsymex_rfc0005_s8bt_utf*`). They are green
+    on the local 8.37 JIT too, where 84 classes decline.
+
+*Item 6: the size caps' real cost, and a lazy encoding.*
+- **Measured** (`tests/s8bt_harness/caps_probe.nim`, with the caps raised by
+  `-d:`; the walker's budget is `seqQueryRLimit` = 20M).
+  - **The automaton.** With the family `(*UTF)(?:a|b)*a(?:a|b){k}c` on
+    the priority route, `find == 1` costs:
+    - k = 2: 34 minimised states, 16.7M rlimit;
+    - k = 3: 50 states, 20.3M, past the budget.
+
+    The determinised regex has 11k nodes at k = 3 and 269k at k = 4 (past
+    the 40k default). At k = 4 Z3 ran past a 60M rlimit and was killed
+    after 2400 s. From k = 5 the regex is past 2M nodes, and the
+    4000-state cap is never the one reached.
+
+    A recursive function over the minimised automaton's states (one
+    numeral per state) measured worse: `zsUnknown` at 60M where the regex
+    took 3.6M.
+  - **The step table.** A symbolic-receiver replace query (`r == "x-"`,
+    `len(s) <= 4`) is `zsUnknown` at 20M at every size measured, from 7
+    to 3072 rows, and so are 2899d26's own UTF and `(?m)` tables. Building
+    the term takes 41 s at 1026 rows and 170 s at 3072.
+  - **Registers.** No suite pattern and no constructed family (ladders,
+    THEN, SKIP, CRLF families up to k = 10) needs more than 1 register.
+- **So the caps stay** (4000 / 512 / 6, now `-d:nelliMaxDfaStates`,
+  `nelliMaxRegexSize`, `nelliMaxStepStates`, `nelliMaxRegs`). Raising
+  them buys no decided query.
+- **The lazy encoding.** A UTF-mode pattern with nothing PCRE's priority
+  decides takes S8ay's edge-split reading (`regex_parser.lazyUtf`) in
+  place of the determinised automaton. "Nothing PCRE's priority decides"
+  means no verb, no limit, LF newlines, anchors only at the edges, every
+  atom whole UTF-8 characters, and for matchLen, endsWith and findBounds'
+  end an S8ay selection form.
+  - Its languages are Z3 regexes over the UTF-8 bytes (`cpsRe`, the same
+    trie), and Z3's derivatives build their states lazily.
+  - pcre_exec's UTF errors (-10, -11, after -24) are added as
+    `callError` reads them.
+  - It is sound on a valid subject from a character boundary: no match
+    starts inside a character, so the leftmost byte offset is the leftmost
+    character.
+  - Under 8.37's JIT, a search whose scan can stop inside a character is
+    not lazy.
+- **Item 6 RED / GREEN.**
+  - RED: k = 6 is past the regex cap, and the four walker pins are
+    `sxUnknown`.
+  - GREEN: `find == 1` costs 0.20M at k = 3, 0.68M at k = 5 and 6.5M at
+    k = 6. The pins are `sxSat` with std/re's witness, or `sxUnsat`. The
+    entries' formulas give 6760 cases, 0 differ
+    (`tsymex_rfc0005_s8bt_caps*`).
+
+*Item 7: replace facts for every pattern and `by`.* (A fork.)
+- **The facts.** `pcre_select.replaceFacts` reads:
+  - the match lengths from the tree (`(*ACCEPT)` makes the shortest 0);
+  - the sure bytes, from which an attempt always matches. These come from
+    the attempt's no-match automaton in every start class, with and
+    without NOTEMPTY_ATSTART. There are none under COMMIT, PRUNE, SKIP,
+    THEN, UTF or a limit, and none for LF where the CRLF skip passes it;
+  - the first bytes, from the no-match verifier.
+- **The lemmas.** `replaceLemmas` states:
+  - the length relation, with a fresh `kb` for `k·len(by)`, and a match
+    that can be empty bounded by `k <= 2·len(s) + 1`;
+  - no match implies no change;
+  - `k >= 1` implies a first byte;
+  - per sure byte, containment in `r` implies containment in `by`;
+  - the image for a literal `by`.
+- **Where they go.** Every recursively lowered replace is a fresh value,
+  and its facts go in the new sink `regexRecFactConds`, drained after the
+  definitions. `checkCapped` runs the facts-first check in a translated
+  context of its own, under `recFactsRLimit` = 100k (the slowest
+  refutation takes 2060). Every later step substitutes the terms back.
+- **RED / GREEN.**
+  - RED: 10 undecided pins on Z3 5.1 and 14 on 4.13.4, at `fa21308`.
+  - GREEN: every pin decided on both versions, in 0.0 to 0.2 s.
+  - The facts differential: 168060 std/re replaces, 0 differ.
+  - Removing the verb, UTF and LF exclusions gives 3099 differ.
+
+*Soundness bugs found.*
+- **Before this slice:**
+  - **Item 1:** any libpcre was read with 8.45's model, including
+    versions the model was never checked against.
+  - **S8bj's barrier re-run:** under (*CRLF), a SKIP:NAME barrier
+    executed past the start of an attempt that began at a CRLF's LF
+    re-ran without moving past the LF. This gave a wrong find on
+    `(*CRLF)[\x09-\x0b](*SKIP:B)a|[\x09-\x0b]` (19 cells). It is fixed in
+    item 4.
+- **On the Windows legs, caught by CI and declined or modelled before
+  landing:**
+  - 8.37's class compilation (above);
+  - JIT + (*ANY) UTF search languages (21 wrong `skNoOcc` cells).
+- **In the slice's own new code, found by the differentials:**
+  - class-repeat RMATCH, and SKIP:NAME re-run costs (item 3);
+  - an `IndexDefect` in `stepTable`'s leaf lookup on the JIT;
+  - `auto_possessify`'s other-case test;
+  - PT_CLIST start bits;
+  - the XCLASS for folded wide characters.
+
+*Different mechanisms, reported and not fixed here.*
+- **PCRE's default match and recursion limits are not modelled
+  (SOUNDNESS).** PCRE's default `match_limit` and `match_limit_recursion`
+  are 10 000 000. A pattern that backtracks heavily on a subject of
+  millions of bytes can return -8 or -21, where the model answers with a
+  match or a miss. Walker subjects are bounded far below this.
+- **The JIT's machine stack (SOUNDNESS, Windows legs).** 8.37's JIT runs
+  on a 32K default stack, and deep backtracking on a long subject returns
+  `PCRE_ERROR_JIT_STACKLIMIT` (-27). This is not modelled; it belongs to
+  the same class as the default limits.
+- **The JIT's own limit accounting (PRECISION).** A LIMIT between 0 and
+  the default declines on the JIT. Its `count_match` sites are not
+  `match()`'s, and it ignores LIMIT_RECURSION.
+- **Limit accounting gaps (PRECISION).** Under a limit between, these
+  decline:
+  - auto-possessification next to a property or an extended class;
+  - a possessive repeat of a non-ASCII UTF class (e.g. `\x{e9}*` at the
+    end);
+  - a possessive (*CRLF) dot repeat;
+  - an attempt that starts with a kept `ignore_skip_arg`.
+
+  In the oracle corpus that is 8 of 366k calls.
+- **A SKIP:NAME count past 7 (PRECISION).** A repeat that runs a
+  SKIP:NAME per iteration keeps a count that grows with the subject, so
+  no finite automaton holds it. It declines by name.
+- **The JIT in UTF mode (PRECISION).** These decline: a scan whose first
+  characters include U+0080..U+00BF, and (*ANY)'s search languages under
+  the scan.
+- **8.37's UTF classes (PRECISION, Windows).** A (*UCP) POSIX class or a
+  negated escape in a UTF class declines there.
+- **A symbolic receiver through the step table (PRECISION).** These
+  queries stay `beSolverUndef` at every table size: 7 to 3072 rows,
+  `zsUnknown` at 20M, 2899d26's own tables included. Item 7's facts
+  refute what they state. A SAT search for a value needs a different
+  encoding of `replace`.
+- **Z3 past its rlimit (PRECISION, liveness).** On a 269k-node regex,
+  Z3 ran past a 60M rlimit for 2400 s. The regex cap (40k nodes) keeps
+  the walker away from this.
+- **The priority route in UTF mode (PRECISION).** matchLen, endsWith and
+  findBounds' end over a (*UCP) or property pattern without a selection
+  form still use the automaton. A concrete check there takes Z3 seconds.
+- **Item 7's residuals (PRECISION).** These stay undecided:
+  - two-byte containment (`a+b` never leaves "ab");
+  - UTF patterns, which have no sure or first bytes, because an invalid
+    subject is returned whole;
+  - verbs, LIMIT and an unmarked SKIP:NAME, which have no sure bytes;
+  - `count` over a replace value.
+
+**As landed (S8ca, walker 233 provisional) — S8bu's remainder.** Base
+5729b1a (S8bu, walker 225). Suites `tsymex_rfc0005_s8ca_stack` (item 1),
+`_views` (item 2), `_calls` (item 3), `_closures` (item 4), `_procvals`
+(item 5), `_strings` (item 6), `_resize` (item 7), `_derefmut` (item 8):
+every SUT that can run natively has a native run confirming which labels
+Nim hits. S8bu's and S8bs's pins of the declines this slice decides are
+repinned to the decided verdicts.
+
+- *Item 1: the native stack.* `walk` recurses natively once per inlined
+  call, and `maxCallDepth` bounds that by a count. One level costs about
+  158 KB on c and 186 KB on cpp (debug build), so
+  `tsymex_configdefaults`' crash pin, whose 50 levels were sized on c,
+  ran off the 8 MB stack on cpp (rc=139). `nativestack.nim` reads the
+  stack's bounds from the OS (`pthread_getattr_np`,
+  `GetCurrentThreadStackLimits`, the macOS np calls), cached per thread
+  and read again when the stack pointer leaves them, since on Windows
+  each solve runs on a 16 MB fiber of its own. A call frame records the
+  stack pointer it was pushed at, so a level's cost is measured; a call
+  is not inlined when the stack left is under the reserve
+  (`nativeStackShort`). It declines in-band as
+  `beBudgetExhaustedUnmodelled` naming the native stack, at any
+  `maxCallDepth`, and the verdict is not cached (`symexNativeStackCut`).
+  Windows: a 1 MB main thread could overflow the same way before this;
+  the check covers it, and the fiber and the 8 MB link are measured like
+  any other stack.
+- *Item 2: `viewFollows`.* It read a change of the cell as in-place by
+  the shape of the terms. `swap(gps[], other)` with `other = newSeq(2)`
+  gives equal terms over other memory: `vw` sxUnsat and `vw_dead` sxSat,
+  in a defined program. Identity is now tracked by the write: each
+  element write-back the parser emits (`dwInPlace`) and each sync of an
+  element written by name is logged as an in-place step of the heap
+  arrays it changed (`Path.inPlaceSteps`); a view, anchored at its
+  arrays' terms when it binds (`ViewMark`), follows only while a chain of
+  such steps leads to the current terms. Any other write declines the
+  path, whatever its terms.
+- *Item 3: an `addr s[i]` actual of a seq with element cells* is the
+  element's cell itself (`sharesElemCell`), for a direct, a proc-value
+  and a closure call.
+- *Item 4: closures.* (a) The closure's frame binds a by-reference
+  capture that is an address-taken variable of the applying frame to the
+  variable's cell (`linkCapAddrCells`, `capCellOf`); the frame keeps the
+  local, the cell and the env cell one value. (b) A heap lvalue the body
+  also reaches is passed by reference: the body is specialised to the
+  lvalue (`byRefSub`, as for a direct call; a `VarLoc` of mode "ref").
+- *Item 5: a seq argument of a proc value or a closure.* A seq, table or
+  set contributes the sort of each of its leaves (its data arrays and its
+  length) to the application's domain, as a nested tuple does.
+- *Item 6: strings.* `s[i] = c` is the string with that byte replaced
+  (`iekStrSetAt`), its index checked before the value is evaluated. A
+  string viewed as `openArray[char]` is the seq of its bytes
+  (`iekStrChars`); a `var` one is written back byte for byte
+  (`iekStrFromChars`). A by-value copy of an address-taken string follows
+  where its memory is: a `view` of a string that owns its memory, a plain
+  copy of a literal's (which Nim copies at the first write), and a
+  decline where the walk cannot place it (`StrBuf`).
+- *Item 7, as probed natively.* `toOpenArray(s, first, last)` raises
+  `IndexDefect` iff its length is not 0 and a bound is outside
+  `0 ..< s.len`; a length below 0 is otherwise a view of that length,
+  which no loop enters and whose every index raises. A `mitems` body that
+  changes the length meets Nim's `assert(len(a) == L)` at the end of the
+  iteration (`AssertionDefect`); a use of the element after the change is
+  a use of an address that may be stale, and declines (`miElemGuards`).
+- *Item 8: a mutation through a pointer to the whole value.* `p[].add`,
+  `p[].del`, `p[].insert` on a seq, `p[].add` on a string, `p[].incl` on a
+  set, through a `ptr` or a `ref`: the value is read through the pointer,
+  the bare arm's mutation applied, and the result stored back. A by-value
+  copy sharing the memory declines (the mutation may resize).
+- *Item 9: compile time.* Measured with the host idle (12 cores, load
+  2-8, two compiles at once), compile user time of a one-SUT suite, the
+  floor of importing `nelli/symex`, is 24 s on c and 29 s on cpp; every
+  S8bu and S8ca file is 25-36 s on c and 32-43 s on cpp, under the 60 s
+  budget. The 67-108 s S8bu reported was load: the same files read 52-78 s
+  beside other slices' runs (load about 20). `_paths`, `_strings` and
+  `_closures` were split on those loaded readings, before the idle one
+  (`tsymex_rfc0005_s8bu_byvalseq`, `_s8ca_strings_byvalue`,
+  `_s8ca_closures_heap`). On Windows, compile and run together, every
+  S8bu and S8ca file is within 60 s at 5c4350c (`s8bu_calls`, the slowest,
+  at 51.8 s). `_stack` took 102 s at ab58942, so its copy of
+  `tsymex_configdefaults`' crash pin (about 60 s there) is gone, and its two
+  thread tests under the default budget, never short of stack on Windows,
+  run only on Linux and macOS (47.0 s at 5c4350c).
+
+*Soundness bugs found and fixed.* (1) `viewFollows`, above, now pinned by
+a defined program (`vw`, `vw_dead`, swapped at the base). (2) `swap` was a
+silent no-op: its bodiless magic was registered with an empty body, so
+`swap(a, b); if a[1] == 3` was a clean false sxUnsat (`parseSwap`). (3) Two
+`addr s[0]` in one frame: a callee's store through the older cell's `ite`
+left the shadowed cell's heap read a new term with its old value, and the
+caller's sync clobbered the element, a false sxSat (`withCellElem`).
+
+*Suites* (`ok/failed`; c on Z3 5.1 and 4.13.4, cpp on 5.1), from a worktree
+at ab58942, whose `src` is that of the head: 148 suites, every suite the
+job names and every `openArray`, `closure` or `addr ` grep hit, with S8bu's
+62-suite list: 2075/0, 2075/0 and 2050/0. The 25 cpp lacks are
+`tsymex_r6_n43_parity`, which does not compile on cpp, the same at the base
+(below). `tsymex_configdefaults` 24/0 on all three: cpp no longer dies in
+the crash pin. `tfuzzwinjoblimits` is Windows-only and runs nothing here.
+`_stack` is 10 tests in that sweep; at its final text (5c4350c) it passes
+9/0 on all three, its crash-pin copy removed.
+
+*Windows.* at 5c4350c all three legs green: fuzzer-mingw 41436653116, fuzzer-msvc
+41436653094, symex-mingw 41436653107. At 1c9bc98 every suite passed, but
+symex-mingw 41430194830 failed its shard 0 budget (40.5 min against 40) on a
+slow runner; the same 57 suites took 23.5 min at ab58942 and 38.9 at 5c4350c.
+A shard is close to its budget, so this can recur. 21 corpus files exceed
+60 s of compile and run on Windows, none of them S8bu's or S8ca's; 19 were
+over at 8815a81 (S8bu), and `s8ab_letaudit` (55.6 to 63.5 s) and
+`s8u_precision` (58.0 to 60.3 s) crossed it here.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: `unsafeNew(p, n)` is dropped.** `p` stays nil, so
+  `unsafeNew(p, 8); p[] = k; if p[] == 3` is sxRaised where Nim raises
+  nothing and hits the label.
+- **PRECISION: `wasMoved(x)` stops the compile.** It lowers to the
+  `=wasMoved` hook, and `parseCalleeImpl`'s `expectKind` fails (nnkSym for
+  nnkIdentDefs) instead of a decline.
+- **PRECISION: `setLen` declines**, a seq's system body reaching an
+  unsupported `nnkWhenStmt`, so a `mitems` body that resizes by `setLen`
+  declines where one that resizes by `add` or `pop` decides.
+- **PRECISION: a string of unknown provenance** (`newString`, an opaque
+  call) with a by-value copy declines, as Nim's memory for it cannot be
+  placed; so does an element of `mitems` used after a resize, whose address
+  may be stale (undefined natively).
+- **PRECISION: `tsymex_r6_n43_parity` does not compile on cpp.** `Atomic[T]`
+  in the walker's generated allocator assigns a `std::atomic` (a deleted
+  operator); the same error at the base 5729b1a. It passes 25/0 on c.
+
+**As landed (S8by, walker 231, provisional) — S8bp's remainder.** Suite
+`tsymex_rfc0005_s8by_remainder` (12 tests; c on both Z3 versions, cpp 5.1).
+Built on S8bp (79037e4).
+
+- *The concolic scratch solves in contexts of their own.*
+  `concreteBranchOutcome`, `concretelyInfeasible` and
+  `runConcolicCollectImpl`'s concrete-inputs check run through
+  `concreteScratchCheck`: `ownContextSolver` under `concreteBranchRLimit`,
+  the units added to `ownContextUnits`. In the context, a factoring branch
+  condition took 876,296 units or 5,854,996 by the order the query's
+  constants were made in (5.1; 23,956 and 911,593 on 4.13.4), and under a
+  bound between them was decided or not. Pinned: that bound (3M, 400k) and
+  three context shapes, RED with the solves put back in the context.
+  This slice's first pin compared a context with 300 unrelated constants
+  against one without. That difference (72,162 against 72,126) was the
+  process's first solve of the query: the two are equal when alternated.
+- *No (1b) or (1c) after a facts-first SAT.* (1c) is the facts-first query
+  under a larger budget and (1b) a subset of it, so both are known SAT.
+  (1c)'s capped half is skipped too where the facts-first model makes every
+  cap true; it can only decline, so a wrong evaluation there costs a
+  decline, not a verdict. Verdicts are unchanged. S8bp's `every step` pin
+  reaches the three steps with the facts-first check switched off.
+- *One term order per query.* `ownContextSolver` translates the query's
+  terms as one vector in `queryTermOrder`: the roots in order, each term's
+  arguments last to first, children first. The order moves the search, so
+  units as well as wall time, not wall time alone.
+- *`mergeMemberships` below the top level.* A membership under a
+  disjunction, an `ite` branch, a `not` or an implication is merged with
+  those of the same string that hold where it is read: `x in (A & I)` where
+  asserted, `not (x in (comp(A) & I))` where denied. A literal read both
+  ways (an `ite` condition, an argument of `=`) is left as it is. `a or not
+  s.contains(re"b")` beside `s.endsWith(re"b+")` was `sxUnknown` on 4.13.4
+  (8.5M units) and is UNSAT within 20,000. Pinned against native Nim.
+
+*Units, whole walks.*
+
+| Build | `lastNl` 5.1 | `lastNl` 4.13.4 | B1-1 5.1 | B1-1 4.13.4 |
+|---|---|---|---|---|
+| S8bp (79037e4) | 1,106,184 | 1,499,189 | 47,637 | 80,626 |
+| skip only, S8bp's order (cbfef23) | 498,821 | 786,466 | 47,637 | 80,626 |
+| slice, skip off | 2,433,310 | 2,356,421 | 47,601 | 80,546 |
+| slice | 1,026,624 | 1,219,607 | 47,601 | 80,546 |
+
+The skip's 607,363 units (5.1) are the row S8bp to the row below it. In the
+slice's term order it saves more, 1,406,686, but that order's own search
+costs `lastNl` more than S8bp's did, so against S8bp the walk is 79,560 lower.
+
+*Wall time, `r4_strip`'s binary on Z3 5.1* (12 cores, load 21 to 28, pairs
+side by side; wall s, CPU s in brackets):
+
+| Pair | S8bm (14d7e81) | S8bp (79037e4) | slice |
+|---|---|---|---|
+| a | 125.8 (111.6) | | 146.4 (131.1) |
+| b | | 154.7 (143.0) | 143.7 (133.2) |
+| c | 113.7 (103.3) | | 141.2 (128.0) |
+| d | | 146.5 (129.2) | 140.0 (121.5) |
+
+The ceiling of 190 s is met, but it was set on the 8-core host, and S8bp
+meets it here too. Against S8bp the order saves 4 to 7%; the slice stays 16 to
+24% above S8bm. B1-1 and `lastNl` are under 1 s in S8bp and in the slice, on
+both versions.
+
+*Suites* (`ok/failed`, c; identical on 5.1 and 4.13.4): `s8by_remainder` 12/0
+(cpp 12/0), `s8bp_isolation` 9/0 (cpp 9/0), `phase15_CR2_cachekey` (231) 6/0
+(cpp 6/0), `s8bm_stability` 4/0 (cpp 4/0), and the slice's list of 48 suites, 697
+tests in all, among them `s8ba_remainder`, `r4_strip`, `s8ay_remainder`,
+`s8ar_remainder`, `phase13_rlimit` and every suite naming concolic.
+`s8bj_*` and `s8bb_*` are not on this base: their 22 suites pass on both
+versions on a trial merge with `rfc-0005-soundness-channels` (136ad60), where
+the scratch solves keep S8bu's clock through `ownContextCheck`.
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: a fresh thread's spend on a query follows what earlier threads
+  of the process ran**, in a context of its own as well. On non-main threads
+  (Z3 5.1), one factoring branch solve took 72,124 units until a thread ran it
+  beside 3,000 unrelated constants, then 5,854,994 on that thread and every
+  later one, whatever its context held. The main thread stayed at 72,124
+  through the same sequence, and `lastNl`'s walk there at 1,026,624. 4.13.4
+  moves alike (26,695 to 911,593). The cause is not identified. A walker query
+  is a function of its query only within one such history.
+- **PRECISION: Z3 5.1 prints an internal check on wide factoring.** `Failed to
+  verify: m_cache.mk_unique(p) == p`, with its request to file an issue, on `x
+  * y` with `x`, `y` below 200000. The solve goes on and runs out of its bound
+  (50M units); 4.13.4 decides the same query in 191,361.
+- **PRECISION: `r4_strip` stays above S8bm** (the table above): the order
+  closes about a quarter of S8bp's gap.
+- **PRECISION: `tsymex_configdefaults` runs longer, past the 60 s convention
+  already.** Windows `symex-mingw`, the test's own run: 98 s at S8bp, 127 s and
+  153 s on this slice's code. Side by side on Linux (4.13.4, CPU s): 31 and 32
+  at S8bp, 38 and 40 at the slice; 25 and 29 with the skip alone, 32 and 36 at
+  the slice in that pair, so the rise comes after the skip. Not attributed
+  further. `s8ai_semantic` is the other file past 60 s (94 s at S8bp, 82 s and
+  60 s here).
+
+**As landed (S8cc, walker 238 provisional) — S8br's remainder.** Base
+136ad60 (batch 7, walker 237; the job's base was a25229d, and the branch
+merges batch 7). Suites `tsymex_rfc0005_s8cc_cellquery` (item 1) and
+`tsymex_rfc0005_s8cc_remainder` (items 2 and 3), both registered. CR2's `==`
+pin is 238, and both suites carry the `>= 238` floor.
+
+- *Item 1: no code here; batch 7 fixed it.* The query was
+  `int2bv(sbv2int(k) + 5 + 0) != k + 5`: the cell's Int arithmetic met the
+  element's bit-vector across the bridge. At a25229d each dead label
+  (`cv_dead`, `cc_dead`, `cm_dead`, `cl_dead`) spent its 20M units and came
+  back `sxUnknown` (`beSolverUndef`). Replayed offline on the 4.13.4 CLI, the
+  dumped query had no result in 120 s; a hand-reduced form with the term
+  spelled `bvadd(k, 5)` and the Int overflow obligation kept was `unsat` in
+  48 units. The query holds no array term, so the cause is not array theory
+  or a missing frame fact. S8bu fixed it, in two parts, each shown by a
+  one-change run:
+  * `probeProto` offering the bit-vector (1c56690). Removed at 136ad60, all
+    four dead labels return to `sxUnknown` at 20M. Added alone at a25229d,
+    `cv_dead`, `cc_dead` and `cl_dead` decide.
+  * `bvIntInverseFacts` (0c4c19e, narrowed by 8815a81). `cm_dead`
+    (`v[] * 3 - k`) still spent 20M at a25229d with `probeProto` alone, and
+    with the facts removed at 136ad60 it spends the suite's 2M.
+  S8cc pins this with a 2M step budget (a tenth of what the base spent) over
+  18 labels, adding a store over a symbolic index (`cp`), the input as the
+  index (`ci`), an `int32` element (`c3`), a module-level seq's element
+  (`cs`) and a local array's (`co`). No label takes over 417 ms on Z3 5.1 or
+  393 ms on 4.13.4 (walk included, the box at a load of about 21-24 on 12
+  cores). The earlier claim that `queryRLimit` did not end this query did
+  not reproduce: 420 s was the then-unbounded default.
+- *Item 2: the write summary.* `scanOpaqueEffects` counted every
+  module-level `var` a body names as written. A global now counts only where
+  the body may write it. The read positions are listed (`scanRead`): the
+  right side of an assignment, a declaration's value, a condition, a `case`
+  selector, a by-value argument, and an index on the left of an assignment
+  (`scanWrite`). A symbol anywhere else still counts, so an unlisted shape
+  stays conservative. A `var` formal counts by its declared type, since a
+  magic's (`inc gi`) has no `nnkHiddenAddr`. A read whose value holds refs
+  still reaches its heaps (`let h = gH; h.s = ...`); a path whose value is
+  ref-free reaches none (`gH.s[0]`). `result = gi` in a routine returning
+  `var` counts. Both consumers gain: `laterLeavesLvalue` (S8br's frame
+  condition) and an opaque call's rebinding (`opaqueWriteSummary`).
+- *A false verdict the precision would have opened (fixed before landing).*
+  A by-value formal may be the caller's storage: Nim passes a large one by
+  address, so `unsafeAddr x` writes the caller's variable. Once such an
+  argument reads as no write, an opaque `wrByVal(gBig)` was a false `sxUnsat`
+  (`ob`, observed with the arm removed). `addr` of a by-value formal now
+  summarises as every global and heap.
+- *Item 3: an index call with no symbol.* `hoistIndexCalls` now binds every
+  index call that is not a builtin, under a mark of the symbol of the call's
+  type (`int` for an anonymous `range`, where only the mark's name is read;
+  the `let` carries the type). S8br's `result` lookup is gone. The call node
+  cannot be marked as itself: compiling such a mark aborted the compiler
+  with an `IndexDefect`, while every macro operation tried on the node alone
+  (`repr` included) was fine, so the failing operation was not isolated.
+  `indexCallDecline` remains for a spent mark counter. S8br's `fs_dead` pin
+  moves from a decline to `sxUnsat`. The S8br note's generic case did not
+  reproduce: `idOf(1)` and `oneOf("x")` were already exact at the base, and
+  stay pinned.
+- *Pins and RED.* Observed at 136ad60: `ri`, `rs`, `rd`, `ra` and their twins
+  declined (`feEvalOrderUnmodelled`); `or` and its twin were `sxUnknown`
+  (`feGlobalHavoc`); `fs`, `fa`, `fp`, `fc`, `fr`, `ft` and their twins
+  declined (`feUnsupportedOp`). Already right at the base and kept: the
+  writers (`wa` ... `wb` still decline) and the generics (`gi`, `go`, `gn`).
+
+*Different mechanisms, reported and not fixed here.*
+- **PRECISION: `addr` of a global in a walked callee halts the path.**
+  `let p = addr gi; p[] = 1` as a later argument is `sxUnknown`
+  (`heUnsafeCast`, `wp_dead`).
+- **PRECISION: `unsafeAddr` of a by-value array formal in a walked callee
+  declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
+  `wb_dead`).

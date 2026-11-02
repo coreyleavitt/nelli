@@ -203,8 +203,8 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "244"
-  ## RFC-0005 S8cd (provisional 244) -- precision over proc-value results and
+const symexWalkerVersion* = "249"
+  ## RFC-0005 S8cd (249; batch 9's 245 before it) -- precision over proc-value results and
   ## globals, and one soundness fix. A call through a proc value with no
   ## resolved target carries its return type (`ccRetTy`, in the key as
   ## `;ret=`), so `f(k).len` lowers over a stand-in of that type and the path
@@ -217,6 +217,37 @@ const symexWalkerVersion* = "244"
   ## measured, and a set operator's operands are ordered (`parseOperandPair`).
   ## `recvValue` reads a receiver as one; each arm observes what it reads.
   ## `seqLenCaps` leaves a leaf equated to a literal uncapped.
+  ##
+  ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
+  ## batch 8 as one integration branch under ONE walker number; their bullets
+  ## follow, each naming its provisional number. The stack's own changes: S8ce
+  ## removes batch 8's `solveRaiseHook` with S8bx's hook (`checkCappedSteps` is
+  ## `checkCapped` again; a lifecycle hook no longer loses a raise). S8ca's
+  ## `parseSwap` is dropped for S8bl's `parseVarMagicStmt`. SOUNDNESS: S8ca item
+  ## 5 gives a proc value's domain a sort for a seq, table, set or array, which
+  ## lifted the only decline in front of three aliasing shapes: a view and its
+  ## Table in one call (`closureTakesView`, a false sxSat), a by-value location
+  ## the body also reaches (`byValueTouch`, a false sxUnsat), a call returning
+  ## `var T` as a `var` actual (a false sxSat). Each declines. 241 -> 245.
+  ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
+  ## one integration branch under ONE walker number; their bullets follow the
+  ## batch 7 block, each naming its provisional number. The stack's own
+  ## changes: S8bx's view / Table sync is S8bs's (`AddrCellEntry.slot`,
+  ## `syncAddrCells`), so it runs after every statement. S8bt's step 0 is one
+  ## `ownContextSolver`, as every `checkCapped` step: a translated query keeps
+  ## its recursive definitions. SOUNDNESS: a callee of one statement holding
+  ## the view and its Table was never synced; a write through the Table was
+  ## not seen through the view (`mutViewWriteBack`'s reload); a callee holding
+  ## the view and reaching the Table by a global's name or a capture had two
+  ## copies (`cGuardRoots`); a raise in an own-context solve was lost on C, a
+  ## false sxUnsat (`solveRaiseHook`). An element of `mitems` passed on to a
+  ## `var` formal no longer aborts the compile. `checkCapped` step 1d: caps the
+  ## query itself implies do not leave step 1's UNSAT to step 2's core, which
+  ## is not minimal (Z3 4.13.4). 237 -> 241.
+  ## RFC-0005 S8cc (237->238): S8as's write summary counts a callee's global
+  ## only where the callee may write it, and an index call with no `result`
+  ## symbol is bound once. Verdicts change from a decline to exact.
+  ##
   ##
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
@@ -291,6 +322,23 @@ const symexWalkerVersion* = "244"
   ## closure call in it was applied by each guard branch and by the result
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
+  ## RFC-0005 S8by (2026-10-03) — S8bp's remainder. After a facts-first
+  ## SAT, `checkCapped` no longer repeats (1b) and (1c)'s uncapped half
+  ## (known SAT), nor (1c)'s capped half when the facts-first model makes
+  ## the caps true: 607,363 units of `lastNl`'s 1,106,184 (Z3 5.1), so a
+  ## query near its budget can decide where it declined. Concolic
+  ## collection's scratch solves check in contexts of their own, so what the
+  ## walk's context holds moves neither their spend nor their outcome.
+  ## `mergeMemberships` merges a
+  ## membership below the top level (under a disjunction, an `ite`, a
+  ## `not`) with those of the same string that hold where it is read: `a
+  ## or not s.contains(re"b")` beside `s.endsWith(re"b+")` was `sxUnknown`
+  ## on Z3 4.13.4 (8.5M units). And a query's terms are made in its own
+  ## context in one order, the query's: that moves wall time and units
+  ## (`lastNl` 498,821 to 1,026,624 on 5.1, 1,106,184 before the slice).
+  ## Provisional 231 (220 to 230 are held by slices still running). 219 ->
+  ## 231.
+  ##
   ##
   ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
   ## walk, or an earlier walk on the thread, left in Z3's context. Every
@@ -309,6 +357,13 @@ const symexWalkerVersion* = "244"
   ## not s.contains(re"b")` was `sxUnknown` on Z3 4.13.4 (11.2M units) and
   ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
   ## still running). 214 -> 219.
+  ##
+  ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
+  ## not inlined when the native stack left below it is under what one more
+  ## level needs (`nativeStackShort`): it declines in-band
+  ## (`beBudgetExhaustedUnmodelled`, naming the native stack) whatever
+  ## `maxCallDepth` says, where the walk overflowed the stack (SIGSEGV) on
+  ## cpp and on a small thread stack. 225 -> 233.
   ##
   ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
   ## query is decided beside the inverse of each signed Int view it holds
@@ -381,6 +436,41 @@ const symexWalkerVersion* = "244"
   ## `ccVarPtrSafe`, the variant hierarchy fields), so
   ## cached entries rotate.
   ##
+  ## RFC-0005 S8ce (2026-11-02) — S8bx's remainder; provisional number (the
+  ## channel assigns the final one at merge). 228->238. SOUNDNESS: nim-z3's
+  ## lifecycle hooks wrapped their bodies in `try/except`, and a hook run on
+  ## the raise path with the error flag set (C backend, goto exceptions)
+  ## took the in-flight exception as its own and cleared it, so ANY raise
+  ## crossing a live Z3 term's destroy was lost and the walk went on to a
+  ## false verdict. S8bx had closed extraction alone. The hooks are now
+  ## raise-free by construction (nim-z3 `rfc-0005-s8ce`, milpa.lock), so every
+  ## raise reaches `runSymexCaught`: a run that was silently decided on C is
+  ## `sxUnknown` + `weInternalWalkerFault`, as on C++. S8bx's raise hook
+  ## (`extractionRaiseHook`) is removed; its pins stay green.
+  ##
+  ## RFC-0005 S8bx (2026-10-03) — S8bl's remainder; provisional number (the
+  ## channel assigns the final one at merge). 213->228. SOUNDNESS: a raise
+  ## inside witness extraction (which runs in the walk since S1c) was lost
+  ## on the C backend -- a call's result temporary destroyed on the raise
+  ## path without the error flag cleared ran nim-z3's `termDestroy`, whose
+  ## `try/except` consumed the in-flight exception -- and the walk went on
+  ## to a false `sxUnsat` (or a half-extracted winner). Every raise inside
+  ## extraction is now recorded as it is raised (`extractionRaiseHook`),
+  ## ends the walk, and makes the run `sxUnknown` + `weInternalWalkerFault`
+  ## on both backends.
+  ## The seq witness reader and the renderability predicate share one
+  ## classifier (`seqWitnessReader`): a placeholder seq of an element no
+  ## reader reads crashed the compile. SOUNDNESS: an `mpairs` / `mvalues`
+  ## view passed to a call with its Table was two copies of one location
+  ## (swapped verdicts); the walker keeps the two formals equal in the
+  ## callee (`cViewAliases`, `syncAddrCells`). SOUNDNESS: a key removed
+  ## from a Table while iterating it, the length kept, followed the
+  ## enumeration taken at loop entry (a false sxUnsat / sxSat for one entry;
+  ## Nim's slot walk depends on the hashes): the path declines
+  ## (`iekTabRemovedSince`). A string's `setLen` binds a fresh byte leaf
+  ## equal to the prefix / extension, so a byte read of a symbolic string's
+  ## result decides on both pinned Z3s (was `sxUnknown`).
+  ##
   ## RFC-0005 S8bl (2026-10-02) — S8bc's remainder; provisional number (the
   ## channel assigns the final one at merge). 203->213. SOUNDNESS: a system
   ## magic with a `var` parameter was registered with an empty body, so its
@@ -449,6 +539,23 @@ const symexWalkerVersion* = "244"
   ## aborted the compile); `k in {..}` / `notin` over a set literal of
   ## constants is the disjunction of its elements (it declined). The regex
   ## replace recursions carry fuel. Batch 3 is 209, S8bh 208.
+  ##
+  ## RFC-0005 S8bt (2026-10-03) — S8bj's remainder. SOUNDNESS: the walker
+  ## reads a regex only when std/re's libpcre is a build the model is
+  ## verified against (`pcre_engine.verifiedLibs`, version string and
+  ## engine); any other library declines every regex call (S8bj recorded
+  ## it in the cache key but read it with 8.45's model). The JIT (8.37,
+  ## the Windows legs) is its own engine model (`peJit837`: its prefix
+  ## scan, SKIP and SKIP:NAME semantics). A LIMIT between 0 and the default
+  ## is modelled by `match()`'s call and depth counts. Mixed (*SKIP:NAME)
+  ## carries `ignore_skip_arg` across attempts. UTF mode reads (*UCP),
+  ## `\p`, Unicode case folding and (*ANY)'s multi-byte newlines from
+  ## generated 8.45 tables (8.37's differing classes decline). Plain UTF
+  ## patterns take a lazy Z3-regex route past the automaton caps.
+  ## replace gets facts (lengths, sure and first bytes) for every pattern
+  ## and `by`.
+  ##
+  ## (Prior: 211.)
   ##
   ## RFC-0005 S8bj (2026-10-02) — the regex constructs S8bb left
   ## undecided or declined. The backtracking verbs `(*COMMIT)`,
@@ -5637,6 +5744,9 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
       canonicalize(e.key, env) & ">"
+  of iekTabRemovedSince:   # RFC-0005 S8bx (item 4)
+    "Ex<TRm:" & canonicalize(e.trCur, env) & ";" &
+      canonicalize(e.trBase, env) & ">"
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
     "Ex<" & $e.kind & ":" & canonicalize(e.mutRecv, env) & ";" &
       canonicalize(e.mutArg, env) & ">"
@@ -5782,6 +5892,11 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
     # whether the walk binds its formal to an address cell.
     let locs = varLocKeys(s.cVarLocs, env)
+    # RFC-0005 S8bx (item 3): an mpairs view aliased to its table in the
+    # callee changes what the callee reads, so it keys the call.
+    var views: seq[string]
+    for a in s.cViewAliases:
+      views.add $a.viewArg & ":" & $a.tabArg & ":" & lookupLocal(env, a.keyName)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
@@ -5808,7 +5923,8 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
       (if s.opaqueWhy.len > 0: ";why=" & s.opaqueWhy else: "") &
       # RFC-0005 S8bn: whether a `var` actual may be a pointer's target
       # changes the verdict (a deref in the callee declines or not).
-      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") & ">"
+      (if s.cVarPtrSafe.len > 0: ";vps=" & $s.cVarPtrSafe else: "") &
+      (if views.len > 0: ";view=[" & views.join(",") & "]" else: "") & ">"
   of isIndex:
     let retSlot = "$" & $bindLocal(env, s.ixRetName)
     # RFC-0005 S8z: an array's first index changes which element a read
@@ -5927,6 +6043,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
       ";fld=" & s.dwField & (if s.dwInit: ";init" else: "") &   # RFC-0005 S8l
       (if s.dwCell: ";cell" else: "") &                          # RFC-0005 S8an
+      (if s.dwInPlace: ";inplace" else: "") &                    # RFC-0005 S8ca
       ";ety=" & canonicalize(s.dwElemTy) &
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"

@@ -42,6 +42,13 @@ proc preSufNl(s: string; x, y: int) =
      s.startsWith("ab") and s.endsWith("ba") and s.len == 2:
     symexTarget("s8bp_presuf")
 
+proc ownCoreNl(s: string; x, y: int) =
+  ## UNSAT on its own with no bound on `s`, so step 1d cannot show the caps
+  ## implied and step 2's core decides it, with a factoring search.
+  if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117 and
+     s.startsWith("ab") and s.startsWith("ba"):
+    symexTarget("s8bp_owncore")
+
 proc plainNl(x, y: int) =
   ## No string: the `plain` query.
   if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117:
@@ -103,10 +110,14 @@ suite "S8bp (1): no step's search moves with unrelated walk state":
     check a.steps == b.steps
     for x in symexStepStatsNames(a.steps): seen.incl x
 
-  test "the facts-first check, steps 1, 1b, 1c and 2":
+  test "the facts-first check, steps 1, 1b, 1c and 1d":
     ## Before S8bp (Z3 5.1): step 1c 114,891 against 350,726 units, step
-    ## 2 401,123 against 231,590 (4.13.4: 238,219 against 327,223).
+    ## 2 401,123 against 231,590 (4.13.4: 238,219 against 327,223). `s.len`
+    ## bounds the query, so since batch 8 step 1d answers before step 2.
     same(preSufNl, "s8bp_presuf", defaultSymexSettings(), sxUnsat)
+
+  test "step 2":
+    same(ownCoreNl, "s8bp_owncore", defaultSymexSettings(), sxUnsat)
 
   test "step 3":
     ## Before S8bp: 207,893 against 464,636 units (4.13.4).
@@ -142,7 +153,7 @@ suite "S8bp (1): no step's search moves with unrelated walk state":
 
   test "the three walks reached every step":
     check seen == toHashSet(["plain", "factsFirst", "1", "1b", "1c",
-                             "1c-capped", "2", "3"])
+                             "1c-capped", "1d", "2", "3"])
 
 suite "S8bp (2): a thread's first walk searches as its second does":
 

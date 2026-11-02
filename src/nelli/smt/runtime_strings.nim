@@ -29,6 +29,14 @@ template requireStr(sv: SymVal, opName: string) =
       msg: opName & ": operand lowered to " & plainEnglishSymValKind(sv.kind) &
            " — not svString (→ sxUnknown, Invariant 3)")
 
+const strSetAtUnroll = 64
+  ## RFC-0005 S8ca. The longest string of known length whose character
+  ## write `iekStrSetAt` unrolls position by position.
+
+var strCharsCounter {.threadvar.}: int
+  ## RFC-0005 S8ca. Names the bound variables of `iekStrChars` /
+  ## `iekStrFromChars`.
+
 proc needleAsStr(sv: SymVal, opName: string): Z3String =
   ## v65 (chapulin round-4 backlog, first Defect-net field catch): the
   ## needle argument of `find`/`rfind`/`contains`/`startsWith`/`endsWith`
@@ -469,7 +477,7 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
   ##   SymexZ3VersionMissingError, SymexUnsupportedRegexError, StrOpKinds
   case e.kind
   of iekStrLit:
-    SymVal(kind: svString, str: mkString(e.sval))
+    SymVal(kind: svString, str: mkString(e.sval), strBuf: sbLiteral)
   of iekStrLen:
     # Phase 15 S3. `s.len` → Z3 `(str.len s)`. Under the ≤0xFF byte-faithful
     # constraint (asserted at allocation, ADR-0006) the Z3 character count
@@ -906,7 +914,12 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # RFC-0005 S8p: the right operand may be a char (`s.add('z')`), the
     # 1-byte string with that byte (`needleAsStr`, exact under ADR-0006).
     let r = lowerStrOperand(env, e.strArgs[1])
-    SymVal(kind: svString, str: concat(l.str, needleAsStr(r, "iekStrConcat")))
+    # RFC-0005 S8ca: the result owns its memory (`strBuf`): `&` allocates,
+    # and `add` (`s.add y`, `s &= y`) copies a literal's memory first, even
+    # to append nothing (probed: `"ab".add ""` then a write through a
+    # pointer is not seen by a copy taken before).
+    SymVal(kind: svString, str: concat(l.str, needleAsStr(r, "iekStrConcat")),
+           strBuf: sbOwned)
   of iekIntToStr:
     # Phase 15 S10a. `$n` (system.`$` on an int) → Z3 `(str.from-int n)`
     # (`Z3_mk_int_to_str`), exposed by nim-z3 as `toStr` on `Z3Int`. Result is a
@@ -1220,6 +1233,119 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
     # negative start now takes the fallback, whose first scan raises.
     SymVal(kind: svBool,
            bo: (startSV.zi >= mkInt(0)) and matches(tail, region))
+  of iekStrSetAt:
+    # RFC-0005 S8ca. `s[i] = c`: `s[0, i) & c & s[i + 1, len)`. The parser
+    # reads `s[i]` first where it can (its IndexDefect fork, before the value
+    # is evaluated, as Nim checks), and the write forks it too. Nim makes
+    # the write in the string's own memory (a literal's is copied first,
+    # `prepareMutation`): the result owns it.
+    let recv = lowerStrOperand(env, e.strArgs[0])
+    requireStr(recv, "iekStrSetAt")
+    let i = toZ3Int(lowerStrOperand(env, e.strArgs[1]))
+    let cv = lowerStrOperand(env, e.strArgs[2])
+    let s = recv.str
+    # The write's own IndexDefect (`iekStrAt`'s sink): a field's `o.s[i] = c`
+    # has no read before it (`dottedFieldMutate`); after one, it is false.
+    let oob = not (i >= mkInt(0) and i < len(s))
+    strIndexOobConds.add oob
+    syncStrIndexOobCond(oob)
+    let lenFold = simplify(len(s))
+    if getAstKind(lenFold) == akNumeral:
+      # A string of known length (at most `strSetAtUnroll`): one splice per
+      # position, chosen by `i` (`ite`), each at constant offsets. The
+      # splice at a symbolic `i` took Z3 minutes to refute an UNSAT query
+      # (`s[k] = 'z'` then `s[k] != 'z'`: 110-350 s each, measured, and as
+      # long through `seq.mapi`); the unrolled form decides it at once.
+      var n = -1
+      try: n = parseInt(getNumeralString(lenFold))
+      except CatchableError: n = -1
+      if n >= 0 and n <= strSetAtUnroll:
+        let ctx = requireCurrentContext()
+        let c = needleAsStr(cv, "iekStrSetAt")
+        var acc = s
+        for j in countdown(n - 1, 0):
+          let w = concat(concat(substr(s, mkInt(0), mkInt(j)), c),
+                         substr(s, mkInt(j + 1), mkInt(n - j - 1)))
+          let pick = i == mkInt(j)
+          acc = wrap[Z3String](ctx, checkedIte(ctx, pick.raw, w.raw, acc.raw))
+        return SymVal(kind: svString, strBuf: sbOwned, str: acc)
+    if cv.kind == svBV8:
+      # `seq.mapi` over `s`: char `j` is `c` where `j == i`, else `s`'s
+      # (quantifier-free, as `iekStrFromChars`).
+      let ctx = requireCurrentContext()
+      inc strCharsCounter
+      let jVar = mkIntVar("__strset_j" & $strCharsCounter)
+      let xVar = mkCharVar("__strset_x" & $strCharsCounter)
+      let wide = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_zero_ext(ctx.raw,
+        uint32(UnicodeCharWidth - 8), cv.bv8.raw))
+      let ch = wrap[Z3AnyAst](ctx,
+        ctx.checkErr Z3_mk_char_from_bv(ctx.raw, wide.raw))
+      let hit = jVar == i
+      let body = wrap[Z3AnyAst](ctx, checkedIte(ctx, hit.raw, ch.raw,
+                                                 xVar.raw))
+      var apps = [ctx.checkErr Z3_to_app(ctx.raw, jVar.raw),
+                  ctx.checkErr Z3_to_app(ctx.raw, xVar.raw)]
+      let lam = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw,
+        2'u32, cast[ptr UncheckedArray[RawZ3App]](addr apps[0]), body.raw))
+      let zero = mkInt(0)
+      return SymVal(kind: svString, strBuf: sbOwned,
+             str: wrap[Z3String](ctx, ctx.checkErr Z3_mk_seq_mapi(ctx.raw,
+                                       lam.raw, zero.raw, s.raw)))
+    let c = needleAsStr(cv, "iekStrSetAt")
+    SymVal(kind: svString, strBuf: sbOwned,
+           str: concat(concat(substr(s, mkInt(0), i), c),
+                       substr(s, i + mkInt(1), len(s) - i - mkInt(1))))
+  of iekStrChars:
+    # RFC-0005 S8ca. The `openArray[char]` view of a string: `s.len` chars,
+    # element `i` the byte `s[i]` (as `iekStrAt` reads it), a lambda over
+    # the string's term (`iekSeqSlice`'s shape).
+    let recv = lowerStrOperand(env, e.strArgs[0])
+    requireStr(recv, "iekStrChars")
+    let ctx = requireCurrentContext()
+    inc strCharsCounter
+    let iVar = mkIntVar("__strchars_i" & $strCharsCounter)
+    let b8 = intToBv[8](toCode(at(recv.str, iVar)), Z3BitVec[8])
+    mkSeqSV(len(recv.str), @[lambdaOver(ctx, iVar,
+                                        wrap[Z3AnyAst](ctx, b8.raw))],
+            tInt(8, signed = false))
+  of iekStrFromChars:
+    # RFC-0005 S8ca. The string `s` after its `var openArray[char]` view `a`
+    # (of the same length: a view is never resized) was written: byte `i`
+    # is `a[i]`, `seq.mapi` over `s` (quantifier-free, as `iekStrToLower`'s
+    # `seq.map`). Nim made the string's memory its own before the view
+    # was taken (`prepareMutation`).
+    let recv = lowerStrOperand(env, e.strArgs[0])
+    requireStr(recv, "iekStrFromChars")
+    let a = lowerStrOperand(env, e.strArgs[1])
+    if a.kind != svSeq or a.isUnsupportedFieldPlaceholder: # [placeholder-audited]
+      raise (ref SymexUnsupportedStringOpError)(op: "iekStrFromChars",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+        msg: "iekStrFromChars: the view lowered to " &
+             plainEnglishSymValKind(a.kind) &
+             " -- expected a backed seq of chars (-> sxUnknown, Invariant 3)")
+    let ctx = requireCurrentContext()
+    inc strCharsCounter
+    let iVar = mkIntVar("__strchars_i" & $strCharsCounter)
+    let xVar = mkCharVar("__strchars_x" & $strCharsCounter)
+    let el = seqElemAt(a, iVar)
+    if el.kind != svBV8:
+      raise (ref SymexUnsupportedStringOpError)(op: "iekStrFromChars",  # [raise-audited: converted-at-chokepoint -- caught by degradeStrArm at lower()'s lowerStrArm(env, e) call site (runtime.nim, N36)]
+        msg: "iekStrFromChars: an element lowered to " &
+             plainEnglishSymValKind(el.kind) & " -- expected a char " &
+             "(-> sxUnknown, Invariant 3)")
+    # Every intermediate is wrapped (inc_ref'd) as it is made: an rc-0 node
+    # may be freed by the next API call (`iekSeqSlice`'s ownership note).
+    let wide = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_zero_ext(ctx.raw,
+      uint32(UnicodeCharWidth - 8), el.bv8.raw))
+    let ch = wrap[Z3AnyAst](ctx,
+      ctx.checkErr Z3_mk_char_from_bv(ctx.raw, wide.raw))
+    var apps = [ctx.checkErr Z3_to_app(ctx.raw, iVar.raw),
+                ctx.checkErr Z3_to_app(ctx.raw, xVar.raw)]
+    let lam = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_lambda_const(ctx.raw,
+      2'u32, cast[ptr UncheckedArray[RawZ3App]](addr apps[0]), ch.raw))
+    let zero = mkInt(0)
+    SymVal(kind: svString, strBuf: sbOwned,
+           str: wrap[Z3String](ctx, ctx.checkErr Z3_mk_seq_mapi(ctx.raw,
+                                       lam.raw, zero.raw, recv.str.raw)))
   of StrOpKinds - {iekStrLen, iekStrAt, iekStrSubstr,
                    iekStrContains, iekStrStartsWith, iekStrEndsWith,
                    iekStrFind, iekStrRfind, iekStrReplaceAll,
@@ -1228,7 +1354,8 @@ proc lowerStrArm(env: Env, e: IRExpr): SymVal =
                    iekStrConcat,
                    iekIntToStr, iekStrToInt, iekRadixFmt,
                    iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip,
-                   iekStrInOptionRegion}:
+                   iekStrInOptionRegion,
+                   iekStrSetAt, iekStrChars, iekStrFromChars}:
     # Phase 15: string ops not modeled in this cycle. Raise a classified
     # SymexUnsupportedStringOpError; the runSymex boundary maps it to sxUnknown +
     # seUnsupportedStringOp (ADR-0006, Invariant 3 — never a crash/silent UNSAT).

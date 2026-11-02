@@ -1045,6 +1045,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 S8ce (S8bx's remainder: nim-z3's lifecycle hooks swallowed an
     ## in-flight raise on the C backend, fixed in nim-z3; S8bx's raise hook
     ## removed). 228->238 (provisional).
+    ## RFC-0005 S8ca (a call declines in-band when the native stack left
+    ## is under one more level's need). 225->233.
     check symexWalkerVersion == "241"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

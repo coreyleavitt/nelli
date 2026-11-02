@@ -393,8 +393,11 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## deposits into `regexRaiseMsgs`, drained as the RegexError raise
     ## fork. All are reached only from `lowerStrArm`, through plain proc
     ## frames, so the chokepoint catches them.
+    ## runtime_strings.nim 18 -> 20 (RFC-0005 S8ca): `iekStrFromChars`'s two
+    ## (a view that is not a backed seq of chars), reached only from
+    ## `lowerStrArm`, through plain proc frames.
     check runtimeCount == 6
-    check runtimeStringsCount == 18
+    check runtimeStringsCount == 20
     # N46-followup-2 (round-6 re-review, heap-raise totality slice):
     # runtime_heap.nim's 13 LEDGERED-LIVE sites were adjudicated -- 7
     # CONVERTED to the in-band degrade idiom (no longer raw raises, no

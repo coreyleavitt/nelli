@@ -356,11 +356,13 @@ suite "S8cd item 3: case-object globals":
     candidate(multiArmRaise, "m_raise")
 
   test "a case object reaching a heap cell declines, never sxUnsat":
-    for lbl in ["gr_after", "gr_raise"]:
+    template declines(lbl: string) =
       let r = symexFind(refArmReassign, tLabel(lbl))
       checkpoint lbl & " " & $r.status & " " & show(r.errors)
       check r.status == sxUnknown
       check not r.errors.hasKind(weInternalWalkerFault)
+    block: declines("gr_after")
+    block: declines("gr_raise")
 
   test "a case object held in an array global":
     candidate(arrElem, "v_elem")

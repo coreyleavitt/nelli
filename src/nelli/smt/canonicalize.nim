@@ -203,7 +203,17 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "245"
+const symexWalkerVersion* = "252"
+  ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
+  ## call past `pcre_select.limitReach`'s safe length no longer has a definite
+  ## verdict unless the query holds with it stopped at a limit too.
+  ## Also S8bt's remainder: the JIT's LIMIT count is modelled (`jitCost`), the
+  ## interpreter's limit gaps closed (`buildNfa`'s `concrete`), SKIP:NAME reads
+  ## past 7 by concrete calls (`execArgCap`), the JIT's UTF scan and POSIX
+  ## classes on 8.37 follow the library, a call Z3 cannot search and a pattern
+  ## past the regex cap are read at points (`pointCheck`), `replace`'s facts
+  ## cover verbs, limits, UTF and two bytes, and `strutils.count` lowers
+  ## (`iekStrCount`). Provisional 242.
   ## RFC-0005 batch 9 (2026-11-02) -- S8ce, S8ca, S8by and S8cc land stacked on
   ## batch 8 as one integration branch under ONE walker number; their bullets
   ## follow, each naming its provisional number. The stack's own changes: S8ce

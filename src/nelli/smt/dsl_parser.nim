@@ -1845,7 +1845,7 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     if e.strOp == "[]": return true
     for a in e.strArgs:
       if rhsHasInlineDefectFork(a): return true
-  of iekStrLen, iekStrFind, iekStrRfind, iekStrContains,
+  of iekStrLen, iekStrFind, iekStrRfind, iekStrCount, iekStrContains,
      iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrCaptureRe,
@@ -1950,7 +1950,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
   of iekSeqInsert: @[e.insSeq, e.insVal, e.insIdx]
   of iekSeqPop: @[e.popSeq]
   of iekTableSet: @[e.tabRecv, e.tabKey, e.tabVal]
-  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind,
+  of iekStrLen, iekStrAt, iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount,
      iekStrContains, iekStrStartsWith, iekStrEndsWith, iekStrReplaceAll,
      iekStrSplit, iekStrJoin, iekStrMatch, iekStrFindRe, iekStrReplaceRe,
      iekStrConcat, iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
@@ -2022,7 +2022,7 @@ func isEagerIR(e: IRExpr): bool =
   case e.kind
   of iekClosureCall, iekHofCall, iekMathCall: true
   of iekBinop: e.bop in {bAdd, bSub, bMul}
-  of iekStrSubstr, iekStrFind, iekStrRfind, iekStrContains, iekStrStartsWith,
+  of iekStrSubstr, iekStrFind, iekStrRfind, iekStrCount, iekStrContains, iekStrStartsWith,
      iekStrEndsWith, iekStrReplaceAll, iekStrSplit, iekStrJoin, iekStrMatch,
      iekStrFindRe, iekStrReplaceRe, iekStrCaptureRe, iekStrConcat,
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
@@ -10838,6 +10838,16 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
           of "toLowerAscii": return mkStrOp(iekStrToLower, calleeSym.strVal, caseArgs)
           of "toUpperAscii": return mkStrOp(iekStrToUpper, calleeSym.strVal, caseArgs)
           else:              return mkStrOp(iekStrUnsupported, calleeSym.strVal, caseArgs)
+        # RFC-0005 S8cf (item 11): `strutils.count(s, c)` and `count(s, sub)`
+        # with `overlapping` false and a literal, non-empty `sub` (an empty
+        # one raises). `set[char]` and `overlapping` stay unregistered.
+        if isBuiltinNamed(calleeSym, ["count"]) and n.len in 3 .. 4 and
+           (n.len == 3 or (n[3].kind == nnkSym and n[3].strVal == "false") or
+            (n[3].kind == nnkIntLit and n[3].intVal == 0)) and
+           (n[2].typeKind == ntyChar or
+            (n[2].kind == nnkStrLit and n[2].strVal.len > 0)):
+          return mkStrOp(iekStrCount, "count", @[parseExpr(n[1], preamble, ctx),
+                                                 parseExpr(n[2], preamble, ctx)])
         # Round-4 Slice B (ADR-0026): `strutils.strip(s[, leading[,
         # trailing[, chars]]])` with LITERAL flags and a LITERAL char set →
         # `iekStrStrip` (decomposition constraints, runtime_strings.nim).

@@ -487,6 +487,11 @@ title = "S8br's remainder: address cell at a non-literal array index with an inp
 state = "done"
 
 [[slice]]
+id = "S8cf"
+title = "S8bt's remainder: PCRE match/recursion limits and the JIT stack limit, JIT LIMIT accounting, limit-accounting gaps, SKIP:NAME past 7, UTF JIT scan residuals, symbolic step-table receiver, UTF priority-route cost, replace-lemma residuals, 8.44/8.39 allowlist"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -14167,3 +14172,74 @@ pin is 238, and both suites carry the `>= 238` floor.
 - **PRECISION: `unsafeAddr` of a by-value array formal in a walked callee
   declines** (`feUnsupportedOp`, S8ax's "`addr x` ... is not modelled",
   `wb_dead`).
+
+**As landed (S8cf, walker 242 provisional) — S8bt's remainder.** The branch
+is `rfc-0005-s8cf`, on `136ad60` with S8bt merged. Ground truth stays the
+libpcre `std/re` loads: PCRE 8.45's interpreter on Linux and 8.37 with its JIT
+on the Windows legs. New suites are named `tsymex_rfc0005_s8cf_*`.
+
+*Items 1, 2: PCRE's limits and the JIT stack (SOUNDNESS).*
+- **The bug.** The model read no limit, so `(a|a)*[bc]` at `a^30` gave five
+  false `sxUnsat` (match, find, matchLen, findBounds, replace) and a false
+  `sxSat`, and the JIT's stack limit a false `sxUnsat`.
+- **The fix.** `pcre_select.limitReach` gives each call never or a safe length
+  (`reachLenCap`, `reachCallBudget`, `reachDepthBudget`). `checkCapped` wraps
+  `checkExact`: SAT past safe is solved again with the lengths guarded, else
+  `zsUnknown`; UNSAT must survive `limitWorldRefuted`, the query with each
+  site free to stop (`regexLimitSites`).
+- **Finding.** A third outcome the job did not list: on 8.45 with an 8 MB
+  stack `(a|b)*c` takes SIGSEGV near 8000 bytes, `(a)*c` near 16000. On 8.37's
+  JIT -27 arrives at 1025 and 1376 bytes.
+
+*Item 3: the JIT's LIMIT count.* `jitCost` sites over 424350 calls, 0 differ;
+`detect_repeat`'s group repeats keep `jitCountUnread` (400 skipped).
+
+*Item 4: limit gaps.* `buildNfa(..., concrete = true)` reads auto-possession
+and `ignore_skip_arg`'s runs concretely (2380 calls, 0 differ).
+
+*Item 5: SKIP:NAME past 7.* `concreteCall` with `execArgCap` (100 names); the
+languages decline past 7, the walker reads those calls at points.
+
+*Item 6: the JIT's UTF scan.* The U+0080..U+00BF decline was over-cautious: the
+scan starts only with literals and `\d \s \w`, which fail at a continuation
+byte; 239976 calls, 0 differ, decline removed. `(*ANY)` under the scan keeps its
+decline (72 differences or more when lifted); pinned calls read at points.
+
+*Item 7: classes on 8.37.* `parsePcre`'s `pre845` models the Latin-1 symbols in
+`[[:punct:]]` and narrows the decline to `classPre845`; negated escapes showed
+no difference and are lifted.
+
+*Items 8, 9, 10: the point route.* `pointCheck` replaces each heavy call's value
+by a fresh one, and reads it at the points the search proposes
+(`concreteEntry`); UNSAT is the query's own, a model every call agrees with is
+the query's, otherwise the point is a lemma. Then `pointTable` over short
+strings. A pattern past the regex cap (still 40k) gets a declared site and decides by points only. A
+subject pinned to a literal states every value on the path at once.
+- **Soundness of the pinned round.** A call's definition is dropped only with
+  its value stated, and only if no remaining root names its fresh terms.
+  Dropping by fresh names alone gave a false `sxSat` (`cf_branches_no`, RED
+  during this slice, never landed).
+
+*Item 11: `replace`'s facts.* `ReplaceFacts.pairs`, `.utf`, `searchMoves`
+(`acCommit`, `acSkipT`, `acErrM/R`) with `nonEmptyAttempt`; 8895 fact calls, 0
+differ. `strutils.count` over a char or a literal non-empty string lowers
+(`iekStrCount`); it was unlowered for any symbolic string.
+
+*Item 12: more library builds.* Stays declined; 8.44, 8.39 and 8.39's JIT need a
+Windows leg each. The legs take 6 to 38 minutes today; the coordinator decides.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS (held as unknown).** A value past `limitReach`'s safe length is
+  `zsUnknown`, including an unbounded no-match refutation. SIGSEGV past the
+  stack is the library's own behaviour: no verdict models the crash.
+- **PRECISION.**
+  - Auto-possession comparing a property or XCLASS with another item declines.
+  - A kept `ignore_skip_arg` under a limit declines.
+  - `detect_repeat`'s group repeats stay unread on the JIT.
+  - SKIP:NAME's count past 100 is unmodelled, and the languages decline past 7.
+  - Symbolic `(*ANY)` under the JIT's scan stays unknown.
+  - Multi-item POSIX classes on 8.37 decline (`classPre845`).
+  - `replace`'s unmarked `SKIP:NAME` has no sure bytes; `count` of `set[char]`
+    or overlapping counts stay unregistered; `first` is not computed in UTF.
+  - A `v == f` definition on an Int in `regexRecDefConds` crashes at
+    `byteLeafIds`; avoided with an inline term, latent.

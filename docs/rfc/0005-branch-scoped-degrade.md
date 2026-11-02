@@ -13297,7 +13297,7 @@ corpus shard passing; d64b7ee superseded them.
   its write-back declines rather than evaluate it again.
 
 **As landed (S8cb, walker 243 provisional) — S8bo onto batch 7, and S8bo's
-remainder.** Suites `tsymex_rfc0005_s8cb_magics`, `_tostr`, `_cells`, `_replay`.
+remainder.** Suites `tsymex_rfc0005_s8cb_magics`, `_tostr`, `_order`, `_cells`, `_replay`.
 Every pin was run RED on the merge of S8bo first, except where noted.
 
 *Wrong verdicts found and fixed.*

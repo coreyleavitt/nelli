@@ -1200,6 +1200,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bo_replay",
             "tsymex_rfc0005_s8cb_magics",
             "tsymex_rfc0005_s8cb_tostr",
+            "tsymex_rfc0005_s8cb_order",
             "tsymex_rfc0005_s8cb_cells",
             "tsymex_rfc0005_s8cb_replay",
             # RFC-0005 S8bh -- S8bf's remainder: var / addr effects of a

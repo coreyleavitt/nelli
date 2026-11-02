@@ -1002,6 +1002,7 @@ task test, "Run the test suite":
             # nonzero-start indexof / word-equation facts; seq.last_indexof
             # queries take step 1c; walker 181->182.
             "tsymex_rfc0005_s8ai_semantic",
+            "tsymex_rfc0005_s8ai_semantic_b",
             # RFC-0005 S8ag -- S8y's remainder: a one-character literal
             # str.indexof lowers to a fresh Int with split axioms (and
             # chain facts), so N36's five-iteration exits find a model; a

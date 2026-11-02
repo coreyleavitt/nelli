@@ -32,6 +32,7 @@ import ./types
 import ./abstraction
 import ./regex_parser   ## Phase 15 S6b: parseNimRegexToZ3Regex (re"…" → Z3Regex)
 import ./pcre_select   ## RFC-0005 S8bb: the priority run (`replace`)
+import ./pcre_engine   ## RFC-0005 S8bt: the engine of unanchored calls
 import ./exn_hierarchy   ## Phase 15 E4: exnTypeTable / isSubtypeOf / isDefect
 import ../choice   ## RFC-fuzzer-nextgen G1b: ChoiceNode — the concrete draw trace
 import ../int128   ## RFC-fuzzer-nextgen G1b: toInt64(ChoiceInt) for draw bounds/values
@@ -4118,6 +4119,15 @@ var regexRecDefConds* {.threadvar.}: seq[Z3Bool]
   ## superset of the real ones, so its UNSAT is the query's own; Z3's
   ## unfolding of the recursive term never reaches the facts' conflict
   ## (S8bb's Q7, Q8: `replace(s, re"a", "").contains("a")`).
+
+var regexRecFactConds* {.threadvar.}: seq[Z3Bool]
+  ## RFC-0005 S8bt. The facts of the `replace` values in `regexRecDefConds`
+  ## (`regex_parser.replaceLemmas`): each over one occurrence's own `r`,
+  ## its receiver and `by`, and fresh Ints (the match count, the bytes
+  ## removed), and true of every receiver, so they prune no real model.
+  ## `checkCapped` asserts them where it leaves the definitions out, and
+  ## leaves both out of the steps after it (each `r` replaced by its term).
+  ## S8bj put them in `stripDecompConds`.
 
 var stripDecompConds* {.threadvar.}: seq[Z3Bool]
   ## Round-4 Slice B (ADR-0026). Decomposition constraints emitted by the
@@ -13385,6 +13395,13 @@ proc bvIntInverseFacts*(ctx: Z3Context; roots: openArray[Z3Bool]): seq[Z3Bool] =
     let eq = checkedEq(ctx, views[i].x.raw, views[j].x.raw)
     result.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, t.raw, eq))
 
+const recFactsRLimit* = 100_000'u
+  ## RFC-0005 S8bt. The budget of `checkCapped`'s check without the
+  ## recursive `replace` definitions (S8bj ran it under `factsFirstRLimit`).
+  ## The facts' refutations take at most a few thousand units (2,060 for the
+  ## slowest S8bt pin, Z3 5.1); a query they do not refute ran the larger
+  ## budget out for nothing (`s8bb_replace`'s `a|ab` pin: 0.4 s became 7 s).
+
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):
                  tuple[status: Z3Status, s: Z3Solver, m: Z3Model,
@@ -13518,7 +13535,7 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # negated, as one (`mergeMemberships`; the same models).
   # RFC-0005 S8bu: and with each signed Int view's inverse,
   # `x == int2bv(sbv2int(x))` (`bvIntInverseFacts`): theorems too.
-  let rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
+  var rootsIn = mergeMemberships(ctx, @query & divRangeFacts(ctx, query) &
     bvOffsetLinks(ctx, query) & bvIntInverseFacts(ctx, query))
   let qto = settings.budget.queryTimeoutMs   # RFC-0005 S8bu
   # RFC-0005 S8bq: a query that counts a builtin set's members runs under
@@ -13531,17 +13548,54 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # RFC-0005 S8bj: the query without the recursive `replace` definitions
   # (`regexRecDefConds`), under the small budget of step 0: a superset of
   # the real models, so an UNSAT is the query's own.
+  # RFC-0005 S8bt: the values' facts (`regexRecFactConds`) are asserted
+  # there only. Every step after it decides the query with each value `r`
+  # replaced by its term (`r == term` read off its definition) and the
+  # definitions and facts left out: the same models (the facts are true of
+  # every term's value), and exactly the query S8bb / S8bj's run and step
+  # tables put to Z3, whose model search the indirection through `r` and
+  # the facts slowed (`tsymex_rfc0005_s8bb_replace`'s symbolic receivers:
+  # 1.3 s became 11 s).
   if regexRecDefConds.len > 0:
     var defIds = initHashSet[int]()
     for d in regexRecDefConds: defIds.incl astId(ctx, d.raw)
-    var abstracted: seq[Z3Bool]
+    var factIds = initHashSet[int]()
+    for f in regexRecFactConds: factIds.incl astId(ctx, f.raw)
+    var abstracted, rest: seq[Z3Bool]
     for r in rootsIn:
-      if astId(ctx, r.raw) notin defIds: abstracted.add r
+      let id = astId(ctx, r.raw)
+      if id notin defIds:
+        abstracted.add r
+        if id notin factIds: rest.add r
     if abstracted.len < rootsIn.len:
-      let pre = if rlimit == 0: factsFirstRLimit else: min(rlimit, factsFirstRLimit)
-      let sAbs = ownContextSolver(ctx, abstracted, pre)   # RFC-0005 S8bp
+      let pre = if rlimit == 0: recFactsRLimit else: min(rlimit, recFactsRLimit)
+      # RFC-0005 S8bp, S8bt: in a context of its own, as every step: a check
+      # leaves state in its context that changes how later checks there
+      # search (this one, however short, took `s8bb_replace`'s `x*` pin from
+      # 4 s to 20 s in the walk's). A translated query keeps its recursive
+      # functions' definitions (probed on both pinned Z3s).
+      let sAbs = ownContextSolver(ctx, abstracted, pre)
       if counted("regexDefsFree", ownContextCheck(sAbs)) == zsUnsat:
         return (zsUnsat, sAbs, nil, "")
+      # A nested replace's term mentions the inner value: definitions are
+      # added inner first, so each term is resolved against the earlier
+      # ones before it stands in.
+      var froms, tos: seq[RawZ3Ast]
+      for d in regexRecDefConds:
+        let app = Z3_to_app(ctx.raw, d.raw)
+        var t = Z3_get_app_arg(ctx.raw, app, 1)
+        if froms.len > 0:
+          t = ctx.checkErr Z3_substitute(ctx.raw, t, cuint(froms.len),
+            cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+            cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr))
+        froms.add Z3_get_app_arg(ctx.raw, app, 0)
+        tos.add t
+      rootsIn = @[]
+      for r in rest:
+        rootsIn.add wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw,
+          r.raw, cuint(froms.len),
+          cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+          cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
   template plain(): untyped =
     let s = ownContextSolver(ctx, rootsIn, rlimit)
     let r = counted("plain", ownContextCheck(s))
@@ -13765,6 +13819,9 @@ proc globalRoots(base: openArray[Z3Bool]): seq[Z3Bool] =
     roots.add c
   # RFC-0005 S8bj: the recursive `replace` values' definitions.
   for c in regexRecDefConds:
+    roots.add c
+  # RFC-0005 S8bt: and their facts.
+  for c in regexRecFactConds:
     roots.add c
   # RFC-0005 S8f: every allocated table's / set's size is at least its
   # number of distinct present key terms (`ContainerCardRegistry`). True of
@@ -25103,6 +25160,7 @@ proc resetSymexRunState(settings: SymexSettings): Z3Context =
   containerCard = ContainerCardRegistry()  ## RFC-0005 S8f: reset table/set cardinality registry
   stripDecompConds = @[]                 ## ADR-0026: reset strip-decomposition sink
   regexRecDefConds = @[]                 ## RFC-0005 S8bj: reset recursive replace definitions
+  regexRecFactConds = @[]                ## RFC-0005 S8bt: and their facts
   stripSynthCounter = 0                  ## ADR-0026: reset strip fresh-name counter
   indexSplits = @[]                      ## RFC-0005 S8ag: reset indexof splits
   bitSetCardTerms = @[]                  ## RFC-0005 S8bq: reset card terms

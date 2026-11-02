@@ -436,6 +436,23 @@ const symexWalkerVersion* = "237"
   ## constants is the disjunction of its elements (it declined). The regex
   ## replace recursions carry fuel. Batch 3 is 209, S8bh 208.
   ##
+  ## RFC-0005 S8bt (2026-10-03) — S8bj's remainder. SOUNDNESS: the walker
+  ## reads a regex only when std/re's libpcre is a build the model is
+  ## verified against (`pcre_engine.verifiedLibs`, version string and
+  ## engine); any other library declines every regex call (S8bj recorded
+  ## it in the cache key but read it with 8.45's model). The JIT (8.37,
+  ## the Windows legs) is its own engine model (`peJit837`: its prefix
+  ## scan, SKIP and SKIP:NAME semantics). A LIMIT between 0 and the default
+  ## is modelled by `match()`'s call and depth counts. Mixed (*SKIP:NAME)
+  ## carries `ignore_skip_arg` across attempts. UTF mode reads (*UCP),
+  ## `\p`, Unicode case folding and (*ANY)'s multi-byte newlines from
+  ## generated 8.45 tables (8.37's differing classes decline). Plain UTF
+  ## patterns take a lazy Z3-regex route past the automaton caps.
+  ## replace gets facts (lengths, sure and first bytes) for every pattern
+  ## and `by`.
+  ##
+  ## (Prior: 211.)
+  ##
   ## RFC-0005 S8bj (2026-10-02) — the regex constructs S8bb left
   ## undecided or declined. The backtracking verbs `(*COMMIT)`,
   ## `(*PRUNE)`, `(*SKIP)`, `(*SKIP:NAME)`, `(*THEN)` and the marks follow

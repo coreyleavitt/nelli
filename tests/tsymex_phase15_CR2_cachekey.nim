@@ -1033,6 +1033,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## the lvalue reads). Provisional 229 (224-228 held). 223->229.
     ## RFC-0005 batch 7: S8bp, S8bu and S8br stacked on batch 6, and a
     ## `var openArray` view a later argument writes declined. 230->237.
+    ## RFC-0005 S8bt (an unverified libpcre declines every regex call; the
+    ## rest of S8bj's remainder). Provisional 224.
     check symexWalkerVersion == "237"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

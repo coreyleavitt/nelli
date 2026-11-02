@@ -8055,6 +8055,16 @@ can lose one, whichever shape reaches it.
 - **PRECISION: nim-z3 leaks, no verdict affected.** `Z3FuncDeclOwn`,
   `Z3FuncInterpOwn` and `Z3RcfNum`'s hooks never release their `ctx` reference;
   each predates this slice and its behaviour is unchanged.
+- **PRECISION: `Z3Ast[S: static SortTag]`'s hooks are not the ones a `Z3Int` /
+  `Z3Bool` uses:** the generated C of a walker build has no hook attributed to
+  `ast.nim`, so those values take the field-wise destroy. They release `ctx` and
+  no raw reference: a leak until the context goes. It also means they never ran
+  the `try`, which is why the lost raises above are all carried by bit-vector,
+  array, sequence and regex terms, or a solver or model.
+- **PRECISION: nim-z3's own suite on the image's Z3 5.1.** `tffi`, `tversion` and
+  `tmultiversion` assert a 4.x runtime (they pass on 4.13.4), and `tregex_index`
+  stalls in one Z3 query at the same test at ae509f0 and with the fix (killed at
+  1300 s each; it passes in 2 s on 4.13.4). Not caused here.
 - **Compiler: a `try` in any other destructor loses a raise the same way.** Nothing
   in nelli or its deps has one now (the audit pins nim-z3); the reduction is in the
   S8ce report for an upstream Nim issue.

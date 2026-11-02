@@ -37,7 +37,9 @@ proc lastNl(s, t: string; x, y: int) =
 
 proc preSufNl(s: string; x, y: int) =
   ## UNSAT on its own (`"ab" & ..` cannot end in `"ba"` at length 2), so
-  ## every step up to step 2's core runs, each with a factoring search.
+  ## it is decided by step 2's core, with a factoring search in every step.
+  ## RFC-0005 S8by: after its facts-first SAT neither (1b) nor (1c) runs;
+  ## with the facts-first check off, every step up to (2) does.
   if x > 1 and y > 1 and x < 2000 and y < 2000 and x * y == 1022117 and
      s.startsWith("ab") and s.endsWith("ba") and s.len == 2:
     symexTarget("s8bp_presuf")
@@ -103,10 +105,18 @@ suite "S8bp (1): no step's search moves with unrelated walk state":
     check a.steps == b.steps
     for x in symexStepStatsNames(a.steps): seen.incl x
 
-  test "the facts-first check, steps 1, 1b, 1c and 2":
-    ## Before S8bp (Z3 5.1): step 1c 114,891 against 350,726 units, step
-    ## 2 401,123 against 231,590 (4.13.4: 238,219 against 327,223).
+  test "the facts-first check, steps 1 and 2":
+    ## Before S8bp (Z3 5.1): step 2 401,123 against 231,590 units (4.13.4:
+    ## 238,219 against 327,223).
     same(preSufNl, "s8bp_presuf", defaultSymexSettings(), sxUnsat)
+
+  test "steps 1b, 1c and 1c-capped":
+    ## RFC-0005 S8by: a facts-first SAT now skips them, and they run after
+    ## a facts-first check that did not answer; off here, so they run on
+    ## this query. Before S8bp (Z3 5.1): step 1c 114,891 against 350,726.
+    symexFactsFirstOff = true
+    same(preSufNl, "s8bp_presuf", defaultSymexSettings(), sxUnsat)
+    symexFactsFirstOff = false
 
   test "step 3":
     ## Before S8bp: 207,893 against 464,636 units (4.13.4).
@@ -140,7 +150,7 @@ suite "S8bp (1): no step's search moves with unrelated walk state":
     symexQueryStats = @[]
     symexStepStats = @[]
 
-  test "the three walks reached every step":
+  test "the walks reached every step":
     check seen == toHashSet(["plain", "factsFirst", "1", "1b", "1c",
                              "1c-capped", "2", "3"])
 

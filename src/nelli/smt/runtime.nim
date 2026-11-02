@@ -11927,8 +11927,9 @@ proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
   # 1's full-theory search to its half budget first: S8aw's join walks
   # spent 10,000,930 units (about 20 s on Z3 5.1) before step 1c answered
   # in a few thousand. Anything else (SAT, or unknown in the small budget)
-  # falls through to the unchanged order below, (1b) and (1c) included
-  # with their full budget, so no verdict is lost.
+  # falls through to the unchanged order below; unknown runs (1b) and (1c)
+  # with their full budget, so no verdict is lost, and SAT skips what it
+  # already answers (RFC-0005 S8by, below).
   # RFC-0005 S8ba: with each length at most `high(int)` (`nimLenFacts`):
   # true of every real input, so an UNSAT is still the query's own.
   let facts = seqRangeFacts(ctx, roots) & nimLenFacts(ctx, lens)

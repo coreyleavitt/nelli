@@ -454,7 +454,10 @@ proc emitExpr*(e: IRExpr): NimNode =
     newCall(bindSym"mkSeqLen", emitExpr(e.lenObj), newLit(e.lenLoc))
   of iekSeqSlice:
     newCall(bindSym"mkSeqSlice", emitExpr(e.ssBase),
-            emitExpr(e.ssLo), emitExpr(e.ssHi))
+            emitExpr(e.ssLo), emitExpr(e.ssHi), newLit(e.ssView))
+  of iekSeqSplice:   ## RFC-0005 S8bu
+    newCall(bindSym"mkSeqSplice", emitExpr(e.spBase),
+            emitExpr(e.spAt), emitExpr(e.spPart))
   of iekStrLit:
     newCall(bindSym"mkStrLit", newLit(e.sval))
   of iekContains:
@@ -537,10 +540,11 @@ proc emitExpr*(e: IRExpr): NimNode =
     for t in e.ccTouch: tcLit.add newLit(t)
     var vpLit = newTree(nnkBracket)        ## RFC-0005 S8bn
     for v in e.ccVarPtrSafe: vpLit.add newLit(v)
+    # RFC-0005 S8bu: and `ccVarLocs`.
     newCall(bindSym"mkClosureCall", newLit(e.ccCallee), prefix(argsLit, "@"),
             newCall(bindSym"@", vtLit), newCall(bindSym"@", alLit),
             newCall(bindSym"@", adLit), newCall(bindSym"@", tcLit),
-            newCall(bindSym"@", vpLit))
+            newLit(e.ccVarLocs), newCall(bindSym"@", vpLit))
   of iekSeqLit:           ## Phase 15 C4
     var elemsLit = newTree(nnkBracket)
     for c in e.seqLitElems: elemsLit.add emitExpr(c)
@@ -1784,6 +1788,9 @@ proc rhsHasInlineDefectFork(e: IRExpr): bool =
     # deposit in its lowering; RFC-0005 S8g: and its RangeDefect) — always
     # guard-worthy on an and/or RHS.
     result = true
+  of iekSeqSplice:   ## RFC-0005 S8bu: forks nothing of its own
+    result = rhsHasInlineDefectFork(e.spBase) or
+             rhsHasInlineDefectFork(e.spAt) or rhsHasInlineDefectFork(e.spPart)
   of iekContains:
     result = rhsHasInlineDefectFork(e.container) or rhsHasInlineDefectFork(e.key)
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel:
@@ -1917,6 +1924,7 @@ proc irKids(e: IRExpr): seq[IRExpr] =
   of iekVariantFieldSet: @[e.vfsRecv, e.vfsVal]
   of iekSeqLen: @[e.lenObj]
   of iekSeqSlice: @[e.ssBase, e.ssLo, e.ssHi]
+  of iekSeqSplice: @[e.spBase, e.spAt, e.spPart]   ## RFC-0005 S8bu
   of iekContains: @[e.container, e.key]
   of iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel: @[e.mutRecv, e.mutArg]
   of iekSeqDel: @[e.delSeq, e.delIdx]
@@ -1999,6 +2007,7 @@ func isEagerIR(e: IRExpr): bool =
      iekStrFindRe, iekStrReplaceRe, iekStrCaptureRe, iekStrConcat,
      iekIntToStr, iekStrToInt, iekRadixFmt, iekStrUnsupported,
      iekStrToLower, iekStrToUpper, iekRuneToStr, iekStrStrip, iekStrInOptionRegion, iekSeqSlice,
+     iekSeqSplice,   # RFC-0005 S8bu
      iekSeqAdd, iekSetIncl, iekSetExcl, iekTableDel, iekSeqDel,
      iekSeqInsert, iekSeqPop, iekTableSet, iekContains, iekBorrowOp,
      iekSeqNew:   # RFC-0005 S8bc, S8bi: `newSeq[T](n)` and kin, a call
@@ -2122,6 +2131,14 @@ proc splitIndexChecks(seg: seq[IRStmt]; cut: int; ir: IRExpr;
     "an unchecked read, undefined in Nim (feEvalOrderUnmodelled)")]))])
   for i in cut ..< seg.len: tail.add seg[i]
   true
+const procValueHeadKinds = {nskVar, nskLet, nskParam, nskForVar, nskTemp,
+                           nskResult, nskField}
+  ## RFC-0005 S8br. The symbol kinds a call's head has when the call goes
+  ## through a proc value (a variable, a parameter, a field), not to a
+  ## routine. (S8br named it `procValueSymKinds`; batch 7 renamed it: S8bn's
+  ## exported `dsl_typebridge.procValueSymKinds` is the routines a proc
+  ## value can name, which this module-level constant shadowed.)
+
 type LateAddr = object
   ## RFC-0005 S8bk. Where a by-address argument's lvalue was lowered
   ## (`userCallStmt`): its address and value reads are
@@ -2130,10 +2147,20 @@ type LateAddr = object
   ## `growable[j]` is true when the container of the `j`-th index on the
   ## lvalue's path (root first) is not an array, so that its length may
   ## change (`lvalueIndexGrowable`). `ok` is false for an argument without
-  ## one (a variable, a cell shared with an earlier `addr`).
+  ## one (a variable, a cell shared with an earlier `addr`). RFC-0005 S8br:
+  ## `lv` is the lvalue and `later` the arguments after it, for the frame
+  ## condition a check no snapshot carries takes (`laterLeavesLvalue`).
   ok: bool
   lo, hi, bindEnd: int
   growable: seq[bool]
+  lv: NimNode
+  later: seq[NimNode]
+
+proc laterLeavesLvalue(lv: NimNode; later: seq[NimNode]): bool  ## RFC-0005 S8br fwd decl
+
+proc laterActuals(n: NimNode; i: int): seq[NimNode] =
+  ## RFC-0005 S8br. The arguments of the call `n` after its `i`-th.
+  for k in i + 1 ..< n.len: result.add n[k]
 
 proc lvalueIndexGrowable(lv: NimNode): seq[bool] =
   ## RFC-0005 S8bk. For each index on the lvalue path `lv`, root first:
@@ -2184,8 +2211,11 @@ proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
   ## (`feEvalOrderUnmodelled`: Nim accesses through a value it never
   ## checked, undefined behaviour). A check this cannot snapshot (one that
   ## reads a moved read, a variant arm's discriminant, a checked
-  ## arithmetic) keeps the lvalue where it stands and the call declines
-  ## whenever a later argument may write.
+  ## arithmetic) keeps the lvalue where it stands. RFC-0005 S8br: the call
+  ## then declines only when a later argument may write a location the
+  ## lvalue reads (`laterLeavesLvalue`); where none does, the address, its
+  ## checks and the value are the same at the call as where the argument
+  ## stands. S8bk declined whenever a later argument may write anything.
   let lo = la.lo - base
   let hi = la.hi - base
   let be = la.bindEnd - base
@@ -2230,6 +2260,7 @@ proc placeLateAddr(seg: seq[IRStmt]; la: LateAddr; base: int;
     guards[i - cut] = differs
   if not exact:
     outPre.add seg[cut ..< seg.len]
+    if laterLeavesLvalue(la.lv, la.later): return
     tail.add ctx.declineMarker(feEvalOrderUnmodelled,
       "a by-address argument whose address Nim checks where it stands " &
       "and takes at the call, after a later argument's call that may " &
@@ -5769,6 +5800,81 @@ proc typeReachKeys(t: NimNode; into: var seq[string]; seen: var seq[string]) =
   else:
     add "*"
 
+proc laterArgWrites(a: NimNode; acc: var OpaqueEffects;
+                    seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8br. What evaluating the argument `a` may write, into `acc`:
+  ## for each call in it, S8as's summary of the callee's body
+  ## (`scanOpaqueEffects`: the globals it names, the captures it may write,
+  ## the heaps it reaches) and S8ax's of its by-address actuals
+  ## (`opaqueArgEffects`); a routine passed as a value is summarised as a
+  ## callee. Not inert for anything else that may write (a call through a
+  ## proc value, an assignment, a routine built inline): S8as's summary
+  ## cannot bound it.
+  if not acc.inert: return
+  case a.kind
+  of nnkEmpty, nnkCharLit .. nnkNilLit:
+    discard
+  of nnkSym:
+    if symKind(a) in procValueHeadKinds:
+      if a.typeKind in {ntyProc, ntyPointer}:
+        acc.notInert("`" & a.repr & "` may be a routine with unknown effects")
+    else:
+      # A routine passed as a value (`scanOpaqueEffects` reads a user
+      # routine's body; any other symbol it meets is a no-op).
+      scanOpaqueEffects(a, acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    if a.len == 0 or a[0].kind != nnkSym or
+       symKind(a[0]) in procValueHeadKinds:
+      acc.notInert("`" & a.repr & "` calls through a proc value")
+      return
+    scanOpaqueEffects(a[0], acc, seen, stack)
+    opaqueArgEffects(a, a[0], acc)
+    for k in 1 ..< a.len: laterArgWrites(a[k], acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkHiddenDeref,
+     nnkDerefExpr, nnkHiddenAddr, nnkAddr, nnkDotExpr, nnkBracketExpr,
+     nnkCheckedFieldExpr, nnkPar, nnkTupleConstr, nnkBracket, nnkCurly,
+     nnkObjConstr, nnkExprColonExpr, nnkIfExpr, nnkElifExpr, nnkElseExpr:
+    for c in a: laterArgWrites(c, acc, seen, stack)
+  else:
+    acc.notInert("`" & a.repr & "` may write")
+
+proc laterLeavesLvalue(lv: NimNode; later: seq[NimNode]): bool =
+  ## RFC-0005 S8br. The frame condition of a by-address argument's lvalue
+  ## `lv` over the arguments after it (`later`): true when none of them may
+  ## write a location `lv` reads -- a variable it names (its root and its
+  ## indices' variables), or a heap its path dereferences -- by S8as/S8ax's
+  ## write summary (`laterArgWrites`). A path through a `ptr`, or a later
+  ## argument that may write any heap (or through a `ptr`, into any
+  ## variable), meets everything. Then the lvalue names the same cell, with
+  ## the same value, at the call as where the argument stands, so a check no
+  ## snapshot carries need not decline (`placeLateAddr`).
+  if lv.isNil: return false
+  var acc = OpaqueEffects(inert: true)
+  var seen, stack: seq[NimNode]
+  for a in later: laterArgWrites(a, acc, seen, stack)
+  if not acc.inert or acc.heapAll or havocAllGlobals in acc.havoc:
+    return false
+  var heapSteps: seq[NimNode]
+  let root = lvalueRoot(lv, heapSteps)
+  if root.isNil or root.kind != nnkSym: return false
+  var keys: seq[string]
+  var seenT: seq[string]
+  for t in acc.heapTys: typeReachKeys(t, keys, seenT)
+  if "*" in keys or "t:?" in keys: return false
+  for d in heapSteps:
+    if derefIsPtr(d) or objectInherits(d.getTypeInst): return false
+    if cellTypeKey(d.getTypeInst) in keys: return false
+  var syms: seq[NimNode]
+  lvalueVarSyms(lv, syms)
+  if not containsSym(syms, root): syms.add root
+  for s in syms:
+    let nm = if byRefName(s).len > 0: byRefName(s)
+             elif isModuleGlobal(s): globalIRName(s)
+             else: s.strVal
+    if nm in acc.havoc: return false
+  true
+
 proc substFormal(n, gone, keep: NimNode): NimNode =
   ## RFC-0005 S8bh. `n` with every use of the formal `gone` spelled as the
   ## formal `keep` (symbol identity; a lambda nested in `n` included, as it
@@ -6074,6 +6180,210 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv0, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
+proc indexCallResult(ix: NimNode): NimNode =
+  ## RFC-0005 S8br. When `ix`, inside an index, is a user routine's call
+  ## (Nim evaluates it where the argument stands, into a temporary): the
+  ## callee's own `result` symbol, which has the type the call returns, to
+  ## mark (as S8bd's `byRefSub` marks a call base). nil otherwise: a
+  ## builtin (`len`, `+`) is read inline, with the index.
+  if ix.kind notin {nnkCall, nnkCommand} or ix.len == 0 or
+     ix[0].kind != nnkSym or not isUserCallee(ix[0]):
+    return nil
+  let ci = resolveRoutineImpl(ix[0])
+  if ci != nil and ci.len > 7 and ci[7].kind == nnkSym and
+     sameType(ci[7].getTypeInst, ix.getTypeInst):
+    ci[7]
+  else: nil
+
+proc lvalueStepKid(a: NimNode; k: int): bool =
+  ## RFC-0005 S8br. Child `k` of the lvalue path step `a` is itself on the
+  ## path (an index is not: `hoistIndexCalls` treats it as one).
+  case a.kind
+  of nnkHiddenAddr, nnkAddr, nnkHiddenDeref, nnkDerefExpr, nnkDotExpr,
+     nnkCheckedFieldExpr, nnkBracketExpr:
+    k == 0
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv:
+    k == a.len - 1
+  else: false
+
+proc hasIndexCall(a: NimNode; inIndex: bool): bool =
+  ## RFC-0005 S8br. Whether `hoistIndexCalls` would evaluate a call in an
+  ## index of the by-address actual `a`.
+  if inIndex and indexCallResult(a) != nil: return true
+  for k in 0 ..< a.len:
+    if inIndex or lvalueStepKid(a, k):
+      if hasIndexCall(a[k], inIndex): return true
+    elif a.kind == nnkBracketExpr and k > 0:
+      if hasIndexCall(a[k], true): return true
+  false
+
+proc indexCallLeft(a: NimNode; inIndex: bool): NimNode =
+  ## RFC-0005 S8br. A call left in an index of the lvalue path `a` after
+  ## `hoistIndexCalls` that Nim evaluates once and a write-back, which
+  ## re-parses the lvalue, would evaluate again: one through a proc value,
+  ## or a user routine's with no `result` symbol to mark (a generic's whose
+  ## `result` has another type). nil when none is left. The seq write-back
+  ## called it a second time (a false verdict); the array one declined.
+  if inIndex and a.kind in {nnkCall, nnkCommand} and a.len > 0 and
+     (a[0].kind != nnkSym or isUserCallee(a[0]) or
+      symKind(a[0]) in procValueHeadKinds):
+    return a
+  for k in 0 ..< a.len:
+    let sub =
+      if inIndex or lvalueStepKid(a, k): indexCallLeft(a[k], inIndex)
+      elif a.kind == nnkBracketExpr and k > 0: indexCallLeft(a[k], true)
+      else: nil
+    if sub != nil: return sub
+  nil
+
+proc indexCallDecline(lv, n, calleeSym: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8br. The scoped decline of a write-back through `lv` that
+  ## would evaluate a call in its index again (`indexCallLeft`), or nil.
+  let c = indexCallLeft(lv, false)
+  if c.isNil: return nil
+  ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "the index of by-address argument `" & lv.repr & "` of `" &
+            macros.strVal(calleeSym) & "` calls `" & c.repr & "`, which Nim " &
+            "evaluates once, where the argument stands; the write-back " &
+            "after the call would evaluate it again (feUnsupportedOp)"),
+    "index call in a by-address argument (feUnsupportedOp)")
+
+proc hoistIndexCalls(a: NimNode; inIndex: bool; preamble: var seq[IRStmt];
+                     ctx: ParseCtx): NimNode =
+  ## RFC-0005 S8br. A by-address actual `a` (`gArr[nextI()]`, `addr
+  ## gs[nextI()]`) with each call in an index on its lvalue path evaluated
+  ## once, here, root first, and replaced by a mark (`markByRef` of the
+  ## callee's `result`, `indexCallResult`) naming the `let` that holds its
+  ## result. Nim evaluates the call where the
+  ## argument stands (`T1_ = nextI(); chk(T1_); T2_ = f(); touch(&gArr[T1_],
+  ## T2_)`), so the copy-in, the copy-out and S8an's cell all reach the
+  ## element through that one value, and S8bk's late address
+  ## (`placeLateAddr`) keeps the `let` where it stands (it is not a lazy
+  ## read). The copy-out re-parsed the call and declined (`unsupported
+  ## nnkAsgn shape`, `pureIndexExpr`). `a` itself when nothing changed.
+  let res = if inIndex: indexCallResult(a) else: nil
+  if res != nil:
+    let mk = markByRef(res)
+    if mk.isNil: return a
+    let v = parseExpr(a, preamble, ctx)
+    preamble.add mkLet(byRefName(mk), classifyType(a).ty, v)
+    return mk
+  var kids: seq[NimNode]
+  var changed = false
+  for k in 0 ..< a.len:
+    let c = a[k]
+    let sub =
+      if inIndex: hoistIndexCalls(c, true, preamble, ctx)
+      elif lvalueStepKid(a, k): hoistIndexCalls(c, false, preamble, ctx)
+      elif a.kind == nnkBracketExpr and k > 0:
+        hoistIndexCalls(c, true, preamble, ctx)
+      else: c
+    if sub != c: changed = true
+    kids.add sub
+  if not changed: return a
+  result = copyNimNode(a)
+  for c in kids: result.add c
+
+proc isToOpenArray(n: NimNode): bool =
+  ## RFC-0005 S8bu. `n` is system's `toOpenArray(x, first, last)`.
+  n.kind in {nnkCall, nnkCommand} and n.len == 4 and n[0].kind == nnkSym and
+    isBuiltinNamed(n[0], ["toOpenArray"])
+
+proc openArraySource(n: NimNode): NimNode =
+  ## RFC-0005 S8bu. The actual an `openArray` view is taken of: `n` without
+  ## the conversion Nim inserts to the parameter's type (`s`, `a`, or a
+  ## `toOpenArray` call).
+  result = n
+  while result.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and
+        result.len == 2 and result.typeKind in {ntyOpenArray, ntyVarargs}:
+    result = result[1]
+
+proc arrayAsSeq(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bu. The array `x` as the seq of its elements (an openArray
+  ## view of a whole array), `x` evaluated once.
+  let aty = classifyType(x).ty
+  let a = freshSynth(ctx, "oaArr")
+  preamble.add mkLet(a, aty, parseExpr(x, preamble, ctx))
+  var elems: seq[IRExpr]
+  for k in 0 ..< aty.size: elems.add mkIndex(mkVar(a), mkIntLit(int64(k)))
+  mkSeqLit(elems, aty.elemTy)
+
+proc toOpenArraySlice(x: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx;
+                      lo: var IRExpr): IRExpr =
+  ## RFC-0005 S8bu. `toOpenArray(src, first, last)`: the view of `src` (a seq
+  ## or an array, evaluated once, then the bounds, in Nim's order) from
+  ## position `first` to `last`, a slice (`iekSeqSlice`) whose bounds are
+  ## fixed `let`s (`lo` names the first, for a write-back). Nim checks the
+  ## bounds unless the view is empty by `last == first - 1` (probe on the
+  ## pinned toolchain: `(5, 4)` and `(-1, -2)` of a 4-element seq are empty,
+  ## `(5, 3)` raises `IndexDefect`), which is the slice's own check whenever
+  ## `last >= first - 1`. Below that Nim raises nothing and makes a view of
+  ## negative length (`(2, 0)` has `len == -1`) whose reads are past the
+  ## storage: declined on its paths. The bounds are the program's `int`s
+  ## (bit-vectors, compared as such here); the slice takes them across the
+  ## signed Int bridge (`ssView`).
+  let src = x[1]
+  let cls = classifyType(src).ty
+  let intTy = tInt(64, signed = true)
+  var baseIR: IRExpr
+  var low = 0'i64
+  case cls.kind
+  of itSeq:
+    baseIR = parseExpr(src, preamble, ctx)
+  of itArray:
+    baseIR = arrayAsSeq(src, preamble, ctx)
+    low = arrayIndexLow(src)
+  else:
+    preamble.add ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(x, "RFC-0005 S8bu: `toOpenArray` of a " & $cls.kind &
+              " (`" & src.repr & "`) is not modelled: the walk views a seq " &
+              "or an array only (feUnsupportedOp)"),
+      "toOpenArray of an unmodelled storage (feUnsupportedOp)")
+    lo = mkIntLit(0)
+    return mkSeqLit(@[], classifyType(x).ty.seqElemTy)
+  let elemTy = classifyType(x).ty.seqElemTy
+  let b = freshSynth(ctx, "oaBase")
+  preamble.add mkLet(b, tSeq(elemTy), baseIR)
+  var bounds: seq[IRExpr]
+  for k in 2 .. 3:
+    var e = parseExpr(x[k], preamble, ctx)
+    if low != 0: e = mkBinop(bSub, e, mkIntLit(low))
+    let t = freshSynth(ctx, "oaBound")
+    preamble.add mkLet(t, intTy, e)
+    bounds.add mkVar(t)
+  preamble.add mkIf(@[mkBranch(
+    mkBinop(bLt, bounds[1], mkBinop(bSub, bounds[0], mkIntLit(1))),
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(x, "RFC-0005 S8bu: `" & x.repr & "` may have `last < first " &
+              "- 1`, which Nim does not check: the view has a negative " &
+              "length and its reads are past the storage, which the walk " &
+              "does not model (feUnsupportedOp)"),
+      "toOpenArray of negative length (feUnsupportedOp)"))])
+  lo = bounds[0]
+  mkSeqSlice(mkVar(b), bounds[0], bounds[1], view = true)
+
+proc openArrayView(n: NimNode; preamble: var seq[IRStmt];
+                   ctx: ParseCtx): IRExpr =
+  ## RFC-0005 S8bu. The seq the `openArray[T]` actual `n` views (the walk
+  ## holds an openArray as that seq, `classifyType`): a seq itself, an
+  ## array's elements, or a `toOpenArray` slice of either. A string's
+  ## (`openArray[char]`) is declined.
+  let x = openArraySource(n)
+  if isToOpenArray(x):
+    var lo: IRExpr
+    return toOpenArraySlice(x, preamble, ctx, lo)
+  let cls = classifyType(x).ty
+  case cls.kind
+  of itSeq: parseExpr(x, preamble, ctx)
+  of itArray: arrayAsSeq(x, preamble, ctx)
+  else:
+    preamble.add ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "RFC-0005 S8bu: an `openArray` view of a " & $cls.kind &
+              " (`" & x.repr & "`) is not modelled: the walk views a seq " &
+              "or an array only (feUnsupportedOp)"),
+      "openArray view of an unmodelled storage (feUnsupportedOp)")
+    mkSeqLit(@[], classifyType(n).ty.seqElemTy)
+
 proc varLocOf(lv: NimNode; temp, mode: string;
               preamble: var seq[IRStmt]; ctx: ParseCtx;
               locs: var seq[VarLoc]) =
@@ -6112,7 +6422,8 @@ proc varLocOf(lv: NimNode; temp, mode: string;
       rev.add t
       t = t[0]
     of nnkBracketExpr:
-      if t.len != 2 or t[0].typeKind != ntySequence or
+      # RFC-0005 S8bu: an array's element too (`locGet`).
+      if t.len != 2 or t[0].typeKind notin {ntySequence, ntyArray} or
          not stableIndex(t[1], []):
         ok = false
         break
@@ -6137,8 +6448,13 @@ proc varLocOf(lv: NimNode; temp, mode: string;
         path.add macros.strVal(st[1])
       else:
         let ix = freshSynth(ctx, "varLocIx")
-        preamble.add mkLet(ix, classifyType(st[1]).ty,
-                           parseExpr(st[1], preamble, ctx))
+        var ixIR = parseExpr(st[1], preamble, ctx)
+        # RFC-0005 S8bu: an array's step is its position (the index less
+        # the array's first index).
+        if st[0].typeKind == ntyArray:
+          let lo = arrayIndexLow(st[0])
+          if lo != 0: ixIR = mkBinop(bSub, ixIR, mkIntLit(lo))
+        preamble.add mkLet(ix, classifyType(st[1]).ty, ixIR)
         path.add "[" & ix
   locs.add (temp: temp, root: strVal(root), path: path, mode: mode)
 
@@ -6185,6 +6501,36 @@ proc byValueShare(a: NimNode): string =
     if getSize(ty) > 3 * sizeof(float): return "ptr"
     if payload(ty, 0): "copy" else: ""
   else: ""
+
+proc byValueLoc(arg: NimNode; k: int; preamble: var seq[IRStmt];
+                ctx: ParseCtx; locs: var seq[VarLoc]) =
+  ## RFC-0005 S8bs. Record where the by-value argument `arg` (the `k`-th)
+  ## came from (`VarLoc` `#<k>`) when Nim passes it by address or shares its
+  ## memory (`byValueShare`): a path the walk may keep equal to a cell.
+  ## RFC-0005 S8bu: for a closure or proc-value call too (`ccVarLocs`).
+  ## An `openArray` view shares its storage's memory: a whole seq's is the
+  ## seq's own (`copy`); an array's, or a `toOpenArray` slice's, is a
+  ## location the walker does not bind (`?`: declined when the storage's
+  ## variable has a cell or element cells).
+  if arg.kind == nnkHiddenAddr: return
+  let src = openArraySource(arg)
+  if src != arg or isToOpenArray(arg):
+    let st = if isToOpenArray(src): src[1] else: src
+    if not isToOpenArray(src) and classifyType(st).ty.kind == itSeq:
+      varLocOf(st, "#" & $k, "copy", preamble, ctx, locs)
+    else:
+      var vl: seq[VarLoc]
+      varLocOf(st, "#" & $k, "var", preamble, ctx, vl)
+      for l in vl:
+        locs.add (temp: l.temp, root: l.root, path: @["?"], mode: "copy")
+    return
+  var a = arg
+  while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0 and
+        sameType(a.getTypeInst, a[^1].getTypeInst):
+    a = a[^1]
+  let share = byValueShare(a)
+  if share.len > 0:
+    varLocOf(a, "#" & $k, share, preamble, ctx, locs)
 
 proc armChecked(lv: NimNode; b: ByRefSub; preamble: var seq[IRStmt];
                 ctx: ParseCtx): bool =
@@ -6246,7 +6592,77 @@ proc varActualPtrSafety(lv: NimNode): int =
     else: 1
   else: 0
 
-proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
+proc varSeqViews(n: NimNode): NimNode =
+  ## RFC-0005 S8bu. The call `n` with each `var openArray` actual that views
+  ## a whole seq (`nnkHiddenAddr(conv(s))`) spelled as the seq passed by
+  ## address (`nnkHiddenAddr(s)`), as a `var seq` actual is: the formal is
+  ## that seq in the walk (`classifyType`), and Nim passes its address.
+  result = n
+  for i in 1 ..< n.len:
+    let a = n[i]
+    if a.kind != nnkHiddenAddr or a.len != 1: continue
+    let x = openArraySource(a[0])
+    if x == a[0] or isToOpenArray(x) or classifyType(x).ty.kind != itSeq:
+      continue
+    if result == n: result = copyNimTree(n)
+    let b = copyNimNode(a)
+    b.add x
+    result[i] = b
+
+proc varViewSource(a: NimNode): NimNode =
+  ## RFC-0005 S8bu. For a `var openArray` actual viewing an array or a
+  ## `toOpenArray` slice (after `varSeqViews`), the view (the array, or the
+  ## `toOpenArray` call); nil for any other actual.
+  if a.kind != nnkHiddenAddr or a.len != 1: return nil
+  let x = openArraySource(a[0])
+  if isToOpenArray(x): return x
+  if x != a[0] and classifyType(x).ty.kind == itArray: return x
+  nil
+
+proc viewTemp(view, actual: NimNode; preamble: var seq[IRStmt];
+              ctx: ParseCtx; lo: var IRExpr): string =
+  ## RFC-0005 S8bu. A temporary seq holding the `var openArray` view
+  ## `view` (`varViewSource`) of the actual `actual`; `lo` names the
+  ## slice's first position (nil for a whole array).
+  lo = nil
+  let viewIR =
+    if isToOpenArray(view): toOpenArraySlice(view, preamble, ctx, lo)
+    else: arrayAsSeq(view, preamble, ctx)
+  result = freshSynth(ctx, "oaView")
+  preamble.add mkLet(result, classifyType(actual).ty, viewIR)
+
+proc viewStorage(view: NimNode): NimNode =
+  ## RFC-0005 S8bu. The storage a `var openArray` view writes to.
+  if isToOpenArray(view): view[1] else: view
+
+proc viewWriteBack(view, actual: NimNode; t: string; lo: IRExpr;
+                   ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bu. The temporary `t` (`viewTemp`) written back over the
+  ## elements of its storage it views: a seq's by `iekSeqSplice`, an
+  ## array's element by element (an openArray's length never changes).
+  let storage = viewStorage(view)
+  var wbPre: seq[IRStmt]
+  let elemTy = classifyType(actual).ty.seqElemTy
+  let back =
+    if classifyType(storage).ty.kind == itSeq:
+      mkSeqSplice(parseExpr(storage, wbPre, ctx), lo, mkVar(t))
+    else:
+      let aty = classifyType(storage).ty
+      let whole =
+        if lo == nil: mkVar(t)
+        else: mkSeqSplice(arrayAsSeq(storage, wbPre, ctx), lo, mkVar(t))
+      let ws = freshSynth(ctx, "oaBack")
+      wbPre.add mkLet(ws, tSeq(elemTy), whole)
+      var elems: seq[IRExpr]
+      for k in 0 ..< aty.size:
+        let e = freshSynth(ctx, "oaElem")
+        wbPre.add mkIndexStmt(e, mkVar(ws), mkIntLit(int64(k)), elemTy)
+        elems.add mkVar(e)
+      mkArrayLit(elems, aty.elemTy)
+  let w = parseAsgn(nnkAsgn.newTree(storage, newEmptyNode()), back, wbPre, ctx)
+  mkBlock(wbPre & @[w])
+
+proc userCallStmt(n0, calleeSym: NimNode; callKey, retName: string;
                   retTy: IRType; offsetPositions: seq[int];
                   preamble: var seq[IRStmt]; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8ac. The `isCall` of a walked user routine, with its
@@ -6289,6 +6705,14 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
   ## heap decides whether the two refs are one. An actual of such a pair
   ## that cannot be passed so takes the write-back below, which declines
   ## (`varActualMayAlias` sees the other).
+  ##
+  ## RFC-0005 S8bu: a `var openArray` actual is a view of its storage. One
+  ## of a whole seq is the seq passed by address (`varSeqViews`). One of an
+  ## array or of a `toOpenArray` slice is a temporary seq holding the view,
+  ## written back over the viewed elements of the storage in the same
+  ## `finally` (an openArray's length never changes), under the gates of a
+  ## `var` actual's write-back.
+  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
   var argIRs: seq[IRExpr]
   var byRefs: seq[ByRefSub]   ## RFC-0005 S8ba
   var writeBacks: seq[IRStmt]
@@ -6342,6 +6766,13 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(n[i].kind == nnkHiddenAddr or addrActualLvalue(n[i]) != nil)
     argLate.add LateAddr()
+    if argFixed[^1] and hasIndexCall(n[i], false):
+      # RFC-0005 S8br: a call in the lvalue's index is evaluated once,
+      # here (`hoistIndexCalls`). The call node is copied, not edited.
+      let h = hoistIndexCalls(n[i], false, preamble, ctx)
+      let nn = copyNimNode(n)
+      for k in 0 ..< n.len: nn.add(if k == i: h else: n[k])
+      n = nn
     let addrLv = addrActualLvalue(n[i])
     if addrLv != nil:
       var heapSteps: seq[NimNode]
@@ -6375,7 +6806,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
         argIRs.add parseExpr(b.base, preamble, ctx)
         argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
                                bindEnd: preamble.len,
-                               growable: lvalueIndexGrowable(b.base))
+                               growable: lvalueIndexGrowable(b.base),
+                               lv: addrLv, later: laterActuals(n, i))
         continue
       block:
         var syms: seq[NimNode]
@@ -6456,13 +6888,69 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                                 cell = true)
       argLate[^1] = LateAddr(ok: true, lo: lvLo, hi: lvHi,
                              bindEnd: preamble.len,
-                             growable: lvalueIndexGrowable(addrLv))
+                             growable: lvalueIndexGrowable(addrLv),
+                             lv: addrLv, later: laterActuals(n, i))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(addrLv, newEmptyNode()), mkVar(back),
                         wbPre, ctx)
       writeBacks.add mkBlock(wbPre & @[w])
+      let icd = indexCallDecline(addrLv, n, calleeSym, ctx)   ## RFC-0005 S8br
+      if icd != nil: writeBacks.add icd
       argIRs.add mkVar(cell)
+      continue
+    # RFC-0005 S8bu: a `var openArray` view of an array or a slice.
+    let view = varViewSource(n[i])
+    if view != nil:
+      var lo: IRExpr = nil
+      let t = viewTemp(view, n[i], preamble, ctx, lo)
+      var lv = viewStorage(view)
+      if isVarIndirection(lv): lv = lv[0]
+      block:
+        var syms: seq[NimNode]
+        lvalueVarSyms(lv, syms)
+        for s in syms:
+          if s.strVal notin guards: guards.add s.strVal
+      var heapSteps: seq[NimNode]
+      let root = if lv.kind == nnkSym: lv else: lvalueRoot(lv, heapSteps)
+      if not laterLeavesLvalue(lv, laterActuals(n, i)):
+        # RFC-0005 batch 7: the temporary is the view's elements where the
+        # argument stands; Nim passes the storage's address, so the callee
+        # sees what a later argument's call wrote there, and the write-back
+        # would overwrite that write with the stale copy (a false `sxUnsat`
+        # before batch 7). S8br's frame condition decides it.
+        writeBacks.add ctx.declineAtSite(feEvalOrderUnmodelled,
+          siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
+                  calleeSym.strVal & "` is copied where it stands, and a " &
+                  "later argument's call may write its storage before the " &
+                  "call (feEvalOrderUnmodelled)"),
+          "var openArray view written by a later argument (feEvalOrderUnmodelled)")
+      elif root.isNil or
+         varActualMayAlias(n, i, lv, root, heapSteps, aliasConds,
+                           cellsBound = true):
+        writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+          siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
+                  calleeSym.strVal & "` views a location the callee may " &
+                  "reach another way (or it has no root variable): the " &
+                  "callee's writes to it are not modelled (feUnsupportedOp)"),
+          "var openArray write-back not modelled (feUnsupportedOp)")
+      elif (let g = outerReachesCell(outerOf(), heapSteps); g != nil):
+        writeBacks.add ctx.declineAtSite(feUnsupportedOp,
+          siteMsg(n, "`var openArray` argument `" & view.repr & "` of `" &
+                  calleeSym.strVal & "` views a heap location the callee " &
+                  "can also reach through `" & macros.strVal(g) & "`: the " &
+                  "callee's writes through the two are not modelled in its " &
+                  "order (feUnsupportedOp)"),
+          "var openArray reachable through a global (feUnsupportedOp)")
+      else:
+        # The view is not the storage's own shape: a variable with a cell
+        # declines in the walker (`bindVarLocs`' path it does not follow).
+        var vl: seq[VarLoc]
+        varLocOf(lv, t, "var", preamble, ctx, vl)
+        for l in vl:
+          locs.add (temp: l.temp, root: l.root, path: @["?"], mode: l.mode)
+        writeBacks.add viewWriteBack(view, n[i], t, lo, ctx)
+      argIRs.add mkVar(t)
       continue
     # RFC-0005 S8bd: a by-reference actual is evaluated once, as its base
     # (below); the lvalue itself is lowered only when it is not one.
@@ -6514,7 +7002,8 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           argIRs.add parseExpr(b.base, preamble, ctx)
           argLate[^1] = LateAddr(ok: true, lo: lo, hi: preamble.len,
                                  bindEnd: preamble.len,
-                                 growable: lvalueIndexGrowable(b.base))
+                                 growable: lvalueIndexGrowable(b.base),
+                                 lv: lv, later: laterActuals(n, i))
           byRefTaken = true
     if byRefTaken: continue
     if castBlocked:
@@ -6531,16 +7020,9 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
     let irLo = preamble.len
     var ir = parseExpr(n[i], preamble, ctx)
     let irHi = preamble.len
-    if n[i].kind != nnkHiddenAddr:
-      # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
-      # memory it shares, is a path the walk may keep equal to a cell.
-      var a = n[i]
-      while a.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and a.len > 0 and
-            sameType(a.getTypeInst, a[^1].getTypeInst):
-        a = a[^1]
-      let share = byValueShare(a)
-      if share.len > 0:
-        varLocOf(a, "#" & $(i - 1), share, preamble, ctx, locs)
+    # RFC-0005 S8bs: a by-value argument Nim passes by address, or whose
+    # memory it shares, is a path the walk may keep equal to a cell.
+    byValueLoc(n[i], i - 1, preamble, ctx, locs)
     if n[i].kind == nnkSym and varActualPtrSafety(n[i]) == 2:
       # RFC-0005 S8bn: the caller's own `var` formal passed on to a `var`
       # formal (Nim drops the `addr`); read only for a `var` formal.
@@ -6604,11 +7086,14 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
           # An lvalue shape `parseAsgn` declines is its own scoped marker
           # (`isUnsupported`): every path leaving the call reaches it.
           writeBacks.add(if wbPre.len == 0: w else: mkBlock(wbPre & @[w]))
+          let icd = indexCallDecline(lv, n, calleeSym, ctx)   ## RFC-0005 S8br
+          if icd != nil: writeBacks.add icd
           # RFC-0005 S8bk: copied in at the call, through the address the
           # copy-out writes (`placeLateAddr`).
           argLate[^1] = LateAddr(ok: true, lo: irLo, hi: irHi,
                                  bindEnd: preamble.len,
-                                 growable: lvalueIndexGrowable(lv))
+                                 growable: lvalueIndexGrowable(lv),
+                                 lv: lv, later: laterActuals(n, i))
     argIRs.add ir
   orderOperands(preamble, argMarks, argIRs, argTys, omOperands, ctx,
                 argFixed, argLate)   ## RFC-0005 S8ax, S8bk; S8be: in a `while` guard too
@@ -6635,11 +7120,6 @@ proc userCallStmt(n, calleeSym: NimNode; callKey, retName: string;
                     locs, (if anyVarActual: varSafe else: @[]))
   if writeBacks.len == 0: call
   else: mkTry(call, @[], mkBlock(writeBacks))
-
-const maxModelledInitialSize = 1'i64 shl 20
-  ## RFC-0005 S8at. The largest `initialSize` an `initTable`/`initHashSet`
-  ## call is modelled at (see `parseInitContainer`). RFC-0005 S8bc / batch
-  ## 5: the largest length every seq constructor is (`parseNewSeqLen`).
 
 proc sizeOperandOnce(ir: IRExpr; n: NimNode; preamble: var seq[IRStmt];
                      ctx: ParseCtx): IRExpr =
@@ -6848,7 +7328,7 @@ proc simpleRefExpr(e: NimNode): bool =
     e.len >= 1 and simpleRefExpr(e[^1])
   else: false
 
-proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
+proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
                    preamble: var seq[IRStmt]; ctx: ParseCtx;
                    ordered = false):
                    tuple[e: IRExpr, hoisted: bool] =
@@ -6884,6 +7364,11 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   ## `addr` actual through S8ax's `parseOrderedArgs`, as the sites that
   ## ordered their arguments before S8bh did (a proc-valued variable in
   ## expression position, S8be's call through a proc-valued expression).
+  ##
+  ## RFC-0005 S8bu: a `var openArray` actual as `userCallStmt` passes one:
+  ## a whole seq's view is the seq (`varSeqViews`), an array's or a slice's
+  ## a temporary written back over the elements it views.
+  var n = varSeqViews(n0)   # RFC-0005 S8br: and its hoisted index calls
   let ti = calleeSym.getTypeInst
   var varTys: seq[IRType]
   var anyVar = false
@@ -6902,14 +7387,23 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   var anyAddr = false
   for i in 1 ..< n.len:
     if addrActualLvalue(n[i]) != nil: anyAddr = true
+  # RFC-0005 S8bu: where each argument the walk passes as a value came from,
+  # when it is a path into a routine's variable Nim passes by address or
+  # shares (`ccVarLocs`, as `userCallStmt`'s `cVarLocs`): the walker binds
+  # the formal to the variable's cell when it has one (`bindVarLocs`).
+  var locs: seq[VarLoc]
   if not anyVar and not anyAddr:
-    if ordered:
-      return (e: mkClosureCall(calleeName, parseOrderedArgs(n, 1, preamble, ctx)),
-              hoisted: false)
     var argIRs: seq[IRExpr]
+    if ordered:
+      argIRs = parseOrderedArgs(n, 1, preamble, ctx)
+    else:
+      for i in 1 ..< n.len:
+        argIRs.add parseExpr(n[i], preamble, ctx)
+    # The index of a path is read without side effects (`stableIndex`), so
+    # reading it after the arguments reads the value the argument used.
     for i in 1 ..< n.len:
-      argIRs.add parseExpr(n[i], preamble, ctx)
-    return (e: mkClosureCall(calleeName, argIRs), hoisted: false)
+      byValueLoc(n[i], i - 1, preamble, ctx, locs)
+    return (e: mkClosureCall(calleeName, argIRs, locs = locs), hoisted: false)
   let nArgs = n.len - 1
   proc isVarFormal(k: int): bool = k < varTys.len and varTys[k] != nil
   proc declineHere(msg: string): IRStmt =
@@ -6918,18 +7412,18 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
               " (feUnsupportedOp, RFC-0005 S8bh)"),
       "closure call var/addr effect not modelled (feUnsupportedOp)")
   # The location each `var`/`addr` actual hands the callee.
+  proc actualLv(a: NimNode; k: int): NimNode =
+    let al = addrActualLvalue(a)
+    if al != nil:
+      result = al
+    elif isVarFormal(k) and varViewSource(a) == nil:   # RFC-0005 S8bu
+      if a.kind == nnkHiddenAddr and a.len == 1:
+        result = a[0]
+        if isVarIndirection(result): result = result[0]
+      elif a.kind == nnkSym:
+        result = a   ## a `var` formal passed on (Nim drops the addr)
   var lvOf = newSeq[NimNode](nArgs + 1)
-  for i in 1 ..< n.len:
-    let a = addrActualLvalue(n[i])
-    if a != nil:
-      lvOf[i] = a
-    elif isVarFormal(i - 1):
-      if n[i].kind == nnkHiddenAddr and n[i].len == 1:
-        var lv = n[i][0]
-        if isVarIndirection(lv): lv = lv[0]
-        lvOf[i] = lv
-      elif n[i].kind == nnkSym:
-        lvOf[i] = n[i]   ## a `var` formal passed on (Nim drops the addr)
+  for i in 1 ..< n.len: lvOf[i] = actualLv(n[i], i - 1)
   # S8bf's peers: two heap lvalues that may be one cell through different
   # refs. Two `addr`s, or two `var`s, of one lvalue are one location
   # already (`same`), not a pair.
@@ -6937,9 +7431,12 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   for i in 1 ..< n.len: same[i] = i
   var peers = newSeq[seq[int]](nArgs + 1)
   for i in 1 ..< n.len:
-    if lvOf[i].isNil: continue
+    # RFC-0005 S8br: a call in an index names a location each time it is
+    # evaluated (`hoistIndexCalls`), never one an earlier actual spells
+    # alike.
+    if lvOf[i].isNil or hasIndexCall(n[i], false): continue
     for j in 1 ..< i:
-      if lvOf[j].isNil: continue
+      if lvOf[j].isNil or hasIndexCall(n[j], false): continue
       if (addrActualLvalue(n[i]) != nil) != (addrActualLvalue(n[j]) != nil):
         continue
       if scopedRepr(lvOf[i]) == scopedRepr(lvOf[j]):
@@ -6987,13 +7484,58 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
   var argLate = newSeq[LateAddr](nArgs)
   for i in 1 ..< n.len:
     let k = i - 1
-    let lv = lvOf[i]
+    var lv = lvOf[i]
     argMarks.add preamble.len
     argTys.add(if n[i].typeKind != ntyNone: classifyType(n[i]).ty else: nil)
     argFixed.add(not lv.isNil)
+    let view = varViewSource(n[i])
+    if view != nil:
+      # RFC-0005 S8bu: a `var openArray` view of an array or a slice.
+      var lo: IRExpr = nil
+      let t = viewTemp(view, n[i], preamble, ctx, lo)
+      var vlv = viewStorage(view)
+      if isVarIndirection(vlv): vlv = vlv[0]
+      var heapSteps: seq[NimNode]
+      let root = if vlv.kind == nnkSym: vlv else: lvalueRoot(vlv, heapSteps)
+      addTouch(vlv, heapSteps)
+      if not laterLeavesLvalue(vlv, laterActuals(n, i)):
+        # RFC-0005 batch 7: as `userCallStmt`'s view, copied where it
+        # stands, while Nim passes the storage a later argument may write.
+        declines.add ctx.declineAtSite(feEvalOrderUnmodelled,
+          siteMsg(n, "call through `" & calleeName & "`: `var openArray` " &
+                  "argument `" & view.repr & "` is copied where it stands, " &
+                  "and a later argument's call may write its storage before " &
+                  "the call (feEvalOrderUnmodelled)"),
+          "var openArray view written by a later argument (feEvalOrderUnmodelled)")
+      if root.isNil or
+         varActualMayAlias(n, i, vlv, root, heapSteps, aliasConds, peers[i]):
+        declines.add declineHere("`var openArray` argument `" & view.repr &
+          "` views a location the callee may reach another way (or it has " &
+          "no root variable)")
+      var vl: seq[VarLoc]
+      varLocOf(vlv, t, "var", preamble, ctx, vl)
+      for l in vl:
+        locs.add (temp: l.temp, root: l.root, path: @["?"], mode: l.mode)
+      cellBacks.add viewWriteBack(view, n[i], t, lo, ctx)
+      argIRs.add mkVar(t)
+      continue
     if lv.isNil:
       argIRs.add parseExpr(n[i], preamble, ctx)
+      byValueLoc(n[i], k, preamble, ctx, locs)   ## RFC-0005 S8bu
       continue
+    # RFC-0005 S8br: a call in the lvalue's index is evaluated once, here,
+    # as for a direct call (`hoistIndexCalls`).
+    if hasIndexCall(n[i], false):
+      let h = hoistIndexCalls(n[i], false, preamble, ctx)
+      let nn = copyNimNode(n)
+      for j in 0 ..< n.len: nn.add(if j == i: h else: n[j])
+      n = nn
+      lv = actualLv(h, k)
+      lvOf[i] = lv
+    if (let c = indexCallLeft(lv, false); c != nil):
+      declines.add declineHere("the index of `" & lv.repr & "` calls `" &
+        c.repr & "`, which Nim evaluates once, where the argument stands; " &
+        "the write-back after the call would evaluate it again")
     if lv.kind != nnkSym and lvalueCastBlocks(lv):
       # RFC-0005 batch 5 (S8bg on S8bh's path): a `var` / `addr` actual
       # reached through a `cast` declines naming the cast, as a direct
@@ -7009,14 +7551,6 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     var heapSteps: seq[NimNode]
     let root = lvalueRoot(lv, heapSteps)
     addTouch(lv, heapSteps)
-    # RFC-0005 S8bs: a path into a routine's variable, which may have an
-    # address cell the body reaches through a pointer (`c:`, checked by the
-    # walker, `lowerClosureCall`).
-    if lv.kind != nnkSym and heapSteps.len == 0 and root != nil and
-       root.kind == nnkSym and
-       symKind(root) in {nskVar, nskLet, nskParam, nskResult, nskForVar} and
-       not isModuleGlobal(root) and ("c:" & strVal(root)) notin touch:
-      touch.add "c:" & strVal(root)
     var skip = peers[i]
     for j in 1 ..< n.len:
       if j != i and same[j] == same[i]: skip.add j
@@ -7044,6 +7578,7 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       cellOfArg[i] = cell
       let ptrTy = classifyType(n[i]).ty
       let elemTy = classifyType(lv).ty
+      varLocOf(lv, cell, "addr", preamble, ctx, locs)   ## RFC-0005 S8bu
       let lvLo = preamble.len
       let lvIR = parseExpr(lv, preamble, ctx)
       let lvHi = preamble.len
@@ -7051,7 +7586,8 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
       preamble.add mkDerefWrite(mkVar(cell), lvIR, elemTy, ptrFamily = true,
                                 cell = true)
       argLate[k] = LateAddr(ok: true, lo: lvLo, hi: lvHi, bindEnd: preamble.len,
-                            growable: lvalueIndexGrowable(lv))
+                            growable: lvalueIndexGrowable(lv), lv: lv,
+                            later: laterActuals(n, i))
       let back = freshSynth(ctx, "addrBack")
       var wbPre = @[mkPtrDeref(back, mkVar(cell), elemTy, cell = true)]
       let w = parseAsgn(nnkAsgn.newTree(lv, newEmptyNode()), mkVar(back),
@@ -7074,8 +7610,10 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     # RFC-0005 batch 5 (S8bk): copied in at the call, through the address
     # the write-back writes.
     argLate[k] = LateAddr(ok: true, lo: irLo, hi: irHi, bindEnd: preamble.len,
-                          growable: lvalueIndexGrowable(lv))
+                          growable: lvalueIndexGrowable(lv), lv: lv,
+                          later: laterActuals(n, i))
     temps[i] = t
+    varLocOf(lv, t, "var", preamble, ctx, locs)   ## RFC-0005 S8bu
     backs.add (i: i, lv: lv)
     argIRs.add mkVar(t)
   # RFC-0005 batch 5 (S8bk on S8bh's path): Nim takes a `var` / `addr`
@@ -7134,7 +7672,7 @@ proc closureCallIR(n, calleeSym: NimNode; calleeName: string;
     for k, a in aliasV:
       if a != k: identity = false
     if identity: aliasV = @[]
-    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV,
+    mkClosureCall(calleeName, argIRs, varTys, aliasV, addrArgs, touchV, locs,
                   varSafe)
   proc wrap(call: IRExpr; wbs: seq[IRStmt]): IRStmt =
     let l = mkLet(synth, retTy, call)
@@ -7894,6 +8432,11 @@ proc parseExpr*(n: NimNode, preamble: var seq[IRStmt], ctx: ParseCtx): IRExpr =
   # result (`markByRef`) is its parameter, as a marked symbol is.
   if n.kind != nnkSym and n.len == 0 and byRefName(n).len > 0:
     return mkVar(byRefName(n))
+  # RFC-0005 S8bu: an `openArray` actual is the seq it views.
+  if isToOpenArray(n) or
+     (n.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkConv} and n.len == 2 and
+      n.typeKind == ntyOpenArray):
+    return openArrayView(n, preamble, ctx)
   # RFC-0005 S8bc (item 2): a non-operator `{.borrow.}` routine call is its
   # base routine's call on the unwrapped arguments (`borrowRoutineRewrite`).
   block borrowRoutine:
@@ -13546,12 +14089,25 @@ proc bindIterArg(impl, formalSym, tyNode, arg: NimNode;
   if tyNode.kind == nnkVarTy:
     var a = arg
     if a.kind == nnkHiddenAddr and a.len == 1: a = a[0]
+    # RFC-0005 S8bu: a `var openArray` formal viewing a whole seq is the
+    # seq (`varSeqViews`).
+    let src = openArraySource(a)
+    if src != a and not isToOpenArray(src) and
+       classifyType(src).ty.kind == itSeq:
+      a = src
     var b = ByRefSub(isPtr: false, tail: a)
     b.addrNode = newNimNode(nnkHiddenAddr)
     b.addrNode.add copyNimTree(a)
     body = substByRefBody(body, f, b)
     return true
   var hasIx = false
+  # RFC-0005 S8bu: a by-value `openArray` formal viewing a whole seq, or a
+  # whole array whose first index is 0, is that location.
+  var arg = arg
+  let src = openArraySource(arg)
+  if src != arg and not isToOpenArray(src):
+    let k = classifyType(src).ty.kind
+    if k == itSeq or (k == itArray and arrayIndexLow(src) == 0): arg = src
   if not iterArgPath(arg, hasIx): return false
   if not hasIx:
     body = substIterArg(body, f, arg)
@@ -14468,7 +15024,9 @@ proc pureIndexExpr(n: NimNode): bool =
   ## literals, conversions, field and index reads, and builtin operators. A
   ## write's chain is parsed more than once (the read `op=` and a variant
   ## check make, then each rebuilt level), so an index that called a routine
-  ## would call it more than once; such an index declines.
+  ## would call it more than once; such an index declines. RFC-0005 S8br: a
+  ## call's mark (`hoistIndexCalls`) is a symbol, the `let` holding its
+  ## result.
   case n.kind
   of nnkSym, nnkCharLit..nnkUInt64Lit: true
   of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkHiddenDeref, nnkPar,
@@ -15517,6 +16075,36 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
         return mkFieldDerefWrite(ptrIR, valIR, fieldTy, pointeeTy,
                                  fieldName, isPtr)
   let lhs = unwrapHidden(n[0])
+  if lhs.kind == nnkBracketExpr and lhs.len == 2 and
+     lhs[0].kind in {nnkDerefExpr, nnkHiddenDeref} and lhs[0].len == 1 and
+     not isVarIndirection(lhs[0]):
+    # RFC-0005 S8bu: `p[][i] = v`, an element of a seq written through a
+    # `ref`/`ptr` to the whole seq (`gps = addr s`). It was the
+    # "unsupported nnkAsgn shape" decline. The pointer is read once, the
+    # seq read through it, the element checked before the value is
+    # evaluated (as `s[i] = v`), written (`isIndexAssign`, its IndexDefect
+    # fork), and the seq stored back: an in-place write of the cell, which
+    # a by-value copy sharing its memory sees (`syncAddrCells`' `view`).
+    var operand = lhs[0][0]
+    if operand.kind == nnkHiddenDeref and operand.len == 1 and
+       classifyType(operand[0]).ty.kind in {itRef, itPtr}:
+      operand = operand[0]
+    let opCls = classifyType(operand)
+    if opCls.ty.kind in {itRef, itPtr}:
+      let isPtr = opCls.ty.kind == itPtr
+      let pointeeTy = if isPtr: opCls.ty.ptrPointeeTy else: opCls.ty.refPointeeTy
+      if pointeeTy.kind == itSeq:
+        let pt = freshSynth(ctx, "dixPtr")
+        preamble.add mkLet(pt, opCls.ty, parseExpr(operand, preamble, ctx))
+        let tmp = freshSynth(ctx, "dixSeq")
+        preamble.add(if isPtr: mkPtrDeref(tmp, mkVar(pt), pointeeTy)
+                     else: mkDeref(tmp, mkVar(pt), pointeeTy))
+        let idxIR = parseExpr(lhs[1], preamble, ctx)
+        preamble.add mkIndexStmt(freshSynth(ctx, "awck"), mkVar(tmp), idxIR,
+                                 pointeeTy.seqElemTy, siteLoc(n))
+        let valIR = asgnRhs()
+        preamble.add mkIndexAssignStmt(tmp, idxIR, valIR, siteLoc(n))
+        return mkDerefWrite(mkVar(pt), mkVar(tmp), pointeeTy, isPtr)
   if lhs.kind == nnkBracketExpr and lhs.len == 2:
     let recv = unwrapHidden(lhs[0])
     if recv.kind == nnkSym:
@@ -15709,6 +16297,117 @@ proc parseAsgn(n: NimNode, rhsOverride: IRExpr,
       let fw = valueFieldWrite(lhs, val, preamble, ctx)
       return fw.toStmt
   ctx.declineMarker(feUnsupportedStmtKind, &"unsupported nnkAsgn shape: {n.repr}")
+
+proc yieldedElement(n: NimNode): NimNode =
+  ## RFC-0005 S8bu. The typed element `a[i]` an instantiated `mitems` /
+  ## `mpairs` yields by address (`yield a[i]`, `yield (i, a[i])`); nil when
+  ## the body has no such yield.
+  if n.kind == nnkYieldStmt and n.len == 1:
+    var e = n[0]
+    while e.kind in {nnkHiddenSubConv, nnkHiddenStdConv} and e.len == 2:
+      e = e[1]
+    if e.kind in {nnkTupleConstr, nnkPar} and e.len == 2: e = e[1]
+    if e.kind == nnkHiddenAddr and e.len == 1: e = e[0]
+    if e.kind == nnkBracketExpr and e.len == 2 and e[1].kind == nnkSym:
+      return e
+    return nil
+  for c in n:
+    let r = yieldedElement(c)
+    if r != nil: return r
+  nil
+
+proc parseMutIter(n, iterExpr, bodyNode: NimNode; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8bu. `for x in mitems(c)` / `for i, x in mpairs(c)` over a
+  ## seq or an array. Nim yields each element by address (`var T`), and its
+  ## inline expansion makes the body's `x` that element: `x` is spelled
+  ## `c[k]` in the body (`substByRefBody`, as an iterator's `var` formal is),
+  ## `k` the iteration's position (a marked copy of the iterator's own
+  ## counter, `markByRef`, so the element node keeps its type). A write
+  ## through `x`, through another name for the element (`addr c[k]` taken
+  ## before the loop), and a read of `c` in the body are all one location.
+  ## `c` is a location (`iterArgPath`); its indices are read once, when the
+  ## loop starts. A seq is walked as Nim's `while k < L` with `L` its length
+  ## when the loop starts; a length that changed by the end of an iteration
+  ## (Nim's `assert`) is declined on its paths. An array is unrolled. Before,
+  ## the stdlib body was inlined and declined at `unCheckedInc`'s pragma (a
+  ## seq) or at `low(IX)` (an array).
+  let isPairs = iterExpr[0].strVal == "mpairs"
+  if (isPairs and n.len != 4) or (not isPairs and n.len != 3):
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"for-loop over `{iterExpr[0].strVal}` with {n.len - 2} loop " &
+      "variable(s): only `for x in mitems(c)` and `for i, x in mpairs(c)` " &
+      "are modelled")
+  var c = iterExpr[1]
+  if c.kind == nnkHiddenAddr and c.len == 1: c = c[0]
+  c = openArraySource(c)
+  let cls = classifyType(c).ty
+  var impl: NimNode = nil
+  if iterExpr[0].kind == nnkSym:
+    impl = iterExpr[0].getImpl
+  let ybr = if impl != nil and impl.kind == nnkIteratorDef: yieldedElement(body(impl))
+            else: nil
+  var hasIx = false
+  if cls.kind notin {itSeq, itArray} or ybr == nil or
+     not iterArgPath(c, hasIx):
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"RFC-0005 S8bu: `{iterExpr[0].strVal}` over `{c.repr}` (a " &
+      &"{cls.kind}) is not modelled: the walk follows it over a seq or an " &
+      "array location only")
+  var pre: seq[IRStmt]
+  var ok = true
+  let fixed = if hasIx: hoistIterIndices(c, pre, ctx, ok) else: c
+  let mark = markByRef(ybr[1])
+  if not ok or mark.isNil:
+    return ctx.declineMarker(feUnsupportedStmtKind,
+      &"RFC-0005 S8bu: `{iterExpr[0].strVal}` over `{c.repr}`: an index of " &
+      "the location has no name the walk can fix")
+  let elem = copyNimNode(ybr)
+  elem.add copyNimTree(stripFieldChecks(fixed))
+  elem.add mark
+  var sub = ByRefSub(isPtr: false, tail: elem)
+  sub.addrNode = newNimNode(nnkHiddenAddr)
+  sub.addrNode.add copyNimTree(elem)
+  let xSym = n[n.len - 3]
+  let body0 = substByRefBody(bodyNode, xSym, sub)
+  let k = strVal(mark)
+  let kTy = classifyType(ybr[1]).ty
+  let (body, unrollBrk) = parseLoopBody(body0, ctx,
+                                        unrolled = cls.kind == itArray)
+  var stmts = pre
+  if cls.kind == itArray:
+    let lo = arrayIndexLow(c)
+    var iters: seq[IRStmt]
+    for q in 0 ..< cls.size:
+      iters.add mkLet(k, kTy, mkIntLit(lo + int64(q)))
+      if isPairs:
+        iters.add mkLet(strVal(n[0]), classifyType(n[0]).ty, mkVar(k))
+      iters.add body
+    if unrollBrk.len > 0: stmts.add mkLabelledBlock(unrollBrk, iters)
+    else: stmts.add iters
+    return mkBlock(stmts)
+  let seqIR = parseExpr(fixed, stmts, ctx)
+  let lenName = freshSynth(ctx, "miLen")
+  let intTy = tInt(64, signed = true)
+  stmts.add mkLet(lenName, intTy, mkSeqLen(seqIR))
+  let iv = freshSynth(ctx, "miIv")
+  stmts.add mkLet(iv, intTy, mkIntLit(0))
+  var loopStmts = @[mkLet(k, kTy, mkVar(iv))]
+  if isPairs:
+    loopStmts.add mkLet(strVal(n[0]), classifyType(n[0]).ty, mkVar(iv))
+  loopStmts.add body
+  loopStmts.add mkAssign(iv, mkBinop(bAdd, mkVar(iv), mkIntLit(1)))
+  var lp: seq[IRStmt]
+  let lenNow = mkSeqLen(parseExpr(fixed, lp, ctx))
+  for st in lp: loopStmts.add st
+  loopStmts.add mkIf(@[mkBranch(mkBinop(bNe, lenNow, mkVar(lenName)),
+    ctx.declineAtSite(feUnsupportedOp,
+      siteMsg(n, "RFC-0005 S8bu: the length of `" & c.repr & "` changed " &
+              "during an iteration of `" & iterExpr[0].strVal & "`: Nim's " &
+              "`assert` there, and the element it yielded by address, are " &
+              "not modelled (feUnsupportedOp)"),
+      "mitems over a seq whose length changed (feUnsupportedOp)"))])
+  stmts.add mkWhile(mkBinop(bLt, mkVar(iv), mkVar(lenName)), mkBlock(loopStmts))
+  mkBlock(stmts)
 
 proc parseBorrowViewedStmt(rw: NimNode,
                            views: seq[tuple[node, baseTy: NimNode]],
@@ -15932,6 +16631,10 @@ proc parseStmtInner(n: NimNode,
       allStmts.add initStmt
       allStmts.add whileSt
       mkBlock(allStmts)
+    elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
+         iterExpr[0].kind == nnkSym and
+         isBuiltinNamed(iterExpr[0], ["mitems", "mpairs"]):
+      parseMutIter(n, iterExpr, bodyNode, ctx)   # RFC-0005 S8bu
     elif iterExpr.kind == nnkCall and iterExpr.len == 2 and
          iterExpr[0].kind == nnkSym and isBuiltinNamed(iterExpr[0], ["items", "pairs"]):
       # `for x in container` semchecks to `for x in items(container)`.

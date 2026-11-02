@@ -69,7 +69,8 @@ suite "S8bm (1): step 1 is independent of the facts-first check":
     ## (`rlimitCountNow`). Step 1's units are spent in a context of its
     ## own, so the reading adds them (`ownContextUnits`): without that, a
     ## hit whose step 1 ran out of budget read as cheap. B1-1's hit is its
-    ## target query, SAT at step 1.
+    ## target query, SAT at step 1. (RFC-0005 S8bp: every search is now in
+    ## a context of its own, and the reading is `ownContextUnits` alone.)
     symexTargetSolveStats = (budgetOut: 0, declined: 0, slowSat: 0, units: 0)
     let w = walkB11(factsFirst = true)
     check w.status == sxSat

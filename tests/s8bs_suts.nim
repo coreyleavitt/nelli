@@ -413,34 +413,32 @@ proc sutOpenArrayRead(k: int) =
   if r == k and k == 25: symexTarget("or")
   if r != k: symexTarget("or_dead")
 
-# A `seq[bool]`: an element cell of a `seq[int]` holds an Int-sorted heap
-# against the seq's bit-vector data, and an unsatisfiable query over the two
-# does not terminate (a different mechanism, reported in the RFC).
-var gpbo: ptr bool
-
-proc takeS(t: sink seq[bool], k: int): bool =
-  gpbo[] = k > 3
+# A `seq[int]`: an element cell holds an Int-sorted heap against the seq's
+# bit-vector data (S8bs used `seq[bool]` here: the unsatisfiable query over
+# the two did not terminate until RFC-0005 S8bu's `bvIntInverseFacts`).
+proc takeS(t: sink seq[int], k: int): int =
+  gpi[] = k
   t[0]
 
 proc sutSink(k: int) =
-  var s = @[false, false]
-  gpbo = addr s[0]
+  var s = @[0, 0]
+  gpi = addr s[0]
   let r = takeS(s, k)
-  if r == (k > 3) and k == 26: symexTarget("sk")
-  if r != (k > 3): symexTarget("sk_dead")
+  if r == k and k == 26: symexTarget("sk")
+  if r != k: symexTarget("sk_dead")
 
-iterator itv(a: var seq[bool]; k: int): bool =
-  a[0] = k > 3
-  gpbo[] = true
+iterator itv(a: var seq[int]; k: int): int =
+  a[0] = k
+  gpi[] = 7
   yield a[0]
 
 proc sutIterVar(k: int) =
-  var s = @[false, false]
-  gpbo = addr s[0]
-  var got = false
+  var s = @[0, 0]
+  gpi = addr s[0]
+  var got = 0
   for x in itv(s, k): got = x
-  if got and s[0] and k == 27: symexTarget("iv")
-  if not got or not s[0]: symexTarget("iv_dead")
+  if got == 7 and s[0] == 7 and k == 27: symexTarget("iv")
+  if got != 7 or s[0] != 7: symexTarget("iv_dead")
 
 proc sutMitems(k: int) =
   var s = @[0, 0]
@@ -542,17 +540,17 @@ proc sutIterValBody(k: int) =
 
 # ---- a by-value parameter Nim passes by address or shares -----------------
 
-proc rdSeq(t: seq[bool], k: int): bool =
-  gpbo[] = k > 3
+proc rdSeq(t: seq[int], k: int): int =
+  gpi[] = k
   t[0]
 
 proc sutSeqByValue(k: int) =
   ## A seq parameter shares its caller's elements.
-  var s = @[false, false]
-  gpbo = addr s[0]
+  var s = @[0, 0]
+  gpi = addr s[0]
   let r = rdSeq(s, k)
-  if r == (k > 3) and k == 29: symexTarget("sv")
-  if r != (k > 3): symexTarget("sv_dead")
+  if r == k and k == 29: symexTarget("sv")
+  if r != k: symexTarget("sv_dead")
 
 var gps: ptr seq[int]
 
@@ -599,11 +597,12 @@ proc sutBigByValue(k: int) =
   if r == k and k == 32: symexTarget("bg")
   if r != k: symexTarget("bg_dead")
 
-# A `bool` field: the callee's result read from an `int` field heap is
-# linked to the caller's bit-vector by `bv2int`, and Z3 does not decide that
-# unsatisfiable query (a different mechanism, reported in the RFC).
+# An `int` field: the callee's result read from an `int` field heap is
+# linked to the caller's bit-vector by `bv2int` (S8bs used a `bool` field
+# here: Z3 did not decide that unsatisfiable query until RFC-0005 S8bu's
+# `bvIntInverseFacts`).
 type BigF = object
-  x: bool
+  x: int
   a, b, c: int
 
 type HoldBig = object
@@ -612,26 +611,26 @@ type HoldBig = object
 
 var gphb: ptr HoldBig
 
-proc rdBigH(b: BigF, k: int): bool =
-  gphb[].bg.x = k > 3
+proc rdBigH(b: BigF, k: int): int =
+  gphb[].bg.x = k
   b.x
 
 proc sutBigFieldByValue(k: int) =
-  var h = HoldBig(bg: BigF(x: false), n: 0)
+  var h = HoldBig(bg: BigF(x: 0), n: 0)
   gphb = addr h
   let r = rdBigH(h.bg, k)
-  if r == (k > 3) and k == 33: symexTarget("bh")
-  if r != (k > 3): symexTarget("bh_dead")
+  if r == k and k == 33: symexTarget("bh")
+  if r != k: symexTarget("bh_dead")
 
 proc sutNestedSameFrame(k: int) =
   ## A write through a pointer to an object into a field of its nested
   ## object, read back in the same frame.
-  var h = HoldBig(bg: BigF(x: false), n: 0)
+  var h = HoldBig(bg: BigF(x: 0), n: 0)
   gphb = addr h
-  gphb[].bg.x = k > 3
+  gphb[].bg.x = k
   let r = h.bg.x
-  if r == (k > 3) and k == 36: symexTarget("ns")
-  if r != (k > 3): symexTarget("ns_dead")
+  if r == k and k == 36: symexTarget("ns")
+  if r != k: symexTarget("ns_dead")
 
 var gpsm: ptr Box
 

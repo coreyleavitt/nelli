@@ -504,7 +504,9 @@ suite "RFC-0005 S7 (e) -- structural: sinks, funnel, drain map":
     ## escaping `addr` pointer; more than two actuals on one location; no
     ## specialised body for an aliased pair; a var actual naming no
     ## variable). RFC-0005 S8bs adds the decline of a capture whose address
-    ## is taken (a cell the body may also reach through the pointer).
+    ## is taken (a cell the body may also reach through the pointer);
+    ## RFC-0005 S8bu replaces it with the decline of an actual the closure
+    ## descent cannot bind to such a cell (`bindVarLocs`).
     check degradeSites == 20
 
   test "every closure-sink site's kind is a classified S7 kind, never a ⊤ default":

@@ -203,7 +203,25 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "230"
+const symexWalkerVersion* = "237"
+  ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
+  ## batch 6 as one integration branch under ONE walker number; their
+  ## bullets follow, each naming its provisional number. The stack's own
+  ## changes: S8bp's own-context search is the one `checkCapped` solve
+  ## (`ownContextCheck`), and S8bu's bounded solve (`solveBounded`, the
+  ## timeout reason) runs inside it, so every step -- S8bj's step 0, the
+  ## facts-first steps, (1) to (3) and the plain query -- is isolated and
+  ## bounded; S8bu's inverse facts join S8bp's merged memberships. Every
+  ## per-thread kind probe (batch 4's const-array, S8ax's store / ite,
+  ## S8bq's uninitialized kinds, S8bu's select / int2bv / eq) builds in
+  ## S8bp's `probeContext`. S8bu's openArray view and S8br's index-call
+  ## hoist share one normalised call (`varSeqViews`, then
+  ## `hoistIndexCalls`). SOUNDNESS: a `var openArray` view of an array or
+  ## a slice is copied where the argument stands, while Nim passes the
+  ## storage; a later argument's call that wrote it (`fill(a, bump())`) was
+  ## overwritten by the write-back -- a false `sxUnsat` at S8bu's tip. It
+  ## declines on S8br's frame condition (`laterLeavesLvalue`). 230 -> 237.
+  ##
   ## RFC-0005 batch 6 (2026-10-03) — S8bs, S8bn, S8bl, S8bq and S8bw land
   ## stacked on batch 5 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own
@@ -259,6 +277,56 @@ const symexWalkerVersion* = "230"
   ## closure call in it was applied by each guard branch and by the result
   ## (a false `sxSat` and a false `sxUnsat` on what it writes). S8bj's
   ## step-table `run` (`__regexStep`) carries S8bi's fuel. 217 -> 223.
+  ##
+  ## RFC-0005 S8bp (2026-10-03) — no walker search depends on what the
+  ## walk, or an earlier walk on the thread, left in Z3's context. Every
+  ## `checkCapped` step (not only S8bm's step 1) searches in a fresh
+  ## context of its own: with thirty unrelated constants made before each
+  ## query, the theory-free steps, (2), (3) and the no-string query all
+  ## moved (Z3 5.1: (2) 401,123 units against 231,590). The per-thread
+  ## kind probes build their terms in a context of their own, so a
+  ## thread's first walk searches as its later ones do (Z3 5.1: a step-3
+  ## search took 482,126 units in the first walk and 85,882 in the
+  ## second). Both change which search decides a query under a budget.
+  ## And a string's regex memberships, one of them negated, are decided as
+  ## one membership of the intersection with the complement
+  ## (`mergeMemberships`), with `contains` / `match` from a literal 0
+  ## reading the string itself: S8ay's unbounded `s.endsWith(re"b+") and
+  ## not s.contains(re"b")` was `sxUnknown` on Z3 4.13.4 (11.2M units) and
+  ## is UNSAT in 4,733. Provisional 219 (215 to 218 are held by slices
+  ## still running). 214 -> 219.
+  ##
+  ## RFC-0005 S8bu (2026-10-03, provisional) — S8bs's remainder. Every
+  ## query is decided beside the inverse of each signed Int view it holds
+  ## (`int2bv(sbv2int(x)) == x` for an `int2bv` of a view, `sbv2int(x) ==
+  ## sbv2int(y)` implies `x == y`; `bvIntInverseFacts`): an `int` read
+  ## across the Int-heap / bit-vector bridge gave Z3 UNSAT queries it never
+  ## decided, and `queryRLimit` now defaults to 250M and `queryTimeoutMs`
+  ## to 10 minutes, so no query is unbounded under the defaults (an
+  ## exhausted one declines). 222 -> 225.
+  ## An `openArray[T]` is the seq it views (a seq, an array's elements, a
+  ## `toOpenArray` slice, `iekSeqSlice.ssView`, whose bounds take the
+  ## signed Int bridge); a `var` one is written back over what it views
+  ## (`iekSeqSplice`).
+  ## `mitems` / `mpairs` make the loop variable the element itself.
+  ## A path into an address-taken variable steps through an array element,
+  ## at a constant or a symbolic index.
+  ## A by-value seq of an address-taken seq is a `view` of its cell, which
+  ## declines once the cell is assigned whole or resized; `p[][i] = v` is
+  ## modelled.
+  ##
+  ## RFC-0005 S8br (provisional 229; 224-228 held by slices still running)
+  ## — S8bk's remainder. A call in a by-address actual's index
+  ## (`touch(gArr[nextI()], f())`) is evaluated once, where the argument
+  ## stands, into a `let` the lvalue then names (`hoistIndexCalls`): the
+  ## copy-in, the copy-out and S8an's cell reach the element through it.
+  ## Before, the copy-out re-parsed the call: an array element declined
+  ## (`unsupported nnkAsgn shape`), and a seq element called it twice (a
+  ## false `sxSat` and a false `sxUnsat`). A by-address argument whose index
+  ## check no snapshot carries (`gH.s[gi]`) declines only when a later
+  ## argument may write a location its lvalue reads (`laterLeavesLvalue`,
+  ## S8as/S8ax's write summary); S8bk declined it whenever a later argument
+  ## may write anything. 223 -> 229.
   ##
   ## RFC-0005 S8bs (2026-10-03, provisional) — a `var` actual whose
   ## variable has an address cell was copied in and written back, so a
@@ -5408,6 +5476,19 @@ proc lookupLocal(env: LocalEnv, name: string): string =
   else:
     name  # free — encode by original name
 
+proc varLocKeys(locs: seq[VarLoc]; env: LocalEnv): seq[string] =
+  ## RFC-0005 S8bs. Where each copy-in/copy-out argument came from
+  ## (`IRStmt.cVarLocs`; RFC-0005 S8bu: `IRExpr.ccVarLocs` too) decides
+  ## whether the walk binds its formal to an address cell, so it keys the
+  ## call.
+  for l in locs:
+    var steps: seq[string]
+    for st in l.path:
+      steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
+                else: st)
+    result.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
+               "/" & steps.join("/") & ":" & l.mode
+
 # ---- IRExpr -----------------------------------------------------------------
 
 proc binopTag(op: IRBinop): string =
@@ -5533,7 +5614,11 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
   of iekSeqLen:    "Ex<SL:" & canonicalize(e.lenObj, env) & ">"
   of iekSeqSlice:  "Ex<SSL:" & canonicalize(e.ssBase, env) & ":" &
                    canonicalize(e.ssLo, env) & ":" &
-                   canonicalize(e.ssHi, env) & ">"   ## v67: seq-slice view
+                   canonicalize(e.ssHi, env) &
+                   (if e.ssView: ":view" else: "") & ">"   ## v67; S8bu
+  of iekSeqSplice: "Ex<SSP:" & canonicalize(e.spBase, env) & ":" &
+                   canonicalize(e.spAt, env) & ":" &
+                   canonicalize(e.spPart, env) & ">"   ## RFC-0005 S8bu
   of iekStrLit:    "Ex<S:" & e.sval.escape & ">"
   of iekContains:
     "Ex<C:" & canonicalize(e.container, env) & ";" &
@@ -5590,10 +5675,12 @@ proc canonicalize(e: IRExpr, env: LocalEnv): string =
     # RFC-0005 S8bh: the call's `var`/`addr` effects.
     var vts: seq[string]
     for t in e.ccVarTys: vts.add(if t.isNil: "-" else: canonicalize(t))
+    # RFC-0005 S8bu: and where its arguments came from (`ccVarLocs`).
     "Ex<CC:" & e.ccCallee & "(" & argKeys.join(",") & ")" &
       ";var=[" & vts.join(",") & "];alias=" & $e.ccAlias &
       ";addr=" & $e.ccAddrArgs & ";touch=[" & e.ccTouch.join(",") & "]" &
-      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") & ">"
+      (if e.ccVarPtrSafe.len > 0: ";vps=" & $e.ccVarPtrSafe else: "") &
+      ";locs=[" & varLocKeys(e.ccVarLocs, env).join(",") & "]>"
   of iekSeqLit:                          ## Phase 15 C4
     var es: seq[string]
     for c in e.seqLitElems: es.add canonicalize(c, env)
@@ -5679,14 +5766,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     for g in s.cGuardRoots: guards.add lookupLocal(env, g)
     # RFC-0005 S8bs: where a copy-in/copy-out argument came from decides
     # whether the walk binds its formal to an address cell.
-    var locs: seq[string]
-    for l in s.cVarLocs:
-      var steps: seq[string]
-      for st in l.path:
-        steps.add(if st.startsWith("["): "[" & lookupLocal(env, st[1 .. ^1])
-                  else: st)
-      locs.add lookupLocal(env, l.temp) & "@" & lookupLocal(env, l.root) &
-               "/" & steps.join("/") & ":" & l.mode
+    let locs = varLocKeys(s.cVarLocs, env)
     "St<Cl:" & s.callee & ";opaque=" & $s.opaque & ";inert=" & $s.opaqueInert &
       ";ret=" & retSlot &
       ";retTy=" & canonicalize(s.retTy) & ";args=[" & args.join(",") & "]" &
@@ -5966,6 +6046,9 @@ proc canonicalize*(s: SymexSettings): string =
   ##                        a string / seq; a query it cuts off is
   ##                        sxUnknown. Rendered `;sqr=` only when not the
   ##                        default 20M (default keys unchanged).
+  ##   queryTimeoutMs     — RFC-0005 S8bu: the wall-clock bound of every
+  ##                        solve; one it cuts off is sxUnknown. Rendered
+  ##                        `;qto=` only when not the default 600000.
   ##   maxRecursionDepth  — RFC-0005 S8ax: the hard budget the adaptive call
   ##                        depth extends to past `maxCallDepth`; a call
   ##                        past it declines, so it changes the verdict.
@@ -6031,6 +6114,8 @@ proc canonicalize*(s: SymexSettings): string =
      else: ";msl=" & $s.budget.maxSeqLen) &   ## RFC-0005 S8k, same rule
     (if s.budget.seqQueryRLimit == ResourceBudget().seqQueryRLimit: ""
      else: ";sqr=" & $s.budget.seqQueryRLimit) &   ## RFC-0005 S8k, same rule
+    (if s.budget.queryTimeoutMs == ResourceBudget().queryTimeoutMs: ""
+     else: ";qto=" & $s.budget.queryTimeoutMs) &   ## RFC-0005 S8bu, same rule
     (if s.budget.maxRecursionDepth == ResourceBudget().maxRecursionDepth: ""
      else: ";mrd=" & $s.budget.maxRecursionDepth) &   ## RFC-0005 S8ax, same rule
     (if s.replayTimeoutMs == SymexSettings().replayTimeoutMs: ""

@@ -25,15 +25,14 @@ suite "S8bs: by-value parameters":
   test "by-value parameters":
     clean(sutSeqByValue, "sv", sxSat)
     clean(sutSeqByValue, "sv_dead", sxUnsat)
-    # A copy of a seq or string whose address is taken shares its elements
-    # but not an assignment of the whole: declined (reported in the RFC).
-    declines(sutSeqWholeByValue, "sw",
-             "a by-value argument shares the memory of")
-    declines(sutSeqWholeByValue, "sw_dead",
-             "a by-value argument shares the memory of")
-    declines(sutStrByValue, "sr", "a by-value argument shares the memory of")
+    # A copy of a seq whose address is taken shares its elements (RFC-0005
+    # S8bu: a `view` of the cell). A string's declines (reported in the
+    # RFC): a write to a character is not modelled.
+    clean(sutSeqWholeByValue, "sw", sxSat)
+    clean(sutSeqWholeByValue, "sw_dead", sxUnsat)
+    declines(sutStrByValue, "sr", "a by-value string shares the memory of")
     declines(sutStrByValue, "sr_dead",
-             "a by-value argument shares the memory of")
+             "a by-value string shares the memory of")
     clean(sutBigByValue, "bg", sxSat)
     clean(sutBigByValue, "bg_dead", sxUnsat)
     clean(sutBigFieldByValue, "bh", sxSat)

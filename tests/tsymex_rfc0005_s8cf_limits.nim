@@ -47,7 +47,7 @@ proc shortMiss(s: string) =
 
 proc hitImpliesByte(s: string) =
   # A stopped call reads false here too, so this holds at every length.
-  if s.contains(re"(a|b)*c") and 'c' notin s:
+  if s.contains(re"(a|b)*c") and not s.contains(re"c"):
     symexTarget("cf_hit_needs_c")
 
 proc missImpliesNoByte(s: string) =

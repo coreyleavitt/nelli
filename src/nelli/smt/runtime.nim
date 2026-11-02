@@ -13797,11 +13797,20 @@ proc checkExact(ctx: Z3Context; query: openArray[Z3Bool];
       if tfUnsat: (zsUnsat, s1b, nil, "")
       else: (zsUnknown, s3, nil, z3Why(s3))
 
-const limitWorldRLimit* = 1_000_000'u
-  ## RFC-0005 S8cf. The budget of `checkCapped`'s check of the calls that
-  ## stop at a limit. It refutes on the error value alone (a few thousand
-  ## units); a query it does not refute has a model with a long subject,
-  ## which Z3 need not find: running out reads the same.
+const
+  limitWorldRLimit* = 1_000_000'u
+    ## RFC-0005 S8cf. The budget of one `limitWorldRefuted` check. It refutes
+    ## on the error value alone (a few thousand units); a query it does not
+    ## refute has a model with a long subject, which Z3 need not find, and
+    ## running out reads the same.
+  limitWorldTimeoutMs = 3000'u
+    ## RFC-0005 S8cf. Its clock: Z3's sequence solver can stop advancing the
+    ## step count on `(a|a)*[bc]` against a long literal (probed), so the
+    ## step bound alone need not end the check. The cut only makes the query
+    ## `zsUnknown`.
+  limitWorldSites = 8
+    ## RFC-0005 S8cf. The most calls `limitWorldRefuted` splits on, one check
+    ## each; a query reading more is `zsUnknown` past their safe lengths.
 
 proc limitSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
   ## RFC-0005 S8cf. The `regexLimitSites` whose value `query` reads.
@@ -13838,34 +13847,45 @@ proc limitReason(ctx: Z3Context; sites: seq[int]): string =
 proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
                        sites: seq[int]): bool =
   ## RFC-0005 S8cf. True when `query`, already UNSAT with every call read
-  ## exactly, is UNSAT with some call past its safe length stopped at a
-  ## limit too. A superset of the real runs: such a call has its error value
-  ## or its exact one, independently of the others.
-  var roots = @query
-  var abs: seq[Z3Bool]
-  for k in countdown(sites.high, 0):
-    let st = regexLimitSites[sites[k]]
-    let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
-    abs.add ab
-    let v = ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw, st.err.raw, st.exact.raw)
-    var froms = [st.exact.raw]
-    var tos = [v]
-    for r in roots.mitems:
-      let id = astId(ctx, r.raw)
-      if id in st.guarded:
-        r = ab or r
-      else:
-        r = wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw, 1,
-          cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
-          cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
-    roots.add wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_implies(ctx.raw, ab.raw,
-      (len(st.subject) > mkInt(st.safe)).raw))
-    for c in st.errConds: roots.add c
-  var some = abs[0]
-  for k in 1 ..< abs.len: some = some or abs[k]
-  roots.add some
-  let s = ownContextSolver(ctx, roots, limitWorldRLimit)
-  ownContextCheck(s) == zsUnsat
+  ## exactly, is UNSAT with each call in turn stopped at a limit. That call's
+  ## value is gone from its check, which keeps it clear of the exact term's
+  ## search; the other calls are their error value or their exact one, a
+  ## superset of the real runs.
+  if sites.len > limitWorldSites: return false
+  proc swap(r: Z3Bool; a, b: RawZ3Ast): Z3Bool =
+    var froms = [a]
+    var tos = [b]
+    wrap[Z3Bool](ctx, ctx.checkErr Z3_substitute(ctx.raw, r.raw, 1,
+      cast[ptr UncheckedArray[RawZ3Ast]](froms[0].addr),
+      cast[ptr UncheckedArray[RawZ3Ast]](tos[0].addr)))
+  let savedTimeout = queryTimeoutMsCur
+  defer: queryTimeoutMsCur = savedTimeout
+  if queryTimeoutMsCur == 0'u or queryTimeoutMsCur > limitWorldTimeoutMs:
+    queryTimeoutMsCur = limitWorldTimeoutMs
+  for k in sites:
+    let stopped = regexLimitSites[k]
+    var roots: seq[Z3Bool]
+    for r in query:
+      if astId(ctx, r.raw) notin stopped.guarded:
+        roots.add swap(r, stopped.exact.raw, stopped.err.raw)
+    for c in stopped.errConds: roots.add c
+    roots.add len(stopped.subject) > mkInt(stopped.safe)
+    for j in sites:
+      if j == k: continue
+      let other = regexLimitSites[j]
+      let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
+      let v = ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw, other.err.raw,
+                                     other.exact.raw)
+      var next: seq[Z3Bool]
+      for r in roots:
+        next.add(if astId(ctx, r.raw) in other.guarded: ab or r
+                 else: swap(r, other.exact.raw, v))
+      roots = next
+      for c in other.errConds: roots.add c
+      roots.add (not ab) or (len(other.subject) > mkInt(other.safe))
+    let s = ownContextSolver(ctx, roots, limitWorldRLimit)
+    if ownContextCheck(s) != zsUnsat: return false
+  true
 
 proc checkCapped(ctx: Z3Context; query: openArray[Z3Bool];
                  settings: SymexSettings; rlimit: uint):

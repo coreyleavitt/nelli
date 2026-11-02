@@ -38,3 +38,6 @@ state = "pending"
 - Run them on Z3 5.1 and 4.13.4, plus cpp.
 - Windows: all three legs green.
 - Report DONE to `worker-reports/s8cg.md`.
+
+## Added after S8ca and S8by
+Item 1 (`viewFollows`) is fixed by S8ca, and item 6 (concolic isolation, nested `mergeMemberships`) by S8by. Do not redo them: drop both from this slice. Items 2, 3, 4, 5, 7 and 8 stand.

@@ -27,3 +27,6 @@ Measure everything side by side on one host, S8bm 14d7e81 and S8bp 79037e4 again
 - Suites: yours, s8by, s8bp, s8bm, B1-1, r4_strip, configdefaults, s8ai_semantic, s8ay, s8ar, s8bj_*, s8bb_*, CR2, phase13_rlimit, and every concolic suite (`command grep -l concolic tests/`).
 - Run on Z3 5.1 and 4.13.4, plus cpp for the new suite. All three Windows legs green.
 - Report DONE to `worker-reports/s8ci.md`, with per-file Windows times.
+
+## Added after batch 8
+Batch 8 split the slow files: `tsymex_configdefaults_depth` (the `maxCallDepth: 50` pin, about 96 s on Windows) from `tsymex_configdefaults`, and `tsymex_rfc0005_s8ai_semantic_b` (52.9 s) from `s8ai_semantic`. Base on batch 8's head, as the coordinator will say. Item 4's target is now `configdefaults_depth`. Find why one test spends 96 s and fix that cause. Do not lower the depth, because the pin exists to prove the bound at that depth.

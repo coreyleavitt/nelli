@@ -10462,3 +10462,10 @@ the scratch solves keep S8bu's clock through `ownContextCheck`.
   (50M units); 4.13.4 decides the same query in 191,361.
 - **PRECISION: `r4_strip` stays above S8bm** (the table above): the order
   closes about a quarter of S8bp's gap.
+- **PRECISION: `tsymex_configdefaults` runs longer, past the 60 s convention
+  already.** Windows `symex-mingw`, the test's own run: 98 s at S8bp, 127 s and
+  153 s on this slice's code. Side by side on Linux (4.13.4, CPU s): 31 and 32
+  at S8bp, 38 and 40 at the slice; 25 and 29 with the skip alone, 32 and 36 at
+  the slice in that pair, so the rise comes after the skip. Not attributed
+  further. `s8ai_semantic` is the other file past 60 s (94 s at S8bp, 82 s and
+  60 s here).

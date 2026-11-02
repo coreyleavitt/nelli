@@ -4135,6 +4135,8 @@ type RegexPointSite* = object
   ## as the query reads it (`exact`), the assertions that only define it
   ## (`defs`, their ids) and its operands. `declined`: the encoding is past
   ## its size cap, so `exact` is a fresh value with nothing else defining it.
+  ## `light`: Z3 reads this encoding well, so a query only takes its value at
+  ## a subject pinned beside a call that is not (`pointCheck`'s pinned round).
   exact*: Z3AnyAst
   defs*: seq[int]
   subject*, by*: Z3String
@@ -4143,6 +4145,7 @@ type RegexPointSite* = object
   pr*: PcreParse
   safe*: int       ## `limitReach`'s safe length (`high(int)`: no limit)
   declined*: bool
+  light*: bool
 
 var regexPointSites* {.threadvar.}: seq[RegexPointSite]
   ## RFC-0005 S8cf. Every such call of the walk. Reset per run.
@@ -13881,22 +13884,23 @@ proc pointValue(st: RegexPointSite; subject, by: string; start: int): RegexPoint
   if subject.len > st.safe: return RegexPoint()
   concreteEntry(st.sp, st.pr, subject, start, by)
 
+proc pointLit(st: RegexPointSite; p: RegexPoint): Z3AnyAst =
+  ## RFC-0005 S8cf. The value `p` as a term.
+  if st.sp.entry == "replace": toAnyAst(mkString(p.s))
+  elif st.sp.entry in ["match", "contains", "startsWith", "endsWith"]:
+    toAnyAst(mkBool(p.b))
+  else: toAnyAst(mkInt(p.i))
+
 proc pointEq(st: RegexPointSite; v: Z3AnyAst; p: RegexPoint): Z3Bool =
   ## RFC-0005 S8cf. `v` is the value `p`.
-  let ctx = v.ctx
-  let want =
-    if st.sp.entry == "replace": toAnyAst(mkString(p.s))
-    elif st.sp.entry in ["match", "contains", "startsWith", "endsWith"]:
-      toAnyAst(mkBool(p.b))
-    else: toAnyAst(mkInt(p.i))
-  wrap[Z3Bool](ctx, ctx.checkErr Z3_mk_eq(ctx.raw, v.raw, want.raw))
+  wrap[Z3Bool](v.ctx, checkedEq(v.ctx, v.raw, pointLit(st, p).raw))
 
 proc pointSitesIn(ctx: Z3Context; query: openArray[Z3Bool]): seq[int] =
   ## RFC-0005 S8cf. The `regexPointSites` whose value `query` reads.
   if regexPointSites.len == 0: return
   var byId = initTable[int, seq[int]]()
   for i, st in regexPointSites:
-    byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
+    if not st.light: byId.mgetOrPut(astId(ctx, st.exact.raw), @[]).add i
   var seen, hit: HashSet[int]
   var stack: seq[Z3AnyAst]
   for r in query: stack.add toAnyAst(r)
@@ -13966,6 +13970,126 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
   proc atPoint(st: RegexPointSite; s, by: string; start: int): Z3Bool =
     result = st.subject == mkString(s) and st.start == mkInt(start)
     if st.sp.entry == "replace": result = result and st.by == mkString(by)
+  # A subject the query pins to a literal has its values now, and folds the
+  # facts over it: Z3 4.13.4 ran out of its budget on those memberships.
+  block pinned:
+    ensureByteDomainKinds()
+    let bk = byteDomainKinds
+    var lits = initTable[int, RawZ3Ast]()
+    var stack: seq[Z3AnyAst]
+    for r in roots: stack.add toAnyAst(r)
+    while stack.len > 0:
+      let t = stack.pop()
+      if getAstKind(t) != akApp: continue
+      let (decl, args) = unpackApp(t)
+      let dk = ord(Z3_get_decl_kind(ctx.raw, decl))
+      if dk == bk.andK:
+        for a in args: stack.add a
+      elif dk == bk.eq and args.len == 2:
+        if Z3_is_string(ctx.raw, args[1].raw):
+          lits[astId(ctx, args[0].raw)] = args[1].raw
+        elif Z3_is_string(ctx.raw, args[0].raw):
+          lits[astId(ctx, args[1].raw)] = args[0].raw
+    var pins = roots
+    var ff, tt: seq[RawZ3Ast]
+    var eqs: seq[Z3Bool]
+    for k, i in sites:
+      let st = regexPointSites[i]
+      let id = astId(ctx, st.subject.raw)
+      if id notin lits: break pinned
+      let lit = literalStringBytes(wrap[Z3String](ctx, lits[id]))
+      let startS = simplify(st.start)
+      if not lit.ok or not isNumeralAst(ctx, startS.raw): break pinned
+      var by = ""
+      if st.sp.entry == "replace":
+        let b = literalStringBytes(st.by)
+        if not b.ok: break pinned
+        by = b.s
+      let p = pointValue(st, lit.s, by,
+                         int(parseBiggestInt(getNumeralString(startS))))
+      if not p.ok: break pinned
+      eqs.add pointEq(st, vs[k], p)
+      eqs.add st.subject == mkString(lit.s)
+      ff.add st.subject.raw
+      tt.add lits[id]
+    # Every other call on a pinned subject has its value here too, so what
+    # defines it need not be searched: a call whose fresh terms the rest of
+    # the query still names keeps its encoding, or a model of the rest need
+    # not extend to it. The search reads the rest of `query` as it stands.
+    var queryIds: HashSet[int]
+    for r in query: queryIds.incl astId(ctx, r.raw)
+    type Lifted = tuple[exact, value: RawZ3Ast, defs: seq[int]]
+    var lifted: seq[Lifted]
+    for i, st in regexPointSites:
+      if i in sites: continue
+      var onPath = false
+      for d in st.defs: onPath = onPath or d in queryIds
+      if not onPath: continue
+      let id = astId(ctx, st.subject.raw)
+      if id notin lits: continue
+      let lit = literalStringBytes(wrap[Z3String](ctx, lits[id]))
+      let startS = simplify(st.start)
+      if not lit.ok or not isNumeralAst(ctx, startS.raw): continue
+      let p = pointValue(st, lit.s, "",
+                         int(parseBiggestInt(getNumeralString(startS))))
+      if not p.ok: continue
+      lifted.add (st.exact.raw, pointLit(st, p).raw, st.defs)
+      ff.add st.subject.raw
+      tt.add lits[id]
+    let kinds = seqCapKinds()
+    proc constsOf(r: Z3AnyAst): HashSet[string] =
+      var seen: HashSet[int]
+      var work = @[r]
+      while work.len > 0:
+        let t = work.pop()
+        let id = astId(ctx, t.raw)
+        if id in seen or getAstKind(t) != akApp: continue
+        seen.incl id
+        let (decl, args) = unpackApp(t)
+        if args.len == 0:
+          if ord(Z3_get_decl_kind(ctx.raw, decl)) == kinds.uninterp:
+            result.incl $Z3_get_symbol_string(ctx.raw,
+                                              Z3_get_decl_name(ctx.raw, decl))
+        for a in args: work.add a
+    proc subst(r: RawZ3Ast; a, b: var seq[RawZ3Ast]): RawZ3Ast =
+      if a.len == 0: return r
+      ctx.checkErr Z3_substitute(ctx.raw, r, cuint(a.len),
+        cast[ptr UncheckedArray[RawZ3Ast]](a[0].addr),
+        cast[ptr UncheckedArray[RawZ3Ast]](b[0].addr))
+    while true:
+      var gone = dropped
+      var fs = froms
+      var ts = tos
+      for l in lifted:
+        for d in l.defs: gone.incl d
+        fs.add l.exact
+        ts.add l.value
+      pins = @[]
+      for r in query:
+        if astId(ctx, r.raw) in gone: continue
+        pins.add simplify(wrap[Z3Bool](ctx, subst(subst(r.raw, fs, ts), ff, tt)))
+      var live: HashSet[string]
+      for r in pins: live = live + constsOf(toAnyAst(r))
+      var keep: seq[Lifted]
+      for l in lifted:
+        var shared = false
+        for r in query:
+          if astId(ctx, r.raw) in l.defs:
+            let c = constsOf(toAnyAst(wrap[Z3Bool](ctx, subst(r.raw, ff, tt))))
+            for n in c:
+              if n in live: shared = true
+        if not shared: keep.add l
+      if keep.len == lifted.len: break
+      lifted = keep
+    let sv = ownContextSolver(ctx, pins & eqs, pointRLimit)
+    case ownContextCheck(sv)
+    of zsUnsat:
+      decided = true
+      return (zsUnsat, sv, nil, "")
+    of zsSat:
+      decided = true
+      return (zsSat, sv, translate(sv.model(), ctx), "")
+    of zsUnknown: discard
   block rounds:
     for round in 0 ..< pointRounds:
       let sv = ownContextSolver(ctx, roots, pointRLimit)
@@ -14116,8 +14240,8 @@ proc limitWorldRefuted(ctx: Z3Context; query: openArray[Z3Bool];
       if j == k: continue
       let other = regexLimitSites[j]
       let ab = mkBoolVar(ctx, regexFreshName("__regexLimitHit"))
-      let v = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_ite(ctx.raw, ab.raw,
-        other.err.raw, other.exact.raw))
+      let v = wrap[Z3AnyAst](ctx, checkedIte(ctx, ab.raw, other.err.raw,
+                                             other.exact.raw))
       var next: seq[Z3Bool]
       for r in roots:
         next.add(if astId(ctx, r.raw) in other.guarded: ab or r

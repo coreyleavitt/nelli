@@ -34,7 +34,7 @@ proc valid(c: int32): bool = c >= 0 and c <= maxCp and (c < 0xD800 or c > 0xDFFF
 
 proc atomSet(p: string): CpSet =
   ## The code points of a one-character pattern, as the reader reads them.
-  let r = parsePcre(p)
+  let r = parsePcre(p, false, pcreOlderThan(8, 45))
   doAssert r.status == psOk, p & ": " & $r.status & " " & r.reason
   var x = r.root
   while x.kind == rxCat and x.kids.len == 1: x = x.kids[0]
@@ -69,7 +69,7 @@ var pre845Declined = 0
 
 proc checkSet(p: string; extra: openArray[int32]; bad: var seq[string]):
     int =
-  if pcreOlderThan(8, 45) and parsePcre(p).classPre845:
+  if pcreOlderThan(8, 45) and parsePcre(p, false, pcreOlderThan(8, 45)).classPre845:
     let sp = RegexSpec(entry: "find", flag: "re", pattern: p)
     if parseSpec(sp).status != psUnmodelled:
       bad.add escape(p) & ": not declined before 8.45"
@@ -211,7 +211,7 @@ suite "S8bt: UTF patterns, concretely, against std/re":
       var bad: seq[string]
       var calls = 0
       for p in utfPats:
-        let pr = parsePcre(p)
+        let pr = parsePcre(p, false, pcreOlderThan(8, 45))
         check pr.status == psOk
         if pr.status != psOk:
           bad.add escape(p) & ": " & pr.reason

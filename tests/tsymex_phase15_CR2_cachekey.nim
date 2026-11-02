@@ -1035,6 +1035,8 @@ suite "Phase 15 CR-2 — version bumps":
     ## `var openArray` view a later argument writes declined. 230->237.
     ## RFC-0005 S8bt (an unverified libpcre declines every regex call; the
     ## rest of S8bj's remainder). Provisional 224.
+    ## RFC-0005 S8cf (PCRE's limits read; the rest of S8bt's remainder).
+    ## Provisional 242.
     check symexWalkerVersion == "242"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":

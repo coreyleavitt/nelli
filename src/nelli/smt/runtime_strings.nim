@@ -390,13 +390,14 @@ proc regexLimitSite[T](sp: RegexSpec; pr: PcreParse; subject: Z3String;
 
 proc regexPointSite[T](sp: RegexSpec; pr: PcreParse; subject, by: Z3String;
                        start: Z3Int; exact: T; defs: seq[int];
-                       declined = false) =
+                       declined = false; light = false) =
   ## RFC-0005 S8cf. Records a call `checkCapped` reads at points first.
   if foldedLiteral(exact): return
   let reach = regexReach(sp, pr)
   regexPointSites.add RegexPointSite(exact: toAnyAst(exact), defs: defs,
     subject: subject, by: by, start: start, sp: sp, pr: pr,
-    safe: (if reach.never: high(int) else: reach.safe), declined: declined)
+    safe: (if reach.never: high(int) else: reach.safe), declined: declined,
+    light: light)
 
 proc literalCall(sp: RegexSpec; pr: PcreParse; subject, by: Z3String;
                  start: Z3Int): RegexPoint =
@@ -528,11 +529,13 @@ proc lowerRegexCall(env: Env, e: IRExpr): SymVal =
     for d in r.defs:
       stripDecompConds.add d
       defIds.add astId(d.ctx, d.raw)
-    if r.heavy and not capture:
+    if not capture:
       if kind == svBool:
-        regexPointSite(sp, pr, recv.str, mkString(""), start, r.b, defIds)
+        regexPointSite(sp, pr, recv.str, mkString(""), start, r.b, defIds,
+                       light = not r.heavy)
       else:
-        regexPointSite(sp, pr, recv.str, mkString(""), start, r.i, defIds)
+        regexPointSite(sp, pr, recv.str, mkString(""), start, r.i, defIds,
+                       light = not r.heavy)
     regexLimitOfCall(sp, pr, recv.str, r, kind, old, oldI)
     case kind
     of svBool: SymVal(kind: svBool, bo: r.b)

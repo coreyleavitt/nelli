@@ -207,6 +207,13 @@ const symexWalkerVersion* = "242"
   ## RFC-0005 S8cf: PCRE's own limits are read (`runtime.checkCapped`): a
   ## call past `pcre_select.limitReach`'s safe length no longer has a definite
   ## verdict unless the query holds with it stopped at a limit too.
+  ## Also S8bt's remainder: the JIT's LIMIT count is modelled (`jitCost`), the
+  ## interpreter's limit gaps closed (`buildNfa`'s `concrete`), SKIP:NAME reads
+  ## past 7 by concrete calls (`execArgCap`), the JIT's UTF scan and POSIX
+  ## classes on 8.37 follow the library, a call Z3 cannot search and a pattern
+  ## past the regex cap are read at points (`pointCheck`), `replace`'s facts
+  ## cover verbs, limits, UTF and two bytes, and `strutils.count` lowers
+  ## (`iekStrCount`). Provisional 242.
   ## RFC-0005 batch 7 (2026-10-04) — S8bp, S8bu and S8br land stacked on
   ## batch 6 as one integration branch under ONE walker number; their
   ## bullets follow, each naming its provisional number. The stack's own

@@ -53,6 +53,39 @@ proc lastPinnedRefuted(s: string) =
   if s == "abcde" and s.findBounds(re"(*UTF)(*ANY).+").last != 4:
     symexTarget("cf_last_pinned_no")
 
+proc boundsPinned(s: string) =
+  if s == "abcde":
+    let b = s.findBounds(re"(*UTF)(*ANY).+")
+    if b.first == 0 and b.last == 4:
+      symexTarget("cf_bounds_pinned")
+
+proc boundsPinnedRefuted(s: string) =
+  # The value the query reads of the search half is wrong at this subject: no
+  # query that keeps the other call's value may drop what defines this one.
+  if s == "abcde":
+    let b = s.findBounds(re"(*UTF)(*ANY).+")
+    if b.first == 3 and b.last == 4:
+      symexTarget("cf_bounds_pinned_no")
+
+proc secondCallRefuted(s: string) =
+  if s == "abcde" and s.find(re"c") == 0 and
+     s.findBounds(re"(*UTF)(*ANY).+").last == 4:
+    symexTarget("cf_second_call_no")
+
+proc separateBranchesRefuted(s: string) =
+  # Each condition its own assertion on the path.
+  if s == "abcde":
+    if s.find(re"c") == 0:
+      if s.findBounds(re"(*UTF)(*ANY).+").last == 4:
+        symexTarget("cf_branches_no")
+
+proc separateBranchesHit(s: string) =
+  if s == "abcde":
+    if s.find(re"c") == 2:
+      if s.contains(re"d"):
+        if s.findBounds(re"(*UTF)(*ANY).+").last == 4:
+          symexTarget("cf_branches")
+
 proc matchLenLiteral() =
   let s = "\xc3\xa9b"
   if s.matchLen(re"(*UCP)(*UTF)\w+") == 3:
@@ -92,5 +125,10 @@ suite "S8cf: the point route":
     check measured(lastLiteralRefuted, "cf_last_literal_no") == sxUnsat
     check measured(lastPinned, "cf_last_pinned") == sxSat
     check measured(lastPinnedRefuted, "cf_last_pinned_no") == sxUnsat
+    check measured(boundsPinned, "cf_bounds_pinned") == sxSat
+    check measured(boundsPinnedRefuted, "cf_bounds_pinned_no") == sxUnsat
+    check measured(secondCallRefuted, "cf_second_call_no") == sxUnsat
+    check measured(separateBranchesRefuted, "cf_branches_no") == sxUnsat
+    check measured(separateBranchesHit, "cf_branches") == sxSat
     check measured(matchLenLiteral, "cf_len_literal") == sxSat
     check measured(endsPinned, "cf_ends_pinned") == sxSat

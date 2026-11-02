@@ -1410,5 +1410,13 @@ task test, "Run the test suite":
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
             "tsymex_rfc0005_s8cl_lifetime",
-            "tsymex_rfc0005_s8cl_strings"]:
+            "tsymex_rfc0005_s8cl_strings",
+            # RFC-0005 S8cr: the definition-of-done audit's gaps. The six
+            # unpinned fresh-symbol kinds and the coverage invariant; a live
+            # sevError beside a clean witness and symexForAll's own pins; a
+            # helper check for each to-unsat flip. No bump.
+            "tsymex_rfc0005_s8cr_intro",
+            "tsymex_rfc0005_s8cr_pins",
+            "tsymex_rfc0005_s8cr_flips",
+            "tsymex_rfc0005_s8cr_flips_str"]:
     exec "nim c -r --threads:on --hints:off --path:src tests/" & f & ".nim"

@@ -13222,8 +13222,9 @@ already clean; the items' remaining cases landed.
   the path holds so far, so in `p[] = 1; h.n = 4; if p[] != 1 and p[] != 4` the
   second dereference named `h.n` without the first store, a clean false `sxSat`
   at 136ad60 for a scalar field that replay refutes, and (b) would have widened
-  it to every by-value part. `Path.ptrStores` logs the stores and
-  `ptrApplyMissed` writes the missed ones under the family's later writes.
+  it to every by-value part. `Path.ptrStores` logs the stores, and
+  `ptrApplyMissed` states each location's last one in the family's initial
+  constant: every read and write of the family came after it.
 
 Different mechanisms, reported and not fixed here:
 
@@ -13232,9 +13233,6 @@ Different mechanisms, reported and not fixed here:
 - PRECISION: a whole aggregate's `ptr` declines (fix (a)) rather than being
   modelled as a location; `p[].x` through an aliasing `ptr Obj` needs a cell
   identity for the whole value.
-- PRECISION: a read of a field family before the path gave it an earlier store
-  through a pointer stays free (`p[] = 1; let k = h.n`, below), which admits a
-  value Nim's alias would not hold, and only a replay tells them apart.
 - PRECISION: such a store into a location other than a plain scalar family (a
   seq element, a table value, a case object's branch, a variable) declines
   ("which that store did not reach") rather than reaching it.

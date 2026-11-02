@@ -3557,39 +3557,37 @@ proc ptrMissedBy(p: Path; typeId: string; code: int64): seq[int] =
 
 proc ptrApplyMissed(ctx: Z3Context; p: Path; typeId: string;
                     targets: seq[PtrTarget]) =
-  ## RFC-0005 S8bz. A scalar field family the path holds only now takes the
-  ## earlier stores into its initial constant, under every later write of the
-  ## family. Without them a dereference naming it was a false `sxSat`
-  ## (`p[] = 1; h.n = 4; if p[] != 1 and p[] != 4`). A read of the family before
-  ## this saw the constant: free, which admits what the store wrote.
+  ## RFC-0005 S8bz. A scalar field family the path holds only now: every read
+  ## and write of it came after the earlier stores, so the location each last
+  ## store names holds that value in the family's initial constant. Without
+  ## this a dereference naming it was a false `sxSat`
+  ## (`p[] = 1; h.n = 4; if p[] != 1 and p[] != 4`).
   for t in targets:
     if t.famKey.len == 0 or t.seqIdx or t.tabKey or t.aggregate or t.hasArm:
       continue
     let missed = ptrMissedBy(p, typeId, t.code)
     if missed.len == 0: continue
-    let cur = p.heaps[t.famKey]
-    let arrSort = sortOfRaw(ctx, cur.raw)
     let sym = ctx.checkErr Z3_mk_string_symbol(ctx.raw,
                                                ("heap_" & t.famKey).cstring)
-    # Each term wrapped: a raw one has no reference, and the next call may free it.
-    let init = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym, arrSort))
-    var arr = init
+    let init = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_mk_const(ctx.raw, sym,
+                                     sortOfRaw(ctx, p.heaps[t.famKey].raw)))
+    var named: seq[tuple[hit: Z3Bool; obj: Z3AnyAst]]
     for i in missed:
       let st = p.ptrStores[i]
       let selE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
         p.heaps[ptrSelKey(typeId)].raw, st.ptrAst.raw))
-      let objE = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
-        p.heaps[ptrObjKey(typeId, t.famKey)].raw, st.ptrAst.raw))
-      let old = wrap[Z3AnyAst](ctx, checkedSelect(ctx, arr.raw, objE.raw))
-      let elem = wrap[Z3AnyAst](ctx, checkedIte(ctx,
-        ptrSelIs(ctx, selE, t.code).raw, st.val.raw, old.raw))
-      arr = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw, objE.raw, elem.raw))
+      named.add((ptrSelIs(ctx, selE, t.code), wrap[Z3AnyAst](ctx, checkedSelect(
+        ctx, p.heaps[ptrObjKey(typeId, t.famKey)].raw, st.ptrAst.raw))))
       p.ptrStores[i].reached.add t.code
-    var frm = [init.raw]
-    var to = [arr.raw]
-    p.heaps[t.famKey] = wrap[Z3AnyAst](ctx, ctx.checkErr Z3_substitute(ctx.raw,
-      cur.raw, cuint(1), cast[ptr UncheckedArray[RawZ3Ast]](frm[0].addr),
-      cast[ptr UncheckedArray[RawZ3Ast]](to[0].addr)))
+    for a, i in missed:
+      var last = named[a].hit
+      for b in a + 1 .. named.high:
+        last = last and not (named[b].hit and wrap[Z3Bool](ctx, checkedEq(ctx,
+          named[b].obj.raw, named[a].obj.raw)))
+      let cell = wrap[Z3AnyAst](ctx, checkedSelect(ctx, init.raw,
+                                                   named[a].obj.raw))
+      p.pc.add (not last) or wrap[Z3Bool](ctx, checkedEq(ctx, cell.raw,
+                                                         p.ptrStores[i].val.raw))
 
 proc ptrInactive(ctx: Z3Context; p: Path; typeId: string; sel: Z3AnyAst;
                  targets: seq[PtrTarget]): Option[Z3Bool] =

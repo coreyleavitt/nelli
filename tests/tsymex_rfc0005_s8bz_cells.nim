@@ -361,6 +361,20 @@ proc h3lateDead(h: H3; p, q: ptr int) =
     p[] = 1
     let k = h.n
     if q[] != 1 and q[] != 2 and k == k: symexTarget("h3lateDead")
+proc h3lateRead(h: H3; p: ptr int) =
+  # A read between the store and the dereference that finds the part saw the
+  # store: under the alias `k` is 1, and without it `p[]` is.
+  if p != nil and h != nil:
+    p[] = 1
+    let k = h.o.y
+    h.o.y = 5
+    if p[] == 5 and k == 7: symexTarget("h3lateRead")
+proc h3lateReadHit(h: H3; p: ptr int) =
+  if p != nil and h != nil:
+    p[] = 1
+    let k = h.o.y
+    h.o.y = 5
+    if p[] == 5 and k == 1: symexTarget("h3lateReadHit")
 proc h1late(h: H1; p: ptr int) =
   # A seq's element has no such store: a stated decline.
   if p != nil and h != nil:
@@ -372,6 +386,13 @@ suite "S8bz: a by-value part of a heap object":
     var h = H3(o: O1(x: 1, y: 1))
     h3w(h, addr h.o.y)
     check h.o.y == 3
+    # `h3lateRead`, native: the read sees the store through the alias.
+    h = H3(o: O1(x: 1, y: 1))
+    let p3 = addr h.o.y
+    p3[] = 1
+    let k3 = h.o.y
+    h.o.y = 5
+    check p3[] == 5 and k3 == 1
   test "a target of the pointer":
     confirmed(h3w, "h3w")
     confirmed(h3r, "h3r")
@@ -383,6 +404,8 @@ suite "S8bz: a by-value part of a heap object":
     # not hold (RFC-0005, "As landed (S8bz)"): no replay.
     discard clean(h3lateTwo, "h3lateTwo", sxSat)
     discard clean(h3lateDead, "h3lateDead", sxUnsat)
+    discard clean(h3lateRead, "h3lateRead", sxUnsat)
+    confirmed(h3lateReadHit, "h3lateReadHit")
   test "where it cannot: a stated decline":
     inBand(h1late, "h1late", "which that store did not reach")
 

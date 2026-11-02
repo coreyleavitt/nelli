@@ -467,6 +467,11 @@ title = "S8bj's remainder: decline unchecked libpcre versions, JIT-vs-interprete
 state = "done"
 
 [[slice]]
+id = "S8ca"
+title = "S8bu's remainder: cpp segfault in configdefaults' maxCallDepth crash pin, structural viewFollows in-place check, addr s[i] of element-cell seqs to calls, closures over address-taken vars and heap lvalues, seq args to proc values, string as openArray[char], negative toOpenArray and resizing mitems, gps[].add through ptr-to-seq, S8bu suite compile time"
+state = "done"
+
+[[slice]]
 id    = "S11"
 title = "Public surface: Soundness, gaps(), SymexFinding/render, cache schema, bound echo"
 state = "done"
@@ -13709,3 +13714,130 @@ table, and every Z3 formula.
     subject is returned whole;
   - verbs, LIMIT and an unmarked SKIP:NAME, which have no sure bytes;
   - `count` over a replace value.
+
+**As landed (S8ca, walker 233 provisional) — S8bu's remainder.** Base
+5729b1a (S8bu, walker 225). Suites `tsymex_rfc0005_s8ca_stack` (item 1),
+`_views` (item 2), `_calls` (item 3), `_closures` (item 4), `_procvals`
+(item 5), `_strings` (item 6), `_resize` (item 7), `_derefmut` (item 8):
+every SUT that can run natively has a native run confirming which labels
+Nim hits. S8bu's and S8bs's pins of the declines this slice decides are
+repinned to the decided verdicts.
+
+- *Item 1: the native stack.* `walk` recurses natively once per inlined
+  call, and `maxCallDepth` bounds that by a count. One level costs about
+  158 KB on c and 186 KB on cpp (debug build), so
+  `tsymex_configdefaults`' crash pin, whose 50 levels were sized on c,
+  ran off the 8 MB stack on cpp (rc=139). `nativestack.nim` reads the
+  stack's bounds from the OS (`pthread_getattr_np`,
+  `GetCurrentThreadStackLimits`, the macOS np calls), cached per thread
+  and read again when the stack pointer leaves them, since on Windows
+  each solve runs on a 16 MB fiber of its own. A call frame records the
+  stack pointer it was pushed at, so a level's cost is measured; a call
+  is not inlined when the stack left is under the reserve
+  (`nativeStackShort`). It declines in-band as
+  `beBudgetExhaustedUnmodelled` naming the native stack, at any
+  `maxCallDepth`, and the verdict is not cached (`symexNativeStackCut`).
+  Windows: a 1 MB main thread could overflow the same way before this;
+  the check covers it, and the fiber and the 8 MB link are measured like
+  any other stack.
+- *Item 2: `viewFollows`.* It read a change of the cell as in-place by
+  the shape of the terms. `swap(gps[], other)` with `other = newSeq(2)`
+  gives equal terms over other memory: `vw` sxUnsat and `vw_dead` sxSat,
+  in a defined program. Identity is now tracked by the write: each
+  element write-back the parser emits (`dwInPlace`) and each sync of an
+  element written by name is logged as an in-place step of the heap
+  arrays it changed (`Path.inPlaceSteps`); a view, anchored at its
+  arrays' terms when it binds (`ViewMark`), follows only while a chain of
+  such steps leads to the current terms. Any other write declines the
+  path, whatever its terms.
+- *Item 3: an `addr s[i]` actual of a seq with element cells* is the
+  element's cell itself (`sharesElemCell`), for a direct, a proc-value
+  and a closure call.
+- *Item 4: closures.* (a) The closure's frame binds a by-reference
+  capture that is an address-taken variable of the applying frame to the
+  variable's cell (`linkCapAddrCells`, `capCellOf`); the frame keeps the
+  local, the cell and the env cell one value. (b) A heap lvalue the body
+  also reaches is passed by reference: the body is specialised to the
+  lvalue (`byRefSub`, as for a direct call; a `VarLoc` of mode "ref").
+- *Item 5: a seq argument of a proc value or a closure.* A seq, table or
+  set contributes the sort of each of its leaves (its data arrays and its
+  length) to the application's domain, as a nested tuple does.
+- *Item 6: strings.* `s[i] = c` is the string with that byte replaced
+  (`iekStrSetAt`), its index checked before the value is evaluated. A
+  string viewed as `openArray[char]` is the seq of its bytes
+  (`iekStrChars`); a `var` one is written back byte for byte
+  (`iekStrFromChars`). A by-value copy of an address-taken string follows
+  where its memory is: a `view` of a string that owns its memory, a plain
+  copy of a literal's (which Nim copies at the first write), and a
+  decline where the walk cannot place it (`StrBuf`).
+- *Item 7, as probed natively.* `toOpenArray(s, first, last)` raises
+  `IndexDefect` iff its length is not 0 and a bound is outside
+  `0 ..< s.len`; a length below 0 is otherwise a view of that length,
+  which no loop enters and whose every index raises. A `mitems` body that
+  changes the length meets Nim's `assert(len(a) == L)` at the end of the
+  iteration (`AssertionDefect`); a use of the element after the change is
+  a use of an address that may be stale, and declines (`miElemGuards`).
+- *Item 8: a mutation through a pointer to the whole value.* `p[].add`,
+  `p[].del`, `p[].insert` on a seq, `p[].add` on a string, `p[].incl` on a
+  set, through a `ptr` or a `ref`: the value is read through the pointer,
+  the bare arm's mutation applied, and the result stored back. A by-value
+  copy sharing the memory declines (the mutation may resize).
+- *Item 9: compile time.* Measured with the host idle (12 cores, load
+  2-8, two compiles at once), compile user time of a one-SUT suite, the
+  floor of importing `nelli/symex`, is 24 s on c and 29 s on cpp; every
+  S8bu and S8ca file is 25-36 s on c and 32-43 s on cpp, under the 60 s
+  budget. The 67-108 s S8bu reported was load: the same files read 52-78 s
+  beside other slices' runs (load about 20). `_paths`, `_strings` and
+  `_closures` were split on those loaded readings, before the idle one
+  (`tsymex_rfc0005_s8bu_byvalseq`, `_s8ca_strings_byvalue`,
+  `_s8ca_closures_heap`). On Windows, compile and run together, every
+  S8bu and S8ca file is within 60 s at 5c4350c (`s8bu_calls`, the slowest,
+  at 51.8 s). `_stack` took 102 s at ab58942, so its copy of
+  `tsymex_configdefaults`' crash pin (about 60 s there) is gone, and its two
+  thread tests under the default budget, never short of stack on Windows,
+  run only on Linux and macOS (47.0 s at 5c4350c).
+
+*Soundness bugs found and fixed.* (1) `viewFollows`, above, now pinned by
+a defined program (`vw`, `vw_dead`, swapped at the base). (2) `swap` was a
+silent no-op: its bodiless magic was registered with an empty body, so
+`swap(a, b); if a[1] == 3` was a clean false sxUnsat (`parseSwap`). (3) Two
+`addr s[0]` in one frame: a callee's store through the older cell's `ite`
+left the shadowed cell's heap read a new term with its old value, and the
+caller's sync clobbered the element, a false sxSat (`withCellElem`).
+
+*Suites* (`ok/failed`; c on Z3 5.1 and 4.13.4, cpp on 5.1), from a worktree
+at ab58942, whose `src` is that of the head: 148 suites, every suite the
+job names and every `openArray`, `closure` or `addr ` grep hit, with S8bu's
+62-suite list: 2075/0, 2075/0 and 2050/0. The 25 cpp lacks are
+`tsymex_r6_n43_parity`, which does not compile on cpp, the same at the base
+(below). `tsymex_configdefaults` 24/0 on all three: cpp no longer dies in
+the crash pin. `tfuzzwinjoblimits` is Windows-only and runs nothing here.
+`_stack` is 10 tests in that sweep; at its final text (5c4350c) it passes
+9/0 on all three, its crash-pin copy removed.
+
+*Windows.* at 5c4350c all three legs green: fuzzer-mingw 41436653116, fuzzer-msvc
+41436653094, symex-mingw 41436653107. At 1c9bc98 every suite passed, but
+symex-mingw 41430194830 failed its shard 0 budget (40.5 min against 40) on a
+slow runner; the same 57 suites took 23.5 min at ab58942 and 38.9 at 5c4350c.
+A shard is close to its budget, so this can recur. 21 corpus files exceed
+60 s of compile and run on Windows, none of them S8bu's or S8ca's; 19 were
+over at 8815a81 (S8bu), and `s8ab_letaudit` (55.6 to 63.5 s) and
+`s8u_precision` (58.0 to 60.3 s) crossed it here.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: `unsafeNew(p, n)` is dropped.** `p` stays nil, so
+  `unsafeNew(p, 8); p[] = k; if p[] == 3` is sxRaised where Nim raises
+  nothing and hits the label.
+- **PRECISION: `wasMoved(x)` stops the compile.** It lowers to the
+  `=wasMoved` hook, and `parseCalleeImpl`'s `expectKind` fails (nnkSym for
+  nnkIdentDefs) instead of a decline.
+- **PRECISION: `setLen` declines**, a seq's system body reaching an
+  unsupported `nnkWhenStmt`, so a `mitems` body that resizes by `setLen`
+  declines where one that resizes by `add` or `pop` decides.
+- **PRECISION: a string of unknown provenance** (`newString`, an opaque
+  call) with a by-value copy declines, as Nim's memory for it cannot be
+  placed; so does an element of `mitems` used after a resize, whose address
+  may be stale (undefined natively).
+- **PRECISION: `tsymex_r6_n43_parity` does not compile on cpp.** `Atomic[T]`
+  in the walker's generated allocator assigns a `std::atomic` (a deleted
+  operator); the same error at the base 5729b1a. It passes 25/0 on c.

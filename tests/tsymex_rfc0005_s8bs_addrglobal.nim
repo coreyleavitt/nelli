@@ -75,9 +75,10 @@ suite "S8bs: an address cell reached through a global ptr":
     clean(sutCapture, "cp", sxSat)
     clean(sutCapture, "cp_dead", sxUnsat)
   test "a proc-value call":
-    # RFC-0005 S8bh's decline: the body reaches a heap cell of the type.
-    declines(sutProcValue, "pv", "can also be reached by the body")
-    declines(sutProcValue, "pv_dead", "can also be reached by the body")
+    # RFC-0005 S8bh declined it (the body reaches a heap cell of the
+    # type). RFC-0005 S8ca: `pb[].x` is passed by reference.
+    clean(sutProcValue, "pv", sxSat)
+    clean(sutProcValue, "pv_dead", sxUnsat)
   test "a global ref":
     clean(sutGlobalRef, "gr", sxSat)
     clean(sutGlobalRef, "gr_dead", sxUnsat)

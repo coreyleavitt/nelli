@@ -203,7 +203,14 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "241"
+const symexWalkerVersion* = "246"
+  ## RFC-0005 S8ca (2026-10-03, provisional) — S8bu's remainder. A call is
+  ## not inlined when the native stack left below it is under what one more
+  ## level needs (`nativeStackShort`): it declines in-band
+  ## (`beBudgetExhaustedUnmodelled`, naming the native stack) whatever
+  ## `maxCallDepth` says, where the walk overflowed the stack (SIGSEGV) on
+  ## cpp and on a small thread stack. 225 -> 233.
+  ##
   ## RFC-0005 batch 8 (2026-11-02) -- S8bx and S8bt land stacked on batch 7 as
   ## one integration branch under ONE walker number; their bullets follow the
   ## batch 7 block, each naming its provisional number. The stack's own
@@ -5977,6 +5984,7 @@ proc canonicalize(s: IRStmt, env: LocalEnv): string =
     "St<Dw:fam=" & (if s.dwPtrFamily: "ptr" else: "ref") &
       ";fld=" & s.dwField & (if s.dwInit: ";init" else: "") &   # RFC-0005 S8l
       (if s.dwCell: ";cell" else: "") &                          # RFC-0005 S8an
+      (if s.dwInPlace: ";inplace" else: "") &                    # RFC-0005 S8ca
       ";ety=" & canonicalize(s.dwElemTy) &
       ";p=" & canonicalize(s.dwPtr, env) &
       ";v=" & canonicalize(s.dwValue, env) & ">"

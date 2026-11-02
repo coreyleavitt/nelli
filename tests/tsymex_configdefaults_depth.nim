@@ -33,7 +33,7 @@ suite "RFC-0010 B4 -- the default budget actually bounds a runaway search":
     # when the native stack left is under one more level's need, so this
     # declines in-band on both backends, and so does any larger bound
     # (`tsymex_rfc0005_s8ca_stack`). `maxCallDepth: 0` still exhausts on
-    # the first call, by design (above).
+    # the first call, by design.
     let r = symexFind(runawayRecursionSut, tLabel("runaway_recursion_never"),
         SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
     check r.status == sxUnknown

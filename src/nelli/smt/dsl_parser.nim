@@ -3341,10 +3341,149 @@ proc isNoReturnRoutine(sym: NimNode): bool =
   false
 
 proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
+                       seen, stack: var seq[NimNode])  ## RFC-0005 S8cc fwd decl
+
+proc scanRead(e: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode])
+
+proc scanReadPath(e: NimNode; acc: var OpaqueEffects;
+                  seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The lvalue path `e`, whose value reaches no heap cell,
+  ## read: its root is neither rebound nor does its value escape, and its
+  ## indices are read.
+  case e.kind
+  of nnkSym:
+    if not (symKind(e) in {nskVar, nskLet} and isModuleGlobal(e)):
+      scanOpaqueEffects(e, acc, seen, stack)
+  of nnkDotExpr, nnkHiddenDeref, nnkDerefExpr:
+    scanReadPath(e[0], acc, seen, stack)
+  of nnkBracketExpr, nnkCheckedFieldExpr:
+    scanReadPath(e[0], acc, seen, stack)
+    for i in 1 ..< e.len: scanRead(e[i], acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar:
+    scanReadPath(e[^1], acc, seen, stack)
+  else:
+    scanRead(e, acc, seen, stack)
+
+proc scanCall(n: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. A call in a summarised body: the routine, then each
+  ## argument, read when its formal is by value. A `var` formal or an
+  ## address taken counts as a write (a magic's `var` formal, `inc gi`, has
+  ## no `nnkHiddenAddr`, hence the formal's type), as does any argument when
+  ## the formals cannot be listed.
+  if n.len == 0 or n[0].kind != nnkSym:
+    for c in n: scanOpaqueEffects(c, acc, seen, stack)
+    return
+  scanOpaqueEffects(n[0], acc, seen, stack)
+  var byValue: seq[bool]
+  # A routine's declared formals (a magic's `var` is on its declaration); a
+  # proc value's from its type.
+  let fp =
+    if symKind(n[0]) in procValueHeadKinds:
+      let ty = n[0].getTypeImpl
+      if ty.kind == nnkProcTy and ty.len > 0: ty[0] else: nil
+    else:
+      let impl = n[0].getImpl
+      if impl.kind in RoutineNodes: impl[3] else: nil
+  if fp != nil and fp.kind == nnkFormalParams:
+    for i in 1 ..< fp.len:
+      let d = fp[i]
+      if d.kind != nnkIdentDefs: continue
+      for _ in 0 ..< d.len - 2:
+        byValue.add d[^2].kind notin {nnkVarTy, nnkOutTy}
+  for i in 1 ..< n.len:
+    if byValue.len == n.len - 1 and byValue[i - 1] and
+       n[i].kind notin {nnkHiddenAddr, nnkAddr}:
+      scanRead(n[i], acc, seen, stack)
+    else:
+      scanOpaqueEffects(n[i], acc, seen, stack)
+
+proc scanRead(e: NimNode; acc: var OpaqueEffects;
+              seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The expression `e` read by value. A module-level
+  ## variable is not rebound by a read (S8as counted every one a body names
+  ## as written), but a value holding refs escapes: every cell its type
+  ## reaches may be written through it. A proc-typed one, or any other
+  ## shape of expression, is summarised as S8as does.
+  if e == nil or not acc.inert: return
+  case e.kind
+  of nnkSym:
+    if symKind(e) in {nskVar, nskLet} and isModuleGlobal(e) and
+       e.typeKind notin {ntyProc, ntyPointer}:
+      if not irTypeRefFree(classifyType(e.getTypeInst).ty):
+        var rs: seq[string]
+        reachPointees(e.getTypeInst, acc, rs)
+    else:
+      scanOpaqueEffects(e, acc, seen, stack)
+  of nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr, nnkHiddenDeref,
+     nnkDerefExpr:
+    if irTypeRefFree(classifyType(e.getTypeInst).ty):
+      scanReadPath(e, acc, seen, stack)
+    else:
+      for c in e: scanRead(c, acc, seen, stack)
+  of nnkHiddenStdConv, nnkHiddenSubConv, nnkConv, nnkPar, nnkBracket,
+     nnkTupleConstr, nnkCurly, nnkObjConstr, nnkExprColonExpr:
+    for c in e: scanRead(c, acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    scanCall(e, acc, seen, stack)
+  else:
+    scanOpaqueEffects(e, acc, seen, stack)
+
+proc scanWrite(lhs: NimNode; acc: var OpaqueEffects;
+               seen, stack: var seq[NimNode]) =
+  ## RFC-0005 S8cc. The left side of an assignment: its root is written, its
+  ## indices are read.
+  case lhs.kind
+  of nnkBracketExpr:
+    scanWrite(lhs[0], acc, seen, stack)
+    for i in 1 ..< lhs.len: scanRead(lhs[i], acc, seen, stack)
+  of nnkDotExpr:
+    scanWrite(lhs[0], acc, seen, stack)
+  else:
+    scanOpaqueEffects(lhs, acc, seen, stack)
+
+proc scanOpaqueEffects(n: NimNode; acc: var OpaqueEffects;
                        seen, stack: var seq[NimNode]) =
-  ## RFC-0005 S8as. See `opaqueWriteSummary`.
+  ## RFC-0005 S8as. See `opaqueWriteSummary`. RFC-0005 S8cc: a module-level
+  ## variable counts where the body may write it. The positions that only
+  ## read are listed here (`scanRead`); a symbol met anywhere else counts.
   if n == nil or not acc.inert: return
   case n.kind
+  of nnkAsgn, nnkFastAsgn:
+    scanWrite(n[0], acc, seen, stack)
+    if n[0].kind == nnkSym and n[0].typeKind == ntyVar:
+      # `result = gi` of a routine returning `var`: the address escapes.
+      scanOpaqueEffects(n[1], acc, seen, stack)
+    else:
+      scanRead(n[1], acc, seen, stack)
+  of nnkIdentDefs, nnkVarTuple:
+    for i in 0 ..< n.len - 1: scanOpaqueEffects(n[i], acc, seen, stack)
+    scanRead(n[^1], acc, seen, stack)
+  of nnkElifBranch, nnkElifExpr:
+    scanRead(n[0], acc, seen, stack)
+    scanOpaqueEffects(n[1], acc, seen, stack)
+  of nnkCaseStmt:
+    scanRead(n[0], acc, seen, stack)
+    for i in 1 ..< n.len: scanOpaqueEffects(n[i], acc, seen, stack)
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix, nnkCallStrLit,
+     nnkHiddenCallConv:
+    scanCall(n, acc, seen, stack)
+  of nnkAddr:
+    # A by-value formal may be the caller's own storage (Nim passes a large
+    # one by address), read above as no write: its address (`unsafeAddr`)
+    # may write any variable a caller passed.
+    var r = n[0]
+    while r.kind in {nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr} and
+          r.len > 0:
+      r = r[0]
+    if r.kind == nnkSym and symKind(r) == nskParam and
+       r.typeKind notin {ntyVar, ntyPtr, ntyRef}:
+      if havocAllGlobals notin acc.havoc: acc.havoc.add havocAllGlobals
+      acc.heapAll = true
+    else:
+      for c in n: scanOpaqueEffects(c, acc, seen, stack)
   of nnkSym:
     let k = symKind(n)
     if k in {nskVar, nskLet} and isModuleGlobal(n):
@@ -5879,7 +6018,7 @@ proc laterArgWrites(a: NimNode; acc: var OpaqueEffects;
                     seen, stack: var seq[NimNode]) =
   ## RFC-0005 S8br. What evaluating the argument `a` may write, into `acc`:
   ## for each call in it, S8as's summary of the callee's body
-  ## (`scanOpaqueEffects`: the globals it names, the captures it may write,
+  ## (`scanOpaqueEffects`: the globals it may write, the captures it may write,
   ## the heaps it reaches) and S8ax's of its by-address actuals
   ## (`opaqueArgEffects`); a routine passed as a value is summarised as a
   ## callee. Not inert for anything else that may write (a call through a
@@ -6255,20 +6394,14 @@ proc byRefSub(calleeSym: NimNode; idx: int; lv0, actual: NimNode;
   if f.isNil or mentionsSym(substByRefBody(impl[6], f, b), f): return
   b
 
-proc indexCallResult(ix: NimNode): NimNode =
-  ## RFC-0005 S8br. When `ix`, inside an index, is a user routine's call
-  ## (Nim evaluates it where the argument stands, into a temporary): the
-  ## callee's own `result` symbol, which has the type the call returns, to
-  ## mark (as S8bd's `byRefSub` marks a call base). nil otherwise: a
-  ## builtin (`len`, `+`) is read inline, with the index.
-  if ix.kind notin {nnkCall, nnkCommand} or ix.len == 0 or
-     ix[0].kind != nnkSym or not isUserCallee(ix[0]):
-    return nil
-  let ci = resolveRoutineImpl(ix[0])
-  if ci != nil and ci.len > 7 and ci[7].kind == nnkSym and
-     sameType(ci[7].getTypeInst, ix.getTypeInst):
-    ci[7]
-  else: nil
+proc indexCallToBind(ix: NimNode): bool =
+  ## RFC-0005 S8br. `ix`, inside an index, is a call of a user routine, or
+  ## (RFC-0005 S8cc) one through a proc value or any other head: Nim
+  ## evaluates it where the argument stands, into a temporary. False for a
+  ## builtin (`len`, `+`), which is read inline with the index.
+  ix.kind in {nnkCall, nnkCommand} and ix.len > 0 and
+    (ix[0].kind != nnkSym or isUserCallee(ix[0]) or
+     symKind(ix[0]) in procValueHeadKinds)
 
 proc lvalueStepKid(a: NimNode; k: int): bool =
   ## RFC-0005 S8br. Child `k` of the lvalue path step `a` is itself on the
@@ -6284,7 +6417,7 @@ proc lvalueStepKid(a: NimNode; k: int): bool =
 proc hasIndexCall(a: NimNode; inIndex: bool): bool =
   ## RFC-0005 S8br. Whether `hoistIndexCalls` would evaluate a call in an
   ## index of the by-address actual `a`.
-  if inIndex and indexCallResult(a) != nil: return true
+  if inIndex and indexCallToBind(a): return true
   for k in 0 ..< a.len:
     if inIndex or lvalueStepKid(a, k):
       if hasIndexCall(a[k], inIndex): return true
@@ -6295,13 +6428,10 @@ proc hasIndexCall(a: NimNode; inIndex: bool): bool =
 proc indexCallLeft(a: NimNode; inIndex: bool): NimNode =
   ## RFC-0005 S8br. A call left in an index of the lvalue path `a` after
   ## `hoistIndexCalls` that Nim evaluates once and a write-back, which
-  ## re-parses the lvalue, would evaluate again: one through a proc value,
-  ## or a user routine's with no `result` symbol to mark (a generic's whose
-  ## `result` has another type). nil when none is left. The seq write-back
-  ## called it a second time (a false verdict); the array one declined.
-  if inIndex and a.kind in {nnkCall, nnkCommand} and a.len > 0 and
-     (a[0].kind != nnkSym or isUserCallee(a[0]) or
-      symKind(a[0]) in procValueHeadKinds):
+  ## re-parses the lvalue, would evaluate again: the mark counter was spent
+  ## (`markByRef`). nil when none is left. The seq write-back called it a
+  ## second time (a false verdict); the array one declined.
+  if inIndex and indexCallToBind(a):
     return a
   for k in 0 ..< a.len:
     let sub =
@@ -6327,18 +6457,23 @@ proc hoistIndexCalls(a: NimNode; inIndex: bool; preamble: var seq[IRStmt];
                      ctx: ParseCtx): NimNode =
   ## RFC-0005 S8br. A by-address actual `a` (`gArr[nextI()]`, `addr
   ## gs[nextI()]`) with each call in an index on its lvalue path evaluated
-  ## once, here, root first, and replaced by a mark (`markByRef` of the
-  ## callee's `result`, `indexCallResult`) naming the `let` that holds its
-  ## result. Nim evaluates the call where the
+  ## once, here, root first, and replaced by a mark naming the `let` that
+  ## holds its result. RFC-0005 S8cc: the mark is of the symbol of the call's
+  ## type, so a call with no typed `result` symbol (through a proc value) is
+  ## named too. The call node cannot be marked as itself: a childless call
+  ## in an index aborts the compiler (`IndexDefect`). An anonymous type (a
+  ## `range[..]`) has no symbol: the `let` carries the type, and only the
+  ## mark's name is read, so `int` stands in.
+  ## Nim evaluates the call where the
   ## argument stands (`T1_ = nextI(); chk(T1_); T2_ = f(); touch(&gArr[T1_],
   ## T2_)`), so the copy-in, the copy-out and S8an's cell all reach the
   ## element through that one value, and S8bk's late address
   ## (`placeLateAddr`) keeps the `let` where it stands (it is not a lazy
   ## read). The copy-out re-parsed the call and declined (`unsupported
   ## nnkAsgn shape`, `pureIndexExpr`). `a` itself when nothing changed.
-  let res = if inIndex: indexCallResult(a) else: nil
-  if res != nil:
-    let mk = markByRef(res)
+  if inIndex and indexCallToBind(a):
+    let ty = a.getTypeInst
+    let mk = markByRef(if ty.kind == nnkSym: ty else: bindSym"int")
     if mk.isNil: return a
     let v = parseExpr(a, preamble, ctx)
     preamble.add mkLet(byRefName(mk), classifyType(a).ty, v)
@@ -7417,6 +7552,35 @@ proc simpleRefExpr(e: NimNode): bool =
     e.len >= 1 and simpleRefExpr(e[^1])
   else: false
 
+func holdsCompoundLeaf(t: IRType): bool =
+  ## RFC-0005 batch 9. `t` is, or a tuple of, what S8ca's `sortOfTuple` admits
+  ## to a proc value's domain: a seq, a table, a set or an array.
+  if t == nil: return false
+  case t.kind
+  of itSeq, itTable, itSet, itArray: true
+  of itTuple:
+    for f in t.fields:
+      if holdsCompoundLeaf(f): return true
+    false
+  else: false
+
+proc byValueTouch(a: NimNode; touch: var seq[string]) =
+  ## RFC-0005 batch 9. A by-value actual of such a type shares its memory
+  ## with the variable it names (Nim passes it by address, or copies a header
+  ## over one buffer), while the walk binds the formal to a copy. A body that
+  ## also reaches that variable (`touchMeetsOuter`) reads through the formal
+  ## what it wrote by name: `f(gs)` with `gs[0] = 50; a[0]` is 50 natively. It
+  ## declined through S8ca's item 5 for want of a sort, and was a false
+  ## `sxUnsat` after it.
+  if a.kind == nnkHiddenAddr or a.typeKind == ntyNone or
+     not holdsCompoundLeaf(classifyType(a).ty):
+    return
+  var syms: seq[NimNode]
+  lvalueVarSyms(a, syms)
+  for s in syms:
+    let nm = "n:" & s.strVal
+    if nm notin touch: touch.add nm
+
 proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
                    preamble: var seq[IRStmt]; ctx: ParseCtx;
                    ordered = false):
@@ -7490,9 +7654,12 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
         argIRs.add parseExpr(n[i], preamble, ctx)
     # The index of a path is read without side effects (`stableIndex`), so
     # reading it after the arguments reads the value the argument used.
+    var byValTouch: seq[string]   # RFC-0005 batch 9
     for i in 1 ..< n.len:
       byValueLoc(n[i], i - 1, preamble, ctx, locs)
-    return (e: mkClosureCall(calleeName, argIRs, locs = locs), hoisted: false)
+      byValueTouch(n[i], byValTouch)
+    return (e: mkClosureCall(calleeName, argIRs, touch = byValTouch, locs = locs),
+            hoisted: false)
   let nArgs = n.len - 1
   proc isVarFormal(k: int): bool = k < varTys.len and varTys[k] != nil
   proc declineHere(msg: string): IRStmt =
@@ -7609,8 +7776,17 @@ proc closureCallIR(n0, calleeSym: NimNode; calleeName: string;
       argIRs.add mkVar(t)
       continue
     if lv.isNil:
+      if isVarFormal(k):
+        # RFC-0005 batch 9: a call returning `var T` (`t["a"]`) is a location
+        # the walk has no name for: it would read a copy into a temporary
+        # and drop the callee's write to it. Beside the Table it declined
+        # through S8ca's item 5 for want of a sort, and was a false `sxSat`
+        # after it (`f(t["a"], t, "a")`).
+        declines.add declineHere("`var` argument `" & n[i].repr &
+          "` is not a location the walk can write back to")
       argIRs.add parseExpr(n[i], preamble, ctx)
       byValueLoc(n[i], k, preamble, ctx, locs)   ## RFC-0005 S8bu
+      byValueTouch(n[i], touch)                  ## RFC-0005 batch 9
       continue
     # RFC-0005 S8br: a call in the lvalue's index is evaluated once, here,
     # as for a direct call (`hoistIndexCalls`).
@@ -8542,7 +8718,6 @@ proc parseOfTest(n: NimNode; preamble: var seq[IRStmt]; ctx: ParseCtx): IRExpr =
   reads.add mkAssign(res, ok)
   preamble.add mkIf(@[mkBranch(nonNil, mkBlock(reads))])
   mkVar(res)
-
 var miElemGuards {.compileTime.}: seq[tuple[mark: string; loc, site: NimNode;
                                            lenName, iter: string]]
   ## RFC-0005 S8ca. While a `mitems` / `mpairs` body is parsed
@@ -15932,6 +16107,27 @@ func irLocRoot(e: IRExpr): string =
   of iekField: irLocRoot(e.obj)
   else: ""
 
+proc closureTakesView(e: IRExpr; vName, tabRoot: string): bool =
+  ## RFC-0005 batch 9. `e` calls through a proc value with a `var` or `addr`
+  ## actual, and its actuals reach both the `mpairs` view `vName` and the
+  ## Table rooted at `tabRoot` (a `var` actual that is not a variable is a
+  ## temporary, whose location `ccTouch` names). A by-value-only call writes
+  ## through no formal, so nothing has to relate the two.
+  if e == nil: return false
+  if e.kind == iekClosureCall:
+    var writes = e.ccAddrArgs.len > 0
+    for t in e.ccVarTys:
+      if t != nil: writes = true
+    if writes:
+      var refs: HashSet[string]
+      for a in e.ccArgs: collectVarRefs(a, refs)
+      for t in e.ccTouch:
+        if t.startsWith("n:"): refs.incl t[2 .. ^1]
+      if vName in refs and (tabRoot.len == 0 or tabRoot in refs): return true
+  for k in irKids(e):
+    if closureTakesView(k, vName, tabRoot): return true
+  false
+
 proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
                      n: NimNode; ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8bx (item 3). In an `mpairs` / `mvalues` body, a call that
@@ -15994,6 +16190,20 @@ proc markViewAliases(s: IRStmt; vName, tabPath, tabRoot, keyName: string;
         "a call receives an `mpairs` view and a location holding its " &
         "Table"), s])
     s.cViewAliases.add (viewArg: viewIx, tabArg: tabIx, keyName: keyName)
+    s
+  of isLet, isAssign:
+    # RFC-0005 batch 9: a call through a proc value has no `cViewAliases`, so
+    # the two formals would be separate copies. Batch 8's decline here came
+    # from the Table's compound sort, which S8ca (item 5) lifted: a false
+    # `sxSat` until this one.
+    if closureTakesView((if s.kind == isLet: s.lvalue else: s.avalue),
+                        vName, tabRoot):
+      return mkBlock(@[ctx.declineAtSite(feUnsupportedOp,
+        siteMsg(n, "a call through a proc value in the body of this `for` " &
+                "receives the loop variable and its Table: the two are one " &
+                "location in Nim, which is not modelled -- path degraded to " &
+                "sxUnknown"),
+        "a proc-value call receives an `mpairs` view and its Table"), s])
     s
   else: s
 
@@ -17916,10 +18126,11 @@ proc parseStmtInner(n: NimNode,
           # literal or a variable (`arrayElemLvalue`), so reading it twice
           # is reading it once.
           # RFC-0005 S8bl (item 1): and of a SEQ ELEMENT at a pure index
-          # (`s[0].add 'x'`, `s[i].add v`) or a dereference (`p[].add v`):
-          # any `pureLvalueTarget`. Those reached the generic call, where the
-          # system `add` magic was registered with an empty body -- the
-          # append was dropped, a false sxSat.
+          # (`s[0].add 'x'`, `s[i].add v`): any `pureLvalueTarget` (a
+          # dereference takes S8ca's arm above, which reads the pointer once
+          # and the value after the arguments). Those reached the generic
+          # call, where the system `add` magic was registered with an empty
+          # body -- the append was dropped, a false sxSat.
           let oldTmp = freshSynth(ctx, "aelt")
           let eltTy = classifyType(recv1).ty
           preamble.add mkLet(oldTmp, eltTy, parseExpr(recv1, preamble, ctx))

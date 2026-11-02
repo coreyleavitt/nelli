@@ -22,7 +22,7 @@
 ##
 ## Found on the way (SOUNDNESS): `swap` was a no-op. Its bodiless
 ## `{.magic.}` routine was registered with an empty body, so `swap(a, b);
-## if a[1] == 3` was a clean, wrong sxUnsat. It is modelled (`parseSwap`):
+## if a[1] == 3` was a clean, wrong sxUnsat. It is modelled (`parseVarMagicStmt`):
 ## both operands read, each written the other's value through the
 ## assignment's own lvalue arms.
 ##

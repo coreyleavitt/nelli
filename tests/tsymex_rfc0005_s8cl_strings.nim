@@ -154,5 +154,5 @@ suite "S8cl (4): newString is fresh memory":
     check u.status == sxUnknown
 
 suite "S8cl: walker version":
-  test "symexWalkerVersion >= 246":
-    check parseInt(symexWalkerVersion) >= 246
+  test "symexWalkerVersion >= 248":
+    check parseInt(symexWalkerVersion) >= 248

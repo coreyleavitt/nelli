@@ -1331,7 +1331,10 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8bx_iterchange",
             # S8bx item 5: a string's setLen over a symbolic string decides.
             "tsymex_rfc0005_s8bx_setlenstr",
-            # item 6, split out by RFC-0005 S8ca item 9.
+            # RFC-0005 S8ce: nim-z3's hooks no longer swallow an in-flight raise
+            "tsymex_rfc0005_s8ce_hookraise",
+            "tsymex_rfc0005_s8ce_raiseshapes",
+            # S8bu's item 6, split out by RFC-0005 S8ca item 9.
             "tsymex_rfc0005_s8bu_byvalseq",
             # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
             # declines in-band when the native stack left is under one more
@@ -1354,6 +1357,22 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ca_resize",
             # item 8: a mutation through a pointer to the whole value.
             "tsymex_rfc0005_s8ca_derefmut",
+            # RFC-0005 S8by: no (1b)/(1c) after a facts-first SAT; concolic
+            # scratch solves in contexts of their own; a regex membership
+            # under a disjunction or an ite merged with those that hold
+            # where it is read. Walker 219->231.
+            "tsymex_rfc0005_s8by_remainder",
+            # RFC-0005 S8cc -- S8br's remainder: the address cell's query at
+            # a non-literal index is pinned to a step budget; a callee's
+            # global counts as written only where it may be; an index call
+            # with no symbol is bound once. Walker 237->238.
+            "tsymex_rfc0005_s8cc_cellquery",
+            "tsymex_rfc0005_s8cc_remainder",
+            # RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8.
+            # A proc value's aliasing shapes decline; walker 241->245.
+            "tsymex_rfc0005_b9_integration",
+            # A call declines before Nim's call depth limit ends the process.
+            "tsymex_rfc0005_b9_calldepth",
             # RFC-0005 S8cl: the allocation and lifetime magics, `newString`.
             "tsymex_rfc0005_s8cl_magics",
             "tsymex_rfc0005_s8cl_strings"]:

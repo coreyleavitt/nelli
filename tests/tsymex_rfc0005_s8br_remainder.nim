@@ -50,15 +50,6 @@ template declines(fn: typed, lbl, why: string) =
     check why in show(r.errors)
     check not r.errors.hasKind(weInternalWalkerFault)
 
-template declinesOp(fn: typed, lbl, why: string) =
-  block:
-    let r = symexFind(fn, tLabel(lbl))
-    checkpoint lbl & " " & $r.status & " " & show(r.errors)
-    check r.status == sxUnknown
-    check r.errors.hasKind(feUnsupportedOp)
-    check why in show(r.errors)
-    check not r.errors.hasKind(weInternalWalkerFault)
-
 var gArr: array[3, int]
 var gs: seq[int]
 var gi: int
@@ -193,8 +184,8 @@ proc sutIdxCallProcArr(k: int) =
     symexTarget("pa_dead")
 
 proc sutIdxCallValue(k: int) =
-  ## The index calls through a proc value: no `result` to name its value
-  ## by, so the write-back, which would call it again, declines.
+  ## The index calls through a proc value: bound once by its own mark since
+  ## S8cc (`tsymex_rfc0005_s8cc_remainder`); it declined here before.
   if k < 0 or k > 1000: return
   gs = @[10, k, 30]
   gCalls = 0
@@ -259,9 +250,10 @@ suite "S8br: a call in a by-address actual's index":
     discard verdict(sutIdxCallAddr, "ia_dead", sxUnsat)
     declines(sutIdxCallShrunk, "is", "never checked")
 
-  test "an index call the walk cannot name declines":
-    ## RED: `fs_dead` a false `sxSat` (the seq copy-out called `fv` again).
-    declinesOp(sutIdxCallValue, "fs_dead", "evaluates once, where the argument stands")
+  test "an index call through a proc value decides":
+    ## RED: `fs_dead` a false `sxSat` (the seq copy-out called `fv` again);
+    ## S8br declined it, S8cc decides it.
+    discard verdict(sutIdxCallValue, "fs_dead", sxUnsat)
 
   test "a call in a by-address actual's index, through a proc value":
     ## RED: `ps` `sxUnsat` and `ps_dead` a false `sxSat` (the seq copy-out

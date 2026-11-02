@@ -1042,11 +1042,22 @@ suite "Phase 15 CR-2 — version bumps":
     ## RFC-0005 batch 8: S8bx and S8bt stacked on batch 7, one location for
     ## an `mpairs` view, a table write seen through it, a raise in an
     ## own-context solve a fault. 237->241.
+    ## RFC-0005 S8ce (S8bx's remainder: nim-z3's lifecycle hooks swallowed an
+    ## in-flight raise on the C backend, fixed in nim-z3; S8bx's raise hook
+    ## removed). 228->238 (provisional).
     ## RFC-0005 S8ca (a call declines in-band when the native stack left
     ## is under one more level's need). 225->233.
+    ## RFC-0005 S8by (no (1b)/(1c) after a facts-first SAT; concolic
+    ## scratch solves in contexts of their own; a membership below the top
+    ## level merged). Provisional 231. 219->231.
+    ## RFC-0005 S8cc (a callee's global counts as written only where it
+    ## may be; an index call with no symbol is bound once). 237->238.
+    ## RFC-0005 batch 9: S8ce, S8ca, S8by and S8cc stacked on batch 8; a
+    ## proc-value call's aliasing shapes decline where S8ca's sort lifted
+    ## their decline. 241->245.
     ## RFC-0005 S8cl (a bodiless magic is modelled or declines, `unsafeNew`
-    ## and `newString` allocate, `setLen` reads after its length). 246.
-    check symexWalkerVersion == "246"
+    ## and `newString` allocate, `setLen` reads after its length). 245->248.
+    check symexWalkerVersion == "248"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

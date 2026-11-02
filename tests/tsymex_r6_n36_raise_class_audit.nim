@@ -406,7 +406,7 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     # raises, still marked -- 13 -> 6).
     check runtimeHeapCount == 6
 
-  test "pattern (B) site inventory: 77 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
+  test "pattern (B) site inventory: 78 runtime.nim + 0 runtime_strings.nim + 3 runtime_heap.nim marked lines":
     ## N46-followup-3: runtime.nim 78 -> 75 (rawAnyAstOf/iekField/
     ## storeSeqElem no longer raw raises, not re-marked -- see this file's
     ## own N46-followup-3 header note and `symexWalkerVersion`'s doc comment).
@@ -465,13 +465,16 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## `injectedExtractionFaultTerms`).
     ## 77 -> 79 (RFC-0005 batch 8, walker 241). The same for an own-context
     ## solve (`ownContextCheck`, `injectedSolveFaultTerms`).
-    ## 79 -> 80 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
+    ## 79 -> 80 (RFC-0005 S8ce). One category-c test-injection-only site,
+    ## compiled out of every normal build: the raise-shape fault
+    ## `injectShapeFault`.
+    ## 80 -> 81 (RFC-0005 S8cl). `storeOrdinal`'s range check, the check `F(v)`
     ## made implicitly: category-c.
-    check runtimeCount == 80
+    check runtimeCount == 81
     check runtimeStringsCount == 0
     check runtimeHeapCount == 3
 
-  test "N46-followup-3: pattern (B) category breakdown -- 80 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
+  test "N46-followup-3: pattern (B) category breakdown -- 81 category-c, 0 category-d (runtime.nim + runtime_heap.nim) -- category-d backlog CLOSED":
     ## Sub-breakdown of the pattern-(B) inventory above, pinned separately so
     ## a future slice that resolves a `category-d` (uncertain) entry into
     ## `category-c` (proven) -- or vice versa, if a `category-c` argument
@@ -501,8 +504,9 @@ suite "symex N36 — permanent raw-raise-in-lower CLASS regression audit":
     ## S8z).
     ## 78 -> 80: the same two S8bx test-injection-only sites added above.
     ## 80 -> 82: the same two batch 8 test-injection-only sites added above.
-    ## 82 -> 83: the same `storeOrdinal` site added above (RFC-0005 S8cl).
-    check cCount == 83
+    ## 82 -> 83: the same S8ce `injectShapeFault` site added above.
+    ## 83 -> 84: the same `storeOrdinal` site added above (RFC-0005 S8cl).
+    check cCount == 84
     check dCount == 0
 
   test "N46-followup-2: pattern (A) LEDGERED-LIVE backlog CLOSED -- zero remain (runtime_heap.nim)":

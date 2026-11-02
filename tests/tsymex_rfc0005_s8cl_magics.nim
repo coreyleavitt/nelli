@@ -486,5 +486,5 @@ suite "S8cl (3): setLen":
     clean(sutMitemsSetLen, "ms_dead", sxUnsat)
 
 suite "S8cl: walker version":
-  test "symexWalkerVersion >= 246":
-    check parseInt(symexWalkerVersion) >= 246
+  test "symexWalkerVersion >= 248":
+    check parseInt(symexWalkerVersion) >= 248

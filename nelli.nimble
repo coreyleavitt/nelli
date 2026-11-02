@@ -1337,6 +1337,8 @@ task test, "Run the test suite":
             # S8cn items 3 and 4: an mpairs view and its Table.
             "tsymex_rfc0005_s8cn_views",
             "tsymex_rfc0005_s8cn_seqview",
+            "tsymex_rfc0005_s8cn_lent",
+            "tsymex_rfc0005_s8cn_lentnative",
             # RFC-0005 S8ce: nim-z3's hooks no longer swallow an in-flight raise
             "tsymex_rfc0005_s8ce_hookraise",
             "tsymex_rfc0005_s8ce_raiseshapes",

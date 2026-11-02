@@ -203,7 +203,7 @@ const renderAsChoicesVersion* = "12"
   ##   element VALUES were already positionally correct (S8z); only the
   ##   witness's own declared array type's index origin was wrong.
 
-const symexWalkerVersion* = "249"
+const symexWalkerVersion* = "250"
   ## RFC-0005 S8cn (2026-11-02), 245->249 (provisional), past the numbers
   ## queued slices hold. Verdicts change: step 1e (a bounded concrete search
   ## after 1b, `checkCappedSteps`) answers `sxSat` on queries both searches ran

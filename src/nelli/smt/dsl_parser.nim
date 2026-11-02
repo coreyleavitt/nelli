@@ -15187,6 +15187,150 @@ proc substAddrAlias(n, p, addrNode: NimNode): NimNode =
   result = copyNimNode(n)
   for c in n: result.add substAddrAlias(c, p, addrNode)
 
+func holdsSharedMemory(t: IRType): bool =
+  ## RFC-0005 S8cn. `t` is, or holds, a seq, a string or a Table.
+  if t == nil: return false
+  case t.kind
+  of itSeq, itString, itTable, itSet: true
+  of itTuple:
+    for f in t.fields:
+      if holdsSharedMemory(f): return true
+    false
+  of itArray: holdsSharedMemory(t.elemTy)
+  else: false
+
+proc routineWritesHeap(sym: NimNode; seen: var seq[NimNode]): bool
+proc nodeWritesHeap(n: NimNode; seen: var seq[NimNode]): bool =
+  ## RFC-0005 S8cn. `n` writes through a `ptr` or a `ref`, or calls a routine
+  ## that does, or a proc value.
+  if n == nil: return false
+  case n.kind
+  of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
+    var lv = (if n.kind == nnkHiddenAddr: n[0] else: n[0])
+    if n.kind == nnkHiddenAddr and isVarIndirection(lv): lv = lv[0]
+    var steps: seq[NimNode]
+    let r = lvalueRoot(lv, steps)
+    if r == nil or steps.len > 0: return true
+  of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
+    if n.len > 0:
+      if n[0].kind != nnkSym: return true
+      if symKind(n[0]) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
+        return true
+      if isUserRoutine(n[0]):
+        if routineWritesHeap(n[0], seen): return true
+      else:
+        for j in 1 ..< n.len:
+          if n[j].typeKind == ntyPtr: return true
+  else: discard
+  for c in n:
+    if nodeWritesHeap(c, seen): return true
+  false
+
+proc routineWritesHeap(sym: NimNode; seen: var seq[NimNode]): bool =
+  if containsSym(seen, sym): return false
+  seen.add sym
+  let impl = resolveRoutineImpl(sym)
+  if impl == nil or impl.len < 7: return true
+  nodeWritesHeap(body(impl), seen)
+
+proc rootReachedByPointer(root: NimNode; heapSteps: seq[NimNode]): bool =
+  ## RFC-0005 S8cn. A pointer may reach the memory of `root`: the location is
+  ## behind one already, or `root` is a global or a formal (who knows what its
+  ## caller holds), or its routine takes its address.
+  if heapSteps.len > 0 or isModuleGlobal(root) or symKind(root) == nskParam:
+    return true
+  let impl = resolveRoutineImpl(root.owner)
+  impl == nil or impl.len < 7 or addrTakenIn(body(impl), root)
+
+proc mayWriteRoot(n, root: NimNode; heapSteps: seq[NimNode]): string =
+  ## RFC-0005 S8cn. How `n`, run while a `lent` loop variable or a `let` holds
+  ## the memory of a container rooted at `root`, may write that memory, or "":
+  ## by name, as a `var` actual, through `addr`, by a callee that reaches
+  ## `root` by name (`calleeOuterSyms`), or, when a pointer may reach it
+  ## (`rootReachedByPointer`), through any `ptr` or `ref`.
+  proc scan(x: NimNode): string =
+    if x == nil: return ""
+    case x.kind
+    of nnkAsgn, nnkFastAsgn, nnkHiddenAddr:
+      var lv = x[0]
+      if x.kind == nnkHiddenAddr and isVarIndirection(lv): lv = lv[0]
+      var steps: seq[NimNode]
+      let r = lvalueRoot(lv, steps)
+      if r != nil and r.kind == nnkSym and containsSym(@[root], r):
+        return "written by name"
+    of nnkCall, nnkCommand, nnkInfix, nnkPrefix, nnkPostfix:
+      if x.len > 0 and x[0].kind == nnkSym and isUserRoutine(x[0]) and
+         containsSym(calleeOuterSyms(x[0]), root):
+        return "written by `" & x[0].strVal & "`, which reaches it by name"
+      if x.len > 0 and (x[0].kind != nnkSym or symKind(x[0]) in
+         {nskVar, nskLet, nskParam, nskForVar, nskTemp}):
+        return "reachable by a call through a proc value"
+    else: discard
+    if addrTakenIn(newTree(nnkStmtList, x), root) and
+       x.kind in {nnkAddr, nnkCall, nnkCommand}:
+      return "its address is taken"
+    for c in x:
+      let w = scan(c)
+      if w.len > 0: return w
+    ""
+  result = scan(n)
+  if result.len == 0 and rootReachedByPointer(root, heapSteps):
+    var seen: seq[NimNode]
+    if nodeWritesHeap(n, seen):
+      result = "written through a pointer or a ref"
+
+func alwaysCopied(t: IRType): bool =
+  ## RFC-0005 S8cn. A scalar: a loop variable or `let` of it is its own memory.
+  t != nil and t.kind in {itInt, itBool, itFloat32, itFloat64}
+
+proc lentLoopDecline(n, container, loopVar, bodyNode: NimNode; ctx: ParseCtx;
+                     what: string): IRStmt =
+  ## RFC-0005 S8cn. The decline of a `for` over `container` whose variable
+  ## holds the element's memory while the body may write it, or nil. The walk
+  ## binds the variable to the value read where it stands; `tsymex_rfc0005_s8cn_lentnative`
+  ## pins Nim seeing the write. The exact model is for RFC-0016.
+  var steps: seq[NimNode]
+  let root = lvalueRoot(unwrapHidden(container), steps)
+  if root == nil or root.kind != nnkSym: return nil
+  if countSymUses(bodyNode, loopVar) == 0: return nil
+  let why = mayWriteRoot(bodyNode, root, steps)
+  if why.len == 0: return nil
+  ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(n, "the variable of this `for` over `" & what & "` holds the " &
+            "container's memory, and the body may write it (" & why & "): " &
+            "Nim reads the write through the variable, which is not modelled " &
+            "(RFC-0016) (feUnsupportedOp)"),
+    "a `for` variable holding the memory the body may write")
+
+proc letCursorDecline(c: NimNode; rest: seq[NimNode]; ctx: ParseCtx): IRStmt =
+  ## RFC-0005 S8cn. The decline of `let c = lv` over a seq, a string, a Table
+  ## or an object holding one, where a later statement of its list reads `c`
+  ## and may write `lv`, or nil. `let` shares the memory under `--mm:refc`
+  ## always, and under orc and arc when cursor inference proves it, on evidence
+  ## from the whole routine (`tsymex_rfc0005_s8cn_lentnative`); a copy otherwise.
+  ## A verdict for one would hold under that setting only.
+  if c.kind != nnkLetSection or c.len != 1 or c[0].kind != nnkIdentDefs or
+     c[0].len != 3 or c[0][0].kind != nnkSym:
+    return nil
+  let v = unwrapHidden(c[0][2])
+  if v.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkDerefExpr,
+                   nnkHiddenDeref, nnkCheckedFieldExpr}:
+    return nil
+  if v.typeKind == ntyNone or not holdsSharedMemory(classifyType(v).ty): return nil
+  var steps: seq[NimNode]
+  let root = lvalueRoot(v, steps)
+  if root == nil or root.kind != nnkSym: return nil
+  let tail = newTree(nnkStmtList, rest)
+  if countSymUses(tail, c[0][0]) == 0: return nil
+  let why = mayWriteRoot(tail, root, steps)
+  if why.len == 0: return nil
+  ctx.declineAtSite(feUnsupportedOp,
+    siteMsg(c, "`let " & c[0][0].strVal & " = " & v.repr & "` shares the " &
+            "memory or copies it, by the memory manager and what cursor " &
+            "inference proved, and it may be written while the `let` is read (" &
+            why & "): not modelled (RFC-0016) (feUnsupportedOp)"),
+    "a `let` holding memory that may be written")
+
 proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
   ## RFC-0005 S8l. Parse the statements `items[start ..^ 1]` of one statement
   ## list, lowering `defer:` the way Nim does: a `defer: D` guards the REST of
@@ -15205,6 +15349,12 @@ proc parseDeferList(items: seq[NimNode], start: int, ctx: ParseCtx): IRStmt =
       let fin = parseStmt(c[c.len - 1], ctx)   # lexically first
       stmts.add mkTry(parseDeferList(items, k + 1, ctx), @[], fin)
       break
+    # RFC-0005 S8cn: `let c = s`, with a later write `c` may see.
+    block:
+      let lc = letCursorDecline(c, items[k + 1 ..< items.len], ctx)
+      if lc != nil:
+        stmts.add lc
+        break
     # RFC-0005 S8an: `let p = addr x` whose every later use is `p[]` or an
     # argument to a `ptr` formal that keeps it local (`ptrUsesStayLocal`)
     # IS `x`: the rest of the list is parsed with `p[]` spelled `x` and
@@ -16386,6 +16536,13 @@ proc parseTableForLoop(n: NimNode; ctx: ParseCtx): IRStmt =
       siteMsg(n, "`" & iterName & "` over a Table reached other than as a " &
               "variable or a field path is not modelled"),
       "`" & iterName & "` over this Table is not modelled")
+  # RFC-0005 S8cn: `values` and `keys` yield the slot's memory; `pairs` copies a
+  # scalar on every setting. `feTableIterOrder`'s replay does not stand in: a
+  # table of one entry is clean, and an `sxUnsat` is believed at any size.
+  if not mutView and (iterName != "pairs" or vars.len != 2 or
+                      not alwaysCopied(valTy)):
+    let d = lentLoopDecline(n, container, vars[^1], n[^1], ctx, iterName)
+    if d != nil: return d
   var body = parseLoopBody(n[^1], ctx).body   # a `continue` leaves the body
   var pre: seq[IRStmt]
   let snapIR = liftIndexContainer(parseExpr(container, pre, ctx), tabCls.ty,
@@ -17512,6 +17669,17 @@ proc parseStmtInner(n: NimNode,
           "symex Phase 15 S3: `for c in s` over a symbolic " &
             "string is unsupported (unbounded symbolic iteration length, " &
             "not a byte/codepoint mismatch — ADR-0006)")
+      # RFC-0005 S8cn: `items` over a seq is the element's memory; `pairs`, and
+      # `items` over an array, copy a scalar on every setting, but share anything
+      # else.
+      block:
+        let elemTy = if recvCls.ty.kind == itArray: recvCls.ty.elemTy
+                     elif recvCls.ty.kind == itSeq: recvCls.ty.seqElemTy
+                     else: nil
+        if recvCls.ty.kind == itSeq and not isPairs or not alwaysCopied(elemTy):
+          let d = lentLoopDecline(n, container, (if isPairs: n[1] else: iterVar),
+                                  bodyNode, ctx, iterExpr[0].strVal)
+          if d != nil: return d
       # RFC-0005 S8m: an array is unrolled (a `break` leaves the block
       # around the whole unroll); a seq is a `while` whose increment follows
       # the body (a `continue` leaves the body's block).

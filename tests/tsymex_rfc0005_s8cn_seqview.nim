@@ -528,4 +528,4 @@ suite "S8cn: a key added under the view":
 
 suite "S8cn: walker version":
   test "the floor":
-    check parseInt(symexWalkerVersion) >= 249
+    check parseInt(symexWalkerVersion) >= 250

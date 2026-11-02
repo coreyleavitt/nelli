@@ -1057,7 +1057,7 @@ suite "Phase 15 CR-2 — version bumps":
     ## their decline. 241->245.
     ## RFC-0005 S8cn: step 1e, an `mpairs` view and its Table, a seq's element
     ## with its seq, a `let` proc value. 245->249 (provisional, with batch 9 merged).
-    check symexWalkerVersion == "249"
+    check symexWalkerVersion == "250"
 
   test "CR-2 sub-test 6: renderAsChoicesVersion matches the current pin":
     ## CR-4 changes how int32(f) materialises as svBV32 internally; however,

@@ -2527,11 +2527,11 @@ proc tyScalarSize(ty: IRType): int =
   of itFloat64: 8
   else: 0
 
-proc armOffsets(sizes: seq[int]): seq[int] =
+proc armOffsets(sizes: seq[int]; packed: bool): seq[int] =
   ## RFC-0005 S8bz (item 6). The offsets of a branch's fields from the start of
   ## the object's union: C's layout of the struct Nim emits for a branch, each
-  ## scalar at its natural alignment (native suite). -1 from the first field
-  ## whose layout is not computed on.
+  ## scalar at its natural alignment (native suite), or with none under
+  ## `{.packed.}`. -1 from the first field whose layout is not computed on.
   var o = 0
   var known = true
   for sz in sizes:
@@ -2539,7 +2539,7 @@ proc armOffsets(sizes: seq[int]): seq[int] =
     if not known:
       result.add -1
       continue
-    if o mod sz != 0: o += sz - (o mod sz)
+    if not packed and o mod sz != 0: o += sz - (o mod sz)
     result.add o
     o += sz
 
@@ -2560,16 +2560,19 @@ proc ptrArmOverlaps(v: SymVal; step: int): seq[PtrOverlap] =
   let target = v.vArmFields[tag][j]
   var ts: seq[int]
   for f in v.vArmFields[tag]: ts.add svScalarSize(f)
-  let off = armOffsets(ts)[j]
+  # The IR does not say `{.packed.}`: an overlap holds under both layouts.
+  let off = armOffsets(ts, false)[j]
+  let offP = armOffsets(ts, true)[j]
   if off < 0: return
   let nm = v.vArmFieldNames[tag][j]
   for t, fs in v.vArmFields:
     if nm in v.vArmFieldNames[t]: continue
     var szs: seq[int]
     for f in fs: szs.add svScalarSize(f)
-    let offs = armOffsets(szs)
+    let offs = armOffsets(szs, false)
+    let offsP = armOffsets(szs, true)
     for k, f in fs:
-      if offs[k] == off and overlapPair(f, target):
+      if offs[k] == off and offsP[k] == offP and overlapPair(f, target):
         let c = ptrTagCond(v.vDisc[], v.vArmFields, t)
         result.add PtrOverlap(cond: c, step: ptrArmStep(0, t, k),
           nan: (case f.kind
@@ -2621,7 +2624,9 @@ proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
   let rest = key[at + 3 .. ^1]
   let sep = rest.find("__")
   if sep <= 0: return
-  let ord = try: parseInt(rest[0 ..< sep]) except ValueError: return
+  let ordS = rest[0 ..< sep]
+  if ordS != "-1" and not ordS.allCharsInSet(Digits): return
+  let ord = parseInt(ordS)
   let field = rest[sep + 2 .. ^1]
   let baseId = key[0 ..< at]
   var vty: IRType = nil
@@ -2633,14 +2638,18 @@ proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
     dk = k
   if vty == nil: return
   var off = -1
+  var offP = -1
   var size = 0
+  var isBool = false
   for arm in vty.vArms:
     if arm.tagOrdinal == ord and field in arm.fieldNames:
       var szs: seq[int]
       for f in arm.fieldTypes: szs.add tyScalarSize(f)
       let ix = arm.fieldNames.find(field)
-      off = armOffsets(szs)[ix]
+      off = armOffsets(szs, false)[ix]
+      offP = armOffsets(szs, true)[ix]
       size = szs[ix]
+      isBool = arm.fieldTypes[ix].kind == itBool
   if off < 0: return
   let heap = if p.heaps.hasKey(dk): p.heaps[dk]
              else: mkHeapArrayVar(ctx, allocRefSort(ctx, vty), vty.vDiscTy,
@@ -2650,9 +2659,11 @@ proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
     if field in arm.fieldNames: continue
     var szs: seq[int]
     for f in arm.fieldTypes: szs.add tyScalarSize(f)
-    let offs = armOffsets(szs)
+    let offs = armOffsets(szs, false)
+    let offsP = armOffsets(szs, true)
     for k, f in arm.fieldTypes:
-      if offs[k] == off and szs[k] == size:
+      if offs[k] == off and offsP[k] == offP and szs[k] == size and
+         (f.kind == itBool) == isBool:
         var c: Z3Bool
         if arm.isElse:
           c = mkBool(true)
@@ -2660,9 +2671,18 @@ proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
             if not o.isElse: c = c and not variantDiscEq(disc, int64(o.tagOrdinal))
         else:
           c = variantDiscEq(disc, int64(arm.tagOrdinal))
-        result.add PtrOverlap(cond: c, famKey: baseId & "__@" &
-          $(if arm.isElse: -1 else: arm.tagOrdinal) & "__" & arm.fieldNames[k],
-          ty: f, nan: mkBool(false))
+        let fk = baseId & "__@" &
+          $(if arm.isElse: -1 else: arm.tagOrdinal) & "__" & arm.fieldNames[k]
+        # A NaN's bytes are not one value: as `ptrArmOverlaps`, a decline.
+        var nan = mkBool(false)
+        if f.kind in {itFloat32, itFloat64}:
+          let arr = if p.heaps.hasKey(fk): p.heaps[fk]
+                    else: mkHeapArrayVar(ctx, sortOfRaw(ctx, objAddr.raw), f,
+                                         "heap_" & fk)
+          let cur = heapSelect(ctx, arr, objAddr, f)
+          nan = c and (if f.kind == itFloat64: isNaN(cur.fp64)
+                       else: isNaN(cur.fp32))
+        result.add PtrOverlap(cond: c, famKey: fk, ty: f, nan: nan)
         break
 
 proc ptrHeapDiscFact(ctx: Z3Context; p: Path; key: string;

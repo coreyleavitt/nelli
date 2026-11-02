@@ -74,6 +74,18 @@ type
     case k: VK
     of vA: discard
     of vB: g: int
+  VK2 {.packed.} = object
+    case k: VK
+    of vA:
+      p1: int8
+      p2: int64
+    of vB:
+      q1: int32
+      q2: int64
+  HN = ref object
+    case k: VK
+    of vA: a: int64
+    of vB: f: float64
   HF = ref object
     case k: VK
     of vA: a: int
@@ -86,6 +98,7 @@ proc addrU(v: var VU): ptr uint32 = addr v.u
 proc addrE64(v: var VM): ptr int64 = addr v.e64
 proc addrD64(v: var VM): ptr int64 = addr v.d64
 proc addrB64(v: var VP): ptr int64 = addr v.b64
+proc addrQ2(v: var VK2): ptr int64 = addr v.q2
 {.pop.}
 
 suite "S8bz (6): Nim's bytes":
@@ -111,6 +124,9 @@ suite "S8bz (6): Nim's bytes":
     check addrE64(v)[] == 99
     # A 64-bit field over two 32-bit ones: the partial overlap, not modelled.
     check addrD64(v)[] == ((2'i64 shl 32) or 1'i64)
+  test "nim: under {.packed.} the fields at one natural offset do not overlap":
+    var v = VK2(k: vA, p1: 0, p2: 0x0102030405060708'i64)
+    check addrQ2(v)[] != 0x0102030405060708'i64
   test "nim: a wider field reads past the active one: bytes it does not hold":
     # Only that the address is the union's start: what lies past `a32` is
     # whatever the object was given, which the model does not lay out.
@@ -180,6 +196,16 @@ proc p6m(v: var VM; p: ptr int64) =
   if p != nil and v.k == vA:
     v.c64 = 9
     if p[] == 9: symexTarget("p6m")
+proc p6k(v: var VK2; p: ptr int64) =
+  if p != nil and v.k == vA:
+    v.p2 = 9
+    if p[] == 9: symexTarget("p6k")
+proc p6hn(h: HN; p: ptr int64) =
+  # The integer branch's bytes while a heap object's float is active; `a` reads
+  # a NaN's bytes, which are no one value.
+  if p != nil and h != nil and h.k == vB:
+    h.f = 1.0
+    if p[] == 0x3FF0000000000000'i64: symexTarget("p6hn")
 proc p6e(v: var VE; p: ptr int) =
   if p != nil and v.k == vA:
     if p[] == 9: symexTarget("p6e")
@@ -198,8 +224,10 @@ suite "S8bz (6): an inactive branch":
     confirmed(p6sqw, "p6sqw")
     confirmed(p6tb, "p6tb")
     confirmed(p6hf, "p6hf")
+    confirmed(p6hn, "p6hn")
   test "any other overlap stays a stated decline":
     declined(p6s, "p6s")       # a string over an integer
     declined(p6p, "p6p")       # past the active field
     declined(p6m, "p6m")       # `d64` over two `int32`s
     declined(p6e, "p6e")       # a branch with no field
+    declined(p6k, "p6k")       # the layout `{.packed.}` may change

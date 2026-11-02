@@ -14000,13 +14000,18 @@ proc pointCheck(ctx: Z3Context; query: openArray[Z3Bool];
   var bytes: seq[char]
   proc addByte(c: char) =
     if c notin bytes and bytes.len < pointTableBytes: bytes.add c
-  for lit in stringConstants(ctx, query):
-    for c in lit: addByte(c)
+  # The query's own text first: the facts' UTF-8 ranges hold bytes too.
+  let lits = stringConstants(ctx, query)
+  for lit in lits:
+    for c in lit:
+      if c in {' '..'~'}: addByte(c)
   var body = st0.sp.pattern          # past its start options: `(*UTF8)`
   while body.startsWith("(*") and ')' in body:
     body = body[body.find(')') + 1 .. ^1]
   for c in body:
     if c in {'a'..'z', 'A'..'Z', '0'..'9'}: addByte(c)
+  for lit in lits:
+    for c in lit: addByte(c)
   addByte('a')
   var words = @[""]
   var at = 0

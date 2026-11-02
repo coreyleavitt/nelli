@@ -201,6 +201,16 @@ template orderSuts(T: typedesc; A, B, C, X, tg: untyped) =
     if b2(A in s, ch()) and j == 1: symexTarget(astToStr(tg) & "_in_early")
     s = {A}
     if not b2(A in s, ch()) and j == 1: symexTarget(astToStr(tg) & "_in_late")
+  proc `inLit tg`(j: int) =
+    # A literal's elements are compared inline, not built (`k` read late).
+    var k = A
+    proc ch(): bool =
+      k = B
+      true
+    proc b2(a, b: bool): bool = a
+    if b2(A in {k, X}, ch()) and j == 1: symexTarget(astToStr(tg) & "_il_early")
+    k = A
+    if not b2(A in {k, X}, ch()) and j == 1: symexTarget(astToStr(tg) & "_il_late")
   proc `cardInner tg`(j: int) =
     var s: set[T] = {A}
     proc ch(): int =
@@ -247,10 +257,10 @@ orderSuts(Mx, Mx(1), Mx(2), Mx(3), Mx(4), mx)
 orderSuts(uint8, 1'u8, 2'u8, 3'u8, 4'u8, by)
 
 template orderPins(tag: static string; big: static bool;
-                   unionN, compareT, eqL, inL, cardI, cardB, ctor, es: untyped) =
+                   unionN, compareT, eqL, inL, inLt, cardI, cardB, ctor, es: untyped) =
   test "nim: " & tag:
     symexCaptureBegin()
-    unionN(1); compareT(1); eqL(1); inL(1); cardI(1); cardB(1); ctor(1); es(1)
+    unionN(1); compareT(1); eqL(1); inL(1); inLt(1); cardI(1); cardB(1); ctor(1); es(1)
     let hit = symexCaptureEnd()
     check (tag & "_u_early" in hit) == big
     check (tag & "_u_late" in hit) == not big
@@ -260,6 +270,8 @@ template orderPins(tag: static string; big: static bool;
     check tag & "_eq_late" in hit
     check tag & "_in_early" notin hit
     check tag & "_in_late" in hit
+    check tag & "_il_early" notin hit
+    check tag & "_il_late" in hit
     check (tag & "_card_early" in hit) == big
     check (tag & "_card_late" in hit) == not big
     check tag & "_cb_early" notin hit
@@ -281,6 +293,8 @@ template orderPins(tag: static string; big: static bool;
     early(true, eqL, tag & "_eq_late")
     early(false, inL, tag & "_in_early")
     early(true, inL, tag & "_in_late")
+    early(false, inLt, tag & "_il_early")
+    early(true, inLt, tag & "_il_late")
     early(big, cardI, tag & "_card_early")
     early(not big, cardI, tag & "_card_late")
     early(false, cardB, tag & "_cb_early")
@@ -292,13 +306,13 @@ template orderPins(tag: static string; big: static bool;
     early(not big, es, tag & "_es_c")
 
 suite "S8cd item 4: where Nim reads a set expression":
-  orderPins("sm", false, unionNestedsm, compareTempsm, eqLazysm, inLazysm,
+  orderPins("sm", false, unionNestedsm, compareTempsm, eqLazysm, inLazysm, inLitsm,
             cardInnersm, cardBaresm, ctorEagersm, elemEagerSetLazysm)
-  orderPins("md", false, unionNestedmd, compareTempmd, eqLazymd, inLazymd,
+  orderPins("md", false, unionNestedmd, compareTempmd, eqLazymd, inLazymd, inLitmd,
             cardInnermd, cardBaremd, ctorEagermd, elemEagerSetLazymd)
-  orderPins("mx", true, unionNestedmx, compareTempmx, eqLazymx, inLazymx,
+  orderPins("mx", true, unionNestedmx, compareTempmx, eqLazymx, inLazymx, inLitmx,
             cardInnermx, cardBaremx, ctorEagermx, elemEagerSetLazymx)
-  orderPins("by", true, unionNestedby, compareTempby, eqLazyby, inLazyby,
+  orderPins("by", true, unionNestedby, compareTempby, eqLazyby, inLazyby, inLitby,
             cardInnerby, cardBareby, ctorEagerby, elemEagerSetLazyby)
 
 # --- item 6: a pinned long literal under a tight cap ----------------------------

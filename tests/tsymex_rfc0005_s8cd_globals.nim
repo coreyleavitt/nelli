@@ -241,7 +241,62 @@ proc arrElem(k: int) =
   if gVArr[1].kind == gkA and k == 2: symexTarget("v_elem")
   if gVArr[1].kind == gkA and gVArr[1].kind == gkB: symexTarget("v_elem_dead")
 
+type GR = object
+  case kind: GK
+  of gkA: r: ref int
+  of gkB: n: int
+
+var gR: GR
+
+proc refArmReassign(k: int) =
+  # A case object reaching a heap cell has no entry-value model.
+  try:
+    gR.kind = gkB
+    if k == 1: symexTarget("gr_after")
+  except FieldDefect:
+    symexTarget("gr_raise")
+
+proc armAlias(p: ptr int) =
+  # A pointer may address the arm field of a global only read.
+  if p == nil or gV.kind != gkA: return
+  let a = gV.a
+  p[] = 7
+  if gV.a != a: symexTarget("v_ptr")
+
+proc viaUnknownCall(f: proc(); k: int) =
+  # A call the walk cannot resolve may write the global.
+  let a = gV.kind
+  f()
+  if gV.kind != a and k == 1: symexTarget("v_havoc")
+
+proc opaqueWrite() {.noinline.} =
+  {.cast(noSideEffect).}:
+    gV = GV(kind: gkB, b: "w")
+
+proc viaOpaque(k: int) =
+  let a = gV.kind
+  opaqueWrite()
+  if gV.kind != a and k == 1: symexTarget("v_opaque")
+
 suite "S8cd item 3: case-object globals":
+
+  test "nim: an alias of an arm field, a write by a later call":
+    symexCaptureBegin()
+    gV = GV(kind: gkA, a: 0); armAlias(addr gV.a)
+    gV = GV(kind: gkA, a: 0)
+    viaUnknownCall(proc() = gV = GV(kind: gkB, b: "w"), 1)
+    gV = GV(kind: gkA, a: 0); viaOpaque(1)
+    check symexCaptureEnd() == toHashSet(["v_ptr", "v_havoc", "v_opaque"])
+
+  test "a global's arm field is a pointer's target, a later call may write it":
+    candidate(armAlias, "v_ptr")
+    let r = symexFind(viaUnknownCall, tLabel("v_havoc"))
+    checkpoint $r.status & " " & show(r.errors)
+    check r.status != sxUnsat
+    let r2 = symexFind(viaOpaque, tLabel("v_opaque"))
+    checkpoint $r2.status & " " & show(r2.errors)
+    check r2.status != sxUnsat
+
 
   test "nim: with the global set up, each label is reached":
     symexCaptureBegin()
@@ -299,6 +354,13 @@ suite "S8cd item 3: case-object globals":
     candidate(multiAxis, "m_axes")
     dead(multiAxis, "m_dead")
     candidate(multiArmRaise, "m_raise")
+
+  test "a case object reaching a heap cell declines, never sxUnsat":
+    for lbl in ["gr_after", "gr_raise"]:
+      let r = symexFind(refArmReassign, tLabel(lbl))
+      checkpoint lbl & " " & $r.status & " " & show(r.errors)
+      check r.status == sxUnknown
+      check not r.errors.hasKind(weInternalWalkerFault)
 
   test "a case object held in an array global":
     candidate(arrElem, "v_elem")

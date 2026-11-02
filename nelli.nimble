@@ -1177,6 +1177,8 @@ task test, "Run the test suite":
             # items 5-6: an array element on a path into an address-taken
             # variable; a by-value seq whose whole address is taken.
             "tsymex_rfc0005_s8bu_paths",
+            # item 6, split out by RFC-0005 S8ca item 9.
+            "tsymex_rfc0005_s8bu_byvalseq",
             # RFC-0005 S8ca -- S8bu's remainder; walker 233. Item 1: a call
             # declines in-band when the native stack left is under one more
             # level's need.
@@ -1192,6 +1194,7 @@ task test, "Run the test suite":
             "tsymex_rfc0005_s8ca_procvals",
             # item 6: strings (character writes, openArray[char], views).
             "tsymex_rfc0005_s8ca_strings",
+            "tsymex_rfc0005_s8ca_strings_byvalue",
             # item 7: a negative-length toOpenArray; a resizing mitems body.
             "tsymex_rfc0005_s8ca_resize",
             # item 8: a mutation through a pointer to the whole value.

@@ -1,11 +1,11 @@
 ## RFC-0005 (soundness channels) slice S8ca -- S8bu's remainder, item 6:
-## strings as `openArray[char]`, character writes, and a by-value string
-## of an address-taken string.
+## strings as `openArray[char]` and character writes. The by-value string of
+## an address-taken string is `tsymex_rfc0005_s8ca_strings_byvalue` (split by
+## item 9: the file was over the 60 s compile budget).
 ##
 ## S11 declined every character write (`s[i] = c`): the walk's strings are
 ## Z3 strings, immutable values. S8bu then declined a string viewed as
-## `openArray[char]` (it had been a false sxUnsat) and a by-value string
-## sharing the memory of an address-taken one.
+## `openArray[char]` (it had been a false sxUnsat).
 ##
 ## Pinned here (the RFC's "As landed (S8ca)" note has the design):
 ##   (6a) `s[i] = c` is the string with that byte replaced
@@ -14,11 +14,6 @@
 ##   (6b) a string viewed as `openArray[char]` is the seq of its bytes
 ##        (`iekStrChars`), a whole string or a `toOpenArray` slice; a `var`
 ##        one is written back byte for byte (`iekStrFromChars`);
-##   (6c) a by-value copy of an address-taken string shares its memory:
-##        of a string that owns its memory it is a `view` (an in-place
-##        character write is seen); of a literal's, which Nim copies at the
-##        first write, it is a plain copy; of a string whose memory the walk
-##        cannot place, the call declines (`StrBuf`).
 ##
 ## Every expectation below is Nim's (each "nim" test runs the SUTs natively
 ## under a capture frame and checks which labels they hit).
@@ -144,61 +139,18 @@ proc sutVarOASlice(k: int) =
   if s == "azcd" and k == 3: symexTarget("ow")
   if s != "azcd": symexTarget("ow_dead")
 
-proc rdStr(t: string): char =
-  gpstr[][0] = 'z'
-  t[0]
-
-proc sutOwnedView(k: int) =
-  ## The string's memory is its own (`add` copied the literal's): the copy
-  ## sees the write. (`"a" & "b"` would be folded to a literal.)
-  var st = "a"
-  st.add 'b'
-  gpstr = addr st
-  let r = rdStr(st)
-  if r == 'z' and k == 3: symexTarget("bo")
-  if r != 'z': symexTarget("bo_dead")
-
-proc sutLiteralView(k: int) =
-  ## A literal's memory: the write copies it first, the copy does not see it.
-  var st = "ab"
-  gpstr = addr st
-  let r = rdStr(st)
-  if r == 'a' and st[0] == 'z' and k == 3: symexTarget("bl")
-  if r != 'a' or st[0] != 'z': symexTarget("bl_dead")
-
-proc sutMaybeEmptyAdd(k: int) =
-  ## Appending a string, even an empty one, makes a literal's memory the
-  ## string's own (Nim copies it first): the copy sees the write.
-  var st = "ab"
-  let e = if k == 3: "" else: "c"
-  st.add e
-  gpstr = addr st
-  let r = rdStr(st)
-  if r == 'z' and k == 3: symexTarget("be")
-  if r != 'z': symexTarget("be_dead")
-
-proc sutUnknownView(k: int) =
-  ## A string of unknown provenance (`newString`, an opaque call): declined.
-  ## (`$k` declined alike, after 26 s of modelling the conversion.)
-  var st = newString(2)
-  gpstr = addr st
-  let r = rdStr(st)
-  if r == 'z' and k == 3: symexTarget("bu")
-
 suite "S8ca (6): strings":
 
   test "nim":
     let h = nativeHits(sutCharWrite, ks) + nativeHits(sutCharOrder, ks) +
             nativeHits(sutFieldWrite, ks) + nativeHits(sutPtrWrite, ks) +
             nativeHits(sutStrOpenArray, ks) + nativeHits(sutStrSlice, ks) +
-            nativeHits(sutVarOA, ks) + nativeHits(sutVarOASlice, ks) +
-            nativeHits(sutOwnedView, ks) + nativeHits(sutLiteralView, ks) +
-            nativeHits(sutUnknownView, ks) + nativeHits(sutMaybeEmptyAdd, ks)
+            nativeHits(sutVarOA, ks) + nativeHits(sutVarOASlice, ks)
     for l in ["cw", "cw_raise", "co", "co_value", "cf", "cp", "oa", "os",
-              "os_raise", "ov", "ow", "bo", "bl", "bu", "be"]:
+              "os_raise", "ov", "ow"]:
       checkpoint l
       check l in h
-    for l in ["cw", "co", "cf", "cp", "oa", "os", "ov", "ow", "bo", "bl", "be"]:
+    for l in ["cw", "co", "cf", "cp", "oa", "os", "ov", "ow"]:
       checkpoint l & "_dead"
       check (l & "_dead") notin h
 
@@ -224,15 +176,6 @@ suite "S8ca (6): strings":
     clean(sutVarOA, "ov_dead", sxUnsat)
     clean(sutVarOASlice, "ow", sxSat)
     clean(sutVarOASlice, "ow_dead", sxUnsat)
-
-  test "a by-value copy of an address-taken string":
-    clean(sutOwnedView, "bo", sxSat)
-    clean(sutOwnedView, "bo_dead", sxUnsat)
-    clean(sutLiteralView, "bl", sxSat)
-    clean(sutLiteralView, "bl_dead", sxUnsat)
-    declines(sutUnknownView, "bu", "does not know whether that memory")
-    clean(sutMaybeEmptyAdd, "be", sxSat)
-    clean(sutMaybeEmptyAdd, "be_dead", sxUnsat)
 
 suite "S8ca: walker version":
   test "symexWalkerVersion >= 233":

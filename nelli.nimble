@@ -60,6 +60,7 @@ task test, "Run the test suite":
             # Named tsymex_* WITH the underscore so derive-ci-suites.ps1 picks
             # it up into the symex-mingw corpus.
             "tsymex_configdefaults",
+            "tsymex_configdefaults_depth",
             "tsymex_canonicalize",
             "tsymex_typebridge_variants",
             "tsymex_phase11_walker",

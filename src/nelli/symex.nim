@@ -37,7 +37,7 @@ export choice
 import ./smt/dsl
 export dsl
 import ./smt/scan
-from ./smt/scoped_names import isModuleGlobal   ## RFC-0005 S8bn
+from ./smt/scoped_names import isModuleGlobal, globalIRName   ## RFC-0005 S8bn
 import ./engine/types as engineTypes
 export engineTypes.SymexFinding, engineTypes.SymexFindingStatus,
        engineTypes.FindingGap, engineTypes.trusted   ## RFC-0005 S11
@@ -1958,6 +1958,19 @@ template symexTransparent*() {.pragma.}
 # stack the calling thread's size (`replayStackSize`), with the calling
 # thread's values of the thread variables the routine may reach
 # (`emitReplayWitness`), which it hands back when it ends.
+#
+# RFC-0005 S8cb (item 7). One never-ending replay must not take every later
+# replay with it. Nothing can stop the thread, but only state both may reach
+# makes their interleaving observable: each replay carries its footprint
+# (`replayFootprint`, read at macro time), and a replay is contended only by
+# an abandoned one whose footprint meets its own.
+
+type ReplayFootprint* = object
+  ## RFC-0005 S8cb. The state a replay may share with another: the module-level
+  ## variables (and C routines of the stdlib) its code names, transitively.
+  ## `open`: some code it may run cannot be read, so it may share anything.
+  open*: bool
+  tokens*: seq[string]
 
 type ReplayRun* = enum
   ## RFC-0005 S8bo. How one bounded replay (`runReplayBounded`) ended.
@@ -1977,6 +1990,7 @@ when compileOption("threads"):
     body: proc () {.closure, gcsafe.}
     done: Atomic[bool]
     stackSize: int
+    footprint: ReplayFootprint   ## RFC-0005 S8cb
     th: ptr Thread[ptr ReplayJob]
 
   var abandonedLock: Lock
@@ -1985,9 +1999,10 @@ when compileOption("threads"):
     ## seen to end (`abandonedLock`).
   initLock(abandonedLock)
 
-  proc reapAbandoned(): int =
+  proc reapAbandoned(fp: ReplayFootprint = ReplayFootprint(open: true)): int =
     ## RFC-0005 S8bo. Joins and frees the abandoned replays that have ended;
-    ## the number still running.
+    ## the number still running. RFC-0005 S8cb: of those a replay of footprint
+    ## `fp` may share state with.
     withLock abandonedLock:
       var live: seq[ptr ReplayJob]
       for j in abandoned:
@@ -2000,7 +2015,14 @@ when compileOption("threads"):
           live.add j
       {.cast(gcsafe).}:
         abandoned = live
-      result = live.len
+      for j in live:
+        var meets = fp.open or j.footprint.open
+        if not meets:
+          for t in fp.tokens:
+            if t in j.footprint.tokens:
+              meets = true
+              break
+        if meets: inc result
 
   proc replayAbandonedLive*(): int =
     ## RFC-0005 S8bo. How many abandoned replays are still running.
@@ -2061,8 +2083,15 @@ when compileOption("threads"):
       getCurrentThreadStackLimits(addr lo, addr hi)
       int(hi - lo)
 
-  elif defined(linux):
+  elif defined(linux) or defined(macosx) or defined(freebsd) or
+       defined(netbsd) or defined(dragonfly):
+    # RFC-0005 S8cb (item 6): every POSIX system with `makecontext`. OpenBSD
+    # has none, so stays on the thread's own stack (below).
     import std/posix
+
+    when defined(macosx):
+      # <ucontext.h> refuses to compile otherwise.
+      {.localPassC: "-D_XOPEN_SOURCE=600 -D_DARWIN_C_SOURCE".}
 
     type
       StackT {.importc: "stack_t", header: "<signal.h>", bycopy.} = object
@@ -2114,11 +2143,49 @@ when compileOption("threads"):
       discard swapcontext(addr here, addr there)
       discard munmap(mem, size + page)
 
+    when defined(linux):
+      proc pthread_getattr_np(t: Pthread; a: ptr Pthread_attr): cint
+        {.importc, header: "<pthread.h>".}
+    elif defined(macosx):
+      proc pthread_get_stacksize_np(t: Pthread): csize_t
+        {.importc, header: "<pthread.h>".}
+    elif defined(netbsd):
+      proc pthread_attr_get_np(t: Pthread; a: ptr Pthread_attr): cint
+        {.importc, header: "<pthread.h>".}
+    else:
+      proc pthread_attr_get_np(t: Pthread; a: ptr Pthread_attr): cint
+        {.importc, header: "<pthread_np.h>".}
+
+    proc pthread_attr_getstackRaw(a: ptr Pthread_attr; base: ptr pointer;
+                                  size: ptr csize_t): cint
+      {.importc: "pthread_attr_getstack", header: "<pthread.h>".}
+
+    proc threadStackSize(): int =
+      ## RFC-0005 S8cb (item 6). The size of this thread's stack, as the thread
+      ## library created it; 0 when it does not say.
+      when defined(macosx):
+        result = int(pthread_get_stacksize_np(pthread_self()))
+      else:
+        var a: Pthread_attr
+        when defined(linux):
+          if pthread_getattr_np(pthread_self(), addr a) != 0: return 0
+        else:
+          if pthread_attr_init(addr a) != 0: return 0
+          if pthread_attr_get_np(pthread_self(), addr a) != 0:
+            discard pthread_attr_destroy(addr a)
+            return 0
+        var base: pointer
+        var size: csize_t
+        if pthread_attr_getstackRaw(addr a, addr base, addr size) == 0:
+          result = int(size)
+        discard pthread_attr_destroy(addr a)
+
     proc callerStackSize(): int =
       ## The main thread's stack is its `RLIMIT_STACK` (capped; an unlimited
-      ## one at 64 MiB). Any other thread's is taken to be Nim's own
-      ## (0: the replay thread's default), which every Nim thread has.
-      if pthread_equal(pthread_self(), mainThread) == 0: return 0
+      ## one at 64 MiB). RFC-0005 S8cb: any other thread's is what the thread
+      ## library created (a thread Nim did not start may have any size).
+      if pthread_equal(pthread_self(), mainThread) == 0:
+        return threadStackSize()
       var rl: RLimit
       if getrlimit(RLIMIT_STACK, rl) != 0: return 0
       let cur = int(rl.rlim_cur)
@@ -2142,8 +2209,9 @@ when compileOption("threads"):
 
   proc replayStackSize*(): int =
     ## RFC-0005 S8bo. The stack a replay started from this thread runs on:
-    ## this thread's own size where it is known (the main thread on Linux,
-    ## any thread on Windows), else Nim's thread stack (2 MiB on 64-bit).
+    ## this thread's own size where it is known, else Nim's thread stack
+    ## (2 MiB on 64-bit). RFC-0005 S8cb: known for every thread on Windows,
+    ## Linux, macOS, FreeBSD, NetBSD and DragonFly.
     let s = callerStackSize()
     if s > 0: s else: 256 * 1024 * sizeof(int)
 else:
@@ -2153,7 +2221,9 @@ else:
     ## RFC-0005 S8bo. A build without threads replays on the calling thread.
 
 proc runReplayBounded*(body: proc () {.closure, gcsafe.};
-                       timeoutMs: int): ReplayRun =
+                       timeoutMs: int;
+                       footprint: ReplayFootprint =
+                         ReplayFootprint(open: true)): ReplayRun =
   ## RFC-0005 S8be. Run one replay `body`; `rrAbandoned` when it did not end
   ## within `timeoutMs` and was abandoned. `timeoutMs <= 0`, or a build
   ## without threads, runs it on the calling thread with no bound.
@@ -2162,8 +2232,11 @@ proc runReplayBounded*(body: proc () {.closure, gcsafe.};
   ## what the other read. The thread runs `body` on a stack the calling
   ## thread's size (`replayStackSize`); the caller (`emitReplayWitness`)
   ## carries its thread variables in and out.
+  ## RFC-0005 S8cb: only an abandoned replay whose footprint meets `footprint`
+  ## (`replayFootprint`) contends it; a caller that does not know its body's
+  ## footprint leaves it open, which any of them does.
   when compileOption("threads"):
-    let contended = reapAbandoned() > 0
+    let contended = reapAbandoned(footprint) > 0
     if timeoutMs <= 0:
       body()
       return (if contended: rrContended else: rrEnded)
@@ -2181,6 +2254,7 @@ proc runReplayBounded*(body: proc () {.closure, gcsafe.};
     let job = cast[ptr ReplayJob](allocShared0(sizeof(ReplayJob)))
     job.body = body
     job.stackSize = callerStackSize()
+    job.footprint = footprint
     let th = cast[ptr Thread[ptr ReplayJob]](
       allocShared0(sizeof(Thread[ptr ReplayJob])))
     job.th = th
@@ -2591,6 +2665,12 @@ proc isThreadvarSym(n: NimNode): bool =
     if p.kind in {nnkIdent, nnkSym} and p.strVal == "threadvar": return true
   false
 
+proc routineKey(r: NimNode): string =
+  ## RFC-0005 S8cb. Tells routines apart, including generic instances:
+  ## `signatureHash` alone is the same for every routine of a module with the
+  ## same parameter types, so a scan keyed by it read only the first of them.
+  r.strVal & "#" & r.symBodyHash
+
 proc scanThreadvars(n: NimNode; vars: var seq[NimNode];
                     seen: var seq[string]; complete: var bool) =
   ## RFC-0005 S8bo. See `threadvarsReached`.
@@ -2604,7 +2684,7 @@ proc scanThreadvars(n: NimNode; vars: var seq[NimNode];
     elif k == nskMethod:
       complete = false   # dynamic dispatch: any override may run
     elif isUserRoutine(n):
-      let key = n.signatureHash
+      let key = routineKey(n)   # RFC-0005 S8cb
       if key in seen: return
       seen.add key
       # Through the Cluster N nil-core, as `scanOpaqueEffects` reads a
@@ -2634,6 +2714,145 @@ proc threadvarsReached(fn: NimNode): seq[NimNode] =
   var complete = true
   scanThreadvars(fn, result, seen, complete)
   if not complete: result.setLen(0)
+
+type RoutineFootprint = object
+  ## RFC-0005 S8cb. What one routine's own body names (`scanFootprint`).
+  tokens: seq[string]
+  callees: seq[NimNode]
+  open: bool
+
+var routineFootprints {.compileTime.}: Table[string, RoutineFootprint]
+  ## RFC-0005 S8cb. Per routine (`routineKey`), so that a program's replays
+  ## read each of the stdlib routines they share once.
+
+proc scanFootprint(n: NimNode; user: bool; owner: string;
+                   acc: var RoutineFootprint) =
+  ## RFC-0005 S8cb. See `replayFootprint`. `user`: `n` is code of the program,
+  ## not of the stdlib; `owner`: the routine's name.
+  case n.kind
+  of nnkSym:
+    case symKind(n)
+    of nskVar, nskLet, nskParam, nskForVar, nskResult:
+      # A thread variable is copied into the replay's thread, so is shared by
+      # what it refers to: the program's are (`threadvarsReached`), and the
+      # stdlib's are not carried at all. A stdlib `let` cannot change.
+      if symKind(n) in {nskVar, nskLet} and isThreadvarSym(n):
+        if user: acc.tokens.add globalIRName(n)
+      elif symKind(n) in {nskVar, nskLet} and isModuleGlobal(n):
+        if user or symKind(n) == nskVar: acc.tokens.add globalIRName(n)
+      # A proc value the program holds, so may hand to the stdlib: code this
+      # scan does not see.
+      if user and n.typeKind == ntyProc: acc.open = true
+    of nskMethod:
+      acc.open = true   # dynamic dispatch: any override may run
+    of nskProc, nskFunc, nskConverter, nskIterator:
+      acc.callees.add n
+    else: discard
+  of nnkCall, nnkCommand:
+    if n.len > 0:
+      # A proc value: code this scan does not see. The stdlib's generic bodies
+      # spell an instantiation as a call head, and it calls a proc parameter
+      # only with what the program handed it (above).
+      let h = n[0]
+      if h.kind == nnkSym:
+        if user and
+           symKind(h) in {nskParam, nskLet, nskVar, nskResult, nskForVar}:
+          acc.open = true
+      elif h.kind in {nnkDotExpr, nnkCheckedFieldExpr, nnkDerefExpr,
+                      nnkHiddenDeref}:
+        acc.open = true
+      elif user and h.kind notin {nnkIdent, nnkOpenSymChoice,
+                                  nnkClosedSymChoice} and
+           not (h.kind == nnkBracketExpr and h[0].kind in
+                {nnkOpenSymChoice, nnkClosedSymChoice}):
+        acc.open = true
+    for c in n: scanFootprint(c, user, owner, acc)
+  of nnkAsmStmt:
+    if user: acc.open = true
+    else: acc.tokens.add "c:" & owner
+  of nnkPragma:
+    for p in n:
+      let emits = p.kind == nnkExprColonExpr and
+                  p[0].kind in {nnkIdent, nnkSym} and p[0].strVal == "emit"
+      if emits:
+        if user: acc.open = true
+        else: acc.tokens.add "c:" & owner
+  else:
+    for c in n: scanFootprint(c, user, owner, acc)
+
+proc hasPragmaNamed(impl: NimNode; name: string): bool =
+  ## RFC-0005 S8cb. The routine definition `impl` carries pragma `name`.
+  for p in impl[4]:
+    let head = if p.kind == nnkExprColonExpr: p[0] else: p
+    if head.kind in {nnkIdent, nnkSym} and head.strVal == name: return true
+
+proc isRuntimeCode(impl: NimNode): bool =
+  ## RFC-0005 S8cb. `impl` is in Nim's runtime (`lib/system*`, its atomics) or
+  ## nelli's replay markers, whose state is per-thread, or synchronised, or of
+  ## no consequence to what the program computes. A variable of it the program
+  ## names is still the program's footprint (`scanFootprint`).
+  let f = impl.lineInfoObj.filename.replace('\\', '/')
+  "/lib/system/" in f or f.endsWith("/lib/system.nim") or
+    f.endsWith("/sysatomics.nim") or f.endsWith("/nelli/engine/markers.nim")
+
+proc routineFootprint(r: NimNode): RoutineFootprint =
+  ## RFC-0005 S8cb. The routine `r`'s own footprint (`routineFootprints`).
+  let key = routineKey(r)
+  if key in routineFootprints: return routineFootprints[key]
+  let user = not isStdlibDecl(r)
+  let impl =
+    try: r.getImpl
+    except CatchableError: newEmptyNode()
+  if impl.kind notin RoutineNodes or impl.len <= 6:
+    # No definition this scan can read.
+    result.open = user
+  elif isRuntimeCode(impl):
+    discard
+  elif impl[6].kind == nnkEmpty:
+    # Foreign code. The program's may do anything; the stdlib's are told apart
+    # by name, with its compiler magics holding no state of their own.
+    if user: result.open = true
+    elif not hasPragmaNamed(impl, "magic"): result.tokens.add "c:" & r.strVal
+  else:
+    scanFootprint(impl[6], user, r.strVal, result)
+  routineFootprints[key] = result
+
+proc replayFootprint(fn: NimNode): ReplayFootprint =
+  ## RFC-0005 S8cb. The state a replay of `fn` may share with another one. A
+  ## replay's parameters and locals are its own, and it reaches anything else
+  ## through a module-level variable (or `{.global.}`, or thread variable,
+  ## whose value is copied in) named in code it may run: the routines `fn`
+  ## names, transitively, the stdlib's included. Open when some of that code
+  ## cannot be read: a method, a proc value, a foreign routine or `emit` of the
+  ## program, or a routine that captures its caller's variables (a nested
+  ## routine whose enclosing one the scan never entered).
+  ##
+  ## The scan reads the typed AST, so it does not see a hook the compiler
+  ## inserts (a `=destroy` of the program's that names a variable), nor state
+  ## behind two different C routines; `docs/rfc/0005-branch-scoped-degrade.md`
+  ## records both.
+  if fn.kind != nnkSym or symKind(fn) notin {nskProc, nskFunc, nskConverter}:
+    return ReplayFootprint(open: true)
+  var seen: seq[string]
+  var routines: seq[NimNode]
+  var stack = @[fn]
+  while stack.len > 0:
+    let r = stack.pop()
+    let key = routineKey(r)
+    if key in seen: continue
+    seen.add key
+    routines.add r
+    let f = routineFootprint(r)
+    if f.open: result.open = true
+    for t in f.tokens:
+      if t notin result.tokens: result.tokens.add t
+    for c in f.callees: stack.add c
+  for r in routines:
+    let o = owner(r)
+    if o.kind == nnkSym and
+       symKind(o) in {nskProc, nskFunc, nskConverter, nskMethod, nskIterator} and
+       routineKey(o) notin seen:
+      result.open = true
 
 proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
                         witness, target, pathTaint: NimNode;
@@ -2678,6 +2897,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
   let hitsId = genSym(nskVar, "replayHits")       # RFC-0005 S8be
   let endedId = genSym(nskLet, "replayEnded")     # RFC-0005 S8be
   let aimsId = genSym(nskLet, "replayAims")       # RFC-0005 batch 6
+  let footprint = newLit(replayFootprint(fn))     # RFC-0005 S8cb
   # RFC-0005 S8bn (item 2): the module-level `var`s `fn` can reach, which a
   # `ptr` parameter's witness may be aimed at.
   var globals: seq[NimNode]
@@ -2755,7 +2975,7 @@ proc emitReplayWitness*(fn: NimNode; params: seq[IRParam];
               except Exception as e:
                 `escId` = e
               `hitsId` = symexCaptureEnd()
-              `tvOut`, `timeoutMs`)
+              `tvOut`, `timeoutMs`, `footprint`)
           if `endedId` == rrAbandoned: roTimedOut
           else:
             `tvBack`

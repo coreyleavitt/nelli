@@ -15097,6 +15097,13 @@ proc pureIndexExpr(n: NimNode): bool =
     true
   else: false
 
+proc isTableElemCall(n: NimNode): bool =
+  ## RFC-0005 S8bz (item 2). `n` is `t[k]` on a value `Table` (`std/tables`'
+  ## `[]`, a call in the typed tree).
+  n.kind == nnkCall and n.len == 3 and n[0].kind == nnkSym and
+    n[0].strVal == "[]" and n[1].kind != nnkEmpty and
+    classifyType(unwrapHidden(n[1])).ty.kind == itTable
+
 proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## RFC-0005 S8s. Classifies `lhs` as one step of a value field chain. A
   ## variant arm field's `nnkCheckedFieldExpr` (Nim's discriminant check) is
@@ -15106,13 +15113,33 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
   ## placeholder.
   var t = unwrapHidden(lhs)
   if t.kind == nnkCheckedFieldExpr and t.len >= 1: t = t[0]
+  if isTableElemCall(t):
+    # RFC-0005 S8bz (item 2): a table's aggregate value (`t[k].x = v`), stored
+    # back at its key (`valueFieldWrite`). `[]` raises for a missing key, so
+    # the write's check read is what raises (`valueFieldChecked`). It was the
+    # "unsupported nnkAsgn shape" decline. A key is parsed once per level, as
+    # a symbolic index is, so it must call nothing (`pureIndexExpr`).
+    let tr = unwrapHidden(t[1])
+    let tty = classifyType(tr).ty
+    if not heapTreeTy(tty.tabValTy) or
+       tr.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr}:
+      return false
+    var kn = t[2]
+    while kn.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and kn.len >= 1:
+      kn = kn[kn.len - 1]
+    if kn.kind notin {nnkStrLit .. nnkTripleStrLit} and not pureIndexExpr(kn):
+      return false
+    step = FieldStep(recv: tr, recvTy: tty, ix: -1, idx: t[2],
+                     fieldTy: tty.tabValTy)
+    return true
   if t.len != 2: return false
   var derefOp: NimNode
   # RFC-0005 S8at: `p[]` of a whole-held pointee is a chain root itself
   # (`wholeDerefRoot`); `unwrapHidden` would strip the deref.
   let recv = if wholeDerefRoot(t[0], derefOp): t[0] else: unwrapHidden(t[0])
   if recv.kind notin {nnkSym, nnkDotExpr, nnkBracketExpr, nnkCheckedFieldExpr,
-                      nnkHiddenDeref, nnkDerefExpr}:   ## RFC-0005 S8at
+                      nnkHiddenDeref, nnkDerefExpr} and   ## RFC-0005 S8at
+     not isTableElemCall(recv):                           ## RFC-0005 S8bz
     return false
   var recvTy: IRType
   if recv.kind in {nnkHiddenDeref, nnkDerefExpr}:
@@ -15152,6 +15179,22 @@ proc fieldStep(lhs: NimNode; step: var FieldStep): bool =
     step.fieldTy = recvTy.elemTy
     return step.fieldTy != nil and
            not isUnsupportedFieldPlaceholder(step.fieldTy)
+  if t.kind == nnkBracketExpr and recvTy.kind == itSeq:
+    # RFC-0005 S8bz (item 1): an element of a seq of aggregates (`xs[i].x = v`),
+    # also what `addr xs[i].x`'s store is rewritten to (`elemAddrNode`). It was
+    # the "unsupported nnkAsgn shape" decline. Stored as an array's symbolic
+    # index is (`valueFieldWrite`).
+    if not seqBackedTy(recvTy) or not isTreeSeqElemTy(recvTy.seqElemTy):
+      return false
+    var ixNode = t[1]
+    while ixNode.kind in {nnkHiddenStdConv, nnkHiddenSubConv} and ixNode.len >= 1:
+      ixNode = ixNode[ixNode.len - 1]
+    if ixNode.typeKind == ntyNone or classifyType(ixNode).ty.kind != itInt or
+       not pureIndexExpr(ixNode):
+      return false
+    step.idx = t[1]
+    step.fieldTy = recvTy.seqElemTy
+    return true
   if t.kind == nnkBracketExpr:
     if recvTy.kind != itTuple or
        t[1].kind notin {nnkIntLit, nnkInt8Lit, nnkInt16Lit, nnkInt32Lit,
@@ -15253,7 +15296,10 @@ proc valueFieldWrite(lhs: NimNode, newVal: IRExpr,
   # (`gA[k].x = v`).
   markCopyRead(recvIR, preamble, recvLo)
   let rebuilt =
-    if step.recvTy.kind == itArray and step.idx != nil:
+    if step.recvTy.kind == itTable:
+      # RFC-0005 S8bz (item 2): the rebuilt value, stored back at its key.
+      mkTableSet(recvIR, parseExpr(step.idx, preamble, ctx), newVal)
+    elif step.recvTy.kind in {itArray, itSeq} and step.idx != nil:
       # RFC-0005 S8z: a symbolic index. The old array is copied into a
       # temporary, `isIndexAssign` forks the `IndexDefect` and stores the one
       # element (`ite` per position), and the temporary is the rebuilt value.

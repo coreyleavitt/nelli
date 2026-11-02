@@ -10329,6 +10329,10 @@ proc extractFromSymVal(m: Z3Model, w: var RawWitness, path: string,
                        sv: SymVal)
   ## RFC-0005 S8at fwd-decl: a container `Table` value is extracted as one.
 
+proc extractTreeValue(m: Z3Model, w: var RawWitness, path: string,
+                      sv: SymVal, ty: IRType)
+  ## RFC-0005 S8bz fwd-decl (defined below).
+
 proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
                          sv: SymVal) =
   ## RFC-0005 S8f (was: the present keys among a static scan of string
@@ -10374,7 +10378,10 @@ proc extractTableEntries(m: Z3Model, w: var RawWitness, path: string,
     of tvTree:
       # RFC-0005 S8at: a container value is written as a by-value param of
       # its type is (`seqLens` + elements, `setMembers`, `tabKeys`).
-      extractFromSymVal(m, w, vpath, v)
+      # RFC-0005 S8bz (item 2): an aggregate as a seq's tree element is, in
+      # the heap's cell layout.
+      if heapTreeTy(vty): extractTreeValue(m, w, vpath, v, vty)
+      else: extractFromSymVal(m, w, vpath, v)
   let present = sv.tabPresentRaw
   if kty.kind == itString:
     var named: HashSet[string]   ## every term's value, present or not
@@ -11054,6 +11061,9 @@ type PtrLeafAim = object
   path: seq[int]
   steps: seq[string]   ## RFC-0005 S8bw (item 3): `path` as the witness
                        ## names it (`ptrAimInto`)
+  elemSteps: seq[string]  ## RFC-0005 S8bz (items 1, 2): the part of the
+                          ## aggregate element or value below the pointer's
+                          ## index or key
   seqIdx: bool
   tabKey: bool
   fam: string
@@ -11537,10 +11547,19 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
     for fam in fams:
       if not currentVariantHeaps.hasKey(fam): continue
       # RFC-0005 S8bn (item 4): an element of a seq held in the family.
-      let seqCode = ptrTargetCode(fam & "/*")
+      var seqCode = ptrTargetCode(fam & "/*")
+      # RFC-0005 S8bz (item 1): or a part of its aggregate element.
+      for code, la in ptrLeafAims:
+        if la.fam == fam and la.seqIdx and la.typeId == typeId and
+           la.elemSteps.len > 0 and ptrSelMatches(selV, code):
+          seqCode = code
       let isSeqFam = ptrSelMatches(selV, seqCode) and
                      ptrLeafAims.hasKey(seqCode)
-      let tabCode = ptrTargetCode(fam & "/#")
+      var tabCode = ptrTargetCode(fam & "/#")
+      for code, la in ptrLeafAims:   # RFC-0005 S8bz (item 2)
+        if la.fam == fam and la.tabKey and la.typeId == typeId and
+           la.elemSteps.len > 0 and ptrSelMatches(selV, code):
+          tabCode = code
       let isTabFam = ptrSelMatches(selV, tabCode) and
                      ptrLeafAims.hasKey(tabCode)
       if not isSeqFam and not isTabFam and
@@ -11561,12 +11580,14 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
           if currentVariantHeaps.hasKey(ik):
             aim.add "." & $m.eval(wrap[Z3AnyAst](ctx, checkedSelect(ctx,
               inputHeap(ik).raw, pos.addrAst.raw)))
+            for st in ptrLeafAims[seqCode].elemSteps: aim.add "." & st
           else: aim = ""
         elif isTabFam:
           let kk = ptrKeyKey(typeId)
           if currentVariantHeaps.hasKey(kk):
             aim.add "." & m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(ctx,
               inputHeap(kk).raw, pos.addrAst.raw)))
+            for st in ptrLeafAims[tabCode].elemSteps: aim.add "." & st
           else: aim = ""
         if aim.len > 0:
           b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
@@ -11606,6 +11627,7 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
         if not currentVariantHeaps.hasKey(kk): break
         aim.add "/k" & toHex(m.evalStrBytes(wrap[Z3String](ctx, checkedSelect(
           ctx, inputHeap(kk).raw, pos.addrAst.raw))))
+      aim.add ptrLeafPathStr(la.elemSteps, false)
       b.entries[b.entryOf[pos.name]].aliasRef = some(aim)
       break
   b.entries
@@ -27255,6 +27277,26 @@ proc readCellSeq[E](c: RefWitness; path: string; f: var seq[E]) =
       if path.len > 0 and path[0] != '&':
         cellRecord(c, "&" & path & "." & $i, cast[pointer](addr f[i]))
 
+proc cellRecordParts[T](c: RefWitness; prefix: string; x: var T) =
+  ## RFC-0005 S8bz (item 2). The address of each part of the aggregate `x`,
+  ## under `prefix`, by position and by name (`f<name>`), for a pointer the
+  ## snapshot aims at it.
+  when T is object or T is tuple:
+    var k = 0
+    {.cast(uncheckedAssign).}:
+      for fname, fv in fieldPairs(x):
+        cellRecord(c, prefix & "." & $k, cast[pointer](addr fv))
+        cellRecord(c, prefix & ".f" & fname, cast[pointer](addr fv))
+        cellRecordParts(c, prefix & "." & $k, fv)
+        cellRecordParts(c, prefix & ".f" & fname, fv)
+        inc k
+  elif T is array:
+    var k = 0
+    for e in x.mitems:
+      cellRecord(c, prefix & "." & $k, cast[pointer](addr e))
+      cellRecordParts(c, prefix & "." & $k, e)
+      inc k
+
 proc readCellTable[K, V](c: RefWitness; path: string; f: var Table[K, V]) =
   ## RFC-0005 S8ap. A `Table[string, V]` cell field: the keys of
   ## `tabKeys[path]`, each value the leaf `<path>.<key>` (`intVals`, a bool
@@ -27278,6 +27320,9 @@ proc readCellTable[K, V](c: RefWitness; path: string; f: var Table[K, V]) =
       when compiles(witnessTabKey[K](k)):
         cellRecord(c, "&" & path & "." & k,
                    cast[pointer](addr f[witnessTabKey[K](k)]))
+        # RFC-0005 S8bz (item 2): and its parts' (`readCellField`'s spelling).
+        when V is object or V is tuple or V is array:
+          cellRecordParts(c, "&" & path & "." & k, f[witnessTabKey[K](k)])
 
 proc readCellSet[E](c: RefWitness; path: string; f: var HashSet[E]) =
   ## RFC-0005 S8ap. A `HashSet[E]` cell field: `setMembers[path]`, whose
@@ -27344,14 +27389,23 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
   elif F is object or F is tuple:
     # RFC-0005 S8ar: a by-value object / tuple field, each part the leaf
     # `<path>.<name>` (`renderHeapValue`; an anonymous tuple's `FieldN`).
+    # RFC-0005 S8bz (item 1): each part's address, for a pointer the snapshot
+    # aims at it by position or name (`&<cell>.<field>.<index>.<step>`).
+    var k = 0
     {.cast(uncheckedAssign).}:
       for fname, fv in fieldPairs(f):
         readCellField(c, path & "." & fname, fv)
+        if path.len > 0 and path[0] != '&':
+          cellRecord(c, "&" & path & "." & $k, cast[pointer](addr fv))
+          cellRecord(c, "&" & path & ".f" & fname, cast[pointer](addr fv))
+        inc k
   elif F is array:
     # RFC-0005 S8ar: an array field, element `i` (from 0) the leaf `<path>.<i>`.
     var i = 0
     for x in f.mitems:
       readCellField(c, path & "." & $i, x)
+      if path.len > 0 and path[0] != '&':
+        cellRecord(c, "&" & path & "." & $i, cast[pointer](addr x))
       inc i
   else:
     discard
@@ -27603,6 +27657,10 @@ proc witnessTabVal*[V](w: RawWitness; p: string; v: var V): bool =
     return true
   elif V is Table:
     v = readTableAs[typeof(keys(default(V))), typeof(values(default(V)))](w, p)
+    return true
+  elif V is object or V is tuple or V is array:
+    # RFC-0005 S8bz (item 2): an aggregate value, in the heap's cell layout.
+    readCellField(newRefWitness(w), p, v)
     return true
   elif V is string:
     if w.strVals.hasKey(p): (v = w.strVals[p]; return true)

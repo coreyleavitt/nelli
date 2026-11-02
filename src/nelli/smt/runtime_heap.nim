@@ -2018,9 +2018,81 @@ type PtrTarget = object
   idx: Z3AnyAst
   tabKey: bool        ## RFC-0005 S8bn (item 4): a `Table[string, V]` value
                       ## at the pointer's key (`idx`, `ptrKeyAt`)
+  elemPath: seq[int]  ## RFC-0005 S8bz (items 1, 2): the part of an aggregate
+                      ## element or value the pointer addresses
+  aggregate: bool     ## RFC-0005 S8bz (items 1, 2): the element or value is
+                      ## held leaf-split (`isTreeSeqElemTy`), `elemPath` below
+                      ## it
+  famElemTy: IRType   ## RFC-0005 S8bz (items 1, 2): the seq's or table's
+                      ## type, for one held in a field family (`ptrFamSeq`)
   hasArm: bool        ## RFC-0005 S8bw (item 3): a field of a case object's
   armCond: Z3Bool     ## branch, there only while `armCond` (its branch is
                       ## the active one) holds
+
+proc svHoldsAggregate(sv: SymVal; pointee: IRType; depth = 0): bool =
+  ## RFC-0005 S8bz (item 1). A by-value variable's value `sv` may hold a whole
+  ## `pointee` aggregate a pointer could address (conservative beyond the
+  ## depth bound).
+  if depth > 8: return true
+  case sv.kind
+  of svTuple:
+    if svFitsHeapTy(sv, pointee): return true
+    for f in sv.fields:
+      if svHoldsAggregate(f, pointee, depth + 1): return true
+    false
+  of svArray:
+    if svFitsHeapTy(sv, pointee): return true
+    for e in sv.arrElems:
+      if svHoldsAggregate(e, pointee, depth + 1): return true
+    false
+  of svVariant, svMultiVariant: svFitsHeapTy(sv, pointee)
+  of svSeq: tyMayHold(sv.seqElemTy, pointee)
+  of svTable: tyMayHold(sv.tabValTy, pointee)
+  of svDistinct: svHoldsAggregate(ejectBase(sv), pointee, depth + 1)
+  else: false
+
+proc ptrAggregateDecline(w: WalkCtx; p: Path; ptrAst: Z3AnyAst;
+                         pointee: IRType; typeId: string): string =
+  ## RFC-0005 S8bz (item 1). A `ptr T` of a whole aggregate `T` holds its own
+  ## field-split cells: this model has no candidate targets for it
+  ## (`ptrScalarPointee`), so a dereference that may address a variable's
+  ## aggregate, a seq element, a table value or a heap-held part was a false
+  ## `sxUnsat` (`p[] = v`, then a read of the variable). The dereference
+  ## declines when such a location exists. A pointer the walk allocated on
+  ## this path is its own cell.
+  if pointee == nil or ptrScalarPointee(pointee): return ""
+  for r in p.liveRefs.getOrDefault(typeId, @[]):
+    if r.raw == ptrAst.raw: return ""
+  template msg(where: string): string =
+    "a `ptr " & $pointee & "` of unknown origin may address " & where &
+      ", whose aggregate this model holds no pointer identity for -- not " &
+      "modelled (RFC-0005 S8bz; feUnsupportedOp)"
+  for name, sv in p.env.pairs:
+    if isGlobalEnvName(name) and svHoldsAggregate(sv, pointee):
+      return msg("the global `" & displayName(name) & "`")
+  for cf in w.callStack:
+    for formal in cf.ptrRiskFormals:
+      if tyMayHold(formal.ty, pointee):
+        return msg("the `var` formal `" & formal.name & "` of `" & cf.callee & "`")
+  for prm in w.params:
+    if prm.isVar and tyMayHold(prm.ty, pointee):
+      return msg("the `var` parameter `" & prm.name & "`")
+  for key in p.heaps.keys:
+    if key == typeId or key.startsWith(typeId & "__"): continue
+    let vt = heapKeyValTy(key)
+    if vt != nil and heapCompoundTy(vt) and tyMayHold(vt, pointee):
+      return msg("a part held in a heap cell (`" & key & "`)")
+    # A by-value part of a heap object, held in a leaf heap per part: every
+    # leaf of the pointee, below one key.
+    let sfx = if heapCompoundTy(pointee): heapLeafSuffixes(pointee)
+              else: newSeq[string]()
+    if sfx.len > 0 and sfx[0].len > 0 and key.endsWith(sfx[0]):
+      let base = key[0 ..< key.len - sfx[0].len]
+      var whole = true
+      for sf in sfx:
+        if not p.heaps.hasKey(base & sf): whole = false
+      if whole: return msg("a part held in a heap cell (`" & base & "`)")
+  ""
 
 proc ptrSeqElemMatches(e, pointee: IRType): bool =
   ## RFC-0005 S8bn (item 4). A seq of `e` holds locations a `ptr pointee`
@@ -2036,7 +2108,11 @@ proc ptrTabValMatches(v, pointee: IRType): bool =
   ## type the table holds (`isContainerIntLeaf`: an integer of any width, a
   ## char, an enum, a `bool`), each read and written through its cell
   ## (`cellValue` / `cellOf`); was a 64-bit integer only.
-  v != nil and pointee != nil and isContainerIntLeaf(v) and
+  ## RFC-0005 S8bz (item 2): a string or float value too, a term of its own
+  ## sort (`tvStr`, `tvF32`, `tvF64`).
+  if v == nil or pointee == nil: return false
+  if v.kind in {itString, itFloat32, itFloat64}: return v.kind == pointee.kind
+  isContainerIntLeaf(v) and
     ((v.kind == itBool and pointee.kind == itBool) or
      (v.kind == itInt and pointee.kind == itInt and
       v.width == pointee.width and v.signed == pointee.signed))
@@ -2052,10 +2128,14 @@ proc ptrTabCellOf(val: SymVal; pointee: IRType): RawZ3Ast =
   let c = cellOf(val, pointee)
   if c.isSome: c.get.raw else: rawAnyAstOf(val)
 
-type PtrLeaf = tuple[path: seq[int]; steps: seq[string]; seqIdx, tabKey: bool]
+type PtrLeaf = tuple[path: seq[int]; steps: seq[string]; seqIdx, tabKey: bool;
+                     aggregate: bool; elemPath: seq[int]; elemSteps: seq[string]]
   ## RFC-0005 S8bn (item 4). A part of a variable: its `path` below the
   ## root. RFC-0005 S8bw (item 3): and its `steps` as the witness names them
   ## (`ptrAimInto`): a position, or `f<name>` for a case object's field.
+  ## RFC-0005 S8bz (items 1, 2): a part of a leaf-split seq element or table
+  ## value: the container at `path`, the part at `elemPath` / `elemSteps`
+  ## below the element the pointer's index or key names.
 
 const ptrArmBase = 4096
   ## RFC-0005 S8bw (item 3). A case object's branch field is the path step
@@ -2107,14 +2187,33 @@ proc ptrArmCond(sv: SymVal; s: int): Z3Bool =
     else: result = result or c
 
 proc ptrVarLeaves(sv: SymVal; pointee: IRType; path: seq[int]; depth: int;
+                  acc: var seq[PtrLeaf]; steps: seq[string] = @[]): bool
+
+proc ptrElemLeaves(elemTy, pointee: IRType; depth: int;
+                   acc: var seq[PtrLeaf]): bool =
+  ## RFC-0005 S8bz (items 1, 2). The parts of a leaf-split element or value of
+  ## `elemTy` a `ptr pointee` may address, below the element. False when a
+  ## part is itself a seq or table holding such a location: two indices, and
+  ## the pointer has one (`ptrIdxAt`).
+  var parts: seq[PtrLeaf]
+  if not ptrVarLeaves(seqElemProto(elemTy), pointee, @[], depth + 1, parts):
+    return false
+  for e in parts:
+    if e.seqIdx or e.tabKey: return false
+    acc.add e
+  true
+
+proc ptrVarLeaves(sv: SymVal; pointee: IRType; path: seq[int]; depth: int;
                   acc: var seq[PtrLeaf]; steps: seq[string] = @[]): bool =
   ## RFC-0005 S8bn (item 4). The parts of the by-value value `sv` a
   ## `ptr pointee` may address, each a (path, seq index) below the root --
   ## S8ax's element-alias identity (root, path, snapshot index): a scalar or
   ## string leaf, a field of a tuple or object, an element of an array (each
   ## position a step), an element of a seq (a step the pointer's index
-  ## names). False when a part may hold one but has no such identity here (a
-  ## case object, a table, a set, a seq of aggregates).
+  ## names). False when a part may hold one but has no such identity here.
+  ## RFC-0005 S8bz (item 1): a part of a seq's aggregate element, per
+  ## element; a container inside that element holds no identity yet
+  ## (`ptrElemLeaves`).
   ## RFC-0005 S8bw (item 3): a case object's plain fields and the fields of
   ## each branch (`ptrArmStep`); a pointer to a branch field addresses it
   ## only while its branch is active (`ptrArmCond`, checked at the
@@ -2123,7 +2222,8 @@ proc ptrVarLeaves(sv: SymVal; pointee: IRType; path: seq[int]; depth: int;
   case sv.kind
   of svBV8, svBV16, svBV32, svBV64, svInt, svBool, svFloat32, svFloat64,
      svString:
-    if svMayHold(sv, pointee): acc.add (path, steps, false, false)
+    if svMayHold(sv, pointee):
+      acc.add (path, steps, false, false, false, newSeq[int](), newSeq[string]())
     true
   of svTuple:
     for i, f in sv.fields:
@@ -2158,13 +2258,28 @@ proc ptrVarLeaves(sv: SymVal; pointee: IRType; path: seq[int]; depth: int;
   of svSeq:
     if not sv.isUnsupportedFieldPlaceholder and # [placeholder-audited]
        ptrSeqElemMatches(sv.seqElemTy, pointee):
-      acc.add (path, steps, true, false)
+      acc.add (path, steps, true, false, false, newSeq[int](), newSeq[string]())
+      true
+    elif not sv.isUnsupportedFieldPlaceholder and # [placeholder-audited]
+         isTreeSeqElemTy(sv.seqElemTy):
+      var parts: seq[PtrLeaf]
+      if not ptrElemLeaves(sv.seqElemTy, pointee, depth, parts): return false
+      for e in parts:
+        acc.add (path, steps, true, false, true, e.path, e.steps)
       true
     else: not tyMayHold(sv.seqElemTy, pointee)
   of svTable:
     if sv.tabKeyTy != nil and sv.tabKeyTy.kind == itString and
        ptrTabValMatches(sv.tabValTy, pointee):
-      acc.add (path, steps, false, true)
+      acc.add (path, steps, false, true, false, newSeq[int](), newSeq[string]())
+      true
+    elif sv.tabKeyTy != nil and sv.tabKeyTy.kind == itString and
+         heapTreeTy(sv.tabValTy):
+      # RFC-0005 S8bz (item 2): a part of an aggregate value, per key.
+      var parts: seq[PtrLeaf]
+      if not ptrElemLeaves(sv.tabValTy, pointee, depth, parts): return false
+      for e in parts:
+        acc.add (path, steps, false, true, true, e.path, e.steps)
       true
     else: not tyMayHold(sv.tabValTy, pointee)
   of svSet: true      # a set's members have no address (`tyMayHold`)
@@ -2378,6 +2493,14 @@ proc ptrHeapArmCond(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
       if not arm.isElse:
         result.cond = result.cond and not variantDiscEq(disc, int64(arm.tagOrdinal))
 
+proc ptrFamSeq(ctx: Z3Context; p: Path; t: PtrTarget): SymVal =
+  ## RFC-0005 S8bz (items 1, 2). The seq or table of aggregates the target's
+  ## field family holds at its object, whole (every leaf heap).
+  var cell: HeapCell
+  for sfx in heapLeafSuffixes(t.famElemTy):
+    cell.add (sfx, p.heaps[t.famKey & sfx])
+  heapCellSelect(ctx, cell, t.objAddr, t.famElemTy)
+
 proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                 pointee: IRType; refSort: RawZ3Sort; typeId: string):
     tuple[sel: Z3AnyAst; targets: seq[PtrTarget]; decline: string] =
@@ -2417,9 +2540,11 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         result.targets.add PtrTarget(code: ptrTargetCode(vnm), envName: vnm)
         continue
       let code = ptrTargetCode(vnm & ptrLeafPathStr(lf.steps, lf.seqIdx) &
-                               (if lf.tabKey: "/#" else: ""))
+                               (if lf.tabKey: "/#" else: "") &
+                               ptrLeafPathStr(lf.elemSteps, false))
       var t = PtrTarget(code: code, envName: vnm, path: lf.path,
-                        seqIdx: lf.seqIdx, tabKey: lf.tabKey)
+                        seqIdx: lf.seqIdx, tabKey: lf.tabKey,
+                        aggregate: lf.aggregate, elemPath: lf.elemPath)
       # RFC-0005 S8bw (item 3): a field of a case object's branch, while
       # the branch is active.
       (t.hasArm, t.armCond) = svPathArmCond(vsv, lf.path)
@@ -2442,6 +2567,12 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         t.idx = ptrKeyAt(ctx, p, typeId, refSort, ptrAst)
         idxFacts.add (code, wrap[Z3Bool](ctx, checkedSelect(ctx,
                                          ini.tabPresentRaw.raw, t.idx.raw)))
+        if lf.aggregate:
+          # RFC-0005 S8bz (item 2): the value's own branch.
+          let ea = svPathArmCond(tabValAt(ctx, cur, t.idx.raw), lf.elemPath)
+          if ea.has:
+            t.armCond = if t.hasArm: t.armCond and ea.cond else: ea.cond
+            t.hasArm = true
       if lf.seqIdx:
         let cur = svAtPath(vsv, lf.path)
         let ini = ptrInputOf(w, vnm, lf.path)
@@ -2456,9 +2587,16 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         t.idx = ptrIdxAt(ctx, p, typeId, refSort, ptrAst)
         idxFacts.add (code, ptrIdxInRange(ctx, t.idx,
                                           wrap[Z3AnyAst](ctx, ini.seqLen.raw)))
+        if lf.aggregate:
+          # RFC-0005 S8bz (item 1): the element's own branch.
+          let ea = svPathArmCond(seqElemAt(cur, wrap[Z3Int](ctx, t.idx.raw)),
+                                 lf.elemPath)
+          if ea.has:
+            t.armCond = if t.hasArm: t.armCond and ea.cond else: ea.cond
+            t.hasArm = true
       ptrLeafAims[code] = PtrLeafAim(name: vnm, path: lf.path, steps: lf.steps,
                                      seqIdx: lf.seqIdx, tabKey: lf.tabKey,
-                                     typeId: typeId)
+                                     elemSteps: lf.elemSteps, typeId: typeId)
       result.targets.add t
   var idxFacts: seq[tuple[code: int64; inRange: Z3Bool]]
   for name, sv in p.env.pairs:
@@ -2515,10 +2653,23 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       if vt.kind == itSeq and ptrSeqElemMatches(vt.seqElemTy, pointee):
         seqFamKeys.add key
         continue
+      # RFC-0005 S8bz (item 1): a part of a seq's aggregate element.
+      if vt.kind == itSeq and seqBackedTy(vt) and isTreeSeqElemTy(vt.seqElemTy):
+        var parts: seq[PtrLeaf]
+        if ptrElemLeaves(vt.seqElemTy, pointee, 0, parts):
+          if parts.len > 0: seqFamKeys.add key
+          continue
       if vt.kind == itTable and vt.tabKeyTy != nil and
          vt.tabKeyTy.kind == itString and ptrTabValMatches(vt.tabValTy, pointee):
         tabFamKeys.add key
         continue
+      # RFC-0005 S8bz (item 2): a part of a table's aggregate value.
+      if vt.kind == itTable and vt.tabKeyTy != nil and
+         vt.tabKeyTy.kind == itString and heapTreeTy(vt.tabValTy):
+        var parts: seq[PtrLeaf]
+        if ptrElemLeaves(vt.tabValTy, pointee, 0, parts):
+          if parts.len > 0: tabFamKeys.add key
+          continue
       if tyMayHold(vt, pointee):
         result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
           "address an element of a " & $vt.kind & " held in a heap cell " &
@@ -2625,8 +2776,34 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       if not seen:
         if p.liveRefs.hasKey(pk): p.liveRefs[pk].add objAddr
         else: p.liveRefs[pk] = @[objAddr]
-    let code = ptrTargetCode(key & "/*")
     let idx = ptrIdxAt(ctx, p, typeId, refSort, ptrAst)
+    let vt = heapKeyValTy(key)
+    if isTreeSeqElemTy(vt.seqElemTy):
+      # RFC-0005 S8bz (item 1): each part of the object's element.
+      var parts: seq[PtrLeaf]
+      discard ptrElemLeaves(vt.seqElemTy, pointee, 0, parts)
+      var missing = false
+      for sfx in heapLeafSuffixes(vt):
+        if not p.heaps.hasKey(key & sfx): missing = true
+      if missing:
+        result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+          "address an element of a seq held in a heap cell (`" & key &
+          "`), part of whose element this path holds no heap for -- not " &
+          "modelled (RFC-0005 S8bz; feUnsupportedOp)"
+        return
+      for e in parts:
+        let code = ptrTargetCode(key & "/*" & ptrLeafPathStr(e.steps, false))
+        idxFacts.add (code, ptrIdxInRange(ctx, idx, inLen))
+        ptrLeafAims[code] = PtrLeafAim(fam: key, seqIdx: true, typeId: typeId,
+                                       elemSteps: e.steps)
+        var t = PtrTarget(code: code, famKey: key, objAddr: objAddr,
+                          seqIdx: true, idx: idx, aggregate: true,
+                          elemPath: e.path, famElemTy: vt)
+        (t.hasArm, t.armCond) = svPathArmCond(
+          seqElemAt(ptrFamSeq(ctx, p, t), wrap[Z3Int](ctx, idx.raw)), e.path)
+        result.targets.add t
+      continue
+    let code = ptrTargetCode(key & "/*")
     idxFacts.add (code, ptrIdxInRange(ctx, idx, inLen))
     ptrLeafAims[code] = PtrLeafAim(fam: key, seqIdx: true, typeId: typeId)
     result.targets.add PtrTarget(code: code, famKey: key, objAddr: objAddr,
@@ -2691,8 +2868,35 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
       if not seen:
         if p.liveRefs.hasKey(pk): p.liveRefs[pk].add objAddr
         else: p.liveRefs[pk] = @[objAddr]
-    let code = ptrTargetCode(key & "/#")
     let kt = ptrKeyAt(ctx, p, typeId, refSort, ptrAst)
+    let tvt = heapKeyValTy(key)
+    if heapTreeTy(tvt.tabValTy):
+      # RFC-0005 S8bz (item 2): each part of the object's table value.
+      var parts: seq[PtrLeaf]
+      discard ptrElemLeaves(tvt.tabValTy, pointee, 0, parts)
+      var missing = false
+      for sfx in heapLeafSuffixes(tvt):
+        if not p.heaps.hasKey(key & sfx): missing = true
+      if missing:
+        result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+          "address a value of a table held in a heap cell (`" & key &
+          "`), part of whose value this path holds no heap for -- not " &
+          "modelled (RFC-0005 S8bz; feUnsupportedOp)"
+        return
+      for e in parts:
+        let code = ptrTargetCode(key & "/#" & ptrLeafPathStr(e.steps, false))
+        idxFacts.add (code, wrap[Z3Bool](ctx, checkedSelect(ctx, inPresent.raw,
+                                                            kt.raw)))
+        ptrLeafAims[code] = PtrLeafAim(fam: key, tabKey: true, typeId: typeId,
+                                       elemSteps: e.steps)
+        var t = PtrTarget(code: code, famKey: key, objAddr: objAddr,
+                          tabKey: true, idx: kt, aggregate: true,
+                          elemPath: e.path, famElemTy: tvt)
+        (t.hasArm, t.armCond) = svPathArmCond(
+          tabValAt(ctx, ptrFamSeq(ctx, p, t), kt.raw), e.path)
+        result.targets.add t
+      continue
+    let code = ptrTargetCode(key & "/#")
     idxFacts.add (code, wrap[Z3Bool](ctx, checkedSelect(ctx, inPresent.raw,
                                                          kt.raw)))
     ptrLeafAims[code] = PtrLeafAim(fam: key, tabKey: true, typeId: typeId)
@@ -2775,6 +2979,12 @@ proc tabValueOf(ctx: Z3Context; raw: RawZ3Ast; pointee: IRType): SymVal =
   ## reads: through its 64-bit cell (`ptrTabCellRead`), which a heap field
   ## family holds as an Int (`elemTermIn`); a 64-bit integer's cell is the
   ## value (`elemValueOf`).
+  ## RFC-0005 S8bz (item 2): a string or float value is a term of its sort.
+  case pointee.kind
+  of itString: return SymVal(kind: svString, str: wrap[Z3String](ctx, raw))
+  of itFloat32: return SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, raw))
+  of itFloat64: return SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, raw))
+  else: discard
   if pointee.kind == itInt and pointee.width == 64:
     return elemValueOf(ctx, raw, pointee)
   var cell = raw
@@ -2787,11 +2997,59 @@ proc tabTermIn(ctx: Z3Context; val: SymVal; pointee: IRType;
                arr: Z3AnyAst): RawZ3Ast =
   ## RFC-0005 batch 6. `tabValueOf`'s inverse: `val`'s 64-bit cell
   ## (`cellOf`), in the sort of the table's data array `arr`.
+  ## RFC-0005 S8bz (item 2): a string or float value is a term of its sort.
+  if pointee.kind in {itString, itFloat32, itFloat64}: return rawAnyAstOf(val)
   if pointee.kind == itInt and pointee.width == 64:
     return elemTermIn(ctx, val, arr)
   let c = cellOf(val, pointee)
   if c.isNone: return elemTermIn(ctx, val, arr)
   elemTermIn(ctx, SymVal(kind: svBV64, signed: true, bv64: c.get), arr)
+
+proc ptrAggregateMsg(pointee: IRType): string =
+  ## RFC-0005 S8bz (item 1). A store through a pointer whose target's element
+  ## the value does not fit (`seqStoreArrs` none).
+  "a `ptr " & $pointee & "` store into an aggregate element or table value " &
+    "whose layout the value does not fit -- not modelled (RFC-0005 S8bz; " &
+    "feUnsupportedOp)"
+
+proc ptrStoredPart(ctx: Z3Context; c: SymVal; t: PtrTarget;
+                   val: SymVal): Option[SymVal] =
+  ## RFC-0005 S8bz (items 1, 2). The seq or table `c` with the part
+  ## `t.elemPath` of the element or value at the target's index or key set to
+  ## `val`. none when the value does not fit.
+  if t.tabKey:
+    let terms = tabValTerms(svWithPath(tabValAt(ctx, c, t.idx.raw), t.elemPath,
+                                       val), c.tabValTy)
+    if terms.isNone or terms.get.len != 1 + c.tabDataMore.len:
+      return none(SymVal)
+    var r = c
+    r.tabDataRaw = wrap[Z3AnyAst](ctx, checkedStore(ctx, c.tabDataRaw.raw,
+                                                    t.idx.raw, terms.get[0].raw))
+    for i in 0 ..< c.tabDataMore.len:
+      r.tabDataMore[i] = wrap[Z3AnyAst](ctx, checkedStore(ctx,
+        c.tabDataMore[i].raw, t.idx.raw, terms.get[i + 1].raw))
+    return some(r)
+  let i = wrap[Z3Int](ctx, t.idx.raw)
+  let arrs = seqStoreArrs(c, i, svWithPath(seqElemAt(c, i), t.elemPath, val))
+  if arrs.isNone: return none(SymVal)
+  some(withSeqArrsOf(c, arrs.get))
+
+proc ptrGuardedArrs(ctx: Z3Context; guard: Z3Bool; a, b: SymVal): SymVal =
+  ## RFC-0005 S8bz (items 1, 2). `a` under `guard`, else `b`: two seqs or two
+  ## tables, of one length and key set, data array by data array.
+  template pick(x, y: Z3AnyAst): Z3AnyAst =
+    wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw, x.raw, y.raw))
+  result = b
+  if a.kind == svTable:
+    result.tabDataRaw = pick(a.tabDataRaw, b.tabDataRaw)
+    for i in 0 ..< a.tabDataMore.len:
+      result.tabDataMore[i] = pick(a.tabDataMore[i], b.tabDataMore[i])
+  else:
+    let xs = seqArrs(a)
+    let ys = seqArrs(b)
+    var merged: seq[Z3AnyAst]
+    for i in 0 ..< xs.len: merged.add pick(xs[i], ys[i])
+    result = withSeqArrsOf(b, merged)
 
 proc ptrInactiveMsg(pointee: IRType): string =
   "a `ptr " & $pointee & "` may address a field of a case object's " &
@@ -2837,7 +3095,20 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   for i in countdown(tg.targets.high, 0):
     let t = tg.targets[i]
     let tv =
-      if t.famKey.len > 0 and (t.seqIdx or t.tabKey):
+      if t.aggregate and t.famKey.len > 0 and t.tabKey:
+        svAtPath(tabValAt(ctx, ptrFamSeq(ctx, p, t), t.idx.raw),
+                 t.elemPath)   # RFC-0005 S8bz (item 2)
+      elif t.aggregate and t.famKey.len > 0:
+        svAtPath(seqElemAt(ptrFamSeq(ctx, p, t), wrap[Z3Int](ctx, t.idx.raw)),
+                 t.elemPath)   # RFC-0005 S8bz (item 1)
+      elif t.aggregate and t.seqIdx:
+        svAtPath(seqElemAt(svAtPath(p.env[t.envName], t.path),
+                           wrap[Z3Int](ctx, t.idx.raw)),
+                 t.elemPath)   # RFC-0005 S8bz (item 1)
+      elif t.aggregate:
+        svAtPath(tabValAt(ctx, svAtPath(p.env[t.envName], t.path), t.idx.raw),
+                 t.elemPath)   # RFC-0005 S8bz (item 2)
+      elif t.famKey.len > 0 and (t.seqIdx or t.tabKey):
         # RFC-0005 S8bn (item 4): the element of the object's seq, or the
         # value of its table at the pointer's key.
         let data = wrap[Z3AnyAst](ctx, checkedSelect(ctx,
@@ -2885,7 +3156,31 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   inactive = ptrInactive(ctx, tg.sel, tg.targets)
   for t in tg.targets:
     let guard = ptrSelIs(ctx, tg.sel, t.code)
-    if t.famKey.len > 0 and (t.seqIdx or t.tabKey):
+    if t.aggregate and t.famKey.len > 0:
+      # RFC-0005 S8bz (item 1): the part of the object's element, in each
+      # leaf heap under the guard.
+      let sq = ptrFamSeq(ctx, p, t)
+      let neu = ptrStoredPart(ctx, sq, t, val)
+      if neu.isNone: return ptrAggregateMsg(pointee)
+      let old = svLeafAsts(sq, t.famElemTy)
+      let leaves = svLeafAsts(neu.get, t.famElemTy)
+      for li, sfx in heapLeafSuffixes(t.famElemTy):
+        if leaves[li] == old[li]: continue
+        let arr = p.heaps[t.famKey & sfx]
+        let stored = wrap[Z3AnyAst](ctx, checkedStore(ctx, arr.raw,
+                                                      t.objAddr.raw, leaves[li]))
+        p.heaps[t.famKey & sfx] = wrap[Z3AnyAst](ctx, checkedIte(ctx, guard.raw,
+                                                  stored.raw, arr.raw))
+    elif t.aggregate:
+      # RFC-0005 S8bz (items 1, 2): the part of the element or value, in each
+      # leaf's array under the guard.
+      let root = p.env[t.envName]
+      let sq = svAtPath(root, t.path)
+      let neu = ptrStoredPart(ctx, sq, t, val)
+      if neu.isNone: return ptrAggregateMsg(pointee)
+      p.env[t.envName] = svWithPath(root, t.path,
+                                    ptrGuardedArrs(ctx, guard, neu.get, sq))
+    elif t.famKey.len > 0 and (t.seqIdx or t.tabKey):
       # RFC-0005 S8bn (item 4): the element of the object's seq, or the
       # value of its table at the pointer's key.
       let arr = p.heaps[t.famKey]
@@ -3513,6 +3808,16 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
         # cell's read-back (`dCell`, the variable itself) nor a field deref
         # (`p.f`: the pointer addresses the object). The target's facts go
         # onto this statement's own fork.
+        # RFC-0005 S8bz (item 1): a whole aggregate's pointer has no such
+        # targets; it declines where it may address one.
+        if refSV.kind == svPtr and not stmt.dCell:
+          let aggMsg = ptrAggregateDecline(w, cp2, refAst,
+            (if isField: stmt.dObjTy else: stmt.dElemTy), typeId)
+          if aggMsg.len > 0:
+            survivors.add degradeHeapArmForPath(cp2, stmt.dElemTy,
+              stmt.dRetName, "__ptrTargetRead",
+              w.degrade(feUnsupportedOp, aggMsg))
+            continue
         if refSV.kind == svPtr and not isField and not stmt.dCell and
            ptrScalarPointee(stmt.dElemTy):
           cp2 = forkPath(cp2, cp2.pc, cp2.env)
@@ -3520,9 +3825,11 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           let tr = ptrTargetRead(ctx, w, cp2, refAst, stmt.dElemTy, refSort,
                                  typeId, valSV)
           if tr.decline.len > 0:
+            # RFC-0005 S8bz: the walk's own degrade, as below: this arm's
+            # pending lowering taint leaked when no drain followed.
             survivors.add degradeHeapArmForPath(cp2, stmt.dElemTy,
               stmt.dRetName, "__ptrTargetRead",
-              heapArmDegrade(feUnsupportedOp, tr.decline))
+              w.degrade(feUnsupportedOp, tr.decline))
             continue
           # RFC-0005 S8bw (item 3): the pointer may address a case object's
           # branch field whose branch is not active -- declined there.
@@ -4268,6 +4575,15 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
           # stores into each candidate TARGET under its `sel` guard
           # (`ptrTargetWrite`; the own cell's store is the one above). Not
           # an `addr` cell's store (`dwCell`) nor a field write.
+          # RFC-0005 S8bz (item 1): a whole aggregate's pointer has no such
+          # targets; it declines where it may address one.
+          if refSV.kind == svPtr and not stmt.dwCell:
+            let aggMsg = ptrAggregateDecline(w, child, refAst,
+              (if isField: stmt.dwObjTy else: stmt.dwElemTy), typeId)
+            if aggMsg.len > 0:
+              survivors.add degradeHeapArmForPath(child,
+                w.degrade(feUnsupportedOp, aggMsg))
+              continue
           if refSV.kind == svPtr and not isField and not stmt.dwCell and
              ptrScalarPointee(stmt.dwElemTy):
             let pre = forkPath(child, child.pc, child.env)
@@ -4276,8 +4592,9 @@ proc walkHeapArm(stmt: IRStmt, paths: seq[Path], w: var WalkCtx): seq[Path] =
                                      allocRefSort(ctx, sortTy), typeId, valSV,
                                      inactive)
             if msg.len > 0:
+              # RFC-0005 S8bz: the walk's own degrade (`tr.decline`'s note).
               survivors.add degradeHeapArmForPath(child,
-                heapArmDegrade(feUnsupportedOp, msg))
+                w.degrade(feUnsupportedOp, msg))
               continue
             # RFC-0005 S8bw (item 3): as the read's (`ptrTargetRead`).
             if inactive.isSome:

@@ -4823,7 +4823,11 @@ func isTableContainerValTy*(valTy: IRType): bool =
     (valTy.kind == itSeq and valTy.seqUnsupportedFieldReason.len == 0 and
      isBackedSeqElemTy(valTy.seqElemTy)) or
     (valTy.kind == itSet and isContainerIntLeaf(valTy.setElemTy)) or
-    (valTy.kind == itTable and isBackedTableTy(valTy.tabKeyTy, valTy.tabValTy)))
+    (valTy.kind == itTable and isBackedTableTy(valTy.tabKeyTy, valTy.tabValTy)) or
+    # RFC-0005 S8bz (item 2): a by-value tuple, object, array or case object,
+    # one data array per leaf, as a seq holds it (`isTreeSeqElemTy`).
+    (valTy.kind in {itTuple, itArray, itVariant, itMultiVariant} and
+     heapTreeTy(valTy)))
 
 func isTableValTy*(valTy: IRType): bool =
   ## RFC-0005 S8ar. A `Table` value type the model backs: an
@@ -5019,6 +5023,8 @@ proc isRenderableTableTy*(keyTy, valTy: IRType): bool =
       # RFC-0005 S8bc: a seq of a tree element (`readSeqAs`).
       (isTreeSeqElemTy(valTy.seqElemTy) and isRenderableWitnessTy(valTy))
   of itTable: isRenderableTableTy(valTy.tabKeyTy, valTy.tabValTy)
+  # RFC-0005 S8bz (item 2): an aggregate value, part by part.
+  of itTuple, itArray, itVariant, itMultiVariant: isRenderableWitnessTy(valTy)
   else: true
 
 proc isRenderableSetElemTy*(elemTy: IRType): bool =

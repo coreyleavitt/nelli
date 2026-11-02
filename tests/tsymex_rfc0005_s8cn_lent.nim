@@ -510,10 +510,9 @@ suite "S8cn: seq `items` with a write in the body":
     nativeSees(cGlobal, "cg_new", "cg_old")
     nativeSees(cLambda, "cl_new", "cl_old")
     nativeSeesT(cVarCall, "cv_new", "cv_old")
-    for r in [symexFind(cGlobal, tLabel("cg_old")),
-              symexFind(cLambda, tLabel("cl_old")),
-              symexFind(cVarCall, tLabel("cv_old"))]:
-      check r.status == sxUnknown
+    check symexFind(cGlobal, tLabel("cg_old")).status == sxUnknown
+    check symexFind(cLambda, tLabel("cl_old")).status == sxUnknown
+    check symexFind(cVarCall, tLabel("cv_old")).status == sxUnknown
   test "a target in a closure body: the calling path's branches hold":
     for n in [-1, 0, 76, 77, 78, 177]:
       check "cp_never" notin hits(cPcVar(n))

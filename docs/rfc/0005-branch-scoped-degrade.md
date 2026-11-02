@@ -14210,8 +14210,9 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
 - *Item 3: `setLen`.* SOUNDNESS at the merged tree: it read the old value before
   its length, so `gs.setLen(growG())`, where `growG` writes `gs`, lost that write
   (a false sxUnsat and a false sxSat). It now reads after the length for a bare
-  variable; `setLen(a[gi], bump())`, where the call writes the index Nim has
-  already used, declines (`laterArgDecline`). A `mitems` body that resizes with
+  variable; `setLen(a[gi], bump())`, where the call writes the index Nim uses
+  after it, declines (`laterArgDecline`): the walk wrote the old `a[0]` into `a[1]`,
+  right lengths and false elements. New since S8bl: main at 6cbfe8f declines both.
   `setLen` decides. An element of `mitems` used after a resize still declines.
 - *Item 4: `newString`.* `newString` and `newStringOfCap` are modelled through
   `isSetLen` with `slFresh`: `Natural`'s check, the modelled bound, NUL bytes,
@@ -14228,11 +14229,11 @@ false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
   verification, and in `scripts/psweep.sh`.
 
 *Different mechanisms, reported and not fixed here.*
-- **SOUNDNESS: `$k` on a negative int.** `iekIntToStr` uses Z3's `int.to.str`,
-  the empty string below 0. `let s = $k; if s.len == 0` is a clean false sxSat
-  and `if s == "-1"` a clean false sxUnsat (Nim hits the second and never the
-  first, observed); `repr(k)` walks `$x` and shares it. The fix would be
-  `ite(n < 0, "-" & from_int(-n), from_int(n))`.
+- **Fixed elsewhere: `$k` on a negative int and `ensureMove`.** Both are false at
+  e497dcf and right at S8cb 28ab1a7, observed. `ensureMove` declines here
+  (`magicBodyEmpty`); S8cb models it, and that model should stand at integration.
+  **SOUNDNESS: `procCall`'s zero result** is old, a false sxSat at main 6cbfe8f too;
+  it declines here.
 - **PRECISION: `zeroMem` and `copyMem` on `addr x`** decline through a walker
   fault, `FieldDefect` reading `ptrPointeeTy` of an `itUninterp`. In-band, but a
   fault rather than a named decline.

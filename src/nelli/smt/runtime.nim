@@ -11392,10 +11392,10 @@ proc queryTermOrder*(ctx: Z3Context; roots: openArray[Z3Bool]):
   ## since S8bp, but not the wall time a unit costs: the search a unit
   ## pays for follows the context's term ids (`r4_strip`'s budget-out step
   ## 3, 10M units, ran 135 s in its own context against 58.5 s in the
-  ## walk's, S8bp). Measured on that walk (Z3 5.1, CPU seconds side by
-  ## side under one load): Z3's own translation order, root by root,
-  ## spent 195 (step 1) and 318 (step 3), the walk's context 152 in step
-  ## 3, and this order 128 and 205; the walk 478 s against 712 s.
+  ## walk's, S8bp). The order moves the search, so units as well as wall
+  ## time. `r4_strip`'s binary, CPU seconds side by side under one load
+  ## (Z3 5.1): 133 and 122 against 143 and 129 in Z3's own translation
+  ## order, root by root.
   var done: HashSet[int]
   var stack: seq[tuple[t: Z3AnyAst, expanded: bool]]
   for i in countdown(roots.len - 1, 0): stack.add (toAnyAst(roots[i]), false)
@@ -15441,13 +15441,12 @@ proc concreteScratchCheck(ctx: Z3Context; roots: openArray[Z3Bool];
   ## of its own (`ownContextSolver`, RFC-0005 S8bm), its units added to
   ## `ownContextUnits`. They checked in the walk's context, where what the
   ## context already held moved their search, as S8bm and S8bp measured
-  ## for the walker's own: with 300 unrelated Int constants live in it, a
-  ## factoring branch condition took 72,126 units against 72,162 as is
-  ## (Z3 5.1; 26,695 against 26,726 on 4.13.4), and under a bound between
-  ## such spends it was decided in one context and not in the other
-  ## (`tsymex_rfc0005_s8by_remainder`).
-  ## Now a solve's spend, and so whether it decides within its bound, is
-  ## a function of its query alone.
+  ## for the walker's own: a factoring branch condition took 876,296 units
+  ## in one context and 5,854,996 in one that made the query's constants
+  ## the other way round (Z3 5.1; 23,956 and 911,593 on 4.13.4), and under
+  ## a bound between them it was decided in the first and not in the second
+  ## (`tsymex_rfc0005_s8by_remainder`). Now what the context holds moves
+  ## neither its spend nor whether it decides within its bound.
   ownContextCheck(ownContextSolver(ctx, roots, concreteBranchRLimit(settings)))
 
 proc concreteBranchOutcome*(ctx: Z3Context, concreteEq: seq[Z3Bool],

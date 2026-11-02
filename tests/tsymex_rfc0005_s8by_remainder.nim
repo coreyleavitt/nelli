@@ -15,12 +15,14 @@
 ##       a smaller budget, and (1b)'s is a subset of it, so both are known
 ##       SAT. Where the facts-first model also satisfies the caps, (1c)'s
 ##       capped half is known SAT too and is skipped. Verdicts are
-##       unchanged; `lastNl` spends about 607k units less (Z3 5.1).
+##       unchanged; 607,363 of `lastNl`'s 1,106,184 units are gone (Z3
+##       5.1, in S8bp's term order; (3) moves the rest of its search).
 ##   (3) a query's terms are made in its own context in one order, a
 ##       function of the query alone (`queryTermOrder`: the roots in
 ##       order, each term's arguments last to first, children first); Z3's
-##       wall time per unit follows that order (`r4_strip`'s budget-out
-##       walk 478 s against 712 s side by side, Z3 5.1, loaded box);
+##       search, so its wall time per unit and its units, follows that
+##       order (`r4_strip`'s binary 133 and 122 CPU seconds against 143 and
+##       129, side by side, Z3 5.1);
 ##   (4) a regex membership below the top level -- under a disjunction
 ##       (`a or not s.contains(re"b")`), in an `ite` branch, under a `not`
 ##       -- is merged with the memberships of the same string that hold
@@ -137,10 +139,10 @@ proc scratchSolves(arg: tuple[holds: int; bound: uint]) {.thread.} =
     scratchOut = (o, inf, units, ownContextUnits - own + ctxCount(ctx) - here)
 
 proc settleProcess() {.thread.} =
-  ## A factoring search over other constants, in the walk's kind of
-  ## context. Z3's spend on one query also moves with what the process has
-  ## run before (the RFC's "As landed (S8by)", a different mechanism), so
-  ## the comparison below is made after that has settled.
+  ## A factoring search over other constants, on a thread of its own. A
+  ## fresh thread's spend on one query also moves with what earlier threads
+  ## of the process ran (the RFC's "As landed (S8by)", a different
+  ## mechanism), so the comparison below is made after that has settled.
   {.cast(gcsafe).}:
     let ctx = newContext()
     let p = mkIntVar(ctx, "p")
@@ -173,7 +175,7 @@ suite "S8by (1): a concolic scratch solve is the same in any context":
     var settle: Thread[void]
     createThread(settle, settleProcess)
     joinThread(settle)
-    # Each once to settle, as the process's first solves of this query.
+    # Each once to settle: the process's first solves of this query.
     for holds in 0 .. 3: discard scratchIn(holds, 50_000_000'u)
     let base = scratchIn(0, 50_000_000'u)
     check base.outcome == some(true)

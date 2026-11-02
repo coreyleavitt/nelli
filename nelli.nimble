@@ -1188,6 +1188,21 @@ task test, "Run the test suite":
             # capture-keyed call cache; element and case-object `addr`
             # cells; walker 209->217 (batch 4).
             "tsymex_rfc0005_s8be_remainder",
+            # Split in three by S8bo.
+            "tsymex_rfc0005_s8be_remainder_b",
+            "tsymex_rfc0005_s8be_remainder_c",
+            # RFC-0005 S8bo -- S8be's remainder: isNil and unlowered
+            # magics; plain-object, arm-field and seq-of-object address
+            # cells, whole seq assignment as a resize; abandoned and
+            # threaded replay fidelity.
+            "tsymex_rfc0005_s8bo_nil",
+            "tsymex_rfc0005_s8bo_cells",
+            "tsymex_rfc0005_s8bo_replay",
+            "tsymex_rfc0005_s8cb_magics",
+            "tsymex_rfc0005_s8cb_tostr",
+            "tsymex_rfc0005_s8cb_order",
+            "tsymex_rfc0005_s8cb_cells",
+            "tsymex_rfc0005_s8cb_replay",
             # RFC-0005 S8bh -- S8bf's remainder: var / addr effects of a
             # call through a proc value; a ptr of unknown origin may address
             # a ref field, a global or a var parameter; ref conversions along

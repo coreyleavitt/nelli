@@ -25,6 +25,10 @@
 ## `tsymex_rfc0005_s8by_remainder`, S8ce's fallback beside S8bx's pins in
 ## `tsymex_rfc0005_s8bx_extractraise`.
 ##
+## `unsafeNew` declines. S8ca's report has it as a defect (a no-op, so `p` stays
+## nil), true at S8ca's own head (8cef160: `p != nil` a false `sxUnsat`, `p == nil`
+## a false `sxSat`), whose base has no S8bl. S8bl's decline holds on this stack.
+##
 ## Every SUT's native run is checked here, on the input the comment names.
 import std/[unittest, strutils, tables, sets]
 import nelli
@@ -271,6 +275,21 @@ proc sIndexOnce(n: int) =
   if gCalls != 1: symexTarget("once_dead")
   if gs[0] != n + 1: symexTarget("once_dead2")
 
+# ---- `unsafeNew` -------------------------------------------------------------
+
+proc sUnsafeNil(k: int) =
+  var p: ref int
+  unsafeNew(p, 8)
+  if p != nil: symexTarget("un_live")
+  if p == nil: symexTarget("un_dead")
+
+proc sUnsafeWrite(k: int) =
+  var p: ref int
+  unsafeNew(p, 8)
+  p[] = k
+  if p[] == 3: symexTarget("uw_live")
+  if p[] != k: symexTarget("uw_dead")
+
 let t5 = {"a": 5}.toTable
 
 suite "batch 9: the native runs":
@@ -291,6 +310,8 @@ suite "batch 9: the native runs":
     check nativeHits(sViewAfter(t5)) == ["after_live"].toHashSet
     check nativeHits(sCopy(@[5])) == ["copy_live"].toHashSet
     check nativeHits(sIndexOnce(5)) == ["once_live"].toHashSet
+    check nativeHits(sUnsafeNil(5)) == ["un_live"].toHashSet
+    check nativeHits(sUnsafeWrite(3)) == ["uw_live"].toHashSet
 
 suite "batch 9: a view and its Table through a proc value declines":
 
@@ -354,6 +375,14 @@ suite "batch 9: what the lifted limit is for stays exact":
     verdict(sIndexOnce, "once_live", sxSat)
     verdict(sIndexOnce, "once_dead", sxUnsat)
     verdict(sIndexOnce, "once_dead2", sxUnsat)
+
+suite "batch 9: unsafeNew declines":
+
+  test "a nil check and a write through it":
+    declines(sUnsafeNil, "un_live", feUnsupportedOp)
+    declines(sUnsafeNil, "un_dead", feUnsupportedOp)
+    declines(sUnsafeWrite, "uw_live", feUnsupportedOp)
+    declines(sUnsafeWrite, "uw_dead", feUnsupportedOp)
 
 suite "batch 9: walker version":
 

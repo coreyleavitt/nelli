@@ -6951,11 +6951,20 @@ proc byValueTouch(a: NimNode; touch: var seq[string]) =
   ## what it wrote by name: `f(gs)` with `gs[0] = 50; a[0]` is 50 natively. It
   ## declined through S8ca's item 5 for want of a sort, and was a false
   ## `sxUnsat` after it.
-  if a.kind == nnkHiddenAddr or a.typeKind == ntyNone or
-     not holdsCompoundLeaf(classifyType(a).ty):
+  # RFC-0005 S8cn: an openArray formal is the same memory, whatever its
+  # conversion or `toOpenArray` spells it as.
+  var bare = a
+  while bare.kind in {nnkHiddenStdConv, nnkHiddenSubConv, nnkHiddenCallConv,
+                      nnkConv} and bare.len > 0:
+    bare = bare[^1]
+  if bare.kind in {nnkCall, nnkCommand} and bare.len >= 2 and
+     bare[0].kind == nnkSym and bare[0].strVal == "toOpenArray":
+    bare = bare[1]
+  if bare.kind == nnkHiddenAddr or bare.typeKind == ntyNone or
+     not holdsCompoundLeaf(classifyType(bare).ty):
     return
   var syms: seq[NimNode]
-  lvalueVarSyms(a, syms)
+  lvalueVarSyms(bare, syms)
   for s in syms:
     let nm = "n:" & s.strVal
     if nm notin touch: touch.add nm
@@ -15215,8 +15224,7 @@ proc nodeWritesHeap(n: NimNode; seen: var seq[NimNode]): bool =
     if n.len > 0:
       if n[0].kind != nnkSym: return true
       # The markers' runtime side touches only its own capture state.
-      if n[0].strVal in ["symexTarget", "symexAssert", "symexAssume"]:
-        return false
+      if isMarkerCall(n): return false
       if symKind(n[0]) in {nskVar, nskLet, nskParam, nskForVar, nskTemp}:
         return true
       if isUserRoutine(n[0]):

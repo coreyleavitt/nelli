@@ -2002,6 +2002,17 @@ proc svMayHold(sv: SymVal; pointee: IRType; depth = 0): bool =
   of svRef, svPtr, svClosure: false
   else: true
 
+type PtrOverlap = object
+  ## RFC-0005 S8bz (item 6). A case object's inactive branch field and a field
+  ## of the active branch at the same offset, of one size, both scalars: Nim's
+  ## dereference reads and writes the active field's bytes (`ptrArmOverlaps`).
+  cond: Z3Bool        ## the active branch is this one
+  nan: Z3Bool         ## ... and its float holds a NaN, whose bits Z3 leaves
+                      ## free: read as an integer, those bytes are not known
+  step: int           ## the active field's path step (by-value)
+  famKey: string      ## or its field family (held in a heap)
+  ty: IRType          ## the active field's type (held in a heap)
+
 type PtrTarget = object
   ## RFC-0005 S8bh. One candidate target of a pointer: a field family (its
   ## heap `famKey`, the object `objAddr`) or a variable (`envName`).
@@ -2028,6 +2039,8 @@ type PtrTarget = object
   hasArm: bool        ## RFC-0005 S8bw (item 3): a field of a case object's
   armCond: Z3Bool     ## branch, there only while `armCond` (its branch is
                       ## the active one) holds
+  overlaps: seq[PtrOverlap]  ## RFC-0005 S8bz (item 6): while another branch
+                             ## is active, what the same bytes hold there
 
 proc svHoldsAggregate(sv: SymVal; pointee: IRType; depth = 0): bool =
   ## RFC-0005 S8bz (item 1). A by-value variable's value `sv` may hold a whole
@@ -2493,6 +2506,186 @@ proc ptrHeapArmCond(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
       if not arm.isElse:
         result.cond = result.cond and not variantDiscEq(disc, int64(arm.tagOrdinal))
 
+proc svScalarSize(sv: SymVal): int =
+  ## RFC-0005 S8bz (item 6). The bytes a scalar value occupies, 0 for a shape
+  ## whose layout this model does not compute.
+  case sv.kind
+  of svBV8, svBool: 1
+  of svBV16: 2
+  of svBV32, svFloat32: 4
+  of svBV64, svFloat64: 8
+  of svInt: (if sv.ziWidth == 0: 8 else: sv.ziWidth div 8)
+  else: 0
+
+proc tyScalarSize(ty: IRType): int =
+  ## RFC-0005 S8bz (item 6). `svScalarSize` by type.
+  if ty == nil: return 0
+  case ty.kind
+  of itInt: ty.width div 8
+  of itBool: 1
+  of itFloat32: 4
+  of itFloat64: 8
+  else: 0
+
+proc armOffsets(sizes: seq[int]): seq[int] =
+  ## RFC-0005 S8bz (item 6). The offsets of a branch's fields from the start of
+  ## the object's union: C's layout of the struct Nim emits for a branch, each
+  ## scalar at its natural alignment (native suite). -1 from the first field
+  ## whose layout is not computed on.
+  var o = 0
+  var known = true
+  for sz in sizes:
+    if sz <= 0: known = false
+    if not known:
+      result.add -1
+      continue
+    if o mod sz != 0: o += sz - (o mod sz)
+    result.add o
+    o += sz
+
+proc overlapPair(a, b: SymVal): bool =
+  ## RFC-0005 S8bz (item 6). Same-size scalars whose bytes both spell a value of
+  ## the other: integers and floats. A `bool` overlaps only a `bool` (any other
+  ## byte is no `bool`).
+  svScalarSize(a) == svScalarSize(b) and svScalarSize(a) > 0 and
+    (a.kind == svBool) == (b.kind == svBool)
+
+proc ptrArmOverlaps(v: SymVal; step: int): seq[PtrOverlap] =
+  ## RFC-0005 S8bz (item 6). For the branch field at `step` of the case object
+  ## `v`, a by-value `svVariant`: each other branch with a field of its size at
+  ## its offset. A branch without one stays the scoped decline (`ptrInactive`):
+  ## a partial overlap, or bytes that branch does not hold.
+  if v.kind != svVariant or step >= 0: return
+  let (_, tag, j) = ptrArmStepOf(step)
+  let target = v.vArmFields[tag][j]
+  var ts: seq[int]
+  for f in v.vArmFields[tag]: ts.add svScalarSize(f)
+  let off = armOffsets(ts)[j]
+  if off < 0: return
+  let nm = v.vArmFieldNames[tag][j]
+  for t, fs in v.vArmFields:
+    if nm in v.vArmFieldNames[t]: continue
+    var szs: seq[int]
+    for f in fs: szs.add svScalarSize(f)
+    let offs = armOffsets(szs)
+    for k, f in fs:
+      if offs[k] == off and overlapPair(f, target):
+        let c = ptrTagCond(v.vDisc[], v.vArmFields, t)
+        result.add PtrOverlap(cond: c, step: ptrArmStep(0, t, k),
+          nan: (case f.kind
+                of svFloat64: c and isNaN(f.fp64)
+                of svFloat32: c and isNaN(f.fp32)
+                else: mkBool(false)))
+        break
+
+proc ptrReinterpret(ctx: Z3Context; v: SymVal; like: SymVal): SymVal =
+  ## RFC-0005 S8bz (item 6). The value of `like`'s kind that `v`'s bytes spell
+  ## (same size: `overlapPair`). Native suite: Nim's dereference reads those
+  ## bytes as the pointer's type.
+  if v.kind == like.kind and (v.kind notin {svBV8, svBV16, svBV32, svBV64} or
+                              v.signed == like.signed):
+    return v
+  if like.kind == svBool: return v
+  var bits =
+    case v.kind
+    of svFloat32: ctx.checkErr Z3_mk_fpa_to_ieee_bv(ctx.raw, v.fp32.raw)
+    of svFloat64: ctx.checkErr Z3_mk_fpa_to_ieee_bv(ctx.raw, v.fp64.raw)
+    of svInt: ctx.checkErr Z3_mk_int2bv(ctx.raw, cuint(svScalarSize(v) * 8), v.zi.raw)
+    else: rawAnyAstOf(v)
+  case like.kind
+  of svFloat32:
+    SymVal(kind: svFloat32, fp32: wrap[Z3Float32](ctx, ctx.checkErr(
+      Z3_mk_fpa_to_fp_bv(ctx.raw, bits, ctx.checkErr Z3_get_sort(ctx.raw, like.fp32.raw)))))
+  of svFloat64:
+    SymVal(kind: svFloat64, fp64: wrap[Z3Float64](ctx, ctx.checkErr(
+      Z3_mk_fpa_to_fp_bv(ctx.raw, bits, ctx.checkErr Z3_get_sort(ctx.raw, like.fp64.raw)))))
+  of svBV8: liftBV(wrap[Z3BitVec[8]](ctx, bits), like.signed)
+  of svBV16: liftBV(wrap[Z3BitVec[16]](ctx, bits), like.signed)
+  of svBV32: liftBV(wrap[Z3BitVec[32]](ctx, bits), like.signed)
+  of svBV64: liftBV(wrap[Z3BitVec[64]](ctx, bits), like.signed)
+  of svInt:
+    # A heap's `Int` cell: the signed value of the bits (`intHeapCell`).
+    let n = svScalarSize(like)
+    var r = like
+    r.zi = wrap[Z3Int](ctx, ctx.checkErr Z3_mk_bv2int(ctx.raw, bits, true))
+    discard n
+    r
+  else: v
+
+proc ptrOverlapsOfHeap(ctx: Z3Context; p: Path; key: string; objAddr: Z3AnyAst):
+    seq[PtrOverlap] =
+  ## RFC-0005 S8bz (item 6). `ptrArmOverlaps` for the field family `key` of a
+  ## case object's branch held in a heap (`<O>__@<ord>__<f>`).
+  let at = key.find("__@")
+  if at < 0: return
+  let rest = key[at + 3 .. ^1]
+  let sep = rest.find("__")
+  if sep <= 0: return
+  let ord = try: parseInt(rest[0 ..< sep]) except ValueError: return
+  let field = rest[sep + 2 .. ^1]
+  let baseId = key[0 ..< at]
+  var vty: IRType = nil
+  var dk = ""
+  for k, shape in heapKeyShapes:
+    if not k.startsWith(baseId & "__@disc") or shape.variantTy == nil: continue
+    if variantDiscHeapKey(shape.variantTy) != k: continue
+    vty = shape.variantTy
+    dk = k
+  if vty == nil: return
+  var off = -1
+  var size = 0
+  for arm in vty.vArms:
+    if arm.tagOrdinal == ord and field in arm.fieldNames:
+      var szs: seq[int]
+      for f in arm.fieldTypes: szs.add tyScalarSize(f)
+      let ix = arm.fieldNames.find(field)
+      off = armOffsets(szs)[ix]
+      size = szs[ix]
+  if off < 0: return
+  let heap = if p.heaps.hasKey(dk): p.heaps[dk]
+             else: mkHeapArrayVar(ctx, allocRefSort(ctx, vty), vty.vDiscTy,
+                                  "heap_" & dk, vty)
+  let disc = heapSelect(ctx, heap, objAddr, vty.vDiscTy)
+  for arm in vty.vArms:
+    if field in arm.fieldNames: continue
+    var szs: seq[int]
+    for f in arm.fieldTypes: szs.add tyScalarSize(f)
+    let offs = armOffsets(szs)
+    for k, f in arm.fieldTypes:
+      if offs[k] == off and szs[k] == size:
+        var c: Z3Bool
+        if arm.isElse:
+          c = mkBool(true)
+          for o in vty.vArms:
+            if not o.isElse: c = c and not variantDiscEq(disc, int64(o.tagOrdinal))
+        else:
+          c = variantDiscEq(disc, int64(arm.tagOrdinal))
+        result.add PtrOverlap(cond: c, famKey: baseId & "__@" &
+          $(if arm.isElse: -1 else: arm.tagOrdinal) & "__" & arm.fieldNames[k],
+          ty: f, nan: mkBool(false))
+        break
+
+proc ptrHeapDiscFact(ctx: Z3Context; p: Path; key: string;
+                     objAddr: Z3AnyAst): Option[Z3Bool] =
+  ## RFC-0005 S8bz (item 6). The object at `objAddr` holds a value of its case
+  ## type: its discriminator names a branch (an `else` branch takes the rest).
+  let at = key.find("__@")
+  if at < 0: return
+  let baseId = key[0 ..< at]
+  for k, shape in heapKeyShapes:
+    if not k.startsWith(baseId & "__@disc") or shape.variantTy == nil: continue
+    if variantDiscHeapKey(shape.variantTy) != k: continue
+    let vty = shape.variantTy
+    let heap = if p.heaps.hasKey(k): p.heaps[k]
+               else: mkHeapArrayVar(ctx, allocRefSort(ctx, vty), vty.vDiscTy,
+                                    "heap_" & k, vty)
+    let disc = heapSelect(ctx, heap, objAddr, vty.vDiscTy)
+    var c = mkBool(false)
+    for arm in vty.vArms:
+      if arm.isElse: return none(Z3Bool)
+      c = c or variantDiscEq(disc, int64(arm.tagOrdinal))
+    return some(c)
+
 proc ptrFamSeq(ctx: Z3Context; p: Path; t: PtrTarget): SymVal =
   ## RFC-0005 S8bz (items 1, 2). The seq or table of aggregates the target's
   ## field family holds at its object, whole (every leaf heap).
@@ -2589,11 +2782,32 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                                           wrap[Z3AnyAst](ctx, ini.seqLen.raw)))
         if lf.aggregate:
           # RFC-0005 S8bz (item 1): the element's own branch.
-          let ea = svPathArmCond(seqElemAt(cur, wrap[Z3Int](ctx, t.idx.raw)),
-                                 lf.elemPath)
+          let elemV = seqElemAt(cur, wrap[Z3Int](ctx, t.idx.raw))
+          # The element holds a value of its type (its discriminator names a
+          # branch), as a read of it asserts.
+          for c in svCellWf(elemV, cur.seqElemTy, false, false):
+            idxFacts.add (code, c)
+          let ea = svPathArmCond(elemV, lf.elemPath)
           if ea.has:
             t.armCond = if t.hasArm: t.armCond and ea.cond else: ea.cond
             t.hasArm = true
+      # RFC-0005 S8bz (item 6): the one branch step of its path, its last.
+      if t.hasArm:
+        var branches = 0
+        for st in lf.path & lf.elemPath:
+          if st < 0: inc branches
+        if branches == 1:
+          if lf.aggregate and lf.elemPath[^1] < 0:
+            let cont = svAtPath(vsv, lf.path)
+            let elem =
+              if lf.tabKey: tabValAt(ctx, cont, t.idx.raw)
+              else: seqElemAt(cont, wrap[Z3Int](ctx, t.idx.raw))
+            t.overlaps = ptrArmOverlaps(svAtPath(elem, lf.elemPath[0 .. ^2]),
+                                        lf.elemPath[^1])
+          elif not lf.aggregate and not lf.seqIdx and not lf.tabKey and
+               lf.path[^1] < 0:
+            t.overlaps = ptrArmOverlaps(svAtPath(vsv, lf.path[0 .. ^2]),
+                                        lf.path[^1])
       ptrLeafAims[code] = PtrLeafAim(name: vnm, path: lf.path, steps: lf.steps,
                                      seqIdx: lf.seqIdx, tabKey: lf.tabKey,
                                      elemSteps: lf.elemSteps, typeId: typeId)
@@ -2645,6 +2859,23 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   var tabFamKeys: seq[string]
   for key in p.heaps.keys:
     if key == typeId or key.startsWith(typeId & "__@"): continue
+    # RFC-0005 S8bz (item 1): a by-value part of a heap object, in a leaf heap
+    # of its own (`<O>__<f>__@.<part>`). It was no target: a store through the
+    # pointer was never seen by a read of the part (a false `sxUnsat`). A
+    # case object's or container's leaf there stays a stated decline.
+    let leafAt = key.find("__@.")
+    if leafAt >= 0 and not key.startsWith(typeId & "__"):
+      let leafRange = ctx.checkErr Z3_get_array_sort_range(ctx.raw,
+        sortOfRaw(ctx, p.heaps[key].raw))
+      if leafRange != valSort: continue
+      if key[leafAt + 4 .. ^1].replace("__@.", ".").contains("@"):
+        result.decline = "a `ptr " & $pointee & "` of unknown origin may " &
+          "address a part of a case object or container held by value in a " &
+          "heap cell (`" & key & "`), which this model holds no cell " &
+          "identity for -- not modelled (RFC-0005 S8bz; feUnsupportedOp)"
+        return
+      famKeys.add key
+      continue
     let vt = heapKeyValTy(key)
     if vt == nil: continue
     if heapCompoundTy(vt) and "__@len" notin key and "__@present" notin key:
@@ -2726,6 +2957,10 @@ proc ptrTargets(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         "(RFC-0005 S8bw; feUnsupportedOp)"
       return
     (t.hasArm, t.armCond) = (arm.has, arm.cond)
+    if arm.has:   # RFC-0005 S8bz (item 6)
+      t.overlaps = ptrOverlapsOfHeap(ctx, p, key, objAddr)
+      let d = ptrHeapDiscFact(ctx, p, key, objAddr)
+      if d.isSome: idxFacts.add (t.code, d.get)
     result.targets.add t
   seqFamKeys.sort()
   for key in seqFamKeys:
@@ -3055,7 +3290,8 @@ proc ptrInactiveMsg(pointee: IRType): string =
   "a `ptr " & $pointee & "` may address a field of a case object's " &
     "branch that is not the active one: Nim's dereference reads or " &
     "writes whatever the active branch holds at that address, which this " &
-    "model does not lay out -- not modelled (RFC-0005 S8bw; feUnsupportedOp)"
+    "model lays out only for a same-size scalar at one offset -- not " &
+    "modelled (RFC-0005 S8bw, S8bz; feUnsupportedOp)"
 
 proc ptrInactive(ctx: Z3Context; sel: Z3AnyAst;
                  targets: seq[PtrTarget]): Option[Z3Bool] =
@@ -3066,10 +3302,72 @@ proc ptrInactive(ctx: Z3Context; sel: Z3AnyAst;
   var any = false
   for t in targets:
     if not t.hasArm: continue
-    let bad = ptrSelIs(ctx, sel, t.code) and not t.armCond
+    # RFC-0005 S8bz (item 6): an inactive branch's overlapping field reads
+    # the active field's bytes (`ptrOverlapRead`).
+    var known = t.armCond
+    for ov in t.overlaps: known = known or (ov.cond and not ov.nan)
+    let bad = ptrSelIs(ctx, sel, t.code) and not known
     c = if any: c or bad else: bad
     any = true
   if any: some(c) else: none(Z3Bool)
+
+proc ptrOverlapPart(ctx: Z3Context; p: Path; t: PtrTarget; ov: PtrOverlap): SymVal =
+  ## RFC-0005 S8bz (item 6). The active field `ov` of the target's case object.
+  if ov.famKey.len > 0:
+    let arr = if p.heaps.hasKey(ov.famKey): p.heaps[ov.famKey]
+              else: mkHeapArrayVar(ctx, sortOfRaw(ctx, t.objAddr.raw), ov.ty,
+                                   "heap_" & ov.famKey)
+    return heapSelect(ctx, arr, t.objAddr, ov.ty)
+  if t.aggregate:
+    let cont =
+      if t.famKey.len > 0: ptrFamSeq(ctx, p, t)
+      else: svAtPath(p.env[t.envName], t.path)
+    let elem =
+      if t.tabKey: tabValAt(ctx, cont, t.idx.raw)
+      else: seqElemAt(cont, wrap[Z3Int](ctx, t.idx.raw))
+    return svAtPath(elem, t.elemPath[0 .. ^2] & @[ov.step])
+  svAtPath(p.env[t.envName], t.path[0 .. ^2] & @[ov.step])
+
+proc ptrOverlapWrite(ctx: Z3Context; p: Path; t: PtrTarget; ov: PtrOverlap;
+                     guard: Z3Bool; val: SymVal): bool =
+  ## RFC-0005 S8bz (item 6). `val`'s bytes into the active field `ov` of the
+  ## target's case object, under `guard`. False when they do not fit.
+  let g = guard and ov.cond
+  let old = ptrOverlapPart(ctx, p, t, ov)
+  let bytes = ptrReinterpret(ctx, val, old)
+  if ov.famKey.len > 0:
+    let arr = if p.heaps.hasKey(ov.famKey): p.heaps[ov.famKey]
+              else: mkHeapArrayVar(ctx, sortOfRaw(ctx, t.objAddr.raw), ov.ty,
+                                   "heap_" & ov.famKey)
+    let stored = checkedStore(ctx, arr.raw, t.objAddr.raw, rawAnyAstOf(bytes))
+    p.heaps[ov.famKey] = wrap[Z3AnyAst](ctx, checkedIte(ctx, g.raw, stored, arr.raw))
+    return true
+  if t.aggregate:
+    var alt = t
+    alt.elemPath = t.elemPath[0 .. ^2] & @[ov.step]
+    if t.famKey.len > 0:
+      let sq = ptrFamSeq(ctx, p, t)
+      let neu = ptrStoredPart(ctx, sq, alt, bytes)
+      if neu.isNone: return false
+      let merged = ptrGuardedArrs(ctx, g, neu.get, sq)
+      let oldLeaves = svLeafAsts(sq, t.famElemTy)
+      let leaves = svLeafAsts(merged, t.famElemTy)
+      for li, sfx in heapLeafSuffixes(t.famElemTy):
+        if leaves[li] == oldLeaves[li]: continue
+        p.heaps[t.famKey & sfx] = wrap[Z3AnyAst](ctx, checkedStore(ctx,
+          p.heaps[t.famKey & sfx].raw, t.objAddr.raw, leaves[li]))
+      return true
+    let root = p.env[t.envName]
+    let sq = svAtPath(root, t.path)
+    let neu = ptrStoredPart(ctx, sq, alt, bytes)
+    if neu.isNone: return false
+    p.env[t.envName] = svWithPath(root, t.path, ptrGuardedArrs(ctx, g, neu.get, sq))
+    return true
+  let root = p.env[t.envName]
+  let path = t.path[0 .. ^2] & @[ov.step]
+  p.env[t.envName] = svWithPath(root, path,
+    ptrIteSV(ctx, g, bytes, svAtPath(root, path)))
+  true
 
 proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                    pointee: IRType; refSort: RawZ3Sort; typeId: string;
@@ -3127,16 +3425,22 @@ proc ptrTargetRead(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
         tabValueOf(ctx, checkedSelect(ctx, tb.tabDataRaw.raw, t.idx.raw),
                    pointee)   # RFC-0005 S8bw: through its 64-bit cell
       else: svAtPath(p.env[t.envName], t.path)
+    # RFC-0005 S8bz (item 6): while another branch is active, its bytes.
+    var tvv = tv
+    for ov in t.overlaps:
+      tvv = ptrIteSV(ctx, ov.cond,
+                     ptrReinterpret(ctx, ptrOverlapPart(ctx, p, t, ov), tv), tvv)
+    let tvFinal = tvv
     let isT = ptrSelIs(ctx, tg.sel, t.code)
-    result.val = ptrIteSV(ctx, isT, tv, result.val)
-    let part = unwrittenIn(tv)
+    result.val = ptrIteSV(ctx, isT, tvFinal, result.val)
+    let part = unwrittenIn(tvFinal)
     if part.len > 0:
       result.part = part
       result.unwritten = some(if result.unwritten.isSome:
                                 result.unwritten.get or isT
                               else: isT)
     else:
-      result.written = ptrIteSV(ctx, isT, tv, result.written)
+      result.written = ptrIteSV(ctx, isT, tvFinal, result.written)
 
 proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
                     pointee: IRType; refSort: RawZ3Sort; typeId: string;
@@ -3156,6 +3460,10 @@ proc ptrTargetWrite(ctx: Z3Context; w: var WalkCtx; p: Path; ptrAst: Z3AnyAst;
   inactive = ptrInactive(ctx, tg.sel, tg.targets)
   for t in tg.targets:
     let guard = ptrSelIs(ctx, tg.sel, t.code)
+    # RFC-0005 S8bz (item 6): while another branch is active, its bytes.
+    for ov in t.overlaps:
+      if not ptrOverlapWrite(ctx, p, t, ov, guard, val):
+        return ptrAggregateMsg(pointee)
     if t.aggregate and t.famKey.len > 0:
       # RFC-0005 S8bz (item 1): the part of the object's element, in each
       # leaf heap under the guard.

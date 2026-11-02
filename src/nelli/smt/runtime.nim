@@ -11572,9 +11572,14 @@ proc buildHeapSnapshot(m: Z3Model, w: var RawWitness, env: Env,
       for tid, srt in currentRefSorts:
         if srt == objSort: oid = tid
       let address = oid & "|" & $m.eval(objAddr)
-      let fsep = fam.rfind("__")
+      # RFC-0005 S8bz (item 1): a by-value part's leaf heap
+      # (`<O>__<f>__@.<part>`) is the field, then its parts.
+      let leafAt = fam.find("__@.")
+      let famBase = if leafAt >= 0: fam[0 ..< leafAt] else: fam
+      let fsep = famBase.rfind("__")
       if oid.len > 0 and fsep >= 0 and b.cellOf.hasKey(address):
-        var aim = "&" & b.cellOf[address] & "." & fam[fsep + 2 .. ^1]
+        var aim = "&" & b.cellOf[address] & "." & famBase[fsep + 2 .. ^1]
+        if leafAt >= 0: aim.add fam[leafAt .. ^1].replace("__@.", ".")
         if isSeqFam:
           let ik = ptrIdxKey(typeId)
           if currentVariantHeaps.hasKey(ik):
@@ -27145,6 +27150,10 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
   ## key), or nil.
   when T is U:
     if i == path.len: return addr x
+  elif T is SomeInteger and U is SomeInteger and sizeof(T) == sizeof(U):
+    # RFC-0005 S8bz (item 6): the other signedness at the same bytes
+    # (`svMayHold` lists it).
+    if i == path.len: return cast[ptr U](addr x)
   if i >= path.len: return nil
   when T is Table:
     if path[i].len >= 1 and path[i][0] == 'k':
@@ -27183,6 +27192,17 @@ proc ptrAimInto*[T; U](x: var T; path: seq[string]; i: int): ptr U =
 {.pop.}
 
 proc readCellField[F](c: RefWitness; path: string; f: var F)
+
+{.push fieldChecks: off.}   # RFC-0005 S8bw (item 3): see `ptrAimByName`
+proc cellRecordBranches[T](c: RefWitness; prefix: string; x: var T) =
+  ## RFC-0005 S8bz (item 6). Each field's address under `prefix`, every
+  ## branch's: a pointer the snapshot aims at a field of an inactive branch
+  ## addresses that field's bytes all the same. `fieldPairs` walks only the
+  ## active one. A discriminator is not addressable (`when compiles`).
+  ptrAimEachField(x):
+    when compiles(addr it):
+      cellRecord(c, prefix & "." & itName, cast[pointer](addr it))
+{.pop.}
 
 proc validDefault[F](f: var F) =
   ## RFC-0005 S8h. A cell comes from `new`/`alloc0`, so every field starts
@@ -27257,6 +27277,8 @@ proc resolveRef*[T: ref | ptr](c: RefWitness; pos: string): T =
         # RFC-0005 S8bh (item 2): the field's address, for a pointer the
         # snapshot aims at it (`aliasRef = "&<cell>.<field>"`).
         cellRecord(c, "&" & leaves & "." & fname, cast[pointer](addr fv))
+    when compiles(cellRecordBranches(c, "&" & leaves, result[])):
+      cellRecordBranches(c, "&" & leaves, result[])
   else:
     readCellField(c, leaves, result[])
 
@@ -27398,6 +27420,7 @@ proc readCellField[F](c: RefWitness; path: string; f: var F) =
         if path.len > 0 and path[0] != '&':
           cellRecord(c, "&" & path & "." & $k, cast[pointer](addr fv))
           cellRecord(c, "&" & path & ".f" & fname, cast[pointer](addr fv))
+          cellRecord(c, "&" & path & "." & fname, cast[pointer](addr fv))
         inc k
   elif F is array:
     # RFC-0005 S8ar: an array field, element `i` (from 0) the leaf `<path>.<i>`.

@@ -474,7 +474,7 @@ state = "done"
 [[slice]]
 id = "S8cl"
 title = "S8ca's remainder: unsafeNew is dropped, wasMoved stops the compile, setLen declines on its when statement, a by-value copy of a string of unknown provenance, n43_parity on cpp"
-state = "pending"
+state = "done"
 
 [[slice]]
 id    = "S11"
@@ -13846,3 +13846,69 @@ over at 8815a81 (S8bu), and `s8ab_letaudit` (55.6 to 63.5 s) and
 - **PRECISION: `tsymex_r6_n43_parity` does not compile on cpp.** `Atomic[T]`
   in the walker's generated allocator assigns a `std::atomic` (a deleted
   operator); the same error at the base 5729b1a. It passes 25/0 on c.
+
+**As landed (S8cl, walker 246 provisional) — S8ca's remainder.** Base afce42a
+(batch 8, walker 241) merged with S8ca 8cef160, and that merge resolved here
+(f7779d5). Suites `tsymex_rfc0005_s8cl_magics` (items 1-3) and
+`tsymex_rfc0005_s8cl_strings` (item 4): every SUT that can run natively has a
+native run confirming which labels Nim hits.
+
+S8bl, in the base, had already modelled `wasMoved`, `reset`, `setLen`, `move`
+and `swap`, and made `unsafeNew` decline at registration. So at the merged tree
+the first three items were pins, not gaps; their RED is at 8cef160, where
+`unsafeNew(p, 8); if p != nil` was a clean false sxUnsat and `p == nil` a clean
+false sxSat (Nim hits the first), `setLen` declined on its `nnkWhenStmt`, and
+`wasMoved` stopped the compile (nnkSym for nnkIdentDefs).
+
+- *Item 1: a magic with no body is modelled or declines.* `unsafeNew(p, n)` is
+  now modelled: a fresh zeroed cell written back through a pure lvalue,
+  `RangeDefect` on a negative size, a decline when the size is under the
+  pointee's or above `maxModelledInitialSize`. A size whose call writes what the
+  place reads declines (`feEvalOrderUnmodelled`). The audit found two more
+  SOUNDNESS bugs at the merged tree: `ensureMove(a)` and `procCall(f(k))`,
+  whose bodies are empty, returned the zero value (`b.len == 1` a false sxUnsat,
+  `b.len == 0` and `r == 4 and k != 3` false sxSat). Any magic with no statement
+  to walk now declines, naming the magic. Decided against Nim: `reset` (variable,
+  field), `move` (variable, array element), `new` (expression, field, object),
+  `wasMoved` (seq, int, through a pointer), `=copy`. Declined: `new(p, finalizer)`,
+  `=sink`, `=dup`, `=destroy`, `newStringUninit`. `shallowCopy` is not declared
+  under ORC and stays `vmDeclined`.
+- *Item 2: what cannot be read declines.* `parseCalleeImpl`'s `expectKind` is
+  guarded by `formalsReadable`: a generated hook's `nnkArgList`, and a generic
+  instance's formal typed only by its default (`create`'s `size = 1.Positive`,
+  "node has no type"), decline. The type bridge leaves an object with a `when`
+  member unsupported ("Expected nnkIdentDefs, got nnkRecWhen", which `GC_ref`
+  reached through `RefHeader`).
+- *Item 3: `setLen`.* SOUNDNESS at the merged tree: it read the old value before
+  its length, so `gs.setLen(growG())`, where `growG` writes `gs`, lost that write
+  (a false sxUnsat and a false sxSat). It now reads after the length for a bare
+  variable; `setLen(a[gi], bump())`, where the call writes the index Nim has
+  already used, declines (`laterArgDecline`). A `mitems` body that resizes with
+  `setLen` decides. An element of `mitems` used after a resize still declines.
+- *Item 4: `newString`.* `newString` and `newStringOfCap` are modelled through
+  `isSetLen` with `slFresh`: `Natural`'s check, the modelled bound, NUL bytes,
+  and a string the path owns (`sbOwned`), so a by-value copy of the
+  address-taken result decides. An opaque call's result stays a decline, because
+  it may be a literal's memory or its own and a by-value copy shares only the
+  first: no one answer is sound for both. `tsymex_rfc0005_s8ca_strings_byvalue`'s
+  decline pin moved from `newString` to an opaque source.
+- *Item 5: `tsymex_r6_n43_parity` on cpp.* `readCellField`'s ordinal arm assigned
+  an imported `std::atomic`, whose `operator=` is deleted. `storeOrdinal`
+  range-checks and writes through the bytes, as S8s's `validDefault` did, and
+  both use it. `tsymex_r6_n42_deref_taint` had the same cause (S8cp item 5) and
+  passes on cpp too. No CI leg runs cpp; both suites run on cpp in this slice's
+  verification, and in `scripts/psweep.sh`.
+
+*Different mechanisms, reported and not fixed here.*
+- **SOUNDNESS: `$k` on a negative int.** `iekIntToStr` uses Z3's `int.to.str`,
+  the empty string below 0. `let s = $k; if s.len == 0` is a clean false sxSat
+  and `if s == "-1"` a clean false sxUnsat (Nim hits the second and never the
+  first, observed); `repr(k)` walks `$x` and shares it. The fix would be
+  `ite(n < 0, "-" & from_int(-n), from_int(n))`.
+- **PRECISION: `zeroMem` and `copyMem` on `addr x`** decline through a walker
+  fault, `FieldDefect` reading `ptrPointeeTy` of an `itUninterp`. In-band, but a
+  fault rather than a named decline.
+- **PRECISION: declines left as declines.** `alloc0` behind a cast
+  (`heUnsafeCast`), `ensureMove` and `procCall` (sound, unmodelled), `create`,
+  `new(p, finalizer)`, `GC_ref`, an object with a `when` member, a `type` section
+  inside a SUT, a nested `s[gi]` of a seq of seqs.

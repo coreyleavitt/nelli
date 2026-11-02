@@ -30,3 +30,6 @@ Measure everything side by side on one host, S8bm 14d7e81 and S8bp 79037e4 again
 
 ## Added after batch 8
 Batch 8 split the slow files: `tsymex_configdefaults_depth` (the `maxCallDepth: 50` pin, about 96 s on Windows) from `tsymex_configdefaults`, and `tsymex_rfc0005_s8ai_semantic_b` (52.9 s) from `s8ai_semantic`. Base on batch 8's head, as the coordinator will say. Item 4's target is now `configdefaults_depth`. Find why one test spends 96 s and fix that cause. Do not lower the depth, because the pin exists to prove the bound at that depth.
+
+## Added by batch 9
+S8by's `queryTermOrder` moved `ti_tuple`'s SAT search on Z3 4.13.4 from 79,811,644 to 411,783,288 units, so `s8bc_remainder_c`'s `tupleBudget` went from 300M to 600M, costing about +100 s on Linux. UNSAT queries fell (142,112 to 68,137, and 521,055 to 315,601). Take the term order itself: find an order that keeps the UNSAT gains without the SAT cost, or measure why none exists, then lower the budget back if you can.

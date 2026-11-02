@@ -87,11 +87,10 @@ suite "S8ca (1): the walk declines before the native stack runs out":
     check stackNamed(r.errors)
     check symexNativeStackCut()
 
-  test "the crash pin's budget (maxCallDepth: 50) declines cleanly":
-    let r = symexFind(s8caRunawaySut, tLabel("s8ca_runaway_never"),
-        SymexSettings(budget: ResourceBudget(maxCallDepth: 50)))
-    checkpoint show(r.errors)
-    check r.status == sxUnknown
+  # The crash pin's own budget (`maxCallDepth: 50`) stays where it is pinned,
+  # `tsymex_configdefaults`, on c and cpp: on Windows, where the fiber's 16 MB
+  # does not cut it, those 50 levels take about 60 s, and a second copy here
+  # took this file over the 60 s convention.
 
   test "solves in a row each measure the stack they run on":
     # On Windows each solve has a fiber of its own; a bound cached from
